@@ -9,6 +9,8 @@ use std::collections::{HashMap, BTreeMap};
 pub struct CompiledFunction {
     /// Pointer to executable code
     pub code_ptr: usize,
+    /// Length of the code in 32-bit instructions
+    pub code_len: usize,
     /// Stack map entries: (absolute_pc, stack_size)
     pub stack_map: Vec<(usize, usize)>,
     /// Number of locals/parameters
@@ -56,16 +58,8 @@ pub struct Arm64CodeGen {
     /// Number of stack slots needed (from register allocator)
     num_stack_slots: usize,
 
-    /// Callee-saved registers that were saved in the function prologue (for per-function compilation)
-    /// This is used by Ret to emit the correct epilogue
-    saved_callee_registers: Vec<usize>,
-
     /// Stack space allocated for spills in per-function compilation
     function_stack_space: usize,
-
-    /// Flag indicating we're in per-function compilation mode
-    /// When true, Ret emits its own epilogue; when false, Ret jumps to __epilogue
-    is_per_function_compilation: bool,
 
     // === Stack Map for GC ===
 
@@ -88,10 +82,6 @@ pub struct Arm64CodeGen {
 
     /// Number of reserved exception slots (from compiler)
     reserved_exception_slots: usize,
-
-    /// Var table pointer for GC-safe var access
-    /// This is the address of the var_table Vec's data, used for indirect var access
-    var_table_ptr: usize,
 
     /// Current instruction being compiled (for error reporting)
     current_instruction: Option<String>,
@@ -117,9 +107,7 @@ impl Arm64CodeGen {
             placeholder_positions: HashMap::new(),
             current_function_stack_bytes: 0,
             num_stack_slots: 0,
-            saved_callee_registers: Vec::new(),
             function_stack_space: 0,
-            is_per_function_compilation: false,
             // Stack map for GC
             stack_map: HashMap::new(),
             current_stack_size: 0,
@@ -127,16 +115,9 @@ impl Arm64CodeGen {
             num_locals: 0,
             num_spill_slots: 0,
             reserved_exception_slots: 0,
-            // Var table pointer (set before codegen)
-            var_table_ptr: 0,
             // Current instruction for error reporting
             current_instruction: None,
         }
-    }
-
-    /// Set the var table pointer for GC-safe var access
-    pub fn set_var_table_ptr(&mut self, ptr: usize) {
-        self.var_table_ptr = ptr;
     }
 
     fn new_label(&mut self) -> Label {
@@ -152,24 +133,21 @@ impl Arm64CodeGen {
     /// - Each function is compiled separately with its own register allocation
     /// - Returns a CompiledFunction with code pointer and stack map
     ///
-    /// Stack frame layout:
+    /// Stack frame layout (following Beagle ABI):
     /// - FP, LR saved at [sp, #-16]!
-    /// - Callee-saved registers (x19-x28) saved as needed
-    /// - Spill slots at FP-relative offsets
-    /// - Exception slots after spill slots
-    /// - Local variable slots after exception slots (for storing arguments)
+    /// - Spill slots at FP-relative offsets (initialized to null)
+    /// - Exception slots after spill slots (initialized to null)
+    /// - Local variable slots after exception slots (initialized to null)
+    /// - Dynamic save slots from CallWithSaves (pushed/popped as needed)
     ///
     /// num_locals: Number of local variable slots from IrBuilder (for storing arguments)
-    /// var_table_ptr: Address of the var_table data for GC-safe var access
     pub fn compile_function(
         instructions: &[Instruction],
         num_locals: usize,
         reserved_exception_slots: usize,
-        var_table_ptr: usize,
     ) -> Result<CompiledFunction, String> {
         let mut codegen = Arm64CodeGen::new();
         codegen.num_locals = num_locals;
-        codegen.var_table_ptr = var_table_ptr;
         codegen.reserved_exception_slots = reserved_exception_slots;
 
         // Run register allocation for THIS function only
@@ -182,16 +160,6 @@ impl Arm64CodeGen {
 
         // Store allocation map
         codegen.register_map = allocator.allocated_registers.clone();
-
-        // Determine which callee-saved registers are used
-        let mut used_callee_saved: Vec<usize> = allocator.allocated_registers
-            .values()
-            .map(|vreg| vreg.index())
-            .filter(|&idx| idx >= 19 && idx <= 28)
-            .collect();
-
-        used_callee_saved.sort_unstable();
-        used_callee_saved.dedup();
 
         let allocated_instructions = allocator.finish();
 
@@ -207,16 +175,18 @@ impl Arm64CodeGen {
         };
 
         // Emit function prologue (Beagle-style with placeholder for patching)
-        // Stack layout after prologue:
+        // Stack layout after prologue (following Beagle ABI):
         //   [FP + 8]:       saved x30 (LR)
         //   [FP + 0]:       saved x29 (old FP) <- FP points here
-        //   [FP - 8]:       spill slot 0 / local 0
-        //   [FP - 16]:      spill slot 1 / local 1
+        //   [FP - 8]:       spill slot 0 / local 0 (initialized to null)
+        //   [FP - 16]:      spill slot 1 / local 1 (initialized to null)
         //   ...
-        //   [FP - N*8]:     save slot 0 (from push_to_stack)
+        //   [FP - N*8]:     dynamic save slot 0 (from CallWithSaves push_to_stack)
         //   ...
         //   [SP]:           <- SP after stack allocation (patched later)
         //
+        // ABI: Every function saves its own registers via CallWithSaves.
+        // NO callee-saved registers are saved in prologue/epilogue.
         // Beagle approach: Emit placeholder SUB, patch with actual size after compilation.
 
         // Step 1: Save FP and LR
@@ -225,46 +195,34 @@ impl Arm64CodeGen {
         // Step 2: Set FP to current SP (before any stack allocation)
         codegen.emit_mov(29, 31);  // mov x29, sp
 
-        // Step 3: Save used callee-saved registers AFTER setting FP
-        // These are saved with FP-relative addressing so they don't interfere with spills
-        for chunk in used_callee_saved.chunks(2) {
-            if chunk.len() == 2 {
-                codegen.emit_stp(chunk[0], chunk[1], 31, -2);
-            } else {
-                codegen.emit_stp(chunk[0], 31, 31, -2);  // Pair with xzr
-            }
-        }
-
-        // Step 4: Emit placeholder SUB for stack allocation (will be patched)
+        // Step 3: Emit placeholder SUB for stack allocation (will be patched)
         // Magic value 0xAAA identifies this as a placeholder (fits in 12-bit immediate)
         let prologue_placeholder_index = codegen.code.len();
         codegen.emit_sub_sp_imm(0xAAA);  // Placeholder - will be patched
 
-        // Step 5: Initialize all local/spill slots to null (Beagle pattern)
+        // Step 4: Initialize all local/spill slots to null (Beagle pattern)
         // This ensures GC won't see garbage as heap pointers during stack scanning.
         // Use x15 as scratch register (it's caller-saved and not used for arguments)
-        // TEMPORARILY DISABLED - causing loop regression
-        // codegen.emit_mov_imm(15, BuiltInTypes::null_value() as i64);  // Load null (0b111)
-        // codegen.set_all_locals_to_null(15);
+        codegen.emit_mov_imm(15, BuiltInTypes::null_value() as i64);  // Load null (0b111)
+        codegen.set_all_locals_to_null(15);
 
         // Store info for Ret to emit correct epilogue and for patching
         codegen.num_stack_slots = total_stack_slots;
-        codegen.saved_callee_registers = used_callee_saved.clone();
         codegen.function_stack_space = stack_space;  // Initial estimate (spills only)
-        codegen.is_per_function_compilation = true;
 
         // Reset stack tracking for push/pop during compilation
         codegen.current_stack_size = 0;
         codegen.max_stack_size = 0;
 
-        // DEBUG: Print function frame info
-        // eprintln!("DEBUG compile_function: callee_saved={:?}, stack_space={}, spill_slots={}",
-        //           used_callee_saved, stack_space, num_spill_slots);
-
-        // Compile instructions (Ret will emit its own epilogue using saved_callee_registers)
+        // Compile instructions
         for inst in &allocated_instructions {
             codegen.compile_instruction(inst)?;
         }
+
+        // Emit epilogue (Beagle-style: add sp placeholder, ldp, ret)
+        codegen.emit_add_sp_imm(0xAAA);  // Placeholder - will be patched
+        codegen.emit_ldp(29, 30, 31, 2);  // ldp x29, x30, [sp], #16
+        codegen.emit_ret();
 
         // Patch prologue and epilogue with actual stack size (Beagle-style)
         // Total stack = spill slots + max dynamic stack (from push_to_stack)
@@ -289,171 +247,11 @@ impl Arm64CodeGen {
 
         Ok(CompiledFunction {
             code_ptr,
+            code_len: codegen.code.len(),
             stack_map,
             num_locals,
             max_stack_size: codegen.max_stack_size,  // Total frame size in words
         })
-    }
-
-    /// Compile IR instructions to ARM64 machine code
-    ///
-    /// # Parameters
-    /// - `instructions`: IR instructions to compile
-    /// - `result_reg`: The register containing the final result
-    /// - `num_registers`: Number of registers available (0 = default/unlimited)
-    pub fn compile(&mut self, instructions: &[Instruction], result_reg: &IrValue, num_registers: usize) -> Result<Vec<u32>, String> {
-        // Reset state
-        self.code.clear();
-        self.register_map.clear();
-        self.next_physical_reg = 0;
-        self.label_positions.clear();
-        self.pending_fixups.clear();
-        self.pending_adr_fixups.clear();
-        self.placeholder_positions.clear();
-        self.current_function_stack_bytes = 0;
-        self.num_stack_slots = 0;
-
-        // Run linear scan register allocation
-        let mut allocator = LinearScan::new(instructions.to_vec(), num_registers);
-
-        // Mark result register as live until the end
-        // This is critical - without this, the register allocator may reuse
-        // the physical register for the result, causing wrong values to be returned
-        if let IrValue::Register(vreg) = result_reg {
-            allocator.mark_live_until_end(*vreg);
-        }
-
-        allocator.allocate();
-
-        let num_spill_slots = allocator.next_stack_slot;
-
-        // Store the register allocation map for use in codegen
-        self.register_map = allocator.allocated_registers.clone();
-
-        // Debug: print allocation for v27 if it exists
-        // let v27 = crate::ir::VirtualRegister::Temp(27);
-        // if let Some(physical) = self.register_map.get(&v27) {
-        //     eprintln!("DEBUG: v27 allocated to x{}", physical.index());
-        // } else {
-        //     eprintln!("DEBUG: v27 not in allocation map (might be physical already or not used)");
-        // }
-
-        // Find the physical register for the result (before consuming allocator)
-        // Result is now always a register thanks to ensure_register() call in main.rs
-        let result_physical = match result_reg {
-            IrValue::Register(vreg) => {
-                allocator.allocated_registers.get(vreg)
-                    .ok_or_else(|| format!("Result register {:?} not allocated", vreg))?
-                    .index()
-            }
-            _ => return Err(format!("Expected register for result, got {:?}", result_reg)),
-        };
-
-        // Store for use in calculate_stack_size and push_to_stack offset calculation
-        self.num_stack_slots = num_spill_slots;
-        self.num_spill_slots = num_spill_slots;
-
-        let allocated_instructions = allocator.finish();
-
-        // Emit function prologue (matching Beagle's approach)
-        // Stack layout after prologue:
-        //   [FP + 8]:   saved x30 (LR)
-        //   [FP + 0]:   saved x29 (old FP) <- FP points here
-        //   [FP - 8]:   spill slot 0
-        //   [FP - 16]:  spill slot 1
-        //   ...
-        //   [FP - N*8]: dynamic stack from push_to_stack
-        //   [SP]:       <- SP after stack allocation
-        //
-        // NOTE: We don't save callee-saved registers (x19-x28) in the prologue.
-        // They're callee-saved, meaning any function we call will preserve them.
-
-        // Step 1: Save FP and LR
-        self.emit_stp(29, 30, 31, -2);  // stp x29, x30, [sp, #-16]!
-
-        // Step 2: Set FP = SP (immediately after saving FP/LR)
-        self.emit_mov(29, 31);  // mov x29, sp
-
-        // Step 3: Emit placeholder SUB for stack allocation (will be patched after compilation)
-        // We use 0xAAA as a magic placeholder value (fits in 12-bit immediate)
-        let prologue_placeholder_index = self.code.len();
-        self.emit_sub_sp_imm(0xAAA);  // Placeholder - will be patched
-
-        // Step 4: Initialize all local/spill slots to null (Beagle pattern)
-        // This ensures GC won't see garbage as heap pointers during stack scanning.
-        // Use x15 as scratch register (it's caller-saved and not used for arguments)
-        // TEMPORARILY DISABLED - causing loop regression
-        // self.emit_mov_imm(15, BuiltInTypes::null_value() as i64);  // Load null (0b111)
-        // self.set_all_locals_to_null(15);
-
-        // Reset stack tracking for push_to_stack during compilation
-        self.current_stack_size = 0;
-        self.max_stack_size = 0;
-
-        // Compile each instruction (now with physical registers)
-        for inst in &allocated_instructions {
-            self.compile_instruction(inst)?;
-        }
-
-        // Apply jump fixups AFTER all code is generated
-        // (We'll apply fixups after emitting epilogue)
-
-        // Emit epilogue label (where Ret instructions jump to)
-        self.emit_label("__epilogue".to_string());
-
-        // Move result to x0 (keep it tagged)
-        // For Ret instructions, they've already moved their result to x0 before jumping here
-        // But for top-level code that falls through (no explicit Ret), we need to move result to x0
-        // Since both paths go through here, and Ret already ensures result is in x0,
-        // this is a harmless mov x0, x0 for functions with Ret, but necessary for top-level code
-        if result_physical != 0 {
-            self.emit_mov(0, result_physical);
-        }
-
-        // Emit function epilogue (matching Beagle's approach)
-        // Emit placeholder ADD for stack deallocation (will be patched to match prologue)
-        let epilogue_placeholder_index = self.code.len();
-        self.emit_add_sp_imm(0xAAA);  // Placeholder - will be patched
-
-        // Restore FP and LR (no callee-saved register restoration needed)
-        self.emit_ldp(29, 30, 31, 2);    // ldp x29, x30, [sp], #16
-
-        // Emit return instruction
-        self.emit_ret();
-
-        // Calculate actual stack size needed: spill slots + dynamic stack from push_to_stack
-        // Total stack = num_spill_slots + max_stack_size (from push_to_stack usage)
-        let total_stack_words = self.num_spill_slots + self.max_stack_size;
-        // Round up to even for 16-byte alignment
-        let aligned_stack_words = if total_stack_words % 2 != 0 {
-            total_stack_words + 1
-        } else {
-            total_stack_words
-        };
-        let stack_bytes = aligned_stack_words * 8;
-
-        // Patch prologue SUB and epilogue ADD with actual stack size
-        if stack_bytes > 0 {
-            // Generate correct SUB sp, sp, #stack_bytes
-            let sub_instruction = self.generate_stack_sub_sequence(stack_bytes as i64);
-            self.code[prologue_placeholder_index] = sub_instruction[0];
-
-            // Generate correct ADD sp, sp, #stack_bytes
-            let add_instruction = self.generate_stack_add_sequence(stack_bytes as i64);
-            self.code[epilogue_placeholder_index] = add_instruction[0];
-        } else {
-            // No stack needed - replace with NOP
-            self.code[prologue_placeholder_index] = 0xD503201F; // NOP
-            self.code[epilogue_placeholder_index] = 0xD503201F; // NOP
-        }
-
-        // Patch all per-function placeholder instructions
-        self.patch_stack_placeholders();
-
-        // NOW apply jump fixups after all labels are defined
-        self.apply_fixups()?;
-
-        Ok(self.code.clone())
     }
 
     fn compile_instruction(&mut self, inst: &Instruction) -> Result<(), String> {
@@ -485,38 +283,12 @@ impl Arm64CodeGen {
                 self.store_spill(dst_reg, dest_spill);
             }
 
-            Instruction::LoadVar(dst, var_id) => {
-                // LoadVar: Load var value via var table indirection (GC-safe)
-                // 1. Load var_table_ptr into temp
-                // 2. Load var_ptr = var_table[var_id]
-                // 3. Untag var_ptr
-                // 4. Load value from var_ptr + 24
-                let dest_spill = self.dest_spill(dst);
-                let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
+            // ========== Runtime Symbol-Based Var Access ==========
 
-                let temp_reg = 15;  // x15 as temp
-
-                // Load var_table_ptr into temp register
-                self.emit_mov_imm(temp_reg, self.var_table_ptr as i64);
-
-                // Load var_ptr from var_table[var_id]
-                let offset = (*var_id as i32) * 8;
-                self.emit_ldr_offset(temp_reg, temp_reg, offset);
-
-                // Untag var_ptr (shift right 3)
-                // LSR Xd, Xn, #3 = UBFM Xd, Xn, #3, #63 = 0xD343FC00
-                let lsr_instruction = 0xD343FC00u32 | ((temp_reg as u32) << 5) | (temp_reg as u32);
-                self.code.push(lsr_instruction);
-
-                // Load value field (offset 24)
-                self.emit_ldr_offset(dst_reg, temp_reg, 24);
-
-                self.store_spill(dst_reg, dest_spill);
-            }
-
-            Instruction::LoadVarDynamic(dst, var_id) => {
-                // LoadVarDynamic: Call trampoline to check dynamic bindings (^:dynamic vars)
-                // First load var_ptr from var_table, then pass to trampoline
+            Instruction::LoadVarBySymbol(dst, ns_symbol_id, name_symbol_id) => {
+                // LoadVarBySymbol: Call trampoline to look up var by symbol at runtime
+                // Args: x0 = ns_symbol_id, x1 = name_symbol_id
+                // Returns: x0 = value (tagged)
                 let dest_spill = self.dest_spill(dst);
                 let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
 
@@ -526,14 +298,12 @@ impl Arm64CodeGen {
                 self.emit_stp(4, 5, 31, -2);
                 self.emit_stp(6, 7, 31, -2);
 
-                // Load var_ptr from var_table[var_id] into x0 (first argument)
-                let temp_reg = 15;
-                self.emit_mov_imm(temp_reg, self.var_table_ptr as i64);
-                let offset = (*var_id as i32) * 8;
-                self.emit_ldr_offset(0, temp_reg, offset);  // x0 = var_table[var_id] (tagged var_ptr)
+                // Load args: x0 = ns_symbol_id, x1 = name_symbol_id
+                self.emit_mov_imm(0, *ns_symbol_id as i64);
+                self.emit_mov_imm(1, *name_symbol_id as i64);
 
                 // Load trampoline function address into x15
-                let func_addr = crate::trampoline::trampoline_var_get_value_dynamic as usize;
+                let func_addr = crate::trampoline::trampoline_load_var_by_symbol as usize;
                 self.emit_mov_imm(15, func_addr as i64);
 
                 // Call the trampoline
@@ -557,14 +327,54 @@ impl Arm64CodeGen {
                 self.store_spill(dst_reg, dest_spill);
             }
 
-            Instruction::StoreVar(var_id, value) => {
-                // StoreVar: Store value to var via var table indirection (GC-safe)
-                // 1. Load var_table_ptr into temp
-                // 2. Load var_ptr = var_table[var_id]
-                // 3. Untag var_ptr
-                // 4. Store value to var_ptr + 24
+            Instruction::LoadVarBySymbolDynamic(dst, ns_symbol_id, name_symbol_id) => {
+                // LoadVarBySymbolDynamic: Call trampoline with dynamic binding check
+                // Args: x0 = ns_symbol_id, x1 = name_symbol_id
+                // Returns: x0 = value (tagged)
+                let dest_spill = self.dest_spill(dst);
+                let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
 
-                // Handle TaggedConstant inline (like Beagle's Assign)
+                // Save x0-x7 to stack
+                self.emit_stp(0, 1, 31, -2);
+                self.emit_stp(2, 3, 31, -2);
+                self.emit_stp(4, 5, 31, -2);
+                self.emit_stp(6, 7, 31, -2);
+
+                // Load args
+                self.emit_mov_imm(0, *ns_symbol_id as i64);
+                self.emit_mov_imm(1, *name_symbol_id as i64);
+
+                // Load trampoline function address
+                let func_addr = crate::trampoline::trampoline_load_var_by_symbol_dynamic as usize;
+                self.emit_mov_imm(15, func_addr as i64);
+
+                // Call the trampoline
+                self.emit_blr(15);
+
+                // Result is in x0, save to temp register x9
+                let temp_result = 9;
+                self.emit_mov(temp_result, 0);
+
+                // Restore x0-x7
+                self.emit_ldp(6, 7, 31, 2);
+                self.emit_ldp(4, 5, 31, 2);
+                self.emit_ldp(2, 3, 31, 2);
+                self.emit_ldp(0, 1, 31, 2);
+
+                // Move result to destination
+                if dst_reg != temp_result {
+                    self.emit_mov(dst_reg, temp_result);
+                }
+
+                self.store_spill(dst_reg, dest_spill);
+            }
+
+            Instruction::StoreVarBySymbol(ns_symbol_id, name_symbol_id, value) => {
+                // StoreVarBySymbol: Call trampoline to store value (creates var if needed)
+                // Args: x0 = ns_symbol_id, x1 = name_symbol_id, x2 = value
+                // Returns: x0 = value
+
+                // Get value into a register first
                 let value_reg = match value {
                     IrValue::TaggedConstant(val) => {
                         let temp = self.allocate_temp_register();
@@ -579,23 +389,68 @@ impl Arm64CodeGen {
                     _ => self.get_physical_reg_for_irvalue(value, false)?
                 };
 
-                let temp_reg = 15;  // x15 as temp
+                // Save value_reg to temp if it's x0-x7 (will be clobbered by save/restore)
+                let saved_value_reg = if value_reg < 8 {
+                    self.emit_mov(9, value_reg);  // Save to x9
+                    9
+                } else {
+                    value_reg
+                };
 
-                // Load var_table_ptr into temp register
-                self.emit_mov_imm(temp_reg, self.var_table_ptr as i64);
+                // Save x0-x7 to stack
+                self.emit_stp(0, 1, 31, -2);
+                self.emit_stp(2, 3, 31, -2);
+                self.emit_stp(4, 5, 31, -2);
+                self.emit_stp(6, 7, 31, -2);
 
-                // Load var_ptr from var_table[var_id]
-                let offset = (*var_id as i32) * 8;
-                self.emit_ldr_offset(temp_reg, temp_reg, offset);
+                // Load args: x0 = ns_symbol_id, x1 = name_symbol_id, x2 = value
+                self.emit_mov_imm(0, *ns_symbol_id as i64);
+                self.emit_mov_imm(1, *name_symbol_id as i64);
+                self.emit_mov(2, saved_value_reg);
 
-                // Untag var_ptr (shift right 3)
-                // LSR Xd, Xn, #3 = UBFM Xd, Xn, #3, #63 = 0xD343FC00
-                let lsr_instruction = 0xD343FC00u32 | ((temp_reg as u32) << 5) | (temp_reg as u32);
-                self.code.push(lsr_instruction);
+                // Load trampoline function address
+                let func_addr = crate::trampoline::trampoline_store_var_by_symbol as usize;
+                self.emit_mov_imm(15, func_addr as i64);
 
-                // Store value into var (offset 24 = header + ns_ptr + symbol_ptr)
-                self.emit_str_offset(value_reg, temp_reg, 24);
+                // Call the trampoline
+                self.emit_blr(15);
+
+                // Restore x0-x7 (we don't care about the return value for store)
+                self.emit_ldp(6, 7, 31, 2);
+                self.emit_ldp(4, 5, 31, 2);
+                self.emit_ldp(2, 3, 31, 2);
+                self.emit_ldp(0, 1, 31, 2);
+
                 self.clear_temp_registers();
+            }
+
+            Instruction::EnsureVarBySymbol(ns_symbol_id, name_symbol_id) => {
+                // EnsureVarBySymbol: Call trampoline to ensure var exists
+                // Args: x0 = ns_symbol_id, x1 = name_symbol_id
+                // Returns: nil (we don't use it)
+
+                // Save x0-x7 to stack
+                self.emit_stp(0, 1, 31, -2);
+                self.emit_stp(2, 3, 31, -2);
+                self.emit_stp(4, 5, 31, -2);
+                self.emit_stp(6, 7, 31, -2);
+
+                // Load args
+                self.emit_mov_imm(0, *ns_symbol_id as i64);
+                self.emit_mov_imm(1, *name_symbol_id as i64);
+
+                // Load trampoline function address
+                let func_addr = crate::trampoline::trampoline_ensure_var_by_symbol as usize;
+                self.emit_mov_imm(15, func_addr as i64);
+
+                // Call the trampoline
+                self.emit_blr(15);
+
+                // Restore x0-x7
+                self.emit_ldp(6, 7, 31, 2);
+                self.emit_ldp(4, 5, 31, 2);
+                self.emit_ldp(2, 3, 31, 2);
+                self.emit_ldp(0, 1, 31, 2);
             }
 
             Instruction::LoadKeyword(dst, keyword_index) => {
@@ -1585,7 +1440,7 @@ impl Arm64CodeGen {
                 //
                 // IMPORTANT: We must save x0-x7 before the call because argument registers
                 // might still be needed by subsequent code (e.g., a variable reference to
-                // a function parameter that hasn't been assigned to a callee-saved register yet).
+                // a function parameter that's still in its argument register).
                 //
                 // We also must save SP/FP/LR BEFORE pushing the argument registers, because
                 // when throw restores SP, we want to restore to the "real" SP, not one that's
@@ -1765,6 +1620,46 @@ impl Arm64CodeGen {
                 self.emit_external_call(func_addr, "trampoline_register_protocol_method");
             }
 
+            Instruction::InstanceCheck(dst, expected_type_id, value) => {
+                // InstanceCheck: check if value is an instance of the specified type
+                // ARM64 Calling Convention for trampoline_instance_check:
+                // - x0 = expected_type_id (full type ID including DEFTYPE_ID_OFFSET)
+                // - x1 = value (tagged)
+                // - Returns: x0 = tagged boolean (true if match, false otherwise)
+
+                let dest_spill = self.dest_spill(dst);
+                let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
+
+                // Get the value register
+                let value_reg = self.get_physical_reg_for_irvalue(value, false)?;
+
+                // Save value if it's in x0 or x1 (will be clobbered by args)
+                let saved_value_reg = if value_reg <= 1 {
+                    self.emit_mov(16, value_reg);  // Save to x16
+                    16
+                } else {
+                    value_reg
+                };
+
+                // Load expected type ID into x0
+                self.emit_mov_imm(0, *expected_type_id as i64);
+
+                // Load value into x1
+                self.emit_mov(1, saved_value_reg);
+
+                // Call the trampoline
+                let func_addr = crate::trampoline::trampoline_instance_check as usize;
+                self.emit_external_call(func_addr, "trampoline_instance_check");
+
+                // Move result from x0 to destination
+                if dst_reg != 0 {
+                    self.emit_mov(dst_reg, 0);
+                }
+
+                // Spill if needed
+                self.store_spill(dst_reg, dest_spill);
+            }
+
             Instruction::ExternalCallWithSaves(dst, func_addr, args, saves) => {
                 // ExternalCall: call a known function address (trampoline) with register preservation
                 // Simpler than CallWithSaves - no tag checking, just direct call to known address
@@ -1870,7 +1765,7 @@ impl Arm64CodeGen {
 
             Instruction::Ret(value) => {
                 // Move result to x0 (return register)
-                // Match on value type like Beagle does (ir.rs:1884-1929)
+                // Epilogue is emitted separately at end of compile_function
                 match value {
                     IrValue::Register(_) => {
                         let src_reg = self.get_physical_reg_for_irvalue(value, false)?;
@@ -1898,36 +1793,7 @@ impl Arm64CodeGen {
                         }
                     }
                 }
-
-                // Emit function epilogue (Beagle-style with placeholder for patching)
-                if self.is_per_function_compilation {
-                    // Per-function compilation: emit placeholder ADD for stack deallocation
-                    // This will be patched with actual stack size after compilation
-                    // Use 0xAAA as magic value (fits in 12-bit immediate field)
-                    self.emit_add_sp_imm(0xAAA);  // Placeholder - will be patched
-
-                    // Restore callee-saved registers in reverse order
-                    if !self.saved_callee_registers.is_empty() {
-                        let saved_regs = self.saved_callee_registers.clone();
-                        let chunks: Vec<_> = saved_regs.chunks(2).collect();
-                        for chunk in chunks.into_iter().rev() {
-                            if chunk.len() == 2 {
-                                self.emit_ldp(chunk[0], chunk[1], 31, 2);
-                            } else {
-                                self.emit_ldp(chunk[0], 31, 31, 2);  // Paired with xzr
-                            }
-                        }
-                    }
-
-                    // Restore FP and LR
-                    self.emit_ldp(29, 30, 31, 2);
-                } else {
-                    // For top-level code (compile method), just jump to epilogue
-                    self.emit_jump(&"__epilogue".to_string());
-                    return Ok(());  // Don't emit ret here, epilogue will do it
-                }
-
-                self.emit_ret();
+                // Note: Epilogue (add sp, ldp, ret) is emitted at end of compile_function
             }
 
             Instruction::CallWithSaves(dst, fn_val, args, saves) => {
@@ -4013,74 +3879,6 @@ impl Arm64CodeGen {
         self.emit_blr(15);
     }
 
-    /// Execute the compiled code (for testing)
-    ///
-    /// Uses a trampoline to safely execute JIT code with proper stack management
-    pub fn execute(&self) -> Result<i64, String> {
-        // Debug output disabled for performance
-        // eprintln!("DEBUG: execute() called with {} instructions", self.code.len());
-        // eprintln!("DEBUG: JIT code:");
-        // for (i, inst) in self.code.iter().enumerate() {
-        //     eprintln!("  {:04x}: {:08x}", i * 4, inst);
-        // }
-        let code_size = self.code.len() * 4;
-
-        unsafe {
-            // Allocate memory with mmap
-            let ptr = libc::mmap(
-                std::ptr::null_mut(),
-                code_size,
-                libc::PROT_READ | libc::PROT_WRITE,
-                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
-                -1,
-                0,
-            );
-
-            if ptr == libc::MAP_FAILED {
-                return Err("mmap failed".to_string());
-            }
-
-            // Copy code to executable memory
-            let code_bytes = std::slice::from_raw_parts(
-                self.code.as_ptr() as *const u8,
-                code_size,
-            );
-            std::ptr::copy_nonoverlapping(code_bytes.as_ptr(), ptr as *mut u8, code_size);
-
-            // Make memory executable
-            if libc::mprotect(ptr, code_size, libc::PROT_READ | libc::PROT_EXEC) != 0 {
-                libc::munmap(ptr, code_size);
-                return Err("mprotect failed".to_string());
-            }
-
-            // Clear instruction cache (required on ARM64)
-            #[cfg(target_os = "macos")]
-            {
-                unsafe extern "C" {
-                    fn sys_icache_invalidate(start: *const libc::c_void, size: libc::size_t);
-                }
-                sys_icache_invalidate(ptr, code_size);
-            }
-
-            // Execute through trampoline for safety
-            let trampoline = Trampoline::new(64 * 1024); // 64KB stack
-            let result = trampoline.execute(ptr as *const u8);
-
-            // Explicitly drop trampoline before cleaning up JIT code
-            drop(trampoline);
-
-            // NOTE: We intentionally DO NOT call munmap here!
-            // The JIT code needs to stay alive because function objects may hold
-            // pointers to code in this block. In a production system, we would need
-            // a proper JIT code cache with reference counting or garbage collection.
-            // For now, we leak the memory (acceptable for a REPL/demo).
-            //
-            // libc::munmap(ptr, code_size);  // DISABLED - would free function code!
-
-            // Return the tagged result (caller is responsible for untagging if needed)
-            Ok(result)
-        }
-    }
 }
 
 #[cfg(test)]
@@ -4101,18 +3899,17 @@ mod tests {
 
         let runtime = Arc::new(UnsafeCell::new(GCRuntime::new()));
         let mut compiler = Compiler::new(runtime);
-        let result_reg = compiler.compile(&ast).unwrap();
+        compiler.compile(&ast).unwrap();
         let instructions = compiler.take_instructions();
+        let num_locals = compiler.builder.num_locals;
 
-        let mut codegen = Arm64CodeGen::new();
-        let machine_code = codegen.compile(&instructions, &result_reg, 0).unwrap();
+        let compiled = Arm64CodeGen::compile_function(&instructions, num_locals, 0).unwrap();
 
-        println!("\nGenerated {} ARM64 instructions for (+ 1 2)", machine_code.len());
-        for (i, inst) in machine_code.iter().enumerate() {
-            println!("  {:04x}: {:08x}", i * 4, inst);
-        }
+        println!("\nCompiled function for (+ 1 2) at {:p}", compiled.code_ptr as *const u8);
 
-        let result = codegen.execute().unwrap();
+        // Execute as 0-argument function via trampoline
+        let trampoline = Trampoline::new(64 * 1024);
+        let result = unsafe { trampoline.execute(compiled.code_ptr as *const u8) };
         // Result is tagged: 3 << 3 = 24
         assert_eq!(result, 24);
     }
@@ -4125,15 +3922,17 @@ mod tests {
 
         let runtime = Arc::new(UnsafeCell::new(GCRuntime::new()));
         let mut compiler = Compiler::new(runtime);
-        let result_reg = compiler.compile(&ast).unwrap();
+        compiler.compile(&ast).unwrap();
         let instructions = compiler.take_instructions();
+        let num_locals = compiler.builder.num_locals;
 
-        let mut codegen = Arm64CodeGen::new();
-        let machine_code = codegen.compile(&instructions, &result_reg, 0).unwrap();
+        let compiled = Arm64CodeGen::compile_function(&instructions, num_locals, 0).unwrap();
 
-        println!("\nGenerated {} ARM64 instructions for (+ (* 2 3) 4)", machine_code.len());
+        println!("\nCompiled function for (+ (* 2 3) 4) at {:p}", compiled.code_ptr as *const u8);
 
-        let result = codegen.execute().unwrap();
+        // Execute as 0-argument function via trampoline
+        let trampoline = Trampoline::new(64 * 1024);
+        let result = unsafe { trampoline.execute(compiled.code_ptr as *const u8) };
         // Result is tagged: 10 << 3 = 80
         assert_eq!(result, 80);
     }

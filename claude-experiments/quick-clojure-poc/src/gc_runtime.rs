@@ -43,11 +43,6 @@ const TYPE_ID_MULTI_ARITY_FN: u8 = 14;
 const TYPE_ID_CONS: u8 = 15;
 const TYPE_ID_ARRAY: u8 = 16;
 
-// Var table allocation constants
-// Reserve 1GB virtual address space (only uses physical memory on demand)
-const VAR_TABLE_RESERVED: usize = 1024 * 1024 * 1024; // 1GB virtual
-const VAR_TABLE_PAGE_SIZE: usize = 4096; // Commit in 4KB pages
-
 // ========== Built-in Type IDs for Protocol Dispatch ==========
 // These are used by the protocol vtable to dispatch on type.
 // Tagged primitives use their tag-derived ID, heap objects use these.
@@ -303,36 +298,11 @@ pub struct GCRuntime {
 
     /// Reverse lookup: symbol string -> symbol_id
     symbol_name_to_id: HashMap<String, u32>,
-
-    // ========== Var ID Table (GC-safe var access) ==========
-
-    /// Var table: var_id -> tagged var pointer
-    /// Allocated via mmap for stable address (never reallocates).
-    /// GC updates entries when vars move.
-    var_table_ptr: *mut usize,
-
-    /// Bytes of physical memory committed in var table
-    var_table_committed: usize,
-
-    /// Reverse mapping: var_ptr -> var_id (for compiler lookups)
-    var_id_map: HashMap<usize, u32>,
-
-    /// Next var ID to allocate
-    next_var_id: u32,
 }
 
 impl Default for GCRuntime {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-impl Drop for GCRuntime {
-    fn drop(&mut self) {
-        // Unmap the var table memory
-        unsafe {
-            libc::munmap(self.var_table_ptr as *mut libc::c_void, VAR_TABLE_RESERVED);
-        }
     }
 }
 
@@ -342,30 +312,6 @@ impl GCRuntime {
     }
 
     pub fn with_options(options: AllocatorOptions) -> Self {
-        // Reserve large virtual address space for var table (no physical memory yet)
-        let var_table_ptr = unsafe {
-            libc::mmap(
-                std::ptr::null_mut(),
-                VAR_TABLE_RESERVED,
-                libc::PROT_NONE, // Reserve only, no access yet
-                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
-                -1,
-                0,
-            ) as *mut usize
-        };
-        if var_table_ptr == libc::MAP_FAILED as *mut usize {
-            panic!("Failed to reserve var table virtual memory");
-        }
-
-        // Commit first page (makes it readable/writable)
-        unsafe {
-            libc::mprotect(
-                var_table_ptr as *mut libc::c_void,
-                VAR_TABLE_PAGE_SIZE,
-                libc::PROT_READ | libc::PROT_WRITE,
-            );
-        }
-
         GCRuntime {
             allocator: Alloc::new(options),
             stack_map: StackMap::new(),
@@ -390,11 +336,6 @@ impl GCRuntime {
             // Symbol interning (for runtime var lookup)
             symbol_table: Vec::new(),
             symbol_name_to_id: HashMap::new(),
-            // Var ID table (mmap-allocated for stable address)
-            var_table_ptr,
-            var_table_committed: VAR_TABLE_PAGE_SIZE,
-            var_id_map: HashMap::new(),
-            next_var_id: 0,
         }
     }
 
@@ -452,15 +393,6 @@ impl GCRuntime {
                     }
                 }
 
-                // Update var table if a var was relocated
-                if let Some(&var_id) = self.var_id_map.get(&old_ptr) {
-                    unsafe {
-                        *self.var_table_ptr.add(var_id as usize) = new_ptr;
-                    }
-                    self.var_id_map.remove(&old_ptr);
-                    self.var_id_map.insert(new_ptr, var_id);
-                }
-
                 // Update dynamic_vars set if a var was relocated
                 if self.dynamic_vars.remove(&old_ptr) {
                     self.dynamic_vars.insert(new_ptr);
@@ -470,63 +402,6 @@ impl GCRuntime {
                 if let Some(stack) = self.dynamic_bindings.remove(&old_ptr) {
                     self.dynamic_bindings.insert(new_ptr, stack);
                 }
-            }
-        }
-
-        // Also update var_table by checking for forwarding pointers
-        // This handles vars that were moved but not reported via namespace relocations
-        self.update_var_table_after_gc();
-    }
-
-    /// Update var_table entries after GC by checking for forwarding pointers
-    fn update_var_table_after_gc(&mut self) {
-        use crate::gc::types::HeapObject;
-        #[cfg(feature = "compacting")]
-        use crate::gc::types::Header;
-
-        let mut updates = Vec::new();
-
-        // Iterate via raw pointer instead of Vec
-        for var_id in 0..self.next_var_id as usize {
-            let tagged_ptr = unsafe { *self.var_table_ptr.add(var_id) };
-            if tagged_ptr == 0 {
-                continue;
-            }
-
-            // Check if this object was forwarded (marked objects have forwarding pointer)
-            let heap_obj = HeapObject::from_tagged(tagged_ptr);
-            if heap_obj.marked() {
-                // Compacting GC stores forwarding pointer in header
-                // Generational GC stores forwarding pointer in field 0
-                #[cfg(feature = "compacting")]
-                let new_ptr = {
-                    let untagged = heap_obj.untagged();
-                    let pointer = untagged as *const usize;
-                    let header_data = unsafe { *pointer };
-                    Header::clear_marked_bit(header_data)
-                };
-
-                #[cfg(not(feature = "compacting"))]
-                let new_ptr = heap_obj.get_field(0);
-
-                updates.push((var_id, tagged_ptr, new_ptr));
-            }
-        }
-
-        // Apply updates
-        for (var_id, old_ptr, new_ptr) in updates {
-            unsafe {
-                *self.var_table_ptr.add(var_id) = new_ptr;
-            }
-            self.var_id_map.remove(&old_ptr);
-            self.var_id_map.insert(new_ptr, var_id as u32);
-
-            // Also update dynamic_vars and dynamic_bindings
-            if self.dynamic_vars.remove(&old_ptr) {
-                self.dynamic_vars.insert(new_ptr);
-            }
-            if let Some(stack) = self.dynamic_bindings.remove(&old_ptr) {
-                self.dynamic_bindings.insert(new_ptr, stack);
             }
         }
     }
@@ -823,6 +698,10 @@ impl GCRuntime {
         symbol_name: &str,
         value: usize,
     ) -> Result<usize, String> {
+        // IMPORTANT: Save namespace name BEFORE any allocations that might trigger GC
+        // The ns_ptr might be relocated by GC during allocations below
+        let ns_name = self.namespace_name(ns_ptr);
+
         let ns_untagged = self.untag_heap_object(ns_ptr);
         let heap_obj = HeapObject::from_untagged(ns_untagged as *const u8);
         let header = heap_obj.get_header();
@@ -841,17 +720,25 @@ impl GCRuntime {
             }
         }
 
-        // Allocate symbol name string
+        // Allocate symbol name string - this might trigger GC!
         let symbol_ptr = self.allocate_string(symbol_name)?;
 
-        // Reallocate with +2 words
+        // Reallocate with +2 words - this might also trigger GC!
         let new_size = current_size + 2;
         let new_ns_ptr = self.allocate_raw(new_size, TYPE_ID_NAMESPACE)?;
 
-        // Copy existing fields
+        // CRITICAL: Re-fetch the source namespace pointer AFTER allocations
+        // GC may have relocated it, so we need to use the namespace root to find
+        // its current location
+        let current_ns_ptr = self.get_namespace_by_name(&ns_name)
+            .ok_or_else(|| format!("Namespace {} disappeared during allocation", ns_name))?;
+        let current_ns_untagged = self.untag_heap_object(current_ns_ptr);
+        let source_heap_obj = HeapObject::from_untagged(current_ns_untagged as *const u8);
+
+        // Copy existing fields from the (possibly relocated) source namespace
         let new_heap_obj = HeapObject::from_untagged(new_ns_ptr as *const u8);
         for i in 0..current_size {
-            let field = heap_obj.get_field(i);
+            let field = source_heap_obj.get_field(i);
             new_heap_obj.write_field(i, field);
         }
 
@@ -862,10 +749,28 @@ impl GCRuntime {
         let tagged_new_ptr = self.tag_heap_object(new_ns_ptr);
 
         // Update GC root since namespace was reallocated
-        let name = self.namespace_name(tagged_new_ptr);
-        self.update_namespace_root(&name, tagged_new_ptr);
+        self.update_namespace_root(&ns_name, tagged_new_ptr);
 
         Ok(tagged_new_ptr)
+    }
+
+    /// Debug: print bindings in a namespace
+    pub fn debug_namespace_bindings(&self, ns_ptr: usize, limit: usize) {
+        let ns_untagged = self.untag_heap_object(ns_ptr);
+        let heap_obj = HeapObject::from_untagged(ns_untagged as *const u8);
+        let header = heap_obj.get_header();
+        let size = header.size as usize;
+
+        if size == 0 {
+            return;
+        }
+
+        let num_bindings = (size - 1) / 2;
+
+        for i in 0..num_bindings.min(limit) {
+            let name_ptr = heap_obj.get_field(1 + i * 2);
+            let stored_name = self.read_string(name_ptr);
+        }
     }
 
     /// Look up a binding in a namespace
@@ -972,15 +877,6 @@ impl GCRuntime {
                     }
                 }
 
-                // Update var table if a var was relocated
-                if let Some(&var_id) = self.var_id_map.get(&old_ptr) {
-                    unsafe {
-                        *self.var_table_ptr.add(var_id as usize) = new_ptr;
-                    }
-                    self.var_id_map.remove(&old_ptr);
-                    self.var_id_map.insert(new_ptr, var_id);
-                }
-
                 // Update dynamic_vars set if a var was relocated
                 if self.dynamic_vars.remove(&old_ptr) {
                     self.dynamic_vars.insert(new_ptr);
@@ -992,9 +888,6 @@ impl GCRuntime {
                 }
             }
         }
-
-        // Also update var_table by checking for forwarding pointers
-        self.update_var_table_after_gc();
     }
 
     /// Get heap statistics
@@ -1057,37 +950,8 @@ impl GCRuntime {
 
     // ========== Var Methods ==========
 
-    /// Get the raw pointer to the var table for JIT code
-    /// This pointer is stable (mmap-allocated, never moves)
-    pub fn var_table_ptr(&self) -> *const usize {
-        self.var_table_ptr as *const usize
-    }
-
-    /// Ensure we have committed enough pages for var_id
-    fn ensure_var_table_capacity(&mut self, var_id: u32) {
-        let needed = ((var_id as usize + 1) * 8 + VAR_TABLE_PAGE_SIZE - 1)
-            / VAR_TABLE_PAGE_SIZE
-            * VAR_TABLE_PAGE_SIZE;
-        if needed > self.var_table_committed {
-            // Commit more pages
-            unsafe {
-                libc::mprotect(
-                    self.var_table_ptr as *mut libc::c_void,
-                    needed,
-                    libc::PROT_READ | libc::PROT_WRITE,
-                );
-            }
-            self.var_table_committed = needed;
-        }
-    }
-
-    /// Get the var_id for a tagged var pointer
-    pub fn get_var_id(&self, var_ptr: usize) -> Option<u32> {
-        self.var_id_map.get(&var_ptr).copied()
-    }
-
-    /// Allocate a var object and register it in the var table
-    /// Returns (tagged_var_ptr, var_id)
+    /// Allocate a var object on the heap
+    /// Returns (tagged_var_ptr, var_id) - var_id is always 0 (unused, kept for API compatibility)
     pub fn allocate_var(
         &mut self,
         ns_ptr: usize,
@@ -1104,20 +968,8 @@ impl GCRuntime {
 
         let tagged_var_ptr = self.tag_heap_object(var_ptr);
 
-        // Register in var table for GC-safe access
-        let var_id = self.next_var_id;
-        self.next_var_id += 1;
-
-        // Commit more pages if needed (grows on demand)
-        self.ensure_var_table_capacity(var_id);
-
-        // Write directly to mmap buffer
-        unsafe {
-            *self.var_table_ptr.add(var_id as usize) = tagged_var_ptr;
-        }
-        self.var_id_map.insert(tagged_var_ptr, var_id);
-
-        Ok((tagged_var_ptr, var_id))
+        // var_id is no longer used - vars are looked up by symbol at runtime
+        Ok((tagged_var_ptr, 0))
     }
 
     /// Bootstrap all builtin functions as Vars in clojure.core.
@@ -1133,16 +985,19 @@ impl GCRuntime {
 
         let wrappers = generate_builtin_wrappers();
 
-        for (name, code_ptr) in wrappers {
+        for (name, code_ptr) in &wrappers {
             // Create a tagged function pointer (no closures, just raw code)
             // Function tag is 0b100 (4)
             let fn_tagged = (code_ptr << 3) | 0b100;
 
             // Create a var for this builtin in clojure.core
-            let (var_ptr, _var_id) = self.allocate_var(core_ns_ptr, name, fn_tagged)?;
+            let (var_ptr, _var_id) = self.allocate_var(core_ns_ptr, *name, fn_tagged)?;
 
             // Add the var to the namespace bindings
-            core_ns_ptr = self.namespace_add_binding(core_ns_ptr, name, var_ptr)?;
+            let old_ptr = core_ns_ptr;
+            core_ns_ptr = self.namespace_add_binding(core_ns_ptr, *name, var_ptr)?;
+            if *name == "make-array" {
+            }
         }
 
         Ok(core_ns_ptr)
@@ -2092,6 +1947,7 @@ impl GCRuntime {
                 match header.type_id {
                     TYPE_ID_NAMESPACE => BUILTIN_TYPE_NAMESPACE,
                     TYPE_ID_VAR => BUILTIN_TYPE_VAR,
+                    TYPE_ID_KEYWORD => BUILTIN_TYPE_KEYWORD,
                     TYPE_ID_DEFTYPE => {
                         // For deftypes, use type_data + offset to get unique type_id
                         header.type_data as usize + DEFTYPE_ID_OFFSET
@@ -2183,6 +2039,9 @@ mod tests {
     fn test_namespace_binding() {
         let mut runtime = GCRuntime::new();
         let ns_ptr = runtime.allocate_namespace("user").unwrap();
+
+        // Register as GC root so it survives allocations
+        runtime.add_namespace_root("user".to_string(), ns_ptr);
 
         // Add a binding (42 tagged as int)
         let value = 42 << 3;

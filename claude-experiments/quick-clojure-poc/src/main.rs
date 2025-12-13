@@ -20,6 +20,7 @@ use crate::clojure_ast::{analyze, Expr};
 use crate::compiler::Compiler;
 use crate::arm_codegen::Arm64CodeGen;
 use crate::gc_runtime::GCRuntime;
+use crate::trampoline::Trampoline;
 
 /// Print a tagged value, matching Clojure's behavior
 /// nil prints nothing, other values print their untagged representation
@@ -597,33 +598,26 @@ fn load_clojure_file(
                     Ok(ast) => {
                         match compiler.compile(&ast) {
                             Ok(result_reg) => {
-                                // Ensure result is always a register (convert constants if needed)
-                                let result_reg = compiler.ensure_register(result_reg);
+                                // Emit Ret for top-level expressions (like Beagle's ir.ret(last))
+                                compiler.builder.emit(crate::ir::Instruction::Ret(result_reg));
                                 let instructions = compiler.take_instructions();
-                                let mut codegen = Arm64CodeGen::new();
+                                let num_locals = compiler.builder.num_locals;
 
-                                let var_table_ptr = unsafe {
-                                    let rt = &*runtime.get();
-                                    rt.var_table_ptr() as usize
-                                };
-                                codegen.set_var_table_ptr(var_table_ptr);
+                                match Arm64CodeGen::compile_function(&instructions, num_locals, 0) {
+                                    Ok(compiled) => {
+                                        // Execute as 0-argument function via trampoline
+                                        let trampoline = Trampoline::new(64 * 1024);
+                                        let result = unsafe { trampoline.execute(compiled.code_ptr as *const u8) };
 
-                                match codegen.compile(&instructions, &result_reg, 0) {
-                                    Ok(_) => {
-                                        match codegen.execute() {
-                                            Ok(result) => {
-                                                if print_results && !matches!(ast,
-                                                    Expr::Def { .. } |
-                                                    Expr::Ns { .. } |
-                                                    Expr::Use { .. }
-                                                ) {
-                                                    unsafe {
-                                                        let rt = &*runtime.get();
-                                                        print_tagged_value(result, rt);
-                                                    }
-                                                }
+                                        if print_results && !matches!(ast,
+                                            Expr::Def { .. } |
+                                            Expr::Ns { .. } |
+                                            Expr::Use { .. }
+                                        ) {
+                                            unsafe {
+                                                let rt = &*runtime.get();
+                                                print_tagged_value(result, rt);
                                             }
-                                            Err(e) => return Err(format!("Execution error: {}", e)),
                                         }
                                     }
                                     Err(e) => return Err(format!("Codegen error: {}", e)),
@@ -665,6 +659,9 @@ fn run_expr(expr: &str, gc_always: bool) {
     // Create compiler
     let mut compiler = Compiler::new(runtime.clone());
 
+    // NOTE: Not loading clojure.core for -e mode to keep it fast
+    // Core functions like count, hash-map etc won't be available
+
     // Parse the expression
     let val = match read(expr) {
         Ok(v) => v,
@@ -692,36 +689,27 @@ fn run_expr(expr: &str, gc_always: bool) {
         }
     };
 
-    // Ensure result is always a register (convert constants if needed)
-    let result_reg = compiler.ensure_register(result_reg);
+    // Emit Ret for top-level expression
+    compiler.builder.emit(crate::ir::Instruction::Ret(result_reg));
     let instructions = compiler.take_instructions();
-    let mut codegen = Arm64CodeGen::new();
-
-    // Set var_table_ptr for GC-safe var access
-    let var_table_ptr = unsafe {
-        let rt = &*runtime.get();
-        rt.var_table_ptr() as usize
-    };
-    codegen.set_var_table_ptr(var_table_ptr);
+    let num_locals = compiler.builder.num_locals;
 
     // Generate machine code
-    if let Err(e) = codegen.compile(&instructions, &result_reg, 0) {
-        eprintln!("Codegen error: {}", e);
-        std::process::exit(1);
-    }
-
-    // Execute and print result
-    match codegen.execute() {
-        Ok(result) => {
-            unsafe {
-                let rt = &*runtime.get();
-                print_tagged_value(result, rt);
-            }
-        }
+    let compiled = match Arm64CodeGen::compile_function(&instructions, num_locals, 0) {
+        Ok(c) => c,
         Err(e) => {
-            eprintln!("Execution error: {}", e);
+            eprintln!("Codegen error: {}", e);
             std::process::exit(1);
         }
+    };
+
+    // Execute as 0-argument function via trampoline
+    let trampoline = Trampoline::new(64 * 1024);
+    let result = unsafe { trampoline.execute(compiled.code_ptr as *const u8) };
+
+    unsafe {
+        let rt = &*runtime.get();
+        print_tagged_value(result, rt);
     }
 }
 
@@ -792,39 +780,28 @@ fn run_script(filename: &str, gc_always: bool) {
                         // Compile and execute
                         match compiler.compile(&ast) {
                             Ok(result_reg) => {
-                                // Ensure result is always a register (convert constants if needed)
-                                let result_reg = compiler.ensure_register(result_reg);
+                                // Emit Ret for top-level expression
+                                compiler.builder.emit(crate::ir::Instruction::Ret(result_reg));
                                 let instructions = compiler.take_instructions();
-                                let mut codegen = Arm64CodeGen::new();
+                                let num_locals = compiler.builder.num_locals;
 
-                                // Set var_table_ptr for GC-safe var access
-                                let var_table_ptr = unsafe {
-                                    let rt = &*runtime.get();
-                                    rt.var_table_ptr() as usize
-                                };
-                                codegen.set_var_table_ptr(var_table_ptr);
+                                match Arm64CodeGen::compile_function(&instructions, num_locals, 0) {
+                                    Ok(compiled) => {
+                                        // Execute as 0-argument function via trampoline
+                                        let trampoline = Trampoline::new(64 * 1024);
+                                        let result = unsafe { trampoline.execute(compiled.code_ptr as *const u8) };
 
-                                match codegen.compile(&instructions, &result_reg, 0) {
-                                    Ok(_) => {
-                                        match codegen.execute() {
-                                            Ok(result) => {
-                                                // Only print result for non-def/ns/use expressions
-                                                // This matches Clojure's behavior in script mode
-                                                if !matches!(ast,
-                                                    Expr::Def { .. } |
-                                                    Expr::Ns { .. } |
-                                                    Expr::Use { .. }
-                                                ) {
-                                                    // SAFETY: Single-threaded, not during compilation
-                                                    unsafe {
-                                                        let rt = &*runtime.get();
-                                                        print_tagged_value(result, rt);
-                                                    }
-                                                }
-                                            }
-                                            Err(e) => {
-                                                eprintln!("Execution error: {}", e);
-                                                std::process::exit(1);
+                                        // Only print result for non-def/ns/use expressions
+                                        // This matches Clojure's behavior in script mode
+                                        if !matches!(ast,
+                                            Expr::Def { .. } |
+                                            Expr::Ns { .. } |
+                                            Expr::Use { .. }
+                                        ) {
+                                            // SAFETY: Single-threaded, not during compilation
+                                            unsafe {
+                                                let rt = &*runtime.get();
+                                                print_tagged_value(result, rt);
                                             }
                                         }
                                     }
@@ -1282,19 +1259,20 @@ fn main() {
                                         // Use the REPL compiler so we can access defined vars
                                         match repl_compiler.compile(&ast) {
                                             Ok(result_reg) => {
-                                                // Ensure result is always a register (convert constants if needed)
-                                                let result_reg = repl_compiler.ensure_register(result_reg);
+                                                // Emit Ret for top-level expression
+                                                repl_compiler.builder.emit(crate::ir::Instruction::Ret(result_reg));
                                                 let instructions = repl_compiler.take_instructions();
-                                                let mut codegen = Arm64CodeGen::new();
-                                                // Set var_table_ptr for GC-safe var access
-                                                let var_table_ptr = unsafe {
-                                                    let rt = &*runtime.get();
-                                                    rt.var_table_ptr() as usize
-                                                };
-                                                codegen.set_var_table_ptr(var_table_ptr);
-                                                match codegen.compile(&instructions, &result_reg, 0) {
-                                                    Ok(code) => {
-                                                        print_machine_code(&code);
+                                                let num_locals = repl_compiler.builder.num_locals;
+
+                                                match Arm64CodeGen::compile_function(&instructions, num_locals, 0) {
+                                                    Ok(compiled) => {
+                                                        // Display the machine code by reading from executable memory
+                                                        let code_ptr = compiled.code_ptr as *const u32;
+                                                        let code_len = compiled.code_len;
+                                                        unsafe {
+                                                            let code_slice = std::slice::from_raw_parts(code_ptr, code_len);
+                                                            print_machine_code(&code_slice.to_vec());
+                                                        }
                                                         println!();
                                                     }
                                                     Err(e) => eprintln!("Codegen error: {}", e),
@@ -1307,48 +1285,42 @@ fn main() {
                                         // Normal execution using IR-based compilation with persistent compiler
                                         match repl_compiler.compile(&ast) {
                                             Ok(result_reg) => {
-                                                // Ensure result is always a register (convert constants if needed)
-                                                let result_reg = repl_compiler.ensure_register(result_reg);
+                                                // Emit Ret for top-level expression
+                                                repl_compiler.builder.emit(crate::ir::Instruction::Ret(result_reg));
                                                 let instructions = repl_compiler.take_instructions();
-                                                let mut codegen = Arm64CodeGen::new();
-                                                // Set var_table_ptr for GC-safe var access
-                                                let var_table_ptr = unsafe {
-                                                    let rt = &*runtime.get();
-                                                    rt.var_table_ptr() as usize
-                                                };
-                                                codegen.set_var_table_ptr(var_table_ptr);
-                                                match codegen.compile(&instructions, &result_reg, 0) {
-                                                    Ok(_) => {
-                                                        match codegen.execute() {
-                                                            Ok(result) => {
-                                                                // Sync compiler's namespace registry in case GC relocated objects
-                                                                // (This can happen during allocation in gc-always mode or when heap is full)
-                                                                repl_compiler.sync_namespace_registry();
+                                                let num_locals = repl_compiler.builder.num_locals;
 
-                                                                // SAFETY: After successful execution, not during compilation
-                                                                unsafe {
-                                                                    let rt = &*runtime.get();
-                                                                    // If this was a top-level def, print the var instead of the value
-                                                                    if let Expr::Def { name, .. } = &ast {
-                                                                        // Look up the var that was just stored
-                                                                        let ns_name = repl_compiler.get_current_namespace();
-                                                                        let ns_ptr = rt.list_namespaces()
-                                                                            .iter()
-                                                                            .find(|(n, _, _)| n == &ns_name)
-                                                                            .map(|(_, ptr, _)| *ptr)
-                                                                            .unwrap();
+                                                match Arm64CodeGen::compile_function(&instructions, num_locals, 0) {
+                                                    Ok(compiled) => {
+                                                        // Execute as 0-argument function via trampoline
+                                                        let trampoline = Trampoline::new(64 * 1024);
+                                                        let result = unsafe { trampoline.execute(compiled.code_ptr as *const u8) };
 
-                                                                        if let Some(var_ptr) = rt.namespace_lookup(ns_ptr, name) {
-                                                                            let (ns_name, symbol_name) = rt.var_info(var_ptr);
-                                                                            println!("#'{}/{}", ns_name, symbol_name);
-                                                                        }
-                                                                    } else {
-                                                                        // For other expressions, print the result value
-                                                                        print_tagged_value(result, rt);
-                                                                    }
+                                                        // Sync compiler's namespace registry in case GC relocated objects
+                                                        // (This can happen during allocation in gc-always mode or when heap is full)
+                                                        repl_compiler.sync_namespace_registry();
+
+                                                        // SAFETY: After successful execution, not during compilation
+                                                        unsafe {
+                                                            let rt = &*runtime.get();
+                                                            // If this was a top-level def, print the var instead of the value
+                                                            if let Expr::Def { name, .. } = &ast {
+                                                                // Look up the var that was just stored
+                                                                let ns_name = repl_compiler.get_current_namespace();
+                                                                let ns_ptr = rt.list_namespaces()
+                                                                    .iter()
+                                                                    .find(|(n, _, _)| n == &ns_name)
+                                                                    .map(|(_, ptr, _)| *ptr)
+                                                                    .unwrap();
+
+                                                                if let Some(var_ptr) = rt.namespace_lookup(ns_ptr, name) {
+                                                                    let (ns_name, symbol_name) = rt.var_info(var_ptr);
+                                                                    println!("#'{}/{}", ns_name, symbol_name);
                                                                 }
+                                                            } else {
+                                                                // For other expressions, print the result value
+                                                                print_tagged_value(result, rt);
                                                             }
-                                                            Err(e) => eprintln!("Execution error: {}", e),
                                                         }
                                                     }
                                                     Err(e) => eprintln!("Codegen error: {}", e),

@@ -35,7 +35,7 @@ pub struct LinearScan {
     result_register: Option<VirtualRegister>,
 }
 
-/// Create a physical register (callee-saved registers x19-x28)
+/// Create a physical register (x19-x28 per ARM64 calling convention)
 fn physical(index: usize) -> VirtualRegister {
     VirtualRegister::Temp(index)
 }
@@ -51,7 +51,7 @@ impl LinearScan {
         // Determine number of registers to use
         let max_registers = if max_registers == 0 { 10 } else { max_registers };
 
-        // Use ARM64 callee-saved registers starting from x19
+        // Use ARM64 registers x19-x28 (preserved via CallWithSaves, not prologue)
         let physical_registers: Vec<VirtualRegister> = (19..(19 + max_registers))
             .map(physical)
             .collect();
@@ -195,6 +195,12 @@ impl LinearScan {
                 if let IrValue::Register(r) = src2 { regs.push(*r); }
             }
 
+            // InstanceCheck(dst, type_id, value) - type_id is a constant, not a register
+            Instruction::InstanceCheck(dst, _, value) => {
+                if let IrValue::Register(r) = dst { regs.push(*r); }
+                if let IrValue::Register(r) = value { regs.push(*r); }
+            }
+
             Instruction::Tag(dst, src, _tag) => {
                 if let IrValue::Register(r) = dst { regs.push(*r); }
                 if let IrValue::Register(r) = src { regs.push(*r); }
@@ -203,16 +209,20 @@ impl LinearScan {
             // Note: Untag is handled above with the other dst/src instructions
 
             Instruction::LoadConstant(dst, _)
-            | Instruction::LoadVar(dst, _)
-            | Instruction::LoadVarDynamic(dst, _)
+            | Instruction::LoadVarBySymbol(dst, _, _)
+            | Instruction::LoadVarBySymbolDynamic(dst, _, _)
             | Instruction::LoadTrue(dst)
             | Instruction::LoadFalse(dst) => {
                 if let IrValue::Register(r) = dst { regs.push(*r); }
             }
 
-            Instruction::StoreVar(_var_id, value) => {
-                // StoreVar only uses the value register (var_id is a u32, not a register)
+            Instruction::StoreVarBySymbol(_, _, value) => {
+                // StoreVar only uses the value register (var_id/symbol_ids are u32, not registers)
                 if let IrValue::Register(r) = value { regs.push(*r); }
+            }
+
+            Instruction::EnsureVarBySymbol(_, _) => {
+                // No registers used
             }
 
             Instruction::Assign(dst, src) => {
@@ -594,6 +604,12 @@ impl LinearScan {
                 replace(src2);
             }
 
+            // InstanceCheck(dst, type_id, value) - type_id is a constant
+            Instruction::InstanceCheck(dst, _, value) => {
+                replace(dst);
+                replace(value);
+            }
+
             Instruction::Tag(dst, src, _) => {
                 replace(dst);
                 replace(src);
@@ -624,16 +640,20 @@ impl LinearScan {
             }
 
             Instruction::LoadConstant(dst, _)
-            | Instruction::LoadVar(dst, _)
-            | Instruction::LoadVarDynamic(dst, _)
+            | Instruction::LoadVarBySymbol(dst, _, _)
+            | Instruction::LoadVarBySymbolDynamic(dst, _, _)
             | Instruction::LoadTrue(dst)
             | Instruction::LoadFalse(dst) => {
                 replace(dst);
             }
 
-            Instruction::StoreVar(_var_id, value) => {
-                // var_id is u32, only value needs register replacement
+            Instruction::StoreVarBySymbol(_, _, value) => {
+                // symbol_ids are u32, only value needs register replacement
                 replace(value);
+            }
+
+            Instruction::EnsureVarBySymbol(_, _) => {
+                // No registers to replace
             }
 
             Instruction::Assign(dst, src) => {
@@ -1021,6 +1041,12 @@ impl LinearScan {
                 replace(src2);
             }
 
+            // InstanceCheck(dst, type_id, value) - type_id is a constant
+            Instruction::InstanceCheck(dst, _, value) => {
+                replace(dst);
+                replace(value);
+            }
+
             Instruction::Tag(dst, src, _) => {
                 replace(dst);
                 replace(src);
@@ -1051,16 +1077,20 @@ impl LinearScan {
             }
 
             Instruction::LoadConstant(dst, _)
-            | Instruction::LoadVar(dst, _)
-            | Instruction::LoadVarDynamic(dst, _)
+            | Instruction::LoadVarBySymbol(dst, _, _)
+            | Instruction::LoadVarBySymbolDynamic(dst, _, _)
             | Instruction::LoadTrue(dst)
             | Instruction::LoadFalse(dst) => {
                 replace(dst);
             }
 
-            Instruction::StoreVar(_var_id, value) => {
-                // var_id is u32, only value needs register replacement
+            Instruction::StoreVarBySymbol(_, _, value) => {
+                // symbol_ids are u32, only value needs register replacement
                 replace(value);
+            }
+
+            Instruction::EnsureVarBySymbol(_, _) => {
+                // No registers to replace
             }
 
             Instruction::Assign(dst, src) => {

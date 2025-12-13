@@ -412,7 +412,11 @@ pub extern "C" fn trampoline_load_var_by_symbol(ns_symbol_id: u32, name_symbol_i
 
         // Look up var in namespace
         let var_ptr = rt.namespace_lookup(ns_ptr, var_name)
-            .unwrap_or_else(|| panic!("Unable to resolve symbol: {}/{}", ns_name, var_name));
+            .unwrap_or_else(|| {
+                // Debug: print first 10 bindings
+                rt.debug_namespace_bindings(ns_ptr, 10);
+                panic!("Unable to resolve symbol: {}/{}", ns_name, var_name)
+            });
 
         // Get and return value
         rt.var_get_value(var_ptr)
@@ -461,24 +465,26 @@ pub extern "C" fn trampoline_store_var_by_symbol(ns_symbol_id: u32, name_symbol_
         let runtime_ptr = std::ptr::addr_of!(RUNTIME);
         let rt = &mut *(*runtime_ptr).as_ref().unwrap().get();
 
-        // Get symbol strings
+        // Get symbol strings (clone to avoid borrow issues)
         let ns_name = rt.get_symbol(ns_symbol_id)
-            .expect("invalid ns_symbol_id");
+            .expect("invalid ns_symbol_id")
+            .to_string();
         let var_name = rt.get_symbol(name_symbol_id)
-            .expect("invalid name_symbol_id");
+            .expect("invalid name_symbol_id")
+            .to_string();
 
         // Look up namespace
-        let ns_ptr = rt.get_namespace_by_name(ns_name)
+        let ns_ptr = rt.get_namespace_by_name(&ns_name)
             .unwrap_or_else(|| panic!("Namespace not found: {}", ns_name));
 
         // Look up or create var
-        let var_ptr = if let Some(existing) = rt.namespace_lookup(ns_ptr, var_name) {
+        let var_ptr = if let Some(existing) = rt.namespace_lookup(ns_ptr, &var_name) {
             existing
         } else {
             // Create new var
-            let (new_var_ptr, _var_id) = rt.allocate_var(ns_ptr, var_name, value)
+            let (new_var_ptr, _var_id) = rt.allocate_var(ns_ptr, &var_name, value)
                 .expect("Failed to allocate var");
-            rt.namespace_add_binding(ns_ptr, var_name, new_var_ptr)
+            rt.namespace_add_binding(ns_ptr, &var_name, new_var_ptr)
                 .expect("Failed to add namespace binding");
             new_var_ptr
         };
@@ -502,22 +508,24 @@ pub extern "C" fn trampoline_ensure_var_by_symbol(ns_symbol_id: u32, name_symbol
         let runtime_ptr = std::ptr::addr_of!(RUNTIME);
         let rt = &mut *(*runtime_ptr).as_ref().unwrap().get();
 
-        // Get symbol strings
+        // Get symbol strings (clone to avoid borrow issues)
         let ns_name = rt.get_symbol(ns_symbol_id)
-            .expect("invalid ns_symbol_id");
+            .expect("invalid ns_symbol_id")
+            .to_string();
         let var_name = rt.get_symbol(name_symbol_id)
-            .expect("invalid name_symbol_id");
+            .expect("invalid name_symbol_id")
+            .to_string();
 
         // Look up namespace
-        let ns_ptr = rt.get_namespace_by_name(ns_name)
+        let ns_ptr = rt.get_namespace_by_name(&ns_name)
             .unwrap_or_else(|| panic!("Namespace not found: {}", ns_name));
 
         // Create var if it doesn't exist
-        if rt.namespace_lookup(ns_ptr, var_name).is_none() {
+        if rt.namespace_lookup(ns_ptr, &var_name).is_none() {
             let nil_value = 7usize; // nil tagged value
-            let (new_var_ptr, _var_id) = rt.allocate_var(ns_ptr, var_name, nil_value)
+            let (new_var_ptr, _var_id) = rt.allocate_var(ns_ptr, &var_name, nil_value)
                 .expect("Failed to allocate var");
-            rt.namespace_add_binding(ns_ptr, var_name, new_var_ptr)
+            rt.namespace_add_binding(ns_ptr, &var_name, new_var_ptr)
                 .expect("Failed to add namespace binding");
         }
 
@@ -1092,7 +1100,6 @@ pub extern "C" fn trampoline_throw(_stack_pointer: usize, exception_value: usize
 /// - Returns: x0 = same marker value (pass through)
 #[unsafe(no_mangle)]
 pub extern "C" fn trampoline_debug_marker(marker: usize) -> usize {
-    eprintln!("DEBUG MARKER: 0x{:x}", marker);
     marker
 }
 
@@ -1252,6 +1259,36 @@ pub extern "C" fn trampoline_intern_keyword(keyword_index: usize) -> usize {
     }
 }
 
+// ========== Type Checking Trampolines ==========
+
+/// Trampoline: Check if a value is an instance of a deftype
+///
+/// ARM64 Calling Convention:
+/// - Args: x0 = expected_type_id (full type ID including DEFTYPE_ID_OFFSET)
+///         x1 = value to check (tagged)
+/// - Returns: x0 = tagged boolean (true if instance, false otherwise)
+#[unsafe(no_mangle)]
+pub extern "C" fn trampoline_instance_check(
+    expected_type_id: usize,
+    value: usize,
+) -> usize {
+    unsafe {
+        let runtime_ptr = std::ptr::addr_of!(RUNTIME);
+        let rt = &*(*runtime_ptr).as_ref().unwrap().get();
+
+        let actual_type_id = rt.get_type_id_for_value(value);
+
+        // Return tagged boolean
+        // true = (1 << 3) | 0b011 = 11 = 0b01011
+        // false = (0 << 3) | 0b011 = 3 = 0b00011
+        if actual_type_id == expected_type_id {
+            11 // true
+        } else {
+            3 // false
+        }
+    }
+}
+
 // ========== Raw Mutable Array Trampolines ==========
 
 /// Trampoline: Allocate a new raw mutable array
@@ -1366,6 +1403,132 @@ pub extern "C" fn trampoline_aclone(stack_pointer: usize, arr_ptr: usize) -> usi
                 eprintln!("Error cloning array: {}", msg);
                 7 // Return nil on error
             }
+        }
+    }
+}
+
+/// Hash a value - works for keywords, strings, and other primitive types
+/// - x0 = value (tagged)
+/// - Returns: x0 = hash value (tagged integer)
+#[unsafe(no_mangle)]
+pub extern "C" fn trampoline_hash_value(value: usize) -> usize {
+    use crate::gc_runtime::BUILTIN_TYPE_KEYWORD;
+    use crate::gc::types::{BuiltInTypes, HeapObject};
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    unsafe {
+        let runtime_ptr = std::ptr::addr_of!(RUNTIME);
+        let rt = &*(*runtime_ptr).as_ref().unwrap().get();
+
+        let type_id = rt.get_type_id_for_value(value);
+
+        // Compute hash and mask to 60 bits to avoid overflow in construct_int
+        // (which reserves 3 bits for tagging)
+        let hash = match type_id {
+            id if id == BuiltInTypes::Int as usize => {
+                // Integer - use the untagged value as the hash (already fits)
+                BuiltInTypes::untag(value)
+            }
+            id if id == BUILTIN_TYPE_KEYWORD => {
+                // Keyword - hash based on its pointer value (keywords are interned)
+                // Use a simple multiplicative hash that's deterministic and fast
+                // Mask to 60 bits (isize::MAX >> 3) to fit in tagged integer
+                // The pointer value is already unique per keyword due to interning
+                let ptr = value >> 3;  // Remove tag bits
+                // Use a multiplicative hash constant (FNV-1a inspired)
+                let h = ptr.wrapping_mul(0x517cc1b727220a95);
+                h & 0x0fff_ffff_ffff_ffff
+            }
+            id if id == BuiltInTypes::String as usize => {
+                // String - hash the string content
+                let untagged = (value & !0b111) as *const u8;
+                let obj = HeapObject::from_untagged(untagged);
+                let s = obj.get_str_unchecked();
+                let mut hasher = DefaultHasher::new();
+                s.hash(&mut hasher);
+                (hasher.finish() as usize) & 0x0fff_ffff_ffff_ffff
+            }
+            _ => {
+                // For other types, use pointer identity
+                let mut hasher = DefaultHasher::new();
+                value.hash(&mut hasher);
+                (hasher.finish() as usize) & 0x0fff_ffff_ffff_ffff
+            }
+        };
+
+        // Return as tagged integer
+        BuiltInTypes::construct_int(hash as isize) as usize
+    }
+}
+
+/// Check if a value is a keyword
+/// - x0 = value (tagged)
+/// - Returns: x0 = true (0b01011) or false (0b00011)
+#[unsafe(no_mangle)]
+pub extern "C" fn trampoline_is_keyword(value: usize) -> usize {
+    use crate::gc_runtime::BUILTIN_TYPE_KEYWORD;
+
+    unsafe {
+        let runtime_ptr = std::ptr::addr_of!(RUNTIME);
+        let rt = &*(*runtime_ptr).as_ref().unwrap().get();
+
+        let type_id = rt.get_type_id_for_value(value);
+        if type_id == BUILTIN_TYPE_KEYWORD {
+            11 // true
+        } else {
+            3 // false
+        }
+    }
+}
+
+/// Check if a value is a cons cell (used for list operations)
+/// - x0 = value (tagged)
+/// - Returns: x0 = true (0b01011) or false (0b00011)
+#[unsafe(no_mangle)]
+pub extern "C" fn trampoline_is_cons(value: usize) -> usize {
+    unsafe {
+        let runtime_ptr = std::ptr::addr_of!(RUNTIME);
+        let rt = &*(*runtime_ptr).as_ref().unwrap().get();
+
+        if rt.is_cons(value) {
+            11 // true
+        } else {
+            3 // false
+        }
+    }
+}
+
+/// Get the first element of a cons cell
+/// - x0 = cons cell (tagged)
+/// - Returns: x0 = head element (tagged)
+#[unsafe(no_mangle)]
+pub extern "C" fn trampoline_cons_first(value: usize) -> usize {
+    unsafe {
+        let runtime_ptr = std::ptr::addr_of!(RUNTIME);
+        let rt = &*(*runtime_ptr).as_ref().unwrap().get();
+
+        if rt.is_cons(value) {
+            rt.cons_head(value)
+        } else {
+            7 // nil
+        }
+    }
+}
+
+/// Get the rest of a cons cell (the tail)
+/// - x0 = cons cell (tagged)
+/// - Returns: x0 = tail (tagged, may be nil or another cons)
+#[unsafe(no_mangle)]
+pub extern "C" fn trampoline_cons_rest(value: usize) -> usize {
+    unsafe {
+        let runtime_ptr = std::ptr::addr_of!(RUNTIME);
+        let rt = &*(*runtime_ptr).as_ref().unwrap().get();
+
+        if rt.is_cons(value) {
+            rt.cons_tail(value)
+        } else {
+            7 // nil
         }
     }
 }

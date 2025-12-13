@@ -34,12 +34,6 @@ fn load_core(compiler: &mut compiler::Compiler, runtime: &Arc<UnsafeCell<gc_runt
                     let instructions = compiler.take_instructions();
                     let mut codegen = arm_codegen::Arm64CodeGen::new();
 
-                    let var_table_ptr = unsafe {
-                        let rt = &*runtime.get();
-                        rt.var_table_ptr() as usize
-                    };
-                    codegen.set_var_table_ptr(var_table_ptr);
-
                     if codegen.compile(&instructions, &result_reg, 0).is_ok() {
                         let _ = codegen.execute();
                     }
@@ -66,13 +60,7 @@ fn run_and_get_tagged(code: &str) -> i64 {
     let result_reg = compiler.ensure_register(result_val);
     let instructions = compiler.take_instructions();
 
-    let var_table_ptr = unsafe {
-        let rt = &*runtime.get();
-        rt.var_table_ptr() as usize
-    };
-
     let mut codegen = arm_codegen::Arm64CodeGen::new();
-    codegen.set_var_table_ptr(var_table_ptr);
     codegen.compile(&instructions, &result_reg, 0).expect(&format!("Codegen failed for: {}", code));
     codegen.execute().expect(&format!("Execute failed for: {}", code))
 }

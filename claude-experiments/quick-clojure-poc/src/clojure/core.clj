@@ -492,23 +492,32 @@
   (fn [coll]
     (if (nil? coll)
       nil
-      (-seq coll))))
+      (if (cons? coll)
+        coll  ;; cons cells are their own seq
+        (-seq coll)))))
 
 (def first
   (fn [coll]
     (if (nil? coll)
       nil
-      (if (nil? (seq coll))
-        nil
-        (-first (seq coll))))))
+      (if (cons? coll)
+        (cons-first coll)
+        (let [s (seq coll)]
+          (if (nil? s)
+            nil
+            (-first s)))))))
 
 (def next
   (fn [coll]
     (if (nil? coll)
       nil
-      (if (nil? (seq coll))
-        nil
-        (-next (seq coll))))))
+      (if (cons? coll)
+        (let [rest (cons-rest coll)]
+          (if (nil? rest) nil rest))
+        (let [s (seq coll)]
+          (if (nil? s)
+            nil
+            (-next s)))))))
 
 ;; =============================================================================
 ;; Hashing Infrastructure
@@ -558,13 +567,16 @@
 (def empty-ordered-hash (m3-fmix m3-seed 0))
 
 ;; Polymorphic hash function - dispatches to -hash protocol method
+;; Uses hash-primitive builtin for keywords and strings
 (def hash
   (fn [x]
     (if (nil? x)
       0
       (if (number? x)
         x
-        (-hash x)))))
+        (if (keyword? x)
+          (hash-primitive x)
+          (-hash x))))))
 
 (def hash-ordered-coll
   (fn [coll]
@@ -782,6 +794,11 @@
   [x]
   (if x false true))
 
+(defn list
+  "Creates a new list containing the items."
+  [& items]
+  items)
+
 ;; DEVIATION: Our Error type instead of js/Error
 (deftype Error [message])
 
@@ -793,10 +810,8 @@
 ;; DEVIATION: Forward declarations needed because our compiler doesn't support lazy lookup
 (declare EMPTY-NODE EMPTY-VECTOR PersistentVector)
 
-;; DEVIATION: instance? stub - always returns false for now
-;; TODO: Implement proper type checking
-(defn instance? [type obj]
-  false)
+;; NOTE: instance? is now a compiler builtin - it's resolved at compile time
+;; based on the type argument and emits efficient type checking code
 
 ;; DEVIATION: count function - calls the ICounted protocol
 (defn count
@@ -815,10 +830,7 @@
 (defn integer? [x]
   (number? x))
 
-;; DEVIATION: vector? stub - always returns false for now
-;; TODO: Implement proper type checking
-(defn vector? [x]
-  false)
+;; NOTE: vector? is defined after PersistentVector to use instance? properly
 
 ;; DEVIATION: with-meta - calls the IWithMeta protocol
 (defn with-meta [o meta]
@@ -835,24 +847,53 @@
 (deftype MapEntry [key val __hash]
   IMapEntry
   (-key [this] key)
-  (-val [this] val))
+  (-val [this] val)
 
-;; DEVIATION: array function - creates arrays with given elements
-(defn array
-  "Creates a new array with the given elements."
-  ([] (make-array 0))
-  ([a] (let [arr (make-array 1)]
-         (aset arr 0 a)
-         arr))
-  ([a b] (let [arr (make-array 2)]
-           (aset arr 0 a)
-           (aset arr 1 b)
-           arr))
-  ([a b c] (let [arr (make-array 3)]
-             (aset arr 0 a)
-             (aset arr 1 b)
-             (aset arr 2 c)
-             arr)))
+  ICounted
+  (-count [this] 2)
+
+  IIndexed
+  (-nth [this n]
+    (if (== n 0)
+      key
+      (if (== n 1)
+        val
+        (throw (Error. "Index out of bounds")))))
+  (-nth [this n not-found]
+    (if (== n 0)
+      key
+      (if (== n 1)
+        val
+        not-found))))
+
+;; DEVIATION: array functions - individual functions for each arity
+;; Since multi-arity defn is not fully supported, we use separate functions
+
+(defn array0 []
+  "Creates an empty array."
+  (make-array 0))
+
+(defn array1 [a]
+  "Creates a 1-element array."
+  (let [arr (make-array 1)]
+    (aset arr 0 a)
+    arr))
+
+(defn array2 [a b]
+  "Creates a 2-element array."
+  (let [arr (make-array 2)]
+    (aset arr 0 a)
+    (aset arr 1 b)
+    arr))
+
+(defn array4 [a b c d]
+  "Creates a 4-element array."
+  (let [arr (make-array 4)]
+    (aset arr 0 a)
+    (aset arr 1 b)
+    (aset arr 2 c)
+    (aset arr 3 d)
+    arr))
 
 ;; DEVIATION: array-butlast - replacement for (.slice arr 0 -1)
 ;; Creates a new array with all elements except the last
@@ -1047,7 +1088,7 @@
                            (pv-aset n-r 1 (new-path nil shift (VectorNode. nil tail)))
                            n-r)
                        (push-tail coll shift root (VectorNode. nil tail)))]
-        (PersistentVector. meta (inc cnt) new-shift new-root (array o) nil))))
+        (PersistentVector. meta (inc cnt) new-shift new-root (array1 o) nil))))
 
   IEmptyableCollection
   (-empty [coll] (-with-meta EMPTY-VECTOR meta))
@@ -1181,7 +1222,13 @@
 (def EMPTY-NODE (VectorNode. nil (make-array 32)))
 
 (def EMPTY-VECTOR
-  (PersistentVector. nil 0 5 EMPTY-NODE (array) empty-ordered-hash))
+  (PersistentVector. nil 0 5 EMPTY-NODE (array0) empty-ordered-hash))
+
+;; Now that PersistentVector is defined, we can implement vector? properly
+(defn vector?
+  "Return true if x is a PersistentVector"
+  [x]
+  (instance? PersistentVector x))
 
 (defn vec
   "Creates a new vector containing the contents of coll."
@@ -1198,3 +1245,1003 @@
   "Creates a new vector containing the args."
   [& args]
   (vec args))
+
+;; =============================================================================
+;; VERBATIM FROM CLOJURESCRIPT - PersistentArrayMap and PersistentHashMap
+;; Source: https://github.com/clojure/clojurescript/blob/master/src/main/cljs/cljs/core.cljs
+;; =============================================================================
+
+;; -----------------------------------------------------------------------------
+;; Additional Helper Functions for Maps
+;; -----------------------------------------------------------------------------
+
+;; DEVIATION: Forward declarations
+(declare PersistentArrayMap PersistentHashMap TransientArrayMap TransientHashMap)
+(declare BitmapIndexedNode ArrayNode HashCollisionNode)
+(declare create-inode-seq create-array-node-seq create-node)
+
+;; Sentinel value for lookup failures
+;; DEVIATION: js-obj not available, using a unique object
+(deftype* LookupSentinel [])
+(def ^:private lookup-sentinel (LookupSentinel.))
+
+;; DEVIATION: Removed ^number type hint (not supported)
+(defn mix-collection-hash
+  "Mix final collection hash for ordered or unordered collections.
+   hash-basis is the combined collection hash, count is the number
+   of elements included in the basis. Note this is the hash code
+   consistent with =, different from .hashCode.
+   See http://clojure.org/data_structures#hash for full algorithms."
+  [hash-basis count]
+  (let [h1 m3-seed
+        k1 (m3-mix-K1 hash-basis)
+        h1 (m3-mix-H1 h1 k1)]
+    (m3-fmix h1 count)))
+
+;; DEVIATION: Removed ^number type hint (not supported)
+(defn hash-unordered-coll
+  "Returns the hash code, consistent with =, for an external unordered
+   collection implementing Iterable. For maps, the iterator should
+   return map entries whose hash is computed as
+     (hash-ordered-coll [k v]).
+   See http://clojure.org/data_structures#hash for full algorithms."
+  [coll]
+  (loop [n 0 hash-code 0 coll (seq coll)]
+    (if-not (nil? coll)
+      (recur (inc n) (bit-or (+ hash-code (hash (first coll))) 0) (next coll))
+      (mix-collection-hash hash-code n))))
+
+(def ^:private empty-unordered-hash
+  (mix-collection-hash 0 0))
+
+(defn bit-count
+  "Counts the number of bits set in n"
+  [v]
+  (let [v (- v (bit-and (bit-shift-right v 1) 0x55555555))
+        v (+ (bit-and v 0x33333333) (bit-and (bit-shift-right v 2) 0x33333333))]
+    (bit-shift-right (* (bit-and (+ v (bit-shift-right v 4)) 0xF0F0F0F) 0x1010101) 24)))
+
+(defn unreduced
+  "If x is reduced?, returns (deref x), else returns x"
+  [x]
+  (if (reduced? x) (-deref x) x))
+
+;; DEVIATION: map? stub - real implementation after map types are defined
+(defn map?
+  "Return true if x is a map"
+  [x]
+  false)
+
+;; DEVIATION: record? stub
+(defn record?
+  "Return true if x satisfies IRecord"
+  [x]
+  false)
+
+;; keyword? is now a builtin - no stub needed
+
+;; DEVIATION: symbol? stub
+(defn symbol?
+  "Return true if x is a Symbol"
+  [x]
+  false)
+
+;; DEVIATION: string? - check if number type is a string (we might not have strings)
+(defn string?
+  "Returns true if x is a string"
+  [x]
+  false)
+
+;; DEVIATION: keyword-identical? stub
+(defn keyword-identical?
+  "Efficient test to determine that two keywords are identical."
+  [x y]
+  (identical? x y))
+
+;; NeverEquiv type for map equality checking
+(deftype* NeverEquiv [])
+
+(extend-type NeverEquiv
+  IEquiv
+  (-equiv [o other] false))
+
+(def ^:private never-equiv (NeverEquiv.))
+
+(defn equiv-map
+  "Test map equivalence. Returns true if x equals y, otherwise returns false."
+  [x y]
+  (if (and (map? y) (not (record? y)))
+    (if (== (count x) (count y))
+      (-kv-reduce x
+        (fn [_ k v]
+          (if (= (-lookup y k never-equiv) v)
+            true
+            (reduced false)))
+        true)
+      false)
+    false))
+
+;; -----------------------------------------------------------------------------
+;; Array Copy Utilities
+;; -----------------------------------------------------------------------------
+
+(defn array-copy
+  "Copy len elements from array from starting at i to array to starting at j"
+  [from i to j len]
+  (loop [i i j j len len]
+    (if (zero? len)
+      to
+      (do (aset to j (aget from i))
+          (recur (inc i) (inc j) (dec len))))))
+
+(defn array-copy-downward
+  "Copy len elements from array from starting at i to array to starting at j, going downward"
+  [from i to j len]
+  (loop [i (+ i (dec len)) j (+ j (dec len)) len len]
+    (if (zero? len)
+      to
+      (do (aset to j (aget from i))
+          (recur (dec i) (dec j) (dec len))))))
+
+;; -----------------------------------------------------------------------------
+;; Array Index Functions
+;; -----------------------------------------------------------------------------
+
+(defn array-index-of-nil? [arr]
+  (let [len (alength arr)]
+    (loop [i 0]
+      (cond
+        (<= len i) -1
+        (nil? (aget arr i)) i
+        :else (recur (+ i 2))))))
+
+;; DEVIATION: No keyword support yet, so this is a stub
+(defn array-index-of-keyword? [arr k]
+  -1)
+
+;; DEVIATION: No symbol support yet, so this is a stub
+(defn array-index-of-symbol? [arr k]
+  -1)
+
+(defn array-index-of-identical? [arr k]
+  (let [len (alength arr)]
+    (loop [i 0]
+      (cond
+        (<= len i) -1
+        (identical? k (aget arr i)) i
+        :else (recur (+ i 2))))))
+
+(defn array-index-of-equiv? [arr k]
+  (let [len (alength arr)]
+    (loop [i 0]
+      (cond
+        (<= len i) -1
+        (= k (aget arr i)) i
+        :else (recur (+ i 2))))))
+
+(defn array-index-of [arr k]
+  (cond
+    (keyword? k) (array-index-of-keyword? arr k)
+
+    (or (string? k) (number? k))
+    (array-index-of-identical? arr k)
+
+    (symbol? k) (array-index-of-symbol? arr k)
+
+    (nil? k)
+    (array-index-of-nil? arr)
+
+    :else (array-index-of-equiv? arr k)))
+
+(defn array-map-index-of [m k]
+  (array-index-of (.-arr m) k))
+
+(defn array-extend-kv [arr k v]
+  (let [l (alength arr)
+        narr (make-array (+ l 2))]
+    (loop [i 0]
+      (when (< i l)
+        (aset narr i (aget arr i))
+        (recur (inc i))))
+    (aset narr l k)
+    (aset narr (inc l) v)
+    narr))
+
+(defn array-map-extend-kv [m k v]
+  (array-extend-kv (.-arr m) k v))
+
+;; key-test for comparing keys
+(defn key-test [key other]
+  (cond
+    (identical? key other) true
+    (keyword-identical? key other) true
+    :else (= key other)))
+
+;; -----------------------------------------------------------------------------
+;; Box type for mutable flag passing
+;; -----------------------------------------------------------------------------
+
+(deftype* Box [^:mutable val])
+
+;; -----------------------------------------------------------------------------
+;; Hash Map Helper Functions
+;; -----------------------------------------------------------------------------
+
+(defn mask [hash shift]
+  (bit-and (unsigned-bit-shift-right hash shift) 0x01f))
+
+(defn clone-and-set
+  ([arr i a]
+   (let [clone (aclone arr)]
+     (aset clone i a)
+     clone))
+  ([arr i a j b]
+   (let [clone (aclone arr)]
+     (aset clone i a)
+     (aset clone j b)
+     clone)))
+
+(defn remove-pair [arr i]
+  (let [new-arr (make-array (- (alength arr) 2))]
+    (array-copy arr 0 new-arr 0 (* 2 i))
+    (array-copy arr (* 2 (inc i)) new-arr (* 2 i) (- (alength new-arr) (* 2 i)))
+    new-arr))
+
+(defn bitmap-indexed-node-index [bitmap bit]
+  (bit-count (bit-and bitmap (dec bit))))
+
+(defn bitpos [hash shift]
+  (bit-shift-left 1 (mask hash shift)))
+
+(defn edit-and-set
+  ([inode edit i a]
+   (let [editable (-ensure-editable inode edit)]
+     (aset (.-arr editable) i a)
+     editable))
+  ([inode edit i a j b]
+   (let [editable (-ensure-editable inode edit)]
+     (aset (.-arr editable) i a)
+     (aset (.-arr editable) j b)
+     editable)))
+
+(defn inode-kv-reduce [arr f init]
+  (let [len (alength arr)]
+    (loop [i 0 init init]
+      (if (< i len)
+        (let [init (let [k (aget arr i)]
+                     (if-not (nil? k)
+                       (f init k (aget arr (inc i)))
+                       (let [node (aget arr (inc i))]
+                         (if-not (nil? node)
+                           (-kv-reduce node f init)
+                           init))))]
+          (if (reduced? init)
+            init
+            (recur (+ i 2) init)))
+        init))))
+
+;; -----------------------------------------------------------------------------
+;; BitmapIndexedNode
+;; -----------------------------------------------------------------------------
+
+;; DEVIATION: Removed Object from deftype (not supported)
+(deftype BitmapIndexedNode [edit ^:mutable bitmap ^:mutable arr]
+  IKVReduce
+  (-kv-reduce [inode f init]
+    (inode-kv-reduce arr f init)))
+
+;; DEVIATION: Forward-define ArrayNode and HashCollisionNode types here
+;; so they can be referenced by BitmapIndexedNode functions below
+(deftype ArrayNode [edit ^:mutable cnt ^:mutable arr]
+  IKVReduce
+  (-kv-reduce [inode f init]
+    (let [len (alength arr)]
+      (loop [i 0 init init]
+        (if (< i len)
+          (let [node (aget arr i)]
+            (if-not (nil? node)
+              (let [init (-kv-reduce node f init)]
+                (if (reduced? init)
+                  init
+                  (recur (inc i) init)))
+              (recur (inc i) init)))
+          init)))))
+
+(deftype HashCollisionNode [edit
+                            ^:mutable collision-hash
+                            ^:mutable cnt
+                            ^:mutable arr]
+  IKVReduce
+  (-kv-reduce [inode f init]
+    (inode-kv-reduce arr f init)))
+
+;; DEVIATION: Object methods need to be added via extend-type or we need different approach
+;; For now, let's define the node operations as separate functions
+
+(defn bitmap-indexed-node-ensure-editable [inode e]
+  (if (identical? e (.-edit inode))
+    inode
+    (let [n (bit-count (.-bitmap inode))
+          new-arr (make-array (if (neg? n) 4 (* 2 (inc n))))]
+      (array-copy (.-arr inode) 0 new-arr 0 (* 2 n))
+      (BitmapIndexedNode. e (.-bitmap inode) new-arr))))
+
+(defn bitmap-indexed-node-inode-assoc [inode shift hash key val added-leaf?]
+  (let [bit (bitpos hash shift)
+        idx (bitmap-indexed-node-index (.-bitmap inode) bit)
+        arr (.-arr inode)
+        bitmap (.-bitmap inode)]
+    (if (zero? (bit-and bitmap bit))
+      (let [n (bit-count bitmap)]
+        (if (>= n 16)
+          (let [nodes (make-array 32)
+                jdx (mask hash shift)]
+            (aset nodes jdx (bitmap-indexed-node-inode-assoc EMPTY-BITMAP-NODE (+ shift 5) hash key val added-leaf?))
+            (loop [i 0 j 0]
+              (if (< i 32)
+                (if (zero? (bit-and (unsigned-bit-shift-right bitmap i) 1))
+                  (recur (inc i) j)
+                  (do (aset nodes i
+                            (if-not (nil? (aget arr j))
+                              (bitmap-indexed-node-inode-assoc EMPTY-BITMAP-NODE
+                                (+ shift 5) (hash (aget arr j)) (aget arr j) (aget arr (inc j)) added-leaf?)
+                              (aget arr (inc j))))
+                      (recur (inc i) (+ j 2))))))
+            (ArrayNode. nil (inc n) nodes))
+          (let [new-arr (make-array (* 2 (inc n)))]
+            (array-copy arr 0 new-arr 0 (* 2 idx))
+            (aset new-arr (* 2 idx) key)
+            (aset new-arr (inc (* 2 idx)) val)
+            (array-copy arr (* 2 idx) new-arr (* 2 (inc idx)) (* 2 (- n idx)))
+            (set! (.-val added-leaf?) true)
+            (BitmapIndexedNode. nil (bit-or bitmap bit) new-arr))))
+      (let [key-or-nil (aget arr (* 2 idx))
+            val-or-node (aget arr (inc (* 2 idx)))]
+        (cond (nil? key-or-nil)
+              (let [n (bitmap-indexed-node-inode-assoc val-or-node (+ shift 5) hash key val added-leaf?)]
+                (if (identical? n val-or-node)
+                  inode
+                  (BitmapIndexedNode. nil bitmap (clone-and-set arr (inc (* 2 idx)) n))))
+
+              (key-test key key-or-nil)
+              (if (identical? val val-or-node)
+                inode
+                (BitmapIndexedNode. nil bitmap (clone-and-set arr (inc (* 2 idx)) val)))
+
+              :else
+              (do (set! (.-val added-leaf?) true)
+                  (BitmapIndexedNode. nil bitmap
+                    (clone-and-set arr (* 2 idx) nil (inc (* 2 idx))
+                      (create-node5 (+ shift 5) key-or-nil val-or-node hash key val)))))))))
+
+(defn bitmap-indexed-node-inode-without [inode shift hash key]
+  (let [bit (bitpos hash shift)
+        bitmap (.-bitmap inode)
+        arr (.-arr inode)]
+    (if (zero? (bit-and bitmap bit))
+      inode
+      (let [idx (bitmap-indexed-node-index bitmap bit)
+            key-or-nil (aget arr (* 2 idx))
+            val-or-node (aget arr (inc (* 2 idx)))]
+        (cond (nil? key-or-nil)
+              (let [n (bitmap-indexed-node-inode-without val-or-node (+ shift 5) hash key)]
+                (cond (identical? n val-or-node) inode
+                      (not (nil? n)) (BitmapIndexedNode. nil bitmap (clone-and-set arr (inc (* 2 idx)) n))
+                      (== bitmap bit) nil
+                      :else (BitmapIndexedNode. nil (bit-xor bitmap bit) (remove-pair arr idx))))
+              (key-test key key-or-nil)
+              (if (== bitmap bit)
+                nil
+                (BitmapIndexedNode. nil (bit-xor bitmap bit) (remove-pair arr idx)))
+              :else inode)))))
+
+(defn bitmap-indexed-node-inode-lookup [inode shift hash key not-found]
+  (let [bit (bitpos hash shift)
+        bitmap (.-bitmap inode)
+        arr (.-arr inode)]
+    (if (zero? (bit-and bitmap bit))
+      not-found
+      (let [idx (bitmap-indexed-node-index bitmap bit)
+            key-or-nil (aget arr (* 2 idx))
+            val-or-node (aget arr (inc (* 2 idx)))]
+        (cond (nil? key-or-nil) (bitmap-indexed-node-inode-lookup val-or-node (+ shift 5) hash key not-found)
+              (key-test key key-or-nil) val-or-node
+              :else not-found)))))
+
+(defn bitmap-indexed-node-inode-find [inode shift hash key not-found]
+  (let [bit (bitpos hash shift)
+        bitmap (.-bitmap inode)
+        arr (.-arr inode)]
+    (if (zero? (bit-and bitmap bit))
+      not-found
+      (let [idx (bitmap-indexed-node-index bitmap bit)
+            key-or-nil (aget arr (* 2 idx))
+            val-or-node (aget arr (inc (* 2 idx)))]
+        (cond (nil? key-or-nil) (bitmap-indexed-node-inode-find val-or-node (+ shift 5) hash key not-found)
+              (key-test key key-or-nil) (MapEntry. key-or-nil val-or-node nil)
+              :else not-found)))))
+
+(def EMPTY-BITMAP-NODE (BitmapIndexedNode. nil 0 (make-array 0)))
+
+;; -----------------------------------------------------------------------------
+;; ArrayNode Helper Functions
+;; (ArrayNode deftype is defined earlier to enable forward references)
+;; -----------------------------------------------------------------------------
+
+(defn pack-array-node [array-node edit idx]
+  (let [arr (.-arr array-node)
+        len (alength arr)
+        new-arr (make-array (* 2 (dec (.-cnt array-node))))]
+    (loop [i 0 j 1 bitmap 0]
+      (if (< i len)
+        (if (and (not (== i idx))
+                 (not (nil? (aget arr i))))
+          (do (aset new-arr j (aget arr i))
+              (recur (inc i) (+ j 2) (bit-or bitmap (bit-shift-left 1 i))))
+          (recur (inc i) j bitmap))
+        (BitmapIndexedNode. edit bitmap new-arr)))))
+
+(defn array-node-inode-assoc [inode shift hash key val added-leaf?]
+  (let [idx (mask hash shift)
+        node (aget (.-arr inode) idx)]
+    (if (nil? node)
+      (ArrayNode. nil (inc (.-cnt inode))
+        (clone-and-set (.-arr inode) idx
+          (bitmap-indexed-node-inode-assoc EMPTY-BITMAP-NODE (+ shift 5) hash key val added-leaf?)))
+      (let [n (bitmap-indexed-node-inode-assoc node (+ shift 5) hash key val added-leaf?)]
+        (if (identical? n node)
+          inode
+          (ArrayNode. nil (.-cnt inode) (clone-and-set (.-arr inode) idx n)))))))
+
+(defn array-node-inode-without [inode shift hash key]
+  (let [idx (mask hash shift)
+        node (aget (.-arr inode) idx)]
+    (if-not (nil? node)
+      (let [n (bitmap-indexed-node-inode-without node (+ shift 5) hash key)]
+        (cond
+          (identical? n node)
+          inode
+
+          (nil? n)
+          (if (<= (.-cnt inode) 8)
+            (pack-array-node inode nil idx)
+            (ArrayNode. nil (dec (.-cnt inode)) (clone-and-set (.-arr inode) idx n)))
+
+          :else
+          (ArrayNode. nil (.-cnt inode) (clone-and-set (.-arr inode) idx n))))
+      inode)))
+
+(defn array-node-inode-lookup [inode shift hash key not-found]
+  (let [idx (mask hash shift)
+        node (aget (.-arr inode) idx)]
+    (if-not (nil? node)
+      (bitmap-indexed-node-inode-lookup node (+ shift 5) hash key not-found)
+      not-found)))
+
+(defn array-node-inode-find [inode shift hash key not-found]
+  (let [idx (mask hash shift)
+        node (aget (.-arr inode) idx)]
+    (if-not (nil? node)
+      (bitmap-indexed-node-inode-find node (+ shift 5) hash key not-found)
+      not-found)))
+
+;; -----------------------------------------------------------------------------
+;; HashCollisionNode Helper Functions
+;; (HashCollisionNode deftype is defined earlier to enable forward references)
+;; -----------------------------------------------------------------------------
+
+(defn hash-collision-node-find-index [arr cnt key]
+  (let [lim (* 2 cnt)]
+    (loop [i 0]
+      (if (< i lim)
+        (if (key-test key (aget arr i))
+          i
+          (recur (+ i 2)))
+        -1))))
+
+(defn hash-collision-node-inode-assoc [inode shift hash key val added-leaf?]
+  (if (== hash (.-collision-hash inode))
+    (let [idx (hash-collision-node-find-index (.-arr inode) (.-cnt inode) key)]
+      (if (== idx -1)
+        (let [len (* 2 (.-cnt inode))
+              new-arr (make-array (+ len 2))]
+          (array-copy (.-arr inode) 0 new-arr 0 len)
+          (aset new-arr len key)
+          (aset new-arr (inc len) val)
+          (set! (.-val added-leaf?) true)
+          (HashCollisionNode. nil (.-collision-hash inode) (inc (.-cnt inode)) new-arr))
+        (if (= (aget (.-arr inode) (inc idx)) val)
+          inode
+          (HashCollisionNode. nil (.-collision-hash inode) (.-cnt inode)
+            (clone-and-set (.-arr inode) (inc idx) val)))))
+    (bitmap-indexed-node-inode-assoc
+      (BitmapIndexedNode. nil (bitpos (.-collision-hash inode) shift) (array2 nil inode))
+      shift hash key val added-leaf?)))
+
+(defn hash-collision-node-inode-without [inode shift hash key]
+  (let [idx (hash-collision-node-find-index (.-arr inode) (.-cnt inode) key)]
+    (cond (== idx -1) inode
+          (== (.-cnt inode) 1) nil
+          :else (HashCollisionNode. nil (.-collision-hash inode) (dec (.-cnt inode))
+                  (remove-pair (.-arr inode) (quot idx 2))))))
+
+(defn hash-collision-node-inode-lookup [inode shift hash key not-found]
+  (let [idx (hash-collision-node-find-index (.-arr inode) (.-cnt inode) key)]
+    (cond (< idx 0) not-found
+          :else (aget (.-arr inode) (inc idx)))))
+
+(defn hash-collision-node-inode-find [inode shift hash key not-found]
+  (let [idx (hash-collision-node-find-index (.-arr inode) (.-cnt inode) key)]
+    (cond (< idx 0) not-found
+          :else (MapEntry. (aget (.-arr inode) idx) (aget (.-arr inode) (inc idx)) nil))))
+
+;; -----------------------------------------------------------------------------
+;; create-node helper
+;; -----------------------------------------------------------------------------
+
+;; DEVIATION: create-node uses separate 5-arg and 6-arg functions since multi-arity not supported
+(defn create-node5 [shift key1 val1 key2hash key2 val2]
+  (let [key1hash (hash key1)]
+    (if (== key1hash key2hash)
+      (HashCollisionNode. nil key1hash 2 (array4 key1 val1 key2 val2))
+      (let [added-leaf? (Box. false)
+            node1 (bitmap-indexed-node-inode-assoc EMPTY-BITMAP-NODE shift key1hash key1 val1 added-leaf?)]
+        (bitmap-indexed-node-inode-assoc node1 shift key2hash key2 val2 added-leaf?)))))
+
+(defn create-node6 [edit shift key1 val1 key2hash key2 val2]
+  (let [key1hash (hash key1)]
+    (if (== key1hash key2hash)
+      (HashCollisionNode. nil key1hash 2 (array4 key1 val1 key2 val2))
+       (let [added-leaf? (Box. false)
+             node1 (bitmap-indexed-node-inode-assoc EMPTY-BITMAP-NODE shift key1hash key1 val1 added-leaf?)]
+         (bitmap-indexed-node-inode-assoc node1 shift key2hash key2 val2 added-leaf?)))))
+
+;; -----------------------------------------------------------------------------
+;; PersistentArrayMap
+;; -----------------------------------------------------------------------------
+
+(deftype PersistentArrayMap [meta cnt arr ^:mutable __hash]
+  ICloneable
+  (-clone [_] (PersistentArrayMap. meta cnt arr __hash))
+
+  IWithMeta
+  (-with-meta [coll new-meta]
+    (if (identical? new-meta meta)
+      coll
+      (PersistentArrayMap. new-meta cnt arr __hash)))
+
+  IMeta
+  (-meta [coll] meta)
+
+  ICollection
+  (-conj [coll entry]
+    (if (vector? entry)
+      (-assoc coll (-nth entry 0) (-nth entry 1))
+      (loop [ret coll es (seq entry)]
+        (if (nil? es)
+          ret
+          (let [e (first es)]
+            (if (vector? e)
+              (recur (-assoc ret (-nth e 0) (-nth e 1))
+                     (next es))
+              (throw (Error. "conj on a map takes map entries or seqables of map entries"))))))))
+
+  IEmptyableCollection
+  (-empty [coll] (-with-meta EMPTY-ARRAY-MAP meta))
+
+  IEquiv
+  (-equiv [coll other]
+    (if (and (map? other) (not (record? other)))
+      (let [alen (alength arr)]
+        (if (== cnt (count other))
+          (loop [i 0]
+            (if (< i alen)
+              (let [v (-lookup other (aget arr i) lookup-sentinel)]
+                (if-not (identical? v lookup-sentinel)
+                  (if (= (aget arr (inc i)) v)
+                    (recur (+ i 2))
+                    false)
+                  false))
+              true))
+          false))
+      false))
+
+  IHash
+  (-hash [coll] (caching-hash coll hash-unordered-coll __hash))
+
+  ISeqable
+  ;; DEVIATION: Simplified - no PersistentArrayMapSeq yet
+  (-seq [coll]
+    (when (pos? cnt)
+      coll))
+
+  ICounted
+  (-count [coll] cnt)
+
+  ILookup
+  (-lookup [coll k]
+    (-lookup coll k nil))
+
+  (-lookup [coll k not-found]
+    (let [idx (array-map-index-of coll k)]
+      (if (== idx -1)
+        not-found
+        (aget arr (inc idx)))))
+
+  IAssociative
+  (-assoc [coll k v]
+    (let [idx (array-map-index-of coll k)]
+      (cond
+        (== idx -1)
+        (if (< cnt 8)  ;; HASHMAP-THRESHOLD
+          (let [arr (array-map-extend-kv coll k v)]
+            (PersistentArrayMap. meta (inc cnt) arr nil))
+          ;; DEVIATION: Can't use into or as-> yet, use let instead
+          (let [m (-with-meta (-assoc EMPTY-HASH-MAP k v) meta)]
+            (loop [i 0 m m]
+              (if (< i (alength arr))
+                (recur (+ i 2) (-assoc m (aget arr i) (aget arr (inc i))))
+                m))))
+
+        (identical? v (aget arr (inc idx)))
+        coll
+
+        :else
+        (let [new-arr (aclone arr)]
+          (aset new-arr (inc idx) v)
+          (PersistentArrayMap. meta cnt new-arr nil)))))
+
+  (-contains-key? [coll k]
+    (not (== (array-map-index-of coll k) -1)))
+
+  IFind
+  (-find [coll k]
+    (let [idx (array-map-index-of coll k)]
+      (when-not (== idx -1)
+        (MapEntry. (aget arr idx) (aget arr (inc idx)) nil))))
+
+  IMap
+  (-dissoc [coll k]
+    (let [idx (array-map-index-of coll k)]
+      (if (>= idx 0)
+        (let [len (alength arr)
+              new-len (- len 2)]
+          (if (zero? new-len)
+            (-empty coll)
+            (let [new-arr (make-array new-len)]
+              (loop [s 0 d 0]
+                (cond
+                  (>= s len) (PersistentArrayMap. meta (dec cnt) new-arr nil)
+                  (= k (aget arr s)) (recur (+ s 2) d)
+                  :else (do (aset new-arr d (aget arr s))
+                            (aset new-arr (inc d) (aget arr (inc s)))
+                            (recur (+ s 2) (+ d 2))))))))
+        coll)))
+
+  IKVReduce
+  (-kv-reduce [coll f init]
+    (let [len (alength arr)]
+      (loop [i 0 init init]
+        (if (< i len)
+          (let [init (f init (aget arr i) (aget arr (inc i)))]
+            (if (reduced? init)
+              (-deref init)
+              (recur (+ i 2) init)))
+          init))))
+
+  IReduce
+  (-reduce [coll f]
+    (seq-reduce f coll))
+  (-reduce [coll f start]
+    (seq-reduce f start coll))
+
+  IFn
+  (-invoke [coll k]
+    (-lookup coll k))
+
+  (-invoke [coll k not-found]
+    (-lookup coll k not-found)))
+
+(def EMPTY-ARRAY-MAP (PersistentArrayMap. nil 0 (array0) empty-unordered-hash))
+
+;; -----------------------------------------------------------------------------
+;; PersistentHashMap
+;; -----------------------------------------------------------------------------
+
+(deftype PersistentHashMap [meta cnt root ^:mutable has-nil? nil-val ^:mutable __hash]
+  ICloneable
+  (-clone [_] (PersistentHashMap. meta cnt root has-nil? nil-val __hash))
+
+  IWithMeta
+  (-with-meta [coll new-meta]
+    (if (identical? new-meta meta)
+      coll
+      (PersistentHashMap. new-meta cnt root has-nil? nil-val __hash)))
+
+  IMeta
+  (-meta [coll] meta)
+
+  ICollection
+  (-conj [coll entry]
+    (if (vector? entry)
+      (-assoc coll (-nth entry 0) (-nth entry 1))
+      (loop [ret coll es (seq entry)]
+        (if (nil? es)
+          ret
+          (let [e (first es)]
+            (if (vector? e)
+              (recur (-assoc ret (-nth e 0) (-nth e 1))
+                     (next es))
+              (throw (Error. "conj on a map takes map entries or seqables of map entries"))))))))
+
+  IEmptyableCollection
+  (-empty [coll] (-with-meta EMPTY-HASH-MAP meta))
+
+  IEquiv
+  (-equiv [coll other] (equiv-map coll other))
+
+  IHash
+  (-hash [coll] (caching-hash coll hash-unordered-coll __hash))
+
+  ISeqable
+  ;; DEVIATION: Simplified - no proper seq yet
+  (-seq [coll]
+    (when (pos? cnt)
+      coll))
+
+  ICounted
+  (-count [coll] cnt)
+
+  ILookup
+  (-lookup [coll k]
+    (-lookup coll k nil))
+
+  (-lookup [coll k not-found]
+    (cond (nil? k) (if has-nil?
+                     nil-val
+                     not-found)
+          (nil? root) not-found
+          :else (bitmap-indexed-node-inode-lookup root 0 (hash k) k not-found)))
+
+  IAssociative
+  (-assoc [coll k v]
+    (if (nil? k)
+      (if (and has-nil? (identical? v nil-val))
+        coll
+        (PersistentHashMap. meta (if has-nil? cnt (inc cnt)) root true v nil))
+      (let [added-leaf? (Box. false)
+            base-node (if (nil? root) EMPTY-BITMAP-NODE root)
+            new-root (bitmap-indexed-node-inode-assoc base-node 0 (hash k) k v added-leaf?)]
+        (if (identical? new-root root)
+          coll
+          (PersistentHashMap. meta (if (.-val added-leaf?) (inc cnt) cnt) new-root has-nil? nil-val nil)))))
+
+  (-contains-key? [coll k]
+    (cond (nil? k) has-nil?
+          (nil? root) false
+          :else (not (identical? (bitmap-indexed-node-inode-lookup root 0 (hash k) k lookup-sentinel)
+                                 lookup-sentinel))))
+
+  IFind
+  (-find [coll k]
+    (cond
+      (nil? k) (when has-nil? (MapEntry. nil nil-val nil))
+      (nil? root) nil
+      :else (bitmap-indexed-node-inode-find root 0 (hash k) k nil)))
+
+  IMap
+  (-dissoc [coll k]
+    (cond (nil? k) (if has-nil?
+                     (PersistentHashMap. meta (dec cnt) root false nil nil)
+                     coll)
+          (nil? root) coll
+          :else
+          (let [new-root (bitmap-indexed-node-inode-without root 0 (hash k) k)]
+            (if (identical? new-root root)
+              coll
+              (PersistentHashMap. meta (dec cnt) new-root has-nil? nil-val nil)))))
+
+  IKVReduce
+  (-kv-reduce [coll f init]
+    (let [init (if has-nil? (f init nil nil-val) init)]
+      (cond
+        (reduced? init) (-deref init)
+        (not (nil? root)) (unreduced (-kv-reduce root f init))
+        :else init)))
+
+  IFn
+  (-invoke [coll k]
+    (-lookup coll k))
+
+  (-invoke [coll k not-found]
+    (-lookup coll k not-found)))
+
+(def EMPTY-HASH-MAP (PersistentHashMap. nil 0 nil false nil empty-unordered-hash))
+
+;; -----------------------------------------------------------------------------
+;; Map Constructor Functions
+;; -----------------------------------------------------------------------------
+
+(defn hash-map
+  "keyval => key val
+  Returns a new hash map with supplied mappings."
+  [& keyvals]
+  (loop [in (seq keyvals) out EMPTY-HASH-MAP]
+    (if in
+      (let [k (first in)
+            in (next in)]
+        (if (nil? in)
+          (throw (Error. "hash-map requires an even number of arguments"))
+          (recur (next in) (-assoc out k (first in)))))
+      out)))
+
+(defn array-map
+  "keyval => key val
+  Returns a new array map with supplied mappings."
+  [& keyvals]
+  (let [arr (make-array (count keyvals))]
+    (loop [i 0 s (seq keyvals)]
+      (if s
+        (do
+          (aset arr i (first s))
+          (recur (inc i) (next s)))
+        (PersistentArrayMap. nil (/ (alength arr) 2) arr nil)))))
+
+;; -----------------------------------------------------------------------------
+;; Map Wrapper Functions
+;; -----------------------------------------------------------------------------
+
+(defn key
+  "Returns the key of the map entry."
+  [e]
+  (-key e))
+
+(defn val
+  "Returns the value of the map entry."
+  [e]
+  (-val e))
+
+(defn get
+  "Returns the value mapped to key, not-found or nil if key not present.
+   Note: Use (get m k) for lookup, (get m k default) for lookup with default."
+  [m k & not-found]
+  (if (nil? m)
+    (first not-found)
+    (if not-found
+      (-lookup m k (first not-found))
+      (-lookup m k))))
+
+(defn assoc
+  "assoc[iate]. When applied to a map, returns a new map of the
+   same (hashed/sorted) type, that contains the mapping of key(s) to
+   val(s). When applied to a vector, returns a new vector that
+   contains val at index."
+  [coll k v & kvs]
+  (let [ret (-assoc coll k v)]
+    (if kvs
+      (loop [ret ret kvs kvs]
+        (if kvs
+          (recur (-assoc ret (first kvs) (second kvs)) (next (next kvs)))
+          ret))
+      ret)))
+
+(defn dissoc
+  "dissoc[iate]. Returns a new map of the same (hashed/sorted) type,
+   that does not contain a mapping for key(s)."
+  [coll k & ks]
+  (if (nil? coll)
+    nil
+    (let [ret (-dissoc coll k)]
+      (if ks
+        (loop [ret ret ks ks]
+          (if ks
+            (recur (-dissoc ret (first ks)) (next ks))
+            ret))
+        ret))))
+
+(defn find
+  "Returns the map entry for key, or nil if key not present."
+  [coll k]
+  (if (nil? coll)
+    nil
+    (-find coll k)))
+
+(defn contains?
+  "Returns true if key is present in the given collection, otherwise
+   returns false."
+  [coll k]
+  (if (nil? coll)
+    false
+    (-contains-key? coll k)))
+
+(defn keys
+  "Returns a sequence of the map's keys, in the same order as (seq map)."
+  [hash-map]
+  (if (nil? hash-map)
+    nil
+    (let [s (seq hash-map)]
+      (if s
+        (loop [s s acc nil]
+          (if s
+            (recur (next s) (cons (-key (first s)) acc))
+            (reverse acc)))
+        nil))))
+
+(defn vals
+  "Returns a sequence of the map's values, in the same order as (seq map)."
+  [hash-map]
+  (if (nil? hash-map)
+    nil
+    (let [s (seq hash-map)]
+      (if s
+        (loop [s s acc nil]
+          (if s
+            (recur (next s) (cons (-val (first s)) acc))
+            (reverse acc)))
+        nil))))
+
+(defn merge
+  "Returns a map that consists of the rest of the maps conj-ed onto
+   the first. If a key occurs in more than one map, the mapping from
+   the latter (left-to-right) will be the mapping in the result."
+  [& maps]
+  (if (nil? (first maps))
+    nil
+    (loop [maps maps out (first maps)]
+      (if (next maps)
+        (let [m (second maps)]
+          (recur (next maps)
+                 (if (nil? m)
+                   out
+                   (-kv-reduce m (fn [acc k v] (-assoc acc k v)) out))))
+        out))))
+
+(defn select-keys
+  "Returns a map containing only those entries in map whose key is in keys"
+  [map keyseq]
+  (loop [s (seq keyseq) out (hash-map)]
+    (if s
+      (let [k (first s)
+            entry (find map k)]
+        (recur (next s)
+               (if entry
+                 (-assoc out k (-val entry))
+                 out)))
+      out)))
+
+(defn empty
+  "Returns an empty collection of the same category as coll."
+  [coll]
+  (if (nil? coll)
+    nil
+    (-empty coll)))
+
+(defn reduce-kv
+  "Reduces an associative collection. f should be a function of 3
+   arguments. Returns the result of applying f to init, the first key
+   and the first value in coll, then applying f to that result and the
+   2nd key and value, etc."
+  [f init coll]
+  (if (nil? coll)
+    init
+    (-kv-reduce coll f init)))
+
+(defn into
+  "Returns a new coll consisting of to-coll with all of the items of
+   from-coll conjoined."
+  [to from]
+  (if (nil? from)
+    to
+    (loop [s (seq from) out to]
+      (if s
+        (recur (next s) (conj out (first s)))
+        out))))
+
+(defn associative?
+  "Returns true if coll implements Associative"
+  [coll]
+  (if (nil? coll)
+    false
+    (or (instance? PersistentArrayMap coll)
+        (instance? PersistentHashMap coll)
+        (instance? PersistentVector coll))))

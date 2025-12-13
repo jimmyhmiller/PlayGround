@@ -50,7 +50,7 @@ pub struct Compiler {
     used_namespaces: HashMap<String, Vec<String>>,
 
     /// IR builder
-    builder: IrBuilder,
+    pub builder: IrBuilder,
 
     /// Local variable scopes (for let bindings and parameters)
     /// Each scope maps variable name → Binding (register or local slot)
@@ -94,16 +94,19 @@ impl Compiler {
             // Bootstrap *ns* var in clojure.core
             // Initially set to user namespace (since that's the default starting namespace)
             let (ns_var_ptr, _ns_var_id) = rt.allocate_var(core_ns_ptr, "*ns*", user_ns_ptr).unwrap();
-            let new_core_ns_ptr = rt.namespace_add_binding(core_ns_ptr, "*ns*", ns_var_ptr).unwrap();
+            let core_ns_ptr = rt.namespace_add_binding(core_ns_ptr, "*ns*", ns_var_ptr).unwrap();
 
             // Mark *ns* as dynamic so it can be rebound later
             rt.mark_var_dynamic(ns_var_ptr);
 
-            // Update core_ns_ptr if it changed (due to namespace re-allocation)
-            let core_ns_ptr = new_core_ns_ptr;
+            // Update namespace root after adding *ns* binding (may have reallocated)
+            rt.update_namespace_root("clojure.core", core_ns_ptr);
 
             // Bootstrap builtin functions as Vars in clojure.core
             let core_ns_ptr = rt.bootstrap_builtins(core_ns_ptr).unwrap();
+
+            // Update namespace root after bootstrap_builtins (may have reallocated many times)
+            rt.update_namespace_root("clojure.core", core_ns_ptr);
 
             (core_ns_ptr, user_ns_ptr)
         };
@@ -247,91 +250,57 @@ impl Compiler {
                 return Ok(register);
             }
 
-        // Not a local - look up as a global var
+        // Not a local - emit runtime symbol lookup
+        // This enables forward references: vars are looked up at runtime, not compile time
+
         // SAFETY: Single-threaded REPL - no concurrent access during compilation
-        let rt = unsafe { &*self.runtime.get() };
+        let rt = unsafe { &mut *self.runtime.get() };
 
-        // Determine which namespace to look in
-        let ns_ptr = if let Some(ns_name) = namespace {
-            self.namespace_registry
-                .get(ns_name)
-                .copied()
-                .ok_or_else(|| format!("Undefined namespace: {}", ns_name))?
+        // Determine namespace name
+        let ns_name = if let Some(ns) = namespace {
+            // Verify namespace exists
+            if !self.namespace_registry.contains_key(ns) {
+                return Err(format!("Undefined namespace: {}", ns));
+            }
+            ns.clone()
         } else {
-            // Try current namespace first
-            if let Some(var_ptr) = rt.namespace_lookup(self.current_namespace_ptr, name) {
-                // eprintln!("DEBUG compile_var (current ns): found var '{}' at {:x}", name, var_ptr);
-                let var_id = rt.get_var_id(var_ptr).expect("var should have var_id");
-                let result = self.builder.new_register();
-                // Check if var is dynamic at compile time
-                if rt.is_var_dynamic(var_ptr) {
-                    // Dynamic var - use trampoline for binding lookup
-                    self.builder.emit(Instruction::LoadVarDynamic(
-                        result,
-                        var_id,
-                    ));
-                } else {
-                    // Non-dynamic var - direct memory load
-                    self.builder.emit(Instruction::LoadVar(
-                        result,
-                        var_id,
-                    ));
-                }
-                return Ok(result);
-            }
-
-            // Try used namespaces
-            let current_ns_name = rt.namespace_name(self.current_namespace_ptr);
-            if let Some(used) = self.used_namespaces.get(&current_ns_name) {
-                for used_ns in used {
-                    if let Some(&used_ns_ptr) = self.namespace_registry.get(used_ns)
-                        && let Some(var_ptr) = rt.namespace_lookup(used_ns_ptr, name) {
-                            // eprintln!("DEBUG compile_var (used ns {}): found var '{}' at {:x}", used_ns, name, var_ptr);
-                            let var_id = rt.get_var_id(var_ptr).expect("var should have var_id");
-                            let result = self.builder.new_register();
-                            // Check if var is dynamic at compile time
-                            if rt.is_var_dynamic(var_ptr) {
-                                self.builder.emit(Instruction::LoadVarDynamic(
-                                    result,
-                                    var_id,
-                                ));
-                            } else {
-                                self.builder.emit(Instruction::LoadVar(
-                                    result,
-                                    var_id,
-                                ));
-                            }
-                            return Ok(result);
-                        }
-                }
-            }
-
-            return Err(format!("Undefined variable: {}", name));
+            // Use current namespace
+            rt.namespace_name(self.current_namespace_ptr)
         };
 
-        // Look up in specified namespace
-        if let Some(var_ptr) = rt.namespace_lookup(ns_ptr, name) {
-            // eprintln!("DEBUG compile_var: found var '{}' at {:x}", name, var_ptr);
-            let var_id = rt.get_var_id(var_ptr).expect("var should have var_id");
-            let result = self.builder.new_register();
-            // Check if var is dynamic at compile time
-            if rt.is_var_dynamic(var_ptr) {
-                // Dynamic var - use trampoline for binding lookup
-                self.builder.emit(Instruction::LoadVarDynamic(
-                    result,
-                    var_id,
-                ));
+        // Intern symbols for runtime lookup
+        let ns_symbol_id = rt.intern_symbol(&ns_name);
+        let name_symbol_id = rt.intern_symbol(name);
+
+        let result = self.builder.new_register();
+
+        // Check if var exists and is dynamic at compile time
+        // If var doesn't exist yet (forward reference), we can't know - assume non-dynamic
+        let is_dynamic = if let Some(&ns_ptr) = self.namespace_registry.get(&ns_name) {
+            if let Some(var_ptr) = rt.namespace_lookup(ns_ptr, name) {
+                rt.is_var_dynamic(var_ptr)
             } else {
-                // Non-dynamic var - direct memory load
-                self.builder.emit(Instruction::LoadVar(
-                    result,
-                    var_id,
-                ));
+                false  // Forward reference - assume non-dynamic
             }
-            Ok(result)
         } else {
-            Err(format!("Undefined variable: {}/{}", namespace.as_ref().unwrap(), name))
+            false
+        };
+
+        if is_dynamic {
+            self.builder.emit(Instruction::LoadVarBySymbolDynamic(
+                result,
+                ns_symbol_id,
+                name_symbol_id,
+            ));
+        } else {
+            self.builder.emit(Instruction::LoadVarBySymbol(
+                result,
+                ns_symbol_id,
+                name_symbol_id,
+            ));
         }
+
+        Ok(result)
     }
 
     /// Check if a symbol is a built-in function
@@ -340,7 +309,9 @@ impl Compiler {
                  "bit-and" | "bit-or" | "bit-xor" | "bit-not" |
                  "bit-shift-left" | "bit-shift-right" | "unsigned-bit-shift-right" |
                  "bit-shift-right-zero-fill" |  // CLJS alias for unsigned-bit-shift-right
-                 "nil?" | "number?" | "string?" | "fn?" | "identical?" | "println")
+                 "nil?" | "number?" | "string?" | "fn?" | "identical?" | "println" |
+                 "instance?" | "keyword?" | "hash-primitive" |
+                 "cons?" | "cons-first" | "cons-rest")
     }
 
     /// Compile (var symbol) - returns the Var object itself, not its value
@@ -766,56 +737,60 @@ impl Compiler {
             .unwrap_or(false);
 
         // SAFETY: Single-threaded REPL - no concurrent access during compilation
-        // IMPORTANT: Create/lookup the Var BEFORE compiling the value expression.
-        // This allows recursive functions to resolve their own name via LoadVar.
-        let (var_ptr, var_id) = unsafe {
-            let rt = &mut *self.runtime.get();
+        let rt = unsafe { &mut *self.runtime.get() };
 
-            // Check if var already exists
-            if let Some(existing_var_ptr) = rt.namespace_lookup(self.current_namespace_ptr, name) {
-                // Get var_id for existing var
-                let var_id = rt.get_var_id(existing_var_ptr).expect("existing var should have var_id");
-                (existing_var_ptr, var_id)
-            } else {
-                // Create new var with nil placeholder (7) - will be overwritten after compilation
-                let (new_var_ptr, new_var_id) = rt.allocate_var(
-                    self.current_namespace_ptr,
-                    name,
-                    7, // nil placeholder
-                ).unwrap();
+        // Get namespace name and intern symbols for runtime lookup
+        let ns_name = rt.namespace_name(self.current_namespace_ptr);
+        let ns_symbol_id = rt.intern_symbol(&ns_name);
+        let name_symbol_id = rt.intern_symbol(name);
 
-                // Mark as dynamic ONLY if metadata indicates it
-                if is_dynamic {
-                    rt.mark_var_dynamic(new_var_ptr);
-                }
-
-                // Add var to namespace BEFORE compiling value
-                // This enables recursive function references
-                let new_ns_ptr = rt
-                    .namespace_add_binding(self.current_namespace_ptr, name, new_var_ptr)
-                    .unwrap();
-
-                // Update current namespace pointer if it moved
-                // (namespace_add_binding now handles updating the GC root automatically)
-                if new_ns_ptr != self.current_namespace_ptr {
-                    self.current_namespace_ptr = new_ns_ptr;
-
-                    // Update in registry
-                    let ns_name = rt.namespace_name(new_ns_ptr);
-                    self.namespace_registry.insert(ns_name, new_ns_ptr);
-                }
-
-                (new_var_ptr, new_var_id)
+        // Create/lookup the Var BEFORE compiling the value expression.
+        // This allows recursive functions to resolve their own name.
+        // Check if var already exists
+        if let Some(existing_var_ptr) = rt.namespace_lookup(self.current_namespace_ptr, name) {
+            // Existing var - mark dynamic if needed
+            if is_dynamic {
+                rt.mark_var_dynamic(existing_var_ptr);
             }
-        };
+        } else {
+            // Create new var with nil placeholder (7) - will be overwritten after compilation
+            let (new_var_ptr, _new_var_id) = rt.allocate_var(
+                self.current_namespace_ptr,
+                name,
+                7, // nil placeholder
+            ).unwrap();
 
-        // NOW compile the value expression - recursive refs will resolve via LoadVar
+            // Mark as dynamic ONLY if metadata indicates it
+            if is_dynamic {
+                rt.mark_var_dynamic(new_var_ptr);
+            }
+
+            // Add var to namespace BEFORE compiling value
+            // This enables recursive function references
+            let new_ns_ptr = rt
+                .namespace_add_binding(self.current_namespace_ptr, name, new_var_ptr)
+                .unwrap();
+
+            // Update current namespace pointer if it moved
+            if new_ns_ptr != self.current_namespace_ptr {
+                self.current_namespace_ptr = new_ns_ptr;
+
+                // Update in registry
+                let ns_name_updated = rt.namespace_name(new_ns_ptr);
+                self.namespace_registry.insert(ns_name_updated.clone(), new_ns_ptr);
+
+                // Update the runtime's namespace root so trampolines can find it
+                rt.update_namespace_root(&ns_name_updated, new_ns_ptr);
+            }
+        }
+
+        // NOW compile the value expression - recursive refs will resolve via LoadVarBySymbol
         let value_reg = self.compile(value_expr)?;
 
-        // Emit StoreVar instruction to update the var at runtime
-        // Use var_id for GC-safe indirect access via var table
-        self.builder.emit(Instruction::StoreVar(
-            var_id,
+        // Emit StoreVarBySymbol instruction to update the var at runtime
+        self.builder.emit(Instruction::StoreVarBySymbol(
+            ns_symbol_id,
+            name_symbol_id,
             value_reg,
         ));
 
@@ -884,13 +859,12 @@ impl Compiler {
             self.used_namespaces.insert(name.to_string(), vec!["clojure.core".to_string()]);
         }
 
-        // Emit instruction to set *ns* at runtime
-        // Look up the *ns* var pointer and var_id
-        let ns_var_id = unsafe {
-            let rt = &*self.runtime.get();
-            let core_ns_ptr = *self.namespace_registry.get("clojure.core").unwrap();
-            let ns_var_ptr = rt.namespace_lookup(core_ns_ptr, "*ns*").unwrap();
-            rt.get_var_id(ns_var_ptr).expect("*ns* var should have var_id")
+        // Emit instruction to set *ns* at runtime using symbol-based lookup
+        let (core_ns_symbol_id, ns_var_symbol_id) = unsafe {
+            let rt = &mut *self.runtime.get();
+            let core_ns_id = rt.intern_symbol("clojure.core");
+            let ns_var_id = rt.intern_symbol("*ns*");
+            (core_ns_id, ns_var_id)
         };
 
         // Load the current namespace pointer as a tagged constant
@@ -900,9 +874,10 @@ impl Compiler {
             IrValue::TaggedConstant((self.current_namespace_ptr << 3) as isize)
         ));
 
-        // Store it into *ns* var
-        self.builder.emit(Instruction::StoreVar(
-            ns_var_id,
+        // Store it into *ns* var using symbol-based lookup
+        self.builder.emit(Instruction::StoreVarBySymbol(
+            core_ns_symbol_id,
+            ns_var_symbol_id,
             ns_value,
         ));
 
@@ -1271,7 +1246,6 @@ impl Compiler {
 
         // DEBUG: Print free vars for protocol methods
         if !free_vars.is_empty() {
-            eprintln!("DEBUG compile_fn: name={:?}, free_vars={:?}", name, free_vars);
         }
 
         // Step 2: Capture free variables (evaluate them in current scope)
@@ -1476,15 +1450,9 @@ impl Compiler {
         // Store the function IR for display purposes
         self.compiled_function_irs.push((name.clone(), fn_instructions.clone()));
 
-        // Get var_table_ptr for GC-safe var access in codegen
-        let var_table_ptr = unsafe {
-            let rt = &*self.runtime.get();
-            rt.var_table_ptr() as usize
-        };
-
         // Pass num_locals from the builder (includes all allocated local slots)
         let num_locals = self.builder.num_locals;
-        let compiled = Arm64CodeGen::compile_function(&fn_instructions, num_locals, reserved_exception_slots, var_table_ptr)?;
+        let compiled = Arm64CodeGen::compile_function(&fn_instructions, num_locals, reserved_exception_slots)?;
 
         // Register stack map with runtime for GC
         unsafe {
@@ -1842,6 +1810,12 @@ impl Compiler {
                     "string?" => self.compile_builtin_string_pred(args),
                     "fn?" => self.compile_builtin_fn_pred(args),
                     "identical?" => self.compile_builtin_identical(args),
+                    "instance?" => self.compile_builtin_instance_check(args),
+                    "keyword?" => self.compile_builtin_keyword_check(args),
+                    "hash-primitive" => self.compile_builtin_hash_primitive(args),
+                    "cons?" => self.compile_builtin_cons_check(args),
+                    "cons-first" => self.compile_builtin_cons_first(args),
+                    "cons-rest" => self.compile_builtin_cons_rest(args),
                     _ => unreachable!(),
                 };
             }
@@ -2481,6 +2455,126 @@ impl Compiler {
         // Compare raw tagged values - identical values have identical bit patterns
         let result = self.builder.new_register();
         self.builder.emit(Instruction::Compare(result, left, right, Condition::Equal));
+        Ok(result)
+    }
+
+    /// Compile (instance? Type obj) - check if obj is an instance of Type
+    /// Type must be a symbol that was defined via deftype
+    fn compile_builtin_instance_check(&mut self, args: &[Expr]) -> Result<IrValue, String> {
+        use crate::gc_runtime::DEFTYPE_ID_OFFSET;
+
+        if args.len() != 2 {
+            return Err(format!("instance? requires 2 arguments, got {}", args.len()));
+        }
+
+        // First argument must be a type symbol (e.g., PersistentVector)
+        let type_name = match &args[0] {
+            Expr::Var { namespace, name } => {
+                // Build fully qualified type name
+                let current_ns = self.get_current_namespace();
+                match namespace {
+                    Some(ns) => format!("{}/{}", ns, name),
+                    None => format!("{}/{}", current_ns, name),
+                }
+            }
+            _ => return Err("instance? first argument must be a type symbol".to_string()),
+        };
+
+        // Look up the type ID in the runtime
+        let full_type_id = {
+            let rt = unsafe { &*self.runtime.get() };
+            match rt.get_type_id(&type_name) {
+                Some(id) => id + DEFTYPE_ID_OFFSET,
+                None => return Err(format!("Unknown type: {}", type_name)),
+            }
+        };
+
+        // Compile the value to check
+        let value = self.compile(&args[1])?;
+        let value = self.ensure_register(value);
+
+        // Emit instance check instruction
+        let result = self.builder.new_register();
+        self.builder.emit(Instruction::InstanceCheck(result, full_type_id, value));
+        Ok(result)
+    }
+
+    /// Compile (keyword? x) - check if x is a keyword
+    fn compile_builtin_keyword_check(&mut self, args: &[Expr]) -> Result<IrValue, String> {
+        if args.len() != 1 {
+            return Err(format!("keyword? requires 1 argument, got {}", args.len()));
+        }
+
+        // Compile the value to check
+        let value = self.compile(&args[0])?;
+        let value = self.ensure_register(value);
+
+        // Call trampoline_is_keyword
+        let result = self.builder.new_register();
+        let fn_addr = crate::trampoline::trampoline_is_keyword as usize;
+        self.builder.emit(Instruction::ExternalCall(result, fn_addr, vec![value]));
+        Ok(result)
+    }
+
+    /// Compile (hash-primitive x) - hash a primitive value (keyword, string, number)
+    fn compile_builtin_hash_primitive(&mut self, args: &[Expr]) -> Result<IrValue, String> {
+        if args.len() != 1 {
+            return Err(format!("hash-primitive requires 1 argument, got {}", args.len()));
+        }
+
+        // Compile the value to hash
+        let value = self.compile(&args[0])?;
+        let value = self.ensure_register(value);
+
+        // Call trampoline_hash_value
+        let result = self.builder.new_register();
+        let fn_addr = crate::trampoline::trampoline_hash_value as usize;
+        self.builder.emit(Instruction::ExternalCall(result, fn_addr, vec![value]));
+        Ok(result)
+    }
+
+    /// Compile (cons? x) - check if x is a cons cell
+    fn compile_builtin_cons_check(&mut self, args: &[Expr]) -> Result<IrValue, String> {
+        if args.len() != 1 {
+            return Err(format!("cons? requires 1 argument, got {}", args.len()));
+        }
+
+        let value = self.compile(&args[0])?;
+        let value = self.ensure_register(value);
+
+        let result = self.builder.new_register();
+        let fn_addr = crate::trampoline::trampoline_is_cons as usize;
+        self.builder.emit(Instruction::ExternalCall(result, fn_addr, vec![value]));
+        Ok(result)
+    }
+
+    /// Compile (cons-first x) - get the first element of a cons cell
+    fn compile_builtin_cons_first(&mut self, args: &[Expr]) -> Result<IrValue, String> {
+        if args.len() != 1 {
+            return Err(format!("cons-first requires 1 argument, got {}", args.len()));
+        }
+
+        let value = self.compile(&args[0])?;
+        let value = self.ensure_register(value);
+
+        let result = self.builder.new_register();
+        let fn_addr = crate::trampoline::trampoline_cons_first as usize;
+        self.builder.emit(Instruction::ExternalCall(result, fn_addr, vec![value]));
+        Ok(result)
+    }
+
+    /// Compile (cons-rest x) - get the rest of a cons cell
+    fn compile_builtin_cons_rest(&mut self, args: &[Expr]) -> Result<IrValue, String> {
+        if args.len() != 1 {
+            return Err(format!("cons-rest requires 1 argument, got {}", args.len()));
+        }
+
+        let value = self.compile(&args[0])?;
+        let value = self.ensure_register(value);
+
+        let result = self.builder.new_register();
+        let fn_addr = crate::trampoline::trampoline_cons_rest as usize;
+        self.builder.emit(Instruction::ExternalCall(result, fn_addr, vec![value]));
         Ok(result)
     }
 

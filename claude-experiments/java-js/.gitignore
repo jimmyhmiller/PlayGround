@@ -1,6 +1,47 @@
+# Java / Maven
+target/
+*.class
+*.jar
+*.war
+*.ear
+*.log
+dependency-reduced-pom.xml
+
+# IDE
+.idea/
+*.iml
+.vscode/
+*.swp
+*.swo
+.project
+.classpath
+.settings/
+
+# Node.js
 node_modules/
 dist/
+npm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project-specific
 temp-packages/
 test-oracles/adhoc-cache/
+test-oracles/adhoc-cache-backup-test/
+benchmark-results/
+async-profiler/
+async-profiler-3.0-macos/
+
+# Benchmarks build artifacts
 benchmarks/go/esbuild/
 benchmarks/go/benchmark-go
+
+# Downloaded benchmark libraries (regenerate with benchmarks/download-real-world-libs.sh)
+benchmarks/real-world-libs/
+benchmarks/real-world-libs-es5/
+benchmarks/javascript/node_modules/
+
+# Claude
+.claude/

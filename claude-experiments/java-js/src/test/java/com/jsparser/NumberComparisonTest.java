@@ -7,14 +7,14 @@ import java.nio.file.*;
 public class NumberComparisonTest {
     @Test
     void compareNumbers() throws Exception {
-        String source = Files.readString(Path.of("test-number-cases.js"));
+        String source = Files.readString(Path.of("tests/test-number-cases.js"));
         var prog = Parser.parse(source, false);
 
         ObjectMapper m = new ObjectMapper();
         m.enable(SerializationFeature.INDENT_OUTPUT);
 
         String actualJson = m.writeValueAsString(prog);
-        String expectedJson = Files.readString(Path.of("test-number-cases-acorn.json"));
+        String expectedJson = Files.readString(Path.of("tests/test-number-cases-acorn.json"));
 
         JsonNode expected = m.readTree(expectedJson);
         JsonNode actual = m.readTree(actualJson);

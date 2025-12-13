@@ -135,19 +135,9 @@ pub enum Instruction {
 
     // Constants
     LoadConstant(IrValue, IrValue),
-    /// LoadVar(dest_reg, var_id) - load var value via var table indirection
-    /// var_id indexes into the var_table to get current var pointer (GC-safe)
-    LoadVar(IrValue, u32),
-    /// LoadVarDynamic(dest_reg, var_id) - trampoline call for ^:dynamic vars
-    /// var_id indexes into var_table to get var pointer for dynamic binding lookup
-    LoadVarDynamic(IrValue, u32),
-    /// StoreVar(var_id, value_reg) - store value to var via var table indirection
-    /// var_id indexes into var_table to get current var pointer (GC-safe)
-    StoreVar(u32, IrValue),
 
     // ========== Runtime Symbol-Based Var Access ==========
-    // These instructions look up vars by symbol name at runtime, enabling forward references.
-    // Used instead of LoadVar/StoreVar when vars may not exist at compile time.
+    // Vars are looked up by symbol name at runtime, enabling forward references.
 
     /// LoadVarBySymbol(dest, ns_symbol_id, name_symbol_id)
     /// At runtime: looks up var by namespace/name symbols via trampoline, returns value.
@@ -304,6 +294,13 @@ pub enum Instruction {
     /// RegisterProtocolMethod(type_id, protocol_id, method_index, fn_ptr)
     /// Registers a method implementation in the protocol vtable
     RegisterProtocolMethod(usize, usize, usize, IrValue),
+
+    // Type checking
+
+    /// InstanceCheck(dst, expected_type_id, value) - check if value is an instance of type
+    /// expected_type_id: full type ID (deftype ID + DEFTYPE_ID_OFFSET)
+    /// Returns tagged boolean (true if match, false otherwise)
+    InstanceCheck(IrValue, usize, IrValue),
 
     // External calls (for trampolines)
 

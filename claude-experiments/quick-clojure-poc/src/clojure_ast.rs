@@ -277,37 +277,44 @@ pub fn analyze(value: &Value) -> Result<Expr, String> {
 
         // Lists are either special forms or function calls
         Value::List(items) if !items.is_empty() => {
-            // Check if first element is a special form
+            // Check if first element is a special form or builtin macro
             if let Some(Value::Symbol(name)) = items.get(0) {
                 match name.as_str() {
+                    // ========== TRUE SPECIAL FORMS ==========
+                    // These are actual Clojure special forms that cannot be implemented as macros
                     "def" => analyze_def(items),
-                    "defn" => analyze_defn(items),
-                    "declare" => analyze_declare(items),
                     "set!" => analyze_set(items),
                     "if" => analyze_if(items),
-                    "if-not" => analyze_if_not(items),
-                    "when" => analyze_when(items),
-                    "when-not" => analyze_when_not(items),
-                    "and" => analyze_and(items),
-                    "or" => analyze_or(items),
-                    "cond" => analyze_cond(items),
                     "do" => analyze_do(items),
                     "let" => analyze_let(items),
                     "loop" => analyze_loop(items),
-                    "dotimes" => analyze_dotimes(items),
                     "recur" => analyze_recur(items),
                     "fn" => analyze_fn(items),
                     "quote" => analyze_quote(items),
-                    "ns" => analyze_ns(items),
-                    "use" => analyze_use(items),
-                    "binding" => analyze_binding(items),
                     "var" => analyze_var_ref(items),
-                    "deftype*" | "deftype" => analyze_deftype(items),
                     "throw" => analyze_throw(items),
                     "try" => analyze_try(items),
-                    "defprotocol" => analyze_defprotocol(items),
-                    "extend-type" => analyze_extend_type(items),
-                    "debugger" => analyze_debugger(items),
+
+                    // ========== BUILTIN MACROS ==========
+                    // These are macros in real Clojure but implemented here as special forms.
+                    // TODO: Replace with actual macro implementations once we have macros.
+                    "defn" => analyze_defn(items),           // (defn name [args] body) -> (def name (fn [args] body))
+                    "declare" => analyze_declare(items),     // (declare x y z) -> (def x) (def y) (def z)
+                    "if-not" => analyze_if_not(items),       // (if-not test then else) -> (if (not test) then else)
+                    "when" => analyze_when(items),           // (when test body...) -> (if test (do body...) nil)
+                    "when-not" => analyze_when_not(items),   // (when-not test body...) -> (if test nil (do body...))
+                    "and" => analyze_and(items),             // (and x y) -> (if x y false)
+                    "or" => analyze_or(items),               // (or x y) -> (if x x y)
+                    "cond" => analyze_cond(items),           // (cond test1 expr1 ...) -> nested ifs
+                    "dotimes" => analyze_dotimes(items),     // (dotimes [i n] body) -> loop
+                    "ns" => analyze_ns(items),               // namespace declaration
+                    "use" => analyze_use(items),             // (use 'ns) - deprecated, use require
+                    "binding" => analyze_binding(items),     // dynamic binding
+                    "deftype*" | "deftype" => analyze_deftype(items),  // type definition
+                    "defprotocol" => analyze_defprotocol(items),       // protocol definition
+                    "extend-type" => analyze_extend_type(items),       // extend protocol to type
+                    "debugger" => analyze_debugger(items),   // debugging helper
+
                     _ => analyze_call(items),
                 }
             } else {
