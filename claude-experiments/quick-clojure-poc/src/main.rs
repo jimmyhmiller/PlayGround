@@ -11,6 +11,7 @@ mod gc;
 mod gc_runtime;
 mod register_allocation;
 mod trampoline;
+mod builtins;
 
 use std::io::{self, Write};
 use std::sync::Arc;
@@ -646,6 +647,13 @@ fn run_expr(expr: &str, gc_always: bool) {
     let runtime = Arc::new(UnsafeCell::new(GCRuntime::new()));
     trampoline::set_runtime(runtime.clone());
 
+    // Initialize builtins
+    unsafe {
+        builtins::initialize_builtins(runtime.clone());
+        let rt = &mut *runtime.get();
+        builtins::register_builtins(rt);
+    }
+
     // Enable gc-always mode if requested
     if gc_always {
         unsafe {
@@ -657,8 +665,11 @@ fn run_expr(expr: &str, gc_always: bool) {
     // Create compiler
     let mut compiler = Compiler::new(runtime.clone());
 
-    // NOTE: Not loading clojure.core for -e mode to keep it fast
-    // Core functions like count, hash-map etc won't be available
+    // Load clojure.core first (silently)
+    if let Err(e) = load_clojure_file("src/clojure/core.clj", &mut compiler, &runtime, false) {
+        eprintln!("Error loading clojure.core: {}", e);
+        std::process::exit(1);
+    }
 
     // Parse the expression
     let val = match read(expr) {
@@ -724,6 +735,13 @@ fn run_script(filename: &str, gc_always: bool) {
     // Create runtime with GC
     let runtime = Arc::new(UnsafeCell::new(GCRuntime::new()));
     trampoline::set_runtime(runtime.clone());
+
+    // Initialize builtins
+    unsafe {
+        builtins::initialize_builtins(runtime.clone());
+        let rt = &mut *runtime.get();
+        builtins::register_builtins(rt);
+    }
 
     // Enable gc-always mode if requested
     if gc_always {
@@ -886,6 +904,19 @@ fn main() {
     // Set global runtime for trampolines
     // SAFETY: Must be called before any JIT code runs
     trampoline::set_runtime(runtime.clone());
+
+    // Initialize builtins
+    // SAFETY: Called once during initialization
+    unsafe {
+        builtins::initialize_builtins(runtime.clone());
+    }
+
+    // Register builtin functions in the runtime
+    // SAFETY: Single-threaded initialization
+    unsafe {
+        let rt = &mut *runtime.get();
+        builtins::register_builtins(rt);
+    }
 
     // Create a persistent compiler to maintain global environment across REPL iterations
     let mut repl_compiler = Compiler::new(runtime.clone());

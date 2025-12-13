@@ -283,138 +283,9 @@ impl Arm64CodeGen {
                 self.store_spill(dst_reg, dest_spill);
             }
 
-            // ========== Runtime Symbol-Based Var Access ==========
-
-            Instruction::LoadVarBySymbol(dst, ns_symbol_id, name_symbol_id) => {
-                // LoadVarBySymbol: Call trampoline to look up var by symbol at runtime
-                // Args: x0 = ns_symbol_id, x1 = name_symbol_id
-                // Returns: x0 = value (tagged)
-                let dest_spill = self.dest_spill(dst);
-                let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
-
-                // Load args: x0 = ns_symbol_id, x1 = name_symbol_id
-                self.emit_mov_imm(0, *ns_symbol_id as i64);
-                self.emit_mov_imm(1, *name_symbol_id as i64);
-
-                // Load trampoline function address into x15
-                let func_addr = crate::trampoline::trampoline_load_var_by_symbol as usize;
-                self.emit_mov_imm(15, func_addr as i64);
-
-                // Call the trampoline
-                self.emit_blr(15);
-
-                // Move result from x0 to final destination
-                if dst_reg != 0 {
-                    self.emit_mov(dst_reg, 0);
-                }
-
-                self.store_spill(dst_reg, dest_spill);
-            }
-
-            Instruction::LoadVarBySymbolDynamic(dst, ns_symbol_id, name_symbol_id) => {
-                // LoadVarBySymbolDynamic: Call trampoline with dynamic binding check
-                // Args: x0 = ns_symbol_id, x1 = name_symbol_id
-                // Returns: x0 = value (tagged)
-                let dest_spill = self.dest_spill(dst);
-                let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
-
-                // Load args
-                self.emit_mov_imm(0, *ns_symbol_id as i64);
-                self.emit_mov_imm(1, *name_symbol_id as i64);
-
-                // Load trampoline function address
-                let func_addr = crate::trampoline::trampoline_load_var_by_symbol_dynamic as usize;
-                self.emit_mov_imm(15, func_addr as i64);
-
-                // Call the trampoline
-                self.emit_blr(15);
-
-                // Move result to destination
-                if dst_reg != 0 {
-                    self.emit_mov(dst_reg, 0);
-                }
-
-                self.store_spill(dst_reg, dest_spill);
-            }
-
-            Instruction::StoreVarBySymbol(ns_symbol_id, name_symbol_id, value) => {
-                // StoreVarBySymbol: Call trampoline to store value (creates var if needed)
-                // Args: x0 = ns_symbol_id, x1 = name_symbol_id, x2 = value
-                // Returns: x0 = value
-
-                // Get value into a register first
-                let value_reg = match value {
-                    IrValue::TaggedConstant(val) => {
-                        let temp = self.allocate_temp_register();
-                        self.emit_mov_imm(temp, *val as i64);
-                        temp
-                    }
-                    IrValue::Null => {
-                        let temp = self.allocate_temp_register();
-                        self.emit_mov_imm(temp, 7);  // nil is tagged as 7
-                        temp
-                    }
-                    _ => self.get_physical_reg_for_irvalue(value, false)?
-                };
-
-                // Load args: x0 = ns_symbol_id, x1 = name_symbol_id, x2 = value
-                self.emit_mov_imm(0, *ns_symbol_id as i64);
-                self.emit_mov_imm(1, *name_symbol_id as i64);
-                if value_reg != 2 {
-                    self.emit_mov(2, value_reg);
-                }
-
-                // Load trampoline function address
-                let func_addr = crate::trampoline::trampoline_store_var_by_symbol as usize;
-                self.emit_mov_imm(15, func_addr as i64);
-
-                // Call the trampoline
-                self.emit_blr(15);
-
-                self.clear_temp_registers();
-            }
-
-            Instruction::EnsureVarBySymbol(ns_symbol_id, name_symbol_id) => {
-                // EnsureVarBySymbol: Call trampoline to ensure var exists
-                // Args: x0 = ns_symbol_id, x1 = name_symbol_id
-                // Returns: nil (we don't use it)
-
-                // Load args
-                self.emit_mov_imm(0, *ns_symbol_id as i64);
-                self.emit_mov_imm(1, *name_symbol_id as i64);
-
-                // Load trampoline function address
-                let func_addr = crate::trampoline::trampoline_ensure_var_by_symbol as usize;
-                self.emit_mov_imm(15, func_addr as i64);
-
-                // Call the trampoline
-                self.emit_blr(15);
-            }
-
-            Instruction::LoadKeyword(dst, keyword_index) => {
-                // LoadKeyword: call trampoline to intern and return keyword pointer
-                // The keyword text is already stored in runtime.keyword_constants[index]
-                // We need to call trampoline_intern_keyword(index) which returns tagged pointer
-                let dest_spill = self.dest_spill(dst);
-                let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
-
-                // Load keyword index into x0 (first argument)
-                self.emit_mov_imm(0, *keyword_index as i64);
-
-                // Load trampoline function address into x15
-                let func_addr = crate::trampoline::trampoline_intern_keyword as usize;
-                self.emit_mov_imm(15, func_addr as i64);
-
-                // Call the trampoline
-                self.emit_blr(15);
-
-                // Move result from x0 to final destination
-                if dst_reg != 0 {
-                    self.emit_mov(dst_reg, 0);
-                }
-
-                self.store_spill(dst_reg, dest_spill);
-            }
+            // Note: LoadVarBySymbol, LoadVarBySymbolDynamic, StoreVarBySymbol, EnsureVarBySymbol,
+            // and LoadKeyword have been converted to builtin function calls.
+            // They are now handled by the regular Call instruction codegen.
 
             Instruction::LoadTrue(dst) => {
                 let dest_spill = self.dest_spill(dst);
@@ -1683,8 +1554,8 @@ impl Arm64CodeGen {
                 // STEP 2: Tag-aware call logic
                 // Supports:
                 //   - Raw function pointers (tag 0b100)
-                //   - Single-arity closures (tag 0b101, type_id = 12)
-                //   - Multi-arity functions (tag 0b101, type_id = 14)
+                //   - Single-arity closures (tag 0b101, type_id = TYPE_FUNCTION)
+                //   - Multi-arity functions (tag 0b101, type_id = TYPE_MULTI_ARITY_FN)
                 let dest_spill = self.dest_spill(dst);
                 let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
 
@@ -1739,13 +1610,14 @@ impl Arm64CodeGen {
                 let type_id_reg = tag_reg;
                 self.emit_ldrb_offset(type_id_reg, closure_ptr_reg, 7);
 
-                // Check if multi-arity (type_id == 14)
-                self.emit_cmp_imm(type_id_reg, 14);
+                // Check if multi-arity (type_id == TYPE_MULTI_ARITY_FN)
+                use crate::gc_runtime::TYPE_MULTI_ARITY_FN;
+                self.emit_cmp_imm(type_id_reg, TYPE_MULTI_ARITY_FN as i64);
 
                 let is_multi_arity_label = self.new_label();
                 self.emit_branch_cond(is_multi_arity_label.clone(), 0); // 0 = EQ
 
-                // === Single-arity closure path (type_id == 12) ===
+                // === Single-arity closure path (type_id == TYPE_FUNCTION) ===
                 use crate::gc_runtime::closure_layout;
                 // code_ptr_reg already allocated from temp pool above
                 self.emit_ldr_offset(code_ptr_reg, closure_ptr_reg, closure_layout::FIELD_1_CODE_PTR as i32);
@@ -1781,7 +1653,7 @@ impl Arm64CodeGen {
                 let do_call_label = self.new_label();
                 self.emit_jump(&do_call_label);
 
-                // === Multi-arity function path (type_id == 14) ===
+                // === Multi-arity function path (type_id == TYPE_MULTI_ARITY_FN) ===
                 self.emit_label(is_multi_arity_label);
 
                 // Save fn_reg (will be x0 for the closure) and args to stack temporarily

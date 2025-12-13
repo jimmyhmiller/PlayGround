@@ -32,37 +32,28 @@ type Alloc = crate::gc::mutex_allocator::MutexAllocator<AllocImpl>;
 #[cfg(not(feature = "thread-safe"))]
 type Alloc = AllocImpl;
 
-const TYPE_ID_STRING: u8 = 2;
-const TYPE_ID_FLOAT: u8 = 3;
-const TYPE_ID_KEYWORD: u8 = 4;
-const TYPE_ID_NAMESPACE: u8 = 10;
-const TYPE_ID_VAR: u8 = 11;
-const TYPE_ID_FUNCTION: u8 = 12;
-const TYPE_ID_DEFTYPE: u8 = 13;
-const TYPE_ID_MULTI_ARITY_FN: u8 = 14;
-const TYPE_ID_CONS: u8 = 15;
-const TYPE_ID_ARRAY: u8 = 16;
+// ========== Type IDs ==========
+// Used both in heap object headers (cast to u8) and for protocol dispatch (as usize).
+// Tagged primitives (int, bool, nil) don't have heap headers but use these IDs for dispatch.
 
-// ========== Built-in Type IDs for Protocol Dispatch ==========
-// These are used by the protocol vtable to dispatch on type.
-// Tagged primitives use their tag-derived ID, heap objects use these.
-
-pub const BUILTIN_TYPE_NIL: usize = 0;
-pub const BUILTIN_TYPE_BOOL: usize = 1;
-pub const BUILTIN_TYPE_INT: usize = 2;
-pub const BUILTIN_TYPE_FLOAT: usize = 3;
-pub const BUILTIN_TYPE_STRING: usize = 4;
-pub const BUILTIN_TYPE_KEYWORD: usize = 5;
-pub const BUILTIN_TYPE_SYMBOL: usize = 6;
-pub const BUILTIN_TYPE_LIST: usize = 7;
-pub const BUILTIN_TYPE_VECTOR: usize = 8;
-pub const BUILTIN_TYPE_MAP: usize = 9;
-pub const BUILTIN_TYPE_SET: usize = 10;
-pub const BUILTIN_TYPE_FUNCTION: usize = 11;
-pub const BUILTIN_TYPE_CLOSURE: usize = 12;
-pub const BUILTIN_TYPE_NAMESPACE: usize = 13;
-pub const BUILTIN_TYPE_VAR: usize = 14;
-pub const BUILTIN_TYPE_ARRAY: usize = 15;
+pub const TYPE_NIL: usize = 0;
+pub const TYPE_BOOL: usize = 1;
+pub const TYPE_INT: usize = 2;
+pub const TYPE_FLOAT: usize = 3;
+pub const TYPE_STRING: usize = 4;
+pub const TYPE_KEYWORD: usize = 5;
+pub const TYPE_SYMBOL: usize = 6;
+pub const TYPE_LIST: usize = 7;        // PersistentList / Cons
+pub const TYPE_VECTOR: usize = 8;
+pub const TYPE_MAP: usize = 9;
+pub const TYPE_SET: usize = 10;
+pub const TYPE_FUNCTION: usize = 11;
+pub const TYPE_CLOSURE: usize = 12;
+pub const TYPE_NAMESPACE: usize = 13;
+pub const TYPE_VAR: usize = 14;
+pub const TYPE_ARRAY: usize = 15;
+pub const TYPE_MULTI_ARITY_FN: usize = 16;
+pub const TYPE_DEFTYPE: usize = 17;    // Base for deftypes, actual ID = TYPE_DEFTYPE + type_data
 
 /// Offset added to deftype IDs to avoid collision with built-in types
 pub const DEFTYPE_ID_OFFSET: usize = 100;
@@ -449,7 +440,7 @@ impl GCRuntime {
         let bytes = s.as_bytes();
         let words = bytes.len().div_ceil(8);
 
-        let ptr = self.allocate_raw(words, TYPE_ID_STRING)?;
+        let ptr = self.allocate_raw(words, TYPE_STRING as u8)?;
 
         let mut heap_obj = HeapObject::from_untagged(ptr as *const u8);
 
@@ -473,7 +464,7 @@ impl GCRuntime {
     /// pointer would lose precision (we only have 61 bits after the 3-bit tag)
     pub fn allocate_float(&mut self, value: f64) -> Result<usize, String> {
         // Allocate 1 word for the float value (8 bytes)
-        let ptr = self.allocate_raw(1, TYPE_ID_FLOAT)?;
+        let ptr = self.allocate_raw(1, TYPE_FLOAT as u8)?;
 
         let mut heap_obj = HeapObject::from_untagged(ptr as *const u8);
 
@@ -564,7 +555,7 @@ impl GCRuntime {
         let text_words = bytes.len().div_ceil(8);
         let total_words = 1 + text_words;
 
-        let ptr = self.allocate_raw(total_words, TYPE_ID_KEYWORD)?;
+        let ptr = self.allocate_raw(total_words, TYPE_KEYWORD as u8)?;
 
         let mut heap_obj = HeapObject::from_untagged(ptr as *const u8);
 
@@ -628,7 +619,7 @@ impl GCRuntime {
 
         // Verify it's a keyword
         let header = heap_obj.get_header();
-        if header.type_id != TYPE_ID_KEYWORD {
+        if header.type_id != TYPE_KEYWORD as u8 {
             return Err(format!("Not a keyword: type_id={}", header.type_id));
         }
 
@@ -652,7 +643,7 @@ impl GCRuntime {
 
         let ptr = self.untag_heap_object(tagged);
         let heap_obj = HeapObject::from_untagged(ptr as *const u8);
-        heap_obj.get_header().type_id == TYPE_ID_KEYWORD
+        heap_obj.get_header().type_id == TYPE_KEYWORD as u8
     }
 
     /// Get the keyword constant text by index (for trampolines)
@@ -683,7 +674,7 @@ impl GCRuntime {
     pub fn allocate_namespace(&mut self, name: &str) -> Result<usize, String> {
         let name_ptr = self.allocate_string(name)?;
         let size_words = 1;
-        let ns_ptr = self.allocate_raw(size_words, TYPE_ID_NAMESPACE)?;
+        let ns_ptr = self.allocate_raw(size_words, TYPE_NAMESPACE as u8)?;
 
         let heap_obj = HeapObject::from_untagged(ns_ptr as *const u8);
         heap_obj.write_field(0, name_ptr as usize);
@@ -725,7 +716,7 @@ impl GCRuntime {
 
         // Reallocate with +2 words - this might also trigger GC!
         let new_size = current_size + 2;
-        let new_ns_ptr = self.allocate_raw(new_size, TYPE_ID_NAMESPACE)?;
+        let new_ns_ptr = self.allocate_raw(new_size, TYPE_NAMESPACE as u8)?;
 
         // CRITICAL: Re-fetch the source namespace pointer AFTER allocations
         // GC may have relocated it, so we need to use the namespace root to find
@@ -960,7 +951,7 @@ impl GCRuntime {
     ) -> Result<(usize, u32), String> {
         let symbol_ptr = self.allocate_string(symbol_name)?;
 
-        let var_ptr = self.allocate_raw(3, TYPE_ID_VAR)?;
+        let var_ptr = self.allocate_raw(3, TYPE_VAR as u8)?;
         let heap_obj = HeapObject::from_untagged(var_ptr as *const u8);
         heap_obj.write_field(0, ns_ptr);
         heap_obj.write_field(1, symbol_ptr);
@@ -1114,7 +1105,7 @@ impl GCRuntime {
         };
 
         let size_words = 3 + closure_values.len();
-        let fn_ptr = self.allocate_raw(size_words, TYPE_ID_FUNCTION)?;
+        let fn_ptr = self.allocate_raw(size_words, TYPE_FUNCTION as u8)?;
         let heap_obj = HeapObject::from_untagged(fn_ptr as *const u8);
 
         heap_obj.write_field(closure_layout::FIELD_NAME_PTR, name_ptr);
@@ -1188,7 +1179,7 @@ impl GCRuntime {
 
         let arity_count = arities.len();
         let size_words = multi_arity_layout::total_size_words(arity_count, closure_values.len());
-        let fn_ptr = self.allocate_raw(size_words, TYPE_ID_MULTI_ARITY_FN)?;
+        let fn_ptr = self.allocate_raw(size_words, TYPE_MULTI_ARITY_FN as u8)?;
         let heap_obj = HeapObject::from_untagged(fn_ptr as *const u8);
 
         // Write header fields
@@ -1228,7 +1219,7 @@ impl GCRuntime {
     pub fn is_multi_arity_function(&self, fn_ptr: usize) -> bool {
         let untagged = self.untag_closure(fn_ptr);
         let heap_obj = HeapObject::from_untagged(untagged as *const u8);
-        heap_obj.get_header().type_id == TYPE_ID_MULTI_ARITY_FN
+        heap_obj.get_header().type_id == TYPE_MULTI_ARITY_FN as u8
     }
 
     /// Look up the code pointer for a given argument count in a multi-arity function
@@ -1298,7 +1289,7 @@ impl GCRuntime {
 
     /// Allocate a cons cell (head, tail)
     pub fn allocate_cons(&mut self, head: usize, tail: usize) -> Result<usize, String> {
-        let cons_ptr = self.allocate_raw(cons_layout::SIZE_WORDS, TYPE_ID_CONS)?;
+        let cons_ptr = self.allocate_raw(cons_layout::SIZE_WORDS, TYPE_LIST as u8)?;
         let heap_obj = HeapObject::from_untagged(cons_ptr as *const u8);
 
         heap_obj.write_field(cons_layout::FIELD_HEAD, head);
@@ -1329,7 +1320,7 @@ impl GCRuntime {
         }
         let untagged = self.untag_heap_object(value);
         let heap_obj = HeapObject::from_untagged(untagged as *const u8);
-        heap_obj.get_header().type_id == TYPE_ID_CONS
+        heap_obj.get_header().type_id == TYPE_LIST as u8
     }
 
     /// Build a list from a slice of values (right-to-left cons)
@@ -1349,7 +1340,7 @@ impl GCRuntime {
     /// All elements are initialized to nil
     pub fn allocate_array(&mut self, length: usize) -> Result<usize, String> {
         let size_words = array_layout::total_size_words(length);
-        let arr_ptr = self.allocate_raw(size_words, TYPE_ID_ARRAY)?;
+        let arr_ptr = self.allocate_raw(size_words, TYPE_ARRAY as u8)?;
         let heap_obj = HeapObject::from_untagged(arr_ptr as *const u8);
 
         // Write length as tagged integer (so GC doesn't try to trace it as a pointer)
@@ -1409,7 +1400,7 @@ impl GCRuntime {
         }
         let untagged = self.untag_heap_object(value);
         let heap_obj = HeapObject::from_untagged(untagged as *const u8);
-        heap_obj.get_header().type_id == TYPE_ID_ARRAY
+        heap_obj.get_header().type_id == TYPE_ARRAY as u8
     }
 
     /// Clone an array (allocates a new array with same contents)
@@ -1424,6 +1415,31 @@ impl GCRuntime {
         }
 
         Ok(new_arr)
+    }
+
+    // ========== IndexedSeq Support (for variadic args) ==========
+
+    /// Create an IndexedSeq wrapping an array of values
+    /// Used by trampoline_collect_rest_args for variadic function arguments
+    /// Returns nil if values is empty, otherwise an IndexedSeq
+    pub fn allocate_indexed_seq(&mut self, values: &[usize]) -> Result<usize, String> {
+        if values.is_empty() {
+            return Ok(7); // nil
+        }
+
+        // Allocate and fill array with values
+        let arr = self.allocate_array(values.len())?;
+        for (i, &value) in values.iter().enumerate() {
+            self.array_set(arr, i, value)?;
+        }
+
+        // Look up IndexedSeq type ID
+        let indexed_seq_type_id = self.get_type_id("clojure.core/IndexedSeq")
+            .ok_or_else(|| "IndexedSeq type not registered".to_string())?;
+
+        // Create IndexedSeq instance with fields: [arr, i=0, meta=nil]
+        let field_values = vec![arr, 0usize, 7usize]; // arr, i=0 (tagged int), meta=nil
+        self.allocate_type_instance(indexed_seq_type_id, field_values)
     }
 
     // ========== DefType Methods ==========
@@ -1475,7 +1491,7 @@ impl GCRuntime {
         }
 
         let size_words = field_values.len();
-        let obj_ptr = self.allocate_raw(size_words, TYPE_ID_DEFTYPE)?;
+        let obj_ptr = self.allocate_raw(size_words, TYPE_DEFTYPE as u8)?;
         let mut heap_obj = HeapObject::from_untagged(obj_ptr as *const u8);
 
         // Store type_id in header's type_data field
@@ -1575,8 +1591,8 @@ impl GCRuntime {
 
         // Compute tagged pointer based on type
         let tagged_ptr = match type_id {
-            TYPE_ID_STRING => self.tag_string(address),
-            TYPE_ID_FUNCTION => self.tag_closure(address),
+            t if t == TYPE_STRING as u8 => self.tag_string(address),
+            t if t == TYPE_FUNCTION as u8 => self.tag_closure(address),
             _ => self.tag_heap_object(address),
         };
 
@@ -1654,17 +1670,17 @@ impl GCRuntime {
             BuiltInTypes::HeapObject => {
                 let untagged = value >> 3;
                 let obj = HeapObject::from_untagged(untagged as *const u8);
-                let type_id = obj.get_type_id() as u8;
-                match type_id {
-                    TYPE_ID_NAMESPACE => {
+                let type_id = obj.get_type_id();
+                match type_id as usize {
+                    TYPE_NAMESPACE => {
                         let name = self.namespace_name(value);
                         format!("#<ns:{}>", name)
                     }
-                    TYPE_ID_VAR => {
+                    TYPE_VAR => {
                         let (ns, sym) = self.var_info(value);
                         format!("#'{}/{}", ns, sym)
                     }
-                    TYPE_ID_DEFTYPE => {
+                    TYPE_DEFTYPE => {
                         let type_data = obj.get_header().type_data as usize;
                         if let Some(def) = self.get_type_def(type_data) {
                             format!("#<{}@{:x}>", def.name, untagged)
@@ -1672,18 +1688,18 @@ impl GCRuntime {
                             format!("#<deftype@{:x}>", untagged)
                         }
                     }
-                    TYPE_ID_CONS => {
+                    TYPE_LIST => {
                         // Format cons cells as a list
                         self.format_list(value)
                     }
-                    TYPE_ID_KEYWORD => {
+                    TYPE_KEYWORD => {
                         // Format keyword with colon prefix
                         match self.get_keyword_text(value) {
                             Ok(text) => format!(":{}", text),
                             Err(_) => format!("#<keyword@{:x}>", untagged),
                         }
                     }
-                    TYPE_ID_ARRAY => {
+                    TYPE_ARRAY => {
                         let len = self.array_length(value);
                         if len == 0 {
                             "#<array[]>".to_string()
@@ -1731,9 +1747,9 @@ impl GCRuntime {
 
             let untagged = current >> 3;
             let obj = HeapObject::from_untagged(untagged as *const u8);
-            let type_id = obj.get_type_id() as u8;
+            let type_id = obj.get_type_id();
 
-            if type_id != TYPE_ID_CONS {
+            if type_id as usize != TYPE_LIST {
                 // Improper list - add dot notation
                 items.push(format!(". {}", self.format_value(current)));
                 break;
@@ -1932,31 +1948,26 @@ impl GCRuntime {
         let tag = value & 0b111;
 
         match tag {
-            0b000 => BUILTIN_TYPE_INT,      // Integer
-            0b001 => BUILTIN_TYPE_FLOAT,    // Float
-            0b010 => BUILTIN_TYPE_STRING,   // String (could be keyword/symbol too)
-            0b011 => BUILTIN_TYPE_BOOL,     // Bool
-            0b100 => BUILTIN_TYPE_FUNCTION, // Function
-            0b101 => BUILTIN_TYPE_CLOSURE,  // Closure
+            0b000 => TYPE_INT,      // Integer
+            0b001 => TYPE_FLOAT,    // Float
+            0b010 => TYPE_STRING,   // String (could be keyword/symbol too)
+            0b011 => TYPE_BOOL,     // Bool
+            0b100 => TYPE_FUNCTION, // Function
+            0b101 => TYPE_CLOSURE,  // Closure
             0b110 => {
-                // HeapObject - need to check type_id in header
+                // HeapObject - read type_id directly from header
                 let untagged = value >> 3;
                 let heap_obj = HeapObject::from_untagged(untagged as *const u8);
                 let header = heap_obj.get_header();
 
-                match header.type_id {
-                    TYPE_ID_NAMESPACE => BUILTIN_TYPE_NAMESPACE,
-                    TYPE_ID_VAR => BUILTIN_TYPE_VAR,
-                    TYPE_ID_KEYWORD => BUILTIN_TYPE_KEYWORD,
-                    TYPE_ID_DEFTYPE => {
-                        // For deftypes, use type_data + offset to get unique type_id
-                        header.type_data as usize + DEFTYPE_ID_OFFSET
-                    }
-                    // TODO: Add vector, map, list, set when implemented as heap objects
-                    _ => 0, // Unknown type
+                if header.type_id as usize == TYPE_DEFTYPE {
+                    // For deftypes, use type_data + offset to get unique type_id
+                    header.type_data as usize + DEFTYPE_ID_OFFSET
+                } else {
+                    header.type_id as usize
                 }
             }
-            0b111 => BUILTIN_TYPE_NIL,      // Nil
+            0b111 => TYPE_NIL,      // Nil
             _ => unreachable!(),
         }
     }
@@ -1977,21 +1988,22 @@ impl GCRuntime {
     /// Get the name of a built-in type ID (for error messages)
     pub fn builtin_type_name(type_id: usize) -> &'static str {
         match type_id {
-            BUILTIN_TYPE_NIL => "nil",
-            BUILTIN_TYPE_BOOL => "Boolean",
-            BUILTIN_TYPE_INT => "Long",
-            BUILTIN_TYPE_FLOAT => "Double",
-            BUILTIN_TYPE_STRING => "String",
-            BUILTIN_TYPE_KEYWORD => "Keyword",
-            BUILTIN_TYPE_SYMBOL => "Symbol",
-            BUILTIN_TYPE_LIST => "PersistentList",
-            BUILTIN_TYPE_VECTOR => "PersistentVector",
-            BUILTIN_TYPE_MAP => "PersistentHashMap",
-            BUILTIN_TYPE_SET => "PersistentHashSet",
-            BUILTIN_TYPE_FUNCTION => "Function",
-            BUILTIN_TYPE_CLOSURE => "Closure",
-            BUILTIN_TYPE_NAMESPACE => "Namespace",
-            BUILTIN_TYPE_VAR => "Var",
+            TYPE_NIL => "nil",
+            TYPE_BOOL => "Boolean",
+            TYPE_INT => "Long",
+            TYPE_FLOAT => "Double",
+            TYPE_STRING => "String",
+            TYPE_KEYWORD => "Keyword",
+            TYPE_SYMBOL => "Symbol",
+            TYPE_LIST => "PersistentList",
+            TYPE_VECTOR => "PersistentVector",
+            TYPE_MAP => "PersistentHashMap",
+            TYPE_SET => "PersistentHashSet",
+            TYPE_FUNCTION => "Function",
+            TYPE_CLOSURE => "Closure",
+            TYPE_NAMESPACE => "Namespace",
+            TYPE_VAR => "Var",
+            TYPE_ARRAY => "Array",
             _ if type_id >= DEFTYPE_ID_OFFSET => "deftype",
             _ => "unknown",
         }

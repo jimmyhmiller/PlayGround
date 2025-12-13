@@ -925,15 +925,15 @@ pub extern "C" fn trampoline_allocate_multi_arity_fn(
     }
 }
 
-/// Trampoline: Collect rest arguments into a list
+/// Trampoline: Collect rest arguments into an IndexedSeq
 ///
 /// ARM64 Calling Convention:
 /// - Args: x0 = stack_pointer (JIT frame pointer for GC)
 ///         x1 = pointer to args array on stack (excess args after fixed params)
 ///         x2 = count of excess arguments
-/// - Returns: x0 = tagged list (cons cells) or nil
+/// - Returns: x0 = tagged IndexedSeq wrapping an Array, or nil if empty
 ///
-/// Builds a list from right to left using cons cells.
+/// Creates an IndexedSeq (like ClojureScript) wrapping a mutable array.
 #[unsafe(no_mangle)]
 pub extern "C" fn trampoline_collect_rest_args(
     stack_pointer: usize,
@@ -954,11 +954,11 @@ pub extern "C" fn trampoline_collect_rest_args(
         // Read args from pointer
         let args_slice = std::slice::from_raw_parts(args_ptr, count);
 
-        // Build list from the values
-        match rt.build_list(args_slice) {
-            Ok(list) => list,
+        // Create IndexedSeq wrapping an array of the values
+        match rt.allocate_indexed_seq(args_slice) {
+            Ok(indexed_seq) => indexed_seq,
             Err(msg) => {
-                eprintln!("Error building rest args list: {}", msg);
+                eprintln!("Error building rest args IndexedSeq: {}", msg);
                 7 // nil on error
             }
         }
@@ -1412,7 +1412,7 @@ pub extern "C" fn trampoline_aclone(stack_pointer: usize, arr_ptr: usize) -> usi
 /// - Returns: x0 = hash value (tagged integer)
 #[unsafe(no_mangle)]
 pub extern "C" fn trampoline_hash_value(value: usize) -> usize {
-    use crate::gc_runtime::BUILTIN_TYPE_KEYWORD;
+    use crate::gc_runtime::TYPE_KEYWORD;
     use crate::gc::types::{BuiltInTypes, HeapObject};
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
@@ -1430,7 +1430,7 @@ pub extern "C" fn trampoline_hash_value(value: usize) -> usize {
                 // Integer - use the untagged value as the hash (already fits)
                 BuiltInTypes::untag(value)
             }
-            id if id == BUILTIN_TYPE_KEYWORD => {
+            id if id == TYPE_KEYWORD => {
                 // Keyword - hash based on its pointer value (keywords are interned)
                 // Use a simple multiplicative hash that's deterministic and fast
                 // Mask to 60 bits (isize::MAX >> 3) to fit in tagged integer
@@ -1467,14 +1467,14 @@ pub extern "C" fn trampoline_hash_value(value: usize) -> usize {
 /// - Returns: x0 = true (0b01011) or false (0b00011)
 #[unsafe(no_mangle)]
 pub extern "C" fn trampoline_is_keyword(value: usize) -> usize {
-    use crate::gc_runtime::BUILTIN_TYPE_KEYWORD;
+    use crate::gc_runtime::TYPE_KEYWORD;
 
     unsafe {
         let runtime_ptr = std::ptr::addr_of!(RUNTIME);
         let rt = &*(*runtime_ptr).as_ref().unwrap().get();
 
         let type_id = rt.get_type_id_for_value(value);
-        if type_id == BUILTIN_TYPE_KEYWORD {
+        if type_id == TYPE_KEYWORD {
             11 // true
         } else {
             3 // false

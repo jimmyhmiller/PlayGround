@@ -209,21 +209,13 @@ impl LinearScan {
             // Note: Untag is handled above with the other dst/src instructions
 
             Instruction::LoadConstant(dst, _)
-            | Instruction::LoadVarBySymbol(dst, _, _)
-            | Instruction::LoadVarBySymbolDynamic(dst, _, _)
             | Instruction::LoadTrue(dst)
             | Instruction::LoadFalse(dst) => {
                 if let IrValue::Register(r) = dst { regs.push(*r); }
             }
 
-            Instruction::StoreVarBySymbol(_, _, value) => {
-                // StoreVar only uses the value register (var_id/symbol_ids are u32, not registers)
-                if let IrValue::Register(r) = value { regs.push(*r); }
-            }
-
-            Instruction::EnsureVarBySymbol(_, _) => {
-                // No registers used
-            }
+            // Note: LoadVarBySymbol, LoadVarBySymbolDynamic, StoreVarBySymbol, EnsureVarBySymbol,
+            // and LoadKeyword are now builtin function calls handled by Call instruction
 
             Instruction::Assign(dst, src) => {
                 if let IrValue::Register(r) = dst { regs.push(*r); }
@@ -355,9 +347,7 @@ impl LinearScan {
                 }
             }
 
-            Instruction::LoadKeyword(dst, _index) => {
-                if let IrValue::Register(r) = dst { regs.push(*r); }
-            }
+            // Note: LoadKeyword is now a builtin function call handled by Call instruction
 
             Instruction::PushExceptionHandler(_label, _slot) => {
                 // No registers - uses pre-allocated stack slot
@@ -640,21 +630,13 @@ impl LinearScan {
             }
 
             Instruction::LoadConstant(dst, _)
-            | Instruction::LoadVarBySymbol(dst, _, _)
-            | Instruction::LoadVarBySymbolDynamic(dst, _, _)
             | Instruction::LoadTrue(dst)
             | Instruction::LoadFalse(dst) => {
                 replace(dst);
             }
 
-            Instruction::StoreVarBySymbol(_, _, value) => {
-                // symbol_ids are u32, only value needs register replacement
-                replace(value);
-            }
-
-            Instruction::EnsureVarBySymbol(_, _) => {
-                // No registers to replace
-            }
+            // Note: LoadVarBySymbol, LoadVarBySymbolDynamic, StoreVarBySymbol, EnsureVarBySymbol,
+            // and LoadKeyword are now builtin function calls handled by Call instruction
 
             Instruction::Assign(dst, src) => {
                 replace(dst);
@@ -786,9 +768,7 @@ impl LinearScan {
                 }
             }
 
-            Instruction::LoadKeyword(dst, _index) => {
-                replace(dst);
-            }
+            // Note: LoadKeyword is now a builtin function call handled by Call instruction
 
             Instruction::PushExceptionHandler(_label, _slot) => {
                 // No registers - uses pre-allocated stack slot
@@ -1077,21 +1057,13 @@ impl LinearScan {
             }
 
             Instruction::LoadConstant(dst, _)
-            | Instruction::LoadVarBySymbol(dst, _, _)
-            | Instruction::LoadVarBySymbolDynamic(dst, _, _)
             | Instruction::LoadTrue(dst)
             | Instruction::LoadFalse(dst) => {
                 replace(dst);
             }
 
-            Instruction::StoreVarBySymbol(_, _, value) => {
-                // symbol_ids are u32, only value needs register replacement
-                replace(value);
-            }
-
-            Instruction::EnsureVarBySymbol(_, _) => {
-                // No registers to replace
-            }
+            // Note: LoadVarBySymbol, LoadVarBySymbolDynamic, StoreVarBySymbol, EnsureVarBySymbol,
+            // and LoadKeyword are now builtin function calls handled by Call instruction
 
             Instruction::Assign(dst, src) => {
                 replace(dst);
@@ -1223,9 +1195,7 @@ impl LinearScan {
                 }
             }
 
-            Instruction::LoadKeyword(dst, _index) => {
-                replace(dst);
-            }
+            // Note: LoadKeyword is now a builtin function call handled by Call instruction
 
             Instruction::PushExceptionHandler(_label, _slot) => {
                 // No registers - uses pre-allocated stack slot

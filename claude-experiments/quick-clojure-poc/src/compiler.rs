@@ -237,8 +237,9 @@ impl Compiler {
                 let rt = unsafe { &mut *self.runtime.get() };
                 let keyword_index = rt.add_keyword(text.clone());
 
-                // Emit LoadKeyword instruction - actual allocation happens at runtime
-                self.builder.emit(Instruction::LoadKeyword(result, keyword_index));
+                // Call load-keyword builtin - actual allocation happens at runtime
+                let index_reg = self.builder.assign_new(IrValue::TaggedConstant((keyword_index << 3) as isize));
+                return self.call_builtin("load-keyword", vec![index_reg]);
             }
             _ => {
                 return Err(format!("Literal type not yet supported: {:?}", value));
@@ -279,8 +280,6 @@ impl Compiler {
         let ns_symbol_id = rt.intern_symbol(&ns_name);
         let name_symbol_id = rt.intern_symbol(name);
 
-        let result = self.builder.new_register();
-
         // Check if var exists and is dynamic at compile time
         // If var doesn't exist yet (forward reference), we can't know - assume non-dynamic
         let is_dynamic = if let Some(&ns_ptr) = self.namespace_registry.get(&ns_name) {
@@ -293,21 +292,17 @@ impl Compiler {
             false
         };
 
-        if is_dynamic {
-            self.builder.emit(Instruction::LoadVarBySymbolDynamic(
-                result,
-                ns_symbol_id,
-                name_symbol_id,
-            ));
+        // Call builtin function to load var value
+        let builtin_name = if is_dynamic {
+            "load-var-by-symbol-dynamic"
         } else {
-            self.builder.emit(Instruction::LoadVarBySymbol(
-                result,
-                ns_symbol_id,
-                name_symbol_id,
-            ));
-        }
+            "load-var-by-symbol"
+        };
 
-        Ok(result)
+        let ns_sym_reg = self.builder.assign_new(IrValue::TaggedConstant(((ns_symbol_id << 3) as isize)));
+        let name_sym_reg = self.builder.assign_new(IrValue::TaggedConstant(((name_symbol_id << 3) as isize)));
+
+        self.call_builtin(builtin_name, vec![ns_sym_reg, name_sym_reg])
     }
 
     /// Check if a symbol is a built-in function
@@ -662,17 +657,18 @@ impl Compiler {
 
         // Fall back to built-in types
         match type_name {
-            "nil" | "Nil" => Ok(BUILTIN_TYPE_NIL),
-            "Boolean" | "bool" => Ok(BUILTIN_TYPE_BOOL),
-            "Long" | "Integer" | "int" => Ok(BUILTIN_TYPE_INT),
-            "Double" | "Float" | "float" => Ok(BUILTIN_TYPE_FLOAT),
-            "String" => Ok(BUILTIN_TYPE_STRING),
-            "Keyword" => Ok(BUILTIN_TYPE_KEYWORD),
-            "Symbol" => Ok(BUILTIN_TYPE_SYMBOL),
-            "PersistentList" | "List" => Ok(BUILTIN_TYPE_LIST),
-            "PersistentVector" | "Vector" => Ok(BUILTIN_TYPE_VECTOR),
-            "PersistentHashMap" | "Map" => Ok(BUILTIN_TYPE_MAP),
-            "PersistentHashSet" | "Set" => Ok(BUILTIN_TYPE_SET),
+            "nil" | "Nil" => Ok(TYPE_NIL),
+            "Boolean" | "bool" => Ok(TYPE_BOOL),
+            "Long" | "Integer" | "int" => Ok(TYPE_INT),
+            "Double" | "Float" | "float" => Ok(TYPE_FLOAT),
+            "String" => Ok(TYPE_STRING),
+            "Keyword" => Ok(TYPE_KEYWORD),
+            "Symbol" => Ok(TYPE_SYMBOL),
+            "PersistentList" | "List" => Ok(TYPE_LIST),
+            "PersistentVector" | "Vector" => Ok(TYPE_VECTOR),
+            "PersistentHashMap" | "Map" => Ok(TYPE_MAP),
+            "PersistentHashSet" | "Set" => Ok(TYPE_SET),
+            "Array" => Ok(TYPE_ARRAY),
             _ => Err(format!("Unknown type: {}", type_name)),
         }
     }
@@ -791,15 +787,13 @@ impl Compiler {
             }
         }
 
-        // NOW compile the value expression - recursive refs will resolve via LoadVarBySymbol
+        // NOW compile the value expression - recursive refs will resolve via load-var-by-symbol builtin
         let value_reg = self.compile(value_expr)?;
 
-        // Emit StoreVarBySymbol instruction to update the var at runtime
-        self.builder.emit(Instruction::StoreVarBySymbol(
-            ns_symbol_id,
-            name_symbol_id,
-            value_reg,
-        ));
+        // Call store-var-by-symbol builtin to update the var at runtime
+        let ns_sym_reg = self.builder.assign_new(IrValue::TaggedConstant(((ns_symbol_id << 3) as isize)));
+        let name_sym_reg = self.builder.assign_new(IrValue::TaggedConstant(((name_symbol_id << 3) as isize)));
+        self.call_builtin("store-var-by-symbol", vec![ns_sym_reg, name_sym_reg, value_reg])?;
 
         // def returns the value
         Ok(value_reg)
@@ -882,11 +876,9 @@ impl Compiler {
         ));
 
         // Store it into *ns* var using symbol-based lookup
-        self.builder.emit(Instruction::StoreVarBySymbol(
-            core_ns_symbol_id,
-            ns_var_symbol_id,
-            ns_value,
-        ));
+        let core_ns_reg = self.builder.assign_new(IrValue::TaggedConstant(((core_ns_symbol_id << 3) as isize)));
+        let ns_var_reg = self.builder.assign_new(IrValue::TaggedConstant(((ns_var_symbol_id << 3) as isize)));
+        self.call_builtin("store-var-by-symbol", vec![core_ns_reg, ns_var_reg, ns_value])?;
 
         // Return the namespace pointer (like the value of the ns form)
         Ok(ns_value)
@@ -1242,6 +1234,37 @@ impl Compiler {
         // Look up the var
         rt.namespace_lookup(ns_ptr, name)
             .ok_or_else(|| format!("Var not found: {}", name))
+    }
+
+    /// Call a builtin function by name
+    /// Gets the function pointer directly from the builtin registry and emits a Call instruction.
+    /// Returns the result register.
+    fn call_builtin(&mut self, builtin_name: &str, args: Vec<IrValue>) -> Result<IrValue, String> {
+        // Get the function pointer directly from the builtin registry
+        let function_ptr = crate::builtins::get_builtin_descriptors()
+            .into_iter()
+            .find(|desc| desc.name.ends_with(builtin_name))
+            .ok_or_else(|| format!("Unknown builtin: {}", builtin_name))?
+            .function_ptr;
+
+        // Tag the function pointer (tag 0b100 for function pointers)
+        let tagged_fn_ptr = (function_ptr << 3) | 0b100;
+
+        // Load the function pointer into a register (required by codegen)
+        let fn_ptr_reg = self.builder.assign_new(IrValue::TaggedConstant(tagged_fn_ptr as isize));
+
+        // Ensure all args are in registers (convert constants if needed)
+        // This is important: constants in codegen use temp registers which can be
+        // clobbered by internal Call computation. By using assign_new here,
+        // we ensure proper register allocation.
+        let args: Vec<_> = args.into_iter()
+            .map(|v| self.builder.assign_new(v))
+            .collect();
+
+        // Emit a Call instruction with the builtin function pointer
+        let result = self.builder.new_register();
+        self.builder.emit(Instruction::Call(result, fn_ptr_reg, args));
+        Ok(result)
     }
 
     fn compile_fn(&mut self, name: &Option<String>, arities: &[crate::value::FnArity]) -> Result<IrValue, String> {

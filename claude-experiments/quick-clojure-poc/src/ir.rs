@@ -136,26 +136,9 @@ pub enum Instruction {
     // Constants
     LoadConstant(IrValue, IrValue),
 
-    // ========== Runtime Symbol-Based Var Access ==========
-    // Vars are looked up by symbol name at runtime, enabling forward references.
-
-    /// LoadVarBySymbol(dest, ns_symbol_id, name_symbol_id)
-    /// At runtime: looks up var by namespace/name symbols via trampoline, returns value.
-    /// Throws "Unable to resolve symbol" if var doesn't exist.
-    LoadVarBySymbol(IrValue, u32, u32),
-
-    /// LoadVarBySymbolDynamic(dest, ns_symbol_id, name_symbol_id)
-    /// Same as LoadVarBySymbol but checks dynamic bindings first.
-    LoadVarBySymbolDynamic(IrValue, u32, u32),
-
-    /// StoreVarBySymbol(ns_symbol_id, name_symbol_id, value)
-    /// At runtime: creates var if needed, stores value. Used by def/defn.
-    StoreVarBySymbol(u32, u32, IrValue),
-
-    /// EnsureVarBySymbol(ns_symbol_id, name_symbol_id)
-    /// At runtime: creates var with unbound placeholder if doesn't exist.
-    /// Used at start of def to enable recursive references.
-    EnsureVarBySymbol(u32, u32),
+    // Note: LoadVarBySymbol, LoadVarBySymbolDynamic, StoreVarBySymbol, and EnsureVarBySymbol
+    // have been converted to builtin function calls (runtime.builtin/load-var-by-symbol, etc.)
+    // See builtins.rs for implementations.
 
     LoadTrue(IrValue),
     LoadFalse(IrValue),
@@ -255,10 +238,8 @@ pub enum Instruction {
     /// values is a vector of tagged values to print (space-separated)
     Println(IrValue, Vec<IrValue>),
 
-    // Keyword literals
-    /// LoadKeyword(dst, keyword_index) - load/intern keyword constant
-    /// At runtime, calls intern_keyword_runtime to get the tagged keyword pointer
-    LoadKeyword(IrValue, usize),
+    // Note: LoadKeyword has been converted to a builtin function call (runtime.builtin/load-keyword)
+    // See builtins.rs for implementation.
 
     // Exception handling
     /// PushExceptionHandler(catch_label, exception_slot_index) - setup exception handler

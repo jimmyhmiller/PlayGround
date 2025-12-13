@@ -492,32 +492,25 @@
   (fn [coll]
     (if (nil? coll)
       nil
-      (if (cons? coll)
-        coll  ;; cons cells are their own seq
-        (-seq coll)))))
+      (-seq coll))))
 
 (def first
   (fn [coll]
     (if (nil? coll)
       nil
-      (if (cons? coll)
-        (cons-first coll)
-        (let [s (seq coll)]
-          (if (nil? s)
-            nil
-            (-first s)))))))
+      (let [s (seq coll)]
+        (if (nil? s)
+          nil
+          (-first s))))))
 
 (def next
   (fn [coll]
     (if (nil? coll)
       nil
-      (if (cons? coll)
-        (let [rest (cons-rest coll)]
-          (if (nil? rest) nil rest))
-        (let [s (seq coll)]
-          (if (nil? s)
-            nil
-            (-next s)))))))
+      (let [s (seq coll)]
+        (if (nil? s)
+          nil
+          (-next s))))))
 
 ;; =============================================================================
 ;; Hashing Infrastructure
@@ -794,13 +787,118 @@
   [x]
   (if x false true))
 
+;; =============================================================================
+;; Error Type (needed before IndexedSeq)
+;; =============================================================================
+
+(deftype Error [message])
+
+;; =============================================================================
+;; IndexedSeq - Wrapper for variadic arguments (like ClojureScript)
+;; =============================================================================
+
+(deftype* IndexedSeq [arr i meta])
+
+(extend-type IndexedSeq
+  ISeqable
+  (-seq [this]
+    (if (< (.-i this) (alength (.-arr this)))
+      this
+      nil))
+
+  ISeq
+  (-first [this]
+    (aget (.-arr this) (.-i this)))
+  (-rest [this]
+    (if (< (+ (.-i this) 1) (alength (.-arr this)))
+      (IndexedSeq. (.-arr this) (+ (.-i this) 1) nil)
+      EMPTY-LIST))
+
+  INext
+  (-next [this]
+    (if (< (+ (.-i this) 1) (alength (.-arr this)))
+      (IndexedSeq. (.-arr this) (+ (.-i this) 1) nil)
+      nil))
+
+  ICounted
+  (-count [this]
+    (- (alength (.-arr this)) (.-i this)))
+
+  IIndexed
+  (-nth [this n]
+    (let [idx (+ (.-i this) n)]
+      (if (and (<= 0 idx) (< idx (alength (.-arr this))))
+        (aget (.-arr this) idx)
+        (throw (Error. "Index out of bounds")))))
+  (-nth [this n not-found]
+    (let [idx (+ (.-i this) n)]
+      (if (and (<= 0 idx) (< idx (alength (.-arr this))))
+        (aget (.-arr this) idx)
+        not-found)))
+
+  ICollection
+  (-conj [this o]
+    ;; conj on IndexedSeq creates a list
+    (cons o this))
+
+  IEmptyableCollection
+  (-empty [this] EMPTY-LIST)
+
+  IEquiv
+  (-equiv [this other]
+    (equiv-sequential this other))
+
+  IHash
+  (-hash [this]
+    (hash-ordered-coll this))
+
+  IReduce
+  (-reduce [this f]
+    (let [arr (.-arr this)
+          len (alength arr)
+          i (.-i this)]
+      (if (< i len)
+        (loop [acc (aget arr i) idx (+ i 1)]
+          (if (< idx len)
+            (let [acc (f acc (aget arr idx))]
+              (if (reduced? acc)
+                (-deref acc)
+                (recur acc (+ idx 1))))
+            acc))
+        (f))))
+  (-reduce [this f start]
+    (let [arr (.-arr this)
+          len (alength arr)]
+      (loop [acc start idx (.-i this)]
+        (if (< idx len)
+          (let [acc (f acc (aget arr idx))]
+            (if (reduced? acc)
+              (-deref acc)
+              (recur acc (+ idx 1))))
+          acc))))
+
+  IMeta
+  (-meta [this] (.-meta this))
+
+  IWithMeta
+  (-with-meta [this new-meta]
+    (if (identical? new-meta (.-meta this))
+      this
+      (IndexedSeq. (.-arr this) (.-i this) new-meta))))
+
+;; Helper to create IndexedSeq from array (used by trampoline)
+(defn indexed-seq
+  "Create an IndexedSeq from an array, starting at index i."
+  ([arr] (indexed-seq arr 0))
+  ([arr i]
+   (if (< i (alength arr))
+     (IndexedSeq. arr i nil)
+     nil)))
+
 (defn list
   "Creates a new list containing the items."
   [& items]
   items)
-
-;; DEVIATION: Our Error type instead of js/Error
-(deftype Error [message])
 
 ;; =============================================================================
 ;; VERBATIM FROM CLOJURESCRIPT - PersistentVector
@@ -1395,13 +1493,25 @@
         (nil? (aget arr i)) i
         :else (recur (+ i 2))))))
 
-;; DEVIATION: No keyword support yet, so this is a stub
+;; Keywords are interned in this implementation, so identical? works
 (defn array-index-of-keyword? [arr k]
-  -1)
+  (let [len (alength arr)]
+    (loop [i 0]
+      (cond
+        (<= len i) -1
+        (and (keyword? (aget arr i))
+             (identical? k (aget arr i))) i
+        :else (recur (+ i 2))))))
 
-;; DEVIATION: No symbol support yet, so this is a stub
+;; Symbols are interned in this implementation, so identical? works
 (defn array-index-of-symbol? [arr k]
-  -1)
+  (let [len (alength arr)]
+    (loop [i 0]
+      (cond
+        (<= len i) -1
+        (and (symbol? (aget arr i))
+             (identical? k (aget arr i))) i
+        :else (recur (+ i 2))))))
 
 (defn array-index-of-identical? [arr k]
   (let [len (alength arr)]
@@ -2009,7 +2119,9 @@
       (if (and has-nil? (identical? v nil-val))
         coll
         (PersistentHashMap. meta (if has-nil? cnt (inc cnt)) root true v nil))
-      (let [added-leaf? (Box. false)
+      (let [_ (println "here" k v)
+            added-leaf? (Box. false)
+            _ (println "here" k v)
             base-node (if (nil? root) EMPTY-BITMAP-NODE root)
             new-root (bitmap-indexed-node-inode-assoc base-node 0 (hash k) k v added-leaf?)]
         (if (identical? new-root root)

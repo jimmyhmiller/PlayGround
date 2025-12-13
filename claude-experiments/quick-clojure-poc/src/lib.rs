@@ -13,3 +13,4 @@ pub mod gc;
 pub mod gc_runtime;
 pub mod register_allocation;
 pub mod trampoline;
+pub mod builtins;
