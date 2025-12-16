@@ -964,6 +964,11 @@
         val
         not-found))))
 
+;; Factory function for MapEntry (needed for closures that can't resolve deftype constructors)
+(defn make-map-entry [k v]
+  "Creates a MapEntry with the given key and value."
+  (MapEntry. k v nil))
+
 ;; DEVIATION: array functions - individual functions for each arity
 ;; Since multi-arity defn is not fully supported, we use separate functions
 
@@ -1395,9 +1400,10 @@
 (defn bit-count
   "Counts the number of bits set in n"
   [v]
-  (let [v (- v (bit-and (bit-shift-right v 1) 0x55555555))
-        v (+ (bit-and v 0x33333333) (bit-and (bit-shift-right v 2) 0x33333333))]
-    (bit-shift-right (* (bit-and (+ v (bit-shift-right v 4)) 0xF0F0F0F) 0x1010101) 24)))
+  ;; SWAR algorithm for 64-bit popcount
+  (let [v (- v (bit-and (bit-shift-right v 1) 0x5555555555555555))
+        v (+ (bit-and v 0x3333333333333333) (bit-and (bit-shift-right v 2) 0x3333333333333333))]
+    (bit-shift-right (* (bit-and (+ v (bit-shift-right v 4)) 0x0F0F0F0F0F0F0F0F) 0x0101010101010101) 56)))
 
 (defn unreduced
   "If x is reduced?, returns (deref x), else returns x"
@@ -1907,6 +1913,22 @@
          (bitmap-indexed-node-inode-assoc node1 shift key2hash key2 val2 added-leaf?)))))
 
 ;; -----------------------------------------------------------------------------
+;; Map seq helper (must come before map types that use it)
+;; -----------------------------------------------------------------------------
+
+;; Helper closure that builds entry and conses it
+(defn -build-entry-and-cons [make-entry-fn]
+  "Returns a reducer function that builds map entries."
+  (fn [acc k v]
+    (cons (make-entry-fn k v) acc)))
+
+;; Helper to build a list of MapEntry from a map using kv-reduce
+;; This is eager but simple - builds the full list upfront
+(defn -map-to-entry-list [m]
+  "Converts a map to a list of MapEntry objects using kv-reduce."
+  (-kv-reduce m (-build-entry-and-cons make-map-entry) nil))
+
+;; -----------------------------------------------------------------------------
 ;; PersistentArrayMap
 ;; -----------------------------------------------------------------------------
 
@@ -1960,10 +1982,10 @@
   (-hash [coll] (caching-hash coll hash-unordered-coll __hash))
 
   ISeqable
-  ;; DEVIATION: Simplified - no PersistentArrayMapSeq yet
+  ;; DEVIATION: Builds eager list of MapEntry via kv-reduce
   (-seq [coll]
     (when (pos? cnt)
-      coll))
+      (-map-to-entry-list coll)))
 
   ICounted
   (-count [coll] cnt)
@@ -2094,10 +2116,10 @@
   (-hash [coll] (caching-hash coll hash-unordered-coll __hash))
 
   ISeqable
-  ;; DEVIATION: Simplified - no proper seq yet
+  ;; DEVIATION: Builds eager list of MapEntry via kv-reduce
   (-seq [coll]
     (when (pos? cnt)
-      coll))
+      (-map-to-entry-list coll)))
 
   ICounted
   (-count [coll] cnt)
@@ -2119,9 +2141,7 @@
       (if (and has-nil? (identical? v nil-val))
         coll
         (PersistentHashMap. meta (if has-nil? cnt (inc cnt)) root true v nil))
-      (let [_ (println "here" k v)
-            added-leaf? (Box. false)
-            _ (println "here" k v)
+      (let [added-leaf? (Box. false)
             base-node (if (nil? root) EMPTY-BITMAP-NODE root)
             new-root (bitmap-indexed-node-inode-assoc base-node 0 (hash k) k v added-leaf?)]
         (if (identical? new-root root)
@@ -2357,3 +2377,45 @@
     (or (instance? PersistentArrayMap coll)
         (instance? PersistentHashMap coll)
         (instance? PersistentVector coll))))
+
+;; =============================================================================
+;; I/O Functions (like Beagle's pattern - variadic wrappers around builtins)
+;; =============================================================================
+
+(defn print
+  "Prints the object(s) to stdout. print and println produce output for
+   human consumption. Returns nil."
+  [& args]
+  (let [s (seq args)]
+    (if (nil? s)
+      nil
+      (do
+        ;; Print first item without leading space
+        (_print (first s))
+        ;; Print remaining items with leading space
+        (loop [s (next s)]
+          (if (nil? s)
+            nil
+            (do
+              (_print-space)
+              (_print (first s))
+              (recur (next s)))))))))
+
+(defn println
+  "Same as print followed by (newline). Returns nil."
+  [& args]
+  (let [s (seq args)]
+    (if (nil? s)
+      (_newline)
+      (do
+        ;; Print first item without leading space
+        (_print (first s))
+        ;; Print remaining items with leading space
+        (loop [s (next s)]
+          (if (nil? s)
+            nil
+            (do
+              (_print-space)
+              (_print (first s))
+              (recur (next s)))))
+        (_newline)))))

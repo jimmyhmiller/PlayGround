@@ -1506,6 +1506,42 @@ impl GCRuntime {
         Ok(self.tag_heap_object(obj_ptr))
     }
 
+    /// Allocate a deftype instance on the heap without writing fields.
+    /// Returns UNTAGGED pointer. Caller is responsible for:
+    /// 1. Writing field values using HeapStore at offsets 1, 2, 3, ... (after header)
+    /// 2. Tagging the pointer with HeapObject tag (0b110)
+    ///
+    /// This is used by the refactored MakeType compilation which emits
+    /// HeapStore instructions for each field instead of passing an array.
+    pub fn allocate_type_object_raw(
+        &mut self,
+        type_id: usize,
+        field_count: usize,
+    ) -> Result<usize, String> {
+        // Validate type exists
+        let type_def = self.type_registry.get(type_id)
+            .ok_or_else(|| format!("Unknown type_id: {}", type_id))?;
+
+        if field_count != type_def.fields.len() {
+            return Err(format!(
+                "Type {} expects {} fields, got {}",
+                type_def.name, type_def.fields.len(), field_count
+            ));
+        }
+
+        // Allocate raw heap space
+        let obj_ptr = self.allocate_raw(field_count, TYPE_DEFTYPE as u8)?;
+        let mut heap_obj = HeapObject::from_untagged(obj_ptr as *const u8);
+
+        // Store type_id in header's type_data field
+        let mut header = heap_obj.get_header();
+        header.type_data = type_id as u32;
+        heap_obj.write_header_direct(header);
+
+        // Return UNTAGGED pointer - caller will write fields and tag
+        Ok(obj_ptr)
+    }
+
     /// Read a field from a deftype instance
     pub fn read_type_field(&self, obj_ptr: usize, field_index: usize) -> usize {
         let untagged = self.untag_heap_object(obj_ptr);
@@ -1651,7 +1687,11 @@ impl GCRuntime {
     pub fn format_value(&self, value: usize) -> String {
         let kind = BuiltInTypes::get_kind(value);
         match kind {
-            BuiltInTypes::Int => format!("{}", (value as i64) >> 3),
+            // Untag by shifting right 3 bits
+            // Use unsigned shift to avoid sign extension for large positive values
+            // Note: This means negative numbers will display as large positive values,
+            // but this is preferable to positive numbers displaying as negative
+            BuiltInTypes::Int => format!("{}", value >> 3),
             BuiltInTypes::Bool => {
                 if value == 11 { "true".to_string() }
                 else if value == 3 { "false".to_string() }

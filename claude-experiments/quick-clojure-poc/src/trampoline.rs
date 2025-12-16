@@ -647,6 +647,142 @@ pub extern "C" fn trampoline_println(count: usize, values_ptr: *const usize) -> 
     }
 }
 
+/// Trampoline: Print values with register-based argument passing
+///
+/// REFACTORED: This version takes values directly in registers instead of on the stack.
+/// This allows the compiler to emit ExternalCall instead of the complex Println instruction.
+///
+/// ARM64 Calling Convention:
+/// - Args: x0 = count (0-7), x1-x7 = values (unused args can be anything)
+/// - Returns: x0 = nil (0b111)
+///
+/// For more than 7 values, fall back to multiple calls or the legacy stack-based approach.
+#[unsafe(no_mangle)]
+pub extern "C" fn trampoline_println_regs(
+    count: usize,
+    v0: usize,
+    v1: usize,
+    v2: usize,
+    v3: usize,
+    v4: usize,
+    v5: usize,
+    v6: usize,
+) -> usize {
+    unsafe {
+        let runtime_ptr = std::ptr::addr_of!(RUNTIME);
+        let rt = &*(*runtime_ptr).as_ref().unwrap().get();
+
+        let values = [v0, v1, v2, v3, v4, v5, v6];
+
+        // Print each value, space-separated
+        for i in 0..count.min(7) {
+            if i > 0 {
+                print!(" ");
+            }
+            let val = values[i];
+            let s = rt.format_value(val);
+            // format_value wraps strings in quotes, but println should print raw strings
+            let kind = crate::gc::types::BuiltInTypes::get_kind(val);
+            if kind == crate::gc::types::BuiltInTypes::String && s.starts_with('"') && s.ends_with('"') && s.len() >= 2 {
+                print!("{}", &s[1..s.len()-1]);
+            } else {
+                print!("{}", s);
+            }
+        }
+        println!();
+
+        7 // nil
+    }
+}
+
+/// Trampoline: Print single value with newline
+///
+/// This implements the _println builtin (like Beagle's pattern).
+/// Takes a single tagged value and prints it followed by a newline.
+///
+/// ARM64 Calling Convention:
+/// - Args: x0 = tagged value to print
+/// - Returns: x0 = nil (0b111)
+#[unsafe(no_mangle)]
+pub extern "C" fn trampoline_println_value(value: usize) -> usize {
+    unsafe {
+        let runtime_ptr = std::ptr::addr_of!(RUNTIME);
+        let rt = &*(*runtime_ptr).as_ref().unwrap().get();
+
+        // Use runtime's value_to_string for proper formatting
+        let s = rt.format_value(value);
+        // format_value wraps strings in quotes, but println should print raw strings
+        // Check if it's a string and unwrap
+        let kind = crate::gc::types::BuiltInTypes::get_kind(value);
+        if kind == crate::gc::types::BuiltInTypes::String && s.starts_with('"') && s.ends_with('"') && s.len() >= 2 {
+            println!("{}", &s[1..s.len()-1]);
+        } else {
+            println!("{}", s);
+        }
+
+        7 // nil
+    }
+}
+
+/// Trampoline: Print single value without newline
+///
+/// This implements the _print builtin (like Beagle's pattern).
+/// Takes a single tagged value and prints it.
+///
+/// ARM64 Calling Convention:
+/// - Args: x0 = tagged value to print
+/// - Returns: x0 = nil (0b111)
+#[unsafe(no_mangle)]
+pub extern "C" fn trampoline_print_value(value: usize) -> usize {
+    unsafe {
+        let runtime_ptr = std::ptr::addr_of!(RUNTIME);
+        let rt = &*(*runtime_ptr).as_ref().unwrap().get();
+
+        // Use runtime's value_to_string for proper formatting
+        let s = rt.format_value(value);
+        // format_value wraps strings in quotes, but print should print raw strings
+        // Check if it's a string and unwrap
+        let kind = crate::gc::types::BuiltInTypes::get_kind(value);
+        if kind == crate::gc::types::BuiltInTypes::String && s.starts_with('"') && s.ends_with('"') && s.len() >= 2 {
+            print!("{}", &s[1..s.len()-1]);
+        } else {
+            print!("{}", s);
+        }
+
+        // Flush stdout to ensure output appears immediately
+        use std::io::Write;
+        let _ = std::io::stdout().flush();
+
+        7 // nil
+    }
+}
+
+/// Trampoline: Print newline only
+///
+/// This implements _newline builtin for when println is called with no args.
+///
+/// ARM64 Calling Convention:
+/// - Args: none
+/// - Returns: x0 = nil (0b111)
+#[unsafe(no_mangle)]
+pub extern "C" fn trampoline_newline() -> usize {
+    println!();
+    7 // nil
+}
+
+/// Trampoline: Print space
+///
+/// This implements _print_space builtin for separating values.
+///
+/// ARM64 Calling Convention:
+/// - Args: none
+/// - Returns: x0 = nil (0b111)
+#[unsafe(no_mangle)]
+pub extern "C" fn trampoline_print_space() -> usize {
+    print!(" ");
+    7 // nil
+}
+
 /// Trampoline: Allocate function object
 ///
 /// ARM64 Calling Convention:
@@ -776,6 +912,41 @@ pub extern "C" fn trampoline_allocate_type(
     }
 }
 
+/// Trampoline: Allocate deftype instance WITHOUT writing fields
+///
+/// ARM64 Calling Convention:
+/// - Args: x0 = stack_pointer (JIT frame pointer for GC), x1 = type_id, x2 = field_count
+/// - Returns: x0 = UNTAGGED pointer to allocated object
+///
+/// This is used by the refactored MakeType compilation. The caller is responsible for:
+/// 1. Writing field values using HeapStore instructions at offsets 1, 2, 3, ... (after 8-byte header)
+/// 2. Tagging the result pointer with HeapObject tag (0b110) using Tag instruction
+///
+/// The trampoline allocates space, writes the header with type_id, and initializes
+/// all fields to nil. The JIT code then overwrites fields with actual values.
+#[unsafe(no_mangle)]
+pub extern "C" fn trampoline_allocate_type_object_raw(
+    stack_pointer: usize,
+    type_id: usize,
+    field_count: usize,
+) -> usize {
+    unsafe {
+        let runtime_ptr = std::ptr::addr_of!(RUNTIME);
+        let rt = &mut *(*runtime_ptr).as_ref().unwrap().get();
+
+        // GC before allocation if gc_always is enabled
+        rt.maybe_gc_before_alloc(stack_pointer);
+
+        match rt.allocate_type_object_raw(type_id, field_count) {
+            Ok(obj_ptr) => obj_ptr,
+            Err(msg) => {
+                eprintln!("Error allocating type object: {}", msg);
+                0 // Return null pointer on error (not nil - this is untagged!)
+            }
+        }
+    }
+}
+
 /// Trampoline: Load field from deftype instance by field index
 ///
 /// ARM64 Calling Convention:
@@ -853,6 +1024,76 @@ pub extern "C" fn trampoline_load_type_field_by_name(
             Ok(value) => value,
             Err(msg) => {
                 eprintln!("Error loading field: {}", msg);
+                7 // nil
+            }
+        }
+    }
+}
+
+/// Trampoline: Load field by symbol ID (REFACTORED version)
+///
+/// This avoids the stack-based string passing of trampoline_load_type_field_by_name.
+/// The field name is pre-interned as a symbol at compile time, and its ID is passed directly.
+///
+/// ARM64 Calling Convention:
+/// - Args: x0 = instance pointer (tagged), x1 = field_name_symbol_id (untagged symbol index)
+/// - Returns: x0 = field value (tagged)
+#[unsafe(no_mangle)]
+pub extern "C" fn trampoline_load_type_field_by_symbol(
+    obj_ptr: usize,
+    field_symbol_id: usize,
+) -> usize {
+    unsafe {
+        let runtime_ptr = std::ptr::addr_of!(RUNTIME);
+        let rt = &*(*runtime_ptr).as_ref().unwrap().get();
+
+        // Get field name from symbol table
+        let field_name = match rt.get_symbol(field_symbol_id as u32) {
+            Some(s) => s,
+            None => {
+                eprintln!("Error: Unknown symbol ID {} for field access", field_symbol_id);
+                return 7; // nil
+            }
+        };
+
+        match rt.load_type_field_by_name(obj_ptr, field_name) {
+            Ok(value) => value,
+            Err(msg) => {
+                eprintln!("Error loading field: {}", msg);
+                7 // nil
+            }
+        }
+    }
+}
+
+/// Trampoline: Store field by symbol ID (REFACTORED version)
+///
+/// ARM64 Calling Convention:
+/// - Args: x0 = instance pointer (tagged), x1 = field_name_symbol_id, x2 = value
+/// - Returns: x0 = value (the stored value)
+#[unsafe(no_mangle)]
+pub extern "C" fn trampoline_store_type_field_by_symbol(
+    obj_ptr: usize,
+    field_symbol_id: usize,
+    value: usize,
+) -> usize {
+    unsafe {
+        let runtime_ptr = std::ptr::addr_of!(RUNTIME);
+        let rt = &mut *(*runtime_ptr).as_ref().unwrap().get();
+
+        // Get field name from symbol table
+        let field_name = match rt.get_symbol(field_symbol_id as u32) {
+            Some(s) => s.to_string(), // Clone because we need mutable borrow below
+            None => {
+                eprintln!("Error: Unknown symbol ID {} for field store", field_symbol_id);
+                return 7; // nil
+            }
+        };
+
+        match rt.store_type_field_by_name(obj_ptr, &field_name, value) {
+            Ok(v) => v,
+            Err(msg) => {
+                eprintln!("Error storing field: {}", msg);
                 7 // nil
             }
         }

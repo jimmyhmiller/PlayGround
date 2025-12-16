@@ -278,6 +278,14 @@ impl Arm64CodeGen {
                         // nil: 0b111 = 7
                         self.emit_mov_imm(dst_reg, 7);
                     }
+                    IrValue::RawConstant(c) => {
+                        // Raw (untagged) constant - used for type IDs, field counts, etc.
+                        self.emit_mov_imm(dst_reg, *c);
+                    }
+                    IrValue::FramePointer => {
+                        // FramePointer (x29) - copy to dst register
+                        self.emit_mov(dst_reg, 29);
+                    }
                     _ => return Err(format!("Invalid constant: {:?}", value)),
                 }
                 self.store_spill(dst_reg, dest_spill);
@@ -309,9 +317,10 @@ impl Arm64CodeGen {
                 // Handle TaggedConstant: compute untagged value at compile time
                 match src {
                     IrValue::TaggedConstant(val) => {
-                        // Untag: arithmetic right shift by 3
-                        let untagged = (*val as i64) >> 3;
-                        self.emit_mov_imm(dst_reg, untagged);
+                        // Untag: logical right shift by 3 (no sign extension)
+                        // Use unsigned shift to avoid sign extension for large integers
+                        let untagged = (*val as u64) >> 3;
+                        self.emit_mov_imm(dst_reg, untagged as i64);
                     }
                     IrValue::Null => {
                         // nil >> 3 = 0
@@ -319,31 +328,67 @@ impl Arm64CodeGen {
                     }
                     _ => {
                         let src_reg = self.get_physical_reg_for_irvalue(src, false)?;
-                        // Untag: arithmetic right shift by 3
-                        self.emit_asr_imm(dst_reg, src_reg, 3);
+                        // Untag: logical right shift by 3 (no sign extension)
+                        // Using LSR instead of ASR prevents sign extension for large integers
+                        self.emit_lsr_imm(dst_reg, src_reg, 3);
                     }
                 }
                 self.store_spill(dst_reg, dest_spill);
             }
 
-            Instruction::Tag(dst, src, _tag) => {
+            Instruction::Tag(dst, src, tag) => {
                 let dest_spill = self.dest_spill(dst);
                 let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
-                // Handle TaggedConstant: this shouldn't normally happen but handle it
-                match src {
-                    IrValue::TaggedConstant(val) => {
-                        // Tag: left shift by 3 (int tag is 000)
+
+                // Check if tag is a RawConstant specifying a non-zero tag (e.g., heap object tag 0b110)
+                // If so, we OR with the tag. Otherwise, we shift left by 3 (integer tagging).
+                let tag_value: Option<u64> = match tag {
+                    IrValue::RawConstant(t) if *t != 0 => Some(*t as u64),
+                    IrValue::Register(_) => None, // Tag is in a register, will OR dynamically
+                    _ => None, // Zero tag or TaggedConstant - use shift
+                };
+
+                match (src, tag_value) {
+                    // TaggedConstant with explicit tag: shift then OR
+                    (IrValue::TaggedConstant(val), Some(t)) => {
+                        let tagged = ((*val as u64) << 3) | t;
+                        self.emit_mov_imm(dst_reg, tagged as i64);
+                    }
+                    // TaggedConstant without explicit tag: just shift
+                    (IrValue::TaggedConstant(val), None) => {
                         let tagged = (*val as i64) << 3;
                         self.emit_mov_imm(dst_reg, tagged);
                     }
-                    IrValue::Null => {
+                    (IrValue::Null, _) => {
                         // 0 << 3 = 0
                         self.emit_mov_imm(dst_reg, 0);
                     }
-                    _ => {
+                    // Register/Spill with explicit tag: shift left by 3 and OR with tag
+                    // This is the correct tagging scheme: (ptr << 3) | tag
+                    // Untagging is done by >> 3
+                    (_, Some(t)) => {
                         let src_reg = self.get_physical_reg_for_irvalue(src, false)?;
-                        // Tag: left shift by 3 (int tag is 000)
+                        // Step 1: Shift pointer left by 3
                         self.emit_lsl_imm(dst_reg, src_reg, 3);
+                        // Step 2: OR with tag value
+                        self.emit_mov_imm(9, t as i64);  // x9 = tag value
+                        self.emit_orr(dst_reg, dst_reg, 9);  // dst = (src << 3) | tag
+                    }
+                    // Register/Spill without explicit tag: shift left by 3 (integer tagging)
+                    (_, None) => {
+                        let src_reg = self.get_physical_reg_for_irvalue(src, false)?;
+                        // Check if tag is a register (dynamic tagging)
+                        match tag {
+                            IrValue::Register(_) | IrValue::Spill(_, _) => {
+                                // Dynamic tag: OR src with tag register
+                                let tag_reg = self.get_physical_reg_for_irvalue(tag, false)?;
+                                self.emit_orr(dst_reg, src_reg, tag_reg);
+                            }
+                            _ => {
+                                // Default: left shift by 3 (int tag is 000)
+                                self.emit_lsl_imm(dst_reg, src_reg, 3);
+                            }
+                        }
                     }
                 }
                 self.store_spill(dst_reg, dest_spill);
@@ -376,6 +421,13 @@ impl Arm64CodeGen {
                 // Load 64-bit value from ptr + offset*8
                 self.emit_ldr_offset(dst_reg, ptr_reg, *offset * 8);
                 self.store_spill(dst_reg, dest_spill);
+            }
+
+            Instruction::HeapStore(ptr, offset, value) => {
+                let ptr_reg = self.get_physical_reg_for_irvalue(ptr, false)?;
+                let value_reg = self.get_physical_reg_for_irvalue(value, false)?;
+                // Store 64-bit value to ptr + offset*8
+                self.emit_str_offset(value_reg, ptr_reg, *offset * 8);
             }
 
             Instruction::LoadByte(dst, ptr, offset) => {
@@ -570,38 +622,17 @@ impl Arm64CodeGen {
                 let dest_spill = self.dest_spill(dst);
                 let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
                 let src_reg = self.get_physical_reg_for_irvalue(src, false)?;
-                // Untag: shift right by 3 to get heap pointer
-                self.emit_asr_imm(dst_reg, src_reg, 3);
+                // Untag: logical shift right by 3 to get heap pointer
+                self.emit_lsr_imm(dst_reg, src_reg, 3);
                 // Load f64 bits from offset 8 (skip header)
                 self.emit_ldr_offset(dst_reg, dst_reg, 8);
                 self.store_spill(dst_reg, dest_spill);
             }
 
-            Instruction::AllocateFloat(dst, src) => {
-                // Allocate a new float on the heap
-                // src contains f64 bits, dst will receive tagged float pointer
-                let dest_spill = self.dest_spill(dst);
-                let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
-                let src_reg = self.get_physical_reg_for_irvalue(src, false)?;
-
-                // Pass JIT frame pointer (x29) as first argument (x0) for GC
-                self.emit_mov(0, 29);
-                // Move src to x1 (second argument)
-                if src_reg != 1 {
-                    self.emit_mov(1, src_reg);
-                }
-
-                // Call trampoline_allocate_float
-                let trampoline_addr = crate::trampoline::trampoline_allocate_float as usize;
-                self.emit_mov_imm(16, trampoline_addr as i64);  // x16 = trampoline address
-                self.emit_blr(16);  // call trampoline
-
-                // Result is in x0, move to dst
-                if dst_reg != 0 {
-                    self.emit_mov(dst_reg, 0);
-                }
-
-                self.store_spill(dst_reg, dest_spill);
+            Instruction::AllocateFloat(_, _) => {
+                // REFACTORED: AllocateFloat is now handled via ExternalCall at IR level
+                // See compiler.rs where AllocateFloat emissions are replaced with ExternalCall
+                return Err("AllocateFloat should have been lowered to ExternalCall".to_string());
             }
 
             Instruction::Assign(dst, src) => {
@@ -625,97 +656,19 @@ impl Arm64CodeGen {
                 self.store_spill(dst_reg, dest_spill);
             }
 
-            Instruction::PushBinding(var_ptr, value) => {
-                // PushBinding: call trampoline to push a dynamic binding
-                // ARM64 calling convention:
-                // - x0 = var_ptr (tagged)
-                // - x1 = value (tagged)
-                // - x0 = return value (0 = success, 1 = error)
-
-                match var_ptr {
-                    IrValue::TaggedConstant(tagged_ptr) => {
-                        // Get the value register
-                        let value_reg = self.get_physical_reg_for_irvalue(value, false)?;
-
-                        // Load tagged var_ptr into x0 (first argument)
-                        self.emit_mov_imm(0, *tagged_ptr as i64);
-
-                        // Move value to x1 (second argument) if not already there
-                        if value_reg != 1 {
-                            self.emit_mov(1, value_reg);
-                        }
-
-                        // Load trampoline function address into x15
-                        let func_addr = crate::trampoline::trampoline_push_binding as usize;
-                        self.emit_mov_imm(15, func_addr as i64);
-
-                        // Call the trampoline
-                        self.emit_blr(15);
-
-                        // Return value in x0 (0 = success, 1 = error)
-                        // For now, we ignore errors (could add error handling later)
-                    }
-                    _ => return Err(format!("PushBinding requires constant var pointer: {:?}", var_ptr)),
-                }
+            Instruction::PushBinding(_, _) => {
+                // REFACTORED: PushBinding is now handled via ExternalCall at IR level
+                return Err("PushBinding should have been lowered to ExternalCall".to_string());
             }
 
-            Instruction::PopBinding(var_ptr) => {
-                // PopBinding: call trampoline to pop a dynamic binding
-                // ARM64 calling convention:
-                // - x0 = var_ptr (tagged)
-                // - x0 = return value (0 = success, 1 = error)
-
-                match var_ptr {
-                    IrValue::TaggedConstant(tagged_ptr) => {
-                        // Load tagged var_ptr into x0 (first argument)
-                        self.emit_mov_imm(0, *tagged_ptr as i64);
-
-                        // Load trampoline function address into x15
-                        let func_addr = crate::trampoline::trampoline_pop_binding as usize;
-                        self.emit_mov_imm(15, func_addr as i64);
-
-                        // Call the trampoline
-                        self.emit_blr(15);
-
-                        // Return value in x0 (0 = success, 1 = error)
-                        // For now, we ignore errors (could add error handling later)
-                    }
-                    _ => return Err(format!("PopBinding requires constant var pointer: {:?}", var_ptr)),
-                }
+            Instruction::PopBinding(_) => {
+                // REFACTORED: PopBinding is now handled via ExternalCall at IR level
+                return Err("PopBinding should have been lowered to ExternalCall".to_string());
             }
 
-            Instruction::SetVar(var_ptr, value) => {
-                // SetVar: call trampoline to modify a thread-local binding (for set!)
-                // ARM64 calling convention:
-                // - x0 = var_ptr (tagged)
-                // - x1 = value (tagged)
-                // - x0 = return value (0 = success, 1 = error)
-
-                match var_ptr {
-                    IrValue::TaggedConstant(tagged_ptr) => {
-                        // Get the value register
-                        let value_reg = self.get_physical_reg_for_irvalue(value, false)?;
-
-                        // Load tagged var_ptr into x0 (first argument)
-                        self.emit_mov_imm(0, *tagged_ptr as i64);
-
-                        // Move value to x1 (second argument) if not already there
-                        if value_reg != 1 {
-                            self.emit_mov(1, value_reg);
-                        }
-
-                        // Load trampoline function address into x15
-                        let func_addr = crate::trampoline::trampoline_set_binding as usize;
-                        self.emit_mov_imm(15, func_addr as i64);
-
-                        // Call the trampoline
-                        self.emit_blr(15);
-
-                        // Return value in x0 (0 = success, 1 = error)
-                        // For now, we ignore errors (could add error handling later)
-                    }
-                    _ => return Err(format!("SetVar requires constant var pointer: {:?}", var_ptr)),
-                }
+            Instruction::SetVar(_, _) => {
+                // REFACTORED: SetVar is now handled via ExternalCall at IR level
+                return Err("SetVar should have been lowered to ExternalCall".to_string());
             }
 
             Instruction::Label(label) => {
@@ -1123,76 +1076,12 @@ impl Arm64CodeGen {
 
             // NOTE: CallWithSaves is handled later in the match with multi-arity support
 
-            Instruction::CallGC(dst) => {
-                // CallGC: Force garbage collection
-                // Pass current frame pointer (x29) as stack_pointer to trampoline_gc
-                let dest_spill = self.dest_spill(dst);
-                let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
-
-                // Move frame pointer (x29) to x0 as argument
-                self.emit_mov(0, 29);
-
-                // Load trampoline_gc address and call it
-                let func_addr = crate::trampoline::trampoline_gc as usize;
-                self.emit_mov_imm(15, func_addr as i64);
-                self.emit_blr(15);
-
-                // Result is in x0 (returns nil = 7)
-                if dst_reg != 0 {
-                    self.emit_mov(dst_reg, 0);
-                }
-                self.store_spill(dst_reg, dest_spill);
+            Instruction::CallGC(_) => {
+                // REFACTORED: CallGC is now handled via ExternalCall at IR level
+                return Err("CallGC should have been lowered to ExternalCall".to_string());
             }
 
-            Instruction::Println(dst, args) => {
-                // Println: Print values followed by newline
-                // ARM64 Calling Convention for trampoline_println:
-                // - x0 = count (number of values)
-                // - x1 = values_ptr (pointer to array of tagged values on stack)
-                // - Returns: x0 = nil (7)
-
-                let dest_spill = self.dest_spill(dst);
-                let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
-                let num_args = args.len();
-
-                if num_args > 0 {
-                    // Allocate stack space for argument array (8 bytes per value)
-                    let stack_space = (num_args * 8) as i64;
-                    // Align to 16 bytes
-                    let aligned_space = (stack_space + 15) & !15;
-                    self.emit_sub_imm(31, 31, aligned_space);
-
-                    // Store each argument value to the stack array
-                    for (i, arg) in args.iter().enumerate() {
-                        let arg_reg = self.get_physical_reg_for_irvalue(arg, false)?;
-                        self.emit_str_offset(arg_reg, 31, (i * 8) as i32);
-                    }
-
-                    // x0 = count, x1 = SP (pointer to array)
-                    self.emit_mov_imm(0, num_args as i64);
-                    self.emit_mov(1, 31);
-
-                    // Call trampoline_println
-                    let func_addr = crate::trampoline::trampoline_println as usize;
-                    self.emit_mov_imm(15, func_addr as i64);
-                    self.emit_blr(15);
-
-                    // Deallocate stack space
-                    self.emit_add_imm(31, 31, aligned_space);
-                } else {
-                    // No arguments - just call with count=0, ptr=null
-                    self.emit_mov_imm(0, 0);
-                    self.emit_mov_imm(1, 0);
-
-                    let func_addr = crate::trampoline::trampoline_println as usize;
-                    self.emit_mov_imm(15, func_addr as i64);
-                    self.emit_blr(15);
-                }
-
-                // Result is nil (7), move to dst
-                self.emit_mov_imm(dst_reg, 7);
-                self.store_spill(dst_reg, dest_spill);
-            }
+            // NOTE: Println has been refactored out - now uses ExternalCall to trampoline_println_regs
 
             Instruction::PushExceptionHandler(catch_label, exception_slot) => {
                 // PushExceptionHandler: Setup exception handler
@@ -1316,75 +1205,14 @@ impl Arm64CodeGen {
 
             // ========== Protocol System Instructions ==========
 
-            Instruction::RegisterProtocolMethod(type_id, protocol_id, method_index, fn_ptr) => {
-                // Call trampoline_register_protocol_method(type_id, protocol_id, method_index, fn_ptr)
-                // ARM64 Calling Convention:
-                // - x0 = type_id
-                // - x1 = protocol_id
-                // - x2 = method_index
-                // - x3 = fn_ptr (tagged closure)
-
-                let fn_ptr_reg = self.get_physical_reg_for_irvalue(fn_ptr, false)?;
-
-                // Save fn_ptr to a safe register if needed (it might be in x0-x3)
-                if fn_ptr_reg < 4 {
-                    self.emit_mov(16, fn_ptr_reg);  // Move to x16 temporarily
-                }
-
-                // Load arguments
-                self.emit_mov_imm(0, *type_id as i64);
-                self.emit_mov_imm(1, *protocol_id as i64);
-                self.emit_mov_imm(2, *method_index as i64);
-
-                if fn_ptr_reg < 4 {
-                    self.emit_mov(3, 16);  // Move from x16 to x3
-                } else {
-                    self.emit_mov(3, fn_ptr_reg);
-                }
-
-                // Call the trampoline
-                let func_addr = crate::trampoline::trampoline_register_protocol_method as usize;
-                self.emit_external_call(func_addr, "trampoline_register_protocol_method");
+            Instruction::RegisterProtocolMethod(_, _, _, _) => {
+                // REFACTORED: RegisterProtocolMethod is now handled via ExternalCall at IR level
+                return Err("RegisterProtocolMethod should have been lowered to ExternalCall".to_string());
             }
 
-            Instruction::InstanceCheck(dst, expected_type_id, value) => {
-                // InstanceCheck: check if value is an instance of the specified type
-                // ARM64 Calling Convention for trampoline_instance_check:
-                // - x0 = expected_type_id (full type ID including DEFTYPE_ID_OFFSET)
-                // - x1 = value (tagged)
-                // - Returns: x0 = tagged boolean (true if match, false otherwise)
-
-                let dest_spill = self.dest_spill(dst);
-                let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
-
-                // Get the value register
-                let value_reg = self.get_physical_reg_for_irvalue(value, false)?;
-
-                // Save value if it's in x0 or x1 (will be clobbered by args)
-                let saved_value_reg = if value_reg <= 1 {
-                    self.emit_mov(16, value_reg);  // Save to x16
-                    16
-                } else {
-                    value_reg
-                };
-
-                // Load expected type ID into x0
-                self.emit_mov_imm(0, *expected_type_id as i64);
-
-                // Load value into x1
-                self.emit_mov(1, saved_value_reg);
-
-                // Call the trampoline
-                let func_addr = crate::trampoline::trampoline_instance_check as usize;
-                self.emit_external_call(func_addr, "trampoline_instance_check");
-
-                // Move result from x0 to destination
-                if dst_reg != 0 {
-                    self.emit_mov(dst_reg, 0);
-                }
-
-                // Spill if needed
-                self.store_spill(dst_reg, dest_spill);
+            Instruction::InstanceCheck(_, _, _) => {
+                // REFACTORED: InstanceCheck is now handled via ExternalCall at IR level
+                return Err("InstanceCheck should have been lowered to ExternalCall".to_string());
             }
 
             Instruction::ExternalCallWithSaves(dst, func_addr, args, saves) => {
@@ -1786,302 +1614,13 @@ impl Arm64CodeGen {
                 self.current_function_stack_bytes -= save_bytes;
             }
 
-            Instruction::MakeType(dst, type_id, field_values) => {
-                // MakeType: Create a deftype instance
-                // Similar to MakeFunctionPtr but for type instances
-                //
-                // ARM64 Calling Convention for trampoline_allocate_type:
-                // - x0 = stack_pointer (JIT frame pointer for GC)
-                // - x1 = type_id
-                // - x2 = field_count
-                // - x3 = values_ptr (pointer to field values on stack)
-                // - Returns: x0 = tagged HeapObject pointer
+            // NOTE: MakeType, MakeTypeWithSaves, LoadTypeField, and StoreTypeField have been refactored out.
+            // - Deftype construction uses ExternalCall + HeapStore + Tag
+            // - Field access uses ExternalCall to trampoline_load_type_field_by_symbol with pre-interned symbol IDs
 
-                let dest_spill = self.dest_spill(dst);
-                let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
-
-                // Step 1: Allocate stack space for field values (16-byte aligned)
-                let total_stack_space = field_values.len() * 8;
-                let aligned_stack_space = ((total_stack_space + 15) / 16) * 16;
-                if aligned_stack_space > 0 {
-                    self.emit_sub_sp_imm(aligned_stack_space as i64);
-                }
-
-                // Step 2: Store field values to stack
-                // Clear temps after each to avoid exhausting pool with many fields
-                for (i, value) in field_values.iter().enumerate() {
-                    // Handle TaggedConstant inline
-                    let src_reg = match value {
-                        IrValue::TaggedConstant(val) => {
-                            let temp = self.allocate_temp_register();
-                            self.emit_mov_imm(temp, *val as i64);
-                            temp
-                        }
-                        IrValue::Null => {
-                            let temp = self.allocate_temp_register();
-                            self.emit_mov_imm(temp, 7);  // nil is tagged as 7
-                            temp
-                        }
-                        _ => self.get_physical_reg_for_irvalue(value, false)?
-                    };
-                    let offset = i * 8;
-                    self.emit_str_offset(src_reg, 31, offset as i32);
-                    self.clear_temp_registers();
-                }
-
-                // Step 3: Save stack pointer for values_ptr argument
-                let values_ptr_reg = 10;
-                self.emit_mov(values_ptr_reg, 31);
-
-                // Step 4: Set up arguments for trampoline call
-                self.emit_mov(0, 29);                            // x0 = JIT frame pointer for GC
-                self.emit_mov_imm(1, *type_id as i64);           // x1 = type_id
-                self.emit_mov_imm(2, field_values.len() as i64); // x2 = field_count
-                self.emit_mov(3, values_ptr_reg);                // x3 = values_ptr
-
-                // Step 5: Call trampoline to allocate type instance
-                let func_addr = crate::trampoline::trampoline_allocate_type as usize;
-                self.emit_external_call(func_addr, "trampoline_allocate_type");
-
-                // Step 6: Clean up stack
-                if aligned_stack_space > 0 {
-                    self.emit_add_sp_imm(aligned_stack_space as i64);
-                }
-
-                // Step 7: Result is in x0 (tagged HeapObject pointer)
-                if dst_reg != 0 {
-                    self.emit_mov(dst_reg, 0);
-                }
-
-                self.store_spill(dst_reg, dest_spill);
-            }
-
-            Instruction::MakeTypeWithSaves(dst, type_id, field_values, saves) => {
-                // MakeTypeWithSaves: Create a deftype instance with register preservation
-                //
-                // Following Beagle's CallWithSaves pattern EXACTLY:
-                // - Push saves to FP-relative stack one at a time (in order)
-                // - Do the call (just BLR, no X30 save - that's in prologue)
-                // - Pop saves from stack in REVERSE order
-
-                let dest_spill = self.dest_spill(dst);
-                let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
-                self.clear_temp_registers();
-
-                // STEP 1: Push saves to stack one at a time
-                // Uses STR with pre-decrement to grow stack
-                for save in saves.iter() {
-                    let save_reg = self.get_physical_reg_for_irvalue(save, false)?;
-                    self.push_to_stack(save_reg);
-                    self.clear_temp_registers();
-                }
-
-                // STEP 2: Allocate stack space for field values (16-byte aligned)
-                // This uses SP for the trampoline call's argument array
-                let total_stack_space = field_values.len() * 8;
-                let aligned_stack_space = ((total_stack_space + 15) / 16) * 16;
-                if aligned_stack_space > 0 {
-                    self.emit_sub_sp_imm(aligned_stack_space as i64);
-                }
-
-                // STEP 3: Store field values to stack (SP-relative for trampoline args)
-                for (i, value) in field_values.iter().enumerate() {
-                    // Handle TaggedConstant inline
-                    let src_reg = match value {
-                        IrValue::TaggedConstant(val) => {
-                            let temp = self.allocate_temp_register();
-                            self.emit_mov_imm(temp, *val as i64);
-                            temp
-                        }
-                        IrValue::Null => {
-                            let temp = self.allocate_temp_register();
-                            self.emit_mov_imm(temp, 7);  // nil is tagged as 7
-                            temp
-                        }
-                        _ => self.get_physical_reg_for_irvalue(value, false)?
-                    };
-                    let offset = i * 8;
-                    self.emit_str_offset(src_reg, 31, offset as i32);
-                    self.clear_temp_registers();
-                }
-
-                // STEP 4: Save stack pointer for values_ptr argument
-                let values_ptr_reg = 10;
-                self.emit_mov(values_ptr_reg, 31);
-
-                // STEP 5: Set up arguments for trampoline call
-                // Args: x0=stack_pointer (JIT FP for GC), x1=type_id, x2=field_count, x3=values_ptr
-                self.emit_mov(0, 29);                            // x0 = JIT frame pointer for GC
-                self.emit_mov_imm(1, *type_id as i64);           // x1 = type_id
-                self.emit_mov_imm(2, field_values.len() as i64); // x2 = field_count
-                self.emit_mov(3, values_ptr_reg);                // x3 = values_ptr
-
-                // STEP 6: Call trampoline (just BLR, like Beagle's call_builtin)
-                let func_addr = crate::trampoline::trampoline_allocate_type as usize;
-                self.emit_external_call(func_addr, "trampoline_allocate_type");
-
-                // STEP 7: Clean up field values stack space
-                if aligned_stack_space > 0 {
-                    self.emit_add_sp_imm(aligned_stack_space as i64);
-                }
-
-                // STEP 8: Move result to destination
-                if dst_reg != 0 {
-                    self.emit_mov(dst_reg, 0);
-                }
-                self.store_spill(dst_reg, dest_spill);
-
-                // STEP 9: Pop saves from stack in REVERSE order
-                // Uses LDR with post-increment to shrink stack
-                for save in saves.iter().rev() {
-                    let save_reg = self.get_physical_reg_for_irvalue(save, false)?;
-                    self.pop_from_stack(save_reg);
-                    self.clear_temp_registers();
-                }
-            }
-
-            Instruction::LoadTypeField(dst, obj, field_name) => {
-                // LoadTypeField: Load a field from a deftype instance by field name
-                //
-                // Runtime field lookup via trampoline:
-                // 1. Embed field name string on stack
-                // 2. Call trampoline_load_type_field_by_name(obj_ptr, field_name_ptr, field_name_len)
-                // 3. Trampoline extracts type_id from object header
-                // 4. Looks up field index by name in type registry
-                // 5. Returns field value
-                //
-                // ARM64 Calling Convention for trampoline_load_type_field_by_name:
-                // - x0 = obj_ptr (tagged HeapObject)
-                // - x1 = field_name_ptr (pointer to string bytes on stack)
-                // - x2 = field_name_len
-                // - Returns: x0 = field value (tagged)
-
-                let dest_spill = self.dest_spill(dst);
-                let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
-                let obj_reg = self.get_physical_reg_for_irvalue(obj, false)?;
-
-                let field_bytes = field_name.as_bytes();
-                let field_len = field_bytes.len();
-
-                // Allocate stack space for field name string (16-byte aligned)
-                let string_stack_space = ((field_len + 15) / 16) * 16;
-                if string_stack_space > 0 {
-                    self.emit_sub_sp_imm(string_stack_space as i64);
-                }
-
-                // Store field name bytes to stack using STRB
-                let temp_byte_reg = 10;  // Use x10 as temp for byte values
-                for (i, &byte) in field_bytes.iter().enumerate() {
-                    self.emit_mov_imm(temp_byte_reg, byte as i64);
-                    self.emit_strb_offset(temp_byte_reg, 31, i as i32);
-                }
-
-                // Save pointer to field name string (current SP)
-                let field_name_ptr_reg = 12;  // x12 = field_name_ptr
-                self.emit_mov(field_name_ptr_reg, 31);
-
-                // Set up trampoline arguments
-                if obj_reg != 0 {
-                    self.emit_mov(0, obj_reg);
-                }
-                self.emit_mov(1, field_name_ptr_reg);           // x1 = field_name_ptr
-                self.emit_mov_imm(2, field_len as i64);         // x2 = field_name_len
-
-                // Call trampoline_load_type_field_by_name
-                let func_addr = crate::trampoline::trampoline_load_type_field_by_name as usize;
-                self.emit_mov_imm(15, func_addr as i64);
-                self.emit_blr(15);
-
-                // Clean up stack space for field name
-                if string_stack_space > 0 {
-                    self.emit_add_sp_imm(string_stack_space as i64);
-                }
-
-                // Move result to destination register
-                if dst_reg != 0 {
-                    self.emit_mov(dst_reg, 0);
-                }
-
-                self.store_spill(dst_reg, dest_spill);
-            }
-
-            Instruction::StoreTypeField(obj, field_name, value) => {
-                // StoreTypeField: Store a value to a mutable field in a deftype instance
-                //
-                // ARM64 Calling Convention for trampoline_store_type_field:
-                // - x0 = obj_ptr (tagged HeapObject)
-                // - x1 = field_name_ptr (pointer to string bytes on stack)
-                // - x2 = field_name_len
-                // - x3 = value (tagged value to store)
-                // - Returns: x0 = value (the stored value)
-                //
-                // Note: The write barrier (GcAddRoot) should be emitted BEFORE this instruction
-
-                let obj_reg = self.get_physical_reg_for_irvalue(obj, false)?;
-                let value_reg = self.get_physical_reg_for_irvalue(value, false)?;
-
-                let field_bytes = field_name.as_bytes();
-                let field_len = field_bytes.len();
-
-                // Allocate stack space for field name string (16-byte aligned)
-                let string_stack_space = ((field_len + 15) / 16) * 16;
-                if string_stack_space > 0 {
-                    self.emit_sub_sp_imm(string_stack_space as i64);
-                }
-
-                // Store field name bytes to stack
-                let temp_byte_reg = 10;
-                for (i, &byte) in field_bytes.iter().enumerate() {
-                    self.emit_mov_imm(temp_byte_reg, byte as i64);
-                    self.emit_strb_offset(temp_byte_reg, 31, i as i32);
-                }
-
-                // Save pointer to field name string
-                let field_name_ptr_reg = 12;
-                self.emit_mov(field_name_ptr_reg, 31);
-
-                // Set up trampoline arguments
-                if obj_reg != 0 {
-                    self.emit_mov(0, obj_reg);
-                }
-                self.emit_mov(1, field_name_ptr_reg);           // x1 = field_name_ptr
-                self.emit_mov_imm(2, field_len as i64);         // x2 = field_name_len
-                if value_reg != 3 {
-                    self.emit_mov(3, value_reg);                // x3 = value
-                }
-
-                // Call trampoline_store_type_field
-                let func_addr = crate::trampoline::trampoline_store_type_field as usize;
-                self.emit_mov_imm(15, func_addr as i64);
-                self.emit_blr(15);
-
-                // Clean up stack space
-                if string_stack_space > 0 {
-                    self.emit_add_sp_imm(string_stack_space as i64);
-                }
-            }
-
-            Instruction::GcAddRoot(obj) => {
-                // GcAddRoot: Add object to GC write barrier remembered set
-                //
-                // ARM64 Calling Convention for trampoline_gc_add_root:
-                // - x0 = obj_ptr (tagged HeapObject)
-                // - Returns: x0 = nil (7)
-                //
-                // This is critical for generational GC correctness.
-                // Must be called BEFORE storing a pointer to a mutable field.
-
-                let obj_reg = self.get_physical_reg_for_irvalue(obj, false)?;
-
-                // Set up argument: x0 = obj_ptr
-                if obj_reg != 0 {
-                    self.emit_mov(0, obj_reg);
-                }
-
-                // Call trampoline_gc_add_root
-                let func_addr = crate::trampoline::trampoline_gc_add_root as usize;
-                self.emit_mov_imm(15, func_addr as i64);
-                self.emit_blr(15);
+            Instruction::GcAddRoot(_) => {
+                // REFACTORED: GcAddRoot is now handled via ExternalCall at IR level
+                return Err("GcAddRoot should have been lowered to ExternalCall".to_string());
             }
 
             Instruction::ExternalCall(_, _, _) => {
@@ -2605,6 +2144,10 @@ impl Arm64CodeGen {
                 // For destination, just return temp_reg without loading
                 Ok(temp_reg)
             }
+            IrValue::FramePointer => {
+                // FramePointer is x29 (FP) - used for passing stack pointer to trampolines
+                Ok(29)
+            }
             IrValue::TaggedConstant(_) | IrValue::Null => {
                 // TaggedConstant and Null should be converted to registers via assign_new
                 // in the compiler BEFORE reaching codegen. If we hit this, it means
@@ -2787,18 +2330,25 @@ impl Arm64CodeGen {
     /// ORR Xd, Xn, #imm
     #[allow(dead_code)]
     fn emit_orr_imm(&mut self, dst: usize, src: usize, imm: u32) {
-        // For small immediates like 0b100, we can use the logical immediate encoding
-        // ORR Xd, Xn, #imm
-        // This is a simplified version for our specific use case (imm < 256)
-        // Full ARM64 immediate encoding is complex, but for small values we can use:
-        // 0xB2400000 | (imms << 10) | (src << 5) | dst
-        // For imm=0b100 (4), we use pattern: immr=0, imms=2 (encodes value 0b111 >> (64-3))
-        // Simplified: just use 0xB2400000 as base with imm encoding
-        let instruction = if imm == 0b100 {
-            // ORR X, X, #0b100 - special case for Function tag
-            0xB2400C00u32 | ((src as u32) << 5) | (dst as u32)
-        } else {
-            panic!("ORR immediate only implemented for 0b100");
+        // ARM64 logical immediate encoding for small tag values
+        // Format: sf(1) opc(01) 100100 N(1) immr(6) imms(6) Rn(5) Rd(5)
+        // Base: 0xB2400000 for 64-bit ORR immediate
+        let instruction = match imm {
+            // 0b100 (4) - Function tag: single bit at position 2
+            // immr=0, imms=0 encodes element size 64, pattern of 1 bit at position 2
+            0b100 => 0xB2400C00u32 | ((src as u32) << 5) | (dst as u32),
+
+            // 0b110 (6) - HeapObject tag: two bits at positions 1 and 2
+            // For 0b110 = binary 110, we need a 2-bit pattern (11) rotated to position 1
+            // N=1, immr=63 (rotate right by 1 = rotate left by 63), imms=1 (2-bit pattern)
+            // Base encoding: 0xB27F0400 for ORR X, X, #6
+            0b110 => 0xB27F0400u32 | ((src as u32) << 5) | (dst as u32),
+
+            // 0b111 (7) - nil tag: three bits at positions 0, 1, 2
+            // N=1, immr=0, imms=2 (3-bit pattern)
+            0b111 => 0xB2400800u32 | ((src as u32) << 5) | (dst as u32),
+
+            _ => panic!("ORR immediate not implemented for {:#b} ({})", imm, imm),
         };
         self.code.push(instruction);
     }

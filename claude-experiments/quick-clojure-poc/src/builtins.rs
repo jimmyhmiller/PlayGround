@@ -132,14 +132,47 @@ pub extern "C" fn builtin_load_keyword(tagged_keyword_index: usize) -> usize {
 // I/O operations
 // ============================================================================
 
-/// builtin_println(count, values_ptr) -> tagged_value (nil)
+/// builtin_println_value(value) -> tagged_value (nil)
 ///
-/// Prints values separated by spaces, followed by a newline.
+/// Prints a single value followed by a newline.
 /// Returns nil (tagged value 7).
 #[unsafe(no_mangle)]
-pub extern "C" fn builtin_println(count: usize, values_ptr: *const usize) -> usize {
+pub extern "C" fn builtin_println_value(value: usize) -> usize {
     unsafe {
-        trampoline::trampoline_println(count, values_ptr)
+        trampoline::trampoline_println_value(value)
+    }
+}
+
+/// builtin_print_value(value) -> tagged_value (nil)
+///
+/// Prints a single value without a newline.
+/// Returns nil (tagged value 7).
+#[unsafe(no_mangle)]
+pub extern "C" fn builtin_print_value(value: usize) -> usize {
+    unsafe {
+        trampoline::trampoline_print_value(value)
+    }
+}
+
+/// builtin_newline() -> tagged_value (nil)
+///
+/// Prints a newline.
+/// Returns nil (tagged value 7).
+#[unsafe(no_mangle)]
+pub extern "C" fn builtin_newline() -> usize {
+    unsafe {
+        trampoline::trampoline_newline()
+    }
+}
+
+/// builtin_print_space() -> tagged_value (nil)
+///
+/// Prints a space.
+/// Returns nil (tagged value 7).
+#[unsafe(no_mangle)]
+pub extern "C" fn builtin_print_space() -> usize {
+    unsafe {
+        trampoline::trampoline_print_space()
     }
 }
 
@@ -198,9 +231,24 @@ pub fn get_builtin_descriptors() -> Vec<BuiltinDescriptor> {
             arity: 1,
         },
         BuiltinDescriptor {
-            name: "runtime.builtin/println",
-            function_ptr: builtin_println as usize,
-            arity: 2,  // count + pointer
+            name: "runtime.builtin/_println",
+            function_ptr: builtin_println_value as usize,
+            arity: 1,  // single value
+        },
+        BuiltinDescriptor {
+            name: "runtime.builtin/_print",
+            function_ptr: builtin_print_value as usize,
+            arity: 1,  // single value
+        },
+        BuiltinDescriptor {
+            name: "runtime.builtin/_newline",
+            function_ptr: builtin_newline as usize,
+            arity: 0,
+        },
+        BuiltinDescriptor {
+            name: "runtime.builtin/_print-space",
+            function_ptr: builtin_print_space as usize,
+            arity: 0,
         },
         BuiltinDescriptor {
             name: "runtime.builtin/gc",

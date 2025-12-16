@@ -189,6 +189,11 @@ impl LinearScan {
                 if let IrValue::Register(r) = ptr { regs.push(*r); }
             }
 
+            Instruction::HeapStore(ptr, _, value) => {
+                if let IrValue::Register(r) = ptr { regs.push(*r); }
+                if let IrValue::Register(r) = value { regs.push(*r); }
+            }
+
             Instruction::Compare(dst, src1, src2, _) => {
                 if let IrValue::Register(r) = dst { regs.push(*r); }
                 if let IrValue::Register(r) = src1 { regs.push(*r); }
@@ -305,32 +310,11 @@ impl LinearScan {
                 }
             }
 
-            Instruction::MakeType(dst, _type_id, field_values) => {
-                if let IrValue::Register(r) = dst { regs.push(*r); }
-                for val in field_values {
-                    if let IrValue::Register(r) = val { regs.push(*r); }
-                }
-            }
+            // NOTE: MakeType/MakeTypeWithSaves have been refactored out.
+            // Deftype construction now uses ExternalCall + HeapStore + Tag.
 
-            Instruction::MakeTypeWithSaves(dst, _type_id, field_values, saves) => {
-                if let IrValue::Register(r) = dst { regs.push(*r); }
-                for val in field_values {
-                    if let IrValue::Register(r) = val { regs.push(*r); }
-                }
-                for save in saves {
-                    if let IrValue::Register(r) = save { regs.push(*r); }
-                }
-            }
-
-            Instruction::LoadTypeField(dst, obj, _field_name) => {
-                if let IrValue::Register(r) = dst { regs.push(*r); }
-                if let IrValue::Register(r) = obj { regs.push(*r); }
-            }
-
-            Instruction::StoreTypeField(obj, _field_name, value) => {
-                if let IrValue::Register(r) = obj { regs.push(*r); }
-                if let IrValue::Register(r) = value { regs.push(*r); }
-            }
+            // NOTE: LoadTypeField and StoreTypeField have been refactored out.
+            // Field access now uses ExternalCall with pre-interned symbol IDs.
 
             Instruction::GcAddRoot(obj) => {
                 if let IrValue::Register(r) = obj { regs.push(*r); }
@@ -340,12 +324,7 @@ impl LinearScan {
                 if let IrValue::Register(r) = dst { regs.push(*r); }
             }
 
-            Instruction::Println(dst, args) => {
-                if let IrValue::Register(r) = dst { regs.push(*r); }
-                for arg in args {
-                    if let IrValue::Register(r) = arg { regs.push(*r); }
-                }
-            }
+            // NOTE: Println removed - now uses ExternalCall
 
             // Note: LoadKeyword is now a builtin function call handled by Call instruction
 
@@ -629,6 +608,11 @@ impl LinearScan {
                 replace(ptr);
             }
 
+            Instruction::HeapStore(ptr, _, value) => {
+                replace(ptr);
+                replace(value);
+            }
+
             Instruction::LoadConstant(dst, _)
             | Instruction::LoadTrue(dst)
             | Instruction::LoadFalse(dst) => {
@@ -726,32 +710,8 @@ impl LinearScan {
                 }
             }
 
-            Instruction::MakeType(dst, _type_id, field_values) => {
-                replace(dst);
-                for val in field_values {
-                    replace(val);
-                }
-            }
-
-            Instruction::MakeTypeWithSaves(dst, _type_id, field_values, saves) => {
-                replace(dst);
-                for val in field_values {
-                    replace(val);
-                }
-                for save in saves {
-                    replace(save);
-                }
-            }
-
-            Instruction::LoadTypeField(dst, obj, _field_name) => {
-                replace(dst);
-                replace(obj);
-            }
-
-            Instruction::StoreTypeField(obj, _field_name, value) => {
-                replace(obj);
-                replace(value);
-            }
+            // NOTE: MakeType/MakeTypeWithSaves removed - now use ExternalCall + HeapStore + Tag
+            // NOTE: LoadTypeField/StoreTypeField removed - now use ExternalCall with symbol IDs
 
             Instruction::GcAddRoot(obj) => {
                 replace(obj);
@@ -761,12 +721,7 @@ impl LinearScan {
                 replace(dst);
             }
 
-            Instruction::Println(dst, args) => {
-                replace(dst);
-                for arg in args {
-                    replace(arg);
-                }
-            }
+            // NOTE: Println removed - now uses ExternalCall
 
             // Note: LoadKeyword is now a builtin function call handled by Call instruction
 
@@ -1056,6 +1011,11 @@ impl LinearScan {
                 replace(ptr);
             }
 
+            Instruction::HeapStore(ptr, _, value) => {
+                replace(ptr);
+                replace(value);
+            }
+
             Instruction::LoadConstant(dst, _)
             | Instruction::LoadTrue(dst)
             | Instruction::LoadFalse(dst) => {
@@ -1153,32 +1113,8 @@ impl LinearScan {
                 }
             }
 
-            Instruction::MakeType(dst, _type_id, field_values) => {
-                replace(dst);
-                for val in field_values {
-                    replace(val);
-                }
-            }
-
-            Instruction::MakeTypeWithSaves(dst, _type_id, field_values, saves) => {
-                replace(dst);
-                for val in field_values {
-                    replace(val);
-                }
-                for save in saves {
-                    replace(save);
-                }
-            }
-
-            Instruction::LoadTypeField(dst, obj, _field_name) => {
-                replace(dst);
-                replace(obj);
-            }
-
-            Instruction::StoreTypeField(obj, _field_name, value) => {
-                replace(obj);
-                replace(value);
-            }
+            // NOTE: MakeType/MakeTypeWithSaves removed - now use ExternalCall + HeapStore + Tag
+            // NOTE: LoadTypeField/StoreTypeField removed - now use ExternalCall with symbol IDs
 
             Instruction::GcAddRoot(obj) => {
                 replace(obj);
@@ -1188,12 +1124,7 @@ impl LinearScan {
                 replace(dst);
             }
 
-            Instruction::Println(dst, args) => {
-                replace(dst);
-                for arg in args {
-                    replace(arg);
-                }
-            }
+            // NOTE: Println removed - now uses ExternalCall
 
             // Note: LoadKeyword is now a builtin function call handled by Call instruction
 
@@ -1295,16 +1226,16 @@ impl LinearScan {
     /// Transform Call, ExternalCall, and Recur instructions to their WithSaves variants
     ///
     /// This analyzes which registers are live across each call/recur site and generates
-    /// CallWithSaves/ExternalCallWithSaves/RecurWithSaves/MakeTypeWithSaves instructions with explicit register preservation.
+    /// CallWithSaves/ExternalCallWithSaves/RecurWithSaves instructions with explicit register preservation.
+    /// NOTE: MakeType has been refactored out - deftype construction now uses ExternalCall + HeapStore + Tag.
     fn transform_calls_to_saves(&mut self) {
         for i in 0..self.instructions.len() {
-            // Check if this is a Call, ExternalCall, Recur, or MakeType instruction
+            // Check if this is a Call, ExternalCall, or Recur instruction
             let is_call = matches!(self.instructions[i], Instruction::Call(_, _, _));
             let is_external_call = matches!(self.instructions[i], Instruction::ExternalCall(_, _, _));
             let is_recur = matches!(self.instructions[i], Instruction::Recur(_, _));
-            let is_make_type = matches!(self.instructions[i], Instruction::MakeType(_, _, _));
 
-            if !is_call && !is_external_call && !is_recur && !is_make_type {
+            if !is_call && !is_external_call && !is_recur {
                 continue;
             }
 
@@ -1312,7 +1243,6 @@ impl LinearScan {
             let dest = match &self.instructions[i] {
                 Instruction::Call(d, _, _) => Some(*d),
                 Instruction::ExternalCall(d, _, _) => Some(*d),
-                Instruction::MakeType(d, _, _) => Some(*d),
                 Instruction::Recur(_, _) => None,
                 _ => continue,
             };
@@ -1452,14 +1382,6 @@ impl LinearScan {
                 // Saving/restoring would actually corrupt values by overwriting new loop
                 // binding values with old saved values.
                 continue;
-            } else if is_make_type {
-                // Transform MakeType to MakeTypeWithSaves
-                let (type_id, field_values) = if let Instruction::MakeType(_, tid, fv) = &self.instructions[i] {
-                    (*tid, fv.clone())
-                } else {
-                    continue;
-                };
-                self.instructions[i] = Instruction::MakeTypeWithSaves(dest.unwrap(), type_id, field_values, saves);
             }
         }
     }

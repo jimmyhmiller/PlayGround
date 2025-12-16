@@ -311,9 +311,10 @@ impl Compiler {
                  "bit-and" | "bit-or" | "bit-xor" | "bit-not" |
                  "bit-shift-left" | "bit-shift-right" | "unsigned-bit-shift-right" |
                  "bit-shift-right-zero-fill" |  // CLJS alias for unsigned-bit-shift-right
-                 "nil?" | "number?" | "string?" | "fn?" | "identical?" | "println" |
+                 "nil?" | "number?" | "string?" | "fn?" | "identical?" |
                  "instance?" | "keyword?" | "hash-primitive" |
-                 "cons?" | "cons-first" | "cons-rest")
+                 "cons?" | "cons-first" | "cons-rest" |
+                 "_println" | "_print" | "_newline" | "_print-space")
     }
 
     /// Compile (var symbol) - returns the Var object itself, not its value
@@ -364,13 +365,17 @@ impl Compiler {
     }
 
     /// Compile (TypeName. arg1 arg2 ...) - constructor call
+    ///
+    /// REFACTORED: Instead of emitting a single MakeType instruction, we emit
+    /// a sequence of primitive IR instructions following the Beagle pattern:
+    /// 1. ExternalCall to allocate heap object (returns untagged pointer)
+    /// 2. HeapStore for each field value
+    /// 3. Tag the pointer with HeapObject tag
     fn compile_type_construct(&mut self, type_name: &str, args: &[Expr]) -> Result<IrValue, String> {
         // Resolve type name to fully qualified name
         let qualified_name = if type_name.contains('/') {
-            // Already qualified (e.g., "foo/Point")
             type_name.to_string()
         } else {
-            // Unqualified - use current namespace
             format!("{}/{}", self.get_current_namespace(), type_name)
         };
 
@@ -387,57 +392,113 @@ impl Compiler {
             ));
         }
 
-        // Compile all arguments
-        let mut arg_values = Vec::new();
+        // Compile all arguments and ensure they're in registers
+        let mut field_values = Vec::new();
         for arg in args {
-            arg_values.push(self.compile(arg)?);
+            let val = self.compile(arg)?;
+            let reg = self.ensure_register(val);
+            field_values.push(reg);
         }
 
-        // Emit MakeType instruction
+        // Step 1: Allocate heap object via trampoline
+        // trampoline_allocate_type_object_raw(stack_pointer, type_id, field_count) -> untagged_ptr
+        let trampoline_addr = crate::trampoline::trampoline_allocate_type_object_raw as usize;
+        let raw_ptr = self.builder.new_register();
+
+        // Load type_id and field_count as raw constants (untagged values)
+        let type_id_reg = self.builder.assign_new(IrValue::RawConstant(type_info.type_id as i64));
+        let field_count_reg = self.builder.assign_new(IrValue::RawConstant(field_values.len() as i64));
+
+        // Pass FramePointer (x29) as first arg for GC stack walking
+        self.builder.emit(Instruction::ExternalCall(
+            raw_ptr,
+            trampoline_addr,
+            vec![IrValue::FramePointer, type_id_reg, field_count_reg]
+        ));
+
+        // Step 2: Write field values using HeapStore
+        // Field 0 is at offset 1 (after 8-byte header), field 1 at offset 2, etc.
+        for (i, field_val) in field_values.iter().enumerate() {
+            let offset = (i + 1) as i32;
+            self.builder.emit(Instruction::HeapStore(raw_ptr, offset, *field_val));
+        }
+
+        // Step 3: Tag the pointer with HeapObject tag (0b110)
+        // Pass the tag directly as a constant (don't allocate a register for it)
         let result = self.builder.new_register();
-        self.builder.emit(Instruction::MakeType(result, type_info.type_id, arg_values));
+        self.builder.emit(Instruction::Tag(result, raw_ptr, IrValue::RawConstant(0b110)));
 
         Ok(result)
     }
 
     /// Compile (.-field obj) - field access
+    ///
+    /// REFACTORED: Now uses ExternalCall with pre-interned symbol ID instead of
+    /// the LoadTypeField instruction that embedded field names on the stack.
     fn compile_field_access(&mut self, field: &str, object: &Expr) -> Result<IrValue, String> {
-        // Compile the object
+        // Compile the object and ensure it's in a register
         let obj_value = self.compile(object)?;
+        let obj_reg = self.ensure_register(obj_value);
 
-        // We need runtime type lookup to find the field index
-        // For now, emit a LoadTypeField with field name (runtime will resolve)
-        // This is a simplification - a real implementation would use inline caching
+        // Intern the field name as a symbol at compile time
+        let rt = unsafe { &mut *self.runtime.get() };
+        let field_symbol_id = rt.intern_symbol(field);
 
-        // Get field index at runtime via trampoline
+        // Emit ExternalCall to trampoline_load_type_field_by_symbol(obj, symbol_id)
+        let trampoline_addr = crate::trampoline::trampoline_load_type_field_by_symbol as usize;
+        let symbol_id_reg = self.builder.assign_new(IrValue::RawConstant(field_symbol_id as i64));
+
         let result = self.builder.new_register();
-        self.builder.emit(Instruction::LoadTypeField(result, obj_value, field.to_string()));
+        self.builder.emit(Instruction::ExternalCall(
+            result,
+            trampoline_addr,
+            vec![obj_reg, symbol_id_reg]
+        ));
 
         Ok(result)
     }
 
     /// Compile (set! (.-field obj) value) - field assignment
     /// Requires the field to be declared as ^:mutable in the deftype
+    ///
+    /// REFACTORED: Now uses ExternalCall with pre-interned symbol ID instead of
+    /// the StoreTypeField instruction that embedded field names on the stack.
     fn compile_field_set(&mut self, field: &str, object: &Expr, value: &Expr) -> Result<IrValue, String> {
-        // 1. Compile the object
+        // 1. Compile the object and ensure it's in a register
         let obj_value = self.compile(object)?;
+        let obj_reg = self.ensure_register(obj_value);
 
         // 2. Compile the new value and ensure it's in a register
-        // (StoreTypeField requires a register, not a TaggedConstant)
         let new_value = self.compile(value)?;
-        let new_value = self.ensure_register(new_value);
+        let new_value_reg = self.ensure_register(new_value);
 
-        // 3. Emit GcAddRoot for write barrier (BEFORE the store)
-        // This is critical for generational GC correctness:
-        // When storing a young-generation pointer into an old-generation object,
-        // we must track the old object so the GC can find the cross-generational reference.
-        self.builder.emit(Instruction::GcAddRoot(obj_value));
+        // 3. Emit GcAddRoot as ExternalCall for write barrier (BEFORE the store)
+        // This is critical for generational GC correctness
+        let gc_trampoline_addr = crate::trampoline::trampoline_gc_add_root as usize;
+        let gc_result = self.builder.new_register();
+        self.builder.emit(Instruction::ExternalCall(
+            gc_result,
+            gc_trampoline_addr,
+            vec![obj_reg]
+        ));
 
-        // 4. Emit the field store
-        self.builder.emit(Instruction::StoreTypeField(obj_value, field.to_string(), new_value));
+        // 4. Intern the field name as a symbol at compile time
+        let rt = unsafe { &mut *self.runtime.get() };
+        let field_symbol_id = rt.intern_symbol(field);
 
-        // 5. set! returns the new value
-        Ok(new_value)
+        // 5. Emit ExternalCall to trampoline_store_type_field_by_symbol(obj, symbol_id, value)
+        let store_trampoline_addr = crate::trampoline::trampoline_store_type_field_by_symbol as usize;
+        let symbol_id_reg = self.builder.assign_new(IrValue::RawConstant(field_symbol_id as i64));
+
+        let result = self.builder.new_register();
+        self.builder.emit(Instruction::ExternalCall(
+            result,
+            store_trampoline_addr,
+            vec![obj_reg, symbol_id_reg, new_value_reg]
+        ));
+
+        // 6. set! returns the stored value
+        Ok(result)
     }
 
     fn compile_throw(&mut self, exception: &Expr) -> Result<IrValue, String> {
@@ -623,12 +684,19 @@ impl Compiler {
                 // If there are multiple arities, this creates a multi-arity function
                 let fn_value = self.compile_fn(&None, &arities)?;
 
-                // Emit RegisterProtocolMethod instruction
-                self.builder.emit(Instruction::RegisterProtocolMethod(
-                    type_id,
-                    protocol_id,
-                    method_index,
-                    fn_value,
+                // Emit RegisterProtocolMethod as ExternalCall
+                // Call trampoline_register_protocol_method(type_id, protocol_id, method_index, fn_ptr)
+                let trampoline_addr = crate::trampoline::trampoline_register_protocol_method as usize;
+                let dummy_result = self.builder.new_register();
+                self.builder.emit(Instruction::ExternalCall(
+                    dummy_result,
+                    trampoline_addr,
+                    vec![
+                        IrValue::RawConstant(type_id as i64),
+                        IrValue::RawConstant(protocol_id as i64),
+                        IrValue::RawConstant(method_index as i64),
+                        fn_value
+                    ]
                 ));
             }
         }
@@ -1104,10 +1172,14 @@ impl Compiler {
             // Compile the value expression
             let value_reg = self.compile(value_expr)?;
 
-            // Emit PushBinding instruction
-            self.builder.emit(Instruction::PushBinding(
-                IrValue::TaggedConstant(var_ptr as isize),
-                value_reg,
+            // Emit PushBinding as ExternalCall
+            // Call trampoline_push_binding(var_ptr, value) -> result
+            let trampoline_addr = crate::trampoline::trampoline_push_binding as usize;
+            let push_result = self.builder.new_register();
+            self.builder.emit(Instruction::ExternalCall(
+                push_result,
+                trampoline_addr,
+                vec![IrValue::TaggedConstant(var_ptr as isize), value_reg]
             ));
 
             var_ptrs.push(var_ptr);
@@ -1123,8 +1195,14 @@ impl Compiler {
 
         // Pop all bindings in reverse order
         for &var_ptr in var_ptrs.iter().rev() {
-            self.builder.emit(Instruction::PopBinding(
-                IrValue::TaggedConstant(var_ptr as isize)
+            // Emit PopBinding as ExternalCall
+            // Call trampoline_pop_binding(var_ptr) -> result
+            let trampoline_addr = crate::trampoline::trampoline_pop_binding as usize;
+            let pop_result = self.builder.new_register();
+            self.builder.emit(Instruction::ExternalCall(
+                pop_result,
+                trampoline_addr,
+                vec![IrValue::TaggedConstant(var_ptr as isize)]
             ));
         }
 
@@ -1145,10 +1223,14 @@ impl Compiler {
         // Compile the value expression
         let value_reg = self.compile(value_expr)?;
 
-        // Emit SetVar instruction
-        self.builder.emit(Instruction::SetVar(
-            IrValue::TaggedConstant(var_ptr as isize),
-            value_reg,
+        // Emit SetVar as ExternalCall
+        // Call trampoline_set_binding(var_ptr, value) -> result
+        let trampoline_addr = crate::trampoline::trampoline_set_binding as usize;
+        let set_result = self.builder.new_register();
+        self.builder.emit(Instruction::ExternalCall(
+            set_result,
+            trampoline_addr,
+            vec![IrValue::TaggedConstant(var_ptr as isize), value_reg]
         ));
 
         // set! returns the new value
@@ -1321,12 +1403,26 @@ impl Compiler {
         let fn_obj_reg = self.builder.new_register();
 
         if arities.len() == 1 && variadic_min.is_none() {
-            // Single fixed arity - use existing MakeFunctionPtr (more efficient)
-            self.builder.emit(Instruction::MakeFunctionPtr(
-                fn_obj_reg,
-                compiled_arities[0].1,
-                closure_values,
-            ));
+            // Single fixed arity - create function pointer
+            let code_ptr = compiled_arities[0].1;
+
+            if closure_values.is_empty() {
+                // Regular function (no closures) - use MakeFunctionPtr for simple tagging
+                self.builder.emit(Instruction::MakeFunctionPtr(
+                    fn_obj_reg,
+                    code_ptr,
+                    vec![]  // No closures
+                ));
+            } else {
+                // Closure - allocate heap object via ExternalCall
+                // Need to allocate stack space for values first (done in lowering pass or codegen)
+                // For now, emit MakeFunctionPtr with closure_values - will refactor codegen later
+                self.builder.emit(Instruction::MakeFunctionPtr(
+                    fn_obj_reg,
+                    code_ptr,
+                    closure_values,
+                ));
+            }
         } else {
             // Multi-arity or variadic - use MakeMultiArityFn
             let arity_table: Vec<(usize, usize)> = compiled_arities.iter()
@@ -1825,7 +1921,6 @@ impl Compiler {
                     "<=" => self.compile_builtin_le(args),
                     ">=" => self.compile_builtin_ge(args),
                     "=" => self.compile_builtin_eq(args),
-                    "println" => self.compile_builtin_println(args),
                     "__gc" => self.compile_builtin_gc(args),
                     "bit-and" => self.compile_builtin_bit_and(args),
                     "bit-or" => self.compile_builtin_bit_or(args),
@@ -1846,6 +1941,10 @@ impl Compiler {
                     "cons?" => self.compile_builtin_cons_check(args),
                     "cons-first" => self.compile_builtin_cons_first(args),
                     "cons-rest" => self.compile_builtin_cons_rest(args),
+                    "_println" => self.compile_builtin_println_value(args),
+                    "_print" => self.compile_builtin_print_value(args),
+                    "_newline" => self.compile_builtin_newline(args),
+                    "_print-space" => self.compile_builtin_print_space(args),
                     _ => unreachable!(),
                 };
             }
@@ -2033,7 +2132,14 @@ impl Compiler {
         self.builder.emit(float_op(float_result, left_float, right_float));
 
         // Allocate new float on heap and get tagged pointer
-        self.builder.emit(Instruction::AllocateFloat(result, float_result));
+        // Call trampoline_allocate_float(jit_frame_ptr, f64_bits) -> tagged_ptr
+        let trampoline_addr = crate::trampoline::trampoline_allocate_float as usize;
+        let fp_reg = IrValue::RawConstant(29);  // x29 = frame pointer
+        self.builder.emit(Instruction::ExternalCall(
+            result,
+            trampoline_addr,
+            vec![fp_reg, float_result]
+        ));
 
         self.builder.emit(Instruction::Label(done));
 
@@ -2178,20 +2284,40 @@ impl Compiler {
         Ok(result)
     }
 
-    fn compile_builtin_println(&mut self, args: &[Expr]) -> Result<IrValue, String> {
-        // println takes any number of arguments (including 0)
-        // Compile all arguments and ensure they're in registers
-        let mut arg_vals = Vec::new();
-        for arg in args {
-            let val = self.compile(arg)?;
-            arg_vals.push(self.builder.assign_new(val));
+    /// _println - prints a single value with newline (like Beagle's pattern)
+    fn compile_builtin_println_value(&mut self, args: &[Expr]) -> Result<IrValue, String> {
+        if args.len() != 1 {
+            return Err(format!("_println requires 1 argument, got {}", args.len()));
         }
+        let val = self.compile(&args[0])?;
+        let val_reg = self.builder.assign_new(val);
+        self.call_builtin("runtime.builtin/_println", vec![val_reg])
+    }
 
-        let result = self.builder.new_register();
-        self.builder.emit(Instruction::Println(result, arg_vals));
+    /// _print - prints a single value without newline (like Beagle's pattern)
+    fn compile_builtin_print_value(&mut self, args: &[Expr]) -> Result<IrValue, String> {
+        if args.len() != 1 {
+            return Err(format!("_print requires 1 argument, got {}", args.len()));
+        }
+        let val = self.compile(&args[0])?;
+        let val_reg = self.builder.assign_new(val);
+        self.call_builtin("runtime.builtin/_print", vec![val_reg])
+    }
 
-        // println returns nil
-        Ok(result)
+    /// _newline - prints just a newline
+    fn compile_builtin_newline(&mut self, args: &[Expr]) -> Result<IrValue, String> {
+        if !args.is_empty() {
+            return Err(format!("_newline takes no arguments, got {}", args.len()));
+        }
+        self.call_builtin("runtime.builtin/_newline", vec![])
+    }
+
+    /// _print-space - prints just a space
+    fn compile_builtin_print_space(&mut self, args: &[Expr]) -> Result<IrValue, String> {
+        if !args.is_empty() {
+            return Err(format!("_print-space takes no arguments, got {}", args.len()));
+        }
+        self.call_builtin("runtime.builtin/_print-space", vec![])
     }
 
     fn compile_builtin_eq(&mut self, args: &[Expr]) -> Result<IrValue, String> {
@@ -2217,9 +2343,15 @@ impl Compiler {
 
     fn compile_builtin_gc(&mut self, _args: &[Expr]) -> Result<IrValue, String> {
         // __gc takes no arguments and returns nil
-        // The CallGC instruction will call trampoline_gc with the current frame pointer
+        // Call trampoline_gc(frame_ptr) -> nil
         let result = self.builder.new_register();
-        self.builder.emit(Instruction::CallGC(result));
+        let trampoline_addr = crate::trampoline::trampoline_gc as usize;
+        let fp_reg = IrValue::RawConstant(29);  // x29 = frame pointer
+        self.builder.emit(Instruction::ExternalCall(
+            result,
+            trampoline_addr,
+            vec![fp_reg]
+        ));
         Ok(result)
     }
 
@@ -2523,9 +2655,15 @@ impl Compiler {
         let value = self.compile(&args[1])?;
         let value = self.ensure_register(value);
 
-        // Emit instance check instruction
+        // Emit instance check as ExternalCall
+        // Call trampoline_instance_check(type_id, value) -> tagged_boolean
         let result = self.builder.new_register();
-        self.builder.emit(Instruction::InstanceCheck(result, full_type_id, value));
+        let trampoline_addr = crate::trampoline::trampoline_instance_check as usize;
+        self.builder.emit(Instruction::ExternalCall(
+            result,
+            trampoline_addr,
+            vec![IrValue::RawConstant(full_type_id as i64), value]
+        ));
         Ok(result)
     }
 
