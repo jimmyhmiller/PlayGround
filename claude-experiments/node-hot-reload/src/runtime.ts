@@ -147,11 +147,23 @@ export function createRuntime(): HotRuntime {
         // Get or create the module's namespace
         const __m = this.module(moduleId);
 
-        // Build a preamble that destructures all module bindings
-        // This makes `greet("test")` work without needing `__m.greet("test")`
-        const bindings = Object.keys(__m);
-        const destructure = bindings.length > 0
-          ? `const { ${bindings.join(", ")} } = __m;\n`
+        // Build a combined object of ALL module exports
+        // This makes `greet("test")` work even if greet is from another module
+        const allBindings: Record<string, unknown> = {};
+        for (const [modId, mod] of this.modules) {
+          for (const [key, value] of Object.entries(mod)) {
+            if (key !== "default" && !allBindings.hasOwnProperty(key)) {
+              allBindings[key] = value;
+            }
+          }
+        }
+        // Current module's bindings take precedence
+        Object.assign(allBindings, __m);
+
+        const bindingNames = Object.keys(allBindings);
+        console.log(`[hot] Available bindings for eval:`, bindingNames);
+        const destructure = bindingNames.length > 0
+          ? `const { ${bindingNames.join(", ")} } = __allBindings;\n`
           : "";
 
         // Create a function that has access to __m and __hot
