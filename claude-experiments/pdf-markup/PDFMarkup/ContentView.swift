@@ -4,7 +4,6 @@ import PDFKit
 
 struct ContentView: View {
     @State private var selectedColor: Color = .yellow
-    @State private var showingFilePicker = false
     @State private var pdfDocument: PDFDocument?
     @State private var selectedPDF: PDFMetadata?
     @State private var library: PDFLibrary?
@@ -12,8 +11,6 @@ struct ContentView: View {
     @State private var errorMessage: String?
 
     @StateObject private var downloader = PDFDownloader()
-
-    let highlightColors: [Color] = [.yellow, .green, .pink, .orange, .blue, .purple]
 
     var body: some View {
         NavigationSplitView {
@@ -43,58 +40,52 @@ struct ContentView: View {
                 }
             }
         } detail: {
-            VStack(spacing: 0) {
-                // Toolbar
-                HStack(spacing: 16) {
-                    Text("Highlight:")
-                        .font(.headline)
-
-                    ForEach(highlightColors, id: \.self) { color in
-                        Circle()
-                            .fill(color.opacity(0.5))
-                            .frame(width: 40, height: 40)
-                            .overlay(
-                                Circle()
-                                    .strokeBorder(Color.primary, lineWidth: selectedColor == color ? 3 : 1)
-                            )
-                            .onTapGesture {
-                                selectedColor = color
-                            }
-                    }
-
-                    Spacer()
-
-                    // Download indicator
-                    if downloader.isDownloading {
-                        ProgressView()
-                            .scaleEffect(0.8)
-                        Text("Downloading...")
-                            .font(.caption)
-                    }
-
-                    Button("Open File") {
-                        showingFilePicker = true
-                    }
-                    .buttonStyle(.borderedProminent)
-                }
-                .padding()
-                .background(Color(.systemBackground))
-
-                Divider()
-
+            ZStack {
                 // PDF viewer
-                if let pdfDocument = pdfDocument {
-                    PDFMarkupView(pdfDocument: pdfDocument, selectedColor: $selectedColor)
+                if let pdfDocument = pdfDocument, let pdfHash = selectedPDF?.hash {
+                    PDFMarkupView(pdfDocument: pdfDocument, pdfHash: pdfHash, selectedColor: $selectedColor)
                 } else {
                     VStack(spacing: 20) {
                         Image(systemName: "doc.fill")
                             .font(.system(size: 64))
-                            .foregroundStyle(.secondary)
-                        Text("Select a PDF from the sidebar or open a file")
-                            .font(.title2)
+                            .foregroundStyle(.tertiary)
+                        Text("Select a PDF from the sidebar")
+                            .font(.title3)
                             .foregroundStyle(.secondary)
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(Color(.systemGroupedBackground))
+                }
+
+                // Floating color palette on the right
+                if pdfDocument != nil {
+                    HStack {
+                        Spacer()
+                        FloatingColorPalette(selectedColor: $selectedColor)
+                            .padding(.trailing, 16)
+                    }
+                }
+
+                // Download indicator overlay
+                if downloader.isDownloading {
+                    VStack {
+                        HStack {
+                            Spacer()
+                            HStack(spacing: 8) {
+                                ProgressView()
+                                    .scaleEffect(0.7)
+                                Text("Downloading...")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 8)
+                            .background(.ultraThinMaterial)
+                            .cornerRadius(20)
+                            .padding()
+                        }
+                        Spacer()
+                    }
                 }
             }
         }
@@ -108,29 +99,11 @@ struct ContentView: View {
                 }
             }
         }
-        .fileImporter(
-            isPresented: $showingFilePicker,
-            allowedContentTypes: [.pdf]
-        ) { result in
-            switch result {
-            case .success(let url):
-                if url.startAccessingSecurityScopedResource() {
-                    defer { url.stopAccessingSecurityScopedResource() }
-                    if let doc = PDFDocument(url: url) {
-                        pdfDocument = doc
-                    }
-                }
-            case .failure(let error):
-                print("Error selecting file: \(error)")
-            }
-        }
     }
 
     func loadLibrary() async {
         isLoadingLibrary = true
         defer { isLoadingLibrary = false }
-
-        let indexPath = "/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/reading-tools/pdf-indexer/pdf-index.json"
 
         // Do heavy work off main thread
         await Task.detached {
@@ -138,7 +111,16 @@ struct ContentView: View {
             S3StateManager.shared.loadState()
 
             do {
-                let data = try Data(contentsOf: URL(fileURLWithPath: indexPath))
+                // Fetch pdf-index.json from S3
+                guard AWSCredentials.isConfigured() else {
+                    await MainActor.run {
+                        self.errorMessage = "AWS credentials not configured"
+                    }
+                    return
+                }
+
+                let indexURL = URL(string: "https://\(AWSCredentials.bucket).s3.\(AWSCredentials.region).amazonaws.com/pdf-index.json")!
+                let (data, _) = try await URLSession.shared.data(from: indexURL)
                 let pdfs = try JSONDecoder().decode([PDFMetadata].self, from: data)
 
                 // Only keep PDFs that are in S3
@@ -169,52 +151,354 @@ struct ContentView: View {
     }
 }
 
+// MARK: - Floating Color Palette
+
+struct FloatingColorPalette: View {
+    @Binding var selectedColor: Color
+    @StateObject private var customColors = CustomColorStore()
+    @State private var showingColorPicker = false
+    @State private var newColor = Color.cyan
+
+    private let defaultColors: [(Color, String)] = [
+        (Color(red: 1.0, green: 0.95, blue: 0.4), "yellow"),
+        (Color(red: 0.6, green: 0.95, blue: 0.6), "green"),
+        (Color(red: 1.0, green: 0.45, blue: 0.45), "red"),
+        (Color(red: 1.0, green: 0.75, blue: 0.4), "orange"),
+        (Color(red: 0.6, green: 0.8, blue: 1.0), "blue"),
+        (Color(red: 0.85, green: 0.7, blue: 1.0), "purple"),
+    ]
+
+    var body: some View {
+        VStack(spacing: 6) {
+            // Eraser at top
+            EraserButton(isSelected: selectedColor == .clear) {
+                withAnimation(.easeInOut(duration: 0.15)) {
+                    selectedColor = .clear
+                }
+            }
+
+            Divider()
+                .frame(width: 20)
+                .padding(.vertical, 2)
+
+            // Default color dots
+            ForEach(defaultColors, id: \.1) { color, name in
+                ColorDot(
+                    color: color,
+                    isSelected: isDefaultColorSelected(name: name),
+                    action: { selectDefaultColor(name: name) }
+                )
+            }
+
+            // Custom colors
+            ForEach(Array(customColors.colors.enumerated()), id: \.offset) { index, colorData in
+                ColorDot(
+                    color: colorData.color,
+                    isSelected: isCustomColorSelected(colorData),
+                    action: { selectCustomColor(colorData) }
+                )
+                .contextMenu {
+                    Button(role: .destructive) {
+                        customColors.remove(at: index)
+                    } label: {
+                        Label("Remove", systemImage: "trash")
+                    }
+                }
+            }
+
+            // Add color button
+            if customColors.colors.count < 6 {
+                Divider()
+                    .frame(width: 20)
+                    .padding(.vertical, 2)
+
+                AddColorButton {
+                    showingColorPicker = true
+                }
+            }
+        }
+        .padding(.vertical, 10)
+        .padding(.horizontal, 6)
+        .background(
+            RoundedRectangle(cornerRadius: 20)
+                .fill(.ultraThinMaterial)
+                .shadow(color: Color.black.opacity(0.15), radius: 8, x: 0, y: 2)
+        )
+        .sheet(isPresented: $showingColorPicker) {
+            ColorPickerSheet(color: $newColor) {
+                customColors.add(newColor)
+                selectedColor = newColor
+                showingColorPicker = false
+            }
+        }
+    }
+
+    private func isDefaultColorSelected(name: String) -> Bool {
+        switch name {
+        case "yellow": return selectedColor == .yellow
+        case "green": return selectedColor == .green
+        case "red": return selectedColor == .red
+        case "orange": return selectedColor == .orange
+        case "blue": return selectedColor == .blue
+        case "purple": return selectedColor == .purple
+        default: return false
+        }
+    }
+
+    private func selectDefaultColor(name: String) {
+        withAnimation(.easeInOut(duration: 0.15)) {
+            switch name {
+            case "yellow": selectedColor = .yellow
+            case "green": selectedColor = .green
+            case "red": selectedColor = .red
+            case "orange": selectedColor = .orange
+            case "blue": selectedColor = .blue
+            case "purple": selectedColor = .purple
+            default: break
+            }
+        }
+    }
+
+    private func isCustomColorSelected(_ colorData: StorableColor) -> Bool {
+        // Compare RGB components
+        return colorData.matches(selectedColor)
+    }
+
+    private func selectCustomColor(_ colorData: StorableColor) {
+        withAnimation(.easeInOut(duration: 0.15)) {
+            selectedColor = colorData.color
+        }
+    }
+}
+
+// MARK: - Custom Color Storage
+
+struct StorableColor: Codable, Equatable {
+    let red: Double
+    let green: Double
+    let blue: Double
+    let alpha: Double
+
+    init(_ color: Color) {
+        let uiColor = UIColor(color)
+        var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+        uiColor.getRed(&r, green: &g, blue: &b, alpha: &a)
+        self.red = Double(r)
+        self.green = Double(g)
+        self.blue = Double(b)
+        self.alpha = Double(a)
+    }
+
+    var color: Color {
+        Color(red: red, green: green, blue: blue, opacity: alpha)
+    }
+
+    func matches(_ other: Color) -> Bool {
+        let otherStorable = StorableColor(other)
+        return abs(red - otherStorable.red) < 0.01 &&
+               abs(green - otherStorable.green) < 0.01 &&
+               abs(blue - otherStorable.blue) < 0.01
+    }
+}
+
+class CustomColorStore: ObservableObject {
+    @Published var colors: [StorableColor] = []
+
+    private let key = "customHighlightColors"
+
+    init() {
+        load()
+    }
+
+    func add(_ color: Color) {
+        let storable = StorableColor(color)
+        if !colors.contains(storable) {
+            colors.append(storable)
+            save()
+        }
+    }
+
+    func remove(at index: Int) {
+        colors.remove(at: index)
+        save()
+    }
+
+    private func save() {
+        if let data = try? JSONEncoder().encode(colors) {
+            UserDefaults.standard.set(data, forKey: key)
+        }
+    }
+
+    private func load() {
+        if let data = UserDefaults.standard.data(forKey: key),
+           let decoded = try? JSONDecoder().decode([StorableColor].self, from: data) {
+            colors = decoded
+        }
+    }
+}
+
+// MARK: - Color Picker Sheet
+
+struct ColorPickerSheet: View {
+    @Binding var color: Color
+    @Environment(\.dismiss) var dismiss
+    let onAdd: () -> Void
+
+    var body: some View {
+        NavigationView {
+            VStack(spacing: 24) {
+                ColorPicker("Choose a highlight color", selection: $color, supportsOpacity: false)
+                    .labelsHidden()
+                    .scaleEffect(1.5)
+
+                // Preview
+                RoundedRectangle(cornerRadius: 12)
+                    .fill(color.opacity(0.5))
+                    .frame(height: 60)
+                    .overlay(
+                        Text("Preview")
+                            .foregroundColor(.primary)
+                    )
+                    .padding(.horizontal)
+
+                Spacer()
+            }
+            .padding(.top, 40)
+            .navigationTitle("Add Color")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") {
+                        dismiss()
+                    }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Add") {
+                        onAdd()
+                    }
+                }
+            }
+        }
+    }
+}
+
+// MARK: - Add Color Button
+
+struct AddColorButton: View {
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            ZStack {
+                Circle()
+                    .fill(Color(.systemGray5))
+                    .frame(width: 28, height: 28)
+                Image(systemName: "plus")
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundColor(.secondary)
+            }
+            .overlay(
+                Circle()
+                    .strokeBorder(Color.black.opacity(0.1), lineWidth: 1)
+            )
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+struct EraserButton: View {
+    let isSelected: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            ZStack {
+                Circle()
+                    .fill(Color(.systemGray5))
+                    .frame(width: 28, height: 28)
+                Image(systemName: "eraser.fill")
+                    .font(.system(size: 14))
+                    .foregroundColor(.secondary)
+            }
+            .overlay(
+                Circle()
+                    .strokeBorder(Color.white, lineWidth: isSelected ? 3 : 0)
+                    .shadow(color: .black.opacity(0.2), radius: 1, x: 0, y: 1)
+            )
+            .overlay(
+                Circle()
+                    .strokeBorder(Color.black.opacity(0.1), lineWidth: 1)
+            )
+            .scaleEffect(isSelected ? 1.1 : 1.0)
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+struct ColorDot: View {
+    let color: Color
+    let isSelected: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Circle()
+                .fill(color)
+                .frame(width: 28, height: 28)
+                .overlay(
+                    Circle()
+                        .strokeBorder(Color.white, lineWidth: isSelected ? 3 : 0)
+                        .shadow(color: .black.opacity(0.2), radius: 1, x: 0, y: 1)
+                )
+                .overlay(
+                    Circle()
+                        .strokeBorder(Color.black.opacity(0.1), lineWidth: 1)
+                )
+                .scaleEffect(isSelected ? 1.1 : 1.0)
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+// MARK: - PDF Markup View
+
 struct PDFMarkupView: View {
     let pdfDocument: PDFDocument
+    let pdfHash: String
     @Binding var selectedColor: Color
 
     var body: some View {
         ScrollView {
-            LazyVStack(spacing: 20) {
+            LazyVStack(spacing: 24) {
                 ForEach(0..<pdfDocument.pageCount, id: \.self) { pageIndex in
                     if let page = pdfDocument.page(at: pageIndex) {
-                        VStack(spacing: 8) {
-                            // Page number indicator
-                            HStack {
-                                Text("Page \(pageIndex + 1)")
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
-                                    .padding(.horizontal, 12)
-                                    .padding(.vertical, 4)
-                                    .background(Color(.systemGray5))
-                                    .cornerRadius(12)
-                                Spacer()
-                            }
-                            .padding(.horizontal)
-
-                            // PDF page with PencilKit overlay
-                            PDFPageView(page: page, selectedColor: $selectedColor, pageIndex: pageIndex)
-                                .aspectRatio(page.bounds(for: .mediaBox).width / page.bounds(for: .mediaBox).height, contentMode: .fit)
-                                .frame(maxWidth: 800)
-                                .shadow(color: Color.black.opacity(0.1), radius: 8, x: 0, y: 4)
-                                .frame(minHeight: 600) // Ensure minimum height for each page
-                        }
+                        PDFPageView(page: page, pdfHash: pdfHash, selectedColor: $selectedColor, pageIndex: pageIndex)
+                            .aspectRatio(page.bounds(for: .mediaBox).width / page.bounds(for: .mediaBox).height, contentMode: .fit)
+                            .frame(maxWidth: 800)
+                            .background(Color.white)
+                            .cornerRadius(4)
+                            .shadow(color: Color.black.opacity(0.08), radius: 12, x: 0, y: 4)
+                            .frame(minHeight: 600)
                     }
                 }
             }
-            .padding()
+            .padding(.vertical, 24)
+            .padding(.horizontal, 40)
         }
+        .background(Color(.systemGroupedBackground))
         .scrollIndicators(.visible)
+        .id(pdfHash) // Force view recreation when PDF changes
     }
 }
 
 struct PDFPageView: UIViewRepresentable {
     let page: PDFPage
+    let pdfHash: String
     @Binding var selectedColor: Color
     let pageIndex: Int
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(selectedColor: $selectedColor, pageIndex: pageIndex)
+        Coordinator(selectedColor: $selectedColor, pdfHash: pdfHash, pageIndex: pageIndex)
     }
 
     func makeUIView(context: Context) -> UIView {
@@ -254,12 +538,19 @@ struct PDFPageView: UIViewRepresentable {
 
         containerView.addSubview(canvasView)
 
-        // Setup tool with initial color
-        let ink = PKInkingTool(.marker, color: UIColor(context.coordinator.selectedColor), width: 20)
-        canvasView.tool = ink
+        // Setup tool with initial color (or eraser)
+        if context.coordinator.selectedColor == .clear {
+            canvasView.tool = PKEraserTool(.bitmap)
+        } else {
+            let ink = PKInkingTool(.marker, color: UIColor.highlightColor(from: context.coordinator.selectedColor), width: 20)
+            canvasView.tool = ink
+        }
 
         context.coordinator.canvasView = canvasView
         context.coordinator.containerView = containerView
+
+        // Set up delegate to save drawings when changed
+        canvasView.delegate = context.coordinator
 
         NSLayoutConstraint.activate([
             pdfView.topAnchor.constraint(equalTo: containerView.topAnchor),
@@ -280,36 +571,39 @@ struct PDFPageView: UIViewRepresentable {
     }
 
     func updateUIView(_ uiView: UIView, context: Context) {
-        // Update the tool color when selectedColor changes
+        // Update the tool when selectedColor changes
         if let canvasView = context.coordinator.canvasView {
-            let ink = PKInkingTool(.marker, color: UIColor(selectedColor), width: 20)
-            canvasView.tool = ink
+            if selectedColor == .clear {
+                canvasView.tool = PKEraserTool(.bitmap)
+            } else {
+                let ink = PKInkingTool(.marker, color: UIColor.highlightColor(from: selectedColor), width: 20)
+                canvasView.tool = ink
+            }
         }
     }
 
-    class Coordinator: NSObject {
+    class Coordinator: NSObject, PKCanvasViewDelegate {
         @Binding var selectedColor: Color
         weak var canvasView: PKCanvasView?
         weak var containerView: UIView?
+        let pdfHash: String
         let pageIndex: Int
 
-        // Store drawings per page
-        static var pageDrawings: [Int: PKDrawing] = [:]
-
-        init(selectedColor: Binding<Color>, pageIndex: Int) {
+        init(selectedColor: Binding<Color>, pdfHash: String, pageIndex: Int) {
             self._selectedColor = selectedColor
+            self.pdfHash = pdfHash
             self.pageIndex = pageIndex
             super.init()
         }
 
-        func saveDrawing() {
-            if let canvas = canvasView {
-                Coordinator.pageDrawings[pageIndex] = canvas.drawing
-            }
+        // Called when drawing changes - save it
+        func canvasViewDrawingDidChange(_ canvasView: PKCanvasView) {
+            DrawingManager.shared.scheduleSave(canvasView.drawing, pdfHash: pdfHash, page: pageIndex)
         }
 
         func loadDrawing() {
-            if let canvas = canvasView, let drawing = Coordinator.pageDrawings[pageIndex] {
+            if let canvas = canvasView,
+               let drawing = DrawingManager.shared.loadDrawing(pdfHash: pdfHash, page: pageIndex) {
                 canvas.drawing = drawing
             }
         }
@@ -317,24 +611,30 @@ struct PDFPageView: UIViewRepresentable {
 }
 
 extension UIColor {
-    convenience init(_ color: Color) {
-        // Use UIColor's native color system instead of trying to extract components
+    static func highlightColor(from color: Color) -> UIColor {
+        // Handle known system colors with specific highlighter values
         switch color {
         case .yellow:
-            self.init(red: 1.0, green: 1.0, blue: 0.0, alpha: 0.5)
+            return UIColor(red: 1.0, green: 1.0, blue: 0.0, alpha: 0.5)
         case .green:
-            self.init(red: 0.0, green: 1.0, blue: 0.0, alpha: 0.5)
-        case .pink:
-            self.init(red: 1.0, green: 0.75, blue: 0.8, alpha: 0.5)
+            return UIColor(red: 0.0, green: 1.0, blue: 0.0, alpha: 0.5)
+        case .red:
+            return UIColor(red: 1.0, green: 0.35, blue: 0.35, alpha: 0.5)
         case .orange:
-            self.init(red: 1.0, green: 0.65, blue: 0.0, alpha: 0.5)
+            return UIColor(red: 1.0, green: 0.65, blue: 0.0, alpha: 0.5)
         case .blue:
-            self.init(red: 0.0, green: 0.5, blue: 1.0, alpha: 0.5)
+            return UIColor(red: 0.0, green: 0.5, blue: 1.0, alpha: 0.5)
         case .purple:
-            self.init(red: 0.5, green: 0.0, blue: 0.5, alpha: 0.5)
+            return UIColor(red: 0.6, green: 0.3, blue: 0.9, alpha: 0.5)
         default:
-            // Fallback to yellow
-            self.init(red: 1.0, green: 1.0, blue: 0.0, alpha: 0.5)
+            // For custom colors, use cgColor to extract components
+            if let cgColor = color.cgColor,
+               let components = cgColor.components,
+               components.count >= 3 {
+                return UIColor(red: components[0], green: components[1], blue: components[2], alpha: 0.5)
+            }
+            // Fallback
+            return UIColor(red: 1.0, green: 1.0, blue: 0.0, alpha: 0.5)
         }
     }
 }

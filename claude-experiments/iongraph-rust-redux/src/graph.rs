@@ -5,6 +5,9 @@ use crate::compilers::universal::{UniversalIR, UniversalInstruction};
 use crate::layout_provider::{LayoutProvider, Vec2};
 use std::collections::HashSet;
 
+#[cfg(target_arch = "wasm32")]
+use web_sys;
+
 pub const CONTENT_PADDING: f64 = 20.0;
 pub const BLOCK_GAP: f64 = 44.0;
 pub const PORT_START: f64 = 16.0;
@@ -316,6 +319,17 @@ impl<P: LayoutProvider> Graph<P> {
 
         let mut el = self.layout_provider.create_element("div");
 
+        // Calculate and set block size upfront (needed for WebGL which can't measure DOM)
+        let has_lir = false; // TODO: detect LIR from instruction attributes
+        let calculated_size = self.layout_provider.calculate_block_size(
+            &block_id,
+            instructions.len(),
+            has_lir,
+            false, // has_samples
+        );
+        self.layout_provider.set_style(&mut el, "width", &format!("{}px", calculated_size.x));
+        self.layout_provider.set_style(&mut el, "height", &format!("{}px", calculated_size.y));
+
         self.layout_provider
             .add_classes(&mut el, &["ig-block", "ig-bg-white"]);
 
@@ -461,6 +475,24 @@ impl<P: LayoutProvider> Graph<P> {
                                         &mut block_el,
                                         "top",
                                         &format!("{}px", block_node.pos.y),
+                                    );
+                                    // Set block size (needed for WebGL renderer)
+                                    // Debug: log size being set
+                                    #[cfg(target_arch = "wasm32")]
+                                    web_sys::console::log_1(&format!(
+                                        "Setting block {} size: {}x{}",
+                                        block_idx, block_node.size.x, block_node.size.y
+                                    ).into());
+
+                                    self.layout_provider.set_style(
+                                        &mut block_el,
+                                        "width",
+                                        &format!("{}px", block_node.size.x),
+                                    );
+                                    self.layout_provider.set_style(
+                                        &mut block_el,
+                                        "height",
+                                        &format!("{}px", block_node.size.y),
                                     );
                                     break;
                                 }
@@ -917,6 +949,7 @@ fn downward_arrow<P: LayoutProvider>(
     let mut g = layout_provider.create_svg_element("g");
 
     let mut p = layout_provider.create_svg_element("path");
+    layout_provider.add_class(&mut p, "ig-arrow");
     layout_provider.set_attribute(&mut p, "d", &path);
     layout_provider.set_attribute(&mut p, "fill", "none");
     layout_provider.set_attribute(&mut p, "stroke", "black");
@@ -995,6 +1028,7 @@ fn upward_arrow<P: LayoutProvider>(
     let mut g = layout_provider.create_svg_element("g");
 
     let mut p = layout_provider.create_svg_element("path");
+    layout_provider.add_class(&mut p, "ig-arrow");
     layout_provider.set_attribute(&mut p, "d", &path);
     layout_provider.set_attribute(&mut p, "fill", "none");
     layout_provider.set_attribute(&mut p, "stroke", "black");
@@ -1036,6 +1070,7 @@ fn arrow_to_backedge<P: LayoutProvider>(
     let mut g = layout_provider.create_svg_element("g");
 
     let mut p = layout_provider.create_svg_element("path");
+    layout_provider.add_class(&mut p, "ig-arrow");
     layout_provider.set_attribute(&mut p, "d", &path);
     layout_provider.set_attribute(&mut p, "fill", "none");
     layout_provider.set_attribute(&mut p, "stroke", "black");
@@ -1081,6 +1116,7 @@ fn arrow_from_block_to_backedge_dummy<P: LayoutProvider>(
     let mut g = layout_provider.create_svg_element("g");
 
     let mut p = layout_provider.create_svg_element("path");
+    layout_provider.add_class(&mut p, "ig-arrow");
     layout_provider.set_attribute(&mut p, "d", &path);
     layout_provider.set_attribute(&mut p, "fill", "none");
     layout_provider.set_attribute(&mut p, "stroke", "black");
@@ -1115,6 +1151,7 @@ fn loop_header_arrow<P: LayoutProvider>(
     let mut g = layout_provider.create_svg_element("g");
 
     let mut p = layout_provider.create_svg_element("path");
+    layout_provider.add_class(&mut p, "ig-arrow");
     layout_provider.set_attribute(&mut p, "d", &path);
     layout_provider.set_attribute(&mut p, "fill", "none");
     layout_provider.set_attribute(&mut p, "stroke", "black");
@@ -1196,6 +1233,7 @@ fn back_edge_arrow<P: LayoutProvider>(
     let mut g = layout_provider.create_svg_element("g");
 
     let mut p = layout_provider.create_svg_element("path");
+    layout_provider.add_class(&mut p, "ig-arrow");
     layout_provider.set_attribute(&mut p, "d", &path);
     layout_provider.set_attribute(&mut p, "fill", "none");
     layout_provider.set_attribute(&mut p, "stroke", "black");
@@ -1281,6 +1319,7 @@ fn self_loop_arrow<P: LayoutProvider>(
     let mut g = layout_provider.create_svg_element("g");
 
     let mut p = layout_provider.create_svg_element("path");
+    layout_provider.add_class(&mut p, "ig-arrow");
     layout_provider.set_attribute(&mut p, "d", &path);
     layout_provider.set_attribute(&mut p, "fill", "none");
     layout_provider.set_attribute(&mut p, "stroke", "black");
@@ -1302,6 +1341,7 @@ fn arrowhead<P: LayoutProvider>(
     size: i32,
 ) -> Box<P::Element> {
     let mut p = layout_provider.create_svg_element("path");
+    layout_provider.add_class(&mut p, "ig-arrowhead");
     layout_provider.set_attribute(
         &mut p,
         "d",

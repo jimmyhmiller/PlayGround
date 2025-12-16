@@ -21,6 +21,14 @@ pub mod json_compat;
 #[cfg(target_arch = "wasm32")]
 pub mod wasm;
 
+// WebGL renderer module (conditionally compiled with webgl feature)
+#[cfg(feature = "webgl")]
+pub mod webgl;
+
+// WebGL WASM bindings (requires both webgl feature and wasm32 target)
+#[cfg(all(feature = "webgl", target_arch = "wasm32"))]
+pub mod wasm_webgl;
+
 // Re-export core traits for easy access
 pub use core::{CompilerIR, IRInstruction, IRBlock, SemanticAttribute};
 

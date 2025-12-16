@@ -14,12 +14,43 @@ serde_json = { version = "1.0", optional = true }
 wasm-bindgen = "0.2"
 console_error_panic_hook = "0.1"
 
+# WebGL rendering (optional)
+lyon = { version = "1.0", optional = true }
+js-sys = { version = "0.3", optional = true }
+
+[dependencies.web-sys]
+version = "0.3"
+optional = true
+features = [
+    "Window",
+    "Document",
+    "Element",
+    "console",
+    "HtmlCanvasElement",
+    "HtmlImageElement",
+    "ImageData",
+    "CanvasRenderingContext2d",
+    "WebGl2RenderingContext",
+    "WebGlProgram",
+    "WebGlShader",
+    "WebGlBuffer",
+    "WebGlTexture",
+    "WebGlUniformLocation",
+    "WebGlVertexArrayObject",
+    "MouseEvent",
+    "WheelEvent",
+    "KeyboardEvent",
+    "TextMetrics",
+    "Performance",
+]
+
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
 
 [features]
 default = []
 serde = ["dep:serde", "dep:serde_json"]
+webgl = ["dep:lyon", "dep:web-sys", "dep:js-sys", "serde"]
 
 [profile.release]
 opt-level = "z"

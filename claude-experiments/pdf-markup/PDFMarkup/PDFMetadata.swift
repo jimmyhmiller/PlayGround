@@ -46,9 +46,9 @@ struct PDFMetadata: Codable, Identifiable, Hashable {
         return "uncategorized"
     }
 
-    func s3URL(bucket: String = "jimmyhmiller-bucket") -> URL? {
+    func s3URL() -> URL? {
         // Use S3StateManager to get the correct URL
-        return S3StateManager.shared.s3URL(for: hash, bucket: bucket)
+        return S3StateManager.shared.s3URL(for: hash)
     }
 }
 

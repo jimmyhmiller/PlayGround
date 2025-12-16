@@ -1,0 +1,112 @@
+{
+  "name": "hot-reload",
+  "displayName": "Hot Reload",
+  "description": "Expression-level hot reloading for JavaScript - REPL-like evaluation into running Node.js processes",
+  "version": "0.1.0",
+  "publisher": "hot-reload",
+  "engines": {
+    "vscode": "^1.74.0"
+  },
+  "categories": [
+    "Debuggers",
+    "Programming Languages",
+    "Other"
+  ],
+  "keywords": [
+    "javascript",
+    "typescript",
+    "hot-reload",
+    "repl",
+    "eval"
+  ],
+  "activationEvents": [
+    "onLanguage:javascript",
+    "onLanguage:typescript",
+    "onLanguage:javascriptreact",
+    "onLanguage:typescriptreact"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "hotReload.connect",
+        "title": "Hot Reload: Connect"
+      },
+      {
+        "command": "hotReload.disconnect",
+        "title": "Hot Reload: Disconnect"
+      },
+      {
+        "command": "hotReload.evalSelection",
+        "title": "Hot Reload: Eval Selection"
+      },
+      {
+        "command": "hotReload.evalDefun",
+        "title": "Hot Reload: Eval Function/Class at Cursor"
+      },
+      {
+        "command": "hotReload.evalBuffer",
+        "title": "Hot Reload: Eval Buffer"
+      },
+      {
+        "command": "hotReload.evalExpression",
+        "title": "Hot Reload: Eval Expression..."
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "hotReload.evalDefun",
+        "key": "ctrl+c ctrl+c",
+        "mac": "ctrl+c ctrl+c",
+        "when": "editorTextFocus && editorLangId =~ /javascript|typescript|javascriptreact|typescriptreact/"
+      },
+      {
+        "command": "hotReload.evalSelection",
+        "key": "ctrl+x ctrl+e",
+        "mac": "ctrl+x ctrl+e",
+        "when": "editorTextFocus && editorLangId =~ /javascript|typescript|javascriptreact|typescriptreact/"
+      },
+      {
+        "command": "hotReload.evalBuffer",
+        "key": "ctrl+c ctrl+k",
+        "mac": "ctrl+c ctrl+k",
+        "when": "editorTextFocus && editorLangId =~ /javascript|typescript|javascriptreact|typescriptreact/"
+      }
+    ],
+    "configuration": {
+      "title": "Hot Reload",
+      "properties": {
+        "hotReload.port": {
+          "type": "number",
+          "default": 3456,
+          "description": "Port for the hot reload WebSocket server"
+        },
+        "hotReload.host": {
+          "type": "string",
+          "default": "localhost",
+          "description": "Host for the hot reload WebSocket server"
+        },
+        "hotReload.autoConnect": {
+          "type": "boolean",
+          "default": false,
+          "description": "Automatically connect when opening a JavaScript/TypeScript file"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "lint": "eslint src --ext ts"
+  },
+  "devDependencies": {
+    "@types/node": "^18.0.0",
+    "@types/vscode": "^1.74.0",
+    "@types/ws": "^8.5.0",
+    "typescript": "^5.0.0"
+  },
+  "dependencies": {
+    "ws": "^8.14.0"
+  }
+}

@@ -1,0 +1,23 @@
+[
+    {
+        "keys": ["ctrl+c", "ctrl+c"],
+        "command": "hot_reload_eval_defun",
+        "context": [
+            { "key": "selector", "operator": "equal", "operand": "source.js, source.ts, source.jsx, source.tsx" }
+        ]
+    },
+    {
+        "keys": ["ctrl+x", "ctrl+e"],
+        "command": "hot_reload_eval_selection",
+        "context": [
+            { "key": "selector", "operator": "equal", "operand": "source.js, source.ts, source.jsx, source.tsx" }
+        ]
+    },
+    {
+        "keys": ["ctrl+c", "ctrl+k"],
+        "command": "hot_reload_eval_buffer",
+        "context": [
+            { "key": "selector", "operator": "equal", "operand": "source.js, source.ts, source.jsx, source.tsx" }
+        ]
+    }
+]

@@ -15,6 +15,10 @@
 		A1000011000000000000001 /* PDFDownloader.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000C000000000000001 /* PDFDownloader.swift */; };
 		A1000013000000000000001 /* PDFLibrarySidebar.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000E000000000000001 /* PDFLibrarySidebar.swift */; };
 		A1000015000000000000001 /* S3State.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000016000000000000001 /* S3State.swift */; };
+		A1000017000000000000001 /* DrawingManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000018000000000000001 /* DrawingManager.swift */; };
+		A1000019000000000000001 /* DrawingSyncManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100001A000000000000001 /* DrawingSyncManager.swift */; };
+		A100001B000000000000001 /* AWSCredentials.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100001C000000000000001 /* AWSCredentials.swift */; };
+		A100001D000000000000001 /* aws-config.plist in Resources */ = {isa = PBXBuildFile; fileRef = A100001E000000000000001 /* aws-config.plist */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -22,11 +26,15 @@
 		A1000002000000000000001 /* PDFMarkupApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PDFMarkupApp.swift; sourceTree = "<group>"; };
 		A1000004000000000000001 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		A1000006000000000000001 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
-		A1000008000000000000001 /* sample.pdf */ = {isa = PBXFileReference; lastKnownFileType = file; path = sample.pdf; sourceTree = "<group>"; };
+		A1000008000000000000001 /* sample.pdf */ = {isa = PBXFileReference; lastKnownFileType = image.pdf; path = sample.pdf; sourceTree = "<group>"; };
 		A100000A000000000000001 /* PDFMetadata.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PDFMetadata.swift; sourceTree = "<group>"; };
 		A100000C000000000000001 /* PDFDownloader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PDFDownloader.swift; sourceTree = "<group>"; };
 		A100000E000000000000001 /* PDFLibrarySidebar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PDFLibrarySidebar.swift; sourceTree = "<group>"; };
 		A1000016000000000000001 /* S3State.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = S3State.swift; sourceTree = "<group>"; };
+		A1000018000000000000001 /* DrawingManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DrawingManager.swift; sourceTree = "<group>"; };
+		A100001A000000000000001 /* DrawingSyncManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DrawingSyncManager.swift; sourceTree = "<group>"; };
+		A100001C000000000000001 /* AWSCredentials.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AWSCredentials.swift; sourceTree = "<group>"; };
+		A100001E000000000000001 /* aws-config.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = "aws-config.plist"; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -57,6 +65,10 @@
 				A100000C000000000000001 /* PDFDownloader.swift */,
 				A100000E000000000000001 /* PDFLibrarySidebar.swift */,
 				A1000016000000000000001 /* S3State.swift */,
+				A1000018000000000000001 /* DrawingManager.swift */,
+				A100001A000000000000001 /* DrawingSyncManager.swift */,
+				A100001C000000000000001 /* AWSCredentials.swift */,
+				A100001E000000000000001 /* aws-config.plist */,
 				A1000008000000000000001 /* sample.pdf */,
 				A1000006000000000000001 /* Assets.xcassets */,
 			);
@@ -131,6 +143,7 @@
 			files = (
 				A1000005000000000000001 /* Assets.xcassets in Resources */,
 				A1000007000000000000001 /* sample.pdf in Resources */,
+				A100001D000000000000001 /* aws-config.plist in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -147,6 +160,9 @@
 				A1000011000000000000001 /* PDFDownloader.swift in Sources */,
 				A1000013000000000000001 /* PDFLibrarySidebar.swift in Sources */,
 				A1000015000000000000001 /* S3State.swift in Sources */,
+				A1000017000000000000001 /* DrawingManager.swift in Sources */,
+				A1000019000000000000001 /* DrawingSyncManager.swift in Sources */,
+				A100001B000000000000001 /* AWSCredentials.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -279,7 +295,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = "";
+				DEVELOPMENT_TEAM = 7J8U597P7P;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
@@ -312,7 +328,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = "";
+				DEVELOPMENT_TEAM = 7J8U597P7P;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;

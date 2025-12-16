@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Hot Reload Electron Demo</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      padding: 40px;
+      background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+      color: #eee;
+      min-height: 100vh;
+      margin: 0;
+    }
+    h1 {
+      color: #00d9ff;
+      margin-bottom: 10px;
+    }
+    .subtitle {
+      color: #888;
+      margin-bottom: 30px;
+    }
+    #greeting {
+      font-size: 24px;
+      padding: 20px;
+      background: rgba(255,255,255,0.1);
+      border-radius: 8px;
+      margin-bottom: 20px;
+    }
+    #status {
+      color: #888;
+      font-size: 14px;
+      margin-bottom: 20px;
+    }
+    button {
+      background: #00d9ff;
+      color: #1a1a2e;
+      border: none;
+      padding: 12px 24px;
+      font-size: 16px;
+      border-radius: 6px;
+      cursor: pointer;
+      margin-right: 10px;
+    }
+    button:hover {
+      background: #00b8d9;
+    }
+    .instructions {
+      margin-top: 40px;
+      padding: 20px;
+      background: rgba(0, 217, 255, 0.1);
+      border-radius: 8px;
+      border-left: 4px solid #00d9ff;
+    }
+    .instructions h3 {
+      margin-top: 0;
+      color: #00d9ff;
+    }
+    code {
+      background: rgba(255,255,255,0.1);
+      padding: 2px 6px;
+      border-radius: 4px;
+    }
+  </style>
+</head>
+<body>
+  <h1>🔥 Hot Reload Electron</h1>
+  <p class="subtitle">Edit main.js and see changes instantly!</p>
+
+  <div id="greeting">Loading...</div>
+  <div id="status">Loading...</div>
+
+  <button id="clickBtn">Click Me!</button>
+  <button id="refreshBtn">Refresh Display</button>
+
+  <div class="instructions">
+    <h3>Try it!</h3>
+    <p>1. Edit <code>main.js</code> - change the <code>getGreeting()</code> function</p>
+    <p>2. Save the file</p>
+    <p>3. Click "Refresh Display" to see your changes!</p>
+    <p>Notice: The click count is preserved across reloads! 🎉</p>
+  </div>
+
+  <script>
+    async function updateDisplay() {
+      document.getElementById('greeting').textContent = await window.api.getGreeting();
+      document.getElementById('status').textContent = await window.api.getStatus();
+    }
+
+    document.getElementById('clickBtn').addEventListener('click', async () => {
+      const result = await window.api.handleClick();
+      document.getElementById('greeting').textContent = result;
+      updateDisplay();
+    });
+
+    document.getElementById('refreshBtn').addEventListener('click', updateDisplay);
+
+    // Initial load
+    updateDisplay();
+
+    // Auto-refresh every 2 seconds to show hot-reload changes
+    setInterval(updateDisplay, 2000);
+  </script>
+</body>
+</html>

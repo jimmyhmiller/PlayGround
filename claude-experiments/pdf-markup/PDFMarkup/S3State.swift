@@ -17,10 +17,15 @@ class S3StateManager {
     private init() {}
 
     func loadState() {
-        let statePath = "/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/reading-tools/pdf-sync/.pdf-sync-state.json"
+        guard AWSCredentials.isConfigured() else {
+            print("AWS credentials not configured")
+            return
+        }
+
+        let stateURL = URL(string: "https://\(AWSCredentials.bucket).s3.\(AWSCredentials.region).amazonaws.com/pdf-sync-state.json")!
 
         do {
-            let data = try Data(contentsOf: URL(fileURLWithPath: statePath))
+            let data = try Data(contentsOf: stateURL)
             state = try JSONDecoder().decode(S3State.self, from: data)
         } catch {
             print("Failed to load S3 state: \(error)")
@@ -42,14 +47,19 @@ class S3StateManager {
         }
     }
 
-    func s3URL(for hash: String, bucket: String = "jimmyhmiller-bucket") -> URL? {
+    func s3URL(for hash: String) -> URL? {
+        guard AWSCredentials.isConfigured() else {
+            print("AWS credentials not configured")
+            return nil
+        }
+
         guard let key = s3Key(for: hash) else {
             print("No S3 key found for hash: \(hash)")
             return nil
         }
 
-        // S3 URL format: https://bucket.s3.amazonaws.com/key
-        let urlString = "https://\(bucket).s3.amazonaws.com/\(key)"
+        // S3 URL format: https://bucket.s3.region.amazonaws.com/key
+        let urlString = "https://\(AWSCredentials.bucket).s3.\(AWSCredentials.region).amazonaws.com/\(key)"
         return URL(string: urlString)
     }
 }

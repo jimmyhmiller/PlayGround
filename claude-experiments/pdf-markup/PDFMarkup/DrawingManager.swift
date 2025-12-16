@@ -101,7 +101,7 @@ class DrawingManager: ObservableObject {
         // Save to disk
         saveToDisk(pdfDrawings)
 
-        // Mark for S3 sync
+        // Mark for S3 sync (if configured)
         DrawingSyncManager.shared.markForSync(pdfHash: pdfHash)
     }
 
