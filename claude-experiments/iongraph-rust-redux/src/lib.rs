@@ -38,3 +38,4 @@ pub use compilers::IonIR;
 
 // Re-export high-level API for easy access
 pub use api::{render_svg, render_svg_from_json, render_ion_pass, GraphBuilder};
+pub use api::{Render, ToGraph, GraphBlock, GraphInstruction};

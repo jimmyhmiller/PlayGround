@@ -1,15 +1,39 @@
-use crate::SSATranslator;
-use crate::ast::{BinaryOperator, UnaryOperator};
-use crate::instruction::{Block, Instruction, Value, Variable};
+//! Generic SSA visualizer for Graphviz DOT output.
+
 use std::fs;
 use std::process::Command;
 
-pub struct SSAVisualizer<'a> {
-    translator: &'a SSATranslator,
+use crate::traits::{InstructionFactory, SsaInstruction, SsaValue};
+use crate::translator::SSATranslator;
+use crate::types::Block;
+
+/// Trait for formatting values in visualization
+pub trait FormatValue {
+    fn format_for_display(&self) -> String;
 }
 
-impl<'a> SSAVisualizer<'a> {
-    pub fn new(translator: &'a SSATranslator) -> Self {
+/// Trait for formatting instructions in visualization
+pub trait FormatInstruction {
+    fn format_for_display(&self) -> String;
+}
+
+/// Generic SSA visualizer
+pub struct SSAVisualizer<'a, V, I, F>
+where
+    V: SsaValue,
+    I: SsaInstruction<Value = V>,
+    F: InstructionFactory<Instr = I>,
+{
+    translator: &'a SSATranslator<V, I, F>,
+}
+
+impl<'a, V, I, F> SSAVisualizer<'a, V, I, F>
+where
+    V: SsaValue + FormatValue,
+    I: SsaInstruction<Value = V> + FormatInstruction,
+    F: InstructionFactory<Instr = I>,
+{
+    pub fn new(translator: &'a SSATranslator<V, I, F>) -> Self {
         SSAVisualizer { translator }
     }
 
@@ -46,10 +70,9 @@ impl<'a> SSAVisualizer<'a> {
         dot
     }
 
-    fn generate_block_node(&self, block: &Block) -> String {
+    fn generate_block_node(&self, block: &Block<I>) -> String {
         let mut node = String::new();
 
-        // Start the block node
         node.push_str(&format!("    block_{} [label=\"", block.id.0));
         node.push_str(&format!("Block {}\\n", block.id.0));
         node.push_str("─────────────\\n");
@@ -62,7 +85,7 @@ impl<'a> SSAVisualizer<'a> {
                     let operands: Vec<String> = phi
                         .operands
                         .iter()
-                        .map(|op| self.format_value(op))
+                        .map(|op| op.format_for_display())
                         .collect();
                     node.push_str(&operands.join(", "));
                     node.push_str("\\n");
@@ -75,7 +98,7 @@ impl<'a> SSAVisualizer<'a> {
 
         // Add instructions
         for instr in &block.instructions {
-            node.push_str(&self.format_instruction(instr));
+            node.push_str(&instr.format_for_display());
             node.push_str("\\n");
         }
 
@@ -89,108 +112,6 @@ impl<'a> SSAVisualizer<'a> {
         node
     }
 
-    fn format_instruction(&self, instr: &Instruction) -> String {
-        match instr {
-            Instruction::Assign { dest, value } => {
-                format!(
-                    "{} := {}",
-                    self.format_variable(dest),
-                    self.format_value(value)
-                )
-            }
-            Instruction::BinaryOp {
-                dest,
-                left,
-                op,
-                right,
-            } => {
-                format!(
-                    "{} := {} {} {}",
-                    self.format_variable(dest),
-                    self.format_value(left),
-                    self.format_binop(op),
-                    self.format_value(right)
-                )
-            }
-            Instruction::UnaryOp { dest, op, operand } => {
-                format!(
-                    "{} := {} {}",
-                    self.format_variable(dest),
-                    self.format_unaryop(op),
-                    self.format_value(operand)
-                )
-            }
-            Instruction::Jump { target } => {
-                format!("jump block_{}", target.0)
-            }
-            Instruction::ConditionalJump {
-                condition,
-                true_target,
-                false_target,
-            } => {
-                format!(
-                    "if {} then block_{} else block_{}",
-                    self.format_value(condition),
-                    true_target.0,
-                    false_target.0
-                )
-            }
-            Instruction::Print { value } => {
-                format!("print {}", self.format_value(value))
-            }
-        }
-    }
-
-    fn format_value(&self, value: &Value) -> String {
-        match value {
-            Value::Literal(n) => n.to_string(),
-            Value::Var(var) => self.format_variable(var),
-            Value::Phi(phi_id) => {
-                if let Some(phi) = self.translator.phis.get(phi_id) {
-                    if phi.operands.is_empty() {
-                        format!("Φ{}", phi_id.0)
-                    } else {
-                        let operands: Vec<String> = phi
-                            .operands
-                            .iter()
-                            .map(|op| self.format_value(op))
-                            .collect();
-                        format!("Φ{}({})", phi_id.0, operands.join(","))
-                    }
-                } else {
-                    format!("Φ{}", phi_id.0)
-                }
-            }
-            Value::Undefined => "⊥".to_string(),
-        }
-    }
-
-    fn format_variable(&self, var: &Variable) -> String {
-        var.0.clone()
-    }
-
-    fn format_binop(&self, op: &BinaryOperator) -> String {
-        match op {
-            BinaryOperator::Add => "+".to_string(),
-            BinaryOperator::Subtract => "-".to_string(),
-            BinaryOperator::Multiply => "*".to_string(),
-            BinaryOperator::Divide => "/".to_string(),
-            BinaryOperator::Equal => "==".to_string(),
-            BinaryOperator::NotEqual => "!=".to_string(),
-            BinaryOperator::LessThan => "<".to_string(),
-            BinaryOperator::LessThanOrEqual => "<=".to_string(),
-            BinaryOperator::GreaterThan => ">".to_string(),
-            BinaryOperator::GreaterThanOrEqual => ">=".to_string(),
-        }
-    }
-
-    fn format_unaryop(&self, op: &UnaryOperator) -> String {
-        match op {
-            UnaryOperator::Negate => "-".to_string(),
-            UnaryOperator::Not => "!".to_string(),
-        }
-    }
-
     fn has_phi_nodes(&self) -> bool {
         !self.translator.incomplete_phis.is_empty()
     }
@@ -202,11 +123,9 @@ impl<'a> SSAVisualizer<'a> {
     }
 
     pub fn render_to_png(&self, png_path: &str) -> std::io::Result<()> {
-        // Create a temporary dot file
         let dot_path = format!("{}.dot", png_path.trim_end_matches(".png"));
         self.render_to_file(&dot_path)?;
 
-        // Run graphviz to convert dot to png
         let output = Command::new("dot")
             .arg("-Tpng")
             .arg("-o")
@@ -223,18 +142,13 @@ impl<'a> SSAVisualizer<'a> {
             ));
         }
 
-        // Keep the dot file for inspection (don't delete it)
-        // fs::remove_file(dot_path).ok();
-
         println!("SSA graph rendered to: {}", png_path);
         Ok(())
     }
 
     pub fn render_and_open(&self, png_path: &str) -> std::io::Result<()> {
-        // First render to PNG
         self.render_to_png(png_path)?;
 
-        // Open the PNG file with the default viewer
         #[cfg(target_os = "macos")]
         {
             Command::new("open").arg(png_path).spawn()?;
@@ -256,8 +170,13 @@ impl<'a> SSAVisualizer<'a> {
     }
 }
 
-// Helper function to quickly visualize an SSATranslator
-pub fn visualize_ssa(translator: &SSATranslator, name: &str) -> std::io::Result<()> {
+/// Helper function to quickly visualize an SSATranslator
+pub fn visualize_ssa<V, I, F>(translator: &SSATranslator<V, I, F>, name: &str) -> std::io::Result<()>
+where
+    V: SsaValue + FormatValue,
+    I: SsaInstruction<Value = V> + FormatInstruction,
+    F: InstructionFactory<Instr = I>,
+{
     let visualizer = SSAVisualizer::new(translator);
     let png_path = format!("{}.png", name);
     visualizer.render_and_open(&png_path)

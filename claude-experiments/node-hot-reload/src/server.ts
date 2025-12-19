@@ -24,8 +24,8 @@ export function startServer(options: ServerOptions) {
   // Track pending eval requests to route results back
   const pendingEvals = new Map<string, WebSocket>();
 
-  // Create WebSocket server
-  const wss = new WebSocketServer({ port });
+  // Create WebSocket server on localhost only
+  const wss = new WebSocketServer({ host: "127.0.0.1", port });
 
   wss.on("connection", (ws: WebSocket) => {
     console.log("[server] Client connected");
