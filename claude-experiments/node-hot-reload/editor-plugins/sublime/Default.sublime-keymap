@@ -1,13 +1,20 @@
 [
     {
-        "keys": ["ctrl+c", "ctrl+c"],
-        "command": "hot_reload_eval_defun",
+        "keys": ["ctrl+c", "ctrl+j"],
+        "command": "hot_reload_jack_in",
         "context": [
             { "key": "selector", "operator": "equal", "operand": "source.js, source.ts, source.jsx, source.tsx" }
         ]
     },
     {
-        "keys": ["ctrl+x", "ctrl+e"],
+        "keys": ["ctrl+c", "ctrl+c"],
+        "command": "hot_reload_eval_top_form",
+        "context": [
+            { "key": "selector", "operator": "equal", "operand": "source.js, source.ts, source.jsx, source.tsx" }
+        ]
+    },
+    {
+        "keys": ["ctrl+c", "alt+e"],
         "command": "hot_reload_eval_selection",
         "context": [
             { "key": "selector", "operator": "equal", "operand": "source.js, source.ts, source.jsx, source.tsx" }
@@ -16,6 +23,27 @@
     {
         "keys": ["ctrl+c", "ctrl+k"],
         "command": "hot_reload_eval_buffer",
+        "context": [
+            { "key": "selector", "operator": "equal", "operand": "source.js, source.ts, source.jsx, source.tsx" }
+        ]
+    },
+    {
+        "keys": ["ctrl+c", "ctrl+q"],
+        "command": "hot_reload_clear_results",
+        "context": [
+            { "key": "selector", "operator": "equal", "operand": "source.js, source.ts, source.jsx, source.tsx" }
+        ]
+    },
+    {
+        "keys": ["ctrl+c", "ctrl+p"],
+        "command": "hot_reload_eval_to_panel",
+        "context": [
+            { "key": "selector", "operator": "equal", "operand": "source.js, source.ts, source.jsx, source.tsx" }
+        ]
+    },
+    {
+        "keys": ["ctrl+c", "ctrl+l"],
+        "command": "hot_reload_connect",
         "context": [
             { "key": "selector", "operator": "equal", "operand": "source.js, source.ts, source.jsx, source.tsx" }
         ]

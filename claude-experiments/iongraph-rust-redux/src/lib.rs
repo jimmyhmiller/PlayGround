@@ -1,3 +1,4 @@
+pub mod api;
 pub mod classes;
 pub mod core;
 pub mod compilers;
@@ -34,3 +35,6 @@ pub use core::{CompilerIR, IRInstruction, IRBlock, SemanticAttribute};
 
 // Re-export Ion implementation for backward compatibility
 pub use compilers::IonIR;
+
+// Re-export high-level API for easy access
+pub use api::{render_svg, render_svg_from_json, render_ion_pass, GraphBuilder};

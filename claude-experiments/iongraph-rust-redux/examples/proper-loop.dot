@@ -1,8 +1,0 @@
-// Test proper loop with dedicated backedge block
-digraph proper_loop {
-    entry -> header
-    header -> body
-    body -> backedge
-    backedge -> header
-    header -> exit
-}

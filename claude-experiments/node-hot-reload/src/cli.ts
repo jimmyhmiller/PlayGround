@@ -2,11 +2,43 @@
 
 import * as fs from "fs";
 import * as path from "path";
+import * as net from "net";
 import { transform } from "./transform";
 import { startServer } from "./server";
 import { createRuntime } from "./runtime";
 
-const HOT_PORT = 3456;
+const DEFAULT_PORTS = [3456, 3457, 3458, 3459, 3460];
+
+function findAvailablePort(): Promise<number> {
+  return new Promise((resolve) => {
+    let index = 0;
+
+    function tryPort() {
+      if (index >= DEFAULT_PORTS.length) {
+        resolve(DEFAULT_PORTS[0]); // Fall back to first port
+        return;
+      }
+
+      const port = DEFAULT_PORTS[index];
+      const server = net.createServer();
+
+      server.once("error", () => {
+        index++;
+        tryPort();
+      });
+
+      server.once("listening", () => {
+        server.close(() => {
+          resolve(port);
+        });
+      });
+
+      server.listen(port, "127.0.0.1");
+    }
+
+    tryPort();
+  });
+}
 
 interface ModuleInfo {
   id: string;
@@ -105,12 +137,16 @@ function topologicalSort(modules: Map<string, ModuleInfo>): string[] {
   return sorted;
 }
 
-function run(entry: string) {
+async function run(entry: string) {
   const entryAbsolute = path.resolve(entry);
   const sourceRoot = path.dirname(entryAbsolute);
 
   console.log(`[hot] Starting with entry: ${entry}`);
   console.log(`[hot] Source root: ${sourceRoot}`);
+
+  // Find available port
+  const port = await findAvailablePort();
+  console.log(`[hot] Using port: ${port}`);
 
   // Collect and transform all modules
   const modules = collectModules(entryAbsolute, sourceRoot);
@@ -142,11 +178,11 @@ function run(entry: string) {
   // Start dev server
   const server = startServer({
     sourceDir: sourceRoot,
-    port: HOT_PORT,
+    port,
   });
 
   // Connect runtime to dev server
-  runtime.connect(HOT_PORT);
+  runtime.connect(port);
 
   // Handle shutdown
   process.on("SIGINT", () => {

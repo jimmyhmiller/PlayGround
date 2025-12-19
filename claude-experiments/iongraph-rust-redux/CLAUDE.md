@@ -19,7 +19,7 @@ The Rust port has been fully validated against the TypeScript implementation:
 - ✅ All layout algorithms verified on real-world SpiderMonkey JIT data
 - ✅ Byte-for-byte identical SVG output
 
-See [TEST_RESULTS_FINAL.md](TEST_RESULTS_FINAL.md) for detailed test results.
+See [docs/TEST_RESULTS_FINAL.md](docs/TEST_RESULTS_FINAL.md) for detailed test results.
 
 This is an active port with the following completion status:
 
@@ -189,16 +189,16 @@ All edge straightening algorithms are now fully implemented:
       - Interactive UI with keyboard navigation
     - Updated iongraph binary with --wasm flag
     - **File size reduction**: 51% smaller for large files (9.2MB vs 18MB for mega-complex.json)
-    - Created comprehensive guide (WASM_GUIDE.md)
+    - Created comprehensive guide (docs/WASM_GUIDE.md)
 
 ### Next Priorities
 
 1. **Sample Counts Integration** - Add profiling data support (low priority)
-2. **Desktop GUI with Skia** - Native GUI application (see PLAN_GUI_RENDERING.md)
+2. **Desktop GUI with Skia** - Native GUI application (see docs/PLAN_GUI_RENDERING.md)
 
 ## WASM Interactive Viewer
 
-The project supports WASM-based browser rendering for smaller file sizes and interactive navigation. See [WASM_GUIDE.md](WASM_GUIDE.md) for complete documentation.
+The project supports WASM-based browser rendering for smaller file sizes and interactive navigation. See [docs/WASM_GUIDE.md](docs/WASM_GUIDE.md) for complete documentation.
 
 ### Quick Commands
 
@@ -208,7 +208,7 @@ wasm-pack build --target web --out-dir pkg
 
 # Generate WASM HTML (51% smaller than static HTML)
 cargo build --release --bin iongraph
-./target/release/iongraph --wasm ion-examples/mega-complex.json output.html
+./target/release/iongraph --wasm tests/fixtures/ion-examples/mega-complex.json output.html
 
 # Open in browser
 open output.html
@@ -232,7 +232,7 @@ open output.html
 
 ## Benchmarking
 
-The project includes comprehensive benchmarking tools. See [BENCHMARK_QUICK_START.md](BENCHMARK_QUICK_START.md) for quick start guide.
+The project includes comprehensive benchmarking tools. See [docs/BENCHMARK_QUICK_START.md](docs/BENCHMARK_QUICK_START.md) for quick start guide.
 
 ### Quick Commands
 
@@ -241,17 +241,17 @@ The project includes comprehensive benchmarking tools. See [BENCHMARK_QUICK_STAR
 cargo bench
 
 # Compare Rust vs TypeScript
-./compare-performance.sh ion-examples/mega-complex.json 100
+./scripts/compare-performance.sh tests/fixtures/ion-examples/mega-complex.json 100
 
 # Profile with samply
 cargo build --release --bin profile-render
-samply record target/release/profile-render ion-examples/mega-complex.json 1000
+samply record target/release/profile-render tests/fixtures/ion-examples/mega-complex.json 1000
 
 # Quick performance check
-./quick-bench.sh 50
+./scripts/quick-bench.sh 50
 ```
 
-See [BENCHMARKS.md](BENCHMARKS.md) for complete documentation.
+See [docs/BENCHMARKS.md](docs/BENCHMARKS.md) for complete documentation.
 
 ## Architecture Notes
 
@@ -259,6 +259,25 @@ See [BENCHMARKS.md](BENCHMARKS.md) for complete documentation.
 - SVG rendering handled by provider implementations
 - Graph layout uses layered approach with dummy nodes for long edges
 - Coordinate system: origin at top-left, Y increases downward
+
+## Project Structure
+
+```
+iongraph-rust-redux/
+├── src/                           # Core source code
+│   ├── bin/                       # Binary entry points
+│   ├── compilers/                 # IR compiler implementations
+│   ├── core/                      # Core traits and types
+│   ├── json/                      # JSON parsing
+│   └── webgl/                     # WebGL renderer
+├── tests/                         # Integration tests
+│   ├── fixtures/ion-examples/     # Test JSON fixtures
+│   └── integration.rs             # Integration test suite
+├── benches/                       # Criterion benchmarks
+├── scripts/                       # Shell/Python scripts
+├── docs/                          # Documentation
+└── assets/                        # CSS and static assets
+```
 
 ## Building
 
