@@ -42,17 +42,19 @@ class HotReloadConnection:
         self.message_queue = queue.Queue()
         self._thread = None
 
-    def connect(self, host="localhost", port=3456):
+    def connect(self, host="127.0.0.1", port=3456):
         """Connect to the hot reload server."""
         if self.connected:
             self.disconnect()
 
         self.server_port = port
+        # Use 127.0.0.1 to avoid IPv6 issues
+        if host == "localhost":
+            host = "127.0.0.1"
         url = "ws://{}:{}".format(host, port)
 
         def on_open(ws):
             self.connected = True
-            # Identify as editor - server will send back source_root
             ws.send(json.dumps({
                 "type": "identify",
                 "clientType": "editor"
@@ -67,12 +69,12 @@ class HotReloadConnection:
                 pass
 
         def on_error(ws, error):
-            sublime.status_message("[hot] Error: " + str(error))
+            sublime.set_timeout(lambda: sublime.status_message("[hot] Error: " + str(error)), 0)
 
         def on_close(ws, close_status_code, close_msg):
             self.connected = False
             self.source_root = None
-            sublime.status_message("[hot] Disconnected")
+            sublime.set_timeout(lambda: sublime.status_message("[hot] Disconnected"), 0)
 
         self.ws = websocket.WebSocketApp(
             url,
@@ -82,7 +84,11 @@ class HotReloadConnection:
             on_close=on_close
         )
 
-        self._thread = threading.Thread(target=self.ws.run_forever, daemon=True)
+        import socket
+        self._thread = threading.Thread(
+            target=lambda: self.ws.run_forever(sockopt=((socket.IPPROTO_TCP, socket.TCP_NODELAY, 1),)),
+            daemon=True
+        )
         self._thread.start()
 
     def disconnect(self):
@@ -199,7 +205,7 @@ def scan_for_servers(callback):
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(0.5)
-            result = sock.connect_ex(('localhost', port))
+            result = sock.connect_ex(('127.0.0.1', port))
             sock.close()
             if result == 0:
                 return port

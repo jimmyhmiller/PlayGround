@@ -190,6 +190,24 @@ class DrawingManager: ObservableObject {
         return files.filter { $0.hasSuffix(".drawings.json") }
     }
 
+    /// Returns recently highlighted PDF hashes sorted by last modified date (most recent first)
+    func getRecentlyHighlightedHashes(limit: Int = 10) -> [(hash: String, lastModified: Date)] {
+        var results: [(hash: String, lastModified: Date)] = []
+
+        let files = getAllDrawingFiles()
+        for file in files {
+            let hash = file.replacingOccurrences(of: ".drawings.json", with: "")
+            if let drawings = loadDrawings(pdfHash: hash) {
+                results.append((hash: hash, lastModified: drawings.lastModified))
+            }
+        }
+
+        // Sort by most recent first
+        results.sort { $0.lastModified > $1.lastModified }
+
+        return Array(results.prefix(limit))
+    }
+
     // MARK: - Private Helpers
 
     private func drawingsURL(for pdfHash: String) -> URL {

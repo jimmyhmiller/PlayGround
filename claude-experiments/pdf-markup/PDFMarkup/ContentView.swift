@@ -9,14 +9,21 @@ struct ContentView: View {
     @State private var library: PDFLibrary?
     @State private var isLoadingLibrary = false
     @State private var errorMessage: String?
+    @State private var currentPDFHash: String?
 
     @StateObject private var downloader = PDFDownloader()
+    @EnvironmentObject var sharedPDFManager: SharedPDFManager
 
     var body: some View {
         NavigationSplitView {
             // Sidebar
             if let library = library {
-                PDFLibrarySidebar(library: library, selectedPDF: $selectedPDF)
+                PDFLibrarySidebar(library: library, selectedPDF: $selectedPDF, onSelectSharedPDF: { hash, document in
+                    // Handle selection of a recently highlighted PDF that might be shared
+                    currentPDFHash = hash
+                    pdfDocument = document
+                    selectedPDF = nil
+                })
             } else if isLoadingLibrary {
                 VStack {
                     ProgressView()
@@ -42,7 +49,7 @@ struct ContentView: View {
         } detail: {
             ZStack {
                 // PDF viewer
-                if let pdfDocument = pdfDocument, let pdfHash = selectedPDF?.hash {
+                if let pdfDocument = pdfDocument, let pdfHash = currentPDFHash ?? selectedPDF?.hash {
                     PDFMarkupView(pdfDocument: pdfDocument, pdfHash: pdfHash, selectedColor: $selectedColor)
                 } else {
                     VStack(spacing: 20) {
@@ -94,9 +101,19 @@ struct ContentView: View {
         }
         .onChange(of: selectedPDF) { oldValue, newValue in
             if let pdf = newValue {
+                currentPDFHash = pdf.hash
                 Task {
                     await loadPDF(metadata: pdf)
                 }
+            }
+        }
+        .onChange(of: sharedPDFManager.pendingPDF) { oldValue, newValue in
+            if let shared = newValue {
+                // Open the shared PDF
+                currentPDFHash = shared.hash
+                pdfDocument = shared.document
+                selectedPDF = nil
+                sharedPDFManager.clearPending()
             }
         }
     }

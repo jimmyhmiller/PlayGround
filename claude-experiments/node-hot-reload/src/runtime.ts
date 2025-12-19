@@ -161,7 +161,6 @@ export function createRuntime(): HotRuntime {
         Object.assign(allBindings, __m);
 
         const bindingNames = Object.keys(allBindings);
-        console.log(`[hot] Available bindings for eval:`, bindingNames);
         const destructure = bindingNames.length > 0
           ? `const { ${bindingNames.join(", ")} } = __allBindings;\n`
           : "";
@@ -176,8 +175,8 @@ export function createRuntime(): HotRuntime {
           evalCode = `${destructure}${code}`;
         }
 
-        const fn = new Function("__m", "__hot", evalCode);
-        const result = fn(__m, this);
+        const fn = new Function("__m", "__hot", "__allBindings", evalCode);
+        const result = fn(__m, this, allBindings);
 
         console.log(`[hot] Eval in ${moduleId}: ${code.slice(0, 50)}${code.length > 50 ? "..." : ""}`);
 

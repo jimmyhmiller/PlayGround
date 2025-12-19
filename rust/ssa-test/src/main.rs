@@ -6,6 +6,7 @@ mod ast;
 mod instruction;
 mod syntax;
 mod visualizer;
+mod ssa_properties;
 
 pub struct SSATranslator {
     pub definition: HashMap<String, HashMap<BlockId, Value>>,

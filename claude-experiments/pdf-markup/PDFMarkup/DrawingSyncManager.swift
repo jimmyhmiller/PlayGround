@@ -219,6 +219,143 @@ class DrawingSyncManager: ObservableObject {
         pendingUploads.insert(pdfHash)
     }
 
+    // MARK: - PDF Upload
+
+    /// Uploads a shared PDF to S3 and updates index files
+    func uploadSharedPDF(data: Data, hash: String, fileName: String, pageCount: Int) async throws {
+        guard AWSCredentials.isConfigured() else {
+            throw SyncError.credentialsNotConfigured
+        }
+
+        await MainActor.run { self.syncState = .syncing }
+
+        do {
+            // 1. Upload the PDF file
+            let pdfKey = "pdfs/shared/\(hash)_original.pdf"
+            try await uploadData(data, toKey: pdfKey, contentType: "application/pdf")
+            print("✅ Uploaded PDF to \(pdfKey)")
+
+            // 2. Update pdf-sync-state.json
+            try await updateSyncState(hash: hash, s3Key: pdfKey, originalPath: "shared/\(fileName)")
+
+            // 3. Update pdf-index.json
+            try await updatePDFIndex(hash: hash, fileName: fileName, pageCount: pageCount)
+
+            // 4. Reload state so the PDF appears in library
+            S3StateManager.shared.loadState()
+
+            await MainActor.run {
+                self.syncState = .synced
+                self.lastSyncDate = Date()
+            }
+
+            print("✅ Successfully uploaded and indexed shared PDF: \(fileName)")
+        } catch {
+            await MainActor.run {
+                self.syncState = .error(error.localizedDescription)
+            }
+            throw error
+        }
+    }
+
+    private func uploadData(_ data: Data, toKey key: String, contentType: String) async throws {
+        let url = URL(string: "https://\(AWSCredentials.bucket).s3.\(AWSCredentials.region).amazonaws.com/\(key)")!
+        var request = URLRequest(url: url)
+        request.httpMethod = "PUT"
+        request.setValue(contentType, forHTTPHeaderField: "Content-Type")
+
+        try signRequest(&request, body: data)
+
+        let (responseData, response) = try await URLSession.shared.upload(for: request, from: data)
+
+        guard let httpResponse = response as? HTTPURLResponse,
+              (200...299).contains(httpResponse.statusCode) else {
+            if let responseString = String(data: responseData, encoding: .utf8) {
+                print("❌ S3 Error: \(responseString)")
+            }
+            throw SyncError.uploadFailed
+        }
+    }
+
+    private func updateSyncState(hash: String, s3Key: String, originalPath: String) async throws {
+        // Download current state
+        let stateURL = URL(string: "https://\(AWSCredentials.bucket).s3.\(AWSCredentials.region).amazonaws.com/pdf-sync-state.json")!
+
+        var currentState: [String: Any] = [:]
+        var uploaded: [String: Any] = [:]
+
+        // Try to fetch existing state
+        if let (data, response) = try? await URLSession.shared.data(from: stateURL),
+           let httpResponse = response as? HTTPURLResponse,
+           httpResponse.statusCode == 200,
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            currentState = json
+            uploaded = (json["uploaded"] as? [String: Any]) ?? [:]
+        }
+
+        // Add new entry
+        let dateFormatter = ISO8601DateFormatter()
+        uploaded[s3Key] = [
+            "originalPath": originalPath,
+            "hash": hash,
+            "uploadedAt": dateFormatter.string(from: Date())
+        ]
+
+        currentState["uploaded"] = uploaded
+
+        // Upload updated state
+        let updatedData = try JSONSerialization.data(withJSONObject: currentState, options: .prettyPrinted)
+        try await uploadData(updatedData, toKey: "pdf-sync-state.json", contentType: "application/json")
+        print("✅ Updated pdf-sync-state.json")
+    }
+
+    private func updatePDFIndex(hash: String, fileName: String, pageCount: Int) async throws {
+        // Download current index
+        let indexURL = URL(string: "https://\(AWSCredentials.bucket).s3.\(AWSCredentials.region).amazonaws.com/pdf-index.json")!
+
+        var pdfs: [[String: Any]] = []
+
+        // Try to fetch existing index
+        if let (data, response) = try? await URLSession.shared.data(from: indexURL),
+           let httpResponse = response as? HTTPURLResponse,
+           httpResponse.statusCode == 200,
+           let json = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] {
+            pdfs = json
+        }
+
+        // Check if this hash already exists
+        if pdfs.contains(where: { ($0["hash"] as? String) == hash }) {
+            print("ℹ️ PDF already in index, skipping")
+            return
+        }
+
+        // Add new entry
+        let dateFormatter = ISO8601DateFormatter()
+        let newEntry: [String: Any] = [
+            "hash": hash,
+            "path": "shared/\(fileName)",
+            "fileName": fileName,
+            "title": NSNull(),
+            "author": NSNull(),
+            "metadataFound": false,
+            "totalPages": pageCount,
+            "creator": NSNull(),
+            "producer": NSNull(),
+            "creationDate": NSNull(),
+            "error": NSNull(),
+            "processedAt": dateFormatter.string(from: Date()),
+            "ocr_title": NSNull(),
+            "ocr_author": NSNull()
+        ]
+
+        pdfs.append(newEntry)
+
+        // Upload updated index
+        let updatedData = try JSONSerialization.data(withJSONObject: pdfs, options: .prettyPrinted)
+        try await uploadData(updatedData, toKey: "pdf-index.json", contentType: "application/json")
+        print("✅ Updated pdf-index.json")
+    }
+
     // MARK: - AWS Signature V4 Signing
 
     private func signRequest(_ request: inout URLRequest, body: Data?) throws {

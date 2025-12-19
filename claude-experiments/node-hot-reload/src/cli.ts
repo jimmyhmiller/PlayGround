@@ -50,7 +50,6 @@ function collectModules(
     while ((match = getRegex.exec(transformed)) !== null) {
       const dep = match[1];
       // Skip node_modules - they don't end in .js typically
-      // Local files are transformed to be relative paths like "greet.js" or "lib/utils.js"
       if (!dep.endsWith(".js")) continue;
 
       deps.push(dep);
