@@ -15,6 +15,17 @@ struct MainPopoverView: View {
         }
         .padding()
         .frame(width: 280)
+        .background(
+            Group {
+                Button("") { viewModel.undo() }
+                    .keyboardShortcut("z", modifiers: .command)
+                    .opacity(0)
+
+                Button("") { viewModel.redo() }
+                    .keyboardShortcut("z", modifiers: [.command, .shift])
+                    .opacity(0)
+            }
+        )
     }
 
     private var mainContent: some View {

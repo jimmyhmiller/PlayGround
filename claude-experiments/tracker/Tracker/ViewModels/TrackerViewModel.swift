@@ -23,6 +23,11 @@ enum TimePeriod: String, CaseIterable {
     }
 }
 
+enum UndoAction {
+    case addEntry(Entry)
+    case deleteGoal(Goal, [Entry]) // Goal and its associated entries
+}
+
 @MainActor
 class TrackerViewModel: ObservableObject {
     @Published var goals: [Goal] = []
@@ -31,6 +36,8 @@ class TrackerViewModel: ObservableObject {
     @Published var isAddingGoal: Bool = false
 
     private let dataStore = DataStore.shared
+    private var undoStack: [UndoAction] = []
+    private var redoStack: [UndoAction] = []
 
     init() {
         loadData()
@@ -53,8 +60,11 @@ class TrackerViewModel: ObservableObject {
     }
 
     func deleteGoal(_ goal: Goal) {
+        let goalEntries = entries.filter { $0.goalId == goal.id }
         goals.removeAll { $0.id == goal.id }
         entries.removeAll { $0.goalId == goal.id }
+        undoStack.append(.deleteGoal(goal, goalEntries))
+        redoStack.removeAll()
         save()
     }
 
@@ -71,10 +81,55 @@ class TrackerViewModel: ObservableObject {
     }
 
     func addEntry(for goal: Goal, amount: Double) {
-        let entry = Entry(goalId: goal.id, amount: amount)
+        var adjustedAmount = amount
+
+        // Don't allow going below 0
+        if amount < 0 {
+            let currentTotal = totalForGoal(goal, in: .all)
+            if currentTotal + amount < 0 {
+                adjustedAmount = -currentTotal // Only subtract what's available
+            }
+            if adjustedAmount == 0 { return } // Nothing to subtract
+        }
+
+        let entry = Entry(goalId: goal.id, amount: adjustedAmount)
         entries.append(entry)
+        undoStack.append(.addEntry(entry))
+        redoStack.removeAll()
         save()
     }
+
+    func undo() {
+        guard let action = undoStack.popLast() else { return }
+        switch action {
+        case .addEntry(let entry):
+            entries.removeAll { $0.id == entry.id }
+            redoStack.append(action)
+        case .deleteGoal(let goal, let goalEntries):
+            goals.append(goal)
+            entries.append(contentsOf: goalEntries)
+            redoStack.append(action)
+        }
+        save()
+    }
+
+    func redo() {
+        guard let action = redoStack.popLast() else { return }
+        switch action {
+        case .addEntry(let entry):
+            entries.append(entry)
+            undoStack.append(action)
+        case .deleteGoal(let goal, _):
+            let goalEntries = entries.filter { $0.goalId == goal.id }
+            goals.removeAll { $0.id == goal.id }
+            entries.removeAll { $0.goalId == goal.id }
+            undoStack.append(.deleteGoal(goal, goalEntries))
+        }
+        save()
+    }
+
+    var canUndo: Bool { !undoStack.isEmpty }
+    var canRedo: Bool { !redoStack.isEmpty }
 
     func filteredEntries(for period: TimePeriod) -> [Entry] {
         guard let startDate = period.startDate else {

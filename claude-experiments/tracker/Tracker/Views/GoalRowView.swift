@@ -9,6 +9,8 @@ struct GoalRowView: View {
     @State private var dragOffset: CGFloat = 0
     @GestureState private var isPressed: Bool = false
     @State private var showingColorPicker: Bool = false
+    @State private var isAltPressed: Bool = false
+    @State private var eventMonitor: Any?
 
     private let maxDragDistance: CGFloat = 100
     private let minAmountPerDrag: Double = 1.0
@@ -45,12 +47,12 @@ struct GoalRowView: View {
                 if isPressed {
                     // Visual feedback during press/drag
                     RoundedRectangle(cornerRadius: 4)
-                        .fill(goal.color.opacity(0.3))
+                        .fill(isAltPressed ? Color(hex: "#E57373").opacity(0.3) : goal.color.opacity(0.3))
                         .frame(width: 40, height: 8 + dragProgress * 20)
                 } else {
-                    Image(systemName: "arrow.up.circle")
+                    Image(systemName: isAltPressed ? "arrow.down.circle" : "arrow.up.circle")
                         .font(.system(size: 14))
-                        .foregroundColor(.secondary)
+                        .foregroundColor(isAltPressed ? Color(hex: "#E57373") : .secondary)
                 }
             }
             .frame(width: 40, height: 28)
@@ -78,20 +80,49 @@ struct GoalRowView: View {
                     state = true
                 }
                 .onChanged { value in
-                    // Only track upward drag
-                    if value.translation.height < 0 {
-                        dragOffset = -value.translation.height
+                    // Check for Alt key
+                    isAltPressed = NSEvent.modifierFlags.contains(.option)
+
+                    // Track drag in the appropriate direction
+                    if isAltPressed {
+                        // Alt held: drag down to decrease
+                        if value.translation.height > 0 {
+                            dragOffset = value.translation.height
+                        }
+                    } else {
+                        // Normal: drag up to increase
+                        if value.translation.height < 0 {
+                            dragOffset = -value.translation.height
+                        }
                     }
                 }
                 .onEnded { value in
-                    if dragOffset > 20 { // Minimum threshold
-                        onAdd(amountToAdd)
+                    // Always add at least minimum amount on any click/drag
+                    let amount = dragOffset > 20 ? amountToAdd : minAmountPerDrag
+                    if isAltPressed {
+                        onAdd(-amount)
+                    } else {
+                        onAdd(amount)
                     }
                     withAnimation(.easeOut(duration: 0.2)) {
                         dragOffset = 0
                     }
                 }
         )
+        .onAppear {
+            isAltPressed = NSEvent.modifierFlags.contains(.option)
+            eventMonitor = NSEvent.addLocalMonitorForEvents(matching: .flagsChanged) { event in
+                isAltPressed = event.modifierFlags.contains(.option)
+                return event
+            }
+        }
+        .onDisappear {
+            isAltPressed = false
+            if let monitor = eventMonitor {
+                NSEvent.removeMonitor(monitor)
+                eventMonitor = nil
+            }
+        }
     }
 
     private var colorPickerContent: some View {

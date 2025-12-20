@@ -116,6 +116,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 class ClearDataView: NSView {
     private let label: NSTextField
     private var onClick: () -> Void
+    private var isHighlighted = false {
+        didSet {
+            needsDisplay = true
+            label.textColor = isHighlighted ? .white : .labelColor
+        }
+    }
+    private var trackingArea: NSTrackingArea?
 
     init(remainingClicks: Int, onClick: @escaping () -> Void) {
         self.onClick = onClick
@@ -124,6 +131,7 @@ class ClearDataView: NSView {
 
         label.font = NSFont.menuFont(ofSize: 0)
         label.translatesAutoresizingMaskIntoConstraints = false
+        label.backgroundColor = .clear
         addSubview(label)
 
         NSLayoutConstraint.activate([
@@ -134,6 +142,37 @@ class ClearDataView: NSView {
 
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let existing = trackingArea {
+            removeTrackingArea(existing)
+        }
+        trackingArea = NSTrackingArea(
+            rect: bounds,
+            options: [.mouseEnteredAndExited, .activeAlways],
+            owner: self,
+            userInfo: nil
+        )
+        addTrackingArea(trackingArea!)
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        if isHighlighted {
+            NSColor.selectedContentBackgroundColor.setFill()
+            let path = NSBezierPath(roundedRect: bounds.insetBy(dx: 4, dy: 1), xRadius: 4, yRadius: 4)
+            path.fill()
+        }
+        super.draw(dirtyRect)
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        isHighlighted = true
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        isHighlighted = false
     }
 
     func updateCount(_ remaining: Int) {
