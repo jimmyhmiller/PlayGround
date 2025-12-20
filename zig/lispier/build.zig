@@ -97,6 +97,100 @@ pub fn build(b: *std.Build) void {
     const show_ast_step = b.step("show-ast", "Show AST output for source code");
     show_ast_step.dependOn(&run_show_ast.step);
 
+    // Show IR tool
+    const show_ir_module = b.createModule(.{
+        .root_source_file = b.path("src/show_ir.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    show_ir_module.addImport("main", main_module);
+
+    const show_ir_exe = b.addExecutable(.{
+        .name = "show-ir",
+        .root_module = show_ir_module,
+    });
+
+    // Add MLIR include paths and libraries for show-ir
+    show_ir_exe.addIncludePath(.{ .cwd_relative = "/opt/homebrew/opt/llvm/include" });
+    show_ir_exe.addIncludePath(.{ .cwd_relative = "/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/c-mlir-wrapper/include" });
+    show_ir_exe.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/opt/llvm/lib" });
+    show_ir_exe.addLibraryPath(.{ .cwd_relative = "/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/c-mlir-wrapper/build" });
+    show_ir_exe.linkSystemLibrary("MLIR");
+    show_ir_exe.linkSystemLibrary("LLVM");
+    show_ir_exe.linkSystemLibrary("MLIRCAPIIR");
+    show_ir_exe.linkSystemLibrary("MLIRCAPIFunc");
+    show_ir_exe.linkSystemLibrary("MLIRCAPIArith");
+    show_ir_exe.linkSystemLibrary("MLIRCAPIControlFlow");
+    show_ir_exe.linkSystemLibrary("MLIRCAPISCF");
+    show_ir_exe.linkSystemLibrary("MLIRCAPIMemRef");
+    show_ir_exe.linkSystemLibrary("MLIRCAPIVector");
+    show_ir_exe.linkSystemLibrary("MLIRCAPILLVM");
+    show_ir_exe.linkSystemLibrary("mlir-introspection");
+    show_ir_exe.linkLibC();
+    show_ir_exe.linkLibCpp();
+
+    b.installArtifact(show_ir_exe);
+
+    const run_show_ir = b.addRunArtifact(show_ir_exe);
+    run_show_ir.step.dependOn(b.getInstallStep());
+
+    if (b.args) |args| {
+        run_show_ir.addArgs(args);
+    }
+
+    const show_ir_step = b.step("show-ir", "Generate and show MLIR IR for source code");
+    show_ir_step.dependOn(&run_show_ir.step);
+
+    // Run (JIT) tool
+    const run_module = b.createModule(.{
+        .root_source_file = b.path("src/run.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    run_module.addImport("main", main_module);
+
+    const run_exe = b.addExecutable(.{
+        .name = "run",
+        .root_module = run_module,
+    });
+
+    // Add MLIR include paths and libraries for run
+    run_exe.addIncludePath(.{ .cwd_relative = "/opt/homebrew/opt/llvm/include" });
+    run_exe.addIncludePath(.{ .cwd_relative = "/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/c-mlir-wrapper/include" });
+    run_exe.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/opt/llvm/lib" });
+    run_exe.addLibraryPath(.{ .cwd_relative = "/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/c-mlir-wrapper/build" });
+    run_exe.linkSystemLibrary("MLIR");
+    run_exe.linkSystemLibrary("LLVM");
+    run_exe.linkSystemLibrary("MLIRCAPIIR");
+    run_exe.linkSystemLibrary("MLIRCAPIFunc");
+    run_exe.linkSystemLibrary("MLIRCAPIArith");
+    run_exe.linkSystemLibrary("MLIRCAPIControlFlow");
+    run_exe.linkSystemLibrary("MLIRCAPISCF");
+    run_exe.linkSystemLibrary("MLIRCAPIMemRef");
+    run_exe.linkSystemLibrary("MLIRCAPIVector");
+    run_exe.linkSystemLibrary("MLIRCAPILLVM");
+    run_exe.linkSystemLibrary("MLIRCAPIExecutionEngine");
+    run_exe.linkSystemLibrary("MLIRCAPIRegisterEverything");
+    run_exe.linkSystemLibrary("MLIRExecutionEngine");
+    run_exe.linkSystemLibrary("MLIRExecutionEngineUtils");
+    run_exe.linkSystemLibrary("MLIRTargetLLVMIRExport");
+    run_exe.linkSystemLibrary("MLIRToLLVMIRTranslationRegistration");
+    run_exe.linkSystemLibrary("mlir-introspection");
+    run_exe.linkLibC();
+    run_exe.linkLibCpp();
+
+    b.installArtifact(run_exe);
+
+    const run_run = b.addRunArtifact(run_exe);
+    run_run.step.dependOn(b.getInstallStep());
+
+    if (b.args) |args| {
+        run_run.addArgs(args);
+    }
+
+    const run_step = b.step("run", "JIT compile and run Lispier source code");
+    run_step.dependOn(&run_run.step);
+
     // Find overlaps tool
     const find_overlaps_module = b.createModule(.{
         .root_source_file = b.path("src/find_overlaps.zig"),

@@ -65,6 +65,12 @@ pub const FunctionType = struct {
     }
 };
 
+/// Typed number (number with explicit type)
+pub const TypedNumber = struct {
+    value: f64,
+    typ: *Type,
+};
+
 /// Attribute value (for operation attributes)
 pub const AttributeValue = union(enum) {
     string: []const u8,
@@ -73,6 +79,7 @@ pub const AttributeValue = union(enum) {
     array: std.ArrayList(AttributeValue),
     type: *Type,
     function_type: *FunctionType,
+    typed_number: TypedNumber,
 };
 
 /// Module (top-level container)
@@ -165,6 +172,7 @@ pub const Operation = struct {
             },
             .type => |t| t.deinit(),
             .function_type => |ft| ft.deinit(),
+            .typed_number => |tn| tn.typ.deinit(),
             else => {},
         }
     }

@@ -211,12 +211,24 @@ pub const Parser = struct {
                 break :blk AttributeValue{ .type = type_value };
             },
             .List => blk: {
-                // Check if it's a function type
+                // Check if it's a function type or type annotation
                 if (value.data.list.items.len > 0 and value.data.list.items[0].type == .Symbol) {
                     const first_sym = value.data.list.items[0].data.symbol.name;
                     if (std.mem.eql(u8, first_sym, "->")) {
                         const ft = try self.parseFunctionTypeValue(value);
                         break :blk AttributeValue{ .function_type = ft };
+                    }
+                    // Type annotation: (: value type)
+                    if (std.mem.eql(u8, first_sym, ":") and value.data.list.items.len == 3) {
+                        const val = value.data.list.items[1];
+                        const typ = value.data.list.items[2];
+                        if (val.type == .Number and typ.type == .Symbol) {
+                            const type_value = try Type.init(self.allocator, typ.data.symbol.name);
+                            break :blk AttributeValue{ .typed_number = .{
+                                .value = val.data.number,
+                                .typ = type_value,
+                            } };
+                        }
                     }
                 }
                 break :blk AttributeValue{ .string = try self.allocator.dupe(u8, "<list>") };

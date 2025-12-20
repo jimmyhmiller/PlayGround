@@ -265,5 +265,6 @@ fn printAttributeValue(value: ast.AttributeValue, indent: usize) std.mem.Allocat
         },
         .type => |t| std.debug.print("Type({s})", .{t.name}),
         .function_type => std.debug.print("FunctionType", .{}),
+        .typed_number => |tn| std.debug.print("{d} : {s}", .{ tn.value, tn.typ.name }),
     }
 }

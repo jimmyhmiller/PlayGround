@@ -6,6 +6,8 @@ pub const reader = @import("reader.zig");
 pub const ast = @import("ast.zig");
 pub const parser = @import("parser.zig");
 pub const mlir_integration = @import("mlir_integration.zig");
+pub const ir_generator = @import("ir_generator.zig");
+pub const jit = @import("jit.zig");
 
 /// Main API for parsing Lispier code
 pub const Compiler = struct {
@@ -136,4 +138,6 @@ test {
     _ = ast;
     _ = parser;
     _ = mlir_integration;
+    _ = ir_generator;
+    _ = jit;
 }

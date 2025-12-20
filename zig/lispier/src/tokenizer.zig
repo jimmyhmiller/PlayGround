@@ -221,7 +221,8 @@ pub const Tokenizer = struct {
     }
 
     fn keyword(self: *Tokenizer) !Token {
-        while (self.isAlphaNumeric(self.peek()) or self.peek() == '-' or self.peek() == '_') {
+        // Keywords can contain alphanumeric, dash, underscore, and period (for namespaced attrs like :llvm.emit_c_interface)
+        while (self.isAlphaNumeric(self.peek()) or self.peek() == '-' or self.peek() == '_' or self.peek() == '.') {
             _ = self.advance();
         }
         return self.makeToken(.Keyword);

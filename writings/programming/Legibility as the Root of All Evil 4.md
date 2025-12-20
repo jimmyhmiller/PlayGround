@@ -6,7 +6,7 @@ Thanks to Sean Goedecke's [Seeing Like a Software Company](https://www.seangoede
 
 ## The Junior Engineer's Run In with Legibility
 
-I have been at war with legibilty since my first software job. Well that's not entirely accurate, my beef with legibility far predates my understanding of the concept. I didn't get good grades in high school. I did well on tests, too hard classes, but did none of my homework. Looking back in many ways it was a silly decision and one I'd change. But I still can conjure up that feeling I once had. That feeling of injustice. The feeling of wasting my time. I believed strongly that school was supposed to be about learning the material and I knew the material. Why was I wasting my time?
+I have been struggling against legibilty since my first software job. Well that's not entirely accurate, my beef with legibility far predates my understanding of the concept. I didn't get good grades in high school. I did well on tests, took hard classes, but did none of my homework. Looking back in many ways it was a silly decision and one I'd change. But I still can conjure up that feeling I once had. That feeling of injustice. The feeling of wasting my time. I believed strongly that school was supposed to be about learning the material and I knew the material. Why was I wasting my time?
 
 I didn't understand then that what I faced then would continue to be a life long struggle. School wasn't (only) about learning the material. It was a system designed to measure outcomes. To make homogenized reports of students abilities. To offer monitoring, control, accountability to bureaucrats, politicians, parents, communties, and administrators. The standardized tests, learning objectives, and later pre and post test structure weren't given based on some belief that this is the best way to educate, but instead for that goal of legibility.
 
@@ -16,6 +16,7 @@ The business was furious.
 
 Sadly this story is not unique to me. I saw the same episode repeated time after time with eager junior engineers. Finishing work early was not a good thing. Predictiability matter more than outcome.
 
-## But What About Good Legibility?
+## The Struggle Continues
 
-There is no doubt that my general distaste for legibility has caused its fair share of conflict with even those coworkers who enjoy working with me. 
+One I learned the patterns of the workplace, I never did face this kind of backlash again. But I couldn't escape the negative impacts of legibility. But I think worse than that, I couldn't seem to get other people to see these negative impacts. Legibility has become best practice. 
+

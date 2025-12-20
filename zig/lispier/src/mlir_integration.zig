@@ -7,9 +7,11 @@ pub const ValidationError = error{
 };
 
 /// C imports for MLIR
-const c = @cImport({
+pub const c = @cImport({
     @cInclude("mlir-c/IR.h");
     @cInclude("mlir-c/Support.h");
+    @cInclude("mlir-c/BuiltinTypes.h");
+    @cInclude("mlir-c/BuiltinAttributes.h");
     @cInclude("mlir-c/Dialect/Arith.h");
     @cInclude("mlir-c/Dialect/Func.h");
     @cInclude("mlir-c/Dialect/ControlFlow.h");
@@ -17,20 +19,55 @@ const c = @cImport({
     @cInclude("mlir-c/Dialect/MemRef.h");
     @cInclude("mlir-c/Dialect/Vector.h");
     @cInclude("mlir-c/Dialect/LLVM.h");
+    @cInclude("mlir-c/Pass.h");
+    @cInclude("mlir-c/ExecutionEngine.h");
+    @cInclude("mlir-c/RegisterEverything.h");
     @cInclude("mlir-introspection.h");
 });
 
 /// Dialect registry for validating operations
 pub const DialectRegistry = struct {
     ctx: c.MlirContext,
+    registry: c.MlirDialectRegistry,
     allocator: std.mem.Allocator,
     loaded_dialects: std.StringHashMap(void),
 
     pub fn init(allocator: std.mem.Allocator) !DialectRegistry {
-        const ctx = c.mlirContextCreate();
+        // Create a dialect registry and pre-register all supported dialects
+        const registry = c.mlirDialectRegistryCreate();
+
+        // Insert all dialect handles into the registry upfront
+        const arith_handle = c.mlirGetDialectHandle__arith__();
+        const func_handle = c.mlirGetDialectHandle__func__();
+        const cf_handle = c.mlirGetDialectHandle__cf__();
+        const scf_handle = c.mlirGetDialectHandle__scf__();
+        const memref_handle = c.mlirGetDialectHandle__memref__();
+        const vector_handle = c.mlirGetDialectHandle__vector__();
+        const llvm_handle = c.mlirGetDialectHandle__llvm__();
+
+        c.mlirDialectHandleInsertDialect(arith_handle, registry);
+        c.mlirDialectHandleInsertDialect(func_handle, registry);
+        c.mlirDialectHandleInsertDialect(cf_handle, registry);
+        c.mlirDialectHandleInsertDialect(scf_handle, registry);
+        c.mlirDialectHandleInsertDialect(memref_handle, registry);
+        c.mlirDialectHandleInsertDialect(vector_handle, registry);
+        c.mlirDialectHandleInsertDialect(llvm_handle, registry);
+
+        // Create context WITH the registry (this registers the operations)
+        const ctx = c.mlirContextCreateWithRegistry(registry, true);
+
+        // Also explicitly load the dialects on the context
+        _ = c.mlirDialectHandleLoadDialect(arith_handle, ctx);
+        _ = c.mlirDialectHandleLoadDialect(func_handle, ctx);
+        _ = c.mlirDialectHandleLoadDialect(cf_handle, ctx);
+        _ = c.mlirDialectHandleLoadDialect(scf_handle, ctx);
+        _ = c.mlirDialectHandleLoadDialect(memref_handle, ctx);
+        _ = c.mlirDialectHandleLoadDialect(vector_handle, ctx);
+        _ = c.mlirDialectHandleLoadDialect(llvm_handle, ctx);
 
         return .{
             .ctx = ctx,
+            .registry = registry,
             .allocator = allocator,
             .loaded_dialects = std.StringHashMap(void).init(allocator),
         };
@@ -43,7 +80,20 @@ pub const DialectRegistry = struct {
             self.allocator.free(key.*);
         }
         self.loaded_dialects.deinit();
+        c.mlirDialectRegistryDestroy(self.registry);
         c.mlirContextDestroy(self.ctx);
+    }
+
+    /// Get dialect handle by name
+    fn getDialectHandle(name: []const u8) ?c.MlirDialectHandle {
+        if (std.mem.eql(u8, name, "arith")) return c.mlirGetDialectHandle__arith__();
+        if (std.mem.eql(u8, name, "func")) return c.mlirGetDialectHandle__func__();
+        if (std.mem.eql(u8, name, "cf")) return c.mlirGetDialectHandle__cf__();
+        if (std.mem.eql(u8, name, "scf")) return c.mlirGetDialectHandle__scf__();
+        if (std.mem.eql(u8, name, "memref")) return c.mlirGetDialectHandle__memref__();
+        if (std.mem.eql(u8, name, "vector")) return c.mlirGetDialectHandle__vector__();
+        if (std.mem.eql(u8, name, "llvm")) return c.mlirGetDialectHandle__llvm__();
+        return null;
     }
 
     /// Load a dialect by name
@@ -52,49 +102,12 @@ pub const DialectRegistry = struct {
             return;
         }
 
-        // Register the dialect handle based on name
-        var found = false;
+        const handle = getDialectHandle(name) orelse return error.UnknownDialect;
 
-        if (std.mem.eql(u8, name, "arith")) {
-            const handle = c.mlirGetDialectHandle__arith__();
-            c.mlirDialectHandleRegisterDialect(handle, self.ctx);
-            _ = c.mlirDialectHandleLoadDialect(handle, self.ctx);
-            found = true;
-        } else if (std.mem.eql(u8, name, "func")) {
-            const handle = c.mlirGetDialectHandle__func__();
-            c.mlirDialectHandleRegisterDialect(handle, self.ctx);
-            _ = c.mlirDialectHandleLoadDialect(handle, self.ctx);
-            found = true;
-        } else if (std.mem.eql(u8, name, "cf")) {
-            const handle = c.mlirGetDialectHandle__cf__();
-            c.mlirDialectHandleRegisterDialect(handle, self.ctx);
-            _ = c.mlirDialectHandleLoadDialect(handle, self.ctx);
-            found = true;
-        } else if (std.mem.eql(u8, name, "scf")) {
-            const handle = c.mlirGetDialectHandle__scf__();
-            c.mlirDialectHandleRegisterDialect(handle, self.ctx);
-            _ = c.mlirDialectHandleLoadDialect(handle, self.ctx);
-            found = true;
-        } else if (std.mem.eql(u8, name, "memref")) {
-            const handle = c.mlirGetDialectHandle__memref__();
-            c.mlirDialectHandleRegisterDialect(handle, self.ctx);
-            _ = c.mlirDialectHandleLoadDialect(handle, self.ctx);
-            found = true;
-        } else if (std.mem.eql(u8, name, "vector")) {
-            const handle = c.mlirGetDialectHandle__vector__();
-            c.mlirDialectHandleRegisterDialect(handle, self.ctx);
-            _ = c.mlirDialectHandleLoadDialect(handle, self.ctx);
-            found = true;
-        } else if (std.mem.eql(u8, name, "llvm")) {
-            const handle = c.mlirGetDialectHandle__llvm__();
-            c.mlirDialectHandleRegisterDialect(handle, self.ctx);
-            _ = c.mlirDialectHandleLoadDialect(handle, self.ctx);
-            found = true;
-        }
-
-        if (!found) {
-            return error.UnknownDialect;
-        }
+        // Insert into registry, append registry to context, then load
+        c.mlirDialectHandleInsertDialect(handle, self.registry);
+        c.mlirContextAppendDialectRegistry(self.ctx, self.registry);
+        _ = c.mlirDialectHandleLoadDialect(handle, self.ctx);
 
         // Mark as loaded
         const owned_name = try self.allocator.dupe(u8, name);
