@@ -29,11 +29,37 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
 
         if let button = statusItem.button {
-            button.image = NSImage(systemSymbolName: "chart.bar.fill", accessibilityDescription: "Tracker")
+            button.image = createMenuBarIcon()
+            button.image?.isTemplate = true
             button.action = #selector(handleClick)
             button.sendAction(on: [.leftMouseUp, .rightMouseUp])
             button.target = self
         }
+    }
+
+    private func createMenuBarIcon() -> NSImage? {
+        // Short, Long, Medium bar pattern
+        return svgToImage("""
+            <svg width="18" height="18" viewBox="0 0 18 18" xmlns="http://www.w3.org/2000/svg">
+              <rect x="2" y="2" width="7" height="4" rx="2" fill="black"/>
+              <rect x="2" y="7" width="14" height="4" rx="2" fill="black"/>
+              <rect x="2" y="12.5" width="11" height="4" rx="2" fill="black"/>
+            </svg>
+            """)
+    }
+
+    private func svgToImage(_ svgString: String) -> NSImage? {
+        guard let data = svgString.data(using: .utf8) else { return nil }
+        guard let svgImage = NSImage(data: data) else { return nil }
+
+        // Create a template image at the right size for menu bar
+        let size = NSSize(width: 18, height: 18)
+        let image = NSImage(size: size)
+        image.lockFocus()
+        svgImage.draw(in: NSRect(origin: .zero, size: size))
+        image.unlockFocus()
+        image.isTemplate = true
+        return image
     }
 
     private func setupPopover() {
