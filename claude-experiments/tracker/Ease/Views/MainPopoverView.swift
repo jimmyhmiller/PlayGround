@@ -1,7 +1,7 @@
 import SwiftUI
 
 struct MainPopoverView: View {
-    @EnvironmentObject var viewModel: TrackerViewModel
+    @EnvironmentObject var viewModel: EaseViewModel
 
     var body: some View {
         VStack(spacing: 16) {

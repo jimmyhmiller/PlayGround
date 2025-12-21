@@ -2,7 +2,7 @@ import SwiftUI
 import AppKit
 
 @main
-struct TrackerApp: App {
+struct EaseApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
 
     var body: some Scene {
@@ -16,7 +16,7 @@ struct TrackerApp: App {
 class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var statusItem: NSStatusItem!
     private var popover: NSPopover!
-    private let viewModel = TrackerViewModel()
+    private let viewModel = EaseViewModel()
     private var clearMenuItem: NSMenuItem?
     private var modifierTimer: Timer?
 

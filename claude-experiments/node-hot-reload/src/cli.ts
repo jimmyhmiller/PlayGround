@@ -6,6 +6,7 @@ import * as net from "net";
 import { transform } from "./transform";
 import { startServer } from "./server";
 import { createRuntime } from "./runtime";
+import { strip } from "./strip";
 
 const DEFAULT_PORTS = [3456, 3457, 3458, 3459, 3460];
 
@@ -192,16 +193,132 @@ async function run(entry: string) {
   });
 }
 
+function stripFile(inputFile: string, outputFile?: string) {
+  const code = fs.readFileSync(inputFile, "utf-8");
+  const stripped = strip(code);
+
+  if (outputFile) {
+    const outDir = path.dirname(outputFile);
+    if (!fs.existsSync(outDir)) {
+      fs.mkdirSync(outDir, { recursive: true });
+    }
+    fs.writeFileSync(outputFile, stripped);
+    console.log(`[hot] Stripped: ${inputFile} -> ${outputFile}`);
+  } else {
+    // Output to stdout
+    process.stdout.write(stripped);
+  }
+}
+
+function stripDir(inputDir: string, outputDir: string, extensions: string[]) {
+  const files = walkDir(inputDir, extensions);
+  let count = 0;
+
+  for (const file of files) {
+    const relative = path.relative(inputDir, file);
+    const outFile = path.join(outputDir, relative);
+
+    const code = fs.readFileSync(file, "utf-8");
+    const stripped = strip(code);
+
+    const outDir = path.dirname(outFile);
+    if (!fs.existsSync(outDir)) {
+      fs.mkdirSync(outDir, { recursive: true });
+    }
+
+    fs.writeFileSync(outFile, stripped);
+    count++;
+  }
+
+  console.log(`[hot] Stripped ${count} file(s) from ${inputDir} to ${outputDir}`);
+}
+
+function walkDir(dir: string, extensions: string[]): string[] {
+  const results: string[] = [];
+
+  function walk(currentDir: string) {
+    const entries = fs.readdirSync(currentDir, { withFileTypes: true });
+
+    for (const entry of entries) {
+      const fullPath = path.join(currentDir, entry.name);
+
+      if (entry.isDirectory()) {
+        // Skip node_modules and hidden directories
+        if (entry.name !== "node_modules" && !entry.name.startsWith(".")) {
+          walk(fullPath);
+        }
+      } else if (entry.isFile()) {
+        const ext = path.extname(entry.name);
+        if (extensions.includes(ext)) {
+          results.push(fullPath);
+        }
+      }
+    }
+  }
+
+  walk(dir);
+  return results;
+}
+
+function printUsage() {
+  console.log("Usage:");
+  console.log("  hot run <entry.js>              Run with hot reloading");
+  console.log("  hot strip <file.js>             Strip once/defonce from file (stdout)");
+  console.log("  hot strip <file.js> -o <out.js> Strip once/defonce to output file");
+  console.log("  hot strip -d <src> -o <dist>    Strip directory recursively");
+  console.log("");
+  console.log("Options:");
+  console.log("  -o, --output <path>   Output file or directory");
+  console.log("  -d, --dir <path>      Input directory (recursive)");
+  console.log("  -e, --ext <exts>      File extensions (default: .js,.ts,.jsx,.tsx)");
+  console.log("");
+  console.log("Examples:");
+  console.log("  hot run ./src/index.js");
+  console.log("  hot strip ./src/app.js -o ./dist/app.js");
+  console.log("  hot strip -d ./src -o ./dist");
+  console.log("  hot strip ./src/app.js | prettier --stdin-filepath app.js");
+}
+
 // Simple CLI
 const args = process.argv.slice(2);
 const command = args[0];
 
 if (command === "run" && args[1]) {
   run(args[1]);
+} else if (command === "strip") {
+  // Parse strip arguments
+  let inputFile: string | undefined;
+  let inputDir: string | undefined;
+  let output: string | undefined;
+  let extensions = [".js", ".ts", ".jsx", ".tsx"];
+
+  for (let i = 1; i < args.length; i++) {
+    const arg = args[i];
+    if (arg === "-o" || arg === "--output") {
+      output = args[++i];
+    } else if (arg === "-d" || arg === "--dir") {
+      inputDir = args[++i];
+    } else if (arg === "-e" || arg === "--ext") {
+      extensions = args[++i].split(",").map((e) => (e.startsWith(".") ? e : `.${e}`));
+    } else if (!arg.startsWith("-")) {
+      inputFile = arg;
+    }
+  }
+
+  if (inputDir) {
+    if (!output) {
+      console.error("[hot] Error: --output is required when using --dir");
+      process.exit(1);
+    }
+    stripDir(inputDir, output, extensions);
+  } else if (inputFile) {
+    stripFile(inputFile, output);
+  } else {
+    console.error("[hot] Error: No input file or directory specified");
+    printUsage();
+    process.exit(1);
+  }
 } else {
-  console.log("Usage: hot run <entry.js>");
-  console.log("");
-  console.log("Example:");
-  console.log("  hot run ./example/index.js");
+  printUsage();
   process.exit(1);
 }

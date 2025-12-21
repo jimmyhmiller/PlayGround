@@ -11,7 +11,7 @@ class DataStore {
     private let fileManager = FileManager.default
     private var dataFileURL: URL {
         let appSupport = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        let appFolder = appSupport.appendingPathComponent("ProgressTracker", isDirectory: true)
+        let appFolder = appSupport.appendingPathComponent("Ease", isDirectory: true)
 
         if !fileManager.fileExists(atPath: appFolder.path) {
             try? fileManager.createDirectory(at: appFolder, withIntermediateDirectories: true)

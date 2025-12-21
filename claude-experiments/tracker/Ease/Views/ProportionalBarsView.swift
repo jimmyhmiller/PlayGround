@@ -1,7 +1,7 @@
 import SwiftUI
 
 struct ProportionalBarsView: View {
-    @EnvironmentObject var viewModel: TrackerViewModel
+    @EnvironmentObject var viewModel: EaseViewModel
 
     var body: some View {
         let proportions = viewModel.proportions(for: viewModel.selectedPeriod)

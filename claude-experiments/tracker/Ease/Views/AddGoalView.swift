@@ -1,7 +1,7 @@
 import SwiftUI
 
 struct AddGoalView: View {
-    @EnvironmentObject var viewModel: TrackerViewModel
+    @EnvironmentObject var viewModel: EaseViewModel
 
     @State private var name: String = ""
     @State private var selectedColorHex: String = ""

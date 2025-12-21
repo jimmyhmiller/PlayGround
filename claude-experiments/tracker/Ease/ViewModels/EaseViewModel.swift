@@ -29,7 +29,7 @@ enum UndoAction {
 }
 
 @MainActor
-class TrackerViewModel: ObservableObject {
+class EaseViewModel: ObservableObject {
     @Published var goals: [Goal] = []
     @Published var entries: [Entry] = []
     @Published var selectedPeriod: TimePeriod = .week
