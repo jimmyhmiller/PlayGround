@@ -226,10 +226,19 @@ pub fn build(b: *std.Build) void {
     const find_overlaps_step = b.step("find-overlaps", "Find overlapping operations in MLIR dialects");
     find_overlaps_step.dependOn(&run_find_overlaps.step);
 
-    // Tests
+    // Tests with Serpent test runner
+    const serpent = b.dependency("serpent", .{});
+
     const tests = b.addTest(.{
         .root_module = main_module,
+        .test_runner = .{
+            .path = serpent.path("src/root.zig"),
+            .mode = .simple,
+        },
     });
+
+    // Add Serpent expect matchers for enhanced assertions
+    main_module.addImport("serpent", serpent.module("serpent"));
 
     // Add MLIR include paths and libraries
     tests.addIncludePath(.{ .cwd_relative = "/opt/homebrew/opt/llvm/include" });
@@ -270,9 +279,14 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     integration_root.addImport("main", main_module);
+    integration_root.addImport("serpent", serpent.module("serpent"));
 
     const integration_tests = b.addTest(.{
         .root_module = integration_root,
+        .test_runner = .{
+            .path = serpent.path("src/root.zig"),
+            .mode = .simple,
+        },
     });
 
     integration_tests.addIncludePath(.{ .cwd_relative = "/opt/homebrew/opt/llvm/include" });
