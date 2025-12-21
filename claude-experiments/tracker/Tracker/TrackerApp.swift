@@ -17,8 +17,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var statusItem: NSStatusItem!
     private var popover: NSPopover!
     private let viewModel = TrackerViewModel()
-    private var clearClickCount = 0
-    private var clearDataMenuItem: NSMenuItem?
+    private var clearMenuItem: NSMenuItem?
+    private var modifierTimer: Timer?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         setupStatusItem()
@@ -66,19 +66,19 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func showContextMenu(_ sender: NSStatusBarButton) {
-        clearClickCount = 0
         let menu = NSMenu()
         menu.delegate = self
+        menu.autoenablesItems = false
 
-        let clearItem = NSMenuItem()
-        let clearView = ClearDataView(
-            remainingClicks: 5,
-            onClick: { [weak self] in
-                self?.handleClearDataClick()
-            }
+        let modifiersHeld = NSEvent.modifierFlags.contains([.command, .option])
+
+        let clearItem = NSMenuItem(
+            title: modifiersHeld ? "Clear Data" : "Clear Data (⌘⌥)",
+            action: #selector(clearDataClicked),
+            keyEquivalent: ""
         )
-        clearItem.view = clearView
-        clearDataMenuItem = clearItem
+        clearItem.isEnabled = modifiersHeld
+        clearMenuItem = clearItem
         menu.addItem(clearItem)
         menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(title: "Quit", action: #selector(quitApp), keyEquivalent: "q"))
@@ -88,98 +88,28 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         statusItem.menu = nil
     }
 
-    private func handleClearDataClick() {
-        clearClickCount += 1
-        let remainingClicks = 5 - clearClickCount
+    @objc private func clearDataClicked() {
+        viewModel.clearAllData()
+    }
 
-        if remainingClicks <= 0 {
-            viewModel.clearAllData()
-            clearClickCount = 0
-            statusItem.menu?.cancelTracking()
-        } else if let menuItem = clearDataMenuItem,
-                  let clearView = menuItem.view as? ClearDataView {
-            clearView.updateCount(remainingClicks)
+    func menuWillOpen(_ menu: NSMenu) {
+        // Start polling for modifier changes - must use common modes to work during menu tracking
+        modifierTimer = Timer(timeInterval: 0.05, repeats: true) { [weak self] _ in
+            DispatchQueue.main.async {
+                let modifiersHeld = NSEvent.modifierFlags.contains([.command, .option])
+                self?.clearMenuItem?.title = modifiersHeld ? "Clear Data" : "Clear Data (⌘⌥)"
+                self?.clearMenuItem?.isEnabled = modifiersHeld
+            }
         }
+        RunLoop.main.add(modifierTimer!, forMode: .common)
+    }
+
+    func menuDidClose(_ menu: NSMenu) {
+        modifierTimer?.invalidate()
+        modifierTimer = nil
     }
 
     @objc private func quitApp() {
         NSApp.terminate(nil)
-    }
-
-    nonisolated func menuDidClose(_ menu: NSMenu) {
-        Task { @MainActor in
-            self.clearClickCount = 0
-        }
-    }
-}
-
-class ClearDataView: NSView {
-    private let label: NSTextField
-    private var onClick: () -> Void
-    private var isHighlighted = false {
-        didSet {
-            needsDisplay = true
-            label.textColor = isHighlighted ? .white : .labelColor
-        }
-    }
-    private var trackingArea: NSTrackingArea?
-
-    init(remainingClicks: Int, onClick: @escaping () -> Void) {
-        self.onClick = onClick
-        self.label = NSTextField(labelWithString: "Clear Data (\(remainingClicks))")
-        super.init(frame: NSRect(x: 0, y: 0, width: 150, height: 22))
-
-        label.font = NSFont.menuFont(ofSize: 0)
-        label.translatesAutoresizingMaskIntoConstraints = false
-        label.backgroundColor = .clear
-        addSubview(label)
-
-        NSLayoutConstraint.activate([
-            label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
-            label.centerYAnchor.constraint(equalTo: centerYAnchor)
-        ])
-    }
-
-    required init?(coder: NSCoder) {
-        fatalError("init(coder:) has not been implemented")
-    }
-
-    override func updateTrackingAreas() {
-        super.updateTrackingAreas()
-        if let existing = trackingArea {
-            removeTrackingArea(existing)
-        }
-        trackingArea = NSTrackingArea(
-            rect: bounds,
-            options: [.mouseEnteredAndExited, .activeAlways],
-            owner: self,
-            userInfo: nil
-        )
-        addTrackingArea(trackingArea!)
-    }
-
-    override func draw(_ dirtyRect: NSRect) {
-        if isHighlighted {
-            NSColor.selectedContentBackgroundColor.setFill()
-            let path = NSBezierPath(roundedRect: bounds.insetBy(dx: 4, dy: 1), xRadius: 4, yRadius: 4)
-            path.fill()
-        }
-        super.draw(dirtyRect)
-    }
-
-    override func mouseEntered(with event: NSEvent) {
-        isHighlighted = true
-    }
-
-    override func mouseExited(with event: NSEvent) {
-        isHighlighted = false
-    }
-
-    func updateCount(_ remaining: Int) {
-        label.stringValue = "Clear Data (\(remaining))"
-    }
-
-    override func mouseUp(with event: NSEvent) {
-        onClick()
     }
 }
