@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>matrix</title>
+  <style>
+    body { font-family: monospace; background: #000; color: #0f0; padding: 20px; }
+    #output { white-space: pre; font-size: 10px; line-height: 1.1; }
+  </style>
+</head>
+<body>
+  <h1>matrix</h1>
+  <pre id="output"></pre>
+  <script>
+    const params = new URLSearchParams(window.location.search);
+    const ms = parseInt(params.get('ms') || '80', 10);
+    const width = parseInt(params.get('w') || '80', 10);
+    const height = parseInt(params.get('h') || '30', 10);
+    const count = parseInt(params.get('n') || '0', 10); // 0 = infinite frames
+
+    const chars = 'アイウエオカキクケコサシスセソタチツテトナニヌネノハヒフヘホマミムメモヤユヨラリルレロワヲン0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ<>{}[]|/*-+!@#$%^&()';
+
+    // Screen buffer - stores character and age at each position
+    // age: 0 = empty, 1 = head (brightest), 2+ = fading trail
+    const screen = [];
+    for (let y = 0; y < height; y++) {
+      screen[y] = [];
+      for (let x = 0; x < width; x++) {
+        screen[y][x] = { char: ' ', age: 0 };
+      }
+    }
+
+    // Drops - each column can have an active drop
+    const drops = [];
+    for (let x = 0; x < width; x++) {
+      drops[x] = {
+        active: Math.random() > 0.7,
+        y: Math.floor(Math.random() * height),
+        speed: 1,
+        length: Math.floor(Math.random() * 15) + 8
+      };
+    }
+
+    let frameCount = 0;
+    let timer = null;
+
+    function randomChar() {
+      return chars[Math.floor(Math.random() * chars.length)];
+    }
+
+    function tick() {
+      // Age all cells and clear old ones
+      for (let y = 0; y < height; y++) {
+        for (let x = 0; x < width; x++) {
+          if (screen[y][x].age > 0) {
+            screen[y][x].age++;
+            // Randomly change characters in trail for effect
+            if (screen[y][x].age > 1 && Math.random() > 0.9) {
+              screen[y][x].char = randomChar();
+            }
+            // Fade out after trail length
+            if (screen[y][x].age > drops[x].length) {
+              screen[y][x] = { char: ' ', age: 0 };
+            }
+          }
+        }
+      }
+
+      // Move drops down
+      for (let x = 0; x < width; x++) {
+        if (drops[x].active) {
+          drops[x].y += drops[x].speed;
+
+          // Draw new head
+          if (drops[x].y >= 0 && drops[x].y < height) {
+            screen[drops[x].y][x] = { char: randomChar(), age: 1 };
+          }
+
+          // Reset drop when it goes off screen
+          if (drops[x].y - drops[x].length > height) {
+            drops[x].active = false;
+          }
+        } else {
+          // Random chance to spawn new drop
+          if (Math.random() > 0.97) {
+            drops[x] = {
+              active: true,
+              y: 0,
+              speed: 1,
+              length: Math.floor(Math.random() * 15) + 8
+            };
+          }
+        }
+      }
+    }
+
+    function render() {
+      let output = '';
+      for (let y = 0; y < height; y++) {
+        for (let x = 0; x < width; x++) {
+          output += screen[y][x].char;
+        }
+        if (y < height - 1) output += '\n';
+      }
+      return output;
+    }
+
+    window.opener?.postMessage({ type: 'ready' }, '*');
+
+    window.addEventListener('message', (event) => {
+      if (event.data.type === 'stdin') {
+        timer = setInterval(() => {
+          tick();
+          const frame = render();
+          frameCount++;
+          document.getElementById('output').textContent = frame;
+          window.opener?.postMessage({ type: 'frame', data: frame }, '*');
+
+          if (count > 0 && frameCount >= count) {
+            clearInterval(timer);
+            window.opener?.postMessage({ type: 'exit', code: 0 }, '*');
+          }
+        }, ms);
+      }
+    });
+  </script>
+</body>
+</html>

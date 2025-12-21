@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>cat</title>
+  <style>
+    body { font-family: monospace; background: #000; color: #0f0; padding: 20px; }
+  </style>
+</head>
+<body>
+  <h1>cat</h1>
+  <pre id="output">waiting for input...</pre>
+  <script>
+    const params = new URLSearchParams(window.location.search);
+    // cat can take content as a parameter (since we can't read files)
+    const content = params.get('content') || '';
+
+    window.opener?.postMessage({ type: 'ready' }, '*');
+
+    window.addEventListener('message', (event) => {
+      if (event.data.type === 'stdin') {
+        // If content param provided, output that; otherwise pass through stdin
+        const output = content || event.data.data;
+        document.getElementById('output').textContent = output;
+        window.opener?.postMessage({ type: 'stdout', data: output }, '*');
+        window.opener?.postMessage({ type: 'exit', code: 0 }, '*');
+      }
+    });
+  </script>
+</body>
+</html>

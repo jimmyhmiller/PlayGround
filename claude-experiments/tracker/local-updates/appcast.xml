@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <channel>
+        <title>Ease Updates (Local Dev)</title>
+        <link>http://localhost:8080/appcast.xml</link>
+        <description>Local development update feed for Ease</description>
+        <language>en</language>
+        <item>
+            <title>Version 1.1.0</title>
+            <description><![CDATA[
+                <h2>What's New in 1.1.0</h2>
+                <ul>
+                    <li>Added auto-update support</li>
+                    <li>Added update channel switching (Stable/Local Dev)</li>
+                    <li>Bug fixes and improvements</li>
+                </ul>
+            ]]></description>
+            <pubDate>Sun, 22 Dec 2024 12:00:00 +0000</pubDate>
+            <sparkle:version>2</sparkle:version>
+            <sparkle:shortVersionString>1.1.0</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+            <enclosure url="http://localhost:8080/Ease.zip"
+                       sparkle:version="2"
+                       sparkle:shortVersionString="1.1.0"
+                       length="0"
+                       type="application/octet-stream"/>
+        </item>
+    </channel>
+</rss>

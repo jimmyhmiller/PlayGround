@@ -10,6 +10,30 @@ interface ImportBinding {
   imported?: string;
 }
 
+// Check if an import is external (bare module specifier, not relative)
+function isExternalImport(source: string): boolean {
+  return !source.startsWith(".") && !source.startsWith("/");
+}
+
+// Check if an expression is a require() call and return the source if external
+function getExternalRequireSource(node: t.Expression | null | undefined): string | null {
+  if (!node) return null;
+
+  // Handle: require('module')
+  if (
+    t.isCallExpression(node) &&
+    t.isIdentifier(node.callee) &&
+    node.callee.name === "require" &&
+    node.arguments.length === 1 &&
+    t.isStringLiteral(node.arguments[0])
+  ) {
+    const source = node.arguments[0].value;
+    return isExternalImport(source) ? source : null;
+  }
+
+  return null;
+}
+
 interface LocalBinding {
   type: "function" | "variable" | "class";
   preserve: boolean;
@@ -58,6 +82,9 @@ export function transform(code: string, options: TransformOptions): string {
   // Track API imports to skip them
   const apiImports = new Set<string>();
 
+  // Track external import identifiers to skip in second pass
+  const externalImportIds = new Set<string>();
+
   // Track top-level local bindings
   const locals = new Map<string, LocalBinding>();
 
@@ -74,41 +101,152 @@ export function transform(code: string, options: TransformOptions): string {
                           sourceValue === "hot-reload/api" ||
                           sourceValue.endsWith("/api");
 
+      // Check if this is an external import (node_modules, built-ins like 'electron')
+      const isExternal = isExternalImport(sourceValue);
+
       const source = resolveImportSource(sourceValue, filename, sourceRoot);
 
-      for (const specifier of nodePath.node.specifiers) {
-        if (t.isImportSpecifier(specifier)) {
-          const imported = t.isIdentifier(specifier.imported)
-            ? specifier.imported.name
-            : specifier.imported.value;
+      // Only track local imports for hot-reload transformation
+      // External imports are left as regular require() calls
+      if (!isExternal && !isApiImport) {
+        for (const specifier of nodePath.node.specifiers) {
+          if (t.isImportSpecifier(specifier)) {
+            const imported = t.isIdentifier(specifier.imported)
+              ? specifier.imported.name
+              : specifier.imported.value;
 
-          // Track API imports separately
-          if (isApiImport && (imported === "once" || imported === "defonce")) {
-            apiImports.add(specifier.local.name);
-          } else {
             imports.set(specifier.local.name, {
               source,
               type: "named",
               imported,
             });
+          } else if (t.isImportDefaultSpecifier(specifier)) {
+            imports.set(specifier.local.name, {
+              source,
+              type: "default",
+            });
+          } else if (t.isImportNamespaceSpecifier(specifier)) {
+            imports.set(specifier.local.name, {
+              source,
+              type: "namespace",
+            });
           }
-        } else if (t.isImportDefaultSpecifier(specifier)) {
-          imports.set(specifier.local.name, {
-            source,
-            type: "default",
-          });
-        } else if (t.isImportNamespaceSpecifier(specifier)) {
-          imports.set(specifier.local.name, {
-            source,
-            type: "namespace",
-          });
         }
       }
 
-      // Remove API imports entirely, transform others
+      // Track API imports for removal
       if (isApiImport) {
+        for (const specifier of nodePath.node.specifiers) {
+          if (t.isImportSpecifier(specifier)) {
+            const imported = t.isIdentifier(specifier.imported)
+              ? specifier.imported.name
+              : specifier.imported.value;
+            if (imported === "once" || imported === "defonce") {
+              apiImports.add(specifier.local.name);
+            }
+          }
+        }
+      }
+
+      // Transform imports based on type
+      if (isApiImport) {
+        // Remove API imports entirely
         nodePath.remove();
+      } else if (isExternal) {
+        // Convert external imports to regular require() - leave them alone
+        // Transform: import { x } from 'pkg' -> const { x } = require('pkg')
+        // Transform: import x from 'pkg' -> const x = require('pkg').default || require('pkg')
+        // Transform: import * as x from 'pkg' -> const x = require('pkg')
+        const specifiers = nodePath.node.specifiers;
+
+        // Track all identifiers from external imports so we don't transform them
+        for (const spec of specifiers) {
+          externalImportIds.add(spec.local.name);
+        }
+
+        if (specifiers.length === 0) {
+          // Side-effect import: import 'pkg'
+          nodePath.replaceWith(
+            t.expressionStatement(
+              t.callExpression(t.identifier("require"), [t.stringLiteral(sourceValue)])
+            )
+          );
+        } else {
+          const requireCall = t.callExpression(t.identifier("require"), [t.stringLiteral(sourceValue)]);
+          const declarations: t.VariableDeclarator[] = [];
+
+          // Group specifiers by type
+          const namedSpecifiers: t.ImportSpecifier[] = [];
+          let defaultSpecifier: t.ImportDefaultSpecifier | null = null;
+          let namespaceSpecifier: t.ImportNamespaceSpecifier | null = null;
+
+          for (const spec of specifiers) {
+            if (t.isImportSpecifier(spec)) {
+              namedSpecifiers.push(spec);
+            } else if (t.isImportDefaultSpecifier(spec)) {
+              defaultSpecifier = spec;
+            } else if (t.isImportNamespaceSpecifier(spec)) {
+              namespaceSpecifier = spec;
+            }
+          }
+
+          // Handle namespace import: import * as x from 'pkg'
+          if (namespaceSpecifier) {
+            declarations.push(
+              t.variableDeclarator(namespaceSpecifier.local, requireCall)
+            );
+          }
+
+          // Handle default import: import x from 'pkg'
+          if (defaultSpecifier) {
+            // Use: const x = require('pkg').default ?? require('pkg')
+            // to handle both ESM default exports and CJS modules
+            const req = namespaceSpecifier
+              ? t.identifier(namespaceSpecifier.local.name)
+              : requireCall;
+            declarations.push(
+              t.variableDeclarator(
+                defaultSpecifier.local,
+                t.logicalExpression(
+                  "??",
+                  t.memberExpression(
+                    namespaceSpecifier ? t.identifier(namespaceSpecifier.local.name) : t.callExpression(t.identifier("require"), [t.stringLiteral(sourceValue)]),
+                    t.identifier("default")
+                  ),
+                  namespaceSpecifier ? t.identifier(namespaceSpecifier.local.name) : t.callExpression(t.identifier("require"), [t.stringLiteral(sourceValue)])
+                )
+              )
+            );
+          }
+
+          // Handle named imports: import { x, y } from 'pkg'
+          if (namedSpecifiers.length > 0) {
+            const properties: t.ObjectProperty[] = namedSpecifiers.map(spec => {
+              const imported = t.isIdentifier(spec.imported)
+                ? spec.imported
+                : t.identifier(spec.imported.value);
+              return t.objectProperty(
+                imported,
+                spec.local,
+                false,
+                imported.name === spec.local.name
+              );
+            });
+
+            const req = namespaceSpecifier
+              ? t.identifier(namespaceSpecifier.local.name)
+              : requireCall;
+            declarations.push(
+              t.variableDeclarator(t.objectPattern(properties), req)
+            );
+          }
+
+          nodePath.replaceWith(
+            t.variableDeclaration("const", declarations)
+          );
+        }
       } else if (nodePath.node.specifiers.length === 0) {
+        // Side-effect import for local module
         nodePath.replaceWith(
           t.expressionStatement(
             t.callExpression(
@@ -118,6 +256,7 @@ export function transform(code: string, options: TransformOptions): string {
           )
         );
       } else {
+        // Local import - remove (references will be replaced with __hot.get())
         nodePath.remove();
       }
     },
@@ -131,12 +270,36 @@ export function transform(code: string, options: TransformOptions): string {
     VariableDeclaration(nodePath: NodePath<t.VariableDeclaration>) {
       if (nodePath.parent === ast.program) {
         for (const declarator of nodePath.node.declarations) {
+          // Check for CommonJS require of external module: const x = require('module')
+          // Also handles destructuring: const { a, b } = require('module')
+          const externalSource = getExternalRequireSource(declarator.init);
+          if (externalSource) {
+            // Track all identifiers from this declaration as external
+            if (t.isIdentifier(declarator.id)) {
+              externalImportIds.add(declarator.id.name);
+            } else if (t.isObjectPattern(declarator.id)) {
+              for (const prop of declarator.id.properties) {
+                if (t.isObjectProperty(prop) && t.isIdentifier(prop.value)) {
+                  externalImportIds.add(prop.value.name);
+                } else if (t.isRestElement(prop) && t.isIdentifier(prop.argument)) {
+                  externalImportIds.add(prop.argument.name);
+                }
+              }
+            }
+            continue;
+          }
+
           if (t.isIdentifier(declarator.id)) {
+            const name = declarator.id.name;
+
+            // Skip external import identifiers (they're regular require() now)
+            if (externalImportIds.has(name)) continue;
+
             // Check for defonce() call or let keyword
             const hasDefonce = isDefonce(declarator.init);
             const shouldPreserve = hasDefonce || nodePath.node.kind === "let";
 
-            locals.set(declarator.id.name, {
+            locals.set(name, {
               type: "variable",
               preserve: shouldPreserve,
             });
@@ -160,13 +323,28 @@ export function transform(code: string, options: TransformOptions): string {
       // Skip API function references (once, defonce)
       if (apiImports.has(name)) return;
 
+      // Skip external import identifiers (they're regular require() now)
+      if (externalImportIds.has(name)) return;
+
       const importBinding = imports.get(name);
       const localBinding = locals.get(name);
 
       if (!importBinding && !localBinding) return;
-      if (!nodePath.isReferencedIdentifier()) return;
 
       const parent = nodePath.parent;
+
+      // For locals, also transform assignment targets (e.g., mainWindow = x -> __m.mainWindow = x)
+      // Check this BEFORE isReferencedIdentifier() to avoid TypeScript narrowing issues
+      if (localBinding && t.isAssignmentExpression(parent) && parent.left === nodePath.node) {
+        // Transform assignment target
+        nodePath.replaceWith(
+          t.memberExpression(t.identifier("__m"), t.identifier(name))
+        );
+        return;
+      }
+
+      // For imports, only transform referenced identifiers (can't assign to imports)
+      if (!nodePath.isReferencedIdentifier()) return;
       if (
         t.isMemberExpression(parent) &&
         parent.property === nodePath.node &&
@@ -227,16 +405,19 @@ export function transform(code: string, options: TransformOptions): string {
       const name = nodePath.node.id.name;
       nodePath.replaceWith(
         t.expressionStatement(
-          t.assignmentExpression(
-            "=",
-            t.memberExpression(t.identifier("__m"), t.identifier(name)),
-            t.functionExpression(
-              nodePath.node.id,
-              nodePath.node.params,
-              nodePath.node.body,
-              nodePath.node.generator,
-              nodePath.node.async
-            )
+          t.callExpression(
+            t.memberExpression(t.identifier("__hot"), t.identifier("defn")),
+            [
+              t.identifier("__m"),
+              t.stringLiteral(name),
+              t.functionExpression(
+                nodePath.node.id,
+                nodePath.node.params,
+                nodePath.node.body,
+                nodePath.node.generator,
+                nodePath.node.async
+              )
+            ]
           )
         )
       );
@@ -244,6 +425,12 @@ export function transform(code: string, options: TransformOptions): string {
 
     VariableDeclaration(nodePath: NodePath<t.VariableDeclaration>) {
       if (nodePath.parent !== ast.program) return;
+
+      // Check if this is an external import declaration - skip it entirely
+      const hasExternalImport = nodePath.node.declarations.some(
+        d => t.isIdentifier(d.id) && externalImportIds.has(d.id.name)
+      );
+      if (hasExternalImport) return;
 
       const statements: t.Statement[] = [];
 
@@ -318,16 +505,19 @@ export function transform(code: string, options: TransformOptions): string {
           locals.set(name, { type: "function", preserve: false });
           nodePath.replaceWith(
             t.expressionStatement(
-              t.assignmentExpression(
-                "=",
-                t.memberExpression(t.identifier("__m"), t.identifier(name)),
-                t.functionExpression(
-                  declaration.id,
-                  declaration.params,
-                  declaration.body,
-                  declaration.generator,
-                  declaration.async
-                )
+              t.callExpression(
+                t.memberExpression(t.identifier("__hot"), t.identifier("defn")),
+                [
+                  t.identifier("__m"),
+                  t.stringLiteral(name),
+                  t.functionExpression(
+                    declaration.id,
+                    declaration.params,
+                    declaration.body,
+                    declaration.generator,
+                    declaration.async
+                  )
+                ]
               )
             )
           );
@@ -413,42 +603,58 @@ export function transform(code: string, options: TransformOptions): string {
     ExportDefaultDeclaration(nodePath: NodePath<t.ExportDefaultDeclaration>) {
       const { declaration } = nodePath.node;
 
-      let value: t.Expression;
-
       if (t.isFunctionDeclaration(declaration)) {
         if (declaration.id) {
           locals.set(declaration.id.name, { type: "function", preserve: false });
         }
-        value = t.functionExpression(
-          declaration.id,
-          declaration.params,
-          declaration.body,
-          declaration.generator,
-          declaration.async
+        // Use __hot.defn for function declarations
+        nodePath.replaceWith(
+          t.expressionStatement(
+            t.callExpression(
+              t.memberExpression(t.identifier("__hot"), t.identifier("defn")),
+              [
+                t.identifier("__m"),
+                t.stringLiteral("default"),
+                t.functionExpression(
+                  declaration.id,
+                  declaration.params,
+                  declaration.body,
+                  declaration.generator,
+                  declaration.async
+                )
+              ]
+            )
+          )
         );
       } else if (t.isClassDeclaration(declaration)) {
         if (declaration.id) {
           locals.set(declaration.id.name, { type: "class", preserve: false });
         }
-        value = t.classExpression(
-          declaration.id,
-          declaration.superClass,
-          declaration.body,
-          declaration.decorators
+        nodePath.replaceWith(
+          t.expressionStatement(
+            t.assignmentExpression(
+              "=",
+              t.memberExpression(t.identifier("__m"), t.identifier("default")),
+              t.classExpression(
+                declaration.id,
+                declaration.superClass,
+                declaration.body,
+                declaration.decorators
+              )
+            )
+          )
         );
       } else {
-        value = declaration as t.Expression;
-      }
-
-      nodePath.replaceWith(
-        t.expressionStatement(
-          t.assignmentExpression(
-            "=",
-            t.memberExpression(t.identifier("__m"), t.identifier("default")),
-            value
+        nodePath.replaceWith(
+          t.expressionStatement(
+            t.assignmentExpression(
+              "=",
+              t.memberExpression(t.identifier("__m"), t.identifier("default")),
+              declaration as t.Expression
+            )
           )
-        )
-      );
+        );
+      }
     },
   });
 

@@ -2,6 +2,9 @@ import SwiftUI
 
 struct MainPopoverView: View {
     @EnvironmentObject var viewModel: EaseViewModel
+    @State private var isCmdHeld: Bool = false
+    @State private var eventMonitor: Any?
+    @State private var draggingGoal: Goal?
 
     var body: some View {
         VStack(spacing: 16) {
@@ -26,6 +29,19 @@ struct MainPopoverView: View {
                     .opacity(0)
             }
         )
+        .onAppear {
+            isCmdHeld = NSEvent.modifierFlags.contains(.command)
+            eventMonitor = NSEvent.addLocalMonitorForEvents(matching: .flagsChanged) { event in
+                isCmdHeld = event.modifierFlags.contains(.command)
+                return event
+            }
+        }
+        .onDisappear {
+            if let monitor = eventMonitor {
+                NSEvent.removeMonitor(monitor)
+                eventMonitor = nil
+            }
+        }
     }
 
     private var mainContent: some View {
@@ -52,6 +68,7 @@ struct MainPopoverView: View {
                     ForEach(viewModel.goals) { goal in
                         GoalRowView(
                             goal: goal,
+                            isReorderMode: isCmdHeld,
                             onAdd: { amount in
                                 viewModel.addEntry(for: goal, amount: amount)
                             },
@@ -62,6 +79,20 @@ struct MainPopoverView: View {
                                 viewModel.updateGoalColor(goal, colorHex: colorHex)
                             }
                         )
+                        .opacity(draggingGoal?.id == goal.id ? 0.5 : 1.0)
+                        .onDrag {
+                            guard isCmdHeld else { return NSItemProvider() }
+                            draggingGoal = goal
+                            return NSItemProvider(object: goal.id.uuidString as NSString)
+                        }
+                        .onDrop(of: [.text], delegate: GoalDropDelegate(
+                            goal: goal,
+                            goals: viewModel.goals,
+                            draggingGoal: $draggingGoal,
+                            onMove: { from, to in
+                                viewModel.moveGoal(from: from, to: to)
+                            }
+                        ))
                     }
                 }
             }
@@ -83,5 +114,34 @@ struct MainPopoverView: View {
             }
             .buttonStyle(.plain)
         }
+    }
+}
+
+struct GoalDropDelegate: DropDelegate {
+    let goal: Goal
+    let goals: [Goal]
+    @Binding var draggingGoal: Goal?
+    let onMove: (IndexSet, Int) -> Void
+
+    func performDrop(info: DropInfo) -> Bool {
+        draggingGoal = nil
+        return true
+    }
+
+    func dropEntered(info: DropInfo) {
+        guard let dragging = draggingGoal,
+              dragging.id != goal.id,
+              let fromIndex = goals.firstIndex(where: { $0.id == dragging.id }),
+              let toIndex = goals.firstIndex(where: { $0.id == goal.id }) else {
+            return
+        }
+
+        withAnimation(.easeInOut(duration: 0.2)) {
+            onMove(IndexSet(integer: fromIndex), toIndex > fromIndex ? toIndex + 1 : toIndex)
+        }
+    }
+
+    func dropUpdated(info: DropInfo) -> DropProposal? {
+        DropProposal(operation: .move)
     }
 }

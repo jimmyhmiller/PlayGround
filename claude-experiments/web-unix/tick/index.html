@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>tick</title>
+  <style>
+    body { font-family: monospace; background: #000; color: #0f0; padding: 20px; }
+  </style>
+</head>
+<body>
+  <h1>tick</h1>
+  <pre id="output">waiting...</pre>
+  <script>
+    const params = new URLSearchParams(window.location.search);
+    const interval = parseInt(params.get('ms') || '1000', 10);
+    const count = parseInt(params.get('n') || '0', 10); // 0 = infinite
+
+    let tickCount = 0;
+    let timer = null;
+
+    window.opener?.postMessage({ type: 'ready' }, '*');
+
+    window.addEventListener('message', (event) => {
+      if (event.data.type === 'stdin') {
+        // Start ticking
+        timer = setInterval(() => {
+          tickCount++;
+          const output = `tick ${tickCount} - ${new Date().toISOString()}`;
+          document.getElementById('output').textContent = output;
+          window.opener?.postMessage({ type: 'stdout', data: output }, '*');
+
+          if (count > 0 && tickCount >= count) {
+            clearInterval(timer);
+            window.opener?.postMessage({ type: 'exit', code: 0 }, '*');
+          }
+        }, interval);
+      }
+    });
+  </script>
+</body>
+</html>

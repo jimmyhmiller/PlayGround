@@ -27,6 +27,14 @@ export function startServer(options: ServerOptions) {
   // Create WebSocket server on localhost only
   const wss = new WebSocketServer({ host: "127.0.0.1", port });
 
+  wss.on("listening", () => {
+    console.log("[server] WebSocket server ready");
+  });
+
+  wss.on("error", (err) => {
+    console.error("[server] WebSocket server error:", err);
+  });
+
   wss.on("connection", (ws: WebSocket) => {
     console.log("[server] Client connected");
     // Default to runtime, editors will identify themselves
@@ -121,6 +129,7 @@ export function startServer(options: ServerOptions) {
   console.log(`[server] WebSocket server listening on port ${port}`);
 
   // Watch for file changes (.js, .ts, .jsx, .tsx)
+  // Only watch main process code, not renderer (Vite handles that)
   const watcher = chokidar.watch([
     `${absoluteSourceDir}/**/*.js`,
     `${absoluteSourceDir}/**/*.ts`,
@@ -134,6 +143,11 @@ export function startServer(options: ServerOptions) {
       '**/dist/**',
       '**/*.min.js',
       '**/*.d.ts',
+      // Ignore frontend/renderer directories - Vite handles those
+      '**/renderer/**',
+      '**/frontend/**',
+      '**/client/**',
+      '**/web/**',
     ],
   });
 

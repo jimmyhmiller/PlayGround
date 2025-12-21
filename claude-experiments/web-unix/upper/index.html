@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>upper</title>
+  <style>
+    body { font-family: monospace; background: #000; color: #0f0; padding: 20px; }
+  </style>
+</head>
+<body>
+  <h1>upper</h1>
+  <pre id="output">waiting for input...</pre>
+  <script>
+    window.opener?.postMessage({ type: 'ready' }, '*');
+
+    window.addEventListener('message', (event) => {
+      if (event.data.type === 'stdin') {
+        const input = event.data.data;
+        const output = input.toUpperCase();
+        document.getElementById('output').textContent = output;
+        window.opener?.postMessage({ type: 'stdout', data: output }, '*');
+        window.opener?.postMessage({ type: 'exit', code: 0 }, '*');
+      }
+    });
+  </script>
+</body>
+</html>

@@ -80,6 +80,11 @@ class EaseViewModel: ObservableObject {
         }
     }
 
+    func moveGoal(from source: IndexSet, to destination: Int) {
+        goals.move(fromOffsets: source, toOffset: destination)
+        save()
+    }
+
     func addEntry(for goal: Goal, amount: Double) {
         var adjustedAmount = amount
 

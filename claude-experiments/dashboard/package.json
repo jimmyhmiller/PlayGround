@@ -1,0 +1,24 @@
+{
+  "name": "electron-hot-reload-dashboard",
+  "version": "1.0.0",
+  "description": "Electron app with hot-reloading backend and React frontend",
+  "main": "src/main/index.js",
+  "scripts": {
+    "dev": "concurrently \"npm run dev:main\" \"npm run dev:renderer\"",
+    "dev:main": "NODE_ENV=development electron -r hot-reload/register .",
+    "dev:renderer": "vite",
+    "build": "vite build",
+    "start": "electron ."
+  },
+  "dependencies": {
+    "hot-reload": "file:../node-hot-reload",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.2.1",
+    "concurrently": "^8.2.2",
+    "electron": "^28.0.0",
+    "vite": "^5.0.10"
+  }
+}

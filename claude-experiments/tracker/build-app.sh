@@ -9,6 +9,24 @@ swift build -c release
 echo "Creating app bundle..."
 cp .build/release/Ease Ease.app/Contents/MacOS/
 
+# Add rpath for Frameworks directory
+echo "Setting rpath..."
+install_name_tool -add_rpath @executable_path/../Frameworks Ease.app/Contents/MacOS/Ease 2>/dev/null || true
+
+# Copy Sparkle framework to app bundle
+echo "Copying Sparkle framework..."
+mkdir -p Ease.app/Contents/Frameworks
+SPARKLE_PATH=$(find .build -name "Sparkle.framework" -type d | head -1)
+if [ -n "$SPARKLE_PATH" ]; then
+    rm -rf Ease.app/Contents/Frameworks/Sparkle.framework
+    cp -R "$SPARKLE_PATH" Ease.app/Contents/Frameworks/
+else
+    echo "Warning: Sparkle.framework not found in build directory"
+fi
+
+# Clean up old Tracker executable if present
+rm -f Ease.app/Contents/MacOS/Tracker
+
 # Sign the app (replace with your identity if you have one)
 # To find your identity: security find-identity -v -p codesigning
 IDENTITY="${CODESIGN_IDENTITY:-}"

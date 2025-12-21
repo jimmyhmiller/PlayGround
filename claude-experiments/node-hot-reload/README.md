@@ -405,16 +405,111 @@ const stripped = strip(code);
 
 ### Babel Plugin
 
-Add to your `babel.config.js` for automatic stripping during build:
+The `hot-reload/strip` package exports a Babel plugin for automatic stripping during builds.
+
+#### Basic Setup
+
+```javascript
+// babel.config.js
+module.exports = {
+  presets: ['@babel/preset-env'],
+  plugins: ['hot-reload/strip']
+};
+```
+
+#### Production Only (Recommended)
+
+Strip only in production, keeping the calls during development:
 
 ```javascript
 // babel.config.js
 module.exports = {
   presets: ['@babel/preset-env'],
   plugins: [
-    // Only strip in production
     process.env.NODE_ENV === 'production' && 'hot-reload/strip'
   ].filter(Boolean)
+};
+```
+
+#### With Webpack
+
+```javascript
+// webpack.config.js
+module.exports = {
+  module: {
+    rules: [
+      {
+        test: /\.(js|jsx|ts|tsx)$/,
+        exclude: /node_modules/,
+        use: {
+          loader: 'babel-loader',
+          options: {
+            presets: ['@babel/preset-env', '@babel/preset-react'],
+            plugins: [
+              process.env.NODE_ENV === 'production' && 'hot-reload/strip'
+            ].filter(Boolean)
+          }
+        }
+      }
+    ]
+  }
+};
+```
+
+#### With Vite
+
+```javascript
+// vite.config.js
+import { defineConfig } from 'vite';
+import react from '@vitejs/plugin-react';
+
+export default defineConfig({
+  plugins: [
+    react({
+      babel: {
+        plugins: [
+          process.env.NODE_ENV === 'production' && 'hot-reload/strip'
+        ].filter(Boolean)
+      }
+    })
+  ]
+});
+```
+
+#### With Next.js
+
+```javascript
+// next.config.js
+module.exports = {
+  webpack: (config, { isServer, dev }) => {
+    if (!dev) {
+      config.module.rules.push({
+        test: /\.(js|jsx|ts|tsx)$/,
+        exclude: /node_modules/,
+        use: {
+          loader: 'babel-loader',
+          options: {
+            plugins: ['hot-reload/strip']
+          }
+        }
+      });
+    }
+    return config;
+  }
+};
+```
+
+#### Plugin Options
+
+```javascript
+// babel.config.js
+module.exports = {
+  plugins: [
+    ['hot-reload/strip', {
+      // Add custom import sources to strip (in addition to hot-reload/api)
+      sourcePatterns: ['my-custom-hot-reload/api']
+    }]
+  ]
 };
 ```
 

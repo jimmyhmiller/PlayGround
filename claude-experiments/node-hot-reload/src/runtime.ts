@@ -9,13 +9,17 @@ interface EvalResult {
 
 interface HotRuntime {
   modules: Map<string, Record<string, unknown>>;
+  storage: Map<string, Record<string, unknown>>;  // backing storage for functions
   loaders: Map<string, () => void>;
   ws: WebSocket | null;
+  sourceRoot: string;
 
   module(id: string): Record<string, unknown>;
   get(id: string): Record<string, unknown>;
   require(id: string): void;
   register(id: string, loader: () => void): void;
+  defn(module: Record<string, unknown>, name: string, fn: Function): void;
+  setSourceRoot(root: string): void;
   connect(port: number): void;
   reload(id: string, code: string): void;
   evalExpr(moduleId: string, code: string, type: "declaration" | "expression", requestId?: string): EvalResult;
@@ -24,12 +28,15 @@ interface HotRuntime {
 export function createRuntime(): HotRuntime {
   const runtime: HotRuntime = {
     modules: new Map(),
+    storage: new Map(),
     loaders: new Map(),
     ws: null,
+    sourceRoot: process.cwd(),
 
     module(id: string): Record<string, unknown> {
       if (!this.modules.has(id)) {
-        this.modules.set(id, {});
+        const mod: Record<string, unknown> = { __id__: id };
+        this.modules.set(id, mod);
       }
       return this.modules.get(id)!;
     },
@@ -77,11 +84,49 @@ export function createRuntime(): HotRuntime {
       this.loaders.set(id, loader);
     },
 
+    defn(module: Record<string, unknown>, name: string, fn: Function): void {
+      // Get or create backing storage for this module
+      const moduleId = (module as any).__id__ as string;
+      if (!this.storage.has(moduleId)) {
+        this.storage.set(moduleId, {});
+      }
+      const store = this.storage.get(moduleId)!;
+
+      // Store the actual function
+      store[name] = fn;
+
+      // Define getter if not already defined
+      if (!Object.getOwnPropertyDescriptor(module, name)?.get) {
+        Object.defineProperty(module, name, {
+          get() {
+            // Return wrapper that looks up fresh on each INVOCATION (not when getter is called)
+            return (...args: unknown[]) => (store[name] as Function)(...args);
+          },
+          set(value) {
+            store[name] = value;
+          },
+          configurable: true,
+          enumerable: true
+        });
+      }
+      // If getter exists, storage is already updated above
+    },
+
+    setSourceRoot(root: string): void {
+      this.sourceRoot = root;
+    },
+
     connect(port: number): void {
-      const url = `ws://localhost:${port}`;
+      const url = `ws://127.0.0.1:${port}`;
       console.log(`[hot] Connecting to ${url}`);
 
-      this.ws = new WebSocket(url);
+      try {
+        this.ws = new WebSocket(url);
+        console.log(`[hot] WebSocket created, readyState: ${this.ws.readyState}`);
+      } catch (e) {
+        console.error(`[hot] Failed to create WebSocket:`, e);
+        return;
+      }
 
       this.ws.on("open", () => {
         console.log("[hot] Connected to dev server");
@@ -123,10 +168,7 @@ export function createRuntime(): HotRuntime {
       });
 
       this.ws.on("error", (err: Error) => {
-        // Suppress ECONNREFUSED errors during reconnection
-        if ((err as NodeJS.ErrnoException).code !== "ECONNREFUSED") {
-          console.error("[hot] WebSocket error:", err.message);
-        }
+        console.error("[hot] WebSocket error:", (err as NodeJS.ErrnoException).code, err.message);
       });
     },
 
@@ -134,8 +176,12 @@ export function createRuntime(): HotRuntime {
       try {
         // The code already references __hot global, so just eval it
         // It will update the module's properties in place
-        const fn = new Function("__hot", code);
-        fn(this);
+        // Pass require, __dirname, __filename so the code has access to Node globals
+        const path = require('path');
+        const modulePath = path.resolve(this.sourceRoot, id);
+        const moduleDir = path.dirname(modulePath);
+        const fn = new Function("__hot", "require", "__dirname", "__filename", code);
+        fn(this, require, moduleDir, modulePath);
         console.log(`[hot] Successfully reloaded ${id}`);
       } catch (e) {
         console.error(`[hot] Failed to reload ${id}:`, e);

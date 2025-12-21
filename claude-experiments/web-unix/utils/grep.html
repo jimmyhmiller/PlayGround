@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>grep</title>
+  <style>
+    body { font-family: monospace; background: #000; color: #0f0; padding: 20px; }
+  </style>
+</head>
+<body>
+  <h1>grep</h1>
+  <pre id="output">waiting for input...</pre>
+  <script>
+    const params = new URLSearchParams(window.location.search);
+    const pattern = params.get('pattern') || '';
+
+    window.opener?.postMessage({ type: 'ready' }, '*');
+
+    window.addEventListener('message', (event) => {
+      if (event.data.type === 'stdin') {
+        const input = event.data.data;
+        const lines = input.split('\n');
+        const regex = new RegExp(pattern);
+        const output = lines.filter(line => regex.test(line)).join('\n');
+        document.getElementById('output').textContent = output || '(no matches)';
+        window.opener?.postMessage({ type: 'stdout', data: output }, '*');
+      }
+    });
+  </script>
+</body>
+</html>

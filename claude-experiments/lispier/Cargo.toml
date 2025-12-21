@@ -1,0 +1,11 @@
+[package]
+name = "lispier"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+melior = { path = "/Users/jimmyhmiller/Documents/Code/open-source/melior/melior", features = ["ods-dialects"] }
+thiserror = "1.0"
+
+[dev-dependencies]
+pretty_assertions = "1.4"

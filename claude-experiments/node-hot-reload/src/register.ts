@@ -18,6 +18,7 @@ const sourceRoot = process.cwd();
 
 // Create global runtime
 const runtime = createRuntime();
+runtime.setSourceRoot(sourceRoot);
 (global as any).__hot = runtime;
 
 // Hook into require() to transform .js and .ts files

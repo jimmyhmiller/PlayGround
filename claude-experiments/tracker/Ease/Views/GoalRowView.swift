@@ -2,6 +2,7 @@ import SwiftUI
 
 struct GoalRowView: View {
     let goal: Goal
+    var isReorderMode: Bool = false
     let onAdd: (Double) -> Void
     let onDelete: () -> Void
     let onColorChange: (String) -> Void
@@ -27,11 +28,20 @@ struct GoalRowView: View {
 
     var body: some View {
         HStack(spacing: 12) {
+            if isReorderMode {
+                Image(systemName: "line.3.horizontal")
+                    .font(.system(size: 12))
+                    .foregroundColor(.secondary)
+                    .frame(width: 16)
+            }
+
             Circle()
                 .fill(goal.color)
                 .frame(width: 12, height: 12)
                 .onTapGesture {
-                    showingColorPicker.toggle()
+                    if !isReorderMode {
+                        showingColorPicker.toggle()
+                    }
                 }
                 .popover(isPresented: $showingColorPicker) {
                     colorPickerContent
@@ -42,40 +52,42 @@ struct GoalRowView: View {
 
             Spacer()
 
-            // Pull indicator
-            ZStack {
-                if isPressed {
-                    // Visual feedback during press/drag
-                    RoundedRectangle(cornerRadius: 4)
-                        .fill(isAltPressed ? Color(hex: "#E57373").opacity(0.3) : goal.color.opacity(0.3))
-                        .frame(width: 40, height: 8 + dragProgress * 20)
-                } else {
-                    Image(systemName: isAltPressed ? "arrow.down.circle" : "arrow.up.circle")
-                        .font(.system(size: 14))
-                        .foregroundColor(isAltPressed ? Color(hex: "#E57373") : .secondary)
+            if !isReorderMode {
+                // Pull indicator
+                ZStack {
+                    if isPressed {
+                        // Visual feedback during press/drag
+                        RoundedRectangle(cornerRadius: 4)
+                            .fill(isAltPressed ? Color(hex: "#E57373").opacity(0.3) : goal.color.opacity(0.3))
+                            .frame(width: 40, height: 8 + dragProgress * 20)
+                    } else {
+                        Image(systemName: isAltPressed ? "arrow.down.circle" : "arrow.up.circle")
+                            .font(.system(size: 14))
+                            .foregroundColor(isAltPressed ? Color(hex: "#E57373") : .secondary)
+                    }
                 }
-            }
-            .frame(width: 40, height: 28)
+                .frame(width: 40, height: 28)
 
-            Button {
-                onDelete()
-            } label: {
-                Image(systemName: "xmark.circle.fill")
-                    .font(.system(size: 14))
-                    .foregroundColor(.secondary.opacity(0.5))
+                Button {
+                    onDelete()
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 14))
+                        .foregroundColor(.secondary.opacity(0.5))
+                }
+                .buttonStyle(.plain)
+                .opacity(isPressed ? 0 : 1)
             }
-            .buttonStyle(.plain)
-            .opacity(isPressed ? 0 : 1)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
         .contentShape(Rectangle())
         .background(
             RoundedRectangle(cornerRadius: 8)
-                .fill(isPressed ? goal.color.opacity(0.1) : Color.clear)
+                .fill(isReorderMode ? goal.color.opacity(0.05) : (isPressed ? goal.color.opacity(0.1) : Color.clear))
         )
         .gesture(
-            DragGesture(minimumDistance: 0)
+            isReorderMode ? nil : DragGesture(minimumDistance: 0)
                 .updating($isPressed) { _, state, _ in
                     state = true
                 }

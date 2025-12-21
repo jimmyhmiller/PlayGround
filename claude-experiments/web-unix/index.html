@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Web Unix</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: monospace;
+      background: #1a1a1a;
+      color: #0f0;
+      padding: 20px;
+      margin: 0;
+    }
+    h1 { color: #0f0; margin: 0 0 10px 0; }
+    .command {
+      color: #888;
+      margin-bottom: 20px;
+      font-size: 14px;
+    }
+    .command code {
+      color: #0f0;
+    }
+    #output {
+      background: #000;
+      border: 1px solid #333;
+      padding: 20px;
+      min-height: 200px;
+      white-space: pre-wrap;
+      word-wrap: break-word;
+      font-size: 16px;
+    }
+    .stderr { color: #f00; }
+    .info { color: #888; font-style: italic; font-size: 12px; }
+    #stages {
+      margin: 10px 0;
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+    .stage {
+      padding: 5px 10px;
+      background: #333;
+      border-radius: 3px;
+      font-size: 12px;
+    }
+    .stage.active { background: #550; color: #ff0; }
+    .stage.done { background: #050; color: #0f0; }
+    .help {
+      margin-top: 40px;
+      color: #666;
+      font-size: 12px;
+    }
+    .help h3 { color: #888; }
+    .help code { color: #0a0; }
+  </style>
+</head>
+<body>
+  <h1>$ web-unix</h1>
+  <div class="command">$ <code id="cmd"></code></div>
+  <div id="stages"></div>
+  <div id="output"></div>
+
+  <div class="help" id="help">
+    <h3>Usage</h3>
+    <p>Add a pipeline to the URL hash:</p>
+    <p><code>http://localhost:8888/#echo?text=hello world|upper|reverse</code></p>
+
+    <h3>Examples</h3>
+    <ul>
+      <li><a href="#echo?text=hello world|upper">#echo?text=hello world|upper</a></li>
+      <li><a href="#echo?text=hello world|upper|reverse">#echo?text=hello world|upper|reverse</a></li>
+      <li><a href="#echo?text=apple%0Abanana%0Aapple%0Acherry|sort|uniq">#echo?text=apple\nbanana\napple\ncherry|sort|uniq</a></li>
+      <li><a href="#tick?ms=500&n=5|upper">#tick?ms=500&n=5|upper</a> (streaming!)</li>
+    </ul>
+
+    <h3>Available Commands</h3>
+    <ul>
+      <li><code>echo?text=...</code> - output text</li>
+      <li><code>tick?ms=1000&n=5</code> - emit ticks (n=0 for infinite)</li>
+      <li><code>upper</code> - uppercase</li>
+      <li><code>lower</code> - lowercase</li>
+      <li><code>reverse</code> - reverse string</li>
+      <li><code>grep?pattern=...</code> - filter lines matching regex</li>
+      <li><code>sort</code> - sort lines</li>
+      <li><code>uniq</code> - deduplicate lines</li>
+      <li><code>head?n=5</code> - first N lines</li>
+      <li><code>tail?n=5</code> - last N lines</li>
+      <li><code>wc</code> - line/word/char count</li>
+    </ul>
+  </div>
+
+  <script>
+    const BASE_URL = window.location.origin + window.location.pathname.replace('index.html', '');
+
+    let pipeline = [];
+    let windows = [];
+    let readyCount = 0;
+    let currentStage = 0;
+
+    function log(msg, className = '') {
+      const output = document.getElementById('output');
+      const span = document.createElement('span');
+      span.className = className;
+      span.textContent = msg + '\n';
+      output.appendChild(span);
+    }
+
+    function updateStages() {
+      const stagesEl = document.getElementById('stages');
+      stagesEl.innerHTML = pipeline.map((stage, i) => {
+        let status = '';
+        if (i < currentStage) status = 'done';
+        else if (i === currentStage) status = 'active';
+        return `<div class="stage ${status}">${stage.name}</div>`;
+      }).join('');
+    }
+
+    function parsePipeline(input) {
+      return input.split('|').map(s => s.trim()).filter(Boolean).map(segment => {
+        // Check if it's a full URL
+        if (segment.startsWith('http://') || segment.startsWith('https://')) {
+          const url = new URL(segment);
+          // Get last non-empty path segment as name
+          const pathParts = url.pathname.split('/').filter(Boolean);
+          const name = pathParts.pop()?.replace('.html', '') || url.hostname;
+          return { name, url: segment };
+        }
+        // Local utility - use /name/ path
+        const [name, queryString] = segment.split('?');
+        const params = new URLSearchParams(queryString || '');
+        const queryStr = params.toString();
+        return { name, params, url: `${BASE_URL}${name}/${queryStr ? '?' + queryStr : ''}` };
+      });
+    }
+
+    function run(input) {
+      document.getElementById('cmd').textContent = input;
+      document.getElementById('output').innerHTML = '';
+      document.getElementById('help').style.display = 'none';
+
+      pipeline = parsePipeline(input);
+      readyCount = 0;
+
+      if (pipeline.length === 0) {
+        log('No pipeline specified', 'stderr');
+        return;
+      }
+
+      updateStages();
+
+      // Open all windows
+      pipeline.forEach((stage, i) => {
+        const w = window.open(stage.url, `stage_${i}`, 'width=400,height=300');
+        windows.push(w);
+      });
+    }
+
+    function sendToStage(index, message) {
+      if (index >= windows.length) {
+        // End of pipeline - display the output
+        log(message.data);
+        currentStage = pipeline.length; // Mark all as done
+        updateStages();
+        return;
+      }
+
+      currentStage = index;
+      updateStages();
+
+      const w = windows[index];
+      if (w && !w.closed) {
+        w.postMessage(message, '*');
+      } else {
+        log(`Window ${index} (${pipeline[index].name}) is closed!`, 'stderr');
+      }
+    }
+
+    function closeAll() {
+      windows.forEach(w => { try { w.close(); } catch(e) {} });
+    }
+
+    window.addEventListener('message', (event) => {
+      const { type, data } = event.data;
+      const senderIndex = windows.findIndex(w => w === event.source);
+
+      if (type === 'ready') {
+        readyCount++;
+        if (readyCount === pipeline.length) {
+          sendToStage(0, { type: 'stdin', data: '' });
+        }
+      } else if (type === 'stdout') {
+        sendToStage(senderIndex + 1, { type: 'stdin', data });
+      } else if (type === 'frame') {
+        // Full screen replacement (for animations)
+        if (senderIndex === pipeline.length - 1) {
+          document.getElementById('output').textContent = data;
+        } else {
+          sendToStage(senderIndex + 1, { type: 'stdin', data });
+        }
+      } else if (type === 'stderr') {
+        log(`[${pipeline[senderIndex]?.name}] ${data}`, 'stderr');
+      } else if (type === 'exit') {
+        // Only close when the last stage exits
+        if (senderIndex === pipeline.length - 1) {
+          closeAll();
+        }
+      }
+    });
+
+    // Auto-run on page load if hash present
+    window.addEventListener('load', () => {
+      const hash = window.location.hash.slice(1);
+      if (hash) {
+        run(decodeURIComponent(hash));
+      }
+    });
+
+    // Re-run when hash changes
+    window.addEventListener('hashchange', () => {
+      windows.forEach(w => { try { w.close(); } catch(e) {} });
+      windows = [];
+      readyCount = 0;
+      currentStage = 0;
+      const hash = window.location.hash.slice(1);
+      if (hash) {
+        run(decodeURIComponent(hash));
+      }
+    });
+  </script>
+</body>
+</html>

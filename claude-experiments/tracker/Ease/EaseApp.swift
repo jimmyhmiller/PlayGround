@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import Sparkle
 
 @main
 struct EaseApp: App {
@@ -17,6 +18,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var statusItem: NSStatusItem!
     private var popover: NSPopover!
     private let viewModel = EaseViewModel()
+    private let updateManager = UpdateManager.shared
     private var clearMenuItem: NSMenuItem?
     private var modifierTimer: Timer?
 
@@ -96,8 +98,35 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.delegate = self
         menu.autoenablesItems = false
 
-        let modifiersHeld = NSEvent.modifierFlags.contains([.command, .option])
+        // Check for Updates
+        let updateItem = NSMenuItem(
+            title: "Check for Updates...",
+            action: #selector(checkForUpdates),
+            keyEquivalent: ""
+        )
+        updateItem.isEnabled = updateManager.canCheckForUpdates
+        menu.addItem(updateItem)
 
+        // Update Channel submenu
+        let channelMenu = NSMenu()
+        for channel in UpdateChannel.allCases {
+            let channelItem = NSMenuItem(
+                title: channel.displayName,
+                action: #selector(switchChannel(_:)),
+                keyEquivalent: ""
+            )
+            channelItem.representedObject = channel
+            channelItem.state = updateManager.currentChannel == channel ? .on : .off
+            channelMenu.addItem(channelItem)
+        }
+        let channelMenuItem = NSMenuItem(title: "Update Channel", action: nil, keyEquivalent: "")
+        channelMenuItem.submenu = channelMenu
+        menu.addItem(channelMenuItem)
+
+        menu.addItem(NSMenuItem.separator())
+
+        // Clear Data
+        let modifiersHeld = NSEvent.modifierFlags.contains([.command, .option])
         let clearItem = NSMenuItem(
             title: modifiersHeld ? "Clear Data" : "Clear Data (⌘⌥)",
             action: #selector(clearDataClicked),
@@ -106,12 +135,22 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         clearItem.isEnabled = modifiersHeld
         clearMenuItem = clearItem
         menu.addItem(clearItem)
+
         menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(title: "Quit", action: #selector(quitApp), keyEquivalent: "q"))
 
         statusItem.menu = menu
         statusItem.button?.performClick(nil)
         statusItem.menu = nil
+    }
+
+    @objc private func checkForUpdates() {
+        updateManager.checkForUpdates()
+    }
+
+    @objc private func switchChannel(_ sender: NSMenuItem) {
+        guard let channel = sender.representedObject as? UpdateChannel else { return }
+        updateManager.currentChannel = channel
     }
 
     @objc private func clearDataClicked() {

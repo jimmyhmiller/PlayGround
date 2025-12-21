@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>echo</title>
+  <style>
+    body { font-family: monospace; background: #000; color: #0f0; padding: 20px; }
+  </style>
+</head>
+<body>
+  <h1>echo</h1>
+  <pre id="output"></pre>
+  <script>
+    const params = new URLSearchParams(window.location.search);
+    const text = params.get('text') || '';
+
+    document.getElementById('output').textContent = `text: ${text}`;
+
+    window.opener?.postMessage({ type: 'ready' }, '*');
+
+    window.addEventListener('message', (event) => {
+      if (event.data.type === 'stdin') {
+        // Echo ignores stdin, just outputs its text parameter
+        window.opener?.postMessage({ type: 'stdout', data: text }, '*');
+        window.opener?.postMessage({ type: 'exit', code: 0 }, '*');
+      }
+    });
+  </script>
+</body>
+</html>
