@@ -397,11 +397,6 @@ impl LinearScan {
                 if let IrValue::Register(r) = cond { regs.push(*r); }
             }
 
-            // Recur/RecurWithSaves are no longer generated - recur is lowered to Assign + Jump
-            Instruction::Recur(..) | Instruction::RecurWithSaves(..) => {
-                panic!("BUG: Recur/RecurWithSaves should not exist - recur is lowered to Assign + Jump");
-            }
-
             // Debug instruction - no registers
             Instruction::Breakpoint => {}
 
@@ -779,11 +774,6 @@ impl LinearScan {
 
             Instruction::AssertPost(cond, _index) => {
                 replace(cond);
-            }
-
-            // Recur/RecurWithSaves are no longer generated - recur is lowered to Assign + Jump
-            Instruction::Recur(..) | Instruction::RecurWithSaves(..) => {
-                panic!("BUG: Recur/RecurWithSaves should not exist - recur is lowered to Assign + Jump");
             }
 
             // Debug instruction - no registers
@@ -1171,23 +1161,6 @@ impl LinearScan {
                 replace(cond);
             }
 
-            Instruction::Recur(_label, assignments) => {
-                for (dst, src) in assignments.iter_mut() {
-                    replace(dst);
-                    replace(src);
-                }
-            }
-
-            Instruction::RecurWithSaves(_label, assignments, saves) => {
-                for (dst, src) in assignments.iter_mut() {
-                    replace(dst);
-                    replace(src);
-                }
-                for save in saves.iter_mut() {
-                    replace(save);
-                }
-            }
-
             // Local variable operations
             Instruction::StoreLocal(_slot, value) => {
                 replace(value);
@@ -1201,83 +1174,42 @@ impl LinearScan {
         }
     }
 
-    /// Transform Call, ExternalCall, and Recur instructions to their WithSaves variants
+    /// Transform Call and ExternalCall instructions to their WithSaves variants
     ///
-    /// This analyzes which registers are live across each call/recur site and generates
-    /// CallWithSaves/ExternalCallWithSaves/RecurWithSaves instructions with explicit register preservation.
-    /// NOTE: MakeType has been refactored out - deftype construction now uses ExternalCall + HeapStore + Tag.
+    /// This analyzes which registers are live across each call site and generates
+    /// CallWithSaves/ExternalCallWithSaves instructions with explicit register preservation.
+    /// NOTE: Recur is no longer handled here - it's lowered to Assign + Jump in the compiler.
     fn transform_calls_to_saves(&mut self) {
         for i in 0..self.instructions.len() {
-            // Check if this is a Call, ExternalCall, or Recur instruction
+            // Check if this is a Call or ExternalCall instruction
             let is_call = matches!(self.instructions[i], Instruction::Call(_, _, _));
             let is_external_call = matches!(self.instructions[i], Instruction::ExternalCall(_, _, _));
-            let is_recur = matches!(self.instructions[i], Instruction::Recur(_, _));
 
-            if !is_call && !is_external_call && !is_recur {
+            if !is_call && !is_external_call {
                 continue;
             }
 
-            // Extract destination register for exclusion from saves (Recur has no destination)
+            // Extract destination register for exclusion from saves
             let dest = match &self.instructions[i] {
-                Instruction::Call(d, _, _) => Some(*d),
-                Instruction::ExternalCall(d, _, _) => Some(*d),
-                Instruction::Recur(_, _) => None,
+                Instruction::Call(d, _, _) => *d,
+                Instruction::ExternalCall(d, _, _) => *d,
                 _ => continue,
             };
 
-            // For Recur, find the target label index and assignment destinations
-            let (loop_start_index, recur_dests) = if is_recur {
-                if let Instruction::Recur(label, assignments) = &self.instructions[i] {
-                    // Find the label instruction index
-                    let idx = self.instructions.iter().position(|instr| {
-                        matches!(instr, Instruction::Label(l) if l == label)
-                    });
-                    // Collect destination registers from assignments (these should NOT be saved)
-                    let dests: Vec<_> = assignments.iter()
-                        .filter_map(|(dst, _)| {
-                            if let IrValue::Register(vreg) = dst {
-                                Some(*vreg)
-                            } else {
-                                None
-                            }
-                        })
-                        .collect();
-                    (idx, dests)
-                } else {
-                    (None, Vec::new())
-                }
-            } else {
-                (None, Vec::new())
-            };
-
-            // Find registers live across this call/recur
+            // Find registers live across this call
             let mut saves = Vec::new();
 
             for (vreg, (start, end)) in &self.lifetimes {
-                // Determine if register is live across this instruction
-                let is_live_across = if is_recur {
-                    // For Recur: A register needs to be saved if:
-                    // 1. It's defined before the recur (start <= i)
-                    // 2. It's used at or after the loop start (end >= loop_start_index)
-                    // This ensures registers used in the loop body survive iterations
-                    if let Some(loop_idx) = loop_start_index {
-                        *start <= i && *end >= loop_idx && !self.spill_locations.contains_key(vreg)
-                    } else {
-                        // Fallback: treat like a regular call
-                        *start <= i && *end > i && !self.spill_locations.contains_key(vreg)
-                    }
-                } else {
-                    // For Call/ExternalCall: standard liveness check
-                    // Register is live across if it starts before and ends after
-                    *start <= i && *end > i && !self.spill_locations.contains_key(vreg)
-                };
+                // For Call/ExternalCall: standard liveness check
+                // Register is live across if it starts before and ends after
+                let is_live_across = *start <= i && *end > i && !self.spill_locations.contains_key(vreg);
 
                 if is_live_across {
                     // Get the physical register
                     if let Some(&physical_reg) = self.allocated_registers.get(vreg) {
                         // Don't save the destination register (it's about to be overwritten)
                         let is_dest = match &dest {
-                            Some(IrValue::Register(dest_vreg)) => {
+                            IrValue::Register(dest_vreg) => {
                                 self.allocated_registers.get(dest_vreg)
                                     .map(|&dest_phys| dest_phys == physical_reg)
                                     .unwrap_or(false)
@@ -1285,12 +1217,7 @@ impl LinearScan {
                             _ => false,
                         };
 
-                        // For Recur: also exclude assignment destination registers
-                        // These are being explicitly updated, so saving/restoring them would
-                        // overwrite the new value with the old value
-                        let is_recur_dest = recur_dests.contains(vreg);
-
-                        if !is_dest && !is_recur_dest {
+                        if !is_dest {
                             // IMPORTANT: Push the VIRTUAL register, not the physical register!
                             // The codegen will look up the physical register from the allocation map.
                             // If we pushed the physical register (e.g., Temp(1) meaning x1), it would
@@ -1343,23 +1270,14 @@ impl LinearScan {
                 } else {
                     continue;
                 };
-                self.instructions[i] = Instruction::CallWithSaves(dest.unwrap(), func, args, saves);
+                self.instructions[i] = Instruction::CallWithSaves(dest, func, args, saves);
             } else if is_external_call {
                 let (func_addr, args) = if let Instruction::ExternalCall(_, addr, a) = &self.instructions[i] {
                     (*addr, a.clone())
                 } else {
                     continue;
                 };
-                self.instructions[i] = Instruction::ExternalCallWithSaves(dest.unwrap(), func_addr, args, saves);
-            } else if is_recur {
-                // DON'T transform Recur to RecurWithSaves!
-                // Recur is a tail call - it jumps back to the loop head and never returns.
-                // There's no need to save any registers because:
-                // 1. The loop bindings are handled by the assignments
-                // 2. We never return to this point after the jump
-                // Saving/restoring would actually corrupt values by overwriting new loop
-                // binding values with old saved values.
-                continue;
+                self.instructions[i] = Instruction::ExternalCallWithSaves(dest, func_addr, args, saves);
             }
         }
     }

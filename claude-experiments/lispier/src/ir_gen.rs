@@ -163,6 +163,10 @@ impl<'c> IRGenerator<'c> {
                 // Extern nodes are metadata for FFI registration, not IR
                 Ok(None)
             }
+            Node::Defmacro(_) => {
+                // Defmacro nodes are metadata for macro registration, not IR
+                Ok(None)
+            }
         }
     }
 

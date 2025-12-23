@@ -317,9 +317,8 @@ impl Arm64CodeGen {
                 // Handle TaggedConstant: compute untagged value at compile time
                 match src {
                     IrValue::TaggedConstant(val) => {
-                        // Untag: logical right shift by 3 (no sign extension)
-                        // Use unsigned shift to avoid sign extension for large integers
-                        let untagged = (*val as u64) >> 3;
+                        // Untag: arithmetic right shift by 3 (preserves sign for negative integers)
+                        let untagged = *val >> 3;
                         self.emit_mov_imm(dst_reg, untagged as i64);
                     }
                     IrValue::Null => {
@@ -328,9 +327,8 @@ impl Arm64CodeGen {
                     }
                     _ => {
                         let src_reg = self.get_physical_reg_for_irvalue(src, false)?;
-                        // Untag: logical right shift by 3 (no sign extension)
-                        // Using LSR instead of ASR prevents sign extension for large integers
-                        self.emit_lsr_imm(dst_reg, src_reg, 3);
+                        // Untag: arithmetic right shift by 3 (preserves sign for negative integers)
+                        self.emit_asr_imm(dst_reg, src_reg, 3);
                     }
                 }
                 self.store_spill(dst_reg, dest_spill);
@@ -687,16 +685,6 @@ impl Arm64CodeGen {
                 self.pending_fixups.push((fixup_index, label.clone()));
                 // Placeholder - will be patched in apply_fixups
                 self.code.push(0x14000000); // B #0
-            }
-
-            Instruction::Recur(..) => {
-                // Recur is now lowered to Assign + Jump in the compiler
-                return Err("BUG: Recur instruction should not reach codegen - it should be lowered to Assign + Jump".to_string());
-            }
-
-            Instruction::RecurWithSaves(..) => {
-                // RecurWithSaves is no longer generated
-                return Err("BUG: RecurWithSaves instruction should not reach codegen".to_string());
             }
 
             Instruction::JumpIf(label, cond, src1, src2) => {

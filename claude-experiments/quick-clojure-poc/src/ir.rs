@@ -158,14 +158,12 @@ pub enum Instruction {
     Jump(Label),
     JumpIf(Label, Condition, IrValue, IrValue),  // label, condition, val1, val2
 
-    /// Recur(label, assignments) - loop back-edge, like Beagle's Recurse
-    /// assignments: Vec<(target, new_value)> - assigns new_value to target, then jumps to label
-    /// Transformed to RecurWithSaves by register allocator
-    Recur(Label, Vec<(IrValue, IrValue)>),
-    /// RecurWithSaves(label, assignments, saves) - recur with register preservation
-    /// The register allocator generates this from Recur, adding saves for live registers.
-    /// Codegen order: 1) save registers, 2) do assignments, 3) jump, 4) restore on exit
-    RecurWithSaves(Label, Vec<(IrValue, IrValue)>, Vec<IrValue>),
+    // NOTE: Recur and RecurWithSaves have been removed.
+    // Recur is now lowered to Assign + Jump in the compiler (compile_recur).
+    // The parallel assignment semantics are handled by:
+    // 1. Assigning new values to temp registers
+    // 2. Assigning temps to binding registers
+    // 3. Jumping to the loop label
 
     // Assignment
     Assign(IrValue, IrValue),  // dst, src

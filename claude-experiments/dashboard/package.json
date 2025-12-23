@@ -2,11 +2,12 @@
   "name": "electron-hot-reload-dashboard",
   "version": "1.0.0",
   "description": "Electron app with hot-reloading backend and React frontend",
-  "main": "src/main/index.ts",
+  "main": "src/main/bootstrap.js",
   "scripts": {
+    "build:preload": "esbuild src/main/preload.ts --bundle --platform=node --outfile=src/main/preload.js --external:electron",
     "dev": "concurrently \"npm run dev:main\" \"npm run dev:renderer\"",
     "dev:main": "NODE_ENV=development electron -r hot-reload/register .",
-    "dev:no-hot": "concurrently \"npm run dev:main:no-hot\" \"npm run dev:renderer\"",
+    "dev:no-hot": "npm run build:preload && concurrently \"npm run dev:main:no-hot\" \"npm run dev:renderer\"",
     "dev:main:no-hot": "NODE_ENV=development electron .",
     "dev:renderer": "vite",
     "build": "vite build",
@@ -31,6 +32,8 @@
     "@vitejs/plugin-react": "^4.2.1",
     "concurrently": "^8.2.2",
     "electron": "^28.0.0",
+    "esbuild": "^0.27.2",
+    "tsx": "^4.21.0",
     "typescript": "^5.9.3",
     "vite": "^5.0.10"
   }

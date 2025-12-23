@@ -14,8 +14,9 @@ pub mod value;
 pub mod value_ffi;
 
 pub use ast::{
-    AttributeValue, Binding, Block, BlockArgument, Compilation, Extern, FunctionType, LetExpr, Module,
-    Node, Operation, Pass, Region, Require, Target, Type, TypeAnnotation, TypedNumber,
+    AttributeValue, Binding, Block, BlockArgument, Compilation, Defmacro, Extern, FunctionType,
+    LetExpr, Module, Node, Operation, Pass, Region, Require, RequireMacros, Target, Type,
+    TypeAnnotation, TypedNumber,
 };
 pub use module_loader::{find_project_root, ModuleError, ModuleLoader};
 pub use dialect::DialectRegistry;
@@ -24,9 +25,11 @@ pub use jit::{Jit, JitError};
 pub use namespace::{Namespace, NamespaceScope};
 pub use parser::{Parser, ParserError};
 pub use reader::{Reader, ReaderError};
-pub use runtime::{extract_compilation, extract_externs, Backend, RuntimeEnv, RuntimeError};
+pub use runtime::{
+    extract_compilation, extract_defmacros, extract_externs, Backend, RuntimeEnv, RuntimeError,
+};
 pub use token::{Token, TokenType};
 pub use tokenizer::{Tokenizer, TokenizerError};
 pub use value::{Symbol, Value};
-pub use macros::{Macro, MacroError, MacroExpander, MacroRegistry};
+pub use macros::{JitMacro, JitMacroFn, Macro, MacroError, MacroExpander, MacroRegistry};
 pub use value_ffi::{get_value_ffi_functions, FfiFunction};

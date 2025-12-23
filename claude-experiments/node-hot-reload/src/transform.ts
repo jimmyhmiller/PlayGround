@@ -3,6 +3,7 @@ import traverse, { NodePath } from "@babel/traverse";
 import generate from "@babel/generator";
 import * as t from "@babel/types";
 import * as path from "path";
+import { transformFromAstSync } from "@babel/core";
 
 interface ImportBinding {
   source: string;
@@ -42,6 +43,7 @@ interface LocalBinding {
 interface TransformOptions {
   filename: string;
   sourceRoot?: string;
+  esm?: boolean; // Output ESM syntax for external imports (default: false = CJS)
 }
 
 // Check if a node is a call to our API function (once or defonce)
@@ -67,7 +69,7 @@ function isDefonce(node: t.Expression | null | undefined): boolean {
 }
 
 export function transform(code: string, options: TransformOptions): string {
-  const { filename, sourceRoot = process.cwd() } = options;
+  const { filename, sourceRoot = process.cwd(), esm = false } = options;
   const moduleId = resolveModuleId(filename, sourceRoot);
 
   const ast = parser.parse(code, {
@@ -91,6 +93,9 @@ export function transform(code: string, options: TransformOptions): string {
   // Track once() counter
   let onceCounter = 0;
 
+  // Track ESM exports (only used in ESM mode)
+  const esmExports: Array<{ name: string; type: 'function' | 'value' | 'default-function' | 'default-value' }> = [];
+
   // First pass: collect imports and top-level declarations
   traverse(ast, {
     ImportDeclaration(nodePath: NodePath<t.ImportDeclaration>) {
@@ -106,9 +111,10 @@ export function transform(code: string, options: TransformOptions): string {
 
       const source = resolveImportSource(sourceValue, filename, sourceRoot);
 
-      // Only track local imports for hot-reload transformation
+      // Only track local imports for hot-reload transformation (CJS mode only)
       // External imports are left as regular require() calls
-      if (!isExternal && !isApiImport) {
+      // In ESM mode, local imports stay as ESM imports (no tracking needed)
+      if (!isExternal && !isApiImport && !esm) {
         for (const specifier of nodePath.node.specifiers) {
           if (t.isImportSpecifier(specifier)) {
             const imported = t.isIdentifier(specifier.imported)
@@ -153,16 +159,22 @@ export function transform(code: string, options: TransformOptions): string {
         // Remove API imports entirely
         nodePath.remove();
       } else if (isExternal) {
-        // Convert external imports to regular require() - leave them alone
-        // Transform: import { x } from 'pkg' -> const { x } = require('pkg')
-        // Transform: import x from 'pkg' -> const x = require('pkg').default || require('pkg')
-        // Transform: import * as x from 'pkg' -> const x = require('pkg')
-        const specifiers = nodePath.node.specifiers;
-
         // Track all identifiers from external imports so we don't transform them
+        const specifiers = nodePath.node.specifiers;
         for (const spec of specifiers) {
           externalImportIds.add(spec.local.name);
         }
+
+        // In ESM mode, keep external imports as-is (ESM syntax)
+        if (esm) {
+          // Don't transform - leave as ESM import
+          return;
+        }
+
+        // In CJS mode, convert external imports to require() calls
+        // Transform: import { x } from 'pkg' -> const { x } = require('pkg')
+        // Transform: import x from 'pkg' -> const x = require('pkg').default || require('pkg')
+        // Transform: import * as x from 'pkg' -> const x = require('pkg')
 
         if (specifiers.length === 0) {
           // Side-effect import: import 'pkg'
@@ -245,6 +257,11 @@ export function transform(code: string, options: TransformOptions): string {
             t.variableDeclaration("const", declarations)
           );
         }
+      } else if (esm) {
+        // In ESM mode, keep local imports as-is
+        // The imported module will export wrappers that delegate to __hot
+        // Don't track these in 'imports' so references won't be transformed
+        return;
       } else if (nodePath.node.specifiers.length === 0) {
         // Side-effect import for local module
         nodePath.replaceWith(
@@ -503,6 +520,7 @@ export function transform(code: string, options: TransformOptions): string {
         if (t.isFunctionDeclaration(declaration) && declaration.id) {
           const name = declaration.id.name;
           locals.set(name, { type: "function", preserve: false });
+          if (esm) esmExports.push({ name, type: 'function' });
           nodePath.replaceWith(
             t.expressionStatement(
               t.callExpression(
@@ -528,6 +546,7 @@ export function transform(code: string, options: TransformOptions): string {
               const name = declarator.id.name;
               const hasDefonce = isDefonce(declarator.init);
               locals.set(name, { type: "variable", preserve: hasDefonce });
+              if (esm) esmExports.push({ name, type: 'value' });
 
               const init = unwrapDefonce(declarator.init);
 
@@ -562,6 +581,7 @@ export function transform(code: string, options: TransformOptions): string {
         } else if (t.isClassDeclaration(declaration) && declaration.id) {
           const name = declaration.id.name;
           locals.set(name, { type: "class", preserve: false });
+          if (esm) esmExports.push({ name, type: 'value' });
           nodePath.replaceWith(
             t.expressionStatement(
               t.assignmentExpression(
@@ -585,6 +605,7 @@ export function transform(code: string, options: TransformOptions): string {
             const exportedName = t.isIdentifier(specifier.exported)
               ? specifier.exported.name
               : specifier.exported.value;
+            if (esm) esmExports.push({ name: exportedName, type: 'value' });
             statements.push(
               t.expressionStatement(
                 t.assignmentExpression(
@@ -607,6 +628,7 @@ export function transform(code: string, options: TransformOptions): string {
         if (declaration.id) {
           locals.set(declaration.id.name, { type: "function", preserve: false });
         }
+        if (esm) esmExports.push({ name: 'default', type: 'default-function' });
         // Use __hot.defn for function declarations
         nodePath.replaceWith(
           t.expressionStatement(
@@ -630,6 +652,7 @@ export function transform(code: string, options: TransformOptions): string {
         if (declaration.id) {
           locals.set(declaration.id.name, { type: "class", preserve: false });
         }
+        if (esm) esmExports.push({ name: 'default', type: 'default-value' });
         nodePath.replaceWith(
           t.expressionStatement(
             t.assignmentExpression(
@@ -645,6 +668,7 @@ export function transform(code: string, options: TransformOptions): string {
           )
         );
       } else {
+        if (esm) esmExports.push({ name: 'default', type: 'default-value' });
         nodePath.replaceWith(
           t.expressionStatement(
             t.assignmentExpression(
@@ -707,13 +731,94 @@ export function transform(code: string, options: TransformOptions): string {
     ])
   );
 
-  const output = generate(ast, {
+  // In ESM mode, add export statements at the end
+  if (esm && esmExports.length > 0) {
+    for (const exp of esmExports) {
+      if (exp.type === 'function') {
+        // For functions, export a wrapper that delegates to __m (for hot reload)
+        // export function name(...args) { return __m.name.apply(this, args); }
+        ast.program.body.push(
+          t.exportNamedDeclaration(
+            t.functionDeclaration(
+              t.identifier(exp.name),
+              [t.restElement(t.identifier('__args'))],
+              t.blockStatement([
+                t.returnStatement(
+                  t.callExpression(
+                    t.memberExpression(
+                      t.memberExpression(t.identifier('__m'), t.identifier(exp.name)),
+                      t.identifier('apply')
+                    ),
+                    [t.thisExpression(), t.identifier('__args')]
+                  )
+                )
+              ])
+            )
+          )
+        );
+      } else if (exp.type === 'value') {
+        // For values, export a getter via Object.defineProperty pattern
+        // We use a variable declaration that reads from __m
+        // export const name = __m.name;  (won't be live, but values rarely change)
+        ast.program.body.push(
+          t.exportNamedDeclaration(
+            t.variableDeclaration('const', [
+              t.variableDeclarator(
+                t.identifier(exp.name),
+                t.memberExpression(t.identifier('__m'), t.identifier(exp.name))
+              )
+            ])
+          )
+        );
+      } else if (exp.type === 'default-function') {
+        // export default function(...args) { return __m.default.apply(this, args); }
+        ast.program.body.push(
+          t.exportDefaultDeclaration(
+            t.functionDeclaration(
+              null,
+              [t.restElement(t.identifier('__args'))],
+              t.blockStatement([
+                t.returnStatement(
+                  t.callExpression(
+                    t.memberExpression(
+                      t.memberExpression(t.identifier('__m'), t.identifier('default')),
+                      t.identifier('apply')
+                    ),
+                    [t.thisExpression(), t.identifier('__args')]
+                  )
+                )
+              ])
+            )
+          )
+        );
+      } else if (exp.type === 'default-value') {
+        // export default __m.default;
+        ast.program.body.push(
+          t.exportDefaultDeclaration(
+            t.memberExpression(t.identifier('__m'), t.identifier('default'))
+          )
+        );
+      }
+    }
+  }
+
+  // Strip TypeScript types using Babel transform
+  const result = transformFromAstSync(ast, code, {
+    plugins: [
+      ['@babel/plugin-transform-typescript', { isTSX: true }]
+    ],
+    filename: filename,
+    sourceType: 'module',
     retainLines: false,
     compact: false,
     comments: true,
   });
 
-  return output.code;
+  if (!result || !result.code) {
+    throw new Error('Failed to transform TypeScript');
+  }
+
+  return result.code;
 }
 
 /**

@@ -1,8 +1,9 @@
 use thiserror::Error;
 
 use crate::ast::{
-    AttributeValue, Binding, Block, BlockArgument, Compilation, Extern, FunctionType, LetExpr, Module,
-    Node, Operation, Pass, Region, Require, Target, Type, TypeAnnotation, TypedMLIRLiteral, TypedNumber,
+    AttributeValue, Binding, Block, BlockArgument, Compilation, Defmacro, Extern, FunctionType,
+    LetExpr, Module, Node, Operation, Pass, Region, Require, RequireMacros, Target, Type,
+    TypeAnnotation, TypedMLIRLiteral, TypedNumber,
 };
 use crate::value::Value;
 
@@ -35,6 +36,9 @@ pub enum ParserError {
     #[error("invalid require form - expected (require [\"path\" :as alias])")]
     InvalidRequireForm,
 
+    #[error("invalid require-macros form - expected (require-macros \"path\")")]
+    InvalidRequireMacrosForm,
+
     #[error("invalid compilation form - expected (compilation (target ...) ...)")]
     InvalidCompilationForm,
 
@@ -46,6 +50,9 @@ pub enum ParserError {
 
     #[error("invalid extern form - expected (extern :library-name)")]
     InvalidExternForm,
+
+    #[error("invalid defmacro form - expected (defmacro name)")]
+    InvalidDefmacroForm,
 }
 
 pub struct Parser;
@@ -106,8 +113,10 @@ impl Parser {
                 Ok(Node::literal(original.clone()))
             }
             "require" => self.parse_require(items),
+            "require-macros" => self.parse_require_macros(items),
             "compilation" => self.parse_compilation(items),
             "extern" => self.parse_extern(items),
+            "defmacro" => self.parse_defmacro(items),
             _ => self.parse_operation(items),
         }
     }
@@ -182,6 +191,20 @@ impl Parser {
         Err(ParserError::InvalidRequireForm)
     }
 
+    fn parse_require_macros(&mut self, items: &[Value]) -> Result<Node, ParserError> {
+        // (require-macros "./macros.lisp")
+        if items.len() < 2 {
+            return Err(ParserError::InvalidRequireMacrosForm);
+        }
+
+        let path = match &items[1] {
+            Value::String(s) => s.clone(),
+            _ => return Err(ParserError::InvalidRequireMacrosForm),
+        };
+
+        Ok(Node::require_macros(RequireMacros::new(path)))
+    }
+
     fn parse_compilation(&mut self, items: &[Value]) -> Result<Node, ParserError> {
         // (compilation (target rocm ...) (target cuda ...) ...)
         let mut compilation = Compilation::new();
@@ -216,6 +239,20 @@ impl Parser {
         };
 
         Ok(Node::extern_decl(Extern::new(library)))
+    }
+
+    fn parse_defmacro(&mut self, items: &[Value]) -> Result<Node, ParserError> {
+        // (defmacro name)
+        if items.len() < 2 {
+            return Err(ParserError::InvalidDefmacroForm);
+        }
+
+        let name = match &items[1] {
+            Value::Symbol(sym) => sym.name.clone(),
+            _ => return Err(ParserError::InvalidDefmacroForm),
+        };
+
+        Ok(Node::defmacro(Defmacro::new(name)))
     }
 
     fn parse_target(&mut self, items: &[Value]) -> Result<Target, ParserError> {

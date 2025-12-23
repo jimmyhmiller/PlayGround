@@ -385,6 +385,17 @@ pub fn extract_externs(nodes: &[crate::ast::Node]) -> Vec<crate::ast::Extern> {
     externs
 }
 
+/// Extract defmacro declarations from parsed nodes
+pub fn extract_defmacros(nodes: &[crate::ast::Node]) -> Vec<crate::ast::Defmacro> {
+    let mut defmacros = Vec::new();
+    for node in nodes {
+        if let crate::ast::Node::Defmacro(d) = node {
+            defmacros.push(d.clone());
+        }
+    }
+    defmacros
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

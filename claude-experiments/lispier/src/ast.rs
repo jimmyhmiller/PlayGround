@@ -295,6 +295,41 @@ impl Extern {
     }
 }
 
+/// Macro registration declaration
+/// Registers a compiled function as a macro for use during expansion
+#[derive(Debug, Clone, PartialEq)]
+pub struct Defmacro {
+    /// The name of the function to register as a macro
+    pub name: String,
+}
+
+impl Defmacro {
+    pub fn new(name: impl Into<String>) -> Self {
+        Self { name: name.into() }
+    }
+}
+
+/// Require macros declaration
+/// Loads and compiles a macro module, registering its macros for use in this module
+#[derive(Debug, Clone, PartialEq)]
+pub struct RequireMacros {
+    /// The path to the macro module
+    pub path: String,
+    /// Whether the path is project-relative (starts with @)
+    pub is_project_relative: bool,
+}
+
+impl RequireMacros {
+    pub fn new(path: impl Into<String>) -> Self {
+        let path = path.into();
+        let is_project_relative = path.starts_with('@');
+        Self {
+            path,
+            is_project_relative,
+        }
+    }
+}
+
 impl Module {
     pub fn new() -> Self {
         Self { body: Vec::new() }
@@ -381,8 +416,10 @@ pub enum Node {
     FunctionType(FunctionType),
     Literal(Value),
     Require(Require),
+    RequireMacros(RequireMacros),
     Compilation(Compilation),
     Extern(Extern),
+    Defmacro(Defmacro),
 }
 
 impl Node {
@@ -426,12 +463,20 @@ impl Node {
         Node::Require(require)
     }
 
+    pub fn require_macros(require_macros: RequireMacros) -> Self {
+        Node::RequireMacros(require_macros)
+    }
+
     pub fn compilation(compilation: Compilation) -> Self {
         Node::Compilation(compilation)
     }
 
     pub fn extern_decl(extern_decl: Extern) -> Self {
         Node::Extern(extern_decl)
+    }
+
+    pub fn defmacro(defmacro: Defmacro) -> Self {
+        Node::Defmacro(defmacro)
     }
 
     pub fn is_module(&self) -> bool {
@@ -474,12 +519,20 @@ impl Node {
         matches!(self, Node::Require(_))
     }
 
+    pub fn is_require_macros(&self) -> bool {
+        matches!(self, Node::RequireMacros(_))
+    }
+
     pub fn is_compilation(&self) -> bool {
         matches!(self, Node::Compilation(_))
     }
 
     pub fn is_extern(&self) -> bool {
         matches!(self, Node::Extern(_))
+    }
+
+    pub fn is_defmacro(&self) -> bool {
+        matches!(self, Node::Defmacro(_))
     }
 
     pub fn as_module(&self) -> &Module {
@@ -552,6 +605,13 @@ impl Node {
         }
     }
 
+    pub fn as_require_macros(&self) -> &RequireMacros {
+        match self {
+            Node::RequireMacros(r) => r,
+            _ => panic!("expected RequireMacros"),
+        }
+    }
+
     pub fn as_compilation(&self) -> &Compilation {
         match self {
             Node::Compilation(c) => c,
@@ -563,6 +623,13 @@ impl Node {
         match self {
             Node::Extern(e) => e,
             _ => panic!("expected Extern"),
+        }
+    }
+
+    pub fn as_defmacro(&self) -> &Defmacro {
+        match self {
+            Node::Defmacro(d) => d,
+            _ => panic!("expected Defmacro"),
         }
     }
 }
