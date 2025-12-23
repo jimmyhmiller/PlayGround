@@ -374,6 +374,17 @@ pub fn extract_compilation(nodes: &[crate::ast::Node]) -> Option<Compilation> {
     None
 }
 
+/// Extract extern declarations from parsed nodes
+pub fn extract_externs(nodes: &[crate::ast::Node]) -> Vec<crate::ast::Extern> {
+    let mut externs = Vec::new();
+    for node in nodes {
+        if let crate::ast::Node::Extern(e) = node {
+            externs.push(e.clone());
+        }
+    }
+    externs
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

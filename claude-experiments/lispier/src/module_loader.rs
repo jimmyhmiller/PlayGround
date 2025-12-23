@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 use crate::ast::{Node, Require};
+use crate::macros::MacroExpander;
 use crate::parser::Parser;
 use crate::reader::Reader;
 use crate::tokenizer::Tokenizer;
@@ -21,6 +22,9 @@ pub enum ModuleError {
 
     #[error("reader error in {0}: {1}")]
     ReaderError(PathBuf, String),
+
+    #[error("macro error in {0}: {1}")]
+    MacroError(PathBuf, String),
 
     #[error("parser error in {0}: {1}")]
     ParserError(PathBuf, String),
@@ -146,9 +150,15 @@ impl ModuleLoader {
             .read()
             .map_err(|e| ModuleError::ReaderError(path.clone(), e.to_string()))?;
 
+        // Macro expansion
+        let expander = MacroExpander::new();
+        let expanded = expander
+            .expand_all(&values)
+            .map_err(|e| ModuleError::MacroError(path.clone(), e.to_string()))?;
+
         let mut parser = Parser::new();
         parser
-            .parse(&values)
+            .parse(&expanded)
             .map_err(|e| ModuleError::ParserError(path.clone(), e.to_string()))
     }
 }

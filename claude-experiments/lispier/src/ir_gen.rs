@@ -159,6 +159,10 @@ impl<'c> IRGenerator<'c> {
                 // Compilation nodes are metadata for the JIT runner, not IR
                 Ok(None)
             }
+            Node::Extern(_) => {
+                // Extern nodes are metadata for FFI registration, not IR
+                Ok(None)
+            }
         }
     }
 

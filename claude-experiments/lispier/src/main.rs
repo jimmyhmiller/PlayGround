@@ -3,8 +3,9 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use lispier::{
-    extract_compilation, find_project_root, DialectRegistry, IRGenerator, Jit, ModuleLoader,
-    Parser, Reader, RuntimeEnv, Tokenizer,
+    extract_compilation, extract_externs, find_project_root, AttributeValue, DialectRegistry,
+    IRGenerator, Jit, MacroExpander, ModuleLoader, Node, Operation, Parser, Reader, RuntimeEnv,
+    Tokenizer,
 };
 
 fn main() -> ExitCode {
@@ -35,6 +36,14 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         }
+        Some("show-expanded") => {
+            if let Some(file) = args.get(2) {
+                show_expanded(file)
+            } else {
+                eprintln!("Usage: lispier show-expanded <file>");
+                ExitCode::FAILURE
+            }
+        }
         Some("eval") => {
             if let Some(expr) = args.get(2) {
                 eval_expr(expr)
@@ -62,11 +71,12 @@ fn print_usage() {
     println!("    lispier <command> [args]");
     println!();
     println!("COMMANDS:");
-    println!("    run <file>         Compile and execute a file");
-    println!("    show-ast <file>    Show the AST for a file");
-    println!("    show-ir <file>     Show the generated MLIR for a file");
-    println!("    eval <expr>        Evaluate an expression");
-    println!("    --help, -h         Show this help message");
+    println!("    run <file>           Compile and execute a file");
+    println!("    show-ast <file>      Show the AST for a file");
+    println!("    show-ir <file>       Show the generated MLIR for a file");
+    println!("    show-expanded <file> Show macro-expanded source");
+    println!("    eval <expr>          Evaluate an expression");
+    println!("    --help, -h           Show this help message");
 }
 
 fn run_file(path: &str) -> ExitCode {
@@ -195,6 +205,53 @@ fn show_ir(path: &str) -> ExitCode {
     }
 }
 
+fn show_expanded(path: &str) -> ExitCode {
+    let source = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Failed to read file: {}", e);
+            return ExitCode::FAILURE;
+        }
+    };
+
+    // Tokenize
+    let mut tokenizer = Tokenizer::new(&source);
+    let tokens = match tokenizer.tokenize() {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("Tokenizer error: {}", e);
+            return ExitCode::FAILURE;
+        }
+    };
+
+    // Read
+    let mut reader = Reader::new(&tokens);
+    let values = match reader.read() {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("Reader error: {}", e);
+            return ExitCode::FAILURE;
+        }
+    };
+
+    // Macro expansion
+    let expander = MacroExpander::new();
+    let expanded = match expander.expand_all(&values) {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!("Macro error: {}", e);
+            return ExitCode::FAILURE;
+        }
+    };
+
+    // Print expanded forms
+    for value in &expanded {
+        println!("{}", value);
+    }
+
+    ExitCode::SUCCESS
+}
+
 fn eval_expr(expr: &str) -> ExitCode {
     match compile_and_run(expr) {
         Ok(()) => ExitCode::SUCCESS,
@@ -228,8 +285,103 @@ fn compile_and_run(source: &str) -> Result<(), String> {
     compile_and_run_nodes(&nodes)
 }
 
+/// Return type of a main function
+#[derive(Debug, Clone)]
+enum MainReturnType {
+    I32,
+    I64,
+    F32,
+    F64,
+    Void,
+}
+
+/// Find the main function in AST nodes and extract its return type
+fn find_main_return_type(nodes: &[Node]) -> Option<MainReturnType> {
+    for node in nodes {
+        if let Some(ret_type) = find_main_in_node(node) {
+            return Some(ret_type);
+        }
+    }
+    None
+}
+
+/// Recursively search for main function in a node
+fn find_main_in_node(node: &Node) -> Option<MainReturnType> {
+    match node {
+        Node::Operation(op) => {
+            if is_main_function(op) {
+                return extract_return_type(op);
+            }
+            // Search in regions
+            for region in &op.regions {
+                for block in &region.blocks {
+                    for child in &block.operations {
+                        if let Some(ret_type) = find_main_in_node(child) {
+                            return Some(ret_type);
+                        }
+                    }
+                }
+            }
+            None
+        }
+        Node::Module(module) => {
+            for child in &module.body {
+                if let Some(ret_type) = find_main_in_node(child) {
+                    return Some(ret_type);
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+/// Check if an operation is a main function
+fn is_main_function(op: &Operation) -> bool {
+    if op.qualified_name() != "func.func" {
+        return false;
+    }
+
+    match op.attributes.get("sym_name") {
+        Some(AttributeValue::String(name)) => name == "main",
+        _ => false,
+    }
+}
+
+/// Extract return type from a function operation
+fn extract_return_type(op: &Operation) -> Option<MainReturnType> {
+    let func_type = match op.attributes.get("function_type") {
+        Some(AttributeValue::FunctionType(ft)) => ft,
+        _ => return Some(MainReturnType::Void),
+    };
+
+    if func_type.return_types.is_empty() {
+        return Some(MainReturnType::Void);
+    }
+
+    // Get the first return type
+    let ret_type_name = &func_type.return_types[0].name;
+
+    match ret_type_name.as_str() {
+        "i32" => Some(MainReturnType::I32),
+        "i64" => Some(MainReturnType::I64),
+        "f32" => Some(MainReturnType::F32),
+        "f64" => Some(MainReturnType::F64),
+        _ => {
+            eprintln!("Warning: unsupported main return type '{}', treating as void", ret_type_name);
+            Some(MainReturnType::Void)
+        }
+    }
+}
+
 /// Compile and run pre-parsed nodes
-fn compile_and_run_nodes(nodes: &[lispier::Node]) -> Result<(), String> {
+fn compile_and_run_nodes(nodes: &[Node]) -> Result<(), String> {
+    // Find main's return type before generating IR
+    let return_type = find_main_return_type(nodes);
+
+    // Extract extern declarations
+    let externs = extract_externs(nodes);
+
     // Generate MLIR
     let registry = DialectRegistry::new();
     let generator = IRGenerator::new(&registry);
@@ -241,12 +393,63 @@ fn compile_and_run_nodes(nodes: &[lispier::Node]) -> Result<(), String> {
     let jit = Jit::new(&registry, &mut module)
         .map_err(|e| format!("JIT creation error: {}", e))?;
 
-    // Look for a main function to invoke
-    if let Some(_main_ptr) = jit.lookup("main") {
-        // TODO: Invoke main function
-        println!("Found main function, but invocation not yet implemented");
-    } else {
-        println!("No main function found");
+    // Register FFI symbols based on extern declarations
+    for ext in &externs {
+        // Keywords may be stored with or without the leading colon
+        let lib = ext.library.trim_start_matches(':');
+        match lib {
+            "value-ffi" => {
+                unsafe {
+                    jit.register_value_ffi();
+                }
+            }
+            other => {
+                return Err(format!("Unknown extern library: {}", other));
+            }
+        }
+    }
+
+    // Use invoke_packed for uniform calling convention
+    // The llvm-request-c-wrappers pass generates _mlir_ciface_main which invoke_packed uses
+    match return_type {
+        Some(MainReturnType::I32) => {
+            let mut result: i32 = 0;
+            unsafe {
+                jit.invoke_packed("main", &mut [&mut result as *mut i32 as *mut ()])
+                    .map_err(|e| format!("Invocation error: {}", e))?;
+            }
+            println!("{}", result);
+        }
+        Some(MainReturnType::I64) => {
+            let mut result: i64 = 0;
+            unsafe {
+                jit.invoke_packed("main", &mut [&mut result as *mut i64 as *mut ()])
+                    .map_err(|e| format!("Invocation error: {}", e))?;
+            }
+            println!("{}", result);
+        }
+        Some(MainReturnType::F32) => {
+            let mut result: f32 = 0.0;
+            unsafe {
+                jit.invoke_packed("main", &mut [&mut result as *mut f32 as *mut ()])
+                    .map_err(|e| format!("Invocation error: {}", e))?;
+            }
+            println!("{}", result);
+        }
+        Some(MainReturnType::F64) => {
+            let mut result: f64 = 0.0;
+            unsafe {
+                jit.invoke_packed("main", &mut [&mut result as *mut f64 as *mut ()])
+                    .map_err(|e| format!("Invocation error: {}", e))?;
+            }
+            println!("{}", result);
+        }
+        Some(MainReturnType::Void) | None => {
+            unsafe {
+                jit.invoke_packed("main", &mut [])
+                    .map_err(|e| format!("Invocation error: {}", e))?;
+            }
+        }
     }
 
     Ok(())

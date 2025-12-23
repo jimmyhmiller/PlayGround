@@ -280,6 +280,21 @@ impl Default for Compilation {
     }
 }
 
+/// External FFI declaration
+#[derive(Debug, Clone, PartialEq)]
+pub struct Extern {
+    /// The FFI library to load (e.g., "value-ffi" for Value manipulation)
+    pub library: String,
+}
+
+impl Extern {
+    pub fn new(library: impl Into<String>) -> Self {
+        Self {
+            library: library.into(),
+        }
+    }
+}
+
 impl Module {
     pub fn new() -> Self {
         Self { body: Vec::new() }
@@ -367,6 +382,7 @@ pub enum Node {
     Literal(Value),
     Require(Require),
     Compilation(Compilation),
+    Extern(Extern),
 }
 
 impl Node {
@@ -414,6 +430,10 @@ impl Node {
         Node::Compilation(compilation)
     }
 
+    pub fn extern_decl(extern_decl: Extern) -> Self {
+        Node::Extern(extern_decl)
+    }
+
     pub fn is_module(&self) -> bool {
         matches!(self, Node::Module(_))
     }
@@ -456,6 +476,10 @@ impl Node {
 
     pub fn is_compilation(&self) -> bool {
         matches!(self, Node::Compilation(_))
+    }
+
+    pub fn is_extern(&self) -> bool {
+        matches!(self, Node::Extern(_))
     }
 
     pub fn as_module(&self) -> &Module {
@@ -532,6 +556,13 @@ impl Node {
         match self {
             Node::Compilation(c) => c,
             _ => panic!("expected Compilation"),
+        }
+    }
+
+    pub fn as_extern(&self) -> &Extern {
+        match self {
+            Node::Extern(e) => e,
+            _ => panic!("expected Extern"),
         }
     }
 }

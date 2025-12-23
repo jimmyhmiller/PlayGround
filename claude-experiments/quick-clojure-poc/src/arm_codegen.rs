@@ -689,100 +689,14 @@ impl Arm64CodeGen {
                 self.code.push(0x14000000); // B #0
             }
 
-            Instruction::Recur(label, assignments) => {
-                // Recur is a tail call - the compiler has already evaluated all new values
-                // into registers/spills BEFORE this instruction, so we just need to:
-                // 1. Move each new value to its binding register
-                // 2. Jump to loop label
-                //
-                // We use push/pop for parallel assignment to handle register overlaps safely.
-                // This ensures that if dst[i] == src[j] for i != j, we don't clobber the source.
-
-                if !assignments.is_empty() {
-                    // Phase 1: Push all source values to stack
-                    // Clear temps after EACH push - the value is safe on stack so we can reuse temp
-                    for (_, src) in assignments.iter() {
-                        self.clear_temp_registers();
-                        let src_reg = self.get_physical_reg_for_irvalue(src, false)?;
-                        self.emit_stp(src_reg, 31, 31, -2); // stp src, xzr, [sp, #-16]!
-                    }
-
-                    // Phase 2: Pop into destinations (reverse order to match push order)
-                    for (dst, _) in assignments.iter().rev() {
-                        let dest_spill = self.dest_spill(dst);
-                        let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
-                        self.emit_ldp(dst_reg, 31, 31, 2); // ldp dst, xzr, [sp], #16
-                        self.store_spill(dst_reg, dest_spill);
-                        self.clear_temp_registers();
-                    }
-                }
-
-                // Jump to loop label
-                let fixup_index = self.code.len();
-                self.pending_fixups.push((fixup_index, label.clone()));
-                self.code.push(0x14000000); // B #0
+            Instruction::Recur(..) => {
+                // Recur is now lowered to Assign + Jump in the compiler
+                return Err("BUG: Recur instruction should not reach codegen - it should be lowered to Assign + Jump".to_string());
             }
 
-            Instruction::RecurWithSaves(label, assignments, saves) => {
-                // Loop back-edge with register preservation
-                // Save registers that are live across the loop iteration
-
-                // Step 1: Save all the saves (registers that need to survive)
-                // Clear temps between each iteration to avoid exhausting the pool
-                for save in saves.iter() {
-                    let save_reg = self.get_physical_reg_for_irvalue(save, false)?;
-                    self.emit_stp(save_reg, 31, 31, -2); // stp save, xzr, [sp, #-16]!
-                    self.clear_temp_registers();
-                }
-
-                // Step 2: Push assignment sources to stack (for parallel assignment)
-                // Filter out assignments with constant destinations (these are no-ops)
-                let valid_assignments: Vec<_> = assignments.iter()
-                    .filter(|(dst, _)| !matches!(dst, IrValue::TaggedConstant(_) | IrValue::Null))
-                    .collect();
-
-                if !valid_assignments.is_empty() {
-                    for (_, src) in valid_assignments.iter() {
-                        // Handle TaggedConstant inline
-                        let src_reg = match src {
-                            IrValue::TaggedConstant(val) => {
-                                let temp = self.allocate_temp_register();
-                                self.emit_mov_imm(temp, *val as i64);
-                                temp
-                            }
-                            IrValue::Null => {
-                                let temp = self.allocate_temp_register();
-                                self.emit_mov_imm(temp, 7);  // nil is tagged as 7
-                                temp
-                            }
-                            _ => self.get_physical_reg_for_irvalue(src, false)?
-                        };
-                        self.emit_stp(src_reg, 31, 31, -2); // stp src, xzr, [sp, #-16]!
-                        self.clear_temp_registers();
-                    }
-
-                    // Step 3: Pop into destinations (reverse order)
-                    // IMPORTANT: Must call store_spill to write back to spill slot!
-                    for (dst, _) in valid_assignments.iter().rev() {
-                        let dest_spill = self.dest_spill(dst);
-                        let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
-                        self.emit_ldp(dst_reg, 31, 31, 2); // ldp dst, xzr, [sp], #16
-                        self.store_spill(dst_reg, dest_spill);
-                        self.clear_temp_registers();
-                    }
-                }
-
-                // Step 4: Restore the saves (reverse order)
-                for save in saves.iter().rev() {
-                    let save_reg = self.get_physical_reg_for_irvalue(save, false)?;
-                    self.emit_ldp(save_reg, 31, 31, 2); // ldp save, xzr, [sp], #16
-                    self.clear_temp_registers();
-                }
-
-                // Step 5: Jump to loop label
-                let fixup_index = self.code.len();
-                self.pending_fixups.push((fixup_index, label.clone()));
-                self.code.push(0x14000000); // B #0
+            Instruction::RecurWithSaves(..) => {
+                // RecurWithSaves is no longer generated
+                return Err("BUG: RecurWithSaves instruction should not reach codegen".to_string());
             }
 
             Instruction::JumpIf(label, cond, src1, src2) => {

@@ -1,7 +1,7 @@
 use thiserror::Error;
 
 use crate::ast::{
-    AttributeValue, Binding, Block, BlockArgument, Compilation, FunctionType, LetExpr, Module,
+    AttributeValue, Binding, Block, BlockArgument, Compilation, Extern, FunctionType, LetExpr, Module,
     Node, Operation, Pass, Region, Require, Target, Type, TypeAnnotation, TypedMLIRLiteral, TypedNumber,
 };
 use crate::value::Value;
@@ -43,6 +43,9 @@ pub enum ParserError {
 
     #[error("invalid pass form - expected (pass name) or (pass name {{:attr val}})")]
     InvalidPassForm,
+
+    #[error("invalid extern form - expected (extern :library-name)")]
+    InvalidExternForm,
 }
 
 pub struct Parser;
@@ -104,6 +107,7 @@ impl Parser {
             }
             "require" => self.parse_require(items),
             "compilation" => self.parse_compilation(items),
+            "extern" => self.parse_extern(items),
             _ => self.parse_operation(items),
         }
     }
@@ -198,6 +202,20 @@ impl Parser {
         }
 
         Ok(Node::compilation(compilation))
+    }
+
+    fn parse_extern(&mut self, items: &[Value]) -> Result<Node, ParserError> {
+        // (extern :value-ffi)
+        if items.len() < 2 {
+            return Err(ParserError::InvalidExternForm);
+        }
+
+        let library = match &items[1] {
+            Value::Keyword(kw) => kw.clone(),
+            _ => return Err(ParserError::InvalidExternForm),
+        };
+
+        Ok(Node::extern_decl(Extern::new(library)))
     }
 
     fn parse_target(&mut self, items: &[Value]) -> Result<Target, ParserError> {
@@ -343,6 +361,10 @@ impl Parser {
                 Ok(AttributeValue::Array(arr))
             }
             Value::Symbol(sym) => {
+                // Symbol references starting with @ are flat symbol refs (for callee, etc.)
+                if sym.name.starts_with('@') {
+                    return Ok(AttributeValue::String(sym.name.clone()));
+                }
                 // Check for MLIR literal syntax: anything with <...>
                 // e.g., array<i32: 0, 1, 1>, dense<[1, 2, 3]>, affine_map<...>
                 // Pass through as-is - no automatic conversion

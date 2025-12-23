@@ -1,11 +1,13 @@
 use melior::{
     ir::Module,
-    pass::{self, PassManager},
+    pass::PassManager,
+    utility::{parse_pass_pipeline, register_all_passes},
     ExecutionEngine,
 };
 use thiserror::Error;
 
 use crate::dialect::DialectRegistry;
+use crate::value_ffi::get_value_ffi_functions;
 
 #[derive(Debug, Error)]
 pub enum JitError {
@@ -51,14 +53,22 @@ impl Jit {
     fn lower_to_llvm(registry: &DialectRegistry, module: &mut Module) -> Result<(), JitError> {
         let context = registry.context();
 
+        // Register all passes so we can use them by name
+        register_all_passes();
+
         // Create pass manager
         let pm = PassManager::new(context);
 
         // Enable verification after each pass
         pm.enable_verifier(true);
 
-        // Use the unified to-LLVM pass that converts everything
-        pm.add_pass(pass::conversion::create_to_llvm());
+        // Use pass pipeline with llvm-request-c-wrappers to generate _mlir_ciface_ wrappers
+        // This enables invoke_packed to work properly
+        // llvm-request-c-wrappers runs on func.func, so it must be nested
+        let pipeline = "builtin.module(func.func(llvm-request-c-wrappers),convert-func-to-llvm,convert-arith-to-llvm,convert-cf-to-llvm,convert-index-to-llvm,finalize-memref-to-llvm,reconcile-unrealized-casts)";
+
+        parse_pass_pipeline(pm.as_operation_pass_manager(), pipeline)
+            .map_err(|e| JitError::PassPipelineFailed(format!("{:?}", e)))?;
 
         // Run the pass manager on the module
         pm.run(module).map_err(|_| JitError::PassManagerRunFailed)?;
@@ -108,6 +118,28 @@ impl Jit {
     /// Dump the compiled module to an object file
     pub fn dump_to_object_file(&self, path: &str) {
         self.engine.dump_to_object_file(path);
+    }
+
+    /// Register all Value FFI functions with the JIT
+    ///
+    /// This makes functions like `value_list_new`, `value_symbol_new`, etc.
+    /// available for calling from compiled code.
+    ///
+    /// Registers both the bare name and the `_mlir_ciface_` prefixed version
+    /// to support both direct LLVM calls and func dialect calls.
+    ///
+    /// # Safety
+    /// Must be called before invoking any function that uses FFI symbols.
+    pub unsafe fn register_value_ffi(&self) {
+        for ffi_fn in get_value_ffi_functions() {
+            unsafe {
+                // Register the bare name
+                self.register_symbol(ffi_fn.name, ffi_fn.ptr);
+                // Also register with _mlir_ciface_ prefix for func dialect compatibility
+                let ciface_name = format!("_mlir_ciface_{}", ffi_fn.name);
+                self.register_symbol(&ciface_name, ffi_fn.ptr);
+            }
+        }
     }
 }
 

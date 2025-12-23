@@ -1129,23 +1129,28 @@ impl Compiler {
             ));
         }
 
-        // Compile ALL new values first (before any assignments)
+        // 1. Compile ALL new values first (before any assignments)
         let mut new_values = Vec::new();
         for arg in args {
             new_values.push(self.compile(arg)?);
         }
 
-        // Build assignments list: (target_binding_register, new_value)
-        let mut assignments = Vec::new();
-        for (binding_reg, new_value) in context.binding_registers.iter().zip(new_values.iter()) {
-            // Include all assignments, even if target == source
-            // Codegen will skip no-ops
-            assignments.push((*binding_reg, *new_value));
+        // 2. Allocate temps and copy new values into them (parallel read)
+        // This ensures all source values are captured before any destinations are modified
+        let mut temps = Vec::new();
+        for new_value in &new_values {
+            let temp = self.builder.new_register();
+            self.builder.emit(Instruction::Assign(temp, *new_value));
+            temps.push(temp);
         }
 
-        // Emit Recur instruction (will be transformed to RecurWithSaves by register allocator)
-        // The Recur instruction handles: 1) saving live registers, 2) assignments, 3) jump
-        self.builder.emit(Instruction::Recur(context.label.clone(), assignments));
+        // 3. Copy temps into binding registers (parallel write)
+        for (binding_reg, temp) in context.binding_registers.iter().zip(temps.iter()) {
+            self.builder.emit(Instruction::Assign(*binding_reg, *temp));
+        }
+
+        // 4. Jump to loop label
+        self.builder.emit(Instruction::Jump(context.label.clone()));
 
         // Return dummy (recur never returns normally)
         let dummy = self.builder.new_register();

@@ -10,6 +10,8 @@ struct ContentView: View {
     @State private var isLoadingLibrary = false
     @State private var errorMessage: String?
     @State private var currentPDFHash: String?
+    @State private var currentDownloadTask: Task<Void, Never>?
+    @State private var loadRequestCounter: Int = 0
 
     @StateObject private var downloader = PDFDownloader()
     @EnvironmentObject var sharedPDFManager: SharedPDFManager
@@ -20,6 +22,9 @@ struct ContentView: View {
             if let library = library {
                 PDFLibrarySidebar(library: library, selectedPDF: $selectedPDF, onSelectSharedPDF: { hash, document in
                     // Handle selection of a recently highlighted PDF that might be shared
+                    currentDownloadTask?.cancel()
+                    currentDownloadTask = nil
+                    loadRequestCounter += 1  // Invalidate any pending loads
                     currentPDFHash = hash
                     pdfDocument = document
                     selectedPDF = nil
@@ -100,15 +105,27 @@ struct ContentView: View {
             await loadLibrary()
         }
         .onChange(of: selectedPDF) { oldValue, newValue in
+            // Cancel any in-flight download
+            currentDownloadTask?.cancel()
+
+            // Increment counter to invalidate any pending loads
+            loadRequestCounter += 1
+
             if let pdf = newValue {
+                let requestId = loadRequestCounter  // Capture current counter
                 currentPDFHash = pdf.hash
-                Task {
-                    await loadPDF(metadata: pdf)
+                currentDownloadTask = Task {
+                    await loadPDF(metadata: pdf, requestId: requestId)
                 }
             }
         }
         .onChange(of: sharedPDFManager.pendingPDF) { oldValue, newValue in
             if let shared = newValue {
+                // Cancel any in-flight download and invalidate pending loads
+                currentDownloadTask?.cancel()
+                currentDownloadTask = nil
+                loadRequestCounter += 1
+
                 // Open the shared PDF
                 currentPDFHash = shared.hash
                 pdfDocument = shared.document
@@ -157,13 +174,23 @@ struct ContentView: View {
         }.value
     }
 
-    func loadPDF(metadata: PDFMetadata) async {
+    func loadPDF(metadata: PDFMetadata, requestId: Int) async {
         do {
             let document = try await downloader.downloadPDF(metadata: metadata)
+
+            // Check if this request is still current
+            guard !Task.isCancelled else { return }
+            guard requestId == loadRequestCounter else {
+                print("Discarding stale PDF load (request \(requestId), current \(loadRequestCounter))")
+                return
+            }
+
             pdfDocument = document
         } catch {
-            errorMessage = "Failed to load PDF: \(error.localizedDescription)"
-            print("Error loading PDF: \(error)")
+            if !Task.isCancelled {
+                errorMessage = "Failed to load PDF: \(error.localizedDescription)"
+                print("Error loading PDF: \(error)")
+            }
         }
     }
 }
@@ -565,6 +592,7 @@ struct PDFPageView: UIViewRepresentable {
 
         context.coordinator.canvasView = canvasView
         context.coordinator.containerView = containerView
+        context.coordinator.pdfView = pdfView
 
         // Set up delegate to save drawings when changed
         canvasView.delegate = context.coordinator
@@ -588,6 +616,23 @@ struct PDFPageView: UIViewRepresentable {
     }
 
     func updateUIView(_ uiView: UIView, context: Context) {
+        // Update PDF content if the page changed
+        if let pdfView = context.coordinator.pdfView {
+            let currentPage = pdfView.document?.page(at: 0)
+            if currentPage !== page {
+                let newDoc = PDFDocument()
+                newDoc.insert(page, at: 0)
+                pdfView.document = newDoc
+            }
+        }
+
+        // Update drawing if hash changed
+        if context.coordinator.pdfHash != pdfHash {
+            context.coordinator.pdfHash = pdfHash
+            context.coordinator.pageIndex = pageIndex
+            context.coordinator.loadDrawing()
+        }
+
         // Update the tool when selectedColor changes
         if let canvasView = context.coordinator.canvasView {
             if selectedColor == .clear {
@@ -603,8 +648,9 @@ struct PDFPageView: UIViewRepresentable {
         @Binding var selectedColor: Color
         weak var canvasView: PKCanvasView?
         weak var containerView: UIView?
-        let pdfHash: String
-        let pageIndex: Int
+        weak var pdfView: PDFView?
+        var pdfHash: String
+        var pageIndex: Int
 
         init(selectedColor: Binding<Color>, pdfHash: String, pageIndex: Int) {
             self._selectedColor = selectedColor

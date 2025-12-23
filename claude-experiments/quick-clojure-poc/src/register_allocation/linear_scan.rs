@@ -117,21 +117,25 @@ impl LinearScan {
         }
 
         // IMPORTANT: Extend lifetimes for registers used within loops
-        // If a register is used inside a loop (between label and recur),
-        // its lifetime must extend to the recur instruction to ensure
+        // If a register is used inside a loop (between label and back-edge jump),
+        // its lifetime must extend to the jump instruction to ensure
         // the physical register isn't reused before we jump back.
-        for (recur_idx, instruction) in instructions.iter().enumerate() {
-            if let Instruction::Recur(label, _) = instruction {
-                // Find the loop label index
+        // A back-edge is a Jump to a label that appears BEFORE the jump.
+        for (jump_idx, instruction) in instructions.iter().enumerate() {
+            if let Instruction::Jump(label) = instruction {
+                // Find the target label index
                 if let Some(label_idx) = instructions.iter().position(|instr| {
                     matches!(instr, Instruction::Label(l) if l == label)
                 }) {
-                    // Extend lifetime of any register used between label and recur
-                    for (reg, (start, end)) in result.iter_mut() {
-                        // If register is defined before or at recur, and used within the loop
-                        // (end >= label_idx), extend its lifetime to cover the recur
-                        if *start <= recur_idx && *end >= label_idx && *end < recur_idx {
-                            *end = recur_idx;
+                    // Only process back-edges (jumps to earlier labels = loops)
+                    if label_idx < jump_idx {
+                        // Extend lifetime of any register used between label and jump
+                        for (_reg, (start, end)) in result.iter_mut() {
+                            // If register is defined before or at jump, and used within the loop
+                            // (end >= label_idx), extend its lifetime to cover the jump
+                            if *start <= jump_idx && *end >= label_idx && *end < jump_idx {
+                                *end = jump_idx;
+                            }
                         }
                     }
                 }
@@ -393,22 +397,9 @@ impl LinearScan {
                 if let IrValue::Register(r) = cond { regs.push(*r); }
             }
 
-            // Loop recur instructions (like Beagle's Recurse)
-            Instruction::Recur(_label, assignments) => {
-                for (target, source) in assignments {
-                    if let IrValue::Register(r) = target { regs.push(*r); }
-                    if let IrValue::Register(r) = source { regs.push(*r); }
-                }
-            }
-
-            Instruction::RecurWithSaves(_label, assignments, saves) => {
-                for (target, source) in assignments {
-                    if let IrValue::Register(r) = target { regs.push(*r); }
-                    if let IrValue::Register(r) = source { regs.push(*r); }
-                }
-                for save in saves {
-                    if let IrValue::Register(r) = save { regs.push(*r); }
-                }
+            // Recur/RecurWithSaves are no longer generated - recur is lowered to Assign + Jump
+            Instruction::Recur(..) | Instruction::RecurWithSaves(..) => {
+                panic!("BUG: Recur/RecurWithSaves should not exist - recur is lowered to Assign + Jump");
             }
 
             // Debug instruction - no registers
@@ -790,22 +781,9 @@ impl LinearScan {
                 replace(cond);
             }
 
-            // Loop recur instructions
-            Instruction::Recur(_label, assignments) => {
-                for (target, source) in assignments {
-                    replace(target);
-                    replace(source);
-                }
-            }
-
-            Instruction::RecurWithSaves(_label, assignments, saves) => {
-                for (target, source) in assignments {
-                    replace(target);
-                    replace(source);
-                }
-                for save in saves {
-                    replace(save);
-                }
+            // Recur/RecurWithSaves are no longer generated - recur is lowered to Assign + Jump
+            Instruction::Recur(..) | Instruction::RecurWithSaves(..) => {
+                panic!("BUG: Recur/RecurWithSaves should not exist - recur is lowered to Assign + Jump");
             }
 
             // Debug instruction - no registers
