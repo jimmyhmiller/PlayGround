@@ -1,6 +1,6 @@
-; GAP: Affine dialect
+; WORKING: Affine dialect
 ; MLIR's affine dialect provides structured loop/memory operations with affine maps
-; This file tests affine dialect support
+; Syntax: affine_map<(d0, d1) -> (d0 + d1)> and affine_set<(d0) : (d0 >= 0)> as unquoted symbols
 
 (require-dialect [func :as f] [arith :as a] [affine :as aff] [memref :as m])
 
@@ -45,8 +45,8 @@
         (block [(: i index)]
           (def one (: 1 i32))
           (def zero (: 0 i32))
-          ; How to express affine.if with affine set?
-          (def result (aff/if {:condition "affine_set<(d0) : (d0 >= 0)>"
+          ; affine_set as unquoted symbol becomes MLIRLiteral
+          (def result (aff/if {:condition affine_set<(d0) : (d0 >= 0)>
                                :result i32} i
             (region
               (block []
@@ -62,6 +62,6 @@
              :function_type (-> [index index] [index])}
       (region
         (block [(: d0 index) (: d1 index)]
-          ; affine.apply uses affine_map attribute
-          (def result (aff/apply {:map "affine_map<(d0, d1) -> (d0 + d1)>"} d0 d1))
+          ; affine_map as unquoted symbol becomes MLIRLiteral
+          (def result (aff/apply {:map affine_map<(d0, d1) -> (d0 + d1)>} d0 d1))
           (f/return result))))))

@@ -1,6 +1,10 @@
 ; GAP: scf.parallel and scf.reduce operations
 ; scf.parallel is a parallel loop construct
-; This file tests parallel loop support
+;
+; ACTUAL ERROR: "invalid operand type" during IR generation
+;   - scf.parallel requires special handling for bounds/steps
+;   - scf.reduce for reductions needs specific support
+;   - scf.forall also not supported
 
 (require-dialect [func :as f] [arith :as a] [scf :as s] [memref :as m])
 

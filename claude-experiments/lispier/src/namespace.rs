@@ -1,5 +1,20 @@
 use std::collections::HashMap;
 
+/// Find a character in a string, but only if it's outside of angle brackets
+fn find_outside_angles(s: &str, c: char) -> Option<usize> {
+    let mut depth: i32 = 0;
+    for (i, ch) in s.char_indices() {
+        if ch == '<' {
+            depth += 1;
+        } else if ch == '>' {
+            depth = depth.saturating_sub(1);
+        } else if ch == c && depth == 0 {
+            return Some(i);
+        }
+    }
+    None
+}
+
 /// Namespace information for symbols
 #[derive(Debug, Clone, PartialEq)]
 pub struct Namespace {
@@ -73,8 +88,8 @@ impl NamespaceScope {
     /// Returns the user namespace for local/unresolved symbols
     /// Returns Err with the unknown namespace name if a qualified symbol references an unknown dialect
     pub fn resolve_symbol(&mut self, symbol_text: &str) -> Result<Namespace, String> {
-        // Check for slash notation: alias/name
-        if let Some(slash_pos) = symbol_text.find('/') {
+        // Check for slash notation: alias/name (only before any angle bracket)
+        if let Some(slash_pos) = find_outside_angles(symbol_text, '/') {
             let alias = &symbol_text[0..slash_pos];
             // Find namespace with this alias
             for ns in self.required.values() {
@@ -88,8 +103,8 @@ impl NamespaceScope {
             return Err(alias.to_string());
         }
 
-        // Check for dot notation: namespace.name
-        if let Some(dot_pos) = symbol_text.find('.') {
+        // Check for dot notation: namespace.name (only before any angle bracket)
+        if let Some(dot_pos) = find_outside_angles(symbol_text, '.') {
             let namespace_name = &symbol_text[0..dot_pos];
 
             // Check if already in required
@@ -116,10 +131,10 @@ impl NamespaceScope {
 
     /// Get the unqualified part of a symbol (after / or .)
     pub fn get_unqualified_name<'a>(&self, symbol_text: &'a str) -> &'a str {
-        if let Some(slash_pos) = symbol_text.find('/') {
+        if let Some(slash_pos) = find_outside_angles(symbol_text, '/') {
             return &symbol_text[slash_pos + 1..];
         }
-        if let Some(dot_pos) = symbol_text.find('.') {
+        if let Some(dot_pos) = find_outside_angles(symbol_text, '.') {
             return &symbol_text[dot_pos + 1..];
         }
         symbol_text

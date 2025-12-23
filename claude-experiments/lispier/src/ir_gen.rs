@@ -235,7 +235,6 @@ impl<'c> IRGenerator<'c> {
         // Remove successors from attributes - they're not MLIR attributes but block references
         // Control flow operations like cf.br, cf.cond_br use successors differently
         attributes.remove("successors");
-        attributes.remove("operand_segment_sizes");
 
         // Filter operands - some may be converted to attributes
         let mut filtered_operands: Vec<&Node> = Vec::new();
@@ -290,6 +289,10 @@ impl<'c> IRGenerator<'c> {
                     // Support string as type (e.g., "memref<?xf32>")
                     result_types.push(self.parse_type(&s)?);
                 }
+                AttributeValue::MLIRLiteral(s) => {
+                    // Support MLIR literal types (e.g., memref<10xi64>)
+                    result_types.push(self.parse_type(&s)?);
+                }
                 AttributeValue::Array(arr) => {
                     for item in arr {
                         match item {
@@ -297,6 +300,9 @@ impl<'c> IRGenerator<'c> {
                                 result_types.push(self.parse_type(&t.name)?);
                             }
                             AttributeValue::String(s) => {
+                                result_types.push(self.parse_type(&s)?);
+                            }
+                            AttributeValue::MLIRLiteral(s) => {
                                 result_types.push(self.parse_type(&s)?);
                             }
                             _ => {}
@@ -474,7 +480,6 @@ impl<'c> IRGenerator<'c> {
         // Clone attributes
         let mut attributes = op.attributes.clone();
         attributes.remove("successors");
-        attributes.remove("operand_segment_sizes");
 
         // Parse operands, separating block labels from values
         let mut operand_values: Vec<Value<'c, 'a>> = Vec::new();
@@ -532,31 +537,6 @@ impl<'c> IRGenerator<'c> {
             if !succ_args.is_empty() {
                 op_builder = op_builder.add_operands(succ_args);
             }
-        }
-
-        // Add operandSegmentSizes for cf.cond_br
-        if qualified_name == "cf.cond_br" && successor_blocks.len() == 2 {
-            let condition_count = operand_values.len() as i32;
-            let true_args_count = successor_blocks[0].1.len() as i32;
-            let false_args_count = successor_blocks[1].1.len() as i32;
-
-            let segment_sizes = Attribute::parse(
-                context,
-                &format!(
-                    "array<i32: {}, {}, {}>",
-                    condition_count, true_args_count, false_args_count
-                ),
-            )
-            .ok_or_else(|| {
-                GeneratorError::OperationCreationFailed(
-                    "Failed to create operandSegmentSizes".to_string(),
-                )
-            })?;
-
-            op_builder = op_builder.add_attributes(&[(
-                Identifier::new(context, "operandSegmentSizes"),
-                segment_sizes,
-            )]);
         }
 
         // Add attributes
@@ -641,27 +621,6 @@ impl<'c> IRGenerator<'c> {
         // Enable result type inference for certain operations
         if enable_inference {
             op_builder = op_builder.enable_result_type_inference();
-        }
-
-        // Add operandSegmentSizes for gpu.launch
-        // Segments: asyncDependencies, gridSizeX/Y/Z, blockSizeX/Y/Z, clusterSizeX/Y/Z, dynamicSharedMemorySize
-        if name == "gpu.launch" {
-            // gpu.launch expects 6 operands: gridX, gridY, gridZ, blockX, blockY, blockZ
-            // No async dependencies, no cluster sizes, no dynamic shared memory
-            let segment_sizes = Attribute::parse(
-                context,
-                "array<i32: 0, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0>",
-            )
-            .ok_or_else(|| {
-                GeneratorError::OperationCreationFailed(
-                    "Failed to create operandSegmentSizes for gpu.launch".to_string(),
-                )
-            })?;
-
-            op_builder = op_builder.add_attributes(&[(
-                Identifier::new(context, "operandSegmentSizes"),
-                segment_sizes,
-            )]);
         }
 
         op_builder
@@ -910,6 +869,8 @@ impl<'c> IRGenerator<'c> {
                 if s.starts_with('@') {
                     Ok(FlatSymbolRefAttribute::new(context, &s[1..]).into())
                 } else {
+                    // Plain strings become StringAttr
+                    // For MLIR attribute literals, use (: literal type) syntax
                     Ok(StringAttribute::new(context, s).into())
                 }
             }
@@ -956,6 +917,23 @@ impl<'c> IRGenerator<'c> {
                 let mlir_type = self.parse_type(&tn.typ.name)?;
                 Ok(self.create_number_attribute(tn.value, mlir_type))
             }
+            AttributeValue::TypedMLIRLiteral(tl) => {
+                // Construct "literal : type" and parse as MLIR attribute
+                let attr_str = format!("{} : {}", tl.literal, tl.typ.name);
+                Attribute::parse(context, &attr_str)
+                    .ok_or_else(|| GeneratorError::TypeParseError(format!("Invalid typed MLIR attribute: {}", attr_str)))
+            }
+            AttributeValue::MLIRLiteral(s) => {
+                // Try to parse as MLIR attribute literal (array<i32: ...>, dense<...>, etc.)
+                if let Some(attr) = Attribute::parse(context, s) {
+                    Ok(attr)
+                } else {
+                    // Fall back to TypeAttribute for things like memref<128xf32>
+                    // (MLIR types that should be wrapped as attributes)
+                    let mlir_type = self.parse_type(s)?;
+                    Ok(TypeAttribute::new(mlir_type).into())
+                }
+            }
         }
     }
 }
@@ -999,7 +977,7 @@ mod tests {
     fn test_symbol_table_basic_operations() {
         // Test that symbol table can define and lookup values
         // We test this by compiling code that uses variables
-        let source = "(module (let [x (: 42 i32)] (arith.addi x x)))";
+        let source = "(require-dialect arith) (module (let [x (: 42 i32)] (arith.addi x x)))";
 
         let mut tokenizer = Tokenizer::new(source);
         let tokens = tokenizer.tokenize().unwrap();
@@ -1020,6 +998,7 @@ mod tests {
     fn test_symbol_table_scoping() {
         // Test that inner scopes can shadow outer scope variables
         let source = r#"
+            (require-dialect arith)
             (module
               (let [x (: 10 i32)]
                 (let [x (: 20 i32)]
@@ -1044,6 +1023,7 @@ mod tests {
     fn test_symbol_table_nested_scope_lookup() {
         // Test that inner scopes can see outer scope variables
         let source = r#"
+            (require-dialect arith)
             (module
               (let [outer (: 10 i32)]
                 (let [inner (: 20 i32)]
@@ -1067,7 +1047,7 @@ mod tests {
     #[test]
     fn test_compile_simple_expression() {
         // Integration test: compile a simple arith expression
-        let source = "(module (arith.addi (: 1 i32) (: 2 i32)))";
+        let source = "(require-dialect arith) (module (arith.addi (: 1 i32) (: 2 i32)))";
 
         let mut tokenizer = Tokenizer::new(source);
         let tokens = tokenizer.tokenize().unwrap();
@@ -1086,7 +1066,7 @@ mod tests {
     #[test]
     fn test_undefined_symbol_error() {
         // Test that using an undefined symbol produces an error
-        let source = "(module (arith.addi undefined_var (: 1 i32)))";
+        let source = "(require-dialect arith) (module (arith.addi undefined_var (: 1 i32)))";
 
         let mut tokenizer = Tokenizer::new(source);
         let tokens = tokenizer.tokenize().unwrap();
@@ -1112,12 +1092,43 @@ mod tests {
     fn test_operation_with_region() {
         // Test an operation with a region (func.func)
         let source = r#"
+            (require-dialect func)
             (module
               (func.func {:sym_name "test"
                           :function_type (-> [] [i32])}
                 (region
                   (block []
                     (func.return (: 42 i32))))))
+        "#;
+
+        let mut tokenizer = Tokenizer::new(source);
+        let tokens = tokenizer.tokenize().unwrap();
+        let mut reader = Reader::new(&tokens);
+        let values = reader.read().unwrap();
+        let mut parser = Parser::new();
+        let nodes = parser.parse(&values).unwrap();
+
+        let registry = DialectRegistry::new();
+        let generator = IRGenerator::new(&registry);
+        let module = generator.generate(&nodes).unwrap();
+
+        assert!(module.as_operation().verify());
+    }
+
+    #[test]
+    fn test_def_in_function_block() {
+        // Test def inside a function block - variable should be available for later use
+        // This matches the pattern in memory.lsp where def is used to bind alloc result
+        let source = r#"
+            (require-dialect [memref :as m])
+            (require-dialect [func :as f])
+            (module
+              (f/func {:sym_name "test"
+                       :function_type (-> [] [memref<10xi64>])}
+                (region
+                  (block []
+                    (def buffer (m/alloc {:result memref<10xi64>}))
+                    (f/return buffer)))))
         "#;
 
         let mut tokenizer = Tokenizer::new(source);

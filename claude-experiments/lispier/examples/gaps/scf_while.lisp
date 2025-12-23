@@ -1,6 +1,6 @@
-; GAP: scf.while operation
+; WORKING: scf.while operation
 ; scf.while is a more general loop construct with before/after regions
-; This file tests scf.while support
+; Status: scf.while with scf.condition works correctly
 
 (require-dialect [func :as f] [arith :as a] [scf :as s])
 
@@ -39,8 +39,8 @@
           (f/return result))))
 
     ; Test 2: scf.while with multiple iter args
-    ; NOTE: This test exposes a gap - multi-result destructuring (def (a b) ...) not supported
-    ; Would need syntax like: (def result (s/while ...)) and then some way to extract results
+    ; NOTE: Multi-result destructuring (def (a b) ...) is not supported
+    ; but single-result scf.while works correctly
     (f/func {:sym_name "fib_while"
              :function_type (-> [i64] [i64])
              :llvm.emit_c_interface true}

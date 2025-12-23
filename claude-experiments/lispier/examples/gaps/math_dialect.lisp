@@ -1,6 +1,6 @@
-; GAP: Math dialect operations
+; WORKING: Math dialect operations
 ; The math dialect provides transcendental and other math operations
-; This file tests math dialect support
+; Status: All math operations work correctly (sqrt, exp, log, trig, etc.)
 
 (require-dialect [func :as f] [math :as m])
 

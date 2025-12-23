@@ -13,7 +13,8 @@
         (block [(: x i64) (: y i64)]
           (def cond (a/cmpi {:predicate "sgt"} x y))
           ; Pass x to return_x block, y to return_y block
-          (c/cond_br cond ^return_x x ^return_y y))
+          ; operandSegmentSizes: [condition, trueDestOperands, falseDestOperands]
+          (c/cond_br {:operandSegmentSizes array<i32: 1, 1, 1>} cond ^return_x x ^return_y y))
 
         (block ^return_x [(: val i64)]
           (f/return val))

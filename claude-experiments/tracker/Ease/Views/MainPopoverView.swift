@@ -33,6 +33,10 @@ struct MainPopoverView: View {
             isCmdHeld = NSEvent.modifierFlags.contains(.command)
             eventMonitor = NSEvent.addLocalMonitorForEvents(matching: .flagsChanged) { event in
                 isCmdHeld = event.modifierFlags.contains(.command)
+                // Clear dragging state when Cmd is released
+                if !isCmdHeld {
+                    draggingGoal = nil
+                }
                 return event
             }
         }
@@ -80,6 +84,7 @@ struct MainPopoverView: View {
                             }
                         )
                         .opacity(draggingGoal?.id == goal.id ? 0.5 : 1.0)
+                        .animation(.easeInOut(duration: 0.15), value: draggingGoal?.id)
                         .onDrag {
                             guard isCmdHeld else { return NSItemProvider() }
                             draggingGoal = goal

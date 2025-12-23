@@ -1,10 +1,14 @@
 ; GAP: Advanced memref operations
 ; The memref dialect has many operations beyond basic load/store
-; This file tests advanced memref operations
+;
+; ACTUAL ERROR: "undefined symbol: mem" when using string type syntax
+;   - String types like "memref<?xf32>" cause symbol resolution issues
+;   - Block arguments with string types don't bind correctly
 ;
 ; KNOWN GAPS:
 ; - Commas in type syntax not supported (e.g., strided<[10, 1], offset: 0>)
 ; - Complex memref layouts with affine maps may not parse correctly
+; - Dynamic memref with string syntax fails
 
 (require-dialect [func :as f] [arith :as a] [memref :as m])
 

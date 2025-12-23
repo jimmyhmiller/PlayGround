@@ -1,6 +1,6 @@
-; GAP: Dense array attributes
+; WORKING: Dense array attributes
 ; MLIR supports dense<[1, 2, 3, 4]> : tensor<4xi32> attribute syntax
-; This file tests whether lispier can express dense element attributes
+; Syntax: (: dense<[1, 2, 3, 4]> tensor<4xi32>)
 
 (require-dialect [func :as f] [arith :as a])
 
@@ -12,10 +12,7 @@
              :function_type (-> [] [tensor<4xi32>])}
       (region
         (block []
-          ; How do we express dense<[1, 2, 3, 4]> in lispier syntax?
-          ; Option 1: As a special attribute syntax
-          (def cst (arith.constant {:value "dense<[1, 2, 3, 4]> : tensor<4xi32>"
-                                    :result tensor<4xi32>}))
+          (def cst (arith.constant {:value (: dense<[1, 2, 3, 4]> tensor<4xi32>)}))
           (f/return cst))))
 
     ; Test 2: Dense float tensor
@@ -24,8 +21,7 @@
              :function_type (-> [] [tensor<4xf32>])}
       (region
         (block []
-          (def cst (arith.constant {:value "dense<[1.0, 2.0, 3.0, 4.0]> : tensor<4xf32>"
-                                    :result tensor<4xf32>}))
+          (def cst (arith.constant {:value (: dense<[1.0, 2.0, 3.0, 4.0]> tensor<4xf32>)}))
           (f/return cst))))
 
     ; Test 3: Dense 2D tensor
@@ -34,8 +30,7 @@
              :function_type (-> [] [tensor<2x2xi32>])}
       (region
         (block []
-          (def cst (arith.constant {:value "dense<[[1, 2], [3, 4]]> : tensor<2x2xi32>"
-                                    :result tensor<2x2xi32>}))
+          (def cst (arith.constant {:value (: dense<[[1, 2], [3, 4]]> tensor<2x2xi32>)}))
           (f/return cst))))
 
     ; Test 4: Splat constant (all same value)
@@ -44,6 +39,5 @@
              :function_type (-> [] [tensor<4x4xf32>])}
       (region
         (block []
-          (def cst (arith.constant {:value "dense<0.0> : tensor<4x4xf32>"
-                                    :result tensor<4x4xf32>}))
+          (def cst (arith.constant {:value (: dense<0.0> tensor<4x4xf32>)}))
           (f/return cst))))))

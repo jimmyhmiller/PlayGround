@@ -1,6 +1,10 @@
 ; GAP: Linalg dialect operations
 ; The linalg dialect provides high-level linear algebra operations
-; This file tests linalg dialect support
+;
+; ACTUAL ERROR: "invalid operand type" during IR generation
+;   - Basic linalg ops (fill, copy, matmul, dot, matvec) fail
+;   - linalg.generic with affine_map indexing_maps also fails
+;   - May be related to how linalg operations expect their inputs
 
 (require-dialect [func :as f] [arith :as a] [linalg :as l] [memref :as m] [tensor :as t])
 

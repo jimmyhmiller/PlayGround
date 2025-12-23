@@ -1,6 +1,6 @@
-; GAP: Complex number types
+; WORKING: Complex number types
 ; MLIR supports complex<f32>, complex<f64> types
-; This file tests complex type support
+; Status: All complex type operations work correctly
 
 (require-dialect [func :as f] [arith :as a] [complex :as c])
 

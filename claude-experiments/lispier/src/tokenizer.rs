@@ -106,8 +106,28 @@ impl Tokenizer {
                 continue;
             }
             if c == '>' {
-                if depth > 0 {
+                // Check if this is part of -> or >= (not a closing angle bracket)
+                let prev_char = if self.current > self.start {
+                    Some(self.chars[self.current - 1])
+                } else {
+                    None
+                };
+                // Check if next char is = (for >=)
+                let next_char = if self.current + 1 < self.chars.len() {
+                    Some(self.chars[self.current + 1])
+                } else {
+                    None
+                };
+                let is_arrow = prev_char == Some('-');
+                let is_gte = next_char == Some('=');
+
+                if depth > 0 && !is_arrow && !is_gte {
                     depth -= 1;
+                    self.advance();
+                    continue;
+                }
+                // If it's part of -> or >= inside brackets, allow it and continue
+                if depth > 0 && (is_arrow || is_gte) {
                     self.advance();
                     continue;
                 }
@@ -285,6 +305,8 @@ impl Tokenizer {
             || c == '='
             || c == '<'
             || c == '>'
+            || c == '@'
+            || c == '%'
     }
 
     fn is_symbol_char(&self, c: char) -> bool {
@@ -300,6 +322,8 @@ impl Tokenizer {
             || c == '='
             || c == '<'
             || c == '>'
+            || c == '@'
+            || c == '%'
     }
 }
 
@@ -412,5 +436,27 @@ mod tests {
         assert_eq!(tokens[2].token_type, TokenType::LeftBrace);
         assert_eq!(tokens[3].lexeme, ":value");
         assert_eq!(tokens[9].token_type, TokenType::Eof);
+    }
+
+    #[test]
+    fn test_affine_map_in_map() {
+        let mut tokenizer = Tokenizer::new("{:map affine_map<(d0, d1) -> (d0 + d1)>}");
+        let tokens = tokenizer.tokenize().unwrap();
+
+        assert_eq!(tokens[0].token_type, TokenType::LeftBrace);
+        assert_eq!(tokens[1].lexeme, ":map");
+        assert_eq!(tokens[2].lexeme, "affine_map<(d0, d1) -> (d0 + d1)>");
+        assert_eq!(tokens[3].token_type, TokenType::RightBrace);
+    }
+
+    #[test]
+    fn test_affine_set_with_comparison() {
+        let mut tokenizer = Tokenizer::new("{:condition affine_set<(d0) : (d0 >= 0)>}");
+        let tokens = tokenizer.tokenize().unwrap();
+
+        assert_eq!(tokens[0].token_type, TokenType::LeftBrace);
+        assert_eq!(tokens[1].lexeme, ":condition");
+        assert_eq!(tokens[2].lexeme, "affine_set<(d0) : (d0 >= 0)>");
+        assert_eq!(tokens[3].token_type, TokenType::RightBrace);
     }
 }

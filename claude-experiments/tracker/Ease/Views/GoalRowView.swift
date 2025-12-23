@@ -28,12 +28,11 @@ struct GoalRowView: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            if isReorderMode {
-                Image(systemName: "line.3.horizontal")
-                    .font(.system(size: 12))
-                    .foregroundColor(.secondary)
-                    .frame(width: 16)
-            }
+            Image(systemName: "line.3.horizontal")
+                .font(.system(size: 12))
+                .foregroundColor(.secondary)
+                .frame(width: 16)
+                .opacity(isReorderMode ? 1 : 0)
 
             Circle()
                 .fill(goal.color)
@@ -52,32 +51,31 @@ struct GoalRowView: View {
 
             Spacer()
 
-            if !isReorderMode {
-                // Pull indicator
-                ZStack {
-                    if isPressed {
-                        // Visual feedback during press/drag
-                        RoundedRectangle(cornerRadius: 4)
-                            .fill(isAltPressed ? Color(hex: "#E57373").opacity(0.3) : goal.color.opacity(0.3))
-                            .frame(width: 40, height: 8 + dragProgress * 20)
-                    } else {
-                        Image(systemName: isAltPressed ? "arrow.down.circle" : "arrow.up.circle")
-                            .font(.system(size: 14))
-                            .foregroundColor(isAltPressed ? Color(hex: "#E57373") : .secondary)
-                    }
-                }
-                .frame(width: 40, height: 28)
-
-                Button {
-                    onDelete()
-                } label: {
-                    Image(systemName: "xmark.circle.fill")
+            // Pull indicator - always present for consistent layout
+            ZStack {
+                if isPressed {
+                    // Visual feedback during press/drag
+                    RoundedRectangle(cornerRadius: 4)
+                        .fill(isAltPressed ? Color(hex: "#E57373").opacity(0.3) : goal.color.opacity(0.3))
+                        .frame(width: 40, height: 8 + dragProgress * 20)
+                } else {
+                    Image(systemName: isAltPressed ? "arrow.down.circle" : "arrow.up.circle")
                         .font(.system(size: 14))
-                        .foregroundColor(.secondary.opacity(0.5))
+                        .foregroundColor(isAltPressed ? Color(hex: "#E57373") : .secondary)
                 }
-                .buttonStyle(.plain)
-                .opacity(isPressed ? 0 : 1)
             }
+            .frame(width: 40, height: 28)
+            .opacity(isReorderMode ? 0 : 1)
+
+            Button {
+                onDelete()
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.system(size: 14))
+                    .foregroundColor(.secondary.opacity(0.5))
+            }
+            .buttonStyle(.plain)
+            .opacity(isReorderMode ? 0 : (isPressed ? 0 : 1))
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)

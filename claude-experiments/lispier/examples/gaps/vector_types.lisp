@@ -1,6 +1,6 @@
-; GAP: Vector types
+; WORKING: Vector types
 ; MLIR supports vector types like vector<4xf32>, vector<4x4xf32>
-; This file tests whether lispier can handle vector types and operations
+; Status: All vector type operations work correctly
 
 (require-dialect [func :as f] [arith :as a] [vector :as v])
 

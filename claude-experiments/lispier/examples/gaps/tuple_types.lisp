@@ -1,9 +1,6 @@
-; GAP: Tuple types
+; WORKING: Tuple types
 ; MLIR supports tuple types like tuple<i32, f32, i64>
-; This file tests tuple type support
-
-; GAP: Tuple types
-; Note: builtin dialect operations may need special handling
+; Status: Tuple types and nested tuples work correctly
 (require-dialect [func :as f] [builtin :as b])
 
 (module

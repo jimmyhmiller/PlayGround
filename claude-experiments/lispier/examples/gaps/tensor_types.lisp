@@ -1,6 +1,6 @@
-; GAP: Tensor types
+; WORKING: Tensor types
 ; MLIR supports tensor types like tensor<4x4xf32>, tensor<?xf32>, tensor<*xf32>
-; This file tests whether the lispier syntax supports tensor types
+; Status: All tensor type syntax works correctly, including dynamic dimensions (?)
 
 (require-dialect [func :as f] [arith :as a] [tensor :as t])
 

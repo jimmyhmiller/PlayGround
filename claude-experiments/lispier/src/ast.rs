@@ -43,6 +43,13 @@ pub struct TypedNumber {
     pub typ: Type,
 }
 
+/// Typed MLIR literal (e.g., dense<[1,2,3]> with type tensor<3xi32>)
+#[derive(Debug, Clone, PartialEq)]
+pub struct TypedMLIRLiteral {
+    pub literal: String,
+    pub typ: Type,
+}
+
 /// Attribute value (for operation attributes)
 #[derive(Debug, Clone, PartialEq)]
 pub enum AttributeValue {
@@ -53,6 +60,11 @@ pub enum AttributeValue {
     Type(Type),
     FunctionType(FunctionType),
     TypedNumber(TypedNumber),
+    /// Typed MLIR attribute literal: (: dense<[1,2,3]> tensor<3xi32>)
+    TypedMLIRLiteral(TypedMLIRLiteral),
+    /// MLIR attribute literal syntax like array<i32: 0, 1, 1>, dense<...>, etc.
+    /// Stored with spaces already converted to commas for MLIR parsing.
+    MLIRLiteral(String),
 }
 
 /// Block argument

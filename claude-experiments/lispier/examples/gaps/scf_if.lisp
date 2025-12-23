@@ -1,6 +1,6 @@
-; GAP: scf.if operation
+; WORKING: scf.if operation
 ; scf.if is different from cf.cond_br - it's a structured if-then-else with results
-; This file tests scf.if support
+; Status: scf.if works correctly (both with and without else regions)
 
 (require-dialect [func :as f] [arith :as a] [scf :as s] [memref :as m])
 
@@ -32,7 +32,7 @@
           (f/return result))))
 
     ; Test 2: scf.if without else (no result)
-    ; NOTE: This test exposes a gap - scf.if with only "then" region
+    ; This now works correctly!
     (f/func {:sym_name "scf_if_no_else"
              :function_type (-> [i1 memref<1xi32>] [])}
       (region

@@ -2,7 +2,7 @@ use thiserror::Error;
 
 use crate::ast::{
     AttributeValue, Binding, Block, BlockArgument, Compilation, FunctionType, LetExpr, Module,
-    Node, Operation, Pass, Region, Require, Target, Type, TypeAnnotation, TypedNumber,
+    Node, Operation, Pass, Region, Require, Target, Type, TypeAnnotation, TypedMLIRLiteral, TypedNumber,
 };
 use crate::value::Value;
 
@@ -343,7 +343,13 @@ impl Parser {
                 Ok(AttributeValue::Array(arr))
             }
             Value::Symbol(sym) => {
-                // Treat as a type
+                // Check for MLIR literal syntax: anything with <...>
+                // e.g., array<i32: 0, 1, 1>, dense<[1, 2, 3]>, affine_map<...>
+                // Pass through as-is - no automatic conversion
+                if sym.name.contains('<') && sym.name.ends_with('>') {
+                    return Ok(AttributeValue::MLIRLiteral(sym.name.clone()));
+                }
+                // Non-parameterized symbols are types
                 Ok(AttributeValue::Type(Type::new(&sym.name)))
             }
             Value::List(items) => {
@@ -356,13 +362,23 @@ impl Parser {
                         }
                         // Type annotation: (: value type)
                         if first_sym.name == ":" && items.len() == 3 {
-                            if let (Value::Number(n), Value::Symbol(typ_sym)) =
-                                (&items[1], &items[2])
-                            {
-                                return Ok(AttributeValue::TypedNumber(TypedNumber {
-                                    value: *n,
-                                    typ: Type::new(&typ_sym.name),
-                                }));
+                            if let Value::Symbol(typ_sym) = &items[2] {
+                                match &items[1] {
+                                    Value::Number(n) => {
+                                        return Ok(AttributeValue::TypedNumber(TypedNumber {
+                                            value: *n,
+                                            typ: Type::new(&typ_sym.name),
+                                        }));
+                                    }
+                                    Value::Symbol(lit_sym) if lit_sym.name.contains('<') => {
+                                        // MLIR literal with type: (: dense<[1,2,3]> tensor<3xi32>)
+                                        return Ok(AttributeValue::TypedMLIRLiteral(TypedMLIRLiteral {
+                                            literal: lit_sym.name.clone(),
+                                            typ: Type::new(&typ_sym.name),
+                                        }));
+                                    }
+                                    _ => {}
+                                }
                             }
                         }
                     }
@@ -649,23 +665,23 @@ mod tests {
 
     #[test]
     fn test_simple_operation() {
-        let nodes = parse_str("(arith.addi x y)");
+        let nodes = parse_str("(require-dialect arith) (arith.addi x y)");
 
-        assert_eq!(nodes.len(), 1);
-        assert!(nodes[0].is_operation());
+        assert_eq!(nodes.len(), 2);
+        assert!(nodes[1].is_operation());
 
-        let op = nodes[0].as_operation();
+        let op = nodes[1].as_operation();
         assert_eq!(op.name, "addi");
         assert_eq!(op.namespace.as_ref().unwrap(), "arith");
     }
 
     #[test]
     fn test_with_attributes() {
-        let nodes = parse_str("(arith.constant {:value 42})");
+        let nodes = parse_str("(require-dialect arith) (arith.constant {:value 42})");
 
-        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes.len(), 2);
 
-        let op = nodes[0].as_operation();
+        let op = nodes[1].as_operation();
         assert!(op.attributes.contains_key("value"));
     }
 
@@ -700,38 +716,41 @@ mod tests {
     #[test]
     fn test_region() {
         let nodes = parse_str(
-            r#"(region
+            r#"(require-dialect arith)
+            (region
               (block ^entry
                 (arith.addi 1 2)))"#,
         );
 
-        assert_eq!(nodes.len(), 1);
-        assert!(nodes[0].is_region());
+        assert_eq!(nodes.len(), 2);
+        assert!(nodes[1].is_region());
     }
 
     #[test]
     fn test_module() {
         let nodes = parse_str(
-            r#"(module
+            r#"(require-dialect arith)
+            (module
               (do
                 (block
                   (arith.addi 1 2))))"#,
         );
 
-        assert_eq!(nodes.len(), 1);
-        assert!(nodes[0].is_module());
+        assert_eq!(nodes.len(), 2);
+        assert!(nodes[1].is_module());
     }
 
     #[test]
     fn test_block_label() {
         let nodes = parse_str(
-            r#"(block ^entry
+            r#"(require-dialect arith)
+            (block ^entry
               (arith.addi 1 2))"#,
         );
 
-        assert_eq!(nodes.len(), 1);
-        assert!(nodes[0].is_block());
-        assert_eq!(nodes[0].as_block().operations.len(), 1);
+        assert_eq!(nodes.len(), 2);
+        assert!(nodes[1].is_block());
+        assert_eq!(nodes[1].as_block().operations.len(), 1);
     }
 
     #[test]
@@ -763,14 +782,15 @@ mod tests {
     #[test]
     fn test_block_arguments_capture_types() {
         let nodes = parse_str(
-            r#"(block ^entry [(: x i32) (: y f32)]
+            r#"(require-dialect arith)
+            (block ^entry [(: x i32) (: y f32)]
               (arith.addi x y))"#,
         );
 
-        assert_eq!(nodes.len(), 1);
-        assert!(nodes[0].is_block());
+        assert_eq!(nodes.len(), 2);
+        assert!(nodes[1].is_block());
 
-        let block = nodes[0].as_block();
+        let block = nodes[1].as_block();
         assert_eq!(block.arguments.len(), 2);
         assert_eq!(block.arguments[0].name, "x");
         assert!(block.arguments[0].typ.is_some());
@@ -782,12 +802,12 @@ mod tests {
 
     #[test]
     fn test_def_destructuring() {
-        let nodes = parse_str("(def [a b] (arith.multi_result))");
+        let nodes = parse_str("(require-dialect arith) (def [a b] (arith.multi_result))");
 
-        assert_eq!(nodes.len(), 1);
-        assert!(nodes[0].is_def());
+        assert_eq!(nodes.len(), 2);
+        assert!(nodes[1].is_def());
 
-        let binding = nodes[0].as_def();
+        let binding = nodes[1].as_def();
         assert_eq!(binding.names.len(), 2);
         assert_eq!(binding.names[0], "a");
         assert_eq!(binding.names[1], "b");

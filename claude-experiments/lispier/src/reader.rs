@@ -214,6 +214,13 @@ impl<'a> Reader<'a> {
             return Ok(Value::nil());
         }
 
+        // Skip namespace resolution for MLIR dialect types (start with !)
+        // These are passed through as-is to the MLIR type parser
+        if token.lexeme.starts_with('!') {
+            let symbol = Symbol::new(&token.lexeme);
+            return Ok(Value::Symbol(symbol));
+        }
+
         // Resolve namespace for the symbol
         let namespace = self.namespace_scope.resolve_symbol(&token.lexeme)
             .map_err(|unknown_dialect| {
@@ -456,10 +463,10 @@ mod tests {
 
     #[test]
     fn test_dot_notation_namespaces() {
-        let values = read_str("(arith.addi 1 2)");
+        let values = read_str("(require-dialect arith) (arith.addi 1 2)");
 
-        assert_eq!(values.len(), 1);
-        let list = &values[0];
+        assert_eq!(values.len(), 2);
+        let list = &values[1];
         let sym = &list.as_list()[0];
         let symbol = sym.as_symbol();
         assert_eq!(symbol.name, "addi");

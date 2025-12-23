@@ -1,0 +1,452 @@
+/**
+ * Theme CSS Variables
+ *
+ * All themeable properties are defined here as CSS custom properties.
+ * Components should use these variables instead of hardcoded values.
+ */
+
+:root {
+  /* === Base Colors === */
+  --theme-bg-primary: #0a0a0a;
+  --theme-bg-secondary: #1a1a1a;
+  --theme-bg-tertiary: #252525;
+  --theme-bg-elevated: #2d2d2d;
+  --theme-bg-input: #2a2a2a;
+
+  /* === Text Colors === */
+  --theme-text-primary: #ffffff;
+  --theme-text-secondary: #cccccc;
+  --theme-text-muted: #888888;
+  --theme-text-disabled: #666666;
+
+  /* === Border Colors === */
+  --theme-border-primary: #333333;
+  --theme-border-secondary: #444444;
+  --theme-border-focus: #555555;
+
+  /* === Accent Colors === */
+  --theme-accent-primary: #2563eb;
+  --theme-accent-secondary: #3b82f6;
+  --theme-accent-success: #22c55e;
+  --theme-accent-warning: #f59e0b;
+  --theme-accent-error: #ef4444;
+  --theme-accent-info: #06b6d4;
+
+  /* === Structural: Shadows === */
+  --theme-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.2);
+  --theme-shadow-md: 0 4px 12px rgba(0, 0, 0, 0.3);
+  --theme-shadow-lg: 0 8px 32px rgba(0, 0, 0, 0.4);
+  --theme-shadow-none: none;
+
+  /* === Structural: Border Width === */
+  --theme-border-width: 1px;
+  --theme-border-style: solid;
+
+  /* === Structural: Border Radius === */
+  --theme-radius-none: 0;
+  --theme-radius-sm: 4px;
+  --theme-radius-md: 6px;
+  --theme-radius-lg: 8px;
+  --theme-radius-xl: 12px;
+  --theme-radius-full: 9999px;
+
+  /* === Window Chrome === */
+  --theme-window-bg: #1e1e1e;
+  --theme-window-header-bg: #2d2d2d;
+  --theme-window-header-inactive-bg: #252525;
+  --theme-window-border-color: rgba(255, 255, 255, 0.1);
+  --theme-window-border-width: 1px;
+  --theme-window-border-style: solid;
+  --theme-window-radius: var(--theme-radius-lg);
+  --theme-window-shadow: var(--theme-shadow-lg);
+  --theme-window-shadow-inactive: var(--theme-shadow-md);
+  --theme-window-title-weight: 500;
+  --theme-window-title-transform: none;
+
+  /* === Toolbar === */
+  --theme-toolbar-bg: #1a1a1a;
+  --theme-toolbar-border-color: #333333;
+  --theme-toolbar-border-width: 1px;
+  --theme-toolbar-button-bg: #333333;
+  --theme-toolbar-button-border-color: #444444;
+  --theme-toolbar-button-border-width: 1px;
+  --theme-toolbar-button-hover-bg: #444444;
+  --theme-toolbar-button-radius: var(--theme-radius-sm);
+
+  /* === Code/Editor === */
+  --theme-code-bg: #1e1e1e;
+  --theme-code-text: #d4d4d4;
+  --theme-code-keyword: #569cd6;
+  --theme-code-string: #ce9178;
+  --theme-code-comment: #6a9955;
+  --theme-code-number: #b5cea8;
+
+  /* === Diff Colors === */
+  --theme-diff-add-bg: #1b4721;
+  --theme-diff-add-text: #7ee787;
+  --theme-diff-remove-bg: #4b1f1f;
+  --theme-diff-remove-text: #f97583;
+  --theme-diff-hunk-bg: #1f3a5c;
+  --theme-diff-hunk-text: #79c0ff;
+
+  /* === Event Type Colors === */
+  --theme-event-user: #9c27b0;
+  --theme-event-data: #4caf50;
+  --theme-event-file: #2196f3;
+  --theme-event-git: #ff9800;
+  --theme-event-system: #607d8b;
+  --theme-event-command: #f44336;
+  --theme-event-editor: #00bcd4;
+
+  /* === Spacing === */
+  --theme-spacing-xs: 4px;
+  --theme-spacing-sm: 8px;
+  --theme-spacing-md: 12px;
+  --theme-spacing-lg: 16px;
+  --theme-spacing-xl: 24px;
+
+  /* === Typography === */
+  --theme-font-family: system-ui, -apple-system, sans-serif;
+  --theme-font-mono: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+  --theme-font-size-xs: 10px;
+  --theme-font-size-sm: 11px;
+  --theme-font-size-md: 12px;
+  --theme-font-size-lg: 14px;
+  --theme-font-weight-normal: 400;
+  --theme-font-weight-medium: 500;
+  --theme-font-weight-bold: 600;
+
+  /* === Transitions === */
+  --theme-transition-fast: 0.1s ease;
+  --theme-transition-normal: 0.2s ease;
+
+  /* === Special Effects === */
+  --theme-backdrop-blur: blur(0px);
+  --theme-window-opacity: 1;
+}
+
+/* ============================================
+   PRESET THEMES
+   ============================================ */
+
+/* === Theme: Light === */
+.theme-light {
+  --theme-bg-primary: #f5f5f5;
+  --theme-bg-secondary: #ffffff;
+  --theme-bg-tertiary: #e8e8e8;
+  --theme-bg-elevated: #ffffff;
+  --theme-bg-input: #ffffff;
+
+  --theme-text-primary: #1a1a1a;
+  --theme-text-secondary: #333333;
+  --theme-text-muted: #666666;
+  --theme-text-disabled: #999999;
+
+  --theme-border-primary: #dddddd;
+  --theme-border-secondary: #cccccc;
+  --theme-border-focus: #aaaaaa;
+
+  --theme-window-bg: #ffffff;
+  --theme-window-header-bg: #f0f0f0;
+  --theme-window-header-inactive-bg: #f5f5f5;
+  --theme-window-border-color: rgba(0, 0, 0, 0.1);
+  --theme-window-shadow: 0 8px 32px rgba(0, 0, 0, 0.15);
+  --theme-window-shadow-inactive: 0 4px 16px rgba(0, 0, 0, 0.1);
+
+  --theme-toolbar-bg: #f0f0f0;
+  --theme-toolbar-border-color: #dddddd;
+  --theme-toolbar-button-bg: #e0e0e0;
+  --theme-toolbar-button-border-color: #cccccc;
+  --theme-toolbar-button-hover-bg: #d0d0d0;
+
+  --theme-code-bg: #f8f8f8;
+  --theme-code-text: #333333;
+}
+
+/* === Theme: Flat === */
+.theme-flat {
+  --theme-shadow-sm: none;
+  --theme-shadow-md: none;
+  --theme-shadow-lg: none;
+
+  --theme-window-shadow: none;
+  --theme-window-shadow-inactive: none;
+  --theme-window-radius: 0;
+  --theme-window-border-width: 2px;
+  --theme-window-border-color: #444444;
+
+  --theme-radius-sm: 0;
+  --theme-radius-md: 0;
+  --theme-radius-lg: 0;
+  --theme-radius-xl: 0;
+
+  --theme-toolbar-button-radius: 0;
+}
+
+/* === Theme: TUI (Text UI) === */
+.theme-tui {
+  --theme-bg-primary: #000000;
+  --theme-bg-secondary: #000000;
+  --theme-bg-tertiary: #000000;
+  --theme-bg-elevated: #000000;
+  --theme-bg-input: #000000;
+
+  --theme-text-primary: #00ff00;
+  --theme-text-secondary: #00cc00;
+  --theme-text-muted: #008800;
+  --theme-text-disabled: #005500;
+
+  --theme-border-primary: #00ff00;
+  --theme-border-secondary: #00cc00;
+  --theme-border-focus: #00ff00;
+
+  --theme-accent-primary: #00ffff;
+  --theme-accent-secondary: #ff00ff;
+  --theme-accent-success: #00ff00;
+  --theme-accent-warning: #ffff00;
+  --theme-accent-error: #ff0000;
+  --theme-accent-info: #00ffff;
+
+  --theme-shadow-sm: none;
+  --theme-shadow-md: none;
+  --theme-shadow-lg: none;
+
+  --theme-window-bg: #000000;
+  --theme-window-header-bg: #000000;
+  --theme-window-header-inactive-bg: #000000;
+  --theme-window-border-color: #00ff00;
+  --theme-window-border-width: 1px;
+  --theme-window-border-style: solid;
+  --theme-window-radius: 0;
+  --theme-window-shadow: none;
+  --theme-window-shadow-inactive: none;
+  --theme-window-title-weight: 400;
+  --theme-window-title-transform: uppercase;
+
+  --theme-radius-sm: 0;
+  --theme-radius-md: 0;
+  --theme-radius-lg: 0;
+  --theme-radius-xl: 0;
+
+  --theme-toolbar-bg: #000000;
+  --theme-toolbar-border-color: #00ff00;
+  --theme-toolbar-button-bg: #000000;
+  --theme-toolbar-button-border-color: #00ff00;
+  --theme-toolbar-button-hover-bg: #003300;
+  --theme-toolbar-button-radius: 0;
+
+  --theme-code-bg: #000000;
+  --theme-code-text: #00ff00;
+  --theme-code-keyword: #00ffff;
+  --theme-code-string: #ffff00;
+  --theme-code-comment: #008800;
+  --theme-code-number: #ff00ff;
+
+  --theme-diff-add-bg: #002200;
+  --theme-diff-add-text: #00ff00;
+  --theme-diff-remove-bg: #220000;
+  --theme-diff-remove-text: #ff0000;
+  --theme-diff-hunk-bg: #000022;
+  --theme-diff-hunk-text: #00ffff;
+
+  --theme-event-user: #ff00ff;
+  --theme-event-data: #00ff00;
+  --theme-event-file: #00ffff;
+  --theme-event-git: #ffff00;
+  --theme-event-system: #888888;
+  --theme-event-command: #ff0000;
+  --theme-event-editor: #00ffff;
+
+  --theme-font-family: 'Courier New', 'Consolas', monospace;
+  --theme-font-mono: 'Courier New', 'Consolas', monospace;
+}
+
+/* === Theme: TUI Amber === */
+.theme-tui-amber {
+  --theme-bg-primary: #000000;
+  --theme-bg-secondary: #000000;
+  --theme-bg-tertiary: #0a0500;
+  --theme-bg-elevated: #0a0500;
+  --theme-bg-input: #000000;
+
+  --theme-text-primary: #ffb000;
+  --theme-text-secondary: #cc8800;
+  --theme-text-muted: #886600;
+  --theme-text-disabled: #553300;
+
+  --theme-border-primary: #ffb000;
+  --theme-border-secondary: #cc8800;
+  --theme-border-focus: #ffb000;
+
+  --theme-accent-primary: #ffb000;
+  --theme-accent-secondary: #ffcc00;
+  --theme-accent-success: #ffb000;
+  --theme-accent-warning: #ff6600;
+  --theme-accent-error: #ff0000;
+  --theme-accent-info: #ffcc00;
+
+  --theme-shadow-sm: none;
+  --theme-shadow-md: none;
+  --theme-shadow-lg: none;
+
+  --theme-window-bg: #000000;
+  --theme-window-header-bg: #0a0500;
+  --theme-window-header-inactive-bg: #050200;
+  --theme-window-border-color: #ffb000;
+  --theme-window-border-width: 1px;
+  --theme-window-radius: 0;
+  --theme-window-shadow: none;
+  --theme-window-shadow-inactive: none;
+  --theme-window-title-weight: 400;
+  --theme-window-title-transform: uppercase;
+
+  --theme-radius-sm: 0;
+  --theme-radius-md: 0;
+  --theme-radius-lg: 0;
+  --theme-radius-xl: 0;
+
+  --theme-toolbar-bg: #000000;
+  --theme-toolbar-border-color: #ffb000;
+  --theme-toolbar-button-bg: #000000;
+  --theme-toolbar-button-border-color: #ffb000;
+  --theme-toolbar-button-hover-bg: #1a0a00;
+  --theme-toolbar-button-radius: 0;
+
+  --theme-code-bg: #000000;
+  --theme-code-text: #ffb000;
+  --theme-code-keyword: #ffcc00;
+  --theme-code-string: #ff8800;
+  --theme-code-comment: #665500;
+  --theme-code-number: #ffdd00;
+
+  --theme-font-family: 'Courier New', 'Consolas', monospace;
+  --theme-font-mono: 'Courier New', 'Consolas', monospace;
+}
+
+/* === Theme: Monokai === */
+.theme-monokai {
+  --theme-bg-primary: #272822;
+  --theme-bg-secondary: #1e1f1c;
+  --theme-bg-tertiary: #3e3d32;
+  --theme-bg-elevated: #49483e;
+
+  --theme-text-primary: #f8f8f2;
+  --theme-text-secondary: #cfcfc2;
+  --theme-text-muted: #75715e;
+
+  --theme-accent-primary: #a6e22e;
+  --theme-accent-secondary: #66d9ef;
+  --theme-accent-error: #f92672;
+  --theme-accent-warning: #e6db74;
+
+  --theme-window-bg: #272822;
+  --theme-window-header-bg: #3e3d32;
+
+  --theme-code-keyword: #f92672;
+  --theme-code-string: #e6db74;
+  --theme-code-comment: #75715e;
+  --theme-code-number: #ae81ff;
+}
+
+/* === Theme: Nord === */
+.theme-nord {
+  --theme-bg-primary: #2e3440;
+  --theme-bg-secondary: #3b4252;
+  --theme-bg-tertiary: #434c5e;
+  --theme-bg-elevated: #4c566a;
+
+  --theme-text-primary: #eceff4;
+  --theme-text-secondary: #e5e9f0;
+  --theme-text-muted: #d8dee9;
+
+  --theme-accent-primary: #88c0d0;
+  --theme-accent-secondary: #81a1c1;
+  --theme-accent-success: #a3be8c;
+  --theme-accent-warning: #ebcb8b;
+  --theme-accent-error: #bf616a;
+
+  --theme-window-bg: #2e3440;
+  --theme-window-header-bg: #3b4252;
+  --theme-border-primary: #4c566a;
+
+  --theme-code-keyword: #81a1c1;
+  --theme-code-string: #a3be8c;
+  --theme-code-comment: #616e88;
+}
+
+/* === Theme: Solarized Dark === */
+.theme-solarized {
+  --theme-bg-primary: #002b36;
+  --theme-bg-secondary: #073642;
+  --theme-bg-tertiary: #094552;
+  --theme-bg-elevated: #0a4f5c;
+
+  --theme-text-primary: #fdf6e3;
+  --theme-text-secondary: #eee8d5;
+  --theme-text-muted: #93a1a1;
+
+  --theme-accent-primary: #268bd2;
+  --theme-accent-secondary: #2aa198;
+  --theme-accent-success: #859900;
+  --theme-accent-warning: #b58900;
+  --theme-accent-error: #dc322f;
+
+  --theme-window-bg: #002b36;
+  --theme-window-header-bg: #073642;
+  --theme-border-primary: #094552;
+}
+
+/* === Theme: Glass === */
+.theme-glass {
+  --theme-bg-primary: rgba(10, 10, 10, 0.8);
+  --theme-bg-secondary: rgba(30, 30, 30, 0.7);
+  --theme-bg-tertiary: rgba(50, 50, 50, 0.6);
+  --theme-bg-elevated: rgba(60, 60, 60, 0.6);
+
+  --theme-window-bg: rgba(30, 30, 30, 0.85);
+  --theme-window-header-bg: rgba(50, 50, 50, 0.9);
+  --theme-window-header-inactive-bg: rgba(40, 40, 40, 0.8);
+  --theme-window-border-color: rgba(255, 255, 255, 0.15);
+  --theme-window-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+
+  --theme-toolbar-bg: rgba(20, 20, 20, 0.9);
+  --theme-toolbar-button-bg: rgba(60, 60, 60, 0.6);
+  --theme-toolbar-button-hover-bg: rgba(80, 80, 80, 0.6);
+
+  --theme-backdrop-blur: blur(12px);
+  --theme-window-opacity: 1;
+}
+
+/* === Theme: High Contrast === */
+.theme-high-contrast {
+  --theme-bg-primary: #000000;
+  --theme-bg-secondary: #000000;
+  --theme-bg-tertiary: #1a1a1a;
+  --theme-bg-elevated: #1a1a1a;
+
+  --theme-text-primary: #ffffff;
+  --theme-text-secondary: #ffffff;
+  --theme-text-muted: #cccccc;
+  --theme-text-disabled: #888888;
+
+  --theme-border-primary: #ffffff;
+  --theme-border-secondary: #ffffff;
+  --theme-border-focus: #ffff00;
+
+  --theme-accent-primary: #00ffff;
+  --theme-accent-secondary: #ffff00;
+  --theme-accent-success: #00ff00;
+  --theme-accent-warning: #ffff00;
+  --theme-accent-error: #ff0000;
+
+  --theme-window-bg: #000000;
+  --theme-window-header-bg: #1a1a1a;
+  --theme-window-border-color: #ffffff;
+  --theme-window-border-width: 2px;
+  --theme-window-shadow: none;
+  --theme-window-shadow-inactive: none;
+
+  --theme-toolbar-border-color: #ffffff;
+  --theme-toolbar-button-border-color: #ffffff;
+  --theme-toolbar-button-border-width: 2px;
+}

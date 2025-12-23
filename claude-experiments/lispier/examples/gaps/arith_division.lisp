@@ -1,6 +1,6 @@
-; GAP: Arith division and remainder operations
-; The arith dialect has many operations not yet tested
-; This file tests division, remainder, negation, and casting ops
+; WORKING: Arith division and remainder operations
+; The arith dialect has many operations beyond basic add/sub/mul
+; Status: All division, remainder, negation, and casting ops work correctly
 
 (require-dialect [func :as f] [arith :as a])
 

@@ -1,6 +1,9 @@
 const { app, BrowserWindow, ipcMain } = require('electron');
 const path = require('path');
 const { once } = require('hot-reload/api');
+const events = require('./events');
+const { initServices, setupServiceIPC } = require('./services');
+const { initStateStore, setupStateIPC } = require('./state');
 
 // Track app state - persists across hot reloads (use let for hot-reload to preserve)
 let counter = 0;
@@ -12,7 +15,13 @@ function getMessage() {
 }
 
 function incrementCounter() {
-  counter += 20;
+  const oldValue = counter;
+  counter += 1;
+  events.emit('data.counter.changed', {
+    oldValue,
+    newValue: counter,
+    delta: 1,
+  });
   return counter;
 }
 
@@ -26,6 +35,24 @@ once(ipcMain.handle('get-message', getMessage));
 once(ipcMain.handle('increment', incrementCounter));
 
 once(ipcMain.handle('get-counter', getCounter));
+
+// Initialize event system
+once(events.setupIPC());
+once(events.setupExternalBridge({ port: 9876 }));
+
+// Initialize state store
+once(initStateStore(events));
+once(setupStateIPC());
+
+// Initialize services (file watcher, git)
+once(initServices(events, { repoPath: process.cwd() }));
+once(setupServiceIPC());
+
+// Emit app startup event
+events.emit('system.app.started', {
+  version: app.getVersion(),
+  platform: process.platform,
+});
 
 // Create window
 function createWindow() {

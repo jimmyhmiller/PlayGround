@@ -1,6 +1,6 @@
-; GAP: Index dialect operations
+; WORKING: Index dialect operations
 ; The index dialect provides operations specific to index type
-; This file tests index dialect support
+; Status: All index dialect operations work correctly
 
 (require-dialect [func :as f] [index :as i])
 

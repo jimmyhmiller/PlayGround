@@ -48,7 +48,9 @@
 
           ;; gpu.launch with grid and block dimensions
           ;; Block args: bx by bz tx ty tz gridDimX gridDimY gridDimZ blockDimX blockDimY blockDimZ
-          (gpu.launch c1 c1 c1 block_dim c1 c1
+          ;; operandSegmentSizes: [async, gridX/Y/Z, blockX/Y/Z, clusterX/Y/Z, dynamicSharedMem]
+          (gpu.launch {:operandSegmentSizes array<i32: 0, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0>}
+            c1 c1 c1 block_dim c1 c1
             (region
               (block [(: bx index) (: by index) (: bz index)
                       (: tx index) (: ty index) (: tz index)
