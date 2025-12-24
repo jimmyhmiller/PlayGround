@@ -30,3 +30,8 @@ Some of the pdfs have nice metadata built-in. So we can just go ahead an extract
 
 For the rest, we pass to Qwen3-VL-30B to grab the title and author.
 
+### Tool 6
+
+A swift application compiled for my mac and ipad that let's me annotate pdfs.
+
+![Screenshot 2025-12-23 at 3.37.34 PM](/Users/jimmyhmiller/Library/Application Support/typora-user-images/Screenshot 2025-12-23 at 3.37.34 PM.png)

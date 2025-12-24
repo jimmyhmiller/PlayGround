@@ -1774,6 +1774,167 @@ pub extern "C" fn trampoline_cons_rest(value: usize) -> usize {
     }
 }
 
+/// Invoke an object as a function via IFn protocol dispatch
+///
+/// Called when trying to invoke a non-function/closure value (e.g., keyword, map).
+/// Looks up -invoke method for obj's type and calls it with appropriate args.
+///
+/// Args (in ARM64 calling convention):
+/// - x0 = obj (the IFn implementor, e.g., keyword)
+/// - x1 = arg_count (number of user arguments)
+/// - x2 = arg0 (first user arg)
+/// - x3 = arg1, x4 = arg2, ... x8 = arg6 (up to 7 user args)
+///
+/// Returns: result of -invoke call
+#[unsafe(no_mangle)]
+pub extern "C" fn trampoline_ifn_invoke(
+    obj: usize,
+    arg_count: usize,
+    arg0: usize,
+    arg1: usize,
+    arg2: usize,
+    arg3: usize,
+    arg4: usize,
+    arg5: usize,
+    arg6: usize,
+) -> usize {
+    use crate::gc_runtime::closure_layout;
+    use crate::gc::types::HeapObject;
+
+    unsafe {
+        let runtime_ptr = std::ptr::addr_of!(RUNTIME);
+        let rt = &mut *(*runtime_ptr).as_ref().unwrap().get();
+
+        // Get type_id from obj
+        let type_id = rt.get_type_id_for_value(obj);
+
+        // Look up -invoke method for this type
+        let fn_ptr = match rt.lookup_protocol_method(type_id, "-invoke") {
+            Some(ptr) => ptr,
+            None => {
+                let type_name = crate::gc_runtime::GCRuntime::builtin_type_name(type_id);
+                let error_msg = format!(
+                    "IllegalArgumentException: {} cannot be cast to clojure.lang.IFn",
+                    type_name
+                );
+                let error_str = rt.allocate_string(&error_msg).unwrap_or(7);
+                trampoline_throw(0, error_str);
+            }
+        };
+
+        // Now we have fn_ptr (tagged function or closure)
+        // We need to call it with (obj, arg0, arg1, ...) based on arg_count
+        // The arity of -invoke is arg_count + 1 (including 'this')
+
+        let tag = fn_ptr & 0b111;
+
+        if tag == 0b100 {
+            // Raw function - untag to get code pointer
+            let code_ptr = fn_ptr >> 3;
+
+            // Call with the appropriate number of args
+            // -invoke(this, a, b, ...) where 'this' = obj
+            type Fn1 = extern "C" fn(usize) -> usize;
+            type Fn2 = extern "C" fn(usize, usize) -> usize;
+            type Fn3 = extern "C" fn(usize, usize, usize) -> usize;
+            type Fn4 = extern "C" fn(usize, usize, usize, usize) -> usize;
+            type Fn5 = extern "C" fn(usize, usize, usize, usize, usize) -> usize;
+            type Fn6 = extern "C" fn(usize, usize, usize, usize, usize, usize) -> usize;
+            type Fn7 = extern "C" fn(usize, usize, usize, usize, usize, usize, usize) -> usize;
+            type Fn8 = extern "C" fn(usize, usize, usize, usize, usize, usize, usize, usize) -> usize;
+
+            match arg_count {
+                0 => std::mem::transmute::<usize, Fn1>(code_ptr)(obj),
+                1 => std::mem::transmute::<usize, Fn2>(code_ptr)(obj, arg0),
+                2 => std::mem::transmute::<usize, Fn3>(code_ptr)(obj, arg0, arg1),
+                3 => std::mem::transmute::<usize, Fn4>(code_ptr)(obj, arg0, arg1, arg2),
+                4 => std::mem::transmute::<usize, Fn5>(code_ptr)(obj, arg0, arg1, arg2, arg3),
+                5 => std::mem::transmute::<usize, Fn6>(code_ptr)(obj, arg0, arg1, arg2, arg3, arg4),
+                6 => std::mem::transmute::<usize, Fn7>(code_ptr)(obj, arg0, arg1, arg2, arg3, arg4, arg5),
+                7 => std::mem::transmute::<usize, Fn8>(code_ptr)(obj, arg0, arg1, arg2, arg3, arg4, arg5, arg6),
+                _ => {
+                    let error_msg = format!("Too many arguments to IFn: {}", arg_count);
+                    let error_str = rt.allocate_string(&error_msg).unwrap_or(7);
+                    trampoline_throw(0, error_str);
+                }
+            }
+        } else if tag == 0b101 {
+            // Closure - could be single-arity or multi-arity
+            let untagged = fn_ptr >> 3;
+            let heap_obj = HeapObject::from_untagged(untagged as *const u8);
+            let closure_type_id = heap_obj.get_header().type_id;
+
+            // Check if multi-arity
+            use crate::gc_runtime::TYPE_MULTI_ARITY_FN;
+            if closure_type_id == TYPE_MULTI_ARITY_FN as u8 {
+                // For multi-arity, need to look up the right arity
+                // arg_count is the number of user args, -invoke takes arg_count + 1 (including 'this')
+                match rt.multi_arity_lookup(fn_ptr, arg_count + 1) {
+                    Some((code_ptr, _is_variadic)) => {
+                        // Call with closure calling convention
+                        type ClosureFn2 = extern "C" fn(usize, usize) -> usize;
+                        type ClosureFn3 = extern "C" fn(usize, usize, usize) -> usize;
+                        type ClosureFn4 = extern "C" fn(usize, usize, usize, usize) -> usize;
+
+                        return match arg_count {
+                            0 => std::mem::transmute::<usize, ClosureFn2>(code_ptr)(fn_ptr, obj),
+                            1 => std::mem::transmute::<usize, ClosureFn3>(code_ptr)(fn_ptr, obj, arg0),
+                            2 => std::mem::transmute::<usize, ClosureFn4>(code_ptr)(fn_ptr, obj, arg0, arg1),
+                            _ => {
+                                let error_msg = format!("Too many arguments to IFn: {}", arg_count);
+                                let error_str = rt.allocate_string(&error_msg).unwrap_or(7);
+                                trampoline_throw(0, error_str);
+                            }
+                        };
+                    }
+                    None => {
+                        let error_msg = format!("No matching arity for {} args in -invoke", arg_count + 1);
+                        let error_str = rt.allocate_string(&error_msg).unwrap_or(7);
+                        trampoline_throw(0, error_str);
+                    }
+                }
+            }
+
+            // Single-arity closure
+            let code_ptr = heap_obj.get_field(closure_layout::FIELD_CODE_PTR);
+
+            // For closures, x0 = closure, x1-x7 = user args, x9 = arg count
+            // But -invoke's args are (this, a, b, ...) so we need:
+            // closure call args: (closure, this, a, b, ...)
+            // arg count for -invoke is arg_count + 1
+            type ClosureFn2 = extern "C" fn(usize, usize) -> usize;
+            type ClosureFn3 = extern "C" fn(usize, usize, usize) -> usize;
+            type ClosureFn4 = extern "C" fn(usize, usize, usize, usize) -> usize;
+            type ClosureFn5 = extern "C" fn(usize, usize, usize, usize, usize) -> usize;
+            type ClosureFn6 = extern "C" fn(usize, usize, usize, usize, usize, usize) -> usize;
+            type ClosureFn7 = extern "C" fn(usize, usize, usize, usize, usize, usize, usize) -> usize;
+            type ClosureFn8 = extern "C" fn(usize, usize, usize, usize, usize, usize, usize, usize) -> usize;
+            type ClosureFn9 = extern "C" fn(usize, usize, usize, usize, usize, usize, usize, usize, usize) -> usize;
+
+            match arg_count {
+                0 => std::mem::transmute::<usize, ClosureFn2>(code_ptr)(fn_ptr, obj),
+                1 => std::mem::transmute::<usize, ClosureFn3>(code_ptr)(fn_ptr, obj, arg0),
+                2 => std::mem::transmute::<usize, ClosureFn4>(code_ptr)(fn_ptr, obj, arg0, arg1),
+                3 => std::mem::transmute::<usize, ClosureFn5>(code_ptr)(fn_ptr, obj, arg0, arg1, arg2),
+                4 => std::mem::transmute::<usize, ClosureFn6>(code_ptr)(fn_ptr, obj, arg0, arg1, arg2, arg3),
+                5 => std::mem::transmute::<usize, ClosureFn7>(code_ptr)(fn_ptr, obj, arg0, arg1, arg2, arg3, arg4),
+                6 => std::mem::transmute::<usize, ClosureFn8>(code_ptr)(fn_ptr, obj, arg0, arg1, arg2, arg3, arg4, arg5),
+                7 => std::mem::transmute::<usize, ClosureFn9>(code_ptr)(fn_ptr, obj, arg0, arg1, arg2, arg3, arg4, arg5, arg6),
+                _ => {
+                    let error_msg = format!("Too many arguments to IFn: {}", arg_count);
+                    let error_str = rt.allocate_string(&error_msg).unwrap_or(7);
+                    trampoline_throw(0, error_str);
+                }
+            }
+        } else {
+            // Not a callable type
+            let error_msg = format!("Cannot invoke object with tag {}", tag);
+            let error_str = rt.allocate_string(&error_msg).unwrap_or(7);
+            trampoline_throw(0, error_str);
+        }
+    }
+}
+
 /// Trampoline that sets up a safe environment for JIT code execution
 ///
 /// The trampoline:

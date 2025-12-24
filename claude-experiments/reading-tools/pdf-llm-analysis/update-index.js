@@ -88,15 +88,17 @@ function titlesMatch(title1, title2, threshold = 0.8) {
  * Update PDF index with LLM-extracted metadata
  * @param {string} indexPath - Path to index JSON file
  * @param {boolean} verify - Whether to verify existing metadata
+ * @param {boolean} forceAll - Whether to process all PDFs without ocr_title (regardless of metadataFound)
  * @param {number} numPages - Number of pages to analyze per PDF
  * @param {number} threshold - Similarity threshold for matching
  * @param {number} dpi - Image resolution in DPI (lower = faster)
  */
-async function updateIndex(indexPath, verify = false, numPages = 3, threshold = 0.8, dpi = 72) {
+async function updateIndex(indexPath, verify = false, forceAll = false, numPages = 3, threshold = 0.8, dpi = 72) {
   console.log('='.repeat(60));
   console.log('Configuration:');
   console.log(`  Index file: ${indexPath}`);
   console.log(`  Verify mode: ${verify ? 'enabled' : 'disabled'}`);
+  console.log(`  Force all mode: ${forceAll ? 'enabled' : 'disabled'}`);
   console.log(`  Pages per PDF: ${numPages}`);
   console.log(`  Image resolution: ${dpi} DPI`);
   console.log(`  Similarity threshold: ${(threshold * 100).toFixed(0)}%`);
@@ -130,6 +132,9 @@ async function updateIndex(indexPath, verify = false, numPages = 3, threshold = 
     if (verify) {
       // With verify flag, process everything (except "other" type)
       return true;
+    } else if (forceAll) {
+      // With force-all flag, process all PDFs without ocr_title (regardless of metadataFound)
+      return entry.ocr_title === undefined || entry.ocr_title === null;
     } else {
       // Without verify flag, only process PDFs without metadata AND without ocr_title
       // Skip PDFs that already have been successfully processed
@@ -253,6 +258,7 @@ Arguments:
 
 Options:
   --verify      Verify existing metadata and add ocr_title if mismatched
+  --force-all   Process ALL PDFs without ocr_title (including those with bad metadata)
   --pages N     Number of pages to analyze per PDF (default: 3)
   --threshold T Similarity threshold for matching (0-1, default: 0.8)
   --dpi N       Image resolution in DPI (default: 72, lower = faster)
@@ -260,6 +266,9 @@ Options:
 Examples:
   # Update PDFs without metadata
   node update-index.js ../pdf-indexer/pdf-index.json
+
+  # Process all PDFs that don't have ocr_title yet (including bad metadata)
+  node update-index.js ../pdf-indexer/pdf-index.json --force-all
 
   # Verify all PDFs and add ocr_title for mismatches
   node update-index.js ../pdf-indexer/pdf-index.json --verify
@@ -278,7 +287,7 @@ Examples:
 
 The tool will:
   1. Read the existing index file
-  2. Process PDFs without metadata (or all PDFs with --verify)
+  2. Process PDFs without metadata (or all PDFs with --verify/--force-all)
   3. Extract title/author using qwen-vl vision model
   4. Add ocr_title and ocr_author fields when needed
   5. Use fuzzy matching to compare titles (with --verify)
@@ -289,6 +298,7 @@ The tool will:
 
   const indexPath = args[0];
   const verify = args.includes('--verify');
+  const forceAll = args.includes('--force-all');
 
   // Parse --pages option
   const pagesIndex = args.indexOf('--pages');
@@ -319,7 +329,7 @@ The tool will:
   }
 
   try {
-    await updateIndex(indexPath, verify, numPages, threshold, dpi);
+    await updateIndex(indexPath, verify, forceAll, numPages, threshold, dpi);
   } catch (error) {
     console.error('Error:', error.message);
     process.exit(1);

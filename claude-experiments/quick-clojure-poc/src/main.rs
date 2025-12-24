@@ -29,7 +29,7 @@ fn print_tagged_value(tagged_value: i64, runtime: &GCRuntime) {
     let tag = tagged_value & 0b111;
 
     match tagged_value {
-        7 => {}, // nil - print nothing, matching Clojure
+        7 => println!("nil"),
         11 => println!("true"),
         3 => println!("false"),
         _ => {
@@ -718,7 +718,7 @@ fn run_expr(expr: &str, gc_always: bool) {
 }
 
 /// Execute a Clojure script file (like `clojure script.clj`)
-/// Prints results of top-level expressions, but not def/ns/use
+/// Like Clojure, scripts don't print results - only explicit print calls produce output
 fn run_script(filename: &str, gc_always: bool) {
     use std::fs;
     use std::io::BufRead;
@@ -797,22 +797,10 @@ fn run_script(filename: &str, gc_always: bool) {
                                 match Arm64CodeGen::compile_function(&instructions, num_locals, 0) {
                                     Ok(compiled) => {
                                         // Execute as 0-argument function via trampoline
+                                        // Like Clojure, scripts don't print results automatically
+                                        // Only explicit print/println calls produce output
                                         let trampoline = Trampoline::new(64 * 1024);
-                                        let result = unsafe { trampoline.execute(compiled.code_ptr as *const u8) };
-
-                                        // Only print result for non-def/ns/use expressions
-                                        // This matches Clojure's behavior in script mode
-                                        if !matches!(ast,
-                                            Expr::Def { .. } |
-                                            Expr::Ns { .. } |
-                                            Expr::Use { .. }
-                                        ) {
-                                            // SAFETY: Single-threaded, not during compilation
-                                            unsafe {
-                                                let rt = &*runtime.get();
-                                                print_tagged_value(result, rt);
-                                            }
-                                        }
+                                        let _result = unsafe { trampoline.execute(compiled.code_ptr as *const u8) };
                                     }
                                     Err(e) => {
                                         eprintln!("Codegen error: {}", e);

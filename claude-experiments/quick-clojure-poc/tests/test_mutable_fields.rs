@@ -89,7 +89,7 @@ fn test_mutable_field_initial_value() {
     let code = r#"
 (deftype* Box [^:mutable val])
 (def b (Box. 42))
-(.-val b)
+(println (.-val b))
 "#;
     let output = run_and_get_stdout(code);
     assert_eq!(output, "42", "Expected 42, got: {}", output);
@@ -114,7 +114,7 @@ fn test_mutable_field_set_returns_value() {
     let code = r#"
 (deftype* Box [^:mutable val])
 (def b (Box. 42))
-(set! (.-val b) 999)
+(println (set! (.-val b) 999))
 "#;
     let output = run_and_get_stdout(code);
     assert_eq!(output, "999", "set! should return 999, got: {}", output);
@@ -253,7 +253,7 @@ fn test_mixed_fields_read_immutable() {
     let code = r#"
 (deftype* MixedBox [immutable-val ^:mutable mutable-val])
 (def m (MixedBox. 100 200))
-(.-immutable-val m)
+(println (.-immutable-val m))
 "#;
     let output = run_and_get_stdout(code);
     assert_eq!(output, "100", "Expected 100, got: {}", output);
@@ -264,7 +264,7 @@ fn test_mixed_fields_read_mutable() {
     let code = r#"
 (deftype* MixedBox [immutable-val ^:mutable mutable-val])
 (def m (MixedBox. 100 200))
-(.-mutable-val m)
+(println (.-mutable-val m))
 "#;
     let output = run_and_get_stdout(code);
     assert_eq!(output, "200", "Expected 200, got: {}", output);

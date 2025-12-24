@@ -241,6 +241,30 @@ impl Compiler {
                 let index_reg = self.builder.assign_new(IrValue::TaggedConstant((keyword_index << 3) as isize));
                 return self.call_builtin("load-keyword", vec![index_reg]);
             }
+            Value::Vector(elements) => {
+                // Compile vector literal as call to (vector elem1 elem2 ...)
+                // Convert each element to an Expr and compile as a vector call
+                let elem_exprs: Vec<Expr> = elements.iter()
+                    .map(|v| Expr::Literal(v.clone()))
+                    .collect();
+                return self.compile_call(
+                    &Expr::Var { namespace: Some("clojure.core".to_string()), name: "vector".to_string() },
+                    &elem_exprs
+                );
+            }
+            Value::Map(pairs) => {
+                // Compile map literal as call to (hash-map k1 v1 k2 v2 ...)
+                // Flatten the map into key-value pairs
+                let mut kv_exprs: Vec<Expr> = Vec::new();
+                for (k, v) in pairs.iter() {
+                    kv_exprs.push(Expr::Literal(k.clone()));
+                    kv_exprs.push(Expr::Literal(v.clone()));
+                }
+                return self.compile_call(
+                    &Expr::Var { namespace: Some("clojure.core".to_string()), name: "hash-map".to_string() },
+                    &kv_exprs
+                );
+            }
             _ => {
                 return Err(format!("Literal type not yet supported: {:?}", value));
             }
@@ -916,15 +940,26 @@ impl Compiler {
             // SAFETY: Single-threaded compilation
             let ns_ptr = unsafe {
                 let rt = &mut *self.runtime.get();
-                let ns_ptr = rt.allocate_namespace(name)?;
+                let mut ns_ptr = rt.allocate_namespace(name)?;
                 rt.add_namespace_root(name.to_string(), ns_ptr);
+
+                // Refer all of clojure.core into the new namespace (like Clojure does)
+                // Skip if this IS clojure.core, or if clojure.core doesn't exist yet
+                if name != "clojure.core" {
+                    if let Some(core_ns_ptr) = rt.get_namespace_by_name("clojure.core") {
+                        ns_ptr = rt.refer_all(ns_ptr, core_ns_ptr)?;
+                        // Update the namespace root since refer_all may have reallocated
+                        rt.update_namespace_root(name, ns_ptr);
+                    }
+                }
+
                 ns_ptr
             };
 
             self.namespace_registry.insert(name.to_string(), ns_ptr);
             self.current_namespace_ptr = ns_ptr;
 
-            // Implicitly use clojure.core
+            // Track that we used clojure.core (for potential future exclude support)
             self.used_namespaces.insert(name.to_string(), vec!["clojure.core".to_string()]);
         }
 
@@ -2685,6 +2720,40 @@ impl Compiler {
         // Call trampoline_is_keyword
         let result = self.builder.new_register();
         let fn_addr = crate::trampoline::trampoline_is_keyword as usize;
+        self.builder.emit(Instruction::ExternalCall(result, fn_addr, vec![value]));
+        Ok(result)
+    }
+
+    /// Compile (map? x) - check if x is a map
+    fn compile_builtin_map_check(&mut self, args: &[Expr]) -> Result<IrValue, String> {
+        if args.len() != 1 {
+            return Err(format!("map? requires 1 argument, got {}", args.len()));
+        }
+
+        // Compile the value to check
+        let value = self.compile(&args[0])?;
+        let value = self.ensure_register(value);
+
+        // Call builtin_is_map
+        let result = self.builder.new_register();
+        let fn_addr = crate::builtins::builtin_is_map as usize;
+        self.builder.emit(Instruction::ExternalCall(result, fn_addr, vec![value]));
+        Ok(result)
+    }
+
+    /// Compile (vector? x) - check if x is a vector
+    fn compile_builtin_vector_check(&mut self, args: &[Expr]) -> Result<IrValue, String> {
+        if args.len() != 1 {
+            return Err(format!("vector? requires 1 argument, got {}", args.len()));
+        }
+
+        // Compile the value to check
+        let value = self.compile(&args[0])?;
+        let value = self.ensure_register(value);
+
+        // Call builtin_is_vector
+        let result = self.builder.new_register();
+        let fn_addr = crate::builtins::builtin_is_vector as usize;
         self.builder.emit(Instruction::ExternalCall(result, fn_addr, vec![value]));
         Ok(result)
     }

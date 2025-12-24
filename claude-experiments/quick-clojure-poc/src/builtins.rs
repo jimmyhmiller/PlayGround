@@ -192,6 +192,40 @@ pub extern "C" fn builtin_gc(stack_pointer: usize) -> usize {
 }
 
 // ============================================================================
+// Type predicates
+// ============================================================================
+
+/// builtin_is_map(value) -> tagged_boolean
+///
+/// Returns true if value is a map (PersistentHashMap), false otherwise.
+#[unsafe(no_mangle)]
+pub extern "C" fn builtin_is_map(value: usize) -> usize {
+    unsafe {
+        let rt = get_runtime();
+        if rt.is_map(value) {
+            0b00001_111  // true
+        } else {
+            0b00000_111  // false
+        }
+    }
+}
+
+/// builtin_is_vector(value) -> tagged_boolean
+///
+/// Returns true if value is a vector, false otherwise.
+#[unsafe(no_mangle)]
+pub extern "C" fn builtin_is_vector(value: usize) -> usize {
+    unsafe {
+        let rt = get_runtime();
+        if rt.is_vector(value) {
+            0b00001_111  // true
+        } else {
+            0b00000_111  // false
+        }
+    }
+}
+
+// ============================================================================
 // Builtin registration
 // ============================================================================
 
@@ -254,6 +288,16 @@ pub fn get_builtin_descriptors() -> Vec<BuiltinDescriptor> {
             name: "runtime.builtin/gc",
             function_ptr: builtin_gc as usize,
             arity: 1,  // stack_pointer
+        },
+        BuiltinDescriptor {
+            name: "runtime.builtin/map?",
+            function_ptr: builtin_is_map as usize,
+            arity: 1,
+        },
+        BuiltinDescriptor {
+            name: "runtime.builtin/vector?",
+            function_ptr: builtin_is_vector as usize,
+            arity: 1,
         },
     ]
 }

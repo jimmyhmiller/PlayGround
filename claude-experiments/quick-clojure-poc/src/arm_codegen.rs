@@ -917,14 +917,51 @@ impl Arm64CodeGen {
                 // Extract tag (fn_val & 0b111)
                 self.emit_and_imm(tag_reg, fn_reg, 0b111);
 
-                // Check if Function (0b100) or Closure (0b101)
+                // Check if Function (0b100), Closure (0b101), or IFn (other)
                 self.emit_cmp_imm(tag_reg, 0b100);
 
                 let is_function_label = self.new_label();
                 self.emit_branch_cond(is_function_label.clone(), 0); // 0 = EQ (if tag == 0b100)
 
+                // Not a function, check if closure (0b101)
+                self.emit_cmp_imm(tag_reg, 0b101);
+                let is_closure_label = self.new_label();
+                self.emit_branch_cond(is_closure_label.clone(), 0); // 0 = EQ (if tag == 0b101)
+
+                // === IFn path (tag != 0b100 and != 0b101) ===
+                // Call trampoline_ifn_invoke(obj, arg_count, arg0, arg1, ...)
+                let done_label = self.new_label();
+                {
+                    let arg_count = args.len();
+
+                    // Set up args for trampoline_ifn_invoke:
+                    // x0 = obj (fn_reg), x1 = arg_count, x2-x8 = user args
+                    self.emit_mov(0, fn_reg);  // x0 = obj to invoke
+                    self.emit_mov_imm(1, arg_count as i64);  // x1 = arg count
+
+                    // Move user args to x2-x8
+                    // First collect all source registers to avoid overwrites
+                    for (i, &src_reg) in arg_source_regs.iter().enumerate() {
+                        if i + 2 != src_reg {  // Only move if source != destination
+                            self.emit_mov(i + 2, src_reg);  // x2, x3, x4, etc.
+                        }
+                    }
+
+                    // Pad remaining args with 0 (nil) - trampoline expects 7 args
+                    for i in arg_count..7 {
+                        self.emit_mov_imm((i + 2) as usize, 7);  // 7 = nil tagged value
+                    }
+
+                    // Call trampoline_ifn_invoke
+                    let ifn_invoke_addr = crate::trampoline::trampoline_ifn_invoke as usize;
+                    self.emit_external_call(ifn_invoke_addr, "trampoline_ifn_invoke");
+                }
+
+                // Result is in x0, jump to done
+                self.emit_jump(&done_label);
+
                 // === Closure path (tag == 0b101) ===
-                // eprintln!("DEBUG: Call - emitting closure path");
+                self.emit_label(is_closure_label);
 
                 // Untag closure pointer (shift right by 3)
                 // LSR Xd, Xn, #3 - Logical shift right by 3 = UBFM Xd, Xn, #3, #63
@@ -943,12 +980,11 @@ impl Arm64CodeGen {
                     }
                 }
 
-                let after_call_label = self.new_label();
-                self.emit_jump(&after_call_label);
+                let do_blr_label = self.new_label();
+                self.emit_jump(&do_blr_label);
 
                 // === Function path (tag == 0b100) ===
                 self.emit_label(is_function_label);
-                // eprintln!("DEBUG: Call - emitting function path");
 
                 // Untag function pointer to get code_ptr (shift right by 3)
                 let lsr_instruction = 0xD343FC00u32 | ((fn_reg as u32) << 5) | (code_ptr_reg as u32);
@@ -956,15 +992,17 @@ impl Arm64CodeGen {
 
                 // Set up normal calling convention: args in x0-x7
                 for (i, &src_reg) in arg_source_regs.iter().enumerate() {
-                    // eprintln!("DEBUG: Call (fn path) - moving arg {} from x{} to x{}", i, src_reg, i);
                     if i != src_reg {  // Only move if source != destination
                         self.emit_mov(i, src_reg);  // x0, x1, x2, etc.
                     }
                 }
 
-                // === Call the function ===
-                self.emit_label(after_call_label);
+                // === Call the function (for function and closure paths) ===
+                self.emit_label(do_blr_label);
                 self.emit_blr(code_ptr_reg);
+
+                // === Done (result in x0) ===
+                self.emit_label(done_label);
 
                 // Result is in x0
                 // eprintln!("DEBUG: Call - result will be moved from x0 to x{}", dst_reg);
@@ -1286,12 +1324,16 @@ impl Arm64CodeGen {
                 //   - Raw function pointers (tag 0b100)
                 //   - Single-arity closures (tag 0b101, type_id = TYPE_FUNCTION)
                 //   - Multi-arity functions (tag 0b101, type_id = TYPE_MULTI_ARITY_FN)
+                //   - More than 7 user args (for closures) or 8 args (for raw functions) via stack
                 let dest_spill = self.dest_spill(dst);
                 let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
 
-                if args.len() > 8 {
-                    return Err("Call with more than 8 arguments not yet supported".to_string());
-                }
+                // Calculate stack args needed for closures (7 user args in registers, rest on stack)
+                // For raw functions: 8 args in registers
+                // We'll use the closure limit (7) since that's the more common case
+                let max_reg_user_args = 7usize;
+                let stack_arg_count = if args.len() > max_reg_user_args { args.len() - max_reg_user_args } else { 0 };
+                let stack_args_bytes = ((stack_arg_count * 8 + 15) / 16) * 16;  // 16-byte aligned
 
                 // Get function pointer - may be in a temp register if spilled
                 // IMPORTANT: If fn_val is spilled, we get a temp register (x9).
@@ -1309,6 +1351,36 @@ impl Arm64CodeGen {
                 // to be clobbered by tag checking operations that also use temps.
                 let arg_count = args.len();
 
+                // STEP 2a: Allocate stack space for extra arguments (if any)
+                // For closures: x1-x7 = first 7 user args, stack = args 7+
+                // For raw functions: x0-x7 = first 8 args, stack = args 8+
+                // We allocate for closures (the more restrictive case)
+                if stack_args_bytes > 0 {
+                    self.emit_sub_sp_imm(stack_args_bytes as i64);
+                    self.current_function_stack_bytes += stack_args_bytes;
+                    self.increment_stack_size(stack_args_bytes / 8);
+
+                    // Store extra args to stack
+                    self.clear_temp_registers();
+                    for i in 0..stack_arg_count {
+                        let arg_idx = max_reg_user_args + i;
+                        let arg = &args[arg_idx];
+                        let src_reg = match arg {
+                            IrValue::Spill(_, slot) => {
+                                let temp = self.allocate_temp_register();
+                                // Adjust offset for the new stack space we just allocated
+                                let offset = -((*slot as i32 + 1) * 8);
+                                self.emit_load_from_fp(temp, offset);
+                                temp
+                            }
+                            _ => self.get_physical_reg_for_irvalue(arg, false)?
+                        };
+                        // Store to stack at SP + i * 8
+                        self.emit_str_offset(src_reg, 31, (i * 8) as i32);
+                        self.clear_temp_registers();
+                    }
+                }
+
                 // Use temp registers from pool for tag/closure_ptr, but NOT for code_ptr!
                 // x18 is RESERVED by macOS and must NEVER be used!
                 // x9 is used for arg_count in closure calling convention, so can't use it for code_ptr
@@ -1320,13 +1392,60 @@ impl Arm64CodeGen {
                 // Extract tag (fn_val & 0b111)
                 self.emit_and_imm(tag_reg, fn_reg, 0b111);
 
-                // Check if Function (0b100) or Closure (0b101)
+                // Check if Function (0b100), Closure (0b101), or IFn (other)
                 self.emit_cmp_imm(tag_reg, 0b100);
 
                 let is_raw_function_label = self.new_label();
                 self.emit_branch_cond(is_raw_function_label.clone(), 0); // 0 = EQ (if tag == 0b100)
 
+                // Not a function, check if closure (0b101)
+                self.emit_cmp_imm(tag_reg, 0b101);
+                let is_closure_label = self.new_label();
+                self.emit_branch_cond(is_closure_label.clone(), 0); // 0 = EQ (if tag == 0b101)
+
+                // === IFn path (tag != 0b100 and != 0b101) ===
+                // Call trampoline_ifn_invoke(obj, arg_count, arg0, arg1, ...)
+                let done_label = self.new_label();
+                {
+                    // Set up args for trampoline_ifn_invoke:
+                    // x0 = obj (fn_reg), x1 = arg_count, x2-x8 = user args
+                    self.emit_mov(0, fn_reg);  // x0 = obj to invoke
+                    self.emit_mov_imm(1, arg_count as i64);  // x1 = arg count
+
+                    // Load user args directly into x2-x8
+                    self.clear_temp_registers();
+                    for (i, arg) in args.iter().enumerate() {
+                        let target_reg = i + 2;  // x2, x3, x4, etc.
+                        match arg {
+                            IrValue::Spill(_, slot) => {
+                                let offset = -((*slot as i32 + 1) * 8);
+                                self.emit_load_from_fp(target_reg, offset);
+                            }
+                            _ => {
+                                let src_reg = self.get_physical_reg_for_irvalue(arg, false)?;
+                                if target_reg != src_reg {
+                                    self.emit_mov(target_reg, src_reg);
+                                }
+                                self.clear_temp_registers();
+                            }
+                        }
+                    }
+
+                    // Pad remaining args with nil (7) - trampoline expects 7 args
+                    for i in arg_count..7 {
+                        self.emit_mov_imm((i + 2) as usize, 7);  // 7 = nil tagged value
+                    }
+
+                    // Call trampoline_ifn_invoke
+                    let ifn_invoke_addr = crate::trampoline::trampoline_ifn_invoke as usize;
+                    self.emit_external_call(ifn_invoke_addr, "trampoline_ifn_invoke");
+                }
+
+                // Result is in x0, jump to done
+                self.emit_jump(&done_label);
+
                 // === Closure path (tag == 0b101) ===
+                self.emit_label(is_closure_label);
                 // Could be single-arity (TYPE_ID_FUNCTION=12) or multi-arity (TYPE_ID_MULTI_ARITY_FN=14)
 
                 // Untag closure pointer (shift right by 3)
@@ -1354,14 +1473,17 @@ impl Arm64CodeGen {
 
                 // Set up closure calling convention:
                 // - x0 = closure object
-                // - x1-x7 = user args
-                // - x9 = argument count (for variadic support)
+                // - x1-x7 = first 7 user args (rest are on stack, already set up)
+                // - x9 = total argument count (for variadic support)
                 self.emit_mov(0, fn_reg);  // x0 = tagged closure pointer
 
                 // Load args directly into x1, x2, etc.
+                // Only load up to max_reg_user_args (7) - rest are already on stack
                 // This is done HERE (after tag checking) to avoid temp register clobbering
                 self.clear_temp_registers();
-                for (i, arg) in args.iter().enumerate() {
+                let reg_args_to_load = std::cmp::min(args.len(), max_reg_user_args);
+                for i in 0..reg_args_to_load {
+                    let arg = &args[i];
                     let target_reg = i + 1;  // x1, x2, x3, etc.
                     match arg {
                         IrValue::Spill(_, slot) => {
@@ -1378,7 +1500,7 @@ impl Arm64CodeGen {
                         }
                     }
                 }
-                self.emit_mov_imm(9, arg_count as i64);  // x9 = argument count
+                self.emit_mov_imm(9, arg_count as i64);  // x9 = total argument count
 
                 let do_call_label = self.new_label();
                 self.emit_jump(&do_call_label);
@@ -1432,14 +1554,15 @@ impl Arm64CodeGen {
                 // Actually, we need to restore args from stack before cleanup
                 // Set up closure calling convention for multi-arity:
                 // - x0 = closure object
-                // - x1-x7 = user args (load from stack)
-                // - x9 = argument count (for variadic support)
+                // - x1-x7 = first 7 user args (load from stack)
+                // - x9 = total argument count (for variadic support)
+                // Note: extra args (7+) are already on the outer stack from earlier
                 self.emit_mov(0, fn_reg);  // x0 = tagged closure pointer
-                for i in 0..arg_count {
+                for i in 0..std::cmp::min(arg_count, max_reg_user_args) {
                     let target_reg = i + 1;  // x1, x2, x3, etc.
                     self.emit_ldr_offset(target_reg, 31, ((i + 1) * 8) as i32);
                 }
-                self.emit_mov_imm(9, arg_count as i64);  // x9 = argument count
+                self.emit_mov_imm(9, arg_count as i64);  // x9 = total argument count
 
                 // Now clean up temporary stack space
                 if aligned_ma_stack > 0 {
@@ -1455,9 +1578,14 @@ impl Arm64CodeGen {
                 let lsr_instruction = 0xD343FC00u32 | ((fn_reg as u32) << 5) | (code_ptr_reg as u32);
                 self.code.push(lsr_instruction);
 
-                // Set up normal calling convention: args in x0-x7
+                // Set up normal calling convention: args in x0-x7 (first 8 only)
+                // Note: For raw functions, 8 args fit in registers. If there are more,
+                // they are already on stack from the closure path's allocation.
+                // But raw functions rarely have >8 args, so we just load min(args, 8).
                 self.clear_temp_registers();
-                for (i, arg) in args.iter().enumerate() {
+                let raw_fn_reg_args = std::cmp::min(args.len(), 8);
+                for i in 0..raw_fn_reg_args {
+                    let arg = &args[i];
                     let target_reg = i;  // x0, x1, x2, etc.
                     match arg {
                         IrValue::Spill(_, slot) => {
@@ -1478,12 +1606,21 @@ impl Arm64CodeGen {
                 self.emit_label(do_call_label);
                 self.emit_blr(code_ptr_reg);
 
+                // === Done (result in x0) ===
+                self.emit_label(done_label);
+
                 // Move result from x0 to destination
                 if dst_reg != 0 {
                     self.emit_mov(dst_reg, 0);
                 }
 
                 self.store_spill(dst_reg, dest_spill);
+
+                // Clean up stack space for extra arguments (if any were allocated)
+                if stack_args_bytes > 0 {
+                    self.emit_add_sp_imm(stack_args_bytes as i64);
+                    self.decrement_stack_size(stack_args_bytes / 8);
+                }
 
                 // STEP 3: Restore volatile registers (reverse order)
                 // First, update stack size tracking (must match increment above)
@@ -1817,8 +1954,9 @@ impl Arm64CodeGen {
                 //
                 // At function entry:
                 // - x9 = total argument count (set by caller)
-                // - For closures/multi-arity: x0 = closure obj, x1-x7 = user args
-                // - For raw functions: x0-x7 = args directly
+                // - For closures/multi-arity: x0 = closure obj, x1-x7 = first 7 user args
+                // - For raw functions: x0-x7 = first 8 args
+                // - Extra args (7+ for closures, 8+ for raw) are on caller's stack at [FP+16+...]
                 //
                 // IMPORTANT: This instruction calls a trampoline which clobbers x0-x18.
                 // We must save fixed parameter registers (x1-x7 that hold the fixed params)
@@ -1827,7 +1965,7 @@ impl Arm64CodeGen {
                 // We need to:
                 // 1. Calculate excess_count = x9 - fixed_count
                 // 2. If excess_count <= 0, return nil
-                // 3. Otherwise, save fixed params, collect args, restore fixed params
+                // 3. Otherwise, collect args from registers AND caller's stack
 
                 let dest_spill = self.dest_spill(dst);
                 let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
@@ -1836,6 +1974,9 @@ impl Arm64CodeGen {
 
                 // The first excess arg register is x(param_offset + fixed_count)
                 let first_excess_reg = offset + fixed;
+
+                // Maximum user args in registers for closures (x1-x7)
+                let max_reg_user_args: usize = 7;
 
                 // Use a temp register that's NOT x9 for the excess count
                 // x9 is where the arg count is stored
@@ -1858,7 +1999,7 @@ impl Arm64CodeGen {
                 self.emit_mov_imm(dst_reg, 7);  // nil = 7
                 self.emit_jump(&done_label);
 
-                // Has excess args - push them to stack and call trampoline
+                // Has excess args - collect from registers and caller's stack, call trampoline
                 self.emit_label(has_excess_label);
 
                 // IMPORTANT: Save the fixed parameter registers BEFORE we call the trampoline
@@ -1867,39 +2008,106 @@ impl Arm64CodeGen {
                 // Also save x0 (closure object) if we're using closure convention.
                 //
                 // Stack layout:
-                //   [fixed params saved area: 8 * (offset + fixed) bytes]
-                //   [excess args area: 64 bytes]
+                //   [sp + save_area_aligned]: excess args area (space for ALL excess args)
+                //   [sp]: saved registers
 
                 let num_regs_to_save = offset + fixed;  // x0..x(offset+fixed-1)
                 let save_area_size = num_regs_to_save * 8;
                 let save_area_aligned = (save_area_size + 15) & !15;  // Align to 16
 
-                // Stack layout will be:
-                //   [sp + save_area_aligned]: excess args (64 bytes)
-                //   [sp]: saved registers
-                let total_stack = save_area_aligned + 64;
-                self.emit_sub_sp_imm(total_stack as i64);
+                // Allocate space for up to 32 excess args (should be plenty)
+                // We'll collect args from both registers and the caller's stack
+                let max_excess_args = 32;
+                let excess_area_size = max_excess_args * 8;
+                let total_stack = save_area_aligned + excess_area_size;
+                let total_stack_aligned = (total_stack + 15) & !15;
+                self.emit_sub_sp_imm(total_stack_aligned as i64);
 
                 // Save fixed parameter registers and closure object
                 for i in 0..num_regs_to_save {
                     self.emit_str_offset(i, 31, (i * 8) as i32);
                 }
 
-                // Store excess args to stack (after save area)
-                let max_excess = 7;
-                for i in 0..max_excess {
+                // Calculate how many args are in registers vs on stack
+                // For closures: first_excess_reg = offset + fixed = 1 + fixed
+                // Register args: first_excess_reg to x7 (inclusive)
+                // Stack args: remaining args at caller's stack
+
+                // Store excess args from registers (first_excess_reg to min(7, first_excess_reg + excess_count - 1))
+                let args_in_regs_max = if first_excess_reg <= 7 { 7 - first_excess_reg + 1 } else { 0 };
+                for i in 0..args_in_regs_max {
                     let arg_reg = first_excess_reg + i;
-                    if arg_reg <= 7 {  // Only x0-x7 are argument registers
+                    if arg_reg <= 7 {
                         // Check if this arg should be stored (i < excess_count)
                         self.emit_cmp_imm(excess_count_reg, (i + 1) as i64);
                         let skip_store_label = self.new_label();
                         // B.LT = 11 (branch if excess_count < i+1, meaning skip storing this arg)
                         self.emit_branch_cond(skip_store_label.clone(), 11);
-                        // Store arg to stack (in the excess args area)
+                        // Store arg to excess args area
                         self.emit_str_offset(arg_reg, 31, (save_area_aligned + i * 8) as i32);
                         self.emit_label(skip_store_label);
                     }
                 }
+
+                // Now handle args that were passed on the caller's stack
+                // For closures: user args 7+ are on caller's stack at [FP + 16 + ...]
+                // The index into excess_args for stack arg 0 is (7 - first_excess_reg + 1) = args_in_regs_max
+                // Stack args start at [FP + 16 + 0], [FP + 16 + 8], etc.
+                //
+                // We need to check if excess_count > args_in_regs_max, and if so, copy from caller's stack
+                let stack_args_start_label = self.new_label();
+                let skip_stack_copy_label = self.new_label();
+
+                // Only copy from stack if excess_count > args_in_regs_max
+                self.emit_cmp_imm(excess_count_reg, args_in_regs_max as i64);
+                // B.LE = skip (if excess_count <= args_in_regs_max, no stack args)
+                self.emit_branch_cond(skip_stack_copy_label.clone(), 13);  // LE = 13
+
+                // Copy stack args (use x11 as temp, x12 as loop counter)
+                // Number of stack args to copy = excess_count - args_in_regs_max
+                // Use x12 as loop index, x13 as limit
+                let loop_idx_reg = 12;
+                let limit_reg = 13;
+                let temp_reg = 11;
+
+                self.emit_mov_imm(loop_idx_reg, 0);  // i = 0
+                // limit = excess_count - args_in_regs_max
+                self.emit_sub_imm(limit_reg, excess_count_reg, args_in_regs_max as i64);
+
+                self.emit_label(stack_args_start_label.clone());
+
+                // Check loop condition: i < limit
+                self.emit_cmp(loop_idx_reg, limit_reg);
+                // B.GE = exit (if i >= limit)
+                self.emit_branch_cond(skip_stack_copy_label.clone(), 10);  // GE = 10
+
+                // Load arg from caller's stack: [FP + 16 + i * 8]
+                // Calculate source offset = 16 + i * 8
+                // Use LSL to multiply i by 8, then add 16
+                // x14 = i << 3
+                let offset_reg = 14;
+                self.emit_lsl_imm(offset_reg, loop_idx_reg, 3);  // offset_reg = i * 8
+                self.emit_add_imm(offset_reg, offset_reg, 16);   // offset_reg = 16 + i * 8
+
+                // Load from [FP + offset_reg]
+                self.emit_ldr_reg_offset(temp_reg, 29, offset_reg);
+
+                // Store to our excess args area: [SP + save_area_aligned + (args_in_regs_max + i) * 8]
+                // Calculate dest offset = save_area_aligned + args_in_regs_max * 8 + i * 8
+                let dest_offset_reg = 17;  // Use x17 for dest offset
+                self.emit_lsl_imm(dest_offset_reg, loop_idx_reg, 3);  // i * 8
+                self.emit_add_imm(dest_offset_reg, dest_offset_reg, (save_area_aligned + args_in_regs_max * 8) as i64);
+
+                // Store to [SP + dest_offset_reg]
+                self.emit_str_reg_offset(temp_reg, 31, dest_offset_reg);
+
+                // i++
+                self.emit_add_imm(loop_idx_reg, loop_idx_reg, 1);
+
+                // Jump back to loop start
+                self.emit_jump(&stack_args_start_label);
+
+                self.emit_label(skip_stack_copy_label);
 
                 // Call trampoline_collect_rest_args(stack_pointer, args_ptr, excess_count)
                 // x0 = JIT frame pointer for GC
@@ -2282,6 +2490,15 @@ impl Arm64CodeGen {
         self.code.push(instruction);
     }
 
+    /// Load with register offset: LDR Xt, [Xn, Xm]
+    fn emit_ldr_reg_offset(&mut self, dst: usize, base: usize, offset_reg: usize) {
+        // LDR Xt, [Xn, Xm] - Load with register offset
+        // Encoding: 11 111000 01 1 Rm 011 0 10 Rn Rt
+        // = F8606800 | (Rm << 16) | (Rn << 5) | Rt
+        let instruction = 0xF8606800 | ((offset_reg as u32) << 16) | ((base as u32) << 5) | (dst as u32);
+        self.code.push(instruction);
+    }
+
     /// Generate MOV involving SP (uses ADD with immediate 0)
     /// Based on Beagle's mov_sp pattern
     fn emit_mov_sp(&mut self, dst: usize, src: usize) {
@@ -2570,6 +2787,15 @@ impl Arm64CodeGen {
         // Offset is in bytes, needs to be divided by 8 for encoding (unsigned 12-bit)
         let offset_scaled = (offset / 8) as u32;
         let instruction = 0xF9000000 | (offset_scaled << 10) | ((base as u32) << 5) | (src as u32);
+        self.code.push(instruction);
+    }
+
+    /// Store with register offset: STR Xt, [Xn, Xm]
+    fn emit_str_reg_offset(&mut self, src: usize, base: usize, offset_reg: usize) {
+        // STR Xt, [Xn, Xm] - Store with register offset
+        // Encoding: 11 111000 00 1 Rm 011 0 10 Rn Rt
+        // = F8206800 | (Rm << 16) | (Rn << 5) | Rt
+        let instruction = 0xF8206800 | ((offset_reg as u32) << 16) | ((base as u32) << 5) | (src as u32);
         self.code.push(instruction);
     }
 

@@ -330,6 +330,45 @@ export function transform(code: string, options: TransformOptions): string {
         locals.set(nodePath.node.id.name, { type: "class", preserve: false });
       }
     },
+
+    // Handle TypeScript's `import x = require('...')` syntax
+    TSImportEqualsDeclaration(nodePath: NodePath<t.TSImportEqualsDeclaration>) {
+      const { id, moduleReference } = nodePath.node;
+
+      // Only handle `import x = require('...')` style (external module reference)
+      if (t.isTSExternalModuleReference(moduleReference)) {
+        const source = moduleReference.expression;
+        if (!t.isStringLiteral(source)) return;
+
+        const sourceValue = source.value;
+        const isExternal = isExternalImport(sourceValue);
+
+        // Track as external import so we don't transform references
+        externalImportIds.add(id.name);
+
+        if (isExternal) {
+          // External imports: use require() since node_modules are already JS
+          // Transform to: const x = require('...')
+          nodePath.replaceWith(
+            t.variableDeclaration("const", [
+              t.variableDeclarator(
+                id,
+                t.callExpression(t.identifier("require"), [source])
+              )
+            ])
+          );
+        } else {
+          // Local imports: convert to ESM default import so they go through our loader
+          // Transform to: import x from '...'
+          nodePath.replaceWith(
+            t.importDeclaration(
+              [t.importDefaultSpecifier(id)],
+              source
+            )
+          );
+        }
+      }
+    },
   });
 
   // Second pass: transform declarations and replace references
@@ -680,6 +719,22 @@ export function transform(code: string, options: TransformOptions): string {
         );
       }
     },
+
+    // Handle TypeScript's `export = expression` syntax
+    // This is CJS-style export that needs to become `export default` in ESM
+    TSExportAssignment(nodePath: NodePath<t.TSExportAssignment>) {
+      const expression = nodePath.node.expression;
+      if (esm) esmExports.push({ name: 'default', type: 'default-value' });
+      nodePath.replaceWith(
+        t.expressionStatement(
+          t.assignmentExpression(
+            "=",
+            t.memberExpression(t.identifier("__m"), t.identifier("default")),
+            expression
+          )
+        )
+      );
+    },
   });
 
   // Third pass: handle once() calls in expression statements
@@ -730,6 +785,33 @@ export function transform(code: string, options: TransformOptions): string {
       ),
     ])
   );
+
+  // In ESM mode, add require function for CJS compatibility
+  // This allows `require()` calls to work in ESM context
+  if (esm) {
+    ast.program.body.unshift(
+      // const require = __createRequire(import.meta.url);
+      t.variableDeclaration("const", [
+        t.variableDeclarator(
+          t.identifier("require"),
+          t.callExpression(
+            t.identifier("__createRequire"),
+            [t.memberExpression(
+              t.metaProperty(t.identifier("import"), t.identifier("meta")),
+              t.identifier("url")
+            )]
+          )
+        ),
+      ])
+    );
+    ast.program.body.unshift(
+      // import { createRequire as __createRequire } from 'node:module';
+      t.importDeclaration(
+        [t.importSpecifier(t.identifier("__createRequire"), t.identifier("createRequire"))],
+        t.stringLiteral("node:module")
+      )
+    );
+  }
 
   // In ESM mode, add export statements at the end
   if (esm && esmExports.length > 0) {

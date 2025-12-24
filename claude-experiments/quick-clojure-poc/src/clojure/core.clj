@@ -749,6 +749,78 @@
   (-reduce [this f start] (seq-reduce f start this)))
 
 ;; =============================================================================
+;; Cons - Simple cons cell (doesn't track count like PList)
+;; =============================================================================
+
+(deftype* Cons [meta first rest ^:mutable __hash])
+
+(extend-type Cons
+  ICloneable
+  (-clone [this] (Cons. (.-meta this) (.-first this) (.-rest this) (.-__hash this)))
+
+  IWithMeta
+  (-with-meta [this new-meta]
+    (if (identical? new-meta (.-meta this))
+      this
+      (Cons. new-meta (.-first this) (.-rest this) (.-__hash this))))
+
+  IMeta
+  (-meta [this] (.-meta this))
+
+  ISeq
+  (-first [this] (.-first this))
+  (-rest [this] (if (nil? (.-rest this)) EMPTY-LIST (.-rest this)))
+
+  INext
+  (-next [this]
+    (if (nil? (.-rest this)) nil (-seq (.-rest this))))
+
+  ICollection
+  (-conj [this o] (Cons. nil o this nil))
+
+  IEmptyableCollection
+  (-empty [this] EMPTY-LIST)
+
+  ISequential
+
+  IEquiv
+  (-equiv [this other] (equiv-sequential this other))
+
+  IHash
+  (-hash [this]
+    (if (nil? (.-__hash this))
+      (let [h (hash-ordered-coll this)]
+        (set! (.-__hash this) h)
+        h)
+      (.-__hash this)))
+
+  ISeqable
+  (-seq [this] this)
+
+  IReduce
+  (-reduce [this f] (seq-reduce f this))
+  (-reduce [this f start] (seq-reduce f start this)))
+
+(defn cons
+  "Returns a new seq where x is the first element and coll is the rest."
+  [x coll]
+  (if (nil? coll)
+    (PList. nil x nil 1 nil)
+    (Cons. nil x (seq coll) nil)))
+
+(defn conj
+  "Returns a new collection with x 'added' to coll."
+  [coll x]
+  (if (nil? coll)
+    (PList. nil x nil 1 nil)
+    (-conj coll x)))
+
+(defn reverse
+  "Returns a seq of the items in coll in reverse order. Not lazy."
+  [coll]
+  (reduce conj EMPTY-LIST coll))
+
+;; =============================================================================
 ;; Basic Arithmetic Helpers
 ;; =============================================================================
 
@@ -898,7 +970,14 @@
 (defn list
   "Creates a new list containing the items."
   [& items]
-  items)
+  ;; Build a proper list by iterating from end to beginning
+  (if (nil? items)
+    EMPTY-LIST
+    (let [c (count items)]
+      (loop [i (dec c) acc EMPTY-LIST]
+        (if (< i 0)
+          acc
+          (recur (dec i) (cons (nth items i) acc)))))))
 
 ;; =============================================================================
 ;; VERBATIM FROM CLOJURESCRIPT - PersistentVector
@@ -918,6 +997,29 @@
   (if (nil? coll)
     0
     (-count coll)))
+
+;; DEVIATION: rest function - calls -rest protocol method
+(defn rest
+  "Returns a possibly empty seq of the items after the first."
+  [coll]
+  (if (nil? coll)
+    nil
+    (let [s (-seq coll)]
+      (if (nil? s)
+        nil
+        (-rest s)))))
+
+;; DEVIATION: second function
+(defn second
+  "Returns the second item in the collection."
+  [coll]
+  (first (next coll)))
+
+(defn nth
+  "Returns the value at the index. get returns nil if index out of
+   bounds, nth throws an exception unless not-found is supplied."
+  ([coll n] (-nth coll n))
+  ([coll n not-found] (-nth coll n not-found)))
 
 ;; DEVIATION: caching-hash stub - returns 0 for now
 ;; TODO: Implement proper hash caching
@@ -1142,6 +1244,7 @@
 
 (declare chunked-seq)
 
+
 (deftype PersistentVector [meta cnt shift root tail ^:mutable __hash]
   ICloneable
   (-clone [_] (PersistentVector. meta cnt shift root tail __hash))
@@ -1216,12 +1319,31 @@
   (-hash [coll] (caching-hash coll hash-ordered-coll __hash))
 
   ISeqable
-  ;; DEVIATION: Simplified seq - no IndexedSeq/chunked-seq yet
   (-seq [coll]
     (if (zero? cnt)
       nil
-      ;; TODO: Return proper seq. For now use a simple loop approach
       coll))
+
+  ISeq
+  (-first [coll] (-nth coll 0))
+  (-rest [coll]
+    (if (<= cnt 1)
+      EMPTY-LIST
+      ;; Build a list from elements 1..n
+      (loop [i (dec cnt) acc EMPTY-LIST]
+        (if (< i 1)
+          acc
+          (recur (dec i) (cons (-nth coll i) acc))))))
+
+  INext
+  (-next [coll]
+    (if (<= cnt 1)
+      nil
+      ;; Build a list from elements 1..n
+      (loop [i (dec cnt) acc EMPTY-LIST]
+        (if (< i 1)
+          acc
+          (recur (dec i) (cons (-nth coll i) acc))))))
 
   ICounted
   (-count [coll] cnt)
@@ -1410,11 +1532,7 @@
   [x]
   (if (reduced? x) (-deref x) x))
 
-;; DEVIATION: map? stub - real implementation after map types are defined
-(defn map?
-  "Return true if x is a map"
-  [x]
-  false)
+;; map? is defined after PersistentHashMap below
 
 ;; DEVIATION: record? stub
 (defn record?
@@ -1916,17 +2034,11 @@
 ;; Map seq helper (must come before map types that use it)
 ;; -----------------------------------------------------------------------------
 
-;; Helper closure that builds entry and conses it
-(defn -build-entry-and-cons [make-entry-fn]
-  "Returns a reducer function that builds map entries."
-  (fn [acc k v]
-    (cons (make-entry-fn k v) acc)))
-
 ;; Helper to build a list of MapEntry from a map using kv-reduce
 ;; This is eager but simple - builds the full list upfront
 (defn -map-to-entry-list [m]
   "Converts a map to a list of MapEntry objects using kv-reduce."
-  (-kv-reduce m (-build-entry-and-cons make-map-entry) nil))
+  (-kv-reduce m (fn [acc k v] (cons (make-map-entry k v) acc)) nil))
 
 ;; -----------------------------------------------------------------------------
 ;; PersistentArrayMap
@@ -1982,10 +2094,15 @@
   (-hash [coll] (caching-hash coll hash-unordered-coll __hash))
 
   ISeqable
-  ;; DEVIATION: Builds eager list of MapEntry via kv-reduce
+  ;; DEVIATION: Builds eager list of MapEntry by walking the array directly
   (-seq [coll]
     (when (pos? cnt)
-      (-map-to-entry-list coll)))
+      (let [a arr
+            len (alength a)]
+        (loop [i (- len 2) acc nil]
+          (if (>= i 0)
+            (recur (- i 2) (cons (MapEntry. (aget a i) (aget a (+ i 1)) nil) acc))
+            acc)))))
 
   ICounted
   (-count [coll] cnt)
@@ -2116,10 +2233,10 @@
   (-hash [coll] (caching-hash coll hash-unordered-coll __hash))
 
   ISeqable
-  ;; DEVIATION: Builds eager list of MapEntry via kv-reduce
+  ;; DEVIATION: Builds eager list of MapEntry via kv-reduce (inlined)
   (-seq [coll]
     (when (pos? cnt)
-      (-map-to-entry-list coll)))
+      (-kv-reduce coll (fn [acc k v] (cons (MapEntry. k v nil) acc)) nil)))
 
   ICounted
   (-count [coll] cnt)
@@ -2220,6 +2337,16 @@
         (PersistentArrayMap. nil (/ (alength arr) 2) arr nil)))))
 
 ;; -----------------------------------------------------------------------------
+;; Map Type Predicates
+;; -----------------------------------------------------------------------------
+
+(defn map?
+  "Return true if x is a map (PersistentArrayMap or PersistentHashMap)"
+  [x]
+  (or (instance? PersistentArrayMap x)
+      (instance? PersistentHashMap x)))
+
+;; -----------------------------------------------------------------------------
 ;; Map Wrapper Functions
 ;; -----------------------------------------------------------------------------
 
@@ -2242,6 +2369,14 @@
     (if not-found
       (-lookup m k (first not-found))
       (-lookup m k))))
+
+;; Make keywords callable as functions: (:key map) and (:key map default)
+(extend-type Keyword
+  IFn
+  (-invoke [k coll]
+    (get coll k))
+  (-invoke [k coll not-found]
+    (get coll k not-found)))
 
 (defn assoc
   "assoc[iate]. When applied to a map, returns a new map of the

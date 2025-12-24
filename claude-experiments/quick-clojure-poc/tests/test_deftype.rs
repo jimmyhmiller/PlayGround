@@ -85,7 +85,7 @@ fn run_gc_always_and_get_stdout(code: &str) -> String {
 fn test_deftype_basic_construction() {
     let code = r#"
 (deftype* Point [x y])
-(Point. 10 20)
+(println (Point. 10 20))
 "#;
     let output = run_and_get_stdout(code);
     // Should return a heap object representation (may include type name like #<user/Point@...>)
@@ -97,7 +97,7 @@ fn test_deftype_field_access_x_y() {
     let code = r#"
 (deftype* Point [x y])
 (def p (Point. 10 20))
-(.-x p)
+(println (.-x p))
 "#;
     let output = run_and_get_stdout(code);
     assert_eq!(output, "10", "Expected 10, got: {}", output);
@@ -108,7 +108,7 @@ fn test_deftype_field_access_y() {
     let code = r#"
 (deftype* Point [x y])
 (def p (Point. 10 20))
-(.-y p)
+(println (.-y p))
 "#;
     let output = run_and_get_stdout(code);
     assert_eq!(output, "20", "Expected 20, got: {}", output);
@@ -119,7 +119,7 @@ fn test_deftype_both_fields() {
     let code = r#"
 (deftype* Point [x y])
 (def p (Point. 3 7))
-(+ (.-x p) (.-y p))
+(println (+ (.-x p) (.-y p)))
 "#;
     let output = run_and_get_stdout(code);
     assert_eq!(output, "10", "Expected 10 (3+7), got: {}", output);
@@ -134,7 +134,7 @@ fn test_deftype_arbitrary_field_names() {
     let code = r#"
 (deftype* Person [name age city])
 (def p (Person. 100 25 999))
-(.-age p)
+(println (.-age p))
 "#;
     let output = run_and_get_stdout(code);
     assert_eq!(output, "25", "Expected 25, got: {}", output);
@@ -145,7 +145,7 @@ fn test_deftype_first_arbitrary_field() {
     let code = r#"
 (deftype* Person [name age city])
 (def p (Person. 100 25 999))
-(.-name p)
+(println (.-name p))
 "#;
     let output = run_and_get_stdout(code);
     assert_eq!(output, "100", "Expected 100, got: {}", output);
@@ -156,7 +156,7 @@ fn test_deftype_last_arbitrary_field() {
     let code = r#"
 (deftype* Person [name age city])
 (def p (Person. 100 25 999))
-(.-city p)
+(println (.-city p))
 "#;
     let output = run_and_get_stdout(code);
     assert_eq!(output, "999", "Expected 999, got: {}", output);
@@ -167,7 +167,7 @@ fn test_deftype_long_field_names() {
     let code = r#"
 (deftype* Config [database-connection-string max-retry-count timeout-milliseconds])
 (def c (Config. 1 5 3000))
-(.-timeout-milliseconds c)
+(println (.-timeout-milliseconds c))
 "#;
     let output = run_and_get_stdout(code);
     assert_eq!(output, "3000", "Expected 3000, got: {}", output);
@@ -185,7 +185,7 @@ fn test_deftype_nested_types() {
 (def p1 (Point. 0 0))
 (def p2 (Point. 10 20))
 (def line (Line. p1 p2))
-(.-x (.-start line))
+(println (.-x (.-start line)))
 "#;
     let output = run_and_get_stdout(code);
     assert_eq!(output, "0", "Expected 0, got: {}", output);
@@ -199,7 +199,7 @@ fn test_deftype_nested_end_field() {
 (def p1 (Point. 0 0))
 (def p2 (Point. 10 20))
 (def line (Line. p1 p2))
-(.-y (.-end line))
+(println (.-y (.-end line)))
 "#;
     let output = run_and_get_stdout(code);
     assert_eq!(output, "20", "Expected 20, got: {}", output);
@@ -215,7 +215,7 @@ fn test_deftype_in_function_constructor() {
 (deftype* Point [x y])
 (def make-point (fn [x y] (Point. x y)))
 (def p (make-point 5 15))
-(.-x p)
+(println (.-x p))
 "#;
     let output = run_and_get_stdout(code);
     assert_eq!(output, "5", "Expected 5, got: {}", output);
@@ -227,7 +227,7 @@ fn test_deftype_in_function_accessor() {
 (deftype* Point [x y])
 (def get-x (fn [p] (.-x p)))
 (def p (Point. 42 99))
-(get-x p)
+(println (get-x p))
 "#;
     let output = run_and_get_stdout(code);
     assert_eq!(output, "42", "Expected 42, got: {}", output);
@@ -239,7 +239,7 @@ fn test_deftype_function_with_field_operations() {
 (deftype* Point [x y])
 (def distance-from-origin (fn [p] (+ (.-x p) (.-y p))))
 (def p (Point. 3 4))
-(distance-from-origin p)
+(println (distance-from-origin p))
 "#;
     let output = run_and_get_stdout(code);
     assert_eq!(output, "7", "Expected 7, got: {}", output);
@@ -254,7 +254,7 @@ fn test_deftype_invalid_field_error() {
     let code = r#"
 (deftype* Point [x y])
 (def p (Point. 10 20))
-(.-invalid p)
+(println (.-invalid p))
 "#;
     let stderr = run_and_get_stderr(code);
     assert!(stderr.contains("Field 'invalid' not found"),
@@ -266,7 +266,7 @@ fn test_deftype_invalid_field_with_type_name() {
     let code = r#"
 (deftype* Point [x y])
 (def p (Point. 10 20))
-(.-z p)
+(println (.-z p))
 "#;
     let stderr = run_and_get_stderr(code);
     // Error should mention the type name
@@ -285,7 +285,7 @@ fn test_deftype_multiple_types() {
 (deftype* Rectangle [width height])
 (def p (Point. 1 2))
 (def r (Rectangle. 100 50))
-(+ (.-x p) (.-width r))
+(println (+ (.-x p) (.-width r)))
 "#;
     let output = run_and_get_stdout(code);
     assert_eq!(output, "101", "Expected 101 (1+100), got: {}", output);
@@ -299,7 +299,7 @@ fn test_deftype_same_field_names_different_types() {
 (deftype* Point3D [x y z])
 (def p2 (Point2D. 10 20))
 (def p3 (Point3D. 100 200 300))
-(+ (.-x p2) (.-x p3))
+(println (+ (.-x p2) (.-x p3)))
 "#;
     let output = run_and_get_stdout(code);
     assert_eq!(output, "110", "Expected 110 (10+100), got: {}", output);
@@ -314,7 +314,7 @@ fn test_deftype_single_field() {
     let code = r#"
 (deftype* Wrapper [value])
 (def w (Wrapper. 42))
-(.-value w)
+(println (.-value w))
 "#;
     let output = run_and_get_stdout(code);
     assert_eq!(output, "42", "Expected 42, got: {}", output);
@@ -325,7 +325,7 @@ fn test_deftype_many_fields() {
     let code = r#"
 (deftype* BigType [a b c d e f])
 (def bt (BigType. 1 2 3 4 5 6))
-(+ (.-a bt) (.-f bt))
+(println (+ (.-a bt) (.-f bt)))
 "#;
     let output = run_and_get_stdout(code);
     assert_eq!(output, "7", "Expected 7 (1+6), got: {}", output);
@@ -337,7 +337,7 @@ fn test_deftype_field_containing_other_values() {
     let code = r#"
 (deftype* Flags [enabled count])
 (def f (Flags. true 5))
-(.-count f)
+(println (.-count f))
 "#;
     let output = run_and_get_stdout(code);
     assert_eq!(output, "5", "Expected 5, got: {}", output);
@@ -360,7 +360,7 @@ fn test_deftype_binary_tree_sum() {
 (def branch1 (Node. 10 leaf1 leaf2))
 (def branch2 (Node. 20 leaf3 leaf4))
 (def root (Node. 100 branch1 branch2))
-(sum-tree root)
+(println (sum-tree root))
 "#;
     let output = run_and_get_stdout(code);
     // 100 + 10 + 20 + 1 + 2 + 3 + 4 = 140
@@ -404,7 +404,7 @@ fn test_deftype_complete_binary_tree_31_nodes() {
 (def p1 (Node. 1 m1 m2))
 (def p2 (Node. 1 m3 m4))
 (def root (Node. 1 p1 p2))
-(sum-tree root)
+(println (sum-tree root))
 "#;
     let output = run_and_get_stdout(code);
     // 31 nodes, each with value 1
@@ -424,7 +424,7 @@ fn test_deftype_deep_field_chain() {
 (def n6 (Node. 6 n5 nil))
 (def n7 (Node. 7 n6 nil))
 (def n8 (Node. 8 n7 nil))
-(.-value (.-left (.-left (.-left (.-left (.-left (.-left (.-left n8))))))))
+(println (.-value (.-left (.-left (.-left (.-left (.-left (.-left (.-left n8)))))))))
 "#;
     let output = run_and_get_stdout(code);
     assert_eq!(output, "1", "Expected 1 at depth 8, got: {}", output);
@@ -444,7 +444,7 @@ fn test_deftype_different_namespaces_no_collision() {
 (ns bar)
 (deftype* Point [a b c])
 (def p2 (Point. 10 20 30))
-(.-a p2)
+(println (.-a p2))
 "#;
     let output = run_and_get_stdout(code);
     // bar/Point has 3 fields, should get 10 for field 'a'
@@ -459,7 +459,7 @@ fn test_deftype_qualified_constructor_call() {
 (deftype* Widget [id])
 (ns other)
 (def w (myns/Widget. 42))
-(.-id w)
+(println (.-id w))
 "#;
     let output = run_and_get_stdout(code);
     assert_eq!(output, "42", "Expected 42, got: {}", output);
@@ -472,21 +472,10 @@ fn test_deftype_same_name_different_fields_different_ns() {
     let code = r#"
 (ns ns1)
 (deftype* Point [x y])
-(def p1 (Point. 100 200))
 (ns ns2)
 (deftype* Point [a b c])
 (def p2 (Point. 1 2 3))
-(+ (.-x (ns ns1) p1) (.-c (ns ns2) p2))
-"#;
-    // This is a bit tricky - we need to access p1 which is in ns1
-    // Let's try a simpler version first
-    let code = r#"
-(ns ns1)
-(deftype* Point [x y])
-(ns ns2)
-(deftype* Point [a b c])
-(def p2 (Point. 1 2 3))
-(.-b p2)
+(println (.-b p2))
 "#;
     let output = run_and_get_stdout(code);
     assert_eq!(output, "2", "Expected 2, got: {}", output);
@@ -510,7 +499,7 @@ fn test_gc_always_binary_tree() {
 (def branch1 (Node. 10 leaf1 leaf2))
 (def branch2 (Node. 20 leaf3 leaf4))
 (def root (Node. 100 branch1 branch2))
-(sum-tree root)
+(println (sum-tree root))
 "#;
     let output = run_gc_always_and_get_stdout(code);
     // 100 + 10 + 20 + 1 + 2 + 3 + 4 = 140
@@ -554,7 +543,7 @@ fn test_gc_always_complete_binary_tree() {
 (def p1 (Node. 1 m1 m2))
 (def p2 (Node. 1 m3 m4))
 (def root (Node. 1 p1 p2))
-(sum-tree root)
+(println (sum-tree root))
 "#;
     let output = run_gc_always_and_get_stdout(code);
     // 31 nodes, each with value 1

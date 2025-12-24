@@ -2,6 +2,7 @@ pub mod ast;
 pub mod dialect;
 pub mod ir_gen;
 pub mod jit;
+pub mod macro_compiler;
 pub mod macros;
 pub mod module_loader;
 pub mod namespace;
@@ -31,5 +32,6 @@ pub use runtime::{
 pub use token::{Token, TokenType};
 pub use tokenizer::{Tokenizer, TokenizerError};
 pub use value::{Symbol, Value};
+pub use macro_compiler::{CompiledMacros, MacroCompiler, MacroCompilerError};
 pub use macros::{JitMacro, JitMacroFn, Macro, MacroError, MacroExpander, MacroRegistry};
 pub use value_ffi::{get_value_ffi_functions, FfiFunction};

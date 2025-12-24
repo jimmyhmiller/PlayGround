@@ -682,6 +682,24 @@ impl GCRuntime {
         Ok(self.tag_heap_object(ns_ptr))
     }
 
+    /// Refer all bindings from source namespace into target namespace
+    /// This is used to implement (ns foo) which implicitly refers clojure.core
+    /// Returns the (possibly relocated) target namespace pointer
+    pub fn refer_all(&mut self, target_ns_ptr: usize, source_ns_ptr: usize) -> Result<usize, String> {
+        // Get all bindings from source namespace first
+        // We collect them to avoid issues with GC during iteration
+        let bindings = self.namespace_all_bindings(source_ns_ptr);
+
+        // Add each binding to the target namespace
+        let mut current_target = target_ns_ptr;
+        for (name, var_ptr) in bindings {
+            // namespace_add_binding may reallocate and return new pointer
+            current_target = self.namespace_add_binding(current_target, &name, var_ptr)?;
+        }
+
+        Ok(current_target)
+    }
+
     /// Add or update a binding in a namespace (may reallocate!)
     pub fn namespace_add_binding(
         &mut self,
@@ -793,6 +811,30 @@ impl GCRuntime {
         let heap_obj = HeapObject::from_untagged(ns_untagged as *const u8);
         let name_ptr = heap_obj.get_field(0);
         self.read_string(name_ptr)
+    }
+
+    /// Get all bindings from a namespace as (name, var_ptr) pairs
+    pub fn namespace_all_bindings(&self, ns_ptr: usize) -> Vec<(String, usize)> {
+        let ns_untagged = self.untag_heap_object(ns_ptr);
+        let heap_obj = HeapObject::from_untagged(ns_untagged as *const u8);
+        let header = heap_obj.get_header();
+        let size = header.size as usize;
+
+        if size == 0 {
+            return Vec::new();
+        }
+
+        let num_bindings = (size - 1) / 2;
+        let mut bindings = Vec::with_capacity(num_bindings);
+
+        for i in 0..num_bindings {
+            let name_ptr = heap_obj.get_field(1 + i * 2);
+            let var_ptr = heap_obj.get_field(1 + i * 2 + 1);
+            let name = self.read_string(name_ptr);
+            bindings.push((name, var_ptr));
+        }
+
+        bindings
     }
 
     /// Register namespace as GC root
@@ -1403,6 +1445,28 @@ impl GCRuntime {
         heap_obj.get_header().type_id == TYPE_ARRAY as u8
     }
 
+    /// Check if a value is a map (PersistentHashMap)
+    pub fn is_map(&self, value: usize) -> bool {
+        // Check if it's a heap object
+        if (value & 0b111) != 0b110 {
+            return false;
+        }
+        let untagged = self.untag_heap_object(value);
+        let heap_obj = HeapObject::from_untagged(untagged as *const u8);
+        heap_obj.get_header().type_id == TYPE_MAP as u8
+    }
+
+    /// Check if a value is a vector
+    pub fn is_vector(&self, value: usize) -> bool {
+        // Check if it's a heap object
+        if (value & 0b111) != 0b110 {
+            return false;
+        }
+        let untagged = self.untag_heap_object(value);
+        let heap_obj = HeapObject::from_untagged(untagged as *const u8);
+        heap_obj.get_header().type_id == TYPE_VECTOR as u8
+    }
+
     /// Clone an array (allocates a new array with same contents)
     pub fn array_clone(&mut self, arr_ptr: usize) -> Result<usize, String> {
         let length = self.array_length(arr_ptr);
@@ -1723,7 +1787,12 @@ impl GCRuntime {
                     TYPE_DEFTYPE => {
                         let type_data = obj.get_header().type_data as usize;
                         if let Some(def) = self.get_type_def(type_data) {
-                            format!("#<{}@{:x}>", def.name, untagged)
+                            // Special handling for Cons cells - print as list
+                            if def.name == "clojure.core/Cons" {
+                                self.format_cons(value)
+                            } else {
+                                format!("#<{}@{:x}>", def.name, untagged)
+                            }
                         } else {
                             format!("#<deftype@{:x}>", untagged)
                         }
@@ -1801,6 +1870,64 @@ impl GCRuntime {
 
             items.push(self.format_value(head));
             current = tail;
+        }
+
+        format!("({})", items.join(" "))
+    }
+
+    /// Format a Cons cell (deftype) as a list
+    fn format_cons(&self, value: usize) -> String {
+        let mut items = Vec::new();
+        let mut current = value;
+        let mut max_depth = 100;
+
+        while max_depth > 0 {
+            max_depth -= 1;
+
+            // Check if nil
+            if current == 7 {
+                break;
+            }
+
+            // Check if it's a heap object
+            if BuiltInTypes::get_kind(current) != BuiltInTypes::HeapObject {
+                items.push(format!(". {}", self.format_value(current)));
+                break;
+            }
+
+            let untagged = current >> 3;
+            let obj = HeapObject::from_untagged(untagged as *const u8);
+            let type_id = obj.get_type_id();
+
+            // Check if it's a deftype (Cons)
+            if type_id as usize != TYPE_DEFTYPE {
+                // Check for EmptyList (TYPE_LIST with count 0)
+                if type_id as usize == TYPE_LIST {
+                    break;
+                }
+                items.push(format!(". {}", self.format_value(current)));
+                break;
+            }
+
+            // Check if it's a Cons type by looking at the type_data
+            let type_data = obj.get_header().type_data as usize;
+            if let Some(def) = self.get_type_def(type_data) {
+                if def.name != "clojure.core/Cons" {
+                    items.push(format!(". {}", self.format_value(current)));
+                    break;
+                }
+            } else {
+                items.push(format!(". {}", self.format_value(current)));
+                break;
+            }
+
+            // Cons has fields: [meta, first, rest, __hash]
+            // first is at field index 1, rest is at field index 2
+            let first = obj.get_field(1);
+            let rest = obj.get_field(2);
+
+            items.push(self.format_value(first));
+            current = rest;
         }
 
         format!("({})", items.join(" "))

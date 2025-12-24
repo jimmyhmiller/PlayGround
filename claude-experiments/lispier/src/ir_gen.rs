@@ -167,6 +167,10 @@ impl<'c> IRGenerator<'c> {
                 // Defmacro nodes are metadata for macro registration, not IR
                 Ok(None)
             }
+            Node::RequireMacros(_) => {
+                // RequireMacros nodes are metadata for macro loading, not IR
+                Ok(None)
+            }
         }
     }
 
