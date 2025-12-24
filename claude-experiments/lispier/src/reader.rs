@@ -80,6 +80,30 @@ impl<'a> Reader<'a> {
                 // Standalone ":" is used for type annotations and typed block args.
                 Ok(Some(Value::symbol(":")))
             }
+            TokenType::Backtick => {
+                // Quasiquote: `form -> (quasiquote form)
+                let form = self.read_value()?.ok_or_else(|| {
+                    ReaderError::UnexpectedToken(TokenType::Eof, token.line, token.column)
+                })?;
+                Ok(Some(Value::List(vec![Value::symbol("quasiquote"), form])))
+            }
+            TokenType::Tilde => {
+                // Unquote: ~form -> (unquote form)
+                let form = self.read_value()?.ok_or_else(|| {
+                    ReaderError::UnexpectedToken(TokenType::Eof, token.line, token.column)
+                })?;
+                Ok(Some(Value::List(vec![Value::symbol("unquote"), form])))
+            }
+            TokenType::TildeAt => {
+                // Unquote-splice: ~@form -> (unquote-splice form)
+                let form = self.read_value()?.ok_or_else(|| {
+                    ReaderError::UnexpectedToken(TokenType::Eof, token.line, token.column)
+                })?;
+                Ok(Some(Value::List(vec![
+                    Value::symbol("unquote-splice"),
+                    form,
+                ])))
+            }
             TokenType::Eof => Ok(None),
             TokenType::RightParen | TokenType::RightBracket | TokenType::RightBrace => {
                 Err(ReaderError::UnexpectedToken(

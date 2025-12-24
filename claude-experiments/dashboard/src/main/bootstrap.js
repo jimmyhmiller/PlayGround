@@ -1,3 +1,2 @@
-// Bootstrap file to load TypeScript main via tsx
-require('tsx/cjs');
+// Bootstrap file - hot-reload/electron-loader handles TypeScript transformation
 require('./index.ts');

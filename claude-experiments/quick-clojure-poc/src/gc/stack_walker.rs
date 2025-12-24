@@ -23,46 +23,37 @@ impl StackWalker {
 
     /// Walk the stack and call a callback for each heap pointer found
     /// The callback receives (stack_offset, heap_pointer_value)
+    ///
+    /// This uses a conservative approach: we scan ALL values on the stack that look
+    /// like heap pointers, not just those within recognized stack frames. This is
+    /// necessary because:
+    /// 1. Registers saved by ExternalCallWithSaves (via STP) are pushed below the
+    ///    stack frame boundary and wouldn't be scanned otherwise
+    /// 2. The trampoline's return address may not be in our stack map, so frame-based
+    ///    scanning would miss values in the current call context
     pub fn walk_stack_roots<F>(
         stack_base: usize,
         stack_pointer: usize,
-        stack_map: &StackMap,
+        _stack_map: &StackMap,  // Kept for API compatibility but not used in conservative scan
         mut callback: F,
     ) where
         F: FnMut(usize, usize),
     {
         let stack = Self::get_live_stack(stack_base, stack_pointer);
 
-        let mut i = 0;
-        while i < stack.len() {
-            let value = stack[i];
-
-            if let Some(details) = stack_map.find_stack_data(value) {
-                let mut frame_size = details.max_stack_size + details.number_of_locals;
-                if frame_size % 2 != 0 {
-                    frame_size += 1;
+        // Conservative scan: check EVERY word on the stack for heap pointers
+        // This catches:
+        // - Values in recognized stack frames
+        // - Registers saved via STP before trampoline calls
+        // - Any other live values that might be heap references
+        for (i, &value) in stack.iter().enumerate() {
+            if BuiltInTypes::is_heap_pointer(value) {
+                let untagged = BuiltInTypes::untag(value);
+                // Verify alignment (garbage values may have heap pointer tags but wrong alignment)
+                if untagged % 8 == 0 {
+                    callback(i, value);
                 }
-
-                let bottom_of_frame = i + frame_size + 1;
-                let active_frame = details.current_stack_size + details.number_of_locals;
-
-                i = bottom_of_frame;
-
-                for (j, slot) in stack
-                    .iter()
-                    .enumerate()
-                    .take(bottom_of_frame)
-                    .skip(bottom_of_frame - active_frame)
-                {
-                    if BuiltInTypes::is_heap_pointer(*slot) {
-                        let untagged = BuiltInTypes::untag(*slot);
-                        debug_assert!(untagged % 8 == 0, "Pointer is not aligned");
-                        callback(j, *slot);
-                    }
-                }
-                continue;
             }
-            i += 1;
         }
     }
 

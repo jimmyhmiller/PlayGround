@@ -109,7 +109,8 @@ impl BuiltInTypes {
     }
 
     pub fn is_heap_pointer(value: usize) -> bool {
-        match BuiltInTypes::get_kind(value) {
+        // First check: must have a heap pointer tag
+        let is_heap_tagged = match BuiltInTypes::get_kind(value) {
             BuiltInTypes::Int => false,
             BuiltInTypes::Float => true,
             BuiltInTypes::String => true,  // Strings ARE heap objects that need tracing
@@ -118,7 +119,14 @@ impl BuiltInTypes {
             BuiltInTypes::Closure => true,
             BuiltInTypes::HeapObject => true,
             BuiltInTypes::Null => false,
+        };
+        if !is_heap_tagged {
+            return false;
         }
+        // Second check: untagged pointer must be 8-byte aligned
+        // This filters out garbage values that happen to have the heap pointer tag
+        let untagged = Self::untag(value);
+        untagged % 8 == 0
     }
 
     /// Check if a tagged value is a closure (tag 0b101)

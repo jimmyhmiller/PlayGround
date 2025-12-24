@@ -208,7 +208,7 @@ mod tests {
         // Extract defmacro declarations
         let defmacros = extract_defmacros(&nodes);
         assert!(!defmacros.is_empty(), "Expected at least one defmacro");
-        assert_eq!(defmacros[0].name, "identity");
+        assert_eq!(defmacros[0].name, "double");
 
         // Generate MLIR and compile
         let registry = DialectRegistry::new();
@@ -224,20 +224,39 @@ mod tests {
 
         // Look up the macro function
         let macro_fn = jit
-            .lookup_macro_fn("identity")
-            .expect("Failed to find identity function");
+            .lookup_macro_fn("double")
+            .expect("Failed to find double function");
 
         // Create the JitMacro
-        let jit_macro = unsafe { JitMacro::new("identity", macro_fn) };
+        let jit_macro = unsafe { JitMacro::new("double", macro_fn) };
 
-        // Test the macro: expand (identity 42) should return 42
-        let args = vec![Value::Number(42.0)];
+        // Test the macro: expand (double 21) should return (arith.addi 21 21)
+        let args = vec![Value::Number(21.0)];
         let result = jit_macro.expand(&args).expect("Macro expansion failed");
 
-        // The result should be the number 42
+        // The result should be a list (arith.addi 21 21)
         match result {
-            Value::Number(n) => assert_eq!(n, 42.0),
-            _ => panic!("Expected number result, got {:?}", result),
+            Value::List(items) => {
+                assert_eq!(items.len(), 3, "Expected 3 items in list");
+                // First item should be the symbol arith.addi
+                if let Value::Symbol(sym) = &items[0] {
+                    assert_eq!(sym.name, "arith.addi");
+                } else {
+                    panic!("Expected symbol, got {:?}", items[0]);
+                }
+                // Second and third items should be the number 21
+                if let Value::Number(n) = &items[1] {
+                    assert_eq!(*n, 21.0);
+                } else {
+                    panic!("Expected number, got {:?}", items[1]);
+                }
+                if let Value::Number(n) = &items[2] {
+                    assert_eq!(*n, 21.0);
+                } else {
+                    panic!("Expected number, got {:?}", items[2]);
+                }
+            }
+            _ => panic!("Expected list result, got {:?}", result),
         }
     }
 }

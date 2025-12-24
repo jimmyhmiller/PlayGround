@@ -65,6 +65,16 @@ impl Tokenizer {
                 }
             }
             '^' => self.block_label(),
+            '`' => Ok(Some(self.make_token(TokenType::Backtick))),
+            '~' => {
+                // Could be ~ (unquote) or ~@ (unquote-splice)
+                if self.peek() == '@' {
+                    self.advance(); // consume the @
+                    Ok(Some(self.make_token(TokenType::TildeAt)))
+                } else {
+                    Ok(Some(self.make_token(TokenType::Tilde)))
+                }
+            }
             '"' => self.string(),
             ' ' | '\r' | '\t' => Ok(None),
             '\n' => {

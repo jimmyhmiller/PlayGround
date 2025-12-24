@@ -46,21 +46,44 @@ export function createRuntime(): HotRuntime {
       if (!mod) {
         // Might be a node_modules import that wasn't loaded yet
         // Try native require
-        try {
-          const native = require(id);
-          // Wrap native module to look like our module format
-          const wrapper: Record<string, unknown> = { default: native };
-          // Also expose all named exports
-          if (native && typeof native === "object") {
-            Object.assign(wrapper, native);
+        const path = require('path');
+        const fs = require('fs');
+        let native: unknown;
+        let found = false;
+
+        // Check if this is a local module ID (relative to sourceRoot)
+        if (!id.startsWith('/') && !id.startsWith('.') && (id.includes('/') || id.endsWith('.ts') || id.endsWith('.js'))) {
+          const basePath = path.join(this.sourceRoot, id);
+          const extensions = ['', '.ts', '.tsx', '.js', '.jsx', '/index.ts', '/index.js'];
+          for (const ext of extensions) {
+            const fullPath = basePath + ext;
+            if (fs.existsSync(fullPath) && fs.statSync(fullPath).isFile()) {
+              native = require(fullPath);
+              found = true;
+              break;
+            }
           }
-          this.modules.set(id, wrapper);
-          return wrapper;
-        } catch (e) {
-          throw new Error(
-            `[hot] Module "${id}" not found. Make sure it's loaded before accessing it.`
-          );
         }
+
+        if (!found) {
+          try {
+            native = require(id);
+            found = true;
+          } catch (e) {
+            throw new Error(
+              `[hot] Module "${id}" not found. Make sure it's loaded before accessing it.`
+            );
+          }
+        }
+
+        // Wrap native module to look like our module format
+        const wrapper: Record<string, unknown> = { default: native };
+        // Also expose all named exports
+        if (native && typeof native === "object") {
+          Object.assign(wrapper, native);
+        }
+        this.modules.set(id, wrapper);
+        return wrapper;
       }
       return mod;
     },
@@ -71,7 +94,32 @@ export function createRuntime(): HotRuntime {
       if (loader) {
         loader();
       } else {
-        // Try native require for node_modules
+        // Try to require the module
+        // If it looks like a local module ID (not starting with / or a bare specifier), resolve it
+        const path = require('path');
+        const fs = require('fs');
+
+        // Check if this is a local module ID (relative to sourceRoot)
+        // Local IDs look like "src/main/events/EventStore" (no leading . or /)
+        if (!id.startsWith('/') && !id.startsWith('.') && (id.includes('/') || id.endsWith('.ts') || id.endsWith('.js'))) {
+          // Try with common extensions
+          const basePath = path.join(this.sourceRoot, id);
+          const extensions = ['', '.ts', '.tsx', '.js', '.jsx', '/index.ts', '/index.js'];
+          for (const ext of extensions) {
+            const fullPath = basePath + ext;
+            try {
+              if (fs.existsSync(fullPath) && fs.statSync(fullPath).isFile()) {
+                require(fullPath);
+                return;
+              }
+            } catch (e) {
+              // File found but failed to load - this is a real error, rethrow
+              throw e;
+            }
+          }
+        }
+
+        // Fall back to direct require
         try {
           require(id);
         } catch (e) {

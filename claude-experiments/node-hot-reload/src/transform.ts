@@ -16,6 +16,34 @@ function isExternalImport(source: string): boolean {
   return !source.startsWith(".") && !source.startsWith("/");
 }
 
+// Check if an identifier is in a TypeScript type position (type annotation, type argument, etc.)
+function isInTypePosition(nodePath: NodePath<t.Identifier>): boolean {
+  let current: NodePath | null = nodePath;
+  while (current) {
+    const node = current.node;
+    // Check if we're inside any TypeScript type node
+    if (
+      t.isTSTypeAnnotation(node) ||
+      t.isTSTypeReference(node) ||
+      t.isTSTypeParameterDeclaration(node) ||
+      t.isTSTypeParameterInstantiation(node) ||
+      t.isTSTypeLiteral(node) ||
+      t.isTSFunctionType(node) ||
+      t.isTSArrayType(node) ||
+      t.isTSUnionType(node) ||
+      t.isTSIntersectionType(node) ||
+      t.isTSTypeQuery(node) ||
+      t.isTSExpressionWithTypeArguments(node) ||
+      t.isTSInterfaceDeclaration(node) ||
+      t.isTSTypeAliasDeclaration(node)
+    ) {
+      return true;
+    }
+    current = current.parentPath;
+  }
+  return false;
+}
+
 // Check if an expression is a require() call and return the source if external
 function getExternalRequireSource(node: t.Expression | null | undefined): string | null {
   if (!node) return null;
@@ -96,10 +124,19 @@ export function transform(code: string, options: TransformOptions): string {
   // Track ESM exports (only used in ESM mode)
   const esmExports: Array<{ name: string; type: 'function' | 'value' | 'default-function' | 'default-value' }> = [];
 
+  // Track if we have a TSExportAssignment (export = x) for CJS module.exports
+  let hasTSExportAssignment = false;
+
   // First pass: collect imports and top-level declarations
   traverse(ast, {
     ImportDeclaration(nodePath: NodePath<t.ImportDeclaration>) {
       const sourceValue = nodePath.node.source.value;
+
+      // Skip type-only imports entirely - they don't exist at runtime
+      if (nodePath.node.importKind === 'type') {
+        nodePath.remove();
+        return;
+      }
 
       // Check if this is importing from our API
       const isApiImport = sourceValue === "hot-reload" ||
@@ -262,8 +299,9 @@ export function transform(code: string, options: TransformOptions): string {
         // The imported module will export wrappers that delegate to __hot
         // Don't track these in 'imports' so references won't be transformed
         return;
-      } else if (nodePath.node.specifiers.length === 0) {
-        // Side-effect import for local module
+      } else {
+        // CJS mode: local import - replace with __hot.require() to load the module
+        // References will be replaced with __hot.get() calls
         nodePath.replaceWith(
           t.expressionStatement(
             t.callExpression(
@@ -272,9 +310,6 @@ export function transform(code: string, options: TransformOptions): string {
             )
           )
         );
-      } else {
-        // Local import - remove (references will be replaced with __hot.get())
-        nodePath.remove();
       }
     },
 
@@ -343,12 +378,19 @@ export function transform(code: string, options: TransformOptions): string {
         const sourceValue = source.value;
         const isExternal = isExternalImport(sourceValue);
 
-        // Track as external import so we don't transform references
+        // Track so we don't transform references
         externalImportIds.add(id.name);
 
-        if (isExternal) {
-          // External imports: use require() since node_modules are already JS
-          // Transform to: const x = require('...')
+        if (esm && !isExternal) {
+          // ESM mode + local import: convert to ESM default import
+          nodePath.replaceWith(
+            t.importDeclaration(
+              [t.importDefaultSpecifier(id)],
+              source
+            )
+          );
+        } else {
+          // CJS mode OR external import: use require()
           nodePath.replaceWith(
             t.variableDeclaration("const", [
               t.variableDeclarator(
@@ -356,15 +398,6 @@ export function transform(code: string, options: TransformOptions): string {
                 t.callExpression(t.identifier("require"), [source])
               )
             ])
-          );
-        } else {
-          // Local imports: convert to ESM default import so they go through our loader
-          // Transform to: import x from '...'
-          nodePath.replaceWith(
-            t.importDeclaration(
-              [t.importDefaultSpecifier(id)],
-              source
-            )
           );
         }
       }
@@ -375,6 +408,9 @@ export function transform(code: string, options: TransformOptions): string {
   traverse(ast, {
     Identifier(nodePath: NodePath<t.Identifier>) {
       const name = nodePath.node.name;
+
+      // Skip identifiers in type positions (type annotations, type references, etc.)
+      if (isInTypePosition(nodePath)) return;
 
       // Skip API function references (once, defonce)
       if (apiImports.has(name)) return;
@@ -555,7 +591,19 @@ export function transform(code: string, options: TransformOptions): string {
     ExportNamedDeclaration(nodePath: NodePath<t.ExportNamedDeclaration>) {
       const { declaration, specifiers } = nodePath.node;
 
+      // Handle type-only exports - remove them entirely
+      if (nodePath.node.exportKind === 'type') {
+        nodePath.remove();
+        return;
+      }
+
       if (declaration) {
+        // Handle type-only declarations (export interface, export type)
+        if (t.isTSInterfaceDeclaration(declaration) || t.isTSTypeAliasDeclaration(declaration)) {
+          nodePath.remove();
+          return;
+        }
+
         if (t.isFunctionDeclaration(declaration) && declaration.id) {
           const name = declaration.id.name;
           locals.set(name, { type: "function", preserve: false });
@@ -724,6 +772,7 @@ export function transform(code: string, options: TransformOptions): string {
     // This is CJS-style export that needs to become `export default` in ESM
     TSExportAssignment(nodePath: NodePath<t.TSExportAssignment>) {
       const expression = nodePath.node.expression;
+      hasTSExportAssignment = true;
       if (esm) esmExports.push({ name: 'default', type: 'default-value' });
       nodePath.replaceWith(
         t.expressionStatement(
@@ -884,10 +933,39 @@ export function transform(code: string, options: TransformOptions): string {
     }
   }
 
+  // In CJS mode, add module.exports at the end
+  if (!esm) {
+    if (hasTSExportAssignment) {
+      // export = expression -> module.exports = __m.default
+      ast.program.body.push(
+        t.expressionStatement(
+          t.assignmentExpression(
+            "=",
+            t.memberExpression(t.identifier("module"), t.identifier("exports")),
+            t.memberExpression(t.identifier("__m"), t.identifier("default"))
+          )
+        )
+      );
+    } else {
+      // Regular exports -> module.exports = __m (so all exports are accessible)
+      ast.program.body.push(
+        t.expressionStatement(
+          t.assignmentExpression(
+            "=",
+            t.memberExpression(t.identifier("module"), t.identifier("exports")),
+            t.identifier("__m")
+          )
+        )
+      );
+    }
+  }
+
   // Strip TypeScript types using Babel transform
+  // Use require.resolve to get absolute path - ensures plugin is found from hot-reload's node_modules
+  const tsPluginPath = require.resolve('@babel/plugin-transform-typescript');
   const result = transformFromAstSync(ast, code, {
     plugins: [
-      ['@babel/plugin-transform-typescript', { isTSX: true }]
+      [tsPluginPath, { isTSX: true }]
     ],
     filename: filename,
     sourceType: 'module',
@@ -1107,11 +1185,17 @@ export function transformExpression(
   return { code: resultCode, type: resultType };
 }
 
+// Strip known extensions from module IDs for consistent matching
+function stripExtension(filePath: string): string {
+  return filePath.replace(/\.(ts|tsx|js|jsx)$/, '');
+}
+
 function resolveModuleId(filename: string, sourceRoot: string): string {
   const absolute = path.isAbsolute(filename)
     ? filename
     : path.resolve(sourceRoot, filename);
-  return path.relative(sourceRoot, absolute);
+  const relative = path.relative(sourceRoot, absolute);
+  return stripExtension(relative);
 }
 
 function resolveImportSource(
@@ -1125,5 +1209,6 @@ function resolveImportSource(
 
   const fromDir = path.dirname(fromFile);
   const absolute = path.resolve(fromDir, source);
-  return path.relative(sourceRoot, absolute);
+  const relative = path.relative(sourceRoot, absolute);
+  return stripExtension(relative);
 }

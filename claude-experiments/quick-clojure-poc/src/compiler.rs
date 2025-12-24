@@ -219,10 +219,11 @@ impl Compiler {
                 ));
             }
             Value::String(s) => {
-                // Allocate string at compile time
+                // Allocate string at compile time as a rooted constant
+                // This ensures the string survives GC even when not stored in a var
                 // SAFETY: Single-threaded REPL
                 let rt = unsafe { &mut *self.runtime.get() };
-                let str_ptr = rt.allocate_string(s)
+                let str_ptr = rt.allocate_string_constant(s)
                     .map_err(|e| format!("Failed to allocate string: {}", e))?;
 
                 // Load the tagged pointer as a constant
@@ -433,7 +434,7 @@ impl Compiler {
         let type_id_reg = self.builder.assign_new(IrValue::RawConstant(type_info.type_id as i64));
         let field_count_reg = self.builder.assign_new(IrValue::RawConstant(field_values.len() as i64));
 
-        // Pass FramePointer (x29) as first arg for GC stack walking
+        // Pass FramePointer (SP/x31) as first arg for GC stack walking
         self.builder.emit(Instruction::ExternalCall(
             raw_ptr,
             trampoline_addr,
@@ -2172,13 +2173,13 @@ impl Compiler {
         self.builder.emit(float_op(float_result, left_float, right_float));
 
         // Allocate new float on heap and get tagged pointer
-        // Call trampoline_allocate_float(jit_frame_ptr, f64_bits) -> tagged_ptr
+        // Call trampoline_allocate_float(stack_pointer, f64_bits) -> tagged_ptr
         let trampoline_addr = crate::trampoline::trampoline_allocate_float as usize;
-        let fp_reg = IrValue::RawConstant(29);  // x29 = frame pointer
+        // Use FramePointer which is mapped to SP (x31) for GC stack scanning
         self.builder.emit(Instruction::ExternalCall(
             result,
             trampoline_addr,
-            vec![fp_reg, float_result]
+            vec![IrValue::FramePointer, float_result]
         ));
 
         self.builder.emit(Instruction::Label(done));
@@ -2383,14 +2384,14 @@ impl Compiler {
 
     fn compile_builtin_gc(&mut self, _args: &[Expr]) -> Result<IrValue, String> {
         // __gc takes no arguments and returns nil
-        // Call trampoline_gc(frame_ptr) -> nil
+        // Call trampoline_gc(stack_pointer) -> nil
         let result = self.builder.new_register();
         let trampoline_addr = crate::trampoline::trampoline_gc as usize;
-        let fp_reg = IrValue::RawConstant(29);  // x29 = frame pointer
+        // Use FramePointer which is mapped to SP (x31) for GC stack scanning
         self.builder.emit(Instruction::ExternalCall(
             result,
             trampoline_addr,
-            vec![fp_reg]
+            vec![IrValue::FramePointer]
         ));
         Ok(result)
     }

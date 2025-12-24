@@ -274,6 +274,10 @@ pub struct GCRuntime {
     /// Used for dispatch when we only know the method name
     method_to_protocol: HashMap<String, (usize, usize)>,
 
+    /// Mapping from protocol vtable key to namespace root ID (for GC tracking)
+    /// This allows protocol method closures to be treated as GC roots
+    protocol_vtable_root_ids: HashMap<(usize, usize, usize), usize>,
+
     // ========== Keyword Interning ==========
 
     /// Keyword constant storage: index -> keyword text (without colon)
@@ -281,6 +285,15 @@ pub struct GCRuntime {
 
     /// Cache of allocated keyword heap pointers: index -> Some(tagged_ptr) if allocated
     keyword_heap_ptrs: Vec<Option<usize>>,
+
+    /// Mapping from keyword index to namespace root ID (for GC tracking)
+    keyword_root_ids: HashMap<usize, usize>,
+
+    // ========== String Constants (for compile-time string literals) ==========
+
+    /// String constants that need to survive GC (allocated at compile time)
+    /// Maps string pointer to its namespace root ID
+    string_constant_root_ids: HashMap<usize, usize>,
 
     // ========== Symbol Interning (for runtime var lookup) ==========
 
@@ -321,9 +334,13 @@ impl GCRuntime {
             protocol_name_to_id: HashMap::new(),
             protocol_vtable: HashMap::new(),
             method_to_protocol: HashMap::new(),
+            protocol_vtable_root_ids: HashMap::new(),
             // Keyword interning
             keyword_constants: Vec::new(),
             keyword_heap_ptrs: Vec::new(),
+            keyword_root_ids: HashMap::new(),
+            // String constants (compile-time literals)
+            string_constant_root_ids: HashMap::new(),
             // Symbol interning (for runtime var lookup)
             symbol_table: Vec::new(),
             symbol_name_to_id: HashMap::new(),
@@ -381,6 +398,22 @@ impl GCRuntime {
                 for (_name, ptr) in self.namespace_roots.iter_mut() {
                     if *ptr == old_ptr {
                         *ptr = new_ptr;
+                    }
+                }
+
+                // Update protocol_vtable entries if they were relocated
+                for (_key, ptr) in self.protocol_vtable.iter_mut() {
+                    if *ptr == old_ptr {
+                        *ptr = new_ptr;
+                    }
+                }
+
+                // Update keyword_heap_ptrs if they were relocated
+                for ptr_opt in self.keyword_heap_ptrs.iter_mut() {
+                    if let Some(ptr) = ptr_opt {
+                        if *ptr == old_ptr {
+                            *ptr = new_ptr;
+                        }
                     }
                 }
 
@@ -457,6 +490,21 @@ impl GCRuntime {
         }
 
         Ok(self.tag_string(ptr))
+    }
+
+    /// Allocate a string constant that will survive GC
+    /// This is used for compile-time string literals that need to be rooted
+    pub fn allocate_string_constant(&mut self, s: &str) -> Result<usize, String> {
+        // Allocate the string normally
+        let str_ptr = self.allocate_string(s)?;
+
+        // Register as GC root so string constants are never collected
+        let root_id = self.next_namespace_id;
+        self.next_namespace_id += 1;
+        self.string_constant_root_ids.insert(str_ptr, root_id);
+        self.allocator.add_namespace_root(root_id, str_ptr);
+
+        Ok(str_ptr)
     }
 
     /// Allocate a float on the heap
@@ -601,13 +649,17 @@ impl GCRuntime {
         // Allocate the keyword
         let ptr = self.allocate_keyword(&text)?;
 
-        // Cache and register as root (keywords are permanent)
+        // Cache the pointer
         if let Some(slot) = self.keyword_heap_ptrs.get_mut(index) {
             *slot = Some(ptr);
         }
 
         // Register as GC root so keywords are never collected
-        self.allocator.gc_add_root(ptr);
+        // Use add_namespace_root which works for all GC implementations
+        let root_id = self.next_namespace_id;
+        self.next_namespace_id += 1;
+        self.keyword_root_ids.insert(index, root_id);
+        self.allocator.add_namespace_root(root_id, ptr);
 
         Ok(ptr)
     }
@@ -906,6 +958,22 @@ impl GCRuntime {
                             if id == ns_id {
                                 // Already updated the root
                             }
+                        }
+                    }
+                }
+
+                // Update protocol_vtable entries if they were relocated
+                for (_key, ptr) in self.protocol_vtable.iter_mut() {
+                    if *ptr == old_ptr {
+                        *ptr = new_ptr;
+                    }
+                }
+
+                // Update keyword_heap_ptrs if they were relocated
+                for ptr_opt in self.keyword_heap_ptrs.iter_mut() {
+                    if let Some(ptr) = ptr_opt {
+                        if *ptr == old_ptr {
+                            *ptr = new_ptr;
                         }
                     }
                 }
@@ -2086,7 +2154,24 @@ impl GCRuntime {
         method_index: usize,
         fn_ptr: usize,
     ) {
-        self.protocol_vtable.insert((type_id, protocol_id, method_index), fn_ptr);
+        let key = (type_id, protocol_id, method_index);
+
+        // If we're replacing an existing implementation, remove the old root
+        if let Some(&old_root_id) = self.protocol_vtable_root_ids.get(&key) {
+            if let Some(&old_ptr) = self.protocol_vtable.get(&key) {
+                self.allocator.remove_namespace_root(old_root_id, old_ptr);
+            }
+        }
+
+        // Add the new implementation
+        self.protocol_vtable.insert(key, fn_ptr);
+
+        // Register the fn_ptr as a GC root so it's not collected
+        // Use namespace_id starting from a high value to avoid collision with real namespaces
+        let root_id = self.next_namespace_id;
+        self.next_namespace_id += 1;
+        self.protocol_vtable_root_ids.insert(key, root_id);
+        self.allocator.add_namespace_root(root_id, fn_ptr);
     }
 
     /// Look up protocol method implementation by type_id and method_name

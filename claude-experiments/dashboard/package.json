@@ -6,7 +6,7 @@
   "scripts": {
     "build:preload": "esbuild src/main/preload.ts --bundle --platform=node --outfile=src/main/preload.js --external:electron",
     "dev": "concurrently \"npm run dev:main\" \"npm run dev:renderer\"",
-    "dev:main": "NODE_ENV=development electron -r hot-reload/register .",
+    "dev:main": "NODE_ENV=development electron -r hot-reload/electron-loader .",
     "dev:no-hot": "npm run build:preload && concurrently \"npm run dev:main:no-hot\" \"npm run dev:renderer\"",
     "dev:main:no-hot": "NODE_ENV=development electron .",
     "dev:renderer": "vite",

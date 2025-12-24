@@ -1,9 +1,10 @@
-import { memo, useMemo, useCallback, ComponentType, ReactElement } from 'react';
+import { memo, useMemo, useCallback, useState, ComponentType, ReactElement } from 'react';
 import { WindowManagerProvider, WindowContainer, useWindowManager } from './WindowManager';
 import { ThemeProvider } from '../theme/ThemeProvider';
 import { SettingsProvider, useSettings } from '../settings/SettingsProvider';
 import CommandPalette, { useCommandPalette, Command } from './CommandPalette';
 import QuickSwitcher, { useQuickSwitcher } from './QuickSwitcher';
+import PromptDialog, { ConfirmDialog } from './PromptDialog';
 import {
   useProjectsState,
   useDashboardsState,
@@ -88,6 +89,22 @@ const DesktopQuickSwitcher = memo(function DesktopQuickSwitcher(): ReactElement 
   return <QuickSwitcher isOpen={isOpen} onClose={close} />;
 });
 
+// Dialog state types
+interface PromptState {
+  isOpen: boolean;
+  title: string;
+  placeholder: string;
+  defaultValue: string;
+  onSubmit: (value: string) => void;
+}
+
+interface ConfirmState {
+  isOpen: boolean;
+  title: string;
+  message: string;
+  onConfirm: () => void;
+}
+
 /**
  * Command Palette Controller - manages commands and palette state
  */
@@ -96,6 +113,64 @@ const DesktopCommandPalette = memo(function DesktopCommandPalette(): ReactElemen
   const { settings } = useSettings();
   const shortcut = settings.commandPaletteShortcut || 'cmd+shift+p';
   const { isOpen, close } = useCommandPalette(shortcut);
+
+  // Dialog state
+  const [promptState, setPromptState] = useState<PromptState>({
+    isOpen: false,
+    title: '',
+    placeholder: '',
+    defaultValue: '',
+    onSubmit: () => {},
+  });
+
+  const [confirmState, setConfirmState] = useState<ConfirmState>({
+    isOpen: false,
+    title: '',
+    message: '',
+    onConfirm: () => {},
+  });
+
+  // Helper to show prompt dialog
+  const showPrompt = useCallback(
+    (title: string, placeholder: string, defaultValue: string = ''): Promise<string | null> => {
+      return new Promise((resolve) => {
+        setPromptState({
+          isOpen: true,
+          title,
+          placeholder,
+          defaultValue,
+          onSubmit: (value) => {
+            setPromptState((prev) => ({ ...prev, isOpen: false }));
+            resolve(value);
+          },
+        });
+      });
+    },
+    []
+  );
+
+  const closePrompt = useCallback(() => {
+    setPromptState((prev) => ({ ...prev, isOpen: false }));
+  }, []);
+
+  // Helper to show confirm dialog
+  const showConfirm = useCallback((title: string, message: string): Promise<boolean> => {
+    return new Promise((resolve) => {
+      setConfirmState({
+        isOpen: true,
+        title,
+        message,
+        onConfirm: () => {
+          setConfirmState((prev) => ({ ...prev, isOpen: false }));
+          resolve(true);
+        },
+      });
+    });
+  }, []);
+
+  const closeConfirm = useCallback(() => {
+    setConfirmState((prev) => ({ ...prev, isOpen: false }));
+  }, []);
 
   // Project and dashboard state for commands
   const {
@@ -152,9 +227,9 @@ const DesktopCommandPalette = memo(function DesktopCommandPalette(): ReactElemen
       category: 'Projects',
       keywords: ['project', 'create', 'new'],
       action: async () => {
-        const name = window.prompt('Enter project name:');
-        if (name?.trim()) {
-          await createProject(name.trim());
+        const name = await showPrompt('Create New Project', 'Enter project name');
+        if (name) {
+          await createProject(name);
         }
       },
     });
@@ -168,9 +243,13 @@ const DesktopCommandPalette = memo(function DesktopCommandPalette(): ReactElemen
         category: 'Projects',
         keywords: ['project', 'rename', 'edit'],
         action: async () => {
-          const name = window.prompt('Enter new project name:', activeProject.name);
-          if (name?.trim() && name !== activeProject.name) {
-            await renameProject(activeProject.id, name.trim());
+          const name = await showPrompt(
+            'Rename Project',
+            'Enter new project name',
+            activeProject.name
+          );
+          if (name && name !== activeProject.name) {
+            await renameProject(activeProject.id, name);
           }
         },
       });
@@ -185,7 +264,8 @@ const DesktopCommandPalette = memo(function DesktopCommandPalette(): ReactElemen
         category: 'Projects',
         keywords: ['project', 'delete', 'remove'],
         action: async () => {
-          const confirmed = window.confirm(
+          const confirmed = await showConfirm(
+            'Delete Project',
             `Are you sure you want to delete project "${activeProject.name}"? This will delete all its dashboards.`
           );
           if (confirmed) {
@@ -222,9 +302,9 @@ const DesktopCommandPalette = memo(function DesktopCommandPalette(): ReactElemen
         category: 'Dashboards',
         keywords: ['dashboard', 'create', 'new'],
         action: async () => {
-          const name = window.prompt('Enter dashboard name:');
-          if (name?.trim()) {
-            await createDashboard(activeProject.id, name.trim());
+          const name = await showPrompt('Create New Dashboard', 'Enter dashboard name');
+          if (name) {
+            await createDashboard(activeProject.id, name);
           }
         },
       });
@@ -239,9 +319,13 @@ const DesktopCommandPalette = memo(function DesktopCommandPalette(): ReactElemen
         category: 'Dashboards',
         keywords: ['dashboard', 'rename', 'edit'],
         action: async () => {
-          const name = window.prompt('Enter new dashboard name:', activeDashboard.name);
-          if (name?.trim() && name !== activeDashboard.name) {
-            await renameDashboard(activeDashboard.id, name.trim());
+          const name = await showPrompt(
+            'Rename Dashboard',
+            'Enter new dashboard name',
+            activeDashboard.name
+          );
+          if (name && name !== activeDashboard.name) {
+            await renameDashboard(activeDashboard.id, name);
           }
         },
       });
@@ -271,7 +355,8 @@ const DesktopCommandPalette = memo(function DesktopCommandPalette(): ReactElemen
           category: 'Dashboards',
           keywords: ['dashboard', 'delete', 'remove'],
           action: async () => {
-            const confirmed = window.confirm(
+            const confirmed = await showConfirm(
+              'Delete Dashboard',
               `Are you sure you want to delete dashboard "${activeDashboard.name}"?`
             );
             if (confirmed) {
@@ -348,6 +433,8 @@ const DesktopCommandPalette = memo(function DesktopCommandPalette(): ReactElemen
     renameDashboard,
     saveLayout,
     tree,
+    showPrompt,
+    showConfirm,
   ]);
 
   const handleExecute = useCallback((command: Command) => {
@@ -355,12 +442,29 @@ const DesktopCommandPalette = memo(function DesktopCommandPalette(): ReactElemen
   }, []);
 
   return (
-    <CommandPalette
-      isOpen={isOpen}
-      onClose={close}
-      commands={commands}
-      onExecute={handleExecute}
-    />
+    <>
+      <CommandPalette
+        isOpen={isOpen}
+        onClose={close}
+        commands={commands}
+        onExecute={handleExecute}
+      />
+      <PromptDialog
+        isOpen={promptState.isOpen}
+        title={promptState.title}
+        placeholder={promptState.placeholder}
+        defaultValue={promptState.defaultValue}
+        onSubmit={promptState.onSubmit}
+        onCancel={closePrompt}
+      />
+      <ConfirmDialog
+        isOpen={confirmState.isOpen}
+        title={confirmState.title}
+        message={confirmState.message}
+        onConfirm={confirmState.onConfirm}
+        onCancel={closeConfirm}
+      />
+    </>
   );
 });
 

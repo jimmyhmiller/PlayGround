@@ -283,8 +283,10 @@ impl Arm64CodeGen {
                         self.emit_mov_imm(dst_reg, *c);
                     }
                     IrValue::FramePointer => {
-                        // FramePointer (x29) - copy to dst register
-                        self.emit_mov(dst_reg, 29);
+                        // Use SP (x31) for GC stack scanning - despite the name, we need SP
+                        // so GC can scan values that have been pushed to stack via STP.
+                        // FP (x29) would miss values between SP and FP.
+                        self.emit_mov(dst_reg, 31);
                     }
                     _ => return Err(format!("Invalid constant: {:?}", value)),
                 }
@@ -821,8 +823,8 @@ impl Arm64CodeGen {
                     self.emit_mov(values_ptr_reg, 31);
 
                     // Step 4: Set up arguments for trampoline call
-                    // Args: x0=stack_pointer (JIT FP for GC), x1=name_ptr, x2=code_ptr, x3=closure_count, x4=values_ptr
-                    self.emit_mov(0, 29);  // x0 = JIT frame pointer for GC
+                    // Args: x0=stack_pointer (SP for GC to scan values on stack), x1=name_ptr, x2=code_ptr, x3=closure_count, x4=values_ptr
+                    self.emit_mov(0, 31);  // x0 = SP for GC (so values on stack get scanned)
                     self.emit_mov_imm(1, 0);  // x1 = 0 (anonymous)
                     self.emit_mov_imm(2, *code_ptr as i64);  // x2 = code_ptr (raw pointer)
                     self.emit_mov_imm(3, closure_values.len() as i64);  // x3 = closure_count
@@ -1842,7 +1844,7 @@ impl Arm64CodeGen {
                 // Similar to MakeFunctionPtr but stores multiple (param_count, code_ptr) pairs
                 //
                 // ARM64 Calling Convention for trampoline_allocate_multi_arity_fn:
-                // - x0 = stack_pointer (JIT frame pointer for GC)
+                // - x0 = stack_pointer (SP for GC to scan values on stack)
                 // - x1 = name_ptr (0 for anonymous)
                 // - x2 = arity_count
                 // - x3 = arities_ptr (pointer to (param_count, code_ptr) pairs on stack)
@@ -1889,7 +1891,7 @@ impl Arm64CodeGen {
                 self.emit_add_imm(closures_ptr_reg, 31, arities_size as i64);  // SP + arities_size = closures_ptr
 
                 // Step 5: Set up arguments for trampoline call
-                self.emit_mov(0, 29);  // x0 = JIT frame pointer for GC
+                self.emit_mov(0, 31);  // x0 = SP for GC (so values on stack get scanned)
                 self.emit_mov_imm(1, 0);  // x1 = name_ptr (0 for anonymous)
                 self.emit_mov_imm(2, arities.len() as i64);  // x2 = arity_count
                 self.emit_mov(3, arities_ptr_reg);  // x3 = arities_ptr
@@ -2110,10 +2112,10 @@ impl Arm64CodeGen {
                 self.emit_label(skip_stack_copy_label);
 
                 // Call trampoline_collect_rest_args(stack_pointer, args_ptr, excess_count)
-                // x0 = JIT frame pointer for GC
+                // x0 = SP for GC (so values on stack get scanned)
                 // x1 = pointer to excess args on stack
                 // x2 = excess_count
-                self.emit_mov(0, 29);  // x0 = JIT frame pointer for GC
+                self.emit_mov(0, 31);  // x0 = SP for GC (so values on stack get scanned)
                 // ADD x1, SP, #save_area_aligned
                 self.emit_add_sp_offset_to_reg(1, save_area_aligned as i64);
                 self.emit_mov(2, excess_count_reg);  // x2 = excess_count
@@ -2255,8 +2257,9 @@ impl Arm64CodeGen {
                 Ok(temp_reg)
             }
             IrValue::FramePointer => {
-                // FramePointer is x29 (FP) - used for passing stack pointer to trampolines
-                Ok(29)
+                // Use SP (x31) for GC stack scanning - despite the name, we need SP
+                // so GC can scan values that have been pushed to stack via STP.
+                Ok(31)
             }
             IrValue::TaggedConstant(_) | IrValue::Null => {
                 // TaggedConstant and Null should be converted to registers via assign_new

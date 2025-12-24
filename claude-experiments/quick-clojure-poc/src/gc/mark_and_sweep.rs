@@ -163,6 +163,7 @@ impl MarkAndSweep {
     fn mark(&self, stack_base: usize, stack_map: &StackMap, stack_pointer: usize) {
         let mut to_mark: Vec<HeapObject> = Vec::with_capacity(128);
 
+        // Mark namespace roots
         for (_, root) in self.namespace_roots.iter() {
             if !BuiltInTypes::is_heap_pointer(*root) {
                 continue;
@@ -170,9 +171,22 @@ impl MarkAndSweep {
             to_mark.push(HeapObject::from_tagged(*root));
         }
 
+        // Mark temporary roots (registered during allocations to protect intermediate values)
+        for root in self.temporary_roots.iter().flatten() {
+            if BuiltInTypes::is_heap_pointer(*root) {
+                to_mark.push(HeapObject::from_tagged(*root));
+            }
+        }
+
         // Use the stack walker to find heap pointers
+        // With conservative scanning, we must validate that pointers are within the heap
+        // to avoid crashes from garbage values that happen to look like heap pointers
         StackWalker::walk_stack_roots(stack_base, stack_pointer, stack_map, |_, pointer| {
-            to_mark.push(HeapObject::from_tagged(pointer));
+            let untagged = BuiltInTypes::untag(pointer);
+            // Only add if the pointer is within our heap bounds
+            if self.space.contains(untagged as *const u8) {
+                to_mark.push(HeapObject::from_tagged(pointer));
+            }
         });
 
         while let Some(object) = to_mark.pop() {

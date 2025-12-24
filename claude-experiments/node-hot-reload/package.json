@@ -11,10 +11,11 @@
     "./api": "./dist/api.js",
     "./register": "./dist/register.js",
     "./strip": "./dist/strip.js",
-    "./loader": "./dist/loader-register.mjs"
+    "./loader": "./dist/loader-register.mjs",
+    "./electron-loader": "./dist/electron-loader.js"
   },
   "scripts": {
-    "build": "tsc && cp src/*.mjs dist/",
+    "build": "tsc && cp src/*.mjs dist/ && cp src/electron-loader.js dist/",
     "dev": "tsc --watch"
   },
   "dependencies": {

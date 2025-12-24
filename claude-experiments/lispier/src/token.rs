@@ -14,6 +14,9 @@ pub enum TokenType {
     Keyword,      // :keyword
     BlockLabel,   // ^label
     Colon,        // : (for type annotations)
+    Backtick,     // ` (quasiquote)
+    Tilde,        // ~ (unquote)
+    TildeAt,      // ~@ (unquote-splice)
     Eof,
 }
 

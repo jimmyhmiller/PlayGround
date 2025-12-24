@@ -227,7 +227,7 @@ pub fn generate_builtin_wrappers() -> HashMap<&'static str, usize> {
 
     // Helper to emit a wrapper that calls a trampoline
     // Args are already in x0, x1, x2 - just need to call the trampoline
-    // If with_stack_pointer is true, pass x29 as first arg and shift original args
+    // If with_stack_pointer is true, pass SP as first arg and shift original args
     let mut emit_trampoline_wrapper = |name: &'static str, trampoline_addr: usize, with_stack_pointer: bool| {
         let addr = trampoline_addr;
         let mut code = Vec::new();
@@ -238,8 +238,11 @@ pub fn generate_builtin_wrappers() -> HashMap<&'static str, usize> {
             code.push(0xAA0103E2);
             // mov x1, x0
             code.push(0xAA0003E1);
-            // mov x0, x29   ; pass JIT frame pointer as first argument
-            code.push(0xAA1D03E0);
+            // add x0, sp, #0   ; pass current stack pointer as first argument
+            // This is the correct encoding for "mov x0, sp" on ARM64
+            // SP is used for GC to scan all values on the stack, including those
+            // pushed via STP by ExternalCallWithSaves before calling allocating operations.
+            code.push(0x910003E0);
         }
 
         // stp x29, x30, [sp, #-16]!   ; save fp/lr
