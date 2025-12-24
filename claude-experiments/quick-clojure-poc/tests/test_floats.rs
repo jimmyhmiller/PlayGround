@@ -8,8 +8,8 @@
 // ✅ Special float values (very small, very large)
 
 use quick_clojure_poc::*;
-use std::sync::Arc;
 use std::cell::UnsafeCell;
+use std::sync::Arc;
 
 /// Helper function to run a test case and return the raw tagged result
 fn run_and_get_tagged(code: &str) -> i64 {
@@ -19,7 +19,9 @@ fn run_and_get_tagged(code: &str) -> i64 {
     let runtime = Arc::new(UnsafeCell::new(gc_runtime::GCRuntime::new()));
     trampoline::set_runtime(runtime.clone());
     let mut compiler = compiler::Compiler::new(runtime.clone());
-    compiler.compile_toplevel(&ast).expect(&format!("Compiler failed for: {}", code));
+    compiler
+        .compile_toplevel(&ast)
+        .expect(&format!("Compiler failed for: {}", code));
     let instructions = compiler.take_instructions();
     let num_locals = compiler.builder.num_locals;
 
@@ -43,7 +45,11 @@ fn read_float_from_tagged(tagged: i64, runtime: &gc_runtime::GCRuntime) -> f64 {
 fn run_test_int(code: &str, expected: i64) {
     let tagged_result = run_and_get_tagged(code);
     let tag = get_tag(tagged_result);
-    assert_eq!(tag, 0, "Expected integer (tag 0), got tag {} for: {}", tag, code);
+    assert_eq!(
+        tag, 0,
+        "Expected integer (tag 0), got tag {} for: {}",
+        tag, code
+    );
     let result = tagged_result >> 3;
     assert_eq!(result, expected, "Integer test failed for: {}", code);
 }
@@ -56,7 +62,9 @@ fn run_test_float(code: &str, expected: f64) {
     let runtime = Arc::new(UnsafeCell::new(gc_runtime::GCRuntime::new()));
     trampoline::set_runtime(runtime.clone());
     let mut compiler = compiler::Compiler::new(runtime.clone());
-    compiler.compile_toplevel(&ast).expect(&format!("Compiler failed for: {}", code));
+    compiler
+        .compile_toplevel(&ast)
+        .expect(&format!("Compiler failed for: {}", code));
     let instructions = compiler.take_instructions();
     let num_locals = compiler.builder.num_locals;
 
@@ -66,7 +74,11 @@ fn run_test_float(code: &str, expected: f64) {
     let tagged_result = unsafe { tramp.execute(compiled.code_ptr as *const u8) };
 
     let tag = get_tag(tagged_result);
-    assert_eq!(tag, 1, "Expected float (tag 1), got tag {} for: {}", tag, code);
+    assert_eq!(
+        tag, 1,
+        "Expected float (tag 1), got tag {} for: {}",
+        tag, code
+    );
 
     // Read the float from the heap
     let rt = unsafe { &*runtime.get() };
@@ -75,8 +87,14 @@ fn run_test_float(code: &str, expected: f64) {
     // Use approximate comparison for floats
     let diff = (result - expected).abs();
     let tolerance = 1e-10;
-    assert!(diff < tolerance, "Float test failed for: {} - expected {}, got {} (diff: {})",
-            code, expected, result, diff);
+    assert!(
+        diff < tolerance,
+        "Float test failed for: {} - expected {}, got {} (diff: {})",
+        code,
+        expected,
+        result,
+        diff
+    );
 }
 
 /// Helper function to run a test case expecting a float result with custom tolerance
@@ -87,7 +105,9 @@ fn run_test_float_approx(code: &str, expected: f64, tolerance: f64) {
     let runtime = Arc::new(UnsafeCell::new(gc_runtime::GCRuntime::new()));
     trampoline::set_runtime(runtime.clone());
     let mut compiler = compiler::Compiler::new(runtime.clone());
-    compiler.compile_toplevel(&ast).expect(&format!("Compiler failed for: {}", code));
+    compiler
+        .compile_toplevel(&ast)
+        .expect(&format!("Compiler failed for: {}", code));
     let instructions = compiler.take_instructions();
     let num_locals = compiler.builder.num_locals;
 
@@ -97,14 +117,25 @@ fn run_test_float_approx(code: &str, expected: f64, tolerance: f64) {
     let tagged_result = unsafe { tramp.execute(compiled.code_ptr as *const u8) };
 
     let tag = get_tag(tagged_result);
-    assert_eq!(tag, 1, "Expected float (tag 1), got tag {} for: {}", tag, code);
+    assert_eq!(
+        tag, 1,
+        "Expected float (tag 1), got tag {} for: {}",
+        tag, code
+    );
 
     let rt = unsafe { &*runtime.get() };
     let result = read_float_from_tagged(tagged_result, rt);
 
     let diff = (result - expected).abs();
-    assert!(diff < tolerance, "Float test failed for: {} - expected {}, got {} (diff: {}, tolerance: {})",
-            code, expected, result, diff, tolerance);
+    assert!(
+        diff < tolerance,
+        "Float test failed for: {} - expected {}, got {} (diff: {}, tolerance: {})",
+        code,
+        expected,
+        result,
+        diff,
+        tolerance
+    );
 }
 
 // =============================================================================
@@ -313,7 +344,9 @@ fn run_test_no_crash(code: &str) {
     let runtime = Arc::new(UnsafeCell::new(gc_runtime::GCRuntime::new()));
     trampoline::set_runtime(runtime.clone());
     let mut compiler = compiler::Compiler::new(runtime.clone());
-    compiler.compile_toplevel(&ast).expect(&format!("Compiler failed for: {}", code));
+    compiler
+        .compile_toplevel(&ast)
+        .expect(&format!("Compiler failed for: {}", code));
     let instructions = compiler.take_instructions();
     let num_locals = compiler.builder.num_locals;
 

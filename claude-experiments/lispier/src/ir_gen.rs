@@ -171,6 +171,10 @@ impl<'c> IRGenerator<'c> {
                 // RequireMacros nodes are metadata for macro loading, not IR
                 Ok(None)
             }
+            Node::LinkLibrary(_) => {
+                // LinkLibrary nodes are metadata for library linking, not IR
+                Ok(None)
+            }
         }
     }
 

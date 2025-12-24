@@ -1,3 +1,5 @@
+use crate::arm_instructions as arm;
+use crate::gc_runtime::{ExceptionHandler, GCRuntime};
 /// Trampoline for executing JIT code safely
 ///
 /// This provides:
@@ -7,13 +9,10 @@
 /// 4. Runtime function call trampolines for dynamic bindings
 ///
 /// Based on Beagle's trampoline implementation
-
-use std::alloc::{dealloc, Layout};
+use std::alloc::{Layout, dealloc};
 use std::arch::asm;
-use std::collections::HashMap;
-use crate::gc_runtime::{GCRuntime, ExceptionHandler};
-use crate::arm_instructions as arm;
 use std::cell::UnsafeCell;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 // Global runtime reference (set during initialization)
@@ -30,7 +29,9 @@ static mut TRAMPOLINE_SAVED_SP: usize = 0;
 #[inline(never)]
 #[unsafe(no_mangle)]
 pub extern "C" fn trampoline_save_original_sp(sp: usize) {
-    unsafe { TRAMPOLINE_SAVED_SP = sp; }
+    unsafe {
+        TRAMPOLINE_SAVED_SP = sp;
+    }
 }
 
 /// Restore the original stack pointer after JIT execution
@@ -44,7 +45,9 @@ pub extern "C" fn trampoline_get_original_sp() -> usize {
 ///
 /// SAFETY: Must be called exactly once before any JIT code runs
 pub fn set_runtime(runtime: Arc<UnsafeCell<GCRuntime>>) {
-    unsafe { RUNTIME = Some(runtime); }
+    unsafe {
+        RUNTIME = Some(runtime);
+    }
 }
 
 // ========== Builtin Wrapper Code Generation ==========
@@ -95,187 +98,230 @@ pub fn generate_builtin_wrappers() -> HashMap<&'static str, usize> {
 
     // +: (x0, x1) -> x0 + x1  (tagged integers)
     // Untag both, add, retag
-    emit_builtin("+", &[
-        0xD343FC00,  // lsr x0, x0, #3  (untag arg0)
-        0xD343FC21,  // lsr x1, x1, #3  (untag arg1)
-        0x8B010000,  // add x0, x0, x1
-        0xD37DF000,  // lsl x0, x0, #3  (retag)
-        0xD65F03C0,  // ret
-    ]);
+    emit_builtin(
+        "+",
+        &[
+            0xD343FC00, // lsr x0, x0, #3  (untag arg0)
+            0xD343FC21, // lsr x1, x1, #3  (untag arg1)
+            0x8B010000, // add x0, x0, x1
+            0xD37DF000, // lsl x0, x0, #3  (retag)
+            0xD65F03C0, // ret
+        ],
+    );
 
     // -: (x0, x1) -> x0 - x1
-    emit_builtin("-", &[
-        0xD343FC00,  // lsr x0, x0, #3
-        0xD343FC21,  // lsr x1, x1, #3
-        0xCB010000,  // sub x0, x0, x1
-        0xD37DF000,  // lsl x0, x0, #3
-        0xD65F03C0,  // ret
-    ]);
+    emit_builtin(
+        "-",
+        &[
+            0xD343FC00, // lsr x0, x0, #3
+            0xD343FC21, // lsr x1, x1, #3
+            0xCB010000, // sub x0, x0, x1
+            0xD37DF000, // lsl x0, x0, #3
+            0xD65F03C0, // ret
+        ],
+    );
 
     // *: (x0, x1) -> x0 * x1
-    emit_builtin("*", &[
-        0xD343FC00,  // lsr x0, x0, #3
-        0xD343FC21,  // lsr x1, x1, #3
-        0x9B017C00,  // mul x0, x0, x1
-        0xD37DF000,  // lsl x0, x0, #3
-        0xD65F03C0,  // ret
-    ]);
+    emit_builtin(
+        "*",
+        &[
+            0xD343FC00, // lsr x0, x0, #3
+            0xD343FC21, // lsr x1, x1, #3
+            0x9B017C00, // mul x0, x0, x1
+            0xD37DF000, // lsl x0, x0, #3
+            0xD65F03C0, // ret
+        ],
+    );
 
     // /: (x0, x1) -> x0 / x1  (signed division)
-    emit_builtin("/", &[
-        0xD343FC00,  // lsr x0, x0, #3
-        0xD343FC21,  // lsr x1, x1, #3
-        0x9AC10C00,  // sdiv x0, x0, x1
-        0xD37DF000,  // lsl x0, x0, #3
-        0xD65F03C0,  // ret
-    ]);
+    emit_builtin(
+        "/",
+        &[
+            0xD343FC00, // lsr x0, x0, #3
+            0xD343FC21, // lsr x1, x1, #3
+            0x9AC10C00, // sdiv x0, x0, x1
+            0xD37DF000, // lsl x0, x0, #3
+            0xD65F03C0, // ret
+        ],
+    );
 
     // <: (x0, x1) -> true if x0 < x1
     // Compare untagged values, return tagged boolean (true=11, false=3)
-    emit_builtin("<", &[
-        0xD343FC00,  // lsr x0, x0, #3  (untag for proper signed compare)
-        0xD343FC21,  // lsr x1, x1, #3
-        0xEB01001F,  // cmp x0, x1
-        0x9A9FB7E0,  // cset x0, lt (set x0 = 1 if less than, else 0)
-        0xD37DF000,  // lsl x0, x0, #3  (0 -> 0, 1 -> 8)
-        0x91000C00,  // add x0, x0, #3  (0 -> 3=false, 8 -> 11=true)
-        0xD65F03C0,  // ret
-    ]);
+    emit_builtin(
+        "<",
+        &[
+            0xD343FC00, // lsr x0, x0, #3  (untag for proper signed compare)
+            0xD343FC21, // lsr x1, x1, #3
+            0xEB01001F, // cmp x0, x1
+            0x9A9FB7E0, // cset x0, lt (set x0 = 1 if less than, else 0)
+            0xD37DF000, // lsl x0, x0, #3  (0 -> 0, 1 -> 8)
+            0x91000C00, // add x0, x0, #3  (0 -> 3=false, 8 -> 11=true)
+            0xD65F03C0, // ret
+        ],
+    );
 
     // >: (x0, x1) -> true if x0 > x1
-    emit_builtin(">", &[
-        0xD343FC00,  // lsr x0, x0, #3
-        0xD343FC21,  // lsr x1, x1, #3
-        0xEB01001F,  // cmp x0, x1
-        0x9A9FC7E0,  // cset x0, gt (set x0 = 1 if greater than, else 0)
-        0xD37DF000,  // lsl x0, x0, #3
-        0x91000C00,  // add x0, x0, #3
-        0xD65F03C0,  // ret
-    ]);
+    emit_builtin(
+        ">",
+        &[
+            0xD343FC00, // lsr x0, x0, #3
+            0xD343FC21, // lsr x1, x1, #3
+            0xEB01001F, // cmp x0, x1
+            0x9A9FC7E0, // cset x0, gt (set x0 = 1 if greater than, else 0)
+            0xD37DF000, // lsl x0, x0, #3
+            0x91000C00, // add x0, x0, #3
+            0xD65F03C0, // ret
+        ],
+    );
 
     // =: (x0, x1) -> true if x0 == x1
     // Compare tagged values directly (identity comparison)
-    emit_builtin("=", &[
-        0xEB01001F,  // cmp x0, x1  (compare tagged values directly)
-        0x9A9F17E0,  // cset x0, eq (set x0 = 1 if equal, else 0)
-        0xD37DF000,  // lsl x0, x0, #3
-        0x91000C00,  // add x0, x0, #3
-        0xD65F03C0,  // ret
-    ]);
+    emit_builtin(
+        "=",
+        &[
+            0xEB01001F, // cmp x0, x1  (compare tagged values directly)
+            0x9A9F17E0, // cset x0, eq (set x0 = 1 if equal, else 0)
+            0xD37DF000, // lsl x0, x0, #3
+            0x91000C00, // add x0, x0, #3
+            0xD65F03C0, // ret
+        ],
+    );
 
     // bit-and: (x0, x1) -> x0 & x1
-    emit_builtin("bit-and", &[
-        0xD343FC00,  // lsr x0, x0, #3
-        0xD343FC21,  // lsr x1, x1, #3
-        0x8A010000,  // and x0, x0, x1
-        0xD37DF000,  // lsl x0, x0, #3
-        0xD65F03C0,  // ret
-    ]);
+    emit_builtin(
+        "bit-and",
+        &[
+            0xD343FC00, // lsr x0, x0, #3
+            0xD343FC21, // lsr x1, x1, #3
+            0x8A010000, // and x0, x0, x1
+            0xD37DF000, // lsl x0, x0, #3
+            0xD65F03C0, // ret
+        ],
+    );
 
     // bit-or: (x0, x1) -> x0 | x1
-    emit_builtin("bit-or", &[
-        0xD343FC00,  // lsr x0, x0, #3
-        0xD343FC21,  // lsr x1, x1, #3
-        0xAA010000,  // orr x0, x0, x1
-        0xD37DF000,  // lsl x0, x0, #3
-        0xD65F03C0,  // ret
-    ]);
+    emit_builtin(
+        "bit-or",
+        &[
+            0xD343FC00, // lsr x0, x0, #3
+            0xD343FC21, // lsr x1, x1, #3
+            0xAA010000, // orr x0, x0, x1
+            0xD37DF000, // lsl x0, x0, #3
+            0xD65F03C0, // ret
+        ],
+    );
 
     // bit-xor: (x0, x1) -> x0 ^ x1
-    emit_builtin("bit-xor", &[
-        0xD343FC00,  // lsr x0, x0, #3
-        0xD343FC21,  // lsr x1, x1, #3
-        0xCA010000,  // eor x0, x0, x1
-        0xD37DF000,  // lsl x0, x0, #3
-        0xD65F03C0,  // ret
-    ]);
+    emit_builtin(
+        "bit-xor",
+        &[
+            0xD343FC00, // lsr x0, x0, #3
+            0xD343FC21, // lsr x1, x1, #3
+            0xCA010000, // eor x0, x0, x1
+            0xD37DF000, // lsl x0, x0, #3
+            0xD65F03C0, // ret
+        ],
+    );
 
     // bit-not: (x0) -> ~x0
-    emit_builtin("bit-not", &[
-        0xD343FC00,  // lsr x0, x0, #3
-        0xAA2003E0,  // mvn x0, x0  (orn x0, xzr, x0)
-        0xD37DF000,  // lsl x0, x0, #3
-        0xD65F03C0,  // ret
-    ]);
+    emit_builtin(
+        "bit-not",
+        &[
+            0xD343FC00, // lsr x0, x0, #3
+            0xAA2003E0, // mvn x0, x0  (orn x0, xzr, x0)
+            0xD37DF000, // lsl x0, x0, #3
+            0xD65F03C0, // ret
+        ],
+    );
 
     // bit-shift-left: (x0, x1) -> x0 << x1
-    emit_builtin("bit-shift-left", &[
-        0xD343FC00,  // lsr x0, x0, #3  (untag value)
-        0xD343FC21,  // lsr x1, x1, #3  (untag shift amount)
-        0x9AC12000,  // lsl x0, x0, x1  (lslv)
-        0xD37DF000,  // lsl x0, x0, #3  (retag)
-        0xD65F03C0,  // ret
-    ]);
+    emit_builtin(
+        "bit-shift-left",
+        &[
+            0xD343FC00, // lsr x0, x0, #3  (untag value)
+            0xD343FC21, // lsr x1, x1, #3  (untag shift amount)
+            0x9AC12000, // lsl x0, x0, x1  (lslv)
+            0xD37DF000, // lsl x0, x0, #3  (retag)
+            0xD65F03C0, // ret
+        ],
+    );
 
     // bit-shift-right: (x0, x1) -> x0 >> x1 (arithmetic/signed)
-    emit_builtin("bit-shift-right", &[
-        0xD343FC00,  // lsr x0, x0, #3
-        0xD343FC21,  // lsr x1, x1, #3
-        0x9AC12800,  // asr x0, x0, x1  (asrv)
-        0xD37DF000,  // lsl x0, x0, #3
-        0xD65F03C0,  // ret
-    ]);
+    emit_builtin(
+        "bit-shift-right",
+        &[
+            0xD343FC00, // lsr x0, x0, #3
+            0xD343FC21, // lsr x1, x1, #3
+            0x9AC12800, // asr x0, x0, x1  (asrv)
+            0xD37DF000, // lsl x0, x0, #3
+            0xD65F03C0, // ret
+        ],
+    );
 
     // unsigned-bit-shift-right: (x0, x1) -> x0 >>> x1 (logical/unsigned)
-    emit_builtin("unsigned-bit-shift-right", &[
-        0xD343FC00,  // lsr x0, x0, #3
-        0xD343FC21,  // lsr x1, x1, #3
-        0x9AC12400,  // lsr x0, x0, x1  (lsrv)
-        0xD37DF000,  // lsl x0, x0, #3
-        0xD65F03C0,  // ret
-    ]);
+    emit_builtin(
+        "unsigned-bit-shift-right",
+        &[
+            0xD343FC00, // lsr x0, x0, #3
+            0xD343FC21, // lsr x1, x1, #3
+            0x9AC12400, // lsr x0, x0, x1  (lsrv)
+            0xD37DF000, // lsl x0, x0, #3
+            0xD65F03C0, // ret
+        ],
+    );
 
     // Helper to emit a wrapper that calls a trampoline
     // Args are already in x0, x1, x2 - just need to call the trampoline
     // If with_stack_pointer is true, pass SP as first arg and shift original args
-    let mut emit_trampoline_wrapper = |name: &'static str, trampoline_addr: usize, with_stack_pointer: bool| {
-        let addr = trampoline_addr;
-        let mut code = Vec::new();
+    let mut emit_trampoline_wrapper =
+        |name: &'static str, trampoline_addr: usize, with_stack_pointer: bool| {
+            let addr = trampoline_addr;
+            let mut code = Vec::new();
 
-        if with_stack_pointer {
-            // Shift args: x2 <- x1, x1 <- x0 (do in reverse order to avoid clobbering)
-            // mov x2, x1
-            code.push(0xAA0103E2);
-            // mov x1, x0
-            code.push(0xAA0003E1);
-            // add x0, sp, #0   ; pass current stack pointer as first argument
-            // This is the correct encoding for "mov x0, sp" on ARM64
-            // SP is used for GC to scan all values on the stack, including those
-            // pushed via STP by ExternalCallWithSaves before calling allocating operations.
-            code.push(0x910003E0);
-        }
-
-        // stp x29, x30, [sp, #-16]!   ; save fp/lr
-        code.push(0xA9BF7BFD);
-        // mov x29, sp                  ; set frame pointer
-        code.push(0x910003FD);
-
-        // Load 64-bit address into x9 using movz/movk sequence
-        // movz x9, #(addr[15:0])
-        code.push(0xD2800009 | (((addr & 0xFFFF) as u32) << 5));
-        // movk x9, #(addr[31:16]), lsl 16
-        code.push(0xF2A00009 | ((((addr >> 16) & 0xFFFF) as u32) << 5));
-        // movk x9, #(addr[47:32]), lsl 32
-        code.push(0xF2C00009 | ((((addr >> 32) & 0xFFFF) as u32) << 5));
-        // movk x9, #(addr[63:48]), lsl 48
-        code.push(0xF2E00009 | ((((addr >> 48) & 0xFFFF) as u32) << 5));
-
-        // blr x9                       ; call trampoline
-        code.push(0xD63F0120);
-        // ldp x29, x30, [sp], #16      ; restore fp/lr
-        code.push(0xA8C17BFD);
-        // ret
-        code.push(0xD65F03C0);
-
-        unsafe {
-            for (i, &instr) in code.iter().enumerate() {
-                *base.add(offset + i) = instr;
+            if with_stack_pointer {
+                // Shift args: x2 <- x1, x1 <- x0 (do in reverse order to avoid clobbering)
+                // mov x2, x1
+                code.push(0xAA0103E2);
+                // mov x1, x0
+                code.push(0xAA0003E1);
+                // add x0, sp, #0   ; pass current stack pointer as first argument
+                // This is the correct encoding for "mov x0, sp" on ARM64
+                // SP is used for GC to scan all values on the stack, including those
+                // pushed via STP by ExternalCallWithSaves before calling allocating operations.
+                code.push(0x910003E0);
             }
-        }
-        let code_ptr = unsafe { base.add(offset) } as usize;
-        wrappers.insert(name, code_ptr);
-        offset += code.len();
-    };
+
+            // stp x29, x30, [sp, #-16]!   ; save fp/lr
+            code.push(0xA9BF7BFD);
+            // mov x29, sp                  ; set frame pointer
+            code.push(0x910003FD);
+
+            // Load 64-bit address into x9 using movz/movk sequence
+            // movz x9, #(addr[15:0])
+            code.push(0xD2800009 | (((addr & 0xFFFF) as u32) << 5));
+            // movk x9, #(addr[31:16]), lsl 16
+            code.push(0xF2A00009 | ((((addr >> 16) & 0xFFFF) as u32) << 5));
+            // movk x9, #(addr[47:32]), lsl 32
+            code.push(0xF2C00009 | ((((addr >> 32) & 0xFFFF) as u32) << 5));
+            // movk x9, #(addr[63:48]), lsl 48
+            code.push(0xF2E00009 | ((((addr >> 48) & 0xFFFF) as u32) << 5));
+
+            // blr x9                       ; call trampoline
+            code.push(0xD63F0120);
+            // ldp x29, x30, [sp], #16      ; restore fp/lr
+            code.push(0xA8C17BFD);
+            // ret
+            code.push(0xD65F03C0);
+
+            unsafe {
+                for (i, &instr) in code.iter().enumerate() {
+                    *base.add(offset + i) = instr;
+                }
+            }
+            let code_ptr = unsafe { base.add(offset) } as usize;
+            wrappers.insert(name, code_ptr);
+            offset += code.len();
+        };
 
     // make-array: (x0 = length) -> array  [ALLOCATES - needs JIT frame pointer]
     emit_trampoline_wrapper("make-array", trampoline_make_array as usize, true);
@@ -404,22 +450,22 @@ pub extern "C" fn trampoline_load_var_by_symbol(ns_symbol_id: u32, name_symbol_i
         let rt = &*(*runtime_ptr).as_ref().unwrap().get();
 
         // Get symbol strings
-        let ns_name = rt.get_symbol(ns_symbol_id)
-            .expect("invalid ns_symbol_id");
-        let var_name = rt.get_symbol(name_symbol_id)
+        let ns_name = rt.get_symbol(ns_symbol_id).expect("invalid ns_symbol_id");
+        let var_name = rt
+            .get_symbol(name_symbol_id)
             .expect("invalid name_symbol_id");
 
         // Look up namespace
-        let ns_ptr = rt.get_namespace_by_name(ns_name)
+        let ns_ptr = rt
+            .get_namespace_by_name(ns_name)
             .unwrap_or_else(|| panic!("Namespace not found: {}", ns_name));
 
         // Look up var in namespace
-        let var_ptr = rt.namespace_lookup(ns_ptr, var_name)
-            .unwrap_or_else(|| {
-                // Debug: print first 10 bindings
-                rt.debug_namespace_bindings(ns_ptr, 10);
-                panic!("Unable to resolve symbol: {}/{}", ns_name, var_name)
-            });
+        let var_ptr = rt.namespace_lookup(ns_ptr, var_name).unwrap_or_else(|| {
+            // Debug: print first 10 bindings
+            rt.debug_namespace_bindings(ns_ptr, 10);
+            panic!("Unable to resolve symbol: {}/{}", ns_name, var_name)
+        });
 
         // Get and return value
         rt.var_get_value(var_ptr)
@@ -433,23 +479,28 @@ pub extern "C" fn trampoline_load_var_by_symbol(ns_symbol_id: u32, name_symbol_i
 /// - Returns: x0 = value (tagged)
 /// - Panics if var not found
 #[unsafe(no_mangle)]
-pub extern "C" fn trampoline_load_var_by_symbol_dynamic(ns_symbol_id: u32, name_symbol_id: u32) -> usize {
+pub extern "C" fn trampoline_load_var_by_symbol_dynamic(
+    ns_symbol_id: u32,
+    name_symbol_id: u32,
+) -> usize {
     unsafe {
         let runtime_ptr = std::ptr::addr_of!(RUNTIME);
         let rt = &*(*runtime_ptr).as_ref().unwrap().get();
 
         // Get symbol strings
-        let ns_name = rt.get_symbol(ns_symbol_id)
-            .expect("invalid ns_symbol_id");
-        let var_name = rt.get_symbol(name_symbol_id)
+        let ns_name = rt.get_symbol(ns_symbol_id).expect("invalid ns_symbol_id");
+        let var_name = rt
+            .get_symbol(name_symbol_id)
             .expect("invalid name_symbol_id");
 
         // Look up namespace
-        let ns_ptr = rt.get_namespace_by_name(ns_name)
+        let ns_ptr = rt
+            .get_namespace_by_name(ns_name)
             .unwrap_or_else(|| panic!("Namespace not found: {}", ns_name));
 
         // Look up var in namespace
-        let var_ptr = rt.namespace_lookup(ns_ptr, var_name)
+        let var_ptr = rt
+            .namespace_lookup(ns_ptr, var_name)
             .unwrap_or_else(|| panic!("Unable to resolve symbol: {}/{}", ns_name, var_name));
 
         // Get value (checking dynamic bindings)
@@ -463,21 +514,28 @@ pub extern "C" fn trampoline_load_var_by_symbol_dynamic(ns_symbol_id: u32, name_
 /// - Args: x0 = ns_symbol_id (u32), x1 = name_symbol_id (u32), x2 = value (tagged)
 /// - Returns: x0 = value (tagged) - def returns the value
 #[unsafe(no_mangle)]
-pub extern "C" fn trampoline_store_var_by_symbol(ns_symbol_id: u32, name_symbol_id: u32, value: usize) -> usize {
+pub extern "C" fn trampoline_store_var_by_symbol(
+    ns_symbol_id: u32,
+    name_symbol_id: u32,
+    value: usize,
+) -> usize {
     unsafe {
         let runtime_ptr = std::ptr::addr_of!(RUNTIME);
         let rt = &mut *(*runtime_ptr).as_ref().unwrap().get();
 
         // Get symbol strings (clone to avoid borrow issues)
-        let ns_name = rt.get_symbol(ns_symbol_id)
+        let ns_name = rt
+            .get_symbol(ns_symbol_id)
             .expect("invalid ns_symbol_id")
             .to_string();
-        let var_name = rt.get_symbol(name_symbol_id)
+        let var_name = rt
+            .get_symbol(name_symbol_id)
             .expect("invalid name_symbol_id")
             .to_string();
 
         // Look up namespace
-        let ns_ptr = rt.get_namespace_by_name(&ns_name)
+        let ns_ptr = rt
+            .get_namespace_by_name(&ns_name)
             .unwrap_or_else(|| panic!("Namespace not found: {}", ns_name));
 
         // Look up or create var
@@ -485,7 +543,8 @@ pub extern "C" fn trampoline_store_var_by_symbol(ns_symbol_id: u32, name_symbol_
             existing
         } else {
             // Create new var
-            let (new_var_ptr, _var_id) = rt.allocate_var(ns_ptr, &var_name, value)
+            let (new_var_ptr, _var_id) = rt
+                .allocate_var(ns_ptr, &var_name, value)
                 .expect("Failed to allocate var");
             rt.namespace_add_binding(ns_ptr, &var_name, new_var_ptr)
                 .expect("Failed to add namespace binding");
@@ -512,21 +571,25 @@ pub extern "C" fn trampoline_ensure_var_by_symbol(ns_symbol_id: u32, name_symbol
         let rt = &mut *(*runtime_ptr).as_ref().unwrap().get();
 
         // Get symbol strings (clone to avoid borrow issues)
-        let ns_name = rt.get_symbol(ns_symbol_id)
+        let ns_name = rt
+            .get_symbol(ns_symbol_id)
             .expect("invalid ns_symbol_id")
             .to_string();
-        let var_name = rt.get_symbol(name_symbol_id)
+        let var_name = rt
+            .get_symbol(name_symbol_id)
             .expect("invalid name_symbol_id")
             .to_string();
 
         // Look up namespace
-        let ns_ptr = rt.get_namespace_by_name(&ns_name)
+        let ns_ptr = rt
+            .get_namespace_by_name(&ns_name)
             .unwrap_or_else(|| panic!("Namespace not found: {}", ns_name));
 
         // Create var if it doesn't exist
         if rt.namespace_lookup(ns_ptr, &var_name).is_none() {
             let nil_value = 7usize; // nil tagged value
-            let (new_var_ptr, _var_id) = rt.allocate_var(ns_ptr, &var_name, nil_value)
+            let (new_var_ptr, _var_id) = rt
+                .allocate_var(ns_ptr, &var_name, nil_value)
                 .expect("Failed to allocate var");
             rt.namespace_add_binding(ns_ptr, &var_name, new_var_ptr)
                 .expect("Failed to add namespace binding");
@@ -638,8 +701,12 @@ pub extern "C" fn trampoline_println(count: usize, values_ptr: *const usize) -> 
             // format_value wraps strings in quotes, but println should print raw strings
             // Check if it's a string and unwrap
             let kind = crate::gc::types::BuiltInTypes::get_kind(val);
-            if kind == crate::gc::types::BuiltInTypes::String && s.starts_with('"') && s.ends_with('"') && s.len() >= 2 {
-                print!("{}", &s[1..s.len()-1]);
+            if kind == crate::gc::types::BuiltInTypes::String
+                && s.starts_with('"')
+                && s.ends_with('"')
+                && s.len() >= 2
+            {
+                print!("{}", &s[1..s.len() - 1]);
             } else {
                 print!("{}", s);
             }
@@ -686,8 +753,12 @@ pub extern "C" fn trampoline_println_regs(
             let s = rt.format_value(val);
             // format_value wraps strings in quotes, but println should print raw strings
             let kind = crate::gc::types::BuiltInTypes::get_kind(val);
-            if kind == crate::gc::types::BuiltInTypes::String && s.starts_with('"') && s.ends_with('"') && s.len() >= 2 {
-                print!("{}", &s[1..s.len()-1]);
+            if kind == crate::gc::types::BuiltInTypes::String
+                && s.starts_with('"')
+                && s.ends_with('"')
+                && s.len() >= 2
+            {
+                print!("{}", &s[1..s.len() - 1]);
             } else {
                 print!("{}", s);
             }
@@ -717,8 +788,12 @@ pub extern "C" fn trampoline_println_value(value: usize) -> usize {
         // format_value wraps strings in quotes, but println should print raw strings
         // Check if it's a string and unwrap
         let kind = crate::gc::types::BuiltInTypes::get_kind(value);
-        if kind == crate::gc::types::BuiltInTypes::String && s.starts_with('"') && s.ends_with('"') && s.len() >= 2 {
-            println!("{}", &s[1..s.len()-1]);
+        if kind == crate::gc::types::BuiltInTypes::String
+            && s.starts_with('"')
+            && s.ends_with('"')
+            && s.len() >= 2
+        {
+            println!("{}", &s[1..s.len() - 1]);
         } else {
             println!("{}", s);
         }
@@ -746,8 +821,12 @@ pub extern "C" fn trampoline_print_value(value: usize) -> usize {
         // format_value wraps strings in quotes, but print should print raw strings
         // Check if it's a string and unwrap
         let kind = crate::gc::types::BuiltInTypes::get_kind(value);
-        if kind == crate::gc::types::BuiltInTypes::String && s.starts_with('"') && s.ends_with('"') && s.len() >= 2 {
-            print!("{}", &s[1..s.len()-1]);
+        if kind == crate::gc::types::BuiltInTypes::String
+            && s.starts_with('"')
+            && s.ends_with('"')
+            && s.len() >= 2
+        {
+            print!("{}", &s[1..s.len() - 1]);
         } else {
             print!("{}", s);
         }
@@ -956,10 +1035,7 @@ pub extern "C" fn trampoline_allocate_type_object_raw(
 /// - Args: x0 = instance pointer (tagged), x1 = field_index
 /// - Returns: x0 = field value (tagged)
 #[unsafe(no_mangle)]
-pub extern "C" fn trampoline_load_type_field(
-    obj_ptr: usize,
-    field_index: usize,
-) -> usize {
+pub extern "C" fn trampoline_load_type_field(obj_ptr: usize, field_index: usize) -> usize {
     unsafe {
         let runtime_ptr = std::ptr::addr_of!(RUNTIME);
         let rt = &*(*runtime_ptr).as_ref().unwrap().get();
@@ -1054,7 +1130,10 @@ pub extern "C" fn trampoline_load_type_field_by_symbol(
         let field_name = match rt.get_symbol(field_symbol_id as u32) {
             Some(s) => s,
             None => {
-                eprintln!("Error: Unknown symbol ID {} for field access", field_symbol_id);
+                eprintln!(
+                    "Error: Unknown symbol ID {} for field access",
+                    field_symbol_id
+                );
                 return 7; // nil
             }
         };
@@ -1088,7 +1167,10 @@ pub extern "C" fn trampoline_store_type_field_by_symbol(
         let field_name = match rt.get_symbol(field_symbol_id as u32) {
             Some(s) => s.to_string(), // Clone because we need mutable borrow below
             None => {
-                eprintln!("Error: Unknown symbol ID {} for field store", field_symbol_id);
+                eprintln!(
+                    "Error: Unknown symbol ID {} for field store",
+                    field_symbol_id
+                );
                 return 7; // nil
             }
         };
@@ -1136,7 +1218,8 @@ pub extern "C" fn trampoline_allocate_multi_arity_fn(
         // Read arities from pointer (each arity is 2 words: param_count, code_ptr)
         let arities: Vec<(usize, usize)> = if arity_count > 0 {
             let arities_slice = std::slice::from_raw_parts(arities_ptr, arity_count * 2);
-            arities_slice.chunks(2)
+            arities_slice
+                .chunks(2)
                 .map(|chunk| (chunk[0], chunk[1]))
                 .collect()
         } else {
@@ -1218,10 +1301,7 @@ pub extern "C" fn trampoline_collect_rest_args(
 ///
 /// This is called at runtime to determine which arity implementation to invoke.
 #[unsafe(no_mangle)]
-pub extern "C" fn trampoline_multi_arity_lookup(
-    fn_ptr: usize,
-    arg_count: usize,
-) -> usize {
+pub extern "C" fn trampoline_multi_arity_lookup(fn_ptr: usize, arg_count: usize) -> usize {
     unsafe {
         let runtime_ptr = std::ptr::addr_of!(RUNTIME);
         let rt = &*(*runtime_ptr).as_ref().unwrap().get();
@@ -1253,7 +1333,7 @@ pub extern "C" fn trampoline_multi_arity_lookup(
 #[unsafe(no_mangle)]
 pub extern "C" fn trampoline_push_exception_handler(
     handler_address: usize,
-    result_local: isize,  // Negative FP-relative offset
+    result_local: isize, // Negative FP-relative offset
     link_register: usize,
     stack_pointer: usize,
     frame_pointer: usize,
@@ -1311,7 +1391,8 @@ pub extern "C" fn trampoline_throw(_stack_pointer: usize, exception_value: usize
             // Store exception at result_local (FP-relative)
             // result_local is a negative offset from FP (since locals are below FP)
             // Use signed arithmetic to compute the address correctly
-            let result_ptr = ((handler.frame_pointer as isize) + handler.result_local) as *mut usize;
+            let result_ptr =
+                ((handler.frame_pointer as isize) + handler.result_local) as *mut usize;
             *result_ptr = exception_value;
 
             // Restore SP, FP, LR and jump to handler
@@ -1358,7 +1439,10 @@ pub extern "C" fn trampoline_debug_marker(marker: usize) -> usize {
 /// Creates an AssertionError with message "Assert failed: :pre condition {index}"
 /// and throws it via the exception mechanism.
 #[unsafe(no_mangle)]
-pub extern "C" fn trampoline_pre_condition_failed(_stack_pointer: usize, condition_index: usize) -> ! {
+pub extern "C" fn trampoline_pre_condition_failed(
+    _stack_pointer: usize,
+    condition_index: usize,
+) -> ! {
     unsafe {
         let runtime_ptr = std::ptr::addr_of!(RUNTIME);
         let rt = &mut *(*runtime_ptr).as_ref().unwrap().get();
@@ -1388,7 +1472,10 @@ pub extern "C" fn trampoline_pre_condition_failed(_stack_pointer: usize, conditi
 /// Creates an AssertionError with message "Assert failed: :post condition {index}"
 /// and throws it via the exception mechanism.
 #[unsafe(no_mangle)]
-pub extern "C" fn trampoline_post_condition_failed(_stack_pointer: usize, condition_index: usize) -> ! {
+pub extern "C" fn trampoline_post_condition_failed(
+    _stack_pointer: usize,
+    condition_index: usize,
+) -> ! {
     unsafe {
         let runtime_ptr = std::ptr::addr_of!(RUNTIME);
         let rt = &mut *(*runtime_ptr).as_ref().unwrap().get();
@@ -1453,9 +1540,10 @@ pub extern "C" fn trampoline_protocol_lookup(
         let rt = &mut *(*runtime_ptr).as_ref().unwrap().get();
 
         // Get method name
-        let method_name = std::str::from_utf8_unchecked(
-            std::slice::from_raw_parts(method_name_ptr, method_name_len)
-        );
+        let method_name = std::str::from_utf8_unchecked(std::slice::from_raw_parts(
+            method_name_ptr,
+            method_name_len,
+        ));
 
         // Get type_id from target
         let type_id = rt.get_type_id_for_value(target);
@@ -1497,7 +1585,7 @@ pub extern "C" fn trampoline_intern_keyword(keyword_index: usize) -> usize {
             Err(msg) => {
                 eprintln!("Failed to intern keyword: {}", msg);
                 // Return nil on error
-                7  // nil tagged value
+                7 // nil tagged value
             }
         }
     }
@@ -1512,10 +1600,7 @@ pub extern "C" fn trampoline_intern_keyword(keyword_index: usize) -> usize {
 ///         x1 = value to check (tagged)
 /// - Returns: x0 = tagged boolean (true if instance, false otherwise)
 #[unsafe(no_mangle)]
-pub extern "C" fn trampoline_instance_check(
-    expected_type_id: usize,
-    value: usize,
-) -> usize {
+pub extern "C" fn trampoline_instance_check(expected_type_id: usize, value: usize) -> usize {
     unsafe {
         let runtime_ptr = std::ptr::addr_of!(RUNTIME);
         let rt = &*(*runtime_ptr).as_ref().unwrap().get();
@@ -1656,8 +1741,8 @@ pub extern "C" fn trampoline_aclone(stack_pointer: usize, arr_ptr: usize) -> usi
 /// - Returns: x0 = hash value (tagged integer)
 #[unsafe(no_mangle)]
 pub extern "C" fn trampoline_hash_value(value: usize) -> usize {
-    use crate::gc_runtime::TYPE_KEYWORD;
     use crate::gc::types::{BuiltInTypes, HeapObject};
+    use crate::gc_runtime::TYPE_KEYWORD;
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
 
@@ -1679,7 +1764,7 @@ pub extern "C" fn trampoline_hash_value(value: usize) -> usize {
                 // Use a simple multiplicative hash that's deterministic and fast
                 // Mask to 60 bits (isize::MAX >> 3) to fit in tagged integer
                 // The pointer value is already unique per keyword due to interning
-                let ptr = value >> 3;  // Remove tag bits
+                let ptr = value >> 3; // Remove tag bits
                 // Use a multiplicative hash constant (FNV-1a inspired)
                 let h = ptr.wrapping_mul(0x517cc1b727220a95);
                 h & 0x0fff_ffff_ffff_ffff
@@ -1801,8 +1886,8 @@ pub extern "C" fn trampoline_ifn_invoke(
     arg5: usize,
     arg6: usize,
 ) -> usize {
-    use crate::gc_runtime::closure_layout;
     use crate::gc::types::HeapObject;
+    use crate::gc_runtime::closure_layout;
 
     unsafe {
         let runtime_ptr = std::ptr::addr_of!(RUNTIME);
@@ -1844,7 +1929,8 @@ pub extern "C" fn trampoline_ifn_invoke(
             type Fn5 = extern "C" fn(usize, usize, usize, usize, usize) -> usize;
             type Fn6 = extern "C" fn(usize, usize, usize, usize, usize, usize) -> usize;
             type Fn7 = extern "C" fn(usize, usize, usize, usize, usize, usize, usize) -> usize;
-            type Fn8 = extern "C" fn(usize, usize, usize, usize, usize, usize, usize, usize) -> usize;
+            type Fn8 =
+                extern "C" fn(usize, usize, usize, usize, usize, usize, usize, usize) -> usize;
 
             match arg_count {
                 0 => std::mem::transmute::<usize, Fn1>(code_ptr)(obj),
@@ -1853,8 +1939,12 @@ pub extern "C" fn trampoline_ifn_invoke(
                 3 => std::mem::transmute::<usize, Fn4>(code_ptr)(obj, arg0, arg1, arg2),
                 4 => std::mem::transmute::<usize, Fn5>(code_ptr)(obj, arg0, arg1, arg2, arg3),
                 5 => std::mem::transmute::<usize, Fn6>(code_ptr)(obj, arg0, arg1, arg2, arg3, arg4),
-                6 => std::mem::transmute::<usize, Fn7>(code_ptr)(obj, arg0, arg1, arg2, arg3, arg4, arg5),
-                7 => std::mem::transmute::<usize, Fn8>(code_ptr)(obj, arg0, arg1, arg2, arg3, arg4, arg5, arg6),
+                6 => std::mem::transmute::<usize, Fn7>(code_ptr)(
+                    obj, arg0, arg1, arg2, arg3, arg4, arg5,
+                ),
+                7 => std::mem::transmute::<usize, Fn8>(code_ptr)(
+                    obj, arg0, arg1, arg2, arg3, arg4, arg5, arg6,
+                ),
                 _ => {
                     let error_msg = format!("Too many arguments to IFn: {}", arg_count);
                     let error_str = rt.allocate_string(&error_msg).unwrap_or(7);
@@ -1881,8 +1971,12 @@ pub extern "C" fn trampoline_ifn_invoke(
 
                         return match arg_count {
                             0 => std::mem::transmute::<usize, ClosureFn2>(code_ptr)(fn_ptr, obj),
-                            1 => std::mem::transmute::<usize, ClosureFn3>(code_ptr)(fn_ptr, obj, arg0),
-                            2 => std::mem::transmute::<usize, ClosureFn4>(code_ptr)(fn_ptr, obj, arg0, arg1),
+                            1 => std::mem::transmute::<usize, ClosureFn3>(code_ptr)(
+                                fn_ptr, obj, arg0,
+                            ),
+                            2 => std::mem::transmute::<usize, ClosureFn4>(code_ptr)(
+                                fn_ptr, obj, arg0, arg1,
+                            ),
                             _ => {
                                 let error_msg = format!("Too many arguments to IFn: {}", arg_count);
                                 let error_str = rt.allocate_string(&error_msg).unwrap_or(7);
@@ -1891,7 +1985,8 @@ pub extern "C" fn trampoline_ifn_invoke(
                         };
                     }
                     None => {
-                        let error_msg = format!("No matching arity for {} args in -invoke", arg_count + 1);
+                        let error_msg =
+                            format!("No matching arity for {} args in -invoke", arg_count + 1);
                         let error_str = rt.allocate_string(&error_msg).unwrap_or(7);
                         trampoline_throw(0, error_str);
                     }
@@ -1910,19 +2005,41 @@ pub extern "C" fn trampoline_ifn_invoke(
             type ClosureFn4 = extern "C" fn(usize, usize, usize, usize) -> usize;
             type ClosureFn5 = extern "C" fn(usize, usize, usize, usize, usize) -> usize;
             type ClosureFn6 = extern "C" fn(usize, usize, usize, usize, usize, usize) -> usize;
-            type ClosureFn7 = extern "C" fn(usize, usize, usize, usize, usize, usize, usize) -> usize;
-            type ClosureFn8 = extern "C" fn(usize, usize, usize, usize, usize, usize, usize, usize) -> usize;
-            type ClosureFn9 = extern "C" fn(usize, usize, usize, usize, usize, usize, usize, usize, usize) -> usize;
+            type ClosureFn7 =
+                extern "C" fn(usize, usize, usize, usize, usize, usize, usize) -> usize;
+            type ClosureFn8 =
+                extern "C" fn(usize, usize, usize, usize, usize, usize, usize, usize) -> usize;
+            type ClosureFn9 = extern "C" fn(
+                usize,
+                usize,
+                usize,
+                usize,
+                usize,
+                usize,
+                usize,
+                usize,
+                usize,
+            ) -> usize;
 
             match arg_count {
                 0 => std::mem::transmute::<usize, ClosureFn2>(code_ptr)(fn_ptr, obj),
                 1 => std::mem::transmute::<usize, ClosureFn3>(code_ptr)(fn_ptr, obj, arg0),
                 2 => std::mem::transmute::<usize, ClosureFn4>(code_ptr)(fn_ptr, obj, arg0, arg1),
-                3 => std::mem::transmute::<usize, ClosureFn5>(code_ptr)(fn_ptr, obj, arg0, arg1, arg2),
-                4 => std::mem::transmute::<usize, ClosureFn6>(code_ptr)(fn_ptr, obj, arg0, arg1, arg2, arg3),
-                5 => std::mem::transmute::<usize, ClosureFn7>(code_ptr)(fn_ptr, obj, arg0, arg1, arg2, arg3, arg4),
-                6 => std::mem::transmute::<usize, ClosureFn8>(code_ptr)(fn_ptr, obj, arg0, arg1, arg2, arg3, arg4, arg5),
-                7 => std::mem::transmute::<usize, ClosureFn9>(code_ptr)(fn_ptr, obj, arg0, arg1, arg2, arg3, arg4, arg5, arg6),
+                3 => std::mem::transmute::<usize, ClosureFn5>(code_ptr)(
+                    fn_ptr, obj, arg0, arg1, arg2,
+                ),
+                4 => std::mem::transmute::<usize, ClosureFn6>(code_ptr)(
+                    fn_ptr, obj, arg0, arg1, arg2, arg3,
+                ),
+                5 => std::mem::transmute::<usize, ClosureFn7>(code_ptr)(
+                    fn_ptr, obj, arg0, arg1, arg2, arg3, arg4,
+                ),
+                6 => std::mem::transmute::<usize, ClosureFn8>(code_ptr)(
+                    fn_ptr, obj, arg0, arg1, arg2, arg3, arg4, arg5,
+                ),
+                7 => std::mem::transmute::<usize, ClosureFn9>(code_ptr)(
+                    fn_ptr, obj, arg0, arg1, arg2, arg3, arg4, arg5, arg6,
+                ),
                 _ => {
                     let error_msg = format!("Too many arguments to IFn: {}", arg_count);
                     let error_str = rt.allocate_string(&error_msg).unwrap_or(7);
@@ -2063,10 +2180,7 @@ impl Trampoline {
             }
 
             // Copy code
-            let code_bytes = std::slice::from_raw_parts(
-                self.code.as_ptr() as *const u8,
-                code_size,
-            );
+            let code_bytes = std::slice::from_raw_parts(self.code.as_ptr() as *const u8, code_size);
             std::ptr::copy_nonoverlapping(code_bytes.as_ptr(), ptr as *mut u8, code_size);
 
             // Make executable
@@ -2125,10 +2239,7 @@ impl Trampoline {
             }
 
             // Copy code
-            let code_bytes = std::slice::from_raw_parts(
-                code.as_ptr() as *const u8,
-                code_size,
-            );
+            let code_bytes = std::slice::from_raw_parts(code.as_ptr() as *const u8, code_size);
             std::ptr::copy_nonoverlapping(code_bytes.as_ptr(), ptr as *mut u8, code_size);
 
             // Make executable (can't be writeable and executable at same time on macOS)
@@ -2166,12 +2277,10 @@ impl Trampoline {
                 rt.set_stack_base(self.stack_ptr as usize);
             }
 
-            let trampoline_fn: extern "C" fn(u64, u64) -> i64 =
-                std::mem::transmute(self.code_ptr);
+            let trampoline_fn: extern "C" fn(u64, u64) -> i64 = std::mem::transmute(self.code_ptr);
             trampoline_fn(self.stack_ptr as u64, jit_fn as u64)
         }
     }
-
 }
 
 impl Drop for Trampoline {
@@ -2222,10 +2331,7 @@ mod tests {
             }
 
             // Copy code
-            let code_bytes = std::slice::from_raw_parts(
-                code.as_ptr() as *const u8,
-                code_size,
-            );
+            let code_bytes = std::slice::from_raw_parts(code.as_ptr() as *const u8, code_size);
             std::ptr::copy_nonoverlapping(code_bytes.as_ptr(), ptr as *mut u8, code_size);
 
             // Make executable (can't be writeable and executable at same time on macOS)

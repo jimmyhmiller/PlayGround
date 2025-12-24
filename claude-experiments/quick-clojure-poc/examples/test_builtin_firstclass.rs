@@ -1,7 +1,7 @@
 // Test that builtins work as first-class values
 use quick_clojure_poc::*;
-use std::sync::Arc;
 use std::cell::UnsafeCell;
+use std::sync::Arc;
 
 fn run_test(code: &str, expected: i64) {
     let val = reader::read(code).expect(&format!("Failed to read: {}", code));
@@ -9,7 +9,9 @@ fn run_test(code: &str, expected: i64) {
 
     let runtime = Arc::new(UnsafeCell::new(gc_runtime::GCRuntime::new()));
     let mut compiler = compiler::Compiler::new(runtime);
-    compiler.compile(&ast).expect(&format!("Compiler failed for: {}", code));
+    compiler
+        .compile(&ast)
+        .expect(&format!("Compiler failed for: {}", code));
     let instructions = compiler.take_instructions();
     let num_locals = compiler.builder.num_locals;
 

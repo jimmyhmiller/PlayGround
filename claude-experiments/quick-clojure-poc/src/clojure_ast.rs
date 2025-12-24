@@ -11,7 +11,7 @@ pub enum Expr {
 
     // Variable reference
     Var {
-        namespace: Option<String>,  // None = unqualified, Some("user") = qualified
+        namespace: Option<String>, // None = unqualified, Some("user") = qualified
         name: String,
     },
 
@@ -51,16 +51,16 @@ pub enum Expr {
     /// (binding [var1 val1 var2 val2 ...] body)
     /// Establishes thread-local bindings for dynamic vars
     Binding {
-        bindings: Vec<(String, Box<Expr>)>,  // [(var-name, value-expr), ...]
-        body: Vec<Expr>,  // Multiple expressions in body (like do)
+        bindings: Vec<(String, Box<Expr>)>, // [(var-name, value-expr), ...]
+        body: Vec<Expr>,                    // Multiple expressions in body (like do)
     },
 
     /// (let [x 10 y 20] (+ x y))
     /// Establishes lexical (stack-allocated) local bindings
     /// Bindings are sequential - each can see prior bindings
     Let {
-        bindings: Vec<(String, Box<Expr>)>,  // [(name, value-expr), ...]
-        body: Vec<Expr>,  // Body expressions (returns last)
+        bindings: Vec<(String, Box<Expr>)>, // [(name, value-expr), ...]
+        body: Vec<Expr>,                    // Body expressions (returns last)
     },
 
     /// (loop [x 0 sum 0] body...)
@@ -81,8 +81,8 @@ pub enum Expr {
     /// Function definition - first-class values
     /// Supports multi-arity dispatch and closures
     Fn {
-        name: Option<String>,                      // Optional self-recursion name
-        arities: Vec<crate::value::FnArity>,       // One or more arity overloads
+        name: Option<String>,                // Optional self-recursion name
+        arities: Vec<crate::value::FnArity>, // One or more arity overloads
     },
 
     // Function call (for now, all calls are the same)
@@ -148,7 +148,6 @@ pub enum Expr {
     },
 
     // ========== Protocol System ==========
-
     /// (defprotocol ProtocolName
     ///   (method1 [this arg1])
     ///   (method2 [this arg1 arg2]))
@@ -172,8 +171,8 @@ pub enum Expr {
     /// Protocol method call: (-first coll)
     /// Protocol methods are called like regular functions but dispatch on first arg's type
     ProtocolCall {
-        method_name: String,  // e.g., "-first"
-        args: Vec<Expr>,      // First arg is the dispatch target
+        method_name: String, // e.g., "-first"
+        args: Vec<Expr>,     // First arg is the dispatch target
     },
 
     /// (debugger expr)
@@ -188,8 +187,8 @@ pub enum Expr {
 /// (catch ExceptionType binding body*)
 #[derive(Debug, Clone, PartialEq)]
 pub struct CatchClause {
-    pub exception_type: String,  // e.g., "Exception" (ignored for now - catch all)
-    pub binding: String,         // Local binding for caught exception
+    pub exception_type: String, // e.g., "Exception" (ignored for now - catch all)
+    pub binding: String,        // Local binding for caught exception
     pub body: Vec<Expr>,
 }
 
@@ -215,7 +214,7 @@ pub struct ProtocolImpl {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProtocolMethodImpl {
     pub name: String,
-    pub params: Vec<String>,  // Includes 'this'
+    pub params: Vec<String>, // Includes 'this'
     pub body: Vec<Expr>,
 }
 
@@ -234,21 +233,19 @@ pub struct FieldDef {
 pub fn analyze(value: &Value) -> Result<Expr, String> {
     match value {
         // Literals pass through
-        Value::Nil | Value::Bool(_) | Value::Int(_) | Value::Float(_) |
-        Value::String(_) | Value::Keyword(_) => {
-            Ok(Expr::Literal(value.clone()))
-        }
+        Value::Nil
+        | Value::Bool(_)
+        | Value::Int(_)
+        | Value::Float(_)
+        | Value::String(_)
+        | Value::Keyword(_) => Ok(Expr::Literal(value.clone())),
 
         // Vectors and other data structures are literals for now
         // (until we implement vector/map construction)
-        Value::Vector(_) | Value::Map(_) | Value::Set(_) => {
-            Ok(Expr::Literal(value.clone()))
-        }
+        Value::Vector(_) | Value::Map(_) | Value::Set(_) => Ok(Expr::Literal(value.clone())),
 
         // WithMeta wraps a value with metadata - analyze the inner value
-        Value::WithMeta(_, inner) => {
-            analyze(inner)
-        }
+        Value::WithMeta(_, inner) => analyze(inner),
 
         // Symbols become variable references
         // Parse qualified symbols: "user/foo" → Var { namespace: Some("user"), name: "foo" }
@@ -262,7 +259,7 @@ pub fn analyze(value: &Value) -> Result<Expr, String> {
                 })
             } else if let Some(idx) = s.find('/') {
                 let namespace = s[..idx].to_string();
-                let name = s[idx+1..].to_string();
+                let name = s[idx + 1..].to_string();
                 Ok(Expr::Var {
                     namespace: Some(namespace),
                     name,
@@ -298,22 +295,22 @@ pub fn analyze(value: &Value) -> Result<Expr, String> {
                     // ========== BUILTIN MACROS ==========
                     // These are macros in real Clojure but implemented here as special forms.
                     // TODO: Replace with actual macro implementations once we have macros.
-                    "defn" => analyze_defn(items),           // (defn name [args] body) -> (def name (fn [args] body))
-                    "declare" => analyze_declare(items),     // (declare x y z) -> (def x) (def y) (def z)
-                    "if-not" => analyze_if_not(items),       // (if-not test then else) -> (if (not test) then else)
-                    "when" => analyze_when(items),           // (when test body...) -> (if test (do body...) nil)
-                    "when-not" => analyze_when_not(items),   // (when-not test body...) -> (if test nil (do body...))
-                    "and" => analyze_and(items),             // (and x y) -> (if x y false)
-                    "or" => analyze_or(items),               // (or x y) -> (if x x y)
-                    "cond" => analyze_cond(items),           // (cond test1 expr1 ...) -> nested ifs
-                    "dotimes" => analyze_dotimes(items),     // (dotimes [i n] body) -> loop
-                    "ns" => analyze_ns(items),               // namespace declaration
-                    "use" => analyze_use(items),             // (use 'ns) - deprecated, use require
-                    "binding" => analyze_binding(items),     // dynamic binding
-                    "deftype*" | "deftype" => analyze_deftype(items),  // type definition
-                    "defprotocol" => analyze_defprotocol(items),       // protocol definition
-                    "extend-type" => analyze_extend_type(items),       // extend protocol to type
-                    "debugger" => analyze_debugger(items),   // debugging helper
+                    "defn" => analyze_defn(items), // (defn name [args] body) -> (def name (fn [args] body))
+                    "declare" => analyze_declare(items), // (declare x y z) -> (def x) (def y) (def z)
+                    "if-not" => analyze_if_not(items), // (if-not test then else) -> (if (not test) then else)
+                    "when" => analyze_when(items), // (when test body...) -> (if test (do body...) nil)
+                    "when-not" => analyze_when_not(items), // (when-not test body...) -> (if test nil (do body...))
+                    "and" => analyze_and(items),           // (and x y) -> (if x y false)
+                    "or" => analyze_or(items),             // (or x y) -> (if x x y)
+                    "cond" => analyze_cond(items),         // (cond test1 expr1 ...) -> nested ifs
+                    "dotimes" => analyze_dotimes(items),   // (dotimes [i n] body) -> loop
+                    "ns" => analyze_ns(items),             // namespace declaration
+                    "use" => analyze_use(items),           // (use 'ns) - deprecated, use require
+                    "binding" => analyze_binding(items),   // dynamic binding
+                    "deftype*" | "deftype" => analyze_deftype(items), // type definition
+                    "defprotocol" => analyze_defprotocol(items), // protocol definition
+                    "extend-type" => analyze_extend_type(items), // extend protocol to type
+                    "debugger" => analyze_debugger(items), // debugging helper
 
                     _ => analyze_call(items),
                 }
@@ -322,17 +319,11 @@ pub fn analyze(value: &Value) -> Result<Expr, String> {
             }
         }
 
-        Value::List(_) => {
-            Err("Cannot evaluate empty list".to_string())
-        }
+        Value::List(_) => Err("Cannot evaluate empty list".to_string()),
 
-        Value::Function { .. } => {
-            Err("Functions not yet implemented".to_string())
-        }
+        Value::Function { .. } => Err("Functions not yet implemented".to_string()),
 
-        Value::Namespace { .. } => {
-            Err("Namespace values not yet implemented".to_string())
-        }
+        Value::Namespace { .. } => Err("Namespace values not yet implemented".to_string()),
     }
 }
 
@@ -343,12 +334,10 @@ fn analyze_def(items: &im::Vector<Value>) -> Result<Expr, String> {
 
     // Extract name and metadata from the symbol (which might have metadata attached)
     let (name, metadata) = match &items[1] {
-        Value::WithMeta(meta, inner) => {
-            match **inner {
-                Value::Symbol(ref s) => (s.clone(), Some(meta.clone())),
-                _ => return Err("def requires a symbol".to_string()),
-            }
-        }
+        Value::WithMeta(meta, inner) => match **inner {
+            Value::Symbol(ref s) => (s.clone(), Some(meta.clone())),
+            _ => return Err("def requires a symbol".to_string()),
+        },
         Value::Symbol(s) => (s.clone(), None),
         _ => return Err("def requires a symbol as first argument".to_string()),
     };
@@ -432,7 +421,10 @@ fn analyze_defn(items: &im::Vector<Value>) -> Result<Expr, String> {
 
 fn analyze_set(items: &im::Vector<Value>) -> Result<Expr, String> {
     if items.len() != 3 {
-        return Err(format!("set! requires 2 arguments, got {}", items.len() - 1));
+        return Err(format!(
+            "set! requires 2 arguments, got {}",
+            items.len() - 1
+        ));
     }
 
     // First, analyze the target to see what it is
@@ -441,13 +433,11 @@ fn analyze_set(items: &im::Vector<Value>) -> Result<Expr, String> {
 
     // Check if target is a field access - if so, this is a field set
     match target {
-        Expr::FieldAccess { field, object } => {
-            Ok(Expr::FieldSet {
-                field,
-                object,
-                value: Box::new(value),
-            })
-        }
+        Expr::FieldAccess { field, object } => Ok(Expr::FieldSet {
+            field,
+            object,
+            value: Box::new(value),
+        }),
         _ => {
             // Original behavior for var set!
             Ok(Expr::Set {
@@ -460,7 +450,10 @@ fn analyze_set(items: &im::Vector<Value>) -> Result<Expr, String> {
 
 fn analyze_if(items: &im::Vector<Value>) -> Result<Expr, String> {
     if items.len() < 3 || items.len() > 4 {
-        return Err(format!("if requires 2 or 3 arguments, got {}", items.len() - 1));
+        return Err(format!(
+            "if requires 2 or 3 arguments, got {}",
+            items.len() - 1
+        ));
     }
 
     let test = analyze(&items[1])?;
@@ -481,7 +474,10 @@ fn analyze_if(items: &im::Vector<Value>) -> Result<Expr, String> {
 /// Transforms (if-not test then else) into (if (not test) then else)
 fn analyze_if_not(items: &im::Vector<Value>) -> Result<Expr, String> {
     if items.len() < 3 || items.len() > 4 {
-        return Err(format!("if-not requires 2 or 3 arguments, got {}", items.len() - 1));
+        return Err(format!(
+            "if-not requires 2 or 3 arguments, got {}",
+            items.len() - 1
+        ));
     }
 
     // Wrap the test in (not ...)
@@ -533,7 +529,7 @@ fn analyze_when(items: &im::Vector<Value>) -> Result<Expr, String> {
     Ok(Expr::If {
         test: Box::new(test),
         then: Box::new(then),
-        else_: None,  // when returns nil if test is false
+        else_: None, // when returns nil if test is false
     })
 }
 
@@ -703,16 +699,24 @@ fn analyze_do(items: &im::Vector<Value>) -> Result<Expr, String> {
 fn analyze_debugger(items: &im::Vector<Value>) -> Result<Expr, String> {
     // (debugger expr) - inserts breakpoint before evaluating expr
     if items.len() != 2 {
-        return Err(format!("debugger requires 1 argument, got {}", items.len() - 1));
+        return Err(format!(
+            "debugger requires 1 argument, got {}",
+            items.len() - 1
+        ));
     }
 
     let expr = analyze(&items[1])?;
-    Ok(Expr::Debugger { expr: Box::new(expr) })
+    Ok(Expr::Debugger {
+        expr: Box::new(expr),
+    })
 }
 
 fn analyze_quote(items: &im::Vector<Value>) -> Result<Expr, String> {
     if items.len() != 2 {
-        return Err(format!("quote requires 1 argument, got {}", items.len() - 1));
+        return Err(format!(
+            "quote requires 1 argument, got {}",
+            items.len() - 1
+        ));
     }
 
     Ok(Expr::Quote(items[1].clone()))
@@ -734,7 +738,7 @@ fn analyze_var_ref(items: &im::Vector<Value>) -> Result<Expr, String> {
                 })
             } else if let Some(idx) = s.find('/') {
                 let namespace = s[..idx].to_string();
-                let name = s[idx+1..].to_string();
+                let name = s[idx + 1..].to_string();
                 Ok(Expr::VarRef {
                     namespace: Some(namespace),
                     name,
@@ -775,10 +779,16 @@ fn analyze_deftype(items: &im::Vector<Value>) -> Result<Expr, String> {
                     Value::WithMeta(meta, inner) => {
                         let field_name = match &**inner {
                             Value::Symbol(s) => s.clone(),
-                            _ => return Err(format!("deftype field must be a symbol, got {:?}", inner)),
+                            _ => {
+                                return Err(format!(
+                                    "deftype field must be a symbol, got {:?}",
+                                    inner
+                                ));
+                            }
                         };
                         // Check if :mutable is in the metadata
-                        let is_mutable = meta.contains_key(":mutable") || meta.contains_key("mutable");
+                        let is_mutable =
+                            meta.contains_key(":mutable") || meta.contains_key("mutable");
                         field_names.push(field_name.clone());
                         FieldDef {
                             name: field_name,
@@ -808,10 +818,18 @@ fn analyze_deftype(items: &im::Vector<Value>) -> Result<Expr, String> {
         let implementations = parse_protocol_implementations_with_fields(items, 3, &field_names)?;
 
         // Generate: (do (deftype* name fields) (extend-type name protocols...))
-        let deftype_expr = Expr::DefType { name: name.clone(), fields };
-        let extend_expr = Expr::ExtendType { type_name: name, implementations };
+        let deftype_expr = Expr::DefType {
+            name: name.clone(),
+            fields,
+        };
+        let extend_expr = Expr::ExtendType {
+            type_name: name,
+            implementations,
+        };
 
-        Ok(Expr::Do { exprs: vec![deftype_expr, extend_expr] })
+        Ok(Expr::Do {
+            exprs: vec![deftype_expr, extend_expr],
+        })
     } else {
         // Simple deftype without protocol implementations
         Ok(Expr::DefType { name, fields })
@@ -840,7 +858,9 @@ fn analyze_use(items: &im::Vector<Value>) -> Result<Expr, String> {
         // Accept both symbols and quoted symbols: (use clojure.core) or (use 'clojure.core)
         Value::Symbol(s) => s.clone(),
         Value::List(quoted) if quoted.len() == 2 => {
-            if let (Some(Value::Symbol(q)), Some(Value::Symbol(ns))) = (quoted.get(0), quoted.get(1)) {
+            if let (Some(Value::Symbol(q)), Some(Value::Symbol(ns))) =
+                (quoted.get(0), quoted.get(1))
+            {
                 if q == "quote" {
                     ns.clone()
                 } else {
@@ -870,7 +890,9 @@ fn analyze_binding(items: &im::Vector<Value>) -> Result<Expr, String> {
 
     // Bindings must be even (pairs of var/value)
     if bindings_vec.len() % 2 != 0 {
-        return Err("binding vector must contain an even number of forms (var/value pairs)".to_string());
+        return Err(
+            "binding vector must contain an even number of forms (var/value pairs)".to_string(),
+        );
     }
 
     // Parse each binding pair
@@ -882,7 +904,12 @@ fn analyze_binding(items: &im::Vector<Value>) -> Result<Expr, String> {
                 // For now, we'll store the full symbol name
                 s.clone()
             }
-            _ => return Err(format!("binding requires symbols as variable names, got {:?}", bindings_vec[i])),
+            _ => {
+                return Err(format!(
+                    "binding requires symbols as variable names, got {:?}",
+                    bindings_vec[i]
+                ));
+            }
         };
 
         let value_expr = analyze(&bindings_vec[i + 1])?;
@@ -916,7 +943,10 @@ fn analyze_let(items: &im::Vector<Value>) -> Result<Expr, String> {
 
     // Bindings must be even (pairs of name/value)
     if bindings_vec.len() % 2 != 0 {
-        return Err("let bindings vector must contain an even number of forms (name/value pairs)".to_string());
+        return Err(
+            "let bindings vector must contain an even number of forms (name/value pairs)"
+                .to_string(),
+        );
     }
 
     // Parse each binding pair
@@ -924,7 +954,12 @@ fn analyze_let(items: &im::Vector<Value>) -> Result<Expr, String> {
     for i in (0..bindings_vec.len()).step_by(2) {
         let name = match &bindings_vec[i] {
             Value::Symbol(s) => s.clone(),
-            _ => return Err(format!("let binding names must be symbols, got {:?}", bindings_vec[i])),
+            _ => {
+                return Err(format!(
+                    "let binding names must be symbols, got {:?}",
+                    bindings_vec[i]
+                ));
+            }
         };
 
         let value_expr = analyze(&bindings_vec[i + 1])?;
@@ -965,7 +1000,12 @@ fn analyze_loop(items: &im::Vector<Value>) -> Result<Expr, String> {
     for i in (0..bindings_vec.len()).step_by(2) {
         let name = match &bindings_vec[i] {
             Value::Symbol(s) => s.clone(),
-            _ => return Err(format!("loop binding names must be symbols, got {:?}", bindings_vec[i])),
+            _ => {
+                return Err(format!(
+                    "loop binding names must be symbols, got {:?}",
+                    bindings_vec[i]
+                ));
+            }
         };
         let value_expr = analyze(&bindings_vec[i + 1])?;
         bindings.push((name, Box::new(value_expr)));
@@ -1015,12 +1055,20 @@ fn analyze_dotimes(items: &im::Vector<Value>) -> Result<Expr, String> {
     // Build: (loop [i 0] (when (< i n) body... (recur (inc i))))
     // The inc call
     let inc_call = Expr::Call {
-        func: Box::new(Expr::Var { namespace: None, name: "inc".to_string() }),
-        args: vec![Expr::Var { namespace: None, name: var_name.clone() }],
+        func: Box::new(Expr::Var {
+            namespace: None,
+            name: "inc".to_string(),
+        }),
+        args: vec![Expr::Var {
+            namespace: None,
+            name: var_name.clone(),
+        }],
     };
 
     // The recur
-    let recur_expr = Expr::Recur { args: vec![inc_call] };
+    let recur_expr = Expr::Recur {
+        args: vec![inc_call],
+    };
 
     // Add recur to body
     body_exprs.push(recur_expr);
@@ -1034,9 +1082,15 @@ fn analyze_dotimes(items: &im::Vector<Value>) -> Result<Expr, String> {
 
     // The < comparison
     let lt_call = Expr::Call {
-        func: Box::new(Expr::Var { namespace: None, name: "<".to_string() }),
+        func: Box::new(Expr::Var {
+            namespace: None,
+            name: "<".to_string(),
+        }),
         args: vec![
-            Expr::Var { namespace: None, name: var_name.clone() },
+            Expr::Var {
+                namespace: None,
+                name: var_name.clone(),
+            },
             count_expr,
         ],
     };
@@ -1202,43 +1256,48 @@ fn parse_fn_params_and_body(
     }
 
     // Parse condition map and body
-    let (pre_conditions, post_conditions, body_start_idx) =
-        if !body_items.is_empty() {
-            if let Some(Value::Map(cond_map)) = body_items.first() {
-                // Check if this is truly a condition map or just the body
-                // Condition map has :pre and/or :post keys
-                let has_pre = cond_map.contains_key(&Value::Keyword("pre".to_string()));
-                let has_post = cond_map.contains_key(&Value::Keyword("post".to_string()));
+    let (pre_conditions, post_conditions, body_start_idx) = if !body_items.is_empty() {
+        if let Some(Value::Map(cond_map)) = body_items.first() {
+            // Check if this is truly a condition map or just the body
+            // Condition map has :pre and/or :post keys
+            let has_pre = cond_map.contains_key(&Value::Keyword("pre".to_string()));
+            let has_post = cond_map.contains_key(&Value::Keyword("post".to_string()));
 
-                if has_pre || has_post {
-                    // Parse condition map
-                    let pre = if let Some(Value::Vector(pre_vec)) = cond_map.get(&Value::Keyword("pre".to_string())) {
-                        pre_vec.iter()
-                            .map(|v| analyze(v))
-                            .collect::<Result<Vec<_>, _>>()?
-                    } else {
-                        Vec::new()
-                    };
-
-                    let post = if let Some(Value::Vector(post_vec)) = cond_map.get(&Value::Keyword("post".to_string())) {
-                        post_vec.iter()
-                            .map(|v| analyze(v))
-                            .collect::<Result<Vec<_>, _>>()?
-                    } else {
-                        Vec::new()
-                    };
-
-                    (pre, post, 1)
+            if has_pre || has_post {
+                // Parse condition map
+                let pre = if let Some(Value::Vector(pre_vec)) =
+                    cond_map.get(&Value::Keyword("pre".to_string()))
+                {
+                    pre_vec
+                        .iter()
+                        .map(|v| analyze(v))
+                        .collect::<Result<Vec<_>, _>>()?
                 } else {
-                    // Just a map in the body, not a condition map
-                    (Vec::new(), Vec::new(), 0)
-                }
+                    Vec::new()
+                };
+
+                let post = if let Some(Value::Vector(post_vec)) =
+                    cond_map.get(&Value::Keyword("post".to_string()))
+                {
+                    post_vec
+                        .iter()
+                        .map(|v| analyze(v))
+                        .collect::<Result<Vec<_>, _>>()?
+                } else {
+                    Vec::new()
+                };
+
+                (pre, post, 1)
             } else {
+                // Just a map in the body, not a condition map
                 (Vec::new(), Vec::new(), 0)
             }
         } else {
             (Vec::new(), Vec::new(), 0)
-        };
+        }
+    } else {
+        (Vec::new(), Vec::new(), 0)
+    };
 
     // Parse body expressions
     let mut body = Vec::new();
@@ -1289,7 +1348,10 @@ fn validate_fn_arities(arities: &[crate::value::FnArity]) -> Result<(), String> 
 fn analyze_throw(items: &im::Vector<Value>) -> Result<Expr, String> {
     // (throw expr)
     if items.len() != 2 {
-        return Err(format!("throw requires 1 argument, got {}", items.len() - 1));
+        return Err(format!(
+            "throw requires 1 argument, got {}",
+            items.len() - 1
+        ));
     }
 
     let exception = analyze(&items[1])?;
@@ -1322,7 +1384,9 @@ fn analyze_try(items: &im::Vector<Value>) -> Result<Expr, String> {
                 if sym == "catch" {
                     // (catch ExType binding body*)
                     if list_items.len() < 3 {
-                        return Err("catch requires at least exception type and binding".to_string());
+                        return Err(
+                            "catch requires at least exception type and binding".to_string()
+                        );
                     }
 
                     let exception_type = match &list_items[1] {
@@ -1446,7 +1510,12 @@ fn parse_protocol_method_sig(value: &Value) -> Result<ProtocolMethodSig, String>
                 for param in params.iter() {
                     match param {
                         Value::Symbol(s) => param_names.push(s.clone()),
-                        _ => return Err(format!("Protocol method parameter must be a symbol, got {:?}", param)),
+                        _ => {
+                            return Err(format!(
+                                "Protocol method parameter must be a symbol, got {:?}",
+                                param
+                            ));
+                        }
                     }
                 }
                 if param_names.is_empty() || param_names[0] != "this" {
@@ -1458,13 +1527,19 @@ fn parse_protocol_method_sig(value: &Value) -> Result<ProtocolMethodSig, String>
                 // Docstring - skip it
             }
             _ => {
-                return Err(format!("Protocol method arity must be a vector, got {:?}", items[i]));
+                return Err(format!(
+                    "Protocol method arity must be a vector, got {:?}",
+                    items[i]
+                ));
             }
         }
     }
 
     if arities.is_empty() {
-        return Err(format!("Protocol method {} requires at least one arity", name));
+        return Err(format!(
+            "Protocol method {} requires at least one arity",
+            name
+        ));
     }
 
     Ok(ProtocolMethodSig { name, arities })
@@ -1490,10 +1565,16 @@ fn analyze_extend_type(items: &im::Vector<Value>) -> Result<Expr, String> {
     // Parse protocol implementations
     let implementations = parse_protocol_implementations(&items, 2)?;
 
-    Ok(Expr::ExtendType { type_name, implementations })
+    Ok(Expr::ExtendType {
+        type_name,
+        implementations,
+    })
 }
 
-fn parse_protocol_implementations(items: &im::Vector<Value>, start_idx: usize) -> Result<Vec<ProtocolImpl>, String> {
+fn parse_protocol_implementations(
+    items: &im::Vector<Value>,
+    start_idx: usize,
+) -> Result<Vec<ProtocolImpl>, String> {
     // Protocol implementations are grouped by protocol name:
     // ProtocolName
     // (method1 [this] body...)
@@ -1527,7 +1608,10 @@ fn parse_protocol_implementations(items: &im::Vector<Value>, start_idx: usize) -
                 current_methods.push(method_impl);
             }
             _ => {
-                return Err(format!("Expected protocol name or method implementation, got {:?}", items[i]));
+                return Err(format!(
+                    "Expected protocol name or method implementation, got {:?}",
+                    items[i]
+                ));
             }
         }
     }
@@ -1572,7 +1656,10 @@ fn parse_protocol_implementations_with_fields(
                 current_methods.push(method_impl);
             }
             _ => {
-                return Err(format!("Expected protocol name or method implementation, got {:?}", items[i]));
+                return Err(format!(
+                    "Expected protocol name or method implementation, got {:?}",
+                    items[i]
+                ));
             }
         }
     }
@@ -1587,7 +1674,10 @@ fn parse_protocol_implementations_with_fields(
     Ok(implementations)
 }
 
-fn parse_protocol_method_impl(items: &im::Vector<Value>, field_names: &[String]) -> Result<ProtocolMethodImpl, String> {
+fn parse_protocol_method_impl(
+    items: &im::Vector<Value>,
+    field_names: &[String],
+) -> Result<ProtocolMethodImpl, String> {
     // (method-name [this arg1 arg2] body...)
     if items.len() < 2 {
         return Err("Protocol method implementation requires at least name and params".to_string());
@@ -1606,7 +1696,12 @@ fn parse_protocol_method_impl(items: &im::Vector<Value>, field_names: &[String])
             for param in params.iter() {
                 match param {
                     Value::Symbol(s) => param_names.push(s.clone()),
-                    _ => return Err(format!("Method parameter must be a symbol, got {:?}", param)),
+                    _ => {
+                        return Err(format!(
+                            "Method parameter must be a symbol, got {:?}",
+                            param
+                        ));
+                    }
                 }
             }
             param_names
@@ -1667,7 +1762,7 @@ fn analyze_call(items: &im::Vector<Value>) -> Result<Expr, String> {
     if let Some(Value::Symbol(sym)) = items.get(0) {
         // Check for constructor call: (TypeName. arg1 arg2 ...)
         if sym.ends_with('.') && sym.len() > 1 && !sym.starts_with('.') {
-            let type_name = sym[..sym.len()-1].to_string();
+            let type_name = sym[..sym.len() - 1].to_string();
             let mut args = Vec::new();
             for i in 1..items.len() {
                 args.push(analyze(&items[i])?);
@@ -1701,9 +1796,13 @@ fn analyze_call(items: &im::Vector<Value>) -> Result<Expr, String> {
 
         // Check for protocol method call: (-method-name obj args...)
         // Protocol methods start with "-" but not ".-" or "->"
-        if sym.starts_with('-') && sym.len() > 1 && !sym.starts_with(".-") && !sym.starts_with("->") {
+        if sym.starts_with('-') && sym.len() > 1 && !sym.starts_with(".-") && !sym.starts_with("->")
+        {
             if items.len() < 2 {
-                return Err(format!("Protocol method {} requires at least 1 argument (the target)", sym));
+                return Err(format!(
+                    "Protocol method {} requires at least 1 argument (the target)",
+                    sym
+                ));
             }
             let method_name = sym.clone();
             let mut args = Vec::new();

@@ -1,27 +1,27 @@
-mod value;
-mod reader;
 mod clojure_ast;
+mod reader;
+mod value;
 
 // Our own IR and compiler
-mod ir;
-mod compiler;
-mod arm_instructions;
 mod arm_codegen;
+mod arm_instructions;
+mod builtins;
+mod compiler;
 mod gc;
 mod gc_runtime;
+mod ir;
 mod register_allocation;
 mod trampoline;
-mod builtins;
 
+use crate::arm_codegen::Arm64CodeGen;
+use crate::clojure_ast::{Expr, analyze};
+use crate::compiler::Compiler;
+use crate::gc_runtime::GCRuntime;
+use crate::reader::read;
+use crate::trampoline::Trampoline;
+use std::cell::UnsafeCell;
 use std::io::{self, Write};
 use std::sync::Arc;
-use std::cell::UnsafeCell;
-use crate::reader::read;
-use crate::clojure_ast::{analyze, Expr};
-use crate::compiler::Compiler;
-use crate::arm_codegen::Arm64CodeGen;
-use crate::gc_runtime::GCRuntime;
-use crate::trampoline::Trampoline;
 
 /// Print a tagged value, matching Clojure's behavior
 /// nil prints nothing, other values print their untagged representation
@@ -115,7 +115,11 @@ fn print_ast(ast: &Expr, indent: usize) {
         Expr::Ns { name } => println!("{}Ns({})", prefix, name),
         Expr::Use { namespace } => println!("{}Use({})", prefix, namespace),
         Expr::Quote(v) => println!("{}Quote({:?})", prefix, v),
-        Expr::Def { name, value, metadata } => {
+        Expr::Def {
+            name,
+            value,
+            metadata,
+        } => {
             println!("{}Def", prefix);
             println!("{}  name: {}", prefix, name);
             if let Some(meta) = metadata {
@@ -245,7 +249,11 @@ fn print_ast(ast: &Expr, indent: usize) {
             println!("{}  object:", prefix);
             print_ast(object, indent + 2);
         }
-        Expr::FieldSet { field, object, value } => {
+        Expr::FieldSet {
+            field,
+            object,
+            value,
+        } => {
             println!("{}FieldSet(.-{})", prefix, field);
             println!("{}  object:", prefix);
             print_ast(object, indent + 2);
@@ -257,7 +265,11 @@ fn print_ast(ast: &Expr, indent: usize) {
             println!("{}  exception:", prefix);
             print_ast(exception, indent + 2);
         }
-        Expr::Try { body, catches, finally } => {
+        Expr::Try {
+            body,
+            catches,
+            finally,
+        } => {
             println!("{}Try", prefix);
             println!("{}  body:", prefix);
             for (i, expr) in body.iter().enumerate() {
@@ -267,7 +279,10 @@ fn print_ast(ast: &Expr, indent: usize) {
             if !catches.is_empty() {
                 println!("{}  catches:", prefix);
                 for (i, catch) in catches.iter().enumerate() {
-                    println!("{}    [{}] {} {}:", prefix, i, catch.exception_type, catch.binding);
+                    println!(
+                        "{}    [{}] {} {}:",
+                        prefix, i, catch.exception_type, catch.binding
+                    );
                     for (j, expr) in catch.body.iter().enumerate() {
                         println!("{}      [{}]:", prefix, j);
                         print_ast(expr, indent + 4);
@@ -286,10 +301,16 @@ fn print_ast(ast: &Expr, indent: usize) {
         Expr::DefProtocol { name, methods } => {
             println!("{}DefProtocol({})", prefix, name);
             for method in methods {
-                println!("{}  method: {} (arities: {:?})", prefix, method.name, method.arities);
+                println!(
+                    "{}  method: {} (arities: {:?})",
+                    prefix, method.name, method.arities
+                );
             }
         }
-        Expr::ExtendType { type_name, implementations } => {
+        Expr::ExtendType {
+            type_name,
+            implementations,
+        } => {
             println!("{}ExtendType({})", prefix, type_name);
             for impl_ in implementations {
                 println!("{}  implements: {}", prefix, impl_.protocol_name);
@@ -317,9 +338,18 @@ fn print_ast(ast: &Expr, indent: usize) {
 }
 
 fn print_machine_code(code: &[u32]) {
-    println!("\nMachine Code ({} instructions, {} bytes):", code.len(), code.len() * 4);
+    println!(
+        "\nMachine Code ({} instructions, {} bytes):",
+        code.len(),
+        code.len() * 4
+    );
     for (i, instruction) in code.iter().enumerate() {
-        println!("  {:04x}: {:08x}  ; {}", i * 4, instruction, disassemble_arm64(*instruction));
+        println!(
+            "  {:04x}: {:08x}  ; {}",
+            i * 4,
+            instruction,
+            disassemble_arm64(*instruction)
+        );
     }
 }
 
@@ -606,13 +636,18 @@ fn load_clojure_file(
                                     Ok(compiled) => {
                                         // Execute as 0-argument function via trampoline
                                         let trampoline = Trampoline::new(64 * 1024);
-                                        let result = unsafe { trampoline.execute(compiled.code_ptr as *const u8) };
+                                        let result = unsafe {
+                                            trampoline.execute(compiled.code_ptr as *const u8)
+                                        };
 
-                                        if print_results && !matches!(ast,
-                                            Expr::Def { .. } |
-                                            Expr::Ns { .. } |
-                                            Expr::Use { .. }
-                                        ) {
+                                        if print_results
+                                            && !matches!(
+                                                ast,
+                                                Expr::Def { .. }
+                                                    | Expr::Ns { .. }
+                                                    | Expr::Use { .. }
+                                            )
+                                        {
                                             unsafe {
                                                 let rt = &*runtime.get();
                                                 print_tagged_value(result, rt);
@@ -800,7 +835,9 @@ fn run_script(filename: &str, gc_always: bool) {
                                         // Like Clojure, scripts don't print results automatically
                                         // Only explicit print/println calls produce output
                                         let trampoline = Trampoline::new(64 * 1024);
-                                        let _result = unsafe { trampoline.execute(compiled.code_ptr as *const u8) };
+                                        let _result = unsafe {
+                                            trampoline.execute(compiled.code_ptr as *const u8)
+                                        };
                                     }
                                     Err(e) => {
                                         eprintln!("Codegen error: {}", e);
@@ -982,10 +1019,22 @@ fn main() {
                         rt.heap_stats()
                     };
                     println!("\n╔════════════════════ Heap Statistics ════════════════════╗");
-                    println!("║ GC Algorithm:    {:>20}                 ║", stats.gc_algorithm);
-                    println!("║ Namespaces:      {:>8}                               ║", stats.namespace_count);
-                    println!("║ Types:           {:>8}                               ║", stats.type_count);
-                    println!("║ Stack Map:       {:>8} entries                      ║", stats.stack_map_entries);
+                    println!(
+                        "║ GC Algorithm:    {:>20}                 ║",
+                        stats.gc_algorithm
+                    );
+                    println!(
+                        "║ Namespaces:      {:>8}                               ║",
+                        stats.namespace_count
+                    );
+                    println!(
+                        "║ Types:           {:>8}                               ║",
+                        stats.type_count
+                    );
+                    println!(
+                        "║ Stack Map:       {:>8} entries                      ║",
+                        stats.stack_map_entries
+                    );
                     println!("╚═════════════════════════════════════════════════════════╝");
                     println!();
                     continue;
@@ -1015,7 +1064,8 @@ fn main() {
                         let rt = &*runtime.get();
 
                         // Find namespace pointer
-                        if let Some(ns_ptr) = rt.list_namespaces()
+                        if let Some(ns_ptr) = rt
+                            .list_namespaces()
                             .iter()
                             .find(|(name, _, _)| name == ns_name)
                             .map(|(_, ptr, _)| *ptr)
@@ -1028,7 +1078,10 @@ fn main() {
                                 let value = rt.var_get_value(var_ptr);
                                 let untagged = value >> 3;
                                 let tag = value & 7;
-                                println!("  {:12}  0x{:08x}      {} (tag={})", name, var_ptr, untagged, tag);
+                                println!(
+                                    "  {:12}  0x{:08x}      {} (tag={})",
+                                    name, var_ptr, untagged, tag
+                                );
                             }
                             println!("╚═══════════════════════════════════════════════════╝\n");
                         } else {
@@ -1048,8 +1101,16 @@ fn main() {
                     };
                     println!("\n╔════════════════════ Detailed Heap Stats ════════════════════╗");
                     println!("  GC Algorithm:       {}", stats.gc_algorithm);
-                    println!("  Total Heap:         {} bytes ({:.2} KB)", stats.total_bytes, stats.total_bytes as f64 / 1024.0);
-                    println!("  Used:               {} bytes ({:.2} KB)", stats.used_bytes, stats.used_bytes as f64 / 1024.0);
+                    println!(
+                        "  Total Heap:         {} bytes ({:.2} KB)",
+                        stats.total_bytes,
+                        stats.total_bytes as f64 / 1024.0
+                    );
+                    println!(
+                        "  Used:               {} bytes ({:.2} KB)",
+                        stats.used_bytes,
+                        stats.used_bytes as f64 / 1024.0
+                    );
                     println!("  Live Objects:       {}", stats.object_count);
                     println!();
                     println!("  Objects by Type:");
@@ -1098,16 +1159,26 @@ fn main() {
                             println!("No objects in heap");
                         }
                     } else {
-                        println!("\n╔═══════════════════════ Live Objects ═══════════════════════╗");
+                        println!(
+                            "\n╔═══════════════════════ Live Objects ═══════════════════════╗"
+                        );
                         println!("  Address          Type         Size    Fields  TypeData");
                         println!("  ─────────────────────────────────────────────────────────────");
                         for obj in &objects {
-                            println!("  0x{:012x}  {:12} {:>5}   {:>6}  {}",
-                                obj.address, obj.type_name, obj.size_bytes, obj.field_count, obj.type_data);
+                            println!(
+                                "  0x{:012x}  {:12} {:>5}   {:>6}  {}",
+                                obj.address,
+                                obj.type_name,
+                                obj.size_bytes,
+                                obj.field_count,
+                                obj.type_data
+                            );
                         }
                         println!("  ─────────────────────────────────────────────────────────────");
                         println!("  Total: {} objects", objects.len());
-                        println!("╚═════════════════════════════════════════════════════════════╝\n");
+                        println!(
+                            "╚═════════════════════════════════════════════════════════════╝\n"
+                        );
                     }
                     continue;
                 }
@@ -1122,32 +1193,33 @@ fn main() {
                     };
 
                     match addr {
-                        Ok(tagged_ptr) => {
-                            unsafe {
-                                let rt = &*runtime.get();
-                                if let Some(info) = rt.inspect_object(tagged_ptr) {
-                                    println!("\n╔═══════════════ Object @ 0x{:x} ═══════════════╗", info.address);
-                                    println!("  Type:       {} (id={})", info.type_name, info.type_id);
-                                    println!("  Size:       {} bytes", info.size_bytes);
-                                    println!("  Fields:     {}", info.field_count);
-                                    println!("  TypeData:   {}", info.type_data);
-                                    println!("  Opaque:     {}", info.is_opaque);
+                        Ok(tagged_ptr) => unsafe {
+                            let rt = &*runtime.get();
+                            if let Some(info) = rt.inspect_object(tagged_ptr) {
+                                println!(
+                                    "\n╔═══════════════ Object @ 0x{:x} ═══════════════╗",
+                                    info.address
+                                );
+                                println!("  Type:       {} (id={})", info.type_name, info.type_id);
+                                println!("  Size:       {} bytes", info.size_bytes);
+                                println!("  Fields:     {}", info.field_count);
+                                println!("  TypeData:   {}", info.type_data);
+                                println!("  Opaque:     {}", info.is_opaque);
 
-                                    let fields = rt.object_fields(tagged_ptr);
-                                    if !fields.is_empty() {
-                                        println!();
-                                        println!("  Fields:");
-                                        println!("  ───────────────────────────────────────────────");
-                                        for (idx, value, desc) in &fields {
-                                            println!("  [{}] 0x{:x} = {}", idx, value, desc);
-                                        }
+                                let fields = rt.object_fields(tagged_ptr);
+                                if !fields.is_empty() {
+                                    println!();
+                                    println!("  Fields:");
+                                    println!("  ───────────────────────────────────────────────");
+                                    for (idx, value, desc) in &fields {
+                                        println!("  [{}] 0x{:x} = {}", idx, value, desc);
                                     }
-                                    println!("╚═══════════════════════════════════════════════════╝\n");
-                                } else {
-                                    eprintln!("No object found at address 0x{:x}", tagged_ptr);
                                 }
+                                println!("╚═══════════════════════════════════════════════════╝\n");
+                            } else {
+                                eprintln!("No object found at address 0x{:x}", tagged_ptr);
                             }
-                        }
+                        },
                         Err(_) => {
                             eprintln!("Invalid address: {}", addr_str);
                         }
@@ -1174,16 +1246,23 @@ fn main() {
                             if refs.is_empty() {
                                 println!("No references found to 0x{:x}", tagged_ptr);
                             } else {
-                                println!("\n╔═══════════ References to 0x{:x} ═══════════╗", tagged_ptr);
+                                println!(
+                                    "\n╔═══════════ References to 0x{:x} ═══════════╗",
+                                    tagged_ptr
+                                );
                                 println!("  From Address       Field    Tagged Value");
                                 println!("  ─────────────────────────────────────────────────");
                                 for r in &refs {
-                                    println!("  0x{:012x}   [{}]      0x{:x}",
-                                        r.from_address, r.field_index, r.tagged_value);
+                                    println!(
+                                        "  0x{:012x}   [{}]      0x{:x}",
+                                        r.from_address, r.field_index, r.tagged_value
+                                    );
                                 }
                                 println!("  ─────────────────────────────────────────────────────");
                                 println!("  Total: {} references", refs.len());
-                                println!("╚═══════════════════════════════════════════════════════╝\n");
+                                println!(
+                                    "╚═══════════════════════════════════════════════════════╝\n"
+                                );
                             }
                         }
                         Err(_) => {
@@ -1245,18 +1324,32 @@ fn main() {
                                         match repl_compiler.compile(&ast) {
                                             Ok(_) => {
                                                 // First show any nested function IRs
-                                                let fn_irs = repl_compiler.take_compiled_function_irs();
+                                                let fn_irs =
+                                                    repl_compiler.take_compiled_function_irs();
                                                 for (fn_name, fn_instructions) in &fn_irs {
-                                                    let name_str = fn_name.as_ref().map(|s| s.as_str()).unwrap_or("<anonymous>");
-                                                    println!("\nFunction '{}' IR ({} instructions):", name_str, fn_instructions.len());
-                                                    for (i, inst) in fn_instructions.iter().enumerate() {
+                                                    let name_str = fn_name
+                                                        .as_ref()
+                                                        .map(|s| s.as_str())
+                                                        .unwrap_or("<anonymous>");
+                                                    println!(
+                                                        "\nFunction '{}' IR ({} instructions):",
+                                                        name_str,
+                                                        fn_instructions.len()
+                                                    );
+                                                    for (i, inst) in
+                                                        fn_instructions.iter().enumerate()
+                                                    {
                                                         println!("  {:3}: {:?}", i, inst);
                                                     }
                                                 }
 
                                                 // Then show top-level IR
-                                                let instructions = repl_compiler.take_instructions();
-                                                println!("\nTop-level IR ({} instructions):", instructions.len());
+                                                let instructions =
+                                                    repl_compiler.take_instructions();
+                                                println!(
+                                                    "\nTop-level IR ({} instructions):",
+                                                    instructions.len()
+                                                );
                                                 for (i, inst) in instructions.iter().enumerate() {
                                                     println!("  {:3}: {:?}", i, inst);
                                                 }
@@ -1269,17 +1362,28 @@ fn main() {
                                         // Use the REPL compiler so we can access defined vars
                                         match repl_compiler.compile_toplevel(&ast) {
                                             Ok(_) => {
-                                                let instructions = repl_compiler.take_instructions();
+                                                let instructions =
+                                                    repl_compiler.take_instructions();
                                                 let num_locals = repl_compiler.builder.num_locals;
 
-                                                match Arm64CodeGen::compile_function(&instructions, num_locals, 0) {
+                                                match Arm64CodeGen::compile_function(
+                                                    &instructions,
+                                                    num_locals,
+                                                    0,
+                                                ) {
                                                     Ok(compiled) => {
                                                         // Display the machine code by reading from executable memory
-                                                        let code_ptr = compiled.code_ptr as *const u32;
+                                                        let code_ptr =
+                                                            compiled.code_ptr as *const u32;
                                                         let code_len = compiled.code_len;
                                                         unsafe {
-                                                            let code_slice = std::slice::from_raw_parts(code_ptr, code_len);
-                                                            print_machine_code(&code_slice.to_vec());
+                                                            let code_slice =
+                                                                std::slice::from_raw_parts(
+                                                                    code_ptr, code_len,
+                                                                );
+                                                            print_machine_code(
+                                                                &code_slice.to_vec(),
+                                                            );
                                                         }
                                                         println!();
                                                     }
@@ -1293,14 +1397,23 @@ fn main() {
                                         // Normal execution using IR-based compilation with persistent compiler
                                         match repl_compiler.compile_toplevel(&ast) {
                                             Ok(_) => {
-                                                let instructions = repl_compiler.take_instructions();
+                                                let instructions =
+                                                    repl_compiler.take_instructions();
                                                 let num_locals = repl_compiler.builder.num_locals;
 
-                                                match Arm64CodeGen::compile_function(&instructions, num_locals, 0) {
+                                                match Arm64CodeGen::compile_function(
+                                                    &instructions,
+                                                    num_locals,
+                                                    0,
+                                                ) {
                                                     Ok(compiled) => {
                                                         // Execute as 0-argument function via trampoline
                                                         let trampoline = Trampoline::new(64 * 1024);
-                                                        let result = unsafe { trampoline.execute(compiled.code_ptr as *const u8) };
+                                                        let result = unsafe {
+                                                            trampoline.execute(
+                                                                compiled.code_ptr as *const u8,
+                                                            )
+                                                        };
 
                                                         // Sync compiler's namespace registry in case GC relocated objects
                                                         // (This can happen during allocation in gc-always mode or when heap is full)
@@ -1312,16 +1425,24 @@ fn main() {
                                                             // If this was a top-level def, print the var instead of the value
                                                             if let Expr::Def { name, .. } = &ast {
                                                                 // Look up the var that was just stored
-                                                                let ns_name = repl_compiler.get_current_namespace();
-                                                                let ns_ptr = rt.list_namespaces()
+                                                                let ns_name = repl_compiler
+                                                                    .get_current_namespace();
+                                                                let ns_ptr = rt
+                                                                    .list_namespaces()
                                                                     .iter()
                                                                     .find(|(n, _, _)| n == &ns_name)
                                                                     .map(|(_, ptr, _)| *ptr)
                                                                     .unwrap();
 
-                                                                if let Some(var_ptr) = rt.namespace_lookup(ns_ptr, name) {
-                                                                    let (ns_name, symbol_name) = rt.var_info(var_ptr);
-                                                                    println!("#'{}/{}", ns_name, symbol_name);
+                                                                if let Some(var_ptr) = rt
+                                                                    .namespace_lookup(ns_ptr, name)
+                                                                {
+                                                                    let (ns_name, symbol_name) =
+                                                                        rt.var_info(var_ptr);
+                                                                    println!(
+                                                                        "#'{}/{}",
+                                                                        ns_name, symbol_name
+                                                                    );
                                                                 }
                                                             } else {
                                                                 // For other expressions, print the result value

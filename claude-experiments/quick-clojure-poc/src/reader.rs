@@ -1,6 +1,6 @@
 use crate::value::Value;
 use clojure_reader::edn::{Edn, read_string};
-use im::{vector, hashmap, hashset};
+use im::{hashmap, hashset, vector};
 use std::collections::HashMap;
 
 /// Convert clojure-reader's Edn to our Value representation
@@ -35,7 +35,7 @@ pub fn edn_to_value(edn: &Edn) -> Result<Value, String> {
         }
 
         Edn::Map(map) => {
-            let mut result = hashmap!{};
+            let mut result = hashmap! {};
             for (k, v) in map {
                 let key = edn_to_value(k)?;
                 let value = edn_to_value(v)?;
@@ -45,7 +45,7 @@ pub fn edn_to_value(edn: &Edn) -> Result<Value, String> {
         }
 
         Edn::Set(items) => {
-            let mut result = hashset!{};
+            let mut result = hashset! {};
             for item in items {
                 result.insert(edn_to_value(item)?);
             }
@@ -55,7 +55,7 @@ pub fn edn_to_value(edn: &Edn) -> Result<Value, String> {
         // Handle metadata
         Edn::Meta(meta_map, inner) => {
             // Convert metadata map to HashMap<String, Value>
-            let mut metadata = hashmap!{};
+            let mut metadata = hashmap! {};
             for (k, v) in meta_map {
                 let key = match k {
                     Edn::Key(s) => s.to_string(),
@@ -79,9 +79,18 @@ pub fn edn_to_value(edn: &Edn) -> Result<Value, String> {
 
 /// Check if a character can be part of a keyword/symbol name
 fn is_keyword_char(c: char) -> bool {
-    c.is_alphanumeric() || c == '/' || c == '-' || c == '_'
-        || c == '.' || c == '*' || c == '+' || c == '!' || c == '?'
-        || c == '<' || c == '>' || c == '='
+    c.is_alphanumeric()
+        || c == '/'
+        || c == '-'
+        || c == '_'
+        || c == '.'
+        || c == '*'
+        || c == '+'
+        || c == '!'
+        || c == '?'
+        || c == '<'
+        || c == '>'
+        || c == '='
 }
 
 /// Pre-process input to handle reader macros not supported by clojure-reader
@@ -221,7 +230,10 @@ mod tests {
         assert_eq!(read("false").unwrap(), Value::Bool(false));
         assert_eq!(read("42").unwrap(), Value::Int(42));
         assert_eq!(read("3.14").unwrap(), Value::Float(3.14));
-        assert_eq!(read("\"hello\"").unwrap(), Value::String("hello".to_string()));
+        assert_eq!(
+            read("\"hello\"").unwrap(),
+            Value::String("hello".to_string())
+        );
     }
 
     #[test]
@@ -384,7 +396,10 @@ mod tests {
                 assert_eq!(map.len(), 2);
                 let key_name = Value::Keyword("user/name".to_string());
                 let key_id = Value::Keyword("my.keys/id".to_string());
-                assert_eq!(map.get(&key_name), Some(&Value::String("Alice".to_string())));
+                assert_eq!(
+                    map.get(&key_name),
+                    Some(&Value::String("Alice".to_string()))
+                );
                 assert_eq!(map.get(&key_id), Some(&Value::Int(42)));
             }
             _ => panic!("Expected map"),

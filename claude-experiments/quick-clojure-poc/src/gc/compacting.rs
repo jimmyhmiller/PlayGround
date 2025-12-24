@@ -5,10 +5,13 @@
 
 use std::error::Error;
 
-use super::space::{Space, DEFAULT_PAGE_COUNT};
+use super::space::{DEFAULT_PAGE_COUNT, Space};
 use super::stack_walker::StackWalker;
 use super::types::{BuiltInTypes, Header, HeapObject};
-use super::{AllocateAction, Allocator, AllocatorOptions, StackMap, HeapInspector, DetailedHeapStats, type_id_to_name};
+use super::{
+    AllocateAction, Allocator, AllocatorOptions, DetailedHeapStats, HeapInspector, StackMap,
+    type_id_to_name,
+};
 
 /// Compacting heap using Cheney's algorithm
 pub struct CompactingHeap {

@@ -1,3 +1,5 @@
+use std::fs;
+use std::path::PathBuf;
 /// Unit tests for deftype* implementation
 ///
 /// Tests the deftype special form including:
@@ -6,11 +8,8 @@
 /// - Field access (.-field obj)
 /// - Nested types
 /// - Error handling
-
 use std::process::Command;
-use std::fs;
 use std::sync::OnceLock;
-use std::path::PathBuf;
 
 static BINARY_PATH: OnceLock<PathBuf> = OnceLock::new();
 
@@ -23,8 +22,7 @@ fn get_binary_path() -> &'static PathBuf {
 
         assert!(status.success(), "Failed to build release binary");
 
-        let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
-            .unwrap_or_else(|_| ".".to_string());
+        let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
         PathBuf::from(manifest_dir).join("target/release/quick-clojure-poc")
     })
 }
@@ -89,7 +87,11 @@ fn test_deftype_basic_construction() {
 "#;
     let output = run_and_get_stdout(code);
     // Should return a heap object representation (may include type name like #<user/Point@...>)
-    assert!(output.contains("#<") && output.contains("@"), "Expected object output, got: {}", output);
+    assert!(
+        output.contains("#<") && output.contains("@"),
+        "Expected object output, got: {}",
+        output
+    );
 }
 
 #[test]
@@ -257,8 +259,11 @@ fn test_deftype_invalid_field_error() {
 (println (.-invalid p))
 "#;
     let stderr = run_and_get_stderr(code);
-    assert!(stderr.contains("Field 'invalid' not found"),
-            "Expected error about invalid field, got: {}", stderr);
+    assert!(
+        stderr.contains("Field 'invalid' not found"),
+        "Expected error about invalid field, got: {}",
+        stderr
+    );
 }
 
 #[test]
@@ -270,8 +275,11 @@ fn test_deftype_invalid_field_with_type_name() {
 "#;
     let stderr = run_and_get_stderr(code);
     // Error should mention the type name
-    assert!(stderr.contains("Point"),
-            "Expected error to mention type 'Point', got: {}", stderr);
+    assert!(
+        stderr.contains("Point"),
+        "Expected error to mention type 'Point', got: {}",
+        stderr
+    );
 }
 
 // ============================================================================
@@ -503,7 +511,11 @@ fn test_gc_always_binary_tree() {
 "#;
     let output = run_gc_always_and_get_stdout(code);
     // 100 + 10 + 20 + 1 + 2 + 3 + 4 = 140
-    assert_eq!(output, "140", "Expected 140 with gc-always mode, got: {}", output);
+    assert_eq!(
+        output, "140",
+        "Expected 140 with gc-always mode, got: {}",
+        output
+    );
 }
 
 #[test]
@@ -547,5 +559,9 @@ fn test_gc_always_complete_binary_tree() {
 "#;
     let output = run_gc_always_and_get_stdout(code);
     // 31 nodes, each with value 1
-    assert_eq!(output, "31", "Expected 31 with gc-always mode, got: {}", output);
+    assert_eq!(
+        output, "31",
+        "Expected 31 with gc-always mode, got: {}",
+        output
+    );
 }

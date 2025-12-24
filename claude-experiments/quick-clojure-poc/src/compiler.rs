@@ -1,11 +1,11 @@
-use crate::clojure_ast::{Expr, CatchClause};
-use crate::value::Value;
-use crate::ir::{Instruction, IrValue, IrBuilder, Condition, Label};
-use crate::gc_runtime::GCRuntime;
 use crate::arm_codegen::Arm64CodeGen;
+use crate::clojure_ast::{CatchClause, Expr};
+use crate::gc_runtime::GCRuntime;
+use crate::ir::{Condition, Instruction, IrBuilder, IrValue, Label};
+use crate::value::Value;
+use std::cell::UnsafeCell;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::cell::UnsafeCell;
 
 /// Context for loop/recur
 #[derive(Clone)]
@@ -29,7 +29,7 @@ enum Binding {
 #[derive(Clone, Debug)]
 struct TypeInfo {
     type_id: usize,
-    fields: Vec<(String, bool)>,  // (name, is_mutable)
+    fields: Vec<(String, bool)>, // (name, is_mutable)
 }
 
 /// Clojure to IR compiler
@@ -93,8 +93,11 @@ impl Compiler {
 
             // Bootstrap *ns* var in clojure.core
             // Initially set to user namespace (since that's the default starting namespace)
-            let (ns_var_ptr, _ns_var_id) = rt.allocate_var(core_ns_ptr, "*ns*", user_ns_ptr).unwrap();
-            let core_ns_ptr = rt.namespace_add_binding(core_ns_ptr, "*ns*", ns_var_ptr).unwrap();
+            let (ns_var_ptr, _ns_var_id) =
+                rt.allocate_var(core_ns_ptr, "*ns*", user_ns_ptr).unwrap();
+            let core_ns_ptr = rt
+                .namespace_add_binding(core_ns_ptr, "*ns*", ns_var_ptr)
+                .unwrap();
 
             // Mark *ns* as dynamic so it can be rebound later
             rt.mark_var_dynamic(ns_var_ptr);
@@ -139,7 +142,11 @@ impl Compiler {
         match expr {
             Expr::Literal(value) => self.compile_literal(value),
             Expr::Var { namespace, name } => self.compile_var(namespace, name),
-            Expr::Def { name, value, metadata } => self.compile_def(name, value, metadata),
+            Expr::Def {
+                name,
+                value,
+                metadata,
+            } => self.compile_def(name, value, metadata),
             Expr::Set { var, value } => self.compile_set(var, value),
             Expr::Ns { name } => self.compile_ns(name),
             Expr::Use { namespace } => self.compile_use(namespace),
@@ -156,13 +163,26 @@ impl Compiler {
             Expr::DefType { name, fields } => self.compile_deftype(name, fields),
             Expr::TypeConstruct { type_name, args } => self.compile_type_construct(type_name, args),
             Expr::FieldAccess { field, object } => self.compile_field_access(field, object),
-            Expr::FieldSet { field, object, value } => self.compile_field_set(field, object, value),
+            Expr::FieldSet {
+                field,
+                object,
+                value,
+            } => self.compile_field_set(field, object, value),
             Expr::Throw { exception } => self.compile_throw(exception),
-            Expr::Try { body, catches, finally } => self.compile_try(body, catches, finally),
+            Expr::Try {
+                body,
+                catches,
+                finally,
+            } => self.compile_try(body, catches, finally),
             // Protocol system - will be implemented in Phase 4
             Expr::DefProtocol { name, methods } => self.compile_defprotocol(name, methods),
-            Expr::ExtendType { type_name, implementations } => self.compile_extend_type(type_name, implementations),
-            Expr::ProtocolCall { method_name, args } => self.compile_protocol_call(method_name, args),
+            Expr::ExtendType {
+                type_name,
+                implementations,
+            } => self.compile_extend_type(type_name, implementations),
+            Expr::ProtocolCall { method_name, args } => {
+                self.compile_protocol_call(method_name, args)
+            }
             Expr::Debugger { expr } => self.compile_debugger(expr),
         }
     }
@@ -209,7 +229,8 @@ impl Compiler {
                 // Floats are heap-allocated to preserve full precision
                 // SAFETY: Single-threaded REPL
                 let rt = unsafe { &mut *self.runtime.get() };
-                let float_ptr = rt.allocate_float(*f)
+                let float_ptr = rt
+                    .allocate_float(*f)
                     .map_err(|e| format!("Failed to allocate float: {}", e))?;
 
                 // Load the tagged pointer as a constant
@@ -223,7 +244,8 @@ impl Compiler {
                 // This ensures the string survives GC even when not stored in a var
                 // SAFETY: Single-threaded REPL
                 let rt = unsafe { &mut *self.runtime.get() };
-                let str_ptr = rt.allocate_string_constant(s)
+                let str_ptr = rt
+                    .allocate_string_constant(s)
                     .map_err(|e| format!("Failed to allocate string: {}", e))?;
 
                 // Load the tagged pointer as a constant
@@ -239,18 +261,22 @@ impl Compiler {
                 let keyword_index = rt.add_keyword(text.clone());
 
                 // Call load-keyword builtin - actual allocation happens at runtime
-                let index_reg = self.builder.assign_new(IrValue::TaggedConstant((keyword_index << 3) as isize));
+                let index_reg = self
+                    .builder
+                    .assign_new(IrValue::TaggedConstant((keyword_index << 3) as isize));
                 return self.call_builtin("load-keyword", vec![index_reg]);
             }
             Value::Vector(elements) => {
                 // Compile vector literal as call to (vector elem1 elem2 ...)
                 // Convert each element to an Expr and compile as a vector call
-                let elem_exprs: Vec<Expr> = elements.iter()
-                    .map(|v| Expr::Literal(v.clone()))
-                    .collect();
+                let elem_exprs: Vec<Expr> =
+                    elements.iter().map(|v| Expr::Literal(v.clone())).collect();
                 return self.compile_call(
-                    &Expr::Var { namespace: Some("clojure.core".to_string()), name: "vector".to_string() },
-                    &elem_exprs
+                    &Expr::Var {
+                        namespace: Some("clojure.core".to_string()),
+                        name: "vector".to_string(),
+                    },
+                    &elem_exprs,
                 );
             }
             Value::Map(pairs) => {
@@ -262,8 +288,11 @@ impl Compiler {
                     kv_exprs.push(Expr::Literal(v.clone()));
                 }
                 return self.compile_call(
-                    &Expr::Var { namespace: Some("clojure.core".to_string()), name: "hash-map".to_string() },
-                    &kv_exprs
+                    &Expr::Var {
+                        namespace: Some("clojure.core".to_string()),
+                        name: "hash-map".to_string(),
+                    },
+                    &kv_exprs,
                 );
             }
             _ => {
@@ -278,10 +307,11 @@ impl Compiler {
         // First, check if this is a local variable (from let)
         // Only unqualified names can be locals
         if namespace.is_none()
-            && let Some(register) = self.lookup_local(name) {
-                // Local variable - just return the register directly
-                return Ok(register);
-            }
+            && let Some(register) = self.lookup_local(name)
+        {
+            // Local variable - just return the register directly
+            return Ok(register);
+        }
 
         // Not a local - emit runtime symbol lookup
         // This enables forward references: vars are looked up at runtime, not compile time
@@ -311,7 +341,7 @@ impl Compiler {
             if let Some(var_ptr) = rt.namespace_lookup(ns_ptr, name) {
                 rt.is_var_dynamic(var_ptr)
             } else {
-                false  // Forward reference - assume non-dynamic
+                false // Forward reference - assume non-dynamic
             }
         } else {
             false
@@ -324,26 +354,37 @@ impl Compiler {
             "load-var-by-symbol"
         };
 
-        let ns_sym_reg = self.builder.assign_new(IrValue::TaggedConstant(((ns_symbol_id << 3) as isize)));
-        let name_sym_reg = self.builder.assign_new(IrValue::TaggedConstant(((name_symbol_id << 3) as isize)));
+        let ns_sym_reg = self
+            .builder
+            .assign_new(IrValue::TaggedConstant(((ns_symbol_id << 3) as isize)));
+        let name_sym_reg = self
+            .builder
+            .assign_new(IrValue::TaggedConstant(((name_symbol_id << 3) as isize)));
 
         self.call_builtin(builtin_name, vec![ns_sym_reg, name_sym_reg])
     }
 
     /// Check if a symbol is a built-in function
     fn is_builtin(&self, name: &str) -> bool {
-        matches!(name, "+" | "-" | "*" | "/" | "<" | ">" | "<=" | ">=" | "=" | "__gc" |
+        matches!(
+            name,
+            "+" | "-" | "*" | "/" | "<" | ">" | "<=" | ">=" | "=" | "__gc" |
                  "bit-and" | "bit-or" | "bit-xor" | "bit-not" |
                  "bit-shift-left" | "bit-shift-right" | "unsigned-bit-shift-right" |
                  "bit-shift-right-zero-fill" |  // CLJS alias for unsigned-bit-shift-right
                  "nil?" | "number?" | "string?" | "fn?" | "identical?" |
                  "instance?" | "keyword?" | "hash-primitive" |
                  "cons?" | "cons-first" | "cons-rest" |
-                 "_println" | "_print" | "_newline" | "_print-space")
+                 "_println" | "_print" | "_newline" | "_print-space"
+        )
     }
 
     /// Compile (var symbol) - returns the Var object itself, not its value
-    fn compile_var_ref(&mut self, namespace: &Option<String>, name: &str) -> Result<IrValue, String> {
+    fn compile_var_ref(
+        &mut self,
+        namespace: &Option<String>,
+        name: &str,
+    ) -> Result<IrValue, String> {
         // Look up the var pointer (same logic as compile_var, but don't dereference)
         let var_ptr = self.lookup_var_pointer(namespace, name)?;
 
@@ -360,7 +401,11 @@ impl Compiler {
 
     /// Compile (deftype* TypeName [field1 ^:mutable field2 ...])
     /// Registers the type and returns nil
-    fn compile_deftype(&mut self, name: &str, fields: &[crate::clojure_ast::FieldDef]) -> Result<IrValue, String> {
+    fn compile_deftype(
+        &mut self,
+        name: &str,
+        fields: &[crate::clojure_ast::FieldDef],
+    ) -> Result<IrValue, String> {
         // Register the type with the runtime using fully qualified name
         let current_ns = self.get_current_namespace();
         let qualified_name = format!("{}/{}", current_ns, name);
@@ -385,7 +430,8 @@ impl Compiler {
 
         // deftype* returns nil
         let result = self.builder.new_register();
-        self.builder.emit(Instruction::LoadConstant(result, IrValue::Null));
+        self.builder
+            .emit(Instruction::LoadConstant(result, IrValue::Null));
         Ok(result)
     }
 
@@ -396,7 +442,11 @@ impl Compiler {
     /// 1. ExternalCall to allocate heap object (returns untagged pointer)
     /// 2. HeapStore for each field value
     /// 3. Tag the pointer with HeapObject tag
-    fn compile_type_construct(&mut self, type_name: &str, args: &[Expr]) -> Result<IrValue, String> {
+    fn compile_type_construct(
+        &mut self,
+        type_name: &str,
+        args: &[Expr],
+    ) -> Result<IrValue, String> {
         // Resolve type name to fully qualified name
         let qualified_name = if type_name.contains('/') {
             type_name.to_string()
@@ -405,7 +455,9 @@ impl Compiler {
         };
 
         // Look up the type by fully qualified name
-        let type_info = self.type_registry.get(&qualified_name)
+        let type_info = self
+            .type_registry
+            .get(&qualified_name)
             .cloned()
             .ok_or_else(|| format!("Unknown type: {}", qualified_name))?;
 
@@ -413,7 +465,9 @@ impl Compiler {
         if args.len() != type_info.fields.len() {
             return Err(format!(
                 "Type {} requires {} arguments, got {}",
-                type_name, type_info.fields.len(), args.len()
+                type_name,
+                type_info.fields.len(),
+                args.len()
             ));
         }
 
@@ -431,27 +485,36 @@ impl Compiler {
         let raw_ptr = self.builder.new_register();
 
         // Load type_id and field_count as raw constants (untagged values)
-        let type_id_reg = self.builder.assign_new(IrValue::RawConstant(type_info.type_id as i64));
-        let field_count_reg = self.builder.assign_new(IrValue::RawConstant(field_values.len() as i64));
+        let type_id_reg = self
+            .builder
+            .assign_new(IrValue::RawConstant(type_info.type_id as i64));
+        let field_count_reg = self
+            .builder
+            .assign_new(IrValue::RawConstant(field_values.len() as i64));
 
         // Pass FramePointer (SP/x31) as first arg for GC stack walking
         self.builder.emit(Instruction::ExternalCall(
             raw_ptr,
             trampoline_addr,
-            vec![IrValue::FramePointer, type_id_reg, field_count_reg]
+            vec![IrValue::FramePointer, type_id_reg, field_count_reg],
         ));
 
         // Step 2: Write field values using HeapStore
         // Field 0 is at offset 1 (after 8-byte header), field 1 at offset 2, etc.
         for (i, field_val) in field_values.iter().enumerate() {
             let offset = (i + 1) as i32;
-            self.builder.emit(Instruction::HeapStore(raw_ptr, offset, *field_val));
+            self.builder
+                .emit(Instruction::HeapStore(raw_ptr, offset, *field_val));
         }
 
         // Step 3: Tag the pointer with HeapObject tag (0b110)
         // Pass the tag directly as a constant (don't allocate a register for it)
         let result = self.builder.new_register();
-        self.builder.emit(Instruction::Tag(result, raw_ptr, IrValue::RawConstant(0b110)));
+        self.builder.emit(Instruction::Tag(
+            result,
+            raw_ptr,
+            IrValue::RawConstant(0b110),
+        ));
 
         Ok(result)
     }
@@ -471,13 +534,15 @@ impl Compiler {
 
         // Emit ExternalCall to trampoline_load_type_field_by_symbol(obj, symbol_id)
         let trampoline_addr = crate::trampoline::trampoline_load_type_field_by_symbol as usize;
-        let symbol_id_reg = self.builder.assign_new(IrValue::RawConstant(field_symbol_id as i64));
+        let symbol_id_reg = self
+            .builder
+            .assign_new(IrValue::RawConstant(field_symbol_id as i64));
 
         let result = self.builder.new_register();
         self.builder.emit(Instruction::ExternalCall(
             result,
             trampoline_addr,
-            vec![obj_reg, symbol_id_reg]
+            vec![obj_reg, symbol_id_reg],
         ));
 
         Ok(result)
@@ -488,7 +553,12 @@ impl Compiler {
     ///
     /// REFACTORED: Now uses ExternalCall with pre-interned symbol ID instead of
     /// the StoreTypeField instruction that embedded field names on the stack.
-    fn compile_field_set(&mut self, field: &str, object: &Expr, value: &Expr) -> Result<IrValue, String> {
+    fn compile_field_set(
+        &mut self,
+        field: &str,
+        object: &Expr,
+        value: &Expr,
+    ) -> Result<IrValue, String> {
         // 1. Compile the object and ensure it's in a register
         let obj_value = self.compile(object)?;
         let obj_reg = self.ensure_register(obj_value);
@@ -504,7 +574,7 @@ impl Compiler {
         self.builder.emit(Instruction::ExternalCall(
             gc_result,
             gc_trampoline_addr,
-            vec![obj_reg]
+            vec![obj_reg],
         ));
 
         // 4. Intern the field name as a symbol at compile time
@@ -512,14 +582,17 @@ impl Compiler {
         let field_symbol_id = rt.intern_symbol(field);
 
         // 5. Emit ExternalCall to trampoline_store_type_field_by_symbol(obj, symbol_id, value)
-        let store_trampoline_addr = crate::trampoline::trampoline_store_type_field_by_symbol as usize;
-        let symbol_id_reg = self.builder.assign_new(IrValue::RawConstant(field_symbol_id as i64));
+        let store_trampoline_addr =
+            crate::trampoline::trampoline_store_type_field_by_symbol as usize;
+        let symbol_id_reg = self
+            .builder
+            .assign_new(IrValue::RawConstant(field_symbol_id as i64));
 
         let result = self.builder.new_register();
         self.builder.emit(Instruction::ExternalCall(
             result,
             store_trampoline_addr,
-            vec![obj_reg, symbol_id_reg, new_value_reg]
+            vec![obj_reg, symbol_id_reg, new_value_reg],
         ));
 
         // 6. set! returns the stored value
@@ -535,7 +608,8 @@ impl Compiler {
 
         // Throw never returns, but return dummy nil for type consistency
         let dummy = self.builder.new_register();
-        self.builder.emit(Instruction::LoadConstant(dummy, IrValue::Null));
+        self.builder
+            .emit(Instruction::LoadConstant(dummy, IrValue::Null));
         Ok(dummy)
     }
 
@@ -589,13 +663,17 @@ impl Compiler {
         if let Some(finally_body) = finally {
             self.compile_do(finally_body)?;
         }
-        self.builder.emit(Instruction::Jump(after_catch_label.clone()));
+        self.builder
+            .emit(Instruction::Jump(after_catch_label.clone()));
 
         // 5. Catch block (throw jumps here with exception stored at stack slot)
         self.builder.emit(Instruction::Label(catch_label.clone()));
 
         // Load exception from the pre-allocated stack slot into exception_local register
-        self.builder.emit(Instruction::LoadExceptionLocal(exception_local, exception_slot));
+        self.builder.emit(Instruction::LoadExceptionLocal(
+            exception_local,
+            exception_slot,
+        ));
 
         // Handle catch clauses
         if !catches.is_empty() {
@@ -652,7 +730,8 @@ impl Compiler {
 
         // defprotocol returns nil
         let result = self.builder.new_register();
-        self.builder.emit(Instruction::LoadConstant(result, IrValue::Null));
+        self.builder
+            .emit(Instruction::LoadConstant(result, IrValue::Null));
         Ok(result)
     }
 
@@ -670,7 +749,8 @@ impl Compiler {
         // For each protocol implementation
         for impl_ in implementations {
             // Get protocol_id
-            let protocol_full_name = format!("{}/{}", self.get_current_namespace(), &impl_.protocol_name);
+            let protocol_full_name =
+                format!("{}/{}", self.get_current_namespace(), &impl_.protocol_name);
             let protocol_id = unsafe {
                 let rt = &*self.runtime.get();
                 rt.get_protocol_id(&protocol_full_name)
@@ -680,9 +760,13 @@ impl Compiler {
             // Group methods by name to handle multi-arity protocol methods
             // Multiple implementations with the same name but different param counts
             // should be combined into a single multi-arity function
-            let mut methods_by_name: HashMap<String, Vec<&crate::clojure_ast::ProtocolMethodImpl>> = HashMap::new();
+            let mut methods_by_name: HashMap<String, Vec<&crate::clojure_ast::ProtocolMethodImpl>> =
+                HashMap::new();
             for method in &impl_.methods {
-                methods_by_name.entry(method.name.clone()).or_default().push(method);
+                methods_by_name
+                    .entry(method.name.clone())
+                    .or_default()
+                    .push(method);
             }
 
             // For each unique method name
@@ -690,7 +774,12 @@ impl Compiler {
                 let method_index = unsafe {
                     let rt = &*self.runtime.get();
                     rt.get_protocol_method_index(protocol_id, &method_name)
-                        .ok_or_else(|| format!("Unknown method {} in protocol {}", method_name, impl_.protocol_name))?
+                        .ok_or_else(|| {
+                            format!(
+                                "Unknown method {} in protocol {}",
+                                method_name, impl_.protocol_name
+                            )
+                        })?
                 };
 
                 // Compile all arities of this method into FnArity structs
@@ -711,7 +800,8 @@ impl Compiler {
 
                 // Emit RegisterProtocolMethod as ExternalCall
                 // Call trampoline_register_protocol_method(type_id, protocol_id, method_index, fn_ptr)
-                let trampoline_addr = crate::trampoline::trampoline_register_protocol_method as usize;
+                let trampoline_addr =
+                    crate::trampoline::trampoline_register_protocol_method as usize;
                 let dummy_result = self.builder.new_register();
                 self.builder.emit(Instruction::ExternalCall(
                     dummy_result,
@@ -720,15 +810,16 @@ impl Compiler {
                         IrValue::RawConstant(type_id as i64),
                         IrValue::RawConstant(protocol_id as i64),
                         IrValue::RawConstant(method_index as i64),
-                        fn_value
-                    ]
+                        fn_value,
+                    ],
                 ));
             }
         }
 
         // Return nil
         let result = self.builder.new_register();
-        self.builder.emit(Instruction::LoadConstant(result, IrValue::Null));
+        self.builder
+            .emit(Instruction::LoadConstant(result, IrValue::Null));
         Ok(result)
     }
 
@@ -772,7 +863,10 @@ impl Compiler {
         args: &[Expr],
     ) -> Result<IrValue, String> {
         if args.is_empty() {
-            return Err(format!("Protocol method {} requires at least 1 argument", method_name));
+            return Err(format!(
+                "Protocol method {} requires at least 1 argument",
+                method_name
+            ));
         }
 
         // Compile all arguments
@@ -789,7 +883,8 @@ impl Compiler {
         // Ensure all arg values are in registers (convert constants if needed)
         // This is important: constants in codegen use temp registers which can be
         // clobbered by internal Call computation.
-        let arg_values: Vec<_> = arg_values.into_iter()
+        let arg_values: Vec<_> = arg_values
+            .into_iter()
             .map(|v| self.builder.assign_new(v))
             .collect();
 
@@ -800,15 +895,16 @@ impl Compiler {
             fn_ptr,
             trampoline_addr,
             vec![
-                arg_values[0].clone(),                      // target
-                IrValue::RawConstant(method_ptr as i64),    // method_name_ptr
-                IrValue::RawConstant(method_len as i64),    // method_name_len
+                arg_values[0].clone(),                   // target
+                IrValue::RawConstant(method_ptr as i64), // method_name_ptr
+                IrValue::RawConstant(method_len as i64), // method_name_len
             ],
         ));
 
         // Step 2: Call fn_ptr with all args (register allocator handles saves)
         let result = self.builder.new_register();
-        self.builder.emit(Instruction::Call(result, fn_ptr, arg_values));
+        self.builder
+            .emit(Instruction::Call(result, fn_ptr, arg_values));
 
         Ok(result)
     }
@@ -820,7 +916,12 @@ impl Compiler {
         self.compile(expr)
     }
 
-    fn compile_def(&mut self, name: &str, value_expr: &Expr, metadata: &Option<im::HashMap<String, Value>>) -> Result<IrValue, String> {
+    fn compile_def(
+        &mut self,
+        name: &str,
+        value_expr: &Expr,
+        metadata: &Option<im::HashMap<String, Value>>,
+    ) -> Result<IrValue, String> {
         // Check if var has ^:dynamic metadata
         let is_dynamic = metadata
             .as_ref()
@@ -850,11 +951,13 @@ impl Compiler {
             }
         } else {
             // Create new var with nil placeholder (7) - will be overwritten after compilation
-            let (new_var_ptr, _new_var_id) = rt.allocate_var(
-                self.current_namespace_ptr,
-                name,
-                7, // nil placeholder
-            ).unwrap();
+            let (new_var_ptr, _new_var_id) = rt
+                .allocate_var(
+                    self.current_namespace_ptr,
+                    name,
+                    7, // nil placeholder
+                )
+                .unwrap();
 
             // Mark as dynamic ONLY if metadata indicates it
             if is_dynamic {
@@ -873,7 +976,8 @@ impl Compiler {
 
                 // Update in registry
                 let ns_name_updated = rt.namespace_name(new_ns_ptr);
-                self.namespace_registry.insert(ns_name_updated.clone(), new_ns_ptr);
+                self.namespace_registry
+                    .insert(ns_name_updated.clone(), new_ns_ptr);
 
                 // Update the runtime's namespace root so trampolines can find it
                 rt.update_namespace_root(&ns_name_updated, new_ns_ptr);
@@ -884,9 +988,16 @@ impl Compiler {
         let value_reg = self.compile(value_expr)?;
 
         // Call store-var-by-symbol builtin to update the var at runtime
-        let ns_sym_reg = self.builder.assign_new(IrValue::TaggedConstant(((ns_symbol_id << 3) as isize)));
-        let name_sym_reg = self.builder.assign_new(IrValue::TaggedConstant(((name_symbol_id << 3) as isize)));
-        self.call_builtin("store-var-by-symbol", vec![ns_sym_reg, name_sym_reg, value_reg])?;
+        let ns_sym_reg = self
+            .builder
+            .assign_new(IrValue::TaggedConstant(((ns_symbol_id << 3) as isize)));
+        let name_sym_reg = self
+            .builder
+            .assign_new(IrValue::TaggedConstant(((name_symbol_id << 3) as isize)));
+        self.call_builtin(
+            "store-var-by-symbol",
+            vec![ns_sym_reg, name_sym_reg, value_reg],
+        )?;
 
         // def returns the value
         Ok(value_reg)
@@ -909,7 +1020,8 @@ impl Compiler {
 
             // Find current namespace name by reverse lookup BEFORE updating registry
             // (Don't dereference current_namespace_ptr - it may be stale after compacting GC)
-            let current_ns_name = self.namespace_registry
+            let current_ns_name = self
+                .namespace_registry
                 .iter()
                 .find(|(_, ptr)| **ptr == self.current_namespace_ptr)
                 .map(|(name, _)| name.clone());
@@ -961,7 +1073,8 @@ impl Compiler {
             self.current_namespace_ptr = ns_ptr;
 
             // Track that we used clojure.core (for potential future exclude support)
-            self.used_namespaces.insert(name.to_string(), vec!["clojure.core".to_string()]);
+            self.used_namespaces
+                .insert(name.to_string(), vec!["clojure.core".to_string()]);
         }
 
         // Emit instruction to set *ns* at runtime using symbol-based lookup
@@ -976,13 +1089,20 @@ impl Compiler {
         let ns_value = self.builder.new_register();
         self.builder.emit(Instruction::LoadConstant(
             ns_value,
-            IrValue::TaggedConstant((self.current_namespace_ptr << 3) as isize)
+            IrValue::TaggedConstant((self.current_namespace_ptr << 3) as isize),
         ));
 
         // Store it into *ns* var using symbol-based lookup
-        let core_ns_reg = self.builder.assign_new(IrValue::TaggedConstant(((core_ns_symbol_id << 3) as isize)));
-        let ns_var_reg = self.builder.assign_new(IrValue::TaggedConstant(((ns_var_symbol_id << 3) as isize)));
-        self.call_builtin("store-var-by-symbol", vec![core_ns_reg, ns_var_reg, ns_value])?;
+        let core_ns_reg = self
+            .builder
+            .assign_new(IrValue::TaggedConstant(((core_ns_symbol_id << 3) as isize)));
+        let ns_var_reg = self
+            .builder
+            .assign_new(IrValue::TaggedConstant(((ns_var_symbol_id << 3) as isize)));
+        self.call_builtin(
+            "store-var-by-symbol",
+            vec![core_ns_reg, ns_var_reg, ns_value],
+        )?;
 
         // Return the namespace pointer (like the value of the ns form)
         Ok(ns_value)
@@ -1004,7 +1124,8 @@ impl Compiler {
 
         // Return nil
         let result = self.builder.new_register();
-        self.builder.emit(Instruction::LoadConstant(result, IrValue::Null));
+        self.builder
+            .emit(Instruction::LoadConstant(result, IrValue::Null));
         Ok(result)
     }
 
@@ -1039,7 +1160,8 @@ impl Compiler {
 
         // Also jump to else if test is nil
         let nil_reg = self.builder.new_register();
-        self.builder.emit(Instruction::LoadConstant(nil_reg, IrValue::Null));
+        self.builder
+            .emit(Instruction::LoadConstant(nil_reg, IrValue::Null));
         self.builder.emit(Instruction::JumpIf(
             else_label.clone(),
             Condition::Equal,
@@ -1058,7 +1180,8 @@ impl Compiler {
             let else_reg = self.compile(else_expr)?;
             self.builder.emit(Instruction::Assign(result, else_reg));
         } else {
-            self.builder.emit(Instruction::LoadConstant(result, IrValue::Null));
+            self.builder
+                .emit(Instruction::LoadConstant(result, IrValue::Null));
         }
 
         // End label
@@ -1077,7 +1200,11 @@ impl Compiler {
         Ok(last_result)
     }
 
-    fn compile_let(&mut self, bindings: &[(String, Box<Expr>)], body: &[Expr]) -> Result<IrValue, String> {
+    fn compile_let(
+        &mut self,
+        bindings: &[(String, Box<Expr>)],
+        body: &[Expr],
+    ) -> Result<IrValue, String> {
         // (let [x 10 y 20] (+ x y))
         // This creates LEXICAL (stack-allocated) bindings, not dynamic bindings
         //
@@ -1117,7 +1244,11 @@ impl Compiler {
         Ok(result)
     }
 
-    fn compile_loop(&mut self, bindings: &[(String, Box<Expr>)], body: &[Expr]) -> Result<IrValue, String> {
+    fn compile_loop(
+        &mut self,
+        bindings: &[(String, Box<Expr>)],
+        body: &[Expr],
+    ) -> Result<IrValue, String> {
         self.push_scope();
 
         // Compile each binding and track registers
@@ -1153,7 +1284,9 @@ impl Compiler {
     }
 
     fn compile_recur(&mut self, args: &[Expr]) -> Result<IrValue, String> {
-        let context = self.loop_contexts.last()
+        let context = self
+            .loop_contexts
+            .last()
             .ok_or_else(|| "recur not in loop or fn context".to_string())?
             .clone();
 
@@ -1190,11 +1323,16 @@ impl Compiler {
 
         // Return dummy (recur never returns normally)
         let dummy = self.builder.new_register();
-        self.builder.emit(Instruction::LoadConstant(dummy, IrValue::Null));
+        self.builder
+            .emit(Instruction::LoadConstant(dummy, IrValue::Null));
         Ok(dummy)
     }
 
-    fn compile_binding(&mut self, bindings: &[(String, Box<Expr>)], body: &[Expr]) -> Result<IrValue, String> {
+    fn compile_binding(
+        &mut self,
+        bindings: &[(String, Box<Expr>)],
+        body: &[Expr],
+    ) -> Result<IrValue, String> {
         // (binding [var1 val1 var2 val2 ...] body)
         // 1. Compile and push all bindings
         // 2. Compile body (like do - last expression's value is returned)
@@ -1220,7 +1358,7 @@ impl Compiler {
             self.builder.emit(Instruction::ExternalCall(
                 push_result,
                 trampoline_addr,
-                vec![IrValue::TaggedConstant(var_ptr as isize), value_reg]
+                vec![IrValue::TaggedConstant(var_ptr as isize), value_reg],
             ));
 
             var_ptrs.push(var_ptr);
@@ -1228,7 +1366,8 @@ impl Compiler {
 
         // Compile body (like do - last expression's value is returned)
         let mut result = self.builder.new_register();
-        self.builder.emit(Instruction::LoadConstant(result, IrValue::Null));
+        self.builder
+            .emit(Instruction::LoadConstant(result, IrValue::Null));
 
         for expr in body {
             result = self.compile(expr)?;
@@ -1243,7 +1382,7 @@ impl Compiler {
             self.builder.emit(Instruction::ExternalCall(
                 pop_result,
                 trampoline_addr,
-                vec![IrValue::TaggedConstant(var_ptr as isize)]
+                vec![IrValue::TaggedConstant(var_ptr as isize)],
             ));
         }
 
@@ -1271,7 +1410,7 @@ impl Compiler {
         self.builder.emit(Instruction::ExternalCall(
             set_result,
             trampoline_addr,
-            vec![IrValue::TaggedConstant(var_ptr as isize), value_reg]
+            vec![IrValue::TaggedConstant(var_ptr as isize), value_reg],
         ));
 
         // set! returns the new value
@@ -1283,7 +1422,7 @@ impl Compiler {
     fn parse_var_name(&self, var_name: &str) -> Result<(Option<String>, String), String> {
         if let Some(idx) = var_name.find('/') {
             let namespace = var_name[..idx].to_string();
-            let name = var_name[idx+1..].to_string();
+            let name = var_name[idx + 1..].to_string();
             Ok((Some(namespace), name))
         } else {
             Ok((None, var_name.to_string()))
@@ -1348,7 +1487,9 @@ impl Compiler {
 
         // Determine which namespace to search
         let ns_ptr = if let Some(ns_name) = namespace {
-            *self.namespace_registry.get(ns_name)
+            *self
+                .namespace_registry
+                .get(ns_name)
                 .ok_or_else(|| format!("Namespace not found: {}", ns_name))?
         } else {
             self.current_namespace_ptr
@@ -1374,23 +1515,31 @@ impl Compiler {
         let tagged_fn_ptr = (function_ptr << 3) | 0b100;
 
         // Load the function pointer into a register (required by codegen)
-        let fn_ptr_reg = self.builder.assign_new(IrValue::TaggedConstant(tagged_fn_ptr as isize));
+        let fn_ptr_reg = self
+            .builder
+            .assign_new(IrValue::TaggedConstant(tagged_fn_ptr as isize));
 
         // Ensure all args are in registers (convert constants if needed)
         // This is important: constants in codegen use temp registers which can be
         // clobbered by internal Call computation. By using assign_new here,
         // we ensure proper register allocation.
-        let args: Vec<_> = args.into_iter()
+        let args: Vec<_> = args
+            .into_iter()
             .map(|v| self.builder.assign_new(v))
             .collect();
 
         // Emit a Call instruction with the builtin function pointer
         let result = self.builder.new_register();
-        self.builder.emit(Instruction::Call(result, fn_ptr_reg, args));
+        self.builder
+            .emit(Instruction::Call(result, fn_ptr_reg, args));
         Ok(result)
     }
 
-    fn compile_fn(&mut self, name: &Option<String>, arities: &[crate::value::FnArity]) -> Result<IrValue, String> {
+    fn compile_fn(
+        &mut self,
+        name: &Option<String>,
+        arities: &[crate::value::FnArity],
+    ) -> Result<IrValue, String> {
         // Per-function compilation (Beagle's approach):
         // Each function (or each arity) is compiled separately with its own register allocation
 
@@ -1398,8 +1547,7 @@ impl Compiler {
         let free_vars = self.find_free_variables_across_arities(arities, name)?;
 
         // DEBUG: Print free vars for protocol methods
-        if !free_vars.is_empty() {
-        }
+        if !free_vars.is_empty() {}
 
         // Step 2: Capture free variables (evaluate them in current scope)
         // IMPORTANT: This must happen BEFORE compiling the function body to capture
@@ -1430,13 +1578,15 @@ impl Compiler {
             let is_variadic = arity.rest_param.is_some();
             let param_count = arity.params.len();
 
-            let code_ptr = self.compile_single_arity(name, arity, &free_vars, is_multi_arity, arity_count)?;
+            let code_ptr =
+                self.compile_single_arity(name, arity, &free_vars, is_multi_arity, arity_count)?;
 
             compiled_arities.push((param_count, code_ptr, is_variadic));
         }
 
         // Step 4: Determine variadic minimum (if any)
-        let variadic_min = compiled_arities.iter()
+        let variadic_min = compiled_arities
+            .iter()
             .find(|(_, _, is_var)| *is_var)
             .map(|(count, _, _)| *count);
 
@@ -1452,7 +1602,7 @@ impl Compiler {
                 self.builder.emit(Instruction::MakeFunctionPtr(
                     fn_obj_reg,
                     code_ptr,
-                    vec![]  // No closures
+                    vec![], // No closures
                 ));
             } else {
                 // Closure - allocate heap object via ExternalCall
@@ -1466,7 +1616,8 @@ impl Compiler {
             }
         } else {
             // Multi-arity or variadic - use MakeMultiArityFn
-            let arity_table: Vec<(usize, usize)> = compiled_arities.iter()
+            let arity_table: Vec<(usize, usize)> = compiled_arities
+                .iter()
                 .map(|(param_count, code_ptr, _)| (*param_count, *code_ptr))
                 .collect();
 
@@ -1532,12 +1683,14 @@ impl Compiler {
             let arg_reg = IrValue::Register(crate::ir::VirtualRegister::Argument(i + param_offset));
             // Allocate a local slot and store the argument there
             let local_slot = self.builder.allocate_local();
-            self.builder.emit(Instruction::StoreLocal(local_slot, arg_reg));
+            self.builder
+                .emit(Instruction::StoreLocal(local_slot, arg_reg));
             self.bind_local_slot(param.clone(), local_slot);
             // For recur, we still need a register representation
             // Load the parameter into a temp register for the param_registers vec
             let temp_reg = self.builder.new_register();
-            self.builder.emit(Instruction::LoadLocal(temp_reg, local_slot));
+            self.builder
+                .emit(Instruction::LoadLocal(temp_reg, local_slot));
             param_registers.push(temp_reg);
         }
 
@@ -1547,7 +1700,11 @@ impl Compiler {
         if let Some(rest) = &arity.rest_param {
             let rest_reg = self.builder.new_register();
             let fixed_count = arity.params.len();
-            self.builder.emit(Instruction::CollectRestArgs(rest_reg, fixed_count, param_offset));
+            self.builder.emit(Instruction::CollectRestArgs(
+                rest_reg,
+                fixed_count,
+                param_offset,
+            ));
             self.bind_local(rest.clone(), rest_reg);
             param_registers.push(rest_reg);
         }
@@ -1561,11 +1718,15 @@ impl Compiler {
                 if is_multi_arity {
                     // Multi-arity: closures are stored after the arity table
                     self.builder.emit(Instruction::LoadClosureMultiArity(
-                        closure_reg, self_reg.clone(), arity_count, i
+                        closure_reg,
+                        self_reg.clone(),
+                        arity_count,
+                        i,
                     ));
                 } else {
                     // Single-arity: use standard closure layout
-                    self.builder.emit(Instruction::LoadClosure(closure_reg, self_reg.clone(), i));
+                    self.builder
+                        .emit(Instruction::LoadClosure(closure_reg, self_reg.clone(), i));
                 }
                 self.bind_local(var_name.clone(), closure_reg);
             }
@@ -1580,7 +1741,8 @@ impl Compiler {
 
         // Push loop context for recur in fn body
         let fn_entry_label = self.builder.new_label();
-        self.builder.emit(Instruction::Label(fn_entry_label.clone()));
+        self.builder
+            .emit(Instruction::Label(fn_entry_label.clone()));
         self.loop_contexts.push(LoopContext {
             label: fn_entry_label,
             binding_registers: param_registers,
@@ -1615,22 +1777,27 @@ impl Compiler {
         let fn_instructions = self.builder.take_instructions();
 
         // Store the function IR for display purposes
-        self.compiled_function_irs.push((name.clone(), fn_instructions.clone()));
+        self.compiled_function_irs
+            .push((name.clone(), fn_instructions.clone()));
 
         // Pass num_locals from the builder (includes all allocated local slots)
         let num_locals = self.builder.num_locals;
-        let compiled = Arm64CodeGen::compile_function(&fn_instructions, num_locals, reserved_exception_slots)?;
+        let compiled =
+            Arm64CodeGen::compile_function(&fn_instructions, num_locals, reserved_exception_slots)?;
 
         // Register stack map with runtime for GC
         unsafe {
             let rt = &mut *self.runtime.get();
             for (pc, stack_size) in &compiled.stack_map {
-                rt.add_stack_map_entry(*pc, crate::gc::StackMapDetails {
-                    function_name: name.clone(),
-                    number_of_locals: compiled.num_locals,
-                    current_stack_size: *stack_size,
-                    max_stack_size: compiled.max_stack_size,
-                });
+                rt.add_stack_map_entry(
+                    *pc,
+                    crate::gc::StackMapDetails {
+                        function_name: name.clone(),
+                        number_of_locals: compiled.num_locals,
+                        current_stack_size: *stack_size,
+                        max_stack_size: compiled.max_stack_size,
+                    },
+                );
             }
         }
 
@@ -1663,7 +1830,8 @@ impl Compiler {
     fn compile_body(&mut self, exprs: &[Expr]) -> Result<IrValue, String> {
         if exprs.is_empty() {
             let result = self.builder.new_register();
-            self.builder.emit(Instruction::LoadConstant(result, IrValue::Null));
+            self.builder
+                .emit(Instruction::LoadConstant(result, IrValue::Null));
             return Ok(result);
         }
 
@@ -1735,7 +1903,10 @@ impl Compiler {
         free: &mut std::collections::HashSet<String>,
     ) {
         match expr {
-            Expr::Var { namespace: None, name } => {
+            Expr::Var {
+                namespace: None,
+                name,
+            } => {
                 // Only consider unqualified names
                 if !bound.contains(name) && !self.is_builtin(name) {
                     // Check if it's a local variable in current scope
@@ -1764,7 +1935,10 @@ impl Compiler {
                 }
             }
 
-            Expr::Fn { name: fn_name, arities } => {
+            Expr::Fn {
+                name: fn_name,
+                arities,
+            } => {
                 // Nested function - need to recurse with proper scoping
                 let mut fn_bound = bound.clone();
 
@@ -1853,7 +2027,9 @@ impl Compiler {
             Expr::Literal(_) | Expr::Quote(_) | Expr::Ns { .. } | Expr::Use { .. } => {}
 
             // Qualified vars are not free (they're global)
-            Expr::Var { namespace: Some(_), .. } => {}
+            Expr::Var {
+                namespace: Some(_), ..
+            } => {}
 
             // VarRef always refers to a global var, not free
             Expr::VarRef { .. } => {}
@@ -1885,7 +2061,11 @@ impl Compiler {
             }
 
             // Try: check body, catches, and finally for free vars
-            Expr::Try { body, catches, finally } => {
+            Expr::Try {
+                body,
+                catches,
+                finally,
+            } => {
                 for expr in body {
                     self.collect_free_vars_from_expr(expr, bound, free);
                 }
@@ -1909,7 +2089,9 @@ impl Compiler {
                 // DefProtocol is a declaration, no free vars
             }
 
-            Expr::ExtendType { implementations, .. } => {
+            Expr::ExtendType {
+                implementations, ..
+            } => {
                 // Check method bodies for free vars
                 for impl_ in implementations {
                     for method in &impl_.methods {
@@ -1969,8 +2151,12 @@ impl Compiler {
                     "bit-not" => self.compile_builtin_bit_not(args),
                     "bit-shift-left" => self.compile_builtin_bit_shift_left(args),
                     "bit-shift-right" => self.compile_builtin_bit_shift_right(args),
-                    "unsigned-bit-shift-right" => self.compile_builtin_unsigned_bit_shift_right(args),
-                    "bit-shift-right-zero-fill" => self.compile_builtin_unsigned_bit_shift_right(args),  // CLJS alias
+                    "unsigned-bit-shift-right" => {
+                        self.compile_builtin_unsigned_bit_shift_right(args)
+                    }
+                    "bit-shift-right-zero-fill" => {
+                        self.compile_builtin_unsigned_bit_shift_right(args)
+                    } // CLJS alias
                     "nil?" => self.compile_builtin_nil_pred(args),
                     "number?" => self.compile_builtin_number_pred(args),
                     "string?" => self.compile_builtin_string_pred(args),
@@ -2006,13 +2192,15 @@ impl Compiler {
         // clobbered by internal Call computation. By using assign_new here,
         // we ensure proper register allocation.
         let fn_val = self.builder.assign_new(fn_val);
-        let arg_vals: Vec<_> = arg_vals.into_iter()
+        let arg_vals: Vec<_> = arg_vals
+            .into_iter()
             .map(|v| self.builder.assign_new(v))
             .collect();
 
         // 4. Emit Call instruction
         let result = self.builder.new_register();
-        self.builder.emit(Instruction::Call(result, fn_val, arg_vals));
+        self.builder
+            .emit(Instruction::Call(result, fn_val, arg_vals));
 
         Ok(result)
     }
@@ -2070,10 +2258,15 @@ impl Compiler {
         self.builder.emit(Instruction::Untag(right_untagged, right));
 
         let int_result = self.builder.new_register();
-        self.builder.emit(int_op(int_result, left_untagged, right_untagged));
+        self.builder
+            .emit(int_op(int_result, left_untagged, right_untagged));
 
         // Tag as int (tag 0b000)
-        self.builder.emit(Instruction::Tag(result, int_result, IrValue::TaggedConstant(0)));
+        self.builder.emit(Instruction::Tag(
+            result,
+            int_result,
+            IrValue::TaggedConstant(0),
+        ));
         self.builder.emit(Instruction::Jump(done.clone()));
 
         // FLOAT path (at least one operand is non-int)
@@ -2107,16 +2300,24 @@ impl Compiler {
         // Not int or float - throw type error
         // For now, treat as 0.0 (we need proper exception handling for a real error)
         // TODO: Implement proper type error throwing
-        self.builder.emit(Instruction::LoadConstant(left_float, IrValue::TaggedConstant(0)));
-        self.builder.emit(Instruction::IntToFloat(left_float, left_float));
-        self.builder.emit(Instruction::Jump(left_convert_done.clone()));
+        self.builder.emit(Instruction::LoadConstant(
+            left_float,
+            IrValue::TaggedConstant(0),
+        ));
+        self.builder
+            .emit(Instruction::IntToFloat(left_float, left_float));
+        self.builder
+            .emit(Instruction::Jump(left_convert_done.clone()));
 
         // Left is int, convert to float
         self.builder.emit(Instruction::Label(left_is_int));
         let left_int_untagged = self.builder.new_register();
-        self.builder.emit(Instruction::Untag(left_int_untagged, left));
-        self.builder.emit(Instruction::IntToFloat(left_float, left_int_untagged));
-        self.builder.emit(Instruction::Jump(left_convert_done.clone()));
+        self.builder
+            .emit(Instruction::Untag(left_int_untagged, left));
+        self.builder
+            .emit(Instruction::IntToFloat(left_float, left_int_untagged));
+        self.builder
+            .emit(Instruction::Jump(left_convert_done.clone()));
 
         // Left is already float, load f64 bits from heap
         self.builder.emit(Instruction::Label(left_is_float));
@@ -2151,26 +2352,36 @@ impl Compiler {
         // Not int or float - throw type error
         // For now, treat as 0.0 (we need proper exception handling for a real error)
         // TODO: Implement proper type error throwing
-        self.builder.emit(Instruction::LoadConstant(right_float, IrValue::TaggedConstant(0)));
-        self.builder.emit(Instruction::IntToFloat(right_float, right_float));
-        self.builder.emit(Instruction::Jump(right_convert_done.clone()));
+        self.builder.emit(Instruction::LoadConstant(
+            right_float,
+            IrValue::TaggedConstant(0),
+        ));
+        self.builder
+            .emit(Instruction::IntToFloat(right_float, right_float));
+        self.builder
+            .emit(Instruction::Jump(right_convert_done.clone()));
 
         // Right is int, convert to float
         self.builder.emit(Instruction::Label(right_is_int));
         let right_int_untagged = self.builder.new_register();
-        self.builder.emit(Instruction::Untag(right_int_untagged, right));
-        self.builder.emit(Instruction::IntToFloat(right_float, right_int_untagged));
-        self.builder.emit(Instruction::Jump(right_convert_done.clone()));
+        self.builder
+            .emit(Instruction::Untag(right_int_untagged, right));
+        self.builder
+            .emit(Instruction::IntToFloat(right_float, right_int_untagged));
+        self.builder
+            .emit(Instruction::Jump(right_convert_done.clone()));
 
         // Right is already float, load f64 bits from heap
         self.builder.emit(Instruction::Label(right_is_float));
-        self.builder.emit(Instruction::LoadFloat(right_float, right));
+        self.builder
+            .emit(Instruction::LoadFloat(right_float, right));
 
         self.builder.emit(Instruction::Label(right_convert_done));
 
         // Perform float operation (on raw f64 bits)
         let float_result = self.builder.new_register();
-        self.builder.emit(float_op(float_result, left_float, right_float));
+        self.builder
+            .emit(float_op(float_result, left_float, right_float));
 
         // Allocate new float on heap and get tagged pointer
         // Call trampoline_allocate_float(stack_pointer, f64_bits) -> tagged_ptr
@@ -2179,7 +2390,7 @@ impl Compiler {
         self.builder.emit(Instruction::ExternalCall(
             result,
             trampoline_addr,
-            vec![IrValue::FramePointer, float_result]
+            vec![IrValue::FramePointer, float_result],
         ));
 
         self.builder.emit(Instruction::Label(done));
@@ -2249,7 +2460,12 @@ impl Compiler {
         self.builder.emit(Instruction::Untag(right_untagged, right));
 
         let result = self.builder.new_register();
-        self.builder.emit(Instruction::Compare(result, left_untagged, right_untagged, Condition::LessThan));
+        self.builder.emit(Instruction::Compare(
+            result,
+            left_untagged,
+            right_untagged,
+            Condition::LessThan,
+        ));
 
         // Compare now returns properly tagged boolean (3 or 11)
         Ok(result)
@@ -2273,7 +2489,12 @@ impl Compiler {
         self.builder.emit(Instruction::Untag(right_untagged, right));
 
         let result = self.builder.new_register();
-        self.builder.emit(Instruction::Compare(result, left_untagged, right_untagged, Condition::GreaterThan));
+        self.builder.emit(Instruction::Compare(
+            result,
+            left_untagged,
+            right_untagged,
+            Condition::GreaterThan,
+        ));
 
         // Compare now returns properly tagged boolean (3 or 11)
         Ok(result)
@@ -2297,7 +2518,12 @@ impl Compiler {
         self.builder.emit(Instruction::Untag(right_untagged, right));
 
         let result = self.builder.new_register();
-        self.builder.emit(Instruction::Compare(result, left_untagged, right_untagged, Condition::LessThanOrEqual));
+        self.builder.emit(Instruction::Compare(
+            result,
+            left_untagged,
+            right_untagged,
+            Condition::LessThanOrEqual,
+        ));
 
         Ok(result)
     }
@@ -2320,7 +2546,12 @@ impl Compiler {
         self.builder.emit(Instruction::Untag(right_untagged, right));
 
         let result = self.builder.new_register();
-        self.builder.emit(Instruction::Compare(result, left_untagged, right_untagged, Condition::GreaterThanOrEqual));
+        self.builder.emit(Instruction::Compare(
+            result,
+            left_untagged,
+            right_untagged,
+            Condition::GreaterThanOrEqual,
+        ));
 
         Ok(result)
     }
@@ -2356,7 +2587,10 @@ impl Compiler {
     /// _print-space - prints just a space
     fn compile_builtin_print_space(&mut self, args: &[Expr]) -> Result<IrValue, String> {
         if !args.is_empty() {
-            return Err(format!("_print-space takes no arguments, got {}", args.len()));
+            return Err(format!(
+                "_print-space takes no arguments, got {}",
+                args.len()
+            ));
         }
         self.call_builtin("runtime.builtin/_print-space", vec![])
     }
@@ -2376,7 +2610,8 @@ impl Compiler {
         // Compare tagged values directly - this preserves type information
         // nil (7), false (3), true (11), and integers (n<<3) all have different representations
         let result = self.builder.new_register();
-        self.builder.emit(Instruction::Compare(result, left, right, Condition::Equal));
+        self.builder
+            .emit(Instruction::Compare(result, left, right, Condition::Equal));
 
         // Compare returns properly tagged boolean (3 or 11)
         Ok(result)
@@ -2391,7 +2626,7 @@ impl Compiler {
         self.builder.emit(Instruction::ExternalCall(
             result,
             trampoline_addr,
-            vec![IrValue::FramePointer]
+            vec![IrValue::FramePointer],
         ));
         Ok(result)
     }
@@ -2415,10 +2650,18 @@ impl Compiler {
         self.builder.emit(Instruction::Untag(right_untagged, right));
 
         let result_untagged = self.builder.new_register();
-        self.builder.emit(Instruction::BitAnd(result_untagged, left_untagged, right_untagged));
+        self.builder.emit(Instruction::BitAnd(
+            result_untagged,
+            left_untagged,
+            right_untagged,
+        ));
 
         let result = self.builder.new_register();
-        self.builder.emit(Instruction::Tag(result, result_untagged, IrValue::TaggedConstant(0)));
+        self.builder.emit(Instruction::Tag(
+            result,
+            result_untagged,
+            IrValue::TaggedConstant(0),
+        ));
 
         Ok(result)
     }
@@ -2437,10 +2680,18 @@ impl Compiler {
         self.builder.emit(Instruction::Untag(right_untagged, right));
 
         let result_untagged = self.builder.new_register();
-        self.builder.emit(Instruction::BitOr(result_untagged, left_untagged, right_untagged));
+        self.builder.emit(Instruction::BitOr(
+            result_untagged,
+            left_untagged,
+            right_untagged,
+        ));
 
         let result = self.builder.new_register();
-        self.builder.emit(Instruction::Tag(result, result_untagged, IrValue::TaggedConstant(0)));
+        self.builder.emit(Instruction::Tag(
+            result,
+            result_untagged,
+            IrValue::TaggedConstant(0),
+        ));
 
         Ok(result)
     }
@@ -2459,10 +2710,18 @@ impl Compiler {
         self.builder.emit(Instruction::Untag(right_untagged, right));
 
         let result_untagged = self.builder.new_register();
-        self.builder.emit(Instruction::BitXor(result_untagged, left_untagged, right_untagged));
+        self.builder.emit(Instruction::BitXor(
+            result_untagged,
+            left_untagged,
+            right_untagged,
+        ));
 
         let result = self.builder.new_register();
-        self.builder.emit(Instruction::Tag(result, result_untagged, IrValue::TaggedConstant(0)));
+        self.builder.emit(Instruction::Tag(
+            result,
+            result_untagged,
+            IrValue::TaggedConstant(0),
+        ));
 
         Ok(result)
     }
@@ -2475,20 +2734,29 @@ impl Compiler {
         let operand = self.compile(&args[0])?;
 
         let operand_untagged = self.builder.new_register();
-        self.builder.emit(Instruction::Untag(operand_untagged, operand));
+        self.builder
+            .emit(Instruction::Untag(operand_untagged, operand));
 
         let result_untagged = self.builder.new_register();
-        self.builder.emit(Instruction::BitNot(result_untagged, operand_untagged));
+        self.builder
+            .emit(Instruction::BitNot(result_untagged, operand_untagged));
 
         let result = self.builder.new_register();
-        self.builder.emit(Instruction::Tag(result, result_untagged, IrValue::TaggedConstant(0)));
+        self.builder.emit(Instruction::Tag(
+            result,
+            result_untagged,
+            IrValue::TaggedConstant(0),
+        ));
 
         Ok(result)
     }
 
     fn compile_builtin_bit_shift_left(&mut self, args: &[Expr]) -> Result<IrValue, String> {
         if args.len() != 2 {
-            return Err(format!("bit-shift-left requires 2 arguments, got {}", args.len()));
+            return Err(format!(
+                "bit-shift-left requires 2 arguments, got {}",
+                args.len()
+            ));
         }
 
         let value = self.compile(&args[0])?;
@@ -2497,20 +2765,32 @@ impl Compiler {
         let value_untagged = self.builder.new_register();
         let amount_untagged = self.builder.new_register();
         self.builder.emit(Instruction::Untag(value_untagged, value));
-        self.builder.emit(Instruction::Untag(amount_untagged, amount));
+        self.builder
+            .emit(Instruction::Untag(amount_untagged, amount));
 
         let result_untagged = self.builder.new_register();
-        self.builder.emit(Instruction::BitShiftLeft(result_untagged, value_untagged, amount_untagged));
+        self.builder.emit(Instruction::BitShiftLeft(
+            result_untagged,
+            value_untagged,
+            amount_untagged,
+        ));
 
         let result = self.builder.new_register();
-        self.builder.emit(Instruction::Tag(result, result_untagged, IrValue::TaggedConstant(0)));
+        self.builder.emit(Instruction::Tag(
+            result,
+            result_untagged,
+            IrValue::TaggedConstant(0),
+        ));
 
         Ok(result)
     }
 
     fn compile_builtin_bit_shift_right(&mut self, args: &[Expr]) -> Result<IrValue, String> {
         if args.len() != 2 {
-            return Err(format!("bit-shift-right requires 2 arguments, got {}", args.len()));
+            return Err(format!(
+                "bit-shift-right requires 2 arguments, got {}",
+                args.len()
+            ));
         }
 
         let value = self.compile(&args[0])?;
@@ -2519,20 +2799,35 @@ impl Compiler {
         let value_untagged = self.builder.new_register();
         let amount_untagged = self.builder.new_register();
         self.builder.emit(Instruction::Untag(value_untagged, value));
-        self.builder.emit(Instruction::Untag(amount_untagged, amount));
+        self.builder
+            .emit(Instruction::Untag(amount_untagged, amount));
 
         let result_untagged = self.builder.new_register();
-        self.builder.emit(Instruction::BitShiftRight(result_untagged, value_untagged, amount_untagged));
+        self.builder.emit(Instruction::BitShiftRight(
+            result_untagged,
+            value_untagged,
+            amount_untagged,
+        ));
 
         let result = self.builder.new_register();
-        self.builder.emit(Instruction::Tag(result, result_untagged, IrValue::TaggedConstant(0)));
+        self.builder.emit(Instruction::Tag(
+            result,
+            result_untagged,
+            IrValue::TaggedConstant(0),
+        ));
 
         Ok(result)
     }
 
-    fn compile_builtin_unsigned_bit_shift_right(&mut self, args: &[Expr]) -> Result<IrValue, String> {
+    fn compile_builtin_unsigned_bit_shift_right(
+        &mut self,
+        args: &[Expr],
+    ) -> Result<IrValue, String> {
         if args.len() != 2 {
-            return Err(format!("unsigned-bit-shift-right requires 2 arguments, got {}", args.len()));
+            return Err(format!(
+                "unsigned-bit-shift-right requires 2 arguments, got {}",
+                args.len()
+            ));
         }
 
         let value = self.compile(&args[0])?;
@@ -2541,13 +2836,22 @@ impl Compiler {
         let value_untagged = self.builder.new_register();
         let amount_untagged = self.builder.new_register();
         self.builder.emit(Instruction::Untag(value_untagged, value));
-        self.builder.emit(Instruction::Untag(amount_untagged, amount));
+        self.builder
+            .emit(Instruction::Untag(amount_untagged, amount));
 
         let result_untagged = self.builder.new_register();
-        self.builder.emit(Instruction::UnsignedBitShiftRight(result_untagged, value_untagged, amount_untagged));
+        self.builder.emit(Instruction::UnsignedBitShiftRight(
+            result_untagged,
+            value_untagged,
+            amount_untagged,
+        ));
 
         let result = self.builder.new_register();
-        self.builder.emit(Instruction::Tag(result, result_untagged, IrValue::TaggedConstant(0)));
+        self.builder.emit(Instruction::Tag(
+            result,
+            result_untagged,
+            IrValue::TaggedConstant(0),
+        ));
 
         Ok(result)
     }
@@ -2563,10 +2867,16 @@ impl Compiler {
 
         // Load nil constant (7) into a register for comparison
         let nil_const = self.builder.new_register();
-        self.builder.emit(Instruction::LoadConstant(nil_const, IrValue::Null));
+        self.builder
+            .emit(Instruction::LoadConstant(nil_const, IrValue::Null));
 
         let result = self.builder.new_register();
-        self.builder.emit(Instruction::Compare(result, val, nil_const, Condition::Equal));
+        self.builder.emit(Instruction::Compare(
+            result,
+            val,
+            nil_const,
+            Condition::Equal,
+        ));
         Ok(result)
     }
 
@@ -2581,11 +2891,19 @@ impl Compiler {
 
         // Load constant 2 into a register for comparison
         let two_const = self.builder.new_register();
-        self.builder.emit(Instruction::LoadConstant(two_const, IrValue::TaggedConstant(2)));
+        self.builder.emit(Instruction::LoadConstant(
+            two_const,
+            IrValue::TaggedConstant(2),
+        ));
 
         // Check if tag < 2 (i.e., tag is 0 for int or 1 for float)
         let result = self.builder.new_register();
-        self.builder.emit(Instruction::Compare(result, tag, two_const, Condition::LessThan));
+        self.builder.emit(Instruction::Compare(
+            result,
+            tag,
+            two_const,
+            Condition::LessThan,
+        ));
         Ok(result)
     }
 
@@ -2600,10 +2918,18 @@ impl Compiler {
 
         // Load constant 2 into a register for comparison
         let two_const = self.builder.new_register();
-        self.builder.emit(Instruction::LoadConstant(two_const, IrValue::TaggedConstant(2)));
+        self.builder.emit(Instruction::LoadConstant(
+            two_const,
+            IrValue::TaggedConstant(2),
+        ));
 
         let result = self.builder.new_register();
-        self.builder.emit(Instruction::Compare(result, tag, two_const, Condition::Equal));
+        self.builder.emit(Instruction::Compare(
+            result,
+            tag,
+            two_const,
+            Condition::Equal,
+        ));
         Ok(result)
     }
 
@@ -2624,15 +2950,31 @@ impl Compiler {
 
         // Load constants into registers
         let four_const = self.builder.new_register();
-        self.builder.emit(Instruction::LoadConstant(four_const, IrValue::TaggedConstant(4)));
+        self.builder.emit(Instruction::LoadConstant(
+            four_const,
+            IrValue::TaggedConstant(4),
+        ));
         let five_const = self.builder.new_register();
-        self.builder.emit(Instruction::LoadConstant(five_const, IrValue::TaggedConstant(5)));
+        self.builder.emit(Instruction::LoadConstant(
+            five_const,
+            IrValue::TaggedConstant(5),
+        ));
 
         // Check tag == 4 (function)
-        self.builder.emit(Instruction::JumpIf(is_fn_label.clone(), Condition::Equal, tag, four_const));
+        self.builder.emit(Instruction::JumpIf(
+            is_fn_label.clone(),
+            Condition::Equal,
+            tag,
+            four_const,
+        ));
 
         // Check tag == 5 (closure)
-        self.builder.emit(Instruction::JumpIf(is_fn_label.clone(), Condition::Equal, tag, five_const));
+        self.builder.emit(Instruction::JumpIf(
+            is_fn_label.clone(),
+            Condition::Equal,
+            tag,
+            five_const,
+        ));
 
         // Neither: return false
         self.builder.emit(Instruction::LoadFalse(result));
@@ -2648,7 +2990,10 @@ impl Compiler {
 
     fn compile_builtin_identical(&mut self, args: &[Expr]) -> Result<IrValue, String> {
         if args.len() != 2 {
-            return Err(format!("identical? requires 2 arguments, got {}", args.len()));
+            return Err(format!(
+                "identical? requires 2 arguments, got {}",
+                args.len()
+            ));
         }
         let left = self.compile(&args[0])?;
         let left = self.ensure_register(left);
@@ -2657,7 +3002,8 @@ impl Compiler {
 
         // Compare raw tagged values - identical values have identical bit patterns
         let result = self.builder.new_register();
-        self.builder.emit(Instruction::Compare(result, left, right, Condition::Equal));
+        self.builder
+            .emit(Instruction::Compare(result, left, right, Condition::Equal));
         Ok(result)
     }
 
@@ -2667,7 +3013,10 @@ impl Compiler {
         use crate::gc_runtime::DEFTYPE_ID_OFFSET;
 
         if args.len() != 2 {
-            return Err(format!("instance? requires 2 arguments, got {}", args.len()));
+            return Err(format!(
+                "instance? requires 2 arguments, got {}",
+                args.len()
+            ));
         }
 
         // First argument must be a type symbol (e.g., PersistentVector)
@@ -2703,7 +3052,7 @@ impl Compiler {
         self.builder.emit(Instruction::ExternalCall(
             result,
             trampoline_addr,
-            vec![IrValue::RawConstant(full_type_id as i64), value]
+            vec![IrValue::RawConstant(full_type_id as i64), value],
         ));
         Ok(result)
     }
@@ -2721,7 +3070,8 @@ impl Compiler {
         // Call trampoline_is_keyword
         let result = self.builder.new_register();
         let fn_addr = crate::trampoline::trampoline_is_keyword as usize;
-        self.builder.emit(Instruction::ExternalCall(result, fn_addr, vec![value]));
+        self.builder
+            .emit(Instruction::ExternalCall(result, fn_addr, vec![value]));
         Ok(result)
     }
 
@@ -2738,7 +3088,8 @@ impl Compiler {
         // Call builtin_is_map
         let result = self.builder.new_register();
         let fn_addr = crate::builtins::builtin_is_map as usize;
-        self.builder.emit(Instruction::ExternalCall(result, fn_addr, vec![value]));
+        self.builder
+            .emit(Instruction::ExternalCall(result, fn_addr, vec![value]));
         Ok(result)
     }
 
@@ -2755,14 +3106,18 @@ impl Compiler {
         // Call builtin_is_vector
         let result = self.builder.new_register();
         let fn_addr = crate::builtins::builtin_is_vector as usize;
-        self.builder.emit(Instruction::ExternalCall(result, fn_addr, vec![value]));
+        self.builder
+            .emit(Instruction::ExternalCall(result, fn_addr, vec![value]));
         Ok(result)
     }
 
     /// Compile (hash-primitive x) - hash a primitive value (keyword, string, number)
     fn compile_builtin_hash_primitive(&mut self, args: &[Expr]) -> Result<IrValue, String> {
         if args.len() != 1 {
-            return Err(format!("hash-primitive requires 1 argument, got {}", args.len()));
+            return Err(format!(
+                "hash-primitive requires 1 argument, got {}",
+                args.len()
+            ));
         }
 
         // Compile the value to hash
@@ -2772,7 +3127,8 @@ impl Compiler {
         // Call trampoline_hash_value
         let result = self.builder.new_register();
         let fn_addr = crate::trampoline::trampoline_hash_value as usize;
-        self.builder.emit(Instruction::ExternalCall(result, fn_addr, vec![value]));
+        self.builder
+            .emit(Instruction::ExternalCall(result, fn_addr, vec![value]));
         Ok(result)
     }
 
@@ -2787,14 +3143,18 @@ impl Compiler {
 
         let result = self.builder.new_register();
         let fn_addr = crate::trampoline::trampoline_is_cons as usize;
-        self.builder.emit(Instruction::ExternalCall(result, fn_addr, vec![value]));
+        self.builder
+            .emit(Instruction::ExternalCall(result, fn_addr, vec![value]));
         Ok(result)
     }
 
     /// Compile (cons-first x) - get the first element of a cons cell
     fn compile_builtin_cons_first(&mut self, args: &[Expr]) -> Result<IrValue, String> {
         if args.len() != 1 {
-            return Err(format!("cons-first requires 1 argument, got {}", args.len()));
+            return Err(format!(
+                "cons-first requires 1 argument, got {}",
+                args.len()
+            ));
         }
 
         let value = self.compile(&args[0])?;
@@ -2802,7 +3162,8 @@ impl Compiler {
 
         let result = self.builder.new_register();
         let fn_addr = crate::trampoline::trampoline_cons_first as usize;
-        self.builder.emit(Instruction::ExternalCall(result, fn_addr, vec![value]));
+        self.builder
+            .emit(Instruction::ExternalCall(result, fn_addr, vec![value]));
         Ok(result)
     }
 
@@ -2817,7 +3178,8 @@ impl Compiler {
 
         let result = self.builder.new_register();
         let fn_addr = crate::trampoline::trampoline_cons_rest as usize;
-        self.builder.emit(Instruction::ExternalCall(result, fn_addr, vec![value]));
+        self.builder
+            .emit(Instruction::ExternalCall(result, fn_addr, vec![value]));
         Ok(result)
     }
 
@@ -2844,8 +3206,8 @@ impl Compiler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::reader::read;
     use crate::clojure_ast::analyze;
+    use crate::reader::read;
     use std::cell::UnsafeCell;
 
     #[test]
@@ -2863,13 +3225,20 @@ mod tests {
         // - Type tag checks and branching
         // - Int path: Untag, AddInt, Tag
         // - Float path: Type checks, conversions, AddFloat, AllocateFloat
-        println!("\nGenerated {} IR instructions for (+ 1 2):", instructions.len());
+        println!(
+            "\nGenerated {} IR instructions for (+ 1 2):",
+            instructions.len()
+        );
         for (i, inst) in instructions.iter().enumerate() {
             println!("  {}: {:?}", i, inst);
         }
 
         // Just verify we generated some instructions (the exact count varies with optimizations)
-        assert!(instructions.len() >= 6, "Expected at least 6 instructions, got {}", instructions.len());
+        assert!(
+            instructions.len() >= 6,
+            "Expected at least 6 instructions, got {}",
+            instructions.len()
+        );
     }
 
     #[test]
@@ -2882,7 +3251,10 @@ mod tests {
         compiler.compile(&ast).unwrap();
         let instructions = compiler.take_instructions();
 
-        println!("\nGenerated {} IR instructions for (+ (* 2 3) 4):", instructions.len());
+        println!(
+            "\nGenerated {} IR instructions for (+ (* 2 3) 4):",
+            instructions.len()
+        );
         for (i, inst) in instructions.iter().enumerate() {
             println!("  {}: {:?}", i, inst);
         }
@@ -2970,6 +3342,9 @@ mod tests {
         let instructions = compiler.take_instructions();
 
         // Should have instructions for allocating var, storing value, etc.
-        assert!(instructions.len() > 1, "Should generate multiple instructions for def");
+        assert!(
+            instructions.len() > 1,
+            "Should generate multiple instructions for def"
+        );
     }
 }

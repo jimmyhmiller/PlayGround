@@ -13,15 +13,15 @@
 //   (lldb) memory read -fx -c16 $sp    # View stack memory
 //   (lldb) memory read -fx -c16 $x29   # View frame pointer area
 
-use quick_clojure_poc::reader::read;
+use quick_clojure_poc::arm_codegen::Arm64CodeGen;
 use quick_clojure_poc::clojure_ast::analyze;
 use quick_clojure_poc::compiler::Compiler;
 use quick_clojure_poc::gc_runtime::GCRuntime;
-use quick_clojure_poc::arm_codegen::Arm64CodeGen;
+use quick_clojure_poc::reader::read;
 use quick_clojure_poc::register_allocation::linear_scan::LinearScan;
 use quick_clojure_poc::trampoline::{self, Trampoline};
-use std::sync::Arc;
 use std::cell::UnsafeCell;
+use std::sync::Arc;
 
 fn main() {
     // Test case that forces spilling with 4 registers
@@ -66,7 +66,10 @@ fn main() {
     let compiled = Arm64CodeGen::compile_function(&instructions, num_locals, 0).unwrap();
 
     println!("\n=== ARM64 Machine Code ===");
-    println!("Compiled {} instructions at {:p}", compiled.code_len, compiled.code_ptr as *const u8);
+    println!(
+        "Compiled {} instructions at {:p}",
+        compiled.code_len, compiled.code_ptr as *const u8
+    );
 
     println!("\n=== Executing (breakpoint will trigger) ===");
 

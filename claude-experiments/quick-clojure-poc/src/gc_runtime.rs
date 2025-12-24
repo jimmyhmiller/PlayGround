@@ -7,9 +7,8 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::gc::{
-    Allocator, AllocateAction, AllocatorOptions, StackMap, StackMapDetails,
-    BuiltInTypes, HeapObject, Word, HeapInspector, DetailedHeapStats, ObjectInfo,
-    ObjectReference, type_id_to_name,
+    AllocateAction, Allocator, AllocatorOptions, BuiltInTypes, DetailedHeapStats, HeapInspector,
+    HeapObject, ObjectInfo, ObjectReference, StackMap, StackMapDetails, Word, type_id_to_name,
 };
 
 // Re-export for compatibility
@@ -43,7 +42,7 @@ pub const TYPE_FLOAT: usize = 3;
 pub const TYPE_STRING: usize = 4;
 pub const TYPE_KEYWORD: usize = 5;
 pub const TYPE_SYMBOL: usize = 6;
-pub const TYPE_LIST: usize = 7;        // PersistentList / Cons
+pub const TYPE_LIST: usize = 7; // PersistentList / Cons
 pub const TYPE_VECTOR: usize = 8;
 pub const TYPE_MAP: usize = 9;
 pub const TYPE_SET: usize = 10;
@@ -53,7 +52,7 @@ pub const TYPE_NAMESPACE: usize = 13;
 pub const TYPE_VAR: usize = 14;
 pub const TYPE_ARRAY: usize = 15;
 pub const TYPE_MULTI_ARITY_FN: usize = 16;
-pub const TYPE_DEFTYPE: usize = 17;    // Base for deftypes, actual ID = TYPE_DEFTYPE + type_data
+pub const TYPE_DEFTYPE: usize = 17; // Base for deftypes, actual ID = TYPE_DEFTYPE + type_data
 
 /// Offset added to deftype IDs to avoid collision with built-in types
 pub const DEFTYPE_ID_OFFSET: usize = 100;
@@ -107,11 +106,11 @@ impl ProtocolDef {
 #[repr(C)]
 #[derive(Debug, Clone)]
 pub struct ExceptionHandler {
-    pub handler_address: usize,   // Label address to jump to (catch block)
-    pub stack_pointer: usize,     // Saved SP
-    pub frame_pointer: usize,     // Saved FP (x29)
-    pub link_register: usize,     // Saved LR (x30)
-    pub result_local: isize,      // Where to store exception (FP-relative offset, negative)
+    pub handler_address: usize, // Label address to jump to (catch block)
+    pub stack_pointer: usize,   // Saved SP
+    pub frame_pointer: usize,   // Saved FP (x29)
+    pub link_register: usize,   // Saved LR (x30)
+    pub result_local: isize,    // Where to store exception (FP-relative offset, negative)
 }
 
 /// Closure heap object layout constants (single-arity functions)
@@ -259,7 +258,6 @@ pub struct GCRuntime {
     exception_handlers: Vec<ExceptionHandler>,
 
     // ========== Protocol System ==========
-
     /// Protocol registry: indexed by protocol_id
     protocol_registry: Vec<ProtocolDef>,
 
@@ -279,7 +277,6 @@ pub struct GCRuntime {
     protocol_vtable_root_ids: HashMap<(usize, usize, usize), usize>,
 
     // ========== Keyword Interning ==========
-
     /// Keyword constant storage: index -> keyword text (without colon)
     keyword_constants: Vec<String>,
 
@@ -290,13 +287,11 @@ pub struct GCRuntime {
     keyword_root_ids: HashMap<usize, usize>,
 
     // ========== String Constants (for compile-time string literals) ==========
-
     /// String constants that need to survive GC (allocated at compile time)
     /// Maps string pointer to its namespace root ID
     string_constant_root_ids: HashMap<usize, usize>,
 
     // ========== Symbol Interning (for runtime var lookup) ==========
-
     /// Symbol table: symbol_id -> symbol string
     symbol_table: Vec<String>,
 
@@ -319,7 +314,7 @@ impl GCRuntime {
         GCRuntime {
             allocator: Alloc::new(options),
             stack_map: StackMap::new(),
-            stack_base: 0,  // Set by set_stack_base() before running JIT code
+            stack_base: 0, // Set by set_stack_base() before running JIT code
             namespace_roots: HashMap::new(),
             namespace_name_to_id: HashMap::new(),
             next_namespace_id: 0,
@@ -388,7 +383,8 @@ impl GCRuntime {
             // Stack base not set, can't run GC
             return;
         }
-        self.allocator.gc(&self.stack_map, &[(self.stack_base, stack_pointer)]);
+        self.allocator
+            .gc(&self.stack_map, &[(self.stack_base, stack_pointer)]);
 
         // Handle relocations (for compacting/generational GC)
         let relocations = self.allocator.get_namespace_relocations();
@@ -443,7 +439,10 @@ impl GCRuntime {
     /// Allocate raw memory from the heap
     fn allocate_raw(&mut self, size_words: usize, type_id: u8) -> Result<usize, String> {
         // Try to allocate
-        match self.allocator.try_allocate(size_words, BuiltInTypes::HeapObject) {
+        match self
+            .allocator
+            .try_allocate(size_words, BuiltInTypes::HeapObject)
+        {
             Ok(AllocateAction::Allocated(ptr)) => {
                 let mut heap_obj = HeapObject::from_untagged(ptr);
                 heap_obj.write_header(Word::from_word(size_words));
@@ -523,7 +522,7 @@ impl GCRuntime {
 
         // Write the float bits directly to the heap
         unsafe {
-            let data_ptr = (ptr + 8) as *mut u64;  // Skip header (8 bytes)
+            let data_ptr = (ptr + 8) as *mut u64; // Skip header (8 bytes)
             *data_ptr = value.to_bits();
         }
 
@@ -534,7 +533,7 @@ impl GCRuntime {
     pub fn read_float(&self, tagged: usize) -> f64 {
         let ptr = self.untag_float(tagged);
         unsafe {
-            let data_ptr = (ptr + 8) as *const u64;  // Skip header
+            let data_ptr = (ptr + 8) as *const u64; // Skip header
             f64::from_bits(*data_ptr)
         }
     }
@@ -642,7 +641,9 @@ impl GCRuntime {
         }
 
         // Get the text from constants
-        let text = self.keyword_constants.get(index)
+        let text = self
+            .keyword_constants
+            .get(index)
             .ok_or_else(|| format!("Invalid keyword index: {}", index))?
             .clone();
 
@@ -680,8 +681,7 @@ impl GCRuntime {
             // Skip header (8 bytes) and hash (8 bytes)
             let text_ptr = (ptr + 16) as *const u8;
             let bytes = std::slice::from_raw_parts(text_ptr, text_len);
-            std::str::from_utf8(bytes)
-                .map_err(|e| format!("Invalid UTF-8 in keyword: {}", e))
+            std::str::from_utf8(bytes).map_err(|e| format!("Invalid UTF-8 in keyword: {}", e))
         }
     }
 
@@ -689,7 +689,8 @@ impl GCRuntime {
     pub fn is_keyword(&self, tagged: usize) -> bool {
         // Check tag bits first
         let tag = tagged & 0b111;
-        if tag != 0b110 {  // heap object tag
+        if tag != 0b110 {
+            // heap object tag
             return false;
         }
 
@@ -737,7 +738,11 @@ impl GCRuntime {
     /// Refer all bindings from source namespace into target namespace
     /// This is used to implement (ns foo) which implicitly refers clojure.core
     /// Returns the (possibly relocated) target namespace pointer
-    pub fn refer_all(&mut self, target_ns_ptr: usize, source_ns_ptr: usize) -> Result<usize, String> {
+    pub fn refer_all(
+        &mut self,
+        target_ns_ptr: usize,
+        source_ns_ptr: usize,
+    ) -> Result<usize, String> {
         // Get all bindings from source namespace first
         // We collect them to avoid issues with GC during iteration
         let bindings = self.namespace_all_bindings(source_ns_ptr);
@@ -791,7 +796,8 @@ impl GCRuntime {
         // CRITICAL: Re-fetch the source namespace pointer AFTER allocations
         // GC may have relocated it, so we need to use the namespace root to find
         // its current location
-        let current_ns_ptr = self.get_namespace_by_name(&ns_name)
+        let current_ns_ptr = self
+            .get_namespace_by_name(&ns_name)
             .ok_or_else(|| format!("Namespace {} disappeared during allocation", ns_name))?;
         let current_ns_untagged = self.untag_heap_object(current_ns_ptr);
         let source_heap_obj = HeapObject::from_untagged(current_ns_untagged as *const u8);
@@ -943,7 +949,8 @@ impl GCRuntime {
 
     /// Run GC with stack pointers
     pub fn run_gc_with_stack(&mut self, stack_base: usize, stack_pointer: usize) {
-        self.allocator.gc(&self.stack_map, &[(stack_base, stack_pointer)]);
+        self.allocator
+            .gc(&self.stack_map, &[(stack_base, stack_pointer)]);
 
         // Handle relocations
         let relocations = self.allocator.get_namespace_relocations();
@@ -1000,7 +1007,8 @@ impl GCRuntime {
                 "generational"
             } else {
                 "mark-and-sweep"
-            }.to_string(),
+            }
+            .to_string(),
             namespace_count: self.namespace_roots.len(),
             type_count: self.type_registry.len(),
             stack_map_entries: self.stack_map.entry_count(),
@@ -1097,8 +1105,7 @@ impl GCRuntime {
             // Add the var to the namespace bindings
             let old_ptr = core_ns_ptr;
             core_ns_ptr = self.namespace_add_binding(core_ns_ptr, *name, var_ptr)?;
-            if *name == "make-array" {
-            }
+            if *name == "make-array" {}
         }
 
         Ok(core_ns_ptr)
@@ -1249,7 +1256,10 @@ impl GCRuntime {
         let heap_obj = HeapObject::from_untagged(untagged as *const u8);
         let closure_count = heap_obj.get_field(closure_layout::FIELD_CLOSURE_COUNT);
         if index >= closure_count {
-            panic!("Closure index out of bounds: {} >= {}", index, closure_count);
+            panic!(
+                "Closure index out of bounds: {} >= {}",
+                index, closure_count
+            );
         }
         heap_obj.get_field(closure_layout::FIELD_FIRST_VALUE + index)
     }
@@ -1295,14 +1305,19 @@ impl GCRuntime {
         // Write header fields
         // All integer fields must be tagged to avoid GC treating them as heap pointers
         heap_obj.write_field(multi_arity_layout::FIELD_NAME_PTR, name_ptr);
-        heap_obj.write_field(multi_arity_layout::FIELD_ARITY_COUNT,
-            BuiltInTypes::Int.tag(arity_count as isize) as usize);
+        heap_obj.write_field(
+            multi_arity_layout::FIELD_ARITY_COUNT,
+            BuiltInTypes::Int.tag(arity_count as isize) as usize,
+        );
         heap_obj.write_field(
             multi_arity_layout::FIELD_VARIADIC_MIN,
-            BuiltInTypes::Int.tag(variadic_min.unwrap_or(multi_arity_layout::NO_VARIADIC) as isize) as usize,
+            BuiltInTypes::Int.tag(variadic_min.unwrap_or(multi_arity_layout::NO_VARIADIC) as isize)
+                as usize,
         );
-        heap_obj.write_field(multi_arity_layout::FIELD_CLOSURE_COUNT,
-            BuiltInTypes::Int.tag(closure_values.len() as isize) as usize);
+        heap_obj.write_field(
+            multi_arity_layout::FIELD_CLOSURE_COUNT,
+            BuiltInTypes::Int.tag(closure_values.len() as isize) as usize,
+        );
 
         // Write arity table
         // Note: param_count must be tagged as Int to avoid GC treating it as a heap pointer
@@ -1310,7 +1325,10 @@ impl GCRuntime {
         // match heap pointer tag patterns in practice
         for (i, (param_count, code_ptr)) in arities.iter().enumerate() {
             let tagged_param_count = BuiltInTypes::Int.tag(*param_count as isize) as usize;
-            heap_obj.write_field(multi_arity_layout::arity_param_count_field(i), tagged_param_count);
+            heap_obj.write_field(
+                multi_arity_layout::arity_param_count_field(i),
+                tagged_param_count,
+            );
             heap_obj.write_field(multi_arity_layout::arity_code_ptr_field(i), *code_ptr);
         }
 
@@ -1345,7 +1363,8 @@ impl GCRuntime {
 
         // First, try to find an exact match
         for i in 0..arity_count {
-            let param_count = heap_obj.get_field(multi_arity_layout::arity_param_count_field(i)) >> 3;
+            let param_count =
+                heap_obj.get_field(multi_arity_layout::arity_param_count_field(i)) >> 3;
             if param_count == arg_count {
                 let code_ptr = heap_obj.get_field(multi_arity_layout::arity_code_ptr_field(i));
                 return Some((code_ptr, false));
@@ -1358,7 +1377,8 @@ impl GCRuntime {
         if variadic_min != no_variadic_untagged && arg_count >= variadic_min {
             // Find the variadic arity (the one with param_count == variadic_min)
             for i in 0..arity_count {
-                let param_count = heap_obj.get_field(multi_arity_layout::arity_param_count_field(i)) >> 3;
+                let param_count =
+                    heap_obj.get_field(multi_arity_layout::arity_param_count_field(i)) >> 3;
                 if param_count == variadic_min {
                     let code_ptr = heap_obj.get_field(multi_arity_layout::arity_code_ptr_field(i));
                     return Some((code_ptr, true));
@@ -1390,7 +1410,10 @@ impl GCRuntime {
         let arity_count = heap_obj.get_field(multi_arity_layout::FIELD_ARITY_COUNT) >> 3;
         let closure_count = heap_obj.get_field(multi_arity_layout::FIELD_CLOSURE_COUNT) >> 3;
         if index >= closure_count {
-            panic!("Multi-arity closure index out of bounds: {} >= {}", index, closure_count);
+            panic!(
+                "Multi-arity closure index out of bounds: {} >= {}",
+                index, closure_count
+            );
         }
         heap_obj.get_field(multi_arity_layout::closure_value_field(arity_count, index))
     }
@@ -1566,7 +1589,8 @@ impl GCRuntime {
         }
 
         // Look up IndexedSeq type ID
-        let indexed_seq_type_id = self.get_type_id("clojure.core/IndexedSeq")
+        let indexed_seq_type_id = self
+            .get_type_id("clojure.core/IndexedSeq")
             .ok_or_else(|| "IndexedSeq type not registered".to_string())?;
 
         // Create IndexedSeq instance with fields: [arr, i=0, meta=nil]
@@ -1612,13 +1636,17 @@ impl GCRuntime {
         type_id: usize,
         field_values: Vec<usize>,
     ) -> Result<usize, String> {
-        let type_def = self.type_registry.get(type_id)
+        let type_def = self
+            .type_registry
+            .get(type_id)
             .ok_or_else(|| format!("Unknown type_id: {}", type_id))?;
 
         if field_values.len() != type_def.fields.len() {
             return Err(format!(
                 "Type {} expects {} fields, got {}",
-                type_def.name, type_def.fields.len(), field_values.len()
+                type_def.name,
+                type_def.fields.len(),
+                field_values.len()
             ));
         }
 
@@ -1651,13 +1679,17 @@ impl GCRuntime {
         field_count: usize,
     ) -> Result<usize, String> {
         // Validate type exists
-        let type_def = self.type_registry.get(type_id)
+        let type_def = self
+            .type_registry
+            .get(type_id)
             .ok_or_else(|| format!("Unknown type_id: {}", type_id))?;
 
         if field_count != type_def.fields.len() {
             return Err(format!(
                 "Type {} expects {} fields, got {}",
-                type_def.name, type_def.fields.len(), field_count
+                type_def.name,
+                type_def.fields.len(),
+                field_count
             ));
         }
 
@@ -1689,30 +1721,57 @@ impl GCRuntime {
     }
 
     /// Load a field from a deftype instance by field name
-    pub fn load_type_field_by_name(&self, obj_ptr: usize, field_name: &str) -> Result<usize, String> {
+    pub fn load_type_field_by_name(
+        &self,
+        obj_ptr: usize,
+        field_name: &str,
+    ) -> Result<usize, String> {
         let type_id = self.get_instance_type_id(obj_ptr);
 
-        let type_def = self.type_registry.get(type_id)
+        let type_def = self
+            .type_registry
+            .get(type_id)
             .ok_or_else(|| format!("Unknown type_id {} in object", type_id))?;
 
-        let field_index = type_def.fields.iter()
+        let field_index = type_def
+            .fields
+            .iter()
             .position(|f| f == field_name)
-            .ok_or_else(|| format!("Field '{}' not found in type '{}'", field_name, type_def.name))?;
+            .ok_or_else(|| {
+                format!(
+                    "Field '{}' not found in type '{}'",
+                    field_name, type_def.name
+                )
+            })?;
 
         Ok(self.read_type_field(obj_ptr, field_index))
     }
 
     /// Store a value to a field in a deftype instance by field name
     /// Used by trampoline_store_type_field for mutable field assignment
-    pub fn store_type_field_by_name(&mut self, obj_ptr: usize, field_name: &str, value: usize) -> Result<usize, String> {
+    pub fn store_type_field_by_name(
+        &mut self,
+        obj_ptr: usize,
+        field_name: &str,
+        value: usize,
+    ) -> Result<usize, String> {
         let type_id = self.get_instance_type_id(obj_ptr);
 
-        let type_def = self.type_registry.get(type_id)
+        let type_def = self
+            .type_registry
+            .get(type_id)
             .ok_or_else(|| format!("Unknown type_id {} in object", type_id))?;
 
-        let field_index = type_def.fields.iter()
+        let field_index = type_def
+            .fields
+            .iter()
             .position(|f| f == field_name)
-            .ok_or_else(|| format!("Field '{}' not found in type '{}'", field_name, type_def.name))?;
+            .ok_or_else(|| {
+                format!(
+                    "Field '{}' not found in type '{}'",
+                    field_name, type_def.name
+                )
+            })?;
 
         self.write_type_field(obj_ptr, field_index, value);
         Ok(value)
@@ -1735,14 +1794,16 @@ impl GCRuntime {
 
     /// List all live objects in the heap
     pub fn list_objects(&self) -> Vec<ObjectInfo> {
-        self.allocator.iter_objects()
+        self.allocator
+            .iter_objects()
             .map(|obj| self.object_to_info(&obj))
             .collect()
     }
 
     /// List objects filtered by type name
     pub fn list_objects_by_type(&self, type_name: &str) -> Vec<ObjectInfo> {
-        self.allocator.iter_objects()
+        self.allocator
+            .iter_objects()
             .filter(|obj| {
                 let type_id = obj.get_type_id() as u8;
                 type_id_to_name(type_id) == type_name
@@ -1825,9 +1886,13 @@ impl GCRuntime {
             // but this is preferable to positive numbers displaying as negative
             BuiltInTypes::Int => format!("{}", value >> 3),
             BuiltInTypes::Bool => {
-                if value == 11 { "true".to_string() }
-                else if value == 3 { "false".to_string() }
-                else { format!("bool?{}", value) }
+                if value == 11 {
+                    "true".to_string()
+                } else if value == 3 {
+                    "false".to_string()
+                } else {
+                    format!("bool?{}", value)
+                }
             }
             BuiltInTypes::Null => "nil".to_string(),
             BuiltInTypes::String => {
@@ -2117,10 +2182,8 @@ impl GCRuntime {
 
         // Register method -> (protocol_id, method_index) mappings
         for (method_index, method) in methods.iter().enumerate() {
-            self.method_to_protocol.insert(
-                method.name.clone(),
-                (protocol_id, method_index),
-            );
+            self.method_to_protocol
+                .insert(method.name.clone(), (protocol_id, method_index));
         }
 
         self.protocol_registry.push(ProtocolDef {
@@ -2142,8 +2205,14 @@ impl GCRuntime {
     }
 
     /// Get method index within a protocol by method name
-    pub fn get_protocol_method_index(&self, protocol_id: usize, method_name: &str) -> Option<usize> {
-        self.protocol_registry.get(protocol_id)?.method_index(method_name)
+    pub fn get_protocol_method_index(
+        &self,
+        protocol_id: usize,
+        method_name: &str,
+    ) -> Option<usize> {
+        self.protocol_registry
+            .get(protocol_id)?
+            .method_index(method_name)
     }
 
     /// Register a protocol method implementation in the vtable
@@ -2181,7 +2250,9 @@ impl GCRuntime {
         let &(protocol_id, method_index) = self.method_to_protocol.get(method_name)?;
 
         // Look up the implementation in the vtable
-        self.protocol_vtable.get(&(type_id, protocol_id, method_index)).copied()
+        self.protocol_vtable
+            .get(&(type_id, protocol_id, method_index))
+            .copied()
     }
 
     /// Look up protocol method by protocol_id and method_index (direct vtable lookup)
@@ -2191,7 +2262,9 @@ impl GCRuntime {
         protocol_id: usize,
         method_index: usize,
     ) -> Option<usize> {
-        self.protocol_vtable.get(&(type_id, protocol_id, method_index)).copied()
+        self.protocol_vtable
+            .get(&(type_id, protocol_id, method_index))
+            .copied()
     }
 
     /// Get the protocol type ID for a tagged value
@@ -2219,7 +2292,7 @@ impl GCRuntime {
                     header.type_id as usize
                 }
             }
-            0b111 => TYPE_NIL,      // Nil
+            0b111 => TYPE_NIL, // Nil
             _ => unreachable!(),
         }
     }
@@ -2229,7 +2302,10 @@ impl GCRuntime {
         if let Some(protocol) = self.protocol_registry.get(protocol_id) {
             // Check if at least one method is implemented
             for method_index in 0..protocol.methods.len() {
-                if self.protocol_vtable.contains_key(&(type_id, protocol_id, method_index)) {
+                if self
+                    .protocol_vtable
+                    .contains_key(&(type_id, protocol_id, method_index))
+                {
                     return true;
                 }
             }
@@ -2331,7 +2407,10 @@ mod tests {
         assert!(heap_obj.is_opaque_object(), "String should be opaque");
 
         // Verify get_fields returns empty (GC won't scan contents)
-        assert!(heap_obj.get_fields().is_empty(), "Opaque object should have no fields");
+        assert!(
+            heap_obj.get_fields().is_empty(),
+            "Opaque object should have no fields"
+        );
     }
 
     #[test]
@@ -2343,7 +2422,9 @@ mod tests {
 
         // Create a string with content that could be misinterpreted as a pointer
         // (8 bytes that when interpreted as usize would look like an address)
-        let str_ptr = runtime.allocate_string("\x00\x00\x00\x10\x00\x00\x00\x00").unwrap();
+        let str_ptr = runtime
+            .allocate_string("\x00\x00\x00\x10\x00\x00\x00\x00")
+            .unwrap();
 
         let untagged = str_ptr >> 3;
         let heap_obj = HeapObject::from_untagged(untagged as *const u8);
@@ -2351,7 +2432,10 @@ mod tests {
         // Verify GC won't try to follow the "pointer"
         assert!(heap_obj.is_opaque_object());
         let refs: Vec<_> = heap_obj.get_heap_references().collect();
-        assert!(refs.is_empty(), "Opaque objects should not report heap references");
+        assert!(
+            refs.is_empty(),
+            "Opaque objects should not report heap references"
+        );
     }
 
     #[test]

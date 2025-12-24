@@ -9,12 +9,14 @@ import {
   useProjectsState,
   useDashboardsState,
   useProjectDashboardTree,
+  useThemeState,
 } from '../hooks/useBackendState';
 import CodeMirrorEditor from './CodeMirrorEditor';
 import GitDiffViewer from './GitDiffViewer';
 import EventLogPanel from './EventLogPanel';
 import ThemeEditor from './ThemeEditor';
 import SettingsEditor from './SettingsEditor';
+import { GlobalUIRenderer, globalUIRegistry } from '../globalUI';
 
 interface ComponentConfig {
   component: ComponentType<unknown>;
@@ -180,6 +182,7 @@ const DesktopCommandPalette = memo(function DesktopCommandPalette(): ReactElemen
     createProject,
     deleteProject,
     renameProject,
+    setProjectTheme,
   } = useProjectsState();
 
   const {
@@ -189,9 +192,12 @@ const DesktopCommandPalette = memo(function DesktopCommandPalette(): ReactElemen
     deleteDashboard,
     renameDashboard,
     saveLayout,
+    setDashboardThemeOverride,
   } = useDashboardsState();
 
   const { tree } = useProjectDashboardTree();
+
+  const { currentTheme, overrides } = useThemeState();
 
   // Build command list
   const commands: Command[] = useMemo(() => {
@@ -251,6 +257,21 @@ const DesktopCommandPalette = memo(function DesktopCommandPalette(): ReactElemen
           if (name && name !== activeProject.name) {
             await renameProject(activeProject.id, name);
           }
+        },
+      });
+
+      cmds.push({
+        id: 'project-save-theme',
+        label: 'Save Theme as Project Default',
+        description: 'Set current theme as the default for this project',
+        icon: '🎨',
+        category: 'Theme',
+        keywords: ['theme', 'save', 'project', 'default'],
+        action: async () => {
+          await setProjectTheme(activeProject.id, {
+            current: currentTheme,
+            overrides,
+          });
         },
       });
     }
@@ -342,6 +363,36 @@ const DesktopCommandPalette = memo(function DesktopCommandPalette(): ReactElemen
         },
       });
 
+      cmds.push({
+        id: 'dashboard-save-theme',
+        label: 'Save Theme to Dashboard',
+        description: 'Save current theme as this dashboard\'s theme override',
+        icon: '🎨',
+        category: 'Theme',
+        keywords: ['theme', 'save', 'dashboard', 'override'],
+        action: async () => {
+          await setDashboardThemeOverride(activeDashboard.id, {
+            current: currentTheme,
+            overrides,
+          });
+        },
+      });
+
+      // Only show reset if dashboard has a theme override
+      if (activeDashboard.themeOverride) {
+        cmds.push({
+          id: 'dashboard-reset-theme',
+          label: 'Reset Dashboard Theme',
+          description: 'Use project default theme instead of dashboard override',
+          icon: '↩️',
+          category: 'Theme',
+          keywords: ['theme', 'reset', 'dashboard', 'default'],
+          action: async () => {
+            await setDashboardThemeOverride(activeDashboard.id, undefined);
+          },
+        });
+      }
+
       // Only show delete if there's more than one dashboard
       const projectDashboards = dashboards.filter(
         (d) => d.projectId === activeProject?.id
@@ -426,13 +477,17 @@ const DesktopCommandPalette = memo(function DesktopCommandPalette(): ReactElemen
     createProject,
     deleteProject,
     renameProject,
+    setProjectTheme,
     dashboards,
     activeDashboard,
     createDashboard,
     deleteDashboard,
     renameDashboard,
     saveLayout,
+    setDashboardThemeOverride,
     tree,
+    currentTheme,
+    overrides,
     showPrompt,
     showConfirm,
   ]);
@@ -511,6 +566,8 @@ function Desktop(): ReactElement {
             >
               <WindowContainer />
             </div>
+            {/* Global UI layer - widgets in fixed positions */}
+            <GlobalUIRenderer registry={globalUIRegistry} />
             <DesktopCommandPalette />
             <DesktopQuickSwitcher />
           </div>

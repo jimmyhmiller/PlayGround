@@ -3,8 +3,8 @@
 // Provides utilities to walk the stack and find heap pointers
 // using stack map information.
 
-use super::types::BuiltInTypes;
 use super::StackMap;
+use super::types::BuiltInTypes;
 
 /// A simple abstraction for walking the stack and finding heap pointers
 pub struct StackWalker;
@@ -34,7 +34,7 @@ impl StackWalker {
     pub fn walk_stack_roots<F>(
         stack_base: usize,
         stack_pointer: usize,
-        _stack_map: &StackMap,  // Kept for API compatibility but not used in conservative scan
+        _stack_map: &StackMap, // Kept for API compatibility but not used in conservative scan
         mut callback: F,
     ) where
         F: FnMut(usize, usize),

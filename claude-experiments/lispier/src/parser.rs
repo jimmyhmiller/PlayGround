@@ -2,8 +2,8 @@ use thiserror::Error;
 
 use crate::ast::{
     AttributeValue, Binding, Block, BlockArgument, Compilation, Defmacro, Extern, FunctionType,
-    LetExpr, Module, Node, Operation, Pass, Region, Require, RequireMacros, Target, Type,
-    TypeAnnotation, TypedMLIRLiteral, TypedNumber,
+    LetExpr, LinkLibrary, Module, Node, Operation, Pass, Region, Require, RequireMacros, Target,
+    Type, TypeAnnotation, TypedMLIRLiteral, TypedNumber,
 };
 use crate::value::Value;
 
@@ -53,6 +53,9 @@ pub enum ParserError {
 
     #[error("invalid defmacro form - expected (defmacro name)")]
     InvalidDefmacroForm,
+
+    #[error("invalid link-library form - expected (link-library :c) or (link-library \"path\")")]
+    InvalidLinkLibraryForm,
 }
 
 pub struct Parser;
@@ -117,6 +120,7 @@ impl Parser {
             "compilation" => self.parse_compilation(items),
             "extern" => self.parse_extern(items),
             "defmacro" => self.parse_defmacro(items),
+            "link-library" => self.parse_link_library(items),
             _ => self.parse_operation(items),
         }
     }
@@ -253,6 +257,21 @@ impl Parser {
         };
 
         Ok(Node::defmacro(Defmacro::new(name)))
+    }
+
+    fn parse_link_library(&mut self, items: &[Value]) -> Result<Node, ParserError> {
+        // (link-library :c) or (link-library "path/to/lib.so")
+        if items.len() < 2 {
+            return Err(ParserError::InvalidLinkLibraryForm);
+        }
+
+        let library = match &items[1] {
+            Value::Keyword(kw) => kw.clone(),
+            Value::String(s) => s.clone(),
+            _ => return Err(ParserError::InvalidLinkLibraryForm),
+        };
+
+        Ok(Node::LinkLibrary(LinkLibrary::new(library)))
     }
 
     fn parse_target(&mut self, items: &[Value]) -> Result<Target, ParserError> {

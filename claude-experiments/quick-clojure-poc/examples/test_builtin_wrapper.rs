@@ -1,18 +1,20 @@
 /// Test that the builtin wrappers work correctly when called directly
-
-use quick_clojure_poc::trampoline::{generate_builtin_wrappers, Trampoline};
+use quick_clojure_poc::trampoline::{Trampoline, generate_builtin_wrappers};
 
 fn main() {
     // First test: simple function that returns 42
     println!("=== Test 1: Simple return 42 ===");
     let code42: [u32; 2] = [
-        0xD2800540,  // mov x0, #42
-        0xD65F03C0,  // ret
+        0xD2800540, // mov x0, #42
+        0xD65F03C0, // ret
     ];
     let ptr42 = allocate_and_copy(&code42);
-    println!("Code at 0x{:x}: [{:08x}, {:08x}]", ptr42,
-             unsafe { *(ptr42 as *const u32) },
-             unsafe { *((ptr42 + 4) as *const u32) });
+    println!(
+        "Code at 0x{:x}: [{:08x}, {:08x}]",
+        ptr42,
+        unsafe { *(ptr42 as *const u32) },
+        unsafe { *((ptr42 + 4) as *const u32) }
+    );
 
     let fn42: extern "C" fn() -> usize = unsafe { std::mem::transmute(ptr42) };
     let result42 = fn42();
@@ -21,7 +23,7 @@ fn main() {
     // Test 1b: Function that returns first arg
     println!("\n=== Test 1b: Return first arg ===");
     let code_ret_arg: [u32; 1] = [
-        0xD65F03C0,  // ret (just return x0)
+        0xD65F03C0, // ret (just return x0)
     ];
     let ptr_ret_arg = allocate_and_copy(&code_ret_arg);
     let fn_ret_arg: extern "C" fn(usize) -> usize = unsafe { std::mem::transmute(ptr_ret_arg) };
@@ -31,33 +33,35 @@ fn main() {
     // Test 1c: Function that returns second arg
     println!("\n=== Test 1c: Return second arg ===");
     let code_ret_arg2: [u32; 2] = [
-        0xAA0103E0,  // mov x0, x1 (copy x1 to x0)
-        0xD65F03C0,  // ret
+        0xAA0103E0, // mov x0, x1 (copy x1 to x0)
+        0xD65F03C0, // ret
     ];
     let ptr_ret_arg2 = allocate_and_copy(&code_ret_arg2);
-    let fn_ret_arg2: extern "C" fn(usize, usize) -> usize = unsafe { std::mem::transmute(ptr_ret_arg2) };
+    let fn_ret_arg2: extern "C" fn(usize, usize) -> usize =
+        unsafe { std::mem::transmute(ptr_ret_arg2) };
     let result_ret_arg2 = fn_ret_arg2(11, 22);
     println!("fn_ret_arg2(11, 22) = {} (expected 22)", result_ret_arg2);
 
     // Test 1d: Simple add (no tagging)
     println!("\n=== Test 1d: Simple add (no tagging) ===");
     let code_add_simple: [u32; 2] = [
-        0x8B010000,  // add x0, x0, x1
-        0xD65F03C0,  // ret
+        0x8B010000, // add x0, x0, x1
+        0xD65F03C0, // ret
     ];
     let ptr_add_simple = allocate_and_copy(&code_add_simple);
-    let fn_add_simple: extern "C" fn(usize, usize) -> usize = unsafe { std::mem::transmute(ptr_add_simple) };
+    let fn_add_simple: extern "C" fn(usize, usize) -> usize =
+        unsafe { std::mem::transmute(ptr_add_simple) };
     let result_add_simple = fn_add_simple(3, 4);
     println!("fn_add_simple(3, 4) = {} (expected 7)", result_add_simple);
 
     // Test 1e: Add with tagging
     println!("\n=== Test 1e: Add with tagging ===");
     let code_add: [u32; 5] = [
-        0xD343FC00,  // lsr x0, x0, #3  (untag arg0)
-        0xD343FC21,  // lsr x1, x1, #3  (untag arg1)
-        0x8B010000,  // add x0, x0, x1
-        0xD37DF000,  // lsl x0, x0, #3  (retag) - correct encoding
-        0xD65F03C0,  // ret
+        0xD343FC00, // lsr x0, x0, #3  (untag arg0)
+        0xD343FC21, // lsr x1, x1, #3  (untag arg1)
+        0x8B010000, // add x0, x0, x1
+        0xD37DF000, // lsl x0, x0, #3  (retag) - correct encoding
+        0xD65F03C0, // ret
     ];
     let ptr_add = allocate_and_copy(&code_add);
     println!("Add function at 0x{:x}", ptr_add);
@@ -68,38 +72,43 @@ fn main() {
         }
     }
     let fn_add: extern "C" fn(usize, usize) -> usize = unsafe { std::mem::transmute(ptr_add) };
-    let result_add = fn_add(24, 32);  // tagged 3 and 4
-    println!("Result: {} (expected 56, untagged {})", result_add, result_add >> 3);
+    let result_add = fn_add(24, 32); // tagged 3 and 4
+    println!(
+        "Result: {} (expected 56, untagged {})",
+        result_add,
+        result_add >> 3
+    );
 
     // Test 1f: Just lsr (untag first arg)
     println!("\n=== Test 1f: Just lsr x0, x0, #3 ===");
     let code_lsr: [u32; 2] = [
-        0xD343FC00,  // lsr x0, x0, #3  (untag)
-        0xD65F03C0,  // ret
+        0xD343FC00, // lsr x0, x0, #3  (untag)
+        0xD65F03C0, // ret
     ];
     let ptr_lsr = allocate_and_copy(&code_lsr);
     let fn_lsr: extern "C" fn(usize) -> usize = unsafe { std::mem::transmute(ptr_lsr) };
-    let result_lsr = fn_lsr(24);  // tagged 3
+    let result_lsr = fn_lsr(24); // tagged 3
     println!("fn_lsr(24) = {} (expected 3)", result_lsr);
 
     // Test 1g: lsr both then add
     println!("\n=== Test 1g: lsr + lsr + add ===");
     let code_lsr_add: [u32; 4] = [
-        0xD343FC00,  // lsr x0, x0, #3  (untag arg0)
-        0xD343FC21,  // lsr x1, x1, #3  (untag arg1)
-        0x8B010000,  // add x0, x0, x1
-        0xD65F03C0,  // ret
+        0xD343FC00, // lsr x0, x0, #3  (untag arg0)
+        0xD343FC21, // lsr x1, x1, #3  (untag arg1)
+        0x8B010000, // add x0, x0, x1
+        0xD65F03C0, // ret
     ];
     let ptr_lsr_add = allocate_and_copy(&code_lsr_add);
-    let fn_lsr_add: extern "C" fn(usize, usize) -> usize = unsafe { std::mem::transmute(ptr_lsr_add) };
-    let result_lsr_add = fn_lsr_add(24, 32);  // tagged 3 and 4
+    let fn_lsr_add: extern "C" fn(usize, usize) -> usize =
+        unsafe { std::mem::transmute(ptr_lsr_add) };
+    let result_lsr_add = fn_lsr_add(24, 32); // tagged 3 and 4
     println!("fn_lsr_add(24, 32) = {} (expected 7)", result_lsr_add);
 
     // Test 1h: Just lsl
     println!("\n=== Test 1h: Just lsl x0, x0, #3 ===");
     let code_lsl: [u32; 2] = [
-        0xD37DF000,  // lsl x0, x0, #3  (retag) - correct encoding
-        0xD65F03C0,  // ret
+        0xD37DF000, // lsl x0, x0, #3  (retag) - correct encoding
+        0xD65F03C0, // ret
     ];
     let ptr_lsl = allocate_and_copy(&code_lsl);
     let fn_lsl: extern "C" fn(usize) -> usize = unsafe { std::mem::transmute(ptr_lsl) };
@@ -131,12 +140,20 @@ fn main() {
     // Test: (+ 3 4) with tagged args
     // Tagged 3 = 3 << 3 = 24
     // Tagged 4 = 4 << 3 = 32
-    let arg0 = 3usize << 3;  // 24
-    let arg1 = 4usize << 3;  // 32
+    let arg0 = 3usize << 3; // 24
+    let arg1 = 4usize << 3; // 32
 
-    println!("Calling + wrapper with args: {} (tagged 3), {} (tagged 4)", arg0, arg1);
+    println!(
+        "Calling + wrapper with args: {} (tagged 3), {} (tagged 4)",
+        arg0, arg1
+    );
     let result = plus_fn(arg0, arg1);
-    println!("Result via fn ptr: {} (tag={}, untagged: {})", result, result & 7, result >> 3);
+    println!(
+        "Result via fn ptr: {} (tag={}, untagged: {})",
+        result,
+        result & 7,
+        result >> 3
+    );
 
     // Try calling via inline asm
     let result_asm: usize;
@@ -150,12 +167,22 @@ fn main() {
             clobber_abi("C"),
         );
     }
-    println!("Result via asm:    {} (tag={}, untagged: {})", result_asm, result_asm & 7, result_asm >> 3);
+    println!(
+        "Result via asm:    {} (tag={}, untagged: {})",
+        result_asm,
+        result_asm & 7,
+        result_asm >> 3
+    );
 
     // Try calling through the trampoline (generates JIT code that calls wrapper)
     println!("\n--- Test via Trampoline ---");
     let result_tramp = test_via_trampoline(plus_ptr, arg0, arg1);
-    println!("Result via trampoline: {} (tag={}, untagged: {})", result_tramp, result_tramp & 7, result_tramp >> 3);
+    println!(
+        "Result via trampoline: {} (tag={}, untagged: {})",
+        result_tramp,
+        result_tramp & 7,
+        result_tramp >> 3
+    );
 
     if result >> 3 == 7 && (result & 7) == 0 {
         println!("SUCCESS! 3 + 4 = 7");

@@ -1,3 +1,5 @@
+use std::fs;
+use std::path::PathBuf;
 /// Unit tests for mutable fields in deftype*
 ///
 /// Tests the ^:mutable field metadata and set! on field access including:
@@ -8,11 +10,8 @@
 /// - Write barriers with GC stress (gc-always mode)
 /// - Linked structures with mutable pointers
 /// - Counter/accumulator patterns
-
 use std::process::Command;
-use std::fs;
 use std::sync::OnceLock;
-use std::path::PathBuf;
 
 static BINARY_PATH: OnceLock<PathBuf> = OnceLock::new();
 
@@ -25,8 +24,7 @@ fn get_binary_path() -> &'static PathBuf {
 
         assert!(status.success(), "Failed to build release binary");
 
-        let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
-            .unwrap_or_else(|_| ".".to_string());
+        let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
         PathBuf::from(manifest_dir).join("target/release/quick-clojure-poc")
     })
 }
@@ -102,7 +100,7 @@ fn test_mutable_field_set() {
 (def b (Box. 42))
 (do
   (set! (.-val b) 100)
-  (.-val b))
+  (println (.-val b)))
 "#;
     let output = run_and_get_stdout(code);
     assert_eq!(output, "100", "Expected 100 after set!, got: {}", output);
@@ -129,10 +127,14 @@ fn test_mutable_field_multiple_sets() {
   (set! (.-val b) 1)
   (set! (.-val b) 2)
   (set! (.-val b) 3)
-  (.-val b))
+  (println (.-val b)))
 "#;
     let output = run_and_get_stdout(code);
-    assert_eq!(output, "3", "Expected 3 after multiple sets, got: {}", output);
+    assert_eq!(
+        output, "3",
+        "Expected 3 after multiple sets, got: {}",
+        output
+    );
 }
 
 // ============================================================================
@@ -146,7 +148,7 @@ fn test_counter_increment() {
 (def c (Counter. 0))
 (do
   (set! (.-count c) (+ (.-count c) 1))
-  (.-count c))
+  (println (.-count c)))
 "#;
     let output = run_and_get_stdout(code);
     assert_eq!(output, "1", "Expected 1 after increment, got: {}", output);
@@ -163,10 +165,14 @@ fn test_counter_multiple_increments() {
   (set! (.-count c) (+ (.-count c) 1))
   (set! (.-count c) (+ (.-count c) 1))
   (set! (.-count c) (+ (.-count c) 1))
-  (.-count c))
+  (println (.-count c)))
 "#;
     let output = run_and_get_stdout(code);
-    assert_eq!(output, "5", "Expected 5 after 5 increments, got: {}", output);
+    assert_eq!(
+        output, "5",
+        "Expected 5 after 5 increments, got: {}",
+        output
+    );
 }
 
 #[test]
@@ -177,7 +183,7 @@ fn test_counter_with_initial_value() {
 (do
   (set! (.-count c) (+ (.-count c) 1))
   (set! (.-count c) (+ (.-count c) 1))
-  (.-count c))
+  (println (.-count c)))
 "#;
     let output = run_and_get_stdout(code);
     assert_eq!(output, "102", "Expected 102, got: {}", output);
@@ -192,10 +198,14 @@ fn test_counter_decrement() {
   (set! (.-count c) (- (.-count c) 1))
   (set! (.-count c) (- (.-count c) 1))
   (set! (.-count c) (- (.-count c) 1))
-  (.-count c))
+  (println (.-count c)))
 "#;
     let output = run_and_get_stdout(code);
-    assert_eq!(output, "7", "Expected 7 after 3 decrements from 10, got: {}", output);
+    assert_eq!(
+        output, "7",
+        "Expected 7 after 3 decrements from 10, got: {}",
+        output
+    );
 }
 
 // ============================================================================
@@ -210,7 +220,7 @@ fn test_multiple_mutable_fields() {
 (do
   (set! (.-x p) 10)
   (set! (.-y p) 20)
-  (+ (.-x p) (.-y p)))
+  (println (+ (.-x p) (.-y p))))
 "#;
     let output = run_and_get_stdout(code);
     assert_eq!(output, "30", "Expected 30 (10+20), got: {}", output);
@@ -223,10 +233,14 @@ fn test_multiple_mutable_fields_independent() {
 (def p (Point. 5 5))
 (do
   (set! (.-x p) 100)
-  (.-y p))
+  (println (.-y p)))
 "#;
     let output = run_and_get_stdout(code);
-    assert_eq!(output, "5", "Setting x should not affect y, got: {}", output);
+    assert_eq!(
+        output, "5",
+        "Setting x should not affect y, got: {}",
+        output
+    );
 }
 
 #[test]
@@ -238,7 +252,7 @@ fn test_three_mutable_fields() {
   (set! (.-x p) 10)
   (set! (.-y p) 20)
   (set! (.-z p) 30)
-  (+ (.-x p) (+ (.-y p) (.-z p))))
+  (println (+ (.-x p) (+ (.-y p) (.-z p)))))
 "#;
     let output = run_and_get_stdout(code);
     assert_eq!(output, "60", "Expected 60 (10+20+30), got: {}", output);
@@ -277,7 +291,7 @@ fn test_mixed_fields_set_mutable() {
 (def m (MixedBox. 100 200))
 (do
   (set! (.-mutable-val m) 999)
-  (.-mutable-val m))
+  (println (.-mutable-val m)))
 "#;
     let output = run_and_get_stdout(code);
     assert_eq!(output, "999", "Expected 999, got: {}", output);
@@ -290,10 +304,14 @@ fn test_mixed_fields_immutable_unchanged() {
 (def m (MixedBox. 100 200))
 (do
   (set! (.-mutable-val m) 999)
-  (.-immutable-val m))
+  (println (.-immutable-val m)))
 "#;
     let output = run_and_get_stdout(code);
-    assert_eq!(output, "100", "Immutable field should be unchanged, got: {}", output);
+    assert_eq!(
+        output, "100",
+        "Immutable field should be unchanged, got: {}",
+        output
+    );
 }
 
 #[test]
@@ -303,7 +321,7 @@ fn test_first_field_mutable_second_immutable() {
 (def f (FlippedBox. 10 20))
 (do
   (set! (.-first-val f) 100)
-  (+ (.-first-val f) (.-second-val f)))
+  (println (+ (.-first-val f) (.-second-val f))))
 "#;
     let output = run_and_get_stdout(code);
     assert_eq!(output, "120", "Expected 120 (100+20), got: {}", output);
@@ -320,7 +338,7 @@ fn test_mutable_store_boolean_true() {
 (def b (Box. 42))
 (do
   (set! (.-val b) true)
-  (.-val b))
+  (println (.-val b)))
 "#;
     let output = run_and_get_stdout(code);
     assert_eq!(output, "true", "Expected true, got: {}", output);
@@ -333,7 +351,7 @@ fn test_mutable_store_boolean_false() {
 (def b (Box. 42))
 (do
   (set! (.-val b) false)
-  (.-val b))
+  (println (.-val b)))
 "#;
     let output = run_and_get_stdout(code);
     assert_eq!(output, "false", "Expected false, got: {}", output);
@@ -346,11 +364,15 @@ fn test_mutable_store_nil() {
 (def b (Box. 42))
 (do
   (set! (.-val b) nil)
-  (= (.-val b) nil))
+  (println (= (.-val b) nil)))
 "#;
     let output = run_and_get_stdout(code);
     // nil doesn't print, so we check if it equals nil
-    assert_eq!(output, "true", "Expected true (val == nil), got: {}", output);
+    assert_eq!(
+        output, "true",
+        "Expected true (val == nil), got: {}",
+        output
+    );
 }
 
 #[test]
@@ -360,7 +382,7 @@ fn test_mutable_store_negative() {
 (def b (Box. 42))
 (do
   (set! (.-val b) -100)
-  (.-val b))
+  (println (.-val b)))
 "#;
     let output = run_and_get_stdout(code);
     assert_eq!(output, "-100", "Expected -100, got: {}", output);
@@ -373,7 +395,7 @@ fn test_mutable_store_zero() {
 (def b (Box. 42))
 (do
   (set! (.-val b) 0)
-  (.-val b))
+  (println (.-val b)))
 "#;
     let output = run_and_get_stdout(code);
     assert_eq!(output, "0", "Expected 0, got: {}", output);
@@ -391,7 +413,7 @@ fn test_linked_list_basic() {
 (def n2 (Node. 2 nil))
 (do
   (set! (.-next n1) n2)
-  (.-value (.-next n1)))
+  (println (.-value (.-next n1))))
 "#;
     let output = run_and_get_stdout(code);
     assert_eq!(output, "2", "Expected 2 (value of n2), got: {}", output);
@@ -407,7 +429,7 @@ fn test_linked_list_three_nodes() {
 (do
   (set! (.-next n1) n2)
   (set! (.-next n2) n3)
-  (.-value (.-next (.-next n1))))
+  (println (.-value (.-next (.-next n1)))))
 "#;
     let output = run_and_get_stdout(code);
     assert_eq!(output, "3", "Expected 3 (value of n3), got: {}", output);
@@ -424,10 +446,14 @@ fn test_linked_list_rewire() {
 (do
   (set! (.-next n1) n2)
   (set! (.-next n1) n3)
-  (.-value (.-next n1)))
+  (println (.-value (.-next n1))))
 "#;
     let output = run_and_get_stdout(code);
-    assert_eq!(output, "3", "After rewire, n1->n3, expected 3, got: {}", output);
+    assert_eq!(
+        output, "3",
+        "After rewire, n1->n3, expected 3, got: {}",
+        output
+    );
 }
 
 #[test]
@@ -446,7 +472,7 @@ fn test_linked_list_sum() {
 (do
   (set! (.-next n1) n2)
   (set! (.-next n2) n3)
-  (sum-list n1))
+  (println (sum-list n1)))
 "#;
     let output = run_and_get_stdout(code);
     assert_eq!(output, "60", "Expected 60 (10+20+30), got: {}", output);
@@ -464,10 +490,14 @@ fn test_multiple_instances_independent() {
 (def b2 (Box. 2))
 (do
   (set! (.-val b1) 100)
-  (.-val b2))
+  (println (.-val b2)))
 "#;
     let output = run_and_get_stdout(code);
-    assert_eq!(output, "2", "Changing b1 should not affect b2, got: {}", output);
+    assert_eq!(
+        output, "2",
+        "Changing b1 should not affect b2, got: {}",
+        output
+    );
 }
 
 #[test]
@@ -479,7 +509,7 @@ fn test_multiple_instances_both_modified() {
 (do
   (set! (.-val b1) 100)
   (set! (.-val b2) 200)
-  (+ (.-val b1) (.-val b2)))
+  (println (+ (.-val b1) (.-val b2))))
 "#;
     let output = run_and_get_stdout(code);
     assert_eq!(output, "300", "Expected 300 (100+200), got: {}", output);
@@ -497,10 +527,14 @@ fn test_set_in_function() {
 (def b (Box. 0))
 (do
   (set-box! b 42)
-  (.-val b))
+  (println (.-val b)))
 "#;
     let output = run_and_get_stdout(code);
-    assert_eq!(output, "42", "Expected 42 after set in function, got: {}", output);
+    assert_eq!(
+        output, "42",
+        "Expected 42 after set in function, got: {}",
+        output
+    );
 }
 
 #[test]
@@ -513,10 +547,14 @@ fn test_increment_in_function() {
   (inc! c)
   (inc! c)
   (inc! c)
-  (.-count c))
+  (println (.-count c)))
 "#;
     let output = run_and_get_stdout(code);
-    assert_eq!(output, "3", "Expected 3 after 3 inc! calls, got: {}", output);
+    assert_eq!(
+        output, "3",
+        "Expected 3 after 3 inc! calls, got: {}",
+        output
+    );
 }
 
 #[test]
@@ -531,7 +569,7 @@ fn test_swap_in_function() {
 (def p (Pair. 1 2))
 (do
   (swap! p)
-  (+ (* (.-first p) 10) (.-second p)))
+  (println (+ (* (.-first p) 10) (.-second p))))
 "#;
     let output = run_and_get_stdout(code);
     // After swap: first=2, second=1, so 2*10 + 1 = 21
@@ -549,7 +587,7 @@ fn test_gc_always_basic_mutable() {
 (def b (Box. 42))
 (do
   (set! (.-val b) 100)
-  (.-val b))
+  (println (.-val b)))
 "#;
     let output = run_gc_always_and_get_stdout(code);
     assert_eq!(output, "100", "gc-always: Expected 100, got: {}", output);
@@ -566,7 +604,7 @@ fn test_gc_always_counter() {
   (set! (.-count c) (+ (.-count c) 1))
   (set! (.-count c) (+ (.-count c) 1))
   (set! (.-count c) (+ (.-count c) 1))
-  (.-count c))
+  (println (.-count c)))
 "#;
     let output = run_gc_always_and_get_stdout(code);
     assert_eq!(output, "5", "gc-always: Expected 5, got: {}", output);
@@ -592,10 +630,14 @@ fn test_gc_always_linked_list() {
   (set! (.-next n2) n3)
   (set! (.-next n3) n4)
   (set! (.-next n4) n5)
-  (sum-list n1))
+  (println (sum-list n1)))
 "#;
     let output = run_gc_always_and_get_stdout(code);
-    assert_eq!(output, "150", "gc-always: Expected 150 (10+20+30+40+50), got: {}", output);
+    assert_eq!(
+        output, "150",
+        "gc-always: Expected 150 (10+20+30+40+50), got: {}",
+        output
+    );
 }
 
 #[test]
@@ -609,10 +651,14 @@ fn test_gc_always_linked_list_rewire() {
 (do
   (set! (.-next n1) n2)
   (set! (.-next n1) n3)
-  (.-value (.-next n1)))
+  (println (.-value (.-next n1))))
 "#;
     let output = run_gc_always_and_get_stdout(code);
-    assert_eq!(output, "3", "gc-always: After rewire expected 3, got: {}", output);
+    assert_eq!(
+        output, "3",
+        "gc-always: After rewire expected 3, got: {}",
+        output
+    );
 }
 
 #[test]
@@ -624,7 +670,7 @@ fn test_gc_always_multiple_mutable_fields() {
   (set! (.-x p) 10)
   (set! (.-y p) 20)
   (set! (.-z p) 30)
-  (+ (.-x p) (+ (.-y p) (.-z p))))
+  (println (+ (.-x p) (+ (.-y p) (.-z p)))))
 "#;
     let output = run_gc_always_and_get_stdout(code);
     assert_eq!(output, "60", "gc-always: Expected 60, got: {}", output);
@@ -647,7 +693,7 @@ fn test_gc_always_many_allocations_between_sets() {
   (set! (.-val b) 200)
   (def d6 (Dummy. 16 17 18))
   (set! (.-val b) 300)
-  (.-val b))
+  (println (.-val b)))
 "#;
     let output = run_gc_always_and_get_stdout(code);
     assert_eq!(output, "300", "gc-always: Expected 300, got: {}", output);
@@ -664,7 +710,7 @@ fn test_gc_always_store_new_allocation() {
   (set! (.-next head) (Node. 1 nil))
   (set! (.-next (.-next head)) (Node. 2 nil))
   (set! (.-next (.-next (.-next head))) (Node. 3 nil))
-  (.-value (.-next (.-next (.-next head)))))
+  (println (.-value (.-next (.-next (.-next head))))))
 "#;
     let output = run_gc_always_and_get_stdout(code);
     assert_eq!(output, "3", "gc-always: Expected 3, got: {}", output);
@@ -700,7 +746,7 @@ fn test_gc_always_tree_with_mutable_children() {
   (set! (.-left root) branch1)
   (set! (.-right root) branch2)
 
-  (sum-tree root))
+  (println (sum-tree root)))
 "#;
     let output = run_gc_always_and_get_stdout(code);
     // 100 + 10 + 20 + 1 + 2 + 3 + 4 = 140
@@ -723,7 +769,7 @@ fn test_loop_counter() {
         (set! (.-count c) (+ (.-count c) 1))
         (recur (+ i 1)))
       nil))
-  (.-count c))
+  (println (.-count c)))
 "#;
     let output = run_and_get_stdout(code);
     assert_eq!(output, "10", "Expected 10 after loop, got: {}", output);
@@ -741,10 +787,14 @@ fn test_loop_counter_gc_always() {
         (set! (.-count c) (+ (.-count c) 1))
         (recur (+ i 1)))
       nil))
-  (.-count c))
+  (println (.-count c)))
 "#;
     let output = run_gc_always_and_get_stdout(code);
-    assert_eq!(output, "10", "gc-always: Expected 10 after loop, got: {}", output);
+    assert_eq!(
+        output, "10",
+        "gc-always: Expected 10 after loop, got: {}",
+        output
+    );
 }
 
 #[test]
@@ -767,7 +817,7 @@ fn test_loop_build_linked_list() {
         (set! (.-next prev) new-node)
         (recur (+ i 1) new-node))
       nil))
-  (sum-list head))
+  (println (sum-list head)))
 "#;
     let output = run_and_get_stdout(code);
     // 0 + 1 + 2 + 3 + 4 + 5 = 15
@@ -793,7 +843,7 @@ fn test_loop_build_linked_list_gc_always() {
         (set! (.-next prev) new-node)
         (recur (+ i 1) new-node))
       nil))
-  (sum-list head))
+  (println (sum-list head)))
 "#;
     let output = run_gc_always_and_get_stdout(code);
     // 0 + 1 + 2 + 3 + 4 + 5 = 15
@@ -811,7 +861,7 @@ fn test_set_same_value() {
 (def b (Box. 42))
 (do
   (set! (.-val b) 42)
-  (.-val b))
+  (println (.-val b)))
 "#;
     let output = run_and_get_stdout(code);
     assert_eq!(output, "42", "Expected 42, got: {}", output);
@@ -824,7 +874,7 @@ fn test_set_then_read_multiple_times() {
 (def b (Box. 0))
 (do
   (set! (.-val b) 42)
-  (+ (.-val b) (+ (.-val b) (.-val b))))
+  (println (+ (.-val b) (+ (.-val b) (.-val b)))))
 "#;
     let output = run_and_get_stdout(code);
     assert_eq!(output, "126", "Expected 126 (42*3), got: {}", output);
@@ -842,7 +892,7 @@ fn test_deeply_nested_field_access() {
   (set! (.-inner w1) w2)
   (set! (.-inner w2) w3)
   (set! (.-inner w3) w4)
-  (.-inner (.-inner (.-inner (.-inner w1)))))
+  (println (.-inner (.-inner (.-inner (.-inner w1))))))
 "#;
     let output = run_and_get_stdout(code);
     assert_eq!(output, "42", "Expected 42 at depth 4, got: {}", output);
@@ -858,7 +908,7 @@ fn test_circular_reference() {
 (do
   (set! (.-next n1) n2)
   (set! (.-next n2) n1)
-  (.-value (.-next (.-next n1))))
+  (println (.-value (.-next (.-next n1)))))
 "#;
     let output = run_and_get_stdout(code);
     // n1 -> n2 -> n1, so (.-next (.-next n1)) = n1, value = 1

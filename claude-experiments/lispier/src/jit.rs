@@ -40,11 +40,24 @@ impl Jit {
         registry: &DialectRegistry,
         module: &mut Module,
     ) -> Result<Self, JitError> {
+        Self::with_libraries(registry, module, &[])
+    }
+
+    /// Create a new JIT compiler with shared libraries to link
+    ///
+    /// Library paths can be:
+    /// - Absolute paths to .so/.dylib files
+    /// - Library names that will be searched in standard paths
+    pub fn with_libraries(
+        registry: &DialectRegistry,
+        module: &mut Module,
+        library_paths: &[&str],
+    ) -> Result<Self, JitError> {
         // Lower to LLVM dialect
         Self::lower_to_llvm(registry, module)?;
 
-        // Create execution engine
-        let engine = ExecutionEngine::new(module, 2, &[], false);
+        // Create execution engine with shared libraries
+        let engine = ExecutionEngine::new(module, 2, library_paths, false);
 
         Ok(Self { engine })
     }
@@ -65,7 +78,8 @@ impl Jit {
         // Use pass pipeline with llvm-request-c-wrappers to generate _mlir_ciface_ wrappers
         // This enables invoke_packed to work properly
         // llvm-request-c-wrappers runs on func.func, so it must be nested
-        let pipeline = "builtin.module(func.func(llvm-request-c-wrappers),convert-func-to-llvm,convert-arith-to-llvm,convert-cf-to-llvm,convert-index-to-llvm,finalize-memref-to-llvm,reconcile-unrealized-casts)";
+        // convert-scf-to-cf lowers SCF dialect (scf.if, scf.for, etc.) to CF dialect
+        let pipeline = "builtin.module(func.func(llvm-request-c-wrappers),convert-scf-to-cf,convert-func-to-llvm,convert-arith-to-llvm,convert-cf-to-llvm,convert-index-to-llvm,finalize-memref-to-llvm,reconcile-unrealized-casts)";
 
         parse_pass_pipeline(pm.as_operation_pass_manager(), pipeline)
             .map_err(|e| JitError::PassPipelineFailed(format!("{:?}", e)))?;
@@ -138,6 +152,39 @@ impl Jit {
                 // Also register with _mlir_ciface_ prefix for func dialect compatibility
                 let ciface_name = format!("_mlir_ciface_{}", ffi_fn.name);
                 self.register_symbol(&ciface_name, ffi_fn.ptr);
+            }
+        }
+    }
+
+    /// Register common libc functions with the JIT
+    ///
+    /// This makes functions like `malloc`, `free`, `memcpy`, etc.
+    /// available for calling from compiled code.
+    ///
+    /// # Safety
+    /// Must be called before invoking any function that uses libc symbols.
+    pub unsafe fn register_libc(&self) {
+        let libc_fns: &[(&str, *mut ())] = &[
+            ("malloc", libc::malloc as *mut ()),
+            ("free", libc::free as *mut ()),
+            ("calloc", libc::calloc as *mut ()),
+            ("realloc", libc::realloc as *mut ()),
+            ("memcpy", libc::memcpy as *mut ()),
+            ("memset", libc::memset as *mut ()),
+            ("memmove", libc::memmove as *mut ()),
+            ("strlen", libc::strlen as *mut ()),
+            ("printf", libc::printf as *mut ()),
+            ("puts", libc::puts as *mut ()),
+            ("putchar", libc::putchar as *mut ()),
+            ("exit", libc::exit as *mut ()),
+            ("abort", libc::abort as *mut ()),
+        ];
+
+        for (name, ptr) in libc_fns {
+            unsafe {
+                self.register_symbol(name, *ptr);
+                let ciface_name = format!("_mlir_ciface_{}", name);
+                self.register_symbol(&ciface_name, *ptr);
             }
         }
     }

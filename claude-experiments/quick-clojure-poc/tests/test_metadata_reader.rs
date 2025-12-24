@@ -18,29 +18,35 @@ fn test_metadata_shorthand() {
             Edn::Meta(meta, value) => {
                 println!("  Got Meta! meta={:?}, value={:?}", meta, value);
                 // Metadata is correctly parsed - this is the expected behavior
-                assert!(matches!(value.as_ref(), Edn::Symbol(_)), "Expected symbol after metadata");
+                assert!(
+                    matches!(value.as_ref(), Edn::Symbol(_)),
+                    "Expected symbol after metadata"
+                );
             }
             Edn::Tagged(tag, value) => {
                 println!("  Got Tagged! tag='{}', value={:?}", tag, value);
-                assert_eq!(*tag, "dynamic" , "Expected tag to be 'dynamic'");
+                assert_eq!(*tag, "dynamic", "Expected tag to be 'dynamic'");
             }
             _ => {
-                println!("  Not Tagged or Meta, got variant: {}", match edn {
-                    Edn::Vector(_) => "Vector",
-                    Edn::Set(_) => "Set",
-                    Edn::Map(_) => "Map",
-                    Edn::List(_) => "List",
-                    Edn::Key(_) => "Key",
-                    Edn::Symbol(_) => "Symbol",
-                    Edn::Str(_) => "Str",
-                    Edn::Int(_) => "Int",
-                    Edn::Tagged(_, _) => "Tagged",
-                    Edn::Meta(_, _) => "Meta",
-                    Edn::Char(_) => "Char",
-                    Edn::Bool(_) => "Bool",
-                    Edn::Nil => "Nil",
-                    _ => "Other",
-                });
+                println!(
+                    "  Not Tagged or Meta, got variant: {}",
+                    match edn {
+                        Edn::Vector(_) => "Vector",
+                        Edn::Set(_) => "Set",
+                        Edn::Map(_) => "Map",
+                        Edn::List(_) => "List",
+                        Edn::Key(_) => "Key",
+                        Edn::Symbol(_) => "Symbol",
+                        Edn::Str(_) => "Str",
+                        Edn::Int(_) => "Int",
+                        Edn::Tagged(_, _) => "Tagged",
+                        Edn::Meta(_, _) => "Meta",
+                        Edn::Char(_) => "Char",
+                        Edn::Bool(_) => "Bool",
+                        Edn::Nil => "Nil",
+                        _ => "Other",
+                    }
+                );
                 panic!("Expected Meta or Tagged variant, got something else");
             }
         }

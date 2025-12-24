@@ -1,6 +1,6 @@
 use quick_clojure_poc::*;
-use std::sync::Arc;
 use std::cell::UnsafeCell;
+use std::sync::Arc;
 
 fn main() {
     let code = "(+ (* 2 3) 4)";
@@ -18,7 +18,8 @@ fn main() {
         println!("  {}: {:?}", i, inst);
     }
 
-    let compiled = arm_codegen::Arm64CodeGen::compile_function(&instructions, num_locals, 0).unwrap();
+    let compiled =
+        arm_codegen::Arm64CodeGen::compile_function(&instructions, num_locals, 0).unwrap();
 
     println!("\nGenerated {} ARM64 instructions", compiled.code_len);
 

@@ -15,16 +15,19 @@ struct PDFMetadata: Codable, Identifiable, Hashable {
     let processedAt: String
     let ocr_title: String?
     let ocr_author: String?
+    let preferred_title: String?
+    let preferred_author: String?
+    let preferred_source: String?
 
     // Use path as ID since it's unique, not hash (which can be same in different folders)
     var id: String { path }
 
     var displayTitle: String {
-        ocr_title ?? title ?? fileName.replacingOccurrences(of: "_original.pdf", with: "")
+        preferred_title ?? ocr_title ?? title ?? fileName.replacingOccurrences(of: "_original.pdf", with: "")
     }
 
     var displayAuthor: String {
-        ocr_author ?? author ?? "Unknown"
+        preferred_author ?? ocr_author ?? author ?? "Unknown"
     }
 
     var folder: String {

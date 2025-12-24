@@ -396,6 +396,17 @@ pub fn extract_defmacros(nodes: &[crate::ast::Node]) -> Vec<crate::ast::Defmacro
     defmacros
 }
 
+/// Extract link-library declarations from parsed nodes
+pub fn extract_link_libraries(nodes: &[crate::ast::Node]) -> Vec<crate::ast::LinkLibrary> {
+    let mut libs = Vec::new();
+    for node in nodes {
+        if let crate::ast::Node::LinkLibrary(l) = node {
+            libs.push(l.clone());
+        }
+    }
+    libs
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

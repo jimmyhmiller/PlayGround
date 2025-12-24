@@ -113,7 +113,7 @@ impl BuiltInTypes {
         let is_heap_tagged = match BuiltInTypes::get_kind(value) {
             BuiltInTypes::Int => false,
             BuiltInTypes::Float => true,
-            BuiltInTypes::String => true,  // Strings ARE heap objects that need tracing
+            BuiltInTypes::String => true, // Strings ARE heap objects that need tracing
             BuiltInTypes::Bool => false,
             BuiltInTypes::Function => false,
             BuiltInTypes::Closure => true,
@@ -145,7 +145,7 @@ impl BuiltInTypes {
 pub struct Header {
     pub type_id: u8,
     pub type_data: u32,
-    pub size: u16,  // Changed from u8 to u16 to support objects > 255 words
+    pub size: u16, // Changed from u8 to u16 to support objects > 255 words
     pub opaque: bool,
     pub marked: bool,
 }
@@ -205,7 +205,7 @@ impl Header {
     }
 
     pub fn size_offset() -> usize {
-        1  // Size now starts at byte 1 (bits 8-23)
+        1 // Size now starts at byte 1 (bits 8-23)
     }
 
     /// Get the bit mask for the marked bit

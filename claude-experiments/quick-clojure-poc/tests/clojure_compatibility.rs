@@ -1,11 +1,10 @@
+use std::path::PathBuf;
 /// Integration tests that verify our implementation matches Clojure's behavior
 ///
 /// These tests run expressions through both our JIT compiler and Clojure,
 /// then compare the outputs to ensure compatibility.
-
 use std::process::Command;
 use std::sync::OnceLock;
-use std::path::PathBuf;
 
 static BINARY_PATH: OnceLock<PathBuf> = OnceLock::new();
 
@@ -21,8 +20,7 @@ fn get_binary_path() -> &'static PathBuf {
         assert!(status.success(), "Failed to build release binary");
 
         // Get the path to the binary
-        let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
-            .unwrap_or_else(|_| ".".to_string());
+        let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
         PathBuf::from(manifest_dir).join("target/release/quick-clojure-poc")
     })
 }
@@ -70,7 +68,11 @@ fn assert_matches_clojure(expr: &str) {
     let clojure_output = run_clojure(expr);
 
     // Treat empty output as "nil"
-    let our_normalized = if our_output.is_empty() { "nil" } else { &our_output };
+    let our_normalized = if our_output.is_empty() {
+        "nil"
+    } else {
+        &our_output
+    };
 
     assert_eq!(
         our_normalized, clojure_output,
@@ -303,7 +305,9 @@ fn test_fn_in_let() {
 
 #[test]
 fn test_multiple_fn_calls() {
-    assert_matches_clojure("(let [add1 (fn [x] (+ x 1)) mul2 (fn [x] (* x 2))] (+ (add1 5) (mul2 3)))");
+    assert_matches_clojure(
+        "(let [add1 (fn [x] (+ x 1)) mul2 (fn [x] (* x 2))] (+ (add1 5) (mul2 3)))",
+    );
 }
 
 #[test]
@@ -339,13 +343,17 @@ fn test_deeply_nested_addition() {
 #[test]
 fn test_deeply_nested_let() {
     // Nested lets with many variables in scope
-    assert_matches_clojure("(let [a 1] (let [b 2] (let [c 3] (let [d 4] (let [e 5] (+ a (+ b (+ c (+ d e)))))))))");
+    assert_matches_clojure(
+        "(let [a 1] (let [b 2] (let [c 3] (let [d 4] (let [e 5] (+ a (+ b (+ c (+ d e)))))))))",
+    );
 }
 
 #[test]
 fn test_many_variables_in_let() {
     // Many bindings in single let
-    assert_matches_clojure("(let [a 1 b 2 c 3 d 4 e 5 f 6 g 7 h 8] (+ a (+ b (+ c (+ d (+ e (+ f (+ g h))))))))");
+    assert_matches_clojure(
+        "(let [a 1 b 2 c 3 d 4 e 5 f 6 g 7 h 8] (+ a (+ b (+ c (+ d (+ e (+ f (+ g h))))))))",
+    );
 }
 
 #[test]
@@ -363,13 +371,17 @@ fn test_deeply_nested_arithmetic() {
 #[test]
 fn test_ten_variable_let() {
     // 10 variables in scope simultaneously
-    assert_matches_clojure("(let [v1 1 v2 2 v3 3 v4 4 v5 5 v6 6 v7 7 v8 8 v9 9 v10 10] (+ v1 (+ v2 (+ v3 (+ v4 (+ v5 (+ v6 (+ v7 (+ v8 (+ v9 v10))))))))))");
+    assert_matches_clojure(
+        "(let [v1 1 v2 2 v3 3 v4 4 v5 5 v6 6 v7 7 v8 8 v9 9 v10 10] (+ v1 (+ v2 (+ v3 (+ v4 (+ v5 (+ v6 (+ v7 (+ v8 (+ v9 v10))))))))))",
+    );
 }
 
 #[test]
 fn test_nested_closures_deep() {
     // 5-level deep closure nesting
-    assert_matches_clojure("((((((fn [a] (fn [b] (fn [c] (fn [d] (fn [e] (+ a (+ b (+ c (+ d e))))))))) 1) 2) 3) 4) 5)");
+    assert_matches_clojure(
+        "((((((fn [a] (fn [b] (fn [c] (fn [d] (fn [e] (+ a (+ b (+ c (+ d e))))))))) 1) 2) 3) 4) 5)",
+    );
 }
 
 #[test]
@@ -387,7 +399,9 @@ fn test_many_fn_args() {
 #[test]
 fn test_chained_closures() {
     // Chain of closures each capturing previous value
-    assert_matches_clojure("(let [f1 (fn [x] (+ x 1)) f2 (fn [x] (+ (f1 x) 2)) f3 (fn [x] (+ (f2 x) 3))] (f3 10))")
+    assert_matches_clojure(
+        "(let [f1 (fn [x] (+ x 1)) f2 (fn [x] (+ (f1 x) 2)) f3 (fn [x] (+ (f2 x) 3))] (f3 10))",
+    )
 }
 
 // ============================================================================
@@ -549,13 +563,17 @@ fn test_loop_fibonacci() {
 #[test]
 fn test_loop_with_let() {
     // Loop with let inside
-    assert_matches_clojure("(loop [i 0 acc 0] (if (>= i 5) acc (let [sq (* i i)] (recur (+ i 1) (+ acc sq)))))");
+    assert_matches_clojure(
+        "(loop [i 0 acc 0] (if (>= i 5) acc (let [sq (* i i)] (recur (+ i 1) (+ acc sq)))))",
+    );
 }
 
 #[test]
 fn test_nested_loop() {
     // Simple nested loop: outer 0-2, inner 0-2, count = 9
-    assert_matches_clojure("(loop [outer 0 count 0] (if (>= outer 3) count (recur (+ outer 1) (loop [inner 0 c count] (if (>= inner 3) c (recur (+ inner 1) (+ c 1)))))))");
+    assert_matches_clojure(
+        "(loop [outer 0 count 0] (if (>= outer 3) count (recur (+ outer 1) (loop [inner 0 c count] (if (>= inner 3) c (recur (+ inner 1) (+ c 1)))))))",
+    );
 }
 
 // ============================================================================

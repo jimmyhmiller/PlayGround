@@ -4,10 +4,13 @@
 
 use std::error::Error;
 
-use super::space::{Space, DEFAULT_PAGE_COUNT};
+use super::space::{DEFAULT_PAGE_COUNT, Space};
 use super::stack_walker::StackWalker;
 use super::types::{BuiltInTypes, HeapObject, Word};
-use super::{AllocateAction, Allocator, AllocatorOptions, StackMap, HeapInspector, DetailedHeapStats, type_id_to_name};
+use super::{
+    AllocateAction, Allocator, AllocatorOptions, DetailedHeapStats, HeapInspector, StackMap,
+    type_id_to_name,
+};
 
 /// Free list entry
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
@@ -386,7 +389,11 @@ impl<'a> Iterator for LiveObjectIterator<'a> {
 
 impl HeapInspector for MarkAndSweep {
     fn iter_objects(&self) -> Box<dyn Iterator<Item = HeapObject> + '_> {
-        Box::new(LiveObjectIterator::new(&self.space, &self.free_list, self.space.highmark))
+        Box::new(LiveObjectIterator::new(
+            &self.space,
+            &self.free_list,
+            self.space.highmark,
+        ))
     }
 
     fn detailed_stats(&self) -> DetailedHeapStats {
@@ -415,7 +422,13 @@ impl HeapInspector for MarkAndSweep {
         // Free list stats
         let free_list_entries = self.free_list.ranges.len();
         let free_bytes: usize = self.free_list.ranges.iter().map(|e| e.size).sum();
-        let largest_free_block = self.free_list.ranges.iter().map(|e| e.size).max().unwrap_or(0);
+        let largest_free_block = self
+            .free_list
+            .ranges
+            .iter()
+            .map(|e| e.size)
+            .max()
+            .unwrap_or(0);
 
         DetailedHeapStats {
             gc_algorithm: "mark-and-sweep",

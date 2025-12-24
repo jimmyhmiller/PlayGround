@@ -5,8 +5,8 @@
 // This was a significant bug that caused crashes due to temp register clobbering.
 
 use quick_clojure_poc::*;
-use std::sync::Arc;
 use std::cell::UnsafeCell;
+use std::sync::Arc;
 
 /// Helper to load clojure.core into the compiler/runtime
 fn load_core(compiler: &mut compiler::Compiler, _runtime: &Arc<UnsafeCell<gc_runtime::GCRuntime>>) {
@@ -33,7 +33,9 @@ fn load_core(compiler: &mut compiler::Compiler, _runtime: &Arc<UnsafeCell<gc_run
                     let instructions = compiler.take_instructions();
                     let num_locals = compiler.builder.num_locals;
 
-                    if let Ok(compiled) = arm_codegen::Arm64CodeGen::compile_function(&instructions, num_locals, 0) {
+                    if let Ok(compiled) =
+                        arm_codegen::Arm64CodeGen::compile_function(&instructions, num_locals, 0)
+                    {
                         let tramp = trampoline::Trampoline::new(64 * 1024);
                         let _ = unsafe { tramp.execute(compiled.code_ptr as *const u8) };
                     }
@@ -56,7 +58,9 @@ fn run_and_get_tagged(code: &str) -> i64 {
     let val = reader::read(code).expect(&format!("Failed to read: {}", code));
     let ast = clojure_ast::analyze(&val).expect(&format!("Failed to analyze: {}", code));
 
-    compiler.compile_toplevel(&ast).expect(&format!("Compiler failed for: {}", code));
+    compiler
+        .compile_toplevel(&ast)
+        .expect(&format!("Compiler failed for: {}", code));
     let instructions = compiler.take_instructions();
     let num_locals = compiler.builder.num_locals;
 
@@ -71,7 +75,12 @@ fn run_expect_list(code: &str) {
     let result = run_and_get_tagged(code);
     // Heap objects have tags 5 (closure/list) or 6 (other heap objects)
     let tag = result & 0b111;
-    assert!(tag == 5 || tag == 6, "Expected heap object (tag 5 or 6), got tag {} for: {}", tag, code);
+    assert!(
+        tag == 5 || tag == 6,
+        "Expected heap object (tag 5 or 6), got tag {} for: {}",
+        tag,
+        code
+    );
 }
 
 /// Helper to check that code returns a specific integer
@@ -79,9 +88,17 @@ fn run_expect_int(code: &str, expected: i64) {
     let result = run_and_get_tagged(code);
     // Integers have tag 0b000, value is shifted left by 3
     let tag = result & 0b111;
-    assert_eq!(tag, 0, "Expected integer (tag 0), got tag {} for: {}", tag, code);
+    assert_eq!(
+        tag, 0,
+        "Expected integer (tag 0), got tag {} for: {}",
+        tag, code
+    );
     let value = result >> 3;
-    assert_eq!(value, expected, "Expected {}, got {} for: {}", expected, value, code);
+    assert_eq!(
+        value, expected,
+        "Expected {}, got {} for: {}",
+        expected, value, code
+    );
 }
 
 // =============================================================================
@@ -106,7 +123,10 @@ fn test_first_of_conj() {
 #[test]
 fn test_first_of_nested_conj() {
     // conj prepends, so first should be 4
-    run_expect_int("(first (-conj (-conj (-conj (-conj (-conj EMPTY-LIST 0) 1) 2) 3) 4))", 4);
+    run_expect_int(
+        "(first (-conj (-conj (-conj (-conj (-conj EMPTY-LIST 0) 1) 2) 3) 4))",
+        4,
+    );
 }
 
 // =============================================================================

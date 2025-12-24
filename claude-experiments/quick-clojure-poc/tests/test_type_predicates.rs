@@ -8,8 +8,8 @@
 // ✅ identical? - raw pointer/value comparison
 
 use quick_clojure_poc::*;
-use std::sync::Arc;
 use std::cell::UnsafeCell;
+use std::sync::Arc;
 
 /// Helper function to run a test case and return the raw tagged result
 fn run_and_get_tagged(code: &str) -> i64 {
@@ -19,7 +19,9 @@ fn run_and_get_tagged(code: &str) -> i64 {
     let runtime = Arc::new(UnsafeCell::new(gc_runtime::GCRuntime::new()));
     trampoline::set_runtime(runtime.clone());
     let mut compiler = compiler::Compiler::new(runtime.clone());
-    compiler.compile_toplevel(&ast).expect(&format!("Compiler failed for: {}", code));
+    compiler
+        .compile_toplevel(&ast)
+        .expect(&format!("Compiler failed for: {}", code));
     let instructions = compiler.take_instructions();
     let num_locals = compiler.builder.num_locals;
 
@@ -33,14 +35,22 @@ fn run_and_get_tagged(code: &str) -> i64 {
 fn run_test_true(code: &str) {
     let tagged_result = run_and_get_tagged(code);
     // true is 11 (0b1011)
-    assert_eq!(tagged_result, 11, "Expected true (11), got {} for: {}", tagged_result, code);
+    assert_eq!(
+        tagged_result, 11,
+        "Expected true (11), got {} for: {}",
+        tagged_result, code
+    );
 }
 
 /// Helper function to run a test case expecting a boolean false result
 fn run_test_false(code: &str) {
     let tagged_result = run_and_get_tagged(code);
     // false is 3 (0b0011)
-    assert_eq!(tagged_result, 3, "Expected false (3), got {} for: {}", tagged_result, code);
+    assert_eq!(
+        tagged_result, 3,
+        "Expected false (3), got {} for: {}",
+        tagged_result, code
+    );
 }
 
 // =============================================================================

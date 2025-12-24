@@ -7,10 +7,13 @@
 use std::error::Error;
 
 use super::mark_and_sweep::MarkAndSweep;
-use super::space::{Space, DEFAULT_PAGE_COUNT};
+use super::space::{DEFAULT_PAGE_COUNT, Space};
 use super::stack_walker::StackWalker;
 use super::types::{BuiltInTypes, HeapObject, Word};
-use super::{AllocateAction, Allocator, AllocatorOptions, StackMap, HeapInspector, DetailedHeapStats, type_id_to_name};
+use super::{
+    AllocateAction, Allocator, AllocatorOptions, DetailedHeapStats, HeapInspector, StackMap,
+    type_id_to_name,
+};
 
 /// Generational garbage collector
 pub struct GenerationalGC {

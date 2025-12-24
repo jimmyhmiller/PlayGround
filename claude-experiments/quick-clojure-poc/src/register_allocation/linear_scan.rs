@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 use std::collections::{BTreeMap, HashMap};
 
-use crate::ir::{Instruction, IrValue, VirtualRegister};
+use crate::ir::{CallTarget, Instruction, IrValue, VirtualRegister};
 
 /// Linear scan register allocator
 ///
@@ -49,12 +49,15 @@ impl LinearScan {
         let lifetimes = Self::compute_lifetimes(&instructions);
 
         // Determine number of registers to use
-        let max_registers = if max_registers == 0 { 10 } else { max_registers };
+        let max_registers = if max_registers == 0 {
+            10
+        } else {
+            max_registers
+        };
 
         // Use ARM64 registers x19-x28 (preserved via CallWithSaves, not prologue)
-        let physical_registers: Vec<VirtualRegister> = (19..(19 + max_registers))
-            .map(physical)
-            .collect();
+        let physical_registers: Vec<VirtualRegister> =
+            (19..(19 + max_registers)).map(physical).collect();
 
         LinearScan {
             lifetimes,
@@ -63,7 +66,7 @@ impl LinearScan {
             free_registers: physical_registers,
             max_registers,
             spill_locations: HashMap::new(),
-            next_stack_slot: 0,  // Start stack slots at 0
+            next_stack_slot: 0, // Start stack slots at 0
             result_register: None,
         }
     }
@@ -87,9 +90,7 @@ impl LinearScan {
     /// A register's lifetime is from its first definition to its last use.
     /// Special handling for loops: registers used within a loop body must have
     /// their lifetime extended to cover the entire loop (including back edges).
-    fn compute_lifetimes(
-        instructions: &[Instruction],
-    ) -> HashMap<VirtualRegister, (usize, usize)> {
+    fn compute_lifetimes(instructions: &[Instruction]) -> HashMap<VirtualRegister, (usize, usize)> {
         let mut result: HashMap<VirtualRegister, (usize, usize)> = HashMap::new();
 
         // Scan backwards to find first definition and last use
@@ -124,9 +125,10 @@ impl LinearScan {
         for (jump_idx, instruction) in instructions.iter().enumerate() {
             if let Instruction::Jump(label) = instruction {
                 // Find the target label index
-                if let Some(label_idx) = instructions.iter().position(|instr| {
-                    matches!(instr, Instruction::Label(l) if l == label)
-                }) {
+                if let Some(label_idx) = instructions
+                    .iter()
+                    .position(|instr| matches!(instr, Instruction::Label(l) if l == label))
+                {
                     // Only process back-edges (jumps to earlier labels = loops)
                     if label_idx < jump_idx {
                         // Extend lifetime of any register used between label and jump
@@ -164,9 +166,15 @@ impl LinearScan {
             | Instruction::BitShiftLeft(dst, src1, src2)
             | Instruction::BitShiftRight(dst, src1, src2)
             | Instruction::UnsignedBitShiftRight(dst, src1, src2) => {
-                if let IrValue::Register(r) = dst { regs.push(*r); }
-                if let IrValue::Register(r) = src1 { regs.push(*r); }
-                if let IrValue::Register(r) = src2 { regs.push(*r); }
+                if let IrValue::Register(r) = dst {
+                    regs.push(*r);
+                }
+                if let IrValue::Register(r) = src1 {
+                    regs.push(*r);
+                }
+                if let IrValue::Register(r) = src2 {
+                    regs.push(*r);
+                }
             }
 
             Instruction::IntToFloat(dst, src)
@@ -175,69 +183,107 @@ impl LinearScan {
             | Instruction::AllocateFloat(dst, src)
             | Instruction::BitNot(dst, src)
             | Instruction::Untag(dst, src) => {
-                if let IrValue::Register(r) = dst { regs.push(*r); }
-                if let IrValue::Register(r) = src { regs.push(*r); }
+                if let IrValue::Register(r) = dst {
+                    regs.push(*r);
+                }
+                if let IrValue::Register(r) = src {
+                    regs.push(*r);
+                }
             }
 
             // Immediate operations (dst, src, immediate)
-            Instruction::AndImm(dst, src, _)
-            | Instruction::ShiftRightImm(dst, src, _) => {
-                if let IrValue::Register(r) = dst { regs.push(*r); }
-                if let IrValue::Register(r) = src { regs.push(*r); }
+            Instruction::AndImm(dst, src, _) | Instruction::ShiftRightImm(dst, src, _) => {
+                if let IrValue::Register(r) = dst {
+                    regs.push(*r);
+                }
+                if let IrValue::Register(r) = src {
+                    regs.push(*r);
+                }
             }
 
             // Heap access (dst, ptr, offset)
-            Instruction::HeapLoad(dst, ptr, _)
-            | Instruction::LoadByte(dst, ptr, _) => {
-                if let IrValue::Register(r) = dst { regs.push(*r); }
-                if let IrValue::Register(r) = ptr { regs.push(*r); }
+            Instruction::HeapLoad(dst, ptr, _) | Instruction::LoadByte(dst, ptr, _) => {
+                if let IrValue::Register(r) = dst {
+                    regs.push(*r);
+                }
+                if let IrValue::Register(r) = ptr {
+                    regs.push(*r);
+                }
             }
 
             Instruction::HeapStore(ptr, _, value) => {
-                if let IrValue::Register(r) = ptr { regs.push(*r); }
-                if let IrValue::Register(r) = value { regs.push(*r); }
+                if let IrValue::Register(r) = ptr {
+                    regs.push(*r);
+                }
+                if let IrValue::Register(r) = value {
+                    regs.push(*r);
+                }
             }
 
             Instruction::Compare(dst, src1, src2, _) => {
-                if let IrValue::Register(r) = dst { regs.push(*r); }
-                if let IrValue::Register(r) = src1 { regs.push(*r); }
-                if let IrValue::Register(r) = src2 { regs.push(*r); }
+                if let IrValue::Register(r) = dst {
+                    regs.push(*r);
+                }
+                if let IrValue::Register(r) = src1 {
+                    regs.push(*r);
+                }
+                if let IrValue::Register(r) = src2 {
+                    regs.push(*r);
+                }
             }
 
             // InstanceCheck(dst, type_id, value) - type_id is a constant, not a register
             Instruction::InstanceCheck(dst, _, value) => {
-                if let IrValue::Register(r) = dst { regs.push(*r); }
-                if let IrValue::Register(r) = value { regs.push(*r); }
+                if let IrValue::Register(r) = dst {
+                    regs.push(*r);
+                }
+                if let IrValue::Register(r) = value {
+                    regs.push(*r);
+                }
             }
 
             Instruction::Tag(dst, src, _tag) => {
-                if let IrValue::Register(r) = dst { regs.push(*r); }
-                if let IrValue::Register(r) = src { regs.push(*r); }
+                if let IrValue::Register(r) = dst {
+                    regs.push(*r);
+                }
+                if let IrValue::Register(r) = src {
+                    regs.push(*r);
+                }
             }
 
             // Note: Untag is handled above with the other dst/src instructions
-
             Instruction::LoadConstant(dst, _)
             | Instruction::LoadTrue(dst)
             | Instruction::LoadFalse(dst) => {
-                if let IrValue::Register(r) = dst { regs.push(*r); }
+                if let IrValue::Register(r) = dst {
+                    regs.push(*r);
+                }
             }
 
             // Note: LoadVarBySymbol, LoadVarBySymbolDynamic, StoreVarBySymbol, EnsureVarBySymbol,
             // and LoadKeyword are now builtin function calls handled by Call instruction
-
             Instruction::Assign(dst, src) => {
-                if let IrValue::Register(r) = dst { regs.push(*r); }
-                if let IrValue::Register(r) = src { regs.push(*r); }
+                if let IrValue::Register(r) = dst {
+                    regs.push(*r);
+                }
+                if let IrValue::Register(r) = src {
+                    regs.push(*r);
+                }
             }
 
             Instruction::JumpIf(_, _, val1, val2) => {
-                if let IrValue::Register(r) = val1 { regs.push(*r); }
-                if let IrValue::Register(r) = val2 { regs.push(*r); }
+                if let IrValue::Register(r) = val1 {
+                    regs.push(*r);
+                }
+                if let IrValue::Register(r) = val2 {
+                    regs.push(*r);
+                }
             }
 
             Instruction::Ret(val) => {
-                if let IrValue::Register(r) = val { regs.push(*r); }
+                if let IrValue::Register(r) = val {
+                    regs.push(*r);
+                }
             }
 
             Instruction::Label(_) | Instruction::Jump(_) => {
@@ -245,72 +291,114 @@ impl LinearScan {
             }
 
             Instruction::PushBinding(var_ptr, value) => {
-                if let IrValue::Register(r) = var_ptr { regs.push(*r); }
-                if let IrValue::Register(r) = value { regs.push(*r); }
+                if let IrValue::Register(r) = var_ptr {
+                    regs.push(*r);
+                }
+                if let IrValue::Register(r) = value {
+                    regs.push(*r);
+                }
             }
 
             Instruction::PopBinding(var_ptr) => {
-                if let IrValue::Register(r) = var_ptr { regs.push(*r); }
+                if let IrValue::Register(r) = var_ptr {
+                    regs.push(*r);
+                }
             }
 
             Instruction::SetVar(var_ptr, value) => {
-                if let IrValue::Register(r) = var_ptr { regs.push(*r); }
-                if let IrValue::Register(r) = value { regs.push(*r); }
+                if let IrValue::Register(r) = var_ptr {
+                    regs.push(*r);
+                }
+                if let IrValue::Register(r) = value {
+                    regs.push(*r);
+                }
             }
 
             Instruction::MakeFunctionPtr(dst, _code_ptr, closure_values) => {
-                if let IrValue::Register(r) = dst { regs.push(*r); }
+                if let IrValue::Register(r) = dst {
+                    regs.push(*r);
+                }
                 for val in closure_values {
-                    if let IrValue::Register(r) = val { regs.push(*r); }
+                    if let IrValue::Register(r) = val {
+                        regs.push(*r);
+                    }
                 }
             }
 
             Instruction::LoadClosure(dst, fn_obj, _index) => {
-                if let IrValue::Register(r) = dst { regs.push(*r); }
-                if let IrValue::Register(r) = fn_obj { regs.push(*r); }
+                if let IrValue::Register(r) = dst {
+                    regs.push(*r);
+                }
+                if let IrValue::Register(r) = fn_obj {
+                    regs.push(*r);
+                }
             }
 
             Instruction::Call(dst, fn_val, args) => {
-                if let IrValue::Register(r) = dst { regs.push(*r); }
-                if let IrValue::Register(r) = fn_val { regs.push(*r); }
+                if let IrValue::Register(r) = dst {
+                    regs.push(*r);
+                }
+                if let IrValue::Register(r) = fn_val {
+                    regs.push(*r);
+                }
                 for arg in args {
-                    if let IrValue::Register(r) = arg { regs.push(*r); }
+                    if let IrValue::Register(r) = arg {
+                        regs.push(*r);
+                    }
                 }
             }
 
-            Instruction::CallWithSaves(dst, fn_val, args, saves) => {
-                if let IrValue::Register(r) = dst { regs.push(*r); }
-                if let IrValue::Register(r) = fn_val { regs.push(*r); }
+            Instruction::CallWithSaves(dst, target, args, saves) => {
+                if let IrValue::Register(r) = dst {
+                    regs.push(*r);
+                }
+                // Extract registers from CallTarget
+                match target {
+                    CallTarget::External(_) => {} // No registers in address
+                    CallTarget::Direct(code_ptr, _, arg_count_reg) => {
+                        if let IrValue::Register(r) = code_ptr {
+                            regs.push(*r);
+                        }
+                        if let Some(ac) = arg_count_reg {
+                            if let IrValue::Register(r) = ac {
+                                regs.push(*r);
+                            }
+                        }
+                    }
+                    CallTarget::Dynamic(fn_val) => {
+                        if let IrValue::Register(r) = fn_val {
+                            regs.push(*r);
+                        }
+                    }
+                }
                 for arg in args {
-                    if let IrValue::Register(r) = arg { regs.push(*r); }
+                    if let IrValue::Register(r) = arg {
+                        regs.push(*r);
+                    }
                 }
                 for save in saves {
-                    if let IrValue::Register(r) = save { regs.push(*r); }
+                    if let IrValue::Register(r) = save {
+                        regs.push(*r);
+                    }
                 }
             }
 
             Instruction::CallDirect(dst, code_ptr, args, _is_closure, arg_count_reg) => {
-                if let IrValue::Register(r) = dst { regs.push(*r); }
-                if let IrValue::Register(r) = code_ptr { regs.push(*r); }
+                if let IrValue::Register(r) = dst {
+                    regs.push(*r);
+                }
+                if let IrValue::Register(r) = code_ptr {
+                    regs.push(*r);
+                }
                 for arg in args {
-                    if let IrValue::Register(r) = arg { regs.push(*r); }
+                    if let IrValue::Register(r) = arg {
+                        regs.push(*r);
+                    }
                 }
                 if let Some(ac) = arg_count_reg {
-                    if let IrValue::Register(r) = ac { regs.push(*r); }
-                }
-            }
-
-            Instruction::CallDirectWithSaves(dst, code_ptr, args, _is_closure, arg_count_reg, saves) => {
-                if let IrValue::Register(r) = dst { regs.push(*r); }
-                if let IrValue::Register(r) = code_ptr { regs.push(*r); }
-                for arg in args {
-                    if let IrValue::Register(r) = arg { regs.push(*r); }
-                }
-                if let Some(ac) = arg_count_reg {
-                    if let IrValue::Register(r) = ac { regs.push(*r); }
-                }
-                for save in saves {
-                    if let IrValue::Register(r) = save { regs.push(*r); }
+                    if let IrValue::Register(r) = ac {
+                        regs.push(*r);
+                    }
                 }
             }
 
@@ -319,19 +407,21 @@ impl LinearScan {
 
             // NOTE: LoadTypeField and StoreTypeField have been refactored out.
             // Field access now uses ExternalCall with pre-interned symbol IDs.
-
             Instruction::GcAddRoot(obj) => {
-                if let IrValue::Register(r) = obj { regs.push(*r); }
+                if let IrValue::Register(r) = obj {
+                    regs.push(*r);
+                }
             }
 
             Instruction::CallGC(dst) => {
-                if let IrValue::Register(r) = dst { regs.push(*r); }
+                if let IrValue::Register(r) = dst {
+                    regs.push(*r);
+                }
             }
 
             // NOTE: Println removed - now uses ExternalCall
 
             // Note: LoadKeyword is now a builtin function call handled by Call instruction
-
             Instruction::PushExceptionHandler(_label, _slot) => {
                 // No registers - uses pre-allocated stack slot
             }
@@ -341,60 +431,74 @@ impl LinearScan {
             }
 
             Instruction::Throw(exc) => {
-                if let IrValue::Register(r) = exc { regs.push(*r); }
+                if let IrValue::Register(r) = exc {
+                    regs.push(*r);
+                }
             }
 
             Instruction::LoadExceptionLocal(dest, _label) => {
-                if let IrValue::Register(r) = dest { regs.push(*r); }
+                if let IrValue::Register(r) = dest {
+                    regs.push(*r);
+                }
             }
 
             // Protocol system instructions
             Instruction::RegisterProtocolMethod(_type_id, _protocol_id, _method_index, fn_ptr) => {
-                if let IrValue::Register(r) = fn_ptr { regs.push(*r); }
+                if let IrValue::Register(r) = fn_ptr {
+                    regs.push(*r);
+                }
             }
 
-            // External calls (trampolines)
+            // External calls (trampolines) - transformed to CallWithSaves by register allocator
             Instruction::ExternalCall(dst, _func_addr, args) => {
-                if let IrValue::Register(r) = dst { regs.push(*r); }
-                for arg in args {
-                    if let IrValue::Register(r) = arg { regs.push(*r); }
+                if let IrValue::Register(r) = dst {
+                    regs.push(*r);
                 }
-            }
-
-            Instruction::ExternalCallWithSaves(dst, _func_addr, args, saves) => {
-                if let IrValue::Register(r) = dst { regs.push(*r); }
                 for arg in args {
-                    if let IrValue::Register(r) = arg { regs.push(*r); }
-                }
-                for save in saves {
-                    if let IrValue::Register(r) = save { regs.push(*r); }
+                    if let IrValue::Register(r) = arg {
+                        regs.push(*r);
+                    }
                 }
             }
 
             // Multi-arity function instructions
             Instruction::MakeMultiArityFn(dst, _arities, _variadic_min, closure_values) => {
-                if let IrValue::Register(r) = dst { regs.push(*r); }
+                if let IrValue::Register(r) = dst {
+                    regs.push(*r);
+                }
                 for val in closure_values {
-                    if let IrValue::Register(r) = val { regs.push(*r); }
+                    if let IrValue::Register(r) = val {
+                        regs.push(*r);
+                    }
                 }
             }
 
             Instruction::LoadClosureMultiArity(dst, fn_obj, _arity_count, _index) => {
-                if let IrValue::Register(r) = dst { regs.push(*r); }
-                if let IrValue::Register(r) = fn_obj { regs.push(*r); }
+                if let IrValue::Register(r) = dst {
+                    regs.push(*r);
+                }
+                if let IrValue::Register(r) = fn_obj {
+                    regs.push(*r);
+                }
             }
 
             Instruction::CollectRestArgs(dst, _fixed_count, _param_offset) => {
-                if let IrValue::Register(r) = dst { regs.push(*r); }
+                if let IrValue::Register(r) = dst {
+                    regs.push(*r);
+                }
             }
 
             // Assertion instructions
             Instruction::AssertPre(cond, _index) => {
-                if let IrValue::Register(r) = cond { regs.push(*r); }
+                if let IrValue::Register(r) = cond {
+                    regs.push(*r);
+                }
             }
 
             Instruction::AssertPost(cond, _index) => {
-                if let IrValue::Register(r) = cond { regs.push(*r); }
+                if let IrValue::Register(r) = cond {
+                    regs.push(*r);
+                }
             }
 
             // Debug instruction - no registers
@@ -402,10 +506,14 @@ impl LinearScan {
 
             // Local variable operations - StoreLocal stores to stack, LoadLocal loads from stack
             Instruction::StoreLocal(_slot, value) => {
-                if let IrValue::Register(r) = value { regs.push(*r); }
+                if let IrValue::Register(r) = value {
+                    regs.push(*r);
+                }
             }
             Instruction::LoadLocal(dst, _slot) => {
-                if let IrValue::Register(r) = dst { regs.push(*r); }
+                if let IrValue::Register(r) = dst {
+                    regs.push(*r);
+                }
             }
         }
 
@@ -455,7 +563,7 @@ impl LinearScan {
         let mut intervals: Vec<(usize, usize, VirtualRegister)> = self
             .lifetimes
             .iter()
-            .filter(|(vreg, _)| !matches!(vreg, VirtualRegister::Argument(_)))  // Skip argument registers - already allocated
+            .filter(|(vreg, _)| !matches!(vreg, VirtualRegister::Argument(_))) // Skip argument registers - already allocated
             .map(|(register, (start, end))| (*start, *end, *register))
             .collect();
 
@@ -481,7 +589,11 @@ impl LinearScan {
                     active.sort_by_key(|(_, end, _)| *end);
                 } else {
                     // This shouldn't happen if active.len() < max_registers
-                    panic!("No free registers available! active={}, max={}", active.len(), self.max_registers);
+                    panic!(
+                        "No free registers available! active={}, max={}",
+                        active.len(),
+                        self.max_registers
+                    );
                 }
             }
         }
@@ -528,9 +640,10 @@ impl LinearScan {
     ) {
         let replace = |val: &mut IrValue| {
             if let IrValue::Register(vreg) = val
-                && let Some(&stack_offset) = spill_locations.get(vreg) {
-                    *val = IrValue::Spill(*vreg, stack_offset);
-                }
+                && let Some(&stack_offset) = spill_locations.get(vreg)
+            {
+                *val = IrValue::Spill(*vreg, stack_offset);
+            }
         };
 
         match inst {
@@ -581,15 +694,13 @@ impl LinearScan {
             }
 
             // Immediate operations (dst, src, imm)
-            Instruction::AndImm(dst, src, _)
-            | Instruction::ShiftRightImm(dst, src, _) => {
+            Instruction::AndImm(dst, src, _) | Instruction::ShiftRightImm(dst, src, _) => {
                 replace(dst);
                 replace(src);
             }
 
             // Heap access (dst, ptr, offset)
-            Instruction::HeapLoad(dst, ptr, _)
-            | Instruction::LoadByte(dst, ptr, _) => {
+            Instruction::HeapLoad(dst, ptr, _) | Instruction::LoadByte(dst, ptr, _) => {
                 replace(dst);
                 replace(ptr);
             }
@@ -607,7 +718,6 @@ impl LinearScan {
 
             // Note: LoadVarBySymbol, LoadVarBySymbolDynamic, StoreVarBySymbol, EnsureVarBySymbol,
             // and LoadKeyword are now builtin function calls handled by Call instruction
-
             Instruction::Assign(dst, src) => {
                 replace(dst);
                 replace(src);
@@ -660,9 +770,21 @@ impl LinearScan {
                 }
             }
 
-            Instruction::CallWithSaves(dst, fn_val, args, saves) => {
+            Instruction::CallWithSaves(dst, target, args, saves) => {
                 replace(dst);
-                replace(fn_val);
+                // Replace registers in CallTarget
+                match target {
+                    CallTarget::External(_) => {} // No registers in address
+                    CallTarget::Direct(code_ptr, _, arg_count_reg) => {
+                        replace(code_ptr);
+                        if let Some(ac) = arg_count_reg {
+                            replace(ac);
+                        }
+                    }
+                    CallTarget::Dynamic(fn_val) => {
+                        replace(fn_val);
+                    }
+                }
                 for arg in args {
                     replace(arg);
                 }
@@ -682,23 +804,8 @@ impl LinearScan {
                 }
             }
 
-            Instruction::CallDirectWithSaves(dst, code_ptr, args, _is_closure, arg_count_reg, saves) => {
-                replace(dst);
-                replace(code_ptr);
-                for arg in args {
-                    replace(arg);
-                }
-                if let Some(ac) = arg_count_reg {
-                    replace(ac);
-                }
-                for save in saves {
-                    replace(save);
-                }
-            }
-
             // NOTE: MakeType/MakeTypeWithSaves removed - now use ExternalCall + HeapStore + Tag
             // NOTE: LoadTypeField/StoreTypeField removed - now use ExternalCall with symbol IDs
-
             Instruction::GcAddRoot(obj) => {
                 replace(obj);
             }
@@ -710,7 +817,6 @@ impl LinearScan {
             // NOTE: Println removed - now uses ExternalCall
 
             // Note: LoadKeyword is now a builtin function call handled by Call instruction
-
             Instruction::PushExceptionHandler(_label, _slot) => {
                 // No registers - uses pre-allocated stack slot
             }
@@ -737,16 +843,6 @@ impl LinearScan {
                 replace(dst);
                 for arg in args {
                     replace(arg);
-                }
-            }
-
-            Instruction::ExternalCallWithSaves(dst, _func_addr, args, saves) => {
-                replace(dst);
-                for arg in args {
-                    replace(arg);
-                }
-                for save in saves {
-                    replace(save);
                 }
             }
 
@@ -848,7 +944,9 @@ impl LinearScan {
             if current_is_result {
                 // Can't spill the result register - this is a register allocation failure
                 // In practice, we should try to spill something else or increase register count
-                panic!("Cannot allocate result register: all physical registers are in use by protected registers");
+                panic!(
+                    "Cannot allocate result register: all physical registers are in use by protected registers"
+                );
             }
             // Spill current interval instead
             let stack_slot = self.allocate_stack_slot();
@@ -910,7 +1008,7 @@ impl LinearScan {
                 // The allocator maps Argument(n) -> Temp(n), but Temp(n) might be a virtual register
                 // with a different allocation, causing wrong physical register lookups.
                 if matches!(vreg, VirtualRegister::Argument(_)) {
-                    return;  // Keep Argument registers as-is
+                    return; // Keep Argument registers as-is
                 }
                 if let Some(&physical) = allocation.get(vreg) {
                     *val = IrValue::Register(physical);
@@ -966,15 +1064,13 @@ impl LinearScan {
             }
 
             // Immediate operations (dst, src, imm)
-            Instruction::AndImm(dst, src, _)
-            | Instruction::ShiftRightImm(dst, src, _) => {
+            Instruction::AndImm(dst, src, _) | Instruction::ShiftRightImm(dst, src, _) => {
                 replace(dst);
                 replace(src);
             }
 
             // Heap access (dst, ptr, offset)
-            Instruction::HeapLoad(dst, ptr, _)
-            | Instruction::LoadByte(dst, ptr, _) => {
+            Instruction::HeapLoad(dst, ptr, _) | Instruction::LoadByte(dst, ptr, _) => {
                 replace(dst);
                 replace(ptr);
             }
@@ -992,7 +1088,6 @@ impl LinearScan {
 
             // Note: LoadVarBySymbol, LoadVarBySymbolDynamic, StoreVarBySymbol, EnsureVarBySymbol,
             // and LoadKeyword are now builtin function calls handled by Call instruction
-
             Instruction::Assign(dst, src) => {
                 replace(dst);
                 replace(src);
@@ -1045,9 +1140,21 @@ impl LinearScan {
                 }
             }
 
-            Instruction::CallWithSaves(dst, fn_val, args, saves) => {
+            Instruction::CallWithSaves(dst, target, args, saves) => {
                 replace(dst);
-                replace(fn_val);
+                // Replace registers in CallTarget
+                match target {
+                    CallTarget::External(_) => {} // No registers in address
+                    CallTarget::Direct(code_ptr, _, arg_count_reg) => {
+                        replace(code_ptr);
+                        if let Some(ac) = arg_count_reg {
+                            replace(ac);
+                        }
+                    }
+                    CallTarget::Dynamic(fn_val) => {
+                        replace(fn_val);
+                    }
+                }
                 for arg in args {
                     replace(arg);
                 }
@@ -1067,23 +1174,8 @@ impl LinearScan {
                 }
             }
 
-            Instruction::CallDirectWithSaves(dst, code_ptr, args, _is_closure, arg_count_reg, saves) => {
-                replace(dst);
-                replace(code_ptr);
-                for arg in args {
-                    replace(arg);
-                }
-                if let Some(ac) = arg_count_reg {
-                    replace(ac);
-                }
-                for save in saves {
-                    replace(save);
-                }
-            }
-
             // NOTE: MakeType/MakeTypeWithSaves removed - now use ExternalCall + HeapStore + Tag
             // NOTE: LoadTypeField/StoreTypeField removed - now use ExternalCall with symbol IDs
-
             Instruction::GcAddRoot(obj) => {
                 replace(obj);
             }
@@ -1095,7 +1187,6 @@ impl LinearScan {
             // NOTE: Println removed - now uses ExternalCall
 
             // Note: LoadKeyword is now a builtin function call handled by Call instruction
-
             Instruction::PushExceptionHandler(_label, _slot) => {
                 // No registers - uses pre-allocated stack slot
             }
@@ -1122,16 +1213,6 @@ impl LinearScan {
                 replace(dst);
                 for arg in args {
                     replace(arg);
-                }
-            }
-
-            Instruction::ExternalCallWithSaves(dst, _func_addr, args, saves) => {
-                replace(dst);
-                for arg in args {
-                    replace(arg);
-                }
-                for save in saves {
-                    replace(save);
                 }
             }
 
@@ -1177,13 +1258,14 @@ impl LinearScan {
     /// Transform Call and ExternalCall instructions to their WithSaves variants
     ///
     /// This analyzes which registers are live across each call site and generates
-    /// CallWithSaves/ExternalCallWithSaves instructions with explicit register preservation.
+    /// CallWithSaves instructions with explicit register preservation.
     /// NOTE: Recur is no longer handled here - it's lowered to Assign + Jump in the compiler.
     fn transform_calls_to_saves(&mut self) {
         for i in 0..self.instructions.len() {
             // Check if this is a Call or ExternalCall instruction
             let is_call = matches!(self.instructions[i], Instruction::Call(_, _, _));
-            let is_external_call = matches!(self.instructions[i], Instruction::ExternalCall(_, _, _));
+            let is_external_call =
+                matches!(self.instructions[i], Instruction::ExternalCall(_, _, _));
 
             if !is_call && !is_external_call {
                 continue;
@@ -1202,18 +1284,19 @@ impl LinearScan {
             for (vreg, (start, end)) in &self.lifetimes {
                 // For Call/ExternalCall: standard liveness check
                 // Register is live across if it starts before and ends after
-                let is_live_across = *start <= i && *end > i && !self.spill_locations.contains_key(vreg);
+                let is_live_across =
+                    *start <= i && *end > i && !self.spill_locations.contains_key(vreg);
 
                 if is_live_across {
                     // Get the physical register
                     if let Some(&physical_reg) = self.allocated_registers.get(vreg) {
                         // Don't save the destination register (it's about to be overwritten)
                         let is_dest = match &dest {
-                            IrValue::Register(dest_vreg) => {
-                                self.allocated_registers.get(dest_vreg)
-                                    .map(|&dest_phys| dest_phys == physical_reg)
-                                    .unwrap_or(false)
-                            }
+                            IrValue::Register(dest_vreg) => self
+                                .allocated_registers
+                                .get(dest_vreg)
+                                .map(|&dest_phys| dest_phys == physical_reg)
+                                .unwrap_or(false),
                             _ => false,
                         };
 
@@ -1231,53 +1314,48 @@ impl LinearScan {
             // Remove duplicates - sort by physical register and dedup
             // Multiple virtual registers might map to the same physical register
             saves.sort_by_key(|v| match v {
-                IrValue::Register(vreg) => {
-                    self.allocated_registers.get(vreg)
-                        .map(|phys| phys.index())
-                        .unwrap_or(vreg.index())
-                }
+                IrValue::Register(vreg) => self
+                    .allocated_registers
+                    .get(vreg)
+                    .map(|phys| phys.index())
+                    .unwrap_or(vreg.index()),
                 _ => 0,
             });
             // Dedup by physical register, not by virtual register
             let mut seen_physical = std::collections::HashSet::new();
-            saves.retain(|v| {
-                match v {
-                    IrValue::Register(vreg) => {
-                        let phys_idx = self.allocated_registers.get(vreg)
-                            .map(|phys| phys.index())
-                            .unwrap_or(vreg.index());
-                        seen_physical.insert(phys_idx)
-                    }
-                    _ => true,
+            saves.retain(|v| match v {
+                IrValue::Register(vreg) => {
+                    let phys_idx = self
+                        .allocated_registers
+                        .get(vreg)
+                        .map(|phys| phys.index())
+                        .unwrap_or(vreg.index());
+                    seen_physical.insert(phys_idx)
                 }
+                _ => true,
             });
 
-            // Apply spill replacement to saves list
-            // (Registers that were spilled after allocation need to be converted to Spill values)
-            let saves: Vec<IrValue> = saves.into_iter().map(|val| {
-                if let IrValue::Register(vreg) = &val {
-                    if let Some(&stack_offset) = self.spill_locations.get(vreg) {
-                        return IrValue::Spill(*vreg, stack_offset);
-                    }
-                }
-                val
-            }).collect();
+            // Note: saves are always Registers, never Spills
+            // (line 1205 already excludes spilled values via !self.spill_locations.contains_key)
 
-            // Transform to WithSaves variant
+            // Transform to unified CallWithSaves with appropriate CallTarget
             if is_call {
                 let (func, args) = if let Instruction::Call(_, f, a) = &self.instructions[i] {
                     (*f, a.clone())
                 } else {
                     continue;
                 };
-                self.instructions[i] = Instruction::CallWithSaves(dest, func, args, saves);
+                self.instructions[i] =
+                    Instruction::CallWithSaves(dest, CallTarget::Dynamic(func), args, saves);
             } else if is_external_call {
-                let (func_addr, args) = if let Instruction::ExternalCall(_, addr, a) = &self.instructions[i] {
-                    (*addr, a.clone())
-                } else {
-                    continue;
-                };
-                self.instructions[i] = Instruction::ExternalCallWithSaves(dest, func_addr, args, saves);
+                let (func_addr, args) =
+                    if let Instruction::ExternalCall(_, addr, a) = &self.instructions[i] {
+                        (*addr, a.clone())
+                    } else {
+                        continue;
+                    };
+                self.instructions[i] =
+                    Instruction::CallWithSaves(dest, CallTarget::External(func_addr), args, saves);
             }
         }
     }
@@ -1329,15 +1407,21 @@ mod tests {
                 // Either the register should be in allocated_registers, or it should be spilled
                 let is_allocated = allocator.allocated_registers.contains_key(&reg);
                 let is_spilled = allocator.spill_locations.contains_key(&reg);
-                assert!(is_allocated || is_spilled,
-                    "Register {} should be either allocated or spilled", reg.display_name());
+                assert!(
+                    is_allocated || is_spilled,
+                    "Register {} should be either allocated or spilled",
+                    reg.display_name()
+                );
 
                 // If allocated, verify it maps to a physical register (x19-x28)
                 if let Some(physical) = allocator.allocated_registers.get(&reg) {
                     let idx = physical.index();
-                    assert!(idx >= 19 && idx <= 28,
+                    assert!(
+                        idx >= 19 && idx <= 28,
                         "Register {} mapped to {} which is not physical (19-28)",
-                        reg.display_name(), physical.display_name());
+                        reg.display_name(),
+                        physical.display_name()
+                    );
                 }
             }
         }
@@ -1380,9 +1464,15 @@ mod tests {
         allocator.allocate();
 
         println!("\nSpill locations: {:?}", allocator.spill_locations);
-        println!("Allocated registers: {}", allocator.allocated_registers.len());
+        println!(
+            "Allocated registers: {}",
+            allocator.allocated_registers.len()
+        );
 
         // Some registers should be spilled
-        assert!(allocator.spill_locations.len() > 0, "Should have spilled some registers");
+        assert!(
+            allocator.spill_locations.len() > 0,
+            "Should have spilled some registers"
+        );
     }
 }

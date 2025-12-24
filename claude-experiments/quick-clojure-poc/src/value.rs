@@ -1,16 +1,16 @@
-use im::{Vector, HashMap};
-use std::fmt;
+use im::{HashMap, Vector};
 use std::collections::HashMap as StdHashMap;
+use std::fmt;
 
 /// Function arity definition
 /// Represents one overload of a multi-arity function
 #[derive(Debug, Clone, PartialEq)]
 pub struct FnArity {
-    pub params: Vec<String>,           // Positional parameters
-    pub rest_param: Option<String>,    // Variadic rest parameter (after &)
-    pub body: Vec<crate::clojure_ast::Expr>,  // Body expressions (implicit do)
-    pub pre_conditions: Vec<crate::clojure_ast::Expr>,   // :pre assertions
-    pub post_conditions: Vec<crate::clojure_ast::Expr>,  // :post assertions (can use %)
+    pub params: Vec<String>,                            // Positional parameters
+    pub rest_param: Option<String>,                     // Variadic rest parameter (after &)
+    pub body: Vec<crate::clojure_ast::Expr>,            // Body expressions (implicit do)
+    pub pre_conditions: Vec<crate::clojure_ast::Expr>,  // :pre assertions
+    pub post_conditions: Vec<crate::clojure_ast::Expr>, // :post assertions (can use %)
 }
 
 // NOTE: Parameter destructuring (Phase 4) is deferred for future implementation.
@@ -37,10 +37,10 @@ pub enum Value {
     String(String),
 
     // Collections (using im-rs temporarily)
-    List(Vector<Value>),      // Clojure lists - sequential
-    Vector(Vector<Value>),     // Clojure vectors - indexed
+    List(Vector<Value>),        // Clojure lists - sequential
+    Vector(Vector<Value>),      // Clojure vectors - indexed
     Map(HashMap<Value, Value>), // Clojure maps - key-value
-    Set(im::HashSet<Value>),   // Clojure sets
+    Set(im::HashSet<Value>),    // Clojure sets
 
     // Metadata wrapper
     WithMeta(HashMap<String, Value>, Box<Value>),
@@ -49,9 +49,9 @@ pub enum Value {
     // Supports multi-arity dispatch (0-20 arities + optional variadic)
     #[allow(dead_code)]
     Function {
-        name: Option<String>,                      // Optional name for self-recursion
-        arity_map: StdHashMap<usize, FnArity>,     // Fixed arities: arity_num → implementation
-        variadic_arity: Option<Box<FnArity>>,      // Optional variadic overload (& rest-param)
+        name: Option<String>,                  // Optional name for self-recursion
+        arity_map: StdHashMap<usize, FnArity>, // Fixed arities: arity_num → implementation
+        variadic_arity: Option<Box<FnArity>>,  // Optional variadic overload (& rest-param)
     },
 
     // Namespace object (for future heap allocation)
@@ -61,7 +61,7 @@ pub enum Value {
     Namespace {
         name: String,
         mappings: std::collections::HashMap<String, isize>, // symbol → tagged value
-        used_namespaces: Vec<String>,                        // namespace names that are used
+        used_namespaces: Vec<String>,                       // namespace names that are used
     },
 }
 
@@ -94,7 +94,9 @@ impl std::hash::Hash for Value {
                 // Hash the inner value, metadata doesn't affect hash
                 inner.hash(state);
             }
-            Value::Function { name, arity_map, .. } => {
+            Value::Function {
+                name, arity_map, ..
+            } => {
                 name.hash(state);
                 arity_map.len().hash(state);
             }

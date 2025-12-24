@@ -6,7 +6,9 @@
 use std::{error::Error, sync::Mutex};
 
 use super::types::{BuiltInTypes, HeapObject};
-use super::{AllocateAction, Allocator, AllocatorOptions, StackMap, HeapInspector, DetailedHeapStats};
+use super::{
+    AllocateAction, Allocator, AllocatorOptions, DetailedHeapStats, HeapInspector, StackMap,
+};
 
 /// Thread-safe wrapper for any allocator
 pub struct MutexAllocator<Alloc: Allocator> {

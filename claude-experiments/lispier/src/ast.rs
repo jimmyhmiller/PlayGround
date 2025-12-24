@@ -295,6 +295,47 @@ impl Extern {
     }
 }
 
+/// Link a shared library for external symbols
+#[derive(Debug, Clone, PartialEq)]
+pub struct LinkLibrary {
+    /// The library to link
+    /// Can be a keyword like :c for libc, or a path string
+    pub library: String,
+}
+
+impl LinkLibrary {
+    pub fn new(library: impl Into<String>) -> Self {
+        Self {
+            library: library.into(),
+        }
+    }
+
+    /// Get the platform-specific library path
+    pub fn resolve_path(&self) -> String {
+        match self.library.as_str() {
+            ":c" | ":libc" => {
+                // Platform-specific libc - use absolute paths
+                #[cfg(target_os = "macos")]
+                { "/usr/lib/libSystem.B.dylib".to_string() }
+                #[cfg(target_os = "linux")]
+                { "/lib/x86_64-linux-gnu/libc.so.6".to_string() }
+                #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+                { "c".to_string() }
+            }
+            ":m" | ":libm" => {
+                #[cfg(target_os = "macos")]
+                { "/usr/lib/libSystem.B.dylib".to_string() }
+                #[cfg(target_os = "linux")]
+                { "/lib/x86_64-linux-gnu/libm.so.6".to_string() }
+                #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+                { "m".to_string() }
+            }
+            // Otherwise treat as a path or library name
+            _ => self.library.clone(),
+        }
+    }
+}
+
 /// Macro registration declaration
 /// Registers a compiled function as a macro for use during expansion
 #[derive(Debug, Clone, PartialEq)]
@@ -420,6 +461,7 @@ pub enum Node {
     Compilation(Compilation),
     Extern(Extern),
     Defmacro(Defmacro),
+    LinkLibrary(LinkLibrary),
 }
 
 impl Node {

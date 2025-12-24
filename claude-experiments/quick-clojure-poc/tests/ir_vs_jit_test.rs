@@ -20,8 +20,8 @@
 // ❌ Boolean literals as standalone values (true/false work in if conditions)
 
 use quick_clojure_poc::*;
-use std::sync::Arc;
 use std::cell::UnsafeCell;
+use std::sync::Arc;
 
 /// Helper function to run a test case with a fresh compiler
 fn run_test(code: &str, expected: i64) {
@@ -30,7 +30,9 @@ fn run_test(code: &str, expected: i64) {
 
     let runtime = Arc::new(UnsafeCell::new(gc_runtime::GCRuntime::new()));
     let mut compiler = compiler::Compiler::new(runtime);
-    compiler.compile_toplevel(&ast).expect(&format!("Compiler failed for: {}", code));
+    compiler
+        .compile_toplevel(&ast)
+        .expect(&format!("Compiler failed for: {}", code));
     let instructions = compiler.take_instructions();
     let num_locals = compiler.builder.num_locals;
 
@@ -66,9 +68,7 @@ fn test_ir_backend_execution() {
 
 #[test]
 fn test_ir_backend_literals() {
-    let test_cases = vec![
-        "0", "1", "42", "100", "999", "65535",
-    ];
+    let test_cases = vec!["0", "1", "42", "100", "999", "65535"];
 
     for code in test_cases {
         let expected: i64 = code.parse().unwrap();
@@ -83,7 +83,8 @@ fn test_ir_backend_literals() {
         let instructions = compiler.take_instructions();
         let num_locals = compiler.builder.num_locals;
 
-        let compiled = arm_codegen::Arm64CodeGen::compile_function(&instructions, num_locals, 0).unwrap();
+        let compiled =
+            arm_codegen::Arm64CodeGen::compile_function(&instructions, num_locals, 0).unwrap();
         let tramp = trampoline::Trampoline::new(64 * 1024);
         let tagged_result = unsafe { tramp.execute(compiled.code_ptr as *const u8) };
         let result = tagged_result >> 3;
@@ -100,14 +101,38 @@ fn test_ir_backend_arithmetic() {
     }
 
     let test_cases = vec![
-        TestCase { expr: "(+ 0 0)", expected: 0 },
-        TestCase { expr: "(+ 100 200)", expected: 300 },
-        TestCase { expr: "(- 100 50)", expected: 50 },
-        TestCase { expr: "(* 12 13)", expected: 156 },
-        TestCase { expr: "(/ 100 10)", expected: 10 },
-        TestCase { expr: "(+ (+ 1 2) (+ 3 4))", expected: 10 },
-        TestCase { expr: "(- (+ 10 5) (- 8 3))", expected: 10 },
-        TestCase { expr: "(* (* 2 3) (* 4 5))", expected: 120 },
+        TestCase {
+            expr: "(+ 0 0)",
+            expected: 0,
+        },
+        TestCase {
+            expr: "(+ 100 200)",
+            expected: 300,
+        },
+        TestCase {
+            expr: "(- 100 50)",
+            expected: 50,
+        },
+        TestCase {
+            expr: "(* 12 13)",
+            expected: 156,
+        },
+        TestCase {
+            expr: "(/ 100 10)",
+            expected: 10,
+        },
+        TestCase {
+            expr: "(+ (+ 1 2) (+ 3 4))",
+            expected: 10,
+        },
+        TestCase {
+            expr: "(- (+ 10 5) (- 8 3))",
+            expected: 10,
+        },
+        TestCase {
+            expr: "(* (* 2 3) (* 4 5))",
+            expected: 120,
+        },
     ];
 
     for test in test_cases {
@@ -120,7 +145,8 @@ fn test_ir_backend_arithmetic() {
         let instructions = compiler.take_instructions();
         let num_locals = compiler.builder.num_locals;
 
-        let compiled = arm_codegen::Arm64CodeGen::compile_function(&instructions, num_locals, 0).unwrap();
+        let compiled =
+            arm_codegen::Arm64CodeGen::compile_function(&instructions, num_locals, 0).unwrap();
         let tramp = trampoline::Trampoline::new(64 * 1024);
         let tagged_result = unsafe { tramp.execute(compiled.code_ptr as *const u8) };
         let result = tagged_result >> 3;
@@ -138,13 +164,11 @@ fn test_ir_backend_comparisons() {
         ("(< 5 5)", 0),
         ("(< 0 1)", 1),
         ("(< 100 200)", 1),
-
         // Greater than
         ("(> 2 1)", 1),
         ("(> 1 2)", 0),
         ("(> 5 5)", 0),
         ("(> 100 50)", 1),
-
         // Equal
         ("(= 5 5)", 1),
         ("(= 1 2)", 0),
@@ -163,16 +187,13 @@ fn test_ir_backend_if_expressions() {
         // Simple if with true/false
         ("(if true 1 2)", 1),
         ("(if false 1 2)", 2),
-
         // If with comparison
         ("(if (< 1 2) 10 20)", 10),
         ("(if (> 1 2) 10 20)", 20),
         ("(if (= 5 5) 100 200)", 100),
-
         // If with computed values in branches
         ("(if true (+ 2 3) (* 4 5))", 5),
         ("(if false (+ 2 3) (* 4 5))", 20),
-
         // Nested comparisons
         ("(if (< 10 20) 1 0)", 1),
         ("(if (> 10 20) 1 0)", 0),
@@ -206,12 +227,10 @@ fn test_ir_backend_edge_cases() {
         ("(+ 0 0)", 0),
         ("(* 0 100)", 0),
         ("(* 100 0)", 0),
-
         // One
         ("1", 1),
         ("(* 1 42)", 42),
         ("(* 42 1)", 42),
-
         // Large numbers
         ("1000", 1000),
         ("(+ 500 500)", 1000),
@@ -245,7 +264,6 @@ fn test_ir_backend_comparison_combinations() {
         ("(< 0 0)", 0),
         ("(> 0 0)", 0),
         ("(= 0 0)", 1),
-
         // Comparisons in if (simple to avoid register exhaustion)
         ("(if (< 5 10) 100 200)", 100),
         ("(if (> 5 10) 100 200)", 200),
@@ -277,11 +295,9 @@ fn test_ir_backend_mixed_operations() {
         ("(+ (if (< 1 2) 10 20) 5)", 15),
         ("(* (if (> 5 3) 2 0) 10)", 20),
         ("(- 100 (if (= 1 1) 50 0))", 50),
-
         // Mix do and arithmetic
         ("(do (* 2 3))", 6),
         ("(do (+ 1 1) (+ 2 2))", 4),
-
         // NOTE: Arithmetic with boolean comparison results is NOT supported in Clojure.
         // In real Clojure, (+ true true) throws ClassCastException.
         // Our implementation now safely returns 0 for non-numeric operands instead of crashing.
@@ -309,7 +325,8 @@ fn test_ir_backend_def_with_persistent_compiler() {
     compiler.compile_toplevel(&ast).unwrap();
     let instructions = compiler.take_instructions();
     let num_locals = compiler.builder.num_locals;
-    let compiled = arm_codegen::Arm64CodeGen::compile_function(&instructions, num_locals, 0).unwrap();
+    let compiled =
+        arm_codegen::Arm64CodeGen::compile_function(&instructions, num_locals, 0).unwrap();
     let tramp = trampoline::Trampoline::new(64 * 1024);
     let tagged_result = unsafe { tramp.execute(compiled.code_ptr as *const u8) };
     assert_eq!(tagged_result >> 3, 5);
@@ -325,7 +342,8 @@ fn test_ir_backend_def_with_persistent_compiler() {
     compiler.compile_toplevel(&ast).unwrap();
     let instructions = compiler.take_instructions();
     let num_locals = compiler.builder.num_locals;
-    let compiled = arm_codegen::Arm64CodeGen::compile_function(&instructions, num_locals, 0).unwrap();
+    let compiled =
+        arm_codegen::Arm64CodeGen::compile_function(&instructions, num_locals, 0).unwrap();
     let tramp = trampoline::Trampoline::new(64 * 1024);
     let tagged_result = unsafe { tramp.execute(compiled.code_ptr as *const u8) };
     assert_eq!(tagged_result >> 3, 5);
@@ -337,7 +355,8 @@ fn test_ir_backend_def_with_persistent_compiler() {
     compiler.compile_toplevel(&ast).unwrap();
     let instructions = compiler.take_instructions();
     let num_locals = compiler.builder.num_locals;
-    let compiled = arm_codegen::Arm64CodeGen::compile_function(&instructions, num_locals, 0).unwrap();
+    let compiled =
+        arm_codegen::Arm64CodeGen::compile_function(&instructions, num_locals, 0).unwrap();
     let tramp = trampoline::Trampoline::new(64 * 1024);
     let tagged_result = unsafe { tramp.execute(compiled.code_ptr as *const u8) };
     assert_eq!(tagged_result >> 3, 10);
@@ -352,7 +371,8 @@ fn test_ir_backend_def_with_persistent_compiler() {
     compiler.compile_toplevel(&ast).unwrap();
     let instructions = compiler.take_instructions();
     let num_locals = compiler.builder.num_locals;
-    let compiled = arm_codegen::Arm64CodeGen::compile_function(&instructions, num_locals, 0).unwrap();
+    let compiled =
+        arm_codegen::Arm64CodeGen::compile_function(&instructions, num_locals, 0).unwrap();
     let tramp = trampoline::Trampoline::new(64 * 1024);
     let tagged_result = unsafe { tramp.execute(compiled.code_ptr as *const u8) };
     assert_eq!(tagged_result >> 3, 15);

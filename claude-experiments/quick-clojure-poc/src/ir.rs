@@ -14,10 +14,29 @@ pub enum Condition {
     GreaterThanOrEqual,
 }
 
+/// Target for unified CallWithSaves instruction
+/// Replaces separate ExternalCallWithSaves, CallDirectWithSaves, and dynamic CallWithSaves
+#[derive(Debug, Clone, PartialEq)]
+pub enum CallTarget {
+    /// Known external function address (trampolines)
+    /// Args go in x0-x7
+    External(usize),
+
+    /// Known code pointer in a register (after dispatch is resolved)
+    /// (code_ptr_value, is_closure, arg_count_reg)
+    /// If is_closure: x0=closure, x1-x7=user args, x9=arg_count
+    /// If not closure: x0-x7=args
+    Direct(IrValue, bool, Option<IrValue>),
+
+    /// Dynamic dispatch - must check tag at runtime
+    /// Handles: raw functions (0b100), closures (0b101), IFn objects (other)
+    Dynamic(IrValue),
+}
+
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub enum VirtualRegister {
-    Temp(usize),      // Compiler-generated temporary registers
-    Argument(usize),  // Function argument registers (x0-x7)
+    Temp(usize),     // Compiler-generated temporary registers
+    Argument(usize), // Function argument registers (x0-x7)
 }
 
 impl VirtualRegister {
@@ -73,12 +92,12 @@ impl PartialOrd for VirtualRegister {
 #[allow(dead_code)]
 pub enum IrValue {
     Register(VirtualRegister),
-    TaggedConstant(isize),  // For tagged integers
-    RawConstant(i64),       // For untagged values (pointers, lengths, etc.)
+    TaggedConstant(isize), // For tagged integers
+    RawConstant(i64),      // For untagged values (pointers, lengths, etc.)
     True,
     False,
     Null,
-    Spill(VirtualRegister, usize),  // Spilled register with stack offset
+    Spill(VirtualRegister, usize), // Spilled register with stack offset
     /// FramePointer - represents x29 (FP) in ARM64
     /// Used for passing stack pointer to allocation trampolines for GC safety
     FramePointer,
@@ -89,16 +108,16 @@ pub type Label = String;
 #[derive(Debug, Clone)]
 pub enum Instruction {
     // Integer Arithmetic (work on untagged values)
-    AddInt(IrValue, IrValue, IrValue),  // dst, src1, src2
+    AddInt(IrValue, IrValue, IrValue), // dst, src1, src2
     Sub(IrValue, IrValue, IrValue),
     Mul(IrValue, IrValue, IrValue),
     Div(IrValue, IrValue, IrValue),
 
     // Bitwise operations (work on untagged values)
-    BitAnd(IrValue, IrValue, IrValue),    // dst, src1, src2
-    BitOr(IrValue, IrValue, IrValue),     // dst, src1, src2
-    BitXor(IrValue, IrValue, IrValue),    // dst, src1, src2
-    BitNot(IrValue, IrValue),             // dst, src
+    BitAnd(IrValue, IrValue, IrValue),        // dst, src1, src2
+    BitOr(IrValue, IrValue, IrValue),         // dst, src1, src2
+    BitXor(IrValue, IrValue, IrValue),        // dst, src1, src2
+    BitNot(IrValue, IrValue),                 // dst, src
     BitShiftLeft(IrValue, IrValue, IrValue),  // dst, src, amount
     BitShiftRight(IrValue, IrValue, IrValue), // dst, src, amount (arithmetic/signed)
     UnsignedBitShiftRight(IrValue, IrValue, IrValue), // dst, src, amount (logical/unsigned)
@@ -118,25 +137,25 @@ pub enum Instruction {
     LoadByte(IrValue, IrValue, i32),
 
     // Float Arithmetic (work on raw f64 bits in registers)
-    AddFloat(IrValue, IrValue, IrValue),  // dst, src1, src2 - f64 addition
+    AddFloat(IrValue, IrValue, IrValue), // dst, src1, src2 - f64 addition
     SubFloat(IrValue, IrValue, IrValue),
     MulFloat(IrValue, IrValue, IrValue),
     DivFloat(IrValue, IrValue, IrValue),
-    IntToFloat(IrValue, IrValue),         // dst, src - convert int to float
+    IntToFloat(IrValue, IrValue), // dst, src - convert int to float
 
     // Float heap operations (floats are heap-allocated)
-    LoadFloat(IrValue, IrValue),          // dst, src - load f64 from heap float pointer
-    AllocateFloat(IrValue, IrValue),      // dst, src - allocate heap float with f64 value, returns tagged ptr
+    LoadFloat(IrValue, IrValue), // dst, src - load f64 from heap float pointer
+    AllocateFloat(IrValue, IrValue), // dst, src - allocate heap float with f64 value, returns tagged ptr
 
     // Type tag extraction
-    GetTag(IrValue, IrValue),  // dst, src - extract tag bits (last 3 bits)
+    GetTag(IrValue, IrValue), // dst, src - extract tag bits (last 3 bits)
 
     // Comparison (produces boolean in register)
-    Compare(IrValue, IrValue, IrValue, Condition),  // dst, src1, src2, condition
+    Compare(IrValue, IrValue, IrValue, Condition), // dst, src1, src2, condition
 
     // Type tagging/untagging
-    Tag(IrValue, IrValue, IrValue),    // dst, value, tag
-    Untag(IrValue, IrValue),           // dst, tagged_value
+    Tag(IrValue, IrValue, IrValue), // dst, value, tag
+    Untag(IrValue, IrValue),        // dst, tagged_value
 
     // Constants
     LoadConstant(IrValue, IrValue),
@@ -144,19 +163,18 @@ pub enum Instruction {
     // Note: LoadVarBySymbol, LoadVarBySymbolDynamic, StoreVarBySymbol, and EnsureVarBySymbol
     // have been converted to builtin function calls (runtime.builtin/load-var-by-symbol, etc.)
     // See builtins.rs for implementations.
-
     LoadTrue(IrValue),
     LoadFalse(IrValue),
 
     // Dynamic var bindings
-    PushBinding(IrValue, IrValue),  // PushBinding(var_ptr, value) - push thread-local binding
-    PopBinding(IrValue),            // PopBinding(var_ptr) - pop thread-local binding
-    SetVar(IrValue, IrValue),       // SetVar(var_ptr, value) - modify thread-local binding (for set!)
+    PushBinding(IrValue, IrValue), // PushBinding(var_ptr, value) - push thread-local binding
+    PopBinding(IrValue),           // PopBinding(var_ptr) - pop thread-local binding
+    SetVar(IrValue, IrValue), // SetVar(var_ptr, value) - modify thread-local binding (for set!)
 
     // Control flow
     Label(Label),
     Jump(Label),
-    JumpIf(Label, Condition, IrValue, IrValue),  // label, condition, val1, val2
+    JumpIf(Label, Condition, IrValue, IrValue), // label, condition, val1, val2
 
     // NOTE: Recur and RecurWithSaves have been removed.
     // Recur is now lowered to Assign + Jump in the compiler (compile_recur).
@@ -166,26 +184,23 @@ pub enum Instruction {
     // 3. Jumping to the loop label
 
     // Assignment
-    Assign(IrValue, IrValue),  // dst, src
+    Assign(IrValue, IrValue), // dst, src
 
     // Function operations
     MakeFunctionPtr(IrValue, usize, Vec<IrValue>), // MakeFunctionPtr(dst, code_ptr, closure_values) - create function with raw code pointer
-    LoadClosure(IrValue, IrValue, usize),   // LoadClosure(dst, fn_obj, index) - load closure variable
-    Call(IrValue, IrValue, Vec<IrValue>),   // Call(dst, fn, args) - invoke function
-    CallWithSaves(IrValue, IrValue, Vec<IrValue>, Vec<IrValue>),  // CallWithSaves(dst, fn, args, saves) - call with register preservation
+    LoadClosure(IrValue, IrValue, usize), // LoadClosure(dst, fn_obj, index) - load closure variable
+    Call(IrValue, IrValue, Vec<IrValue>), // Call(dst, fn, args) - invoke function
+
+    /// CallWithSaves(dst, target, args, saves) - unified call with register preservation
+    /// target: CallTarget specifying how to call (External, Direct, or Dynamic)
+    /// args: arguments to pass
+    /// saves: registers to save/restore across the call
+    CallWithSaves(IrValue, CallTarget, Vec<IrValue>, Vec<IrValue>),
 
     /// CallDirect(dst, code_ptr, args, is_closure, arg_count_reg)
     /// Low-level call with pre-computed code pointer (no tag checking).
-    /// - code_ptr: IrValue containing the raw (untagged) code pointer
-    /// - args: arguments in calling convention order (x0=closure for closures, then user args)
-    /// - is_closure: if true, the call is to a closure (affects argument setup)
-    /// - arg_count_reg: if Some, the register holding arg count for variadic support
-    /// This is generated by lowering Call/CallWithSaves after dispatch logic is computed.
+    /// NOTE: For non-tail calls, use CallWithSaves with CallTarget::Direct instead.
     CallDirect(IrValue, IrValue, Vec<IrValue>, bool, Option<IrValue>),
-
-    /// CallDirectWithSaves(dst, code_ptr, args, is_closure, arg_count_reg, saves)
-    /// Same as CallDirect but with register saves for non-tail calls.
-    CallDirectWithSaves(IrValue, IrValue, Vec<IrValue>, bool, Option<IrValue>, Vec<IrValue>),
 
     // Multi-arity function operations
     /// MakeMultiArityFn(dst, arities, variadic_min, closure_values)
@@ -228,10 +243,10 @@ pub enum Instruction {
     Ret(IrValue),
 
     // Debug
-    Breakpoint,  // BRK #0 - trap for debugger
+    Breakpoint, // BRK #0 - trap for debugger
 
     // GC
-    CallGC(IrValue),  // CallGC(dst) - force garbage collection, returns nil
+    CallGC(IrValue), // CallGC(dst) - force garbage collection, returns nil
 
     // NOTE: Println has been refactored out - now uses ExternalCall to trampoline_println_regs
     // The trampoline takes (count, v0, v1, v2, v3, v4, v5, v6) in registers, up to 7 values.
@@ -258,7 +273,6 @@ pub enum Instruction {
     LoadExceptionLocal(IrValue, usize),
 
     // Assertion checking (pre/post conditions)
-
     /// AssertPre(condition_value, condition_index)
     /// Checks if condition_value is truthy; if falsy, throws AssertionError
     /// condition_index is used in error message
@@ -269,31 +283,24 @@ pub enum Instruction {
     AssertPost(IrValue, usize),
 
     // Protocol system
-
     /// RegisterProtocolMethod(type_id, protocol_id, method_index, fn_ptr)
     /// Registers a method implementation in the protocol vtable
     RegisterProtocolMethod(usize, usize, usize, IrValue),
 
     // Type checking
-
     /// InstanceCheck(dst, expected_type_id, value) - check if value is an instance of type
     /// expected_type_id: full type ID (deftype ID + DEFTYPE_ID_OFFSET)
     /// Returns tagged boolean (true if match, false otherwise)
     InstanceCheck(IrValue, usize, IrValue),
 
     // External calls (for trampolines)
-
     /// ExternalCall(dst, func_addr, args) - call a known function address
     /// func_addr is an untagged constant (the trampoline address)
     /// Used for protocol lookup, var access, etc.
+    /// NOTE: For calls needing register saves, use CallWithSaves with CallTarget::External
     ExternalCall(IrValue, usize, Vec<IrValue>),
 
-    /// ExternalCallWithSaves(dst, func_addr, args, saves) - with register preservation
-    /// Created by register allocator from ExternalCall
-    ExternalCallWithSaves(IrValue, usize, Vec<IrValue>, Vec<IrValue>),
-
     // Local variable operations (stack-based)
-
     /// StoreLocal(slot, value) - store value to local slot on stack
     /// Used at function entry to save arguments to stack
     /// slot is 0-based index, codegen converts to FP-relative offset

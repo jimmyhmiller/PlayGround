@@ -3,9 +3,9 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use lispier::{
-    extract_compilation, extract_externs, find_project_root, AttributeValue, DialectRegistry,
-    IRGenerator, Jit, MacroExpander, ModuleLoader, Node, Operation, Parser, Reader, RuntimeEnv,
-    Tokenizer,
+    extract_compilation, extract_externs, extract_link_libraries, find_project_root,
+    AttributeValue, DialectRegistry, IRGenerator, Jit, MacroExpander, ModuleLoader, Node,
+    Operation, Parser, Reader, RuntimeEnv, Tokenizer,
 };
 
 fn main() -> ExitCode {
@@ -382,6 +382,9 @@ fn compile_and_run_nodes(nodes: &[Node]) -> Result<(), String> {
     // Extract extern declarations
     let externs = extract_externs(nodes);
 
+    // Extract link library declarations
+    let link_libs = extract_link_libraries(nodes);
+
     // Generate MLIR
     let registry = DialectRegistry::new();
     let generator = IRGenerator::new(&registry);
@@ -389,9 +392,32 @@ fn compile_and_run_nodes(nodes: &[Node]) -> Result<(), String> {
         .generate(nodes)
         .map_err(|e| format!("IR generation error: {}", e))?;
 
-    // Create JIT and run
-    let jit = Jit::new(&registry, &mut module)
-        .map_err(|e| format!("JIT creation error: {}", e))?;
+    // Separate link libraries into well-known ones (like :c) and file paths
+    let mut needs_libc = false;
+    let mut file_libs: Vec<String> = Vec::new();
+    for lib in &link_libs {
+        match lib.library.as_str() {
+            ":c" | ":libc" | ":m" | ":libm" => needs_libc = true,
+            _ => file_libs.push(lib.resolve_path()),
+        }
+    }
+
+    // Create JIT with optional library paths (for actual library files)
+    let jit = if file_libs.is_empty() {
+        Jit::new(&registry, &mut module)
+            .map_err(|e| format!("JIT creation error: {}", e))?
+    } else {
+        let lib_path_refs: Vec<&str> = file_libs.iter().map(|s| s.as_str()).collect();
+        Jit::with_libraries(&registry, &mut module, &lib_path_refs)
+            .map_err(|e| format!("JIT creation error: {}", e))?
+    };
+
+    // Register libc symbols if needed
+    if needs_libc {
+        unsafe {
+            jit.register_libc();
+        }
+    }
 
     // Register FFI symbols based on extern declarations
     for ext in &externs {

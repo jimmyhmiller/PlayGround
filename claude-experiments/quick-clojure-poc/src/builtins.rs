@@ -9,11 +9,10 @@
 /// - Return value in x0 (tagged value)
 /// - May call other runtime functions
 /// - Safe points for GC
-
 use crate::gc_runtime::GCRuntime;
 use crate::trampoline;
-use std::sync::Arc;
 use std::cell::UnsafeCell;
+use std::sync::Arc;
 
 /// Runtime pointer used by builtins to access the runtime
 /// SAFETY: Set once during initialization, immutable thereafter
@@ -43,7 +42,10 @@ unsafe fn get_runtime() -> &'static mut GCRuntime {
 /// Panics if the namespace or var doesn't exist.
 /// Arguments are tagged integers that need to be untagged before use.
 #[unsafe(no_mangle)]
-pub extern "C" fn builtin_load_var_by_symbol(tagged_ns_symbol_id: usize, tagged_name_symbol_id: usize) -> usize {
+pub extern "C" fn builtin_load_var_by_symbol(
+    tagged_ns_symbol_id: usize,
+    tagged_name_symbol_id: usize,
+) -> usize {
     unsafe {
         // Untag the symbol IDs (shift right by 3)
         let ns_symbol_id = (tagged_ns_symbol_id >> 3) as u32;
@@ -57,7 +59,10 @@ pub extern "C" fn builtin_load_var_by_symbol(tagged_ns_symbol_id: usize, tagged_
 /// Like builtin_load_var_by_symbol but checks dynamic bindings first.
 /// Arguments are tagged integers that need to be untagged before use.
 #[unsafe(no_mangle)]
-pub extern "C" fn builtin_load_var_by_symbol_dynamic(tagged_ns_symbol_id: usize, tagged_name_symbol_id: usize) -> usize {
+pub extern "C" fn builtin_load_var_by_symbol_dynamic(
+    tagged_ns_symbol_id: usize,
+    tagged_name_symbol_id: usize,
+) -> usize {
     unsafe {
         // Untag the symbol IDs (shift right by 3)
         let ns_symbol_id = (tagged_ns_symbol_id >> 3) as u32;
@@ -72,7 +77,11 @@ pub extern "C" fn builtin_load_var_by_symbol_dynamic(tagged_ns_symbol_id: usize,
 /// Returns nil (tagged value 7).
 /// Symbol ID arguments are tagged integers that need to be untagged before use.
 #[unsafe(no_mangle)]
-pub extern "C" fn builtin_store_var_by_symbol(tagged_ns_symbol_id: usize, tagged_name_symbol_id: usize, value: usize) -> usize {
+pub extern "C" fn builtin_store_var_by_symbol(
+    tagged_ns_symbol_id: usize,
+    tagged_name_symbol_id: usize,
+    value: usize,
+) -> usize {
     unsafe {
         // Untag the symbol IDs (shift right by 3)
         let ns_symbol_id = (tagged_ns_symbol_id >> 3) as u32;
@@ -87,7 +96,10 @@ pub extern "C" fn builtin_store_var_by_symbol(tagged_ns_symbol_id: usize, tagged
 /// Returns nil (tagged value 7).
 /// Arguments are tagged integers that need to be untagged before use.
 #[unsafe(no_mangle)]
-pub extern "C" fn builtin_ensure_var_by_symbol(tagged_ns_symbol_id: usize, tagged_name_symbol_id: usize) -> usize {
+pub extern "C" fn builtin_ensure_var_by_symbol(
+    tagged_ns_symbol_id: usize,
+    tagged_name_symbol_id: usize,
+) -> usize {
     unsafe {
         // Untag the symbol IDs (shift right by 3)
         let ns_symbol_id = (tagged_ns_symbol_id >> 3) as u32;
@@ -95,16 +107,24 @@ pub extern "C" fn builtin_ensure_var_by_symbol(tagged_ns_symbol_id: usize, tagge
 
         let rt = get_runtime();
         // Clone strings to avoid borrow issues
-        let ns_name = rt.get_symbol(ns_symbol_id).expect("invalid ns_symbol_id").to_string();
-        let var_name = rt.get_symbol(name_symbol_id).expect("invalid name_symbol_id").to_string();
-        let ns_ptr = rt.get_namespace_by_name(&ns_name)
+        let ns_name = rt
+            .get_symbol(ns_symbol_id)
+            .expect("invalid ns_symbol_id")
+            .to_string();
+        let var_name = rt
+            .get_symbol(name_symbol_id)
+            .expect("invalid name_symbol_id")
+            .to_string();
+        let ns_ptr = rt
+            .get_namespace_by_name(&ns_name)
             .unwrap_or_else(|| panic!("Namespace not found: {}", ns_name));
 
         // Check if var already exists
         if rt.namespace_lookup(ns_ptr, &var_name).is_none() {
             // Create var with unbound placeholder (we'll use nil for now)
             let (var_ptr, _) = rt.allocate_var(ns_ptr, &var_name, 7).unwrap(); // 7 = nil
-            rt.namespace_add_binding(ns_ptr, &var_name, var_ptr).unwrap();
+            rt.namespace_add_binding(ns_ptr, &var_name, var_ptr)
+                .unwrap();
         }
 
         7 // nil
@@ -138,9 +158,7 @@ pub extern "C" fn builtin_load_keyword(tagged_keyword_index: usize) -> usize {
 /// Returns nil (tagged value 7).
 #[unsafe(no_mangle)]
 pub extern "C" fn builtin_println_value(value: usize) -> usize {
-    unsafe {
-        trampoline::trampoline_println_value(value)
-    }
+    unsafe { trampoline::trampoline_println_value(value) }
 }
 
 /// builtin_print_value(value) -> tagged_value (nil)
@@ -149,9 +167,7 @@ pub extern "C" fn builtin_println_value(value: usize) -> usize {
 /// Returns nil (tagged value 7).
 #[unsafe(no_mangle)]
 pub extern "C" fn builtin_print_value(value: usize) -> usize {
-    unsafe {
-        trampoline::trampoline_print_value(value)
-    }
+    unsafe { trampoline::trampoline_print_value(value) }
 }
 
 /// builtin_newline() -> tagged_value (nil)
@@ -160,9 +176,7 @@ pub extern "C" fn builtin_print_value(value: usize) -> usize {
 /// Returns nil (tagged value 7).
 #[unsafe(no_mangle)]
 pub extern "C" fn builtin_newline() -> usize {
-    unsafe {
-        trampoline::trampoline_newline()
-    }
+    unsafe { trampoline::trampoline_newline() }
 }
 
 /// builtin_print_space() -> tagged_value (nil)
@@ -171,9 +185,7 @@ pub extern "C" fn builtin_newline() -> usize {
 /// Returns nil (tagged value 7).
 #[unsafe(no_mangle)]
 pub extern "C" fn builtin_print_space() -> usize {
-    unsafe {
-        trampoline::trampoline_print_space()
-    }
+    unsafe { trampoline::trampoline_print_space() }
 }
 
 // ============================================================================
@@ -186,9 +198,7 @@ pub extern "C" fn builtin_print_space() -> usize {
 /// Returns nil (tagged value 7).
 #[unsafe(no_mangle)]
 pub extern "C" fn builtin_gc(stack_pointer: usize) -> usize {
-    unsafe {
-        trampoline::trampoline_gc(stack_pointer)
-    }
+    unsafe { trampoline::trampoline_gc(stack_pointer) }
 }
 
 // ============================================================================
@@ -203,9 +213,9 @@ pub extern "C" fn builtin_is_map(value: usize) -> usize {
     unsafe {
         let rt = get_runtime();
         if rt.is_map(value) {
-            0b00001_111  // true
+            0b00001_111 // true
         } else {
-            0b00000_111  // false
+            0b00000_111 // false
         }
     }
 }
@@ -218,9 +228,9 @@ pub extern "C" fn builtin_is_vector(value: usize) -> usize {
     unsafe {
         let rt = get_runtime();
         if rt.is_vector(value) {
-            0b00001_111  // true
+            0b00001_111 // true
         } else {
-            0b00000_111  // false
+            0b00000_111 // false
         }
     }
 }
@@ -233,7 +243,7 @@ pub extern "C" fn builtin_is_vector(value: usize) -> usize {
 pub struct BuiltinDescriptor {
     pub name: &'static str,
     pub function_ptr: usize,
-    pub arity: usize,  // Fixed arity (for now, no variadic builtins)
+    pub arity: usize, // Fixed arity (for now, no variadic builtins)
 }
 
 /// Get all builtin function descriptors
@@ -267,12 +277,12 @@ pub fn get_builtin_descriptors() -> Vec<BuiltinDescriptor> {
         BuiltinDescriptor {
             name: "runtime.builtin/_println",
             function_ptr: builtin_println_value as usize,
-            arity: 1,  // single value
+            arity: 1, // single value
         },
         BuiltinDescriptor {
             name: "runtime.builtin/_print",
             function_ptr: builtin_print_value as usize,
-            arity: 1,  // single value
+            arity: 1, // single value
         },
         BuiltinDescriptor {
             name: "runtime.builtin/_newline",
@@ -287,7 +297,7 @@ pub fn get_builtin_descriptors() -> Vec<BuiltinDescriptor> {
         BuiltinDescriptor {
             name: "runtime.builtin/gc",
             function_ptr: builtin_gc as usize,
-            arity: 1,  // stack_pointer
+            arity: 1, // stack_pointer
         },
         BuiltinDescriptor {
             name: "runtime.builtin/map?",

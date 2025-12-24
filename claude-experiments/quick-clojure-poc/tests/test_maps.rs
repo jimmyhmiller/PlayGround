@@ -1,3 +1,5 @@
+use std::fs;
+use std::path::PathBuf;
 /// Unit tests for PersistentArrayMap and PersistentHashMap implementation
 ///
 /// Tests the map data structures including:
@@ -10,11 +12,8 @@
 /// - count on maps
 /// - MapEntry creation and access
 /// - Map equality
-
 use std::process::Command;
-use std::fs;
 use std::sync::OnceLock;
-use std::path::PathBuf;
 
 static BINARY_PATH: OnceLock<PathBuf> = OnceLock::new();
 
@@ -27,8 +26,7 @@ fn get_binary_path() -> &'static PathBuf {
 
         assert!(status.success(), "Failed to build release binary");
 
-        let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
-            .unwrap_or_else(|_| ".".to_string());
+        let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
         PathBuf::from(manifest_dir).join("target/release/quick-clojure-poc")
     })
 }
@@ -257,7 +255,11 @@ fn test_assoc_original_unchanged() {
 (println (get m :a))
 "#;
     let output = run_and_get_stdout(code);
-    assert_eq!(output, "1", "Expected original to be unchanged at 1, got: {}", output);
+    assert_eq!(
+        output, "1",
+        "Expected original to be unchanged at 1, got: {}",
+        output
+    );
 }
 
 #[test]
@@ -316,7 +318,11 @@ fn test_dissoc_original_unchanged() {
 (println (get m :b))
 "#;
     let output = run_and_get_stdout(code);
-    assert_eq!(output, "2", "Expected original to be unchanged at 2, got: {}", output);
+    assert_eq!(
+        output, "2",
+        "Expected original to be unchanged at 2, got: {}",
+        output
+    );
 }
 
 #[test]
@@ -373,7 +379,11 @@ fn test_contains_nil_value() {
 (println (contains? m :a))
 "#;
     let output = run_and_get_stdout(code);
-    assert_eq!(output, "true", "Expected true (key exists even if value is nil), got: {}", output);
+    assert_eq!(
+        output, "true",
+        "Expected true (key exists even if value is nil), got: {}",
+        output
+    );
 }
 
 // ============================================================================
@@ -427,7 +437,11 @@ fn test_keys_empty_map() {
 (println (keys m))
 "#;
     let output = run_and_get_stdout(code);
-    assert_eq!(output, "nil", "Expected nil for empty map keys, got: {}", output);
+    assert_eq!(
+        output, "nil",
+        "Expected nil for empty map keys, got: {}",
+        output
+    );
 }
 
 #[test]
@@ -437,7 +451,11 @@ fn test_vals_empty_map() {
 (println (vals m))
 "#;
     let output = run_and_get_stdout(code);
-    assert_eq!(output, "nil", "Expected nil for empty map vals, got: {}", output);
+    assert_eq!(
+        output, "nil",
+        "Expected nil for empty map vals, got: {}",
+        output
+    );
 }
 
 // ============================================================================
@@ -474,8 +492,11 @@ fn test_map_entry_nth() {
 (println (list (nth entry 0) (nth entry 1)))
 "#;
     let output = run_and_get_stdout(code);
-    assert!(output.contains(":foo") && output.contains("42"),
-            "Expected entry to contain :foo and 42, got: {}", output);
+    assert!(
+        output.contains(":foo") && output.contains("42"),
+        "Expected entry to contain :foo and 42, got: {}",
+        output
+    );
 }
 
 // ============================================================================
@@ -673,7 +694,11 @@ fn test_merge_overwrites() {
 (println (get m3 :b))
 "#;
     let output = run_and_get_stdout(code);
-    assert_eq!(output, "100", "Expected 100 (m2 overwrites), got: {}", output);
+    assert_eq!(
+        output, "100",
+        "Expected 100 (m2 overwrites), got: {}",
+        output
+    );
 }
 
 // ============================================================================
