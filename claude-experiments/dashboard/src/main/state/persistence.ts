@@ -42,6 +42,15 @@ export const DEFAULT_STATE: AppState = {
   dashboards: {
     list: [],
   },
+  globalUI: {
+    slots: [
+      { id: 'top-left', position: { type: 'corner', corner: 'top-left' }, zIndex: 200 },
+      { id: 'top-right', position: { type: 'corner', corner: 'top-right' }, zIndex: 200 },
+      { id: 'bottom-left', position: { type: 'corner', corner: 'bottom-left' }, zIndex: 200 },
+      { id: 'bottom-right', position: { type: 'corner', corner: 'bottom-right' }, zIndex: 200 },
+    ],
+    widgets: [],
+  },
 };
 
 /**

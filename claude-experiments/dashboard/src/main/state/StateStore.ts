@@ -30,6 +30,12 @@ import type {
   DashboardCreatePayload,
   DashboardRenamePayload,
   DashboardSetThemeOverridePayload,
+  GlobalUIState,
+  SlotState,
+  WidgetState,
+  SlotAddPayload,
+  WidgetAddPayload,
+  WidgetUpdatePayload,
 } from '../../types/state';
 
 // Type for the events module
@@ -151,6 +157,8 @@ export class StateStore {
         return this.handleProjectsCommand(action!, payload);
       case 'dashboards':
         return this.handleDashboardsCommand(action!, payload);
+      case 'globalUI':
+        return this.handleGlobalUICommand(action!, payload);
       default:
         throw new Error(`Unknown command domain: ${domain}`);
     }
@@ -878,6 +886,131 @@ export class StateStore {
 
       default:
         throw new Error(`Unknown dashboards action: ${action}`);
+    }
+  }
+
+  // ========== Global UI Commands ==========
+
+  private handleGlobalUICommand(action: string, payload: unknown): CommandResult {
+    const globalUI = this.getState('globalUI') as GlobalUIState;
+
+    switch (action) {
+      case 'addSlot': {
+        const p = payload as SlotAddPayload;
+        // Check if slot already exists
+        if (globalUI.slots.some((s) => s.id === p.id)) {
+          return { success: false, error: `Slot "${p.id}" already exists` };
+        }
+
+        const newSlot: SlotState = {
+          id: p.id,
+          position: p.position,
+          zIndex: p.zIndex,
+        };
+
+        this.setState('globalUI', {
+          ...globalUI,
+          slots: [...globalUI.slots, newSlot],
+        });
+
+        return { id: p.id };
+      }
+
+      case 'removeSlot': {
+        const { id } = payload as { id: string };
+        // Remove slot and any widgets in it
+        this.setState('globalUI', {
+          ...globalUI,
+          slots: globalUI.slots.filter((s) => s.id !== id),
+          widgets: globalUI.widgets.filter((w) => w.slot !== id),
+        });
+        return { success: true };
+      }
+
+      case 'addWidget': {
+        const p = payload as WidgetAddPayload;
+        // Generate ID if not provided
+        const id = p.id ?? `widget_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+
+        // Check if slot exists
+        if (!globalUI.slots.some((s) => s.id === p.slot)) {
+          return { success: false, error: `Slot "${p.slot}" does not exist` };
+        }
+
+        const newWidget: WidgetState = {
+          id,
+          type: p.type,
+          slot: p.slot,
+          props: p.props ?? {},
+          priority: p.priority ?? 10,
+          visible: true,
+        };
+
+        this.setState('globalUI', {
+          ...globalUI,
+          widgets: [...globalUI.widgets, newWidget],
+        });
+
+        return { id };
+      }
+
+      case 'removeWidget': {
+        const { id } = payload as { id: string };
+        this.setState('globalUI', {
+          ...globalUI,
+          widgets: globalUI.widgets.filter((w) => w.id !== id),
+        });
+        return { success: true };
+      }
+
+      case 'updateWidget': {
+        const p = payload as WidgetUpdatePayload;
+        const widgetIndex = globalUI.widgets.findIndex((w) => w.id === p.id);
+        if (widgetIndex === -1) {
+          return { success: false, error: 'Widget not found' };
+        }
+
+        const widget = globalUI.widgets[widgetIndex]!;
+        const updatedWidgets = [...globalUI.widgets];
+        updatedWidgets[widgetIndex] = {
+          ...widget,
+          ...(p.props !== undefined && { props: { ...widget.props, ...p.props } }),
+          ...(p.slot !== undefined && { slot: p.slot }),
+          ...(p.priority !== undefined && { priority: p.priority }),
+          ...(p.visible !== undefined && { visible: p.visible }),
+        };
+
+        this.setState('globalUI', {
+          ...globalUI,
+          widgets: updatedWidgets,
+        });
+
+        return { success: true };
+      }
+
+      case 'setWidgetVisible': {
+        const { id, visible } = payload as { id: string; visible: boolean };
+        const widgetIndex = globalUI.widgets.findIndex((w) => w.id === id);
+        if (widgetIndex === -1) {
+          return { success: false, error: 'Widget not found' };
+        }
+
+        const updatedWidgets = [...globalUI.widgets];
+        updatedWidgets[widgetIndex] = {
+          ...updatedWidgets[widgetIndex]!,
+          visible,
+        };
+
+        this.setState('globalUI', {
+          ...globalUI,
+          widgets: updatedWidgets,
+        });
+
+        return { success: true };
+      }
+
+      default:
+        throw new Error(`Unknown globalUI action: ${action}`);
     }
   }
 }

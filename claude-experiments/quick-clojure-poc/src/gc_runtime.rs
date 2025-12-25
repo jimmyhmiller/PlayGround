@@ -1880,11 +1880,8 @@ impl GCRuntime {
     pub fn format_value(&self, value: usize) -> String {
         let kind = BuiltInTypes::get_kind(value);
         match kind {
-            // Untag by shifting right 3 bits
-            // Use unsigned shift to avoid sign extension for large positive values
-            // Note: This means negative numbers will display as large positive values,
-            // but this is preferable to positive numbers displaying as negative
-            BuiltInTypes::Int => format!("{}", value >> 3),
+            // Untag by shifting right 3 bits using arithmetic shift (sign-preserving)
+            BuiltInTypes::Int => format!("{}", (value as isize) >> 3),
             BuiltInTypes::Bool => {
                 if value == 11 {
                     "true".to_string()

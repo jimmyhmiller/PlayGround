@@ -92,8 +92,9 @@ function titlesMatch(title1, title2, threshold = 0.8) {
  * @param {number} numPages - Number of pages to analyze per PDF
  * @param {number} threshold - Similarity threshold for matching
  * @param {number} dpi - Image resolution in DPI (lower = faster)
+ * @param {number} parallel - Number of PDFs to process in parallel
  */
-async function updateIndex(indexPath, verify = false, forceAll = false, numPages = 3, threshold = 0.8, dpi = 72) {
+async function updateIndex(indexPath, verify = false, forceAll = false, numPages = 3, threshold = 0.8, dpi = 72, parallel = 1) {
   console.log('='.repeat(60));
   console.log('Configuration:');
   console.log(`  Index file: ${indexPath}`);
@@ -102,6 +103,7 @@ async function updateIndex(indexPath, verify = false, forceAll = false, numPages
   console.log(`  Pages per PDF: ${numPages}`);
   console.log(`  Image resolution: ${dpi} DPI`);
   console.log(`  Similarity threshold: ${(threshold * 100).toFixed(0)}%`);
+  console.log(`  Parallel workers: ${parallel}`);
   console.log('='.repeat(60));
   console.log('');
 
@@ -150,72 +152,62 @@ async function updateIndex(indexPath, verify = false, forceAll = false, numPages
   let mismatchedCount = 0;
   let errorCount = 0;
 
-  // Process each PDF
-  for (let i = 0; i < toProcess.length; i++) {
-    const entry = toProcess[i];
+  // Process a single PDF entry
+  async function processEntry(entry, entryNum) {
     const pdfIndex = indexData.indexOf(entry);
+    const prefix = `[${entryNum}/${toProcess.length}]`;
 
-    console.log(`[${i + 1}/${toProcess.length}] Processing: ${entry.fileName}`);
-    console.log(`  Path: ${entry.path}`);
-
-    if (entry.metadataFound) {
-      console.log(`  Existing title: "${entry.title}"`);
-      console.log(`  Existing author: "${entry.author}"`);
-    } else {
-      console.log(`  No existing metadata`);
-    }
-
-    let shouldSave = false;
+    console.log(`${prefix} Processing: ${entry.fileName}`);
 
     try {
       // Extract metadata using LLM (quiet mode)
       const llmMetadata = await extractMetadataWithLLM(entry.path, numPages, true, dpi);
 
-      console.log(`  LLM title: "${llmMetadata.title}"`);
-      console.log(`  LLM author: "${llmMetadata.author}"`);
+      console.log(`${prefix} LLM: "${llmMetadata.title}" by "${llmMetadata.author}"`);
 
       // Check if we need to update based on matching
       let needsUpdate = false;
 
       if (!entry.metadataFound) {
-        // No existing metadata, always add OCR fields
         needsUpdate = true;
-        console.log(`  Action: Adding OCR metadata (no existing metadata)`);
       } else if (verify) {
-        // Verify mode: check if titles match
         const match = titlesMatch(entry.title, llmMetadata.title, threshold);
-
         if (match) {
-          console.log(`  Action: Titles match, keeping existing metadata`);
           matchedCount++;
         } else {
-          console.log(`  Action: Titles don't match, adding ocr_title field`);
           needsUpdate = true;
           mismatchedCount++;
         }
+      } else if (forceAll) {
+        needsUpdate = true;
       }
 
       if (needsUpdate) {
-        // Add OCR fields
         indexData[pdfIndex].ocr_title = llmMetadata.title;
         indexData[pdfIndex].ocr_author = llmMetadata.author;
         processedCount++;
-        shouldSave = true;
+        return true; // Signal that we updated
       }
 
     } catch (error) {
-      console.error(`  Error: ${error.message}`);
-      console.error(`  Skipping this PDF (will retry on next run)`);
+      console.error(`${prefix} Error: ${error.message}`);
       errorCount++;
-      // Don't save on error, don't add error to index
     }
+    return false;
+  }
 
-    // Save progress after each successful update to avoid losing work if interrupted
-    if (shouldSave) {
+  // Process in batches for parallel execution
+  for (let i = 0; i < toProcess.length; i += parallel) {
+    const batch = toProcess.slice(i, i + parallel);
+    const batchPromises = batch.map((entry, j) => processEntry(entry, i + j + 1));
+
+    const results = await Promise.all(batchPromises);
+
+    // Save after each batch if any updates were made
+    if (results.some(r => r)) {
       await writeFile(indexPath, JSON.stringify(indexData, null, 2));
+      console.log(`  [Saved progress: ${processedCount} updated so far]`);
     }
-
-    console.log('');
   }
 
   // Final message
@@ -262,6 +254,7 @@ Options:
   --pages N     Number of pages to analyze per PDF (default: 3)
   --threshold T Similarity threshold for matching (0-1, default: 0.8)
   --dpi N       Image resolution in DPI (default: 72, lower = faster)
+  --parallel N  Process N PDFs in parallel (default: 1)
 
 Examples:
   # Update PDFs without metadata
@@ -284,6 +277,9 @@ Examples:
 
   # Use higher resolution for better accuracy
   node update-index.js ../pdf-indexer/pdf-index.json --dpi 150
+
+  # Process 4 PDFs in parallel for faster batch processing
+  node update-index.js ../pdf-indexer/pdf-index.json --force-all --parallel 4
 
 The tool will:
   1. Read the existing index file
@@ -318,6 +314,12 @@ The tool will:
     ? parseInt(args[dpiIndex + 1])
     : 72;
 
+  // Parse --parallel option
+  const parallelIndex = args.indexOf('--parallel');
+  const parallel = parallelIndex !== -1 && args[parallelIndex + 1]
+    ? parseInt(args[parallelIndex + 1])
+    : 1;
+
   if (threshold < 0 || threshold > 1) {
     console.error('Error: Threshold must be between 0 and 1');
     process.exit(1);
@@ -329,7 +331,7 @@ The tool will:
   }
 
   try {
-    await updateIndex(indexPath, verify, forceAll, numPages, threshold, dpi);
+    await updateIndex(indexPath, verify, forceAll, numPages, threshold, dpi, parallel);
   } catch (error) {
     console.error('Error:', error.message);
     process.exit(1);

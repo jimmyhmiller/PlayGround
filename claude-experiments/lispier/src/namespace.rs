@@ -99,8 +99,9 @@ impl NamespaceScope {
                     }
                 }
             }
-            // Alias not found - this is an error
-            return Err(alias.to_string());
+            // Alias not found - create a namespace for it
+            // This allows struct accessors like Point/x to work without requiring Point as a dialect
+            return Ok(Namespace::with_alias(alias, alias));
         }
 
         // Check for dot notation: namespace.name (only before any angle bracket)

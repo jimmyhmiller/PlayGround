@@ -222,10 +222,7 @@ pub fn print_module(module: &Module) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir_gen::IRGenerator;
-    use crate::macros::{JitMacro, Macro};
-    use crate::module_loader::ModuleLoader;
-    use crate::runtime::extract_defmacros;
+    use crate::macros::Macro;
     use crate::value::Value;
     use std::path::Path;
 
@@ -246,36 +243,19 @@ mod tests {
 
     #[test]
     fn test_jit_macro_integration() {
-        // Load and compile the macro module
+        use crate::macro_compiler::MacroCompiler;
+
+        // Load and compile the macro module using MacroCompiler
+        // (MacroCompiler is the proper way to compile macro modules)
         let macro_file = Path::new("examples/macro_double.lisp");
-        let project_root = macro_file.parent().unwrap().parent().unwrap();
-        let mut loader = ModuleLoader::new(project_root);
-        let nodes = loader.load(macro_file).expect("Failed to load macro module");
+        let compiler = MacroCompiler::new();
+        let compiled = compiler
+            .compile_file(macro_file)
+            .expect("Failed to compile macro module");
 
-        // Extract defmacro declarations
-        let defmacros = extract_defmacros(&nodes);
-        assert!(!defmacros.is_empty(), "Expected at least one defmacro");
-        assert_eq!(defmacros[0].name, "double");
-
-        // Generate MLIR and compile
-        let registry = DialectRegistry::new();
-        let generator = IRGenerator::new(&registry);
-        let mut module = generator.generate(&nodes).expect("Failed to generate IR");
-
-        let jit = Jit::new(&registry, &mut module).expect("Failed to create JIT");
-
-        // Register FFI symbols
-        unsafe {
-            jit.register_value_ffi();
-        }
-
-        // Look up the macro function
-        let macro_fn = jit
-            .lookup_macro_fn("double")
-            .expect("Failed to find double function");
-
-        // Create the JitMacro
-        let jit_macro = unsafe { JitMacro::new("double", macro_fn) };
+        assert!(!compiled.macros.is_empty(), "Expected at least one macro");
+        let jit_macro = &compiled.macros[0];
+        assert_eq!(jit_macro.name(), "double");
 
         // Test the macro: expand (double 21) should return (arith.addi 21 21)
         let args = vec![Value::Number(21.0)];

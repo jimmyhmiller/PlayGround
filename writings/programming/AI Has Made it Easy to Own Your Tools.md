@@ -34,4 +34,6 @@ For the rest, we pass to Qwen3-VL-30B to grab the title and author.
 
 A swift application compiled for my mac and ipad that let's me annotate pdfs.
 
-![Screenshot 2025-12-23 at 3.37.34 PM](/Users/jimmyhmiller/Library/Application Support/typora-user-images/Screenshot 2025-12-23 at 3.37.34 PM.png)
+![Screenshot 2025-12-24 at 11.15.36 PM](/Users/jimmyhmiller/Library/Application Support/typora-user-images/Screenshot 2025-12-24 at 11.15.36 PM.png)
+
+The app is far from fully featured yet. But the fact that it syncs between my mac and ipad seamlessly is wonderful. I use this mainly for the podcast, so I haven't gotten to do a ton with it yet. But having it be something I can customize to my needs already has me excited.

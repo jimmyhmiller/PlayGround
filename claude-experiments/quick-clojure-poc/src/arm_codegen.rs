@@ -368,9 +368,8 @@ impl Arm64CodeGen {
                         let src_reg = self.get_physical_reg_for_irvalue(src, false)?;
                         // Step 1: Shift pointer left by 3
                         self.emit_lsl_imm(dst_reg, src_reg, 3);
-                        // Step 2: OR with tag value
-                        self.emit_mov_imm(9, t as i64); // x9 = tag value
-                        self.emit_orr(dst_reg, dst_reg, 9); // dst = (src << 3) | tag
+                        // Step 2: OR with tag value using immediate form (no scratch register needed)
+                        self.emit_orr_imm(dst_reg, dst_reg, t as u32);
                     }
                     // Register/Spill without explicit tag: shift left by 3 (integer tagging)
                     (_, None) => {

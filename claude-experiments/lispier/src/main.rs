@@ -235,7 +235,7 @@ fn show_expanded(path: &str) -> ExitCode {
     };
 
     // Macro expansion
-    let expander = MacroExpander::new();
+    let mut expander = MacroExpander::new();
     let expanded = match expander.expand_all(&values) {
         Ok(e) => e,
         Err(e) => {

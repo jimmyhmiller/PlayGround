@@ -18,6 +18,8 @@ struct PDFMetadata: Codable, Identifiable, Hashable {
     let preferred_title: String?
     let preferred_author: String?
     let preferred_source: String?
+    let is_duplicate: Bool?
+    let duplicate_of: String?
 
     // Use path as ID since it's unique, not hash (which can be same in different folders)
     var id: String { path }
@@ -63,9 +65,10 @@ struct PDFLibrary {
     private let _sortedFolders: [String]
 
     init(pdfs: [PDFMetadata]) {
-        self.pdfs = pdfs
+        // Filter out duplicates
+        self.pdfs = pdfs.filter { $0.is_duplicate != true }
         // Pre-calculate folders once
-        self._folders = Dictionary(grouping: pdfs, by: { $0.folder })
+        self._folders = Dictionary(grouping: self.pdfs, by: { $0.folder })
         self._sortedFolders = _folders.keys.sorted()
     }
 

@@ -236,10 +236,21 @@ impl ModuleLoader {
         let registry = self.load_macro_modules(&macro_paths, current_dir, path)?;
 
         // Macro expansion with the custom registry
-        let expander = MacroExpander::with_registry(registry);
+        let mut expander = MacroExpander::with_registry(registry);
         let expanded = expander
             .expand_all(&values)
             .map_err(|e| ModuleError::MacroError(path.clone(), e.to_string()))?;
+
+        // Transfer JIT instances from expander to keep dynamically compiled macros alive
+        let dynamic_jits = expander.take_jit_instances();
+        for jit in dynamic_jits {
+            // Use the path as a key with a counter to avoid collisions
+            let key = path.with_extension(format!(
+                "dynamic_macro_{}",
+                self.macro_jits.len()
+            ));
+            self.macro_jits.insert(key, jit);
+        }
 
         let mut parser = Parser::new();
         parser

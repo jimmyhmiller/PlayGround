@@ -16,7 +16,7 @@ import GitDiffViewer from './GitDiffViewer';
 import EventLogPanel from './EventLogPanel';
 import ThemeEditor from './ThemeEditor';
 import SettingsEditor from './SettingsEditor';
-import { GlobalUIRenderer, globalUIRegistry } from '../globalUI';
+import { GlobalUIRenderer } from '../globalUI';
 
 interface ComponentConfig {
   component: ComponentType<unknown>;
@@ -567,7 +567,7 @@ function Desktop(): ReactElement {
               <WindowContainer />
             </div>
             {/* Global UI layer - widgets in fixed positions */}
-            <GlobalUIRenderer registry={globalUIRegistry} />
+            <GlobalUIRenderer />
             <DesktopCommandPalette />
             <DesktopQuickSwitcher />
           </div>

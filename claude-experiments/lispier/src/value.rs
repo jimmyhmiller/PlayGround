@@ -53,6 +53,12 @@ impl Symbol {
 
 impl fmt::Display for Symbol {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Don't print the "user" namespace - it's the default/implicit namespace
+        if let Some(ref ns) = self.namespace {
+            if ns.name == "user" {
+                return write!(f, "{}", self.name);
+            }
+        }
         write!(f, "{}", self.qualified_name())
     }
 }

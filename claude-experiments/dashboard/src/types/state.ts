@@ -108,6 +108,45 @@ export interface DashboardsState {
   list: DashboardState[];
 }
 
+// ========== Global UI State ==========
+
+/**
+ * Slot position configuration
+ */
+export type SlotPosition =
+  | { type: 'corner'; corner: 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right' }
+  | { type: 'bar'; edge: 'top' | 'bottom' }
+  | { type: 'panel'; side: 'left' | 'right'; width?: number };
+
+/**
+ * Slot definition - a named position where widgets can be placed
+ */
+export interface SlotState {
+  id: string;
+  position: SlotPosition;
+  zIndex?: number;
+}
+
+/**
+ * Widget instance - a configured widget in a slot
+ */
+export interface WidgetState {
+  id: string;
+  type: string;
+  slot: string;
+  props: Record<string, unknown>;
+  priority?: number;
+  visible?: boolean;
+}
+
+/**
+ * Global UI state - slots and widget instances
+ */
+export interface GlobalUIState {
+  slots: SlotState[];
+  widgets: WidgetState[];
+}
+
 /**
  * Complete application state
  */
@@ -118,6 +157,7 @@ export interface AppState {
   components: ComponentsState;
   projects: ProjectsState;
   dashboards: DashboardsState;
+  globalUI: GlobalUIState;
 }
 
 /**
@@ -234,6 +274,39 @@ export interface DashboardRenamePayload {
 export interface DashboardSetThemeOverridePayload {
   id: string;
   themeOverride?: ThemeState;
+}
+
+// ========== Global UI Payloads ==========
+
+/**
+ * Slot add payload
+ */
+export interface SlotAddPayload {
+  id: string;
+  position: SlotPosition;
+  zIndex?: number;
+}
+
+/**
+ * Widget add payload
+ */
+export interface WidgetAddPayload {
+  id?: string;
+  type: string;
+  slot: string;
+  props?: Record<string, unknown>;
+  priority?: number;
+}
+
+/**
+ * Widget update payload
+ */
+export interface WidgetUpdatePayload {
+  id: string;
+  props?: Record<string, unknown>;
+  slot?: string;
+  priority?: number;
+  visible?: boolean;
 }
 
 /**
