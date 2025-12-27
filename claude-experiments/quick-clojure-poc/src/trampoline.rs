@@ -15,6 +15,97 @@ use std::cell::UnsafeCell;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+/// Call a closure function with arg_count passed in x9 (for variadic dispatch)
+///
+/// This uses inline assembly to properly set up x9 before calling the closure.
+/// The closure calling convention is:
+/// - x0 = closure pointer (tagged)
+/// - x1-x7 = user arguments (up to 7)
+/// - x9 = total argument count (for variadic rest-arg collection)
+///
+/// # Safety
+/// - code_ptr must be a valid function pointer
+/// - closure must be a valid tagged closure pointer
+/// - args must have at least 7 elements (padded with nil)
+#[cfg(target_arch = "aarch64")]
+unsafe fn call_closure_with_arg_count(
+    code_ptr: usize,
+    closure: usize,
+    args: &[usize; 8],
+    arg_count: usize,
+) -> usize {
+    let result: usize;
+    // Use a trampoline approach: save inputs to callee-saved regs first,
+    // then set up the call
+    unsafe { asm!(
+        // Save frame pointer and link register (callee-saved)
+        "stp x29, x30, [sp, #-16]!",
+        "mov x29, sp",
+
+        // Save inputs to scratch registers (x10-x13)
+        // x10 = code_ptr, x11 = closure, x12 = args_ptr, x13 = arg_count
+        "mov x10, {code_ptr}",
+        "mov x11, {closure}",
+        "mov x12, {args_ptr}",
+        "mov x13, {arg_count}",
+
+        // Now set up the actual call registers
+        // x0 = closure
+        "mov x0, x11",
+
+        // Load args from array (x12)
+        "ldr x1, [x12, #0]",
+        "ldr x2, [x12, #8]",
+        "ldr x3, [x12, #16]",
+        "ldr x4, [x12, #24]",
+        "ldr x5, [x12, #32]",
+        "ldr x6, [x12, #40]",
+        "ldr x7, [x12, #48]",
+
+        // Set x9 = arg_count
+        "mov x9, x13",
+
+        // Call the function (code_ptr is in x10)
+        "blr x10",
+
+        // Restore frame pointer and link register
+        "ldp x29, x30, [sp], #16",
+
+        // Result is in x0
+        code_ptr = in(reg) code_ptr,
+        closure = in(reg) closure,
+        args_ptr = in(reg) args.as_ptr(),
+        arg_count = in(reg) arg_count,
+        lateout("x0") result,
+        // Clobbers - all caller-saved registers that the function might use
+        out("x1") _,
+        out("x2") _,
+        out("x3") _,
+        out("x4") _,
+        out("x5") _,
+        out("x6") _,
+        out("x7") _,
+        out("x9") _,
+        // Also clobber the scratch regs we used
+        out("x10") _,
+        out("x11") _,
+        out("x12") _,
+        out("x13") _,
+        clobber_abi("C"),
+    ); }
+    result
+}
+
+#[cfg(not(target_arch = "aarch64"))]
+unsafe fn call_closure_with_arg_count(
+    _code_ptr: usize,
+    _closure: usize,
+    _args: &[usize; 8],
+    _arg_count: usize,
+) -> usize {
+    panic!("call_closure_with_arg_count only supported on aarch64");
+}
+
 // Global runtime reference (set during initialization)
 // SAFETY: Must be initialized before any JIT code runs
 static mut RUNTIME: Option<Arc<UnsafeCell<GCRuntime>>> = None;
@@ -1195,8 +1286,9 @@ pub extern "C" fn trampoline_store_type_field_by_symbol(
 ///         x2 = arity_count
 ///         x3 = arities_ptr (pointer to (param_count, code_ptr) pairs on stack)
 ///         x4 = variadic_min (usize::MAX if no variadic)
-///         x5 = closure_count
-///         x6 = closures_ptr (pointer to closure values on stack)
+///         x5 = variadic_index (usize::MAX if no variadic)
+///         x6 = closure_count
+///         x7 = closures_ptr (pointer to closure values on stack)
 /// - Returns: x0 = tagged closure pointer
 #[unsafe(no_mangle)]
 pub extern "C" fn trampoline_allocate_multi_arity_fn(
@@ -1205,6 +1297,7 @@ pub extern "C" fn trampoline_allocate_multi_arity_fn(
     arity_count: usize,
     arities_ptr: *const usize,
     variadic_min: usize,
+    variadic_index: usize,
     closure_count: usize,
     closures_ptr: *const usize,
 ) -> usize {
@@ -1234,15 +1327,21 @@ pub extern "C" fn trampoline_allocate_multi_arity_fn(
             vec![]
         };
 
-        // Convert variadic_min sentinel to Option
+        // Convert variadic_min and variadic_index sentinels to Option
         let variadic_min_opt = if variadic_min == usize::MAX {
             None
         } else {
             Some(variadic_min)
         };
 
+        let variadic_index_opt = if variadic_index == usize::MAX {
+            None
+        } else {
+            Some(variadic_index)
+        };
+
         // TODO: Handle name_ptr if non-zero
-        match rt.allocate_multi_arity_function(None, arities, variadic_min_opt, closure_values) {
+        match rt.allocate_multi_arity_function(None, arities, variadic_min_opt, variadic_index_opt, closure_values) {
             Ok(fn_ptr) => fn_ptr,
             Err(msg) => {
                 eprintln!("Error allocating multi-arity function: {}", msg);
@@ -2407,7 +2506,13 @@ pub fn invoke_macro(
         if closure_type_id == TYPE_MULTI_ARITY_FN as u8 {
             // Multi-arity closure - look up the right arity
             match rt.multi_arity_lookup(fn_tagged, arg_count) {
-                Some((code_ptr, _is_variadic)) => {
+                Some((code_ptr, is_variadic)) => {
+                    // For variadic functions, use apply_fn which properly handles x9
+                    if is_variadic {
+                        return apply_fn(rt, fn_tagged, args);
+                    }
+
+                    // Non-variadic multi-arity - standard call
                     // Closure calling convention: x0 = closure, x1-x7 = args
                     type ClosureFn1 = extern "C" fn(usize) -> usize;
                     type ClosureFn2 = extern "C" fn(usize, usize) -> usize;
@@ -2666,6 +2771,229 @@ pub fn invoke_protocol_method(
             "Protocol method {} is not a function (tag: {})",
             method_name, tag
         ))
+    }
+}
+
+// ========== Apply Trampoline ==========
+
+/// Trampoline: Apply a function to a list of arguments
+///
+/// ARM64 Calling Convention:
+/// - Args: x0 = stack_pointer (JIT frame pointer for GC)
+///         x1 = fn_value (tagged function/closure)
+///         x2 = args_seq (tagged seq/list of arguments)
+/// - Returns: x0 = result of applying the function
+///
+/// This handles all function types (raw functions, closures, multi-arity, IFn)
+/// and properly sets up x9 for variadic functions.
+#[unsafe(no_mangle)]
+pub extern "C" fn trampoline_apply(
+    stack_pointer: usize,
+    fn_value: usize,
+    args_seq: usize,
+) -> usize {
+    unsafe {
+        let runtime_ptr = std::ptr::addr_of!(RUNTIME);
+        let rt = &mut *(*runtime_ptr).as_ref().unwrap().get();
+
+        // GC before operation if needed
+        rt.maybe_gc_before_alloc(stack_pointer);
+
+        // Convert args_seq to a Vec<usize>
+        let args = match seq_to_vec(rt, args_seq) {
+            Ok(v) => v,
+            Err(msg) => {
+                eprintln!("apply: error converting args to vec: {}", msg);
+                return 7; // nil
+            }
+        };
+
+        // Call the function with the args
+        match apply_fn(rt, fn_value, &args) {
+            Ok(result) => result,
+            Err(msg) => {
+                eprintln!("apply: error: {}", msg);
+                7 // nil
+            }
+        }
+    }
+}
+
+/// Convert a seq/list to a Vec of tagged values
+fn seq_to_vec(rt: &mut GCRuntime, seq: usize) -> Result<Vec<usize>, String> {
+    use crate::gc_runtime::{TYPE_LIST, TYPE_READER_LIST, TYPE_READER_VECTOR, TYPE_VECTOR};
+
+    if seq == 7 {
+        // nil = empty list
+        return Ok(vec![]);
+    }
+
+    let tag = seq & 0b111;
+    if tag != 0b110 {
+        return Err(format!("apply: args must be a seq, got tag {}", tag));
+    }
+
+    let type_id = rt.get_type_id_for_value(seq);
+    let mut result = Vec::new();
+
+    match type_id as usize {
+        TYPE_READER_LIST | TYPE_LIST => {
+            // Cons-based list - use first/rest
+            let mut current = seq;
+            loop {
+                if current == 7 {
+                    break;
+                }
+                let curr_type = rt.get_type_id_for_value(current);
+                if curr_type as usize == TYPE_READER_LIST || curr_type as usize == TYPE_LIST
+                {
+                    let first = rt.prim_first(current)?;
+                    result.push(first);
+                    current = rt.prim_rest(current)?;
+                } else if current == 7 {
+                    break;
+                } else {
+                    return Err(format!("apply: unexpected type in list: {}", curr_type));
+                }
+            }
+        }
+        TYPE_READER_VECTOR | TYPE_VECTOR => {
+            // Indexed collection - use count and nth
+            let count = rt.prim_count(seq)?;
+            for i in 0..count {
+                let elem = rt.prim_nth(seq, i)?;
+                result.push(elem);
+            }
+        }
+        _ => {
+            return Err(format!("apply: unsupported seq type {}", type_id));
+        }
+    }
+
+    Ok(result)
+}
+
+/// Apply a function to a slice of arguments
+fn apply_fn(rt: &mut GCRuntime, fn_value: usize, args: &[usize]) -> Result<usize, String> {
+    use crate::gc_runtime::{closure_layout, TYPE_FUNCTION, TYPE_MULTI_ARITY_FN};
+    use crate::gc::types::HeapObject;
+
+    let tag = fn_value & 0b111;
+
+    // Pad args to 8 elements
+    let mut padded_args = [7usize; 8];
+    for (i, &arg) in args.iter().take(8).enumerate() {
+        padded_args[i] = arg;
+    }
+    let arg_count = args.len();
+
+    match tag {
+        0b100 => {
+            // Raw function pointer
+            type RawFn0 = extern "C" fn() -> usize;
+            type RawFn1 = extern "C" fn(usize) -> usize;
+            type RawFn2 = extern "C" fn(usize, usize) -> usize;
+            type RawFn3 = extern "C" fn(usize, usize, usize) -> usize;
+            type RawFn4 = extern "C" fn(usize, usize, usize, usize) -> usize;
+            type RawFn5 = extern "C" fn(usize, usize, usize, usize, usize) -> usize;
+            type RawFn6 = extern "C" fn(usize, usize, usize, usize, usize, usize) -> usize;
+            type RawFn7 = extern "C" fn(usize, usize, usize, usize, usize, usize, usize) -> usize;
+            type RawFn8 = extern "C" fn(usize, usize, usize, usize, usize, usize, usize, usize) -> usize;
+
+            let code_ptr = fn_value >> 3;
+            let result = unsafe {
+                match arg_count {
+                    0 => std::mem::transmute::<usize, RawFn0>(code_ptr)(),
+                    1 => std::mem::transmute::<usize, RawFn1>(code_ptr)(padded_args[0]),
+                    2 => std::mem::transmute::<usize, RawFn2>(code_ptr)(padded_args[0], padded_args[1]),
+                    3 => std::mem::transmute::<usize, RawFn3>(code_ptr)(padded_args[0], padded_args[1], padded_args[2]),
+                    4 => std::mem::transmute::<usize, RawFn4>(code_ptr)(padded_args[0], padded_args[1], padded_args[2], padded_args[3]),
+                    5 => std::mem::transmute::<usize, RawFn5>(code_ptr)(padded_args[0], padded_args[1], padded_args[2], padded_args[3], padded_args[4]),
+                    6 => std::mem::transmute::<usize, RawFn6>(code_ptr)(padded_args[0], padded_args[1], padded_args[2], padded_args[3], padded_args[4], padded_args[5]),
+                    7 => std::mem::transmute::<usize, RawFn7>(code_ptr)(padded_args[0], padded_args[1], padded_args[2], padded_args[3], padded_args[4], padded_args[5], padded_args[6]),
+                    _ => std::mem::transmute::<usize, RawFn8>(code_ptr)(padded_args[0], padded_args[1], padded_args[2], padded_args[3], padded_args[4], padded_args[5], padded_args[6], padded_args[7]),
+                }
+            };
+            Ok(result)
+        }
+        0b101 => {
+            // Closure - check if single-arity or multi-arity
+            let untagged = fn_value >> 3;
+            let heap_obj = HeapObject::from_untagged(untagged as *const u8);
+            let type_id = heap_obj.get_header().type_id;
+
+            if type_id == TYPE_MULTI_ARITY_FN as u8 {
+                // Multi-arity function - look up arity and call with x9 set
+                match rt.multi_arity_lookup(fn_value, arg_count) {
+                    Some((code_ptr, is_variadic)) => {
+                        if is_variadic {
+                            // Use the inline asm helper to set x9
+                            let result = unsafe {
+                                call_closure_with_arg_count(code_ptr, fn_value, &padded_args, arg_count)
+                            };
+                            Ok(result)
+                        } else {
+                            // Non-variadic - standard call
+                            type ClosureFn1 = extern "C" fn(usize) -> usize;
+                            type ClosureFn2 = extern "C" fn(usize, usize) -> usize;
+                            type ClosureFn3 = extern "C" fn(usize, usize, usize) -> usize;
+                            type ClosureFn4 = extern "C" fn(usize, usize, usize, usize) -> usize;
+                            type ClosureFn5 = extern "C" fn(usize, usize, usize, usize, usize) -> usize;
+                            type ClosureFn6 = extern "C" fn(usize, usize, usize, usize, usize, usize) -> usize;
+                            type ClosureFn7 = extern "C" fn(usize, usize, usize, usize, usize, usize, usize) -> usize;
+                            type ClosureFn8 = extern "C" fn(usize, usize, usize, usize, usize, usize, usize, usize) -> usize;
+
+                            let result = unsafe {
+                                match arg_count {
+                                    0 => std::mem::transmute::<usize, ClosureFn1>(code_ptr)(fn_value),
+                                    1 => std::mem::transmute::<usize, ClosureFn2>(code_ptr)(fn_value, padded_args[0]),
+                                    2 => std::mem::transmute::<usize, ClosureFn3>(code_ptr)(fn_value, padded_args[0], padded_args[1]),
+                                    3 => std::mem::transmute::<usize, ClosureFn4>(code_ptr)(fn_value, padded_args[0], padded_args[1], padded_args[2]),
+                                    4 => std::mem::transmute::<usize, ClosureFn5>(code_ptr)(fn_value, padded_args[0], padded_args[1], padded_args[2], padded_args[3]),
+                                    5 => std::mem::transmute::<usize, ClosureFn6>(code_ptr)(fn_value, padded_args[0], padded_args[1], padded_args[2], padded_args[3], padded_args[4]),
+                                    6 => std::mem::transmute::<usize, ClosureFn7>(code_ptr)(fn_value, padded_args[0], padded_args[1], padded_args[2], padded_args[3], padded_args[4], padded_args[5]),
+                                    _ => std::mem::transmute::<usize, ClosureFn8>(code_ptr)(fn_value, padded_args[0], padded_args[1], padded_args[2], padded_args[3], padded_args[4], padded_args[5], padded_args[6]),
+                                }
+                            };
+                            Ok(result)
+                        }
+                    }
+                    None => Err(format!("apply: wrong number of args ({}) for function", arg_count)),
+                }
+            } else if type_id == TYPE_FUNCTION as u8 {
+                // Single-arity closure
+                let code_ptr = heap_obj.get_field(closure_layout::FIELD_1_CODE_PTR / 8);
+
+                type ClosureFn1 = extern "C" fn(usize) -> usize;
+                type ClosureFn2 = extern "C" fn(usize, usize) -> usize;
+                type ClosureFn3 = extern "C" fn(usize, usize, usize) -> usize;
+                type ClosureFn4 = extern "C" fn(usize, usize, usize, usize) -> usize;
+                type ClosureFn5 = extern "C" fn(usize, usize, usize, usize, usize) -> usize;
+                type ClosureFn6 = extern "C" fn(usize, usize, usize, usize, usize, usize) -> usize;
+                type ClosureFn7 = extern "C" fn(usize, usize, usize, usize, usize, usize, usize) -> usize;
+                type ClosureFn8 = extern "C" fn(usize, usize, usize, usize, usize, usize, usize, usize) -> usize;
+
+                let result = unsafe {
+                    match arg_count {
+                        0 => std::mem::transmute::<usize, ClosureFn1>(code_ptr)(fn_value),
+                        1 => std::mem::transmute::<usize, ClosureFn2>(code_ptr)(fn_value, padded_args[0]),
+                        2 => std::mem::transmute::<usize, ClosureFn3>(code_ptr)(fn_value, padded_args[0], padded_args[1]),
+                        3 => std::mem::transmute::<usize, ClosureFn4>(code_ptr)(fn_value, padded_args[0], padded_args[1], padded_args[2]),
+                        4 => std::mem::transmute::<usize, ClosureFn5>(code_ptr)(fn_value, padded_args[0], padded_args[1], padded_args[2], padded_args[3]),
+                        5 => std::mem::transmute::<usize, ClosureFn6>(code_ptr)(fn_value, padded_args[0], padded_args[1], padded_args[2], padded_args[3], padded_args[4]),
+                        6 => std::mem::transmute::<usize, ClosureFn7>(code_ptr)(fn_value, padded_args[0], padded_args[1], padded_args[2], padded_args[3], padded_args[4], padded_args[5]),
+                        _ => std::mem::transmute::<usize, ClosureFn8>(code_ptr)(fn_value, padded_args[0], padded_args[1], padded_args[2], padded_args[3], padded_args[4], padded_args[5], padded_args[6]),
+                    }
+                };
+                Ok(result)
+            } else {
+                Err(format!("apply: unknown closure type_id {}", type_id))
+            }
+        }
+        _ => {
+            // Try IFn invoke
+            Err(format!("apply: cannot apply value with tag {}", tag))
+        }
     }
 }
 

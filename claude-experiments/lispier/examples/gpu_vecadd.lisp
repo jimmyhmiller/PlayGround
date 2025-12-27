@@ -8,31 +8,32 @@
 (require-dialect scf)
 
 ;; Compilation pipeline - chip is detected at runtime
+;; Use bare pointer calling convention to avoid ciface wrapper issues with GPU runtime
 (compilation
   (target rocm
     (pass gpu-kernel-outlining)
     (pass rocdl-attach-target)
-    (pass convert-gpu-to-rocdl)
+    (pass convert-gpu-to-rocdl {:use-bare-ptr-memref-call-conv true})
     (pass gpu-module-to-binary)
     (pass convert-scf-to-cf)
     (pass convert-cf-to-llvm)
     (pass convert-arith-to-llvm)
     (pass convert-func-to-llvm)
     (pass finalize-memref-to-llvm)
-    (pass gpu-to-llvm)
+    (pass gpu-to-llvm {:use-bare-pointers-for-kernels true :use-bare-pointers-for-host true})
     (pass reconcile-unrealized-casts))
 
   (target cuda
     (pass gpu-kernel-outlining)
     (pass nvvm-attach-target)
-    (pass convert-gpu-to-nvvm)
+    (pass convert-gpu-to-nvvm {:use-bare-ptr-memref-call-conv true})
     (pass gpu-module-to-binary)
     (pass convert-scf-to-cf)
     (pass convert-cf-to-llvm)
     (pass convert-arith-to-llvm)
     (pass convert-func-to-llvm)
     (pass finalize-memref-to-llvm)
-    (pass gpu-to-llvm)
+    (pass gpu-to-llvm {:use-bare-pointers-for-kernels true :use-bare-pointers-for-host true})
     (pass reconcile-unrealized-casts)))
 
 (module

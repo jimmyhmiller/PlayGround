@@ -203,10 +203,11 @@ pub enum Instruction {
     CallDirect(IrValue, IrValue, Vec<IrValue>, bool, Option<IrValue>),
 
     // Multi-arity function operations
-    /// MakeMultiArityFn(dst, arities, variadic_min, closure_values)
+    /// MakeMultiArityFn(dst, arities, variadic_min, variadic_index, closure_values)
     /// arities: Vec of (param_count, code_ptr) pairs
     /// variadic_min: If Some, the minimum arg count for variadic dispatch
-    MakeMultiArityFn(IrValue, Vec<(usize, usize)>, Option<usize>, Vec<IrValue>),
+    /// variadic_index: If Some, the index of the variadic arity in the arities table
+    MakeMultiArityFn(IrValue, Vec<(usize, usize)>, Option<usize>, Option<usize>, Vec<IrValue>),
 
     /// LoadClosureMultiArity(dst, fn_obj, arity_count, index)
     /// Load closure variable from multi-arity function (needs arity_count to compute offset)
@@ -241,6 +242,13 @@ pub enum Instruction {
 
     // Return
     Ret(IrValue),
+
+    // Apply - call function with args from a list/seq
+    /// Apply(dst, fn_value, args_list)
+    /// Calls fn_value with arguments extracted from args_list at runtime.
+    /// The args_list can be any seq-able (list, vector, etc.).
+    /// This is implemented via a trampoline that handles the dynamic dispatch.
+    Apply(IrValue, IrValue, IrValue),
 
     // Debug
     Breakpoint, // BRK #0 - trap for debugger

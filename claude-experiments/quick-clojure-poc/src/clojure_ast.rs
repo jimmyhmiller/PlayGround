@@ -1,7 +1,7 @@
 use crate::gc_runtime::{
-    GCRuntime, TYPE_BOOL, TYPE_CLOSURE, TYPE_FLOAT, TYPE_FUNCTION, TYPE_INT, TYPE_KEYWORD,
-    TYPE_NIL, TYPE_READER_LIST, TYPE_READER_MAP, TYPE_READER_SYMBOL, TYPE_READER_VECTOR,
-    TYPE_STRING,
+    GCRuntime, TYPE_BOOL, TYPE_FLOAT, TYPE_INT, TYPE_KEYWORD,
+    TYPE_LIST, TYPE_NIL, TYPE_READER_LIST, TYPE_READER_MAP, TYPE_READER_SYMBOL, TYPE_READER_VECTOR,
+    TYPE_STRING, TYPE_SYMBOL, TYPE_VECTOR,
 };
 use crate::value::Value;
 
@@ -1335,7 +1335,7 @@ fn validate_fn_arities(arities: &[crate::value::FnArity]) -> Result<(), String> 
         return Err("fn requires at least one arity".to_string());
     }
 
-    let mut seen_arities = std::collections::HashSet::new();
+    let mut seen_fixed_arities = std::collections::HashSet::new();
     let mut variadic_count = 0;
 
     for arity in arities {
@@ -1346,10 +1346,15 @@ fn validate_fn_arities(arities: &[crate::value::FnArity]) -> Result<(), String> 
             if variadic_count > 1 {
                 return Err("fn can have at most one variadic arity".to_string());
             }
-        }
-
-        if !seen_arities.insert(arity_num) {
-            return Err(format!("Duplicate arity {} in fn", arity_num));
+            // Variadic arities don't conflict with fixed arities of the same param count.
+            // E.g., ([x y] ...) and ([x y & rest] ...) can coexist:
+            // - Fixed arity handles exactly 2 args
+            // - Variadic handles 3+ args (or 2 args if no fixed arity exists)
+        } else {
+            // Only check for duplicates among fixed arities
+            if !seen_fixed_arities.insert(arity_num) {
+                return Err(format!("Duplicate arity {} in fn", arity_num));
+            }
         }
     }
 
@@ -2045,31 +2050,34 @@ fn tagged_to_value(rt: &mut GCRuntime, tagged: usize) -> Result<Value, String> {
             let kw = rt.get_keyword_text(tagged).unwrap_or("").to_string();
             Ok(Value::Keyword(kw))
         }
-        TYPE_READER_SYMBOL => {
-            let name = rt.reader_symbol_name(tagged);
-            let ns = rt.reader_symbol_namespace(tagged);
+        TYPE_READER_SYMBOL | TYPE_SYMBOL => {
+            // Use primitive dispatch to support both ReaderSymbol and runtime Symbol types
+            let name = rt.prim_symbol_name(tagged)?;
+            let ns = rt.prim_symbol_namespace(tagged)?;
             if let Some(ns) = ns {
                 Ok(Value::Symbol(format!("{}/{}", ns, name)))
             } else {
                 Ok(Value::Symbol(name))
             }
         }
-        TYPE_READER_LIST => {
-            let count = rt.reader_list_count(tagged);
+        TYPE_READER_LIST | TYPE_LIST => {
+            // Use primitive dispatch to support both ReaderList and PersistentList
+            let count = rt.prim_count(tagged).unwrap_or(0);
             let mut items = im::Vector::new();
             let mut current = tagged;
             for _ in 0..count {
-                let first = rt.reader_list_first(current);
+                let first = rt.prim_first(current)?;
                 items.push_back(tagged_to_value(rt, first)?);
-                current = rt.reader_list_rest(current)?;
+                current = rt.prim_rest(current)?;
             }
             Ok(Value::List(items))
         }
-        TYPE_READER_VECTOR => {
-            let count = rt.reader_vector_count(tagged);
+        TYPE_READER_VECTOR | TYPE_VECTOR => {
+            // Use primitive dispatch to support both ReaderVector and PersistentVector
+            let count = rt.prim_count(tagged)?;
             let mut items = im::Vector::new();
             for i in 0..count {
-                let elem = rt.reader_vector_nth(tagged, i)?;
+                let elem = rt.prim_nth(tagged, i)?;
                 items.push_back(tagged_to_value(rt, elem)?);
             }
             Ok(Value::Vector(items))
@@ -2086,6 +2094,35 @@ fn tagged_to_value(rt: &mut GCRuntime, tagged: usize) -> Result<Value, String> {
                 map.insert(tagged_to_value(rt, key)?, tagged_to_value(rt, val)?);
             }
             Ok(Value::Map(map))
+        }
+        _ if type_id >= crate::gc_runtime::DEFTYPE_ID_OFFSET => {
+            // Deftype - check if it's seqable (e.g., Cons, PList, etc.)
+            if rt.prim_is_seqable(tagged) {
+                // Treat as a list
+                let count = rt.prim_count(tagged).unwrap_or(0);
+                let mut items = im::Vector::new();
+                let mut current = tagged;
+                for _ in 0..count {
+                    let first = rt.prim_first(current)?;
+                    items.push_back(tagged_to_value(rt, first)?);
+                    current = rt.prim_rest(current)?;
+                }
+                Ok(Value::List(items))
+            } else if rt.prim_is_symbol(tagged) {
+                // It's a symbol type
+                let name = rt.prim_symbol_name(tagged)?;
+                let ns = rt.prim_symbol_namespace(tagged)?;
+                if let Some(ns) = ns {
+                    Ok(Value::Symbol(format!("{}/{}", ns, name)))
+                } else {
+                    Ok(Value::Symbol(name))
+                }
+            } else {
+                Err(format!(
+                    "Cannot convert deftype {} to Value",
+                    crate::gc_runtime::GCRuntime::builtin_type_name(type_id)
+                ))
+            }
         }
         _ => Err(format!("Cannot convert type_id {} to Value", type_id)),
     }

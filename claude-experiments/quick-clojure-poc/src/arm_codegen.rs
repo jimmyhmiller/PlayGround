@@ -1700,7 +1700,7 @@ impl Arm64CodeGen {
             }
 
             // Multi-arity function instructions
-            Instruction::MakeMultiArityFn(dst, arities, variadic_min, closure_values) => {
+            Instruction::MakeMultiArityFn(dst, arities, variadic_min, variadic_index, closure_values) => {
                 // Create a multi-arity function object on the heap
                 // Similar to MakeFunctionPtr but stores multiple (param_count, code_ptr) pairs
                 //
@@ -1710,8 +1710,9 @@ impl Arm64CodeGen {
                 // - x2 = arity_count
                 // - x3 = arities_ptr (pointer to (param_count, code_ptr) pairs on stack)
                 // - x4 = variadic_min (usize::MAX if no variadic)
-                // - x5 = closure_count
-                // - x6 = closures_ptr (pointer to closure values on stack)
+                // - x5 = variadic_index (usize::MAX if no variadic)
+                // - x6 = closure_count
+                // - x7 = closures_ptr (pointer to closure values on stack)
                 // - Returns: x0 = tagged closure pointer
 
                 let dest_spill = self.dest_spill(dst);
@@ -1757,8 +1758,9 @@ impl Arm64CodeGen {
                 self.emit_mov_imm(2, arities.len() as i64); // x2 = arity_count
                 self.emit_mov(3, arities_ptr_reg); // x3 = arities_ptr
                 self.emit_mov_imm(4, variadic_min.unwrap_or(usize::MAX) as i64); // x4 = variadic_min
-                self.emit_mov_imm(5, closure_values.len() as i64); // x5 = closure_count
-                self.emit_mov(6, closures_ptr_reg); // x6 = closures_ptr
+                self.emit_mov_imm(5, variadic_index.unwrap_or(usize::MAX) as i64); // x5 = variadic_index
+                self.emit_mov_imm(6, closure_values.len() as i64); // x6 = closure_count
+                self.emit_mov(7, closures_ptr_reg); // x7 = closures_ptr
 
                 // Step 6: Call trampoline to allocate multi-arity function
                 let func_addr = crate::trampoline::trampoline_allocate_multi_arity_fn as usize;
@@ -2088,6 +2090,41 @@ impl Arm64CodeGen {
 
                 self.emit_label(pass_label);
                 // Condition passed - continue execution
+            }
+
+            Instruction::Apply(dst, fn_value, args_seq) => {
+                // Apply: call trampoline_apply(stack_pointer, fn_value, args_seq)
+                // Result goes into dst
+
+                let dest_spill = self.dest_spill(dst);
+                let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
+
+                // Get fn_value and args_seq registers
+                let fn_reg = self.get_physical_reg_for_irvalue(fn_value, false)?;
+                self.clear_temp_registers();
+                let args_reg = self.get_physical_reg_for_irvalue(args_seq, false)?;
+                self.clear_temp_registers();
+
+                // Set up call: x0 = FP (stack pointer for GC), x1 = fn_value, x2 = args_seq
+                self.emit_mov(2, args_reg);
+                self.emit_mov(1, fn_reg);
+                self.emit_mov(0, 29); // x0 = FP (frame pointer)
+
+                // Call trampoline_apply
+                let apply_addr = crate::trampoline::trampoline_apply as usize;
+                self.emit_external_call(apply_addr, "trampoline_apply");
+
+                // Result is in x0
+                if dst_reg != 0 {
+                    self.emit_mov(dst_reg, 0);
+                }
+
+                // Handle spilled destination
+                if let Some(slot) = dest_spill {
+                    // Store to spill slot
+                    let offset = -((slot as i32 + 1) * 8);
+                    self.emit_store_to_fp(dst_reg, offset);
+                }
             }
         }
 

@@ -1016,6 +1016,325 @@ impl<'c> IRGenerator<'c> {
             }
         }
     }
+
+    /// Generate a linalg operation with proper ins/outs structure
+    fn generate_linalg_operation<'a>(
+        &self,
+        context: &'c Context,
+        name: &str,
+        operands: &[Value<'c, 'a>],
+        result_types: &[Type<'c>],
+        attributes: &HashMap<String, AttributeValue>,
+        user_regions: Vec<Region<'c>>,
+        block: &'a BlockRef<'c, 'a>,
+    ) -> Result<Option<Value<'c, 'a>>, GeneratorError> {
+        let location = self.location;
+
+        // Determine the number of ins and outs based on the operation type
+        let (num_ins, num_outs) = match name {
+            "linalg.fill" => (1, 1),           // 1 scalar input, 1 output tensor/memref
+            "linalg.copy" => (1, 1),           // 1 input, 1 output
+            "linalg.dot" => (2, 1),            // 2 inputs (vectors), 1 output (scalar memref)
+            "linalg.matvec" => (2, 1),         // 2 inputs (matrix, vector), 1 output (vector)
+            "linalg.vecmat" => (2, 1),         // 2 inputs (vector, matrix), 1 output (vector)
+            "linalg.matmul" => (2, 1),         // 2 inputs (matrices), 1 output (matrix)
+            "linalg.batch_matmul" => (2, 1),   // 2 inputs, 1 output
+            "linalg.add" => (2, 1),            // 2 inputs, 1 output
+            "linalg.sub" => (2, 1),            // 2 inputs, 1 output
+            "linalg.mul" => (2, 1),            // 2 inputs, 1 output
+            "linalg.div" => (2, 1),            // 2 inputs, 1 output
+            "linalg.transpose" => (1, 1),      // 1 input, 1 output
+            "linalg.broadcast" => (1, 1),      // 1 input, 1 output
+            "linalg.generic" => {
+                // For generic, we need to count from attributes or operands
+                // Default heuristic: last operand is output, rest are inputs
+                if operands.is_empty() {
+                    (0, 0)
+                } else {
+                    (operands.len() - 1, 1)
+                }
+            }
+            "linalg.yield" => {
+                // linalg.yield is the terminator inside linalg regions
+                let mut op_builder = OperationBuilder::new(name, location);
+                if !operands.is_empty() {
+                    op_builder = op_builder.add_operands(operands);
+                }
+                let operation = op_builder.build().map_err(|e| {
+                    GeneratorError::OperationCreationFailed(format!("{}: {:?}", name, e))
+                })?;
+                block.append_operation(operation);
+                return Ok(None);
+            }
+            _ => {
+                // Default: assume last operand is output
+                if operands.is_empty() {
+                    (0, 0)
+                } else {
+                    (operands.len() - 1, 1)
+                }
+            }
+        };
+
+        // Validate operand count
+        if operands.len() != num_ins + num_outs {
+            return Err(GeneratorError::OperationCreationFailed(format!(
+                "{}: expected {} operands ({}ins + {}outs), got {}",
+                name, num_ins + num_outs, num_ins, num_outs, operands.len()
+            )));
+        }
+
+        // Build operandSegmentSizes attribute
+        let segment_sizes = format!("array<i32: {}, {}>", num_ins, num_outs);
+
+        // Build the operation with linalg-specific structure
+        let mut op_builder = OperationBuilder::new(name, location);
+        op_builder = op_builder.add_operands(operands);
+
+        if !result_types.is_empty() {
+            op_builder = op_builder.add_results(result_types);
+        }
+
+        // Add operandSegmentSizes
+        if let Some(attr) = Attribute::parse(context, &segment_sizes) {
+            op_builder = op_builder.add_attributes(&[(
+                Identifier::new(context, "operandSegmentSizes"),
+                attr,
+            )]);
+        }
+
+        // Add user-provided attributes
+        for (key, value) in attributes {
+            let attr = self.convert_attribute_value(value)?;
+            op_builder = op_builder.add_attributes(&[(Identifier::new(context, key), attr)]);
+        }
+
+        // Create the region with the computation body
+        let region = if !user_regions.is_empty() {
+            user_regions.into_iter().next().unwrap()
+        } else {
+            self.create_linalg_body_region(context, name, operands, num_ins, num_outs)?
+        };
+
+        op_builder = op_builder.add_regions_vec(vec![region]);
+
+        let operation = op_builder.build().map_err(|e| {
+            GeneratorError::OperationCreationFailed(format!("{}: {:?}", name, e))
+        })?;
+
+        let op_ref = block.append_operation(operation);
+
+        if op_ref.result_count() > 0 {
+            return Ok(Some(op_ref.result(0).unwrap().into()));
+        }
+
+        Ok(None)
+    }
+
+    /// Create the body region for a linalg named operation
+    fn create_linalg_body_region(
+        &self,
+        context: &'c Context,
+        name: &str,
+        operands: &[Value<'c, '_>],
+        _num_ins: usize,
+        _num_outs: usize,
+    ) -> Result<Region<'c>, GeneratorError> {
+        let region = Region::new();
+
+        // Determine element types from operands
+        let mut elem_types: Vec<Type<'c>> = Vec::new();
+        for operand in operands.iter() {
+            let ty = operand.r#type();
+            // Extract element type from memref or tensor
+            let elem_ty = self.extract_element_type(context, ty);
+            elem_types.push(elem_ty);
+        }
+
+        // Create block arguments: one for each input element + one for each output element
+        let mut arg_types: Vec<(Type<'c>, Location<'c>)> = Vec::new();
+        for elem_ty in &elem_types {
+            arg_types.push((*elem_ty, self.location));
+        }
+
+        let block = Block::new(&arg_types);
+        let block_ref = region.append_block(block);
+
+        // Create the body based on the operation type
+        match name {
+            "linalg.fill" => {
+                // fill: yield the input value
+                // Body: ^bb0(%in: f32, %out: f32): linalg.yield %in
+                if let Ok(in_arg) = block_ref.argument(0) {
+                    let yield_op = OperationBuilder::new("linalg.yield", self.location)
+                        .add_operands(&[in_arg.into()])
+                        .build()
+                        .map_err(|e| GeneratorError::OperationCreationFailed(format!("linalg.yield: {:?}", e)))?;
+                    block_ref.append_operation(yield_op);
+                }
+            }
+            "linalg.copy" => {
+                // copy: yield the input value
+                if let Ok(in_arg) = block_ref.argument(0) {
+                    let yield_op = OperationBuilder::new("linalg.yield", self.location)
+                        .add_operands(&[in_arg.into()])
+                        .build()
+                        .map_err(|e| GeneratorError::OperationCreationFailed(format!("linalg.yield: {:?}", e)))?;
+                    block_ref.append_operation(yield_op);
+                }
+            }
+            "linalg.dot" | "linalg.matvec" | "linalg.vecmat" | "linalg.matmul" | "linalg.batch_matmul" => {
+                // matmul family: mul inputs, add to accumulator, yield
+                // Body: ^bb0(%a: f32, %b: f32, %acc: f32):
+                //   %prod = arith.mulf %a, %b
+                //   %sum = arith.addf %acc, %prod
+                //   linalg.yield %sum
+                if arg_types.len() >= 3 {
+                    let a = block_ref.argument(0).map_err(|_| GeneratorError::InvalidOperandType)?;
+                    let b = block_ref.argument(1).map_err(|_| GeneratorError::InvalidOperandType)?;
+                    let acc = block_ref.argument(2).map_err(|_| GeneratorError::InvalidOperandType)?;
+
+                    let elem_ty = elem_types[0];
+
+                    // Check if floating point or integer
+                    if elem_ty.is_f16() || elem_ty.is_f32() || elem_ty.is_f64() {
+                        // Floating point: mulf, addf
+                        let mul_op = arith::mulf(a.into(), b.into(), self.location);
+                        let mul_ref = block_ref.append_operation(mul_op);
+                        let prod: Value = mul_ref.result(0).unwrap().into();
+
+                        let add_op = arith::addf(prod, acc.into(), self.location);
+                        let add_ref = block_ref.append_operation(add_op);
+                        let sum: Value = add_ref.result(0).unwrap().into();
+
+                        let yield_op = OperationBuilder::new("linalg.yield", self.location)
+                            .add_operands(&[sum])
+                            .build()
+                            .map_err(|e| GeneratorError::OperationCreationFailed(format!("linalg.yield: {:?}", e)))?;
+                        block_ref.append_operation(yield_op);
+                    } else {
+                        // Integer: muli, addi
+                        let mul_op = arith::muli(a.into(), b.into(), self.location);
+                        let mul_ref = block_ref.append_operation(mul_op);
+                        let prod: Value = mul_ref.result(0).unwrap().into();
+
+                        let add_op = arith::addi(prod, acc.into(), self.location);
+                        let add_ref = block_ref.append_operation(add_op);
+                        let sum: Value = add_ref.result(0).unwrap().into();
+
+                        let yield_op = OperationBuilder::new("linalg.yield", self.location)
+                            .add_operands(&[sum])
+                            .build()
+                            .map_err(|e| GeneratorError::OperationCreationFailed(format!("linalg.yield: {:?}", e)))?;
+                        block_ref.append_operation(yield_op);
+                    }
+                }
+            }
+            "linalg.add" => {
+                // add: add two inputs, yield result
+                if arg_types.len() >= 3 {
+                    let a = block_ref.argument(0).map_err(|_| GeneratorError::InvalidOperandType)?;
+                    let b = block_ref.argument(1).map_err(|_| GeneratorError::InvalidOperandType)?;
+                    let elem_ty = elem_types[0];
+
+                    let result = if elem_ty.is_f16() || elem_ty.is_f32() || elem_ty.is_f64() {
+                        let op = arith::addf(a.into(), b.into(), self.location);
+                        let op_ref = block_ref.append_operation(op);
+                        op_ref.result(0).unwrap().into()
+                    } else {
+                        let op = arith::addi(a.into(), b.into(), self.location);
+                        let op_ref = block_ref.append_operation(op);
+                        op_ref.result(0).unwrap().into()
+                    };
+
+                    let yield_op = OperationBuilder::new("linalg.yield", self.location)
+                        .add_operands(&[result])
+                        .build()
+                        .map_err(|e| GeneratorError::OperationCreationFailed(format!("linalg.yield: {:?}", e)))?;
+                    block_ref.append_operation(yield_op);
+                }
+            }
+            "linalg.mul" => {
+                // mul: multiply two inputs, yield result
+                if arg_types.len() >= 3 {
+                    let a = block_ref.argument(0).map_err(|_| GeneratorError::InvalidOperandType)?;
+                    let b = block_ref.argument(1).map_err(|_| GeneratorError::InvalidOperandType)?;
+                    let elem_ty = elem_types[0];
+
+                    let result = if elem_ty.is_f16() || elem_ty.is_f32() || elem_ty.is_f64() {
+                        let op = arith::mulf(a.into(), b.into(), self.location);
+                        let op_ref = block_ref.append_operation(op);
+                        op_ref.result(0).unwrap().into()
+                    } else {
+                        let op = arith::muli(a.into(), b.into(), self.location);
+                        let op_ref = block_ref.append_operation(op);
+                        op_ref.result(0).unwrap().into()
+                    };
+
+                    let yield_op = OperationBuilder::new("linalg.yield", self.location)
+                        .add_operands(&[result])
+                        .build()
+                        .map_err(|e| GeneratorError::OperationCreationFailed(format!("linalg.yield: {:?}", e)))?;
+                    block_ref.append_operation(yield_op);
+                }
+            }
+            _ => {
+                // Default: just yield the first input
+                if let Ok(in_arg) = block_ref.argument(0) {
+                    let yield_op = OperationBuilder::new("linalg.yield", self.location)
+                        .add_operands(&[in_arg.into()])
+                        .build()
+                        .map_err(|e| GeneratorError::OperationCreationFailed(format!("linalg.yield: {:?}", e)))?;
+                    block_ref.append_operation(yield_op);
+                }
+            }
+        }
+
+        Ok(region)
+    }
+
+    /// Extract the element type from a memref or tensor type
+    fn extract_element_type(&self, context: &'c Context, ty: Type<'c>) -> Type<'c> {
+        let ty_str = format!("{}", ty);
+
+        // Handle scalar memrefs like "memref<f32>" (no dimensions)
+        // These look like "memref<f32>" rather than "memref<4x4xf32>"
+        if ty_str.starts_with("memref<") && !ty_str.contains('x') {
+            // Extract type between < and >
+            if let Some(start) = ty_str.find('<') {
+                let after_bracket = &ty_str[start + 1..];
+                let elem_str = after_bracket.trim_end_matches('>');
+                if let Some(elem_ty) = Type::parse(context, elem_str) {
+                    return elem_ty;
+                }
+            }
+        }
+
+        // Handle tensor scalars like "tensor<f32>"
+        if ty_str.starts_with("tensor<") && !ty_str.contains('x') {
+            if let Some(start) = ty_str.find('<') {
+                let after_bracket = &ty_str[start + 1..];
+                let elem_str = after_bracket.trim_end_matches('>');
+                if let Some(elem_ty) = Type::parse(context, elem_str) {
+                    return elem_ty;
+                }
+            }
+        }
+
+        // Parse element type from string representation
+        // e.g., "memref<4x4xf32>" -> "f32", "tensor<10xi64>" -> "i64"
+        if let Some(pos) = ty_str.rfind('x') {
+            let after_x = &ty_str[pos + 1..];
+            // Remove trailing > if present
+            let elem_str = after_x.trim_end_matches('>');
+            if let Some(elem_ty) = Type::parse(context, elem_str) {
+                return elem_ty;
+            }
+        }
+
+        // For scalars (like f32 in linalg.fill), return as-is
+        ty
+    }
 }
 
 

@@ -985,6 +985,32 @@
 ;; NOTE: instance? is now a compiler builtin - it's resolved at compile time
 ;; based on the type argument and emits efficient type checking code
 
+;; seq function - calls -seq protocol method
+(defn seq
+  "Returns a seq on the collection. If the collection is empty, returns nil."
+  [coll]
+  (if (nil? coll)
+    nil
+    (-seq coll)))
+
+;; concat2 - helper for concat
+(defn concat2 [x y]
+  (let [s (seq x)]
+    (if s
+      (cons (first s) (concat2 (rest s) y))
+      (seq y))))
+
+;; concat - concatenates sequences
+;; Eager implementation, variadic
+(defn concat
+  "Returns a seq representing the concatenation of the elements in the supplied colls."
+  ([] nil)
+  ([x] (seq x))
+  ([x y] (concat2 x y))
+  ([x y z] (concat2 x (concat2 y z)))
+  ([a b c d] (concat2 a (concat2 b (concat2 c d))))
+  ([a b c d e] (concat2 a (concat2 b (concat2 c (concat2 d e))))))
+
 ;; DEVIATION: count function - calls the ICounted protocol
 (defn count
   "Returns the number of items in the collection."
@@ -2559,3 +2585,68 @@
               (_print (first s))
               (recur (next s)))))
         (_newline)))))
+;; =============================================================================
+;; Core Macros
+;; =============================================================================
+
+;; when - evaluates body when test is true
+(def ^:macro when
+  (fn [form env test & body]
+    (list (quote if) test (cons (quote do) body))))
+
+;; when-not - evaluates body when test is false
+(def ^:macro when-not
+  (fn [form env test & body]
+    (list (quote if) test nil (cons (quote do) body))))
+
+;; if-not - inverse of if
+(def ^:macro if-not
+  (fn [form env test then & else]
+    (if (nil? (first else))
+      (list (quote if) test nil then)
+      (list (quote if) test (first else) then))))
+
+;; cond - conditional with multiple clauses
+(def ^:macro cond
+  (fn cond-macro [form env & clauses]
+    (if (nil? (seq clauses))
+      nil
+      (if (nil? (next clauses))
+        (throw "cond requires an even number of forms")
+        (list (quote if)
+              (first clauses)
+              (second clauses)
+              (cons (quote cond) (next (next clauses))))))))
+
+;; and - short-circuit logical and
+(def ^:macro and
+  (fn and-macro [form env & exprs]
+    (if (nil? (seq exprs))
+      true
+      (if (nil? (next exprs))
+        (first exprs)
+        (list (quote if) (first exprs)
+              (cons (quote and) (next exprs))
+              false)))))
+
+;; or - short-circuit logical or
+(def ^:macro or
+  (fn or-macro [form env & exprs]
+    (if (nil? (seq exprs))
+      nil
+      (if (nil? (next exprs))
+        (first exprs)
+        (list (quote let) (list (quote or__auto__) (first exprs))
+              (list (quote if) (quote or__auto__)
+                    (quote or__auto__)
+                    (cons (quote or) (next exprs))))))))
+
+;; Note: Threading macros are not yet supported because they require
+;; seq operations on reader data structures, which don't implement
+;; the Clojure sequence protocols. This requires extending the primitive
+;; dispatch layer to expose prim_first/prim_rest as Clojure-callable builtins.
+
+;; comment - ignores all forms
+(def ^:macro comment
+  (fn [form env & _]
+    nil))

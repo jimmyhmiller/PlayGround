@@ -348,6 +348,18 @@ impl LinearScan {
                 }
             }
 
+            Instruction::Apply(dst, fn_val, args_seq) => {
+                if let IrValue::Register(r) = dst {
+                    regs.push(*r);
+                }
+                if let IrValue::Register(r) = fn_val {
+                    regs.push(*r);
+                }
+                if let IrValue::Register(r) = args_seq {
+                    regs.push(*r);
+                }
+            }
+
             Instruction::CallWithSaves(dst, target, args, saves) => {
                 if let IrValue::Register(r) = dst {
                     regs.push(*r);
@@ -462,7 +474,7 @@ impl LinearScan {
             }
 
             // Multi-arity function instructions
-            Instruction::MakeMultiArityFn(dst, _arities, _variadic_min, closure_values) => {
+            Instruction::MakeMultiArityFn(dst, _arities, _variadic_min, _variadic_index, closure_values) => {
                 if let IrValue::Register(r) = dst {
                     regs.push(*r);
                 }
@@ -770,6 +782,12 @@ impl LinearScan {
                 }
             }
 
+            Instruction::Apply(dst, fn_val, args_seq) => {
+                replace(dst);
+                replace(fn_val);
+                replace(args_seq);
+            }
+
             Instruction::CallWithSaves(dst, target, args, saves) => {
                 replace(dst);
                 // Replace registers in CallTarget
@@ -847,7 +865,7 @@ impl LinearScan {
             }
 
             // Multi-arity function instructions
-            Instruction::MakeMultiArityFn(dst, _arities, _variadic_min, closure_values) => {
+            Instruction::MakeMultiArityFn(dst, _arities, _variadic_min, _variadic_index, closure_values) => {
                 replace(dst);
                 for val in closure_values {
                     replace(val);
@@ -1140,6 +1158,12 @@ impl LinearScan {
                 }
             }
 
+            Instruction::Apply(dst, fn_val, args_seq) => {
+                replace(dst);
+                replace(fn_val);
+                replace(args_seq);
+            }
+
             Instruction::CallWithSaves(dst, target, args, saves) => {
                 replace(dst);
                 // Replace registers in CallTarget
@@ -1217,7 +1241,7 @@ impl LinearScan {
             }
 
             // Multi-arity function instructions
-            Instruction::MakeMultiArityFn(dst, _arities, _variadic_min, closure_values) => {
+            Instruction::MakeMultiArityFn(dst, _arities, _variadic_min, _variadic_index, closure_values) => {
                 replace(dst);
                 for val in closure_values {
                     replace(val);

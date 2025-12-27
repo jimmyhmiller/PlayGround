@@ -143,19 +143,48 @@ fn run_with_compilation_spec(nodes: &[lispier::Node], compilation: &lispier::Com
     }
 
     // Build pass pipeline from compilation spec
+    // Some passes need to run inside gpu.module scope
     let runtime_attrs = runtime.runtime_attrs();
-    let pass_args: Vec<String> = target
-        .passes
-        .iter()
-        .map(|p| p.to_pipeline_string(&runtime_attrs))
-        .collect();
+
+    // Passes that run on gpu.module (must be nested)
+    // Note: rocdl-attach-target and nvvm-attach-target run on builtin.module level
+    let gpu_module_passes = ["convert-gpu-to-rocdl", "convert-gpu-to-nvvm"];
+
+    let mut before_gpu: Vec<String> = Vec::new();
+    let mut gpu_passes: Vec<String> = Vec::new();
+    let mut after_gpu: Vec<String> = Vec::new();
+    let mut seen_gpu_pass = false;
+
+    for pass in &target.passes {
+        let pass_str = pass.to_pipeline_string(&runtime_attrs);
+        let is_gpu_pass = gpu_module_passes.iter().any(|&p| pass.name == p);
+
+        if is_gpu_pass {
+            seen_gpu_pass = true;
+            gpu_passes.push(pass_str);
+        } else if !seen_gpu_pass {
+            before_gpu.push(pass_str);
+        } else {
+            after_gpu.push(pass_str);
+        }
+    }
 
     // Construct pipeline string for JIT
     // Wrap everything in builtin.module() and add the c-wrappers pass
-    let pipeline = format!(
-        "builtin.module(func.func(llvm-request-c-wrappers),{})",
-        pass_args.join(",")
-    );
+    // Nest gpu.module passes properly
+    let pipeline = if gpu_passes.is_empty() {
+        format!(
+            "builtin.module(func.func(llvm-request-c-wrappers),{})",
+            before_gpu.into_iter().chain(after_gpu).collect::<Vec<_>>().join(",")
+        )
+    } else {
+        format!(
+            "builtin.module(func.func(llvm-request-c-wrappers),{},gpu.module({}),{})",
+            before_gpu.join(","),
+            gpu_passes.join(","),
+            after_gpu.join(",")
+        )
+    };
 
     eprintln!("Pipeline: {}", pipeline);
 
@@ -171,11 +200,34 @@ fn run_with_compilation_spec(nodes: &[lispier::Node], compilation: &lispier::Com
     };
 
     // Get runtime library paths
+    // Add null terminators since MLIR's library loading expects null-terminated strings
     let lib_paths: Vec<String> = runtime.runtime_libs
         .iter()
-        .map(|p| p.to_string_lossy().to_string())
+        .map(|p| {
+            let mut s = p.to_string_lossy().to_string();
+            s.push('\0');
+            s
+        })
         .collect();
+    eprintln!("Library paths: {:?}", lib_paths);
     let lib_path_refs: Vec<&str> = lib_paths.iter().map(|s| s.as_str()).collect();
+
+    // Pre-load GPU runtime library with RTLD_GLOBAL so symbols are available during JIT linking
+    if matches!(runtime.backend, lispier::runtime::Backend::Rocm) {
+        for lib in &runtime.runtime_libs {
+            let lib_str = lib.to_string_lossy();
+            if lib_str.contains("rocm_runtime") || lib_str.contains("amdhip") {
+                eprintln!("Pre-loading: {}", lib_str);
+                let path_cstr = std::ffi::CString::new(lib_str.as_ref()).unwrap();
+                unsafe {
+                    let handle = libc::dlopen(path_cstr.as_ptr(), libc::RTLD_NOW | libc::RTLD_GLOBAL);
+                    if handle.is_null() {
+                        eprintln!("Warning: Failed to pre-load {}", lib_str);
+                    }
+                }
+            }
+        }
+    }
 
     // Create JIT with custom pipeline and libraries
     let jit = match Jit::with_pipeline_and_libraries(&registry, &mut module, &pipeline, &lib_path_refs) {
@@ -185,6 +237,30 @@ fn run_with_compilation_spec(nodes: &[lispier::Node], compilation: &lispier::Com
             return ExitCode::FAILURE;
         }
     };
+
+    // Register GPU runtime symbols if using GPU backend
+    if matches!(runtime.backend, lispier::runtime::Backend::Rocm) {
+        // Find the rocm runtime library and register its symbols
+        // Use the original paths (without null terminator) for dlopen
+        for lib in &runtime.runtime_libs {
+            let lib_str = lib.to_string_lossy();
+            if lib_str.contains("rocm_runtime") {
+                eprintln!("Registering GPU runtime from: {}", lib_str);
+                unsafe {
+                    jit.register_gpu_runtime(&lib_str);
+                }
+                break;
+            }
+        }
+    }
+
+    // Verify symbol registration worked
+    let test_symbol = "_mlir_ciface_mgpuMemGetDeviceMemRef1dFloat";
+    if let Some(ptr) = jit.lookup(test_symbol) {
+        eprintln!("Successfully looked up {} at {:p}", test_symbol, ptr);
+    } else {
+        eprintln!("Failed to look up {}", test_symbol);
+    }
 
     // Invoke main
     unsafe {

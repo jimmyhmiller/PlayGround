@@ -160,8 +160,9 @@ pub mod multi_arity_layout {
     pub const FIELD_NAME_PTR: usize = 0;
     pub const FIELD_ARITY_COUNT: usize = 1;
     pub const FIELD_VARIADIC_MIN: usize = 2;
-    pub const FIELD_CLOSURE_COUNT: usize = 3;
-    pub const ARITY_TABLE_START: usize = 4;
+    pub const FIELD_VARIADIC_INDEX: usize = 3; // Index of variadic arity in table, or NO_VARIADIC
+    pub const FIELD_CLOSURE_COUNT: usize = 4;
+    pub const ARITY_TABLE_START: usize = 5;
 
     // Each arity entry is 2 words: (param_count, code_ptr)
     pub const ARITY_ENTRY_SIZE: usize = 2;
@@ -188,7 +189,7 @@ pub mod multi_arity_layout {
 
     /// Calculate total object size in words (not including header)
     pub const fn total_size_words(arity_count: usize, closure_count: usize) -> usize {
-        4 + arity_count * ARITY_ENTRY_SIZE + closure_count
+        5 + arity_count * ARITY_ENTRY_SIZE + closure_count
     }
 
     /// Sentinel value for "no variadic arity"
@@ -1571,6 +1572,7 @@ impl GCRuntime {
         name: Option<String>,
         arities: Vec<(usize, usize)>,
         variadic_min: Option<usize>,
+        variadic_index: Option<usize>,
         closure_values: Vec<usize>,
     ) -> Result<usize, String> {
         let name_ptr = if let Some(n) = name {
@@ -1594,6 +1596,11 @@ impl GCRuntime {
         heap_obj.write_field(
             multi_arity_layout::FIELD_VARIADIC_MIN,
             BuiltInTypes::Int.tag(variadic_min.unwrap_or(multi_arity_layout::NO_VARIADIC) as isize)
+                as usize,
+        );
+        heap_obj.write_field(
+            multi_arity_layout::FIELD_VARIADIC_INDEX,
+            BuiltInTypes::Int.tag(variadic_index.unwrap_or(multi_arity_layout::NO_VARIADIC) as isize)
                 as usize,
         );
         heap_obj.write_field(
@@ -1640,11 +1647,18 @@ impl GCRuntime {
 
         // Untag integer fields (they were tagged to avoid GC issues)
         let arity_count = heap_obj.get_field(multi_arity_layout::FIELD_ARITY_COUNT) >> 3;
-        let variadic_min_tagged = heap_obj.get_field(multi_arity_layout::FIELD_VARIADIC_MIN);
-        let variadic_min = variadic_min_tagged >> 3;
+        let variadic_min = heap_obj.get_field(multi_arity_layout::FIELD_VARIADIC_MIN) >> 3;
+        let variadic_index = heap_obj.get_field(multi_arity_layout::FIELD_VARIADIC_INDEX) >> 3;
 
-        // First, try to find an exact match
+        let no_variadic_untagged = multi_arity_layout::NO_VARIADIC >> 3;
+        let has_variadic = variadic_index != no_variadic_untagged;
+
+        // First, try to find an exact match among FIXED arities (skip the variadic arity)
         for i in 0..arity_count {
+            // Skip the variadic arity - we only want exact matches for fixed arities
+            if has_variadic && i == variadic_index {
+                continue;
+            }
             let param_count =
                 heap_obj.get_field(multi_arity_layout::arity_param_count_field(i)) >> 3;
             if param_count == arg_count {
@@ -1653,19 +1667,11 @@ impl GCRuntime {
             }
         }
 
-        // If no exact match and we have a variadic arity, check if args >= variadic_min
-        // Note: NO_VARIADIC is usize::MAX, when tagged and untagged it stays very large
-        let no_variadic_untagged = multi_arity_layout::NO_VARIADIC >> 3;
-        if variadic_min != no_variadic_untagged && arg_count >= variadic_min {
-            // Find the variadic arity (the one with param_count == variadic_min)
-            for i in 0..arity_count {
-                let param_count =
-                    heap_obj.get_field(multi_arity_layout::arity_param_count_field(i)) >> 3;
-                if param_count == variadic_min {
-                    let code_ptr = heap_obj.get_field(multi_arity_layout::arity_code_ptr_field(i));
-                    return Some((code_ptr, true));
-                }
-            }
+        // If no exact fixed match and we have a variadic arity, check if args >= variadic_min
+        if has_variadic && arg_count >= variadic_min {
+            // Use the variadic index directly instead of searching
+            let code_ptr = heap_obj.get_field(multi_arity_layout::arity_code_ptr_field(variadic_index));
+            return Some((code_ptr, true));
         }
 
         None
@@ -1683,6 +1689,13 @@ impl GCRuntime {
         let untagged = self.untag_closure(fn_ptr);
         let heap_obj = HeapObject::from_untagged(untagged as *const u8);
         heap_obj.get_field(multi_arity_layout::FIELD_ARITY_COUNT) >> 3
+    }
+
+    /// Get variadic_min from a multi-arity function (the fixed param count before &rest)
+    pub fn multi_arity_variadic_min(&self, fn_ptr: usize) -> usize {
+        let untagged = self.untag_closure(fn_ptr);
+        let heap_obj = HeapObject::from_untagged(untagged as *const u8);
+        heap_obj.get_field(multi_arity_layout::FIELD_VARIADIC_MIN) >> 3
     }
 
     /// Get closure value by index from a multi-arity function
@@ -3527,6 +3540,17 @@ impl GCRuntime {
         let type_id = self.get_type_id_for_value(value);
         match type_id {
             TYPE_READER_SYMBOL => Ok(self.reader_symbol_name(value)),
+            TYPE_SYMBOL => {
+                // TYPE_SYMBOL is just a heap-allocated string containing the full symbol name
+                // e.g. "foo" or "ns/foo"
+                let full_name = self.read_string(value);
+                // Extract just the name part (after /)
+                if let Some(pos) = full_name.rfind('/') {
+                    Ok(full_name[pos + 1..].to_string())
+                } else {
+                    Ok(full_name)
+                }
+            }
             _ if type_id >= DEFTYPE_ID_OFFSET => {
                 // Protocol dispatch to -name
                 // -name returns a string, which we need to read
@@ -3545,6 +3569,17 @@ impl GCRuntime {
         let type_id = self.get_type_id_for_value(value);
         match type_id {
             TYPE_READER_SYMBOL => Ok(self.reader_symbol_namespace(value)),
+            TYPE_SYMBOL => {
+                // TYPE_SYMBOL is just a heap-allocated string containing the full symbol name
+                // e.g. "foo" or "ns/foo"
+                let full_name = self.read_string(value);
+                // Extract namespace part (before /)
+                if let Some(pos) = full_name.rfind('/') {
+                    Ok(Some(full_name[..pos].to_string()))
+                } else {
+                    Ok(None)
+                }
+            }
             _ if type_id >= DEFTYPE_ID_OFFSET => {
                 // Protocol dispatch to -namespace
                 // -namespace returns a string or nil

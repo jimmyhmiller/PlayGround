@@ -243,8 +243,16 @@ impl Pass {
     /// Format: "pass-name" or "pass-name{attr1=value1 attr2=value2}"
     pub fn to_pipeline_string(&self, runtime_attrs: &HashMap<String, String>) -> String {
         let mut attrs = self.attributes.clone();
-        // Merge runtime attributes (runtime takes precedence)
+
+        // Only merge runtime attributes into passes that accept them
+        // chip attribute is only valid for target attachment passes
+        let accepts_chip = self.name == "rocdl-attach-target"
+            || self.name == "nvvm-attach-target";
+
         for (k, v) in runtime_attrs {
+            if k == "chip" && !accepts_chip {
+                continue;
+            }
             attrs.insert(k.clone(), v.clone());
         }
 

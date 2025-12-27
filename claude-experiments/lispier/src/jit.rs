@@ -175,6 +175,66 @@ impl Jit {
         }
     }
 
+    /// Register GPU runtime symbols from a shared library
+    ///
+    /// This loads mgpu* functions from the given library and registers them
+    /// with the `_mlir_ciface_` prefix needed by compiled code.
+    ///
+    /// # Safety
+    /// Must be called before invoking any function that uses GPU runtime symbols.
+    pub unsafe fn register_gpu_runtime(&self, lib_path: &str) {
+        // GPU runtime functions that need ciface wrappers
+        let gpu_fns = [
+            "mgpuMemAlloc",
+            "mgpuMemcpy",
+            "mgpuMemFree",
+            "mgpuMemGetDeviceMemRef1dFloat",
+            "mgpuMemGetDeviceMemRef1dInt32",
+            "mgpuMemHostRegister",
+            "mgpuMemHostRegisterMemRef",
+            "mgpuMemHostUnregister",
+            "mgpuMemHostUnregisterMemRef",
+            "mgpuMemset16",
+            "mgpuMemset32",
+            "mgpuStreamCreate",
+            "mgpuStreamDestroy",
+            "mgpuStreamSynchronize",
+            "mgpuStreamWaitEvent",
+            "mgpuEventCreate",
+            "mgpuEventDestroy",
+            "mgpuEventRecord",
+            "mgpuEventSynchronize",
+            "mgpuLaunchKernel",
+            "mgpuModuleLoad",
+            "mgpuModuleUnload",
+            "mgpuModuleGetFunction",
+        ];
+
+        // Use null-terminated path for dlopen
+        let path_cstr = std::ffi::CString::new(lib_path).unwrap();
+        let handle = libc::dlopen(path_cstr.as_ptr(), libc::RTLD_NOW | libc::RTLD_GLOBAL);
+        if handle.is_null() {
+            eprintln!("Warning: Failed to dlopen {}", lib_path);
+            return;
+        }
+
+        for name in gpu_fns {
+            let name_cstr = std::ffi::CString::new(name).unwrap();
+            let ptr = libc::dlsym(handle, name_cstr.as_ptr());
+            if !ptr.is_null() {
+                // Register both bare name and ciface version
+                // Add null terminators for MLIR's symbol lookup
+                eprintln!("  Registering {} at {:p}", name, ptr);
+                let name_nul = format!("{}\0", name);
+                self.register_symbol(&name_nul, ptr as *mut ());
+                let ciface_name = format!("_mlir_ciface_{}\0", name);
+                self.register_symbol(&ciface_name, ptr as *mut ());
+            } else {
+                eprintln!("  Symbol {} not found", name);
+            }
+        }
+    }
+
     /// Register common libc functions with the JIT
     ///
     /// This makes functions like `malloc`, `free`, `memcpy`, etc.

@@ -943,6 +943,11 @@ impl Compiler {
             "PersistentHashMap" | "Map" => Ok(TYPE_MAP),
             "PersistentHashSet" | "Set" => Ok(TYPE_SET),
             "Array" => Ok(TYPE_ARRAY),
+            // Reader types - available for extend-type in clojure.core
+            "ReaderList" => Ok(TYPE_READER_LIST),
+            "ReaderVector" => Ok(TYPE_READER_VECTOR),
+            "ReaderMap" => Ok(TYPE_READER_MAP),
+            "ReaderSymbol" => Ok(TYPE_READER_SYMBOL),
             _ => Err(format!("Unknown type: {}", type_name)),
         }
     }
@@ -1700,11 +1705,14 @@ impl Compiler {
             compiled_arities.push((param_count, code_ptr, is_variadic));
         }
 
-        // Step 4: Determine variadic minimum (if any)
-        let variadic_min = compiled_arities
+        // Step 4: Determine variadic minimum and index (if any)
+        let variadic_info = compiled_arities
             .iter()
-            .find(|(_, _, is_var)| *is_var)
-            .map(|(count, _, _)| *count);
+            .enumerate()
+            .find(|(_, (_, _, is_var))| *is_var)
+            .map(|(idx, (count, _, _))| (*count, idx));
+        let variadic_min = variadic_info.map(|(count, _)| count);
+        let variadic_index = variadic_info.map(|(_, idx)| idx);
 
         // Step 5: Create function object
         let fn_obj_reg = self.builder.new_register();
@@ -1741,6 +1749,7 @@ impl Compiler {
                 fn_obj_reg,
                 arity_table,
                 variadic_min,
+                variadic_index,
                 closure_values,
             ));
         }

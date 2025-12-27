@@ -20,8 +20,102 @@ use crate::gc_runtime::GCRuntime;
 use crate::reader::{read, read_to_tagged};
 use crate::trampoline::Trampoline;
 use std::cell::UnsafeCell;
-use std::io::{self, Write};
+use std::io::{self, BufRead, Write};
 use std::sync::Arc;
+
+/// Read input from stdin until delimiters are balanced.
+/// Returns None on EOF, Some(input) when we have a balanced expression.
+fn read_balanced_input(prompt: &str, continuation_prompt: &str) -> Option<String> {
+    let stdin = io::stdin();
+    let mut accumulated = String::new();
+    let mut is_first_line = true;
+
+    loop {
+        // Print appropriate prompt
+        if is_first_line {
+            print!("{}", prompt);
+        } else {
+            print!("{}", continuation_prompt);
+        }
+        io::stdout().flush().unwrap();
+
+        let mut line = String::new();
+        match stdin.lock().read_line(&mut line) {
+            Ok(0) => {
+                // EOF
+                if accumulated.is_empty() {
+                    return None;
+                } else {
+                    // Return what we have, even if incomplete
+                    return Some(accumulated);
+                }
+            }
+            Ok(_) => {
+                // Check for REPL commands (only on first line)
+                if is_first_line {
+                    let trimmed = line.trim();
+                    if trimmed.starts_with('/') {
+                        return Some(trimmed.to_string());
+                    }
+                }
+
+                accumulated.push_str(&line);
+
+                // Check if delimiters are balanced
+                if is_balanced(&accumulated) {
+                    return Some(accumulated);
+                }
+
+                is_first_line = false;
+            }
+            Err(_) => return None,
+        }
+    }
+}
+
+/// Check if parentheses, brackets, and braces are balanced in the input.
+/// Also handles strings (ignoring delimiters inside strings).
+fn is_balanced(input: &str) -> bool {
+    let mut paren_depth = 0i32;
+    let mut bracket_depth = 0i32;
+    let mut brace_depth = 0i32;
+    let mut in_string = false;
+    let mut escape_next = false;
+
+    for ch in input.chars() {
+        if escape_next {
+            escape_next = false;
+            continue;
+        }
+
+        if ch == '\\' && in_string {
+            escape_next = true;
+            continue;
+        }
+
+        if ch == '"' {
+            in_string = !in_string;
+            continue;
+        }
+
+        if in_string {
+            continue;
+        }
+
+        match ch {
+            '(' => paren_depth += 1,
+            ')' => paren_depth -= 1,
+            '[' => bracket_depth += 1,
+            ']' => bracket_depth -= 1,
+            '{' => brace_depth += 1,
+            '}' => brace_depth -= 1,
+            _ => {}
+        }
+    }
+
+    // Input is balanced if all depths are zero and we're not in a string
+    !in_string && paren_depth == 0 && bracket_depth == 0 && brace_depth == 0
+}
 
 /// Print a tagged value, matching Clojure's behavior
 /// nil prints nothing, other values print their untagged representation
@@ -974,20 +1068,21 @@ fn main() {
     loop {
         // Show current namespace in prompt
         let ns = repl_compiler.get_current_namespace();
-        print!("{}=> ", ns);
-        io::stdout().flush().unwrap();
+        let prompt = format!("{}=> ", ns);
+        let continuation_prompt = format!("{}   ", " ".repeat(ns.len()));
 
-        let mut input = String::new();
-        match io::stdin().read_line(&mut input) {
-            Ok(0) => break,
-            Ok(_) => {
-                let input = input.trim();
-                if input.is_empty() {
-                    continue;
-                }
+        let input = match read_balanced_input(&prompt, &continuation_prompt) {
+            Some(s) => s,
+            None => break, // EOF
+        };
 
-                // Check for REPL commands
-                if input == "/help" {
+        let input = input.trim();
+        if input.is_empty() {
+            continue;
+        }
+
+        // Check for REPL commands
+        if input == "/help" {
                     print_help();
                     continue;
                 }
@@ -1490,12 +1585,6 @@ fn main() {
                             }
                     Err(e) => eprintln!("Error: {}", e),
                 }
-            }
-            Err(e) => {
-                eprintln!("Error reading input: {}", e);
-                break;
-            }
-        }
     }
 
     println!("\n👋 Goodbye!");

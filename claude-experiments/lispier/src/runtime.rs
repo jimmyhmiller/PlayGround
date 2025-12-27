@@ -325,28 +325,42 @@ fn find_mlir_runner() -> Result<PathBuf, RuntimeError> {
 fn find_runtime_libs(backend: &Backend) -> Result<Vec<PathBuf>, RuntimeError> {
     let mut libs = Vec::new();
 
-    // Common library search paths
+    // Common library search paths (LLVM 21 first, then fall back)
     let search_paths = [
+        "/usr/lib/llvm-21/lib",
+        "/usr/lib/llvm-20/lib",
         "/usr/local/lib",
         "/usr/lib",
         "/usr/lib/x86_64-linux-gnu",
         "/opt/rocm/lib",
+        "/opt/rocm-6.4.4/lib",
     ];
 
-    // Libraries we need
-    let mut needed_libs = vec![
+    // Required libraries
+    let required_libs = vec![
         "libmlir_runner_utils.so",
         "libmlir_c_runner_utils.so",
     ];
 
-    // Add backend-specific runtime
+    // Optional libraries (GPU runtimes, async)
+    let mut optional_libs = vec![
+        "libmlir_async_runtime.so",
+    ];
+
+    // Add backend-specific runtimes
     match backend {
-        Backend::Rocm => needed_libs.push("libmlir_rocm_runtime.so"),
-        Backend::Cuda => needed_libs.push("libmlir_cuda_runtime.so"),
+        Backend::Rocm => {
+            optional_libs.push("libmlir_rocm_runtime.so");
+            optional_libs.push("libamdhip64.so");
+        }
+        Backend::Cuda => {
+            optional_libs.push("libmlir_cuda_runtime.so");
+        }
         Backend::Cpu => {}
     }
 
-    for lib_name in needed_libs {
+    // Find required libraries
+    for lib_name in required_libs {
         let mut found = false;
         for search_path in &search_paths {
             let path = PathBuf::from(search_path).join(lib_name);
@@ -358,6 +372,17 @@ fn find_runtime_libs(backend: &Backend) -> Result<Vec<PathBuf>, RuntimeError> {
         }
         if !found {
             return Err(RuntimeError::RuntimeLibNotFound(lib_name.to_string()));
+        }
+    }
+
+    // Find optional libraries (don't fail if not found)
+    for lib_name in optional_libs {
+        for search_path in &search_paths {
+            let path = PathBuf::from(search_path).join(lib_name);
+            if path.exists() {
+                libs.push(path);
+                break;
+            }
         }
     }
 

@@ -215,8 +215,161 @@ pub fn edn_to_tagged(edn: &Edn, rt: &mut GCRuntime) -> Result<usize, String> {
             }
         }
 
+        // Quote: 'form -> (quote form)
+        Edn::Quote(inner) => {
+            let inner_tagged = edn_to_tagged(inner, rt)?;
+            let quote_sym = rt.allocate_reader_symbol(None, "quote")?;
+            rt.allocate_reader_list(&[quote_sym, inner_tagged])
+        }
+
+        // Syntax-quote (quasiquote): `form -> expanded code
+        Edn::SyntaxQuote(inner) => {
+            expand_syntax_quote(inner, rt)
+        }
+
+        // Unquote: only valid inside syntax-quote, produce a marker
+        Edn::Unquote(inner) => {
+            let inner_tagged = edn_to_tagged(inner, rt)?;
+            let unquote_sym = rt.allocate_reader_symbol(None, "clojure.core/unquote")?;
+            rt.allocate_reader_list(&[unquote_sym, inner_tagged])
+        }
+
+        // Unquote-splicing: only valid inside syntax-quote, produce a marker
+        Edn::UnquoteSplicing(inner) => {
+            let inner_tagged = edn_to_tagged(inner, rt)?;
+            let unquote_splicing_sym = rt.allocate_reader_symbol(None, "clojure.core/unquote-splicing")?;
+            rt.allocate_reader_list(&[unquote_splicing_sym, inner_tagged])
+        }
+
         // Handle other Edn types as needed
         _ => Err(format!("Unsupported EDN type: {:?}", edn)),
+    }
+}
+
+/// Expand a syntax-quoted form into list/seq/concat calls
+/// This implements Clojure's syntax-quote semantics
+fn expand_syntax_quote(edn: &Edn, rt: &mut GCRuntime) -> Result<usize, String> {
+    match edn {
+        // Unquote: ~form -> form (don't quote it)
+        Edn::Unquote(inner) => edn_to_tagged(inner, rt),
+
+        // Unquote-splicing: ~@form is only valid in a collection context
+        // Here we just pass it through - it will be handled by the collection case
+        Edn::UnquoteSplicing(_) => {
+            Err("Unquote-splicing (~@) not valid outside of collection in syntax-quote".to_string())
+        }
+
+        // List: `(a b ~c ~@d) -> (seq (concat (list 'a) (list 'b) (list c) d))
+        Edn::List(items) => {
+            expand_syntax_quote_seq(items, rt, true)
+        }
+
+        // Vector: `[a b ~c] -> (vec (concat (list 'a) (list 'b) (list c)))
+        Edn::Vector(items) => {
+            let concat_result = expand_syntax_quote_seq(items, rt, false)?;
+            // Wrap in (vec ...)
+            // For now, just use apply vector - we may need to adjust
+            let vec_sym = rt.allocate_reader_symbol(None, "vec")?;
+            rt.allocate_reader_list(&[vec_sym, concat_result])
+        }
+
+        // Map: similar treatment
+        Edn::Map(entries) => {
+            // For maps, we need to expand keys and values
+            // `{:a ~b} -> (apply hash-map (concat (list :a) (list b)))
+            let mut concat_args = Vec::new();
+            for (k, v) in entries {
+                let k_expanded = syntax_quote_element(k, rt)?;
+                let v_expanded = syntax_quote_element(v, rt)?;
+                concat_args.push(k_expanded);
+                concat_args.push(v_expanded);
+            }
+            let concat_sym = rt.allocate_reader_symbol(None, "concat")?;
+            let mut concat_list = vec![concat_sym];
+            concat_list.extend(concat_args);
+            let concat_call = rt.allocate_reader_list(&concat_list)?;
+
+            let apply_sym = rt.allocate_reader_symbol(None, "apply")?;
+            let hash_map_sym = rt.allocate_reader_symbol(None, "hash-map")?;
+            rt.allocate_reader_list(&[apply_sym, hash_map_sym, concat_call])
+        }
+
+        // Symbol: quote it with full namespace resolution
+        Edn::Symbol(s) => {
+            // In real Clojure, syntax-quote resolves symbols to their namespaced versions
+            // For now, just quote the symbol as-is
+            let sym = edn_to_tagged(edn, rt)?;
+            let quote_sym = rt.allocate_reader_symbol(None, "quote")?;
+            rt.allocate_reader_list(&[quote_sym, sym])
+        }
+
+        // Other literals: just quote them
+        _ => {
+            let tagged = edn_to_tagged(edn, rt)?;
+            let quote_sym = rt.allocate_reader_symbol(None, "quote")?;
+            rt.allocate_reader_list(&[quote_sym, tagged])
+        }
+    }
+}
+
+/// Expand a sequence (list or vector) inside syntax-quote
+/// Returns (seq (concat ...)) for lists, just (concat ...) for vectors
+fn expand_syntax_quote_seq(items: &[Edn], rt: &mut GCRuntime, wrap_in_seq: bool) -> Result<usize, String> {
+    let mut concat_args = Vec::new();
+
+    for item in items {
+        concat_args.push(syntax_quote_element(item, rt)?);
+    }
+
+    let concat_sym = rt.allocate_reader_symbol(None, "concat")?;
+    let mut concat_list = vec![concat_sym];
+    concat_list.extend(concat_args);
+    let concat_call = rt.allocate_reader_list(&concat_list)?;
+
+    if wrap_in_seq {
+        let seq_sym = rt.allocate_reader_symbol(None, "seq")?;
+        rt.allocate_reader_list(&[seq_sym, concat_call])
+    } else {
+        Ok(concat_call)
+    }
+}
+
+/// Process a single element inside a syntax-quoted collection
+/// Returns a form suitable for use in concat
+fn syntax_quote_element(edn: &Edn, rt: &mut GCRuntime) -> Result<usize, String> {
+    match edn {
+        // ~form -> (list form)
+        Edn::Unquote(inner) => {
+            let inner_tagged = edn_to_tagged(inner, rt)?;
+            let list_sym = rt.allocate_reader_symbol(None, "list")?;
+            rt.allocate_reader_list(&[list_sym, inner_tagged])
+        }
+
+        // ~@form -> form (spliced directly into concat)
+        Edn::UnquoteSplicing(inner) => {
+            edn_to_tagged(inner, rt)
+        }
+
+        // Nested list: recursively syntax-quote and wrap in (list ...)
+        Edn::List(_) => {
+            let expanded = expand_syntax_quote(edn, rt)?;
+            let list_sym = rt.allocate_reader_symbol(None, "list")?;
+            rt.allocate_reader_list(&[list_sym, expanded])
+        }
+
+        // Nested vector: recursively syntax-quote and wrap in (list ...)
+        Edn::Vector(_) => {
+            let expanded = expand_syntax_quote(edn, rt)?;
+            let list_sym = rt.allocate_reader_symbol(None, "list")?;
+            rt.allocate_reader_list(&[list_sym, expanded])
+        }
+
+        // Other forms: quote and wrap in (list ...)
+        _ => {
+            let expanded = expand_syntax_quote(edn, rt)?;
+            let list_sym = rt.allocate_reader_symbol(None, "list")?;
+            rt.allocate_reader_list(&[list_sym, expanded])
+        }
     }
 }
 
