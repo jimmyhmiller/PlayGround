@@ -346,6 +346,17 @@ impl IrBuilder {
         }
     }
 
+    /// Reset the builder for a new compilation unit
+    /// Used when compiling multiple expressions in sequence (e.g., TopLevelDo)
+    pub fn reset(&mut self) {
+        self.next_temp_register = 0;
+        self.next_argument_register = 0;
+        self.next_label = 0;
+        self.instructions.clear();
+        self.reserved_exception_slots = 0;
+        self.num_locals = 0;
+    }
+
     /// Allocate a stack slot for exception handling
     /// Returns the slot index (0-based, will be converted to FP-relative offset in codegen)
     pub fn allocate_exception_slot(&mut self) -> usize {

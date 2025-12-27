@@ -337,6 +337,19 @@ impl<'c> IRGenerator<'c> {
             regions.push(Region::new());
         }
 
+        // Special handling for linalg named operations
+        if qualified_name.starts_with("linalg.") {
+            return self.generate_linalg_operation(
+                context,
+                &qualified_name,
+                &operand_values,
+                &result_types,
+                &attributes,
+                regions,
+                block,
+            );
+        }
+
         // Build the operation
         let operation = self.build_operation(
             context,

@@ -58,6 +58,25 @@
             rc (call i64 item_check right)]
         (+i (+i lc rc) (: 1 i64))))))
 
+; Free a tree recursively
+(defn free_tree [(: node !llvm.ptr)] -> i64
+  ; Check if internal node (left child is not null)
+  (def left_child (TreeNode/left node))
+  (scf.if (llvm.icmp {:predicate 1} left_child (llvm.mlir.zero {:result !llvm.ptr}))
+    (region
+      (block []
+        ; Internal node - free children first
+        (def right_child (TreeNode/right node))
+        (call i64 free_tree left_child)
+        (call i64 free_tree right_child)
+        (scf.yield)))
+    (region
+      (block []
+        (scf.yield))))
+  ; Free this node
+  (call! free node)
+  (func.return (: 0 i64)))
+
 ; =============================================================================
 ; Printing Utilities
 ; =============================================================================
@@ -93,6 +112,7 @@
       (block [(: i i64) (: acc i64)]
         (def tree (call !llvm.ptr bottom_up_tree depth))
         (def c (call i64 item_check tree))
+        (call i64 free_tree tree)
         (scf.yield (+i acc c))))))
   ; Print: iterations \t trees of depth \t depth \t check: \t check
   (call i64 print_number iterations)
@@ -136,6 +156,7 @@
   (def stretch_depth (+i max_depth (: 1 i64)))
   (def stretch_tree (call !llvm.ptr bottom_up_tree stretch_depth))
   (def stretch_check (call i64 item_check stretch_tree))
+  (call i64 free_tree stretch_tree)
 
   ; Print: stretch tree of depth N \t check: N
   (print "stretch tree of depth ")
@@ -161,6 +182,7 @@
 
   ; Print long-lived tree result
   (def long_check (call i64 item_check long_lived_tree))
+  (call i64 free_tree long_lived_tree)
   (print "long lived tree of depth ")
   (call i64 print_number max_depth)
   (print "\t check: ")

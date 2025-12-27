@@ -2299,6 +2299,376 @@ impl Drop for Trampoline {
     }
 }
 
+// ========== Macro Invocation ==========
+
+/// Invoke a compiled function with the given arguments at compile time.
+/// This is used for macro expansion - the macro function is called with
+/// the unevaluated reader forms as arguments.
+///
+/// Arguments:
+/// - rt: The GC runtime
+/// - fn_tagged: Tagged function pointer (tag 0b100) or closure (tag 0b101)
+/// - args: Slice of tagged reader form arguments
+///
+/// Returns: The result of the macro function (a tagged reader form)
+pub fn invoke_macro(
+    rt: &mut GCRuntime,
+    fn_tagged: usize,
+    args: &[usize],
+) -> Result<usize, String> {
+    use crate::gc::types::HeapObject;
+    use crate::gc_runtime::closure_layout;
+
+    let tag = fn_tagged & 0b111;
+    let arg_count = args.len();
+
+    // Pad args to 8 elements for uniform dispatch
+    let mut padded_args = [7usize; 8]; // 7 = nil
+    for (i, &arg) in args.iter().enumerate().take(8) {
+        padded_args[i] = arg;
+    }
+
+    if tag == 0b100 {
+        // Raw function pointer
+        let code_ptr = fn_tagged >> 3;
+
+        // Define function types for different arities
+        type Fn0 = extern "C" fn() -> usize;
+        type Fn1 = extern "C" fn(usize) -> usize;
+        type Fn2 = extern "C" fn(usize, usize) -> usize;
+        type Fn3 = extern "C" fn(usize, usize, usize) -> usize;
+        type Fn4 = extern "C" fn(usize, usize, usize, usize) -> usize;
+        type Fn5 = extern "C" fn(usize, usize, usize, usize, usize) -> usize;
+        type Fn6 = extern "C" fn(usize, usize, usize, usize, usize, usize) -> usize;
+        type Fn7 = extern "C" fn(usize, usize, usize, usize, usize, usize, usize) -> usize;
+        type Fn8 = extern "C" fn(usize, usize, usize, usize, usize, usize, usize, usize) -> usize;
+
+        let result = unsafe {
+            match arg_count {
+                0 => std::mem::transmute::<usize, Fn0>(code_ptr)(),
+                1 => std::mem::transmute::<usize, Fn1>(code_ptr)(padded_args[0]),
+                2 => std::mem::transmute::<usize, Fn2>(code_ptr)(padded_args[0], padded_args[1]),
+                3 => std::mem::transmute::<usize, Fn3>(code_ptr)(
+                    padded_args[0],
+                    padded_args[1],
+                    padded_args[2],
+                ),
+                4 => std::mem::transmute::<usize, Fn4>(code_ptr)(
+                    padded_args[0],
+                    padded_args[1],
+                    padded_args[2],
+                    padded_args[3],
+                ),
+                5 => std::mem::transmute::<usize, Fn5>(code_ptr)(
+                    padded_args[0],
+                    padded_args[1],
+                    padded_args[2],
+                    padded_args[3],
+                    padded_args[4],
+                ),
+                6 => std::mem::transmute::<usize, Fn6>(code_ptr)(
+                    padded_args[0],
+                    padded_args[1],
+                    padded_args[2],
+                    padded_args[3],
+                    padded_args[4],
+                    padded_args[5],
+                ),
+                7 => std::mem::transmute::<usize, Fn7>(code_ptr)(
+                    padded_args[0],
+                    padded_args[1],
+                    padded_args[2],
+                    padded_args[3],
+                    padded_args[4],
+                    padded_args[5],
+                    padded_args[6],
+                ),
+                8 => std::mem::transmute::<usize, Fn8>(code_ptr)(
+                    padded_args[0],
+                    padded_args[1],
+                    padded_args[2],
+                    padded_args[3],
+                    padded_args[4],
+                    padded_args[5],
+                    padded_args[6],
+                    padded_args[7],
+                ),
+                _ => return Err(format!("Macro has too many arguments: {}", arg_count)),
+            }
+        };
+        Ok(result)
+    } else if tag == 0b101 {
+        // Closure - need to pass closure as first arg
+        let untagged = fn_tagged >> 3;
+        let heap_obj = HeapObject::from_untagged(untagged as *const u8);
+        let closure_type_id = heap_obj.get_header().type_id;
+
+        use crate::gc_runtime::TYPE_MULTI_ARITY_FN;
+        if closure_type_id == TYPE_MULTI_ARITY_FN as u8 {
+            // Multi-arity closure - look up the right arity
+            match rt.multi_arity_lookup(fn_tagged, arg_count) {
+                Some((code_ptr, _is_variadic)) => {
+                    // Closure calling convention: x0 = closure, x1-x7 = args
+                    type ClosureFn1 = extern "C" fn(usize) -> usize;
+                    type ClosureFn2 = extern "C" fn(usize, usize) -> usize;
+                    type ClosureFn3 = extern "C" fn(usize, usize, usize) -> usize;
+                    type ClosureFn4 = extern "C" fn(usize, usize, usize, usize) -> usize;
+                    type ClosureFn5 = extern "C" fn(usize, usize, usize, usize, usize) -> usize;
+                    type ClosureFn6 =
+                        extern "C" fn(usize, usize, usize, usize, usize, usize) -> usize;
+                    type ClosureFn7 =
+                        extern "C" fn(usize, usize, usize, usize, usize, usize, usize) -> usize;
+                    type ClosureFn8 = extern "C" fn(
+                        usize,
+                        usize,
+                        usize,
+                        usize,
+                        usize,
+                        usize,
+                        usize,
+                        usize,
+                    ) -> usize;
+
+                    let result = unsafe {
+                        match arg_count {
+                            0 => std::mem::transmute::<usize, ClosureFn1>(code_ptr)(fn_tagged),
+                            1 => std::mem::transmute::<usize, ClosureFn2>(code_ptr)(
+                                fn_tagged,
+                                padded_args[0],
+                            ),
+                            2 => std::mem::transmute::<usize, ClosureFn3>(code_ptr)(
+                                fn_tagged,
+                                padded_args[0],
+                                padded_args[1],
+                            ),
+                            3 => std::mem::transmute::<usize, ClosureFn4>(code_ptr)(
+                                fn_tagged,
+                                padded_args[0],
+                                padded_args[1],
+                                padded_args[2],
+                            ),
+                            4 => std::mem::transmute::<usize, ClosureFn5>(code_ptr)(
+                                fn_tagged,
+                                padded_args[0],
+                                padded_args[1],
+                                padded_args[2],
+                                padded_args[3],
+                            ),
+                            5 => std::mem::transmute::<usize, ClosureFn6>(code_ptr)(
+                                fn_tagged,
+                                padded_args[0],
+                                padded_args[1],
+                                padded_args[2],
+                                padded_args[3],
+                                padded_args[4],
+                            ),
+                            6 => std::mem::transmute::<usize, ClosureFn7>(code_ptr)(
+                                fn_tagged,
+                                padded_args[0],
+                                padded_args[1],
+                                padded_args[2],
+                                padded_args[3],
+                                padded_args[4],
+                                padded_args[5],
+                            ),
+                            7 => std::mem::transmute::<usize, ClosureFn8>(code_ptr)(
+                                fn_tagged,
+                                padded_args[0],
+                                padded_args[1],
+                                padded_args[2],
+                                padded_args[3],
+                                padded_args[4],
+                                padded_args[5],
+                                padded_args[6],
+                            ),
+                            _ => return Err(format!("Macro has too many arguments: {}", arg_count)),
+                        }
+                    };
+                    Ok(result)
+                }
+                None => Err(format!(
+                    "Wrong number of arguments ({}) to macro",
+                    arg_count
+                )),
+            }
+        } else {
+            // Single-arity closure
+            let code_ptr = heap_obj.get_field(closure_layout::FIELD_1_CODE_PTR / 8);
+
+            type ClosureFn1 = extern "C" fn(usize) -> usize;
+            type ClosureFn2 = extern "C" fn(usize, usize) -> usize;
+            type ClosureFn3 = extern "C" fn(usize, usize, usize) -> usize;
+            type ClosureFn4 = extern "C" fn(usize, usize, usize, usize) -> usize;
+            type ClosureFn5 = extern "C" fn(usize, usize, usize, usize, usize) -> usize;
+            type ClosureFn6 = extern "C" fn(usize, usize, usize, usize, usize, usize) -> usize;
+            type ClosureFn7 =
+                extern "C" fn(usize, usize, usize, usize, usize, usize, usize) -> usize;
+            type ClosureFn8 =
+                extern "C" fn(usize, usize, usize, usize, usize, usize, usize, usize) -> usize;
+
+            let result = unsafe {
+                match arg_count {
+                    0 => std::mem::transmute::<usize, ClosureFn1>(code_ptr)(fn_tagged),
+                    1 => std::mem::transmute::<usize, ClosureFn2>(code_ptr)(
+                        fn_tagged,
+                        padded_args[0],
+                    ),
+                    2 => std::mem::transmute::<usize, ClosureFn3>(code_ptr)(
+                        fn_tagged,
+                        padded_args[0],
+                        padded_args[1],
+                    ),
+                    3 => std::mem::transmute::<usize, ClosureFn4>(code_ptr)(
+                        fn_tagged,
+                        padded_args[0],
+                        padded_args[1],
+                        padded_args[2],
+                    ),
+                    4 => std::mem::transmute::<usize, ClosureFn5>(code_ptr)(
+                        fn_tagged,
+                        padded_args[0],
+                        padded_args[1],
+                        padded_args[2],
+                        padded_args[3],
+                    ),
+                    5 => std::mem::transmute::<usize, ClosureFn6>(code_ptr)(
+                        fn_tagged,
+                        padded_args[0],
+                        padded_args[1],
+                        padded_args[2],
+                        padded_args[3],
+                        padded_args[4],
+                    ),
+                    6 => std::mem::transmute::<usize, ClosureFn7>(code_ptr)(
+                        fn_tagged,
+                        padded_args[0],
+                        padded_args[1],
+                        padded_args[2],
+                        padded_args[3],
+                        padded_args[4],
+                        padded_args[5],
+                    ),
+                    7 => std::mem::transmute::<usize, ClosureFn8>(code_ptr)(
+                        fn_tagged,
+                        padded_args[0],
+                        padded_args[1],
+                        padded_args[2],
+                        padded_args[3],
+                        padded_args[4],
+                        padded_args[5],
+                        padded_args[6],
+                    ),
+                    _ => return Err(format!("Macro has too many arguments: {}", arg_count)),
+                }
+            };
+            Ok(result)
+        }
+    } else {
+        Err(format!(
+            "Cannot invoke non-function as macro (tag: {})",
+            tag
+        ))
+    }
+}
+
+// ========== Protocol Method Invocation (for primitive dispatch) ==========
+
+/// Invoke a protocol method on a target value.
+/// This is used by primitive dispatch functions in gc_runtime.rs when
+/// the type is a user-defined type (deftype) that implements a protocol.
+///
+/// Arguments:
+/// - rt: The GC runtime
+/// - target: The tagged value to invoke the method on (becomes first arg)
+/// - method_name: The protocol method name (e.g., "-first", "-count")
+/// - extra_args: Additional arguments (for methods that take more than just 'this')
+///
+/// Returns: The result of the method call
+pub fn invoke_protocol_method(
+    rt: &mut GCRuntime,
+    target: usize,
+    method_name: &str,
+    extra_args: &[usize],
+) -> Result<usize, String> {
+    use crate::gc::types::HeapObject;
+    use crate::gc_runtime::closure_layout;
+
+    // Look up the method
+    let type_id = rt.get_type_id_for_value(target);
+    let fn_ptr = rt
+        .lookup_protocol_method(type_id, method_name)
+        .ok_or_else(|| {
+            format!(
+                "No implementation of {} for type {}",
+                method_name,
+                GCRuntime::builtin_type_name(type_id)
+            )
+        })?;
+
+    let tag = fn_ptr & 0b111;
+    let total_args = 1 + extra_args.len(); // 'this' + extra args
+
+    // Build args array: [target, extra_args...]
+    let mut args = vec![target];
+    args.extend_from_slice(extra_args);
+
+    if tag == 0b100 {
+        // Raw function pointer
+        let code_ptr = fn_ptr >> 3;
+
+        type Fn1 = extern "C" fn(usize) -> usize;
+        type Fn2 = extern "C" fn(usize, usize) -> usize;
+        type Fn3 = extern "C" fn(usize, usize, usize) -> usize;
+
+        let result = unsafe {
+            match total_args {
+                1 => std::mem::transmute::<usize, Fn1>(code_ptr)(args[0]),
+                2 => std::mem::transmute::<usize, Fn2>(code_ptr)(args[0], args[1]),
+                3 => std::mem::transmute::<usize, Fn3>(code_ptr)(args[0], args[1], args[2]),
+                _ => {
+                    return Err(format!(
+                        "Protocol method {} has too many arguments: {}",
+                        method_name, total_args
+                    ))
+                }
+            }
+        };
+        Ok(result)
+    } else if tag == 0b101 {
+        // Closure
+        let untagged = fn_ptr >> 3;
+        let heap_obj = HeapObject::from_untagged(untagged as *const u8);
+        let code_ptr = heap_obj.get_field(closure_layout::FIELD_1_CODE_PTR / 8);
+
+        // Closure calling convention: closure in first position, then args
+        type ClosureFn2 = extern "C" fn(usize, usize) -> usize;
+        type ClosureFn3 = extern "C" fn(usize, usize, usize) -> usize;
+        type ClosureFn4 = extern "C" fn(usize, usize, usize, usize) -> usize;
+
+        let result = unsafe {
+            match total_args {
+                1 => std::mem::transmute::<usize, ClosureFn2>(code_ptr)(fn_ptr, args[0]),
+                2 => std::mem::transmute::<usize, ClosureFn3>(code_ptr)(fn_ptr, args[0], args[1]),
+                3 => std::mem::transmute::<usize, ClosureFn4>(code_ptr)(
+                    fn_ptr, args[0], args[1], args[2],
+                ),
+                _ => {
+                    return Err(format!(
+                        "Protocol method {} has too many arguments: {}",
+                        method_name, total_args
+                    ))
+                }
+            }
+        };
+        Ok(result)
+    } else {
+        Err(format!(
+            "Protocol method {} is not a function (tag: {})",
+            method_name, tag
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

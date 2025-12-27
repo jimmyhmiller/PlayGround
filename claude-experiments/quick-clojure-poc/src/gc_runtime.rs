@@ -55,6 +55,14 @@ pub const TYPE_MULTI_ARITY_FN: usize = 16;
 pub const TYPE_DEFTYPE: usize = 17; // Base for deftypes, actual ID = TYPE_DEFTYPE + type_data
 pub const TYPE_DYNAMIC_ARRAY: usize = 18; // Dynamic array: header.size = capacity, header.type_data = used count
 
+// ========== Reader Types ==========
+// Opaque types produced by the Rust reader, used directly by macros.
+// These types have Rust-implemented operations exposed as builtins.
+pub const TYPE_READER_LIST: usize = 30;
+pub const TYPE_READER_VECTOR: usize = 31;
+pub const TYPE_READER_MAP: usize = 32;
+pub const TYPE_READER_SYMBOL: usize = 33;
+
 /// Offset added to deftype IDs to avoid collision with built-in types
 pub const DEFTYPE_ID_OFFSET: usize = 100;
 
@@ -222,6 +230,89 @@ pub mod array_layout {
     }
 }
 
+// ========== Reader Type Layouts ==========
+// These types are produced by the Rust reader and consumed by macros.
+// They are simple array-backed structures, not persistent data structures.
+
+/// ReaderList layout: simple array of elements
+/// Layout:
+///   [header(8)]
+///   [count(8)]        - field 0: element count (raw usize, not tagged)
+///   [element0(8)]     - field 1+: elements (tagged values)
+#[allow(dead_code)]
+pub mod reader_list_layout {
+    pub const FIELD_COUNT: usize = 0;
+    pub const FIELD_FIRST_ELEMENT: usize = 1;
+
+    pub const fn total_size_words(element_count: usize) -> usize {
+        1 + element_count
+    }
+
+    pub const fn element_field(index: usize) -> usize {
+        FIELD_FIRST_ELEMENT + index
+    }
+}
+
+/// ReaderVector layout: simple array of elements (same as list but different type ID)
+/// Layout:
+///   [header(8)]
+///   [count(8)]        - field 0: element count (raw usize, not tagged)
+///   [element0(8)]     - field 1+: elements (tagged values)
+#[allow(dead_code)]
+pub mod reader_vector_layout {
+    pub const FIELD_COUNT: usize = 0;
+    pub const FIELD_FIRST_ELEMENT: usize = 1;
+
+    pub const fn total_size_words(element_count: usize) -> usize {
+        1 + element_count
+    }
+
+    pub const fn element_field(index: usize) -> usize {
+        FIELD_FIRST_ELEMENT + index
+    }
+}
+
+/// ReaderMap layout: array of key-value pairs
+/// Layout:
+///   [header(8)]
+///   [count(8)]        - field 0: number of entries (raw usize, not tagged)
+///   [key0(8)]         - field 1+: alternating key, value pairs (tagged values)
+///   [val0(8)]
+///   [key1(8)]
+///   [val1(8)]
+///   ...
+#[allow(dead_code)]
+pub mod reader_map_layout {
+    pub const FIELD_COUNT: usize = 0;
+    pub const FIELD_FIRST_ENTRY: usize = 1;
+
+    pub const fn total_size_words(entry_count: usize) -> usize {
+        1 + entry_count * 2
+    }
+
+    pub const fn key_field(index: usize) -> usize {
+        FIELD_FIRST_ENTRY + index * 2
+    }
+
+    pub const fn value_field(index: usize) -> usize {
+        FIELD_FIRST_ENTRY + index * 2 + 1
+    }
+}
+
+/// ReaderSymbol layout: namespace, name, and metadata as tagged pointers
+/// Layout:
+///   [header(8)]
+///   [namespace(8)]    - field 0: namespace string (tagged) or nil
+///   [name(8)]         - field 1: name string (tagged)
+///   [metadata(8)]     - field 2: metadata map (tagged ReaderMap) or nil
+#[allow(dead_code)]
+pub mod reader_symbol_layout {
+    pub const FIELD_NAMESPACE: usize = 0;
+    pub const FIELD_NAME: usize = 1;
+    pub const FIELD_METADATA: usize = 2;
+    pub const SIZE_WORDS: usize = 3;
+}
+
 /// GC Runtime with pluggable allocator
 pub struct GCRuntime {
     /// The underlying allocator
@@ -298,6 +389,10 @@ pub struct GCRuntime {
 
     /// Reverse lookup: symbol string -> symbol_id
     symbol_name_to_id: HashMap<String, u32>,
+
+    // ========== Macro Support ==========
+    /// Cached :macro keyword pointer for fast macro checking
+    macro_keyword_ptr: Option<usize>,
 }
 
 impl Default for GCRuntime {
@@ -340,6 +435,8 @@ impl GCRuntime {
             // Symbol interning (for runtime var lookup)
             symbol_table: Vec::new(),
             symbol_name_to_id: HashMap::new(),
+            // Macro support
+            macro_keyword_ptr: None,
         }
     }
 
@@ -607,7 +704,7 @@ impl GCRuntime {
 
     /// Allocate a keyword on the heap
     /// Layout: [header(8)][hash(8)][text bytes padded to word boundary]
-    fn allocate_keyword(&mut self, text: &str) -> Result<usize, String> {
+    pub fn allocate_keyword(&mut self, text: &str) -> Result<usize, String> {
         let bytes = text.as_bytes();
         // Words needed: 1 for hash + ceil(bytes.len() / 8) for text
         let text_words = bytes.len().div_ceil(8);
@@ -1153,6 +1250,12 @@ impl GCRuntime {
 
     /// Allocate a var object on the heap
     /// Returns (tagged_var_ptr, symbol_ptr) - symbol_ptr can be reused for namespace binding
+    ///
+    /// Var layout (4 fields):
+    ///   field 0: namespace_ptr (tagged pointer to namespace)
+    ///   field 1: symbol_ptr (tagged string pointer with symbol name)
+    ///   field 2: current_value (the var's root binding)
+    ///   field 3: metadata_ptr (tagged map or nil)
     pub fn allocate_var(
         &mut self,
         ns_ptr: usize,
@@ -1161,11 +1264,12 @@ impl GCRuntime {
     ) -> Result<(usize, usize), String> {
         let symbol_ptr = self.allocate_string(symbol_name)?;
 
-        let var_ptr = self.allocate_raw(3, TYPE_VAR as u8)?;
+        let var_ptr = self.allocate_raw(4, TYPE_VAR as u8)?;
         let heap_obj = HeapObject::from_untagged(var_ptr as *const u8);
         heap_obj.write_field(0, ns_ptr);
         heap_obj.write_field(1, symbol_ptr);
         heap_obj.write_field(2, initial_value);
+        heap_obj.write_field(3, 7); // nil - no metadata initially
 
         let tagged_var_ptr = self.tag_heap_object(var_ptr);
 
@@ -1214,6 +1318,72 @@ impl GCRuntime {
         let untagged = self.untag_heap_object(var_ptr);
         let heap_obj = HeapObject::from_untagged(untagged as *const u8);
         heap_obj.write_field(2, value);
+    }
+
+    /// Get var metadata (field 3)
+    pub fn var_get_meta(&self, var_ptr: usize) -> usize {
+        let untagged = self.untag_heap_object(var_ptr);
+        let heap_obj = HeapObject::from_untagged(untagged as *const u8);
+        heap_obj.get_field(3)
+    }
+
+    /// Set var metadata (field 3)
+    pub fn var_set_meta(&self, var_ptr: usize, meta: usize) {
+        let untagged = self.untag_heap_object(var_ptr);
+        let heap_obj = HeapObject::from_untagged(untagged as *const u8);
+        heap_obj.write_field(3, meta);
+    }
+
+    /// Alter var metadata - assoc a key-value pair into the metadata map
+    /// Uses ReaderMap for storage since it's fully implemented
+    /// If metadata is nil, creates a new map with just the key-value pair
+    pub fn var_alter_meta(&mut self, var_ptr: usize, key: usize, value: usize) -> Result<(), String> {
+        let current_meta = self.var_get_meta(var_ptr);
+        let new_meta = if current_meta == 7 {
+            // nil -> create new ReaderMap with single entry
+            self.allocate_reader_map(&[(key, value)])?
+        } else {
+            // assoc into existing map
+            self.reader_map_assoc(current_meta, key, value)?
+        };
+        self.var_set_meta(var_ptr, new_meta);
+        Ok(())
+    }
+
+    /// Check if var is a macro (has :macro true in metadata)
+    pub fn is_var_macro(&self, var_ptr: usize) -> bool {
+        let meta = self.var_get_meta(var_ptr);
+        if meta == 7 {
+            return false; // nil metadata
+        }
+        // Look up :macro key in the map using the cached keyword pointer
+        if let Some(&macro_kw) = self.macro_keyword_ptr.as_ref() {
+            let not_found = 0usize; // Use 0 as sentinel (not a valid tagged value)
+            let val = self.reader_map_lookup(meta, macro_kw, not_found);
+            // Check if value is true (tagged bool: 0b1011)
+            val == 0b1011
+        } else {
+            false
+        }
+    }
+
+    /// Mark var as macro (set :macro true in metadata)
+    pub fn set_var_macro(&mut self, var_ptr: usize) -> Result<(), String> {
+        // Ensure :macro keyword is interned
+        let macro_kw = self.ensure_macro_keyword()?;
+        let true_val = 0b1011; // tagged true
+        self.var_alter_meta(var_ptr, macro_kw, true_val)
+    }
+
+    /// Ensure :macro keyword is interned and cached
+    fn ensure_macro_keyword(&mut self) -> Result<usize, String> {
+        if let Some(kw) = self.macro_keyword_ptr {
+            return Ok(kw);
+        }
+        let index = self.add_keyword("macro".to_string());
+        let kw = self.intern_keyword(index)?;
+        self.macro_keyword_ptr = Some(kw);
+        Ok(kw)
     }
 
     /// Mark a var as dynamic
@@ -1669,6 +1839,461 @@ impl GCRuntime {
         let heap_obj = HeapObject::from_untagged(untagged as *const u8);
         heap_obj.get_header().type_id == TYPE_VECTOR as u8
     }
+
+    // ========== Reader Type Methods ==========
+    // These types are produced by the Rust reader and used directly by macros.
+
+    /// Simple equality check for tagged values
+    /// For primitives: uses identity
+    /// For strings/keywords: compares content
+    /// For other heap objects: uses identity (for now)
+    fn values_equal(&self, a: usize, b: usize) -> bool {
+        if a == b {
+            return true;
+        }
+
+        // Get tags
+        let tag_a = a & 0b111;
+        let tag_b = b & 0b111;
+
+        if tag_a != tag_b {
+            return false;
+        }
+
+        // For strings, compare content
+        if tag_a == 0b010 {
+            // String tag
+            let str_a = self.read_string(a);
+            let str_b = self.read_string(b);
+            return str_a == str_b;
+        }
+
+        // For heap objects, check type-specific equality
+        if tag_a == 0b110 {
+            // HeapObject tag
+            let untagged_a = self.untag_heap_object(a);
+            let untagged_b = self.untag_heap_object(b);
+            let obj_a = HeapObject::from_untagged(untagged_a as *const u8);
+            let obj_b = HeapObject::from_untagged(untagged_b as *const u8);
+
+            let type_a = obj_a.get_header().type_id;
+            let type_b = obj_b.get_header().type_id;
+
+            if type_a != type_b {
+                return false;
+            }
+
+            // For keywords, compare the text
+            if type_a == TYPE_KEYWORD as u8 {
+                if let (Ok(text_a), Ok(text_b)) =
+                    (self.get_keyword_text(a), self.get_keyword_text(b))
+                {
+                    return text_a == text_b;
+                }
+                return false;
+            }
+
+            // For ReaderSymbol, compare namespace and name
+            if type_a == TYPE_READER_SYMBOL as u8 {
+                let ns_a = self.reader_symbol_namespace(a);
+                let ns_b = self.reader_symbol_namespace(b);
+                let name_a = self.reader_symbol_name(a);
+                let name_b = self.reader_symbol_name(b);
+                return ns_a == ns_b && name_a == name_b;
+            }
+
+            // Default: identity
+            return false;
+        }
+
+        false
+    }
+
+    /// Allocate a ReaderList with the given elements
+    pub fn allocate_reader_list(&mut self, elements: &[usize]) -> Result<usize, String> {
+        let size_words = reader_list_layout::total_size_words(elements.len());
+        let ptr = self.allocate_raw(size_words, TYPE_READER_LIST as u8)?;
+        let heap_obj = HeapObject::from_untagged(ptr as *const u8);
+
+        // Write count (raw usize, not tagged)
+        heap_obj.write_field(reader_list_layout::FIELD_COUNT, elements.len());
+
+        // Write elements
+        for (i, &elem) in elements.iter().enumerate() {
+            heap_obj.write_field(reader_list_layout::element_field(i), elem);
+        }
+
+        Ok(self.tag_heap_object(ptr))
+    }
+
+    /// Get the count of a ReaderList
+    pub fn reader_list_count(&self, list_ptr: usize) -> usize {
+        let untagged = self.untag_heap_object(list_ptr);
+        let heap_obj = HeapObject::from_untagged(untagged as *const u8);
+        heap_obj.get_field(reader_list_layout::FIELD_COUNT)
+    }
+
+    /// Get the first element of a ReaderList (returns nil if empty)
+    pub fn reader_list_first(&self, list_ptr: usize) -> usize {
+        let count = self.reader_list_count(list_ptr);
+        if count == 0 {
+            return 7; // nil
+        }
+        let untagged = self.untag_heap_object(list_ptr);
+        let heap_obj = HeapObject::from_untagged(untagged as *const u8);
+        heap_obj.get_field(reader_list_layout::element_field(0))
+    }
+
+    /// Get the rest of a ReaderList (returns a new ReaderList without first element)
+    pub fn reader_list_rest(&mut self, list_ptr: usize) -> Result<usize, String> {
+        let count = self.reader_list_count(list_ptr);
+        if count <= 1 {
+            return self.allocate_reader_list(&[]); // empty list
+        }
+
+        let untagged = self.untag_heap_object(list_ptr);
+        let heap_obj = HeapObject::from_untagged(untagged as *const u8);
+
+        // Collect rest elements
+        let mut rest_elements = Vec::with_capacity(count - 1);
+        for i in 1..count {
+            rest_elements.push(heap_obj.get_field(reader_list_layout::element_field(i)));
+        }
+
+        self.allocate_reader_list(&rest_elements)
+    }
+
+    /// Get element at index from a ReaderList
+    pub fn reader_list_nth(&self, list_ptr: usize, index: usize) -> Result<usize, String> {
+        let count = self.reader_list_count(list_ptr);
+        if index >= count {
+            return Err(format!(
+                "ReaderList index {} out of bounds for count {}",
+                index, count
+            ));
+        }
+        let untagged = self.untag_heap_object(list_ptr);
+        let heap_obj = HeapObject::from_untagged(untagged as *const u8);
+        Ok(heap_obj.get_field(reader_list_layout::element_field(index)))
+    }
+
+    /// Conj onto a ReaderList (prepends element, like Clojure's cons)
+    pub fn reader_list_conj(&mut self, list_ptr: usize, elem: usize) -> Result<usize, String> {
+        let count = self.reader_list_count(list_ptr);
+        let untagged = self.untag_heap_object(list_ptr);
+        let heap_obj = HeapObject::from_untagged(untagged as *const u8);
+
+        // Collect all elements with new one at front
+        let mut new_elements = Vec::with_capacity(count + 1);
+        new_elements.push(elem);
+        for i in 0..count {
+            new_elements.push(heap_obj.get_field(reader_list_layout::element_field(i)));
+        }
+
+        self.allocate_reader_list(&new_elements)
+    }
+
+    /// Create a ReaderList from a Vec of tagged pointers
+    pub fn reader_list_from_vec(&mut self, elements: &[usize]) -> Result<usize, String> {
+        self.allocate_reader_list(elements)
+    }
+
+    /// Check if a value is a ReaderList
+    pub fn is_reader_list(&self, value: usize) -> bool {
+        if (value & 0b111) != 0b110 {
+            return false;
+        }
+        let untagged = self.untag_heap_object(value);
+        let heap_obj = HeapObject::from_untagged(untagged as *const u8);
+        heap_obj.get_header().type_id == TYPE_READER_LIST as u8
+    }
+
+    /// Allocate a ReaderVector with the given elements
+    pub fn allocate_reader_vector(&mut self, elements: &[usize]) -> Result<usize, String> {
+        let size_words = reader_vector_layout::total_size_words(elements.len());
+        let ptr = self.allocate_raw(size_words, TYPE_READER_VECTOR as u8)?;
+        let heap_obj = HeapObject::from_untagged(ptr as *const u8);
+
+        // Write count (raw usize, not tagged)
+        heap_obj.write_field(reader_vector_layout::FIELD_COUNT, elements.len());
+
+        // Write elements
+        for (i, &elem) in elements.iter().enumerate() {
+            heap_obj.write_field(reader_vector_layout::element_field(i), elem);
+        }
+
+        Ok(self.tag_heap_object(ptr))
+    }
+
+    /// Get the count of a ReaderVector
+    pub fn reader_vector_count(&self, vec_ptr: usize) -> usize {
+        let untagged = self.untag_heap_object(vec_ptr);
+        let heap_obj = HeapObject::from_untagged(untagged as *const u8);
+        heap_obj.get_field(reader_vector_layout::FIELD_COUNT)
+    }
+
+    /// Get element at index from a ReaderVector
+    pub fn reader_vector_nth(&self, vec_ptr: usize, index: usize) -> Result<usize, String> {
+        let count = self.reader_vector_count(vec_ptr);
+        if index >= count {
+            return Err(format!(
+                "ReaderVector index {} out of bounds for count {}",
+                index, count
+            ));
+        }
+        let untagged = self.untag_heap_object(vec_ptr);
+        let heap_obj = HeapObject::from_untagged(untagged as *const u8);
+        Ok(heap_obj.get_field(reader_vector_layout::element_field(index)))
+    }
+
+    /// Get element at index from a ReaderVector with default
+    pub fn reader_vector_nth_or(&self, vec_ptr: usize, index: usize, not_found: usize) -> usize {
+        let count = self.reader_vector_count(vec_ptr);
+        if index >= count {
+            return not_found;
+        }
+        let untagged = self.untag_heap_object(vec_ptr);
+        let heap_obj = HeapObject::from_untagged(untagged as *const u8);
+        heap_obj.get_field(reader_vector_layout::element_field(index))
+    }
+
+    /// Conj onto a ReaderVector (appends element, like Clojure's conj)
+    pub fn reader_vector_conj(&mut self, vec_ptr: usize, elem: usize) -> Result<usize, String> {
+        let count = self.reader_vector_count(vec_ptr);
+        let untagged = self.untag_heap_object(vec_ptr);
+        let heap_obj = HeapObject::from_untagged(untagged as *const u8);
+
+        // Collect all elements with new one at end
+        let mut new_elements = Vec::with_capacity(count + 1);
+        for i in 0..count {
+            new_elements.push(heap_obj.get_field(reader_vector_layout::element_field(i)));
+        }
+        new_elements.push(elem);
+
+        self.allocate_reader_vector(&new_elements)
+    }
+
+    /// Check if a value is a ReaderVector
+    pub fn is_reader_vector(&self, value: usize) -> bool {
+        if (value & 0b111) != 0b110 {
+            return false;
+        }
+        let untagged = self.untag_heap_object(value);
+        let heap_obj = HeapObject::from_untagged(untagged as *const u8);
+        heap_obj.get_header().type_id == TYPE_READER_VECTOR as u8
+    }
+
+    /// Allocate a ReaderMap with the given key-value pairs
+    pub fn allocate_reader_map(&mut self, entries: &[(usize, usize)]) -> Result<usize, String> {
+        let size_words = reader_map_layout::total_size_words(entries.len());
+        let ptr = self.allocate_raw(size_words, TYPE_READER_MAP as u8)?;
+        let heap_obj = HeapObject::from_untagged(ptr as *const u8);
+
+        // Write count (raw usize, not tagged)
+        heap_obj.write_field(reader_map_layout::FIELD_COUNT, entries.len());
+
+        // Write key-value pairs
+        for (i, &(key, value)) in entries.iter().enumerate() {
+            heap_obj.write_field(reader_map_layout::key_field(i), key);
+            heap_obj.write_field(reader_map_layout::value_field(i), value);
+        }
+
+        Ok(self.tag_heap_object(ptr))
+    }
+
+    /// Get the count (number of entries) in a ReaderMap
+    pub fn reader_map_count(&self, map_ptr: usize) -> usize {
+        let untagged = self.untag_heap_object(map_ptr);
+        let heap_obj = HeapObject::from_untagged(untagged as *const u8);
+        heap_obj.get_field(reader_map_layout::FIELD_COUNT)
+    }
+
+    /// Lookup a key in a ReaderMap (returns not_found if not present)
+    pub fn reader_map_lookup(&self, map_ptr: usize, key: usize, not_found: usize) -> usize {
+        let count = self.reader_map_count(map_ptr);
+        let untagged = self.untag_heap_object(map_ptr);
+        let heap_obj = HeapObject::from_untagged(untagged as *const u8);
+
+        // Linear search for key (simple for reader data structures)
+        for i in 0..count {
+            let k = heap_obj.get_field(reader_map_layout::key_field(i));
+            if self.values_equal(k, key) {
+                return heap_obj.get_field(reader_map_layout::value_field(i));
+            }
+        }
+
+        not_found
+    }
+
+    /// Assoc a key-value pair into a ReaderMap (returns new map)
+    pub fn reader_map_assoc(
+        &mut self,
+        map_ptr: usize,
+        key: usize,
+        value: usize,
+    ) -> Result<usize, String> {
+        let count = self.reader_map_count(map_ptr);
+        let untagged = self.untag_heap_object(map_ptr);
+        let heap_obj = HeapObject::from_untagged(untagged as *const u8);
+
+        // Check if key exists and collect entries
+        let mut entries = Vec::with_capacity(count + 1);
+        let mut found = false;
+
+        for i in 0..count {
+            let k = heap_obj.get_field(reader_map_layout::key_field(i));
+            let v = heap_obj.get_field(reader_map_layout::value_field(i));
+            if self.values_equal(k, key) {
+                entries.push((k, value)); // Replace with new value
+                found = true;
+            } else {
+                entries.push((k, v));
+            }
+        }
+
+        if !found {
+            entries.push((key, value));
+        }
+
+        self.allocate_reader_map(&entries)
+    }
+
+    /// Get all keys from a ReaderMap as a ReaderList
+    pub fn reader_map_keys(&mut self, map_ptr: usize) -> Result<usize, String> {
+        let count = self.reader_map_count(map_ptr);
+        let untagged = self.untag_heap_object(map_ptr);
+        let heap_obj = HeapObject::from_untagged(untagged as *const u8);
+
+        let mut keys = Vec::with_capacity(count);
+        for i in 0..count {
+            keys.push(heap_obj.get_field(reader_map_layout::key_field(i)));
+        }
+
+        self.allocate_reader_list(&keys)
+    }
+
+    /// Get all values from a ReaderMap as a ReaderList
+    pub fn reader_map_vals(&mut self, map_ptr: usize) -> Result<usize, String> {
+        let count = self.reader_map_count(map_ptr);
+        let untagged = self.untag_heap_object(map_ptr);
+        let heap_obj = HeapObject::from_untagged(untagged as *const u8);
+
+        let mut vals = Vec::with_capacity(count);
+        for i in 0..count {
+            vals.push(heap_obj.get_field(reader_map_layout::value_field(i)));
+        }
+
+        self.allocate_reader_list(&vals)
+    }
+
+    /// Get a key-value pair from a ReaderMap by index
+    /// Returns (key_ptr, value_ptr)
+    pub fn reader_map_entry(&self, map_ptr: usize, index: usize) -> (usize, usize) {
+        let untagged = self.untag_heap_object(map_ptr);
+        let heap_obj = HeapObject::from_untagged(untagged as *const u8);
+        let key = heap_obj.get_field(reader_map_layout::key_field(index));
+        let value = heap_obj.get_field(reader_map_layout::value_field(index));
+        (key, value)
+    }
+
+    /// Check if a value is a ReaderMap
+    pub fn is_reader_map(&self, value: usize) -> bool {
+        if (value & 0b111) != 0b110 {
+            return false;
+        }
+        let untagged = self.untag_heap_object(value);
+        let heap_obj = HeapObject::from_untagged(untagged as *const u8);
+        heap_obj.get_header().type_id == TYPE_READER_MAP as u8
+    }
+
+    /// Allocate a ReaderSymbol with namespace and name (no metadata)
+    pub fn allocate_reader_symbol(
+        &mut self,
+        namespace: Option<&str>,
+        name: &str,
+    ) -> Result<usize, String> {
+        self.allocate_reader_symbol_with_meta(namespace, name, 7) // nil metadata
+    }
+
+    /// Allocate a ReaderSymbol with namespace, name, and metadata
+    pub fn allocate_reader_symbol_with_meta(
+        &mut self,
+        namespace: Option<&str>,
+        name: &str,
+        metadata: usize, // tagged pointer to ReaderMap or nil
+    ) -> Result<usize, String> {
+        // Allocate string for name
+        let name_ptr = self.allocate_string(name)?;
+
+        // Allocate string for namespace if present, otherwise nil
+        let ns_ptr = match namespace {
+            Some(ns) => self.allocate_string(ns)?,
+            None => 7, // nil
+        };
+
+        let ptr = self.allocate_raw(reader_symbol_layout::SIZE_WORDS, TYPE_READER_SYMBOL as u8)?;
+        let heap_obj = HeapObject::from_untagged(ptr as *const u8);
+
+        heap_obj.write_field(reader_symbol_layout::FIELD_NAMESPACE, ns_ptr);
+        heap_obj.write_field(reader_symbol_layout::FIELD_NAME, name_ptr);
+        heap_obj.write_field(reader_symbol_layout::FIELD_METADATA, metadata);
+
+        Ok(self.tag_heap_object(ptr))
+    }
+
+    /// Get the name of a ReaderSymbol as a string
+    pub fn reader_symbol_name(&self, sym_ptr: usize) -> String {
+        let untagged = self.untag_heap_object(sym_ptr);
+        let heap_obj = HeapObject::from_untagged(untagged as *const u8);
+        let name_ptr = heap_obj.get_field(reader_symbol_layout::FIELD_NAME);
+        self.read_string(name_ptr)
+    }
+
+    /// Get the namespace of a ReaderSymbol as an Option<String>
+    pub fn reader_symbol_namespace(&self, sym_ptr: usize) -> Option<String> {
+        let untagged = self.untag_heap_object(sym_ptr);
+        let heap_obj = HeapObject::from_untagged(untagged as *const u8);
+        let ns_ptr = heap_obj.get_field(reader_symbol_layout::FIELD_NAMESPACE);
+        if ns_ptr == 7 {
+            // nil
+            None
+        } else {
+            Some(self.read_string(ns_ptr))
+        }
+    }
+
+    /// Get the name pointer (tagged) of a ReaderSymbol
+    pub fn reader_symbol_name_ptr(&self, sym_ptr: usize) -> usize {
+        let untagged = self.untag_heap_object(sym_ptr);
+        let heap_obj = HeapObject::from_untagged(untagged as *const u8);
+        heap_obj.get_field(reader_symbol_layout::FIELD_NAME)
+    }
+
+    /// Get the namespace pointer (tagged, or nil) of a ReaderSymbol
+    pub fn reader_symbol_namespace_ptr(&self, sym_ptr: usize) -> usize {
+        let untagged = self.untag_heap_object(sym_ptr);
+        let heap_obj = HeapObject::from_untagged(untagged as *const u8);
+        heap_obj.get_field(reader_symbol_layout::FIELD_NAMESPACE)
+    }
+
+    /// Get the metadata pointer (tagged ReaderMap, or nil) of a ReaderSymbol
+    pub fn reader_symbol_metadata(&self, sym_ptr: usize) -> usize {
+        let untagged = self.untag_heap_object(sym_ptr);
+        let heap_obj = HeapObject::from_untagged(untagged as *const u8);
+        heap_obj.get_field(reader_symbol_layout::FIELD_METADATA)
+    }
+
+    /// Check if a value is a ReaderSymbol
+    pub fn is_reader_symbol(&self, value: usize) -> bool {
+        if (value & 0b111) != 0b110 {
+            return false;
+        }
+        let untagged = self.untag_heap_object(value);
+        let heap_obj = HeapObject::from_untagged(untagged as *const u8);
+        heap_obj.get_header().type_id == TYPE_READER_SYMBOL as u8
+    }
+
+    // ========== End Reader Type Methods ==========
 
     /// Clone an array (allocates a new array with same contents)
     pub fn array_clone(&mut self, arr_ptr: usize) -> Result<usize, String> {
@@ -2126,6 +2751,61 @@ impl GCRuntime {
                             format!("#<array[{} elements]>", len)
                         }
                     }
+                    TYPE_READER_LIST => {
+                        let count = self.reader_list_count(value);
+                        if count == 0 {
+                            "()".to_string()
+                        } else {
+                            let elements: Vec<String> = (0..count)
+                                .map(|i| {
+                                    self.format_value(
+                                        self.reader_list_nth(value, i).unwrap_or(7),
+                                    )
+                                })
+                                .collect();
+                            format!("({})", elements.join(" "))
+                        }
+                    }
+                    TYPE_READER_VECTOR => {
+                        let count = self.reader_vector_count(value);
+                        if count == 0 {
+                            "[]".to_string()
+                        } else {
+                            let elements: Vec<String> = (0..count)
+                                .map(|i| {
+                                    self.format_value(
+                                        self.reader_vector_nth(value, i).unwrap_or(7),
+                                    )
+                                })
+                                .collect();
+                            format!("[{}]", elements.join(" "))
+                        }
+                    }
+                    TYPE_READER_MAP => {
+                        let count = self.reader_map_count(value);
+                        if count == 0 {
+                            "{}".to_string()
+                        } else {
+                            let untagged = self.untag_heap_object(value);
+                            let heap_obj = HeapObject::from_untagged(untagged as *const u8);
+                            let pairs: Vec<String> = (0..count)
+                                .map(|i| {
+                                    let k = heap_obj.get_field(reader_map_layout::key_field(i));
+                                    let v = heap_obj.get_field(reader_map_layout::value_field(i));
+                                    format!("{} {}", self.format_value(k), self.format_value(v))
+                                })
+                                .collect();
+                            format!("{{{}}}", pairs.join(", "))
+                        }
+                    }
+                    TYPE_READER_SYMBOL => {
+                        let ns = self.reader_symbol_namespace(value);
+                        let name = self.reader_symbol_name(value);
+                        match ns {
+                            Some(ns_str) => format!("{}/{}", ns_str, name),
+                            None => name.to_string(),
+                        }
+                    }
                     _ => format!("#<object@{:x}>", untagged),
                 }
             }
@@ -2504,6 +3184,10 @@ impl GCRuntime {
             TYPE_NAMESPACE => "Namespace",
             TYPE_VAR => "Var",
             TYPE_ARRAY => "Array",
+            TYPE_READER_LIST => "ReaderList",
+            TYPE_READER_VECTOR => "ReaderVector",
+            TYPE_READER_MAP => "ReaderMap",
+            TYPE_READER_SYMBOL => "ReaderSymbol",
             _ if type_id >= DEFTYPE_ID_OFFSET => "deftype",
             _ => "unknown",
         }
@@ -2516,6 +3200,413 @@ impl GCRuntime {
             .enumerate()
             .map(|(id, p)| (id, p.name.clone(), p.methods.len()))
             .collect()
+    }
+
+    // ========== Primitive Dispatch Functions ==========
+    // These work before protocols exist by hardcoding behavior for built-in types,
+    // then falling back to protocol dispatch for user-defined types (deftypes).
+
+    /// Check if value is seq-able (list-like: can call first/rest on it)
+    pub fn prim_is_seq(&self, value: usize) -> bool {
+        let type_id = self.get_type_id_for_value(value);
+        match type_id {
+            TYPE_READER_LIST | TYPE_READER_VECTOR => true,
+            TYPE_NIL => false, // nil is not a seq but is seq-able (returns nil)
+            _ if type_id >= DEFTYPE_ID_OFFSET => {
+                // Check if implements ISeq protocol (protocol ID 0 by convention)
+                // For now, assume any deftype with -first method is seq-able
+                self.lookup_protocol_method(type_id, "-first").is_some()
+            }
+            _ => false,
+        }
+    }
+
+    /// Check if value is seqable (can be converted to a seq, including nil)
+    pub fn prim_is_seqable(&self, value: usize) -> bool {
+        let type_id = self.get_type_id_for_value(value);
+        match type_id {
+            TYPE_NIL => true, // nil is seqable (returns nil)
+            TYPE_READER_LIST | TYPE_READER_VECTOR => true,
+            _ if type_id >= DEFTYPE_ID_OFFSET => {
+                self.lookup_protocol_method(type_id, "-first").is_some()
+                    || self.lookup_protocol_method(type_id, "-seq").is_some()
+            }
+            _ => false,
+        }
+    }
+
+    /// Get first element of a seq. Returns nil (7) for empty/nil.
+    pub fn prim_first(&mut self, value: usize) -> Result<usize, String> {
+        // nil returns nil
+        if value == 7 {
+            return Ok(7);
+        }
+
+        let type_id = self.get_type_id_for_value(value);
+        match type_id {
+            TYPE_NIL => Ok(7),
+            TYPE_READER_LIST => {
+                if self.reader_list_count(value) == 0 {
+                    Ok(7) // empty list returns nil
+                } else {
+                    Ok(self.reader_list_first(value))
+                }
+            }
+            TYPE_READER_VECTOR => {
+                if self.reader_vector_count(value) == 0 {
+                    Ok(7)
+                } else {
+                    self.reader_vector_nth(value, 0)
+                }
+            }
+            _ if type_id >= DEFTYPE_ID_OFFSET => {
+                // Fast path for known types
+                let deftype_idx = type_id - DEFTYPE_ID_OFFSET;
+                let type_name = self.get_type_def(deftype_idx).map(|td| td.name.as_str());
+
+                match type_name {
+                    Some("EmptyList") => Ok(7), // empty list returns nil
+                    Some("PList") => {
+                        // PList fields: [meta, first, rest, count, __hash]
+                        // first is at field index 1
+                        Ok(self.read_type_field(value, 1))
+                    }
+                    Some("Cons") => {
+                        // Cons fields: [meta, first, rest, __hash]
+                        // first is at field index 1
+                        Ok(self.read_type_field(value, 1))
+                    }
+                    _ => {
+                        // Fall back to protocol dispatch
+                        crate::trampoline::invoke_protocol_method(self, value, "-first", &[])
+                    }
+                }
+            }
+            _ => Err(format!(
+                "prim_first: unsupported type {}",
+                Self::builtin_type_name(type_id)
+            )),
+        }
+    }
+
+    /// Get rest of a seq. Returns nil (7) for empty/nil.
+    pub fn prim_rest(&mut self, value: usize) -> Result<usize, String> {
+        // nil returns nil (or empty list in Clojure, but nil for simplicity)
+        if value == 7 {
+            return Ok(7);
+        }
+
+        let type_id = self.get_type_id_for_value(value);
+        match type_id {
+            TYPE_NIL => Ok(7),
+            TYPE_READER_LIST => {
+                if self.reader_list_count(value) == 0 {
+                    Ok(7)
+                } else {
+                    self.reader_list_rest(value)
+                }
+            }
+            TYPE_READER_VECTOR => {
+                let count = self.reader_vector_count(value);
+                if count <= 1 {
+                    Ok(7) // Return nil for empty or single-element vector
+                } else {
+                    // For vectors, we'd need to return a subvec or seq
+                    // For now, this is a limitation - vectors don't efficiently support rest
+                    Err("prim_rest: ReaderVector rest not efficiently supported".to_string())
+                }
+            }
+            _ if type_id >= DEFTYPE_ID_OFFSET => {
+                // Fast path for known types
+                let deftype_idx = type_id - DEFTYPE_ID_OFFSET;
+                let type_name = self.get_type_def(deftype_idx).map(|td| td.name.as_str());
+
+                match type_name {
+                    Some("EmptyList") => {
+                        // EmptyList.-rest returns itself (EMPTY-LIST)
+                        Ok(value)
+                    }
+                    Some("PList") => {
+                        // PList fields: [meta, first, rest, count, __hash]
+                        // rest is at field index 2
+                        let rest = self.read_type_field(value, 2);
+                        // If rest is nil, return EMPTY-LIST (which we need to look up)
+                        // For now, return nil if rest is nil
+                        if rest == 7 {
+                            // Need to return EMPTY-LIST, but we don't have easy access
+                            // For safety, return nil - caller should handle
+                            Ok(7)
+                        } else {
+                            Ok(rest)
+                        }
+                    }
+                    Some("Cons") => {
+                        // Cons fields: [meta, first, rest, __hash]
+                        // rest is at field index 2
+                        // Cons.-rest: (if (nil? (.-rest this)) EMPTY-LIST (.-rest this))
+                        let rest = self.read_type_field(value, 2);
+                        if rest == 7 {
+                            // Would return EMPTY-LIST in Clojure
+                            // For now, return nil - caller should check
+                            Ok(7)
+                        } else {
+                            Ok(rest)
+                        }
+                    }
+                    _ => {
+                        // Fall back to protocol dispatch
+                        crate::trampoline::invoke_protocol_method(self, value, "-rest", &[])
+                    }
+                }
+            }
+            _ => Err(format!(
+                "prim_rest: unsupported type {}",
+                Self::builtin_type_name(type_id)
+            )),
+        }
+    }
+
+    /// Get count of a collection
+    /// Like Clojure's count, this will walk seqs that don't implement ICounted
+    pub fn prim_count(&mut self, value: usize) -> Result<usize, String> {
+        if value == 7 {
+            return Ok(0); // nil has count 0
+        }
+
+        let type_id = self.get_type_id_for_value(value);
+        match type_id {
+            TYPE_NIL => Ok(0),
+            TYPE_READER_LIST => Ok(self.reader_list_count(value)),
+            TYPE_READER_VECTOR => Ok(self.reader_vector_count(value)),
+            TYPE_READER_MAP => Ok(self.reader_map_count(value)),
+            _ if type_id >= DEFTYPE_ID_OFFSET => {
+                // Check for known types with hardcoded fast paths
+                let deftype_idx = type_id - DEFTYPE_ID_OFFSET;
+                let type_name = self.get_type_def(deftype_idx).map(|td| td.name.as_str());
+
+                match type_name {
+                    Some("EmptyList") => Ok(0),
+                    Some("PList") => {
+                        // PList has fields: [meta, first, rest, count, __hash]
+                        // count is at field index 3
+                        let count_tagged = self.read_type_field(value, 3);
+                        Ok((count_tagged >> 3) as usize)
+                    }
+                    Some("Cons") => {
+                        // Cons doesn't have count, walk the seq in Rust without protocol dispatch
+                        // Cons fields: [meta, first, rest, __hash]
+                        // rest is at field index 2
+                        let mut count = 0usize;
+                        let mut current = value;
+                        loop {
+                            if current == 7 {
+                                break;
+                            }
+                            let cur_type_id = self.get_type_id_for_value(current);
+                            if cur_type_id == TYPE_NIL {
+                                break;
+                            }
+                            if cur_type_id < DEFTYPE_ID_OFFSET {
+                                // Not a deftype - shouldn't happen but safety check
+                                break;
+                            }
+                            let cur_deftype_idx = cur_type_id - DEFTYPE_ID_OFFSET;
+                            let cur_type_name = self.get_type_def(cur_deftype_idx).map(|td| td.name.as_str());
+
+                            match cur_type_name {
+                                Some("EmptyList") => break,
+                                Some("PList") => {
+                                    // PList has count, add it and done
+                                    let c = self.read_type_field(current, 3);
+                                    count += (c >> 3) as usize;
+                                    break;
+                                }
+                                Some("Cons") => {
+                                    // Cons: increment and get rest (field 2)
+                                    count += 1;
+                                    current = self.read_type_field(current, 2);
+                                }
+                                _ => {
+                                    // Unknown type - fall back to protocol dispatch for -next
+                                    count += 1;
+                                    current = crate::trampoline::invoke_protocol_method(
+                                        self, current, "-next", &[],
+                                    )?;
+                                }
+                            }
+                        }
+                        Ok(count)
+                    }
+                    _ => {
+                        // Unknown deftype - try protocol dispatch
+                        if self.lookup_protocol_method(type_id, "-count").is_some() {
+                            let result =
+                                crate::trampoline::invoke_protocol_method(self, value, "-count", &[])?;
+                            Ok((result >> 3) as usize)
+                        } else if self.prim_is_seq(value) || self.prim_is_seqable(value) {
+                            // Fall back to walking the seq
+                            let mut count = 0usize;
+                            let mut current = value;
+                            loop {
+                                if current == 7 {
+                                    break;
+                                }
+                                let current_type = self.get_type_id_for_value(current);
+                                if current_type == TYPE_NIL {
+                                    break;
+                                }
+                                if current_type >= DEFTYPE_ID_OFFSET
+                                    && self.lookup_protocol_method(current_type, "-count").is_some()
+                                {
+                                    let result = crate::trampoline::invoke_protocol_method(
+                                        self, current, "-count", &[],
+                                    )?;
+                                    count += (result >> 3) as usize;
+                                    break;
+                                }
+                                count += 1;
+                                current = crate::trampoline::invoke_protocol_method(
+                                    self, current, "-next", &[],
+                                )?;
+                            }
+                            Ok(count)
+                        } else {
+                            Err(format!(
+                                "prim_count: type {} is not countable or seqable",
+                                Self::builtin_type_name(type_id)
+                            ))
+                        }
+                    }
+                }
+            }
+            _ => Err(format!(
+                "prim_count: unsupported type {}",
+                Self::builtin_type_name(type_id)
+            )),
+        }
+    }
+
+    /// Get nth element of a collection
+    pub fn prim_nth(&mut self, value: usize, index: usize) -> Result<usize, String> {
+        if value == 7 {
+            return Err("prim_nth: cannot index nil".to_string());
+        }
+
+        let type_id = self.get_type_id_for_value(value);
+        match type_id {
+            TYPE_READER_LIST => self.reader_list_nth(value, index),
+            TYPE_READER_VECTOR => self.reader_vector_nth(value, index),
+            _ if type_id >= DEFTYPE_ID_OFFSET => {
+                // Protocol dispatch to -nth
+                // -nth takes (coll, n) where n is a tagged integer
+                let tagged_index = (index << 3) as usize;
+                crate::trampoline::invoke_protocol_method(self, value, "-nth", &[tagged_index])
+            }
+            _ => Err(format!(
+                "prim_nth: unsupported type {}",
+                Self::builtin_type_name(type_id)
+            )),
+        }
+    }
+
+    /// Check if value is a symbol
+    pub fn prim_is_symbol(&self, value: usize) -> bool {
+        let type_id = self.get_type_id_for_value(value);
+        match type_id {
+            TYPE_READER_SYMBOL | TYPE_SYMBOL => true,
+            _ if type_id >= DEFTYPE_ID_OFFSET => {
+                // Check if implements INamed or has -name method
+                self.lookup_protocol_method(type_id, "-name").is_some()
+            }
+            _ => false,
+        }
+    }
+
+    /// Get the name of a symbol
+    pub fn prim_symbol_name(&mut self, value: usize) -> Result<String, String> {
+        let type_id = self.get_type_id_for_value(value);
+        match type_id {
+            TYPE_READER_SYMBOL => Ok(self.reader_symbol_name(value)),
+            _ if type_id >= DEFTYPE_ID_OFFSET => {
+                // Protocol dispatch to -name
+                // -name returns a string, which we need to read
+                let result = crate::trampoline::invoke_protocol_method(self, value, "-name", &[])?;
+                Ok(self.read_string(result))
+            }
+            _ => Err(format!(
+                "prim_symbol_name: unsupported type {}",
+                Self::builtin_type_name(type_id)
+            )),
+        }
+    }
+
+    /// Get the namespace of a symbol (None if unqualified)
+    pub fn prim_symbol_namespace(&mut self, value: usize) -> Result<Option<String>, String> {
+        let type_id = self.get_type_id_for_value(value);
+        match type_id {
+            TYPE_READER_SYMBOL => Ok(self.reader_symbol_namespace(value)),
+            _ if type_id >= DEFTYPE_ID_OFFSET => {
+                // Protocol dispatch to -namespace
+                // -namespace returns a string or nil
+                let result =
+                    crate::trampoline::invoke_protocol_method(self, value, "-namespace", &[])?;
+                if result == 7 {
+                    // nil
+                    Ok(None)
+                } else {
+                    Ok(Some(self.read_string(result)))
+                }
+            }
+            _ => Err(format!(
+                "prim_symbol_namespace: unsupported type {}",
+                Self::builtin_type_name(type_id)
+            )),
+        }
+    }
+
+    /// Check if value is map-like
+    pub fn prim_is_map(&self, value: usize) -> bool {
+        let type_id = self.get_type_id_for_value(value);
+        match type_id {
+            TYPE_READER_MAP | TYPE_MAP => true,
+            _ if type_id >= DEFTYPE_ID_OFFSET => {
+                // Check if implements ILookup
+                self.lookup_protocol_method(type_id, "-lookup").is_some()
+            }
+            _ => false,
+        }
+    }
+
+    /// Lookup a key in a map-like value
+    pub fn prim_get(&mut self, map: usize, key: usize, not_found: usize) -> Result<usize, String> {
+        if map == 7 {
+            return Ok(not_found); // nil returns not-found
+        }
+
+        let type_id = self.get_type_id_for_value(map);
+        match type_id {
+            TYPE_NIL => Ok(not_found),
+            TYPE_READER_MAP => Ok(self.reader_map_lookup(map, key, not_found)),
+            _ if type_id >= DEFTYPE_ID_OFFSET => {
+                // Protocol dispatch to -lookup
+                // -lookup takes (coll, key, not-found)
+                crate::trampoline::invoke_protocol_method(self, map, "-lookup", &[key, not_found])
+            }
+            _ => Err(format!(
+                "prim_get: unsupported type {}",
+                Self::builtin_type_name(type_id)
+            )),
+        }
+    }
+
+    /// Check if value is a vector
+    pub fn prim_is_vector(&self, value: usize) -> bool {
+        let type_id = self.get_type_id_for_value(value);
+        match type_id {
+            TYPE_READER_VECTOR | TYPE_VECTOR => true,
+            // For user-defined types, we'd need a marker protocol
+            _ => false,
+        }
     }
 }
 

@@ -14,10 +14,10 @@ mod register_allocation;
 mod trampoline;
 
 use crate::arm_codegen::Arm64CodeGen;
-use crate::clojure_ast::{Expr, analyze};
+use crate::clojure_ast::{Expr, analyze, analyze_tagged, analyze_toplevel_tagged};
 use crate::compiler::Compiler;
 use crate::gc_runtime::GCRuntime;
-use crate::reader::read;
+use crate::reader::{read, read_to_tagged};
 use crate::trampoline::Trampoline;
 use std::cell::UnsafeCell;
 use std::io::{self, Write};
@@ -151,6 +151,12 @@ fn print_ast(ast: &Expr, indent: usize) {
             for (i, expr) in exprs.iter().enumerate() {
                 println!("{}  [{}]:", prefix, i);
                 print_ast(expr, indent + 2);
+            }
+        }
+        Expr::TopLevelDo { forms } => {
+            println!("{}TopLevelDo ({} forms, tagged pointers)", prefix, forms.len());
+            for (i, ptr) in forms.iter().enumerate() {
+                println!("{}  [{}]: 0x{:x}", prefix, i, ptr);
             }
         }
         Expr::Let { bindings, body } => {
@@ -623,49 +629,58 @@ fn load_clojure_file(
         accumulated.push_str(&line);
         accumulated.push('\n');
 
-        match read(&accumulated) {
-            Ok(val) => {
-                match analyze(&val) {
-                    Ok(ast) => {
-                        match compiler.compile_toplevel(&ast) {
-                            Ok(_) => {
-                                let instructions = compiler.take_instructions();
-                                let num_locals = compiler.builder.num_locals;
-
-                                match Arm64CodeGen::compile_function(&instructions, num_locals, 0) {
-                                    Ok(compiled) => {
-                                        // Execute as 0-argument function via trampoline
-                                        let trampoline = Trampoline::new(64 * 1024);
-                                        let result = unsafe {
-                                            trampoline.execute(compiled.code_ptr as *const u8)
-                                        };
-
-                                        if print_results
-                                            && !matches!(
-                                                ast,
-                                                Expr::Def { .. }
-                                                    | Expr::Ns { .. }
-                                                    | Expr::Use { .. }
-                                            )
-                                        {
-                                            unsafe {
-                                                let rt = &*runtime.get();
-                                                print_tagged_value(result, rt);
-                                            }
-                                        }
-                                    }
-                                    Err(e) => return Err(format!("Codegen error: {}", e)),
-                                }
-                            }
-                            Err(e) => return Err(format!("Compile error: {}", e)),
+        // Try to read using tagged pointer reader
+        let ast = unsafe {
+            let rt = &mut *runtime.get();
+            match read_to_tagged(&accumulated, rt) {
+                Ok(tagged) => match analyze_toplevel_tagged(rt, tagged) {
+                    Ok(ast) => ast,
+                    Err(e) => {
+                        // Analysis error - but might be incomplete expression
+                        // Try the old reader to distinguish
+                        match read(&accumulated) {
+                            Ok(_) => return Err(format!("Analysis error: {}", e)),
+                            Err(_) => continue, // Incomplete expression
                         }
                     }
-                    Err(e) => return Err(format!("Analysis error: {}", e)),
-                }
-                accumulated.clear();
+                },
+                Err(_) => continue, // Incomplete expression, keep accumulating
             }
-            Err(_) => continue,
+        };
+
+        match compiler.compile_toplevel(&ast) {
+            Ok(_) => {
+                let instructions = compiler.take_instructions();
+                let num_locals = compiler.builder.num_locals;
+
+                match Arm64CodeGen::compile_function(&instructions, num_locals, 0) {
+                    Ok(compiled) => {
+                        // Execute as 0-argument function via trampoline
+                        let trampoline = Trampoline::new(64 * 1024);
+                        let result = unsafe {
+                            trampoline.execute(compiled.code_ptr as *const u8)
+                        };
+
+                        if print_results
+                            && !matches!(
+                                ast,
+                                Expr::Def { .. }
+                                    | Expr::Ns { .. }
+                                    | Expr::Use { .. }
+                            )
+                        {
+                            unsafe {
+                                let rt = &*runtime.get();
+                                print_tagged_value(result, rt);
+                            }
+                        }
+                    }
+                    Err(e) => return Err(format!("Codegen error: {}", e)),
+                }
+            }
+            Err(e) => return Err(format!("Compile error: {}", e)),
         }
+        accumulated.clear();
     }
 
     if !accumulated.trim().is_empty() {
@@ -706,21 +721,22 @@ fn run_expr(expr: &str, gc_always: bool) {
         std::process::exit(1);
     }
 
-    // Parse the expression
-    let val = match read(expr) {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("Read error: {}", e);
-            std::process::exit(1);
-        }
-    };
-
-    // Analyze the expression
-    let ast = match analyze(&val) {
-        Ok(a) => a,
-        Err(e) => {
-            eprintln!("Analysis error: {}", e);
-            std::process::exit(1);
+    // Parse and analyze the expression using tagged pointers
+    let ast = unsafe {
+        let rt = &mut *runtime.get();
+        let tagged = match read_to_tagged(expr, rt) {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("Read error: {}", e);
+                std::process::exit(1);
+            }
+        };
+        match analyze_toplevel_tagged(rt, tagged) {
+            Ok(a) => a,
+            Err(e) => {
+                eprintln!("Analysis error: {}", e);
+                std::process::exit(1);
+            }
         }
     };
 
@@ -817,54 +833,58 @@ fn run_script(filename: &str, gc_always: bool) {
         accumulated.push_str(&line);
         accumulated.push('\n');
 
-        // Try to read an expression
-        match read(&accumulated) {
-            Ok(val) => {
-                // We got a complete expression, analyze and execute it
-                match analyze(&val) {
-                    Ok(ast) => {
-                        // Compile and execute
-                        match compiler.compile_toplevel(&ast) {
+        // Try to read and analyze using tagged pointers
+        let ast = unsafe {
+            let rt = &mut *runtime.get();
+            match read_to_tagged(&accumulated, rt) {
+                Ok(tagged) => match analyze_toplevel_tagged(rt, tagged) {
+                    Ok(ast) => ast,
+                    Err(e) => {
+                        // Analysis error - but might be incomplete expression
+                        // Try the old reader to distinguish
+                        match read(&accumulated) {
                             Ok(_) => {
-                                let instructions = compiler.take_instructions();
-                                let num_locals = compiler.builder.num_locals;
-
-                                match Arm64CodeGen::compile_function(&instructions, num_locals, 0) {
-                                    Ok(compiled) => {
-                                        // Execute as 0-argument function via trampoline
-                                        // Like Clojure, scripts don't print results automatically
-                                        // Only explicit print/println calls produce output
-                                        let trampoline = Trampoline::new(64 * 1024);
-                                        let _result = unsafe {
-                                            trampoline.execute(compiled.code_ptr as *const u8)
-                                        };
-                                    }
-                                    Err(e) => {
-                                        eprintln!("Codegen error: {}", e);
-                                        std::process::exit(1);
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                eprintln!("Compile error: {}", e);
+                                eprintln!("Analysis error: {}", e);
                                 std::process::exit(1);
                             }
+                            Err(_) => continue, // Incomplete expression
                         }
                     }
+                },
+                Err(_) => continue, // Incomplete expression, keep accumulating
+            }
+        };
+
+        // Compile and execute
+        match compiler.compile_toplevel(&ast) {
+            Ok(_) => {
+                let instructions = compiler.take_instructions();
+                let num_locals = compiler.builder.num_locals;
+
+                match Arm64CodeGen::compile_function(&instructions, num_locals, 0) {
+                    Ok(compiled) => {
+                        // Execute as 0-argument function via trampoline
+                        // Like Clojure, scripts don't print results automatically
+                        // Only explicit print/println calls produce output
+                        let trampoline = Trampoline::new(64 * 1024);
+                        let _result = unsafe {
+                            trampoline.execute(compiled.code_ptr as *const u8)
+                        };
+                    }
                     Err(e) => {
-                        eprintln!("Analysis error: {}", e);
+                        eprintln!("Codegen error: {}", e);
                         std::process::exit(1);
                     }
                 }
-
-                // Clear accumulated for next expression
-                accumulated.clear();
             }
-            Err(_) => {
-                // Not a complete expression yet, continue accumulating
-                continue;
+            Err(e) => {
+                eprintln!("Compile error: {}", e);
+                std::process::exit(1);
             }
         }
+
+        // Clear accumulated for next expression
+        accumulated.clear();
     }
 
     // Check if there's any remaining incomplete expression
@@ -1308,12 +1328,18 @@ fn main() {
                     ("", input)
                 };
 
-                // Read and analyze
-                match read(code) {
-                    Ok(value) => {
-                        match analyze(&value) {
-                            Ok(ast) => {
-                                match command {
+                // Read and analyze using tagged pointers
+                let ast_result = unsafe {
+                    let rt = &mut *runtime.get();
+                    match read_to_tagged(code, rt) {
+                        Ok(tagged) => analyze_toplevel_tagged(rt, tagged),
+                        Err(e) => Err(format!("Read error: {}", e)),
+                    }
+                };
+
+                match ast_result {
+                    Ok(ast) => {
+                        match command {
                                     "/ast" => {
                                         println!("\nAST:");
                                         print_ast(&ast, 0);
@@ -1462,10 +1488,7 @@ fn main() {
                                     }
                                 }
                             }
-                            Err(e) => eprintln!("Parse error: {}", e),
-                        }
-                    }
-                    Err(e) => eprintln!("Read error: {}", e),
+                    Err(e) => eprintln!("Error: {}", e),
                 }
             }
             Err(e) => {

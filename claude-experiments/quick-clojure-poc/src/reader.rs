@@ -1,3 +1,4 @@
+use crate::gc_runtime::GCRuntime;
 use crate::value::Value;
 use clojure_reader::edn::{Edn, read_string};
 use im::{hashmap, hashset, vector};
@@ -74,6 +75,191 @@ pub fn edn_to_value(edn: &Edn) -> Result<Value, String> {
 
         // Handle other Edn types as needed
         _ => Err(format!("Unsupported EDN type: {:?}", edn)),
+    }
+}
+
+// ============================================================================
+// Tagged Pointer Reader - produces heap-allocated reader types
+// ============================================================================
+
+/// Convert clojure-reader's Edn to tagged heap pointers using GCRuntime
+/// This produces ReaderList, ReaderVector, ReaderMap, ReaderSymbol types
+/// that can be directly used by macros and the analyzer.
+pub fn edn_to_tagged(edn: &Edn, rt: &mut GCRuntime) -> Result<usize, String> {
+    match edn {
+        Edn::Nil => Ok(7), // nil tagged value
+
+        Edn::Bool(b) => {
+            // Boolean tag is 0b011, value is shifted left 3 bits
+            // true = 1 << 3 | 0b011 = 0b1011 = 11
+            // false = 0 << 3 | 0b011 = 0b0011 = 3
+            if *b {
+                Ok(0b1011) // true: 1 << 3 | 0b011
+            } else {
+                Ok(0b0011) // false: 0 << 3 | 0b011
+            }
+        }
+
+        Edn::Int(i) => {
+            // Tag as integer (shift left by 3)
+            Ok((*i as usize) << 3)
+        }
+
+        Edn::Double(f) => {
+            // Allocate float on heap
+            rt.allocate_float(f.into_inner())
+        }
+
+        Edn::Str(s) => {
+            // Allocate string on heap
+            rt.allocate_string(s)
+        }
+
+        Edn::Symbol(s) => {
+            // Special case: "/" is the division operator, not a qualified symbol
+            if *s == "/" {
+                rt.allocate_reader_symbol(None, "/")
+            } else if let Some(slash_pos) = s.find('/') {
+                let ns = &s[..slash_pos];
+                let name = &s[slash_pos + 1..];
+                // If namespace is empty (e.g., "/foo"), treat as unqualified
+                if ns.is_empty() {
+                    rt.allocate_reader_symbol(None, s)
+                } else {
+                    rt.allocate_reader_symbol(Some(ns), name)
+                }
+            } else {
+                rt.allocate_reader_symbol(None, s)
+            }
+        }
+
+        Edn::Key(k) => {
+            // Keys in EDN include the ':' prefix, so strip it
+            let keyword = k.strip_prefix(':').unwrap_or(k);
+            rt.allocate_keyword(keyword)
+        }
+
+        Edn::List(items) => {
+            // Convert each item and collect as ReaderList
+            let mut tagged_items = Vec::with_capacity(items.len());
+            for item in items {
+                tagged_items.push(edn_to_tagged(item, rt)?);
+            }
+            rt.allocate_reader_list(&tagged_items)
+        }
+
+        Edn::Vector(items) => {
+            // Convert each item and collect as ReaderVector
+            let mut tagged_items = Vec::with_capacity(items.len());
+            for item in items {
+                tagged_items.push(edn_to_tagged(item, rt)?);
+            }
+            rt.allocate_reader_vector(&tagged_items)
+        }
+
+        Edn::Map(map) => {
+            // Convert each key-value pair and collect as ReaderMap
+            let mut entries = Vec::with_capacity(map.len());
+            for (k, v) in map {
+                let tagged_key = edn_to_tagged(k, rt)?;
+                let tagged_value = edn_to_tagged(v, rt)?;
+                entries.push((tagged_key, tagged_value));
+            }
+            rt.allocate_reader_map(&entries)
+        }
+
+        Edn::Set(items) => {
+            // For now, represent sets as a ReaderVector with a special marker
+            // TODO: Add proper ReaderSet type if needed
+            // For bootstrap, sets are rare in macro code
+            let mut tagged_items = Vec::with_capacity(items.len());
+            for item in items {
+                tagged_items.push(edn_to_tagged(item, rt)?);
+            }
+            // Just use ReaderVector for now - sets are rare in reader output
+            rt.allocate_reader_vector(&tagged_items)
+        }
+
+        // Handle metadata - attach to the inner value
+        Edn::Meta(meta_map, inner) => {
+            // Convert metadata map to a ReaderMap
+            let mut meta_entries = Vec::with_capacity(meta_map.len());
+            for (k, v) in meta_map {
+                let tagged_key = edn_to_tagged(k, rt)?;
+                let tagged_value = edn_to_tagged(v, rt)?;
+                meta_entries.push((tagged_key, tagged_value));
+            }
+            let meta_ptr = rt.allocate_reader_map(&meta_entries)?;
+
+            // Now convert the inner value and attach metadata if it's a symbol
+            match inner.as_ref() {
+                Edn::Symbol(s) => {
+                    // Special case: "/" is the division operator, not a qualified symbol
+                    if *s == "/" {
+                        rt.allocate_reader_symbol_with_meta(None, "/", meta_ptr)
+                    } else if let Some(slash_pos) = s.find('/') {
+                        let ns = &s[..slash_pos];
+                        let name = &s[slash_pos + 1..];
+                        if ns.is_empty() {
+                            rt.allocate_reader_symbol_with_meta(None, s, meta_ptr)
+                        } else {
+                            rt.allocate_reader_symbol_with_meta(Some(ns), name, meta_ptr)
+                        }
+                    } else {
+                        rt.allocate_reader_symbol_with_meta(None, s, meta_ptr)
+                    }
+                }
+                // For other types, just convert normally (metadata is lost for now)
+                // TODO: Add metadata support to other reader types if needed
+                _ => edn_to_tagged(inner, rt),
+            }
+        }
+
+        // Handle other Edn types as needed
+        _ => Err(format!("Unsupported EDN type: {:?}", edn)),
+    }
+}
+
+/// Read a Clojure expression from a string, returning a tagged heap pointer
+/// This is the new reader entry point that produces reader types directly.
+pub fn read_to_tagged(input: &str, rt: &mut GCRuntime) -> Result<usize, String> {
+    let preprocessed = preprocess(input);
+    match read_string(&preprocessed) {
+        Ok(edn) => edn_to_tagged(&edn, rt),
+        Err(e) => Err(format!("Parse error: {:?}", e)),
+    }
+}
+
+/// Read a Clojure expression with namespace context, returning a tagged heap pointer
+pub fn read_to_tagged_with_context(
+    input: &str,
+    current_namespace: &str,
+    namespace_aliases: &HashMap<String, String>,
+    rt: &mut GCRuntime,
+) -> Result<usize, String> {
+    let preprocessed = preprocess_with_context(input, current_namespace, namespace_aliases)?;
+    match read_string(&preprocessed) {
+        Ok(edn) => edn_to_tagged(&edn, rt),
+        Err(e) => Err(format!("Parse error: {:?}", e)),
+    }
+}
+
+/// Read multiple expressions from a string, returning a vector of tagged heap pointers
+/// Useful for reading files with multiple top-level forms.
+pub fn read_all_to_tagged(input: &str, rt: &mut GCRuntime) -> Result<Vec<usize>, String> {
+    let preprocessed = preprocess(input);
+
+    // The clojure_reader crate's read_string only reads one expression
+    // We need to read multiple. For now, wrap in a vector and read that.
+    // This is a workaround - ideally we'd iterate through the input.
+
+    // Try reading as a single form first
+    match read_string(&preprocessed) {
+        Ok(edn) => {
+            let tagged = edn_to_tagged(&edn, rt)?;
+            Ok(vec![tagged])
+        }
+        Err(e) => Err(format!("Parse error: {:?}", e)),
     }
 }
 
@@ -404,5 +590,158 @@ mod tests {
             }
             _ => panic!("Expected map"),
         }
+    }
+
+    // ========================================================================
+    // Tests for tagged pointer reader (read_to_tagged)
+    // ========================================================================
+
+    fn make_test_runtime() -> GCRuntime {
+        GCRuntime::new()
+    }
+
+    #[test]
+    fn test_read_tagged_scalars() {
+        let mut rt = make_test_runtime();
+
+        // nil
+        let nil = read_to_tagged("nil", &mut rt).unwrap();
+        assert_eq!(nil, 7); // nil tagged value
+
+        // booleans (tag 0b011, value shifted left 3)
+        let t = read_to_tagged("true", &mut rt).unwrap();
+        assert_eq!(t, 0b1011); // true: 1 << 3 | 0b011 = 11
+
+        let f = read_to_tagged("false", &mut rt).unwrap();
+        assert_eq!(f, 0b0011); // false: 0 << 3 | 0b011 = 3
+
+        // integers
+        let i = read_to_tagged("42", &mut rt).unwrap();
+        assert_eq!(i >> 3, 42); // untagged integer
+        assert_eq!(i & 0b111, 0); // integer tag
+
+        let neg = read_to_tagged("-10", &mut rt).unwrap();
+        assert_eq!((neg as isize) >> 3, -10);
+    }
+
+    #[test]
+    fn test_read_tagged_string() {
+        let mut rt = make_test_runtime();
+
+        let s = read_to_tagged("\"hello world\"", &mut rt).unwrap();
+        // Should be a string (tag 0b010)
+        assert_eq!(s & 0b111, 0b010);
+
+        // Read back the string
+        let text = rt.read_string(s);
+        assert_eq!(text, "hello world");
+    }
+
+    #[test]
+    fn test_read_tagged_symbol() {
+        let mut rt = make_test_runtime();
+
+        // Simple symbol
+        let sym = read_to_tagged("foo", &mut rt).unwrap();
+        assert!(rt.is_reader_symbol(sym));
+        assert_eq!(rt.reader_symbol_name(sym), "foo");
+        assert!(rt.reader_symbol_namespace(sym).is_none());
+
+        // Namespaced symbol
+        let ns_sym = read_to_tagged("my.ns/bar", &mut rt).unwrap();
+        assert!(rt.is_reader_symbol(ns_sym));
+        assert_eq!(rt.reader_symbol_name(ns_sym), "bar");
+        assert_eq!(rt.reader_symbol_namespace(ns_sym), Some("my.ns".to_string()));
+    }
+
+    #[test]
+    fn test_read_tagged_keyword() {
+        let mut rt = make_test_runtime();
+
+        let kw = read_to_tagged(":foo", &mut rt).unwrap();
+        // Keywords have heap object tag (0b110)
+        assert_eq!(kw & 0b111, 0b110);
+
+        // Check it's actually a keyword
+        let text = rt.get_keyword_text(kw).unwrap();
+        assert_eq!(text, "foo");
+    }
+
+    #[test]
+    fn test_read_tagged_list() {
+        let mut rt = make_test_runtime();
+
+        let list = read_to_tagged("(+ 1 2)", &mut rt).unwrap();
+        assert!(rt.is_reader_list(list));
+        assert_eq!(rt.reader_list_count(list), 3);
+
+        // Check first element is symbol +
+        let first = rt.reader_list_first(list);
+        assert!(rt.is_reader_symbol(first));
+        assert_eq!(rt.reader_symbol_name(first), "+");
+
+        // Check second element is 1
+        let second = rt.reader_list_nth(list, 1).unwrap();
+        assert_eq!(second >> 3, 1);
+    }
+
+    #[test]
+    fn test_read_tagged_vector() {
+        let mut rt = make_test_runtime();
+
+        let vec = read_to_tagged("[1 2 3]", &mut rt).unwrap();
+        assert!(rt.is_reader_vector(vec));
+        assert_eq!(rt.reader_vector_count(vec), 3);
+
+        // Check elements
+        assert_eq!(rt.reader_vector_nth(vec, 0).unwrap() >> 3, 1);
+        assert_eq!(rt.reader_vector_nth(vec, 1).unwrap() >> 3, 2);
+        assert_eq!(rt.reader_vector_nth(vec, 2).unwrap() >> 3, 3);
+    }
+
+    #[test]
+    fn test_read_tagged_map() {
+        let mut rt = make_test_runtime();
+
+        let map = read_to_tagged("{:a 1 :b 2}", &mut rt).unwrap();
+        assert!(rt.is_reader_map(map));
+        assert_eq!(rt.reader_map_count(map), 2);
+    }
+
+    #[test]
+    fn test_read_tagged_nested() {
+        let mut rt = make_test_runtime();
+
+        // Nested structure: (defn foo [x] (+ x 1))
+        let form = read_to_tagged("(defn foo [x] (+ x 1))", &mut rt).unwrap();
+        assert!(rt.is_reader_list(form));
+        assert_eq!(rt.reader_list_count(form), 4);
+
+        // First element should be symbol 'defn'
+        let first = rt.reader_list_first(form);
+        assert!(rt.is_reader_symbol(first));
+        assert_eq!(rt.reader_symbol_name(first), "defn");
+
+        // Third element should be vector [x]
+        let params = rt.reader_list_nth(form, 2).unwrap();
+        assert!(rt.is_reader_vector(params));
+        assert_eq!(rt.reader_vector_count(params), 1);
+    }
+
+    #[test]
+    fn test_read_tagged_empty_collections() {
+        let mut rt = make_test_runtime();
+
+        let empty_list = read_to_tagged("()", &mut rt).unwrap();
+        assert!(rt.is_reader_list(empty_list));
+        assert_eq!(rt.reader_list_count(empty_list), 0);
+
+        let empty_vec = read_to_tagged("[]", &mut rt).unwrap();
+        assert!(rt.is_reader_vector(empty_vec));
+        assert_eq!(rt.reader_vector_count(empty_vec), 0);
+
+        let empty_map = read_to_tagged("{}", &mut rt).unwrap();
+        assert!(rt.is_reader_map(empty_map));
+        assert_eq!(rt.reader_map_count(empty_map), 0);
     }
 }

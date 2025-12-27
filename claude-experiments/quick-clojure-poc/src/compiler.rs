@@ -184,14 +184,76 @@ impl Compiler {
                 self.compile_protocol_call(method_name, args)
             }
             Expr::Debugger { expr } => self.compile_debugger(expr),
+            Expr::TopLevelDo { .. } => {
+                // TopLevelDo should only appear at the top level and is handled by compile_toplevel
+                Err("TopLevelDo encountered in nested context - this should not happen".to_string())
+            }
         }
     }
 
     /// Compile a top-level expression (emits Ret instruction)
+    /// For TopLevelDo, this processes forms sequentially, executing each before
+    /// analyzing the next (required for macros defined and used in same do block).
     pub fn compile_toplevel(&mut self, expr: &Expr) -> Result<IrValue, String> {
+        // Handle TopLevelDo specially - compile and execute each form in sequence
+        if let Expr::TopLevelDo { forms } = expr {
+            return self.compile_toplevel_do(forms);
+        }
+
         let result = self.compile(expr)?;
         self.builder.emit(Instruction::Ret(result));
         Ok(result)
+    }
+
+    /// Compile and execute a top-level do block, processing forms sequentially.
+    /// This is needed so that macros defined in earlier forms can be used in later forms.
+    fn compile_toplevel_do(&mut self, forms: &[usize]) -> Result<IrValue, String> {
+        use crate::arm_codegen::Arm64CodeGen;
+        use crate::clojure_ast::analyze_tagged;
+        use crate::trampoline::Trampoline;
+
+        let mut last_result = IrValue::Null;
+
+        for (i, &tagged) in forms.iter().enumerate() {
+            let is_last = i == forms.len() - 1;
+
+            // Analyze this form
+            // SAFETY: We need mutable access to runtime for analysis
+            let ast = unsafe {
+                let rt = &mut *self.runtime.get();
+                analyze_tagged(rt, tagged)?
+            };
+
+            // Compile this form
+            self.builder.reset();
+            let result = self.compile(&ast)?;
+            self.builder.emit(Instruction::Ret(result));
+
+            let instructions = self.take_instructions();
+            let num_locals = self.builder.num_locals;
+
+            // Generate machine code
+            let compiled = Arm64CodeGen::compile_function(&instructions, num_locals, 0)
+                .map_err(|e| format!("Codegen error in toplevel do: {}", e))?;
+
+            // Execute this form
+            let trampoline = Trampoline::new(64 * 1024);
+            let exec_result = unsafe { trampoline.execute(compiled.code_ptr as *const u8) };
+
+            // If this is the last form, we need to return its result
+            // For intermediate forms, we just need them to execute (for side effects like def)
+            if is_last {
+                // For the last form, we need to reload the result as a constant
+                // since we've already executed it
+                last_result = IrValue::TaggedConstant(exec_result as isize);
+            }
+        }
+
+        // Emit final return with the result of the last expression
+        self.builder.reset();
+        self.builder.emit(Instruction::Ret(last_result));
+
+        Ok(last_result)
     }
 
     fn compile_literal(&mut self, value: &Value) -> Result<IrValue, String> {
@@ -265,6 +327,28 @@ impl Compiler {
                     .builder
                     .assign_new(IrValue::TaggedConstant((keyword_index << 3) as isize));
                 return self.call_builtin("load-keyword", vec![index_reg]);
+            }
+            Value::Symbol(text) => {
+                // Allocate symbol at compile time as a ReaderSymbol
+                // Parse namespace/name from the symbol text
+                // SAFETY: Single-threaded REPL
+                let rt = unsafe { &mut *self.runtime.get() };
+
+                let (namespace, name) = if let Some(slash_pos) = text.find('/') {
+                    (Some(&text[..slash_pos]), &text[slash_pos + 1..])
+                } else {
+                    (None, text.as_str())
+                };
+
+                let sym_ptr = rt
+                    .allocate_reader_symbol(namespace, name)
+                    .map_err(|e| format!("Failed to allocate symbol: {}", e))?;
+
+                // Load the tagged pointer as a constant
+                self.builder.emit(Instruction::LoadConstant(
+                    result,
+                    IrValue::TaggedConstant(sym_ptr as isize),
+                ));
             }
             Value::Vector(elements) => {
                 // Compile vector literal as call to (vector elem1 elem2 ...)
@@ -375,7 +459,13 @@ impl Compiler {
                  "nil?" | "number?" | "string?" | "fn?" | "identical?" |
                  "instance?" | "keyword?" | "hash-primitive" |
                  "cons?" | "cons-first" | "cons-rest" |
-                 "_println" | "_print" | "_newline" | "_print-space"
+                 "_println" | "_print" | "_newline" | "_print-space" |
+                 "__make_reader_symbol_1" | "__make_reader_symbol_2" |
+                 "__make_reader_list_0" | "__make_reader_list_from_vec" |
+                 "__make_reader_vector_0" | "__make_reader_vector_from_list" |
+                 "__make_reader_map_0" |
+                 "__reader_cons" | "__reader_list_1" | "__reader_list_2" |
+                 "__reader_list_3" | "__reader_list_4" | "__reader_list_5"
         )
     }
 
@@ -933,6 +1023,17 @@ impl Compiler {
             })
             .unwrap_or(false);
 
+        // Check if var has ^:macro metadata
+        let is_macro = metadata
+            .as_ref()
+            .and_then(|m| m.get("macro"))
+            .map(|v| match v {
+                Value::Bool(true) => true,
+                Value::Keyword(k) if k == "macro" => true,
+                _ => false,
+            })
+            .unwrap_or(false);
+
         // SAFETY: Single-threaded REPL - no concurrent access during compilation
         let rt = unsafe { &mut *self.runtime.get() };
 
@@ -945,9 +1046,13 @@ impl Compiler {
         // This allows recursive functions to resolve their own name.
         // Check if var already exists
         if let Some(existing_var_ptr) = rt.namespace_lookup(self.current_namespace_ptr, name) {
-            // Existing var - mark dynamic if needed
+            // Existing var - mark dynamic/macro if needed
             if is_dynamic {
                 rt.mark_var_dynamic(existing_var_ptr);
+            }
+            if is_macro {
+                rt.set_var_macro(existing_var_ptr)
+                    .map_err(|e| format!("Failed to mark var as macro: {}", e))?;
             }
         } else {
             // Create new var with nil placeholder (7) - will be overwritten after compilation
@@ -962,6 +1067,12 @@ impl Compiler {
             // Mark as dynamic ONLY if metadata indicates it
             if is_dynamic {
                 rt.mark_var_dynamic(new_var_ptr);
+            }
+
+            // Mark as macro if metadata indicates it
+            if is_macro {
+                rt.set_var_macro(new_var_ptr)
+                    .map_err(|e| format!("Failed to mark var as macro: {}", e))?;
             }
 
             // Add var to namespace BEFORE compiling value
@@ -2122,6 +2233,10 @@ impl Compiler {
             Expr::Debugger { expr } => {
                 self.collect_free_vars_from_expr(expr, bound, free);
             }
+
+            // TopLevelDo is only used at the top level and handled specially
+            // It should never appear in a context where we're collecting free vars
+            Expr::TopLevelDo { .. } => {}
         }
     }
 
@@ -2177,6 +2292,19 @@ impl Compiler {
                     "_print" => self.compile_builtin_print_value(args),
                     "_newline" => self.compile_builtin_newline(args),
                     "_print-space" => self.compile_builtin_print_space(args),
+                    "__make_reader_symbol_1" => self.compile_builtin_make_reader_symbol_1(args),
+                    "__make_reader_symbol_2" => self.compile_builtin_make_reader_symbol_2(args),
+                    "__make_reader_list_0" => self.compile_builtin_make_reader_list_0(args),
+                    "__make_reader_list_from_vec" => self.compile_builtin_make_reader_list_from_vec(args),
+                    "__make_reader_vector_0" => self.compile_builtin_make_reader_vector_0(args),
+                    "__make_reader_vector_from_list" => self.compile_builtin_make_reader_vector_from_list(args),
+                    "__make_reader_map_0" => self.compile_builtin_make_reader_map_0(args),
+                    "__reader_cons" => self.compile_builtin_reader_cons(args),
+                    "__reader_list_1" => self.compile_builtin_reader_list_n(args, 1),
+                    "__reader_list_2" => self.compile_builtin_reader_list_n(args, 2),
+                    "__reader_list_3" => self.compile_builtin_reader_list_n(args, 3),
+                    "__reader_list_4" => self.compile_builtin_reader_list_n(args, 4),
+                    "__reader_list_5" => self.compile_builtin_reader_list_n(args, 5),
                     _ => unreachable!(),
                 };
             }
@@ -2598,6 +2726,97 @@ impl Compiler {
             ));
         }
         self.call_builtin("runtime.builtin/_print-space", vec![])
+    }
+
+    // __make_reader_symbol_1 - create a ReaderSymbol with just a name
+    fn compile_builtin_make_reader_symbol_1(&mut self, args: &[Expr]) -> Result<IrValue, String> {
+        if args.len() != 1 {
+            return Err(format!("__make_reader_symbol_1 requires 1 argument, got {}", args.len()));
+        }
+        let name = self.compile(&args[0])?;
+        let name_reg = self.builder.assign_new(name);
+        self.call_builtin("__make_reader_symbol_1", vec![name_reg])
+    }
+
+    // __make_reader_symbol_2 - create a ReaderSymbol with namespace and name
+    fn compile_builtin_make_reader_symbol_2(&mut self, args: &[Expr]) -> Result<IrValue, String> {
+        if args.len() != 2 {
+            return Err(format!("__make_reader_symbol_2 requires 2 arguments, got {}", args.len()));
+        }
+        let ns = self.compile(&args[0])?;
+        let name = self.compile(&args[1])?;
+        let ns_reg = self.builder.assign_new(ns);
+        let name_reg = self.builder.assign_new(name);
+        self.call_builtin("__make_reader_symbol_2", vec![ns_reg, name_reg])
+    }
+
+    // __make_reader_list_0 - create an empty ReaderList
+    fn compile_builtin_make_reader_list_0(&mut self, args: &[Expr]) -> Result<IrValue, String> {
+        if !args.is_empty() {
+            return Err(format!("__make_reader_list_0 takes no arguments, got {}", args.len()));
+        }
+        self.call_builtin("__make_reader_list_0", vec![])
+    }
+
+    // __make_reader_list_from_vec - create a ReaderList from a vector
+    fn compile_builtin_make_reader_list_from_vec(&mut self, args: &[Expr]) -> Result<IrValue, String> {
+        if args.len() != 1 {
+            return Err(format!("__make_reader_list_from_vec requires 1 argument, got {}", args.len()));
+        }
+        let vec = self.compile(&args[0])?;
+        let vec_reg = self.builder.assign_new(vec);
+        self.call_builtin("__make_reader_list_from_vec", vec![vec_reg])
+    }
+
+    // __make_reader_vector_0 - create an empty ReaderVector
+    fn compile_builtin_make_reader_vector_0(&mut self, args: &[Expr]) -> Result<IrValue, String> {
+        if !args.is_empty() {
+            return Err(format!("__make_reader_vector_0 takes no arguments, got {}", args.len()));
+        }
+        self.call_builtin("__make_reader_vector_0", vec![])
+    }
+
+    // __make_reader_vector_from_list - create a ReaderVector from a list
+    fn compile_builtin_make_reader_vector_from_list(&mut self, args: &[Expr]) -> Result<IrValue, String> {
+        if args.len() != 1 {
+            return Err(format!("__make_reader_vector_from_list requires 1 argument, got {}", args.len()));
+        }
+        let list = self.compile(&args[0])?;
+        let list_reg = self.builder.assign_new(list);
+        self.call_builtin("__make_reader_vector_from_list", vec![list_reg])
+    }
+
+    // __make_reader_map_0 - create an empty ReaderMap
+    fn compile_builtin_make_reader_map_0(&mut self, args: &[Expr]) -> Result<IrValue, String> {
+        if !args.is_empty() {
+            return Err(format!("__make_reader_map_0 takes no arguments, got {}", args.len()));
+        }
+        self.call_builtin("__make_reader_map_0", vec![])
+    }
+
+    // __reader_cons - prepend element to ReaderList
+    fn compile_builtin_reader_cons(&mut self, args: &[Expr]) -> Result<IrValue, String> {
+        if args.len() != 2 {
+            return Err(format!("__reader_cons requires 2 arguments, got {}", args.len()));
+        }
+        let elem = self.compile(&args[0])?;
+        let list = self.compile(&args[1])?;
+        let elem_reg = self.builder.assign_new(elem);
+        let list_reg = self.builder.assign_new(list);
+        self.call_builtin("__reader_cons", vec![elem_reg, list_reg])
+    }
+
+    // __reader_list_N - create ReaderList with N elements
+    fn compile_builtin_reader_list_n(&mut self, args: &[Expr], n: usize) -> Result<IrValue, String> {
+        if args.len() != n {
+            return Err(format!("__reader_list_{} requires {} arguments, got {}", n, n, args.len()));
+        }
+        let mut arg_regs = Vec::with_capacity(n);
+        for arg in args {
+            let val = self.compile(arg)?;
+            arg_regs.push(self.builder.assign_new(val));
+        }
+        self.call_builtin(&format!("__reader_list_{}", n), arg_regs)
     }
 
     fn compile_builtin_eq(&mut self, args: &[Expr]) -> Result<IrValue, String> {
