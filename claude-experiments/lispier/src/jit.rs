@@ -32,6 +32,9 @@ pub struct Jit {
     engine: ExecutionEngine,
 }
 
+/// Default pass pipeline for CPU execution
+const DEFAULT_PIPELINE: &str = "builtin.module(func.func(llvm-request-c-wrappers),convert-scf-to-cf,convert-func-to-llvm,convert-arith-to-llvm,convert-cf-to-llvm,convert-index-to-llvm,finalize-memref-to-llvm,reconcile-unrealized-casts)";
+
 impl Jit {
     /// Create a new JIT compiler from an MLIR module
     ///
@@ -53,8 +56,21 @@ impl Jit {
         module: &mut Module,
         library_paths: &[&str],
     ) -> Result<Self, JitError> {
-        // Lower to LLVM dialect
-        Self::lower_to_llvm(registry, module)?;
+        Self::with_pipeline_and_libraries(registry, module, DEFAULT_PIPELINE, library_paths)
+    }
+
+    /// Create a new JIT compiler with a custom pass pipeline and shared libraries
+    ///
+    /// The pipeline string should be in MLIR pass pipeline syntax.
+    /// Library paths can be absolute paths to .so/.dylib files.
+    pub fn with_pipeline_and_libraries(
+        registry: &DialectRegistry,
+        module: &mut Module,
+        pipeline: &str,
+        library_paths: &[&str],
+    ) -> Result<Self, JitError> {
+        // Run the pass pipeline
+        Self::run_pipeline(registry, module, pipeline)?;
 
         // Create execution engine with shared libraries
         let engine = ExecutionEngine::new(module, 2, library_paths, false);
@@ -62,8 +78,12 @@ impl Jit {
         Ok(Self { engine })
     }
 
-    /// Lower a module from high-level dialects to LLVM dialect
-    fn lower_to_llvm(registry: &DialectRegistry, module: &mut Module) -> Result<(), JitError> {
+    /// Run a pass pipeline on the module
+    pub fn run_pipeline(
+        registry: &DialectRegistry,
+        module: &mut Module,
+        pipeline: &str,
+    ) -> Result<(), JitError> {
         let context = registry.context();
 
         // Register all passes so we can use them by name
@@ -75,12 +95,6 @@ impl Jit {
         // Enable verification after each pass
         pm.enable_verifier(true);
 
-        // Use pass pipeline with llvm-request-c-wrappers to generate _mlir_ciface_ wrappers
-        // This enables invoke_packed to work properly
-        // llvm-request-c-wrappers runs on func.func, so it must be nested
-        // convert-scf-to-cf lowers SCF dialect (scf.if, scf.for, etc.) to CF dialect
-        let pipeline = "builtin.module(func.func(llvm-request-c-wrappers),convert-scf-to-cf,convert-func-to-llvm,convert-arith-to-llvm,convert-cf-to-llvm,convert-index-to-llvm,finalize-memref-to-llvm,reconcile-unrealized-casts)";
-
         parse_pass_pipeline(pm.as_operation_pass_manager(), pipeline)
             .map_err(|e| JitError::PassPipelineFailed(format!("{:?}", e)))?;
 
@@ -88,6 +102,11 @@ impl Jit {
         pm.run(module).map_err(|_| JitError::PassManagerRunFailed)?;
 
         Ok(())
+    }
+
+    /// Lower a module from high-level dialects to LLVM dialect (default pipeline)
+    fn lower_to_llvm(registry: &DialectRegistry, module: &mut Module) -> Result<(), JitError> {
+        Self::run_pipeline(registry, module, DEFAULT_PIPELINE)
     }
 
     /// Invoke a function by name with packed arguments

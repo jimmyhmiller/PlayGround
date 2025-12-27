@@ -238,6 +238,27 @@ impl Pass {
             format!("--{}='{}'", self.name, attr_str)
         }
     }
+
+    /// Convert to pipeline string format for parse_pass_pipeline
+    /// Format: "pass-name" or "pass-name{attr1=value1 attr2=value2}"
+    pub fn to_pipeline_string(&self, runtime_attrs: &HashMap<String, String>) -> String {
+        let mut attrs = self.attributes.clone();
+        // Merge runtime attributes (runtime takes precedence)
+        for (k, v) in runtime_attrs {
+            attrs.insert(k.clone(), v.clone());
+        }
+
+        if attrs.is_empty() {
+            self.name.clone()
+        } else {
+            let attr_str = attrs
+                .iter()
+                .map(|(k, v)| format!("{}={}", k, v))
+                .collect::<Vec<_>>()
+                .join(" ");
+            format!("{}{{{}}}", self.name, attr_str)
+        }
+    }
 }
 
 /// A compilation target (e.g., rocm, cuda, cpu)

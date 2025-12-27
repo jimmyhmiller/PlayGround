@@ -111,7 +111,7 @@ fn run_file(path: &str, program_args: &[String]) -> ExitCode {
     }
 }
 
-/// Run with an external compilation pipeline (for GPU, etc.)
+/// Run with a compilation pipeline (GPU, custom passes, etc.) using JIT
 fn run_with_compilation_spec(nodes: &[lispier::Node], compilation: &lispier::Compilation) -> ExitCode {
     // Detect runtime environment
     let runtime = match RuntimeEnv::detect() {
@@ -123,40 +123,77 @@ fn run_with_compilation_spec(nodes: &[lispier::Node], compilation: &lispier::Com
     };
 
     // Check if we have a matching target
-    if compilation.get_target(runtime.backend.name()).is_none() {
-        eprintln!(
-            "No compilation target for backend '{}' in file",
-            runtime.backend.name()
-        );
-        eprintln!("Available targets: {:?}",
-            compilation.targets.iter().map(|t| &t.backend).collect::<Vec<_>>()
-        );
-        return ExitCode::FAILURE;
-    }
+    let target = match compilation.get_target(runtime.backend.name()) {
+        Some(t) => t,
+        None => {
+            eprintln!(
+                "No compilation target for backend '{}' in file",
+                runtime.backend.name()
+            );
+            eprintln!("Available targets: {:?}",
+                compilation.targets.iter().map(|t| &t.backend).collect::<Vec<_>>()
+            );
+            return ExitCode::FAILURE;
+        }
+    };
 
     eprintln!("Using {} backend", runtime.backend.name());
     if let Some(ref chip) = runtime.chip {
         eprintln!("Detected chip: {}", chip);
     }
 
-    // Generate initial MLIR
-    let mlir_ir = match generate_ir_from_nodes(nodes) {
-        Ok(ir) => ir,
+    // Build pass pipeline from compilation spec
+    let runtime_attrs = runtime.runtime_attrs();
+    let pass_args: Vec<String> = target
+        .passes
+        .iter()
+        .map(|p| p.to_pipeline_string(&runtime_attrs))
+        .collect();
+
+    // Construct pipeline string for JIT
+    // Wrap everything in builtin.module() and add the c-wrappers pass
+    let pipeline = format!(
+        "builtin.module(func.func(llvm-request-c-wrappers),{})",
+        pass_args.join(",")
+    );
+
+    eprintln!("Pipeline: {}", pipeline);
+
+    // Generate MLIR from AST
+    let registry = DialectRegistry::new();
+    let generator = IRGenerator::new(&registry);
+    let mut module = match generator.generate(nodes) {
+        Ok(m) => m,
         Err(e) => {
             eprintln!("IR generation error: {}", e);
             return ExitCode::FAILURE;
         }
     };
 
-    // Compile and run
-    match runtime.compile_and_run(&mlir_ir, compilation) {
-        Ok(output) => {
-            print!("{}", output);
-            ExitCode::SUCCESS
-        }
+    // Get runtime library paths
+    let lib_paths: Vec<String> = runtime.runtime_libs
+        .iter()
+        .map(|p| p.to_string_lossy().to_string())
+        .collect();
+    let lib_path_refs: Vec<&str> = lib_paths.iter().map(|s| s.as_str()).collect();
+
+    // Create JIT with custom pipeline and libraries
+    let jit = match Jit::with_pipeline_and_libraries(&registry, &mut module, &pipeline, &lib_path_refs) {
+        Ok(j) => j,
         Err(e) => {
-            eprintln!("Execution error: {}", e);
-            ExitCode::FAILURE
+            eprintln!("JIT creation error: {}", e);
+            return ExitCode::FAILURE;
+        }
+    };
+
+    // Invoke main
+    unsafe {
+        match jit.invoke_packed("main", &mut []) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("Execution error: {}", e);
+                ExitCode::FAILURE
+            }
         }
     }
 }
