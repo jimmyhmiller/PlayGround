@@ -93,10 +93,10 @@ impl Compiler {
 
             // Bootstrap *ns* var in clojure.core
             // Initially set to user namespace (since that's the default starting namespace)
-            let (ns_var_ptr, _ns_var_id) =
+            let (ns_var_ptr, symbol_ptr) =
                 rt.allocate_var(core_ns_ptr, "*ns*", user_ns_ptr).unwrap();
             let core_ns_ptr = rt
-                .namespace_add_binding(core_ns_ptr, "*ns*", ns_var_ptr)
+                .namespace_add_binding_with_symbol_ptr(core_ns_ptr, "*ns*", ns_var_ptr, symbol_ptr)
                 .unwrap();
 
             // Mark *ns* as dynamic so it can be rebound later
@@ -951,7 +951,7 @@ impl Compiler {
             }
         } else {
             // Create new var with nil placeholder (7) - will be overwritten after compilation
-            let (new_var_ptr, _new_var_id) = rt
+            let (new_var_ptr, symbol_ptr) = rt
                 .allocate_var(
                     self.current_namespace_ptr,
                     name,
@@ -967,7 +967,12 @@ impl Compiler {
             // Add var to namespace BEFORE compiling value
             // This enables recursive function references
             let new_ns_ptr = rt
-                .namespace_add_binding(self.current_namespace_ptr, name, new_var_ptr)
+                .namespace_add_binding_with_symbol_ptr(
+                    self.current_namespace_ptr,
+                    name,
+                    new_var_ptr,
+                    symbol_ptr,
+                )
                 .unwrap();
 
             // Update current namespace pointer if it moved

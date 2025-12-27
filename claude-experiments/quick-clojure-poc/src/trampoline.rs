@@ -543,10 +543,10 @@ pub extern "C" fn trampoline_store_var_by_symbol(
             existing
         } else {
             // Create new var
-            let (new_var_ptr, _var_id) = rt
+            let (new_var_ptr, symbol_ptr) = rt
                 .allocate_var(ns_ptr, &var_name, value)
                 .expect("Failed to allocate var");
-            rt.namespace_add_binding(ns_ptr, &var_name, new_var_ptr)
+            rt.namespace_add_binding_with_symbol_ptr(ns_ptr, &var_name, new_var_ptr, symbol_ptr)
                 .expect("Failed to add namespace binding");
             new_var_ptr
         };
@@ -588,10 +588,10 @@ pub extern "C" fn trampoline_ensure_var_by_symbol(ns_symbol_id: u32, name_symbol
         // Create var if it doesn't exist
         if rt.namespace_lookup(ns_ptr, &var_name).is_none() {
             let nil_value = 7usize; // nil tagged value
-            let (new_var_ptr, _var_id) = rt
+            let (new_var_ptr, symbol_ptr) = rt
                 .allocate_var(ns_ptr, &var_name, nil_value)
                 .expect("Failed to allocate var");
-            rt.namespace_add_binding(ns_ptr, &var_name, new_var_ptr)
+            rt.namespace_add_binding_with_symbol_ptr(ns_ptr, &var_name, new_var_ptr, symbol_ptr)
                 .expect("Failed to add namespace binding");
         }
 

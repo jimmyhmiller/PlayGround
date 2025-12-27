@@ -591,8 +591,59 @@ impl<'c> IRGenerator<'c> {
         // Convert attributes
         let mut named_attrs: Vec<(Identifier<'c>, Attribute<'c>)> = Vec::new();
         for (key, value) in attributes {
+            // Special handling for LLVM-specific attributes
+            if name == "llvm.mlir.global" && key == "linkage" {
+                // Convert linkage to LLVM linkage attribute
+                let linkage_str = match value {
+                    AttributeValue::Number(n) => {
+                        // Map numeric linkage values
+                        match *n as i32 {
+                            0 => "external",
+                            1 => "internal",
+                            2 => "private",
+                            _ => "external",
+                        }
+                    }
+                    AttributeValue::String(s) => s.as_str(),
+                    _ => "external",
+                };
+                let linkage_attr_str = format!("#llvm.linkage<{}>", linkage_str);
+                if let Some(attr) = Attribute::parse(context, &linkage_attr_str) {
+                    named_attrs.push((Identifier::new(context, key), attr));
+                }
+                continue;
+            }
+
+            // Handle constant attribute for llvm.mlir.global as a unit attribute
+            if name == "llvm.mlir.global" && key == "constant" {
+                if let AttributeValue::Boolean(true) = value {
+                    // Unit attribute - just presence indicates true
+                    if let Some(attr) = Attribute::parse(context, "unit") {
+                        named_attrs.push((Identifier::new(context, key), attr));
+                    }
+                }
+                continue;
+            }
+
             let attr = self.convert_attribute_value(value)?;
             named_attrs.push((Identifier::new(context, key), attr));
+        }
+
+        // Special handling for llvm.call: set operandSegmentSizes and op_bundle_sizes
+        if name == "llvm.call" {
+            // Check if callee attribute is present (direct call) vs function pointer (indirect)
+            let has_callee = attributes.contains_key("callee");
+            let callee_count = if has_callee { 0i32 } else { 1i32 };
+            let args_count = operands.len() as i32 - if has_callee { 0 } else { 1 };
+            // operandSegmentSizes = [callee_operand_count, call_args_count, op_bundle_operands_count]
+            let segment_sizes = format!("array<i32: {}, {}, 0>", callee_count, args_count);
+            if let Some(attr) = Attribute::parse(context, &segment_sizes) {
+                named_attrs.push((Identifier::new(context, "operandSegmentSizes"), attr));
+            }
+            // Empty op_bundle_sizes (no operation bundles)
+            if let Some(attr) = Attribute::parse(context, "array<i32>") {
+                named_attrs.push((Identifier::new(context, "op_bundle_sizes"), attr));
+            }
         }
 
         // Check if operation supports type inference using MLIR's InferTypeOpInterface

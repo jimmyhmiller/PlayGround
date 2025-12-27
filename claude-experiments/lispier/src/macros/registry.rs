@@ -6,7 +6,8 @@ use super::builtins::{
     AddFMacro, AddIMacro, AndMacro, CallBangMacro, CallMacro, CondMacro, DefnMacro, DivFMacro,
     DivSIMacro, DivUIMacro, EqIMacro, ExternMacro, GeIMacro, GtIMacro, IfMacro, LeIMacro,
     LoopMacro, LtIMacro, MulFMacro, MulIMacro, NeIMacro, NullCheckMacro, NullPtrMacro, OrMacro,
-    PtrLoadMacro, PtrOffsetMacro, PtrStoreMacro, QuasiquoteMacro, SubFMacro, SubIMacro, WhenMacro,
+    PrintI64Macro, PrintMacro, PrintlnMacro, PtrLoadMacro, PtrOffsetMacro, PtrStoreMacro,
+    QuasiquoteMacro, SubFMacro, SubIMacro, WhenMacro,
 };
 use super::Macro;
 
@@ -78,6 +79,11 @@ impl MacroRegistry {
 
         // External declarations: extern
         self.register(Box::new(ExternMacro));
+
+        // Print macros: print, println, print-i64
+        self.register(Box::new(PrintMacro));
+        self.register(Box::new(PrintlnMacro));
+        self.register(Box::new(PrintI64Macro));
     }
 
     /// Register a macro

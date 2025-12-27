@@ -53,6 +53,7 @@ pub const TYPE_VAR: usize = 14;
 pub const TYPE_ARRAY: usize = 15;
 pub const TYPE_MULTI_ARITY_FN: usize = 16;
 pub const TYPE_DEFTYPE: usize = 17; // Base for deftypes, actual ID = TYPE_DEFTYPE + type_data
+pub const TYPE_DYNAMIC_ARRAY: usize = 18; // Dynamic array: header.size = capacity, header.type_data = used count
 
 /// Offset added to deftype IDs to avoid collision with built-in types
 pub const DEFTYPE_ID_OFFSET: usize = 100;
@@ -467,6 +468,16 @@ impl GCRuntime {
         }
     }
 
+    /// Allocate a dynamic array with given capacity
+    /// header.size = capacity (words), header.type_data = used count (words)
+    fn allocate_dynamic_array(&mut self, capacity: usize) -> Result<usize, String> {
+        let ptr = self.allocate_raw(capacity, TYPE_DYNAMIC_ARRAY as u8)?;
+        let heap_obj = HeapObject::from_untagged(ptr as *const u8);
+        // Set used count to 0
+        heap_obj.set_type_data(0);
+        Ok(ptr)
+    }
+
     /// Allocate a string on the heap
     pub fn allocate_string(&mut self, s: &str) -> Result<usize, String> {
         let bytes = s.as_bytes();
@@ -726,18 +737,23 @@ impl GCRuntime {
     /// Allocate a namespace object on the heap
     pub fn allocate_namespace(&mut self, name: &str) -> Result<usize, String> {
         let name_ptr = self.allocate_string(name)?;
-        let size_words = 1;
-        let ns_ptr = self.allocate_raw(size_words, TYPE_NAMESPACE as u8)?;
 
+        // Allocate dynamic bindings array with initial capacity of 16 words (8 bindings)
+        let bindings_ptr = self.allocate_dynamic_array(16)?;
+        let tagged_bindings = self.tag_heap_object(bindings_ptr);
+
+        // Namespace is fixed size: [name_ptr, bindings_array_ptr]
+        let ns_ptr = self.allocate_raw(2, TYPE_NAMESPACE as u8)?;
         let heap_obj = HeapObject::from_untagged(ns_ptr as *const u8);
         heap_obj.write_field(0, name_ptr as usize);
+        heap_obj.write_field(1, tagged_bindings);
 
         Ok(self.tag_heap_object(ns_ptr))
     }
 
     /// Refer all bindings from source namespace into target namespace
     /// This is used to implement (ns foo) which implicitly refers clojure.core
-    /// Returns the (possibly relocated) target namespace pointer
+    /// Returns the target namespace pointer (unchanged since namespaces are now fixed-size)
     pub fn refer_all(
         &mut self,
         target_ns_ptr: usize,
@@ -748,116 +764,177 @@ impl GCRuntime {
         let bindings = self.namespace_all_bindings(source_ns_ptr);
 
         // Add each binding to the target namespace
-        let mut current_target = target_ns_ptr;
         for (name, var_ptr) in bindings {
-            // namespace_add_binding may reallocate and return new pointer
-            current_target = self.namespace_add_binding(current_target, &name, var_ptr)?;
+            self.namespace_add_binding(target_ns_ptr, &name, var_ptr)?;
         }
 
-        Ok(current_target)
+        Ok(target_ns_ptr)
     }
 
-    /// Add or update a binding in a namespace (may reallocate!)
+    /// Add or update a binding in a namespace
+    /// The namespace object itself is fixed-size; only the bindings array may be reallocated
+    /// Uses dynamic array with capacity (header.size) and used count (header.type_data)
     pub fn namespace_add_binding(
         &mut self,
         ns_ptr: usize,
         symbol_name: &str,
         value: usize,
     ) -> Result<usize, String> {
-        // IMPORTANT: Save namespace name BEFORE any allocations that might trigger GC
-        // The ns_ptr might be relocated by GC during allocations below
+        self.namespace_add_binding_impl(ns_ptr, symbol_name, value, None)
+    }
+
+    /// Add a binding using a pre-allocated symbol string pointer
+    /// This avoids duplicate string allocation when adding vars
+    pub fn namespace_add_binding_with_symbol_ptr(
+        &mut self,
+        ns_ptr: usize,
+        symbol_name: &str,
+        value: usize,
+        symbol_ptr: usize,
+    ) -> Result<usize, String> {
+        self.namespace_add_binding_impl(ns_ptr, symbol_name, value, Some(symbol_ptr))
+    }
+
+    /// Core implementation for adding namespace bindings
+    fn namespace_add_binding_impl(
+        &mut self,
+        ns_ptr: usize,
+        symbol_name: &str,
+        value: usize,
+        existing_symbol_ptr: Option<usize>,
+    ) -> Result<usize, String> {
+        // Save namespace name for GC safety
         let ns_name = self.namespace_name(ns_ptr);
 
+        // Get bindings array from namespace field 1
         let ns_untagged = self.untag_heap_object(ns_ptr);
-        let heap_obj = HeapObject::from_untagged(ns_untagged as *const u8);
-        let header = heap_obj.get_header();
-        let current_size = header.size as usize;
+        let ns_heap_obj = HeapObject::from_untagged(ns_untagged as *const u8);
+        let bindings_tagged = ns_heap_obj.get_field(1);
+        let bindings_untagged = self.untag_heap_object(bindings_tagged);
+        let bindings_obj = HeapObject::from_untagged(bindings_untagged as *const u8);
+        let bindings_header = bindings_obj.get_header();
+        let capacity = bindings_header.size as usize;
+        let used = bindings_obj.get_type_data();
 
-        // Check if binding already exists
-        if current_size > 0 {
-            let num_bindings = (current_size - 1) / 2;
-            for i in 0..num_bindings {
-                let name_ptr = heap_obj.get_field(1 + i * 2);
-                let stored_name = self.read_string(name_ptr);
-                if stored_name == symbol_name {
-                    heap_obj.write_field(1 + i * 2 + 1, value as usize);
-                    return Ok(ns_ptr);
-                }
+        // Check if binding already exists - update in place if so
+        let num_bindings = used / 2;
+        for i in 0..num_bindings {
+            let name_ptr = bindings_obj.get_field(i * 2);
+            let stored_name = self.read_string(name_ptr);
+            if stored_name == symbol_name {
+                bindings_obj.write_field(i * 2 + 1, value as usize);
+                return Ok(ns_ptr);
             }
         }
 
-        // Allocate symbol name string - this might trigger GC!
-        let symbol_ptr = self.allocate_string(symbol_name)?;
+        // Use existing symbol pointer if provided, otherwise allocate a new string
+        let symbol_ptr = if let Some(ptr) = existing_symbol_ptr {
+            ptr
+        } else {
+            // Allocate symbol name string - this might trigger GC!
+            self.allocate_string(symbol_name)?
+        };
 
-        // Reallocate with +2 words - this might also trigger GC!
-        let new_size = current_size + 2;
-        let new_ns_ptr = self.allocate_raw(new_size, TYPE_NAMESPACE as u8)?;
-
-        // CRITICAL: Re-fetch the source namespace pointer AFTER allocations
-        // GC may have relocated it, so we need to use the namespace root to find
-        // its current location
+        // Re-fetch namespace after allocation (GC may have moved things)
         let current_ns_ptr = self
             .get_namespace_by_name(&ns_name)
             .ok_or_else(|| format!("Namespace {} disappeared during allocation", ns_name))?;
         let current_ns_untagged = self.untag_heap_object(current_ns_ptr);
-        let source_heap_obj = HeapObject::from_untagged(current_ns_untagged as *const u8);
+        let current_ns_obj = HeapObject::from_untagged(current_ns_untagged as *const u8);
 
-        // Copy existing fields from the (possibly relocated) source namespace
-        let new_heap_obj = HeapObject::from_untagged(new_ns_ptr as *const u8);
-        for i in 0..current_size {
-            let field = source_heap_obj.get_field(i);
-            new_heap_obj.write_field(i, field);
+        // Re-fetch bindings array (may have been relocated by GC)
+        let bindings_tagged = current_ns_obj.get_field(1);
+        let bindings_untagged = self.untag_heap_object(bindings_tagged);
+        let bindings_obj = HeapObject::from_untagged(bindings_untagged as *const u8);
+        let bindings_header = bindings_obj.get_header();
+        let capacity = bindings_header.size as usize;
+        let used = bindings_obj.get_type_data();
+
+        // Check if we have room in the current array
+        if used + 2 <= capacity {
+            // Add binding in place
+            bindings_obj.write_field(used, symbol_ptr);
+            bindings_obj.write_field(used + 1, value);
+            bindings_obj.set_type_data((used + 2) as u32);
+            return Ok(ns_ptr);
+        }
+
+        // Need to grow: double capacity (minimum 16)
+        let new_capacity = if capacity == 0 { 16 } else { capacity * 2 };
+        let new_bindings_ptr = self.allocate_dynamic_array(new_capacity)?;
+
+        // Re-fetch namespace again after allocation
+        let current_ns_ptr = self
+            .get_namespace_by_name(&ns_name)
+            .ok_or_else(|| format!("Namespace {} disappeared during allocation", ns_name))?;
+        let current_ns_untagged = self.untag_heap_object(current_ns_ptr);
+        let current_ns_obj = HeapObject::from_untagged(current_ns_untagged as *const u8);
+
+        // Get old bindings array (may have been relocated by GC)
+        let old_bindings_tagged = current_ns_obj.get_field(1);
+        let old_bindings_untagged = self.untag_heap_object(old_bindings_tagged);
+        let old_bindings_obj = HeapObject::from_untagged(old_bindings_untagged as *const u8);
+        let old_used = old_bindings_obj.get_type_data();
+
+        // Copy existing bindings to new array
+        let new_bindings_obj = HeapObject::from_untagged(new_bindings_ptr as *const u8);
+        for i in 0..old_used {
+            let field = old_bindings_obj.get_field(i);
+            new_bindings_obj.write_field(i, field);
         }
 
         // Add new binding
-        new_heap_obj.write_field(current_size, symbol_ptr);
-        new_heap_obj.write_field(current_size + 1, value);
+        new_bindings_obj.write_field(old_used, symbol_ptr);
+        new_bindings_obj.write_field(old_used + 1, value);
+        new_bindings_obj.set_type_data((old_used + 2) as u32);
 
-        let tagged_new_ptr = self.tag_heap_object(new_ns_ptr);
+        // Update namespace to point to new bindings array
+        let tagged_new_bindings = self.tag_heap_object(new_bindings_ptr);
+        current_ns_obj.write_field(1, tagged_new_bindings);
 
-        // Update GC root since namespace was reallocated
-        self.update_namespace_root(&ns_name, tagged_new_ptr);
-
-        Ok(tagged_new_ptr)
+        // Namespace itself didn't move, return original pointer
+        Ok(ns_ptr)
     }
 
     /// Debug: print bindings in a namespace
     pub fn debug_namespace_bindings(&self, ns_ptr: usize, limit: usize) {
         let ns_untagged = self.untag_heap_object(ns_ptr);
-        let heap_obj = HeapObject::from_untagged(ns_untagged as *const u8);
-        let header = heap_obj.get_header();
-        let size = header.size as usize;
+        let ns_obj = HeapObject::from_untagged(ns_untagged as *const u8);
 
-        if size == 0 {
-            return;
-        }
+        // Get bindings array from field 1
+        let bindings_tagged = ns_obj.get_field(1);
+        let bindings_untagged = self.untag_heap_object(bindings_tagged);
+        let bindings_obj = HeapObject::from_untagged(bindings_untagged as *const u8);
+        // For dynamic arrays, used count is in type_data
+        let used = bindings_obj.get_type_data();
 
-        let num_bindings = (size - 1) / 2;
+        let num_bindings = used / 2;
 
         for i in 0..num_bindings.min(limit) {
-            let name_ptr = heap_obj.get_field(1 + i * 2);
-            let stored_name = self.read_string(name_ptr);
+            let name_ptr = bindings_obj.get_field(i * 2);
+            let _stored_name = self.read_string(name_ptr);
         }
     }
 
     /// Look up a binding in a namespace
     pub fn namespace_lookup(&self, ns_ptr: usize, symbol_name: &str) -> Option<usize> {
         let ns_untagged = self.untag_heap_object(ns_ptr);
-        let heap_obj = HeapObject::from_untagged(ns_untagged as *const u8);
-        let header = heap_obj.get_header();
-        let size = header.size as usize;
+        let ns_obj = HeapObject::from_untagged(ns_untagged as *const u8);
 
-        if size == 0 {
-            return None;
-        }
+        // Get bindings array from field 1
+        let bindings_tagged = ns_obj.get_field(1);
+        let bindings_untagged = self.untag_heap_object(bindings_tagged);
+        let bindings_obj = HeapObject::from_untagged(bindings_untagged as *const u8);
+        // For dynamic arrays, used count is in type_data
+        let used = bindings_obj.get_type_data();
 
-        let num_bindings = (size - 1) / 2;
+        let num_bindings = used / 2;
 
         for i in 0..num_bindings {
-            let name_ptr = heap_obj.get_field(1 + i * 2);
+            let name_ptr = bindings_obj.get_field(i * 2);
             let stored_name = self.read_string(name_ptr);
             if stored_name == symbol_name {
-                return Some(heap_obj.get_field(1 + i * 2 + 1));
+                return Some(bindings_obj.get_field(i * 2 + 1));
             }
         }
         None
@@ -874,20 +951,21 @@ impl GCRuntime {
     /// Get all bindings from a namespace as (name, var_ptr) pairs
     pub fn namespace_all_bindings(&self, ns_ptr: usize) -> Vec<(String, usize)> {
         let ns_untagged = self.untag_heap_object(ns_ptr);
-        let heap_obj = HeapObject::from_untagged(ns_untagged as *const u8);
-        let header = heap_obj.get_header();
-        let size = header.size as usize;
+        let ns_obj = HeapObject::from_untagged(ns_untagged as *const u8);
 
-        if size == 0 {
-            return Vec::new();
-        }
+        // Get bindings array from field 1
+        let bindings_tagged = ns_obj.get_field(1);
+        let bindings_untagged = self.untag_heap_object(bindings_tagged);
+        let bindings_obj = HeapObject::from_untagged(bindings_untagged as *const u8);
+        // For dynamic arrays, used count is in type_data
+        let used = bindings_obj.get_type_data();
 
-        let num_bindings = (size - 1) / 2;
+        let num_bindings = used / 2;
         let mut bindings = Vec::with_capacity(num_bindings);
 
         for i in 0..num_bindings {
-            let name_ptr = heap_obj.get_field(1 + i * 2);
-            let var_ptr = heap_obj.get_field(1 + i * 2 + 1);
+            let name_ptr = bindings_obj.get_field(i * 2);
+            let var_ptr = bindings_obj.get_field(i * 2 + 1);
             let name = self.read_string(name_ptr);
             bindings.push((name, var_ptr));
         }
@@ -940,10 +1018,24 @@ impl GCRuntime {
         }
     }
 
-    /// Run garbage collection
+    /// Run garbage collection from REPL (no JIT code on stack)
     pub fn run_gc(&mut self) -> Result<(), String> {
-        // For now, just return - full GC requires stack pointers
-        // TODO: Implement proper GC trigger with stack walking
+        // When called from REPL, we're not in the middle of executing JIT code,
+        // so there are no live Clojure values on the Rust stack to scan.
+        // Just trace from namespace roots.
+        self.allocator.gc(&self.stack_map, &[]);
+
+        // Handle relocations (for compacting GC)
+        let relocations = self.allocator.get_namespace_relocations();
+        for (_ns_id, updates) in relocations {
+            for (old_ptr, new_ptr) in updates {
+                for (_name, ptr) in self.namespace_roots.iter_mut() {
+                    if *ptr == old_ptr {
+                        *ptr = new_ptr;
+                    }
+                }
+            }
+        }
         Ok(())
     }
 
@@ -1060,13 +1152,13 @@ impl GCRuntime {
     // ========== Var Methods ==========
 
     /// Allocate a var object on the heap
-    /// Returns (tagged_var_ptr, var_id) - var_id is always 0 (unused, kept for API compatibility)
+    /// Returns (tagged_var_ptr, symbol_ptr) - symbol_ptr can be reused for namespace binding
     pub fn allocate_var(
         &mut self,
         ns_ptr: usize,
         symbol_name: &str,
         initial_value: usize,
-    ) -> Result<(usize, u32), String> {
+    ) -> Result<(usize, usize), String> {
         let symbol_ptr = self.allocate_string(symbol_name)?;
 
         let var_ptr = self.allocate_raw(3, TYPE_VAR as u8)?;
@@ -1077,8 +1169,8 @@ impl GCRuntime {
 
         let tagged_var_ptr = self.tag_heap_object(var_ptr);
 
-        // var_id is no longer used - vars are looked up by symbol at runtime
-        Ok((tagged_var_ptr, 0))
+        // Return the symbol pointer so it can be reused for namespace binding
+        Ok((tagged_var_ptr, symbol_ptr))
     }
 
     /// Bootstrap all builtin functions as Vars in clojure.core.
@@ -1100,12 +1192,11 @@ impl GCRuntime {
             let fn_tagged = (code_ptr << 3) | 0b100;
 
             // Create a var for this builtin in clojure.core
-            let (var_ptr, _var_id) = self.allocate_var(core_ns_ptr, *name, fn_tagged)?;
+            let (var_ptr, symbol_ptr) = self.allocate_var(core_ns_ptr, *name, fn_tagged)?;
 
-            // Add the var to the namespace bindings
-            let old_ptr = core_ns_ptr;
-            core_ns_ptr = self.namespace_add_binding(core_ns_ptr, *name, var_ptr)?;
-            if *name == "make-array" {}
+            // Add the var to the namespace bindings, reusing the symbol string from the var
+            core_ns_ptr =
+                self.namespace_add_binding_with_symbol_ptr(core_ns_ptr, *name, var_ptr, symbol_ptr)?;
         }
 
         Ok(core_ns_ptr)
@@ -1204,6 +1295,27 @@ impl GCRuntime {
         let symbol_name = self.read_string(symbol_ptr);
 
         (ns_name, symbol_name)
+    }
+
+    /// Get the symbol string pointer from a var (field 1)
+    pub fn var_symbol_ptr(&self, var_ptr: usize) -> usize {
+        let untagged = self.untag_heap_object(var_ptr);
+        let heap_obj = HeapObject::from_untagged(untagged as *const u8);
+        heap_obj.get_field(1)
+    }
+
+    /// Check if a tagged value is a Var
+    pub fn is_var(&self, value: usize) -> bool {
+        // Vars use heap object tag (0b101)
+        if value & 0b111 != 0b101 {
+            return false;
+        }
+        let untagged = self.untag_heap_object(value);
+        if !self.allocator.contains_address(untagged) {
+            return false;
+        }
+        let heap_obj = HeapObject::from_untagged(untagged as *const u8);
+        heap_obj.get_type_id() == TYPE_VAR
     }
 
     // ========== Function Methods ==========
@@ -1805,8 +1917,19 @@ impl GCRuntime {
         self.allocator
             .iter_objects()
             .filter(|obj| {
-                let type_id = obj.get_type_id() as u8;
-                type_id_to_name(type_id) == type_name
+                let header = obj.get_header();
+                let type_id = header.type_id;
+                // For DefType, look up actual type name from registry
+                let resolved_name = if type_id == TYPE_DEFTYPE as u8 {
+                    let deftype_id = header.type_data as usize;
+                    self.type_registry
+                        .get(deftype_id)
+                        .map(|td| td.name.as_str())
+                        .unwrap_or("DefType")
+                } else {
+                    type_id_to_name(type_id)
+                };
+                resolved_name == type_name
             })
             .map(|obj| self.object_to_info(&obj))
             .collect()
@@ -1825,15 +1948,67 @@ impl GCRuntime {
             _ => self.tag_heap_object(address),
         };
 
+        // Get type name - for DefType, look up actual type name from registry
+        let type_name = if type_id == TYPE_DEFTYPE as u8 {
+            let deftype_id = header.type_data as usize;
+            self.type_registry
+                .get(deftype_id)
+                .map(|td| td.name.clone())
+                .unwrap_or_else(|| format!("DefType#{}", deftype_id))
+        } else {
+            type_id_to_name(type_id).to_string()
+        };
+
+        // Generate value preview based on type
+        let value_preview = self.generate_value_preview(tagged_ptr, type_id);
+
         ObjectInfo {
             address,
             tagged_ptr,
             type_id,
-            type_name: type_id_to_name(type_id),
+            type_name,
             type_data: header.type_data,
             size_bytes: obj.full_size(),
             field_count: header.size as usize,
             is_opaque: header.opaque,
+            value_preview,
+        }
+    }
+
+    /// Generate a preview string for an object's value
+    fn generate_value_preview(&self, tagged_ptr: usize, type_id: u8) -> Option<String> {
+        const MAX_PREVIEW_LEN: usize = 40;
+
+        match type_id as usize {
+            TYPE_STRING => {
+                let s = self.read_string(tagged_ptr);
+                if s.len() > MAX_PREVIEW_LEN {
+                    Some(format!("\"{}...\"", &s[..MAX_PREVIEW_LEN]))
+                } else {
+                    Some(format!("\"{}\"", s))
+                }
+            }
+            TYPE_KEYWORD => {
+                let s = self.read_string(tagged_ptr);
+                Some(format!(":{}", s))
+            }
+            TYPE_SYMBOL => {
+                let s = self.read_string(tagged_ptr);
+                Some(s)
+            }
+            TYPE_NAMESPACE => {
+                let name = self.namespace_name(tagged_ptr);
+                Some(format!("#<ns:{}>", name))
+            }
+            TYPE_VAR => {
+                let (ns, sym) = self.var_info(tagged_ptr);
+                Some(format!("#'{}/{}", ns, sym))
+            }
+            TYPE_FUNCTION | TYPE_CLOSURE => {
+                let name = self.function_name(tagged_ptr);
+                Some(format!("#<fn:{}>", name))
+            }
+            _ => None,
         }
     }
 

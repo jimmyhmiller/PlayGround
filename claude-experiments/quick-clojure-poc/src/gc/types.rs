@@ -460,6 +460,14 @@ impl HeapObject {
         header.type_data as usize
     }
 
+    pub fn set_type_data(&self, type_data: u32) {
+        let untagged = self.untagged();
+        let pointer = untagged as *mut usize;
+        let mut header = unsafe { Header::from_usize(*pointer) };
+        header.type_data = type_data;
+        unsafe { *pointer = header.to_usize() };
+    }
+
     pub fn is_opaque_object(&self) -> bool {
         let untagged = self.untagged();
         let pointer = untagged as *mut usize;

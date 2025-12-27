@@ -380,9 +380,9 @@ impl HeapInspector for GenerationalGC {
         }
 
         // Convert type_counts to vector with names
-        let mut objects_by_type: Vec<(u8, &'static str, usize, usize)> = type_counts
+        let mut objects_by_type: Vec<(u8, String, usize, usize)> = type_counts
             .into_iter()
-            .map(|(id, (count, bytes))| (id, type_id_to_name(id), count, bytes))
+            .map(|(id, (count, bytes))| (id, type_id_to_name(id).to_string(), count, bytes))
             .collect();
         objects_by_type.sort_by_key(|(id, _, _, _)| *id);
 

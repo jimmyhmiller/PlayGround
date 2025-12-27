@@ -154,8 +154,11 @@ impl MarkAndSweep {
 
     fn mark_and_sweep(&mut self, stack_map: &StackMap, stack_pointers: &[(usize, usize)]) {
         let start = std::time::Instant::now();
+        // Mark from namespace roots (always done)
+        // Then optionally scan stack if stack_pointers provided
+        self.mark_from_roots();
         for (stack_base, stack_pointer) in stack_pointers {
-            self.mark(*stack_base, stack_map, *stack_pointer);
+            self.mark_stack(*stack_base, stack_map, *stack_pointer);
         }
         self.sweep();
         if self.options.print_stats {
@@ -163,7 +166,7 @@ impl MarkAndSweep {
         }
     }
 
-    fn mark(&self, stack_base: usize, stack_map: &StackMap, stack_pointer: usize) {
+    fn mark_from_roots(&self) {
         let mut to_mark: Vec<HeapObject> = Vec::with_capacity(128);
 
         // Mark namespace roots
@@ -181,6 +184,12 @@ impl MarkAndSweep {
             }
         }
 
+        self.trace_objects(to_mark);
+    }
+
+    fn mark_stack(&self, stack_base: usize, stack_map: &StackMap, stack_pointer: usize) {
+        let mut to_mark: Vec<HeapObject> = Vec::with_capacity(128);
+
         // Use the stack walker to find heap pointers
         // With conservative scanning, we must validate that pointers are within the heap
         // to avoid crashes from garbage values that happen to look like heap pointers
@@ -192,6 +201,10 @@ impl MarkAndSweep {
             }
         });
 
+        self.trace_objects(to_mark);
+    }
+
+    fn trace_objects(&self, mut to_mark: Vec<HeapObject>) {
         while let Some(object) = to_mark.pop() {
             if object.marked() {
                 continue;
@@ -413,9 +426,9 @@ impl HeapInspector for MarkAndSweep {
         }
 
         // Convert type_counts to vector with names
-        let mut objects_by_type: Vec<(u8, &'static str, usize, usize)> = type_counts
+        let mut objects_by_type: Vec<(u8, String, usize, usize)> = type_counts
             .into_iter()
-            .map(|(id, (count, bytes))| (id, type_id_to_name(id), count, bytes))
+            .map(|(id, (count, bytes))| (id, type_id_to_name(id).to_string(), count, bytes))
             .collect();
         objects_by_type.sort_by_key(|(id, _, _, _)| *id);
 

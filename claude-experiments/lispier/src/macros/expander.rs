@@ -38,6 +38,250 @@ impl DynamicMacroContext {
     fn new() -> Self {
         Self::default()
     }
+}
+
+/// Collector for print string literals
+///
+/// This pass runs after macro expansion to:
+/// 1. Find all `__print_internal__` calls
+/// 2. Collect unique string literals
+/// 3. Generate LLVM global declarations for each string
+/// 4. Replace `__print_internal__` calls with proper printf calls
+struct StringCollector {
+    /// Map from string content to global name
+    strings: HashMap<String, String>,
+    /// Counter for generating unique names
+    counter: usize,
+}
+
+impl StringCollector {
+    fn new() -> Self {
+        Self {
+            strings: HashMap::new(),
+            counter: 0,
+        }
+    }
+
+    /// Process a list of values, collecting strings and transforming print calls
+    fn process(&mut self, values: Vec<Value>) -> Vec<Value> {
+        // First pass: collect all strings and transform __print_internal__ calls
+        let transformed: Vec<Value> = values
+            .into_iter()
+            .map(|v| self.transform_value(v))
+            .collect();
+
+        // If no strings were collected, just return the transformed values
+        if self.strings.is_empty() {
+            return transformed;
+        }
+
+        // Generate globals and prepend them
+        let mut result = self.generate_globals();
+        result.extend(transformed);
+        result
+    }
+
+    /// Transform a value, replacing __print_internal__ calls
+    fn transform_value(&mut self, value: Value) -> Value {
+        match value {
+            Value::List(items) => {
+                // Check if this is a __print_internal__ call
+                if let Some(Value::Symbol(sym)) = items.first() {
+                    if sym.name == "__print_internal__" {
+                        return self.transform_print_call(&items);
+                    }
+                }
+                // Recursively transform children
+                Value::List(items.into_iter().map(|v| self.transform_value(v)).collect())
+            }
+            Value::Vector(items) => {
+                Value::Vector(items.into_iter().map(|v| self.transform_value(v)).collect())
+            }
+            Value::Map(map) => {
+                Value::Map(
+                    map.into_iter()
+                        .map(|(k, v)| (k, self.transform_value(v)))
+                        .collect(),
+                )
+            }
+            // Atoms pass through unchanged
+            other => other,
+        }
+    }
+
+    /// Transform a __print_internal__ call to a puts/printf call with addressof
+    fn transform_print_call(&mut self, items: &[Value]) -> Value {
+        // items[0] is __print_internal__
+        // items[1] is the format string
+        // items[2..] are additional arguments
+
+        let format_str = match items.get(1) {
+            Some(Value::String(s)) => s.clone(),
+            _ => return Value::List(items.to_vec()), // Pass through if malformed
+        };
+
+        let has_format_args = items.len() > 2;
+
+        // Get or create a global name for this string
+        let global_name = self.get_or_create_global(&format_str);
+
+        let ptr_name = format!("_print_ptr_{}", self.counter - 1);
+
+        // Build addressof expression
+        let addressof = Value::List(vec![
+            Value::symbol("llvm.mlir.addressof"),
+            Value::Map(
+                [
+                    ("global_name".to_string(), Value::symbol(&format!("@{}", global_name))),
+                    ("result".to_string(), Value::symbol("!llvm.ptr")),
+                ]
+                .into_iter()
+                .collect(),
+            ),
+        ]);
+
+        if has_format_args {
+            // For strings with format args, we need to call printf
+            // Since printf is variadic and func.call validates arity,
+            // we use arity-specific function names that the user must declare.
+            // For N extra args, we call printf_N (e.g., printf_1 for 1 extra arg)
+            let extra_arg_count = items.len() - 2;
+            let callee_name = format!("printf_{}", extra_arg_count);
+
+            let mut printf_call = vec![
+                Value::symbol("func.call"),
+                Value::Map(
+                    [
+                        ("callee".to_string(), Value::symbol(&format!("@{}", callee_name))),
+                        ("result".to_string(), Value::symbol("i32")),
+                    ]
+                    .into_iter()
+                    .collect(),
+                ),
+                Value::symbol(&ptr_name),
+            ];
+            // Add additional arguments (items[2..])
+            printf_call.extend(items[2..].iter().cloned());
+
+            Value::List(vec![
+                Value::symbol("let"),
+                Value::Vector(vec![
+                    Value::symbol(&ptr_name),
+                    addressof,
+                ]),
+                Value::List(printf_call),
+            ])
+        } else {
+            // For simple strings without format args, use puts
+            // puts automatically adds a newline, so we need to handle that
+            // But actually for exact output control, we use printf with no extra args
+            // which works because it's a fixed-arity call (1 arg)
+            let printf_call = vec![
+                Value::symbol("func.call"),
+                Value::Map(
+                    [
+                        ("callee".to_string(), Value::symbol("@printf")),
+                        ("result".to_string(), Value::symbol("i32")),
+                    ]
+                    .into_iter()
+                    .collect(),
+                ),
+                Value::symbol(&ptr_name),
+            ];
+
+            Value::List(vec![
+                Value::symbol("let"),
+                Value::Vector(vec![
+                    Value::symbol(&ptr_name),
+                    addressof,
+                ]),
+                Value::List(printf_call),
+            ])
+        }
+    }
+
+    /// Get or create a global name for a string
+    fn get_or_create_global(&mut self, s: &str) -> String {
+        if let Some(name) = self.strings.get(s) {
+            return name.clone();
+        }
+
+        let name = format!("_print_str_{}", self.counter);
+        self.counter += 1;
+        self.strings.insert(s.to_string(), name.clone());
+        name
+    }
+
+    /// Generate LLVM global declarations for all collected strings
+    fn generate_globals(&self) -> Vec<Value> {
+        let mut globals = Vec::new();
+
+        // Sort by name for deterministic output
+        let mut sorted: Vec<_> = self.strings.iter().collect();
+        sorted.sort_by_key(|(_, name)| *name);
+
+        for (content, name) in sorted {
+            // Need to add null terminator for C strings
+            let content_with_null = format!("{}\0", content);
+            let len = content_with_null.len();
+
+            // Generate:
+            // (llvm.mlir.global {:sym_name "name" :linkage 0 :global_type !llvm.array<len x i8> :constant true}
+            //   (region (block []
+            //     (def s (llvm.mlir.constant {:value "content\0" :result !llvm.array<len x i8>}))
+            //     (llvm.return s))))
+
+            let array_type = format!("!llvm.array<{} x i8>", len);
+
+            let global = Value::List(vec![
+                Value::symbol("llvm.mlir.global"),
+                Value::Map(
+                    [
+                        ("sym_name".to_string(), Value::String(name.clone())),
+                        ("linkage".to_string(), Value::Number(0.0)), // internal linkage
+                        ("global_type".to_string(), Value::symbol(&array_type)),
+                        ("constant".to_string(), Value::Boolean(true)),
+                    ]
+                    .into_iter()
+                    .collect(),
+                ),
+                Value::List(vec![
+                    Value::symbol("region"),
+                    Value::List(vec![
+                        Value::symbol("block"),
+                        Value::Vector(vec![]),
+                        Value::List(vec![
+                            Value::symbol("def"),
+                            Value::symbol("_str_val"),
+                            Value::List(vec![
+                                Value::symbol("llvm.mlir.constant"),
+                                Value::Map(
+                                    [
+                                        // Include null terminator in the string value
+                                        ("value".to_string(), Value::String(content_with_null.clone())),
+                                        ("result".to_string(), Value::symbol(&array_type)),
+                                    ]
+                                    .into_iter()
+                                    .collect(),
+                                ),
+                            ]),
+                        ]),
+                        Value::List(vec![
+                            Value::symbol("llvm.return"),
+                            Value::symbol("_str_val"),
+                        ]),
+                    ]),
+                ]),
+            ]);
+
+            globals.push(global);
+        }
+
+        globals
+    }
+}
+
+impl DynamicMacroContext {
 
     /// Check if a value is a require-dialect declaration
     fn is_require_dialect(value: &Value) -> bool {
@@ -240,6 +484,10 @@ impl MacroExpander {
                 result.push(processed);
             }
         }
+
+        // Post-process: collect print strings and generate LLVM globals
+        let mut collector = StringCollector::new();
+        result = collector.process(result);
 
         Ok(result)
     }

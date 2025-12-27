@@ -14,9 +14,11 @@ fn main() -> ExitCode {
     match args.get(1).map(|s| s.as_str()) {
         Some("run") => {
             if let Some(file) = args.get(2) {
-                run_file(file)
+                // Collect any additional arguments after the file path
+                let program_args: Vec<String> = args.iter().skip(3).cloned().collect();
+                run_file(file, &program_args)
             } else {
-                eprintln!("Usage: lispier run <file>");
+                eprintln!("Usage: lispier run <file> [args...]");
                 ExitCode::FAILURE
             }
         }
@@ -71,7 +73,7 @@ fn print_usage() {
     println!("    lispier <command> [args]");
     println!();
     println!("COMMANDS:");
-    println!("    run <file>           Compile and execute a file");
+    println!("    run <file> [args...] Compile and execute a file with optional arguments");
     println!("    show-ast <file>      Show the AST for a file");
     println!("    show-ir <file>       Show the generated MLIR for a file");
     println!("    show-expanded <file> Show macro-expanded source");
@@ -79,7 +81,7 @@ fn print_usage() {
     println!("    --help, -h           Show this help message");
 }
 
-fn run_file(path: &str) -> ExitCode {
+fn run_file(path: &str, program_args: &[String]) -> ExitCode {
     let file_path = Path::new(path);
     let project_root = find_project_root(file_path)
         .unwrap_or_else(|| file_path.parent().unwrap_or(Path::new(".")).to_path_buf());
@@ -100,7 +102,7 @@ fn run_file(path: &str) -> ExitCode {
     }
 
     // No compilation spec - use internal JIT
-    match compile_and_run_nodes(&nodes) {
+    match compile_and_run_nodes(&nodes, program_args) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("Error: {}", e);
@@ -282,7 +284,7 @@ fn parse_to_ast(source: &str) -> Result<Vec<lispier::Node>, String> {
 /// Compile and run source code
 fn compile_and_run(source: &str) -> Result<(), String> {
     let nodes = parse_to_ast(source)?;
-    compile_and_run_nodes(&nodes)
+    compile_and_run_nodes(&nodes, &[])
 }
 
 /// Return type of a main function
@@ -295,29 +297,36 @@ enum MainReturnType {
     Void,
 }
 
-/// Find the main function in AST nodes and extract its return type
-fn find_main_return_type(nodes: &[Node]) -> Option<MainReturnType> {
+/// Signature of a main function - return type and whether it takes argc/argv
+#[derive(Debug, Clone)]
+struct MainSignature {
+    return_type: MainReturnType,
+    takes_args: bool, // true if main accepts (i32, !llvm.ptr) or (i64, !llvm.ptr)
+}
+
+/// Find the main function in AST nodes and extract its signature
+fn find_main_signature(nodes: &[Node]) -> Option<MainSignature> {
     for node in nodes {
-        if let Some(ret_type) = find_main_in_node(node) {
-            return Some(ret_type);
+        if let Some(sig) = find_main_in_node(node) {
+            return Some(sig);
         }
     }
     None
 }
 
 /// Recursively search for main function in a node
-fn find_main_in_node(node: &Node) -> Option<MainReturnType> {
+fn find_main_in_node(node: &Node) -> Option<MainSignature> {
     match node {
         Node::Operation(op) => {
             if is_main_function(op) {
-                return extract_return_type(op);
+                return extract_signature(op);
             }
             // Search in regions
             for region in &op.regions {
                 for block in &region.blocks {
                     for child in &block.operations {
-                        if let Some(ret_type) = find_main_in_node(child) {
-                            return Some(ret_type);
+                        if let Some(sig) = find_main_in_node(child) {
+                            return Some(sig);
                         }
                     }
                 }
@@ -326,8 +335,8 @@ fn find_main_in_node(node: &Node) -> Option<MainReturnType> {
         }
         Node::Module(module) => {
             for child in &module.body {
-                if let Some(ret_type) = find_main_in_node(child) {
-                    return Some(ret_type);
+                if let Some(sig) = find_main_in_node(child) {
+                    return Some(sig);
                 }
             }
             None
@@ -348,36 +357,50 @@ fn is_main_function(op: &Operation) -> bool {
     }
 }
 
-/// Extract return type from a function operation
-fn extract_return_type(op: &Operation) -> Option<MainReturnType> {
+/// Extract full signature from a function operation
+fn extract_signature(op: &Operation) -> Option<MainSignature> {
     let func_type = match op.attributes.get("function_type") {
         Some(AttributeValue::FunctionType(ft)) => ft,
-        _ => return Some(MainReturnType::Void),
+        _ => return Some(MainSignature {
+            return_type: MainReturnType::Void,
+            takes_args: false,
+        }),
     };
 
-    if func_type.return_types.is_empty() {
-        return Some(MainReturnType::Void);
-    }
+    // Check if main takes argc/argv arguments
+    // Expected signature: (i32, !llvm.ptr) or (i64, !llvm.ptr)
+    let takes_args = if func_type.arg_types.len() == 2 {
+        let arg0 = &func_type.arg_types[0].name;
+        let arg1 = &func_type.arg_types[1].name;
+        (arg0 == "i32" || arg0 == "i64") && arg1 == "!llvm.ptr"
+    } else {
+        false
+    };
 
-    // Get the first return type
-    let ret_type_name = &func_type.return_types[0].name;
-
-    match ret_type_name.as_str() {
-        "i32" => Some(MainReturnType::I32),
-        "i64" => Some(MainReturnType::I64),
-        "f32" => Some(MainReturnType::F32),
-        "f64" => Some(MainReturnType::F64),
-        _ => {
-            eprintln!("Warning: unsupported main return type '{}', treating as void", ret_type_name);
-            Some(MainReturnType::Void)
+    // Extract return type
+    let return_type = if func_type.return_types.is_empty() {
+        MainReturnType::Void
+    } else {
+        let ret_type_name = &func_type.return_types[0].name;
+        match ret_type_name.as_str() {
+            "i32" => MainReturnType::I32,
+            "i64" => MainReturnType::I64,
+            "f32" => MainReturnType::F32,
+            "f64" => MainReturnType::F64,
+            _ => {
+                eprintln!("Warning: unsupported main return type '{}', treating as void", ret_type_name);
+                MainReturnType::Void
+            }
         }
-    }
+    };
+
+    Some(MainSignature { return_type, takes_args })
 }
 
-/// Compile and run pre-parsed nodes
-fn compile_and_run_nodes(nodes: &[Node]) -> Result<(), String> {
-    // Find main's return type before generating IR
-    let return_type = find_main_return_type(nodes);
+/// Compile and run pre-parsed nodes with optional program arguments
+fn compile_and_run_nodes(nodes: &[Node], program_args: &[String]) -> Result<(), String> {
+    // Find main's signature before generating IR
+    let signature = find_main_signature(nodes);
 
     // Extract extern declarations
     let externs = extract_externs(nodes);
@@ -435,45 +458,101 @@ fn compile_and_run_nodes(nodes: &[Node]) -> Result<(), String> {
         }
     }
 
+    // Prepare argc/argv if main takes arguments
+    let takes_args = signature.as_ref().map_or(false, |s| s.takes_args);
+
+    // Build argv array: null-terminated array of null-terminated strings
+    // We need to keep the CStrings alive for the duration of the call
+    let c_strings: Vec<std::ffi::CString> = program_args
+        .iter()
+        .map(|s| std::ffi::CString::new(s.as_str()).unwrap())
+        .collect();
+    let mut argv_ptrs: Vec<*const i8> = c_strings.iter().map(|s| s.as_ptr()).collect();
+    argv_ptrs.push(std::ptr::null()); // null-terminate the array
+
+    let mut argc: i64 = program_args.len() as i64;
+    let mut argv: *const *const i8 = argv_ptrs.as_ptr();
+
     // Use invoke_packed for uniform calling convention
     // The llvm-request-c-wrappers pass generates _mlir_ciface_main which invoke_packed uses
+    let return_type = signature.as_ref().map(|s| s.return_type.clone());
+
     match return_type {
         Some(MainReturnType::I32) => {
             let mut result: i32 = 0;
             unsafe {
-                jit.invoke_packed("main", &mut [&mut result as *mut i32 as *mut ()])
-                    .map_err(|e| format!("Invocation error: {}", e))?;
+                if takes_args {
+                    jit.invoke_packed("main", &mut [
+                        &mut argc as *mut i64 as *mut (),
+                        &mut argv as *mut *const *const i8 as *mut (),
+                        &mut result as *mut i32 as *mut ()
+                    ]).map_err(|e| format!("Invocation error: {}", e))?;
+                } else {
+                    jit.invoke_packed("main", &mut [&mut result as *mut i32 as *mut ()])
+                        .map_err(|e| format!("Invocation error: {}", e))?;
+                }
             }
             println!("{}", result);
         }
         Some(MainReturnType::I64) => {
             let mut result: i64 = 0;
             unsafe {
-                jit.invoke_packed("main", &mut [&mut result as *mut i64 as *mut ()])
-                    .map_err(|e| format!("Invocation error: {}", e))?;
+                if takes_args {
+                    jit.invoke_packed("main", &mut [
+                        &mut argc as *mut i64 as *mut (),
+                        &mut argv as *mut *const *const i8 as *mut (),
+                        &mut result as *mut i64 as *mut ()
+                    ]).map_err(|e| format!("Invocation error: {}", e))?;
+                } else {
+                    jit.invoke_packed("main", &mut [&mut result as *mut i64 as *mut ()])
+                        .map_err(|e| format!("Invocation error: {}", e))?;
+                }
             }
             println!("{}", result);
         }
         Some(MainReturnType::F32) => {
             let mut result: f32 = 0.0;
             unsafe {
-                jit.invoke_packed("main", &mut [&mut result as *mut f32 as *mut ()])
-                    .map_err(|e| format!("Invocation error: {}", e))?;
+                if takes_args {
+                    jit.invoke_packed("main", &mut [
+                        &mut argc as *mut i64 as *mut (),
+                        &mut argv as *mut *const *const i8 as *mut (),
+                        &mut result as *mut f32 as *mut ()
+                    ]).map_err(|e| format!("Invocation error: {}", e))?;
+                } else {
+                    jit.invoke_packed("main", &mut [&mut result as *mut f32 as *mut ()])
+                        .map_err(|e| format!("Invocation error: {}", e))?;
+                }
             }
             println!("{}", result);
         }
         Some(MainReturnType::F64) => {
             let mut result: f64 = 0.0;
             unsafe {
-                jit.invoke_packed("main", &mut [&mut result as *mut f64 as *mut ()])
-                    .map_err(|e| format!("Invocation error: {}", e))?;
+                if takes_args {
+                    jit.invoke_packed("main", &mut [
+                        &mut argc as *mut i64 as *mut (),
+                        &mut argv as *mut *const *const i8 as *mut (),
+                        &mut result as *mut f64 as *mut ()
+                    ]).map_err(|e| format!("Invocation error: {}", e))?;
+                } else {
+                    jit.invoke_packed("main", &mut [&mut result as *mut f64 as *mut ()])
+                        .map_err(|e| format!("Invocation error: {}", e))?;
+                }
             }
             println!("{}", result);
         }
         Some(MainReturnType::Void) | None => {
             unsafe {
-                jit.invoke_packed("main", &mut [])
-                    .map_err(|e| format!("Invocation error: {}", e))?;
+                if takes_args {
+                    jit.invoke_packed("main", &mut [
+                        &mut argc as *mut i64 as *mut (),
+                        &mut argv as *mut *const *const i8 as *mut ()
+                    ]).map_err(|e| format!("Invocation error: {}", e))?;
+                } else {
+                    jit.invoke_packed("main", &mut [])
+                        .map_err(|e| format!("Invocation error: {}", e))?;
+                }
             }
         }
     }

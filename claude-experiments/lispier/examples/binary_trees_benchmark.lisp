@@ -9,13 +9,15 @@
 (require-dialect func)
 (require-dialect llvm)
 
-; Link C standard library for malloc/free/putchar
+; Link C standard library for malloc/free/putchar/printf
 (link-library :c)
 
 ; External function declarations
 (extern-fn malloc (-> [i64] [!llvm.ptr]))
 (extern-fn free (-> [!llvm.ptr] []))
 (extern-fn putchar (-> [i32] [i32]))
+(extern-fn atoi (-> [!llvm.ptr] [i32]))
+(extern-fn printf (-> [!llvm.ptr] [i32]))
 
 ; =============================================================================
 ; Tree Node Structure
@@ -79,113 +81,6 @@
         (call i64 print_digit n)
         (: 0 i64)))))
 
-; Print a tab character
-(defn print_tab [] -> i64
-  (call i32 putchar (: 9 i32))
-  (func.return (: 0 i64)))
-
-; Print a newline
-(defn print_newline [] -> i64
-  (call i32 putchar (: 10 i32))
-  (func.return (: 0 i64)))
-
-; Print a space
-(defn print_space [] -> i64
-  (call i32 putchar (: 32 i32))
-  (func.return (: 0 i64)))
-
-; Print: "stretch tree of depth "
-(defn print_stretch_tree_of_depth [] -> i64
-  ; s t r e t c h   t r e  e     o  f     d  e  p  t  h  (space)
-  ; 115 116 114 101 116 99 104 32 116 114 101 101 32 111 102 32 100 101 112 116 104 32
-  (call i32 putchar (: 115 i32))  ; s
-  (call i32 putchar (: 116 i32))  ; t
-  (call i32 putchar (: 114 i32))  ; r
-  (call i32 putchar (: 101 i32))  ; e
-  (call i32 putchar (: 116 i32))  ; t
-  (call i32 putchar (: 99 i32))   ; c
-  (call i32 putchar (: 104 i32))  ; h
-  (call i32 putchar (: 32 i32))   ; (space)
-  (call i32 putchar (: 116 i32))  ; t
-  (call i32 putchar (: 114 i32))  ; r
-  (call i32 putchar (: 101 i32))  ; e
-  (call i32 putchar (: 101 i32))  ; e
-  (call i32 putchar (: 32 i32))   ; (space)
-  (call i32 putchar (: 111 i32))  ; o
-  (call i32 putchar (: 102 i32))  ; f
-  (call i32 putchar (: 32 i32))   ; (space)
-  (call i32 putchar (: 100 i32))  ; d
-  (call i32 putchar (: 101 i32))  ; e
-  (call i32 putchar (: 112 i32))  ; p
-  (call i32 putchar (: 116 i32))  ; t
-  (call i32 putchar (: 104 i32))  ; h
-  (call i32 putchar (: 32 i32))   ; (space)
-  (func.return (: 0 i64)))
-
-; Print: " trees of depth "
-(defn print_trees_of_depth [] -> i64
-  ; (tab) t r e e s (space) o f (space) d e p t h (tab)
-  (call i32 putchar (: 9 i32))    ; (tab)
-  (call i32 putchar (: 116 i32))  ; t
-  (call i32 putchar (: 114 i32))  ; r
-  (call i32 putchar (: 101 i32))  ; e
-  (call i32 putchar (: 101 i32))  ; e
-  (call i32 putchar (: 115 i32))  ; s
-  (call i32 putchar (: 32 i32))   ; (space)
-  (call i32 putchar (: 111 i32))  ; o
-  (call i32 putchar (: 102 i32))  ; f
-  (call i32 putchar (: 32 i32))   ; (space)
-  (call i32 putchar (: 100 i32))  ; d
-  (call i32 putchar (: 101 i32))  ; e
-  (call i32 putchar (: 112 i32))  ; p
-  (call i32 putchar (: 116 i32))  ; t
-  (call i32 putchar (: 104 i32))  ; h
-  (call i32 putchar (: 32 i32))   ; (space)
-  (func.return (: 0 i64)))
-
-; Print: " check: "
-(defn print_check [] -> i64
-  ; (tab) c h e c k : (space)
-  (call i32 putchar (: 9 i32))    ; (tab)
-  (call i32 putchar (: 99 i32))   ; c
-  (call i32 putchar (: 104 i32))  ; h
-  (call i32 putchar (: 101 i32))  ; e
-  (call i32 putchar (: 99 i32))   ; c
-  (call i32 putchar (: 107 i32))  ; k
-  (call i32 putchar (: 58 i32))   ; :
-  (call i32 putchar (: 32 i32))   ; (space)
-  (func.return (: 0 i64)))
-
-; Print: "long lived tree of depth "
-(defn print_long_lived_tree_of_depth [] -> i64
-  ; l o n g (space) l i v e d (space) t r e e (space) o f (space) d e p t h (space)
-  (call i32 putchar (: 108 i32))  ; l
-  (call i32 putchar (: 111 i32))  ; o
-  (call i32 putchar (: 110 i32))  ; n
-  (call i32 putchar (: 103 i32))  ; g
-  (call i32 putchar (: 32 i32))   ; (space)
-  (call i32 putchar (: 108 i32))  ; l
-  (call i32 putchar (: 105 i32))  ; i
-  (call i32 putchar (: 118 i32))  ; v
-  (call i32 putchar (: 101 i32))  ; e
-  (call i32 putchar (: 100 i32))  ; d
-  (call i32 putchar (: 32 i32))   ; (space)
-  (call i32 putchar (: 116 i32))  ; t
-  (call i32 putchar (: 114 i32))  ; r
-  (call i32 putchar (: 101 i32))  ; e
-  (call i32 putchar (: 101 i32))  ; e
-  (call i32 putchar (: 32 i32))   ; (space)
-  (call i32 putchar (: 111 i32))  ; o
-  (call i32 putchar (: 102 i32))  ; f
-  (call i32 putchar (: 32 i32))   ; (space)
-  (call i32 putchar (: 100 i32))  ; d
-  (call i32 putchar (: 101 i32))  ; e
-  (call i32 putchar (: 112 i32))  ; p
-  (call i32 putchar (: 116 i32))  ; t
-  (call i32 putchar (: 104 i32))  ; h
-  (call i32 putchar (: 32 i32))   ; (space)
-  (func.return (: 0 i64)))
-
 ; =============================================================================
 ; Benchmark Work Function
 ; =============================================================================
@@ -201,20 +96,40 @@
         (scf.yield (+i acc c))))))
   ; Print: iterations \t trees of depth \t depth \t check: \t check
   (call i64 print_number iterations)
-  (call i64 print_trees_of_depth)
+  (print "\t trees of depth ")
   (call i64 print_number depth)
-  (call i64 print_check)
+  (print "\t check: ")
   (call i64 print_number check)
-  (call i64 print_newline)
+  (println "")
   (func.return (: 0 i64)))
+
+; =============================================================================
+; Helper: get max of two values
+; =============================================================================
+
+(defn max_i64 [(: a i64) (: b i64)] -> i64
+  (func.return
+    (if {:result i64} (>=i a b)
+      a
+      b)))
 
 ; =============================================================================
 ; Main Benchmark
 ; =============================================================================
 
-(defn main [] -> i64
-  ; Configuration: max depth (normally from command line, hardcoded to 12 here)
-  (def max_depth (: 12 i64))
+(defn main [(: argc i64) (: argv !llvm.ptr)] -> i64
+  ; Parse max depth from command line, default to 6 if not provided
+  ; Like the reference: const maxDepth = Math.max(6, parseInt(process.argv[2]))
+  (def input_depth
+    (if {:result i64} (>=i argc (: 1 i64))
+      ; Get argv[0] (first program argument after the file)
+      (let [arg_ptr (llvm.load {:result !llvm.ptr} argv)
+            parsed (call i32 atoi arg_ptr)]
+        (arith.extsi {:result i64} parsed))
+      (: 6 i64)))
+
+  ; max_depth = max(6, input_depth)
+  (def max_depth (call i64 max_i64 (: 6 i64) input_depth))
   (def min_depth (: 4 i64))
 
   ; Stretch tree: build at maxDepth + 1, check it
@@ -223,11 +138,11 @@
   (def stretch_check (call i64 item_check stretch_tree))
 
   ; Print: stretch tree of depth N \t check: N
-  (call i64 print_stretch_tree_of_depth)
+  (print "stretch tree of depth ")
   (call i64 print_number stretch_depth)
-  (call i64 print_check)
+  (print "\t check: ")
   (call i64 print_number stretch_check)
-  (call i64 print_newline)
+  (println "")
 
   ; Build long-lived tree (kept alive during benchmark)
   (def long_lived_tree (call !llvm.ptr bottom_up_tree max_depth))
@@ -246,10 +161,10 @@
 
   ; Print long-lived tree result
   (def long_check (call i64 item_check long_lived_tree))
-  (call i64 print_long_lived_tree_of_depth)
+  (print "long lived tree of depth ")
   (call i64 print_number max_depth)
-  (call i64 print_check)
+  (print "\t check: ")
   (call i64 print_number long_check)
-  (call i64 print_newline)
+  (println "")
 
   (func.return (: 0 i64)))

@@ -122,8 +122,8 @@ pub extern "C" fn builtin_ensure_var_by_symbol(
         // Check if var already exists
         if rt.namespace_lookup(ns_ptr, &var_name).is_none() {
             // Create var with unbound placeholder (we'll use nil for now)
-            let (var_ptr, _) = rt.allocate_var(ns_ptr, &var_name, 7).unwrap(); // 7 = nil
-            rt.namespace_add_binding(ns_ptr, &var_name, var_ptr)
+            let (var_ptr, symbol_ptr) = rt.allocate_var(ns_ptr, &var_name, 7).unwrap(); // 7 = nil
+            rt.namespace_add_binding_with_symbol_ptr(ns_ptr, &var_name, var_ptr, symbol_ptr)
                 .unwrap();
         }
 

@@ -161,7 +161,7 @@ pub struct ObjectInfo {
     /// Type ID from header
     pub type_id: u8,
     /// Human-readable type name
-    pub type_name: &'static str,
+    pub type_name: String,
     /// Type-specific data (string length, deftype ID, etc.)
     pub type_data: u32,
     /// Total size in bytes including header
@@ -170,6 +170,8 @@ pub struct ObjectInfo {
     pub field_count: usize,
     /// Whether object contains raw bytes vs pointers
     pub is_opaque: bool,
+    /// Preview of the object's value (for strings, var names, etc.)
+    pub value_preview: Option<String>,
 }
 
 /// Detailed heap statistics
@@ -183,8 +185,8 @@ pub struct DetailedHeapStats {
     pub used_bytes: usize,
     /// Total number of live objects
     pub object_count: usize,
-    /// Per-type breakdown: (type_id, count, total_bytes)
-    pub objects_by_type: Vec<(u8, &'static str, usize, usize)>,
+    /// Per-type breakdown: (type_id, type_name, count, total_bytes)
+    pub objects_by_type: Vec<(u8, String, usize, usize)>,
     /// Number of free list entries (mark-and-sweep only)
     pub free_list_entries: Option<usize>,
     /// Total free bytes (mark-and-sweep only)
@@ -209,11 +211,25 @@ pub struct ObjectReference {
 /// Convert type_id to human-readable name
 pub fn type_id_to_name(type_id: u8) -> &'static str {
     match type_id {
-        2 => "String",
-        10 => "Namespace",
-        11 => "Var",
-        12 => "Function",
-        13 => "DefType",
+        0 => "Nil",
+        1 => "Bool",
+        2 => "Int",
+        3 => "Float",
+        4 => "String",
+        5 => "Keyword",
+        6 => "Symbol",
+        7 => "List",
+        8 => "Vector",
+        9 => "Map",
+        10 => "Set",
+        11 => "Function",
+        12 => "Closure",
+        13 => "Namespace",
+        14 => "Var",
+        15 => "Array",
+        16 => "MultiArityFn",
+        17 => "DefType",
+        18 => "DynamicArray",
         _ => "Unknown",
     }
 }

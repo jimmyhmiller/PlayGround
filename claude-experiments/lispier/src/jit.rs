@@ -174,10 +174,20 @@ impl Jit {
             ("memmove", libc::memmove as *mut ()),
             ("strlen", libc::strlen as *mut ()),
             ("printf", libc::printf as *mut ()),
+            // printf_N aliases for fixed-arity calls (workaround for variadic)
+            ("printf_1", libc::printf as *mut ()),
+            ("printf_2", libc::printf as *mut ()),
+            ("printf_3", libc::printf as *mut ()),
+            ("printf_4", libc::printf as *mut ()),
             ("puts", libc::puts as *mut ()),
             ("putchar", libc::putchar as *mut ()),
             ("exit", libc::exit as *mut ()),
             ("abort", libc::abort as *mut ()),
+            ("atoi", libc::atoi as *mut ()),
+            ("atol", libc::atol as *mut ()),
+            ("atof", libc::atof as *mut ()),
+            ("strtol", libc::strtol as *mut ()),
+            ("strtod", libc::strtod as *mut ()),
         ];
 
         for (name, ptr) in libc_fns {

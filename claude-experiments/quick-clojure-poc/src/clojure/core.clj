@@ -451,20 +451,6 @@
      returned coll implements IDrop for subsequent use in a partition-like scenario."))
 
 ;; =============================================================================
-;; Helper Predicates
-;; =============================================================================
-
-;; NOTE: satisfies? and instance? are not yet implemented in the compiler
-;; For now, these always return false - we'll implement proper type checking later
-(def sequential?
-  (fn [x]
-    false))
-
-(def list?
-  (fn [x]
-    false))
-
-;; =============================================================================
 ;; Reduced Type (for early termination in reduce)
 ;; =============================================================================
 
@@ -478,11 +464,10 @@
   (fn [x]
     (Reduced. x)))
 
-;; NOTE: instance? not available yet, so reduced? always returns false for now
-;; This means early termination in reduce won't work
-(def reduced?
-  (fn [x]
-    false))
+(defn reduced?
+  "Returns true if x is the result of a call to reduced"
+  [x]
+  (instance? Reduced x))
 
 ;; =============================================================================
 ;; Polymorphic Sequence Functions
@@ -819,6 +804,16 @@
   "Returns a seq of the items in coll in reverse order. Not lazy."
   [coll]
   (reduce conj EMPTY-LIST coll))
+
+;; Now that list types are defined, implement the predicates
+(defn list?
+  "Returns true if x is a list (PList, Cons, or EmptyList)"
+  [x]
+  (or (instance? PList x)
+      (instance? Cons x)
+      (instance? EmptyList x)))
+
+;; NOTE: sequential? is defined later after PersistentVector and IndexedSeq exist
 
 ;; =============================================================================
 ;; Basic Arithmetic Helpers
@@ -1454,6 +1449,16 @@
   "Return true if x is a PersistentVector"
   [x]
   (instance? PersistentVector x))
+
+;; Now that all sequential types are defined, implement sequential?
+(defn sequential?
+  "Returns true if coll is a sequential collection (list, vector, cons, or indexed-seq)"
+  [coll]
+  (or (instance? PList coll)
+      (instance? EmptyList coll)
+      (instance? Cons coll)
+      (instance? PersistentVector coll)
+      (instance? IndexedSeq coll)))
 
 (defn vec
   "Creates a new vector containing the contents of coll."

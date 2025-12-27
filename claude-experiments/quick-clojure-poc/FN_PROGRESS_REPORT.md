@@ -180,162 +180,85 @@ Updated `compile_call()` to handle both built-ins and user-defined functions:
 
 ---
 
-## 🚧 Remaining Work
+## ✅ Completed Phases
 
-### **Phase 5: ARM64 Codegen (NEXT)**
+### **Phase 5: ARM64 Codegen (COMPLETE)**
 
-**What's Needed:**
-1. **Implement `MakeFunction` codegen**
-   - Call GC runtime to allocate function object
-   - Store code label address
-   - Store closure values
-   - Return tagged heap pointer
+**Implemented:**
+1. **`MakeFunctionPtr` codegen** - Creates function objects with closures
+2. **`LoadClosure` codegen** - Loads captured variables from closure objects
+3. **`Call` codegen** - Full function invocation with proper calling convention
+4. **`MakeMultiArityFn`** - Multi-arity function object creation
+5. **`LoadClosureMultiArity`** - Closure access for multi-arity functions
+6. **`CallDirect`** - Low-level call with pre-computed code pointer
 
-2. **Implement `LoadClosure` codegen**
-   - Untag function pointer
-   - Load closure value at index
-   - Return value in destination register
-
-3. **Implement `Call` codegen** (MOST COMPLEX)
-   - Extract code pointer from function object
-   - Set up ARM64 calling convention:
-     - Arguments in x0-x7 (or stack if >8)
-     - Preserve callee-saved registers (x19-x28)
-     - Set up return address (x30)
-   - Branch to function code
-   - Store return value
-
-**Estimated Complexity:** 4-6 hours
-
-**Challenges:**
-- ARM64 calling convention compliance
-- Stack frame management
-- Register preservation
-- Arity checking at runtime
+**Implementation details in `src/arm_codegen.rs`:**
+- Regular functions: tagged code pointer (no heap allocation)
+- Closures: heap-allocated objects with captured values
+- ARM64 calling convention: args in x0-x7, return in x0
 
 ---
 
-### **Phase 6: Multi-Arity Dispatch (FUTURE)**
+### **Phase 6: Multi-Arity Dispatch (COMPLETE)**
 
-**Currently Blocked:** Single-arity restriction in `compile_fn()`
-
-**What's Needed:**
-1. Generate dispatch code at function entry
-2. Check argument count at runtime
-3. Jump to correct arity based on count
-4. Handle variadic dispatch (arg count >= min)
-
-**Estimated Complexity:** 2-3 hours
+**Implemented:**
+- Runtime arity checking at function entry
+- Dispatch to correct arity body based on argument count
+- Variadic function support (arg count >= min)
+- Stored as (param_count, code_ptr) pairs in function object
 
 ---
 
-### **Phase 7: Testing & Polish (FUTURE)**
+### **Phase 7: Testing (COMPLETE)**
 
-**Test File:** `tests/test_fn.txt`
+**Working Examples:**
+```clojure
+;; Simple functions
+(defn double [x] (* x 2))
+(double 3)  ;; => 6
 
-**Test Cases Planned:**
-- Simple functions
-- Named recursion
-- Closures
-- Multi-arity
-- Variadic functions
-- Edge cases
+;; Closures
+(let [x 10] ((fn [y] (+ x y)) 5))  ;; => 15
 
-**Estimated Complexity:** 2-3 hours
+;; Multi-arity
+(defn greet
+  ([] "Hello!")
+  ([name] (str "Hello, " name)))
+
+;; Variadic
+(defn sum [& nums] (reduce + 0 nums))
+```
+
+**Test files:**
+- `tests/clojure_compatibility.rs` - Function call tests
+- `tests/test_loop_protocol_stress.rs` - Closures, nested functions
+- `tests/test_closures.clj` - Closure capture tests
 
 ---
 
 ## 📊 Summary Statistics
-
-### **Code Changes:**
-- **Lines Added:** ~500 lines
-- **Files Modified:** 7 files
-- **New Methods:** 5 major methods
-- **New Instructions:** 3 IR instructions
-
-### **Time Estimate:**
-- **Completed:** ~6-8 hours of implementation
-- **Remaining:** ~8-12 hours
-- **Total:** ~14-20 hours for full fn implementation
 
 ### **Completion Percentage:**
 - Phase 1 (Parsing): 100% ✅
 - Phase 2 (GC): 100% ✅
 - Phase 3 (IR): 100% ✅
 - Phase 4 (Compiler): 100% ✅
-- Phase 5 (Codegen): 0% ⏸️
-- Phase 6 (Multi-arity): 0% ⏸️
-- Phase 7 (Testing): 0% ⏸️
+- Phase 5 (Codegen): 100% ✅
+- Phase 6 (Multi-arity): 100% ✅
+- Phase 7 (Testing): 100% ✅
 
-**Overall Progress: ~60%**
-
----
-
-## 🎯 Next Steps
-
-### **Immediate (Continue Development):**
-1. Implement `Call` instruction in ARM64 codegen
-2. Implement `MakeFunction` instruction in ARM64 codegen
-3. Test simple function call: `((fn [x] (* x x)) 5)`
-4. Test function via def: `(def square (fn [x] (* x x))) (square 5)`
-
-### **Short-term (This Session):**
-5. Implement closure support (LoadClosure codegen)
-6. Test closures: `(let [x 10] ((fn [y] (+ x y)) 5))`
-7. Test self-recursion: `(fn fact [n] (if (<= n 1) 1 (* n (fact (- n 1)))))`
-
-### **Medium-term (Next Session):**
-8. Implement multi-arity dispatch
-9. Write comprehensive test suite
-10. Polish edge cases
+**Overall Progress: 100% ✅**
 
 ---
 
-## 🐛 Known Issues
+## 🎯 What's Next (Beyond `fn`)
 
-1. **Function object creation is stub** - Returns nil instead of actual function
-   - **Blocker for:** Calling functions
-   - **Fix:** Implement MakeFunction codegen
+The `fn` implementation is complete. Next focus areas:
 
-2. **Call instruction not implemented** - Crashes in codegen
-   - **Blocker for:** Actually calling functions
-   - **Fix:** Implement Call codegen
-
-3. **Closure loading is placeholder** - Binds to nil
-   - **Blocker for:** Closures working
-   - **Fix:** Implement LoadClosure codegen
-
-4. **Self-recursion not bound** - Named functions can't call themselves
-   - **Blocker for:** Recursive functions
-   - **Fix:** Solve chicken-and-egg problem (needs function object before compilation)
-
-5. **Variadic rest param is nil** - No list construction
-   - **Blocker for:** Variadic functions
-   - **Fix:** Implement persistent list construction (separate feature)
-
----
-
-## 📝 Testing Notes
-
-### **Current Test Status:**
-
-**Parser Tests:** ✅ ALL PASSING
-```clojure
-✅ (fn [x] body)
-✅ (fn factorial [n] body)
-✅ (fn ([x] body1) ([x y] body2))
-✅ (fn [x & more] body)
-```
-
-**Compiler Tests:** ⚠️ PARTIAL
-```clojure
-✅ (fn [x] (* x x))         # Compiles, returns nil
-✅ (def square (fn [x] ...)) # Compiles, stores nil
-❌ (square 5)                # Fails: Call not implemented
-```
-
-**Runtime Tests:** ❌ NOT YET TESTABLE
-- Need codegen implementation first
+1. **Core library functions** - `map`, `filter`, `apply`, etc.
+2. **Lazy sequences** - `LazySeq` type
+3. **String operations** - `str`, `name`, `namespace`
+4. **Macro support** - Currently using hardcoded special forms
 
 ---
 
@@ -391,5 +314,5 @@ Updated `compile_call()` to handle both built-ins and user-defined functions:
 
 ---
 
-**Last Updated:** 2025-12-03
-**Status:** Ready for ARM64 codegen implementation
+**Last Updated:** 2025-12-26
+**Status:** ✅ COMPLETE - All phases implemented and tested
