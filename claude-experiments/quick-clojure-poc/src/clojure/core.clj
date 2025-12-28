@@ -921,6 +921,44 @@
   [x]
   (if x false true))
 
+(defn identity
+  "Returns its argument."
+  [x]
+  x)
+
+(defn true?
+  "Returns true if x is the value true, false otherwise."
+  [x]
+  (identical? x true))
+
+(defn false?
+  "Returns true if x is the value false, false otherwise."
+  [x]
+  (identical? x false))
+
+(defn some?
+  "Returns true if x is not nil, false otherwise."
+  [x]
+  (not (nil? x)))
+
+(defn quot
+  "quot[ient] of dividing numerator by denominator."
+  [num div]
+  (/ num div))
+
+(defn rem
+  "remainder of dividing numerator by denominator."
+  [num div]
+  (- num (* (quot num div) div)))
+
+(defn mod
+  "Modulus of num and div. Truncates toward negative infinity."
+  [num div]
+  (let [m (rem num div)]
+    (if (or (= m 0) (= (> num 0) (> div 0)))
+      m
+      (+ m div))))
+
 ;; =============================================================================
 ;; Error Type (needed before IndexedSeq)
 ;; =============================================================================
@@ -2686,15 +2724,17 @@
               (cons (quote cond) (next (next clauses))))))))
 
 ;; and - short-circuit logical and
+;; Returns the first falsey value or the last value if all are truthy
 (def ^:macro and
   (fn and-macro [form env & exprs]
     (if (nil? (seq exprs))
       true
       (if (nil? (next exprs))
         (first exprs)
-        (list (quote if) (first exprs)
-              (cons (quote and) (next exprs))
-              false)))))
+        (list (quote let) (vector (quote and__auto__) (first exprs))
+              (list (quote if) (quote and__auto__)
+                    (cons (quote and) (next exprs))
+                    (quote and__auto__)))))))
 
 ;; or - short-circuit logical or
 (def ^:macro or

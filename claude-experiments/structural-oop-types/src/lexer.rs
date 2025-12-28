@@ -341,11 +341,17 @@ mod tests {
 
     #[test]
     fn test_lex_literals() {
-        let mut lexer = Lexer::new("true false 42 -10");
+        let mut lexer = Lexer::new("true false 42");
         assert_eq!(lexer.next_token().unwrap(), Token::True);
         assert_eq!(lexer.next_token().unwrap(), Token::False);
         assert_eq!(lexer.next_token().unwrap(), Token::Int(42));
-        assert_eq!(lexer.next_token().unwrap(), Token::Int(-10));
+    }
+
+    #[test]
+    fn test_lex_minus() {
+        let mut lexer = Lexer::new("-10");
+        assert_eq!(lexer.next_token().unwrap(), Token::Minus);
+        assert_eq!(lexer.next_token().unwrap(), Token::Int(10));
     }
 
     #[test]

@@ -3,18 +3,49 @@
 //! This implements Hindley-Milner style type inference extended with:
 //! - Row polymorphism for structural object types
 //! - Equi-recursive types for self-reference (this)
+//! - Let-polymorphism (generalization and instantiation)
 
 use crate::expr::Expr;
-use crate::node::NodeId;
+use crate::node::{Node, NodeId};
 use crate::store::NodeStore;
 use crate::unify::{unify, TypeError};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-/// Type environment mapping variable names to their types
+/// A type scheme: ∀vars. type
+///
+/// The `vars` are the IDs of type/row variables that are generalized.
+/// When instantiating, these are replaced with fresh variables.
+#[derive(Debug, Clone)]
+pub struct Scheme {
+    /// The IDs of generalized type variables
+    pub type_vars: HashSet<u32>,
+    /// The IDs of generalized row variables
+    pub row_vars: HashSet<u32>,
+    /// The type (containing references to the generalized variables)
+    pub ty: NodeId,
+}
+
+impl Scheme {
+    /// Create a monomorphic scheme (no generalized variables)
+    pub fn mono(ty: NodeId) -> Self {
+        Scheme {
+            type_vars: HashSet::new(),
+            row_vars: HashSet::new(),
+            ty,
+        }
+    }
+
+    /// Create a polymorphic scheme
+    pub fn poly(type_vars: HashSet<u32>, row_vars: HashSet<u32>, ty: NodeId) -> Self {
+        Scheme { type_vars, row_vars, ty }
+    }
+}
+
+/// Type environment mapping variable names to their type schemes
 #[derive(Debug, Clone)]
 pub struct TypeEnv {
-    /// Variable bindings
-    bindings: HashMap<String, NodeId>,
+    /// Variable bindings (now storing schemes for let-polymorphism)
+    bindings: HashMap<String, Scheme>,
     /// The type of `this` in the current object (if any)
     self_type: Option<NodeId>,
 }
@@ -28,16 +59,23 @@ impl TypeEnv {
         }
     }
 
-    /// Extend the environment with a new binding
+    /// Extend the environment with a monomorphic binding
     pub fn extend(&self, name: impl Into<String>, ty: NodeId) -> Self {
         let mut new_env = self.clone();
-        new_env.bindings.insert(name.into(), ty);
+        new_env.bindings.insert(name.into(), Scheme::mono(ty));
         new_env
     }
 
-    /// Look up a variable in the environment
-    pub fn lookup(&self, name: &str) -> Option<NodeId> {
-        self.bindings.get(name).copied()
+    /// Extend the environment with a polymorphic scheme
+    pub fn extend_scheme(&self, name: impl Into<String>, scheme: Scheme) -> Self {
+        let mut new_env = self.clone();
+        new_env.bindings.insert(name.into(), scheme);
+        new_env
+    }
+
+    /// Look up a variable's scheme in the environment
+    pub fn lookup(&self, name: &str) -> Option<&Scheme> {
+        self.bindings.get(name)
     }
 
     /// Set the self type for object inference
@@ -51,11 +89,215 @@ impl TypeEnv {
     pub fn get_self(&self) -> Option<NodeId> {
         self.self_type
     }
+
+    /// Get all type variable IDs that are free in the environment
+    pub fn free_type_vars(&self, store: &NodeStore) -> HashSet<u32> {
+        let mut free = HashSet::new();
+        for scheme in self.bindings.values() {
+            let (ty_vars, _) = free_vars_in_type(store, scheme.ty);
+            for var in ty_vars {
+                if !scheme.type_vars.contains(&var) {
+                    free.insert(var);
+                }
+            }
+        }
+        if let Some(self_ty) = self.self_type {
+            let (ty_vars, _) = free_vars_in_type(store, self_ty);
+            free.extend(ty_vars);
+        }
+        free
+    }
+
+    /// Get all row variable IDs that are free in the environment
+    pub fn free_row_vars(&self, store: &NodeStore) -> HashSet<u32> {
+        let mut free = HashSet::new();
+        for scheme in self.bindings.values() {
+            let (_, row_vars) = free_vars_in_type(store, scheme.ty);
+            for var in row_vars {
+                if !scheme.row_vars.contains(&var) {
+                    free.insert(var);
+                }
+            }
+        }
+        if let Some(self_ty) = self.self_type {
+            let (_, row_vars) = free_vars_in_type(store, self_ty);
+            free.extend(row_vars);
+        }
+        free
+    }
 }
 
 impl Default for TypeEnv {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Collect all free type and row variable IDs in a type
+/// Returns (type_vars, row_vars)
+fn free_vars_in_type(store: &NodeStore, ty: NodeId) -> (HashSet<u32>, HashSet<u32>) {
+    let mut type_vars = HashSet::new();
+    let mut row_vars = HashSet::new();
+    let mut visited = HashSet::new();
+    collect_free_vars(store, ty, &mut type_vars, &mut row_vars, &mut visited);
+    (type_vars, row_vars)
+}
+
+fn collect_free_vars(
+    store: &NodeStore,
+    ty: NodeId,
+    type_vars: &mut HashSet<u32>,
+    row_vars: &mut HashSet<u32>,
+    visited: &mut HashSet<NodeId>,
+) {
+    let resolved = store.find(ty);
+    if visited.contains(&resolved) {
+        return; // Handle cycles (equi-recursive types)
+    }
+    visited.insert(resolved);
+
+    match store.get(resolved) {
+        Node::Var { id, .. } => {
+            type_vars.insert(*id);
+        }
+        Node::RowVar { id, .. } => {
+            row_vars.insert(*id);
+        }
+        Node::Const { .. } => {}
+        Node::Arrow { domain, codomain, .. } => {
+            collect_free_vars(store, *domain, type_vars, row_vars, visited);
+            collect_free_vars(store, *codomain, type_vars, row_vars, visited);
+        }
+        Node::Record { row, .. } => {
+            collect_free_vars(store, *row, type_vars, row_vars, visited);
+        }
+        Node::RowEmpty { .. } => {}
+        Node::RowExtend { presence, rest, .. } => {
+            collect_free_vars(store, *presence, type_vars, row_vars, visited);
+            collect_free_vars(store, *rest, type_vars, row_vars, visited);
+        }
+        Node::Present { ty, .. } => {
+            collect_free_vars(store, *ty, type_vars, row_vars, visited);
+        }
+        Node::Absent { .. } => {}
+    }
+}
+
+/// Generalize a type into a scheme by quantifying over variables not free in the environment
+fn generalize(env: &TypeEnv, store: &NodeStore, ty: NodeId) -> Scheme {
+    let env_type_free = env.free_type_vars(store);
+    let env_row_free = env.free_row_vars(store);
+    let (ty_type_vars, ty_row_vars) = free_vars_in_type(store, ty);
+
+    // Quantify over variables that are in ty but not in env
+    let type_vars: HashSet<u32> = ty_type_vars.difference(&env_type_free).copied().collect();
+    let row_vars: HashSet<u32> = ty_row_vars.difference(&env_row_free).copied().collect();
+
+    Scheme::poly(type_vars, row_vars, ty)
+}
+
+/// Instantiate a scheme by replacing quantified variables with fresh ones
+fn instantiate(scheme: &Scheme, store: &mut NodeStore) -> NodeId {
+    if scheme.type_vars.is_empty() && scheme.row_vars.is_empty() {
+        // Monomorphic - no need to copy
+        return scheme.ty;
+    }
+
+    // Create fresh type variables for each quantified type variable
+    let mut type_subst: HashMap<u32, NodeId> = HashMap::new();
+    for &var_id in &scheme.type_vars {
+        let fresh = store.fresh_var("inst");
+        type_subst.insert(var_id, fresh);
+    }
+
+    // Create fresh row variables for each quantified row variable
+    let mut row_subst: HashMap<u32, NodeId> = HashMap::new();
+    for &var_id in &scheme.row_vars {
+        let fresh = store.fresh_row_var("inst");
+        row_subst.insert(var_id, fresh);
+    }
+
+    // Copy the type, substituting quantified variables
+    let mut copied: HashMap<NodeId, NodeId> = HashMap::new();
+    copy_type(store, scheme.ty, &type_subst, &row_subst, &mut copied)
+}
+
+/// Copy a type, substituting variables according to the substitution maps
+fn copy_type(
+    store: &mut NodeStore,
+    ty: NodeId,
+    type_subst: &HashMap<u32, NodeId>,
+    row_subst: &HashMap<u32, NodeId>,
+    copied: &mut HashMap<NodeId, NodeId>,
+) -> NodeId {
+    let resolved = store.find(ty);
+
+    // Check if already copied (handles cycles)
+    if let Some(&already) = copied.get(&resolved) {
+        return already;
+    }
+
+    match store.get(resolved).clone() {
+        Node::Var { id, .. } => {
+            if let Some(&fresh) = type_subst.get(&id) {
+                fresh
+            } else {
+                resolved // Not quantified, return as-is
+            }
+        }
+        Node::RowVar { id, .. } => {
+            if let Some(&fresh) = row_subst.get(&id) {
+                fresh
+            } else {
+                resolved
+            }
+        }
+        Node::Const { .. } => resolved,
+        Node::Arrow { domain, codomain, .. } => {
+            // Pre-allocate to handle cycles
+            let placeholder = store.fresh_var("copy");
+            copied.insert(resolved, placeholder);
+
+            let new_domain = copy_type(store, domain, type_subst, row_subst, copied);
+            let new_codomain = copy_type(store, codomain, type_subst, row_subst, copied);
+            let result = store.arrow(new_domain, new_codomain);
+
+            // Update the placeholder to point to the real result
+            store.union(placeholder, result);
+            copied.insert(resolved, result);
+            result
+        }
+        Node::Record { row, .. } => {
+            let placeholder = store.fresh_var("copy");
+            copied.insert(resolved, placeholder);
+
+            let new_row = copy_type(store, row, type_subst, row_subst, copied);
+            let result = store.record(new_row);
+
+            store.union(placeholder, result);
+            copied.insert(resolved, result);
+            result
+        }
+        Node::RowEmpty { .. } => resolved,
+        Node::RowExtend { field, presence, rest, .. } => {
+            let placeholder = store.fresh_row_var("copy");
+            copied.insert(resolved, placeholder);
+
+            let new_presence = copy_type(store, presence, type_subst, row_subst, copied);
+            let new_rest = copy_type(store, rest, type_subst, row_subst, copied);
+
+            // Need to create the row extend node manually
+            let result = store.add(Node::row_extend(&field, new_presence, new_rest));
+
+            store.union(placeholder, result);
+            copied.insert(resolved, result);
+            result
+        }
+        Node::Present { ty: inner, .. } => {
+            let new_inner = copy_type(store, inner, type_subst, row_subst, copied);
+            store.present(new_inner)
+        }
+        Node::Absent { .. } => resolved,
     }
 }
 
@@ -96,11 +338,16 @@ pub fn infer(env: &TypeEnv, expr: &Expr, store: &mut NodeStore) -> Result<NodeId
         // === Literals ===
         Expr::Bool(_) => Ok(store.bool()),
         Expr::Int(_) => Ok(store.int()),
+        Expr::String(_) => Ok(store.string()),
 
         // === Variables ===
-        Expr::Var(name) => env
-            .lookup(name)
-            .ok_or_else(|| InferError::UndefinedVar(name.clone())),
+        Expr::Var(name) => {
+            let scheme = env
+                .lookup(name)
+                .ok_or_else(|| InferError::UndefinedVar(name.clone()))?;
+            // Instantiate the scheme with fresh type variables
+            Ok(instantiate(scheme, store))
+        }
 
         // === Self reference ===
         Expr::This => env.get_self().ok_or(InferError::ThisOutsideObject),
@@ -143,26 +390,31 @@ pub fn infer(env: &TypeEnv, expr: &Expr, store: &mut NodeStore) -> Result<NodeId
         }
 
         // === Let: let x = e1 in e2 ===
+        // With let-polymorphism: generalize value_type before binding
         Expr::Let(name, value, body) => {
             let value_type = infer(env, value, store)?;
-            let new_env = env.extend(name, value_type);
+            // Generalize: quantify over variables not free in env
+            let scheme = generalize(env, store, value_type);
+            let new_env = env.extend_scheme(name, scheme);
             infer(&new_env, body, store)
         }
 
         // === Let rec: let rec x = e1 in e2 ===
         // The variable is bound with a fresh type before inferring the value,
-        // allowing recursive references.
+        // allowing recursive references. After inference, we generalize.
         Expr::LetRec(name, value, body) => {
             // Create a fresh type variable for the recursive binding
             let rec_type = store.fresh_var("rec");
-            // Extend environment with the binding BEFORE inferring value
+            // Extend environment with the binding BEFORE inferring value (monomorphic for now)
             let rec_env = env.extend(name, rec_type);
             // Infer the value's type in the recursive environment
             let value_type = infer(&rec_env, value, store)?;
             // Unify the recursive type variable with the actual type
             unify(store, rec_type, value_type)?;
-            // Infer the body with the recursive binding
-            infer(&rec_env, body, store)
+            // Now generalize for the body
+            let scheme = generalize(env, store, rec_type);
+            let body_env = env.extend_scheme(name, scheme);
+            infer(&body_env, body, store)
         }
 
         // === Mutually recursive let: let rec x1 = e1 and x2 = e2 in body ===
@@ -173,17 +425,24 @@ pub fn infer(env: &TypeEnv, expr: &Expr, store: &mut NodeStore) -> Result<NodeId
             for (name, _) in bindings {
                 let rec_type = store.fresh_var("rec");
                 rec_env = rec_env.extend(name, rec_type);
-                rec_types.push(rec_type);
+                rec_types.push((name.clone(), rec_type));
             }
 
             // Now infer each value's type with all bindings in scope
             for (i, (_, value)) in bindings.iter().enumerate() {
                 let value_type = infer(&rec_env, value, store)?;
-                unify(store, rec_types[i], value_type)?;
+                unify(store, rec_types[i].1, value_type)?;
+            }
+
+            // Generalize all bindings for the body
+            let mut body_env = env.clone();
+            for (name, rec_type) in &rec_types {
+                let scheme = generalize(env, store, *rec_type);
+                body_env = body_env.extend_scheme(name, scheme);
             }
 
             // Infer the body
-            infer(&rec_env, body, store)
+            infer(&body_env, body, store)
         }
 
         // === Object: { method1 = e1, method2 = e2, ... } ===
@@ -238,15 +497,13 @@ pub fn infer(env: &TypeEnv, expr: &Expr, store: &mut NodeStore) -> Result<NodeId
             Ok(field_type)
         }
 
-        // === Equality: e1 == e2 where both are int, returns bool ===
+        // === Equality: e1 == e2 where both have same type (int or string), returns bool ===
         Expr::Eq(left, right) => {
             let left_type = infer(env, left, store)?;
             let right_type = infer(env, right, store)?;
 
-            // Both sides must be int
-            let int_type = store.int();
-            unify(store, left_type, int_type)?;
-            unify(store, right_type, int_type)?;
+            // Both sides must have the same type
+            unify(store, left_type, right_type)?;
 
             Ok(store.bool())
         }
@@ -275,6 +532,32 @@ pub fn infer(env: &TypeEnv, expr: &Expr, store: &mut NodeStore) -> Result<NodeId
             unify(store, right_type, bool_type)?;
 
             Ok(store.bool())
+        }
+
+        // === Arithmetic: e1 op e2 where both are int, returns int ===
+        Expr::Add(left, right) | Expr::Sub(left, right) | Expr::Mul(left, right) | Expr::Div(left, right) => {
+            let left_type = infer(env, left, store)?;
+            let right_type = infer(env, right, store)?;
+
+            // Both sides must be int
+            let int_type = store.int();
+            unify(store, left_type, int_type)?;
+            unify(store, right_type, int_type)?;
+
+            Ok(store.int())
+        }
+
+        // === String concatenation: e1 ++ e2 where both are string, returns string ===
+        Expr::Concat(left, right) => {
+            let left_type = infer(env, left, store)?;
+            let right_type = infer(env, right, store)?;
+
+            // Both sides must be string
+            let string_type = store.string();
+            unify(store, left_type, string_type)?;
+            unify(store, right_type, string_type)?;
+
+            Ok(store.string())
         }
     }
 }

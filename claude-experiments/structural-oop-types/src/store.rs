@@ -67,6 +67,11 @@ impl NodeStore {
         self.constant("int")
     }
 
+    /// Create a string type node
+    pub fn string(&mut self) -> NodeId {
+        self.constant("string")
+    }
+
     /// Create an arrow (function) type node
     pub fn arrow(&mut self, domain: NodeId, codomain: NodeId) -> NodeId {
         self.add(Node::arrow(domain, codomain))

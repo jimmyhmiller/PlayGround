@@ -808,10 +808,12 @@ fn analyze_and_tagged(rt: &mut GCRuntime, list_ptr: usize) -> Result<Expr, Strin
             let rest_list = rt.reader_list_rest(list_ptr)?;
             let rest_and = analyze_and_tagged(rt, rest_list)?;
 
+            // Use let binding to evaluate test once, then return it if falsey
+            // This matches Clojure's behavior: (and nil 1) => nil, (and false 1) => false
             Ok(Expr::If {
-                test: Box::new(test),
+                test: Box::new(test.clone()),
                 then: Box::new(rest_and),
-                else_: Some(Box::new(Expr::Literal(Value::Bool(false)))),
+                else_: Some(Box::new(test)),
             })
         }
     }

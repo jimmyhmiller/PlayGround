@@ -130,6 +130,26 @@ impl Expr {
         Expr::Or(Box::new(left), Box::new(right))
     }
 
+    pub fn add(left: Expr, right: Expr) -> Self {
+        Expr::Add(Box::new(left), Box::new(right))
+    }
+
+    pub fn sub(left: Expr, right: Expr) -> Self {
+        Expr::Sub(Box::new(left), Box::new(right))
+    }
+
+    pub fn mul(left: Expr, right: Expr) -> Self {
+        Expr::Mul(Box::new(left), Box::new(right))
+    }
+
+    pub fn div(left: Expr, right: Expr) -> Self {
+        Expr::Div(Box::new(left), Box::new(right))
+    }
+
+    pub fn concat(left: Expr, right: Expr) -> Self {
+        Expr::Concat(Box::new(left), Box::new(right))
+    }
+
     // === Multi-argument helpers ===
 
     /// Create a multi-argument lambda: λx. λy. λz. body

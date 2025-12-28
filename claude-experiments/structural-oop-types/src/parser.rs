@@ -1,17 +1,20 @@
 //! Parser for the expression language (JavaScript-like syntax)
 //!
 //! Grammar (precedence from low to high):
-//!   expr       ::= let_expr | or_expr
+//!   expr       ::= let_expr | ternary_expr
 //!   let_expr   ::= 'let' IDENT '=' expr 'in' expr
+//!   ternary_expr ::= or_expr ('?' expr ':' expr)?
 //!   or_expr    ::= and_expr ('||' and_expr)*
 //!   and_expr   ::= eq_expr ('&&' eq_expr)*
-//!   eq_expr    ::= ternary_expr ('==' ternary_expr)?
-//!   ternary_expr ::= arrow_expr ('?' expr ':' expr)?
+//!   eq_expr    ::= concat_expr ('==' concat_expr)?
+//!   concat_expr ::= add_expr ('++' add_expr)*
+//!   add_expr   ::= mul_expr (('+' | '-') mul_expr)*
+//!   mul_expr   ::= arrow_expr (('*' | '/') arrow_expr)*
 //!   arrow_expr ::= IDENT '=>' arrow_expr | paren_arrow | app_expr
 //!   paren_arrow ::= '(' IDENT ')' '=>' arrow_expr
 //!   app_expr   ::= primary (primary)*
 //!   primary    ::= atom ('.' IDENT)*
-//!   atom       ::= 'true' | 'false' | INT | IDENT | 'this' | object | '(' expr ')'
+//!   atom       ::= 'true' | 'false' | INT | STRING | IDENT | 'this' | object | '(' expr ')'
 //!   object     ::= '{' (field (',' field)*)? '}'
 //!   field      ::= IDENT ':' expr
 
@@ -102,7 +105,22 @@ impl Parser {
     fn parse_expr(&mut self) -> Result<Expr, ParseError> {
         match self.current() {
             Token::Let => self.parse_let(),
-            _ => self.parse_or_expr(),
+            _ => self.parse_ternary_expr(),
+        }
+    }
+
+    fn parse_ternary_expr(&mut self) -> Result<Expr, ParseError> {
+        let cond = self.parse_or_expr()?;
+
+        // Check for ternary: cond ? then : else
+        if *self.current() == Token::Question {
+            self.advance(); // consume '?'
+            let then_expr = self.parse_expr()?;
+            self.expect(Token::Colon)?;
+            let else_expr = self.parse_expr()?;
+            Ok(Expr::if_(cond, then_expr, else_expr))
+        } else {
+            Ok(cond)
         }
     }
 
@@ -131,15 +149,71 @@ impl Parser {
     }
 
     fn parse_eq_expr(&mut self) -> Result<Expr, ParseError> {
-        let left = self.parse_ternary_expr()?;
+        let left = self.parse_concat_expr()?;
 
         if *self.current() == Token::EqEq {
             self.advance(); // consume '=='
-            let right = self.parse_ternary_expr()?;
+            let right = self.parse_concat_expr()?;
             Ok(Expr::eq(left, right))
         } else {
             Ok(left)
         }
+    }
+
+    fn parse_concat_expr(&mut self) -> Result<Expr, ParseError> {
+        let mut left = self.parse_add_expr()?;
+
+        while *self.current() == Token::PlusPlus {
+            self.advance(); // consume '++'
+            let right = self.parse_add_expr()?;
+            left = Expr::concat(left, right);
+        }
+
+        Ok(left)
+    }
+
+    fn parse_add_expr(&mut self) -> Result<Expr, ParseError> {
+        let mut left = self.parse_mul_expr()?;
+
+        loop {
+            match self.current() {
+                Token::Plus => {
+                    self.advance();
+                    let right = self.parse_mul_expr()?;
+                    left = Expr::add(left, right);
+                }
+                Token::Minus => {
+                    self.advance();
+                    let right = self.parse_mul_expr()?;
+                    left = Expr::sub(left, right);
+                }
+                _ => break,
+            }
+        }
+
+        Ok(left)
+    }
+
+    fn parse_mul_expr(&mut self) -> Result<Expr, ParseError> {
+        let mut left = self.parse_arrow_expr()?;
+
+        loop {
+            match self.current() {
+                Token::Star => {
+                    self.advance();
+                    let right = self.parse_arrow_expr()?;
+                    left = Expr::mul(left, right);
+                }
+                Token::Slash => {
+                    self.advance();
+                    let right = self.parse_arrow_expr()?;
+                    left = Expr::div(left, right);
+                }
+                _ => break,
+            }
+        }
+
+        Ok(left)
     }
 
     fn parse_let(&mut self) -> Result<Expr, ParseError> {
@@ -184,21 +258,6 @@ impl Parser {
         }
     }
 
-    fn parse_ternary_expr(&mut self) -> Result<Expr, ParseError> {
-        let cond = self.parse_arrow_expr()?;
-
-        // Check for ternary: cond ? then : else
-        if *self.current() == Token::Question {
-            self.advance(); // consume '?'
-            let then_expr = self.parse_expr()?;
-            self.expect(Token::Colon)?;
-            let else_expr = self.parse_expr()?;
-            Ok(Expr::if_(cond, then_expr, else_expr))
-        } else {
-            Ok(cond)
-        }
-    }
-
     fn parse_arrow_expr(&mut self) -> Result<Expr, ParseError> {
         // Check for: IDENT => expr
         // Arrow function body can contain ||, &&, ==, ternary, etc.
@@ -206,8 +265,8 @@ impl Parser {
             if *self.peek(1) == Token::Arrow {
                 self.advance(); // consume IDENT
                 self.advance(); // consume '=>'
-                // Parse body at or_expr level to allow operators like ||, &&, ==
-                let body = self.parse_or_expr()?;
+                // Parse body at ternary level to allow all operators including ternary
+                let body = self.parse_ternary_expr()?;
                 return Ok(Expr::lambda(name, body));
             }
         }
@@ -220,8 +279,8 @@ impl Parser {
                     let name = self.expect_ident()?;
                     self.expect(Token::RParen)?;
                     self.expect(Token::Arrow)?;
-                    // Parse body at or_expr level to allow operators like ||, &&, ==
-                    let body = self.parse_or_expr()?;
+                    // Parse body at ternary level to allow all operators including ternary
+                    let body = self.parse_ternary_expr()?;
                     return Ok(Expr::lambda(name, body));
                 }
             }
@@ -240,6 +299,7 @@ impl Parser {
                 Token::True
                 | Token::False
                 | Token::Int(_)
+                | Token::String(_)
                 | Token::This
                 | Token::LBrace => {
                     let arg = self.parse_primary()?;
@@ -298,6 +358,10 @@ impl Parser {
             Token::Int(n) => {
                 self.advance();
                 Ok(Expr::int(n))
+            }
+            Token::String(s) => {
+                self.advance();
+                Ok(Expr::string(s))
             }
             Token::Ident(name) => {
                 self.advance();
@@ -376,10 +440,10 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_negative_number() {
-        // Verify the lexer can handle negative integers
-        let mut lexer = crate::lexer::Lexer::new("-10");
-        assert!(matches!(lexer.next_token().unwrap(), crate::lexer::Token::Int(-10)));
+    fn test_parse_subtraction() {
+        // Negative numbers are now parsed as (0 - n) or just subtraction
+        let expr = parse("5 - 3").unwrap();
+        assert!(matches!(expr, Expr::Sub(..)));
     }
 
     #[test]

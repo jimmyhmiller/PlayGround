@@ -96,7 +96,7 @@ contextBridge.exposeInMainWorld('evalAPI', {
     error?: string;
   }> => ipcRenderer.invoke('eval:execute', code, language, context),
 
-  // Execute multiple code snippets (for benchmarking)
+  // Execute multiple code snippets
   batch: (
     requests: Array<{
       id: string;
@@ -116,17 +116,6 @@ contextBridge.exposeInMainWorld('evalAPI', {
       error?: string;
     }>
   > => ipcRenderer.invoke('eval:batch', requests),
-
-  // Run a benchmark
-  benchmark: (
-    code: string,
-    iterations?: number,
-    warmupIterations?: number,
-    context?: Record<string, unknown>
-  ): Promise<{
-    runs: Array<{ iteration: number; executionTimeMs: number; success: boolean }>;
-    stats: { mean: number; median: number; stdDev: number; min: number; max: number };
-  }> => ipcRenderer.invoke('eval:benchmark', code, iterations, warmupIterations, context),
 });
 
 // State API for renderer - backend-driven state management

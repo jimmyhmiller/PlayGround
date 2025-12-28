@@ -133,20 +133,6 @@ export function setupServiceIPC(): void {
     }
   );
 
-  ipcMain.handle(
-    'eval:benchmark',
-    async (
-      _event: IpcMainInvokeEvent,
-      code: string,
-      iterations?: number,
-      warmupIterations?: number,
-      context?: Record<string, unknown>
-    ) => {
-      const evalService = getEvaluationService();
-      return await evalService.benchmark(code, iterations, warmupIterations, context);
-    }
-  );
-
   console.log('[services] IPC handlers registered');
 }
 

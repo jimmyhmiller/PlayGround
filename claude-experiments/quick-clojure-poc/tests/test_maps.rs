@@ -52,10 +52,6 @@ fn run_and_get_stdout(code: &str) -> String {
     run_code(code).0
 }
 
-fn run_and_get_stderr(code: &str) -> String {
-    run_code(code).1
-}
-
 /// Run code with gc-always mode enabled (GC before every allocation)
 fn run_code_gc_always(code: &str) -> (String, String) {
     let binary_path = get_binary_path();

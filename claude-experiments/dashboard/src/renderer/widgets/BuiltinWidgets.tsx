@@ -834,6 +834,251 @@ export const TransformWidget = memo(function TransformWidget({
   return null; // No UI - pure transformer
 });
 
+// ========== Layout Container Widget ==========
+
+/**
+ * LayoutContainer - Composes multiple widgets with layout
+ *
+ * Allows declarative composition of widgets with horizontal/vertical splits.
+ */
+export interface LayoutChildConfig {
+  type: string;
+  props?: Record<string, unknown>;
+  flex?: number;
+}
+
+export interface LayoutContainerProps {
+  /** Layout direction */
+  direction?: 'horizontal' | 'vertical';
+  /** Gap between children */
+  gap?: number;
+  /** Child widget configurations */
+  children: LayoutChildConfig[];
+}
+
+export const LayoutContainer = memo(function LayoutContainer({
+  direction = 'horizontal',
+  gap = 8,
+  children,
+}: LayoutContainerProps): ReactElement {
+  return (
+    <div style={{
+      display: 'flex',
+      flexDirection: direction === 'horizontal' ? 'row' : 'column',
+      gap,
+      height: '100%',
+      width: '100%',
+    }}>
+      {children.map((child, index) => {
+        const typeConfig = WIDGET_TYPES[child.type];
+        if (!typeConfig) {
+          return (
+            <div key={index} style={{ flex: child.flex ?? 1, color: 'var(--theme-status-error)' }}>
+              Unknown widget: {child.type}
+            </div>
+          );
+        }
+
+        const Component = typeConfig.component;
+        const props = { ...typeConfig.defaultProps, ...child.props };
+
+        return (
+          <div key={index} style={{ flex: child.flex ?? 1, minWidth: 0, minHeight: 0, overflow: 'auto' }}>
+            <Component {...props} />
+          </div>
+        );
+      })}
+    </div>
+  );
+});
+
+// ========== Eval Code Editor Widget ==========
+
+/**
+ * EvalCodeEditor - Simple code editor that emits eval events
+ *
+ * A textarea-based code editor that emits events when code is evaluated.
+ * For simple use cases - use InlineEvalEditor for full CodeMirror experience.
+ */
+export interface EvalCodeEditorProps {
+  /** Initial code content */
+  initialCode?: string;
+  /** Event type to emit for eval requests */
+  emitAs?: string;
+  /** Placeholder text */
+  placeholder?: string;
+  /** Label/title */
+  title?: string;
+  /** Number of iterations for benchmark mode */
+  iterations?: number;
+}
+
+export const EvalCodeEditor = memo(function EvalCodeEditor({
+  initialCode = '',
+  emitAs = 'eval.request',
+  placeholder = 'Enter code to evaluate...',
+  title,
+  iterations = 1,
+}: EvalCodeEditorProps): ReactElement {
+  const [code, setCode] = useState(initialCode);
+  const [isRunning, setIsRunning] = useState(false);
+  const emit = useEmit();
+  const hasEvalAPI = typeof window !== 'undefined' && !!window.evalAPI;
+
+  const handleRun = useCallback(async () => {
+    if (!code.trim() || isRunning) return;
+    if (!window.evalAPI) {
+      console.error('[EvalCodeEditor] evalAPI not available');
+      return;
+    }
+    setIsRunning(true);
+
+    try {
+      for (let i = 0; i < iterations; i++) {
+        const iterationId = `${Date.now()}-${i}`;
+        emit(emitAs, { code, iteration: i, id: iterationId });
+
+        // Actually execute the code
+        const result = await window.evalAPI.execute(code, 'javascript');
+        // The eval service already emits eval.result, but we can also emit here
+        emit('eval.result', { ...result, iteration: i });
+      }
+    } finally {
+      setIsRunning(false);
+    }
+  }, [code, iterations, emit, emitAs, isRunning]);
+
+  return (
+    <div style={{
+      display: 'flex',
+      flexDirection: 'column',
+      height: '100%',
+      background: 'var(--theme-bg-elevated)',
+      borderRadius: 'var(--theme-radius-sm)',
+      overflow: 'hidden',
+    }}>
+      {title && (
+        <div style={{
+          padding: '8px 12px',
+          fontSize: '0.8em',
+          color: 'var(--theme-text-muted)',
+          borderBottom: '1px solid var(--theme-border-primary)',
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center',
+        }}>
+          <span>{title}</span>
+          <div style={{ display: 'flex', gap: '8px' }}>
+            <button
+              onClick={handleRun}
+              disabled={isRunning || !hasEvalAPI}
+              title={hasEvalAPI ? 'Run code (⌘+Enter)' : 'Eval API not available - run in Electron'}
+              style={{
+                padding: '4px 12px',
+                background: hasEvalAPI ? 'var(--theme-accent-primary)' : 'var(--theme-bg-tertiary)',
+                color: hasEvalAPI ? 'var(--theme-bg-primary)' : 'var(--theme-text-muted)',
+                border: 'none',
+                borderRadius: 'var(--theme-radius-sm)',
+                cursor: isRunning || !hasEvalAPI ? 'not-allowed' : 'pointer',
+                fontSize: '0.85em',
+                opacity: hasEvalAPI ? 1 : 0.6,
+              }}
+            >
+              {isRunning ? 'Running...' : hasEvalAPI ? 'Run' : 'No Eval API'}
+            </button>
+          </div>
+        </div>
+      )}
+      <textarea
+        value={code}
+        onChange={(e) => setCode(e.target.value)}
+        placeholder={placeholder}
+        style={{
+          flex: 1,
+          padding: '12px',
+          background: 'var(--theme-code-bg, #1e1e2e)',
+          color: 'var(--theme-code-text, #e0e0e0)',
+          border: 'none',
+          fontFamily: 'var(--theme-font-mono)',
+          fontSize: 'var(--theme-font-size-sm)',
+          resize: 'none',
+          outline: 'none',
+        }}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+            e.preventDefault();
+            handleRun();
+          }
+        }}
+      />
+    </div>
+  );
+});
+
+// ========== Event Display Widget ==========
+
+/**
+ * EventDisplay - Simple event stream display
+ *
+ * Shows recent events matching a pattern as a log.
+ */
+export interface EventDisplayProps {
+  /** Event pattern to subscribe to */
+  subscribePattern: string;
+  /** Max events to show */
+  maxEvents?: number;
+  /** Title */
+  title?: string;
+  /** Fields to display from payload */
+  fields?: string[];
+}
+
+export const EventDisplay = memo(function EventDisplay({
+  subscribePattern,
+  maxEvents = 10,
+  title,
+  fields,
+}: EventDisplayProps): ReactElement {
+  const events = useEventSubscription(subscribePattern, { maxEvents });
+
+  return (
+    <div style={{ ...baseWidgetStyle, padding: 0 }}>
+      {title && (
+        <div style={{ padding: '8px 12px', fontSize: '0.8em', color: 'var(--theme-text-muted)', borderBottom: '1px solid var(--theme-border-primary)' }}>
+          {title}
+        </div>
+      )}
+      <div style={{ maxHeight: 200, overflow: 'auto' }}>
+        {events.length === 0 ? (
+          <div style={{ padding: '12px', color: 'var(--theme-text-muted)', textAlign: 'center', fontSize: '0.85em' }}>
+            Waiting for {subscribePattern} events...
+          </div>
+        ) : (
+          events.map((event, i) => {
+            const payload = event.payload as Record<string, unknown>;
+            const displayFields = fields ?? Object.keys(payload).slice(0, 4);
+            return (
+              <div key={event.id ?? i} style={{
+                padding: '6px 12px',
+                borderBottom: '1px solid var(--theme-border-primary)',
+                fontSize: '0.8em',
+                fontFamily: 'var(--theme-font-mono)',
+              }}>
+                {displayFields.map((f) => (
+                  <span key={f} style={{ marginRight: '12px' }}>
+                    <span style={{ color: 'var(--theme-text-muted)' }}>{f}:</span>{' '}
+                    {formatCellValue(payload[f])}
+                  </span>
+                ))}
+              </div>
+            );
+          })
+        )}
+      </div>
+    </div>
+  );
+});
+
 // ========== Widget Type Registry ==========
 
 export interface WidgetTypeConfig {
@@ -876,5 +1121,17 @@ export const WIDGET_TYPES: Record<string, WidgetTypeConfig> = {
   'transform': {
     component: TransformWidget as unknown as React.ComponentType<Record<string, unknown>>,
     defaultProps: { subscribePattern: 'data.**', emitAs: 'transformed', transform: '(p) => p' },
+  },
+  'layout': {
+    component: LayoutContainer as unknown as React.ComponentType<Record<string, unknown>>,
+    defaultProps: { direction: 'horizontal', gap: 8, children: [] },
+  },
+  'eval-editor': {
+    component: EvalCodeEditor as unknown as React.ComponentType<Record<string, unknown>>,
+    defaultProps: { title: 'Code', iterations: 1 },
+  },
+  'event-display': {
+    component: EventDisplay as unknown as React.ComponentType<Record<string, unknown>>,
+    defaultProps: { subscribePattern: '**', maxEvents: 10 },
   },
 };

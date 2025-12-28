@@ -725,7 +725,7 @@ fn generate_ir_from_nodes(nodes: &[lispier::Node]) -> Result<String, String> {
     let module = generator
         .generate(nodes)
         .map_err(|e| format!("IR generation error: {}", e))?;
-
-    Ok(format!("{}", module.as_operation()))
+    let result = format!("{}", module.as_operation());
+    Ok(result)
 }
 

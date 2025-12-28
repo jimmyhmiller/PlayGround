@@ -332,8 +332,8 @@ impl<'c> IRGenerator<'c> {
         // Generate regions for this operation (with parent scope access)
         let mut regions: Vec<Region<'c>> = self.generate_regions_with_scope(&op.regions, symbol_table)?;
 
-        // func.func requires at least one region (even for external declarations)
-        if qualified_name == "func.func" && regions.is_empty() {
+        // func.func and llvm.func require at least one region (even for external declarations)
+        if (qualified_name == "func.func" || qualified_name == "llvm.func") && regions.is_empty() {
             regions.push(Region::new());
         }
 
@@ -605,15 +605,24 @@ impl<'c> IRGenerator<'c> {
         let mut named_attrs: Vec<(Identifier<'c>, Attribute<'c>)> = Vec::new();
         for (key, value) in attributes {
             // Special handling for LLVM-specific attributes
-            if name == "llvm.mlir.global" && key == "linkage" {
+            if (name == "llvm.mlir.global" || name == "llvm.func") && key == "linkage" {
                 // Convert linkage to LLVM linkage attribute
                 let linkage_str = match value {
                     AttributeValue::Number(n) => {
                         // Map numeric linkage values
+                        // See https://llvm.org/doxygen/GlobalValue_8h.html for linkage enum
                         match *n as i32 {
                             0 => "external",
-                            1 => "internal",
-                            2 => "private",
+                            1 => "available_externally",
+                            2 => "linkonce",
+                            3 => "linkonce_odr",
+                            4 => "weak",
+                            5 => "weak_odr",
+                            6 => "appending",
+                            7 => "internal",
+                            8 => "private",
+                            9 => "external_weak",
+                            10 => "external", // LLVM's ExternalLinkage
                             _ => "external",
                         }
                     }
@@ -681,21 +690,8 @@ impl<'c> IRGenerator<'c> {
             named_attrs.push((Identifier::new(context, key), attr));
         }
 
-        // Special handling for llvm.call: set operandSegmentSizes and op_bundle_sizes
+        // Special handling for llvm.call: set op_bundle_sizes (operandSegmentSizes is handled above)
         if name == "llvm.call" {
-            // Check if callee attribute is present (direct call) vs function pointer (indirect)
-            let has_callee = attributes.contains_key("callee");
-            let callee_count = if has_callee { 0i32 } else { 1i32 };
-            let args_count = operands.len() as i32 - if has_callee { 0 } else { 1 };
-            // operandSegmentSizes = [callee_operand_count, call_args_count, op_bundle_operands_count]
-            let segment_sizes = format!("array<i32: {}, {}, 0>", callee_count, args_count);
-            eprintln!("DEBUG llvm.call: operands.len()={}, has_callee={}, callee_count={}, args_count={}, segment_sizes={}", operands.len(), has_callee, callee_count, args_count, segment_sizes);
-            if let Some(attr) = Attribute::parse(context, &segment_sizes) {
-                eprintln!("DEBUG: Parsed operandSegmentSizes attribute successfully");
-                named_attrs.push((Identifier::new(context, "operandSegmentSizes"), attr));
-            } else {
-                eprintln!("DEBUG: FAILED to parse operandSegmentSizes attribute");
-            }
             // Empty op_bundle_sizes (no operation bundles)
             if let Some(attr) = Attribute::parse(context, "array<i32>") {
                 named_attrs.push((Identifier::new(context, "op_bundle_sizes"), attr));
@@ -731,7 +727,17 @@ impl<'c> IRGenerator<'c> {
         // Build operation state
         let mut op_builder = OperationBuilder::new(name, location);
 
-        if !operands.is_empty() {
+        // Special handling for llvm.call: use add_operands_with_segment_sizes
+        // operandSegmentSizes for llvm.call has 2 segments: [call_arg_operands, op_bundle_operands]
+        // Note: callee is an attribute for direct calls, not an operand segment
+        if name == "llvm.call" {
+            let empty: &[Value<'c, '_>] = &[];
+            // Direct call: [N call args, 0 op_bundle operands]
+            op_builder = op_builder.add_operands_with_segment_sizes(
+                context,
+                &[operands, empty],
+            );
+        } else if !operands.is_empty() {
             op_builder = op_builder.add_operands(operands);
         }
 

@@ -17,10 +17,7 @@ import EventLogPanel from './EventLogPanel';
 import ThemeEditor from './ThemeEditor';
 import SettingsEditor from './SettingsEditor';
 import { GlobalUIRenderer } from '../globalUI';
-import InlineEvalEditor from './InlineEvalEditor';
-import BenchmarkPanel from './BenchmarkPanel';
-import RouteView from './RouteView';
-import './lighttable.css';
+import WidgetLayout from './WidgetLayout';
 
 interface ComponentConfig {
   component: ComponentType<unknown>;
@@ -76,29 +73,13 @@ const COMPONENT_REGISTRY: Record<string, ComponentConfig> = {
     width: 300,
     height: 280,
   },
-  'inline-eval': {
-    component: InlineEvalEditor as ComponentType<unknown>,
-    label: 'Inline Eval',
-    icon: '>',
-    defaultProps: { language: 'javascript' },
-    width: 700,
-    height: 500,
-  },
-  'benchmark': {
-    component: BenchmarkPanel as ComponentType<unknown>,
-    label: 'Benchmark',
-    icon: '~',
-    defaultProps: { iterations: 100 },
-    width: 900,
-    height: 700,
-  },
-  'route-view': {
-    component: RouteView as ComponentType<unknown>,
-    label: 'Route View',
-    icon: '/',
+  'widget-layout': {
+    component: WidgetLayout as ComponentType<unknown>,
+    label: 'Dashboard',
+    icon: '▦',
     defaultProps: {},
     width: 800,
-    height: 600,
+    height: 500,
   },
 };
 
@@ -493,6 +474,65 @@ const DesktopCommandPalette = memo(function DesktopCommandPalette(): ReactElemen
       keywords: ['git', 'poll', 'watch', 'auto'],
       action: async () => {
         await window.gitAPI.startPolling(2000);
+      },
+    });
+
+    // Dashboard loading commands
+    cmds.push({
+      id: 'load-dashboard-json',
+      label: 'Load Dashboard from JSON',
+      description: 'Load a dashboard layout from a JSON file',
+      icon: '▦',
+      category: 'Dashboards',
+      keywords: ['load', 'dashboard', 'json', 'file', 'open', 'layout'],
+      action: async () => {
+        const filePath = await showPrompt(
+          'Load Dashboard',
+          'Enter path to dashboard JSON file',
+          ''
+        );
+        if (filePath) {
+          // Load the file to get the dashboard name
+          try {
+            const result = await window.fileAPI.load(filePath);
+            const config = JSON.parse(result.content);
+            const title = config.name || 'Dashboard';
+            createWindow({
+              title,
+              componentType: 'widget-layout',
+              props: { configPath: filePath },
+              width: 800,
+              height: 600,
+            });
+          } catch (err) {
+            console.error('Failed to load dashboard:', err);
+          }
+        }
+      },
+    });
+
+    cmds.push({
+      id: 'load-dashboard-inline',
+      label: 'Load Dashboard from Clipboard',
+      description: 'Create a dashboard from JSON in clipboard',
+      icon: '📋',
+      category: 'Dashboards',
+      keywords: ['paste', 'dashboard', 'json', 'clipboard', 'inline'],
+      action: async () => {
+        try {
+          const text = await navigator.clipboard.readText();
+          const config = JSON.parse(text);
+          const title = config.name || 'Dashboard';
+          createWindow({
+            title,
+            componentType: 'widget-layout',
+            props: { config: config.layout || config },
+            width: 800,
+            height: 600,
+          });
+        } catch (err) {
+          console.error('Failed to parse clipboard JSON:', err);
+        }
       },
     });
 
