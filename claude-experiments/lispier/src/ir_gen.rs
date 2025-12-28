@@ -659,24 +659,31 @@ impl<'c> IRGenerator<'c> {
             }
         }
 
-        // Check if operation supports type inference using MLIR's InferTypeOpInterface
+        // Determine result types and whether to use MLIR's type inference
+        //
+        // Strategy:
+        // 1. If explicit result types are provided (via :result attribute), use them
+        // 2. If no explicit types AND operation supports InferTypeOpInterface AND has no regions,
+        //    let MLIR infer the types (don't provide any ourselves)
+        // 3. Otherwise, no result types (operation is void or we can't infer)
+        //
+        // The key insight: when using enable_result_type_inference(), we must NOT
+        // provide any result types ourselves - MLIR will figure them out.
+        // This works correctly for both ops that produce results (arith.addi infers from operands)
+        // and void ops (memref.store correctly infers zero results).
         let supports_inference = context.operation_supports_type_inference(name);
 
-        // Determine result types - use inference if no explicit types, no regions, and operation supports it
-        let final_result_types: Vec<Type<'c>> = if result_types.is_empty() && regions.is_empty() && supports_inference {
-            // Try to use inferred type for operations that produce results
-            if let Some(t) = inferred_type {
-                vec![t]
+        let (final_result_types, enable_inference): (Vec<Type<'c>>, bool) =
+            if !result_types.is_empty() {
+                // Explicit types provided - use them, no inference
+                (result_types.to_vec(), false)
+            } else if regions.is_empty() && supports_inference {
+                // Let MLIR infer - provide NO types, enable inference
+                (vec![], true)
             } else {
-                vec![]
-            }
-        } else {
-            result_types.to_vec()
-        };
-
-        // Check if we should enable type inference
-        let enable_inference =
-            result_types.is_empty() && regions.is_empty() && supports_inference;
+                // No inference possible - void operation
+                (vec![], false)
+            };
 
         // Build operation state
         let mut op_builder = OperationBuilder::new(name, location);

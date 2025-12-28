@@ -325,15 +325,16 @@ fn find_mlir_runner() -> Result<PathBuf, RuntimeError> {
 fn find_runtime_libs(backend: &Backend) -> Result<Vec<PathBuf>, RuntimeError> {
     let mut libs = Vec::new();
 
-    // Common library search paths (LLVM 21 first, then fall back)
+    // Common library search paths
+    // ROCm paths first to avoid LLVM version conflicts with system HIP
     let search_paths = [
+        "/opt/rocm-6.4.4/lib",
+        "/opt/rocm/lib",
         "/usr/lib/llvm-21/lib",
         "/usr/lib/llvm-20/lib",
         "/usr/local/lib",
         "/usr/lib",
         "/usr/lib/x86_64-linux-gnu",
-        "/opt/rocm/lib",
-        "/opt/rocm-6.4.4/lib",
     ];
 
     // Required libraries
