@@ -470,6 +470,69 @@
   (instance? Reduced x))
 
 ;; =============================================================================
+;; Reader Type Protocol Implementations
+;; These allow reader data structures (used in macros) to work with core protocols
+;; =============================================================================
+
+(extend-type __ReaderList
+  IList
+
+  ISeq
+  (-first [this] (__reader_list_first this))
+  (-rest [this] (__reader_list_rest this))
+
+  INext
+  (-next [this]
+    (let [r (__reader_list_rest this)]
+      (if (== (__reader_list_count r) 0)
+        nil
+        r)))
+
+  ICounted
+  (-count [this] (__reader_list_count this))
+
+  ISeqable
+  (-seq [this]
+    (if (== (__reader_list_count this) 0)
+      nil
+      this))
+
+  IIndexed
+  (-nth [this n] (__reader_list_nth this n))
+  (-nth [this n not-found]
+    (if (< n (__reader_list_count this))
+      (__reader_list_nth this n)
+      not-found)))
+
+(extend-type __ReaderVector
+  ISeq
+  (-first [this] (__reader_vector_first this))
+  (-rest [this] (__reader_vector_rest this))
+
+  INext
+  (-next [this]
+    (let [r (__reader_vector_rest this)]
+      (if (== (__reader_vector_count r) 0)
+        nil
+        r)))
+
+  ICounted
+  (-count [this] (__reader_vector_count this))
+
+  ISeqable
+  (-seq [this]
+    (if (== (__reader_vector_count this) 0)
+      nil
+      this))
+
+  IIndexed
+  (-nth [this n] (__reader_vector_nth this n))
+  (-nth [this n not-found]
+    (if (< n (__reader_vector_count this))
+      (__reader_vector_nth this n)
+      not-found)))
+
+;; =============================================================================
 ;; Polymorphic Sequence Functions
 ;; =============================================================================
 
@@ -624,6 +687,8 @@
 ;; =============================================================================
 
 (extend-type EmptyList
+  IList
+
   ICloneable
   (-clone [this] (EmptyList. (.-meta this)))
 
@@ -677,6 +742,8 @@
 ;; =============================================================================
 
 (extend-type PList
+  IList
+
   ICloneable
   (-clone [this] (PList. (.-meta this) (.-first this) (.-rest this) (.-count this) (.-__hash this)))
 
@@ -740,6 +807,8 @@
 (deftype* Cons [meta first rest ^:mutable __hash])
 
 (extend-type Cons
+  IList
+
   ICloneable
   (-clone [this] (Cons. (.-meta this) (.-first this) (.-rest this) (.-__hash this)))
 
@@ -807,11 +876,9 @@
 
 ;; Now that list types are defined, implement the predicates
 (defn list?
-  "Returns true if x is a list (PList, Cons, or EmptyList)"
+  "Returns true if x implements IList"
   [x]
-  (or (instance? PList x)
-      (instance? Cons x)
-      (instance? EmptyList x)))
+  (satisfies? IList x))
 
 ;; NOTE: sequential? is defined later after PersistentVector and IndexedSeq exist
 
@@ -2641,10 +2708,27 @@
                     (quote or__auto__)
                     (cons (quote or) (next exprs))))))))
 
-;; Note: Threading macros are not yet supported because they require
-;; seq operations on reader data structures, which don't implement
-;; the Clojure sequence protocols. This requires extending the primitive
-;; dispatch layer to expose prim_first/prim_rest as Clojure-callable builtins.
+;; -> threading macro (thread first)
+(def ^:macro ->
+  (fn thread-first [form env x & forms]
+    (if (nil? (seq forms))
+      x
+      (let [f (first forms)
+            threaded (if (list? f)
+                       (cons (first f) (cons x (next f)))
+                       (list f x))]
+        (cons (quote ->) (cons threaded (next forms)))))))
+
+;; ->> threading macro (thread last)
+(def ^:macro ->>
+  (fn thread-last [form env x & forms]
+    (if (nil? (seq forms))
+      x
+      (let [f (first forms)
+            threaded (if (list? f)
+                       (concat (list (first f)) (next f) (list x))
+                       (list f x))]
+        (cons (quote ->>) (cons threaded (next forms)))))))
 
 ;; comment - ignores all forms
 (def ^:macro comment

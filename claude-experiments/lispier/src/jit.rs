@@ -84,6 +84,11 @@ impl Jit {
         module: &mut Module,
         pipeline: &str,
     ) -> Result<(), JitError> {
+        // Skip if pipeline is empty
+        if pipeline.is_empty() {
+            return Ok(());
+        }
+
         let context = registry.context();
 
         // Register all passes so we can use them by name

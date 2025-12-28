@@ -123,10 +123,10 @@ impl BuiltInTypes {
         if !is_heap_tagged {
             return false;
         }
-        // Second check: untagged pointer must be 8-byte aligned
+        // Second check: untagged pointer must be 8-byte aligned AND non-null
         // This filters out garbage values that happen to have the heap pointer tag
         let untagged = Self::untag(value);
-        untagged % 8 == 0
+        untagged != 0 && untagged % 8 == 0
     }
 
     /// Check if a tagged value is a closure (tag 0b101)

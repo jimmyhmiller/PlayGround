@@ -1945,6 +1945,20 @@ pub fn analyze_tagged(rt: &mut GCRuntime, tagged: usize) -> Result<Expr, String>
         });
     }
 
+    // Check for vector BEFORE seq (vectors are seqable but should be treated as literals, not calls)
+    if rt.prim_is_vector(tagged) {
+        // Vectors are literals - convert to Value::Vector
+        let vec = tagged_to_value(rt, tagged)?;
+        return Ok(Expr::Literal(vec));
+    }
+
+    // Check for map BEFORE seq (maps are seqable but should be treated as literals, not calls)
+    if rt.prim_is_map(tagged) {
+        // Maps are literals - convert to Value::Map
+        let map = tagged_to_value(rt, tagged)?;
+        return Ok(Expr::Literal(map));
+    }
+
     // Check for seq (ReaderList, PersistentList, or any ISeq impl)
     if rt.prim_is_seq(tagged) {
         let count = rt.prim_count(tagged)?;
@@ -2002,20 +2016,6 @@ pub fn analyze_tagged(rt: &mut GCRuntime, tagged: usize) -> Result<Expr, String>
 
         // Regular function call
         return analyze_call_tagged(rt, tagged);
-    }
-
-    // Check for vector (ReaderVector or PersistentVector)
-    if rt.prim_is_vector(tagged) {
-        // Vectors are literals - convert to Value::Vector
-        let vec = tagged_to_value(rt, tagged)?;
-        return Ok(Expr::Literal(vec));
-    }
-
-    // Check for map (ReaderMap or PersistentHashMap)
-    if rt.prim_is_map(tagged) {
-        // Maps are literals - convert to Value::Map
-        let map = tagged_to_value(rt, tagged)?;
-        return Ok(Expr::Literal(map));
     }
 
     Err(format!("Cannot analyze type_id {}", type_id))
@@ -3667,7 +3667,7 @@ mod tests {
             Expr::Literal(Value::Vector(v)) => {
                 assert_eq!(v.len(), 3);
             }
-            _ => panic!("Expected Vector literal"),
+            other => panic!("Expected Vector literal, got {:?}", other),
         }
     }
 

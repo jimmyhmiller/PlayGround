@@ -213,9 +213,9 @@ pub extern "C" fn builtin_is_map(value: usize) -> usize {
     unsafe {
         let rt = get_runtime();
         if rt.is_map(value) {
-            0b00001_111 // true
+            11 // true = (1 << 3) | 0b011
         } else {
-            0b00000_111 // false
+            3 // false = (0 << 3) | 0b011
         }
     }
 }
@@ -228,9 +228,9 @@ pub extern "C" fn builtin_is_vector(value: usize) -> usize {
     unsafe {
         let rt = get_runtime();
         if rt.is_vector(value) {
-            0b00001_111 // true
+            11 // true = (1 << 3) | 0b011
         } else {
-            0b00000_111 // false
+            3 // false = (0 << 3) | 0b011
         }
     }
 }
@@ -393,6 +393,32 @@ pub extern "C" fn builtin__reader_vector_conj(vec: usize, elem: usize) -> usize 
     }
 }
 
+/// __reader_vector_first(vec) -> first element or nil
+#[unsafe(no_mangle)]
+pub extern "C" fn builtin__reader_vector_first(vec: usize) -> usize {
+    unsafe {
+        let rt = get_runtime();
+        rt.reader_vector_nth(vec, 0).unwrap_or(7)
+    }
+}
+
+/// __reader_vector_rest(vec) -> rest of vector as new ReaderVector
+#[unsafe(no_mangle)]
+pub extern "C" fn builtin__reader_vector_rest(vec: usize) -> usize {
+    unsafe {
+        let rt = get_runtime();
+        let count = rt.reader_vector_count(vec);
+        if count <= 1 {
+            return rt.allocate_reader_vector(&[]).unwrap_or(7);
+        }
+        let mut elements = Vec::with_capacity(count - 1);
+        for i in 1..count {
+            elements.push(rt.reader_vector_nth(vec, i).unwrap_or(7));
+        }
+        rt.allocate_reader_vector(&elements).unwrap_or(7)
+    }
+}
+
 // ============================================================================
 // Reader Type Operations - ReaderMap
 // ============================================================================
@@ -491,9 +517,9 @@ pub extern "C" fn builtin__is_reader_list(value: usize) -> usize {
     unsafe {
         let rt = get_runtime();
         if rt.is_reader_list(value) {
-            0b00001_111 // true
+            11 // true = (1 << 3) | 0b011
         } else {
-            0b00000_111 // false
+            3 // false = (0 << 3) | 0b011
         }
     }
 }
@@ -506,9 +532,9 @@ pub extern "C" fn builtin__is_reader_vector(value: usize) -> usize {
     unsafe {
         let rt = get_runtime();
         if rt.is_reader_vector(value) {
-            0b00001_111 // true
+            11 // true = (1 << 3) | 0b011
         } else {
-            0b00000_111 // false
+            3 // false = (0 << 3) | 0b011
         }
     }
 }
@@ -521,9 +547,9 @@ pub extern "C" fn builtin__is_reader_map(value: usize) -> usize {
     unsafe {
         let rt = get_runtime();
         if rt.is_reader_map(value) {
-            0b00001_111 // true
+            11 // true = (1 << 3) | 0b011
         } else {
-            0b00000_111 // false
+            3 // false = (0 << 3) | 0b011
         }
     }
 }
@@ -536,9 +562,25 @@ pub extern "C" fn builtin__is_reader_symbol(value: usize) -> usize {
     unsafe {
         let rt = get_runtime();
         if rt.is_reader_symbol(value) {
-            0b00001_111 // true
+            11 // true = (1 << 3) | 0b011
         } else {
-            0b00000_111 // false
+            3 // false = (0 << 3) | 0b011
+        }
+    }
+}
+
+/// satisfies?(protocol_id, value) -> tagged_boolean
+///
+/// Returns true if value's type satisfies the given protocol.
+/// protocol_id is a raw (untagged) protocol ID number.
+#[unsafe(no_mangle)]
+pub extern "C" fn builtin_satisfies(protocol_id: usize, value: usize) -> usize {
+    unsafe {
+        let rt = get_runtime();
+        if rt.value_satisfies_protocol(value, protocol_id) {
+            11 // true = (1 << 3) | 0b011
+        } else {
+            3 // false = (0 << 3) | 0b011
         }
     }
 }
@@ -896,6 +938,16 @@ pub fn get_builtin_descriptors() -> Vec<BuiltinDescriptor> {
             function_ptr: builtin__reader_vector_conj as usize,
             arity: 2,
         },
+        BuiltinDescriptor {
+            name: "__reader_vector_first",
+            function_ptr: builtin__reader_vector_first as usize,
+            arity: 1,
+        },
+        BuiltinDescriptor {
+            name: "__reader_vector_rest",
+            function_ptr: builtin__reader_vector_rest as usize,
+            arity: 1,
+        },
         // Reader Map operations
         BuiltinDescriptor {
             name: "__reader_map_count",
@@ -1019,6 +1071,12 @@ pub fn get_builtin_descriptors() -> Vec<BuiltinDescriptor> {
             name: "__make_reader_map_0",
             function_ptr: builtin__make_reader_map_0 as usize,
             arity: 0,
+        },
+        // Protocol satisfaction check
+        BuiltinDescriptor {
+            name: "satisfies?",
+            function_ptr: builtin_satisfies as usize,
+            arity: 2,
         },
     ]
 }

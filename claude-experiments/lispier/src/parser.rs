@@ -326,6 +326,7 @@ impl Parser {
                         Value::String(s) => s.clone(),
                         Value::Number(n) => n.to_string(),
                         Value::Symbol(sym) => sym.name.clone(),
+                        Value::Boolean(b) => b.to_string(),
                         _ => continue,
                     };
                     pass.attributes.insert(key.clone(), val_str);

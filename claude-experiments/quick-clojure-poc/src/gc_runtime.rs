@@ -369,6 +369,10 @@ pub struct GCRuntime {
     /// This allows protocol method closures to be treated as GC roots
     protocol_vtable_root_ids: HashMap<(usize, usize, usize), usize>,
 
+    /// Marker protocol satisfaction: Set of (type_id, protocol_id) for marker protocols
+    /// Used for protocols that have no methods (like IList, ISeq marker interfaces)
+    marker_protocol_satisfies: HashSet<(usize, usize)>,
+
     // ========== Keyword Interning ==========
     /// Keyword constant storage: index -> keyword text (without colon)
     keyword_constants: Vec<String>,
@@ -427,6 +431,7 @@ impl GCRuntime {
             protocol_vtable: HashMap::new(),
             method_to_protocol: HashMap::new(),
             protocol_vtable_root_ids: HashMap::new(),
+            marker_protocol_satisfies: HashSet::new(),
             // Keyword interning
             keyword_constants: Vec::new(),
             keyword_heap_ptrs: Vec::new(),
@@ -829,7 +834,11 @@ impl GCRuntime {
 
     /// Get symbol string by ID (for runtime lookup).
     pub fn get_symbol(&self, id: u32) -> Option<&str> {
-        self.symbol_table.get(id as usize).map(|s| s.as_str())
+        let result = self.symbol_table.get(id as usize).map(|s| s.as_str());
+        if id == 184 || result == Some("") {
+            eprintln!("GET_SYMBOL: id={} -> {:?}, symbol_table.len()={}", id, result, self.symbol_table.len());
+        }
+        result
     }
 
     /// Allocate a namespace object on the heap
@@ -1001,16 +1010,22 @@ impl GCRuntime {
 
         // Get bindings array from field 1
         let bindings_tagged = ns_obj.get_field(1);
+        eprintln!("DEBUG: bindings_tagged = 0x{:x}", bindings_tagged);
         let bindings_untagged = self.untag_heap_object(bindings_tagged);
+        eprintln!("DEBUG: bindings_untagged = 0x{:x}", bindings_untagged);
         let bindings_obj = HeapObject::from_untagged(bindings_untagged as *const u8);
         // For dynamic arrays, used count is in type_data
         let used = bindings_obj.get_type_data();
+        let header = bindings_obj.get_header();
 
         let num_bindings = used / 2;
+        eprintln!("DEBUG: used={}, header.size={}, num_bindings={}", used, header.size, num_bindings);
 
         for i in 0..num_bindings.min(limit) {
             let name_ptr = bindings_obj.get_field(i * 2);
-            let _stored_name = self.read_string(name_ptr);
+            eprintln!("DEBUG: binding[{}] name_ptr = 0x{:x}", i, name_ptr);
+            let stored_name = self.read_string(name_ptr);
+            eprintln!("DEBUG: binding[{}] = '{}'", i, stored_name);
         }
     }
 
@@ -1018,6 +1033,10 @@ impl GCRuntime {
     pub fn namespace_lookup(&self, ns_ptr: usize, symbol_name: &str) -> Option<usize> {
         let ns_untagged = self.untag_heap_object(ns_ptr);
         let ns_obj = HeapObject::from_untagged(ns_untagged as *const u8);
+
+        // Get namespace name for debug
+        let ns_name_ptr = ns_obj.get_field(0);
+        let ns_name = self.read_string(ns_name_ptr);
 
         // Get bindings array from field 1
         let bindings_tagged = ns_obj.get_field(1);
@@ -1028,12 +1047,33 @@ impl GCRuntime {
 
         let num_bindings = used / 2;
 
+        // Static counter to track calls
+        static LOOKUP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let call_id = LOOKUP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+
+        // Print for all lookups after 4000 to see what's happening near failure
+        if symbol_name == "/" || call_id > 4000 {
+            eprintln!("LOOKUP[{}]: ns='{}' searching for '{}', ns_ptr=0x{:x} num_bindings={}", call_id, ns_name, symbol_name, ns_ptr, num_bindings);
+        }
+
+        // Debug: panic on empty string lookup to get backtrace
+        if symbol_name.is_empty() {
+            panic!("LOOKUP: Empty symbol name in namespace_lookup! ns='{}', call_id={}", ns_name, call_id);
+        }
+
         for i in 0..num_bindings {
             let name_ptr = bindings_obj.get_field(i * 2);
             let stored_name = self.read_string(name_ptr);
             if stored_name == symbol_name {
-                return Some(bindings_obj.get_field(i * 2 + 1));
+                let result = bindings_obj.get_field(i * 2 + 1);
+                if symbol_name == "/" {
+                    eprintln!("LOOKUP[{}]: FOUND '{}' at index {}, returning Some(0x{:x})", call_id, symbol_name, i, result);
+                }
+                return Some(result);
             }
+        }
+        if symbol_name == "/" {
+            eprintln!("LOOKUP[{}]: NOT FOUND '{}', returning None", call_id, symbol_name);
         }
         None
     }
@@ -1186,6 +1226,19 @@ impl GCRuntime {
                 }
             }
         }
+    }
+
+    /// Register a temporary GC root.
+    /// Returns a root ID that must be passed to unregister_temporary_root when done.
+    /// Use this to protect heap objects during operations that may trigger GC.
+    pub fn register_temporary_root(&mut self, root: usize) -> usize {
+        self.allocator.register_temporary_root(root)
+    }
+
+    /// Unregister a temporary GC root.
+    /// Returns the value that was registered.
+    pub fn unregister_temporary_root(&mut self, id: usize) -> usize {
+        self.allocator.unregister_temporary_root(id)
     }
 
     /// Get heap statistics
@@ -3069,6 +3122,31 @@ impl GCRuntime {
         self.protocol_name_to_id.get(name).copied()
     }
 
+    /// Check if a type satisfies a protocol (has at least one method implemented or is registered for marker protocol)
+    pub fn type_satisfies_protocol(&self, type_id: usize, protocol_id: usize) -> bool {
+        // First check if this is a marker protocol satisfaction
+        if self.marker_protocol_satisfies.contains(&(type_id, protocol_id)) {
+            return true;
+        }
+
+        // Get the protocol definition to find how many methods it has
+        if let Some(protocol_def) = self.protocol_registry.get(protocol_id) {
+            // Check if any method is implemented for this type
+            for method_index in 0..protocol_def.methods.len() {
+                if self.protocol_vtable.contains_key(&(type_id, protocol_id, method_index)) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Check if a value satisfies a protocol
+    pub fn value_satisfies_protocol(&self, value: usize, protocol_id: usize) -> bool {
+        let type_id = self.get_type_id_for_value(value);
+        self.type_satisfies_protocol(type_id, protocol_id)
+    }
+
     /// Get method index within a protocol by method name
     pub fn get_protocol_method_index(
         &self,
@@ -3106,6 +3184,11 @@ impl GCRuntime {
         self.next_namespace_id += 1;
         self.protocol_vtable_root_ids.insert(key, root_id);
         self.allocator.add_namespace_root(root_id, fn_ptr);
+    }
+
+    /// Register that a type satisfies a marker protocol (protocol with no methods)
+    pub fn register_marker_protocol_impl(&mut self, type_id: usize, protocol_id: usize) {
+        self.marker_protocol_satisfies.insert((type_id, protocol_id));
     }
 
     /// Look up protocol method implementation by type_id and method_name
@@ -3160,22 +3243,6 @@ impl GCRuntime {
             0b111 => TYPE_NIL, // Nil
             _ => unreachable!(),
         }
-    }
-
-    /// Check if a type implements a protocol
-    pub fn type_satisfies_protocol(&self, type_id: usize, protocol_id: usize) -> bool {
-        if let Some(protocol) = self.protocol_registry.get(protocol_id) {
-            // Check if at least one method is implemented
-            for method_index in 0..protocol.methods.len() {
-                if self
-                    .protocol_vtable
-                    .contains_key(&(type_id, protocol_id, method_index))
-                {
-                    return true;
-                }
-            }
-        }
-        false
     }
 
     /// Get the name of a built-in type ID (for error messages)

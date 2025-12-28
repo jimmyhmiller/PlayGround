@@ -551,12 +551,9 @@ pub extern "C" fn trampoline_load_var_by_symbol(ns_symbol_id: u32, name_symbol_i
             .get_namespace_by_name(ns_name)
             .unwrap_or_else(|| panic!("Namespace not found: {}", ns_name));
 
-        // Look up var in namespace
-        let var_ptr = rt.namespace_lookup(ns_ptr, var_name).unwrap_or_else(|| {
-            // Debug: print first 10 bindings
-            rt.debug_namespace_bindings(ns_ptr, 10);
-            panic!("Unable to resolve symbol: {}/{}", ns_name, var_name)
-        });
+        let var_ptr = rt
+            .namespace_lookup(ns_ptr, var_name)
+            .unwrap_or_else(|| panic!("Unable to resolve symbol: {}/{}", ns_name, var_name));
 
         // Get and return value
         rt.var_get_value(var_ptr)
@@ -1613,6 +1610,23 @@ pub extern "C" fn trampoline_register_protocol_method(
         let runtime_ptr = std::ptr::addr_of!(RUNTIME);
         let rt = &mut *(*runtime_ptr).as_ref().unwrap().get();
         rt.register_protocol_method_impl(type_id, protocol_id, method_index, fn_ptr);
+        7 // nil
+    }
+}
+
+/// Trampoline: Register marker protocol satisfaction
+///
+/// Called when extend-type adds a marker protocol (no methods).
+///
+/// ARM64 Calling Convention:
+/// - Args: x0 = type_id, x1 = protocol_id
+/// - Returns: x0 = nil (7)
+#[unsafe(no_mangle)]
+pub extern "C" fn trampoline_register_marker_protocol(type_id: usize, protocol_id: usize) -> usize {
+    unsafe {
+        let runtime_ptr = std::ptr::addr_of!(RUNTIME);
+        let rt = &mut *(*runtime_ptr).as_ref().unwrap().get();
+        rt.register_marker_protocol_impl(type_id, protocol_id);
         7 // nil
     }
 }

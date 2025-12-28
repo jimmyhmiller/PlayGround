@@ -201,7 +201,7 @@ fn run_with_compilation_spec(nodes: &[lispier::Node], compilation: &lispier::Com
 
     // Get runtime library paths
     // Add null terminators since MLIR's library loading expects null-terminated strings
-    let lib_paths: Vec<String> = runtime.runtime_libs
+    let mut lib_paths: Vec<String> = runtime.runtime_libs
         .iter()
         .map(|p| {
             let mut s = p.to_string_lossy().to_string();
@@ -209,6 +209,15 @@ fn run_with_compilation_spec(nodes: &[lispier::Node], compilation: &lispier::Com
             s
         })
         .collect();
+
+    // Add the ciface shim library for GPU runtime wrappers
+    if matches!(runtime.backend, lispier::runtime::Backend::Rocm) {
+        let shim_path = std::env::var("HOME")
+            .map(|h| format!("{}/libgpu_ciface_shim.so\0", h))
+            .unwrap_or_else(|_| "/home/jimmyhmiller/libgpu_ciface_shim.so\0".to_string());
+        lib_paths.push(shim_path);
+    }
+
     eprintln!("Library paths: {:?}", lib_paths);
     let lib_path_refs: Vec<&str> = lib_paths.iter().map(|s| s.as_str()).collect();
 
@@ -216,27 +225,57 @@ fn run_with_compilation_spec(nodes: &[lispier::Node], compilation: &lispier::Com
     if matches!(runtime.backend, lispier::runtime::Backend::Rocm) {
         for lib in &runtime.runtime_libs {
             let lib_str = lib.to_string_lossy();
-            if lib_str.contains("rocm_runtime") || lib_str.contains("amdhip") {
+            if lib_str.contains("rocm_runtime") {
                 eprintln!("Pre-loading: {}", lib_str);
                 let path_cstr = std::ffi::CString::new(lib_str.as_ref()).unwrap();
                 unsafe {
                     let handle = libc::dlopen(path_cstr.as_ptr(), libc::RTLD_NOW | libc::RTLD_GLOBAL);
                     if handle.is_null() {
                         eprintln!("Warning: Failed to pre-load {}", lib_str);
+                    } else {
+                        eprintln!("Successfully pre-loaded: {}", lib_str);
                     }
                 }
             }
         }
+
+        // Pre-load the ciface shim library
+        let shim_path = std::env::var("HOME")
+            .map(|h| format!("{}/libgpu_ciface_shim.so", h))
+            .unwrap_or_else(|_| "/home/jimmyhmiller/libgpu_ciface_shim.so".to_string());
+        eprintln!("Pre-loading shim: {}", shim_path);
+        let path_cstr = std::ffi::CString::new(shim_path.as_str()).unwrap();
+        unsafe {
+            let handle = libc::dlopen(path_cstr.as_ptr(), libc::RTLD_NOW | libc::RTLD_GLOBAL);
+            if handle.is_null() {
+                eprintln!("Warning: Failed to pre-load shim library");
+            } else {
+                eprintln!("Successfully pre-loaded shim library");
+            }
+        }
     }
+    eprintln!("Pre-loading complete");
 
     // Create JIT with custom pipeline and libraries
-    let jit = match Jit::with_pipeline_and_libraries(&registry, &mut module, &pipeline, &lib_path_refs) {
+    eprintln!("Running pass pipeline...");
+    use std::io::Write;
+    std::io::stderr().flush().unwrap();
+    if let Err(e) = Jit::run_pipeline(&registry, &mut module, &pipeline) {
+        eprintln!("Pass pipeline error: {}", e);
+        return ExitCode::FAILURE;
+    }
+    eprintln!("Pass pipeline completed successfully");
+    eprintln!("Module after passes:\n{}", module.as_operation());
+
+    eprintln!("Creating execution engine...");
+    let jit = match Jit::with_pipeline_and_libraries(&registry, &mut module, "", &lib_path_refs) {
         Ok(j) => j,
         Err(e) => {
             eprintln!("JIT creation error: {}", e);
             return ExitCode::FAILURE;
         }
     };
+    eprintln!("JIT created successfully");
 
     // Register GPU runtime symbols if using GPU backend
     if matches!(runtime.backend, lispier::runtime::Backend::Rocm) {

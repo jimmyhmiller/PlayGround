@@ -727,17 +727,23 @@ fn load_clojure_file(
         let ast = unsafe {
             let rt = &mut *runtime.get();
             match read_to_tagged(&accumulated, rt) {
-                Ok(tagged) => match analyze_toplevel_tagged(rt, tagged) {
-                    Ok(ast) => ast,
-                    Err(e) => {
-                        // Analysis error - but might be incomplete expression
-                        // Try the old reader to distinguish
-                        match read(&accumulated) {
-                            Ok(_) => return Err(format!("Analysis error: {}", e)),
-                            Err(_) => continue, // Incomplete expression
+                Ok(tagged) => {
+                    // Register the parsed form as a temporary GC root during analysis
+                    let root_id = rt.register_temporary_root(tagged);
+                    let result = analyze_toplevel_tagged(rt, tagged);
+                    rt.unregister_temporary_root(root_id);
+                    match result {
+                        Ok(ast) => ast,
+                        Err(e) => {
+                            // Analysis error - but might be incomplete expression
+                            // Try the old reader to distinguish
+                            match read(&accumulated) {
+                                Ok(_) => return Err(format!("Analysis error: {}", e)),
+                                Err(_) => continue, // Incomplete expression
+                            }
                         }
                     }
-                },
+                }
                 Err(_) => continue, // Incomplete expression, keep accumulating
             }
         };
@@ -825,7 +831,11 @@ fn run_expr(expr: &str, gc_always: bool) {
                 std::process::exit(1);
             }
         };
-        match analyze_toplevel_tagged(rt, tagged) {
+        // Register parsed form as temporary root during analysis
+        let root_id = rt.register_temporary_root(tagged);
+        let result = analyze_toplevel_tagged(rt, tagged);
+        rt.unregister_temporary_root(root_id);
+        match result {
             Ok(a) => a,
             Err(e) => {
                 eprintln!("Analysis error: {}", e);
@@ -931,20 +941,27 @@ fn run_script(filename: &str, gc_always: bool) {
         let ast = unsafe {
             let rt = &mut *runtime.get();
             match read_to_tagged(&accumulated, rt) {
-                Ok(tagged) => match analyze_toplevel_tagged(rt, tagged) {
-                    Ok(ast) => ast,
-                    Err(e) => {
-                        // Analysis error - but might be incomplete expression
-                        // Try the old reader to distinguish
-                        match read(&accumulated) {
-                            Ok(_) => {
-                                eprintln!("Analysis error: {}", e);
-                                std::process::exit(1);
+                Ok(tagged) => {
+                    // Register the parsed form as a temporary GC root during analysis
+                    // This prevents it from being collected if GC runs during analysis
+                    let root_id = rt.register_temporary_root(tagged);
+                    let result = analyze_toplevel_tagged(rt, tagged);
+                    rt.unregister_temporary_root(root_id);
+                    match result {
+                        Ok(ast) => ast,
+                        Err(e) => {
+                            // Analysis error - but might be incomplete expression
+                            // Try the old reader to distinguish
+                            match read(&accumulated) {
+                                Ok(_) => {
+                                    eprintln!("Analysis error: {}", e);
+                                    std::process::exit(1);
+                                }
+                                Err(_) => continue, // Incomplete expression
                             }
-                            Err(_) => continue, // Incomplete expression
                         }
                     }
-                },
+                }
                 Err(_) => continue, // Incomplete expression, keep accumulating
             }
         };
@@ -1427,7 +1444,13 @@ fn main() {
                 let ast_result = unsafe {
                     let rt = &mut *runtime.get();
                     match read_to_tagged(code, rt) {
-                        Ok(tagged) => analyze_toplevel_tagged(rt, tagged),
+                        Ok(tagged) => {
+                            // Register parsed form as temporary root during analysis
+                            let root_id = rt.register_temporary_root(tagged);
+                            let result = analyze_toplevel_tagged(rt, tagged);
+                            rt.unregister_temporary_root(root_id);
+                            result
+                        }
                         Err(e) => Err(format!("Read error: {}", e)),
                     }
                 };

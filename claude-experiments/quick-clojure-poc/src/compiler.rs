@@ -457,7 +457,7 @@ impl Compiler {
                  "bit-shift-left" | "bit-shift-right" | "unsigned-bit-shift-right" |
                  "bit-shift-right-zero-fill" |  // CLJS alias for unsigned-bit-shift-right
                  "nil?" | "number?" | "string?" | "fn?" | "identical?" |
-                 "instance?" | "keyword?" | "hash-primitive" |
+                 "instance?" | "satisfies?" | "keyword?" | "hash-primitive" |
                  "cons?" | "cons-first" | "cons-rest" |
                  "_println" | "_print" | "_newline" | "_print-space" |
                  "__make_reader_symbol_1" | "__make_reader_symbol_2" |
@@ -465,7 +465,14 @@ impl Compiler {
                  "__make_reader_vector_0" | "__make_reader_vector_from_list" |
                  "__make_reader_map_0" |
                  "__reader_cons" | "__reader_list_1" | "__reader_list_2" |
-                 "__reader_list_3" | "__reader_list_4" | "__reader_list_5"
+                 "__reader_list_3" | "__reader_list_4" | "__reader_list_5" |
+                 // Reader primitive operations for protocol implementations
+                 "__reader_list_first" | "__reader_list_rest" | "__reader_list_count" |
+                 "__reader_list_nth" | "__reader_list_conj" |
+                 "__reader_vector_first" | "__reader_vector_rest" | "__reader_vector_count" |
+                 "__reader_vector_nth" | "__reader_vector_conj" |
+                 // Reader type predicates
+                 "__reader_list?" | "__reader_vector?" | "__reader_map?" | "__reader_symbol?"
         )
     }
 
@@ -847,6 +854,23 @@ impl Compiler {
                     .ok_or_else(|| format!("Unknown protocol: {}", impl_.protocol_name))?
             };
 
+            // Check if this is a marker protocol (no methods in the implementation)
+            if impl_.methods.is_empty() {
+                // Register marker protocol satisfaction
+                let trampoline_addr =
+                    crate::trampoline::trampoline_register_marker_protocol as usize;
+                let dummy_result = self.builder.new_register();
+                self.builder.emit(Instruction::ExternalCall(
+                    dummy_result,
+                    trampoline_addr,
+                    vec![
+                        IrValue::RawConstant(type_id as i64),
+                        IrValue::RawConstant(protocol_id as i64),
+                    ],
+                ));
+                continue;
+            }
+
             // Group methods by name to handle multi-arity protocol methods
             // Multiple implementations with the same name but different param counts
             // should be combined into a single multi-arity function
@@ -944,10 +968,11 @@ impl Compiler {
             "PersistentHashSet" | "Set" => Ok(TYPE_SET),
             "Array" => Ok(TYPE_ARRAY),
             // Reader types - available for extend-type in clojure.core
-            "ReaderList" => Ok(TYPE_READER_LIST),
-            "ReaderVector" => Ok(TYPE_READER_VECTOR),
-            "ReaderMap" => Ok(TYPE_READER_MAP),
-            "ReaderSymbol" => Ok(TYPE_READER_SYMBOL),
+            // Named with __ prefix to indicate internal/primitive types
+            "__ReaderList" => Ok(TYPE_READER_LIST),
+            "__ReaderVector" => Ok(TYPE_READER_VECTOR),
+            "__ReaderMap" => Ok(TYPE_READER_MAP),
+            "__ReaderSymbol" => Ok(TYPE_READER_SYMBOL),
             _ => Err(format!("Unknown type: {}", type_name)),
         }
     }
@@ -2292,6 +2317,7 @@ impl Compiler {
                     "fn?" => self.compile_builtin_fn_pred(args),
                     "identical?" => self.compile_builtin_identical(args),
                     "instance?" => self.compile_builtin_instance_check(args),
+                    "satisfies?" => self.compile_builtin_satisfies_check(args),
                     "keyword?" => self.compile_builtin_keyword_check(args),
                     "hash-primitive" => self.compile_builtin_hash_primitive(args),
                     "cons?" => self.compile_builtin_cons_check(args),
@@ -2314,6 +2340,22 @@ impl Compiler {
                     "__reader_list_3" => self.compile_builtin_reader_list_n(args, 3),
                     "__reader_list_4" => self.compile_builtin_reader_list_n(args, 4),
                     "__reader_list_5" => self.compile_builtin_reader_list_n(args, 5),
+                    // Reader primitive operations for protocol implementations
+                    "__reader_list_first" => self.compile_builtin_reader_prim_1(args, "__reader_list_first"),
+                    "__reader_list_rest" => self.compile_builtin_reader_prim_1(args, "__reader_list_rest"),
+                    "__reader_list_count" => self.compile_builtin_reader_prim_1(args, "__reader_list_count"),
+                    "__reader_list_nth" => self.compile_builtin_reader_prim_2(args, "__reader_list_nth"),
+                    "__reader_list_conj" => self.compile_builtin_reader_prim_2(args, "__reader_list_conj"),
+                    "__reader_vector_first" => self.compile_builtin_reader_prim_1(args, "__reader_vector_first"),
+                    "__reader_vector_rest" => self.compile_builtin_reader_prim_1(args, "__reader_vector_rest"),
+                    "__reader_vector_count" => self.compile_builtin_reader_prim_1(args, "__reader_vector_count"),
+                    "__reader_vector_nth" => self.compile_builtin_reader_prim_2(args, "__reader_vector_nth"),
+                    "__reader_vector_conj" => self.compile_builtin_reader_prim_2(args, "__reader_vector_conj"),
+                    // Reader type predicates
+                    "__reader_list?" => self.compile_builtin_reader_prim_1(args, "__reader_list?"),
+                    "__reader_vector?" => self.compile_builtin_reader_prim_1(args, "__reader_vector?"),
+                    "__reader_map?" => self.compile_builtin_reader_prim_1(args, "__reader_map?"),
+                    "__reader_symbol?" => self.compile_builtin_reader_prim_1(args, "__reader_symbol?"),
                     _ => unreachable!(),
                 };
             }
@@ -2828,6 +2870,28 @@ impl Compiler {
         self.call_builtin(&format!("__reader_list_{}", n), arg_regs)
     }
 
+    /// Compile 1-arg reader primitive operations (first, rest, count)
+    fn compile_builtin_reader_prim_1(&mut self, args: &[Expr], builtin_name: &str) -> Result<IrValue, String> {
+        if args.len() != 1 {
+            return Err(format!("{} requires 1 argument, got {}", builtin_name, args.len()));
+        }
+        let val = self.compile(&args[0])?;
+        let val_reg = self.builder.assign_new(val);
+        self.call_builtin(builtin_name, vec![val_reg])
+    }
+
+    /// Compile 2-arg reader primitive operations (nth, conj)
+    fn compile_builtin_reader_prim_2(&mut self, args: &[Expr], builtin_name: &str) -> Result<IrValue, String> {
+        if args.len() != 2 {
+            return Err(format!("{} requires 2 arguments, got {}", builtin_name, args.len()));
+        }
+        let val1 = self.compile(&args[0])?;
+        let val2 = self.compile(&args[1])?;
+        let val1_reg = self.builder.assign_new(val1);
+        let val2_reg = self.builder.assign_new(val2);
+        self.call_builtin(builtin_name, vec![val1_reg, val2_reg])
+    }
+
     fn compile_builtin_eq(&mut self, args: &[Expr]) -> Result<IrValue, String> {
         if args.len() != 2 {
             return Err(format!("= requires 2 arguments, got {}", args.len()));
@@ -3286,6 +3350,54 @@ impl Compiler {
             result,
             trampoline_addr,
             vec![IrValue::RawConstant(full_type_id as i64), value],
+        ));
+        Ok(result)
+    }
+
+    /// Compile (satisfies? Protocol obj) - check if obj satisfies Protocol
+    /// Protocol must be a symbol that was defined via defprotocol
+    fn compile_builtin_satisfies_check(&mut self, args: &[Expr]) -> Result<IrValue, String> {
+        if args.len() != 2 {
+            return Err(format!(
+                "satisfies? requires 2 arguments, got {}",
+                args.len()
+            ));
+        }
+
+        // First argument must be a protocol symbol (e.g., IList, ISeq)
+        let protocol_name = match &args[0] {
+            Expr::Var { namespace, name } => {
+                // Build fully qualified protocol name
+                let current_ns = self.get_current_namespace();
+                match namespace {
+                    Some(ns) => format!("{}/{}", ns, name),
+                    None => format!("{}/{}", current_ns, name),
+                }
+            }
+            _ => return Err("satisfies? first argument must be a protocol symbol".to_string()),
+        };
+
+        // Look up the protocol ID in the runtime
+        let protocol_id = {
+            let rt = unsafe { &*self.runtime.get() };
+            match rt.get_protocol_id(&protocol_name) {
+                Some(id) => id,
+                None => return Err(format!("Unknown protocol: {}", protocol_name)),
+            }
+        };
+
+        // Compile the value to check
+        let value = self.compile(&args[1])?;
+        let value = self.ensure_register(value);
+
+        // Emit satisfies check as ExternalCall
+        // Call builtin_satisfies(protocol_id, value) -> tagged_boolean
+        let result = self.builder.new_register();
+        let fn_addr = crate::builtins::builtin_satisfies as usize;
+        self.builder.emit(Instruction::ExternalCall(
+            result,
+            fn_addr,
+            vec![IrValue::RawConstant(protocol_id as i64), value],
         ));
         Ok(result)
     }
