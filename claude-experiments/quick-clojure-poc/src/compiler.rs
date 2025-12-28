@@ -832,7 +832,6 @@ impl Compiler {
             .iter()
             .map(|m| ProtocolMethod {
                 name: m.name.clone(),
-                arities: m.arities.iter().map(|a| a.len()).collect(),
             })
             .collect();
 
@@ -2020,16 +2019,8 @@ impl Compiler {
         // Register stack map with runtime for GC
         unsafe {
             let rt = &mut *self.runtime.get();
-            for (pc, stack_size) in &compiled.stack_map {
-                rt.add_stack_map_entry(
-                    *pc,
-                    crate::gc::StackMapDetails {
-                        function_name: name.clone(),
-                        number_of_locals: compiled.num_locals,
-                        current_stack_size: *stack_size,
-                        max_stack_size: compiled.max_stack_size,
-                    },
-                );
+            for (pc, _stack_size) in &compiled.stack_map {
+                rt.add_stack_map_entry(*pc, crate::gc::StackMapDetails {});
             }
         }
 
@@ -3497,42 +3488,6 @@ impl Compiler {
         // Call trampoline_is_keyword
         let result = self.builder.new_register();
         let fn_addr = crate::trampoline::trampoline_is_keyword as usize;
-        self.builder
-            .emit(Instruction::ExternalCall(result, fn_addr, vec![value]));
-        Ok(result)
-    }
-
-    /// Compile (map? x) - check if x is a map
-    fn compile_builtin_map_check(&mut self, args: &[Expr]) -> Result<IrValue, String> {
-        if args.len() != 1 {
-            return Err(format!("map? requires 1 argument, got {}", args.len()));
-        }
-
-        // Compile the value to check
-        let value = self.compile(&args[0])?;
-        let value = self.ensure_register(value);
-
-        // Call builtin_is_map
-        let result = self.builder.new_register();
-        let fn_addr = crate::builtins::builtin_is_map as usize;
-        self.builder
-            .emit(Instruction::ExternalCall(result, fn_addr, vec![value]));
-        Ok(result)
-    }
-
-    /// Compile (vector? x) - check if x is a vector
-    fn compile_builtin_vector_check(&mut self, args: &[Expr]) -> Result<IrValue, String> {
-        if args.len() != 1 {
-            return Err(format!("vector? requires 1 argument, got {}", args.len()));
-        }
-
-        // Compile the value to check
-        let value = self.compile(&args[0])?;
-        let value = self.ensure_register(value);
-
-        // Call builtin_is_vector
-        let result = self.builder.new_register();
-        let fn_addr = crate::builtins::builtin_is_vector as usize;
         self.builder
             .emit(Instruction::ExternalCall(result, fn_addr, vec![value]));
         Ok(result)

@@ -5,11 +5,14 @@
 // - Compacting (Cheney's two-space copying)
 // - Generational (young/old generation)
 
-use std::{error::Error, thread::ThreadId};
+use std::error::Error;
 
+#[cfg(feature = "compacting")]
 pub mod compacting;
+#[cfg(feature = "generational")]
 pub mod generational;
 pub mod mark_and_sweep;
+#[cfg(feature = "thread-safe")]
 pub mod mutex_allocator;
 pub mod space;
 pub mod stack_walker;
@@ -19,15 +22,7 @@ pub use types::{BuiltInTypes, HeapObject, Word};
 
 /// Stack map entry details for a function
 #[derive(Debug, Clone)]
-pub struct StackMapDetails {
-    pub function_name: Option<String>,
-    pub number_of_locals: usize,
-    pub current_stack_size: usize,
-    pub max_stack_size: usize,
-}
-
-/// Stack size constant (128 MB)
-pub const STACK_SIZE: usize = 1024 * 1024 * 128;
+pub struct StackMapDetails {}
 
 /// Stack map for precise GC root scanning
 #[derive(Debug, Clone)]
@@ -46,17 +41,6 @@ impl StackMap {
         Self { details: vec![] }
     }
 
-    /// Find stack data for a given instruction pointer
-    /// Looks for return address minus 4 (ARM64 BL instruction width)
-    pub fn find_stack_data(&self, pointer: usize) -> Option<&StackMapDetails> {
-        for (key, value) in self.details.iter() {
-            if *key == pointer.saturating_sub(4) {
-                return Some(value);
-            }
-        }
-        None
-    }
-
     /// Extend the stack map with new entries
     pub fn extend(&mut self, translated_stack_map: Vec<(usize, StackMapDetails)>) {
         self.details.extend(translated_stack_map);
@@ -71,6 +55,7 @@ impl StackMap {
 /// Options for configuring the allocator
 #[derive(Debug, Clone, Copy)]
 pub struct AllocatorOptions {
+    #[allow(dead_code)] // Used by feature-gated GC implementations
     pub gc: bool,
     pub print_stats: bool,
     pub gc_always: bool,
@@ -135,18 +120,6 @@ pub trait Allocator {
     fn get_pause_pointer(&self) -> usize {
         0
     }
-
-    /// Register a thread for multi-threaded allocation
-    fn register_thread(&mut self, _thread_id: ThreadId) {}
-
-    /// Remove a thread registration
-    fn remove_thread(&mut self, _thread_id: ThreadId) {}
-
-    /// Register a parked thread
-    fn register_parked_thread(&mut self, _thread_id: ThreadId, _stack_pointer: usize) {}
-
-    /// Get allocation options
-    fn get_allocation_options(&self) -> AllocatorOptions;
 }
 
 // ========== Heap Inspection Types ==========
@@ -156,8 +129,6 @@ pub trait Allocator {
 pub struct ObjectInfo {
     /// Untagged address of the object
     pub address: usize,
-    /// Tagged pointer (with type tag)
-    pub tagged_ptr: usize,
     /// Type ID from header
     pub type_id: u8,
     /// Human-readable type name
@@ -200,8 +171,6 @@ pub struct DetailedHeapStats {
 pub struct ObjectReference {
     /// Source object address (untagged)
     pub from_address: usize,
-    /// Target object address (untagged)
-    pub to_address: usize,
     /// Which field holds the reference
     pub field_index: usize,
     /// The tagged pointer value
@@ -247,7 +216,4 @@ pub trait HeapInspector {
 
     /// Check if an address is within the managed heap
     fn contains_address(&self, addr: usize) -> bool;
-
-    /// Get the namespace roots for reference tracing
-    fn get_roots(&self) -> &[(usize, usize)];
 }

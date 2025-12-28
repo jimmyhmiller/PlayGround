@@ -5,7 +5,7 @@ edition = "2024"
 
 [dependencies]
 libc = "0.2.178"
-melior = { path = "/home/jimmyhmiller/Documents/Code/open-source/melior/melior" }
+melior = { git = "https://github.com/jimmyhmiller/melior.git", rev = "e6c550672bd33398b5bcebd5aea69804433a8ace" }
 thiserror = "1.0"
 
 [dev-dependencies]

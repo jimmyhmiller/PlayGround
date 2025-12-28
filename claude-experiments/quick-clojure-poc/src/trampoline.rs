@@ -725,10 +725,13 @@ pub extern "C" fn trampoline_gc_add_root(object_ptr: usize) -> usize {
 ///
 /// ARM64 Calling Convention:
 /// - Args: x0 = object_ptr (tagged), x1 = field_name_ptr (pointer to bytes),
-///         x2 = field_name_len, x3 = value (tagged)
+///   x2 = field_name_len, x3 = value (tagged)
 /// - Returns: x0 = value (the stored value)
+///
+/// # Safety
+/// Caller must ensure `field_name_ptr` points to valid memory of at least `field_name_len` bytes.
 #[unsafe(no_mangle)]
-pub extern "C" fn trampoline_store_type_field(
+pub unsafe extern "C" fn trampoline_store_type_field(
     object_ptr: usize,
     field_name_ptr: *const u8,
     field_name_len: usize,
@@ -766,8 +769,11 @@ pub extern "C" fn trampoline_store_type_field(
 /// ARM64 Calling Convention:
 /// - Args: x0 = count (number of values), x1 = values_ptr (pointer to array of tagged values)
 /// - Returns: x0 = nil (0b111)
+///
+/// # Safety
+/// Caller must ensure `values_ptr` points to valid memory of at least `count` usize values.
 #[unsafe(no_mangle)]
-pub extern "C" fn trampoline_println(count: usize, values_ptr: *const usize) -> usize {
+pub unsafe extern "C" fn trampoline_println(count: usize, values_ptr: *const usize) -> usize {
     unsafe {
         let runtime_ptr = std::ptr::addr_of!(RUNTIME);
         let rt = &*(*runtime_ptr).as_ref().unwrap().get();
@@ -957,12 +963,15 @@ pub extern "C" fn trampoline_print_space() -> usize {
 ///
 /// ARM64 Calling Convention:
 /// - Args: x0 = stack_pointer (JIT frame pointer for GC), x1 = name_ptr (0 for anonymous),
-///         x2 = code_ptr, x3 = closure_count, x4 = values_ptr
+///   x2 = code_ptr, x3 = closure_count, x4 = values_ptr
 /// - Returns: x0 = function pointer (tagged)
 ///
 /// Note: values_ptr points to an array of closure_count tagged values on the stack
+///
+/// # Safety
+/// Caller must ensure `values_ptr` points to valid memory of at least `closure_count` usize values.
 #[unsafe(no_mangle)]
-pub extern "C" fn trampoline_allocate_function(
+pub unsafe extern "C" fn trampoline_allocate_function(
     stack_pointer: usize,
     name_ptr: usize,
     code_ptr: usize,
@@ -1050,8 +1059,11 @@ pub extern "C" fn trampoline_function_closure_count(fn_ptr: usize) -> usize {
 /// - Returns: x0 = instance pointer (tagged HeapObject)
 ///
 /// Note: values_ptr points to an array of field_count tagged values on the stack
+///
+/// # Safety
+/// Caller must ensure `values_ptr` points to valid memory of at least `field_count` usize values.
 #[unsafe(no_mangle)]
-pub extern "C" fn trampoline_allocate_type(
+pub unsafe extern "C" fn trampoline_allocate_type(
     stack_pointer: usize,
     type_id: usize,
     field_count: usize,
@@ -1167,8 +1179,11 @@ pub extern "C" fn trampoline_allocate_float(stack_pointer: usize, float_bits: u6
 /// 2. Looks up type definition in registry
 /// 3. Finds field index by name
 /// 4. Returns field value
+///
+/// # Safety
+/// Caller must ensure `field_name_ptr` points to valid memory of at least `field_name_len` bytes.
 #[unsafe(no_mangle)]
-pub extern "C" fn trampoline_load_type_field_by_name(
+pub unsafe extern "C" fn trampoline_load_type_field_by_name(
     obj_ptr: usize,
     field_name_ptr: *const u8,
     field_name_len: usize,
@@ -1279,16 +1294,20 @@ pub extern "C" fn trampoline_store_type_field_by_symbol(
 ///
 /// ARM64 Calling Convention:
 /// - Args: x0 = stack_pointer (JIT frame pointer for GC)
-///         x1 = name_ptr (0 for anonymous)
-///         x2 = arity_count
-///         x3 = arities_ptr (pointer to (param_count, code_ptr) pairs on stack)
-///         x4 = variadic_min (usize::MAX if no variadic)
-///         x5 = variadic_index (usize::MAX if no variadic)
-///         x6 = closure_count
-///         x7 = closures_ptr (pointer to closure values on stack)
+///   x1 = name_ptr (0 for anonymous)
+///   x2 = arity_count
+///   x3 = arities_ptr (pointer to (param_count, code_ptr) pairs on stack)
+///   x4 = variadic_min (usize::MAX if no variadic)
+///   x5 = variadic_index (usize::MAX if no variadic)
+///   x6 = closure_count
+///   x7 = closures_ptr (pointer to closure values on stack)
 /// - Returns: x0 = tagged closure pointer
+/// # Safety
+/// Caller must ensure that `arities_ptr` points to valid memory of at least
+/// `arity_count * 2` usize values, and `closures_ptr` points to valid memory
+/// of at least `closure_count` usize values.
 #[unsafe(no_mangle)]
-pub extern "C" fn trampoline_allocate_multi_arity_fn(
+pub unsafe extern "C" fn trampoline_allocate_multi_arity_fn(
     stack_pointer: usize,
     _name_ptr: usize,
     arity_count: usize,
@@ -1352,13 +1371,16 @@ pub extern "C" fn trampoline_allocate_multi_arity_fn(
 ///
 /// ARM64 Calling Convention:
 /// - Args: x0 = stack_pointer (JIT frame pointer for GC)
-///         x1 = pointer to args array on stack (excess args after fixed params)
-///         x2 = count of excess arguments
+///   x1 = pointer to args array on stack (excess args after fixed params)
+///   x2 = count of excess arguments
 /// - Returns: x0 = tagged IndexedSeq wrapping an Array, or nil if empty
 ///
 /// Creates an IndexedSeq (like ClojureScript) wrapping a mutable array.
+/// # Safety
+/// Caller must ensure that `args_ptr` points to valid memory of at least
+/// `count` usize values.
 #[unsafe(no_mangle)]
-pub extern "C" fn trampoline_collect_rest_args(
+pub unsafe extern "C" fn trampoline_collect_rest_args(
     stack_pointer: usize,
     args_ptr: *const usize,
     count: usize,
@@ -1392,7 +1414,7 @@ pub extern "C" fn trampoline_collect_rest_args(
 ///
 /// ARM64 Calling Convention:
 /// - Args: x0 = tagged closure pointer (multi-arity function)
-///         x1 = argument count
+///   x1 = argument count
 /// - Returns: x0 = code pointer to call (or 0 if no matching arity)
 ///
 /// This is called at runtime to determine which arity implementation to invoke.
@@ -1635,15 +1657,18 @@ pub extern "C" fn trampoline_register_marker_protocol(type_id: usize, protocol_i
 ///
 /// ARM64 Calling Convention:
 /// - Args: x0 = target (first arg, used for type dispatch)
-///         x1 = method_name_ptr, x2 = method_name_len
+///   x1 = method_name_ptr, x2 = method_name_len
 /// - Returns: x0 = fn_ptr (tagged function/closure pointer)
 ///
 /// This trampoline:
 /// 1. Gets the type_id from the target value
 /// 2. Looks up the method implementation in the vtable
 /// 3. Returns the fn_ptr (or throws IllegalArgumentException if not found)
+/// # Safety
+/// Caller must ensure that `method_name_ptr` points to valid UTF-8 memory
+/// of at least `method_name_len` bytes.
 #[unsafe(no_mangle)]
-pub extern "C" fn trampoline_protocol_lookup(
+pub unsafe extern "C" fn trampoline_protocol_lookup(
     target: usize,
     method_name_ptr: *const u8,
     method_name_len: usize,
@@ -1710,7 +1735,7 @@ pub extern "C" fn trampoline_intern_keyword(keyword_index: usize) -> usize {
 ///
 /// ARM64 Calling Convention:
 /// - Args: x0 = expected_type_id (full type ID including DEFTYPE_ID_OFFSET)
-///         x1 = value to check (tagged)
+///   x1 = value to check (tagged)
 /// - Returns: x0 = tagged boolean (true if instance, false otherwise)
 #[unsafe(no_mangle)]
 pub extern "C" fn trampoline_instance_check(expected_type_id: usize, value: usize) -> usize {
@@ -2794,8 +2819,8 @@ pub fn invoke_protocol_method(
 ///
 /// ARM64 Calling Convention:
 /// - Args: x0 = stack_pointer (JIT frame pointer for GC)
-///         x1 = fn_value (tagged function/closure)
-///         x2 = args_seq (tagged seq/list of arguments)
+///   x1 = fn_value (tagged function/closure)
+///   x2 = args_seq (tagged seq/list of arguments)
 /// - Returns: x0 = result of applying the function
 ///
 /// This handles all function types (raw functions, closures, multi-arity, IFn)

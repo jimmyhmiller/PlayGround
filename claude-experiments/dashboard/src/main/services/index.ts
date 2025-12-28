@@ -7,6 +7,7 @@
 import { ipcMain, IpcMainInvokeEvent } from 'electron';
 import { FileWatcherService } from './fileWatcher';
 import { GitService } from './gitService';
+import { initEvaluationService, getEvaluationService, EvaluationRequest } from './evaluationService';
 
 // Type for the events module
 interface EventEmitter {
@@ -36,6 +37,9 @@ export function initServices(events: EventEmitter, options: ServiceOptions = {})
 
   // Initialize git service
   gitService = new GitService(events, repoPath);
+
+  // Initialize evaluation service with events
+  initEvaluationService(events);
 
   console.log('[services] Initialized');
 
@@ -101,6 +105,47 @@ export function setupServiceIPC(): void {
     await gitService!.unstageFile(filePath);
     return { success: true };
   });
+
+  // Evaluation operations
+  ipcMain.handle(
+    'eval:execute',
+    async (
+      _event: IpcMainInvokeEvent,
+      code: string,
+      language: 'javascript' | 'typescript' = 'javascript',
+      context?: Record<string, unknown>
+    ) => {
+      const evalService = getEvaluationService();
+      return await evalService.execute({
+        id: `eval-${Date.now()}`,
+        code,
+        language,
+        context,
+      });
+    }
+  );
+
+  ipcMain.handle(
+    'eval:batch',
+    async (_event: IpcMainInvokeEvent, requests: EvaluationRequest[]) => {
+      const evalService = getEvaluationService();
+      return await evalService.batch(requests);
+    }
+  );
+
+  ipcMain.handle(
+    'eval:benchmark',
+    async (
+      _event: IpcMainInvokeEvent,
+      code: string,
+      iterations?: number,
+      warmupIterations?: number,
+      context?: Record<string, unknown>
+    ) => {
+      const evalService = getEvaluationService();
+      return await evalService.benchmark(code, iterations, warmupIterations, context);
+    }
+  );
 
   console.log('[services] IPC handlers registered');
 }

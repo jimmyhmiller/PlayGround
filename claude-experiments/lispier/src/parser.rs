@@ -672,7 +672,7 @@ impl Parser {
     }
 
     fn parse_function_type_value(&mut self, items: &[Value]) -> Result<FunctionType, ParserError> {
-        // (-> [args...] [returns...])
+        // (-> [args...] [returns...]) or (-> [args... ...] [returns...]) for vararg
         if items.len() < 3 {
             return Err(ParserError::InvalidFunctionType);
         }
@@ -684,7 +684,12 @@ impl Parser {
             for type_val in args_vec {
                 match type_val {
                     Value::Symbol(sym) => {
-                        ft.arg_types.push(Type::new(&sym.name));
+                        // Check for ... which indicates vararg
+                        if sym.name == "..." {
+                            ft.is_vararg = true;
+                        } else {
+                            ft.arg_types.push(Type::new(&sym.name));
+                        }
                     }
                     Value::String(s) => {
                         // Support string-quoted types (e.g., "memref<?xf32>")

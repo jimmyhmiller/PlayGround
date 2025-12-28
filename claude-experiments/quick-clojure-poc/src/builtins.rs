@@ -46,12 +46,10 @@ pub extern "C" fn builtin_load_var_by_symbol(
     tagged_ns_symbol_id: usize,
     tagged_name_symbol_id: usize,
 ) -> usize {
-    unsafe {
-        // Untag the symbol IDs (shift right by 3)
-        let ns_symbol_id = (tagged_ns_symbol_id >> 3) as u32;
-        let name_symbol_id = (tagged_name_symbol_id >> 3) as u32;
-        trampoline::trampoline_load_var_by_symbol(ns_symbol_id, name_symbol_id)
-    }
+    // Untag the symbol IDs (shift right by 3)
+    let ns_symbol_id = (tagged_ns_symbol_id >> 3) as u32;
+    let name_symbol_id = (tagged_name_symbol_id >> 3) as u32;
+    trampoline::trampoline_load_var_by_symbol(ns_symbol_id, name_symbol_id)
 }
 
 /// builtin_load_var_by_symbol_dynamic(tagged_ns_symbol_id, tagged_name_symbol_id) -> tagged_value
@@ -63,12 +61,10 @@ pub extern "C" fn builtin_load_var_by_symbol_dynamic(
     tagged_ns_symbol_id: usize,
     tagged_name_symbol_id: usize,
 ) -> usize {
-    unsafe {
-        // Untag the symbol IDs (shift right by 3)
-        let ns_symbol_id = (tagged_ns_symbol_id >> 3) as u32;
-        let name_symbol_id = (tagged_name_symbol_id >> 3) as u32;
-        trampoline::trampoline_load_var_by_symbol_dynamic(ns_symbol_id, name_symbol_id)
-    }
+    // Untag the symbol IDs (shift right by 3)
+    let ns_symbol_id = (tagged_ns_symbol_id >> 3) as u32;
+    let name_symbol_id = (tagged_name_symbol_id >> 3) as u32;
+    trampoline::trampoline_load_var_by_symbol_dynamic(ns_symbol_id, name_symbol_id)
 }
 
 /// builtin_store_var_by_symbol(tagged_ns_symbol_id, tagged_name_symbol_id, value) -> tagged_value (nil)
@@ -82,12 +78,10 @@ pub extern "C" fn builtin_store_var_by_symbol(
     tagged_name_symbol_id: usize,
     value: usize,
 ) -> usize {
-    unsafe {
-        // Untag the symbol IDs (shift right by 3)
-        let ns_symbol_id = (tagged_ns_symbol_id >> 3) as u32;
-        let name_symbol_id = (tagged_name_symbol_id >> 3) as u32;
-        trampoline::trampoline_store_var_by_symbol(ns_symbol_id, name_symbol_id, value)
-    }
+    // Untag the symbol IDs (shift right by 3)
+    let ns_symbol_id = (tagged_ns_symbol_id >> 3) as u32;
+    let name_symbol_id = (tagged_name_symbol_id >> 3) as u32;
+    trampoline::trampoline_store_var_by_symbol(ns_symbol_id, name_symbol_id, value)
 }
 
 /// builtin_ensure_var_by_symbol(tagged_ns_symbol_id, tagged_name_symbol_id) -> tagged_value (nil)
@@ -141,11 +135,9 @@ pub extern "C" fn builtin_ensure_var_by_symbol(
 /// Argument is a tagged integer that needs to be untagged before use.
 #[unsafe(no_mangle)]
 pub extern "C" fn builtin_load_keyword(tagged_keyword_index: usize) -> usize {
-    unsafe {
-        // Untag the keyword index (shift right by 3)
-        let keyword_index = tagged_keyword_index >> 3;
-        trampoline::trampoline_intern_keyword(keyword_index)
-    }
+    // Untag the keyword index (shift right by 3)
+    let keyword_index = tagged_keyword_index >> 3;
+    trampoline::trampoline_intern_keyword(keyword_index)
 }
 
 // ============================================================================
@@ -158,7 +150,7 @@ pub extern "C" fn builtin_load_keyword(tagged_keyword_index: usize) -> usize {
 /// Returns nil (tagged value 7).
 #[unsafe(no_mangle)]
 pub extern "C" fn builtin_println_value(value: usize) -> usize {
-    unsafe { trampoline::trampoline_println_value(value) }
+    trampoline::trampoline_println_value(value)
 }
 
 /// builtin_print_value(value) -> tagged_value (nil)
@@ -167,7 +159,7 @@ pub extern "C" fn builtin_println_value(value: usize) -> usize {
 /// Returns nil (tagged value 7).
 #[unsafe(no_mangle)]
 pub extern "C" fn builtin_print_value(value: usize) -> usize {
-    unsafe { trampoline::trampoline_print_value(value) }
+    trampoline::trampoline_print_value(value)
 }
 
 /// builtin_newline() -> tagged_value (nil)
@@ -176,7 +168,7 @@ pub extern "C" fn builtin_print_value(value: usize) -> usize {
 /// Returns nil (tagged value 7).
 #[unsafe(no_mangle)]
 pub extern "C" fn builtin_newline() -> usize {
-    unsafe { trampoline::trampoline_newline() }
+    trampoline::trampoline_newline()
 }
 
 /// builtin_print_space() -> tagged_value (nil)
@@ -185,7 +177,7 @@ pub extern "C" fn builtin_newline() -> usize {
 /// Returns nil (tagged value 7).
 #[unsafe(no_mangle)]
 pub extern "C" fn builtin_print_space() -> usize {
-    unsafe { trampoline::trampoline_print_space() }
+    trampoline::trampoline_print_space()
 }
 
 // ============================================================================
@@ -198,7 +190,7 @@ pub extern "C" fn builtin_print_space() -> usize {
 /// Returns nil (tagged value 7).
 #[unsafe(no_mangle)]
 pub extern "C" fn builtin_gc(stack_pointer: usize) -> usize {
-    unsafe { trampoline::trampoline_gc(stack_pointer) }
+    trampoline::trampoline_gc(stack_pointer)
 }
 
 // ============================================================================
@@ -804,7 +796,6 @@ pub extern "C" fn builtin__make_reader_map_0() -> usize {
 pub struct BuiltinDescriptor {
     pub name: &'static str,
     pub function_ptr: usize,
-    pub arity: usize, // Fixed arity (for now, no variadic builtins)
 }
 
 /// Get all builtin function descriptors
@@ -813,270 +804,218 @@ pub fn get_builtin_descriptors() -> Vec<BuiltinDescriptor> {
         BuiltinDescriptor {
             name: "runtime.builtin/load-var-by-symbol",
             function_ptr: builtin_load_var_by_symbol as usize,
-            arity: 2,
         },
         BuiltinDescriptor {
             name: "runtime.builtin/load-var-by-symbol-dynamic",
             function_ptr: builtin_load_var_by_symbol_dynamic as usize,
-            arity: 2,
         },
         BuiltinDescriptor {
             name: "runtime.builtin/store-var-by-symbol",
             function_ptr: builtin_store_var_by_symbol as usize,
-            arity: 3,
         },
         BuiltinDescriptor {
             name: "runtime.builtin/ensure-var-by-symbol",
             function_ptr: builtin_ensure_var_by_symbol as usize,
-            arity: 2,
         },
         BuiltinDescriptor {
             name: "runtime.builtin/load-keyword",
             function_ptr: builtin_load_keyword as usize,
-            arity: 1,
         },
         BuiltinDescriptor {
             name: "runtime.builtin/_println",
             function_ptr: builtin_println_value as usize,
-            arity: 1, // single value
         },
         BuiltinDescriptor {
             name: "runtime.builtin/_print",
             function_ptr: builtin_print_value as usize,
-            arity: 1, // single value
         },
         BuiltinDescriptor {
             name: "runtime.builtin/_newline",
             function_ptr: builtin_newline as usize,
-            arity: 0,
         },
         BuiltinDescriptor {
             name: "runtime.builtin/_print-space",
             function_ptr: builtin_print_space as usize,
-            arity: 0,
         },
         BuiltinDescriptor {
             name: "runtime.builtin/gc",
             function_ptr: builtin_gc as usize,
-            arity: 1, // stack_pointer
         },
         BuiltinDescriptor {
             name: "runtime.builtin/map?",
             function_ptr: builtin_is_map as usize,
-            arity: 1,
         },
         BuiltinDescriptor {
             name: "runtime.builtin/vector?",
             function_ptr: builtin_is_vector as usize,
-            arity: 1,
         },
         // Reader Type Constants (for use in extend-type)
         BuiltinDescriptor {
             name: "__ReaderList",
             function_ptr: builtin__reader_list_type as usize,
-            arity: 0,
         },
         BuiltinDescriptor {
             name: "__ReaderVector",
             function_ptr: builtin__reader_vector_type as usize,
-            arity: 0,
         },
         BuiltinDescriptor {
             name: "__ReaderMap",
             function_ptr: builtin__reader_map_type as usize,
-            arity: 0,
         },
         BuiltinDescriptor {
             name: "__ReaderSymbol",
             function_ptr: builtin__reader_symbol_type as usize,
-            arity: 0,
         },
         // Reader List operations
         BuiltinDescriptor {
             name: "__reader_list_first",
             function_ptr: builtin__reader_list_first as usize,
-            arity: 1,
         },
         BuiltinDescriptor {
             name: "__reader_list_rest",
             function_ptr: builtin__reader_list_rest as usize,
-            arity: 1,
         },
         BuiltinDescriptor {
             name: "__reader_list_count",
             function_ptr: builtin__reader_list_count as usize,
-            arity: 1,
         },
         BuiltinDescriptor {
             name: "__reader_list_conj",
             function_ptr: builtin__reader_list_conj as usize,
-            arity: 2,
         },
         BuiltinDescriptor {
             name: "__reader_list_nth",
             function_ptr: builtin__reader_list_nth as usize,
-            arity: 2,
         },
         // Reader Vector operations
         BuiltinDescriptor {
             name: "__reader_vector_count",
             function_ptr: builtin__reader_vector_count as usize,
-            arity: 1,
         },
         BuiltinDescriptor {
             name: "__reader_vector_nth",
             function_ptr: builtin__reader_vector_nth as usize,
-            arity: 2,
         },
         BuiltinDescriptor {
             name: "__reader_vector_nth_or",
             function_ptr: builtin__reader_vector_nth_or as usize,
-            arity: 3,
         },
         BuiltinDescriptor {
             name: "__reader_vector_conj",
             function_ptr: builtin__reader_vector_conj as usize,
-            arity: 2,
         },
         BuiltinDescriptor {
             name: "__reader_vector_first",
             function_ptr: builtin__reader_vector_first as usize,
-            arity: 1,
         },
         BuiltinDescriptor {
             name: "__reader_vector_rest",
             function_ptr: builtin__reader_vector_rest as usize,
-            arity: 1,
         },
         // Reader Map operations
         BuiltinDescriptor {
             name: "__reader_map_count",
             function_ptr: builtin__reader_map_count as usize,
-            arity: 1,
         },
         BuiltinDescriptor {
             name: "__reader_map_lookup",
             function_ptr: builtin__reader_map_lookup as usize,
-            arity: 3,
         },
         BuiltinDescriptor {
             name: "__reader_map_assoc",
             function_ptr: builtin__reader_map_assoc as usize,
-            arity: 3,
         },
         BuiltinDescriptor {
             name: "__reader_map_keys",
             function_ptr: builtin__reader_map_keys as usize,
-            arity: 1,
         },
         BuiltinDescriptor {
             name: "__reader_map_vals",
             function_ptr: builtin__reader_map_vals as usize,
-            arity: 1,
         },
         // Reader Symbol operations
         BuiltinDescriptor {
             name: "__reader_symbol_name",
             function_ptr: builtin__reader_symbol_name as usize,
-            arity: 1,
         },
         BuiltinDescriptor {
             name: "__reader_symbol_namespace",
             function_ptr: builtin__reader_symbol_namespace as usize,
-            arity: 1,
         },
         // Reader Type predicates
         BuiltinDescriptor {
             name: "__reader_list?",
             function_ptr: builtin__is_reader_list as usize,
-            arity: 1,
         },
         BuiltinDescriptor {
             name: "__reader_vector?",
             function_ptr: builtin__is_reader_vector as usize,
-            arity: 1,
         },
         BuiltinDescriptor {
             name: "__reader_map?",
             function_ptr: builtin__is_reader_map as usize,
-            arity: 1,
         },
         BuiltinDescriptor {
             name: "__reader_symbol?",
             function_ptr: builtin__is_reader_symbol as usize,
-            arity: 1,
         },
         // Reader Type Constructors
         BuiltinDescriptor {
             name: "__make_reader_symbol_1",
             function_ptr: builtin__make_reader_symbol_1 as usize,
-            arity: 1,
         },
         BuiltinDescriptor {
             name: "__make_reader_symbol_2",
             function_ptr: builtin__make_reader_symbol_2 as usize,
-            arity: 2,
         },
         BuiltinDescriptor {
             name: "__make_reader_list_0",
             function_ptr: builtin__make_reader_list_0 as usize,
-            arity: 0,
         },
         BuiltinDescriptor {
             name: "__reader_cons",
             function_ptr: builtin__reader_cons as usize,
-            arity: 2,
         },
         BuiltinDescriptor {
             name: "__reader_list_1",
             function_ptr: builtin__reader_list_1 as usize,
-            arity: 1,
         },
         BuiltinDescriptor {
             name: "__reader_list_2",
             function_ptr: builtin__reader_list_2 as usize,
-            arity: 2,
         },
         BuiltinDescriptor {
             name: "__reader_list_3",
             function_ptr: builtin__reader_list_3 as usize,
-            arity: 3,
         },
         BuiltinDescriptor {
             name: "__reader_list_4",
             function_ptr: builtin__reader_list_4 as usize,
-            arity: 4,
         },
         BuiltinDescriptor {
             name: "__reader_list_5",
             function_ptr: builtin__reader_list_5 as usize,
-            arity: 5,
         },
         BuiltinDescriptor {
             name: "__make_reader_list_from_vec",
             function_ptr: builtin__make_reader_list_from_vec as usize,
-            arity: 1,
         },
         BuiltinDescriptor {
             name: "__make_reader_vector_0",
             function_ptr: builtin__make_reader_vector_0 as usize,
-            arity: 0,
         },
         BuiltinDescriptor {
             name: "__make_reader_vector_from_list",
             function_ptr: builtin__make_reader_vector_from_list as usize,
-            arity: 1,
         },
         BuiltinDescriptor {
             name: "__make_reader_map_0",
             function_ptr: builtin__make_reader_map_0 as usize,
-            arity: 0,
         },
         // Protocol satisfaction check
         BuiltinDescriptor {
             name: "satisfies?",
             function_ptr: builtin_satisfies as usize,
-            arity: 2,
         },
     ]
 }

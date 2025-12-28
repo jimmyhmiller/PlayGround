@@ -2,6 +2,8 @@
 //
 // Provides utilities to walk the stack and find heap pointers
 // using stack map information.
+// Note: Some functions are only used by feature-gated GC implementations.
+#![allow(dead_code)]
 
 use super::StackMap;
 use super::types::BuiltInTypes;

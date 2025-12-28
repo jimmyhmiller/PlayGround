@@ -179,33 +179,12 @@ impl LinearScan {
             Instruction::IntToFloat(dst, src)
             | Instruction::GetTag(dst, src)
             | Instruction::LoadFloat(dst, src)
-            | Instruction::AllocateFloat(dst, src)
             | Instruction::BitNot(dst, src)
             | Instruction::Untag(dst, src) => {
                 if let IrValue::Register(r) = dst {
                     regs.push(*r);
                 }
                 if let IrValue::Register(r) = src {
-                    regs.push(*r);
-                }
-            }
-
-            // Immediate operations (dst, src, immediate)
-            Instruction::AndImm(dst, src, _) | Instruction::ShiftRightImm(dst, src, _) => {
-                if let IrValue::Register(r) = dst {
-                    regs.push(*r);
-                }
-                if let IrValue::Register(r) = src {
-                    regs.push(*r);
-                }
-            }
-
-            // Heap access (dst, ptr, offset)
-            Instruction::HeapLoad(dst, ptr, _) | Instruction::LoadByte(dst, ptr, _) => {
-                if let IrValue::Register(r) = dst {
-                    regs.push(*r);
-                }
-                if let IrValue::Register(r) = ptr {
                     regs.push(*r);
                 }
             }
@@ -227,16 +206,6 @@ impl LinearScan {
                     regs.push(*r);
                 }
                 if let IrValue::Register(r) = src2 {
-                    regs.push(*r);
-                }
-            }
-
-            // InstanceCheck(dst, type_id, value) - type_id is a constant, not a register
-            Instruction::InstanceCheck(dst, _, value) => {
-                if let IrValue::Register(r) = dst {
-                    regs.push(*r);
-                }
-                if let IrValue::Register(r) = value {
                     regs.push(*r);
                 }
             }
@@ -289,30 +258,6 @@ impl LinearScan {
                 // No registers
             }
 
-            Instruction::PushBinding(var_ptr, value) => {
-                if let IrValue::Register(r) = var_ptr {
-                    regs.push(*r);
-                }
-                if let IrValue::Register(r) = value {
-                    regs.push(*r);
-                }
-            }
-
-            Instruction::PopBinding(var_ptr) => {
-                if let IrValue::Register(r) = var_ptr {
-                    regs.push(*r);
-                }
-            }
-
-            Instruction::SetVar(var_ptr, value) => {
-                if let IrValue::Register(r) = var_ptr {
-                    regs.push(*r);
-                }
-                if let IrValue::Register(r) = value {
-                    regs.push(*r);
-                }
-            }
-
             Instruction::MakeFunctionPtr(dst, _code_ptr, closure_values) => {
                 if let IrValue::Register(r) = dst {
                     regs.push(*r);
@@ -347,18 +292,6 @@ impl LinearScan {
                 }
             }
 
-            Instruction::Apply(dst, fn_val, args_seq) => {
-                if let IrValue::Register(r) = dst {
-                    regs.push(*r);
-                }
-                if let IrValue::Register(r) = fn_val {
-                    regs.push(*r);
-                }
-                if let IrValue::Register(r) = args_seq {
-                    regs.push(*r);
-                }
-            }
-
             Instruction::CallWithSaves(dst, target, args, saves) => {
                 if let IrValue::Register(r) = dst {
                     regs.push(*r);
@@ -366,15 +299,6 @@ impl LinearScan {
                 // Extract registers from CallTarget
                 match target {
                     CallTarget::External(_) => {} // No registers in address
-                    CallTarget::Direct(code_ptr, _, arg_count_reg) => {
-                        if let IrValue::Register(r) = code_ptr {
-                            regs.push(*r);
-                        }
-                        if let Some(ac) = arg_count_reg
-                            && let IrValue::Register(r) = ac {
-                                regs.push(*r);
-                            }
-                    }
                     CallTarget::Dynamic(fn_val) => {
                         if let IrValue::Register(r) = fn_val {
                             regs.push(*r);
@@ -393,40 +317,11 @@ impl LinearScan {
                 }
             }
 
-            Instruction::CallDirect(dst, code_ptr, args, _is_closure, arg_count_reg) => {
-                if let IrValue::Register(r) = dst {
-                    regs.push(*r);
-                }
-                if let IrValue::Register(r) = code_ptr {
-                    regs.push(*r);
-                }
-                for arg in args {
-                    if let IrValue::Register(r) = arg {
-                        regs.push(*r);
-                    }
-                }
-                if let Some(ac) = arg_count_reg
-                    && let IrValue::Register(r) = ac {
-                        regs.push(*r);
-                    }
-            }
-
             // NOTE: MakeType/MakeTypeWithSaves have been refactored out.
             // Deftype construction now uses ExternalCall + HeapStore + Tag.
 
             // NOTE: LoadTypeField and StoreTypeField have been refactored out.
             // Field access now uses ExternalCall with pre-interned symbol IDs.
-            Instruction::GcAddRoot(obj) => {
-                if let IrValue::Register(r) = obj {
-                    regs.push(*r);
-                }
-            }
-
-            Instruction::CallGC(dst) => {
-                if let IrValue::Register(r) = dst {
-                    regs.push(*r);
-                }
-            }
 
             // NOTE: Println removed - now uses ExternalCall
 
@@ -447,13 +342,6 @@ impl LinearScan {
 
             Instruction::LoadExceptionLocal(dest, _label) => {
                 if let IrValue::Register(r) = dest {
-                    regs.push(*r);
-                }
-            }
-
-            // Protocol system instructions
-            Instruction::RegisterProtocolMethod(_type_id, _protocol_id, _method_index, fn_ptr) => {
-                if let IrValue::Register(r) = fn_ptr {
                     regs.push(*r);
                 }
             }
@@ -681,12 +569,6 @@ impl LinearScan {
                 replace(src2);
             }
 
-            // InstanceCheck(dst, type_id, value) - type_id is a constant
-            Instruction::InstanceCheck(dst, _, value) => {
-                replace(dst);
-                replace(value);
-            }
-
             Instruction::Tag(dst, src, _) => {
                 replace(dst);
                 replace(src);
@@ -696,22 +578,9 @@ impl LinearScan {
             | Instruction::IntToFloat(dst, src)
             | Instruction::GetTag(dst, src)
             | Instruction::LoadFloat(dst, src)
-            | Instruction::AllocateFloat(dst, src)
             | Instruction::BitNot(dst, src) => {
                 replace(dst);
                 replace(src);
-            }
-
-            // Immediate operations (dst, src, imm)
-            Instruction::AndImm(dst, src, _) | Instruction::ShiftRightImm(dst, src, _) => {
-                replace(dst);
-                replace(src);
-            }
-
-            // Heap access (dst, ptr, offset)
-            Instruction::HeapLoad(dst, ptr, _) | Instruction::LoadByte(dst, ptr, _) => {
-                replace(dst);
-                replace(ptr);
             }
 
             Instruction::HeapStore(ptr, _, value) => {
@@ -745,20 +614,6 @@ impl LinearScan {
                 // No registers
             }
 
-            Instruction::PushBinding(var_ptr, value) => {
-                replace(var_ptr);
-                replace(value);
-            }
-
-            Instruction::PopBinding(var_ptr) => {
-                replace(var_ptr);
-            }
-
-            Instruction::SetVar(var_ptr, value) => {
-                replace(var_ptr);
-                replace(value);
-            }
-
             Instruction::MakeFunctionPtr(dst, _code_ptr, closure_values) => {
                 replace(dst);
                 for val in closure_values {
@@ -779,23 +634,11 @@ impl LinearScan {
                 }
             }
 
-            Instruction::Apply(dst, fn_val, args_seq) => {
-                replace(dst);
-                replace(fn_val);
-                replace(args_seq);
-            }
-
             Instruction::CallWithSaves(dst, target, args, saves) => {
                 replace(dst);
                 // Replace registers in CallTarget
                 match target {
                     CallTarget::External(_) => {} // No registers in address
-                    CallTarget::Direct(code_ptr, _, arg_count_reg) => {
-                        replace(code_ptr);
-                        if let Some(ac) = arg_count_reg {
-                            replace(ac);
-                        }
-                    }
                     CallTarget::Dynamic(fn_val) => {
                         replace(fn_val);
                     }
@@ -808,26 +651,8 @@ impl LinearScan {
                 }
             }
 
-            Instruction::CallDirect(dst, code_ptr, args, _is_closure, arg_count_reg) => {
-                replace(dst);
-                replace(code_ptr);
-                for arg in args {
-                    replace(arg);
-                }
-                if let Some(ac) = arg_count_reg {
-                    replace(ac);
-                }
-            }
-
             // NOTE: MakeType/MakeTypeWithSaves removed - now use ExternalCall + HeapStore + Tag
             // NOTE: LoadTypeField/StoreTypeField removed - now use ExternalCall with symbol IDs
-            Instruction::GcAddRoot(obj) => {
-                replace(obj);
-            }
-
-            Instruction::CallGC(dst) => {
-                replace(dst);
-            }
 
             // NOTE: Println removed - now uses ExternalCall
 
@@ -846,11 +671,6 @@ impl LinearScan {
 
             Instruction::LoadExceptionLocal(dest, _slot) => {
                 replace(dest);
-            }
-
-            // Protocol system instructions
-            Instruction::RegisterProtocolMethod(_type_id, _protocol_id, _method_index, fn_ptr) => {
-                replace(fn_ptr);
             }
 
             // External calls (trampolines)
@@ -1057,12 +877,6 @@ impl LinearScan {
                 replace(src2);
             }
 
-            // InstanceCheck(dst, type_id, value) - type_id is a constant
-            Instruction::InstanceCheck(dst, _, value) => {
-                replace(dst);
-                replace(value);
-            }
-
             Instruction::Tag(dst, src, _) => {
                 replace(dst);
                 replace(src);
@@ -1072,22 +886,9 @@ impl LinearScan {
             | Instruction::IntToFloat(dst, src)
             | Instruction::GetTag(dst, src)
             | Instruction::LoadFloat(dst, src)
-            | Instruction::AllocateFloat(dst, src)
             | Instruction::BitNot(dst, src) => {
                 replace(dst);
                 replace(src);
-            }
-
-            // Immediate operations (dst, src, imm)
-            Instruction::AndImm(dst, src, _) | Instruction::ShiftRightImm(dst, src, _) => {
-                replace(dst);
-                replace(src);
-            }
-
-            // Heap access (dst, ptr, offset)
-            Instruction::HeapLoad(dst, ptr, _) | Instruction::LoadByte(dst, ptr, _) => {
-                replace(dst);
-                replace(ptr);
             }
 
             Instruction::HeapStore(ptr, _, value) => {
@@ -1121,20 +922,6 @@ impl LinearScan {
                 // No registers to replace
             }
 
-            Instruction::PushBinding(var_ptr, value) => {
-                replace(var_ptr);
-                replace(value);
-            }
-
-            Instruction::PopBinding(var_ptr) => {
-                replace(var_ptr);
-            }
-
-            Instruction::SetVar(var_ptr, value) => {
-                replace(var_ptr);
-                replace(value);
-            }
-
             Instruction::MakeFunctionPtr(dst, _code_ptr, closure_values) => {
                 replace(dst);
                 for val in closure_values {
@@ -1155,23 +942,11 @@ impl LinearScan {
                 }
             }
 
-            Instruction::Apply(dst, fn_val, args_seq) => {
-                replace(dst);
-                replace(fn_val);
-                replace(args_seq);
-            }
-
             Instruction::CallWithSaves(dst, target, args, saves) => {
                 replace(dst);
                 // Replace registers in CallTarget
                 match target {
                     CallTarget::External(_) => {} // No registers in address
-                    CallTarget::Direct(code_ptr, _, arg_count_reg) => {
-                        replace(code_ptr);
-                        if let Some(ac) = arg_count_reg {
-                            replace(ac);
-                        }
-                    }
                     CallTarget::Dynamic(fn_val) => {
                         replace(fn_val);
                     }
@@ -1184,26 +959,8 @@ impl LinearScan {
                 }
             }
 
-            Instruction::CallDirect(dst, code_ptr, args, _is_closure, arg_count_reg) => {
-                replace(dst);
-                replace(code_ptr);
-                for arg in args {
-                    replace(arg);
-                }
-                if let Some(ac) = arg_count_reg {
-                    replace(ac);
-                }
-            }
-
             // NOTE: MakeType/MakeTypeWithSaves removed - now use ExternalCall + HeapStore + Tag
             // NOTE: LoadTypeField/StoreTypeField removed - now use ExternalCall with symbol IDs
-            Instruction::GcAddRoot(obj) => {
-                replace(obj);
-            }
-
-            Instruction::CallGC(dst) => {
-                replace(dst);
-            }
 
             // NOTE: Println removed - now uses ExternalCall
 
@@ -1222,11 +979,6 @@ impl LinearScan {
 
             Instruction::LoadExceptionLocal(dest, _slot) => {
                 replace(dest);
-            }
-
-            // Protocol system instructions
-            Instruction::RegisterProtocolMethod(_type_id, _protocol_id, _method_index, fn_ptr) => {
-                replace(fn_ptr);
             }
 
             // External calls (trampolines)

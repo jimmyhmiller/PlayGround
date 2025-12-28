@@ -118,18 +118,6 @@ impl<Alloc: Allocator> Allocator for MutexAllocator<Alloc> {
         drop(lock);
         result
     }
-
-    fn get_allocation_options(&self) -> AllocatorOptions {
-        self.options
-    }
-
-    fn register_thread(&mut self, _thread_id: std::thread::ThreadId) {
-        self.registered_threads += 1;
-    }
-
-    fn remove_thread(&mut self, _thread_id: std::thread::ThreadId) {
-        self.registered_threads -= 1;
-    }
 }
 
 // HeapInspector for MutexAllocator - delegates to inner allocator
@@ -144,9 +132,5 @@ impl<Alloc: Allocator + HeapInspector> HeapInspector for MutexAllocator<Alloc> {
 
     fn contains_address(&self, addr: usize) -> bool {
         self.alloc.contains_address(addr)
-    }
-
-    fn get_roots(&self) -> &[(usize, usize)] {
-        self.alloc.get_roots()
     }
 }

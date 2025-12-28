@@ -7,6 +7,9 @@
 
 import React, { memo, useCallback, useState, useEffect, useMemo, useRef, type ReactElement } from 'react';
 import { useBackendStateSelector, useDispatch, useBackendState } from '../hooks/useBackendState';
+import { useEventSubscription, useEmit, useEventReducer } from '../hooks/useEvents';
+import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, LineChart, Line } from 'recharts';
+// DashboardEvent type used indirectly via event hooks
 
 // ========== Selector Functions ==========
 
@@ -527,6 +530,310 @@ export const EvalWidget = memo(function EvalWidget({
   }
 });
 
+// ========== Event-Driven Widgets ==========
+
+/**
+ * ChartWidget - Renders a chart from event data
+ *
+ * Subscribes to events matching `subscribePattern`, extracts data using `dataKey`,
+ * and renders as a bar or line chart.
+ */
+export interface ChartWidgetProps {
+  /** Event pattern to subscribe to */
+  subscribePattern: string;
+  /** Key to extract numeric value from event payload */
+  dataKey?: string;
+  /** Key to extract label from event payload */
+  labelKey?: string;
+  /** Chart type */
+  chartType?: 'bar' | 'line';
+  /** Max data points to show */
+  maxPoints?: number;
+  /** Chart height */
+  height?: number;
+  /** Title */
+  title?: string;
+}
+
+export const ChartWidget = memo(function ChartWidget({
+  subscribePattern,
+  dataKey = 'value',
+  labelKey = 'name',
+  chartType = 'bar',
+  maxPoints = 20,
+  height = 150,
+  title,
+}: ChartWidgetProps): ReactElement {
+  const events = useEventSubscription(subscribePattern, { maxEvents: maxPoints });
+
+  const chartData = useMemo(() => {
+    return events.map((event, index) => {
+      const payload = event.payload as Record<string, unknown>;
+      return {
+        name: payload[labelKey] ?? `#${index + 1}`,
+        value: typeof payload[dataKey] === 'number' ? payload[dataKey] : 0,
+      };
+    });
+  }, [events, dataKey, labelKey]);
+
+  if (chartData.length === 0) {
+    return (
+      <div style={{ ...baseWidgetStyle, color: 'var(--theme-text-muted)', textAlign: 'center' }}>
+        Waiting for {subscribePattern} events...
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ ...baseWidgetStyle, padding: 0 }}>
+      {title && (
+        <div style={{ padding: '8px 12px', fontSize: '0.8em', color: 'var(--theme-text-muted)', borderBottom: '1px solid var(--theme-border-primary)' }}>
+          {title}
+        </div>
+      )}
+      <ResponsiveContainer width="100%" height={height}>
+        {chartType === 'bar' ? (
+          <BarChart data={chartData} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
+            <XAxis dataKey="name" tick={{ fontSize: 10, fill: 'var(--theme-text-muted)' }} />
+            <YAxis tick={{ fontSize: 10, fill: 'var(--theme-text-muted)' }} />
+            <Tooltip contentStyle={{ background: 'var(--theme-bg-elevated)', border: '1px solid var(--theme-border-primary)' }} />
+            <Bar dataKey="value" fill="var(--theme-accent-primary)" />
+          </BarChart>
+        ) : (
+          <LineChart data={chartData} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
+            <XAxis dataKey="name" tick={{ fontSize: 10, fill: 'var(--theme-text-muted)' }} />
+            <YAxis tick={{ fontSize: 10, fill: 'var(--theme-text-muted)' }} />
+            <Tooltip contentStyle={{ background: 'var(--theme-bg-elevated)', border: '1px solid var(--theme-border-primary)' }} />
+            <Line type="monotone" dataKey="value" stroke="var(--theme-accent-primary)" dot={false} />
+          </LineChart>
+        )}
+      </ResponsiveContainer>
+    </div>
+  );
+});
+
+/**
+ * TableWidget - Renders a table from event data
+ *
+ * Subscribes to events and displays payload fields as columns.
+ */
+export interface TableWidgetProps {
+  /** Event pattern to subscribe to */
+  subscribePattern: string;
+  /** Columns to display (keys from payload) */
+  columns: string[];
+  /** Column headers (optional, defaults to column keys) */
+  headers?: string[];
+  /** Max rows to show */
+  maxRows?: number;
+  /** Title */
+  title?: string;
+}
+
+export const TableWidget = memo(function TableWidget({
+  subscribePattern,
+  columns,
+  headers,
+  maxRows = 10,
+  title,
+}: TableWidgetProps): ReactElement {
+  const events = useEventSubscription(subscribePattern, { maxEvents: maxRows });
+
+  const displayHeaders = headers ?? columns;
+
+  return (
+    <div style={{ ...baseWidgetStyle, padding: 0 }}>
+      {title && (
+        <div style={{ padding: '8px 12px', fontSize: '0.8em', color: 'var(--theme-text-muted)', borderBottom: '1px solid var(--theme-border-primary)' }}>
+          {title}
+        </div>
+      )}
+      <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.85em' }}>
+        <thead>
+          <tr>
+            {displayHeaders.map((h, i) => (
+              <th key={i} style={{ padding: '6px 8px', textAlign: 'left', borderBottom: '1px solid var(--theme-border-primary)', color: 'var(--theme-text-muted)', fontWeight: 500 }}>
+                {h}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {events.length === 0 ? (
+            <tr>
+              <td colSpan={columns.length} style={{ padding: '12px', textAlign: 'center', color: 'var(--theme-text-muted)' }}>
+                Waiting for events...
+              </td>
+            </tr>
+          ) : (
+            events.map((event, i) => {
+              const payload = event.payload as Record<string, unknown>;
+              return (
+                <tr key={event.id ?? i}>
+                  {columns.map((col, j) => (
+                    <td key={j} style={{ padding: '6px 8px', borderBottom: '1px solid var(--theme-border-primary)' }}>
+                      {formatCellValue(payload[col])}
+                    </td>
+                  ))}
+                </tr>
+              );
+            })
+          )}
+        </tbody>
+      </table>
+    </div>
+  );
+});
+
+function formatCellValue(value: unknown): string {
+  if (value === null || value === undefined) return '-';
+  if (typeof value === 'number') return value.toFixed(3);
+  if (typeof value === 'boolean') return value ? 'true' : 'false';
+  return String(value);
+}
+
+/**
+ * StatsWidget - Computes statistics from numeric events and emits results
+ *
+ * Subscribes to events, computes mean/min/max/count, and emits stats events.
+ */
+export interface StatsWidgetProps {
+  /** Event pattern to subscribe to */
+  subscribePattern: string;
+  /** Key to extract numeric value from payload */
+  dataKey?: string;
+  /** Event type to emit with computed stats */
+  emitAs?: string;
+  /** Window size for stats computation */
+  windowSize?: number;
+  /** Show stats inline */
+  showStats?: boolean;
+}
+
+interface StatsState {
+  values: number[];
+  count: number;
+  sum: number;
+  min: number;
+  max: number;
+}
+
+export const StatsWidget = memo(function StatsWidget({
+  subscribePattern,
+  dataKey = 'value',
+  emitAs,
+  windowSize = 100,
+  showStats = true,
+}: StatsWidgetProps): ReactElement | null {
+  const emit = useEmit();
+
+  const stats = useEventReducer<StatsState>(
+    subscribePattern,
+    (state, event) => {
+      const payload = event.payload as Record<string, unknown>;
+      const value = typeof payload[dataKey] === 'number' ? payload[dataKey] as number : NaN;
+
+      if (isNaN(value)) return state;
+
+      const values = [...state.values, value].slice(-windowSize);
+      const count = state.count + 1;
+      const sum = state.sum + value;
+      const min = Math.min(state.min, value);
+      const max = Math.max(state.max, value);
+
+      return { values, count, sum, min, max };
+    },
+    { values: [], count: 0, sum: 0, min: Infinity, max: -Infinity }
+  );
+
+  const mean = stats.count > 0 ? stats.sum / stats.count : 0;
+  const windowMean = stats.values.length > 0
+    ? stats.values.reduce((a, b) => a + b, 0) / stats.values.length
+    : 0;
+
+  // Emit stats when they change
+  useEffect(() => {
+    if (emitAs && stats.count > 0) {
+      emit(emitAs, {
+        count: stats.count,
+        mean,
+        windowMean,
+        min: stats.min === Infinity ? 0 : stats.min,
+        max: stats.max === -Infinity ? 0 : stats.max,
+        windowSize: stats.values.length,
+      });
+    }
+  }, [emitAs, emit, stats.count, mean, windowMean, stats.min, stats.max, stats.values.length]);
+
+  if (!showStats) return null;
+
+  return (
+    <div style={{ ...baseWidgetStyle, display: 'flex', gap: '16px', fontSize: '0.85em' }}>
+      <div>
+        <span style={{ color: 'var(--theme-text-muted)' }}>n:</span> {stats.count}
+      </div>
+      <div>
+        <span style={{ color: 'var(--theme-text-muted)' }}>mean:</span> {mean.toFixed(3)}
+      </div>
+      <div>
+        <span style={{ color: 'var(--theme-text-muted)' }}>min:</span> {stats.min === Infinity ? '-' : stats.min.toFixed(3)}
+      </div>
+      <div>
+        <span style={{ color: 'var(--theme-text-muted)' }}>max:</span> {stats.max === -Infinity ? '-' : stats.max.toFixed(3)}
+      </div>
+    </div>
+  );
+});
+
+/**
+ * TransformWidget - Subscribes to events, transforms payload, emits new events
+ *
+ * A pure data transformer - no UI.
+ */
+export interface TransformWidgetProps {
+  /** Event pattern to subscribe to */
+  subscribePattern: string;
+  /** Event type to emit */
+  emitAs: string;
+  /** Transform function as a string (receives payload, returns new payload) */
+  transform: string;
+}
+
+export const TransformWidget = memo(function TransformWidget({
+  subscribePattern,
+  emitAs,
+  transform,
+}: TransformWidgetProps): ReactElement | null {
+  const emit = useEmit();
+
+  useEffect(() => {
+    // Create transform function
+    let transformFn: (payload: unknown) => unknown;
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-implied-eval
+      transformFn = new Function('payload', `return (${transform})(payload)`) as (payload: unknown) => unknown;
+    } catch (err) {
+      console.error('[TransformWidget] Invalid transform:', err);
+      return;
+    }
+
+    const unsubscribe = window.eventAPI.subscribe(subscribePattern, (event) => {
+      try {
+        const result = transformFn(event.payload);
+        if (result !== undefined) {
+          emit(emitAs, result);
+        }
+      } catch (err) {
+        console.error('[TransformWidget] Transform error:', err);
+      }
+    });
+
+    return unsubscribe;
+  }, [subscribePattern, emitAs, transform, emit]);
+
+  return null; // No UI - pure transformer
+});
+
 // ========== Widget Type Registry ==========
 
 export interface WidgetTypeConfig {
@@ -553,5 +860,21 @@ export const WIDGET_TYPES: Record<string, WidgetTypeConfig> = {
   'eval': {
     component: EvalWidget as unknown as React.ComponentType<Record<string, unknown>>,
     defaultProps: {},
+  },
+  'chart': {
+    component: ChartWidget as unknown as React.ComponentType<Record<string, unknown>>,
+    defaultProps: { subscribePattern: 'data.**', dataKey: 'value', chartType: 'bar' },
+  },
+  'table': {
+    component: TableWidget as unknown as React.ComponentType<Record<string, unknown>>,
+    defaultProps: { subscribePattern: 'data.**', columns: ['value'] },
+  },
+  'stats': {
+    component: StatsWidget as unknown as React.ComponentType<Record<string, unknown>>,
+    defaultProps: { subscribePattern: 'data.**', dataKey: 'value', showStats: true },
+  },
+  'transform': {
+    component: TransformWidget as unknown as React.ComponentType<Record<string, unknown>>,
+    defaultProps: { subscribePattern: 'data.**', emitAs: 'transformed', transform: '(p) => p' },
   },
 };

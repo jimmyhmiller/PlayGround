@@ -245,6 +245,12 @@ impl<'a> Reader<'a> {
             return Ok(Value::Symbol(symbol));
         }
 
+        // Skip namespace resolution for ... (vararg indicator)
+        if token.lexeme == "..." {
+            let symbol = Symbol::new("...");
+            return Ok(Value::Symbol(symbol));
+        }
+
         // Resolve namespace for the symbol
         let namespace = self.namespace_scope.resolve_symbol(&token.lexeme)
             .map_err(|unknown_dialect| {

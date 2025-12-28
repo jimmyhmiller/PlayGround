@@ -980,18 +980,61 @@ impl<'c> IRGenerator<'c> {
                 Ok(TypeAttribute::new(mlir_type).into())
             }
             AttributeValue::FunctionType(ft) => {
-                let mut input_types = Vec::new();
-                let mut result_types = Vec::new();
+                // For vararg functions (LLVM dialect), we need to use !llvm.func<ret (args, ...)>
+                if ft.is_vararg {
+                    // Build type string like "!llvm.func<i32 (ptr, ...)>"
+                    // Note: LLVM types use 'ptr' not '!llvm.ptr' inside the func type
+                    let args_str = ft.arg_types.iter()
+                        .map(|t| {
+                            // Convert !llvm.ptr to ptr for LLVM function type syntax
+                            if t.name == "!llvm.ptr" {
+                                "ptr".to_string()
+                            } else {
+                                t.name.clone()
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ");
 
-                for t in &ft.arg_types {
-                    input_types.push(self.parse_type(&t.name)?);
-                }
-                for t in &ft.return_types {
-                    result_types.push(self.parse_type(&t.name)?);
-                }
+                    // Add ... for vararg
+                    let args_with_vararg = if !args_str.is_empty() {
+                        format!("{}, ...", args_str)
+                    } else {
+                        "...".to_string()
+                    };
 
-                let func_type = FunctionType::new(context, &input_types, &result_types);
-                Ok(TypeAttribute::new(func_type.into()).into())
+                    let returns_str = if ft.return_types.is_empty() {
+                        "void".to_string()
+                    } else if ft.return_types.len() == 1 {
+                        ft.return_types[0].name.clone()
+                    } else {
+                        // Multiple returns - not common in LLVM
+                        ft.return_types.iter()
+                            .map(|t| t.name.clone())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    };
+
+                    let type_str = format!("!llvm.func<{} ({})>", returns_str, args_with_vararg);
+
+                    // Parse as LLVM function type
+                    let mlir_type = Type::parse(context, &type_str)
+                        .ok_or_else(|| GeneratorError::TypeParseError(format!("Invalid vararg function type: {}", type_str)))?;
+                    Ok(TypeAttribute::new(mlir_type).into())
+                } else {
+                    let mut input_types = Vec::new();
+                    let mut result_types = Vec::new();
+
+                    for t in &ft.arg_types {
+                        input_types.push(self.parse_type(&t.name)?);
+                    }
+                    for t in &ft.return_types {
+                        result_types.push(self.parse_type(&t.name)?);
+                    }
+
+                    let func_type = FunctionType::new(context, &input_types, &result_types);
+                    Ok(TypeAttribute::new(func_type.into()).into())
+                }
             }
             AttributeValue::Array(arr) => {
                 let mut attrs: Vec<Attribute<'c>> = Vec::new();

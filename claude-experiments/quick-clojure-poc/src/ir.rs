@@ -22,12 +22,6 @@ pub enum CallTarget {
     /// Args go in x0-x7
     External(usize),
 
-    /// Known code pointer in a register (after dispatch is resolved)
-    /// (code_ptr_value, is_closure, arg_count_reg)
-    /// If is_closure: x0=closure, x1-x7=user args, x9=arg_count
-    /// If not closure: x0-x7=args
-    Direct(IrValue, bool, Option<IrValue>),
-
     /// Dynamic dispatch - must check tag at runtime
     /// Handles: raw functions (0b100), closures (0b101), IFn objects (other)
     Dynamic(IrValue),
@@ -122,19 +116,9 @@ pub enum Instruction {
     BitShiftRight(IrValue, IrValue, IrValue), // dst, src, amount (arithmetic/signed)
     UnsignedBitShiftRight(IrValue, IrValue, IrValue), // dst, src, amount (logical/unsigned)
 
-    // Immediate bitwise/shift operations (for internal use, e.g., tag extraction)
-    /// AndImm(dst, src, mask) - dst = src & mask (immediate AND)
-    AndImm(IrValue, IrValue, u64),
-    /// ShiftRightImm(dst, src, amount) - dst = src >> amount (logical shift right by immediate)
-    ShiftRightImm(IrValue, IrValue, i32),
-
     // Memory operations (for heap access)
-    /// HeapLoad(dst, ptr, offset) - dst = *(ptr + offset*8) - load 64-bit value from heap
-    HeapLoad(IrValue, IrValue, i32),
     /// HeapStore(ptr, offset, value) - *(ptr + offset*8) = value - store 64-bit value to heap
     HeapStore(IrValue, i32, IrValue),
-    /// LoadByte(dst, ptr, offset) - dst = *(u8*)(ptr + offset) - load single byte
-    LoadByte(IrValue, IrValue, i32),
 
     // Float Arithmetic (work on raw f64 bits in registers)
     AddFloat(IrValue, IrValue, IrValue), // dst, src1, src2 - f64 addition
@@ -145,7 +129,6 @@ pub enum Instruction {
 
     // Float heap operations (floats are heap-allocated)
     LoadFloat(IrValue, IrValue), // dst, src - load f64 from heap float pointer
-    AllocateFloat(IrValue, IrValue), // dst, src - allocate heap float with f64 value, returns tagged ptr
 
     // Type tag extraction
     GetTag(IrValue, IrValue), // dst, src - extract tag bits (last 3 bits)
@@ -165,11 +148,6 @@ pub enum Instruction {
     // See builtins.rs for implementations.
     LoadTrue(IrValue),
     LoadFalse(IrValue),
-
-    // Dynamic var bindings
-    PushBinding(IrValue, IrValue), // PushBinding(var_ptr, value) - push thread-local binding
-    PopBinding(IrValue),           // PopBinding(var_ptr) - pop thread-local binding
-    SetVar(IrValue, IrValue), // SetVar(var_ptr, value) - modify thread-local binding (for set!)
 
     // Control flow
     Label(Label),
@@ -196,11 +174,6 @@ pub enum Instruction {
     /// args: arguments to pass
     /// saves: registers to save/restore across the call
     CallWithSaves(IrValue, CallTarget, Vec<IrValue>, Vec<IrValue>),
-
-    /// CallDirect(dst, code_ptr, args, is_closure, arg_count_reg)
-    /// Low-level call with pre-computed code pointer (no tag checking).
-    /// NOTE: For non-tail calls, use CallWithSaves with CallTarget::Direct instead.
-    CallDirect(IrValue, IrValue, Vec<IrValue>, bool, Option<IrValue>),
 
     // Multi-arity function operations
     /// MakeMultiArityFn(dst, arities, variadic_min, variadic_index, closure_values)
@@ -234,27 +207,11 @@ pub enum Instruction {
     // Field access now uses ExternalCall to trampoline_load_type_field_by_symbol with
     // pre-interned symbol IDs, eliminating stack-based string passing.
 
-    // Write barrier for generational GC
-    /// GcAddRoot(obj) - register object with GC write barrier
-    /// Must be called before storing a pointer to a mutable field
-    /// Adds object to the remembered set for generational GC
-    GcAddRoot(IrValue),
-
     // Return
     Ret(IrValue),
 
-    // Apply - call function with args from a list/seq
-    /// Apply(dst, fn_value, args_list)
-    /// Calls fn_value with arguments extracted from args_list at runtime.
-    /// The args_list can be any seq-able (list, vector, etc.).
-    /// This is implemented via a trampoline that handles the dynamic dispatch.
-    Apply(IrValue, IrValue, IrValue),
-
     // Debug
     Breakpoint, // BRK #0 - trap for debugger
-
-    // GC
-    CallGC(IrValue), // CallGC(dst) - force garbage collection, returns nil
 
     // NOTE: Println has been refactored out - now uses ExternalCall to trampoline_println_regs
     // The trampoline takes (count, v0, v1, v2, v3, v4, v5, v6) in registers, up to 7 values.
@@ -289,17 +246,6 @@ pub enum Instruction {
     /// AssertPost(condition_value, condition_index)
     /// Like AssertPre but for post-conditions
     AssertPost(IrValue, usize),
-
-    // Protocol system
-    /// RegisterProtocolMethod(type_id, protocol_id, method_index, fn_ptr)
-    /// Registers a method implementation in the protocol vtable
-    RegisterProtocolMethod(usize, usize, usize, IrValue),
-
-    // Type checking
-    /// InstanceCheck(dst, expected_type_id, value) - check if value is an instance of type
-    /// expected_type_id: full type ID (deftype ID + DEFTYPE_ID_OFFSET)
-    /// Returns tagged boolean (true if match, false otherwise)
-    InstanceCheck(IrValue, usize, IrValue),
 
     // External calls (for trampolines)
     /// ExternalCall(dst, func_addr, args) - call a known function address

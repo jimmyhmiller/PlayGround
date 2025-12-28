@@ -284,10 +284,6 @@ impl Allocator for CompactingHeap {
     fn get_namespace_relocations(&mut self) -> Vec<(usize, Vec<(usize, usize)>)> {
         self.namespace_relocations.drain(0..).collect()
     }
-
-    fn get_allocation_options(&self) -> AllocatorOptions {
-        self.options
-    }
 }
 
 // ========== Heap Inspection ==========
@@ -337,9 +333,5 @@ impl HeapInspector for CompactingHeap {
 
     fn contains_address(&self, addr: usize) -> bool {
         self.from_space.contains(addr as *const u8) || self.to_space.contains(addr as *const u8)
-    }
-
-    fn get_roots(&self) -> &[(usize, usize)] {
-        &self.namespace_roots
     }
 }

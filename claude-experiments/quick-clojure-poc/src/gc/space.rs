@@ -1,6 +1,8 @@
 // Space - mmap-backed memory management for GC
 //
 // This provides the memory space abstraction used by all GC algorithms.
+// Note: Some methods are only used by feature-gated GC implementations.
+#![allow(dead_code)]
 
 use std::{ffi::c_void, io};
 
@@ -16,8 +18,10 @@ pub const MAX_PAGE_COUNT: usize = 1000000;
 pub struct Space {
     pub start: *const u8,
     pub page_count: usize,
+    #[allow(dead_code)] // Used by feature-gated GC implementations
     pub allocation_offset: usize,
     pub highmark: usize,
+    #[allow(dead_code)] // Used by feature-gated GC implementations
     pub protected: bool,
 }
 
@@ -37,11 +41,13 @@ impl Space {
             )
         };
 
-        Self::commit_memory(
-            pre_allocated_space,
-            default_page_count * unsafe { vm_page_size },
-        )
-        .unwrap();
+        unsafe {
+            Self::commit_memory(
+                pre_allocated_space,
+                default_page_count * vm_page_size,
+            )
+            .unwrap();
+        }
 
         Self {
             start: pre_allocated_space as *const u8,
@@ -52,13 +58,13 @@ impl Space {
         }
     }
 
-    pub fn commit_memory(addr: *mut c_void, size: usize) -> Result<(), io::Error> {
-        unsafe {
-            if mprotect(addr, size, libc::PROT_READ | libc::PROT_WRITE) != 0 {
-                Err(io::Error::last_os_error())
-            } else {
-                Ok(())
-            }
+    /// # Safety
+    /// Caller must ensure that `addr` is a valid pointer to `size` bytes of memory.
+    pub unsafe fn commit_memory(addr: *mut c_void, size: usize) -> Result<(), io::Error> {
+        if mprotect(addr, size, libc::PROT_READ | libc::PROT_WRITE) != 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(())
         }
     }
 
@@ -163,11 +169,13 @@ impl Space {
 
     pub fn double_committed_memory(&mut self) {
         let new_page_count = self.page_count * 2;
-        Self::commit_memory(
-            self.start as *mut c_void,
-            new_page_count * unsafe { vm_page_size },
-        )
-        .unwrap();
+        unsafe {
+            Self::commit_memory(
+                self.start as *mut c_void,
+                new_page_count * vm_page_size,
+            )
+            .unwrap();
+        }
         self.page_count = new_page_count;
     }
 

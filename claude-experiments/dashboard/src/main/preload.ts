@@ -79,6 +79,56 @@ contextBridge.exposeInMainWorld('gitAPI', {
   unstage: (filePath: string): Promise<{ success: boolean }> => ipcRenderer.invoke('git:unstage', filePath),
 });
 
+// Evaluation API for renderer - code execution service
+contextBridge.exposeInMainWorld('evalAPI', {
+  // Execute a single code snippet
+  execute: (
+    code: string,
+    language: 'javascript' | 'typescript' = 'javascript',
+    context?: Record<string, unknown>
+  ): Promise<{
+    id: string;
+    success: boolean;
+    value?: unknown;
+    displayValue: string;
+    type: string;
+    executionTimeMs: number;
+    error?: string;
+  }> => ipcRenderer.invoke('eval:execute', code, language, context),
+
+  // Execute multiple code snippets (for benchmarking)
+  batch: (
+    requests: Array<{
+      id: string;
+      code: string;
+      language: 'javascript' | 'typescript';
+      context?: Record<string, unknown>;
+      timeout?: number;
+    }>
+  ): Promise<
+    Array<{
+      id: string;
+      success: boolean;
+      value?: unknown;
+      displayValue: string;
+      type: string;
+      executionTimeMs: number;
+      error?: string;
+    }>
+  > => ipcRenderer.invoke('eval:batch', requests),
+
+  // Run a benchmark
+  benchmark: (
+    code: string,
+    iterations?: number,
+    warmupIterations?: number,
+    context?: Record<string, unknown>
+  ): Promise<{
+    runs: Array<{ iteration: number; executionTimeMs: number; success: boolean }>;
+    stats: { mean: number; median: number; stdDev: number; min: number; max: number };
+  }> => ipcRenderer.invoke('eval:benchmark', code, iterations, warmupIterations, context),
+});
+
 // State API for renderer - backend-driven state management
 contextBridge.exposeInMainWorld('stateAPI', {
   // Get state at path (or full state if no path)

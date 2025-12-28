@@ -17,6 +17,10 @@ import EventLogPanel from './EventLogPanel';
 import ThemeEditor from './ThemeEditor';
 import SettingsEditor from './SettingsEditor';
 import { GlobalUIRenderer } from '../globalUI';
+import InlineEvalEditor from './InlineEvalEditor';
+import BenchmarkPanel from './BenchmarkPanel';
+import RouteView from './RouteView';
+import './lighttable.css';
 
 interface ComponentConfig {
   component: ComponentType<unknown>;
@@ -71,6 +75,30 @@ const COMPONENT_REGISTRY: Record<string, ComponentConfig> = {
     defaultProps: {},
     width: 300,
     height: 280,
+  },
+  'inline-eval': {
+    component: InlineEvalEditor as ComponentType<unknown>,
+    label: 'Inline Eval',
+    icon: '>',
+    defaultProps: { language: 'javascript' },
+    width: 700,
+    height: 500,
+  },
+  'benchmark': {
+    component: BenchmarkPanel as ComponentType<unknown>,
+    label: 'Benchmark',
+    icon: '~',
+    defaultProps: { iterations: 100 },
+    width: 900,
+    height: 700,
+  },
+  'route-view': {
+    component: RouteView as ComponentType<unknown>,
+    label: 'Route View',
+    icon: '/',
+    defaultProps: {},
+    width: 800,
+    height: 600,
   },
 };
 

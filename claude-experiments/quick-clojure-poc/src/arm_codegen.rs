@@ -13,10 +13,6 @@ pub struct CompiledFunction {
     pub code_len: usize,
     /// Stack map entries: (absolute_pc, stack_size)
     pub stack_map: Vec<(usize, usize)>,
-    /// Number of locals/parameters
-    pub num_locals: usize,
-    /// Maximum stack size
-    pub max_stack_size: usize,
 }
 
 /// ARM64 code generator - compiles IR to ARM64 machine code
@@ -28,9 +24,6 @@ pub struct Arm64CodeGen {
 
     /// Map from virtual registers to physical ARM64 registers (from linear scan)
     register_map: BTreeMap<VirtualRegister, VirtualRegister>,
-
-    /// Next physical register to allocate
-    next_physical_reg: usize,
 
     /// Map from labels to code positions (for fixups)
     label_positions: HashMap<Label, usize>,
@@ -97,7 +90,6 @@ impl Arm64CodeGen {
         Arm64CodeGen {
             code: Vec::new(),
             register_map: BTreeMap::new(),
-            next_physical_reg: 0,
             label_positions: HashMap::new(),
             pending_fixups: Vec::new(),
             pending_adr_fixups: Vec::new(),
@@ -248,8 +240,6 @@ impl Arm64CodeGen {
             code_ptr,
             code_len: codegen.code.len(),
             stack_map,
-            num_locals,
-            max_stack_size: codegen.max_stack_size, // Total frame size in words
         })
     }
 
@@ -391,49 +381,12 @@ impl Arm64CodeGen {
                 self.store_spill(dst_reg, dest_spill);
             }
 
-            // Immediate bitwise/shift operations
-            Instruction::AndImm(dst, src, mask) => {
-                let dest_spill = self.dest_spill(dst);
-                let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
-                let src_reg = self.get_physical_reg_for_irvalue(src, false)?;
-                // Note: emit_and_imm takes u32, but mask only uses lower bits for tag extraction
-                self.emit_and_imm(dst_reg, src_reg, *mask as u32);
-                self.store_spill(dst_reg, dest_spill);
-            }
-
-            Instruction::ShiftRightImm(dst, src, amount) => {
-                let dest_spill = self.dest_spill(dst);
-                let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
-                let src_reg = self.get_physical_reg_for_irvalue(src, false)?;
-                // Logical shift right (unsigned)
-                self.emit_lsr_imm(dst_reg, src_reg, *amount as usize);
-                self.store_spill(dst_reg, dest_spill);
-            }
-
             // Memory operations
-            Instruction::HeapLoad(dst, ptr, offset) => {
-                let dest_spill = self.dest_spill(dst);
-                let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
-                let ptr_reg = self.get_physical_reg_for_irvalue(ptr, false)?;
-                // Load 64-bit value from ptr + offset*8
-                self.emit_ldr_offset(dst_reg, ptr_reg, *offset * 8);
-                self.store_spill(dst_reg, dest_spill);
-            }
-
             Instruction::HeapStore(ptr, offset, value) => {
                 let ptr_reg = self.get_physical_reg_for_irvalue(ptr, false)?;
                 let value_reg = self.get_physical_reg_for_irvalue(value, false)?;
                 // Store 64-bit value to ptr + offset*8
                 self.emit_str_offset(value_reg, ptr_reg, *offset * 8);
-            }
-
-            Instruction::LoadByte(dst, ptr, offset) => {
-                let dest_spill = self.dest_spill(dst);
-                let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
-                let ptr_reg = self.get_physical_reg_for_irvalue(ptr, false)?;
-                // Load single byte from ptr + offset
-                self.emit_ldrb_offset(dst_reg, ptr_reg, *offset);
-                self.store_spill(dst_reg, dest_spill);
             }
 
             Instruction::AddInt(dst, src1, src2) => {
@@ -626,12 +579,6 @@ impl Arm64CodeGen {
                 self.store_spill(dst_reg, dest_spill);
             }
 
-            Instruction::AllocateFloat(_, _) => {
-                // REFACTORED: AllocateFloat is now handled via ExternalCall at IR level
-                // See compiler.rs where AllocateFloat emissions are replaced with ExternalCall
-                return Err("AllocateFloat should have been lowered to ExternalCall".to_string());
-            }
-
             Instruction::Assign(dst, src) => {
                 let dest_spill = self.dest_spill(dst);
                 let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
@@ -651,21 +598,6 @@ impl Arm64CodeGen {
                     }
                 }
                 self.store_spill(dst_reg, dest_spill);
-            }
-
-            Instruction::PushBinding(_, _) => {
-                // REFACTORED: PushBinding is now handled via ExternalCall at IR level
-                return Err("PushBinding should have been lowered to ExternalCall".to_string());
-            }
-
-            Instruction::PopBinding(_) => {
-                // REFACTORED: PopBinding is now handled via ExternalCall at IR level
-                return Err("PopBinding should have been lowered to ExternalCall".to_string());
-            }
-
-            Instruction::SetVar(_, _) => {
-                // REFACTORED: SetVar is now handled via ExternalCall at IR level
-                return Err("SetVar should have been lowered to ExternalCall".to_string());
             }
 
             Instruction::Label(label) => {
@@ -1026,10 +958,6 @@ impl Arm64CodeGen {
             }
 
             // NOTE: CallWithSaves is handled later in the match with multi-arity support
-            Instruction::CallGC(_) => {
-                // REFACTORED: CallGC is now handled via ExternalCall at IR level
-                return Err("CallGC should have been lowered to ExternalCall".to_string());
-            }
 
             // NOTE: Println has been refactored out - now uses ExternalCall to trampoline_println_regs
             Instruction::PushExceptionHandler(catch_label, exception_slot) => {
@@ -1152,19 +1080,6 @@ impl Arm64CodeGen {
                 self.store_spill(dest_reg, dest_spill);
             }
 
-            // ========== Protocol System Instructions ==========
-            Instruction::RegisterProtocolMethod(_, _, _, _) => {
-                // REFACTORED: RegisterProtocolMethod is now handled via ExternalCall at IR level
-                return Err(
-                    "RegisterProtocolMethod should have been lowered to ExternalCall".to_string(),
-                );
-            }
-
-            Instruction::InstanceCheck(_, _, _) => {
-                // REFACTORED: InstanceCheck is now handled via ExternalCall at IR level
-                return Err("InstanceCheck should have been lowered to ExternalCall".to_string());
-            }
-
             Instruction::Breakpoint => {
                 // BRK #0 - trap for debugger
                 self.code.push(arm::brk(0));
@@ -1250,52 +1165,6 @@ impl Arm64CodeGen {
                         self.emit_external_call(*func_addr, "external_call");
 
                         // Move result from x0 to destination
-                        if dst_reg != 0 {
-                            self.emit_mov(dst_reg, 0);
-                        }
-                        self.store_spill(dst_reg, dest_spill);
-                    }
-
-                    CallTarget::Direct(code_ptr, is_closure, arg_count_reg) => {
-                        // Direct call with pre-computed code pointer
-                        if args.len() > 8 {
-                            return Err("Direct call with more than 8 arguments not yet supported"
-                                .to_string());
-                        }
-
-                        let code_ptr_reg = self.get_physical_reg_for_irvalue(code_ptr, false)?;
-                        self.clear_temp_registers();
-
-                        // Collect argument source registers
-                        let mut arg_source_regs = Vec::new();
-                        for arg in args.iter() {
-                            let arg_reg = self.get_physical_reg_for_irvalue(arg, false)?;
-                            arg_source_regs.push(arg_reg);
-                            self.clear_temp_registers();
-                        }
-
-                        // Set up arguments in calling convention registers
-                        for (i, &src_reg) in arg_source_regs.iter().enumerate() {
-                            if i != src_reg {
-                                self.emit_mov(i, src_reg);
-                            }
-                        }
-
-                        // Set arg count in x9 for variadic support (if provided)
-                        if let Some(ac) = arg_count_reg {
-                            let ac_reg = self.get_physical_reg_for_irvalue(ac, false)?;
-                            if ac_reg != 9 {
-                                self.emit_mov(9, ac_reg);
-                            }
-                        } else if *is_closure {
-                            let user_arg_count = args.len().saturating_sub(1);
-                            self.emit_mov_imm(9, user_arg_count as i64);
-                        }
-
-                        // Make the call
-                        self.emit_blr(code_ptr_reg);
-
-                        // Result is in x0
                         if dst_reg != 0 {
                             self.emit_mov(dst_reg, 0);
                         }
@@ -1474,8 +1343,7 @@ impl Arm64CodeGen {
                         // This is done HERE (after tag checking) to avoid temp register clobbering
                         self.clear_temp_registers();
                         let reg_args_to_load = std::cmp::min(args.len(), max_reg_user_args);
-                        for i in 0..reg_args_to_load {
-                            let arg = &args[i];
+                        for (i, arg) in args.iter().take(reg_args_to_load).enumerate() {
                             let target_reg = i + 1; // x1, x2, x3, etc.
                             match arg {
                                 IrValue::Spill(_, slot) => {
@@ -1577,9 +1445,8 @@ impl Arm64CodeGen {
                         // But raw functions rarely have >8 args, so we just load min(args, 8).
                         self.clear_temp_registers();
                         let raw_fn_reg_args = std::cmp::min(args.len(), 8);
-                        for i in 0..raw_fn_reg_args {
-                            let arg = &args[i];
-                            let target_reg = i; // x0, x1, x2, etc.
+                        for (target_reg, arg) in args.iter().take(raw_fn_reg_args).enumerate() {
+                            // target_reg is x0, x1, x2, etc.
                             match arg {
                                 IrValue::Spill(_, slot) => {
                                     let offset = -((*slot as i32 + 1) * 8);
@@ -1628,75 +1495,10 @@ impl Arm64CodeGen {
             // NOTE: MakeType, MakeTypeWithSaves, LoadTypeField, and StoreTypeField have been refactored out.
             // - Deftype construction uses ExternalCall + HeapStore + Tag
             // - Field access uses ExternalCall to trampoline_load_type_field_by_symbol with pre-interned symbol IDs
-            Instruction::GcAddRoot(_) => {
-                // REFACTORED: GcAddRoot is now handled via ExternalCall at IR level
-                return Err("GcAddRoot should have been lowered to ExternalCall".to_string());
-            }
 
             Instruction::ExternalCall(_, _, _) => {
                 // ExternalCall should be transformed to CallWithSaves by register allocator
                 panic!("ExternalCall should have been transformed to CallWithSaves");
-            }
-
-            Instruction::CallDirect(dst, code_ptr, args, is_closure, arg_count_reg) => {
-                // CallDirect: Low-level call with pre-computed code pointer
-                // The tag extraction and dispatch logic has already been done in IR.
-                // This just sets up arguments and makes the call.
-                //
-                // For closures: x0 = closure, user args in x1-x7, x9 = arg count
-                // For functions: user args in x0-x7
-
-                let dest_spill = self.dest_spill(dst);
-                let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
-
-                if args.len() > 8 {
-                    return Err(
-                        "CallDirect with more than 8 arguments not yet supported".to_string()
-                    );
-                }
-
-                // Get the code pointer register
-                let code_ptr_reg = self.get_physical_reg_for_irvalue(code_ptr, false)?;
-                self.clear_temp_registers();
-
-                // Collect argument source registers
-                let mut arg_source_regs = Vec::new();
-                for arg in args.iter() {
-                    let arg_reg = self.get_physical_reg_for_irvalue(arg, false)?;
-                    arg_source_regs.push(arg_reg);
-                    self.clear_temp_registers();
-                }
-
-                // Set up arguments in calling convention registers
-                // Note: args already have closure as first element if is_closure is true
-                for (i, &src_reg) in arg_source_regs.iter().enumerate() {
-                    if i != src_reg {
-                        self.emit_mov(i, src_reg);
-                    }
-                }
-
-                // Set arg count in x9 for variadic support (if provided)
-                if let Some(ac) = arg_count_reg {
-                    let ac_reg = self.get_physical_reg_for_irvalue(ac, false)?;
-                    if ac_reg != 9 {
-                        self.emit_mov(9, ac_reg);
-                    }
-                } else if *is_closure {
-                    // For closures without explicit arg_count_reg, emit the count
-                    // User args = total args - 1 (closure is first arg)
-                    let user_arg_count = args.len().saturating_sub(1);
-                    self.emit_mov_imm(9, user_arg_count as i64);
-                }
-
-                // Make the call
-                self.emit_blr(code_ptr_reg);
-
-                // Result is in x0
-                if dst_reg != 0 {
-                    self.emit_mov(dst_reg, 0);
-                }
-
-                self.store_spill(dst_reg, dest_spill);
             }
 
             // Multi-arity function instructions
@@ -2092,40 +1894,6 @@ impl Arm64CodeGen {
                 // Condition passed - continue execution
             }
 
-            Instruction::Apply(dst, fn_value, args_seq) => {
-                // Apply: call trampoline_apply(stack_pointer, fn_value, args_seq)
-                // Result goes into dst
-
-                let dest_spill = self.dest_spill(dst);
-                let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
-
-                // Get fn_value and args_seq registers
-                let fn_reg = self.get_physical_reg_for_irvalue(fn_value, false)?;
-                self.clear_temp_registers();
-                let args_reg = self.get_physical_reg_for_irvalue(args_seq, false)?;
-                self.clear_temp_registers();
-
-                // Set up call: x0 = FP (stack pointer for GC), x1 = fn_value, x2 = args_seq
-                self.emit_mov(2, args_reg);
-                self.emit_mov(1, fn_reg);
-                self.emit_mov(0, 29); // x0 = FP (frame pointer)
-
-                // Call trampoline_apply
-                let apply_addr = crate::trampoline::trampoline_apply as usize;
-                self.emit_external_call(apply_addr, "trampoline_apply");
-
-                // Result is in x0
-                if dst_reg != 0 {
-                    self.emit_mov(dst_reg, 0);
-                }
-
-                // Handle spilled destination
-                if let Some(slot) = dest_spill {
-                    // Store to spill slot
-                    let offset = -((slot as i32 + 1) * 8);
-                    self.emit_store_to_fp(dst_reg, offset);
-                }
-            }
         }
 
         // Clear temporary registers after each instruction (like Beagle does)
@@ -2725,16 +2493,6 @@ impl Arm64CodeGen {
         self.code.push(instruction);
     }
 
-    /// Store a single byte to memory
-    /// STRB Wt, [Xn, #offset] - offset is in bytes (unsigned 12-bit)
-    fn emit_strb_offset(&mut self, src: usize, base: usize, offset: i32) {
-        // STRB Wt, [Xn, #offset]
-        // Encoding: 0x39000000 | (imm12 << 10) | (Rn << 5) | Rt
-        let offset_u = (offset as u32) & 0xFFF; // 12-bit unsigned offset
-        let instruction = 0x39000000 | (offset_u << 10) | ((base as u32) << 5) | (src as u32);
-        self.code.push(instruction);
-    }
-
     fn emit_ldrb_offset(&mut self, dst: usize, base: usize, offset: i32) {
         // LDRB Wt, [Xn, #offset]
         // Encoding: 0x39400000 | (imm12 << 10) | (Rn << 5) | Rt
@@ -2965,115 +2723,6 @@ impl Arm64CodeGen {
         self.emit_ret();
     }
 
-    /// Calculate total stack size for a function
-    fn calculate_stack_size(&self, _label: &Label) -> i64 {
-        // Stack size = spill slots + CallWithSaves accumulated bytes
-        let spill_bytes = if self.num_stack_slots > 0 {
-            (self.num_stack_slots * 8 + 8) as i64 // Add 8 bytes padding
-        } else {
-            0
-        };
-
-        let total = spill_bytes + self.current_function_stack_bytes as i64;
-
-        // Round up to 16-byte alignment
-        ((total + 15) / 16) * 16
-    }
-
-    /// Generate SUB instruction sequence for arbitrary stack sizes
-    /// Handles sizes > 4095 bytes by generating multiple instructions
-    fn generate_stack_sub_sequence(&self, bytes: i64) -> Vec<u32> {
-        const MAX_IMM12: i64 = 4095;
-
-        if bytes == 0 {
-            // No stack needed - return NOP
-            vec![0xD503201F] // NOP
-        } else if bytes <= MAX_IMM12 {
-            // Single SUB: sub sp, sp, #bytes
-            vec![0xD10003FF | (((bytes as u32) & 0xFFF) << 10)]
-        } else {
-            // Multiple SUB instructions for large frames
-            let mut result = Vec::new();
-            let mut remaining = bytes;
-
-            while remaining > MAX_IMM12 {
-                result.push(0xD10003FF | ((MAX_IMM12 as u32) << 10));
-                remaining -= MAX_IMM12;
-            }
-
-            if remaining > 0 {
-                result.push(0xD10003FF | ((remaining as u32) << 10));
-            }
-
-            result
-        }
-    }
-
-    /// Generate ADD instruction sequence for arbitrary stack sizes
-    fn generate_stack_add_sequence(&self, bytes: i64) -> Vec<u32> {
-        const MAX_IMM12: i64 = 4095;
-
-        if bytes == 0 {
-            // No stack allocated - return NOP
-            vec![0xD503201F] // NOP
-        } else if bytes <= MAX_IMM12 {
-            // Single ADD: add sp, sp, #bytes
-            vec![0x910003FF | (((bytes as u32) & 0xFFF) << 10)]
-        } else {
-            // Multiple ADD instructions
-            let mut result = Vec::new();
-            let mut remaining = bytes;
-
-            while remaining > MAX_IMM12 {
-                result.push(0x910003FF | ((MAX_IMM12 as u32) << 10));
-                remaining -= MAX_IMM12;
-            }
-
-            if remaining > 0 {
-                result.push(0x910003FF | ((remaining as u32) << 10));
-            }
-
-            result
-        }
-    }
-
-    /// Patch all placeholder instructions with actual stack sizes
-    /// Called after all code generation is complete
-    fn patch_stack_placeholders(&mut self) {
-        for (label, (prologue_idx, epilogue_idx)) in self.placeholder_positions.clone() {
-            let stack_bytes = self.calculate_stack_size(&label);
-
-            // eprintln!("DEBUG: Patching function '{}': stack_bytes={}", label, stack_bytes);
-
-            // Patch prologue SUB
-            let sub_sequence = self.generate_stack_sub_sequence(stack_bytes);
-            if sub_sequence.len() == 1 {
-                // Simple case - replace instruction in place
-                self.code[prologue_idx] = sub_sequence[0];
-            } else {
-                // Complex case - need to splice multiple instructions
-                // This will shift all subsequent instructions, so we need to update fixups
-                panic!(
-                    "Multi-instruction stack allocation not yet implemented - stack size {} exceeds 4095 bytes",
-                    stack_bytes
-                );
-            }
-
-            // Patch epilogue ADD
-            let add_sequence = self.generate_stack_add_sequence(stack_bytes);
-            if add_sequence.len() == 1 {
-                // Simple case - replace instruction in place
-                self.code[epilogue_idx] = add_sequence[0];
-            } else {
-                // Complex case
-                panic!(
-                    "Multi-instruction stack deallocation not yet implemented - stack size {} exceeds 4095 bytes",
-                    stack_bytes
-                );
-            }
-        }
-    }
-
     fn emit_stp(&mut self, rt: usize, rt2: usize, rn: usize, offset: i32) {
         // STP Xt, Xt2, [Xn, #offset]! (pre-index)
         // offset is in 8-byte units for STP, range -512 to 504
@@ -3141,21 +2790,6 @@ impl Arm64CodeGen {
     /// Decrement stack size tracking in words (call when deallocating stack space)
     pub fn decrement_stack_size(&mut self, words: usize) {
         self.current_stack_size = self.current_stack_size.saturating_sub(words);
-    }
-
-    /// Get max stack size for stack map metadata
-    pub fn max_stack_size(&self) -> usize {
-        self.max_stack_size
-    }
-
-    /// Get number of locals for stack map metadata
-    pub fn num_locals(&self) -> usize {
-        self.num_locals
-    }
-
-    /// Set number of locals (called during function compilation)
-    pub fn set_num_locals(&mut self, count: usize) {
-        self.num_locals = count;
     }
 
     /// Emit an external function call

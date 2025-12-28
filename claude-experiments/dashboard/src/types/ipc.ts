@@ -41,6 +41,11 @@ export const IPC_CHANNELS = {
   // State channels
   STATE_GET: 'state:get',
   STATE_COMMAND: 'state:command',
+
+  // Eval channels
+  EVAL_EXECUTE: 'eval:execute',
+  EVAL_BATCH: 'eval:batch',
+  EVAL_BENCHMARK: 'eval:benchmark',
 } as const;
 
 export type IpcChannel = typeof IPC_CHANNELS[keyof typeof IPC_CHANNELS];
@@ -126,6 +131,56 @@ export interface StateAPI {
 }
 
 /**
+ * Evaluation result from the eval service
+ */
+export interface EvaluationResult {
+  id: string;
+  success: boolean;
+  value?: unknown;
+  displayValue: string;
+  type: string;
+  executionTimeMs: number;
+  error?: string;
+}
+
+/**
+ * Evaluation request for the eval service
+ */
+export interface EvaluationRequest {
+  id: string;
+  code: string;
+  language: 'javascript' | 'typescript';
+  context?: Record<string, unknown>;
+  timeout?: number;
+}
+
+/**
+ * Benchmark result from the eval service
+ */
+export interface BenchmarkResult {
+  runs: Array<{ iteration: number; executionTimeMs: number; success: boolean }>;
+  stats: { mean: number; median: number; stdDev: number; min: number; max: number };
+}
+
+/**
+ * Eval API exposed via preload
+ */
+export interface EvalAPI {
+  execute(
+    code: string,
+    language?: 'javascript' | 'typescript',
+    context?: Record<string, unknown>
+  ): Promise<EvaluationResult>;
+  batch(requests: EvaluationRequest[]): Promise<EvaluationResult[]>;
+  benchmark(
+    code: string,
+    iterations?: number,
+    warmupIterations?: number,
+    context?: Record<string, unknown>
+  ): Promise<BenchmarkResult>;
+}
+
+/**
  * Complete Window API (extends global Window)
  */
 declare global {
@@ -135,6 +190,7 @@ declare global {
     fileAPI: FileAPI;
     gitAPI: GitAPI;
     stateAPI: StateAPI;
+    evalAPI: EvalAPI;
   }
 }
 

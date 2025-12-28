@@ -14,11 +14,13 @@ impl Type {
     }
 }
 
-/// Function type (-> [args] [returns])
+/// Function type (-> [args] [returns]) or (-> [args ...] [returns]) for vararg
 #[derive(Debug, Clone, PartialEq)]
 pub struct FunctionType {
     pub arg_types: Vec<Type>,
     pub return_types: Vec<Type>,
+    /// Whether this is a variadic function (has ... at end of args)
+    pub is_vararg: bool,
 }
 
 impl FunctionType {
@@ -26,6 +28,7 @@ impl FunctionType {
         Self {
             arg_types: Vec::new(),
             return_types: Vec::new(),
+            is_vararg: false,
         }
     }
 }

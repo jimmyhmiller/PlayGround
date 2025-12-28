@@ -317,6 +317,7 @@ impl Tokenizer {
             || c == '>'
             || c == '@'
             || c == '%'
+            || c == '.'  // Allow ... for vararg
     }
 
     fn is_symbol_char(&self, c: char) -> bool {

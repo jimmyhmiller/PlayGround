@@ -1283,7 +1283,7 @@ fn analyze_defn_tagged(rt: &mut GCRuntime, list_ptr: usize) -> Result<Expr, Stri
     fn_list_items.extend_from_slice(&items[start_idx..]);
 
     // Create a new list for fn
-    let fn_list = rt.reader_list_from_vec(&fn_list_items)?;
+    let _fn_list = rt.reader_list_from_vec(&fn_list_items)?;
 
     // Analyze as fn (but we need to make it look like fn, not defn)
     // Actually, let's just inline the fn analysis here

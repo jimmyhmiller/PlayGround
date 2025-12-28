@@ -1,4 +1,6 @@
 // GC Types - Core type definitions for garbage collection
+// Note: Some methods are only used by feature-gated GC implementations.
+#![allow(dead_code)]
 
 /// Built-in type tags for tagged pointers
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]

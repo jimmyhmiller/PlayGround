@@ -3,6 +3,10 @@
 //! extern-fn - Declare external function: (extern-fn name (-> [args...] [rets...]))
 //!             -> (func.func {:sym_name "name" :function_type (-> ...) :sym_visibility "private"})
 //!
+//! For variadic functions (with ... in args):
+//!   (extern-fn printf (-> [!llvm.ptr ...] [i32]))
+//!   -> (llvm.func {:sym_name "printf" :function_type (-> [!llvm.ptr ...] [i32]) :linkage 10})
+//!
 //! Note: Named extern-fn (not extern) to avoid conflict with the built-in (extern :value-ffi) form.
 //!
 //! Example:
@@ -13,6 +17,25 @@ use std::collections::HashMap;
 
 use crate::macros::{Macro, MacroError};
 use crate::value::Value;
+
+/// Check if a function type value contains ... (vararg)
+fn is_vararg_type(func_type: &Value) -> bool {
+    if let Value::List(items) = func_type {
+        // (-> [args...] [rets...])
+        if items.len() >= 2 {
+            if let Value::Vector(args) = &items[1] {
+                for arg in args {
+                    if let Value::Symbol(sym) = arg {
+                        if sym.name == "..." {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    false
+}
 
 /// External function declaration: (extern-fn name fn-type)
 pub struct ExternMacro;
@@ -43,24 +66,38 @@ impl Macro for ExternMacro {
         };
 
         let func_type = args[1].clone();
+        let is_vararg = is_vararg_type(&func_type);
 
-        // Build {:sym_name "name" :function_type FN_TYPE :sym_visibility "private"}
-        let mut attrs = HashMap::new();
-        attrs.insert("sym_name".to_string(), Value::String(func_name));
-        attrs.insert("function_type".to_string(), func_type);
-        attrs.insert(
-            "sym_visibility".to_string(),
-            Value::String("private".to_string()),
-        );
+        if is_vararg {
+            // For vararg functions, use llvm.func with linkage=10 (external)
+            let mut attrs = HashMap::new();
+            attrs.insert("sym_name".to_string(), Value::String(func_name));
+            attrs.insert("function_type".to_string(), func_type);
+            attrs.insert("linkage".to_string(), Value::Number(10.0)); // external linkage
 
-        Ok(Value::List(vec![
-            Value::symbol("func.func"),
-            Value::Map(attrs),
-        ]))
+            Ok(Value::List(vec![
+                Value::symbol("llvm.func"),
+                Value::Map(attrs),
+            ]))
+        } else {
+            // For regular functions, use func.func
+            let mut attrs = HashMap::new();
+            attrs.insert("sym_name".to_string(), Value::String(func_name));
+            attrs.insert("function_type".to_string(), func_type);
+            attrs.insert(
+                "sym_visibility".to_string(),
+                Value::String("private".to_string()),
+            );
+
+            Ok(Value::List(vec![
+                Value::symbol("func.func"),
+                Value::Map(attrs),
+            ]))
+        }
     }
 
     fn doc(&self) -> Option<&str> {
-        Some("Declare external function: (extern-fn name (-> [args] [rets])) -> (func.func {:sym_name ... :sym_visibility \"private\"})")
+        Some("Declare external function: (extern-fn name (-> [args] [rets])) -> (func.func or llvm.func for vararg)")
     }
 }
 

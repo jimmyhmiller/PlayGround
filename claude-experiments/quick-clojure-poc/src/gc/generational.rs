@@ -106,10 +106,6 @@ impl Allocator for GenerationalGC {
         std::mem::take(&mut self.relocated_namespace_roots)
     }
 
-    fn get_allocation_options(&self) -> AllocatorOptions {
-        self.options
-    }
-
     fn register_temporary_root(&mut self, root: usize) -> usize {
         debug_assert!(self.temporary_roots.len() < 10, "Too many temporary roots");
         for (i, temp_root) in self.temporary_roots.iter_mut().enumerate() {
@@ -402,9 +398,5 @@ impl HeapInspector for GenerationalGC {
 
     fn contains_address(&self, addr: usize) -> bool {
         self.young.contains(addr as *const u8) || self.old.contains_address(addr)
-    }
-
-    fn get_roots(&self) -> &[(usize, usize)] {
-        &self.namespace_roots
     }
 }

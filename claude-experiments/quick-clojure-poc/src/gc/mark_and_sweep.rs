@@ -343,10 +343,6 @@ impl Allocator for MarkAndSweep {
         // so we don't have any relocations
         vec![]
     }
-
-    fn get_allocation_options(&self) -> AllocatorOptions {
-        self.options
-    }
 }
 
 // ========== Heap Inspection ==========
@@ -457,9 +453,5 @@ impl HeapInspector for MarkAndSweep {
 
     fn contains_address(&self, addr: usize) -> bool {
         self.space.contains(addr as *const u8)
-    }
-
-    fn get_roots(&self) -> &[(usize, usize)] {
-        &self.namespace_roots
     }
 }
