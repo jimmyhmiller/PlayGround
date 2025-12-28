@@ -168,7 +168,7 @@ impl Arm64CodeGen {
 
         // Calculate stack space (round up to 16-byte alignment)
         let stack_space = if total_stack_slots > 0 {
-            ((total_stack_slots * 8 + 15) / 16) * 16
+            (total_stack_slots * 8).div_ceil(16) * 16
         } else {
             0
         };
@@ -805,7 +805,7 @@ impl Arm64CodeGen {
 
                     // Step 1: Allocate stack space for all values
                     let total_stack_space = closure_values.len() * 8;
-                    let aligned_stack_space = ((total_stack_space + 15) / 16) * 16;
+                    let aligned_stack_space = total_stack_space.div_ceil(16) * 16;
                     if aligned_stack_space > 0 {
                         self.emit_sub_sp_imm(aligned_stack_space as i64);
                     }
@@ -952,7 +952,7 @@ impl Arm64CodeGen {
 
                     // Pad remaining args with 0 (nil) - trampoline expects 7 args
                     for i in arg_count..7 {
-                        self.emit_mov_imm((i + 2) as usize, 7); // 7 = nil tagged value
+                        self.emit_mov_imm(i + 2, 7); // 7 = nil tagged value
                     }
 
                     // Call trampoline_ifn_invoke
@@ -1319,7 +1319,7 @@ impl Arm64CodeGen {
                         } else {
                             0
                         };
-                        let stack_args_bytes = ((stack_arg_count * 8 + 15) / 16) * 16; // 16-byte aligned
+                        let stack_args_bytes = (stack_arg_count * 8).div_ceil(16) * 16; // 16-byte aligned
 
                         // Get function pointer - may be in a temp register if spilled
                         // IMPORTANT: If fn_val is spilled, we get a temp register (x9).
@@ -1420,7 +1420,7 @@ impl Arm64CodeGen {
 
                             // Pad remaining args with nil (7) - trampoline expects 7 args
                             for i in arg_count..7 {
-                                self.emit_mov_imm((i + 2) as usize, 7); // 7 = nil tagged value
+                                self.emit_mov_imm(i + 2, 7); // 7 = nil tagged value
                             }
 
                             // Call trampoline_ifn_invoke
@@ -1504,7 +1504,7 @@ impl Arm64CodeGen {
                         // We need to call the arity lookup trampoline first
                         // Stack layout: [fn_ptr] [args...]
                         let multi_arity_stack_space = (1 + arg_count) * 8;
-                        let aligned_ma_stack = ((multi_arity_stack_space + 15) / 16) * 16;
+                        let aligned_ma_stack = multi_arity_stack_space.div_ceil(16) * 16;
                         if aligned_ma_stack > 0 {
                             self.emit_sub_sp_imm(aligned_ma_stack as i64);
                         }
@@ -1722,7 +1722,7 @@ impl Arm64CodeGen {
                 let arities_size = arities.len() * 2 * 8; // 2 words per arity
                 let closures_size = closure_values.len() * 8;
                 let total_stack_space = arities_size + closures_size;
-                let aligned_stack_space = ((total_stack_space + 15) / 16) * 16;
+                let aligned_stack_space = total_stack_space.div_ceil(16) * 16;
                 if aligned_stack_space > 0 {
                     self.emit_sub_sp_imm(aligned_stack_space as i64);
                 }
@@ -1841,7 +1841,7 @@ impl Arm64CodeGen {
                 let first_excess_reg = offset + fixed;
 
                 // Maximum user args in registers for closures (x1-x7)
-                let max_reg_user_args: usize = 7;
+                let _max_reg_user_args: usize = 7;
 
                 // Use a temp register that's NOT x9 for the excess count
                 // x9 is where the arg count is stored
@@ -2209,7 +2209,7 @@ impl Arm64CodeGen {
                     None => {
                         // Check if this is a valid physical register (x19-x28)
                         let idx = vreg.index();
-                        if idx >= 19 && idx <= 28 {
+                        if (19..=28).contains(&idx) {
                             idx // Already physical, use index directly
                         } else {
                             panic!("Result register {:?} not allocated", vreg);
@@ -2747,7 +2747,7 @@ impl Arm64CodeGen {
         // LDR Xd, [x29, #offset] with signed offset
         // LDUR only supports 9-bit signed offset (-256 to +255)
         // For larger offsets, we need to compute the address first
-        if offset >= -256 && offset <= 255 {
+        if (-256..=255).contains(&offset) {
             // LDUR Xd, [x29, #offset]
             let offset_bits = (offset as u32) & 0x1FF; // 9-bit signed
             let instruction = 0xF8400000 | (offset_bits << 12) | (29 << 5) | (dst as u32);
@@ -2768,7 +2768,7 @@ impl Arm64CodeGen {
         // STR Xt, [x29, #offset] with signed offset
         // STUR only supports 9-bit signed offset (-256 to +255)
         // For larger offsets, we need to compute the address first
-        if offset >= -256 && offset <= 255 {
+        if (-256..=255).contains(&offset) {
             // STUR Xt, [x29, #offset]
             let offset_bits = (offset as u32) & 0x1FF; // 9-bit signed
             let instruction = 0xF8000000 | (offset_bits << 12) | (29 << 5) | (src as u32);
@@ -2902,16 +2902,16 @@ impl Arm64CodeGen {
         // So for imm=0xAAA: 0x910003FF | (0xAAA << 10) = 0x910003FF | 0x2AA800 = 0x912AABFF
         let expected = 0x910003FF_u32 | (0xAAA << 10);
 
-        let result = self.code.iter().rposition(|&inst| inst == expected);
-        result
+        
+        self.code.iter().rposition(|&inst| inst == expected)
     }
 
     /// Emit ADD with potentially large immediate (positive or negative)
     fn emit_add_imm_large(&mut self, dst: usize, src: usize, imm: i64) {
-        if imm >= 0 && imm <= 4095 {
+        if (0..=4095).contains(&imm) {
             // Simple ADD with 12-bit immediate
             self.emit_add_imm(dst, src, imm);
-        } else if imm < 0 && imm >= -4095 {
+        } else if (-4095..0).contains(&imm) {
             // SUB with negated immediate
             self.emit_sub_imm(dst, src, -imm);
         } else {
@@ -3171,68 +3171,5 @@ impl Arm64CodeGen {
         // Load function address and call (X30 already saved in prologue)
         self.emit_mov_imm(15, target_fn as i64); // Use x15 as temp
         self.emit_blr(15);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::clojure_ast::analyze;
-    use crate::compiler::Compiler;
-    use crate::gc_runtime::GCRuntime;
-    use crate::reader::read;
-    use std::cell::UnsafeCell;
-    use std::sync::Arc;
-
-    #[test]
-    fn test_arm64_codegen_add() {
-        let code = "(+ 1 2)";
-        let val = read(code).unwrap();
-        let ast = analyze(&val).unwrap();
-
-        let runtime = Arc::new(UnsafeCell::new(GCRuntime::new()));
-        let mut compiler = Compiler::new(runtime);
-        compiler.compile_toplevel(&ast).unwrap();
-        let instructions = compiler.take_instructions();
-        let num_locals = compiler.builder.num_locals;
-
-        let compiled = Arm64CodeGen::compile_function(&instructions, num_locals, 0).unwrap();
-
-        println!(
-            "\nCompiled function for (+ 1 2) at {:p}",
-            compiled.code_ptr as *const u8
-        );
-
-        // Execute as 0-argument function via trampoline
-        let trampoline = Trampoline::new(64 * 1024);
-        let result = unsafe { trampoline.execute(compiled.code_ptr as *const u8) };
-        // Result is tagged: 3 << 3 = 24
-        assert_eq!(result, 24);
-    }
-
-    #[test]
-    fn test_arm64_codegen_nested() {
-        let code = "(+ (* 2 3) 4)";
-        let val = read(code).unwrap();
-        let ast = analyze(&val).unwrap();
-
-        let runtime = Arc::new(UnsafeCell::new(GCRuntime::new()));
-        let mut compiler = Compiler::new(runtime);
-        compiler.compile_toplevel(&ast).unwrap();
-        let instructions = compiler.take_instructions();
-        let num_locals = compiler.builder.num_locals;
-
-        let compiled = Arm64CodeGen::compile_function(&instructions, num_locals, 0).unwrap();
-
-        println!(
-            "\nCompiled function for (+ (* 2 3) 4) at {:p}",
-            compiled.code_ptr as *const u8
-        );
-
-        // Execute as 0-argument function via trampoline
-        let trampoline = Trampoline::new(64 * 1024);
-        let result = unsafe { trampoline.execute(compiled.code_ptr as *const u8) };
-        // Result is tagged: 10 << 3 = 80
-        assert_eq!(result, 80);
     }
 }

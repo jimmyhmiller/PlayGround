@@ -27,7 +27,7 @@ pub use defn::DefnMacro;
 pub use extern_macro::ExternMacro;
 pub use if_macro::IfMacro;
 pub use loop_macro::LoopMacro;
-pub use pointer::{NullCheckMacro, NullPtrMacro, PtrLoadMacro, PtrOffsetMacro, PtrStoreMacro};
+pub use pointer::{NullCheckMacro, NullPtrMacro, PtrAtMacro, PtrLoadMacro, PtrOffsetMacro, PtrStoreMacro};
 pub use print::{PrintI64Macro, PrintMacro, PrintlnMacro};
 pub use quasiquote::QuasiquoteMacro;
 pub use struct_access::{StructFieldGetMacro, StructFieldSetMacro};

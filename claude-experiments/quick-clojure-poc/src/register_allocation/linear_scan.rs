@@ -110,11 +110,10 @@ impl LinearScan {
         // even if their first explicit use is later. This ensures they're
         // properly saved across any calls that precede their first use.
         for (reg, (start, _end)) in result.iter_mut() {
-            if let VirtualRegister::Argument(_) = reg {
-                if *start > 0 {
+            if let VirtualRegister::Argument(_) = reg
+                && *start > 0 {
                     *start = 0;
                 }
-            }
         }
 
         // IMPORTANT: Extend lifetimes for registers used within loops
@@ -371,11 +370,10 @@ impl LinearScan {
                         if let IrValue::Register(r) = code_ptr {
                             regs.push(*r);
                         }
-                        if let Some(ac) = arg_count_reg {
-                            if let IrValue::Register(r) = ac {
+                        if let Some(ac) = arg_count_reg
+                            && let IrValue::Register(r) = ac {
                                 regs.push(*r);
                             }
-                        }
                     }
                     CallTarget::Dynamic(fn_val) => {
                         if let IrValue::Register(r) = fn_val {
@@ -407,11 +405,10 @@ impl LinearScan {
                         regs.push(*r);
                     }
                 }
-                if let Some(ac) = arg_count_reg {
-                    if let IrValue::Register(r) = ac {
+                if let Some(ac) = arg_count_reg
+                    && let IrValue::Register(r) = ac {
                         regs.push(*r);
                     }
-                }
             }
 
             // NOTE: MakeType/MakeTypeWithSaves have been refactored out.
@@ -551,7 +548,7 @@ impl LinearScan {
         // ARM64 calling convention: arguments are passed in x0-x7
         // Virtual registers with Argument variant should map directly to their index
         // eprintln!("DEBUG: Pre-allocation phase - checking {} virtual registers", self.lifetimes.len());
-        for (vreg, _interval) in &self.lifetimes {
+        for vreg in self.lifetimes.keys() {
             if let VirtualRegister::Argument(n) = vreg {
                 if *n <= 7 {
                     // Map argument virtual register to corresponding physical register (x0-x7)

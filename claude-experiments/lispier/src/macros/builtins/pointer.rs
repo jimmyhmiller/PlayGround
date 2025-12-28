@@ -4,7 +4,8 @@
 //! null?      - Check if null: (null? ptr) -> (llvm.icmp {:predicate 0} ptr (llvm.mlir.zero {:result !llvm.ptr}))
 //! ptr-load   - Load from pointer: (ptr-load TYPE ptr) -> (llvm.load {:result TYPE} ptr)
 //! ptr-store! - Store to pointer: (ptr-store! val ptr) -> (llvm.store val ptr)
-//! ptr-offset - Pointer arithmetic: (ptr-offset TYPE ptr offset) -> (llvm.getelementptr {...} ptr)
+//! ptr-offset - Pointer arithmetic with CONSTANT offset: (ptr-offset TYPE ptr offset) -> (llvm.getelementptr {...} ptr)
+//! ptr-at     - Pointer arithmetic with DYNAMIC index: (ptr-at ELEM_TYPE ptr idx) -> (llvm.getelementptr {...} ptr idx)
 
 use std::collections::HashMap;
 
@@ -222,6 +223,57 @@ impl Macro for PtrOffsetMacro {
 
     fn doc(&self) -> Option<&str> {
         Some("Pointer offset: (ptr-offset TYPE ptr offset) -> (llvm.getelementptr {...} ptr)")
+    }
+}
+
+/// Dynamic pointer indexing: (ptr-at ELEM_TYPE ptr idx) -> (llvm.getelementptr {...} ptr idx)
+/// Uses dynamic index (passed as operand) rather than constant index.
+///
+/// Example:
+///   (ptr-at f32 data_ptr i) ; where i is a dynamic i64 index
+///
+/// This is necessary for array indexing where the index is computed at runtime,
+/// such as in GPT-2 forward pass where we need: params[token * 768 + c]
+pub struct PtrAtMacro;
+
+impl Macro for PtrAtMacro {
+    fn name(&self) -> &str {
+        "ptr-at"
+    }
+
+    fn expand(&self, args: &[Value]) -> Result<Value, MacroError> {
+        if args.len() != 3 {
+            return Err(MacroError::WrongArity {
+                macro_name: "ptr-at".into(),
+                expected: "3 (ELEM_TYPE, ptr, idx)".into(),
+                got: args.len(),
+            });
+        }
+
+        let elem_type = args[0].clone();
+        let ptr = args[1].clone();
+        let idx = args[2].clone();
+
+        // Build {:result !llvm.ptr :rawConstantIndices array<i32: -2147483648> :elem_type ELEM_TYPE}
+        // The sentinel value -2147483648 (i32::MIN) tells MLIR to use the operand as dynamic index
+        let mut attrs = HashMap::new();
+        attrs.insert("result".to_string(), Value::symbol("!llvm.ptr"));
+        attrs.insert(
+            "rawConstantIndices".to_string(),
+            Value::symbol("array<i32: -2147483648>"),
+        );
+        attrs.insert("elem_type".to_string(), elem_type);
+
+        Ok(Value::List(vec![
+            Value::symbol("llvm.getelementptr"),
+            Value::Map(attrs),
+            ptr,
+            idx,
+        ]))
+    }
+
+    fn doc(&self) -> Option<&str> {
+        Some("Dynamic pointer indexing: (ptr-at ELEM_TYPE ptr idx) -> (llvm.getelementptr {...} ptr idx)")
     }
 }
 

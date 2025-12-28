@@ -20,17 +20,17 @@ static mut RUNTIME_PTR: Option<Arc<UnsafeCell<GCRuntime>>> = None;
 
 /// Initialize the builtin runtime pointer
 /// SAFETY: Must be called once before any builtins are used
-pub unsafe fn initialize_builtins(runtime: Arc<UnsafeCell<GCRuntime>>) {
+pub unsafe fn initialize_builtins(runtime: Arc<UnsafeCell<GCRuntime>>) { unsafe {
     RUNTIME_PTR = Some(runtime);
-}
+}}
 
 /// Get the runtime reference
 /// SAFETY: Must be called after initialize_builtins
 #[inline]
 #[allow(static_mut_refs)]
-unsafe fn get_runtime() -> &'static mut GCRuntime {
+unsafe fn get_runtime() -> &'static mut GCRuntime { unsafe {
     &mut *RUNTIME_PTR.as_ref().unwrap().get()
-}
+}}
 
 // ============================================================================
 // Variable access builtins

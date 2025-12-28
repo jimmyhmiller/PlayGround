@@ -870,8 +870,8 @@ pub mod raw {
     /// NOP
     #[inline]
     pub fn nop() -> u32 {
-        let mut result = 0b1101010100_0_00_011_0010_0000_000_11111;
-        result
+        
+        0b1101010100_0_00_011_0010_0000_000_11111
     }
 
     /// ORN (shifted register) -- A64

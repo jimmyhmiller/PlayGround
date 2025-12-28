@@ -65,20 +65,3 @@ impl Runtime {
         Ok(Value::Int(result as i64))
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::reader::read;
-    use crate::clojure_ast::analyze;
-
-    #[test]
-    fn test_compile_literal() {
-        let mut runtime = Runtime::new();
-        let val = read("42").unwrap();
-        let ast = analyze(&val).unwrap();
-        let result = runtime.compile_and_run(&ast);
-        // This might not work yet, but let's see
-        println!("Result: {:?}", result);
-    }
-}

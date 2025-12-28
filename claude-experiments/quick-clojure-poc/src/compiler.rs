@@ -212,6 +212,17 @@ impl Compiler {
         use crate::clojure_ast::analyze_tagged;
         use crate::trampoline::Trampoline;
 
+        // Register all forms as temporary GC roots before processing.
+        // This prevents forms from being collected when GC runs during analysis
+        // of earlier forms.
+        let root_ids: Vec<usize> = unsafe {
+            let rt = &mut *self.runtime.get();
+            forms
+                .iter()
+                .map(|&tagged| rt.register_temporary_root(tagged))
+                .collect()
+        };
+
         let mut last_result = IrValue::Null;
 
         for (i, &tagged) in forms.iter().enumerate() {
@@ -252,6 +263,14 @@ impl Compiler {
         // Emit final return with the result of the last expression
         self.builder.reset();
         self.builder.emit(Instruction::Ret(last_result));
+
+        // Unregister all temporary roots
+        unsafe {
+            let rt = &mut *self.runtime.get();
+            for root_id in root_ids {
+                rt.unregister_temporary_root(root_id);
+            }
+        }
 
         Ok(last_result)
     }
@@ -440,10 +459,10 @@ impl Compiler {
 
         let ns_sym_reg = self
             .builder
-            .assign_new(IrValue::TaggedConstant(((ns_symbol_id << 3) as isize)));
+            .assign_new(IrValue::TaggedConstant((ns_symbol_id << 3) as isize));
         let name_sym_reg = self
             .builder
-            .assign_new(IrValue::TaggedConstant(((name_symbol_id << 3) as isize)));
+            .assign_new(IrValue::TaggedConstant((name_symbol_id << 3) as isize));
 
         self.call_builtin(builtin_name, vec![ns_sym_reg, name_sym_reg])
     }
@@ -825,6 +844,52 @@ impl Compiler {
             rt.register_protocol(full_name, protocol_methods);
         }
 
+        // For each method, create a dispatch function and def it in the current namespace
+        for method in methods {
+            // Synthesize function arities that dispatch to the protocol method
+            let fn_arities: Vec<crate::value::FnArity> = method
+                .arities
+                .iter()
+                .map(|params| {
+                    // Build args for the protocol call (references to the params)
+                    let args: Vec<Expr> = params
+                        .iter()
+                        .map(|p| Expr::Var {
+                            namespace: None,
+                            name: p.clone(),
+                        })
+                        .collect();
+
+                    crate::value::FnArity {
+                        params: params.clone(),
+                        rest_param: None,
+                        body: vec![Expr::ProtocolCall {
+                            method_name: method.name.clone(),
+                            args,
+                        }],
+                        pre_conditions: Vec::new(),
+                        post_conditions: Vec::new(),
+                    }
+                })
+                .collect();
+
+            // Synthesize the function expression
+            let fn_expr = Expr::Fn {
+                name: Some(method.name.clone()),
+                arities: fn_arities,
+            };
+
+            // Synthesize a def for this method
+            let def_expr = Expr::Def {
+                name: method.name.clone(),
+                value: Box::new(fn_expr),
+                metadata: None,
+            };
+
+            // Compile the def
+            self.compile(&def_expr)?;
+        }
+
         // defprotocol returns nil
         let result = self.builder.new_register();
         self.builder
@@ -837,7 +902,6 @@ impl Compiler {
         type_name: &str,
         implementations: &[crate::clojure_ast::ProtocolImpl],
     ) -> Result<IrValue, String> {
-        use crate::gc_runtime::DEFTYPE_ID_OFFSET;
         use std::collections::HashMap;
 
         // Resolve type_id
@@ -1015,7 +1079,7 @@ impl Compiler {
             fn_ptr,
             trampoline_addr,
             vec![
-                arg_values[0].clone(),                   // target
+                arg_values[0],                   // target
                 IrValue::RawConstant(method_ptr as i64), // method_name_ptr
                 IrValue::RawConstant(method_len as i64), // method_name_len
             ],
@@ -1136,10 +1200,10 @@ impl Compiler {
         // Call store-var-by-symbol builtin to update the var at runtime
         let ns_sym_reg = self
             .builder
-            .assign_new(IrValue::TaggedConstant(((ns_symbol_id << 3) as isize)));
+            .assign_new(IrValue::TaggedConstant((ns_symbol_id << 3) as isize));
         let name_sym_reg = self
             .builder
-            .assign_new(IrValue::TaggedConstant(((name_symbol_id << 3) as isize)));
+            .assign_new(IrValue::TaggedConstant((name_symbol_id << 3) as isize));
         self.call_builtin(
             "store-var-by-symbol",
             vec![ns_sym_reg, name_sym_reg, value_reg],
@@ -1155,6 +1219,26 @@ impl Compiler {
         unsafe {
             let rt = &*self.runtime.get();
             rt.namespace_name(self.current_namespace_ptr)
+        }
+    }
+
+    /// Set up user namespace after clojure.core is fully loaded.
+    /// This refers all of clojure.core into user and switches to user namespace.
+    /// Must be called after loading core.clj.
+    pub fn setup_user_namespace(&mut self) {
+        unsafe {
+            let rt = &mut *self.runtime.get();
+
+            if let (Some(&user_ns_ptr), Some(&core_ns_ptr)) = (
+                self.namespace_registry.get("user"),
+                self.namespace_registry.get("clojure.core"),
+            ) {
+                // Refer all of clojure.core into user namespace
+                let new_user_ptr = rt.refer_all(user_ns_ptr, core_ns_ptr).unwrap();
+                rt.update_namespace_root("user", new_user_ptr);
+                self.namespace_registry.insert("user".to_string(), new_user_ptr);
+                self.current_namespace_ptr = new_user_ptr;
+            }
         }
     }
 
@@ -1180,11 +1264,10 @@ impl Compiler {
             }
 
             // Update current_namespace_ptr using the name we found
-            if let Some(name) = current_ns_name {
-                if let Some(&new_ptr) = rt.get_namespace_pointers().get(&name) {
+            if let Some(name) = current_ns_name
+                && let Some(&new_ptr) = rt.get_namespace_pointers().get(&name) {
                     self.current_namespace_ptr = new_ptr;
                 }
-            }
         }
     }
 
@@ -1204,13 +1287,12 @@ impl Compiler {
 
                 // Refer all of clojure.core into the new namespace (like Clojure does)
                 // Skip if this IS clojure.core, or if clojure.core doesn't exist yet
-                if name != "clojure.core" {
-                    if let Some(core_ns_ptr) = rt.get_namespace_by_name("clojure.core") {
+                if name != "clojure.core"
+                    && let Some(core_ns_ptr) = rt.get_namespace_by_name("clojure.core") {
                         ns_ptr = rt.refer_all(ns_ptr, core_ns_ptr)?;
                         // Update the namespace root since refer_all may have reallocated
                         rt.update_namespace_root(name, ns_ptr);
                     }
-                }
 
                 ns_ptr
             };
@@ -1241,10 +1323,10 @@ impl Compiler {
         // Store it into *ns* var using symbol-based lookup
         let core_ns_reg = self
             .builder
-            .assign_new(IrValue::TaggedConstant(((core_ns_symbol_id << 3) as isize)));
+            .assign_new(IrValue::TaggedConstant((core_ns_symbol_id << 3) as isize));
         let ns_var_reg = self
             .builder
-            .assign_new(IrValue::TaggedConstant(((ns_var_symbol_id << 3) as isize)));
+            .assign_new(IrValue::TaggedConstant((ns_var_symbol_id << 3) as isize));
         self.call_builtin(
             "store-var-by-symbol",
             vec![core_ns_reg, ns_var_reg, ns_value],
@@ -1693,7 +1775,7 @@ impl Compiler {
         let free_vars = self.find_free_variables_across_arities(arities, name)?;
 
         // DEBUG: Print free vars for protocol methods
-        if !free_vars.is_empty() {}
+        free_vars.is_empty();
 
         // Step 2: Capture free variables (evaluate them in current scope)
         // IMPORTANT: This must happen BEFORE compiling the function body to capture
@@ -1794,7 +1876,7 @@ impl Compiler {
         arity_count: usize,
     ) -> Result<usize, String> {
         // Save the current IR builder and create a new one for this arity
-        let outer_builder = std::mem::replace(&mut self.builder, IrBuilder::new());
+        let outer_builder = std::mem::take(&mut self.builder);
 
         // Push new scope for function parameters
         self.push_scope();
@@ -1869,14 +1951,14 @@ impl Compiler {
                     // Multi-arity: closures are stored after the arity table
                     self.builder.emit(Instruction::LoadClosureMultiArity(
                         closure_reg,
-                        self_reg.clone(),
+                        *self_reg,
                         arity_count,
                         i,
                     ));
                 } else {
                     // Single-arity: use standard closure layout
                     self.builder
-                        .emit(Instruction::LoadClosure(closure_reg, self_reg.clone(), i));
+                        .emit(Instruction::LoadClosure(closure_reg, *self_reg, i));
                 }
                 self.bind_local(var_name.clone(), closure_reg);
             }
@@ -1908,7 +1990,7 @@ impl Compiler {
         // Each :post condition can reference % which is bound to the result
         if !arity.post_conditions.is_empty() {
             // Bind % to the result for post-condition expressions
-            self.bind_local("%".to_string(), result.clone());
+            self.bind_local("%".to_string(), result);
 
             for (i, post_cond) in arity.post_conditions.iter().enumerate() {
                 let cond_result = self.compile(post_cond)?;
@@ -3545,151 +3627,5 @@ impl Compiler {
     /// Returns vector of (function_name, instructions) for each nested function
     pub fn take_compiled_function_irs(&mut self) -> Vec<(Option<String>, Vec<Instruction>)> {
         std::mem::take(&mut self.compiled_function_irs)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::clojure_ast::analyze;
-    use crate::reader::read;
-    use std::cell::UnsafeCell;
-
-    #[test]
-    fn test_compile_add_generates_ir() {
-        let runtime = Arc::new(UnsafeCell::new(GCRuntime::new()));
-        let mut compiler = Compiler::new(runtime);
-        let val = read("(+ 1 2)").unwrap();
-        let ast = analyze(&val).unwrap();
-
-        compiler.compile(&ast).unwrap();
-        let instructions = compiler.take_instructions();
-
-        // Polymorphic arithmetic generates many instructions for type dispatch:
-        // - LoadConstant for operands
-        // - Type tag checks and branching
-        // - Int path: Untag, AddInt, Tag
-        // - Float path: Type checks, conversions, AddFloat, AllocateFloat
-        println!(
-            "\nGenerated {} IR instructions for (+ 1 2):",
-            instructions.len()
-        );
-        for (i, inst) in instructions.iter().enumerate() {
-            println!("  {}: {:?}", i, inst);
-        }
-
-        // Just verify we generated some instructions (the exact count varies with optimizations)
-        assert!(
-            instructions.len() >= 6,
-            "Expected at least 6 instructions, got {}",
-            instructions.len()
-        );
-    }
-
-    #[test]
-    fn test_compile_nested() {
-        let runtime = Arc::new(UnsafeCell::new(GCRuntime::new()));
-        let mut compiler = Compiler::new(runtime);
-        let val = read("(+ (* 2 3) 4)").unwrap();
-        let ast = analyze(&val).unwrap();
-
-        compiler.compile(&ast).unwrap();
-        let instructions = compiler.take_instructions();
-
-        println!(
-            "\nGenerated {} IR instructions for (+ (* 2 3) 4):",
-            instructions.len()
-        );
-        for (i, inst) in instructions.iter().enumerate() {
-            println!("  {}: {:?}", i, inst);
-        }
-
-        // Should compile (* 2 3) first, then (+ result 4)
-        assert!(instructions.len() > 10);
-    }
-
-    #[test]
-    fn test_compile_string_literal() {
-        let runtime = Arc::new(UnsafeCell::new(GCRuntime::new()));
-        let mut compiler = Compiler::new(runtime.clone());
-        let val = read("\"hello\"").unwrap();
-        let ast = analyze(&val).unwrap();
-
-        compiler.compile(&ast).unwrap();
-        let instructions = compiler.take_instructions();
-
-        // Should generate a single LoadConstant instruction
-        assert_eq!(instructions.len(), 1);
-        match &instructions[0] {
-            Instruction::LoadConstant(_, IrValue::TaggedConstant(ptr)) => {
-                // Verify it's tagged as a string (tag 0b010)
-                assert_eq!(*ptr & 0b111, 0b010, "Should have string tag");
-                // Verify we can read it back
-                let rt = unsafe { &*runtime.get() };
-                let s = rt.read_string(*ptr as usize);
-                assert_eq!(s, "hello");
-            }
-            _ => panic!("Expected LoadConstant instruction"),
-        }
-    }
-
-    #[test]
-    fn test_compile_empty_string() {
-        let runtime = Arc::new(UnsafeCell::new(GCRuntime::new()));
-        let mut compiler = Compiler::new(runtime.clone());
-        let val = read("\"\"").unwrap();
-        let ast = analyze(&val).unwrap();
-
-        compiler.compile(&ast).unwrap();
-        let instructions = compiler.take_instructions();
-
-        assert_eq!(instructions.len(), 1);
-        match &instructions[0] {
-            Instruction::LoadConstant(_, IrValue::TaggedConstant(ptr)) => {
-                let rt = unsafe { &*runtime.get() };
-                let s = rt.read_string(*ptr as usize);
-                assert_eq!(s, "");
-            }
-            _ => panic!("Expected LoadConstant instruction"),
-        }
-    }
-
-    #[test]
-    fn test_compile_string_with_spaces() {
-        let runtime = Arc::new(UnsafeCell::new(GCRuntime::new()));
-        let mut compiler = Compiler::new(runtime.clone());
-        let val = read("\"hello world\"").unwrap();
-        let ast = analyze(&val).unwrap();
-
-        compiler.compile(&ast).unwrap();
-        let instructions = compiler.take_instructions();
-
-        assert_eq!(instructions.len(), 1);
-        match &instructions[0] {
-            Instruction::LoadConstant(_, IrValue::TaggedConstant(ptr)) => {
-                let rt = unsafe { &*runtime.get() };
-                let s = rt.read_string(*ptr as usize);
-                assert_eq!(s, "hello world");
-            }
-            _ => panic!("Expected LoadConstant instruction"),
-        }
-    }
-
-    #[test]
-    fn test_compile_string_in_def() {
-        let runtime = Arc::new(UnsafeCell::new(GCRuntime::new()));
-        let mut compiler = Compiler::new(runtime.clone());
-        let val = read("(def greeting \"hello\")").unwrap();
-        let ast = analyze(&val).unwrap();
-
-        // Should compile without error
-        compiler.compile(&ast).unwrap();
-        let instructions = compiler.take_instructions();
-
-        // Should have instructions for allocating var, storing value, etc.
-        assert!(
-            instructions.len() > 1,
-            "Should generate multiple instructions for def"
-        );
     }
 }

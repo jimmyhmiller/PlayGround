@@ -14,7 +14,7 @@ mod register_allocation;
 mod trampoline;
 
 use crate::arm_codegen::Arm64CodeGen;
-use crate::clojure_ast::{Expr, analyze, analyze_tagged, analyze_toplevel_tagged};
+use crate::clojure_ast::{Expr, analyze_toplevel_tagged};
 use crate::compiler::Compiler;
 use crate::gc_runtime::GCRuntime;
 use crate::reader::{read, read_to_tagged};
@@ -821,6 +821,9 @@ fn run_expr(expr: &str, gc_always: bool) {
         std::process::exit(1);
     }
 
+    // Set up user namespace (refer clojure.core and switch to it)
+    compiler.setup_user_namespace();
+
     // Parse and analyze the expression using tagged pointers
     let ast = unsafe {
         let rt = &mut *runtime.get();
@@ -914,6 +917,9 @@ fn run_script(filename: &str, gc_always: bool) {
         eprintln!("Error loading clojure.core: {}", e);
         std::process::exit(1);
     }
+
+    // Set up user namespace (refer clojure.core and switch to it)
+    compiler.setup_user_namespace();
 
     // Read and accumulate lines until we have a complete expression
     let reader = std::io::BufReader::new(file);
@@ -1081,6 +1087,9 @@ fn main() {
     if let Err(e) = load_clojure_file("src/clojure/core.clj", &mut repl_compiler, &runtime, false) {
         eprintln!("Warning: Could not load clojure.core: {}", e);
     }
+
+    // Set up user namespace (refer clojure.core and switch to it)
+    repl_compiler.setup_user_namespace();
 
     loop {
         // Show current namespace in prompt
@@ -1526,7 +1535,7 @@ fn main() {
                                                                     code_ptr, code_len,
                                                                 );
                                                             print_machine_code(
-                                                                &code_slice.to_vec(),
+                                                                code_slice,
                                                             );
                                                         }
                                                         println!();

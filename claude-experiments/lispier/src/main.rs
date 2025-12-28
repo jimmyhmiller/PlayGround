@@ -604,6 +604,11 @@ fn compile_and_run_nodes(nodes: &[Node], program_args: &[String]) -> Result<(), 
                     jit.register_value_ffi();
                 }
             }
+            "gpt2-ffi" => {
+                unsafe {
+                    jit.register_gpt2_ffi();
+                }
+            }
             other => {
                 return Err(format!("Unknown extern library: {}", other));
             }

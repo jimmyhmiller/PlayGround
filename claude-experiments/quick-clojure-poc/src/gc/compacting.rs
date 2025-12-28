@@ -167,14 +167,13 @@ impl Allocator for CompactingHeap {
         let start_offset = self.to_space.allocation_offset;
         let mut temporary_roots_to_update: Vec<(usize, usize)> = vec![];
         for (i, root) in self.temporary_roots.clone().iter().enumerate() {
-            if let Some(root) = root {
-                if BuiltInTypes::is_heap_pointer(*root) {
+            if let Some(root) = root
+                && BuiltInTypes::is_heap_pointer(*root) {
                     let heap_object = HeapObject::from_tagged(*root);
                     debug_assert!(self.from_space.contains(heap_object.get_pointer()));
                     let new_root = self.copy_using_cheneys_algorithm(heap_object);
                     temporary_roots_to_update.push((i, new_root));
                 }
-            }
         }
 
         unsafe { self.copy_remaining(start_offset) };

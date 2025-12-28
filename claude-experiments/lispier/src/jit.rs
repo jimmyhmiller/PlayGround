@@ -240,6 +240,25 @@ impl Jit {
         }
     }
 
+    /// Register GPT-2 FFI functions with the JIT
+    ///
+    /// This makes functions like `gpt2_load_checkpoint`, `gpt2_get_params_ptr`, etc.
+    /// available for calling from compiled code.
+    ///
+    /// # Safety
+    /// Must be called before invoking any function that uses GPT-2 symbols.
+    pub unsafe fn register_gpt2_ffi(&self) {
+        for (name, ptr) in crate::gpt2::get_gpt2_ffi_functions() {
+            unsafe {
+                // Register the bare name
+                self.register_symbol(name, ptr);
+                // Also register with _mlir_ciface_ prefix for func dialect compatibility
+                let ciface_name = format!("_mlir_ciface_{}", name);
+                self.register_symbol(&ciface_name, ptr);
+            }
+        }
+    }
+
     /// Register common libc functions with the JIT
     ///
     /// This makes functions like `malloc`, `free`, `memcpy`, etc.
@@ -272,6 +291,13 @@ impl Jit {
             ("atof", libc::atof as *mut ()),
             ("strtol", libc::strtol as *mut ()),
             ("strtod", libc::strtod as *mut ()),
+            // File I/O
+            ("fopen", libc::fopen as *mut ()),
+            ("fread", libc::fread as *mut ()),
+            ("fwrite", libc::fwrite as *mut ()),
+            ("fclose", libc::fclose as *mut ()),
+            ("fseek", libc::fseek as *mut ()),
+            ("ftell", libc::ftell as *mut ()),
         ];
 
         for (name, ptr) in libc_fns {

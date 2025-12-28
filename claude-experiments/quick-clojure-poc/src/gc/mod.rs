@@ -15,7 +15,7 @@ pub mod space;
 pub mod stack_walker;
 pub mod types;
 
-pub use types::{BuiltInTypes, Header, HeapObject, Word};
+pub use types::{BuiltInTypes, HeapObject, Word};
 
 /// Stack map entry details for a function
 #[derive(Debug, Clone)]

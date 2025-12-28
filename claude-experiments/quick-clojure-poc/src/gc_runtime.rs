@@ -11,9 +11,6 @@ use crate::gc::{
     HeapObject, ObjectInfo, ObjectReference, StackMap, StackMapDetails, Word, type_id_to_name,
 };
 
-// Re-export for compatibility
-pub use crate::gc::{BuiltInTypes as GcBuiltInTypes, HeapObject as GcHeapObject};
-
 // Select allocator based on feature flags
 cfg_if::cfg_if! {
     if #[cfg(feature = "compacting")] {
@@ -510,11 +507,10 @@ impl GCRuntime {
 
                 // Update keyword_heap_ptrs if they were relocated
                 for ptr_opt in self.keyword_heap_ptrs.iter_mut() {
-                    if let Some(ptr) = ptr_opt {
-                        if *ptr == old_ptr {
+                    if let Some(ptr) = ptr_opt
+                        && *ptr == old_ptr {
                             *ptr = new_ptr;
                         }
-                    }
                 }
 
                 // Update dynamic_vars set if a var was relocated
@@ -834,11 +830,7 @@ impl GCRuntime {
 
     /// Get symbol string by ID (for runtime lookup).
     pub fn get_symbol(&self, id: u32) -> Option<&str> {
-        let result = self.symbol_table.get(id as usize).map(|s| s.as_str());
-        if id == 184 || result == Some("") {
-            eprintln!("GET_SYMBOL: id={} -> {:?}, symbol_table.len()={}", id, result, self.symbol_table.len());
-        }
-        result
+        self.symbol_table.get(id as usize).map(|s| s.as_str())
     }
 
     /// Allocate a namespace object on the heap
@@ -852,7 +844,7 @@ impl GCRuntime {
         // Namespace is fixed size: [name_ptr, bindings_array_ptr]
         let ns_ptr = self.allocate_raw(2, TYPE_NAMESPACE as u8)?;
         let heap_obj = HeapObject::from_untagged(ns_ptr as *const u8);
-        heap_obj.write_field(0, name_ptr as usize);
+        heap_obj.write_field(0, name_ptr);
         heap_obj.write_field(1, tagged_bindings);
 
         Ok(self.tag_heap_object(ns_ptr))
@@ -920,7 +912,7 @@ impl GCRuntime {
         let bindings_untagged = self.untag_heap_object(bindings_tagged);
         let bindings_obj = HeapObject::from_untagged(bindings_untagged as *const u8);
         let bindings_header = bindings_obj.get_header();
-        let capacity = bindings_header.size as usize;
+        let _capacity = bindings_header.size as usize;
         let used = bindings_obj.get_type_data();
 
         // Check if binding already exists - update in place if so
@@ -929,7 +921,7 @@ impl GCRuntime {
             let name_ptr = bindings_obj.get_field(i * 2);
             let stored_name = self.read_string(name_ptr);
             if stored_name == symbol_name {
-                bindings_obj.write_field(i * 2 + 1, value as usize);
+                bindings_obj.write_field(i * 2 + 1, value);
                 return Ok(ns_ptr);
             }
         }
@@ -1036,7 +1028,7 @@ impl GCRuntime {
 
         // Get namespace name for debug
         let ns_name_ptr = ns_obj.get_field(0);
-        let ns_name = self.read_string(ns_name_ptr);
+        let _ns_name = self.read_string(ns_name_ptr);
 
         // Get bindings array from field 1
         let bindings_tagged = ns_obj.get_field(1);
@@ -1044,36 +1036,14 @@ impl GCRuntime {
         let bindings_obj = HeapObject::from_untagged(bindings_untagged as *const u8);
         // For dynamic arrays, used count is in type_data
         let used = bindings_obj.get_type_data();
-
         let num_bindings = used / 2;
-
-        // Static counter to track calls
-        static LOOKUP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let call_id = LOOKUP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-
-        // Print for all lookups after 4000 to see what's happening near failure
-        if symbol_name == "/" || call_id > 4000 {
-            eprintln!("LOOKUP[{}]: ns='{}' searching for '{}', ns_ptr=0x{:x} num_bindings={}", call_id, ns_name, symbol_name, ns_ptr, num_bindings);
-        }
-
-        // Debug: panic on empty string lookup to get backtrace
-        if symbol_name.is_empty() {
-            panic!("LOOKUP: Empty symbol name in namespace_lookup! ns='{}', call_id={}", ns_name, call_id);
-        }
 
         for i in 0..num_bindings {
             let name_ptr = bindings_obj.get_field(i * 2);
             let stored_name = self.read_string(name_ptr);
             if stored_name == symbol_name {
-                let result = bindings_obj.get_field(i * 2 + 1);
-                if symbol_name == "/" {
-                    eprintln!("LOOKUP[{}]: FOUND '{}' at index {}, returning Some(0x{:x})", call_id, symbol_name, i, result);
-                }
-                return Some(result);
+                return Some(bindings_obj.get_field(i * 2 + 1));
             }
-        }
-        if symbol_name == "/" {
-            eprintln!("LOOKUP[{}]: NOT FOUND '{}', returning None", call_id, symbol_name);
         }
         None
     }
@@ -1123,12 +1093,11 @@ impl GCRuntime {
 
     /// Update namespace root (after reallocation)
     pub fn update_namespace_root(&mut self, name: &str, new_ptr: usize) {
-        if let Some(&ns_id) = self.namespace_name_to_id.get(name) {
-            if let Some(old_ptr) = self.namespace_roots.get(name).copied() {
+        if let Some(&ns_id) = self.namespace_name_to_id.get(name)
+            && let Some(old_ptr) = self.namespace_roots.get(name).copied() {
                 self.allocator.remove_namespace_root(ns_id, old_ptr);
                 self.allocator.add_namespace_root(ns_id, new_ptr);
             }
-        }
         self.namespace_roots.insert(name.to_string(), new_ptr);
     }
 
@@ -1191,11 +1160,10 @@ impl GCRuntime {
                     if *ptr == old_ptr {
                         *ptr = new_ptr;
                         // Also need to find ns_id by name for update
-                        if let Some(&id) = self.namespace_name_to_id.get(name) {
-                            if id == ns_id {
+                        if let Some(&id) = self.namespace_name_to_id.get(name)
+                            && id == ns_id {
                                 // Already updated the root
                             }
-                        }
                     }
                 }
 
@@ -1208,11 +1176,10 @@ impl GCRuntime {
 
                 // Update keyword_heap_ptrs if they were relocated
                 for ptr_opt in self.keyword_heap_ptrs.iter_mut() {
-                    if let Some(ptr) = ptr_opt {
-                        if *ptr == old_ptr {
+                    if let Some(ptr) = ptr_opt
+                        && *ptr == old_ptr {
                             *ptr = new_ptr;
                         }
-                    }
                 }
 
                 // Update dynamic_vars set if a var was relocated
@@ -1350,11 +1317,11 @@ impl GCRuntime {
             let fn_tagged = (code_ptr << 3) | 0b100;
 
             // Create a var for this builtin in clojure.core
-            let (var_ptr, symbol_ptr) = self.allocate_var(core_ns_ptr, *name, fn_tagged)?;
+            let (var_ptr, symbol_ptr) = self.allocate_var(core_ns_ptr, name, fn_tagged)?;
 
             // Add the var to the namespace bindings, reusing the symbol string from the var
             core_ns_ptr =
-                self.namespace_add_binding_with_symbol_ptr(core_ns_ptr, *name, var_ptr, symbol_ptr)?;
+                self.namespace_add_binding_with_symbol_ptr(core_ns_ptr, name, var_ptr, symbol_ptr)?;
         }
 
         Ok(core_ns_ptr)
@@ -1483,12 +1450,11 @@ impl GCRuntime {
 
     /// Set the value of a thread-local binding (for set!)
     pub fn set_binding(&mut self, var_ptr: usize, value: usize) -> Result<(), String> {
-        if let Some(stack) = self.dynamic_bindings.get_mut(&var_ptr) {
-            if let Some(last) = stack.last_mut() {
+        if let Some(stack) = self.dynamic_bindings.get_mut(&var_ptr)
+            && let Some(last) = stack.last_mut() {
                 *last = value;
                 return Ok(());
             }
-        }
 
         let (ns_name, symbol_name) = self.var_info(var_ptr);
         Err(format!(
@@ -1499,11 +1465,10 @@ impl GCRuntime {
 
     /// Get the current value of a var, checking dynamic bindings first
     pub fn var_get_value_dynamic(&self, var_ptr: usize) -> usize {
-        if let Some(stack) = self.dynamic_bindings.get(&var_ptr) {
-            if let Some(&value) = stack.last() {
+        if let Some(stack) = self.dynamic_bindings.get(&var_ptr)
+            && let Some(&value) = stack.last() {
                 return value;
             }
-        }
         self.var_get_value(var_ptr)
     }
 
@@ -2771,7 +2736,7 @@ impl GCRuntime {
                 let untagged = value >> 3;
                 let obj = HeapObject::from_untagged(untagged as *const u8);
                 let type_id = obj.get_type_id();
-                match type_id as usize {
+                match type_id {
                     TYPE_NAMESPACE => {
                         let name = self.namespace_name(value);
                         format!("#<ns:{}>", name)
@@ -2909,7 +2874,7 @@ impl GCRuntime {
             let obj = HeapObject::from_untagged(untagged as *const u8);
             let type_id = obj.get_type_id();
 
-            if type_id as usize != TYPE_LIST {
+            if type_id != TYPE_LIST {
                 // Improper list - add dot notation
                 items.push(format!(". {}", self.format_value(current)));
                 break;
@@ -2951,9 +2916,9 @@ impl GCRuntime {
             let type_id = obj.get_type_id();
 
             // Check if it's a deftype (Cons)
-            if type_id as usize != TYPE_DEFTYPE {
+            if type_id != TYPE_DEFTYPE {
                 // Check for EmptyList (TYPE_LIST with count 0)
-                if type_id as usize == TYPE_LIST {
+                if type_id == TYPE_LIST {
                     break;
                 }
                 items.push(format!(". {}", self.format_value(current)));
@@ -3169,11 +3134,10 @@ impl GCRuntime {
         let key = (type_id, protocol_id, method_index);
 
         // If we're replacing an existing implementation, remove the old root
-        if let Some(&old_root_id) = self.protocol_vtable_root_ids.get(&key) {
-            if let Some(&old_ptr) = self.protocol_vtable.get(&key) {
+        if let Some(&old_root_id) = self.protocol_vtable_root_ids.get(&key)
+            && let Some(&old_ptr) = self.protocol_vtable.get(&key) {
                 self.allocator.remove_namespace_root(old_root_id, old_ptr);
             }
-        }
 
         // Add the new implementation
         self.protocol_vtable.insert(key, fn_ptr);
@@ -3470,7 +3434,7 @@ impl GCRuntime {
                         // PList has fields: [meta, first, rest, count, __hash]
                         // count is at field index 3
                         let count_tagged = self.read_type_field(value, 3);
-                        Ok((count_tagged >> 3) as usize)
+                        Ok(count_tagged >> 3)
                     }
                     Some("Cons") => {
                         // Cons doesn't have count, walk the seq in Rust without protocol dispatch
@@ -3498,7 +3462,7 @@ impl GCRuntime {
                                 Some("PList") => {
                                     // PList has count, add it and done
                                     let c = self.read_type_field(current, 3);
-                                    count += (c >> 3) as usize;
+                                    count += c >> 3;
                                     break;
                                 }
                                 Some("Cons") => {
@@ -3579,7 +3543,7 @@ impl GCRuntime {
             _ if type_id >= DEFTYPE_ID_OFFSET => {
                 // Protocol dispatch to -nth
                 // -nth takes (coll, n) where n is a tagged integer
-                let tagged_index = (index << 3) as usize;
+                let tagged_index = index << 3;
                 crate::trampoline::invoke_protocol_method(self, value, "-nth", &[tagged_index])
             }
             _ => Err(format!(

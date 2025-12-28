@@ -2850,7 +2850,7 @@ fn seq_to_vec(rt: &mut GCRuntime, seq: usize) -> Result<Vec<usize>, String> {
     let type_id = rt.get_type_id_for_value(seq);
     let mut result = Vec::new();
 
-    match type_id as usize {
+    match type_id {
         TYPE_READER_LIST | TYPE_LIST => {
             // Cons-based list - use first/rest
             let mut current = seq;
@@ -2859,7 +2859,7 @@ fn seq_to_vec(rt: &mut GCRuntime, seq: usize) -> Result<Vec<usize>, String> {
                     break;
                 }
                 let curr_type = rt.get_type_id_for_value(current);
-                if curr_type as usize == TYPE_READER_LIST || curr_type as usize == TYPE_LIST
+                if curr_type == TYPE_READER_LIST || curr_type == TYPE_LIST
                 {
                     let first = rt.prim_first(current)?;
                     result.push(first);

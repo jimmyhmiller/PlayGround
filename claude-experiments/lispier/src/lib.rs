@@ -1,5 +1,6 @@
 pub mod ast;
 pub mod dialect;
+pub mod gpt2;
 pub mod ir_gen;
 pub mod jit;
 pub mod macro_compiler;

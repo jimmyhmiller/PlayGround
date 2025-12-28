@@ -2,7 +2,6 @@ use crate::gc_runtime::GCRuntime;
 use crate::value::Value;
 use clojure_reader::edn::{Edn, read_string};
 use im::{hashmap, hashset, vector};
-use std::collections::HashMap;
 
 /// Convert clojure-reader's Edn to our Value representation
 pub fn edn_to_value(edn: &Edn) -> Result<Value, String> {
@@ -295,7 +294,7 @@ fn expand_syntax_quote(edn: &Edn, rt: &mut GCRuntime) -> Result<usize, String> {
         }
 
         // Symbol: quote it with full namespace resolution
-        Edn::Symbol(s) => {
+        Edn::Symbol(_s) => {
             // In real Clojure, syntax-quote resolves symbols to their namespaced versions
             // For now, just quote the symbol as-is
             let sym = edn_to_tagged(edn, rt)?;
@@ -383,39 +382,6 @@ pub fn read_to_tagged(input: &str, rt: &mut GCRuntime) -> Result<usize, String> 
     }
 }
 
-/// Read a Clojure expression with namespace context, returning a tagged heap pointer
-pub fn read_to_tagged_with_context(
-    input: &str,
-    current_namespace: &str,
-    namespace_aliases: &HashMap<String, String>,
-    rt: &mut GCRuntime,
-) -> Result<usize, String> {
-    let preprocessed = preprocess_with_context(input, current_namespace, namespace_aliases)?;
-    match read_string(&preprocessed) {
-        Ok(edn) => edn_to_tagged(&edn, rt),
-        Err(e) => Err(format!("Parse error: {:?}", e)),
-    }
-}
-
-/// Read multiple expressions from a string, returning a vector of tagged heap pointers
-/// Useful for reading files with multiple top-level forms.
-pub fn read_all_to_tagged(input: &str, rt: &mut GCRuntime) -> Result<Vec<usize>, String> {
-    let preprocessed = preprocess(input);
-
-    // The clojure_reader crate's read_string only reads one expression
-    // We need to read multiple. For now, wrap in a vector and read that.
-    // This is a workaround - ideally we'd iterate through the input.
-
-    // Try reading as a single form first
-    match read_string(&preprocessed) {
-        Ok(edn) => {
-            let tagged = edn_to_tagged(&edn, rt)?;
-            Ok(vec![tagged])
-        }
-        Err(e) => Err(format!("Parse error: {:?}", e)),
-    }
-}
-
 /// Check if a character can be part of a keyword/symbol name
 fn is_keyword_char(c: char) -> bool {
     c.is_alphanumeric()
@@ -430,80 +396,6 @@ fn is_keyword_char(c: char) -> bool {
         || c == '<'
         || c == '>'
         || c == '='
-}
-
-/// Pre-process input to handle reader macros not supported by clojure-reader
-/// Converts #'symbol to (var symbol)
-/// Converts ::foo to :current-ns/foo (auto-resolved keywords)
-/// Converts ::alias/foo to :resolved-ns/foo (aliased keywords)
-fn preprocess_with_context(
-    input: &str,
-    current_namespace: &str,
-    namespace_aliases: &HashMap<String, String>,
-) -> Result<String, String> {
-    let mut result = String::with_capacity(input.len() * 2);
-    let mut chars = input.chars().peekable();
-
-    while let Some(c) = chars.next() {
-        if c == '#' && chars.peek() == Some(&'\'') {
-            // Handle #'symbol -> (var symbol)
-            chars.next(); // consume the '
-            result.push_str("(var ");
-
-            // Read the symbol (including namespace-qualified symbols)
-            while let Some(&next) = chars.peek() {
-                if is_keyword_char(next) {
-                    result.push(chars.next().unwrap());
-                } else {
-                    break;
-                }
-            }
-            result.push(')');
-        } else if c == ':' && chars.peek() == Some(&':') {
-            // Handle :: auto-resolved keywords
-            chars.next(); // consume second ':'
-
-            // Read the keyword name (may include alias/name)
-            let mut keyword_text = String::new();
-            while let Some(&next) = chars.peek() {
-                if is_keyword_char(next) {
-                    keyword_text.push(chars.next().unwrap());
-                } else {
-                    break;
-                }
-            }
-
-            if keyword_text.is_empty() {
-                return Err("Invalid keyword: :: must be followed by a name".to_string());
-            }
-
-            // Check if it's ::alias/name or just ::name
-            if let Some(slash_pos) = keyword_text.find('/') {
-                let alias = &keyword_text[..slash_pos];
-                let name = &keyword_text[slash_pos + 1..];
-
-                // Look up the alias
-                if let Some(resolved_ns) = namespace_aliases.get(alias) {
-                    result.push(':');
-                    result.push_str(resolved_ns);
-                    result.push('/');
-                    result.push_str(name);
-                } else {
-                    return Err(format!("Unknown namespace alias: {}", alias));
-                }
-            } else {
-                // Just ::name -> :current-ns/name
-                result.push(':');
-                result.push_str(current_namespace);
-                result.push('/');
-                result.push_str(&keyword_text);
-            }
-        } else {
-            result.push(c);
-        }
-    }
-
-    Ok(result)
 }
 
 /// Pre-process input without namespace context (simple version)
@@ -537,21 +429,6 @@ fn preprocess(input: &str) -> String {
 /// Read a Clojure expression from a string
 pub fn read(input: &str) -> Result<Value, String> {
     let preprocessed = preprocess(input);
-    match read_string(&preprocessed) {
-        Ok(edn) => edn_to_value(&edn),
-        Err(e) => Err(format!("Parse error: {:?}", e)),
-    }
-}
-
-/// Read a Clojure expression with namespace context for :: keyword resolution
-/// - current_namespace: the current namespace name (e.g., "user", "my.app")
-/// - namespace_aliases: map of alias -> full namespace name (e.g., {"str" -> "clojure.string"})
-pub fn read_with_context(
-    input: &str,
-    current_namespace: &str,
-    namespace_aliases: &HashMap<String, String>,
-) -> Result<Value, String> {
-    let preprocessed = preprocess_with_context(input, current_namespace, namespace_aliases)?;
     match read_string(&preprocessed) {
         Ok(edn) => edn_to_value(&edn),
         Err(e) => Err(format!("Parse error: {:?}", e)),
@@ -675,73 +552,6 @@ mod tests {
         match read(":my.app.core/handler").unwrap() {
             Value::Keyword(k) => assert_eq!(k, "my.app.core/handler"),
             _ => panic!("Expected keyword"),
-        }
-    }
-
-    #[test]
-    fn test_auto_resolved_keywords() {
-        let aliases = HashMap::new();
-
-        // ::foo should resolve to :user/foo in user namespace
-        match read_with_context("::foo", "user", &aliases).unwrap() {
-            Value::Keyword(k) => assert_eq!(k, "user/foo"),
-            _ => panic!("Expected keyword"),
-        }
-
-        // ::bar in my.app namespace
-        match read_with_context("::bar", "my.app", &aliases).unwrap() {
-            Value::Keyword(k) => assert_eq!(k, "my.app/bar"),
-            _ => panic!("Expected keyword"),
-        }
-    }
-
-    #[test]
-    fn test_aliased_keywords() {
-        let mut aliases = HashMap::new();
-        aliases.insert("str".to_string(), "clojure.string".to_string());
-        aliases.insert("s".to_string(), "clojure.spec.alpha".to_string());
-
-        // ::str/join should resolve to :clojure.string/join
-        match read_with_context("::str/join", "user", &aliases).unwrap() {
-            Value::Keyword(k) => assert_eq!(k, "clojure.string/join"),
-            _ => panic!("Expected keyword"),
-        }
-
-        // ::s/keys should resolve to :clojure.spec.alpha/keys
-        match read_with_context("::s/keys", "user", &aliases).unwrap() {
-            Value::Keyword(k) => assert_eq!(k, "clojure.spec.alpha/keys"),
-            _ => panic!("Expected keyword"),
-        }
-    }
-
-    #[test]
-    fn test_unknown_alias_error() {
-        let aliases = HashMap::new();
-
-        // ::unknown/foo should error
-        let result = read_with_context("::unknown/foo", "user", &aliases);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("Unknown namespace alias"));
-    }
-
-    #[test]
-    fn test_keywords_in_data_structures() {
-        let mut aliases = HashMap::new();
-        aliases.insert("k".to_string(), "my.keys".to_string());
-
-        // Map with auto-resolved keywords
-        match read_with_context("{::name \"Alice\" ::k/id 42}", "user", &aliases).unwrap() {
-            Value::Map(map) => {
-                assert_eq!(map.len(), 2);
-                let key_name = Value::Keyword("user/name".to_string());
-                let key_id = Value::Keyword("my.keys/id".to_string());
-                assert_eq!(
-                    map.get(&key_name),
-                    Some(&Value::String("Alice".to_string()))
-                );
-                assert_eq!(map.get(&key_id), Some(&Value::Int(42)));
-            }
-            _ => panic!("Expected map"),
         }
     }
 

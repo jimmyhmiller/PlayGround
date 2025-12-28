@@ -300,11 +300,10 @@ impl GenerationalGC {
         // and write the forwarding pointer to prevent duplicate copies
         if !heap_object.is_opaque_object() {
             let first_field = heap_object.get_field(0);
-            if let Some(heap_object) = HeapObject::try_from_tagged(first_field) {
-                if self.young.contains(heap_object.get_pointer()) {
+            if let Some(heap_object) = HeapObject::try_from_tagged(first_field)
+                && self.young.contains(heap_object.get_pointer()) {
                     unsafe { self.copy(first_field) };
                 }
-            }
         }
 
         // Write forwarding pointer to first word (safe even for opaque objects
