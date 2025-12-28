@@ -16,6 +16,8 @@ pub enum Expr {
     Bool(bool),
     /// Integer literal
     Int(i64),
+    /// String literal
+    String(String),
 
     // === Variables ===
     /// Variable reference
@@ -47,12 +49,22 @@ pub enum Expr {
     LetRecMutual(Vec<(String, Expr)>, Box<Expr>),
 
     // === Binary Operators ===
-    /// Integer equality: e1 == e2
+    /// Equality: e1 == e2 (works on int and string)
     Eq(Box<Expr>, Box<Expr>),
     /// Boolean AND: e1 && e2
     And(Box<Expr>, Box<Expr>),
     /// Boolean OR: e1 || e2
     Or(Box<Expr>, Box<Expr>),
+    /// Integer addition: e1 + e2
+    Add(Box<Expr>, Box<Expr>),
+    /// Integer subtraction: e1 - e2
+    Sub(Box<Expr>, Box<Expr>),
+    /// Integer multiplication: e1 * e2
+    Mul(Box<Expr>, Box<Expr>),
+    /// Integer division: e1 / e2
+    Div(Box<Expr>, Box<Expr>),
+    /// String concatenation: e1 ++ e2
+    Concat(Box<Expr>, Box<Expr>),
 }
 
 impl Expr {
@@ -64,6 +76,10 @@ impl Expr {
 
     pub fn int(n: i64) -> Self {
         Expr::Int(n)
+    }
+
+    pub fn string(s: impl Into<String>) -> Self {
+        Expr::String(s.into())
     }
 
     pub fn var(name: impl Into<String>) -> Self {

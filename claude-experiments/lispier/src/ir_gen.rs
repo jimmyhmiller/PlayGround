@@ -638,6 +638,45 @@ impl<'c> IRGenerator<'c> {
                 continue;
             }
 
+            // Handle vararg attribute for llvm.call - convert function type to vararg(!llvm.func<...>)
+            if name == "llvm.call" && key == "vararg" {
+                if let AttributeValue::FunctionType(ft) = value {
+                    // Build type string like "!llvm.func<i32 (ptr, ...)>"
+                    let args_str = ft.arg_types.iter()
+                        .map(|t| {
+                            if t.name == "!llvm.ptr" { "ptr".to_string() }
+                            else { t.name.clone() }
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ");
+
+                    // Add ... for vararg
+                    let args_with_vararg = if !args_str.is_empty() {
+                        format!("{}, ...", args_str)
+                    } else {
+                        "...".to_string()
+                    };
+
+                    let returns_str = if ft.return_types.is_empty() {
+                        "void".to_string()
+                    } else if ft.return_types.len() == 1 {
+                        ft.return_types[0].name.clone()
+                    } else {
+                        ft.return_types.iter()
+                            .map(|t| t.name.clone())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    };
+
+                    let type_str = format!("!llvm.func<{} ({})>", returns_str, args_with_vararg);
+                    if let Some(mlir_type) = Type::parse(context, &type_str) {
+                        let type_attr = TypeAttribute::new(mlir_type);
+                        named_attrs.push((Identifier::new(context, "var_callee_type"), type_attr.into()));
+                    }
+                }
+                continue;
+            }
+
             let attr = self.convert_attribute_value(value)?;
             named_attrs.push((Identifier::new(context, key), attr));
         }
@@ -650,8 +689,12 @@ impl<'c> IRGenerator<'c> {
             let args_count = operands.len() as i32 - if has_callee { 0 } else { 1 };
             // operandSegmentSizes = [callee_operand_count, call_args_count, op_bundle_operands_count]
             let segment_sizes = format!("array<i32: {}, {}, 0>", callee_count, args_count);
+            eprintln!("DEBUG llvm.call: operands.len()={}, has_callee={}, callee_count={}, args_count={}, segment_sizes={}", operands.len(), has_callee, callee_count, args_count, segment_sizes);
             if let Some(attr) = Attribute::parse(context, &segment_sizes) {
+                eprintln!("DEBUG: Parsed operandSegmentSizes attribute successfully");
                 named_attrs.push((Identifier::new(context, "operandSegmentSizes"), attr));
+            } else {
+                eprintln!("DEBUG: FAILED to parse operandSegmentSizes attribute");
             }
             // Empty op_bundle_sizes (no operation bundles)
             if let Some(attr) = Attribute::parse(context, "array<i32>") {

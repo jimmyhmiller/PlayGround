@@ -839,11 +839,11 @@ pub extern "C" fn trampoline_println_regs(
         let values = [v0, v1, v2, v3, v4, v5, v6];
 
         // Print each value, space-separated
-        for i in 0..count.min(7) {
+        for (i, val) in values.iter().take(count.min(7)).enumerate() {
             if i > 0 {
                 print!(" ");
             }
-            let val = values[i];
+            let val = *val;
             let s = rt.format_value(val);
             // format_value wraps strings in quotes, but println should print raw strings
             let kind = crate::gc::types::BuiltInTypes::get_kind(val);

@@ -39,6 +39,14 @@ pub enum Token {
     RParen,     // )
     AndAnd,     // &&
     OrOr,       // ||
+    Plus,       // +
+    Minus,      // -
+    Star,       // *
+    Slash,      // /
+    PlusPlus,   // ++ (string concat)
+
+    // String literals
+    String(String),
 
     // End of input
     Eof,
@@ -69,6 +77,12 @@ impl fmt::Display for Token {
             Token::RParen => write!(f, ")"),
             Token::AndAnd => write!(f, "&&"),
             Token::OrOr => write!(f, "||"),
+            Token::Plus => write!(f, "+"),
+            Token::Minus => write!(f, "-"),
+            Token::Star => write!(f, "*"),
+            Token::Slash => write!(f, "/"),
+            Token::PlusPlus => write!(f, "++"),
+            Token::String(s) => write!(f, "\"{}\"", s),
             Token::Eof => write!(f, "EOF"),
         }
     }
@@ -156,6 +170,44 @@ impl<'a> Lexer<'a> {
         num_str.parse().unwrap_or(0)
     }
 
+    fn read_string(&mut self) -> Result<Token, LexError> {
+        let mut s = String::new();
+        loop {
+            match self.advance() {
+                Some('"') => return Ok(Token::String(s)),
+                Some('\\') => {
+                    // Escape sequences
+                    match self.advance() {
+                        Some('n') => s.push('\n'),
+                        Some('t') => s.push('\t'),
+                        Some('r') => s.push('\r'),
+                        Some('\\') => s.push('\\'),
+                        Some('"') => s.push('"'),
+                        Some(c) => {
+                            return Err(LexError {
+                                message: format!("Unknown escape sequence: \\{}", c),
+                                position: self.position,
+                            })
+                        }
+                        None => {
+                            return Err(LexError {
+                                message: "Unterminated string".to_string(),
+                                position: self.position,
+                            })
+                        }
+                    }
+                }
+                Some(c) => s.push(c),
+                None => {
+                    return Err(LexError {
+                        message: "Unterminated string".to_string(),
+                        position: self.position,
+                    })
+                }
+            }
+        }
+    }
+
     pub fn next_token(&mut self) -> Result<Token, LexError> {
         self.skip_whitespace();
 
@@ -209,6 +261,15 @@ impl<'a> Lexer<'a> {
                     })
                 }
             }
+            '+' => {
+                if self.peek() == Some('+') {
+                    self.advance();
+                    Ok(Token::PlusPlus)
+                } else {
+                    Ok(Token::Plus)
+                }
+            }
+            '*' => Ok(Token::Star),
             '/' => {
                 if self.peek() == Some('/') {
                     // Comment - skip to end of line
@@ -221,24 +282,15 @@ impl<'a> Lexer<'a> {
                     // Recurse to get next token
                     self.next_token()
                 } else {
-                    Err(LexError {
-                        message: format!("Unexpected character: {}", ch),
-                        position: self.position,
-                    })
+                    Ok(Token::Slash)
                 }
             }
+            '"' => self.read_string(),
             '-' => {
-                if self.peek().map(|c| c.is_ascii_digit()).unwrap_or(false) {
-                    // Negative number
-                    let digit = self.advance().unwrap();
-                    let num = self.read_number(digit);
-                    Ok(Token::Int(-num))
-                } else {
-                    Err(LexError {
-                        message: format!("Unexpected character: {}", ch),
-                        position: self.position,
-                    })
-                }
+                // Could be negative number or minus operator
+                // For simplicity, we always return Minus token
+                // Parser will handle negative literals as (0 - n)
+                Ok(Token::Minus)
             }
 
             // Numbers

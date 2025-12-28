@@ -1,3 +1,7 @@
+// Arc<UnsafeCell<GCRuntime>> is intentional: Arc for reference counting,
+// UnsafeCell for interior mutability in a single-threaded runtime context
+#![allow(clippy::arc_with_non_send_sync)]
+
 mod clojure_ast;
 mod reader;
 mod value;

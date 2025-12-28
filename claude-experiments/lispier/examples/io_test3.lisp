@@ -75,7 +75,7 @@
   ;; Print file pointer
   (def fmt_ptr (llvm.mlir.addressof {:global_name @fmt_ptr :result !llvm.ptr}))
   (def file_int (llvm.ptrtoint {:result i64} file))
-  (call i32 printf fmt_ptr file_int)
+  (vararg-call i32 printf (-> [!llvm.ptr ...] [i32]) fmt_ptr file_int)
 
   ;; Allocate buffer
   (def buf_size (: 64 i64))
@@ -86,13 +86,13 @@
 
   ;; Print bytes read
   (def fmt_read (llvm.mlir.addressof {:global_name @fmt_read :result !llvm.ptr}))
-  (call i32 printf fmt_read bytes_read)
+  (vararg-call i32 printf (-> [!llvm.ptr ...] [i32]) fmt_read bytes_read)
 
   ;; Read first byte and print
   (def first_byte (llvm.load {:result i8} buf))
   (def first_byte_i64 (arith.extui {:result i64} first_byte))
   (def fmt_byte (llvm.mlir.addressof {:global_name @fmt_byte :result !llvm.ptr}))
-  (call i32 printf fmt_byte first_byte_i64)
+  (vararg-call i32 printf (-> [!llvm.ptr ...] [i32]) fmt_byte first_byte_i64)
 
   ;; Close and free
   (call i32 fclose file)

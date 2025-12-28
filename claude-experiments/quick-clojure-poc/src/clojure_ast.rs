@@ -742,8 +742,8 @@ fn analyze_when_tagged(rt: &mut GCRuntime, list_ptr: usize) -> Result<Expr, Stri
     let test = analyze_tagged(rt, items[1])?;
 
     let mut body_exprs = Vec::new();
-    for i in 2..items.len() {
-        body_exprs.push(analyze_tagged(rt, items[i])?);
+    for item in items.iter().skip(2) {
+        body_exprs.push(analyze_tagged(rt, *item)?);
     }
 
     let then = if body_exprs.is_empty() {
@@ -777,8 +777,8 @@ fn analyze_when_not_tagged(rt: &mut GCRuntime, list_ptr: usize) -> Result<Expr, 
     };
 
     let mut body_exprs = Vec::new();
-    for i in 2..items.len() {
-        body_exprs.push(analyze_tagged(rt, items[i])?);
+    for item in items.iter().skip(2) {
+        body_exprs.push(analyze_tagged(rt, *item)?);
     }
 
     let then = if body_exprs.is_empty() {
@@ -886,8 +886,8 @@ fn analyze_do_tagged(rt: &mut GCRuntime, list_ptr: usize) -> Result<Expr, String
     }
 
     let mut exprs = Vec::new();
-    for i in 1..items.len() {
-        exprs.push(analyze_tagged(rt, items[i])?);
+    for item in items.iter().skip(1) {
+        exprs.push(analyze_tagged(rt, *item)?);
     }
 
     Ok(Expr::Do { exprs })
@@ -958,8 +958,8 @@ fn analyze_let_tagged(rt: &mut GCRuntime, list_ptr: usize) -> Result<Expr, Strin
 
     // Parse body
     let mut body = Vec::new();
-    for i in 2..items.len() {
-        body.push(analyze_tagged(rt, items[i])?);
+    for item in items.iter().skip(2) {
+        body.push(analyze_tagged(rt, *item)?);
     }
 
     if body.is_empty() {
@@ -997,8 +997,8 @@ fn analyze_loop_tagged(rt: &mut GCRuntime, list_ptr: usize) -> Result<Expr, Stri
     }
 
     let mut body = Vec::new();
-    for i in 2..items.len() {
-        body.push(analyze_tagged(rt, items[i])?);
+    for item in items.iter().skip(2) {
+        body.push(analyze_tagged(rt, *item)?);
     }
 
     if body.is_empty() {
@@ -1011,8 +1011,8 @@ fn analyze_loop_tagged(rt: &mut GCRuntime, list_ptr: usize) -> Result<Expr, Stri
 fn analyze_recur_tagged(rt: &mut GCRuntime, list_ptr: usize) -> Result<Expr, String> {
     let items = list_to_vec(rt, list_ptr);
     let mut args = Vec::new();
-    for i in 1..items.len() {
-        args.push(analyze_tagged(rt, items[i])?);
+    for item in items.iter().skip(1) {
+        args.push(analyze_tagged(rt, *item)?);
     }
     Ok(Expr::Recur { args })
 }
@@ -1042,8 +1042,8 @@ fn analyze_dotimes_tagged(rt: &mut GCRuntime, list_ptr: usize) -> Result<Expr, S
 
     // Parse body
     let mut body_exprs = Vec::new();
-    for i in 2..items.len() {
-        body_exprs.push(analyze_tagged(rt, items[i])?);
+    for item in items.iter().skip(2) {
+        body_exprs.push(analyze_tagged(rt, *item)?);
     }
 
     // Build: (loop [i 0] (when (< i n) body... (recur (inc i))))
@@ -1166,12 +1166,11 @@ fn analyze_fn_tagged(rt: &mut GCRuntime, list_ptr: usize) -> Result<Expr, String
     let is_multi_arity = get_type_id(rt, items[idx]) == TYPE_READER_LIST;
 
     if is_multi_arity {
-        for i in idx..items.len() {
-            let arity_ptr = items[i];
-            if get_type_id(rt, arity_ptr) != TYPE_READER_LIST {
+        for arity_ptr in items.iter().skip(idx) {
+            if get_type_id(rt, *arity_ptr) != TYPE_READER_LIST {
                 return Err("Multi-arity fn requires lists for each arity".to_string());
             }
-            let arity = parse_fn_arity_tagged(rt, arity_ptr)?;
+            let arity = parse_fn_arity_tagged(rt, *arity_ptr)?;
             arities.push(arity);
         }
     } else {
@@ -1332,8 +1331,8 @@ fn analyze_declare_tagged(rt: &mut GCRuntime, list_ptr: usize) -> Result<Expr, S
     }
 
     let mut defs = Vec::new();
-    for i in 1..items.len() {
-        let name = get_symbol_name(rt, items[i])
+    for item in items.iter().skip(1) {
+        let name = get_symbol_name(rt, *item)
             .ok_or_else(|| "declare requires symbols".to_string())?;
         defs.push(Expr::Def {
             name,
@@ -1371,8 +1370,8 @@ fn analyze_try_tagged(rt: &mut GCRuntime, list_ptr: usize) -> Result<Expr, Strin
     let mut catches = Vec::new();
     let mut finally = None;
 
-    for i in 1..items.len() {
-        let item = items[i];
+    for item in items.iter().skip(1) {
+        let item = *item;
 
         if get_type_id(rt, item) == TYPE_READER_LIST {
             let list_items = list_to_vec(rt, item);
@@ -1389,8 +1388,8 @@ fn analyze_try_tagged(rt: &mut GCRuntime, list_ptr: usize) -> Result<Expr, Strin
                             .ok_or_else(|| "catch binding must be a symbol".to_string())?;
 
                         let mut catch_body = Vec::new();
-                        for j in 3..list_items.len() {
-                            catch_body.push(analyze_tagged(rt, list_items[j])?);
+                        for list_item in list_items.iter().skip(3) {
+                            catch_body.push(analyze_tagged(rt, *list_item)?);
                         }
 
                         if catch_body.is_empty() {
@@ -1409,8 +1408,8 @@ fn analyze_try_tagged(rt: &mut GCRuntime, list_ptr: usize) -> Result<Expr, Strin
                         }
 
                         let mut finally_body = Vec::new();
-                        for j in 1..list_items.len() {
-                            finally_body.push(analyze_tagged(rt, list_items[j])?);
+                        for list_item in list_items.iter().skip(1) {
+                            finally_body.push(analyze_tagged(rt, *list_item)?);
                         }
 
                         finally = Some(finally_body);
@@ -1513,8 +1512,8 @@ fn analyze_binding_tagged(rt: &mut GCRuntime, list_ptr: usize) -> Result<Expr, S
     }
 
     let mut body = Vec::new();
-    for i in 2..items.len() {
-        body.push(analyze_tagged(rt, items[i])?);
+    for item in items.iter().skip(2) {
+        body.push(analyze_tagged(rt, *item)?);
     }
 
     Ok(Expr::Binding { bindings, body })
@@ -1581,13 +1580,12 @@ fn analyze_defprotocol_tagged(rt: &mut GCRuntime, list_ptr: usize) -> Result<Exp
         .ok_or_else(|| "defprotocol name must be a symbol".to_string())?;
 
     let mut methods = Vec::new();
-    for i in 2..items.len() {
-        let item = items[i];
-        if get_type_id(rt, item) == TYPE_STRING {
+    for item in items.iter().skip(2) {
+        if get_type_id(rt, *item) == TYPE_STRING {
             // Skip docstring
             continue;
         }
-        let method_sig = parse_protocol_method_sig_tagged(rt, item)?;
+        let method_sig = parse_protocol_method_sig_tagged(rt, *item)?;
         methods.push(method_sig);
     }
 
@@ -1608,20 +1606,19 @@ fn parse_protocol_method_sig_tagged(rt: &mut GCRuntime, list_ptr: usize) -> Resu
         .ok_or_else(|| "Protocol method name must be a symbol".to_string())?;
 
     let mut arities = Vec::new();
-    for i in 1..items.len() {
-        let item = items[i];
-        if get_type_id(rt, item) == TYPE_STRING {
+    for item in items.iter().skip(1) {
+        if get_type_id(rt, *item) == TYPE_STRING {
             // Skip docstring
             continue;
         }
-        if get_type_id(rt, item) != TYPE_READER_VECTOR {
+        if get_type_id(rt, *item) != TYPE_READER_VECTOR {
             return Err("Protocol method arity must be a vector".to_string());
         }
 
-        let params_count = rt.reader_vector_count(item);
+        let params_count = rt.reader_vector_count(*item);
         let mut param_names = Vec::new();
         for j in 0..params_count {
-            let param_ptr = rt.reader_vector_nth(item, j)?;
+            let param_ptr = rt.reader_vector_nth(*item, j)?;
             let param_name = get_symbol_name(rt, param_ptr)
                 .ok_or_else(|| "Protocol method parameter must be a symbol".to_string())?;
             param_names.push(param_name);
@@ -1663,8 +1660,8 @@ fn parse_protocol_implementations_tagged(
     let mut current_protocol: Option<String> = None;
     let mut current_methods: Vec<ProtocolMethodImpl> = Vec::new();
 
-    for i in start_idx..items.len() {
-        let item = items[i];
+    for item in items.iter().skip(start_idx) {
+        let item = *item;
 
         if get_type_id(rt, item) == TYPE_READER_SYMBOL {
             // Save previous protocol if any
@@ -1726,8 +1723,8 @@ fn parse_protocol_method_impl_tagged(
 
     // Parse body
     let mut body_exprs = Vec::new();
-    for i in 2..items.len() {
-        body_exprs.push(analyze_tagged(rt, items[i])?);
+    for item in items.iter().skip(2) {
+        body_exprs.push(analyze_tagged(rt, *item)?);
     }
 
     if body_exprs.is_empty() {
@@ -1828,8 +1825,8 @@ fn analyze_call_tagged(rt: &mut GCRuntime, list_ptr: usize) -> Result<Expr, Stri
                 name[..name.len() - 1].to_string()
             };
             let mut args = Vec::new();
-            for i in 1..items.len() {
-                args.push(analyze_tagged(rt, items[i])?);
+            for item in items.iter().skip(1) {
+                args.push(analyze_tagged(rt, *item)?);
             }
             return Ok(Expr::TypeConstruct { type_name, args });
         }
@@ -1856,8 +1853,8 @@ fn analyze_call_tagged(rt: &mut GCRuntime, list_ptr: usize) -> Result<Expr, Stri
                 name[2..].to_string()
             };
             let mut args = Vec::new();
-            for i in 1..items.len() {
-                args.push(analyze_tagged(rt, items[i])?);
+            for item in items.iter().skip(1) {
+                args.push(analyze_tagged(rt, *item)?);
             }
             return Ok(Expr::TypeConstruct { type_name, args });
         }
@@ -1867,8 +1864,8 @@ fn analyze_call_tagged(rt: &mut GCRuntime, list_ptr: usize) -> Result<Expr, Stri
     let func = analyze_tagged(rt, items[0])?;
     let mut args = Vec::new();
 
-    for i in 1..items.len() {
-        args.push(analyze_tagged(rt, items[i])?);
+    for item in items.iter().skip(1) {
+        args.push(analyze_tagged(rt, *item)?);
     }
 
     Ok(Expr::Call {

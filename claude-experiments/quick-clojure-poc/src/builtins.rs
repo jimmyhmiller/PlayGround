@@ -19,7 +19,10 @@ use std::sync::Arc;
 static mut RUNTIME_PTR: Option<Arc<UnsafeCell<GCRuntime>>> = None;
 
 /// Initialize the builtin runtime pointer
-/// SAFETY: Must be called once before any builtins are used
+///
+/// # Safety
+/// Must be called once before any builtins are used.
+/// The runtime must remain valid for the duration of the program.
 pub unsafe fn initialize_builtins(runtime: Arc<UnsafeCell<GCRuntime>>) { unsafe {
     RUNTIME_PTR = Some(runtime);
 }}

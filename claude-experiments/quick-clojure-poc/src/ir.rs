@@ -192,6 +192,7 @@ pub enum Instruction {
     /// - At runtime, x9 contains the total argument count
     /// - fixed_count: number of fixed parameters in this arity
     /// - param_offset: offset for user args (1 for closures, 0 for raw functions)
+    ///
     /// The instruction computes: excess_count = x9 - fixed_count
     /// Then collects args from x(param_offset + fixed_count) onwards into a list.
     CollectRestArgs(IrValue, usize, usize),

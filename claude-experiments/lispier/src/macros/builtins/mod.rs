@@ -13,6 +13,7 @@ mod pointer;
 mod print;
 mod quasiquote;
 pub mod struct_access;
+mod vararg_call;
 mod when;
 
 pub use and_or::{AndMacro, OrMacro};
@@ -31,4 +32,5 @@ pub use pointer::{NullCheckMacro, NullPtrMacro, PtrAtMacro, PtrLoadMacro, PtrOff
 pub use print::{PrintI64Macro, PrintMacro, PrintlnMacro};
 pub use quasiquote::QuasiquoteMacro;
 pub use struct_access::{StructFieldGetMacro, StructFieldSetMacro};
+pub use vararg_call::VarargCallMacro;
 pub use when::WhenMacro;

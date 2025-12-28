@@ -61,7 +61,8 @@ impl Space {
     /// # Safety
     /// Caller must ensure that `addr` is a valid pointer to `size` bytes of memory.
     pub unsafe fn commit_memory(addr: *mut c_void, size: usize) -> Result<(), io::Error> {
-        if mprotect(addr, size, libc::PROT_READ | libc::PROT_WRITE) != 0 {
+        // SAFETY: Caller guarantees addr is valid for size bytes
+        if unsafe { mprotect(addr, size, libc::PROT_READ | libc::PROT_WRITE) } != 0 {
             Err(io::Error::last_os_error())
         } else {
             Ok(())

@@ -7,7 +7,7 @@ use super::builtins::{
     DivSIMacro, DivUIMacro, EqIMacro, ExternMacro, GeIMacro, GtIMacro, IfMacro, LeIMacro,
     LoopMacro, LtIMacro, MulFMacro, MulIMacro, NeIMacro, NullCheckMacro, NullPtrMacro, OrMacro,
     PrintI64Macro, PrintMacro, PrintlnMacro, PtrAtMacro, PtrLoadMacro, PtrOffsetMacro, PtrStoreMacro,
-    QuasiquoteMacro, SubFMacro, SubIMacro, WhenMacro,
+    QuasiquoteMacro, SubFMacro, SubIMacro, VarargCallMacro, WhenMacro,
 };
 use super::Macro;
 
@@ -66,9 +66,10 @@ impl MacroRegistry {
         self.register(Box::new(EqIMacro));
         self.register(Box::new(NeIMacro));
 
-        // Function calls: call, call!
+        // Function calls: call, call!, vararg-call
         self.register(Box::new(CallMacro));
         self.register(Box::new(CallBangMacro));
+        self.register(Box::new(VarargCallMacro));
 
         // Pointer operations: null-ptr, null?, ptr-load, ptr-store!, ptr-offset, ptr-at
         self.register(Box::new(NullPtrMacro));
