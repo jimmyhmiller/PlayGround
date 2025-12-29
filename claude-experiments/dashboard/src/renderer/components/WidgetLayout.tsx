@@ -95,7 +95,23 @@ export interface FloatingLayoutConfig {
   panes: FloatingPaneConfig[];
 }
 
-export type LayoutConfig = WidgetNodeConfig | LayoutNodeConfig | FloatingLayoutConfig;
+export interface WindowConfig {
+  id?: string;
+  title: string;
+  x?: number;
+  y?: number;
+  width?: number;
+  height?: number;
+  widget: WidgetNodeConfig | LayoutNodeConfig;
+}
+
+export interface WindowGroupConfig {
+  type: 'window-group';
+  scope?: string;
+  windows: WindowConfig[];
+}
+
+export type LayoutConfig = WidgetNodeConfig | LayoutNodeConfig | FloatingLayoutConfig | WindowGroupConfig;
 
 export interface DashboardConfig {
   name: string;
@@ -111,6 +127,10 @@ function isLayoutNode(config: LayoutConfig): config is LayoutNodeConfig {
 
 function isFloatingLayout(config: LayoutConfig): config is FloatingLayoutConfig {
   return config.type === 'floating';
+}
+
+function isWindowGroup(config: LayoutConfig): config is WindowGroupConfig {
+  return config.type === 'window-group';
 }
 
 // ========== Widget Node Renderer ==========
@@ -418,6 +438,14 @@ interface ConfigNodeProps {
 }
 
 const ConfigNode = memo(function ConfigNode({ config }: ConfigNodeProps): ReactElement {
+  if (isWindowGroup(config)) {
+    // window-group is handled at the command/loader level, not here
+    return (
+      <div style={{ padding: 20, color: 'var(--theme-text-muted)', textAlign: 'center' }}>
+        window-group must be loaded via command palette
+      </div>
+    );
+  }
   if (isFloatingLayout(config)) {
     return <FloatingLayout config={config} />;
   }

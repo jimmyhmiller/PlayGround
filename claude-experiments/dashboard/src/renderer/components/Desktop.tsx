@@ -492,18 +492,41 @@ const DesktopCommandPalette = memo(function DesktopCommandPalette(): ReactElemen
           ''
         );
         if (filePath) {
-          // Load the file to get the dashboard name
           try {
             const result = await window.fileAPI.load(filePath);
             const config = JSON.parse(result.content);
-            const title = config.name || 'Dashboard';
-            createWindow({
-              title,
-              componentType: 'widget-layout',
-              props: { configPath: filePath },
-              width: 800,
-              height: 600,
-            });
+            const layout = config.layout || config;
+
+            // Handle window-group specially - spawn windows directly
+            if (layout.type === 'window-group') {
+              const scope = layout.scope || `wg-${Date.now()}`;
+              for (const win of layout.windows) {
+                createWindow({
+                  title: win.title,
+                  componentType: 'widget-layout',
+                  props: {
+                    scope,
+                    padding: 0,
+                    background: 'transparent',
+                    config: win.widget,
+                  },
+                  x: win.x,
+                  y: win.y,
+                  width: win.width ?? 400,
+                  height: win.height ?? 300,
+                });
+              }
+            } else {
+              // Regular dashboard - create single window
+              const title = config.name || 'Dashboard';
+              createWindow({
+                title,
+                componentType: 'widget-layout',
+                props: { configPath: filePath },
+                width: 800,
+                height: 600,
+              });
+            }
           } catch (err) {
             console.error('Failed to load dashboard:', err);
           }

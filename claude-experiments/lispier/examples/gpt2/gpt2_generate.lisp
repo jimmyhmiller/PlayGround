@@ -912,20 +912,21 @@
                     (memref.store (llvm.load {:result f32} b_ptr) ln1_b i)
                     (scf.yield))))
 
-              ;; qkv weights
+              ;; qkv weights - llm.c stores as (OC=2304, C=768), we use (C=768, OC=2304)
+              ;; Load with transpose: checkpoint[oc*768+c] -> qkv_w[c][oc]
               (def qkvw_offset (arith.addi qkvw_base (arith.muli layer_i64 qkvw_stride)))
               (def qkvb_offset (arith.addi qkvb_base (arith.muli layer_i64 qkvb_stride)))
-              (scf.for c0 c768 c1
+              (scf.for c0 c2304 c1
                 (region
-                  (block [(: i index)]
-                    (def i_i64 (arith.index_cast {:result i64} i))
-                    (def row_offset (arith.muli i_i64 (: 2304 i64)))
-                    (scf.for c0 c2304 c1
+                  (block [(: oc index)]
+                    (def oc_i64 (arith.index_cast {:result i64} oc))
+                    (def row_offset (arith.muli oc_i64 (: 768 i64)))
+                    (scf.for c0 c768 c1
                       (region
-                        (block [(: j index)]
-                          (def j_i64 (arith.index_cast {:result i64} j))
-                          (def w_ptr (ptr-at f32 params_ptr (arith.addi qkvw_offset (arith.addi row_offset j_i64))))
-                          (memref.store (llvm.load {:result f32} w_ptr) qkv_w i j)
+                        (block [(: c index)]
+                          (def c_i64 (arith.index_cast {:result i64} c))
+                          (def w_ptr (ptr-at f32 params_ptr (arith.addi qkvw_offset (arith.addi row_offset c_i64))))
+                          (memref.store (llvm.load {:result f32} w_ptr) qkv_w c oc)
                           (scf.yield))))
                     (scf.yield))))
               (scf.for c0 c2304 c1
@@ -936,21 +937,28 @@
                     (memref.store (llvm.load {:result f32} b_ptr) qkv_b i)
                     (scf.yield))))
 
-              ;; attention projection weights
+              ;; attention projection weights - llm.c stores as (OC=768, C=768)
+              ;; Load with transpose: checkpoint[oc*768+c] -> attn_w[c][oc]
               (def attprojw_offset (arith.addi attprojw_base (arith.muli layer_i64 attprojw_stride)))
               (def attprojb_offset (arith.addi attprojb_base (arith.muli layer_i64 attprojb_stride)))
               (scf.for c0 c768 c1
                 (region
-                  (block [(: i index)]
-                    (def i_i64 (arith.index_cast {:result i64} i))
-                    (def row_offset (arith.muli i_i64 (: 768 i64)))
+                  (block [(: oc index)]
+                    (def oc_i64 (arith.index_cast {:result i64} oc))
+                    (def row_offset (arith.muli oc_i64 (: 768 i64)))
                     (scf.for c0 c768 c1
                       (region
-                        (block [(: j index)]
-                          (def j_i64 (arith.index_cast {:result i64} j))
-                          (def w_ptr (ptr-at f32 params_ptr (arith.addi attprojw_offset (arith.addi row_offset j_i64))))
-                          (memref.store (llvm.load {:result f32} w_ptr) attn_w i j)
+                        (block [(: c index)]
+                          (def c_i64 (arith.index_cast {:result i64} c))
+                          (def w_ptr (ptr-at f32 params_ptr (arith.addi attprojw_offset (arith.addi row_offset c_i64))))
+                          (memref.store (llvm.load {:result f32} w_ptr) attn_w c oc)
                           (scf.yield))))
+                    (scf.yield))))
+              ;; Bias doesn't need transpose - it's just (OC)
+              (scf.for c0 c768 c1
+                (region
+                  (block [(: i index)]
+                    (def i_i64 (arith.index_cast {:result i64} i))
                     (def ab_ptr (ptr-at f32 params_ptr (arith.addi attprojb_offset i_i64)))
                     (memref.store (llvm.load {:result f32} ab_ptr) attn_b i)
                     (scf.yield))))
@@ -968,20 +976,21 @@
                     (memref.store (llvm.load {:result f32} b_ptr) ln2_b i)
                     (scf.yield))))
 
-              ;; fc weights
+              ;; fc weights - llm.c stores as (OC=3072, C=768)
+              ;; Load with transpose: checkpoint[oc*768+c] -> fc_w[c][oc]
               (def fcw_offset (arith.addi fcw_base (arith.muli layer_i64 fcw_stride)))
               (def fcb_offset (arith.addi fcb_base (arith.muli layer_i64 fcb_stride)))
-              (scf.for c0 c768 c1
+              (scf.for c0 c3072 c1
                 (region
-                  (block [(: i index)]
-                    (def i_i64 (arith.index_cast {:result i64} i))
-                    (def row_offset (arith.muli i_i64 (: 3072 i64)))
-                    (scf.for c0 c3072 c1
+                  (block [(: oc index)]
+                    (def oc_i64 (arith.index_cast {:result i64} oc))
+                    (def row_offset (arith.muli oc_i64 (: 768 i64)))
+                    (scf.for c0 c768 c1
                       (region
-                        (block [(: j index)]
-                          (def j_i64 (arith.index_cast {:result i64} j))
-                          (def w_ptr (ptr-at f32 params_ptr (arith.addi fcw_offset (arith.addi row_offset j_i64))))
-                          (memref.store (llvm.load {:result f32} w_ptr) fc_w i j)
+                        (block [(: c index)]
+                          (def c_i64 (arith.index_cast {:result i64} c))
+                          (def w_ptr (ptr-at f32 params_ptr (arith.addi fcw_offset (arith.addi row_offset c_i64))))
+                          (memref.store (llvm.load {:result f32} w_ptr) fc_w c oc)
                           (scf.yield))))
                     (scf.yield))))
               (scf.for c0 c3072 c1
@@ -992,20 +1001,21 @@
                     (memref.store (llvm.load {:result f32} b_ptr) fc_b i)
                     (scf.yield))))
 
-              ;; fc projection weights
+              ;; fc projection weights - llm.c stores as (OC=768, C=3072)
+              ;; Load with transpose: checkpoint[oc*3072+c] -> fcproj_w[c][oc]
               (def fcprojw_offset (arith.addi fcprojw_base (arith.muli layer_i64 fcprojw_stride)))
               (def fcprojb_offset (arith.addi fcprojb_base (arith.muli layer_i64 fcprojb_stride)))
-              (scf.for c0 c3072 c1
+              (scf.for c0 c768 c1
                 (region
-                  (block [(: i index)]
-                    (def i_i64 (arith.index_cast {:result i64} i))
-                    (def row_offset (arith.muli i_i64 (: 768 i64)))
-                    (scf.for c0 c768 c1
+                  (block [(: oc index)]
+                    (def oc_i64 (arith.index_cast {:result i64} oc))
+                    (def row_offset (arith.muli oc_i64 (: 3072 i64)))
+                    (scf.for c0 c3072 c1
                       (region
-                        (block [(: j index)]
-                          (def j_i64 (arith.index_cast {:result i64} j))
-                          (def w_ptr (ptr-at f32 params_ptr (arith.addi fcprojw_offset (arith.addi row_offset j_i64))))
-                          (memref.store (llvm.load {:result f32} w_ptr) fcproj_w i j)
+                        (block [(: c index)]
+                          (def c_i64 (arith.index_cast {:result i64} c))
+                          (def w_ptr (ptr-at f32 params_ptr (arith.addi fcprojw_offset (arith.addi row_offset c_i64))))
+                          (memref.store (llvm.load {:result f32} w_ptr) fcproj_w c oc)
                           (scf.yield))))
                     (scf.yield))))
               (scf.for c0 c768 c1
@@ -1044,12 +1054,21 @@
         ;; 4. Compute logits at last filled position
         (func.call "logits_last_position" logits x2 wte_ptr logit_pos)
 
+        ;; Debug: show some logit values
+        (def logit0 (memref.load logits (: 0 index)))
+        (def logit11 (memref.load logits (: 11 index)))  ; comma
+        (def logit262 (memref.load logits (: 262 index)))  ; "the"
+        (print "logits[0]=%.2f [11]=%.2f [262]=%.2f\n"
+               (arith.extf {:result f64} logit0)
+               (arith.extf {:result f64} logit11)
+               (arith.extf {:result f64} logit262))
+
         ;; 5. Argmax to get next token
         (def next_token (func.call {:result i32} "argmax" logits))
 
-        ;; 6. Decode and print
+        ;; 6. Decode and print - show token ID for debugging
         (def token_str (func.call {:result !llvm.ptr} "tokenizer_decode" next_token))
-        (print "%s" token_str)
+        (print "[%d]%s" next_token token_str)
 
         ;; 7. Store token at current step position
         (memref.store next_token token_ids step)

@@ -52,18 +52,34 @@ pub fn edn_to_value(edn: &Edn) -> Result<Value, String> {
             Ok(Value::Set(result))
         }
 
-        // Handle metadata
-        Edn::Meta(meta_map, inner) => {
-            // Convert metadata map to HashMap<String, Value>
+        // Handle metadata - meta_expr can be Map, Keyword, Symbol, etc.
+        Edn::Meta(meta_expr, inner) => {
+            // Convert metadata to HashMap<String, Value>
+            // ^:keyword becomes {:keyword true}
+            // ^{:key val} stays as is
+            // ^Symbol becomes {:tag Symbol}
             let mut metadata = hashmap! {};
-            for (k, v) in meta_map {
-                let key = match k {
-                    Edn::Key(s) => s.to_string(),
-                    Edn::Symbol(s) => s.to_string(),
-                    Edn::Str(s) => s.to_string(),
-                    _ => continue, // Skip non-string keys
-                };
-                metadata.insert(key, edn_to_value(v)?);
+            match meta_expr.as_ref() {
+                Edn::Map(map) => {
+                    for (k, v) in map {
+                        let key = match k {
+                            Edn::Key(s) => s.to_string(),
+                            Edn::Symbol(s) => s.to_string(),
+                            Edn::Str(s) => s.to_string(),
+                            _ => continue, // Skip non-string keys
+                        };
+                        metadata.insert(key, edn_to_value(v)?);
+                    }
+                }
+                Edn::Key(k) => {
+                    // ^:keyword -> {:keyword true}
+                    metadata.insert(k.to_string(), Value::Bool(true));
+                }
+                Edn::Symbol(s) => {
+                    // ^Type -> {:tag Type}
+                    metadata.insert("tag".to_string(), Value::Symbol(s.to_string()));
+                }
+                _ => {} // Ignore other metadata forms
             }
 
             // Convert inner value
@@ -180,13 +196,35 @@ pub fn edn_to_tagged(edn: &Edn, rt: &mut GCRuntime) -> Result<usize, String> {
         }
 
         // Handle metadata - attach to the inner value
-        Edn::Meta(meta_map, inner) => {
-            // Convert metadata map to a ReaderMap
-            let mut meta_entries = Vec::with_capacity(meta_map.len());
-            for (k, v) in meta_map {
-                let tagged_key = edn_to_tagged(k, rt)?;
-                let tagged_value = edn_to_tagged(v, rt)?;
-                meta_entries.push((tagged_key, tagged_value));
+        // meta_expr can be Map, Keyword, Symbol, etc.
+        Edn::Meta(meta_expr, inner) => {
+            // Convert metadata to a ReaderMap
+            // ^:keyword becomes {:keyword true}
+            // ^{:key val} stays as is
+            // ^Symbol becomes {:tag Symbol}
+            let mut meta_entries = Vec::new();
+            match meta_expr.as_ref() {
+                Edn::Map(map) => {
+                    meta_entries.reserve(map.len());
+                    for (k, v) in map {
+                        let tagged_key = edn_to_tagged(k, rt)?;
+                        let tagged_value = edn_to_tagged(v, rt)?;
+                        meta_entries.push((tagged_key, tagged_value));
+                    }
+                }
+                Edn::Key(k) => {
+                    // ^:keyword -> {:keyword true}
+                    let tagged_key = rt.allocate_keyword(k)?;
+                    let tagged_value = 0b1011; // true
+                    meta_entries.push((tagged_key, tagged_value));
+                }
+                Edn::Symbol(s) => {
+                    // ^Type -> {:tag Type}
+                    let tagged_key = rt.allocate_keyword("tag")?;
+                    let tagged_value = edn_to_tagged(&Edn::Symbol(s), rt)?;
+                    meta_entries.push((tagged_key, tagged_value));
+                }
+                _ => {} // Ignore other metadata forms
             }
             let meta_ptr = rt.allocate_reader_map(&meta_entries)?;
 
