@@ -1,8 +1,8 @@
-//! Lexer for the expression language (JavaScript-like syntax)
+//! Lexer for the expression language (JavaScript-like syntax with classes)
 //!
 //! Tokens:
-//! - Keywords: true, false, let, in, this
-//! - Symbols: =>, ==, =, ., :, ?, {, }, (, ), ,, &&, ||
+//! - Keywords: true, false, class, this
+//! - Symbols: =>, ==, =, ., :, ?, {, }, (, ), ,, &&, ||, ;
 //! - Identifiers: [a-zA-Z_][a-zA-Z0-9_]*
 //! - Integers: [0-9]+
 
@@ -16,10 +16,7 @@ pub enum Token {
     Int(i64),
 
     // Keywords
-    Let,
-    Rec,
-    And,
-    In,
+    Class,
     This,
 
     // Identifiers
@@ -30,9 +27,11 @@ pub enum Token {
     EqEq,       // ==
     Equals,     // =
     Dot,        // .
+    DotDotDot,  // ... (spread)
     Colon,      // :
     Question,   // ?
     Comma,      // ,
+    Semicolon,  // ;
     LBrace,     // {
     RBrace,     // }
     LParen,     // (
@@ -40,10 +39,10 @@ pub enum Token {
     AndAnd,     // &&
     OrOr,       // ||
     Plus,       // +
+    PlusPlus,   // ++ (string concat)
     Minus,      // -
     Star,       // *
     Slash,      // /
-    PlusPlus,   // ++ (string concat)
 
     // String literals
     String(String),
@@ -58,19 +57,18 @@ impl fmt::Display for Token {
             Token::True => write!(f, "true"),
             Token::False => write!(f, "false"),
             Token::Int(n) => write!(f, "{}", n),
-            Token::Let => write!(f, "let"),
-            Token::Rec => write!(f, "rec"),
-            Token::And => write!(f, "and"),
-            Token::In => write!(f, "in"),
+            Token::Class => write!(f, "class"),
             Token::This => write!(f, "this"),
             Token::Ident(s) => write!(f, "{}", s),
             Token::Arrow => write!(f, "=>"),
             Token::EqEq => write!(f, "=="),
             Token::Equals => write!(f, "="),
             Token::Dot => write!(f, "."),
+            Token::DotDotDot => write!(f, "..."),
             Token::Colon => write!(f, ":"),
             Token::Question => write!(f, "?"),
             Token::Comma => write!(f, ","),
+            Token::Semicolon => write!(f, ";"),
             Token::LBrace => write!(f, "{{"),
             Token::RBrace => write!(f, "}}"),
             Token::LParen => write!(f, "("),
@@ -78,10 +76,10 @@ impl fmt::Display for Token {
             Token::AndAnd => write!(f, "&&"),
             Token::OrOr => write!(f, "||"),
             Token::Plus => write!(f, "+"),
+            Token::PlusPlus => write!(f, "++"),
             Token::Minus => write!(f, "-"),
             Token::Star => write!(f, "*"),
             Token::Slash => write!(f, "/"),
-            Token::PlusPlus => write!(f, "++"),
             Token::String(s) => write!(f, "\"{}\"", s),
             Token::Eof => write!(f, "EOF"),
         }
@@ -217,9 +215,25 @@ impl<'a> Lexer<'a> {
         };
 
         match ch {
-            // Single-character tokens
-            '.' => Ok(Token::Dot),
+            // Single-character tokens (or multi-char starting with this char)
+            '.' => {
+                if self.peek() == Some('.') {
+                    self.advance();
+                    if self.peek() == Some('.') {
+                        self.advance();
+                        Ok(Token::DotDotDot)
+                    } else {
+                        Err(LexError {
+                            message: "Expected '...' but got '..'".to_string(),
+                            position: self.position,
+                        })
+                    }
+                } else {
+                    Ok(Token::Dot)
+                }
+            }
             ',' => Ok(Token::Comma),
+            ';' => Ok(Token::Semicolon),
             ':' => Ok(Token::Colon),
             '?' => Ok(Token::Question),
             '{' => Ok(Token::LBrace),
@@ -305,10 +319,7 @@ impl<'a> Lexer<'a> {
                 match ident.as_str() {
                     "true" => Ok(Token::True),
                     "false" => Ok(Token::False),
-                    "let" => Ok(Token::Let),
-                    "rec" => Ok(Token::Rec),
-                    "and" => Ok(Token::And),
-                    "in" => Ok(Token::In),
+                    "class" => Ok(Token::Class),
                     "this" => Ok(Token::This),
                     _ => Ok(Token::Ident(ident)),
                 }
@@ -391,5 +402,41 @@ mod tests {
         let mut lexer = Lexer::new("42 // this is a comment\n true");
         assert_eq!(lexer.next_token().unwrap(), Token::Int(42));
         assert_eq!(lexer.next_token().unwrap(), Token::True);
+    }
+
+    #[test]
+    fn test_lex_class() {
+        let mut lexer = Lexer::new("class Foo(x) { y: 42 }");
+        assert_eq!(lexer.next_token().unwrap(), Token::Class);
+        assert_eq!(lexer.next_token().unwrap(), Token::Ident("Foo".to_string()));
+        assert_eq!(lexer.next_token().unwrap(), Token::LParen);
+        assert_eq!(lexer.next_token().unwrap(), Token::Ident("x".to_string()));
+        assert_eq!(lexer.next_token().unwrap(), Token::RParen);
+        assert_eq!(lexer.next_token().unwrap(), Token::LBrace);
+        assert_eq!(lexer.next_token().unwrap(), Token::Ident("y".to_string()));
+        assert_eq!(lexer.next_token().unwrap(), Token::Colon);
+        assert_eq!(lexer.next_token().unwrap(), Token::Int(42));
+        assert_eq!(lexer.next_token().unwrap(), Token::RBrace);
+    }
+
+    #[test]
+    fn test_lex_semicolon() {
+        let mut lexer = Lexer::new("a; b");
+        assert_eq!(lexer.next_token().unwrap(), Token::Ident("a".to_string()));
+        assert_eq!(lexer.next_token().unwrap(), Token::Semicolon);
+        assert_eq!(lexer.next_token().unwrap(), Token::Ident("b".to_string()));
+    }
+
+    #[test]
+    fn test_lex_spread() {
+        let mut lexer = Lexer::new("{ ...x, y: 1 }");
+        assert_eq!(lexer.next_token().unwrap(), Token::LBrace);
+        assert_eq!(lexer.next_token().unwrap(), Token::DotDotDot);
+        assert_eq!(lexer.next_token().unwrap(), Token::Ident("x".to_string()));
+        assert_eq!(lexer.next_token().unwrap(), Token::Comma);
+        assert_eq!(lexer.next_token().unwrap(), Token::Ident("y".to_string()));
+        assert_eq!(lexer.next_token().unwrap(), Token::Colon);
+        assert_eq!(lexer.next_token().unwrap(), Token::Int(1));
+        assert_eq!(lexer.next_token().unwrap(), Token::RBrace);
     }
 }

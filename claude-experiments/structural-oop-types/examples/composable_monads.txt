@@ -1,0 +1,322 @@
+// ============================================================================
+// Composable Monads via OOP
+// ============================================================================
+//
+// The goal: Write Error, State, Writer as SEPARATE components,
+// then compose them freely. No monad transformers, no lifting.
+//
+// Key insight: Each monad "wraps" a value and adds its interface.
+// Structural typing means we can access ANY method from ANY layer.
+//
+// ============================================================================
+
+// ----------------------------------------------------------------------------
+// LAYER 1: Identity (Base)
+// ----------------------------------------------------------------------------
+
+{
+  class Pure(x) {
+    value: x,
+    bind: (k) => k(x),
+    map: (f) => Pure(f(x))
+  }
+
+  Pure(42).bind((x) => Pure(x + 1)).value
+}
+
+// ----------------------------------------------------------------------------
+// LAYER 2: Error
+// Wraps any monad, adds: isError, error handling in bind
+// ----------------------------------------------------------------------------
+
+{
+  // Success wraps an inner monad value
+  class Ok(inner) {
+    isError: false,
+    inner: inner,
+    // Delegate to inner's bind, then wrap result
+    bind: (k) => k(inner),
+    // Access inner's value
+    value: inner.value,
+    unwrap: () => inner
+  }
+
+  class Err(msg) {
+    isError: true,
+    message: msg,
+    // Errors short-circuit
+    bind: (k) => this,
+    unwrap: () => this
+  }
+
+  // Test
+  Ok(42).bind((x) => x > 0 ? Ok(x * 2) : Err("negative"))
+}
+
+// ----------------------------------------------------------------------------
+// LAYER 3: State
+// Wraps any monad, adds: state field, get/put/modify
+// ----------------------------------------------------------------------------
+
+{
+  class WithState(inner, state) {
+    inner: inner,
+    state: state,
+    // Forward inner's value
+    value: inner.value,
+    // State operations
+    get: () => state,
+    put: (s) => WithState(inner, s),
+    modify: (f) => WithState(inner, f(state)),
+    // Bind threads state through
+    bind: (k) => k(inner).modify((s) => s)  // simplified
+  }
+
+  // Create stateful computation
+  class Stateful {
+    pure: (x, s) => WithState(x, s)
+  }
+
+  WithState(42, 0).modify((n) => n + 1).modify((n) => n + 1).state
+}
+
+// ----------------------------------------------------------------------------
+// LAYER 4: Writer
+// Wraps any monad, adds: log field, tell
+// ----------------------------------------------------------------------------
+
+{
+  class WithLog(inner, log) {
+    inner: inner,
+    log: log,
+    value: inner.value,
+    // Writer operations
+    tell: (msg) => WithLog(inner, log ++ msg),
+    getLog: () => log,
+    // Bind concatenates logs
+    bind: (k) => k(inner)
+  }
+
+  WithLog(42, "").tell("hello ").tell("world").log
+}
+
+// ----------------------------------------------------------------------------
+// COMPOSITION: Stack the layers!
+// ----------------------------------------------------------------------------
+//
+// Error + State + Writer composed:
+//
+//   WithLog(WithState(Ok(value), state), log)
+//
+// This object has ALL methods:
+//   - .isError, .bind (from Ok/Err)
+//   - .state, .get, .put, .modify (from WithState)
+//   - .log, .tell, .getLog (from WithLog)
+//
+// And structural typing means a function needing just .tell works!
+
+{
+  // Base constructors
+  class Pure(x) {
+    value: x,
+    bind: (k) => k(x)
+  }
+
+  // Error layer
+  class Ok(inner) {
+    isError: false,
+    inner: inner,
+    value: inner.value,
+    bind: (k) => k(inner)
+  }
+
+  class Err(msg) {
+    isError: true,
+    message: msg,
+    bind: (k) => this
+  }
+
+  // State layer - preserves inner's methods via structural typing
+  class WithState(inner, state) {
+    // Forward everything from inner
+    isError: inner.isError,
+    value: inner.value,
+    inner: inner,
+    // State-specific
+    state: state,
+    get: () => state,
+    put: (s) => WithState(inner, s),
+    modify: (f) => WithState(inner, f(state)),
+    // Bind that threads state
+    bind: (k) => inner.isError
+      ? WithState(inner, state)
+      : WithState(k(inner.value), state)
+  }
+
+  // Writer layer - preserves inner's methods
+  class WithLog(inner, log) {
+    // Forward from inner
+    isError: inner.isError,
+    value: inner.value,
+    state: inner.state,
+    inner: inner,
+    // Writer-specific
+    log: log,
+    tell: (msg) => WithLog(inner, log ++ msg),
+    // Bind that accumulates logs
+    bind: (k) => inner.isError
+      ? WithLog(inner, log)
+      : WithLog(k(inner.value), log)
+  }
+
+  // Compose: Error + State + Writer
+  class Combined(value, state, log) {
+    make: () => WithLog(WithState(Ok(value), state), log)
+  }
+
+  Combined(42, 0, "").make().tell("start ").modify((n) => n + 1).tell("done")
+}
+
+// ----------------------------------------------------------------------------
+// THE ELEGANT VERSION: Mixin-style composition
+// ----------------------------------------------------------------------------
+//
+// Instead of nesting, what if each "effect" is a mixin that adds methods?
+// We need a way to "extend" an object with new capabilities.
+
+{
+  // Base: just a value
+  class Value(x) {
+    value: x,
+    bind: (k) => k(x)
+  }
+
+  // "Mixin" that adds error handling behavior
+  // Takes a base object, returns enhanced object
+  class AddError(base, isError, errMsg) {
+    // Copy base fields
+    value: base.value,
+    // Error fields
+    isError: isError,
+    message: errMsg,
+    // Error-aware bind
+    bind: (k) => isError ? this : k(base.value)
+  }
+
+  // Mixin that adds state
+  class AddState(base, state) {
+    // Copy all base fields
+    value: base.value,
+    isError: base.isError,
+    message: base.message,
+    // State fields
+    state: state,
+    get: () => state,
+    put: (s) => AddState(base, s),
+    modify: (f) => AddState(base, f(state)),
+    bind: (k) => base.isError ? AddState(base, state) : AddState(k(base.value), state)
+  }
+
+  // Mixin that adds logging
+  class AddLog(base, log) {
+    // Copy all base fields
+    value: base.value,
+    isError: base.isError,
+    state: base.state,
+    // Log fields
+    log: log,
+    tell: (msg) => AddLog(base, log ++ msg),
+    bind: (k) => base.isError ? AddLog(base, log) : AddLog(k(base.value), log)
+  }
+
+  // Usage: Compose by chaining mixins
+  // Value(42) |> AddError(_, false, "") |> AddState(_, 0) |> AddLog(_, "")
+
+  AddLog(AddState(AddError(Value(42), false, ""), 0), "")
+    .tell("hello ")
+    .modify((n) => n + 1)
+    .tell("world")
+}
+
+// ----------------------------------------------------------------------------
+// EVEN CLEANER: Effect as a record of operations
+// ----------------------------------------------------------------------------
+//
+// What if effects are just records of operations that we merge?
+
+{
+  // Each effect defines its operations as a record
+  class ErrorOps(isError, msg) {
+    isError: isError,
+    message: msg,
+    fail: (m) => ErrorOps(true, m)
+  }
+
+  class StateOps(state) {
+    state: state,
+    get: () => state,
+    put: (s) => StateOps(s),
+    modify: (f) => StateOps(f(state))
+  }
+
+  class WriterOps(log) {
+    log: log,
+    tell: (msg) => WriterOps(log ++ msg)
+  }
+
+  // Combine them into one object with all operations
+  class Eff(value, err, st, wr) {
+    // The value
+    value: value,
+
+    // Error ops
+    isError: err.isError,
+    message: err.message,
+
+    // State ops
+    state: st.state,
+    get: () => st.get(),
+    put: (s) => Eff(value, err, st.put(s), wr),
+    modify: (f) => Eff(value, err, st.modify(f), wr),
+
+    // Writer ops
+    log: wr.log,
+    tell: (msg) => Eff(value, err, st, wr.tell(msg)),
+
+    // Combined bind
+    bind: (k) => err.isError
+      ? this
+      : k(value)
+  }
+
+  // Smart constructor
+  class MakeEff {
+    pure: (x) => Eff(x, ErrorOps(false, ""), StateOps(0), WriterOps(""))
+  }
+
+  MakeEff.pure(42)
+    .tell("start ")
+    .modify((n) => n + 1)
+    .tell("done ")
+    .modify((n) => n + 1)
+}
+
+// ----------------------------------------------------------------------------
+// THE KEY POINT: No Lifting Required!
+// ----------------------------------------------------------------------------
+//
+// In Haskell with transformers:
+//   lift $ lift $ tell "msg"    -- annoying!
+//
+// Here, .tell is just a method. Structural typing handles it.
+// A function that only needs .tell works on ANY object with .tell:
+//
+//   logIt: (m) => m.tell("logged!")
+//
+// This function works on:
+//   - WriterOps("")
+//   - AddLog(anything, "")
+//   - Eff(x, err, st, wr)
+//
+// Because all of them have .tell!
+// That's structural polymorphism doing the work of lifting.

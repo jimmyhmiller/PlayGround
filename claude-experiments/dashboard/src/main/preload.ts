@@ -84,7 +84,7 @@ contextBridge.exposeInMainWorld('evalAPI', {
   // Execute a single code snippet
   execute: (
     code: string,
-    language: 'javascript' | 'typescript' = 'javascript',
+    language: string = 'javascript',
     context?: Record<string, unknown>
   ): Promise<{
     id: string;
@@ -101,7 +101,7 @@ contextBridge.exposeInMainWorld('evalAPI', {
     requests: Array<{
       id: string;
       code: string;
-      language: 'javascript' | 'typescript';
+      language: string;
       context?: Record<string, unknown>;
       timeout?: number;
     }>
@@ -116,6 +116,49 @@ contextBridge.exposeInMainWorld('evalAPI', {
       error?: string;
     }>
   > => ipcRenderer.invoke('eval:batch', requests),
+
+  // Register a subprocess executor for a language
+  registerExecutor: (config: {
+    language: string;
+    command: string;
+    args?: string[];
+    cwd?: string;
+  }): Promise<{ success: boolean; language: string }> =>
+    ipcRenderer.invoke('eval:registerExecutor', config),
+
+  // Unregister an executor
+  unregisterExecutor: (language: string): Promise<{ success: boolean }> =>
+    ipcRenderer.invoke('eval:unregisterExecutor', language),
+
+  // Get list of registered executors
+  getExecutors: (): Promise<
+    Array<{
+      language: string;
+      command: string;
+      args?: string[];
+      cwd?: string;
+    }>
+  > => ipcRenderer.invoke('eval:getExecutors'),
+});
+
+// Shell API for renderer - spawn and manage processes
+contextBridge.exposeInMainWorld('shellAPI', {
+  // Spawn a new process
+  spawn: (
+    id: string,
+    command: string,
+    args: string[] = [],
+    options: { cwd?: string; env?: Record<string, string> } = {}
+  ): Promise<{ success: boolean; id: string; pid?: number }> =>
+    ipcRenderer.invoke('shell:spawn', id, command, args, options),
+
+  // Kill a running process
+  kill: (id: string): Promise<{ success: boolean; id?: string; error?: string }> =>
+    ipcRenderer.invoke('shell:kill', id),
+
+  // Check if a process is running
+  isRunning: (id: string): Promise<{ running: boolean }> =>
+    ipcRenderer.invoke('shell:isRunning', id),
 });
 
 // State API for renderer - backend-driven state management

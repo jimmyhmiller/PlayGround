@@ -49,9 +49,9 @@ support type inference without needing a hardcoded list.
 
 **Files:** `scf_if.lisp`, `scf_while.lisp`
 
-- `scf.if` with result works
+- `scf.if` with result works (requires correct parenthesis: both regions must be inside the scf.if call)
+- `scf.if` with only "then" region (no else, no result) works
 - `scf.while` fails due to `scf.condition` not being recognized as void
-- `scf.if` with only "then" region (no else) untested
 
 ### 5. scf.parallel Not Working
 

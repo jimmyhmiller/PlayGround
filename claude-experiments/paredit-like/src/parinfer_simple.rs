@@ -188,9 +188,18 @@ impl Parinfer {
                 // Close delimiters that were opened at effective indent > next_indent
                 // But only if the next line doesn't already have closing delimiters
                 // Add them to the end of the current line (Lisp convention)
+                //
+                // IMPORTANT: Use line_indent only, NOT col_pos.
+                // Using col_pos breaks cases like scf.if with sibling regions:
+                //   (scf.if cond      <- col_pos=12 for scf.if's (
+                //     (region ...)    <- indent=4
+                //     (region ...))   <- indent=4, same as sibling, NOT dedenting from scf.if
+                // If we used col_pos, we'd wrongly close scf.if after first region
+                // because 4 < 12. But both regions are children of scf.if!
                 if !next_line_has_closers {
                     while let Some(open_info) = delim_stack.last() {
-                        let opener_indent = open_info.line_indent.max(open_info.col_pos);
+                        // Only use line_indent, not col_pos, for determining nesting level
+                        let opener_indent = open_info.line_indent;
                         if next_indent < line_indent && opener_indent > next_indent {
                             let delim_type = open_info.delim_type;
                             delim_stack.pop();
@@ -447,6 +456,34 @@ mod tests {
         let parinfer = Parinfer::new(source);
         let result = parinfer.balance().unwrap();
         // The i32 should remain outside func.call
+        assert_eq!(result, source);
+    }
+
+    #[test]
+    fn test_scf_if_sibling_regions() {
+        // Bug fix: Two sibling regions inside scf.if should both stay inside scf.if
+        // Previously, the second region would become a sibling of scf.if (child of def)
+        // because its indent (4) was less than scf.if's col_pos (12).
+        let source = r#"(def result (scf.if {:result i32} cond
+    (region
+      (block []
+        (scf.yield true_val)))
+    (region
+      (block []
+        (scf.yield false_val)))))"#;
+
+        let parinfer = Parinfer::new(source);
+        let result = parinfer.balance().unwrap();
+        // The balanced input should be preserved exactly
+        assert_eq!(result, source, "scf.if should keep both regions as children");
+    }
+
+    #[test]
+    fn test_sibling_forms_same_indent_preserved() {
+        // Multiple siblings at the same indent should all stay inside parent
+        let source = "(parent\n  (child1)\n  (child2)\n  (child3))";
+        let parinfer = Parinfer::new(source);
+        let result = parinfer.balance().unwrap();
         assert_eq!(result, source);
     }
 }

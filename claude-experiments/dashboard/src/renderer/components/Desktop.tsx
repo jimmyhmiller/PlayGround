@@ -536,6 +536,182 @@ const DesktopCommandPalette = memo(function DesktopCommandPalette(): ReactElemen
       },
     });
 
+    // Flask Demo - Spawn as independent floating panes
+    cmds.push({
+      id: 'flask-demo-panes',
+      label: 'Flask Demo (Floating Panes)',
+      description: 'Open Flask demo as independent draggable panes',
+      icon: '🐍',
+      category: 'Demos',
+      keywords: ['flask', 'demo', 'floating', 'panes', 'light table'],
+      action: async () => {
+        const sharedScope = 'flask-demo';
+
+        // File loader (hidden, just emits events)
+        createWindow({
+          title: 'Flask Loader',
+          componentType: 'widget-layout',
+          props: {
+            scope: sharedScope,
+            padding: 4,
+            config: {
+              type: 'layout',
+              direction: 'vertical',
+              gap: 4,
+              children: [
+                {
+                  type: 'process-runner',
+                  props: {
+                    id: 'flask-server',
+                    command: './venv/bin/python',
+                    args: ['app.py'],
+                    cwd: 'examples/flask-app',
+                    title: 'Server',
+                    startLabel: 'Start',
+                    stopLabel: 'Stop',
+                    showOutput: false,
+                  },
+                },
+                {
+                  type: 'file-loader',
+                  props: {
+                    files: ['examples/flask-app/app.py', 'examples/flask-app/models.py'],
+                    channel: '$scope.routes',
+                    transform: "(content, filePath, allFiles) => { if (!filePath.endsWith('app.py')) return null; const modelsContent = allFiles && allFiles[1] ? allFiles[1].content : ''; const routes = []; const lines = content.split('\\n'); let i = 0; while (i < lines.length) { const line = lines[i]; const match = line.match(/@app\\.route\\(['\"]([^'\"]+)['\"](?:,\\s*methods=\\[([^\\]]+)\\])?\\)/); if (match) { const path = match[1]; const methods = match[2] ? match[2].replace(/['\"/]/g, '').split(',').map(m => m.trim()) : ['GET']; let codeEnd = i; let template = null; let usesTask = false; let usesNote = false; for (let j = i + 1; j < lines.length; j++) { if (lines[j].match(/^@app\\.route|^if __name__/)) { codeEnd = j - 1; break; } if (j === lines.length - 1) codeEnd = j; const tmplMatch = lines[j].match(/render_template\\(['\"]([^'\"]+)['\"]/); if (tmplMatch) template = 'examples/flask-app/templates/' + tmplMatch[1]; if (lines[j].includes('Task')) usesTask = true; if (lines[j].includes('Note')) usesNote = true; } const code = lines.slice(i, codeEnd + 1).join('\\n'); let modelCode = ''; if (modelsContent && (usesTask || usesNote)) { const modelLines = modelsContent.split('\\n'); let inClass = false; let className = ''; let classStart = -1; for (let k = 0; k < modelLines.length; k++) { const classMatch = modelLines[k].match(/^class (Task|Note)/); if (classMatch) { if (inClass && ((className === 'Task' && usesTask) || (className === 'Note' && usesNote))) { modelCode += modelLines.slice(classStart, k).join('\\n') + '\\n\\n'; } inClass = true; className = classMatch[1]; classStart = k; } } if (inClass && ((className === 'Task' && usesTask) || (className === 'Note' && usesNote))) { let endIdx = modelLines.length; for (let k = classStart + 1; k < modelLines.length; k++) { if (modelLines[k].match(/^class |^# Seed|^Task\\(|^Note\\(/)) { endIdx = k; break; } } modelCode += modelLines.slice(classStart, endIdx).join('\\n'); } } routes.push({ id: path + methods[0], path, methods, code, template, modelCode: modelCode.trim(), file: filePath }); } i++; } return routes; }",
+                  },
+                },
+              ],
+            },
+          },
+          width: 200,
+          height: 100,
+          x: 20,
+          y: 20,
+        });
+
+        // Routes selector
+        createWindow({
+          title: 'Routes',
+          componentType: 'widget-layout',
+          props: {
+            scope: sharedScope,
+            padding: 0,
+            background: 'transparent',
+            config: {
+              type: 'selector',
+              props: {
+                subscribePattern: 'loaded.$scope.routes',
+                dataPath: '0.data',
+                labelTemplate: '${methods} ${path}',
+                idKey: 'id',
+                channel: '$scope.route',
+                direction: 'vertical',
+              },
+            },
+          },
+          width: 200,
+          height: 400,
+          x: 20,
+          y: 130,
+        });
+
+        // Controller code
+        createWindow({
+          title: 'Controller',
+          componentType: 'widget-layout',
+          props: {
+            scope: sharedScope,
+            padding: 0,
+            background: 'transparent',
+            config: {
+              type: 'code-block',
+              props: {
+                subscribePattern: 'selection.$scope.route',
+                codeKey: 'code',
+                lineNumbers: true,
+                language: 'Python',
+              },
+            },
+          },
+          width: 450,
+          height: 300,
+          x: 240,
+          y: 20,
+        });
+
+        // Model code
+        createWindow({
+          title: 'Model',
+          componentType: 'widget-layout',
+          props: {
+            scope: sharedScope,
+            padding: 0,
+            background: 'transparent',
+            config: {
+              type: 'code-block',
+              props: {
+                subscribePattern: 'selection.$scope.route',
+                codeKey: 'modelCode',
+                lineNumbers: true,
+                language: 'Python',
+              },
+            },
+          },
+          width: 450,
+          height: 300,
+          x: 240,
+          y: 340,
+        });
+
+        // Template code
+        createWindow({
+          title: 'Template',
+          componentType: 'widget-layout',
+          props: {
+            scope: sharedScope,
+            padding: 0,
+            background: 'transparent',
+            config: {
+              type: 'code-block',
+              props: {
+                filePattern: 'selection.$scope.route',
+                fileKey: 'template',
+                lineNumbers: true,
+                language: 'HTML',
+              },
+            },
+          },
+          width: 450,
+          height: 300,
+          x: 710,
+          y: 20,
+        });
+
+        // Live preview
+        createWindow({
+          title: 'Live Preview',
+          componentType: 'widget-layout',
+          props: {
+            scope: sharedScope,
+            padding: 0,
+            background: 'transparent',
+            config: {
+              type: 'webview',
+              props: {
+                url: 'http://localhost:5001',
+                subscribePattern: 'selection.$scope.route',
+                pathKey: 'path',
+              },
+            },
+          },
+          width: 450,
+          height: 400,
+          x: 710,
+          y: 340,
+        });
+      },
+    });
+
     return cmds;
   }, [
     createWindow,

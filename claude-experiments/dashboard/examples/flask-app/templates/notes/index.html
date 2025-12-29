@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+
+{% block title %}Notes - Flask App{% endblock %}
+
+{% block content %}
+<h1>Notes</h1>
+
+<div style="margin-bottom: 1.5rem;">
+    <a href="/notes/new" class="btn btn-success">+ New Note</a>
+</div>
+
+{% for note in notes %}
+<div class="card">
+    <h3 style="margin-bottom: 0.5rem;">
+        <a href="/notes/{{ note.id }}" style="color: #2c3e50; text-decoration: none;">
+            {{ note.title }}
+        </a>
+    </h3>
+    <p style="color: #7f8c8d;">{{ note.body[:100] }}{% if note.body|length > 100 %}...{% endif %}</p>
+</div>
+{% else %}
+<div class="card">
+    <p>No notes yet. <a href="/notes/new">Create your first note!</a></p>
+</div>
+{% endfor %}
+{% endblock %}

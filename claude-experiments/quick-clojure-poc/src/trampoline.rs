@@ -690,14 +690,14 @@ pub extern "C" fn trampoline_ensure_var_by_symbol(ns_symbol_id: u32, name_symbol
 /// Trampoline: Force garbage collection
 ///
 /// ARM64 Calling Convention:
-/// - Args: x0 = stack_pointer (current frame pointer / x29)
+/// - Args: x0 = frame_pointer (x29), x1 = gc_return_addr (link register)
 /// - Returns: x0 = nil (0b111)
 #[unsafe(no_mangle)]
-pub extern "C" fn trampoline_gc(stack_pointer: usize) -> usize {
+pub extern "C" fn trampoline_gc(frame_pointer: usize, gc_return_addr: usize) -> usize {
     unsafe {
         let runtime_ptr = std::ptr::addr_of!(RUNTIME);
         let rt = &mut *(*runtime_ptr).as_ref().unwrap().get();
-        rt.gc(stack_pointer);
+        rt.gc(frame_pointer, gc_return_addr);
         7 // nil
     }
 }
@@ -962,8 +962,8 @@ pub extern "C" fn trampoline_print_space() -> usize {
 /// Trampoline: Allocate function object
 ///
 /// ARM64 Calling Convention:
-/// - Args: x0 = stack_pointer (JIT frame pointer for GC), x1 = name_ptr (0 for anonymous),
-///   x2 = code_ptr, x3 = closure_count, x4 = values_ptr
+/// - Args: x0 = frame_pointer (x29 for GC), x1 = gc_return_addr (link register),
+///   x2 = name_ptr (0 for anonymous), x3 = code_ptr, x4 = closure_count, x5 = values_ptr
 /// - Returns: x0 = function pointer (tagged)
 ///
 /// Note: values_ptr points to an array of closure_count tagged values on the stack
@@ -972,7 +972,8 @@ pub extern "C" fn trampoline_print_space() -> usize {
 /// Caller must ensure `values_ptr` points to valid memory of at least `closure_count` usize values.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn trampoline_allocate_function(
-    stack_pointer: usize,
+    frame_pointer: usize,
+    gc_return_addr: usize,
     name_ptr: usize,
     code_ptr: usize,
     closure_count: usize,
@@ -983,7 +984,7 @@ pub unsafe extern "C" fn trampoline_allocate_function(
         let rt = &mut *(*runtime_ptr).as_ref().unwrap().get();
 
         // GC before allocation if gc_always is enabled
-        rt.maybe_gc_before_alloc(stack_pointer);
+        rt.maybe_gc_before_alloc(frame_pointer, gc_return_addr);
 
         // Get function name if provided
         let name = if name_ptr != 0 {
@@ -1055,7 +1056,8 @@ pub extern "C" fn trampoline_function_closure_count(fn_ptr: usize) -> usize {
 /// Trampoline: Allocate deftype instance
 ///
 /// ARM64 Calling Convention:
-/// - Args: x0 = stack_pointer (JIT frame pointer for GC), x1 = type_id, x2 = field_count, x3 = values_ptr
+/// - Args: x0 = frame_pointer (x29 for GC), x1 = gc_return_addr (link register),
+///   x2 = type_id, x3 = field_count, x4 = values_ptr
 /// - Returns: x0 = instance pointer (tagged HeapObject)
 ///
 /// Note: values_ptr points to an array of field_count tagged values on the stack
@@ -1064,7 +1066,8 @@ pub extern "C" fn trampoline_function_closure_count(fn_ptr: usize) -> usize {
 /// Caller must ensure `values_ptr` points to valid memory of at least `field_count` usize values.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn trampoline_allocate_type(
-    stack_pointer: usize,
+    frame_pointer: usize,
+    gc_return_addr: usize,
     type_id: usize,
     field_count: usize,
     values_ptr: *const usize,
@@ -1074,7 +1077,7 @@ pub unsafe extern "C" fn trampoline_allocate_type(
         let rt = &mut *(*runtime_ptr).as_ref().unwrap().get();
 
         // GC before allocation if gc_always is enabled
-        rt.maybe_gc_before_alloc(stack_pointer);
+        rt.maybe_gc_before_alloc(frame_pointer, gc_return_addr);
 
         // Read field values from the pointer
         let field_values = if field_count > 0 {
@@ -1097,7 +1100,8 @@ pub unsafe extern "C" fn trampoline_allocate_type(
 /// Trampoline: Allocate deftype instance WITHOUT writing fields
 ///
 /// ARM64 Calling Convention:
-/// - Args: x0 = stack_pointer (JIT frame pointer for GC), x1 = type_id, x2 = field_count
+/// - Args: x0 = frame_pointer (x29 for GC), x1 = gc_return_addr (link register),
+///   x2 = type_id, x3 = field_count
 /// - Returns: x0 = UNTAGGED pointer to allocated object
 ///
 /// This is used by the refactored MakeType compilation. The caller is responsible for:
@@ -1108,7 +1112,8 @@ pub unsafe extern "C" fn trampoline_allocate_type(
 /// all fields to nil. The JIT code then overwrites fields with actual values.
 #[unsafe(no_mangle)]
 pub extern "C" fn trampoline_allocate_type_object_raw(
-    stack_pointer: usize,
+    frame_pointer: usize,
+    gc_return_addr: usize,
     type_id: usize,
     field_count: usize,
 ) -> usize {
@@ -1117,7 +1122,7 @@ pub extern "C" fn trampoline_allocate_type_object_raw(
         let rt = &mut *(*runtime_ptr).as_ref().unwrap().get();
 
         // GC before allocation if gc_always is enabled
-        rt.maybe_gc_before_alloc(stack_pointer);
+        rt.maybe_gc_before_alloc(frame_pointer, gc_return_addr);
 
         match rt.allocate_type_object_raw(type_id, field_count) {
             Ok(obj_ptr) => obj_ptr,
@@ -1146,16 +1151,16 @@ pub extern "C" fn trampoline_load_type_field(obj_ptr: usize, field_index: usize)
 /// Trampoline: Allocate a float on the heap
 ///
 /// ARM64 Calling Convention:
-/// - Args: x0 = stack_pointer (JIT frame pointer for GC), x1 = f64 bits (as u64)
+/// - Args: x0 = frame_pointer (x29 for GC), x1 = gc_return_addr (link register), x2 = f64 bits (as u64)
 /// - Returns: x0 = tagged float pointer
 #[unsafe(no_mangle)]
-pub extern "C" fn trampoline_allocate_float(stack_pointer: usize, float_bits: u64) -> usize {
+pub extern "C" fn trampoline_allocate_float(frame_pointer: usize, gc_return_addr: usize, float_bits: u64) -> usize {
     unsafe {
         let runtime_ptr = std::ptr::addr_of!(RUNTIME);
         let rt = &mut *(*runtime_ptr).as_ref().unwrap().get();
 
         // GC before allocation if gc_always is enabled
-        rt.maybe_gc_before_alloc(stack_pointer);
+        rt.maybe_gc_before_alloc(frame_pointer, gc_return_addr);
 
         let value = f64::from_bits(float_bits);
         match rt.allocate_float(value) {
@@ -1293,14 +1298,14 @@ pub extern "C" fn trampoline_store_type_field_by_symbol(
 /// Trampoline: Allocate a multi-arity function object
 ///
 /// ARM64 Calling Convention:
-/// - Args: x0 = stack_pointer (JIT frame pointer for GC)
-///   x1 = name_ptr (0 for anonymous)
-///   x2 = arity_count
-///   x3 = arities_ptr (pointer to (param_count, code_ptr) pairs on stack)
-///   x4 = variadic_min (usize::MAX if no variadic)
-///   x5 = variadic_index (usize::MAX if no variadic)
-///   x6 = closure_count
-///   x7 = closures_ptr (pointer to closure values on stack)
+/// - Args: x0 = frame_pointer (x29 for GC), x1 = gc_return_addr (link register)
+///   x2 = name_ptr (0 for anonymous)
+///   x3 = arity_count
+///   x4 = arities_ptr (pointer to (param_count, code_ptr) pairs on stack)
+///   x5 = variadic_min (usize::MAX if no variadic)
+///   x6 = variadic_index (usize::MAX if no variadic)
+///   x7 = closure_count
+///   [stack] = closures_ptr (pointer to closure values on stack)
 /// - Returns: x0 = tagged closure pointer
 /// # Safety
 /// Caller must ensure that `arities_ptr` points to valid memory of at least
@@ -1308,7 +1313,8 @@ pub extern "C" fn trampoline_store_type_field_by_symbol(
 /// of at least `closure_count` usize values.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn trampoline_allocate_multi_arity_fn(
-    stack_pointer: usize,
+    frame_pointer: usize,
+    gc_return_addr: usize,
     _name_ptr: usize,
     arity_count: usize,
     arities_ptr: *const usize,
@@ -1322,7 +1328,7 @@ pub unsafe extern "C" fn trampoline_allocate_multi_arity_fn(
         let rt = &mut *(*runtime_ptr).as_ref().unwrap().get();
 
         // GC before allocation if gc_always is enabled
-        rt.maybe_gc_before_alloc(stack_pointer);
+        rt.maybe_gc_before_alloc(frame_pointer, gc_return_addr);
 
         // Read arities from pointer (each arity is 2 words: param_count, code_ptr)
         let arities: Vec<(usize, usize)> = if arity_count > 0 {
@@ -1370,9 +1376,9 @@ pub unsafe extern "C" fn trampoline_allocate_multi_arity_fn(
 /// Trampoline: Collect rest arguments into an IndexedSeq
 ///
 /// ARM64 Calling Convention:
-/// - Args: x0 = stack_pointer (JIT frame pointer for GC)
-///   x1 = pointer to args array on stack (excess args after fixed params)
-///   x2 = count of excess arguments
+/// - Args: x0 = frame_pointer (x29 for GC), x1 = gc_return_addr (link register)
+///   x2 = pointer to args array on stack (excess args after fixed params)
+///   x3 = count of excess arguments
 /// - Returns: x0 = tagged IndexedSeq wrapping an Array, or nil if empty
 ///
 /// Creates an IndexedSeq (like ClojureScript) wrapping a mutable array.
@@ -1381,7 +1387,8 @@ pub unsafe extern "C" fn trampoline_allocate_multi_arity_fn(
 /// `count` usize values.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn trampoline_collect_rest_args(
-    stack_pointer: usize,
+    frame_pointer: usize,
+    gc_return_addr: usize,
     args_ptr: *const usize,
     count: usize,
 ) -> usize {
@@ -1394,7 +1401,7 @@ pub unsafe extern "C" fn trampoline_collect_rest_args(
         let rt = &mut *(*runtime_ptr).as_ref().unwrap().get();
 
         // GC before allocation if gc_always is enabled
-        rt.maybe_gc_before_alloc(stack_pointer);
+        rt.maybe_gc_before_alloc(frame_pointer, gc_return_addr);
 
         // Read args from pointer
         let args_slice = std::slice::from_raw_parts(args_ptr, count);
@@ -1436,6 +1443,58 @@ pub extern "C" fn trampoline_multi_arity_lookup(fn_ptr: usize, arg_count: usize)
             None => {
                 eprintln!("Error: No matching arity for {} args", arg_count);
                 0 // Return 0 to indicate no matching arity
+            }
+        }
+    }
+}
+
+/// Trampoline: Invoke a multi-arity function with dynamic dispatch
+///
+/// ARM64 Calling Convention:
+/// - Args: x0 = tagged closure pointer (multi-arity function)
+///   x1 = argument count
+///   x2-x7 = first 6 arguments
+/// - Returns: x0 = result of the function call
+///
+/// This trampoline:
+/// 1. Looks up the correct arity implementation based on arg_count
+/// 2. Calls that implementation with the provided arguments
+/// 3. Returns the result
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trampoline_invoke_multi_arity(
+    fn_ptr: usize,
+    arg_count: usize,
+    arg0: usize,
+    arg1: usize,
+    arg2: usize,
+    arg3: usize,
+    arg4: usize,
+    arg5: usize,
+) -> usize {
+    unsafe {
+        let runtime_ptr = std::ptr::addr_of!(RUNTIME);
+        let rt = &*(*runtime_ptr).as_ref().unwrap().get();
+
+        // Check if this is actually a multi-arity function
+        if !rt.is_multi_arity_function(fn_ptr) {
+            eprintln!(
+                "Error: trampoline_invoke_multi_arity called on non-multi-arity function"
+            );
+            return 7; // nil
+        }
+
+        match rt.multi_arity_lookup(fn_ptr, arg_count) {
+            Some((code_ptr, _is_variadic)) => {
+                // Call the function with the provided arguments
+                // The code_ptr expects args in x0, x1, x2... so we need to call it
+                // with the arguments in the correct order
+                let func: extern "C" fn(usize, usize, usize, usize, usize, usize) -> usize =
+                    std::mem::transmute(code_ptr);
+                func(arg0, arg1, arg2, arg3, arg4, arg5)
+            }
+            None => {
+                eprintln!("Error: No matching arity for {} args", arg_count);
+                7 // nil
             }
         }
     }
@@ -1761,16 +1820,16 @@ pub extern "C" fn trampoline_instance_check(expected_type_id: usize, value: usiz
 /// Trampoline: Allocate a new raw mutable array
 ///
 /// ARM64 Calling Convention:
-/// - Args: x0 = stack_pointer (JIT frame pointer for GC), x1 = length (tagged integer)
+/// - Args: x0 = frame_pointer (x29 for GC), x1 = gc_return_addr (link register), x2 = length (tagged integer)
 /// - Returns: x0 = tagged array pointer
 #[unsafe(no_mangle)]
-pub extern "C" fn trampoline_make_array(stack_pointer: usize, length: usize) -> usize {
+pub extern "C" fn trampoline_make_array(frame_pointer: usize, gc_return_addr: usize, length: usize) -> usize {
     unsafe {
         let runtime_ptr = std::ptr::addr_of!(RUNTIME);
         let rt = &mut *(*runtime_ptr).as_ref().unwrap().get();
 
         // GC before allocation if gc_always is enabled
-        rt.maybe_gc_before_alloc(stack_pointer);
+        rt.maybe_gc_before_alloc(frame_pointer, gc_return_addr);
 
         // Untag the length
         let len = length >> 3;
@@ -1853,16 +1912,16 @@ pub extern "C" fn trampoline_alength(arr_ptr: usize) -> usize {
 /// Trampoline: Clone an array
 ///
 /// ARM64 Calling Convention:
-/// - Args: x0 = stack_pointer (JIT frame pointer for GC), x1 = array (tagged)
+/// - Args: x0 = frame_pointer (x29 for GC), x1 = gc_return_addr (link register), x2 = array (tagged)
 /// - Returns: x0 = new array (tagged)
 #[unsafe(no_mangle)]
-pub extern "C" fn trampoline_aclone(stack_pointer: usize, arr_ptr: usize) -> usize {
+pub extern "C" fn trampoline_aclone(frame_pointer: usize, gc_return_addr: usize, arr_ptr: usize) -> usize {
     unsafe {
         let runtime_ptr = std::ptr::addr_of!(RUNTIME);
         let rt = &mut *(*runtime_ptr).as_ref().unwrap().get();
 
         // GC before allocation if gc_always is enabled
-        rt.maybe_gc_before_alloc(stack_pointer);
+        rt.maybe_gc_before_alloc(frame_pointer, gc_return_addr);
 
         match rt.array_clone(arr_ptr) {
             Ok(ptr) => ptr,
@@ -2818,16 +2877,17 @@ pub fn invoke_protocol_method(
 /// Trampoline: Apply a function to a list of arguments
 ///
 /// ARM64 Calling Convention:
-/// - Args: x0 = stack_pointer (JIT frame pointer for GC)
-///   x1 = fn_value (tagged function/closure)
-///   x2 = args_seq (tagged seq/list of arguments)
+/// - Args: x0 = frame_pointer (x29 for GC), x1 = gc_return_addr (link register)
+///   x2 = fn_value (tagged function/closure)
+///   x3 = args_seq (tagged seq/list of arguments)
 /// - Returns: x0 = result of applying the function
 ///
 /// This handles all function types (raw functions, closures, multi-arity, IFn)
 /// and properly sets up x9 for variadic functions.
 #[unsafe(no_mangle)]
 pub extern "C" fn trampoline_apply(
-    stack_pointer: usize,
+    frame_pointer: usize,
+    gc_return_addr: usize,
     fn_value: usize,
     args_seq: usize,
 ) -> usize {
@@ -2836,7 +2896,7 @@ pub extern "C" fn trampoline_apply(
         let rt = &mut *(*runtime_ptr).as_ref().unwrap().get();
 
         // GC before operation if needed
-        rt.maybe_gc_before_alloc(stack_pointer);
+        rt.maybe_gc_before_alloc(frame_pointer, gc_return_addr);
 
         // Convert args_seq to a Vec<usize>
         let args = match seq_to_vec(rt, args_seq) {

@@ -379,12 +379,6 @@ impl LinearScan {
                 }
             }
 
-            Instruction::CollectRestArgs(dst, _fixed_count, _param_offset) => {
-                if let IrValue::Register(r) = dst {
-                    regs.push(*r);
-                }
-            }
-
             // Assertion instructions
             Instruction::AssertPre(cond, _index) => {
                 if let IrValue::Register(r) = cond {
@@ -694,10 +688,6 @@ impl LinearScan {
                 replace(fn_obj);
             }
 
-            Instruction::CollectRestArgs(dst, _fixed_count, _param_offset) => {
-                replace(dst);
-            }
-
             // Assertion instructions
             Instruction::AssertPre(cond, _index) => {
                 replace(cond);
@@ -1000,10 +990,6 @@ impl LinearScan {
             Instruction::LoadClosureMultiArity(dst, fn_obj, _arity_count, _index) => {
                 replace(dst);
                 replace(fn_obj);
-            }
-
-            Instruction::CollectRestArgs(dst, _fixed_count, _param_offset) => {
-                replace(dst);
             }
 
             // Assertion instructions

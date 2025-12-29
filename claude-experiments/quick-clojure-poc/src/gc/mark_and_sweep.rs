@@ -152,13 +152,13 @@ impl MarkAndSweep {
         }
     }
 
-    fn mark_and_sweep(&mut self, stack_map: &StackMap, stack_pointers: &[(usize, usize)]) {
+    fn mark_and_sweep(&mut self, stack_map: &StackMap, stack_info: &[(usize, usize, usize)]) {
         let start = std::time::Instant::now();
         // Mark from namespace roots (always done)
-        // Then optionally scan stack if stack_pointers provided
+        // Then optionally scan stack if stack_info provided
         self.mark_from_roots();
-        for (stack_base, stack_pointer) in stack_pointers {
-            self.mark_stack(*stack_base, stack_map, *stack_pointer);
+        for (stack_base, frame_pointer, gc_return_addr) in stack_info {
+            self.mark_stack(*stack_base, stack_map, *frame_pointer, *gc_return_addr);
         }
         self.sweep();
         if self.options.print_stats {
@@ -187,19 +187,24 @@ impl MarkAndSweep {
         self.trace_objects(to_mark);
     }
 
-    fn mark_stack(&self, stack_base: usize, stack_map: &StackMap, stack_pointer: usize) {
+    fn mark_stack(&self, stack_base: usize, stack_map: &StackMap, frame_pointer: usize, gc_return_addr: usize) {
         let mut to_mark: Vec<HeapObject> = Vec::with_capacity(128);
 
-        // Use the stack walker to find heap pointers
-        // With conservative scanning, we must validate that pointers are within the heap
-        // to avoid crashes from garbage values that happen to look like heap pointers
-        StackWalker::walk_stack_roots(stack_base, stack_pointer, stack_map, |_, pointer| {
-            let untagged = BuiltInTypes::untag(pointer);
-            // Only add if the pointer is within our heap bounds
-            if self.space.contains(untagged as *const u8) {
-                to_mark.push(HeapObject::from_tagged(pointer));
-            }
-        });
+        // Use the stack walker to find heap pointers using frame pointer chain traversal
+        // The walker will naturally stop when FP is outside the JIT stack range
+        StackWalker::walk_stack_roots_with_return_addr(
+            stack_base,
+            frame_pointer,
+            gc_return_addr,
+            stack_map,
+            |_, pointer| {
+                let untagged = BuiltInTypes::untag(pointer);
+                // Only add if the pointer is within our heap bounds
+                if self.space.contains(untagged as *const u8) {
+                    to_mark.push(HeapObject::from_tagged(pointer));
+                }
+            },
+        );
 
         self.trace_objects(to_mark);
     }
@@ -287,8 +292,8 @@ impl Allocator for MarkAndSweep {
         }
     }
 
-    fn gc(&mut self, stack_map: &StackMap, stack_pointers: &[(usize, usize)]) {
-        self.mark_and_sweep(stack_map, stack_pointers);
+    fn gc(&mut self, stack_map: &StackMap, stack_info: &[(usize, usize, usize)]) {
+        self.mark_and_sweep(stack_map, stack_info);
     }
 
     fn grow(&mut self) {

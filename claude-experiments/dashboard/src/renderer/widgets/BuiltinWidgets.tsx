@@ -5,11 +5,19 @@
  * Each widget type accepts props that configure its behavior.
  */
 
-import React, { memo, useCallback, useState, useEffect, useMemo, useRef, type ReactElement } from 'react';
+import React, { memo, useCallback, useState, useEffect, useMemo, useRef, useId, type ReactElement } from 'react';
 import { useBackendStateSelector, useDispatch, useBackendState } from '../hooks/useBackendState';
 import { useEventSubscription, useEmit, useEventReducer } from '../hooks/useEvents';
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, LineChart, Line } from 'recharts';
-// DashboardEvent type used indirectly via event hooks
+
+// CodeMirror imports for syntax highlighting
+import { EditorView, lineNumbers, highlightActiveLineGutter, highlightSpecialChars } from '@codemirror/view';
+import { EditorState, Extension } from '@codemirror/state';
+import { syntaxHighlighting, defaultHighlightStyle } from '@codemirror/language';
+import { javascript } from '@codemirror/lang-javascript';
+import { html } from '@codemirror/lang-html';
+import { python } from '@codemirror/lang-python';
+import { oneDark } from '@codemirror/theme-one-dark';
 
 // ========== Selector Functions ==========
 
@@ -903,27 +911,62 @@ export const LayoutContainer = memo(function LayoutContainer({
 export interface EvalCodeEditorProps {
   /** Initial code content */
   initialCode?: string;
-  /** Event type to emit for eval requests */
-  emitAs?: string;
   /** Placeholder text */
   placeholder?: string;
   /** Label/title */
   title?: string;
   /** Number of iterations for benchmark mode */
   iterations?: number;
+  /** Language for evaluation (defaults to 'javascript') */
+  language?: string;
+  /** Command to run for this language (registers executor automatically) */
+  command?: string;
+  /** Arguments for the command */
+  args?: string[];
+  /** Unique channel for this editor's results (e.g., "editor1" -> emits to "eval.result.editor1") */
+  channel?: string;
 }
 
 export const EvalCodeEditor = memo(function EvalCodeEditor({
   initialCode = '',
-  emitAs = 'eval.request',
   placeholder = 'Enter code to evaluate...',
   title,
   iterations = 1,
+  language = 'javascript',
+  command,
+  args,
+  channel,
 }: EvalCodeEditorProps): ReactElement {
   const [code, setCode] = useState(initialCode);
   const [isRunning, setIsRunning] = useState(false);
+  const [executorReady, setExecutorReady] = useState(false);
   const emit = useEmit();
   const hasEvalAPI = typeof window !== 'undefined' && !!window.evalAPI;
+
+  // Auto-generate unique instance ID for this editor
+  const instanceId = useId();
+  const effectiveChannel = channel ?? `auto-${instanceId.replace(/:/g, '')}`;
+
+  // Register executor on mount if command is provided
+  useEffect(() => {
+    if (!command || !window.evalAPI) {
+      // No command needed (built-in JS) or no API
+      setExecutorReady(language === 'javascript' || language === 'typescript');
+      return;
+    }
+
+    window.evalAPI.registerExecutor({ language, command, args })
+      .then(() => {
+        setExecutorReady(true);
+        console.log(`[EvalCodeEditor] Registered executor for ${language}: ${command}`);
+      })
+      .catch((err) => {
+        console.error(`[EvalCodeEditor] Failed to register executor:`, err);
+      });
+  }, [language, command, args]);
+
+  // Determine the event channel for results
+  const resultChannel = `eval.result.${effectiveChannel}`;
 
   const handleRun = useCallback(async () => {
     if (!code.trim() || isRunning) return;
@@ -935,18 +978,15 @@ export const EvalCodeEditor = memo(function EvalCodeEditor({
 
     try {
       for (let i = 0; i < iterations; i++) {
-        const iterationId = `${Date.now()}-${i}`;
-        emit(emitAs, { code, iteration: i, id: iterationId });
-
         // Actually execute the code
-        const result = await window.evalAPI.execute(code, 'javascript');
-        // The eval service already emits eval.result, but we can also emit here
-        emit('eval.result', { ...result, iteration: i });
+        const result = await window.evalAPI.execute(code, language);
+        // Emit to the specific channel for this editor
+        emit(resultChannel, { ...result, iteration: i });
       }
     } finally {
       setIsRunning(false);
     }
-  }, [code, iterations, emit, emitAs, isRunning]);
+  }, [code, iterations, emit, isRunning, language, resultChannel]);
 
   return (
     <div style={{
@@ -971,20 +1011,20 @@ export const EvalCodeEditor = memo(function EvalCodeEditor({
           <div style={{ display: 'flex', gap: '8px' }}>
             <button
               onClick={handleRun}
-              disabled={isRunning || !hasEvalAPI}
-              title={hasEvalAPI ? 'Run code (⌘+Enter)' : 'Eval API not available - run in Electron'}
+              disabled={isRunning || !hasEvalAPI || !executorReady}
+              title={!hasEvalAPI ? 'Eval API not available - run in Electron' : !executorReady ? `Registering ${language} executor...` : 'Run code (⌘+Enter)'}
               style={{
                 padding: '4px 12px',
-                background: hasEvalAPI ? 'var(--theme-accent-primary)' : 'var(--theme-bg-tertiary)',
-                color: hasEvalAPI ? 'var(--theme-bg-primary)' : 'var(--theme-text-muted)',
+                background: hasEvalAPI && executorReady ? 'var(--theme-accent-primary)' : 'var(--theme-bg-tertiary)',
+                color: hasEvalAPI && executorReady ? 'var(--theme-bg-primary)' : 'var(--theme-text-muted)',
                 border: 'none',
                 borderRadius: 'var(--theme-radius-sm)',
-                cursor: isRunning || !hasEvalAPI ? 'not-allowed' : 'pointer',
+                cursor: isRunning || !hasEvalAPI || !executorReady ? 'not-allowed' : 'pointer',
                 fontSize: '0.85em',
-                opacity: hasEvalAPI ? 1 : 0.6,
+                opacity: hasEvalAPI && executorReady ? 1 : 0.6,
               }}
             >
-              {isRunning ? 'Running...' : hasEvalAPI ? 'Run' : 'No Eval API'}
+              {isRunning ? 'Running...' : !hasEvalAPI ? 'No Eval API' : !executorReady ? 'Loading...' : 'Run'}
             </button>
           </div>
         </div>
@@ -1079,6 +1119,807 @@ export const EventDisplay = memo(function EventDisplay({
   );
 });
 
+// ========== Selector Widget ==========
+
+/**
+ * Selector - Clickable item list that emits selection events
+ *
+ * Items can come from:
+ * 1. Static `items` prop
+ * 2. Subscribed events (uses payload as items array)
+ */
+export interface SelectorProps {
+  /** Static items */
+  items?: Array<Record<string, unknown>>;
+  /** Subscribe to events for items (payload should be an array) */
+  subscribePattern?: string;
+  /** Path to extract items from payload (e.g., "0.data" for payload[0].data) */
+  dataPath?: string;
+  /** Key for item label */
+  labelKey?: string;
+  /** Template for label using ${key} syntax */
+  labelTemplate?: string;
+  /** Key for unique item ID */
+  idKey?: string;
+  /** Channel to emit selection to */
+  channel: string;
+  /** Title */
+  title?: string;
+  /** Layout direction */
+  direction?: 'horizontal' | 'vertical';
+}
+
+export const Selector = memo(function Selector({
+  items: staticItems,
+  subscribePattern,
+  dataPath,
+  labelKey = 'label',
+  labelTemplate,
+  idKey = 'id',
+  channel,
+  title,
+  direction = 'vertical',
+}: SelectorProps): ReactElement {
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const events = useEventSubscription(subscribePattern ?? '__none__', { maxEvents: 1 });
+  const emit = useEmit();
+
+  // Get items from static prop or most recent event
+  const items = useMemo(() => {
+    if (staticItems) return staticItems;
+    if (events.length > 0) {
+      let payload: unknown = events[0]?.payload;
+      // Navigate to nested data if dataPath is specified
+      if (dataPath && payload) {
+        const parts = dataPath.split('.');
+        for (const part of parts) {
+          if (payload && typeof payload === 'object') {
+            payload = (payload as Record<string, unknown>)[part];
+          } else {
+            payload = undefined;
+            break;
+          }
+        }
+      }
+      if (Array.isArray(payload)) return payload;
+    }
+    return [];
+  }, [staticItems, events, dataPath]);
+
+  const handleSelect = useCallback((item: Record<string, unknown>) => {
+    const id = String(item[idKey] ?? '');
+    setSelectedId(id);
+    emit(`selection.${channel}`, item);
+  }, [idKey, channel, emit]);
+
+  const renderLabel = useCallback((item: Record<string, unknown>) => {
+    if (labelTemplate) {
+      return labelTemplate.replace(/\$\{(\w+)\}/g, (_, key) => String(item[key] ?? ''));
+    }
+    return String(item[labelKey] ?? '');
+  }, [labelTemplate, labelKey]);
+
+  return (
+    <div style={{ ...baseWidgetStyle, padding: 0 }}>
+      {title && (
+        <div style={{ padding: '8px 12px', fontSize: '0.8em', color: 'var(--theme-text-muted)', borderBottom: '1px solid var(--theme-border-primary)' }}>
+          {title}
+        </div>
+      )}
+      <div style={{
+        display: 'flex',
+        flexDirection: direction === 'horizontal' ? 'row' : 'column',
+        gap: 4,
+        padding: 8,
+        flexWrap: direction === 'horizontal' ? 'wrap' : 'nowrap',
+        overflow: 'auto',
+      }}>
+        {items.length === 0 ? (
+          <div style={{ padding: '12px', color: 'var(--theme-text-muted)', textAlign: 'center', fontSize: '0.85em' }}>
+            No items
+          </div>
+        ) : (
+          items.map((item, i) => {
+            const id = String(item[idKey] ?? i);
+            const isSelected = selectedId === id;
+            return (
+              <button
+                key={id}
+                onClick={() => handleSelect(item)}
+                style={{
+                  padding: '6px 12px',
+                  background: isSelected ? 'var(--theme-accent-primary)' : 'var(--theme-bg-tertiary)',
+                  color: isSelected ? 'var(--theme-bg-primary)' : 'var(--theme-text-primary)',
+                  border: '1px solid var(--theme-border-primary)',
+                  borderRadius: 'var(--theme-radius-sm)',
+                  cursor: 'pointer',
+                  fontSize: '0.85em',
+                  textAlign: 'left',
+                }}
+              >
+                {renderLabel(item)}
+              </button>
+            );
+          })
+        )}
+      </div>
+    </div>
+  );
+});
+
+// ========== CodeBlock Widget ==========
+
+/**
+ * CodeBlock - Read-only code display
+ *
+ * Content can come from:
+ * 1. Static `code` prop
+ * 2. File path via `file` prop
+ * 3. Subscribed event payload
+ */
+export interface CodeBlockProps {
+  /** Static code content */
+  code?: string;
+  /** File path to load */
+  file?: string;
+  /** Subscribe to events for file path to load */
+  filePattern?: string;
+  /** Key in event payload containing file path */
+  fileKey?: string;
+  /** Subscribe to events for code (uses payload[codeKey] or payload as string) */
+  subscribePattern?: string;
+  /** Key in event payload containing code */
+  codeKey?: string;
+  /** Title */
+  title?: string;
+  /** Show line numbers */
+  lineNumbers?: boolean;
+  /** Background color */
+  background?: string;
+  /** Language hint for display */
+  language?: string;
+}
+
+// Get language extension based on language name
+function getLanguageExtension(lang?: string): Extension {
+  const langLower = lang?.toLowerCase() ?? '';
+  if (langLower === 'python' || langLower === 'py') return python();
+  if (langLower === 'javascript' || langLower === 'js') return javascript();
+  if (langLower === 'typescript' || langLower === 'ts') return javascript({ typescript: true });
+  if (langLower === 'html' || langLower === 'jinja' || langLower === 'jinja2') return html();
+  return [];
+}
+
+export const CodeBlock = memo(function CodeBlock({
+  code: staticCode,
+  file: staticFile,
+  filePattern,
+  fileKey = 'file',
+  subscribePattern,
+  codeKey,
+  title,
+  lineNumbers: showLineNumbers = true,
+  background,
+  language,
+}: CodeBlockProps): ReactElement {
+  const [fileContent, setFileContent] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [currentFile, setCurrentFile] = useState<string | null>(null);
+  const codeEvents = useEventSubscription(subscribePattern ?? '__none__', { maxEvents: 1 });
+  const fileEvents = useEventSubscription(filePattern ?? '__none__', { maxEvents: 1 });
+  const editorRef = useRef<HTMLDivElement>(null);
+  const viewRef = useRef<EditorView | null>(null);
+
+  // Determine which file to load (from static prop or event)
+  const fileToLoad = useMemo(() => {
+    if (staticFile) return staticFile;
+    if (fileEvents.length > 0) {
+      const payload = fileEvents[0]?.payload;
+      if (typeof payload === 'string') return payload;
+      if (payload && typeof payload === 'object') {
+        return String((payload as Record<string, unknown>)[fileKey] ?? '');
+      }
+    }
+    return null;
+  }, [staticFile, fileEvents, fileKey]);
+
+  // Load file content when file path changes
+  useEffect(() => {
+    if (!fileToLoad || fileToLoad === currentFile) return;
+    setLoading(true);
+    setCurrentFile(fileToLoad);
+    window.fileAPI?.load(fileToLoad)
+      .then((result) => {
+        if (result?.content) {
+          setFileContent(result.content);
+        } else {
+          setFileContent(null);
+        }
+      })
+      .catch(() => setFileContent(null))
+      .finally(() => setLoading(false));
+  }, [fileToLoad, currentFile]);
+
+  // Determine code to display
+  const code = useMemo(() => {
+    if (staticCode) return staticCode;
+    if (fileContent) return fileContent;
+    if (codeEvents.length > 0) {
+      const payload = codeEvents[0]?.payload;
+      if (typeof payload === 'string') return payload;
+      if (payload && typeof payload === 'object' && codeKey) {
+        return String((payload as Record<string, unknown>)[codeKey] ?? '');
+      }
+    }
+    return '';
+  }, [staticCode, fileContent, codeEvents, codeKey]);
+
+  // Initialize/update CodeMirror
+  useEffect(() => {
+    if (!editorRef.current || !code) return;
+
+    // Destroy previous view if exists
+    if (viewRef.current) {
+      viewRef.current.destroy();
+      viewRef.current = null;
+    }
+
+    const extensions: Extension[] = [
+      EditorView.editable.of(false),
+      EditorState.readOnly.of(true),
+      highlightSpecialChars(),
+      syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
+      oneDark,
+      getLanguageExtension(language),
+      EditorView.theme({
+        '&': { height: '100%', fontSize: '13px' },
+        '.cm-scroller': { overflow: 'auto' },
+        '.cm-content': { padding: '8px 0' },
+        '.cm-line': { padding: '0 12px' },
+      }),
+    ];
+
+    if (showLineNumbers) {
+      extensions.push(lineNumbers());
+    }
+
+    const state = EditorState.create({
+      doc: code,
+      extensions,
+    });
+
+    viewRef.current = new EditorView({
+      state,
+      parent: editorRef.current,
+    });
+
+    return () => {
+      if (viewRef.current) {
+        viewRef.current.destroy();
+        viewRef.current = null;
+      }
+    };
+  }, [code, language, showLineNumbers]);
+
+  // Display title with file path if available
+  const displayTitle = title ?? (currentFile ? currentFile.split('/').pop() : undefined);
+
+  return (
+    <div style={{
+      ...baseWidgetStyle,
+      padding: 0,
+      background: background ?? 'var(--theme-bg-elevated)',
+      height: '100%',
+      display: 'flex',
+      flexDirection: 'column',
+      overflow: 'hidden',
+    }}>
+      {displayTitle && (
+        <div style={{
+          padding: '8px 12px',
+          fontSize: '0.8em',
+          color: 'var(--theme-text-muted)',
+          borderBottom: '1px solid var(--theme-border-primary)',
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center',
+          flexShrink: 0,
+        }}>
+          <span>{displayTitle}</span>
+          {language && <span style={{ opacity: 0.6, fontSize: '0.9em' }}>{language}</span>}
+        </div>
+      )}
+      <div style={{ flex: 1, overflow: 'hidden', minHeight: 0 }}>
+        {loading ? (
+          <div style={{ padding: '12px', color: 'var(--theme-text-muted)', textAlign: 'center' }}>Loading...</div>
+        ) : !code ? (
+          <div style={{ padding: '12px', color: 'var(--theme-text-muted)', textAlign: 'center', fontSize: '0.85em' }}>
+            No code to display
+          </div>
+        ) : (
+          <div ref={editorRef} style={{ height: '100%' }} />
+        )}
+      </div>
+    </div>
+  );
+});
+
+// ========== WebView Widget ==========
+
+/**
+ * WebView - Electron webview for embedded web content
+ * Uses the Electron webview tag for full browser capabilities
+ */
+export interface WebViewProps {
+  /** Base URL */
+  url?: string;
+  /** Subscribe to events for URL path (appended to base url) */
+  subscribePattern?: string;
+  /** Key in event payload containing path */
+  pathKey?: string;
+  /** Title */
+  title?: string;
+  /** Height in pixels (ignored if flex parent) */
+  height?: number;
+}
+
+export const WebView = memo(function WebView({
+  url: baseUrl,
+  subscribePattern,
+  pathKey = 'path',
+  title,
+  height = 300,
+}: WebViewProps): ReactElement {
+  const webviewRef = useRef<HTMLWebViewElement>(null);
+  const events = useEventSubscription(subscribePattern ?? '__none__', { maxEvents: 1 });
+  const [loading, setLoading] = useState(false);
+  const [currentUrl, setCurrentUrl] = useState<string>('');
+  const [error, setError] = useState<string | null>(null);
+
+  // Determine URL
+  const url = useMemo(() => {
+    let path = '';
+    if (events.length > 0) {
+      const payload = events[0]?.payload;
+      if (typeof payload === 'string') path = payload;
+      else if (payload && typeof payload === 'object') {
+        path = String((payload as Record<string, unknown>)[pathKey] ?? '');
+      }
+    }
+    if (baseUrl && path) return `${baseUrl}${path}`;
+    if (baseUrl) return baseUrl;
+    return '';
+  }, [baseUrl, events, pathKey]);
+
+  // Handle webview events
+  useEffect(() => {
+    const webview = webviewRef.current;
+    if (!webview) return;
+
+    const handleLoadStart = () => {
+      setLoading(true);
+      setError(null);
+    };
+    const handleLoadStop = () => setLoading(false);
+    const handleDidNavigate = (e: Event) => {
+      const evt = e as Event & { url: string };
+      setCurrentUrl(evt.url);
+      setError(null);
+    };
+    const handleDidFail = (e: Event) => {
+      const evt = e as Event & { errorCode: number; errorDescription: string; validatedURL: string };
+      setLoading(false);
+      if (evt.errorCode !== -3) { // -3 is ERR_ABORTED, often happens during redirects
+        setError(`Failed to load: ${evt.errorDescription || 'Connection refused'}`);
+      }
+    };
+
+    webview.addEventListener('did-start-loading', handleLoadStart);
+    webview.addEventListener('did-stop-loading', handleLoadStop);
+    webview.addEventListener('did-navigate', handleDidNavigate);
+    webview.addEventListener('did-navigate-in-page', handleDidNavigate);
+    webview.addEventListener('did-fail-load', handleDidFail);
+
+    return () => {
+      webview.removeEventListener('did-start-loading', handleLoadStart);
+      webview.removeEventListener('did-stop-loading', handleLoadStop);
+      webview.removeEventListener('did-navigate', handleDidNavigate);
+      webview.removeEventListener('did-navigate-in-page', handleDidNavigate);
+      webview.removeEventListener('did-fail-load', handleDidFail);
+    };
+  }, []);
+
+  const handleRefresh = useCallback(() => {
+    const webview = webviewRef.current;
+    if (webview) {
+      webview.reload();
+    }
+  }, []);
+
+  return (
+    <div style={{
+      ...baseWidgetStyle,
+      padding: 0,
+      height: '100%',
+      display: 'flex',
+      flexDirection: 'column',
+    }}>
+      {title && (
+        <div style={{
+          padding: '8px 12px',
+          fontSize: '0.8em',
+          color: 'var(--theme-text-muted)',
+          borderBottom: '1px solid var(--theme-border-primary)',
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center',
+          gap: 8,
+        }}>
+          <span>{title} {loading && '(loading...)'}</span>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            {currentUrl && <span style={{ opacity: 0.5, fontSize: '0.85em', maxWidth: 150, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{currentUrl}</span>}
+            <button
+              onClick={handleRefresh}
+              disabled={loading}
+              style={{
+                padding: '2px 8px',
+                background: 'var(--theme-bg-tertiary)',
+                border: '1px solid var(--theme-border-primary)',
+                borderRadius: 'var(--theme-radius-sm)',
+                cursor: loading ? 'not-allowed' : 'pointer',
+                fontSize: '0.85em',
+                color: 'var(--theme-text-secondary)',
+              }}
+            >
+              Refresh
+            </button>
+          </div>
+        </div>
+      )}
+      {url ? (
+        <div
+          style={{ flex: 1, position: 'relative', minHeight: height, background: '#fff' }}
+        >
+          <webview
+            ref={webviewRef as React.RefObject<HTMLWebViewElement>}
+            src={url}
+            style={{
+              width: '100%',
+              height: '100%',
+              minHeight: height,
+              display: 'flex',
+            }}
+          />
+          {error && (
+            <div style={{
+              position: 'absolute',
+              inset: 0,
+              background: 'var(--theme-bg-elevated)',
+              display: 'flex',
+              flexDirection: 'column',
+              alignItems: 'center',
+              justifyContent: 'center',
+              gap: 12,
+              padding: 20,
+            }}>
+              <div style={{ color: 'var(--theme-status-error)', fontSize: '0.9em', textAlign: 'center' }}>
+                {error}
+              </div>
+              <div style={{ color: 'var(--theme-text-muted)', fontSize: '0.8em' }}>
+                Make sure the server is running
+              </div>
+              <button
+                onClick={handleRefresh}
+                style={{
+                  padding: '6px 16px',
+                  background: 'var(--theme-accent-primary)',
+                  color: 'white',
+                  border: 'none',
+                  borderRadius: 'var(--theme-radius-sm)',
+                  cursor: 'pointer',
+                  fontSize: '0.85em',
+                }}
+              >
+                Retry
+              </button>
+            </div>
+          )}
+        </div>
+      ) : (
+        <div style={{ padding: '12px', color: 'var(--theme-text-muted)', textAlign: 'center', fontSize: '0.85em', flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+          No URL specified
+        </div>
+      )}
+    </div>
+  );
+});
+
+// Legacy alias
+export const WebFrame = WebView;
+
+// ========== FileLoader Widget ==========
+
+/**
+ * FileLoader - Loads files and emits their content as events
+ *
+ * Useful for loading config files, source files, etc.
+ * Can apply a transform to parse the content.
+ */
+export interface FileLoaderProps {
+  /** File paths to load */
+  files: string[];
+  /** Channel to emit loaded content to */
+  channel: string;
+  /** Transform function (receives content string, returns parsed data) */
+  transform?: string;
+  /** Reload interval in ms (0 = no auto-reload) */
+  reloadInterval?: number;
+}
+
+export const FileLoader = memo(function FileLoader({
+  files,
+  channel,
+  transform,
+  reloadInterval = 0,
+}: FileLoaderProps): ReactElement {
+  const [loading, setLoading] = useState(false);
+  const [lastLoad, setLastLoad] = useState<Date | null>(null);
+  const emit = useEmit();
+
+  // Parse transform function - receives (content, filePath, allFiles)
+  const transformFn = useMemo(() => {
+    if (!transform) return null;
+    try {
+      // eslint-disable-next-line no-new-func
+      return new Function('content', 'filePath', 'allFiles', `return (${transform})(content, filePath, allFiles)`) as (content: string, filePath: string, allFiles: Array<{ file: string; content: string }>) => unknown;
+    } catch (err) {
+      console.error('[FileLoader] Failed to parse transform:', err);
+      return null;
+    }
+  }, [transform]);
+
+  const loadFiles = useCallback(async () => {
+    setLoading(true);
+    try {
+      // First, load all files
+      const loadedFiles: Array<{ file: string; content: string }> = [];
+      for (const file of files) {
+        try {
+          const result = await window.fileAPI?.load(file);
+          if (result?.content) {
+            loadedFiles.push({ file, content: result.content });
+          }
+        } catch (err) {
+          console.error('[FileLoader] File load error:', file, err);
+        }
+      }
+
+      // Then transform each file, passing all files for cross-reference
+      const results: Array<{ file: string; content: string; data?: unknown }> = [];
+      for (const { file, content } of loadedFiles) {
+        let data: unknown;
+        try {
+          data = transformFn ? transformFn(content, file, loadedFiles) : content;
+        } catch (err) {
+          console.error('[FileLoader] Transform error:', err);
+          data = content;
+        }
+        results.push({ file, content, data });
+      }
+
+      emit(`loaded.${channel}`, results);
+      setLastLoad(new Date());
+    } finally {
+      setLoading(false);
+    }
+  }, [files, channel, emit, transformFn]);
+
+  // Initial load
+  useEffect(() => {
+    loadFiles();
+  }, [loadFiles]);
+
+  // Auto-reload
+  useEffect(() => {
+    if (reloadInterval <= 0) return;
+    const interval = setInterval(loadFiles, reloadInterval);
+    return () => clearInterval(interval);
+  }, [reloadInterval, loadFiles]);
+
+  return (
+    <div style={{
+      padding: '4px 8px',
+      fontSize: '0.75em',
+      color: 'var(--theme-text-muted)',
+      background: 'var(--theme-bg-elevated)',
+      borderRadius: 'var(--theme-radius-sm)',
+      display: 'inline-flex',
+      alignItems: 'center',
+      gap: 8,
+    }}>
+      <span>{loading ? 'Loading...' : `${files.length} file(s)`}</span>
+      {lastLoad && <span>@ {lastLoad.toLocaleTimeString()}</span>}
+      <button
+        onClick={loadFiles}
+        disabled={loading}
+        style={{
+          padding: '2px 6px',
+          background: 'var(--theme-bg-tertiary)',
+          border: '1px solid var(--theme-border-primary)',
+          borderRadius: 'var(--theme-radius-sm)',
+          cursor: 'pointer',
+          fontSize: '0.9em',
+        }}
+      >
+        Reload
+      </button>
+    </div>
+  );
+});
+
+// ========== ProcessRunner Widget ==========
+
+/**
+ * ProcessRunner - Start/stop a process with a button
+ */
+export interface ProcessRunnerProps {
+  /** Unique ID for this process */
+  id: string;
+  /** Command to run */
+  command: string;
+  /** Command arguments */
+  args?: string[];
+  /** Working directory */
+  cwd?: string;
+  /** Button label when stopped */
+  startLabel?: string;
+  /** Button label when running */
+  stopLabel?: string;
+  /** Title/description */
+  title?: string;
+  /** Show output log */
+  showOutput?: boolean;
+  /** Max output lines to keep */
+  maxOutputLines?: number;
+}
+
+export const ProcessRunner = memo(function ProcessRunner({
+  id,
+  command,
+  args = [],
+  cwd,
+  startLabel = 'Start',
+  stopLabel = 'Stop',
+  title,
+  showOutput = true,
+  maxOutputLines = 100,
+}: ProcessRunnerProps): ReactElement {
+  const [running, setRunning] = useState(false);
+  const [output, setOutput] = useState<string[]>([]);
+  const outputRef = useRef<HTMLDivElement>(null);
+
+  // Check initial running state
+  useEffect(() => {
+    window.shellAPI?.isRunning(id).then(({ running: isRunning }) => {
+      setRunning(isRunning);
+    });
+  }, [id]);
+
+  // Subscribe to process output
+  useEffect(() => {
+    const unsubStdout = window.eventAPI?.subscribe(`shell.stdout.${id}`, (event) => {
+      const { data } = event.payload as { data: string };
+      setOutput(prev => [...prev.slice(-(maxOutputLines - 1)), ...data.split('\n').filter(Boolean)]);
+    });
+
+    const unsubStderr = window.eventAPI?.subscribe(`shell.stderr.${id}`, (event) => {
+      const { data } = event.payload as { data: string };
+      setOutput(prev => [...prev.slice(-(maxOutputLines - 1)), ...data.split('\n').filter(Boolean).map(l => `[err] ${l}`)]);
+    });
+
+    const unsubExit = window.eventAPI?.subscribe(`shell.exit.${id}`, (event) => {
+      const { code } = event.payload as { code: number | null };
+      setRunning(false);
+      setOutput(prev => [...prev, `[Process exited with code ${code}]`]);
+    });
+
+    const unsubError = window.eventAPI?.subscribe(`shell.error.${id}`, (event) => {
+      const { error } = event.payload as { error: string };
+      setRunning(false);
+      setOutput(prev => [...prev, `[Error: ${error}]`]);
+    });
+
+    return () => {
+      unsubStdout?.();
+      unsubStderr?.();
+      unsubExit?.();
+      unsubError?.();
+    };
+  }, [id, maxOutputLines]);
+
+  // Auto-scroll output
+  useEffect(() => {
+    if (outputRef.current) {
+      outputRef.current.scrollTop = outputRef.current.scrollHeight;
+    }
+  }, [output]);
+
+  const handleToggle = useCallback(async () => {
+    if (running) {
+      await window.shellAPI?.kill(id);
+      setRunning(false);
+    } else {
+      setOutput([`$ ${command} ${args.join(' ')}`]);
+      const result = await window.shellAPI?.spawn(id, command, args, { cwd });
+      if (result?.success) {
+        setRunning(true);
+      }
+    }
+  }, [running, id, command, args, cwd]);
+
+  return (
+    <div style={{
+      ...baseWidgetStyle,
+      padding: 0,
+      display: 'flex',
+      flexDirection: 'column',
+      height: '100%',
+    }}>
+      <div style={{
+        padding: '8px 12px',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        borderBottom: showOutput ? '1px solid var(--theme-border-primary)' : 'none',
+      }}>
+        <span style={{ fontSize: '0.85em', color: 'var(--theme-text-muted)' }}>
+          {title ?? command}
+        </span>
+        <button
+          onClick={handleToggle}
+          style={{
+            padding: '4px 12px',
+            background: running ? 'var(--theme-status-error)' : 'var(--theme-accent-primary)',
+            color: 'white',
+            border: 'none',
+            borderRadius: 'var(--theme-radius-sm)',
+            cursor: 'pointer',
+            fontSize: '0.8em',
+            fontWeight: 500,
+          }}
+        >
+          {running ? stopLabel : startLabel}
+        </button>
+      </div>
+      {showOutput && (
+        <div
+          ref={outputRef}
+          style={{
+            flex: 1,
+            overflow: 'auto',
+            padding: '8px 12px',
+            fontFamily: 'var(--theme-font-mono)',
+            fontSize: '0.75em',
+            lineHeight: 1.4,
+            background: 'var(--theme-bg-primary)',
+            color: 'var(--theme-text-secondary)',
+          }}
+        >
+          {output.length === 0 ? (
+            <span style={{ color: 'var(--theme-text-muted)' }}>No output yet</span>
+          ) : (
+            output.map((line, i) => (
+              <div key={i} style={{ color: line.startsWith('[err]') ? 'var(--theme-status-error)' : 'inherit' }}>
+                {line}
+              </div>
+            ))
+          )}
+        </div>
+      )}
+    </div>
+  );
+});
+
 // ========== Widget Type Registry ==========
 
 export interface WidgetTypeConfig {
@@ -1133,5 +1974,29 @@ export const WIDGET_TYPES: Record<string, WidgetTypeConfig> = {
   'event-display': {
     component: EventDisplay as unknown as React.ComponentType<Record<string, unknown>>,
     defaultProps: { subscribePattern: '**', maxEvents: 10 },
+  },
+  'selector': {
+    component: Selector as unknown as React.ComponentType<Record<string, unknown>>,
+    defaultProps: { direction: 'vertical', labelKey: 'label', idKey: 'id' },
+  },
+  'code-block': {
+    component: CodeBlock as unknown as React.ComponentType<Record<string, unknown>>,
+    defaultProps: { lineNumbers: true },
+  },
+  'webview': {
+    component: WebView as unknown as React.ComponentType<Record<string, unknown>>,
+    defaultProps: { height: 300 },
+  },
+  'web-frame': {
+    component: WebView as unknown as React.ComponentType<Record<string, unknown>>,
+    defaultProps: { height: 300 },
+  },
+  'file-loader': {
+    component: FileLoader as unknown as React.ComponentType<Record<string, unknown>>,
+    defaultProps: { files: [], reloadInterval: 0 },
+  },
+  'process-runner': {
+    component: ProcessRunner as unknown as React.ComponentType<Record<string, unknown>>,
+    defaultProps: { showOutput: true, maxOutputLines: 100 },
   },
 };

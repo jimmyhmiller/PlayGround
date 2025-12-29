@@ -59,15 +59,15 @@ impl Allocator for GenerationalGC {
         Ok(pointer)
     }
 
-    fn gc(&mut self, stack_map: &StackMap, stack_pointers: &[(usize, usize)]) {
+    fn gc(&mut self, stack_map: &StackMap, stack_info: &[(usize, usize, usize)]) {
         if !self.options.gc {
             return;
         }
         if self.gc_count % self.full_gc_frequency == 0 {
             self.gc_count = 0;
-            self.full_gc(stack_map, stack_pointers);
+            self.full_gc(stack_map, stack_info);
         } else {
-            self.minor_gc(stack_map, stack_pointers);
+            self.minor_gc(stack_map, stack_info);
         }
         self.gc_count += 1;
     }
@@ -139,14 +139,14 @@ impl GenerationalGC {
         }
     }
 
-    fn minor_gc(&mut self, stack_map: &StackMap, stack_pointers: &[(usize, usize)]) {
+    fn minor_gc(&mut self, stack_map: &StackMap, stack_info: &[(usize, usize, usize)]) {
         let start = std::time::Instant::now();
 
         self.process_temporary_roots();
         self.process_additional_roots();
         self.process_namespace_roots();
         self.update_old_generation_namespace_roots();
-        self.process_stack_roots(stack_map, stack_pointers);
+        self.process_stack_roots(stack_map, stack_info);
 
         self.young.clear();
 
@@ -212,28 +212,31 @@ impl GenerationalGC {
         }
     }
 
-    fn process_stack_roots(&mut self, stack_map: &StackMap, stack_pointers: &[(usize, usize)]) {
-        for (stack_base, stack_pointer) in stack_pointers.iter() {
-            let roots = self.gather_roots(*stack_base, stack_map, *stack_pointer);
+    fn process_stack_roots(&mut self, stack_map: &StackMap, stack_info: &[(usize, usize, usize)]) {
+        for (stack_base, frame_pointer, gc_return_addr) in stack_info.iter() {
+            let roots = self.gather_roots(*stack_base, stack_map, *frame_pointer, *gc_return_addr);
             let new_roots: Vec<usize> = roots.iter().map(|x| x.1).collect();
             let new_roots = unsafe { self.copy_all(new_roots) };
 
             self.copy_remaining();
 
-            let stack_buffer = StackWalker::get_live_stack_mut(*stack_base, *stack_pointer);
-            for (i, (stack_offset, _)) in roots.iter().enumerate() {
+            // Update stack slots with new pointer locations
+            // roots contains (slot_addr, old_value) pairs
+            for (i, (slot_addr, _)) in roots.iter().enumerate() {
                 debug_assert!(
                     BuiltInTypes::untag(new_roots[i]) % 8 == 0,
                     "Pointer is not aligned"
                 );
-                stack_buffer[*stack_offset] = new_roots[i];
+                unsafe {
+                    *(*slot_addr as *mut usize) = new_roots[i];
+                }
             }
         }
     }
 
-    fn full_gc(&mut self, stack_map: &StackMap, stack_pointers: &[(usize, usize)]) {
-        self.minor_gc(stack_map, stack_pointers);
-        self.old.gc(stack_map, stack_pointers);
+    fn full_gc(&mut self, stack_map: &StackMap, stack_info: &[(usize, usize, usize)]) {
+        self.minor_gc(stack_map, stack_info);
+        self.old.gc(stack_map, stack_info);
     }
 
     unsafe fn copy_all(&mut self, roots: Vec<usize>) -> Vec<usize> {
@@ -331,16 +334,23 @@ impl GenerationalGC {
         &mut self,
         stack_base: usize,
         stack_map: &StackMap,
-        stack_pointer: usize,
+        frame_pointer: usize,
+        gc_return_addr: usize,
     ) -> Vec<(usize, usize)> {
         let mut roots: Vec<(usize, usize)> = Vec::with_capacity(36);
 
-        StackWalker::walk_stack_roots(stack_base, stack_pointer, stack_map, |offset, pointer| {
-            let untagged = BuiltInTypes::untag(pointer);
-            if self.young.contains(untagged as *const u8) {
-                roots.push((offset, pointer));
-            }
-        });
+        StackWalker::walk_stack_roots_with_return_addr(
+            stack_base,
+            frame_pointer,
+            gc_return_addr,
+            stack_map,
+            |slot_addr, pointer| {
+                let untagged = BuiltInTypes::untag(pointer);
+                if self.young.contains(untagged as *const u8) {
+                    roots.push((slot_addr, pointer));
+                }
+            },
+        );
 
         roots
     }

@@ -1,0 +1,211 @@
+// ============================================================================
+// Effect Composition via Structural Typing
+// ============================================================================
+//
+// The insight: Instead of monad TRANSFORMERS, use INTERFACES.
+//
+// Each effect defines an interface (set of methods).
+// An object can implement MULTIPLE interfaces.
+// Functions take objects with the interfaces they need.
+// Composition = object that implements all needed interfaces.
+//
+// ============================================================================
+
+// ----------------------------------------------------------------------------
+// STEP 1: Define each effect as an INTERFACE (protocol)
+// ----------------------------------------------------------------------------
+//
+// Error protocol: { isError, onError, onSuccess }
+// State protocol: { state, modify }
+// Writer protocol: { log, tell }
+// Monad protocol: { bind, pure }
+//
+// These are just conventions - any object with these fields "implements" them.
+
+// ----------------------------------------------------------------------------
+// STEP 2: Implement CARRIERS that implement multiple protocols
+// ----------------------------------------------------------------------------
+
+{
+  // A carrier for Error + State + Writer
+  // It's just an object with all the relevant fields!
+
+  class Carrier(value, isError, errMsg, state, log) {
+    // === Value ===
+    value: value,
+
+    // === Error protocol ===
+    isError: isError,
+    errMsg: errMsg,
+    fail: (msg) => Carrier(value, true, msg, state, log),
+
+    // === State protocol ===
+    state: state,
+    getState: () => state,
+    putState: (s) => Carrier(value, isError, errMsg, s, log),
+    modifyState: (f) => Carrier(value, isError, errMsg, f(state), log),
+
+    // === Writer protocol ===
+    log: log,
+    tell: (msg) => Carrier(value, isError, errMsg, state, log ++ msg),
+
+    // === Monad protocol ===
+    bind: (k) => isError
+      ? this
+      : k(value),
+
+    pure: (x) => Carrier(x, false, "", state, log),
+
+    // === Convenience ===
+    run: () => isError
+      ? "Error: " ++ errMsg
+      : "Value: " ++ value ++ " | State: " ++ state ++ " | Log: " ++ log
+  }
+
+  // Smart constructor
+  class Eff {
+    run: (x) => Carrier(x, false, "", 0, "")
+  }
+
+  // Test it!
+  Eff.run(10)
+    .tell("started ")
+    .modifyState((n) => n + 1)
+    .bind((x) => Eff.run(x + 1).tell("incremented "))
+    .modifyState((n) => n + 1)
+    .tell("done")
+}
+
+// ----------------------------------------------------------------------------
+// STEP 3: Write GENERIC functions that work with any carrier
+// ----------------------------------------------------------------------------
+//
+// These functions only specify what they NEED, not everything the carrier has.
+// Structural typing lets them work on any carrier with the required fields.
+
+{
+  class Carrier(value, isError, errMsg, state, log) {
+    value: value,
+    isError: isError,
+    errMsg: errMsg,
+    state: state,
+    log: log,
+    fail: (msg) => Carrier(value, true, msg, state, log),
+    putState: (s) => Carrier(value, isError, errMsg, s, log),
+    modifyState: (f) => Carrier(value, isError, errMsg, f(state), log),
+    tell: (msg) => Carrier(value, isError, errMsg, state, log ++ msg),
+    bind: (k) => isError ? this : k(value),
+    pure: (x) => Carrier(x, false, "", state, log)
+  }
+
+  // Function that only needs Writer
+  // Type: { tell: string -> a, ... } -> { tell: string -> a, ... }
+  class LogOps {
+    bracket: (m, label) => m.tell("[" ++ label ++ ": ").tell("]")
+  }
+
+  // Function that only needs State
+  // Type: { state: int, modifyState: (int->int) -> a, ... } -> a
+  class StateOps {
+    increment: (m) => m.modifyState((n) => n + 1),
+    decrement: (m) => m.modifyState((n) => n - 1)
+  }
+
+  // Function that only needs Error
+  // Type: { isError: bool, fail: string -> a, ... } -> a
+  class ErrorOps {
+    guard: (m, cond, msg) => cond ? m : m.fail(msg)
+  }
+
+  // These work on our Carrier because it has all the required fields!
+  Carrier(42, false, "", 0, "")
+}
+
+// ----------------------------------------------------------------------------
+// STEP 4: The "no lifting" advantage
+// ----------------------------------------------------------------------------
+//
+// In Haskell transformers, to use Writer inside StateT inside ErrorT:
+//
+//   example :: ErrorT String (StateT Int (Writer String)) Int
+//   example = do
+//     lift $ lift $ tell "log"   -- TWO lifts!
+//     lift $ modify (+1)          -- ONE lift
+//     throwError "oops"           -- no lift (outermost)
+//
+// With structural carriers:
+//
+//   example = carrier
+//     .tell("log")       -- just a method call
+//     .modifyState(+1)   -- just a method call
+//     .fail("oops")      -- just a method call
+//
+// EVERY operation is at the same "level" because they're all just methods!
+
+// ----------------------------------------------------------------------------
+// STEP 5: Modular carriers via delegation
+// ----------------------------------------------------------------------------
+//
+// Want a carrier with ONLY Error + State (no Writer)?
+// Just make one with those fields. Functions needing Writer won't compile.
+
+{
+  // Error + State only
+  class ErrState(value, isError, errMsg, state) {
+    value: value,
+    isError: isError,
+    errMsg: errMsg,
+    fail: (msg) => ErrState(value, true, msg, state),
+    state: state,
+    modifyState: (f) => ErrState(value, isError, errMsg, f(state)),
+    bind: (k) => isError ? this : k(value)
+  }
+
+  // State + Writer only
+  class StateWriter(value, state, log) {
+    value: value,
+    state: state,
+    modifyState: (f) => StateWriter(value, f(state), log),
+    log: log,
+    tell: (msg) => StateWriter(value, state, log ++ msg),
+    bind: (k) => k(value)
+  }
+
+  // Just Writer
+  class JustWriter(value, log) {
+    value: value,
+    log: log,
+    tell: (msg) => JustWriter(value, log ++ msg),
+    bind: (k) => k(value)
+  }
+
+  // A function needing only Writer works on ALL of these:
+  // - StateWriter
+  // - Full Carrier
+  // - JustWriter
+  //
+  // But NOT on ErrState (no .tell method) - TYPE ERROR!
+
+  JustWriter(42, "").tell("hello")
+}
+
+// ----------------------------------------------------------------------------
+// COMPARISON SUMMARY
+// ----------------------------------------------------------------------------
+//
+// Haskell Monad Transformers:
+//   - Explicit stacking: ErrorT e (StateT s (Writer w)) a
+//   - Explicit lifting: lift $ lift $ tell "x"
+//   - Order matters: ErrorT over StateT ≠ StateT over ErrorT
+//   - Need newtype wrappers for each combination
+//
+// OOP Structural Carriers:
+//   - Just define an object with the fields you need
+//   - No lifting: .tell("x") works directly
+//   - Order doesn't matter: fields are just fields
+//   - Structural subtyping handles "is-a" relationships
+//
+// The insight: Monad transformers solve the problem of
+// "how do I combine monadic effects" in a language with
+// no structural subtyping. With structural subtyping,
+// you just... have an object with multiple interfaces.

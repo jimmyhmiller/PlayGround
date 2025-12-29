@@ -22,7 +22,12 @@ pub use types::{BuiltInTypes, HeapObject, Word};
 
 /// Stack map entry details for a function
 #[derive(Debug, Clone)]
-pub struct StackMapDetails {}
+pub struct StackMapDetails {
+    pub function_name: Option<String>,
+    pub number_of_locals: usize,
+    pub current_stack_size: usize,
+    pub max_stack_size: usize,
+}
 
 /// Stack map for precise GC root scanning
 #[derive(Debug, Clone)]
@@ -39,6 +44,21 @@ impl Default for StackMap {
 impl StackMap {
     pub fn new() -> Self {
         Self { details: vec![] }
+    }
+
+    /// Find stack data for a return address
+    pub fn find_stack_data(&self, pointer: usize) -> Option<&StackMapDetails> {
+        #[cfg(feature = "debug-gc")]
+        {
+            eprintln!("[GC DEBUG] find_stack_data: looking for {:#x}", pointer);
+            eprintln!("[GC DEBUG] Stack map has {} entries", self.details.len());
+        }
+        for (key, value) in self.details.iter() {
+            if *key == pointer {
+                return Some(value);
+            }
+        }
+        None
     }
 
     /// Extend the stack map with new entries
@@ -92,7 +112,8 @@ pub trait Allocator {
     ) -> Result<AllocateAction, Box<dyn Error>>;
 
     /// Run garbage collection
-    fn gc(&mut self, stack_map: &StackMap, stack_pointers: &[(usize, usize)]);
+    /// stack_info is a slice of (stack_base, frame_pointer, gc_return_addr) tuples
+    fn gc(&mut self, stack_map: &StackMap, stack_info: &[(usize, usize, usize)]);
 
     /// Grow the heap
     fn grow(&mut self);

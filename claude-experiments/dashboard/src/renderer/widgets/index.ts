@@ -20,6 +20,12 @@ export {
   LayoutContainer,
   EvalCodeEditor,
   EventDisplay,
+  Selector,
+  CodeBlock,
+  WebView,
+  WebFrame,
+  FileLoader,
+  ProcessRunner,
   WIDGET_TYPES,
   SELECTORS,
 } from './BuiltinWidgets';
@@ -38,5 +44,13 @@ export type {
   LayoutChildConfig,
   EvalCodeEditorProps,
   EventDisplayProps,
+  SelectorProps,
+  CodeBlockProps,
+  WebViewProps,
+  FileLoaderProps,
+  ProcessRunnerProps,
   WidgetTypeConfig,
 } from './BuiltinWidgets';
+
+// Keep WebFrameProps as alias for backwards compatibility
+export type { WebViewProps as WebFrameProps } from './BuiltinWidgets';

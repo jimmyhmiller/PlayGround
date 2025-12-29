@@ -45,7 +45,6 @@ export const IPC_CHANNELS = {
   // Eval channels
   EVAL_EXECUTE: 'eval:execute',
   EVAL_BATCH: 'eval:batch',
-  EVAL_BENCHMARK: 'eval:benchmark',
 } as const;
 
 export type IpcChannel = typeof IPC_CHANNELS[keyof typeof IPC_CHANNELS];
@@ -141,6 +140,7 @@ export interface EvaluationResult {
   type: string;
   executionTimeMs: number;
   error?: string;
+  language?: string;
 }
 
 /**
@@ -149,17 +149,19 @@ export interface EvaluationResult {
 export interface EvaluationRequest {
   id: string;
   code: string;
-  language: 'javascript' | 'typescript';
+  language: string;
   context?: Record<string, unknown>;
   timeout?: number;
 }
 
 /**
- * Benchmark result from the eval service
+ * Executor configuration for subprocess-based execution
  */
-export interface BenchmarkResult {
-  runs: Array<{ iteration: number; executionTimeMs: number; success: boolean }>;
-  stats: { mean: number; median: number; stdDev: number; min: number; max: number };
+export interface ExecutorConfig {
+  language: string;
+  command: string;
+  args?: string[];
+  cwd?: string;
 }
 
 /**
@@ -168,16 +170,27 @@ export interface BenchmarkResult {
 export interface EvalAPI {
   execute(
     code: string,
-    language?: 'javascript' | 'typescript',
+    language?: string,
     context?: Record<string, unknown>
   ): Promise<EvaluationResult>;
   batch(requests: EvaluationRequest[]): Promise<EvaluationResult[]>;
-  benchmark(
-    code: string,
-    iterations?: number,
-    warmupIterations?: number,
-    context?: Record<string, unknown>
-  ): Promise<BenchmarkResult>;
+  registerExecutor(config: ExecutorConfig): Promise<{ success: boolean; language: string }>;
+  unregisterExecutor(language: string): Promise<{ success: boolean }>;
+  getExecutors(): Promise<ExecutorConfig[]>;
+}
+
+/**
+ * Shell API exposed via preload - spawn and manage processes
+ */
+export interface ShellAPI {
+  spawn(
+    id: string,
+    command: string,
+    args?: string[],
+    options?: { cwd?: string; env?: Record<string, string> }
+  ): Promise<{ success: boolean; id: string; pid?: number }>;
+  kill(id: string): Promise<{ success: boolean; id?: string; error?: string }>;
+  isRunning(id: string): Promise<{ running: boolean }>;
 }
 
 /**
@@ -191,6 +204,7 @@ declare global {
     gitAPI: GitAPI;
     stateAPI: StateAPI;
     evalAPI: EvalAPI;
+    shellAPI: ShellAPI;
   }
 }
 

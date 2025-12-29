@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+
+{% block title %}{{ note.title }} - Flask App{% endblock %}
+
+{% block content %}
+<div style="margin-bottom: 1rem;">
+    <a href="/notes" style="color: #3498db;">&larr; Back to Notes</a>
+</div>
+
+<div class="card">
+    <h1>{{ note.title }}</h1>
+    <div style="margin-top: 1rem; white-space: pre-wrap;">{{ note.body }}</div>
+</div>
+{% endblock %}

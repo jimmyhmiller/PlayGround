@@ -1,0 +1,34 @@
+{
+  "name": "SQL Query Demo",
+  "description": "Evaluate SQL via sqlite3 subprocess",
+  "layout": {
+    "type": "layout",
+    "direction": "horizontal",
+    "gap": 8,
+    "children": [
+      {
+        "type": "eval-editor",
+        "props": {
+          "title": "SQL Query",
+          "language": "sql",
+          "command": "sqlite3",
+          "args": [":memory:"],
+          "channel": "$scope-sql",
+          "placeholder": "SELECT * FROM ...",
+          "initialCode": "CREATE TABLE users (id INTEGER, name TEXT, email TEXT);\nINSERT INTO users VALUES (1, 'Alice', 'alice@example.com');\nINSERT INTO users VALUES (2, 'Bob', 'bob@example.com');\nSELECT * FROM users;"
+        },
+        "flex": 1
+      },
+      {
+        "type": "event-display",
+        "props": {
+          "title": "Query Results",
+          "subscribePattern": "eval.result.$scope-sql",
+          "maxEvents": 10,
+          "fields": ["displayValue", "executionTimeMs"]
+        },
+        "flex": 1
+      }
+    ]
+  }
+}

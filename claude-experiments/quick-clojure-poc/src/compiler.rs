@@ -596,7 +596,7 @@ impl Compiler {
         }
 
         // Step 1: Allocate heap object via trampoline
-        // trampoline_allocate_type_object_raw(stack_pointer, type_id, field_count) -> untagged_ptr
+        // trampoline_allocate_type_object_raw(frame_pointer, gc_return_addr, type_id, field_count) -> untagged_ptr
         let trampoline_addr = crate::trampoline::trampoline_allocate_type_object_raw as usize;
         let raw_ptr = self.builder.new_register();
 
@@ -608,11 +608,11 @@ impl Compiler {
             .builder
             .assign_new(IrValue::RawConstant(field_values.len() as i64));
 
-        // Pass FramePointer (SP/x31) as first arg for GC stack walking
+        // Pass FramePointer (x29) and ReturnAddress (x30) as first two args for GC stack walking
         self.builder.emit(Instruction::ExternalCall(
             raw_ptr,
             trampoline_addr,
-            vec![IrValue::FramePointer, type_id_reg, field_count_reg],
+            vec![IrValue::FramePointer, IrValue::ReturnAddress, type_id_reg, field_count_reg],
         ));
 
         // Step 2: Write field values using HeapStore
@@ -1926,18 +1926,22 @@ impl Compiler {
         }
 
         // Bind rest parameter if variadic
-        // CollectRestArgs reads the arg count from x9 (set by caller) and builds a list
-        // from excess arguments beyond the fixed params
+        // The rest collection is now passed by the caller as an argument
+        // at position fixed_count + param_offset (right after the fixed params)
         if let Some(rest) = &arity.rest_param {
-            let rest_reg = self.builder.new_register();
             let fixed_count = arity.params.len();
-            self.builder.emit(Instruction::CollectRestArgs(
-                rest_reg,
-                fixed_count,
-                param_offset,
-            ));
-            self.bind_local(rest.clone(), rest_reg);
-            param_registers.push(rest_reg);
+            let rest_arg_index = fixed_count + param_offset;
+            let arg_reg = IrValue::Register(crate::ir::VirtualRegister::Argument(rest_arg_index));
+            // Store to local slot like other params
+            let local_slot = self.builder.allocate_local();
+            self.builder
+                .emit(Instruction::StoreLocal(local_slot, arg_reg));
+            self.bind_local_slot(rest.clone(), local_slot);
+            // For recur, keep track of the register
+            let temp_reg = self.builder.new_register();
+            self.builder
+                .emit(Instruction::LoadLocal(temp_reg, local_slot));
+            param_registers.push(temp_reg);
         }
 
         // Bind closure variables
@@ -2019,8 +2023,13 @@ impl Compiler {
         // Register stack map with runtime for GC
         unsafe {
             let rt = &mut *self.runtime.get();
-            for (pc, _stack_size) in &compiled.stack_map {
-                rt.add_stack_map_entry(*pc, crate::gc::StackMapDetails {});
+            for (pc, stack_size) in &compiled.stack_map {
+                rt.add_stack_map_entry(*pc, crate::gc::StackMapDetails {
+                    function_name: None,
+                    number_of_locals: num_locals,
+                    current_stack_size: *stack_size,
+                    max_stack_size: *stack_size,
+                });
             }
         }
 
@@ -2641,13 +2650,13 @@ impl Compiler {
             .emit(float_op(float_result, left_float, right_float));
 
         // Allocate new float on heap and get tagged pointer
-        // Call trampoline_allocate_float(stack_pointer, f64_bits) -> tagged_ptr
+        // Call trampoline_allocate_float(frame_pointer, gc_return_addr, f64_bits) -> tagged_ptr
         let trampoline_addr = crate::trampoline::trampoline_allocate_float as usize;
-        // Use FramePointer which is mapped to SP (x31) for GC stack scanning
+        // Use FramePointer (x29) and ReturnAddress (x30) for GC stack walking
         self.builder.emit(Instruction::ExternalCall(
             result,
             trampoline_addr,
-            vec![IrValue::FramePointer, float_result],
+            vec![IrValue::FramePointer, IrValue::ReturnAddress, float_result],
         ));
 
         self.builder.emit(Instruction::Label(done));
@@ -2989,14 +2998,14 @@ impl Compiler {
 
     fn compile_builtin_gc(&mut self, _args: &[Expr]) -> Result<IrValue, String> {
         // __gc takes no arguments and returns nil
-        // Call trampoline_gc(stack_pointer) -> nil
+        // Call trampoline_gc(frame_pointer, gc_return_addr) -> nil
         let result = self.builder.new_register();
         let trampoline_addr = crate::trampoline::trampoline_gc as usize;
-        // Use FramePointer which is mapped to SP (x31) for GC stack scanning
+        // Use FramePointer (x29) and ReturnAddress (x30) for GC stack walking
         self.builder.emit(Instruction::ExternalCall(
             result,
             trampoline_addr,
-            vec![IrValue::FramePointer],
+            vec![IrValue::FramePointer, IrValue::ReturnAddress],
         ));
         Ok(result)
     }

@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+
+{% block title %}About - Flask App{% endblock %}
+
+{% block content %}
+<h1>About</h1>
+
+<div class="card">
+    <p>This is a sample Flask application demonstrating the traditional MVC pattern:</p>
+
+    <ul style="margin: 1rem 0 1rem 1.5rem;">
+        <li><strong>Models</strong> - Task and Note classes with in-memory storage</li>
+        <li><strong>Views</strong> - Jinja2 templates for rendering HTML</li>
+        <li><strong>Controllers</strong> - Flask route handlers</li>
+    </ul>
+
+    <p>Built to demonstrate the Light Table-style route view, which shows all related code for a route in one unified interface.</p>
+</div>
+
+<div class="card">
+    <h2>Features</h2>
+    <ul style="margin: 1rem 0 0 1.5rem;">
+        <li>Task management with completion tracking</li>
+        <li>Note taking with full-text display</li>
+        <li>Clean, responsive design</li>
+        <li>No database required (in-memory storage)</li>
+    </ul>
+</div>
+{% endblock %}

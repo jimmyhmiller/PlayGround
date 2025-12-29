@@ -1,0 +1,30 @@
+{
+  "name": "Eval Dashboard",
+  "description": "Simple code evaluation with event stream",
+  "layout": {
+    "type": "layout",
+    "direction": "vertical",
+    "gap": 8,
+    "children": [
+      {
+        "type": "eval-editor",
+        "props": {
+          "title": "JavaScript Eval",
+          "channel": "$scope",
+          "initialCode": "// Evaluate JavaScript code\n// Results appear below as events\n\n1 + 1\n\nMath.PI * 2\n\n[1, 2, 3].map(x => x * 2)"
+        },
+        "flex": 1
+      },
+      {
+        "type": "event-display",
+        "props": {
+          "subscribePattern": "eval.result.$scope",
+          "maxEvents": 15,
+          "title": "Eval Results (Event Stream)",
+          "fields": ["displayValue", "type", "executionTimeMs", "success"]
+        },
+        "flex": 1
+      }
+    ]
+  }
+}

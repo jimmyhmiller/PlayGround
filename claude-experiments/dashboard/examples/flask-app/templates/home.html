@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+
+{% block title %}Home - Flask App{% endblock %}
+
+{% block content %}
+<h1>Welcome to Flask App</h1>
+
+<div class="stats">
+    <div class="stat">
+        <div class="stat-value">{{ task_count }}</div>
+        <div class="stat-label">Total Tasks</div>
+    </div>
+    <div class="stat">
+        <div class="stat-value">{{ pending_count }}</div>
+        <div class="stat-label">Pending</div>
+    </div>
+    <div class="stat">
+        <div class="stat-value">{{ note_count }}</div>
+        <div class="stat-label">Notes</div>
+    </div>
+</div>
+
+<div class="card">
+    <h2>Quick Links</h2>
+    <p style="margin-bottom: 1rem;">Get started by managing your tasks or notes:</p>
+    <a href="/tasks" class="btn">View Tasks</a>
+    <a href="/notes" class="btn btn-secondary">View Notes</a>
+</div>
+{% endblock %}

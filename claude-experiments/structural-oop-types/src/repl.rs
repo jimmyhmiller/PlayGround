@@ -14,20 +14,36 @@ use crate::store::NodeStore;
 use std::io::{self, BufRead, Write};
 
 const HELP: &str = r#"
-Structural OOP Type Checker REPL (JavaScript-like syntax)
-==========================================================
+Structural OOP Type Checker REPL (JavaScript-like class syntax)
+================================================================
 
 Syntax:
-  true, false           - Boolean literals
-  42, -10               - Integer literals
-  x, foo                - Variables
-  x => e  or  (x) => e  - Arrow function
-  f x                   - Application
-  let x = e1 in e2      - Let binding
-  cond ? e1 : e2        - Ternary conditional
-  { x: e1, y: e2 }      - Object literal
-  e.field               - Field access
-  this                  - Self-reference (in objects)
+  true, false              - Boolean literals
+  42, -10                  - Integer literals
+  "hello"                  - String literals
+  x, foo                   - Variables
+  (x) => e                 - Arrow function (single param)
+  (x, y) => e              - Arrow function (multi param)
+  f(x, y)                  - Function call
+  obj.field                - Field access
+  obj.method(x)            - Method call
+  cond ? e1 : e2           - Ternary conditional
+  { x: e1, y: e2 }         - Object literal
+  { ...obj, x: e }         - Object with spread (copies obj's fields)
+  this                     - Self-reference (in objects/classes)
+  s1 ++ s2                 - String concatenation
+
+  class Name(params) {     - Class definition (Cook-style constructor)
+    ...inner,              - Spread: copy all fields from inner
+    field: value,
+    method: (x) => body
+  }
+
+  {                        - Block with multiple classes
+    class A(x) { ... }
+    class B(y) { ... }
+    expr
+  }
 
 Commands:
   :help     - Show this help
@@ -36,10 +52,7 @@ Commands:
   :parse e  - Show parsed AST
   :examples - Show example expressions
 
-Examples:
-  x => x                          // Identity function
-  { x: 42, y: true }              // Simple object
-  { isEmpty: true, get: this }    // Self-referential object
+Note: Multi-line input is supported. Keep typing until braces are balanced.
 "#;
 
 const EXAMPLES: &str = r#"
@@ -49,36 +62,47 @@ Example expressions to try:
 // Basic types
 true
 42
+"hello"
 
-// Functions
-x => x
-x => y => x
-
-// Let bindings
-let id = x => x in id 42
+// Functions with call syntax
+((x) => x)(42)
+((x, y) => x + y)(1, 2)
 
 // Objects
-{ x: 42 }
 { x: 42, y: true }
-{ name: true, value: 42 }
-
-// Field access
 { x: 42 }.x
-let obj = { x: 42, y: true } in obj.x
 
 // Self-reference (recursive types!)
 { self: this }
-{ id: x => this }
+{ inc: (n) => this }
 
-// Cook-style set
-{ isEmpty: true, contains: i => false, insert: i => this }
+// Spread operator - copies all fields from another object
+{ ...{ x: 42, y: true }, z: "new" }
+(obj) => { ...obj, extra: 1 }
 
-// Structural polymorphism
-let check = s => s.isEmpty in check { isEmpty: true, extra: 42 }
+// Cook-style set object
+{ isEmpty: true, contains: (i) => false, insert: (i) => this }
+
+// Class definitions
+class Box(x) { value: x, get: () => x }
+class Counter(n) { value: n, inc: () => this }
+
+// Class with spread - composable wrappers!
+{
+  class Inner(x) { value: x, double: () => x + x }
+  class Wrapper(inner) { ...inner, extra: 99 }
+  Wrapper(Inner(21)).extra
+}
+
+// Block with multiple classes
+{
+  class Unit(a) { bind: (k) => k(a), show: "ok" }
+  class Error(s) { bind: (k) => this, show: "Error: " ++ s }
+  Unit(42).show
+}
 
 // Ternary conditionals
 true ? 1 : 2
-let x = true in x ? { a: 1 } : { a: 2 }
 "#;
 
 pub fn run_repl() {
@@ -92,33 +116,65 @@ pub fn run_repl() {
         print!("λ> ");
         stdout.flush().unwrap();
 
-        let mut line = String::new();
-        match stdin.lock().read_line(&mut line) {
-            Ok(0) => {
-                // EOF
-                println!("\nGoodbye!");
+        let mut input = String::new();
+        let mut brace_depth = 0i32;
+        let mut first_line = true;
+
+        // Read lines until braces are balanced
+        loop {
+            let mut line = String::new();
+            match stdin.lock().read_line(&mut line) {
+                Ok(0) => {
+                    // EOF
+                    println!("\nGoodbye!");
+                    return;
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    eprintln!("Error reading input: {}", e);
+                    break;
+                }
+            }
+
+            // Update brace depth
+            for ch in line.chars() {
+                match ch {
+                    '{' => brace_depth += 1,
+                    '}' => brace_depth -= 1,
+                    _ => {}
+                }
+            }
+
+            input.push_str(&line);
+
+            // If this is a single line without opening brace, or braces are balanced, we're done
+            if first_line && brace_depth == 0 {
                 break;
             }
-            Ok(_) => {}
-            Err(e) => {
-                eprintln!("Error reading input: {}", e);
-                continue;
+            if !first_line && brace_depth <= 0 {
+                break;
             }
+
+            first_line = false;
+
+            // Show continuation prompt
+            print!(".. ");
+            stdout.flush().unwrap();
         }
 
-        let line = line.trim();
-        if line.is_empty() {
+        let input = input.trim();
+        if input.is_empty() {
             continue;
         }
 
         // Handle commands
-        if line.starts_with(':') {
-            handle_command(line);
+        if input.starts_with(':') {
+            handle_command(input);
             continue;
         }
 
         // Type check the expression
-        typecheck_and_print(line);
+        typecheck_and_print(input);
     }
 }
 

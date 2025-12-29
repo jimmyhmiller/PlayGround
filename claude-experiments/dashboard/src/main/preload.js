@@ -57,6 +57,26 @@ import_electron.contextBridge.exposeInMainWorld("gitAPI", {
   stage: (filePath) => import_electron.ipcRenderer.invoke("git:stage", filePath),
   unstage: (filePath) => import_electron.ipcRenderer.invoke("git:unstage", filePath)
 });
+import_electron.contextBridge.exposeInMainWorld("evalAPI", {
+  // Execute a single code snippet
+  execute: (code, language = "javascript", context) => import_electron.ipcRenderer.invoke("eval:execute", code, language, context),
+  // Execute multiple code snippets
+  batch: (requests) => import_electron.ipcRenderer.invoke("eval:batch", requests),
+  // Register a subprocess executor for a language
+  registerExecutor: (config) => import_electron.ipcRenderer.invoke("eval:registerExecutor", config),
+  // Unregister an executor
+  unregisterExecutor: (language) => import_electron.ipcRenderer.invoke("eval:unregisterExecutor", language),
+  // Get list of registered executors
+  getExecutors: () => import_electron.ipcRenderer.invoke("eval:getExecutors")
+});
+import_electron.contextBridge.exposeInMainWorld("shellAPI", {
+  // Spawn a new process
+  spawn: (id, command, args = [], options = {}) => import_electron.ipcRenderer.invoke("shell:spawn", id, command, args, options),
+  // Kill a running process
+  kill: (id) => import_electron.ipcRenderer.invoke("shell:kill", id),
+  // Check if a process is running
+  isRunning: (id) => import_electron.ipcRenderer.invoke("shell:isRunning", id)
+});
 import_electron.contextBridge.exposeInMainWorld("stateAPI", {
   // Get state at path (or full state if no path)
   get: (path) => import_electron.ipcRenderer.invoke("state:get", path),

@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+
+{% block title %}Tasks - Flask App{% endblock %}
+
+{% block content %}
+<h1>Tasks</h1>
+
+<div style="margin-bottom: 1.5rem;">
+    <a href="/tasks/new" class="btn btn-success">+ New Task</a>
+</div>
+
+{% if pending %}
+<h2>Pending ({{ pending|length }})</h2>
+{% for task in pending %}
+<div class="card" style="display: flex; justify-content: space-between; align-items: center;">
+    <span>{{ task.title }}</span>
+    <form action="/tasks/{{ task.id }}/toggle" method="post" style="margin: 0;">
+        <button type="submit" class="btn btn-success">Complete</button>
+    </form>
+</div>
+{% endfor %}
+{% endif %}
+
+{% if completed %}
+<h2>Completed ({{ completed|length }})</h2>
+{% for task in completed %}
+<div class="card" style="display: flex; justify-content: space-between; align-items: center; opacity: 0.7;">
+    <span style="text-decoration: line-through;">{{ task.title }}</span>
+    <form action="/tasks/{{ task.id }}/toggle" method="post" style="margin: 0;">
+        <button type="submit" class="btn btn-secondary">Undo</button>
+    </form>
+</div>
+{% endfor %}
+{% endif %}
+
+{% if not tasks %}
+<div class="card">
+    <p>No tasks yet. <a href="/tasks/new">Create your first task!</a></p>
+</div>
+{% endif %}
+{% endblock %}

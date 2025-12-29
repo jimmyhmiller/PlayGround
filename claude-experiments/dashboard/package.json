@@ -5,7 +5,7 @@
   "main": "src/main/bootstrap.js",
   "scripts": {
     "build:preload": "esbuild src/main/preload.ts --bundle --platform=node --outfile=src/main/preload.js --external:electron",
-    "dev": "concurrently \"npm run dev:main\" \"npm run dev:renderer\"",
+    "dev": "npm run build:preload && concurrently \"npm run dev:main\" \"npm run dev:renderer\"",
     "dev:main": "NODE_ENV=development electron -r hot-reload/electron-loader .",
     "dev:no-hot": "npm run build:preload && concurrently \"npm run dev:main:no-hot\" \"npm run dev:renderer\"",
     "dev:main:no-hot": "NODE_ENV=development electron .",
@@ -16,6 +16,7 @@
   "dependencies": {
     "@codemirror/lang-html": "^6.4.9",
     "@codemirror/lang-javascript": "^6.2.4",
+    "@codemirror/lang-python": "^6.2.1",
     "@codemirror/theme-one-dark": "^6.1.3",
     "chokidar": "^5.0.0",
     "codemirror": "^6.0.2",

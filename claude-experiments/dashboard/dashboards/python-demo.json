@@ -1,0 +1,33 @@
+{
+  "name": "Python Evaluation Demo",
+  "description": "Evaluate Python code via subprocess",
+  "layout": {
+    "type": "layout",
+    "direction": "horizontal",
+    "gap": 8,
+    "children": [
+      {
+        "type": "eval-editor",
+        "props": {
+          "title": "Python Code",
+          "language": "python",
+          "command": "python3",
+          "channel": "$scope-py",
+          "placeholder": "# Enter Python code...",
+          "initialCode": "# Simple Python evaluation\nprint(2 + 2)\nprint('Hello from Python!')\nprint([x**2 for x in range(5)])"
+        },
+        "flex": 1
+      },
+      {
+        "type": "event-display",
+        "props": {
+          "title": "Results",
+          "subscribePattern": "eval.result.$scope-py",
+          "maxEvents": 10,
+          "fields": ["displayValue", "executionTimeMs"]
+        },
+        "flex": 1
+      }
+    ]
+  }
+}

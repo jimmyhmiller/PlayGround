@@ -33,7 +33,7 @@ pub struct Jit {
 }
 
 /// Default pass pipeline for CPU execution
-const DEFAULT_PIPELINE: &str = "builtin.module(func.func(llvm-request-c-wrappers),convert-scf-to-cf,convert-func-to-llvm,convert-arith-to-llvm,convert-cf-to-llvm,convert-index-to-llvm,finalize-memref-to-llvm,reconcile-unrealized-casts)";
+const DEFAULT_PIPELINE: &str = "builtin.module(func.func(llvm-request-c-wrappers),convert-scf-to-cf,convert-func-to-llvm,convert-arith-to-llvm,convert-cf-to-llvm,convert-index-to-llvm,convert-math-to-llvm,finalize-memref-to-llvm,reconcile-unrealized-casts)";
 
 impl Jit {
     /// Create a new JIT compiler from an MLIR module
@@ -255,6 +255,49 @@ impl Jit {
                 // Also register with _mlir_ciface_ prefix for func dialect compatibility
                 let ciface_name = format!("_mlir_ciface_{}", name);
                 self.register_symbol(&ciface_name, ptr);
+            }
+        }
+    }
+
+    /// Register MLIR runner utils symbols from a shared library
+    ///
+    /// This loads print* functions from the given library and registers them
+    /// with the `_mlir_ciface_` prefix needed by compiled code.
+    ///
+    /// # Safety
+    /// Must be called before invoking any function that uses runner utils symbols.
+    pub unsafe fn register_runner_utils(&self, lib_path: &str) {
+        eprintln!("Registering runner utils from: {}", lib_path);
+        let path_cstr = std::ffi::CString::new(lib_path).unwrap();
+        let handle = libc::dlopen(path_cstr.as_ptr(), libc::RTLD_NOW | libc::RTLD_GLOBAL);
+        if handle.is_null() {
+            eprintln!("Warning: Failed to load runner utils library: {}", lib_path);
+            return;
+        }
+
+        // Functions to register from runner utils
+        let utils_fns = [
+            "printF32",
+            "printF64",
+            "printI64",
+            "printU64",
+            "printOpen",
+            "printClose",
+            "printComma",
+            "printNewline",
+            "printString",
+            "printFlops",
+        ];
+
+        for name in utils_fns {
+            let name_cstr = std::ffi::CString::new(name).unwrap();
+            let ptr = libc::dlsym(handle, name_cstr.as_ptr());
+            if !ptr.is_null() {
+                eprintln!("  Registering {} at {:p}", name, ptr);
+                let name_nul = format!("{}\0", name);
+                self.register_symbol(&name_nul, ptr as *mut ());
+                let ciface_name = format!("_mlir_ciface_{}\0", name);
+                self.register_symbol(&ciface_name, ptr as *mut ());
             }
         }
     }

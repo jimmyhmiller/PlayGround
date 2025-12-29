@@ -150,6 +150,9 @@ fn run_with_compilation_spec(nodes: &[lispier::Node], compilation: &lispier::Com
     // Note: rocdl-attach-target and nvvm-attach-target run on builtin.module level
     let gpu_module_passes = ["convert-gpu-to-rocdl", "convert-gpu-to-nvvm"];
 
+    // Passes that need to run inside func.func scope
+    let func_scoped_passes = ["gpu-map-parallel-loops"];
+
     let mut before_gpu: Vec<String> = Vec::new();
     let mut gpu_passes: Vec<String> = Vec::new();
     let mut after_gpu: Vec<String> = Vec::new();
@@ -158,6 +161,14 @@ fn run_with_compilation_spec(nodes: &[lispier::Node], compilation: &lispier::Com
     for pass in &target.passes {
         let pass_str = pass.to_pipeline_string(&runtime_attrs);
         let is_gpu_pass = gpu_module_passes.iter().any(|&p| pass.name == p);
+        let is_func_scoped = func_scoped_passes.iter().any(|&p| pass.name == p);
+
+        // Wrap func-scoped passes
+        let pass_str = if is_func_scoped {
+            format!("func.func({})", pass_str)
+        } else {
+            pass_str
+        };
 
         if is_gpu_pass {
             seen_gpu_pass = true;
@@ -221,7 +232,26 @@ fn run_with_compilation_spec(nodes: &[lispier::Node], compilation: &lispier::Com
     eprintln!("Library paths: {:?}", lib_paths);
     let lib_path_refs: Vec<&str> = lib_paths.iter().map(|s| s.as_str()).collect();
 
-    // Pre-load GPU runtime library with RTLD_GLOBAL so symbols are available during JIT linking
+    // Pre-load required libraries with RTLD_GLOBAL so symbols are available during JIT linking
+    // This includes c_runner_utils (for print functions) and GPU runtime if applicable
+    // For c_runner_utils, we also need to create ciface aliases for the print functions
+    let mut c_runner_handle: *mut libc::c_void = std::ptr::null_mut();
+    for lib in &runtime.runtime_libs {
+        let lib_str = lib.to_string_lossy();
+        if lib_str.contains("c_runner_utils") {
+            eprintln!("Pre-loading: {}", lib_str);
+            let path_cstr = std::ffi::CString::new(lib_str.as_ref()).unwrap();
+            unsafe {
+                c_runner_handle = libc::dlopen(path_cstr.as_ptr(), libc::RTLD_NOW | libc::RTLD_GLOBAL);
+                if c_runner_handle.is_null() {
+                    eprintln!("Warning: Failed to pre-load {}", lib_str);
+                } else {
+                    eprintln!("Successfully pre-loaded: {}", lib_str);
+                }
+            }
+        }
+    }
+
     if matches!(runtime.backend, lispier::runtime::Backend::Rocm) {
         for lib in &runtime.runtime_libs {
             let lib_str = lib.to_string_lossy();
@@ -254,6 +284,26 @@ fn run_with_compilation_spec(nodes: &[lispier::Node], compilation: &lispier::Com
             }
         }
     }
+    // Pre-load runner utils shim library (provides _mlir_ciface_* aliases for print functions)
+    let runner_shim_path = std::env::var("HOME")
+        .map(|h| format!("{}/librunner_utils_shim.so", h))
+        .unwrap_or_else(|_| "/home/jimmyhmiller/librunner_utils_shim.so".to_string());
+    eprintln!("Pre-loading runner utils shim: {}", runner_shim_path);
+    let path_cstr = std::ffi::CString::new(runner_shim_path.as_str()).unwrap();
+    unsafe {
+        let handle = libc::dlopen(path_cstr.as_ptr(), libc::RTLD_NOW | libc::RTLD_GLOBAL);
+        if handle.is_null() {
+            let error = libc::dlerror();
+            if !error.is_null() {
+                eprintln!("Warning: Failed to pre-load runner utils shim: {:?}", std::ffi::CStr::from_ptr(error));
+            } else {
+                eprintln!("Warning: Failed to pre-load runner utils shim");
+            }
+        } else {
+            eprintln!("Successfully pre-loaded runner utils shim");
+        }
+    }
+
     eprintln!("Pre-loading complete");
 
     // Create JIT with custom pipeline and libraries
@@ -290,6 +340,17 @@ fn run_with_compilation_spec(nodes: &[lispier::Node], compilation: &lispier::Com
                 }
                 break;
             }
+        }
+    }
+
+    // Register runner utils symbols (print functions, etc.)
+    for lib in &runtime.runtime_libs {
+        let lib_str = lib.to_string_lossy();
+        if lib_str.contains("c_runner_utils") {
+            unsafe {
+                jit.register_runner_utils(&lib_str);
+            }
+            break;
         }
     }
 

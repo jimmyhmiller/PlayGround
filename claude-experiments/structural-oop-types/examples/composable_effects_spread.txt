@@ -1,0 +1,217 @@
+// ============================================================================
+// Composable Effects with Spread - No Monad Transformers!
+// ============================================================================
+//
+// With the spread operator (...), we can write each effect INDEPENDENTLY
+// and compose them elegantly. Each effect is a "wrapper" that:
+// 1. Takes an inner object
+// 2. Spreads all its fields
+// 3. Adds its own fields and methods
+//
+// This is TRUE composition - no manual field copying!
+//
+// ============================================================================
+
+// ----------------------------------------------------------------------------
+// THE MAGIC: Each effect is a wrapper that spreads the inner object
+// ----------------------------------------------------------------------------
+
+{
+  // === Identity: The base case ===
+  class Pure(x) {
+    value: x,
+    bind: (k) => k(x)
+  }
+
+  // === Error Effect ===
+  // Wraps ANY object, adds error handling
+  class WithError(inner) {
+    ...inner,              // Spread all inner fields!
+    isError: false,
+    bind: (k) => k(inner.value),
+    fail: (msg) => Failure(msg)
+  }
+
+  class Failure(msg) {
+    isError: true,
+    message: msg,
+    bind: (k) => this
+  }
+
+  // === State Effect ===
+  // Wraps ANY object, adds state
+  class WithState(inner, state) {
+    ...inner,              // Spread all inner fields!
+    state: state,
+    getState: () => state,
+    putState: (s) => WithState(inner, s),
+    modifyState: (f) => WithState(inner, f(state))
+  }
+
+  // === Writer Effect ===
+  // Wraps ANY object, adds logging
+  class WithLog(inner, log) {
+    ...inner,              // Spread all inner fields!
+    log: log,
+    tell: (msg) => WithLog(inner, log ++ msg),
+    getLog: () => log
+  }
+
+  // === COMPOSE: Just nest the wrappers! ===
+  //
+  // Each wrapper spreads the inner, so all fields bubble up:
+  //
+  // WithLog(WithState(WithError(Pure(42)), 0), "")
+  //
+  // This has:
+  // - .value (from Pure)
+  // - .isError, .bind, .fail (from WithError)
+  // - .state, .getState, .modifyState (from WithState)
+  // - .log, .tell, .getLog (from WithLog)
+
+  class Eff {
+    pure: (x) => WithLog(WithState(WithError(Pure(x)), 0), "")
+  }
+
+  // Use it!
+  Eff.pure(42)
+    .tell("start ")
+    .modifyState((n) => n + 1)
+    .tell("end")
+}
+
+// ----------------------------------------------------------------------------
+// THE ELEGANCE: Each effect is COMPLETELY INDEPENDENT
+// ----------------------------------------------------------------------------
+//
+// WithError doesn't know about WithState.
+// WithState doesn't know about WithLog.
+// WithLog doesn't know about WithError.
+//
+// They just wrap "inner" and spread its fields.
+// The ...inner syntax does ALL the forwarding automatically!
+//
+// Compare to the old approach (manual forwarding):
+//
+//   class WithState(inner, state) {
+//     state: state,
+//     value: inner.value,      // manual!
+//     isError: inner.isError,  // manual!
+//     log: inner.log,          // manual!
+//     ...
+//   }
+//
+// With spread:
+//
+//   class WithState(inner, state) {
+//     ...inner,                // automatic!
+//     state: state
+//   }
+//
+// MUCH cleaner!
+
+// ----------------------------------------------------------------------------
+// WHY THIS WORKS: Structural Typing + Spread
+// ----------------------------------------------------------------------------
+//
+// 1. Spread copies all fields from inner to the wrapper
+// 2. Our explicit fields (state, log, etc.) override/add to the spread
+// 3. Structural typing means a function needing { tell, modifyState }
+//    works on any object with those methods - regardless of how many
+//    other fields it has
+//
+// A function that only needs .tell works on:
+// - WithLog(anything)
+// - WithLog(WithState(anything))
+// - WithLog(WithState(WithError(anything)))
+//
+// Because they all have .tell!
+
+// ----------------------------------------------------------------------------
+// COMPARISON: Haskell Monad Transformers vs This
+// ----------------------------------------------------------------------------
+//
+// Haskell:
+//   type App = WriterT String (StateT Int (Either String))
+//
+//   example :: App Int
+//   example = do
+//     tell "start"           -- no lift (Writer on top)
+//     lift $ modify (+1)     -- one lift (State in middle)
+//     lift $ lift $ Left "x" -- two lifts (Either at bottom)
+//
+// With OOP + Spread:
+//   Eff.pure(42)
+//     .tell("start")      -- method on outer wrapper
+//     .modifyState((n) => n + 1)    -- method from inner, bubbled up via spread
+//     .fail("x")          -- method from inner, bubbled up via spread
+//
+// NO LIFTS! Every operation is just a method call.
+// Spread bubbles up all methods automatically.
+//
+// This is the power of structural OOP + spread for effect composition.
+
+// ----------------------------------------------------------------------------
+// ADVANCED: Different orderings give different semantics
+// ----------------------------------------------------------------------------
+
+{
+  class Pure(x) {
+    value: x,
+    bind: (k) => k(x)
+  }
+
+  class WithError(inner) {
+    ...inner,
+    isError: false,
+    fail: (msg) => ErrorVal(msg)
+  }
+
+  class ErrorVal(msg) {
+    isError: true,
+    message: msg,
+    bind: (k) => this
+  }
+
+  class WithState(inner, state) {
+    ...inner,
+    state: state,
+    modifyState: (f) => WithState(inner, f(state))
+  }
+
+  class WithLog(inner, log) {
+    ...inner,
+    log: log,
+    tell: (msg) => WithLog(inner, log ++ msg)
+  }
+
+  // Order 1: Error inside State inside Writer
+  // On error: state is PRESERVED, log is PRESERVED
+  class Stack1 {
+    pure: (x) => WithLog(WithState(WithError(Pure(x)), 0), "")
+  }
+
+  // Order 2: State inside Error
+  // On error: state would be LOST (if we had proper error handling)
+  class Stack2 {
+    pure: (x) => WithLog(WithError(WithState(Pure(x), 0)), "")
+  }
+
+  Stack1.pure(42).tell("hello ").modifyState((n) => n + 1)
+}
+
+// ----------------------------------------------------------------------------
+// SUMMARY
+// ----------------------------------------------------------------------------
+//
+// The spread operator (...) is the key to truly composable effects:
+//
+// 1. Each effect is a wrapper that spreads its inner object
+// 2. This automatically forwards ALL fields from inner
+// 3. No manual field copying, no forgetting fields
+// 4. Structural typing handles polymorphism
+// 5. No lifts - just method calls
+//
+// This achieves the same effect composition as monad transformers
+// but with much simpler syntax and semantics.
+

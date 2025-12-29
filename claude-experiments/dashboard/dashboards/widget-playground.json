@@ -1,0 +1,57 @@
+{
+  "name": "Widget Playground",
+  "description": "Demonstrates composable widget system via events",
+  "layout": {
+    "type": "layout",
+    "direction": "horizontal",
+    "gap": 8,
+    "children": [
+      {
+        "type": "eval-editor",
+        "props": {
+          "title": "Event Source",
+          "iterations": 10,
+          "initialCode": "// Generate events for other widgets\nMath.random() * 100"
+        },
+        "flex": 1
+      },
+      {
+        "type": "layout",
+        "direction": "vertical",
+        "gap": 8,
+        "flex": 1,
+        "children": [
+          {
+            "type": "chart",
+            "props": {
+              "subscribePattern": "eval.result",
+              "dataKey": "executionTimeMs",
+              "chartType": "bar",
+              "maxPoints": 10,
+              "height": 120,
+              "title": "Timing"
+            },
+            "flex": 1
+          },
+          {
+            "type": "stats",
+            "props": {
+              "subscribePattern": "eval.result",
+              "dataKey": "executionTimeMs"
+            },
+            "flex": 0
+          },
+          {
+            "type": "event-display",
+            "props": {
+              "subscribePattern": "eval.**",
+              "maxEvents": 5,
+              "title": "Event Log"
+            },
+            "flex": 1
+          }
+        ]
+      }
+    ]
+  }
+}

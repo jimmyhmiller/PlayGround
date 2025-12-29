@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+
+{% block title %}New Note - Flask App{% endblock %}
+
+{% block content %}
+<h1>New Note</h1>
+
+<div class="card">
+    <form action="/notes" method="post">
+        <label for="title" style="display: block; margin-bottom: 0.5rem; font-weight: 500;">Title</label>
+        <input type="text" id="title" name="title" placeholder="Note title" required autofocus>
+
+        <label for="body" style="display: block; margin-bottom: 0.5rem; font-weight: 500;">Content</label>
+        <textarea id="body" name="body" placeholder="Write your note here..."></textarea>
+
+        <button type="submit" class="btn btn-success">Create Note</button>
+        <a href="/notes" class="btn btn-secondary">Cancel</a>
+    </form>
+</div>
+{% endblock %}

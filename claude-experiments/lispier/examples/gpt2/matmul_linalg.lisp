@@ -16,23 +16,30 @@
 (require-dialect scf)
 
 ;; Compilation pipeline for AMD GPU via linalg lowering
+;; Key insight: convert-scf-to-cf MUST happen before gpu-kernel-outlining
+;; so that no scf.for loops remain inside GPU kernels
 (compilation
   (target rocm
-    ;; Linalg tiling and parallelization
-    (pass linalg-tile-to-parallel-loops)
+    ;; Linalg to parallel loops, then to GPU
+    (pass convert-linalg-to-parallel-loops)
+    (pass gpu-map-parallel-loops)
     (pass convert-parallel-loops-to-gpu)
+    ;; Affine lowering
+    (pass lower-affine)
+    ;; CRITICAL: SCF to CF BEFORE GPU outlining (eliminates scf.for in kernels)
+    (pass convert-scf-to-cf)
     ;; GPU lowering
     (pass gpu-kernel-outlining)
     (pass rocdl-attach-target)
-    (pass convert-gpu-to-rocdl)
+    (pass convert-gpu-to-rocdl {:use-bare-ptr-memref-call-conv true})
     (pass gpu-module-to-binary)
-    ;; LLVM lowering
-    (pass convert-scf-to-cf)
+    ;; Host-side LLVM lowering
     (pass convert-cf-to-llvm)
     (pass convert-arith-to-llvm)
+    (pass convert-index-to-llvm)
     (pass convert-func-to-llvm)
     (pass finalize-memref-to-llvm)
-    (pass gpu-to-llvm)
+    (pass gpu-to-llvm {:use-bare-pointers-for-kernels true})
     (pass reconcile-unrealized-casts)))
 
 (module

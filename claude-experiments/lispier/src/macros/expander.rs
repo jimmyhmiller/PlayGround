@@ -141,25 +141,22 @@ impl StringCollector {
         ]);
 
         if has_format_args {
-            // For strings with format args, we need to call printf
-            // Since printf is variadic and func.call validates arity,
-            // we use arity-specific function names that the user must declare.
-            // For N extra args, we call printf_N (e.g., printf_1 for 1 extra arg)
-            let extra_arg_count = items.len() - 2;
-            let callee_name = format!("printf_{}", extra_arg_count);
+            // For strings with format args, we need to call printf with vararg support
+            // Generate llvm.call directly with vararg attribute
+            // (llvm.call {:callee @printf :vararg (-> [!llvm.ptr ...] [i32]) :result i32} args...)
+            let mut attrs = std::collections::HashMap::new();
+            attrs.insert("callee".to_string(), Value::symbol("@printf"));
+            attrs.insert(
+                "vararg".to_string(),
+                Value::List(vec![
+                    Value::symbol("->"),
+                    Value::Vector(vec![Value::symbol("!llvm.ptr"), Value::symbol("...")]),
+                    Value::Vector(vec![Value::symbol("i32")]),
+                ]),
+            );
+            attrs.insert("result".to_string(), Value::symbol("i32"));
 
-            let mut printf_call = vec![
-                Value::symbol("func.call"),
-                Value::Map(
-                    [
-                        ("callee".to_string(), Value::symbol(&format!("@{}", callee_name))),
-                        ("result".to_string(), Value::symbol("i32")),
-                    ]
-                    .into_iter()
-                    .collect(),
-                ),
-                Value::symbol(&ptr_name),
-            ];
+            let mut printf_call = vec![Value::symbol("llvm.call"), Value::Map(attrs), Value::symbol(&ptr_name)];
             // Add additional arguments (items[2..])
             printf_call.extend(items[2..].iter().cloned());
 
@@ -172,22 +169,21 @@ impl StringCollector {
                 Value::List(printf_call),
             ])
         } else {
-            // For simple strings without format args, use puts
-            // puts automatically adds a newline, so we need to handle that
-            // But actually for exact output control, we use printf with no extra args
-            // which works because it's a fixed-arity call (1 arg)
-            let printf_call = vec![
-                Value::symbol("func.call"),
-                Value::Map(
-                    [
-                        ("callee".to_string(), Value::symbol("@printf")),
-                        ("result".to_string(), Value::symbol("i32")),
-                    ]
-                    .into_iter()
-                    .collect(),
-                ),
-                Value::symbol(&ptr_name),
-            ];
+            // For simple strings without format args, still use llvm.call with vararg
+            // since printf is declared as vararg with llvm.func
+            let mut attrs = std::collections::HashMap::new();
+            attrs.insert("callee".to_string(), Value::symbol("@printf"));
+            attrs.insert(
+                "vararg".to_string(),
+                Value::List(vec![
+                    Value::symbol("->"),
+                    Value::Vector(vec![Value::symbol("!llvm.ptr"), Value::symbol("...")]),
+                    Value::Vector(vec![Value::symbol("i32")]),
+                ]),
+            );
+            attrs.insert("result".to_string(), Value::symbol("i32"));
+
+            let printf_call = vec![Value::symbol("llvm.call"), Value::Map(attrs), Value::symbol(&ptr_name)];
 
             Value::List(vec![
                 Value::symbol("let"),

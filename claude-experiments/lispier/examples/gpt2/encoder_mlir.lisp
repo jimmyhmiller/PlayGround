@@ -26,12 +26,12 @@
 (extern-fn free (-> [!llvm.ptr] []))
 (extern-fn fopen (-> [!llvm.ptr !llvm.ptr] [!llvm.ptr]))
 (extern-fn fread (-> [!llvm.ptr i64 i64 !llvm.ptr] [i64]))
+(extern-fn fseek (-> [!llvm.ptr i64 i32] [i32]))
+(extern-fn ftell (-> [!llvm.ptr] [i64]))
 (extern-fn fclose (-> [!llvm.ptr] [i32]))
 
-;; printf variants for print macro (N = number of format args)
-(extern-fn printf (-> [!llvm.ptr] [i32]))
-(extern-fn printf_1 (-> [!llvm.ptr i64] [i32]))
-(extern-fn printf_4 (-> [!llvm.ptr f64 f64 f64 f64] [i32]))
+;; printf is variadic - use vararg-call to call it
+(extern-fn printf (-> [!llvm.ptr ...] [i32]))
 
 (module
   (do

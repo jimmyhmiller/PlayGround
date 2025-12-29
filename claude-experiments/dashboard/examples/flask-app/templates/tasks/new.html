@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+
+{% block title %}New Task - Flask App{% endblock %}
+
+{% block content %}
+<h1>New Task</h1>
+
+<div class="card">
+    <form action="/tasks" method="post">
+        <label for="title" style="display: block; margin-bottom: 0.5rem; font-weight: 500;">Task Title</label>
+        <input type="text" id="title" name="title" placeholder="What needs to be done?" required autofocus>
+
+        <button type="submit" class="btn btn-success">Create Task</button>
+        <a href="/tasks" class="btn btn-secondary">Cancel</a>
+    </form>
+</div>
+{% endblock %}

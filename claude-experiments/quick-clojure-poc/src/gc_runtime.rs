@@ -446,21 +446,25 @@ impl GCRuntime {
     }
 
     /// Run GC if gc_always is enabled (called before allocations)
-    pub fn maybe_gc_before_alloc(&mut self, stack_pointer: usize) {
+    /// frame_pointer is the JIT frame pointer (x29)
+    /// gc_return_addr is the return address that describes the current frame's locals
+    pub fn maybe_gc_before_alloc(&mut self, frame_pointer: usize, gc_return_addr: usize) {
         if self.options.gc_always && self.stack_base != 0 {
-            self.gc(stack_pointer);
+            self.gc(frame_pointer, gc_return_addr);
         }
     }
 
-    /// Run GC with just the current stack pointer
+    /// Run GC with the current frame pointer and return address
     /// Uses the stored stack_base
-    pub fn gc(&mut self, stack_pointer: usize) {
+    /// frame_pointer is the JIT frame pointer (x29)
+    /// gc_return_addr is the return address that describes the current frame's locals
+    pub fn gc(&mut self, frame_pointer: usize, gc_return_addr: usize) {
         if self.stack_base == 0 {
             // Stack base not set, can't run GC
             return;
         }
         self.allocator
-            .gc(&self.stack_map, &[(self.stack_base, stack_pointer)]);
+            .gc(&self.stack_map, &[(self.stack_base, frame_pointer, gc_return_addr)]);
 
         // Handle relocations (for compacting/generational GC)
         let relocations = self.allocator.get_namespace_relocations();

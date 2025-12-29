@@ -25,10 +25,10 @@
           (def result (s/if {:result i32} cond
             (region
               (block []
-                (s/yield true_val))))
+                (s/yield true_val)))
             (region
               (block []
-                (s/yield false_val))))
+                (s/yield false_val)))))
           (f/return result))))
 
     ; Test 2: scf.if without else (no result)

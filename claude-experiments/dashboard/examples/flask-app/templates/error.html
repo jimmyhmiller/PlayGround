@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+
+{% block title %}Error - Flask App{% endblock %}
+
+{% block content %}
+<div class="card" style="text-align: center; padding: 3rem;">
+    <h1 style="color: #e74c3c;">Oops!</h1>
+    <p style="font-size: 1.2rem; margin: 1rem 0;">{{ message }}</p>
+    <a href="/" class="btn">Go Home</a>
+</div>
+{% endblock %}

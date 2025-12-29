@@ -115,9 +115,10 @@ impl CompactingHeap {
         &mut self,
         stack_base: usize,
         stack_map: &StackMap,
-        stack_pointer: usize,
+        frame_pointer: usize,
+        gc_return_addr: usize,
     ) -> Vec<(usize, usize)> {
-        StackWalker::collect_stack_roots(stack_base, stack_pointer, stack_map)
+        StackWalker::collect_stack_roots_with_return_addr(stack_base, frame_pointer, gc_return_addr, stack_map)
     }
 }
 
@@ -154,7 +155,7 @@ impl Allocator for CompactingHeap {
         Ok(AllocateAction::Allocated(pointer))
     }
 
-    fn gc(&mut self, stack_map: &StackMap, stack_pointers: &[(usize, usize)]) {
+    fn gc(&mut self, stack_map: &StackMap, stack_info: &[(usize, usize, usize)]) {
         if !self.options.gc {
             return;
         }
@@ -182,17 +183,20 @@ impl Allocator for CompactingHeap {
             self.temporary_roots[*i] = Some(*new_root);
         }
 
-        for (stack_base, stack_pointer) in stack_pointers.iter() {
-            let roots = self.gather_roots(*stack_base, stack_map, *stack_pointer);
+        for (stack_base, frame_pointer, gc_return_addr) in stack_info.iter() {
+            let roots = self.gather_roots(*stack_base, stack_map, *frame_pointer, *gc_return_addr);
             let new_roots = unsafe { self.copy_all(roots.iter().map(|x| x.1).collect()) };
 
-            let stack_buffer = StackWalker::get_live_stack_mut(*stack_base, *stack_pointer);
-            for (i, (stack_offset, _)) in roots.iter().enumerate() {
+            // Update stack slots with new pointer locations
+            // roots contains (slot_addr, old_value) pairs
+            for (i, (slot_addr, _)) in roots.iter().enumerate() {
                 debug_assert!(
                     BuiltInTypes::untag(new_roots[i]) % 8 == 0,
                     "Pointer is not aligned"
                 );
-                stack_buffer[*stack_offset] = new_roots[i];
+                unsafe {
+                    *(*slot_addr as *mut usize) = new_roots[i];
+                }
             }
         }
 

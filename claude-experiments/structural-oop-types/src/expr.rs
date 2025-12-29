@@ -4,9 +4,60 @@
 //! - Literals (bool, int)
 //! - Variables and let bindings
 //! - Functions (lambda) and application
-//! - Objects with methods
+//! - Objects with methods (classes)
 //! - Field access
 //! - Self-reference (this)
+//! - Spread operator for objects (...expr)
+
+/// A field in an object literal - either a named field or a spread
+#[derive(Debug, Clone)]
+pub enum ObjectField {
+    /// Named field: name: expr
+    Field(String, Expr),
+    /// Spread: ...expr (copies all fields from expr)
+    Spread(Expr),
+}
+
+/// A class definition: class Name(params) { fields }
+/// Fields can be named (field: expr) or spreads (...expr)
+#[derive(Debug, Clone)]
+pub struct ClassDef {
+    pub name: String,
+    pub params: Vec<String>,
+    pub fields: Vec<ObjectField>,
+}
+
+impl ClassDef {
+    pub fn new(name: impl Into<String>, params: Vec<String>, fields: Vec<ObjectField>) -> Self {
+        ClassDef {
+            name: name.into(),
+            params,
+            fields,
+        }
+    }
+
+    /// Create a ClassDef from plain fields (for backwards compatibility)
+    pub fn from_plain_fields(name: impl Into<String>, params: Vec<String>, fields: Vec<(String, Expr)>) -> Self {
+        let obj_fields = fields.into_iter()
+            .map(|(n, e)| ObjectField::Field(n, e))
+            .collect();
+        ClassDef {
+            name: name.into(),
+            params,
+            fields: obj_fields,
+        }
+    }
+
+    /// Convert a class definition to a lambda that returns an object.
+    /// class F(a, b) { x: e1, y: e2 } -> F = a => b => { x: e1, y: e2 }
+    pub fn to_lambda(&self) -> Expr {
+        let obj = Expr::Object(self.fields.clone());
+        // Wrap in lambdas for each parameter (curried)
+        self.params.iter().rev().fold(obj, |body, param| {
+            Expr::Lambda(param.clone(), Box::new(body))
+        })
+    }
+}
 
 /// An expression in the language
 #[derive(Debug, Clone)]
@@ -30,9 +81,10 @@ pub enum Expr {
     App(Box<Expr>, Box<Expr>),
 
     // === Objects ===
-    /// Object literal: { method1 = expr1, method2 = expr2, ... }
+    /// Object literal: { method1 = expr1, method2 = expr2, ...spread, ... }
     /// Each method body has access to `this` referring to the object itself
-    Object(Vec<(String, Expr)>),
+    /// Fields can be named (Field) or spread (Spread) to copy all fields from another object
+    Object(Vec<ObjectField>),
     /// Field access: expr.field
     FieldAccess(Box<Expr>, String),
     /// Self-reference within an object
@@ -47,6 +99,11 @@ pub enum Expr {
     LetRec(String, Box<Expr>, Box<Expr>),
     /// Mutually recursive let bindings: let rec x1 = e1 and x2 = e2 in body
     LetRecMutual(Vec<(String, Expr)>, Box<Expr>),
+    /// Block with class definitions: { class A ... class B ... expr }
+    /// All classes are mutually recursive within the block
+    Block(Vec<ClassDef>, Box<Expr>),
+    /// Multi-argument function call: f(a, b, c)
+    Call(Box<Expr>, Vec<Expr>),
 
     // === Binary Operators ===
     /// Equality: e1 == e2 (works on int and string)
@@ -95,7 +152,15 @@ impl Expr {
     }
 
     pub fn object(methods: Vec<(impl Into<String>, Expr)>) -> Self {
-        Expr::Object(methods.into_iter().map(|(n, e)| (n.into(), e)).collect())
+        Expr::Object(methods.into_iter().map(|(n, e)| ObjectField::Field(n.into(), e)).collect())
+    }
+
+    pub fn object_with_spreads(fields: Vec<ObjectField>) -> Self {
+        Expr::Object(fields)
+    }
+
+    pub fn spread(expr: Expr) -> ObjectField {
+        ObjectField::Spread(expr)
     }
 
     pub fn field(expr: Expr, field: impl Into<String>) -> Self {
@@ -116,6 +181,14 @@ impl Expr {
 
     pub fn let_rec(name: impl Into<String>, value: Expr, body: Expr) -> Self {
         Expr::LetRec(name.into(), Box::new(value), Box::new(body))
+    }
+
+    pub fn block(classes: Vec<ClassDef>, body: Expr) -> Self {
+        Expr::Block(classes, Box::new(body))
+    }
+
+    pub fn call(func: Expr, args: Vec<Expr>) -> Self {
+        Expr::Call(Box::new(func), args)
     }
 
     pub fn eq(left: Expr, right: Expr) -> Self {
@@ -179,7 +252,7 @@ impl Expr {
 macro_rules! object {
     ($($field:expr => $value:expr),* $(,)?) => {
         Expr::Object(vec![
-            $(($field.to_string(), $value)),*
+            $(ObjectField::Field($field.to_string(), $value)),*
         ])
     };
 }
@@ -196,10 +269,16 @@ mod tests {
         ]);
 
         match empty {
-            Expr::Object(methods) => {
-                assert_eq!(methods.len(), 2);
-                assert_eq!(methods[0].0, "isEmpty");
-                assert_eq!(methods[1].0, "contains");
+            Expr::Object(fields) => {
+                assert_eq!(fields.len(), 2);
+                match &fields[0] {
+                    ObjectField::Field(name, _) => assert_eq!(name, "isEmpty"),
+                    _ => panic!("Expected Field"),
+                }
+                match &fields[1] {
+                    ObjectField::Field(name, _) => assert_eq!(name, "contains"),
+                    _ => panic!("Expected Field"),
+                }
             }
             _ => panic!("Expected Object"),
         }

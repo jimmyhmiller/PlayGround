@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}Flask App{% endblock %}</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #f5f5f5;
+            color: #333;
+            line-height: 1.6;
+        }
+        nav {
+            background: #2c3e50;
+            padding: 1rem 2rem;
+            display: flex;
+            gap: 2rem;
+            align-items: center;
+        }
+        nav a {
+            color: #ecf0f1;
+            text-decoration: none;
+            font-weight: 500;
+        }
+        nav a:hover { color: #3498db; }
+        nav .brand { font-size: 1.2rem; font-weight: bold; }
+        main {
+            max-width: 800px;
+            margin: 2rem auto;
+            padding: 0 1rem;
+        }
+        h1 { margin-bottom: 1rem; color: #2c3e50; }
+        h2 { margin: 1.5rem 0 1rem; color: #34495e; }
+        .card {
+            background: white;
+            border-radius: 8px;
+            padding: 1.5rem;
+            margin-bottom: 1rem;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .btn {
+            display: inline-block;
+            padding: 0.5rem 1rem;
+            background: #3498db;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            text-decoration: none;
+            font-size: 0.9rem;
+        }
+        .btn:hover { background: #2980b9; }
+        .btn-secondary { background: #95a5a6; }
+        .btn-secondary:hover { background: #7f8c8d; }
+        .btn-success { background: #27ae60; }
+        .btn-success:hover { background: #219a52; }
+        input[type="text"], textarea {
+            width: 100%;
+            padding: 0.75rem;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 1rem;
+            margin-bottom: 1rem;
+        }
+        textarea { min-height: 150px; resize: vertical; }
+        .stats { display: flex; gap: 1rem; margin-bottom: 1.5rem; }
+        .stat {
+            background: white;
+            padding: 1rem 1.5rem;
+            border-radius: 8px;
+            text-align: center;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .stat-value { font-size: 2rem; font-weight: bold; color: #3498db; }
+        .stat-label { font-size: 0.85rem; color: #7f8c8d; }
+    </style>
+</head>
+<body>
+    <nav>
+        <a href="/" class="brand">Flask App</a>
+        <a href="/">Home</a>
+        <a href="/tasks">Tasks</a>
+        <a href="/notes">Notes</a>
+        <a href="/about">About</a>
+    </nav>
+    <main>
+        {% block content %}{% endblock %}
+    </main>
+</body>
+</html>

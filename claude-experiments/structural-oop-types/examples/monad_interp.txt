@@ -1,0 +1,68 @@
+// Monadic Interpreter from "Essence of Functional Programming"
+// Ported from Clojure OOP-style to our structurally typed language
+// Using JavaScript-like class syntax
+
+{
+  // === Monad infrastructure ===
+
+  class Unit(a) {
+    bind: (k) => k(a),
+    show: "Success"
+  }
+
+  class ErrorM(s) {
+    bind: (k) => this,
+    show: "Error: " ++ s
+  }
+
+  class Num(i) {
+    show: "Num",
+    bind: (k) => k(i),
+    add: (b) => b.bind((bp) => Num(i + bp))
+  }
+
+  class Fun(f) {
+    show: "<function>",
+    apply: (a) => f(a)
+  }
+
+  class Env(parent, name, val) {
+    lookup: (x) => x == name ? Unit(val) : parent.lookup(x),
+    add: (x, a) => Env(this, x, a)
+  }
+
+  class EmptyEnv {
+    lookup: (x) => ErrorM("unbound: " + x),
+    add: (x, a) => Env(this, x, a)
+  }
+
+  // === AST constructors ===
+
+  class Var(x) {
+    interp: (e) => e.lookup(x)
+  }
+
+  class Con(i) {
+    interp: (e) => Unit(Num(i))
+  }
+
+  class Add(u, v) {
+    interp: (e) => u.interp(e).bind((a) =>
+                   v.interp(e).bind((b) =>
+                   Unit(a.add(b))))
+  }
+
+  class Lam(x, body) {
+    interp: (e) => Unit(Fun((a) => body.interp(e.add(x, a))))
+  }
+
+  class App(t, u) {
+    interp: (e) => t.interp(e).bind((f) =>
+                   u.interp(e).bind((a) =>
+                   f.apply(a)))
+  }
+
+  // Test: ((\x -> x) (10 + 11))
+  // Should return: Unit (Num 21)
+  App(Lam("x", Var("x")), Add(Con(10), Con(11))).interp(EmptyEnv)
+}

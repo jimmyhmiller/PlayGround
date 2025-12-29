@@ -1,0 +1,269 @@
+// ============================================================================
+// Wadler's Interpreter Variations - OOP Style
+// ============================================================================
+//
+// In "The Essence of Functional Programming", Wadler shows how a simple
+// interpreter can be extended with various effects by changing the monad:
+//
+// 1. Identity - pure computation
+// 2. Error - exceptions/failure
+// 3. State - mutable state
+// 4. Output - logging/tracing
+// 5. Combinations via monad transformers
+//
+// The KEY INSIGHT: With OOP + structural typing, we don't need transformers!
+// Objects can simply have ALL the relevant methods, and structural subtyping
+// lets functions work with any object that has the methods they need.
+//
+// ============================================================================
+
+// ----------------------------------------------------------------------------
+// VARIATION 0: Identity Monad (baseline)
+// ----------------------------------------------------------------------------
+
+{
+  class Unit(a) {
+    bind: (k) => k(a)
+  }
+
+  class Num(i) {
+    bind: (k) => k(i),
+    add: (b) => b.bind((bp) => Num(i + bp))
+  }
+
+  // Test: 1 + 2 = 3
+  Num(1).add(Num(2))
+}
+
+// ----------------------------------------------------------------------------
+// VARIATION 1: Error Handling
+// ----------------------------------------------------------------------------
+// In Haskell: Either String a, with Left for errors, Right for success
+// In OOP: objects with isError flag and appropriate bind behavior
+
+{
+  class Success(a) {
+    isError: false,
+    value: a,
+    bind: (k) => k(a),
+    show: "Success"
+  }
+
+  class Error(msg) {
+    isError: true,
+    message: msg,
+    bind: (k) => this,  // Errors propagate without calling k
+    show: "Error: " ++ msg
+  }
+
+  class Num(i) {
+    bind: (k) => k(i),
+    add: (b) => b.bind((bp) => Success(Num(i + bp)))
+  }
+
+  class Divide(a, b) {
+    eval: () => a.bind((av) =>
+                 b.bind((bv) =>
+                 bv == 0 ? Error("division by zero") : Success(av / bv)))
+  }
+
+  // Test: 10 / 2 = 5
+  Divide(Num(10), Num(2)).eval()
+}
+
+// ----------------------------------------------------------------------------
+// VARIATION 2: State (Execution Counting)
+// ----------------------------------------------------------------------------
+// In Haskell: State s a = s -> (a, s)
+// In OOP: objects carry state and return updated state
+
+{
+  class Result(value, count) {
+    value: value,
+    count: count,
+    bind: (k) => {
+      // k returns a Result, we thread the count through
+      // This is tricky - we need k to receive both value and count
+    }
+  }
+
+  // The OOP approach: state is a FIELD, not threaded through bind!
+  class Counted(value, count) {
+    value: value,
+    count: count,
+    bind: (k) => k(value),  // Just pass value, count is accessed via field
+    tick: () => Counted(value, count + 1),
+    getCount: () => count
+  }
+
+  class Num(i) {
+    eval: (count) => Counted(i, count + 1)  // +1 for evaluation
+  }
+
+  Num(42).eval(0)
+}
+
+// ----------------------------------------------------------------------------
+// VARIATION 3: Output/Logging (Writer Monad)
+// ----------------------------------------------------------------------------
+// In Haskell: Writer w a = (a, w) where w is a Monoid
+// In OOP: objects accumulate log output
+
+{
+  class Logged(value, log) {
+    value: value,
+    log: log,
+    bind: (k) => k(value),  // k gets the value
+    tell: (msg) => Logged(value, log ++ msg ++ "\n"),
+    getLog: () => log
+  }
+
+  class TracedNum(i) {
+    eval: () => Logged(i, "Evaluated: " ++ i ++ "\n")
+  }
+
+  TracedNum(42).eval()
+}
+
+// ----------------------------------------------------------------------------
+// THE BIG INSIGHT: COMBINING EFFECTS WITHOUT TRANSFORMERS
+// ----------------------------------------------------------------------------
+//
+// In Haskell, to combine Error + State + Output, you need:
+//   StateT Count (WriterT String (Either String)) a
+//
+// The type becomes complex, and you need 'lift' everywhere.
+//
+// In OOP: Just put all the fields/methods in ONE object!
+
+{
+  // Combined monad: Error + State + Output
+  class Combined(value, count, log, isError) {
+    // Core value
+    value: value,
+    isError: isError,
+
+    // State component
+    count: count,
+    tick: () => Combined(value, count + 1, log, isError),
+
+    // Output component
+    log: log,
+    tell: (msg) => Combined(value, count, log ++ msg ++ "\n", isError),
+
+    // Error handling via bind
+    bind: (k) => isError ? this : k(value),
+
+    // Convenience
+    show: () => isError
+      ? "Error after " ++ count ++ " steps: " ++ value
+      : "Result: " ++ value ++ " (steps: " ++ count ++ ")"
+  }
+
+  class Ok(value) {
+    make: (count, log) => Combined(value, count, log, false)
+  }
+
+  class Err(msg) {
+    make: (count, log) => Combined(msg, count, log, true)
+  }
+
+  // Now an interpreter can use ALL effects naturally:
+  class Num(i) {
+    interp: (env) => Ok(i).make(env.count + 1, env.log ++ "num\n")
+  }
+
+  class Divide(a, b) {
+    interp: (env) =>
+      a.interp(env).bind((av) =>
+      b.interp(env).bind((bv) =>
+      bv == 0
+        ? Err("div/0").make(env.count, env.log)
+        : Ok(av / bv).make(env.count + 1, env.log ++ "div\n")))
+  }
+
+  Num(42).interp(Combined(0, 0, "", false))
+}
+
+// ----------------------------------------------------------------------------
+// WHY THIS WORKS: STRUCTURAL SUBTYPING
+// ----------------------------------------------------------------------------
+//
+// A function that only needs error handling:
+//   handleError: (m) => m.isError ? "failed" : m.value
+//
+// This works with ANY object that has isError and value fields!
+// It doesn't care if the object also has count, log, etc.
+//
+// A function that only needs state:
+//   withCount: (m) => m.tick().tick()
+//
+// This works with any object that has tick method!
+//
+// The SAME object can satisfy MULTIPLE interfaces without transformers.
+// Functions take what they need via row polymorphism.
+
+{
+  class Multi(x, count, log) {
+    // Value
+    value: x,
+
+    // State interface
+    count: count,
+    tick: () => Multi(x, count + 1, log),
+
+    // Writer interface
+    log: log,
+    tell: (s) => Multi(x, count, log ++ s),
+
+    // Monad interface
+    bind: (k) => k(x)
+  }
+
+  // Function only cares about "tick"
+  class UsesState {
+    run: (m) => m.tick().tick().count
+  }
+
+  // Function only cares about "tell"
+  class UsesWriter {
+    run: (m) => m.tell("hello ").tell("world").log
+  }
+
+  // Both work on the SAME object type!
+  Multi(42, 0, "")
+}
+
+// ----------------------------------------------------------------------------
+// COMPARISON: Haskell Transformers vs OOP Objects
+// ----------------------------------------------------------------------------
+//
+// HASKELL (with transformers):
+//
+//   type App = StateT Int (WriterT String (Either String))
+//
+//   example :: App Int
+//   example = do
+//     lift $ lift $ tell "starting"   -- 2 lifts for Writer!
+//     modify (+1)                      -- State is on top, no lift
+//     x <- lift $ lift $ Right 42     -- 2 lifts for Either!
+//     lift $ lift $ tell "done"
+//     return x
+//
+// OOP (with structural objects):
+//
+//   class App(value, count, log, isError) {
+//     tell: (s) => App(value, count, log ++ s, isError),
+//     modify: (f) => App(value, f(count), log, isError),
+//     ...
+//   }
+//
+//   example = App(0, 0, "", false)
+//     .tell("starting")
+//     .modify((n) => n + 1)
+//     .tell("done")
+//
+// NO LIFTS NEEDED! Each operation is just a method call.
+// The object carries all the state/effects as fields.
+//
+// ----------------------------------------------------------------------------

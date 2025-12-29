@@ -1,24 +1,28 @@
-//! Parser for the expression language (JavaScript-like syntax)
+//! Parser for the expression language (JavaScript-like syntax with classes)
 //!
 //! Grammar (precedence from low to high):
-//!   expr       ::= let_expr | ternary_expr
-//!   let_expr   ::= 'let' IDENT '=' expr 'in' expr
+//!   program    ::= block | expr
+//!   block      ::= '{' class_def+ expr '}'
+//!   class_def  ::= 'class' IDENT params? '{' fields '}'
+//!   params     ::= '(' IDENT (',' IDENT)* ')'
+//!   fields     ::= (field (',' field)* ','?)?
+//!   field      ::= IDENT ':' expr
+//!
+//!   expr       ::= ternary_expr
 //!   ternary_expr ::= or_expr ('?' expr ':' expr)?
 //!   or_expr    ::= and_expr ('||' and_expr)*
 //!   and_expr   ::= eq_expr ('&&' eq_expr)*
-//!   eq_expr    ::= concat_expr ('==' concat_expr)?
-//!   concat_expr ::= add_expr ('++' add_expr)*
+//!   eq_expr    ::= add_expr ('==' add_expr)?
 //!   add_expr   ::= mul_expr (('+' | '-') mul_expr)*
-//!   mul_expr   ::= arrow_expr (('*' | '/') arrow_expr)*
-//!   arrow_expr ::= IDENT '=>' arrow_expr | paren_arrow | app_expr
-//!   paren_arrow ::= '(' IDENT ')' '=>' arrow_expr
-//!   app_expr   ::= primary (primary)*
-//!   primary    ::= atom ('.' IDENT)*
-//!   atom       ::= 'true' | 'false' | INT | STRING | IDENT | 'this' | object | '(' expr ')'
-//!   object     ::= '{' (field (',' field)*)? '}'
-//!   field      ::= IDENT ':' expr
+//!   mul_expr   ::= call_expr (('*' | '/') call_expr)*
+//!   call_expr  ::= primary ('(' args? ')')?
+//!   args       ::= expr (',' expr)*
+//!   primary    ::= atom ('.' IDENT ('(' args? ')')?)*
+//!   atom       ::= 'true' | 'false' | INT | STRING | IDENT | 'this' | object | '(' expr ')' | lambda
+//!   lambda     ::= '(' params ')' '=>' expr | IDENT '=>' expr
+//!   object     ::= '{' fields '}'
 
-use crate::expr::Expr;
+use crate::expr::{Expr, ClassDef, ObjectField};
 use crate::lexer::{Lexer, Token, LexError};
 use std::fmt;
 
@@ -93,7 +97,7 @@ impl Parser {
     }
 
     pub fn parse(&mut self) -> Result<Expr, ParseError> {
-        let expr = self.parse_expr()?;
+        let expr = self.parse_program()?;
         if *self.current() != Token::Eof {
             return Err(ParseError {
                 message: format!("Unexpected token after expression: {}", self.current()),
@@ -102,11 +106,147 @@ impl Parser {
         Ok(expr)
     }
 
-    fn parse_expr(&mut self) -> Result<Expr, ParseError> {
-        match self.current() {
-            Token::Let => self.parse_let(),
-            _ => self.parse_ternary_expr(),
+    /// Parse program: either a block with classes, a standalone class, or a plain expression
+    fn parse_program(&mut self) -> Result<Expr, ParseError> {
+        // Check if this is a block (starts with { followed by 'class')
+        if *self.current() == Token::LBrace {
+            if *self.peek(1) == Token::Class {
+                return self.parse_block();
+            }
         }
+
+        // Check for standalone class definition (for REPL convenience)
+        // class F(x) { ... } is equivalent to { class F(x) { ... } F }
+        if *self.current() == Token::Class {
+            let class_def = self.parse_class_def()?;
+            let name = class_def.name.clone();
+            // Return a block with just this class, and the class name as the body
+            return Ok(Expr::Block(vec![class_def], Box::new(Expr::var(name))));
+        }
+
+        self.parse_expr()
+    }
+
+    /// Parse a block: { class_def+ expr }
+    fn parse_block(&mut self) -> Result<Expr, ParseError> {
+        self.expect(Token::LBrace)?;
+
+        let mut classes = Vec::new();
+
+        // Parse class definitions
+        while *self.current() == Token::Class {
+            classes.push(self.parse_class_def()?);
+        }
+
+        if classes.is_empty() {
+            return Err(ParseError {
+                message: "Block must contain at least one class definition".to_string(),
+            });
+        }
+
+        // Parse the final expression
+        let body = self.parse_expr()?;
+
+        self.expect(Token::RBrace)?;
+
+        Ok(Expr::Block(classes, Box::new(body)))
+    }
+
+    /// Parse a class definition: class Name(params) { fields }
+    fn parse_class_def(&mut self) -> Result<ClassDef, ParseError> {
+        self.expect(Token::Class)?;
+        let name = self.expect_ident()?;
+
+        // Parse optional parameters
+        let params = if *self.current() == Token::LParen {
+            self.parse_params()?
+        } else {
+            Vec::new()
+        };
+
+        // Parse the class body (fields, including spreads)
+        self.expect(Token::LBrace)?;
+        let fields = self.parse_class_fields()?;
+        self.expect(Token::RBrace)?;
+
+        Ok(ClassDef::new(name, params, fields))
+    }
+
+    /// Parse class fields: name: expr, ...spread, ...
+    fn parse_class_fields(&mut self) -> Result<Vec<ObjectField>, ParseError> {
+        let mut fields = Vec::new();
+
+        // Empty fields
+        if *self.current() == Token::RBrace {
+            return Ok(fields);
+        }
+
+        // Parse first field
+        fields.push(self.parse_object_field()?);
+
+        // Parse remaining fields
+        while *self.current() == Token::Comma {
+            self.advance(); // consume ','
+
+            // Allow trailing comma
+            if *self.current() == Token::RBrace {
+                break;
+            }
+
+            fields.push(self.parse_object_field()?);
+        }
+
+        Ok(fields)
+    }
+
+    /// Parse parameter list: (a, b, c)
+    fn parse_params(&mut self) -> Result<Vec<String>, ParseError> {
+        self.expect(Token::LParen)?;
+
+        let mut params = Vec::new();
+
+        if *self.current() != Token::RParen {
+            params.push(self.expect_ident()?);
+
+            while *self.current() == Token::Comma {
+                self.advance(); // consume ','
+                params.push(self.expect_ident()?);
+            }
+        }
+
+        self.expect(Token::RParen)?;
+        Ok(params)
+    }
+
+    /// Parse fields: name: expr, name: expr, ...
+    fn parse_fields(&mut self) -> Result<Vec<(String, Expr)>, ParseError> {
+        let mut fields = Vec::new();
+
+        // Empty fields
+        if *self.current() == Token::RBrace {
+            return Ok(fields);
+        }
+
+        // Parse first field
+        fields.push(self.parse_field()?);
+
+        // Parse remaining fields
+        while *self.current() == Token::Comma {
+            self.advance(); // consume ','
+
+            // Allow trailing comma
+            if *self.current() == Token::RBrace {
+                break;
+            }
+
+            fields.push(self.parse_field()?);
+        }
+
+        Ok(fields)
+    }
+
+    fn parse_expr(&mut self) -> Result<Expr, ParseError> {
+        self.parse_ternary_expr()
     }
 
     fn parse_ternary_expr(&mut self) -> Result<Expr, ParseError> {
@@ -195,18 +335,18 @@ impl Parser {
     }
 
     fn parse_mul_expr(&mut self) -> Result<Expr, ParseError> {
-        let mut left = self.parse_arrow_expr()?;
+        let mut left = self.parse_call_expr()?;
 
         loop {
             match self.current() {
                 Token::Star => {
                     self.advance();
-                    let right = self.parse_arrow_expr()?;
+                    let right = self.parse_call_expr()?;
                     left = Expr::mul(left, right);
                 }
                 Token::Slash => {
                     self.advance();
-                    let right = self.parse_arrow_expr()?;
+                    let right = self.parse_call_expr()?;
                     left = Expr::div(left, right);
                 }
                 _ => break,
@@ -216,114 +356,30 @@ impl Parser {
         Ok(left)
     }
 
-    fn parse_let(&mut self) -> Result<Expr, ParseError> {
-        self.expect(Token::Let)?;
+    /// Parse call expression: primary followed by optional calls and field access
+    /// Handles: f(x), f(x).g(y), f.g(x).h, etc.
+    fn parse_call_expr(&mut self) -> Result<Expr, ParseError> {
+        let mut expr = self.parse_atom()?;
 
-        // Check for 'rec' keyword
-        let is_rec = if *self.current() == Token::Rec {
-            self.advance();
-            true
-        } else {
-            false
-        };
-
-        let name = self.expect_ident()?;
-        self.expect(Token::Equals)?;
-        let value = self.parse_expr()?;
-
-        // Check for mutual recursion with 'and'
-        if is_rec && *self.current() == Token::And {
-            let mut bindings = vec![(name, value)];
-
-            while *self.current() == Token::And {
-                self.advance(); // consume 'and'
-                let next_name = self.expect_ident()?;
-                self.expect(Token::Equals)?;
-                let next_value = self.parse_expr()?;
-                bindings.push((next_name, next_value));
-            }
-
-            self.expect(Token::In)?;
-            let body = self.parse_expr()?;
-            return Ok(Expr::LetRecMutual(bindings, Box::new(body)));
-        }
-
-        self.expect(Token::In)?;
-        let body = self.parse_expr()?;
-
-        if is_rec {
-            Ok(Expr::let_rec(name, value, body))
-        } else {
-            Ok(Expr::let_(name, value, body))
-        }
-    }
-
-    fn parse_arrow_expr(&mut self) -> Result<Expr, ParseError> {
-        // Check for: IDENT => expr
-        // Arrow function body can contain ||, &&, ==, ternary, etc.
-        if let Token::Ident(name) = self.current().clone() {
-            if *self.peek(1) == Token::Arrow {
-                self.advance(); // consume IDENT
-                self.advance(); // consume '=>'
-                // Parse body at ternary level to allow all operators including ternary
-                let body = self.parse_ternary_expr()?;
-                return Ok(Expr::lambda(name, body));
-            }
-        }
-
-        // Check for: (IDENT) => expr
-        if *self.current() == Token::LParen {
-            if let Token::Ident(_) = self.peek(1) {
-                if *self.peek(2) == Token::RParen && *self.peek(3) == Token::Arrow {
-                    self.advance(); // consume '('
-                    let name = self.expect_ident()?;
-                    self.expect(Token::RParen)?;
-                    self.expect(Token::Arrow)?;
-                    // Parse body at ternary level to allow all operators including ternary
-                    let body = self.parse_ternary_expr()?;
-                    return Ok(Expr::lambda(name, body));
-                }
-            }
-        }
-
-        self.parse_app_expr()
-    }
-
-    fn parse_app_expr(&mut self) -> Result<Expr, ParseError> {
-        let mut expr = self.parse_primary()?;
-
-        // Application is left-associative: f x y = (f x) y
         loop {
             match self.current() {
-                // These can start a primary expression (but not an arrow function)
-                Token::True
-                | Token::False
-                | Token::Int(_)
-                | Token::String(_)
-                | Token::This
-                | Token::LBrace => {
-                    let arg = self.parse_primary()?;
-                    expr = Expr::app(expr, arg);
-                }
-                Token::Ident(_) => {
-                    // Only parse as argument if not followed by =>
-                    if *self.peek(1) != Token::Arrow {
-                        let arg = self.parse_primary()?;
-                        expr = Expr::app(expr, arg);
-                    } else {
+                Token::LParen => {
+                    // Make sure this isn't a lambda
+                    if self.is_lambda_start() {
                         break;
                     }
+                    let args = self.parse_args()?;
+                    expr = Expr::Call(Box::new(expr), args);
                 }
-                Token::LParen => {
-                    // Could be (expr) as argument or (x) => body
-                    // Check if it's an arrow function
-                    if let Token::Ident(_) = self.peek(1) {
-                        if *self.peek(2) == Token::RParen && *self.peek(3) == Token::Arrow {
-                            break; // It's an arrow function, stop parsing application
-                        }
+                Token::Dot => {
+                    self.advance(); // consume '.'
+                    let field = self.expect_ident()?;
+                    expr = Expr::field(expr, field);
+                    // Check for method call: .method(args)
+                    if *self.current() == Token::LParen && !self.is_lambda_start() {
+                        let args = self.parse_args()?;
+                        expr = Expr::Call(Box::new(expr), args);
                     }
-                    let arg = self.parse_primary()?;
-                    expr = Expr::app(expr, arg);
                 }
                 _ => break,
             }
@@ -332,17 +388,60 @@ impl Parser {
         Ok(expr)
     }
 
-    fn parse_primary(&mut self) -> Result<Expr, ParseError> {
-        let mut expr = self.parse_atom()?;
+    /// Check if current position starts a lambda: (params) => or single IDENT =>
+    fn is_lambda_start(&self) -> bool {
+        if *self.current() == Token::LParen {
+            // Check for (IDENT, ...) => pattern
+            // Find the matching )
+            let mut depth = 0;
+            let mut i = 0;
+            loop {
+                let token = self.peek(i);
+                match token {
+                    Token::LParen => depth += 1,
+                    Token::RParen => {
+                        depth -= 1;
+                        if depth == 0 {
+                            // Check if followed by =>
+                            return *self.peek(i + 1) == Token::Arrow;
+                        }
+                    }
+                    Token::Eof => return false,
+                    _ => {}
+                }
+                i += 1;
+                if i > 100 {
+                    // Safety limit
+                    return false;
+                }
+            }
+        }
+        false
+    }
 
-        // Field access: expr.field.field...
-        while *self.current() == Token::Dot {
-            self.advance(); // consume '.'
-            let field = self.expect_ident()?;
-            expr = Expr::field(expr, field);
+    /// Parse argument list: (expr, expr, ...)
+    fn parse_args(&mut self) -> Result<Vec<Expr>, ParseError> {
+        self.expect(Token::LParen)?;
+
+        let mut args = Vec::new();
+
+        if *self.current() != Token::RParen {
+            args.push(self.parse_expr()?);
+
+            while *self.current() == Token::Comma {
+                self.advance(); // consume ','
+                args.push(self.parse_expr()?);
+            }
         }
 
-        Ok(expr)
+        self.expect(Token::RParen)?;
+        Ok(args)
+    }
+
+    // Note: parse_primary is no longer used - field access is handled in parse_call_expr
+    #[allow(dead_code)]
+    fn parse_primary(&mut self) -> Result<Expr, ParseError> {
+        self.parse_atom()
     }
 
     fn parse_atom(&mut self) -> Result<Expr, ParseError> {
@@ -364,6 +463,13 @@ impl Parser {
                 Ok(Expr::string(s))
             }
             Token::Ident(name) => {
+                // Check for single-param lambda: x => expr
+                if *self.peek(1) == Token::Arrow {
+                    self.advance(); // consume IDENT
+                    self.advance(); // consume '=>'
+                    let body = self.parse_expr()?;
+                    return Ok(Expr::lambda(name, body));
+                }
                 self.advance();
                 Ok(Expr::var(name))
             }
@@ -373,6 +479,15 @@ impl Parser {
             }
             Token::LBrace => self.parse_object(),
             Token::LParen => {
+                // Could be:
+                // 1. Lambda with params: (a, b) => expr or (x) => expr
+                // 2. Grouped expression: (expr)
+
+                if self.is_lambda_start() {
+                    return self.parse_lambda();
+                }
+
+                // Grouped expression
                 self.advance(); // consume '('
                 let expr = self.parse_expr()?;
                 self.expect(Token::RParen)?;
@@ -384,19 +499,33 @@ impl Parser {
         }
     }
 
+    /// Parse a lambda expression: (params) => expr
+    fn parse_lambda(&mut self) -> Result<Expr, ParseError> {
+        let params = self.parse_params()?;
+        self.expect(Token::Arrow)?;
+        let body = self.parse_expr()?;
+
+        // Build curried lambda: (a, b) => e  becomes  a => b => e
+        let result = params.into_iter().rev().fold(body, |acc, param| {
+            Expr::Lambda(param, Box::new(acc))
+        });
+
+        Ok(result)
+    }
+
     fn parse_object(&mut self) -> Result<Expr, ParseError> {
         self.expect(Token::LBrace)?;
 
-        let mut fields = Vec::new();
+        let mut fields: Vec<ObjectField> = Vec::new();
 
         // Empty object
         if *self.current() == Token::RBrace {
             self.advance();
-            return Ok(Expr::object(fields));
+            return Ok(Expr::Object(fields));
         }
 
-        // Parse first field
-        fields.push(self.parse_field()?);
+        // Parse first field (or spread)
+        fields.push(self.parse_object_field()?);
 
         // Parse remaining fields
         while *self.current() == Token::Comma {
@@ -407,11 +536,27 @@ impl Parser {
                 break;
             }
 
-            fields.push(self.parse_field()?);
+            fields.push(self.parse_object_field()?);
         }
 
         self.expect(Token::RBrace)?;
-        Ok(Expr::object(fields))
+        Ok(Expr::Object(fields))
+    }
+
+    /// Parse an object field: either "name: expr" or "...expr"
+    fn parse_object_field(&mut self) -> Result<ObjectField, ParseError> {
+        // Check for spread: ...expr
+        if *self.current() == Token::DotDotDot {
+            self.advance(); // consume '...'
+            let expr = self.parse_expr()?;
+            return Ok(ObjectField::Spread(expr));
+        }
+
+        // Otherwise, it's a named field: name: expr
+        let name = self.expect_ident()?;
+        self.expect(Token::Colon)?;
+        let value = self.parse_expr()?;
+        Ok(ObjectField::Field(name, value))
     }
 
     fn parse_field(&mut self) -> Result<(String, Expr), ParseError> {
@@ -441,7 +586,6 @@ mod tests {
 
     #[test]
     fn test_parse_subtraction() {
-        // Negative numbers are now parsed as (0 - n) or just subtraction
         let expr = parse("5 - 3").unwrap();
         assert!(matches!(expr, Expr::Sub(..)));
     }
@@ -469,28 +613,46 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_multi_param_lambda() {
+        let expr = parse("(x, y) => x").unwrap();
+        // Should be curried: x => y => x
+        match expr {
+            Expr::Lambda(x, body) => {
+                assert_eq!(x, "x");
+                assert!(matches!(*body, Expr::Lambda(..)));
+            }
+            _ => panic!("Expected lambda"),
+        }
+    }
+
+    #[test]
     fn test_parse_nested_arrow() {
         let expr = parse("x => y => x").unwrap();
         assert!(matches!(expr, Expr::Lambda(..)));
     }
 
     #[test]
-    fn test_parse_application() {
-        let expr = parse("f x").unwrap();
-        assert!(matches!(expr, Expr::App(..)));
+    fn test_parse_call() {
+        let expr = parse("f(x)").unwrap();
+        assert!(matches!(expr, Expr::Call(..)));
     }
 
     #[test]
-    fn test_parse_multiple_application() {
-        let expr = parse("f x y").unwrap();
-        // Should be (f x) y
-        assert!(matches!(expr, Expr::App(..)));
+    fn test_parse_call_multiple_args() {
+        let expr = parse("f(x, y, z)").unwrap();
+        match expr {
+            Expr::Call(_, args) => assert_eq!(args.len(), 3),
+            _ => panic!("Expected Call"),
+        }
     }
 
     #[test]
-    fn test_parse_let() {
-        let expr = parse("let x = 42 in x").unwrap();
-        assert!(matches!(expr, Expr::Let(..)));
+    fn test_parse_call_no_args() {
+        let expr = parse("f()").unwrap();
+        match expr {
+            Expr::Call(_, args) => assert!(args.is_empty()),
+            _ => panic!("Expected Call"),
+        }
     }
 
     #[test]
@@ -527,19 +689,59 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_method_call() {
+        let expr = parse("obj.method(x, y)").unwrap();
+        assert!(matches!(expr, Expr::Call(..)));
+    }
+
+    #[test]
     fn test_parse_object_with_this() {
         let expr = parse("{ self: this }").unwrap();
         assert!(matches!(expr, Expr::Object(..)));
     }
 
     #[test]
-    fn test_parse_complex() {
+    fn test_parse_class_def() {
         let input = r#"
-            let isEmpty = s => s.isEmpty in
-            let mySet = { isEmpty: true, contains: i => false } in
-            isEmpty mySet
+            {
+                class Foo(x) {
+                    value: x
+                }
+                Foo(42)
+            }
         "#;
-        parse(input).unwrap();
+        let expr = parse(input).unwrap();
+        assert!(matches!(expr, Expr::Block(..)));
+    }
+
+    #[test]
+    fn test_parse_class_no_params() {
+        let input = r#"
+            {
+                class Empty {
+                    value: 42
+                }
+                Empty
+            }
+        "#;
+        let expr = parse(input).unwrap();
+        assert!(matches!(expr, Expr::Block(..)));
+    }
+
+    #[test]
+    fn test_parse_multiple_classes() {
+        let input = r#"
+            {
+                class A(x) { value: x }
+                class B(y) { other: y }
+                A(1)
+            }
+        "#;
+        let expr = parse(input).unwrap();
+        match expr {
+            Expr::Block(classes, _) => assert_eq!(classes.len(), 2),
+            _ => panic!("Expected Block"),
+        }
     }
 
     #[test]
@@ -567,8 +769,54 @@ mod tests {
     }
 
     #[test]
-    fn test_application_with_arrow_arg() {
-        let expr = parse("f (x => x)").unwrap();
-        assert!(matches!(expr, Expr::App(..)));
+    fn test_parse_call_with_lambda_arg() {
+        let expr = parse("f(x => x)").unwrap();
+        assert!(matches!(expr, Expr::Call(..)));
+    }
+
+    #[test]
+    fn test_parse_chained_calls() {
+        let expr = parse("f(x).g(y)").unwrap();
+        assert!(matches!(expr, Expr::Call(..)));
+    }
+
+    #[test]
+    fn test_parse_spread() {
+        let expr = parse("{ ...x }").unwrap();
+        match expr {
+            Expr::Object(fields) => {
+                assert_eq!(fields.len(), 1);
+                assert!(matches!(fields[0], ObjectField::Spread(_)));
+            }
+            _ => panic!("Expected Object"),
+        }
+    }
+
+    #[test]
+    fn test_parse_spread_with_fields() {
+        let expr = parse("{ ...x, y: 1, z: 2 }").unwrap();
+        match expr {
+            Expr::Object(fields) => {
+                assert_eq!(fields.len(), 3);
+                assert!(matches!(fields[0], ObjectField::Spread(_)));
+                assert!(matches!(fields[1], ObjectField::Field(..)));
+                assert!(matches!(fields[2], ObjectField::Field(..)));
+            }
+            _ => panic!("Expected Object"),
+        }
+    }
+
+    #[test]
+    fn test_parse_multiple_spreads() {
+        let expr = parse("{ ...x, y: 1, ...z }").unwrap();
+        match expr {
+            Expr::Object(fields) => {
+                assert_eq!(fields.len(), 3);
+                assert!(matches!(fields[0], ObjectField::Spread(_)));
+                assert!(matches!(fields[1], ObjectField::Field(..)));
+                assert!(matches!(fields[2], ObjectField::Spread(_)));
+            }
+            _ => panic!("Expected Object"),
+        }
     }
 }

@@ -1,0 +1,238 @@
+// ============================================================================
+// Truly Modular Effect Composition
+// ============================================================================
+//
+// Goal: Define Error, State, Writer INDEPENDENTLY, then combine them.
+//
+// The key insight: Each effect is a "wrapper" that:
+// 1. Adds its own fields to the carrier
+// 2. Provides its own bind behavior
+// 3. Delegates to an inner "rest" for everything else
+//
+// ============================================================================
+
+// ----------------------------------------------------------------------------
+// The Core Idea: Effects as Wrappers
+// ----------------------------------------------------------------------------
+//
+// Each effect wraps an "inner" value and adds its behavior.
+// The inner value can be anything - including another effect wrapper!
+//
+// Identity: { value: a }
+// Error<M>: { isError: bool, inner: M }
+// State<M>: { state: s, inner: M }
+// Writer<M>: { log: w, inner: M }
+//
+// Composed: Writer<State<Error<Identity>>>
+//
+// ============================================================================
+
+{
+  // === IDENTITY: The base case ===
+  class Identity(x) {
+    value: x,
+    bind: (k) => k(x),
+    map: (f) => Identity(f(x))
+  }
+
+  // === ERROR: Adds failure capability ===
+  // Wraps any inner monad, adds isError handling
+  class Success(inner) {
+    isError: false,
+    value: inner.value,
+    inner: inner,
+    // Error operations
+    bind: (k) => k(inner.value),
+    fail: (msg) => Failure(msg)
+  }
+
+  class Failure(msg) {
+    isError: true,
+    message: msg,
+    // Failure propagates
+    bind: (k) => this,
+    fail: (msg) => Failure(msg)
+  }
+
+  // === STATE: Adds state capability ===
+  // Wraps any inner monad, adds state threading
+  class Stated(inner, state) {
+    state: state,
+    value: inner.value,
+    inner: inner,
+    isError: inner.isError,
+    // State operations
+    getState: () => state,
+    putState: (s) => Stated(inner, s),
+    modifyState: (f) => Stated(inner, f(state)),
+    // Bind preserves state
+    bind: (k) => inner.isError
+      ? Stated(inner, state)
+      : Stated(k(inner.value).inner, state),
+    fail: (msg) => Stated(inner.fail(msg), state)
+  }
+
+  // === WRITER: Adds logging capability ===
+  // Wraps any inner monad, adds log accumulation
+  class Logged(inner, log) {
+    log: log,
+    value: inner.value,
+    inner: inner,
+    isError: inner.isError,
+    state: inner.state,
+    // Writer operations
+    tell: (msg) => Logged(inner, log ++ msg),
+    getLog: () => log,
+    // Bind preserves log
+    bind: (k) => inner.isError
+      ? Logged(inner, log)
+      : Logged(k(inner.value).inner, log),
+    // Forward state operations
+    modifyState: (f) => Logged(inner.modifyState(f), log),
+    fail: (msg) => Logged(inner.fail(msg), log)
+  }
+
+  // === COMPOSE: Stack the layers ===
+  //
+  // Identity(42)                           -- just a value
+  // Success(Identity(42))                  -- + error handling
+  // Stated(Success(Identity(42)), 0)       -- + state
+  // Logged(Stated(Success(...), 0), "")    -- + logging
+
+  class Eff {
+    // Convenience: create a fully-stacked effect
+    pure: (x) => Logged(Stated(Success(Identity(x)), 0), "")
+  }
+
+  // Use it!
+  Eff.pure(42)
+    .tell("start ")
+    .modifyState((n) => n + 1)
+    .tell("middle ")
+    .modifyState((n) => n + 1)
+    .tell("end")
+}
+
+// ----------------------------------------------------------------------------
+// THE ELEGANCE: Each layer is INDEPENDENT
+// ----------------------------------------------------------------------------
+//
+// Error doesn't know about State.
+// State doesn't know about Writer.
+// Writer doesn't know about Error.
+//
+// They just wrap "inner" and forward what they don't understand.
+// Structural typing means you can call .tell on anything with .tell!
+//
+// The composition order (Writer < State < Error < Identity) determines
+// the semantics - same as transformer stacking order.
+
+// ----------------------------------------------------------------------------
+// VARIANT: Combine with different orderings
+// ----------------------------------------------------------------------------
+
+{
+  class Identity(x) {
+    value: x,
+    bind: (k) => k(x)
+  }
+
+  class Success(inner) {
+    isError: false,
+    value: inner.value,
+    inner: inner,
+    bind: (k) => k(inner.value),
+    fail: (msg) => Failure(msg)
+  }
+
+  class Failure(msg) {
+    isError: true,
+    message: msg,
+    bind: (k) => this
+  }
+
+  class Stated(inner, state) {
+    state: state,
+    value: inner.value,
+    isError: inner.isError,
+    inner: inner,
+    getState: () => state,
+    modifyState: (f) => Stated(inner, f(state)),
+    bind: (k) => inner.isError
+      ? Stated(inner, state)
+      : Stated(k(inner.value).inner, state),
+    fail: (msg) => Stated(inner.fail(msg), state)
+  }
+
+  class Logged(inner, log) {
+    log: log,
+    value: inner.value,
+    isError: inner.isError,
+    state: inner.state,
+    inner: inner,
+    tell: (msg) => Logged(inner, log ++ msg),
+    modifyState: (f) => Logged(inner.modifyState(f), log),
+    bind: (k) => inner.isError
+      ? Logged(inner, log)
+      : Logged(k(inner.value).inner, log),
+    fail: (msg) => Logged(inner.fail(msg), log)
+  }
+
+  // Order 1: Error inside State inside Writer
+  // On error: state is preserved, log is preserved
+  class Stack1 {
+    pure: (x) => Logged(Stated(Success(Identity(x)), 0), "")
+  }
+
+  // Order 2: State inside Error inside Writer
+  // On error: state is LOST (rolled back)
+  class Stack2 {
+    // Different nesting would give different semantics
+    pure: (x) => Logged(Success(Stated(Identity(x), 0)), "")
+  }
+
+  Stack1.pure(42).tell("hello ")
+}
+
+// ----------------------------------------------------------------------------
+// COMPARISON TO HASKELL
+// ----------------------------------------------------------------------------
+//
+// Haskell:
+//   type App = WriterT String (StateT Int (Either String))
+//
+//   example :: App ()
+//   example = do
+//     tell "start"           -- no lift (Writer on top)
+//     lift $ modify (+1)     -- one lift (State in middle)
+//     lift $ lift $ Left "x" -- two lifts (Either at bottom)
+//
+// OOP with structural wrappers:
+//   Logged(Stated(Success(Identity(())), 0), "")
+//     .tell("start")      -- method on Logged
+//     .modifyState(+1)    -- method forwarded through Logged to Stated
+//     .fail("x")          -- method forwarded through to Success->Failure
+//
+// NO LIFTS! Each operation is just a method call.
+// Methods are forwarded automatically through the wrapper layers.
+
+// ----------------------------------------------------------------------------
+// THE KEY STRUCTURAL INSIGHT
+// ----------------------------------------------------------------------------
+//
+// Why does this work without explicit lifting?
+//
+// 1. Each wrapper COPIES the inner's relevant fields to its own interface:
+//    Logged.state = inner.state
+//    Logged.isError = inner.isError
+//
+// 2. Each wrapper FORWARDS operations it doesn't handle:
+//    Logged.modifyState = (f) => Logged(inner.modifyState(f), log)
+//
+// 3. Structural typing means a function needing { tell, modifyState }
+//    works on Logged(Stated(...)) because Logged has both methods!
+//
+// This is essentially what monad transformers do, but:
+// - No explicit lift/liftIO
+// - No complex type signatures
+// - Natural OOP method dispatch

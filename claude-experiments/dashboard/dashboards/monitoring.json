@@ -1,0 +1,51 @@
+{
+  "name": "Event Monitoring",
+  "description": "Monitor all system events with statistics",
+  "layout": {
+    "type": "layout",
+    "direction": "vertical",
+    "gap": 8,
+    "children": [
+      {
+        "type": "layout",
+        "direction": "horizontal",
+        "gap": 8,
+        "flex": 1,
+        "children": [
+          {
+            "type": "chart",
+            "props": {
+              "subscribePattern": "**",
+              "dataKey": "timestamp",
+              "chartType": "line",
+              "maxPoints": 50,
+              "height": 150,
+              "title": "Event Timeline"
+            },
+            "flex": 1
+          },
+          {
+            "type": "stats",
+            "props": {
+              "subscribePattern": "**",
+              "dataKey": "timestamp",
+              "showStats": true
+            },
+            "flex": 0
+          }
+        ]
+      },
+      {
+        "type": "table",
+        "props": {
+          "subscribePattern": "**",
+          "columns": ["type", "timestamp"],
+          "headers": ["Event Type", "Timestamp"],
+          "maxRows": 25,
+          "title": "All Events"
+        },
+        "flex": 2
+      }
+    ]
+  }
+}

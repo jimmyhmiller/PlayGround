@@ -1,0 +1,228 @@
+// ============================================================================
+// Generic, Composable Effects
+// ============================================================================
+//
+// Goal: Define Error, State, Writer as INDEPENDENT modules,
+// then combine them with a single combinator.
+//
+// ============================================================================
+
+// ----------------------------------------------------------------------------
+// APPROACH 1: Effect Modules + Generic Compose
+// ----------------------------------------------------------------------------
+//
+// Each effect is a MODULE with:
+// - wrap: takes an inner object, returns wrapped version
+// - (no knowledge of other effects)
+//
+// Compose chains the wrappers.
+
+{
+  // === Base case ===
+  class Pure(x) {
+    value: x
+  }
+
+  // === Error Module ===
+  // Completely independent - knows nothing about State or Writer
+  class Error {
+    wrap: (inner) => {
+      ...inner,
+      isError: false,
+      fail: (msg) => { isError: true, message: msg }
+    }
+  }
+
+  // === State Module ===
+  // Completely independent - knows nothing about Error or Writer
+  class State(initial) {
+    wrap: (inner) => {
+      ...inner,
+      state: initial,
+      getState: () => initial,
+      modifyState: (f) => State(f(initial)).wrap(inner)
+    }
+  }
+
+  // === Writer Module ===
+  // Completely independent - knows nothing about Error or State
+  class Writer(initial) {
+    wrap: (inner) => {
+      ...inner,
+      log: initial,
+      tell: (msg) => Writer(initial ++ msg).wrap(inner)
+    }
+  }
+
+  // === Generic Bind ===
+  // The ONLY place that knows about error semantics
+  class Eff {
+    bind: (m, k) => m.isError ? m : k(m.value)
+  }
+
+  // === Compose: Chain the wrappers ===
+  // compose(Error, State(0), Writer("")) creates a stack
+  class Compose {
+    // Apply wrappers right to left
+    two: (outer, inner, x) => outer.wrap(inner.wrap(Pure(x))),
+    three: (a, b, c, x) => a.wrap(b.wrap(c.wrap(Pure(x))))
+  }
+
+  // Usage:
+  Compose.three(Writer(""), State(0), Error, 42)
+}
+
+// ----------------------------------------------------------------------------
+// APPROACH 2: Effect as Data + Interpreter
+// ----------------------------------------------------------------------------
+//
+// Effects are just DATA describing what we want.
+// A single interpreter runs them all.
+
+{
+  // Carrier holds ALL effect state
+  class Carrier(v, err, errMsg, st, lg) {
+    value: v,
+    isError: err,
+    errMsg: errMsg,
+    state: st,
+    log: lg,
+
+    // All operations in one place
+    fail: (msg) => Carrier(v, true, msg, st, lg),
+    modifyState: (f) => Carrier(v, err, errMsg, f(st), lg),
+    tell: (msg) => Carrier(v, err, errMsg, st, lg ++ msg),
+
+    // Generic bind
+    bind: (k) => err ? this : k(v)
+  }
+
+  // Effect MODULES just provide smart constructors
+  class Error {
+    pure: (x, st, lg) => Carrier(x, false, "", st, lg)
+  }
+
+  class State(initial) {
+    init: initial
+  }
+
+  class Writer(initial) {
+    init: initial
+  }
+
+  // Compose creates the initial carrier
+  class Compose {
+    run: (x, state, log) => Carrier(x, false, "", state, log)
+  }
+
+  Compose.run(42, 0, "").tell("hello ").modifyState((n) => n + 1)
+}
+
+// ----------------------------------------------------------------------------
+// APPROACH 3: The Cleanest Practical Solution
+// ----------------------------------------------------------------------------
+//
+// Accept that:
+// 1. Effects that affect control flow (Error) must be known to bind
+// 2. But we can still have MODULAR definitions
+// 3. Spread does the composition work
+//
+// Each effect is a CLASS, combine is just nesting with spread.
+
+{
+  // Each effect is independent and uses spread
+
+  class Pure(x) {
+    value: x
+  }
+
+  class Error(inner) {
+    ...inner,
+    isError: false,
+    fail: (msg) => ErrorValue(msg)
+  }
+
+  class ErrorValue(msg) {
+    isError: true,
+    message: msg
+  }
+
+  class State(inner, s) {
+    ...inner,
+    state: s,
+    modifyState: (f) => State(inner, f(s))
+  }
+
+  class Writer(inner, lg) {
+    ...inner,
+    log: lg,
+    tell: (msg) => Writer(inner, lg ++ msg)
+  }
+
+  // THE COMBINATOR: Just a function that nests them
+  class Eff {
+    // Combine Error + State + Writer
+    make: (x, s, lg) => Writer(State(Error(Pure(x)), s), lg),
+
+    // Generic bind (knows about error)
+    bind: (m, k) => m.isError ? m : k(m.value)
+  }
+
+  // Use it!
+  Eff.make(42, 0, "").tell("start ").modifyState((n) => n + 1).tell("end")
+}
+
+// ----------------------------------------------------------------------------
+// THE FUNDAMENTAL INSIGHT
+// ----------------------------------------------------------------------------
+//
+// In Haskell, monad transformers work because:
+// 1. Each transformer defines `lift` to bring inner operations up
+// 2. Each transformer's `bind` delegates to inner's `bind`
+//
+// We're doing something similar:
+// 1. Spread brings all inner fields up (like `lift`)
+// 2. A generic `bind` handles control flow
+//
+// The difference from "true" monad transformers:
+// - We don't have separate `lift` - spread does it automatically
+// - Our `bind` is external, not per-transformer
+//
+// This is SIMPLER than transformers, at the cost of:
+// - Bind must know about error semantics centrally
+// - Can't have arbitrary effect orderings easily
+//
+// But for practical use, this is often enough!
+
+// ----------------------------------------------------------------------------
+// WHAT "FULLY GENERIC" WOULD REQUIRE
+// ----------------------------------------------------------------------------
+//
+// To have truly independent effects that combine generically, you'd need:
+//
+// 1. Algebraic Effects / Effect Handlers
+//    - Effects are just data (operations to perform)
+//    - Handlers interpret them
+//    - Combining = combining handlers
+//
+// 2. Free/Freer Monads
+//    - Build up a tree of operations
+//    - Interpret the tree with effect-specific handlers
+//
+// 3. First-class control flow (delimited continuations)
+//    - Effects can capture and manipulate continuations
+//    - Very powerful but complex
+//
+// These require language features we don't have:
+// - Sum types (for effect operations)
+// - Pattern matching (for handlers)
+// - Higher-kinded types (for generic monads)
+//
+// What we CAN do with structural OOP + spread:
+// - Modular effect definitions (each in its own class)
+// - Automatic field forwarding (via spread)
+// - Simple composition (nesting)
+// - Clean syntax (method chaining)
+//
+// This gets us 80% of the benefit with 20% of the complexity!
+

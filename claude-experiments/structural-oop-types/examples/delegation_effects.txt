@@ -1,0 +1,224 @@
+// ============================================================================
+// Effect Composition via Delegation
+// ============================================================================
+//
+// The cleanest approach: Each effect "delegates" unknown methods to inner.
+// This is like prototype chains in JavaScript, or trait mixins.
+//
+// Key: We don't manually copy fields. We delegate to inner for anything
+// we don't handle ourselves.
+//
+// ============================================================================
+
+// In a language with delegation (like Self or JavaScript prototypes):
+//
+//   ErrorEffect = {
+//     parent*: inner,          // delegate to inner
+//     isError: false,
+//     fail: (msg) => ...
+//   }
+//
+// Any method not defined here is looked up on inner.
+// This gives us automatic forwarding!
+//
+// Our language doesn't have delegation, but we can simulate it
+// by being explicit about what we're delegating.
+
+// ----------------------------------------------------------------------------
+// Approach: Effect "Layers" with explicit delegation
+// ----------------------------------------------------------------------------
+
+{
+  // The "base" effect - just holds a value
+  class Pure(x) {
+    value: x,
+    // "Run" extracts the final value
+    run: () => x
+  }
+
+  // Error layer: adds isError, fail
+  // Delegates everything else to inner
+  class WithError(inner, isError, errMsg) {
+    // Our own state
+    isError: isError,
+    errMsg: errMsg,
+
+    // Our operations
+    fail: (msg) => WithError(inner, true, msg),
+
+    // Delegate to inner
+    value: inner.value,
+    state: inner.state,      // if inner has state
+    log: inner.log,          // if inner has log
+
+    // Bind with error semantics
+    bind: (k) => isError
+      ? this
+      : WithError(k(inner.value), false, ""),
+
+    run: () => isError ? "Error: " ++ errMsg : inner.run()
+  }
+
+  // State layer: adds state, get, put, modify
+  class WithState(inner, st) {
+    // Our own state
+    state: st,
+
+    // Our operations
+    getState: () => st,
+    putState: (s) => WithState(inner, s),
+    modifyState: (f) => WithState(inner, f(st)),
+
+    // Delegate to inner
+    value: inner.value,
+    isError: inner.isError,  // if inner has error
+    log: inner.log,          // if inner has log
+
+    // Bind preserves our state
+    bind: (k) => WithState(k(inner.value), st),
+
+    run: () => inner.run()
+  }
+
+  // Writer layer: adds log, tell
+  class WithLog(inner, lg) {
+    // Our own state
+    log: lg,
+
+    // Our operations
+    tell: (msg) => WithLog(inner, lg ++ msg),
+    getLog: () => lg,
+
+    // Delegate to inner
+    value: inner.value,
+    isError: inner.isError,
+    state: inner.state,
+
+    // Bind preserves our log
+    bind: (k) => WithLog(k(inner.value), lg),
+
+    run: () => inner.run() ++ " [log: " ++ lg ++ "]"
+  }
+
+  // === COMPOSITION: Just nest! ===
+  //
+  // Stack = WithLog(WithState(WithError(Pure(x), false, ""), 0), "")
+  //
+  // This object has ALL methods:
+  // - .value (from Pure)
+  // - .isError, .fail (from WithError)
+  // - .state, .modifyState (from WithState)
+  // - .log, .tell (from WithLog)
+
+  class Eff {
+    make: (x) => WithLog(WithState(WithError(Pure(x), false, ""), 0), "")
+  }
+
+  Eff.make(42)
+}
+
+// ----------------------------------------------------------------------------
+// THE REAL INSIGHT: Structural typing as implicit delegation
+// ----------------------------------------------------------------------------
+//
+// Even though we "copy" fields like `value: inner.value`, this is really
+// a form of delegation. The value comes from inner, we just expose it.
+//
+// With true prototype delegation (like JavaScript), we wouldn't even
+// need the explicit `value: inner.value` - it would be inherited.
+//
+// But even with explicit copying, the KEY BENEFIT remains:
+//
+//   A function that needs { tell, modifyState } works on our Eff
+//   A function that needs only { tell } also works
+//   A function that needs only { modifyState } also works
+//
+// Each function sees only the interface it cares about!
+
+// ----------------------------------------------------------------------------
+// EVEN SIMPLER: Effect as pure interface, carrier is data
+// ----------------------------------------------------------------------------
+//
+// Alternative design: Separate the DATA from the OPERATIONS
+//
+// The carrier is just a dumb record of all effect state.
+// Operations are functions that transform carriers.
+
+{
+  // Carrier: just data
+  class Carrier(value, isError, errMsg, state, log) {
+    value: value,
+    isError: isError,
+    errMsg: errMsg,
+    state: state,
+    log: log
+  }
+
+  // Error operations (work on any carrier with isError, errMsg)
+  class ErrorOps {
+    fail: (c, msg) => Carrier(c.value, true, msg, c.state, c.log),
+    isOk: (c) => c.isError == false
+  }
+
+  // State operations (work on any carrier with state)
+  class StateOps {
+    get: (c) => c.state,
+    put: (c, s) => Carrier(c.value, c.isError, c.errMsg, s, c.log),
+    modify: (c, f) => StateOps.put(c, f(c.state))
+  }
+
+  // Writer operations (work on any carrier with log)
+  class WriterOps {
+    tell: (c, msg) => Carrier(c.value, c.isError, c.errMsg, c.state, c.log ++ msg),
+    getLog: (c) => c.log
+  }
+
+  // Combined bind
+  class EffOps {
+    bind: (c, k) => c.isError ? c : k(c.value)
+  }
+
+  // Usage: thread carrier through operations
+  class Program {
+    run: () => EffOps.bind(
+      WriterOps.tell(
+        StateOps.modify(
+          WriterOps.tell(
+            Carrier(42, false, "", 0, ""),
+            "start "
+          ),
+          (n) => n + 1
+        ),
+        "end"
+      ),
+      (x) => Carrier(x + 1, false, "", 0, "")
+    )
+  }
+
+  Program.run()
+}
+
+// That's ugly. But it shows the separation: data vs operations.
+// The OOP version (methods on objects) is nicer because method
+// chaining reads left-to-right: carrier.tell("x").modify(f).tell("y")
+
+// ----------------------------------------------------------------------------
+// FINAL SUMMARY
+// ----------------------------------------------------------------------------
+//
+// Monad Transformers solve: "How do I combine monads?"
+// They add complexity: lift, transformer newtypes, order-dependent stacking
+//
+// OOP Structural Effects solve the same problem differently:
+// - Effects are interfaces (sets of methods)
+// - Carriers are objects implementing multiple interfaces
+// - Structural typing lets functions take "any object with these methods"
+// - No lifting needed - methods are just methods
+//
+// The tradeoff:
+// - Transformers: explicit but mechanical
+// - OOP: implicit but requires forwarding/delegation
+//
+// With true prototype-based OOP (like Self), delegation is automatic
+// and this becomes VERY clean. With class-based OOP, you need the
+// manual field copying, but it's still simpler than lifting.

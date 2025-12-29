@@ -5,9 +5,13 @@
  */
 
 import { ipcMain, IpcMainInvokeEvent } from 'electron';
+import { spawn, ChildProcess } from 'child_process';
 import { FileWatcherService } from './fileWatcher';
 import { GitService } from './gitService';
-import { initEvaluationService, getEvaluationService, EvaluationRequest } from './evaluationService';
+import { initEvaluationService, getEvaluationService, EvaluationRequest, ExecutorConfig } from './evaluationService';
+
+// Track running processes
+const runningProcesses: Map<string, ChildProcess> = new Map();
 
 // Type for the events module
 interface EventEmitter {
@@ -112,7 +116,7 @@ export function setupServiceIPC(): void {
     async (
       _event: IpcMainInvokeEvent,
       code: string,
-      language: 'javascript' | 'typescript' = 'javascript',
+      language: string = 'javascript',
       context?: Record<string, unknown>
     ) => {
       const evalService = getEvaluationService();
@@ -132,6 +136,98 @@ export function setupServiceIPC(): void {
       return await evalService.batch(requests);
     }
   );
+
+  // Executor registration
+  ipcMain.handle(
+    'eval:registerExecutor',
+    (_event: IpcMainInvokeEvent, config: ExecutorConfig) => {
+      const evalService = getEvaluationService();
+      evalService.registerExecutor(config);
+      return { success: true, language: config.language };
+    }
+  );
+
+  ipcMain.handle(
+    'eval:unregisterExecutor',
+    (_event: IpcMainInvokeEvent, language: string) => {
+      const evalService = getEvaluationService();
+      evalService.unregisterExecutor(language);
+      return { success: true };
+    }
+  );
+
+  ipcMain.handle('eval:getExecutors', () => {
+    const evalService = getEvaluationService();
+    return evalService.getExecutors();
+  });
+
+  // Shell command operations
+  ipcMain.handle(
+    'shell:spawn',
+    async (
+      _event: IpcMainInvokeEvent,
+      id: string,
+      command: string,
+      args: string[] = [],
+      options: { cwd?: string; env?: Record<string, string> } = {}
+    ) => {
+      // Kill existing process with same ID if any
+      const existing = runningProcesses.get(id);
+      if (existing) {
+        existing.kill();
+        runningProcesses.delete(id);
+      }
+
+      const cwd = options.cwd ?? process.cwd();
+      const env = { ...process.env, ...options.env };
+
+      const proc = spawn(command, args, {
+        cwd,
+        env,
+        shell: true,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+
+      runningProcesses.set(id, proc);
+
+      // Forward output via events
+      const events = fileWatcher ? (fileWatcher as unknown as { events: EventEmitter }).events : null;
+
+      proc.stdout?.on('data', (data: Buffer) => {
+        events?.emit(`shell.stdout.${id}`, { id, data: data.toString() });
+      });
+
+      proc.stderr?.on('data', (data: Buffer) => {
+        events?.emit(`shell.stderr.${id}`, { id, data: data.toString() });
+      });
+
+      proc.on('close', (code: number | null) => {
+        runningProcesses.delete(id);
+        events?.emit(`shell.exit.${id}`, { id, code });
+      });
+
+      proc.on('error', (err: Error) => {
+        runningProcesses.delete(id);
+        events?.emit(`shell.error.${id}`, { id, error: err.message });
+      });
+
+      return { success: true, id, pid: proc.pid };
+    }
+  );
+
+  ipcMain.handle('shell:kill', (_event: IpcMainInvokeEvent, id: string) => {
+    const proc = runningProcesses.get(id);
+    if (proc) {
+      proc.kill();
+      runningProcesses.delete(id);
+      return { success: true, id };
+    }
+    return { success: false, error: 'Process not found' };
+  });
+
+  ipcMain.handle('shell:isRunning', (_event: IpcMainInvokeEvent, id: string) => {
+    return { running: runningProcesses.has(id) };
+  });
 
   console.log('[services] IPC handlers registered');
 }

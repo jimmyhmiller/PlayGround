@@ -1,0 +1,111 @@
+{
+  "name": "Flask Routes Demo",
+  "description": "Light Table-style unified view - handler, model, template, and live preview together",
+  "layout": {
+    "type": "layout",
+    "direction": "horizontal",
+    "gap": 12,
+    "padding": 12,
+    "children": [
+      {
+        "type": "layout",
+        "direction": "vertical",
+        "gap": 8,
+        "flex": 0,
+        "style": { "width": 220 },
+        "children": [
+          {
+            "type": "process-runner",
+            "flex": 0,
+            "props": {
+              "id": "flask-server",
+              "command": "./venv/bin/python",
+              "args": ["app.py"],
+              "cwd": "examples/flask-app",
+              "title": "Flask Server",
+              "startLabel": "Start Server",
+              "stopLabel": "Stop Server",
+              "showOutput": false
+            }
+          },
+          {
+            "type": "file-loader",
+            "flex": 0,
+            "props": {
+              "files": ["examples/flask-app/app.py", "examples/flask-app/models.py"],
+              "channel": "$scope.routes",
+              "transform": "(content, filePath, allFiles) => { if (!filePath.endsWith('app.py')) return null; const modelsContent = allFiles && allFiles[1] ? allFiles[1].content : ''; const routes = []; const lines = content.split('\\n'); let i = 0; while (i < lines.length) { const line = lines[i]; const match = line.match(/@app\\.route\\(['\"]([^'\"]+)['\"](?:,\\s*methods=\\[([^\\]]+)\\])?\\)/); if (match) { const path = match[1]; const methods = match[2] ? match[2].replace(/['\"/]/g, '').split(',').map(m => m.trim()) : ['GET']; let codeEnd = i; let template = null; let usesTask = false; let usesNote = false; for (let j = i + 1; j < lines.length; j++) { if (lines[j].match(/^@app\\.route|^if __name__/)) { codeEnd = j - 1; break; } if (j === lines.length - 1) codeEnd = j; const tmplMatch = lines[j].match(/render_template\\(['\"]([^'\"]+)['\"]/); if (tmplMatch) template = 'examples/flask-app/templates/' + tmplMatch[1]; if (lines[j].includes('Task')) usesTask = true; if (lines[j].includes('Note')) usesNote = true; } const code = lines.slice(i, codeEnd + 1).join('\\n'); let modelCode = ''; if (modelsContent && (usesTask || usesNote)) { const modelLines = modelsContent.split('\\n'); let inClass = false; let className = ''; let classStart = -1; for (let k = 0; k < modelLines.length; k++) { const classMatch = modelLines[k].match(/^class (Task|Note)/); if (classMatch) { if (inClass && ((className === 'Task' && usesTask) || (className === 'Note' && usesNote))) { modelCode += modelLines.slice(classStart, k).join('\\n') + '\\n\\n'; } inClass = true; className = classMatch[1]; classStart = k; } } if (inClass && ((className === 'Task' && usesTask) || (className === 'Note' && usesNote))) { let endIdx = modelLines.length; for (let k = classStart + 1; k < modelLines.length; k++) { if (modelLines[k].match(/^class |^# Seed|^Task\\(|^Note\\(/)) { endIdx = k; break; } } modelCode += modelLines.slice(classStart, endIdx).join('\\n'); } } routes.push({ id: path + methods[0], path, methods, code, template, modelCode: modelCode.trim(), file: filePath }); } i++; } return routes; }"
+            }
+          },
+          {
+            "type": "selector",
+            "flex": 1,
+            "props": {
+              "subscribePattern": "loaded.$scope.routes",
+              "dataPath": "0.data",
+              "labelTemplate": "${methods} ${path}",
+              "idKey": "id",
+              "channel": "$scope.route",
+              "title": "Routes",
+              "direction": "vertical"
+            }
+          }
+        ]
+      },
+      {
+        "type": "layout",
+        "direction": "vertical",
+        "gap": 8,
+        "flex": 1,
+        "children": [
+          {
+            "type": "code-block",
+            "flex": 1,
+            "props": {
+              "subscribePattern": "selection.$scope.route",
+              "codeKey": "code",
+              "title": "Controller",
+              "lineNumbers": true,
+              "background": "rgba(99, 102, 241, 0.1)",
+              "language": "Python"
+            }
+          },
+          {
+            "type": "code-block",
+            "flex": 1,
+            "props": {
+              "subscribePattern": "selection.$scope.route",
+              "codeKey": "modelCode",
+              "title": "Model",
+              "lineNumbers": true,
+              "background": "rgba(249, 115, 22, 0.1)",
+              "language": "Python"
+            }
+          },
+          {
+            "type": "code-block",
+            "flex": 1,
+            "props": {
+              "filePattern": "selection.$scope.route",
+              "fileKey": "template",
+              "title": "Template",
+              "lineNumbers": true,
+              "background": "rgba(34, 197, 94, 0.1)",
+              "language": "HTML"
+            }
+          }
+        ]
+      },
+      {
+        "type": "webview",
+        "flex": 1,
+        "props": {
+          "url": "http://localhost:5001",
+          "subscribePattern": "selection.$scope.route",
+          "pathKey": "path",
+          "title": "Live Preview"
+        }
+      }
+    ]
+  }
+}

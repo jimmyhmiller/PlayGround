@@ -337,15 +337,20 @@ fn find_runtime_libs(backend: &Backend) -> Result<Vec<PathBuf>, RuntimeError> {
         "/usr/lib/x86_64-linux-gnu",
     ];
 
-    // Required libraries
-    let required_libs = vec![
-        "libmlir_runner_utils.so",
-        "libmlir_c_runner_utils.so",
-    ];
+    // Required libraries (only for GPU backends)
+    let required_libs: Vec<&str> = match backend {
+        Backend::Rocm | Backend::Cuda => vec![
+            "libmlir_runner_utils.so",
+            "libmlir_c_runner_utils.so",
+        ],
+        Backend::Cpu => vec![], // CPU doesn't require these for JIT
+    };
 
-    // Optional libraries (GPU runtimes, async)
+    // Optional libraries (GPU runtimes, async, runner utils for CPU)
     let mut optional_libs = vec![
         "libmlir_async_runtime.so",
+        "libmlir_runner_utils.so",
+        "libmlir_c_runner_utils.so",
     ];
 
     // Add backend-specific runtimes

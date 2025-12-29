@@ -1,0 +1,62 @@
+{
+  "name": "Benchmark Dashboard",
+  "description": "Code benchmarking with timing visualization",
+  "layout": {
+    "type": "layout",
+    "direction": "vertical",
+    "gap": 8,
+    "children": [
+      {
+        "type": "layout",
+        "direction": "horizontal",
+        "gap": 8,
+        "flex": 2,
+        "children": [
+          {
+            "type": "eval-editor",
+            "props": {
+              "title": "Benchmark Code",
+              "iterations": 100,
+              "channel": "$scope",
+              "initialCode": "// Enter code to benchmark\n// Press Cmd+Enter to run\n\nlet sum = 0;\nfor (let i = 0; i < 1000; i++) {\n  sum += i;\n}\nsum"
+            },
+            "flex": 1
+          },
+          {
+            "type": "chart",
+            "props": {
+              "subscribePattern": "eval.result.$scope",
+              "dataKey": "executionTimeMs",
+              "labelKey": "iteration",
+              "chartType": "line",
+              "maxPoints": 100,
+              "height": 200,
+              "title": "Execution Time (ms)"
+            },
+            "flex": 1
+          }
+        ]
+      },
+      {
+        "type": "stats",
+        "props": {
+          "subscribePattern": "eval.result.$scope",
+          "dataKey": "executionTimeMs",
+          "showStats": true
+        },
+        "flex": 0
+      },
+      {
+        "type": "table",
+        "props": {
+          "subscribePattern": "eval.result.$scope",
+          "columns": ["iteration", "executionTimeMs", "displayValue", "success"],
+          "headers": ["#", "Time (ms)", "Result", "OK"],
+          "maxRows": 20,
+          "title": "Evaluation Results"
+        },
+        "flex": 1
+      }
+    ]
+  }
+}

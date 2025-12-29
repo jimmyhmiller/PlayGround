@@ -846,3 +846,220 @@ mod integration {
         assert_eq!(ty, "int");
     }
 }
+
+/// Tests for the spread operator
+mod spread {
+    use super::*;
+    use crate::parser::parse;
+
+    fn typecheck_str(input: &str) -> Result<String, String> {
+        match parse(input) {
+            Ok(expr) => {
+                let mut store = NodeStore::new();
+                match infer_expr(&expr, &mut store) {
+                    Ok(ty) => Ok(display_type(&store, ty)),
+                    Err(e) => Err(e.to_string()),
+                }
+            }
+            Err(e) => Err(e.to_string()),
+        }
+    }
+
+    #[test]
+    fn spread_basic() {
+        // { ...{ x: 42 } }
+        let ty = typecheck_str("{ ...{ x: 42 } }").unwrap();
+        // The spread creates an open row, so we'll have a row variable
+        assert!(ty.contains('{'), "Expected record type: {}", ty);
+    }
+
+    #[test]
+    fn spread_with_fields() {
+        // { ...{ x: 42 }, y: true }
+        let ty = typecheck_str("{ ...{ x: 42 }, y: true }").unwrap();
+        assert!(ty.contains("y: bool"), "Expected y field: {}", ty);
+    }
+
+    #[test]
+    fn spread_from_variable() {
+        // (obj) => { ...obj, newField: 1 }
+        let ty = typecheck_str("(obj) => { ...obj, newField: 1 }").unwrap();
+        assert!(ty.contains("newField: int"), "Expected newField: {}", ty);
+    }
+
+    #[test]
+    fn spread_non_object_fails() {
+        // { ...42 } should fail - can't spread a number
+        let result = typecheck_str("{ ...42 }");
+        assert!(result.is_err(), "Expected type error for spreading int");
+    }
+
+    #[test]
+    fn spread_preserves_access() {
+        // ({ ...{ x: 42 }, y: true }).y
+        let ty = typecheck_str("({ ...{ x: 42 }, y: true }).y").unwrap();
+        assert_eq!(ty, "bool");
+    }
+
+    #[test]
+    fn spread_multiple() {
+        // { ...{ x: 42 }, ...{ y: true }, z: "hello" }
+        let ty = typecheck_str(r#"{ ...{ x: 42 }, ...{ y: true }, z: "hello" }"#).unwrap();
+        assert!(ty.contains("z: string"), "Expected z field: {}", ty);
+    }
+
+    #[test]
+    fn spread_in_class() {
+        // A class that wraps another object and adds a field
+        let input = r#"
+            {
+                class Wrapper(inner) {
+                    ...inner,
+                    extra: 42
+                }
+                Wrapper({ x: true })
+            }
+        "#;
+        let ty = typecheck_str(input).unwrap();
+        assert!(ty.contains("extra: int"), "Expected extra field: {}", ty);
+    }
+}
+
+// ============================================================================
+// CLASS BLOCK SYNTAX TESTS
+// ============================================================================
+
+mod class_syntax {
+    use super::*;
+    use crate::parser::parse;
+
+    fn should_parse_and_typecheck(input: &str) -> String {
+        let expr = parse(input).expect("Parse failed");
+        let mut store = NodeStore::new();
+        match infer_expr(&expr, &mut store) {
+            Ok(ty) => display_type(&store, ty),
+            Err(e) => panic!("Type error: {}", e),
+        }
+    }
+
+    #[test]
+    fn simple_class() {
+        let input = r#"
+            {
+                class Foo(x) {
+                    value: x
+                }
+                Foo(42).value
+            }
+        "#;
+        let ty = should_parse_and_typecheck(input);
+        assert_eq!(ty, "int");
+    }
+
+    #[test]
+    fn class_with_method() {
+        let input = r#"
+            {
+                class Box(x) {
+                    get: () => x,
+                    value: x
+                }
+                Box(42).get()
+            }
+        "#;
+        let ty = should_parse_and_typecheck(input);
+        assert_eq!(ty, "int");
+    }
+
+    #[test]
+    fn class_with_this() {
+        let input = r#"
+            {
+                class Counter(n) {
+                    value: n,
+                    inc: () => this
+                }
+                Counter(0)
+            }
+        "#;
+        let ty = should_parse_and_typecheck(input);
+        assert!(ty.contains("μ"), "Expected recursive type, got: {}", ty);
+    }
+
+    #[test]
+    fn multiple_classes() {
+        let input = r#"
+            {
+                class A(x) { value: x }
+                class B(y) { other: y }
+                A(42).value
+            }
+        "#;
+        let ty = should_parse_and_typecheck(input);
+        assert_eq!(ty, "int");
+    }
+
+    #[test]
+    fn mutually_recursive_classes() {
+        let input = r#"
+            {
+                class Unit(a) {
+                    bind: (k) => k(a),
+                    show: "Success"
+                }
+                class ErrorM(s) {
+                    bind: (k) => this,
+                    show: "Error: " ++ s
+                }
+                Unit(42)
+            }
+        "#;
+        let ty = should_parse_and_typecheck(input);
+        assert!(ty.contains("bind"), "Expected bind in type: {}", ty);
+    }
+
+    #[test]
+    fn class_no_params_singleton() {
+        let input = r#"
+            {
+                class Empty {
+                    isEmpty: true,
+                    contains: (i) => false
+                }
+                Empty.isEmpty
+            }
+        "#;
+        let ty = should_parse_and_typecheck(input);
+        assert_eq!(ty, "bool");
+    }
+
+    #[test]
+    fn multi_param_class() {
+        let input = r#"
+            {
+                class Pair(a, b) {
+                    first: a,
+                    second: b
+                }
+                Pair(1, true).first
+            }
+        "#;
+        let ty = should_parse_and_typecheck(input);
+        assert_eq!(ty, "int");
+    }
+
+    #[test]
+    fn chained_method_calls() {
+        let input = r#"
+            {
+                class Builder(x) {
+                    value: x,
+                    add: (n) => Builder(x + n)
+                }
+                Builder(0).add(1).add(2).value
+            }
+        "#;
+        let ty = should_parse_and_typecheck(input);
+        assert_eq!(ty, "int");
+    }
+}

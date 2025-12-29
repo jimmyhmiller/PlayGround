@@ -5,7 +5,7 @@
 //! - Equi-recursive types for self-reference (this)
 //! - Let-polymorphism (generalization and instantiation)
 
-use crate::expr::Expr;
+use crate::expr::{Expr, ObjectField};
 use crate::node::{Node, NodeId};
 use crate::store::NodeStore;
 use crate::unify::{unify, TypeError};
@@ -445,30 +445,103 @@ pub fn infer(env: &TypeEnv, expr: &Expr, store: &mut NodeStore) -> Result<NodeId
             infer(&body_env, body, store)
         }
 
-        // === Object: { method1 = e1, method2 = e2, ... } ===
+        // === Block with class definitions ===
+        // { class A(x) { ... } class B(y) { ... } body }
+        // Treats all classes as mutually recursive bindings.
+        // Each class is converted to a constructor function.
+        Expr::Block(classes, body) => {
+            // Convert classes to bindings: class F(a,b) { fields } -> F = a => b => { fields }
+            let bindings: Vec<(String, Expr)> = classes
+                .iter()
+                .map(|class| (class.name.clone(), class.to_lambda()))
+                .collect();
+
+            // Use the LetRecMutual logic
+            let mut rec_types = Vec::new();
+            let mut rec_env = env.clone();
+            for (name, _) in &bindings {
+                let rec_type = store.fresh_var("class");
+                rec_env = rec_env.extend(name, rec_type);
+                rec_types.push((name.clone(), rec_type));
+            }
+
+            for (i, (_, value)) in bindings.iter().enumerate() {
+                let value_type = infer(&rec_env, &value, store)?;
+                unify(store, rec_types[i].1, value_type)?;
+            }
+
+            let mut body_env = env.clone();
+            for (name, rec_type) in &rec_types {
+                let scheme = generalize(env, store, *rec_type);
+                body_env = body_env.extend_scheme(name, scheme);
+            }
+
+            infer(&body_env, body, store)
+        }
+
+        // === Multi-argument call: f(a, b, c) -> ((f a) b) c ===
+        Expr::Call(func, args) => {
+            let mut result_type = infer(env, func, store)?;
+
+            for arg in args {
+                let arg_type = infer(env, arg, store)?;
+                let new_result_type = store.fresh_var("result");
+                let expected_func_type = store.arrow(arg_type, new_result_type);
+                unify(store, result_type, expected_func_type)?;
+                result_type = new_result_type;
+            }
+
+            Ok(result_type)
+        }
+
+        // === Object: { field1: e1, field2: e2, ...spread, ... } ===
         //
         // This is the key case for self-referential types.
         // We create a fresh type variable for `self`, then infer each method
         // with `self` bound to that variable. Finally, we unify `self` with
         // the actual record type, creating an equi-recursive type.
-        Expr::Object(methods) => {
+        //
+        // For spreads: we require the spread expression to be a record type.
+        // The resulting object has an open row (fresh row variable) when spreads
+        // are present, allowing it to have additional fields from the spread.
+        Expr::Object(fields) => {
             // Create a fresh type variable for `this`
             let self_var = store.fresh_var("self");
 
             // Create environment with `this` bound
             let obj_env = env.with_self(self_var);
 
-            // Infer each method's type
+            // Process fields and spreads
             let mut field_types = Vec::new();
-            for (name, body) in methods {
-                let method_type = infer(&obj_env, body, store)?;
-                field_types.push((name.clone(), method_type));
+            let mut has_spread = false;
+
+            for field in fields {
+                match field {
+                    ObjectField::Spread(expr) => {
+                        // Spread: require the expression to be a record type
+                        let spread_type = infer(&obj_env, expr, store)?;
+                        let spread_row = store.fresh_row_var("spread");
+                        let expected_record = store.record(spread_row);
+                        unify(store, spread_type, expected_record)?;
+                        has_spread = true;
+                    }
+                    ObjectField::Field(name, body) => {
+                        let method_type = infer(&obj_env, body, store)?;
+                        field_types.push((name.clone(), method_type));
+                    }
+                }
             }
 
             // Build the record type: { method1: T1, method2: T2, ... }
-            // Objects have CLOSED rows - they have exactly the fields defined, no more.
-            // Structural subtyping comes from function parameters having OPEN rows.
-            let row_tail = store.row_empty();
+            // If we have spreads, use an open row (fresh row var) as the tail
+            // so the object can have additional fields from spreads.
+            // If no spreads, use closed row (row_empty).
+            let row_tail = if has_spread {
+                store.fresh_row_var("rest")
+            } else {
+                store.row_empty()
+            };
+
             let mut row = row_tail;
             for (name, ty) in field_types.into_iter().rev() {
                 row = store.row_extend_present(&name, ty, row);

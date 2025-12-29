@@ -93,8 +93,11 @@ pub enum IrValue {
     Null,
     Spill(VirtualRegister, usize), // Spilled register with stack offset
     /// FramePointer - represents x29 (FP) in ARM64
-    /// Used for passing stack pointer to allocation trampolines for GC safety
+    /// Used for passing frame pointer to allocation trampolines for GC safety
     FramePointer,
+    /// ReturnAddress - represents x30 (LR) in ARM64
+    /// Used for passing return address to allocation trampolines for GC stack map lookup
+    ReturnAddress,
 }
 
 pub type Label = String;
@@ -185,17 +188,6 @@ pub enum Instruction {
     /// LoadClosureMultiArity(dst, fn_obj, arity_count, index)
     /// Load closure variable from multi-arity function (needs arity_count to compute offset)
     LoadClosureMultiArity(IrValue, IrValue, usize, usize),
-
-    // Variadic argument operations
-    /// CollectRestArgs(dst, fixed_count, param_offset)
-    /// Collects excess args into a list for variadic functions.
-    /// - At runtime, x9 contains the total argument count
-    /// - fixed_count: number of fixed parameters in this arity
-    /// - param_offset: offset for user args (1 for closures, 0 for raw functions)
-    ///
-    /// The instruction computes: excess_count = x9 - fixed_count
-    /// Then collects args from x(param_offset + fixed_count) onwards into a list.
-    CollectRestArgs(IrValue, usize, usize),
 
     // DefType operations
     // NOTE: MakeType has been refactored out - deftype construction now uses:
