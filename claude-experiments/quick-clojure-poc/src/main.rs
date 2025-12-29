@@ -17,7 +17,7 @@ mod ir;
 mod register_allocation;
 mod trampoline;
 
-use crate::arm_codegen::Arm64CodeGen;
+use crate::arm_codegen::{Arm64CodeGen, CompiledFunction};
 use crate::clojure_ast::{Expr, analyze_toplevel_tagged};
 use crate::compiler::Compiler;
 use crate::gc_runtime::GCRuntime;
@@ -26,6 +26,35 @@ use crate::trampoline::Trampoline;
 use std::cell::UnsafeCell;
 use std::io::{self, BufRead, Write};
 use std::sync::Arc;
+
+/// Register stack maps and execute a compiled function.
+/// This is critical for GC safety - stack maps must be registered BEFORE
+/// execution so that if GC is triggered during execution, it can properly
+/// identify live references on the stack.
+fn register_stack_maps_and_execute(
+    compiled: &CompiledFunction,
+    runtime: &Arc<UnsafeCell<GCRuntime>>,
+    trampoline: &Trampoline,
+) -> i64 {
+    // Register stack maps BEFORE execution
+    unsafe {
+        let rt = &mut *runtime.get();
+        for (pc, stack_size) in &compiled.stack_map {
+            rt.add_stack_map_entry(
+                *pc,
+                gc::StackMapDetails {
+                    function_name: None,
+                    number_of_locals: compiled.num_stack_slots,
+                    current_stack_size: *stack_size,
+                    max_stack_size: *stack_size,
+                },
+            );
+        }
+    }
+
+    // Now it's safe to execute
+    unsafe { trampoline.execute(compiled.code_ptr as *const u8) as i64 }
+}
 
 /// Read input from stdin until delimiters are balanced.
 /// Returns None on EOF, Some(input) when we have a balanced expression.
@@ -460,6 +489,7 @@ fn print_machine_code(code: &[u32]) {
 fn disassemble_arm64(inst: u32) -> String {
     // Simple ARM64 disassembly
     match inst {
+        0xD503201F => "nop".to_string(),
         0xD65F03C0 => "ret".to_string(),
         i if (i & 0xFFE00000) == 0xD2800000 => {
             let rd = i & 0x1F;
@@ -760,10 +790,10 @@ fn load_clojure_file(
                 match Arm64CodeGen::compile_function(&instructions, num_locals, 0) {
                     Ok(compiled) => {
                         // Execute as 0-argument function via trampoline
+                        // Stack maps must be registered BEFORE execution for GC safety
                         let trampoline = Trampoline::new(64 * 1024);
-                        let result = unsafe {
-                            trampoline.execute(compiled.code_ptr as *const u8)
-                        };
+                        let result =
+                            register_stack_maps_and_execute(&compiled, &runtime, &trampoline);
 
                         if print_results
                             && !matches!(
@@ -870,8 +900,9 @@ fn run_expr(expr: &str, gc_always: bool) {
     };
 
     // Execute as 0-argument function via trampoline
+    // Stack maps must be registered BEFORE execution for GC safety
     let trampoline = Trampoline::new(64 * 1024);
-    let result = unsafe { trampoline.execute(compiled.code_ptr as *const u8) };
+    let result = register_stack_maps_and_execute(&compiled, &runtime, &trampoline);
 
     unsafe {
         let rt = &*runtime.get();
@@ -985,12 +1016,12 @@ fn run_script(filename: &str, gc_always: bool) {
                 match Arm64CodeGen::compile_function(&instructions, num_locals, 0) {
                     Ok(compiled) => {
                         // Execute as 0-argument function via trampoline
+                        // Stack maps must be registered BEFORE execution for GC safety
                         // Like Clojure, scripts don't print results automatically
                         // Only explicit print/println calls produce output
                         let trampoline = Trampoline::new(64 * 1024);
-                        let _result = unsafe {
-                            trampoline.execute(compiled.code_ptr as *const u8)
-                        };
+                        let _result =
+                            register_stack_maps_and_execute(&compiled, &runtime, &trampoline);
                     }
                     Err(e) => {
                         eprintln!("Codegen error: {}", e);
@@ -1091,6 +1122,9 @@ fn main() {
     if let Err(e) = load_clojure_file("src/clojure/core.clj", &mut repl_compiler, &runtime, false) {
         eprintln!("Warning: Could not load clojure.core: {}", e);
     }
+
+    // Clear accumulated function IRs from loading clojure.core
+    let _ = repl_compiler.take_compiled_function_irs();
 
     // Set up user namespace (refer clojure.core and switch to it)
     repl_compiler.setup_user_namespace();
@@ -1478,6 +1512,8 @@ fn main() {
                                     }
                                     "/ir" => {
                                         // Use the REPL compiler so we can access defined vars
+                                        // Reset builder first to get fresh temp registers
+                                        repl_compiler.builder.reset();
                                         match repl_compiler.compile(&ast) {
                                             Ok(_) => {
                                                 // First show any nested function IRs

@@ -258,14 +258,28 @@ impl LinearScan {
                 // No registers
             }
 
-            Instruction::MakeFunctionPtr(dst, _code_ptr, closure_values) => {
+            Instruction::CurrentStackPosition(dst) => {
                 if let IrValue::Register(r) = dst {
                     regs.push(*r);
                 }
-                for val in closure_values {
-                    if let IrValue::Register(r) = val {
-                        regs.push(*r);
-                    }
+            }
+
+            Instruction::PushToStack(val) => {
+                if let IrValue::Register(r) = val {
+                    regs.push(*r);
+                }
+            }
+
+            Instruction::PopFromStack(_count) => {
+                // No registers
+            }
+
+            Instruction::MakeFunctionPtr(dst, _code_ptr, values_ptr, _closure_count) => {
+                if let IrValue::Register(r) = dst {
+                    regs.push(*r);
+                }
+                if let IrValue::Register(r) = values_ptr {
+                    regs.push(*r);
                 }
             }
 
@@ -359,14 +373,12 @@ impl LinearScan {
             }
 
             // Multi-arity function instructions
-            Instruction::MakeMultiArityFn(dst, _arities, _variadic_min, _variadic_index, closure_values) => {
+            Instruction::MakeMultiArityFn(dst, _arities, _variadic_min, _variadic_index, values_ptr, _closure_count) => {
                 if let IrValue::Register(r) = dst {
                     regs.push(*r);
                 }
-                for val in closure_values {
-                    if let IrValue::Register(r) = val {
-                        regs.push(*r);
-                    }
+                if let IrValue::Register(r) = values_ptr {
+                    regs.push(*r);
                 }
             }
 
@@ -608,11 +620,21 @@ impl LinearScan {
                 // No registers
             }
 
-            Instruction::MakeFunctionPtr(dst, _code_ptr, closure_values) => {
+            Instruction::CurrentStackPosition(dst) => {
                 replace(dst);
-                for val in closure_values {
-                    replace(val);
-                }
+            }
+
+            Instruction::PushToStack(val) => {
+                replace(val);
+            }
+
+            Instruction::PopFromStack(_count) => {
+                // No registers
+            }
+
+            Instruction::MakeFunctionPtr(dst, _code_ptr, values_ptr, _closure_count) => {
+                replace(dst);
+                replace(values_ptr);
             }
 
             Instruction::LoadClosure(dst, fn_obj, _index) => {
@@ -676,11 +698,9 @@ impl LinearScan {
             }
 
             // Multi-arity function instructions
-            Instruction::MakeMultiArityFn(dst, _arities, _variadic_min, _variadic_index, closure_values) => {
+            Instruction::MakeMultiArityFn(dst, _arities, _variadic_min, _variadic_index, values_ptr, _closure_count) => {
                 replace(dst);
-                for val in closure_values {
-                    replace(val);
-                }
+                replace(values_ptr);
             }
 
             Instruction::LoadClosureMultiArity(dst, fn_obj, _arity_count, _index) => {
@@ -912,11 +932,21 @@ impl LinearScan {
                 // No registers to replace
             }
 
-            Instruction::MakeFunctionPtr(dst, _code_ptr, closure_values) => {
+            Instruction::CurrentStackPosition(dst) => {
                 replace(dst);
-                for val in closure_values {
-                    replace(val);
-                }
+            }
+
+            Instruction::PushToStack(val) => {
+                replace(val);
+            }
+
+            Instruction::PopFromStack(_count) => {
+                // No registers
+            }
+
+            Instruction::MakeFunctionPtr(dst, _code_ptr, values_ptr, _closure_count) => {
+                replace(dst);
+                replace(values_ptr);
             }
 
             Instruction::LoadClosure(dst, fn_obj, _index) => {
@@ -980,11 +1010,9 @@ impl LinearScan {
             }
 
             // Multi-arity function instructions
-            Instruction::MakeMultiArityFn(dst, _arities, _variadic_min, _variadic_index, closure_values) => {
+            Instruction::MakeMultiArityFn(dst, _arities, _variadic_min, _variadic_index, values_ptr, _closure_count) => {
                 replace(dst);
-                for val in closure_values {
-                    replace(val);
-                }
+                replace(values_ptr);
             }
 
             Instruction::LoadClosureMultiArity(dst, fn_obj, _arity_count, _index) => {

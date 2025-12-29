@@ -69,11 +69,33 @@ impl Jit {
         pipeline: &str,
         library_paths: &[&str],
     ) -> Result<Self, JitError> {
+        Self::with_symbols_and_libraries(registry, module, pipeline, library_paths, &[])
+    }
+
+    /// Create a new JIT compiler with pre-registered symbols
+    ///
+    /// Symbols are registered immediately after engine creation but before any
+    /// module compilation happens. This is needed for external functions that
+    /// must be available during linking.
+    pub fn with_symbols_and_libraries(
+        registry: &DialectRegistry,
+        module: &mut Module,
+        pipeline: &str,
+        library_paths: &[&str],
+        symbols: &[(&str, *mut ())],
+    ) -> Result<Self, JitError> {
         // Run the pass pipeline
         Self::run_pipeline(registry, module, pipeline)?;
 
         // Create execution engine with shared libraries
         let engine = ExecutionEngine::new(module, 2, library_paths, false);
+
+        // Register symbols immediately after engine creation
+        for (name, ptr) in symbols {
+            unsafe {
+                engine.register_symbol(name, *ptr);
+            }
+        }
 
         Ok(Self { engine })
     }
@@ -250,11 +272,7 @@ impl Jit {
     pub unsafe fn register_gpt2_ffi(&self) {
         for (name, ptr) in crate::gpt2::get_gpt2_ffi_functions() {
             unsafe {
-                // Register the bare name
                 self.register_symbol(name, ptr);
-                // Also register with _mlir_ciface_ prefix for func dialect compatibility
-                let ciface_name = format!("_mlir_ciface_{}", name);
-                self.register_symbol(&ciface_name, ptr);
             }
         }
     }

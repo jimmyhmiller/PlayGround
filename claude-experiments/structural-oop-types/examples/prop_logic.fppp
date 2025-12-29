@@ -1,0 +1,57 @@
+// Propositional Logic - symbolic reasoning with propositions
+// Demonstrates boolean simplification through object methods
+
+{
+  // A simple proposition (atomic variable)
+  class Prop(name) {
+    isTrue: false,
+    isFalse: false,
+    simplify: () => Prop(name),
+    show: name
+  }
+
+  // Known true value
+  class TrueP {
+    isTrue: true,
+    isFalse: false,
+    simplify: () => TrueP(),
+    show: "T"
+  }
+
+  // Known false value
+  class FalseP {
+    isTrue: false,
+    isFalse: true,
+    simplify: () => FalseP(),
+    show: "F"
+  }
+
+  // Conjunction: p && q
+  class And(p, q) {
+    isTrue: p.isTrue && q.isTrue,
+    isFalse: p.isFalse || q.isFalse,
+    simplify: () =>
+      p.simplify().isFalse ? FalseP() :
+      q.simplify().isFalse ? FalseP() :
+      p.simplify().isTrue ? q.simplify() :
+      q.simplify().isTrue ? p.simplify() :
+      And(p.simplify(), q.simplify()),
+    show: "(" ++ p.show ++ " && " ++ q.show ++ ")"
+  }
+
+  // Disjunction: p || q
+  class Or(p, q) {
+    isTrue: p.isTrue || q.isTrue,
+    isFalse: p.isFalse && q.isFalse,
+    simplify: () =>
+      p.simplify().isTrue ? TrueP() :
+      q.simplify().isTrue ? TrueP() :
+      p.simplify().isFalse ? q.simplify() :
+      q.simplify().isFalse ? p.simplify() :
+      Or(p.simplify(), q.simplify()),
+    show: "(" ++ p.show ++ " || " ++ q.show ++ ")"
+  }
+
+  // Test: (T && P) || F simplifies to P
+  Or(And(TrueP(), Prop("P")), FalseP()).simplify().show
+}

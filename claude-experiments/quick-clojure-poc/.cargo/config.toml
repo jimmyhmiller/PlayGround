@@ -1,2 +1,7 @@
 [env]
 RUST_TEST_THREADS = "1"
+
+# Frame pointers are required for GC stack walking.
+# The GC reads the return address from [FP + 8] to find stack map entries.
+[build]
+rustflags = ["-C", "force-frame-pointers=yes"]

@@ -15,6 +15,47 @@ use std::cell::UnsafeCell;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+/// Read the GC return address from the caller's saved frame.
+///
+/// When JIT code calls a Rust builtin function, Rust's prologue saves the return
+/// address at [FP + 8]. This return address points back into JIT code, which IS
+/// in the stack map. By reading it here (inside the Rust function), we get the
+/// correct gc_return_addr regardless of how the JIT function was called.
+///
+/// This requires `-C force-frame-pointers=yes` in rustflags.
+///
+/// IMPORTANT: This function MUST be #[inline(never)] so it has its own frame,
+/// allowing us to walk back to the caller's frame to get the return address
+/// that points to JIT code.
+/// Read the GC return address from the caller's saved frame.
+///
+/// With #[inline(always)], this code runs inside the caller function's frame.
+/// x29 is the caller's frame pointer (the allocating builtin), and [x29+8] is
+/// the return address from the builtin back to JIT code.
+#[inline(always)]
+fn get_gc_return_addr() -> usize {
+    let gc_return_addr: usize;
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        // When inlined into builtin_allocate_xxx:
+        // - x29 = builtin's frame pointer
+        // - [x29 + 8] = builtin's saved LR = return address to JIT code
+        asm!("ldr {}, [x29, #8]", out(reg) gc_return_addr);
+
+        #[cfg(feature = "debug-gc")]
+        {
+            let x29_val: usize;
+            asm!("mov {}, x29", out(reg) x29_val);
+            eprintln!("[GC DEBUG] get_gc_return_addr: x29={:#x}, gc_return_addr={:#x}", x29_val, gc_return_addr);
+        }
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        gc_return_addr = 0;
+    }
+    gc_return_addr
+}
+
 /// Call a closure function with arg_count passed in x9 (for variadic dispatch)
 ///
 /// This uses inline assembly to properly set up x9 before calling the closure.
@@ -626,10 +667,14 @@ pub extern "C" fn builtin_ensure_var_by_symbol(ns_symbol_id: u32, name_symbol_id
 /// Trampoline: Force garbage collection
 ///
 /// ARM64 Calling Convention:
-/// - Args: x0 = frame_pointer (x29), x1 = gc_return_addr (link register)
+/// - Args: x0 = frame_pointer (x29)
 /// - Returns: x0 = nil (0b111)
+///
+/// Note: gc_return_addr is computed internally by reading from Rust's frame [x29 + 8]
 #[allow(dead_code)]
-pub extern "C" fn builtin_gc(frame_pointer: usize, gc_return_addr: usize) -> usize {
+pub extern "C" fn builtin_gc(frame_pointer: usize) -> usize {
+    // Read gc_return_addr from Rust's own saved frame
+    let gc_return_addr = get_gc_return_addr();
     unsafe {
         let runtime_ptr = std::ptr::addr_of!(RUNTIME);
         let rt = &mut *(*runtime_ptr).as_ref().unwrap().get();
@@ -898,23 +943,25 @@ pub extern "C" fn builtin_print_space() -> usize {
 /// Trampoline: Allocate function object
 ///
 /// ARM64 Calling Convention:
-/// - Args: x0 = frame_pointer (x29 for GC), x1 = gc_return_addr (link register),
-///   x2 = name_ptr (0 for anonymous), x3 = code_ptr, x4 = closure_count, x5 = values_ptr
+/// - Args: x0 = frame_pointer (x29 for GC), x1 = name_ptr (0 for anonymous),
+///   x2 = code_ptr, x3 = closure_count, x4 = values_ptr
 /// - Returns: x0 = function pointer (tagged)
 ///
 /// Note: values_ptr points to an array of closure_count tagged values on the stack
+/// Note: gc_return_addr is computed internally by reading from Rust's frame [x29 + 8]
 ///
 /// # Safety
 /// Caller must ensure `values_ptr` points to valid memory of at least `closure_count` usize values.
 #[allow(dead_code)]
 pub unsafe extern "C" fn builtin_allocate_function(
     frame_pointer: usize,
-    gc_return_addr: usize,
     name_ptr: usize,
     code_ptr: usize,
     closure_count: usize,
     values_ptr: *const usize,
 ) -> usize {
+    // Read gc_return_addr from Rust's own saved frame
+    let gc_return_addr = get_gc_return_addr();
     unsafe {
         let runtime_ptr = std::ptr::addr_of!(RUNTIME);
         let rt = &mut *(*runtime_ptr).as_ref().unwrap().get();
@@ -992,22 +1039,23 @@ pub extern "C" fn builtin_function_closure_count(fn_ptr: usize) -> usize {
 /// Trampoline: Allocate deftype instance
 ///
 /// ARM64 Calling Convention:
-/// - Args: x0 = frame_pointer (x29 for GC), x1 = gc_return_addr (link register),
-///   x2 = type_id, x3 = field_count, x4 = values_ptr
+/// - Args: x0 = frame_pointer (x29 for GC), x1 = type_id, x2 = field_count, x3 = values_ptr
 /// - Returns: x0 = instance pointer (tagged HeapObject)
 ///
 /// Note: values_ptr points to an array of field_count tagged values on the stack
+/// Note: gc_return_addr is computed internally by reading from Rust's frame [x29 + 8]
 ///
 /// # Safety
 /// Caller must ensure `values_ptr` points to valid memory of at least `field_count` usize values.
 #[allow(dead_code)]
 pub unsafe extern "C" fn builtin_allocate_type(
     frame_pointer: usize,
-    gc_return_addr: usize,
     type_id: usize,
     field_count: usize,
     values_ptr: *const usize,
 ) -> usize {
+    // Read gc_return_addr from Rust's own saved frame
+    let gc_return_addr = get_gc_return_addr();
     unsafe {
         let runtime_ptr = std::ptr::addr_of!(RUNTIME);
         let rt = &mut *(*runtime_ptr).as_ref().unwrap().get();
@@ -1036,8 +1084,7 @@ pub unsafe extern "C" fn builtin_allocate_type(
 /// Trampoline: Allocate deftype instance WITHOUT writing fields
 ///
 /// ARM64 Calling Convention:
-/// - Args: x0 = frame_pointer (x29 for GC), x1 = gc_return_addr (link register),
-///   x2 = type_id, x3 = field_count
+/// - Args: x0 = frame_pointer (x29 for GC), x1 = type_id, x2 = field_count
 /// - Returns: x0 = UNTAGGED pointer to allocated object
 ///
 /// This is used by the refactored MakeType compilation. The caller is responsible for:
@@ -1046,13 +1093,16 @@ pub unsafe extern "C" fn builtin_allocate_type(
 ///
 /// The trampoline allocates space, writes the header with type_id, and initializes
 /// all fields to nil. The JIT code then overwrites fields with actual values.
+///
+/// Note: gc_return_addr is computed internally by reading from Rust's frame [x29 + 8]
 #[allow(dead_code)]
 pub extern "C" fn builtin_allocate_type_object_raw(
     frame_pointer: usize,
-    gc_return_addr: usize,
     type_id: usize,
     field_count: usize,
 ) -> usize {
+    // Read gc_return_addr from Rust's own saved frame
+    let gc_return_addr = get_gc_return_addr();
     unsafe {
         let runtime_ptr = std::ptr::addr_of!(RUNTIME);
         let rt = &mut *(*runtime_ptr).as_ref().unwrap().get();
@@ -1087,10 +1137,14 @@ pub extern "C" fn builtin_load_type_field(obj_ptr: usize, field_index: usize) ->
 /// Trampoline: Allocate a float on the heap
 ///
 /// ARM64 Calling Convention:
-/// - Args: x0 = frame_pointer (x29 for GC), x1 = gc_return_addr (link register), x2 = f64 bits (as u64)
+/// - Args: x0 = frame_pointer (x29 for GC), x1 = f64 bits (as u64)
 /// - Returns: x0 = tagged float pointer
+///
+/// Note: gc_return_addr is computed internally by reading from Rust's frame [x29 + 8]
 #[allow(dead_code)]
-pub extern "C" fn builtin_allocate_float(frame_pointer: usize, gc_return_addr: usize, float_bits: u64) -> usize {
+pub extern "C" fn builtin_allocate_float(frame_pointer: usize, float_bits: u64) -> usize {
+    // Read gc_return_addr from Rust's own saved frame
+    let gc_return_addr = get_gc_return_addr();
     unsafe {
         let runtime_ptr = std::ptr::addr_of!(RUNTIME);
         let rt = &mut *(*runtime_ptr).as_ref().unwrap().get();
@@ -1234,15 +1288,17 @@ pub extern "C" fn builtin_store_type_field_by_symbol(
 /// Trampoline: Allocate a multi-arity function object
 ///
 /// ARM64 Calling Convention:
-/// - Args: x0 = frame_pointer (x29 for GC), x1 = gc_return_addr (link register)
-///   x2 = name_ptr (0 for anonymous)
-///   x3 = arity_count
-///   x4 = arities_ptr (pointer to (param_count, code_ptr) pairs on stack)
-///   x5 = variadic_min (usize::MAX if no variadic)
-///   x6 = variadic_index (usize::MAX if no variadic)
-///   x7 = closure_count
-///   [stack] = closures_ptr (pointer to closure values on stack)
+/// - Args: x0 = frame_pointer (x29 for GC), x1 = name_ptr (0 for anonymous)
+///   x2 = arity_count
+///   x3 = arities_ptr (pointer to (param_count, code_ptr) pairs on stack)
+///   x4 = variadic_min (usize::MAX if no variadic)
+///   x5 = variadic_index (usize::MAX if no variadic)
+///   x6 = closure_count
+///   x7 = closures_ptr (pointer to closure values on stack)
 /// - Returns: x0 = tagged closure pointer
+///
+/// Note: gc_return_addr is computed internally by reading from Rust's frame [x29 + 8]
+///
 /// # Safety
 /// Caller must ensure that `arities_ptr` points to valid memory of at least
 /// `arity_count * 2` usize values, and `closures_ptr` points to valid memory
@@ -1250,7 +1306,6 @@ pub extern "C" fn builtin_store_type_field_by_symbol(
 #[allow(dead_code)]
 pub unsafe extern "C" fn builtin_allocate_multi_arity_fn(
     frame_pointer: usize,
-    gc_return_addr: usize,
     _name_ptr: usize,
     arity_count: usize,
     arities_ptr: *const usize,
@@ -1259,6 +1314,8 @@ pub unsafe extern "C" fn builtin_allocate_multi_arity_fn(
     closure_count: usize,
     closures_ptr: *const usize,
 ) -> usize {
+    // Read gc_return_addr from Rust's own saved frame
+    let gc_return_addr = get_gc_return_addr();
     unsafe {
         let runtime_ptr = std::ptr::addr_of!(RUNTIME);
         let rt = &mut *(*runtime_ptr).as_ref().unwrap().get();
@@ -1312,19 +1369,20 @@ pub unsafe extern "C" fn builtin_allocate_multi_arity_fn(
 /// Trampoline: Collect rest arguments into an IndexedSeq
 ///
 /// ARM64 Calling Convention:
-/// - Args: x0 = frame_pointer (x29 for GC), x1 = gc_return_addr (link register)
-///   x2 = pointer to args array on stack (excess args after fixed params)
-///   x3 = count of excess arguments
+/// - Args: x0 = frame_pointer (x29 for GC), x1 = pointer to args array on stack
+///   (excess args after fixed params), x2 = count of excess arguments
 /// - Returns: x0 = tagged IndexedSeq wrapping an Array, or nil if empty
 ///
 /// Creates an IndexedSeq (like ClojureScript) wrapping a mutable array.
+///
+/// Note: gc_return_addr is computed internally by reading from Rust's frame [x29 + 8]
+///
 /// # Safety
 /// Caller must ensure that `args_ptr` points to valid memory of at least
 /// `count` usize values.
 #[allow(dead_code)]
 pub unsafe extern "C" fn builtin_collect_rest_args(
     frame_pointer: usize,
-    gc_return_addr: usize,
     args_ptr: *const usize,
     count: usize,
 ) -> usize {
@@ -1332,6 +1390,8 @@ pub unsafe extern "C" fn builtin_collect_rest_args(
         return 7; // nil
     }
 
+    // Read gc_return_addr from Rust's own saved frame
+    let gc_return_addr = get_gc_return_addr();
     unsafe {
         let runtime_ptr = std::ptr::addr_of!(RUNTIME);
         let rt = &mut *(*runtime_ptr).as_ref().unwrap().get();
@@ -1399,16 +1459,16 @@ pub extern "C" fn builtin_multi_arity_lookup(fn_ptr: usize, arg_count: usize) ->
 ///    - x0 = fn_ptr (closure object)
 ///    - x1-xN = user args (and IndexedSeq for variadic)
 /// 4. Returns the result
+///
+/// ARM64 Calling Convention:
+/// - x0 = fn_ptr (the multi-arity function object)
+/// - x1 = arg_count (total number of user arguments)
+/// - x2 = args_ptr (pointer to array of ALL args on stack)
 #[allow(dead_code)]
 pub unsafe extern "C" fn builtin_invoke_multi_arity(
     fn_ptr: usize,
     arg_count: usize,
-    arg0: usize,
-    arg1: usize,
-    arg2: usize,
-    arg3: usize,
-    arg4: usize,
-    arg5: usize,
+    args_ptr: *const usize,
 ) -> usize {
     unsafe {
         let runtime_ptr = std::ptr::addr_of!(RUNTIME);
@@ -1422,8 +1482,12 @@ pub unsafe extern "C" fn builtin_invoke_multi_arity(
             return 7; // nil
         }
 
-        // Put all args in an array for easier manipulation
-        let all_args = [arg0, arg1, arg2, arg3, arg4, arg5];
+        // Read all args from stack pointer
+        let all_args: Vec<usize> = if arg_count > 0 && !args_ptr.is_null() {
+            std::slice::from_raw_parts(args_ptr, arg_count).to_vec()
+        } else {
+            vec![]
+        };
 
         match rt.multi_arity_lookup(fn_ptr, arg_count) {
             Some((code_ptr, is_variadic)) => {
@@ -1437,7 +1501,7 @@ pub unsafe extern "C" fn builtin_invoke_multi_arity(
 
                     // Collect excess args into IndexedSeq
                     let rest_args = if arg_count > variadic_min {
-                        let rest_slice = &all_args[variadic_min..arg_count.min(6)];
+                        let rest_slice = &all_args[variadic_min..];
                         match rt.allocate_indexed_seq(rest_slice) {
                             Ok(seq) => seq,
                             Err(msg) => {
@@ -1454,15 +1518,23 @@ pub unsafe extern "C" fn builtin_invoke_multi_arity(
                     let func: extern "C" fn(usize, usize, usize, usize, usize, usize, usize) -> usize =
                         std::mem::transmute(code_ptr);
 
+                    // Get fixed args (with defaults for missing ones)
+                    let get_arg = |i: usize| -> usize {
+                        if i < all_args.len() { all_args[i] } else { 7 }
+                    };
+
                     match variadic_min {
                         0 => func(fn_ptr, rest_args, 0, 0, 0, 0, 0),
-                        1 => func(fn_ptr, arg0, rest_args, 0, 0, 0, 0),
-                        2 => func(fn_ptr, arg0, arg1, rest_args, 0, 0, 0),
-                        3 => func(fn_ptr, arg0, arg1, arg2, rest_args, 0, 0),
-                        4 => func(fn_ptr, arg0, arg1, arg2, arg3, rest_args, 0),
-                        5 => func(fn_ptr, arg0, arg1, arg2, arg3, arg4, rest_args),
+                        1 => func(fn_ptr, get_arg(0), rest_args, 0, 0, 0, 0),
+                        2 => func(fn_ptr, get_arg(0), get_arg(1), rest_args, 0, 0, 0),
+                        3 => func(fn_ptr, get_arg(0), get_arg(1), get_arg(2), rest_args, 0, 0),
+                        4 => func(fn_ptr, get_arg(0), get_arg(1), get_arg(2), get_arg(3), rest_args, 0),
+                        5 => func(fn_ptr, get_arg(0), get_arg(1), get_arg(2), get_arg(3), get_arg(4), rest_args),
+                        6 => func(fn_ptr, get_arg(0), get_arg(1), get_arg(2), get_arg(3), get_arg(4), get_arg(5)),
                         _ => {
-                            eprintln!("Error: variadic_min {} too large", variadic_min);
+                            // More than 6 fixed params - need stack passing for the function call
+                            // For now, error out (this is rare for variadic functions)
+                            eprintln!("Error: variadic_min {} too large (max 6 fixed params supported)", variadic_min);
                             7
                         }
                     }
@@ -1470,7 +1542,12 @@ pub unsafe extern "C" fn builtin_invoke_multi_arity(
                     // Non-variadic: just pass fn_ptr as x0, then user args
                     let func: extern "C" fn(usize, usize, usize, usize, usize, usize, usize) -> usize =
                         std::mem::transmute(code_ptr);
-                    func(fn_ptr, arg0, arg1, arg2, arg3, arg4, arg5)
+
+                    let get_arg = |i: usize| -> usize {
+                        if i < all_args.len() { all_args[i] } else { 7 }
+                    };
+
+                    func(fn_ptr, get_arg(0), get_arg(1), get_arg(2), get_arg(3), get_arg(4), get_arg(5))
                 }
             }
             None => {
@@ -1801,10 +1878,14 @@ pub extern "C" fn builtin_instance_check(expected_type_id: usize, value: usize) 
 /// Trampoline: Allocate a new raw mutable array
 ///
 /// ARM64 Calling Convention:
-/// - Args: x0 = frame_pointer (x29 for GC), x1 = gc_return_addr (link register), x2 = length (tagged integer)
+/// - Args: x0 = frame_pointer (x29 for GC), x1 = length (tagged integer)
 /// - Returns: x0 = tagged array pointer
+///
+/// Note: gc_return_addr is computed internally by reading from Rust's frame [x29 + 8]
 #[allow(dead_code)]
-pub extern "C" fn builtin_make_array(frame_pointer: usize, gc_return_addr: usize, length: usize) -> usize {
+pub extern "C" fn builtin_make_array(frame_pointer: usize, length: usize) -> usize {
+    // Read gc_return_addr from Rust's own saved frame
+    let gc_return_addr = get_gc_return_addr();
     unsafe {
         let runtime_ptr = std::ptr::addr_of!(RUNTIME);
         let rt = &mut *(*runtime_ptr).as_ref().unwrap().get();
@@ -1899,10 +1980,14 @@ pub extern "C" fn builtin_alength(arr_ptr: usize) -> usize {
 /// Trampoline: Clone an array
 ///
 /// ARM64 Calling Convention:
-/// - Args: x0 = frame_pointer (x29 for GC), x1 = gc_return_addr (link register), x2 = array (tagged)
+/// - Args: x0 = frame_pointer (x29 for GC), x1 = array (tagged)
 /// - Returns: x0 = new array (tagged)
+///
+/// Note: gc_return_addr is computed internally by reading from Rust's frame [x29 + 8]
 #[allow(dead_code)]
-pub extern "C" fn builtin_aclone(frame_pointer: usize, gc_return_addr: usize, arr_ptr: usize) -> usize {
+pub extern "C" fn builtin_aclone(frame_pointer: usize, arr_ptr: usize) -> usize {
+    // Read gc_return_addr from Rust's own saved frame
+    let gc_return_addr = get_gc_return_addr();
     unsafe {
         let runtime_ptr = std::ptr::addr_of!(RUNTIME);
         let rt = &mut *(*runtime_ptr).as_ref().unwrap().get();
@@ -2864,20 +2949,22 @@ pub fn invoke_protocol_method(
 /// Trampoline: Apply a function to a list of arguments
 ///
 /// ARM64 Calling Convention:
-/// - Args: x0 = frame_pointer (x29 for GC), x1 = gc_return_addr (link register)
-///   x2 = fn_value (tagged function/closure)
-///   x3 = args_seq (tagged seq/list of arguments)
+/// - Args: x0 = frame_pointer (x29 for GC), x1 = fn_value (tagged function/closure)
+///   x2 = args_seq (tagged seq/list of arguments)
 /// - Returns: x0 = result of applying the function
 ///
 /// This handles all function types (raw functions, closures, multi-arity, IFn)
 /// and properly sets up x9 for variadic functions.
+///
+/// Note: gc_return_addr is computed internally by reading from Rust's frame [x29 + 8]
 #[allow(dead_code)]
 pub extern "C" fn builtin_apply(
     frame_pointer: usize,
-    gc_return_addr: usize,
     fn_value: usize,
     args_seq: usize,
 ) -> usize {
+    // Read gc_return_addr from Rust's own saved frame
+    let gc_return_addr = get_gc_return_addr();
     unsafe {
         let runtime_ptr = std::ptr::addr_of!(RUNTIME);
         let rt = &mut *(*runtime_ptr).as_ref().unwrap().get();

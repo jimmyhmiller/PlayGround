@@ -48,14 +48,27 @@ impl StackMap {
 
     /// Find stack data for a return address
     pub fn find_stack_data(&self, pointer: usize) -> Option<&StackMapDetails> {
-        #[cfg(feature = "debug-gc")]
-        {
-            eprintln!("[GC DEBUG] find_stack_data: looking for {:#x}", pointer);
-            eprintln!("[GC DEBUG] Stack map has {} entries", self.details.len());
-        }
+        // First, try to find exact match
         for (key, value) in self.details.iter() {
             if *key == pointer {
                 return Some(value);
+            }
+        }
+
+        #[cfg(feature = "debug-gc")]
+        {
+            eprintln!("[GC DEBUG] find_stack_data: looking for {:#x} - NOT FOUND", pointer);
+            eprintln!("[GC DEBUG] Stack map has {} entries", self.details.len());
+            // Find closest entries to see the range
+            if !self.details.is_empty() {
+                let min_key = self.details.iter().map(|(k, _)| *k).min().unwrap_or(0);
+                let max_key = self.details.iter().map(|(k, _)| *k).max().unwrap_or(0);
+                eprintln!("[GC DEBUG] Stack map range: {:#x} to {:#x}", min_key, max_key);
+                if pointer < min_key {
+                    eprintln!("[GC DEBUG] Pointer is {} bytes BELOW min", min_key - pointer);
+                } else if pointer > max_key {
+                    eprintln!("[GC DEBUG] Pointer is {} bytes ABOVE max", pointer - max_key);
+                }
             }
         }
         None
@@ -63,6 +76,15 @@ impl StackMap {
 
     /// Extend the stack map with new entries
     pub fn extend(&mut self, translated_stack_map: Vec<(usize, StackMapDetails)>) {
+        #[cfg(feature = "debug-gc")]
+        {
+            if !translated_stack_map.is_empty() {
+                let min = translated_stack_map.iter().map(|(k, _)| *k).min().unwrap();
+                let max = translated_stack_map.iter().map(|(k, _)| *k).max().unwrap();
+                eprintln!("[GC DEBUG] Adding {} entries to stack map: {:#x} to {:#x}",
+                    translated_stack_map.len(), min, max);
+            }
+        }
         self.details.extend(translated_stack_map);
     }
 

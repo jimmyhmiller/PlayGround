@@ -73,6 +73,7 @@ export interface DashboardState {
   name: string;
   projectId: string;
   windows: WindowState[];
+  widgetState: Record<string, unknown>;  // widgetId -> widget-specific state
   themeOverride?: ThemeState;
   createdAt: number;
   updatedAt: number;
@@ -148,6 +149,14 @@ export interface GlobalUIState {
 }
 
 /**
+ * Widget state storage - persists widget state across dashboard switches
+ * Keyed by widget ID (scope::path)
+ */
+export interface WidgetStateStorage {
+  data: Record<string, unknown>;
+}
+
+/**
  * Complete application state
  */
 export interface AppState {
@@ -158,6 +167,7 @@ export interface AppState {
   projects: ProjectsState;
   dashboards: DashboardsState;
   globalUI: GlobalUIState;
+  widgetState: WidgetStateStorage;
 }
 
 /**
@@ -307,6 +317,30 @@ export interface WidgetUpdatePayload {
   slot?: string;
   priority?: number;
   visible?: boolean;
+}
+
+// ========== Widget State Payloads ==========
+
+/**
+ * Widget state set payload - save widget state to active dashboard
+ */
+export interface WidgetStateSetPayload {
+  widgetId: string;
+  state: unknown;
+}
+
+/**
+ * Widget state get payload
+ */
+export interface WidgetStateGetPayload {
+  widgetId: string;
+}
+
+/**
+ * Widget state clear payload
+ */
+export interface WidgetStateClearPayload {
+  widgetId: string;
 }
 
 /**

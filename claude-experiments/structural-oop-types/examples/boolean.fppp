@@ -1,0 +1,23 @@
+// Boolean algebra using objects
+// Implements True and False as objects with methods
+
+{
+  class True {
+    if_: (cases) => cases.true_,
+    not: () => False(),
+    and_: (other) => other.if_({ true_: True(), false_: False() }),
+    or_: (other) => True(),
+    show: "True"
+  }
+
+  class False {
+    if_: (cases) => cases.false_,
+    not: () => True(),
+    and_: (other) => False(),
+    or_: (other) => other.if_({ true_: True(), false_: False() }),
+    show: "False"
+  }
+
+  // Test: True && False should be False
+  True().and_(False()).show
+}

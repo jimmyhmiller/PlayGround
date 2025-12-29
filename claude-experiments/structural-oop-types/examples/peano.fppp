@@ -1,0 +1,36 @@
+// Peano numerals - natural numbers using objects
+// Zero and Succ form the basis of Church-style numerals
+
+{
+  class Zero {
+    isZero: true,
+    inc: () => Succ(Zero()),
+    dec: () => Zero(),
+    toInt: 0,
+    plus: (other) => other,
+    minus: (other) => other.isZero ? Zero() : Zero(),
+    lt: (other) => !other.isZero,
+    eq: (other) => other.isZero,
+    show: "Zero"
+  }
+
+  class Succ(n) {
+    isZero: false,
+    inc: () => Succ(Succ(n)),
+    dec: () => n,
+    toInt: n.toInt + 1,
+    plus: (other) => n.plus(other.inc()),
+    minus: (other) => other.isZero ? Succ(n) : n.minus(other.dec()),
+    lt: (other) => other.isZero ? false : n.lt(other.dec()),
+    eq: (other) => other.isZero ? false : n.eq(other.dec()),
+    show: "S(" ++ n.show ++ ")"
+  }
+
+  // Helper to create Peano number from integer
+  class FromInt(i) {
+    ...( i == 0 ? Zero() : Succ(FromInt(i - 1)) )
+  }
+
+  // Test: 2 + 3 = 5
+  FromInt(2).plus(FromInt(3)).toInt
+}

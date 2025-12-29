@@ -1,0 +1,44 @@
+// Sets - object-oriented implementation of mathematical sets
+// Based on Cook's "On Understanding Data Abstraction, Revisited"
+
+{
+  class Empty {
+    isEmpty: true,
+    contains: (i) => false,
+    insert: (i) => Insert(Empty(), i),
+    union: (other) => other,
+    show: "{}"
+  }
+
+  class Insert(set, elem) {
+    isEmpty: false,
+    contains: (i) => i == elem || set.contains(i),
+    insert: (i) => Insert(Insert(set, elem), i),
+    union: (other) => Union(Insert(set, elem), other),
+    show: "{" ++ elem ++ ", ...}"
+  }
+
+  class Union(s1, s2) {
+    isEmpty: s1.isEmpty && s2.isEmpty,
+    contains: (i) => s1.contains(i) || s2.contains(i),
+    insert: (i) => Insert(Union(s1, s2), i),
+    union: (other) => Union(Union(s1, s2), other),
+    show: "union"
+  }
+
+  // Infinite set of even numbers
+  class Even {
+    isEmpty: false,
+    contains: (i) => i % 2 == 0,
+    insert: (i) => Insert(Even(), i),
+    union: (other) => Union(Even(), other),
+    show: "evens"
+  }
+
+  // Test: {1, 2} union {3} contains 2?
+  Empty()
+    .insert(1)
+    .insert(2)
+    .union(Empty().insert(3))
+    .contains(2)
+}

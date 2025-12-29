@@ -1,0 +1,38 @@
+// Lists - object-oriented linked lists
+// Cons cells and Nil, with map and other operations
+
+{
+  class Nil {
+    isEmpty: true,
+    cons: (x) => Cons(x, Nil()),
+    map: (f) => Nil(),
+    length: 0,
+    show: "[]"
+  }
+
+  class Cons(head_, tail_) {
+    isEmpty: false,
+    head: head_,
+    tail: tail_,
+    cons: (x) => Cons(x, Cons(head_, tail_)),
+    map: (f) => Cons(f(head_), tail_.map(f)),
+    length: 1 + tail_.length,
+    show: head_ ++ " :: " ++ tail_.show
+  }
+
+  // Helper to build list from values
+  class List3(a, b, c) {
+    ...Nil().cons(c).cons(b).cons(a)
+  }
+
+  // Infinite stream of increasing numbers
+  class From(n) {
+    isEmpty: false,
+    head: n,
+    tail: From(n + 1),
+    show: n ++ "..."
+  }
+
+  // Test: [1, 2, 3] mapped with (*2), show as string
+  List3(1, 2, 3).map((x) => x * 2).show
+}

@@ -784,6 +784,78 @@ export function transform(code: string, options: TransformOptions): string {
         )
       );
     },
+
+    // Handle `export * from './module'` re-exports
+    ExportAllDeclaration(nodePath: NodePath<t.ExportAllDeclaration>) {
+      const sourceValue = nodePath.node.source.value;
+
+      // Skip type-only exports
+      if (nodePath.node.exportKind === 'type') {
+        nodePath.remove();
+        return;
+      }
+
+      const isExternal = isExternalImport(sourceValue);
+      const source = resolveImportSource(sourceValue, filename, sourceRoot);
+
+      if (esm) {
+        // In ESM mode, keep export * as-is for external modules
+        if (isExternal) {
+          return;
+        }
+        // For local modules in ESM mode, we need to re-export through __hot
+        // This is tricky - for now, keep the export * and let it work normally
+        // The imported module will have its own __hot wrappers
+        return;
+      }
+
+      // CJS mode: Transform to load module and copy all exports to __m
+      // export * from './foo' becomes:
+      //   __hot.require('src/main/pipeline/foo');
+      //   Object.assign(__m, __hot.get('src/main/pipeline/foo'));
+      const statements: t.Statement[] = [];
+
+      if (!isExternal) {
+        // Local module: use __hot.require and __hot.get
+        statements.push(
+          t.expressionStatement(
+            t.callExpression(
+              t.memberExpression(t.identifier("__hot"), t.identifier("require")),
+              [t.stringLiteral(source)]
+            )
+          )
+        );
+        statements.push(
+          t.expressionStatement(
+            t.callExpression(
+              t.memberExpression(t.identifier("Object"), t.identifier("assign")),
+              [
+                t.identifier("__m"),
+                t.callExpression(
+                  t.memberExpression(t.identifier("__hot"), t.identifier("get")),
+                  [t.stringLiteral(source)]
+                )
+              ]
+            )
+          )
+        );
+      } else {
+        // External module: use regular require
+        statements.push(
+          t.expressionStatement(
+            t.callExpression(
+              t.memberExpression(t.identifier("Object"), t.identifier("assign")),
+              [
+                t.identifier("__m"),
+                t.callExpression(t.identifier("require"), [t.stringLiteral(sourceValue)])
+              ]
+            )
+          )
+        );
+      }
+
+      nodePath.replaceWithMultiple(statements);
+    },
   });
 
   // Third pass: handle once() calls in expression statements

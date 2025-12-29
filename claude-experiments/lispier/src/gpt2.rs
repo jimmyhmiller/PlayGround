@@ -856,9 +856,131 @@ pub extern "C" fn my_fopen(path: *const i8, mode: *const i8) -> *mut libc::FILE 
     result
 }
 
+// ============================================================================
+// Environment-based path resolution with nice error messages
+// ============================================================================
+
+/// Cached checkpoint path (leaked string for stable pointer)
+static CHECKPOINT_PATH: AtomicPtr<i8> = AtomicPtr::new(std::ptr::null_mut());
+static TOKENIZER_PATH: AtomicPtr<i8> = AtomicPtr::new(std::ptr::null_mut());
+
+fn get_llm_c_dir() -> String {
+    // Check LLM_C_PATH environment variable first
+    if let Ok(path) = std::env::var("LLM_C_PATH") {
+        return path;
+    }
+
+    // Fall back to ~/llm.c
+    if let Ok(home) = std::env::var("HOME") {
+        return format!("{}/llm.c", home);
+    }
+
+    // Last resort
+    "/tmp/llm.c".to_string()
+}
+
+/// Get the checkpoint path, checking environment and providing helpful errors
+/// Returns null-terminated C string pointer (leaked for stable pointer)
+#[unsafe(no_mangle)]
+pub extern "C" fn gpt2_get_checkpoint_path() -> *const i8 {
+    // Return cached path if already computed
+    let cached = CHECKPOINT_PATH.load(Ordering::SeqCst);
+    if !cached.is_null() {
+        return cached;
+    }
+
+    let dir = get_llm_c_dir();
+    let path = format!("{}/gpt2_124M.bin", dir);
+
+    // Check if file exists
+    if !std::path::Path::new(&path).exists() {
+        eprintln!("\n╔═══════════════════════════════════════════════════════════════════╗");
+        eprintln!("║  ERROR: GPT-2 checkpoint not found!                               ║");
+        eprintln!("╠═══════════════════════════════════════════════════════════════════╣");
+        eprintln!("║  Expected path: {:<50} ║", path);
+        eprintln!("║                                                                   ║");
+        eprintln!("║  To fix this, either:                                             ║");
+        eprintln!("║  1. Set LLM_C_PATH environment variable:                          ║");
+        eprintln!("║     export LLM_C_PATH=/path/to/llm.c                              ║");
+        eprintln!("║                                                                   ║");
+        eprintln!("║  2. Or download the checkpoint:                                   ║");
+        eprintln!("║     git clone https://github.com/karpathy/llm.c ~/llm.c           ║");
+        eprintln!("║     cd ~/llm.c && bash dev/download_starter_pack.sh               ║");
+        eprintln!("╚═══════════════════════════════════════════════════════════════════╝\n");
+        std::process::exit(1);
+    }
+
+    eprintln!("Using checkpoint: {}", path);
+
+    // Create null-terminated string and leak it for stable pointer
+    let c_string = std::ffi::CString::new(path).unwrap();
+    let ptr = c_string.into_raw();
+    CHECKPOINT_PATH.store(ptr, Ordering::SeqCst);
+    ptr
+}
+
+/// MLIR ciface wrapper for gpt2_get_checkpoint_path (passes return via pointer)
+#[unsafe(no_mangle)]
+pub extern "C" fn __mlir_ciface_gpt2_get_checkpoint_path(result: *mut *const i8) {
+    unsafe {
+        *result = gpt2_get_checkpoint_path();
+    }
+}
+
+/// Get the tokenizer path, checking environment and providing helpful errors
+#[unsafe(no_mangle)]
+pub extern "C" fn gpt2_get_tokenizer_path() -> *const i8 {
+    // Return cached path if already computed
+    let cached = TOKENIZER_PATH.load(Ordering::SeqCst);
+    if !cached.is_null() {
+        return cached;
+    }
+
+    let dir = get_llm_c_dir();
+    let path = format!("{}/gpt2_tokenizer.bin", dir);
+
+    // Check if file exists
+    if !std::path::Path::new(&path).exists() {
+        eprintln!("\n╔═══════════════════════════════════════════════════════════════════╗");
+        eprintln!("║  ERROR: GPT-2 tokenizer not found!                                ║");
+        eprintln!("╠═══════════════════════════════════════════════════════════════════╣");
+        eprintln!("║  Expected path: {:<50} ║", path);
+        eprintln!("║                                                                   ║");
+        eprintln!("║  To fix this, either:                                             ║");
+        eprintln!("║  1. Set LLM_C_PATH environment variable:                          ║");
+        eprintln!("║     export LLM_C_PATH=/path/to/llm.c                              ║");
+        eprintln!("║                                                                   ║");
+        eprintln!("║  2. Or download the tokenizer:                                    ║");
+        eprintln!("║     git clone https://github.com/karpathy/llm.c ~/llm.c           ║");
+        eprintln!("║     cd ~/llm.c && bash dev/download_starter_pack.sh               ║");
+        eprintln!("╚═══════════════════════════════════════════════════════════════════╝\n");
+        std::process::exit(1);
+    }
+
+    eprintln!("Using tokenizer: {}", path);
+
+    // Create null-terminated string and leak it for stable pointer
+    let c_string = std::ffi::CString::new(path).unwrap();
+    let ptr = c_string.into_raw();
+    TOKENIZER_PATH.store(ptr, Ordering::SeqCst);
+    ptr
+}
+
+/// MLIR ciface wrapper for gpt2_get_tokenizer_path (passes return via pointer)
+#[unsafe(no_mangle)]
+pub extern "C" fn __mlir_ciface_gpt2_get_tokenizer_path(result: *mut *const i8) {
+    unsafe {
+        *result = gpt2_get_tokenizer_path();
+    }
+}
+
 /// Get FFI function list for JIT registration
 pub fn get_gpt2_ffi_functions() -> Vec<(&'static str, *mut ())> {
     vec![
+        ("gpt2_get_checkpoint_path", gpt2_get_checkpoint_path as *mut ()),
+        ("__mlir_ciface_gpt2_get_checkpoint_path", __mlir_ciface_gpt2_get_checkpoint_path as *mut ()),
+        ("gpt2_get_tokenizer_path", gpt2_get_tokenizer_path as *mut ()),
+        ("__mlir_ciface_gpt2_get_tokenizer_path", __mlir_ciface_gpt2_get_tokenizer_path as *mut ()),
         ("gpt2_load_checkpoint", gpt2_load_checkpoint as *mut ()),
         ("gpt2_load_debug_state", gpt2_load_debug_state as *mut ()),
         ("gpt2_get_params_ptr", gpt2_get_params_ptr as *mut ()),

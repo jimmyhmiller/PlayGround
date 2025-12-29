@@ -647,6 +647,50 @@ impl<'c> IRGenerator<'c> {
                 continue;
             }
 
+            // Handle function_type for llvm.func - must use !llvm.func<ret (args)> format
+            if name == "llvm.func" && key == "function_type" {
+                if let AttributeValue::FunctionType(ft) = value {
+                    // Build type string like "!llvm.func<ptr ()>" or "!llvm.func<i32 (ptr, ...)>"
+                    let args_str = ft.arg_types.iter()
+                        .map(|t| {
+                            // Convert !llvm.ptr to ptr for LLVM function type syntax
+                            if t.name == "!llvm.ptr" { "ptr".to_string() }
+                            else { t.name.clone() }
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ");
+
+                    // Add ... for vararg functions
+                    let final_args_str = if ft.is_vararg {
+                        if args_str.is_empty() {
+                            "...".to_string()
+                        } else {
+                            format!("{}, ...", args_str)
+                        }
+                    } else {
+                        args_str
+                    };
+
+                    let returns_str = if ft.return_types.is_empty() {
+                        "void".to_string()
+                    } else if ft.return_types.len() == 1 {
+                        let ret = &ft.return_types[0].name;
+                        if ret == "!llvm.ptr" { "ptr".to_string() }
+                        else { ret.clone() }
+                    } else {
+                        // Multiple returns not supported in LLVM
+                        "void".to_string()
+                    };
+
+                    let type_str = format!("!llvm.func<{} ({})>", returns_str, final_args_str);
+                    if let Some(mlir_type) = Type::parse(context, &type_str) {
+                        let type_attr = TypeAttribute::new(mlir_type);
+                        named_attrs.push((Identifier::new(context, key), type_attr.into()));
+                    }
+                }
+                continue;
+            }
+
             // Handle vararg attribute for llvm.call - convert function type to vararg(!llvm.func<...>)
             if name == "llvm.call" && key == "vararg" {
                 if let AttributeValue::FunctionType(ft) = value {

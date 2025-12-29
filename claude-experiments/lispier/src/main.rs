@@ -630,10 +630,12 @@ fn compile_and_run_nodes(nodes: &[Node], program_args: &[String]) -> Result<(), 
 
     // Separate link libraries into well-known ones (like :c) and file paths
     let mut needs_libc = false;
+    let mut needs_gpt2_ffi = false;
     let mut file_libs: Vec<String> = Vec::new();
     for lib in &link_libs {
         match lib.library.as_str() {
             ":c" | ":libc" | ":m" | ":libm" => needs_libc = true,
+            ":gpt2-ffi" => needs_gpt2_ffi = true,
             _ => file_libs.push(lib.resolve_path()),
         }
     }
@@ -652,6 +654,13 @@ fn compile_and_run_nodes(nodes: &[Node], program_args: &[String]) -> Result<(), 
     if needs_libc {
         unsafe {
             jit.register_libc();
+        }
+    }
+
+    // Register GPT-2 FFI symbols if needed
+    if needs_gpt2_ffi {
+        unsafe {
+            jit.register_gpt2_ffi();
         }
     }
 

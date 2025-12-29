@@ -1,0 +1,125 @@
+{
+  "name": "Pipeline Demo",
+  "description": "Unix-pipes style data processing - drop a CSV file to see it visualized",
+  "layout": {
+    "type": "layout",
+    "direction": "horizontal",
+    "gap": 12,
+    "padding": 12,
+    "children": [
+      {
+        "type": "layout",
+        "direction": "vertical",
+        "gap": 8,
+        "flex": 0,
+        "style": { "width": 280 },
+        "children": [
+          {
+            "type": "file-drop",
+            "flex": 0,
+            "props": {
+              "channel": "$scope.file",
+              "accept": ".csv,.json,.txt",
+              "title": "Drop CSV, JSON, or Text File"
+            }
+          },
+          {
+            "type": "pipeline",
+            "flex": 0,
+            "props": {
+              "showStatus": true,
+              "config": {
+                "id": "csv-pipeline",
+                "name": "CSV → Table",
+                "source": "file.dropped.$scope.file",
+                "sink": "parsed.$scope.data",
+                "stages": [
+                  { "processor": "map", "config": { "path": "content" } },
+                  { "processor": "csv" },
+                  { "processor": "flatten" }
+                ]
+              }
+            }
+          },
+          {
+            "type": "pipeline",
+            "flex": 0,
+            "props": {
+              "showStatus": true,
+              "config": {
+                "id": "json-pipeline",
+                "name": "JSON → Table",
+                "source": "file.dropped.$scope.file",
+                "sink": "parsed.$scope.data",
+                "stages": [
+                  { "processor": "filter", "config": { "contains": { "field": "fileName", "value": ".json" } } },
+                  { "processor": "map", "config": { "path": "content" } },
+                  { "processor": "json" },
+                  { "processor": "flatten" }
+                ]
+              }
+            }
+          },
+          {
+            "type": "processor-list",
+            "flex": 1,
+            "props": {}
+          }
+        ]
+      },
+      {
+        "type": "layout",
+        "direction": "vertical",
+        "gap": 8,
+        "flex": 1,
+        "children": [
+          {
+            "type": "table",
+            "flex": 1,
+            "props": {
+              "subscribePattern": "parsed.$scope.data",
+              "maxRows": 20,
+              "title": "Parsed Data"
+            }
+          },
+          {
+            "type": "event-display",
+            "flex": 0,
+            "props": {
+              "subscribePattern": "parsed.$scope.data",
+              "maxEvents": 5,
+              "title": "Recent Events"
+            }
+          }
+        ]
+      },
+      {
+        "type": "layout",
+        "direction": "vertical",
+        "gap": 8,
+        "flex": 1,
+        "children": [
+          {
+            "type": "chart",
+            "flex": 1,
+            "props": {
+              "subscribePattern": "parsed.$scope.data",
+              "chartType": "line",
+              "maxPoints": 50,
+              "title": "Data Chart"
+            }
+          },
+          {
+            "type": "stats",
+            "flex": 0,
+            "props": {
+              "subscribePattern": "parsed.$scope.data",
+              "dataKey": "Your total earnings",
+              "showStats": true
+            }
+          }
+        ]
+      }
+    ]
+  }
+}

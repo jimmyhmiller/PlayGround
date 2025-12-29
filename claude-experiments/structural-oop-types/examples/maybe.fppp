@@ -1,0 +1,30 @@
+// Maybe monad - optional values
+// Nothing represents absence, Just wraps a present value
+
+{
+  class Nothing {
+    isNothing: true,
+    map: (f) => Nothing(),
+    flatMap: (f) => Nothing(),
+    getOrElse: (default_) => default_,
+    show: "Nothing"
+  }
+
+  class Just(value) {
+    isNothing: false,
+    map: (f) => Just(f(value)),
+    flatMap: (f) => f(value),
+    getOrElse: (default_) => value,
+    show: "Just(" ++ value ++ ")"
+  }
+
+  // Safe division
+  class SafeDiv(a, b) {
+    ...(b == 0 ? Nothing() : Just(a / b))
+  }
+
+  // Test: 10 / 2, then add 5, show result
+  SafeDiv(10, 2)
+    .map((x) => x + 5)
+    .show
+}

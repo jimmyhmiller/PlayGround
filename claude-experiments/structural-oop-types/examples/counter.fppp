@@ -1,0 +1,14 @@
+// Counter - a simple example of OO-style state
+// Demonstrates classes returning `this` for method chaining
+
+{
+  class Counter(n) {
+    value: n,
+    inc: () => Counter(n + 1),
+    dec: () => Counter(n - 1),
+    add: (m) => Counter(n + m),
+    show: "Counter(" ++ n ++ ")"
+  }
+
+  Counter(0).inc().inc().inc().add(10).value
+}

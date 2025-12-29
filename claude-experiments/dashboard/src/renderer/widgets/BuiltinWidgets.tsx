@@ -8,6 +8,7 @@
 import React, { memo, useCallback, useState, useEffect, useMemo, useRef, useId, type ReactElement } from 'react';
 import { useBackendStateSelector, useDispatch, useBackendState } from '../hooks/useBackendState';
 import { useEventSubscription, useEmit, useEventReducer } from '../hooks/useEvents';
+import { usePersistentState } from '../hooks/useWidgetState';
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, LineChart, Line } from 'recharts';
 
 // CodeMirror imports for syntax highlighting
@@ -558,9 +559,9 @@ export const EvalWidget = memo(function EvalWidget({
 export interface ChartWidgetProps {
   /** Event pattern to subscribe to */
   subscribePattern: string;
-  /** Key to extract numeric value from event payload */
+  /** Key to extract numeric value from event payload (auto-detected if not specified) */
   dataKey?: string;
-  /** Key to extract label from event payload */
+  /** Key to extract label from event payload (auto-detected if not specified) */
   labelKey?: string;
   /** Chart type */
   chartType?: 'bar' | 'line';
@@ -570,25 +571,82 @@ export interface ChartWidgetProps {
   height?: number;
   /** Title */
   title?: string;
+  /** Show column selectors */
+  showSelectors?: boolean;
+}
+
+// Helper to detect if a value looks numeric (including string numbers)
+function isNumericValue(val: unknown): boolean {
+  if (typeof val === 'number') return true;
+  if (typeof val === 'string') {
+    const trimmed = val.replace(/[$%,]/g, '').trim();
+    // Must be entirely numeric (not just start with a number like "2023-08")
+    return trimmed !== '' && !isNaN(Number(trimmed)) && isFinite(Number(trimmed));
+  }
+  return false;
+}
+
+// Helper to parse numeric value from string or number
+function parseNumericValue(val: unknown): number {
+  if (typeof val === 'number') return val;
+  if (typeof val === 'string') {
+    const trimmed = val.replace(/[$%,]/g, '').trim();
+    return parseFloat(trimmed) || 0;
+  }
+  return 0;
 }
 
 export const ChartWidget = memo(function ChartWidget({
   subscribePattern,
-  dataKey = 'value',
-  labelKey = 'name',
+  dataKey: configDataKey,
+  labelKey: configLabelKey,
   chartType = 'bar',
   maxPoints = 20,
   height = 150,
   title,
+  showSelectors = true,
 }: ChartWidgetProps): ReactElement {
   const events = useEventSubscription(subscribePattern, { maxEvents: maxPoints });
+
+  // Persist selected keys - usePersistentState is a drop-in for useState
+  const [selectedDataKey, setSelectedDataKey] = usePersistentState<string | null>('selectedDataKey', null);
+  const [selectedLabelKey, setSelectedLabelKey] = usePersistentState<string | null>('selectedLabelKey', null);
+
+  // Detect available columns from first event
+  const { numericColumns, labelColumns } = useMemo(() => {
+    if (events.length === 0) {
+      return { numericColumns: [] as string[], labelColumns: [] as string[] };
+    }
+
+    const payload = events[0].payload as Record<string, unknown>;
+    if (!payload || typeof payload !== 'object') {
+      return { numericColumns: [] as string[], labelColumns: [] as string[] };
+    }
+
+    const numeric: string[] = [];
+    const labels: string[] = [];
+
+    for (const [key, value] of Object.entries(payload)) {
+      if (isNumericValue(value)) {
+        numeric.push(key);
+      } else if (typeof value === 'string') {
+        labels.push(key);
+      }
+    }
+
+    return { numericColumns: numeric, labelColumns: labels };
+  }, [events]);
+
+  // Determine active keys (config > selected > auto-detected)
+  const dataKey = configDataKey || selectedDataKey || numericColumns[0] || 'value';
+  const labelKey = configLabelKey || selectedLabelKey || labelColumns[0] || 'name';
 
   const chartData = useMemo(() => {
     return events.map((event, index) => {
       const payload = event.payload as Record<string, unknown>;
       return {
         name: payload[labelKey] ?? `#${index + 1}`,
-        value: typeof payload[dataKey] === 'number' ? payload[dataKey] : 0,
+        value: parseNumericValue(payload[dataKey]),
       };
     });
   }, [events, dataKey, labelKey]);
@@ -601,13 +659,60 @@ export const ChartWidget = memo(function ChartWidget({
     );
   }
 
+  const selectStyle: React.CSSProperties = {
+    padding: '2px 6px',
+    fontSize: '0.75em',
+    background: 'var(--theme-bg-tertiary)',
+    color: 'var(--theme-text-primary)',
+    border: '1px solid var(--theme-border-primary)',
+    borderRadius: 'var(--theme-radius-sm)',
+    cursor: 'pointer',
+  };
+
   return (
     <div style={{ ...baseWidgetStyle, padding: 0 }}>
-      {title && (
-        <div style={{ padding: '8px 12px', fontSize: '0.8em', color: 'var(--theme-text-muted)', borderBottom: '1px solid var(--theme-border-primary)' }}>
-          {title}
-        </div>
-      )}
+      <div style={{
+        padding: '8px 12px',
+        fontSize: '0.8em',
+        color: 'var(--theme-text-muted)',
+        borderBottom: '1px solid var(--theme-border-primary)',
+        display: 'flex',
+        justifyContent: 'space-between',
+        alignItems: 'center',
+        gap: 8,
+      }}>
+        <span>{title || 'Chart'}</span>
+        {showSelectors && numericColumns.length > 0 && (
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            <label style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+              <span style={{ fontSize: '0.9em' }}>Y:</span>
+              <select
+                value={dataKey}
+                onChange={(e) => setSelectedDataKey(e.target.value)}
+                style={selectStyle}
+              >
+                {numericColumns.map((col) => (
+                  <option key={col} value={col}>{col}</option>
+                ))}
+              </select>
+            </label>
+            {labelColumns.length > 0 && (
+              <label style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                <span style={{ fontSize: '0.9em' }}>X:</span>
+                <select
+                  value={labelKey}
+                  onChange={(e) => setSelectedLabelKey(e.target.value)}
+                  style={selectStyle}
+                >
+                  {labelColumns.map((col) => (
+                    <option key={col} value={col}>{col}</option>
+                  ))}
+                </select>
+              </label>
+            )}
+          </div>
+        )}
+      </div>
       <ResponsiveContainer width="100%" height={height}>
         {chartType === 'bar' ? (
           <BarChart data={chartData} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
@@ -637,8 +742,8 @@ export const ChartWidget = memo(function ChartWidget({
 export interface TableWidgetProps {
   /** Event pattern to subscribe to */
   subscribePattern: string;
-  /** Columns to display (keys from payload) */
-  columns: string[];
+  /** Columns to display (keys from payload). If empty/omitted, auto-detects from data. */
+  columns?: string[];
   /** Column headers (optional, defaults to column keys) */
   headers?: string[];
   /** Max rows to show */
@@ -649,12 +754,27 @@ export interface TableWidgetProps {
 
 export const TableWidget = memo(function TableWidget({
   subscribePattern,
-  columns,
+  columns: configColumns,
   headers,
   maxRows = 10,
   title,
 }: TableWidgetProps): ReactElement {
   const events = useEventSubscription(subscribePattern, { maxEvents: maxRows });
+
+  // Auto-detect columns from first event if not specified
+  const columns = useMemo(() => {
+    if (configColumns && configColumns.length > 0) {
+      return configColumns;
+    }
+    // Detect from first event's payload
+    if (events.length > 0) {
+      const firstPayload = events[0].payload as Record<string, unknown>;
+      if (firstPayload && typeof firstPayload === 'object') {
+        return Object.keys(firstPayload);
+      }
+    }
+    return [];
+  }, [configColumns, events]);
 
   const displayHeaders = headers ?? columns;
 
@@ -748,7 +868,8 @@ export const StatsWidget = memo(function StatsWidget({
     subscribePattern,
     (state, event) => {
       const payload = event.payload as Record<string, unknown>;
-      const value = typeof payload[dataKey] === 'number' ? payload[dataKey] as number : NaN;
+      const rawValue = payload[dataKey];
+      const value = parseNumericValue(rawValue);
 
       if (isNaN(value)) return state;
 
@@ -946,7 +1067,8 @@ export const EvalCodeEditor = memo(function EvalCodeEditor({
   args,
   channel,
 }: EvalCodeEditorProps): ReactElement {
-  const [code, setCode] = useState(initialCode);
+  // Persist code - usePersistentState is a drop-in for useState
+  const [code, setCode] = usePersistentState('code', initialCode);
   const [isRunning, setIsRunning] = useState(false);
   const [executorReady, setExecutorReady] = useState(false);
   const emit = useEmit();
@@ -1169,7 +1291,8 @@ export const Selector = memo(function Selector({
   title,
   direction = 'vertical',
 }: SelectorProps): ReactElement {
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  // Persist selection - usePersistentState is a drop-in for useState
+  const [selectedId, setSelectedId] = usePersistentState<string | null>('selectedId', null);
   const events = useEventSubscription(subscribePattern ?? '__none__', { maxEvents: 1 });
   const emit = useEmit();
 
@@ -1313,7 +1436,10 @@ export const CodeBlock = memo(function CodeBlock({
 }: CodeBlockProps): ReactElement {
   const [fileContent, setFileContent] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
-  const [currentFile, setCurrentFile] = useState<string | null>(null);
+
+  // Persist current file - usePersistentState is a drop-in for useState
+  const [currentFile, setCurrentFile] = usePersistentState<string | null>('currentFile', null);
+
   const codeEvents = useEventSubscription(subscribePattern ?? '__none__', { maxEvents: 1 });
   const fileEvents = useEventSubscription(filePattern ?? '__none__', { maxEvents: 1 });
   const editorRef = useRef<HTMLDivElement>(null);
@@ -1482,8 +1608,10 @@ export const WebView = memo(function WebView({
   const webviewRef = useRef<HTMLWebViewElement>(null);
   const events = useEventSubscription(subscribePattern ?? '__none__', { maxEvents: 1 });
   const [loading, setLoading] = useState(false);
-  const [currentUrl, setCurrentUrl] = useState<string>('');
   const [error, setError] = useState<string | null>(null);
+
+  // Persist current URL - usePersistentState is a drop-in for useState
+  const [currentUrl, setCurrentUrl] = usePersistentState('currentUrl', '');
 
   // Determine URL
   const url = useMemo(() => {
@@ -1958,11 +2086,11 @@ export const WIDGET_TYPES: Record<string, WidgetTypeConfig> = {
   },
   'chart': {
     component: ChartWidget as unknown as React.ComponentType<Record<string, unknown>>,
-    defaultProps: { subscribePattern: 'data.**', dataKey: 'value', chartType: 'bar' },
+    defaultProps: { subscribePattern: 'data.**', chartType: 'bar' },
   },
   'table': {
     component: TableWidget as unknown as React.ComponentType<Record<string, unknown>>,
-    defaultProps: { subscribePattern: 'data.**', columns: ['value'] },
+    defaultProps: { subscribePattern: 'data.**' },
   },
   'stats': {
     component: StatsWidget as unknown as React.ComponentType<Record<string, unknown>>,

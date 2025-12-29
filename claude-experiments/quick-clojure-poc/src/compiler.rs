@@ -1,7 +1,9 @@
 use crate::arm_codegen::Arm64CodeGen;
 use crate::clojure_ast::{CatchClause, Expr};
+use crate::gc;
 use crate::gc_runtime::GCRuntime;
 use crate::ir::{Condition, Instruction, IrBuilder, IrValue, Label};
+use crate::trampoline::Trampoline;
 use crate::value::Value;
 use std::cell::UnsafeCell;
 use std::collections::HashMap;
@@ -200,6 +202,8 @@ impl Compiler {
             return self.compile_toplevel_do(forms);
         }
 
+        // Reset builder for each top-level expression to start with fresh temp registers
+        self.builder.reset();
         let result = self.compile(expr)?;
         self.builder.emit(Instruction::Ret(result));
         Ok(result)
@@ -246,6 +250,22 @@ impl Compiler {
             // Generate machine code
             let compiled = Arm64CodeGen::compile_function(&instructions, num_locals, 0)
                 .map_err(|e| format!("Codegen error in toplevel do: {}", e))?;
+
+            // Register stack maps BEFORE execution - critical for GC safety
+            unsafe {
+                let rt = &mut *self.runtime.get();
+                for (pc, stack_size) in &compiled.stack_map {
+                    rt.add_stack_map_entry(
+                        *pc,
+                        gc::StackMapDetails {
+                            function_name: None,
+                            number_of_locals: compiled.num_stack_slots,
+                            current_stack_size: *stack_size,
+                            max_stack_size: *stack_size,
+                        },
+                    );
+                }
+            }
 
             // Execute this form
             let trampoline = Trampoline::new(64 * 1024);
@@ -610,11 +630,11 @@ impl Compiler {
             .builder
             .assign_new(IrValue::RawConstant(field_values.len() as i64));
 
-        // Pass FramePointer (x29) and ReturnAddress (x30) as first two args for GC stack walking
+        // Pass FramePointer (x29) for GC stack walking. gc_return_addr is computed internally.
         self.builder.emit(Instruction::ExternalCall(
             raw_ptr,
             builtin_addr,
-            vec![IrValue::FramePointer, IrValue::ReturnAddress, type_id_reg, field_count_reg],
+            vec![IrValue::FramePointer, type_id_reg, field_count_reg],
         ));
 
         // Step 2: Write field values using HeapStore
@@ -1824,28 +1844,49 @@ impl Compiler {
 
         // Step 5: Create function object
         let fn_obj_reg = self.builder.new_register();
+        let closure_count = closure_values.len();
+
+        // For closures: emit PushToStack + CurrentStackPosition sequence (Beagle pattern)
+        // This ensures closure values are in FP-relative stack slots that GC can scan
+        // Values must be pushed in REVERSE order because:
+        // - Stack grows DOWN (lower addresses)
+        // - from_raw_parts reads at INCREASING addresses
+        // - So values[0] must end up at the LOWEST address (last pushed)
+        let values_ptr = if !closure_values.is_empty() {
+            // Push each closure value in REVERSE order to FP-relative stack
+            for value in closure_values.iter().rev() {
+                self.builder.emit(Instruction::PushToStack(*value));
+            }
+
+            // After all pushes, get pointer to values[0] (the last pushed value)
+            // CurrentStackPosition gives the NEXT available slot, so we add 8
+            // to point to where values[0] actually is
+            let next_slot_ptr = self.builder.new_register();
+            self.builder
+                .emit(Instruction::CurrentStackPosition(next_slot_ptr));
+
+            // values_ptr = next_slot_ptr + 8
+            let ptr_reg = self.builder.new_register();
+            let eight = self.builder.assign_new(IrValue::RawConstant(8));
+            self.builder
+                .emit(Instruction::AddInt(ptr_reg, next_slot_ptr, eight));
+
+            ptr_reg
+        } else {
+            // No closures - use a dummy value (won't be used)
+            IrValue::TaggedConstant(0)
+        };
 
         if arities.len() == 1 && variadic_min.is_none() {
             // Single fixed arity - create function pointer
             let code_ptr = compiled_arities[0].1;
 
-            if closure_values.is_empty() {
-                // Regular function (no closures) - use MakeFunctionPtr for simple tagging
-                self.builder.emit(Instruction::MakeFunctionPtr(
-                    fn_obj_reg,
-                    code_ptr,
-                    vec![], // No closures
-                ));
-            } else {
-                // Closure - allocate heap object via ExternalCall
-                // Need to allocate stack space for values first (done in lowering pass or codegen)
-                // For now, emit MakeFunctionPtr with closure_values - will refactor codegen later
-                self.builder.emit(Instruction::MakeFunctionPtr(
-                    fn_obj_reg,
-                    code_ptr,
-                    closure_values,
-                ));
-            }
+            self.builder.emit(Instruction::MakeFunctionPtr(
+                fn_obj_reg,
+                code_ptr,
+                values_ptr,
+                closure_count,
+            ));
         } else {
             // Multi-arity or variadic - use MakeMultiArityFn
             let arity_table: Vec<(usize, usize)> = compiled_arities
@@ -1858,8 +1899,14 @@ impl Compiler {
                 arity_table,
                 variadic_min,
                 variadic_index,
-                closure_values,
+                values_ptr,
+                closure_count,
             ));
+        }
+
+        // Pop closure values from logical stack after allocation
+        if closure_count > 0 {
+            self.builder.emit(Instruction::PopFromStack(closure_count));
         }
 
         Ok(fn_obj_reg)
@@ -2023,12 +2070,14 @@ impl Compiler {
             Arm64CodeGen::compile_function(&fn_instructions, num_locals, reserved_exception_slots)?;
 
         // Register stack map with runtime for GC
+        // NOTE: number_of_locals must be the TOTAL stack slots (spills + exceptions + locals)
+        // so that GC can find dynamic saves pushed after the reserved slots
         unsafe {
             let rt = &mut *self.runtime.get();
             for (pc, stack_size) in &compiled.stack_map {
                 rt.add_stack_map_entry(*pc, crate::gc::StackMapDetails {
                     function_name: None,
-                    number_of_locals: num_locals,
+                    number_of_locals: compiled.num_stack_slots,
                     current_stack_size: *stack_size,
                     max_stack_size: *stack_size,
                 });
@@ -2659,13 +2708,13 @@ impl Compiler {
             .emit(float_op(float_result, left_float, right_float));
 
         // Allocate new float on heap and get tagged pointer
-        // Call builtin_allocate_float(frame_pointer, gc_return_addr, f64_bits) -> tagged_ptr
+        // Call builtin_allocate_float(frame_pointer, f64_bits) -> tagged_ptr
         let builtin_addr = crate::trampoline::builtin_allocate_float as usize;
-        // Use FramePointer (x29) and ReturnAddress (x30) for GC stack walking
+        // Use FramePointer (x29) for GC stack walking. gc_return_addr is computed internally.
         self.builder.emit(Instruction::ExternalCall(
             result,
             builtin_addr,
-            vec![IrValue::FramePointer, IrValue::ReturnAddress, float_result],
+            vec![IrValue::FramePointer, float_result],
         ));
 
         self.builder.emit(Instruction::Label(done));
@@ -3007,14 +3056,14 @@ impl Compiler {
 
     fn compile_builtin_gc(&mut self, _args: &[Expr]) -> Result<IrValue, String> {
         // __gc takes no arguments and returns nil
-        // Call builtin_gc(frame_pointer, gc_return_addr) -> nil
+        // Call builtin_gc(frame_pointer) -> nil
         let result = self.builder.new_register();
         let builtin_addr = crate::trampoline::builtin_gc as usize;
-        // Use FramePointer (x29) and ReturnAddress (x30) for GC stack walking
+        // Use FramePointer (x29) for GC stack walking. gc_return_addr is computed internally.
         self.builder.emit(Instruction::ExternalCall(
             result,
             builtin_addr,
-            vec![IrValue::FramePointer, IrValue::ReturnAddress],
+            vec![IrValue::FramePointer],
         ));
         Ok(result)
     }
@@ -3030,11 +3079,11 @@ impl Compiler {
         let length_reg = self.builder.assign_new(length);
         let result = self.builder.new_register();
         let builtin_addr = crate::trampoline::builtin_make_array as usize;
-        // Allocating operation - pass FramePointer and ReturnAddress for GC
+        // Allocating operation - pass FramePointer for GC. gc_return_addr is computed internally.
         self.builder.emit(Instruction::ExternalCall(
             result,
             builtin_addr,
-            vec![IrValue::FramePointer, IrValue::ReturnAddress, length_reg],
+            vec![IrValue::FramePointer, length_reg],
         ));
         Ok(result)
     }
@@ -3104,11 +3153,11 @@ impl Compiler {
         let array_reg = self.builder.assign_new(array);
         let result = self.builder.new_register();
         let builtin_addr = crate::trampoline::builtin_aclone as usize;
-        // Allocating operation - pass FramePointer and ReturnAddress for GC
+        // Allocating operation - pass FramePointer for GC. gc_return_addr is computed internally.
         self.builder.emit(Instruction::ExternalCall(
             result,
             builtin_addr,
-            vec![IrValue::FramePointer, IrValue::ReturnAddress, array_reg],
+            vec![IrValue::FramePointer, array_reg],
         ));
         Ok(result)
     }

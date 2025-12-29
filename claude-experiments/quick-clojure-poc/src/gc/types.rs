@@ -114,7 +114,8 @@ impl BuiltInTypes {
         // First check: must have a heap pointer tag
         let is_heap_tagged = match BuiltInTypes::get_kind(value) {
             BuiltInTypes::Int => false,
-            BuiltInTypes::Float => true,
+            // Floats are embedded values (tagged float bits), NOT heap pointers
+            BuiltInTypes::Float => false,
             BuiltInTypes::String => true, // Strings ARE heap objects that need tracing
             BuiltInTypes::Bool => false,
             BuiltInTypes::Function => false,

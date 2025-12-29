@@ -29,6 +29,10 @@
 
 import { memo, useState, useEffect, useId, useRef, useCallback, createContext, useContext, type ReactElement, type CSSProperties } from 'react';
 import { WIDGET_TYPES } from '../widgets/BuiltinWidgets';
+import { WidgetIdContext, type WidgetIdContextValue } from '../hooks/useWidgetId';
+
+// Re-export for backwards compatibility
+export { useWidgetId } from '../hooks/useWidgetId';
 
 // ========== Scope Context ==========
 // Each WidgetLayout gets a unique scope ID that child widgets can use
@@ -137,9 +141,10 @@ function isWindowGroup(config: LayoutConfig): config is WindowGroupConfig {
 
 interface WidgetNodeProps {
   config: WidgetNodeConfig;
+  path: string;
 }
 
-const WidgetNode = memo(function WidgetNode({ config }: WidgetNodeProps): ReactElement {
+const WidgetNode = memo(function WidgetNode({ config, path }: WidgetNodeProps): ReactElement {
   const scope = useContext(ScopeContext);
   const typeConfig = WIDGET_TYPES[config.type];
 
@@ -162,16 +167,24 @@ const WidgetNode = memo(function WidgetNode({ config }: WidgetNodeProps): ReactE
   const rawProps = { ...typeConfig.defaultProps, ...config.props };
   const props = replaceScope(rawProps, scope) as Record<string, unknown>;
 
-  return <Component {...props} />;
+  // Provide widget ID context for state persistence
+  const widgetIdValue: WidgetIdContextValue = { path, scope };
+
+  return (
+    <WidgetIdContext.Provider value={widgetIdValue}>
+      <Component {...props} />
+    </WidgetIdContext.Provider>
+  );
 });
 
 // ========== Layout Node Renderer ==========
 
 interface LayoutNodeProps {
   config: LayoutNodeConfig;
+  path: string;
 }
 
-const LayoutNode = memo(function LayoutNode({ config }: LayoutNodeProps): ReactElement {
+const LayoutNode = memo(function LayoutNode({ config, path }: LayoutNodeProps): ReactElement {
   const {
     direction = 'horizontal',
     gap = 8,
@@ -197,6 +210,9 @@ const LayoutNode = memo(function LayoutNode({ config }: LayoutNodeProps): ReactE
           ? { flex: '0 0 auto' }  // Don't grow, don't shrink, use content size
           : { flex: flexValue, minWidth: 0, minHeight: 0 };  // Grow, can shrink
 
+        // Build child path
+        const childPath = `${path}.children.${index}`;
+
         return (
           <div
             key={index}
@@ -206,7 +222,7 @@ const LayoutNode = memo(function LayoutNode({ config }: LayoutNodeProps): ReactE
               ...child.style,
             }}
           >
-            <ConfigNode config={child} />
+            <ConfigNode config={child} path={childPath} />
           </div>
         );
       })}
@@ -227,6 +243,7 @@ interface PaneState {
 interface FloatingPaneProps {
   config: FloatingPaneConfig;
   state: PaneState;
+  path: string;
   onMove: (id: string, x: number, y: number) => void;
   onResize: (id: string, width: number, height: number) => void;
   onFocus: (id: string) => void;
@@ -235,6 +252,7 @@ interface FloatingPaneProps {
 const FloatingPane = memo(function FloatingPane({
   config,
   state,
+  path,
   onMove,
   onResize,
   onFocus,
@@ -339,7 +357,7 @@ const FloatingPane = memo(function FloatingPane({
 
       {/* Content */}
       <div style={{ flex: 1, overflow: 'hidden', minHeight: 0 }}>
-        <ConfigNode config={config.widget} />
+        <ConfigNode config={config.widget} path={`${path}.widget`} />
       </div>
 
       {/* Resize handle */}
@@ -366,9 +384,10 @@ const FloatingPane = memo(function FloatingPane({
 
 interface FloatingLayoutProps {
   config: FloatingLayoutConfig;
+  path: string;
 }
 
-const FloatingLayout = memo(function FloatingLayout({ config }: FloatingLayoutProps): ReactElement {
+const FloatingLayout = memo(function FloatingLayout({ config, path }: FloatingLayoutProps): ReactElement {
   const [paneStates, setPaneStates] = useState<Record<string, PaneState>>(() => {
     const initial: Record<string, PaneState> = {};
     config.panes.forEach((pane, index) => {
@@ -422,6 +441,7 @@ const FloatingLayout = memo(function FloatingLayout({ config }: FloatingLayoutPr
           key={pane.id}
           config={pane}
           state={paneStates[pane.id]!}
+          path={`${path}.pane.${pane.id}`}
           onMove={handleMove}
           onResize={handleResize}
           onFocus={handleFocus}
@@ -435,9 +455,10 @@ const FloatingLayout = memo(function FloatingLayout({ config }: FloatingLayoutPr
 
 interface ConfigNodeProps {
   config: LayoutConfig;
+  path: string;
 }
 
-const ConfigNode = memo(function ConfigNode({ config }: ConfigNodeProps): ReactElement {
+const ConfigNode = memo(function ConfigNode({ config, path }: ConfigNodeProps): ReactElement {
   if (isWindowGroup(config)) {
     // window-group is handled at the command/loader level, not here
     return (
@@ -447,12 +468,12 @@ const ConfigNode = memo(function ConfigNode({ config }: ConfigNodeProps): ReactE
     );
   }
   if (isFloatingLayout(config)) {
-    return <FloatingLayout config={config} />;
+    return <FloatingLayout config={config} path={path} />;
   }
   if (isLayoutNode(config)) {
-    return <LayoutNode config={config} />;
+    return <LayoutNode config={config} path={path} />;
   }
-  return <WidgetNode config={config} />;
+  return <WidgetNode config={config} path={path} />;
 });
 
 // ========== Main WidgetLayout Component ==========
@@ -491,14 +512,26 @@ export const WidgetLayout = memo(function WidgetLayout({
   background = 'var(--theme-bg-secondary)',
   padding = 8,
   scope,
+  windowId,
 }: WidgetLayoutProps): ReactElement {
   const [loadedConfig, setLoadedConfig] = useState<LayoutConfig | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
-  // Use provided scope or generate a unique one
+  // Use provided scope, or derive stable scope from configPath, or generate one
   const generatedScope = useId().replace(/:/g, '');
-  const scopeId = scope ?? generatedScope;
+  // For file-based dashboards: use configPath as stable scope (same file = same state)
+  // For dynamic dashboards without configPath: use windowId if available
+  // This ensures state persists when reopening the same dashboard file
+  const stableScope = configPath
+    ? `file:${configPath}`
+    : windowId
+      ? `window:${windowId}`
+      : generatedScope;
+  const scopeId = scope ?? stableScope;
+
+  // Debug logging
+  console.log(`[WidgetLayout] configPath="${configPath}", windowId="${windowId}", scopeId="${scopeId}"`);
 
   // Load config from file if configPath is provided
   useEffect(() => {
@@ -598,7 +631,7 @@ export const WidgetLayout = memo(function WidgetLayout({
         padding,
         boxSizing: 'border-box',
       }}>
-        <ConfigNode config={activeConfig} />
+        <ConfigNode config={activeConfig} path="root" />
       </div>
     </ScopeContext.Provider>
   );

@@ -1,0 +1,43 @@
+// Monadic Interpreter - based on Wadler's "Monads for functional programming"
+// A simple arithmetic expression interpreter with error handling
+
+{
+  // Monad: Success (Unit) and Error
+  class Unit(value) {
+    bind: (f) => f(value),
+    map: (f) => Unit(f(value)),
+    show: "Success: " ++ value
+  }
+
+  class ErrorM(message) {
+    bind: (f) => ErrorM(message),
+    map: (f) => ErrorM(message),
+    show: "Error: " ++ message
+  }
+
+  // Expressions
+  class Con(n) {
+    eval_: () => Unit(n)
+  }
+
+  class Add(left, right) {
+    eval_: () =>
+      left.eval_().bind((a) =>
+        right.eval_().bind((b) =>
+          Unit(a + b)
+        )
+      )
+  }
+
+  class Div(left, right) {
+    eval_: () =>
+      left.eval_().bind((a) =>
+        right.eval_().bind((b) =>
+          b == 0 ? ErrorM("division by zero") : Unit(a / b)
+        )
+      )
+  }
+
+  // Test: (10 / 2) + 3 = 8
+  Add(Div(Con(10), Con(2)), Con(3)).eval_().show
+}

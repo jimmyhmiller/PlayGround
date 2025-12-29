@@ -775,19 +775,20 @@
               (memref.store b_val fc_b i)
               (scf.yield))))
 
-        ;; Copy fc proj weights (3072 x 768)
-        (scf.for c0 c3072 c1
+        ;; Copy fc proj weights - llm.c stores as weight[oc*(4*C)+ic] (row stride = 4*C = 3072)
+        ;; Transpose load: checkpoint[oc*3072+ic] -> fcproj_w[ic][oc]
+        (scf.for c0 c768 c1  ; outer loop over oc (output dim)
           (region
-            (block [(: i index)]
-              (def i_i64 (arith.index_cast {:result i64} i))
-              (def row_base (arith.addi fcprojw_offset (arith.muli i_i64 (: 768 i64))))
-              (scf.for c0 c768 c1
+            (block [(: oc index)]
+              (def oc_i64 (arith.index_cast {:result i64} oc))
+              (def row_base (arith.addi fcprojw_offset (arith.muli oc_i64 (: 3072 i64))))  ; row_stride = 3072
+              (scf.for c0 c3072 c1  ; inner loop over ic (input dim)
                 (region
-                  (block [(: j index)]
-                    (def j_i64 (arith.index_cast {:result i64} j))
-                    (def w_ptr (ptr-at f32 params_ptr (arith.addi row_base j_i64)))
+                  (block [(: ic index)]
+                    (def ic_i64 (arith.index_cast {:result i64} ic))
+                    (def w_ptr (ptr-at f32 params_ptr (arith.addi row_base ic_i64)))
                     (def w_val (llvm.load {:result f32} w_ptr))
-                    (memref.store w_val fcproj_w i j)
+                    (memref.store w_val fcproj_w ic oc)
                     (scf.yield))))
               (scf.yield))))
 

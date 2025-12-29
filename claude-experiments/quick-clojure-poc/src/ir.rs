@@ -168,7 +168,11 @@ pub enum Instruction {
     Assign(IrValue, IrValue), // dst, src
 
     // Function operations
-    MakeFunctionPtr(IrValue, usize, Vec<IrValue>), // MakeFunctionPtr(dst, code_ptr, closure_values) - create function with raw code pointer
+    /// MakeFunctionPtr(dst, code_ptr, values_ptr, closure_count)
+    /// Create function with raw code pointer
+    /// For closures: values_ptr points to FP-relative stack slots (from CurrentStackPosition)
+    /// For non-closures: values_ptr is ignored, closure_count is 0
+    MakeFunctionPtr(IrValue, usize, IrValue, usize),
     LoadClosure(IrValue, IrValue, usize), // LoadClosure(dst, fn_obj, index) - load closure variable
     Call(IrValue, IrValue, Vec<IrValue>), // Call(dst, fn, args) - invoke function
 
@@ -178,12 +182,27 @@ pub enum Instruction {
     /// saves: registers to save/restore across the call
     CallWithSaves(IrValue, CallTarget, Vec<IrValue>, Vec<IrValue>),
 
+    // Stack operations for closure value handling (Beagle pattern)
+    // These ensure closure values are in FP-relative stack slots that GC can scan
+    /// CurrentStackPosition(dst) - get pointer to where next push will go
+    /// Computes FP - ((num_stack_slots + current_stack_size + 1) * 8)
+    CurrentStackPosition(IrValue),
+
+    /// PushToStack(value) - push value to FP-relative stack, increment stack_size
+    /// The pushed value will be included in stack map for GC scanning
+    PushToStack(IrValue),
+
+    /// PopFromStack(count) - logically pop N values (just decrements stack_size)
+    PopFromStack(usize),
+
     // Multi-arity function operations
-    /// MakeMultiArityFn(dst, arities, variadic_min, variadic_index, closure_values)
+    /// MakeMultiArityFn(dst, arities, variadic_min, variadic_index, values_ptr, closure_count)
     /// arities: Vec of (param_count, code_ptr) pairs
     /// variadic_min: If Some, the minimum arg count for variadic dispatch
     /// variadic_index: If Some, the index of the variadic arity in the arities table
-    MakeMultiArityFn(IrValue, Vec<(usize, usize)>, Option<usize>, Option<usize>, Vec<IrValue>),
+    /// values_ptr: pointer to FP-relative stack slots with closure values
+    /// closure_count: number of closure values
+    MakeMultiArityFn(IrValue, Vec<(usize, usize)>, Option<usize>, Option<usize>, IrValue, usize),
 
     /// LoadClosureMultiArity(dst, fn_obj, arity_count, index)
     /// Load closure variable from multi-arity function (needs arity_count to compute offset)

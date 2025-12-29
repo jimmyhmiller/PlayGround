@@ -51,6 +51,9 @@ export const DEFAULT_STATE: AppState = {
     ],
     widgets: [],
   },
+  widgetState: {
+    data: {},
+  },
 };
 
 /**

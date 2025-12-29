@@ -32,23 +32,25 @@
 
 (module
   (do
-    ;; String constants
+
+    ;; Hardcoded paths - set LLM_C_PATH env var in shell before running
+    ;; or modify these paths directly
     (llvm.mlir.global {:sym_name "checkpoint_path"
                        :linkage 0
-                       :global_type !llvm.array<39 x i8>
+                       :global_type !llvm.array<55 x i8>
                        :constant true}
       (region
         (block []
-          (def s (llvm.mlir.constant {:value "/home/jimmyhmiller/llm.c/gpt2_124M.bin\0" :result !llvm.array<39 x i8>}))
+          (def s (llvm.mlir.constant {:value "/Users/jimmyhmiller/Documents/Code/llm.c/gpt2_124M.bin\0" :result !llvm.array<55 x i8>}))
           (llvm.return s))))
 
     (llvm.mlir.global {:sym_name "tokenizer_path"
                        :linkage 0
-                       :global_type !llvm.array<44 x i8>
+                       :global_type !llvm.array<60 x i8>
                        :constant true}
       (region
         (block []
-          (def s (llvm.mlir.constant {:value "/home/jimmyhmiller/llm.c/gpt2_tokenizer.bin\0" :result !llvm.array<44 x i8>}))
+          (def s (llvm.mlir.constant {:value "/Users/jimmyhmiller/Documents/Code/llm.c/gpt2_tokenizer.bin\0" :result !llvm.array<60 x i8>}))
           (llvm.return s))))
 
     (llvm.mlir.global {:sym_name "read_mode"
@@ -157,19 +159,22 @@
 
     ;; =========================================================================
     ;; Math helper: tanh via exp
+    ;; For |x| > 10, tanh ≈ ±1 (clamp to avoid overflow issues)
     ;; tanh(x) = (exp(2x) - 1) / (exp(2x) + 1)
     ;; =========================================================================
     (func.func {:sym_name "my_tanhf"
                 :function_type (-> [f32] [f32])}
       (region
         (block [(: x f32)]
-          (def two (: 2.0 f32))
           (def one (: 1.0 f32))
-          (def two_x (arith.mulf two x))
+          (def two (: 2.0 f32))
+          (def threshold (: 10.0 f32))
+          ;; Clamp x to [-10, 10] to avoid exp overflow (tanh saturates to ±1 anyway)
+          (def x_clamped (arith.minimumf (arith.maximumf x (arith.negf threshold)) threshold))
+          (def two_x (arith.mulf two x_clamped))
           (def exp_2x (func.call {:result f32} "my_expf" two_x))
-          (def num (arith.subf exp_2x one))
-          (def denom (arith.addf exp_2x one))
-          (def result (arith.divf num denom))
+          ;; tanh(x) = (exp(2x) - 1) / (exp(2x) + 1)
+          (def result (arith.divf (arith.subf exp_2x one) (arith.addf exp_2x one)))
           (func.return result))))
 
     ;; =========================================================================
@@ -756,7 +761,7 @@
 ;; etc.
 
 (defn main [] -> i64
-  ;; Load checkpoint
+  ;; Load checkpoint (hardcoded path - modify checkpoint_path global if needed)
   (def path (llvm.mlir.addressof {:global_name @checkpoint_path :result !llvm.ptr}))
   (def mode (llvm.mlir.addressof {:global_name @read_mode :result !llvm.ptr}))
   (def file (call !llvm.ptr fopen path mode))
@@ -827,7 +832,7 @@
   ;;  14. lnfw:     C
   ;;  15. lnfb:     C
   ;; =========================================================================
-  (def size_wte (arith.muli Vp C))
+  (def size_wte (arith.muli Vp C))  ; llm.c uses Vp (padded) for checkpoint storage
   (def size_wpe (arith.muli maxT C))
   (def size_ln1w (arith.muli L C))
   (def size_ln1b (arith.muli L C))
@@ -922,7 +927,7 @@
   (def wte_val_f64 (arith.extf {:result f64} wte_val))
   (print "wte[0][0] = %f\n" wte_val_f64)
 
-  ;; Load tokenizer
+  ;; Load tokenizer (hardcoded path - modify tokenizer_path global if needed)
   (def tok_path (llvm.mlir.addressof {:global_name @tokenizer_path :result !llvm.ptr}))
   (def _tok_ok (func.call {:result i32} "tokenizer_init" tok_path))
 
@@ -1074,20 +1079,20 @@
                     (scf.yield)))
                 (region (block [] (scf.yield))))
 
-              ;; qkv weights - llm.c stores as (C=768, OC=2304)
-              ;; Direct load: checkpoint[c*2304+oc] -> qkv_w[c][oc]
+              ;; qkv weights - llm.c stores as weight[oc*C+c] (row stride = C)
+              ;; Transpose load: checkpoint[oc*C+c] -> qkv_w[c][oc]
               (def qkvw_offset (arith.addi qkvw_base (arith.muli layer_i64 qkvw_stride)))
               (def qkvb_offset (arith.addi qkvb_base (arith.muli layer_i64 qkvb_stride)))
-              (scf.for c0 c768 c1
+              (scf.for c0 c2304 c1
                 (region
-                  (block [(: c index)]
-                    (def c_i64 (arith.index_cast {:result i64} c))
-                    (def row_offset (arith.muli c_i64 (: 2304 i64)))
-                    (scf.for c0 c2304 c1
+                  (block [(: oc index)]
+                    (def oc_i64 (arith.index_cast {:result i64} oc))
+                    (def row_offset (arith.muli oc_i64 C))  ; row_stride = C
+                    (scf.for c0 c768 c1
                       (region
-                        (block [(: oc index)]
-                          (def oc_i64 (arith.index_cast {:result i64} oc))
-                          (def w_ptr (ptr-at f32 params_ptr (arith.addi qkvw_offset (arith.addi row_offset oc_i64))))
+                        (block [(: c index)]
+                          (def c_i64 (arith.index_cast {:result i64} c))
+                          (def w_ptr (ptr-at f32 params_ptr (arith.addi qkvw_offset (arith.addi row_offset c_i64))))
                           (memref.store (llvm.load {:result f32} w_ptr) qkv_w c oc)
                           (scf.yield))))
                     (scf.yield))))
@@ -1099,20 +1104,20 @@
                     (memref.store (llvm.load {:result f32} b_ptr) qkv_b i)
                     (scf.yield))))
 
-              ;; attention projection weights - llm.c stores as (C=768, OC=768)
-              ;; Direct load: checkpoint[c*768+oc] -> attn_w[c][oc]
+              ;; attention projection weights - llm.c stores as weight[oc*C+c] (row stride = C)
+              ;; Transpose load: checkpoint[oc*C+c] -> attn_w[c][oc]
               (def attprojw_offset (arith.addi attprojw_base (arith.muli layer_i64 attprojw_stride)))
               (def attprojb_offset (arith.addi attprojb_base (arith.muli layer_i64 attprojb_stride)))
               (scf.for c0 c768 c1
                 (region
-                  (block [(: c index)]
-                    (def c_i64 (arith.index_cast {:result i64} c))
-                    (def row_offset (arith.muli c_i64 (: 768 i64)))
+                  (block [(: oc index)]
+                    (def oc_i64 (arith.index_cast {:result i64} oc))
+                    (def row_offset (arith.muli oc_i64 C))  ; row_stride = C
                     (scf.for c0 c768 c1
                       (region
-                        (block [(: oc index)]
-                          (def oc_i64 (arith.index_cast {:result i64} oc))
-                          (def w_ptr (ptr-at f32 params_ptr (arith.addi attprojw_offset (arith.addi row_offset oc_i64))))
+                        (block [(: c index)]
+                          (def c_i64 (arith.index_cast {:result i64} c))
+                          (def w_ptr (ptr-at f32 params_ptr (arith.addi attprojw_offset (arith.addi row_offset c_i64))))
                           (memref.store (llvm.load {:result f32} w_ptr) attn_w c oc)
                           (scf.yield))))
                     (scf.yield))))
@@ -1138,20 +1143,20 @@
                     (memref.store (llvm.load {:result f32} b_ptr) ln2_b i)
                     (scf.yield))))
 
-              ;; fc weights - llm.c stores as (C=768, OC=3072)
-              ;; Direct load: checkpoint[c*3072+oc] -> fc_w[c][oc]
+              ;; fc weights - llm.c stores as weight[oc*C+c] (row stride = C)
+              ;; Transpose load: checkpoint[oc*C+c] -> fc_w[c][oc]
               (def fcw_offset (arith.addi fcw_base (arith.muli layer_i64 fcw_stride)))
               (def fcb_offset (arith.addi fcb_base (arith.muli layer_i64 fcb_stride)))
-              (scf.for c0 c768 c1
+              (scf.for c0 c3072 c1
                 (region
-                  (block [(: c index)]
-                    (def c_i64 (arith.index_cast {:result i64} c))
-                    (def row_offset (arith.muli c_i64 (: 3072 i64)))
-                    (scf.for c0 c3072 c1
+                  (block [(: oc index)]
+                    (def oc_i64 (arith.index_cast {:result i64} oc))
+                    (def row_offset (arith.muli oc_i64 C))  ; row_stride = C
+                    (scf.for c0 c768 c1
                       (region
-                        (block [(: oc index)]
-                          (def oc_i64 (arith.index_cast {:result i64} oc))
-                          (def w_ptr (ptr-at f32 params_ptr (arith.addi fcw_offset (arith.addi row_offset oc_i64))))
+                        (block [(: c index)]
+                          (def c_i64 (arith.index_cast {:result i64} c))
+                          (def w_ptr (ptr-at f32 params_ptr (arith.addi fcw_offset (arith.addi row_offset c_i64))))
                           (memref.store (llvm.load {:result f32} w_ptr) fc_w c oc)
                           (scf.yield))))
                     (scf.yield))))
@@ -1167,13 +1172,15 @@
               (scf.if do_layer2_debug
                 (region
                   (block []
-                    ;; Print raw checkpoint values for fc_w - now with stride 3072
+                    ;; Print raw checkpoint values for fc_w
                     (def fcw_raw0 (llvm.load {:result f32} (ptr-at f32 params_ptr fcw_offset)))
                     (def fcw_raw1 (llvm.load {:result f32} (ptr-at f32 params_ptr (arith.addi fcw_offset (: 1 i64)))))
+                    (def fcw_raw768 (llvm.load {:result f32} (ptr-at f32 params_ptr (arith.addi fcw_offset (: 768 i64)))))
                     (def fcw_raw3072 (llvm.load {:result f32} (ptr-at f32 params_ptr (arith.addi fcw_offset (: 3072 i64)))))
-                    (print "Layer 2 fc_w RAW checkpoint:\n  [0]: %.6f  [1]: %.6f  [3072]: %.6f\n"
+                    (print "Layer 2 fc_w RAW checkpoint:\n  [0]: %.6f  [1]: %.6f  [768]: %.6f  [3072]: %.6f\n"
                            (arith.extf {:result f64} fcw_raw0)
                            (arith.extf {:result f64} fcw_raw1)
+                           (arith.extf {:result f64} fcw_raw768)
                            (arith.extf {:result f64} fcw_raw3072))
                     ;; Print loaded values - column 0 (expect raw[0], raw[3072], raw[6144], ...)
                     (def fw0 (memref.load fc_w (: 0 index) (: 0 index)))
@@ -1181,7 +1188,7 @@
                     (def fw2 (memref.load fc_w (: 2 index) (: 0 index)))
                     (def fw3 (memref.load fc_w (: 3 index) (: 0 index)))
                     (def fw4 (memref.load fc_w (: 4 index) (: 0 index)))
-                    (print "Layer 2 fc_w loaded [0..4][0] (expect raw[0,3072,6144...]): %.6f %.6f %.6f %.6f %.6f\n"
+                    (print "Layer 2 fc_w loaded [0..4][0] (expect raw[0,1,2,3,4]): %.6f %.6f %.6f %.6f %.6f\n"
                            (arith.extf {:result f64} fw0)
                            (arith.extf {:result f64} fw1)
                            (arith.extf {:result f64} fw2)
@@ -1190,20 +1197,20 @@
                     (scf.yield)))
                 (region (block [] (scf.yield))))
 
-              ;; fc projection weights - checkpoint stores as (IC=3072, OC=768)
-              ;; Direct load: checkpoint[ic*768+oc] -> fcproj_w[ic][oc]
+              ;; fc projection weights - llm.c stores as weight[oc*(4*C)+ic] (row stride = 4*C)
+              ;; Transpose load: checkpoint[oc*(4*C)+ic] -> fcproj_w[ic][oc]
               (def fcprojw_offset (arith.addi fcprojw_base (arith.muli layer_i64 fcprojw_stride)))
               (def fcprojb_offset (arith.addi fcprojb_base (arith.muli layer_i64 fcprojb_stride)))
-              (scf.for c0 c3072 c1
+              (scf.for c0 c768 c1  ; outer loop over oc (output dim = C)
                 (region
-                  (block [(: ic index)]
-                    (def ic_i64 (arith.index_cast {:result i64} ic))
-                    (def row_offset (arith.muli ic_i64 (: 768 i64)))
-                    (scf.for c0 c768 c1
+                  (block [(: oc index)]
+                    (def oc_i64 (arith.index_cast {:result i64} oc))
+                    (def row_offset (arith.muli oc_i64 C4))  ; row_stride = 4*C
+                    (scf.for c0 c3072 c1  ; inner loop over ic (input dim = 4*C)
                       (region
-                        (block [(: oc index)]
-                          (def oc_i64 (arith.index_cast {:result i64} oc))
-                          (def w_ptr (ptr-at f32 params_ptr (arith.addi fcprojw_offset (arith.addi row_offset oc_i64))))
+                        (block [(: ic index)]
+                          (def ic_i64 (arith.index_cast {:result i64} ic))
+                          (def w_ptr (ptr-at f32 params_ptr (arith.addi fcprojw_offset (arith.addi row_offset ic_i64))))
                           (memref.store (llvm.load {:result f32} w_ptr) fcproj_w ic oc)
                           (scf.yield))))
                     (scf.yield))))
@@ -1236,7 +1243,7 @@
                     (def fpw2 (memref.load fcproj_w (: 2 index) (: 0 index)))
                     (def fpw3 (memref.load fcproj_w (: 3 index) (: 0 index)))
                     (def fpw4 (memref.load fcproj_w (: 4 index) (: 0 index)))
-                    (print "Layer 2 fcprojw loaded [ic][0] (expect raw[0,768,1536,2304,3072]): %.6f %.6f %.6f %.6f %.6f\n"
+                    (print "Layer 2 fcprojw loaded [ic][0] (expect raw[0,1,2,3,4]): %.6f %.6f %.6f %.6f %.6f\n"
                            (arith.extf {:result f64} fpw0)
                            (arith.extf {:result f64} fpw1)
                            (arith.extf {:result f64} fpw2)
@@ -1548,6 +1555,30 @@
 
               (func.call "gelu_forward" gelu_out fc_out)
 
+              ;; Debug: verify gelu at 642 immediately after call
+              (scf.if do_layer2_debug
+                (region
+                  (block []
+                    (def fc642_check (memref.load fc_out (: 0 index) (: 642 index)))
+                    (def gelu642_check (memref.load gelu_out (: 0 index) (: 642 index)))
+                    ;; Manual gelu computation for fc[642]
+                    (def sqrt_2_over_pi (: 0.7978845608 f32))
+                    (def coeff (: 0.044715 f32))
+                    (def half (: 0.5 f32))
+                    (def one (: 1.0 f32))
+                    (def x fc642_check)
+                    (def x3 (arith.mulf x (arith.mulf x x)))
+                    (def inner (arith.mulf sqrt_2_over_pi (arith.addf x (arith.mulf coeff x3))))
+                    (def tanh_val (func.call {:result f32} "my_tanhf" inner))
+                    (def manual_gelu (arith.mulf (arith.mulf half x) (arith.addf one tanh_val)))
+                    (print "  DEBUG at 642: fc=%.6f gelu_stored=%.6f manual_gelu=%.6f tanh=%.6f\n"
+                           (arith.extf {:result f64} fc642_check)
+                           (arith.extf {:result f64} gelu642_check)
+                           (arith.extf {:result f64} manual_gelu)
+                           (arith.extf {:result f64} tanh_val))
+                    (scf.yield)))
+                (region (block [] (scf.yield))))
+
               ;; Debug: layer 2 gelu output
               (scf.if do_layer2_debug
                 (region
@@ -1563,6 +1594,32 @@
                            (arith.extf {:result f64} g2)
                            (arith.extf {:result f64} g3)
                            (arith.extf {:result f64} g4))
+                    ;; Print fc sum
+                    (def c3072_fc (: 3072 index))
+                    (def fc_sum (scf.for {:result f32} c0 c3072_fc c1 (: 0.0 f32)
+                      (region
+                        (block [(: cc index) (: acc f32)]
+                          (def fv (memref.load fc_out (: 0 index) cc))
+                          (scf.yield (arith.addf acc fv))))))
+                    (print "  Sum of all fc[0] values: %.6f\n" (arith.extf {:result f64} fc_sum))
+                    ;; Print fc at specific indices
+                    (def fc500 (memref.load fc_out (: 0 index) (: 500 index)))
+                    (def fc501 (memref.load fc_out (: 0 index) (: 501 index)))
+                    (def fc502 (memref.load fc_out (: 0 index) (: 502 index)))
+                    (def fc503 (memref.load fc_out (: 0 index) (: 503 index)))
+                    (def fc504 (memref.load fc_out (: 0 index) (: 504 index)))
+                    (print "  fc[500..504]: %.3f %.3f %.3f %.3f %.3f\n"
+                           (arith.extf {:result f64} fc500) (arith.extf {:result f64} fc501)
+                           (arith.extf {:result f64} fc502) (arith.extf {:result f64} fc503)
+                           (arith.extf {:result f64} fc504))
+                    ;; Print gelu sum BEFORE matmul_fc_proj
+                    (def c3072_gelu (: 3072 index))
+                    (def gelu_sum_before (scf.for {:result f32} c0 c3072_gelu c1 (: 0.0 f32)
+                      (region
+                        (block [(: cc index) (: acc f32)]
+                          (def gv (memref.load gelu_out (: 0 index) cc))
+                          (scf.yield (arith.addf acc gv))))))
+                    (print "  Sum of gelu[0] BEFORE matmul_fc_proj: %.6f\n" (arith.extf {:result f64} gelu_sum_before))
                     (scf.yield)))
                 (region (block [] (scf.yield))))
 
@@ -1603,6 +1660,216 @@
                            (arith.extf {:result f64} w100)
                            (arith.extf {:result f64} w1000)
                            (arith.extf {:result f64} w3000))
+                    ;; Print first 10 weights like C reference
+                    (def fpw0 (memref.load fcproj_w (: 0 index) (: 0 index)))
+                    (def fpw1 (memref.load fcproj_w (: 1 index) (: 0 index)))
+                    (def fpw2 (memref.load fcproj_w (: 2 index) (: 0 index)))
+                    (def fpw3 (memref.load fcproj_w (: 3 index) (: 0 index)))
+                    (def fpw4 (memref.load fcproj_w (: 4 index) (: 0 index)))
+                    (def fpw5 (memref.load fcproj_w (: 5 index) (: 0 index)))
+                    (def fpw6 (memref.load fcproj_w (: 6 index) (: 0 index)))
+                    (def fpw7 (memref.load fcproj_w (: 7 index) (: 0 index)))
+                    (def fpw8 (memref.load fcproj_w (: 8 index) (: 0 index)))
+                    (def fpw9 (memref.load fcproj_w (: 9 index) (: 0 index)))
+                    (print "  fcproj_w[0..9][0]: %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f\n"
+                           (arith.extf {:result f64} fpw0) (arith.extf {:result f64} fpw1)
+                           (arith.extf {:result f64} fpw2) (arith.extf {:result f64} fpw3)
+                           (arith.extf {:result f64} fpw4) (arith.extf {:result f64} fpw5)
+                           (arith.extf {:result f64} fpw6) (arith.extf {:result f64} fpw7)
+                           (arith.extf {:result f64} fpw8) (arith.extf {:result f64} fpw9))
+                    ;; Print gelu sum
+                    (def gelu_sum (scf.for {:result f32} c0 c3072 c1 (: 0.0 f32)
+                      (region
+                        (block [(: c index) (: acc f32)]
+                          (def gv (memref.load gelu_out (: 0 index) c))
+                          (scf.yield (arith.addf acc gv))))))
+                    (print "  Sum of all gelu[0] values: %.6f\n" (arith.extf {:result f64} gelu_sum))
+                    ;; Print gelu[500..509]
+                    (def g500 (memref.load gelu_out (: 0 index) (: 500 index)))
+                    (def g501 (memref.load gelu_out (: 0 index) (: 501 index)))
+                    (def g502 (memref.load gelu_out (: 0 index) (: 502 index)))
+                    (def g503 (memref.load gelu_out (: 0 index) (: 503 index)))
+                    (def g504 (memref.load gelu_out (: 0 index) (: 504 index)))
+                    (print "  gelu[500..504]: %.3f %.3f %.3f %.3f %.3f\n"
+                           (arith.extf {:result f64} g500) (arith.extf {:result f64} g501)
+                           (arith.extf {:result f64} g502) (arith.extf {:result f64} g503)
+                           (arith.extf {:result f64} g504))
+                    ;; Print gelu[2000..2004]
+                    (def g2000 (memref.load gelu_out (: 0 index) (: 2000 index)))
+                    (def g2001 (memref.load gelu_out (: 0 index) (: 2001 index)))
+                    (def g2002 (memref.load gelu_out (: 0 index) (: 2002 index)))
+                    (def g2003 (memref.load gelu_out (: 0 index) (: 2003 index)))
+                    (def g2004 (memref.load gelu_out (: 0 index) (: 2004 index)))
+                    (print "  gelu[2000..2004]: %.3f %.3f %.3f %.3f %.3f\n"
+                           (arith.extf {:result f64} g2000) (arith.extf {:result f64} g2001)
+                           (arith.extf {:result f64} g2002) (arith.extf {:result f64} g2003)
+                           (arith.extf {:result f64} g2004))
+                    ;; Print additional samples: gelu[505..509] and gelu[2005..2009]
+                    (def g505 (memref.load gelu_out (: 0 index) (: 505 index)))
+                    (def g506 (memref.load gelu_out (: 0 index) (: 506 index)))
+                    (def g507 (memref.load gelu_out (: 0 index) (: 507 index)))
+                    (def g508 (memref.load gelu_out (: 0 index) (: 508 index)))
+                    (def g509 (memref.load gelu_out (: 0 index) (: 509 index)))
+                    (print "  gelu[505..509]: %.3f %.3f %.3f %.3f %.3f\n"
+                           (arith.extf {:result f64} g505) (arith.extf {:result f64} g506)
+                           (arith.extf {:result f64} g507) (arith.extf {:result f64} g508)
+                           (arith.extf {:result f64} g509))
+                    (def g2005 (memref.load gelu_out (: 0 index) (: 2005 index)))
+                    (def g2006 (memref.load gelu_out (: 0 index) (: 2006 index)))
+                    (def g2007 (memref.load gelu_out (: 0 index) (: 2007 index)))
+                    (def g2008 (memref.load gelu_out (: 0 index) (: 2008 index)))
+                    (def g2009 (memref.load gelu_out (: 0 index) (: 2009 index)))
+                    (print "  gelu[2005..2009]: %.3f %.3f %.3f %.3f %.3f\n"
+                           (arith.extf {:result f64} g2005) (arith.extf {:result f64} g2006)
+                           (arith.extf {:result f64} g2007) (arith.extf {:result f64} g2008)
+                           (arith.extf {:result f64} g2009))
+                    ;; Print partial sums: first half (0..1536) and second half (1536..3072)
+                    (def c1536 (: 1536 index))
+                    (def c3072_local (: 3072 index))
+                    ;; Count iterations explicitly
+                    (def count_half1 (scf.for {:result i64} c0 c1536 c1 (: 0 i64)
+                      (region
+                        (block [(: cc index) (: cnt i64)]
+                          (scf.yield (arith.addi cnt (: 1 i64)))))))
+                    (def count_half2 (scf.for {:result i64} c1536 c3072_local c1 (: 0 i64)
+                      (region
+                        (block [(: cc index) (: cnt i64)]
+                          (scf.yield (arith.addi cnt (: 1 i64)))))))
+                    (print "  loop counts: half1=%ld half2=%ld\n" count_half1 count_half2)
+                    ;; Use f64 accumulation to rule out precision issues
+                    (def gelu_sum_half1_f64 (scf.for {:result f64} c0 c1536 c1 (: 0.0 f64)
+                      (region
+                        (block [(: cc index) (: acc f64)]
+                          (def gv (memref.load gelu_out (: 0 index) cc))
+                          (def gv64 (arith.extf {:result f64} gv))
+                          (scf.yield (arith.addf acc gv64))))))
+                    (def gelu_sum_half2_f64 (scf.for {:result f64} c1536 c3072_local c1 (: 0.0 f64)
+                      (region
+                        (block [(: cc index) (: acc f64)]
+                          (def gv (memref.load gelu_out (: 0 index) cc))
+                          (def gv64 (arith.extf {:result f64} gv))
+                          (scf.yield (arith.addf acc gv64))))))
+                    (print "  gelu sum (f64 accum) half1: %.6f, half2: %.6f\n" gelu_sum_half1_f64 gelu_sum_half2_f64)
+                    ;; Check memory layout: gelu[1][0] should be at offset 3072 from gelu[0][0]
+                    (def g_row1_col0 (memref.load gelu_out (: 1 index) (: 0 index)))
+                    (def fc_row1_col0 (memref.load fc_out (: 1 index) (: 0 index)))
+                    (print "  Memory check: gelu[1][0]=%.6f fc[1][0]=%.6f (should be position 1's data)\n"
+                           (arith.extf {:result f64} g_row1_col0)
+                           (arith.extf {:result f64} fc_row1_col0))
+                    ;; Print values at every 256 indices
+                    (def g256 (memref.load gelu_out (: 0 index) (: 256 index)))
+                    (def g512 (memref.load gelu_out (: 0 index) (: 512 index)))
+                    (def g1024 (memref.load gelu_out (: 0 index) (: 1024 index)))
+                    (def g1280 (memref.load gelu_out (: 0 index) (: 1280 index)))
+                    (def g1792 (memref.load gelu_out (: 0 index) (: 1792 index)))
+                    (def g2048 (memref.load gelu_out (: 0 index) (: 2048 index)))
+                    (def g2560 (memref.load gelu_out (: 0 index) (: 2560 index)))
+                    (def g2816 (memref.load gelu_out (: 0 index) (: 2816 index)))
+                    (print "  gelu[@256 intervals]: %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f\n"
+                           (arith.extf {:result f64} g256) (arith.extf {:result f64} g512)
+                           (arith.extf {:result f64} g1024) (arith.extf {:result f64} g1280)
+                           (arith.extf {:result f64} g1792) (arith.extf {:result f64} g2048)
+                           (arith.extf {:result f64} g2560) (arith.extf {:result f64} g2816))
+                    (def gelu_sum_half1 (scf.for {:result f32} c0 c1536 c1 (: 0.0 f32)
+                      (region
+                        (block [(: cc index) (: acc f32)]
+                          (def gv (memref.load gelu_out (: 0 index) cc))
+                          (scf.yield (arith.addf acc gv))))))
+                    (def gelu_sum_half2 (scf.for {:result f32} c1536 c3072_local c1 (: 0.0 f32)
+                      (region
+                        (block [(: cc index) (: acc f32)]
+                          (def gv (memref.load gelu_out (: 0 index) cc))
+                          (scf.yield (arith.addf acc gv))))))
+                    (print "  gelu sum half1[0..1536]: %.6f, half2[1536..3072]: %.6f\n"
+                           (arith.extf {:result f64} gelu_sum_half1)
+                           (arith.extf {:result f64} gelu_sum_half2))
+                    ;; Weighted sum: sum(i * gelu[i])
+                    (def weighted_sum (scf.for {:result f64} c0 c3072_local c1 (: 0.0 f64)
+                      (region
+                        (block [(: cc index) (: acc f64)]
+                          (def cc_f64 (arith.uitofp {:result f64} (arith.index_cast {:result i64} cc)))
+                          (def gv (memref.load gelu_out (: 0 index) cc))
+                          (def gv64 (arith.extf {:result f64} gv))
+                          (scf.yield (arith.addf acc (arith.mulf cc_f64 gv64)))))))
+                    (print "  gelu weighted sum (i*v): %.6f\n" weighted_sum)
+                    ;; Chunk sums for chunks 0, 10, 28, 42, 47 (to match C's pattern)
+                    (def c64 (: 64 index))
+                    (def c640 (: 640 index))
+                    (def c704 (: 704 index))
+                    (def c1792 (: 1792 index))
+                    (def c1856 (: 1856 index))
+                    (def c2688 (: 2688 index))
+                    (def c2752 (: 2752 index))
+                    (def c3008 (: 3008 index))
+                    (def chunk0_sum (scf.for {:result f64} c0 c64 c1 (: 0.0 f64)
+                      (region (block [(: i index) (: acc f64)]
+                        (def gv (memref.load gelu_out (: 0 index) i))
+                        (scf.yield (arith.addf acc (arith.extf {:result f64} gv)))))))
+                    (def chunk10_sum (scf.for {:result f64} c640 c704 c1 (: 0.0 f64)
+                      (region (block [(: i index) (: acc f64)]
+                        (def gv (memref.load gelu_out (: 0 index) i))
+                        (scf.yield (arith.addf acc (arith.extf {:result f64} gv)))))))
+                    (def chunk28_sum (scf.for {:result f64} c1792 c1856 c1 (: 0.0 f64)
+                      (region (block [(: i index) (: acc f64)]
+                        (def gv (memref.load gelu_out (: 0 index) i))
+                        (scf.yield (arith.addf acc (arith.extf {:result f64} gv)))))))
+                    (def chunk42_sum (scf.for {:result f64} c2688 c2752 c1 (: 0.0 f64)
+                      (region (block [(: i index) (: acc f64)]
+                        (def gv (memref.load gelu_out (: 0 index) i))
+                        (scf.yield (arith.addf acc (arith.extf {:result f64} gv)))))))
+                    (def chunk47_sum (scf.for {:result f64} c3008 c3072_local c1 (: 0.0 f64)
+                      (region (block [(: i index) (: acc f64)]
+                        (def gv (memref.load gelu_out (: 0 index) i))
+                        (scf.yield (arith.addf acc (arith.extf {:result f64} gv)))))))
+                    (print "  gelu chunk sums [0,10,28,42,47]: %.1f %.1f %.1f %.1f %.1f\n"
+                           chunk0_sum chunk10_sum chunk28_sum chunk42_sum chunk47_sum)
+                    ;; Print detailed chunk 10 (640-655)
+                    (def g640 (memref.load gelu_out (: 0 index) (: 640 index)))
+                    (def g641 (memref.load gelu_out (: 0 index) (: 641 index)))
+                    (def g642 (memref.load gelu_out (: 0 index) (: 642 index)))
+                    (def g643 (memref.load gelu_out (: 0 index) (: 643 index)))
+                    (def g644 (memref.load gelu_out (: 0 index) (: 644 index)))
+                    (def g645 (memref.load gelu_out (: 0 index) (: 645 index)))
+                    (def g646 (memref.load gelu_out (: 0 index) (: 646 index)))
+                    (def g647 (memref.load gelu_out (: 0 index) (: 647 index)))
+                    (print "  gelu[640..647]: %.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f\n"
+                           (arith.extf {:result f64} g640) (arith.extf {:result f64} g641)
+                           (arith.extf {:result f64} g642) (arith.extf {:result f64} g643)
+                           (arith.extf {:result f64} g644) (arith.extf {:result f64} g645)
+                           (arith.extf {:result f64} g646) (arith.extf {:result f64} g647))
+                    (def fc640 (memref.load fc_out (: 0 index) (: 640 index)))
+                    (def fc641 (memref.load fc_out (: 0 index) (: 641 index)))
+                    (def fc642 (memref.load fc_out (: 0 index) (: 642 index)))
+                    (def fc643 (memref.load fc_out (: 0 index) (: 643 index)))
+                    (def fc644 (memref.load fc_out (: 0 index) (: 644 index)))
+                    (def fc645 (memref.load fc_out (: 0 index) (: 645 index)))
+                    (def fc646 (memref.load fc_out (: 0 index) (: 646 index)))
+                    (def fc647 (memref.load fc_out (: 0 index) (: 647 index)))
+                    (print "  fc[640..647]: %.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f\n"
+                           (arith.extf {:result f64} fc640) (arith.extf {:result f64} fc641)
+                           (arith.extf {:result f64} fc642) (arith.extf {:result f64} fc643)
+                           (arith.extf {:result f64} fc644) (arith.extf {:result f64} fc645)
+                           (arith.extf {:result f64} fc646) (arith.extf {:result f64} fc647))
+                    ;; Print gelu at quarter marks: 768, 1536, 2304
+                    (def g768 (memref.load gelu_out (: 0 index) (: 768 index)))
+                    (def g1536 (memref.load gelu_out (: 0 index) (: 1536 index)))
+                    (def g2304 (memref.load gelu_out (: 0 index) (: 2304 index)))
+                    (def g3071 (memref.load gelu_out (: 0 index) (: 3071 index)))
+                    (print "  gelu[768,1536,2304,3071]: %.6f %.6f %.6f %.6f\n"
+                           (arith.extf {:result f64} g768)
+                           (arith.extf {:result f64} g1536)
+                           (arith.extf {:result f64} g2304)
+                           (arith.extf {:result f64} g3071))
+                    ;; Also print fc at same positions for verification
+                    (def fc768 (memref.load fc_out (: 0 index) (: 768 index)))
+                    (def fc1536 (memref.load fc_out (: 0 index) (: 1536 index)))
+                    (def fc2304 (memref.load fc_out (: 0 index) (: 2304 index)))
+                    (def fc3071 (memref.load fc_out (: 0 index) (: 3071 index)))
+                    (print "  fc[768,1536,2304,3071]: %.6f %.6f %.6f %.6f\n"
+                           (arith.extf {:result f64} fc768)
+                           (arith.extf {:result f64} fc1536)
+                           (arith.extf {:result f64} fc2304)
+                           (arith.extf {:result f64} fc3071))
                     (scf.yield)))
                 (region (block [] (scf.yield))))
 
@@ -1684,10 +1951,10 @@
                      (arith.extf {:result f64} x_pre496)
                      (arith.extf {:result f64} lnf_w496)
                      (arith.extf {:result f64} lnf_b496))
-              ;; Check raw checkpoint values for lnf
-              (def raw_lnfw0 (llvm.load {:result f32} (ptr-at f32 params_ptr (: 124474368 i64))))
-              (def raw_lnfw496 (llvm.load {:result f32} (ptr-at f32 params_ptr (: 124474864 i64))))  ; 124474368 + 496
-              (def raw_lnfb496 (llvm.load {:result f32} (ptr-at f32 params_ptr (: 124475632 i64))))  ; 124475136 + 496
+              ;; Check raw checkpoint values for lnf (use computed offsets)
+              (def raw_lnfw0 (llvm.load {:result f32} (ptr-at f32 params_ptr lnfw_base)))
+              (def raw_lnfw496 (llvm.load {:result f32} (ptr-at f32 params_ptr (arith.addi lnfw_base (: 496 i64)))))
+              (def raw_lnfb496 (llvm.load {:result f32} (ptr-at f32 params_ptr (arith.addi lnfb_base (: 496 i64)))))
               (print "Raw checkpoint: lnfw[0]=%.4f lnfw[496]=%.4f lnfb[496]=%.4f\n"
                      (arith.extf {:result f64} raw_lnfw0)
                      (arith.extf {:result f64} raw_lnfw496)

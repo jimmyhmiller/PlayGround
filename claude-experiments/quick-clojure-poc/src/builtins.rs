@@ -187,13 +187,14 @@ pub extern "C" fn builtin_print_space() -> usize {
 // Garbage collection
 // ============================================================================
 
-/// builtin_gc(frame_pointer, gc_return_addr) -> tagged_value (nil)
+/// builtin_gc(frame_pointer) -> tagged_value (nil)
 ///
 /// Forces a garbage collection.
 /// Returns nil (tagged value 7).
+/// Note: gc_return_addr is computed internally by reading from Rust's frame [x29 + 8]
 #[unsafe(no_mangle)]
-pub extern "C" fn builtin_gc(frame_pointer: usize, gc_return_addr: usize) -> usize {
-    trampoline::builtin_gc(frame_pointer, gc_return_addr)
+pub extern "C" fn builtin_gc(frame_pointer: usize) -> usize {
+    trampoline::builtin_gc(frame_pointer)
 }
 
 // ============================================================================

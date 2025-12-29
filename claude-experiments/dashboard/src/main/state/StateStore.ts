@@ -36,6 +36,9 @@ import type {
   SlotAddPayload,
   WidgetAddPayload,
   WidgetUpdatePayload,
+  WidgetStateSetPayload,
+  WidgetStateGetPayload,
+  WidgetStateClearPayload,
 } from '../../types/state';
 
 // Type for the events module
@@ -132,6 +135,8 @@ export class StateStore {
       this.saveTimeout = null;
     }
     try {
+      const widgetStateCount = Object.keys((this.state.widgetState?.data as Record<string, unknown>) || {}).length;
+      console.log(`[StateStore] Saving state to disk (${widgetStateCount} widget states)`);
       saveState(this.state);
     } catch (err) {
       console.error('StateStore: Failed to save:', err);
@@ -159,6 +164,8 @@ export class StateStore {
         return this.handleDashboardsCommand(action!, payload);
       case 'globalUI':
         return this.handleGlobalUICommand(action!, payload);
+      case 'widgetState':
+        return this.handleWidgetStateCommand(action!, payload);
       default:
         throw new Error(`Unknown command domain: ${domain}`);
     }
@@ -397,6 +404,7 @@ export class StateStore {
           name: 'Default',
           projectId,
           windows: [],
+          widgetState: {},
           createdAt: now,
           updatedAt: now,
         };
@@ -642,6 +650,7 @@ export class StateStore {
           name: p.name,
           projectId: p.projectId,
           windows: [],
+          widgetState: {},
           createdAt: now,
           updatedAt: now,
         };
@@ -1011,6 +1020,45 @@ export class StateStore {
 
       default:
         throw new Error(`Unknown globalUI action: ${action}`);
+    }
+  }
+
+  // ========== Widget State Commands ==========
+
+  private handleWidgetStateCommand(action: string, payload: unknown): CommandResult {
+    const widgetStateStorage = (this.getState('widgetState') as { data: Record<string, unknown> }) || { data: {} };
+
+    switch (action) {
+      case 'set': {
+        const p = payload as WidgetStateSetPayload;
+        console.log(`[StateStore] widgetState.set "${p.widgetId}":`, JSON.stringify(p.state).slice(0, 100));
+        this.setState('widgetState', {
+          data: {
+            ...widgetStateStorage.data,
+            [p.widgetId]: p.state,
+          },
+        });
+        console.log(`[StateStore] widgetState now has ${Object.keys(widgetStateStorage.data).length + 1} entries`);
+        return { success: true };
+      }
+
+      case 'get': {
+        const p = payload as WidgetStateGetPayload;
+        const value = widgetStateStorage.data[p.widgetId];
+        console.log(`[StateStore] widgetState.get "${p.widgetId}":`, value !== undefined ? 'found' : 'not found');
+        return { success: true, state: value } as CommandResult & { state: unknown };
+      }
+
+      case 'clear': {
+        const p = payload as WidgetStateClearPayload;
+        const newData = { ...widgetStateStorage.data };
+        delete newData[p.widgetId];
+        this.setState('widgetState', { data: newData });
+        return { success: true };
+      }
+
+      default:
+        throw new Error(`Unknown widgetState action: ${action}`);
     }
   }
 }

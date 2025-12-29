@@ -96,3 +96,23 @@ import_electron.contextBridge.exposeInMainWorld("stateAPI", {
     };
   }
 });
+import_electron.contextBridge.exposeInMainWorld("pipelineAPI", {
+  // Start a pipeline
+  start: (config) => import_electron.ipcRenderer.invoke("pipeline:start", config),
+  // Stop a pipeline
+  stop: (id) => import_electron.ipcRenderer.invoke("pipeline:stop", id),
+  // Get pipeline stats
+  stats: (id) => import_electron.ipcRenderer.invoke("pipeline:stats", id),
+  // Check if pipeline is running
+  isRunning: (id) => import_electron.ipcRenderer.invoke("pipeline:isRunning", id),
+  // List running pipeline IDs
+  list: () => import_electron.ipcRenderer.invoke("pipeline:list"),
+  // List running pipelines with details
+  listDetailed: () => import_electron.ipcRenderer.invoke("pipeline:listDetailed"),
+  // Stop all pipelines
+  stopAll: () => import_electron.ipcRenderer.invoke("pipeline:stopAll"),
+  // List available processor names
+  processors: () => import_electron.ipcRenderer.invoke("pipeline:processors"),
+  // Describe all processors (for LLM discovery)
+  describeProcessors: () => import_electron.ipcRenderer.invoke("pipeline:describeProcessors")
+});

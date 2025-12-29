@@ -13,6 +13,9 @@ pub struct CompiledFunction {
     pub code_len: usize,
     /// Stack map entries: (absolute_pc, stack_size)
     pub stack_map: Vec<(usize, usize)>,
+    /// Total number of stack slots (spills + exceptions + locals)
+    /// Used by GC to know how many slots to scan before dynamic saves
+    pub num_stack_slots: usize,
 }
 
 /// ARM64 code generator - compiles IR to ARM64 machine code
@@ -191,6 +194,9 @@ impl Arm64CodeGen {
         let prologue_placeholder_index = codegen.code.len();
         codegen.emit_sub_sp_imm(0xAAA); // Placeholder - will be patched
 
+        // Store num_stack_slots BEFORE set_all_locals_to_null so it knows how many slots to init
+        codegen.num_stack_slots = total_stack_slots;
+
         // Step 4: Initialize all local/spill slots to null (Beagle pattern)
         // This ensures GC won't see garbage as heap pointers during stack scanning.
         // Use x15 as scratch register (it's caller-saved and not used for arguments)
@@ -198,7 +204,6 @@ impl Arm64CodeGen {
         codegen.set_all_locals_to_null(15);
 
         // Store info for Ret to emit correct epilogue and for patching
-        codegen.num_stack_slots = total_stack_slots;
         codegen.function_stack_space = stack_space; // Initial estimate (spills only)
 
         // Reset stack tracking for push/pop during compilation
@@ -240,6 +245,7 @@ impl Arm64CodeGen {
             code_ptr,
             code_len: codegen.code.len(),
             stack_map,
+            num_stack_slots: codegen.num_stack_slots,
         })
     }
 
@@ -708,20 +714,41 @@ impl Arm64CodeGen {
                 self.store_spill(dst_reg, dest_spill);
             }
 
-            Instruction::MakeFunctionPtr(dst, code_ptr, closure_values) => {
+            // Stack operations for closure handling (Beagle pattern)
+            Instruction::CurrentStackPosition(dst) => {
+                // Get pointer to where next push will go
+                // This is FP - ((num_stack_slots + current_stack_size + 1) * 8)
+                let dest_spill = self.dest_spill(dst);
+                let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
+                self.get_current_stack_position(dst_reg);
+                self.store_spill(dst_reg, dest_spill);
+            }
+
+            Instruction::PushToStack(value) => {
+                // Push value to FP-relative stack, increment stack_size
+                let src_reg = self.get_physical_reg_for_irvalue(value, false)?;
+                self.push_to_stack(src_reg);
+            }
+
+            Instruction::PopFromStack(count) => {
+                // Logically pop N values (just decrements stack_size)
+                self.decrement_stack_size(*count);
+            }
+
+            Instruction::MakeFunctionPtr(dst, code_ptr, values_ptr, closure_count) => {
                 // MakeFunctionPtr: create function with raw code pointer
-                // eprintln!("DEBUG: MakeFunctionPtr - dst={:?}, code_ptr={:x}, closure_values={:?}", dst, code_ptr, closure_values);
+                // For closures: values_ptr points to FP-relative stack slots
+                // The compiler already emitted CurrentStackPosition + PushToStack for closure values
 
                 let dest_spill = self.dest_spill(dst);
                 let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
 
-                if closure_values.is_empty() {
+                if *closure_count == 0 {
                     // Regular function (no closures) - just tag the code pointer
                     // Tagged value = (code_ptr << 3) | 0b100
-                    // eprintln!("DEBUG: MakeFunctionPtr - creating regular function (no closures)");
 
                     // Load raw code pointer into temp register
-                    let temp_reg = 10; // Use x10 as temporary
+                    let temp_reg = 10;
                     self.emit_mov_imm(temp_reg, *code_ptr as i64);
 
                     // Shift left by 3 and add Function tag (0b100)
@@ -733,56 +760,35 @@ impl Arm64CodeGen {
                     let add_instruction =
                         0x91000000u32 | (0b100 << 10) | ((dst_reg as u32) << 5) | (dst_reg as u32);
                     self.code.push(add_instruction);
-
-                    // eprintln!("DEBUG: MakeFunctionPtr - tagged function pointer in x{}", dst_reg);
                 } else {
-                    // Closure - allocate heap object with closure values
-                    // eprintln!("DEBUG: MakeFunctionPtr - creating closure with {} captured values", closure_values.len());
+                    // Closure - allocate heap object
+                    // values_ptr already points to pushed closure values (from CurrentStackPosition)
+                    // Values already pushed via PushToStack instructions
 
-                    // Step 1: Allocate stack space for all values
-                    let total_stack_space = closure_values.len() * 8;
-                    let aligned_stack_space = total_stack_space.div_ceil(16) * 16;
-                    if aligned_stack_space > 0 {
-                        self.emit_sub_sp_imm(aligned_stack_space as i64);
-                    }
+                    let values_ptr_reg = self.get_physical_reg_for_irvalue(values_ptr, false)?;
 
-                    // Step 2: Store values directly to stack
-                    for (i, value) in closure_values.iter().enumerate() {
-                        let src_reg = self.get_physical_reg_for_irvalue(value, false)?;
-                        let offset = i * 8;
-                        self.emit_str_offset(src_reg, 31, offset as i32);
-                    }
+                    // Set up arguments for trampoline call
+                    // Args: x0=frame_pointer, x1=name_ptr, x2=code_ptr, x3=closure_count, x4=values_ptr
+                    // gc_return_addr is computed internally by the builtin
+                    self.emit_mov(0, 29); // x0 = FP for GC
+                    self.emit_mov_imm(1, 0); // x1 = 0 (anonymous)
+                    self.emit_mov_imm(2, *code_ptr as i64); // x2 = code_ptr
+                    self.emit_mov_imm(3, *closure_count as i64); // x3 = closure_count
+                    self.emit_mov(4, values_ptr_reg); // x4 = values_ptr
 
-                    // Step 3: Save stack pointer for values_ptr
-                    let values_ptr_reg = 10;
-                    self.emit_mov(values_ptr_reg, 31);
-
-                    // Step 4: Set up arguments for trampoline call
-                    // Args: x0=frame_pointer (x29 for GC), x1=gc_return_addr (x30), x2=name_ptr, x3=code_ptr, x4=closure_count, x5=values_ptr
-                    self.emit_mov(0, 29); // x0 = FP for GC (frame pointer)
-                    self.emit_mov(1, 30); // x1 = LR (return address for stack map lookup)
-                    self.emit_mov_imm(2, 0); // x2 = 0 (anonymous)
-                    self.emit_mov_imm(3, *code_ptr as i64); // x3 = code_ptr (raw pointer)
-                    self.emit_mov_imm(4, closure_values.len() as i64); // x4 = closure_count
-                    self.emit_mov(5, values_ptr_reg); // x5 = values_ptr
-
-                    // Step 5: Call trampoline to allocate closure heap object
+                    // Call trampoline to allocate closure heap object
+                    // emit_external_call -> emit_blr -> update_stack_map()
+                    // Stack map includes the pushed closure values!
                     let func_addr = crate::trampoline::builtin_allocate_function as usize;
                     self.emit_external_call(func_addr, "builtin_allocate_function");
 
-                    // Step 6: Clean up stack
-                    if aligned_stack_space > 0 {
-                        self.emit_add_sp_imm(aligned_stack_space as i64);
-                    }
-
-                    // Step 7: Result is in x0 (tagged closure pointer)
+                    // Result is in x0 (tagged closure pointer)
                     if dst_reg != 0 {
                         self.emit_mov(dst_reg, 0);
                     }
                 }
 
                 self.store_spill(dst_reg, dest_spill);
-                // eprintln!("DEBUG: MakeFunctionPtr - done");
             }
 
             Instruction::LoadClosure(dst, fn_obj, index) => {
@@ -944,33 +950,40 @@ impl Arm64CodeGen {
                 // === Multi-arity closure path ===
                 self.emit_label(is_multi_arity_label);
                 // Use builtin_invoke_multi_arity which handles variadic
-                // Args: x0 = fn_ptr, x1 = arg_count, x2-x7 = args 0-5
-                // NOTE: ARM64 ABI only uses x0-x7 for arguments! x8 is NOT a param register.
+                // New calling convention: x0 = fn_ptr, x1 = arg_count, x2 = args_ptr
+                // All args are pushed to stack and pointer passed in x2
                 //
-                // IMPORTANT: We must move args to x2-x7 BEFORE setting x0/x1,
-                // because arg_source_regs might contain x0 or x1!
                 // Save fn_reg to x16 (NOT x15, because emit_external_call uses x15)
                 let saved_fn_reg = 16;
                 self.emit_mov(saved_fn_reg, fn_reg);
 
-                // Move args to x2-x7 first (max 6 args)
-                for (i, &src_reg) in arg_source_regs.iter().take(6).enumerate() {
-                    let target_reg = i + 2;
-                    if target_reg != src_reg {
-                        self.emit_mov(target_reg, src_reg);
+                // Push ALL args to stack (in reverse order so args[0] is at lowest address)
+                let arg_count = args.len();
+                let stack_space = ((arg_count * 8) + 15) / 16 * 16; // 16-byte aligned
+                if stack_space > 0 {
+                    self.emit_sub_sp_imm(stack_space as i64);
+                    for (i, &src_reg) in arg_source_regs.iter().enumerate() {
+                        self.emit_str_offset(src_reg, 31, (i * 8) as i32);
                     }
                 }
-                // Pad remaining with nil (up to x7)
-                for i in args.len()..6 {
-                    self.emit_mov_imm(i + 2, 7);
-                }
 
-                // Now set x0 and x1
+                // Set up args for builtin_invoke_multi_arity:
+                // x0 = fn_ptr, x1 = arg_count, x2 = args_ptr (SP)
                 self.emit_mov(0, saved_fn_reg);
-                self.emit_mov_imm(1, args.len() as i64);
+                self.emit_mov_imm(1, arg_count as i64);
+                if stack_space > 0 {
+                    self.emit_mov(2, 31); // x2 = SP (points to args array)
+                } else {
+                    self.emit_mov_imm(2, 0); // x2 = null (no args)
+                }
 
                 let invoke_addr = crate::trampoline::builtin_invoke_multi_arity as usize;
                 self.emit_external_call(invoke_addr, "builtin_invoke_multi_arity");
+
+                // Clean up stack
+                if stack_space > 0 {
+                    self.emit_add_sp_imm(stack_space as i64);
+                }
 
                 // Result in x0, jump to done
                 self.emit_jump(&done_label);
@@ -1424,37 +1437,53 @@ impl Arm64CodeGen {
                         // 2. Building IndexedSeq for variadic if needed
                         // 3. Calling the function with proper convention
                         //
-                        // Args: x0 = fn_ptr, x1 = arg_count, x2-x7 = args 0-5
-                        // NOTE: ARM64 ABI only uses x0-x7 for args! x8 is NOT a param register.
-                        self.emit_mov(0, fn_reg);
-                        self.emit_mov_imm(1, arg_count as i64);
+                        // New calling convention: x0 = fn_ptr, x1 = arg_count, x2 = args_ptr
+                        // All args are pushed to stack and pointer passed in x2
 
-                        // Load args into x2-x7 (max 6 args)
-                        self.clear_temp_registers();
-                        for (i, arg) in args.iter().take(6).enumerate() {
-                            let target_reg = i + 2; // x2, x3, x4, x5, x6, x7
-                            match arg {
-                                IrValue::Spill(_, slot) => {
-                                    let offset = -((*slot as i32 + 1) * 8);
-                                    self.emit_load_from_fp(target_reg, offset);
-                                }
-                                _ => {
-                                    let src_reg = self.get_physical_reg_for_irvalue(arg, false)?;
-                                    if target_reg != src_reg {
-                                        self.emit_mov(target_reg, src_reg);
+                        // Push ALL args to stack (so args[0] is at lowest address)
+                        // Note: We need to allocate additional stack space beyond what
+                        // was allocated for stack_args (if any)
+                        let multi_arity_stack_space = ((arg_count * 8) + 15) / 16 * 16;
+                        if multi_arity_stack_space > 0 {
+                            self.emit_sub_sp_imm(multi_arity_stack_space as i64);
+
+                            // Load and store each arg
+                            self.clear_temp_registers();
+                            for (i, arg) in args.iter().enumerate() {
+                                match arg {
+                                    IrValue::Spill(_, slot) => {
+                                        let temp = self.allocate_temp_register();
+                                        // Adjust offset for the new stack space we allocated
+                                        let offset = -((*slot as i32 + 1) * 8);
+                                        self.emit_load_from_fp(temp, offset);
+                                        self.emit_str_offset(temp, 31, (i * 8) as i32);
+                                        self.clear_temp_registers();
                                     }
-                                    self.clear_temp_registers();
+                                    _ => {
+                                        let src_reg = self.get_physical_reg_for_irvalue(arg, false)?;
+                                        self.emit_str_offset(src_reg, 31, (i * 8) as i32);
+                                        self.clear_temp_registers();
+                                    }
                                 }
                             }
                         }
 
-                        // Pad remaining with nil (up to x7)
-                        for i in arg_count..6 {
-                            self.emit_mov_imm(i + 2, 7); // nil
+                        // Set up args: x0 = fn_ptr, x1 = arg_count, x2 = args_ptr
+                        self.emit_mov(0, fn_reg);
+                        self.emit_mov_imm(1, arg_count as i64);
+                        if multi_arity_stack_space > 0 {
+                            self.emit_mov(2, 31); // x2 = SP (points to args array)
+                        } else {
+                            self.emit_mov_imm(2, 0); // x2 = null (no args)
                         }
 
                         let invoke_addr = crate::trampoline::builtin_invoke_multi_arity as usize;
                         self.emit_external_call(invoke_addr, "builtin_invoke_multi_arity");
+
+                        // Clean up stack
+                        if multi_arity_stack_space > 0 {
+                            self.emit_add_sp_imm(multi_arity_stack_space as i64);
+                        }
 
                         // Result is in x0, jump to done (skip the do_call_label BLR)
                         self.emit_jump(&done_label);
@@ -1530,41 +1559,49 @@ impl Arm64CodeGen {
             }
 
             // Multi-arity function instructions
-            Instruction::MakeMultiArityFn(dst, arities, variadic_min, variadic_index, closure_values) => {
+            Instruction::MakeMultiArityFn(dst, arities, variadic_min, variadic_index, values_ptr, closure_count) => {
                 // Create a multi-arity function object on the heap
                 // Similar to MakeFunctionPtr but stores multiple (param_count, code_ptr) pairs
                 //
                 // ARM64 Calling Convention for builtin_allocate_multi_arity_fn:
                 // - x0 = frame_pointer (x29 for GC)
-                // - x1 = gc_return_addr (x30)
-                // - x2 = name_ptr (0 for anonymous)
-                // - x3 = arity_count
-                // - x4 = arities_ptr (pointer to (param_count, code_ptr) pairs on stack)
-                // - x5 = variadic_min (usize::MAX if no variadic)
-                // - x6 = variadic_index (usize::MAX if no variadic)
-                // - x7 = closure_count
-                // - [stack] = closures_ptr (pointer to closure values on stack)
+                // - x1 = name_ptr (0 for anonymous)
+                // - x2 = arity_count
+                // - x3 = arities_ptr (pointer to (param_count, code_ptr) pairs on stack)
+                // - x4 = variadic_min (usize::MAX if no variadic)
+                // - x5 = variadic_index (usize::MAX if no variadic)
+                // - x6 = closure_count
+                // - x7 = closures_ptr (pointer to closure values on stack)
                 // - Returns: x0 = tagged closure pointer
+                // gc_return_addr is computed internally by the builtin
+                //
+                // Closure values already pushed via PushToStack instructions
+                // values_ptr points to FP-relative closure values (from CurrentStackPosition)
+                // Arity table uses SP-relative slots (not heap pointers, no GC needed)
 
                 let dest_spill = self.dest_spill(dst);
                 let dst_reg = self.get_physical_reg_for_irvalue(dst, true)?;
 
-                // Step 1: Allocate stack space for arities, closures, and stack arg for closures_ptr
+                // Get closures_ptr from values_ptr (already computed by compiler)
+                let closures_ptr_reg = if *closure_count > 0 {
+                    self.get_physical_reg_for_irvalue(values_ptr, false)?
+                } else {
+                    10 // Will be set to 0 below
+                };
+
+                // Allocate SP space for arity table only (no stack arg needed now)
+                // Arity table contains integers (param_count, code_ptr) - not heap pointers
                 let arities_size = arities.len() * 2 * 8; // 2 words per arity
-                let closures_size = closure_values.len() * 8;
-                let stack_arg_size = 8; // closures_ptr passed on stack
-                let total_stack_space = arities_size + closures_size + stack_arg_size;
-                let aligned_stack_space = total_stack_space.div_ceil(16) * 16;
-                if aligned_stack_space > 0 {
-                    self.emit_sub_sp_imm(aligned_stack_space as i64);
+                let aligned_sp_space = arities_size.div_ceil(16) * 16;
+                if aligned_sp_space > 0 {
+                    self.emit_sub_sp_imm(aligned_sp_space as i64);
                 }
 
-                // Step 2: Store arity table to stack (param_count, code_ptr pairs)
-                let arity_table_offset = stack_arg_size; // After the stack argument slot
+                // Store arity table to SP-relative stack
                 for (i, (param_count, code_ptr)) in arities.iter().enumerate() {
-                    let offset = arity_table_offset + i * 16; // 2 words per entry
+                    let offset = i * 16; // 2 words per entry
                     // Store param_count
-                    let temp_reg = 10;
+                    let temp_reg = 11;
                     self.emit_mov_imm(temp_reg, *param_count as i64);
                     self.emit_str_offset(temp_reg, 31, offset as i32);
                     // Store code_ptr
@@ -1572,44 +1609,38 @@ impl Arm64CodeGen {
                     self.emit_str_offset(temp_reg, 31, (offset + 8) as i32);
                 }
 
-                // Step 3: Store closure values after arity table
-                let closures_start_offset = arity_table_offset + arities_size;
-                for (i, value) in closure_values.iter().enumerate() {
-                    let src_reg = self.get_physical_reg_for_irvalue(value, false)?;
-                    let offset = closures_start_offset + i * 8;
-                    self.emit_str_offset(src_reg, 31, offset as i32);
+                // Set closures_ptr to 0 if no closures
+                if *closure_count == 0 {
+                    self.emit_mov_imm(closures_ptr_reg, 0);
                 }
 
-                // Step 4: Calculate and store closures_ptr as stack argument at [SP]
-                let temp_reg = 10;
-                self.emit_add_imm(temp_reg, 31, closures_start_offset as i64); // SP + offset = closures_ptr
-                self.emit_str_offset(temp_reg, 31, 0); // Store at [SP+0]
+                // Save arities_ptr for argument setup
+                let arities_ptr_reg = 12;
+                self.emit_mov(arities_ptr_reg, 31); // arities_ptr = SP (arity table starts at SP+0)
 
-                // Step 5: Save arities_ptr for argument setup
-                let arities_ptr_reg = 11;
-                self.emit_add_imm(arities_ptr_reg, 31, arity_table_offset as i64); // SP + offset = arities_ptr
+                // Set up arguments for trampoline call
+                // gc_return_addr is computed internally by the builtin
+                self.emit_mov(0, 29); // x0 = FP for GC
+                self.emit_mov_imm(1, 0); // x1 = name_ptr (0 for anonymous)
+                self.emit_mov_imm(2, arities.len() as i64); // x2 = arity_count
+                self.emit_mov(3, arities_ptr_reg); // x3 = arities_ptr
+                self.emit_mov_imm(4, variadic_min.unwrap_or(usize::MAX) as i64); // x4 = variadic_min
+                self.emit_mov_imm(5, variadic_index.unwrap_or(usize::MAX) as i64); // x5 = variadic_index
+                self.emit_mov_imm(6, *closure_count as i64); // x6 = closure_count
+                self.emit_mov(7, closures_ptr_reg); // x7 = closures_ptr
 
-                // Step 6: Set up arguments for trampoline call
-                self.emit_mov(0, 29); // x0 = FP for GC (frame pointer)
-                self.emit_mov(1, 30); // x1 = LR (return address for stack map lookup)
-                self.emit_mov_imm(2, 0); // x2 = name_ptr (0 for anonymous)
-                self.emit_mov_imm(3, arities.len() as i64); // x3 = arity_count
-                self.emit_mov(4, arities_ptr_reg); // x4 = arities_ptr
-                self.emit_mov_imm(5, variadic_min.unwrap_or(usize::MAX) as i64); // x5 = variadic_min
-                self.emit_mov_imm(6, variadic_index.unwrap_or(usize::MAX) as i64); // x6 = variadic_index
-                self.emit_mov_imm(7, closure_values.len() as i64); // x7 = closure_count
-                // closures_ptr is already at [SP+0]
-
-                // Step 7: Call trampoline to allocate multi-arity function
+                // Call trampoline to allocate multi-arity function
+                // emit_external_call -> emit_blr -> update_stack_map()
+                // Stack map includes the pushed closure values!
                 let func_addr = crate::trampoline::builtin_allocate_multi_arity_fn as usize;
                 self.emit_external_call(func_addr, "builtin_allocate_multi_arity_fn");
 
-                // Step 7: Clean up stack
-                if aligned_stack_space > 0 {
-                    self.emit_add_sp_imm(aligned_stack_space as i64);
+                // Clean up SP stack
+                if aligned_sp_space > 0 {
+                    self.emit_add_sp_imm(aligned_sp_space as i64);
                 }
 
-                // Step 8: Result is in x0 (tagged closure pointer)
+                // Result is in x0 (tagged closure pointer)
                 if dst_reg != 0 {
                     self.emit_mov(dst_reg, 0);
                 }
@@ -2435,11 +2466,21 @@ impl Arm64CodeGen {
         self.current_stack_size = self.current_stack_size.saturating_sub(1);
     }
 
+    /// Get pointer to current stack position (where next push will go)
+    /// Computes FP - ((num_stack_slots + current_stack_size + 1) * 8)
+    /// Used for closure values: get pointer BEFORE pushing, then push values
+    fn get_current_stack_position(&mut self, dest_reg: usize) {
+        let offset = ((self.num_stack_slots + self.current_stack_size + 1) * 8) as i64;
+        // SUB Xd, X29, #offset
+        self.emit_sub_imm(dest_reg, 29, offset);
+    }
+
     /// Initialize all local/spill slots to null (Beagle pattern)
     /// This ensures GC won't see garbage as heap pointers during stack scanning.
     /// Called after stack allocation in function prologues.
+    /// Must initialize ALL stack slots: spill slots + exception slots + local slots
     fn set_all_locals_to_null(&mut self, null_register: usize) {
-        for slot in 0..self.num_spill_slots {
+        for slot in 0..self.num_stack_slots {
             // Stack layout: [FP - (slot + 1) * 8] = local/spill slot
             let offset = -((slot as i32 + 1) * 8);
             self.emit_store_to_fp(null_register, offset);
@@ -2610,12 +2651,19 @@ impl Arm64CodeGen {
     /// Translate stack map from instruction offsets to absolute addresses
     /// Called after code is placed in memory to get actual PC values
     pub fn translate_stack_map(&self, base_pointer: usize) -> Vec<(usize, usize)> {
+        #[cfg(feature = "debug-gc")]
+        if !self.stack_map.is_empty() {
+            eprintln!("[GC DEBUG] translate_stack_map: base_pointer={:#x}, code_len={}",
+                base_pointer, self.code.len());
+        }
         self.stack_map
             .iter()
             .map(|(offset, stack_size)| {
-                // Each instruction is 4 bytes, offset is index
-                let pc = (*offset * 4) + base_pointer;
-                (pc, *stack_size)
+                // Each instruction is 4 bytes, offset is index of BLR instruction.
+                // The return address (x30 after BLR) points to the NEXT instruction,
+                // which is at (offset + 1) * 4 + base_pointer.
+                let return_addr = ((*offset + 1) * 4) + base_pointer;
+                (return_addr, *stack_size)
             })
             .collect()
     }
