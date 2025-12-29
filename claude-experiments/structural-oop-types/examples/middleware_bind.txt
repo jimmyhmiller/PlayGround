@@ -1,0 +1,196 @@
+// ============================================================================
+// Middleware-Style Bind Composition
+// ============================================================================
+//
+// The insight: Effects are BIND HANDLERS, not data wrappers.
+//
+// Each effect:
+// - Takes the "next" handler
+// - Wraps bind with its own logic
+// - Delegates to next.bind for the rest
+//
+// This is EXACTLY like Express/Koa middleware!
+//
+// ============================================================================
+
+{
+  // === The Carrier: Just data, all effect state in one place ===
+  class Carrier(v, isErr, st, lg) {
+    value: v,
+    isError: isErr,
+    state: st,
+    log: lg,
+
+    // Effect operations
+    fail: (msg) => Carrier(v, true, st, lg),
+    modifyState: (f) => Carrier(v, isErr, f(st), lg),
+    tell: (msg) => Carrier(v, isErr, st, lg ++ msg)
+  }
+
+  // === Base Handler: Just applies the continuation ===
+  class Id {
+    bind: (m, k) => k(m.value)
+  }
+
+  // === Error Middleware: Short-circuits on error ===
+  class Error(next) {
+    bind: (m, k) => m.isError ? m : next.bind(m, k)
+  }
+
+  // === State Middleware: Threads state through ===
+  // (State is automatic - k's result already has new state)
+  class State(next) {
+    bind: (m, k) => next.bind(m, k)
+  }
+
+  // === Writer Middleware: Accumulates logs ===
+  class Writer(next) {
+    bind: (m, k) => {
+      ...next.bind(m, k),
+      log: m.log ++ next.bind(m, k).log
+    }
+  }
+
+  // === Compose: Chain the handlers! ===
+  class Eff {
+    // Build the middleware stack
+    handler: Writer(Error(Id)),
+
+    // Smart constructor
+    pure: (x) => Carrier(x, false, 0, ""),
+
+    // Bind uses the composed handler
+    bind: (m, k) => Eff.handler.bind(m, k)
+  }
+
+  // === Use it! ===
+  Eff.bind(
+    Eff.pure(42).tell("start ").modifyState((n) => n + 1),
+    (x) => Eff.pure(x + 1).tell("end ")
+  )
+}
+
+// ============================================================================
+// WHY THIS WORKS
+// ============================================================================
+//
+// The key insight: SEPARATION OF CONCERNS
+//
+// 1. Carrier = DATA (holds all effect state)
+// 2. Handlers = CONTROL FLOW (how bind behaves)
+//
+// Each handler only knows about ONE effect:
+// - Error knows about isError
+// - Writer knows about log
+// - State knows about state (trivially)
+//
+// They compose by wrapping: Writer(Error(Id))
+// - Writer wraps Error wraps Id
+// - bind calls flow: Writer -> Error -> Id -> k
+// - Results flow back: k -> Id -> Error -> Writer
+
+// ============================================================================
+// COMPARISON TO MONAD TRANSFORMERS
+// ============================================================================
+//
+// Haskell Transformers:
+//   type App = WriterT String (StateT Int (Either String)) a
+//
+//   Each transformer wraps a monad and defines:
+//   - return/pure
+//   - bind (>>=)
+//   - lift (to bring inner operations up)
+//
+// Our Middleware:
+//   Eff.handler = Writer(Error(Id))
+//
+//   Each middleware wraps a handler and defines:
+//   - bind (that's it!)
+//
+// The difference:
+// - Transformers wrap TYPES (monadic values)
+// - Middleware wraps HANDLERS (bind functions)
+//
+// Our approach is simpler because:
+// - All effect state is in one Carrier
+// - No lifting needed (operations are on Carrier)
+// - Middleware only needs to handle bind
+
+// ============================================================================
+// THE FULL PATTERN
+// ============================================================================
+
+{
+  class Carrier(v, isErr, errMsg, st, lg) {
+    value: v,
+    isError: isErr,
+    errMsg: errMsg,
+    state: st,
+    log: lg,
+
+    // Error ops
+    fail: (msg) => Carrier(v, true, msg, st, lg),
+
+    // State ops
+    get: () => st,
+    put: (s) => Carrier(v, isErr, errMsg, s, lg),
+    modify: (f) => Carrier(v, isErr, errMsg, f(st), lg),
+
+    // Writer ops
+    tell: (msg) => Carrier(v, isErr, errMsg, st, lg ++ msg)
+  }
+
+  // Handlers
+  class Id { bind: (m, k) => k(m.value) }
+
+  class Error(next) {
+    bind: (m, k) => m.isError ? m : next.bind(m, k)
+  }
+
+  class Writer(next) {
+    bind: (m, k) => {
+      ...next.bind(m, k),
+      log: m.log ++ next.bind(m, k).log
+    }
+  }
+
+  // Add more effects easily!
+  // class Reader(next) {
+  //   bind: (m, k) => next.bind(m, (v) => k(v))  // pass env through
+  // }
+
+  class Eff {
+    handler: Writer(Error(Id)),
+    pure: (x) => Carrier(x, false, "", 0, ""),
+    bind: (m, k) => Eff.handler.bind(m, k)
+  }
+
+  // Example: computation that might fail
+  Eff.bind(
+    Eff.pure(10).tell("got 10 "),
+    (x) => x == 0
+      ? Eff.pure(0).fail("division by zero")
+      : Eff.pure(100 / x).tell("divided ")
+  )
+}
+
+// ============================================================================
+// SUMMARY
+// ============================================================================
+//
+// Pattern:
+//   class Effect(next) {
+//     bind: (m, k) => /* effect logic */ next.bind(m, k) /* more logic */
+//   }
+//
+// Compose:
+//   Effect1(Effect2(Effect3(Id)))
+//
+// Each effect is:
+// - INDEPENDENT (doesn't know about other effects)
+// - COMPOSABLE (just pass next handler)
+// - SIMPLE (only defines bind)
+//
+// This is as close to "truly generic" as we can get without
+// algebraic effects or more advanced language features!
+

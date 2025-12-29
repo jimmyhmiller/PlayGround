@@ -19,6 +19,15 @@ import { html } from '@codemirror/lang-html';
 import { python } from '@codemirror/lang-python';
 import { oneDark } from '@codemirror/theme-one-dark';
 
+// Pipeline widgets
+import {
+  FileDrop,
+  Pipeline,
+  PipelineStatus,
+  ProcessorList,
+  InlinePipeline,
+} from './PipelineWidgets';
+
 // ========== Selector Functions ==========
 
 /**
@@ -1998,5 +2007,26 @@ export const WIDGET_TYPES: Record<string, WidgetTypeConfig> = {
   'process-runner': {
     component: ProcessRunner as unknown as React.ComponentType<Record<string, unknown>>,
     defaultProps: { showOutput: true, maxOutputLines: 100 },
+  },
+  // Pipeline widgets
+  'file-drop': {
+    component: FileDrop as unknown as React.ComponentType<Record<string, unknown>>,
+    defaultProps: { title: 'Drop file here', showInfo: true },
+  },
+  'pipeline': {
+    component: Pipeline as unknown as React.ComponentType<Record<string, unknown>>,
+    defaultProps: { autoStart: true, showStatus: false },
+  },
+  'pipeline-status': {
+    component: PipelineStatus as unknown as React.ComponentType<Record<string, unknown>>,
+    defaultProps: { showAll: true },
+  },
+  'processor-list': {
+    component: ProcessorList as unknown as React.ComponentType<Record<string, unknown>>,
+    defaultProps: {},
+  },
+  'inline-pipeline': {
+    component: InlinePipeline as unknown as React.ComponentType<Record<string, unknown>>,
+    defaultProps: { autoStart: true },
   },
 };

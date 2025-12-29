@@ -289,14 +289,42 @@ impl Parser {
     }
 
     fn parse_eq_expr(&mut self) -> Result<Expr, ParseError> {
-        let left = self.parse_concat_expr()?;
+        let left = self.parse_cmp_expr()?;
 
         if *self.current() == Token::EqEq {
             self.advance(); // consume '=='
-            let right = self.parse_concat_expr()?;
+            let right = self.parse_cmp_expr()?;
             Ok(Expr::eq(left, right))
         } else {
             Ok(left)
+        }
+    }
+
+    fn parse_cmp_expr(&mut self) -> Result<Expr, ParseError> {
+        let left = self.parse_concat_expr()?;
+
+        match self.current() {
+            Token::Lt => {
+                self.advance();
+                let right = self.parse_concat_expr()?;
+                Ok(Expr::lt(left, right))
+            }
+            Token::LtEq => {
+                self.advance();
+                let right = self.parse_concat_expr()?;
+                Ok(Expr::lt_eq(left, right))
+            }
+            Token::Gt => {
+                self.advance();
+                let right = self.parse_concat_expr()?;
+                Ok(Expr::gt(left, right))
+            }
+            Token::GtEq => {
+                self.advance();
+                let right = self.parse_concat_expr()?;
+                Ok(Expr::gt_eq(left, right))
+            }
+            _ => Ok(left),
         }
     }
 
@@ -335,25 +363,40 @@ impl Parser {
     }
 
     fn parse_mul_expr(&mut self) -> Result<Expr, ParseError> {
-        let mut left = self.parse_call_expr()?;
+        let mut left = self.parse_unary_expr()?;
 
         loop {
             match self.current() {
                 Token::Star => {
                     self.advance();
-                    let right = self.parse_call_expr()?;
+                    let right = self.parse_unary_expr()?;
                     left = Expr::mul(left, right);
                 }
                 Token::Slash => {
                     self.advance();
-                    let right = self.parse_call_expr()?;
+                    let right = self.parse_unary_expr()?;
                     left = Expr::div(left, right);
+                }
+                Token::Percent => {
+                    self.advance();
+                    let right = self.parse_unary_expr()?;
+                    left = Expr::mod_(left, right);
                 }
                 _ => break,
             }
         }
 
         Ok(left)
+    }
+
+    fn parse_unary_expr(&mut self) -> Result<Expr, ParseError> {
+        if *self.current() == Token::Bang {
+            self.advance(); // consume '!'
+            let expr = self.parse_unary_expr()?;
+            Ok(Expr::not(expr))
+        } else {
+            self.parse_call_expr()
+        }
     }
 
     /// Parse call expression: primary followed by optional calls and field access
@@ -504,6 +547,12 @@ impl Parser {
         let params = self.parse_params()?;
         self.expect(Token::Arrow)?;
         let body = self.parse_expr()?;
+
+        // Handle zero-arg lambda: () => e  becomes  _unit => e
+        // The special "_unit" parameter signals this is a thunk
+        if params.is_empty() {
+            return Ok(Expr::Lambda("_unit".to_string(), Box::new(body)));
+        }
 
         // Build curried lambda: (a, b) => e  becomes  a => b => e
         let result = params.into_iter().rev().fold(body, |acc, param| {

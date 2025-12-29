@@ -10,6 +10,7 @@
 //! - Cook's "On Understanding Data Abstraction, Revisited" (2009)
 
 mod display;
+mod eval;
 mod expr;
 mod infer;
 mod lexer;
@@ -19,6 +20,7 @@ mod repl;
 mod store;
 mod types;
 mod unify;
+mod value;
 
 #[cfg(test)]
 mod tests;
@@ -43,6 +45,10 @@ fn main() {
         Some("--help") | Some("-h") => {
             print_usage();
         }
+        Some(path) if path.ends_with(".fppp") => {
+            // Run a .fppp file
+            run_file(path);
+        }
         Some(expr) if !expr.starts_with('-') => {
             // Type-check a single expression from command line
             repl::run(Some(expr));
@@ -59,6 +65,20 @@ fn main() {
     }
 }
 
+fn run_file(path: &str) {
+    use std::fs;
+
+    let contents = match fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("Error reading file '{}': {}", path, e);
+            std::process::exit(1);
+        }
+    };
+
+    repl::run(Some(&contents));
+}
+
 fn print_usage() {
     println!("Structural OOP Type Checker (JavaScript-like syntax)");
     println!();
@@ -67,11 +87,13 @@ fn print_usage() {
     println!("  structural-oop-types --repl       Start interactive REPL");
     println!("  structural-oop-types --examples   Run built-in examples");
     println!("  structural-oop-types '<expr>'     Type-check a single expression");
+    println!("  structural-oop-types file.fppp    Run a .fppp source file");
     println!();
     println!("Examples:");
     println!("  structural-oop-types 'x => x'");
     println!("  structural-oop-types '{{ x: 42, y: true }}'");
     println!("  structural-oop-types '{{ self: this }}'");
+    println!("  structural-oop-types examples/peano.fppp");
 }
 
 fn run_examples() {

@@ -1,0 +1,297 @@
+// ============================================================================
+// Middleware-Style Monad Composition
+// ============================================================================
+//
+// Key insight: Each effect layer WRAPS the bind of the layer below.
+// - Error wraps bind to short-circuit
+// - State wraps bind to thread state
+// - Writer wraps bind to accumulate logs
+//
+// This is exactly how monad transformers work, just framed as middleware!
+//
+// ============================================================================
+
+// ----------------------------------------------------------------------------
+// APPROACH: Each layer wraps inner's bind
+// ----------------------------------------------------------------------------
+
+{
+  // === Base: Pure just applies the continuation ===
+  class Pure(x) {
+    value: x,
+    bind: (k) => k(x)
+  }
+
+  // === Error: Wraps bind to short-circuit ===
+  class Ok(inner) {
+    ...inner,
+    isError: false,
+    fail: (msg) => Err(msg),
+
+    // MIDDLEWARE: Check error, then delegate to inner's bind
+    bind: (k) => inner.bind((v) => k(v))
+  }
+
+  class Err(msg) {
+    isError: true,
+    message: msg,
+    // Short-circuit: don't call k at all
+    bind: (k) => this
+  }
+
+  // === State: Wraps bind to preserve/thread state ===
+  class WithState(inner, s) {
+    ...inner,
+    state: s,
+    modifyState: (f) => WithState(inner, f(s)),
+
+    // MIDDLEWARE: Run inner's bind, re-wrap with new state
+    bind: (k) => {
+      let result = inner.bind((v) => k(v));
+      // k(v) returns a full stack with its own .state
+      // Re-wrap to ensure State layer is preserved
+      WithState(result, result.state)
+    }
+  }
+
+  // === Writer: Wraps bind to accumulate logs ===
+  class WithLog(inner, lg) {
+    ...inner,
+    log: lg,
+    tell: (msg) => WithLog(inner, lg ++ msg),
+
+    // MIDDLEWARE: Run inner's bind, combine logs
+    bind: (k) => {
+      let result = inner.bind((v) => k(v));
+      // Combine our log with result's log
+      WithLog(result, lg ++ result.log)
+    }
+  }
+
+  // === Compose: Just nest! ===
+  class Eff {
+    pure: (x) => WithLog(WithState(Ok(Pure(x)), 0), "")
+  }
+
+  Eff.pure(42)
+}
+
+// ----------------------------------------------------------------------------
+// THE PROBLEM: Method returns lose outer wrappers
+// ----------------------------------------------------------------------------
+//
+// When we call .modifyState(f), it returns WithState(inner, f(s))
+// But we LOSE the outer WithLog wrapper!
+//
+// This is because methods are spread up from inner layers,
+// but they return instances of THEIR class, not the full stack.
+//
+// To fix this, we need a different architecture...
+
+// ----------------------------------------------------------------------------
+// SOLUTION: Carrier + Effect Operations
+// ----------------------------------------------------------------------------
+//
+// Instead of nested wrappers, have:
+// 1. A single Carrier with all effect state
+// 2. Each effect provides operations on the carrier
+// 3. Bind is composed from effect "middlewares"
+
+{
+  // Single carrier with ALL effect state
+  class Carrier(v, isErr, errMsg, st, lg) {
+    value: v,
+    isError: isErr,
+    errMsg: errMsg,
+    state: st,
+    log: lg,
+
+    // === Effect operations (all on one object) ===
+
+    // Error ops
+    fail: (msg) => Carrier(v, true, msg, st, lg),
+
+    // State ops
+    modifyState: (f) => Carrier(v, isErr, errMsg, f(st), lg),
+    getState: () => st,
+
+    // Writer ops
+    tell: (msg) => Carrier(v, isErr, errMsg, st, lg ++ msg),
+    getLog: () => lg,
+
+    // === BIND: Composed middleware style ===
+    // Each effect's logic is a "layer" in the bind
+    bind: (k) => {
+      // Error layer: short-circuit if error
+      if (isErr) { return this }
+
+      // Otherwise, apply k and get result
+      let result = k(v);
+
+      // State layer: result has new state
+      // Writer layer: combine logs
+      Carrier(result.value, result.isError, result.errMsg,
+              result.state, lg ++ result.log)
+    }
+  }
+
+  // Smart constructor
+  class Eff {
+    pure: (x) => Carrier(x, false, "", 0, "")
+  }
+
+  // Use it with method chaining!
+  Eff.pure(42)
+    .tell("start ")
+    .modifyState((n) => n + 1)
+    .tell("middle ")
+    .bind((x) => Eff.pure(x + 1).tell("added "))
+    .modifyState((n) => n + 1)
+    .tell("end")
+}
+
+// ----------------------------------------------------------------------------
+// BUT WAIT - Can we make this more modular?
+// ----------------------------------------------------------------------------
+//
+// The Carrier above has all effects hardcoded.
+// Let's separate the effects into modules and COMPOSE them!
+
+{
+  // === Base Carrier: just value ===
+  class Base(v) {
+    value: v,
+    bind: (k) => k(v)
+  }
+
+  // === Error Module ===
+  class ErrorMod {
+    // Add error fields and modify bind
+    apply: (carrier) => {
+      ...carrier,
+      isError: false,
+      errMsg: "",
+      fail: (msg) => { ...carrier, isError: true, errMsg: msg },
+
+      // Wrap bind: short-circuit on error
+      bind: (k) => carrier.isError
+        ? carrier
+        : ErrorMod.apply(carrier.bind((v) => k(v)))
+    }
+  }
+
+  // === State Module ===
+  class StateMod(initial) {
+    apply: (carrier) => {
+      ...carrier,
+      state: initial,
+      modifyState: (f) => StateMod(f(carrier.state)).apply(carrier),
+
+      // Wrap bind: thread state through
+      bind: (k) => {
+        let result = carrier.bind((v) => k(v));
+        StateMod(result.state).apply(result)
+      }
+    }
+  }
+
+  // === Writer Module ===
+  class WriterMod(initial) {
+    apply: (carrier) => {
+      ...carrier,
+      log: initial,
+      tell: (msg) => WriterMod(carrier.log ++ msg).apply(carrier),
+
+      // Wrap bind: accumulate logs
+      bind: (k) => {
+        let result = carrier.bind((v) => k(v));
+        WriterMod(carrier.log ++ result.log).apply(result)
+      }
+    }
+  }
+
+  // === COMPOSE: Apply modules in order ===
+  class Compose {
+    // Each .apply wraps the previous, building up the stack
+    all: (v) => WriterMod("").apply(StateMod(0).apply(ErrorMod.apply(Base(v))))
+  }
+
+  Compose.all(42)
+}
+
+// ----------------------------------------------------------------------------
+// THE CLEANEST VERSION
+// ----------------------------------------------------------------------------
+//
+// Accept that bind needs to be centrally defined (it's the control flow).
+// But make effect OPERATIONS modular via spread.
+
+{
+  // Each effect is a class that spreads inner and adds its ops
+  class Pure(x) {
+    value: x
+  }
+
+  class Error(inner) {
+    ...inner,
+    isError: false,
+    fail: (msg) => Failed(msg)
+  }
+
+  class Failed(msg) {
+    isError: true,
+    message: msg
+  }
+
+  class State(inner, s) {
+    ...inner,
+    state: s,
+    modifyState: (f) => State(inner, f(s))
+  }
+
+  class Writer(inner, lg) {
+    ...inner,
+    log: lg,
+    tell: (msg) => Writer(inner, lg ++ msg)
+  }
+
+  // THE COMBINATOR: Composes effects and defines bind
+  class Eff {
+    // Create composed monad
+    pure: (x) => Writer(State(Error(Pure(x)), 0), ""),
+
+    // Bind handles all effects:
+    // - Error: short-circuit
+    // - State: use result's state
+    // - Writer: combine logs
+    bind: (m, k) => {
+      if (m.isError) { return m }
+      let result = k(m.value);
+      Writer(State(Error(Pure(result.value)), result.state), m.log ++ result.log)
+    }
+  }
+
+  Eff.pure(42)
+}
+
+// ----------------------------------------------------------------------------
+// SUMMARY: The Middleware Pattern
+// ----------------------------------------------------------------------------
+//
+// 1. Each effect WRAPS the bind of layers below
+// 2. Error: short-circuits (doesn't call continuation)
+// 3. State: threads state through (uses result's state)
+// 4. Writer: accumulates (combines logs)
+//
+// The limitation in our language:
+// - Methods return their own class, not the full stack
+// - So we lose outer wrappers when calling inner methods
+//
+// Solutions:
+// A. Single Carrier with all fields (loses modularity)
+// B. Rebuild full stack in bind (what we do)
+// C. True algebraic effects (needs language support)
+//
+// The middleware intuition is RIGHT - that's exactly what transformers do!
+// We just need the right plumbing to make it work.
+

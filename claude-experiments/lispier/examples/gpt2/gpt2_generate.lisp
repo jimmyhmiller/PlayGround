@@ -761,11 +761,149 @@
   (def mode (llvm.mlir.addressof {:global_name @read_mode :result !llvm.ptr}))
   (def file (call !llvm.ptr fopen path mode))
 
-  ;; Skip header
-  (def _skip (call i32 fseek file (: 1024 i64) (: 0 i32)))
+  ;; =========================================================================
+  ;; Read checkpoint header (256 ints) to get model config
+  ;; Header format:
+  ;;   [0]: magic (20240326)
+  ;;   [1]: version (3)
+  ;;   [2]: max_seq_len (maxT)
+  ;;   [3]: vocab_size (V)
+  ;;   [4]: num_layers (L)
+  ;;   [5]: num_heads (NH)
+  ;;   [6]: channels (C)
+  ;;   [7]: padded_vocab_size (Vp)
+  ;; =========================================================================
+  (def header_buf (call !llvm.ptr malloc (: 1024 i64)))  ; 256 * 4 bytes
+  (def _read_header (call i64 fread header_buf (: 4 i64) (: 256 i64) file))
 
-  ;; Load all params (padded vocab: 50304 * 768 = 38633472 for wte)
-  (def total_params (: 124475904 i64))
+  ;; Extract model config from header
+  (def magic (llvm.load {:result i32} header_buf))
+  (def version (llvm.load {:result i32} (ptr-at i32 header_buf (: 1 i64))))
+  (def maxT_i32 (llvm.load {:result i32} (ptr-at i32 header_buf (: 2 i64))))
+  (def V_i32 (llvm.load {:result i32} (ptr-at i32 header_buf (: 3 i64))))
+  (def L_i32 (llvm.load {:result i32} (ptr-at i32 header_buf (: 4 i64))))
+  (def NH_i32 (llvm.load {:result i32} (ptr-at i32 header_buf (: 5 i64))))
+  (def C_i32 (llvm.load {:result i32} (ptr-at i32 header_buf (: 6 i64))))
+  (def Vp_i32 (llvm.load {:result i32} (ptr-at i32 header_buf (: 7 i64))))
+
+  ;; Convert to i64 for offset calculations
+  (def maxT (arith.extsi {:result i64} maxT_i32))
+  (def V (arith.extsi {:result i64} V_i32))
+  (def L (arith.extsi {:result i64} L_i32))
+  (def NH (arith.extsi {:result i64} NH_i32))
+  (def C (arith.extsi {:result i64} C_i32))
+  (def Vp (arith.extsi {:result i64} Vp_i32))
+
+  ;; Print config
+  (print "[GPT-2 Config]\n")
+  (print "  max_seq_len: %d\n" maxT_i32)
+  (print "  vocab_size: %d\n" V_i32)
+  (print "  padded_vocab_size: %d\n" Vp_i32)
+  (print "  num_layers: %d\n" L_i32)
+  (print "  num_heads: %d\n" NH_i32)
+  (print "  channels: %d\n" C_i32)
+
+  ;; Compute derived dimensions
+  (def C3 (arith.muli C (: 3 i64)))      ; 3*C = 2304
+  (def C4 (arith.muli C (: 4 i64)))      ; 4*C = 3072
+
+  ;; =========================================================================
+  ;; Compute parameter sizes (number of floats per tensor)
+  ;; From llm.c fill_in_parameter_sizes:
+  ;;   0. wte:      Vp * C
+  ;;   1. wpe:      maxT * C
+  ;;   2. ln1w:     L * C
+  ;;   3. ln1b:     L * C
+  ;;   4. qkvw:     L * 3*C * C
+  ;;   5. qkvb:     L * 3*C
+  ;;   6. attprojw: L * C * C
+  ;;   7. attprojb: L * C
+  ;;   8. ln2w:     L * C
+  ;;   9. ln2b:     L * C
+  ;;  10. fcw:      L * 4*C * C
+  ;;  11. fcb:      L * 4*C
+  ;;  12. fcprojw:  L * C * 4*C  (NOTE: same size as fcw, but different layout!)
+  ;;  13. fcprojb:  L * C
+  ;;  14. lnfw:     C
+  ;;  15. lnfb:     C
+  ;; =========================================================================
+  (def size_wte (arith.muli Vp C))
+  (def size_wpe (arith.muli maxT C))
+  (def size_ln1w (arith.muli L C))
+  (def size_ln1b (arith.muli L C))
+  (def size_qkvw (arith.muli L (arith.muli C3 C)))
+  (def size_qkvb (arith.muli L C3))
+  (def size_attprojw (arith.muli L (arith.muli C C)))
+  (def size_attprojb (arith.muli L C))
+  (def size_ln2w (arith.muli L C))
+  (def size_ln2b (arith.muli L C))
+  (def size_fcw (arith.muli L (arith.muli C4 C)))
+  (def size_fcb (arith.muli L C4))
+  (def size_fcprojw (arith.muli L (arith.muli C C4)))
+  (def size_fcprojb (arith.muli L C))
+  (def size_lnfw C)
+  (def size_lnfb C)
+
+  ;; Compute total params
+  (def total_params
+    (arith.addi size_wte
+      (arith.addi size_wpe
+        (arith.addi size_ln1w
+          (arith.addi size_ln1b
+            (arith.addi size_qkvw
+              (arith.addi size_qkvb
+                (arith.addi size_attprojw
+                  (arith.addi size_attprojb
+                    (arith.addi size_ln2w
+                      (arith.addi size_ln2b
+                        (arith.addi size_fcw
+                          (arith.addi size_fcb
+                            (arith.addi size_fcprojw
+                              (arith.addi size_fcprojb
+                                (arith.addi size_lnfw size_lnfb))))))))))))))))
+
+  (print "  total_params: %ld\n" total_params)
+
+  ;; =========================================================================
+  ;; Compute base offsets (cumulative)
+  ;; =========================================================================
+  (def wte_base (: 0 i64))
+  (def wpe_base (arith.addi wte_base size_wte))
+  (def ln1w_base (arith.addi wpe_base size_wpe))
+  (def ln1b_base (arith.addi ln1w_base size_ln1w))
+  (def qkvw_base (arith.addi ln1b_base size_ln1b))
+  (def qkvb_base (arith.addi qkvw_base size_qkvw))
+  (def attprojw_base (arith.addi qkvb_base size_qkvb))
+  (def attprojb_base (arith.addi attprojw_base size_attprojw))
+  (def ln2w_base (arith.addi attprojb_base size_attprojb))
+  (def ln2b_base (arith.addi ln2w_base size_ln2w))
+  (def fcw_base (arith.addi ln2b_base size_ln2b))
+  (def fcb_base (arith.addi fcw_base size_fcw))
+  (def fcprojw_base (arith.addi fcb_base size_fcb))
+  (def fcprojb_base (arith.addi fcprojw_base size_fcprojw))
+  (def lnfw_base (arith.addi fcprojb_base size_fcprojb))
+  (def lnfb_base (arith.addi lnfw_base size_lnfw))
+
+  ;; Debug: verify offsets (expected from hardcoded: fcw=67805184, fcprojw=96153600)
+  (print "[Offsets] fcw_base=%ld (exp 67805184) fcprojw_base=%ld (exp 96153600)\n"
+         fcw_base fcprojw_base)
+
+  ;; =========================================================================
+  ;; Compute per-layer strides
+  ;; =========================================================================
+  (def ln_stride C)                              ; C
+  (def qkvw_stride (arith.muli C3 C))            ; 3*C * C
+  (def qkvb_stride C3)                           ; 3*C
+  (def attprojw_stride (arith.muli C C))         ; C * C
+  (def attprojb_stride C)                        ; C
+  (def fcw_stride (arith.muli C4 C))             ; 4*C * C
+  (def fcb_stride C4)                            ; 4*C
+  (def fcprojw_stride (arith.muli C C4))         ; C * 4*C
+  (def fcprojb_stride C)                         ; C
+
+  ;; =========================================================================
+  ;; Load parameters
+  ;; =========================================================================
   (def sizeof_f32 (: 4 i64))
   (def total_bytes (arith.muli total_params sizeof_f32))
   (def params_ptr (call !llvm.ptr malloc total_bytes))
@@ -773,6 +911,7 @@
   (def read_count (call i64 fread params_ptr sizeof_f32 total_params file))
   (print "Loaded %ld floats\n" read_count)
   (def _close (call i32 fclose file))
+  ;; Note: header_buf leaks (1KB) but we're about to exit anyway
 
   ;; Store params globally
   (def g_params_addr (llvm.mlir.addressof {:global_name @g_params :result !llvm.ptr}))
@@ -783,15 +922,13 @@
   (def wte_val_f64 (arith.extf {:result f64} wte_val))
   (print "wte[0][0] = %f\n" wte_val_f64)
 
-
   ;; Load tokenizer
   (def tok_path (llvm.mlir.addressof {:global_name @tokenizer_path :result !llvm.ptr}))
   (def _tok_ok (func.call {:result i32} "tokenizer_init" tok_path))
 
-  ;; Get wte and wpe pointers
+  ;; Get wte and wpe pointers (computed from dynamic offsets)
   (def wte_ptr params_ptr)
-  (def wpe_offset (: 38633472 i64))  ; 50304 * 768 (padded vocab)
-  (def wpe_ptr (ptr-at f32 params_ptr wpe_offset))
+  (def wpe_ptr (ptr-at f32 params_ptr wpe_base))
 
   ;; Create token_ids buffer with EOT token (start of generation)
   (def token_ids (memref.alloc {:result memref<64xi32>}))
@@ -801,15 +938,14 @@
   (def c1 (: 1 index))
   (def c64 (: 64 index))
 
-  ;; Fill with EOT, then set a single token prompt: "The" = 464
+  ;; Fill with EOT
   (scf.for c0 c64 c1
     (region
       (block [(: i index)]
         (memref.store eot_token token_ids i)
         (scf.yield))))
-  (memref.store (: 464 i32) token_ids (: 0 index))    ; "The"
 
-  (print "Prompt: The\nGenerated:")
+  (print "Prompt: <|endoftext|>\nGenerated:")
 
   ;; Allocate activation buffers
   (def x (memref.alloc {:result memref<64x768xf32>}))
@@ -844,39 +980,11 @@
   (def c3072 (: 3072 index))
   (def c12 (: 12 index))
 
-  ;; Weight base offsets (using padded_vocab_size = 50304)
-  ;; wte: 0 (50304*768 = 38633472), wpe: 38633472 (1024*768 = 786432)
-  (def ln1w_base (: 39419904 i64))   ; wpe + 786432
-  (def ln1b_base (: 39429120 i64))   ; ln1w + 9216
-  (def qkvw_base (: 39438336 i64))   ; ln1b + 9216
-  (def qkvb_base (: 60672000 i64))   ; qkvw + 21233664
-  (def attprojw_base (: 60699648 i64)) ; qkvb + 27648
-  (def attprojb_base (: 67777536 i64)) ; attprojw + 7077888
-  (def ln2w_base (: 67786752 i64))   ; attprojb + 9216
-  (def ln2b_base (: 67795968 i64))   ; ln2w + 9216
-  (def fcw_base (: 67805184 i64))    ; ln2b + 9216
-  (def fcb_base (: 96116736 i64))    ; fcw + 28311552
-  (def fcprojw_base (: 96153600 i64))  ; fcb + 36864
-  (def fcprojb_base (: 124465152 i64)) ; fcprojw + 28311552
-  (def lnfw_base (: 124474368 i64))  ; fcprojb + 9216
-  (def lnfb_base (: 124475136 i64))  ; lnfw + 768
-
-  ;; Per-layer strides
-  (def ln_stride (: 768 i64))
-  (def qkvw_stride (: 1769472 i64))
-  (def qkvb_stride (: 2304 i64))
-  (def attprojw_stride (: 589824 i64))
-  (def attprojb_stride (: 768 i64))
-  (def fcw_stride (: 2359296 i64))
-  (def fcb_stride (: 3072 i64))
-  (def fcprojw_stride (: 2359296 i64))
-  (def fcprojb_stride (: 768 i64))
-
   ;; =========================================================================
   ;; GENERATION LOOP: Generate 20 tokens
   ;; =========================================================================
   (def prompt_len (: 1 index))
-  (def gen_steps (: 30 index))  ; generate 30 tokens after prompt
+  (def gen_steps (: 20 index))  ; generate 20 tokens
   (def gen_end (arith.addi prompt_len gen_steps))
 
   (print "\nGenerating tokens:\n")
@@ -888,6 +996,27 @@
       (block [(: step index)]
         ;; 1. Embedding lookup
         (func.call "embedding_lookup" x wte_ptr wpe_ptr token_ids)
+
+        ;; Debug: check embedding on first step
+        (def is_first_step_embed (arith.cmpi {:predicate 0} step prompt_len))
+        (scf.if is_first_step_embed
+          (region
+            (block []
+              (def e0 (memref.load x (: 0 index) (: 0 index)))
+              (def e1 (memref.load x (: 0 index) (: 1 index)))
+              (def e2 (memref.load x (: 0 index) (: 2 index)))
+              (def e3 (memref.load x (: 0 index) (: 3 index)))
+              (def e4 (memref.load x (: 0 index) (: 4 index)))
+              (def e496 (memref.load x (: 0 index) (: 496 index)))
+              (print "After embedding:\n  [0..4]: %.4f %.4f %.4f %.4f %.4f\n  [496]: %.4f\n"
+                     (arith.extf {:result f64} e0)
+                     (arith.extf {:result f64} e1)
+                     (arith.extf {:result f64} e2)
+                     (arith.extf {:result f64} e3)
+                     (arith.extf {:result f64} e4)
+                     (arith.extf {:result f64} e496))
+              (scf.yield)))
+          (region (block [] (scf.yield))))
 
         ;; Position to compute logits at (last filled position)
         (def logit_pos (arith.subi step c1))
@@ -912,20 +1041,53 @@
                     (memref.store (llvm.load {:result f32} b_ptr) ln1_b i)
                     (scf.yield))))
 
-              ;; qkv weights - llm.c stores as (OC=2304, C=768), we use (C=768, OC=2304)
-              ;; Load with transpose: checkpoint[oc*768+c] -> qkv_w[c][oc]
+              ;; Debug: check layer 2 weights
+              (def is_layer2_check (arith.cmpi {:predicate 0} layer (: 2 index)))
+              (def do_layer2_debug (arith.andi is_layer2_check is_first_step_embed))
+              (scf.if do_layer2_debug
+                (region
+                  (block []
+                    ;; Print ln1w values
+                    (def w0 (memref.load ln1_w (: 0 index)))
+                    (def w1 (memref.load ln1_w (: 1 index)))
+                    (def w2 (memref.load ln1_w (: 2 index)))
+                    (def w3 (memref.load ln1_w (: 3 index)))
+                    (def w4 (memref.load ln1_w (: 4 index)))
+                    (print "Layer 2 ln1w[0..4]: %.6f %.6f %.6f %.6f %.6f\n"
+                           (arith.extf {:result f64} w0)
+                           (arith.extf {:result f64} w1)
+                           (arith.extf {:result f64} w2)
+                           (arith.extf {:result f64} w3)
+                           (arith.extf {:result f64} w4))
+                    ;; Print ln1b values
+                    (def b0 (memref.load ln1_b (: 0 index)))
+                    (def b1 (memref.load ln1_b (: 1 index)))
+                    (def b2 (memref.load ln1_b (: 2 index)))
+                    (def b3 (memref.load ln1_b (: 3 index)))
+                    (def b4 (memref.load ln1_b (: 4 index)))
+                    (print "Layer 2 ln1b[0..4]: %.6f %.6f %.6f %.6f %.6f\n"
+                           (arith.extf {:result f64} b0)
+                           (arith.extf {:result f64} b1)
+                           (arith.extf {:result f64} b2)
+                           (arith.extf {:result f64} b3)
+                           (arith.extf {:result f64} b4))
+                    (scf.yield)))
+                (region (block [] (scf.yield))))
+
+              ;; qkv weights - llm.c stores as (C=768, OC=2304)
+              ;; Direct load: checkpoint[c*2304+oc] -> qkv_w[c][oc]
               (def qkvw_offset (arith.addi qkvw_base (arith.muli layer_i64 qkvw_stride)))
               (def qkvb_offset (arith.addi qkvb_base (arith.muli layer_i64 qkvb_stride)))
-              (scf.for c0 c2304 c1
+              (scf.for c0 c768 c1
                 (region
-                  (block [(: oc index)]
-                    (def oc_i64 (arith.index_cast {:result i64} oc))
-                    (def row_offset (arith.muli oc_i64 (: 768 i64)))
-                    (scf.for c0 c768 c1
+                  (block [(: c index)]
+                    (def c_i64 (arith.index_cast {:result i64} c))
+                    (def row_offset (arith.muli c_i64 (: 2304 i64)))
+                    (scf.for c0 c2304 c1
                       (region
-                        (block [(: c index)]
-                          (def c_i64 (arith.index_cast {:result i64} c))
-                          (def w_ptr (ptr-at f32 params_ptr (arith.addi qkvw_offset (arith.addi row_offset c_i64))))
+                        (block [(: oc index)]
+                          (def oc_i64 (arith.index_cast {:result i64} oc))
+                          (def w_ptr (ptr-at f32 params_ptr (arith.addi qkvw_offset (arith.addi row_offset oc_i64))))
                           (memref.store (llvm.load {:result f32} w_ptr) qkv_w c oc)
                           (scf.yield))))
                     (scf.yield))))
@@ -937,20 +1099,20 @@
                     (memref.store (llvm.load {:result f32} b_ptr) qkv_b i)
                     (scf.yield))))
 
-              ;; attention projection weights - llm.c stores as (OC=768, C=768)
-              ;; Load with transpose: checkpoint[oc*768+c] -> attn_w[c][oc]
+              ;; attention projection weights - llm.c stores as (C=768, OC=768)
+              ;; Direct load: checkpoint[c*768+oc] -> attn_w[c][oc]
               (def attprojw_offset (arith.addi attprojw_base (arith.muli layer_i64 attprojw_stride)))
               (def attprojb_offset (arith.addi attprojb_base (arith.muli layer_i64 attprojb_stride)))
               (scf.for c0 c768 c1
                 (region
-                  (block [(: oc index)]
-                    (def oc_i64 (arith.index_cast {:result i64} oc))
-                    (def row_offset (arith.muli oc_i64 (: 768 i64)))
+                  (block [(: c index)]
+                    (def c_i64 (arith.index_cast {:result i64} c))
+                    (def row_offset (arith.muli c_i64 (: 768 i64)))
                     (scf.for c0 c768 c1
                       (region
-                        (block [(: c index)]
-                          (def c_i64 (arith.index_cast {:result i64} c))
-                          (def w_ptr (ptr-at f32 params_ptr (arith.addi attprojw_offset (arith.addi row_offset c_i64))))
+                        (block [(: oc index)]
+                          (def oc_i64 (arith.index_cast {:result i64} oc))
+                          (def w_ptr (ptr-at f32 params_ptr (arith.addi attprojw_offset (arith.addi row_offset oc_i64))))
                           (memref.store (llvm.load {:result f32} w_ptr) attn_w c oc)
                           (scf.yield))))
                     (scf.yield))))
@@ -976,20 +1138,20 @@
                     (memref.store (llvm.load {:result f32} b_ptr) ln2_b i)
                     (scf.yield))))
 
-              ;; fc weights - llm.c stores as (OC=3072, C=768)
-              ;; Load with transpose: checkpoint[oc*768+c] -> fc_w[c][oc]
+              ;; fc weights - llm.c stores as (C=768, OC=3072)
+              ;; Direct load: checkpoint[c*3072+oc] -> fc_w[c][oc]
               (def fcw_offset (arith.addi fcw_base (arith.muli layer_i64 fcw_stride)))
               (def fcb_offset (arith.addi fcb_base (arith.muli layer_i64 fcb_stride)))
-              (scf.for c0 c3072 c1
+              (scf.for c0 c768 c1
                 (region
-                  (block [(: oc index)]
-                    (def oc_i64 (arith.index_cast {:result i64} oc))
-                    (def row_offset (arith.muli oc_i64 (: 768 i64)))
-                    (scf.for c0 c768 c1
+                  (block [(: c index)]
+                    (def c_i64 (arith.index_cast {:result i64} c))
+                    (def row_offset (arith.muli c_i64 (: 3072 i64)))
+                    (scf.for c0 c3072 c1
                       (region
-                        (block [(: c index)]
-                          (def c_i64 (arith.index_cast {:result i64} c))
-                          (def w_ptr (ptr-at f32 params_ptr (arith.addi fcw_offset (arith.addi row_offset c_i64))))
+                        (block [(: oc index)]
+                          (def oc_i64 (arith.index_cast {:result i64} oc))
+                          (def w_ptr (ptr-at f32 params_ptr (arith.addi fcw_offset (arith.addi row_offset oc_i64))))
                           (memref.store (llvm.load {:result f32} w_ptr) fc_w c oc)
                           (scf.yield))))
                     (scf.yield))))
@@ -1001,21 +1163,48 @@
                     (memref.store (llvm.load {:result f32} b_ptr) fc_b i)
                     (scf.yield))))
 
-              ;; fc projection weights - llm.c stores as (OC=768, C=3072)
-              ;; Load with transpose: checkpoint[oc*3072+c] -> fcproj_w[c][oc]
+              ;; Debug: check layer 2 fc_w weights
+              (scf.if do_layer2_debug
+                (region
+                  (block []
+                    ;; Print raw checkpoint values for fc_w - now with stride 3072
+                    (def fcw_raw0 (llvm.load {:result f32} (ptr-at f32 params_ptr fcw_offset)))
+                    (def fcw_raw1 (llvm.load {:result f32} (ptr-at f32 params_ptr (arith.addi fcw_offset (: 1 i64)))))
+                    (def fcw_raw3072 (llvm.load {:result f32} (ptr-at f32 params_ptr (arith.addi fcw_offset (: 3072 i64)))))
+                    (print "Layer 2 fc_w RAW checkpoint:\n  [0]: %.6f  [1]: %.6f  [3072]: %.6f\n"
+                           (arith.extf {:result f64} fcw_raw0)
+                           (arith.extf {:result f64} fcw_raw1)
+                           (arith.extf {:result f64} fcw_raw3072))
+                    ;; Print loaded values - column 0 (expect raw[0], raw[3072], raw[6144], ...)
+                    (def fw0 (memref.load fc_w (: 0 index) (: 0 index)))
+                    (def fw1 (memref.load fc_w (: 1 index) (: 0 index)))
+                    (def fw2 (memref.load fc_w (: 2 index) (: 0 index)))
+                    (def fw3 (memref.load fc_w (: 3 index) (: 0 index)))
+                    (def fw4 (memref.load fc_w (: 4 index) (: 0 index)))
+                    (print "Layer 2 fc_w loaded [0..4][0] (expect raw[0,3072,6144...]): %.6f %.6f %.6f %.6f %.6f\n"
+                           (arith.extf {:result f64} fw0)
+                           (arith.extf {:result f64} fw1)
+                           (arith.extf {:result f64} fw2)
+                           (arith.extf {:result f64} fw3)
+                           (arith.extf {:result f64} fw4))
+                    (scf.yield)))
+                (region (block [] (scf.yield))))
+
+              ;; fc projection weights - checkpoint stores as (IC=3072, OC=768)
+              ;; Direct load: checkpoint[ic*768+oc] -> fcproj_w[ic][oc]
               (def fcprojw_offset (arith.addi fcprojw_base (arith.muli layer_i64 fcprojw_stride)))
               (def fcprojb_offset (arith.addi fcprojb_base (arith.muli layer_i64 fcprojb_stride)))
-              (scf.for c0 c768 c1
+              (scf.for c0 c3072 c1
                 (region
-                  (block [(: oc index)]
-                    (def oc_i64 (arith.index_cast {:result i64} oc))
-                    (def row_offset (arith.muli oc_i64 (: 3072 i64)))
-                    (scf.for c0 c3072 c1
+                  (block [(: ic index)]
+                    (def ic_i64 (arith.index_cast {:result i64} ic))
+                    (def row_offset (arith.muli ic_i64 (: 768 i64)))
+                    (scf.for c0 c768 c1
                       (region
-                        (block [(: c index)]
-                          (def c_i64 (arith.index_cast {:result i64} c))
-                          (def w_ptr (ptr-at f32 params_ptr (arith.addi fcprojw_offset (arith.addi row_offset c_i64))))
-                          (memref.store (llvm.load {:result f32} w_ptr) fcproj_w c oc)
+                        (block [(: oc index)]
+                          (def oc_i64 (arith.index_cast {:result i64} oc))
+                          (def w_ptr (ptr-at f32 params_ptr (arith.addi fcprojw_offset (arith.addi row_offset oc_i64))))
+                          (memref.store (llvm.load {:result f32} w_ptr) fcproj_w ic oc)
                           (scf.yield))))
                     (scf.yield))))
               (scf.for c0 c768 c1
@@ -1026,17 +1215,444 @@
                     (memref.store (llvm.load {:result f32} b_ptr) fcproj_b i)
                     (scf.yield))))
 
+              ;; Debug: check layer 2 fcproj weights
+              (scf.if do_layer2_debug
+                (region
+                  (block []
+                    ;; Print RAW checkpoint values at different offsets
+                    (def raw0 (llvm.load {:result f32} (ptr-at f32 params_ptr fcprojw_offset)))
+                    (def raw1 (llvm.load {:result f32} (ptr-at f32 params_ptr (arith.addi fcprojw_offset (: 1 i64)))))
+                    (def raw768 (llvm.load {:result f32} (ptr-at f32 params_ptr (arith.addi fcprojw_offset (: 768 i64)))))
+                    (def raw3072 (llvm.load {:result f32} (ptr-at f32 params_ptr (arith.addi fcprojw_offset (: 3072 i64)))))
+                    (print "Layer 2 fcprojw RAW checkpoint:\n")
+                    (print "  [0]: %.6f  [1]: %.6f  [768]: %.6f  [3072]: %.6f\n"
+                           (arith.extf {:result f64} raw0)
+                           (arith.extf {:result f64} raw1)
+                           (arith.extf {:result f64} raw768)
+                           (arith.extf {:result f64} raw3072))
+                    ;; fcproj_w loaded values
+                    (def fpw0 (memref.load fcproj_w (: 0 index) (: 0 index)))
+                    (def fpw1 (memref.load fcproj_w (: 1 index) (: 0 index)))
+                    (def fpw2 (memref.load fcproj_w (: 2 index) (: 0 index)))
+                    (def fpw3 (memref.load fcproj_w (: 3 index) (: 0 index)))
+                    (def fpw4 (memref.load fcproj_w (: 4 index) (: 0 index)))
+                    (print "Layer 2 fcprojw loaded [ic][0] (expect raw[0,768,1536,2304,3072]): %.6f %.6f %.6f %.6f %.6f\n"
+                           (arith.extf {:result f64} fpw0)
+                           (arith.extf {:result f64} fpw1)
+                           (arith.extf {:result f64} fpw2)
+                           (arith.extf {:result f64} fpw3)
+                           (arith.extf {:result f64} fpw4))
+                    ;; fcproj_b[0..4]
+                    (def fpb0 (memref.load fcproj_b (: 0 index)))
+                    (def fpb1 (memref.load fcproj_b (: 1 index)))
+                    (def fpb2 (memref.load fcproj_b (: 2 index)))
+                    (def fpb3 (memref.load fcproj_b (: 3 index)))
+                    (def fpb4 (memref.load fcproj_b (: 4 index)))
+                    (print "Layer 2 fcprojb[0..4]: %.6f %.6f %.6f %.6f %.6f\n"
+                           (arith.extf {:result f64} fpb0)
+                           (arith.extf {:result f64} fpb1)
+                           (arith.extf {:result f64} fpb2)
+                           (arith.extf {:result f64} fpb3)
+                           (arith.extf {:result f64} fpb4))
+                    (scf.yield)))
+                (region (block [] (scf.yield))))
+
               ;; === Run transformer block ===
+
+              ;; Debug: check layer 2 input (x before LN1)
+              (scf.if do_layer2_debug
+                (region
+                  (block []
+                    (def xi0 (memref.load x (: 0 index) (: 0 index)))
+                    (def xi1 (memref.load x (: 0 index) (: 1 index)))
+                    (def xi2 (memref.load x (: 0 index) (: 2 index)))
+                    (def xi3 (memref.load x (: 0 index) (: 3 index)))
+                    (def xi4 (memref.load x (: 0 index) (: 4 index)))
+                    (def xi496 (memref.load x (: 0 index) (: 496 index)))
+                    (print "Layer 2 input (x):\n  [0..4]: %.4f %.4f %.4f %.4f %.4f\n  [496]: %.4f\n"
+                           (arith.extf {:result f64} xi0)
+                           (arith.extf {:result f64} xi1)
+                           (arith.extf {:result f64} xi2)
+                           (arith.extf {:result f64} xi3)
+                           (arith.extf {:result f64} xi4)
+                           (arith.extf {:result f64} xi496))
+                    (scf.yield)))
+                (region (block [] (scf.yield))))
+
               (func.call "layernorm_forward" ln_out x ln1_w ln1_b)
+
+              ;; Debug: check layer 2 ln1 output
+              (scf.if do_layer2_debug
+                (region
+                  (block []
+                    (def lno0 (memref.load ln_out (: 0 index) (: 0 index)))
+                    (def lno1 (memref.load ln_out (: 0 index) (: 1 index)))
+                    (def lno2 (memref.load ln_out (: 0 index) (: 2 index)))
+                    (def lno3 (memref.load ln_out (: 0 index) (: 3 index)))
+                    (def lno4 (memref.load ln_out (: 0 index) (: 4 index)))
+                    (def lno496 (memref.load ln_out (: 0 index) (: 496 index)))
+                    (print "Layer 2 ln1 output:\n  [0..4]: %.4f %.4f %.4f %.4f %.4f\n  [496]: %.4f\n"
+                           (arith.extf {:result f64} lno0)
+                           (arith.extf {:result f64} lno1)
+                           (arith.extf {:result f64} lno2)
+                           (arith.extf {:result f64} lno3)
+                           (arith.extf {:result f64} lno4)
+                           (arith.extf {:result f64} lno496))
+                    (scf.yield)))
+                (region (block [] (scf.yield))))
+
+              ;; Debug: check layer 0 ln1 output
+              (def is_layer0 (arith.cmpi {:predicate 0} layer c0))
+              (def is_debug_step (arith.andi is_layer0 is_first_step_embed))
+              (scf.if is_debug_step
+                (region
+                  (block []
+                    (def ln0 (memref.load ln_out (: 0 index) (: 0 index)))
+                    (def ln1_v (memref.load ln_out (: 0 index) (: 1 index)))
+                    (def ln2 (memref.load ln_out (: 0 index) (: 2 index)))
+                    (def ln3 (memref.load ln_out (: 0 index) (: 3 index)))
+                    (def ln4 (memref.load ln_out (: 0 index) (: 4 index)))
+                    (def ln496 (memref.load ln_out (: 0 index) (: 496 index)))
+                    (print "After LN1 (layer 0):\n  [0..4]: %.4f %.4f %.4f %.4f %.4f\n  [496]: %.4f\n"
+                           (arith.extf {:result f64} ln0)
+                           (arith.extf {:result f64} ln1_v)
+                           (arith.extf {:result f64} ln2)
+                           (arith.extf {:result f64} ln3)
+                           (arith.extf {:result f64} ln4)
+                           (arith.extf {:result f64} ln496))
+                    (scf.yield)))
+                (region (block [] (scf.yield))))
+
               (func.call "matmul_qkv" qkv_out ln_out qkv_w qkv_b)
+
+              ;; Debug: check QKV output for layer 2
+              (scf.if do_layer2_debug
+                (region
+                  (block []
+                    (def qkv0 (memref.load qkv_out (: 0 index) (: 0 index)))
+                    (def qkv1 (memref.load qkv_out (: 0 index) (: 1 index)))
+                    (def qkv2 (memref.load qkv_out (: 0 index) (: 2 index)))
+                    (def qkv3 (memref.load qkv_out (: 0 index) (: 3 index)))
+                    (def qkv4 (memref.load qkv_out (: 0 index) (: 4 index)))
+                    (print "Layer 2 Q[0..4]: %.4f %.4f %.4f %.4f %.4f\n"
+                           (arith.extf {:result f64} qkv0)
+                           (arith.extf {:result f64} qkv1)
+                           (arith.extf {:result f64} qkv2)
+                           (arith.extf {:result f64} qkv3)
+                           (arith.extf {:result f64} qkv4))
+                    (scf.yield)))
+                (region (block [] (scf.yield))))
+
+              ;; Debug: check QKV output for layer 0
+              (scf.if is_debug_step
+                (region
+                  (block []
+                    ;; Q values (0..4)
+                    (def q0 (memref.load qkv_out (: 0 index) (: 0 index)))
+                    (def q1 (memref.load qkv_out (: 0 index) (: 1 index)))
+                    (def q2 (memref.load qkv_out (: 0 index) (: 2 index)))
+                    (def q3 (memref.load qkv_out (: 0 index) (: 3 index)))
+                    (def q4 (memref.load qkv_out (: 0 index) (: 4 index)))
+                    ;; K values (768..772)
+                    (def k0 (memref.load qkv_out (: 0 index) (: 768 index)))
+                    (def k1 (memref.load qkv_out (: 0 index) (: 769 index)))
+                    (def k2 (memref.load qkv_out (: 0 index) (: 770 index)))
+                    (def k3 (memref.load qkv_out (: 0 index) (: 771 index)))
+                    (def k4 (memref.load qkv_out (: 0 index) (: 772 index)))
+                    ;; V values (1536..1540)
+                    (def v0 (memref.load qkv_out (: 0 index) (: 1536 index)))
+                    (def v1 (memref.load qkv_out (: 0 index) (: 1537 index)))
+                    (def v2 (memref.load qkv_out (: 0 index) (: 1538 index)))
+                    (def v3 (memref.load qkv_out (: 0 index) (: 1539 index)))
+                    (def v4 (memref.load qkv_out (: 0 index) (: 1540 index)))
+                    (print "After QKV (layer 0):\n  Q[0..4]: %.4f %.4f %.4f %.4f %.4f\n"
+                           (arith.extf {:result f64} q0)
+                           (arith.extf {:result f64} q1)
+                           (arith.extf {:result f64} q2)
+                           (arith.extf {:result f64} q3)
+                           (arith.extf {:result f64} q4))
+                    (print "  K[0..4]: %.4f %.4f %.4f %.4f %.4f\n"
+                           (arith.extf {:result f64} k0)
+                           (arith.extf {:result f64} k1)
+                           (arith.extf {:result f64} k2)
+                           (arith.extf {:result f64} k3)
+                           (arith.extf {:result f64} k4))
+                    (print "  V[0..4]: %.4f %.4f %.4f %.4f %.4f\n"
+                           (arith.extf {:result f64} v0)
+                           (arith.extf {:result f64} v1)
+                           (arith.extf {:result f64} v2)
+                           (arith.extf {:result f64} v3)
+                           (arith.extf {:result f64} v4))
+                    (scf.yield)))
+                (region (block [] (scf.yield))))
+
               (func.call "attention_forward" attn_out qkv_out)
+
+              ;; Debug: check attention output for layer 2
+              (scf.if do_layer2_debug
+                (region
+                  (block []
+                    (def at0 (memref.load attn_out (: 0 index) (: 0 index)))
+                    (def at1 (memref.load attn_out (: 0 index) (: 1 index)))
+                    (def at2 (memref.load attn_out (: 0 index) (: 2 index)))
+                    (def at3 (memref.load attn_out (: 0 index) (: 3 index)))
+                    (def at4 (memref.load attn_out (: 0 index) (: 4 index)))
+                    (print "Layer 2 attn output:\n  [0..4]: %.4f %.4f %.4f %.4f %.4f\n"
+                           (arith.extf {:result f64} at0)
+                           (arith.extf {:result f64} at1)
+                           (arith.extf {:result f64} at2)
+                           (arith.extf {:result f64} at3)
+                           (arith.extf {:result f64} at4))
+                    (scf.yield)))
+                (region (block [] (scf.yield))))
+
+              ;; Debug: check attention output for layer 0
+              (scf.if is_debug_step
+                (region
+                  (block []
+                    (def a0 (memref.load attn_out (: 0 index) (: 0 index)))
+                    (def a1 (memref.load attn_out (: 0 index) (: 1 index)))
+                    (def a2 (memref.load attn_out (: 0 index) (: 2 index)))
+                    (def a3 (memref.load attn_out (: 0 index) (: 3 index)))
+                    (def a4 (memref.load attn_out (: 0 index) (: 4 index)))
+                    (def a496 (memref.load attn_out (: 0 index) (: 496 index)))
+                    (print "After attention (layer 0):\n  [0..4]: %.4f %.4f %.4f %.4f %.4f\n  [496]: %.4f\n"
+                           (arith.extf {:result f64} a0)
+                           (arith.extf {:result f64} a1)
+                           (arith.extf {:result f64} a2)
+                           (arith.extf {:result f64} a3)
+                           (arith.extf {:result f64} a4)
+                           (arith.extf {:result f64} a496))
+                    (scf.yield)))
+                (region (block [] (scf.yield))))
+
               (func.call "matmul_attn_proj" attn_proj_out attn_out attn_w attn_b)
+
+              ;; Debug: attention projection for layer 2
+              (scf.if do_layer2_debug
+                (region
+                  (block []
+                    (def ap2_0 (memref.load attn_proj_out (: 0 index) (: 0 index)))
+                    (def ap2_1 (memref.load attn_proj_out (: 0 index) (: 1 index)))
+                    (def ap2_2 (memref.load attn_proj_out (: 0 index) (: 2 index)))
+                    (def ap2_3 (memref.load attn_proj_out (: 0 index) (: 3 index)))
+                    (def ap2_4 (memref.load attn_proj_out (: 0 index) (: 4 index)))
+                    (print "Layer 2 attn proj:\n  [0..4]: %.4f %.4f %.4f %.4f %.4f\n"
+                           (arith.extf {:result f64} ap2_0)
+                           (arith.extf {:result f64} ap2_1)
+                           (arith.extf {:result f64} ap2_2)
+                           (arith.extf {:result f64} ap2_3)
+                           (arith.extf {:result f64} ap2_4))
+                    (scf.yield)))
+                (region (block [] (scf.yield))))
+
+              ;; Debug: attention projection
+              (scf.if is_debug_step
+                (region
+                  (block []
+                    (def ap0 (memref.load attn_proj_out (: 0 index) (: 0 index)))
+                    (def ap1 (memref.load attn_proj_out (: 0 index) (: 1 index)))
+                    (def ap2 (memref.load attn_proj_out (: 0 index) (: 2 index)))
+                    (def ap3 (memref.load attn_proj_out (: 0 index) (: 3 index)))
+                    (def ap4 (memref.load attn_proj_out (: 0 index) (: 4 index)))
+                    (def ap496 (memref.load attn_proj_out (: 0 index) (: 496 index)))
+                    (print "After attn proj (layer 0):\n  [0..4]: %.4f %.4f %.4f %.4f %.4f\n  [496]: %.4f\n"
+                           (arith.extf {:result f64} ap0)
+                           (arith.extf {:result f64} ap1)
+                           (arith.extf {:result f64} ap2)
+                           (arith.extf {:result f64} ap3)
+                           (arith.extf {:result f64} ap4)
+                           (arith.extf {:result f64} ap496))
+                    (scf.yield)))
+                (region (block [] (scf.yield))))
+
               (func.call "residual_add" x2 x attn_proj_out)
+
+              ;; Debug: layer 2 residual1
+              (scf.if do_layer2_debug
+                (region
+                  (block []
+                    (def r2_0 (memref.load x2 (: 0 index) (: 0 index)))
+                    (def r2_1 (memref.load x2 (: 0 index) (: 1 index)))
+                    (def r2_2 (memref.load x2 (: 0 index) (: 2 index)))
+                    (def r2_3 (memref.load x2 (: 0 index) (: 3 index)))
+                    (def r2_4 (memref.load x2 (: 0 index) (: 4 index)))
+                    (print "Layer 2 residual1:\n  [0..4]: %.4f %.4f %.4f %.4f %.4f\n"
+                           (arith.extf {:result f64} r2_0)
+                           (arith.extf {:result f64} r2_1)
+                           (arith.extf {:result f64} r2_2)
+                           (arith.extf {:result f64} r2_3)
+                           (arith.extf {:result f64} r2_4))
+                    (scf.yield)))
+                (region (block [] (scf.yield))))
+
+              ;; Debug: after first residual
+              (scf.if is_debug_step
+                (region
+                  (block []
+                    (def r0 (memref.load x2 (: 0 index) (: 0 index)))
+                    (def r1 (memref.load x2 (: 0 index) (: 1 index)))
+                    (def r2 (memref.load x2 (: 0 index) (: 2 index)))
+                    (def r3 (memref.load x2 (: 0 index) (: 3 index)))
+                    (def r4 (memref.load x2 (: 0 index) (: 4 index)))
+                    (def r496 (memref.load x2 (: 0 index) (: 496 index)))
+                    (print "After residual1 (layer 0):\n  [0..4]: %.4f %.4f %.4f %.4f %.4f\n  [496]: %.4f\n"
+                           (arith.extf {:result f64} r0)
+                           (arith.extf {:result f64} r1)
+                           (arith.extf {:result f64} r2)
+                           (arith.extf {:result f64} r3)
+                           (arith.extf {:result f64} r4)
+                           (arith.extf {:result f64} r496))
+                    (scf.yield)))
+                (region (block [] (scf.yield))))
+
               (func.call "layernorm_forward" ln_out x2 ln2_w ln2_b)
+
+              ;; Debug: layer 2 ln2 output (fc input)
+              (scf.if do_layer2_debug
+                (region
+                  (block []
+                    (def ln2o0 (memref.load ln_out (: 0 index) (: 0 index)))
+                    (def ln2o1 (memref.load ln_out (: 0 index) (: 1 index)))
+                    (def ln2o2 (memref.load ln_out (: 0 index) (: 2 index)))
+                    (def ln2o3 (memref.load ln_out (: 0 index) (: 3 index)))
+                    (def ln2o4 (memref.load ln_out (: 0 index) (: 4 index)))
+                    (print "Layer 2 ln2 output (fc input):\n  [0..4]: %.6f %.6f %.6f %.6f %.6f\n"
+                           (arith.extf {:result f64} ln2o0)
+                           (arith.extf {:result f64} ln2o1)
+                           (arith.extf {:result f64} ln2o2)
+                           (arith.extf {:result f64} ln2o3)
+                           (arith.extf {:result f64} ln2o4))
+                    (scf.yield)))
+                (region (block [] (scf.yield))))
+
               (func.call "matmul_fc" fc_out ln_out fc_w fc_b)
+
+              ;; Debug: layer 2 fc output
+              (scf.if do_layer2_debug
+                (region
+                  (block []
+                    (def fc0 (memref.load fc_out (: 0 index) (: 0 index)))
+                    (def fc1 (memref.load fc_out (: 0 index) (: 1 index)))
+                    (def fc2 (memref.load fc_out (: 0 index) (: 2 index)))
+                    (def fc3 (memref.load fc_out (: 0 index) (: 3 index)))
+                    (def fc4 (memref.load fc_out (: 0 index) (: 4 index)))
+                    (print "Layer 2 fc output:\n  [0..4]: %.4f %.4f %.4f %.4f %.4f\n"
+                           (arith.extf {:result f64} fc0)
+                           (arith.extf {:result f64} fc1)
+                           (arith.extf {:result f64} fc2)
+                           (arith.extf {:result f64} fc3)
+                           (arith.extf {:result f64} fc4))
+                    (scf.yield)))
+                (region (block [] (scf.yield))))
+
               (func.call "gelu_forward" gelu_out fc_out)
+
+              ;; Debug: layer 2 gelu output
+              (scf.if do_layer2_debug
+                (region
+                  (block []
+                    (def g0 (memref.load gelu_out (: 0 index) (: 0 index)))
+                    (def g1 (memref.load gelu_out (: 0 index) (: 1 index)))
+                    (def g2 (memref.load gelu_out (: 0 index) (: 2 index)))
+                    (def g3 (memref.load gelu_out (: 0 index) (: 3 index)))
+                    (def g4 (memref.load gelu_out (: 0 index) (: 4 index)))
+                    (print "Layer 2 gelu output:\n  [0..4]: %.6f %.6f %.6f %.6f %.6f\n"
+                           (arith.extf {:result f64} g0)
+                           (arith.extf {:result f64} g1)
+                           (arith.extf {:result f64} g2)
+                           (arith.extf {:result f64} g3)
+                           (arith.extf {:result f64} g4))
+                    (scf.yield)))
+                (region (block [] (scf.yield))))
+
               (func.call "matmul_fc_proj" fc_proj_out gelu_out fcproj_w fcproj_b)
+
+              ;; Debug: manually compute fc_proj[0][0] for layer 2
+              (scf.if do_layer2_debug
+                (region
+                  (block []
+                    ;; Manual: fc_proj[0][0] = sum_c gelu[0][c] * fcproj_w[c][0] + bias[0]
+                    ;; Compute full sum over 3072 elements
+                    (def c3072 (: 3072 index))
+                    (def manual_sum (scf.for {:result f32} c0 c3072 c1 (: 0.0 f32)
+                      (region
+                        (block [(: c index) (: acc f32)]
+                          (def gv (memref.load gelu_out (: 0 index) c))
+                          (def wv (memref.load fcproj_w c (: 0 index)))
+                          (scf.yield (arith.addf acc (arith.mulf gv wv)))))))
+                    (def b0 (memref.load fcproj_b (: 0 index)))
+                    (def manual_result (arith.addf manual_sum b0))
+                    (print "Manual fc_proj[0][0]: sum=%.6f + bias=%.6f = %.6f\n"
+                           (arith.extf {:result f64} manual_sum)
+                           (arith.extf {:result f64} b0)
+                           (arith.extf {:result f64} manual_result))
+                    ;; Also check a few sample values from gelu and weights
+                    (def g100 (memref.load gelu_out (: 0 index) (: 100 index)))
+                    (def g1000 (memref.load gelu_out (: 0 index) (: 1000 index)))
+                    (def g3000 (memref.load gelu_out (: 0 index) (: 3000 index)))
+                    (print "  gelu_out[0][100,1000,3000]: %.6f %.6f %.6f\n"
+                           (arith.extf {:result f64} g100)
+                           (arith.extf {:result f64} g1000)
+                           (arith.extf {:result f64} g3000))
+                    ;; Check weight values for column 0 at different rows
+                    (def w100 (memref.load fcproj_w (: 100 index) (: 0 index)))
+                    (def w1000 (memref.load fcproj_w (: 1000 index) (: 0 index)))
+                    (def w3000 (memref.load fcproj_w (: 3000 index) (: 0 index)))
+                    (print "  fcproj_w[100,1000,3000][0]: %.6f %.6f %.6f\n"
+                           (arith.extf {:result f64} w100)
+                           (arith.extf {:result f64} w1000)
+                           (arith.extf {:result f64} w3000))
+                    (scf.yield)))
+                (region (block [] (scf.yield))))
+
+              ;; Debug: layer 2 fc_proj output
+              (scf.if do_layer2_debug
+                (region
+                  (block []
+                    (def fcp0 (memref.load fc_proj_out (: 0 index) (: 0 index)))
+                    (def fcp1 (memref.load fc_proj_out (: 0 index) (: 1 index)))
+                    (def fcp2 (memref.load fc_proj_out (: 0 index) (: 2 index)))
+                    (def fcp3 (memref.load fc_proj_out (: 0 index) (: 3 index)))
+                    (def fcp4 (memref.load fc_proj_out (: 0 index) (: 4 index)))
+                    (print "Layer 2 fc_proj output:\n  [0..4]: %.4f %.4f %.4f %.4f %.4f\n"
+                           (arith.extf {:result f64} fcp0)
+                           (arith.extf {:result f64} fcp1)
+                           (arith.extf {:result f64} fcp2)
+                           (arith.extf {:result f64} fcp3)
+                           (arith.extf {:result f64} fcp4))
+                    (scf.yield)))
+                (region (block [] (scf.yield))))
+
               (func.call "residual_add" x x2 fc_proj_out)
+
+              ;; Debug: after each layer complete (for first 3 and last 2)
+              (def is_layer1 (arith.cmpi {:predicate 0} layer c1))
+              (def is_layer2 (arith.cmpi {:predicate 0} layer (: 2 index)))
+              (def is_layer10 (arith.cmpi {:predicate 0} layer (: 10 index)))
+              (def is_layer11 (arith.cmpi {:predicate 0} layer (: 11 index)))
+              (def layer_debug (arith.ori (arith.ori (arith.ori (arith.ori is_layer0 is_layer1) is_layer2) is_layer10) is_layer11))
+              (def do_layer_debug (arith.andi layer_debug is_first_step_embed))
+              (scf.if do_layer_debug
+                (region
+                  (block []
+                    (def l0 (memref.load x (: 0 index) (: 0 index)))
+                    (def l1 (memref.load x (: 0 index) (: 1 index)))
+                    (def l2 (memref.load x (: 0 index) (: 2 index)))
+                    (def l3 (memref.load x (: 0 index) (: 3 index)))
+                    (def l4 (memref.load x (: 0 index) (: 4 index)))
+                    (def l496 (memref.load x (: 0 index) (: 496 index)))
+                    (def layer_i32 (arith.index_cast {:result i32} layer))
+                    (print "After layer %d:\n  [0..4]: %.4f %.4f %.4f %.4f %.4f\n  [496]: %.4f\n"
+                           layer_i32
+                           (arith.extf {:result f64} l0)
+                           (arith.extf {:result f64} l1)
+                           (arith.extf {:result f64} l2)
+                           (arith.extf {:result f64} l3)
+                           (arith.extf {:result f64} l4)
+                           (arith.extf {:result f64} l496))
+                    (scf.yield)))
+                (region (block [] (scf.yield))))
               (scf.yield))))
 
         ;; 3. Final LayerNorm
@@ -1049,26 +1665,167 @@
               (memref.store (llvm.load {:result f32} w_ptr) lnf_w i)
               (memref.store (llvm.load {:result f32} b_ptr) lnf_b i)
               (scf.yield))))
+
+        ;; Debug: check values before final LN, especially position 496
+        (def is_first_step2 (arith.cmpi {:predicate 0} step prompt_len))
+        (scf.if is_first_step2
+          (region
+            (block []
+              ;; Check x (input to final LN)
+              (def x_pre0 (memref.load x (: 0 index) (: 0 index)))
+              (def x_pre1 (memref.load x (: 0 index) (: 1 index)))
+              (def x_pre496 (memref.load x (: 0 index) (: 496 index)))
+              ;; Check lnf weights
+              (def lnf_w0 (memref.load lnf_w (: 0 index)))
+              (def lnf_w496 (memref.load lnf_w (: 496 index)))
+              (def lnf_b496 (memref.load lnf_b (: 496 index)))
+              (print "Before LN: x[0]=%.2f x[496]=%.2f, lnf_w[496]=%.2f lnf_b[496]=%.2f\n"
+                     (arith.extf {:result f64} x_pre0)
+                     (arith.extf {:result f64} x_pre496)
+                     (arith.extf {:result f64} lnf_w496)
+                     (arith.extf {:result f64} lnf_b496))
+              ;; Check raw checkpoint values for lnf
+              (def raw_lnfw0 (llvm.load {:result f32} (ptr-at f32 params_ptr (: 124474368 i64))))
+              (def raw_lnfw496 (llvm.load {:result f32} (ptr-at f32 params_ptr (: 124474864 i64))))  ; 124474368 + 496
+              (def raw_lnfb496 (llvm.load {:result f32} (ptr-at f32 params_ptr (: 124475632 i64))))  ; 124475136 + 496
+              (print "Raw checkpoint: lnfw[0]=%.4f lnfw[496]=%.4f lnfb[496]=%.4f\n"
+                     (arith.extf {:result f64} raw_lnfw0)
+                     (arith.extf {:result f64} raw_lnfw496)
+                     (arith.extf {:result f64} raw_lnfb496))
+              (scf.yield)))
+          (region (block [] (scf.yield))))
+
         (func.call "layernorm_forward" x2 x lnf_w lnf_b)
 
         ;; 4. Compute logits at last filled position
         (func.call "logits_last_position" logits x2 wte_ptr logit_pos)
 
-        ;; Debug: show some logit values
-        (def logit0 (memref.load logits (: 0 index)))
-        (def logit11 (memref.load logits (: 11 index)))  ; comma
-        (def logit262 (memref.load logits (: 262 index)))  ; "the"
-        (print "logits[0]=%.2f [11]=%.2f [262]=%.2f\n"
-               (arith.extf {:result f64} logit0)
-               (arith.extf {:result f64} logit11)
-               (arith.extf {:result f64} logit262))
+        ;; Debug: on first step, show hidden state and wte values
+        (def is_first_step (arith.cmpi {:predicate 0} step prompt_len))  ; eq
+        (scf.if is_first_step
+          (region
+            (block []
+              ;; Print hidden state values (after final layernorm)
+              (def h0 (memref.load x2 (: 0 index) (: 0 index)))
+              (def h1 (memref.load x2 (: 0 index) (: 1 index)))
+              (def h767 (memref.load x2 (: 0 index) (: 767 index)))
+
+              ;; Compute sum of hidden state to see magnitude
+              (def c0_idx (: 0 index))
+              (def c1_idx (: 1 index))
+              (def c768_idx (: 768 index))
+              (def sum_h (scf.for {:result f32} c0_idx c768_idx c1_idx (: 0.0 f32)
+                (region
+                  (block [(: c index) (: acc f32)]
+                    (def hv (memref.load x2 (: 0 index) c))
+                    (scf.yield (arith.addf acc hv))))))
+
+              ;; Check wte values for token 11 (comma)
+              (def wte_11_0_ptr (ptr-at f32 wte_ptr (: 8448 i64)))  ; 11 * 768
+              (def wte_11_0 (llvm.load {:result f32} wte_11_0_ptr))
+              (def wte_11_1_ptr (ptr-at f32 wte_ptr (: 8449 i64)))
+              (def wte_11_1 (llvm.load {:result f32} wte_11_1_ptr))
+
+              (print "Hidden[0]: sum=%.2f, [0]=%.4f [1]=%.4f [767]=%.4f\n"
+                     (arith.extf {:result f64} sum_h)
+                     (arith.extf {:result f64} h0)
+                     (arith.extf {:result f64} h1)
+                     (arith.extf {:result f64} h767))
+              (print "WTE[11]: [0]=%.4f [1]=%.4f\n"
+                     (arith.extf {:result f64} wte_11_0)
+                     (arith.extf {:result f64} wte_11_1))
+
+              ;; Manually compute logit[11] = sum_c hidden[0,c] * wte[11,c]
+              (def manual_logit (scf.for {:result f32} c0_idx c768_idx c1_idx (: 0.0 f32)
+                (region
+                  (block [(: c index) (: acc f32)]
+                    (def hv (memref.load x2 (: 0 index) c))
+                    (def c_i64 (arith.index_cast {:result i64} c))
+                    (def wte_ptr_c (ptr-at f32 wte_ptr (arith.addi (: 8448 i64) c_i64)))
+                    (def wte_v (llvm.load {:result f32} wte_ptr_c))
+                    (scf.yield (arith.addf acc (arith.mulf hv wte_v)))))))
+
+              ;; Compute sum of wte[11] embedding
+              (def sum_wte11 (scf.for {:result f32} c0_idx c768_idx c1_idx (: 0.0 f32)
+                (region
+                  (block [(: c index) (: acc f32)]
+                    (def c_i64 (arith.index_cast {:result i64} c))
+                    (def wte_ptr_c (ptr-at f32 wte_ptr (arith.addi (: 8448 i64) c_i64)))
+                    (def wte_v (llvm.load {:result f32} wte_ptr_c))
+                    (scf.yield (arith.addf acc wte_v))))))
+
+              ;; Compute sum of wte[464] embedding
+              (def sum_wte464 (scf.for {:result f32} c0_idx c768_idx c1_idx (: 0.0 f32)
+                (region
+                  (block [(: c index) (: acc f32)]
+                    (def c_i64 (arith.index_cast {:result i64} c))
+                    (def wte_ptr_c (ptr-at f32 wte_ptr (arith.addi (: 356352 i64) c_i64)))  ; 464*768
+                    (def wte_v (llvm.load {:result f32} wte_ptr_c))
+                    (scf.yield (arith.addf acc wte_v))))))
+
+              (print "Sum wte[11]=%.2f, Sum wte[464]=%.2f\n"
+                     (arith.extf {:result f64} sum_wte11)
+                     (arith.extf {:result f64} sum_wte464))
+
+              ;; Find max absolute value in hidden state
+              (def max_abs_h (scf.for {:result f32} c0_idx c768_idx c1_idx (: 0.0 f32)
+                (region
+                  (block [(: c index) (: best f32)]
+                    (def hv (memref.load x2 (: 0 index) c))
+                    (def abs_hv (arith.maximumf hv (arith.negf hv)))
+                    (def new_best (arith.maximumf best abs_hv))
+                    (scf.yield new_best)))))
+
+              ;; Find first occurrence of max
+              (def max_idx (scf.for {:result i32} c0_idx c768_idx c1_idx (: -1 i32)
+                (region
+                  (block [(: c index) (: found_idx i32)]
+                    (def hv (memref.load x2 (: 0 index) c))
+                    (def abs_hv (arith.maximumf hv (arith.negf hv)))
+                    (def is_max (arith.cmpf {:predicate 1} abs_hv max_abs_h))  ; oeq
+                    (def c_i32 (arith.index_cast {:result i32} c))
+                    (def not_found (arith.cmpi {:predicate 2} found_idx (: 0 i32)))  ; slt
+                    (def update (arith.andi is_max not_found))
+                    (def new_idx (arith.select update c_i32 found_idx))
+                    (scf.yield new_idx)))))
+              (print "Max |hidden[c]| = %.2f at c=%d\n"
+                     (arith.extf {:result f64} max_abs_h)
+                     max_idx)
+
+              ;; Check a few more positions in hidden state
+              (def h100 (memref.load x2 (: 0 index) (: 100 index)))
+              (def h200 (memref.load x2 (: 0 index) (: 200 index)))
+              (def h500 (memref.load x2 (: 0 index) (: 500 index)))
+              (print "Hidden samples: [100]=%.2f [200]=%.2f [500]=%.2f\n"
+                     (arith.extf {:result f64} h100)
+                     (arith.extf {:result f64} h200)
+                     (arith.extf {:result f64} h500))
+
+              ;; Check contribution from position 496 to logit[11]
+              (def h496 (memref.load x2 (: 0 index) (: 496 index)))
+              (def wte_11_496_ptr (ptr-at f32 wte_ptr (: 8944 i64)))  ; 11*768 + 496
+              (def wte_11_496 (llvm.load {:result f32} wte_11_496_ptr))
+              (def contrib_496 (arith.mulf h496 wte_11_496))
+              (print "h[496]=%.2f, wte[11][496]=%.4f, contrib=%.2f\n"
+                     (arith.extf {:result f64} h496)
+                     (arith.extf {:result f64} wte_11_496)
+                     (arith.extf {:result f64} contrib_496))
+
+              ;; Print logits
+              (def l11 (memref.load logits (: 11 index)))
+              (def l464 (memref.load logits (: 464 index)))
+              (print "logit[11]=%.2f, logit[464]=%.2f\n"
+                     (arith.extf {:result f64} l11)
+                     (arith.extf {:result f64} l464))
+              (scf.yield)))
+          (region (block [] (scf.yield))))
 
         ;; 5. Argmax to get next token
         (def next_token (func.call {:result i32} "argmax" logits))
 
-        ;; 6. Decode and print - show token ID for debugging
+        ;; 6. Decode and print
         (def token_str (func.call {:result !llvm.ptr} "tokenizer_decode" next_token))
-        (print "[%d]%s" next_token token_str)
+        (print "%s" token_str)
 
         ;; 7. Store token at current step position
         (memref.store next_token token_ids step)

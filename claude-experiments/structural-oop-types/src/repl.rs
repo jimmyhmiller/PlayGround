@@ -8,9 +8,11 @@
 //!   <expr>    - Type check the expression and show its type
 
 use crate::display::display_type;
+use crate::eval::{eval, EvalError};
 use crate::infer::infer_expr;
 use crate::parser::parse;
 use crate::store::NodeStore;
+use crate::value::{Env, Value};
 use std::io::{self, BufRead, Write};
 
 const HELP: &str = r#"
@@ -241,7 +243,18 @@ fn typecheck_and_print(input: &str) {
     match infer_expr(&expr, &mut store) {
         Ok(ty) => {
             let type_str = display_type(&store, ty);
-            println!("{}", type_str);
+            println!("Type: {}", type_str);
+
+            // Evaluate
+            let env = Env::new();
+            match eval(&expr, &env) {
+                Ok(val) => {
+                    println!("=> {}", val);
+                }
+                Err(e) => {
+                    println!("Eval error: {}", e);
+                }
+            }
         }
         Err(e) => {
             println!("Type error: {}", e);

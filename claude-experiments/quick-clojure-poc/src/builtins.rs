@@ -52,7 +52,7 @@ pub extern "C" fn builtin_load_var_by_symbol(
     // Untag the symbol IDs (shift right by 3)
     let ns_symbol_id = (tagged_ns_symbol_id >> 3) as u32;
     let name_symbol_id = (tagged_name_symbol_id >> 3) as u32;
-    trampoline::trampoline_load_var_by_symbol(ns_symbol_id, name_symbol_id)
+    trampoline::builtin_load_var_by_symbol(ns_symbol_id, name_symbol_id)
 }
 
 /// builtin_load_var_by_symbol_dynamic(tagged_ns_symbol_id, tagged_name_symbol_id) -> tagged_value
@@ -67,7 +67,7 @@ pub extern "C" fn builtin_load_var_by_symbol_dynamic(
     // Untag the symbol IDs (shift right by 3)
     let ns_symbol_id = (tagged_ns_symbol_id >> 3) as u32;
     let name_symbol_id = (tagged_name_symbol_id >> 3) as u32;
-    trampoline::trampoline_load_var_by_symbol_dynamic(ns_symbol_id, name_symbol_id)
+    trampoline::builtin_load_var_by_symbol_dynamic(ns_symbol_id, name_symbol_id)
 }
 
 /// builtin_store_var_by_symbol(tagged_ns_symbol_id, tagged_name_symbol_id, value) -> tagged_value (nil)
@@ -84,7 +84,7 @@ pub extern "C" fn builtin_store_var_by_symbol(
     // Untag the symbol IDs (shift right by 3)
     let ns_symbol_id = (tagged_ns_symbol_id >> 3) as u32;
     let name_symbol_id = (tagged_name_symbol_id >> 3) as u32;
-    trampoline::trampoline_store_var_by_symbol(ns_symbol_id, name_symbol_id, value)
+    trampoline::builtin_store_var_by_symbol(ns_symbol_id, name_symbol_id, value)
 }
 
 /// builtin_ensure_var_by_symbol(tagged_ns_symbol_id, tagged_name_symbol_id) -> tagged_value (nil)
@@ -140,7 +140,7 @@ pub extern "C" fn builtin_ensure_var_by_symbol(
 pub extern "C" fn builtin_load_keyword(tagged_keyword_index: usize) -> usize {
     // Untag the keyword index (shift right by 3)
     let keyword_index = tagged_keyword_index >> 3;
-    trampoline::trampoline_intern_keyword(keyword_index)
+    trampoline::builtin_intern_keyword(keyword_index)
 }
 
 // ============================================================================
@@ -153,7 +153,7 @@ pub extern "C" fn builtin_load_keyword(tagged_keyword_index: usize) -> usize {
 /// Returns nil (tagged value 7).
 #[unsafe(no_mangle)]
 pub extern "C" fn builtin_println_value(value: usize) -> usize {
-    trampoline::trampoline_println_value(value)
+    trampoline::builtin_println_value(value)
 }
 
 /// builtin_print_value(value) -> tagged_value (nil)
@@ -162,7 +162,7 @@ pub extern "C" fn builtin_println_value(value: usize) -> usize {
 /// Returns nil (tagged value 7).
 #[unsafe(no_mangle)]
 pub extern "C" fn builtin_print_value(value: usize) -> usize {
-    trampoline::trampoline_print_value(value)
+    trampoline::builtin_print_value(value)
 }
 
 /// builtin_newline() -> tagged_value (nil)
@@ -171,7 +171,7 @@ pub extern "C" fn builtin_print_value(value: usize) -> usize {
 /// Returns nil (tagged value 7).
 #[unsafe(no_mangle)]
 pub extern "C" fn builtin_newline() -> usize {
-    trampoline::trampoline_newline()
+    trampoline::builtin_newline()
 }
 
 /// builtin_print_space() -> tagged_value (nil)
@@ -180,7 +180,7 @@ pub extern "C" fn builtin_newline() -> usize {
 /// Returns nil (tagged value 7).
 #[unsafe(no_mangle)]
 pub extern "C" fn builtin_print_space() -> usize {
-    trampoline::trampoline_print_space()
+    trampoline::builtin_print_space()
 }
 
 // ============================================================================
@@ -193,7 +193,7 @@ pub extern "C" fn builtin_print_space() -> usize {
 /// Returns nil (tagged value 7).
 #[unsafe(no_mangle)]
 pub extern "C" fn builtin_gc(frame_pointer: usize, gc_return_addr: usize) -> usize {
-    trampoline::trampoline_gc(frame_pointer, gc_return_addr)
+    trampoline::builtin_gc(frame_pointer, gc_return_addr)
 }
 
 // ============================================================================

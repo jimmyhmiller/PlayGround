@@ -118,8 +118,8 @@ static mut TRAMPOLINE_SAVED_SP: usize = 0;
 
 /// Save the original stack pointer before switching to JIT stack
 #[inline(never)]
-#[unsafe(no_mangle)]
-pub extern "C" fn trampoline_save_original_sp(sp: usize) {
+#[allow(dead_code)]
+pub extern "C" fn builtin_save_original_sp(sp: usize) {
     unsafe {
         TRAMPOLINE_SAVED_SP = sp;
     }
@@ -127,8 +127,8 @@ pub extern "C" fn trampoline_save_original_sp(sp: usize) {
 
 /// Restore the original stack pointer after JIT execution
 #[inline(never)]
-#[unsafe(no_mangle)]
-pub extern "C" fn trampoline_get_original_sp() -> usize {
+#[allow(dead_code)]
+pub extern "C" fn builtin_get_original_sp() -> usize {
     unsafe { TRAMPOLINE_SAVED_SP }
 }
 
@@ -361,75 +361,11 @@ pub fn generate_builtin_wrappers() -> HashMap<&'static str, usize> {
         ],
     );
 
-    // Helper to emit a wrapper that calls a trampoline
-    // Args are already in x0, x1, x2 - just need to call the trampoline
-    // If with_stack_pointer is true, pass SP as first arg and shift original args
-    let mut emit_trampoline_wrapper =
-        |name: &'static str, trampoline_addr: usize, with_stack_pointer: bool| {
-            let addr = trampoline_addr;
-            let mut code = Vec::new();
+    // Array operations are now compiled directly via ExternalCall in compiler.rs
+    // No wrappers needed - FramePointer and ReturnAddress are passed as regular args
 
-            if with_stack_pointer {
-                // Shift args: x2 <- x1, x1 <- x0 (do in reverse order to avoid clobbering)
-                // mov x2, x1
-                code.push(0xAA0103E2);
-                // mov x1, x0
-                code.push(0xAA0003E1);
-                // add x0, sp, #0   ; pass current stack pointer as first argument
-                // This is the correct encoding for "mov x0, sp" on ARM64
-                // SP is used for GC to scan all values on the stack, including those
-                // pushed via STP by ExternalCallWithSaves before calling allocating operations.
-                code.push(0x910003E0);
-            }
-
-            // stp x29, x30, [sp, #-16]!   ; save fp/lr
-            code.push(0xA9BF7BFD);
-            // mov x29, sp                  ; set frame pointer
-            code.push(0x910003FD);
-
-            // Load 64-bit address into x9 using movz/movk sequence
-            // movz x9, #(addr[15:0])
-            code.push(0xD2800009 | (((addr & 0xFFFF) as u32) << 5));
-            // movk x9, #(addr[31:16]), lsl 16
-            code.push(0xF2A00009 | ((((addr >> 16) & 0xFFFF) as u32) << 5));
-            // movk x9, #(addr[47:32]), lsl 32
-            code.push(0xF2C00009 | ((((addr >> 32) & 0xFFFF) as u32) << 5));
-            // movk x9, #(addr[63:48]), lsl 48
-            code.push(0xF2E00009 | ((((addr >> 48) & 0xFFFF) as u32) << 5));
-
-            // blr x9                       ; call trampoline
-            code.push(0xD63F0120);
-            // ldp x29, x30, [sp], #16      ; restore fp/lr
-            code.push(0xA8C17BFD);
-            // ret
-            code.push(0xD65F03C0);
-
-            unsafe {
-                for (i, &instr) in code.iter().enumerate() {
-                    *base.add(offset + i) = instr;
-                }
-            }
-            let code_ptr = unsafe { base.add(offset) } as usize;
-            wrappers.insert(name, code_ptr);
-            offset += code.len();
-        };
-
-    // make-array: (x0 = length) -> array  [ALLOCATES - needs JIT frame pointer]
-    emit_trampoline_wrapper("make-array", trampoline_make_array as usize, true);
-
-    // aget: (x0 = array, x1 = index) -> value
-    emit_trampoline_wrapper("aget", trampoline_aget as usize, false);
-
-    // aset!: (x0 = array, x1 = index, x2 = value) -> value
-    emit_trampoline_wrapper("aset!", trampoline_aset as usize, false);
-    // aset: alias for aset! (ClojureScript uses aset without bang)
-    emit_trampoline_wrapper("aset", trampoline_aset as usize, false);
-
-    // alength: (x0 = array) -> length
-    emit_trampoline_wrapper("alength", trampoline_alength as usize, false);
-
-    // aclone: (x0 = array) -> new array  [ALLOCATES - needs JIT frame pointer]
-    emit_trampoline_wrapper("aclone", trampoline_aclone as usize, true);
+    // Suppress unused variable warning
+    let _ = offset;
 
     // Make the page executable
     unsafe {
@@ -456,8 +392,8 @@ pub fn generate_builtin_wrappers() -> HashMap<&'static str, usize> {
 /// ARM64 Calling Convention:
 /// - Args: x0 = var_ptr (tagged)
 /// - Returns: x0 = value (tagged)
-#[unsafe(no_mangle)]
-pub extern "C" fn trampoline_var_get_value_dynamic(var_ptr: usize) -> usize {
+#[allow(dead_code)]
+pub extern "C" fn builtin_var_get_value_dynamic(var_ptr: usize) -> usize {
     unsafe {
         let runtime_ptr = std::ptr::addr_of!(RUNTIME);
         let rt = &*(*runtime_ptr).as_ref().unwrap().get();
@@ -470,8 +406,8 @@ pub extern "C" fn trampoline_var_get_value_dynamic(var_ptr: usize) -> usize {
 /// ARM64 Calling Convention:
 /// - Args: x0 = var_ptr (tagged), x1 = value (tagged)
 /// - Returns: x0 = 0 on success, 1 on error
-#[unsafe(no_mangle)]
-pub extern "C" fn trampoline_push_binding(var_ptr: usize, value: usize) -> usize {
+#[allow(dead_code)]
+pub extern "C" fn builtin_push_binding(var_ptr: usize, value: usize) -> usize {
     unsafe {
         let runtime_ptr = std::ptr::addr_of!(RUNTIME);
         let rt = &mut *(*runtime_ptr).as_ref().unwrap().get();
@@ -490,8 +426,8 @@ pub extern "C" fn trampoline_push_binding(var_ptr: usize, value: usize) -> usize
 /// ARM64 Calling Convention:
 /// - Args: x0 = var_ptr (tagged)
 /// - Returns: x0 = 0 on success, 1 on error
-#[unsafe(no_mangle)]
-pub extern "C" fn trampoline_pop_binding(var_ptr: usize) -> usize {
+#[allow(dead_code)]
+pub extern "C" fn builtin_pop_binding(var_ptr: usize) -> usize {
     unsafe {
         let runtime_ptr = std::ptr::addr_of!(RUNTIME);
         let rt = &mut *(*runtime_ptr).as_ref().unwrap().get();
@@ -510,8 +446,8 @@ pub extern "C" fn trampoline_pop_binding(var_ptr: usize) -> usize {
 /// ARM64 Calling Convention:
 /// - Args: x0 = var_ptr (tagged), x1 = value (tagged)
 /// - Returns: x0 = 0 on success, 1 on error
-#[unsafe(no_mangle)]
-pub extern "C" fn trampoline_set_binding(var_ptr: usize, value: usize) -> usize {
+#[allow(dead_code)]
+pub extern "C" fn builtin_set_binding(var_ptr: usize, value: usize) -> usize {
     unsafe {
         let runtime_ptr = std::ptr::addr_of!(RUNTIME);
         let rt = &mut *(*runtime_ptr).as_ref().unwrap().get();
@@ -534,8 +470,8 @@ pub extern "C" fn trampoline_set_binding(var_ptr: usize, value: usize) -> usize 
 /// - Args: x0 = ns_symbol_id (u32), x1 = name_symbol_id (u32)
 /// - Returns: x0 = value (tagged)
 /// - Panics if var not found (throws "Unable to resolve symbol" error)
-#[unsafe(no_mangle)]
-pub extern "C" fn trampoline_load_var_by_symbol(ns_symbol_id: u32, name_symbol_id: u32) -> usize {
+#[allow(dead_code)]
+pub extern "C" fn builtin_load_var_by_symbol(ns_symbol_id: u32, name_symbol_id: u32) -> usize {
     unsafe {
         let runtime_ptr = std::ptr::addr_of!(RUNTIME);
         let rt = &*(*runtime_ptr).as_ref().unwrap().get();
@@ -566,8 +502,8 @@ pub extern "C" fn trampoline_load_var_by_symbol(ns_symbol_id: u32, name_symbol_i
 /// - Args: x0 = ns_symbol_id (u32), x1 = name_symbol_id (u32)
 /// - Returns: x0 = value (tagged)
 /// - Panics if var not found
-#[unsafe(no_mangle)]
-pub extern "C" fn trampoline_load_var_by_symbol_dynamic(
+#[allow(dead_code)]
+pub extern "C" fn builtin_load_var_by_symbol_dynamic(
     ns_symbol_id: u32,
     name_symbol_id: u32,
 ) -> usize {
@@ -601,8 +537,8 @@ pub extern "C" fn trampoline_load_var_by_symbol_dynamic(
 /// ARM64 Calling Convention:
 /// - Args: x0 = ns_symbol_id (u32), x1 = name_symbol_id (u32), x2 = value (tagged)
 /// - Returns: x0 = value (tagged) - def returns the value
-#[unsafe(no_mangle)]
-pub extern "C" fn trampoline_store_var_by_symbol(
+#[allow(dead_code)]
+pub extern "C" fn builtin_store_var_by_symbol(
     ns_symbol_id: u32,
     name_symbol_id: u32,
     value: usize,
@@ -652,8 +588,8 @@ pub extern "C" fn trampoline_store_var_by_symbol(
 /// ARM64 Calling Convention:
 /// - Args: x0 = ns_symbol_id (u32), x1 = name_symbol_id (u32)
 /// - Returns: x0 = nil (7)
-#[unsafe(no_mangle)]
-pub extern "C" fn trampoline_ensure_var_by_symbol(ns_symbol_id: u32, name_symbol_id: u32) -> usize {
+#[allow(dead_code)]
+pub extern "C" fn builtin_ensure_var_by_symbol(ns_symbol_id: u32, name_symbol_id: u32) -> usize {
     unsafe {
         let runtime_ptr = std::ptr::addr_of!(RUNTIME);
         let rt = &mut *(*runtime_ptr).as_ref().unwrap().get();
@@ -692,8 +628,8 @@ pub extern "C" fn trampoline_ensure_var_by_symbol(ns_symbol_id: u32, name_symbol
 /// ARM64 Calling Convention:
 /// - Args: x0 = frame_pointer (x29), x1 = gc_return_addr (link register)
 /// - Returns: x0 = nil (0b111)
-#[unsafe(no_mangle)]
-pub extern "C" fn trampoline_gc(frame_pointer: usize, gc_return_addr: usize) -> usize {
+#[allow(dead_code)]
+pub extern "C" fn builtin_gc(frame_pointer: usize, gc_return_addr: usize) -> usize {
     unsafe {
         let runtime_ptr = std::ptr::addr_of!(RUNTIME);
         let rt = &mut *(*runtime_ptr).as_ref().unwrap().get();
@@ -711,8 +647,8 @@ pub extern "C" fn trampoline_gc(frame_pointer: usize, gc_return_addr: usize) -> 
 /// ARM64 Calling Convention:
 /// - Args: x0 = object_ptr (tagged pointer to deftype instance)
 /// - Returns: x0 = nil (0b111)
-#[unsafe(no_mangle)]
-pub extern "C" fn trampoline_gc_add_root(object_ptr: usize) -> usize {
+#[allow(dead_code)]
+pub extern "C" fn builtin_gc_add_root(object_ptr: usize) -> usize {
     unsafe {
         let runtime_ptr = std::ptr::addr_of!(RUNTIME);
         let rt = &mut *(*runtime_ptr).as_ref().unwrap().get();
@@ -730,8 +666,8 @@ pub extern "C" fn trampoline_gc_add_root(object_ptr: usize) -> usize {
 ///
 /// # Safety
 /// Caller must ensure `field_name_ptr` points to valid memory of at least `field_name_len` bytes.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn trampoline_store_type_field(
+#[allow(dead_code)]
+pub unsafe extern "C" fn builtin_store_type_field(
     object_ptr: usize,
     field_name_ptr: *const u8,
     field_name_len: usize,
@@ -772,8 +708,8 @@ pub unsafe extern "C" fn trampoline_store_type_field(
 ///
 /// # Safety
 /// Caller must ensure `values_ptr` points to valid memory of at least `count` usize values.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn trampoline_println(count: usize, values_ptr: *const usize) -> usize {
+#[allow(dead_code)]
+pub unsafe extern "C" fn builtin_println(count: usize, values_ptr: *const usize) -> usize {
     unsafe {
         let runtime_ptr = std::ptr::addr_of!(RUNTIME);
         let rt = &*(*runtime_ptr).as_ref().unwrap().get();
@@ -821,8 +757,8 @@ pub unsafe extern "C" fn trampoline_println(count: usize, values_ptr: *const usi
 /// - Returns: x0 = nil (0b111)
 ///
 /// For more than 7 values, fall back to multiple calls or the legacy stack-based approach.
-#[unsafe(no_mangle)]
-pub extern "C" fn trampoline_println_regs(
+#[allow(dead_code)]
+pub extern "C" fn builtin_println_regs(
     count: usize,
     v0: usize,
     v1: usize,
@@ -871,8 +807,8 @@ pub extern "C" fn trampoline_println_regs(
 /// ARM64 Calling Convention:
 /// - Args: x0 = tagged value to print
 /// - Returns: x0 = nil (0b111)
-#[unsafe(no_mangle)]
-pub extern "C" fn trampoline_println_value(value: usize) -> usize {
+#[allow(dead_code)]
+pub extern "C" fn builtin_println_value(value: usize) -> usize {
     unsafe {
         let runtime_ptr = std::ptr::addr_of!(RUNTIME);
         let rt = &*(*runtime_ptr).as_ref().unwrap().get();
@@ -904,8 +840,8 @@ pub extern "C" fn trampoline_println_value(value: usize) -> usize {
 /// ARM64 Calling Convention:
 /// - Args: x0 = tagged value to print
 /// - Returns: x0 = nil (0b111)
-#[unsafe(no_mangle)]
-pub extern "C" fn trampoline_print_value(value: usize) -> usize {
+#[allow(dead_code)]
+pub extern "C" fn builtin_print_value(value: usize) -> usize {
     unsafe {
         let runtime_ptr = std::ptr::addr_of!(RUNTIME);
         let rt = &*(*runtime_ptr).as_ref().unwrap().get();
@@ -940,8 +876,8 @@ pub extern "C" fn trampoline_print_value(value: usize) -> usize {
 /// ARM64 Calling Convention:
 /// - Args: none
 /// - Returns: x0 = nil (0b111)
-#[unsafe(no_mangle)]
-pub extern "C" fn trampoline_newline() -> usize {
+#[allow(dead_code)]
+pub extern "C" fn builtin_newline() -> usize {
     println!();
     7 // nil
 }
@@ -953,8 +889,8 @@ pub extern "C" fn trampoline_newline() -> usize {
 /// ARM64 Calling Convention:
 /// - Args: none
 /// - Returns: x0 = nil (0b111)
-#[unsafe(no_mangle)]
-pub extern "C" fn trampoline_print_space() -> usize {
+#[allow(dead_code)]
+pub extern "C" fn builtin_print_space() -> usize {
     print!(" ");
     7 // nil
 }
@@ -970,8 +906,8 @@ pub extern "C" fn trampoline_print_space() -> usize {
 ///
 /// # Safety
 /// Caller must ensure `values_ptr` points to valid memory of at least `closure_count` usize values.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn trampoline_allocate_function(
+#[allow(dead_code)]
+pub unsafe extern "C" fn builtin_allocate_function(
     frame_pointer: usize,
     gc_return_addr: usize,
     name_ptr: usize,
@@ -1016,8 +952,8 @@ pub unsafe extern "C" fn trampoline_allocate_function(
 /// ARM64 Calling Convention:
 /// - Args: x0 = function pointer (tagged)
 /// - Returns: x0 = code pointer (untagged)
-#[unsafe(no_mangle)]
-pub extern "C" fn trampoline_function_code_ptr(fn_ptr: usize) -> usize {
+#[allow(dead_code)]
+pub extern "C" fn builtin_function_code_ptr(fn_ptr: usize) -> usize {
     unsafe {
         let runtime_ptr = std::ptr::addr_of!(RUNTIME);
         let rt = &*(*runtime_ptr).as_ref().unwrap().get();
@@ -1030,8 +966,8 @@ pub extern "C" fn trampoline_function_code_ptr(fn_ptr: usize) -> usize {
 /// ARM64 Calling Convention:
 /// - Args: x0 = function pointer (tagged), x1 = index
 /// - Returns: x0 = closure value (tagged)
-#[unsafe(no_mangle)]
-pub extern "C" fn trampoline_function_get_closure(fn_ptr: usize, index: usize) -> usize {
+#[allow(dead_code)]
+pub extern "C" fn builtin_function_get_closure(fn_ptr: usize, index: usize) -> usize {
     unsafe {
         let runtime_ptr = std::ptr::addr_of!(RUNTIME);
         let rt = &*(*runtime_ptr).as_ref().unwrap().get();
@@ -1044,8 +980,8 @@ pub extern "C" fn trampoline_function_get_closure(fn_ptr: usize, index: usize) -
 /// ARM64 Calling Convention:
 /// - Args: x0 = function pointer (tagged)
 /// - Returns: x0 = closure_count (untagged integer)
-#[unsafe(no_mangle)]
-pub extern "C" fn trampoline_function_closure_count(fn_ptr: usize) -> usize {
+#[allow(dead_code)]
+pub extern "C" fn builtin_function_closure_count(fn_ptr: usize) -> usize {
     unsafe {
         let runtime_ptr = std::ptr::addr_of!(RUNTIME);
         let rt = &*(*runtime_ptr).as_ref().unwrap().get();
@@ -1064,8 +1000,8 @@ pub extern "C" fn trampoline_function_closure_count(fn_ptr: usize) -> usize {
 ///
 /// # Safety
 /// Caller must ensure `values_ptr` points to valid memory of at least `field_count` usize values.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn trampoline_allocate_type(
+#[allow(dead_code)]
+pub unsafe extern "C" fn builtin_allocate_type(
     frame_pointer: usize,
     gc_return_addr: usize,
     type_id: usize,
@@ -1110,8 +1046,8 @@ pub unsafe extern "C" fn trampoline_allocate_type(
 ///
 /// The trampoline allocates space, writes the header with type_id, and initializes
 /// all fields to nil. The JIT code then overwrites fields with actual values.
-#[unsafe(no_mangle)]
-pub extern "C" fn trampoline_allocate_type_object_raw(
+#[allow(dead_code)]
+pub extern "C" fn builtin_allocate_type_object_raw(
     frame_pointer: usize,
     gc_return_addr: usize,
     type_id: usize,
@@ -1139,8 +1075,8 @@ pub extern "C" fn trampoline_allocate_type_object_raw(
 /// ARM64 Calling Convention:
 /// - Args: x0 = instance pointer (tagged), x1 = field_index
 /// - Returns: x0 = field value (tagged)
-#[unsafe(no_mangle)]
-pub extern "C" fn trampoline_load_type_field(obj_ptr: usize, field_index: usize) -> usize {
+#[allow(dead_code)]
+pub extern "C" fn builtin_load_type_field(obj_ptr: usize, field_index: usize) -> usize {
     unsafe {
         let runtime_ptr = std::ptr::addr_of!(RUNTIME);
         let rt = &*(*runtime_ptr).as_ref().unwrap().get();
@@ -1153,8 +1089,8 @@ pub extern "C" fn trampoline_load_type_field(obj_ptr: usize, field_index: usize)
 /// ARM64 Calling Convention:
 /// - Args: x0 = frame_pointer (x29 for GC), x1 = gc_return_addr (link register), x2 = f64 bits (as u64)
 /// - Returns: x0 = tagged float pointer
-#[unsafe(no_mangle)]
-pub extern "C" fn trampoline_allocate_float(frame_pointer: usize, gc_return_addr: usize, float_bits: u64) -> usize {
+#[allow(dead_code)]
+pub extern "C" fn builtin_allocate_float(frame_pointer: usize, gc_return_addr: usize, float_bits: u64) -> usize {
     unsafe {
         let runtime_ptr = std::ptr::addr_of!(RUNTIME);
         let rt = &mut *(*runtime_ptr).as_ref().unwrap().get();
@@ -1187,8 +1123,8 @@ pub extern "C" fn trampoline_allocate_float(frame_pointer: usize, gc_return_addr
 ///
 /// # Safety
 /// Caller must ensure `field_name_ptr` points to valid memory of at least `field_name_len` bytes.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn trampoline_load_type_field_by_name(
+#[allow(dead_code)]
+pub unsafe extern "C" fn builtin_load_type_field_by_name(
     obj_ptr: usize,
     field_name_ptr: *const u8,
     field_name_len: usize,
@@ -1219,14 +1155,14 @@ pub unsafe extern "C" fn trampoline_load_type_field_by_name(
 
 /// Trampoline: Load field by symbol ID (REFACTORED version)
 ///
-/// This avoids the stack-based string passing of trampoline_load_type_field_by_name.
+/// This avoids the stack-based string passing of builtin_load_type_field_by_name.
 /// The field name is pre-interned as a symbol at compile time, and its ID is passed directly.
 ///
 /// ARM64 Calling Convention:
 /// - Args: x0 = instance pointer (tagged), x1 = field_name_symbol_id (untagged symbol index)
 /// - Returns: x0 = field value (tagged)
-#[unsafe(no_mangle)]
-pub extern "C" fn trampoline_load_type_field_by_symbol(
+#[allow(dead_code)]
+pub extern "C" fn builtin_load_type_field_by_symbol(
     obj_ptr: usize,
     field_symbol_id: usize,
 ) -> usize {
@@ -1261,8 +1197,8 @@ pub extern "C" fn trampoline_load_type_field_by_symbol(
 /// ARM64 Calling Convention:
 /// - Args: x0 = instance pointer (tagged), x1 = field_name_symbol_id, x2 = value
 /// - Returns: x0 = value (the stored value)
-#[unsafe(no_mangle)]
-pub extern "C" fn trampoline_store_type_field_by_symbol(
+#[allow(dead_code)]
+pub extern "C" fn builtin_store_type_field_by_symbol(
     obj_ptr: usize,
     field_symbol_id: usize,
     value: usize,
@@ -1311,8 +1247,8 @@ pub extern "C" fn trampoline_store_type_field_by_symbol(
 /// Caller must ensure that `arities_ptr` points to valid memory of at least
 /// `arity_count * 2` usize values, and `closures_ptr` points to valid memory
 /// of at least `closure_count` usize values.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn trampoline_allocate_multi_arity_fn(
+#[allow(dead_code)]
+pub unsafe extern "C" fn builtin_allocate_multi_arity_fn(
     frame_pointer: usize,
     gc_return_addr: usize,
     _name_ptr: usize,
@@ -1385,8 +1321,8 @@ pub unsafe extern "C" fn trampoline_allocate_multi_arity_fn(
 /// # Safety
 /// Caller must ensure that `args_ptr` points to valid memory of at least
 /// `count` usize values.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn trampoline_collect_rest_args(
+#[allow(dead_code)]
+pub unsafe extern "C" fn builtin_collect_rest_args(
     frame_pointer: usize,
     gc_return_addr: usize,
     args_ptr: *const usize,
@@ -1425,8 +1361,8 @@ pub unsafe extern "C" fn trampoline_collect_rest_args(
 /// - Returns: x0 = code pointer to call (or 0 if no matching arity)
 ///
 /// This is called at runtime to determine which arity implementation to invoke.
-#[unsafe(no_mangle)]
-pub extern "C" fn trampoline_multi_arity_lookup(fn_ptr: usize, arg_count: usize) -> usize {
+#[allow(dead_code)]
+pub extern "C" fn builtin_multi_arity_lookup(fn_ptr: usize, arg_count: usize) -> usize {
     unsafe {
         let runtime_ptr = std::ptr::addr_of!(RUNTIME);
         let rt = &*(*runtime_ptr).as_ref().unwrap().get();
@@ -1434,7 +1370,7 @@ pub extern "C" fn trampoline_multi_arity_lookup(fn_ptr: usize, arg_count: usize)
         // Check if this is actually a multi-arity function
         if !rt.is_multi_arity_function(fn_ptr) {
             // Not a multi-arity function - return 0 to indicate error
-            eprintln!("Error: trampoline_multi_arity_lookup called on non-multi-arity function");
+            eprintln!("Error: builtin_multi_arity_lookup called on non-multi-arity function");
             return 0;
         }
 
@@ -1458,10 +1394,13 @@ pub extern "C" fn trampoline_multi_arity_lookup(fn_ptr: usize, arg_count: usize)
 ///
 /// This trampoline:
 /// 1. Looks up the correct arity implementation based on arg_count
-/// 2. Calls that implementation with the provided arguments
-/// 3. Returns the result
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn trampoline_invoke_multi_arity(
+/// 2. For variadic functions: collects excess args into IndexedSeq
+/// 3. Calls that implementation with the proper calling convention:
+///    - x0 = fn_ptr (closure object)
+///    - x1-xN = user args (and IndexedSeq for variadic)
+/// 4. Returns the result
+#[allow(dead_code)]
+pub unsafe extern "C" fn builtin_invoke_multi_arity(
     fn_ptr: usize,
     arg_count: usize,
     arg0: usize,
@@ -1473,24 +1412,66 @@ pub unsafe extern "C" fn trampoline_invoke_multi_arity(
 ) -> usize {
     unsafe {
         let runtime_ptr = std::ptr::addr_of!(RUNTIME);
-        let rt = &*(*runtime_ptr).as_ref().unwrap().get();
+        let rt = &mut *(*runtime_ptr).as_ref().unwrap().get();
 
         // Check if this is actually a multi-arity function
         if !rt.is_multi_arity_function(fn_ptr) {
             eprintln!(
-                "Error: trampoline_invoke_multi_arity called on non-multi-arity function"
+                "Error: builtin_invoke_multi_arity called on non-multi-arity function"
             );
             return 7; // nil
         }
 
+        // Put all args in an array for easier manipulation
+        let all_args = [arg0, arg1, arg2, arg3, arg4, arg5];
+
         match rt.multi_arity_lookup(fn_ptr, arg_count) {
-            Some((code_ptr, _is_variadic)) => {
-                // Call the function with the provided arguments
-                // The code_ptr expects args in x0, x1, x2... so we need to call it
-                // with the arguments in the correct order
-                let func: extern "C" fn(usize, usize, usize, usize, usize, usize) -> usize =
-                    std::mem::transmute(code_ptr);
-                func(arg0, arg1, arg2, arg3, arg4, arg5)
+            Some((code_ptr, is_variadic)) => {
+                // Multi-arity functions use CLOSURE calling convention:
+                // x0 = fn_ptr (the closure/function object)
+                // x1, x2, ... = user arguments
+
+                if is_variadic {
+                    // Get variadic_min (number of fixed params before & rest)
+                    let variadic_min = rt.get_variadic_min(fn_ptr);
+
+                    // Collect excess args into IndexedSeq
+                    let rest_args = if arg_count > variadic_min {
+                        let rest_slice = &all_args[variadic_min..arg_count.min(6)];
+                        match rt.allocate_indexed_seq(rest_slice) {
+                            Ok(seq) => seq,
+                            Err(msg) => {
+                                eprintln!("Error allocating rest args: {}", msg);
+                                7 // nil
+                            }
+                        }
+                    } else {
+                        7 // nil (no rest args)
+                    };
+
+                    // Build args: fixed_args..., rest_args
+                    // The function expects: x0=fn_ptr, x1..xN=fixed_args, x(N+1)=rest_args
+                    let func: extern "C" fn(usize, usize, usize, usize, usize, usize, usize) -> usize =
+                        std::mem::transmute(code_ptr);
+
+                    match variadic_min {
+                        0 => func(fn_ptr, rest_args, 0, 0, 0, 0, 0),
+                        1 => func(fn_ptr, arg0, rest_args, 0, 0, 0, 0),
+                        2 => func(fn_ptr, arg0, arg1, rest_args, 0, 0, 0),
+                        3 => func(fn_ptr, arg0, arg1, arg2, rest_args, 0, 0),
+                        4 => func(fn_ptr, arg0, arg1, arg2, arg3, rest_args, 0),
+                        5 => func(fn_ptr, arg0, arg1, arg2, arg3, arg4, rest_args),
+                        _ => {
+                            eprintln!("Error: variadic_min {} too large", variadic_min);
+                            7
+                        }
+                    }
+                } else {
+                    // Non-variadic: just pass fn_ptr as x0, then user args
+                    let func: extern "C" fn(usize, usize, usize, usize, usize, usize, usize) -> usize =
+                        std::mem::transmute(code_ptr);
+                    func(fn_ptr, arg0, arg1, arg2, arg3, arg4, arg5)
+                }
             }
             None => {
                 eprintln!("Error: No matching arity for {} args", arg_count);
@@ -1507,8 +1488,8 @@ pub unsafe extern "C" fn trampoline_invoke_multi_arity(
 /// ARM64 Calling Convention:
 /// - Args: x0 = handler_address, x1 = result_local, x2 = link_register, x3 = stack_pointer, x4 = frame_pointer
 /// - Returns: x0 = nil (7)
-#[unsafe(no_mangle)]
-pub extern "C" fn trampoline_push_exception_handler(
+#[allow(dead_code)]
+pub extern "C" fn builtin_push_exception_handler(
     handler_address: usize,
     result_local: isize, // Negative FP-relative offset
     link_register: usize,
@@ -1537,8 +1518,8 @@ pub extern "C" fn trampoline_push_exception_handler(
 /// ARM64 Calling Convention:
 /// - Args: none
 /// - Returns: x0 = nil (7)
-#[unsafe(no_mangle)]
-pub extern "C" fn trampoline_pop_exception_handler() -> usize {
+#[allow(dead_code)]
+pub extern "C" fn builtin_pop_exception_handler() -> usize {
     unsafe {
         let runtime_ptr = std::ptr::addr_of!(RUNTIME);
         let rt = &mut *(*runtime_ptr).as_ref().unwrap().get();
@@ -1558,8 +1539,8 @@ pub extern "C" fn trampoline_pop_exception_handler() -> usize {
 /// 2. Stores exception value at result_local (FP-relative offset)
 /// 3. Restores SP, FP, LR from handler
 /// 4. Jumps to handler_address (catch block)
-#[unsafe(no_mangle)]
-pub extern "C" fn trampoline_throw(_stack_pointer: usize, exception_value: usize) -> ! {
+#[allow(dead_code)]
+pub extern "C" fn builtin_throw(_stack_pointer: usize, exception_value: usize) -> ! {
     unsafe {
         let runtime_ptr = std::ptr::addr_of!(RUNTIME);
         let rt = &mut *(*runtime_ptr).as_ref().unwrap().get();
@@ -1600,8 +1581,8 @@ pub extern "C" fn trampoline_throw(_stack_pointer: usize, exception_value: usize
 /// ARM64 Calling Convention:
 /// - Args: x0 = marker value
 /// - Returns: x0 = same marker value (pass through)
-#[unsafe(no_mangle)]
-pub extern "C" fn trampoline_debug_marker(marker: usize) -> usize {
+#[allow(dead_code)]
+pub extern "C" fn builtin_debug_marker(marker: usize) -> usize {
     marker
 }
 
@@ -1615,8 +1596,8 @@ pub extern "C" fn trampoline_debug_marker(marker: usize) -> usize {
 ///
 /// Creates an AssertionError with message "Assert failed: :pre condition {index}"
 /// and throws it via the exception mechanism.
-#[unsafe(no_mangle)]
-pub extern "C" fn trampoline_pre_condition_failed(
+#[allow(dead_code)]
+pub extern "C" fn builtin_pre_condition_failed(
     _stack_pointer: usize,
     condition_index: usize,
 ) -> ! {
@@ -1636,7 +1617,7 @@ pub extern "C" fn trampoline_pre_condition_failed(
 
         // For now, throw the message string as the exception
         // In a full implementation, we'd create an AssertionError object
-        trampoline_throw(0, msg_ptr);
+        builtin_throw(0, msg_ptr);
     }
 }
 
@@ -1648,8 +1629,8 @@ pub extern "C" fn trampoline_pre_condition_failed(
 ///
 /// Creates an AssertionError with message "Assert failed: :post condition {index}"
 /// and throws it via the exception mechanism.
-#[unsafe(no_mangle)]
-pub extern "C" fn trampoline_post_condition_failed(
+#[allow(dead_code)]
+pub extern "C" fn builtin_post_condition_failed(
     _stack_pointer: usize,
     condition_index: usize,
 ) -> ! {
@@ -1669,7 +1650,7 @@ pub extern "C" fn trampoline_post_condition_failed(
 
         // For now, throw the message string as the exception
         // In a full implementation, we'd create an AssertionError object
-        trampoline_throw(0, msg_ptr);
+        builtin_throw(0, msg_ptr);
     }
 }
 
@@ -1680,8 +1661,8 @@ pub extern "C" fn trampoline_post_condition_failed(
 /// ARM64 Calling Convention:
 /// - Args: x0 = type_id, x1 = protocol_id, x2 = method_index, x3 = fn_ptr (tagged)
 /// - Returns: x0 = nil (7)
-#[unsafe(no_mangle)]
-pub extern "C" fn trampoline_register_protocol_method(
+#[allow(dead_code)]
+pub extern "C" fn builtin_register_protocol_method(
     type_id: usize,
     protocol_id: usize,
     method_index: usize,
@@ -1702,8 +1683,8 @@ pub extern "C" fn trampoline_register_protocol_method(
 /// ARM64 Calling Convention:
 /// - Args: x0 = type_id, x1 = protocol_id
 /// - Returns: x0 = nil (7)
-#[unsafe(no_mangle)]
-pub extern "C" fn trampoline_register_marker_protocol(type_id: usize, protocol_id: usize) -> usize {
+#[allow(dead_code)]
+pub extern "C" fn builtin_register_marker_protocol(type_id: usize, protocol_id: usize) -> usize {
     unsafe {
         let runtime_ptr = std::ptr::addr_of!(RUNTIME);
         let rt = &mut *(*runtime_ptr).as_ref().unwrap().get();
@@ -1726,8 +1707,8 @@ pub extern "C" fn trampoline_register_marker_protocol(type_id: usize, protocol_i
 /// # Safety
 /// Caller must ensure that `method_name_ptr` points to valid UTF-8 memory
 /// of at least `method_name_len` bytes.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn trampoline_protocol_lookup(
+#[allow(dead_code)]
+pub unsafe extern "C" fn builtin_protocol_lookup(
     target: usize,
     method_name_ptr: *const u8,
     method_name_len: usize,
@@ -1756,7 +1737,7 @@ pub unsafe extern "C" fn trampoline_protocol_lookup(
                     method_name, type_name
                 );
                 let error_str = rt.allocate_string(&error_msg).unwrap_or(7);
-                trampoline_throw(0, error_str);
+                builtin_throw(0, error_str);
             }
         }
     }
@@ -1771,8 +1752,8 @@ pub unsafe extern "C" fn trampoline_protocol_lookup(
 /// This is called the first time a keyword literal is used. After that,
 /// the keyword is cached in keyword_heap_ptrs and subsequent calls return
 /// the cached pointer (ensuring identity-based equality works).
-#[unsafe(no_mangle)]
-pub extern "C" fn trampoline_intern_keyword(keyword_index: usize) -> usize {
+#[allow(dead_code)]
+pub extern "C" fn builtin_intern_keyword(keyword_index: usize) -> usize {
     unsafe {
         let runtime_ptr = std::ptr::addr_of!(RUNTIME);
         let rt = &mut *(*runtime_ptr).as_ref().unwrap().get();
@@ -1796,8 +1777,8 @@ pub extern "C" fn trampoline_intern_keyword(keyword_index: usize) -> usize {
 /// - Args: x0 = expected_type_id (full type ID including DEFTYPE_ID_OFFSET)
 ///   x1 = value to check (tagged)
 /// - Returns: x0 = tagged boolean (true if instance, false otherwise)
-#[unsafe(no_mangle)]
-pub extern "C" fn trampoline_instance_check(expected_type_id: usize, value: usize) -> usize {
+#[allow(dead_code)]
+pub extern "C" fn builtin_instance_check(expected_type_id: usize, value: usize) -> usize {
     unsafe {
         let runtime_ptr = std::ptr::addr_of!(RUNTIME);
         let rt = &*(*runtime_ptr).as_ref().unwrap().get();
@@ -1822,17 +1803,23 @@ pub extern "C" fn trampoline_instance_check(expected_type_id: usize, value: usiz
 /// ARM64 Calling Convention:
 /// - Args: x0 = frame_pointer (x29 for GC), x1 = gc_return_addr (link register), x2 = length (tagged integer)
 /// - Returns: x0 = tagged array pointer
-#[unsafe(no_mangle)]
-pub extern "C" fn trampoline_make_array(frame_pointer: usize, gc_return_addr: usize, length: usize) -> usize {
+#[allow(dead_code)]
+pub extern "C" fn builtin_make_array(frame_pointer: usize, gc_return_addr: usize, length: usize) -> usize {
     unsafe {
         let runtime_ptr = std::ptr::addr_of!(RUNTIME);
         let rt = &mut *(*runtime_ptr).as_ref().unwrap().get();
 
+        // Check if length looks like garbage (too large)
+        let len = length >> 3;
+        if len > 1000 {
+            eprintln!("WARNING: builtin_make_array with suspicious length!");
+            eprintln!("  fp={:#x} lr={:#x} length={:#x} ({})", frame_pointer, gc_return_addr, length, len);
+            // Print return as error to get stack trace
+            panic!("Garbage length detected");
+        }
+
         // GC before allocation if gc_always is enabled
         rt.maybe_gc_before_alloc(frame_pointer, gc_return_addr);
-
-        // Untag the length
-        let len = length >> 3;
 
         match rt.allocate_array(len) {
             Ok(ptr) => ptr,
@@ -1849,8 +1836,8 @@ pub extern "C" fn trampoline_make_array(frame_pointer: usize, gc_return_addr: us
 /// ARM64 Calling Convention:
 /// - Args: x0 = array (tagged), x1 = index (tagged integer)
 /// - Returns: x0 = element value (tagged)
-#[unsafe(no_mangle)]
-pub extern "C" fn trampoline_aget(arr_ptr: usize, index: usize) -> usize {
+#[allow(dead_code)]
+pub extern "C" fn builtin_aget(arr_ptr: usize, index: usize) -> usize {
     unsafe {
         let runtime_ptr = std::ptr::addr_of!(RUNTIME);
         let rt = &*(*runtime_ptr).as_ref().unwrap().get();
@@ -1873,8 +1860,8 @@ pub extern "C" fn trampoline_aget(arr_ptr: usize, index: usize) -> usize {
 /// ARM64 Calling Convention:
 /// - Args: x0 = array (tagged), x1 = index (tagged integer), x2 = value (tagged)
 /// - Returns: x0 = value (tagged)
-#[unsafe(no_mangle)]
-pub extern "C" fn trampoline_aset(arr_ptr: usize, index: usize, value: usize) -> usize {
+#[allow(dead_code)]
+pub extern "C" fn builtin_aset(arr_ptr: usize, index: usize, value: usize) -> usize {
     unsafe {
         let runtime_ptr = std::ptr::addr_of!(RUNTIME);
         let rt = &*(*runtime_ptr).as_ref().unwrap().get();
@@ -1897,8 +1884,8 @@ pub extern "C" fn trampoline_aset(arr_ptr: usize, index: usize, value: usize) ->
 /// ARM64 Calling Convention:
 /// - Args: x0 = array (tagged)
 /// - Returns: x0 = length (tagged integer)
-#[unsafe(no_mangle)]
-pub extern "C" fn trampoline_alength(arr_ptr: usize) -> usize {
+#[allow(dead_code)]
+pub extern "C" fn builtin_alength(arr_ptr: usize) -> usize {
     unsafe {
         let runtime_ptr = std::ptr::addr_of!(RUNTIME);
         let rt = &*(*runtime_ptr).as_ref().unwrap().get();
@@ -1914,8 +1901,8 @@ pub extern "C" fn trampoline_alength(arr_ptr: usize) -> usize {
 /// ARM64 Calling Convention:
 /// - Args: x0 = frame_pointer (x29 for GC), x1 = gc_return_addr (link register), x2 = array (tagged)
 /// - Returns: x0 = new array (tagged)
-#[unsafe(no_mangle)]
-pub extern "C" fn trampoline_aclone(frame_pointer: usize, gc_return_addr: usize, arr_ptr: usize) -> usize {
+#[allow(dead_code)]
+pub extern "C" fn builtin_aclone(frame_pointer: usize, gc_return_addr: usize, arr_ptr: usize) -> usize {
     unsafe {
         let runtime_ptr = std::ptr::addr_of!(RUNTIME);
         let rt = &mut *(*runtime_ptr).as_ref().unwrap().get();
@@ -1936,8 +1923,8 @@ pub extern "C" fn trampoline_aclone(frame_pointer: usize, gc_return_addr: usize,
 /// Hash a value - works for keywords, strings, and other primitive types
 /// - x0 = value (tagged)
 /// - Returns: x0 = hash value (tagged integer)
-#[unsafe(no_mangle)]
-pub extern "C" fn trampoline_hash_value(value: usize) -> usize {
+#[allow(dead_code)]
+pub extern "C" fn builtin_hash_value(value: usize) -> usize {
     use crate::gc::types::{BuiltInTypes, HeapObject};
     use crate::gc_runtime::TYPE_KEYWORD;
     use std::collections::hash_map::DefaultHasher;
@@ -1991,8 +1978,8 @@ pub extern "C" fn trampoline_hash_value(value: usize) -> usize {
 /// Check if a value is a keyword
 /// - x0 = value (tagged)
 /// - Returns: x0 = true (0b01011) or false (0b00011)
-#[unsafe(no_mangle)]
-pub extern "C" fn trampoline_is_keyword(value: usize) -> usize {
+#[allow(dead_code)]
+pub extern "C" fn builtin_is_keyword(value: usize) -> usize {
     use crate::gc_runtime::TYPE_KEYWORD;
 
     unsafe {
@@ -2011,8 +1998,8 @@ pub extern "C" fn trampoline_is_keyword(value: usize) -> usize {
 /// Check if a value is a cons cell (used for list operations)
 /// - x0 = value (tagged)
 /// - Returns: x0 = true (0b01011) or false (0b00011)
-#[unsafe(no_mangle)]
-pub extern "C" fn trampoline_is_cons(value: usize) -> usize {
+#[allow(dead_code)]
+pub extern "C" fn builtin_is_cons(value: usize) -> usize {
     unsafe {
         let runtime_ptr = std::ptr::addr_of!(RUNTIME);
         let rt = &*(*runtime_ptr).as_ref().unwrap().get();
@@ -2028,8 +2015,8 @@ pub extern "C" fn trampoline_is_cons(value: usize) -> usize {
 /// Get the first element of a cons cell
 /// - x0 = cons cell (tagged)
 /// - Returns: x0 = head element (tagged)
-#[unsafe(no_mangle)]
-pub extern "C" fn trampoline_cons_first(value: usize) -> usize {
+#[allow(dead_code)]
+pub extern "C" fn builtin_cons_first(value: usize) -> usize {
     unsafe {
         let runtime_ptr = std::ptr::addr_of!(RUNTIME);
         let rt = &*(*runtime_ptr).as_ref().unwrap().get();
@@ -2045,8 +2032,8 @@ pub extern "C" fn trampoline_cons_first(value: usize) -> usize {
 /// Get the rest of a cons cell (the tail)
 /// - x0 = cons cell (tagged)
 /// - Returns: x0 = tail (tagged, may be nil or another cons)
-#[unsafe(no_mangle)]
-pub extern "C" fn trampoline_cons_rest(value: usize) -> usize {
+#[allow(dead_code)]
+pub extern "C" fn builtin_cons_rest(value: usize) -> usize {
     unsafe {
         let runtime_ptr = std::ptr::addr_of!(RUNTIME);
         let rt = &*(*runtime_ptr).as_ref().unwrap().get();
@@ -2071,8 +2058,8 @@ pub extern "C" fn trampoline_cons_rest(value: usize) -> usize {
 /// - x3 = arg1, x4 = arg2, ... x8 = arg6 (up to 7 user args)
 ///
 /// Returns: result of -invoke call
-#[unsafe(no_mangle)]
-pub extern "C" fn trampoline_ifn_invoke(
+#[allow(dead_code)]
+pub extern "C" fn builtin_ifn_invoke(
     obj: usize,
     arg_count: usize,
     arg0: usize,
@@ -2103,7 +2090,7 @@ pub extern "C" fn trampoline_ifn_invoke(
                     type_name
                 );
                 let error_str = rt.allocate_string(&error_msg).unwrap_or(7);
-                trampoline_throw(0, error_str);
+                builtin_throw(0, error_str);
             }
         };
 
@@ -2145,7 +2132,7 @@ pub extern "C" fn trampoline_ifn_invoke(
                 _ => {
                     let error_msg = format!("Too many arguments to IFn: {}", arg_count);
                     let error_str = rt.allocate_string(&error_msg).unwrap_or(7);
-                    trampoline_throw(0, error_str);
+                    builtin_throw(0, error_str);
                 }
             }
         } else if tag == 0b101 {
@@ -2177,7 +2164,7 @@ pub extern "C" fn trampoline_ifn_invoke(
                             _ => {
                                 let error_msg = format!("Too many arguments to IFn: {}", arg_count);
                                 let error_str = rt.allocate_string(&error_msg).unwrap_or(7);
-                                trampoline_throw(0, error_str);
+                                builtin_throw(0, error_str);
                             }
                         };
                     }
@@ -2185,7 +2172,7 @@ pub extern "C" fn trampoline_ifn_invoke(
                         let error_msg =
                             format!("No matching arity for {} args in -invoke", arg_count + 1);
                         let error_str = rt.allocate_string(&error_msg).unwrap_or(7);
-                        trampoline_throw(0, error_str);
+                        builtin_throw(0, error_str);
                     }
                 }
             }
@@ -2240,14 +2227,14 @@ pub extern "C" fn trampoline_ifn_invoke(
                 _ => {
                     let error_msg = format!("Too many arguments to IFn: {}", arg_count);
                     let error_str = rt.allocate_string(&error_msg).unwrap_or(7);
-                    trampoline_throw(0, error_str);
+                    builtin_throw(0, error_str);
                 }
             }
         } else {
             // Not a callable type
             let error_msg = format!("Cannot invoke object with tag {}", tag);
             let error_str = rt.allocate_string(&error_msg).unwrap_or(7);
-            trampoline_throw(0, error_str);
+            builtin_throw(0, error_str);
         }
     }
 }
@@ -2474,8 +2461,8 @@ impl Trampoline {
                 rt.set_stack_base(self.stack_ptr as usize);
             }
 
-            let trampoline_fn: extern "C" fn(u64, u64) -> i64 = std::mem::transmute(self.code_ptr);
-            trampoline_fn(self.stack_ptr as u64, jit_fn as u64)
+            let builtin_fn: extern "C" fn(u64, u64) -> i64 = std::mem::transmute(self.code_ptr);
+            builtin_fn(self.stack_ptr as u64, jit_fn as u64)
         }
     }
 }
@@ -2884,8 +2871,8 @@ pub fn invoke_protocol_method(
 ///
 /// This handles all function types (raw functions, closures, multi-arity, IFn)
 /// and properly sets up x9 for variadic functions.
-#[unsafe(no_mangle)]
-pub extern "C" fn trampoline_apply(
+#[allow(dead_code)]
+pub extern "C" fn builtin_apply(
     frame_pointer: usize,
     gc_return_addr: usize,
     fn_value: usize,
@@ -3101,7 +3088,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_trampoline_simple() {
+    fn test_builtin_simple() {
         // Simple function that returns 42
         let mut code: Vec<u32> = Vec::new();
 

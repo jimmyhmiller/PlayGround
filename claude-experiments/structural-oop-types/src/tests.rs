@@ -1020,13 +1020,14 @@ mod class_syntax {
 
     #[test]
     fn class_no_params_singleton() {
+        // Zero-param classes are now thunks that must be called with ()
         let input = r#"
             {
                 class Empty {
                     isEmpty: true,
                     contains: (i) => false
                 }
-                Empty.isEmpty
+                Empty().isEmpty
             }
         "#;
         let ty = should_parse_and_typecheck(input);

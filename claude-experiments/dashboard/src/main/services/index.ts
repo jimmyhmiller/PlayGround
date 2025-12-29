@@ -9,6 +9,7 @@ import { spawn, ChildProcess } from 'child_process';
 import { FileWatcherService } from './fileWatcher';
 import { GitService } from './gitService';
 import { initEvaluationService, getEvaluationService, EvaluationRequest, ExecutorConfig } from './evaluationService';
+import { initPipelineService, setupPipelineIPC, closePipelineService } from '../pipeline';
 
 // Track running processes
 const runningProcesses: Map<string, ChildProcess> = new Map();
@@ -44,6 +45,9 @@ export function initServices(events: EventEmitter, options: ServiceOptions = {})
 
   // Initialize evaluation service with events
   initEvaluationService(events);
+
+  // Initialize pipeline service
+  initPipelineService(events as EventEmitter & { subscribe: (pattern: string, callback: (event: { type: string; payload: unknown }) => void) => () => void });
 
   console.log('[services] Initialized');
 
@@ -229,6 +233,9 @@ export function setupServiceIPC(): void {
     return { running: runningProcesses.has(id) };
   });
 
+  // Setup pipeline IPC handlers
+  setupPipelineIPC();
+
   console.log('[services] IPC handlers registered');
 }
 
@@ -242,6 +249,7 @@ export function closeServices(): void {
   if (gitService) {
     gitService.stopPolling();
   }
+  closePipelineService();
   console.log('[services] Closed');
 }
 

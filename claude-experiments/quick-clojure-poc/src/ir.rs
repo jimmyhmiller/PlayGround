@@ -191,13 +191,13 @@ pub enum Instruction {
 
     // DefType operations
     // NOTE: MakeType has been refactored out - deftype construction now uses:
-    // 1. ExternalCall to trampoline_allocate_type_object_raw (returns untagged pointer)
+    // 1. ExternalCall to builtin_allocate_type_object_raw (returns untagged pointer)
     // 2. HeapStore instructions to write each field
     // 3. Tag instruction to add HeapObject tag (0b110)
     // This follows the Beagle pattern of decomposing complex operations into primitives.
 
     // NOTE: LoadTypeField and StoreTypeField have been refactored out.
-    // Field access now uses ExternalCall to trampoline_load_type_field_by_symbol with
+    // Field access now uses ExternalCall to builtin_load_type_field_by_symbol with
     // pre-interned symbol IDs, eliminating stack-based string passing.
 
     // Return
@@ -206,7 +206,7 @@ pub enum Instruction {
     // Debug
     Breakpoint, // BRK #0 - trap for debugger
 
-    // NOTE: Println has been refactored out - now uses ExternalCall to trampoline_println_regs
+    // NOTE: Println has been refactored out - now uses ExternalCall to builtin_println_regs
     // The trampoline takes (count, v0, v1, v2, v3, v4, v5, v6) in registers, up to 7 values.
 
     // Note: LoadKeyword has been converted to a builtin function call (runtime.builtin/load-keyword)

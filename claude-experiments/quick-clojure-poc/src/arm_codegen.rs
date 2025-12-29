@@ -767,8 +767,8 @@ impl Arm64CodeGen {
                     self.emit_mov(5, values_ptr_reg); // x5 = values_ptr
 
                     // Step 5: Call trampoline to allocate closure heap object
-                    let func_addr = crate::trampoline::trampoline_allocate_function as usize;
-                    self.emit_external_call(func_addr, "trampoline_allocate_function");
+                    let func_addr = crate::trampoline::builtin_allocate_function as usize;
+                    self.emit_external_call(func_addr, "builtin_allocate_function");
 
                     // Step 6: Clean up stack
                     if aligned_stack_space > 0 {
@@ -868,12 +868,12 @@ impl Arm64CodeGen {
                 self.emit_branch_cond(is_closure_label.clone(), 0); // 0 = EQ (if tag == 0b101)
 
                 // === IFn path (tag != 0b100 and != 0b101) ===
-                // Call trampoline_ifn_invoke(obj, arg_count, arg0, arg1, ...)
+                // Call builtin_ifn_invoke(obj, arg_count, arg0, arg1, ...)
                 let done_label = self.new_label();
                 {
                     let arg_count = args.len();
 
-                    // Set up args for trampoline_ifn_invoke:
+                    // Set up args for builtin_ifn_invoke:
                     // x0 = obj (fn_reg), x1 = arg_count, x2-x8 = user args
                     self.emit_mov(0, fn_reg); // x0 = obj to invoke
                     self.emit_mov_imm(1, arg_count as i64); // x1 = arg count
@@ -892,9 +892,9 @@ impl Arm64CodeGen {
                         self.emit_mov_imm(i + 2, 7); // 7 = nil tagged value
                     }
 
-                    // Call trampoline_ifn_invoke
-                    let ifn_invoke_addr = crate::trampoline::trampoline_ifn_invoke as usize;
-                    self.emit_external_call(ifn_invoke_addr, "trampoline_ifn_invoke");
+                    // Call builtin_ifn_invoke
+                    let ifn_invoke_addr = crate::trampoline::builtin_ifn_invoke as usize;
+                    self.emit_external_call(ifn_invoke_addr, "builtin_ifn_invoke");
                 }
 
                 // Result is in x0, jump to done
@@ -943,7 +943,7 @@ impl Arm64CodeGen {
 
                 // === Multi-arity closure path ===
                 self.emit_label(is_multi_arity_label);
-                // Use trampoline_invoke_multi_arity which handles variadic
+                // Use builtin_invoke_multi_arity which handles variadic
                 // Args: x0 = fn_ptr, x1 = arg_count, x2-x7 = args 0-5
                 // NOTE: ARM64 ABI only uses x0-x7 for arguments! x8 is NOT a param register.
                 //
@@ -969,8 +969,8 @@ impl Arm64CodeGen {
                 self.emit_mov(0, saved_fn_reg);
                 self.emit_mov_imm(1, args.len() as i64);
 
-                let invoke_addr = crate::trampoline::trampoline_invoke_multi_arity as usize;
-                self.emit_external_call(invoke_addr, "trampoline_invoke_multi_arity");
+                let invoke_addr = crate::trampoline::builtin_invoke_multi_arity as usize;
+                self.emit_external_call(invoke_addr, "builtin_invoke_multi_arity");
 
                 // Result in x0, jump to done
                 self.emit_jump(&done_label);
@@ -1010,10 +1010,10 @@ impl Arm64CodeGen {
 
             // NOTE: CallWithSaves is handled later in the match with multi-arity support
 
-            // NOTE: Println has been refactored out - now uses ExternalCall to trampoline_println_regs
+            // NOTE: Println has been refactored out - now uses ExternalCall to builtin_println_regs
             Instruction::PushExceptionHandler(catch_label, exception_slot) => {
                 // PushExceptionHandler: Setup exception handler
-                // Call trampoline_push_exception_handler(handler_addr, result_local, LR, SP, FP)
+                // Call builtin_push_exception_handler(handler_addr, result_local, LR, SP, FP)
 
                 // Compute FP-relative offset for the exception slot
                 // Exception slots come AFTER spill slots in the stack frame:
@@ -1049,15 +1049,15 @@ impl Arm64CodeGen {
                 // x4 = FP
                 self.emit_mov(4, 10);
 
-                // Call trampoline_push_exception_handler
-                let func_addr = crate::trampoline::trampoline_push_exception_handler as usize;
+                // Call builtin_push_exception_handler
+                let func_addr = crate::trampoline::builtin_push_exception_handler as usize;
                 self.emit_mov_imm(15, func_addr as i64);
                 self.emit_blr(15);
             }
 
             Instruction::PopExceptionHandler => {
                 // PopExceptionHandler: Remove exception handler (normal exit from try)
-                let func_addr = crate::trampoline::trampoline_pop_exception_handler as usize;
+                let func_addr = crate::trampoline::builtin_pop_exception_handler as usize;
                 self.emit_mov_imm(15, func_addr as i64);
                 self.emit_blr(15);
                 // Result in x0 is nil, we ignore it
@@ -1065,7 +1065,7 @@ impl Arm64CodeGen {
 
             Instruction::Throw(exc) => {
                 // Throw: Throw exception, never returns
-                // Call trampoline_throw(SP, exception_value)
+                // Call builtin_throw(SP, exception_value)
                 let exc_reg = self.get_physical_reg_for_irvalue(exc, false)?;
 
                 // IMPORTANT: Move exception value to x1 FIRST, before clobbering x0 with SP
@@ -1076,8 +1076,8 @@ impl Arm64CodeGen {
                 // x0 = SP (for potential stack trace) - use ADD x0, sp, #0
                 self.emit_mov_sp(0, 31);
 
-                // Call trampoline_throw (never returns)
-                let func_addr = crate::trampoline::trampoline_throw as usize;
+                // Call builtin_throw (never returns)
+                let func_addr = crate::trampoline::builtin_throw as usize;
                 self.emit_mov_imm(15, func_addr as i64);
                 self.emit_blr(15);
                 // Never returns, but ARM64 codegen continues
@@ -1310,10 +1310,10 @@ impl Arm64CodeGen {
                         self.emit_branch_cond(is_closure_label.clone(), 0); // 0 = EQ (if tag == 0b101)
 
                         // === IFn path (tag != 0b100 and != 0b101) ===
-                        // Call trampoline_ifn_invoke(obj, arg_count, arg0, arg1, ...)
+                        // Call builtin_ifn_invoke(obj, arg_count, arg0, arg1, ...)
                         let done_label = self.new_label();
                         {
-                            // Set up args for trampoline_ifn_invoke:
+                            // Set up args for builtin_ifn_invoke:
                             // x0 = obj (fn_reg), x1 = arg_count, x2-x8 = user args
                             self.emit_mov(0, fn_reg); // x0 = obj to invoke
                             self.emit_mov_imm(1, arg_count as i64); // x1 = arg count
@@ -1343,9 +1343,9 @@ impl Arm64CodeGen {
                                 self.emit_mov_imm(i + 2, 7); // 7 = nil tagged value
                             }
 
-                            // Call trampoline_ifn_invoke
-                            let ifn_invoke_addr = crate::trampoline::trampoline_ifn_invoke as usize;
-                            self.emit_external_call(ifn_invoke_addr, "trampoline_ifn_invoke");
+                            // Call builtin_ifn_invoke
+                            let ifn_invoke_addr = crate::trampoline::builtin_ifn_invoke as usize;
+                            self.emit_external_call(ifn_invoke_addr, "builtin_ifn_invoke");
                         }
 
                         // Result is in x0, jump to done
@@ -1419,7 +1419,7 @@ impl Arm64CodeGen {
                         // === Multi-arity function path (type_id == TYPE_MULTI_ARITY_FN) ===
                         self.emit_label(is_multi_arity_label);
 
-                        // Use trampoline_invoke_multi_arity which handles:
+                        // Use builtin_invoke_multi_arity which handles:
                         // 1. Looking up the correct arity
                         // 2. Building IndexedSeq for variadic if needed
                         // 3. Calling the function with proper convention
@@ -1453,8 +1453,8 @@ impl Arm64CodeGen {
                             self.emit_mov_imm(i + 2, 7); // nil
                         }
 
-                        let invoke_addr = crate::trampoline::trampoline_invoke_multi_arity as usize;
-                        self.emit_external_call(invoke_addr, "trampoline_invoke_multi_arity");
+                        let invoke_addr = crate::trampoline::builtin_invoke_multi_arity as usize;
+                        self.emit_external_call(invoke_addr, "builtin_invoke_multi_arity");
 
                         // Result is in x0, jump to done (skip the do_call_label BLR)
                         self.emit_jump(&done_label);
@@ -1522,7 +1522,7 @@ impl Arm64CodeGen {
 
             // NOTE: MakeType, MakeTypeWithSaves, LoadTypeField, and StoreTypeField have been refactored out.
             // - Deftype construction uses ExternalCall + HeapStore + Tag
-            // - Field access uses ExternalCall to trampoline_load_type_field_by_symbol with pre-interned symbol IDs
+            // - Field access uses ExternalCall to builtin_load_type_field_by_symbol with pre-interned symbol IDs
 
             Instruction::ExternalCall(_, _, _) => {
                 // ExternalCall should be transformed to CallWithSaves by register allocator
@@ -1534,7 +1534,7 @@ impl Arm64CodeGen {
                 // Create a multi-arity function object on the heap
                 // Similar to MakeFunctionPtr but stores multiple (param_count, code_ptr) pairs
                 //
-                // ARM64 Calling Convention for trampoline_allocate_multi_arity_fn:
+                // ARM64 Calling Convention for builtin_allocate_multi_arity_fn:
                 // - x0 = frame_pointer (x29 for GC)
                 // - x1 = gc_return_addr (x30)
                 // - x2 = name_ptr (0 for anonymous)
@@ -1601,8 +1601,8 @@ impl Arm64CodeGen {
                 // closures_ptr is already at [SP+0]
 
                 // Step 7: Call trampoline to allocate multi-arity function
-                let func_addr = crate::trampoline::trampoline_allocate_multi_arity_fn as usize;
-                self.emit_external_call(func_addr, "trampoline_allocate_multi_arity_fn");
+                let func_addr = crate::trampoline::builtin_allocate_multi_arity_fn as usize;
+                self.emit_external_call(func_addr, "builtin_allocate_multi_arity_fn");
 
                 // Step 7: Clean up stack
                 if aligned_stack_space > 0 {
@@ -1653,7 +1653,7 @@ impl Arm64CodeGen {
             }
 
             Instruction::AssertPre(condition, index) => {
-                // Check if condition is truthy; if falsy, call trampoline_pre_condition_failed
+                // Check if condition is truthy; if falsy, call builtin_pre_condition_failed
                 //
                 // In Clojure, false and nil are falsy, everything else is truthy.
                 // nil = 7, false = 3
@@ -1674,9 +1674,9 @@ impl Arm64CodeGen {
                 // If we're here, condition is nil - fail assertion
                 self.emit_mov_imm(0, 0); // x0 = 0 (stack_pointer, unused)
                 self.emit_mov_imm(1, *index as i64); // x1 = condition index
-                let fail_addr = crate::trampoline::trampoline_pre_condition_failed as usize;
-                self.emit_external_call(fail_addr, "trampoline_pre_condition_failed");
-                // trampoline_pre_condition_failed never returns
+                let fail_addr = crate::trampoline::builtin_pre_condition_failed as usize;
+                self.emit_external_call(fail_addr, "builtin_pre_condition_failed");
+                // builtin_pre_condition_failed never returns
 
                 self.emit_label(not_nil_label);
 
@@ -1687,15 +1687,15 @@ impl Arm64CodeGen {
                 // If we're here, condition is false - fail assertion
                 self.emit_mov_imm(0, 0); // x0 = 0 (stack_pointer, unused)
                 self.emit_mov_imm(1, *index as i64); // x1 = condition index
-                self.emit_external_call(fail_addr, "trampoline_pre_condition_failed");
-                // trampoline_pre_condition_failed never returns
+                self.emit_external_call(fail_addr, "builtin_pre_condition_failed");
+                // builtin_pre_condition_failed never returns
 
                 self.emit_label(pass_label);
                 // Condition passed - continue execution
             }
 
             Instruction::AssertPost(condition, index) => {
-                // Same logic as AssertPre but calls trampoline_post_condition_failed
+                // Same logic as AssertPre but calls builtin_post_condition_failed
 
                 let cond_reg = self.get_physical_reg_for_irvalue(condition, false)?;
 
@@ -1709,9 +1709,9 @@ impl Arm64CodeGen {
                 // If we're here, condition is nil - fail assertion
                 self.emit_mov_imm(0, 0); // x0 = 0 (stack_pointer, unused)
                 self.emit_mov_imm(1, *index as i64); // x1 = condition index
-                let fail_addr = crate::trampoline::trampoline_post_condition_failed as usize;
-                self.emit_external_call(fail_addr, "trampoline_post_condition_failed");
-                // trampoline_post_condition_failed never returns
+                let fail_addr = crate::trampoline::builtin_post_condition_failed as usize;
+                self.emit_external_call(fail_addr, "builtin_post_condition_failed");
+                // builtin_post_condition_failed never returns
 
                 self.emit_label(not_nil_label);
 
@@ -1722,8 +1722,8 @@ impl Arm64CodeGen {
                 // If we're here, condition is false - fail assertion
                 self.emit_mov_imm(0, 0); // x0 = 0 (stack_pointer, unused)
                 self.emit_mov_imm(1, *index as i64); // x1 = condition index
-                self.emit_external_call(fail_addr, "trampoline_post_condition_failed");
-                // trampoline_post_condition_failed never returns
+                self.emit_external_call(fail_addr, "builtin_post_condition_failed");
+                // builtin_post_condition_failed never returns
 
                 self.emit_label(pass_label);
                 // Condition passed - continue execution

@@ -483,6 +483,16 @@ pub fn infer(env: &TypeEnv, expr: &Expr, store: &mut NodeStore) -> Result<NodeId
         Expr::Call(func, args) => {
             let mut result_type = infer(env, func, store)?;
 
+            // Handle zero-arg call: f() where f is () => expr
+            // The function has type _unit -> T, so the result is T
+            if args.is_empty() {
+                let unit_type = store.fresh_var("inst");
+                let new_result_type = store.fresh_var("result");
+                let expected_func_type = store.arrow(unit_type, new_result_type);
+                unify(store, result_type, expected_func_type)?;
+                return Ok(new_result_type);
+            }
+
             for arg in args {
                 let arg_type = infer(env, arg, store)?;
                 let new_result_type = store.fresh_var("result");
@@ -608,7 +618,7 @@ pub fn infer(env: &TypeEnv, expr: &Expr, store: &mut NodeStore) -> Result<NodeId
         }
 
         // === Arithmetic: e1 op e2 where both are int, returns int ===
-        Expr::Add(left, right) | Expr::Sub(left, right) | Expr::Mul(left, right) | Expr::Div(left, right) => {
+        Expr::Add(left, right) | Expr::Sub(left, right) | Expr::Mul(left, right) | Expr::Div(left, right) | Expr::Mod(left, right) => {
             let left_type = infer(env, left, store)?;
             let right_type = infer(env, right, store)?;
 
@@ -620,16 +630,35 @@ pub fn infer(env: &TypeEnv, expr: &Expr, store: &mut NodeStore) -> Result<NodeId
             Ok(store.int())
         }
 
-        // === String concatenation: e1 ++ e2 where both are string, returns string ===
-        Expr::Concat(left, right) => {
+        // === Comparison: e1 op e2 where both are int, returns bool ===
+        Expr::Lt(left, right) | Expr::LtEq(left, right) | Expr::Gt(left, right) | Expr::GtEq(left, right) => {
             let left_type = infer(env, left, store)?;
             let right_type = infer(env, right, store)?;
 
-            // Both sides must be string
-            let string_type = store.string();
-            unify(store, left_type, string_type)?;
-            unify(store, right_type, string_type)?;
+            // Both sides must be int
+            let int_type = store.int();
+            unify(store, left_type, int_type)?;
+            unify(store, right_type, int_type)?;
 
+            Ok(store.bool())
+        }
+
+        // === Boolean NOT: !e where e is bool, returns bool ===
+        Expr::Not(expr) => {
+            let expr_type = infer(env, expr, store)?;
+            let bool_type = store.bool();
+            unify(store, expr_type, bool_type)?;
+            Ok(store.bool())
+        }
+
+        // === String concatenation: e1 ++ e2 - flexible, accepts any types, returns string ===
+        // At runtime, non-string values are converted to strings
+        Expr::Concat(left, right) => {
+            // Just infer types of both sides (don't constrain them)
+            let _left_type = infer(env, left, store)?;
+            let _right_type = infer(env, right, store)?;
+
+            // Result is always string
             Ok(store.string())
         }
     }

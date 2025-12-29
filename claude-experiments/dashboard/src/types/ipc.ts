@@ -6,6 +6,7 @@
 
 import type { DashboardEvent, EventFilter } from './events';
 import type { CommandResult } from './state';
+import type { PipelineConfig, PipelineStats, ProcessorDescriptor } from './pipeline';
 
 /**
  * IPC Channel names
@@ -194,6 +195,21 @@ export interface ShellAPI {
 }
 
 /**
+ * Pipeline API exposed via preload - Unix-pipes style data processing
+ */
+export interface PipelineAPI {
+  start(config: PipelineConfig): Promise<{ success: boolean; error?: string }>;
+  stop(id: string): Promise<{ success: boolean; error?: string }>;
+  stats(id: string): Promise<PipelineStats | undefined>;
+  isRunning(id: string): Promise<{ running: boolean }>;
+  list(): Promise<string[]>;
+  listDetailed(): Promise<Array<{ id: string; config: PipelineConfig; stats: PipelineStats }>>;
+  stopAll(): Promise<{ success: boolean }>;
+  processors(): Promise<string[]>;
+  describeProcessors(): Promise<ProcessorDescriptor[]>;
+}
+
+/**
  * Complete Window API (extends global Window)
  */
 declare global {
@@ -205,6 +221,7 @@ declare global {
     stateAPI: StateAPI;
     evalAPI: EvalAPI;
     shellAPI: ShellAPI;
+    pipelineAPI: PipelineAPI;
   }
 }
 

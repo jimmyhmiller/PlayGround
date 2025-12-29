@@ -491,7 +491,9 @@ impl Compiler {
                  "__reader_vector_first" | "__reader_vector_rest" | "__reader_vector_count" |
                  "__reader_vector_nth" | "__reader_vector_conj" |
                  // Reader type predicates
-                 "__reader_list?" | "__reader_vector?" | "__reader_map?" | "__reader_symbol?"
+                 "__reader_list?" | "__reader_vector?" | "__reader_map?" | "__reader_symbol?" |
+                 // Array operations
+                 "make-array" | "aget" | "aset" | "aset!" | "alength" | "aclone"
         )
     }
 
@@ -596,8 +598,8 @@ impl Compiler {
         }
 
         // Step 1: Allocate heap object via trampoline
-        // trampoline_allocate_type_object_raw(frame_pointer, gc_return_addr, type_id, field_count) -> untagged_ptr
-        let trampoline_addr = crate::trampoline::trampoline_allocate_type_object_raw as usize;
+        // builtin_allocate_type_object_raw(frame_pointer, gc_return_addr, type_id, field_count) -> untagged_ptr
+        let builtin_addr = crate::trampoline::builtin_allocate_type_object_raw as usize;
         let raw_ptr = self.builder.new_register();
 
         // Load type_id and field_count as raw constants (untagged values)
@@ -611,7 +613,7 @@ impl Compiler {
         // Pass FramePointer (x29) and ReturnAddress (x30) as first two args for GC stack walking
         self.builder.emit(Instruction::ExternalCall(
             raw_ptr,
-            trampoline_addr,
+            builtin_addr,
             vec![IrValue::FramePointer, IrValue::ReturnAddress, type_id_reg, field_count_reg],
         ));
 
@@ -648,8 +650,8 @@ impl Compiler {
         let rt = unsafe { &mut *self.runtime.get() };
         let field_symbol_id = rt.intern_symbol(field);
 
-        // Emit ExternalCall to trampoline_load_type_field_by_symbol(obj, symbol_id)
-        let trampoline_addr = crate::trampoline::trampoline_load_type_field_by_symbol as usize;
+        // Emit ExternalCall to builtin_load_type_field_by_symbol(obj, symbol_id)
+        let builtin_addr = crate::trampoline::builtin_load_type_field_by_symbol as usize;
         let symbol_id_reg = self
             .builder
             .assign_new(IrValue::RawConstant(field_symbol_id as i64));
@@ -657,7 +659,7 @@ impl Compiler {
         let result = self.builder.new_register();
         self.builder.emit(Instruction::ExternalCall(
             result,
-            trampoline_addr,
+            builtin_addr,
             vec![obj_reg, symbol_id_reg],
         ));
 
@@ -685,11 +687,11 @@ impl Compiler {
 
         // 3. Emit GcAddRoot as ExternalCall for write barrier (BEFORE the store)
         // This is critical for generational GC correctness
-        let gc_trampoline_addr = crate::trampoline::trampoline_gc_add_root as usize;
+        let gc_builtin_addr = crate::trampoline::builtin_gc_add_root as usize;
         let gc_result = self.builder.new_register();
         self.builder.emit(Instruction::ExternalCall(
             gc_result,
-            gc_trampoline_addr,
+            gc_builtin_addr,
             vec![obj_reg],
         ));
 
@@ -697,9 +699,9 @@ impl Compiler {
         let rt = unsafe { &mut *self.runtime.get() };
         let field_symbol_id = rt.intern_symbol(field);
 
-        // 5. Emit ExternalCall to trampoline_store_type_field_by_symbol(obj, symbol_id, value)
-        let store_trampoline_addr =
-            crate::trampoline::trampoline_store_type_field_by_symbol as usize;
+        // 5. Emit ExternalCall to builtin_store_type_field_by_symbol(obj, symbol_id, value)
+        let store_builtin_addr =
+            crate::trampoline::builtin_store_type_field_by_symbol as usize;
         let symbol_id_reg = self
             .builder
             .assign_new(IrValue::RawConstant(field_symbol_id as i64));
@@ -707,7 +709,7 @@ impl Compiler {
         let result = self.builder.new_register();
         self.builder.emit(Instruction::ExternalCall(
             result,
-            store_trampoline_addr,
+            store_builtin_addr,
             vec![obj_reg, symbol_id_reg, new_value_reg],
         ));
 
@@ -920,12 +922,12 @@ impl Compiler {
             // Check if this is a marker protocol (no methods in the implementation)
             if impl_.methods.is_empty() {
                 // Register marker protocol satisfaction
-                let trampoline_addr =
-                    crate::trampoline::trampoline_register_marker_protocol as usize;
+                let builtin_addr =
+                    crate::trampoline::builtin_register_marker_protocol as usize;
                 let dummy_result = self.builder.new_register();
                 self.builder.emit(Instruction::ExternalCall(
                     dummy_result,
-                    trampoline_addr,
+                    builtin_addr,
                     vec![
                         IrValue::RawConstant(type_id as i64),
                         IrValue::RawConstant(protocol_id as i64),
@@ -976,13 +978,13 @@ impl Compiler {
                 let fn_value = self.compile_fn(&None, &arities)?;
 
                 // Emit RegisterProtocolMethod as ExternalCall
-                // Call trampoline_register_protocol_method(type_id, protocol_id, method_index, fn_ptr)
-                let trampoline_addr =
-                    crate::trampoline::trampoline_register_protocol_method as usize;
+                // Call builtin_register_protocol_method(type_id, protocol_id, method_index, fn_ptr)
+                let builtin_addr =
+                    crate::trampoline::builtin_register_protocol_method as usize;
                 let dummy_result = self.builder.new_register();
                 self.builder.emit(Instruction::ExternalCall(
                     dummy_result,
-                    trampoline_addr,
+                    builtin_addr,
                     vec![
                         IrValue::RawConstant(type_id as i64),
                         IrValue::RawConstant(protocol_id as i64),
@@ -1071,12 +1073,12 @@ impl Compiler {
             .map(|v| self.builder.assign_new(v))
             .collect();
 
-        // Step 1: Call trampoline_protocol_lookup(target, method_ptr, method_len) -> fn_ptr
+        // Step 1: Call builtin_protocol_lookup(target, method_ptr, method_len) -> fn_ptr
         let fn_ptr = self.builder.new_register();
-        let trampoline_addr = crate::trampoline::trampoline_protocol_lookup as usize;
+        let builtin_addr = crate::trampoline::builtin_protocol_lookup as usize;
         self.builder.emit(Instruction::ExternalCall(
             fn_ptr,
-            trampoline_addr,
+            builtin_addr,
             vec![
                 arg_values[0],                   // target
                 IrValue::RawConstant(method_ptr as i64), // method_name_ptr
@@ -1579,12 +1581,12 @@ impl Compiler {
             let value_reg = self.compile(value_expr)?;
 
             // Emit PushBinding as ExternalCall
-            // Call trampoline_push_binding(var_ptr, value) -> result
-            let trampoline_addr = crate::trampoline::trampoline_push_binding as usize;
+            // Call builtin_push_binding(var_ptr, value) -> result
+            let builtin_addr = crate::trampoline::builtin_push_binding as usize;
             let push_result = self.builder.new_register();
             self.builder.emit(Instruction::ExternalCall(
                 push_result,
-                trampoline_addr,
+                builtin_addr,
                 vec![IrValue::TaggedConstant(var_ptr as isize), value_reg],
             ));
 
@@ -1603,12 +1605,12 @@ impl Compiler {
         // Pop all bindings in reverse order
         for &var_ptr in var_ptrs.iter().rev() {
             // Emit PopBinding as ExternalCall
-            // Call trampoline_pop_binding(var_ptr) -> result
-            let trampoline_addr = crate::trampoline::trampoline_pop_binding as usize;
+            // Call builtin_pop_binding(var_ptr) -> result
+            let builtin_addr = crate::trampoline::builtin_pop_binding as usize;
             let pop_result = self.builder.new_register();
             self.builder.emit(Instruction::ExternalCall(
                 pop_result,
-                trampoline_addr,
+                builtin_addr,
                 vec![IrValue::TaggedConstant(var_ptr as isize)],
             ));
         }
@@ -1631,12 +1633,12 @@ impl Compiler {
         let value_reg = self.compile(value_expr)?;
 
         // Emit SetVar as ExternalCall
-        // Call trampoline_set_binding(var_ptr, value) -> result
-        let trampoline_addr = crate::trampoline::trampoline_set_binding as usize;
+        // Call builtin_set_binding(var_ptr, value) -> result
+        let builtin_addr = crate::trampoline::builtin_set_binding as usize;
         let set_result = self.builder.new_register();
         self.builder.emit(Instruction::ExternalCall(
             set_result,
-            trampoline_addr,
+            builtin_addr,
             vec![IrValue::TaggedConstant(var_ptr as isize), value_reg],
         ));
 
@@ -2438,6 +2440,13 @@ impl Compiler {
                     "__reader_vector?" => self.compile_builtin_reader_prim_1(args, "__reader_vector?"),
                     "__reader_map?" => self.compile_builtin_reader_prim_1(args, "__reader_map?"),
                     "__reader_symbol?" => self.compile_builtin_reader_prim_1(args, "__reader_symbol?"),
+                    // Array operations
+                    "make-array" => self.compile_builtin_make_array(args),
+                    "aget" => self.compile_builtin_aget(args),
+                    "aset" => self.compile_builtin_aset(args),
+                    "aset!" => self.compile_builtin_aset(args),
+                    "alength" => self.compile_builtin_alength(args),
+                    "aclone" => self.compile_builtin_aclone(args),
                     _ => unreachable!(),
                 };
             }
@@ -2650,12 +2659,12 @@ impl Compiler {
             .emit(float_op(float_result, left_float, right_float));
 
         // Allocate new float on heap and get tagged pointer
-        // Call trampoline_allocate_float(frame_pointer, gc_return_addr, f64_bits) -> tagged_ptr
-        let trampoline_addr = crate::trampoline::trampoline_allocate_float as usize;
+        // Call builtin_allocate_float(frame_pointer, gc_return_addr, f64_bits) -> tagged_ptr
+        let builtin_addr = crate::trampoline::builtin_allocate_float as usize;
         // Use FramePointer (x29) and ReturnAddress (x30) for GC stack walking
         self.builder.emit(Instruction::ExternalCall(
             result,
-            trampoline_addr,
+            builtin_addr,
             vec![IrValue::FramePointer, IrValue::ReturnAddress, float_result],
         ));
 
@@ -2998,14 +3007,108 @@ impl Compiler {
 
     fn compile_builtin_gc(&mut self, _args: &[Expr]) -> Result<IrValue, String> {
         // __gc takes no arguments and returns nil
-        // Call trampoline_gc(frame_pointer, gc_return_addr) -> nil
+        // Call builtin_gc(frame_pointer, gc_return_addr) -> nil
         let result = self.builder.new_register();
-        let trampoline_addr = crate::trampoline::trampoline_gc as usize;
+        let builtin_addr = crate::trampoline::builtin_gc as usize;
         // Use FramePointer (x29) and ReturnAddress (x30) for GC stack walking
         self.builder.emit(Instruction::ExternalCall(
             result,
-            trampoline_addr,
+            builtin_addr,
             vec![IrValue::FramePointer, IrValue::ReturnAddress],
+        ));
+        Ok(result)
+    }
+
+    // Array operations - direct calls to builtin functions
+    // Use assign_new() to ensure all args are in registers before ExternalCall
+
+    fn compile_builtin_make_array(&mut self, args: &[Expr]) -> Result<IrValue, String> {
+        if args.len() != 1 {
+            return Err(format!("make-array requires 1 argument, got {}", args.len()));
+        }
+        let length = self.compile(&args[0])?;
+        let length_reg = self.builder.assign_new(length);
+        let result = self.builder.new_register();
+        let builtin_addr = crate::trampoline::builtin_make_array as usize;
+        // Allocating operation - pass FramePointer and ReturnAddress for GC
+        self.builder.emit(Instruction::ExternalCall(
+            result,
+            builtin_addr,
+            vec![IrValue::FramePointer, IrValue::ReturnAddress, length_reg],
+        ));
+        Ok(result)
+    }
+
+    fn compile_builtin_aget(&mut self, args: &[Expr]) -> Result<IrValue, String> {
+        if args.len() != 2 {
+            return Err(format!("aget requires 2 arguments, got {}", args.len()));
+        }
+        let array = self.compile(&args[0])?;
+        let index = self.compile(&args[1])?;
+        let array_reg = self.builder.assign_new(array);
+        let index_reg = self.builder.assign_new(index);
+        let result = self.builder.new_register();
+        let builtin_addr = crate::trampoline::builtin_aget as usize;
+        // Non-allocating - no need for FramePointer/ReturnAddress
+        self.builder.emit(Instruction::ExternalCall(
+            result,
+            builtin_addr,
+            vec![array_reg, index_reg],
+        ));
+        Ok(result)
+    }
+
+    fn compile_builtin_aset(&mut self, args: &[Expr]) -> Result<IrValue, String> {
+        if args.len() != 3 {
+            return Err(format!("aset requires 3 arguments, got {}", args.len()));
+        }
+        let array = self.compile(&args[0])?;
+        let index = self.compile(&args[1])?;
+        let value = self.compile(&args[2])?;
+        let array_reg = self.builder.assign_new(array);
+        let index_reg = self.builder.assign_new(index);
+        let value_reg = self.builder.assign_new(value);
+        let result = self.builder.new_register();
+        let builtin_addr = crate::trampoline::builtin_aset as usize;
+        // Non-allocating - no need for FramePointer/ReturnAddress
+        self.builder.emit(Instruction::ExternalCall(
+            result,
+            builtin_addr,
+            vec![array_reg, index_reg, value_reg],
+        ));
+        Ok(result)
+    }
+
+    fn compile_builtin_alength(&mut self, args: &[Expr]) -> Result<IrValue, String> {
+        if args.len() != 1 {
+            return Err(format!("alength requires 1 argument, got {}", args.len()));
+        }
+        let array = self.compile(&args[0])?;
+        let array_reg = self.builder.assign_new(array);
+        let result = self.builder.new_register();
+        let builtin_addr = crate::trampoline::builtin_alength as usize;
+        // Non-allocating - no need for FramePointer/ReturnAddress
+        self.builder.emit(Instruction::ExternalCall(
+            result,
+            builtin_addr,
+            vec![array_reg],
+        ));
+        Ok(result)
+    }
+
+    fn compile_builtin_aclone(&mut self, args: &[Expr]) -> Result<IrValue, String> {
+        if args.len() != 1 {
+            return Err(format!("aclone requires 1 argument, got {}", args.len()));
+        }
+        let array = self.compile(&args[0])?;
+        let array_reg = self.builder.assign_new(array);
+        let result = self.builder.new_register();
+        let builtin_addr = crate::trampoline::builtin_aclone as usize;
+        // Allocating operation - pass FramePointer and ReturnAddress for GC
+        self.builder.emit(Instruction::ExternalCall(
+            result,
+            builtin_addr,
+            vec![IrValue::FramePointer, IrValue::ReturnAddress, array_reg],
         ));
         Ok(result)
     }
@@ -3425,12 +3528,12 @@ impl Compiler {
         let value = self.ensure_register(value);
 
         // Emit instance check as ExternalCall
-        // Call trampoline_instance_check(type_id, value) -> tagged_boolean
+        // Call builtin_instance_check(type_id, value) -> tagged_boolean
         let result = self.builder.new_register();
-        let trampoline_addr = crate::trampoline::trampoline_instance_check as usize;
+        let builtin_addr = crate::trampoline::builtin_instance_check as usize;
         self.builder.emit(Instruction::ExternalCall(
             result,
-            trampoline_addr,
+            builtin_addr,
             vec![IrValue::RawConstant(full_type_id as i64), value],
         ));
         Ok(result)
@@ -3494,9 +3597,9 @@ impl Compiler {
         let value = self.compile(&args[0])?;
         let value = self.ensure_register(value);
 
-        // Call trampoline_is_keyword
+        // Call builtin_is_keyword
         let result = self.builder.new_register();
-        let fn_addr = crate::trampoline::trampoline_is_keyword as usize;
+        let fn_addr = crate::trampoline::builtin_is_keyword as usize;
         self.builder
             .emit(Instruction::ExternalCall(result, fn_addr, vec![value]));
         Ok(result)
@@ -3515,9 +3618,9 @@ impl Compiler {
         let value = self.compile(&args[0])?;
         let value = self.ensure_register(value);
 
-        // Call trampoline_hash_value
+        // Call builtin_hash_value
         let result = self.builder.new_register();
-        let fn_addr = crate::trampoline::trampoline_hash_value as usize;
+        let fn_addr = crate::trampoline::builtin_hash_value as usize;
         self.builder
             .emit(Instruction::ExternalCall(result, fn_addr, vec![value]));
         Ok(result)
@@ -3533,7 +3636,7 @@ impl Compiler {
         let value = self.ensure_register(value);
 
         let result = self.builder.new_register();
-        let fn_addr = crate::trampoline::trampoline_is_cons as usize;
+        let fn_addr = crate::trampoline::builtin_is_cons as usize;
         self.builder
             .emit(Instruction::ExternalCall(result, fn_addr, vec![value]));
         Ok(result)
@@ -3552,7 +3655,7 @@ impl Compiler {
         let value = self.ensure_register(value);
 
         let result = self.builder.new_register();
-        let fn_addr = crate::trampoline::trampoline_cons_first as usize;
+        let fn_addr = crate::trampoline::builtin_cons_first as usize;
         self.builder
             .emit(Instruction::ExternalCall(result, fn_addr, vec![value]));
         Ok(result)
@@ -3568,7 +3671,7 @@ impl Compiler {
         let value = self.ensure_register(value);
 
         let result = self.builder.new_register();
-        let fn_addr = crate::trampoline::trampoline_cons_rest as usize;
+        let fn_addr = crate::trampoline::builtin_cons_rest as usize;
         self.builder
             .emit(Instruction::ExternalCall(result, fn_addr, vec![value]));
         Ok(result)

@@ -1,0 +1,173 @@
+// ============================================================================
+// Composable Monads via Middleware - FINAL VERSION
+// ============================================================================
+//
+// Each monad is a handler with: pure, bind, and its operations.
+// Each layer spreads the next layer and adds/overrides what it needs.
+// Composition is just nesting: State(Writer(Error(Id)))
+//
+// NO separate Eff class. The composition IS the monad.
+//
+// ============================================================================
+
+{
+  // === Base: Identity monad ===
+  class Id {
+    pure: (x) => { value: x },
+    bind: (m, k) => k(m.value)
+  }
+
+  // === Error: Adds failure, short-circuits bind ===
+  class Error(next) {
+    ...next,
+    pure: (x) => { ...next.pure(x), isError: false, errMsg: "" },
+    bind: (m, k) => m.isError ? m : next.bind(m, k),
+    fail: (m, msg) => { ...m, isError: true, errMsg: msg }
+  }
+
+  // === Writer: Adds logging, accumulates in bind ===
+  class Writer(next) {
+    ...next,
+    pure: (x) => { ...next.pure(x), log: "" },
+    bind: (m, k) => { ...next.bind(m, k), log: m.log ++ next.bind(m, k).log },
+    tell: (m, msg) => { ...m, log: m.log ++ msg }
+  }
+
+  // === State: Adds state, threads through bind ===
+  class State(initial, next) {
+    ...next,
+    pure: (x) => { ...next.pure(x), state: initial },
+    bind: (m, k) => next.bind(m, k),
+    get: (m) => m.state,
+    put: (m, s) => { ...m, state: s },
+    modify: (m, f) => { ...m, state: f(m.state) }
+  }
+
+  // === THE MONAD: Just compose! ===
+  State(0, Writer(Error(Id)))
+}
+
+// ============================================================================
+// USING IT
+// ============================================================================
+
+{
+  class Id {
+    pure: (x) => { value: x },
+    bind: (m, k) => k(m.value)
+  }
+
+  class Error(next) {
+    ...next,
+    pure: (x) => { ...next.pure(x), isError: false },
+    bind: (m, k) => m.isError ? m : next.bind(m, k),
+    fail: (m, msg) => { ...m, isError: true }
+  }
+
+  class Writer(next) {
+    ...next,
+    pure: (x) => { ...next.pure(x), log: "" },
+    bind: (m, k) => { ...next.bind(m, k), log: m.log ++ next.bind(m, k).log },
+    tell: (m, msg) => { ...m, log: m.log ++ msg }
+  }
+
+  class State(initial, next) {
+    ...next,
+    pure: (x) => { ...next.pure(x), state: initial },
+    bind: (m, k) => next.bind(m, k),
+    modify: (m, f) => { ...m, state: f(m.state) }
+  }
+
+  // Create the monad by composing
+  class M {
+    eff: State(0, Writer(Error(Id)))
+  }
+
+  // Use it!
+  M.eff.bind(
+    M.eff.modify(
+      M.eff.tell(M.eff.pure(42), "start "),
+      (n) => n + 1
+    ),
+    (x) => M.eff.tell(M.eff.pure(x + 1), "end ")
+  )
+}
+
+// ============================================================================
+// WHAT EACH LAYER DOES
+// ============================================================================
+//
+// Id:
+//   pure(x) = { value: x }
+//   bind(m, k) = k(m.value)
+//
+// Error(next):
+//   pure(x) = { ...next.pure(x), isError: false }
+//   bind(m, k) = m.isError ? m : next.bind(m, k)   <- SHORT-CIRCUITS!
+//   fail(m, msg) = { ...m, isError: true }
+//
+// Writer(next):
+//   pure(x) = { ...next.pure(x), log: "" }
+//   bind(m, k) = { ...next.bind(m,k), log: m.log ++ result.log }  <- ACCUMULATES!
+//   tell(m, msg) = { ...m, log: m.log ++ msg }
+//
+// State(init, next):
+//   pure(x) = { ...next.pure(x), state: init }
+//   bind(m, k) = next.bind(m, k)   <- THREADS (state flows through k)
+//   modify(m, f) = { ...m, state: f(m.state) }
+//
+// ============================================================================
+// THE KEY INSIGHT
+// ============================================================================
+//
+// ...next spreads all of next's operations into this layer.
+// So State(0, Writer(Error(Id))) has:
+//   - pure, bind, modify (from State)
+//   - tell (from Writer, via spread)
+//   - fail (from Error, via spread)
+//
+// Each layer's bind wraps the next layer's bind.
+// This is EXACTLY monad transformers, but simpler!
+
+// ============================================================================
+// DIFFERENT ORDERINGS
+// ============================================================================
+
+{
+  class Id { pure: (x) => { value: x }, bind: (m, k) => k(m.value) }
+
+  class Error(next) {
+    ...next,
+    pure: (x) => { ...next.pure(x), isError: false },
+    bind: (m, k) => m.isError ? m : next.bind(m, k)
+  }
+
+  class Writer(next) {
+    ...next,
+    pure: (x) => { ...next.pure(x), log: "" },
+    bind: (m, k) => { ...next.bind(m, k), log: m.log ++ next.bind(m, k).log }
+  }
+
+  // Order 1: Writer outside Error
+  // On error: log is PRESERVED (Writer sees the error result)
+  class Stack1 { eff: Writer(Error(Id)) }
+
+  // Order 2: Error outside Writer
+  // On error: log handling depends on where error occurs
+  class Stack2 { eff: Error(Writer(Id)) }
+
+  Stack1.eff
+}
+
+// ============================================================================
+// SUMMARY
+// ============================================================================
+//
+// 1. Each monad layer: { ...next, pure, bind, operations }
+// 2. Compose by nesting: State(Writer(Error(Id)))
+// 3. The composition IS the monad - no wrapper needed
+// 4. Each layer is completely independent
+// 5. Spread (...next) brings up all inner operations
+//
+// This is the cleanest possible monad composition in OOP!
+

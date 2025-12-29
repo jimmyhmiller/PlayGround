@@ -43,6 +43,12 @@ pub enum Token {
     Minus,      // -
     Star,       // *
     Slash,      // /
+    Percent,    // %
+    Lt,         // <
+    LtEq,       // <=
+    Gt,         // >
+    GtEq,       // >=
+    Bang,       // !
 
     // String literals
     String(String),
@@ -80,6 +86,12 @@ impl fmt::Display for Token {
             Token::Minus => write!(f, "-"),
             Token::Star => write!(f, "*"),
             Token::Slash => write!(f, "/"),
+            Token::Percent => write!(f, "%"),
+            Token::Lt => write!(f, "<"),
+            Token::LtEq => write!(f, "<="),
+            Token::Gt => write!(f, ">"),
+            Token::GtEq => write!(f, ">="),
+            Token::Bang => write!(f, "!"),
             Token::String(s) => write!(f, "\"{}\"", s),
             Token::Eof => write!(f, "EOF"),
         }
@@ -284,6 +296,24 @@ impl<'a> Lexer<'a> {
                 }
             }
             '*' => Ok(Token::Star),
+            '%' => Ok(Token::Percent),
+            '!' => Ok(Token::Bang),
+            '<' => {
+                if self.peek() == Some('=') {
+                    self.advance();
+                    Ok(Token::LtEq)
+                } else {
+                    Ok(Token::Lt)
+                }
+            }
+            '>' => {
+                if self.peek() == Some('=') {
+                    self.advance();
+                    Ok(Token::GtEq)
+                } else {
+                    Ok(Token::Gt)
+                }
+            }
             '/' => {
                 if self.peek() == Some('/') {
                     // Comment - skip to end of line

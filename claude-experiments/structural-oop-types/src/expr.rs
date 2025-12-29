@@ -50,8 +50,15 @@ impl ClassDef {
 
     /// Convert a class definition to a lambda that returns an object.
     /// class F(a, b) { x: e1, y: e2 } -> F = a => b => { x: e1, y: e2 }
+    /// class F() { x: e1 } -> F = _unit => { x: e1 }
     pub fn to_lambda(&self) -> Expr {
         let obj = Expr::Object(self.fields.clone());
+
+        // Handle zero-param class: wrap in a _unit lambda (thunk)
+        if self.params.is_empty() {
+            return Expr::Lambda("_unit".to_string(), Box::new(obj));
+        }
+
         // Wrap in lambdas for each parameter (curried)
         self.params.iter().rev().fold(obj, |body, param| {
             Expr::Lambda(param.clone(), Box::new(body))
@@ -120,8 +127,22 @@ pub enum Expr {
     Mul(Box<Expr>, Box<Expr>),
     /// Integer division: e1 / e2
     Div(Box<Expr>, Box<Expr>),
+    /// Integer modulo: e1 % e2
+    Mod(Box<Expr>, Box<Expr>),
     /// String concatenation: e1 ++ e2
     Concat(Box<Expr>, Box<Expr>),
+    /// Less than: e1 < e2
+    Lt(Box<Expr>, Box<Expr>),
+    /// Less than or equal: e1 <= e2
+    LtEq(Box<Expr>, Box<Expr>),
+    /// Greater than: e1 > e2
+    Gt(Box<Expr>, Box<Expr>),
+    /// Greater than or equal: e1 >= e2
+    GtEq(Box<Expr>, Box<Expr>),
+
+    // === Unary Operators ===
+    /// Boolean NOT: !e
+    Not(Box<Expr>),
 }
 
 impl Expr {
@@ -221,6 +242,30 @@ impl Expr {
 
     pub fn concat(left: Expr, right: Expr) -> Self {
         Expr::Concat(Box::new(left), Box::new(right))
+    }
+
+    pub fn mod_(left: Expr, right: Expr) -> Self {
+        Expr::Mod(Box::new(left), Box::new(right))
+    }
+
+    pub fn lt(left: Expr, right: Expr) -> Self {
+        Expr::Lt(Box::new(left), Box::new(right))
+    }
+
+    pub fn lt_eq(left: Expr, right: Expr) -> Self {
+        Expr::LtEq(Box::new(left), Box::new(right))
+    }
+
+    pub fn gt(left: Expr, right: Expr) -> Self {
+        Expr::Gt(Box::new(left), Box::new(right))
+    }
+
+    pub fn gt_eq(left: Expr, right: Expr) -> Self {
+        Expr::GtEq(Box::new(left), Box::new(right))
+    }
+
+    pub fn not(expr: Expr) -> Self {
+        Expr::Not(Box::new(expr))
     }
 
     // === Multi-argument helpers ===

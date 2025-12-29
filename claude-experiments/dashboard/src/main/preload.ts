@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer, IpcRendererEvent } from 'electron';
 import type { DashboardEvent, EventFilter } from '../types/events';
 import type { CommandResult } from '../types/state';
+import type { PipelineConfig, PipelineStats, ProcessorDescriptor } from '../types/pipeline';
 
 // Pattern matching for client-side filtering
 function matchesPattern(type: string, pattern: string): boolean {
@@ -185,4 +186,41 @@ contextBridge.exposeInMainWorld('stateAPI', {
       ipcRenderer.removeListener('events:push', handler);
     };
   },
+});
+
+// Pipeline API for renderer - Unix-pipes style data processing
+contextBridge.exposeInMainWorld('pipelineAPI', {
+  // Start a pipeline
+  start: (config: PipelineConfig): Promise<{ success: boolean; error?: string }> =>
+    ipcRenderer.invoke('pipeline:start', config),
+
+  // Stop a pipeline
+  stop: (id: string): Promise<{ success: boolean; error?: string }> =>
+    ipcRenderer.invoke('pipeline:stop', id),
+
+  // Get pipeline stats
+  stats: (id: string): Promise<PipelineStats | undefined> =>
+    ipcRenderer.invoke('pipeline:stats', id),
+
+  // Check if pipeline is running
+  isRunning: (id: string): Promise<{ running: boolean }> =>
+    ipcRenderer.invoke('pipeline:isRunning', id),
+
+  // List running pipeline IDs
+  list: (): Promise<string[]> => ipcRenderer.invoke('pipeline:list'),
+
+  // List running pipelines with details
+  listDetailed: (): Promise<
+    Array<{ id: string; config: PipelineConfig; stats: PipelineStats }>
+  > => ipcRenderer.invoke('pipeline:listDetailed'),
+
+  // Stop all pipelines
+  stopAll: (): Promise<{ success: boolean }> => ipcRenderer.invoke('pipeline:stopAll'),
+
+  // List available processor names
+  processors: (): Promise<string[]> => ipcRenderer.invoke('pipeline:processors'),
+
+  // Describe all processors (for LLM discovery)
+  describeProcessors: (): Promise<ProcessorDescriptor[]> =>
+    ipcRenderer.invoke('pipeline:describeProcessors'),
 });

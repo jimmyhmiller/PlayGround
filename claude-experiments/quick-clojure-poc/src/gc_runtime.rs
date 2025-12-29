@@ -1554,6 +1554,15 @@ impl GCRuntime {
         None
     }
 
+    /// Get the variadic_min field from a multi-arity function
+    /// This is the number of fixed parameters before the rest parameter
+    pub fn get_variadic_min(&self, fn_ptr: usize) -> usize {
+        let untagged = self.untag_closure(fn_ptr);
+        let heap_obj = HeapObject::from_untagged(untagged as *const u8);
+        // Untag the integer field
+        heap_obj.get_field(multi_arity_layout::FIELD_VARIADIC_MIN) >> 3
+    }
+
     // ========== Cons Cell Methods (for variadic args) ==========
 
     /// Get the head of a cons cell
@@ -2133,7 +2142,7 @@ impl GCRuntime {
     // ========== IndexedSeq Support (for variadic args) ==========
 
     /// Create an IndexedSeq wrapping an array of values
-    /// Used by trampoline_collect_rest_args for variadic function arguments
+    /// Used by builtin_collect_rest_args for variadic function arguments
     /// Returns nil if values is empty, otherwise an IndexedSeq
     pub fn allocate_indexed_seq(&mut self, values: &[usize]) -> Result<usize, String> {
         if values.is_empty() {
@@ -2301,7 +2310,7 @@ impl GCRuntime {
     }
 
     /// Store a value to a field in a deftype instance by field name
-    /// Used by trampoline_store_type_field for mutable field assignment
+    /// Used by builtin_store_type_field for mutable field assignment
     pub fn store_type_field_by_name(
         &mut self,
         obj_ptr: usize,
