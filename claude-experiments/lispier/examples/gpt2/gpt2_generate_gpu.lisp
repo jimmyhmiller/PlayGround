@@ -772,4 +772,431 @@
                 :function_type (-> [] [])
                 :sym_visibility "private"})
 
-))
+    ;; =========================================================================
+    ;; Main function with weight loading and generation loop
+    ;; =========================================================================
+    (defn main [] -> i64
+  ;; Load checkpoint
+  (def path (llvm.mlir.addressof {:global_name @checkpoint_path :result !llvm.ptr}))
+  (def mode (llvm.mlir.addressof {:global_name @read_mode :result !llvm.ptr}))
+  (def file (call !llvm.ptr fopen path mode))
+
+  ;; Read checkpoint header (256 ints) to get model config
+  (def header_buf (call !llvm.ptr malloc (: 1024 i64)))
+  (def _read_header (call i64 fread header_buf (: 4 i64) (: 256 i64) file))
+
+  ;; Extract model config from header
+  (def magic_ptr header_buf)
+  (def _magic (llvm.load {:result i32} magic_ptr))
+
+  (def maxT_ptr (llvm.getelementptr {:result !llvm.ptr :elem_type i32} header_buf (: 2 i64)))
+  (def maxT_i32 (llvm.load {:result i32} maxT_ptr))
+  (def maxT (arith.extsi {:result i64} maxT_i32))
+
+  (def V_ptr (llvm.getelementptr {:result !llvm.ptr :elem_type i32} header_buf (: 3 i64)))
+  (def V_i32 (llvm.load {:result i32} V_ptr))
+  (def V (arith.extsi {:result i64} V_i32))
+
+  (def L_ptr (llvm.getelementptr {:result !llvm.ptr :elem_type i32} header_buf (: 4 i64)))
+  (def L_i32 (llvm.load {:result i32} L_ptr))
+  (def L (arith.extsi {:result i64} L_i32))
+
+  (def NH_ptr (llvm.getelementptr {:result !llvm.ptr :elem_type i32} header_buf (: 5 i64)))
+  (def NH_i32 (llvm.load {:result i32} NH_ptr))
+
+  (def C_ptr (llvm.getelementptr {:result !llvm.ptr :elem_type i32} header_buf (: 6 i64)))
+  (def C_i32 (llvm.load {:result i32} C_ptr))
+  (def C (arith.extsi {:result i64} C_i32))
+
+  (def Vp_ptr (llvm.getelementptr {:result !llvm.ptr :elem_type i32} header_buf (: 7 i64)))
+  (def Vp_i32 (llvm.load {:result i32} Vp_ptr))
+  (def Vp (arith.extsi {:result i64} Vp_i32))
+
+  ;; Print config
+  (print "[GPT-2 Config]\n")
+  (print "  max_seq_len: %d\n" maxT_i32)
+  (print "  vocab_size: %d\n" V_i32)
+  (print "  num_layers: %d\n" L_i32)
+  (print "  num_heads: %d\n" NH_i32)
+  (print "  channels: %d\n" C_i32)
+
+  ;; Compute derived dimensions
+  (def C3 (arith.muli C (: 3 i64)))
+  (def C4 (arith.muli C (: 4 i64)))
+
+  ;; Compute parameter sizes
+  (def size_wte (arith.muli Vp C))
+  (def size_wpe (arith.muli maxT C))
+  (def size_ln1w (arith.muli L C))
+  (def size_ln1b (arith.muli L C))
+  (def size_qkvw (arith.muli L (arith.muli C3 C)))
+  (def size_qkvb (arith.muli L C3))
+  (def size_attprojw (arith.muli L (arith.muli C C)))
+  (def size_attprojb (arith.muli L C))
+  (def size_ln2w (arith.muli L C))
+  (def size_ln2b (arith.muli L C))
+  (def size_fcw (arith.muli L (arith.muli C4 C)))
+  (def size_fcb (arith.muli L C4))
+  (def size_fcprojw (arith.muli L (arith.muli C C4)))
+  (def size_fcprojb (arith.muli L C))
+  (def size_lnfw C)
+  (def size_lnfb C)
+
+  ;; Compute total params
+  (def total_params
+    (arith.addi size_wte
+      (arith.addi size_wpe
+        (arith.addi size_ln1w
+          (arith.addi size_ln1b
+            (arith.addi size_qkvw
+              (arith.addi size_qkvb
+                (arith.addi size_attprojw
+                  (arith.addi size_attprojb
+                    (arith.addi size_ln2w
+                      (arith.addi size_ln2b
+                        (arith.addi size_fcw
+                          (arith.addi size_fcb
+                            (arith.addi size_fcprojw
+                              (arith.addi size_fcprojb
+                                (arith.addi size_lnfw size_lnfb))))))))))))))))
+
+  (print "  total_params: %ld\n" total_params)
+
+  ;; Compute base offsets
+  (def wte_base (: 0 i64))
+  (def wpe_base (arith.addi wte_base size_wte))
+  (def ln1w_base (arith.addi wpe_base size_wpe))
+  (def ln1b_base (arith.addi ln1w_base size_ln1w))
+  (def qkvw_base (arith.addi ln1b_base size_ln1b))
+  (def qkvb_base (arith.addi qkvw_base size_qkvw))
+  (def attprojw_base (arith.addi qkvb_base size_qkvb))
+  (def attprojb_base (arith.addi attprojw_base size_attprojw))
+  (def ln2w_base (arith.addi attprojb_base size_attprojb))
+  (def ln2b_base (arith.addi ln2w_base size_ln2w))
+  (def fcw_base (arith.addi ln2b_base size_ln2b))
+  (def fcb_base (arith.addi fcw_base size_fcw))
+  (def fcprojw_base (arith.addi fcb_base size_fcb))
+  (def fcprojb_base (arith.addi fcprojw_base size_fcprojw))
+  (def lnfw_base (arith.addi fcprojb_base size_fcprojb))
+  (def lnfb_base (arith.addi lnfw_base size_lnfw))
+
+  ;; Compute per-layer strides
+  (def ln_stride C)
+  (def qkvw_stride (arith.muli C3 C))
+  (def qkvb_stride C3)
+  (def attprojw_stride (arith.muli C C))
+  (def attprojb_stride C)
+  (def fcw_stride (arith.muli C4 C))
+  (def fcb_stride C4)
+  (def fcprojw_stride (arith.muli C C4))
+  (def fcprojb_stride C)
+
+  ;; Load parameters
+  (def sizeof_f32 (: 4 i64))
+  (def total_bytes (arith.muli total_params sizeof_f32))
+  (def params_ptr (call !llvm.ptr malloc total_bytes))
+  (print "Loading weights...\n")
+  (def read_count (call i64 fread params_ptr sizeof_f32 total_params file))
+  (print "Loaded %ld floats\n" read_count)
+  (def _close (call i32 fclose file))
+
+  ;; Store params globally
+  (def g_params_addr (llvm.mlir.addressof {:global_name @g_params :result !llvm.ptr}))
+  (llvm.store params_ptr g_params_addr)
+
+  ;; Verify wte[0][0]
+  (def wte_val (llvm.load {:result f32} params_ptr))
+  (def wte_val_f64 (arith.extf {:result f64} wte_val))
+  (print "wte[0][0] = %f\n" wte_val_f64)
+
+  ;; Load tokenizer
+  (def tok_path (llvm.mlir.addressof {:global_name @tokenizer_path :result !llvm.ptr}))
+  (def _tok_ok (func.call {:result i32} "tokenizer_init" tok_path))
+
+  ;; Get wte and wpe pointers
+  (def wte_ptr params_ptr)
+  (def wpe_ptr (llvm.getelementptr {:result !llvm.ptr :elem_type f32} params_ptr wpe_base))
+
+  ;; Create token_ids buffer with EOT token
+  (def token_ids (memref.alloc {:result memref<64xi32>}))
+  (def eot_global (llvm.mlir.addressof {:global_name @eot_token :result !llvm.ptr}))
+  (def eot_token (llvm.load {:result i32} eot_global))
+  (def c0 (: 0 index))
+  (def c1 (: 1 index))
+  (def c64 (: 64 index))
+
+  ;; Fill with EOT
+  (scf.for c0 c64 c1
+    (region
+      (block [(: i index)]
+        (memref.store eot_token token_ids i)
+        (scf.yield))))
+
+  (print "Prompt: <|endoftext|>\nGenerated:")
+
+  ;; Allocate activation buffers
+  (def x (memref.alloc {:result memref<64x768xf32>}))
+  (def x2 (memref.alloc {:result memref<64x768xf32>}))
+  (def ln_out (memref.alloc {:result memref<64x768xf32>}))
+  (def qkv_out (memref.alloc {:result memref<64x2304xf32>}))
+  (def attn_out (memref.alloc {:result memref<64x768xf32>}))
+  (def attn_proj_out (memref.alloc {:result memref<64x768xf32>}))
+  (def fc_out (memref.alloc {:result memref<64x3072xf32>}))
+  (def gelu_out (memref.alloc {:result memref<64x3072xf32>}))
+  (def fc_proj_out (memref.alloc {:result memref<64x768xf32>}))
+  (def logits (memref.alloc {:result memref<50257xf32>}))
+
+  ;; Layer weight buffers
+  (def ln1_w (memref.alloc {:result memref<768xf32>}))
+  (def ln1_b (memref.alloc {:result memref<768xf32>}))
+  (def qkv_w (memref.alloc {:result memref<768x2304xf32>}))
+  (def qkv_b (memref.alloc {:result memref<2304xf32>}))
+  (def attn_w (memref.alloc {:result memref<768x768xf32>}))
+  (def attn_b (memref.alloc {:result memref<768xf32>}))
+  (def ln2_w (memref.alloc {:result memref<768xf32>}))
+  (def ln2_b (memref.alloc {:result memref<768xf32>}))
+  (def fc_w (memref.alloc {:result memref<768x3072xf32>}))
+  (def fc_b (memref.alloc {:result memref<3072xf32>}))
+  (def fcproj_w (memref.alloc {:result memref<3072x768xf32>}))
+  (def fcproj_b (memref.alloc {:result memref<768xf32>}))
+  (def lnf_w (memref.alloc {:result memref<768xf32>}))
+  (def lnf_b (memref.alloc {:result memref<768xf32>}))
+
+  (def c768 (: 768 index))
+  (def c2304 (: 2304 index))
+  (def c3072 (: 3072 index))
+  (def c12 (: 12 index))
+
+  ;; Generation loop: Generate 20 tokens
+  (def prompt_len (: 1 index))
+  (def gen_steps (: 20 index))
+  (def gen_end (arith.addi prompt_len gen_steps))
+
+  (print "\nGenerating tokens:\n")
+
+  (scf.for prompt_len gen_end c1
+    (region
+      (block [(: step index)]
+        ;; 1. Embedding lookup
+        (func.call "embedding_lookup" x wte_ptr wpe_ptr token_ids)
+
+        ;; 2. Run 12 transformer layers
+        (scf.for c0 c12 c1
+          (region
+            (block [(: layer index)]
+              (def layer_i64 (arith.index_cast {:result i64} layer))
+
+              ;; Load ln1 weights
+              (def ln1w_offset (arith.addi ln1w_base (arith.muli layer_i64 ln_stride)))
+              (def ln1b_offset (arith.addi ln1b_base (arith.muli layer_i64 ln_stride)))
+              (scf.for c0 c768 c1
+                (region
+                  (block [(: i index)]
+                    (def i_i64 (arith.index_cast {:result i64} i))
+                    (def w_ptr (llvm.getelementptr {:result !llvm.ptr :elem_type f32} params_ptr (arith.addi ln1w_offset i_i64)))
+                    (def b_ptr (llvm.getelementptr {:result !llvm.ptr :elem_type f32} params_ptr (arith.addi ln1b_offset i_i64)))
+                    (memref.store (llvm.load {:result f32} w_ptr) ln1_w i)
+                    (memref.store (llvm.load {:result f32} b_ptr) ln1_b i)
+                    (scf.yield))))
+
+              ;; Load qkv weights (transpose: checkpoint[oc*C+c] -> qkv_w[c][oc])
+              (def qkvw_offset (arith.addi qkvw_base (arith.muli layer_i64 qkvw_stride)))
+              (def qkvb_offset (arith.addi qkvb_base (arith.muli layer_i64 qkvb_stride)))
+              (scf.for c0 c2304 c1
+                (region
+                  (block [(: oc index)]
+                    (def oc_i64 (arith.index_cast {:result i64} oc))
+                    (def row_offset (arith.muli oc_i64 C))
+                    (scf.for c0 c768 c1
+                      (region
+                        (block [(: c index)]
+                          (def c_i64 (arith.index_cast {:result i64} c))
+                          (def w_ptr (llvm.getelementptr {:result !llvm.ptr :elem_type f32} params_ptr (arith.addi qkvw_offset (arith.addi row_offset c_i64))))
+                          (memref.store (llvm.load {:result f32} w_ptr) qkv_w c oc)
+                          (scf.yield))))
+                    (scf.yield))))
+              (scf.for c0 c2304 c1
+                (region
+                  (block [(: i index)]
+                    (def i_i64 (arith.index_cast {:result i64} i))
+                    (def b_ptr (llvm.getelementptr {:result !llvm.ptr :elem_type f32} params_ptr (arith.addi qkvb_offset i_i64)))
+                    (memref.store (llvm.load {:result f32} b_ptr) qkv_b i)
+                    (scf.yield))))
+
+              ;; Load attention projection weights (transpose)
+              (def attprojw_offset (arith.addi attprojw_base (arith.muli layer_i64 attprojw_stride)))
+              (def attprojb_offset (arith.addi attprojb_base (arith.muli layer_i64 attprojb_stride)))
+              (scf.for c0 c768 c1
+                (region
+                  (block [(: oc index)]
+                    (def oc_i64 (arith.index_cast {:result i64} oc))
+                    (def row_offset (arith.muli oc_i64 C))
+                    (scf.for c0 c768 c1
+                      (region
+                        (block [(: c index)]
+                          (def c_i64 (arith.index_cast {:result i64} c))
+                          (def w_ptr (llvm.getelementptr {:result !llvm.ptr :elem_type f32} params_ptr (arith.addi attprojw_offset (arith.addi row_offset c_i64))))
+                          (memref.store (llvm.load {:result f32} w_ptr) attn_w c oc)
+                          (scf.yield))))
+                    (scf.yield))))
+              (scf.for c0 c768 c1
+                (region
+                  (block [(: i index)]
+                    (def i_i64 (arith.index_cast {:result i64} i))
+                    (def ab_ptr (llvm.getelementptr {:result !llvm.ptr :elem_type f32} params_ptr (arith.addi attprojb_offset i_i64)))
+                    (memref.store (llvm.load {:result f32} ab_ptr) attn_b i)
+                    (scf.yield))))
+
+              ;; Load ln2 weights
+              (def ln2w_offset (arith.addi ln2w_base (arith.muli layer_i64 ln_stride)))
+              (def ln2b_offset (arith.addi ln2b_base (arith.muli layer_i64 ln_stride)))
+              (scf.for c0 c768 c1
+                (region
+                  (block [(: i index)]
+                    (def i_i64 (arith.index_cast {:result i64} i))
+                    (def w_ptr (llvm.getelementptr {:result !llvm.ptr :elem_type f32} params_ptr (arith.addi ln2w_offset i_i64)))
+                    (def b_ptr (llvm.getelementptr {:result !llvm.ptr :elem_type f32} params_ptr (arith.addi ln2b_offset i_i64)))
+                    (memref.store (llvm.load {:result f32} w_ptr) ln2_w i)
+                    (memref.store (llvm.load {:result f32} b_ptr) ln2_b i)
+                    (scf.yield))))
+
+              ;; Load fc weights (transpose)
+              (def fcw_offset (arith.addi fcw_base (arith.muli layer_i64 fcw_stride)))
+              (def fcb_offset (arith.addi fcb_base (arith.muli layer_i64 fcb_stride)))
+              (scf.for c0 c3072 c1
+                (region
+                  (block [(: oc index)]
+                    (def oc_i64 (arith.index_cast {:result i64} oc))
+                    (def row_offset (arith.muli oc_i64 C))
+                    (scf.for c0 c768 c1
+                      (region
+                        (block [(: c index)]
+                          (def c_i64 (arith.index_cast {:result i64} c))
+                          (def w_ptr (llvm.getelementptr {:result !llvm.ptr :elem_type f32} params_ptr (arith.addi fcw_offset (arith.addi row_offset c_i64))))
+                          (memref.store (llvm.load {:result f32} w_ptr) fc_w c oc)
+                          (scf.yield))))
+                    (scf.yield))))
+              (scf.for c0 c3072 c1
+                (region
+                  (block [(: i index)]
+                    (def i_i64 (arith.index_cast {:result i64} i))
+                    (def b_ptr (llvm.getelementptr {:result !llvm.ptr :elem_type f32} params_ptr (arith.addi fcb_offset i_i64)))
+                    (memref.store (llvm.load {:result f32} b_ptr) fc_b i)
+                    (scf.yield))))
+
+              ;; Load fc projection weights (transpose: checkpoint[oc*(4*C)+ic] -> fcproj_w[ic][oc])
+              (def fcprojw_offset (arith.addi fcprojw_base (arith.muli layer_i64 fcprojw_stride)))
+              (def fcprojb_offset (arith.addi fcprojb_base (arith.muli layer_i64 fcprojb_stride)))
+              (scf.for c0 c768 c1
+                (region
+                  (block [(: oc index)]
+                    (def oc_i64 (arith.index_cast {:result i64} oc))
+                    (def row_offset (arith.muli oc_i64 C4))
+                    (scf.for c0 c3072 c1
+                      (region
+                        (block [(: ic index)]
+                          (def ic_i64 (arith.index_cast {:result i64} ic))
+                          (def w_ptr (llvm.getelementptr {:result !llvm.ptr :elem_type f32} params_ptr (arith.addi fcprojw_offset (arith.addi row_offset ic_i64))))
+                          (memref.store (llvm.load {:result f32} w_ptr) fcproj_w ic oc)
+                          (scf.yield))))
+                    (scf.yield))))
+              (scf.for c0 c768 c1
+                (region
+                  (block [(: i index)]
+                    (def i_i64 (arith.index_cast {:result i64} i))
+                    (def b_ptr (llvm.getelementptr {:result !llvm.ptr :elem_type f32} params_ptr (arith.addi fcprojb_offset i_i64)))
+                    (memref.store (llvm.load {:result f32} b_ptr) fcproj_b i)
+                    (scf.yield))))
+
+              ;; === Transformer block operations ===
+              ;; 1. LayerNorm1
+              (func.call "layernorm_forward" ln_out x ln1_w ln1_b)
+
+              ;; 2. QKV Projection (using linalg.matmul)
+              (func.call "matmul_qkv" qkv_out ln_out qkv_w qkv_b)
+
+              ;; 3. Attention
+              (func.call "attention_forward" attn_out qkv_out)
+
+              ;; 4. Attention Output Projection (using linalg.matmul)
+              (func.call "matmul_attn_proj" attn_proj_out attn_out attn_w attn_b)
+
+              ;; 5. Residual 1 (using linalg.add)
+              (func.call "residual_forward" x2 x attn_proj_out)
+
+              ;; 6. LayerNorm2
+              (func.call "layernorm_forward" ln_out x2 ln2_w ln2_b)
+
+              ;; 7. MLP FC (using linalg.matmul)
+              (func.call "matmul_fc" fc_out ln_out fc_w fc_b)
+
+              ;; 8. GELU (using math.tanh)
+              (func.call "gelu_forward" gelu_out fc_out)
+
+              ;; 9. MLP Projection (using linalg.matmul)
+              (func.call "matmul_fc_proj" fc_proj_out gelu_out fcproj_w fcproj_b)
+
+              ;; 10. Residual 2 (using linalg.add)
+              (func.call "residual_forward" x x2 fc_proj_out)
+
+              (scf.yield))))
+
+        ;; 3. Final LayerNorm
+        (scf.for c0 c768 c1
+          (region
+            (block [(: i index)]
+              (def i_i64 (arith.index_cast {:result i64} i))
+              (def w_ptr (llvm.getelementptr {:result !llvm.ptr :elem_type f32} params_ptr (arith.addi lnfw_base i_i64)))
+              (def b_ptr (llvm.getelementptr {:result !llvm.ptr :elem_type f32} params_ptr (arith.addi lnfb_base i_i64)))
+              (memref.store (llvm.load {:result f32} w_ptr) lnf_w i)
+              (memref.store (llvm.load {:result f32} b_ptr) lnf_b i)
+              (scf.yield))))
+
+        (func.call "layernorm_forward" x2 x lnf_w lnf_b)
+
+        ;; 4. Compute logits
+        (func.call "logits_forward" logits x2 wte_ptr)
+
+        ;; 5. Argmax to get next token
+        (def next_token (func.call {:result i32} "argmax" logits))
+
+        ;; 6. Print token
+        (func.call "print_token" next_token)
+
+        ;; 7. Store token at current step position
+        (memref.store next_token token_ids step)
+
+        (scf.yield))))
+
+  (print "\n\nGeneration complete!\n")
+
+  ;; Cleanup
+  (memref.dealloc token_ids)
+  (memref.dealloc x)
+  (memref.dealloc x2)
+  (memref.dealloc ln_out)
+  (memref.dealloc qkv_out)
+  (memref.dealloc attn_out)
+  (memref.dealloc attn_proj_out)
+  (memref.dealloc fc_out)
+  (memref.dealloc gelu_out)
+  (memref.dealloc fc_proj_out)
+  (memref.dealloc logits)
+  (memref.dealloc ln1_w)
+  (memref.dealloc ln1_b)
+  (memref.dealloc qkv_w)
+  (memref.dealloc qkv_b)
+  (memref.dealloc attn_w)
+  (memref.dealloc attn_b)
+  (memref.dealloc ln2_w)
+  (memref.dealloc ln2_b)
+  (memref.dealloc fc_w)
+  (memref.dealloc fc_b)
+  (memref.dealloc fcproj_w)
+  (memref.dealloc fcproj_b)
+  (memref.dealloc lnf_w)
+  (memref.dealloc lnf_b)
+
+  (call! free params_ptr)
+
+  (func.return (: 0 i64)))))

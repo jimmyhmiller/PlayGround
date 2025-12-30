@@ -116,3 +116,45 @@ import_electron.contextBridge.exposeInMainWorld("pipelineAPI", {
   // Describe all processors (for LLM discovery)
   describeProcessors: () => import_electron.ipcRenderer.invoke("pipeline:describeProcessors")
 });
+import_electron.contextBridge.exposeInMainWorld("acpAPI", {
+  // Spawn the claude-code-acp agent process
+  spawn: () => import_electron.ipcRenderer.invoke("acp:spawn"),
+  // Initialize the ACP connection
+  initialize: () => import_electron.ipcRenderer.invoke("acp:initialize"),
+  // Create a new session
+  newSession: (cwd, mcpServers) => import_electron.ipcRenderer.invoke("acp:newSession", cwd, mcpServers),
+  // Load an existing session
+  loadSession: (sessionId, cwd) => import_electron.ipcRenderer.invoke("acp:loadSession", sessionId, cwd),
+  // Send a prompt to the agent
+  prompt: (sessionId, content) => import_electron.ipcRenderer.invoke("acp:prompt", sessionId, content),
+  // Cancel an ongoing prompt
+  cancel: (sessionId) => import_electron.ipcRenderer.invoke("acp:cancel", sessionId),
+  // Set session mode (e.g., 'plan', 'act')
+  setMode: (sessionId, modeId) => import_electron.ipcRenderer.invoke("acp:setMode", sessionId, modeId),
+  // Shutdown the agent connection
+  shutdown: () => import_electron.ipcRenderer.invoke("acp:shutdown"),
+  // Check if connected
+  isConnected: () => import_electron.ipcRenderer.invoke("acp:isConnected"),
+  // Respond to a permission request
+  respondToPermission: (requestId, outcome) => import_electron.ipcRenderer.invoke("acp:respondPermission", requestId, outcome),
+  // Subscribe to session updates
+  subscribeUpdates: (callback) => {
+    const handler = (_ipcEvent, update) => {
+      callback(update);
+    };
+    import_electron.ipcRenderer.on("acp:sessionUpdate", handler);
+    return () => {
+      import_electron.ipcRenderer.removeListener("acp:sessionUpdate", handler);
+    };
+  },
+  // Subscribe to permission requests
+  subscribePermissions: (callback) => {
+    const handler = (_ipcEvent, request) => {
+      callback(request);
+    };
+    import_electron.ipcRenderer.on("acp:permissionRequest", handler);
+    return () => {
+      import_electron.ipcRenderer.removeListener("acp:permissionRequest", handler);
+    };
+  }
+});

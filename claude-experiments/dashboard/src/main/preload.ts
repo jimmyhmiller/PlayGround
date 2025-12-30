@@ -224,3 +224,65 @@ contextBridge.exposeInMainWorld('pipelineAPI', {
   describeProcessors: (): Promise<ProcessorDescriptor[]> =>
     ipcRenderer.invoke('pipeline:describeProcessors'),
 });
+
+// ACP (Agent Client Protocol) API for renderer - AI agent communication
+contextBridge.exposeInMainWorld('acpAPI', {
+  // Spawn the claude-code-acp agent process
+  spawn: (): Promise<void> => ipcRenderer.invoke('acp:spawn'),
+
+  // Initialize the ACP connection
+  initialize: (): Promise<void> => ipcRenderer.invoke('acp:initialize'),
+
+  // Create a new session
+  newSession: (cwd: string, mcpServers?: unknown[]): Promise<{ sessionId: string }> =>
+    ipcRenderer.invoke('acp:newSession', cwd, mcpServers),
+
+  // Load an existing session
+  loadSession: (sessionId: string, cwd: string): Promise<void> =>
+    ipcRenderer.invoke('acp:loadSession', sessionId, cwd),
+
+  // Send a prompt to the agent
+  prompt: (sessionId: string, content: string | unknown[]): Promise<{ stopReason: string }> =>
+    ipcRenderer.invoke('acp:prompt', sessionId, content),
+
+  // Cancel an ongoing prompt
+  cancel: (sessionId: string): Promise<void> => ipcRenderer.invoke('acp:cancel', sessionId),
+
+  // Set session mode (e.g., 'plan', 'act')
+  setMode: (sessionId: string, modeId: string): Promise<void> =>
+    ipcRenderer.invoke('acp:setMode', sessionId, modeId),
+
+  // Shutdown the agent connection
+  shutdown: (): Promise<void> => ipcRenderer.invoke('acp:shutdown'),
+
+  // Check if connected
+  isConnected: (): Promise<boolean> => ipcRenderer.invoke('acp:isConnected'),
+
+  // Respond to a permission request
+  respondToPermission: (requestId: string, outcome: 'allow' | 'deny'): Promise<void> =>
+    ipcRenderer.invoke('acp:respondPermission', requestId, outcome),
+
+  // Subscribe to session updates
+  subscribeUpdates: (callback: (update: unknown) => void): (() => void) => {
+    const handler = (_ipcEvent: IpcRendererEvent, update: unknown): void => {
+      callback(update);
+    };
+    ipcRenderer.on('acp:sessionUpdate', handler);
+
+    return (): void => {
+      ipcRenderer.removeListener('acp:sessionUpdate', handler);
+    };
+  },
+
+  // Subscribe to permission requests
+  subscribePermissions: (callback: (request: unknown) => void): (() => void) => {
+    const handler = (_ipcEvent: IpcRendererEvent, request: unknown): void => {
+      callback(request);
+    };
+    ipcRenderer.on('acp:permissionRequest', handler);
+
+    return (): void => {
+      ipcRenderer.removeListener('acp:permissionRequest', handler);
+    };
+  },
+});

@@ -29,6 +29,9 @@ import {
   InlinePipeline,
 } from './PipelineWidgets';
 
+// Chat widget
+import { ChatWidget } from './ChatWidget';
+
 // ========== Selector Functions ==========
 
 /**
@@ -2156,5 +2159,10 @@ export const WIDGET_TYPES: Record<string, WidgetTypeConfig> = {
   'inline-pipeline': {
     component: InlinePipeline as unknown as React.ComponentType<Record<string, unknown>>,
     defaultProps: { autoStart: true },
+  },
+  // Chat widget (ACP integration)
+  'chat': {
+    component: ChatWidget as unknown as React.ComponentType<Record<string, unknown>>,
+    defaultProps: { title: 'Claude Chat' },
   },
 };

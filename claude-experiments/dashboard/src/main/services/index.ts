@@ -4,12 +4,14 @@
  * Initializes and exports all backend services.
  */
 
-import { ipcMain, IpcMainInvokeEvent } from 'electron';
+import { ipcMain, IpcMainInvokeEvent, BrowserWindow } from 'electron';
 import { spawn, ChildProcess } from 'child_process';
 import { FileWatcherService } from './fileWatcher';
 import { GitService } from './gitService';
 import { initEvaluationService, getEvaluationService, EvaluationRequest, ExecutorConfig } from './evaluationService';
 import { initPipelineService, setupPipelineIPC, closePipelineService } from '../pipeline';
+import { initACPService, getACPService } from './acpClientService';
+import type { ContentBlock, RequestPermissionRequest, RequestPermissionResponse } from '../../types/acp';
 
 // Track running processes
 const runningProcesses: Map<string, ChildProcess> = new Map();
@@ -48,6 +50,9 @@ export function initServices(events: EventEmitter, options: ServiceOptions = {})
 
   // Initialize pipeline service
   initPipelineService(events as EventEmitter & { subscribe: (pattern: string, callback: (event: { type: string; payload: unknown }) => void) => () => void });
+
+  // Initialize ACP service
+  initACPService(events);
 
   console.log('[services] Initialized');
 
@@ -236,13 +241,117 @@ export function setupServiceIPC(): void {
   // Setup pipeline IPC handlers
   setupPipelineIPC();
 
+  // Setup ACP IPC handlers
+  setupACPIPC();
+
   console.log('[services] IPC handlers registered');
+}
+
+// Pending permission requests for ACP
+const pendingPermissions: Map<string, {
+  resolve: (response: RequestPermissionResponse) => void;
+  reject: (error: Error) => void;
+}> = new Map();
+
+/**
+ * Setup ACP IPC handlers
+ */
+function setupACPIPC(): void {
+  const acpService = getACPService();
+  if (!acpService) {
+    console.warn('[acp] Service not initialized, skipping IPC setup');
+    return;
+  }
+
+  // Set up permission callback to forward to renderer
+  acpService.setPermissionCallback(async (request: RequestPermissionRequest): Promise<RequestPermissionResponse> => {
+    const requestId = `perm-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+
+    // Forward to all renderer windows
+    const windows = BrowserWindow.getAllWindows();
+    for (const win of windows) {
+      win.webContents.send('acp:permissionRequest', { ...request, requestId });
+    }
+
+    // Wait for response from renderer
+    return new Promise((resolve, reject) => {
+      pendingPermissions.set(requestId, { resolve, reject });
+
+      // Timeout after 5 minutes
+      setTimeout(() => {
+        if (pendingPermissions.has(requestId)) {
+          pendingPermissions.delete(requestId);
+          resolve({ outcome: 'deny' });
+        }
+      }, 5 * 60 * 1000);
+    });
+  });
+
+  // Subscribe to session updates and forward to renderer
+  // This is done via the event system - the service emits 'acp.session.update' events
+  // which get pushed to the renderer via the existing events:push channel
+
+  // Spawn the agent
+  ipcMain.handle('acp:spawn', async () => {
+    await acpService.spawn();
+  });
+
+  // Initialize connection
+  ipcMain.handle('acp:initialize', async () => {
+    await acpService.initialize();
+  });
+
+  // Create new session
+  ipcMain.handle('acp:newSession', async (_event: IpcMainInvokeEvent, cwd: string, mcpServers?: unknown[]) => {
+    return await acpService.newSession(cwd, mcpServers);
+  });
+
+  // Load existing session
+  ipcMain.handle('acp:loadSession', async (_event: IpcMainInvokeEvent, sessionId: string, cwd: string) => {
+    await acpService.loadSession(sessionId, cwd);
+  });
+
+  // Send prompt
+  ipcMain.handle('acp:prompt', async (_event: IpcMainInvokeEvent, sessionId: string, content: string | ContentBlock[]) => {
+    return await acpService.prompt(sessionId, content);
+  });
+
+  // Cancel prompt
+  ipcMain.handle('acp:cancel', async (_event: IpcMainInvokeEvent, sessionId: string) => {
+    await acpService.cancel(sessionId);
+  });
+
+  // Set mode
+  ipcMain.handle('acp:setMode', async (_event: IpcMainInvokeEvent, sessionId: string, modeId: string) => {
+    await acpService.setMode(sessionId, modeId);
+  });
+
+  // Shutdown
+  ipcMain.handle('acp:shutdown', async () => {
+    await acpService.shutdown();
+  });
+
+  // Check connection
+  ipcMain.handle('acp:isConnected', () => {
+    return acpService.isConnected();
+  });
+
+  // Respond to permission request
+  ipcMain.handle('acp:respondPermission', (_event: IpcMainInvokeEvent, requestId: string, outcome: 'allow' | 'deny') => {
+    const pending = pendingPermissions.get(requestId);
+    if (pending) {
+      pendingPermissions.delete(requestId);
+      pending.resolve({ outcome });
+    }
+  });
+
+  console.log('[acp] IPC handlers registered');
 }
 
 /**
  * Cleanup services
  */
-export function closeServices(): void {
+export async function closeServices(): Promise<void> {
   if (fileWatcher) {
     fileWatcher.close();
   }
@@ -250,6 +359,13 @@ export function closeServices(): void {
     gitService.stopPolling();
   }
   closePipelineService();
+
+  // Shutdown ACP service
+  const acpService = getACPService();
+  if (acpService) {
+    await acpService.shutdown();
+  }
+
   console.log('[services] Closed');
 }
 

@@ -7,6 +7,12 @@
 import type { DashboardEvent, EventFilter } from './events';
 import type { CommandResult } from './state';
 import type { PipelineConfig, PipelineStats, ProcessorDescriptor } from './pipeline';
+import type {
+  SessionNotification,
+  ContentBlock,
+  RequestPermissionRequest,
+  RequestPermissionResponse,
+} from './acp';
 
 /**
  * IPC Channel names
@@ -46,6 +52,19 @@ export const IPC_CHANNELS = {
   // Eval channels
   EVAL_EXECUTE: 'eval:execute',
   EVAL_BATCH: 'eval:batch',
+
+  // ACP channels
+  ACP_SPAWN: 'acp:spawn',
+  ACP_INITIALIZE: 'acp:initialize',
+  ACP_NEW_SESSION: 'acp:newSession',
+  ACP_LOAD_SESSION: 'acp:loadSession',
+  ACP_PROMPT: 'acp:prompt',
+  ACP_CANCEL: 'acp:cancel',
+  ACP_SET_MODE: 'acp:setMode',
+  ACP_SHUTDOWN: 'acp:shutdown',
+  ACP_IS_CONNECTED: 'acp:isConnected',
+  ACP_RESPOND_PERMISSION: 'acp:respondPermission',
+  ACP_SESSION_UPDATE: 'acp:sessionUpdate',
 } as const;
 
 export type IpcChannel = typeof IPC_CHANNELS[keyof typeof IPC_CHANNELS];
@@ -210,6 +229,47 @@ export interface PipelineAPI {
 }
 
 /**
+ * ACP (Agent Client Protocol) API exposed via preload
+ */
+export interface ACPAPI {
+  /** Spawn the claude-code-acp agent process */
+  spawn(): Promise<void>;
+
+  /** Initialize the ACP connection */
+  initialize(): Promise<void>;
+
+  /** Create a new session */
+  newSession(cwd: string, mcpServers?: unknown[]): Promise<{ sessionId: string }>;
+
+  /** Load an existing session */
+  loadSession(sessionId: string, cwd: string): Promise<void>;
+
+  /** Send a prompt to the agent */
+  prompt(sessionId: string, content: string | ContentBlock[]): Promise<{ stopReason: string }>;
+
+  /** Cancel an ongoing prompt */
+  cancel(sessionId: string): Promise<void>;
+
+  /** Set session mode (e.g., 'plan', 'act') */
+  setMode(sessionId: string, modeId: string): Promise<void>;
+
+  /** Shutdown the agent connection */
+  shutdown(): Promise<void>;
+
+  /** Check if connected */
+  isConnected(): Promise<boolean>;
+
+  /** Respond to a permission request */
+  respondToPermission(requestId: string, outcome: 'allow' | 'deny'): Promise<void>;
+
+  /** Subscribe to session updates */
+  subscribeUpdates(callback: (update: SessionNotification) => void): () => void;
+
+  /** Subscribe to permission requests */
+  subscribePermissions(callback: (request: RequestPermissionRequest) => void): () => void;
+}
+
+/**
  * Complete Window API (extends global Window)
  */
 declare global {
@@ -222,6 +282,7 @@ declare global {
     evalAPI: EvalAPI;
     shellAPI: ShellAPI;
     pipelineAPI: PipelineAPI;
+    acpAPI: ACPAPI;
   }
 }
 
