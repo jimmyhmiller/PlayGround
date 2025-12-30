@@ -3155,10 +3155,18 @@ impl GCRuntime {
                 // Check for known types with hardcoded fast paths
                 let deftype_idx = type_id - DEFTYPE_ID_OFFSET;
                 let type_name = self.get_type_def(deftype_idx).map(|td| td.name.as_str());
+                // Handle namespace-qualified names
+                let is_pv = type_name.map(|n| n == "PersistentVector" || n.ends_with("/PersistentVector")).unwrap_or(false);
+                if is_pv {
+                    // PersistentVector has fields: [meta, cnt, shift, root, tail, __hash]
+                    // cnt is at field index 1
+                    let cnt_tagged = self.read_type_field(value, 1);
+                    return Ok(cnt_tagged >> 3);
+                }
 
                 match type_name {
-                    Some("EmptyList") => Ok(0),
-                    Some("PList") => {
+                    Some("EmptyList") | Some("clojure.core/EmptyList") => Ok(0),
+                    Some("PList") | Some("clojure.core/PList") => {
                         // PList has fields: [meta, first, rest, count, __hash]
                         // count is at field index 3
                         let count_tagged = self.read_type_field(value, 3);
@@ -3269,6 +3277,29 @@ impl GCRuntime {
             TYPE_READER_LIST => self.reader_list_nth(value, index),
             TYPE_READER_VECTOR => self.reader_vector_nth(value, index),
             _ if type_id >= DEFTYPE_ID_OFFSET => {
+                // Check for PersistentVector - direct field access for simple vectors
+                let deftype_idx = type_id - DEFTYPE_ID_OFFSET;
+                let type_name = self.get_type_def(deftype_idx).map(|td| td.name.as_str());
+                let is_pv = type_name.map(|n| n == "PersistentVector" || n.ends_with("/PersistentVector")).unwrap_or(false);
+
+                if is_pv {
+                    // PersistentVector has fields: [meta, cnt, shift, root, tail, __hash]
+                    // For small vectors (count < 32), all elements are in the tail array
+                    let cnt = self.read_type_field(value, 1) >> 3;
+                    if index >= cnt {
+                        return Err(format!("Index {} out of bounds for vector of length {}", index, cnt));
+                    }
+                    // For small vectors (count <= 32), elements are in tail (field 4)
+                    // tail is an array
+                    if cnt <= 32 {
+                        let tail = self.read_type_field(value, 4);
+                        // Use array_get which properly handles array layout
+                        // Arrays have length at field 0, elements start at field 1
+                        return self.array_get(tail, index);
+                    }
+                    // Fall back to protocol dispatch for larger vectors
+                }
+
                 // Protocol dispatch to -nth
                 // -nth takes (coll, n) where n is a tagged integer
                 let tagged_index = index << 3;
@@ -3376,7 +3407,16 @@ impl GCRuntime {
         let type_id = self.get_type_id_for_value(value);
         match type_id {
             TYPE_READER_VECTOR | TYPE_VECTOR => true,
-            // For user-defined types, we'd need a marker protocol
+            // Check for PersistentVector deftype
+            _ if type_id >= DEFTYPE_ID_OFFSET => {
+                if let Some(type_def) = self.get_type_def(type_id - DEFTYPE_ID_OFFSET) {
+                    // Handle both "PersistentVector" and "clojure.core/PersistentVector"
+                    type_def.name == "PersistentVector"
+                        || type_def.name.ends_with("/PersistentVector")
+                } else {
+                    false
+                }
+            }
             _ => false,
         }
     }

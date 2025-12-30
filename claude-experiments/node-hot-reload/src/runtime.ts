@@ -11,12 +11,15 @@ interface HotRuntime {
   modules: Map<string, Record<string, unknown>>;
   storage: Map<string, Record<string, unknown>>;  // backing storage for functions
   loaders: Map<string, () => void>;
+  esmCache: Map<string, unknown>;  // Cache for pre-loaded ESM modules
   ws: WebSocket | null;
   sourceRoot: string;
 
   module(id: string): Record<string, unknown>;
   get(id: string): Record<string, unknown>;
   require(id: string): void;
+  requireExternal(specifier: string): unknown;  // For external (node_modules) packages
+  registerEsm(specifier: string, module: unknown): void;  // Pre-register ESM modules
   register(id: string, loader: () => void): void;
   defn(module: Record<string, unknown>, name: string, fn: Function): void;
   setSourceRoot(root: string): void;
@@ -30,6 +33,7 @@ export function createRuntime(): HotRuntime {
     modules: new Map(),
     storage: new Map(),
     loaders: new Map(),
+    esmCache: new Map(),
     ws: null,
     sourceRoot: process.cwd(),
 
@@ -128,6 +132,37 @@ export function createRuntime(): HotRuntime {
       }
     },
 
+    requireExternal(specifier: string): unknown {
+      // Check if we have a pre-loaded ESM module
+      if (this.esmCache.has(specifier)) {
+        return this.esmCache.get(specifier);
+      }
+
+      try {
+        return require(specifier);
+      } catch (e) {
+        const err = e as NodeJS.ErrnoException;
+        if (err.code === 'ERR_REQUIRE_ESM') {
+          throw new Error(
+            `[hot-reload] Cannot require ES Module '${specifier}'. ` +
+            `This package only supports ESM and cannot be loaded via require().\n\n` +
+            `Solutions:\n` +
+            `  1. Pre-load the ESM module in your bootstrap file:\n` +
+            `     const esm = await import('${specifier}');\n` +
+            `     __hot.registerEsm('${specifier}', esm);\n\n` +
+            `  2. If using Node.js 22+, try running with:\n` +
+            `     node --experimental-require-module ...\n\n` +
+            `  3. Use a bundler (esbuild, webpack) to convert ESM dependencies to CJS`
+          );
+        }
+        throw e;
+      }
+    },
+
+    registerEsm(specifier: string, module: unknown): void {
+      this.esmCache.set(specifier, module);
+    },
+
     register(id: string, loader: () => void): void {
       this.loaders.set(id, loader);
     },
@@ -224,12 +259,14 @@ export function createRuntime(): HotRuntime {
       try {
         // The code already references __hot global, so just eval it
         // It will update the module's properties in place
-        // Pass require, __dirname, __filename so the code has access to Node globals
+        // Pass require, __dirname, __filename, module, exports so the code has access to Node globals
         const path = require('path');
         const modulePath = path.resolve(this.sourceRoot, id);
         const moduleDir = path.dirname(modulePath);
-        const fn = new Function("__hot", "require", "__dirname", "__filename", code);
-        fn(this, require, moduleDir, modulePath);
+        // Create a fake module object for CommonJS compatibility
+        const fakeModule = { exports: {} };
+        const fn = new Function("__hot", "require", "__dirname", "__filename", "module", "exports", code);
+        fn(this, require, moduleDir, modulePath, fakeModule, fakeModule.exports);
         console.log(`[hot] Successfully reloaded ${id}`);
       } catch (e) {
         console.error(`[hot] Failed to reload ${id}:`, e);

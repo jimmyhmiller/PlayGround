@@ -505,6 +505,10 @@
       not-found)))
 
 (extend-type __ReaderVector
+  IVector
+  (-assoc-n [this n val]
+    (throw "ReaderVector does not support -assoc-n"))
+
   ISeq
   (-first [this] (__reader_vector_first this))
   (-rest [this] (__reader_vector_rest this))
@@ -1079,6 +1083,24 @@
           acc
           (recur (dec i) (cons (nth items i) acc)))))))
 
+(defn spread
+  "Used by list* and apply to spread the final argument."
+  [arglist]
+  (cond
+    (nil? arglist) nil
+    (nil? (next arglist)) (seq (first arglist))
+    :else (cons (first arglist) (spread (next arglist)))))
+
+(defn list*
+  "Creates a new seq containing the items prepended to the rest, the
+  last of which will be treated as a sequence."
+  ([args] (seq args))
+  ([a args] (cons a args))
+  ([a b args] (cons a (cons b args)))
+  ([a b c args] (cons a (cons b (cons c args))))
+  ([a b c d & more]
+   (cons a (cons b (cons c (cons d (spread more)))))))
+
 ;; =============================================================================
 ;; VERBATIM FROM CLOJURESCRIPT - PersistentVector
 ;; Source: https://github.com/clojure/clojurescript/blob/master/src/main/cljs/cljs/core.cljs
@@ -1577,9 +1599,9 @@
 
 ;; Now that PersistentVector is defined, we can implement vector? properly
 (defn vector?
-  "Return true if x is a PersistentVector"
+  "Return true if x satisfies IVector"
   [x]
-  (instance? PersistentVector x))
+  (satisfies? IVector x))
 
 ;; Now that all sequential types are defined, implement sequential?
 (defn sequential?
@@ -1595,6 +1617,9 @@
   "Creates a new vector containing the contents of coll."
   [coll]
   (cond
+    (nil? coll)
+    EMPTY-VECTOR
+
     (vector? coll)
     (with-meta coll nil)
 
@@ -1678,17 +1703,32 @@
 
 ;; keyword? is now a builtin - no stub needed
 
-;; DEVIATION: symbol? stub
+;; symbol? - uses __is_symbol builtin
 (defn symbol?
   "Return true if x is a Symbol"
   [x]
-  false)
+  (__is_symbol x))
 
-;; DEVIATION: string? - check if number type is a string (we might not have strings)
+;; symbol - creates a Symbol from string(s)
+(defn symbol
+  "Returns a Symbol with the given namespace and name. Arity-1 version
+   parses ns/name from the string if it contains a /."
+  ([name] (__symbol_1 name))
+  ([ns name] (__symbol_2 ns name)))
+
+;; gensym - generates unique symbols for macro hygiene
+(defn gensym
+  "Returns a new symbol with a unique name. If a prefix string is
+   supplied, the name is prefix# where # is some unique number. If
+   prefix is not supplied, the prefix is 'G__'."
+  ([] (__gensym_0))
+  ([prefix-string] (__gensym_1 prefix-string)))
+
+;; string? - uses __is_string builtin
 (defn string?
   "Returns true if x is a string"
   [x]
-  false)
+  (__is_string x))
 
 ;; DEVIATION: keyword-identical? stub
 (defn keyword-identical?
@@ -2693,6 +2733,23 @@
 ;; =============================================================================
 ;; Core Macros
 ;; =============================================================================
+
+;; defmacro - the macro-defining macro, implemented in Clojure!
+;; This is similar to Clojure's bootstrap: we define defmacro as a macro
+;; using the primitive (def ^:macro name (fn ...)) form, then use __set_macro!
+;;
+;; Simplified version: (defmacro name [params] body...)
+;; Assumes no docstring, no attr-map, single arity
+(def ^:macro defmacro
+  (fn [&form &env name params & body]
+    (let [form-sym (symbol "&form")
+          env-sym (symbol "&env")
+          new-params (vec (list* form-sym env-sym params))
+          fn-form (list* 'fn new-params body)]
+      (list 'do
+            (list 'def name fn-form)
+            (list '__set_macro! (list 'var name))
+            (list 'var name)))))
 
 ;; when - evaluates body when test is true
 (def ^:macro when

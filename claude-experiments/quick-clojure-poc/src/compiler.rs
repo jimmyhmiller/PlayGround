@@ -14,6 +14,9 @@ use std::sync::Arc;
 struct LoopContext {
     label: Label,
     binding_registers: Vec<IrValue>,
+    /// Local slots for fn parameters - recur must store to these too
+    /// None for loop bindings (register-only), Some(slot) for fn params
+    local_slots: Vec<Option<usize>>,
 }
 
 /// Variable binding - can be a register or a local slot on the stack
@@ -418,6 +421,18 @@ impl Compiler {
                     &kv_exprs,
                 );
             }
+            Value::List(elements) => {
+                // Compile list literal as call to (list elem1 elem2 ...)
+                let elem_exprs: Vec<Expr> =
+                    elements.iter().map(|v| Expr::Literal(v.clone())).collect();
+                return self.compile_call(
+                    &Expr::Var {
+                        namespace: Some("clojure.core".to_string()),
+                        name: "list".to_string(),
+                    },
+                    &elem_exprs,
+                );
+            }
             _ => {
                 return Err(format!("Literal type not yet supported: {:?}", value));
             }
@@ -512,6 +527,10 @@ impl Compiler {
                  "__reader_vector_nth" | "__reader_vector_conj" |
                  // Reader type predicates
                  "__reader_list?" | "__reader_vector?" | "__reader_map?" | "__reader_symbol?" |
+                 // New builtins for defmacro support
+                 "__is_string" | "__is_symbol" | "__set_macro!" |
+                 "__symbol_1" | "__symbol_2" |
+                 "__gensym_0" | "__gensym_1" |
                  // Array operations
                  "make-array" | "aget" | "aset" | "aset!" | "alength" | "aclone"
         )
@@ -1515,9 +1534,12 @@ impl Compiler {
         self.builder.emit(Instruction::Label(loop_label.clone()));
 
         // Push loop context for recur
+        // loop bindings are register-only, no local slots
+        let num_bindings = binding_registers.len();
         self.loop_contexts.push(LoopContext {
             label: loop_label,
             binding_registers,
+            local_slots: vec![None; num_bindings],
         });
 
         // Compile body
@@ -1565,6 +1587,14 @@ impl Compiler {
         // 3. Copy temps into binding registers (parallel write)
         for (binding_reg, temp) in context.binding_registers.iter().zip(temps.iter()) {
             self.builder.emit(Instruction::Assign(*binding_reg, *temp));
+        }
+
+        // 3b. Also store to local slots if they exist (for fn params)
+        // This is crucial: fn params are bound to local slots, so recur must update them
+        for (i, temp) in temps.iter().enumerate() {
+            if let Some(Some(local_slot)) = context.local_slots.get(i) {
+                self.builder.emit(Instruction::StoreLocal(*local_slot, *temp));
+            }
         }
 
         // 4. Jump to loop label
@@ -1959,6 +1989,7 @@ impl Compiler {
         // This follows Beagle's approach in ast.rs lines 665-684.
         let param_offset = if uses_closure_convention { 1 } else { 0 };
         let mut param_registers = Vec::new();
+        let mut param_local_slots = Vec::new(); // Track local slots for recur
         for (i, param) in arity.params.iter().enumerate() {
             let arg_reg = IrValue::Register(crate::ir::VirtualRegister::Argument(i + param_offset));
             // Allocate a local slot and store the argument there
@@ -1972,6 +2003,7 @@ impl Compiler {
             self.builder
                 .emit(Instruction::LoadLocal(temp_reg, local_slot));
             param_registers.push(temp_reg);
+            param_local_slots.push(Some(local_slot)); // Track for recur
         }
 
         // Bind rest parameter if variadic
@@ -1991,6 +2023,7 @@ impl Compiler {
             self.builder
                 .emit(Instruction::LoadLocal(temp_reg, local_slot));
             param_registers.push(temp_reg);
+            param_local_slots.push(Some(local_slot)); // Track for recur
         }
 
         // Bind closure variables
@@ -2030,6 +2063,7 @@ impl Compiler {
         self.loop_contexts.push(LoopContext {
             label: fn_entry_label,
             binding_registers: param_registers,
+            local_slots: param_local_slots,
         });
 
         // Compile body (implicit do)
@@ -2489,6 +2523,14 @@ impl Compiler {
                     "__reader_vector?" => self.compile_builtin_reader_prim_1(args, "__reader_vector?"),
                     "__reader_map?" => self.compile_builtin_reader_prim_1(args, "__reader_map?"),
                     "__reader_symbol?" => self.compile_builtin_reader_prim_1(args, "__reader_symbol?"),
+                    // New builtins for defmacro support
+                    "__is_string" => self.compile_builtin_reader_prim_1(args, "__is_string"),
+                    "__is_symbol" => self.compile_builtin_reader_prim_1(args, "__is_symbol"),
+                    "__set_macro!" => self.compile_builtin_reader_prim_1(args, "__set_macro!"),
+                    "__symbol_1" => self.compile_builtin_reader_prim_1(args, "__symbol_1"),
+                    "__symbol_2" => self.compile_builtin_reader_prim_2(args, "__symbol_2"),
+                    "__gensym_0" => self.compile_builtin_gensym_0(args),
+                    "__gensym_1" => self.compile_builtin_reader_prim_1(args, "__gensym_1"),
                     // Array operations
                     "make-array" => self.compile_builtin_make_array(args),
                     "aget" => self.compile_builtin_aget(args),
@@ -3030,6 +3072,14 @@ impl Compiler {
         let val1_reg = self.builder.assign_new(val1);
         let val2_reg = self.builder.assign_new(val2);
         self.call_builtin(builtin_name, vec![val1_reg, val2_reg])
+    }
+
+    /// Compile __gensym_0 (no arguments)
+    fn compile_builtin_gensym_0(&mut self, args: &[Expr]) -> Result<IrValue, String> {
+        if !args.is_empty() {
+            return Err(format!("__gensym_0 requires 0 arguments, got {}", args.len()));
+        }
+        self.call_builtin("__gensym_0", vec![])
     }
 
     fn compile_builtin_eq(&mut self, args: &[Expr]) -> Result<IrValue, String> {

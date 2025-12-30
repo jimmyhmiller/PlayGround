@@ -11,7 +11,6 @@ import { GitService } from './gitService';
 import { initEvaluationService, getEvaluationService, EvaluationRequest, ExecutorConfig } from './evaluationService';
 import { initPipelineService, setupPipelineIPC, closePipelineService } from '../pipeline';
 import { initACPService, getACPService } from './acpClientService';
-import type { ContentBlock, RequestPermissionRequest, RequestPermissionResponse } from '../../types/acp';
 
 // Track running processes
 const runningProcesses: Map<string, ChildProcess> = new Map();
@@ -249,7 +248,7 @@ export function setupServiceIPC(): void {
 
 // Pending permission requests for ACP
 const pendingPermissions: Map<string, {
-  resolve: (response: RequestPermissionResponse) => void;
+  resolve: (response: { outcome: string }) => void;
   reject: (error: Error) => void;
 }> = new Map();
 
@@ -264,7 +263,7 @@ function setupACPIPC(): void {
   }
 
   // Set up permission callback to forward to renderer
-  acpService.setPermissionCallback(async (request: RequestPermissionRequest): Promise<RequestPermissionResponse> => {
+  acpService.setPermissionCallback(async (request: unknown): Promise<{ outcome: string }> => {
     const requestId = `perm-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
     // Forward to all renderer windows
@@ -312,8 +311,8 @@ function setupACPIPC(): void {
   });
 
   // Send prompt
-  ipcMain.handle('acp:prompt', async (_event: IpcMainInvokeEvent, sessionId: string, content: string | ContentBlock[]) => {
-    return await acpService.prompt(sessionId, content);
+  ipcMain.handle('acp:prompt', async (_event: IpcMainInvokeEvent, sessionId: string, content: string | unknown[]) => {
+    return await acpService.prompt(sessionId, content as string | Array<{ type: string; text?: string }>);
   });
 
   // Cancel prompt

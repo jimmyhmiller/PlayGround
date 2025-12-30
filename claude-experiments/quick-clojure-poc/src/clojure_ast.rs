@@ -5,6 +5,41 @@ use crate::gc_runtime::{
 };
 use crate::value::Value;
 
+// Helper functions that work with both reader types and runtime types
+// This is needed because macro expansion produces PersistentVector/Cons, not __ReaderVector/__ReaderList
+
+fn is_vector(rt: &GCRuntime, value: usize) -> bool {
+    rt.prim_is_vector(value)
+}
+
+fn is_list(rt: &GCRuntime, value: usize) -> bool {
+    let type_id = rt.get_type_id_for_value(value);
+    match type_id {
+        TYPE_READER_LIST | TYPE_LIST => true,
+        _ if type_id >= crate::gc_runtime::DEFTYPE_ID_OFFSET => {
+            // Check for known list types
+            if let Some(type_def) = rt.get_type_def(type_id - crate::gc_runtime::DEFTYPE_ID_OFFSET) {
+                matches!(type_def.name.as_str(), "PList" | "Cons" | "EmptyList")
+            } else {
+                false
+            }
+        }
+        _ => false,
+    }
+}
+
+fn is_symbol(rt: &GCRuntime, value: usize) -> bool {
+    rt.prim_is_symbol(value)
+}
+
+fn vector_count(rt: &mut GCRuntime, vec_ptr: usize) -> Result<usize, String> {
+    rt.prim_count(vec_ptr)
+}
+
+fn vector_nth(rt: &mut GCRuntime, vec_ptr: usize, index: usize) -> Result<usize, String> {
+    rt.prim_nth(vec_ptr, index)
+}
+
 /// Clojure Abstract Syntax Tree
 ///
 /// This represents Clojure code after parsing but before compilation.
@@ -936,21 +971,21 @@ fn analyze_let_tagged(rt: &mut GCRuntime, list_ptr: usize) -> Result<Expr, Strin
         return Err("let requires at least 1 argument: bindings vector".to_string());
     }
 
-    // Parse bindings vector
+    // Parse bindings vector (works with both __ReaderVector and PersistentVector)
     let bindings_ptr = items[1];
-    if get_type_id(rt, bindings_ptr) != TYPE_READER_VECTOR {
+    if !is_vector(rt, bindings_ptr) {
         return Err("let requires a vector of bindings as first argument".to_string());
     }
 
-    let bindings_count = rt.reader_vector_count(bindings_ptr);
+    let bindings_count = vector_count(rt, bindings_ptr)?;
     if bindings_count % 2 != 0 {
         return Err("let bindings vector must contain an even number of forms".to_string());
     }
 
     let mut bindings = Vec::new();
     for i in (0..bindings_count).step_by(2) {
-        let name_ptr = rt.reader_vector_nth(bindings_ptr, i)?;
-        let value_ptr = rt.reader_vector_nth(bindings_ptr, i + 1)?;
+        let name_ptr = vector_nth(rt, bindings_ptr, i)?;
+        let value_ptr = vector_nth(rt, bindings_ptr, i + 1)?;
 
         let name = get_symbol_name(rt, name_ptr)
             .ok_or_else(|| "let binding names must be symbols".to_string())?;
@@ -977,20 +1012,21 @@ fn analyze_loop_tagged(rt: &mut GCRuntime, list_ptr: usize) -> Result<Expr, Stri
         return Err("loop requires at least 1 argument: bindings vector".to_string());
     }
 
+    // Parse bindings vector (works with both __ReaderVector and PersistentVector)
     let bindings_ptr = items[1];
-    if get_type_id(rt, bindings_ptr) != TYPE_READER_VECTOR {
+    if !is_vector(rt, bindings_ptr) {
         return Err("loop requires a vector of bindings as first argument".to_string());
     }
 
-    let bindings_count = rt.reader_vector_count(bindings_ptr);
+    let bindings_count = vector_count(rt, bindings_ptr)?;
     if bindings_count % 2 != 0 {
         return Err("loop bindings must contain an even number of forms".to_string());
     }
 
     let mut bindings = Vec::new();
     for i in (0..bindings_count).step_by(2) {
-        let name_ptr = rt.reader_vector_nth(bindings_ptr, i)?;
-        let value_ptr = rt.reader_vector_nth(bindings_ptr, i + 1)?;
+        let name_ptr = vector_nth(rt, bindings_ptr, i)?;
+        let value_ptr = vector_nth(rt, bindings_ptr, i + 1)?;
 
         let name = get_symbol_name(rt, name_ptr)
             .ok_or_else(|| "loop binding names must be symbols".to_string())?;
@@ -1025,18 +1061,19 @@ fn analyze_dotimes_tagged(rt: &mut GCRuntime, list_ptr: usize) -> Result<Expr, S
         return Err("dotimes requires at least a binding vector".to_string());
     }
 
+    // Parse bindings vector (works with both __ReaderVector and PersistentVector)
     let bindings_ptr = items[1];
-    if get_type_id(rt, bindings_ptr) != TYPE_READER_VECTOR {
+    if !is_vector(rt, bindings_ptr) {
         return Err("dotimes requires a vector binding [i n]".to_string());
     }
 
-    let bindings_count = rt.reader_vector_count(bindings_ptr);
+    let bindings_count = vector_count(rt, bindings_ptr)?;
     if bindings_count != 2 {
         return Err("dotimes binding must be [i n]".to_string());
     }
 
-    let var_ptr = rt.reader_vector_nth(bindings_ptr, 0)?;
-    let count_ptr = rt.reader_vector_nth(bindings_ptr, 1)?;
+    let var_ptr = vector_nth(rt, bindings_ptr, 0)?;
+    let count_ptr = vector_nth(rt, bindings_ptr, 1)?;
 
     let var_name = get_symbol_name(rt, var_ptr)
         .ok_or_else(|| "dotimes binding variable must be a symbol".to_string())?;
@@ -1139,17 +1176,16 @@ fn analyze_fn_tagged(rt: &mut GCRuntime, list_ptr: usize) -> Result<Expr, String
 
     let mut idx = 1;
 
-    // Check for optional name
-    let name = if get_type_id(rt, items[idx]) == TYPE_READER_SYMBOL {
+    // Check for optional name (works with both reader symbols and runtime symbols)
+    let name = if is_symbol(rt, items[idx]) {
         // Could be name or could be params - check next item
         if idx + 1 < items.len() {
-            let next_type = get_type_id(rt, items[idx + 1]);
-            if next_type == TYPE_READER_VECTOR {
+            if is_vector(rt, items[idx + 1]) {
                 // This is a name, next is params
                 let n = get_symbol_name(rt, items[idx]);
                 idx += 1;
                 n
-            } else if next_type == TYPE_READER_LIST {
+            } else if is_list(rt, items[idx + 1]) {
                 // Multi-arity form, no name
                 None
             } else {
@@ -1162,14 +1198,14 @@ fn analyze_fn_tagged(rt: &mut GCRuntime, list_ptr: usize) -> Result<Expr, String
         None
     };
 
-    // Parse arities
+    // Parse arities (works with both reader and runtime types)
     let mut arities = Vec::new();
 
-    let is_multi_arity = get_type_id(rt, items[idx]) == TYPE_READER_LIST;
+    let is_multi_arity_form = is_list(rt, items[idx]);
 
-    if is_multi_arity {
+    if is_multi_arity_form {
         for arity_ptr in items.iter().skip(idx) {
-            if get_type_id(rt, *arity_ptr) != TYPE_READER_LIST {
+            if !is_list(rt, *arity_ptr) {
                 return Err("Multi-arity fn requires lists for each arity".to_string());
             }
             let arity = parse_fn_arity_tagged(rt, *arity_ptr)?;
@@ -1178,7 +1214,7 @@ fn analyze_fn_tagged(rt: &mut GCRuntime, list_ptr: usize) -> Result<Expr, String
     } else {
         // Single-arity
         let params_ptr = items[idx];
-        if get_type_id(rt, params_ptr) != TYPE_READER_VECTOR {
+        if !is_vector(rt, params_ptr) {
             return Err("fn requires parameter vector".to_string());
         }
 
@@ -1201,7 +1237,7 @@ fn parse_fn_arity_tagged(rt: &mut GCRuntime, arity_ptr: usize) -> Result<crate::
     }
 
     let params_ptr = arity_items[0];
-    if get_type_id(rt, params_ptr) != TYPE_READER_VECTOR {
+    if !is_vector(rt, params_ptr) {
         return Err("fn arity form must start with parameter vector".to_string());
     }
 
@@ -1214,14 +1250,15 @@ fn parse_fn_params_and_body_tagged(
     params_ptr: usize,
     body_items: &[usize],
 ) -> Result<crate::value::FnArity, String> {
-    let params_count = rt.reader_vector_count(params_ptr);
+    // Works with both __ReaderVector and PersistentVector
+    let params_count = vector_count(rt, params_ptr)?;
 
     let mut params = Vec::new();
     let mut rest_param = None;
     let mut found_ampersand = false;
 
     for i in 0..params_count {
-        let param_ptr = rt.reader_vector_nth(params_ptr, i)?;
+        let param_ptr = vector_nth(rt, params_ptr, i)?;
         let param_name = get_symbol_name(rt, param_ptr)
             .ok_or_else(|| "fn parameters must be symbols".to_string())?;
 
@@ -1304,7 +1341,7 @@ fn analyze_defn_tagged(rt: &mut GCRuntime, list_ptr: usize) -> Result<Expr, Stri
         }
     } else if !fn_items.is_empty() {
         let params_ptr = fn_items[0];
-        if get_type_id(rt, params_ptr) != TYPE_READER_VECTOR {
+        if !is_vector(rt, params_ptr) {
             return Err("defn requires parameter vector".to_string());
         }
 
@@ -1493,19 +1530,19 @@ fn analyze_binding_tagged(rt: &mut GCRuntime, list_ptr: usize) -> Result<Expr, S
     }
 
     let bindings_ptr = items[1];
-    if get_type_id(rt, bindings_ptr) != TYPE_READER_VECTOR {
+    if !is_vector(rt, bindings_ptr) {
         return Err("binding requires a vector of bindings as first argument".to_string());
     }
 
-    let bindings_count = rt.reader_vector_count(bindings_ptr);
+    let bindings_count = vector_count(rt, bindings_ptr)?;
     if bindings_count % 2 != 0 {
         return Err("binding vector must contain an even number of forms".to_string());
     }
 
     let mut bindings = Vec::new();
     for i in (0..bindings_count).step_by(2) {
-        let var_ptr = rt.reader_vector_nth(bindings_ptr, i)?;
-        let val_ptr = rt.reader_vector_nth(bindings_ptr, i + 1)?;
+        let var_ptr = vector_nth(rt, bindings_ptr, i)?;
+        let val_ptr = vector_nth(rt, bindings_ptr, i + 1)?;
 
         let var_name = get_symbol_name(rt, var_ptr)
             .ok_or_else(|| "binding requires symbols as variable names".to_string())?;
@@ -1531,16 +1568,16 @@ fn analyze_deftype_tagged(rt: &mut GCRuntime, list_ptr: usize) -> Result<Expr, S
         .ok_or_else(|| "deftype requires a symbol as type name".to_string())?;
 
     let fields_ptr = items[2];
-    if get_type_id(rt, fields_ptr) != TYPE_READER_VECTOR {
+    if !is_vector(rt, fields_ptr) {
         return Err("deftype requires a vector of field names".to_string());
     }
 
-    let fields_count = rt.reader_vector_count(fields_ptr);
+    let fields_count = vector_count(rt, fields_ptr)?;
     let mut field_names = Vec::new();
     let mut fields = Vec::new();
 
     for i in 0..fields_count {
-        let field_ptr = rt.reader_vector_nth(fields_ptr, i)?;
+        let field_ptr = vector_nth(rt, fields_ptr, i)?;
         // TODO: Handle ^:mutable metadata
         let field_name = get_symbol_name(rt, field_ptr)
             .ok_or_else(|| "deftype field must be a symbol".to_string())?;
@@ -1613,14 +1650,14 @@ fn parse_protocol_method_sig_tagged(rt: &mut GCRuntime, list_ptr: usize) -> Resu
             // Skip docstring
             continue;
         }
-        if get_type_id(rt, *item) != TYPE_READER_VECTOR {
+        if !is_vector(rt, *item) {
             return Err("Protocol method arity must be a vector".to_string());
         }
 
-        let params_count = rt.reader_vector_count(*item);
+        let params_count = vector_count(rt, *item)?;
         let mut param_names = Vec::new();
         for j in 0..params_count {
-            let param_ptr = rt.reader_vector_nth(*item, j)?;
+            let param_ptr = vector_nth(rt, *item, j)?;
             let param_name = get_symbol_name(rt, param_ptr)
                 .ok_or_else(|| "Protocol method parameter must be a symbol".to_string())?;
             param_names.push(param_name);
@@ -1710,14 +1747,14 @@ fn parse_protocol_method_impl_tagged(
         .ok_or_else(|| "Protocol method name must be a symbol".to_string())?;
 
     let params_ptr = items[1];
-    if get_type_id(rt, params_ptr) != TYPE_READER_VECTOR {
+    if !is_vector(rt, params_ptr) {
         return Err("Method params must be a vector".to_string());
     }
 
-    let params_count = rt.reader_vector_count(params_ptr);
+    let params_count = vector_count(rt, params_ptr)?;
     let mut params = Vec::new();
     for i in 0..params_count {
-        let param_ptr = rt.reader_vector_nth(params_ptr, i)?;
+        let param_ptr = vector_nth(rt, params_ptr, i)?;
         let param_name = get_symbol_name(rt, param_ptr)
             .ok_or_else(|| "Method parameter must be a symbol".to_string())?;
         params.push(param_name);

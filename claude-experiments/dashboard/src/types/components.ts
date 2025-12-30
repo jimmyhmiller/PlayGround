@@ -20,6 +20,7 @@ export interface WindowProps {
   minHeight?: number;
   zIndex?: number;
   isFocused?: boolean;
+  pinned?: boolean;
   children?: ReactNode;
   onClose?: (id: string) => void;
   onFocus?: (id: string) => void;
@@ -35,6 +36,7 @@ export interface WindowUpdates {
   width?: number;
   height?: number;
   props?: Record<string, unknown>;
+  pinned?: boolean;
 }
 
 /**
@@ -82,6 +84,7 @@ export interface WindowManagerContextValue {
     width: number;
     height: number;
     zIndex: number;
+    pinned?: boolean;
   }>;
   focusedId: string | null;
   createWindow: (options: {

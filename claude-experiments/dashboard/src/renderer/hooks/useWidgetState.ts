@@ -153,8 +153,14 @@ export function usePersistentState<T>(
   // Debug logging
   console.log(`[usePersistentState] Hook called: key="${key}", fullKey="${fullKey}"`);
 
-  // Load persisted value on mount
+  // Load persisted value on mount - only once per fullKey
   useEffect(() => {
+    // Skip if already loaded for this key
+    if (loadedRef.current) {
+      console.log(`[usePersistentState] Already loaded "${fullKey}", skipping`);
+      return;
+    }
+
     let mounted = true;
     console.log(`[usePersistentState] Loading: "${fullKey}"`);
 
@@ -162,10 +168,11 @@ export function usePersistentState<T>(
       .then((result: unknown) => {
         const r = result as WidgetStateGetResult;
         console.log(`[usePersistentState] Loaded "${fullKey}": state=`, r.state);
-        if (mounted && r.state !== undefined && r.state !== null) {
+        // Only apply if still mounted AND not already loaded (prevents race with setValue)
+        if (mounted && !loadedRef.current && r.state !== undefined && r.state !== null) {
           console.log(`[usePersistentState] Applying loaded state for "${key}":`, r.state);
           setValue(r.state as T);
-        } else {
+        } else if (mounted && !loadedRef.current) {
           console.log(`[usePersistentState] No state found for "${fullKey}", using initial:`, initialValue);
         }
         if (mounted) setLoaded(true);
@@ -187,7 +194,12 @@ export function usePersistentState<T>(
 
       setValue(resolvedValue);
 
-      // Always persist - use ref to get current loaded state
+      // Mark as loaded to prevent any pending load from overwriting this value
+      // Update both ref (immediate) and state (for consistency)
+      loadedRef.current = true;
+      setLoaded(true);
+
+      // Always persist
       console.log(`[usePersistentState] Setting "${fullKey}" (loaded=${loadedRef.current}):`, resolvedValue);
       dispatch('widgetState.set', {
         widgetId: fullKey,

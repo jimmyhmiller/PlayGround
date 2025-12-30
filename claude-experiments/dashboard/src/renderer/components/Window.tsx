@@ -15,6 +15,7 @@ export interface WindowProps {
   onUpdate?: (id: string, updates: WindowUpdates) => void;
   zIndex?: number;
   isFocused?: boolean;
+  pinned?: boolean;
   children?: ReactNode;
 }
 
@@ -55,6 +56,7 @@ const Window = memo(function Window({
   onUpdate,
   zIndex = 1,
   isFocused = false,
+  pinned = false,
   children,
 }: WindowProps) {
   // Local state for optimistic updates during drag/resize
@@ -227,6 +229,39 @@ const Window = memo(function Window({
       return;
     }
   }, [id, onClose]);
+
+  // Pinned mode - no chrome, not draggable, not resizable, behind other windows
+  // Content positioned with same margins as chromeless mode, but no window background
+  if (pinned) {
+    return (
+      <div
+        ref={windowRef}
+        className="window window-pinned"
+        style={{
+          position: 'absolute',
+          left: localPosition.x,
+          top: localPosition.y,
+          width: localSize.width,
+          height: localSize.height,
+          zIndex: 0, // Behind all other windows
+          display: 'flex',
+          flexDirection: 'column',
+          // Margins to match chromeless mode layout
+          padding: '25px 20px 15px 20px', // top accounts for title area + gap
+        }}
+      >
+        <div
+          className="window-content"
+          style={{
+            flex: 1,
+            overflow: 'auto',
+          }}
+        >
+          {children}
+        </div>
+      </div>
+    );
+  }
 
   // Chromeless mode - bare widget style like ai-dashboard2
   if (isChromeless) {

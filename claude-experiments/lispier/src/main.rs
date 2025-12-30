@@ -304,6 +304,28 @@ fn run_with_compilation_spec(nodes: &[lispier::Node], compilation: &lispier::Com
         }
     }
 
+    // Pre-load libc ciface shim library (provides _mlir_ciface_* wrappers for fopen, fclose, etc.)
+    if matches!(runtime.backend, lispier::runtime::Backend::Rocm) {
+        let libc_shim_path = std::env::var("HOME")
+            .map(|h| format!("{}/liblibc_ciface_shim.so", h))
+            .unwrap_or_else(|_| "/home/jimmyhmiller/liblibc_ciface_shim.so".to_string());
+        eprintln!("Pre-loading libc ciface shim: {}", libc_shim_path);
+        let path_cstr = std::ffi::CString::new(libc_shim_path.as_str()).unwrap();
+        unsafe {
+            let handle = libc::dlopen(path_cstr.as_ptr(), libc::RTLD_NOW | libc::RTLD_GLOBAL);
+            if handle.is_null() {
+                let error = libc::dlerror();
+                if !error.is_null() {
+                    eprintln!("Warning: Failed to pre-load libc ciface shim: {:?}", std::ffi::CStr::from_ptr(error));
+                } else {
+                    eprintln!("Warning: Failed to pre-load libc ciface shim");
+                }
+            } else {
+                eprintln!("Successfully pre-loaded libc ciface shim");
+            }
+        }
+    }
+
     eprintln!("Pre-loading complete");
 
     // Create JIT with custom pipeline and libraries

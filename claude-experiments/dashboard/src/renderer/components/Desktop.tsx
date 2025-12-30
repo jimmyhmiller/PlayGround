@@ -1,4 +1,4 @@
-import { memo, useMemo, useCallback, useState, ComponentType, ReactElement } from 'react';
+import { memo, useMemo, useCallback, useState, useRef, useEffect, ComponentType, ReactElement } from 'react';
 import { WindowManagerProvider, WindowContainer, useWindowManager } from './WindowManager';
 import { ThemeProvider } from '../theme/ThemeProvider';
 import { SettingsProvider, useSettings } from '../settings/SettingsProvider';
@@ -120,10 +120,20 @@ interface ConfirmState {
  * Command Palette Controller - manages commands and palette state
  */
 const DesktopCommandPalette = memo(function DesktopCommandPalette(): ReactElement {
-  const { createWindow } = useWindowManager();
+  const { createWindow, windows, focusedId, updateWindow } = useWindowManager();
   const { settings } = useSettings();
   const shortcut = settings.commandPaletteShortcut || 'cmd+shift+p';
   const { isOpen, close } = useCommandPalette(shortcut);
+
+  // Track mouse position for pinned window detection
+  const mousePos = useRef({ x: 0, y: 0 });
+  useEffect(() => {
+    const handleMouseMove = (e: MouseEvent) => {
+      mousePos.current = { x: e.clientX, y: e.clientY };
+    };
+    window.addEventListener('mousemove', handleMouseMove);
+    return () => window.removeEventListener('mousemove', handleMouseMove);
+  }, []);
 
   // Dialog state
   const [promptState, setPromptState] = useState<PromptState>({
@@ -232,6 +242,53 @@ const DesktopCommandPalette = memo(function DesktopCommandPalette(): ReactElemen
         },
       });
     });
+
+    // Pin command - finds unpinned window under mouse cursor
+    const unpinnedWindows = windows.filter(w => !w.pinned);
+    if (unpinnedWindows.length > 0) {
+      cmds.push({
+        id: 'window-pin',
+        label: 'Pin Window (under cursor)',
+        description: 'Lock window in place (no chrome, not draggable, behind other windows)',
+        category: 'Windows',
+        keywords: ['pin', 'window', 'lock', 'fixed', 'background'],
+        action: () => {
+          const { x, y } = mousePos.current;
+          // Find unpinned window under cursor (highest zIndex first)
+          const sorted = [...unpinnedWindows].sort((a, b) => b.zIndex - a.zIndex);
+          const windowUnderCursor = sorted.find(w => {
+            return x >= w.x && x <= w.x + w.width &&
+                   y >= w.y && y <= w.y + w.height;
+          });
+          if (windowUnderCursor) {
+            updateWindow(windowUnderCursor.id, { pinned: true });
+          }
+        },
+      });
+    }
+
+    // Unpin command - finds pinned window under mouse cursor
+    const pinnedWindows = windows.filter(w => w.pinned);
+    if (pinnedWindows.length > 0) {
+      cmds.push({
+        id: 'window-unpin',
+        label: 'Unpin Window (under cursor)',
+        description: 'Unpin the pinned window under your mouse cursor',
+        category: 'Windows',
+        keywords: ['unpin', 'window', 'unlock', 'movable'],
+        action: () => {
+          const { x, y } = mousePos.current;
+          // Find pinned window under cursor
+          const windowUnderCursor = pinnedWindows.find(w => {
+            return x >= w.x && x <= w.x + w.width &&
+                   y >= w.y && y <= w.y + w.height;
+          });
+          if (windowUnderCursor) {
+            updateWindow(windowUnderCursor.id, { pinned: false });
+          }
+        },
+      });
+    }
 
     // Project commands
     cmds.push({
@@ -738,6 +795,9 @@ const DesktopCommandPalette = memo(function DesktopCommandPalette(): ReactElemen
     return cmds;
   }, [
     createWindow,
+    windows,
+    focusedId,
+    updateWindow,
     projects,
     activeProjectId,
     activeProject,

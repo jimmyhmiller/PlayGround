@@ -565,6 +565,125 @@ pub extern "C" fn builtin__is_reader_symbol(value: usize) -> usize {
     }
 }
 
+/// __is_string(value) -> tagged_boolean
+///
+/// Returns true if value is a string, false otherwise.
+#[unsafe(no_mangle)]
+pub extern "C" fn builtin__is_string(value: usize) -> usize {
+    unsafe {
+        let rt = get_runtime();
+        let type_id = rt.get_type_id_for_value(value);
+        if type_id == crate::gc_runtime::TYPE_STRING {
+            11 // true = (1 << 3) | 0b011
+        } else {
+            3 // false = (0 << 3) | 0b011
+        }
+    }
+}
+
+/// __is_symbol(value) -> tagged_boolean
+///
+/// Returns true if value is a symbol (ReaderSymbol or runtime Symbol), false otherwise.
+#[unsafe(no_mangle)]
+pub extern "C" fn builtin__is_symbol(value: usize) -> usize {
+    unsafe {
+        let rt = get_runtime();
+        if rt.prim_is_symbol(value) {
+            11 // true = (1 << 3) | 0b011
+        } else {
+            3 // false = (0 << 3) | 0b011
+        }
+    }
+}
+
+/// __set_macro!(var) -> var
+///
+/// Marks a var as a macro. Returns the var.
+#[unsafe(no_mangle)]
+pub extern "C" fn builtin__set_macro(var_ptr: usize) -> usize {
+    unsafe {
+        let rt = get_runtime();
+        match rt.set_var_macro(var_ptr) {
+            Ok(_) => var_ptr,
+            Err(e) => {
+                eprintln!("__set_macro! error: {}", e);
+                7 // nil on error
+            }
+        }
+    }
+}
+
+/// __symbol(name_str) -> tagged_reader_symbol
+/// __symbol(ns_str, name_str) -> tagged_reader_symbol
+///
+/// Creates a new Symbol. This is the Clojure `symbol` function.
+/// Uses ReaderSymbol as the canonical symbol type.
+#[unsafe(no_mangle)]
+pub extern "C" fn builtin__symbol_1(name: usize) -> usize {
+    unsafe {
+        let rt = get_runtime();
+        let name_str = rt.read_string(name);
+        // Parse namespace from name if it contains /
+        if let Some(pos) = name_str.find('/') {
+            let ns = &name_str[..pos];
+            let n = &name_str[pos + 1..];
+            if ns.is_empty() {
+                rt.allocate_reader_symbol(None, &name_str).unwrap_or(7)
+            } else {
+                rt.allocate_reader_symbol(Some(ns), n).unwrap_or(7)
+            }
+        } else {
+            rt.allocate_reader_symbol(None, &name_str).unwrap_or(7)
+        }
+    }
+}
+
+/// __symbol_2(ns_or_nil, name_str) -> tagged_reader_symbol
+///
+/// Creates a new Symbol with explicit namespace.
+#[unsafe(no_mangle)]
+pub extern "C" fn builtin__symbol_2(ns_or_nil: usize, name: usize) -> usize {
+    unsafe {
+        let rt = get_runtime();
+        let namespace = if ns_or_nil == 7 {
+            None
+        } else {
+            Some(rt.read_string(ns_or_nil))
+        };
+        let name_str = rt.read_string(name);
+        rt.allocate_reader_symbol(namespace.as_deref(), &name_str).unwrap_or(7)
+    }
+}
+
+/// Global counter for gensym
+static GENSYM_COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// __gensym() -> tagged_reader_symbol
+/// __gensym(prefix_str) -> tagged_reader_symbol
+///
+/// Generates a unique symbol. With no args, uses "G__" prefix.
+/// With one arg, uses that string as the prefix.
+#[unsafe(no_mangle)]
+pub extern "C" fn builtin__gensym_0() -> usize {
+    unsafe {
+        let rt = get_runtime();
+        let id = GENSYM_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let name = format!("G__{}", id);
+        rt.allocate_reader_symbol(None, &name).unwrap_or(7)
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn builtin__gensym_1(prefix: usize) -> usize {
+    unsafe {
+        let rt = get_runtime();
+        let prefix_str = rt.read_string(prefix);
+        let id = GENSYM_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let name = format!("{}{}", prefix_str, id);
+        rt.allocate_reader_symbol(None, &name).unwrap_or(7)
+    }
+}
+
 /// satisfies?(protocol_id, value) -> tagged_boolean
 ///
 /// Returns true if value's type satisfies the given protocol.
@@ -1020,6 +1139,39 @@ pub fn get_builtin_descriptors() -> Vec<BuiltinDescriptor> {
         BuiltinDescriptor {
             name: "satisfies?",
             function_ptr: builtin_satisfies as usize,
+        },
+        // String predicate
+        BuiltinDescriptor {
+            name: "__is_string",
+            function_ptr: builtin__is_string as usize,
+        },
+        // Symbol predicate (any symbol type)
+        BuiltinDescriptor {
+            name: "__is_symbol",
+            function_ptr: builtin__is_symbol as usize,
+        },
+        // Set macro flag on var
+        BuiltinDescriptor {
+            name: "__set_macro!",
+            function_ptr: builtin__set_macro as usize,
+        },
+        // Symbol constructors
+        BuiltinDescriptor {
+            name: "__symbol_1",
+            function_ptr: builtin__symbol_1 as usize,
+        },
+        BuiltinDescriptor {
+            name: "__symbol_2",
+            function_ptr: builtin__symbol_2 as usize,
+        },
+        // Gensym
+        BuiltinDescriptor {
+            name: "__gensym_0",
+            function_ptr: builtin__gensym_0 as usize,
+        },
+        BuiltinDescriptor {
+            name: "__gensym_1",
+            function_ptr: builtin__gensym_1 as usize,
         },
     ]
 }

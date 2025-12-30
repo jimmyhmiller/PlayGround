@@ -153,6 +153,7 @@ const WindowWrapper = memo(function WindowWrapper({
       height={win.height}
       zIndex={win.zIndex}
       isFocused={win.id === focusedId}
+      pinned={win.pinned}
       onClose={closeWindow}
       onFocus={focusWindow}
       onUpdate={updateWindow}

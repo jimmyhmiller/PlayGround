@@ -19,6 +19,7 @@ export interface WindowState {
   width: number;
   height: number;
   zIndex: number;
+  pinned?: boolean;
 }
 
 /**
@@ -204,6 +205,7 @@ export interface WindowUpdatePayload {
   width?: number;
   height?: number;
   props?: Record<string, unknown>;
+  pinned?: boolean;
 }
 
 /**

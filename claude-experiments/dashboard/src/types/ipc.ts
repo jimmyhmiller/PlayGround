@@ -11,7 +11,6 @@ import type {
   SessionNotification,
   ContentBlock,
   RequestPermissionRequest,
-  RequestPermissionResponse,
 } from './acp';
 
 /**
