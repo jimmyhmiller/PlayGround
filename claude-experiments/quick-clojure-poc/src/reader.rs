@@ -3,6 +3,36 @@ use crate::value::Value;
 use clojure_reader::edn::{Edn, read_string};
 use im::{hashmap, hashset, vector};
 
+/// Process escape sequences in a string
+fn process_escape_sequences(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.next() {
+                Some('n') => result.push('\n'),
+                Some('t') => result.push('\t'),
+                Some('r') => result.push('\r'),
+                Some('\\') => result.push('\\'),
+                Some('"') => result.push('"'),
+                Some('\'') => result.push('\''),
+                Some('0') => result.push('\0'),
+                Some(other) => {
+                    // Unknown escape, keep as-is
+                    result.push('\\');
+                    result.push(other);
+                }
+                None => result.push('\\'),
+            }
+        } else {
+            result.push(c);
+        }
+    }
+
+    result
+}
+
 /// Convert clojure-reader's Edn to our Value representation
 pub fn edn_to_value(edn: &Edn) -> Result<Value, String> {
     match edn {
@@ -10,7 +40,7 @@ pub fn edn_to_value(edn: &Edn) -> Result<Value, String> {
         Edn::Bool(b) => Ok(Value::Bool(*b)),
         Edn::Int(i) => Ok(Value::Int(*i)),
         Edn::Double(f) => Ok(Value::Float(f.into_inner())),
-        Edn::Str(s) => Ok(Value::String(s.to_string())),
+        Edn::Str(s) => Ok(Value::String(process_escape_sequences(s))),
         Edn::Symbol(s) => Ok(Value::Symbol(s.to_string())),
         Edn::Key(k) => {
             // Keys in EDN include the ':' prefix, so strip it
@@ -126,8 +156,9 @@ pub fn edn_to_tagged(edn: &Edn, rt: &mut GCRuntime) -> Result<usize, String> {
         }
 
         Edn::Str(s) => {
-            // Allocate string on heap
-            rt.allocate_string(s)
+            // Allocate string on heap, processing escape sequences
+            let processed = process_escape_sequences(s);
+            rt.allocate_string(&processed)
         }
 
         Edn::Symbol(s) => {

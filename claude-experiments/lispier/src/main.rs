@@ -151,7 +151,7 @@ fn run_with_compilation_spec(nodes: &[lispier::Node], compilation: &lispier::Com
     let gpu_module_passes = ["convert-gpu-to-rocdl", "convert-gpu-to-nvvm"];
 
     // Passes that need to run inside func.func scope
-    let func_scoped_passes = ["gpu-map-parallel-loops"];
+    let func_scoped_passes = ["gpu-map-parallel-loops", "scf-parallel-loop-tiling"];
 
     let mut before_gpu: Vec<String> = Vec::new();
     let mut gpu_passes: Vec<String> = Vec::new();

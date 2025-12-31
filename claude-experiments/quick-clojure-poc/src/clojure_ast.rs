@@ -17,9 +17,11 @@ fn is_list(rt: &GCRuntime, value: usize) -> bool {
     match type_id {
         TYPE_READER_LIST | TYPE_LIST => true,
         _ if type_id >= crate::gc_runtime::DEFTYPE_ID_OFFSET => {
-            // Check for known list types
+            // Check for known list types (may be qualified or unqualified)
             if let Some(type_def) = rt.get_type_def(type_id - crate::gc_runtime::DEFTYPE_ID_OFFSET) {
-                matches!(type_def.name.as_str(), "PList" | "Cons" | "EmptyList")
+                let name = type_def.name.as_str();
+                matches!(name, "PList" | "Cons" | "EmptyList"
+                    | "clojure.core/PList" | "clojure.core/Cons" | "clojure.core/EmptyList")
             } else {
                 false
             }
@@ -1329,11 +1331,11 @@ fn analyze_defn_tagged(rt: &mut GCRuntime, list_ptr: usize) -> Result<Expr, Stri
     let fn_items = &items[start_idx..];
     let mut arities = Vec::new();
 
-    let is_multi_arity = !fn_items.is_empty() && get_type_id(rt, fn_items[0]) == TYPE_READER_LIST;
+    let is_multi_arity = !fn_items.is_empty() && is_list(rt, fn_items[0]);
 
     if is_multi_arity {
         for &arity_ptr in fn_items {
-            if get_type_id(rt, arity_ptr) != TYPE_READER_LIST {
+            if !is_list(rt, arity_ptr) {
                 return Err("Multi-arity defn requires lists for each arity".to_string());
             }
             let arity = parse_fn_arity_tagged(rt, arity_ptr)?;

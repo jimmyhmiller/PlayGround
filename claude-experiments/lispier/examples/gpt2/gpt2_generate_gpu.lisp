@@ -27,6 +27,8 @@
   (target rocm
     ;; Linalg to parallel loops, then to GPU
     (pass convert-linalg-to-parallel-loops)
+    ;; Tile parallel loops to create block/thread structure (16x16 = 256 threads per block)
+    (pass scf-parallel-loop-tiling {:parallel-loop-tile-sizes "16,16"})
     (pass gpu-map-parallel-loops)
     (pass convert-parallel-loops-to-gpu)
     ;; Lower affine constructs
@@ -75,6 +77,10 @@
 
     (func.func {:sym_name "fclose"
                 :function_type (-> [!llvm.ptr] [i32])
+                :sym_visibility "private"})
+
+    (func.func {:sym_name "clock_ms"
+                :function_type (-> [] [i64])
                 :sym_visibility "private"})
 
     ;; printf is variadic - use extern-fn which generates llvm.func (not affected by llvm-request-c-wrappers)
@@ -438,94 +444,312 @@
           (func.return))))
 
     ;; =========================================================================
-    ;; Attention Forward using math.exp (keep scf.for for softmax reductions)
+    ;; Reshape QKV from (T=64, 3C=2304) to separate Q/K/V as (NH=12, T=64, hs=64)
     ;; =========================================================================
-    (func.func {:sym_name "attention_forward"
-                :function_type (-> [memref<64x768xf32>
+    (func.func {:sym_name "reshape_qkv_to_batched"
+                :function_type (-> [memref<12x64x64xf32>
+                                    memref<12x64x64xf32>
+                                    memref<12x64x64xf32>
                                     memref<64x2304xf32>] [])}
       (region
-        (block [(: out memref<64x768xf32>)
+        (block [(: Q_out memref<12x64x64xf32>)
+                (: K_out memref<12x64x64xf32>)
+                (: V_out memref<12x64x64xf32>)
                 (: qkv memref<64x2304xf32>)]
 
           (def c0 (: 0 index))
           (def c1 (: 1 index))
-          (def c64 (: 64 index))
-          (def c768 (: 768 index))
           (def c12 (: 12 index))
+          (def c64 (: 64 index))
           (def hs (: 64 index))
-          (def zero (: 0.0 f32))
-          (def neg_inf (: -1e9 f32))
-          (def scale (: 0.125 f32))
+          (def c768 (: 768 index))
 
           ;; For each head
           (scf.for c0 c12 c1
             (region
               (block [(: h index)]
                 (def h_offset (arith.muli h hs))
-                (def k_offset (arith.addi h_offset c768))
-                (def v_offset (arith.addi k_offset c768))
+                (def k_base (arith.addi h_offset c768))
+                (def v_base (arith.addi k_base c768))
 
+                ;; For each time position
+                (scf.for c0 c64 c1
+                  (region
+                    (block [(: t index)]
+                      ;; For each head dimension
+                      (scf.for c0 hs c1
+                        (region
+                          (block [(: i index)]
+                            ;; Q[h,t,i] = qkv[t, h*hs + i]
+                            (def q_src_idx (arith.addi h_offset i))
+                            (def q_val (memref.load {:result f32} qkv t q_src_idx))
+                            (memref.store q_val Q_out h t i)
+
+                            ;; K[h,t,i] = qkv[t, 768 + h*hs + i]
+                            (def k_src_idx (arith.addi k_base i))
+                            (def k_val (memref.load {:result f32} qkv t k_src_idx))
+                            (memref.store k_val K_out h t i)
+
+                            ;; V[h,t,i] = qkv[t, 1536 + h*hs + i]
+                            (def v_src_idx (arith.addi v_base i))
+                            (def v_val (memref.load {:result f32} qkv t v_src_idx))
+                            (memref.store v_val V_out h t i)
+                            (scf.yield))))
+                      (scf.yield))))
+                (scf.yield))))
+          (func.return))))
+
+    ;; =========================================================================
+    ;; Transpose K from (NH, T, hs) to (NH, hs, T) for K^T operation
+    ;; =========================================================================
+    (func.func {:sym_name "transpose_k_for_attention"
+                :function_type (-> [memref<12x64x64xf32>
+                                    memref<12x64x64xf32>] [])}
+      (region
+        (block [(: K_t memref<12x64x64xf32>)
+                (: K memref<12x64x64xf32>)]
+
+          (def c0 (: 0 index))
+          (def c1 (: 1 index))
+          (def c12 (: 12 index))
+          (def c64 (: 64 index))
+
+          ;; For each head
+          (scf.for c0 c12 c1
+            (region
+              (block [(: h index)]
+                ;; For each time position (becomes column in transposed)
+                (scf.for c0 c64 c1
+                  (region
+                    (block [(: t index)]
+                      ;; For each head dimension (becomes row in transposed)
+                      (scf.for c0 c64 c1
+                        (region
+                          (block [(: i index)]
+                            ;; K_t[h, i, t] = K[h, t, i]
+                            (def val (memref.load {:result f32} K h t i))
+                            (memref.store val K_t h i t)
+                            (scf.yield))))
+                      (scf.yield))))
+                (scf.yield))))
+          (func.return))))
+
+    ;; =========================================================================
+    ;; Batched Q @ K^T using linalg.batch_matmul + scaling
+    ;; Q: (12, 64, 64), K_t: (12, 64, 64) -> scores: (12, 64, 64)
+    ;; =========================================================================
+    (func.func {:sym_name "batched_qk_matmul"
+                :function_type (-> [memref<12x64x64xf32>
+                                    memref<12x64x64xf32>
+                                    memref<12x64x64xf32>] [])}
+      (region
+        (block [(: scores memref<12x64x64xf32>)
+                (: Q memref<12x64x64xf32>)
+                (: K_t memref<12x64x64xf32>)]
+
+          ;; Zero output for accumulation
+          (def zero (: 0.0 f32))
+          (linalg.fill zero scores)
+
+          ;; Batched matmul: for each batch h, compute scores[h] = Q[h] @ K_t[h]
+          (linalg.batch_matmul Q K_t scores)
+
+          ;; Apply scaling (1/sqrt(64) = 0.125)
+          (def scale (: 0.125 f32))
+          (def c0 (: 0 index))
+          (def c1 (: 1 index))
+          (def c12 (: 12 index))
+          (def c64 (: 64 index))
+
+          (scf.for c0 c12 c1
+            (region
+              (block [(: h index)]
+                (scf.for c0 c64 c1
+                  (region
+                    (block [(: t1 index)]
+                      (scf.for c0 c64 c1
+                        (region
+                          (block [(: t2 index)]
+                            (def val (memref.load {:result f32} scores h t1 t2))
+                            (def scaled (arith.mulf val scale))
+                            (memref.store scaled scores h t1 t2)
+                            (scf.yield))))
+                      (scf.yield))))
+                (scf.yield))))
+
+          (func.return))))
+
+    ;; =========================================================================
+    ;; Causal Softmax: Apply causal mask and softmax to attention scores
+    ;; scores: (12, 64, 64), weights_out: (12, 64, 64)
+    ;; =========================================================================
+    (func.func {:sym_name "causal_softmax"
+                :function_type (-> [memref<12x64x64xf32>
+                                    memref<12x64x64xf32>] [])}
+      (region
+        (block [(: weights memref<12x64x64xf32>)
+                (: scores memref<12x64x64xf32>)]
+
+          (def c0 (: 0 index))
+          (def c1 (: 1 index))
+          (def c12 (: 12 index))
+          (def c64 (: 64 index))
+          (def zero (: 0.0 f32))
+          (def neg_inf (: -1e9 f32))
+
+          ;; For each head
+          (scf.for c0 c12 c1
+            (region
+              (block [(: h index)]
                 ;; For each query position
                 (scf.for c0 c64 c1
                   (region
                     (block [(: t index)]
-                      ;; Pass 1: compute scores and find max
-                      (def max_score (scf.for {:result f32} c0 (arith.addi t c1) c1 neg_inf
+                      ;; Causal mask: only attend to positions <= t
+                      (def valid_len (arith.addi t c1))
+
+                      ;; Pass 1: Find max for numerical stability (only valid positions)
+                      (def max_score (scf.for {:result f32} c0 valid_len c1 neg_inf
                         (region
                           (block [(: t2 index) (: max_acc f32)]
-                            (def dot (scf.for {:result f32} c0 hs c1 zero
-                              (region
-                                (block [(: i index) (: dot_acc f32)]
-                                  (def q_idx (arith.addi h_offset i))
-                                  (def k_idx (arith.addi k_offset i))
-                                  (def q_val (memref.load {:result f32} qkv t q_idx))
-                                  (def k_val (memref.load {:result f32} qkv t2 k_idx))
-                                  (scf.yield (arith.addf dot_acc (arith.mulf q_val k_val)))))))
-                            (def score (arith.mulf dot scale))
+                            (def score (memref.load {:result f32} scores h t t2))
                             (def new_max (arith.maximumf max_acc score))
                             (scf.yield new_max)))))
 
-                      ;; Pass 2: exp and sum using math.exp
-                      (def exp_sum (scf.for {:result f32} c0 (arith.addi t c1) c1 zero
+                      ;; Pass 2: Compute exp(score - max) and sum
+                      (def exp_sum (scf.for {:result f32} c0 valid_len c1 zero
                         (region
                           (block [(: t2 index) (: sum_acc f32)]
-                            (def dot (scf.for {:result f32} c0 hs c1 zero
-                              (region
-                                (block [(: i index) (: dot_acc f32)]
-                                  (def q_idx (arith.addi h_offset i))
-                                  (def k_idx (arith.addi k_offset i))
-                                  (def q_val (memref.load {:result f32} qkv t q_idx))
-                                  (def k_val (memref.load {:result f32} qkv t2 k_idx))
-                                  (scf.yield (arith.addf dot_acc (arith.mulf q_val k_val)))))))
-                            (def score (arith.mulf dot scale))
-                            (def exp_score (math.exp (arith.subf score max_score)))
-                            (scf.yield (arith.addf sum_acc exp_score))))))
+                            (def score (memref.load {:result f32} scores h t t2))
+                            (def shifted (arith.subf score max_score))
+                            (def exp_val (math.exp shifted))
+                            ;; Store intermediate exp value
+                            (memref.store exp_val weights h t t2)
+                            (def new_sum (arith.addf sum_acc exp_val))
+                            (scf.yield new_sum)))))
 
-                      ;; Pass 3: weighted sum of V
+                      ;; Pass 3: Normalize by sum (valid positions)
+                      (scf.for c0 valid_len c1
+                        (region
+                          (block [(: t2 index)]
+                            (def exp_val (memref.load {:result f32} weights h t t2))
+                            (def normalized (arith.divf exp_val exp_sum))
+                            (memref.store normalized weights h t t2)
+                            (scf.yield))))
+
+                      ;; Zero out invalid positions (t2 > t) for causal mask
+                      (scf.for valid_len c64 c1
+                        (region
+                          (block [(: t2 index)]
+                            (memref.store zero weights h t t2)
+                            (scf.yield))))
+
+                      (scf.yield))))
+                (scf.yield))))
+          (func.return))))
+
+    ;; =========================================================================
+    ;; Batched Attention @ V using linalg.batch_matmul
+    ;; weights: (12, 64, 64), V: (12, 64, 64) -> out: (12, 64, 64)
+    ;; =========================================================================
+    (func.func {:sym_name "batched_attn_v_matmul"
+                :function_type (-> [memref<12x64x64xf32>
+                                    memref<12x64x64xf32>
+                                    memref<12x64x64xf32>] [])}
+      (region
+        (block [(: out memref<12x64x64xf32>)
+                (: weights memref<12x64x64xf32>)
+                (: V memref<12x64x64xf32>)]
+
+          ;; Zero output for accumulation
+          (def zero (: 0.0 f32))
+          (linalg.fill zero out)
+
+          ;; Batched matmul: out[h] = weights[h] @ V[h]
+          (linalg.batch_matmul weights V out)
+
+          (func.return))))
+
+    ;; =========================================================================
+    ;; Reshape attention output from (NH=12, T=64, hs=64) back to (T=64, C=768)
+    ;; =========================================================================
+    (func.func {:sym_name "reshape_attn_output"
+                :function_type (-> [memref<64x768xf32>
+                                    memref<12x64x64xf32>] [])}
+      (region
+        (block [(: out memref<64x768xf32>)
+                (: attn_values memref<12x64x64xf32>)]
+
+          (def c0 (: 0 index))
+          (def c1 (: 1 index))
+          (def c12 (: 12 index))
+          (def c64 (: 64 index))
+          (def hs (: 64 index))
+
+          ;; For each time position
+          (scf.for c0 c64 c1
+            (region
+              (block [(: t index)]
+                ;; For each head
+                (scf.for c0 c12 c1
+                  (region
+                    (block [(: h index)]
+                      (def h_offset (arith.muli h hs))
+                      ;; For each head dimension
                       (scf.for c0 hs c1
                         (region
                           (block [(: i index)]
-                            (def weighted_v (scf.for {:result f32} c0 (arith.addi t c1) c1 zero
-                              (region
-                                (block [(: t2 index) (: v_acc f32)]
-                                  (def dot (scf.for {:result f32} c0 hs c1 zero
-                                    (region
-                                      (block [(: j index) (: dot_acc f32)]
-                                        (def q_idx (arith.addi h_offset j))
-                                        (def k_idx (arith.addi k_offset j))
-                                        (def q_val (memref.load {:result f32} qkv t q_idx))
-                                        (def k_val (memref.load {:result f32} qkv t2 k_idx))
-                                        (scf.yield (arith.addf dot_acc (arith.mulf q_val k_val)))))))
-                                  (def score (arith.mulf dot scale))
-                                  (def attn_weight (arith.divf (math.exp (arith.subf score max_score)) exp_sum))
-                                  (def v_idx (arith.addi v_offset i))
-                                  (def v_val (memref.load {:result f32} qkv t2 v_idx))
-                                  (scf.yield (arith.addf v_acc (arith.mulf attn_weight v_val)))))))
+                            ;; out[t, h*hs + i] = attn_values[h, t, i]
                             (def out_idx (arith.addi h_offset i))
-                            (memref.store weighted_v out t out_idx)
+                            (def val (memref.load {:result f32} attn_values h t i))
+                            (memref.store val out t out_idx)
                             (scf.yield))))
                       (scf.yield))))
                 (scf.yield))))
+          (func.return))))
+
+    ;; =========================================================================
+    ;; Attention Forward - Orchestrates batched GPU attention
+    ;; =========================================================================
+    (func.func {:sym_name "attention_forward"
+                :function_type (-> [memref<64x768xf32>
+                                    memref<64x2304xf32>
+                                    memref<12x64x64xf32>
+                                    memref<12x64x64xf32>
+                                    memref<12x64x64xf32>
+                                    memref<12x64x64xf32>
+                                    memref<12x64x64xf32>
+                                    memref<12x64x64xf32>
+                                    memref<12x64x64xf32>] [])}
+      (region
+        (block [(: out memref<64x768xf32>)
+                (: qkv memref<64x2304xf32>)
+                (: Q memref<12x64x64xf32>)
+                (: K memref<12x64x64xf32>)
+                (: V memref<12x64x64xf32>)
+                (: K_t memref<12x64x64xf32>)
+                (: scores memref<12x64x64xf32>)
+                (: weights memref<12x64x64xf32>)
+                (: values memref<12x64x64xf32>)]
+
+          ;; Step 1: Reshape QKV to batched format
+          (func.call "reshape_qkv_to_batched" Q K V qkv)
+
+          ;; Step 2: Transpose K for K^T
+          (func.call "transpose_k_for_attention" K_t K)
+
+          ;; Step 3: Q @ K^T -> scores (GPU via linalg.batch_matmul)
+          (func.call "batched_qk_matmul" scores Q K_t)
+
+          ;; Step 4: Causal softmax on scores -> weights
+          (func.call "causal_softmax" weights scores)
+
+          ;; Step 5: weights @ V -> values (GPU via linalg.batch_matmul)
+          (func.call "batched_attn_v_matmul" values weights V)
+
+          ;; Step 6: Reshape output back to (T, C) format
+          (func.call "reshape_attn_output" out values)
+
           (func.return))))
 
     ;; =========================================================================
@@ -974,7 +1198,16 @@
       (def gelu_out (memref.alloc {:result memref<64x3072xf32>}))
       (def fc_proj_out (memref.alloc {:result memref<64x768xf32>}))
       (def logits (memref.alloc {:result memref<50257xf32>}))
-    
+
+      ;; Attention workspace buffers (for batched attention)
+      (def Q_batched (memref.alloc {:result memref<12x64x64xf32>}))
+      (def K_batched (memref.alloc {:result memref<12x64x64xf32>}))
+      (def V_batched (memref.alloc {:result memref<12x64x64xf32>}))
+      (def K_transposed (memref.alloc {:result memref<12x64x64xf32>}))
+      (def attn_scores (memref.alloc {:result memref<12x64x64xf32>}))
+      (def attn_weights (memref.alloc {:result memref<12x64x64xf32>}))
+      (def attn_values (memref.alloc {:result memref<12x64x64xf32>}))
+
       ;; Layer weight buffers
       (def ln1_w (memref.alloc {:result memref<768xf32>}))
       (def ln1_b (memref.alloc {:result memref<768xf32>}))
@@ -1016,6 +1249,13 @@
       (gpu.host_register (memref.cast {:result "memref<*xf32>"} fcproj_b))
       (gpu.host_register (memref.cast {:result "memref<*xf32>"} lnf_w))
       (gpu.host_register (memref.cast {:result "memref<*xf32>"} lnf_b))
+      (gpu.host_register (memref.cast {:result "memref<*xf32>"} Q_batched))
+      (gpu.host_register (memref.cast {:result "memref<*xf32>"} K_batched))
+      (gpu.host_register (memref.cast {:result "memref<*xf32>"} V_batched))
+      (gpu.host_register (memref.cast {:result "memref<*xf32>"} K_transposed))
+      (gpu.host_register (memref.cast {:result "memref<*xf32>"} attn_scores))
+      (gpu.host_register (memref.cast {:result "memref<*xf32>"} attn_weights))
+      (gpu.host_register (memref.cast {:result "memref<*xf32>"} attn_values))
 
       (def c768 (: 768 index))
       (def c2304 (: 2304 index))
@@ -1028,7 +1268,9 @@
       (def gen_end (arith.addi prompt_len gen_steps))
     
       (print "\nGenerating tokens:\n")
-    
+
+      (def start_time (func.call {:result i64} "clock_ms"))
+
       (scf.for prompt_len gen_end c1
         (region
           (block [(: step index)]
@@ -1170,8 +1412,10 @@
                   ;; 2. QKV Projection (using linalg.matmul)
                   (func.call "matmul_qkv" qkv_out ln_out qkv_w qkv_b)
     
-                  ;; 3. Attention
-                  (func.call "attention_forward" attn_out qkv_out)
+                  ;; 3. Attention (GPU batched matmul + softmax)
+                  (func.call "attention_forward" attn_out qkv_out
+                             Q_batched K_batched V_batched
+                             K_transposed attn_scores attn_weights attn_values)
     
                   ;; 4. Attention Output Projection (using linalg.matmul)
                   (func.call "matmul_attn_proj" attn_proj_out attn_out attn_w attn_b)
@@ -1223,8 +1467,12 @@
             (memref.store next_token token_ids step)
     
             (scf.yield))))
-    
+
+      (def end_time (func.call {:result i64} "clock_ms"))
+      (def elapsed_ms (arith.subi end_time start_time))
       (print "\n\nGeneration complete!\n")
+      (print "Time for 20 tokens: %ld ms\n" elapsed_ms)
+      (print "Per token: %ld ms\n" (arith.divsi elapsed_ms (: 20 i64)))
     
       ;; Cleanup
       (memref.dealloc token_ids)
@@ -1238,6 +1486,13 @@
       (memref.dealloc gelu_out)
       (memref.dealloc fc_proj_out)
       (memref.dealloc logits)
+      (memref.dealloc Q_batched)
+      (memref.dealloc K_batched)
+      (memref.dealloc V_batched)
+      (memref.dealloc K_transposed)
+      (memref.dealloc attn_scores)
+      (memref.dealloc attn_weights)
+      (memref.dealloc attn_values)
       (memref.dealloc ln1_w)
       (memref.dealloc ln1_b)
       (memref.dealloc qkv_w)

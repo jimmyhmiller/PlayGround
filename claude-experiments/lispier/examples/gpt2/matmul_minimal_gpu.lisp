@@ -13,6 +13,8 @@
   (target rocm
     ;; Linalg to parallel loops, then to GPU
     (pass convert-linalg-to-parallel-loops)
+    ;; Tile parallel loops to create block/thread structure (for small 4x4 matrices use 2x2 tiles)
+    (pass scf-parallel-loop-tiling {:parallel-loop-tile-sizes "2,2"})
     (pass gpu-map-parallel-loops)
     (pass convert-parallel-loops-to-gpu)
     ;; Affine lowering before GPU outlining

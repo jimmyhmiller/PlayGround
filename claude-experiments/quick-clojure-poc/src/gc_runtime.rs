@@ -2541,9 +2541,18 @@ impl GCRuntime {
                     TYPE_DEFTYPE => {
                         let type_data = obj.get_header().type_data as usize;
                         if let Some(def) = self.get_type_def(type_data) {
-                            // Special handling for Cons cells - print as list
-                            if def.name == "clojure.core/Cons" {
+                            // Special handling for Cons/PList cells - print as list
+                            if def.name == "clojure.core/Cons" || def.name == "clojure.core/PList" {
                                 self.format_cons(value)
+                            } else if def.name == "clojure.core/PersistentVector" {
+                                // Format as [...] using the vector's internal array
+                                // PersistentVector has fields: [meta, cnt, shift, root, tail]
+                                self.format_persistent_vector(value)
+                            } else if def.name == "clojure.core/EmptyList" {
+                                "()".to_string()
+                            } else if def.name == "clojure.core/IndexedSeq" {
+                                // Format IndexedSeq as a list
+                                self.format_indexed_seq(value)
                             } else {
                                 format!("#<{}@{:x}>", def.name, untagged)
                             }
@@ -2718,10 +2727,30 @@ impl GCRuntime {
                 break;
             }
 
-            // Check if it's a Cons type by looking at the type_data
+            // Check if it's a Cons, PList, or IndexedSeq type by looking at the type_data
             let type_data = obj.get_header().type_data as usize;
             if let Some(def) = self.get_type_def(type_data) {
-                if def.name != "clojure.core/Cons" {
+                if def.name == "clojure.core/Cons" || def.name == "clojure.core/PList" {
+                    // Both Cons and PList have first at field index 1, rest at field index 2
+                    let first = obj.get_field(1);
+                    let rest = obj.get_field(2);
+                    items.push(self.format_value(first));
+                    current = rest;
+                } else if def.name == "clojure.core/IndexedSeq" {
+                    // IndexedSeq has [arr i meta] - walk through the array from index i
+                    // Array has length at field 0, elements at field 1+
+                    let arr = obj.get_field(0);
+                    let i = (obj.get_field(1) >> 3) as usize;
+                    if BuiltInTypes::get_kind(arr) == BuiltInTypes::HeapObject {
+                        let arr_untagged = arr >> 3;
+                        let arr_obj = HeapObject::from_untagged(arr_untagged as *const u8);
+                        let arr_len = (arr_obj.get_field(0) >> 3) as usize;
+                        for idx in i..arr_len {
+                            items.push(self.format_value(arr_obj.get_field(idx + 1))); // +1 to skip length field
+                        }
+                    }
+                    break;
+                } else {
                     items.push(format!(". {}", self.format_value(current)));
                     break;
                 }
@@ -2729,17 +2758,67 @@ impl GCRuntime {
                 items.push(format!(". {}", self.format_value(current)));
                 break;
             }
-
-            // Cons has fields: [meta, first, rest, __hash]
-            // first is at field index 1, rest is at field index 2
-            let first = obj.get_field(1);
-            let rest = obj.get_field(2);
-
-            items.push(self.format_value(first));
-            current = rest;
         }
 
         format!("({})", items.join(" "))
+    }
+
+    /// Format a PersistentVector as [...]
+    fn format_persistent_vector(&self, value: usize) -> String {
+        let untagged = value >> 3;
+        let obj = HeapObject::from_untagged(untagged as *const u8);
+
+        // PersistentVector has fields: [meta, cnt, shift, root, tail, __hash]
+        let cnt = (obj.get_field(1) >> 3) as usize;
+
+        if cnt == 0 {
+            return "[]".to_string();
+        }
+
+        // For small vectors (count <= 32), all elements are in the tail array
+        // The tail array has its length at field 0, elements start at field 1
+        if cnt <= 32 {
+            let tail = obj.get_field(4);
+            if BuiltInTypes::get_kind(tail) == BuiltInTypes::HeapObject {
+                let tail_untagged = tail >> 3;
+                let tail_obj = HeapObject::from_untagged(tail_untagged as *const u8);
+                let elements: Vec<String> = (0..cnt)
+                    .map(|i| self.format_value(tail_obj.get_field(i + 1))) // +1 to skip length field
+                    .collect();
+                return format!("[{}]", elements.join(" "));
+            }
+        }
+
+        // For larger vectors or if tail access fails, fall back to generic formatting
+        format!("[vec of {} elements]", cnt)
+    }
+
+    /// Format an IndexedSeq as a list
+    fn format_indexed_seq(&self, value: usize) -> String {
+        let untagged = value >> 3;
+        let obj = HeapObject::from_untagged(untagged as *const u8);
+
+        // IndexedSeq has fields: [arr, i, meta]
+        let arr = obj.get_field(0);
+        let i = (obj.get_field(1) >> 3) as usize;
+
+        if BuiltInTypes::get_kind(arr) == BuiltInTypes::HeapObject {
+            let arr_untagged = arr >> 3;
+            let arr_obj = HeapObject::from_untagged(arr_untagged as *const u8);
+            // Array has length at field 0, elements at field 1+
+            let arr_len = (arr_obj.get_field(0) >> 3) as usize;
+
+            if i >= arr_len {
+                return "()".to_string();
+            }
+
+            let elements: Vec<String> = (i..arr_len)
+                .map(|idx| self.format_value(arr_obj.get_field(idx + 1))) // +1 to skip length field
+                .collect();
+            return format!("({})", elements.join(" "));
+        }
+
+        "()".to_string()
     }
 
     /// Find all objects that reference a given target object

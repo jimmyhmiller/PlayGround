@@ -1468,9 +1468,13 @@
 
   ISeqable
   (-seq [coll]
-    (if (zero? cnt)
-      nil
-      coll))
+    (when (pos? cnt)
+      ;; Build a list from the vector elements
+      ;; This ensures proper seq semantics for cons
+      (loop [i (dec cnt) acc nil]
+        (if (< i 0)
+          acc
+          (recur (dec i) (cons (-nth coll i) acc))))))
 
   ISeq
   (-first [coll] (-nth coll 0))
