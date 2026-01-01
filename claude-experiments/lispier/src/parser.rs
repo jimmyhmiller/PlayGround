@@ -533,15 +533,21 @@ impl Parser {
                             block.arguments.push(BlockArgument::new(&sym.name));
                         }
                         Value::List(list_items) => {
-                            // (: name type)
+                            // (: name type) where type can be symbol or string
                             if list_items.len() >= 3 {
                                 if let Value::Symbol(first) = &list_items[0] {
                                     if first.name == ":" {
                                         if let Value::Symbol(name_sym) = &list_items[1] {
-                                            if let Value::Symbol(type_sym) = &list_items[2] {
+                                            // Type can be a symbol or a string (for complex types)
+                                            let type_name = match &list_items[2] {
+                                                Value::Symbol(type_sym) => Some(&type_sym.name),
+                                                Value::String(s) => Some(s),
+                                                _ => None,
+                                            };
+                                            if let Some(type_str) = type_name {
                                                 block.arguments.push(BlockArgument::with_type(
                                                     &name_sym.name,
-                                                    Type::new(&type_sym.name),
+                                                    Type::new(type_str),
                                                 ));
                                                 continue;
                                             }

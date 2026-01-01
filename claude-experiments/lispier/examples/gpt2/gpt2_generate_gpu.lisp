@@ -38,10 +38,16 @@
     ;; GPU lowering
     (pass gpu-kernel-outlining)
     (pass rocdl-attach-target)
-    (pass convert-gpu-to-rocdl {:use-bare-ptr-memref-call-conv true})
+    ;; No bare-ptr for strided memref support
+    (pass convert-gpu-to-rocdl)
     (pass gpu-module-to-binary)
-    ;; Host-side LLVM lowering
-    (pass gpu-to-llvm {:use-bare-pointers-for-kernels true})
+    ;; Host-side LLVM lowering (no bare pointers for strided memref support)
+    (pass gpu-to-llvm)
+    ;; expand-strided-metadata BEFORE LLVM conversions (generates arith/affine ops)
+    (pass expand-strided-metadata)
+    ;; lower-affine again because expand-strided-metadata generates affine.apply
+    (pass lower-affine)
+    ;; Now convert everything to LLVM
     (pass convert-cf-to-llvm)
     (pass convert-arith-to-llvm)
     (pass convert-index-to-llvm)
@@ -156,13 +162,13 @@
     (func.func {:sym_name "matmul_qkv"
                 :function_type (-> [memref<64x2304xf32>
                                     memref<64x768xf32>
-                                    memref<768x2304xf32>
-                                    memref<2304xf32>] [])}
+                                    "memref<768x2304xf32, strided<[2304, 1], offset: ?>>"
+                                    "memref<2304xf32, strided<[1], offset: ?>>"] [])}
       (region
         (block [(: out memref<64x2304xf32>)
                 (: inp memref<64x768xf32>)
-                (: weight memref<768x2304xf32>)
-                (: bias memref<2304xf32>)]
+                (: weight "memref<768x2304xf32, strided<[2304, 1], offset: ?>>")
+                (: bias "memref<2304xf32, strided<[1], offset: ?>>")]
 
           ;; Zero output for accumulation
           (def zero (: 0.0 f32))
@@ -200,13 +206,13 @@
     (func.func {:sym_name "matmul_attn_proj"
                 :function_type (-> [memref<64x768xf32>
                                     memref<64x768xf32>
-                                    memref<768x768xf32>
-                                    memref<768xf32>] [])}
+                                    "memref<768x768xf32, strided<[768, 1], offset: ?>>"
+                                    "memref<768xf32, strided<[1], offset: ?>>"] [])}
       (region
         (block [(: out memref<64x768xf32>)
                 (: inp memref<64x768xf32>)
-                (: weight memref<768x768xf32>)
-                (: bias memref<768xf32>)]
+                (: weight "memref<768x768xf32, strided<[768, 1], offset: ?>>")
+                (: bias "memref<768xf32, strided<[1], offset: ?>>")]
 
           (def zero (: 0.0 f32))
           (linalg.fill {:ins 1 :outs 1} zero out
@@ -241,13 +247,13 @@
     (func.func {:sym_name "matmul_fc"
                 :function_type (-> [memref<64x3072xf32>
                                     memref<64x768xf32>
-                                    memref<768x3072xf32>
-                                    memref<3072xf32>] [])}
+                                    "memref<768x3072xf32, strided<[3072, 1], offset: ?>>"
+                                    "memref<3072xf32, strided<[1], offset: ?>>"] [])}
       (region
         (block [(: out memref<64x3072xf32>)
                 (: inp memref<64x768xf32>)
-                (: weight memref<768x3072xf32>)
-                (: bias memref<3072xf32>)]
+                (: weight "memref<768x3072xf32, strided<[3072, 1], offset: ?>>")
+                (: bias "memref<3072xf32, strided<[1], offset: ?>>")]
 
           (def zero (: 0.0 f32))
           (linalg.fill {:ins 1 :outs 1} zero out
@@ -282,13 +288,13 @@
     (func.func {:sym_name "matmul_fc_proj"
                 :function_type (-> [memref<64x768xf32>
                                     memref<64x3072xf32>
-                                    memref<3072x768xf32>
-                                    memref<768xf32>] [])}
+                                    "memref<3072x768xf32, strided<[768, 1], offset: ?>>"
+                                    "memref<768xf32, strided<[1], offset: ?>>"] [])}
       (region
         (block [(: out memref<64x768xf32>)
                 (: inp memref<64x3072xf32>)
-                (: weight memref<3072x768xf32>)
-                (: bias memref<768xf32>)]
+                (: weight "memref<3072x768xf32, strided<[768, 1], offset: ?>>")
+                (: bias "memref<768xf32, strided<[1], offset: ?>>")]
 
           (def zero (: 0.0 f32))
           (linalg.fill {:ins 1 :outs 1} zero out
@@ -414,15 +420,15 @@
     (func.func {:sym_name "layernorm_forward"
                 :function_type (-> [memref<64x768xf32>
                                     memref<64x768xf32>
-                                    memref<768xf32>
-                                    memref<768xf32>
+                                    "memref<768xf32, strided<[1], offset: ?>>"
+                                    "memref<768xf32, strided<[1], offset: ?>>"
                                     memref<64xf32>
                                     memref<64xf32>] [])}
       (region
         (block [(: out memref<64x768xf32>)
                 (: inp memref<64x768xf32>)
-                (: weight memref<768xf32>)
-                (: bias memref<768xf32>)
+                (: weight "memref<768xf32, strided<[1], offset: ?>>")
+                (: bias "memref<768xf32, strided<[1], offset: ?>>")
                 (: mean_buf memref<64xf32>)
                 (: rs_buf memref<64xf32>)]
 
@@ -1335,19 +1341,6 @@
       (def all_fc_b (memref.alloc {:result memref<12x3072xf32>}))
       (def all_fcproj_w (memref.alloc {:result memref<12x3072x768xf32>}))
       (def all_fcproj_b (memref.alloc {:result memref<12x768xf32>}))
-      ;; Single-layer work buffers (copied from all_* per layer - no transpose needed!)
-      (def ln1_w (memref.alloc {:result memref<768xf32>}))
-      (def ln1_b (memref.alloc {:result memref<768xf32>}))
-      (def qkv_w (memref.alloc {:result memref<768x2304xf32>}))
-      (def qkv_b (memref.alloc {:result memref<2304xf32>}))
-      (def attn_w (memref.alloc {:result memref<768x768xf32>}))
-      (def attn_b (memref.alloc {:result memref<768xf32>}))
-      (def ln2_w (memref.alloc {:result memref<768xf32>}))
-      (def ln2_b (memref.alloc {:result memref<768xf32>}))
-      (def fc_w (memref.alloc {:result memref<768x3072xf32>}))
-      (def fc_b (memref.alloc {:result memref<3072xf32>}))
-      (def fcproj_w (memref.alloc {:result memref<3072x768xf32>}))
-      (def fcproj_b (memref.alloc {:result memref<768xf32>}))
       ;; Final layer norm (not per-layer, just one)
       (def lnf_w (memref.alloc {:result memref<768xf32>}))
       (def lnf_b (memref.alloc {:result memref<768xf32>}))
@@ -1377,18 +1370,6 @@
       (gpu.host_register (memref.cast {:result "memref<*xf32>"} all_fc_b))
       (gpu.host_register (memref.cast {:result "memref<*xf32>"} all_fcproj_w))
       (gpu.host_register (memref.cast {:result "memref<*xf32>"} all_fcproj_b))
-      (gpu.host_register (memref.cast {:result "memref<*xf32>"} ln1_w))
-      (gpu.host_register (memref.cast {:result "memref<*xf32>"} ln1_b))
-      (gpu.host_register (memref.cast {:result "memref<*xf32>"} qkv_w))
-      (gpu.host_register (memref.cast {:result "memref<*xf32>"} qkv_b))
-      (gpu.host_register (memref.cast {:result "memref<*xf32>"} attn_w))
-      (gpu.host_register (memref.cast {:result "memref<*xf32>"} attn_b))
-      (gpu.host_register (memref.cast {:result "memref<*xf32>"} ln2_w))
-      (gpu.host_register (memref.cast {:result "memref<*xf32>"} ln2_b))
-      (gpu.host_register (memref.cast {:result "memref<*xf32>"} fc_w))
-      (gpu.host_register (memref.cast {:result "memref<*xf32>"} fc_b))
-      (gpu.host_register (memref.cast {:result "memref<*xf32>"} fcproj_w))
-      (gpu.host_register (memref.cast {:result "memref<*xf32>"} fcproj_b))
       (gpu.host_register (memref.cast {:result "memref<*xf32>"} lnf_w))
       (gpu.host_register (memref.cast {:result "memref<*xf32>"} lnf_b))
       (gpu.host_register (memref.cast {:result "memref<*xf32>"} Q_batched))
@@ -1575,107 +1556,97 @@
             (scf.for c0 c12 c1
               (region
                 (block [(: layer index)]
-                  ;; Copy this layer's weights from cached buffers (already transposed!)
-                  ;; This is much faster than the original: no ptr arithmetic, no transpose
+                  ;; Create subviews into cached weight buffers (zero-copy!)
+                  ;; 2D→1D: memref<12x768xf32>[layer,:] → memref<768xf32, strided<[1], offset: ?>>
+                  (def ln1_w_view (memref.subview {:result "memref<768xf32, strided<[1], offset: ?>>"
+                                                   :operandSegmentSizes "array<i32: 1, 1, 0, 0>"
+                                                   :static_offsets "array<i64: -9223372036854775808, 0>"
+                                                   :static_sizes "array<i64: 1, 768>"
+                                                   :static_strides "array<i64: 1, 1>"}
+                                    all_ln1_w layer))
+                  (def ln1_b_view (memref.subview {:result "memref<768xf32, strided<[1], offset: ?>>"
+                                                   :operandSegmentSizes "array<i32: 1, 1, 0, 0>"
+                                                   :static_offsets "array<i64: -9223372036854775808, 0>"
+                                                   :static_sizes "array<i64: 1, 768>"
+                                                   :static_strides "array<i64: 1, 1>"}
+                                    all_ln1_b layer))
 
-                  ;; Copy ln1 weights
-                  (scf.for c0 c768 c1
-                    (region
-                      (block [(: i index)]
-                        (def v1 (memref.load {:result f32} all_ln1_w layer i))
-                        (memref.store v1 ln1_w i)
-                        (def v2 (memref.load {:result f32} all_ln1_b layer i))
-                        (memref.store v2 ln1_b i)
-                        (scf.yield))))
+                  ;; 3D→2D: memref<12x768x2304xf32>[layer,:,:] → memref<768x2304xf32, strided<[2304, 1], offset: ?>>
+                  (def qkv_w_view (memref.subview {:result "memref<768x2304xf32, strided<[2304, 1], offset: ?>>"
+                                                   :operandSegmentSizes "array<i32: 1, 1, 0, 0>"
+                                                   :static_offsets "array<i64: -9223372036854775808, 0, 0>"
+                                                   :static_sizes "array<i64: 1, 768, 2304>"
+                                                   :static_strides "array<i64: 1, 1, 1>"}
+                                    all_qkv_w layer))
+                  (def qkv_b_view (memref.subview {:result "memref<2304xf32, strided<[1], offset: ?>>"
+                                                   :operandSegmentSizes "array<i32: 1, 1, 0, 0>"
+                                                   :static_offsets "array<i64: -9223372036854775808, 0>"
+                                                   :static_sizes "array<i64: 1, 2304>"
+                                                   :static_strides "array<i64: 1, 1>"}
+                                    all_qkv_b layer))
 
-                  ;; Copy qkv weights (already transposed in cache!)
-                  (scf.for c0 c768 c1
-                    (region
-                      (block [(: c index)]
-                        (scf.for c0 c2304 c1
-                          (region
-                            (block [(: oc index)]
-                              (def v (memref.load {:result f32} all_qkv_w layer c oc))
-                              (memref.store v qkv_w c oc)
-                              (scf.yield))))
-                        (scf.yield))))
-                  (scf.for c0 c2304 c1
-                    (region
-                      (block [(: i index)]
-                        (def v (memref.load {:result f32} all_qkv_b layer i))
-                        (memref.store v qkv_b i)
-                        (scf.yield))))
+                  ;; 3D→2D: memref<12x768x768xf32>[layer,:,:] → memref<768x768xf32, strided<[768, 1], offset: ?>>
+                  (def attn_w_view (memref.subview {:result "memref<768x768xf32, strided<[768, 1], offset: ?>>"
+                                                    :operandSegmentSizes "array<i32: 1, 1, 0, 0>"
+                                                    :static_offsets "array<i64: -9223372036854775808, 0, 0>"
+                                                    :static_sizes "array<i64: 1, 768, 768>"
+                                                    :static_strides "array<i64: 1, 1, 1>"}
+                                     all_attn_w layer))
+                  (def attn_b_view (memref.subview {:result "memref<768xf32, strided<[1], offset: ?>>"
+                                                    :operandSegmentSizes "array<i32: 1, 1, 0, 0>"
+                                                    :static_offsets "array<i64: -9223372036854775808, 0>"
+                                                    :static_sizes "array<i64: 1, 768>"
+                                                    :static_strides "array<i64: 1, 1>"}
+                                     all_attn_b layer))
 
-                  ;; Copy attn weights (already transposed!)
-                  (scf.for c0 c768 c1
-                    (region
-                      (block [(: c index)]
-                        (scf.for c0 c768 c1
-                          (region
-                            (block [(: oc index)]
-                              (def v (memref.load {:result f32} all_attn_w layer c oc))
-                              (memref.store v attn_w c oc)
-                              (scf.yield))))
-                        (scf.yield))))
-                  (scf.for c0 c768 c1
-                    (region
-                      (block [(: i index)]
-                        (def v (memref.load {:result f32} all_attn_b layer i))
-                        (memref.store v attn_b i)
-                        (scf.yield))))
+                  ;; 2D→1D: memref<12x768xf32>[layer,:] → memref<768xf32, strided<[1], offset: ?>>
+                  (def ln2_w_view (memref.subview {:result "memref<768xf32, strided<[1], offset: ?>>"
+                                                   :operandSegmentSizes "array<i32: 1, 1, 0, 0>"
+                                                   :static_offsets "array<i64: -9223372036854775808, 0>"
+                                                   :static_sizes "array<i64: 1, 768>"
+                                                   :static_strides "array<i64: 1, 1>"}
+                                    all_ln2_w layer))
+                  (def ln2_b_view (memref.subview {:result "memref<768xf32, strided<[1], offset: ?>>"
+                                                   :operandSegmentSizes "array<i32: 1, 1, 0, 0>"
+                                                   :static_offsets "array<i64: -9223372036854775808, 0>"
+                                                   :static_sizes "array<i64: 1, 768>"
+                                                   :static_strides "array<i64: 1, 1>"}
+                                    all_ln2_b layer))
 
-                  ;; Copy ln2 weights
-                  (scf.for c0 c768 c1
-                    (region
-                      (block [(: i index)]
-                        (def v1 (memref.load {:result f32} all_ln2_w layer i))
-                        (memref.store v1 ln2_w i)
-                        (def v2 (memref.load {:result f32} all_ln2_b layer i))
-                        (memref.store v2 ln2_b i)
-                        (scf.yield))))
+                  ;; 3D→2D: memref<12x768x3072xf32>[layer,:,:] → memref<768x3072xf32, strided<[3072, 1], offset: ?>>
+                  (def fc_w_view (memref.subview {:result "memref<768x3072xf32, strided<[3072, 1], offset: ?>>"
+                                                  :operandSegmentSizes "array<i32: 1, 1, 0, 0>"
+                                                  :static_offsets "array<i64: -9223372036854775808, 0, 0>"
+                                                  :static_sizes "array<i64: 1, 768, 3072>"
+                                                  :static_strides "array<i64: 1, 1, 1>"}
+                                   all_fc_w layer))
+                  (def fc_b_view (memref.subview {:result "memref<3072xf32, strided<[1], offset: ?>>"
+                                                  :operandSegmentSizes "array<i32: 1, 1, 0, 0>"
+                                                  :static_offsets "array<i64: -9223372036854775808, 0>"
+                                                  :static_sizes "array<i64: 1, 3072>"
+                                                  :static_strides "array<i64: 1, 1>"}
+                                   all_fc_b layer))
 
-                  ;; Copy fc weights (already transposed!)
-                  (scf.for c0 c768 c1
-                    (region
-                      (block [(: c index)]
-                        (scf.for c0 c3072 c1
-                          (region
-                            (block [(: oc index)]
-                              (def v (memref.load {:result f32} all_fc_w layer c oc))
-                              (memref.store v fc_w c oc)
-                              (scf.yield))))
-                        (scf.yield))))
-                  (scf.for c0 c3072 c1
-                    (region
-                      (block [(: i index)]
-                        (def v (memref.load {:result f32} all_fc_b layer i))
-                        (memref.store v fc_b i)
-                        (scf.yield))))
-
-                  ;; Copy fcproj weights (already transposed!)
-                  (scf.for c0 c3072 c1
-                    (region
-                      (block [(: ic index)]
-                        (scf.for c0 c768 c1
-                          (region
-                            (block [(: oc index)]
-                              (def v (memref.load {:result f32} all_fcproj_w layer ic oc))
-                              (memref.store v fcproj_w ic oc)
-                              (scf.yield))))
-                        (scf.yield))))
-                  (scf.for c0 c768 c1
-                    (region
-                      (block [(: i index)]
-                        (def v (memref.load {:result f32} all_fcproj_b layer i))
-                        (memref.store v fcproj_b i)
-                        (scf.yield))))
+                  ;; 3D→2D: memref<12x3072x768xf32>[layer,:,:] → memref<3072x768xf32, strided<[768, 1], offset: ?>>
+                  (def fcproj_w_view (memref.subview {:result "memref<3072x768xf32, strided<[768, 1], offset: ?>>"
+                                                      :operandSegmentSizes "array<i32: 1, 1, 0, 0>"
+                                                      :static_offsets "array<i64: -9223372036854775808, 0, 0>"
+                                                      :static_sizes "array<i64: 1, 3072, 768>"
+                                                      :static_strides "array<i64: 1, 1, 1>"}
+                                       all_fcproj_w layer))
+                  (def fcproj_b_view (memref.subview {:result "memref<768xf32, strided<[1], offset: ?>>"
+                                                      :operandSegmentSizes "array<i32: 1, 1, 0, 0>"
+                                                      :static_offsets "array<i64: -9223372036854775808, 0>"
+                                                      :static_sizes "array<i64: 1, 768>"
+                                                      :static_strides "array<i64: 1, 1>"}
+                                       all_fcproj_b layer))
 
                   ;; === Transformer block operations ===
                   ;; 1. LayerNorm1
-                  (func.call {:callee "@layernorm_forward"} ln_out x ln1_w ln1_b ln_mean_buf ln_rs_buf)
+                  (func.call {:callee "@layernorm_forward"} ln_out x ln1_w_view ln1_b_view ln_mean_buf ln_rs_buf)
 
                   ;; 2. QKV Projection (using linalg.matmul)
-                  (func.call {:callee "@matmul_qkv"} qkv_out ln_out qkv_w qkv_b)
+                  (func.call {:callee "@matmul_qkv"} qkv_out ln_out qkv_w_view qkv_b_view)
 
                   ;; 3. Attention (GPU batched matmul + softmax)
                   (func.call {:callee "@attention_forward"} attn_out qkv_out
@@ -1684,22 +1655,22 @@
                              softmax_masked softmax_max_buf softmax_sum_buf)
 
                   ;; 4. Attention Output Projection (using linalg.matmul)
-                  (func.call {:callee "@matmul_attn_proj"} attn_proj_out attn_out attn_w attn_b)
+                  (func.call {:callee "@matmul_attn_proj"} attn_proj_out attn_out attn_w_view attn_b_view)
 
                   ;; 5. Residual 1 (using linalg.add)
                   (func.call {:callee "@residual_forward"} x2 x attn_proj_out)
 
                   ;; 6. LayerNorm2
-                  (func.call {:callee "@layernorm_forward"} ln_out x2 ln2_w ln2_b ln_mean_buf ln_rs_buf)
+                  (func.call {:callee "@layernorm_forward"} ln_out x2 ln2_w_view ln2_b_view ln_mean_buf ln_rs_buf)
 
                   ;; 7. MLP FC (using linalg.matmul)
-                  (func.call {:callee "@matmul_fc"} fc_out ln_out fc_w fc_b)
+                  (func.call {:callee "@matmul_fc"} fc_out ln_out fc_w_view fc_b_view)
 
                   ;; 8. GELU (using math.tanh)
                   (func.call {:callee "@gelu_forward"} gelu_out fc_out)
 
                   ;; 9. MLP Projection (using linalg.matmul)
-                  (func.call {:callee "@matmul_fc_proj"} fc_proj_out gelu_out fcproj_w fcproj_b)
+                  (func.call {:callee "@matmul_fc_proj"} fc_proj_out gelu_out fcproj_w_view fcproj_b_view)
 
                   ;; 10. Residual 2 (using linalg.add)
                   (func.call {:callee "@residual_forward"} x x2 fc_proj_out)
@@ -1707,7 +1678,10 @@
                   (scf.yield))))
 
             ;; 3. Final LayerNorm (uses pre-loaded lnf_w, lnf_b)
-            (func.call {:callee "@layernorm_forward"} x2 x lnf_w lnf_b ln_mean_buf ln_rs_buf)
+            ;; Cast to strided memref for compatibility with layer-based function signature
+            (def lnf_w_cast (memref.cast {:result "memref<768xf32, strided<[1], offset: ?>>"} lnf_w))
+            (def lnf_b_cast (memref.cast {:result "memref<768xf32, strided<[1], offset: ?>>"} lnf_b))
+            (func.call {:callee "@layernorm_forward"} x2 x lnf_w_cast lnf_b_cast ln_mean_buf ln_rs_buf)
     
             ;; 4. Compute logits from position step-1 (the last token's position)
             (def logit_pos (arith.subi step c1))
@@ -1749,18 +1723,6 @@
       (memref.dealloc attn_scores)
       (memref.dealloc attn_weights)
       (memref.dealloc attn_values)
-      (memref.dealloc ln1_w)
-      (memref.dealloc ln1_b)
-      (memref.dealloc qkv_w)
-      (memref.dealloc qkv_b)
-      (memref.dealloc attn_w)
-      (memref.dealloc attn_b)
-      (memref.dealloc ln2_w)
-      (memref.dealloc ln2_b)
-      (memref.dealloc fc_w)
-      (memref.dealloc fc_b)
-      (memref.dealloc fcproj_w)
-      (memref.dealloc fcproj_b)
       (memref.dealloc lnf_w)
       (memref.dealloc lnf_b)
     

@@ -2,6 +2,178 @@ use crate::gc_runtime::GCRuntime;
 use crate::value::Value;
 use clojure_reader::edn::{Edn, read_string};
 use im::{hashmap, hashset, vector};
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+// Counter for generating unique anonymous function parameter names
+static ANON_FN_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+/// Analyze an Edn form to find the highest numbered % argument and whether %& is used
+/// Returns (max_positional_arg, has_rest_arg)
+/// % and %1 both count as arg 1
+fn find_anon_fn_args(edn: &Edn) -> (usize, bool) {
+    match edn {
+        Edn::Symbol(s) => {
+            if *s == "%" || *s == "%1" {
+                (1, false)
+            } else if *s == "%&" {
+                (0, true)
+            } else if s.starts_with('%') {
+                // Try to parse %2, %3, etc.
+                if let Ok(n) = s[1..].parse::<usize>() {
+                    (n, false)
+                } else {
+                    (0, false)
+                }
+            } else {
+                (0, false)
+            }
+        }
+        Edn::List(items) | Edn::Vector(items) => {
+            let mut max_arg = 0;
+            let mut has_rest = false;
+            for item in items {
+                let (n, r) = find_anon_fn_args(item);
+                max_arg = max_arg.max(n);
+                has_rest = has_rest || r;
+            }
+            (max_arg, has_rest)
+        }
+        Edn::Map(map) => {
+            let mut max_arg = 0;
+            let mut has_rest = false;
+            for (k, v) in map {
+                let (n1, r1) = find_anon_fn_args(k);
+                let (n2, r2) = find_anon_fn_args(v);
+                max_arg = max_arg.max(n1).max(n2);
+                has_rest = has_rest || r1 || r2;
+            }
+            (max_arg, has_rest)
+        }
+        Edn::Set(items) => {
+            let mut max_arg = 0;
+            let mut has_rest = false;
+            for item in items {
+                let (n, r) = find_anon_fn_args(item);
+                max_arg = max_arg.max(n);
+                has_rest = has_rest || r;
+            }
+            (max_arg, has_rest)
+        }
+        // Recursively check nested structures
+        Edn::Quote(inner) | Edn::SyntaxQuote(inner) | Edn::Unquote(inner) | Edn::UnquoteSplicing(inner) => {
+            find_anon_fn_args(inner)
+        }
+        Edn::Meta(_, inner) => find_anon_fn_args(inner),
+        Edn::Tagged(_, inner) => find_anon_fn_args(inner),
+        // Other types don't contain % args
+        _ => (0, false),
+    }
+}
+
+/// Replace % symbols in an Edn form with parameter names
+/// suffix is a unique identifier for this anonymous function
+fn replace_anon_fn_args(edn: &Edn, suffix: usize) -> Edn<'static> {
+    match edn {
+        Edn::Symbol(s) => {
+            if *s == "%" || *s == "%1" {
+                let param_name = format!("p1__{}", suffix);
+                Edn::Symbol(Box::leak(param_name.into_boxed_str()))
+            } else if *s == "%&" {
+                let param_name = format!("rest__{}", suffix);
+                Edn::Symbol(Box::leak(param_name.into_boxed_str()))
+            } else if s.starts_with('%') {
+                if let Ok(n) = s[1..].parse::<usize>() {
+                    let param_name = format!("p{}__{}", n, suffix);
+                    Edn::Symbol(Box::leak(param_name.into_boxed_str()))
+                } else {
+                    Edn::Symbol(Box::leak(s.to_string().into_boxed_str()))
+                }
+            } else {
+                Edn::Symbol(Box::leak(s.to_string().into_boxed_str()))
+            }
+        }
+        Edn::List(items) => {
+            let new_items: Vec<_> = items.iter().map(|item| replace_anon_fn_args(item, suffix)).collect();
+            Edn::List(new_items)
+        }
+        Edn::Vector(items) => {
+            let new_items: Vec<_> = items.iter().map(|item| replace_anon_fn_args(item, suffix)).collect();
+            Edn::Vector(new_items)
+        }
+        Edn::Map(map) => {
+            let new_map: std::collections::BTreeMap<_, _> = map.iter()
+                .map(|(k, v)| (replace_anon_fn_args(k, suffix), replace_anon_fn_args(v, suffix)))
+                .collect();
+            Edn::Map(new_map)
+        }
+        Edn::Set(items) => {
+            let new_items: std::collections::BTreeSet<_> = items.iter()
+                .map(|item| replace_anon_fn_args(item, suffix))
+                .collect();
+            Edn::Set(new_items)
+        }
+        // For other types, just clone/convert
+        Edn::Nil => Edn::Nil,
+        Edn::Bool(b) => Edn::Bool(*b),
+        Edn::Int(i) => Edn::Int(*i),
+        Edn::Double(f) => Edn::Double(*f),
+        Edn::Str(s) => Edn::Str(Box::leak(s.to_string().into_boxed_str())),
+        Edn::Key(k) => Edn::Key(Box::leak(k.to_string().into_boxed_str())),
+        Edn::Char(c) => Edn::Char(*c),
+        Edn::Rational(r) => Edn::Rational(*r),
+        Edn::Tagged(tag, inner) => {
+            Edn::Tagged(
+                Box::leak(tag.to_string().into_boxed_str()),
+                Box::new(replace_anon_fn_args(inner, suffix))
+            )
+        }
+        Edn::Quote(inner) => Edn::Quote(Box::new(replace_anon_fn_args(inner, suffix))),
+        Edn::SyntaxQuote(inner) => Edn::SyntaxQuote(Box::new(replace_anon_fn_args(inner, suffix))),
+        Edn::Unquote(inner) => Edn::Unquote(Box::new(replace_anon_fn_args(inner, suffix))),
+        Edn::UnquoteSplicing(inner) => Edn::UnquoteSplicing(Box::new(replace_anon_fn_args(inner, suffix))),
+        Edn::Meta(meta, inner) => Edn::Meta(
+            Box::new(replace_anon_fn_args(meta, suffix)),
+            Box::new(replace_anon_fn_args(inner, suffix))
+        ),
+        // Catch-all for any other types (shouldn't happen in practice)
+        _ => panic!("Unexpected Edn type in replace_anon_fn_args: {:?}", edn),
+    }
+}
+
+/// Expand #(...) anonymous function syntax
+/// #(+ 1 %) -> (fn [p1__N] (+ 1 p1__N))
+/// #(+ %1 %2) -> (fn [p1__N p2__N] (+ p1__N p2__N))
+/// #(apply + %&) -> (fn [& rest__N] (apply + rest__N))
+fn expand_anon_fn(body: &Edn, rt: &mut GCRuntime) -> Result<usize, String> {
+    let suffix = ANON_FN_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let (max_arg, has_rest) = find_anon_fn_args(body);
+
+    // Build parameter vector
+    let mut params = Vec::new();
+    for i in 1..=max_arg {
+        let param_name = format!("p{}__{}", i, suffix);
+        params.push(rt.allocate_reader_symbol(None, &param_name)?);
+    }
+
+    if has_rest {
+        // Add & and rest parameter
+        let ampersand = rt.allocate_reader_symbol(None, "&")?;
+        let rest_param = format!("rest__{}", suffix);
+        let rest_sym = rt.allocate_reader_symbol(None, &rest_param)?;
+        params.push(ampersand);
+        params.push(rest_sym);
+    }
+
+    let params_vec = rt.allocate_reader_vector(&params)?;
+
+    // Replace % symbols in body and convert to tagged
+    let replaced_body = replace_anon_fn_args(body, suffix);
+    let body_tagged = edn_to_tagged(&replaced_body, rt)?;
+
+    // Build (fn [params] body)
+    let fn_sym = rt.allocate_reader_symbol(None, "fn")?;
+    rt.allocate_reader_list(&[fn_sym, params_vec, body_tagged])
+}
 
 /// Process escape sequences in a string
 fn process_escape_sequences(s: &str) -> String {
@@ -304,6 +476,18 @@ pub fn edn_to_tagged(edn: &Edn, rt: &mut GCRuntime) -> Result<usize, String> {
             let inner_tagged = edn_to_tagged(inner, rt)?;
             let unquote_splicing_sym = rt.allocate_reader_symbol(None, "clojure.core/unquote-splicing")?;
             rt.allocate_reader_list(&[unquote_splicing_sym, inner_tagged])
+        }
+
+        // Tagged literals: #tag value
+        // Special case: empty tag "" is #() anonymous function syntax
+        Edn::Tagged(tag, inner) => {
+            if tag.is_empty() {
+                // #(...) anonymous function syntax
+                expand_anon_fn(inner, rt)
+            } else {
+                // Other tagged literals not yet supported
+                Err(format!("Unsupported tagged literal: #{} {:?}", tag, inner))
+            }
         }
 
         // Handle other Edn types as needed

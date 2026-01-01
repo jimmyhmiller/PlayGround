@@ -393,6 +393,19 @@ fn print_ast(ast: &Expr, indent: usize) {
             println!("{}  value:", prefix);
             print_ast(value, indent + 2);
         }
+        Expr::MethodCall {
+            method,
+            object,
+            args,
+        } => {
+            println!("{}MethodCall(.{})", prefix, method);
+            println!("{}  object:", prefix);
+            print_ast(object, indent + 2);
+            for (i, arg) in args.iter().enumerate() {
+                println!("{}  arg[{}]:", prefix, i);
+                print_ast(arg, indent + 2);
+            }
+        }
         Expr::Throw { exception } => {
             println!("{}Throw", prefix);
             println!("{}  exception:", prefix);

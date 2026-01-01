@@ -173,6 +173,11 @@ impl Compiler {
                 object,
                 value,
             } => self.compile_field_set(field, object, value),
+            Expr::MethodCall {
+                method,
+                object,
+                args,
+            } => self.compile_method_call(method, object, args),
             Expr::Throw { exception } => self.compile_throw(exception),
             Expr::Try {
                 body,
@@ -770,6 +775,51 @@ impl Compiler {
         ));
 
         // 6. set! returns the stored value
+        Ok(result)
+    }
+
+    /// Compile (.method obj arg1 arg2 ...) - method call on deftype
+    /// Uses protocol lookup to find the method implementation
+    fn compile_method_call(
+        &mut self,
+        method: &str,
+        object: &Expr,
+        args: &[Expr],
+    ) -> Result<IrValue, String> {
+        // Compile the object (first argument to method)
+        let obj_value = self.compile(object)?;
+        let obj_reg = self.ensure_register(obj_value);
+
+        // Compile additional arguments
+        let mut arg_regs = vec![obj_reg];
+        for arg in args {
+            let arg_value = self.compile(arg)?;
+            arg_regs.push(self.ensure_register(arg_value));
+        }
+
+        // Leak method name string for trampoline (static lifetime)
+        let method_bytes = method.as_bytes();
+        let method_ptr = Box::leak(method_bytes.to_vec().into_boxed_slice()).as_ptr() as usize;
+        let method_len = method.len();
+
+        // Step 1: Call builtin_protocol_lookup(target, method_ptr, method_len) -> fn_ptr
+        let fn_ptr = self.builder.new_register();
+        let builtin_addr = crate::trampoline::builtin_protocol_lookup as usize;
+        self.builder.emit(Instruction::ExternalCall(
+            fn_ptr,
+            builtin_addr,
+            vec![
+                arg_regs[0],                              // target object
+                IrValue::RawConstant(method_ptr as i64),  // method_name_ptr
+                IrValue::RawConstant(method_len as i64),  // method_name_len
+            ],
+        ));
+
+        // Step 2: Call fn_ptr with all args (object + additional args)
+        let result = self.builder.new_register();
+        self.builder
+            .emit(Instruction::Call(result, fn_ptr, arg_regs));
+
         Ok(result)
     }
 
@@ -2404,6 +2454,14 @@ impl Compiler {
             Expr::FieldSet { object, value, .. } => {
                 self.collect_free_vars_from_expr(object, bound, free);
                 self.collect_free_vars_from_expr(value, bound, free);
+            }
+
+            // MethodCall: check object and args for free vars
+            Expr::MethodCall { object, args, .. } => {
+                self.collect_free_vars_from_expr(object, bound, free);
+                for arg in args {
+                    self.collect_free_vars_from_expr(arg, bound, free);
+                }
             }
 
             // Throw: check exception expression for free vars

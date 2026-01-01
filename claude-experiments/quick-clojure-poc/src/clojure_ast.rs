@@ -181,6 +181,14 @@ pub enum Expr {
         value: Box<Expr>,
     },
 
+    /// (.method obj arg1 arg2 ...) - method call
+    /// Calls a method on a deftype instance (defined via protocol implementation)
+    MethodCall {
+        method: String,
+        object: Box<Expr>,
+        args: Vec<Expr>,
+    },
+
     /// (throw expr)
     /// Throws an exception value
     Throw {
@@ -446,6 +454,7 @@ pub fn analyze_tagged(rt: &mut GCRuntime, tagged: usize) -> Result<Expr, String>
                     "defprotocol" => return analyze_defprotocol_tagged(rt, tagged),
                     "extend-type" => return analyze_extend_type_tagged(rt, tagged),
                     "debugger" => return analyze_debugger_tagged(rt, tagged),
+                    "new" => return analyze_new_tagged(rt, tagged),
 
                     _ => {}
                 }
@@ -958,6 +967,39 @@ fn analyze_debugger_tagged(rt: &mut GCRuntime, list_ptr: usize) -> Result<Expr, 
     Ok(Expr::Debugger {
         expr: Box::new(expr),
     })
+}
+
+/// Analyze (new TypeName arg1 arg2 ...) - constructor call
+/// Equivalent to (TypeName. arg1 arg2 ...)
+fn analyze_new_tagged(rt: &mut GCRuntime, list_ptr: usize) -> Result<Expr, String> {
+    let items = list_to_vec(rt, list_ptr);
+    if items.len() < 2 {
+        return Err("new requires a type name".to_string());
+    }
+
+    // Get the type name from the second element
+    let type_sym = items[1];
+    if !rt.prim_is_symbol(type_sym) {
+        return Err("new requires a symbol as type name".to_string());
+    }
+
+    let name = rt.prim_symbol_name(type_sym)?;
+    let ns = rt.prim_symbol_namespace(type_sym)?;
+
+    // Build the full type name, handling qualified symbols like myns/Widget
+    let type_name = if let Some(ns_str) = ns {
+        format!("{}/{}", ns_str, name)
+    } else {
+        name
+    };
+
+    // Analyze the constructor arguments
+    let mut args = Vec::new();
+    for item in items.iter().skip(2) {
+        args.push(analyze_tagged(rt, *item)?);
+    }
+
+    Ok(Expr::TypeConstruct { type_name, args })
 }
 
 fn analyze_quote_tagged(rt: &mut GCRuntime, list_ptr: usize) -> Result<Expr, String> {
@@ -1898,6 +1940,24 @@ fn analyze_call_tagged(rt: &mut GCRuntime, list_ptr: usize) -> Result<Expr, Stri
             return Ok(Expr::FieldAccess {
                 field,
                 object: Box::new(object),
+            });
+        }
+
+        // Method call: (.method obj arg1 arg2 ...)
+        if name.starts_with('.') && name.len() > 1 && !name.starts_with(".-") {
+            if items.len() < 2 {
+                return Err(format!("Method call {} requires at least an object", name));
+            }
+            let method = name[1..].to_string();
+            let object = analyze_tagged(rt, items[1])?;
+            let mut args = Vec::new();
+            for item in items.iter().skip(2) {
+                args.push(analyze_tagged(rt, *item)?);
+            }
+            return Ok(Expr::MethodCall {
+                method,
+                object: Box::new(object),
+                args,
             });
         }
 
