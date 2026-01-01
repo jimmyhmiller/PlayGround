@@ -250,11 +250,11 @@ Convert ALL CPU-bound operations to GPU-parallelized linalg ops using `linalg.ge
 | **1.3** | Convert GELU to linalg.generic | Med | High | ✅ DONE |
 | **2.1** | Convert transpose_k_for_attention | Low | Med | ✅ DONE |
 | **2.2-2.3** | Convert reshape operations | Med | Med | SKIPPED (needs memref.reshape) |
-| **3.1** | Convert layernorm with scf.parallel + reduce | High | High | TODO |
-| **3.2** | Convert softmax_logits | Med | Med | TODO |
-| **3.3** | Convert causal_softmax | High | High | TODO |
-| **4.1** | Pre-load weights to memref | Med | Prereq | TODO |
-| **4.2** | Convert embedding_lookup | High | Med | TODO |
+| **3.1** | Convert layernorm with scf.parallel + reduce | High | High | ❌ CPU FASTER (471ms vs 450ms) |
+| **3.2** | Convert softmax_logits | Med | Med | TODO (likely same issue) |
+| **3.3** | Convert causal_softmax | High | High | TODO (likely same issue) |
+| **4.1** | Pre-load weights to memref | Med | Prereq | ✅ DONE |
+| **4.2** | Convert embedding_lookup to scf.parallel | High | Med | ✅ DONE (450ms) |
 | **4.3** | Convert logits_forward | Med | Med | TODO |
 
 ---
@@ -283,9 +283,36 @@ Convert ALL CPU-bound operations to GPU-parallelized linalg ops using `linalg.ge
 - **After Phase 1+2:** 44 scf.for loops (reduced by 18)
   - Converted: 4 bias additions, GELU, scaling, K transpose
   - Remaining: layernorm, causal_softmax, embedding_lookup, reshapes, logits
+- **After Phase 4.1+4.2:** ~450ms/token
+  - Added: wte/wpe weight pre-loading to memref, embedding_lookup GPU parallel
+  - Embedding uses scf.parallel with operandSegmentSizes attribute
+
+## Key Findings
+
+### GPU Parallelization Limits
+
+**Reductions don't benefit from simple GPU parallelization:**
+- layernorm: 64 rows × 768 column reduction → GPU was 21ms SLOWER (471 vs 450ms)
+- Reason: GPU kernel launch overhead dominates for small parallelism (64 threads)
+- Each thread still does 768*2 sequential memory accesses
+- CPU cache-friendly loops outperform GPU for this pattern
+
+**Operations that DO benefit:**
+- Element-wise ops via linalg.generic (high parallelism: 64×768 = 49,152 threads)
+- Matrix multiplications (already GPU via linalg.matmul → GPU kernels)
+- Embedding lookup (64×768 parallel writes)
+
+**Operations that DON'T benefit:**
+- Reductions with small outer dimension (layernorm, softmax per row)
+- Would need proper GPU reduction primitives (shared memory, warp shuffles)
 
 ## Expected Outcome
 
-- **After all phases:** All compute-intensive operations GPU-parallelized, ~10-15 kernel launches, target <100ms/token
+- **Current:** ~450ms/token (down from 1.2s, 2.7x improvement)
+- **Realistic target:** 300-400ms/token (limited by CPU-bound reductions)
+- GPU-only reductions would require custom kernel support not available in current MLIR passes
 
-**Performance target:** 10-20x improvement (60-120ms/token)
+**Note:** For true 60-120ms/token, would need:
+1. Custom GPU reduction kernels with shared memory
+2. Fused attention kernels (FlashAttention-style)
+3. Batch processing across multiple tokens

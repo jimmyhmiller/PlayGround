@@ -361,61 +361,44 @@
     ;; =========================================================================
     (func.func {:sym_name "embedding_lookup"
                 :function_type (-> [memref<64x768xf32>
-                                    !llvm.ptr
-                                    !llvm.ptr
+                                    memref<50257x768xf32>
+                                    memref<1024x768xf32>
                                     memref<64xi32>] [])}
       (region
         (block [(: out memref<64x768xf32>)
-                (: wte_ptr !llvm.ptr)
-                (: wpe_ptr !llvm.ptr)
+                (: wte memref<50257x768xf32>)
+                (: wpe memref<1024x768xf32>)
                 (: tokens memref<64xi32>)]
 
           (def c0 (: 0 index))
           (def c1 (: 1 index))
           (def T (: 64 index))
           (def C (: 768 index))
-          (def C_i64 (: 768 i64))
 
-          (scf.for c0 T c1
+          ;; GPU parallel over all (t, c) pairs: 64*768 = 49,152 threads
+          ;; operandSegmentSizes: [2 lowerBounds, 2 upperBounds, 2 steps, 0 initVals]
+          (scf.parallel {:operandSegmentSizes "array<i32: 2, 2, 2, 0>"} [c0 c0] [T C] [c1 c1]
             (region
-              (block [(: t index)]
+              (block [(: t index) (: c index)]
+                ;; Load token_id for this position (redundant loads, but GPU handles this well)
                 (def token_id_i32 (memref.load {:result i32} tokens t))
-                (def token_id (arith.extsi {:result i64} token_id_i32))
-                (def t_i64 (arith.index_cast {:result i64} t))
+                (def token_idx (arith.index_cast {:result index} token_id_i32))
 
-                ;; Token embedding offset: token_id * C
-                (def wte_offset (arith.muli token_id C_i64))
+                ;; Get token embedding: wte[token_id, c]
+                (def wte_val (memref.load {:result f32} wte token_idx c))
 
-                ;; Position embedding offset: t * C
-                (def wpe_offset (arith.muli t_i64 C_i64))
+                ;; Get position embedding: wpe[t, c]
+                (def wpe_val (memref.load {:result f32} wpe t c))
 
-                ;; Copy and add embeddings
-                (scf.for c0 C c1
-                  (region
-                    (block [(: c index)]
-                      (def c_i64 (arith.index_cast {:result i64} c))
-
-                      ;; Get token embedding
-                      (def wte_idx (arith.addi wte_offset c_i64))
-                      (def wte_elem_ptr (ptr-at f32 wte_ptr wte_idx))
-                      (def wte_val (llvm.load {:result f32} wte_elem_ptr))
-
-                      ;; Get position embedding
-                      (def wpe_idx (arith.addi wpe_offset c_i64))
-                      (def wpe_elem_ptr (ptr-at f32 wpe_ptr wpe_idx))
-                      (def wpe_val (llvm.load {:result f32} wpe_elem_ptr))
-
-                      ;; Sum and store
-                      (def sum (arith.addf wte_val wpe_val))
-                      (memref.store sum out t c)
-                      (scf.yield))))
-                (scf.yield))))
+                ;; Sum and store
+                (def sum (arith.addf wte_val wpe_val))
+                (memref.store sum out t c)
+                (scf.reduce))))
           (func.return))))
 
     ;; =========================================================================
-    ;; LayerNorm with GPU-parallel normalization
-    ;; Phase 1: Compute mean and reciprocal std per row (CPU, sequential)
-    ;; Phase 2: Apply normalization (GPU, parallel via linalg.generic)
+    ;; LayerNorm with Fused GPU Warp Reductions
+    ;; Single kernel: warp reduction for mean/variance + apply normalization
     ;; =========================================================================
     (func.func {:sym_name "layernorm_forward"
                 :function_type (-> [memref<64x768xf32>
@@ -434,66 +417,119 @@
 
           (def c0 (: 0 index))
           (def c1 (: 1 index))
+          (def c24 (: 24 index))
           (def T (: 64 index))
-          (def C (: 768 index))
+          (def c32 (: 32 index))
           (def C_f32 (: 768.0 f32))
           (def zero (: 0.0 f32))
           (def eps (: 1e-5 f32))
           (def one (: 1.0 f32))
 
-          ;; Phase 1: Compute mean and reciprocal std for each row
-          ;; NOTE: Kept as scf.for - GPU reduction was slower (903ms vs 829ms)
-          ;; The 768-wide reductions have too much kernel overhead for this size
-          (scf.for c0 T c1
+          ;; Shuffle constants
+          (def c16_i32 (: 16 i32))
+          (def c8_i32 (: 8 i32))
+          (def c4_i32 (: 4 i32))
+          (def c2_i32 (: 2 i32))
+          (def c1_i32 (: 1 i32))
+          (def c32_i32 (: 32 i32))
+
+          ;; Fused GPU kernel: reduction + normalization in one pass
+          ;; Launch 64 blocks (one per row) x 32 threads (one warp)
+          ;; Each thread handles 768/32 = 24 elements
+          (gpu.launch {:operandSegmentSizes array<i32: 0, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0>}
+            T c1 c1 c32 c1 c1
             (region
-              (block [(: t index)]
-                ;; Mean
-                (def sum_val (scf.for {:result f32} c0 C c1 zero
+              (block [(: row index) (: _by index) (: _bz index)
+                      (: lane index) (: _ty index) (: _tz index)
+                      (: _gridDimX index) (: _gridDimY index) (: _gridDimZ index)
+                      (: _blockDimX index) (: _blockDimY index) (: _blockDimZ index)]
+
+                ;; Step 1: Each thread sums its 24 elements
+                (def partial_sum (scf.for {:result f32} c0 c24 c1 zero
                   (region
-                    (block [(: c index) (: acc f32)]
-                      (def x (memref.load {:result f32} inp t c))
+                    (block [(: i index) (: acc f32)]
+                      (def offset (arith.muli i c32))
+                      (def col (arith.addi lane offset))
+                      (def x (memref.load {:result f32} inp row col))
                       (def new_acc (arith.addf acc x))
                       (scf.yield new_acc)))))
-                (def m (arith.divf sum_val C_f32))
-                (memref.store m mean_buf t)
 
-                ;; Variance
-                (def var_val (scf.for {:result f32} c0 C c1 zero
+                ;; Step 2: Warp reduce sum (5 XOR shuffles)
+                (def s16 (gpu.shuffle {:mode "#gpu<shuffle_mode xor>"} partial_sum c16_i32 c32_i32))
+                (def sum16 (arith.addf partial_sum s16))
+                (def s8 (gpu.shuffle {:mode "#gpu<shuffle_mode xor>"} sum16 c8_i32 c32_i32))
+                (def sum8 (arith.addf sum16 s8))
+                (def s4 (gpu.shuffle {:mode "#gpu<shuffle_mode xor>"} sum8 c4_i32 c32_i32))
+                (def sum4 (arith.addf sum8 s4))
+                (def s2 (gpu.shuffle {:mode "#gpu<shuffle_mode xor>"} sum4 c2_i32 c32_i32))
+                (def sum2 (arith.addf sum4 s2))
+                (def s1 (gpu.shuffle {:mode "#gpu<shuffle_mode xor>"} sum2 c1_i32 c32_i32))
+                (def row_sum (arith.addf sum2 s1))
+                (def mean (arith.divf row_sum C_f32))
+
+                ;; Step 3: Each thread computes variance for its 24 elements
+                (def partial_var (scf.for {:result f32} c0 c24 c1 zero
                   (region
-                    (block [(: c index) (: vacc f32)]
-                      (def x (memref.load {:result f32} inp t c))
-                      (def diff (arith.subf x m))
+                    (block [(: i index) (: vacc f32)]
+                      (def offset (arith.muli i c32))
+                      (def col (arith.addi lane offset))
+                      (def x (memref.load {:result f32} inp row col))
+                      (def diff (arith.subf x mean))
                       (def diff_sq (arith.mulf diff diff))
                       (def new_vacc (arith.addf vacc diff_sq))
                       (scf.yield new_vacc)))))
-                (def variance (arith.divf var_val C_f32))
 
-                ;; Reciprocal std using math.sqrt
+                ;; Step 4: Warp reduce variance
+                (def v16 (gpu.shuffle {:mode "#gpu<shuffle_mode xor>"} partial_var c16_i32 c32_i32))
+                (def vsum16 (arith.addf partial_var v16))
+                (def v8 (gpu.shuffle {:mode "#gpu<shuffle_mode xor>"} vsum16 c8_i32 c32_i32))
+                (def vsum8 (arith.addf vsum16 v8))
+                (def v4 (gpu.shuffle {:mode "#gpu<shuffle_mode xor>"} vsum8 c4_i32 c32_i32))
+                (def vsum4 (arith.addf vsum8 v4))
+                (def v2 (gpu.shuffle {:mode "#gpu<shuffle_mode xor>"} vsum4 c2_i32 c32_i32))
+                (def vsum2 (arith.addf vsum4 v2))
+                (def v1 (gpu.shuffle {:mode "#gpu<shuffle_mode xor>"} vsum2 c1_i32 c32_i32))
+                (def var_sum (arith.addf vsum2 v1))
+
+                ;; Step 5: Compute reciprocal std
+                (def variance (arith.divf var_sum C_f32))
                 (def var_eps (arith.addf variance eps))
                 (def std (math.sqrt var_eps))
                 (def rs (arith.divf one std))
-                (memref.store rs rs_buf t)
-                (scf.yield))))
 
-          ;; Phase 2: Apply normalization using linalg.generic (GPU-parallel)
-          ;; out[t,c] = (inp[t,c] - mean[t]) * rs[t] * weight[c] + bias[c]
-          (linalg.generic
-            {:ins 5 :outs 1
-             :indexing_maps [affine_map<(d0,d1)->(d0,d1)>
-                             affine_map<(d0,d1)->(d0)>
-                             affine_map<(d0,d1)->(d0)>
-                             affine_map<(d0,d1)->(d1)>
-                             affine_map<(d0,d1)->(d1)>
-                             affine_map<(d0,d1)->(d0,d1)>]
-             :iterator_types ["#linalg.iterator_type<parallel>" "#linalg.iterator_type<parallel>"]}
-            inp mean_buf rs_buf weight bias out
-            (region
-              (block [(: x f32) (: m f32) (: rs f32) (: w f32) (: b f32) (: _out f32)]
-                (def x_centered (arith.subf x m))
-                (def x_norm (arith.mulf x_centered rs))
-                (def scaled (arith.mulf x_norm w))
-                (def result (arith.addf scaled b))
-                (linalg.yield result))))
+                ;; Step 6: Apply normalization and write output
+                ;; Each thread normalizes its 24 elements: out = (x - mean) * rs * w + b
+                (scf.for c0 c24 c1
+                  (region
+                    (block [(: i index)]
+                      (def offset (arith.muli i c32))
+                      (def col (arith.addi lane offset))
+                      (def x (memref.load {:result f32} inp row col))
+                      (def w (memref.load {:result f32} weight col))
+                      (def b (memref.load {:result f32} bias col))
+                      (def x_centered (arith.subf x mean))
+                      (def x_norm (arith.mulf x_centered rs))
+                      (def scaled (arith.mulf x_norm w))
+                      (def result (arith.addf scaled b))
+                      (memref.store result out row col)
+                      (scf.yield))))
+
+                ;; Store mean/rs for debugging (optional, can remove later)
+                (def lane_i32 (arith.index_cast {:result i32} lane))
+                (def zero_i32 (: 0 i32))
+                (def is_lane0 (arith.cmpi {:predicate 0} lane_i32 zero_i32))
+                (scf.if is_lane0
+                  (region
+                    (block []
+                      (memref.store mean mean_buf row)
+                      (memref.store rs rs_buf row)
+                      (scf.yield)))
+                  (region
+                    (block []
+                      (scf.yield))))
+
+                (gpu.terminator))))
+
           (func.return))))
 
     ;; =========================================================================
@@ -905,36 +941,29 @@
     (func.func {:sym_name "logits_forward"
                 :function_type (-> [memref<50257xf32>
                                     memref<64x768xf32>
-                                    !llvm.ptr
+                                    memref<50257x768xf32>
                                     index] [])}
       (region
         (block [(: out memref<50257xf32>)
                 (: inp memref<64x768xf32>)
-                (: wte_ptr !llvm.ptr)
+                (: wte memref<50257x768xf32>)
                 (: pos index)]
 
           (def c0 (: 0 index))
           (def c1 (: 1 index))
           (def V (: 50257 index))
           (def C (: 768 index))
-          (def C_i64 (: 768 i64))
           (def zero (: 0.0 f32))
 
           ;; For each vocab token v, compute dot(inp[pos, :], wte[v, :])
           (scf.for c0 V c1
             (region
               (block [(: v index)]
-                (def v_i64 (arith.index_cast {:result i64} v))
-                (def wte_row_offset (arith.muli v_i64 C_i64))
-
                 (def dot (scf.for {:result f32} c0 C c1 zero
                   (region
                     (block [(: c index) (: acc f32)]
                       (def inp_val (memref.load {:result f32} inp pos c))
-                      (def c_i64 (arith.index_cast {:result i64} c))
-                      (def wte_idx (arith.addi wte_row_offset c_i64))
-                      (def wte_elem_ptr (ptr-at f32 wte_ptr wte_idx))
-                      (def w_val (llvm.load {:result f32} wte_elem_ptr))
+                      (def w_val (memref.load {:result f32} wte v c))
                       (def prod (arith.mulf inp_val w_val))
                       (def new_acc (arith.addf acc prod))
                       (scf.yield new_acc)))))
@@ -1345,6 +1374,11 @@
       (def lnf_w (memref.alloc {:result memref<768xf32>}))
       (def lnf_b (memref.alloc {:result memref<768xf32>}))
 
+      ;; Token and position embeddings as memrefs (for GPU access)
+      ;; wte: 50257 x 768 = ~147MB, wpe: 1024 x 768 = ~3MB
+      (def wte_memref (memref.alloc {:result memref<50257x768xf32>}))
+      (def wpe_memref (memref.alloc {:result memref<1024x768xf32>}))
+
       ;; Register all buffers with GPU runtime
       (gpu.host_register (memref.cast {:result "memref<*xf32>"} x))
       (gpu.host_register (memref.cast {:result "memref<*xf32>"} x2))
@@ -1372,6 +1406,8 @@
       (gpu.host_register (memref.cast {:result "memref<*xf32>"} all_fcproj_b))
       (gpu.host_register (memref.cast {:result "memref<*xf32>"} lnf_w))
       (gpu.host_register (memref.cast {:result "memref<*xf32>"} lnf_b))
+      (gpu.host_register (memref.cast {:result "memref<*xf32>"} wte_memref))
+      (gpu.host_register (memref.cast {:result "memref<*xf32>"} wpe_memref))
       (gpu.host_register (memref.cast {:result "memref<*xf32>"} Q_batched))
       (gpu.host_register (memref.cast {:result "memref<*xf32>"} K_batched))
       (gpu.host_register (memref.cast {:result "memref<*xf32>"} V_batched))
@@ -1389,6 +1425,48 @@
       (def c12 (: 12 index))
       (def C (: 768 i64))
       (def C4 (: 3072 i64))
+
+      ;; =====================================================================
+      ;; PRE-LOAD WTE AND WPE EMBEDDINGS TO MEMREFS
+      ;; wte: 50257 x 768 floats, wpe: 1024 x 768 floats
+      ;; =====================================================================
+      (def c50257 (: 50257 index))
+      (def c1024 (: 1024 index))
+      (def C768_i64 (: 768 i64))
+
+      ;; Copy wte (token embeddings) from params_ptr to wte_memref
+      (scf.for c0 c50257 c1
+        (region
+          (block [(: v index)]
+            (def v_i64 (arith.index_cast {:result i64} v))
+            (def row_offset (arith.muli v_i64 C768_i64))
+            (scf.for c0 c768 c1
+              (region
+                (block [(: c index)]
+                  (def c_i64 (arith.index_cast {:result i64} c))
+                  (def idx (arith.addi row_offset c_i64))
+                  (def val_ptr (ptr-at f32 wte_ptr idx))
+                  (def val (llvm.load {:result f32} val_ptr))
+                  (memref.store val wte_memref v c)
+                  (scf.yield))))
+            (scf.yield))))
+
+      ;; Copy wpe (position embeddings) from params_ptr to wpe_memref
+      (scf.for c0 c1024 c1
+        (region
+          (block [(: t index)]
+            (def t_i64 (arith.index_cast {:result i64} t))
+            (def row_offset (arith.muli t_i64 C768_i64))
+            (scf.for c0 c768 c1
+              (region
+                (block [(: c index)]
+                  (def c_i64 (arith.index_cast {:result i64} c))
+                  (def idx (arith.addi row_offset c_i64))
+                  (def val_ptr (ptr-at f32 wpe_ptr idx))
+                  (def val (llvm.load {:result f32} val_ptr))
+                  (memref.store val wpe_memref t c)
+                  (scf.yield))))
+            (scf.yield))))
 
       ;; =====================================================================
       ;; PRE-LOAD ALL 12 LAYERS OF WEIGHTS (eliminates per-token loading!)
@@ -1550,7 +1628,7 @@
         (region
           (block [(: step index)]
             ;; 1. Embedding lookup
-            (func.call {:callee "@embedding_lookup"} x wte_ptr wpe_ptr token_ids)
+            (func.call {:callee "@embedding_lookup"} x wte_memref wpe_memref token_ids)
     
             ;; 2. Run 12 transformer layers (copy from cached weights - no transpose!)
             (scf.for c0 c12 c1
@@ -1685,7 +1763,7 @@
     
             ;; 4. Compute logits from position step-1 (the last token's position)
             (def logit_pos (arith.subi step c1))
-            (func.call {:callee "@logits_forward"} logits x2 wte_ptr logit_pos)
+            (func.call {:callee "@logits_forward"} logits x2 wte_memref logit_pos)
     
             ;; 5. Argmax to get next token
             (def next_token (func.call {:callee "@argmax" :result i32} logits))
@@ -1725,6 +1803,8 @@
       (memref.dealloc attn_values)
       (memref.dealloc lnf_w)
       (memref.dealloc lnf_b)
+      (memref.dealloc wte_memref)
+      (memref.dealloc wpe_memref)
     
       (func.call {:callee "@free"} params_ptr)
 
