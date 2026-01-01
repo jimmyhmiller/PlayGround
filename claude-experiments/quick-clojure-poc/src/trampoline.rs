@@ -2080,6 +2080,47 @@ pub extern "C" fn builtin_is_keyword(value: usize) -> usize {
     }
 }
 
+/// Get the name of a keyword as a string
+/// - x0 = keyword (tagged)
+/// - Returns: x0 = string (tagged) or throws if not a keyword
+#[allow(dead_code)]
+pub extern "C" fn builtin_keyword_name(frame_pointer: usize, value: usize) -> usize {
+    use crate::gc_runtime::TYPE_KEYWORD;
+    let gc_return_addr = get_gc_return_addr();
+
+    unsafe {
+        let runtime_ptr = std::ptr::addr_of!(RUNTIME);
+        let rt = &mut *(*runtime_ptr).as_ref().unwrap().get();
+
+        let type_id = rt.get_type_id_for_value(value);
+        if type_id != TYPE_KEYWORD {
+            eprintln!("keyword-name: expected keyword, got type {}", type_id);
+            return 7; // nil
+        }
+
+        // Get the keyword text - clone it first to avoid borrow issues
+        let text = match rt.get_keyword_text(value) {
+            Ok(t) => t.to_string(),
+            Err(e) => {
+                eprintln!("keyword-name: error: {}", e);
+                return 7; // nil
+            }
+        };
+
+        // May need GC
+        rt.maybe_gc_before_alloc(frame_pointer, gc_return_addr);
+
+        // Allocate a string with the keyword text
+        match rt.allocate_string(&text) {
+            Ok(str_ptr) => str_ptr,
+            Err(e) => {
+                eprintln!("keyword-name: error allocating string: {}", e);
+                7 // nil
+            }
+        }
+    }
+}
+
 /// Check if a value is a cons cell (used for list operations)
 /// - x0 = value (tagged)
 /// - Returns: x0 = true (0b01011) or false (0b00011)
@@ -3032,7 +3073,40 @@ fn seq_to_vec(rt: &mut GCRuntime, seq: usize) -> Result<Vec<usize>, String> {
             }
         }
         _ => {
-            return Err(format!("apply: unsupported seq type {}", type_id));
+            // Try to use prim_first/prim_rest for any other seq-like type (Cons, PList, etc.)
+            // These are deftypes that implement ISeq or ISeqable
+
+            // First, try to get count for indexed types (like PersistentVector)
+            if let Ok(count) = rt.prim_count(seq) {
+                for i in 0..count {
+                    let elem = rt.prim_nth(seq, i)?;
+                    result.push(elem);
+                }
+            } else {
+                // Fall back to first/rest iteration
+                let mut current = seq;
+                loop {
+                    if current == 7 {
+                        break;
+                    }
+                    // Try to get first element
+                    match rt.prim_first(current) {
+                        Ok(first) => {
+                            result.push(first);
+                            // Try to get rest
+                            match rt.prim_rest(current) {
+                                Ok(rest) => {
+                                    current = rest;
+                                }
+                                Err(_) => break,
+                            }
+                        }
+                        Err(e) => {
+                            return Err(format!("apply: cannot iterate type {}: {}", type_id, e));
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -3089,13 +3163,47 @@ fn apply_fn(rt: &mut GCRuntime, fn_value: usize, args: &[usize]) -> Result<usize
             let type_id = heap_obj.get_header().type_id;
 
             if type_id == TYPE_MULTI_ARITY_FN as u8 {
-                // Multi-arity function - look up arity and call with x9 set
+                // Multi-arity function - look up arity and call
                 match rt.multi_arity_lookup(fn_value, arg_count) {
                     Some((code_ptr, is_variadic)) => {
                         if is_variadic {
-                            // Use the inline asm helper to set x9
-                            let result = unsafe {
-                                call_closure_with_arg_count(code_ptr, fn_value, &padded_args, arg_count)
+                            // For variadic functions, we need to package rest args into a seq
+                            // just like builtin_invoke_multi_arity does
+                            let variadic_min = rt.get_variadic_min(fn_value);
+
+                            // Collect excess args into IndexedSeq
+                            let rest_args = if arg_count > variadic_min {
+                                let rest_slice = &args[variadic_min..];
+                                match rt.allocate_indexed_seq(rest_slice) {
+                                    Ok(seq) => seq,
+                                    Err(msg) => {
+                                        return Err(format!("Error allocating rest args: {}", msg));
+                                    }
+                                }
+                            } else {
+                                7 // nil (no rest args)
+                            };
+
+                            // Build args: fn_ptr, fixed_args..., rest_args
+                            // The function expects: x0=fn_ptr, x1..xN=fixed_args, x(N+1)=rest_args
+                            type ClosureFn7 = extern "C" fn(usize, usize, usize, usize, usize, usize, usize) -> usize;
+                            let func: ClosureFn7 = unsafe { std::mem::transmute(code_ptr) };
+
+                            // Get fixed args (with defaults for missing ones)
+                            let get_arg = |i: usize| -> usize {
+                                if i < args.len() { args[i] } else { 7 }
+                            };
+
+                            let result = match variadic_min {
+                                0 => func(fn_value, rest_args, 7, 7, 7, 7, 7),
+                                1 => func(fn_value, get_arg(0), rest_args, 7, 7, 7, 7),
+                                2 => func(fn_value, get_arg(0), get_arg(1), rest_args, 7, 7, 7),
+                                3 => func(fn_value, get_arg(0), get_arg(1), get_arg(2), rest_args, 7, 7),
+                                4 => func(fn_value, get_arg(0), get_arg(1), get_arg(2), get_arg(3), rest_args, 7),
+                                5 => func(fn_value, get_arg(0), get_arg(1), get_arg(2), get_arg(3), get_arg(4), rest_args),
+                                _ => {
+                                    return Err(format!("apply: variadic_min {} too large (max 5 supported)", variadic_min));
+                                }
                             };
                             Ok(result)
                         } else {
@@ -3159,6 +3267,123 @@ fn apply_fn(rt: &mut GCRuntime, fn_value: usize, args: &[usize]) -> Result<usize
         _ => {
             // Try IFn invoke
             Err(format!("apply: cannot apply value with tag {}", tag))
+        }
+    }
+}
+
+/// Concatenate string representations of values
+/// - x0 = frame_pointer
+/// - x1 = args (seq of values to convert and concatenate)
+/// - Returns: x0 = concatenated string (tagged)
+#[allow(dead_code)]
+pub extern "C" fn builtin_str_concat(frame_pointer: usize, args: usize) -> usize {
+    use crate::gc_runtime::{TYPE_STRING, TYPE_KEYWORD};
+    let gc_return_addr = get_gc_return_addr();
+
+    unsafe {
+        let runtime_ptr = std::ptr::addr_of!(RUNTIME);
+        let rt = &mut *(*runtime_ptr).as_ref().unwrap().get();
+
+        // May need GC
+        rt.maybe_gc_before_alloc(frame_pointer, gc_return_addr);
+
+        // Handle nil case
+        if args == 7 {
+            // Return empty string
+            match rt.allocate_string("") {
+                Ok(s) => return s,
+                Err(e) => {
+                    eprintln!("str: error allocating empty string: {}", e);
+                    return 7;
+                }
+            }
+        }
+
+        // Convert args seq to vector of values
+        let values = match seq_to_vec(rt, args) {
+            Ok(v) => v,
+            Err(msg) => {
+                eprintln!("str: error converting args: {}", msg);
+                return 7;
+            }
+        };
+
+        // Convert each value to string and concatenate
+        let mut result = String::new();
+        for value in values {
+            let s = value_to_string(rt, value);
+            result.push_str(&s);
+        }
+
+        // Allocate the result string
+        match rt.allocate_string(&result) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("str: error allocating result: {}", e);
+                7
+            }
+        }
+    }
+}
+
+/// Convert a tagged value to its string representation
+fn value_to_string(rt: &mut GCRuntime, value: usize) -> String {
+    use crate::gc_runtime::{TYPE_STRING, TYPE_KEYWORD, TYPE_READER_SYMBOL, TYPE_SYMBOL};
+
+    // nil
+    if value == 7 {
+        return String::new();
+    }
+
+    let tag = value & 0b111;
+    match tag {
+        0b000 => {
+            // Integer
+            format!("{}", (value as isize) >> 3)
+        }
+        0b001 => {
+            // Float
+            let float_val = rt.untag_float(value);
+            let bits = (float_val << 3) as u64;
+            let f = f64::from_bits(bits);
+            format!("{}", f)
+        }
+        0b010 => {
+            // String - return the string content directly
+            rt.read_string(value)
+        }
+        0b011 => {
+            // Boolean
+            if value == 11 { "true".to_string() } else { "false".to_string() }
+        }
+        0b110 => {
+            // Heap object
+            let type_id = rt.get_type_id_for_value(value);
+            match type_id {
+                TYPE_STRING => rt.read_string(value),
+                TYPE_KEYWORD => {
+                    match rt.get_keyword_text(value) {
+                        Ok(text) => format!(":{}", text),
+                        Err(_) => format!("<keyword>")
+                    }
+                }
+                TYPE_READER_SYMBOL | TYPE_SYMBOL => {
+                    // Format symbol with namespace/name
+                    let name = rt.prim_symbol_name(value).unwrap_or_else(|_| "<symbol>".to_string());
+                    match rt.prim_symbol_namespace(value) {
+                        Ok(Some(ns)) => format!("{}/{}", ns, name),
+                        _ => name,
+                    }
+                }
+                _ => {
+                    // Use the runtime's format_value for other types
+                    rt.format_value(value)
+                }
+            }
+        }
+        _ => {
+            // Unknown tag
+            format!("<unknown tag {}>", tag)
         }
     }
 }

@@ -18,23 +18,48 @@ use std::collections::HashMap;
 use crate::macros::{Macro, MacroError};
 use crate::value::Value;
 
-/// Check if a function type value contains ... (vararg)
-fn is_vararg_type(func_type: &Value) -> bool {
+/// Check if a function type value contains ... (vararg) and extract the args/rets
+fn parse_arrow_type(func_type: &Value) -> Option<(Vec<String>, Vec<String>, bool)> {
     if let Value::List(items) = func_type {
         // (-> [args...] [rets...])
-        if items.len() >= 2 {
-            if let Value::Vector(args) = &items[1] {
-                for arg in args {
-                    if let Value::Symbol(sym) = arg {
-                        if sym.name == "..." {
-                            return true;
+        if items.len() >= 3 {
+            if let Value::Symbol(sym) = &items[0] {
+                if sym.name == "->" {
+                    if let Value::Vector(args) = &items[1] {
+                        if let Value::Vector(rets) = &items[2] {
+                            let mut is_vararg = false;
+                            let mut arg_types = Vec::new();
+                            for arg in args {
+                                if let Value::Symbol(s) = arg {
+                                    if s.name == "..." {
+                                        is_vararg = true;
+                                    } else {
+                                        // Convert !llvm.ptr to ptr for LLVM function type syntax
+                                        let t = if s.name == "!llvm.ptr" { "ptr".to_string() } else { s.name.clone() };
+                                        arg_types.push(t);
+                                    }
+                                }
+                            }
+                            let ret_types: Vec<String> = rets.iter().filter_map(|r| {
+                                if let Value::Symbol(s) = r {
+                                    Some(s.name.clone())
+                                } else {
+                                    None
+                                }
+                            }).collect();
+                            return Some((arg_types, ret_types, is_vararg));
                         }
                     }
                 }
             }
         }
     }
-    false
+    None
+}
+
+/// Check if a function type value contains ... (vararg)
+fn is_vararg_type(func_type: &Value) -> bool {
+    parse_arrow_type(func_type).map(|(_, _, is_vararg)| is_vararg).unwrap_or(false)
 }
 
 /// External function declaration: (extern-fn name fn-type)
@@ -69,15 +94,39 @@ impl Macro for ExternMacro {
         let is_vararg = is_vararg_type(&func_type);
 
         if is_vararg {
-            // For vararg functions, use llvm.func with linkage=10 (external)
+            // For vararg functions, use llvm.func with proper LLVM function type syntax
+            // LLVM 21+ requires an empty region even for declarations
             let mut attrs = HashMap::new();
             attrs.insert("sym_name".to_string(), Value::String(func_name));
-            attrs.insert("function_type".to_string(), func_type);
-            attrs.insert("linkage".to_string(), Value::Number(10.0)); // external linkage
+
+            // Convert (-> [args ...] [ret]) to !llvm.func<ret (args, ...)>
+            if let Some((arg_types, ret_types, _)) = parse_arrow_type(&func_type) {
+                let args_str = if arg_types.is_empty() {
+                    "...".to_string()
+                } else {
+                    format!("{}, ...", arg_types.join(", "))
+                };
+                let ret_str = if ret_types.is_empty() {
+                    "void".to_string()
+                } else {
+                    ret_types.join(", ")
+                };
+                let llvm_func_type = format!("!llvm.func<{} ({})>", ret_str, args_str);
+                attrs.insert("function_type".to_string(), Value::symbol(&llvm_func_type));
+            } else {
+                attrs.insert("function_type".to_string(), func_type);
+            }
+
+            // Use proper linkage syntax
+            attrs.insert("linkage".to_string(), Value::String("#llvm.linkage<external>".to_string()));
 
             Ok(Value::List(vec![
                 Value::symbol("llvm.func"),
                 Value::Map(attrs),
+                // Add an empty region (required by LLVM 21+)
+                Value::List(vec![
+                    Value::symbol("region"),
+                ]),
             ]))
         } else {
             // For regular functions, use func.func

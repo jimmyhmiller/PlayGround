@@ -536,6 +536,40 @@
       (__reader_vector_nth this n)
       not-found)))
 
+(extend-type __ReaderSet
+  ICounted
+  (-count [this] (__reader_set_count this))
+
+  ISeqable
+  (-seq [this]
+    (if (== (__reader_set_count this) 0)
+      nil
+      ;; Convert to a list for seqing
+      (loop [i 0 result nil]
+        (if (< i (__reader_set_count this))
+          (recur (+ i 1) (cons (__reader_set_get this i) result))
+          result))))
+
+  ICollection
+  (-conj [this o]
+    (__reader_set_conj this o))
+
+  ILookup
+  (-lookup [this val]
+    (if (__reader_set_contains this val)
+      val
+      nil))
+  (-lookup [this val not-found]
+    (if (__reader_set_contains this val)
+      val
+      not-found))
+
+  ISet
+  (-disjoin [this v]
+    ;; ReaderSet disjoin: build new set without v
+    ;; Note: Returns a new ReaderSet by filtering out v
+    (throw "disjoin not supported on ReaderSet - convert to PersistentHashSet first using (set this)")))
+
 ;; =============================================================================
 ;; Polymorphic Sequence Functions
 ;; =============================================================================
@@ -563,6 +597,56 @@
         (if (nil? s)
           nil
           (-next s))))))
+
+;; =============================================================================
+;; Variadic Arithmetic Functions
+;; These wrap the primitive _+, _-, _*, _/ builtins to provide variadic arities
+;; Must be defined early since hashing infrastructure uses them
+;; =============================================================================
+
+(defn +
+  "Returns the sum of nums. (+) returns 0."
+  ([] 0)
+  ([x] x)
+  ([x y] (prim-add x y))
+  ([x y & more]
+   (loop [acc (prim-add x y) s more]
+     (if (nil? (seq s))
+       acc
+       (recur (prim-add acc (first s)) (next s))))))
+
+(defn -
+  "If no ys are supplied, returns the negation of x, else subtracts
+   the ys from x and returns the result."
+  ([x] (prim-sub 0 x))
+  ([x y] (prim-sub x y))
+  ([x y & more]
+   (loop [acc (prim-sub x y) s more]
+     (if (nil? (seq s))
+       acc
+       (recur (prim-sub acc (first s)) (next s))))))
+
+(defn *
+  "Returns the product of nums. (*) returns 1."
+  ([] 1)
+  ([x] x)
+  ([x y] (prim-mul x y))
+  ([x y & more]
+   (loop [acc (prim-mul x y) s more]
+     (if (nil? (seq s))
+       acc
+       (recur (prim-mul acc (first s)) (next s))))))
+
+(defn /
+  "If no denominators are supplied, returns 1/numerator,
+   else returns numerator divided by all of the denominators."
+  ([x] (prim-div 1 x))
+  ([x y] (prim-div x y))
+  ([x y & more]
+   (loop [acc (prim-div x y) s more]
+     (if (nil? (seq s))
+       acc
+       (recur (prim-div acc (first s)) (next s))))))
 
 ;; =============================================================================
 ;; Hashing Infrastructure
@@ -854,6 +938,14 @@
 
   ISeqable
   (-seq [this] this)
+
+  ICounted
+  (-count [this]
+    ;; Cons doesn't track count, so we need to walk the list
+    (loop [s this cnt 0]
+      (if (nil? s)
+        cnt
+        (recur (-next s) (inc cnt)))))
 
   IReduce
   (-reduce [this f] (seq-reduce f this))
@@ -2526,6 +2618,124 @@
   (or (instance? PersistentArrayMap x)
       (instance? PersistentHashMap x)))
 
+;; =============================================================================
+;; PersistentHashSet - Set implemented as a map where each element maps to true
+;; =============================================================================
+
+(deftype* PersistentHashSet [meta ^:mutable hash-map ^:mutable __hash])
+
+(def EMPTY-HASH-SET (PersistentHashSet. nil EMPTY-HASH-MAP nil))
+
+(extend-type PersistentHashSet
+  ICloneable
+  (-clone [this] (PersistentHashSet. (.-meta this) (.-hash-map this) (.-__hash this)))
+
+  IWithMeta
+  (-with-meta [this new-meta]
+    (if (identical? new-meta (.-meta this))
+      this
+      (PersistentHashSet. new-meta (.-hash-map this) (.-__hash this))))
+
+  IMeta
+  (-meta [this] (.-meta this))
+
+  ICounted
+  (-count [this] (count (.-hash-map this)))
+
+  ICollection
+  (-conj [this o]
+    (PersistentHashSet. (.-meta this) (assoc (.-hash-map this) o true) nil))
+
+  IEmptyableCollection
+  (-empty [this] (-with-meta EMPTY-HASH-SET (.-meta this)))
+
+  IEquiv
+  (-equiv [this other]
+    (and (instance? PersistentHashSet other)
+         (== (count this) (count other))
+         (loop [s (seq (.-hash-map this))]
+           (if (nil? s)
+             true
+             (if (contains? (.-hash-map other) (-key (first s)))
+               (recur (next s))
+               false)))))
+
+  IHash
+  (-hash [this]
+    (caching-hash this hash-unordered-coll __hash))
+
+  ISeqable
+  (-seq [this]
+    (when (pos? (count this))
+      (loop [s (seq (.-hash-map this)) acc nil]
+        (if (nil? s)
+          (reverse acc)
+          (recur (next s) (cons (-key (first s)) acc))))))
+
+  ILookup
+  (-lookup [this v] (-lookup this v nil))
+  (-lookup [this v not-found]
+    (if (contains? (.-hash-map this) v)
+      v
+      not-found))
+
+  IAssociative
+  (-contains-key? [this k]
+    (contains? (.-hash-map this) k))
+  (-assoc [this k v]
+    ;; For sets, assoc adds the key (ignores v, but keeps compat)
+    (-conj this k))
+
+  ISet
+  (-disjoin [this v]
+    (PersistentHashSet. (.-meta this) (dissoc (.-hash-map this) v) nil))
+
+  IFn
+  (-invoke [this k]
+    (-lookup this k nil))
+  (-invoke [this k not-found]
+    (-lookup this k not-found)))
+
+(defn set?
+  "Returns true if x is a set"
+  [x]
+  (instance? PersistentHashSet x))
+
+(defn set
+  "Returns a set of the distinct elements of coll."
+  [coll]
+  (if (nil? coll)
+    EMPTY-HASH-SET
+    (loop [s (seq coll) ret EMPTY-HASH-SET]
+      (if (nil? s)
+        ret
+        (recur (next s) (conj ret (first s)))))))
+
+(defn disj
+  "disj[oin]. Returns a new set of the same (hashed/sorted) type, that
+   does not contain key(s)."
+  [s k & ks]
+  (if (nil? s)
+    nil
+    (let [ret (-disjoin s k)]
+      (if ks
+        (loop [ret ret ks ks]
+          (if (nil? (seq ks))
+            ret
+            (recur (-disjoin ret (first ks)) (next ks))))
+        ret))))
+
+(defn hash-set
+  "Returns a new hash set with supplied keys. Any equal keys are
+   handled as if by repeated uses of conj."
+  [& keys]
+  (if (nil? keys)
+    EMPTY-HASH-SET
+    (loop [s keys ret EMPTY-HASH-SET]
+      (if (nil? (seq s))
+        ret
+        (recur (next s) (conj ret (first s)))))))
+
 ;; -----------------------------------------------------------------------------
 ;; Map Wrapper Functions
 ;; -----------------------------------------------------------------------------
@@ -2835,3 +3045,168 @@
 (def ^:macro comment
   (fn [form env & _]
     nil))
+
+;; =============================================================================
+;; Additional Core Functions
+;; =============================================================================
+
+(defn even?
+  "Returns true if n is even, throws an exception if n is not an integer"
+  [n]
+  (if (integer? n)
+    (zero? (mod n 2))
+    (throw (Error. "Argument must be an integer"))))
+
+(defn odd?
+  "Returns true if n is odd, throws an exception if n is not an integer"
+  [n]
+  (if (integer? n)
+    (not (zero? (mod n 2)))
+    (throw (Error. "Argument must be an integer"))))
+
+(defn abs
+  "Returns the absolute value of a"
+  [a]
+  (if (neg? a) (- 0 a) a))
+
+(defn min
+  "Returns the least of the nums."
+  ([x] x)
+  ([x y] (if (< x y) x y))
+  ([x y & more]
+   (reduce min (min x y) more)))
+
+(defn max
+  "Returns the greatest of the nums."
+  ([x] x)
+  ([x y] (if (> x y) x y))
+  ([x y & more]
+   (reduce max (max x y) more)))
+
+(defn name
+  "Returns the name String of a string, symbol or keyword."
+  [x]
+  (cond
+    (nil? x) nil
+    (string? x) x
+    (keyword? x) (__keyword_name x)
+    (__is_reader_symbol x) (__reader_symbol_name x)
+    (__is_symbol x) (__reader_symbol_name x)
+    :else (throw (Error. "name: Doesn't support type of argument"))))
+
+(defn str
+  "With no args, returns the empty string. With one arg x, returns
+   x.toString(). With more than one arg, returns the concatenation of the
+   str values of the args."
+  ([] "")
+  ([x] (if (nil? x) "" (__str_concat (list x))))
+  ([x & ys] (__str_concat (cons x ys))))
+
+(defn apply
+  "Applies fn f to the argument list formed by prepending intervening arguments to args."
+  ([f args] (__apply f args))
+  ([f x args] (__apply f (cons x args)))
+  ([f x y args] (__apply f (list* x y args)))
+  ([f x y z args] (__apply f (list* x y z args)))
+  ([f a b c d & args] (__apply f (cons a (cons b (cons c (cons d (spread args))))))))
+
+(defn map
+  "Returns a lazy sequence consisting of the result of applying f to
+  the set of first items of each coll, followed by applying f to the set
+  of second items in each coll, until any one of the colls is exhausted.
+  Any remaining items in other colls are ignored. Function f should accept
+  number-of-colls arguments. Returns a transducer when no collection is provided."
+  ([f coll]
+   (if (nil? (seq coll))
+     nil
+     (cons (f (first coll)) (map f (rest coll)))))
+  ([f c1 c2]
+   (let [s1 (seq c1)
+         s2 (seq c2)]
+     (if (and s1 s2)
+       (cons (f (first s1) (first s2))
+             (map f (rest s1) (rest s2)))
+       nil)))
+  ([f c1 c2 c3]
+   (let [s1 (seq c1)
+         s2 (seq c2)
+         s3 (seq c3)]
+     (if (and s1 s2 s3)
+       (cons (f (first s1) (first s2) (first s3))
+             (map f (rest s1) (rest s2) (rest s3)))
+       nil))))
+
+(defn filter
+  "Returns a lazy sequence of the items in coll for which
+  (pred item) returns logical true. pred must be free of side-effects.
+  Returns a transducer when no collection is provided."
+  [pred coll]
+  (if (nil? (seq coll))
+    nil
+    (let [f (first coll)
+          r (rest coll)]
+      (if (pred f)
+        (cons f (filter pred r))
+        (filter pred r)))))
+
+(defn remove
+  "Returns a lazy sequence of the items in coll for which
+  (pred item) returns logical false. pred must be free of side-effects.
+  Returns a transducer when no collection is provided."
+  [pred coll]
+  (filter (fn [x] (not (pred x))) coll))
+
+(defn take
+  "Returns a lazy sequence of the first n items in coll, or all items if
+  there are fewer than n. Returns a stateful transducer when no collection
+  is provided."
+  [n coll]
+  (if (or (<= n 0) (nil? (seq coll)))
+    nil
+    (cons (first coll) (take (dec n) (rest coll)))))
+
+(defn drop
+  "Returns a lazy sequence of all but the first n items in coll.
+  Returns a stateful transducer when no collection is provided."
+  [n coll]
+  (if (<= n 0)
+    (seq coll)
+    (if (nil? (seq coll))
+      nil
+      (drop (dec n) (rest coll)))))
+
+(defn take-while
+  "Returns a lazy sequence of successive items from coll while
+  (pred item) returns logical true. pred must be free of side-effects.
+  Returns a transducer when no collection is provided."
+  [pred coll]
+  (if (nil? (seq coll))
+    nil
+    (let [f (first coll)]
+      (if (pred f)
+        (cons f (take-while pred (rest coll)))
+        nil))))
+
+(defn drop-while
+  "Returns a lazy sequence of the items in coll starting from the
+  first item for which (pred item) returns logical false. Returns a
+  stateful transducer when no collection is provided."
+  [pred coll]
+  (if (nil? (seq coll))
+    nil
+    (if (pred (first coll))
+      (drop-while pred (rest coll))
+      (seq coll))))
+
+(defn partition
+  "Returns a lazy sequence of lists of n items each, at offsets step
+  apart. If step is not supplied, defaults to n, i.e. the partitions
+  do not overlap."
+  ([n coll] (partition n n coll))
+  ([n step coll]
+   (if (nil? (seq coll))
+     nil
+     (let [p (take n coll)]
+       (if (= n (count p))
+         (cons p (partition n step (drop step coll)))
+         nil)))))

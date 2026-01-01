@@ -142,19 +142,19 @@ impl StringCollector {
 
         if has_format_args {
             // For strings with format args, we need to call printf with vararg support
-            // Generate llvm.call directly with vararg attribute
-            // (llvm.call {:callee @printf :vararg (-> [!llvm.ptr ...] [i32]) :result i32} args...)
+            // Generate llvm.call directly with var_callee_type for vararg calls
+            // (llvm.call {:callee @printf :var_callee_type !llvm.func<i32 (ptr, ...)> :result i32} args...)
             let mut attrs = std::collections::HashMap::new();
             attrs.insert("callee".to_string(), Value::symbol("@printf"));
-            attrs.insert(
-                "vararg".to_string(),
-                Value::List(vec![
-                    Value::symbol("->"),
-                    Value::Vector(vec![Value::symbol("!llvm.ptr"), Value::symbol("...")]),
-                    Value::Vector(vec![Value::symbol("i32")]),
-                ]),
-            );
+            attrs.insert("var_callee_type".to_string(), Value::symbol("!llvm.func<i32 (ptr, ...)>"));
             attrs.insert("result".to_string(), Value::symbol("i32"));
+            // Note: operandSegmentSizes is auto-computed by ir_gen.rs using add_operands_with_segment_sizes
+            // llvm.call has 2 operand groups: [callee_operands, op_bundle_operands]
+            // op_bundle_sizes: empty for simple calls
+            attrs.insert(
+                "op_bundle_sizes".to_string(),
+                Value::String("array<i32>".to_string()),
+            );
 
             let mut printf_call = vec![Value::symbol("llvm.call"), Value::Map(attrs), Value::symbol(&ptr_name)];
             // Add additional arguments (items[2..])
@@ -169,19 +169,19 @@ impl StringCollector {
                 Value::List(printf_call),
             ])
         } else {
-            // For simple strings without format args, still use llvm.call with vararg
+            // For simple strings without format args, still use llvm.call with var_callee_type
             // since printf is declared as vararg with llvm.func
             let mut attrs = std::collections::HashMap::new();
             attrs.insert("callee".to_string(), Value::symbol("@printf"));
-            attrs.insert(
-                "vararg".to_string(),
-                Value::List(vec![
-                    Value::symbol("->"),
-                    Value::Vector(vec![Value::symbol("!llvm.ptr"), Value::symbol("...")]),
-                    Value::Vector(vec![Value::symbol("i32")]),
-                ]),
-            );
+            attrs.insert("var_callee_type".to_string(), Value::symbol("!llvm.func<i32 (ptr, ...)>"));
             attrs.insert("result".to_string(), Value::symbol("i32"));
+            // Note: operandSegmentSizes is auto-computed by ir_gen.rs using add_operands_with_segment_sizes
+            // llvm.call has 2 operand groups: [callee_operands, op_bundle_operands]
+            // op_bundle_sizes: empty for simple calls
+            attrs.insert(
+                "op_bundle_sizes".to_string(),
+                Value::String("array<i32>".to_string()),
+            );
 
             let printf_call = vec![Value::symbol("llvm.call"), Value::Map(attrs), Value::symbol(&ptr_name)];
 
@@ -234,7 +234,7 @@ impl StringCollector {
                 Value::Map(
                     [
                         ("sym_name".to_string(), Value::String(name.clone())),
-                        ("linkage".to_string(), Value::Number(0.0)), // internal linkage
+                        ("linkage".to_string(), Value::String("#llvm.linkage<internal>".to_string())),
                         ("global_type".to_string(), Value::symbol(&array_type)),
                         ("constant".to_string(), Value::Boolean(true)),
                     ]

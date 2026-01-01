@@ -215,15 +215,12 @@ pub fn edn_to_tagged(edn: &Edn, rt: &mut GCRuntime) -> Result<usize, String> {
         }
 
         Edn::Set(items) => {
-            // For now, represent sets as a ReaderVector with a special marker
-            // TODO: Add proper ReaderSet type if needed
-            // For bootstrap, sets are rare in macro code
+            // Convert each item and collect as ReaderSet
             let mut tagged_items = Vec::with_capacity(items.len());
             for item in items {
                 tagged_items.push(edn_to_tagged(item, rt)?);
             }
-            // Just use ReaderVector for now - sets are rare in reader output
-            rt.allocate_reader_vector(&tagged_items)
+            rt.allocate_reader_set(&tagged_items)
         }
 
         // Handle metadata - attach to the inner value

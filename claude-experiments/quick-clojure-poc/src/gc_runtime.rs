@@ -59,6 +59,7 @@ pub const TYPE_READER_LIST: usize = 30;
 pub const TYPE_READER_VECTOR: usize = 31;
 pub const TYPE_READER_MAP: usize = 32;
 pub const TYPE_READER_SYMBOL: usize = 33;
+pub const TYPE_READER_SET: usize = 34;
 
 /// Offset added to deftype IDs to avoid collision with built-in types
 pub const DEFTYPE_ID_OFFSET: usize = 100;
@@ -243,6 +244,25 @@ pub mod reader_list_layout {
 ///   [element0(8)]     - field 1+: elements (tagged values)
 #[allow(dead_code)]
 pub mod reader_vector_layout {
+    pub const FIELD_COUNT: usize = 0;
+    pub const FIELD_FIRST_ELEMENT: usize = 1;
+
+    pub const fn total_size_words(element_count: usize) -> usize {
+        1 + element_count
+    }
+
+    pub const fn element_field(index: usize) -> usize {
+        FIELD_FIRST_ELEMENT + index
+    }
+}
+
+/// ReaderSet layout: simple array of elements (same as vector but different type ID)
+/// Layout:
+///   [header(8)]
+///   [count(8)]        - field 0: element count (raw usize, not tagged)
+///   [element0(8)]     - field 1+: elements (tagged values)
+#[allow(dead_code)]
+pub mod reader_set_layout {
     pub const FIELD_COUNT: usize = 0;
     pub const FIELD_FIRST_ELEMENT: usize = 1;
 
@@ -1913,6 +1933,91 @@ impl GCRuntime {
         heap_obj.get_header().type_id == TYPE_READER_VECTOR as u8
     }
 
+    /// Allocate a ReaderSet with the given elements
+    pub fn allocate_reader_set(&mut self, elements: &[usize]) -> Result<usize, String> {
+        let size_words = reader_set_layout::total_size_words(elements.len());
+        let ptr = self.allocate_raw(size_words, TYPE_READER_SET as u8)?;
+        let heap_obj = HeapObject::from_untagged(ptr as *const u8);
+
+        // Write count (raw usize, not tagged)
+        heap_obj.write_field(reader_set_layout::FIELD_COUNT, elements.len());
+
+        // Write elements
+        for (i, &elem) in elements.iter().enumerate() {
+            heap_obj.write_field(reader_set_layout::element_field(i), elem);
+        }
+
+        Ok(self.tag_heap_object(ptr))
+    }
+
+    /// Get the count of a ReaderSet
+    pub fn reader_set_count(&self, set_ptr: usize) -> usize {
+        let untagged = self.untag_heap_object(set_ptr);
+        let heap_obj = HeapObject::from_untagged(untagged as *const u8);
+        heap_obj.get_field(reader_set_layout::FIELD_COUNT)
+    }
+
+    /// Get element at index from a ReaderSet
+    pub fn reader_set_get(&self, set_ptr: usize, index: usize) -> Result<usize, String> {
+        let count = self.reader_set_count(set_ptr);
+        if index >= count {
+            return Err(format!(
+                "ReaderSet index {} out of bounds for count {}",
+                index, count
+            ));
+        }
+        let untagged = self.untag_heap_object(set_ptr);
+        let heap_obj = HeapObject::from_untagged(untagged as *const u8);
+        Ok(heap_obj.get_field(reader_set_layout::element_field(index)))
+    }
+
+    /// Check if a ReaderSet contains a value
+    pub fn reader_set_contains(&self, set_ptr: usize, value: usize) -> bool {
+        let count = self.reader_set_count(set_ptr);
+        let untagged = self.untag_heap_object(set_ptr);
+        let heap_obj = HeapObject::from_untagged(untagged as *const u8);
+
+        // Linear search for value
+        for i in 0..count {
+            let elem = heap_obj.get_field(reader_set_layout::element_field(i));
+            if self.values_equal(elem, value) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Conj onto a ReaderSet (adds element if not already present)
+    pub fn reader_set_conj(&mut self, set_ptr: usize, elem: usize) -> Result<usize, String> {
+        // Check if already contains the element
+        if self.reader_set_contains(set_ptr, elem) {
+            return Ok(set_ptr); // Return same set
+        }
+
+        let count = self.reader_set_count(set_ptr);
+        let untagged = self.untag_heap_object(set_ptr);
+        let heap_obj = HeapObject::from_untagged(untagged as *const u8);
+
+        // Collect all elements with new one
+        let mut new_elements = Vec::with_capacity(count + 1);
+        for i in 0..count {
+            new_elements.push(heap_obj.get_field(reader_set_layout::element_field(i)));
+        }
+        new_elements.push(elem);
+
+        self.allocate_reader_set(&new_elements)
+    }
+
+    /// Check if a value is a ReaderSet
+    pub fn is_reader_set(&self, value: usize) -> bool {
+        if (value & 0b111) != 0b110 {
+            return false;
+        }
+        let untagged = self.untag_heap_object(value);
+        let heap_obj = HeapObject::from_untagged(untagged as *const u8);
+        heap_obj.get_header().type_id == TYPE_READER_SET as u8
+    }
+
     /// Allocate a ReaderMap with the given key-value pairs
     pub fn allocate_reader_map(&mut self, entries: &[(usize, usize)]) -> Result<usize, String> {
         let size_words = reader_map_layout::total_size_words(entries.len());
@@ -2553,6 +2658,12 @@ impl GCRuntime {
                             } else if def.name == "clojure.core/IndexedSeq" {
                                 // Format IndexedSeq as a list
                                 self.format_indexed_seq(value)
+                            } else if def.name == "clojure.core/PersistentHashMap" {
+                                // Format as {:k v, ...}
+                                self.format_persistent_hash_map(value)
+                            } else if def.name == "clojure.core/PersistentHashSet" {
+                                // Format as #{...}
+                                self.format_persistent_hash_set(value)
                             } else {
                                 format!("#<{}@{:x}>", def.name, untagged)
                             }
@@ -2821,6 +2932,64 @@ impl GCRuntime {
         "()".to_string()
     }
 
+    /// Format a PersistentHashMap as {:k v, ...}
+    fn format_persistent_hash_map(&self, value: usize) -> String {
+        let untagged = value >> 3;
+        let obj = HeapObject::from_untagged(untagged as *const u8);
+
+        // PersistentHashMap has fields: [meta, cnt, root, has-nil?, nil-val, __hash]
+        let cnt = (obj.get_field(1) >> 3) as usize;
+        let has_nil = obj.get_field(3) == 11; // true = 11, false = 3
+        let nil_val = obj.get_field(4);
+
+        if cnt == 0 {
+            return "{}".to_string();
+        }
+
+        // For small maps with has-nil, we can at least show the nil entry
+        // For larger maps, show count for now
+        // Full iteration would require walking the HAMT structure
+        if has_nil && cnt == 1 {
+            // Only a nil key
+            let val_str = self.format_value(nil_val);
+            return format!("{{nil {}}}", val_str);
+        }
+
+        // For maps with more entries, show informative output
+        // NOTE: Full HAMT traversal would be complex; for now show abbreviated form
+        if has_nil {
+            let val_str = self.format_value(nil_val);
+            format!("{{nil {}, ... {} entries}}", val_str, cnt)
+        } else {
+            format!("{{... {} entries}}", cnt)
+        }
+    }
+
+    /// Format a PersistentHashSet as #{...}
+    fn format_persistent_hash_set(&self, value: usize) -> String {
+        let untagged = value >> 3;
+        let obj = HeapObject::from_untagged(untagged as *const u8);
+
+        // PersistentHashSet has fields: [meta, hash-map, __hash]
+        let hash_map = obj.get_field(1);
+
+        // Get count from the underlying hash-map
+        if BuiltInTypes::get_kind(hash_map) == BuiltInTypes::HeapObject {
+            let hm_untagged = hash_map >> 3;
+            let hm_obj = HeapObject::from_untagged(hm_untagged as *const u8);
+            let cnt = (hm_obj.get_field(1) >> 3) as usize;
+
+            if cnt == 0 {
+                return "#{}".to_string();
+            }
+
+            // Show abbreviated form with count
+            format!("#{{... {} elements}}", cnt)
+        } else {
+            "#{}".to_string()
+        }
+    }
+
     /// Find all objects that reference a given target object
     pub fn find_references_to(&self, target_ptr: usize) -> Vec<ObjectReference> {
         if !BuiltInTypes::is_heap_pointer(target_ptr) {
@@ -3048,6 +3217,7 @@ impl GCRuntime {
             TYPE_READER_VECTOR => "ReaderVector",
             TYPE_READER_MAP => "ReaderMap",
             TYPE_READER_SYMBOL => "ReaderSymbol",
+            TYPE_READER_SET => "ReaderSet",
             _ if type_id >= DEFTYPE_ID_OFFSET => "deftype",
             _ => "unknown",
         }
@@ -3116,16 +3286,27 @@ impl GCRuntime {
                 let type_name = self.get_type_def(deftype_idx).map(|td| td.name.as_str());
 
                 match type_name {
-                    Some("EmptyList") => Ok(7), // empty list returns nil
-                    Some("PList") => {
+                    Some("EmptyList") | Some("clojure.core/EmptyList") => Ok(7), // empty list returns nil
+                    Some("PList") | Some("clojure.core/PList") => {
                         // PList fields: [meta, first, rest, count, __hash]
                         // first is at field index 1
                         Ok(self.read_type_field(value, 1))
                     }
-                    Some("Cons") => {
+                    Some("Cons") | Some("clojure.core/Cons") => {
                         // Cons fields: [meta, first, rest, __hash]
                         // first is at field index 1
                         Ok(self.read_type_field(value, 1))
+                    }
+                    Some("IndexedSeq") | Some("clojure.core/IndexedSeq") => {
+                        // IndexedSeq fields: [arr, i, meta]
+                        let arr = self.read_type_field(value, 0);
+                        let i = self.read_type_field(value, 1) >> 3; // untag integer
+                        let arr_len = self.array_length(arr);
+                        if i as usize >= arr_len {
+                            Ok(7) // empty
+                        } else {
+                            self.array_get(arr, i as usize)
+                        }
                     }
                     _ => {
                         // Fall back to protocol dispatch
@@ -3173,11 +3354,11 @@ impl GCRuntime {
                 let type_name = self.get_type_def(deftype_idx).map(|td| td.name.as_str());
 
                 match type_name {
-                    Some("EmptyList") => {
+                    Some("EmptyList") | Some("clojure.core/EmptyList") => {
                         // EmptyList.-rest returns itself (EMPTY-LIST)
                         Ok(value)
                     }
-                    Some("PList") => {
+                    Some("PList") | Some("clojure.core/PList") => {
                         // PList fields: [meta, first, rest, count, __hash]
                         // rest is at field index 2
                         let rest = self.read_type_field(value, 2);
@@ -3191,7 +3372,7 @@ impl GCRuntime {
                             Ok(rest)
                         }
                     }
-                    Some("Cons") => {
+                    Some("Cons") | Some("clojure.core/Cons") => {
                         // Cons fields: [meta, first, rest, __hash]
                         // rest is at field index 2
                         // Cons.-rest: (if (nil? (.-rest this)) EMPTY-LIST (.-rest this))
@@ -3202,6 +3383,24 @@ impl GCRuntime {
                             Ok(7)
                         } else {
                             Ok(rest)
+                        }
+                    }
+                    Some("IndexedSeq") | Some("clojure.core/IndexedSeq") => {
+                        // IndexedSeq fields: [arr, i, meta]
+                        let arr = self.read_type_field(value, 0);
+                        let i = self.read_type_field(value, 1) >> 3; // untag integer
+                        let arr_len = self.array_length(arr);
+                        let next_i = i + 1;
+                        if next_i as usize >= arr_len {
+                            Ok(7) // empty - return nil
+                        } else {
+                            // Create new IndexedSeq with incremented index
+                            // IndexedSeq type should already be registered
+                            let indexed_seq_type_id = self
+                                .get_type_id("clojure.core/IndexedSeq")
+                                .ok_or_else(|| "IndexedSeq type not registered".to_string())?;
+                            let field_values = vec![arr, (next_i << 3) as usize, 7usize]; // arr, i=next_i, meta=nil
+                            self.allocate_type_instance(indexed_seq_type_id, field_values)
                         }
                     }
                     _ => {
@@ -3492,6 +3691,25 @@ impl GCRuntime {
                     // Handle both "PersistentVector" and "clojure.core/PersistentVector"
                     type_def.name == "PersistentVector"
                         || type_def.name.ends_with("/PersistentVector")
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        }
+    }
+
+    /// Check if value is a set
+    pub fn prim_is_set(&self, value: usize) -> bool {
+        let type_id = self.get_type_id_for_value(value);
+        match type_id {
+            TYPE_READER_SET | TYPE_SET => true,
+            // Check for PersistentHashSet deftype
+            _ if type_id >= DEFTYPE_ID_OFFSET => {
+                if let Some(type_def) = self.get_type_def(type_id - DEFTYPE_ID_OFFSET) {
+                    // Handle both "PersistentHashSet" and "clojure.core/PersistentHashSet"
+                    type_def.name == "PersistentHashSet"
+                        || type_def.name.ends_with("/PersistentHashSet")
                 } else {
                     false
                 }

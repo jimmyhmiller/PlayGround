@@ -1,7 +1,7 @@
 use crate::gc_runtime::{
     GCRuntime, TYPE_BOOL, TYPE_FLOAT, TYPE_INT, TYPE_KEYWORD,
-    TYPE_LIST, TYPE_NIL, TYPE_READER_LIST, TYPE_READER_MAP, TYPE_READER_SYMBOL, TYPE_READER_VECTOR,
-    TYPE_STRING, TYPE_SYMBOL, TYPE_VECTOR,
+    TYPE_LIST, TYPE_NIL, TYPE_READER_LIST, TYPE_READER_MAP, TYPE_READER_SET, TYPE_READER_SYMBOL,
+    TYPE_READER_VECTOR, TYPE_SET, TYPE_STRING, TYPE_SYMBOL, TYPE_VECTOR,
 };
 use crate::value::Value;
 
@@ -390,6 +390,13 @@ pub fn analyze_tagged(rt: &mut GCRuntime, tagged: usize) -> Result<Expr, String>
         return Ok(Expr::Literal(map));
     }
 
+    // Check for set BEFORE seq (sets are seqable but should be treated as literals, not calls)
+    if rt.prim_is_set(tagged) {
+        // Sets are literals - convert to Value::Set
+        let set = tagged_to_value(rt, tagged)?;
+        return Ok(Expr::Literal(set));
+    }
+
     // Check for seq (ReaderList, PersistentList, or any ISeq impl)
     if rt.prim_is_seq(tagged) {
         let count = rt.prim_count(tagged)?;
@@ -525,6 +532,15 @@ fn tagged_to_value(rt: &mut GCRuntime, tagged: usize) -> Result<Value, String> {
                 map.insert(tagged_to_value(rt, key)?, tagged_to_value(rt, val)?);
             }
             Ok(Value::Map(map))
+        }
+        TYPE_READER_SET | TYPE_SET => {
+            let count = rt.reader_set_count(tagged);
+            let mut set = im::HashSet::new();
+            for i in 0..count {
+                let elem = rt.reader_set_get(tagged, i)?;
+                set.insert(tagged_to_value(rt, elem)?);
+            }
+            Ok(Value::Set(set))
         }
         _ if type_id >= crate::gc_runtime::DEFTYPE_ID_OFFSET => {
             // Deftype - check if it's seqable (e.g., Cons, PList, etc.)

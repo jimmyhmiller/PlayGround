@@ -433,6 +433,18 @@ impl Compiler {
                     &elem_exprs,
                 );
             }
+            Value::Set(elements) => {
+                // Compile set literal as call to (hash-set elem1 elem2 ...)
+                let elem_exprs: Vec<Expr> =
+                    elements.iter().map(|v| Expr::Literal(v.clone())).collect();
+                return self.compile_call(
+                    &Expr::Var {
+                        namespace: Some("clojure.core".to_string()),
+                        name: "hash-set".to_string(),
+                    },
+                    &elem_exprs,
+                );
+            }
             _ => {
                 return Err(format!("Literal type not yet supported: {:?}", value));
             }
@@ -506,7 +518,7 @@ impl Compiler {
     fn is_builtin(&self, name: &str) -> bool {
         matches!(
             name,
-            "+" | "-" | "*" | "/" | "<" | ">" | "<=" | ">=" | "=" | "__gc" |
+            "prim-add" | "prim-sub" | "prim-mul" | "prim-div" | "<" | ">" | "<=" | ">=" | "=" | "__gc" |
                  "bit-and" | "bit-or" | "bit-xor" | "bit-not" |
                  "bit-shift-left" | "bit-shift-right" | "unsigned-bit-shift-right" |
                  "bit-shift-right-zero-fill" |  // CLJS alias for unsigned-bit-shift-right
@@ -532,7 +544,12 @@ impl Compiler {
                  "__symbol_1" | "__symbol_2" |
                  "__gensym_0" | "__gensym_1" |
                  // Array operations
-                 "make-array" | "aget" | "aset" | "aset!" | "alength" | "aclone"
+                 "make-array" | "aget" | "aset" | "aset!" | "alength" | "aclone" |
+                 // Core function builtins
+                 "__keyword_name" | "__apply" | "__str_concat" |
+                 // Reader set operations
+                 "__reader_set_count" | "__reader_set_contains" | "__reader_set_conj" | "__reader_set_get" |
+                 "__is_reader_set"
         )
     }
 
@@ -1077,6 +1094,7 @@ impl Compiler {
             "__ReaderVector" => Ok(TYPE_READER_VECTOR),
             "__ReaderMap" => Ok(TYPE_READER_MAP),
             "__ReaderSymbol" => Ok(TYPE_READER_SYMBOL),
+            "__ReaderSet" => Ok(TYPE_READER_SET),
             _ => Err(format!("Unknown type: {}", type_name)),
         }
     }
@@ -1629,6 +1647,15 @@ impl Compiler {
 
             // Compile the value expression
             let value_reg = self.compile(value_expr)?;
+            // Ensure value is in a register (not a constant)
+            let value_in_reg = self.ensure_register(value_reg);
+
+            // Load var_ptr constant into a register
+            let var_ptr_reg = self.builder.new_register();
+            self.builder.emit(Instruction::LoadConstant(
+                var_ptr_reg,
+                IrValue::TaggedConstant(var_ptr as isize),
+            ));
 
             // Emit PushBinding as ExternalCall
             // Call builtin_push_binding(var_ptr, value) -> result
@@ -1637,7 +1664,7 @@ impl Compiler {
             self.builder.emit(Instruction::ExternalCall(
                 push_result,
                 builtin_addr,
-                vec![IrValue::TaggedConstant(var_ptr as isize), value_reg],
+                vec![var_ptr_reg, value_in_reg],
             ));
 
             var_ptrs.push(var_ptr);
@@ -1654,6 +1681,13 @@ impl Compiler {
 
         // Pop all bindings in reverse order
         for &var_ptr in var_ptrs.iter().rev() {
+            // Load var_ptr constant into a register
+            let var_ptr_reg = self.builder.new_register();
+            self.builder.emit(Instruction::LoadConstant(
+                var_ptr_reg,
+                IrValue::TaggedConstant(var_ptr as isize),
+            ));
+
             // Emit PopBinding as ExternalCall
             // Call builtin_pop_binding(var_ptr) -> result
             let builtin_addr = crate::trampoline::builtin_pop_binding as usize;
@@ -1661,7 +1695,7 @@ impl Compiler {
             self.builder.emit(Instruction::ExternalCall(
                 pop_result,
                 builtin_addr,
-                vec![IrValue::TaggedConstant(var_ptr as isize)],
+                vec![var_ptr_reg],
             ));
         }
 
@@ -2456,10 +2490,10 @@ impl Compiler {
             if is_builtin {
                 // Dispatch to appropriate built-in handler
                 return match name.as_str() {
-                    "+" => self.compile_builtin_add(args),
-                    "-" => self.compile_builtin_sub(args),
-                    "*" => self.compile_builtin_mul(args),
-                    "/" => self.compile_builtin_div(args),
+                    "prim-add" => self.compile_builtin_add(args),
+                    "prim-sub" => self.compile_builtin_sub(args),
+                    "prim-mul" => self.compile_builtin_mul(args),
+                    "prim-div" => self.compile_builtin_div(args),
                     "<" => self.compile_builtin_lt(args),
                     ">" => self.compile_builtin_gt(args),
                     "<=" => self.compile_builtin_le(args),
@@ -2538,6 +2572,16 @@ impl Compiler {
                     "aset!" => self.compile_builtin_aset(args),
                     "alength" => self.compile_builtin_alength(args),
                     "aclone" => self.compile_builtin_aclone(args),
+                    // Core function builtins
+                    "__keyword_name" => self.compile_builtin_keyword_name(args),
+                    "__apply" => self.compile_builtin_apply(args),
+                    "__str_concat" => self.compile_builtin_str_concat(args),
+                    // Reader set operations
+                    "__reader_set_count" => self.compile_builtin_reader_prim_1(args, "__reader_set_count"),
+                    "__reader_set_contains" => self.compile_builtin_reader_prim_2(args, "__reader_set_contains"),
+                    "__reader_set_conj" => self.compile_builtin_reader_set_conj(args),
+                    "__reader_set_get" => self.compile_builtin_reader_prim_2(args, "__reader_set_get"),
+                    "__is_reader_set" => self.compile_builtin_reader_prim_1(args, "__is_reader_set"),
                     _ => unreachable!(),
                 };
             }
@@ -3210,6 +3254,68 @@ impl Compiler {
             vec![IrValue::FramePointer, array_reg],
         ));
         Ok(result)
+    }
+
+    /// Compile __keyword_name (1 argument, allocating)
+    fn compile_builtin_keyword_name(&mut self, args: &[Expr]) -> Result<IrValue, String> {
+        if args.len() != 1 {
+            return Err(format!("__keyword_name requires 1 argument, got {}", args.len()));
+        }
+        let kw = self.compile(&args[0])?;
+        let kw_reg = self.builder.assign_new(kw);
+        let result = self.builder.new_register();
+        let builtin_addr = crate::builtins::builtin__keyword_name as usize;
+        // Allocating operation - pass FramePointer for GC
+        self.builder.emit(Instruction::ExternalCall(
+            result,
+            builtin_addr,
+            vec![IrValue::FramePointer, kw_reg],
+        ));
+        Ok(result)
+    }
+
+    /// Compile __apply (2 arguments, allocating)
+    fn compile_builtin_apply(&mut self, args: &[Expr]) -> Result<IrValue, String> {
+        if args.len() != 2 {
+            return Err(format!("__apply requires 2 arguments, got {}", args.len()));
+        }
+        let fn_val = self.compile(&args[0])?;
+        let args_val = self.compile(&args[1])?;
+        let fn_reg = self.builder.assign_new(fn_val);
+        let args_reg = self.builder.assign_new(args_val);
+        let result = self.builder.new_register();
+        let builtin_addr = crate::builtins::builtin__apply as usize;
+        // Allocating operation - pass FramePointer for GC
+        self.builder.emit(Instruction::ExternalCall(
+            result,
+            builtin_addr,
+            vec![IrValue::FramePointer, fn_reg, args_reg],
+        ));
+        Ok(result)
+    }
+
+    /// Compile __str_concat (1 argument - the seq of values, allocating)
+    fn compile_builtin_str_concat(&mut self, args: &[Expr]) -> Result<IrValue, String> {
+        if args.len() != 1 {
+            return Err(format!("__str_concat requires 1 argument, got {}", args.len()));
+        }
+        let seq = self.compile(&args[0])?;
+        let seq_reg = self.builder.assign_new(seq);
+        let result = self.builder.new_register();
+        let builtin_addr = crate::builtins::builtin__str_concat as usize;
+        // Allocating operation - pass FramePointer for GC
+        self.builder.emit(Instruction::ExternalCall(
+            result,
+            builtin_addr,
+            vec![IrValue::FramePointer, seq_reg],
+        ));
+        Ok(result)
+    }
+
+    /// Compile __reader_set_conj (2 arguments)
+    fn compile_builtin_reader_set_conj(&mut self, args: &[Expr]) -> Result<IrValue, String> {
+        // Just use the standard 2-arg pattern
+        self.compile_builtin_reader_prim_2(args, "__reader_set_conj")
     }
 
     // Bitwise operations - all work on untagged integers:

@@ -147,7 +147,7 @@ fn run_with_compilation_spec(nodes: &[lispier::Node], compilation: &lispier::Com
     let runtime_attrs = runtime.runtime_attrs();
 
     // Passes that run on gpu.module (must be nested)
-    // Note: rocdl-attach-target and nvvm-attach-target run on builtin.module level
+    // Note: rocdl-attach-target, nvvm-attach-target, and convert-math-to-rocdl run on builtin.module level
     let gpu_module_passes = ["convert-gpu-to-rocdl", "convert-gpu-to-nvvm"];
 
     // Passes that need to run inside func.func scope

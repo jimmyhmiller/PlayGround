@@ -57,31 +57,38 @@
     ;; =========================================================================
     (func.func {:sym_name "malloc"
                 :function_type (-> [i64] [!llvm.ptr])
-                :sym_visibility "private"})
+                :sym_visibility "private"}
+      (region))
 
     (func.func {:sym_name "free"
                 :function_type (-> [!llvm.ptr] [])
-                :sym_visibility "private"})
+                :sym_visibility "private"}
+      (region))
 
     (func.func {:sym_name "fopen"
                 :function_type (-> [!llvm.ptr !llvm.ptr] [!llvm.ptr])
-                :sym_visibility "private"})
+                :sym_visibility "private"}
+      (region))
 
     (func.func {:sym_name "fread"
                 :function_type (-> [!llvm.ptr i64 i64 !llvm.ptr] [i64])
-                :sym_visibility "private"})
+                :sym_visibility "private"}
+      (region))
 
     (func.func {:sym_name "fseek"
                 :function_type (-> [!llvm.ptr i64 i32] [i32])
-                :sym_visibility "private"})
+                :sym_visibility "private"}
+      (region))
 
     (func.func {:sym_name "fclose"
                 :function_type (-> [!llvm.ptr] [i32])
-                :sym_visibility "private"})
+                :sym_visibility "private"}
+      (region))
 
     (func.func {:sym_name "clock_ms"
                 :function_type (-> [] [i64])
-                :sym_visibility "private"})
+                :sym_visibility "private"}
+      (region))
 
     ;; printf is variadic - use extern-fn which generates llvm.func (not affected by llvm-request-c-wrappers)
     ;; This is declared outside module using extern-fn macro
@@ -90,7 +97,7 @@
     ;; Global paths and state
     ;; =========================================================================
     (llvm.mlir.global {:sym_name "checkpoint_path"
-                       :linkage 0
+                       :linkage "#llvm.linkage<external>"
                        :global_type !llvm.array<39 x i8>
                        :constant true}
       (region
@@ -99,7 +106,7 @@
           (llvm.return s))))
 
     (llvm.mlir.global {:sym_name "tokenizer_path"
-                       :linkage 0
+                       :linkage "#llvm.linkage<external>"
                        :global_type !llvm.array<44 x i8>
                        :constant true}
       (region
@@ -108,7 +115,7 @@
           (llvm.return s))))
 
     (llvm.mlir.global {:sym_name "read_mode"
-                       :linkage 0
+                       :linkage "#llvm.linkage<external>"
                        :global_type !llvm.array<3 x i8>
                        :constant true}
       (region
@@ -117,7 +124,7 @@
           (llvm.return s))))
 
     (llvm.mlir.global {:sym_name "g_params"
-                       :linkage 10
+                       :linkage "#llvm.linkage<external>"
                        :global_type !llvm.ptr
                        :constant false}
       (region
@@ -126,7 +133,7 @@
           (llvm.return null))))
 
     (llvm.mlir.global {:sym_name "token_table"
-                       :linkage 10
+                       :linkage "#llvm.linkage<external>"
                        :global_type !llvm.ptr
                        :constant false}
       (region
@@ -135,7 +142,7 @@
           (llvm.return null))))
 
     (llvm.mlir.global {:sym_name "eot_token"
-                       :linkage 10
+                       :linkage "#llvm.linkage<external>"
                        :global_type i32
                        :constant false}
       (region
@@ -159,28 +166,31 @@
 
           ;; Zero output for accumulation
           (def zero (: 0.0 f32))
-          (linalg.fill zero out)
+          (linalg.fill {:ins 1 :outs 1} zero out
+            (region
+              (block [(: in f32) (: _out f32)]
+                (linalg.yield in))))
 
           ;; Core matmul: (64,768) @ (768,2304) -> (64,2304)
-          (linalg.matmul inp weight out)
-
-          ;; Add bias
-          (def c0 (: 0 index))
-          (def c1 (: 1 index))
-          (def T (: 64 index))
-          (def K (: 2304 index))
-          (scf.for c0 T c1
+          (linalg.matmul {:ins 2 :outs 1} inp weight out
             (region
-              (block [(: t index)]
-                (scf.for c0 K c1
-                  (region
-                    (block [(: k index)]
-                      (def val (memref.load {:result f32} out t k))
-                      (def b (memref.load {:result f32} bias k))
-                      (def result (arith.addf val b))
-                      (memref.store result out t k)
-                      (scf.yield))))
-                (scf.yield))))
+              (block [(: a f32) (: b f32) (: c f32)]
+                (def mul (arith.mulf a b))
+                (def sum (arith.addf c mul))
+                (linalg.yield sum))))
+
+          ;; Add bias using linalg.generic (GPU-parallelized)
+          (linalg.generic
+            {:ins 2 :outs 1
+             :indexing_maps [affine_map<(d0,d1)->(d0,d1)>
+                             affine_map<(d0,d1)->(d1)>
+                             affine_map<(d0,d1)->(d0,d1)>]
+             :iterator_types ["#linalg.iterator_type<parallel>" "#linalg.iterator_type<parallel>"]}
+            out bias out
+            (region
+              (block [(: val f32) (: b f32) (: _acc f32)]
+                (def result (arith.addf val b))
+                (linalg.yield result))))
 
           (func.return))))
 
@@ -199,25 +209,29 @@
                 (: bias memref<768xf32>)]
 
           (def zero (: 0.0 f32))
-          (linalg.fill zero out)
-          (linalg.matmul inp weight out)
-
-          (def c0 (: 0 index))
-          (def c1 (: 1 index))
-          (def T (: 64 index))
-          (def C (: 768 index))
-          (scf.for c0 T c1
+          (linalg.fill {:ins 1 :outs 1} zero out
             (region
-              (block [(: t index)]
-                (scf.for c0 C c1
-                  (region
-                    (block [(: c index)]
-                      (def val (memref.load {:result f32} out t c))
-                      (def b (memref.load {:result f32} bias c))
-                      (def result (arith.addf val b))
-                      (memref.store result out t c)
-                      (scf.yield))))
-                (scf.yield))))
+              (block [(: in f32) (: _out f32)]
+                (linalg.yield in))))
+          (linalg.matmul {:ins 2 :outs 1} inp weight out
+            (region
+              (block [(: a f32) (: b f32) (: c f32)]
+                (def mul (arith.mulf a b))
+                (def sum (arith.addf c mul))
+                (linalg.yield sum))))
+
+          ;; Add bias using linalg.generic (GPU-parallelized)
+          (linalg.generic
+            {:ins 2 :outs 1
+             :indexing_maps [affine_map<(d0,d1)->(d0,d1)>
+                             affine_map<(d0,d1)->(d1)>
+                             affine_map<(d0,d1)->(d0,d1)>]
+             :iterator_types ["#linalg.iterator_type<parallel>" "#linalg.iterator_type<parallel>"]}
+            out bias out
+            (region
+              (block [(: val f32) (: b f32) (: _acc f32)]
+                (def result (arith.addf val b))
+                (linalg.yield result))))
 
           (func.return))))
 
@@ -236,25 +250,29 @@
                 (: bias memref<3072xf32>)]
 
           (def zero (: 0.0 f32))
-          (linalg.fill zero out)
-          (linalg.matmul inp weight out)
-
-          (def c0 (: 0 index))
-          (def c1 (: 1 index))
-          (def T (: 64 index))
-          (def C4 (: 3072 index))
-          (scf.for c0 T c1
+          (linalg.fill {:ins 1 :outs 1} zero out
             (region
-              (block [(: t index)]
-                (scf.for c0 C4 c1
-                  (region
-                    (block [(: c index)]
-                      (def val (memref.load {:result f32} out t c))
-                      (def b (memref.load {:result f32} bias c))
-                      (def result (arith.addf val b))
-                      (memref.store result out t c)
-                      (scf.yield))))
-                (scf.yield))))
+              (block [(: in f32) (: _out f32)]
+                (linalg.yield in))))
+          (linalg.matmul {:ins 2 :outs 1} inp weight out
+            (region
+              (block [(: a f32) (: b f32) (: c f32)]
+                (def mul (arith.mulf a b))
+                (def sum (arith.addf c mul))
+                (linalg.yield sum))))
+
+          ;; Add bias using linalg.generic (GPU-parallelized)
+          (linalg.generic
+            {:ins 2 :outs 1
+             :indexing_maps [affine_map<(d0,d1)->(d0,d1)>
+                             affine_map<(d0,d1)->(d1)>
+                             affine_map<(d0,d1)->(d0,d1)>]
+             :iterator_types ["#linalg.iterator_type<parallel>" "#linalg.iterator_type<parallel>"]}
+            out bias out
+            (region
+              (block [(: val f32) (: b f32) (: _acc f32)]
+                (def result (arith.addf val b))
+                (linalg.yield result))))
 
           (func.return))))
 
@@ -273,25 +291,29 @@
                 (: bias memref<768xf32>)]
 
           (def zero (: 0.0 f32))
-          (linalg.fill zero out)
-          (linalg.matmul inp weight out)
-
-          (def c0 (: 0 index))
-          (def c1 (: 1 index))
-          (def T (: 64 index))
-          (def C (: 768 index))
-          (scf.for c0 T c1
+          (linalg.fill {:ins 1 :outs 1} zero out
             (region
-              (block [(: t index)]
-                (scf.for c0 C c1
-                  (region
-                    (block [(: c index)]
-                      (def val (memref.load {:result f32} out t c))
-                      (def b (memref.load {:result f32} bias c))
-                      (def result (arith.addf val b))
-                      (memref.store result out t c)
-                      (scf.yield))))
-                (scf.yield))))
+              (block [(: in f32) (: _out f32)]
+                (linalg.yield in))))
+          (linalg.matmul {:ins 2 :outs 1} inp weight out
+            (region
+              (block [(: a f32) (: b f32) (: c f32)]
+                (def mul (arith.mulf a b))
+                (def sum (arith.addf c mul))
+                (linalg.yield sum))))
+
+          ;; Add bias using linalg.generic (GPU-parallelized)
+          (linalg.generic
+            {:ins 2 :outs 1
+             :indexing_maps [affine_map<(d0,d1)->(d0,d1)>
+                             affine_map<(d0,d1)->(d1)>
+                             affine_map<(d0,d1)->(d0,d1)>]
+             :iterator_types ["#linalg.iterator_type<parallel>" "#linalg.iterator_type<parallel>"]}
+            out bias out
+            (region
+              (block [(: val f32) (: b f32) (: _acc f32)]
+                (def result (arith.addf val b))
+                (linalg.yield result))))
 
           (func.return))))
 
@@ -306,7 +328,11 @@
         (block [(: out memref<64x768xf32>)
                 (: inp1 memref<64x768xf32>)
                 (: inp2 memref<64x768xf32>)]
-          (linalg.add inp1 inp2 out)
+          (linalg.add {:ins 2 :outs 1} inp1 inp2 out
+            (region
+              (block [(: x f32) (: y f32) (: _out f32)]
+                (def sum (arith.addf x y))
+                (linalg.yield sum))))
           (func.return))))
 
     ;; =========================================================================
@@ -318,7 +344,10 @@
       (region
         (block [(: out memref<64x768xf32>)
                 (: inp memref<64x768xf32>)]
-          (linalg.copy inp out)
+          (linalg.copy {:ins 1 :outs 1} inp out
+            (region
+              (block [(: in f32) (: _out f32)]
+                (linalg.yield in))))
           (func.return))))
 
     ;; =========================================================================
@@ -378,18 +407,24 @@
           (func.return))))
 
     ;; =========================================================================
-    ;; LayerNorm using math.sqrt (keep scf.for for reductions)
+    ;; LayerNorm with GPU-parallel normalization
+    ;; Phase 1: Compute mean and reciprocal std per row (CPU, sequential)
+    ;; Phase 2: Apply normalization (GPU, parallel via linalg.generic)
     ;; =========================================================================
     (func.func {:sym_name "layernorm_forward"
                 :function_type (-> [memref<64x768xf32>
                                     memref<64x768xf32>
                                     memref<768xf32>
-                                    memref<768xf32>] [])}
+                                    memref<768xf32>
+                                    memref<64xf32>
+                                    memref<64xf32>] [])}
       (region
         (block [(: out memref<64x768xf32>)
                 (: inp memref<64x768xf32>)
                 (: weight memref<768xf32>)
-                (: bias memref<768xf32>)]
+                (: bias memref<768xf32>)
+                (: mean_buf memref<64xf32>)
+                (: rs_buf memref<64xf32>)]
 
           (def c0 (: 0 index))
           (def c1 (: 1 index))
@@ -400,6 +435,9 @@
           (def eps (: 1e-5 f32))
           (def one (: 1.0 f32))
 
+          ;; Phase 1: Compute mean and reciprocal std for each row
+          ;; NOTE: Kept as scf.for - GPU reduction was slower (903ms vs 829ms)
+          ;; The 768-wide reductions have too much kernel overhead for this size
           (scf.for c0 T c1
             (region
               (block [(: t index)]
@@ -411,6 +449,7 @@
                       (def new_acc (arith.addf acc x))
                       (scf.yield new_acc)))))
                 (def m (arith.divf sum_val C_f32))
+                (memref.store m mean_buf t)
 
                 ;; Variance
                 (def var_val (scf.for {:result f32} c0 C c1 zero
@@ -427,24 +466,33 @@
                 (def var_eps (arith.addf variance eps))
                 (def std (math.sqrt var_eps))
                 (def rs (arith.divf one std))
-
-                ;; Normalize
-                (scf.for c0 C c1
-                  (region
-                    (block [(: c index)]
-                      (def x (memref.load {:result f32} inp t c))
-                      (def x_norm (arith.mulf (arith.subf x m) rs))
-                      (def gamma (memref.load {:result f32} weight c))
-                      (def beta (memref.load {:result f32} bias c))
-                      (def scaled (arith.mulf x_norm gamma))
-                      (def result (arith.addf scaled beta))
-                      (memref.store result out t c)
-                      (scf.yield))))
+                (memref.store rs rs_buf t)
                 (scf.yield))))
+
+          ;; Phase 2: Apply normalization using linalg.generic (GPU-parallel)
+          ;; out[t,c] = (inp[t,c] - mean[t]) * rs[t] * weight[c] + bias[c]
+          (linalg.generic
+            {:ins 5 :outs 1
+             :indexing_maps [affine_map<(d0,d1)->(d0,d1)>
+                             affine_map<(d0,d1)->(d0)>
+                             affine_map<(d0,d1)->(d0)>
+                             affine_map<(d0,d1)->(d1)>
+                             affine_map<(d0,d1)->(d1)>
+                             affine_map<(d0,d1)->(d0,d1)>]
+             :iterator_types ["#linalg.iterator_type<parallel>" "#linalg.iterator_type<parallel>"]}
+            inp mean_buf rs_buf weight bias out
+            (region
+              (block [(: x f32) (: m f32) (: rs f32) (: w f32) (: b f32) (: _out f32)]
+                (def x_centered (arith.subf x m))
+                (def x_norm (arith.mulf x_centered rs))
+                (def scaled (arith.mulf x_norm w))
+                (def result (arith.addf scaled b))
+                (linalg.yield result))))
           (func.return))))
 
     ;; =========================================================================
     ;; Reshape QKV from (T=64, 3C=2304) to separate Q/K/V as (NH=12, T=64, hs=64)
+    ;; GPU-parallel via linalg.generic with affine indexing
     ;; =========================================================================
     (func.func {:sym_name "reshape_qkv_to_batched"
                 :function_type (-> [memref<12x64x64xf32>
@@ -457,50 +505,45 @@
                 (: V_out memref<12x64x64xf32>)
                 (: qkv memref<64x2304xf32>)]
 
-          (def c0 (: 0 index))
-          (def c1 (: 1 index))
-          (def c12 (: 12 index))
-          (def c64 (: 64 index))
-          (def hs (: 64 index))
-          (def c768 (: 768 index))
-
-          ;; For each head
-          (scf.for c0 c12 c1
+          ;; Q[h,t,i] = qkv[t, h*64 + i] (offset 0-767)
+          ;; Input reads from (d1, d0*64 + d2), output writes to (d0,d1,d2)
+          (linalg.generic
+            {:ins 1 :outs 1
+             :indexing_maps [affine_map<(d0,d1,d2) -> (d1, d0*64 + d2)>
+                             affine_map<(d0,d1,d2) -> (d0,d1,d2)>]
+             :iterator_types ["#linalg.iterator_type<parallel>" "#linalg.iterator_type<parallel>" "#linalg.iterator_type<parallel>"]}
+            qkv Q_out
             (region
-              (block [(: h index)]
-                (def h_offset (arith.muli h hs))
-                (def k_base (arith.addi h_offset c768))
-                (def v_base (arith.addi k_base c768))
+              (block [(: val f32) (: _out f32)]
+                (linalg.yield val))))
 
-                ;; For each time position
-                (scf.for c0 c64 c1
-                  (region
-                    (block [(: t index)]
-                      ;; For each head dimension
-                      (scf.for c0 hs c1
-                        (region
-                          (block [(: i index)]
-                            ;; Q[h,t,i] = qkv[t, h*hs + i]
-                            (def q_src_idx (arith.addi h_offset i))
-                            (def q_val (memref.load {:result f32} qkv t q_src_idx))
-                            (memref.store q_val Q_out h t i)
+          ;; K[h,t,i] = qkv[t, 768 + h*64 + i] (offset 768-1535)
+          (linalg.generic
+            {:ins 1 :outs 1
+             :indexing_maps [affine_map<(d0,d1,d2) -> (d1, 768 + d0*64 + d2)>
+                             affine_map<(d0,d1,d2) -> (d0,d1,d2)>]
+             :iterator_types ["#linalg.iterator_type<parallel>" "#linalg.iterator_type<parallel>" "#linalg.iterator_type<parallel>"]}
+            qkv K_out
+            (region
+              (block [(: val f32) (: _out f32)]
+                (linalg.yield val))))
 
-                            ;; K[h,t,i] = qkv[t, 768 + h*hs + i]
-                            (def k_src_idx (arith.addi k_base i))
-                            (def k_val (memref.load {:result f32} qkv t k_src_idx))
-                            (memref.store k_val K_out h t i)
+          ;; V[h,t,i] = qkv[t, 1536 + h*64 + i] (offset 1536-2303)
+          (linalg.generic
+            {:ins 1 :outs 1
+             :indexing_maps [affine_map<(d0,d1,d2) -> (d1, 1536 + d0*64 + d2)>
+                             affine_map<(d0,d1,d2) -> (d0,d1,d2)>]
+             :iterator_types ["#linalg.iterator_type<parallel>" "#linalg.iterator_type<parallel>" "#linalg.iterator_type<parallel>"]}
+            qkv V_out
+            (region
+              (block [(: val f32) (: _out f32)]
+                (linalg.yield val))))
 
-                            ;; V[h,t,i] = qkv[t, 1536 + h*hs + i]
-                            (def v_src_idx (arith.addi v_base i))
-                            (def v_val (memref.load {:result f32} qkv t v_src_idx))
-                            (memref.store v_val V_out h t i)
-                            (scf.yield))))
-                      (scf.yield))))
-                (scf.yield))))
           (func.return))))
 
     ;; =========================================================================
     ;; Transpose K from (NH, T, hs) to (NH, hs, T) for K^T operation
+    ;; GPU-parallel via linalg.generic with swapped indexing maps
     ;; =========================================================================
     (func.func {:sym_name "transpose_k_for_attention"
                 :function_type (-> [memref<12x64x64xf32>
@@ -509,29 +552,18 @@
         (block [(: K_t memref<12x64x64xf32>)
                 (: K memref<12x64x64xf32>)]
 
-          (def c0 (: 0 index))
-          (def c1 (: 1 index))
-          (def c12 (: 12 index))
-          (def c64 (: 64 index))
-
-          ;; For each head
-          (scf.for c0 c12 c1
+          ;; GPU-parallel transpose: K_t[h, i, t] = K[h, t, i]
+          ;; Input indexing swaps d1 and d2 to read from transposed position
+          (linalg.generic
+            {:ins 1 :outs 1
+             :indexing_maps [affine_map<(d0,d1,d2) -> (d0,d2,d1)>
+                             affine_map<(d0,d1,d2) -> (d0,d1,d2)>]
+             :iterator_types ["#linalg.iterator_type<parallel>" "#linalg.iterator_type<parallel>" "#linalg.iterator_type<parallel>"]}
+            K K_t
             (region
-              (block [(: h index)]
-                ;; For each time position (becomes column in transposed)
-                (scf.for c0 c64 c1
-                  (region
-                    (block [(: t index)]
-                      ;; For each head dimension (becomes row in transposed)
-                      (scf.for c0 c64 c1
-                        (region
-                          (block [(: i index)]
-                            ;; K_t[h, i, t] = K[h, t, i]
-                            (def val (memref.load {:result f32} K h t i))
-                            (memref.store val K_t h i t)
-                            (scf.yield))))
-                      (scf.yield))))
-                (scf.yield))))
+              (block [(: val f32) (: _out f32)]
+                (linalg.yield val))))
+
           (func.return))))
 
     ;; =========================================================================
@@ -549,103 +581,156 @@
 
           ;; Zero output for accumulation
           (def zero (: 0.0 f32))
-          (linalg.fill zero scores)
+          (linalg.fill {:ins 1 :outs 1} zero scores
+            (region
+              (block [(: in f32) (: _out f32)]
+                (linalg.yield in))))
 
           ;; Batched matmul: for each batch h, compute scores[h] = Q[h] @ K_t[h]
-          (linalg.batch_matmul Q K_t scores)
-
-          ;; Apply scaling (1/sqrt(64) = 0.125)
-          (def scale (: 0.125 f32))
-          (def c0 (: 0 index))
-          (def c1 (: 1 index))
-          (def c12 (: 12 index))
-          (def c64 (: 64 index))
-
-          (scf.for c0 c12 c1
+          (linalg.batch_matmul {:ins 2 :outs 1} Q K_t scores
             (region
-              (block [(: h index)]
-                (scf.for c0 c64 c1
-                  (region
-                    (block [(: t1 index)]
-                      (scf.for c0 c64 c1
-                        (region
-                          (block [(: t2 index)]
-                            (def val (memref.load {:result f32} scores h t1 t2))
-                            (def scaled (arith.mulf val scale))
-                            (memref.store scaled scores h t1 t2)
-                            (scf.yield))))
-                      (scf.yield))))
-                (scf.yield))))
+              (block [(: a f32) (: b f32) (: c f32)]
+                (def mul (arith.mulf a b))
+                (def sum (arith.addf c mul))
+                (linalg.yield sum))))
+
+          ;; Apply scaling (1/sqrt(64) = 0.125) using GPU-parallel linalg.generic
+          (def scale (: 0.125 f32))
+
+          (linalg.generic
+            {:ins 1 :outs 1
+             :indexing_maps [affine_map<(d0,d1,d2) -> (d0,d1,d2)>
+                             affine_map<(d0,d1,d2) -> (d0,d1,d2)>]
+             :iterator_types ["#linalg.iterator_type<parallel>" "#linalg.iterator_type<parallel>" "#linalg.iterator_type<parallel>"]}
+            scores scores
+            (region
+              (block [(: val f32) (: _out f32)]
+                (def scaled (arith.mulf val scale))
+                (linalg.yield scaled))))
 
           (func.return))))
 
     ;; =========================================================================
     ;; Causal Softmax: Apply causal mask and softmax to attention scores
     ;; scores: (12, 64, 64), weights_out: (12, 64, 64)
+    ;; GPU-PARALLEL VERSION using linalg.generic with reductions
     ;; =========================================================================
     (func.func {:sym_name "causal_softmax"
                 :function_type (-> [memref<12x64x64xf32>
-                                    memref<12x64x64xf32>] [])}
+                                    memref<12x64x64xf32>
+                                    memref<12x64x64xf32>
+                                    memref<12x64xf32>
+                                    memref<12x64xf32>] [])}
       (region
         (block [(: weights memref<12x64x64xf32>)
-                (: scores memref<12x64x64xf32>)]
+                (: scores memref<12x64x64xf32>)
+                (: masked_scores memref<12x64x64xf32>)
+                (: max_buf memref<12x64xf32>)
+                (: sum_buf memref<12x64xf32>)]
 
-          (def c0 (: 0 index))
-          (def c1 (: 1 index))
-          (def c12 (: 12 index))
-          (def c64 (: 64 index))
-          (def zero (: 0.0 f32))
           (def neg_inf (: -1e9 f32))
+          (def zero (: 0.0 f32))
+          (def c1_idx (: 1 index))
 
-          ;; For each head
-          (scf.for c0 c12 c1
+          ;; ---------------------------------------------------------------
+          ;; Step 1: Apply causal mask - set positions where t2 > t to -inf
+          ;; This allows full-dimension reductions while respecting causality
+          ;; ---------------------------------------------------------------
+          (linalg.generic
+            {:ins 1 :outs 1
+             :indexing_maps [affine_map<(d0,d1,d2)->(d0,d1,d2)>
+                             affine_map<(d0,d1,d2)->(d0,d1,d2)>]
+             :iterator_types ["#linalg.iterator_type<parallel>" "#linalg.iterator_type<parallel>" "#linalg.iterator_type<parallel>"]}
+            scores masked_scores
             (region
-              (block [(: h index)]
-                ;; For each query position
-                (scf.for c0 c64 c1
-                  (region
-                    (block [(: t index)]
-                      ;; Causal mask: only attend to positions <= t
-                      (def valid_len (arith.addi t c1))
+              (block [(: score f32) (: _out f32)]
+                ;; Get indices: d1 = query position (t), d2 = key position (t2)
+                (def t (linalg.index {:dim 1}))
+                (def t2 (linalg.index {:dim 2}))
+                ;; valid_len = t + 1, so valid positions are t2 < t + 1, i.e., t2 <= t
+                (def valid_len (arith.addi t c1_idx))
+                (def is_valid (arith.cmpi {:predicate 2} t2 valid_len))
+                ;; If valid, use score; otherwise use -inf
+                (def masked (arith.select is_valid score neg_inf))
+                (linalg.yield masked))))
 
-                      ;; Pass 1: Find max for numerical stability (only valid positions)
-                      (def max_score (scf.for {:result f32} c0 valid_len c1 neg_inf
-                        (region
-                          (block [(: t2 index) (: max_acc f32)]
-                            (def score (memref.load {:result f32} scores h t t2))
-                            (def new_max (arith.maximumf max_acc score))
-                            (scf.yield new_max)))))
+          ;; ---------------------------------------------------------------
+          ;; Step 2: Find max per (head, query_pos) using reduction
+          ;; max_buf[h,t] = max over all t2 of masked_scores[h,t,t2]
+          ;; ---------------------------------------------------------------
+          ;; Initialize max_buf to -inf
+          (linalg.fill {:ins 1 :outs 1} neg_inf max_buf
+            (region
+              (block [(: in f32) (: _out f32)]
+                (linalg.yield in))))
 
-                      ;; Pass 2: Compute exp(score - max) and sum
-                      (def exp_sum (scf.for {:result f32} c0 valid_len c1 zero
-                        (region
-                          (block [(: t2 index) (: sum_acc f32)]
-                            (def score (memref.load {:result f32} scores h t t2))
-                            (def shifted (arith.subf score max_score))
-                            (def exp_val (math.exp shifted))
-                            ;; Store intermediate exp value
-                            (memref.store exp_val weights h t t2)
-                            (def new_sum (arith.addf sum_acc exp_val))
-                            (scf.yield new_sum)))))
+          (linalg.generic
+            {:ins 1 :outs 1
+             :indexing_maps [affine_map<(d0,d1,d2)->(d0,d1,d2)>
+                             affine_map<(d0,d1,d2)->(d0,d1)>]
+             :iterator_types ["#linalg.iterator_type<parallel>" "#linalg.iterator_type<parallel>" "#linalg.iterator_type<reduction>"]}
+            masked_scores max_buf
+            (region
+              (block [(: score f32) (: max_acc f32)]
+                (def new_max (arith.maximumf score max_acc))
+                (linalg.yield new_max))))
 
-                      ;; Pass 3: Normalize by sum (valid positions)
-                      (scf.for c0 valid_len c1
-                        (region
-                          (block [(: t2 index)]
-                            (def exp_val (memref.load {:result f32} weights h t t2))
-                            (def normalized (arith.divf exp_val exp_sum))
-                            (memref.store normalized weights h t t2)
-                            (scf.yield))))
+          ;; ---------------------------------------------------------------
+          ;; Step 3: Compute exp(score - max) element-wise
+          ;; weights[h,t,t2] = exp(masked_scores[h,t,t2] - max_buf[h,t])
+          ;; Invalid positions: exp(-inf - max) = exp(-inf) = 0
+          ;; ---------------------------------------------------------------
+          (linalg.generic
+            {:ins 2 :outs 1
+             :indexing_maps [affine_map<(d0,d1,d2)->(d0,d1,d2)>
+                             affine_map<(d0,d1,d2)->(d0,d1)>
+                             affine_map<(d0,d1,d2)->(d0,d1,d2)>]
+             :iterator_types ["#linalg.iterator_type<parallel>" "#linalg.iterator_type<parallel>" "#linalg.iterator_type<parallel>"]}
+            masked_scores max_buf weights
+            (region
+              (block [(: score f32) (: max_val f32) (: _out f32)]
+                (def shifted (arith.subf score max_val))
+                (def exp_val (math.exp shifted))
+                (linalg.yield exp_val))))
 
-                      ;; Zero out invalid positions (t2 > t) for causal mask
-                      (scf.for valid_len c64 c1
-                        (region
-                          (block [(: t2 index)]
-                            (memref.store zero weights h t t2)
-                            (scf.yield))))
+          ;; ---------------------------------------------------------------
+          ;; Step 4: Sum exp values per (head, query_pos) using reduction
+          ;; sum_buf[h,t] = sum over all t2 of weights[h,t,t2]
+          ;; ---------------------------------------------------------------
+          ;; Initialize sum_buf to 0
+          (linalg.fill {:ins 1 :outs 1} zero sum_buf
+            (region
+              (block [(: in f32) (: _out f32)]
+                (linalg.yield in))))
 
-                      (scf.yield))))
-                (scf.yield))))
+          (linalg.generic
+            {:ins 1 :outs 1
+             :indexing_maps [affine_map<(d0,d1,d2)->(d0,d1,d2)>
+                             affine_map<(d0,d1,d2)->(d0,d1)>]
+             :iterator_types ["#linalg.iterator_type<parallel>" "#linalg.iterator_type<parallel>" "#linalg.iterator_type<reduction>"]}
+            weights sum_buf
+            (region
+              (block [(: exp_val f32) (: sum_acc f32)]
+                (def new_sum (arith.addf exp_val sum_acc))
+                (linalg.yield new_sum))))
+
+          ;; ---------------------------------------------------------------
+          ;; Step 5: Normalize by dividing by sum
+          ;; weights[h,t,t2] = weights[h,t,t2] / sum_buf[h,t]
+          ;; Invalid positions: 0 / sum = 0 (correct!)
+          ;; ---------------------------------------------------------------
+          (linalg.generic
+            {:ins 2 :outs 1
+             :indexing_maps [affine_map<(d0,d1,d2)->(d0,d1,d2)>
+                             affine_map<(d0,d1,d2)->(d0,d1)>
+                             affine_map<(d0,d1,d2)->(d0,d1,d2)>]
+             :iterator_types ["#linalg.iterator_type<parallel>" "#linalg.iterator_type<parallel>" "#linalg.iterator_type<parallel>"]}
+            weights sum_buf weights
+            (region
+              (block [(: exp_val f32) (: sum_val f32) (: _out f32)]
+                (def normalized (arith.divf exp_val sum_val))
+                (linalg.yield normalized))))
+
           (func.return))))
 
     ;; =========================================================================
@@ -663,15 +748,24 @@
 
           ;; Zero output for accumulation
           (def zero (: 0.0 f32))
-          (linalg.fill zero out)
+          (linalg.fill {:ins 1 :outs 1} zero out
+            (region
+              (block [(: in f32) (: _out f32)]
+                (linalg.yield in))))
 
           ;; Batched matmul: out[h] = weights[h] @ V[h]
-          (linalg.batch_matmul weights V out)
+          (linalg.batch_matmul {:ins 2 :outs 1} weights V out
+            (region
+              (block [(: a f32) (: b f32) (: c f32)]
+                (def mul (arith.mulf a b))
+                (def sum (arith.addf c mul))
+                (linalg.yield sum))))
 
           (func.return))))
 
     ;; =========================================================================
     ;; Reshape attention output from (NH=12, T=64, hs=64) back to (T=64, C=768)
+    ;; GPU-parallel via linalg.generic with affine indexing
     ;; =========================================================================
     (func.func {:sym_name "reshape_attn_output"
                 :function_type (-> [memref<64x768xf32>
@@ -680,32 +774,19 @@
         (block [(: out memref<64x768xf32>)
                 (: attn_values memref<12x64x64xf32>)]
 
-          (def c0 (: 0 index))
-          (def c1 (: 1 index))
-          (def c12 (: 12 index))
-          (def c64 (: 64 index))
-          (def hs (: 64 index))
-
-          ;; For each time position
-          (scf.for c0 c64 c1
+          ;; out[t, h*64 + i] = attn_values[h, t, i]
+          ;; Iterating over (h, t, i) = (d0, d1, d2)
+          ;; Input reads from (d0, d1, d2), output writes to (d1, d0*64 + d2)
+          (linalg.generic
+            {:ins 1 :outs 1
+             :indexing_maps [affine_map<(d0,d1,d2) -> (d0,d1,d2)>
+                             affine_map<(d0,d1,d2) -> (d1, d0*64 + d2)>]
+             :iterator_types ["#linalg.iterator_type<parallel>" "#linalg.iterator_type<parallel>" "#linalg.iterator_type<parallel>"]}
+            attn_values out
             (region
-              (block [(: t index)]
-                ;; For each head
-                (scf.for c0 c12 c1
-                  (region
-                    (block [(: h index)]
-                      (def h_offset (arith.muli h hs))
-                      ;; For each head dimension
-                      (scf.for c0 hs c1
-                        (region
-                          (block [(: i index)]
-                            ;; out[t, h*hs + i] = attn_values[h, t, i]
-                            (def out_idx (arith.addi h_offset i))
-                            (def val (memref.load {:result f32} attn_values h t i))
-                            (memref.store val out t out_idx)
-                            (scf.yield))))
-                      (scf.yield))))
-                (scf.yield))))
+              (block [(: val f32) (: _out f32)]
+                (linalg.yield val))))
+
           (func.return))))
 
     ;; =========================================================================
@@ -720,7 +801,10 @@
                                     memref<12x64x64xf32>
                                     memref<12x64x64xf32>
                                     memref<12x64x64xf32>
-                                    memref<12x64x64xf32>] [])}
+                                    memref<12x64x64xf32>
+                                    memref<12x64x64xf32>
+                                    memref<12x64xf32>
+                                    memref<12x64xf32>] [])}
       (region
         (block [(: out memref<64x768xf32>)
                 (: qkv memref<64x2304xf32>)
@@ -730,30 +814,34 @@
                 (: K_t memref<12x64x64xf32>)
                 (: scores memref<12x64x64xf32>)
                 (: weights memref<12x64x64xf32>)
-                (: values memref<12x64x64xf32>)]
+                (: values memref<12x64x64xf32>)
+                (: masked_scores memref<12x64x64xf32>)
+                (: max_buf memref<12x64xf32>)
+                (: sum_buf memref<12x64xf32>)]
 
           ;; Step 1: Reshape QKV to batched format
-          (func.call "reshape_qkv_to_batched" Q K V qkv)
+          (func.call {:callee "@reshape_qkv_to_batched"} Q K V qkv)
 
           ;; Step 2: Transpose K for K^T
-          (func.call "transpose_k_for_attention" K_t K)
+          (func.call {:callee "@transpose_k_for_attention"} K_t K)
 
           ;; Step 3: Q @ K^T -> scores (GPU via linalg.batch_matmul)
-          (func.call "batched_qk_matmul" scores Q K_t)
+          (func.call {:callee "@batched_qk_matmul"} scores Q K_t)
 
           ;; Step 4: Causal softmax on scores -> weights
-          (func.call "causal_softmax" weights scores)
+          (func.call {:callee "@causal_softmax"} weights scores masked_scores max_buf sum_buf)
 
           ;; Step 5: weights @ V -> values (GPU via linalg.batch_matmul)
-          (func.call "batched_attn_v_matmul" values weights V)
+          (func.call {:callee "@batched_attn_v_matmul"} values weights V)
 
           ;; Step 6: Reshape output back to (T, C) format
-          (func.call "reshape_attn_output" out values)
+          (func.call {:callee "@reshape_attn_output"} out values)
 
           (func.return))))
 
     ;; =========================================================================
-    ;; GELU Activation using math.tanh
+    ;; GELU Activation (GPU-parallel via linalg.generic)
+    ;; GELU(x) = 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
     ;; =========================================================================
     (func.func {:sym_name "gelu_forward"
                 :function_type (-> [memref<64x3072xf32>
@@ -761,36 +849,48 @@
       (region
         (block [(: out memref<64x3072xf32>)
                 (: inp memref<64x3072xf32>)]
-          (def c0 (: 0 index))
-          (def c1 (: 1 index))
-          (def T (: 64 index))
-          (def C4 (: 3072 index))
-
+          ;; Constants for GELU computation
           (def half (: 0.5 f32))
           (def one (: 1.0 f32))
           (def sqrt_2_over_pi (: 0.7978845608 f32))
           (def coeff (: 0.044715 f32))
 
-          (scf.for c0 T c1
+          ;; GPU-parallel GELU using linalg.generic
+          ;; Use numerically stable tanh via exp(-2|x|) to avoid overflow
+          (def two (: 2.0 f32))
+          (def neg_two (: -2.0 f32))
+          (def neg_one (: -1.0 f32))
+
+          (linalg.generic
+            {:ins 1 :outs 1
+             :indexing_maps [affine_map<(d0,d1) -> (d0,d1)>
+                             affine_map<(d0,d1) -> (d0,d1)>]
+             :iterator_types ["#linalg.iterator_type<parallel>" "#linalg.iterator_type<parallel>"]}
+            inp out
             (region
-              (block [(: t index)]
-                (scf.for c0 C4 c1
-                  (region
-                    (block [(: c index)]
-                      (def x (memref.load {:result f32} inp t c))
-                      (def x2 (arith.mulf x x))
-                      (def x3 (arith.mulf x2 x))
-                      (def inner1 (arith.mulf coeff x3))
-                      (def inner2 (arith.addf x inner1))
-                      (def inner3 (arith.mulf sqrt_2_over_pi inner2))
-                      ;; Use math.tanh instead of custom function
-                      (def tanh_val (math.tanh inner3))
-                      (def one_plus_tanh (arith.addf one tanh_val))
-                      (def half_x (arith.mulf half x))
-                      (def result (arith.mulf half_x one_plus_tanh))
-                      (memref.store result out t c)
-                      (scf.yield))))
-                (scf.yield))))
+              (block [(: x f32) (: _out f32)]
+                ;; GELU: 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
+                (def x2 (arith.mulf x x))
+                (def x3 (arith.mulf x2 x))
+                (def inner1 (arith.mulf coeff x3))
+                (def inner2 (arith.addf x inner1))
+                (def y (arith.mulf sqrt_2_over_pi inner2))
+                ;; Numerically stable tanh:
+                ;; tanh(y) = sign(y) * (1 - exp(-2|y|)) / (1 + exp(-2|y|))
+                ;; For positive y: (1 - exp(-2y)) / (1 + exp(-2y))
+                ;; For negative y: -(1 - exp(2y)) / (1 + exp(2y)) = (exp(2y) - 1) / (exp(2y) + 1)
+                (def abs_y (math.absf y))
+                (def neg_2_abs_y (arith.mulf neg_two abs_y))
+                (def exp_neg (math.exp neg_2_abs_y))
+                (def one_minus_exp (arith.subf one exp_neg))
+                (def one_plus_exp (arith.addf one exp_neg))
+                (def abs_tanh (arith.divf one_minus_exp one_plus_exp))
+                ;; Apply sign: copysign(abs_tanh, y)
+                (def tanh_val (math.copysign abs_tanh y))
+                (def one_plus_tanh (arith.addf one tanh_val))
+                (def half_x (arith.mulf half x))
+                (def result (arith.mulf half_x one_plus_tanh))
+                (linalg.yield result))))
           (func.return))))
 
     ;; =========================================================================
@@ -857,7 +957,7 @@
             (region
               (block [(: v index) (: curr_max f32)]
                 (def val (memref.load {:result f32} logits v))
-                (def is_greater (arith.cmpf {:predicate "ogt"} val curr_max))
+                (def is_greater (arith.cmpf {:predicate 2} val curr_max))
                 (def new_max (arith.select is_greater val curr_max))
                 (scf.yield new_max)))))
 
@@ -899,7 +999,7 @@
             (region
               (block [(: v index) (: curr_max f32)]
                 (def val (memref.load {:result f32} probs v))
-                (def is_greater (arith.cmpf {:predicate "ogt"} val curr_max))
+                (def is_greater (arith.cmpf {:predicate 2} val curr_max))
                 (def new_max (arith.select is_greater val curr_max))
                 (scf.yield new_max)))))
 
@@ -908,7 +1008,7 @@
             (region
               (block [(: v index) (: curr_idx index)]
                 (def val (memref.load {:result f32} probs v))
-                (def is_max (arith.cmpf {:predicate "oeq"} val max_val))
+                (def is_max (arith.cmpf {:predicate 1} val max_val))
                 (def new_idx (arith.select is_max v curr_idx))
                 (scf.yield new_idx)))))
 
@@ -928,8 +1028,10 @@
           (def str_ptr_ptr (ptr-at !llvm.ptr table_ptr token_i64))
           (def str_ptr (llvm.load {:result !llvm.ptr} str_ptr_ptr))
           ;; Use llvm.call directly for variadic printf (can't use func.call with llvm.func)
+          ;; operandSegmentSizes is auto-computed by ir_gen.rs
           (def _p (llvm.call {:callee @printf
                               :var_callee_type !llvm.func<i32 (ptr, ...)>
+                              :op_bundle_sizes "array<i32>"
                               :result i32}
                     str_ptr))
           (func.return))))
@@ -942,12 +1044,12 @@
       (region
         (block [(: path !llvm.ptr)]
           (def mode (llvm.mlir.addressof {:global_name @read_mode :result !llvm.ptr}))
-          (def file (func.call {:result !llvm.ptr} "fopen" path mode))
+          (def file (func.call {:callee "@fopen" :result !llvm.ptr} path mode))
 
           ;; Read header (256 * 4 = 1024 bytes)
           (def header_size (: 1024 i64))
-          (def header_ptr (func.call {:result !llvm.ptr} "malloc" header_size))
-          (def _read_h (func.call {:result i64} "fread" header_ptr (: 4 i64) (: 256 i64) file))
+          (def header_ptr (func.call {:callee "@malloc" :result !llvm.ptr} header_size))
+          (def _read_h (func.call {:callee "@fread" :result i64} header_ptr (: 4 i64) (: 256 i64) file))
 
           ;; Check magic (should be 20240328)
           (def magic (llvm.load {:result i32} header_ptr))
@@ -968,7 +1070,7 @@
           (def vocab_i64 (arith.extsi {:result i64} vocab_size))
           (def ptr_size (: 8 i64))
           (def table_bytes (arith.muli vocab_i64 ptr_size))
-          (def table_ptr (func.call {:result !llvm.ptr} "malloc" table_bytes))
+          (def table_ptr (func.call {:callee "@malloc" :result !llvm.ptr} table_bytes))
 
           ;; Store globally
           (def token_table_addr (llvm.mlir.addressof {:global_name @token_table :result !llvm.ptr}))
@@ -984,18 +1086,18 @@
             (region
               (block [(: i index)]
                 ;; Read length (1 byte)
-                (def len_buf (func.call {:result !llvm.ptr} "malloc" one_byte))
-                (def _r1 (func.call {:result i64} "fread" len_buf one_byte one_byte file))
+                (def len_buf (func.call {:callee "@malloc" :result !llvm.ptr} one_byte))
+                (def _r1 (func.call {:callee "@fread" :result i64} len_buf one_byte one_byte file))
                 (def len_u8 (llvm.load {:result i8} len_buf))
                 (def len (arith.extui {:result i64} len_u8))
-                (func.call "free" len_buf)
+                (func.call {:callee "@free"} len_buf)
 
                 ;; Allocate string buffer (+1 for null)
                 (def str_len_plus1 (arith.addi len one_byte))
-                (def str_ptr (func.call {:result !llvm.ptr} "malloc" str_len_plus1))
+                (def str_ptr (func.call {:callee "@malloc" :result !llvm.ptr} str_len_plus1))
 
                 ;; Read string
-                (def _r2 (func.call {:result i64} "fread" str_ptr one_byte len file))
+                (def _r2 (func.call {:callee "@fread" :result i64} str_ptr one_byte len file))
 
                 ;; Add null terminator
                 (def null_pos (ptr-at i8 str_ptr len))
@@ -1008,8 +1110,8 @@
                 (llvm.store str_ptr slot_ptr)
                 (scf.yield))))
 
-          (def _fc (func.call {:result i32} "fclose" file))
-          (func.call "free" header_ptr)
+          (def _fc (func.call {:callee "@fclose" :result i32} file))
+          (func.call {:callee "@free"} header_ptr)
 
           (func.return (: 0 i32)))))
 
@@ -1018,11 +1120,13 @@
     ;; =========================================================================
     (func.func {:sym_name "printF32"
                 :function_type (-> [f32] [])
-                :sym_visibility "private"})
+                :sym_visibility "private"}
+      (region))
 
     (func.func {:sym_name "printNewline"
                 :function_type (-> [] [])
-                :sym_visibility "private"})
+                :sym_visibility "private"}
+      (region))
 
     ;; =========================================================================
     ;; Main function with weight loading and generation loop
@@ -1031,11 +1135,11 @@
       ;; Load checkpoint
       (def path (llvm.mlir.addressof {:global_name @checkpoint_path :result !llvm.ptr}))
       (def mode (llvm.mlir.addressof {:global_name @read_mode :result !llvm.ptr}))
-      (def file (func.call {:result !llvm.ptr} "fopen" path mode))
+      (def file (func.call {:callee "@fopen" :result !llvm.ptr} path mode))
     
       ;; Read checkpoint header (256 ints) to get model config
-      (def header_buf (func.call {:result !llvm.ptr} "malloc" (: 1024 i64)))
-      (def _read_header (func.call {:result i64} "fread" header_buf (: 4 i64) (: 256 i64) file))
+      (def header_buf (func.call {:callee "@malloc" :result !llvm.ptr} (: 1024 i64)))
+      (def _read_header (func.call {:callee "@fread" :result i64} header_buf (: 4 i64) (: 256 i64) file))
     
       ;; Extract model config from header
       (def magic_ptr header_buf)
@@ -1146,11 +1250,11 @@
       ;; Load parameters
       (def sizeof_f32 (: 4 i64))
       (def total_bytes (arith.muli total_params sizeof_f32))
-      (def params_ptr (func.call {:result !llvm.ptr} "malloc" total_bytes))
+      (def params_ptr (func.call {:callee "@malloc" :result !llvm.ptr} total_bytes))
       (print "Loading weights...\n")
-      (def read_count (func.call {:result i64} "fread" params_ptr sizeof_f32 total_params file))
+      (def read_count (func.call {:callee "@fread" :result i64} params_ptr sizeof_f32 total_params file))
       (print "Loaded %ld floats\n" read_count)
-      (def _close (func.call {:result i32} "fclose" file))
+      (def _close (func.call {:callee "@fclose" :result i32} file))
     
       ;; Store params globally
       (def g_params_addr (llvm.mlir.addressof {:global_name @g_params :result !llvm.ptr}))
@@ -1163,7 +1267,7 @@
     
       ;; Load tokenizer
       (def tok_path (llvm.mlir.addressof {:global_name @tokenizer_path :result !llvm.ptr}))
-      (def _tok_ok (func.call {:result i32} "tokenizer_init" tok_path))
+      (def _tok_ok (func.call {:callee "@tokenizer_init" :result i32} tok_path))
     
       ;; Get wte and wpe pointers
       (def wte_ptr params_ptr)
@@ -1208,7 +1312,30 @@
       (def attn_weights (memref.alloc {:result memref<12x64x64xf32>}))
       (def attn_values (memref.alloc {:result memref<12x64x64xf32>}))
 
-      ;; Layer weight buffers
+      ;; Causal softmax workspace buffers
+      (def softmax_masked (memref.alloc {:result memref<12x64x64xf32>}))
+      (def softmax_max_buf (memref.alloc {:result memref<12x64xf32>}))
+      (def softmax_sum_buf (memref.alloc {:result memref<12x64xf32>}))
+
+      ;; LayerNorm temporary buffers for mean and reciprocal std
+      (def ln_mean_buf (memref.alloc {:result memref<64xf32>}))
+      (def ln_rs_buf (memref.alloc {:result memref<64xf32>}))
+
+      ;; Layer weight buffers - ALL 12 LAYERS cached (eliminates per-token ptr loading)
+      ;; This uses ~340MB but avoids transpose and ptr arithmetic per token
+      (def all_ln1_w (memref.alloc {:result memref<12x768xf32>}))
+      (def all_ln1_b (memref.alloc {:result memref<12x768xf32>}))
+      (def all_qkv_w (memref.alloc {:result memref<12x768x2304xf32>}))
+      (def all_qkv_b (memref.alloc {:result memref<12x2304xf32>}))
+      (def all_attn_w (memref.alloc {:result memref<12x768x768xf32>}))
+      (def all_attn_b (memref.alloc {:result memref<12x768xf32>}))
+      (def all_ln2_w (memref.alloc {:result memref<12x768xf32>}))
+      (def all_ln2_b (memref.alloc {:result memref<12x768xf32>}))
+      (def all_fc_w (memref.alloc {:result memref<12x768x3072xf32>}))
+      (def all_fc_b (memref.alloc {:result memref<12x3072xf32>}))
+      (def all_fcproj_w (memref.alloc {:result memref<12x3072x768xf32>}))
+      (def all_fcproj_b (memref.alloc {:result memref<12x768xf32>}))
+      ;; Single-layer work buffers (copied from all_* per layer - no transpose needed!)
       (def ln1_w (memref.alloc {:result memref<768xf32>}))
       (def ln1_b (memref.alloc {:result memref<768xf32>}))
       (def qkv_w (memref.alloc {:result memref<768x2304xf32>}))
@@ -1221,6 +1348,7 @@
       (def fc_b (memref.alloc {:result memref<3072xf32>}))
       (def fcproj_w (memref.alloc {:result memref<3072x768xf32>}))
       (def fcproj_b (memref.alloc {:result memref<768xf32>}))
+      ;; Final layer norm (not per-layer, just one)
       (def lnf_w (memref.alloc {:result memref<768xf32>}))
       (def lnf_b (memref.alloc {:result memref<768xf32>}))
 
@@ -1228,6 +1356,8 @@
       (gpu.host_register (memref.cast {:result "memref<*xf32>"} x))
       (gpu.host_register (memref.cast {:result "memref<*xf32>"} x2))
       (gpu.host_register (memref.cast {:result "memref<*xf32>"} ln_out))
+      (gpu.host_register (memref.cast {:result "memref<*xf32>"} ln_mean_buf))
+      (gpu.host_register (memref.cast {:result "memref<*xf32>"} ln_rs_buf))
       (gpu.host_register (memref.cast {:result "memref<*xf32>"} qkv_out))
       (gpu.host_register (memref.cast {:result "memref<*xf32>"} attn_out))
       (gpu.host_register (memref.cast {:result "memref<*xf32>"} attn_proj_out))
@@ -1235,6 +1365,18 @@
       (gpu.host_register (memref.cast {:result "memref<*xf32>"} gelu_out))
       (gpu.host_register (memref.cast {:result "memref<*xf32>"} fc_proj_out))
       (gpu.host_register (memref.cast {:result "memref<*xf32>"} logits))
+      (gpu.host_register (memref.cast {:result "memref<*xf32>"} all_ln1_w))
+      (gpu.host_register (memref.cast {:result "memref<*xf32>"} all_ln1_b))
+      (gpu.host_register (memref.cast {:result "memref<*xf32>"} all_qkv_w))
+      (gpu.host_register (memref.cast {:result "memref<*xf32>"} all_qkv_b))
+      (gpu.host_register (memref.cast {:result "memref<*xf32>"} all_attn_w))
+      (gpu.host_register (memref.cast {:result "memref<*xf32>"} all_attn_b))
+      (gpu.host_register (memref.cast {:result "memref<*xf32>"} all_ln2_w))
+      (gpu.host_register (memref.cast {:result "memref<*xf32>"} all_ln2_b))
+      (gpu.host_register (memref.cast {:result "memref<*xf32>"} all_fc_w))
+      (gpu.host_register (memref.cast {:result "memref<*xf32>"} all_fc_b))
+      (gpu.host_register (memref.cast {:result "memref<*xf32>"} all_fcproj_w))
+      (gpu.host_register (memref.cast {:result "memref<*xf32>"} all_fcproj_b))
       (gpu.host_register (memref.cast {:result "memref<*xf32>"} ln1_w))
       (gpu.host_register (memref.cast {:result "memref<*xf32>"} ln1_b))
       (gpu.host_register (memref.cast {:result "memref<*xf32>"} qkv_w))
@@ -1256,219 +1398,333 @@
       (gpu.host_register (memref.cast {:result "memref<*xf32>"} attn_scores))
       (gpu.host_register (memref.cast {:result "memref<*xf32>"} attn_weights))
       (gpu.host_register (memref.cast {:result "memref<*xf32>"} attn_values))
+      (gpu.host_register (memref.cast {:result "memref<*xf32>"} softmax_masked))
+      (gpu.host_register (memref.cast {:result "memref<*xf32>"} softmax_max_buf))
+      (gpu.host_register (memref.cast {:result "memref<*xf32>"} softmax_sum_buf))
 
       (def c768 (: 768 index))
       (def c2304 (: 2304 index))
       (def c3072 (: 3072 index))
       (def c12 (: 12 index))
-    
+      (def C (: 768 i64))
+      (def C4 (: 3072 i64))
+
+      ;; =====================================================================
+      ;; PRE-LOAD ALL 12 LAYERS OF WEIGHTS (eliminates per-token loading!)
+      ;; This is done ONCE before generation, not per token
+      ;; =====================================================================
+      (print "Pre-loading all layer weights...\n")
+      (scf.for c0 c12 c1
+        (region
+          (block [(: layer index)]
+            (def layer_i64 (arith.index_cast {:result i64} layer))
+
+            ;; Load ln1 weights for this layer
+            (def ln1w_offset (arith.addi ln1w_base (arith.muli layer_i64 ln_stride)))
+            (def ln1b_offset (arith.addi ln1b_base (arith.muli layer_i64 ln_stride)))
+            (scf.for c0 c768 c1
+              (region
+                (block [(: i index)]
+                  (def i_i64 (arith.index_cast {:result i64} i))
+                  (def w_ptr (ptr-at f32 params_ptr (arith.addi ln1w_offset i_i64)))
+                  (def b_ptr (ptr-at f32 params_ptr (arith.addi ln1b_offset i_i64)))
+                  (memref.store (llvm.load {:result f32} w_ptr) all_ln1_w layer i)
+                  (memref.store (llvm.load {:result f32} b_ptr) all_ln1_b layer i)
+                  (scf.yield))))
+
+            ;; Load qkv weights (transpose: checkpoint[oc*C+c] -> qkv_w[layer][c][oc])
+            (def qkvw_offset (arith.addi qkvw_base (arith.muli layer_i64 qkvw_stride)))
+            (def qkvb_offset (arith.addi qkvb_base (arith.muli layer_i64 qkvb_stride)))
+            (scf.for c0 c2304 c1
+              (region
+                (block [(: oc index)]
+                  (def oc_i64 (arith.index_cast {:result i64} oc))
+                  (def row_offset (arith.muli oc_i64 C))
+                  (scf.for c0 c768 c1
+                    (region
+                      (block [(: c index)]
+                        (def c_i64 (arith.index_cast {:result i64} c))
+                        (def w_ptr (ptr-at f32 params_ptr (arith.addi qkvw_offset (arith.addi row_offset c_i64))))
+                        (memref.store (llvm.load {:result f32} w_ptr) all_qkv_w layer c oc)
+                        (scf.yield))))
+                  (scf.yield))))
+            (scf.for c0 c2304 c1
+              (region
+                (block [(: i index)]
+                  (def i_i64 (arith.index_cast {:result i64} i))
+                  (def b_ptr (ptr-at f32 params_ptr (arith.addi qkvb_offset i_i64)))
+                  (memref.store (llvm.load {:result f32} b_ptr) all_qkv_b layer i)
+                  (scf.yield))))
+
+            ;; Load attention projection weights (transpose)
+            (def attprojw_offset (arith.addi attprojw_base (arith.muli layer_i64 attprojw_stride)))
+            (def attprojb_offset (arith.addi attprojb_base (arith.muli layer_i64 attprojb_stride)))
+            (scf.for c0 c768 c1
+              (region
+                (block [(: oc index)]
+                  (def oc_i64 (arith.index_cast {:result i64} oc))
+                  (def row_offset (arith.muli oc_i64 C))
+                  (scf.for c0 c768 c1
+                    (region
+                      (block [(: c index)]
+                        (def c_i64 (arith.index_cast {:result i64} c))
+                        (def w_ptr (ptr-at f32 params_ptr (arith.addi attprojw_offset (arith.addi row_offset c_i64))))
+                        (memref.store (llvm.load {:result f32} w_ptr) all_attn_w layer c oc)
+                        (scf.yield))))
+                  (scf.yield))))
+            (scf.for c0 c768 c1
+              (region
+                (block [(: i index)]
+                  (def i_i64 (arith.index_cast {:result i64} i))
+                  (def ab_ptr (ptr-at f32 params_ptr (arith.addi attprojb_offset i_i64)))
+                  (memref.store (llvm.load {:result f32} ab_ptr) all_attn_b layer i)
+                  (scf.yield))))
+
+            ;; Load ln2 weights
+            (def ln2w_offset (arith.addi ln2w_base (arith.muli layer_i64 ln_stride)))
+            (def ln2b_offset (arith.addi ln2b_base (arith.muli layer_i64 ln_stride)))
+            (scf.for c0 c768 c1
+              (region
+                (block [(: i index)]
+                  (def i_i64 (arith.index_cast {:result i64} i))
+                  (def w_ptr (ptr-at f32 params_ptr (arith.addi ln2w_offset i_i64)))
+                  (def b_ptr (ptr-at f32 params_ptr (arith.addi ln2b_offset i_i64)))
+                  (memref.store (llvm.load {:result f32} w_ptr) all_ln2_w layer i)
+                  (memref.store (llvm.load {:result f32} b_ptr) all_ln2_b layer i)
+                  (scf.yield))))
+
+            ;; Load fc weights (transpose)
+            (def fcw_offset (arith.addi fcw_base (arith.muli layer_i64 fcw_stride)))
+            (def fcb_offset (arith.addi fcb_base (arith.muli layer_i64 fcb_stride)))
+            (scf.for c0 c3072 c1
+              (region
+                (block [(: oc index)]
+                  (def oc_i64 (arith.index_cast {:result i64} oc))
+                  (def row_offset (arith.muli oc_i64 C))
+                  (scf.for c0 c768 c1
+                    (region
+                      (block [(: c index)]
+                        (def c_i64 (arith.index_cast {:result i64} c))
+                        (def w_ptr (ptr-at f32 params_ptr (arith.addi fcw_offset (arith.addi row_offset c_i64))))
+                        (memref.store (llvm.load {:result f32} w_ptr) all_fc_w layer c oc)
+                        (scf.yield))))
+                  (scf.yield))))
+            (scf.for c0 c3072 c1
+              (region
+                (block [(: i index)]
+                  (def i_i64 (arith.index_cast {:result i64} i))
+                  (def b_ptr (ptr-at f32 params_ptr (arith.addi fcb_offset i_i64)))
+                  (memref.store (llvm.load {:result f32} b_ptr) all_fc_b layer i)
+                  (scf.yield))))
+
+            ;; Load fc projection weights (transpose)
+            (def fcprojw_offset (arith.addi fcprojw_base (arith.muli layer_i64 fcprojw_stride)))
+            (def fcprojb_offset (arith.addi fcprojb_base (arith.muli layer_i64 fcprojb_stride)))
+            (scf.for c0 c768 c1
+              (region
+                (block [(: oc index)]
+                  (def oc_i64 (arith.index_cast {:result i64} oc))
+                  (def row_offset (arith.muli oc_i64 C4))
+                  (scf.for c0 c3072 c1
+                    (region
+                      (block [(: ic index)]
+                        (def ic_i64 (arith.index_cast {:result i64} ic))
+                        (def w_ptr (ptr-at f32 params_ptr (arith.addi fcprojw_offset (arith.addi row_offset ic_i64))))
+                        (memref.store (llvm.load {:result f32} w_ptr) all_fcproj_w layer ic oc)
+                        (scf.yield))))
+                  (scf.yield))))
+            (scf.for c0 c768 c1
+              (region
+                (block [(: i index)]
+                  (def i_i64 (arith.index_cast {:result i64} i))
+                  (def b_ptr (ptr-at f32 params_ptr (arith.addi fcprojb_offset i_i64)))
+                  (memref.store (llvm.load {:result f32} b_ptr) all_fcproj_b layer i)
+                  (scf.yield))))
+
+            (scf.yield))))
+
+      ;; Load final layernorm weights (only one, not per-layer)
+      (scf.for c0 c768 c1
+        (region
+          (block [(: i index)]
+            (def i_i64 (arith.index_cast {:result i64} i))
+            (def w_ptr (ptr-at f32 params_ptr (arith.addi lnfw_base i_i64)))
+            (def b_ptr (ptr-at f32 params_ptr (arith.addi lnfb_base i_i64)))
+            (memref.store (llvm.load {:result f32} w_ptr) lnf_w i)
+            (memref.store (llvm.load {:result f32} b_ptr) lnf_b i)
+            (scf.yield))))
+
+      (print "Weights pre-loaded!\n")
+
       ;; Generation loop: Generate 20 tokens
       (def prompt_len (: 1 index))
       (def gen_steps (: 20 index))
       (def gen_end (arith.addi prompt_len gen_steps))
-    
+
       (print "\nGenerating tokens:\n")
 
-      (def start_time (func.call {:result i64} "clock_ms"))
+      (def start_time (func.call {:callee "@clock_ms" :result i64}))
 
       (scf.for prompt_len gen_end c1
         (region
           (block [(: step index)]
             ;; 1. Embedding lookup
-            (func.call "embedding_lookup" x wte_ptr wpe_ptr token_ids)
+            (func.call {:callee "@embedding_lookup"} x wte_ptr wpe_ptr token_ids)
     
-            ;; 2. Run 12 transformer layers
+            ;; 2. Run 12 transformer layers (copy from cached weights - no transpose!)
             (scf.for c0 c12 c1
               (region
                 (block [(: layer index)]
-                  (def layer_i64 (arith.index_cast {:result i64} layer))
-    
-                  ;; Load ln1 weights
-                  (def ln1w_offset (arith.addi ln1w_base (arith.muli layer_i64 ln_stride)))
-                  (def ln1b_offset (arith.addi ln1b_base (arith.muli layer_i64 ln_stride)))
+                  ;; Copy this layer's weights from cached buffers (already transposed!)
+                  ;; This is much faster than the original: no ptr arithmetic, no transpose
+
+                  ;; Copy ln1 weights
                   (scf.for c0 c768 c1
                     (region
                       (block [(: i index)]
-                        (def i_i64 (arith.index_cast {:result i64} i))
-                        (def w_ptr (ptr-at f32 params_ptr (arith.addi ln1w_offset i_i64)))
-                        (def b_ptr (ptr-at f32 params_ptr (arith.addi ln1b_offset i_i64)))
-                        (memref.store (llvm.load {:result f32} w_ptr) ln1_w i)
-                        (memref.store (llvm.load {:result f32} b_ptr) ln1_b i)
+                        (def v1 (memref.load {:result f32} all_ln1_w layer i))
+                        (memref.store v1 ln1_w i)
+                        (def v2 (memref.load {:result f32} all_ln1_b layer i))
+                        (memref.store v2 ln1_b i)
                         (scf.yield))))
-    
-                  ;; Load qkv weights (transpose: checkpoint[oc*C+c] -> qkv_w[c][oc])
-                  (def qkvw_offset (arith.addi qkvw_base (arith.muli layer_i64 qkvw_stride)))
-                  (def qkvb_offset (arith.addi qkvb_base (arith.muli layer_i64 qkvb_stride)))
-                  (scf.for c0 c2304 c1
+
+                  ;; Copy qkv weights (already transposed in cache!)
+                  (scf.for c0 c768 c1
                     (region
-                      (block [(: oc index)]
-                        (def oc_i64 (arith.index_cast {:result i64} oc))
-                        (def row_offset (arith.muli oc_i64 C))
-                        (scf.for c0 c768 c1
+                      (block [(: c index)]
+                        (scf.for c0 c2304 c1
                           (region
-                            (block [(: c index)]
-                              (def c_i64 (arith.index_cast {:result i64} c))
-                              (def w_ptr (ptr-at f32 params_ptr (arith.addi qkvw_offset (arith.addi row_offset c_i64))))
-                              (memref.store (llvm.load {:result f32} w_ptr) qkv_w c oc)
+                            (block [(: oc index)]
+                              (def v (memref.load {:result f32} all_qkv_w layer c oc))
+                              (memref.store v qkv_w c oc)
                               (scf.yield))))
                         (scf.yield))))
                   (scf.for c0 c2304 c1
                     (region
                       (block [(: i index)]
-                        (def i_i64 (arith.index_cast {:result i64} i))
-                        (def b_ptr (ptr-at f32 params_ptr (arith.addi qkvb_offset i_i64)))
-                        (memref.store (llvm.load {:result f32} b_ptr) qkv_b i)
+                        (def v (memref.load {:result f32} all_qkv_b layer i))
+                        (memref.store v qkv_b i)
                         (scf.yield))))
-    
-                  ;; Load attention projection weights (transpose)
-                  (def attprojw_offset (arith.addi attprojw_base (arith.muli layer_i64 attprojw_stride)))
-                  (def attprojb_offset (arith.addi attprojb_base (arith.muli layer_i64 attprojb_stride)))
+
+                  ;; Copy attn weights (already transposed!)
                   (scf.for c0 c768 c1
                     (region
-                      (block [(: oc index)]
-                        (def oc_i64 (arith.index_cast {:result i64} oc))
-                        (def row_offset (arith.muli oc_i64 C))
+                      (block [(: c index)]
                         (scf.for c0 c768 c1
                           (region
-                            (block [(: c index)]
-                              (def c_i64 (arith.index_cast {:result i64} c))
-                              (def w_ptr (ptr-at f32 params_ptr (arith.addi attprojw_offset (arith.addi row_offset c_i64))))
-                              (memref.store (llvm.load {:result f32} w_ptr) attn_w c oc)
+                            (block [(: oc index)]
+                              (def v (memref.load {:result f32} all_attn_w layer c oc))
+                              (memref.store v attn_w c oc)
                               (scf.yield))))
                         (scf.yield))))
                   (scf.for c0 c768 c1
                     (region
                       (block [(: i index)]
-                        (def i_i64 (arith.index_cast {:result i64} i))
-                        (def ab_ptr (ptr-at f32 params_ptr (arith.addi attprojb_offset i_i64)))
-                        (memref.store (llvm.load {:result f32} ab_ptr) attn_b i)
+                        (def v (memref.load {:result f32} all_attn_b layer i))
+                        (memref.store v attn_b i)
                         (scf.yield))))
-    
-                  ;; Load ln2 weights
-                  (def ln2w_offset (arith.addi ln2w_base (arith.muli layer_i64 ln_stride)))
-                  (def ln2b_offset (arith.addi ln2b_base (arith.muli layer_i64 ln_stride)))
+
+                  ;; Copy ln2 weights
                   (scf.for c0 c768 c1
                     (region
                       (block [(: i index)]
-                        (def i_i64 (arith.index_cast {:result i64} i))
-                        (def w_ptr (ptr-at f32 params_ptr (arith.addi ln2w_offset i_i64)))
-                        (def b_ptr (ptr-at f32 params_ptr (arith.addi ln2b_offset i_i64)))
-                        (memref.store (llvm.load {:result f32} w_ptr) ln2_w i)
-                        (memref.store (llvm.load {:result f32} b_ptr) ln2_b i)
+                        (def v1 (memref.load {:result f32} all_ln2_w layer i))
+                        (memref.store v1 ln2_w i)
+                        (def v2 (memref.load {:result f32} all_ln2_b layer i))
+                        (memref.store v2 ln2_b i)
                         (scf.yield))))
-    
-                  ;; Load fc weights (transpose)
-                  (def fcw_offset (arith.addi fcw_base (arith.muli layer_i64 fcw_stride)))
-                  (def fcb_offset (arith.addi fcb_base (arith.muli layer_i64 fcb_stride)))
-                  (scf.for c0 c3072 c1
-                    (region
-                      (block [(: oc index)]
-                        (def oc_i64 (arith.index_cast {:result i64} oc))
-                        (def row_offset (arith.muli oc_i64 C))
-                        (scf.for c0 c768 c1
-                          (region
-                            (block [(: c index)]
-                              (def c_i64 (arith.index_cast {:result i64} c))
-                              (def w_ptr (ptr-at f32 params_ptr (arith.addi fcw_offset (arith.addi row_offset c_i64))))
-                              (memref.store (llvm.load {:result f32} w_ptr) fc_w c oc)
-                              (scf.yield))))
-                        (scf.yield))))
-                  (scf.for c0 c3072 c1
-                    (region
-                      (block [(: i index)]
-                        (def i_i64 (arith.index_cast {:result i64} i))
-                        (def b_ptr (ptr-at f32 params_ptr (arith.addi fcb_offset i_i64)))
-                        (memref.store (llvm.load {:result f32} b_ptr) fc_b i)
-                        (scf.yield))))
-    
-                  ;; Load fc projection weights (transpose: checkpoint[oc*(4*C)+ic] -> fcproj_w[ic][oc])
-                  (def fcprojw_offset (arith.addi fcprojw_base (arith.muli layer_i64 fcprojw_stride)))
-                  (def fcprojb_offset (arith.addi fcprojb_base (arith.muli layer_i64 fcprojb_stride)))
+
+                  ;; Copy fc weights (already transposed!)
                   (scf.for c0 c768 c1
                     (region
-                      (block [(: oc index)]
-                        (def oc_i64 (arith.index_cast {:result i64} oc))
-                        (def row_offset (arith.muli oc_i64 C4))
+                      (block [(: c index)]
                         (scf.for c0 c3072 c1
                           (region
-                            (block [(: ic index)]
-                              (def ic_i64 (arith.index_cast {:result i64} ic))
-                              (def w_ptr (ptr-at f32 params_ptr (arith.addi fcprojw_offset (arith.addi row_offset ic_i64))))
-                              (memref.store (llvm.load {:result f32} w_ptr) fcproj_w ic oc)
+                            (block [(: oc index)]
+                              (def v (memref.load {:result f32} all_fc_w layer c oc))
+                              (memref.store v fc_w c oc)
+                              (scf.yield))))
+                        (scf.yield))))
+                  (scf.for c0 c3072 c1
+                    (region
+                      (block [(: i index)]
+                        (def v (memref.load {:result f32} all_fc_b layer i))
+                        (memref.store v fc_b i)
+                        (scf.yield))))
+
+                  ;; Copy fcproj weights (already transposed!)
+                  (scf.for c0 c3072 c1
+                    (region
+                      (block [(: ic index)]
+                        (scf.for c0 c768 c1
+                          (region
+                            (block [(: oc index)]
+                              (def v (memref.load {:result f32} all_fcproj_w layer ic oc))
+                              (memref.store v fcproj_w ic oc)
                               (scf.yield))))
                         (scf.yield))))
                   (scf.for c0 c768 c1
                     (region
                       (block [(: i index)]
-                        (def i_i64 (arith.index_cast {:result i64} i))
-                        (def b_ptr (ptr-at f32 params_ptr (arith.addi fcprojb_offset i_i64)))
-                        (memref.store (llvm.load {:result f32} b_ptr) fcproj_b i)
+                        (def v (memref.load {:result f32} all_fcproj_b layer i))
+                        (memref.store v fcproj_b i)
                         (scf.yield))))
-    
+
                   ;; === Transformer block operations ===
                   ;; 1. LayerNorm1
-                  (func.call "layernorm_forward" ln_out x ln1_w ln1_b)
-    
+                  (func.call {:callee "@layernorm_forward"} ln_out x ln1_w ln1_b ln_mean_buf ln_rs_buf)
+
                   ;; 2. QKV Projection (using linalg.matmul)
-                  (func.call "matmul_qkv" qkv_out ln_out qkv_w qkv_b)
-    
+                  (func.call {:callee "@matmul_qkv"} qkv_out ln_out qkv_w qkv_b)
+
                   ;; 3. Attention (GPU batched matmul + softmax)
-                  (func.call "attention_forward" attn_out qkv_out
+                  (func.call {:callee "@attention_forward"} attn_out qkv_out
                              Q_batched K_batched V_batched
-                             K_transposed attn_scores attn_weights attn_values)
-    
+                             K_transposed attn_scores attn_weights attn_values
+                             softmax_masked softmax_max_buf softmax_sum_buf)
+
                   ;; 4. Attention Output Projection (using linalg.matmul)
-                  (func.call "matmul_attn_proj" attn_proj_out attn_out attn_w attn_b)
-    
+                  (func.call {:callee "@matmul_attn_proj"} attn_proj_out attn_out attn_w attn_b)
+
                   ;; 5. Residual 1 (using linalg.add)
-                  (func.call "residual_forward" x2 x attn_proj_out)
-    
+                  (func.call {:callee "@residual_forward"} x2 x attn_proj_out)
+
                   ;; 6. LayerNorm2
-                  (func.call "layernorm_forward" ln_out x2 ln2_w ln2_b)
-    
+                  (func.call {:callee "@layernorm_forward"} ln_out x2 ln2_w ln2_b ln_mean_buf ln_rs_buf)
+
                   ;; 7. MLP FC (using linalg.matmul)
-                  (func.call "matmul_fc" fc_out ln_out fc_w fc_b)
-    
+                  (func.call {:callee "@matmul_fc"} fc_out ln_out fc_w fc_b)
+
                   ;; 8. GELU (using math.tanh)
-                  (func.call "gelu_forward" gelu_out fc_out)
-    
+                  (func.call {:callee "@gelu_forward"} gelu_out fc_out)
+
                   ;; 9. MLP Projection (using linalg.matmul)
-                  (func.call "matmul_fc_proj" fc_proj_out gelu_out fcproj_w fcproj_b)
-    
+                  (func.call {:callee "@matmul_fc_proj"} fc_proj_out gelu_out fcproj_w fcproj_b)
+
                   ;; 10. Residual 2 (using linalg.add)
-                  (func.call "residual_forward" x x2 fc_proj_out)
-    
+                  (func.call {:callee "@residual_forward"} x x2 fc_proj_out)
+
                   (scf.yield))))
-    
-            ;; 3. Final LayerNorm
-            (scf.for c0 c768 c1
-              (region
-                (block [(: i index)]
-                  (def i_i64 (arith.index_cast {:result i64} i))
-                  (def w_ptr (ptr-at f32 params_ptr (arith.addi lnfw_base i_i64)))
-                  (def b_ptr (ptr-at f32 params_ptr (arith.addi lnfb_base i_i64)))
-                  (memref.store (llvm.load {:result f32} w_ptr) lnf_w i)
-                  (memref.store (llvm.load {:result f32} b_ptr) lnf_b i)
-                  (scf.yield))))
-    
-            (func.call "layernorm_forward" x2 x lnf_w lnf_b)
+
+            ;; 3. Final LayerNorm (uses pre-loaded lnf_w, lnf_b)
+            (func.call {:callee "@layernorm_forward"} x2 x lnf_w lnf_b ln_mean_buf ln_rs_buf)
     
             ;; 4. Compute logits from position step-1 (the last token's position)
             (def logit_pos (arith.subi step c1))
-            (func.call "logits_forward" logits x2 wte_ptr logit_pos)
+            (func.call {:callee "@logits_forward"} logits x2 wte_ptr logit_pos)
     
             ;; 5. Argmax to get next token
-            (def next_token (func.call {:result i32} "argmax" logits))
+            (def next_token (func.call {:callee "@argmax" :result i32} logits))
     
             ;; 6. Print token
-            (func.call "print_token" next_token)
+            (func.call {:callee "@print_token"} next_token)
     
             ;; 7. Store token at current step position
             (memref.store next_token token_ids step)
     
             (scf.yield))))
 
-      (def end_time (func.call {:result i64} "clock_ms"))
+      (def end_time (func.call {:callee "@clock_ms" :result i64}))
       (def elapsed_ms (arith.subi end_time start_time))
       (print "\n\nGeneration complete!\n")
       (print "Time for 20 tokens: %ld ms\n" elapsed_ms)
@@ -1508,6 +1764,6 @@
       (memref.dealloc lnf_w)
       (memref.dealloc lnf_b)
     
-      (func.call "free" params_ptr)
+      (func.call {:callee "@free"} params_ptr)
 
       (func.return))))

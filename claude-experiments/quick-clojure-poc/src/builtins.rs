@@ -236,7 +236,7 @@ pub extern "C" fn builtin_is_vector(value: usize) -> usize {
 // ============================================================================
 // These builtins return the type IDs for reader types, for use in extend-type.
 
-use crate::gc_runtime::{TYPE_READER_LIST, TYPE_READER_MAP, TYPE_READER_SYMBOL, TYPE_READER_VECTOR};
+use crate::gc_runtime::{TYPE_READER_LIST, TYPE_READER_MAP, TYPE_READER_SET, TYPE_READER_SYMBOL, TYPE_READER_VECTOR};
 
 /// __ReaderList() -> tagged_type_id
 ///
@@ -268,6 +268,14 @@ pub extern "C" fn builtin__reader_map_type() -> usize {
 #[unsafe(no_mangle)]
 pub extern "C" fn builtin__reader_symbol_type() -> usize {
     TYPE_READER_SYMBOL << 3 // Tag as integer
+}
+
+/// __ReaderSet() -> tagged_type_id
+///
+/// Returns the type ID for ReaderSet (for use in extend-type).
+#[unsafe(no_mangle)]
+pub extern "C" fn builtin__reader_set_type() -> usize {
+    TYPE_READER_SET << 3 // Tag as integer
 }
 
 // ============================================================================
@@ -502,6 +510,75 @@ pub extern "C" fn builtin__reader_symbol_namespace(sym: usize) -> usize {
 }
 
 // ============================================================================
+// Reader Type Operations - ReaderSet
+// ============================================================================
+
+/// __reader_set_count(set) -> tagged_integer
+///
+/// Returns the count of elements in a ReaderSet.
+#[unsafe(no_mangle)]
+pub extern "C" fn builtin__reader_set_count(set: usize) -> usize {
+    unsafe {
+        let rt = get_runtime();
+        let count = rt.reader_set_count(set);
+        count << 3 // Tag as integer
+    }
+}
+
+/// __reader_set_contains(set, value) -> tagged_boolean
+///
+/// Returns true if the ReaderSet contains the value, false otherwise.
+#[unsafe(no_mangle)]
+pub extern "C" fn builtin__reader_set_contains(set: usize, value: usize) -> usize {
+    unsafe {
+        let rt = get_runtime();
+        if rt.reader_set_contains(set, value) {
+            11 // true = (1 << 3) | 0b011
+        } else {
+            3 // false = (0 << 3) | 0b011
+        }
+    }
+}
+
+/// __reader_set_conj(set, elem) -> tagged_reader_set
+///
+/// Returns a new ReaderSet with elem added (if not already present).
+#[unsafe(no_mangle)]
+pub extern "C" fn builtin__reader_set_conj(set: usize, elem: usize) -> usize {
+    unsafe {
+        let rt = get_runtime();
+        rt.reader_set_conj(set, elem).unwrap_or(7)
+    }
+}
+
+/// __reader_set_get(set, index) -> tagged_value
+///
+/// Returns the element at index in a ReaderSet (for iteration).
+#[unsafe(no_mangle)]
+pub extern "C" fn builtin__reader_set_get(set: usize, tagged_index: usize) -> usize {
+    unsafe {
+        let rt = get_runtime();
+        let index = tagged_index >> 3;
+        rt.reader_set_get(set, index).unwrap_or(7)
+    }
+}
+
+/// __reader_set?(value) -> tagged_boolean
+///
+/// Returns true if value is a ReaderSet, false otherwise.
+#[unsafe(no_mangle)]
+pub extern "C" fn builtin__is_reader_set(value: usize) -> usize {
+    unsafe {
+        let rt = get_runtime();
+        if rt.is_reader_set(value) {
+            11 // true = (1 << 3) | 0b011
+        } else {
+            3 // false = (0 << 3) | 0b011
+        }
+    }
+}
+
+// ============================================================================
 // Reader Type Predicates
 // ============================================================================
 
@@ -594,6 +671,30 @@ pub extern "C" fn builtin__is_symbol(value: usize) -> usize {
             3 // false = (0 << 3) | 0b011
         }
     }
+}
+
+/// __keyword_name(keyword) -> tagged_string
+///
+/// Returns the name of a keyword as a string (without the leading colon).
+#[unsafe(no_mangle)]
+pub extern "C" fn builtin__keyword_name(frame_pointer: usize, value: usize) -> usize {
+    crate::trampoline::builtin_keyword_name(frame_pointer, value)
+}
+
+/// __apply(fn, args) -> result
+///
+/// Applies a function to a sequence of arguments.
+#[unsafe(no_mangle)]
+pub extern "C" fn builtin__apply(frame_pointer: usize, fn_value: usize, args: usize) -> usize {
+    crate::trampoline::builtin_apply(frame_pointer, fn_value, args)
+}
+
+/// __str_concat(seq) -> tagged_string
+///
+/// Concatenates string representations of all elements in seq.
+#[unsafe(no_mangle)]
+pub extern "C" fn builtin__str_concat(frame_pointer: usize, args: usize) -> usize {
+    crate::trampoline::builtin_str_concat(frame_pointer, args)
 }
 
 /// __set_macro!(var) -> var
@@ -989,6 +1090,10 @@ pub fn get_builtin_descriptors() -> Vec<BuiltinDescriptor> {
             name: "__ReaderSymbol",
             function_ptr: builtin__reader_symbol_type as usize,
         },
+        BuiltinDescriptor {
+            name: "__ReaderSet",
+            function_ptr: builtin__reader_set_type as usize,
+        },
         // Reader List operations
         BuiltinDescriptor {
             name: "__reader_list_first",
@@ -1065,6 +1170,23 @@ pub fn get_builtin_descriptors() -> Vec<BuiltinDescriptor> {
             name: "__reader_symbol_namespace",
             function_ptr: builtin__reader_symbol_namespace as usize,
         },
+        // Reader Set operations
+        BuiltinDescriptor {
+            name: "__reader_set_count",
+            function_ptr: builtin__reader_set_count as usize,
+        },
+        BuiltinDescriptor {
+            name: "__reader_set_contains",
+            function_ptr: builtin__reader_set_contains as usize,
+        },
+        BuiltinDescriptor {
+            name: "__reader_set_conj",
+            function_ptr: builtin__reader_set_conj as usize,
+        },
+        BuiltinDescriptor {
+            name: "__reader_set_get",
+            function_ptr: builtin__reader_set_get as usize,
+        },
         // Reader Type predicates
         BuiltinDescriptor {
             name: "__reader_list?",
@@ -1081,6 +1203,10 @@ pub fn get_builtin_descriptors() -> Vec<BuiltinDescriptor> {
         BuiltinDescriptor {
             name: "__reader_symbol?",
             function_ptr: builtin__is_reader_symbol as usize,
+        },
+        BuiltinDescriptor {
+            name: "__reader_set?",
+            function_ptr: builtin__is_reader_set as usize,
         },
         // Reader Type Constructors
         BuiltinDescriptor {
@@ -1172,6 +1298,21 @@ pub fn get_builtin_descriptors() -> Vec<BuiltinDescriptor> {
         BuiltinDescriptor {
             name: "__gensym_1",
             function_ptr: builtin__gensym_1 as usize,
+        },
+        // Keyword name
+        BuiltinDescriptor {
+            name: "__keyword_name",
+            function_ptr: builtin__keyword_name as usize,
+        },
+        // Apply
+        BuiltinDescriptor {
+            name: "__apply",
+            function_ptr: builtin__apply as usize,
+        },
+        // String concatenation
+        BuiltinDescriptor {
+            name: "__str_concat",
+            function_ptr: builtin__str_concat as usize,
         },
     ]
 }
