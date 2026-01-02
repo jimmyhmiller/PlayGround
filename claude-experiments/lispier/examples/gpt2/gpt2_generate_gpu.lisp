@@ -157,17 +157,18 @@
           (llvm.return v))))
 
     ;; =========================================================================
-    ;; QKV Projection using linalg.matmul: (T,C) @ (C,3C) + bias -> (T,3C)
+    ;; QKV Projection: (T,C) @ (C,3C) + bias -> (T,3C)
+    ;; BF16 weights with F32 accumulation for reduced memory bandwidth
     ;; =========================================================================
     (func.func {:sym_name "matmul_qkv"
                 :function_type (-> [memref<64x2304xf32>
                                     memref<64x768xf32>
-                                    "memref<768x2304xf32, strided<[2304, 1], offset: ?>>"
+                                    "memref<768x2304xbf16, strided<[2304, 1], offset: ?>>"
                                     "memref<2304xf32, strided<[1], offset: ?>>"] [])}
       (region
         (block [(: out memref<64x2304xf32>)
                 (: inp memref<64x768xf32>)
-                (: weight "memref<768x2304xf32, strided<[2304, 1], offset: ?>>")
+                (: weight "memref<768x2304xbf16, strided<[2304, 1], offset: ?>>")
                 (: bias "memref<2304xf32, strided<[1], offset: ?>>")]
 
           ;; Zero output for accumulation
@@ -177,11 +178,21 @@
               (block [(: in f32) (: _out f32)]
                 (linalg.yield in))))
 
-          ;; Core matmul: (64,768) @ (768,2304) -> (64,2304)
-          (linalg.matmul {:ins 2 :outs 1} inp weight out
+          ;; Core matmul with bf16 weights: (64,768) @ (768,2304) -> (64,2304)
+          ;; Load bf16, extend to f32, multiply-accumulate in f32
+          (linalg.generic
+            {:ins 2 :outs 1
+             :indexing_maps [affine_map<(d0,d1,d2)->(d0,d2)>
+                             affine_map<(d0,d1,d2)->(d2,d1)>
+                             affine_map<(d0,d1,d2)->(d0,d1)>]
+             :iterator_types ["#linalg.iterator_type<parallel>"
+                              "#linalg.iterator_type<parallel>"
+                              "#linalg.iterator_type<reduction>"]}
+            inp weight out
             (region
-              (block [(: a f32) (: b f32) (: c f32)]
-                (def mul (arith.mulf a b))
+              (block [(: a f32) (: b bf16) (: c f32)]
+                (def b_f32 (arith.extf {:result f32} b))
+                (def mul (arith.mulf a b_f32))
                 (def sum (arith.addf c mul))
                 (linalg.yield sum))))
 
@@ -201,17 +212,18 @@
           (func.return))))
 
     ;; =========================================================================
-    ;; Attention Output Projection using linalg.matmul: (T,C) @ (C,C) + bias
+    ;; Attention Output Projection: (T,C) @ (C,C) + bias
+    ;; BF16 weights with F32 accumulation
     ;; =========================================================================
     (func.func {:sym_name "matmul_attn_proj"
                 :function_type (-> [memref<64x768xf32>
                                     memref<64x768xf32>
-                                    "memref<768x768xf32, strided<[768, 1], offset: ?>>"
+                                    "memref<768x768xbf16, strided<[768, 1], offset: ?>>"
                                     "memref<768xf32, strided<[1], offset: ?>>"] [])}
       (region
         (block [(: out memref<64x768xf32>)
                 (: inp memref<64x768xf32>)
-                (: weight "memref<768x768xf32, strided<[768, 1], offset: ?>>")
+                (: weight "memref<768x768xbf16, strided<[768, 1], offset: ?>>")
                 (: bias "memref<768xf32, strided<[1], offset: ?>>")]
 
           (def zero (: 0.0 f32))
@@ -219,10 +231,21 @@
             (region
               (block [(: in f32) (: _out f32)]
                 (linalg.yield in))))
-          (linalg.matmul {:ins 2 :outs 1} inp weight out
+
+          ;; Core matmul with bf16 weights
+          (linalg.generic
+            {:ins 2 :outs 1
+             :indexing_maps [affine_map<(d0,d1,d2)->(d0,d2)>
+                             affine_map<(d0,d1,d2)->(d2,d1)>
+                             affine_map<(d0,d1,d2)->(d0,d1)>]
+             :iterator_types ["#linalg.iterator_type<parallel>"
+                              "#linalg.iterator_type<parallel>"
+                              "#linalg.iterator_type<reduction>"]}
+            inp weight out
             (region
-              (block [(: a f32) (: b f32) (: c f32)]
-                (def mul (arith.mulf a b))
+              (block [(: a f32) (: b bf16) (: c f32)]
+                (def b_f32 (arith.extf {:result f32} b))
+                (def mul (arith.mulf a b_f32))
                 (def sum (arith.addf c mul))
                 (linalg.yield sum))))
 
@@ -242,17 +265,18 @@
           (func.return))))
 
     ;; =========================================================================
-    ;; MLP FC1 using linalg.matmul: (T,C) @ (C,4C) + bias -> (T,4C)
+    ;; MLP FC1: (T,C) @ (C,4C) + bias -> (T,4C)
+    ;; BF16 weights with F32 accumulation
     ;; =========================================================================
     (func.func {:sym_name "matmul_fc"
                 :function_type (-> [memref<64x3072xf32>
                                     memref<64x768xf32>
-                                    "memref<768x3072xf32, strided<[3072, 1], offset: ?>>"
+                                    "memref<768x3072xbf16, strided<[3072, 1], offset: ?>>"
                                     "memref<3072xf32, strided<[1], offset: ?>>"] [])}
       (region
         (block [(: out memref<64x3072xf32>)
                 (: inp memref<64x768xf32>)
-                (: weight "memref<768x3072xf32, strided<[3072, 1], offset: ?>>")
+                (: weight "memref<768x3072xbf16, strided<[3072, 1], offset: ?>>")
                 (: bias "memref<3072xf32, strided<[1], offset: ?>>")]
 
           (def zero (: 0.0 f32))
@@ -260,10 +284,21 @@
             (region
               (block [(: in f32) (: _out f32)]
                 (linalg.yield in))))
-          (linalg.matmul {:ins 2 :outs 1} inp weight out
+
+          ;; Core matmul with bf16 weights
+          (linalg.generic
+            {:ins 2 :outs 1
+             :indexing_maps [affine_map<(d0,d1,d2)->(d0,d2)>
+                             affine_map<(d0,d1,d2)->(d2,d1)>
+                             affine_map<(d0,d1,d2)->(d0,d1)>]
+             :iterator_types ["#linalg.iterator_type<parallel>"
+                              "#linalg.iterator_type<parallel>"
+                              "#linalg.iterator_type<reduction>"]}
+            inp weight out
             (region
-              (block [(: a f32) (: b f32) (: c f32)]
-                (def mul (arith.mulf a b))
+              (block [(: a f32) (: b bf16) (: c f32)]
+                (def b_f32 (arith.extf {:result f32} b))
+                (def mul (arith.mulf a b_f32))
                 (def sum (arith.addf c mul))
                 (linalg.yield sum))))
 
@@ -283,17 +318,18 @@
           (func.return))))
 
     ;; =========================================================================
-    ;; MLP Projection using linalg.matmul: (T,4C) @ (4C,C) + bias -> (T,C)
+    ;; MLP Projection: (T,4C) @ (4C,C) + bias -> (T,C)
+    ;; BF16 weights with F32 accumulation
     ;; =========================================================================
     (func.func {:sym_name "matmul_fc_proj"
                 :function_type (-> [memref<64x768xf32>
                                     memref<64x3072xf32>
-                                    "memref<3072x768xf32, strided<[768, 1], offset: ?>>"
+                                    "memref<3072x768xbf16, strided<[768, 1], offset: ?>>"
                                     "memref<768xf32, strided<[1], offset: ?>>"] [])}
       (region
         (block [(: out memref<64x768xf32>)
                 (: inp memref<64x3072xf32>)
-                (: weight "memref<3072x768xf32, strided<[768, 1], offset: ?>>")
+                (: weight "memref<3072x768xbf16, strided<[768, 1], offset: ?>>")
                 (: bias "memref<768xf32, strided<[1], offset: ?>>")]
 
           (def zero (: 0.0 f32))
@@ -301,10 +337,21 @@
             (region
               (block [(: in f32) (: _out f32)]
                 (linalg.yield in))))
-          (linalg.matmul {:ins 2 :outs 1} inp weight out
+
+          ;; Core matmul with bf16 weights
+          (linalg.generic
+            {:ins 2 :outs 1
+             :indexing_maps [affine_map<(d0,d1,d2)->(d0,d2)>
+                             affine_map<(d0,d1,d2)->(d2,d1)>
+                             affine_map<(d0,d1,d2)->(d0,d1)>]
+             :iterator_types ["#linalg.iterator_type<parallel>"
+                              "#linalg.iterator_type<parallel>"
+                              "#linalg.iterator_type<reduction>"]}
+            inp weight out
             (region
-              (block [(: a f32) (: b f32) (: c f32)]
-                (def mul (arith.mulf a b))
+              (block [(: a f32) (: b bf16) (: c f32)]
+                (def b_f32 (arith.extf {:result f32} b))
+                (def mul (arith.mulf a b_f32))
                 (def sum (arith.addf c mul))
                 (linalg.yield sum))))
 
@@ -655,7 +702,9 @@
     ;; =========================================================================
     ;; Causal Softmax: Apply causal mask and softmax to attention scores
     ;; scores: (12, 64, 64), weights_out: (12, 64, 64)
-    ;; GPU-PARALLEL VERSION using linalg.generic with reductions
+    ;; FUSED WARP-BASED VERSION using gpu.launch with warp shuffles
+    ;; Each warp (32 threads) processes one (head, query) pair
+    ;; Each thread handles 2 key positions (64/32 = 2)
     ;; =========================================================================
     (func.func {:sym_name "causal_softmax"
                 :function_type (-> [memref<12x64x64xf32>
@@ -666,112 +715,110 @@
       (region
         (block [(: weights memref<12x64x64xf32>)
                 (: scores memref<12x64x64xf32>)
-                (: masked_scores memref<12x64x64xf32>)
-                (: max_buf memref<12x64xf32>)
-                (: sum_buf memref<12x64xf32>)]
+                (: _masked_scores memref<12x64x64xf32>)
+                (: _max_buf memref<12x64xf32>)
+                (: _sum_buf memref<12x64xf32>)]
 
-          (def neg_inf (: -1e9 f32))
+          ;; Constants
+          (def c0 (: 0 index))
+          (def c1 (: 1 index))
+          (def c2 (: 2 index))
+          (def c32 (: 32 index))
+          (def c64 (: 64 index))
+          (def num_blocks (: 768 index))
           (def zero (: 0.0 f32))
-          (def c1_idx (: 1 index))
+          (def one (: 1.0 f32))
+          (def neg_inf (: -1e30 f32))
 
-          ;; ---------------------------------------------------------------
-          ;; Step 1: Apply causal mask - set positions where t2 > t to -inf
-          ;; This allows full-dimension reductions while respecting causality
-          ;; ---------------------------------------------------------------
-          (linalg.generic
-            {:ins 1 :outs 1
-             :indexing_maps [affine_map<(d0,d1,d2)->(d0,d1,d2)>
-                             affine_map<(d0,d1,d2)->(d0,d1,d2)>]
-             :iterator_types ["#linalg.iterator_type<parallel>" "#linalg.iterator_type<parallel>" "#linalg.iterator_type<parallel>"]}
-            scores masked_scores
-            (region
-              (block [(: score f32) (: _out f32)]
-                ;; Get indices: d1 = query position (t), d2 = key position (t2)
-                (def t (linalg.index {:dim 1}))
-                (def t2 (linalg.index {:dim 2}))
-                ;; valid_len = t + 1, so valid positions are t2 < t + 1, i.e., t2 <= t
-                (def valid_len (arith.addi t c1_idx))
-                (def is_valid (arith.cmpi {:predicate 2} t2 valid_len))
-                ;; If valid, use score; otherwise use -inf
-                (def masked (arith.select is_valid score neg_inf))
-                (linalg.yield masked))))
+          ;; Shuffle constants
+          (def c16_i32 (: 16 i32))
+          (def c8_i32 (: 8 i32))
+          (def c4_i32 (: 4 i32))
+          (def c2_i32 (: 2 i32))
+          (def c1_i32 (: 1 i32))
+          (def c32_i32 (: 32 i32))
 
-          ;; ---------------------------------------------------------------
-          ;; Step 2: Find max per (head, query_pos) using reduction
-          ;; max_buf[h,t] = max over all t2 of masked_scores[h,t,t2]
-          ;; ---------------------------------------------------------------
-          ;; Initialize max_buf to -inf
-          (linalg.fill {:ins 1 :outs 1} neg_inf max_buf
+          ;; Launch 768 blocks (12 heads x 64 queries), 32 threads each
+          (gpu.launch {:operandSegmentSizes array<i32: 0, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0>}
+            num_blocks c1 c1 c32 c1 c1
             (region
-              (block [(: in f32) (: _out f32)]
-                (linalg.yield in))))
+              (block [(: block_id index) (: _by index) (: _bz index)
+                      (: lane index) (: _ty index) (: _tz index)
+                      (: _gridDimX index) (: _gridDimY index) (: _gridDimZ index)
+                      (: _blockDimX index) (: _blockDimY index) (: _blockDimZ index)]
 
-          (linalg.generic
-            {:ins 1 :outs 1
-             :indexing_maps [affine_map<(d0,d1,d2)->(d0,d1,d2)>
-                             affine_map<(d0,d1,d2)->(d0,d1)>]
-             :iterator_types ["#linalg.iterator_type<parallel>" "#linalg.iterator_type<parallel>" "#linalg.iterator_type<reduction>"]}
-            masked_scores max_buf
-            (region
-              (block [(: score f32) (: max_acc f32)]
-                (def new_max (arith.maximumf score max_acc))
-                (linalg.yield new_max))))
+                ;; Decompose block_id into head and query indices
+                (def head (arith.divui block_id c64))
+                (def query (arith.remui block_id c64))
 
-          ;; ---------------------------------------------------------------
-          ;; Step 3: Compute exp(score - max) element-wise
-          ;; weights[h,t,t2] = exp(masked_scores[h,t,t2] - max_buf[h,t])
-          ;; Invalid positions: exp(-inf - max) = exp(-inf) = 0
-          ;; ---------------------------------------------------------------
-          (linalg.generic
-            {:ins 2 :outs 1
-             :indexing_maps [affine_map<(d0,d1,d2)->(d0,d1,d2)>
-                             affine_map<(d0,d1,d2)->(d0,d1)>
-                             affine_map<(d0,d1,d2)->(d0,d1,d2)>]
-             :iterator_types ["#linalg.iterator_type<parallel>" "#linalg.iterator_type<parallel>" "#linalg.iterator_type<parallel>"]}
-            masked_scores max_buf weights
-            (region
-              (block [(: score f32) (: max_val f32) (: _out f32)]
-                (def shifted (arith.subf score max_val))
-                (def exp_val (math.exp shifted))
-                (linalg.yield exp_val))))
+                ;; Step 1: Find local max (with causal mask applied inline)
+                (def local_max (scf.for {:result f32} c0 c2 c1 neg_inf
+                  (region
+                    (block [(: i index) (: m f32)]
+                      (def offset (arith.muli i c32))
+                      (def key_pos (arith.addi lane offset))
+                      (def score (memref.load {:result f32} scores head query key_pos))
+                      ;; key_pos <= query (ule = predicate 7)
+                      (def is_valid (arith.cmpi {:predicate 7} key_pos query))
+                      (def masked_score (arith.select is_valid score neg_inf))
+                      (def new_m (arith.maximumf m masked_score))
+                      (scf.yield new_m)))))
 
-          ;; ---------------------------------------------------------------
-          ;; Step 4: Sum exp values per (head, query_pos) using reduction
-          ;; sum_buf[h,t] = sum over all t2 of weights[h,t,t2]
-          ;; ---------------------------------------------------------------
-          ;; Initialize sum_buf to 0
-          (linalg.fill {:ins 1 :outs 1} zero sum_buf
-            (region
-              (block [(: in f32) (: _out f32)]
-                (linalg.yield in))))
+                ;; Warp reduce max
+                (def m16 (gpu.shuffle {:mode "#gpu<shuffle_mode xor>"} local_max c16_i32 c32_i32))
+                (def max16 (arith.maximumf local_max m16))
+                (def m8 (gpu.shuffle {:mode "#gpu<shuffle_mode xor>"} max16 c8_i32 c32_i32))
+                (def max8 (arith.maximumf max16 m8))
+                (def m4 (gpu.shuffle {:mode "#gpu<shuffle_mode xor>"} max8 c4_i32 c32_i32))
+                (def max4 (arith.maximumf max8 m4))
+                (def m2 (gpu.shuffle {:mode "#gpu<shuffle_mode xor>"} max4 c2_i32 c32_i32))
+                (def max2 (arith.maximumf max4 m2))
+                (def m1 (gpu.shuffle {:mode "#gpu<shuffle_mode xor>"} max2 c1_i32 c32_i32))
+                (def global_max (arith.maximumf max2 m1))
 
-          (linalg.generic
-            {:ins 1 :outs 1
-             :indexing_maps [affine_map<(d0,d1,d2)->(d0,d1,d2)>
-                             affine_map<(d0,d1,d2)->(d0,d1)>]
-             :iterator_types ["#linalg.iterator_type<parallel>" "#linalg.iterator_type<parallel>" "#linalg.iterator_type<reduction>"]}
-            weights sum_buf
-            (region
-              (block [(: exp_val f32) (: sum_acc f32)]
-                (def new_sum (arith.addf exp_val sum_acc))
-                (linalg.yield new_sum))))
+                ;; Step 2: Compute local sum of exp(score - max)
+                (def local_sum (scf.for {:result f32} c0 c2 c1 zero
+                  (region
+                    (block [(: i index) (: s f32)]
+                      (def offset (arith.muli i c32))
+                      (def key_pos (arith.addi lane offset))
+                      (def score (memref.load {:result f32} scores head query key_pos))
+                      (def is_valid (arith.cmpi {:predicate 7} key_pos query))
+                      (def masked_score (arith.select is_valid score neg_inf))
+                      (def shifted (arith.subf masked_score global_max))
+                      (def exp_val (math.exp shifted))
+                      (def new_s (arith.addf s exp_val))
+                      (scf.yield new_s)))))
 
-          ;; ---------------------------------------------------------------
-          ;; Step 5: Normalize by dividing by sum
-          ;; weights[h,t,t2] = weights[h,t,t2] / sum_buf[h,t]
-          ;; Invalid positions: 0 / sum = 0 (correct!)
-          ;; ---------------------------------------------------------------
-          (linalg.generic
-            {:ins 2 :outs 1
-             :indexing_maps [affine_map<(d0,d1,d2)->(d0,d1,d2)>
-                             affine_map<(d0,d1,d2)->(d0,d1)>
-                             affine_map<(d0,d1,d2)->(d0,d1,d2)>]
-             :iterator_types ["#linalg.iterator_type<parallel>" "#linalg.iterator_type<parallel>" "#linalg.iterator_type<parallel>"]}
-            weights sum_buf weights
-            (region
-              (block [(: exp_val f32) (: sum_val f32) (: _out f32)]
-                (def normalized (arith.divf exp_val sum_val))
-                (linalg.yield normalized))))
+                ;; Warp reduce sum
+                (def s16 (gpu.shuffle {:mode "#gpu<shuffle_mode xor>"} local_sum c16_i32 c32_i32))
+                (def sum16 (arith.addf local_sum s16))
+                (def s8 (gpu.shuffle {:mode "#gpu<shuffle_mode xor>"} sum16 c8_i32 c32_i32))
+                (def sum8 (arith.addf sum16 s8))
+                (def s4 (gpu.shuffle {:mode "#gpu<shuffle_mode xor>"} sum8 c4_i32 c32_i32))
+                (def sum4 (arith.addf sum8 s4))
+                (def s2 (gpu.shuffle {:mode "#gpu<shuffle_mode xor>"} sum4 c2_i32 c32_i32))
+                (def sum2 (arith.addf sum4 s2))
+                (def s1 (gpu.shuffle {:mode "#gpu<shuffle_mode xor>"} sum2 c1_i32 c32_i32))
+                (def total_sum (arith.addf sum2 s1))
+
+                ;; Step 3: Normalize and write output
+                (def scale (arith.divf one total_sum))
+                (scf.for c0 c2 c1
+                  (region
+                    (block [(: i index)]
+                      (def offset (arith.muli i c32))
+                      (def key_pos (arith.addi lane offset))
+                      (def score (memref.load {:result f32} scores head query key_pos))
+                      (def is_valid (arith.cmpi {:predicate 7} key_pos query))
+                      (def masked_score (arith.select is_valid score neg_inf))
+                      (def shifted (arith.subf masked_score global_max))
+                      (def exp_val (math.exp shifted))
+                      (def softmax_val (arith.mulf exp_val scale))
+                      (memref.store softmax_val weights head query key_pos)
+                      (scf.yield))))
+
+                (gpu.terminator))))
 
           (func.return))))
 
@@ -1357,18 +1404,18 @@
       (def ln_rs_buf (memref.alloc {:result memref<64xf32>}))
 
       ;; Layer weight buffers - ALL 12 LAYERS cached (eliminates per-token ptr loading)
-      ;; This uses ~340MB but avoids transpose and ptr arithmetic per token
+      ;; BF16 for weight matrices to reduce memory bandwidth (~170MB instead of 340MB)
       (def all_ln1_w (memref.alloc {:result memref<12x768xf32>}))
       (def all_ln1_b (memref.alloc {:result memref<12x768xf32>}))
-      (def all_qkv_w (memref.alloc {:result memref<12x768x2304xf32>}))
+      (def all_qkv_w (memref.alloc {:result memref<12x768x2304xbf16>}))
       (def all_qkv_b (memref.alloc {:result memref<12x2304xf32>}))
-      (def all_attn_w (memref.alloc {:result memref<12x768x768xf32>}))
+      (def all_attn_w (memref.alloc {:result memref<12x768x768xbf16>}))
       (def all_attn_b (memref.alloc {:result memref<12x768xf32>}))
       (def all_ln2_w (memref.alloc {:result memref<12x768xf32>}))
       (def all_ln2_b (memref.alloc {:result memref<12x768xf32>}))
-      (def all_fc_w (memref.alloc {:result memref<12x768x3072xf32>}))
+      (def all_fc_w (memref.alloc {:result memref<12x768x3072xbf16>}))
       (def all_fc_b (memref.alloc {:result memref<12x3072xf32>}))
-      (def all_fcproj_w (memref.alloc {:result memref<12x3072x768xf32>}))
+      (def all_fcproj_w (memref.alloc {:result memref<12x3072x768xbf16>}))
       (def all_fcproj_b (memref.alloc {:result memref<12x768xf32>}))
       ;; Final layer norm (not per-layer, just one)
       (def lnf_w (memref.alloc {:result memref<768xf32>}))
@@ -1394,15 +1441,15 @@
       (gpu.host_register (memref.cast {:result "memref<*xf32>"} logits))
       (gpu.host_register (memref.cast {:result "memref<*xf32>"} all_ln1_w))
       (gpu.host_register (memref.cast {:result "memref<*xf32>"} all_ln1_b))
-      (gpu.host_register (memref.cast {:result "memref<*xf32>"} all_qkv_w))
+      (gpu.host_register (memref.cast {:result "memref<*xbf16>"} all_qkv_w))
       (gpu.host_register (memref.cast {:result "memref<*xf32>"} all_qkv_b))
-      (gpu.host_register (memref.cast {:result "memref<*xf32>"} all_attn_w))
+      (gpu.host_register (memref.cast {:result "memref<*xbf16>"} all_attn_w))
       (gpu.host_register (memref.cast {:result "memref<*xf32>"} all_attn_b))
       (gpu.host_register (memref.cast {:result "memref<*xf32>"} all_ln2_w))
       (gpu.host_register (memref.cast {:result "memref<*xf32>"} all_ln2_b))
-      (gpu.host_register (memref.cast {:result "memref<*xf32>"} all_fc_w))
+      (gpu.host_register (memref.cast {:result "memref<*xbf16>"} all_fc_w))
       (gpu.host_register (memref.cast {:result "memref<*xf32>"} all_fc_b))
-      (gpu.host_register (memref.cast {:result "memref<*xf32>"} all_fcproj_w))
+      (gpu.host_register (memref.cast {:result "memref<*xbf16>"} all_fcproj_w))
       (gpu.host_register (memref.cast {:result "memref<*xf32>"} all_fcproj_b))
       (gpu.host_register (memref.cast {:result "memref<*xf32>"} lnf_w))
       (gpu.host_register (memref.cast {:result "memref<*xf32>"} lnf_b))
@@ -1504,7 +1551,9 @@
                       (block [(: c index)]
                         (def c_i64 (arith.index_cast {:result i64} c))
                         (def w_ptr (ptr-at f32 params_ptr (arith.addi qkvw_offset (arith.addi row_offset c_i64))))
-                        (memref.store (llvm.load {:result f32} w_ptr) all_qkv_w layer c oc)
+                        (def w_f32 (llvm.load {:result f32} w_ptr))
+                        (def w_bf16 (arith.truncf {:result bf16} w_f32))
+                        (memref.store w_bf16 all_qkv_w layer c oc)
                         (scf.yield))))
                   (scf.yield))))
             (scf.for c0 c2304 c1
@@ -1528,7 +1577,9 @@
                       (block [(: c index)]
                         (def c_i64 (arith.index_cast {:result i64} c))
                         (def w_ptr (ptr-at f32 params_ptr (arith.addi attprojw_offset (arith.addi row_offset c_i64))))
-                        (memref.store (llvm.load {:result f32} w_ptr) all_attn_w layer c oc)
+                        (def w_f32 (llvm.load {:result f32} w_ptr))
+                        (def w_bf16 (arith.truncf {:result bf16} w_f32))
+                        (memref.store w_bf16 all_attn_w layer c oc)
                         (scf.yield))))
                   (scf.yield))))
             (scf.for c0 c768 c1
@@ -1565,7 +1616,9 @@
                       (block [(: c index)]
                         (def c_i64 (arith.index_cast {:result i64} c))
                         (def w_ptr (ptr-at f32 params_ptr (arith.addi fcw_offset (arith.addi row_offset c_i64))))
-                        (memref.store (llvm.load {:result f32} w_ptr) all_fc_w layer c oc)
+                        (def w_f32 (llvm.load {:result f32} w_ptr))
+                        (def w_bf16 (arith.truncf {:result bf16} w_f32))
+                        (memref.store w_bf16 all_fc_w layer c oc)
                         (scf.yield))))
                   (scf.yield))))
             (scf.for c0 c3072 c1
@@ -1589,7 +1642,9 @@
                       (block [(: ic index)]
                         (def ic_i64 (arith.index_cast {:result i64} ic))
                         (def w_ptr (ptr-at f32 params_ptr (arith.addi fcprojw_offset (arith.addi row_offset ic_i64))))
-                        (memref.store (llvm.load {:result f32} w_ptr) all_fcproj_w layer ic oc)
+                        (def w_f32 (llvm.load {:result f32} w_ptr))
+                        (def w_bf16 (arith.truncf {:result bf16} w_f32))
+                        (memref.store w_bf16 all_fcproj_w layer ic oc)
                         (scf.yield))))
                   (scf.yield))))
             (scf.for c0 c768 c1
@@ -1649,8 +1704,8 @@
                                                    :static_strides "array<i64: 1, 1>"}
                                     all_ln1_b layer))
 
-                  ;; 3D→2D: memref<12x768x2304xf32>[layer,:,:] → memref<768x2304xf32, strided<[2304, 1], offset: ?>>
-                  (def qkv_w_view (memref.subview {:result "memref<768x2304xf32, strided<[2304, 1], offset: ?>>"
+                  ;; 3D→2D: memref<12x768x2304xbf16>[layer,:,:] → memref<768x2304xbf16, strided<[2304, 1], offset: ?>>
+                  (def qkv_w_view (memref.subview {:result "memref<768x2304xbf16, strided<[2304, 1], offset: ?>>"
                                                    :operandSegmentSizes "array<i32: 1, 1, 0, 0>"
                                                    :static_offsets "array<i64: -9223372036854775808, 0, 0>"
                                                    :static_sizes "array<i64: 1, 768, 2304>"
@@ -1663,8 +1718,8 @@
                                                    :static_strides "array<i64: 1, 1>"}
                                     all_qkv_b layer))
 
-                  ;; 3D→2D: memref<12x768x768xf32>[layer,:,:] → memref<768x768xf32, strided<[768, 1], offset: ?>>
-                  (def attn_w_view (memref.subview {:result "memref<768x768xf32, strided<[768, 1], offset: ?>>"
+                  ;; 3D→2D: memref<12x768x768xbf16>[layer,:,:] → memref<768x768xbf16, strided<[768, 1], offset: ?>>
+                  (def attn_w_view (memref.subview {:result "memref<768x768xbf16, strided<[768, 1], offset: ?>>"
                                                     :operandSegmentSizes "array<i32: 1, 1, 0, 0>"
                                                     :static_offsets "array<i64: -9223372036854775808, 0, 0>"
                                                     :static_sizes "array<i64: 1, 768, 768>"
@@ -1691,8 +1746,8 @@
                                                    :static_strides "array<i64: 1, 1>"}
                                     all_ln2_b layer))
 
-                  ;; 3D→2D: memref<12x768x3072xf32>[layer,:,:] → memref<768x3072xf32, strided<[3072, 1], offset: ?>>
-                  (def fc_w_view (memref.subview {:result "memref<768x3072xf32, strided<[3072, 1], offset: ?>>"
+                  ;; 3D→2D: memref<12x768x3072xbf16>[layer,:,:] → memref<768x3072xbf16, strided<[3072, 1], offset: ?>>
+                  (def fc_w_view (memref.subview {:result "memref<768x3072xbf16, strided<[3072, 1], offset: ?>>"
                                                   :operandSegmentSizes "array<i32: 1, 1, 0, 0>"
                                                   :static_offsets "array<i64: -9223372036854775808, 0, 0>"
                                                   :static_sizes "array<i64: 1, 768, 3072>"
@@ -1705,8 +1760,8 @@
                                                   :static_strides "array<i64: 1, 1>"}
                                    all_fc_b layer))
 
-                  ;; 3D→2D: memref<12x3072x768xf32>[layer,:,:] → memref<3072x768xf32, strided<[768, 1], offset: ?>>
-                  (def fcproj_w_view (memref.subview {:result "memref<3072x768xf32, strided<[768, 1], offset: ?>>"
+                  ;; 3D→2D: memref<12x3072x768xbf16>[layer,:,:] → memref<3072x768xbf16, strided<[768, 1], offset: ?>>
+                  (def fcproj_w_view (memref.subview {:result "memref<3072x768xbf16, strided<[768, 1], offset: ?>>"
                                                       :operandSegmentSizes "array<i32: 1, 1, 0, 0>"
                                                       :static_offsets "array<i64: -9223372036854775808, 0, 0>"
                                                       :static_sizes "array<i64: 1, 3072, 768>"
