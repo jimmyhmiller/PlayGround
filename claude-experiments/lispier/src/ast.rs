@@ -200,11 +200,25 @@ pub struct Require {
     pub is_project_relative: bool,
 }
 
+/// Pass scope - where the pass runs in the MLIR pipeline
+#[derive(Debug, Clone, PartialEq, Default)]
+pub enum PassScope {
+    /// Top-level module passes (default)
+    #[default]
+    Module,
+    /// Run inside func.func() scope
+    Func,
+    /// Run inside gpu.module() scope
+    GpuModule,
+}
+
 /// A compilation pass with optional attributes
 #[derive(Debug, Clone, PartialEq)]
 pub struct Pass {
     pub name: String,
     pub attributes: HashMap<String, String>,
+    /// The scope at which this pass runs (explicit in syntax)
+    pub scope: PassScope,
 }
 
 impl Pass {
@@ -212,6 +226,15 @@ impl Pass {
         Self {
             name: name.into(),
             attributes: HashMap::new(),
+            scope: PassScope::default(),
+        }
+    }
+
+    pub fn with_scope(name: impl Into<String>, scope: PassScope) -> Self {
+        Self {
+            name: name.into(),
+            attributes: HashMap::new(),
+            scope,
         }
     }
 
@@ -219,6 +242,19 @@ impl Pass {
         Self {
             name: name.into(),
             attributes,
+            scope: PassScope::default(),
+        }
+    }
+
+    pub fn with_attributes_and_scope(
+        name: impl Into<String>,
+        attributes: HashMap<String, String>,
+        scope: PassScope,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            attributes,
+            scope,
         }
     }
 
@@ -307,6 +343,47 @@ impl Compilation {
 }
 
 impl Default for Compilation {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// GPU compilation specification
+/// Used with (compilation-gpu rocm ...) or (compilation-gpu cuda ...)
+#[derive(Debug, Clone, PartialEq)]
+pub struct CompilationGpu {
+    /// Backend name: "rocm" or "cuda"
+    pub backend: String,
+    /// All passes with their explicit scopes
+    pub passes: Vec<Pass>,
+}
+
+impl CompilationGpu {
+    pub fn new(backend: impl Into<String>) -> Self {
+        Self {
+            backend: backend.into(),
+            passes: Vec::new(),
+        }
+    }
+}
+
+/// CPU compilation specification
+/// Used with (compilation-cpu ...)
+#[derive(Debug, Clone, PartialEq)]
+pub struct CompilationCpu {
+    /// All passes with their explicit scopes (no GpuModule scope allowed)
+    pub passes: Vec<Pass>,
+}
+
+impl CompilationCpu {
+    pub fn new() -> Self {
+        Self {
+            passes: Vec::new(),
+        }
+    }
+}
+
+impl Default for CompilationCpu {
     fn default() -> Self {
         Self::new()
     }
@@ -491,6 +568,8 @@ pub enum Node {
     Require(Require),
     RequireMacros(RequireMacros),
     Compilation(Compilation),
+    CompilationGpu(CompilationGpu),
+    CompilationCpu(CompilationCpu),
     Extern(Extern),
     Defmacro(Defmacro),
     LinkLibrary(LinkLibrary),
@@ -543,6 +622,14 @@ impl Node {
 
     pub fn compilation(compilation: Compilation) -> Self {
         Node::Compilation(compilation)
+    }
+
+    pub fn compilation_gpu(compilation_gpu: CompilationGpu) -> Self {
+        Node::CompilationGpu(compilation_gpu)
+    }
+
+    pub fn compilation_cpu(compilation_cpu: CompilationCpu) -> Self {
+        Node::CompilationCpu(compilation_cpu)
     }
 
     pub fn extern_decl(extern_decl: Extern) -> Self {
@@ -599,6 +686,14 @@ impl Node {
 
     pub fn is_compilation(&self) -> bool {
         matches!(self, Node::Compilation(_))
+    }
+
+    pub fn is_compilation_gpu(&self) -> bool {
+        matches!(self, Node::CompilationGpu(_))
+    }
+
+    pub fn is_compilation_cpu(&self) -> bool {
+        matches!(self, Node::CompilationCpu(_))
     }
 
     pub fn is_extern(&self) -> bool {
@@ -690,6 +785,20 @@ impl Node {
         match self {
             Node::Compilation(c) => c,
             _ => panic!("expected Compilation"),
+        }
+    }
+
+    pub fn as_compilation_gpu(&self) -> &CompilationGpu {
+        match self {
+            Node::CompilationGpu(c) => c,
+            _ => panic!("expected CompilationGpu"),
+        }
+    }
+
+    pub fn as_compilation_cpu(&self) -> &CompilationCpu {
+        match self {
+            Node::CompilationCpu(c) => c,
+            _ => panic!("expected CompilationCpu"),
         }
     }
 

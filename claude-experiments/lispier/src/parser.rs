@@ -1,9 +1,10 @@
 use thiserror::Error;
 
 use crate::ast::{
-    AttributeValue, Binding, Block, BlockArgument, Compilation, Defmacro, Extern, FunctionType,
-    LetExpr, LinkLibrary, Module, Node, Operation, Pass, Region, Require, RequireMacros, Target,
-    Type, TypeAnnotation, TypedMLIRLiteral, TypedNumber,
+    AttributeValue, Binding, Block, BlockArgument, Compilation, CompilationCpu, CompilationGpu,
+    Defmacro, Extern, FunctionType, LetExpr, LinkLibrary, Module, Node, Operation, Pass,
+    PassScope, Region, Require, RequireMacros, Target, Type, TypeAnnotation, TypedMLIRLiteral,
+    TypedNumber,
 };
 use crate::value::Value;
 
@@ -56,6 +57,18 @@ pub enum ParserError {
 
     #[error("invalid link-library form - expected (link-library :c) or (link-library \"path\")")]
     InvalidLinkLibraryForm,
+
+    #[error("invalid compilation-gpu form - expected (compilation-gpu backend (passes ...) (func-passes ...) (gpu-passes ...))")]
+    InvalidCompilationGpuForm,
+
+    #[error("invalid compilation-cpu form - expected (compilation-cpu (passes ...) (func-passes ...))")]
+    InvalidCompilationCpuForm,
+
+    #[error("invalid pass group - expected (passes ...), (func-passes ...), or (gpu-passes ...)")]
+    InvalidPassGroup,
+
+    #[error("gpu-passes not allowed in compilation-cpu")]
+    GpuPassesInCpuCompilation,
 }
 
 pub struct Parser;
@@ -118,6 +131,8 @@ impl Parser {
             "require" => self.parse_require(items),
             "require-macros" => self.parse_require_macros(items),
             "compilation" => self.parse_compilation(items),
+            "compilation-gpu" => self.parse_compilation_gpu(items),
+            "compilation-cpu" => self.parse_compilation_cpu(items),
             "extern" => self.parse_extern(items),
             "defmacro" => self.parse_defmacro(items),
             "link-library" => self.parse_link_library(items),
@@ -335,6 +350,109 @@ impl Parser {
         }
 
         Ok(pass)
+    }
+
+    fn parse_compilation_gpu(&mut self, items: &[Value]) -> Result<Node, ParserError> {
+        // (compilation-gpu rocm (passes ...) (func-passes ...) (gpu-passes ...))
+        if items.len() < 2 {
+            return Err(ParserError::InvalidCompilationGpuForm);
+        }
+
+        let backend = match &items[1] {
+            Value::Symbol(sym) => sym.name.clone(),
+            _ => return Err(ParserError::InvalidCompilationGpuForm),
+        };
+
+        let mut compilation = CompilationGpu::new(backend);
+
+        for item in items.iter().skip(2) {
+            if let Value::List(list_items) = item {
+                if !list_items.is_empty() {
+                    if let Value::Symbol(first) = &list_items[0] {
+                        match first.name.as_str() {
+                            "passes" => {
+                                let passes = self.parse_pass_group(list_items, PassScope::Module)?;
+                                compilation.passes.extend(passes);
+                            }
+                            "func-passes" => {
+                                let passes = self.parse_pass_group(list_items, PassScope::Func)?;
+                                compilation.passes.extend(passes);
+                            }
+                            "gpu-passes" => {
+                                let passes =
+                                    self.parse_pass_group(list_items, PassScope::GpuModule)?;
+                                compilation.passes.extend(passes);
+                            }
+                            _ => return Err(ParserError::InvalidPassGroup),
+                        }
+                        continue;
+                    }
+                }
+            }
+            return Err(ParserError::InvalidCompilationGpuForm);
+        }
+
+        Ok(Node::compilation_gpu(compilation))
+    }
+
+    fn parse_compilation_cpu(&mut self, items: &[Value]) -> Result<Node, ParserError> {
+        // (compilation-cpu (passes ...) (func-passes ...))
+        let mut compilation = CompilationCpu::new();
+
+        for item in items.iter().skip(1) {
+            if let Value::List(list_items) = item {
+                if !list_items.is_empty() {
+                    if let Value::Symbol(first) = &list_items[0] {
+                        match first.name.as_str() {
+                            "passes" => {
+                                let passes = self.parse_pass_group(list_items, PassScope::Module)?;
+                                compilation.passes.extend(passes);
+                            }
+                            "func-passes" => {
+                                let passes = self.parse_pass_group(list_items, PassScope::Func)?;
+                                compilation.passes.extend(passes);
+                            }
+                            "gpu-passes" => {
+                                // GPU passes not allowed in CPU compilation
+                                return Err(ParserError::GpuPassesInCpuCompilation);
+                            }
+                            _ => return Err(ParserError::InvalidPassGroup),
+                        }
+                        continue;
+                    }
+                }
+            }
+            return Err(ParserError::InvalidCompilationCpuForm);
+        }
+
+        Ok(Node::compilation_cpu(compilation))
+    }
+
+    fn parse_pass_group(
+        &mut self,
+        items: &[Value],
+        scope: PassScope,
+    ) -> Result<Vec<Pass>, ParserError> {
+        // (passes (pass a) (pass b) ...) or (func-passes (pass a) ...) etc.
+        let mut passes = Vec::new();
+
+        for item in items.iter().skip(1) {
+            if let Value::List(list_items) = item {
+                if !list_items.is_empty() {
+                    if let Value::Symbol(first) = &list_items[0] {
+                        if first.name == "pass" {
+                            let mut pass = self.parse_pass(list_items)?;
+                            pass.scope = scope.clone();
+                            passes.push(pass);
+                            continue;
+                        }
+                    }
+                }
+            }
+            return Err(ParserError::InvalidPassGroup);
+        }
+
+        Ok(passes)
     }
 
     fn parse_operation(&mut self, items: &[Value]) -> Result<Node, ParserError> {

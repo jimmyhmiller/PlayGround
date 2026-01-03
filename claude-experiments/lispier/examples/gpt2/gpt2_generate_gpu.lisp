@@ -23,13 +23,25 @@
 (extern-fn printf (-> [!llvm.ptr ...] [i32]))
 
 ;; Compilation pipeline for AMD GPU via linalg -> parallel loops -> GPU
-(compilation
-  (target rocm
-    ;; Linalg to parallel loops, then to GPU
+;;
+;; IMPORTANT: The order of sections matters! Module passes are split around
+;; gpu-passes because convert-gpu-to-rocdl must run BEFORE gpu-module-to-binary.
+;; Func-scoped passes must run AFTER convert-linalg-to-parallel-loops creates the loops.
+(compilation-gpu rocm
+  ;; First create parallel loops from linalg ops
+  (passes
     (pass convert-linalg-to-parallel-loops)
+    (pass linalg-fuse-elementwise-ops))
+
+  ;; Function-scoped passes (run inside func.func on the parallel loops)
+  (func-passes
     ;; Tile parallel loops to create block/thread structure (16x16 = 256 threads per block)
     (pass scf-parallel-loop-tiling {:parallel-loop-tile-sizes "16,16"})
-    (pass gpu-map-parallel-loops)
+    (pass gpu-map-parallel-loops))
+
+  ;; Module-level passes BEFORE GPU module lowering
+  (passes
+    ;; Convert to GPU ops
     (pass convert-parallel-loops-to-gpu)
     ;; Lower affine constructs
     (pass lower-affine)
@@ -37,9 +49,15 @@
     (pass convert-scf-to-cf)
     ;; GPU lowering
     (pass gpu-kernel-outlining)
-    (pass rocdl-attach-target)
-    ;; No bare-ptr for strided memref support
-    (pass convert-gpu-to-rocdl)
+    (pass rocdl-attach-target))
+
+  ;; GPU module passes (run inside gpu.module)
+  ;; MUST come before gpu-module-to-binary
+  (gpu-passes
+    (pass convert-gpu-to-rocdl))
+
+  ;; Module-level passes AFTER GPU module lowering
+  (passes
     (pass gpu-module-to-binary)
     ;; Host-side LLVM lowering (no bare pointers for strided memref support)
     (pass gpu-to-llvm)

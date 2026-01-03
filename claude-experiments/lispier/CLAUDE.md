@@ -53,7 +53,7 @@ The `scripts/remote-test.sh` script syncs code to the GPU server and runs GPT-2 
 - Backup host: `computer.jimmyhmiller.com`
 - GPU: AMD gfx1151 (ROCm backend)
 - Model: GPT-2 124M (~124M parameters)
-- Performance: ~830ms per token
+- Performance: ~450ms per token
 
 ### Running Directly on Server
 

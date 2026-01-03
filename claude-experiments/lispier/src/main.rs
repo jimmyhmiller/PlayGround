@@ -3,9 +3,10 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use lispier::{
-    extract_compilation, extract_externs, extract_link_libraries, find_project_root,
-    AttributeValue, DialectRegistry, IRGenerator, Jit, MacroExpander, ModuleLoader, Node,
-    Operation, Parser, Reader, RuntimeEnv, Tokenizer,
+    build_cpu_pipeline, build_gpu_pipeline, extract_compilation, extract_compilation_cpu,
+    extract_compilation_gpu, extract_externs, extract_link_libraries, find_project_root,
+    AttributeValue, CompilationCpu, CompilationGpu, DialectRegistry, IRGenerator, Jit,
+    MacroExpander, ModuleLoader, Node, Operation, Parser, Reader, RuntimeEnv, Tokenizer,
 };
 
 fn main() -> ExitCode {
@@ -96,7 +97,16 @@ fn run_file(path: &str, program_args: &[String]) -> ExitCode {
         }
     };
 
-    // Check if there's a compilation spec - if so, use external pipeline
+    // Check for new-style compilation specs first
+    if let Some(compilation) = extract_compilation_gpu(&nodes) {
+        return run_with_gpu_compilation(&nodes, &compilation);
+    }
+
+    if let Some(compilation) = extract_compilation_cpu(&nodes) {
+        return run_with_cpu_compilation(&nodes, &compilation);
+    }
+
+    // Check if there's a legacy compilation spec - if so, use external pipeline
     if let Some(compilation) = extract_compilation(&nodes) {
         return run_with_compilation_spec(&nodes, &compilation);
     }
@@ -151,7 +161,14 @@ fn run_with_compilation_spec(nodes: &[lispier::Node], compilation: &lispier::Com
     let gpu_module_passes = ["convert-gpu-to-rocdl", "convert-gpu-to-nvvm"];
 
     // Passes that need to run inside func.func scope
-    let func_scoped_passes = ["gpu-map-parallel-loops", "scf-parallel-loop-tiling"];
+    let func_scoped_passes = [
+        "gpu-map-parallel-loops",
+        "scf-parallel-loop-tiling",
+        "convert-linalg-to-affine-loops",
+        "affine-loop-tile",
+        "affine-parallelize",
+        "convert-affine-for-to-gpu",
+    ];
 
     let mut before_gpu: Vec<String> = Vec::new();
     let mut gpu_passes: Vec<String> = Vec::new();
@@ -383,6 +400,281 @@ fn run_with_compilation_spec(nodes: &[lispier::Node], compilation: &lispier::Com
     } else {
         eprintln!("Failed to look up {}", test_symbol);
     }
+
+    // Invoke main
+    unsafe {
+        match jit.invoke_packed("main", &mut []) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("Execution error: {}", e);
+                ExitCode::FAILURE
+            }
+        }
+    }
+}
+
+/// Run with a GPU compilation pipeline using the new explicit scoping
+fn run_with_gpu_compilation(nodes: &[lispier::Node], compilation: &CompilationGpu) -> ExitCode {
+    // Detect runtime environment
+    let runtime = match RuntimeEnv::detect() {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("Runtime detection error: {}", e);
+            return ExitCode::FAILURE;
+        }
+    };
+
+    // Verify backend matches
+    if runtime.backend.name() != compilation.backend {
+        eprintln!(
+            "Backend mismatch: file requires '{}', but detected '{}'",
+            compilation.backend,
+            runtime.backend.name()
+        );
+        return ExitCode::FAILURE;
+    }
+
+    eprintln!("Using {} backend", runtime.backend.name());
+    if let Some(ref chip) = runtime.chip {
+        eprintln!("Detected chip: {}", chip);
+    }
+
+    // Build pass pipeline using the new pipeline builder
+    let runtime_attrs = runtime.runtime_attrs();
+    let pipeline = build_gpu_pipeline(compilation, &runtime_attrs);
+
+    eprintln!("Pipeline: {}", pipeline);
+
+    // Generate MLIR from AST
+    let registry = DialectRegistry::new();
+    let generator = IRGenerator::new(&registry);
+    let mut module = match generator.generate(nodes) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("IR generation error: {}", e);
+            return ExitCode::FAILURE;
+        }
+    };
+
+    // Get runtime library paths
+    let mut lib_paths: Vec<String> = runtime
+        .runtime_libs
+        .iter()
+        .map(|p| {
+            let mut s = p.to_string_lossy().to_string();
+            s.push('\0');
+            s
+        })
+        .collect();
+
+    // Add the ciface shim library for GPU runtime wrappers
+    if matches!(runtime.backend, lispier::runtime::Backend::Rocm) {
+        let shim_path = std::env::var("HOME")
+            .map(|h| format!("{}/libgpu_ciface_shim.so\0", h))
+            .unwrap_or_else(|_| "/home/jimmyhmiller/libgpu_ciface_shim.so\0".to_string());
+        lib_paths.push(shim_path);
+    }
+
+    eprintln!("Library paths: {:?}", lib_paths);
+    let lib_path_refs: Vec<&str> = lib_paths.iter().map(|s| s.as_str()).collect();
+
+    // Pre-load required libraries
+    for lib in &runtime.runtime_libs {
+        let lib_str = lib.to_string_lossy();
+        if lib_str.contains("c_runner_utils") {
+            eprintln!("Pre-loading: {}", lib_str);
+            let path_cstr = std::ffi::CString::new(lib_str.as_ref()).unwrap();
+            unsafe {
+                let handle =
+                    libc::dlopen(path_cstr.as_ptr(), libc::RTLD_NOW | libc::RTLD_GLOBAL);
+                if handle.is_null() {
+                    eprintln!("Warning: Failed to pre-load {}", lib_str);
+                } else {
+                    eprintln!("Successfully pre-loaded: {}", lib_str);
+                }
+            }
+        }
+    }
+
+    if matches!(runtime.backend, lispier::runtime::Backend::Rocm) {
+        for lib in &runtime.runtime_libs {
+            let lib_str = lib.to_string_lossy();
+            if lib_str.contains("rocm_runtime") {
+                eprintln!("Pre-loading: {}", lib_str);
+                let path_cstr = std::ffi::CString::new(lib_str.as_ref()).unwrap();
+                unsafe {
+                    let handle =
+                        libc::dlopen(path_cstr.as_ptr(), libc::RTLD_NOW | libc::RTLD_GLOBAL);
+                    if handle.is_null() {
+                        eprintln!("Warning: Failed to pre-load {}", lib_str);
+                    } else {
+                        eprintln!("Successfully pre-loaded: {}", lib_str);
+                    }
+                }
+            }
+        }
+
+        // Pre-load the ciface shim library
+        let shim_path = std::env::var("HOME")
+            .map(|h| format!("{}/libgpu_ciface_shim.so", h))
+            .unwrap_or_else(|_| "/home/jimmyhmiller/libgpu_ciface_shim.so".to_string());
+        eprintln!("Pre-loading shim: {}", shim_path);
+        let path_cstr = std::ffi::CString::new(shim_path.as_str()).unwrap();
+        unsafe {
+            let handle = libc::dlopen(path_cstr.as_ptr(), libc::RTLD_NOW | libc::RTLD_GLOBAL);
+            if handle.is_null() {
+                eprintln!("Warning: Failed to pre-load shim library");
+            } else {
+                eprintln!("Successfully pre-loaded shim library");
+            }
+        }
+    }
+
+    // Pre-load runner utils shim library
+    let runner_shim_path = std::env::var("HOME")
+        .map(|h| format!("{}/librunner_utils_shim.so", h))
+        .unwrap_or_else(|_| "/home/jimmyhmiller/librunner_utils_shim.so".to_string());
+    eprintln!("Pre-loading runner utils shim: {}", runner_shim_path);
+    let path_cstr = std::ffi::CString::new(runner_shim_path.as_str()).unwrap();
+    unsafe {
+        let handle = libc::dlopen(path_cstr.as_ptr(), libc::RTLD_NOW | libc::RTLD_GLOBAL);
+        if handle.is_null() {
+            let error = libc::dlerror();
+            if !error.is_null() {
+                eprintln!(
+                    "Warning: Failed to pre-load runner utils shim: {:?}",
+                    std::ffi::CStr::from_ptr(error)
+                );
+            } else {
+                eprintln!("Warning: Failed to pre-load runner utils shim");
+            }
+        } else {
+            eprintln!("Successfully pre-loaded runner utils shim");
+        }
+    }
+
+    // Pre-load libc ciface shim library
+    if matches!(runtime.backend, lispier::runtime::Backend::Rocm) {
+        let libc_shim_path = std::env::var("HOME")
+            .map(|h| format!("{}/liblibc_ciface_shim.so", h))
+            .unwrap_or_else(|_| "/home/jimmyhmiller/liblibc_ciface_shim.so".to_string());
+        eprintln!("Pre-loading libc ciface shim: {}", libc_shim_path);
+        let path_cstr = std::ffi::CString::new(libc_shim_path.as_str()).unwrap();
+        unsafe {
+            let handle = libc::dlopen(path_cstr.as_ptr(), libc::RTLD_NOW | libc::RTLD_GLOBAL);
+            if handle.is_null() {
+                let error = libc::dlerror();
+                if !error.is_null() {
+                    eprintln!(
+                        "Warning: Failed to pre-load libc ciface shim: {:?}",
+                        std::ffi::CStr::from_ptr(error)
+                    );
+                } else {
+                    eprintln!("Warning: Failed to pre-load libc ciface shim");
+                }
+            } else {
+                eprintln!("Successfully pre-loaded libc ciface shim");
+            }
+        }
+    }
+
+    eprintln!("Pre-loading complete");
+
+    // Create JIT with custom pipeline and libraries
+    eprintln!("Running pass pipeline...");
+    use std::io::Write;
+    std::io::stderr().flush().unwrap();
+    if let Err(e) = Jit::run_pipeline(&registry, &mut module, &pipeline) {
+        eprintln!("Pass pipeline error: {}", e);
+        return ExitCode::FAILURE;
+    }
+    eprintln!("Pass pipeline completed successfully");
+    eprintln!("Module after passes:\n{}", module.as_operation());
+
+    eprintln!("Creating execution engine...");
+    let jit = match Jit::with_pipeline_and_libraries(&registry, &mut module, "", &lib_path_refs) {
+        Ok(j) => j,
+        Err(e) => {
+            eprintln!("JIT creation error: {}", e);
+            return ExitCode::FAILURE;
+        }
+    };
+    eprintln!("JIT created successfully");
+
+    // Register GPU runtime symbols if using GPU backend
+    if matches!(runtime.backend, lispier::runtime::Backend::Rocm) {
+        for lib in &runtime.runtime_libs {
+            let lib_str = lib.to_string_lossy();
+            if lib_str.contains("rocm_runtime") {
+                eprintln!("Registering GPU runtime from: {}", lib_str);
+                unsafe {
+                    jit.register_gpu_runtime(&lib_str);
+                }
+                break;
+            }
+        }
+    }
+
+    // Register runner utils symbols
+    for lib in &runtime.runtime_libs {
+        let lib_str = lib.to_string_lossy();
+        if lib_str.contains("c_runner_utils") {
+            unsafe {
+                jit.register_runner_utils(&lib_str);
+            }
+            break;
+        }
+    }
+
+    // Invoke main
+    unsafe {
+        match jit.invoke_packed("main", &mut []) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("Execution error: {}", e);
+                ExitCode::FAILURE
+            }
+        }
+    }
+}
+
+/// Run with a CPU compilation pipeline using the new explicit scoping
+fn run_with_cpu_compilation(nodes: &[lispier::Node], compilation: &CompilationCpu) -> ExitCode {
+    eprintln!("Using CPU backend");
+
+    // Build pass pipeline using the new pipeline builder
+    let runtime_attrs = std::collections::HashMap::new();
+    let pipeline = build_cpu_pipeline(compilation, &runtime_attrs);
+
+    eprintln!("Pipeline: {}", pipeline);
+
+    // Generate MLIR from AST
+    let registry = DialectRegistry::new();
+    let generator = IRGenerator::new(&registry);
+    let mut module = match generator.generate(nodes) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("IR generation error: {}", e);
+            return ExitCode::FAILURE;
+        }
+    };
+
+    // Run the pass pipeline
+    eprintln!("Running pass pipeline...");
+    if let Err(e) = Jit::run_pipeline(&registry, &mut module, &pipeline) {
+        eprintln!("Pass pipeline error: {}", e);
+        return ExitCode::FAILURE;
+    }
+    eprintln!("Pass pipeline completed successfully");
+
+    // Create JIT and run
+    let jit = match Jit::new(&registry, &mut module) {
+        Ok(j) => j,
+        Err(e) => {
+            eprintln!("JIT creation error: {}", e);
+            return ExitCode::FAILURE;
+        }
+    };
 
     // Invoke main
     unsafe {

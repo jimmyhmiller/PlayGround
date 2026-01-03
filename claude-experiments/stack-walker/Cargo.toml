@@ -1,0 +1,17 @@
+[package]
+name = "stack-walker"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "A modular stack frame walking library for GC root scanning"
+keywords = ["stack", "unwinding", "gc", "debugging"]
+categories = ["development-tools::debugging", "memory-management"]
+
+[dependencies]
+thiserror = "1.0"
+
+[dev-dependencies]
+
+[[bin]]
+name = "walk_bench"
+path = "benches/walk_bench.rs"

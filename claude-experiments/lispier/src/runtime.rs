@@ -405,6 +405,26 @@ pub fn extract_compilation(nodes: &[crate::ast::Node]) -> Option<Compilation> {
     None
 }
 
+/// Extract GPU compilation spec from parsed nodes
+pub fn extract_compilation_gpu(nodes: &[crate::ast::Node]) -> Option<crate::ast::CompilationGpu> {
+    for node in nodes {
+        if let crate::ast::Node::CompilationGpu(c) = node {
+            return Some(c.clone());
+        }
+    }
+    None
+}
+
+/// Extract CPU compilation spec from parsed nodes
+pub fn extract_compilation_cpu(nodes: &[crate::ast::Node]) -> Option<crate::ast::CompilationCpu> {
+    for node in nodes {
+        if let crate::ast::Node::CompilationCpu(c) = node {
+            return Some(c.clone());
+        }
+    }
+    None
+}
+
 /// Extract extern declarations from parsed nodes
 pub fn extract_externs(nodes: &[crate::ast::Node]) -> Vec<crate::ast::Extern> {
     let mut externs = Vec::new();
