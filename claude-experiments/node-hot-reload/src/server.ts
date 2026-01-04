@@ -18,6 +18,7 @@ export function startServer(options: ServerOptions) {
   interface Client {
     ws: WebSocket;
     type: "runtime" | "editor";
+    loadedModules: Set<string>;  // Modules this runtime has actually loaded
   }
   const clients = new Map<WebSocket, Client>();
 
@@ -38,7 +39,7 @@ export function startServer(options: ServerOptions) {
   wss.on("connection", (ws: WebSocket) => {
     console.log("[server] Client connected");
     // Default to runtime, editors will identify themselves
-    clients.set(ws, { ws, type: "runtime" });
+    clients.set(ws, { ws, type: "runtime", loadedModules: new Set() });
 
     ws.on("message", (data) => {
       try {
@@ -98,6 +99,12 @@ export function startServer(options: ServerOptions) {
               success: false,
               error: `Transform error: ${error.message}`,
             }));
+          }
+        } else if (message.type === "module-loaded") {
+          // Runtime reports a module was loaded
+          const client = clients.get(ws);
+          if (client && client.type === "runtime") {
+            client.loadedModules.add(message.id);
           }
         } else if (message.type === "eval-result") {
           // Runtime sends result back - route to requesting editor
@@ -169,16 +176,22 @@ export function startServer(options: ServerOptions) {
         code: transformed,
       });
 
-      // Broadcast to all runtime clients
+      // Only send to runtimes that have actually loaded this module
       let sentCount = 0;
       for (const [clientWs, client] of clients) {
         if (client.type === "runtime" && clientWs.readyState === WebSocket.OPEN) {
-          clientWs.send(message);
-          sentCount++;
+          if (client.loadedModules.has(moduleId)) {
+            clientWs.send(message);
+            sentCount++;
+          }
         }
       }
 
-      console.log(`[server] Sent reload for ${moduleId} to ${sentCount} runtime(s)`);
+      if (sentCount > 0) {
+        console.log(`[server] Sent reload for ${moduleId} to ${sentCount} runtime(s)`);
+      } else {
+        console.log(`[server] Skipped reload for ${moduleId} (not loaded by any runtime)`);
+      }
     } catch (e) {
       console.error(`[server] Failed to transform ${filePath}:`, e);
     }

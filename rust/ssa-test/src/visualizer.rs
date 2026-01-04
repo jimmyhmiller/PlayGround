@@ -77,23 +77,30 @@ where
         node.push_str(&format!("Block {}\\n", block.id.0));
         node.push_str("─────────────\\n");
 
-        // Add phi nodes for this block if any
-        if let Some(phis) = self.translator.incomplete_phis.get(&block.id) {
-            for (var, phi_id) in phis {
-                if let Some(phi) = self.translator.phis.get(phi_id) {
-                    node.push_str(&format!("Φ({}) = ", var));
-                    let operands: Vec<String> = phi
-                        .operands
-                        .iter()
-                        .map(|op| op.format_for_display())
-                        .collect();
-                    node.push_str(&operands.join(", "));
-                    node.push_str("\\n");
-                }
-            }
-            if !phis.is_empty() {
-                node.push_str("─────────────\\n");
-            }
+        // Collect phis that belong to this block
+        let block_phis: Vec<_> = self.translator.phis
+            .values()
+            .filter(|phi| phi.block_id == block.id)
+            .collect();
+
+        // Add phi nodes for this block
+        for phi in &block_phis {
+            // Use phi.dest if available, otherwise show Φ{id}
+            let dest_name = phi.dest.as_ref()
+                .map(|v| v.name().to_string())
+                .unwrap_or_else(|| format!("Φ{}", phi.id.0));
+
+            let operands: Vec<String> = phi
+                .operands
+                .iter()
+                .map(|op| op.format_for_display())
+                .collect();
+
+            node.push_str(&format!("{} = φ({})\\n", dest_name, operands.join(", ")));
+        }
+
+        if !block_phis.is_empty() {
+            node.push_str("─────────────\\n");
         }
 
         // Add instructions
@@ -113,7 +120,7 @@ where
     }
 
     fn has_phi_nodes(&self) -> bool {
-        !self.translator.incomplete_phis.is_empty()
+        !self.translator.phis.is_empty()
     }
 
     pub fn render_to_file(&self, filepath: &str) -> std::io::Result<()> {

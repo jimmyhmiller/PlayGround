@@ -158,6 +158,35 @@ export interface WidgetStateStorage {
 }
 
 /**
+ * Custom widget definition - a dynamically registered widget type
+ */
+export interface CustomWidgetDefinition {
+  /** Unique name for the widget type (e.g., "my-chart") */
+  name: string;
+  /** Display description for discovery */
+  description: string;
+  /** Category for grouping (e.g., "display", "data", "input") */
+  category: string;
+  /** React component code as string - will be compiled at runtime */
+  code: string;
+  /** Default props for the widget */
+  defaultProps: Record<string, unknown>;
+  /** Props schema for documentation */
+  propsSchema: Record<string, string>;
+  /** Creation timestamp */
+  createdAt: number;
+  /** Last update timestamp */
+  updatedAt: number;
+}
+
+/**
+ * Custom widgets state - stores dynamically registered widget types
+ */
+export interface CustomWidgetsState {
+  list: CustomWidgetDefinition[];
+}
+
+/**
  * Complete application state
  */
 export interface AppState {
@@ -169,6 +198,7 @@ export interface AppState {
   dashboards: DashboardsState;
   globalUI: GlobalUIState;
   widgetState: WidgetStateStorage;
+  customWidgets: CustomWidgetsState;
 }
 
 /**
@@ -343,6 +373,38 @@ export interface WidgetStateGetPayload {
  */
 export interface WidgetStateClearPayload {
   widgetId: string;
+}
+
+// ========== Custom Widgets Payloads ==========
+
+/**
+ * Custom widget register payload
+ */
+export interface CustomWidgetRegisterPayload {
+  name: string;
+  description: string;
+  category?: string;
+  code: string;
+  defaultProps?: Record<string, unknown>;
+  propsSchema?: Record<string, string>;
+}
+
+/**
+ * Custom widget unregister payload
+ */
+export interface CustomWidgetUnregisterPayload {
+  name: string;
+}
+
+/**
+ * Custom widget update payload
+ */
+export interface CustomWidgetUpdatePayload {
+  name: string;
+  code?: string;
+  description?: string;
+  defaultProps?: Record<string, unknown>;
+  propsSchema?: Record<string, string>;
 }
 
 /**

@@ -18,6 +18,9 @@ import ThemeEditor from './ThemeEditor';
 import SettingsEditor from './SettingsEditor';
 import { GlobalUIRenderer } from '../globalUI';
 import WidgetLayout from './WidgetLayout';
+import { WidgetErrorBoundary } from './ErrorBoundary';
+import { useCustomWidgets } from '../hooks/useCustomWidgets';
+import { CodeExecutionHandler } from '../widgets/DynamicWidget';
 
 interface ComponentConfig {
   component: ComponentType<unknown>;
@@ -851,13 +854,59 @@ const DesktopCommandPalette = memo(function DesktopCommandPalette(): ReactElemen
 });
 
 /**
+ * CustomWidgetsLoader - Loads custom widgets from state on startup
+ * This component renders nothing but initializes the custom widget system.
+ */
+const CustomWidgetsLoader = memo(function CustomWidgetsLoader(): null {
+  // This hook loads custom widgets from backend state and
+  // subscribes to registration/update/unregistration events
+  useCustomWidgets();
+  return null;
+});
+
+/**
  * Desktop environment with windowing and theming
  */
 function Desktop(): ReactElement {
+  const [leftPanelVisible, setLeftPanelVisible] = useState(false);
+  const [rightPanelVisible, setRightPanelVisible] = useState(true);
+
+  // Listen for panel visibility changes
+  useEffect(() => {
+    const unsubLeft = window.eventAPI.subscribe('globalUI.leftPanel.toggle', (event) => {
+      setLeftPanelVisible(event.payload as boolean);
+    });
+    const unsubRight = window.eventAPI.subscribe('globalUI.rightPanel.toggle', (event) => {
+      setRightPanelVisible(event.payload as boolean);
+    });
+    
+    // Listen for panel moves - when moving, update visibility for both sides
+    const unsubMove = window.eventAPI.subscribe('globalUI.panel.moveTo', (event) => {
+      const newSide = event.payload as string;
+      if (newSide === 'left') {
+        setLeftPanelVisible(true);
+        setRightPanelVisible(false);
+      } else {
+        setLeftPanelVisible(false);
+        setRightPanelVisible(true);
+      }
+    });
+    
+    return () => {
+      unsubLeft();
+      unsubRight();
+      unsubMove();
+    };
+  }, []);
+
   return (
     <SettingsProvider>
       <ThemeProvider>
         <WindowManagerProvider componentRegistry={COMPONENT_REGISTRY}>
+          {/* Initialize custom widgets system */}
+          <CustomWidgetsLoader />
+          {/* Handle code execution requests from MCP server */}
+          <CodeExecutionHandler />
           <div
             className="desktop"
             style={{
@@ -870,6 +919,20 @@ function Desktop(): ReactElement {
               position: 'relative',
             }}
           >
+            {/* Drag region for frameless window */}
+            <div
+              className="window-drag-region"
+              style={{
+                position: 'absolute',
+                top: 0,
+                left: 80, // Leave space for traffic lights
+                right: 0,
+                height: '38px',
+                // @ts-expect-error - webkit property for electron
+                WebkitAppRegion: 'drag',
+                zIndex: 1000,
+              }}
+            />
             {/* Background layer for pattern overlays (like ai-dashboard2) */}
             <div
               className="bg-layer"
@@ -889,12 +952,21 @@ function Desktop(): ReactElement {
             />
             <div
               className="desktop-workspace"
-              style={{ flex: 1, position: 'relative', zIndex: 1 }}
+              style={{
+                flex: 1,
+                position: 'relative',
+                zIndex: 1,
+                marginLeft: leftPanelVisible ? '200px' : 0,
+                marginRight: rightPanelVisible ? '200px' : 0,
+                transition: 'margin 0.3s ease',
+              }}
             >
               <WindowContainer />
             </div>
             {/* Global UI layer - widgets in fixed positions */}
-            <GlobalUIRenderer />
+            <WidgetErrorBoundary>
+              <GlobalUIRenderer />
+            </WidgetErrorBoundary>
             <DesktopCommandPalette />
             <DesktopQuickSwitcher />
           </div>

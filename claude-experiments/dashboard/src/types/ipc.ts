@@ -56,7 +56,7 @@ export const IPC_CHANNELS = {
   ACP_SPAWN: 'acp:spawn',
   ACP_INITIALIZE: 'acp:initialize',
   ACP_NEW_SESSION: 'acp:newSession',
-  ACP_LOAD_SESSION: 'acp:loadSession',
+  ACP_RESUME_SESSION: 'acp:resumeSession',
   ACP_PROMPT: 'acp:prompt',
   ACP_CANCEL: 'acp:cancel',
   ACP_SET_MODE: 'acp:setMode',
@@ -64,6 +64,7 @@ export const IPC_CHANNELS = {
   ACP_IS_CONNECTED: 'acp:isConnected',
   ACP_RESPOND_PERMISSION: 'acp:respondPermission',
   ACP_SESSION_UPDATE: 'acp:sessionUpdate',
+  ACP_LOAD_SESSION_HISTORY: 'acp:loadSessionHistory',
 } as const;
 
 export type IpcChannel = typeof IPC_CHANNELS[keyof typeof IPC_CHANNELS];
@@ -238,10 +239,19 @@ export interface ACPAPI {
   initialize(): Promise<void>;
 
   /** Create a new session */
-  newSession(cwd: string, mcpServers?: unknown[]): Promise<{ sessionId: string }>;
+  newSession(cwd: string, mcpServers?: unknown[], force?: boolean): Promise<{
+    sessionId: string;
+    modes?: {
+      availableModes: Array<{ id: string; name: string }>;
+      currentModeId: string;
+    };
+  }>;
 
-  /** Load an existing session */
-  loadSession(sessionId: string, cwd: string): Promise<void>;
+  /** Resume an existing session */
+  resumeSession(sessionId: string, cwd: string): Promise<{
+    sessionId: string;
+    modes?: { availableModes: Array<{ id: string; name: string }>; currentModeId: string };
+  }>;
 
   /** Send a prompt to the agent */
   prompt(sessionId: string, content: string | ContentBlock[]): Promise<{ stopReason: string }>;
@@ -258,14 +268,22 @@ export interface ACPAPI {
   /** Check if connected */
   isConnected(): Promise<boolean>;
 
-  /** Respond to a permission request */
-  respondToPermission(requestId: string, outcome: 'allow' | 'deny'): Promise<void>;
+  /** Respond to a permission request with the selected optionId */
+  respondToPermission(requestId: string, optionId: string): Promise<void>;
 
   /** Subscribe to session updates */
   subscribeUpdates(callback: (update: SessionNotification) => void): () => void;
 
   /** Subscribe to permission requests */
   subscribePermissions(callback: (request: RequestPermissionRequest) => void): () => void;
+
+  /** Load session history from Claude's local files */
+  loadSessionHistory(sessionId: string, cwd: string): Promise<Array<{
+    id: string;
+    role: 'user' | 'assistant';
+    content: string;
+    timestamp: number;
+  }>>;
 }
 
 /**

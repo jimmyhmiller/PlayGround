@@ -45,7 +45,7 @@ export function useWidgetState<T extends Record<string, unknown>>(
         if (mounted) {
           if (result.state !== undefined && result.state !== null) {
             // Merge with initial state to handle new fields
-            setState(prev => ({
+            setState(_prev => ({
               ...initialStateRef.current,
               ...(result.state as Partial<T>),
             }));
@@ -125,19 +125,19 @@ export function useWidgetValue<T>(
  *
  * @param key - Unique key for this piece of state within the widget
  * @param initialValue - Default value if not persisted
- * @returns [value, setValue] - Same signature as useState
+ * @returns [value, setValue, isLoaded] - Like useState but with loading state
  *
  * @example
  * // Instead of:
  * const [code, setCode] = useState('');
  *
  * // Use:
- * const [code, setCode] = usePersistentState('code', '');
+ * const [code, setCode, isLoaded] = usePersistentState('code', '');
  */
 export function usePersistentState<T>(
   key: string,
   initialValue: T
-): [T, (value: T | ((prev: T) => T)) => void] {
+): [T, (value: T | ((prev: T) => T)) => void, boolean] {
   // Auto-get widget ID from context
   const widgetId = useWidgetId();
   const fullKey = `${widgetId}::${key}`;
@@ -150,36 +150,33 @@ export function usePersistentState<T>(
   valueRef.current = value;
   loadedRef.current = loaded;
 
-  // Debug logging
-  console.log(`[usePersistentState] Hook called: key="${key}", fullKey="${fullKey}"`);
-
   // Load persisted value on mount - only once per fullKey
   useEffect(() => {
     // Skip if already loaded for this key
     if (loadedRef.current) {
-      console.log(`[usePersistentState] Already loaded "${fullKey}", skipping`);
       return;
     }
 
     let mounted = true;
-    console.log(`[usePersistentState] Loading: "${fullKey}"`);
 
     dispatch('widgetState.get', { widgetId: fullKey })
       .then((result: unknown) => {
         const r = result as WidgetStateGetResult;
-        console.log(`[usePersistentState] Loaded "${fullKey}": state=`, r.state);
         // Only apply if still mounted AND not already loaded (prevents race with setValue)
         if (mounted && !loadedRef.current && r.state !== undefined && r.state !== null) {
-          console.log(`[usePersistentState] Applying loaded state for "${key}":`, r.state);
           setValue(r.state as T);
-        } else if (mounted && !loadedRef.current) {
-          console.log(`[usePersistentState] No state found for "${fullKey}", using initial:`, initialValue);
         }
-        if (mounted) setLoaded(true);
+        if (mounted) {
+          loadedRef.current = true;
+          setLoaded(true);
+        }
       })
       .catch((err) => {
         console.error(`[usePersistentState] Load error "${fullKey}":`, err);
-        if (mounted) setLoaded(true);
+        if (mounted) {
+          loadedRef.current = true;
+          setLoaded(true);
+        }
       });
 
     return () => { mounted = false; };
@@ -200,12 +197,9 @@ export function usePersistentState<T>(
       setLoaded(true);
 
       // Always persist
-      console.log(`[usePersistentState] Setting "${fullKey}" (loaded=${loadedRef.current}):`, resolvedValue);
       dispatch('widgetState.set', {
         widgetId: fullKey,
         state: resolvedValue,
-      }).then(() => {
-        console.log(`[usePersistentState] Saved "${fullKey}" successfully`);
       }).catch((err) => {
         console.error(`[usePersistentState] Failed to save "${fullKey}":`, err);
       });
@@ -213,5 +207,5 @@ export function usePersistentState<T>(
     [dispatch, fullKey]
   );
 
-  return [value, setPersistedValue];
+  return [value, setPersistedValue, loaded];
 }

@@ -18,6 +18,22 @@ pub enum SSAViolation<V> {
         block_id: BlockId,
         unique_operand: V,
     },
+    /// Phi exists in entry block (entry has no predecessors, so phi is invalid)
+    PhiInEntryBlock {
+        phi_id: PhiId,
+    },
+    /// Phi exists in unreachable block
+    PhiInUnreachableBlock {
+        phi_id: PhiId,
+        block_id: BlockId,
+    },
+    /// Phi operand index doesn't align with predecessor
+    PhiOperandPredecessorMismatch {
+        phi_id: PhiId,
+        operand_idx: usize,
+        operand_from_block: BlockId,
+        expected_predecessor: BlockId,
+    },
     /// Phi operand count doesn't match block's predecessor count
     OperandCountMismatch {
         phi_id: PhiId,
@@ -62,11 +78,10 @@ pub enum SSAViolation<V> {
         instruction_index: usize,
         phi_id: PhiId,
     },
-    /// Phi assignment not at the beginning of block
-    PhiNotAtBlockStart {
-        block_id: BlockId,
-        instruction_index: usize,
+    /// Phi is missing its destination variable (not materialized)
+    PhiMissingDestination {
         phi_id: PhiId,
+        block_id: BlockId,
     },
     /// Variable is defined more than once
     MultipleDefinitions {
@@ -100,6 +115,12 @@ pub enum SSAViolation<V> {
         variable: SsaVariable,
         def_block: BlockId,
     },
+    /// Phi referenced as value in instruction (should have been replaced with variable)
+    PhiNotInlined {
+        phi_id: PhiId,
+        block_id: BlockId,
+        instruction_index: usize,
+    },
 }
 
 impl<V: std::fmt::Debug> std::fmt::Display for SSAViolation<V> {
@@ -108,6 +129,16 @@ impl<V: std::fmt::Debug> std::fmt::Display for SSAViolation<V> {
             SSAViolation::TrivialPhi { phi_id, block_id, unique_operand } => {
                 write!(f, "Trivial phi {:?} in block {:?}: all operands are {:?}",
                     phi_id, block_id, unique_operand)
+            }
+            SSAViolation::PhiInEntryBlock { phi_id } => {
+                write!(f, "Phi {:?} exists in entry block (entry has no predecessors)", phi_id)
+            }
+            SSAViolation::PhiInUnreachableBlock { phi_id, block_id } => {
+                write!(f, "Phi {:?} exists in unreachable block {:?}", phi_id, block_id)
+            }
+            SSAViolation::PhiOperandPredecessorMismatch { phi_id, operand_idx, operand_from_block, expected_predecessor } => {
+                write!(f, "Phi {:?} operand {} is from {:?} but expected from predecessor {:?}",
+                    phi_id, operand_idx, operand_from_block, expected_predecessor)
             }
             SSAViolation::OperandCountMismatch { phi_id, block_id, operand_count, predecessor_count } => {
                 write!(f, "Phi {:?} in block {:?} has {} operands but block has {} predecessors",
@@ -137,9 +168,9 @@ impl<V: std::fmt::Debug> std::fmt::Display for SSAViolation<V> {
                 write!(f, "Instruction {} in block {:?} uses phi {:?} directly",
                     instruction_index, block_id, phi_id)
             }
-            SSAViolation::PhiNotAtBlockStart { block_id, instruction_index, phi_id } => {
-                write!(f, "Phi {:?} assignment at instruction {} in block {:?}",
-                    phi_id, instruction_index, block_id)
+            SSAViolation::PhiMissingDestination { phi_id, block_id } => {
+                write!(f, "Phi {:?} in block {:?} has no destination variable (not materialized)",
+                    phi_id, block_id)
             }
             SSAViolation::MultipleDefinitions { variable, definition_sites } => {
                 write!(f, "Variable {:?} has multiple definitions at {:?}",
@@ -159,6 +190,10 @@ impl<V: std::fmt::Debug> std::fmt::Display for SSAViolation<V> {
             SSAViolation::PhiOperandDominanceViolation { phi_id, block_id, operand_index, predecessor, variable, def_block } => {
                 write!(f, "Phi operand dominance violation: {:?} operand {} in {:?} uses {:?} (def in {:?}) which doesn't dominate predecessor {:?}",
                     phi_id, operand_index, block_id, variable, def_block, predecessor)
+            }
+            SSAViolation::PhiNotInlined { phi_id, block_id, instruction_index } => {
+                write!(f, "Phi {:?} referenced as value at instruction {} in block {:?} (should have been replaced with variable)",
+                    phi_id, instruction_index, block_id)
             }
         }
     }
@@ -223,6 +258,15 @@ where
                 block_id: phi.block_id,
             });
         }
+
+        // Check that phi has destination after materialization
+        // (Only check if block is sealed - unmaterialized phis in unsealed blocks are OK)
+        if phi.dest.is_none() && translator.sealed_blocks.contains(&phi.block_id) && !phi.operands.is_empty() {
+            violations.push(SSAViolation::PhiMissingDestination {
+                phi_id: *phi_id,
+                block_id: phi.block_id,
+            });
+        }
     }
 
     // Property 5: All blocks should be sealed
@@ -268,21 +312,19 @@ where
         }
     }
 
-    // Property 8: Phi assignments must be at block start
+    // Property 8: No phi references should remain in instructions
+    // After materialization, all Value::Phi(id) should be replaced with Value::Var
     for block in &translator.blocks {
-        let mut seen_non_phi = false;
         for (instr_idx, instruction) in block.instructions.iter().enumerate() {
-            if let Some(phi_id) = instruction.get_phi_assignment() {
-                if seen_non_phi {
-                    violations.push(SSAViolation::PhiNotAtBlockStart {
+            instruction.visit_values(|value| {
+                if let Some(phi_id) = value.as_phi() {
+                    violations.push(SSAViolation::PhiNotInlined {
+                        phi_id,
                         block_id: block.id,
                         instruction_index: instr_idx,
-                        phi_id,
                     });
                 }
-            } else {
-                seen_non_phi = true;
-            }
+            });
         }
     }
 
@@ -300,6 +342,29 @@ where
 
     // Property 12: Dead phis
     violations.extend(check_dead_phis(translator));
+
+    // Property 13: Phi in entry block
+    violations.extend(check_phi_entry_block(translator));
+
+    violations
+}
+
+/// Check that no phi nodes exist in the entry block
+/// Entry block has no predecessors, so phi nodes are invalid there
+fn check_phi_entry_block<V, I, F>(translator: &SSATranslator<V, I, F>) -> Vec<SSAViolation<V>>
+where
+    V: SsaValue,
+    I: SsaInstruction<Value = V>,
+    F: InstructionFactory<Instr = I>,
+{
+    let mut violations = Vec::new();
+    let entry_block = BlockId(0);
+
+    for (phi_id, phi) in &translator.phis {
+        if phi.block_id == entry_block && !phi.operands.is_empty() {
+            violations.push(SSAViolation::PhiInEntryBlock { phi_id: *phi_id });
+        }
+    }
 
     violations
 }
@@ -370,6 +435,7 @@ where
     let mut def_blocks: HashMap<SsaVariable, BlockId> = HashMap::new();
     let mut defined_vars: HashSet<SsaVariable> = HashSet::new();
 
+    // Collect definitions from instructions
     for block in &translator.blocks {
         for (instr_idx, instruction) in block.instructions.iter().enumerate() {
             if let Some(var) = instruction.destination() {
@@ -380,6 +446,19 @@ where
                 def_blocks.insert(var.clone(), block.id);
                 defined_vars.insert(var.clone());
             }
+        }
+    }
+
+    // Collect definitions from phi destinations
+    // Phi destinations are defined at the beginning of the block (instruction index 0)
+    for phi in translator.phis.values() {
+        if let Some(ref dest) = phi.dest {
+            definitions
+                .entry(dest.clone())
+                .or_default()
+                .push((phi.block_id, 0));
+            def_blocks.insert(dest.clone(), phi.block_id);
+            defined_vars.insert(dest.clone());
         }
     }
 
@@ -599,30 +678,20 @@ where
 {
     let mut violations = Vec::new();
 
-    // Build a map of phi_id -> assigned variable (if any)
-    let mut phi_to_var: HashMap<PhiId, SsaVariable> = HashMap::new();
-    for block in &translator.blocks {
-        for instruction in &block.instructions {
-            if let Some(phi_id) = instruction.get_phi_assignment() {
-                if let Some(dest) = instruction.destination() {
-                    phi_to_var.insert(phi_id, dest.clone());
-                }
-            }
-        }
-    }
+    // Build a map of phi_id -> assigned variable using phi.dest
+    let phi_to_var: HashMap<PhiId, SsaVariable> = translator.phis
+        .iter()
+        .filter_map(|(phi_id, phi)| {
+            phi.dest.as_ref().map(|dest| (*phi_id, dest.clone()))
+        })
+        .collect();
 
     // Collect all phis that are "used" by non-phi instructions
     let mut used_phis: HashSet<PhiId> = HashSet::new();
 
-    // First pass: find phis directly used in non-phi-assignment instructions
+    // First pass: find phis whose destination variable is used in instructions
     for block in &translator.blocks {
         for instruction in &block.instructions {
-            // Skip phi assignment instructions when checking for uses
-            if instruction.get_phi_assignment().is_some() {
-                continue;
-            }
-
-            // Check for direct phi uses or variable uses that came from phis
             instruction.visit_values(|value| {
                 // Direct phi use (shouldn't happen in well-formed SSA, but check anyway)
                 if let Some(phi_id) = value.as_phi() {
@@ -641,7 +710,7 @@ where
     }
 
     // Second pass: propagate "used" status through phi references
-    // (if phi A references phi B, and A is used, then B is also used)
+    // (if phi A uses phi B's result, and A is used, then B is also used)
     let mut changed = true;
     while changed {
         changed = false;
@@ -721,7 +790,11 @@ where
 
     println!("\nPhis ({}):", translator.phis.len());
     for (phi_id, phi) in &translator.phis {
-        println!("  {:?} in block {:?}: operands={:?}", phi_id, phi.block_id, phi.operands);
+        let dest_str = phi.dest.as_ref()
+            .map(|v| v.name().to_string())
+            .unwrap_or_else(|| "?".to_string());
+        println!("  {} = φ{:?} in block {:?}: operands={:?}",
+            dest_str, phi_id, phi.block_id, phi.operands);
     }
 
     println!("\nIncomplete Phis:");

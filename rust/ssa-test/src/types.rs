@@ -65,12 +65,18 @@ pub enum PhiReference {
 }
 
 /// A phi node - generic over the value type
+///
+/// In proper SSA, a phi directly defines a variable:
+///   v7 = φ(v2, v5)
+/// The `dest` field holds this destination variable once materialized.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Phi<V> {
     pub id: PhiId,
     pub block_id: BlockId,
     pub operands: Vec<V>,
     pub uses: Vec<PhiReference>,
+    /// The variable this phi defines (set during materialization)
+    pub dest: Option<SsaVariable>,
 }
 
 impl<V> Phi<V> {
@@ -80,6 +86,7 @@ impl<V> Phi<V> {
             block_id,
             operands: Vec::new(),
             uses: Vec::new(),
+            dest: None,
         }
     }
 }

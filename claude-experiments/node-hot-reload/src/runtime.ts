@@ -12,6 +12,7 @@ interface HotRuntime {
   storage: Map<string, Record<string, unknown>>;  // backing storage for functions
   loaders: Map<string, () => void>;
   esmCache: Map<string, unknown>;  // Cache for pre-loaded ESM modules
+  loadedModuleIds: Set<string>;  // Track loaded modules for hot reload
   ws: WebSocket | null;
   sourceRoot: string;
 
@@ -34,6 +35,7 @@ export function createRuntime(): HotRuntime {
     storage: new Map(),
     loaders: new Map(),
     esmCache: new Map(),
+    loadedModuleIds: new Set<string>(),  // Track what we've loaded
     ws: null,
     sourceRoot: process.cwd(),
 
@@ -97,6 +99,11 @@ export function createRuntime(): HotRuntime {
       const loader = this.loaders.get(id);
       if (loader) {
         loader();
+        // Track this module as loaded (send to server if connected, otherwise sent on connect)
+        this.loadedModuleIds.add(id);
+        if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+          this.ws.send(JSON.stringify({ type: "module-loaded", id }));
+        }
       } else {
         // Try to require the module
         // If it looks like a local module ID (not starting with / or a bare specifier), resolve it
@@ -213,6 +220,10 @@ export function createRuntime(): HotRuntime {
 
       this.ws.on("open", () => {
         console.log("[hot] Connected to dev server");
+        // Send all modules that were loaded before we connected
+        for (const id of this.loadedModuleIds) {
+          this.ws!.send(JSON.stringify({ type: "module-loaded", id }));
+        }
       });
 
       this.ws.on("message", (data: WebSocket.Data) => {

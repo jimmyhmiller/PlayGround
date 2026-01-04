@@ -122,9 +122,9 @@ import_electron.contextBridge.exposeInMainWorld("acpAPI", {
   // Initialize the ACP connection
   initialize: () => import_electron.ipcRenderer.invoke("acp:initialize"),
   // Create a new session
-  newSession: (cwd, mcpServers) => import_electron.ipcRenderer.invoke("acp:newSession", cwd, mcpServers),
-  // Load an existing session
-  loadSession: (sessionId, cwd) => import_electron.ipcRenderer.invoke("acp:loadSession", sessionId, cwd),
+  newSession: (cwd, mcpServers, force) => import_electron.ipcRenderer.invoke("acp:newSession", cwd, mcpServers, force),
+  // Resume an existing session
+  resumeSession: (sessionId, cwd) => import_electron.ipcRenderer.invoke("acp:resumeSession", sessionId, cwd),
   // Send a prompt to the agent
   prompt: (sessionId, content) => import_electron.ipcRenderer.invoke("acp:prompt", sessionId, content),
   // Cancel an ongoing prompt
@@ -135,8 +135,8 @@ import_electron.contextBridge.exposeInMainWorld("acpAPI", {
   shutdown: () => import_electron.ipcRenderer.invoke("acp:shutdown"),
   // Check if connected
   isConnected: () => import_electron.ipcRenderer.invoke("acp:isConnected"),
-  // Respond to a permission request
-  respondToPermission: (requestId, outcome) => import_electron.ipcRenderer.invoke("acp:respondPermission", requestId, outcome),
+  // Respond to a permission request with selected optionId
+  respondToPermission: (requestId, optionId) => import_electron.ipcRenderer.invoke("acp:respondPermission", requestId, optionId),
   // Subscribe to session updates
   subscribeUpdates: (callback) => {
     const handler = (_ipcEvent, update) => {
@@ -156,5 +156,7 @@ import_electron.contextBridge.exposeInMainWorld("acpAPI", {
     return () => {
       import_electron.ipcRenderer.removeListener("acp:permissionRequest", handler);
     };
-  }
+  },
+  // Load session history from Claude's local files
+  loadSessionHistory: (sessionId, cwd) => import_electron.ipcRenderer.invoke("acp:loadSessionHistory", sessionId, cwd)
 });

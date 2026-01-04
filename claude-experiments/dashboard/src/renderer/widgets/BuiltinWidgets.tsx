@@ -9,10 +9,11 @@ import React, { memo, useCallback, useState, useEffect, useMemo, useRef, useId, 
 import { useBackendStateSelector, useDispatch, useBackendState } from '../hooks/useBackendState';
 import { useEventSubscription, useEmit, useEventReducer } from '../hooks/useEvents';
 import { usePersistentState } from '../hooks/useWidgetState';
+import { WidgetErrorBoundary } from '../components/ErrorBoundary';
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, LineChart, Line } from 'recharts';
 
 // CodeMirror imports for syntax highlighting
-import { EditorView, lineNumbers, highlightActiveLineGutter, highlightSpecialChars } from '@codemirror/view';
+import { EditorView, lineNumbers, highlightSpecialChars } from '@codemirror/view';
 import { EditorState, Extension } from '@codemirror/state';
 import { syntaxHighlighting, defaultHighlightStyle } from '@codemirror/language';
 import { javascript } from '@codemirror/lang-javascript';
@@ -411,6 +412,12 @@ const createEvalContext = () => ({
   useBackendState,
   useBackendStateSelector,
   useDispatch,
+  usePersistentState,
+
+  // Event hooks
+  useEventSubscription,
+  useEmit,
+  useEventReducer,
 
   // Selectors
   SELECTORS,
@@ -535,20 +542,12 @@ export const EvalWidget = memo(function EvalWidget({
     return null;
   }
 
-  // Wrap in error boundary
-  try {
-    return <Component {...componentProps} />;
-  } catch (err) {
-    return (
-      <div style={{
-        ...baseWidgetStyle,
-        color: 'var(--theme-status-error, #f44)',
-        fontSize: '0.8em',
-      }}>
-        Render error: {(err as Error).message}
-      </div>
-    );
-  }
+  // Wrap in error boundary to catch runtime errors
+  return (
+    <WidgetErrorBoundary>
+      <Component {...componentProps} />
+    </WidgetErrorBoundary>
+  );
 });
 
 // ========== Event-Driven Widgets ==========
@@ -617,11 +616,12 @@ export const ChartWidget = memo(function ChartWidget({
 
   // Detect available columns from first event
   const { numericColumns, labelColumns } = useMemo(() => {
-    if (events.length === 0) {
+    const firstEvent = events[0];
+    if (!firstEvent) {
       return { numericColumns: [] as string[], labelColumns: [] as string[] };
     }
 
-    const payload = events[0].payload as Record<string, unknown>;
+    const payload = firstEvent.payload as Record<string, unknown>;
     if (!payload || typeof payload !== 'object') {
       return { numericColumns: [] as string[], labelColumns: [] as string[] };
     }
@@ -770,8 +770,9 @@ export const TableWidget = memo(function TableWidget({
       return configColumns;
     }
     // Detect from first event's payload
-    if (events.length > 0) {
-      const firstPayload = events[0].payload as Record<string, unknown>;
+    const firstEvent = events[0];
+    if (firstEvent) {
+      const firstPayload = firstEvent.payload as Record<string, unknown>;
       if (firstPayload && typeof firstPayload === 'object') {
         return Object.keys(firstPayload);
       }

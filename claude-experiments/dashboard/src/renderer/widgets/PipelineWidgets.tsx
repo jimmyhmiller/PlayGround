@@ -60,6 +60,7 @@ export const FileDrop = memo(function FileDrop({
 
     for (let i = 0; i < files.length; i++) {
       const file = files[i];
+      if (!file) continue;
 
       // Check file extension if accept is specified
       if (accept) {

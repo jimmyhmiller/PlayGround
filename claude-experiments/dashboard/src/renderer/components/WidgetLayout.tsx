@@ -30,6 +30,7 @@
 import { memo, useState, useEffect, useId, useRef, useCallback, createContext, useContext, type ReactElement, type CSSProperties } from 'react';
 import { WIDGET_TYPES } from '../widgets/BuiltinWidgets';
 import { WidgetIdContext, type WidgetIdContextValue } from '../hooks/useWidgetId';
+import { WidgetErrorBoundary } from './ErrorBoundary';
 
 // Re-export for backwards compatibility
 export { useWidgetId } from '../hooks/useWidgetId';
@@ -97,6 +98,8 @@ export interface FloatingPaneConfig {
 export interface FloatingLayoutConfig {
   type: 'floating';
   panes: FloatingPaneConfig[];
+  flex?: number;
+  style?: CSSProperties;
 }
 
 export interface WindowConfig {
@@ -113,6 +116,8 @@ export interface WindowGroupConfig {
   type: 'window-group';
   scope?: string;
   windows: WindowConfig[];
+  flex?: number;
+  style?: CSSProperties;
 }
 
 export type LayoutConfig = WidgetNodeConfig | LayoutNodeConfig | FloatingLayoutConfig | WindowGroupConfig;
@@ -172,7 +177,9 @@ const WidgetNode = memo(function WidgetNode({ config, path }: WidgetNodeProps): 
 
   return (
     <WidgetIdContext.Provider value={widgetIdValue}>
-      <Component {...props} />
+      <WidgetErrorBoundary>
+        <Component {...props} />
+      </WidgetErrorBoundary>
     </WidgetIdContext.Provider>
   );
 });
@@ -402,7 +409,7 @@ const FloatingLayout = memo(function FloatingLayout({ config, path }: FloatingLa
     return initial;
   });
 
-  const [maxZ, setMaxZ] = useState(config.panes.length);
+  const [_maxZ, setMaxZ] = useState(config.panes.length);
 
   const handleMove = useCallback((id: string, x: number, y: number) => {
     setPaneStates(prev => ({

@@ -16,6 +16,7 @@ use crate::types::{Block, BlockId, Phi, PhiId, PhiReference, SsaVariable};
 /// - `V`: The value type (must implement `SsaValue`)
 /// - `I`: The instruction type (must implement `SsaInstruction<Value = V>`)
 /// - `F`: The instruction factory (must implement `InstructionFactory<Instr = I>`)
+#[derive(Debug)]
 pub struct SSATranslator<V, I, F>
 where
     V: SsaValue,
@@ -103,10 +104,9 @@ where
     fn read_variable_recursively(&mut self, variable: String, block_id: BlockId) -> V {
         let value: V;
         if !self.sealed_blocks.contains(&block_id) {
-            // Block not sealed - create incomplete phi and materialize to variable
+            // Block not sealed - create incomplete phi (don't materialize yet)
             let phi_id = self.create_phi(block_id);
-            let temp_var = self.materialize_phi(phi_id, block_id);
-            value = V::from_var(temp_var);
+            value = V::from_phi(phi_id);
             self.incomplete_phis
                 .entry(block_id)
                 .or_default()
@@ -119,23 +119,17 @@ where
             if block.predecessors.len() == 1 {
                 value = self.read_variable(variable.clone(), block.predecessors[0]);
             } else {
-                // Multiple predecessors - create phi and materialize to variable
+                // Multiple predecessors - create phi (don't materialize yet)
                 let phi_id = self.create_phi(block_id);
-                let temp_var = self.materialize_phi(phi_id, block_id);
-                let var_value = V::from_var(temp_var.clone());
-                self.write_variable(variable.clone(), block_id, var_value.clone());
+                let phi_value = V::from_phi(phi_id);
+                self.write_variable(variable.clone(), block_id, phi_value.clone());
                 let result = self.add_phi_operands(&variable, phi_id);
 
                 // If the phi was removed as trivial, use the replacement value directly
-                // and clean up the unnecessary copy instruction
                 if !self.phis.contains_key(&phi_id) {
-                    // Phi was removed - update definition and remove the copy instruction
-                    self.write_variable(variable.clone(), block_id, result.clone());
-                    // Remove the materialized instruction (vN := replacement)
-                    self.remove_copy_instruction(block_id, &temp_var);
                     value = result;
                 } else {
-                    value = var_value;
+                    value = phi_value;
                 }
             }
         }
@@ -143,33 +137,73 @@ where
         value
     }
 
-    /// Materialize a phi to a variable by creating an Assign instruction at block start
-    fn materialize_phi(&mut self, phi_id: PhiId, block_id: BlockId) -> SsaVariable {
-        let temp_var = self.get_temp_variable("phi");
-        // Insert phi assignment at the beginning of the block, after any existing phi assignments
-        let insert_pos = self.find_phi_insert_position(block_id);
-        let phi_assign = F::create_phi_assign(temp_var.clone(), phi_id);
-        self.blocks[block_id.0].instructions.insert(insert_pos, phi_assign);
-        temp_var
-    }
+    /// Materialize all remaining phis to variables.
+    /// Call this after all blocks are sealed and trivial phis removed.
+    ///
+    /// This stores the destination variable in each phi's `dest` field
+    /// and replaces all phi references in instructions with variables.
+    pub fn materialize_all_phis(&mut self) {
+        // Collect phi ids first to avoid borrow issues
+        let phi_ids: Vec<PhiId> = self.phis.keys().copied().collect();
 
-    /// Find the position to insert a new phi assignment (after existing phi assigns)
-    fn find_phi_insert_position(&self, block_id: BlockId) -> usize {
-        let block = &self.blocks[block_id.0];
-        for (i, instr) in block.instructions.iter().enumerate() {
-            if !instr.is_phi_assignment() {
-                return i;
+        // Find existing phi assignments and their variables (from AST translation)
+        let mut existing_phi_vars: HashMap<PhiId, SsaVariable> = HashMap::new();
+        for block in &self.blocks {
+            for instruction in &block.instructions {
+                if let Some(phi_id) = instruction.get_phi_assignment() {
+                    if let Some(dest) = instruction.destination() {
+                        existing_phi_vars.insert(phi_id, dest.clone());
+                    }
+                }
             }
         }
-        block.instructions.len()
-    }
 
-    /// Remove a copy instruction (dest := something) from a block
-    fn remove_copy_instruction(&mut self, block_id: BlockId, dest: &SsaVariable) {
-        let block = &mut self.blocks[block_id.0];
-        block.instructions.retain(|instr| {
-            instr.destination() != Some(dest)
-        });
+        // Assign destination variable to each phi
+        let mut phi_to_var: HashMap<PhiId, SsaVariable> = HashMap::new();
+        for phi_id in &phi_ids {
+            let var = if let Some(existing) = existing_phi_vars.get(phi_id) {
+                existing.clone()
+            } else {
+                self.get_temp_variable("phi")
+            };
+            phi_to_var.insert(*phi_id, var.clone());
+
+            // Store the destination in the phi itself
+            if let Some(phi) = self.phis.get_mut(phi_id) {
+                phi.dest = Some(var);
+            }
+        }
+
+        // Remove any existing phi assignment instructions from blocks
+        // (phis are now represented by their dest field, not by instructions)
+        for block in &mut self.blocks {
+            block.instructions.retain(|instr| instr.get_phi_assignment().is_none());
+        }
+
+        // Replace all phi references with their corresponding variables
+        for (phi_id, var) in &phi_to_var {
+            let var_value = V::from_var(var.clone());
+
+            // Replace in all instructions
+            for block in &mut self.blocks {
+                for instruction in &mut block.instructions {
+                    instruction.visit_values_mut(|value| {
+                        if value.is_same_phi(*phi_id) {
+                            *value = var_value.clone();
+                        }
+                    });
+                }
+            }
+
+            // Replace in phi operands (phis can reference other phis)
+            for phi in self.phis.values_mut() {
+                for operand in &mut phi.operands {
+                    if operand.is_same_phi(*phi_id) {
+                        *operand = var_value.clone();
+                    }
+                }
+            }
+        }
     }
 
     fn add_phi_operands(&mut self, variable: &String, phi_id: PhiId) -> V {
@@ -402,6 +436,7 @@ where
             }
         }
     }
+
 
     fn replace_value_at_location(&mut self, block_id: BlockId, instruction_offset: usize, old_phi_id: PhiId, new_value: V) {
         // First, replace in instructions

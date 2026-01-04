@@ -234,12 +234,12 @@ contextBridge.exposeInMainWorld('acpAPI', {
   initialize: (): Promise<void> => ipcRenderer.invoke('acp:initialize'),
 
   // Create a new session
-  newSession: (cwd: string, mcpServers?: unknown[]): Promise<{ sessionId: string }> =>
-    ipcRenderer.invoke('acp:newSession', cwd, mcpServers),
+  newSession: (cwd: string, mcpServers?: unknown[], force?: boolean): Promise<{ sessionId: string }> =>
+    ipcRenderer.invoke('acp:newSession', cwd, mcpServers, force),
 
-  // Load an existing session
-  loadSession: (sessionId: string, cwd: string): Promise<void> =>
-    ipcRenderer.invoke('acp:loadSession', sessionId, cwd),
+  // Resume an existing session
+  resumeSession: (sessionId: string, cwd: string): Promise<{ sessionId: string; modes?: { availableModes: Array<{ id: string; name: string }>; currentModeId: string } }> =>
+    ipcRenderer.invoke('acp:resumeSession', sessionId, cwd),
 
   // Send a prompt to the agent
   prompt: (sessionId: string, content: string | unknown[]): Promise<{ stopReason: string }> =>
@@ -258,9 +258,9 @@ contextBridge.exposeInMainWorld('acpAPI', {
   // Check if connected
   isConnected: (): Promise<boolean> => ipcRenderer.invoke('acp:isConnected'),
 
-  // Respond to a permission request
-  respondToPermission: (requestId: string, outcome: 'allow' | 'deny'): Promise<void> =>
-    ipcRenderer.invoke('acp:respondPermission', requestId, outcome),
+  // Respond to a permission request with selected optionId
+  respondToPermission: (requestId: string, optionId: string): Promise<void> =>
+    ipcRenderer.invoke('acp:respondPermission', requestId, optionId),
 
   // Subscribe to session updates
   subscribeUpdates: (callback: (update: unknown) => void): (() => void) => {
@@ -285,4 +285,12 @@ contextBridge.exposeInMainWorld('acpAPI', {
       ipcRenderer.removeListener('acp:permissionRequest', handler);
     };
   },
+
+  // Load session history from Claude's local files
+  loadSessionHistory: (sessionId: string, cwd: string): Promise<Array<{
+    id: string;
+    role: 'user' | 'assistant';
+    content: string;
+    timestamp: number;
+  }>> => ipcRenderer.invoke('acp:loadSessionHistory', sessionId, cwd),
 });

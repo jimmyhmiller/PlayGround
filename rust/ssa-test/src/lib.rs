@@ -48,9 +48,14 @@ pub mod traits;
 pub mod translator;
 pub mod validation;
 pub mod visualizer;
+pub mod cfg;
+pub mod cfg_validation;
 
 // Concrete implementation example
 pub mod concrete;
+
+// Linear IR example (demonstrates CFG → SSA pipeline)
+pub mod linear;
 
 // Re-export core types
 pub use types::{Block, BlockId, Phi, PhiId, PhiReference, SsaVariable};
@@ -67,6 +72,12 @@ pub use validation::{assert_valid_ssa, debug_ssa_state, validate_ssa, SSAViolati
 // Re-export visualizer
 pub use visualizer::{FormatInstruction, FormatValue, SSAVisualizer};
 
+// Re-export CFG
+pub use cfg::{Cfg, CfgBlock, CfgBlockId, CfgBuilder, CfgInstruction, ControlFlow};
+
+// Re-export CFG validation
+pub use cfg_validation::{CfgViolation, validate_cfg, assert_valid_cfg, compute_reachable};
+
 /// Prelude module for convenient imports
 pub mod prelude {
     pub use crate::types::{Block, BlockId, Phi, PhiId, PhiReference, SsaVariable};
@@ -74,4 +85,6 @@ pub mod prelude {
     pub use crate::translator::SSATranslator;
     pub use crate::validation::{assert_valid_ssa, debug_ssa_state, validate_ssa, SSAViolation};
     pub use crate::visualizer::{FormatInstruction, FormatValue, SSAVisualizer};
+    pub use crate::cfg::{Cfg, CfgBlock, CfgBlockId, CfgBuilder, CfgInstruction, ControlFlow};
+    pub use crate::cfg_validation::{CfgViolation, validate_cfg, assert_valid_cfg, compute_reachable};
 }

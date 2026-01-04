@@ -5,6 +5,7 @@
  * Exports the public API for emitting, subscribing, and querying events.
  */
 
+import { defonce } from 'hot-reload/api';
 import { EventStore } from './EventStore';
 import { createCommandHandler, CommandHandlerFactory } from './commands';
 import { setupEventIPC } from './bridges/ipcBridge';
@@ -18,6 +19,7 @@ import type {
   EventPersistence,
   Unsubscribe,
 } from '../../types/events';
+import type { StateStore } from '../state/StateStore';
 
 // Create singleton event store
 const eventStore = new EventStore({
@@ -34,8 +36,12 @@ interface ExternalBridgeHandle {
 }
 let externalBridgeHandle: ExternalBridgeHandle | null = null;
 
+// Track state store reference for external bridge (preserved across hot reloads)
+const stateStoreRef = defonce<{ current: StateStore | null }>({ current: null });
+
 interface ExternalBridgeOptions {
   port?: number;
+  stateStore?: StateStore;
 }
 
 const events = {
@@ -75,8 +81,20 @@ const events = {
    * Setup WebSocket bridge for external processes
    */
   setupExternalBridge: (options?: ExternalBridgeOptions): ExternalBridgeHandle => {
-    externalBridgeHandle = setupExternalBridge(eventStore, options);
+    // Use stored stateStore if available and not passed in options
+    const effectiveOptions = {
+      ...options,
+      stateStore: options?.stateStore ?? stateStoreRef.current ?? undefined,
+    };
+    externalBridgeHandle = setupExternalBridge(eventStore, effectiveOptions);
     return externalBridgeHandle;
+  },
+
+  /**
+   * Set the state store reference for use by external bridge
+   */
+  setStateStore: (stateStore: StateStore): void => {
+    stateStoreRef.current = stateStore;
   },
 
   /**

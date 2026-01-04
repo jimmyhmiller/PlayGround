@@ -144,7 +144,7 @@ function renderMarkdown(content: string): React.ReactNode {
     lines.forEach((line, lineIdx) => {
       // Headers
       const headerMatch = line.match(/^(#{1,6})\s+(.+)$/);
-      if (headerMatch) {
+      if (headerMatch && headerMatch[1] && headerMatch[2]) {
         flushList();
         const level = headerMatch[1].length;
         const text = headerMatch[2];
@@ -166,7 +166,7 @@ function renderMarkdown(content: string): React.ReactNode {
 
       // Unordered list
       const ulMatch = line.match(/^[\s]*[-*]\s+(.+)$/);
-      if (ulMatch) {
+      if (ulMatch && ulMatch[1]) {
         if (listType !== 'ul') {
           flushList();
           listType = 'ul';
@@ -177,7 +177,7 @@ function renderMarkdown(content: string): React.ReactNode {
 
       // Ordered list
       const olMatch = line.match(/^[\s]*\d+\.\s+(.+)$/);
-      if (olMatch) {
+      if (olMatch && olMatch[1]) {
         if (listType !== 'ol') {
           flushList();
           listType = 'ol';

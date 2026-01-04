@@ -5,7 +5,8 @@
   "main": "src/main/bootstrap.js",
   "scripts": {
     "build:preload": "esbuild src/main/preload.ts --bundle --platform=node --outfile=src/main/preload.js --external:electron",
-    "dev": "npm run build:preload && concurrently \"npm run dev:main\" \"npm run dev:renderer\"",
+    "build:mcp": "esbuild src/main/mcp/server.ts --bundle --platform=node --outfile=src/main/mcp/server.js --external:@modelcontextprotocol/sdk",
+    "dev": "npm run build:preload && npm run build:mcp && concurrently \"npm run dev:main\" \"npm run dev:renderer\"",
     "dev:main": "NODE_ENV=development electron -r hot-reload/electron-loader .",
     "dev:no-hot": "npm run build:preload && concurrently \"npm run dev:main:no-hot\" \"npm run dev:renderer\"",
     "dev:main:no-hot": "NODE_ENV=development electron .",
@@ -15,6 +16,7 @@
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "^0.12.0",
+    "@modelcontextprotocol/sdk": "^1.0.0",
     "@codemirror/lang-html": "^6.4.9",
     "@codemirror/lang-javascript": "^6.2.4",
     "@codemirror/lang-python": "^6.2.1",

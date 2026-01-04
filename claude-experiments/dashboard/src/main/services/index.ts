@@ -247,8 +247,9 @@ export function setupServiceIPC(): void {
 }
 
 // Pending permission requests for ACP
+// Response format: { outcome: { outcome: 'selected', optionId: string } | { outcome: 'cancelled' } }
 const pendingPermissions: Map<string, {
-  resolve: (response: { outcome: string }) => void;
+  resolve: (response: { outcome: { outcome: 'selected'; optionId: string } | { outcome: 'cancelled' } }) => void;
   reject: (error: Error) => void;
 }> = new Map();
 
@@ -263,7 +264,7 @@ function setupACPIPC(): void {
   }
 
   // Set up permission callback to forward to renderer
-  acpService.setPermissionCallback(async (request: unknown): Promise<{ outcome: string }> => {
+  acpService.setPermissionCallback(async (request: unknown): Promise<{ outcome: { outcome: 'selected'; optionId: string } | { outcome: 'cancelled' } }> => {
     const requestId = `perm-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
     // Forward to all renderer windows
@@ -276,11 +277,11 @@ function setupACPIPC(): void {
     return new Promise((resolve, reject) => {
       pendingPermissions.set(requestId, { resolve, reject });
 
-      // Timeout after 5 minutes
+      // Timeout after 5 minutes - cancel the request
       setTimeout(() => {
         if (pendingPermissions.has(requestId)) {
           pendingPermissions.delete(requestId);
-          resolve({ outcome: 'deny' });
+          resolve({ outcome: { outcome: 'cancelled' } });
         }
       }, 5 * 60 * 1000);
     });
@@ -301,13 +302,13 @@ function setupACPIPC(): void {
   });
 
   // Create new session
-  ipcMain.handle('acp:newSession', async (_event: IpcMainInvokeEvent, cwd: string, mcpServers?: unknown[]) => {
-    return await acpService.newSession(cwd, mcpServers);
+  ipcMain.handle('acp:newSession', async (_event: IpcMainInvokeEvent, cwd: string, mcpServers?: unknown[], force?: boolean) => {
+    return await acpService.newSession(cwd, mcpServers, force);
   });
 
-  // Load existing session
-  ipcMain.handle('acp:loadSession', async (_event: IpcMainInvokeEvent, sessionId: string, cwd: string) => {
-    await acpService.loadSession(sessionId, cwd);
+  // Resume existing session
+  ipcMain.handle('acp:resumeSession', async (_event: IpcMainInvokeEvent, sessionId: string, cwd: string) => {
+    return await acpService.resumeSession(sessionId, cwd);
   });
 
   // Send prompt
@@ -336,12 +337,22 @@ function setupACPIPC(): void {
   });
 
   // Respond to permission request
-  ipcMain.handle('acp:respondPermission', (_event: IpcMainInvokeEvent, requestId: string, outcome: 'allow' | 'deny') => {
+  // optionId should be one of: 'allow', 'allow_always', 'reject', or 'cancelled'
+  ipcMain.handle('acp:respondPermission', (_event: IpcMainInvokeEvent, requestId: string, optionId: string) => {
     const pending = pendingPermissions.get(requestId);
     if (pending) {
       pendingPermissions.delete(requestId);
-      pending.resolve({ outcome });
+      if (optionId === 'cancelled') {
+        pending.resolve({ outcome: { outcome: 'cancelled' } });
+      } else {
+        pending.resolve({ outcome: { outcome: 'selected', optionId } });
+      }
     }
+  });
+
+  // Load session history from Claude's local files
+  ipcMain.handle('acp:loadSessionHistory', async (_event: IpcMainInvokeEvent, sessionId: string, cwd: string) => {
+    return await acpService.loadSessionHistory(sessionId, cwd);
   });
 
   console.log('[acp] IPC handlers registered');

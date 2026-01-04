@@ -11,6 +11,7 @@ import type { ChatMessage, UIPlanTask, UIToolCall, SessionNotification } from '.
 
 // Sub-components
 import { MessageList, ChatInput, ToolCallBlock, TodoList, PermissionDialog } from './chat';
+import type { ContentBlock } from './chat/ChatInput';
 
 interface ChatWidgetProps {
   sessionCwd?: string;
@@ -31,10 +32,16 @@ export function ChatWidget({
   sessionCwd,
   title = 'Claude Chat',
 }: ChatWidgetProps): React.ReactElement {
+  // Mode type from ACP
+  interface SessionMode {
+    id: string;
+    name: string;
+  }
+
   // Persistent state (survives dashboard switches)
   const [messages, setMessages] = usePersistentState<ChatMessage[]>('messages', []);
-  const [sessionId, setSessionId] = usePersistentState<string | null>('sessionId', null);
-  const [mode, setMode] = usePersistentState<'plan' | 'act'>('mode', 'act');
+  const [sessionId, setSessionId, sessionIdLoaded] = usePersistentState<string | null>('sessionId', null);
+  const [currentModeId, setCurrentModeId] = usePersistentState<string | null>('currentModeId', null);
   const [todos, setTodos] = usePersistentState<UIPlanTask[]>('todos', []);
 
   // Ephemeral state (not persisted)
@@ -44,10 +51,13 @@ export function ChatWidget({
   const [toolCalls, setToolCalls] = useState<Map<string, UIToolCall>>(new Map());
   const [pendingPermission, setPendingPermission] = useState<PermissionRequest | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [availableModes, setAvailableModes] = useState<SessionMode[]>([]);
 
   // Refs
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const currentMessageIdRef = useRef<string | null>(null);
+  const hasInitializedRef = useRef(false);
+  const hasScrolledInitiallyRef = useRef(false);
   // Refs for async closures - needed because handleSend awaits across renders
   const currentTextRef = useRef(currentText);
   const toolCallsRef = useRef(toolCalls);
@@ -59,13 +69,23 @@ export function ChatWidget({
   // Generate unique message ID
   const generateId = () => `msg-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
-  // Scroll to bottom
-  const scrollToBottom = () => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  // Scroll to bottom - instant on initial load, smooth afterwards
+  const scrollToBottom = (instant = false) => {
+    messagesEndRef.current?.scrollIntoView({ behavior: instant ? 'instant' : 'smooth' });
   };
 
-  // Initialize connection on mount
+  // Initialize connection once persistence has loaded
   useEffect(() => {
+    // Wait for persistence to load before initializing
+    if (!sessionIdLoaded) {
+      return;
+    }
+
+    // Skip if we've already initialized (prevents re-running when sessionId changes after newSession)
+    if (hasInitializedRef.current) {
+      return;
+    }
+
     let mounted = true;
 
     async function init() {
@@ -74,30 +94,93 @@ export function ChatWidget({
         const wasConnected = await window.acpAPI.isConnected();
         if (mounted) setIsConnected(wasConnected);
 
+        const cwd = sessionCwd || process.cwd?.() || '/';
+
         if (!wasConnected) {
           // Spawn and initialize - this starts a new agent process
           await window.acpAPI.spawn();
           await window.acpAPI.initialize();
-          if (mounted) setIsConnected(true);
-
-          // Agent was just started, so any old sessionId is invalid
-          // Clear old messages since Claude won't have that context
-          if (mounted && messagesRef.current.length > 0) {
-            setMessages([]);
-            setTodos([]);
-          }
-
-          // Create a fresh session
-          const cwd = sessionCwd || process.cwd?.() || '/';
-          const result = await window.acpAPI.newSession(cwd);
-          if (mounted) setSessionId(result.sessionId);
-        } else if (!sessionId) {
-          // Already connected but no session - create one
-          const cwd = sessionCwd || process.cwd?.() || '/';
-          const result = await window.acpAPI.newSession(cwd);
-          if (mounted) setSessionId(result.sessionId);
+          if (!mounted) return;
+          setIsConnected(true);
         }
-        // If already connected AND we have a sessionId, assume it's valid
+
+        // If we have a persisted sessionId, try to resume it
+        if (sessionId) {
+          try {
+            console.log('[ChatWidget] Resuming existing session:', sessionId);
+            const result = await window.acpAPI.resumeSession(sessionId, cwd);
+            console.log('[ChatWidget] Session resumed, verifying connection...');
+
+            // Verify the session is actually usable by checking if we're still connected
+            // The resume might "succeed" but Claude Code may have exited if session wasn't found
+            const stillConnected = await window.acpAPI.isConnected();
+            if (!stillConnected) {
+              throw new Error('Session resume failed - agent disconnected');
+            }
+
+            console.log('[ChatWidget] Session resumed successfully, loading history from disk...');
+
+            // Load conversation history from Claude's local files
+            const history = await window.acpAPI.loadSessionHistory(sessionId, cwd);
+            if (mounted) {
+              setMessages(history as ChatMessage[]);
+              setTodos([]); // Todos are not persisted in session files
+            }
+            console.log('[ChatWidget] Loaded', history.length, 'messages from session history');
+
+            if (mounted && result.modes) {
+              setAvailableModes(result.modes.availableModes);
+
+              // If we have a persisted mode that differs from the session mode, restore it
+              if (currentModeId && currentModeId !== result.modes.currentModeId) {
+                console.log('[ChatWidget] Restoring persisted mode:', currentModeId);
+                try {
+                  await window.acpAPI.setMode(sessionId, currentModeId);
+                  // Keep the persisted mode (don't overwrite with session mode)
+                } catch (modeErr) {
+                  console.warn('[ChatWidget] Failed to restore mode, using session mode:', modeErr);
+                  setCurrentModeId(result.modes.currentModeId);
+                }
+              } else {
+                setCurrentModeId(result.modes.currentModeId);
+              }
+            }
+          } catch (err) {
+            console.error('[ChatWidget] Failed to resume session, creating new one:', err);
+            // Session resume failed - need to respawn and create a new session
+            // Clear old messages since they're not part of this session
+            try {
+              await window.acpAPI.spawn();
+              await window.acpAPI.initialize();
+            } catch {
+              // May already be connected, ignore
+            }
+            const result = await window.acpAPI.newSession(cwd);
+            if (mounted) {
+              setSessionId(result.sessionId);
+              setMessages([]); // Clear messages - old session context is gone
+              setTodos([]);    // Clear todos too
+              if (result.modes) {
+                setAvailableModes(result.modes.availableModes);
+                setCurrentModeId(result.modes.currentModeId);
+              }
+            }
+          }
+        } else {
+          // No persisted session - create a new one
+          const result = await window.acpAPI.newSession(cwd);
+          if (mounted) {
+            setSessionId(result.sessionId);
+            setMessages([]); // Clear any stale messages
+            if (result.modes) {
+              setAvailableModes(result.modes.availableModes);
+              setCurrentModeId(result.modes.currentModeId);
+            }
+          }
+        }
+
+        // Mark as initialized
+        hasInitializedRef.current = true;
       } catch (err) {
         console.error('[ChatWidget] Init error:', err);
         if (mounted) setError((err as Error).message);
@@ -109,7 +192,7 @@ export function ChatWidget({
     return () => {
       mounted = false;
     };
-  }, [sessionCwd, sessionId, setSessionId]);
+  }, [sessionIdLoaded, sessionId, sessionCwd]);
 
   // Subscribe to session updates via event system
   // Note: Skip 'acp.session.update' as it duplicates the specific event types
@@ -214,22 +297,28 @@ export function ChatWidget({
 
         case 'current_mode_update': {
           const modeUpdate = update as unknown as { currentModeId: string };
-          if (modeUpdate.currentModeId === 'plan' || modeUpdate.currentModeId === 'act') {
-            setMode(modeUpdate.currentModeId);
-          }
+          setCurrentModeId(modeUpdate.currentModeId);
           break;
         }
       }
     });
 
     return () => unsubscribe?.();
-  }, [sessionId, setTodos, setMode]);
+  }, [sessionId, setTodos, setCurrentModeId]);
 
-  // Subscribe to permission requests
+  // Subscribe to permission requests via IPC (has requestId needed for response)
   useEffect(() => {
-    const unsubscribe = window.eventAPI?.subscribe('acp.permission.request', (event) => {
-      const request = event.payload as PermissionRequest;
-      setPendingPermission(request);
+    const unsubscribe = window.acpAPI?.subscribePermissions((rawRequest: unknown) => {
+      // Map ACP request structure to our PermissionRequest interface
+      const req = rawRequest as {
+        requestId: string;
+        toolCall?: { title?: string; toolCallId?: string };
+      };
+      setPendingPermission({
+        requestId: req.requestId,
+        toolCallId: req.toolCall?.toolCallId ?? '',
+        title: req.toolCall?.title ?? 'Unknown Tool',
+      });
     });
 
     return () => unsubscribe?.();
@@ -256,15 +345,35 @@ export function ChatWidget({
     scrollToBottom();
   };
 
-  // Send message
-  const handleSend = async (text: string) => {
-    if (!sessionId || !text.trim()) return;
+  // Send message with content blocks (text and/or images)
+  const handleSend = async (content: ContentBlock[]) => {
+    if (!sessionId || content.length === 0) return;
+
+    // If currently streaming, cancel first
+    if (isStreaming) {
+      try {
+        await window.acpAPI.cancel(sessionId);
+        finishMessage();
+      } catch (err) {
+        console.error('[ChatWidget] Cancel before send error:', err);
+      }
+    }
+
+    // Extract text for display (images shown as [Image] placeholder)
+    const displayText = content
+      .map(block => {
+        if (block.type === 'text') return block.text || '';
+        if (block.type === 'image') return '[Image]';
+        return '';
+      })
+      .filter(Boolean)
+      .join(' ');
 
     // Add user message
     const userMessage: ChatMessage = {
       id: generateId(),
       role: 'user',
-      content: text,
+      content: displayText,
       timestamp: Date.now(),
     };
     setMessages((prev) => [...prev, userMessage]);
@@ -277,14 +386,54 @@ export function ChatWidget({
     currentMessageIdRef.current = generateId();
     setError(null);
 
+    // Convert to ACP content block format
+    const acpContent = content.map(block => {
+      if (block.type === 'text') {
+        return { type: 'text' as const, text: block.text || '' };
+      } else {
+        return { type: 'image' as const, data: block.data || '', mimeType: block.mimeType || 'image/png' };
+      }
+    });
+
     try {
-      const result = await window.acpAPI.prompt(sessionId, text);
+      const result = await window.acpAPI.prompt(sessionId, acpContent);
       console.log('[ChatWidget] Prompt result:', result);
       finishMessage();
     } catch (err) {
       console.error('[ChatWidget] Prompt error:', err);
-      setError((err as Error).message);
-      setIsStreaming(false);
+      const errorMessage = (err as Error).message || '';
+
+      // If the error is "process exited", the session doesn't exist - create a new one
+      if (errorMessage.includes('process exited') || errorMessage.includes('Internal error')) {
+        console.log('[ChatWidget] Session appears invalid, creating new session...');
+        setError('Session expired - creating new session...');
+
+        try {
+          // Respawn and create new session
+          await window.acpAPI.spawn();
+          await window.acpAPI.initialize();
+          const cwd = sessionCwd || process.cwd?.() || '/';
+          const newSession = await window.acpAPI.newSession(cwd);
+          setSessionId(newSession.sessionId);
+          if (newSession.modes) {
+            setAvailableModes(newSession.modes.availableModes);
+            setCurrentModeId(newSession.modes.currentModeId);
+          }
+          setError(null);
+
+          // Retry the prompt with the new session
+          const result = await window.acpAPI.prompt(newSession.sessionId, acpContent);
+          console.log('[ChatWidget] Retry prompt result:', result);
+          finishMessage();
+        } catch (retryErr) {
+          console.error('[ChatWidget] Retry failed:', retryErr);
+          setError((retryErr as Error).message);
+          setIsStreaming(false);
+        }
+      } else {
+        setError(errorMessage);
+        setIsStreaming(false);
+      }
     }
   };
 
@@ -299,35 +448,62 @@ export function ChatWidget({
     }
   };
 
-  // Toggle mode
+  // Toggle mode - cycles through available modes
   const handleModeToggle = async () => {
-    if (!sessionId) return;
-    const newMode = mode === 'plan' ? 'act' : 'plan';
+    if (!sessionId || availableModes.length === 0) return;
+
+    // Find current mode index and cycle to next
+    const currentIndex = availableModes.findIndex(m => m.id === currentModeId);
+    const nextIndex = (currentIndex + 1) % availableModes.length;
+    const nextMode = availableModes[nextIndex];
+
+    if (!nextMode) return;
+
     try {
-      await window.acpAPI.setMode(sessionId, newMode);
-      setMode(newMode);
+      await window.acpAPI.setMode(sessionId, nextMode.id);
+      setCurrentModeId(nextMode.id);
     } catch (err) {
       console.error('[ChatWidget] Mode change error:', err);
+      setError(`Failed to change mode: ${(err as Error).message}`);
     }
   };
 
-  // Handle permission response
-  const handlePermission = async (outcome: 'allow' | 'deny') => {
+  // Handle permission response - optionId should be 'allow', 'allow_always', 'reject', etc.
+  const handlePermission = async (optionId: string) => {
     if (!pendingPermission) return;
     try {
-      await window.acpAPI.respondToPermission(pendingPermission.requestId, outcome);
+      await window.acpAPI.respondToPermission(pendingPermission.requestId, optionId);
     } catch (err) {
       console.error('[ChatWidget] Permission response error:', err);
     }
     setPendingPermission(null);
   };
 
-  // Clear chat
-  const handleClear = () => {
-    setMessages([]);
-    setTodos([]);
-    setCurrentText('');
-    setToolCalls(new Map());
+  // Start a new session
+  const handleNewSession = async () => {
+    const cwd = sessionCwd || process.cwd?.() || '/';
+
+    try {
+      // Create a new session (force=true to always create new, not reuse existing)
+      const result = await window.acpAPI.newSession(cwd, undefined, true);
+      setSessionId(result.sessionId);
+      setMessages([]);
+      setTodos([]);
+      setCurrentText('');
+      setToolCalls(new Map());
+      if (result.modes) {
+        setAvailableModes(result.modes.availableModes);
+        setCurrentModeId(result.modes.currentModeId);
+      }
+      console.log('[ChatWidget] Started new session:', result.sessionId);
+    } catch (err) {
+      console.error('[ChatWidget] Failed to create new session:', err);
+      // Still clear local state even if new session fails
+      setMessages([]);
+      setTodos([]);
+      setCurrentText('');
+      setToolCalls(new Map());
+    }
   };
 
   // Styles
@@ -402,10 +578,18 @@ export function ChatWidget({
     fontSize: 'var(--theme-font-size-sm)',
   };
 
-  // Auto-scroll when streaming text updates or messages change
+  // Auto-scroll when streaming text updates, messages change, or tool calls update
   useEffect(() => {
-    scrollToBottom();
-  }, [currentText, messages]);
+    if (!hasScrolledInitiallyRef.current && messages.length > 0) {
+      // First scroll after mount - use instant
+      hasScrolledInitiallyRef.current = true;
+      scrollToBottom(true);
+    } else if (hasScrolledInitiallyRef.current) {
+      // Subsequent scrolls - use smooth
+      scrollToBottom();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentText, messages, toolCalls]);
 
   // Render current streaming content
   const streamingContent = isStreaming && (currentText || toolCalls.size > 0) && (
@@ -437,21 +621,27 @@ export function ChatWidget({
       <div style={headerStyle}>
         <span style={titleStyle}>{title}</span>
         <div style={statusStyle}>
-          <span>{mode === 'plan' ? 'Plan Mode' : 'Act Mode'}</span>
-          <button
-            onClick={handleModeToggle}
-            style={{
-              padding: '2px 8px',
-              fontSize: 'var(--theme-font-size-xs)',
-              backgroundColor: 'transparent',
-              border: '1px solid var(--theme-border-primary)',
-              borderRadius: 'var(--theme-radius-sm)',
-              color: 'inherit',
-              cursor: 'pointer',
-            }}
-          >
-            Toggle
-          </button>
+          {availableModes.length > 0 && (
+            <>
+              <span>{availableModes.find(m => m.id === currentModeId)?.name ?? 'Unknown Mode'}</span>
+              {availableModes.length > 1 && (
+                <button
+                  onClick={handleModeToggle}
+                  style={{
+                    padding: '2px 8px',
+                    fontSize: 'var(--theme-font-size-xs)',
+                    backgroundColor: 'transparent',
+                    border: '1px solid var(--theme-border-primary)',
+                    borderRadius: 'var(--theme-radius-sm)',
+                    color: 'inherit',
+                    cursor: 'pointer',
+                  }}
+                >
+                  Toggle
+                </button>
+              )}
+            </>
+          )}
           <div style={dotStyle} title={isConnected ? 'Connected' : 'Disconnected'} />
         </div>
       </div>
@@ -464,7 +654,7 @@ export function ChatWidget({
         <PermissionDialog
           request={pendingPermission}
           onAllow={() => handlePermission('allow')}
-          onDeny={() => handlePermission('deny')}
+          onDeny={() => handlePermission('reject')}
         />
       )}
 
@@ -489,7 +679,7 @@ export function ChatWidget({
           <ChatInput
             onSend={handleSend}
             onCancel={handleCancel}
-            onClear={handleClear}
+            onNewSession={handleNewSession}
             isStreaming={isStreaming}
             disabled={!isConnected || !sessionId}
           />

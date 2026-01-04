@@ -39,6 +39,11 @@ import type {
   WidgetStateSetPayload,
   WidgetStateGetPayload,
   WidgetStateClearPayload,
+  CustomWidgetsState,
+  CustomWidgetDefinition,
+  CustomWidgetRegisterPayload,
+  CustomWidgetUnregisterPayload,
+  CustomWidgetUpdatePayload,
 } from '../../types/state';
 
 // Type for the events module
@@ -166,6 +171,8 @@ export class StateStore {
         return this.handleGlobalUICommand(action!, payload);
       case 'widgetState':
         return this.handleWidgetStateCommand(action!, payload);
+      case 'customWidgets':
+        return this.handleCustomWidgetsCommand(action!, payload);
       default:
         throw new Error(`Unknown command domain: ${domain}`);
     }
@@ -1059,6 +1066,122 @@ export class StateStore {
 
       default:
         throw new Error(`Unknown widgetState action: ${action}`);
+    }
+  }
+
+  // ========== Custom Widgets Commands ==========
+
+  private handleCustomWidgetsCommand(action: string, payload: unknown): CommandResult {
+    const customWidgets = (this.getState('customWidgets') as CustomWidgetsState) || { list: [] };
+
+    switch (action) {
+      case 'register': {
+        const p = payload as CustomWidgetRegisterPayload;
+
+        // Validate name
+        if (!p.name || !/^[a-z][a-z0-9-]*$/.test(p.name)) {
+          return {
+            success: false,
+            error: 'Widget name must start with lowercase letter and contain only lowercase letters, numbers, and hyphens',
+          };
+        }
+
+        // Check if widget already exists
+        const existingIndex = customWidgets.list.findIndex((w) => w.name === p.name);
+        const now = Date.now();
+
+        const widget: CustomWidgetDefinition = {
+          name: p.name,
+          description: p.description,
+          category: p.category ?? 'custom',
+          code: p.code,
+          defaultProps: p.defaultProps ?? {},
+          propsSchema: p.propsSchema ?? {},
+          createdAt: existingIndex !== -1 ? customWidgets.list[existingIndex]!.createdAt : now,
+          updatedAt: now,
+        };
+
+        let newList: CustomWidgetDefinition[];
+        if (existingIndex !== -1) {
+          // Update existing
+          newList = [...customWidgets.list];
+          newList[existingIndex] = widget;
+        } else {
+          // Add new
+          newList = [...customWidgets.list, widget];
+        }
+
+        this.setState('customWidgets', { list: newList });
+
+        // Emit event so renderer can update its registry
+        this.events.emit('customWidgets.registered', { widget });
+
+        return { success: true, id: p.name };
+      }
+
+      case 'unregister': {
+        const p = payload as CustomWidgetUnregisterPayload;
+        const existingIndex = customWidgets.list.findIndex((w) => w.name === p.name);
+
+        if (existingIndex === -1) {
+          return { success: false, error: `Widget "${p.name}" not found` };
+        }
+
+        const newList = customWidgets.list.filter((w) => w.name !== p.name);
+        this.setState('customWidgets', { list: newList });
+
+        // Emit event so renderer can update its registry
+        this.events.emit('customWidgets.unregistered', { name: p.name });
+
+        return { success: true };
+      }
+
+      case 'update': {
+        const p = payload as CustomWidgetUpdatePayload;
+        const existingIndex = customWidgets.list.findIndex((w) => w.name === p.name);
+
+        if (existingIndex === -1) {
+          return { success: false, error: `Widget "${p.name}" not found` };
+        }
+
+        const existing = customWidgets.list[existingIndex]!;
+        const updated: CustomWidgetDefinition = {
+          ...existing,
+          ...(p.code !== undefined && { code: p.code }),
+          ...(p.description !== undefined && { description: p.description }),
+          ...(p.defaultProps !== undefined && { defaultProps: p.defaultProps }),
+          ...(p.propsSchema !== undefined && { propsSchema: p.propsSchema }),
+          updatedAt: Date.now(),
+        };
+
+        const newList = [...customWidgets.list];
+        newList[existingIndex] = updated;
+        this.setState('customWidgets', { list: newList });
+
+        // Emit event so renderer can hot-reload the widget
+        this.events.emit('customWidgets.updated', { widget: updated });
+
+        return { success: true };
+      }
+
+      case 'list': {
+        return {
+          success: true,
+          widgets: customWidgets.list,
+        } as CommandResult & { widgets: CustomWidgetDefinition[] };
+      }
+
+      case 'get': {
+        const { name } = payload as { name: string };
+        const widget = customWidgets.list.find((w) => w.name === name);
+        if (!widget) {
+          return { success: false, error: `Widget "${name}" not found` };
+        }
+        return { success: true, widget } as CommandResult & { widget: CustomWidgetDefinition };
+      }
+
+      default:
+        throw new Error(`Unknown customWidgets action: ${action}`);
     }
   }
 }

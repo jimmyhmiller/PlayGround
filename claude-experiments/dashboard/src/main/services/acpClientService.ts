@@ -9,6 +9,15 @@ import { spawn, ChildProcess } from 'child_process';
 import { Readable, Writable } from 'stream';
 import * as fs from 'fs/promises';
 import * as path from 'path';
+import * as os from 'os';
+import * as readline from 'readline';
+
+// Get the path to the MCP server (relative to this file in src/main/services/)
+function getMcpServerPath(): string {
+  // In development, __dirname points to src/main/services/
+  // MCP server is at src/main/mcp/server.js
+  return path.resolve(__dirname, '../mcp/server.js');
+}
 
 // Event emitter interface
 interface EventEmitter {
@@ -67,10 +76,20 @@ export class ACPClientService {
   private spawnPromise: Promise<void> | null = null;
   private initPromise: Promise<void> | null = null;
   private currentSessionId: string | null = null;
-  private sessionPromise: Promise<{ sessionId: string }> | null = null;
+  private sessionPromise: Promise<{ sessionId: string; modes?: { availableModes: Array<{ id: string; name: string }>; currentModeId: string } }> | null = null;
+  private stderrBuffer: string = '';
+  private agentInfo: { name: string; title?: string; version?: string } | null = null;
 
   constructor(events: EventEmitter) {
     this.events = events;
+  }
+
+  /**
+   * Check if the connected agent is Claude Code
+   */
+  isClaudeCode(): boolean {
+    return this.agentInfo?.name === '@zed-industries/claude-code-acp' ||
+           this.agentInfo?.title === 'Claude Code';
   }
 
   /**
@@ -106,6 +125,7 @@ export class ACPClientService {
       this.agent = null;
       this.isInitialized = false;
       this.currentSessionId = null;
+      this.agentInfo = null;
     }
 
     // Create spawn promise before any async work
@@ -124,17 +144,27 @@ export class ACPClientService {
   private async doSpawn(): Promise<void> {
     const acp = await getACPModule();
 
-    // Spawn claude-code-acp
-    this.agentProcess = spawn('npx', ['@zed-industries/claude-code-acp'], {
-      stdio: ['pipe', 'pipe', 'inherit'],
+    // Spawn claude-code-acp with auto-approve permissions
+    // Capture stderr to detect session errors
+    this.stderrBuffer = '';
+    this.agentProcess = spawn('npx', ['@zed-industries/claude-code-acp', '--dangerously-skip-permissions'], {
+      stdio: ['pipe', 'pipe', 'pipe'],
       env: {
         ...process.env,
       },
     });
 
-    if (!this.agentProcess.stdin || !this.agentProcess.stdout) {
+    if (!this.agentProcess.stdin || !this.agentProcess.stdout || !this.agentProcess.stderr) {
       throw new Error('Failed to get stdio pipes from agent process');
     }
+
+    // Monitor stderr for errors and also log to console
+    this.agentProcess.stderr.on('data', (data: Buffer) => {
+      const text = data.toString();
+      this.stderrBuffer += text;
+      // Also print to console so we can see it
+      process.stderr.write(text);
+    });
 
     // Convert Node streams to Web streams for the SDK
     const input = Writable.toWeb(this.agentProcess.stdin) as WritableStream<Uint8Array>;
@@ -165,6 +195,7 @@ export class ACPClientService {
       this.agent = null;
       this.isInitialized = false;
       this.currentSessionId = null;
+      this.agentInfo = null;
       this.events.emit('acp.process.exit', { code, signal });
     });
 
@@ -228,21 +259,37 @@ export class ACPClientService {
 
     console.log('[acp] Initialized:', result);
     this.isInitialized = true;
+
+    // Store agent info for later checks
+    if (result.agentInfo) {
+      this.agentInfo = result.agentInfo as { name: string; title?: string; version?: string };
+      console.log('[acp] Agent:', this.agentInfo.name, this.agentInfo.version);
+    }
+
     this.events.emit('acp.initialized', result);
   }
 
+  // Session response type with modes
+  private sessionModes: { availableModes: Array<{ id: string; name: string }>; currentModeId: string } | null = null;
+
   /**
    * Create a new session (or return existing one if already created)
+   * @param cwd - Working directory for the session
+   * @param mcpServers - Optional MCP servers to connect
+   * @param force - If true, always creates a new session even if one exists
    */
-  async newSession(cwd: string, mcpServers?: unknown[]): Promise<{ sessionId: string }> {
+  async newSession(cwd: string, mcpServers?: unknown[], force?: boolean): Promise<{
+    sessionId: string;
+    modes?: { availableModes: Array<{ id: string; name: string }>; currentModeId: string };
+  }> {
     if (!this.connection || !this.isInitialized) {
       throw new Error('Not initialized. Call spawn() and initialize() first.');
     }
 
-    // If we already have a session, return it
-    if (this.currentSessionId) {
+    // If we already have a session and not forcing, return it with cached modes
+    if (this.currentSessionId && !force) {
       console.log('[acp] Returning existing session:', this.currentSessionId);
-      return { sessionId: this.currentSessionId };
+      return { sessionId: this.currentSessionId, modes: this.sessionModes ?? undefined };
     }
 
     // If session creation is in progress, wait for it
@@ -264,35 +311,99 @@ export class ACPClientService {
   /**
    * Internal session creation
    */
-  private async doNewSession(cwd: string, mcpServers?: unknown[]): Promise<{ sessionId: string }> {
+  private async doNewSession(cwd: string, mcpServers?: unknown[]): Promise<{
+    sessionId: string;
+    modes?: { availableModes: Array<{ id: string; name: string }>; currentModeId: string };
+  }> {
+    // Build MCP server list, including our dashboard MCP server
+    const dashboardMcpServer = {
+      name: 'dashboard',
+      command: 'node',
+      args: [getMcpServerPath()],
+      env: [],  // Required by ACP schema
+    };
+
+    // Combine user-provided MCP servers with our dashboard server
+    const allMcpServers = [
+      dashboardMcpServer,
+      ...(mcpServers ?? []),
+    ];
+
+    console.log('[acp] Creating session with MCP servers:', allMcpServers.map((s: { name?: string }) => s.name));
+
     const result = await this.connection!.newSession({
       cwd,
-      mcpServers: mcpServers as never[] ?? [],
+      mcpServers: allMcpServers as never[],
     });
 
     console.log('[acp] New session:', result.sessionId);
+    console.log('[acp] Available modes:', result.modes);
     this.currentSessionId = result.sessionId;
-    this.events.emit('acp.session.new', { sessionId: result.sessionId });
+    this.sessionModes = result.modes as { availableModes: Array<{ id: string; name: string }>; currentModeId: string } | null;
+    this.events.emit('acp.session.new', {
+      sessionId: result.sessionId,
+      modes: result.modes,
+    });
 
-    return { sessionId: result.sessionId };
+    return {
+      sessionId: result.sessionId,
+      modes: this.sessionModes ?? undefined,
+    };
   }
 
   /**
-   * Load an existing session
+   * Resume an existing session (uses unstable_resumeSession)
    */
-  async loadSession(sessionId: string, cwd: string): Promise<void> {
+  async resumeSession(sessionId: string, cwd: string): Promise<{
+    sessionId: string;
+    modes?: { availableModes: Array<{ id: string; name: string }>; currentModeId: string };
+  }> {
     if (!this.connection || !this.isInitialized) {
       throw new Error('Not initialized');
     }
 
-    await this.connection.loadSession({
+    console.log('[acp] Attempting to resume session:', sessionId);
+
+    // Clear stderr buffer before resume to catch any new errors
+    this.stderrBuffer = '';
+
+    // Include dashboard MCP server, same as newSession
+    const dashboardMcpServer = {
+      name: 'dashboard',
+      command: 'node',
+      args: [getMcpServerPath()],
+      env: [],
+    };
+
+    const result = await this.connection.unstable_resumeSession({
       sessionId,
       cwd,
-      mcpServers: [],
+      mcpServers: [dashboardMcpServer] as never[],
     });
 
-    console.log('[acp] Loaded session:', sessionId);
-    this.events.emit('acp.session.loaded', { sessionId });
+    // Wait a moment for stderr to be processed
+    await new Promise(resolve => setTimeout(resolve, 100));
+
+    // Check if stderr contains "No conversation found" - this means the session doesn't exist
+    if (this.stderrBuffer.includes('No conversation found')) {
+      console.log('[acp] Session not found on disk, throwing error');
+      throw new Error(`Session not found: ${sessionId}`);
+    }
+
+    // Double-check we're still connected after resume
+    if (!this.isConnected()) {
+      throw new Error('Connection lost after resume - session may not exist');
+    }
+
+    console.log('[acp] Resume session result:', result);
+    this.currentSessionId = sessionId;
+    this.sessionModes = result.modes as { availableModes: Array<{ id: string; name: string }>; currentModeId: string } | null;
+    this.events.emit('acp.session.resumed', { sessionId, modes: result.modes });
+
+    return {
+      sessionId,
+      modes: this.sessionModes ?? undefined,
+    };
   }
 
   /**
@@ -372,6 +483,7 @@ export class ACPClientService {
     this.agent = null;
     this.isInitialized = false;
     this.currentSessionId = null;
+    this.agentInfo = null;
 
     console.log('[acp] Shutdown complete');
   }
@@ -381,6 +493,103 @@ export class ACPClientService {
    */
   isConnected(): boolean {
     return this.isInitialized && this.connection !== null;
+  }
+
+  /**
+   * Get the path to a session file on disk
+   */
+  private getSessionFilePath(sessionId: string, cwd: string): string {
+    // Claude Code stores sessions in ~/.claude/projects/<encoded-cwd>/<sessionId>.jsonl
+    const homeDir = os.homedir();
+    const encodedCwd = cwd.replace(/\//g, '-');
+    return path.join(homeDir, '.claude', 'projects', encodedCwd, `${sessionId}.jsonl`);
+  }
+
+  /**
+   * Load conversation history from a session file
+   * Returns messages in the format expected by ChatWidget
+   * Note: Only works with Claude Code agent - other agents may store sessions differently
+   */
+  async loadSessionHistory(sessionId: string, cwd: string): Promise<Array<{
+    id: string;
+    role: 'user' | 'assistant';
+    content: string;
+    timestamp: number;
+  }>> {
+    // Only Claude Code stores sessions in ~/.claude/projects/
+    if (!this.isClaudeCode()) {
+      console.log('[acp] Session history loading only supported for Claude Code agent');
+      return [];
+    }
+
+    const sessionPath = this.getSessionFilePath(sessionId, cwd);
+
+    try {
+      await fs.access(sessionPath);
+    } catch {
+      console.log('[acp] Session file not found:', sessionPath);
+      return [];
+    }
+
+    const messages: Array<{
+      id: string;
+      role: 'user' | 'assistant';
+      content: string;
+      timestamp: number;
+    }> = [];
+
+    // Read file line by line (JSONL format)
+    const fileHandle = await fs.open(sessionPath, 'r');
+    const rl = readline.createInterface({
+      input: fileHandle.createReadStream(),
+      crlfDelay: Infinity,
+    });
+
+    for await (const line of rl) {
+      if (!line.trim()) continue;
+
+      try {
+        const entry = JSON.parse(line);
+
+        // Only process user and assistant messages
+        if (entry.type === 'user' && entry.message) {
+          const textContent = entry.message.content
+            ?.filter((c: { type: string }) => c.type === 'text')
+            .map((c: { text: string }) => c.text)
+            .join('') || '';
+
+          if (textContent) {
+            messages.push({
+              id: entry.uuid || `msg-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+              role: 'user',
+              content: textContent,
+              timestamp: entry.timestamp ? new Date(entry.timestamp).getTime() : Date.now(),
+            });
+          }
+        } else if (entry.type === 'assistant' && entry.message) {
+          const textContent = entry.message.content
+            ?.filter((c: { type: string }) => c.type === 'text')
+            .map((c: { text: string }) => c.text)
+            .join('') || '';
+
+          if (textContent) {
+            messages.push({
+              id: entry.uuid || `msg-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+              role: 'assistant',
+              content: textContent,
+              timestamp: entry.timestamp ? new Date(entry.timestamp).getTime() : Date.now(),
+            });
+          }
+        }
+      } catch (parseErr) {
+        // Skip malformed lines
+        console.warn('[acp] Failed to parse session line:', parseErr);
+      }
+    }
+
+    await fileHandle.close();
+    console.log('[acp] Loaded', messages.length, 'messages from session file');
+    return messages;
   }
 
   /**
@@ -415,8 +624,8 @@ export class ACPClientService {
           return await this.permissionCallback(params);
         }
 
-        // Default: deny all permissions if no callback set
-        return { outcome: 'deny' };
+        // Default: cancel if no callback set
+        return { outcome: { outcome: 'cancelled' } };
       },
 
       // File system: read

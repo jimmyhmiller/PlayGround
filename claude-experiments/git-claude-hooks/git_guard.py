@@ -22,6 +22,30 @@ def get_current_branch():
         return None
 
 
+def is_git_ref(name):
+    """Check if name is a valid git ref (branch, tag, commit)."""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--verify", "--quiet", name],
+            capture_output=True, text=True, timeout=5
+        )
+        return result.returncode == 0
+    except:
+        return False
+
+
+def is_tracked_file(path):
+    """Check if path is a tracked file in the repo."""
+    try:
+        result = subprocess.run(
+            ["git", "ls-files", "--error-unmatch", path],
+            capture_output=True, text=True, timeout=5
+        )
+        return result.returncode == 0
+    except:
+        return False
+
+
 def load_config():
     """Load configuration from git_guard.json."""
     config_path = os.path.join(
@@ -81,6 +105,43 @@ def main():
                 command
             )))
             sys.exit(0)
+
+    # Check: git checkout <something> - determine if it's a file or branch
+    checkout_match = re.search(r"\bgit\s+checkout\s+(.+)", command)
+    if checkout_match:
+        args = checkout_match.group(1).strip()
+        # Skip if it's a branch creation operation
+        if re.match(r"^(-b|-B|--orphan)\s", args):
+            sys.exit(0)
+        # Handle explicit file checkout: git checkout -- <file>
+        if "--" in args:
+            after_dashdash = args.split("--", 1)[1].strip()
+            if after_dashdash:
+                print(json.dumps(ask_user(
+                    f"git checkout -- discards uncommitted changes to '{after_dashdash}'. Allow?",
+                    command
+                )))
+                sys.exit(0)
+        # Parse the arguments to find potential file paths
+        parts = args.split()
+        for part in parts:
+            # Skip flags
+            if part.startswith("-"):
+                continue
+            # Check if this is a tracked file (not a branch/ref)
+            if is_tracked_file(part) and not is_git_ref(part):
+                print(json.dumps(ask_user(
+                    f"git checkout of file '{part}' will discard uncommitted changes. Allow?",
+                    command
+                )))
+                sys.exit(0)
+            # If it's both a file AND a ref, still warn (ambiguous)
+            if is_tracked_file(part) and is_git_ref(part):
+                print(json.dumps(ask_user(
+                    f"'{part}' is both a file and a branch/ref. Allow?",
+                    command
+                )))
+                sys.exit(0)
 
     # Allow all other commands
     sys.exit(0)

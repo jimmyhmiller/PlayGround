@@ -5,6 +5,7 @@
  */
 
 import { ipcMain, IpcMainInvokeEvent } from 'electron';
+import { defonce } from 'hot-reload/api';
 import { StateStore } from './StateStore';
 
 // Type for the events module
@@ -12,26 +13,27 @@ interface EventEmitter {
   emit(type: string, payload: unknown): void;
 }
 
-let stateStore: StateStore | null = null;
+// Persist state store across hot reloads
+const stateStoreRef = defonce<{ current: StateStore | null }>({ current: null });
 
 /**
  * Initialize the state store
  */
 export function initStateStore(events: EventEmitter): StateStore {
-  if (!stateStore) {
-    stateStore = new StateStore(events);
+  if (!stateStoreRef.current) {
+    stateStoreRef.current = new StateStore(events);
   }
-  return stateStore;
+  return stateStoreRef.current;
 }
 
 /**
  * Get the state store instance
  */
 export function getStateStore(): StateStore {
-  if (!stateStore) {
+  if (!stateStoreRef.current) {
     throw new Error('StateStore not initialized. Call initStateStore first.');
   }
-  return stateStore;
+  return stateStoreRef.current;
 }
 
 /**
@@ -40,12 +42,18 @@ export function getStateStore(): StateStore {
 export function setupStateIPC(): void {
   // Get state at path
   ipcMain.handle('state:get', (_event: IpcMainInvokeEvent, path?: string) => {
-    return stateStore!.getState(path);
+    if (!stateStoreRef.current) {
+      throw new Error('StateStore not initialized');
+    }
+    return stateStoreRef.current.getState(path);
   });
 
   // Execute a command
   ipcMain.handle('state:command', (_event: IpcMainInvokeEvent, type: string, payload: unknown) => {
-    return stateStore!.handleCommand(type, payload);
+    if (!stateStoreRef.current) {
+      throw new Error('StateStore not initialized');
+    }
+    return stateStoreRef.current.handleCommand(type, payload);
   });
 
   // Subscribe to state changes - handled via events:push in the event system

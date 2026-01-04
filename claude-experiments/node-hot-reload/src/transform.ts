@@ -96,6 +96,24 @@ function isDefonce(node: t.Expression | null | undefined): boolean {
   return !!node && isApiCall(node, "defonce");
 }
 
+// Unwrap lambda expressions for once(): () => expr becomes expr
+// For block bodies, we call the function immediately: (() => { ... })()
+function unwrapOnceArg(node: t.Expression): t.Expression {
+  // Arrow function with expression body: () => expr
+  if (t.isArrowFunctionExpression(node) && t.isExpression(node.body)) {
+    return node.body;
+  }
+  // Arrow function with block body: () => { ... } -> call it
+  if (t.isArrowFunctionExpression(node) && t.isBlockStatement(node.body)) {
+    return t.callExpression(node, []);
+  }
+  // Regular function expression: function() { ... } -> call it
+  if (t.isFunctionExpression(node)) {
+    return t.callExpression(node, []);
+  }
+  return node;
+}
+
 export function transform(code: string, options: TransformOptions): string {
   const { filename, sourceRoot = process.cwd(), esm = false } = options;
   const moduleId = resolveModuleId(filename, sourceRoot);
@@ -597,6 +615,12 @@ export function transform(code: string, options: TransformOptions): string {
         return;
       }
 
+      // Handle empty exports (export {};) - remove them
+      if (!declaration && specifiers.length === 0) {
+        nodePath.remove();
+        return;
+      }
+
       if (declaration) {
         // Handle type-only declarations (export interface, export type)
         if (t.isTSInterfaceDeclaration(declaration) || t.isTSTypeAliasDeclaration(declaration)) {
@@ -867,7 +891,7 @@ export function transform(code: string, options: TransformOptions): string {
       isApiCall(stmt.expression, "once") &&
       stmt.expression.arguments.length > 0
     ) {
-      const innerExpr = stmt.expression.arguments[0] as t.Expression;
+      const innerExpr = unwrapOnceArg(stmt.expression.arguments[0] as t.Expression);
       const guardName = `__once_${onceCounter++}`;
 
       newBody.push(

@@ -185,6 +185,10 @@ fn main() {
     let mut ssa_translator = ConcreteTranslator::new();
     translate(&mut ssa_translator, &program_lisp);
 
+    // Seal the final block and materialize all phis
+    ssa_translator.seal_block(ssa_translator.current_block);
+    ssa_translator.materialize_all_phis();
+
     println!("{:#?}", program_lisp);
 
     debug_ssa_state(&ssa_translator);
@@ -232,6 +236,7 @@ mod tests {
             non_empty_phis
         );
 
+        translator.materialize_all_phis();
         assert_valid_ssa(&translator);
     }
 
@@ -250,6 +255,7 @@ mod tests {
         translate(&mut translator, &program);
         translator.seal_block(translator.current_block);
 
+        translator.materialize_all_phis();
         debug_ssa_state(&translator);
         assert_valid_ssa(&translator);
 
@@ -306,6 +312,7 @@ mod tests {
         );
 
         // Also validate all other SSA properties
+        translator.materialize_all_phis();
         assert_valid_ssa(&translator);
     }
 
@@ -323,6 +330,7 @@ mod tests {
         translate(&mut translator, &program);
         translator.seal_block(translator.current_block);
 
+        translator.materialize_all_phis();
         debug_ssa_state(&translator);
         assert_valid_ssa(&translator);
     }
@@ -343,6 +351,7 @@ mod tests {
         translate(&mut translator, &program);
         translator.seal_block(translator.current_block);
 
+        translator.materialize_all_phis();
         debug_ssa_state(&translator);
         assert_valid_ssa(&translator);
     }
@@ -364,6 +373,7 @@ mod tests {
         translate(&mut translator, &program);
         translator.seal_block(translator.current_block);
 
+        translator.materialize_all_phis();
         debug_ssa_state(&translator);
         assert_valid_ssa(&translator);
     }
@@ -388,6 +398,7 @@ mod tests {
         translate(&mut translator, &program);
         translator.seal_block(translator.current_block);
 
+        translator.materialize_all_phis();
         debug_ssa_state(&translator);
         assert_valid_ssa(&translator);
     }
@@ -409,6 +420,7 @@ mod tests {
         translate(&mut translator, &program);
         translator.seal_block(translator.current_block);
 
+        translator.materialize_all_phis();
         debug_ssa_state(&translator);
         assert_valid_ssa(&translator);
     }
@@ -427,6 +439,7 @@ mod tests {
         translate(&mut translator, &program);
         translator.seal_block(translator.current_block);
 
+        translator.materialize_all_phis();
         debug_ssa_state(&translator);
         assert_valid_ssa(&translator);
     }
@@ -450,6 +463,7 @@ mod tests {
         translate(&mut translator, &program);
         translator.seal_block(translator.current_block);
 
+        translator.materialize_all_phis();
         debug_ssa_state(&translator);
         assert_valid_ssa(&translator);
     }
@@ -721,9 +735,9 @@ mod tests {
         );
     }
 
-    /// Negative test: Detect phi assignment not at block start
+    /// Negative test: Detect phi value used in instruction (not materialized)
     #[test]
-    fn test_negative_phi_not_at_block_start() {
+    fn test_negative_phi_not_materialized() {
         use ssa_test::types::Phi;
 
         let mut translator = ConcreteTranslator::new();
@@ -735,32 +749,38 @@ mod tests {
         let mut phi = Phi::new(phi_id, block_id);
         phi.operands.push(Value::Literal(1));
         phi.operands.push(Value::Literal(2));
+        // Note: phi.dest is NOT set - simulating pre-materialization state
         translator.phis.insert(phi_id, phi);
 
         translator.blocks[block_id.0].predecessors.push(BlockId(99));
         translator.blocks[block_id.0].predecessors.push(BlockId(98));
 
-        // Add a non-phi instruction first
-        translator.emit(Instruction::Assign {
-            dest: SsaVariable::new("x"),
-            value: Value::Literal(42),
-        });
-
-        // Then add phi assignment (wrong order!)
+        // Add an instruction that uses phi value directly (should trigger PhiNotInlined)
         translator.emit(Instruction::Assign {
             dest: SsaVariable::new("phi_result"),
             value: Value::Phi(phi_id),
         });
 
         let violations = validate_ssa(&translator);
-        let order_violations: Vec<_> = violations
+
+        // Should detect both PhiMissingDestination and PhiNotInlined
+        let missing_dest_violations: Vec<_> = violations
             .iter()
-            .filter(|v| matches!(v, SSAViolation::PhiNotAtBlockStart { .. }))
+            .filter(|v| matches!(v, SSAViolation::PhiMissingDestination { .. }))
+            .collect();
+
+        let not_inlined_violations: Vec<_> = violations
+            .iter()
+            .filter(|v| matches!(v, SSAViolation::PhiNotInlined { .. }))
             .collect();
 
         assert!(
-            !order_violations.is_empty(),
-            "Should detect phi assignment not at block start"
+            !missing_dest_violations.is_empty(),
+            "Should detect phi missing destination"
+        );
+        assert!(
+            !not_inlined_violations.is_empty(),
+            "Should detect phi value in instruction"
         );
     }
 
@@ -857,19 +877,16 @@ mod tests {
         let mut phi = Phi::new(phi_id, block_id);
         phi.operands.push(Value::Literal(1));
         phi.operands.push(Value::Literal(2));
+        // Set the destination variable (simulating proper materialization)
+        phi.dest = Some(SsaVariable::new("dead_phi_result"));
         translator.phis.insert(phi_id, phi);
 
         // Add predecessors so it's a valid join point
         translator.blocks[block_id.0].predecessors.push(BlockId(99));
         translator.blocks[block_id.0].predecessors.push(BlockId(98));
 
-        // Assign phi to a variable but never use that variable
-        translator.emit(Instruction::Assign {
-            dest: SsaVariable::new("dead_phi_result"),
-            value: Value::Phi(phi_id),
-        });
-
         // Add some other instruction that doesn't use the phi result
+        // (the phi defines "dead_phi_result" but nothing uses it)
         translator.emit(Instruction::Assign {
             dest: SsaVariable::new("other"),
             value: Value::Literal(42),
