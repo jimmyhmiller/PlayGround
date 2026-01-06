@@ -33,6 +33,9 @@ import {
 // Chat widget
 import { ChatWidget } from './ChatWidget';
 
+// Navigation sidebar
+import NavigationSidebar from '../components/NavigationSidebar';
+
 // ========== Selector Functions ==========
 
 /**
@@ -2083,6 +2086,10 @@ export const WIDGET_TYPES: Record<string, WidgetTypeConfig> = {
   'dashboard-list': {
     component: DashboardList as unknown as React.ComponentType<Record<string, unknown>>,
     defaultProps: {},
+  },
+  'navigation-sidebar': {
+    component: NavigationSidebar as unknown as React.ComponentType<Record<string, unknown>>,
+    defaultProps: { showSearch: false },
   },
   'eval': {
     component: EvalWidget as unknown as React.ComponentType<Record<string, unknown>>,

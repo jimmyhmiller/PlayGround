@@ -5,7 +5,7 @@
  * Each renderer handles the CSS positioning for its slot type.
  */
 
-import { memo, useState, useEffect, useCallback, type ReactNode, type ReactElement, type CSSProperties } from 'react';
+import { memo, useState, useEffect, useCallback, useRef, type ReactNode, type ReactElement, type CSSProperties } from 'react';
 import type { CornerPosition, BarEdge, PanelSide } from '../../types/globalUI';
 
 // ========== Corner Slot ==========
@@ -116,6 +116,27 @@ export const PanelSlot = memo(function PanelSlot({
   const [isHovered, setIsHovered] = useState(false);
   const [showContextMenu, setShowContextMenu] = useState(false);
   const [contextMenuPos, setContextMenuPos] = useState({ x: 0, y: 0 });
+  
+  // Use plain localStorage for shared width across both panels
+  const STORAGE_KEY = 'panel-width-shared';
+  const loadWidth = () => {
+    try {
+      const stored = localStorage.getItem(STORAGE_KEY);
+      return stored ? JSON.parse(stored) : width;
+    } catch {
+      return width;
+    }
+  };
+  
+  const [panelWidth, setPanelWidthState] = useState(loadWidth);
+  const [isResizing, setIsResizing] = useState(false);
+  const resizeStartX = useRef(0);
+  const resizeStartWidth = useRef(0);
+  
+  const setPanelWidth = useCallback((newWidth: number) => {
+    setPanelWidthState(newWidth);
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(newWidth));
+  }, [STORAGE_KEY]);
 
   // Listen for panel pin toggle events using direct subscription
   useEffect(() => {
@@ -129,6 +150,26 @@ export const PanelSlot = memo(function PanelSlot({
     });
     return unsubscribe;
   }, [side]);
+
+  // Emit width when pinned state or width changes - only emit actual width when pinned
+  useEffect(() => {
+    window.eventAPI.emit(`globalUI.${side}Panel.width`, isPinned ? panelWidth : 0);
+  }, [side, panelWidth, isPinned]);
+
+  // Sync width when panel moves between sides
+  useEffect(() => {
+    const unsubscribe = window.eventAPI.subscribe('globalUI.panel.moveTo', (event) => {
+      const newSide = event.payload as string;
+      // When panel moves to our side, reload width from localStorage
+      if (newSide === side) {
+        const width = loadWidth();
+        setPanelWidthState(width);
+        // Emit immediately so Desktop gets the right width
+        window.eventAPI.emit(`globalUI.${side}Panel.width`, isPinned ? width : 0);
+      }
+    });
+    return unsubscribe;
+  }, [side, isPinned]);
 
   const handleContextMenu = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
@@ -168,6 +209,49 @@ export const PanelSlot = memo(function PanelSlot({
     const newSide = side === 'left' ? 'right' : 'left';
     window.eventAPI.emit('globalUI.panel.moveTo', newSide);
   }, [side]);
+
+  // Resize handlers
+  const handleResizeStart = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    setIsResizing(true);
+    resizeStartX.current = e.clientX;
+    resizeStartWidth.current = panelWidth;
+  }, [panelWidth]);
+
+  const handleResizeMove = useCallback((e: MouseEvent) => {
+    if (!isResizing) return;
+    
+    const delta = isLeft ? e.clientX - resizeStartX.current : resizeStartX.current - e.clientX;
+    const newWidth = resizeStartWidth.current + delta;
+    
+    // Constrain width between 200 and 600 pixels
+    const constrainedWidth = Math.min(Math.max(newWidth, 200), 600);
+    setPanelWidth(constrainedWidth);
+    
+    // Emit width change event (only emit when pinned, handled by useEffect)
+    window.eventAPI.emit(`globalUI.${side}Panel.width`, constrainedWidth);
+  }, [isResizing, isLeft, side]);
+
+  const handleResizeEnd = useCallback(() => {
+    setIsResizing(false);
+  }, []);
+
+  // Add/remove resize event listeners
+  useEffect(() => {
+    if (isResizing) {
+      window.addEventListener('mousemove', handleResizeMove);
+      window.addEventListener('mouseup', handleResizeEnd);
+      document.body.style.cursor = 'col-resize';
+      document.body.style.userSelect = 'none';
+      return () => {
+        window.removeEventListener('mousemove', handleResizeMove);
+        window.removeEventListener('mouseup', handleResizeEnd);
+        document.body.style.cursor = '';
+        document.body.style.userSelect = '';
+      };
+    }
+    return undefined;
+  }, [isResizing, handleResizeMove, handleResizeEnd]);
 
   // Close context menu on click outside
   useEffect(() => {
@@ -211,26 +295,51 @@ export const PanelSlot = memo(function PanelSlot({
           top: 0,
           bottom: 0,
           [isLeft ? 'left' : 'right']: 0,
-          width,
+          width: panelWidth,
           zIndex,
           display: 'flex',
           flexDirection: 'column',
-          gap: 'var(--theme-spacing-sm, 8px)',
-          padding: 'var(--theme-spacing-md, 16px)',
-          paddingTop: trafficLightPadding > 0 ? `${trafficLightPadding}px` : 'var(--theme-spacing-md, 16px)',
+          paddingTop: trafficLightPadding > 0 ? `${trafficLightPadding}px` : 0,
           background: 'var(--theme-bg-secondary, #1a1a2e)',
           borderLeft: isLeft ? 'none' : '1px solid var(--theme-border-primary, #333)',
           borderRight: isLeft ? '1px solid var(--theme-border-primary, #333)' : 'none',
           pointerEvents: 'auto',
           overflowY: 'auto',
           transform: isVisible ? 'translateX(0)' : `translateX(${isLeft ? '-' : ''}100%)`,
-          transition: 'transform 0.3s ease',
+          transition: isResizing ? 'none' : 'transform 0.3s ease',
         }}
         onMouseEnter={() => !isPinned && setIsHovered(true)}
         onMouseLeave={() => !isPinned && setIsHovered(false)}
         onContextMenu={handleContextMenu}
       >
         {children}
+        
+        {/* Resize handle */}
+        {isPinned && (
+          <div
+            onMouseDown={handleResizeStart}
+            style={{
+              position: 'absolute',
+              top: 0,
+              bottom: 0,
+              [isLeft ? 'right' : 'left']: 0,
+              width: '4px',
+              cursor: 'col-resize',
+              background: isResizing ? 'var(--theme-accent-primary)' : 'transparent',
+              zIndex: 1000,
+            }}
+            onMouseEnter={(e) => {
+              if (!isResizing) {
+                e.currentTarget.style.background = 'var(--theme-border-primary)';
+              }
+            }}
+            onMouseLeave={(e) => {
+              if (!isResizing) {
+                e.currentTarget.style.background = 'transparent';
+              }
+            }}
+          />
+        )}
       </div>
 
       {/* Context menu */}

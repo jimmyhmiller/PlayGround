@@ -43,12 +43,28 @@ export function ChatWidget({
   const [sessionId, setSessionId, sessionIdLoaded] = usePersistentState<string | null>('sessionId', null);
   const [currentModeId, setCurrentModeId] = usePersistentState<string | null>('currentModeId', null);
   const [todos, setTodos] = usePersistentState<UIPlanTask[]>('todos', []);
+  const [isStreaming, setIsStreaming] = usePersistentState<boolean>('isStreaming', false);
+  const [streamingText, setStreamingText] = usePersistentState<string>('streamingText', '');
+  const [streamingToolCalls, setStreamingToolCalls] = usePersistentState<Record<string, UIToolCall>>('streamingToolCalls', {});
 
   // Ephemeral state (not persisted)
   const [isConnected, setIsConnected] = useState(false);
-  const [isStreaming, setIsStreaming] = useState(false);
-  const [currentText, setCurrentText] = useState('');
-  const [toolCalls, setToolCalls] = useState<Map<string, UIToolCall>>(new Map());
+
+  // Derived state from persisted streaming state
+  const currentText = streamingText;
+  const setCurrentText = setStreamingText;
+  const toolCalls = new Map(Object.entries(streamingToolCalls));
+  const setToolCalls = (updater: Map<string, UIToolCall> | ((prev: Map<string, UIToolCall>) => Map<string, UIToolCall>)) => {
+    if (typeof updater === 'function') {
+      setStreamingToolCalls(prev => {
+        const prevMap = new Map(Object.entries(prev));
+        const nextMap = updater(prevMap);
+        return Object.fromEntries(nextMap);
+      });
+    } else {
+      setStreamingToolCalls(Object.fromEntries(updater));
+    }
+  };
   const [pendingPermission, setPendingPermission] = useState<PermissionRequest | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [availableModes, setAvailableModes] = useState<SessionMode[]>([]);
@@ -58,6 +74,9 @@ export function ChatWidget({
   const currentMessageIdRef = useRef<string | null>(null);
   const hasInitializedRef = useRef(false);
   const hasScrolledInitiallyRef = useRef(false);
+  const currentPromptIdRef = useRef<string | null>(null);
+  const isStreamingRef = useRef(isStreaming);
+  isStreamingRef.current = isStreaming;
   // Refs for async closures - needed because handleSend awaits across renders
   const currentTextRef = useRef(currentText);
   const toolCallsRef = useRef(toolCalls);
@@ -209,6 +228,12 @@ export function ChatWidget({
         return;
       }
 
+      // Ignore streaming events if there's no active prompt (e.g., after cancel)
+      // This prevents stale events from overwriting new prompt state
+      if (!currentPromptIdRef.current && !isStreamingRef.current) {
+        return;
+      }
+
       const update = payload.update;
       const updateType = update.sessionUpdate;
 
@@ -342,6 +367,7 @@ export function ChatWidget({
     setToolCalls(new Map());
     setIsStreaming(false);
     currentMessageIdRef.current = null;
+    currentPromptIdRef.current = null;
     scrollToBottom();
   };
 
@@ -349,15 +375,38 @@ export function ChatWidget({
   const handleSend = async (content: ContentBlock[]) => {
     if (!sessionId || content.length === 0) return;
 
-    // If currently streaming, cancel first
-    if (isStreaming) {
+    // Generate new prompt ID to filter out stale events
+    const newPromptId = `prompt-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+
+    // If currently streaming, cancel first and save current progress
+    if (isStreamingRef.current) {
+      // Invalidate old prompt immediately
+      const oldPromptId = currentPromptIdRef.current;
+      currentPromptIdRef.current = null;
+
       try {
         await window.acpAPI.cancel(sessionId);
-        finishMessage();
       } catch (err) {
         console.error('[ChatWidget] Cancel before send error:', err);
       }
+
+      // Save the interrupted message if there was content
+      const text = currentTextRef.current;
+      const calls = toolCallsRef.current;
+      if (text.trim() || calls.size > 0) {
+        const interruptedMessage: ChatMessage = {
+          id: oldPromptId || generateId(),
+          role: 'assistant',
+          content: text + (text.trim() ? '\n\n' : '') + '[Interrupted]',
+          timestamp: Date.now(),
+          toolCallIds: Array.from(calls.keys()),
+        };
+        setMessages((prev) => [...prev, interruptedMessage]);
+      }
     }
+
+    // Set new prompt ID before clearing state
+    currentPromptIdRef.current = newPromptId;
 
     // Extract text for display (images shown as [Image] placeholder)
     const displayText = content
@@ -379,11 +428,11 @@ export function ChatWidget({
     setMessages((prev) => [...prev, userMessage]);
     scrollToBottom();
 
-    // Start streaming
+    // Start streaming with fresh state
     setIsStreaming(true);
     setCurrentText('');
     setToolCalls(new Map());
-    currentMessageIdRef.current = generateId();
+    currentMessageIdRef.current = newPromptId;
     setError(null);
 
     // Convert to ACP content block format
@@ -407,6 +456,7 @@ export function ChatWidget({
       if (errorMessage.includes('process exited') || errorMessage.includes('Internal error')) {
         console.log('[ChatWidget] Session appears invalid, creating new session...');
         setError('Session expired - creating new session...');
+        const previousModeId = currentModeId;
 
         try {
           // Respawn and create new session
@@ -417,7 +467,15 @@ export function ChatWidget({
           setSessionId(newSession.sessionId);
           if (newSession.modes) {
             setAvailableModes(newSession.modes.availableModes);
-            setCurrentModeId(newSession.modes.currentModeId);
+            // Restore previous mode if available
+            if (previousModeId && newSession.modes.availableModes.some(m => m.id === previousModeId)) {
+              if (newSession.modes.currentModeId !== previousModeId) {
+                await window.acpAPI.setMode(newSession.sessionId, previousModeId);
+              }
+              setCurrentModeId(previousModeId);
+            } else {
+              setCurrentModeId(newSession.modes.currentModeId);
+            }
           }
           setError(null);
 
@@ -482,6 +540,8 @@ export function ChatWidget({
   // Start a new session
   const handleNewSession = async () => {
     const cwd = sessionCwd || process.cwd?.() || '/';
+    // Remember the current mode to restore it in the new session
+    const previousModeId = currentModeId;
 
     try {
       // Create a new session (force=true to always create new, not reuse existing)
@@ -493,7 +553,16 @@ export function ChatWidget({
       setToolCalls(new Map());
       if (result.modes) {
         setAvailableModes(result.modes.availableModes);
-        setCurrentModeId(result.modes.currentModeId);
+
+        // Restore the previous mode if it's available in the new session
+        if (previousModeId && result.modes.availableModes.some(m => m.id === previousModeId)) {
+          if (result.modes.currentModeId !== previousModeId) {
+            await window.acpAPI.setMode(result.sessionId, previousModeId);
+          }
+          setCurrentModeId(previousModeId);
+        } else {
+          setCurrentModeId(result.modes.currentModeId);
+        }
       }
       console.log('[ChatWidget] Started new session:', result.sessionId);
     } catch (err) {

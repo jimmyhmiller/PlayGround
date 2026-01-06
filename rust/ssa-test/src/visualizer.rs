@@ -130,15 +130,25 @@ where
     }
 
     pub fn render_to_png(&self, png_path: &str) -> std::io::Result<()> {
-        let dot_path = format!("{}.dot", png_path.trim_end_matches(".png"));
-        self.render_to_file(&dot_path)?;
+        use std::io::Write;
+        use std::process::Stdio;
 
-        let output = Command::new("dot")
+        let dot_content = self.generate_dot();
+
+        // Pipe DOT content via stdin to avoid creating intermediate files
+        let mut child = Command::new("dot")
             .arg("-Tpng")
             .arg("-o")
             .arg(png_path)
-            .arg(&dot_path)
-            .output()?;
+            .stdin(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
+
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin.write_all(dot_content.as_bytes())?;
+        }
+
+        let output = child.wait_with_output()?;
 
         if !output.status.success() {
             let error = String::from_utf8_lossy(&output.stderr);

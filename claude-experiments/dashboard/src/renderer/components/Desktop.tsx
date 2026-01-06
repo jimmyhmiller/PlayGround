@@ -869,7 +869,8 @@ const CustomWidgetsLoader = memo(function CustomWidgetsLoader(): null {
  */
 function Desktop(): ReactElement {
   const [leftPanelVisible, setLeftPanelVisible] = useState(false);
-  const [rightPanelVisible, setRightPanelVisible] = useState(true);
+  const [rightPanelVisible, setRightPanelVisible] = useState(false);
+  const [sharedPanelWidth, setSharedPanelWidth] = useState(200);
 
   // Listen for panel visibility changes
   useEffect(() => {
@@ -878,6 +879,16 @@ function Desktop(): ReactElement {
     });
     const unsubRight = window.eventAPI.subscribe('globalUI.rightPanel.toggle', (event) => {
       setRightPanelVisible(event.payload as boolean);
+    });
+    
+    // Listen for width changes from EITHER side - they both set the same shared width
+    const unsubLeftWidth = window.eventAPI.subscribe('globalUI.leftPanel.width', (event) => {
+      const width = event.payload as number;
+      if (width > 0) setSharedPanelWidth(width);
+    });
+    const unsubRightWidth = window.eventAPI.subscribe('globalUI.rightPanel.width', (event) => {
+      const width = event.payload as number;
+      if (width > 0) setSharedPanelWidth(width);
     });
     
     // Listen for panel moves - when moving, update visibility for both sides
@@ -895,6 +906,8 @@ function Desktop(): ReactElement {
     return () => {
       unsubLeft();
       unsubRight();
+      unsubLeftWidth();
+      unsubRightWidth();
       unsubMove();
     };
   }, []);
@@ -956,9 +969,8 @@ function Desktop(): ReactElement {
                 flex: 1,
                 position: 'relative',
                 zIndex: 1,
-                marginLeft: leftPanelVisible ? '200px' : 0,
-                marginRight: rightPanelVisible ? '200px' : 0,
-                transition: 'margin 0.3s ease',
+                marginLeft: leftPanelVisible ? sharedPanelWidth : 0,
+                marginRight: rightPanelVisible ? sharedPanelWidth : 0,
               }}
             >
               <WindowContainer />

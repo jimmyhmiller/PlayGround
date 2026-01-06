@@ -1,0 +1,9 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc f2ac82f29dca9422659d44820a5a86f0fd6f674a27a058038b9ed3d6cdf70268 # shrinks to program = TestProgram { instructions: [Const { var_id: 0, value: -1 }, Const { var_id: 1, value: -2 }] }
+cc 66724443a1977859e0af243531b67f23d787d9cb709f1479ecc0096f21a10f22 # shrinks to program = TestProgram { instructions: [Const { var_id: 0, value: -1 }, Const { var_id: 1, value: 0 }] }
+cc 79745957a7b37a95f2c3cc8b166864cb5d028fae5d89e8a8c58ef51bb2117897 # shrinks to program = TestProgram { instructions: [Const { var_id: 0, value: 1 }, Const { var_id: 1, value: 2 }, BinOp { var_id: 2, left_id: 0, op: Add, right_id: 1 }, BinOp { var_id: 3, left_id: 0, op: Add, right_id: 2 }] }

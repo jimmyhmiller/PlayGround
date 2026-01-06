@@ -1,11 +1,12 @@
 import { memo, useState, useEffect, useRef, useMemo, useCallback } from 'react';
-import { useProjectDashboardTree, useDashboardCommands } from '../hooks/useBackendState';
+import { useProjectDashboardTree, useDashboardCommands, useProjectCommands } from '../hooks/useBackendState';
 import type { ProjectState, DashboardState } from '../../types/state';
 
 /**
- * Quick Switcher - Fast dashboard switching with Cmd+P
+ * Quick Switcher - Fast project and dashboard switching with Cmd+P
  *
  * Shows dashboards grouped by projects for quick navigation.
+ * Supports switching both projects and dashboards.
  * Supports keyboard navigation and search filtering.
  */
 
@@ -33,6 +34,7 @@ const QuickSwitcher = memo(function QuickSwitcher({ isOpen, onClose }: QuickSwit
 
   const { tree, activeProjectId, activeDashboardId, loading } = useProjectDashboardTree();
   const { switchDashboard } = useDashboardCommands();
+  const { switchProject } = useProjectCommands();
 
   // Build flat list of items (project headers + dashboards)
   const allItems = useMemo((): QuickSwitcherItem[] => {
@@ -90,9 +92,9 @@ const QuickSwitcher = memo(function QuickSwitcher({ isOpen, onClose }: QuickSwit
     );
   }, [allItems, query]);
 
-  // Get only selectable items (dashboards, not headers)
+  // Get only selectable items (both projects and dashboards)
   const selectableItems = useMemo(
-    () => filteredItems.filter((item) => item.type === 'dashboard'),
+    () => filteredItems.filter((item) => item.type === 'project-header' || item.type === 'dashboard'),
     [filteredItems]
   );
 
@@ -127,12 +129,17 @@ const QuickSwitcher = memo(function QuickSwitcher({ isOpen, onClose }: QuickSwit
 
   const handleSelect = useCallback(
     async (item: QuickSwitcherItem) => {
-      if (item.type === 'dashboard' && item.dashboard) {
+      if (item.type === 'project-header' && item.project) {
+        // Switch to project (will activate its active dashboard)
+        await switchProject(item.project.id);
+        onClose();
+      } else if (item.type === 'dashboard' && item.dashboard) {
+        // Switch to dashboard (will switch project if needed)
         await switchDashboard(item.dashboard.id);
         onClose();
       }
     },
-    [switchDashboard, onClose]
+    [switchDashboard, switchProject, onClose]
   );
 
   const handleKeyDown = useCallback(
@@ -279,18 +286,26 @@ const QuickSwitcher = memo(function QuickSwitcher({ isOpen, onClose }: QuickSwit
             </div>
           ) : (
             filteredItems.map((item) => {
+              const isSelected =
+                selectableItems[selectedIndex]?.id === item.id;
+
               if (item.type === 'project-header') {
                 return (
                   <ProjectHeader
                     key={item.id}
                     label={item.label}
                     isActive={item.isActive}
+                    isSelected={isSelected}
+                    onClick={() => handleSelect(item)}
+                    onMouseEnter={() => {
+                      const idx = selectableItems.findIndex(
+                        (i) => i.id === item.id
+                      );
+                      if (idx !== -1) setSelectedIndex(idx);
+                    }}
                   />
                 );
               }
-
-              const isSelected =
-                selectableItems[selectedIndex]?.id === item.id;
 
               return (
                 <DashboardItem
@@ -323,7 +338,7 @@ const QuickSwitcher = memo(function QuickSwitcher({ isOpen, onClose }: QuickSwit
           }}
         >
           <span>↑↓ Navigate</span>
-          <span>↵ Switch</span>
+          <span>↵ Switch Project/Dashboard</span>
           <span>Esc Close</span>
         </div>
       </div>
@@ -334,18 +349,27 @@ const QuickSwitcher = memo(function QuickSwitcher({ isOpen, onClose }: QuickSwit
 interface ProjectHeaderProps {
   label: string;
   isActive: boolean;
+  isSelected: boolean;
+  onClick: () => void;
+  onMouseEnter: () => void;
 }
 
 const ProjectHeader = memo(function ProjectHeader({
   label,
   isActive,
+  isSelected,
+  onClick,
+  onMouseEnter,
 }: ProjectHeaderProps) {
   return (
     <div
-      className="quick-switcher-project-header"
+      className={`quick-switcher-project-header ${isSelected ? 'selected' : ''}`}
+      onClick={onClick}
+      onMouseEnter={onMouseEnter}
       style={{
         padding: 'var(--theme-spacing-sm) var(--theme-spacing-md)',
         marginTop: 'var(--theme-spacing-sm)',
+        borderRadius: 'var(--theme-radius-sm)',
         fontSize: 'var(--theme-font-size-xs)',
         fontWeight: 'var(--theme-font-weight-bold)',
         color: isActive
@@ -356,6 +380,11 @@ const ProjectHeader = memo(function ProjectHeader({
         display: 'flex',
         alignItems: 'center',
         gap: 'var(--theme-spacing-xs)',
+        cursor: 'pointer',
+        background: isSelected
+          ? 'var(--theme-palette-item-hover)'
+          : 'transparent',
+        transition: 'background var(--theme-transition-fast)',
       }}
     >
       <span style={{ fontSize: '10px' }}>▸</span>

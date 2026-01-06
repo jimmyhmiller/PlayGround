@@ -33,12 +33,13 @@ class DataLoader {
         return try loadJSON(from: "\(dataDir)/variations/\(studyId)/\(variationId).json")
     }
 
-    func loadAllFlashcards(for course: Course) throws -> [Flashcard] {
+    func loadAllFlashcards(for course: Course, chapterIds: Set<String>? = nil) throws -> [Flashcard] {
         var allFlashcards: [Flashcard] = []
 
         let chapters = try loadChapters(courseId: course.id)
+        let filteredChapters = chapterIds == nil ? chapters : chapters.filter { chapterIds!.contains($0.id) }
 
-        for chapter in chapters {
+        for chapter in filteredChapters {
             let studies = try loadStudies(chapterId: chapter.id)
 
             for study in studies {
@@ -51,6 +52,7 @@ class DataLoader {
                         variation: variation,
                         playerColor: course.color,
                         courseName: course.name,
+                        chapterId: chapter.id,
                         chapterName: chapter.name,
                         studyName: study.name
                     )
@@ -59,14 +61,13 @@ class DataLoader {
             }
         }
 
-        // Deduplicate
+        // Deduplicate by stable ID
         var seen = Set<String>()
         return allFlashcards.filter { card in
-            let key = "\(card.positionFen)|\(card.correctMove)"
-            if seen.contains(key) {
+            if seen.contains(card.id) {
                 return false
             }
-            seen.insert(key)
+            seen.insert(card.id)
             return true
         }
     }

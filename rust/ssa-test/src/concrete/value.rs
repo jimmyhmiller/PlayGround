@@ -1,8 +1,9 @@
-//! Concrete value type implementing SsaValue.
+//! Concrete value type implementing SsaValue and OptimizableValue.
 
 use crate::traits::SsaValue;
 use crate::types::{PhiId, SsaVariable};
 use crate::visualizer::FormatValue;
+use crate::optim::traits::OptimizableValue;
 
 /// Concrete value type for the example IR.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -85,5 +86,20 @@ impl FormatValue for Value {
             Value::Phi(id) => format!("Φ{}", id.0),
             Value::Undefined => "⊥".to_string(),
         }
+    }
+}
+
+impl OptimizableValue for Value {
+    type Constant = i32;
+
+    fn as_constant(&self) -> Option<&i32> {
+        match self {
+            Value::Literal(n) => Some(n),
+            _ => None,
+        }
+    }
+
+    fn from_constant(c: i32) -> Self {
+        Value::Literal(c)
     }
 }

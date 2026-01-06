@@ -1,10 +1,12 @@
-//! Concrete instruction type implementing SsaInstruction and InstructionFactory.
+//! Concrete instruction type implementing SsaInstruction, InstructionFactory,
+//! OptimizableInstruction, and InstructionMutator.
 
 use crate::concrete::ast::{BinaryOperator, UnaryOperator};
 use crate::concrete::value::Value;
-use crate::traits::{InstructionFactory, SsaInstruction};
+use crate::traits::{InstructionFactory, SsaInstruction, SsaValue};
 use crate::types::{BlockId, PhiId, SsaVariable};
 use crate::visualizer::{FormatInstruction, FormatValue};
+use crate::optim::traits::{OptimizableInstruction, OptimizableValue, ExpressionKey, InstructionMutator};
 
 /// Concrete instruction type for the example IR.
 #[derive(Debug, Clone, PartialEq)]
@@ -173,6 +175,119 @@ impl FormatInstruction for Instruction {
             Instruction::Print { value } => {
                 format!("print {}", value.format_for_display())
             }
+        }
+    }
+}
+
+impl OptimizableInstruction for Instruction {
+    fn has_side_effects(&self) -> bool {
+        matches!(self, Instruction::Print { .. })
+    }
+
+    fn is_terminator(&self) -> bool {
+        matches!(
+            self,
+            Instruction::Jump { .. } | Instruction::ConditionalJump { .. }
+        )
+    }
+
+    fn as_copy(&self) -> Option<(&SsaVariable, &Value)> {
+        match self {
+            // Only return simple copies (not phi assignments)
+            Instruction::Assign { dest, value } if !value.is_phi() => Some((dest, value)),
+            _ => None,
+        }
+    }
+
+    fn try_fold(&self) -> Option<i32> {
+        match self {
+            Instruction::BinaryOp { left, op, right, .. } => {
+                let l = *left.as_constant()?;
+                let r = *right.as_constant()?;
+                Some(match op {
+                    BinaryOperator::Add => l.checked_add(r)?,
+                    BinaryOperator::Subtract => l.checked_sub(r)?,
+                    BinaryOperator::Multiply => l.checked_mul(r)?,
+                    BinaryOperator::Divide => {
+                        if r == 0 {
+                            return None;
+                        }
+                        l.checked_div(r)?
+                    }
+                    BinaryOperator::Equal => {
+                        if l == r { 1 } else { 0 }
+                    }
+                    BinaryOperator::NotEqual => {
+                        if l != r { 1 } else { 0 }
+                    }
+                    BinaryOperator::LessThan => {
+                        if l < r { 1 } else { 0 }
+                    }
+                    BinaryOperator::LessThanOrEqual => {
+                        if l <= r { 1 } else { 0 }
+                    }
+                    BinaryOperator::GreaterThan => {
+                        if l > r { 1 } else { 0 }
+                    }
+                    BinaryOperator::GreaterThanOrEqual => {
+                        if l >= r { 1 } else { 0 }
+                    }
+                })
+            }
+            Instruction::UnaryOp { op, operand, .. } => {
+                let v = *operand.as_constant()?;
+                Some(match op {
+                    UnaryOperator::Negate => v.checked_neg()?,
+                    UnaryOperator::Not => {
+                        if v == 0 { 1 } else { 0 }
+                    }
+                })
+            }
+            _ => None,
+        }
+    }
+
+    fn expression_key(&self) -> Option<ExpressionKey<Value>> {
+        match self {
+            Instruction::BinaryOp { left, op, right, .. } => {
+                let op_name = match op {
+                    BinaryOperator::Add => "add",
+                    BinaryOperator::Subtract => "sub",
+                    BinaryOperator::Multiply => "mul",
+                    BinaryOperator::Divide => "div",
+                    BinaryOperator::Equal => "eq",
+                    BinaryOperator::NotEqual => "ne",
+                    BinaryOperator::LessThan => "lt",
+                    BinaryOperator::LessThanOrEqual => "le",
+                    BinaryOperator::GreaterThan => "gt",
+                    BinaryOperator::GreaterThanOrEqual => "ge",
+                };
+                Some(ExpressionKey::BinaryOp {
+                    left: left.clone(),
+                    op: op_name.to_string(),
+                    right: right.clone(),
+                })
+            }
+            Instruction::UnaryOp { op, operand, .. } => {
+                let op_name = match op {
+                    UnaryOperator::Negate => "neg",
+                    UnaryOperator::Not => "not",
+                };
+                Some(ExpressionKey::UnaryOp {
+                    op: op_name.to_string(),
+                    operand: operand.clone(),
+                })
+            }
+            _ => None,
+        }
+    }
+}
+
+impl InstructionMutator for InstructionBuilder {
+    fn create_constant_assign(dest: SsaVariable, constant: i32) -> Instruction {
+        Instruction::Assign {
+            dest,
+            value: Value::Literal(constant),
         }
     }
 }

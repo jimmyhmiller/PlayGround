@@ -27,6 +27,10 @@ pub enum SSAViolation<V> {
         phi_id: PhiId,
         block_id: BlockId,
     },
+    /// Block has no predecessors (and is not the entry block) - unreachable code
+    UnreachableBlock {
+        block_id: BlockId,
+    },
     /// Phi operand index doesn't align with predecessor
     PhiOperandPredecessorMismatch {
         phi_id: PhiId,
@@ -135,6 +139,9 @@ impl<V: std::fmt::Debug> std::fmt::Display for SSAViolation<V> {
             }
             SSAViolation::PhiInUnreachableBlock { phi_id, block_id } => {
                 write!(f, "Phi {:?} exists in unreachable block {:?}", phi_id, block_id)
+            }
+            SSAViolation::UnreachableBlock { block_id } => {
+                write!(f, "Block {:?} has no predecessors (unreachable code)", block_id)
             }
             SSAViolation::PhiOperandPredecessorMismatch { phi_id, operand_idx, operand_from_block, expected_predecessor } => {
                 write!(f, "Phi {:?} operand {} is from {:?} but expected from predecessor {:?}",
@@ -346,6 +353,9 @@ where
     // Property 13: Phi in entry block
     violations.extend(check_phi_entry_block(translator));
 
+    // Property 14: Unreachable blocks
+    violations.extend(check_unreachable_blocks(translator));
+
     violations
 }
 
@@ -363,6 +373,31 @@ where
     for (phi_id, phi) in &translator.phis {
         if phi.block_id == entry_block && !phi.operands.is_empty() {
             violations.push(SSAViolation::PhiInEntryBlock { phi_id: *phi_id });
+        }
+    }
+
+    violations
+}
+
+/// Check for unreachable blocks (blocks with no predecessors that aren't the entry block)
+fn check_unreachable_blocks<V, I, F>(translator: &SSATranslator<V, I, F>) -> Vec<SSAViolation<V>>
+where
+    V: SsaValue,
+    I: SsaInstruction<Value = V>,
+    F: InstructionFactory<Instr = I>,
+{
+    let mut violations = Vec::new();
+    let entry_block = BlockId(0);
+
+    for block in &translator.blocks {
+        // Skip entry block - it's expected to have no predecessors
+        if block.id == entry_block {
+            continue;
+        }
+
+        // Block has no predecessors - it's unreachable
+        if block.predecessors.is_empty() {
+            violations.push(SSAViolation::UnreachableBlock { block_id: block.id });
         }
     }
 

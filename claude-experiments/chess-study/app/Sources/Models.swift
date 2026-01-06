@@ -32,8 +32,16 @@ struct Variation: Codable {
     let moves: [String: MoveData]
 }
 
+struct MoveStep {
+    let fen: String           // Position before this move
+    let san: String           // The move in SAN notation
+    let resultingFen: String  // Position after this move
+    let notation: String      // Display notation like "1.e4" or "e5"
+}
+
 struct Flashcard: Identifiable {
-    let id = UUID()
+    let id: String  // Stable ID based on position + move
+    let chapterId: String
     let courseName: String
     let chapterName: String
     let studyName: String
@@ -42,6 +50,26 @@ struct Flashcard: Identifiable {
     let resultingFen: String
     let moveNumber: Int
     let linePreview: String
+    let moveSequence: [MoveStep]  // Full sequence of moves leading to (and including) this position
+
+    init(chapterId: String, courseName: String, chapterName: String, studyName: String,
+         positionFen: String, correctMove: String, resultingFen: String,
+         moveNumber: Int, linePreview: String, moveSequence: [MoveStep]) {
+        self.id = "\(positionFen)|\(correctMove)".data(using: .utf8)!
+            .base64EncodedString()
+            .prefix(32)
+            .description
+        self.chapterId = chapterId
+        self.courseName = courseName
+        self.chapterName = chapterName
+        self.studyName = studyName
+        self.positionFen = positionFen
+        self.correctMove = correctMove
+        self.resultingFen = resultingFen
+        self.moveNumber = moveNumber
+        self.linePreview = linePreview
+        self.moveSequence = moveSequence
+    }
 }
 
 // MARK: - FEN Utilities
@@ -91,6 +119,7 @@ func generateFlashcards(
     variation: Variation,
     playerColor: String,
     courseName: String,
+    chapterId: String,
     chapterName: String,
     studyName: String
 ) -> [Flashcard] {
@@ -101,26 +130,40 @@ func generateFlashcards(
 
     for sequence in sequences {
         var lineNotation: [String] = []
+        var moveSteps: [MoveStep] = []
 
         for move in sequence {
             let moveNum = moveNumber(fen: move.fen)
             let isWhiteMove = whoToMove(fen: move.fen) == "w"
 
+            let notation: String
             if isWhiteMove {
-                lineNotation.append("\(moveNum).\(move.san)")
+                notation = "\(moveNum).\(move.san)"
+                lineNotation.append(notation)
             } else {
                 if lineNotation.isEmpty || !lineNotation.last!.contains(".") {
-                    lineNotation.append("\(moveNum)...\(move.san)")
+                    notation = "\(moveNum)...\(move.san)"
+                    lineNotation.append(notation)
                 } else {
-                    lineNotation.append(move.san)
+                    notation = move.san
+                    lineNotation.append(notation)
                 }
             }
+
+            let step = MoveStep(
+                fen: move.fen,
+                san: move.san,
+                resultingFen: move.nextFen,
+                notation: notation
+            )
+            moveSteps.append(step)
 
             if whoToMove(fen: move.fen) == playerToMove {
                 let previewMoves = Array(lineNotation.dropLast())
                 let preview = previewMoves.joined(separator: " ") + " ?"
 
                 let card = Flashcard(
+                    chapterId: chapterId,
                     courseName: courseName,
                     chapterName: chapterName,
                     studyName: studyName,
@@ -128,7 +171,8 @@ func generateFlashcards(
                     correctMove: move.san,
                     resultingFen: move.nextFen,
                     moveNumber: moveNum,
-                    linePreview: preview.isEmpty ? "?" : preview
+                    linePreview: preview.isEmpty ? "?" : preview,
+                    moveSequence: moveSteps  // Include all moves up to this point
                 )
                 flashcards.append(card)
             }

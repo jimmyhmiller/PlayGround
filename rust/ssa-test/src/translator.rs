@@ -95,6 +95,13 @@ where
                 .get(&variable)
                 .and_then(|v| v.get(&block_id))
             {
+                // Check if this references a phi that no longer exists
+                if let Some(phi_id) = value.as_phi() {
+                    if !self.phis.contains_key(&phi_id) {
+                        // Phi was removed, need to re-read
+                        return self.read_variable_recursively(variable, block_id);
+                    }
+                }
                 return value.clone();
             }
         }
@@ -116,7 +123,12 @@ where
                 .blocks
                 .get(block_id.0)
                 .expect("Block not found");
-            if block.predecessors.len() == 1 {
+            if block.predecessors.is_empty() {
+                // Entry block with no predecessors - variable is undefined
+                value = V::undefined();
+                self.write_variable(variable.clone(), block_id, value.clone());
+                return value;
+            } else if block.predecessors.len() == 1 {
                 value = self.read_variable(variable.clone(), block.predecessors[0]);
             } else {
                 // Multiple predecessors - create phi (don't materialize yet)
@@ -143,6 +155,10 @@ where
     /// This stores the destination variable in each phi's `dest` field
     /// and replaces all phi references in instructions with variables.
     pub fn materialize_all_phis(&mut self) {
+        // Final cleanup: remove any trivial phis that may have been created
+        // due to cross-block dependencies during sealing
+        self.final_cleanup_trivial_phis();
+
         // Collect phi ids first to avoid borrow issues
         let phi_ids: Vec<PhiId> = self.phis.keys().copied().collect();
 
@@ -334,7 +350,29 @@ where
 
         if let Some(phis) = self.incomplete_phis.remove(&block_id) {
             for (variable, phi_id) in phis {
-                if predecessor_count == 1 {
+                if predecessor_count == 0 {
+                    // Entry block with no predecessors: variable is undefined
+                    let value = V::undefined();
+
+                    // Only update definition if there isn't already a local definition
+                    let has_local_def = self.definition
+                        .get(&variable)
+                        .and_then(|m| m.get(&block_id))
+                        .map(|v| !v.is_same_phi(phi_id))
+                        .unwrap_or(false);
+
+                    if !has_local_def {
+                        self.write_variable(variable.clone(), block_id, value.clone());
+                    }
+
+                    // Replace uses of this phi with undefined
+                    if let Some(phi) = self.phis.get(&phi_id).cloned() {
+                        self.replace_phi_uses_with_list(&phi.uses, phi_id, value.clone());
+                    }
+
+                    // Remove the unnecessary phi
+                    self.phis.remove(&phi_id);
+                } else if predecessor_count == 1 {
                     // Single predecessor: no phi needed, just read from predecessor
                     let pred = self.blocks[block_id.0].predecessors[0];
                     let value = self.read_variable(variable.clone(), pred);
@@ -362,6 +400,88 @@ where
                     // Multiple predecessors: need to add operands and potentially simplify
                     self.add_phi_operands(&variable, phi_id);
                 }
+            }
+
+            // Cleanup pass: fix any dangling phi references that might have been
+            // created when phi A referenced phi B, and phi B was later removed
+            self.cleanup_dangling_phi_references();
+        }
+    }
+
+    /// Clean up any phi operands that reference non-existent phis
+    fn cleanup_dangling_phi_references(&mut self) {
+        let existing_phi_ids: std::collections::HashSet<PhiId> =
+            self.phis.keys().copied().collect();
+
+        // Collect incomplete phi IDs (phis still waiting for blocks to seal)
+        let incomplete_phi_ids: std::collections::HashSet<PhiId> =
+            self.incomplete_phis.values()
+                .flat_map(|block_phis| block_phis.values().copied())
+                .collect();
+
+        // First pass: replace dangling references with undefined
+        let mut modified_phis: Vec<PhiId> = Vec::new();
+        for (phi_id, phi) in self.phis.iter_mut() {
+            // Skip incomplete phis - they'll be processed when their block is sealed
+            if incomplete_phi_ids.contains(phi_id) {
+                continue;
+            }
+
+            let mut was_modified = false;
+            for operand in &mut phi.operands {
+                if let Some(ref_phi_id) = operand.as_phi() {
+                    if !existing_phi_ids.contains(&ref_phi_id) {
+                        // Replace dangling reference with undefined
+                        *operand = V::undefined();
+                        was_modified = true;
+                    }
+                }
+            }
+            if was_modified {
+                modified_phis.push(*phi_id);
+            }
+        }
+
+        // Second pass: try to remove any phis that became trivial after cleanup
+        for phi_id in modified_phis {
+            self.try_remove_trivial_phi(phi_id);
+        }
+    }
+
+    /// Final cleanup of trivial phis after all blocks are sealed.
+    /// This handles cases where cross-block dependencies created trivial phis
+    /// that weren't caught during individual block sealing.
+    fn final_cleanup_trivial_phis(&mut self) {
+        let existing_phi_ids: std::collections::HashSet<PhiId> =
+            self.phis.keys().copied().collect();
+
+        // Replace any remaining dangling phi references
+        for phi in self.phis.values_mut() {
+            for operand in &mut phi.operands {
+                if let Some(ref_phi_id) = operand.as_phi() {
+                    if !existing_phi_ids.contains(&ref_phi_id) {
+                        *operand = V::undefined();
+                    }
+                }
+            }
+        }
+
+        // Keep trying to remove trivial phis until no more can be removed
+        loop {
+            let phi_ids: Vec<PhiId> = self.phis.keys().copied().collect();
+            let initial_count = phi_ids.len();
+
+            for phi_id in phi_ids {
+                // Skip if already removed by a recursive call
+                if !self.phis.contains_key(&phi_id) {
+                    continue;
+                }
+                self.try_remove_trivial_phi(phi_id);
+            }
+
+            // If no phis were removed, we're done
+            if self.phis.len() == initial_count {
+                break;
             }
         }
     }
@@ -433,6 +553,16 @@ where
                         *value = replacement.clone();
                     }
                 });
+            }
+        }
+
+        // Also scan ALL phis for references to this phi
+        // This is needed because use tracking may be incomplete
+        for phi in self.phis.values_mut() {
+            for operand in &mut phi.operands {
+                if operand.is_same_phi(phi_id) {
+                    *operand = replacement.clone();
+                }
             }
         }
     }

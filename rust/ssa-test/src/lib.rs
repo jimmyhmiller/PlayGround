@@ -51,6 +51,9 @@ pub mod visualizer;
 pub mod cfg;
 pub mod cfg_validation;
 
+// Optimization framework
+pub mod optim;
+
 // Concrete implementation example
 pub mod concrete;
 

@@ -96,7 +96,8 @@ pub struct CfgBlock<I> {
 }
 
 impl<I> CfgBlock<I> {
-    fn new(id: CfgBlockId) -> Self {
+    /// Create a new empty basic block with the given ID.
+    pub fn new(id: CfgBlockId) -> Self {
         CfgBlock {
             id,
             instructions: Vec::new(),
