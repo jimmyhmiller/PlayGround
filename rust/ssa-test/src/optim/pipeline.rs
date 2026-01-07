@@ -2,6 +2,7 @@
 
 use crate::traits::InstructionFactory;
 use crate::translator::SSATranslator;
+use crate::validation::{validate_ssa, SSAViolation};
 
 use super::analysis::AnalysisCache;
 use super::pass::{OptimizationPass, PassResult, PassStats};
@@ -22,6 +23,8 @@ pub struct PipelineResult {
     pub stats: PassStats,
     /// Per-pass results (pass name, result)
     pub pass_results: Vec<(String, PassResult)>,
+    /// Validation violations found after passes (if verification enabled)
+    pub validation_errors: Vec<(String, Vec<String>)>,
 }
 
 impl PipelineResult {
@@ -31,6 +34,26 @@ impl PipelineResult {
             iterations: 0,
             stats: PassStats::new(),
             pass_results: Vec::new(),
+            validation_errors: Vec::new(),
+        }
+    }
+
+    /// Check if any validation errors occurred.
+    pub fn has_validation_errors(&self) -> bool {
+        !self.validation_errors.is_empty()
+    }
+
+    /// Panic if validation errors were found, with detailed messages.
+    pub fn assert_valid(&self) {
+        if self.has_validation_errors() {
+            let mut msg = String::from("SSA validation failed after optimization passes:\n");
+            for (pass_name, errors) in &self.validation_errors {
+                msg.push_str(&format!("\nAfter pass '{}':\n", pass_name));
+                for err in errors {
+                    msg.push_str(&format!("  - {}\n", err));
+                }
+            }
+            panic!("{}", msg);
         }
     }
 }
@@ -63,6 +86,8 @@ where
 {
     passes: Vec<Box<dyn OptimizationPass<V, I, F>>>,
     cache: AnalysisCache<V, I>,
+    /// Whether to validate SSA properties after each pass
+    verify: bool,
 }
 
 impl<V, I, F> OptimizationPipeline<V, I, F>
@@ -76,7 +101,31 @@ where
         OptimizationPipeline {
             passes: Vec::new(),
             cache: AnalysisCache::new(),
+            verify: false,
         }
+    }
+
+    /// Create an empty pipeline with verification enabled.
+    ///
+    /// When verification is enabled, SSA properties are validated after
+    /// each optimization pass. This helps catch bugs in optimization passes
+    /// but adds overhead.
+    pub fn new_with_verify() -> Self {
+        OptimizationPipeline {
+            passes: Vec::new(),
+            cache: AnalysisCache::new(),
+            verify: true,
+        }
+    }
+
+    /// Enable or disable verification after each pass.
+    pub fn set_verify(&mut self, verify: bool) {
+        self.verify = verify;
+    }
+
+    /// Check if verification is enabled.
+    pub fn verify_enabled(&self) -> bool {
+        self.verify
     }
 
     /// Add a pass to the pipeline.
@@ -86,6 +135,11 @@ where
 
     /// Run all passes once.
     pub fn run(&mut self, translator: &mut SSATranslator<V, I, F>) -> PipelineResult {
+        self.run_internal(translator, true)
+    }
+
+    /// Internal run that optionally skips final validation (for use in fixed-point iteration)
+    fn run_internal(&mut self, translator: &mut SSATranslator<V, I, F>, do_final_validation: bool) -> PipelineResult {
         let mut result = PipelineResult::new();
         result.iterations = 1;
 
@@ -99,11 +153,67 @@ where
                 self.cache.invalidate(&pass.invalidates());
             }
 
+            // Verify SSA properties after each pass if enabled
+            if self.verify {
+                let violations = validate_ssa(translator);
+                // During intermediate passes, filter out DeadPhi (DCE should handle)
+                // The final validation will catch any remaining issues
+                let critical_violations: Vec<_> = violations
+                    .into_iter()
+                    .filter(|v| !matches!(v, SSAViolation::DeadPhi { .. }))
+                    .collect();
+
+                if !critical_violations.is_empty() {
+                    let error_strings: Vec<String> = critical_violations
+                        .iter()
+                        .map(|v| format!("{}", v))
+                        .collect();
+                    result.validation_errors.push((pass_name.clone(), error_strings));
+                }
+            }
+
             result.stats.merge(&pass_result.stats);
             result.pass_results.push((pass_name, pass_result));
         }
 
+        // Final validation - check EVERYTHING including things we filtered during passes
+        if self.verify && do_final_validation {
+            let final_violations = Self::final_validation(translator);
+            if !final_violations.is_empty() {
+                result.validation_errors.push(("final".to_string(), final_violations));
+            }
+        }
+
         result
+    }
+
+    /// Comprehensive final validation after all passes complete.
+    /// This checks everything - no filtering.
+    fn final_validation(translator: &SSATranslator<V, I, F>) -> Vec<String> {
+        let mut errors = Vec::new();
+
+        // Check SSA properties (including dead phis - they should be gone now)
+        let ssa_violations = validate_ssa(translator);
+        for v in ssa_violations {
+            errors.push(format!("SSA: {}", v));
+        }
+
+        // Check for empty blocks
+        for block in &translator.blocks {
+            if block.instructions.is_empty() {
+                errors.push(format!("Empty block: Block {:?} has no instructions", block.id));
+            }
+        }
+
+        // Check for unreachable blocks (except entry)
+        let entry = crate::types::BlockId(0);
+        for block in &translator.blocks {
+            if block.id != entry && block.predecessors.is_empty() {
+                errors.push(format!("Unreachable block: Block {:?} has no predecessors", block.id));
+            }
+        }
+
+        errors
     }
 
     /// Run passes repeatedly until no changes are made or max iterations reached.
@@ -117,9 +227,11 @@ where
         for iteration in 0..max_iterations {
             result.iterations = iteration + 1;
 
-            let iter_result = self.run(translator);
+            // Don't do final validation on intermediate iterations
+            let iter_result = self.run_internal(translator, false);
             result.stats.merge(&iter_result.stats);
             result.pass_results.extend(iter_result.pass_results);
+            result.validation_errors.extend(iter_result.validation_errors);
 
             if !iter_result.changed {
                 // Fixed point reached
@@ -127,6 +239,14 @@ where
             }
 
             result.changed = true;
+        }
+
+        // Do final validation only once at the end
+        if self.verify {
+            let final_violations = Self::final_validation(translator);
+            if !final_violations.is_empty() {
+                result.validation_errors.push(("final".to_string(), final_violations));
+            }
         }
 
         result
@@ -221,6 +341,7 @@ mod tests {
         assert!(!result.changed);
         assert_eq!(result.iterations, 0);
         assert!(result.pass_results.is_empty());
+        assert!(!result.has_validation_errors());
     }
 
     #[test]
@@ -236,5 +357,17 @@ mod tests {
 
         assert_eq!(stats1.instructions_removed, 8);
         assert_eq!(stats1.values_propagated, 2);
+    }
+
+    #[test]
+    fn test_validation_error_detection() {
+        let mut result = PipelineResult::new();
+        assert!(!result.has_validation_errors());
+
+        result.validation_errors.push((
+            "test_pass".to_string(),
+            vec!["Some error".to_string()],
+        ));
+        assert!(result.has_validation_errors());
     }
 }

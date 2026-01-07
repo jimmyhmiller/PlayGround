@@ -23,13 +23,19 @@ use ssa_test::types::{PhiId, SsaVariable};
 // Simple VM Definition
 // ============================================================================
 
-/// Physical registers for our simple VM (4 general purpose registers).
+/// Physical registers for our simple VM (6 general purpose registers).
+/// R0-R3 are allocatable:
+///   - R0, R1: caller-saved (clobbered by calls)
+///   - R2, R3: callee-saved (preserved across calls)
+/// R4, R5 are reserved as scratch registers for code generation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Reg {
     R0,
     R1,
     R2,
     R3,
+    R4,  // Scratch register for codegen
+    R5,  // Scratch register for codegen
 }
 
 impl PhysicalRegister for Reg {
@@ -39,6 +45,8 @@ impl PhysicalRegister for Reg {
             Reg::R1 => 1,
             Reg::R2 => 2,
             Reg::R3 => 3,
+            Reg::R4 => 4,
+            Reg::R5 => 5,
         }
     }
 
@@ -48,6 +56,8 @@ impl PhysicalRegister for Reg {
             Reg::R1 => "r1",
             Reg::R2 => "r2",
             Reg::R3 => "r3",
+            Reg::R4 => "r4",
+            Reg::R5 => "r5",
         }
     }
 }
@@ -59,6 +69,8 @@ impl Reg {
             1 => Some(Reg::R1),
             2 => Some(Reg::R2),
             3 => Some(Reg::R3),
+            4 => Some(Reg::R4),
+            5 => Some(Reg::R5),
             _ => None,
         }
     }
@@ -77,9 +89,10 @@ impl RegisterClass for RegClass {
     }
 
     fn allocatable_registers(&self) -> &'static [Reg] {
-        // Only R0 and R1 are allocatable.
-        // R2 and R3 are reserved as scratch registers for code generation.
-        &[Reg::R0, Reg::R1]
+        // All 4 registers are allocatable.
+        // R0, R1 are caller-saved (clobbered by calls)
+        // R2, R3 are callee-saved (preserved across calls)
+        &[Reg::R0, Reg::R1, Reg::R2, Reg::R3]
     }
 }
 
@@ -100,6 +113,16 @@ impl TargetArchitecture for SimpleArch {
 
     fn stack_slot_size(&self) -> usize {
         8
+    }
+
+    fn caller_saved(&self) -> &'static [Reg] {
+        // R0 and R1 are clobbered by calls
+        &[Reg::R0, Reg::R1]
+    }
+
+    fn callee_saved(&self) -> &'static [Reg] {
+        // R2 and R3 are preserved across calls
+        &[Reg::R2, Reg::R3]
     }
 }
 
@@ -122,6 +145,9 @@ pub enum VmInstr {
     Spill { src: Reg, slot: usize },
     /// Reload: load from stack slot to reg
     Reload { dest: Reg, slot: usize },
+    /// Call: simulates a function call that clobbers caller-saved registers (R0, R1)
+    /// and returns a value in dest.
+    Call { dest: Reg, return_value: i64 },
     /// No-op (placeholder)
     Nop,
 }
@@ -129,8 +155,8 @@ pub enum VmInstr {
 /// Simple VM state
 #[derive(Debug, Clone)]
 pub struct Vm {
-    /// Register file
-    pub regs: [i64; 4],
+    /// Register file (6 registers: R0-R5)
+    pub regs: [i64; 6],
     /// Stack (for spills)
     pub stack: Vec<i64>,
     /// Program counter
@@ -140,7 +166,7 @@ pub struct Vm {
 impl Vm {
     pub fn new(stack_slots: usize) -> Self {
         Vm {
-            regs: [0; 4],
+            regs: [0; 6],
             stack: vec![0; stack_slots],
             pc: 0,
         }
@@ -176,6 +202,13 @@ impl Vm {
                 if *slot < self.stack.len() {
                     self.regs[dest.id()] = self.stack[*slot];
                 }
+            }
+            VmInstr::Call { dest, return_value } => {
+                // Clobber caller-saved registers (R0, R1) with garbage
+                self.regs[Reg::R0.id()] = 0xDEAD_BEEF_i64;
+                self.regs[Reg::R1.id()] = 0xCAFE_BABE_i64;
+                // Set the return value in the destination register
+                self.regs[dest.id()] = *return_value;
             }
             VmInstr::Nop => {}
         }
@@ -273,6 +306,8 @@ pub enum TestInstr {
     PhiAssign { dest: SsaVariable, phi_id: PhiId },
     /// Copy: dest := src
     Copy { dest: SsaVariable, src: TestValue },
+    /// dest := call(return_value) - simulates a function call that clobbers caller-saved regs
+    Call { dest: SsaVariable, return_value: i64 },
 }
 
 impl SsaInstruction for TestInstr {
@@ -288,6 +323,7 @@ impl SsaInstruction for TestInstr {
             TestInstr::Neg { operand, .. } => visitor(operand),
             TestInstr::PhiAssign { .. } => {}
             TestInstr::Copy { src, .. } => visitor(src),
+            TestInstr::Call { .. } => {} // No value operands
         }
     }
 
@@ -301,6 +337,7 @@ impl SsaInstruction for TestInstr {
             TestInstr::Neg { operand, .. } => visitor(operand),
             TestInstr::PhiAssign { .. } => {}
             TestInstr::Copy { src, .. } => visitor(src),
+            TestInstr::Call { .. } => {} // No value operands
         }
     }
 
@@ -310,7 +347,8 @@ impl SsaInstruction for TestInstr {
             | TestInstr::BinOp { dest, .. }
             | TestInstr::Neg { dest, .. }
             | TestInstr::PhiAssign { dest, .. }
-            | TestInstr::Copy { dest, .. } => Some(dest),
+            | TestInstr::Copy { dest, .. }
+            | TestInstr::Call { dest, .. } => Some(dest),
         }
     }
 
@@ -328,7 +366,8 @@ impl SsaInstruction for TestInstr {
 
 impl OptimizableInstruction for TestInstr {
     fn has_side_effects(&self) -> bool {
-        false
+        // Calls have side effects (they clobber registers)
+        matches!(self, TestInstr::Call { .. })
     }
 
     fn is_terminator(&self) -> bool {
@@ -354,6 +393,7 @@ impl OptimizableInstruction for TestInstr {
                 })
             }
             TestInstr::Neg { operand: TestValue::Literal(n), .. } => Some(n.wrapping_neg()),
+            TestInstr::Call { return_value, .. } => Some(*return_value),
             _ => None,
         }
     }
@@ -384,8 +424,8 @@ impl InstructionFactory for TestFactory {
 /// Generate VM instructions from SSA after register allocation (v2 - respects allocation).
 ///
 /// This version properly uses the allocated registers and spill slots.
-/// It uses R2 and R3 as scratch registers for binary operations to avoid
-/// clobbering allocated values in R0/R1.
+/// It uses R4 and R5 as scratch registers for binary operations to avoid
+/// clobbering allocated values in R0-R3.
 pub fn generate_vm_code_v2(
     translator: &SSATranslator<TestValue, TestInstr, TestFactory>,
     assignments: &HashMap<SsaVariable, Location>,
@@ -406,34 +446,34 @@ pub fn generate_vm_code_v2(
                         }
                         Location::StackSlot(slot) => {
                             // Load into scratch register, then spill
-                            emit_load_value_v2(&mut code, value, assignments, Reg::R3);
-                            code.push(VmInstr::Spill { src: Reg::R3, slot });
+                            emit_load_value_v2(&mut code, value, assignments, Reg::R5);
+                            code.push(VmInstr::Spill { src: Reg::R5, slot });
                         }
                     }
                 }
                 TestInstr::BinOp { dest, left, op, right } => {
                     let dest_loc = assignments.get(dest).cloned().unwrap_or(Location::Register(0));
 
-                    // Use R2 and R3 as scratch registers for operands
-                    emit_load_value_v2(&mut code, left, assignments, Reg::R2);
-                    emit_load_value_v2(&mut code, right, assignments, Reg::R3);
+                    // Use R4 and R5 as scratch registers for operands
+                    emit_load_value_v2(&mut code, left, assignments, Reg::R4);
+                    emit_load_value_v2(&mut code, right, assignments, Reg::R5);
 
-                    // Compute result into R2
+                    // Compute result into R4
                     match op {
-                        BinOp::Add => code.push(VmInstr::Add { dest: Reg::R2, left: Reg::R2, right: Reg::R3 }),
-                        BinOp::Sub => code.push(VmInstr::Sub { dest: Reg::R2, left: Reg::R2, right: Reg::R3 }),
-                        BinOp::Mul => code.push(VmInstr::Mul { dest: Reg::R2, left: Reg::R2, right: Reg::R3 }),
+                        BinOp::Add => code.push(VmInstr::Add { dest: Reg::R4, left: Reg::R4, right: Reg::R5 }),
+                        BinOp::Sub => code.push(VmInstr::Sub { dest: Reg::R4, left: Reg::R4, right: Reg::R5 }),
+                        BinOp::Mul => code.push(VmInstr::Mul { dest: Reg::R4, left: Reg::R4, right: Reg::R5 }),
                     }
 
                     // Store result to destination
-                    emit_store_to_loc_v2(&mut code, Reg::R2, dest_loc);
+                    emit_store_to_loc_v2(&mut code, Reg::R4, dest_loc);
                 }
                 TestInstr::Neg { dest, operand } => {
                     let dest_loc = assignments.get(dest).cloned().unwrap_or(Location::Register(0));
 
-                    emit_load_value_v2(&mut code, operand, assignments, Reg::R2);
-                    code.push(VmInstr::Neg { dest: Reg::R2, src: Reg::R2 });
-                    emit_store_to_loc_v2(&mut code, Reg::R2, dest_loc);
+                    emit_load_value_v2(&mut code, operand, assignments, Reg::R4);
+                    code.push(VmInstr::Neg { dest: Reg::R4, src: Reg::R4 });
+                    emit_store_to_loc_v2(&mut code, Reg::R4, dest_loc);
                 }
                 TestInstr::Copy { dest, src } => {
                     let dest_loc = assignments.get(dest).cloned().unwrap_or(Location::Register(0));
@@ -452,13 +492,24 @@ pub fn generate_vm_code_v2(
                         }
                         _ => {
                             // Use scratch register
-                            emit_load_value_v2(&mut code, src, assignments, Reg::R2);
-                            emit_store_to_loc_v2(&mut code, Reg::R2, dest_loc);
+                            emit_load_value_v2(&mut code, src, assignments, Reg::R4);
+                            emit_store_to_loc_v2(&mut code, Reg::R4, dest_loc);
                         }
                     }
                 }
                 TestInstr::PhiAssign { .. } => {
                     // Phis should be eliminated before codegen
+                }
+                TestInstr::Call { dest, return_value } => {
+                    let dest_loc = assignments.get(dest).cloned().unwrap_or(Location::Register(0));
+
+                    // Emit a call that returns the specified value.
+                    // The call will clobber R0 and R1 (caller-saved registers).
+                    // The result goes into R0 initially (calling convention).
+                    code.push(VmInstr::Call { dest: Reg::R0, return_value: *return_value });
+
+                    // Store result to destination
+                    emit_store_to_loc_v2(&mut code, Reg::R0, dest_loc);
                 }
             }
         }
@@ -567,6 +618,9 @@ pub fn interpret_ssa(
                         env.insert(dest.clone(), value);
                     }
                 }
+                TestInstr::Call { dest, return_value } => {
+                    env.insert(dest.clone(), *return_value);
+                }
             }
         }
     }
@@ -598,6 +652,8 @@ pub enum TestProgramInstr {
     BinOp { var_id: usize, left_id: usize, op: BinOp, right_id: usize },
     Neg { var_id: usize, src_id: usize },
     Copy { var_id: usize, src_id: usize },
+    /// Simulates a function call that returns a value and clobbers caller-saved registers
+    Call { var_id: usize, return_value: i64 },
 }
 
 impl TestProgram {
@@ -647,6 +703,14 @@ impl TestProgram {
                     });
                     translator.write_variable(format!("v{}", var_id), block_id, TestValue::Var(dest));
                 }
+                TestProgramInstr::Call { var_id, return_value } => {
+                    let dest = SsaVariable::new(&format!("v{}", var_id));
+                    translator.emit(TestInstr::Call {
+                        dest: dest.clone(),
+                        return_value: *return_value,
+                    });
+                    translator.write_variable(format!("v{}", var_id), block_id, TestValue::Var(dest));
+                }
             }
         }
 
@@ -681,6 +745,9 @@ impl TestProgram {
                     let val = env.get(src_id).copied().unwrap_or(0);
                     env.insert(*var_id, val);
                 }
+                TestProgramInstr::Call { var_id, return_value } => {
+                    env.insert(*var_id, *return_value);
+                }
             }
         }
 
@@ -693,7 +760,8 @@ impl TestProgram {
             TestProgramInstr::Const { var_id, .. }
             | TestProgramInstr::BinOp { var_id, .. }
             | TestProgramInstr::Neg { var_id, .. }
-            | TestProgramInstr::Copy { var_id, .. } => *var_id,
+            | TestProgramInstr::Copy { var_id, .. }
+            | TestProgramInstr::Call { var_id, .. } => *var_id,
         }).collect()
     }
 }
@@ -762,6 +830,11 @@ fn arb_program(max_vars: usize) -> impl Strategy<Value = TestProgram> {
 // Tests
 // ============================================================================
 
+/// Check if a TestInstr is a call instruction (clobbers caller-saved registers)
+fn is_call_instr(instr: &TestInstr) -> bool {
+    matches!(instr, TestInstr::Call { .. })
+}
+
 /// Full pipeline: SSA → RegAlloc → CodeGen → VM execution
 ///
 /// This test verifies that register allocation produces correct code by:
@@ -782,9 +855,13 @@ fn run_full_pipeline(program: &TestProgram) -> Result<(), String> {
     // 3. Eliminate phis (for straight-line code this is a no-op)
     PhiElimination::eliminate(&mut translator);
 
-    // 4. Compute liveness and intervals
+    // 4. Compute liveness and intervals WITH call site detection
     let liveness = LivenessAnalysis::compute(&translator);
-    let mut interval_analysis = IntervalAnalysis::compute(&translator, &liveness);
+    let mut interval_analysis = IntervalAnalysis::compute_with_call_sites(
+        &translator,
+        &liveness,
+        is_call_instr,  // Closure to detect call instructions
+    );
 
     // 5. Run register allocation
     let config = LinearScanConfig::default();
@@ -933,4 +1010,124 @@ fn test_reuse_after_last_use() {
         ],
     };
     run_full_pipeline(&program).unwrap();
+}
+
+// ============================================================================
+// Call clobbering tests
+// ============================================================================
+
+#[test]
+fn test_single_call() {
+    // Simple case: a single call with no values crossing it
+    let program = TestProgram {
+        instructions: vec![
+            TestProgramInstr::Call { var_id: 0, return_value: 42 },
+        ],
+    };
+    run_full_pipeline(&program).unwrap();
+}
+
+#[test]
+fn test_call_result_used() {
+    // Call result is used in a subsequent operation
+    let program = TestProgram {
+        instructions: vec![
+            TestProgramInstr::Call { var_id: 0, return_value: 10 },
+            TestProgramInstr::Const { var_id: 1, value: 5 },
+            TestProgramInstr::BinOp { var_id: 2, left_id: 0, op: BinOp::Add, right_id: 1 },
+        ],
+    };
+    run_full_pipeline(&program).unwrap();
+}
+
+#[test]
+fn test_value_survives_call() {
+    // A value is defined BEFORE a call and used AFTER - must survive the call.
+    // The register allocator must put v0 in a callee-saved register (R2 or R3)
+    // or spill it.
+    let program = TestProgram {
+        instructions: vec![
+            TestProgramInstr::Const { var_id: 0, value: 100 },  // Must survive the call
+            TestProgramInstr::Call { var_id: 1, return_value: 42 },  // Clobbers R0, R1
+            TestProgramInstr::BinOp { var_id: 2, left_id: 0, op: BinOp::Add, right_id: 1 },  // Uses v0 after call
+        ],
+    };
+    let result = run_full_pipeline(&program);
+    assert!(result.is_ok(), "Error: {:?}", result);
+}
+
+#[test]
+fn test_fib_pattern_two_calls() {
+    // This is the fib(n-1) + fib(n-2) pattern that caused the original bug.
+    // v0 = call1() - returns 10
+    // v1 = call2() - returns 20, CLOBBERS R0/R1
+    // v2 = v0 + v1 - v0 must have survived call2!
+    let program = TestProgram {
+        instructions: vec![
+            TestProgramInstr::Call { var_id: 0, return_value: 10 },  // First call
+            TestProgramInstr::Call { var_id: 1, return_value: 20 },  // Second call clobbers
+            TestProgramInstr::BinOp { var_id: 2, left_id: 0, op: BinOp::Add, right_id: 1 },  // Should be 30
+        ],
+    };
+    let result = run_full_pipeline(&program);
+    assert!(result.is_ok(), "Error: {:?}", result);
+}
+
+#[test]
+fn test_multiple_values_survive_call() {
+    // Multiple values must survive a call
+    let program = TestProgram {
+        instructions: vec![
+            TestProgramInstr::Const { var_id: 0, value: 1 },
+            TestProgramInstr::Const { var_id: 1, value: 2 },
+            TestProgramInstr::Call { var_id: 2, return_value: 100 },
+            // Both v0 and v1 must survive the call
+            TestProgramInstr::BinOp { var_id: 3, left_id: 0, op: BinOp::Add, right_id: 1 },
+            TestProgramInstr::BinOp { var_id: 4, left_id: 3, op: BinOp::Add, right_id: 2 },
+        ],
+    };
+    let result = run_full_pipeline(&program);
+    assert!(result.is_ok(), "Error: {:?}", result);
+}
+
+#[test]
+fn test_three_calls_chain() {
+    // Three calls in a row, each result must survive subsequent calls
+    // v0 = call() returns 1
+    // v1 = call() returns 2, v0 must survive
+    // v2 = call() returns 3, v0 and v1 must survive
+    // v3 = v0 + v1 + v2 = 6
+    let program = TestProgram {
+        instructions: vec![
+            TestProgramInstr::Call { var_id: 0, return_value: 1 },
+            TestProgramInstr::Call { var_id: 1, return_value: 2 },
+            TestProgramInstr::Call { var_id: 2, return_value: 3 },
+            TestProgramInstr::BinOp { var_id: 3, left_id: 0, op: BinOp::Add, right_id: 1 },
+            TestProgramInstr::BinOp { var_id: 4, left_id: 3, op: BinOp::Add, right_id: 2 },
+        ],
+    };
+    let result = run_full_pipeline(&program);
+    assert!(result.is_ok(), "Error: {:?}", result);
+}
+
+#[test]
+fn test_call_with_spilling_pressure() {
+    // Many values that must survive a call - forces spilling
+    // We have 2 callee-saved regs (R2, R3), so 3+ values that survive calls must spill
+    let program = TestProgram {
+        instructions: vec![
+            TestProgramInstr::Const { var_id: 0, value: 1 },
+            TestProgramInstr::Const { var_id: 1, value: 2 },
+            TestProgramInstr::Const { var_id: 2, value: 3 },
+            TestProgramInstr::Const { var_id: 3, value: 4 },
+            TestProgramInstr::Call { var_id: 4, return_value: 100 },
+            // All of v0-v3 must survive the call - this requires spilling
+            TestProgramInstr::BinOp { var_id: 5, left_id: 0, op: BinOp::Add, right_id: 1 },
+            TestProgramInstr::BinOp { var_id: 6, left_id: 2, op: BinOp::Add, right_id: 3 },
+            TestProgramInstr::BinOp { var_id: 7, left_id: 5, op: BinOp::Add, right_id: 6 },
+            TestProgramInstr::BinOp { var_id: 8, left_id: 7, op: BinOp::Add, right_id: 4 },
+        ],
+    };
+    let result = run_full_pipeline(&program);
+    assert!(result.is_ok(), "Error: {:?}", result);
 }

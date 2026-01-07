@@ -405,7 +405,11 @@ struct InstallOutputPanel: View {
                 }
                 .padding(.horizontal, 12)
                 .padding(.vertical, 8)
+                #if os(iOS)
+                .background(Color(.systemBackground))
+                #else
                 .background(Color(nsColor: .windowBackgroundColor))
+                #endif
             }
             .buttonStyle(.plain)
 

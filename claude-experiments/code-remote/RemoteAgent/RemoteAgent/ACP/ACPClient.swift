@@ -108,6 +108,7 @@ actor ACPClient {
 
     // MARK: - Connection
 
+    #if os(macOS)
     /// Connect to an ACP agent via subprocess
     func connect(
         command: String,
@@ -154,6 +155,7 @@ actor ACPClient {
 
         emitEvent(.connected(agentInfo: result.agentInfo))
     }
+    #endif
 
     /// Connect using an existing connection (for testing or custom transports)
     func connect(using connection: any ACPConnectionProtocol) async throws {
@@ -374,7 +376,8 @@ extension ACPClient {
         )
     }
 
-    /// Connect to claude-code-acp subprocess
+    #if os(macOS)
+    /// Connect to claude-code-acp subprocess (macOS only)
     /// Requires: npm install -g @zed-industries/claude-code-acp
     func connectToClaudeCodeACP(
         acpPath: String = "/usr/local/bin/claude-code-acp",
@@ -390,4 +393,5 @@ extension ACPClient {
             currentDirectory: currentDirectory
         )
     }
+    #endif
 }

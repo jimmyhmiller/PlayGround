@@ -19,12 +19,12 @@
 //! algorithm runs. When a regular interval needs a register that's occupied
 //! by a pre-colored interval, it must be spilled or use a different register.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::types::SsaVariable;
 
 use super::interval::{LiveInterval, Location, ProgramPoint};
-use super::target::TargetArchitecture;
+use super::target::{PhysicalRegister, TargetArchitecture};
 
 /// Configuration for the linear scan allocator.
 #[derive(Debug, Clone)]
@@ -192,8 +192,18 @@ where
             // Try to allocate a register
             let register_hint = intervals[idx].register_hint;
             let end = intervals[idx].end().unwrap_or(start);
+            let crosses_call = intervals[idx].crosses_call;
 
-            if let Some(reg) = self.try_allocate_register_with_hint(register_hint) {
+            // Choose allocation strategy based on whether interval crosses a call
+            let allocated_reg = if crosses_call {
+                // Must use a callee-saved register (preserved across calls)
+                self.try_allocate_callee_saved(register_hint)
+            } else {
+                // Can use any register
+                self.try_allocate_register_with_hint(register_hint)
+            };
+
+            if let Some(reg) = allocated_reg {
                 intervals[idx].assignment = Some(Location::Register(reg));
                 self.stats.registers_assigned += 1;
 
@@ -267,13 +277,25 @@ where
     fn spill_at_interval(&mut self, intervals: &mut [LiveInterval], current_idx: usize) {
         let current_interval = &intervals[current_idx];
         let current_end = current_interval.end();
+        let current_crosses_call = current_interval.crosses_call;
+
+        // Get callee-saved register IDs for filtering
+        let callee_saved = self.callee_saved_ids();
 
         // Find the interval with the furthest end point among active intervals
         let spill_candidate = self.active.iter()
             .enumerate()
             .filter(|(_, entry)| {
                 // Don't spill fixed-register intervals
-                intervals[entry.interval_idx].fixed_register.is_none()
+                if intervals[entry.interval_idx].fixed_register.is_some() {
+                    return false;
+                }
+                // If current interval crosses a call, we can only evict from
+                // callee-saved registers (since we need a callee-saved register)
+                if current_crosses_call && !callee_saved.contains(&entry.register) {
+                    return false;
+                }
+                true
             })
             .max_by_key(|(_, entry)| entry.end);
 
@@ -321,6 +343,41 @@ where
         let slot = self.next_stack_slot;
         self.next_stack_slot += 1;
         slot
+    }
+
+    /// Get the set of callee-saved register IDs.
+    fn callee_saved_ids(&self) -> HashSet<usize> {
+        self.target.callee_saved().iter().map(|r| r.id()).collect()
+    }
+
+    /// Try to allocate a register for an interval that crosses a call.
+    ///
+    /// Only callee-saved registers can be used for such intervals.
+    fn try_allocate_callee_saved(&mut self, hint: Option<usize>) -> Option<usize> {
+        let callee_saved = self.callee_saved_ids();
+
+        // Check hint first (only if it's callee-saved)
+        if self.config.use_hints {
+            if let Some(h) = hint {
+                if callee_saved.contains(&h)
+                    && self.free_registers.get(h).copied().unwrap_or(false)
+                {
+                    self.free_registers[h] = false;
+                    return Some(h);
+                }
+            }
+        }
+
+        // Find any free callee-saved register
+        for &reg in self.target.callee_saved() {
+            let id = reg.id();
+            if self.free_registers.get(id).copied().unwrap_or(false) {
+                self.free_registers[id] = false;
+                return Some(id);
+            }
+        }
+
+        None
     }
 }
 

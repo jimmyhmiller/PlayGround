@@ -27,10 +27,39 @@
 //! ```
 
 use std::collections::{HashMap, HashSet};
+use std::fmt;
 
+use crate::optim::traits::{OptimizableInstruction, OptimizableValue};
 use crate::traits::{InstructionFactory, SsaInstruction, SsaValue};
 use crate::translator::SSATranslator;
 use crate::types::BlockId;
+
+/// Violations found during phi elimination validation.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PhiEliminationViolation {
+    /// Phi nodes remain after elimination (should be empty)
+    PhisRemainAfterElimination { count: usize },
+    /// Block has no instructions (empty block)
+    EmptyBlock { block_id: BlockId },
+    /// Block is unreachable (no predecessors and not entry)
+    UnreachableBlock { block_id: BlockId },
+}
+
+impl fmt::Display for PhiEliminationViolation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            PhiEliminationViolation::PhisRemainAfterElimination { count } => {
+                write!(f, "{} phi nodes remain after elimination (should be 0)", count)
+            }
+            PhiEliminationViolation::EmptyBlock { block_id } => {
+                write!(f, "Block {:?} has no instructions after phi elimination", block_id)
+            }
+            PhiEliminationViolation::UnreachableBlock { block_id } => {
+                write!(f, "Block {:?} is unreachable (no predecessors)", block_id)
+            }
+        }
+    }
+}
 
 /// Phi elimination pass.
 ///
@@ -51,13 +80,20 @@ impl PhiElimination {
     /// your CFG may have critical edges.
     pub fn eliminate<V, I, F>(translator: &mut SSATranslator<V, I, F>)
     where
-        V: SsaValue,
-        I: SsaInstruction<Value = V>,
+        V: SsaValue + OptimizableValue,
+        I: SsaInstruction<Value = V> + OptimizableInstruction,
         F: InstructionFactory<Instr = I>,
     {
         // Collect all phi information first to avoid borrow issues
-        let phi_info: Vec<_> = translator.phis.values()
-            .filter_map(|phi| {
+        // IMPORTANT: Sort by phi ID to ensure deterministic ordering.
+        // HashMap iteration order is non-deterministic, which can cause
+        // different copy insertion orders and incorrect results.
+        let mut phi_ids: Vec<_> = translator.phis.keys().cloned().collect();
+        phi_ids.sort_by_key(|id| id.0);
+
+        let phi_info: Vec<_> = phi_ids.iter()
+            .filter_map(|phi_id| {
+                let phi = translator.phis.get(phi_id)?;
                 let dest = phi.dest.clone()?;
                 let block_id = phi.block_id;
                 let operands = phi.operands.clone();
@@ -99,8 +135,8 @@ impl PhiElimination {
         instruction: I,
     )
     where
-        V: SsaValue,
-        I: SsaInstruction<Value = V>,
+        V: SsaValue + OptimizableValue,
+        I: SsaInstruction<Value = V> + OptimizableInstruction,
         F: InstructionFactory<Instr = I>,
     {
         let block = &mut translator.blocks[block_id.0];
@@ -109,8 +145,18 @@ impl PhiElimination {
         if len == 0 {
             block.instructions.push(instruction);
         } else {
-            // Insert before the last instruction (assumed to be terminator)
-            block.instructions.insert(len - 1, instruction);
+            // Check if the last instruction is actually a terminator
+            let last_is_terminator = block.instructions.last()
+                .map(|i| i.is_terminator())
+                .unwrap_or(false);
+
+            if last_is_terminator {
+                // Insert before the terminator
+                block.instructions.insert(len - 1, instruction);
+            } else {
+                // No terminator - append to the end
+                block.instructions.push(instruction);
+            }
         }
     }
 
@@ -235,6 +281,85 @@ impl PhiElimination {
         }
 
         conflicts
+    }
+
+    /// Validate the IR state after phi elimination.
+    ///
+    /// Returns a list of violations found. An empty list indicates valid state.
+    pub fn validate<V, I, F>(
+        translator: &SSATranslator<V, I, F>,
+    ) -> Vec<PhiEliminationViolation>
+    where
+        V: SsaValue,
+        I: SsaInstruction<Value = V>,
+        F: InstructionFactory<Instr = I>,
+    {
+        let mut violations = Vec::new();
+
+        // Check that all phis have been eliminated
+        if !translator.phis.is_empty() {
+            violations.push(PhiEliminationViolation::PhisRemainAfterElimination {
+                count: translator.phis.len(),
+            });
+        }
+
+        // Check for empty blocks
+        let entry_block = BlockId(0);
+        for block in &translator.blocks {
+            if block.instructions.is_empty() {
+                violations.push(PhiEliminationViolation::EmptyBlock {
+                    block_id: block.id,
+                });
+            }
+
+            // Check for unreachable blocks (except entry)
+            if block.id != entry_block && block.predecessors.is_empty() {
+                violations.push(PhiEliminationViolation::UnreachableBlock {
+                    block_id: block.id,
+                });
+            }
+        }
+
+        violations
+    }
+
+    /// Eliminate phi nodes and validate the result.
+    ///
+    /// This is equivalent to calling `eliminate` followed by `validate`,
+    /// but panics if validation fails.
+    pub fn eliminate_and_verify<V, I, F>(translator: &mut SSATranslator<V, I, F>)
+    where
+        V: SsaValue + OptimizableValue,
+        I: SsaInstruction<Value = V> + OptimizableInstruction,
+        F: InstructionFactory<Instr = I>,
+    {
+        Self::eliminate(translator);
+
+        let violations = Self::validate(translator);
+        if !violations.is_empty() {
+            let mut msg = String::from("Phi elimination validation failed:\n");
+            for v in &violations {
+                msg.push_str(&format!("  - {}\n", v));
+            }
+            panic!("{}", msg);
+        }
+    }
+}
+
+/// Assert phi elimination validation passes.
+pub fn assert_valid_after_phi_elimination<V, I, F>(translator: &SSATranslator<V, I, F>)
+where
+    V: SsaValue,
+    I: SsaInstruction<Value = V>,
+    F: InstructionFactory<Instr = I>,
+{
+    let violations = PhiElimination::validate(translator);
+    if !violations.is_empty() {
+        let mut msg = String::from("Post-phi-elimination validation failed:\n");
+        for v in &violations {
+            msg.push_str(&format!("  - {}\n", v));
+        }
+        panic!("{}", msg);
     }
 }
 

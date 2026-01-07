@@ -120,6 +120,8 @@ struct ServerFormView: View {
     @State private var port: String = "22"
     @State private var username: String = ""
     @State private var authMethod: AuthMethod = .password
+    @State private var password: String = ""
+    @State private var hasExistingPassword: Bool = false
     @State private var privateKeyPath: String = ""
 
     @State private var isTesting = false
@@ -139,107 +141,122 @@ struct ServerFormView: View {
         NavigationStack {
             Form {
                 Section("Server Details") {
-                    TextField("Name", text: $name)
-                        .textContentType(.name)
+                TextField("Name", text: $name)
+                    .textContentType(.name)
 
-                    TextField("Host", text: $host)
-                        .textContentType(.URL)
-                        #if os(iOS)
-                        .autocapitalization(.none)
-                        .keyboardType(.URL)
-                        #endif
+                TextField("Host", text: $host)
+                    .textContentType(.URL)
+                    #if os(iOS)
+                    .autocapitalization(.none)
+                    .keyboardType(.URL)
+                    #endif
 
-                    TextField("Port", text: $port)
-                        #if os(iOS)
-                        .keyboardType(.numberPad)
-                        #endif
+                TextField("Port", text: $port)
+                    #if os(iOS)
+                    .keyboardType(.numberPad)
+                    #endif
 
-                    TextField("Username", text: $username)
-                        .textContentType(.username)
-                        #if os(iOS)
-                        .autocapitalization(.none)
-                        #endif
+                TextField("Username", text: $username)
+                    .textContentType(.username)
+                    #if os(iOS)
+                    .autocapitalization(.none)
+                    #endif
+            }
+
+            Section("Authentication") {
+                Picker("Method", selection: $authMethod) {
+                    Text("Password").tag(AuthMethod.password)
+                    Text("Private Key").tag(AuthMethod.privateKey)
                 }
+                .pickerStyle(.segmented)
 
-                Section("Authentication") {
-                    Picker("Method", selection: $authMethod) {
-                        Text("Password").tag(AuthMethod.password)
-                        Text("Private Key").tag(AuthMethod.privateKey)
-                    }
-                    .pickerStyle(.segmented)
+                if authMethod == .password {
+                    SecureField(hasExistingPassword ? "Password (saved)" : "Password", text: $password)
+                        .textContentType(.password)
 
-                    if authMethod == .privateKey {
-                        TextField("Private Key Path", text: $privateKeyPath)
-                            #if os(iOS)
-                            .autocapitalization(.none)
-                            #endif
-
-                        Text("e.g., ~/.ssh/id_rsa")
+                    if hasExistingPassword && password.isEmpty {
+                        Text("Password saved in Keychain")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
                 }
 
-                Section {
-                    Button {
-                        testConnection()
-                    } label: {
-                        HStack {
-                            if isTesting {
-                                ProgressView()
-                                    .padding(.trailing, 4)
-                            }
-                            Text("Test Connection")
+                if authMethod == .privateKey {
+                    TextField("Private Key Path", text: $privateKeyPath)
+                        #if os(iOS)
+                        .autocapitalization(.none)
+                        #endif
+
+                    Text("e.g., ~/.ssh/id_rsa")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            Section {
+                Button {
+                    testConnection()
+                } label: {
+                    HStack {
+                        if isTesting {
+                            ProgressView()
+                                .padding(.trailing, 4)
+                        }
+                        Text("Test Connection")
+                    }
+                }
+                .disabled(host.isEmpty || username.isEmpty || isTesting)
+
+                if let result = testResult {
+                    HStack {
+                        switch result {
+                        case .success:
+                            Image(systemName: "checkmark.circle.fill")
+                                .foregroundStyle(.green)
+                            Text("Connection successful")
+                        case .failure(let error):
+                            Image(systemName: "xmark.circle.fill")
+                                .foregroundStyle(.red)
+                            Text(error)
+                                .font(.caption)
                         }
                     }
-                    .disabled(host.isEmpty || username.isEmpty || isTesting)
+                }
+            }
+        }
+        .navigationTitle(isEditing ? "Edit Server" : "Add Server")
+        #if os(iOS)
+        .navigationBarTitleDisplayMode(.inline)
+        #endif
+        .toolbar {
+            ToolbarItem(placement: .cancellationAction) {
+                Button("Cancel") {
+                    dismiss()
+                }
+            }
 
-                    if let result = testResult {
-                        HStack {
-                            switch result {
-                            case .success:
-                                Image(systemName: "checkmark.circle.fill")
-                                    .foregroundStyle(.green)
-                                Text("Connection successful")
-                            case .failure(let error):
-                                Image(systemName: "xmark.circle.fill")
-                                    .foregroundStyle(.red)
-                                Text(error)
-                                    .font(.caption)
-                            }
-                        }
-                    }
+            ToolbarItem(placement: .confirmationAction) {
+                Button("Save") {
+                    saveServer()
+                    dismiss()
                 }
+                .disabled(name.isEmpty || host.isEmpty || username.isEmpty)
             }
-            .navigationTitle(isEditing ? "Edit Server" : "Add Server")
-            #if os(iOS)
-            .navigationBarTitleDisplayMode(.inline)
-            #endif
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") {
-                        dismiss()
-                    }
-                }
-
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Save") {
-                        saveServer()
-                        dismiss()
-                    }
-                    .disabled(name.isEmpty || host.isEmpty || username.isEmpty)
-                }
+        }
+        .task {
+            if case .edit(let server) = mode {
+                name = server.name
+                host = server.host
+                port = String(server.port)
+                username = server.username
+                authMethod = server.authMethod
+                privateKeyPath = server.privateKeyPath ?? ""
+                // Check if password exists in Keychain (async to avoid blocking)
+                hasExistingPassword = await Task.detached {
+                    KeychainService.hasPassword(for: server.id)
+                }.value
             }
-            .onAppear {
-                if case .edit(let server) = mode {
-                    name = server.name
-                    host = server.host
-                    port = String(server.port)
-                    username = server.username
-                    authMethod = server.authMethod
-                    privateKeyPath = server.privateKeyPath ?? ""
-                }
-            }
+        }
         }
     }
 
@@ -258,6 +275,10 @@ struct ServerFormView: View {
             if authMethod == .privateKey {
                 server.privateKeyPath = privateKeyPath
             }
+            // Save password to Keychain if using password auth
+            if authMethod == .password && !password.isEmpty {
+                try? KeychainService.savePassword(password, for: server.id)
+            }
             onSave(server)
 
         case .edit(let server):
@@ -267,6 +288,17 @@ struct ServerFormView: View {
             server.username = username
             server.authMethod = authMethod
             server.privateKeyPath = authMethod == .privateKey ? privateKeyPath : nil
+
+            // Update password in Keychain
+            if authMethod == .password {
+                if !password.isEmpty {
+                    try? KeychainService.savePassword(password, for: server.id)
+                }
+                // If password is empty but we had one saved, keep it
+            } else {
+                // Switching to key auth - remove any saved password
+                try? KeychainService.deletePassword(for: server.id)
+            }
         }
     }
 

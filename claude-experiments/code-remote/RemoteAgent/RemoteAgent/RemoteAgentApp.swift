@@ -8,8 +8,10 @@ import _CryptoExtras
 import AppKit
 #endif
 
+#if os(macOS)
 // Set to true to run SSH debug test on launch
 let RUN_SSH_DEBUG_TEST = false
+#endif
 
 @main
 struct RemoteAgentApp: App {
@@ -18,6 +20,14 @@ struct RemoteAgentApp: App {
     #endif
 
     var sharedModelContainer: ModelContainer = {
+        // Ensure Application Support directory exists before SwiftData tries to create the store
+        let fileManager = FileManager.default
+        if let appSupportURL = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first {
+            if !fileManager.fileExists(atPath: appSupportURL.path) {
+                try? fileManager.createDirectory(at: appSupportURL, withIntermediateDirectories: true)
+            }
+        }
+
         let schema = Schema([
             Server.self,
             Project.self,
@@ -31,6 +41,7 @@ struct RemoteAgentApp: App {
         }
     }()
 
+    #if os(macOS)
     init() {
         if RUN_SSH_DEBUG_TEST {
             Task {
@@ -38,6 +49,7 @@ struct RemoteAgentApp: App {
             }
         }
     }
+    #endif
 
     var body: some Scene {
         WindowGroup {
@@ -47,6 +59,7 @@ struct RemoteAgentApp: App {
     }
 }
 
+#if os(macOS)
 func runSSHDebugTest() async {
     print("\n========== SSH DEBUG TEST ==========")
 
@@ -139,6 +152,7 @@ func runSSHDebugTest() async {
 
     print("========== END SSH DEBUG TEST ==========\n")
 }
+#endif
 
 #if os(macOS)
 class AppDelegate: NSObject, NSApplicationDelegate {

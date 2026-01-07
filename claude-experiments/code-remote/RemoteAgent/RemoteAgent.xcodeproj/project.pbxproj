@@ -26,6 +26,12 @@
 		A1000017 /* ToolCallView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000017 /* ToolCallView.swift */; };
 		A1000018 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A2000018 /* Assets.xcassets */; };
 		A1000019 /* Citadel in Frameworks */ = {isa = PBXBuildFile; productRef = A10000P1 /* Citadel */; };
+		A1000029 /* ACPLib in Frameworks */ = {isa = PBXBuildFile; productRef = A10000P2 /* ACPLib */; };
+		A1000025 /* ACPService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000025 /* ACPService.swift */; };
+		A1000026 /* ACPChatViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000026 /* ACPChatViewModel.swift */; };
+		A1000027 /* ACPChatView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000027 /* ACPChatView.swift */; };
+		A1000028 /* RemoteFileBrowser.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000028 /* RemoteFileBrowser.swift */; };
+		A1000030 /* KeychainService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000030 /* KeychainService.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -47,6 +53,16 @@
 		A2000016 /* CodeBlock.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodeBlock.swift; sourceTree = "<group>"; };
 		A2000017 /* ToolCallView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToolCallView.swift; sourceTree = "<group>"; };
 		A2000018 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		A2000020 /* ACP.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ACP.swift; sourceTree = "<group>"; };
+		A2000021 /* ACPClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ACPClient.swift; sourceTree = "<group>"; };
+		A2000022 /* Connection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Connection.swift; sourceTree = "<group>"; };
+		A2000023 /* JSONRPC.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JSONRPC.swift; sourceTree = "<group>"; };
+		A2000024 /* Types.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Types.swift; sourceTree = "<group>"; };
+		A2000025 /* ACPService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ACPService.swift; sourceTree = "<group>"; };
+		A2000026 /* ACPChatViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ACPChatViewModel.swift; sourceTree = "<group>"; };
+		A2000027 /* ACPChatView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ACPChatView.swift; sourceTree = "<group>"; };
+		A2000028 /* RemoteFileBrowser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteFileBrowser.swift; sourceTree = "<group>"; };
+		A2000030 /* KeychainService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeychainService.swift; sourceTree = "<group>"; };
 		A3000001 /* RemoteAgent.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = RemoteAgent.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
@@ -56,6 +72,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				A1000019 /* Citadel in Frameworks */,
+				A1000029 /* ACPLib in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -75,6 +92,7 @@
 			children = (
 				A2000001 /* RemoteAgentApp.swift */,
 				A2000002 /* ContentView.swift */,
+				A5000009 /* ACP */,
 				A5000004 /* Models */,
 				A5000005 /* Services */,
 				A5000006 /* ViewModels */,
@@ -109,6 +127,8 @@
 				A2000007 /* SSHService.swift */,
 				A2000008 /* ClaudeClient.swift */,
 				A2000009 /* SessionStore.swift */,
+				A2000025 /* ACPService.swift */,
+				A2000030 /* KeychainService.swift */,
 			);
 			path = Services;
 			sourceTree = "<group>";
@@ -117,6 +137,7 @@
 			isa = PBXGroup;
 			children = (
 				A2000010 /* ChatViewModel.swift */,
+				A2000026 /* ACPChatViewModel.swift */,
 			);
 			path = ViewModels;
 			sourceTree = "<group>";
@@ -128,6 +149,7 @@
 				A2000012 /* ProjectListView.swift */,
 				A2000013 /* SessionListView.swift */,
 				A2000014 /* ChatView.swift */,
+				A2000027 /* ACPChatView.swift */,
 				A5000008 /* Components */,
 			);
 			path = Views;
@@ -139,8 +161,21 @@
 				A2000015 /* InputBar.swift */,
 				A2000016 /* CodeBlock.swift */,
 				A2000017 /* ToolCallView.swift */,
+				A2000028 /* RemoteFileBrowser.swift */,
 			);
 			path = Components;
+			sourceTree = "<group>";
+		};
+		A5000009 /* ACP */ = {
+			isa = PBXGroup;
+			children = (
+				A2000020 /* ACP.swift */,
+				A2000021 /* ACPClient.swift */,
+				A2000022 /* Connection.swift */,
+				A2000023 /* JSONRPC.swift */,
+				A2000024 /* Types.swift */,
+			);
+			path = ACP;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -161,6 +196,7 @@
 			name = RemoteAgent;
 			packageProductDependencies = (
 				A10000P1 /* Citadel */,
+				A10000P2 /* ACPLib */,
 			);
 			productName = RemoteAgent;
 			productReference = A3000001 /* RemoteAgent.app */;
@@ -192,6 +228,7 @@
 			mainGroup = A5000001;
 			packageReferences = (
 				AB000001 /* XCRemoteSwiftPackageReference "Citadel" */,
+				AB000002 /* XCLocalSwiftPackageReference "acp-lib" */,
 			);
 			productRefGroup = A5000003 /* Products */;
 			projectDirPath = "";
@@ -235,6 +272,11 @@
 				A1000015 /* InputBar.swift in Sources */,
 				A1000016 /* CodeBlock.swift in Sources */,
 				A1000017 /* ToolCallView.swift in Sources */,
+				A1000025 /* ACPService.swift in Sources */,
+				A1000026 /* ACPChatViewModel.swift in Sources */,
+				A1000027 /* ACPChatView.swift in Sources */,
+				A1000028 /* RemoteFileBrowser.swift in Sources */,
+				A1000030 /* KeychainService.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -295,10 +337,10 @@
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
 				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = YES;
-				SDKROOT = iphoneos;
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
 				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
 			};
@@ -352,9 +394,9 @@
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
 				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
-				SDKROOT = iphoneos;
 				SWIFT_COMPILATION_MODE = wholemodule;
 				VALIDATE_PRODUCT = YES;
 			};
@@ -382,6 +424,8 @@
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.example.RemoteAgent;
 				PRODUCT_NAME = "$(TARGET_NAME)";
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator macosx";
+				SUPPORTS_MACCATALYST = NO;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
@@ -410,6 +454,8 @@
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.example.RemoteAgent;
 				PRODUCT_NAME = "$(TARGET_NAME)";
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator macosx";
+				SUPPORTS_MACCATALYST = NO;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
@@ -439,6 +485,13 @@
 		};
 /* End XCConfigurationList section */
 
+/* Begin XCLocalSwiftPackageReference section */
+		AB000002 /* XCLocalSwiftPackageReference "acp-lib" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = "../acp-lib";
+		};
+/* End XCLocalSwiftPackageReference section */
+
 /* Begin XCRemoteSwiftPackageReference section */
 		AB000001 /* XCRemoteSwiftPackageReference "Citadel" */ = {
 			isa = XCRemoteSwiftPackageReference;
@@ -455,6 +508,10 @@
 			isa = XCSwiftPackageProductDependency;
 			package = AB000001 /* XCRemoteSwiftPackageReference "Citadel" */;
 			productName = Citadel;
+		};
+		A10000P2 /* ACPLib */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = ACPLib;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

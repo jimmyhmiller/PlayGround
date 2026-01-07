@@ -17,7 +17,8 @@ public struct SSHConfiguration: Sendable {
     }
 }
 
-// MARK: - Managed Terminal
+#if os(macOS)
+// MARK: - Managed Terminal (macOS only)
 
 /// A managed terminal process
 actor ManagedTerminal {
@@ -163,12 +164,15 @@ actor ManagedTerminal {
         }
     }
 }
+#endif
 
 // MARK: - Terminal Manager
 
 /// Manages terminal processes for ACP
 public actor TerminalManager {
+    #if os(macOS)
     private var terminals: [String: ManagedTerminal] = [:]
+    #endif
     private var idCounter: Int = 0
     private var sshConfig: SSHConfiguration?
 
@@ -196,6 +200,7 @@ public actor TerminalManager {
         cwd: String? = nil,
         env: [String: String]? = nil
     ) async throws -> String {
+        #if os(macOS)
         idCounter += 1
         let id = "terminal-\(idCounter)"
 
@@ -207,10 +212,14 @@ public actor TerminalManager {
         acpLog("TerminalManager: created terminal \(id) for command: \(command) [\(mode)]")
 
         return id
+        #else
+        throw NSError(domain: "ACPLib", code: 1, userInfo: [NSLocalizedDescriptionKey: "Terminal execution not supported on iOS"])
+        #endif
     }
 
     /// Get the output from a terminal
     public func getOutput(terminalId: String) async -> (output: String, exitStatus: (exitCode: Int32?, signal: String?)?) {
+        #if os(macOS)
         guard let terminal = terminals[terminalId] else {
             return ("", nil)
         }
@@ -223,35 +232,48 @@ public actor TerminalManager {
         } else {
             return (output, nil)
         }
+        #else
+        return ("", nil)
+        #endif
     }
 
     /// Wait for a terminal to exit
     public func waitForExit(terminalId: String) async -> (exitCode: Int32?, signal: String?) {
+        #if os(macOS)
         guard let terminal = terminals[terminalId] else {
             return (nil, nil)
         }
 
         return await terminal.waitForExit()
+        #else
+        return (nil, nil)
+        #endif
     }
 
     /// Kill a terminal
     public func killTerminal(terminalId: String) async {
+        #if os(macOS)
         guard let terminal = terminals[terminalId] else { return }
         await terminal.kill()
+        #endif
     }
 
     /// Release (remove) a terminal
     public func releaseTerminal(terminalId: String) async {
+        #if os(macOS)
         if let terminal = terminals.removeValue(forKey: terminalId) {
             await terminal.kill()
         }
+        #endif
     }
 
     /// Clear all terminals
     public func clearAll() async {
+        #if os(macOS)
         for (_, terminal) in terminals {
             await terminal.kill()
         }
         terminals.removeAll()
+        #endif
     }
 }

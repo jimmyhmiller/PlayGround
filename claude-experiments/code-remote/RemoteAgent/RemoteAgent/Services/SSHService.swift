@@ -80,11 +80,18 @@ actor SSHService {
 
             switch server.authMethod {
             case .password:
-                guard let password = password, !password.isEmpty else {
+                // Try provided password first, then fall back to Keychain
+                let actualPassword: String
+                if let pwd = password, !pwd.isEmpty {
+                    actualPassword = pwd
+                } else if let keychainPwd = try? KeychainService.getPassword(for: server.id), !keychainPwd.isEmpty {
+                    print("[SSHService] Using password from Keychain")
+                    actualPassword = keychainPwd
+                } else {
                     print("[SSHService] ERROR: Password required but not provided")
-                    throw SSHError.authenticationFailed("Password required - please configure server to use SSH key auth")
+                    throw SSHError.authenticationFailed("Password required - please add password in server settings")
                 }
-                authMethod = .passwordBased(username: actualUsername, password: password)
+                authMethod = .passwordBased(username: actualUsername, password: actualPassword)
 
             case .privateKey:
                 // Auto-detect SSH key if no path specified
@@ -92,6 +99,7 @@ actor SSHService {
                 if let specifiedPath = server.privateKeyPath, !specifiedPath.isEmpty {
                     keyPath = specifiedPath
                 } else {
+                    #if os(macOS)
                     // Try common SSH key locations
                     let homeDir = FileManager.default.homeDirectoryForCurrentUser.path
                     let commonKeys = [
@@ -103,6 +111,9 @@ actor SSHService {
                         throw SSHError.authenticationFailed("No SSH key found. Checked: ~/.ssh/id_ed25519, ~/.ssh/id_rsa, ~/.ssh/id_ecdsa")
                     }
                     keyPath = foundKey
+                    #else
+                    throw SSHError.authenticationFailed("SSH key path must be specified on iOS")
+                    #endif
                 }
                 print("[SSHService] Using SSH key: \(keyPath)")
 

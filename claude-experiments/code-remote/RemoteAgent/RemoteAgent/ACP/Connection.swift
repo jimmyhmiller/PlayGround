@@ -53,6 +53,7 @@ protocol ACPConnectionProtocol: Actor {
 
 // MARK: - Subprocess ACP Connection
 
+#if os(macOS)
 /// Manages a connection to an ACP agent via subprocess (stdin/stdout)
 actor ACPSubprocessConnection: ACPConnectionProtocol {
     private let process: Process
@@ -306,6 +307,7 @@ actor ACPSubprocessConnection: ACPConnectionProtocol {
         }
     }
 }
+#endif
 
 // MARK: - Mock Connection for Testing
 

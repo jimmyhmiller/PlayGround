@@ -11,6 +11,7 @@ public enum ACPError: Error, LocalizedError, Sendable {
     case promptFailed(String)
     case cancelled
     case invalidState(String)
+    case notSupported(String)
 
     public var errorDescription: String? {
         switch self {
@@ -28,6 +29,8 @@ public enum ACPError: Error, LocalizedError, Sendable {
             return "Operation was cancelled"
         case .invalidState(let state):
             return "Invalid state: \(state)"
+        case .notSupported(let feature):
+            return "Not supported: \(feature)"
         }
     }
 }

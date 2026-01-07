@@ -80,7 +80,8 @@ public actor ACPClient {
 
     // MARK: - Connection
 
-    /// Connect to an ACP agent via subprocess
+    #if os(macOS)
+    /// Connect to an ACP agent via subprocess (macOS only)
     public func connect(
         command: String,
         arguments: [String] = [],
@@ -101,13 +102,13 @@ public actor ACPClient {
         )
 
         // Set up notification handler
-        await conn.setNotificationHandler { [weak self] notification in
+        await conn.setNotificationHandler { [weak self] (notification: JSONRPCNotification) in
             acpLog("ACPClient: received notification \(notification.method)")
             await self?.handleNotification(notification)
         }
 
         // Set up request handler for permission requests
-        await conn.setRequestHandler { [weak self] request in
+        await conn.setRequestHandler { [weak self] (request: JSONRPCRequest) in
             acpLog("ACPClient: received request \(request.method), id=\(request.id)")
             return await self?.handleRequest(request)
         }
@@ -138,6 +139,7 @@ public actor ACPClient {
         emitEvent(.connected(agentInfo: result.agentInfo))
         acpLog("ACPClient.connect: connected successfully")
     }
+    #endif
 
     /// Connect using an existing connection (for testing or custom transports)
     public func connect(using connection: any ACPConnectionProtocol) async throws {
@@ -777,7 +779,8 @@ public extension ACPClient {
         )
     }
 
-    /// Connect to claude-code-acp subprocess
+    #if os(macOS)
+    /// Connect to claude-code-acp subprocess (macOS only)
     /// Requires: npm install -g @anthropics/claude-code-acp
     func connectToClaudeCodeACP(
         acpPath: String = "/usr/local/bin/claude-code-acp",
@@ -793,4 +796,5 @@ public extension ACPClient {
             currentDirectory: currentDirectory
         )
     }
+    #endif
 }

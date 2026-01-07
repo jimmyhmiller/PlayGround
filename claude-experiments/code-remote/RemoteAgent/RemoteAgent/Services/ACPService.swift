@@ -50,6 +50,7 @@ class ACPService: ObservableObject {
 
     /// Check if claude-code-acp is installed locally
     static func isClaudeCodeACPInstalled() -> Bool {
+        #if os(macOS)
         let possiblePaths = [
             "/usr/local/bin/claude-code-acp",
             "/opt/homebrew/bin/claude-code-acp",
@@ -72,6 +73,10 @@ class ACPService: ObservableObject {
         try? result.run()
         result.waitUntilExit()
         return result.terminationStatus == 0
+        #else
+        // Local ACP not supported on iOS
+        return false
+        #endif
     }
 
     /// Check if claude-code-acp is installed on a remote server via SSH
@@ -80,37 +85,34 @@ class ACPService: ObservableObject {
         username: String,
         keyPath: String?
     ) async -> Bool {
-        await Task.detached {
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
+        do {
+            // Create a temporary server config
+            let tempServer = Server(
+                name: "temp",
+                host: host,
+                port: 22,
+                username: username,
+                authMethod: .privateKey
+            )
+            tempServer.privateKeyPath = keyPath
 
-            var args = ["-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=10"]
-            if let keyPath = keyPath, !keyPath.isEmpty {
-                args.append(contentsOf: ["-i", (keyPath as NSString).expandingTildeInPath])
-            }
-            args.append("\(username)@\(host)")
-            args.append("which claude-code-acp || command -v claude-code-acp")
+            let sshService = SSHService()
+            try await sshService.connect(to: tempServer, password: nil)
 
-            process.arguments = args
+            let output = try await sshService.executeCommand("which claude-code-acp || command -v claude-code-acp")
+            await sshService.disconnect()
 
-            let pipe = Pipe()
-            process.standardOutput = pipe
-            process.standardError = pipe
-
-            do {
-                try process.run()
-                process.waitUntilExit()
-                return process.terminationStatus == 0
-            } catch {
-                return false
-            }
-        }.value
+            return !output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        } catch {
+            return false
+        }
     }
 
     /// Install claude-code-acp locally
     static func installClaudeCodeACPLocal(
         onOutput: @escaping @Sendable (String) -> Void
     ) async -> Result<Void, Error> {
+        #if os(macOS)
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
         process.arguments = ["npm", "install", "-g", "@zed-industries/claude-code-acp"]
@@ -161,6 +163,9 @@ class ACPService: ObservableObject {
                 return .failure(ACPServiceError.connectionFailed("Installation failed with exit code \(process.terminationStatus)"))
             }
         }.value
+        #else
+        return .failure(ACPServiceError.connectionFailed("Local installation not supported on iOS"))
+        #endif
     }
 
     /// Install claude-code-acp on a remote server via SSH
@@ -170,65 +175,34 @@ class ACPService: ObservableObject {
         keyPath: String?,
         onOutput: @escaping @Sendable (String) -> Void
     ) async -> Result<Void, Error> {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
-
-        var args = ["-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no", "-t", "-t"]
-        if let keyPath = keyPath, !keyPath.isEmpty {
-            args.append(contentsOf: ["-i", (keyPath as NSString).expandingTildeInPath])
-        }
-        args.append("\(username)@\(host)")
-        // Use npm to install globally, trying common node paths
-        args.append("export PATH=$PATH:$HOME/.nvm/versions/node/*/bin:$HOME/.npm-global/bin:/usr/local/bin && npm install -g @zed-industries/claude-code-acp")
-
-        process.arguments = args
-
-        let stdoutPipe = Pipe()
-        let stderrPipe = Pipe()
-        process.standardOutput = stdoutPipe
-        process.standardError = stderrPipe
-
-        // Set up async reading for stdout
-        stdoutPipe.fileHandleForReading.readabilityHandler = { handle in
-            let data = handle.availableData
-            if !data.isEmpty, let output = String(data: data, encoding: .utf8) {
-                DispatchQueue.main.async {
-                    onOutput(output)
-                }
-            }
-        }
-
-        // Set up async reading for stderr
-        stderrPipe.fileHandleForReading.readabilityHandler = { handle in
-            let data = handle.availableData
-            if !data.isEmpty, let output = String(data: data, encoding: .utf8) {
-                DispatchQueue.main.async {
-                    onOutput(output)
-                }
-            }
-        }
-
         do {
-            try process.run()
+            // Create a temporary server config
+            let tempServer = Server(
+                name: "temp",
+                host: host,
+                port: 22,
+                username: username,
+                authMethod: .privateKey
+            )
+            tempServer.privateKeyPath = keyPath
+
+            let sshService = SSHService()
+            try await sshService.connect(to: tempServer, password: nil)
+
+            // Install command with PATH setup for common node locations
+            let installCommand = "export PATH=$PATH:$HOME/.nvm/versions/node/*/bin:$HOME/.npm-global/bin:/usr/local/bin && npm install -g @zed-industries/claude-code-acp"
+
+            await MainActor.run { onOutput("Connecting to \(host)...\n") }
+            await MainActor.run { onOutput("Running: npm install -g @zed-industries/claude-code-acp\n") }
+
+            let output = try await sshService.executeCommand(installCommand)
+            await MainActor.run { onOutput(output) }
+
+            await sshService.disconnect()
+            return .success(())
         } catch {
-            stdoutPipe.fileHandleForReading.readabilityHandler = nil
-            stderrPipe.fileHandleForReading.readabilityHandler = nil
             return .failure(error)
         }
-
-        // Wait in background
-        return await Task.detached {
-            process.waitUntilExit()
-
-            stdoutPipe.fileHandleForReading.readabilityHandler = nil
-            stderrPipe.fileHandleForReading.readabilityHandler = nil
-
-            if process.terminationStatus == 0 {
-                return .success(())
-            } else {
-                return .failure(ACPServiceError.connectionFailed("Installation failed with exit code \(process.terminationStatus)"))
-            }
-        }.value
     }
 
     /// Connect to a local Claude Code ACP agent
@@ -237,6 +211,7 @@ class ACPService: ObservableObject {
         acpPath: String? = nil,
         workingDirectory: String
     ) async throws {
+        #if os(macOS)
         log("connectLocal: starting, workingDirectory=\(workingDirectory)")
         await disconnect()
 
@@ -276,6 +251,9 @@ class ACPService: ObservableObject {
         agentInfo = await client.agentInfo
         log("connectLocal: connected, agentInfo=\(String(describing: self.agentInfo))")
         eventContinuation?.yield(.connected)
+        #else
+        throw ACPServiceError.connectionFailed("Local connections are not supported on iOS. Please use a remote server.")
+        #endif
     }
 
     /// Connect to a remote Claude Code ACP agent via SSH tunnel
@@ -288,6 +266,7 @@ class ACPService: ObservableObject {
         acpPath: String = "claude-code-acp",
         workingDirectory: String
     ) async throws {
+        #if os(macOS)
         await disconnect()
 
         // For remote connections, we use SSH to run claude-code-acp remotely
@@ -333,6 +312,10 @@ class ACPService: ObservableObject {
         isConnected = true
         agentInfo = await client.agentInfo
         eventContinuation?.yield(.connected)
+        #else
+        // TODO: Implement iOS remote connection using Citadel SSH library
+        throw ACPServiceError.connectionFailed("Remote connections are not yet supported on iOS")
+        #endif
     }
 
     /// Set up permission handler on delegate
@@ -368,6 +351,7 @@ class ACPService: ObservableObject {
 
     /// Find the claude-code-acp binary
     private func findClaudeCodeACP() -> String {
+        #if os(macOS)
         // Common locations for npm global binaries
         let possiblePaths = [
             "/usr/local/bin/claude-code-acp",
@@ -393,6 +377,7 @@ class ACPService: ObservableObject {
                 return path
             }
         }
+        #endif
 
         // Fallback - assume it's in PATH
         return "claude-code-acp"

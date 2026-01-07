@@ -100,6 +100,7 @@ enum SessionContentBlock: Decodable {
 /// Loads session history from Claude Code's local JSONL files
 public struct SessionHistoryLoader {
 
+    #if os(macOS)
     /// Get the path to a session file
     /// Path pattern: ~/.claude/projects/{encoded-cwd}/{sessionId}.jsonl
     public static func sessionFilePath(sessionId: String, cwd: String) -> URL {
@@ -204,4 +205,25 @@ public struct SessionHistoryLoader {
             .filter { $0.pathExtension == "jsonl" }
             .map { $0.deletingPathExtension().lastPathComponent }
     }
+    #else
+    /// Get the path to a session file - not available on iOS
+    public static func sessionFilePath(sessionId: String, cwd: String) -> URL {
+        fatalError("Local session history is not available on iOS - sessions are stored on the remote Mac")
+    }
+
+    /// Load and parse session history - not available on iOS
+    public static func loadHistory(sessionId: String, cwd: String) async throws -> [ACPHistoryMessage] {
+        throw ACPError.notSupported("Local session history is not available on iOS")
+    }
+
+    /// Check if a session file exists - not available on iOS
+    public static func sessionExists(sessionId: String, cwd: String) -> Bool {
+        return false
+    }
+
+    /// List all sessions for a given working directory - not available on iOS
+    public static func listSessions(cwd: String) throws -> [String] {
+        throw ACPError.notSupported("Local session history is not available on iOS")
+    }
+    #endif
 }

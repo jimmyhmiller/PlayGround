@@ -10,14 +10,23 @@
 //! - [`OptimizableValue`] - Extends `SsaValue` with constant handling
 //! - [`OptimizableInstruction`] - Extends `SsaInstruction` with optimization metadata
 //!
-//! Then use the [`OptimizationPipeline`] to run passes:
+//! Then use the [`Optimizer`] for safe, easy optimization:
 //!
 //! ```ignore
-//! use ssa_lib::optim::prelude::*;
+//! use ssa_lib::optim::Optimizer;
 //!
-//! let mut pipeline = OptimizationPipeline::standard();
-//! pipeline.run(&mut translator);
+//! // Safe API with verification ON and DCE auto-included:
+//! Optimizer::new(&mut translator)
+//!     .copy_propagation()
+//!     .constant_folding()
+//!     .run()?;  // Returns Result - errors hard to ignore
+//!
+//! // Or use convenience functions:
+//! use ssa_lib::optim::optimize;
+//! optimize(&mut translator)?;
 //! ```
+//!
+//! For more control, use [`OptimizationPipeline`] directly.
 //!
 //! # Available Passes
 //!
@@ -33,12 +42,14 @@ pub mod pipeline;
 pub mod analysis;
 pub mod passes;
 pub mod regalloc;
+pub mod optimizer;
 
 // Re-export main types
 pub use traits::{OptimizableValue, OptimizableInstruction, InstructionMutator, ExpressionKey};
 pub use pass::{OptimizationPass, PassResult, PassStats, Invalidations};
-pub use pipeline::OptimizationPipeline;
+pub use pipeline::{OptimizationPipeline, PipelineResult};
 pub use analysis::{AnalysisCache, LivenessAnalysis, UseDefChains};
+pub use optimizer::{Optimizer, OptimizationError, OptimizationResult, optimize, optimize_aggressive};
 
 // Re-export regalloc types
 pub use regalloc::{
@@ -55,8 +66,9 @@ pub use regalloc::{
 pub mod prelude {
     pub use super::traits::{OptimizableValue, OptimizableInstruction, InstructionMutator, ExpressionKey};
     pub use super::pass::{OptimizationPass, PassResult, PassStats, Invalidations};
-    pub use super::pipeline::OptimizationPipeline;
+    pub use super::pipeline::{OptimizationPipeline, PipelineResult};
     pub use super::analysis::{AnalysisCache, LivenessAnalysis, UseDefChains};
+    pub use super::optimizer::{Optimizer, OptimizationError, OptimizationResult, optimize, optimize_aggressive};
     pub use super::passes::*;
     pub use super::regalloc::*;
 }

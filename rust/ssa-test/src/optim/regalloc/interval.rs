@@ -133,6 +133,13 @@ pub struct LiveInterval {
 
     /// Final assignment after register allocation.
     pub assignment: Option<Location>,
+
+    /// Whether this interval crosses a call site.
+    ///
+    /// If true, this interval must be assigned to a callee-saved register
+    /// or spilled to the stack. Caller-saved registers would be clobbered
+    /// by the call.
+    pub crosses_call: bool,
 }
 
 impl LiveInterval {
@@ -146,6 +153,7 @@ impl LiveInterval {
             register_hint: None,
             reg_class: None,
             assignment: None,
+            crosses_call: false,
         }
     }
 
@@ -244,6 +252,12 @@ pub struct IntervalAnalysis {
 
     /// Total number of program points.
     pub num_program_points: usize,
+
+    /// Program points that are call sites (where caller-saved registers are clobbered).
+    ///
+    /// Intervals that are live across any of these points must be assigned
+    /// to callee-saved registers or spilled.
+    pub call_sites: Vec<ProgramPoint>,
 }
 
 impl IntervalAnalysis {
@@ -394,6 +408,190 @@ impl IntervalAnalysis {
             block_ends,
             block_order,
             num_program_points,
+            call_sites: Vec::new(),
+        }
+    }
+
+    /// Compute live intervals from liveness analysis, with call site detection.
+    ///
+    /// This is like `compute()` but also tracks which program points are call
+    /// sites (instructions that clobber caller-saved registers). Intervals that
+    /// are live across call sites will have `crosses_call` set to true.
+    ///
+    /// The `is_call` closure should return `true` for instructions that clobber
+    /// caller-saved registers (function calls, etc.).
+    pub fn compute_with_call_sites<V, I, F, IsCall>(
+        translator: &SSATranslator<V, I, F>,
+        liveness: &LivenessAnalysis,
+        is_call: IsCall,
+    ) -> Self
+    where
+        V: OptimizableValue,
+        I: OptimizableInstruction<Value = V>,
+        F: InstructionFactory<Instr = I>,
+        IsCall: Fn(&I) -> bool,
+    {
+        // Step 1: Order blocks (for now, just use the natural order)
+        let block_order: Vec<BlockId> = translator.blocks.iter()
+            .map(|b| b.id)
+            .collect();
+
+        // Step 2: Assign program points to blocks and track call sites
+        let mut block_starts: HashMap<BlockId, ProgramPoint> = HashMap::new();
+        let mut block_ends: HashMap<BlockId, ProgramPoint> = HashMap::new();
+        let mut call_sites: Vec<ProgramPoint> = Vec::new();
+        let mut current_point = 0usize;
+
+        for &block_id in &block_order {
+            block_starts.insert(block_id, ProgramPoint(current_point));
+
+            let block = &translator.blocks[block_id.0];
+            // Each instruction gets one program point
+            // We also add points for phi nodes at the start
+            let num_phis = translator.phis.values()
+                .filter(|phi| phi.block_id == block_id)
+                .count();
+            let _phi_point_start = current_point;
+            current_point += num_phis;
+
+            // Track call sites while processing instructions
+            for (instr_idx, instr) in block.instructions.iter().enumerate() {
+                let instr_point = ProgramPoint(current_point + instr_idx);
+                if is_call(instr) {
+                    call_sites.push(instr_point);
+                }
+            }
+            current_point += block.instructions.len();
+
+            block_ends.insert(block_id, ProgramPoint(current_point));
+        }
+
+        let num_program_points = current_point;
+
+        // Step 3: Build live intervals
+        let mut intervals: Vec<LiveInterval> = Vec::new();
+        let mut variable_to_interval: HashMap<SsaVariable, usize> = HashMap::new();
+
+        // For each block, create intervals based on liveness
+        for &block_id in &block_order {
+            let block_start = block_starts[&block_id];
+            let block_end = block_ends[&block_id];
+
+            // Variables live at block entry are live from block start
+            if let Some(live_in) = liveness.live_in.get(&block_id) {
+                for var in live_in {
+                    let interval_idx = *variable_to_interval
+                        .entry(var.clone())
+                        .or_insert_with(|| {
+                            let idx = intervals.len();
+                            intervals.push(LiveInterval::new(var.clone()));
+                            idx
+                        });
+
+                    // Extend interval to cover this block
+                    intervals[interval_idx].add_range(LiveRange::new(block_start, block_end));
+                }
+            }
+
+            // Variables live at block exit are live to block end
+            if let Some(live_out) = liveness.live_out.get(&block_id) {
+                for var in live_out {
+                    let interval_idx = *variable_to_interval
+                        .entry(var.clone())
+                        .or_insert_with(|| {
+                            let idx = intervals.len();
+                            intervals.push(LiveInterval::new(var.clone()));
+                            idx
+                        });
+
+                    // Extend interval to cover this block
+                    intervals[interval_idx].add_range(LiveRange::new(block_start, block_end));
+                }
+            }
+
+            // Process phi definitions
+            let mut point_offset = 0usize;
+            for phi in translator.phis.values() {
+                if phi.block_id == block_id {
+                    if let Some(dest) = &phi.dest {
+                        let def_point = ProgramPoint(block_start.0 + point_offset);
+                        let interval_idx = *variable_to_interval
+                            .entry(dest.clone())
+                            .or_insert_with(|| {
+                                let idx = intervals.len();
+                                intervals.push(LiveInterval::new(dest.clone()));
+                                idx
+                            });
+
+                        // Definition starts the interval
+                        intervals[interval_idx].add_range(LiveRange::new(def_point, block_end));
+                    }
+                    point_offset += 1;
+                }
+            }
+
+            // Process instruction definitions and uses
+            let block = &translator.blocks[block_id.0];
+            for (instr_idx, instr) in block.instructions.iter().enumerate() {
+                let instr_point = ProgramPoint(block_start.0 + point_offset + instr_idx);
+
+                // Uses: variable must be live up to this point
+                instr.visit_values(|value| {
+                    if let Some(var) = value.as_var() {
+                        if let Some(&interval_idx) = variable_to_interval.get(var) {
+                            // Extend to include the use
+                            let current_start = intervals[interval_idx].start()
+                                .unwrap_or(instr_point);
+                            intervals[interval_idx].add_range(
+                                LiveRange::new(current_start, ProgramPoint(instr_point.0 + 1))
+                            );
+                        }
+                    }
+                });
+
+                // Definition: starts a new live range
+                if let Some(dest) = instr.destination() {
+                    let interval_idx = *variable_to_interval
+                        .entry(dest.clone())
+                        .or_insert_with(|| {
+                            let idx = intervals.len();
+                            intervals.push(LiveInterval::new(dest.clone()));
+                            idx
+                        });
+
+                    // Definition creates a new range starting at this point
+                    intervals[interval_idx].add_range(
+                        LiveRange::new(instr_point, ProgramPoint(instr_point.0 + 1))
+                    );
+                }
+            }
+        }
+
+        // Step 4: Mark intervals that cross call sites
+        for interval in &mut intervals {
+            for &call_point in &call_sites {
+                // An interval crosses a call if:
+                // 1. It is live at the call point
+                // 2. It continues after the call (doesn't end at the call)
+                if interval.is_live_at(call_point) {
+                    if let Some(end) = interval.end() {
+                        if end.0 > call_point.0 + 1 {
+                            interval.crosses_call = true;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        IntervalAnalysis {
+            intervals,
+            variable_to_interval,
+            block_starts,
+            block_ends,
+            block_order,
+            num_program_points,
+            call_sites,
         }
     }
 

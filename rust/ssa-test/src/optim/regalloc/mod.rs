@@ -66,7 +66,7 @@ pub mod lowered;
 pub use target::{PhysicalRegister, RegisterClass, TargetArchitecture};
 pub use constraints::{RegisterConstraint, OperandConstraints, HasRegisterConstraints};
 pub use interval::{ProgramPoint, LiveRange, LiveInterval, Location, IntervalAnalysis};
-pub use phi_elim::PhiElimination;
+pub use phi_elim::{PhiElimination, PhiEliminationViolation, assert_valid_after_phi_elimination};
 pub use linear_scan::{LinearScanAllocator, LinearScanConfig, AllocationResult, AllocationStats};
 pub use spill::SpillCodeFactory;
 pub use lowered::{LoweredOperand, LoweredInstruction, LoweredBlock, LoweredFunction};

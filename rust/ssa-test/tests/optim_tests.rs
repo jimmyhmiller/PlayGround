@@ -659,3 +659,295 @@ fn test_all_dead_code() {
     assert_eq!(result.stats.instructions_removed, 3);
     assert!(translator.blocks[0].instructions.is_empty());
 }
+
+// ============================================================================
+// Verification Tests
+// ============================================================================
+
+#[test]
+fn test_pipeline_with_verification() {
+    let mut translator = TestTranslator::new();
+
+    // v0 := 10
+    // v1 := v0  (copy, will be propagated)
+    // v2 := 20 (dead, will be eliminated)
+    // print v1
+    translator.emit(Instruction::Assign {
+        dest: SsaVariable::new("v0"),
+        value: Value::Literal(10),
+    });
+    translator.emit(Instruction::Assign {
+        dest: SsaVariable::new("v1"),
+        value: Value::Var(SsaVariable::new("v0")),
+    });
+    translator.emit(Instruction::Assign {
+        dest: SsaVariable::new("v2"),
+        value: Value::Literal(20),
+    });
+    translator.emit(Instruction::Print {
+        value: Value::Var(SsaVariable::new("v1")),
+    });
+
+    translator.seal_block(BlockId(0));
+
+    // Use pipeline with verification enabled
+    let mut pipeline: OptimizationPipeline<Value, Instruction, InstructionBuilder> =
+        OptimizationPipeline::new_with_verify();
+    pipeline.add_pass(CopyPropagation::new());
+    pipeline.add_pass(ConstantPropagation::new());
+    pipeline.add_pass(DeadCodeElimination::new());
+
+    let result = pipeline.run(&mut translator);
+
+    assert!(result.changed);
+    // Verification should pass - if not, this test will fail
+    result.assert_valid();
+}
+
+#[test]
+fn test_aggressive_pipeline_with_verification() {
+    let mut translator = TestTranslator::new();
+
+    // v0 := 5 + 5     (will be folded to 10)
+    // v1 := v0        (copy, will be propagated)
+    // v2 := v0 + v0   (will compute from folded constant)
+    // v3 := v0 + v0   (CSE: same as v2)
+    // print v3
+    translator.emit(Instruction::BinaryOp {
+        dest: SsaVariable::new("v0"),
+        left: Value::Literal(5),
+        op: BinaryOperator::Add,
+        right: Value::Literal(5),
+    });
+    translator.emit(Instruction::Assign {
+        dest: SsaVariable::new("v1"),
+        value: Value::Var(SsaVariable::new("v0")),
+    });
+    translator.emit(Instruction::BinaryOp {
+        dest: SsaVariable::new("v2"),
+        left: Value::Var(SsaVariable::new("v0")),
+        op: BinaryOperator::Add,
+        right: Value::Var(SsaVariable::new("v0")),
+    });
+    translator.emit(Instruction::BinaryOp {
+        dest: SsaVariable::new("v3"),
+        left: Value::Var(SsaVariable::new("v0")),
+        op: BinaryOperator::Add,
+        right: Value::Var(SsaVariable::new("v0")),
+    });
+    translator.emit(Instruction::Print {
+        value: Value::Var(SsaVariable::new("v3")),
+    });
+
+    translator.seal_block(BlockId(0));
+
+    // Use aggressive pipeline with verification enabled
+    let mut pipeline: OptimizationPipeline<Value, Instruction, InstructionBuilder> =
+        OptimizationPipeline::new_with_verify();
+    pipeline.add_pass(CopyPropagation::new());
+    pipeline.add_pass(ConstantPropagation::new());
+    pipeline.add_pass(ConstantFolding::new());
+    pipeline.add_pass(CommonSubexpressionElimination::new());
+    pipeline.add_pass(DeadCodeElimination::new());
+
+    let result = pipeline.run_until_fixed_point(&mut translator, 5);
+
+    assert!(result.changed);
+    // Verification should pass after all passes
+    result.assert_valid();
+}
+
+// ============================================================================
+// New Safe Optimizer API Tests
+// ============================================================================
+
+use ssa_test::optim::{Optimizer, optimize, optimize_aggressive};
+
+#[test]
+fn test_optimizer_simple() {
+    let mut translator = TestTranslator::new();
+
+    translator.emit(Instruction::Assign {
+        dest: SsaVariable::new("v0"),
+        value: Value::Literal(10),
+    });
+    translator.emit(Instruction::Assign {
+        dest: SsaVariable::new("v1"),
+        value: Value::Var(SsaVariable::new("v0")),
+    });
+    translator.emit(Instruction::Print {
+        value: Value::Var(SsaVariable::new("v1")),
+    });
+
+    translator.seal_block(BlockId(0));
+
+    // New safe API - returns Result, DCE auto-included, verification on
+    let result = Optimizer::new(&mut translator)
+        .copy_propagation()
+        .run()
+        .expect("optimization should succeed");
+
+    assert!(result.changed);
+}
+
+#[test]
+fn test_optimizer_with_constant_folding() {
+    let mut translator = TestTranslator::new();
+
+    // v0 := 5 + 5 (foldable)
+    // print v0
+    translator.emit(Instruction::BinaryOp {
+        dest: SsaVariable::new("v0"),
+        left: Value::Literal(5),
+        op: BinaryOperator::Add,
+        right: Value::Literal(5),
+    });
+    translator.emit(Instruction::Print {
+        value: Value::Var(SsaVariable::new("v0")),
+    });
+
+    translator.seal_block(BlockId(0));
+
+    let result = Optimizer::new(&mut translator)
+        .constant_folding()
+        .run()
+        .expect("optimization should succeed");
+
+    assert!(result.changed);
+    assert!(result.stats.expressions_folded > 0);
+}
+
+#[test]
+fn test_optimizer_fixed_point() {
+    let mut translator = TestTranslator::new();
+
+    // Setup that benefits from multiple iterations
+    translator.emit(Instruction::BinaryOp {
+        dest: SsaVariable::new("v0"),
+        left: Value::Literal(2),
+        op: BinaryOperator::Add,
+        right: Value::Literal(3),
+    });
+    translator.emit(Instruction::Assign {
+        dest: SsaVariable::new("v1"),
+        value: Value::Var(SsaVariable::new("v0")),
+    });
+    translator.emit(Instruction::Print {
+        value: Value::Var(SsaVariable::new("v1")),
+    });
+
+    translator.seal_block(BlockId(0));
+
+    let result = Optimizer::new(&mut translator)
+        .copy_propagation()
+        .constant_propagation()
+        .constant_folding()
+        .run_to_fixed_point(10)
+        .expect("optimization should succeed");
+
+    assert!(result.changed);
+}
+
+#[test]
+fn test_optimize_convenience_function() {
+    let mut translator = TestTranslator::new();
+
+    translator.emit(Instruction::Assign {
+        dest: SsaVariable::new("v0"),
+        value: Value::Literal(42),
+    });
+    translator.emit(Instruction::Print {
+        value: Value::Var(SsaVariable::new("v0")),
+    });
+
+    translator.seal_block(BlockId(0));
+
+    // Convenience function - easiest path
+    let result = optimize(&mut translator).expect("optimization should succeed");
+
+    // No changes expected (already optimal), but should still succeed
+    assert!(!result.has_validation_errors());
+}
+
+#[test]
+fn test_optimize_aggressive_convenience_function() {
+    let mut translator = TestTranslator::new();
+
+    // Complex setup
+    translator.emit(Instruction::BinaryOp {
+        dest: SsaVariable::new("v0"),
+        left: Value::Literal(5),
+        op: BinaryOperator::Add,
+        right: Value::Literal(5),
+    });
+    translator.emit(Instruction::Assign {
+        dest: SsaVariable::new("v1"),
+        value: Value::Var(SsaVariable::new("v0")),
+    });
+    translator.emit(Instruction::Print {
+        value: Value::Var(SsaVariable::new("v1")),
+    });
+
+    translator.seal_block(BlockId(0));
+
+    let result = optimize_aggressive(&mut translator, 5)
+        .expect("optimization should succeed");
+
+    assert!(result.changed);
+}
+
+#[test]
+fn test_optimizer_no_auto_cleanup() {
+    let mut translator = TestTranslator::new();
+
+    // v0 := 10
+    // v1 := v0 (dead after copy prop)
+    // print v0
+    translator.emit(Instruction::Assign {
+        dest: SsaVariable::new("v0"),
+        value: Value::Literal(10),
+    });
+    translator.emit(Instruction::Assign {
+        dest: SsaVariable::new("v1"),
+        value: Value::Var(SsaVariable::new("v0")),
+    });
+    translator.emit(Instruction::Print {
+        value: Value::Var(SsaVariable::new("v0")),
+    });
+
+    translator.seal_block(BlockId(0));
+
+    // Explicitly disable auto-cleanup
+    let result = Optimizer::new(&mut translator)
+        .copy_propagation()
+        .no_auto_cleanup()  // Explicit opt-out
+        .dce()              // Manually add DCE
+        .run()
+        .expect("optimization should succeed");
+
+    assert!(result.changed);
+}
+
+#[test]
+fn test_optimizer_unchecked_mode() {
+    let mut translator = TestTranslator::new();
+
+    translator.emit(Instruction::Assign {
+        dest: SsaVariable::new("v0"),
+        value: Value::Literal(10),
+    });
+    translator.emit(Instruction::Print {
+        value: Value::Var(SsaVariable::new("v0")),
+    });
+
+    translator.seal_block(BlockId(0));
+
+    // Use unchecked mode (returns PipelineResult, not Result)
+    let result = Optimizer::new(&mut translator)
+        .copy_propagation()
+        .no_verification()
+        .run_unchecked();
+
+    // Can inspect raw result
+    assert!(!result.has_validation_errors()); // Empty because verification disabled
+}
