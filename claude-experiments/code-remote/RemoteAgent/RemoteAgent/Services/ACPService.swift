@@ -1,10 +1,8 @@
 import Foundation
 import ACPLib
 
-// Simple stderr logging for terminal visibility
 private func log(_ message: String) {
-    let timestamp = ISO8601DateFormatter().string(from: Date())
-    fputs("[\(timestamp)] [ACPService] \(message)\n", stderr)
+    appLog(message, category: "ACPService")
 }
 
 // MARK: - ACP Service
@@ -14,6 +12,9 @@ private func log(_ message: String) {
 @MainActor
 class ACPService: ObservableObject {
     private var client: ACPClient?
+    #if !os(macOS)
+    private var sshConnection: ACPSSHConnection?
+    #endif
     private var eventTask: Task<Void, Never>?
     private var permissionDelegate: ACPPermissionDelegate?
 
@@ -81,29 +82,32 @@ class ACPService: ObservableObject {
 
     /// Check if claude-code-acp is installed on a remote server via SSH
     static func isClaudeCodeACPInstalledRemote(
-        host: String,
-        username: String,
-        keyPath: String?
+        server: Server
     ) async -> Bool {
         do {
-            // Create a temporary server config
-            let tempServer = Server(
-                name: "temp",
-                host: host,
-                port: 22,
-                username: username,
-                authMethod: .privateKey
-            )
-            tempServer.privateKeyPath = keyPath
+            log("isClaudeCodeACPInstalledRemote: checking \(server.username)@\(server.host)")
+            log("isClaudeCodeACPInstalledRemote: authMethod=\(server.authMethod), keyPath=\(server.privateKeyPath ?? "nil")")
 
             let sshService = SSHService()
-            try await sshService.connect(to: tempServer, password: nil)
+
+            // Get password from keychain if using password auth
+            var password: String? = nil
+            if server.authMethod == .password {
+                password = try? await KeychainService.shared.getPassword(for: server.id)
+                log("isClaudeCodeACPInstalledRemote: using password auth, hasPassword=\(password != nil)")
+            }
+
+            try await sshService.connect(to: server, password: password)
 
             let output = try await sshService.executeCommand("which claude-code-acp || command -v claude-code-acp")
+            log("isClaudeCodeACPInstalledRemote: command output='\(output.trimmingCharacters(in: .whitespacesAndNewlines))'")
             await sshService.disconnect()
 
-            return !output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            let isInstalled = !output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            log("isClaudeCodeACPInstalledRemote: isInstalled=\(isInstalled)")
+            return isInstalled
         } catch {
+            log("isClaudeCodeACPInstalledRemote: ERROR - \(error)")
             return false
         }
     }
@@ -170,29 +174,26 @@ class ACPService: ObservableObject {
 
     /// Install claude-code-acp on a remote server via SSH
     static func installClaudeCodeACPRemote(
-        host: String,
-        username: String,
-        keyPath: String?,
+        server: Server,
         onOutput: @escaping @Sendable (String) -> Void
     ) async -> Result<Void, Error> {
         do {
-            // Create a temporary server config
-            let tempServer = Server(
-                name: "temp",
-                host: host,
-                port: 22,
-                username: username,
-                authMethod: .privateKey
-            )
-            tempServer.privateKeyPath = keyPath
+            log("installClaudeCodeACPRemote: installing on \(server.username)@\(server.host)")
 
             let sshService = SSHService()
-            try await sshService.connect(to: tempServer, password: nil)
+
+            // Get password from keychain if using password auth
+            var password: String? = nil
+            if server.authMethod == .password {
+                password = try? await KeychainService.shared.getPassword(for: server.id)
+            }
+
+            try await sshService.connect(to: server, password: password)
 
             // Install command with PATH setup for common node locations
             let installCommand = "export PATH=$PATH:$HOME/.nvm/versions/node/*/bin:$HOME/.npm-global/bin:/usr/local/bin && npm install -g @zed-industries/claude-code-acp"
 
-            await MainActor.run { onOutput("Connecting to \(host)...\n") }
+            await MainActor.run { onOutput("Connecting to \(server.host)...\n") }
             await MainActor.run { onOutput("Running: npm install -g @zed-industries/claude-code-acp\n") }
 
             let output = try await sshService.executeCommand(installCommand)
@@ -201,6 +202,7 @@ class ACPService: ObservableObject {
             await sshService.disconnect()
             return .success(())
         } catch {
+            log("installClaudeCodeACPRemote: ERROR - \(error)")
             return .failure(error)
         }
     }
@@ -261,8 +263,10 @@ class ACPService: ObservableObject {
     /// Requires claude-code-acp to be installed on the remote machine
     func connectRemote(
         sshHost: String,
+        sshPort: Int = 22,
         sshUsername: String,
         sshKeyPath: String?,
+        sshPassword: String? = nil,
         acpPath: String = "claude-code-acp",
         workingDirectory: String
     ) async throws {
@@ -297,6 +301,10 @@ class ACPService: ObservableObject {
         // Build SSH command to run claude-code-acp remotely
         var sshArgs = ["-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no"]
 
+        if sshPort != 22 {
+            sshArgs.append(contentsOf: ["-p", String(sshPort)])
+        }
+
         if let keyPath = sshKeyPath, !keyPath.isEmpty {
             sshArgs.append(contentsOf: ["-i", (keyPath as NSString).expandingTildeInPath])
         }
@@ -313,10 +321,76 @@ class ACPService: ObservableObject {
         agentInfo = await client.agentInfo
         eventContinuation?.yield(.connected)
         #else
-        // TODO: Implement iOS remote connection using Citadel SSH library
-        throw ACPServiceError.connectionFailed("Remote connections are not yet supported on iOS")
+        // iOS: Use ACPSSHConnection with the real ACPClient
+        let totalStart = Date()
+        log("connectRemote: iOS using ACPSSHConnection + ACPClient")
+        log("connectRemote: host=\(sshHost), port=\(sshPort), username=\(sshUsername)")
+        log("connectRemote: workingDirectory=\(workingDirectory), acpPath=\(acpPath)")
+        log("connectRemote: hasKeyPath=\(sshKeyPath != nil), hasPassword=\(sshPassword != nil)")
+        await disconnect()
+
+        // Create SSH connection
+        var stepStart = Date()
+        log("connectRemote: creating ACPSSHConnection")
+        let connection = ACPSSHConnection()
+        self.sshConnection = connection
+
+        // Connect via SSH first (this starts the output reader)
+        log("connectRemote: connecting via SSH...")
+        try await connection.connect(
+            host: sshHost,
+            port: sshPort,
+            username: sshUsername,
+            privateKeyPath: sshKeyPath,
+            password: sshPassword,
+            workingDirectory: workingDirectory,
+            acpPath: acpPath
+        )
+        log("connectRemote: SSH connection established in \(Date().timeIntervalSince(stepStart))s")
+
+        // Create ACPClient
+        stepStart = Date()
+        log("connectRemote: creating ACPClient")
+        let acpClient = ACPClient.forClaudeCode(name: "RemoteAgent", version: "1.0.0")
+        self.client = acpClient
+        log("connectRemote: ACPClient created in \(Date().timeIntervalSince(stepStart))s")
+
+        // Set up permission delegate
+        stepStart = Date()
+        log("connectRemote: creating permission delegate")
+        let delegate = ACPPermissionDelegate()
+        log("connectRemote: delegate created in \(Date().timeIntervalSince(stepStart))s")
+
+        stepStart = Date()
+        self.permissionDelegate = delegate
+        log("connectRemote: delegate stored in \(Date().timeIntervalSince(stepStart))s")
+
+        stepStart = Date()
+        await acpClient.setDelegate(delegate)
+        log("connectRemote: setDelegate completed in \(Date().timeIntervalSince(stepStart))s")
+
+        stepStart = Date()
+        await setupPermissionHandler(delegate)
+        log("connectRemote: setupPermissionHandler completed in \(Date().timeIntervalSince(stepStart))s")
+
+        // Connect ACPClient using our SSH connection
+        // This will set up notification/request handlers and send initialize
+        stepStart = Date()
+        log("connectRemote: calling acpClient.connect(using: connection)")
+        try await acpClient.connect(using: connection)
+        log("connectRemote: ACPClient connected (initialize) in \(Date().timeIntervalSince(stepStart))s")
+
+        // Start listening for events from ACPClient
+        log("connectRemote: starting event listener")
+        startEventListener()
+
+        isConnected = true
+        agentInfo = await acpClient.agentInfo
+        log("connectRemote: iOS connected in \(Date().timeIntervalSince(totalStart))s total, agent=\(String(describing: self.agentInfo))")
+        eventContinuation?.yield(.connected)
         #endif
     }
+
 
     /// Set up permission handler on delegate
     private func setupPermissionHandler(_ delegate: ACPPermissionDelegate) async {
@@ -384,16 +458,30 @@ class ACPService: ObservableObject {
     }
 
     func disconnect() async {
-        log("disconnect: starting")
+        // Log call stack to understand what's triggering disconnect
+        let callStack = Thread.callStackSymbols.prefix(10).joined(separator: "\n")
+        log("disconnect: starting, call stack:\n\(callStack)")
         eventTask?.cancel()
         eventTask = nil
 
+        #if os(macOS)
         if let client = client {
             // Clear SSH configuration
             await client.setSSHConfiguration(nil)
             await client.disconnect()
         }
         client = nil
+        #else
+        if let client = client {
+            await client.disconnect()
+        }
+        client = nil
+        if let sshConnection = sshConnection {
+            await sshConnection.close()
+        }
+        sshConnection = nil
+        #endif
+
         isConnected = false
         sessionId = nil
         agentInfo = nil
@@ -405,6 +493,7 @@ class ACPService: ObservableObject {
 
     func newSession(workingDirectory: String) async throws -> String {
         log("newSession: starting, workingDirectory=\(workingDirectory)")
+
         guard let client = client else {
             log("newSession: not connected")
             throw ACPServiceError.notConnected
@@ -435,6 +524,7 @@ class ACPService: ObservableObject {
 
     func sendPrompt(_ text: String) async throws {
         log("sendPrompt: starting, text length=\(text.count)")
+
         guard let client = client else {
             log("sendPrompt: not connected")
             throw ACPServiceError.notConnected
@@ -689,24 +779,23 @@ actor ACPPermissionDelegate: ACPClientDelegate {
     }
 
     func acpClient(_ client: ACPClient, requestPermissionFor toolName: String, input: String?, prompt: String?) async -> (granted: Bool, context: String?) {
-        let timestamp = ISO8601DateFormatter().string(from: Date())
-        fputs("[\(timestamp)] [ACPPermissionDelegate] Permission request: tool=\(toolName)\n", stderr)
+        appLog("Permission request: tool=\(toolName)", category: "Permission")
         if let input = input {
-            fputs("[\(timestamp)] [ACPPermissionDelegate] Input: \(String(input.prefix(200)))\n", stderr)
+            appLog("Input: \(String(input.prefix(200)))", category: "Permission")
         }
         if let prompt = prompt {
-            fputs("[\(timestamp)] [ACPPermissionDelegate] Prompt: \(prompt)\n", stderr)
+            appLog("Prompt: \(prompt)", category: "Permission")
         }
 
         // Use handler to show UI
         if let handler = permissionHandler {
             let result = await handler(toolName, input, prompt)
-            fputs("[\(timestamp)] [ACPPermissionDelegate] Handler result: granted=\(result.0)\n", stderr)
+            appLog("Handler result: granted=\(result.0)", category: "Permission")
             return result
         }
 
         // No handler - deny by default for safety
-        fputs("[\(timestamp)] [ACPPermissionDelegate] No handler, denying permission\n", stderr)
+        appLog("No handler, denying permission", category: "Permission")
         return (false, "No permission handler configured")
     }
 }

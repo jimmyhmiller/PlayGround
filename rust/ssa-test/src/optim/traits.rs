@@ -7,7 +7,7 @@ use std::fmt::Debug;
 use std::hash::Hash;
 
 use crate::traits::{SsaValue, SsaInstruction, InstructionFactory};
-use crate::types::SsaVariable;
+use crate::types::{BlockId, SsaVariable};
 
 /// Trait for value types that can participate in optimizations.
 ///
@@ -66,6 +66,66 @@ pub enum ExpressionKey<V: OptimizableValue> {
     Custom(String, Vec<V>),
 }
 
+/// Result of attempting to simplify a control-flow instruction.
+///
+/// Used by `try_simplify_control_flow()` to indicate how an instruction
+/// should be transformed when its operands are known constants.
+///
+/// Generic over `V` (the Value type) to allow `PassThrough` to carry the
+/// source value directly (which could be a variable or constant).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ControlFlowSimplification<V: OptimizableValue> {
+    /// No simplification possible (operands not constant, or not a control-flow instruction)
+    NoChange,
+
+    /// Remove this instruction entirely (for instructions with no destination).
+    ///
+    /// Use this when a guard/check always passes and execution should
+    /// continue to the next instruction, and the instruction produces no value.
+    Remove,
+
+    /// Replace terminator with unconditional jump (for ConditionalJump-style instructions).
+    ///
+    /// Use this when a conditional branch has a known outcome.
+    ///
+    /// - `target`: The block to jump to
+    /// - `dead_targets`: Blocks that were targets but will no longer be reached
+    Jump {
+        target: BlockId,
+        dead_targets: Vec<BlockId>,
+    },
+
+    /// Guard passes - replace with copy instruction.
+    ///
+    /// Use this when a guard always passes and produces a value.
+    /// `dest := guard_int(value) -> fail` becomes `dest := value`
+    ///
+    /// The source is the Value type directly, so it works for both variables and constants.
+    ///
+    /// - `dest`: The destination variable that receives the value
+    /// - `source`: The value to copy (can be variable or constant)
+    /// - `dead_target`: The fail target edge that should be removed from CFG
+    /// - `fall_through_target`: The block to jump to after the copy (makes control flow explicit)
+    PassThrough {
+        dest: SsaVariable,
+        source: V,
+        dead_target: BlockId,
+        fall_through_target: BlockId,
+    },
+
+    /// Guard fails - becomes unconditional jump, rest of block is dead.
+    ///
+    /// Use this for non-terminator guards that always fail.
+    /// The guard becomes a jump, and all instructions after it in the block are removed.
+    ///
+    /// - `target`: The block to jump to (the guard's fail target)
+    /// - `fall_through_target`: The block that was the implicit fall-through (needs phi cleanup)
+    FailJump {
+        target: BlockId,
+        fall_through_target: BlockId,
+    },
+}
+
 /// Trait for instruction types that can participate in optimizations.
 ///
 /// Extends `SsaInstruction` with methods needed by optimization passes.
@@ -114,6 +174,32 @@ where
     /// Examples: jump, branch, return, unreachable.
     fn is_terminator(&self) -> bool;
 
+    /// Returns the block IDs that this instruction may jump to.
+    ///
+    /// Used by CFG analysis and cleanup passes to rebuild predecessor lists.
+    /// Should return all possible successors for control-flow instructions:
+    /// - Jump: the single target
+    /// - ConditionalJump/Branch: both targets
+    /// - Guard: both the fail target AND the fall-through target
+    /// - Return/non-control-flow: empty vec
+    ///
+    /// Default implementation returns empty vec (for non-control-flow instructions).
+    fn jump_targets(&self) -> Vec<BlockId> {
+        vec![]
+    }
+
+    /// Rewrite a jump target from `old` to `new`.
+    ///
+    /// Used by jump threading to bypass trivial jump blocks.
+    /// Should update any occurrence of `old` in the instruction's targets to `new`.
+    ///
+    /// Returns true if any target was rewritten.
+    ///
+    /// Default implementation returns false (no targets to rewrite).
+    fn rewrite_jump_target(&mut self, _old: BlockId, _new: BlockId) -> bool {
+        false
+    }
+
     /// If this is a simple copy/move instruction, returns (dest, src).
     ///
     /// A copy is `dest := src` where src is a single value (not a computation).
@@ -143,11 +229,76 @@ where
     /// - Instructions that don't compute a value
     /// - Operations that shouldn't be deduplicated
     fn expression_key(&self) -> Option<ExpressionKey<Self::Value>>;
+
+    /// Try to simplify this control-flow instruction based on constant operands.
+    ///
+    /// Called by the control-flow simplification pass on all instructions.
+    /// Override this method to enable simplification of guards, conditional
+    /// branches, or other control-flow instructions when their operands are
+    /// known constants.
+    ///
+    /// # Returns
+    /// - `NoChange`: Keep the instruction as-is (default)
+    /// - `Remove`: Delete the instruction (no destination to preserve)
+    /// - `Jump`: Replace terminator with unconditional jump
+    /// - `PassThrough`: Guard passes, replace with copy (preserves destination)
+    /// - `FailJump`: Guard fails mid-block, becomes jump (rest of block is dead)
+    ///
+    /// # Example
+    /// ```ignore
+    /// fn try_simplify_control_flow(&self) -> ControlFlowSimplification<Self::Value> {
+    ///     match self {
+    ///         // Terminator: conditional branch with constant condition
+    ///         MyInstr::Branch { cond, then_block, else_block } => {
+    ///             if let Some(c) = cond.as_constant() {
+    ///                 if is_truthy(*c) {
+    ///                     ControlFlowSimplification::Jump {
+    ///                         target: *then_block,
+    ///                         dead_targets: vec![*else_block],
+    ///                     }
+    ///                 } else {
+    ///                     ControlFlowSimplification::Jump {
+    ///                         target: *else_block,
+    ///                         dead_targets: vec![*then_block],
+    ///                     }
+    ///                 }
+    ///             } else {
+    ///                 ControlFlowSimplification::NoChange
+    ///             }
+    ///         }
+    ///         // Non-terminator guard that produces a value
+    ///         // dest := guard_int(value) -> fail_target, falls through to next_block
+    ///         MyInstr::GuardInt { dest, value, fail_target, next_block } => {
+    ///             if value_is_known_int(value) {
+    ///                 // Guard passes - replace with copy, remove edge to fail_target
+    ///                 ControlFlowSimplification::PassThrough {
+    ///                     dest: *dest,
+    ///                     source: value.clone(),
+    ///                     dead_target: *fail_target,
+    ///                 }
+    ///             } else if value_is_known_not_int(value) {
+    ///                 // Guard fails - becomes jump, rest of block is dead
+    ///                 ControlFlowSimplification::FailJump {
+    ///                     target: *fail_target,
+    ///                     fall_through_target: *next_block,
+    ///                 }
+    ///             } else {
+    ///                 ControlFlowSimplification::NoChange
+    ///             }
+    ///         }
+    ///         _ => ControlFlowSimplification::NoChange,
+    ///     }
+    /// }
+    /// ```
+    fn try_simplify_control_flow(&self) -> ControlFlowSimplification<Self::Value> {
+        ControlFlowSimplification::NoChange
+    }
 }
 
 /// Factory trait for creating optimization-related instructions.
 ///
-/// Extends `InstructionFactory` with the ability to create constant assignments.
+/// Extends `InstructionFactory` with the ability to create constant assignments
+/// and unconditional jumps.
 pub trait InstructionMutator: InstructionFactory
 where
     <Self::Instr as SsaInstruction>::Value: OptimizableValue,
@@ -159,6 +310,12 @@ where
         dest: SsaVariable,
         constant: <<Self::Instr as SsaInstruction>::Value as OptimizableValue>::Constant,
     ) -> Self::Instr;
+
+    /// Create an unconditional jump instruction.
+    ///
+    /// Used by control-flow simplification to replace conditional branches
+    /// when the condition is a known constant.
+    fn create_jump(target: BlockId) -> Self::Instr;
 }
 
 #[cfg(test)]

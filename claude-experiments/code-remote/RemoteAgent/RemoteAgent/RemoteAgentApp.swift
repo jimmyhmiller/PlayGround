@@ -19,6 +19,21 @@ struct RemoteAgentApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     #endif
 
+    init() {
+        // Pre-warm NIO/Citadel in background to avoid UI freeze on first use
+        Task.detached(priority: .background) {
+            await prewarmNetworkingLibraries()
+        }
+
+        #if os(macOS)
+        if RUN_SSH_DEBUG_TEST {
+            Task {
+                await runSSHDebugTest()
+            }
+        }
+        #endif
+    }
+
     var sharedModelContainer: ModelContainer = {
         // Ensure Application Support directory exists before SwiftData tries to create the store
         let fileManager = FileManager.default
@@ -41,22 +56,27 @@ struct RemoteAgentApp: App {
         }
     }()
 
-    #if os(macOS)
-    init() {
-        if RUN_SSH_DEBUG_TEST {
-            Task {
-                await runSSHDebugTest()
-            }
-        }
-    }
-    #endif
-
     var body: some Scene {
         WindowGroup {
             ContentView()
         }
         .modelContainer(sharedModelContainer)
     }
+}
+
+/// Pre-warm NIO and Citadel libraries to avoid UI freeze on first SSH connection
+/// This initializes the event loop and crypto in the background at app startup
+private func prewarmNetworkingLibraries() async {
+    // Simply creating SSHClientSettings triggers NIO event loop initialization
+    // We don't actually connect - just warm up the infrastructure
+    _ = SSHClientSettings(
+        host: "localhost",
+        port: 22,
+        authenticationMethod: { .passwordBased(username: "dummy", password: "dummy") },
+        hostKeyValidator: .acceptAnything()
+    )
+    // Touch crypto to initialize it
+    _ = Curve25519.Signing.PrivateKey()
 }
 
 #if os(macOS)

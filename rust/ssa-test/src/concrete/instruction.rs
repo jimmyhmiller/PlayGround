@@ -6,7 +6,7 @@ use crate::concrete::value::Value;
 use crate::traits::{InstructionFactory, SsaInstruction, SsaValue};
 use crate::types::{BlockId, PhiId, SsaVariable};
 use crate::visualizer::{FormatInstruction, FormatValue};
-use crate::optim::traits::{OptimizableInstruction, OptimizableValue, ExpressionKey, InstructionMutator};
+use crate::optim::traits::{OptimizableInstruction, OptimizableValue, ExpressionKey, InstructionMutator, ControlFlowSimplification};
 
 /// Concrete instruction type for the example IR.
 #[derive(Debug, Clone, PartialEq)]
@@ -191,6 +191,40 @@ impl OptimizableInstruction for Instruction {
         )
     }
 
+    fn jump_targets(&self) -> Vec<crate::types::BlockId> {
+        match self {
+            Instruction::Jump { target } => vec![*target],
+            Instruction::ConditionalJump { true_target, false_target, .. } => {
+                vec![*true_target, *false_target]
+            }
+            _ => vec![],
+        }
+    }
+
+    fn rewrite_jump_target(&mut self, old: crate::types::BlockId, new: crate::types::BlockId) -> bool {
+        let mut changed = false;
+        match self {
+            Instruction::Jump { target } => {
+                if *target == old {
+                    *target = new;
+                    changed = true;
+                }
+            }
+            Instruction::ConditionalJump { true_target, false_target, .. } => {
+                if *true_target == old {
+                    *true_target = new;
+                    changed = true;
+                }
+                if *false_target == old {
+                    *false_target = new;
+                    changed = true;
+                }
+            }
+            _ => {}
+        }
+        changed
+    }
+
     fn as_copy(&self) -> Option<(&SsaVariable, &Value)> {
         match self {
             // Only return simple copies (not phi assignments)
@@ -281,6 +315,30 @@ impl OptimizableInstruction for Instruction {
             _ => None,
         }
     }
+
+    fn try_simplify_control_flow(&self) -> ControlFlowSimplification<Self::Value> {
+        match self {
+            Instruction::ConditionalJump { condition, true_target, false_target } => {
+                if let Some(c) = condition.as_constant() {
+                    // Non-zero is truthy
+                    if *c != 0 {
+                        ControlFlowSimplification::Jump {
+                            target: *true_target,
+                            dead_targets: vec![*false_target],
+                        }
+                    } else {
+                        ControlFlowSimplification::Jump {
+                            target: *false_target,
+                            dead_targets: vec![*true_target],
+                        }
+                    }
+                } else {
+                    ControlFlowSimplification::NoChange
+                }
+            }
+            _ => ControlFlowSimplification::NoChange,
+        }
+    }
 }
 
 impl InstructionMutator for InstructionBuilder {
@@ -289,5 +347,9 @@ impl InstructionMutator for InstructionBuilder {
             dest,
             value: Value::Literal(constant),
         }
+    }
+
+    fn create_jump(target: BlockId) -> Instruction {
+        Instruction::Jump { target }
     }
 }

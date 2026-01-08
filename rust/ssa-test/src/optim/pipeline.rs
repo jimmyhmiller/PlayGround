@@ -8,7 +8,7 @@ use super::analysis::AnalysisCache;
 use super::pass::{OptimizationPass, PassResult, PassStats};
 use super::passes::{
     DeadCodeElimination, CopyPropagation, ConstantFolding, ConstantPropagation,
-    CommonSubexpressionElimination,
+    CommonSubexpressionElimination, ControlFlowSimplificationPass, JumpThreading, CfgCleanup,
 };
 use super::traits::{OptimizableValue, OptimizableInstruction, InstructionMutator};
 
@@ -297,7 +297,8 @@ where
 
     /// Create an aggressive optimization pipeline.
     ///
-    /// Includes all passes: Copy Prop, Const Prop, Const Fold, CSE, DCE
+    /// Includes all passes: Copy Prop, Const Prop, Const Fold, Control Flow Simplify,
+    /// Jump Threading, CFG Cleanup, CSE, DCE
     ///
     /// Use `run_until_fixed_point` for best results.
     pub fn aggressive() -> Self
@@ -307,13 +308,20 @@ where
         CopyPropagation: OptimizationPass<V, I, F>,
         ConstantPropagation: OptimizationPass<V, I, F>,
         ConstantFolding: OptimizationPass<V, I, F>,
+        ControlFlowSimplificationPass: OptimizationPass<V, I, F>,
+        JumpThreading: OptimizationPass<V, I, F>,
+        CfgCleanup: OptimizationPass<V, I, F>,
         CommonSubexpressionElimination: OptimizationPass<V, I, F>,
     {
         let mut pipeline = Self::new();
-        // Order matters: propagate first, then fold, then eliminate
+        // Order matters: propagate first, then fold, simplify control flow,
+        // thread jumps, cleanup CFG, then eliminate
         pipeline.add_pass(CopyPropagation::new());
         pipeline.add_pass(ConstantPropagation::new());
         pipeline.add_pass(ConstantFolding::new());
+        pipeline.add_pass(ControlFlowSimplificationPass::new());
+        pipeline.add_pass(JumpThreading::new());
+        pipeline.add_pass(CfgCleanup::new());
         pipeline.add_pass(CommonSubexpressionElimination::new());
         pipeline.add_pass(DeadCodeElimination::new());
         pipeline

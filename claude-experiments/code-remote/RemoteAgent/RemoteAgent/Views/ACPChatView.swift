@@ -157,10 +157,16 @@ struct ACPChatView: View {
             }
         }
         .task {
-            await checkAndConnect()
-        }
-        .onDisappear {
-            Task { await viewModel.disconnect() }
+            // Use task cancellation for cleanup - SwiftUI cancels this when view actually goes away
+            await withTaskCancellationHandler {
+                await checkAndConnect()
+                // Keep task alive while connected to detect cancellation
+                while !Task.isCancelled && viewModel.isConnected {
+                    try? await Task.sleep(nanoseconds: 1_000_000_000)
+                }
+            } onCancel: {
+                Task { await viewModel.disconnect() }
+            }
         }
     }
 
@@ -174,11 +180,7 @@ struct ACPChatView: View {
 
             isCheckingRemote = true
 
-            let isInstalled = await ACPService.isClaudeCodeACPInstalledRemote(
-                host: server.host,
-                username: server.username,
-                keyPath: server.privateKeyPath
-            )
+            let isInstalled = await ACPService.isClaudeCodeACPInstalledRemote(server: server)
 
             isCheckingRemote = false
 
@@ -216,9 +218,7 @@ struct ACPChatView: View {
             }
 
             let result = await ACPService.installClaudeCodeACPRemote(
-                host: server.host,
-                username: server.username,
-                keyPath: server.privateKeyPath,
+                server: server,
                 onOutput: { [outputCollector] output in
                     outputCollector.append(output)
                 }

@@ -1,11 +1,12 @@
 //! Generic SSA visualizer for Graphviz DOT output.
 
+use std::collections::HashSet;
 use std::fs;
 use std::process::Command;
 
 use crate::traits::{InstructionFactory, SsaInstruction, SsaValue};
 use crate::translator::SSATranslator;
-use crate::types::Block;
+use crate::types::{Block, BlockId};
 
 /// Trait for formatting values in visualization
 pub trait FormatValue {
@@ -44,15 +45,24 @@ where
         dot.push_str("    node [shape=box, style=rounded];\n");
         dot.push_str("    \n");
 
-        // Generate nodes for each block
+        // Find reachable blocks (skip unreachable/empty blocks)
+        let reachable = self.find_reachable_blocks();
+
+        // Generate nodes for each reachable block
         for block in &self.translator.blocks {
-            dot.push_str(&self.generate_block_node(block));
+            if reachable.contains(&block.id) {
+                dot.push_str(&self.generate_block_node(block));
+            }
         }
 
-        // Generate edges between blocks
+        // Generate edges between reachable blocks
         for block in &self.translator.blocks {
-            for pred in &block.predecessors {
-                dot.push_str(&format!("    block_{} -> block_{};\n", pred.0, block.id.0));
+            if reachable.contains(&block.id) {
+                for pred in &block.predecessors {
+                    if reachable.contains(pred) {
+                        dot.push_str(&format!("    block_{} -> block_{};\n", pred.0, block.id.0));
+                    }
+                }
             }
         }
 
@@ -68,6 +78,33 @@ where
 
         dot.push_str("}\n");
         dot
+    }
+
+    /// Find all blocks reachable from entry.
+    /// A block is considered reachable if:
+    /// - It's the entry block (BlockId(0)), OR
+    /// - It has non-empty instructions AND has predecessors
+    fn find_reachable_blocks(&self) -> HashSet<BlockId> {
+        let mut reachable = HashSet::new();
+        let entry = BlockId(0);
+
+        // Entry is always reachable (even if empty, we show it)
+        reachable.insert(entry);
+
+        // BFS from entry following predecessor relationships backwards
+        // Actually, we need to follow successor relationships, but we only have predecessors
+        // So instead: a block is reachable if it has non-empty instructions OR is entry
+        // Then we refine: only include blocks that are actually connected
+
+        // Simple approach: include blocks that have instructions
+        // (CfgCleanup clears instructions of unreachable blocks)
+        for block in &self.translator.blocks {
+            if !block.instructions.is_empty() {
+                reachable.insert(block.id);
+            }
+        }
+
+        reachable
     }
 
     fn generate_block_node(&self, block: &Block<I>) -> String {

@@ -84,7 +84,7 @@ actor SSHService {
                 let actualPassword: String
                 if let pwd = password, !pwd.isEmpty {
                     actualPassword = pwd
-                } else if let keychainPwd = try? KeychainService.getPassword(for: server.id), !keychainPwd.isEmpty {
+                } else if let keychainPwd = try? await KeychainService.shared.getPassword(for: server.id), !keychainPwd.isEmpty {
                     print("[SSHService] Using password from Keychain")
                     actualPassword = keychainPwd
                 } else {

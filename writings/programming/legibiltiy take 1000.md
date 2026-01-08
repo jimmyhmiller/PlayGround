@@ -50,6 +50,8 @@ It hard to list all the ways that backlogs can create negative consequences for 
 
 The temptation here is to respond that clearly this isn't a problem with the backlog, but the assingment of tasks to work on the backlog. Or perhaps, it is a breakdown of backlog review. Or perhaps it is a breakdown of linking related tasks in the backlog. We are enigineers who can come up with countless ways to structure things to "prevent" these problems. But the problem itself occured because of the legibility of the backlog. If instead A had worked on X and Y and needed to work on something else, they could have simply talked to B and told them about X and Y and how to do Z. Instead, we believed the simplifying legible myth that each "story" is an isolated unit of work and ended up in this scenario.
 
+### OKRs / KPIs
+
 
 
 

@@ -7,6 +7,7 @@ struct ServerListView: View {
 
     @State private var showingAddSheet = false
     @State private var selectedServer: Server?
+    @State private var showingLogs = false
 
     var body: some View {
         List {
@@ -43,12 +44,24 @@ struct ServerListView: View {
             ProjectListView(server: server)
         }
         .toolbar {
+            ToolbarItem(placement: .navigation) {
+                Button {
+                    showingLogs = true
+                } label: {
+                    Label("Logs", systemImage: "doc.text.magnifyingglass")
+                }
+            }
             ToolbarItem(placement: .primaryAction) {
                 Button {
                     showingAddSheet = true
                 } label: {
                     Label("Add Server", systemImage: "plus")
                 }
+            }
+        }
+        .sheet(isPresented: $showingLogs) {
+            NavigationStack {
+                LogViewerView()
             }
         }
         .sheet(isPresented: $showingAddSheet) {
@@ -251,10 +264,8 @@ struct ServerFormView: View {
                 username = server.username
                 authMethod = server.authMethod
                 privateKeyPath = server.privateKeyPath ?? ""
-                // Check if password exists in Keychain (async to avoid blocking)
-                hasExistingPassword = await Task.detached {
-                    KeychainService.hasPassword(for: server.id)
-                }.value
+                // Check if password exists in Keychain (runs on actor, off main thread)
+                hasExistingPassword = await KeychainService.shared.hasPassword(for: server.id)
             }
         }
         }
@@ -275,9 +286,13 @@ struct ServerFormView: View {
             if authMethod == .privateKey {
                 server.privateKeyPath = privateKeyPath
             }
-            // Save password to Keychain if using password auth
+            // Save password to Keychain if using password auth (async, off main thread)
             if authMethod == .password && !password.isEmpty {
-                try? KeychainService.savePassword(password, for: server.id)
+                let pwd = password
+                let serverId = server.id
+                Task {
+                    try? await KeychainService.shared.savePassword(pwd, for: serverId)
+                }
             }
             onSave(server)
 
@@ -289,15 +304,21 @@ struct ServerFormView: View {
             server.authMethod = authMethod
             server.privateKeyPath = authMethod == .privateKey ? privateKeyPath : nil
 
-            // Update password in Keychain
+            // Update password in Keychain (async, off main thread)
+            let serverId = server.id
             if authMethod == .password {
                 if !password.isEmpty {
-                    try? KeychainService.savePassword(password, for: server.id)
+                    let pwd = password
+                    Task {
+                        try? await KeychainService.shared.savePassword(pwd, for: serverId)
+                    }
                 }
                 // If password is empty but we had one saved, keep it
             } else {
                 // Switching to key auth - remove any saved password
-                try? KeychainService.deletePassword(for: server.id)
+                Task {
+                    try? await KeychainService.shared.deletePassword(for: serverId)
+                }
             }
         }
     }
@@ -307,13 +328,45 @@ struct ServerFormView: View {
         testResult = nil
 
         Task {
-            // Simulate connection test
-            try? await Task.sleep(nanoseconds: 1_000_000_000)
+            do {
+                // Create temporary server with form values
+                let portNumber = Int(port) ?? 22
+                let tempServer = Server(
+                    name: "test",
+                    host: host,
+                    port: portNumber,
+                    username: username,
+                    authMethod: authMethod
+                )
+                tempServer.privateKeyPath = authMethod == .privateKey ? privateKeyPath : nil
 
-            await MainActor.run {
-                isTesting = false
-                // In real implementation, actually test SSH connection
-                testResult = .success
+                let sshService = SSHService()
+
+                // Use password from form for password auth
+                let testPassword = authMethod == .password ? password : nil
+
+                try await sshService.connect(to: tempServer, password: testPassword)
+
+                // Try a simple command to verify connection works
+                let output = try await sshService.executeCommand("echo 'Connection successful'")
+                await sshService.disconnect()
+
+                if output.contains("Connection successful") {
+                    await MainActor.run {
+                        isTesting = false
+                        testResult = .success
+                    }
+                } else {
+                    await MainActor.run {
+                        isTesting = false
+                        testResult = .failure("Command execution failed")
+                    }
+                }
+            } catch {
+                await MainActor.run {
+                    isTesting = false
+                    testResult = .failure(error.localizedDescription)
+                }
             }
         }
     }

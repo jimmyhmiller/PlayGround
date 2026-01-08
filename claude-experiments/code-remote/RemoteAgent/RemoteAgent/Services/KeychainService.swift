@@ -3,21 +3,25 @@ import Security
 
 /// Service for securely storing and retrieving passwords from Keychain
 /// Integrates with Face ID/Touch ID automatically on iOS
-enum KeychainService {
+/// Uses a shared actor instance to run Keychain operations off the main thread
+actor KeychainService {
+    static let shared = KeychainService()
 
-    private static let serviceName = "com.remoteagent.ssh"
+    private let serviceName = "com.remoteagent.ssh"
+
+    private init() {}
 
     /// Save a password for a server
-    static func savePassword(_ password: String, for serverID: UUID) throws {
+    func savePassword(_ password: String, for serverID: UUID) throws {
         let account = serverID.uuidString
         let passwordData = password.data(using: .utf8)!
 
         // Delete any existing password first
-        try? deletePassword(for: serverID)
+        try? self.deletePassword(for: serverID)
 
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: serviceName,
+            kSecAttrService as String: self.serviceName,
             kSecAttrAccount as String: account,
             kSecValueData as String: passwordData,
             kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly
@@ -31,12 +35,12 @@ enum KeychainService {
     }
 
     /// Retrieve a password for a server
-    static func getPassword(for serverID: UUID) throws -> String? {
+    func getPassword(for serverID: UUID) throws -> String? {
         let account = serverID.uuidString
 
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: serviceName,
+            kSecAttrService as String: self.serviceName,
             kSecAttrAccount as String: account,
             kSecReturnData as String: true,
             kSecMatchLimit as String: kSecMatchLimitOne
@@ -62,12 +66,12 @@ enum KeychainService {
     }
 
     /// Delete a password for a server
-    static func deletePassword(for serverID: UUID) throws {
+    func deletePassword(for serverID: UUID) throws {
         let account = serverID.uuidString
 
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: serviceName,
+            kSecAttrService as String: self.serviceName,
             kSecAttrAccount as String: account
         ]
 
@@ -79,12 +83,12 @@ enum KeychainService {
     }
 
     /// Check if a password exists for a server
-    static func hasPassword(for serverID: UUID) -> Bool {
+    func hasPassword(for serverID: UUID) -> Bool {
         let account = serverID.uuidString
 
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: serviceName,
+            kSecAttrService as String: self.serviceName,
             kSecAttrAccount as String: account,
             kSecReturnData as String: false
         ]

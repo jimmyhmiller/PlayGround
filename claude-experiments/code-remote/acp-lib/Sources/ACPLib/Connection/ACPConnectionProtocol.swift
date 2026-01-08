@@ -15,4 +15,10 @@ public protocol ACPConnectionProtocol: Actor {
 
     /// Whether the connection is closed
     var isClosed: Bool { get async }
+
+    /// Set handler for incoming notifications from the agent
+    func setNotificationHandler(_ handler: @escaping @Sendable (JSONRPCNotification) async -> Void)
+
+    /// Set handler for incoming requests from the agent (e.g., permission requests)
+    func setRequestHandler(_ handler: @escaping @Sendable (JSONRPCRequest) async -> JSONRPCResponse?)
 }

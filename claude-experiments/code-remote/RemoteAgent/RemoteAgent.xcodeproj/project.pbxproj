@@ -32,6 +32,8 @@
 		A1000027 /* ACPChatView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000027 /* ACPChatView.swift */; };
 		A1000028 /* RemoteFileBrowser.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000028 /* RemoteFileBrowser.swift */; };
 		A1000030 /* KeychainService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000030 /* KeychainService.swift */; };
+		A1000031 /* ACPSSHConnection.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000031 /* ACPSSHConnection.swift */; };
+		A1000032 /* LogStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000032 /* LogStore.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -63,6 +65,8 @@
 		A2000027 /* ACPChatView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ACPChatView.swift; sourceTree = "<group>"; };
 		A2000028 /* RemoteFileBrowser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteFileBrowser.swift; sourceTree = "<group>"; };
 		A2000030 /* KeychainService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeychainService.swift; sourceTree = "<group>"; };
+		A2000031 /* ACPSSHConnection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ACPSSHConnection.swift; sourceTree = "<group>"; };
+		A2000032 /* LogStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LogStore.swift; sourceTree = "<group>"; };
 		A3000001 /* RemoteAgent.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = RemoteAgent.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
@@ -129,6 +133,7 @@
 				A2000009 /* SessionStore.swift */,
 				A2000025 /* ACPService.swift */,
 				A2000030 /* KeychainService.swift */,
+				A2000032 /* LogStore.swift */,
 			);
 			path = Services;
 			sourceTree = "<group>";
@@ -172,6 +177,7 @@
 				A2000020 /* ACP.swift */,
 				A2000021 /* ACPClient.swift */,
 				A2000022 /* Connection.swift */,
+				A2000031 /* ACPSSHConnection.swift */,
 				A2000023 /* JSONRPC.swift */,
 				A2000024 /* Types.swift */,
 			);
@@ -277,6 +283,8 @@
 				A1000027 /* ACPChatView.swift in Sources */,
 				A1000028 /* RemoteFileBrowser.swift in Sources */,
 				A1000030 /* KeychainService.swift in Sources */,
+				A1000031 /* ACPSSHConnection.swift in Sources */,
+				A1000032 /* LogStore.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

@@ -2,10 +2,9 @@ import Foundation
 import SwiftUI
 import ACPLib
 
-// Simple stderr logging for terminal visibility
+// Use the centralized logging that writes to file
 private func log(_ message: String) {
-    let timestamp = ISO8601DateFormatter().string(from: Date())
-    fputs("[\(timestamp)] [ChatVM] \(message)\n", stderr)
+    appLog(message, category: "ChatVM")
 }
 
 // MARK: - Display Permission Request
@@ -87,22 +86,35 @@ class ACPChatViewModel: ObservableObject {
             } else {
                 // Remote connection via SSH tunnel
                 log("connect: connecting remotely to \(server.host)")
+
+                // Fetch password from Keychain if using password auth
+                var sshPassword: String? = nil
+                if server.authMethod == .password {
+                    sshPassword = try? await KeychainService.shared.getPassword(for: server.id)
+                    log("connect: fetched password from keychain, hasPassword=\(sshPassword != nil)")
+                }
+
                 try await acpService.connectRemote(
                     sshHost: server.host,
+                    sshPort: server.port,
                     sshUsername: server.username,
                     sshKeyPath: server.privateKeyPath,
+                    sshPassword: sshPassword,
                     workingDirectory: project.remotePath
                 )
                 log("connect: remote connection established")
             }
 
             isConnected = true
+            log("connect: isConnected=true, now creating session...")
 
             // Create a new session
-            log("connect: creating new session")
+            let sessionStart = Date()
+            log("connect: creating new session at \(sessionStart)")
             let sid = try await acpService.newSession(workingDirectory: project.remotePath)
+            let sessionEnd = Date()
             sessionId = sid
-            log("connect: session created \(sid)")
+            log("connect: session created \(sid) in \(sessionEnd.timeIntervalSince(sessionStart))s")
 
             if let agentInfo = acpService.agentInfo {
                 agentName = agentInfo.title
@@ -251,18 +263,36 @@ class ACPChatViewModel: ObservableObject {
     // MARK: - Mode Management
 
     func setMode(_ modeId: String) async {
+        log("setMode: attempting to set mode to \(modeId)")
         do {
             try await acpService.setMode(modeId)
+            log("setMode: success")
         } catch {
-            errorMessage = error.localizedDescription
+            log("setMode: error - \(error)")
+            // Check if this is a "method not found" error (server doesn't support mode switching)
+            let errorDesc = String(describing: error)
+            if errorDesc.contains("-32601") || errorDesc.contains("Method not found") {
+                log("setMode: server doesn't support mode switching")
+                // Don't show error - mode switching just isn't supported
+            } else {
+                errorMessage = error.localizedDescription
+            }
         }
     }
 
     func cycleMode() async {
+        log("cycleMode: attempting to cycle mode")
         do {
             _ = try await acpService.cycleMode()
+            log("cycleMode: success")
         } catch {
-            errorMessage = error.localizedDescription
+            log("cycleMode: error - \(error)")
+            let errorDesc = String(describing: error)
+            if errorDesc.contains("-32601") || errorDesc.contains("Method not found") {
+                log("cycleMode: server doesn't support mode switching")
+            } else {
+                errorMessage = error.localizedDescription
+            }
         }
     }
 

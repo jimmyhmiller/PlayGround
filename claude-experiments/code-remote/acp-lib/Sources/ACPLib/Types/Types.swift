@@ -281,10 +281,11 @@ public struct ACPSetSessionModeParams: Codable, Sendable {
 }
 
 public struct ACPSetSessionModeResult: Codable, Sendable {
-    public let success: Bool
+    // Server returns empty object, _meta is optional
+    public let _meta: [String: AnyCodableValue]?
 
-    public init(success: Bool) {
-        self.success = success
+    public init(_meta: [String: AnyCodableValue]? = nil) {
+        self._meta = _meta
     }
 }
 

@@ -11,6 +11,11 @@ struct RemoteFileBrowserView: View {
     @State private var sshService: SSHService?
     @State private var isConnected = false
     @State private var hasStartedConnection = false
+    
+    // Directory cache for better performance
+    @State private var directoryCache: [String: [RemoteFileItem]] = [:]
+    // Debounce task to prevent rapid directory loading
+    @State private var loadDirectoryTask: Task<Void, Never>?
 
     var body: some View {
         Group {
@@ -26,6 +31,11 @@ struct RemoteFileBrowserView: View {
             guard !hasStartedConnection else { return }
             hasStartedConnection = true
             await connect()
+        }
+        .onDisappear {
+            // Clean up resources when view disappears
+            loadDirectoryTask?.cancel()
+            Task { await sshService?.disconnect() }
         }
     }
 
@@ -175,7 +185,6 @@ struct RemoteFileBrowserView: View {
         }
     }
 
-    @MainActor
     private func connect() async {
         let service = SSHService()
         sshService = service
@@ -187,26 +196,44 @@ struct RemoteFileBrowserView: View {
             let home = try await service.getHomeDirectory()
             await loadDirectory(home)
         } catch {
-            self.error = error.localizedDescription
+            await MainActor.run {
+                self.error = error.localizedDescription
+            }
         }
     }
 
-    @MainActor
     private func loadDirectory(_ path: String) async {
-        guard let service = sshService else { return }
+        // Cancel any pending directory loading to prevent race conditions
+        loadDirectoryTask?.cancel()
+        
+        loadDirectoryTask = Task { @MainActor in
+            guard let service = sshService else { return }
 
-        isLoading = true
-        error = nil
+            isLoading = true
+            error = nil
 
-        do {
-            let loadedItems = try await service.listDirectory(path)
-            items = loadedItems
-            currentPath = path
-        } catch {
-            self.error = error.localizedDescription
+            // Check cache first
+            if let cachedItems = directoryCache[path] {
+                self.items = cachedItems
+                self.currentPath = path
+                self.isLoading = false
+                return
+            }
+
+            do {
+                let loadedItems = try await service.listDirectory(path)
+                // Cache the result for future use
+                directoryCache[path] = loadedItems
+                self.items = loadedItems
+                self.currentPath = path
+            } catch {
+                self.error = error.localizedDescription
+                // Remove from cache on error
+                directoryCache.removeValue(forKey: path)
+            }
+
+            self.isLoading = false
         }
-
-        isLoading = false
     }
 }
 

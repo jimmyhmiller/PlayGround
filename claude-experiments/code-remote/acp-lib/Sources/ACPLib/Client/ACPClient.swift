@@ -145,9 +145,22 @@ public actor ACPClient {
     public func connect(using connection: any ACPConnectionProtocol) async throws {
         await disconnect()
 
+        // Set up notification handler for streaming events
+        await connection.setNotificationHandler { [weak self] (notification: JSONRPCNotification) in
+            acpLog("ACPClient (custom connection): received notification \(notification.method)")
+            await self?.handleNotification(notification)
+        }
+
+        // Set up request handler for permission requests
+        await connection.setRequestHandler { [weak self] (request: JSONRPCRequest) in
+            acpLog("ACPClient (custom connection): received request \(request.method), id=\(request.id)")
+            return await self?.handleRequest(request)
+        }
+
         self.connection = connection
 
         // Initialize the connection
+        acpLog("ACPClient.connect(using:): sending initialize request...")
         let result: ACPInitializeResult = try await connection.sendRequest(
             method: "initialize",
             params: ACPInitializeParams(
@@ -155,6 +168,7 @@ public actor ACPClient {
                 clientInfo: clientInfo
             )
         )
+        acpLog("ACPClient.connect(using:): initialize complete, agent=\(result.agentInfo.name)")
 
         isConnected = true
         agentInfo = result.agentInfo
@@ -391,7 +405,7 @@ public actor ACPClient {
         }
 
         let _: ACPSetSessionModeResult = try await conn.sendRequest(
-            method: "session/setMode",
+            method: "session/set_mode",
             params: ACPSetSessionModeParams(sessionId: sid, modeId: modeId)
         )
 
