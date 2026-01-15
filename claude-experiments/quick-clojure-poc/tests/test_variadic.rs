@@ -239,17 +239,14 @@ fn test_variadic_with_closures() {
 #[test]
 fn test_variadic_recursive() {
     // Variadic function that calls itself
+    // Note: Use (seq args) not (nil? args) because rest returns empty list, not nil
     let code = r#"
 (defn sum-all [& args]
-  (if (nil? args)
-    0
-    (+ (first args) (apply sum-all (rest args)))))
+  (if (seq args)
+    (+ (first args) (apply sum-all (rest args)))
+    0))
 (_println (sum-all 1 2 3 4 5))
 "#;
-    // This may fail if apply isn't implemented, but the test structure is here
-    let (stdout, stderr) = run_code(code);
-    // Just check it doesn't crash - apply might not be implemented
-    if !stderr.contains("apply") {
-        assert_eq!(stdout, "15");
-    }
+    let (stdout, _stderr) = run_code(code);
+    assert_eq!(stdout, "15");
 }

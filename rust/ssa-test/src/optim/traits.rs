@@ -66,6 +66,42 @@ pub enum ExpressionKey<V: OptimizableValue> {
     Custom(String, Vec<V>),
 }
 
+/// Hint about branch probability/semantics for block layout optimization.
+///
+/// These hints allow instructions to communicate expected branch behavior
+/// to the block layout algorithm, enabling better code placement decisions.
+///
+/// # Example
+/// ```ignore
+/// // For a guard instruction where failure is unlikely:
+/// fn branch_hints(&self) -> Vec<BranchHint> {
+///     match self {
+///         MyInstr::Guard { fail_target, .. } => {
+///             // fail_target is cold (unlikely), fall-through is hot (likely)
+///             vec![BranchHint::Unlikely, BranchHint::Likely]
+///         }
+///         _ => vec![],
+///     }
+/// }
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BranchHint {
+    /// No hint - use default heuristics (position-based: first=likely, second=unlikely)
+    None,
+    /// This edge is likely to be taken (hot path, should be fall-through candidate)
+    Likely,
+    /// This edge is unlikely to be taken (cold path, error handling, GC triggers)
+    Unlikely,
+    /// This is a loop back-edge (prefer loop exit as fall-through)
+    LoopBack,
+}
+
+impl Default for BranchHint {
+    fn default() -> Self {
+        BranchHint::None
+    }
+}
+
 /// Result of attempting to simplify a control-flow instruction.
 ///
 /// Used by `try_simplify_control_flow()` to indicate how an instruction
@@ -186,6 +222,38 @@ where
     /// Default implementation returns empty vec (for non-control-flow instructions).
     fn jump_targets(&self) -> Vec<BlockId> {
         vec![]
+    }
+
+    /// Returns branch probability hints for each jump target.
+    ///
+    /// The returned vec should have the same length as `jump_targets()`.
+    /// Used by block layout algorithms to make better placement decisions.
+    ///
+    /// This is particularly important for:
+    /// - **Guards**: The fail target should be `Unlikely`, success path `Likely`
+    /// - **GC checks**: The GC-triggered path should be `Unlikely`
+    /// - **Error handling**: Exception/error paths should be `Unlikely`
+    ///
+    /// Default implementation returns `BranchHint::None` for all targets,
+    /// which tells the layout algorithm to use position-based heuristics
+    /// (first target = likely, second = unlikely).
+    ///
+    /// # Example
+    /// ```ignore
+    /// fn branch_hints(&self) -> Vec<BranchHint> {
+    ///     match self {
+    ///         // Guard: fail_target (cold), then fall-through (hot)
+    ///         MyInstr::GuardInt { .. } => vec![BranchHint::Unlikely, BranchHint::Likely],
+    ///         // GC check: gc_path (cold), normal_path (hot)
+    ///         MyInstr::GCCheck { .. } => vec![BranchHint::Unlikely, BranchHint::Likely],
+    ///         // Normal conditional: no hint, use default heuristics
+    ///         MyInstr::Branch { .. } => vec![BranchHint::None, BranchHint::None],
+    ///         _ => vec![],
+    ///     }
+    /// }
+    /// ```
+    fn branch_hints(&self) -> Vec<BranchHint> {
+        vec![BranchHint::None; self.jump_targets().len()]
     }
 
     /// Rewrite a jump target from `old` to `new`.
@@ -336,6 +404,7 @@ mod tests {
             fn undefined() -> Self { TestValue(-1) }
             fn as_phi(&self) -> Option<crate::types::PhiId> { None }
             fn as_var(&self) -> Option<&SsaVariable> { None }
+            fn is_undefined(&self) -> bool { self.0 == -1 }
         }
 
         impl OptimizableValue for TestValue {

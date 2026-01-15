@@ -50,11 +50,19 @@ public actor ACPClient {
         self.delegate = delegate
     }
 
-    /// Configure SSH for remote terminal execution
+    /// Configure SSH for remote terminal execution (macOS only)
     /// When set, terminal commands will be executed via SSH on the remote host
     public func setSSHConfiguration(_ config: SSHConfiguration?) async {
         await terminalManager.setSSHConfiguration(config)
     }
+
+    #if !os(macOS)
+    /// Set the remote command executor for iOS terminal execution
+    /// This allows terminal commands to be executed via SSH on a remote server
+    public func setRemoteExecutor(_ executor: any RemoteCommandExecutor) async {
+        await terminalManager.setRemoteExecutor(executor)
+    }
+    #endif
 
     // MARK: - State Accessors
 
@@ -236,15 +244,23 @@ public actor ACPClient {
         }
 
         let result: ACPSessionResumeResult = try await conn.sendRequest(
-            method: "unstable_resumeSession",
+            method: "session/resume",
             params: ACPSessionResumeParams(sessionId: sessionId, cwd: cwd, mcpServers: mcpServers)
         )
 
         currentSessionId = result.sessionId
         await modeManager.updateModes(from: result.modes)
 
-        // Load history
-        let history = try await SessionHistoryLoader.loadHistory(sessionId: sessionId, cwd: cwd)
+        // Load history - only available on macOS (files are local)
+        // On iOS, history files are on the remote server and not accessible
+        var history: [ACPHistoryMessage] = []
+        #if os(macOS)
+        do {
+            history = try await SessionHistoryLoader.loadHistory(sessionId: sessionId, cwd: cwd)
+        } catch {
+            acpLog("Failed to load session history: \(error)")
+        }
+        #endif
 
         emitEvent(.sessionResumed(sessionId: result.sessionId, modes: result.modes))
         return (result.sessionId, result.modes, history)
@@ -439,6 +455,8 @@ public actor ACPClient {
             return await handleTerminalKill(request)
         case "terminal/release":
             return await handleTerminalRelease(request)
+        case "fs/read_text_file":
+            return await handleFsReadTextFile(request)
         default:
             acpLog("Unknown incoming request: \(request.method)")
             return nil
@@ -650,6 +668,77 @@ public actor ACPClient {
         }
     }
 
+    // MARK: - File System Handlers
+
+    private func handleFsReadTextFile(_ request: JSONRPCRequest) async -> JSONRPCResponse {
+        acpLog("handleFsReadTextFile: processing id=\(request.id)")
+
+        do {
+            guard let params = request.params else {
+                return makeErrorResponse(request.id, code: -32602, message: "Missing params")
+            }
+
+            struct FsReadParams: Codable {
+                let sessionId: String
+                let path: String
+                let line: Int?
+                let limit: Int?
+            }
+
+            let readParams = try params.decode(FsReadParams.self)
+            acpLog("handleFsReadTextFile: path=\(readParams.path), line=\(readParams.line ?? 1), limit=\(readParams.limit ?? 2000)")
+
+            // Read file via remote executor (SSH) or locally
+            let content: String
+            let lineCount: Int
+
+            #if os(iOS)
+            // On iOS, use remote executor to read file via SSH
+            if let remoteContent = await terminalManager.readRemoteFile(readParams.path) {
+                content = remoteContent
+            } else {
+                return makeErrorResponse(request.id, code: -32000, message: "Failed to read file: \(readParams.path)")
+            }
+            #else
+            // On macOS, read locally or via SSH if configured
+            if await terminalManager.hasRemoteExecutor {
+                if let remoteContent = await terminalManager.readRemoteFile(readParams.path) {
+                    content = remoteContent
+                } else {
+                    return makeErrorResponse(request.id, code: -32000, message: "Failed to read file: \(readParams.path)")
+                }
+            } else {
+                // Read locally
+                let url = URL(fileURLWithPath: readParams.path)
+                content = try String(contentsOf: url, encoding: .utf8)
+            }
+            #endif
+
+            // Apply line offset and limit
+            let lines = content.components(separatedBy: "\n")
+            lineCount = lines.count
+            let startLine = max(0, (readParams.line ?? 1) - 1)
+            let endLine = min(lines.count, startLine + (readParams.limit ?? 2000))
+            let slicedContent = lines[startLine..<endLine].joined(separator: "\n")
+
+            acpLog("handleFsReadTextFile: read \(lineCount) lines, returning \(endLine - startLine) lines")
+
+            struct FsReadResult: Codable {
+                let content: String
+                let lineCount: Int
+            }
+
+            let result = FsReadResult(content: slicedContent, lineCount: lineCount)
+            return .success(JSONRPCSuccessResponse(
+                id: request.id,
+                result: AnyCodableValue(result)
+            ))
+        } catch {
+            acpLogError("handleFsReadTextFile: error: \(error)")
+            return makeErrorResponse(request.id, code: -32000, message: "Failed to read file: \(error.localizedDescription)")
+        }
+    }
+
     private func makeErrorResponse(_ id: JSONRPCId, code: Int, message: String) -> JSONRPCResponse {
         .error(JSONRPCErrorResponse(
             jsonrpc: jsonrpcVersion,
@@ -787,7 +876,9 @@ public extension ACPClient {
                 version: version
             ),
             clientCapabilities: ACPClientCapabilities(
-                fs: ACPFSCapabilities(readTextFile: true, writeTextFile: true),
+                // Don't advertise fs capabilities - agent should use its own tools
+                // to read/write files on the server where it's running
+                fs: nil,
                 terminal: true
             )
         )

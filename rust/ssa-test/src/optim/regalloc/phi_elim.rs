@@ -344,6 +344,30 @@ impl PhiElimination {
             panic!("{}", msg);
         }
     }
+
+    /// Eliminate phi nodes and clean up any resulting trampolines.
+    ///
+    /// This is the recommended method for phi elimination as it:
+    /// 1. Converts phi nodes to copy instructions
+    /// 2. Removes any trampoline blocks created by critical edge splitting
+    ///
+    /// Returns the number of trampolines eliminated.
+    ///
+    /// # Example
+    /// ```ignore
+    /// // Before register allocation:
+    /// PhiElimination::eliminate_with_cleanup(&mut translator);
+    /// // Now the IR has no phis and no trampolines
+    /// ```
+    pub fn eliminate_with_cleanup<V, I, F>(translator: &mut SSATranslator<V, I, F>) -> usize
+    where
+        V: SsaValue + OptimizableValue,
+        I: SsaInstruction<Value = V> + OptimizableInstruction,
+        F: InstructionFactory<Instr = I>,
+    {
+        Self::eliminate(translator);
+        eliminate_trampolines(translator)
+    }
 }
 
 /// Assert phi elimination validation passes.
@@ -361,6 +385,146 @@ where
         }
         panic!("{}", msg);
     }
+}
+
+/// Trampoline elimination: remove blocks that only contain an unconditional jump.
+///
+/// After phi elimination and critical edge splitting, some blocks may end up
+/// containing only a jump instruction (trampolines). These waste code space
+/// and cause unnecessary branches.
+///
+/// This function:
+/// 1. Identifies trampoline blocks (single unconditional jump, no phis)
+/// 2. Rewrites all predecessors to jump directly to the ultimate target
+/// 3. Clears the trampoline blocks
+///
+/// # Returns
+/// The number of trampolines eliminated.
+///
+/// # Example
+/// Before:
+/// ```text
+/// B0: if cond goto B1 else goto B2
+/// B1: ...code... goto B3
+/// B2: goto B3      <- trampoline (created by critical edge split)
+/// B3: ...
+/// ```
+///
+/// After:
+/// ```text
+/// B0: if cond goto B1 else goto B3   <- B2 bypassed
+/// B1: ...code... goto B3
+/// B2: (empty)                         <- cleared
+/// B3: ...
+/// ```
+pub fn eliminate_trampolines<V, I, F>(translator: &mut SSATranslator<V, I, F>) -> usize
+where
+    V: SsaValue + OptimizableValue,
+    I: SsaInstruction<Value = V> + OptimizableInstruction,
+    F: InstructionFactory<Instr = I>,
+{
+    // Step 1: Identify trampoline blocks
+    // A trampoline block:
+    // - Is not the entry block (BlockId(0))
+    // - Has exactly one instruction
+    // - That instruction is an unconditional jump (exactly one target)
+    // - Has no phi nodes (should be empty after phi elimination anyway)
+    let trampolines: HashMap<BlockId, BlockId> = translator.blocks
+        .iter()
+        .filter(|block| {
+            block.id.0 != 0
+                && block.instructions.len() == 1
+                && block.instructions[0].jump_targets().len() == 1
+                && !translator.phis.values().any(|phi| phi.block_id == block.id)
+        })
+        .map(|block| {
+            let target = block.instructions[0].jump_targets()[0];
+            (block.id, target)
+        })
+        .collect();
+
+    if trampolines.is_empty() {
+        return 0;
+    }
+
+    // Step 2: Build ultimate target map (follow chains of trampolines)
+    // A -> B -> C becomes A -> C
+    let ultimate_targets: HashMap<BlockId, BlockId> = trampolines
+        .keys()
+        .map(|&block_id| {
+            let mut current = block_id;
+            let mut visited = HashSet::new();
+            visited.insert(current);
+
+            // Follow the chain until we hit a non-trampoline or a cycle
+            while let Some(&next) = trampolines.get(&current) {
+                if visited.contains(&next) {
+                    // Cycle detected, stop here
+                    break;
+                }
+                visited.insert(next);
+                current = next;
+            }
+
+            // current is either in trampolines (chain end) or not (final target)
+            let ultimate = trampolines.get(&current).copied().unwrap_or(current);
+            (block_id, ultimate)
+        })
+        .collect();
+
+    // Step 3: Rewrite jump targets in all blocks
+    for block in &mut translator.blocks {
+        for instr in &mut block.instructions {
+            for (&trampoline, &ultimate) in &ultimate_targets {
+                instr.rewrite_jump_target(trampoline, ultimate);
+            }
+        }
+    }
+
+    // Step 4: Collect trampoline predecessor information
+    // We need to know who jumps to each trampoline so we can update successor predecessors
+    let trampoline_preds: HashMap<BlockId, Vec<BlockId>> = trampolines
+        .keys()
+        .map(|&t| (t, translator.blocks[t.0].predecessors.clone()))
+        .collect();
+
+    // Step 5: Update predecessor lists
+    // For each non-trampoline block, update predecessors that were trampolines
+    for block in &mut translator.blocks {
+        if trampolines.contains_key(&block.id) {
+            continue; // Skip trampolines, we'll clear them
+        }
+
+        let mut new_preds = Vec::new();
+        for &pred in &block.predecessors {
+            if ultimate_targets.contains_key(&pred) {
+                // This predecessor was a trampoline - find who jumped to it
+                // and add them as the new predecessors
+                if let Some(tpreds) = trampoline_preds.get(&pred) {
+                    for &tp in tpreds {
+                        if !new_preds.contains(&tp) {
+                            new_preds.push(tp);
+                        }
+                    }
+                }
+            } else {
+                if !new_preds.contains(&pred) {
+                    new_preds.push(pred);
+                }
+            }
+        }
+        block.predecessors = new_preds;
+    }
+
+    // Step 5: Clear trampoline blocks (make them empty/unreachable)
+    let count = trampolines.len();
+    for &trampoline_id in trampolines.keys() {
+        let block = &mut translator.blocks[trampoline_id.0];
+        block.instructions.clear();
+        block.predecessors.clear();
+    }
+
+    count
 }
 
 #[cfg(test)]

@@ -125,6 +125,13 @@ pub enum SSAViolation<V> {
         block_id: BlockId,
         instruction_index: usize,
     },
+    /// Phi has an undefined operand (indicates a bug in CFG transformation)
+    UndefinedPhiOperand {
+        phi_id: PhiId,
+        block_id: BlockId,
+        operand_index: usize,
+        predecessor: BlockId,
+    },
 }
 
 impl<V: std::fmt::Debug> std::fmt::Display for SSAViolation<V> {
@@ -202,6 +209,11 @@ impl<V: std::fmt::Debug> std::fmt::Display for SSAViolation<V> {
                 write!(f, "Phi {:?} referenced as value at instruction {} in block {:?} (should have been replaced with variable)",
                     phi_id, instruction_index, block_id)
             }
+            SSAViolation::UndefinedPhiOperand { phi_id, block_id, operand_index, predecessor } => {
+                write!(f, "Phi {:?} in block {:?} has undefined operand at index {} for predecessor {:?} \
+                    (this usually indicates a bug in jump threading or CFG cleanup)",
+                    phi_id, block_id, operand_index, predecessor)
+            }
         }
     }
 }
@@ -246,6 +258,22 @@ where
                         referenced_phi: ref_phi_id,
                     });
                 }
+            }
+        }
+
+        // Property 3b: No undefined phi operands
+        // Undefined operands in phis usually indicate a bug in jump threading or CFG cleanup
+        // where new predecessors were added without properly copying phi operands
+        for (operand_idx, operand) in phi.operands.iter().enumerate() {
+            if operand.is_undefined() {
+                let predecessor = block.predecessors.get(operand_idx).copied()
+                    .unwrap_or(BlockId(usize::MAX)); // Fallback for misaligned indices
+                violations.push(SSAViolation::UndefinedPhiOperand {
+                    phi_id: *phi_id,
+                    block_id: phi.block_id,
+                    operand_index: operand_idx,
+                    predecessor,
+                });
             }
         }
 

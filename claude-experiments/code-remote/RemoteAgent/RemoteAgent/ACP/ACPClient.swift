@@ -86,7 +86,8 @@ actor ACPClient {
     init(
         clientInfo: ACPClientInfo,
         clientCapabilities: ACPClientCapabilities = ACPClientCapabilities(
-            fs: ACPFSCapabilities(readTextFile: true, writeTextFile: true),
+            // Disable fs capabilities - files are on remote server, not client
+            fs: nil,
             terminal: true
         )
     ) {
@@ -370,7 +371,8 @@ extension ACPClient {
                 version: version
             ),
             clientCapabilities: ACPClientCapabilities(
-                fs: ACPFSCapabilities(readTextFile: true, writeTextFile: true),
+                // Disable fs capabilities - files are on remote server, not client
+                fs: nil,
                 terminal: true
             )
         )

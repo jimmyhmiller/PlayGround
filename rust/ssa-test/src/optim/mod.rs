@@ -43,9 +43,10 @@ pub mod analysis;
 pub mod passes;
 pub mod regalloc;
 pub mod optimizer;
+pub mod lowering;
 
 // Re-export main types
-pub use traits::{OptimizableValue, OptimizableInstruction, InstructionMutator, ExpressionKey};
+pub use traits::{OptimizableValue, OptimizableInstruction, InstructionMutator, ExpressionKey, BranchHint};
 pub use pass::{OptimizationPass, PassResult, PassStats, Invalidations};
 pub use pipeline::{OptimizationPipeline, PipelineResult};
 pub use analysis::{AnalysisCache, LivenessAnalysis, UseDefChains};
@@ -56,19 +57,27 @@ pub use regalloc::{
     PhysicalRegister, RegisterClass, TargetArchitecture,
     RegisterConstraint, OperandConstraints, HasRegisterConstraints,
     ProgramPoint, LiveRange, LiveInterval, Location, IntervalAnalysis,
-    PhiElimination,
+    PhiElimination, eliminate_trampolines,
     LinearScanAllocator, LinearScanConfig, AllocationResult, AllocationStats,
     SpillCodeFactory,
     LoweredOperand, LoweredInstruction, LoweredBlock, LoweredFunction,
 };
 
+// Re-export lowering types
+pub use lowering::{
+    BlockLayoutStrategy, DefaultBlockLayout, ExtTspBlockLayout, LoweringContext,
+    CodeEmitter, EmitContext, LoweredTerminator, FallThroughChoice,
+    FallThroughDecision, EdgeKind, DebugEmitter, LoweredBlockInfo,
+};
+
 /// Prelude for convenient imports
 pub mod prelude {
-    pub use super::traits::{OptimizableValue, OptimizableInstruction, InstructionMutator, ExpressionKey};
+    pub use super::traits::{OptimizableValue, OptimizableInstruction, InstructionMutator, ExpressionKey, BranchHint};
     pub use super::pass::{OptimizationPass, PassResult, PassStats, Invalidations};
     pub use super::pipeline::{OptimizationPipeline, PipelineResult};
     pub use super::analysis::{AnalysisCache, LivenessAnalysis, UseDefChains};
     pub use super::optimizer::{Optimizer, OptimizationError, OptimizationResult, optimize, optimize_aggressive};
     pub use super::passes::*;
     pub use super::regalloc::*;
+    pub use super::lowering::*;
 }

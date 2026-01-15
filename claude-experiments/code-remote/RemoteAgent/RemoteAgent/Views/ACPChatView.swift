@@ -1,4 +1,5 @@
 import SwiftUI
+import SwiftData
 import ACPLib
 
 // Helper class to collect output from non-isolated callbacks
@@ -18,25 +19,29 @@ class InstallOutputCollector: ObservableObject {
 }
 
 struct ACPChatView: View {
+    @Environment(\.modelContext) private var modelContext
     @StateObject private var viewModel: ACPChatViewModel
     @StateObject private var outputCollector = InstallOutputCollector()
     @State private var showInstallPrompt = false
     @State private var isInstalling = false
     @State private var isRemoteServer = false
     @State private var isCheckingRemote = false
+    @State private var hasInitiatedConnection = false  // Prevents duplicate connection attempts
 
     let project: Project
     let resumeSession: Session?
+    let preConnectedService: ACPService?
 
     private var isRemote: Bool {
         guard let server = project.server else { return false }
         return !server.host.isEmpty && server.host != "localhost" && server.host != "127.0.0.1"
     }
 
-    init(project: Project, resumeSession: Session?) {
+    init(project: Project, resumeSession: Session?, modelContainer: ModelContainer? = nil, acpService: ACPService? = nil) {
         self.project = project
         self.resumeSession = resumeSession
-        _viewModel = StateObject(wrappedValue: ACPChatViewModel(project: project))
+        self.preConnectedService = acpService
+        _viewModel = StateObject(wrappedValue: ACPChatViewModel(project: project, modelContainer: modelContainer, acpService: acpService))
     }
 
     var body: some View {
@@ -82,6 +87,7 @@ struct ACPChatView: View {
                     onRetry: {
                         showInstallPrompt = false
                         outputCollector.clear()
+                        hasInitiatedConnection = false  // Reset to allow retry
                         Task { await checkAndConnect() }
                     }
                 )
@@ -171,6 +177,21 @@ struct ACPChatView: View {
     }
 
     private func checkAndConnect() async {
+        // Prevent duplicate connection attempts from SwiftUI's .task firing multiple times
+        guard !hasInitiatedConnection else { return }
+        hasInitiatedConnection = true
+
+        // If we have a pre-connected service, skip the install checks
+        if let service = preConnectedService, service.isConnected {
+            // Already connected - just proceed
+            await viewModel.connect(skipNewSession: resumeSession != nil)
+
+            if viewModel.isConnected, let session = resumeSession {
+                await viewModel.resumeSession(session)
+            }
+            return
+        }
+
         if isRemote {
             // Remote server - check via SSH
             guard let server = project.server else {
@@ -198,7 +219,8 @@ struct ACPChatView: View {
             }
         }
 
-        await viewModel.connect()
+        // If resuming, skip creating a new session here - resumeSession will create one
+        await viewModel.connect(skipNewSession: resumeSession != nil)
 
         if viewModel.isConnected, let session = resumeSession {
             await viewModel.resumeSession(session)
@@ -333,6 +355,8 @@ struct InstallACPPromptView: View {
                         #if os(macOS)
                         NSPasteboard.general.clearContents()
                         NSPasteboard.general.setString(installCommand, forType: .string)
+                        #else
+                        UIPasteboard.general.string = installCommand
                         #endif
                     } label: {
                         Image(systemName: "doc.on.doc")
@@ -644,7 +668,8 @@ struct ACPConnectionStatusBar: View {
     NavigationStack {
         ACPChatView(
             project: Project.preview,
-            resumeSession: nil
+            resumeSession: nil,
+            acpService: nil
         )
     }
 }

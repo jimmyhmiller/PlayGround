@@ -18,13 +18,22 @@
 //! fixed constraints are assigned their required register before the main
 //! algorithm runs. When a regular interval needs a register that's occupied
 //! by a pre-colored interval, it must be spilled or use a different register.
+//!
+//! # Allocation Strategies
+//!
+//! The allocator is generic over an [`AllocationStrategy`] that controls:
+//! - Which registers to prefer for different kinds of intervals
+//! - How to select spill candidates when registers are exhausted
+//!
+//! See the [`strategy`](super::strategy) module for built-in strategies.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use crate::types::SsaVariable;
 
 use super::interval::{LiveInterval, Location, ProgramPoint};
-use super::target::{PhysicalRegister, TargetArchitecture};
+use super::strategy::{AllocationContext, AllocationStrategy, ActiveInterval, StandardCallingConvention};
+use super::target::TargetArchitecture;
 
 /// Configuration for the linear scan allocator.
 #[derive(Debug, Clone)]
@@ -90,15 +99,35 @@ struct ActiveEntry {
 }
 
 /// The linear scan register allocator.
+///
+/// Generic over:
+/// - `T`: The target architecture
+/// - `S`: The allocation strategy (defaults to [`StandardCallingConvention`])
+///
+/// # Example
+///
+/// ```ignore
+/// use ssa_lib::optim::regalloc::{LinearScanAllocator, IgnoreCallingConvention};
+///
+/// // Standard usage (backward compatible)
+/// let allocator = LinearScanAllocator::new(my_arch);
+///
+/// // With custom strategy
+/// let allocator = LinearScanAllocator::with_strategy(my_arch, IgnoreCallingConvention);
+/// ```
 #[derive(Debug)]
-pub struct LinearScanAllocator<T>
+pub struct LinearScanAllocator<T, S = StandardCallingConvention>
 where
     T: TargetArchitecture,
     T::Register: 'static,
     T::Class: 'static,
+    S: AllocationStrategy<T>,
 {
     /// Target architecture.
     target: T,
+
+    /// Allocation strategy.
+    strategy: S,
 
     /// Configuration.
     config: LinearScanConfig,
@@ -116,28 +145,56 @@ where
     stats: AllocationStats,
 }
 
-impl<T> LinearScanAllocator<T>
+// Backward-compatible constructors using the default strategy
+impl<T> LinearScanAllocator<T, StandardCallingConvention>
 where
     T: TargetArchitecture,
     T::Register: 'static,
     T::Class: 'static,
 {
-    /// Create a new allocator for the given target.
+    /// Create a new allocator for the given target using the standard calling convention strategy.
+    ///
+    /// This is backward compatible with existing code.
     pub fn new(target: T) -> Self {
-        Self::with_config(target, LinearScanConfig::default())
+        Self::with_strategy(target, StandardCallingConvention)
     }
 
-    /// Create a new allocator with custom configuration.
+    /// Create a new allocator with custom configuration using the standard strategy.
     pub fn with_config(target: T, config: LinearScanConfig) -> Self {
+        Self::with_strategy_and_config(target, StandardCallingConvention, config)
+    }
+}
+
+// Constructors for custom strategies
+impl<T, S> LinearScanAllocator<T, S>
+where
+    T: TargetArchitecture,
+    T::Register: 'static,
+    T::Class: 'static,
+    S: AllocationStrategy<T>,
+{
+    /// Create a new allocator with the given target and strategy.
+    pub fn with_strategy(target: T, strategy: S) -> Self {
+        Self::with_strategy_and_config(target, strategy, LinearScanConfig::default())
+    }
+
+    /// Create a new allocator with the given target, strategy, and configuration.
+    pub fn with_strategy_and_config(target: T, strategy: S, config: LinearScanConfig) -> Self {
         let num_regs = target.total_registers();
         LinearScanAllocator {
             target,
+            strategy,
             config,
             active: Vec::new(),
             free_registers: vec![true; num_regs],
             next_stack_slot: 0,
             stats: AllocationStats::default(),
         }
+    }
+
+    /// Get a reference to the allocation strategy.
+    pub fn strategy(&self) -> &S {
+        &self.strategy
     }
 
     /// Reset the allocator state for a new allocation.
@@ -189,21 +246,19 @@ where
             // Expire old intervals
             self.expire_old_intervals(start);
 
-            // Try to allocate a register
+            // Build context for strategy
+            let ctx = AllocationContext::new(&self.target, &self.free_registers);
+
+            // Let strategy select the register
+            let allocated_reg = self.strategy.select_register(&intervals[idx], &ctx);
+
             let register_hint = intervals[idx].register_hint;
             let end = intervals[idx].end().unwrap_or(start);
-            let crosses_call = intervals[idx].crosses_call;
-
-            // Choose allocation strategy based on whether interval crosses a call
-            let allocated_reg = if crosses_call {
-                // Must use a callee-saved register (preserved across calls)
-                self.try_allocate_callee_saved(register_hint)
-            } else {
-                // Can use any register
-                self.try_allocate_register_with_hint(register_hint)
-            };
 
             if let Some(reg) = allocated_reg {
+                // Mark register as used
+                self.free_registers[reg] = false;
+
                 intervals[idx].assignment = Some(Location::Register(reg));
                 self.stats.registers_assigned += 1;
 
@@ -249,59 +304,36 @@ where
         }
     }
 
-    /// Try to allocate a register, optionally respecting a hint.
-    fn try_allocate_register_with_hint(&mut self, hint: Option<usize>) -> Option<usize> {
-        // Check hint first
-        if self.config.use_hints {
-            if let Some(h) = hint {
-                if self.free_registers.get(h).copied().unwrap_or(false) {
-                    self.free_registers[h] = false;
-                    return Some(h);
-                }
-            }
-        }
-
-        // Find any free register
-        // TODO: Use register class to filter
-        for (reg, is_free) in self.free_registers.iter_mut().enumerate() {
-            if *is_free {
-                *is_free = false;
-                return Some(reg);
-            }
-        }
-
-        None
-    }
 
     /// Handle spilling when no register is available.
     fn spill_at_interval(&mut self, intervals: &mut [LiveInterval], current_idx: usize) {
         let current_interval = &intervals[current_idx];
         let current_end = current_interval.end();
-        let current_crosses_call = current_interval.crosses_call;
 
-        // Get callee-saved register IDs for filtering
-        let callee_saved = self.callee_saved_ids();
-
-        // Find the interval with the furthest end point among active intervals
-        let spill_candidate = self.active.iter()
-            .enumerate()
-            .filter(|(_, entry)| {
-                // Don't spill fixed-register intervals
-                if intervals[entry.interval_idx].fixed_register.is_some() {
-                    return false;
-                }
-                // If current interval crosses a call, we can only evict from
-                // callee-saved registers (since we need a callee-saved register)
-                if current_crosses_call && !callee_saved.contains(&entry.register) {
-                    return false;
-                }
-                true
+        // Build active interval info for the strategy
+        let active_data: Vec<ActiveInterval> = self.active.iter()
+            .map(|e| ActiveInterval {
+                interval_idx: e.interval_idx,
+                register: e.register,
+                end: e.end,
             })
-            .max_by_key(|(_, entry)| entry.end);
+            .collect();
 
-        match spill_candidate {
-            Some((active_idx, entry)) if Some(entry.end) > current_end => {
-                // Spill the active interval (it has a longer lifetime)
+        // Build context for strategy
+        let ctx = AllocationContext::new(&self.target, &self.free_registers);
+
+        // Let strategy select the spill candidate
+        let spill_candidate_idx = self.strategy.select_spill_candidate(
+            current_interval,
+            &active_data,
+            intervals,
+            &ctx,
+        );
+
+        match spill_candidate_idx {
+            Some(active_idx) => {
+                // Spill the selected active interval
+                let entry = &self.active[active_idx];
                 let spill_idx = entry.interval_idx;
                 let reg = entry.register;
 
@@ -320,7 +352,7 @@ where
                 intervals[spill_idx].assignment = Some(Location::StackSlot(slot));
                 self.stats.variables_spilled += 1;
             }
-            _ => {
+            None => {
                 // Spill the current interval (no benefit to evicting)
                 let slot = self.allocate_stack_slot();
                 intervals[current_idx].assignment = Some(Location::StackSlot(slot));
@@ -343,41 +375,6 @@ where
         let slot = self.next_stack_slot;
         self.next_stack_slot += 1;
         slot
-    }
-
-    /// Get the set of callee-saved register IDs.
-    fn callee_saved_ids(&self) -> HashSet<usize> {
-        self.target.callee_saved().iter().map(|r| r.id()).collect()
-    }
-
-    /// Try to allocate a register for an interval that crosses a call.
-    ///
-    /// Only callee-saved registers can be used for such intervals.
-    fn try_allocate_callee_saved(&mut self, hint: Option<usize>) -> Option<usize> {
-        let callee_saved = self.callee_saved_ids();
-
-        // Check hint first (only if it's callee-saved)
-        if self.config.use_hints {
-            if let Some(h) = hint {
-                if callee_saved.contains(&h)
-                    && self.free_registers.get(h).copied().unwrap_or(false)
-                {
-                    self.free_registers[h] = false;
-                    return Some(h);
-                }
-            }
-        }
-
-        // Find any free callee-saved register
-        for &reg in self.target.callee_saved() {
-            let id = reg.id();
-            if self.free_registers.get(id).copied().unwrap_or(false) {
-                self.free_registers[id] = false;
-                return Some(id);
-            }
-        }
-
-        None
     }
 }
 

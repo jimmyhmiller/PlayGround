@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>NSSupportsLiveActivities</key>
+	<true/>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>location</string>
+		<string>fetch</string>
+		<string>processing</string>
+		<string>remote-notification</string>
+	</array>
+	<key>BGTaskSchedulerPermittedIdentifiers</key>
+	<array>
+		<string>com.example.RemoteAgent.connection-keepalive</string>
+	</array>
+	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
+	<string>RemoteAgent uses location to keep your SSH connection alive when the app is in the background. Without this, iOS will terminate the connection after 30 seconds.</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>RemoteAgent uses location to keep your SSH connection alive. This helps maintain your connection while using the app.</string>
+</dict>
+</plist>

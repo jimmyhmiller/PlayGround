@@ -112,49 +112,126 @@ where
             })
             .collect();
 
-        // Step 3: Rewrite jump targets in all blocks using rewrite_jump_target
+        // Step 3: Rewrite jump targets and track edge changes
+        // We need to track which edges are being added/removed for predecessor updates
+        // Also track which trivial block was bypassed so we can copy its phi operands
         let mut changed = false;
+        // (source, trivial_block) - edge being removed
+        let mut edges_removed: Vec<(BlockId, BlockId)> = Vec::new();
+        // (source, ultimate_target, trivial_block) - edge being added, with bypassed block
+        let mut edges_added: Vec<(BlockId, BlockId, BlockId)> = Vec::new();
 
         for block in &mut translator.blocks {
+            let source_id = block.id;
             for instr in &mut block.instructions {
                 // Try to rewrite each trivial block target to its ultimate target
                 for (&trivial_block, &ultimate_target) in &ultimate_targets {
                     if instr.rewrite_jump_target(trivial_block, ultimate_target) {
                         changed = true;
                         stats.instructions_removed += 1;
+                        // Track the edge change with the trivial block that was bypassed
+                        edges_removed.push((source_id, trivial_block));
+                        edges_added.push((source_id, ultimate_target, trivial_block));
                     }
                 }
             }
         }
 
-        // Step 4: Update predecessor lists
-        // Remove trivial blocks from predecessor lists and add the source instead
-        for block in &mut translator.blocks {
-            let old_preds = block.predecessors.clone();
-            let mut new_preds = Vec::new();
+        // Step 4: Update predecessor lists based on edge changes
+        // For each removed edge: remove source from target's predecessors (and update phis)
+        // For each added edge: add source to target's predecessors (and copy phi operands
+        // from the bypassed trivial block)
 
-            for pred in old_preds {
-                if let Some(&ultimate_source) = ultimate_targets.get(&pred) {
-                    // This predecessor was a trivial block, find its predecessors
-                    // Actually, we should add the predecessors of the trivial block
-                    // But for now, the CfgCleanup pass will rebuild predecessors correctly
-                    // Skip trivial block predecessors
-                    let _ = ultimate_source;
-                } else {
-                    new_preds.push(pred);
-                }
+        // First, collect phi operands to copy BEFORE modifying anything
+        // Map: (ultimate_target, trivial_block) -> Vec<(PhiId, operand_value)>
+        let mut phi_operands_to_copy: HashMap<(BlockId, BlockId), Vec<(crate::types::PhiId, V)>> = HashMap::new();
+        for &(_, ultimate_target, trivial_block) in &edges_added {
+            let key = (ultimate_target, trivial_block);
+            if phi_operands_to_copy.contains_key(&key) {
+                continue; // Already collected for this pair
             }
 
-            if new_preds != block.predecessors {
-                block.predecessors = new_preds;
+            // Find the phi operand index for trivial_block in ultimate_target's predecessors
+            let preds = &translator.blocks[ultimate_target.0].predecessors;
+            if let Some(trivial_idx) = preds.iter().position(|&p| p == trivial_block) {
+                // Collect operands for all phis in ultimate_target
+                let operands: Vec<_> = translator.phis
+                    .iter()
+                    .filter(|(_, phi)| phi.block_id == ultimate_target)
+                    .filter_map(|(&phi_id, phi)| {
+                        phi.operands.get(trivial_idx).cloned().map(|op| (phi_id, op))
+                    })
+                    .collect();
+                phi_operands_to_copy.insert(key, operands);
+            }
+        }
+
+        // Handle removed edges and their phi operands
+        for (source, target) in &edges_removed {
+            let block = &mut translator.blocks[target.0];
+            if let Some(idx) = block.predecessors.iter().position(|&p| p == *source) {
+                block.predecessors.remove(idx);
+
+                // Remove corresponding phi operands
+                for phi in translator.phis.values_mut() {
+                    if phi.block_id == *target && idx < phi.operands.len() {
+                        phi.operands.remove(idx);
+                    }
+                }
                 changed = true;
             }
         }
 
-        // Note: CfgCleanup should run after this to:
-        // - Rebuild predecessors from actual jump targets
+        // Handle added edges
+        // For trivial blocks being bypassed, copy the phi operand from the trivial block
+        for (source, ultimate_target, trivial_block) in &edges_added {
+            let block = &mut translator.blocks[ultimate_target.0];
+
+            // Only add if not already a predecessor
+            if !block.predecessors.contains(source) {
+                block.predecessors.push(*source);
+
+                // For phis: copy the operand from the trivial block being bypassed
+                // Since trivial blocks have no phis, the value flowing through is unchanged
+                let key = (*ultimate_target, *trivial_block);
+                if let Some(operands) = phi_operands_to_copy.get(&key) {
+                    // Use the pre-collected operands
+                    for (phi_id, operand) in operands {
+                        if let Some(phi) = translator.phis.get_mut(phi_id) {
+                            phi.operands.push(operand.clone());
+                        }
+                    }
+                } else {
+                    // Fallback: if we couldn't find the trivial block's operand,
+                    // try to find it now (though predecessors may have changed)
+                    let preds = &translator.blocks[ultimate_target.0].predecessors;
+                    if let Some(trivial_idx) = preds.iter().position(|&p| p == *trivial_block) {
+                        for phi in translator.phis.values_mut() {
+                            if phi.block_id == *ultimate_target {
+                                if let Some(operand) = phi.operands.get(trivial_idx).cloned() {
+                                    phi.operands.push(operand);
+                                } else {
+                                    // Last resort: use undefined if we can't find the operand
+                                    phi.operands.push(V::undefined());
+                                }
+                            }
+                        }
+                    } else {
+                        // Trivial block is not a predecessor - use undefined
+                        for phi in translator.phis.values_mut() {
+                            if phi.block_id == *ultimate_target {
+                                phi.operands.push(V::undefined());
+                            }
+                        }
+                    }
+                }
+                changed = true;
+            }
+        }
+
+        // Note: CfgCleanup should still run after this to:
         // - Clear unreachable trivial blocks
-        // - Update phis accordingly
+        // - Remove any remaining stale edges
 
         if changed {
             PassResult::changed(stats)

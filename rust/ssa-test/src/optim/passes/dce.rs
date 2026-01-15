@@ -148,38 +148,132 @@ where
     ) -> PassResult {
         let mut stats = PassStats::new();
 
+        if std::env::var("DEBUG_DCE_DUMP").is_ok() {
+            eprintln!("\n=== DCE: BEFORE ===");
+            for (block_idx, block) in translator.blocks.iter().enumerate() {
+                eprintln!("Block {} (preds={:?}):", block_idx, block.predecessors);
+                for instr in &block.instructions {
+                    eprintln!("  {:?}", instr);
+                }
+            }
+            eprintln!("Phis:");
+            for (id, phi) in &translator.phis {
+                eprintln!("  {:?}: {:?}", id, phi);
+            }
+        }
+
         // Compute live variables
         let live_vars = self.compute_live_variables(translator);
 
-        // Remove dead instructions
-        for block in &mut translator.blocks {
+        if std::env::var("DEBUG_DCE_DUMP").is_ok() {
+            eprintln!("\n=== DCE: LIVE VARS ===");
+            for var in &live_vars {
+                eprintln!("  {:?}", var);
+            }
+        }
+
+        // Remove dead instructions and track offset remapping for phi uses
+        use std::collections::HashMap;
+
+        // Maps (block_id, old_offset) -> new_offset for instructions that were kept
+        let mut offset_remaps: HashMap<(usize, usize), usize> = HashMap::new();
+
+        for (block_idx, block) in translator.blocks.iter_mut().enumerate() {
             let original_count = block.instructions.len();
 
-            block.instructions.retain(|instr| {
-                // Keep instructions with side effects
-                if instr.has_side_effects() {
-                    return true;
-                }
+            // First, determine which instructions to keep and build the offset remap
+            let mut new_offset = 0;
+            let mut keep_flags: Vec<bool> = Vec::with_capacity(block.instructions.len());
 
-                // Keep terminators
-                if instr.is_terminator() {
-                    return true;
-                }
-
-                // Keep instructions whose destination is live
-                if let Some(dest) = instr.destination() {
-                    if live_vars.contains(dest) {
-                        return true;
+            for (old_offset, instr) in block.instructions.iter().enumerate() {
+                let keep = if instr.has_side_effects() {
+                    if std::env::var("DEBUG_DCE_VERBOSE").is_ok() {
+                        eprintln!("[DCE] Keeping side-effecting: {:?}", instr);
                     }
-                    // Dead instruction - remove it
-                    return false;
-                }
+                    true
+                } else if instr.is_terminator() {
+                    if std::env::var("DEBUG_DCE_VERBOSE").is_ok() {
+                        eprintln!("[DCE] Keeping terminator: {:?}", instr);
+                    }
+                    true
+                } else if let Some(dest) = instr.destination() {
+                    if live_vars.contains(dest) {
+                        if std::env::var("DEBUG_DCE_VERBOSE").is_ok() {
+                            eprintln!("[DCE] Keeping live dest {:?}: {:?}", dest, instr);
+                        }
+                        true
+                    } else {
+                        if std::env::var("DEBUG_DCE").is_ok() || std::env::var("DEBUG_DCE_VERBOSE").is_ok() {
+                            eprintln!("[DCE] Removing dead instruction (dest={:?}): {:?}", dest, instr);
+                        }
+                        false
+                    }
+                } else {
+                    if std::env::var("DEBUG_DCE_VERBOSE").is_ok() {
+                        eprintln!("[DCE] Keeping no-dest: {:?}", instr);
+                    }
+                    true
+                };
 
-                // No destination - keep (might be important)
-                true
-            });
+                if keep {
+                    offset_remaps.insert((block_idx, old_offset), new_offset);
+                    new_offset += 1;
+                }
+                keep_flags.push(keep);
+            }
+
+            // Now actually remove the instructions
+            let mut flag_iter = keep_flags.into_iter();
+            block.instructions.retain(|_| flag_iter.next().unwrap_or(true));
 
             stats.instructions_removed += original_count - block.instructions.len();
+        }
+
+        // Rebuild phi uses from scratch by scanning all instructions
+        // This is safer than trying to remap offsets when instructions are removed
+        use crate::types::{BlockId, PhiReference};
+
+        // Build a map from phi destination variable names to phi IDs
+        let phi_dest_to_id: HashMap<SsaVariable, crate::types::PhiId> = translator
+            .phis
+            .iter()
+            .filter_map(|(phi_id, phi)| {
+                phi.dest.as_ref().map(|dest| (dest.clone(), *phi_id))
+            })
+            .collect();
+
+        // Clear existing instruction uses for all phis (keep phi-to-phi uses)
+        for phi in translator.phis.values_mut() {
+            phi.uses.retain(|phi_ref| matches!(phi_ref, PhiReference::Phi(_)));
+        }
+
+        // Rebuild instruction uses by scanning all instructions
+        // Check for both direct phi references AND variable references to phi destinations
+        for (block_idx, block) in translator.blocks.iter().enumerate() {
+            for (instr_offset, instr) in block.instructions.iter().enumerate() {
+                instr.visit_values(|value| {
+                    // Check for direct phi references
+                    if let Some(phi_id) = value.as_phi() {
+                        if let Some(phi) = translator.phis.get_mut(&phi_id) {
+                            phi.uses.push(PhiReference::Instruction {
+                                block_id: BlockId(block_idx),
+                                instruction_offset: instr_offset,
+                            });
+                        }
+                    }
+                    // Check for variable references to phi destinations
+                    if let Some(var) = value.as_var() {
+                        if let Some(phi_id) = phi_dest_to_id.get(var) {
+                            if let Some(phi) = translator.phis.get_mut(phi_id) {
+                                phi.uses.push(PhiReference::Instruction {
+                                    block_id: BlockId(block_idx),
+                                    instruction_offset: instr_offset,
+                                });
+                            }
+                        }
+                    }
+                });
+            }
         }
 
         // Remove dead phi nodes
@@ -196,9 +290,31 @@ where
             })
             .collect();
 
-        for phi_id in phi_ids_to_remove {
-            translator.phis.remove(&phi_id);
-            stats.phis_simplified += 1;
+        // TEMPORARILY DISABLED phi removal to debug
+        if std::env::var("ENABLE_PHI_REMOVAL").is_ok() {
+            for phi_id in phi_ids_to_remove {
+                if std::env::var("DEBUG_DCE").is_ok() {
+                    if let Some(phi) = translator.phis.get(&phi_id) {
+                        eprintln!("[DCE] Removing dead phi: {:?}", phi);
+                    }
+                }
+                translator.phis.remove(&phi_id);
+                stats.phis_simplified += 1;
+            }
+        }
+
+        if std::env::var("DEBUG_DCE_DUMP").is_ok() {
+            eprintln!("\n=== DCE: AFTER ===");
+            for (block_idx, block) in translator.blocks.iter().enumerate() {
+                eprintln!("Block {} (preds={:?}):", block_idx, block.predecessors);
+                for instr in &block.instructions {
+                    eprintln!("  {:?}", instr);
+                }
+            }
+            eprintln!("Phis:");
+            for (id, phi) in &translator.phis {
+                eprintln!("  {:?}: {:?}", id, phi);
+            }
         }
 
         if stats.instructions_removed > 0 || stats.phis_simplified > 0 {

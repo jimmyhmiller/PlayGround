@@ -73,6 +73,10 @@ impl SsaValueTrait for SsaValue {
             _ => None,
         }
     }
+
+    fn is_undefined(&self) -> bool {
+        matches!(self, SsaValue::Undefined)
+    }
 }
 
 impl FormatValue for SsaValue {

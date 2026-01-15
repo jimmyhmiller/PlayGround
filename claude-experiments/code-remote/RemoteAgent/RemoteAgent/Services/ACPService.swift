@@ -11,12 +11,16 @@ private func log(_ message: String) {
 /// This replaces the SSH-based approach with the standardized ACP protocol
 @MainActor
 class ACPService: ObservableObject {
+    // Static tracker to prevent duplicate connections from SwiftUI view recreation
+    private static var activeConnections: Set<String> = []
+
     private var client: ACPClient?
     #if !os(macOS)
     private var sshConnection: ACPSSHConnection?
     #endif
     private var eventTask: Task<Void, Never>?
     private var permissionDelegate: ACPPermissionDelegate?
+    private var connectionKey: String?  // Tracks which connection this instance owns
 
     @Published var isConnected = false
     @Published var sessionId: String?
@@ -327,7 +331,21 @@ class ACPService: ObservableObject {
         log("connectRemote: host=\(sshHost), port=\(sshPort), username=\(sshUsername)")
         log("connectRemote: workingDirectory=\(workingDirectory), acpPath=\(acpPath)")
         log("connectRemote: hasKeyPath=\(sshKeyPath != nil), hasPassword=\(sshPassword != nil)")
+
+        // Prevent duplicate connections from SwiftUI view recreation
+        let key = "\(sshHost):\(workingDirectory)"
+        if Self.activeConnections.contains(key) {
+            log("connectRemote: SKIPPING - connection already active for \(key)")
+            return
+        }
+
+        // Disconnect any existing connection FIRST (before registering new key)
         await disconnect()
+
+        // Now register our connection key
+        Self.activeConnections.insert(key)
+        self.connectionKey = key
+        log("connectRemote: registered connection key \(key), active=\(Self.activeConnections.count)")
 
         // Create SSH connection
         var stepStart = Date()
@@ -379,6 +397,11 @@ class ACPService: ObservableObject {
         log("connectRemote: calling acpClient.connect(using: connection)")
         try await acpClient.connect(using: connection)
         log("connectRemote: ACPClient connected (initialize) in \(Date().timeIntervalSince(stepStart))s")
+
+        // Set up remote executor for terminal commands on iOS
+        // This allows Claude to run bash commands via SSH
+        log("connectRemote: setting remote executor for terminals")
+        await acpClient.setRemoteExecutor(connection)
 
         // Start listening for events from ACPClient
         log("connectRemote: starting event listener")
@@ -461,6 +484,14 @@ class ACPService: ObservableObject {
         // Log call stack to understand what's triggering disconnect
         let callStack = Thread.callStackSymbols.prefix(10).joined(separator: "\n")
         log("disconnect: starting, call stack:\n\(callStack)")
+
+        // Clean up connection tracking
+        if let key = connectionKey {
+            Self.activeConnections.remove(key)
+            log("disconnect: removed connection key \(key), active=\(Self.activeConnections.count)")
+            connectionKey = nil
+        }
+
         eventTask?.cancel()
         eventTask = nil
 
@@ -506,18 +537,26 @@ class ACPService: ObservableObject {
         return id
     }
 
-    func loadSession(sessionId: String, workingDirectory: String? = nil) async throws -> String {
-        log("loadSession: starting, sessionId=\(sessionId)")
+    func loadSession(sessionId: String, workingDirectory: String) async throws -> (sessionId: String, history: [ACPHistoryMessage]) {
+        log("loadSession: starting, sessionId=\(sessionId), cwd=\(workingDirectory)")
         guard let client = client else {
             log("loadSession: not connected")
             throw ACPServiceError.notConnected
         }
 
-        let id = try await client.loadSession(sessionId: sessionId, cwd: workingDirectory)
-        self.sessionId = id
-        log("loadSession: loaded session \(id)")
-        eventContinuation?.yield(.sessionLoaded(sessionId: id))
-        return id
+        // Use resumeSession instead of loadSession - server only supports unstable_resumeSession
+        let result = try await client.resumeSession(sessionId: sessionId, cwd: workingDirectory)
+        self.sessionId = result.sessionId
+        log("loadSession: resumed session \(result.sessionId), historyCount=\(result.history.count)")
+
+        // Update modes from resume result
+        if let modeInfo = result.modes {
+            availableModes = modeInfo.availableModes
+            currentMode = availableModes.first { $0.id == modeInfo.currentModeId }
+        }
+
+        eventContinuation?.yield(.sessionLoaded(sessionId: result.sessionId))
+        return (result.sessionId, result.history)
     }
 
     // MARK: - Prompting
@@ -590,11 +629,217 @@ class ACPService: ObservableObject {
             log("loadSessionHistory: no active session")
             throw ACPServiceError.noActiveSession
         }
+        return try await loadSessionHistory(cwd: cwd, sessionId: sessionId)
+    }
 
+    func loadSessionHistory(cwd: String, sessionId: String) async throws -> [ACPHistoryMessage] {
+        log("loadSessionHistory: starting, cwd=\(cwd), sessionId=\(sessionId)")
+
+        #if os(macOS)
         let history = try await SessionHistoryLoader.loadHistory(sessionId: sessionId, cwd: cwd)
         log("loadSessionHistory: loaded \(history.count) messages")
         return history
+        #else
+        // On iOS, load history from remote server via SSH
+        guard let sshConnection = sshConnection else {
+            log("loadSessionHistory: no SSH connection")
+            throw ACPServiceError.notConnected
+        }
+
+        let history = try await loadRemoteSessionHistory(sessionId: sessionId, cwd: cwd, via: sshConnection)
+        log("loadSessionHistory: loaded \(history.count) messages from remote")
+        return history
+        #endif
     }
+
+    #if !os(macOS)
+    /// Load session history from remote server via SSH
+    private func loadRemoteSessionHistory(sessionId: String, cwd: String, via connection: ACPSSHConnection) async throws -> [ACPHistoryMessage] {
+        // Path pattern: ~/.claude/projects/{encoded-cwd}/{sessionId}.jsonl
+        let encodedCwd = cwd.replacingOccurrences(of: "/", with: "-")
+        let remotePath = "~/.claude/projects/\(encodedCwd)/\(sessionId).jsonl"
+
+        log("loadRemoteSessionHistory: reading \(remotePath)")
+
+        // Check if file exists
+        let exists = try await connection.remoteFileExists(remotePath)
+        if !exists {
+            log("loadRemoteSessionHistory: file not found")
+            return []
+        }
+
+        // Read file content
+        let content = try await connection.readRemoteFile(remotePath)
+        if content.isEmpty {
+            return []
+        }
+
+        // Parse JSONL
+        return parseSessionHistory(content)
+    }
+
+    /// Parse session history from JSONL content
+    private func parseSessionHistory(_ content: String) -> [ACPHistoryMessage] {
+        let lines = content.components(separatedBy: "\n").filter { !$0.isEmpty }
+        var messages: [ACPHistoryMessage] = []
+
+        for line in lines {
+            guard let data = line.data(using: .utf8),
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                continue
+            }
+
+            guard let type = json["type"] as? String,
+                  (type == "user" || type == "assistant") else {
+                continue
+            }
+
+            let role: ACPMessageRole = type == "user" ? .user : .assistant
+            let uuid = json["uuid"] as? String ?? UUID().uuidString
+
+            // Parse timestamp
+            var timestamp = Date()
+            if let timestampStr = json["timestamp"] as? String {
+                let formatter = ISO8601DateFormatter()
+                formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+                timestamp = formatter.date(from: timestampStr) ?? Date()
+            }
+
+            // Extract content from message.content array
+            guard let message = json["message"] as? [String: Any],
+                  let contentBlocks = message["content"] as? [[String: Any]] else {
+                continue
+            }
+
+            var textParts: [String] = []
+            var toolCalls: [ACPHistoryToolCall] = []
+            var hasToolResult = false
+
+            for block in contentBlocks {
+                guard let blockType = block["type"] as? String else { continue }
+
+                switch blockType {
+                case "text":
+                    if let text = block["text"] as? String, !text.isEmpty {
+                        textParts.append(text)
+                    }
+                case "tool_use":
+                    // Parse tool use blocks properly
+                    if let toolId = block["id"] as? String,
+                       let toolName = block["name"] as? String {
+                        var inputStr: String? = nil
+                        if let input = block["input"] as? [String: Any],
+                           let inputData = try? JSONSerialization.data(withJSONObject: input, options: []),
+                           let str = String(data: inputData, encoding: .utf8) {
+                            inputStr = str
+                        }
+                        toolCalls.append(ACPHistoryToolCall(id: toolId, name: toolName, input: inputStr, output: nil))
+                    }
+                case "tool_result":
+                    hasToolResult = true
+                    // Skip tool results - these are system responses, not user content
+                default:
+                    break
+                }
+            }
+
+            // For user messages: only show if there's actual text (not just tool results)
+            if role == .user {
+                guard !textParts.isEmpty else { continue }
+            }
+
+            let textContent = textParts.joined(separator: "\n")
+
+            // For assistant messages: include even if only tool calls (no text)
+            if role == .assistant && textContent.isEmpty && toolCalls.isEmpty {
+                continue
+            }
+
+            messages.append(ACPHistoryMessage(
+                id: uuid,
+                role: role,
+                content: textContent,
+                timestamp: timestamp,
+                toolCalls: toolCalls.isEmpty ? nil : toolCalls
+            ))
+        }
+
+        return messages
+    }
+
+    /// Check if a session exists on the remote server
+    func sessionExistsOnServer(sessionId: String, cwd: String) async -> Bool {
+        guard let connection = sshConnection else {
+            log("sessionExistsOnServer: no SSH connection")
+            return false
+        }
+
+        let encodedCwd = cwd.replacingOccurrences(of: "/", with: "-")
+        let remotePath = "~/.claude/projects/\(encodedCwd)/\(sessionId).jsonl"
+        log("sessionExistsOnServer: checking \(remotePath)")
+
+        do {
+            let exists = try await connection.remoteFileExists(remotePath)
+            log("sessionExistsOnServer: exists=\(exists)")
+            return exists
+        } catch {
+            log("sessionExistsOnServer: error - \(error)")
+            return false
+        }
+    }
+
+    /// List sessions from the remote server by reading .jsonl files
+    /// Returns sessions sorted by modification time (newest first)
+    func listRemoteSessions(cwd: String, projectId: UUID) async -> [Session] {
+        guard let connection = sshConnection else {
+            log("listRemoteSessions: no SSH connection")
+            return []
+        }
+
+        let encodedCwd = cwd.replacingOccurrences(of: "/", with: "-")
+        let remotePath = "~/.claude/projects/\(encodedCwd)"
+        log("listRemoteSessions: listing \(remotePath)")
+
+        do {
+            // Use stat to get modification time in epoch seconds, along with size and filename
+            // Format: epoch_seconds size filename
+            // Sort by epoch descending (newest first), filter out empty/tiny files, limit to 10 most recent
+            let command = """
+            bash -c 'for f in \(remotePath)/*.jsonl; do [ -f "$f" ] && stat --format="%Y %s %n" "$f" 2>/dev/null; done | sort -rn | head -20'
+            """
+            let output = try await connection.executeCommand(command)
+
+            var sessions: [Session] = []
+            let lines = output.components(separatedBy: "\n").filter { !$0.isEmpty }
+
+            for line in lines {
+                // Parse: epoch_seconds size filename
+                let parts = line.components(separatedBy: " ")
+                guard parts.count >= 3 else { continue }
+
+                guard let epoch = Double(parts[0]) else { continue }
+                guard let size = Int(parts[1]), size > 500 else { continue } // Skip empty/tiny files
+
+                let fullPath = parts.dropFirst(2).joined(separator: " ")
+                guard fullPath.hasSuffix(".jsonl") else { continue }
+
+                // Extract session ID from path
+                let filename = (fullPath as NSString).lastPathComponent
+                let sessionId = filename.replacingOccurrences(of: ".jsonl", with: "")
+
+                let createdAt = Date(timeIntervalSince1970: epoch)
+                let session = Session(id: sessionId, projectId: projectId, createdAt: createdAt)
+                sessions.append(session)
+            }
+
+            log("listRemoteSessions: found \(sessions.count) sessions")
+            return sessions
+        } catch {
+            log("listRemoteSessions: error - \(error)")
+            return []
+        }
+    }
+    #endif
 
     // MARK: - Event Handling
 

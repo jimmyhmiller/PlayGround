@@ -7,6 +7,9 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		66FA75F08F8D8B27407E8983 /* NetworkKeepAliveService.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA6D7995B3D35255F2B92762 /* NetworkKeepAliveService.swift */; };
+		8B18111575E467C2E64AFCBF /* ConnectionLiveActivity.swift in Sources */ = {isa = PBXBuildFile; fileRef = EE192BBC75011C0D1103E15A /* ConnectionLiveActivity.swift */; };
+		9A0919DF5A4828BCC8CE9F58 /* ConnectionActivityAttributes.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000035 /* ConnectionActivityAttributes.swift */; };
 		A1000001 /* RemoteAgentApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000001 /* RemoteAgentApp.swift */; };
 		A1000002 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000002 /* ContentView.swift */; };
 		A1000003 /* Server.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000003 /* Server.swift */; };
@@ -26,17 +29,54 @@
 		A1000017 /* ToolCallView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000017 /* ToolCallView.swift */; };
 		A1000018 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A2000018 /* Assets.xcassets */; };
 		A1000019 /* Citadel in Frameworks */ = {isa = PBXBuildFile; productRef = A10000P1 /* Citadel */; };
-		A1000029 /* ACPLib in Frameworks */ = {isa = PBXBuildFile; productRef = A10000P2 /* ACPLib */; };
 		A1000025 /* ACPService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000025 /* ACPService.swift */; };
 		A1000026 /* ACPChatViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000026 /* ACPChatViewModel.swift */; };
 		A1000027 /* ACPChatView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000027 /* ACPChatView.swift */; };
 		A1000028 /* RemoteFileBrowser.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000028 /* RemoteFileBrowser.swift */; };
+		A1000029 /* ACPLib in Frameworks */ = {isa = PBXBuildFile; productRef = A10000P2 /* ACPLib */; };
 		A1000030 /* KeychainService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000030 /* KeychainService.swift */; };
 		A1000031 /* ACPSSHConnection.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000031 /* ACPSSHConnection.swift */; };
 		A1000032 /* LogStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000032 /* LogStore.swift */; };
+		A1000033 /* CachedSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000033 /* CachedSession.swift */; };
+		A1000034 /* SessionCacheService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000034 /* SessionCacheService.swift */; };
+		A1000035 /* ConnectionActivityAttributes.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000035 /* ConnectionActivityAttributes.swift */; };
+		B9B25F33185AA9861F919541 /* ConnectionWidgetExtension.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = 8655CEDB065EAA2F631D79BD /* ConnectionWidgetExtension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		CE6E1E65A0129F2A7295593F /* ConnectionWidgetBundle.swift in Sources */ = {isa = PBXBuildFile; fileRef = 63091C15EB83F104FB3D4268 /* ConnectionWidgetBundle.swift */; };
+		E10EDC7C5FED89DE52CF6C86 /* Foundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 69080F19C3AB9D98136F7E21 /* Foundation.framework */; };
+		E120197FF520224BE1CC4E55 /* LocationKeepAliveService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1F69452F078E8AC4499D0807 /* LocationKeepAliveService.swift */; };
+		FB15F7D55B956C15C3F85F0C /* ConnectionLiveActivity.swift in Sources */ = {isa = PBXBuildFile; fileRef = 58D0B4D343269EF65FB68D91 /* ConnectionLiveActivity.swift */; };
 /* End PBXBuildFile section */
 
+/* Begin PBXContainerItemProxy section */
+		8946526D336E26408019DA45 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = A8000001 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 2EA3F79D763BA02492618938;
+			remoteInfo = ConnectionWidgetExtension;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		4496E9ED5780FCFF7E92AEA7 /* Embed App Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (
+				B9B25F33185AA9861F919541 /* ConnectionWidgetExtension.appex in Embed App Extensions */,
+			);
+			name = "Embed App Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
+
 /* Begin PBXFileReference section */
+		1F69452F078E8AC4499D0807 /* LocationKeepAliveService.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = LocationKeepAliveService.swift; path = RemoteAgent/Services/LocationKeepAliveService.swift; sourceTree = "<group>"; };
+		58D0B4D343269EF65FB68D91 /* ConnectionLiveActivity.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ConnectionLiveActivity.swift; sourceTree = "<group>"; };
+		63091C15EB83F104FB3D4268 /* ConnectionWidgetBundle.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ConnectionWidgetBundle.swift; sourceTree = "<group>"; };
+		69080F19C3AB9D98136F7E21 /* Foundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Foundation.framework; path = Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS18.0.sdk/System/Library/Frameworks/Foundation.framework; sourceTree = DEVELOPER_DIR; };
+		8655CEDB065EAA2F631D79BD /* ConnectionWidgetExtension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = ConnectionWidgetExtension.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		A2000001 /* RemoteAgentApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteAgentApp.swift; sourceTree = "<group>"; };
 		A2000002 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		A2000003 /* Server.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Server.swift; sourceTree = "<group>"; };
@@ -67,10 +107,23 @@
 		A2000030 /* KeychainService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeychainService.swift; sourceTree = "<group>"; };
 		A2000031 /* ACPSSHConnection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ACPSSHConnection.swift; sourceTree = "<group>"; };
 		A2000032 /* LogStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LogStore.swift; sourceTree = "<group>"; };
+		A2000033 /* CachedSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CachedSession.swift; sourceTree = "<group>"; };
+		A2000034 /* SessionCacheService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionCacheService.swift; sourceTree = "<group>"; };
+		A2000035 /* ConnectionActivityAttributes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConnectionActivityAttributes.swift; sourceTree = "<group>"; };
 		A3000001 /* RemoteAgent.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = RemoteAgent.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		BA6D7995B3D35255F2B92762 /* NetworkKeepAliveService.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = NetworkKeepAliveService.swift; path = RemoteAgent/Services/NetworkKeepAliveService.swift; sourceTree = "<group>"; };
+		EE192BBC75011C0D1103E15A /* ConnectionLiveActivity.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = ConnectionLiveActivity.swift; path = ConnectionWidget/ConnectionLiveActivity.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
+		2FCC6CABFD5E474BF565EEE4 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				E10EDC7C5FED89DE52CF6C86 /* Foundation.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		A4000001 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
@@ -83,11 +136,33 @@
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
+		3B60AA6AAC196ED4FB16020F /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				F71A92FFD5DDB3A358B864B9 /* iOS */,
+			);
+			name = Frameworks;
+			sourceTree = "<group>";
+		};
+		64CA690A62EE74856391D400 /* ConnectionWidget */ = {
+			isa = PBXGroup;
+			children = (
+				63091C15EB83F104FB3D4268 /* ConnectionWidgetBundle.swift */,
+				58D0B4D343269EF65FB68D91 /* ConnectionLiveActivity.swift */,
+			);
+			name = ConnectionWidget;
+			path = ConnectionWidget;
+			sourceTree = "<group>";
+		};
 		A5000001 = {
 			isa = PBXGroup;
 			children = (
 				A5000002 /* RemoteAgent */,
 				A5000003 /* Products */,
+				3B60AA6AAC196ED4FB16020F /* Frameworks */,
+				64CA690A62EE74856391D400 /* ConnectionWidget */,
+				1F69452F078E8AC4499D0807 /* LocationKeepAliveService.swift */,
+				BA6D7995B3D35255F2B92762 /* NetworkKeepAliveService.swift */,
 			);
 			sourceTree = "<group>";
 		};
@@ -110,6 +185,7 @@
 			isa = PBXGroup;
 			children = (
 				A3000001 /* RemoteAgent.app */,
+				8655CEDB065EAA2F631D79BD /* ConnectionWidgetExtension.appex */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -121,6 +197,8 @@
 				A2000004 /* Project.swift */,
 				A2000005 /* Session.swift */,
 				A2000006 /* ClaudeModels.swift */,
+				A2000033 /* CachedSession.swift */,
+				A2000035 /* ConnectionActivityAttributes.swift */,
 			);
 			path = Models;
 			sourceTree = "<group>";
@@ -134,6 +212,7 @@
 				A2000025 /* ACPService.swift */,
 				A2000030 /* KeychainService.swift */,
 				A2000032 /* LogStore.swift */,
+				A2000034 /* SessionCacheService.swift */,
 			);
 			path = Services;
 			sourceTree = "<group>";
@@ -184,9 +263,34 @@
 			path = ACP;
 			sourceTree = "<group>";
 		};
+		F71A92FFD5DDB3A358B864B9 /* iOS */ = {
+			isa = PBXGroup;
+			children = (
+				69080F19C3AB9D98136F7E21 /* Foundation.framework */,
+			);
+			name = iOS;
+			sourceTree = "<group>";
+		};
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
+		2EA3F79D763BA02492618938 /* ConnectionWidgetExtension */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 0F6F68D4F718DFE93F5FDAB4 /* Build configuration list for PBXNativeTarget "ConnectionWidgetExtension" */;
+			buildPhases = (
+				1BD488F4DDC5CA350BBC0B7A /* Sources */,
+				2FCC6CABFD5E474BF565EEE4 /* Frameworks */,
+				5F47FDDF292ACDBBAF242DE3 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = ConnectionWidgetExtension;
+			productName = ConnectionWidgetExtension;
+			productReference = 8655CEDB065EAA2F631D79BD /* ConnectionWidgetExtension.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
 		A6000001 /* RemoteAgent */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = A7000003 /* Build configuration list for PBXNativeTarget "RemoteAgent" */;
@@ -194,10 +298,12 @@
 				A6000002 /* Sources */,
 				A4000001 /* Frameworks */,
 				A6000003 /* Resources */,
+				4496E9ED5780FCFF7E92AEA7 /* Embed App Extensions */,
 			);
 			buildRules = (
 			);
 			dependencies = (
+				34DBF43C7A61F85EC511EFAF /* PBXTargetDependency */,
 			);
 			name = RemoteAgent;
 			packageProductDependencies = (
@@ -241,11 +347,19 @@
 			projectRoot = "";
 			targets = (
 				A6000001 /* RemoteAgent */,
+				2EA3F79D763BA02492618938 /* ConnectionWidgetExtension */,
 			);
 		};
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
+		5F47FDDF292ACDBBAF242DE3 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		A6000003 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -257,6 +371,17 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
+		1BD488F4DDC5CA350BBC0B7A /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				8B18111575E467C2E64AFCBF /* ConnectionLiveActivity.swift in Sources */,
+				CE6E1E65A0129F2A7295593F /* ConnectionWidgetBundle.swift in Sources */,
+				FB15F7D55B956C15C3F85F0C /* ConnectionLiveActivity.swift in Sources */,
+				9A0919DF5A4828BCC8CE9F58 /* ConnectionActivityAttributes.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		A6000002 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -285,12 +410,55 @@
 				A1000030 /* KeychainService.swift in Sources */,
 				A1000031 /* ACPSSHConnection.swift in Sources */,
 				A1000032 /* LogStore.swift in Sources */,
+				A1000033 /* CachedSession.swift in Sources */,
+				A1000034 /* SessionCacheService.swift in Sources */,
+				A1000035 /* ConnectionActivityAttributes.swift in Sources */,
+				E120197FF520224BE1CC4E55 /* LocationKeepAliveService.swift in Sources */,
+				66FA75F08F8D8B27407E8983 /* NetworkKeepAliveService.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXSourcesBuildPhase section */
 
+/* Begin PBXTargetDependency section */
+		34DBF43C7A61F85EC511EFAF /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			name = ConnectionWidgetExtension;
+			target = 2EA3F79D763BA02492618938 /* ConnectionWidgetExtension */;
+			targetProxy = 8946526D336E26408019DA45 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
 /* Begin XCBuildConfiguration section */
+		96E0A65CBD98D0E73A0834BA /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_ENABLE_OBJC_WEAK = NO;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 7J8U597P7P;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = ConnectionWidget/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = ConnectionWidget;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				OTHER_SWIFT_FLAGS = "$(inherited) -DWIDGET_EXTENSION";
+				PRODUCT_BUNDLE_IDENTIFIER = com.example.RemoteAgent.ConnectionWidget;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SKIP_INSTALL = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
 		A9000001 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -420,6 +588,8 @@
 				DEVELOPMENT_TEAM = 7J8U597P7P;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = RemoteAgent/Info.plist;
+				INFOPLIST_KEY_NSSupportsLiveActivities = YES;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -450,6 +620,8 @@
 				DEVELOPMENT_TEAM = 7J8U597P7P;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = RemoteAgent/Info.plist;
+				INFOPLIST_KEY_NSSupportsLiveActivities = YES;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -470,9 +642,46 @@
 			};
 			name = Release;
 		};
+		D8C941EC9305089840B9C7EB /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_ENABLE_OBJC_WEAK = NO;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 7J8U597P7P;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = ConnectionWidget/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = ConnectionWidget;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				OTHER_SWIFT_FLAGS = "$(inherited) -DWIDGET_EXTENSION";
+				PRODUCT_BUNDLE_IDENTIFIER = com.example.RemoteAgent.ConnectionWidget;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SKIP_INSTALL = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
+		0F6F68D4F718DFE93F5FDAB4 /* Build configuration list for PBXNativeTarget "ConnectionWidgetExtension" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				96E0A65CBD98D0E73A0834BA /* Release */,
+				D8C941EC9305089840B9C7EB /* Debug */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
 		A7000001 /* Build configuration list for PBXProject "RemoteAgent" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (

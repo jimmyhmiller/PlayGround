@@ -161,13 +161,43 @@ class ClaudeClient: ObservableObject {
 
 // MARK: - Display Models
 
+/// A content block that can be either text or a tool call, maintaining order
+enum MessageContentBlock: Identifiable {
+    case text(id: String, content: String)
+    case toolCall(DisplayToolCall)
+
+    var id: String {
+        switch self {
+        case .text(let id, _): return id
+        case .toolCall(let tc): return tc.id
+        }
+    }
+
+    var asToolCall: DisplayToolCall? {
+        if case .toolCall(let tc) = self { return tc }
+        return nil
+    }
+}
+
 struct ChatDisplayMessage: Identifiable {
     let id: String
     let role: DisplayMessageRole
-    var content: String
-    var toolCalls: [DisplayToolCall]
+    var contentBlocks: [MessageContentBlock]
     let timestamp: Date
     var isStreaming: Bool
+
+    /// Convenience property to get combined text content
+    var content: String {
+        contentBlocks.compactMap { block in
+            if case .text(_, let content) = block { return content }
+            return nil
+        }.joined()
+    }
+
+    /// Convenience property to get all tool calls
+    var toolCalls: [DisplayToolCall] {
+        contentBlocks.compactMap { $0.asToolCall }
+    }
 
     init(
         id: String = UUID().uuidString,
@@ -179,8 +209,30 @@ struct ChatDisplayMessage: Identifiable {
     ) {
         self.id = id
         self.role = role
-        self.content = content
-        self.toolCalls = toolCalls
+        self.timestamp = timestamp
+        self.isStreaming = isStreaming
+
+        // Build content blocks - text first, then tool calls
+        var blocks: [MessageContentBlock] = []
+        if !content.isEmpty {
+            blocks.append(.text(id: UUID().uuidString, content: content))
+        }
+        for tc in toolCalls {
+            blocks.append(.toolCall(tc))
+        }
+        self.contentBlocks = blocks
+    }
+
+    init(
+        id: String = UUID().uuidString,
+        role: DisplayMessageRole,
+        contentBlocks: [MessageContentBlock],
+        timestamp: Date = Date(),
+        isStreaming: Bool = false
+    ) {
+        self.id = id
+        self.role = role
+        self.contentBlocks = contentBlocks
         self.timestamp = timestamp
         self.isStreaming = isStreaming
     }
@@ -204,5 +256,14 @@ struct DisplayToolCall: Identifiable {
         case running
         case completed
         case error
+    }
+
+    init(id: String, name: String, input: String, output: String? = nil, isExpanded: Bool = false, status: ToolCallStatus = .running) {
+        self.id = id
+        self.name = name
+        self.input = input
+        self.output = output
+        self.isExpanded = isExpanded
+        self.status = status
     }
 }

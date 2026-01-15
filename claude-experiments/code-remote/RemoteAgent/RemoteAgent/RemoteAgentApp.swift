@@ -6,6 +6,8 @@ import Crypto
 import _CryptoExtras
 #if os(macOS)
 import AppKit
+#else
+import UIKit
 #endif
 
 #if os(macOS)
@@ -46,6 +48,8 @@ struct RemoteAgentApp: App {
         let schema = Schema([
             Server.self,
             Project.self,
+            CachedSession.self,
+            CachedMessage.self,
         ])
         let modelConfiguration = ModelConfiguration(schema: schema, isStoredInMemoryOnly: false)
 

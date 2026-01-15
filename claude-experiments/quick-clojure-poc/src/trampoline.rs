@@ -3073,37 +3073,43 @@ fn seq_to_vec(rt: &mut GCRuntime, seq: usize) -> Result<Vec<usize>, String> {
             }
         }
         _ => {
-            // Try to use prim_first/prim_rest for any other seq-like type (Cons, PList, etc.)
+            // Try to use prim_first/prim_rest for any other seq-like type (Cons, PList, IndexedSeq, etc.)
             // These are deftypes that implement ISeq or ISeqable
+            // Note: We use first/rest iteration for all unknown types because:
+            // - prim_count succeeds for many types that don't support prim_nth (e.g., PList)
+            // - first/rest is universally supported by seq types
+            //
+            // First, call -seq to get the actual sequence (handles EmptyList which returns nil from -seq)
+            let seq_result = invoke_protocol_method(rt, seq, "-seq", &[]);
+            let mut current = match seq_result {
+                Ok(s) => s,
+                Err(_) => seq, // If -seq fails, try to iterate the original
+            };
 
-            // First, try to get count for indexed types (like PersistentVector)
-            if let Ok(count) = rt.prim_count(seq) {
-                for i in 0..count {
-                    let elem = rt.prim_nth(seq, i)?;
-                    result.push(elem);
+            loop {
+                if current == 7 {
+                    break;
                 }
-            } else {
-                // Fall back to first/rest iteration
-                let mut current = seq;
-                loop {
-                    if current == 7 {
-                        break;
-                    }
-                    // Try to get first element
-                    match rt.prim_first(current) {
-                        Ok(first) => {
-                            result.push(first);
-                            // Try to get rest
-                            match rt.prim_rest(current) {
-                                Ok(rest) => {
-                                    current = rest;
+                // Try to get first element
+                match rt.prim_first(current) {
+                    Ok(first) => {
+                        result.push(first);
+                        // Try to get rest
+                        match rt.prim_rest(current) {
+                            Ok(rest) => {
+                                if rest == current {
+                                    panic!(
+                                        "seq_to_vec: -rest returned self, would cause infinite loop. \
+                                        Type should implement -seq to return nil for empty collections."
+                                    );
                                 }
-                                Err(_) => break,
+                                current = rest;
                             }
+                            Err(_) => break,
                         }
-                        Err(e) => {
-                            return Err(format!("apply: cannot iterate type {}: {}", type_id, e));
-                        }
+                    }
+                    Err(e) => {
+                        return Err(format!("apply: cannot iterate type {}: {}", type_id, e));
                     }
                 }
             }

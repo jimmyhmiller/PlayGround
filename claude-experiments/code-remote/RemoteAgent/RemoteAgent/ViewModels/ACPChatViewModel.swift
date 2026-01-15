@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import SwiftData
 import ACPLib
 
 // Use the centralized logging that writes to file
@@ -41,6 +42,8 @@ class ACPChatViewModel: ObservableObject {
 
     private let acpService: ACPService
     private let sessionStore: SessionStore
+    private let cacheService: SessionCacheService?
+    private let usesExternalService: Bool  // True if using a pre-connected service
 
     private let project: Project
     private var eventTask: Task<Void, Never>?
@@ -48,10 +51,19 @@ class ACPChatViewModel: ObservableObject {
 
     // MARK: - Init
 
-    init(project: Project) {
+    init(project: Project, modelContainer: ModelContainer? = nil, acpService: ACPService? = nil) {
         self.project = project
-        self.acpService = ACPService()
         self.sessionStore = SessionStore()
+        self.cacheService = modelContainer.map { SessionCacheService(modelContainer: $0) }
+
+        // Use pre-connected service if provided, otherwise create our own
+        if let service = acpService {
+            self.acpService = service
+            self.usesExternalService = true
+        } else {
+            self.acpService = ACPService()
+            self.usesExternalService = false
+        }
     }
 
     deinit {
@@ -60,14 +72,15 @@ class ACPChatViewModel: ObservableObject {
 
     // MARK: - Public Methods
 
-    func connect() async {
+    /// Connect to the server. If skipNewSession is true, don't create a new session (used when resuming).
+    func connect(skipNewSession: Bool = false) async {
         guard let server = project.server else {
             log("connect: no server configured for project")
             errorMessage = "No server configured for project"
             return
         }
 
-        log("connect: starting")
+        log("connect: starting, skipNewSession=\(skipNewSession), alreadyConnected=\(acpService.isConnected)")
         isLoading = true
         errorMessage = nil
 
@@ -75,46 +88,81 @@ class ACPChatViewModel: ObservableObject {
             // Start listening for events first
             startEventListener()
 
-            // Connect based on server configuration
-            if server.host == "localhost" || server.host == "127.0.0.1" || server.host.isEmpty {
-                // Local connection - uses claude-code-acp
-                log("connect: connecting locally to \(self.project.remotePath)")
-                try await acpService.connectLocal(
-                    workingDirectory: project.remotePath
-                )
-                log("connect: local connection established")
+            // If using a pre-connected external service, skip the connection step
+            if usesExternalService && acpService.isConnected {
+                log("connect: using pre-connected service, skipping connection")
             } else {
-                // Remote connection via SSH tunnel
-                log("connect: connecting remotely to \(server.host)")
+                // Connect based on server configuration
+                if server.host == "localhost" || server.host == "127.0.0.1" || server.host.isEmpty {
+                    // Local connection - uses claude-code-acp
+                    log("connect: connecting locally to \(self.project.remotePath)")
+                    try await acpService.connectLocal(
+                        workingDirectory: project.remotePath
+                    )
+                    log("connect: local connection established")
+                } else {
+                    // Remote connection via SSH tunnel
+                    log("connect: connecting remotely to \(server.host)")
 
-                // Fetch password from Keychain if using password auth
-                var sshPassword: String? = nil
-                if server.authMethod == .password {
-                    sshPassword = try? await KeychainService.shared.getPassword(for: server.id)
-                    log("connect: fetched password from keychain, hasPassword=\(sshPassword != nil)")
+                    // Fetch password from Keychain if using password auth
+                    var sshPassword: String? = nil
+                    if server.authMethod == .password {
+                        sshPassword = try? await KeychainService.shared.getPassword(for: server.id)
+                        log("connect: fetched password from keychain, hasPassword=\(sshPassword != nil)")
+                    }
+
+                    try await acpService.connectRemote(
+                        sshHost: server.host,
+                        sshPort: server.port,
+                        sshUsername: server.username,
+                        sshKeyPath: server.privateKeyPath,
+                        sshPassword: sshPassword,
+                        workingDirectory: project.remotePath
+                    )
+                    log("connect: remote connection established")
                 }
-
-                try await acpService.connectRemote(
-                    sshHost: server.host,
-                    sshPort: server.port,
-                    sshUsername: server.username,
-                    sshKeyPath: server.privateKeyPath,
-                    sshPassword: sshPassword,
-                    workingDirectory: project.remotePath
-                )
-                log("connect: remote connection established")
             }
 
             isConnected = true
-            log("connect: isConnected=true, now creating session...")
 
-            // Create a new session
-            let sessionStart = Date()
-            log("connect: creating new session at \(sessionStart)")
-            let sid = try await acpService.newSession(workingDirectory: project.remotePath)
-            let sessionEnd = Date()
-            sessionId = sid
-            log("connect: session created \(sid) in \(sessionEnd.timeIntervalSince(sessionStart))s")
+            // Start location tracking to keep app alive when backgrounded
+            LocationKeepAliveService.shared.startTracking()
+
+            #if os(iOS)
+            // Start network keep-alive to maintain connections in background
+            NetworkKeepAliveService.shared.start()
+            #endif
+
+            // Start Live Activity to show status on lock screen
+            ConnectionActivityManager.shared.startActivity(
+                serverName: server.name,
+                projectName: project.name,
+                sessionId: sessionId ?? "connecting"
+            )
+
+            // Only create a new session if we're not resuming an old one
+            if !skipNewSession {
+                log("connect: isConnected=true, now creating session...")
+
+                // Create a new session
+                let sessionStart = Date()
+                log("connect: creating new session at \(sessionStart)")
+                let sid = try await acpService.newSession(workingDirectory: project.remotePath)
+                let sessionEnd = Date()
+                sessionId = sid
+                log("connect: session created \(sid) in \(sessionEnd.timeIntervalSince(sessionStart))s")
+
+                // Save session to local store so it appears in session list
+                let newSession = Session(id: sid, projectId: project.id)
+                await sessionStore.addSession(newSession)
+                log("connect: saved session to store")
+
+                // Update Live Activity with actual session ID
+                ConnectionActivityManager.shared.updateConnected()
+            } else {
+                log("connect: isConnected=true, skipping new session (will resume)")
+                ConnectionActivityManager.shared.updateConnected()
+            }
 
             if let agentInfo = acpService.agentInfo {
                 agentName = agentInfo.title
@@ -167,52 +215,150 @@ class ACPChatViewModel: ObservableObject {
 
     func resumeSession(_ session: Session) async {
         isLoading = true
+        log("resumeSession: starting for session \(session.id)")
 
         do {
-            let sid = try await acpService.loadSession(
+            // First check if the session file exists on the remote server
+            let sessionExists = await acpService.sessionExistsOnServer(
                 sessionId: session.id,
-                workingDirectory: project.remotePath
+                cwd: project.remotePath
             )
-            sessionId = sid
+            log("resumeSession: session exists on server = \(sessionExists)")
 
-            // Load session history
-            await loadSessionHistory()
+            if sessionExists {
+                // Session exists - resume it properly
+                let result = try await acpService.loadSession(
+                    sessionId: session.id,
+                    workingDirectory: project.remotePath
+                )
+                sessionId = result.sessionId
+                log("resumeSession: resumed session \(result.sessionId)")
 
-            // Update last active time
-            var updatedSession = session
-            updatedSession.lastActiveAt = Date()
-            await sessionStore.updateSession(updatedSession)
+                // Load FULL history from JSONL file (ACP protocol only returns recent messages)
+                var history: [ACPHistoryMessage] = []
+
+                // Always load from remote JSONL file for complete history
+                log("resumeSession: loading full history from remote JSONL file...")
+                do {
+                    history = try await acpService.loadSessionHistory(
+                        cwd: project.remotePath,
+                        sessionId: session.id
+                    )
+                    log("resumeSession: loaded \(history.count) messages from remote JSONL")
+                } catch {
+                    log("resumeSession: failed to load remote history: \(error)")
+
+                    // Fall back to cache if remote fails
+                    if let cache = cacheService {
+                        let cached = await cache.loadCachedHistory(sessionId: session.id)
+                        if !cached.isEmpty {
+                            log("resumeSession: loaded \(cached.count) messages from cache")
+                            history = cached
+                        }
+                    }
+
+                    // Last resort: use ACP's limited history
+                    if history.isEmpty {
+                        history = result.history
+                        log("resumeSession: using ACP history with \(history.count) messages")
+                    }
+                }
+
+                // Cache the full history for next time
+                if !history.isEmpty, let cache = cacheService {
+                    await cache.cacheHistory(
+                        sessionId: session.id,
+                        projectId: project.id,
+                        workingDirectory: project.remotePath,
+                        messages: history
+                    )
+                    log("resumeSession: cached history locally")
+                }
+
+                messages = history.compactMap { historyMsg -> ChatDisplayMessage? in
+                    // Skip user messages that are just tool results (no actual text)
+                    if historyMsg.role == .user && historyMsg.content.isEmpty {
+                        return nil
+                    }
+
+                    // Build content blocks from text and tool calls
+                    var contentBlocks: [MessageContentBlock] = []
+
+                    // Add text content if present
+                    if !historyMsg.content.isEmpty {
+                        contentBlocks.append(.text(id: UUID().uuidString, content: historyMsg.content))
+                    }
+
+                    // Add tool calls if present (for assistant messages)
+                    if let toolCalls = historyMsg.toolCalls {
+                        for tc in toolCalls {
+                            let displayToolCall = DisplayToolCall(
+                                id: tc.id,
+                                name: tc.name,
+                                input: tc.input ?? "",
+                                output: tc.output,
+                                isExpanded: false,
+                                status: .completed
+                            )
+                            contentBlocks.append(.toolCall(displayToolCall))
+                        }
+                    }
+
+                    // Skip if no content at all
+                    guard !contentBlocks.isEmpty else { return nil }
+
+                    return ChatDisplayMessage(
+                        id: historyMsg.id,
+                        role: historyMsg.role == .user ? .user : .assistant,
+                        contentBlocks: contentBlocks,
+                        timestamp: historyMsg.timestamp,
+                        isStreaming: false
+                    )
+                }
+                log("resumeSession: displaying \(messages.count) messages")
+            } else {
+                // Session doesn't exist on server - create new session
+                log("resumeSession: session not found on server, creating new session")
+                let sid = try await acpService.newSession(workingDirectory: project.remotePath)
+                sessionId = sid
+                log("resumeSession: created new session \(sid)")
+
+                // Delete stale session from local storage
+                await sessionStore.deleteSession(id: session.id, projectId: project.id)
+                if let cache = cacheService {
+                    await cache.deleteCachedSession(sessionId: session.id)
+                }
+
+                // Save new session to local store
+                let newSession = Session(id: sid, projectId: project.id)
+                await sessionStore.addSession(newSession)
+                log("resumeSession: saved new session to store")
+            }
         } catch {
+            log("resumeSession: error - \(error)")
             errorMessage = error.localizedDescription
         }
 
         isLoading = false
     }
 
-    private func loadSessionHistory() async {
-        do {
-            let history = try await acpService.loadSessionHistory(cwd: project.remotePath)
-
-            // Convert history messages to display messages
-            messages = history.map { historyMsg in
-                ChatDisplayMessage(
-                    id: historyMsg.id,
-                    role: historyMsg.role == .user ? .user : .assistant,
-                    content: historyMsg.content,
-                    timestamp: historyMsg.timestamp
-                )
-            }
-        } catch {
-            // History loading is optional - just log and continue
-            print("[ACPChatViewModel] Failed to load session history: \(error)")
-        }
-    }
 
     func disconnect() async {
         eventTask?.cancel()
         await acpService.disconnect()
         isConnected = false
         sessionId = nil
+
+        // Stop location tracking
+        LocationKeepAliveService.shared.stopTracking()
+
+        #if os(iOS)
+        // Stop network keep-alive
+        NetworkKeepAliveService.shared.stop()
+        #endif
+
+        // End Live Activity
+        await ConnectionActivityManager.shared.endActivity()
     }
 
     func cancel() async {
@@ -234,7 +380,14 @@ class ACPChatViewModel: ObservableObject {
         // Mark current streaming message as interrupted
         if let messageId = streamingMessageId,
            let index = messages.firstIndex(where: { $0.id == messageId }) {
-            messages[index].content += "\n\n[Interrupted]"
+            // Append [Interrupted] to content blocks
+            let interruptedText = "\n\n[Interrupted]"
+            if let lastBlockIndex = messages[index].contentBlocks.indices.last,
+               case .text(let id, let existingContent) = messages[index].contentBlocks[lastBlockIndex] {
+                messages[index].contentBlocks[lastBlockIndex] = .text(id: id, content: existingContent + interruptedText)
+            } else {
+                messages[index].contentBlocks.append(.text(id: UUID().uuidString, content: interruptedText))
+            }
             messages[index].isStreaming = false
         }
         streamingMessageId = nil
@@ -302,9 +455,13 @@ class ACPChatViewModel: ObservableObject {
 
     func toggleToolCallExpanded(_ toolCallId: String) {
         for i in messages.indices {
-            if let toolIndex = messages[i].toolCalls.firstIndex(where: { $0.id == toolCallId }) {
-                messages[i].toolCalls[toolIndex].isExpanded.toggle()
-                break
+            // Find the tool call in contentBlocks
+            for j in messages[i].contentBlocks.indices {
+                if case .toolCall(var tc) = messages[i].contentBlocks[j], tc.id == toolCallId {
+                    tc.isExpanded.toggle()
+                    messages[i].contentBlocks[j] = .toolCall(tc)
+                    return
+                }
             }
         }
     }
@@ -359,7 +516,17 @@ class ACPChatViewModel: ObservableObject {
             log("handleEvent: textDelta, length=\(delta.count), streamingMessageId=\(self.streamingMessageId ?? "nil")")
             if let messageId = streamingMessageId,
                let index = messages.firstIndex(where: { $0.id == messageId }) {
-                messages[index].content += delta
+                // Append to the last text block, or create a new one
+                if let lastBlockIndex = messages[index].contentBlocks.indices.last,
+                   case .text(let id, let existingContent) = messages[index].contentBlocks[lastBlockIndex] {
+                    // Append to existing text block
+                    messages[index].contentBlocks[lastBlockIndex] = .text(id: id, content: existingContent + delta)
+                } else {
+                    // Create a new text block
+                    messages[index].contentBlocks.append(.text(id: UUID().uuidString, content: delta))
+                }
+                // Update Live Activity to show streaming
+                ConnectionActivityManager.shared.updateStreaming(operation: "Receiving response...")
             } else {
                 log("handleEvent: textDelta received but no streaming message to append to")
             }
@@ -368,11 +535,21 @@ class ACPChatViewModel: ObservableObject {
             log("handleEvent: thinking, length=\(text.count)")
             if let messageId = streamingMessageId,
                let index = messages.firstIndex(where: { $0.id == messageId }) {
-                messages[index].content += "[Thinking] \(text)\n"
+                // Append thinking text to content blocks
+                let thinkingText = "[Thinking] \(text)\n"
+                if let lastBlockIndex = messages[index].contentBlocks.indices.last,
+                   case .text(let id, let existingContent) = messages[index].contentBlocks[lastBlockIndex] {
+                    messages[index].contentBlocks[lastBlockIndex] = .text(id: id, content: existingContent + thinkingText)
+                } else {
+                    messages[index].contentBlocks.append(.text(id: UUID().uuidString, content: thinkingText))
+                }
             }
 
         case .toolUseStarted(let id, let name, let input):
             log("handleEvent: toolUseStarted, id=\(id), name=\(name), inputLength=\(input.count)")
+            // Update Live Activity to show tool running
+            ConnectionActivityManager.shared.updateToolRunning(toolName: name)
+
             let toolCall = DisplayToolCall(
                 id: id,
                 name: name,
@@ -384,13 +561,16 @@ class ACPChatViewModel: ObservableObject {
 
             // Ensure we have an assistant message to append to
             if let lastIndex = messages.indices.last, messages[lastIndex].role == .assistant {
-                messages[lastIndex].toolCalls.append(toolCall)
+                messages[lastIndex].contentBlocks.append(.toolCall(toolCall))
                 log("handleEvent: toolUseStarted, appended to message at index \(lastIndex), total toolCalls=\(self.messages[lastIndex].toolCalls.count)")
             } else {
                 // Create a new assistant message for the tool call
                 log("handleEvent: toolUseStarted, creating new assistant message for tool call")
-                var assistantMessage = ChatDisplayMessage(role: .assistant, content: "", isStreaming: true)
-                assistantMessage.toolCalls.append(toolCall)
+                let assistantMessage = ChatDisplayMessage(
+                    role: .assistant,
+                    contentBlocks: [.toolCall(toolCall)],
+                    isStreaming: true
+                )
                 messages.append(assistantMessage)
                 streamingMessageId = assistantMessage.id
                 isStreaming = true
@@ -400,25 +580,32 @@ class ACPChatViewModel: ObservableObject {
             log("handleEvent: toolUseProgress, id=\(id), status=\(status), title=\(title ?? "nil")")
             // Update tool status or create if doesn't exist
             var found = false
-            var foundIndex: Int? = nil
-            var foundToolIndex: Int? = nil
+            var foundMsgIndex: Int? = nil
+            var foundBlockIndex: Int? = nil
+
             for i in messages.indices.reversed() {
-                if let toolIndex = messages[i].toolCalls.firstIndex(where: { $0.id == id }) {
-                    found = true
-                    foundIndex = i
-                    foundToolIndex = toolIndex
-                    log("handleEvent: toolUseProgress, found tool in message at index \(i)")
-                    break
+                for j in messages[i].contentBlocks.indices {
+                    if case .toolCall(let tc) = messages[i].contentBlocks[j], tc.id == id {
+                        found = true
+                        foundMsgIndex = i
+                        foundBlockIndex = j
+                        log("handleEvent: toolUseProgress, found tool in message at index \(i)")
+                        break
+                    }
                 }
+                if found { break }
             }
 
-            if found, let msgIdx = foundIndex, let toolIdx = foundToolIndex {
+            if found, let msgIdx = foundMsgIndex, let blockIdx = foundBlockIndex {
                 // Update existing tool with new info if available
-                if let title = title, messages[msgIdx].toolCalls[toolIdx].name == "Tool" {
-                    messages[msgIdx].toolCalls[toolIdx].name = title
-                }
-                if let input = input, messages[msgIdx].toolCalls[toolIdx].input.isEmpty {
-                    messages[msgIdx].toolCalls[toolIdx].input = input
+                if case .toolCall(var tc) = messages[msgIdx].contentBlocks[blockIdx] {
+                    if let title = title, tc.name == "Tool" {
+                        tc.name = title
+                    }
+                    if let input = input, tc.input.isEmpty {
+                        tc.input = input
+                    }
+                    messages[msgIdx].contentBlocks[blockIdx] = .toolCall(tc)
                 }
             } else {
                 // Tool doesn't exist yet - this happens with MCP tool calls
@@ -435,10 +622,13 @@ class ACPChatViewModel: ObservableObject {
 
                 // Add to current assistant message or create one
                 if let lastIndex = messages.indices.last, messages[lastIndex].role == .assistant {
-                    messages[lastIndex].toolCalls.append(toolCall)
+                    messages[lastIndex].contentBlocks.append(.toolCall(toolCall))
                 } else {
-                    var assistantMessage = ChatDisplayMessage(role: .assistant, content: "", isStreaming: true)
-                    assistantMessage.toolCalls.append(toolCall)
+                    let assistantMessage = ChatDisplayMessage(
+                        role: .assistant,
+                        contentBlocks: [.toolCall(toolCall)],
+                        isStreaming: true
+                    )
                     messages.append(assistantMessage)
                     streamingMessageId = assistantMessage.id
                     isStreaming = true
@@ -449,13 +639,17 @@ class ACPChatViewModel: ObservableObject {
             log("handleEvent: toolUseCompleted, id=\(id), isError=\(isError), resultLength=\(result?.count ?? 0)")
             var found = false
             for i in messages.indices.reversed() {
-                if let toolIndex = messages[i].toolCalls.firstIndex(where: { $0.id == id }) {
-                    messages[i].toolCalls[toolIndex].output = result
-                    messages[i].toolCalls[toolIndex].status = isError ? .error : .completed
-                    found = true
-                    log("handleEvent: toolUseCompleted, updated tool at message[\(i)].toolCalls[\(toolIndex)], newStatus=\(String(describing: self.messages[i].toolCalls[toolIndex].status))")
-                    break
+                for j in messages[i].contentBlocks.indices {
+                    if case .toolCall(var tc) = messages[i].contentBlocks[j], tc.id == id {
+                        tc.output = result
+                        tc.status = isError ? .error : .completed
+                        messages[i].contentBlocks[j] = .toolCall(tc)
+                        found = true
+                        log("handleEvent: toolUseCompleted, updated tool at message[\(i)].contentBlocks[\(j)], newStatus=\(tc.status)")
+                        break
+                    }
                 }
+                if found { break }
             }
             if !found {
                 log("handleEvent: toolUseCompleted, tool \(id) not found in any message!")
@@ -478,6 +672,30 @@ class ACPChatViewModel: ObservableObject {
                 log("handleEvent: turnComplete, set isStreaming=false on message at index \(index)")
             }
             streamingMessageId = nil
+
+            // Update Live Activity to show idle/ready
+            ConnectionActivityManager.shared.updateIdle(messagesExchanged: messages.count)
+
+            // Cache messages locally for offline access
+            if let sessionId = sessionId, let cache = cacheService {
+                Task {
+                    let historyMessages = messages.map { msg in
+                        ACPHistoryMessage(
+                            id: msg.id,
+                            role: msg.role == .user ? .user : .assistant,
+                            content: msg.content,
+                            timestamp: msg.timestamp
+                        )
+                    }
+                    await cache.cacheHistory(
+                        sessionId: sessionId,
+                        projectId: project.id,
+                        workingDirectory: project.remotePath,
+                        messages: historyMessages
+                    )
+                    log("handleEvent: turnComplete, cached \(historyMessages.count) messages")
+                }
+            }
 
         case .error(let errMsg):
             log("handleEvent: error, message=\(errMsg)")

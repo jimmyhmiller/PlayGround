@@ -130,6 +130,23 @@ where
             }
         }
 
+        // Filter out redundant FailToJump actions in the same block.
+        // If we have multiple FailToJump in the same block, only keep the one with
+        // the lowest index - the others will be truncated anyway, and keeping them
+        // would cause us to not properly remove their target edges.
+        let mut seen_fail_blocks: std::collections::HashSet<BlockId> = std::collections::HashSet::new();
+        let actions: Vec<_> = actions
+            .into_iter()
+            .filter(|action| {
+                if let SimplificationAction::FailToJump { block_id, .. } = action {
+                    // Keep only the first (lowest index) FailToJump per block
+                    seen_fail_blocks.insert(*block_id)
+                } else {
+                    true
+                }
+            })
+            .collect();
+
         // Apply simplifications in reverse order to preserve indices
         for action in actions.into_iter().rev() {
             match action {
@@ -190,6 +207,19 @@ where
                     target,
                     fall_through_target,
                 } => {
+                    // Collect all jump targets from instructions that will be truncated
+                    // (including the current instruction's fall_through, and any subsequent
+                    // instructions' targets). We need to remove these edges from the CFG.
+                    let mut edges_to_remove: Vec<BlockId> = vec![fall_through_target];
+
+                    // Check instructions after instr_idx for any jump targets
+                    let block_instrs = &translator.blocks[block_id.0].instructions;
+                    for i in (instr_idx + 1)..block_instrs.len() {
+                        for jump_target in block_instrs[i].jump_targets() {
+                            edges_to_remove.push(jump_target);
+                        }
+                    }
+
                     // Replace guard with jump
                     translator.blocks[block_id.0].instructions[instr_idx] =
                         F::create_jump(target);
@@ -197,8 +227,13 @@ where
                     // Truncate: remove all instructions after the jump
                     translator.blocks[block_id.0].instructions.truncate(instr_idx + 1);
 
-                    // Update CFG: remove the fall-through edge
-                    remove_predecessor_edge(translator, fall_through_target, block_id);
+                    // Update CFG: remove all dead edges
+                    for dead_target in edges_to_remove {
+                        // Don't remove edge to our new target
+                        if dead_target != target {
+                            remove_predecessor_edge(translator, dead_target, block_id);
+                        }
+                    }
 
                     stats.instructions_removed += 1;
                 }

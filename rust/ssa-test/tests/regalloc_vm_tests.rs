@@ -266,6 +266,10 @@ impl SsaValue for TestValue {
             _ => None,
         }
     }
+
+    fn is_undefined(&self) -> bool {
+        matches!(self, TestValue::Undefined)
+    }
 }
 
 impl OptimizableValue for TestValue {

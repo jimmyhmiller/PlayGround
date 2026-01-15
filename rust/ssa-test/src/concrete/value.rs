@@ -65,6 +65,10 @@ impl SsaValue for Value {
             _ => None,
         }
     }
+
+    fn is_undefined(&self) -> bool {
+        matches!(self, Value::Undefined)
+    }
 }
 
 impl std::fmt::Display for Value {

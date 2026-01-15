@@ -58,6 +58,7 @@ pub mod target;
 pub mod constraints;
 pub mod interval;
 pub mod phi_elim;
+pub mod strategy;
 pub mod linear_scan;
 pub mod spill;
 pub mod lowered;
@@ -66,7 +67,12 @@ pub mod lowered;
 pub use target::{PhysicalRegister, RegisterClass, TargetArchitecture};
 pub use constraints::{RegisterConstraint, OperandConstraints, HasRegisterConstraints};
 pub use interval::{ProgramPoint, LiveRange, LiveInterval, Location, IntervalAnalysis};
-pub use phi_elim::{PhiElimination, PhiEliminationViolation, assert_valid_after_phi_elimination};
+pub use phi_elim::{PhiElimination, PhiEliminationViolation, assert_valid_after_phi_elimination, eliminate_trampolines};
+pub use strategy::{
+    AllocationContext, AllocationStrategy, ActiveInterval,
+    StandardCallingConvention, IgnoreCallingConvention,
+    PreferCallerSavedForShortLived, PreferredRegistersStrategy,
+};
 pub use linear_scan::{LinearScanAllocator, LinearScanConfig, AllocationResult, AllocationStats};
 pub use spill::SpillCodeFactory;
 pub use lowered::{LoweredOperand, LoweredInstruction, LoweredBlock, LoweredFunction};

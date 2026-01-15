@@ -17,6 +17,99 @@ public struct SSHConfiguration: Sendable {
     }
 }
 
+// MARK: - Remote Command Executor Protocol
+
+/// Protocol for executing commands on a remote server (used on iOS)
+public protocol RemoteCommandExecutor: Actor {
+    /// Execute a command and return the output
+    func executeCommand(_ command: String) async throws -> String
+}
+
+// MARK: - Remote Terminal (iOS)
+
+#if !os(macOS)
+/// A managed terminal that runs via SSH on iOS
+actor RemoteTerminal {
+    let id: String
+    private weak var executor: (any RemoteCommandExecutor)?
+    private var output: String = ""
+    private var exitCode: Int32?
+    private var hasExited: Bool = false
+    private var command: String = ""
+    private var cwd: String?
+    private var runTask: Task<Void, Never>?
+
+    init(id: String, executor: any RemoteCommandExecutor) {
+        self.id = id
+        self.executor = executor
+    }
+
+    func start(command: String, cwd: String?, env: [String: String]?) async throws {
+        self.command = command
+        self.cwd = cwd
+
+        // Build full command with cd and env
+        var fullCommand = ""
+        if let cwd = cwd {
+            fullCommand += "cd '\(cwd)' && "
+        }
+        if let env = env {
+            for (key, value) in env {
+                let escapedValue = value.replacingOccurrences(of: "'", with: "'\"'\"'")
+                fullCommand += "\(key)='\(escapedValue)' "
+            }
+        }
+        fullCommand += command
+
+        // Run command in background
+        runTask = Task { [weak self] in
+            guard let self = self, let executor = await self.executor else { return }
+
+            do {
+                let result = try await executor.executeCommand(fullCommand)
+                await self.setOutput(result)
+                await self.setExitCode(0)
+            } catch {
+                await self.appendOutput("Error: \(error.localizedDescription)")
+                await self.setExitCode(1)
+            }
+        }
+    }
+
+    private func setOutput(_ str: String) {
+        output = str
+    }
+
+    private func appendOutput(_ str: String) {
+        output += str
+    }
+
+    private func setExitCode(_ code: Int32) {
+        exitCode = code
+        hasExited = true
+    }
+
+    func getOutput() -> String {
+        return output
+    }
+
+    func getExitStatus() -> (exitCode: Int32?, signal: String?, exited: Bool) {
+        return (exitCode, nil, hasExited)
+    }
+
+    func waitForExit() async -> (exitCode: Int32?, signal: String?) {
+        // Wait for the task to complete
+        await runTask?.value
+        return (exitCode, nil)
+    }
+
+    func kill() {
+        runTask?.cancel()
+        hasExited = true
+    }
+}
+#endif
+
 #if os(macOS)
 // MARK: - Managed Terminal (macOS only)
 
@@ -172,13 +265,16 @@ actor ManagedTerminal {
 public actor TerminalManager {
     #if os(macOS)
     private var terminals: [String: ManagedTerminal] = [:]
+    #else
+    private var terminals: [String: RemoteTerminal] = [:]
+    private var remoteExecutor: (any RemoteCommandExecutor)?
     #endif
     private var idCounter: Int = 0
     private var sshConfig: SSHConfiguration?
 
     public init() {}
 
-    /// Configure SSH for remote terminal execution
+    /// Configure SSH for remote terminal execution (macOS)
     public func setSSHConfiguration(_ config: SSHConfiguration?) {
         self.sshConfig = config
         if let config = config {
@@ -187,6 +283,14 @@ public actor TerminalManager {
             acpLog("TerminalManager: SSH disabled, using local execution")
         }
     }
+
+    #if !os(macOS)
+    /// Set the remote command executor for iOS terminal execution
+    public func setRemoteExecutor(_ executor: any RemoteCommandExecutor) {
+        self.remoteExecutor = executor
+        acpLog("TerminalManager: remote executor configured for iOS")
+    }
+    #endif
 
     /// Check if SSH is configured
     public var isSSHEnabled: Bool {
@@ -200,26 +304,33 @@ public actor TerminalManager {
         cwd: String? = nil,
         env: [String: String]? = nil
     ) async throws -> String {
-        #if os(macOS)
         idCounter += 1
         let id = "terminal-\(idCounter)"
 
+        #if os(macOS)
         let terminal = ManagedTerminal(id: id)
         try await terminal.start(command: command, args: args ?? [], cwd: cwd, env: env, sshConfig: sshConfig)
 
         terminals[id] = terminal
         let mode = sshConfig != nil ? "SSH" : "local"
         acpLog("TerminalManager: created terminal \(id) for command: \(command) [\(mode)]")
+        #else
+        guard let executor = remoteExecutor else {
+            throw NSError(domain: "ACPLib", code: 1, userInfo: [NSLocalizedDescriptionKey: "No remote executor configured for iOS terminal"])
+        }
+
+        let terminal = RemoteTerminal(id: id, executor: executor)
+        try await terminal.start(command: command, cwd: cwd, env: env)
+
+        terminals[id] = terminal
+        acpLog("TerminalManager: created remote terminal \(id) for command: \(command)")
+        #endif
 
         return id
-        #else
-        throw NSError(domain: "ACPLib", code: 1, userInfo: [NSLocalizedDescriptionKey: "Terminal execution not supported on iOS"])
-        #endif
     }
 
     /// Get the output from a terminal
     public func getOutput(terminalId: String) async -> (output: String, exitStatus: (exitCode: Int32?, signal: String?)?) {
-        #if os(macOS)
         guard let terminal = terminals[terminalId] else {
             return ("", nil)
         }
@@ -232,48 +343,99 @@ public actor TerminalManager {
         } else {
             return (output, nil)
         }
-        #else
-        return ("", nil)
-        #endif
     }
 
     /// Wait for a terminal to exit
     public func waitForExit(terminalId: String) async -> (exitCode: Int32?, signal: String?) {
-        #if os(macOS)
         guard let terminal = terminals[terminalId] else {
             return (nil, nil)
         }
 
         return await terminal.waitForExit()
-        #else
-        return (nil, nil)
-        #endif
     }
 
     /// Kill a terminal
     public func killTerminal(terminalId: String) async {
-        #if os(macOS)
         guard let terminal = terminals[terminalId] else { return }
         await terminal.kill()
-        #endif
     }
 
     /// Release (remove) a terminal
     public func releaseTerminal(terminalId: String) async {
-        #if os(macOS)
         if let terminal = terminals.removeValue(forKey: terminalId) {
             await terminal.kill()
         }
-        #endif
     }
 
     /// Clear all terminals
     public func clearAll() async {
-        #if os(macOS)
         for (_, terminal) in terminals {
             await terminal.kill()
         }
         terminals.removeAll()
+    }
+
+    // MARK: - File Operations
+
+    /// Check if remote executor is available
+    public var hasRemoteExecutor: Bool {
+        #if os(macOS)
+        return sshConfig != nil
+        #else
+        return remoteExecutor != nil
+        #endif
+    }
+
+    /// Read a file from the remote server via SSH
+    public func readRemoteFile(_ path: String) async -> String? {
+        #if os(macOS)
+        guard let ssh = sshConfig else {
+            acpLog("TerminalManager: readRemoteFile - no SSH config")
+            return nil
+        }
+
+        do {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
+
+            var sshArgs = ["-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no"]
+            if let keyPath = ssh.keyPath, !keyPath.isEmpty {
+                sshArgs.append(contentsOf: ["-i", (keyPath as NSString).expandingTildeInPath])
+            }
+            sshArgs.append("\(ssh.username)@\(ssh.host)")
+            sshArgs.append("cat '\(path)'")
+
+            process.arguments = sshArgs
+
+            let outputPipe = Pipe()
+            process.standardOutput = outputPipe
+            process.standardError = FileHandle.nullDevice
+
+            try process.run()
+            process.waitUntilExit()
+
+            let data = outputPipe.fileHandleForReading.readDataToEndOfFile()
+            let content = String(data: data, encoding: .utf8)
+            acpLog("TerminalManager: readRemoteFile - read \(data.count) bytes from \(path)")
+            return content
+        } catch {
+            acpLog("TerminalManager: readRemoteFile error: \(error)")
+            return nil
+        }
+        #else
+        guard let executor = remoteExecutor else {
+            acpLog("TerminalManager: readRemoteFile - no remote executor")
+            return nil
+        }
+
+        do {
+            let content = try await executor.executeCommand("cat '\(path)'")
+            acpLog("TerminalManager: readRemoteFile - read \(content.count) bytes from \(path)")
+            return content
+        } catch {
+            acpLog("TerminalManager: readRemoteFile error: \(error)")
+            return nil
+        }
         #endif
     }
 }

@@ -122,9 +122,12 @@ class ChatViewModel: ObservableObject {
 
     func toggleToolCallExpanded(_ toolCallId: String) {
         for i in messages.indices {
-            if let toolIndex = messages[i].toolCalls.firstIndex(where: { $0.id == toolCallId }) {
-                messages[i].toolCalls[toolIndex].isExpanded.toggle()
-                break
+            for j in messages[i].contentBlocks.indices {
+                if case .toolCall(var tc) = messages[i].contentBlocks[j], tc.id == toolCallId {
+                    tc.isExpanded.toggle()
+                    messages[i].contentBlocks[j] = .toolCall(tc)
+                    return
+                }
             }
         }
     }
@@ -161,13 +164,20 @@ class ChatViewModel: ObservableObject {
         case .textDelta(let delta):
             if let messageId = streamingMessageId,
                let index = messages.firstIndex(where: { $0.id == messageId }) {
-                messages[index].content += delta
+                // Append to last text block or create new one
+                if let lastBlockIndex = messages[index].contentBlocks.indices.last,
+                   case .text(let id, let existingContent) = messages[index].contentBlocks[lastBlockIndex] {
+                    messages[index].contentBlocks[lastBlockIndex] = .text(id: id, content: existingContent + delta)
+                } else {
+                    messages[index].contentBlocks.append(.text(id: UUID().uuidString, content: delta))
+                }
             }
 
         case .textComplete(let text):
             if let messageId = streamingMessageId,
                let index = messages.firstIndex(where: { $0.id == messageId }) {
-                messages[index].content = text
+                // Replace all text blocks with complete text
+                messages[index].contentBlocks = [.text(id: UUID().uuidString, content: text)]
                 messages[index].isStreaming = false
             }
 
@@ -182,15 +192,18 @@ class ChatViewModel: ObservableObject {
             )
 
             if let lastIndex = messages.indices.last, messages[lastIndex].role == .assistant {
-                messages[lastIndex].toolCalls.append(toolCall)
+                messages[lastIndex].contentBlocks.append(.toolCall(toolCall))
             }
 
         case .toolUseCompleted(let id, let result, let isError):
             for i in messages.indices.reversed() {
-                if let toolIndex = messages[i].toolCalls.firstIndex(where: { $0.id == id }) {
-                    messages[i].toolCalls[toolIndex].output = result
-                    messages[i].toolCalls[toolIndex].status = isError ? .error : .completed
-                    break
+                for j in messages[i].contentBlocks.indices {
+                    if case .toolCall(var tc) = messages[i].contentBlocks[j], tc.id == id {
+                        tc.output = result
+                        tc.status = isError ? .error : .completed
+                        messages[i].contentBlocks[j] = .toolCall(tc)
+                        return
+                    }
                 }
             }
 

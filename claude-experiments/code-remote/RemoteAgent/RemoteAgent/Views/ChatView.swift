@@ -167,15 +167,29 @@ struct MessageView: View {
                         .foregroundStyle(.tertiary)
                 }
 
-                // Content
-                if !message.content.isEmpty {
-                    MessageContentView(content: message.content, isStreaming: message.isStreaming)
+                // Content blocks - rendered in order (text and tool calls interleaved)
+                ForEach(message.contentBlocks) { block in
+                    switch block {
+                    case .text(_, let content):
+                        if !content.isEmpty {
+                            MessageContentView(content: content, isStreaming: message.isStreaming)
+                        }
+                    case .toolCall(let toolCall):
+                        ToolCallView(toolCall: toolCall) {
+                            onToggleToolCall(toolCall.id)
+                        }
+                    }
                 }
 
-                // Tool calls
-                ForEach(message.toolCalls) { toolCall in
-                    ToolCallView(toolCall: toolCall) {
-                        onToggleToolCall(toolCall.id)
+                // Show streaming indicator if no content blocks yet
+                if message.contentBlocks.isEmpty && message.isStreaming {
+                    HStack(spacing: 4) {
+                        ForEach(0..<3, id: \.self) { _ in
+                            Circle()
+                                .fill(.secondary)
+                                .frame(width: 6, height: 6)
+                                .opacity(0.5)
+                        }
                     }
                 }
             }

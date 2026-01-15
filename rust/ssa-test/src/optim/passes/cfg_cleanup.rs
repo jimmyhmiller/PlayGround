@@ -191,8 +191,12 @@ where
 
 /// Rebuild predecessor lists by scanning all terminators using jump_targets().
 ///
-/// This is the authoritative way to determine control flow edges.
-/// Returns true if any predecessors were changed.
+/// This function only REMOVES stale predecessors - it never adds new ones.
+/// This is critical for preserving phi operand correspondence: each phi operand
+/// corresponds to a predecessor by index. If we added new predecessors without
+/// adding corresponding phi operands, we'd corrupt the phi nodes.
+///
+/// Returns true if any predecessors were removed.
 fn rebuild_predecessors_from_terminators<V, I, F>(
     translator: &mut SSATranslator<V, I, F>,
 ) -> bool
@@ -201,15 +205,15 @@ where
     I: OptimizableInstruction<Value = V>,
     F: InstructionFactory<Instr = I>,
 {
-    // Build the new predecessor map from scratch
-    let mut new_predecessors: HashMap<BlockId, Vec<BlockId>> = HashMap::new();
+    // Build the set of valid predecessors from terminators
+    let mut valid_predecessors: HashMap<BlockId, HashSet<BlockId>> = HashMap::new();
 
-    // Initialize all blocks with empty predecessor lists
+    // Initialize all blocks with empty predecessor sets
     for block in &translator.blocks {
-        new_predecessors.insert(block.id, Vec::new());
+        valid_predecessors.insert(block.id, HashSet::new());
     }
 
-    // Scan all terminators to find edges
+    // Scan all terminators to find valid edges
     for block in &translator.blocks {
         let source_id = block.id;
 
@@ -217,48 +221,42 @@ where
             // Get jump targets from this instruction
             let targets = instr.jump_targets();
             for target in targets {
-                if let Some(preds) = new_predecessors.get_mut(&target) {
-                    if !preds.contains(&source_id) {
-                        preds.push(source_id);
-                    }
+                if let Some(preds) = valid_predecessors.get_mut(&target) {
+                    preds.insert(source_id);
                 }
             }
         }
     }
 
-    // First pass: collect all phi update information (immutable borrow)
-    // We need: (block_id, old_predecessors, removed_predecessors)
+    // First pass: collect phi update information for REMOVED predecessors only
+    // We only remove predecessors that are no longer valid (no terminator points to them)
+    // We do NOT add new predecessors - that would corrupt phi operands
     let mut phi_updates: Vec<(BlockId, Vec<BlockId>, Vec<BlockId>)> = Vec::new();
     let mut changed = false;
 
     for block in &translator.blocks {
-        let new_preds = new_predecessors.get(&block.id).cloned().unwrap_or_default();
+        let valid_preds = valid_predecessors.get(&block.id).unwrap();
         let old_preds = &block.predecessors;
 
-        if *old_preds != new_preds {
-            // Predecessors changed - need to update phi operands
-            let new_set: HashSet<_> = new_preds.iter().copied().collect();
+        // Find predecessors that should be removed (no longer valid)
+        let removed: Vec<_> = old_preds.iter()
+            .filter(|p| !valid_preds.contains(p))
+            .copied()
+            .collect();
 
-            let removed: Vec<_> = old_preds.iter()
-                .filter(|p| !new_set.contains(p))
-                .copied()
-                .collect();
-
-            // Collect the update info for later
-            if !removed.is_empty() {
-                phi_updates.push((block.id, old_preds.clone(), removed));
-            }
-
-            // Note: We don't handle added predecessors here because that would require
-            // knowing what value to use for the new phi operand. That's the responsibility
-            // of the pass that added the edge.
-
+        if !removed.is_empty() {
+            phi_updates.push((block.id, old_preds.clone(), removed));
             changed = true;
         }
+
+        // Note: We intentionally do NOT add new predecessors here.
+        // Adding predecessors without adding corresponding phi operands would corrupt
+        // the phi nodes (each phi operand corresponds to a predecessor by index).
+        // New edges should be handled by the pass that creates them.
     }
 
-    // Second pass: apply phi updates (mutable borrow of phis only)
-    for (block_id, old_preds, removed) in phi_updates {
+    // Second pass: apply phi updates (remove operands for removed predecessors)
+    for (block_id, old_preds, removed) in &phi_updates {
         // Find indices of removed predecessors (in reverse order for safe removal)
         let mut indices_to_remove: Vec<usize> = removed
             .iter()
@@ -268,7 +266,7 @@ where
 
         // Remove corresponding operands from all phis in this block
         for phi in translator.phis.values_mut() {
-            if phi.block_id == block_id {
+            if phi.block_id == *block_id {
                 for &idx in &indices_to_remove {
                     if idx < phi.operands.len() {
                         phi.operands.remove(idx);
@@ -278,10 +276,11 @@ where
         }
     }
 
-    // Third pass: update the predecessor lists
+    // Third pass: update the predecessor lists (only remove, don't add)
     for block in &mut translator.blocks {
-        let new_preds = new_predecessors.remove(&block.id).unwrap_or_default();
-        block.predecessors = new_preds;
+        let valid_preds = valid_predecessors.get(&block.id).unwrap();
+        // Only keep predecessors that are still valid
+        block.predecessors.retain(|pred| valid_preds.contains(pred));
     }
 
     changed

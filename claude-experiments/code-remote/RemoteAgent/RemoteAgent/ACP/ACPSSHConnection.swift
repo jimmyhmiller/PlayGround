@@ -14,9 +14,10 @@ private func log(_ message: String) {
 
 /// SSH-based ACP connection that implements ACPConnectionProtocol
 /// This allows using the real ACPClient on iOS via SSH transport
-actor ACPSSHConnection: ACPConnectionProtocol {
+actor ACPSSHConnection: ACPConnectionProtocol, RemoteCommandExecutor {
     private var client: SSHClient?
     private var outputTask: Task<Void, Never>?
+    private var heartbeatTask: Task<Void, Never>?
     private var notificationHandler: (@Sendable (JSONRPCNotification) async -> Void)?
     private var requestHandler: (@Sendable (JSONRPCRequest) async -> JSONRPCResponse?)?
 
@@ -130,6 +131,18 @@ actor ACPSSHConnection: ACPConnectionProtocol {
     }
 
     private func startOutputReader(command: String) {
+        // Start heartbeat task to monitor if output reader is still alive
+        heartbeatTask = Task { [weak self] in
+            var heartbeatCount = 0
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 10_000_000_000) // 10 seconds
+                heartbeatCount += 1
+                let isClosed = await self?.isClosed ?? true
+                log("SSH heartbeat #\(heartbeatCount) (isClosed=\(isClosed))")
+            }
+            log("SSH heartbeat task ended")
+        }
+
         outputTask = Task { [weak self] in
             guard let self = self, let client = await self.client else {
                 log("startOutputReader: no client")
@@ -338,10 +351,72 @@ actor ACPSSHConnection: ACPConnectionProtocol {
         _ = try await client.executeCommand(writeCmd)
     }
 
+    // MARK: - Remote Command Execution (for terminals and file reading)
+
+    /// Execute a command on the remote server and return the output
+    func executeCommand(_ command: String) async throws -> String {
+        guard let client = client else {
+            throw ACPConnectionError.notConnected
+        }
+
+        log("executeCommand: \(command.prefix(100))")
+        let result = try await client.executeCommand(command)
+        let output = String(buffer: result)
+        log("executeCommand: output length=\(output.count)")
+        return output
+    }
+
+    /// Read a file from the remote server
+    func readRemoteFile(_ path: String) async throws -> String {
+        guard let client = client else {
+            throw ACPConnectionError.notConnected
+        }
+
+        log("readRemoteFile: \(path)")
+        // Use bash -c to ensure tilde expansion works
+        let result = try await client.executeCommand("bash -c 'cat \(path) 2>/dev/null'")
+        let content = String(buffer: result)
+        log("readRemoteFile: read \(content.count) bytes")
+        return content
+    }
+
+    /// Check if a file exists on the remote server
+    func remoteFileExists(_ path: String) async throws -> Bool {
+        guard let client = client else {
+            throw ACPConnectionError.notConnected
+        }
+
+        // Use bash -c to ensure tilde expansion works (single quotes prevent expansion)
+        let result = try await client.executeCommand("bash -c 'test -f \(path) && echo exists || echo notfound'")
+        let output = String(buffer: result).trimmingCharacters(in: .whitespacesAndNewlines)
+        return output == "exists"
+    }
+
+    /// List files in a remote directory
+    func listRemoteDirectory(_ path: String, pattern: String? = nil) async throws -> [String] {
+        guard let client = client else {
+            throw ACPConnectionError.notConnected
+        }
+
+        let escapedPath = path.replacingOccurrences(of: "'", with: "'\"'\"'")
+        let command: String
+        if let pattern = pattern {
+            command = "ls -1 '\(escapedPath)'/\(pattern) 2>/dev/null || true"
+        } else {
+            command = "ls -1 '\(escapedPath)' 2>/dev/null || true"
+        }
+
+        let result = try await client.executeCommand(command)
+        let output = String(buffer: result)
+        return output.components(separatedBy: "\n").filter { !$0.isEmpty }
+    }
+
     func close() async {
         guard !_isClosed else { return }
         _isClosed = true
 
+        heartbeatTask?.cancel()
+        heartbeatTask = nil
         outputTask?.cancel()
         outputTask = nil
 
@@ -361,6 +436,7 @@ actor ACPSSHConnection: ACPConnectionProtocol {
     }
 
     deinit {
+        heartbeatTask?.cancel()
         outputTask?.cancel()
     }
 }

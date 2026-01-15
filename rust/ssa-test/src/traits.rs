@@ -58,6 +58,12 @@ pub trait SsaValue: Clone + PartialEq + Eq + std::hash::Hash + std::fmt::Debug {
     fn is_phi(&self) -> bool {
         self.as_phi().is_some()
     }
+
+    /// Check if this value is undefined
+    ///
+    /// This is used by validation to detect bugs in CFG transformations
+    /// that incorrectly add undefined values to phi operands.
+    fn is_undefined(&self) -> bool;
 }
 
 /// Trait for instruction types that can participate in SSA construction.

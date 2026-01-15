@@ -48,6 +48,16 @@ pub enum Instruction {
     Print {
         value: Value,
     },
+
+    /// Function call with result (has side effects)
+    /// This represents a call to an external function that may have side effects.
+    /// The result is stored in `dest`, but the call should NOT be eliminated
+    /// even if the result is unused.
+    Call {
+        dest: SsaVariable,
+        func: String,
+        args: Vec<Value>,
+    },
 }
 
 impl SsaInstruction for Instruction {
@@ -63,6 +73,11 @@ impl SsaInstruction for Instruction {
             Instruction::UnaryOp { operand, .. } => visitor(operand),
             Instruction::ConditionalJump { condition, .. } => visitor(condition),
             Instruction::Print { value } => visitor(value),
+            Instruction::Call { args, .. } => {
+                for arg in args {
+                    visitor(arg);
+                }
+            }
             Instruction::Jump { .. } => {}
         }
     }
@@ -77,6 +92,11 @@ impl SsaInstruction for Instruction {
             Instruction::UnaryOp { operand, .. } => visitor(operand),
             Instruction::ConditionalJump { condition, .. } => visitor(condition),
             Instruction::Print { value } => visitor(value),
+            Instruction::Call { args, .. } => {
+                for arg in args {
+                    visitor(arg);
+                }
+            }
             Instruction::Jump { .. } => {}
         }
     }
@@ -85,7 +105,8 @@ impl SsaInstruction for Instruction {
         match self {
             Instruction::Assign { dest, .. }
             | Instruction::BinaryOp { dest, .. }
-            | Instruction::UnaryOp { dest, .. } => Some(dest),
+            | Instruction::UnaryOp { dest, .. }
+            | Instruction::Call { dest, .. } => Some(dest),
             _ => None,
         }
     }
@@ -175,13 +196,19 @@ impl FormatInstruction for Instruction {
             Instruction::Print { value } => {
                 format!("print {}", value.format_for_display())
             }
+            Instruction::Call { dest, func, args } => {
+                let args_str: Vec<String> = args.iter()
+                    .map(|a| a.format_for_display())
+                    .collect();
+                format!("{} := call {}({})", dest.name(), func, args_str.join(", "))
+            }
         }
     }
 }
 
 impl OptimizableInstruction for Instruction {
     fn has_side_effects(&self) -> bool {
-        matches!(self, Instruction::Print { .. })
+        matches!(self, Instruction::Print { .. } | Instruction::Call { .. })
     }
 
     fn is_terminator(&self) -> bool {
