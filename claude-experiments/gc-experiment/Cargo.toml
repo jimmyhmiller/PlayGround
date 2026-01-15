@@ -1,0 +1,10 @@
+[package]
+name = "gc-experiment"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+inkwell = { git = "https://github.com/jimmyhmiller/inkwell", features = ["llvm21-1"] }
+
+[profile.release]
+debug = true
