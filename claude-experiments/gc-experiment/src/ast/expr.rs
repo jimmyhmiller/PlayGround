@@ -13,6 +13,7 @@ pub enum BinOp {
     Le,
     Gt,
     Ge,
+    Shl, // Shift left
 }
 
 /// Expressions in our language
@@ -57,6 +58,8 @@ pub enum Expr {
         function: String,
         args: Vec<Expr>,
     },
+    /// Print an integer value (for debugging)
+    PrintInt(Box<Expr>),
 }
 
 /// Statements in our language
@@ -190,6 +193,14 @@ impl Expr {
         }
     }
 
+    pub fn shl(left: Expr, right: Expr) -> Self {
+        Expr::BinOp {
+            op: BinOp::Shl,
+            left: Box::new(left),
+            right: Box::new(right),
+        }
+    }
+
     pub fn new_struct(name: impl Into<String>) -> Self {
         Expr::NewStruct(name.into())
     }
@@ -225,6 +236,10 @@ impl Expr {
             function: function.into(),
             args,
         }
+    }
+
+    pub fn print_int(value: Expr) -> Self {
+        Expr::PrintInt(Box::new(value))
     }
 }
 

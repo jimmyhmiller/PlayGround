@@ -46,12 +46,53 @@ impl<'ctx> Compiler<'ctx> {
             function_values.insert(func.name().to_string(), fn_value);
         }
 
+        // Collect all globals that need to be marked as used
+        let mut used_globals: Vec<PointerValue<'ctx>> = Vec::new();
+
         // Second pass: compile function bodies
         for func in &self.program.functions {
             let fn_value = function_values[func.name()];
             let mut fn_compiler = FunctionCompiler::new(self, func, fn_value, &function_values);
             fn_compiler.compile();
+
+            // Collect the frame origin global for llvm.used
+            used_globals.push(fn_compiler.frame_origin.as_pointer_value());
         }
+
+        // Add struct metas to used globals
+        for meta in self.types.struct_metas.values() {
+            used_globals.push(meta.as_pointer_value());
+        }
+        if let Some(array_meta) = self.types.array_meta {
+            used_globals.push(array_meta.as_pointer_value());
+        }
+
+        // Create llvm.compiler.used array to prevent globalopt/globaldce from eliminating these
+        self.create_llvm_used(&used_globals);
+    }
+
+    /// Add globals to llvm.compiler.used to prevent elimination by optimization passes
+    /// We use llvm.compiler.used (not llvm.used) because:
+    /// - llvm.used prevents linker from removing symbols
+    /// - llvm.compiler.used prevents compiler optimizations from removing symbols
+    /// For JIT compilation, we need the compiler-level protection.
+    fn create_llvm_used(&self, globals: &[PointerValue<'ctx>]) {
+        if globals.is_empty() {
+            return;
+        }
+
+        let ptr_ty = self.types.ptr_ty;
+        let array_ty = ptr_ty.array_type(globals.len() as u32);
+
+        // Create array of pointers to the globals
+        let values: Vec<_> = globals.iter().map(|g| (*g).into()).collect();
+        let array = ptr_ty.const_array(&values);
+
+        // Use llvm.compiler.used to prevent optimizer from eliminating these globals
+        let used_global = self.module.add_global(array_ty, None, "llvm.compiler.used");
+        used_global.set_initializer(&array);
+        used_global.set_linkage(inkwell::module::Linkage::Appending);
+        // Note: section is optional for llvm.compiler.used
     }
 
     /// Declare a function (just the signature, no body)
@@ -264,7 +305,24 @@ impl<'a, 'ctx> FunctionCompiler<'a, 'ctx> {
             .build_memset(frame_alloca, 8, types.i8_ty.const_zero(), frame_size)
             .unwrap();
 
-        // Store origin pointer: frame.origin = &frame_origin
+        // CRITICAL ORDER: Push frame to thread->top_frame FIRST to make it escape
+        // This must happen BEFORE storing origin, otherwise the origin store
+        // can be eliminated by globalopt because nothing can read it yet.
+        let top_frame_ptr = self.get_thread_top_frame_ptr();
+        let old_top = builder
+            .build_load(types.ptr_ty, top_frame_ptr, "old_top")
+            .unwrap()
+            .into_pointer_value();
+
+        let parent_ptr = builder
+            .build_struct_gep(frame_ty, frame_alloca, 0, "parent_ptr")
+            .unwrap();
+        builder.build_store(parent_ptr, old_top).unwrap();
+
+        // Frame escapes here - thread->top_frame = &frame
+        builder.build_store(top_frame_ptr, frame_alloca).unwrap();
+
+        // NOW store origin - optimizer knows pollcheck(thread) can read frame->origin
         let origin_ptr = builder
             .build_struct_gep(frame_ty, frame_alloca, 1, "origin_ptr")
             .unwrap();
@@ -272,19 +330,10 @@ impl<'a, 'ctx> FunctionCompiler<'a, 'ctx> {
             .build_store(origin_ptr, self.frame_origin.as_pointer_value())
             .unwrap();
 
-        // Push frame onto chain: frame.parent = thread.top_frame
-        let top_frame_ptr = self.get_thread_top_frame_ptr();
-        let old_top = builder
-            .build_load(types.ptr_ty, top_frame_ptr, "old_top")
-            .unwrap();
-
-        let parent_ptr = builder
-            .build_struct_gep(frame_ty, frame_alloca, 0, "parent_ptr")
-            .unwrap();
-        builder.build_store(parent_ptr, old_top).unwrap();
-
-        // thread.top_frame = &frame
-        builder.build_store(top_frame_ptr, frame_alloca).unwrap();
+        // NOTE: No write barrier setup needed!
+        // With beagle-style code generation (evaluate args before allocation),
+        // construction stores happen immediately after allocation with no GC safepoints.
+        // Objects are guaranteed to be in young gen, so no barriers needed.
     }
 
     /// Emit the GC frame epilogue (before returns)
@@ -294,6 +343,7 @@ impl<'a, 'ctx> FunctionCompiler<'a, 'ctx> {
         let frame_ty = types.frame_type(self.compiler.context, self.num_roots);
 
         // Pop frame: thread.top_frame = frame.parent
+        // Use volatile to match prologue and prevent optimization
         let parent_ptr = builder
             .build_struct_gep(frame_ty, self.frame_alloca, 0, "parent_ptr")
             .unwrap();
@@ -302,7 +352,8 @@ impl<'a, 'ctx> FunctionCompiler<'a, 'ctx> {
             .unwrap();
 
         let top_frame_ptr = self.get_thread_top_frame_ptr();
-        builder.build_store(top_frame_ptr, parent).unwrap();
+        let store = builder.build_store(top_frame_ptr, parent).unwrap();
+        store.set_volatile(true).unwrap();
     }
 
     /// Get a pointer to thread.top_frame
@@ -390,10 +441,13 @@ impl<'a, 'ctx> FunctionCompiler<'a, 'ctx> {
                 .unwrap()
         };
 
-        builder.build_store(slot_ptr, value).unwrap();
+        let store = builder.build_store(slot_ptr, value).unwrap();
+        // Make root stores volatile for consistency with volatile loads
+        store.set_volatile(true).unwrap();
     }
 
     /// Load a value from a root slot
+    /// Note: We use volatile loads to prevent LLVM from CSE-ing them across GC points
     fn load_root(&self, slot: usize) -> PointerValue<'ctx> {
         let types = &self.compiler.types;
         let builder = &self.compiler.builder;
@@ -417,10 +471,17 @@ impl<'a, 'ctx> FunctionCompiler<'a, 'ctx> {
                 .unwrap()
         };
 
-        builder
+        let load = builder
             .build_load(types.ptr_ty, slot_ptr, "root_value")
             .unwrap()
-            .into_pointer_value()
+            .into_pointer_value();
+
+        // Make the load volatile so LLVM won't optimize it away across GC points
+        if let Some(instr) = load.as_instruction() {
+            instr.set_volatile(true).unwrap();
+        }
+
+        load
     }
 
     /// Emit a pollcheck (safepoint)
@@ -518,11 +579,15 @@ impl<'a, 'ctx> FunctionCompiler<'a, 'ctx> {
             }
 
             Stmt::FieldSet { object, struct_name, field, value } => {
-                let obj_ptr = self.compile_expr(object).into_pointer_value();
+                // IMPORTANT: Evaluate value FIRST, because it might trigger GC
+                // which would move the object. Then we reload object pointer
+                // from its root slot with a fresh, post-GC value.
                 let field_value = self.compile_expr(value);
+                let obj_ptr = self.compile_expr(object).into_pointer_value();
 
                 let struct_def = self.compiler.program.find_struct(struct_name).unwrap();
                 let field_idx = struct_def.field_index(field).unwrap();
+                let field_type = &struct_def.fields[field_idx].typ;
 
                 // Get payload pointer (skip header)
                 let payload_ptr = unsafe {
@@ -541,6 +606,15 @@ impl<'a, 'ctx> FunctionCompiler<'a, 'ctx> {
                     .unwrap();
 
                 self.compiler.builder.build_store(field_ptr, field_value).unwrap();
+
+                // NO WRITE BARRIER for construction!
+                // Following beagle's approach: if we restructure code to evaluate all
+                // arguments BEFORE allocation, then stores happen immediately after
+                // allocation with no GC safepoints in between. The object is guaranteed
+                // to be in young gen, so no barrier is needed.
+                //
+                // For mutation operations (set! on existing objects), we would need
+                // barriers, but that would be a separate Stmt::FieldMutate or similar.
             }
 
             Stmt::ArraySet { array, index, value } => {
@@ -569,6 +643,11 @@ impl<'a, 'ctx> FunctionCompiler<'a, 'ctx> {
                 };
 
                 self.compiler.builder.build_store(elem_ptr, elem_value).unwrap();
+
+                // NOTE: No write barrier for array element stores during construction.
+                // Same reasoning as FieldSet - if we follow beagle-style code generation,
+                // array stores during construction don't need barriers.
+                // For array mutation, we would need barriers.
             }
 
             Stmt::Return(expr) => {
@@ -696,6 +775,7 @@ impl<'a, 'ctx> FunctionCompiler<'a, 'ctx> {
                         BinOp::Le => builder.build_int_compare(IntPredicate::SLE, lhs_int, rhs_int, "le").unwrap().into(),
                         BinOp::Gt => builder.build_int_compare(IntPredicate::SGT, lhs_int, rhs_int, "gt").unwrap().into(),
                         BinOp::Ge => builder.build_int_compare(IntPredicate::SGE, lhs_int, rhs_int, "ge").unwrap().into(),
+                        BinOp::Shl => builder.build_left_shift(lhs_int, rhs_int, "shl").unwrap().into(),
                     }
                 }
             }
@@ -820,6 +900,18 @@ impl<'a, 'ctx> FunctionCompiler<'a, 'ctx> {
                 builder.build_int_z_extend(len, types.i64_ty, "length_i64").unwrap().into()
             }
 
+            Expr::PrintInt(value) => {
+                let val = self.compile_expr(value).into_int_value();
+                let call_site = builder
+                    .build_call(
+                        self.compiler.runtime.print_int,
+                        &[val.into()],
+                        "print_result",
+                    )
+                    .unwrap();
+                call_site.as_any_value_enum().into_int_value().into()
+            }
+
             Expr::Call { function, args } => {
                 let fn_value = self.functions.get(function).unwrap();
 
@@ -848,4 +940,9 @@ impl<'a, 'ctx> FunctionCompiler<'a, 'ctx> {
             }
         }
     }
+
+    // NOTE: emit_write_barrier removed!
+    // With beagle-style code generation, we don't need write barriers for construction.
+    // If we add mutation operations (set! on existing objects), we would need to add
+    // write barriers back, but they would only be needed for mutation, not construction.
 }

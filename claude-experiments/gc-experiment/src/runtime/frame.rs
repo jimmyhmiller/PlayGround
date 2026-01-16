@@ -84,10 +84,18 @@ impl Frame {
         }
     }
 
-    /// Iterate over all roots in this frame
+    /// Iterate over all roots in this frame (returns values)
     pub fn roots(&self) -> FrameRootsIter {
         FrameRootsIter {
             ptr: self.roots_ptr(),
+            remaining: self.num_roots() as usize,
+        }
+    }
+
+    /// Iterate over all root slots in this frame (returns slot addresses and values)
+    pub fn root_slots(&self) -> FrameRootSlotsIter {
+        FrameRootSlotsIter {
+            ptr: self.roots_ptr() as *mut *mut c_void,
             remaining: self.num_roots() as usize,
         }
     }
@@ -128,6 +136,35 @@ impl Iterator for FrameRootsIter {
 }
 
 impl ExactSizeIterator for FrameRootsIter {}
+
+/// Iterator over root slots in a single frame (returns slot address and value)
+pub struct FrameRootSlotsIter {
+    ptr: *mut *mut c_void,
+    remaining: usize,
+}
+
+impl Iterator for FrameRootSlotsIter {
+    /// Returns (slot_address, value)
+    type Item = (*mut *mut c_void, *mut c_void);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.remaining == 0 {
+            None
+        } else {
+            let slot_addr = self.ptr;
+            let value = unsafe { *self.ptr };
+            self.ptr = unsafe { self.ptr.add(1) };
+            self.remaining -= 1;
+            Some((slot_addr, value))
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.remaining, Some(self.remaining))
+    }
+}
+
+impl ExactSizeIterator for FrameRootSlotsIter {}
 
 /// Iterator over all frames in a thread's frame chain
 pub struct FrameChainIter {

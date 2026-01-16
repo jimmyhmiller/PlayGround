@@ -1,0 +1,13 @@
+[package]
+name = "gc-library"
+version = "0.1.0"
+edition = "2024"
+description = "Generic garbage collection library with multiple algorithms"
+license = "MIT"
+
+[dependencies]
+libc = "0.2"
+usdt = "0.5"
+
+[features]
+thread-safe = []

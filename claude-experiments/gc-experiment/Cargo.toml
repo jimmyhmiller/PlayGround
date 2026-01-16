@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 inkwell = { git = "https://github.com/jimmyhmiller/inkwell", features = ["llvm21-1"] }
+gc-library = { path = "../gc-library" }
 
 [profile.release]
 debug = true

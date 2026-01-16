@@ -255,6 +255,18 @@ pub struct RuntimeFunctions<'ctx> {
 
     /// ptr gc_allocate_array(thread*, meta*, length)
     pub allocate_array: FunctionValue<'ctx>,
+
+    /// void gc_write_barrier(object_ptr, new_value) - notify GC of pointer store (slow path)
+    pub write_barrier: FunctionValue<'ctx>,
+
+    /// i64 print_int(i64 value) - returns the value for chaining
+    pub print_int: FunctionValue<'ctx>,
+
+    /// External global: young generation start address
+    pub young_gen_start: GlobalValue<'ctx>,
+
+    /// External global: young generation end address
+    pub young_gen_end: GlobalValue<'ctx>,
 }
 
 impl<'ctx> RuntimeFunctions<'ctx> {
@@ -281,10 +293,35 @@ impl<'ctx> RuntimeFunctions<'ctx> {
         );
         let allocate_array = module.add_function("gc_allocate_array", allocate_array_ty, None);
 
+        // void gc_write_barrier(ptr object_ptr) - mark card for object if in old gen
+        let write_barrier_ty = types.void_ty.fn_type(
+            &[types.ptr_ty.into()],
+            false,
+        );
+        let write_barrier = module.add_function("gc_write_barrier", write_barrier_ty, None);
+
+        // i64 print_int(i64 value) - for debugging
+        let print_int_ty = types.i64_ty.fn_type(&[types.i64_ty.into()], false);
+        let print_int = module.add_function("print_int", print_int_ty, None);
+
+        // External globals for young generation bounds (for inline write barrier check)
+        // Mark as constant since they don't change during program execution
+        let young_gen_start = module.add_global(types.i64_ty, None, "YOUNG_GEN_START");
+        young_gen_start.set_linkage(inkwell::module::Linkage::External);
+        young_gen_start.set_constant(true);
+
+        let young_gen_end = module.add_global(types.i64_ty, None, "YOUNG_GEN_END");
+        young_gen_end.set_linkage(inkwell::module::Linkage::External);
+        young_gen_end.set_constant(true);
+
         Self {
             pollcheck_slow,
             allocate,
             allocate_array,
+            write_barrier,
+            print_int,
+            young_gen_start,
+            young_gen_end,
         }
     }
 }
