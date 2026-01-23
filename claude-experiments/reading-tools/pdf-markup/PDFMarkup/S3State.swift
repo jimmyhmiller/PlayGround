@@ -22,13 +22,14 @@ class S3StateManager {
             return
         }
 
-        let stateURL = URL(string: "https://\(AWSCredentials.bucket).s3.\(AWSCredentials.region).amazonaws.com/pdf-sync-state.json")!
-
-        do {
-            let data = try Data(contentsOf: stateURL)
-            state = try JSONDecoder().decode(S3State.self, from: data)
-        } catch {
-            print("Failed to load S3 state: \(error)")
+        Task {
+            do {
+                if let data = try await DrawingSyncManager.shared.signedDownloadData(key: "pdf-sync-state.json") {
+                    state = try JSONDecoder().decode(S3State.self, from: data)
+                }
+            } catch {
+                print("Failed to load S3 state: \(error)")
+            }
         }
     }
 

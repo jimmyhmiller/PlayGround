@@ -1,0 +1,14 @@
+[package]
+name = "partial3"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Pin serde to pre-1.0.219 to avoid __private removal
+serde = "=1.0.218"
+swc_ecma_parser = "6"
+swc_ecma_ast = "5"
+swc_common = { version = "5", features = ["tty-emitter"] }
+
+[dev-dependencies]
+proptest = "1.4"

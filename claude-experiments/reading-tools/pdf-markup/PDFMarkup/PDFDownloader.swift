@@ -34,8 +34,8 @@ class PDFDownloader: ObservableObject {
             return document
         }
 
-        // Download from S3
-        guard let s3URL = metadata.s3URL() else {
+        // Get S3 key for this PDF
+        guard let s3Key = S3StateManager.shared.s3Key(for: metadata.hash) else {
             throw PDFDownloadError.invalidURL
         }
 
@@ -49,19 +49,12 @@ class PDFDownloader: ObservableObject {
         }
 
         do {
-            // Download the file
-            let (tempURL, response) = try await URLSession.shared.download(from: s3URL)
+            // Download the file using signed request
+            let success = try await DrawingSyncManager.shared.signedDownloadFile(key: s3Key, to: cachedPath)
 
-            guard let httpResponse = response as? HTTPURLResponse,
-                  httpResponse.statusCode == 200 else {
+            guard success else {
                 throw PDFDownloadError.downloadFailed
             }
-
-            // Move to cache
-            if FileManager.default.fileExists(atPath: cachedPath.path) {
-                try? FileManager.default.removeItem(at: cachedPath)
-            }
-            try FileManager.default.moveItem(at: tempURL, to: cachedPath)
 
             // Load PDF
             guard let document = PDFDocument(url: cachedPath) else {

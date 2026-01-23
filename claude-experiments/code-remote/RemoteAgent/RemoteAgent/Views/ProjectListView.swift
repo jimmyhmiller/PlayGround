@@ -6,6 +6,9 @@ struct ProjectListView: View {
     @Bindable var server: Server
 
     @State private var isAddingProject = false
+    @State private var runningSessions: [String] = []
+    @State private var isLoadingSessions = false
+    @State private var sessionError: String?
 
     var body: some View {
         Group {
@@ -69,26 +72,112 @@ struct ProjectListView: View {
 
     private var projectListContent: some View {
         List {
-            if server.projects.isEmpty {
-                ContentUnavailableView(
-                    "No Projects",
-                    systemImage: "folder",
-                    description: Text("Tap + to browse and select a folder")
-                )
-            } else {
-                ForEach(server.projects) { project in
-                    NavigationLink(value: project) {
-                        ProjectRow(project: project)
-                    }
-                    .swipeActions(edge: .trailing, allowsFullSwipe: true) {
-                        Button(role: .destructive) {
-                            deleteProject(project)
-                        } label: {
-                            Label("Delete", systemImage: "trash")
+            // Running Sessions Section
+            if !runningSessions.isEmpty || isLoadingSessions {
+                Section("Running Sessions") {
+                    if isLoadingSessions {
+                        HStack {
+                            ProgressView()
+                                .controlSize(.small)
+                            Text("Loading...")
+                                .foregroundStyle(.secondary)
+                        }
+                    } else {
+                        ForEach(runningSessions, id: \.self) { sessionId in
+                            NavigationLink {
+                                // TODO: Reconnect view
+                                ReconnectSessionView(server: server, sessionId: sessionId)
+                            } label: {
+                                HStack {
+                                    Image(systemName: "terminal.fill")
+                                        .foregroundStyle(.green)
+                                    Text(sessionId)
+                                        .font(.system(.caption, design: .monospaced))
+                                }
+                            }
+                            .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                                Button(role: .destructive) {
+                                    Task { await killSession(sessionId) }
+                                } label: {
+                                    Label("Kill", systemImage: "xmark.circle")
+                                }
+                            }
                         }
                     }
                 }
             }
+
+            // Projects Section
+            Section("Projects") {
+                if server.projects.isEmpty {
+                    Text("No projects - tap + to add")
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(server.projects) { project in
+                        NavigationLink(value: project) {
+                            ProjectRow(project: project)
+                        }
+                        .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                            Button(role: .destructive) {
+                                deleteProject(project)
+                            } label: {
+                                Label("Delete", systemImage: "trash")
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        .task {
+            await loadRunningSessions()
+        }
+        .refreshable {
+            await loadRunningSessions()
+        }
+    }
+
+    private func loadRunningSessions() async {
+        isLoadingSessions = true
+        sessionError = nil
+
+        do {
+            let password = try? KeychainService.shared.getPassword(for: server.id)
+            runningSessions = try await ACPSSHConnection.listRunningSessions(
+                host: server.host,
+                port: server.port,
+                username: server.username,
+                privateKeyPath: server.authMethod == .privateKey ? server.privateKeyPath : nil,
+                password: password
+            )
+        } catch {
+            sessionError = error.localizedDescription
+        }
+
+        isLoadingSessions = false
+    }
+
+    private func killSession(_ sessionId: String) async {
+        do {
+            let password = try? KeychainService.shared.getPassword(for: server.id)
+
+            // SSH in and kill the process
+            let connection = ACPSSHConnection(existingSessionId: sessionId)
+            try await connection.connect(
+                host: server.host,
+                port: server.port,
+                username: server.username,
+                privateKeyPath: server.authMethod == .privateKey ? server.privateKeyPath : nil,
+                password: password,
+                workingDirectory: "/tmp",
+                acpPath: "claude-code-acp"
+            )
+            await connection.close() // This terminates the session
+
+            // Refresh the list
+            await loadRunningSessions()
+        } catch {
+            // Ignore errors, just refresh
+            await loadRunningSessions()
         }
     }
 

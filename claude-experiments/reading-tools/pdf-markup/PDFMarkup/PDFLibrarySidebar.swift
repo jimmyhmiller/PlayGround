@@ -65,10 +65,20 @@ struct PDFLibrarySidebar: View {
     }
 
     var searchResultsList: some View {
-        List(filteredPDFs, selection: $selectedPDF) { pdf in
-            PDFListItem(pdf: pdf)
+        ScrollView {
+            LazyVStack(spacing: 4) {
+                ForEach(filteredPDFs) { pdf in
+                    Button {
+                        selectedPDF = pdf
+                    } label: {
+                        PDFListItem(pdf: pdf, isSelected: selectedPDF?.id == pdf.id)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 8)
         }
-        .listStyle(.sidebar)
     }
 
     var folderList: some View {
@@ -189,6 +199,7 @@ struct PDFListItem: View {
         }
         .padding(.vertical, 6)
         .padding(.horizontal, 4)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .background(
             RoundedRectangle(cornerRadius: 6)
                 .fill(isSelected ? Color.accentColor.opacity(0.15) : Color.clear)

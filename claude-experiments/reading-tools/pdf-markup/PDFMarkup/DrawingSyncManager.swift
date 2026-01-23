@@ -71,6 +71,7 @@ class DrawingSyncManager: ObservableObject {
             var request = URLRequest(url: url)
             request.httpMethod = "PUT"
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.setValue("public-read", forHTTPHeaderField: "x-amz-acl")
             // Note: Don't set httpBody when using upload(for:from:) - it's provided as the second parameter
 
             // Sign the request
@@ -109,12 +110,15 @@ class DrawingSyncManager: ObservableObject {
     }
 
     func downloadDrawings(pdfHash: String) async throws -> PDFDrawings? {
+        print("📥 downloadDrawings called for \(pdfHash)")
         guard AWSCredentials.isConfigured() else {
+            print("❌ AWS credentials not configured")
             throw SyncError.credentialsNotConfigured
         }
 
         let key = "drawings/\(pdfHash).drawings.json"
         let url = URL(string: "https://\(AWSCredentials.bucket).s3.\(AWSCredentials.region).amazonaws.com/\(key)")!
+        print("📥 Fetching from: \(url)")
 
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
@@ -140,6 +144,7 @@ class DrawingSyncManager: ObservableObject {
             }
 
             let decoder = JSONDecoder()
+            decoder.dateDecodingStrategy = .deferredToDate
             let drawings = try decoder.decode(PDFDrawings.self, from: data)
 
             print("✅ Successfully downloaded drawings for \(pdfHash) from S3")
@@ -156,13 +161,82 @@ class DrawingSyncManager: ObservableObject {
         }
     }
 
+    /// Downloads data from S3 using signed requests
+    func signedDownloadData(key: String) async throws -> Data? {
+        guard AWSCredentials.isConfigured() else {
+            throw SyncError.credentialsNotConfigured
+        }
+
+        let url = URL(string: "https://\(AWSCredentials.bucket).s3.\(AWSCredentials.region).amazonaws.com/\(key)")!
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        try signRequest(&request, body: nil)
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw SyncError.downloadFailed
+        }
+
+        if httpResponse.statusCode == 404 {
+            return nil
+        }
+
+        guard (200...299).contains(httpResponse.statusCode) else {
+            throw SyncError.downloadFailed
+        }
+
+        return data
+    }
+
+    /// Downloads a file from S3 using signed requests
+    func signedDownloadFile(key: String, to destination: URL) async throws -> Bool {
+        guard AWSCredentials.isConfigured() else {
+            throw SyncError.credentialsNotConfigured
+        }
+
+        let url = URL(string: "https://\(AWSCredentials.bucket).s3.\(AWSCredentials.region).amazonaws.com/\(key)")!
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        try signRequest(&request, body: nil)
+
+        let (tempURL, response) = try await URLSession.shared.download(for: request)
+
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw SyncError.downloadFailed
+        }
+
+        if httpResponse.statusCode == 404 {
+            return false
+        }
+
+        guard (200...299).contains(httpResponse.statusCode) else {
+            throw SyncError.downloadFailed
+        }
+
+        // Move to destination
+        if FileManager.default.fileExists(atPath: destination.path) {
+            try FileManager.default.removeItem(at: destination)
+        }
+        try FileManager.default.moveItem(at: tempURL, to: destination)
+
+        return true
+    }
+
     func sync(pdfHash: String) async throws {
+        print("🔄 Starting sync for \(pdfHash)")
         await MainActor.run { self.syncState = .syncing }
 
         do {
             // Download remote version
+            print("📥 Downloading remote drawings...")
             let remoteDrawings = try await downloadDrawings(pdfHash: pdfHash)
+            print("📥 Remote drawings: \(remoteDrawings != nil ? "found \(remoteDrawings!.pages.count) pages" : "none")")
+
             let localDrawings = DrawingManager.shared.loadDrawings(pdfHash: pdfHash)
+            print("💾 Local drawings: \(localDrawings != nil ? "found \(localDrawings!.pages.count) pages" : "none")")
 
             // Resolve conflicts
             let mergedDrawings = resolveConflict(
@@ -170,15 +244,23 @@ class DrawingSyncManager: ObservableObject {
                 remote: remoteDrawings,
                 pdfHash: pdfHash
             )
+            print("🔀 Merged drawings: \(mergedDrawings != nil ? "found \(mergedDrawings!.pages.count) pages" : "none")")
 
             // Save merged version locally
             if let merged = mergedDrawings {
+                print("💾 Saving merged drawings locally...")
                 saveMergedDrawings(merged)
+                print("✅ Saved merged drawings")
             }
 
-            // Upload to S3
-            if localDrawings != nil || mergedDrawings != nil {
+            // Only upload if we have local changes AND we successfully checked remote
+            // This prevents overwriting remote with empty local when download fails
+            let shouldUpload = localDrawings != nil && (remoteDrawings == nil || localDrawings!.lastModified > remoteDrawings!.lastModified)
+            if shouldUpload {
+                print("📤 Uploading local changes to S3...")
                 try await uploadDrawings(pdfHash: pdfHash)
+            } else {
+                print("⏭️ Skipping upload (no local changes or remote is newer)")
             }
 
             await MainActor.run {
@@ -258,11 +340,14 @@ class DrawingSyncManager: ObservableObject {
         }
     }
 
-    private func uploadData(_ data: Data, toKey key: String, contentType: String) async throws {
+    private func uploadData(_ data: Data, toKey key: String, contentType: String, makePublic: Bool = true) async throws {
         let url = URL(string: "https://\(AWSCredentials.bucket).s3.\(AWSCredentials.region).amazonaws.com/\(key)")!
         var request = URLRequest(url: url)
         request.httpMethod = "PUT"
         request.setValue(contentType, forHTTPHeaderField: "Content-Type")
+        if makePublic {
+            request.setValue("public-read", forHTTPHeaderField: "x-amz-acl")
+        }
 
         try signRequest(&request, body: data)
 
@@ -383,8 +468,19 @@ class DrawingSyncManager: ObservableObject {
         let httpMethod = request.httpMethod!
         let canonicalURI = request.url!.path.isEmpty ? "/" : request.url!.path
         let canonicalQueryString = ""
-        let canonicalHeaders = "host:\(request.url!.host!)\nx-amz-content-sha256:\(payloadHash)\nx-amz-date:\(timestamp)\n"
-        let signedHeaders = "host;x-amz-content-sha256;x-amz-date"
+
+        // Check if x-amz-acl header is set (for public uploads)
+        let aclHeader = request.value(forHTTPHeaderField: "x-amz-acl")
+        let canonicalHeaders: String
+        let signedHeaders: String
+
+        if let acl = aclHeader {
+            canonicalHeaders = "host:\(request.url!.host!)\nx-amz-acl:\(acl)\nx-amz-content-sha256:\(payloadHash)\nx-amz-date:\(timestamp)\n"
+            signedHeaders = "host;x-amz-acl;x-amz-content-sha256;x-amz-date"
+        } else {
+            canonicalHeaders = "host:\(request.url!.host!)\nx-amz-content-sha256:\(payloadHash)\nx-amz-date:\(timestamp)\n"
+            signedHeaders = "host;x-amz-content-sha256;x-amz-date"
+        }
 
         let canonicalRequest = """
         \(httpMethod)

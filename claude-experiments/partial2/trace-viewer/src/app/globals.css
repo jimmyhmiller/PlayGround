@@ -1,0 +1,54 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --static-color: #22c55e;
+  --dynamic-color: #f59e0b;
+  --background: #0a0a0a;
+  --foreground: #ededed;
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+
+.static-value {
+  color: var(--static-color);
+}
+
+.dynamic-value {
+  color: var(--dynamic-color);
+}
+
+.event-card {
+  @apply p-3 rounded-lg border transition-all duration-200;
+}
+
+.event-card.current {
+  @apply ring-2 ring-blue-500 bg-blue-950/30;
+}
+
+.event-card:not(.current) {
+  @apply border-gray-700 bg-gray-900/50 opacity-60;
+}
+
+.depth-indicator {
+  @apply inline-block w-4 h-4 rounded-full text-xs flex items-center justify-center;
+}
+
+/* Code highlighting */
+.code-block {
+  @apply bg-gray-900 rounded-md p-4 overflow-x-auto text-sm;
+}
+
+.token.keyword { color: #c678dd; }
+.token.string { color: #98c379; }
+.token.number { color: #d19a66; }
+.token.operator { color: #56b6c2; }
+.token.punctuation { color: #abb2bf; }
+.token.comment { color: #5c6370; font-style: italic; }
+.token.function { color: #61afef; }
+.token.boolean { color: #d19a66; }

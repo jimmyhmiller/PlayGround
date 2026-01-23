@@ -8,6 +8,7 @@ struct ServerListView: View {
     @State private var showingAddSheet = false
     @State private var selectedServer: Server?
     @State private var showingLogs = false
+    @State private var showingRunningSessions = false
 
     var body: some View {
         List {
@@ -45,10 +46,17 @@ struct ServerListView: View {
         }
         .toolbar {
             ToolbarItem(placement: .navigation) {
-                Button {
-                    showingLogs = true
-                } label: {
-                    Label("Logs", systemImage: "doc.text.magnifyingglass")
+                HStack(spacing: 16) {
+                    Button {
+                        showingLogs = true
+                    } label: {
+                        Label("Logs", systemImage: "doc.text.magnifyingglass")
+                    }
+                    Button {
+                        showingRunningSessions = true
+                    } label: {
+                        Label("Sessions", systemImage: "terminal")
+                    }
                 }
             }
             ToolbarItem(placement: .primaryAction) {
@@ -63,6 +71,9 @@ struct ServerListView: View {
             NavigationStack {
                 LogViewerView()
             }
+        }
+        .sheet(isPresented: $showingRunningSessions) {
+            RunningSessionsView()
         }
         .sheet(isPresented: $showingAddSheet) {
             ServerFormView(mode: .add) { server in

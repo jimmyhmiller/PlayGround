@@ -152,29 +152,74 @@ class DataService: ObservableObject {
         return conversation
     }
 
-    func searchFullText(query: String) async -> [HistoryEntry] {
-        guard !query.isEmpty else { return historyEntries }
+    func searchFullText(query: String, onResult: @escaping @Sendable (HistoryEntry) -> Void) async {
+        guard !query.isEmpty else { return }
 
         let lowercasedQuery = query.lowercased()
-        var results: [HistoryEntry] = []
 
-        // First pass: filter by display/project (fast)
-        let quickMatches = Set(historyEntries.filter {
-            $0.display.lowercased().contains(lowercasedQuery) ||
-            $0.project.lowercased().contains(lowercasedQuery)
-        }.map { $0.id })
-
-        // Add quick matches
-        results = historyEntries.filter { quickMatches.contains($0.id) }
-
-        // Second pass: search full conversation content
-        for entry in historyEntries where !quickMatches.contains(entry.id) {
-            if let conversation = await loadConversation(for: entry),
-               conversation.allTextContent.lowercased().contains(lowercasedQuery) {
-                results.append(entry)
+        // First pass: quick matches on display/project (instant)
+        var quickMatchIds = Set<String>()
+        for entry in historyEntries {
+            if entry.display.lowercased().contains(lowercasedQuery) ||
+               entry.project.lowercased().contains(lowercasedQuery) {
+                quickMatchIds.insert(entry.id)
+                onResult(entry)
             }
         }
 
-        return results.sorted { $0.timestamp > $1.timestamp }
+        // Second pass: parallel full-text search (off main actor)
+        let entriesToSearch = historyEntries.filter { !quickMatchIds.contains($0.id) }
+        let claudeDir = self.claudeDir
+
+        await withTaskGroup(of: HistoryEntry?.self) { group in
+            for entry in entriesToSearch {
+                group.addTask {
+                    if let content = Self.loadConversationContent(for: entry, claudeDir: claudeDir),
+                       content.lowercased().contains(lowercasedQuery) {
+                        return entry
+                    }
+                    return nil
+                }
+            }
+
+            for await result in group {
+                if let entry = result {
+                    onResult(entry)
+                }
+            }
+        }
+    }
+
+    // Non-isolated helper for parallel search
+    private nonisolated static func loadConversationContent(for entry: HistoryEntry, claudeDir: URL) -> String? {
+        let projectDir = claudeDir
+            .appendingPathComponent("projects")
+            .appendingPathComponent(entry.encodedProjectPath)
+
+        guard let sessionId = entry.sessionId else { return nil }
+        let conversationFile = projectDir.appendingPathComponent("\(sessionId).jsonl")
+
+        guard FileManager.default.fileExists(atPath: conversationFile.path),
+              let data = try? Data(contentsOf: conversationFile),
+              let content = String(data: data, encoding: .utf8) else {
+            return nil
+        }
+
+        let lines = content.split(separator: "\n", omittingEmptySubsequences: true)
+        let decoder = JSONDecoder()
+
+        var textParts: [String] = []
+        for line in lines {
+            guard let message = try? decoder.decode(Message.self, from: Data(line.utf8)) else {
+                continue
+            }
+            if message.isUser || message.isAssistant {
+                textParts.append(message.textContent)
+            } else if message.isSummary, let summary = message.summary {
+                textParts.append(summary)
+            }
+        }
+
+        return textParts.joined(separator: " ")
     }
 }

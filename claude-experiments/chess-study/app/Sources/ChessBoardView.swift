@@ -52,29 +52,11 @@ struct ChessBoardView: View {
                                         // Piece
                                         if let piece = piece {
                                             let info = pieceInfo(piece)
-                                            ZStack {
-                                                // Outline/shadow
-                                                Text(info.emoji)
-                                                    .font(.system(size: squareSize * 0.75))
-                                                    .foregroundColor(info.isWhite ? .black : .white)
-                                                    .offset(x: 1, y: 1)
-                                                Text(info.emoji)
-                                                    .font(.system(size: squareSize * 0.75))
-                                                    .foregroundColor(info.isWhite ? .black : .white)
-                                                    .offset(x: -1, y: -1)
-                                                Text(info.emoji)
-                                                    .font(.system(size: squareSize * 0.75))
-                                                    .foregroundColor(info.isWhite ? .black : .white)
-                                                    .offset(x: 1, y: -1)
-                                                Text(info.emoji)
-                                                    .font(.system(size: squareSize * 0.75))
-                                                    .foregroundColor(info.isWhite ? .black : .white)
-                                                    .offset(x: -1, y: 1)
-                                                // Main piece
-                                                Text(info.emoji)
-                                                    .font(.system(size: squareSize * 0.75))
-                                                    .foregroundColor(info.isWhite ? .white : .black)
-                                            }
+                                            Text(info.symbol)
+                                                .font(.system(size: squareSize * 0.7))
+                                                .foregroundColor(info.isWhite ? .white : .black)
+                                                .shadow(color: info.isWhite ? .black : .white, radius: 0.5)
+                                                .shadow(color: info.isWhite ? .black : .white, radius: 0.5)
                                         }
                                     }
                                     .frame(width: squareSize, height: squareSize)
@@ -136,20 +118,23 @@ struct ChessBoardView: View {
         return board
     }
 
-    private func pieceInfo(_ piece: Character) -> (emoji: String, isWhite: Bool) {
+    private func pieceInfo(_ piece: Character) -> (symbol: String, isWhite: Bool) {
+        // Use filled pieces with text variation selector (U+FE0E) to force text rendering
+        // This allows foregroundColor to work properly on iOS
+        let textSelector = "\u{FE0E}"
         switch piece {
-        case "K": return ("♚", true)
-        case "Q": return ("♛", true)
-        case "R": return ("♜", true)
-        case "B": return ("♝", true)
-        case "N": return ("♞", true)
-        case "P": return ("♟", true)
-        case "k": return ("♚", false)
-        case "q": return ("♛", false)
-        case "r": return ("♜", false)
-        case "b": return ("♝", false)
-        case "n": return ("♞", false)
-        case "p": return ("♟", false)
+        case "K": return ("♚" + textSelector, true)
+        case "Q": return ("♛" + textSelector, true)
+        case "R": return ("♜" + textSelector, true)
+        case "B": return ("♝" + textSelector, true)
+        case "N": return ("♞" + textSelector, true)
+        case "P": return ("♟" + textSelector, true)
+        case "k": return ("♚" + textSelector, false)
+        case "q": return ("♛" + textSelector, false)
+        case "r": return ("♜" + textSelector, false)
+        case "b": return ("♝" + textSelector, false)
+        case "n": return ("♞" + textSelector, false)
+        case "p": return ("♟" + textSelector, false)
         default: return ("", true)
         }
     }

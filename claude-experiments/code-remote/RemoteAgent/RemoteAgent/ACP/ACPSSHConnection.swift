@@ -30,13 +30,136 @@ actor ACPSSHConnection: ACPConnectionProtocol, RemoteCommandExecutor {
 
     private let sessionId: String
     private var inputFifo: String { "/tmp/acp_in_\(sessionId)" }
+    private var outputFile: String { "/tmp/acp_out_\(sessionId)" }  // Regular file, not FIFO - prevents blocking
     private var pidFile: String { "/tmp/acp_pid_\(sessionId)" }
+    private var logFile: String { "/tmp/acp_log_\(sessionId)" }
 
     var isClosed: Bool { _isClosed }
 
+    /// Returns the session ID for potential reconnection
+    var currentSessionId: String { sessionId }
+
+    /// Create a new connection with a fresh session ID
     init() {
         self.sessionId = UUID().uuidString.lowercased().replacingOccurrences(of: "-", with: "").prefix(16).description
         log("init: created with sessionId=\(self.sessionId)")
+    }
+
+    /// Create a connection that will reconnect to an existing session
+    init(existingSessionId: String) {
+        self.sessionId = existingSessionId
+        log("init: reconnecting to existing sessionId=\(self.sessionId)")
+    }
+
+    /// Check if a session with the given ID is still running on the remote server.
+    /// This is a static helper to determine whether to reconnect or start fresh.
+    static func isSessionRunning(
+        sessionId: String,
+        host: String,
+        port: Int = 22,
+        username: String,
+        privateKeyPath: String?,
+        password: String?
+    ) async throws -> Bool {
+        // Build authentication method
+        let authMethod: SSHAuthenticationMethod
+        if let keyPath = privateKeyPath, !keyPath.isEmpty {
+            let expandedPath = (keyPath as NSString).expandingTildeInPath
+            let keyURL = URL(fileURLWithPath: expandedPath)
+            let keyData = try Data(contentsOf: keyURL)
+            guard let keyString = String(data: keyData, encoding: .utf8) else {
+                throw ACPConnectionError.encodingError("Could not read private key")
+            }
+
+            let keyType = try SSHKeyDetection.detectPrivateKeyType(from: keyString)
+            if keyType == .rsa {
+                let rsaKey = try Insecure.RSA.PrivateKey(sshRsa: keyString)
+                authMethod = .rsa(username: username, privateKey: rsaKey)
+            } else if keyType == .ed25519 {
+                let ed25519Key = try Curve25519.Signing.PrivateKey(sshEd25519: keyString)
+                authMethod = .ed25519(username: username, privateKey: ed25519Key)
+            } else {
+                throw ACPConnectionError.encodingError("Unsupported key type: \(keyType)")
+            }
+        } else if let password = password, !password.isEmpty {
+            authMethod = .passwordBased(username: username, password: password)
+        } else {
+            throw ACPConnectionError.encodingError("Either SSH key or password must be provided")
+        }
+
+        let client = try await SSHClient.connect(
+            host: host,
+            port: port,
+            authenticationMethod: authMethod,
+            hostKeyValidator: .acceptAnything(),
+            reconnect: .never
+        )
+
+        defer { Task { try? await client.close() } }
+
+        let pidFile = "/tmp/acp_pid_\(sessionId)"
+        let result = try await client.executeCommand("test -f \(pidFile) && kill -0 $(cat \(pidFile)) 2>/dev/null && echo 'running' || echo 'not_running'")
+        let output = String(buffer: result).trimmingCharacters(in: .whitespacesAndNewlines)
+        return output == "running"
+    }
+
+    /// List all running ACP sessions on the remote server
+    static func listRunningSessions(
+        host: String,
+        port: Int = 22,
+        username: String,
+        privateKeyPath: String?,
+        password: String?
+    ) async throws -> [String] {
+        // Build authentication method
+        let authMethod: SSHAuthenticationMethod
+        if let keyPath = privateKeyPath, !keyPath.isEmpty {
+            let expandedPath = (keyPath as NSString).expandingTildeInPath
+            let keyURL = URL(fileURLWithPath: expandedPath)
+            let keyData = try Data(contentsOf: keyURL)
+            guard let keyString = String(data: keyData, encoding: .utf8) else {
+                throw ACPConnectionError.encodingError("Could not read private key")
+            }
+
+            let keyType = try SSHKeyDetection.detectPrivateKeyType(from: keyString)
+            if keyType == .rsa {
+                let rsaKey = try Insecure.RSA.PrivateKey(sshRsa: keyString)
+                authMethod = .rsa(username: username, privateKey: rsaKey)
+            } else if keyType == .ed25519 {
+                let ed25519Key = try Curve25519.Signing.PrivateKey(sshEd25519: keyString)
+                authMethod = .ed25519(username: username, privateKey: ed25519Key)
+            } else {
+                throw ACPConnectionError.encodingError("Unsupported key type: \(keyType)")
+            }
+        } else if let password = password, !password.isEmpty {
+            authMethod = .passwordBased(username: username, password: password)
+        } else {
+            throw ACPConnectionError.encodingError("Either SSH key or password must be provided")
+        }
+
+        let client = try await SSHClient.connect(
+            host: host,
+            port: port,
+            authenticationMethod: authMethod,
+            hostKeyValidator: .acceptAnything(),
+            reconnect: .never
+        )
+
+        defer { Task { try? await client.close() } }
+
+        // Find all PID files and check which ones have running processes
+        let result = try await client.executeCommand("""
+            for f in /tmp/acp_pid_*; do
+                if [ -f "$f" ]; then
+                    sid=$(echo "$f" | sed 's/.*acp_pid_//')
+                    if kill -0 $(cat "$f") 2>/dev/null; then
+                        echo "$sid"
+                    fi
+                fi
+            done
+            """)
+        let output = String(buffer: result)
+        return output.components(separatedBy: "\n").filter { !$0.isEmpty }
     }
 
     func setNotificationHandler(_ handler: @escaping @Sendable (JSONRPCNotification) async -> Void) {
@@ -106,31 +229,63 @@ actor ACPSSHConnection: ACPConnectionProtocol, RemoteCommandExecutor {
         )
         log("connect: SSH connected")
 
-        // Create FIFO for input
-        let mkfifoResult = try await client?.executeCommand("rm -f \(inputFifo) \(pidFile); mkfifo \(inputFifo) && echo 'ok'")
-        let mkfifoStr = String(buffer: mkfifoResult ?? ByteBuffer()).trimmingCharacters(in: .whitespacesAndNewlines)
-        if mkfifoStr != "ok" {
-            throw ACPConnectionError.connectionClosed
+        // Check if session already exists (reconnection case)
+        let existsResult = try await client?.executeCommand("test -f \(pidFile) && kill -0 $(cat \(pidFile)) 2>/dev/null && echo 'running' || echo 'not_running'")
+        let existsStr = String(buffer: existsResult ?? ByteBuffer()).trimmingCharacters(in: .whitespacesAndNewlines)
+        let sessionExists = existsStr == "running"
+
+        if sessionExists {
+            log("connect: found existing ACP session, reconnecting...")
+            // Start reading from the existing output file (tail -f)
+            startOutputReader()
+            log("connect: reconnected to existing session")
+        } else {
+            log("connect: starting new ACP session")
+
+            // Clean up any stale files and create input FIFO
+            let setupCmd = "rm -f \(inputFifo) \(outputFile) \(pidFile) \(logFile); mkfifo \(inputFifo) && echo 'ok'"
+            let mkfifoResult = try await client?.executeCommand(setupCmd)
+            let mkfifoStr = String(buffer: mkfifoResult ?? ByteBuffer()).trimmingCharacters(in: .whitespacesAndNewlines)
+            if mkfifoStr != "ok" {
+                throw ACPConnectionError.connectionClosed
+            }
+            log("connect: created input FIFO at \(inputFifo)")
+
+            // Start claude-code-acp using nohup so it survives SSH disconnection
+            // Output goes to a regular file so writes never block
+            let startCmd = "nohup bash -c 'cd \(workingDirectory) && tail -f \(inputFifo) | \(acpPath)' >> \(outputFile) 2>> \(logFile) & echo $!"
+            log("connect: starting detached ACP process")
+            let pidResult = try await client?.executeCommand(startCmd)
+            let pidStr = String(buffer: pidResult ?? ByteBuffer()).trimmingCharacters(in: .whitespacesAndNewlines)
+
+            // Save PID for later process management
+            _ = try await client?.executeCommand("echo '\(pidStr)' > \(pidFile)")
+            log("connect: ACP process started with PID \(pidStr)")
+
+            // Wait for the process to initialize
+            try await Task.sleep(nanoseconds: 1_500_000_000)
+
+            // Verify the process is running
+            let checkCmd = "kill -0 \(pidStr) 2>/dev/null && echo 'ok' || echo 'failed'"
+            let checkResult = try await client?.executeCommand(checkCmd)
+            let checkStr = String(buffer: checkResult ?? ByteBuffer()).trimmingCharacters(in: .whitespacesAndNewlines)
+            if checkStr != "ok" {
+                let logsResult = try await client?.executeCommand("cat \(logFile) 2>/dev/null | tail -20")
+                let logs = String(buffer: logsResult ?? ByteBuffer())
+                log("connect: ACP process died. Logs: \(logs)")
+                throw ACPConnectionError.encodingError("ACP process failed to start: \(logs)")
+            }
+
+            log("connect: ACP process running")
+
+            // Start reading from output file
+            startOutputReader()
         }
-        log("connect: created input FIFO at \(inputFifo)")
 
-        // Start claude-code-acp reading from FIFO
-        let startCmd = "cd \(workingDirectory) && echo \\$\\$ > \(pidFile) && exec tail -f \(inputFifo) | \(acpPath)"
-        log("connect: starting ACP process with command: \(startCmd)")
-
-        // Start reading output in background
-        startOutputReader(command: startCmd)
-
-        // Wait for the process to start
-        // We can't easily poll the PID file while executeCommandStream is running on the same SSH client
-        // So we just wait a bit and let the initialize request verify the connection works
-        log("connect: waiting 2 seconds for ACP process to initialize...")
-        try await Task.sleep(nanoseconds: 2_000_000_000)
-
-        log("connect: ready to send requests (process assumed started, initialize will verify)")
+        log("connect: ready to send requests")
     }
 
-    private func startOutputReader(command: String) {
+    private func startOutputReader() {
         // Start heartbeat task to monitor if output reader is still alive
         heartbeatTask = Task { [weak self] in
             var heartbeatCount = 0
@@ -149,10 +304,13 @@ actor ACPSSHConnection: ACPConnectionProtocol, RemoteCommandExecutor {
                 return
             }
 
-            log("startOutputReader: starting command stream")
+            let outputFile = await self.outputFile
+            log("startOutputReader: tailing output file \(outputFile)")
 
             do {
-                let stream = try await client.executeCommandStream(command)
+                // Use tail -f to read from the output file - this follows new data as it's appended
+                // Using -n +1 to read from the beginning on fresh sessions, or just new data on reconnect
+                let stream = try await client.executeCommandStream("tail -f -n +1 \(outputFile)")
                 log("startOutputReader: stream obtained, waiting for output")
 
                 var buffer = Data()
@@ -241,19 +399,57 @@ actor ACPSSHConnection: ACPConnectionProtocol, RemoteCommandExecutor {
         }
     }
 
-    private func sendResponseToAgent(_ response: JSONRPCResponse) async {
+    /// Maximum size for inline base64 data in shell commands (64KB to be safe with shell limits)
+    private static let maxInlineDataSize = 64 * 1024
+
+    /// Helper to send data to the FIFO, handling large payloads by chunking
+    private func sendDataToFifo(_ data: Data, label: String) async throws {
         guard let client = client else {
-            log("sendResponseToAgent: no client")
-            return
+            throw ACPConnectionError.notConnected
         }
 
+        log("\(label): data size=\(data.count) bytes")
+
+        if data.count <= Self.maxInlineDataSize {
+            // Small data: send inline via echo
+            let base64Data = data.base64EncodedString()
+            let writeCmd = "echo '\(base64Data)' | base64 -d > \(inputFifo)"
+            _ = try await client.executeCommand(writeCmd)
+        } else {
+            // Large data: write to temp file first, then cat to FIFO
+            // This avoids shell argument limits (ARG_MAX)
+            let tempFile = "/tmp/acp_chunk_\(sessionId)_\(Int.random(in: 0..<Int.max))"
+            log("\(label): using temp file \(tempFile) for large payload")
+
+            // Write data in chunks to the temp file
+            let chunkSize = Self.maxInlineDataSize
+            var offset = 0
+            var isFirst = true
+
+            while offset < data.count {
+                let end = min(offset + chunkSize, data.count)
+                let chunk = data[offset..<end]
+                let base64Chunk = chunk.base64EncodedString()
+
+                let redirectOp = isFirst ? ">" : ">>"
+                let writeCmd = "echo '\(base64Chunk)' | base64 -d \(redirectOp) \(tempFile)"
+                _ = try await client.executeCommand(writeCmd)
+
+                isFirst = false
+                offset = end
+            }
+
+            // Now cat the temp file to the FIFO and clean up
+            let catCmd = "cat \(tempFile) > \(inputFifo) && rm -f \(tempFile)"
+            _ = try await client.executeCommand(catCmd)
+        }
+    }
+
+    private func sendResponseToAgent(_ response: JSONRPCResponse) async {
         do {
             var data = try encoder.encode(response)
             data.append(UInt8(ascii: "\n"))
-
-            let base64Json = data.base64EncodedString()
-            let writeCmd = "echo '\(base64Json)' | base64 -d > \(inputFifo)"
-            _ = try await client.executeCommand(writeCmd)
+            try await sendDataToFifo(data, label: "sendResponseToAgent[\(response.id)]")
             log("sendResponseToAgent: sent response for id=\(response.id)")
         } catch {
             log("sendResponseToAgent: error sending response: \(error)")
@@ -276,7 +472,7 @@ actor ACPSSHConnection: ACPConnectionProtocol, RemoteCommandExecutor {
             log("sendRequest: ERROR - connection is closed")
             throw ACPConnectionError.notConnected
         }
-        guard let client = client else {
+        guard client != nil else {
             log("sendRequest: ERROR - no SSH client")
             throw ACPConnectionError.notConnected
         }
@@ -290,16 +486,9 @@ actor ACPSSHConnection: ACPConnectionProtocol, RemoteCommandExecutor {
         var data = try encoder.encode(request)
         data.append(UInt8(ascii: "\n"))
 
-        guard let jsonStr = String(data: data, encoding: .utf8) else {
-            log("sendRequest: ERROR - failed to encode request")
-            throw ACPConnectionError.encodingError("Failed to encode request")
+        if let jsonStr = String(data: data, encoding: .utf8) {
+            log("sendRequest: sending JSON (first 300 chars): \(jsonStr.prefix(300))")
         }
-
-        log("sendRequest: sending JSON (first 300 chars): \(jsonStr.prefix(300))")
-
-        // Base64 encode to avoid shell escaping issues
-        let base64Json = data.base64EncodedString()
-        log("sendRequest: base64 length=\(base64Json.count)")
 
         let response = try await withCheckedThrowingContinuation { (cont: CheckedContinuation<JSONRPCResponse, Error>) in
             pendingRequests[id] = cont
@@ -307,10 +496,8 @@ actor ACPSSHConnection: ACPConnectionProtocol, RemoteCommandExecutor {
 
             Task {
                 do {
-                    let writeCmd = "echo '\(base64Json)' | base64 -d > \(self.inputFifo)"
-                    log("sendRequest: executing write command for id=\(id)")
-                    _ = try await client.executeCommand(writeCmd)
-                    log("sendRequest: write command completed for id=\(id)")
+                    try await self.sendDataToFifo(data, label: "sendRequest[\(id)]")
+                    log("sendRequest: write completed for id=\(id)")
                 } catch {
                     log("sendRequest: ERROR writing request id=\(id): \(error)")
                     if let removed = self.pendingRequests.removeValue(forKey: id) {
@@ -335,7 +522,7 @@ actor ACPSSHConnection: ACPConnectionProtocol, RemoteCommandExecutor {
         guard !_isClosed else {
             throw ACPConnectionError.notConnected
         }
-        guard let client = client else {
+        guard client != nil else {
             throw ACPConnectionError.notConnected
         }
 
@@ -344,11 +531,8 @@ actor ACPSSHConnection: ACPConnectionProtocol, RemoteCommandExecutor {
         var data = try encoder.encode(notification)
         data.append(UInt8(ascii: "\n"))
 
-        log("sending notification: \(method)")
-
-        let base64Json = data.base64EncodedString()
-        let writeCmd = "echo '\(base64Json)' | base64 -d > \(inputFifo)"
-        _ = try await client.executeCommand(writeCmd)
+        log("sendNotification: method=\(method)")
+        try await sendDataToFifo(data, label: "sendNotification[\(method)]")
     }
 
     // MARK: - Remote Command Execution (for terminals and file reading)
@@ -411,7 +595,15 @@ actor ACPSSHConnection: ACPConnectionProtocol, RemoteCommandExecutor {
         return output.components(separatedBy: "\n").filter { !$0.isEmpty }
     }
 
+    /// Close the connection and terminate the ACP session (protocol conformance)
     func close() async {
+        await closeConnection(keepSessionAlive: false)
+    }
+
+    /// Close the connection with option to keep session alive.
+    /// - Parameter keepSessionAlive: If true, the ACP process keeps running on the server for later reconnection.
+    ///                               If false (default), the ACP process is terminated.
+    private func closeConnection(keepSessionAlive: Bool) async {
         guard !_isClosed else { return }
         _isClosed = true
 
@@ -420,9 +612,21 @@ actor ACPSSHConnection: ACPConnectionProtocol, RemoteCommandExecutor {
         outputTask?.cancel()
         outputTask = nil
 
-        // Clean up remote resources
         if let client = client {
-            _ = try? await client.executeCommand("pkill -f 'tail.*\(inputFifo)' 2>/dev/null; rm -f \(inputFifo) \(pidFile)")
+            if keepSessionAlive {
+                // Just disconnect SSH, leave ACP running for reconnection
+                log("close: keeping session alive for reconnection (sessionId=\(sessionId))")
+            } else {
+                // Terminate ACP process and clean up
+                log("close: terminating ACP session")
+                _ = try? await client.executeCommand("""
+                    if [ -f \(pidFile) ]; then
+                        kill $(cat \(pidFile)) 2>/dev/null
+                    fi
+                    pkill -f 'tail.*\(inputFifo)' 2>/dev/null
+                    rm -f \(inputFifo) \(outputFile) \(pidFile) \(logFile)
+                    """)
+            }
             try? await client.close()
         }
         client = nil
@@ -432,7 +636,17 @@ actor ACPSSHConnection: ACPConnectionProtocol, RemoteCommandExecutor {
         }
         pendingRequests.removeAll()
 
-        log("connection closed")
+        log("connection closed (keepSessionAlive=\(keepSessionAlive))")
+    }
+
+    /// Disconnect from SSH but keep the ACP session running for later reconnection
+    func disconnect() async {
+        await closeConnection(keepSessionAlive: true)
+    }
+
+    /// Terminate the ACP session completely
+    func terminate() async {
+        await closeConnection(keepSessionAlive: false)
     }
 
     deinit {

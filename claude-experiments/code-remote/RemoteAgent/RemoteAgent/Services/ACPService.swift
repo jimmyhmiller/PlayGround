@@ -414,6 +414,64 @@ class ACPService: ObservableObject {
         #endif
     }
 
+    /// Connect to an existing ACP session (iOS only)
+    func connectToExistingSession(
+        sessionId: String,
+        host: String,
+        port: Int = 22,
+        username: String,
+        privateKeyPath: String?,
+        password: String?
+    ) async throws {
+        #if os(iOS)
+        log("connectToExistingSession: reconnecting to session \(sessionId)")
+
+        await disconnect()
+
+        // Create SSH connection with existing session ID
+        let connection = ACPSSHConnection(existingSessionId: sessionId)
+        self.sshConnection = connection
+
+        // Connect via SSH (this will reconnect to the existing session)
+        try await connection.connect(
+            host: host,
+            port: port,
+            username: username,
+            privateKeyPath: privateKeyPath,
+            password: password,
+            workingDirectory: "/tmp", // Not used for reconnection
+            acpPath: "claude-code-acp" // Not used for reconnection
+        )
+        log("connectToExistingSession: SSH connection established")
+
+        // Create ACPClient
+        let acpClient = ACPClient.forClaudeCode(name: "RemoteAgent", version: "1.0.0")
+        self.client = acpClient
+
+        // Set up permission delegate
+        let delegate = ACPPermissionDelegate()
+        self.permissionDelegate = delegate
+        await acpClient.setDelegate(delegate)
+        await setupPermissionHandler(delegate)
+
+        // Connect ACPClient using our SSH connection
+        try await acpClient.connect(using: connection)
+        log("connectToExistingSession: ACPClient connected")
+
+        // Set up remote executor
+        await acpClient.setRemoteExecutor(connection)
+
+        startEventListener()
+
+        isConnected = true
+        agentInfo = await acpClient.agentInfo
+        self.sessionId = sessionId
+        log("connectToExistingSession: connected to existing session")
+        eventContinuation?.yield(.connected)
+        #else
+        throw ACPServiceError.connectionFailed("connectToExistingSession is only supported on iOS")
+        #endif
+    }
 
     /// Set up permission handler on delegate
     private func setupPermissionHandler(_ delegate: ACPPermissionDelegate) async {
@@ -508,7 +566,8 @@ class ACPService: ObservableObject {
         }
         client = nil
         if let sshConnection = sshConnection {
-            await sshConnection.close()
+            // Use disconnect() to keep the ACP session alive for reconnection
+            await sshConnection.disconnect()
         }
         sshConnection = nil
         #endif

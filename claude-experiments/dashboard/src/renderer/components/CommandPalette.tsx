@@ -29,6 +29,7 @@ interface CommandPaletteProps {
   onClose: () => void;
   commands: Command[];
   onExecute: (command: Command) => void;
+  onAskClaude?: (query: string) => void;
 }
 
 /**
@@ -42,6 +43,7 @@ const CommandPalette = memo(function CommandPalette({
   onClose,
   commands,
   onExecute,
+  onAskClaude,
 }: CommandPaletteProps) {
   const [query, setQuery] = useState('');
   const [selectedIndex, setSelectedIndex] = useState(0);
@@ -60,6 +62,13 @@ const CommandPalette = memo(function CommandPalette({
     );
   }, [commands, query]);
 
+  // Show "Ask Claude" option when there's a query and the callback is provided
+  const showAskClaude = onAskClaude && query.trim().length > 0;
+
+  // Total items includes the Ask Claude option at the end
+  const totalItems = filteredCommands.length + (showAskClaude ? 1 : 0);
+  const askClaudeIndex = filteredCommands.length; // It's always the last item
+
   // Reset selection when query changes
   useEffect(() => {
     setSelectedIndex(0);
@@ -77,25 +86,32 @@ const CommandPalette = memo(function CommandPalette({
 
   // Scroll selected item into view
   useEffect(() => {
-    if (listRef.current && filteredCommands.length > 0) {
+    if (listRef.current && totalItems > 0) {
       const selectedEl = listRef.current.children[selectedIndex] as HTMLElement;
       if (selectedEl) {
         selectedEl.scrollIntoView({ block: 'nearest' });
       }
     }
-  }, [selectedIndex, filteredCommands.length]);
+  }, [selectedIndex, totalItems]);
 
   const executeCommand = useCallback((command: Command) => {
     onExecute(command);
     onClose();
   }, [onExecute, onClose]);
 
+  const handleAskClaude = useCallback(() => {
+    if (onAskClaude && query.trim()) {
+      onAskClaude(query.trim());
+      onClose();
+    }
+  }, [onAskClaude, query, onClose]);
+
   const handleKeyDown = useCallback((e: React.KeyboardEvent<HTMLInputElement>) => {
     switch (e.key) {
       case 'ArrowDown':
         e.preventDefault();
         setSelectedIndex(prev =>
-          prev < filteredCommands.length - 1 ? prev + 1 : prev
+          prev < totalItems - 1 ? prev + 1 : prev
         );
         break;
       case 'ArrowUp':
@@ -104,7 +120,9 @@ const CommandPalette = memo(function CommandPalette({
         break;
       case 'Enter':
         e.preventDefault();
-        if (filteredCommands[selectedIndex]) {
+        if (showAskClaude && selectedIndex === askClaudeIndex) {
+          handleAskClaude();
+        } else if (filteredCommands[selectedIndex]) {
           executeCommand(filteredCommands[selectedIndex]);
         }
         break;
@@ -115,7 +133,7 @@ const CommandPalette = memo(function CommandPalette({
       default:
         break;
     }
-  }, [filteredCommands, selectedIndex, executeCommand, onClose]);
+  }, [filteredCommands, selectedIndex, executeCommand, onClose, totalItems, showAskClaude, askClaudeIndex, handleAskClaude]);
 
   if (!isOpen) return null;
 
@@ -194,7 +212,7 @@ const CommandPalette = memo(function CommandPalette({
             padding: 'var(--theme-spacing-xs)',
           }}
         >
-          {filteredCommands.length === 0 ? (
+          {filteredCommands.length === 0 && !showAskClaude ? (
             <div
               style={{
                 padding: 'var(--theme-spacing-lg)',
@@ -206,15 +224,33 @@ const CommandPalette = memo(function CommandPalette({
               No commands found
             </div>
           ) : (
-            filteredCommands.map((command, index) => (
-              <CommandItem
-                key={command.id}
-                command={command}
-                isSelected={index === selectedIndex}
-                onClick={() => executeCommand(command)}
-                onMouseEnter={() => setSelectedIndex(index)}
-              />
-            ))
+            <>
+              {filteredCommands.map((command, index) => (
+                <CommandItem
+                  key={command.id}
+                  command={command}
+                  isSelected={index === selectedIndex}
+                  onClick={() => executeCommand(command)}
+                  onMouseEnter={() => setSelectedIndex(index)}
+                />
+              ))}
+              {showAskClaude && (
+                <CommandItem
+                  key="ask-claude"
+                  command={{
+                    id: 'ask-claude',
+                    label: `Ask Claude: "${query.trim()}"`,
+                    description: 'Send this request to Claude to create or modify the dashboard',
+                    icon: '🤖',
+                    category: 'AI',
+                    action: handleAskClaude,
+                  }}
+                  isSelected={selectedIndex === askClaudeIndex}
+                  onClick={handleAskClaude}
+                  onMouseEnter={() => setSelectedIndex(askClaudeIndex)}
+                />
+              )}
+            </>
           )}
         </div>
 

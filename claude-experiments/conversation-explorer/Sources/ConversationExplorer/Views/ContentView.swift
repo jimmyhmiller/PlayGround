@@ -6,11 +6,20 @@ struct ContentView: View {
     @State private var selectedEntry: HistoryEntry?
     @State private var searchQuery = ""
     @State private var isSearching = false
+    @State private var fullTextResults: [HistoryEntry]? = nil
+    @State private var searchTask: Task<Void, Never>? = nil
 
     var filteredProjects: [String] {
         if searchQuery.isEmpty {
             return dataService.uniqueProjects
         }
+
+        // If we have full-text results, show projects containing those results
+        if let results = fullTextResults {
+            let matchingProjects = Set(results.map { $0.project })
+            return dataService.uniqueProjects.filter { matchingProjects.contains($0) }
+        }
+
         let query = searchQuery.lowercased()
         // Show projects that match OR have matching conversations
         return dataService.uniqueProjects.filter { project in
@@ -24,6 +33,12 @@ struct ContentView: View {
     }
 
     func filteredEntries(for project: String) -> [HistoryEntry] {
+        // If we have full-text results, filter to only those results for this project
+        if let results = fullTextResults {
+            return results.filter { $0.project == project }
+                .sorted { $0.timestamp > $1.timestamp }
+        }
+
         let entries = dataService.entriesForProject(project)
         if searchQuery.isEmpty { return entries }
         let query = searchQuery.lowercased()
@@ -35,11 +50,22 @@ struct ContentView: View {
             // Global search bar
             HStack(spacing: 12) {
                 HStack {
-                    Image(systemName: "magnifyingglass")
-                        .foregroundColor(.secondary)
+                    if isSearching {
+                        ProgressView()
+                            .scaleEffect(0.7)
+                            .frame(width: 16, height: 16)
+                    } else {
+                        Image(systemName: "magnifyingglass")
+                            .foregroundColor(.secondary)
+                    }
                     TextField("Search all conversations...", text: $searchQuery)
                         .textFieldStyle(.plain)
                     if !searchQuery.isEmpty {
+                        if let results = fullTextResults {
+                            Text("\(results.count) results")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
                         Button(action: { searchQuery = "" }) {
                             Image(systemName: "xmark.circle.fill")
                                 .foregroundColor(.secondary)
@@ -63,7 +89,8 @@ struct ContentView: View {
                     projects: filteredProjects,
                     dataService: dataService,
                     selectedProject: $selectedProject,
-                    searchQuery: searchQuery
+                    searchQuery: searchQuery,
+                    fullTextResults: fullTextResults
                 )
                 .frame(width: 240)
 
@@ -101,6 +128,41 @@ struct ContentView: View {
         }
         .onChange(of: selectedProject) { _, _ in
             selectedEntry = nil
+        }
+        .onChange(of: searchQuery) { _, newValue in
+            // Cancel previous search
+            searchTask?.cancel()
+
+            if newValue.isEmpty {
+                fullTextResults = nil
+                isSearching = false
+                return
+            }
+
+            // Start new streaming search
+            fullTextResults = []
+            isSearching = true
+
+            searchTask = Task {
+                // Small debounce
+                try? await Task.sleep(for: .milliseconds(150))
+                guard !Task.isCancelled else { return }
+
+                await dataService.searchFullText(query: newValue) { entry in
+                    guard !Task.isCancelled else { return }
+                    Task { @MainActor in
+                        guard !Task.isCancelled else { return }
+                        if fullTextResults != nil {
+                            fullTextResults?.append(entry)
+                        }
+                    }
+                }
+
+                guard !Task.isCancelled else { return }
+                await MainActor.run {
+                    isSearching = false
+                }
+            }
         }
     }
 }

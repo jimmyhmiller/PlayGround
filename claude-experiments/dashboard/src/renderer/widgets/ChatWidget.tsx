@@ -16,6 +16,8 @@ import type { ContentBlock } from './chat/ChatInput';
 interface ChatWidgetProps {
   sessionCwd?: string;
   title?: string;
+  /** If provided, this prompt will be auto-sent after connection is established */
+  initialPrompt?: string;
 }
 
 interface PermissionRequest {
@@ -31,6 +33,7 @@ interface PermissionRequest {
 export function ChatWidget({
   sessionCwd,
   title = 'Claude Chat',
+  initialPrompt,
 }: ChatWidgetProps): React.ReactElement {
   // Mode type from ACP
   interface SessionMode {
@@ -76,6 +79,7 @@ export function ChatWidget({
   const hasScrolledInitiallyRef = useRef(false);
   const currentPromptIdRef = useRef<string | null>(null);
   const isStreamingRef = useRef(isStreaming);
+  const hasSentInitialPromptRef = useRef(false);
   isStreamingRef.current = isStreaming;
   // Refs for async closures - needed because handleSend awaits across renders
   const currentTextRef = useRef(currentText);
@@ -113,7 +117,7 @@ export function ChatWidget({
         const wasConnected = await window.acpAPI.isConnected();
         if (mounted) setIsConnected(wasConnected);
 
-        const cwd = sessionCwd || process.cwd?.() || '/';
+        const cwd = sessionCwd || '/';
 
         if (!wasConnected) {
           // Spawn and initialize - this starts a new agent process
@@ -212,6 +216,79 @@ export function ChatWidget({
       mounted = false;
     };
   }, [sessionIdLoaded, sessionId, sessionCwd]);
+
+  // Auto-send initial prompt if provided
+  useEffect(() => {
+    // Only send if we have an initial prompt, are connected, have a session, and haven't sent it yet
+    if (
+      !initialPrompt ||
+      !isConnected ||
+      !sessionId ||
+      !hasInitializedRef.current ||
+      hasSentInitialPromptRef.current ||
+      isStreaming
+    ) {
+      return;
+    }
+
+    // Mark as sent immediately to prevent re-sending
+    hasSentInitialPromptRef.current = true;
+
+    // Build context-aware prompt for dashboard modifications
+    const contextPrompt = `You are helping modify a React/Electron dashboard application. The user wants to make changes to their dashboard.
+
+The dashboard has these key features:
+- Window management system (create/move/resize floating windows)
+- Widget-based layouts (widgets can be arranged in grids/layouts)
+- Custom widget support (widgets are React components)
+- Theme system with CSS variables
+- Command palette for actions
+- Projects and dashboards for organization
+
+The user's request: "${initialPrompt}"
+
+Please implement this request by:
+1. Creating or modifying the necessary widget components
+2. Using the dashboard's MCP tools to register widgets or update the UI
+3. If this is a new widget, register it using the dashboard_register_widget tool
+4. Keep the code simple and focused on the request
+
+Start by understanding what files need to be created or modified, then implement the changes.`;
+
+    // Create content block and send
+    const content = [{ type: 'text' as const, text: contextPrompt }];
+
+    // Use setTimeout to ensure handleSend is available
+    setTimeout(() => {
+      const sendPrompt = async () => {
+        const userMessage: ChatMessage = {
+          id: `msg-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+          role: 'user',
+          content: initialPrompt, // Show original request in UI
+          timestamp: Date.now(),
+        };
+        setMessages((prev) => [...prev, userMessage]);
+
+        // Generate prompt ID and start streaming
+        const newPromptId = `prompt-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+        currentPromptIdRef.current = newPromptId;
+        currentMessageIdRef.current = newPromptId;
+        setIsStreaming(true);
+        setCurrentText('');
+        setToolCalls(new Map());
+
+        try {
+          await window.acpAPI.prompt(sessionId, content);
+          // finishMessage will be called by the streaming handler
+        } catch (err) {
+          console.error('[ChatWidget] Initial prompt error:', err);
+          setError((err as Error).message);
+          setIsStreaming(false);
+        }
+      };
+      sendPrompt();
+    }, 100);
+  }, [initialPrompt, isConnected, sessionId, isStreaming]);
 
   // Subscribe to session updates via event system
   // Note: Skip 'acp.session.update' as it duplicates the specific event types
@@ -462,7 +539,7 @@ export function ChatWidget({
           // Respawn and create new session
           await window.acpAPI.spawn();
           await window.acpAPI.initialize();
-          const cwd = sessionCwd || process.cwd?.() || '/';
+          const cwd = sessionCwd || '/';
           const newSession = await window.acpAPI.newSession(cwd);
           setSessionId(newSession.sessionId);
           if (newSession.modes) {
@@ -539,7 +616,7 @@ export function ChatWidget({
 
   // Start a new session
   const handleNewSession = async () => {
-    const cwd = sessionCwd || process.cwd?.() || '/';
+    const cwd = sessionCwd || '/';
     // Remember the current mode to restore it in the new session
     const previousModeId = currentModeId;
 

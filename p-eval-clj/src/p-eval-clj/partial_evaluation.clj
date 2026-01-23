@@ -351,6 +351,20 @@
    ]))
 
 
+(last
+ (evaluate ['(defn lookup [coll x]
+               (if (clojure.core/empty? coll)
+                 nil
+                 (if (clojure.core/= (clojure.core/ffirst coll) x)
+                   (clojure.core/second (clojure.core/first coll))
+                   (lookup (clojure.core/rest coll) x))))
+            '(defn insert [coll k v]
+               (if (empty? coll)
+                 [[k v]]
+                 (conj coll [k v])))
+
+            `(~'lookup [[:k 2] [:q 3]] ~'arg)]))
+
 
 
 

@@ -105,6 +105,7 @@ struct ContentView: View {
             await loadLibrary()
         }
         .onChange(of: selectedPDF) { oldValue, newValue in
+            print("🔔 selectedPDF changed: \(newValue?.hash ?? "nil")")
             // Cancel any in-flight download
             currentDownloadTask?.cancel()
 
@@ -112,6 +113,7 @@ struct ContentView: View {
             loadRequestCounter += 1
 
             if let pdf = newValue {
+                print("📄 Will load PDF: \(pdf.displayTitle)")
                 let requestId = loadRequestCounter  // Capture current counter
                 currentPDFHash = pdf.hash
                 currentDownloadTask = Task {
@@ -176,6 +178,15 @@ struct ContentView: View {
 
     func loadPDF(metadata: PDFMetadata, requestId: Int) async {
         do {
+            // Sync drawings from S3 first
+            print("📄 Loading PDF: \(metadata.hash)")
+            do {
+                try await DrawingSyncManager.shared.sync(pdfHash: metadata.hash)
+                print("✅ Sync completed for \(metadata.hash)")
+            } catch {
+                print("❌ Sync failed: \(error)")
+            }
+
             let document = try await downloader.downloadPDF(metadata: metadata)
 
             // Check if this request is still current
@@ -535,6 +546,19 @@ struct PDFMarkupView: View {
     }
 }
 
+class LayoutAwareContainerView: UIView {
+    var onLayoutChange: (() -> Void)?
+    private var lastBounds: CGRect = .zero
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        if bounds != lastBounds {
+            lastBounds = bounds
+            onLayoutChange?()
+        }
+    }
+}
+
 struct PDFPageView: UIViewRepresentable {
     let page: PDFPage
     let pdfHash: String
@@ -546,7 +570,7 @@ struct PDFPageView: UIViewRepresentable {
     }
 
     func makeUIView(context: Context) -> UIView {
-        let containerView = UIView()
+        let containerView = LayoutAwareContainerView()
 
         // PDF view
         let pdfView = PDFView()
@@ -609,8 +633,10 @@ struct PDFPageView: UIViewRepresentable {
             canvasView.bottomAnchor.constraint(equalTo: containerView.bottomAnchor)
         ])
 
-        // Load any saved drawings for this page
-        context.coordinator.loadDrawing()
+        // Load drawings when layout changes (handles initial load and resize)
+        containerView.onLayoutChange = { [weak coordinator = context.coordinator] in
+            coordinator?.loadDrawing()
+        }
 
         return containerView
     }

@@ -826,6 +826,73 @@ const DesktopCommandPalette = memo(function DesktopCommandPalette(): ReactElemen
     command.action();
   }, []);
 
+  // Claude status state
+  const [claudeStatus, setClaudeStatus] = useState<{
+    active: boolean;
+    query: string;
+    status: 'connecting' | 'working' | 'done' | 'error';
+    message?: string;
+  }>({ active: false, query: '', status: 'connecting' });
+
+  // Handle freeform queries to Claude - runs in background with status indicator
+  const handleAskClaude = useCallback(async (query: string) => {
+    setClaudeStatus({ active: true, query, status: 'connecting' });
+
+    try {
+      // Check if ACP is connected, if not spawn and initialize
+      const isConnected = await window.acpAPI.isConnected();
+      if (!isConnected) {
+        await window.acpAPI.spawn();
+        await window.acpAPI.initialize();
+      }
+
+      setClaudeStatus({ active: true, query, status: 'working' });
+
+      // Create a new session
+      const { sessionId } = await window.acpAPI.newSession('/');
+
+      // Build a prompt that gives Claude context about the dashboard
+      const prompt = `You are helping modify a React/Electron dashboard application. The user wants to make changes to their dashboard.
+
+The dashboard has these key features:
+- Window management system (create/move/resize floating windows)
+- Widget-based layouts (widgets can be arranged in grids/layouts)
+- Custom widget support (widgets are React components)
+- Theme system with CSS variables
+- Command palette for actions
+- Projects and dashboards for organization
+
+The user's request: "${query}"
+
+Please implement this request by:
+1. Creating or modifying the necessary widget components
+2. Using the dashboard's MCP tools to register widgets or update the UI
+3. If this is a new widget, register it using the dashboard_register_widget tool
+4. Keep the code simple and focused on the request
+
+Start by understanding what files need to be created or modified, then implement the changes.`;
+
+      // Send the prompt to Claude
+      await window.acpAPI.prompt(sessionId, prompt);
+
+      setClaudeStatus({ active: true, query, status: 'done', message: 'Complete!' });
+
+      // Auto-hide after 3 seconds
+      setTimeout(() => {
+        setClaudeStatus(prev => prev.status === 'done' ? { ...prev, active: false } : prev);
+      }, 3000);
+
+    } catch (error) {
+      console.error('[Desktop] Failed to send query to Claude:', error);
+      setClaudeStatus({
+        active: true,
+        query,
+        status: 'error',
+        message: (error as Error).message || 'Unknown error',
+      });
+    }
+  }, []);
+
   return (
     <>
       <CommandPalette
@@ -833,7 +900,87 @@ const DesktopCommandPalette = memo(function DesktopCommandPalette(): ReactElemen
         onClose={close}
         commands={commands}
         onExecute={handleExecute}
+        onAskClaude={handleAskClaude}
       />
+
+      {/* Claude Status Indicator */}
+      {claudeStatus.active && (
+        <div
+          style={{
+            position: 'fixed',
+            bottom: 16,
+            right: 16,
+            background: 'var(--theme-bg-elevated, #252540)',
+            border: '1px solid var(--theme-border-primary, #333)',
+            borderRadius: 8,
+            padding: '12px 16px',
+            display: 'flex',
+            alignItems: 'center',
+            gap: 12,
+            zIndex: 9999,
+            boxShadow: '0 4px 12px rgba(0,0,0,0.3)',
+            maxWidth: 300,
+          }}
+        >
+          {claudeStatus.status === 'connecting' && (
+            <div style={{ width: 16, height: 16, borderRadius: '50%', background: '#f59e0b', animation: 'pulse 1s infinite' }} />
+          )}
+          {claudeStatus.status === 'working' && (
+            <div style={{ width: 16, height: 16, borderRadius: '50%', border: '2px solid #3b82f6', borderTopColor: 'transparent', animation: 'spin 1s linear infinite' }} />
+          )}
+          {claudeStatus.status === 'done' && (
+            <div style={{ width: 16, height: 16, borderRadius: '50%', background: '#22c55e' }} />
+          )}
+          {claudeStatus.status === 'error' && (
+            <div style={{ width: 16, height: 16, borderRadius: '50%', background: '#ef4444' }} />
+          )}
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{
+              fontSize: 12,
+              color: 'var(--theme-text-muted, #888)',
+              whiteSpace: 'nowrap',
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+            }}>
+              {claudeStatus.query}
+            </div>
+            <div style={{
+              fontSize: 11,
+              color: claudeStatus.status === 'error' ? '#ef4444' : 'var(--theme-text-secondary, #aaa)',
+            }}>
+              {claudeStatus.status === 'connecting' && 'Connecting to Claude...'}
+              {claudeStatus.status === 'working' && 'Working...'}
+              {claudeStatus.status === 'done' && (claudeStatus.message || 'Done!')}
+              {claudeStatus.status === 'error' && (claudeStatus.message || 'Error')}
+            </div>
+          </div>
+          <button
+            onClick={() => setClaudeStatus(prev => ({ ...prev, active: false }))}
+            style={{
+              background: 'none',
+              border: 'none',
+              color: 'var(--theme-text-muted, #888)',
+              cursor: 'pointer',
+              padding: 4,
+              fontSize: 14,
+            }}
+          >
+            ×
+          </button>
+        </div>
+      )}
+
+      {/* CSS for animations */}
+      <style>{`
+        @keyframes spin {
+          to { transform: rotate(360deg); }
+        }
+        @keyframes pulse {
+          0%, 100% { opacity: 1; }
+          50% { opacity: 0.5; }
+        }
+      `}</style>
+
       <PromptDialog
         isOpen={promptState.isOpen}
         title={promptState.title}

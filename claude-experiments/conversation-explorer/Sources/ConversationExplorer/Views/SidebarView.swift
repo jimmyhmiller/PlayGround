@@ -5,6 +5,7 @@ struct ProjectListView: View {
     @ObservedObject var dataService: DataService
     @Binding var selectedProject: String?
     let searchQuery: String
+    let fullTextResults: [HistoryEntry]?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -48,6 +49,9 @@ struct ProjectListView: View {
     }
 
     func countForProject(_ project: String) -> Int {
+        if let results = fullTextResults {
+            return results.filter { $0.project == project }.count
+        }
         if searchQuery.isEmpty {
             return dataService.entriesForProject(project).count
         }
