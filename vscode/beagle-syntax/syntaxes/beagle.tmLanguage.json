@@ -26,15 +26,15 @@
         },
         {
             "name": "entity.name.function.beagle",
-            "match": "\\b[A-Za-z_][A-Za-z0-9_]*\\s*(?=\\()"
+            "match": "\\b[A-Za-z_][A-Za-z0-9_\\-]*\\s*(?=\\()"
         },
         {
             "name": "entity.name.struct.beagle",
-            "match": "\\b[A-Za-z_][A-Za-z0-9_]*\\s*(?=\\{)"
+            "match": "\\b[A-Za-z_][A-Za-z0-9_\\-]*\\s*(?=\\{)"
         },
         {
             "name": "entity.name.namespace.beagle",
-            "match": "(?<=namespace\\s)[A-Za-z_][A-Za-z0-9_\\.]*"
+            "match": "(?<=namespace\\s)[A-Za-z_][A-Za-z0-9_\\.\\-]*"
         },
         {
             "name": "string.quoted.double.beagle",

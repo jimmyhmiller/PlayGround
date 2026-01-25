@@ -118,7 +118,7 @@ import_electron.contextBridge.exposeInMainWorld("pipelineAPI", {
 });
 import_electron.contextBridge.exposeInMainWorld("acpAPI", {
   // Spawn the claude-code-acp agent process
-  spawn: () => import_electron.ipcRenderer.invoke("acp:spawn"),
+  spawn: (cwd) => import_electron.ipcRenderer.invoke("acp:spawn", cwd),
   // Initialize the ACP connection
   initialize: () => import_electron.ipcRenderer.invoke("acp:initialize"),
   // Create a new session
@@ -159,4 +159,8 @@ import_electron.contextBridge.exposeInMainWorld("acpAPI", {
   },
   // Load session history from Claude's local files
   loadSessionHistory: (sessionId, cwd) => import_electron.ipcRenderer.invoke("acp:loadSessionHistory", sessionId, cwd)
+});
+import_electron.contextBridge.exposeInMainWorld("dialogAPI", {
+  // Show a directory picker dialog
+  showDirectoryPicker: (options) => import_electron.ipcRenderer.invoke("dialog:showDirectoryPicker", options)
 });

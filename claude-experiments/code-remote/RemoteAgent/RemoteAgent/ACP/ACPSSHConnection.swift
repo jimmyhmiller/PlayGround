@@ -33,6 +33,7 @@ actor ACPSSHConnection: ACPConnectionProtocol, RemoteCommandExecutor {
     private var outputFile: String { "/tmp/acp_out_\(sessionId)" }  // Regular file, not FIFO - prevents blocking
     private var pidFile: String { "/tmp/acp_pid_\(sessionId)" }
     private var logFile: String { "/tmp/acp_log_\(sessionId)" }
+    private var cwdFile: String { "/tmp/acp_cwd_\(sessionId)" }  // Stores working directory for reconnection
 
     var isClosed: Bool { _isClosed }
 
@@ -103,6 +104,12 @@ actor ACPSSHConnection: ACPConnectionProtocol, RemoteCommandExecutor {
         return output == "running"
     }
 
+    /// Info about a running ACP session
+    struct RunningSession: Identifiable {
+        let id: String  // session ID
+        let workingDirectory: String?
+    }
+
     /// List all running ACP sessions on the remote server
     static func listRunningSessions(
         host: String,
@@ -110,7 +117,7 @@ actor ACPSSHConnection: ACPConnectionProtocol, RemoteCommandExecutor {
         username: String,
         privateKeyPath: String?,
         password: String?
-    ) async throws -> [String] {
+    ) async throws -> [RunningSession] {
         // Build authentication method
         let authMethod: SSHAuthenticationMethod
         if let keyPath = privateKeyPath, !keyPath.isEmpty {
@@ -148,18 +155,31 @@ actor ACPSSHConnection: ACPConnectionProtocol, RemoteCommandExecutor {
         defer { Task { try? await client.close() } }
 
         // Find all PID files and check which ones have running processes
+        // Output format: sessionId|workingDirectory (one per line)
         let result = try await client.executeCommand("""
             for f in /tmp/acp_pid_*; do
                 if [ -f "$f" ]; then
                     sid=$(echo "$f" | sed 's/.*acp_pid_//')
                     if kill -0 $(cat "$f") 2>/dev/null; then
-                        echo "$sid"
+                        cwd=""
+                        cwdfile="/tmp/acp_cwd_$sid"
+                        if [ -f "$cwdfile" ]; then
+                            cwd=$(cat "$cwdfile")
+                        fi
+                        echo "$sid|$cwd"
                     fi
                 fi
             done
             """)
         let output = String(buffer: result)
-        return output.components(separatedBy: "\n").filter { !$0.isEmpty }
+        return output.components(separatedBy: "\n")
+            .filter { !$0.isEmpty }
+            .map { line in
+                let parts = line.components(separatedBy: "|")
+                let sessionId = parts[0]
+                let cwd = parts.count > 1 && !parts[1].isEmpty ? parts[1] : nil
+                return RunningSession(id: sessionId, workingDirectory: cwd)
+            }
     }
 
     func setNotificationHandler(_ handler: @escaping @Sendable (JSONRPCNotification) async -> Void) {
@@ -243,13 +263,13 @@ actor ACPSSHConnection: ACPConnectionProtocol, RemoteCommandExecutor {
             log("connect: starting new ACP session")
 
             // Clean up any stale files and create input FIFO
-            let setupCmd = "rm -f \(inputFifo) \(outputFile) \(pidFile) \(logFile); mkfifo \(inputFifo) && echo 'ok'"
+            let setupCmd = "rm -f \(inputFifo) \(outputFile) \(pidFile) \(logFile) \(cwdFile); mkfifo \(inputFifo) && echo '\(workingDirectory)' > \(cwdFile) && echo 'ok'"
             let mkfifoResult = try await client?.executeCommand(setupCmd)
             let mkfifoStr = String(buffer: mkfifoResult ?? ByteBuffer()).trimmingCharacters(in: .whitespacesAndNewlines)
             if mkfifoStr != "ok" {
                 throw ACPConnectionError.connectionClosed
             }
-            log("connect: created input FIFO at \(inputFifo)")
+            log("connect: created input FIFO at \(inputFifo), saved cwd to \(cwdFile)")
 
             // Start claude-code-acp using nohup so it survives SSH disconnection
             // Output goes to a regular file so writes never block

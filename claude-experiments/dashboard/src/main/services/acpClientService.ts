@@ -99,14 +99,33 @@ export class ACPClientService {
     this.permissionCallback = callback;
   }
 
+  private spawnCwd: string | null = null;
+
   /**
    * Spawn the claude-code-acp agent and establish connection
+   * @param cwd - Working directory to spawn the agent in
    */
-  async spawn(): Promise<void> {
-    // Already connected
+  async spawn(cwd?: string): Promise<void> {
+    // Already connected - but check if we need to respawn in a different directory
     if (this.isInitialized && this.connection) {
-      console.log('[acp] Already connected, skipping spawn');
-      return;
+      if (cwd && this.spawnCwd !== cwd) {
+        console.log('[acp] Respawning in new directory:', cwd, '(was:', this.spawnCwd, ')');
+        // Kill and wait for cleanup
+        if (this.agentProcess) {
+          this.agentProcess.kill();
+          await new Promise(resolve => setTimeout(resolve, 500));
+        }
+        this.agentProcess = null;
+        this.connection = null;
+        this.agent = null;
+        this.isInitialized = false;
+        this.currentSessionId = null;
+        this.agentInfo = null;
+        this.spawnCwd = null;
+      } else {
+        console.log('[acp] Already connected in correct directory:', this.spawnCwd);
+        return;
+      }
     }
 
     // Already spawning - wait for that to complete
@@ -128,8 +147,11 @@ export class ACPClientService {
       this.agentInfo = null;
     }
 
+    // Store the cwd we're spawning with
+    this.spawnCwd = cwd || null;
+
     // Create spawn promise before any async work
-    this.spawnPromise = this.doSpawn();
+    this.spawnPromise = this.doSpawn(cwd);
 
     try {
       await this.spawnPromise;
@@ -141,16 +163,21 @@ export class ACPClientService {
   /**
    * Internal spawn implementation
    */
-  private async doSpawn(): Promise<void> {
+  private async doSpawn(cwd?: string): Promise<void> {
     const acp = await getACPModule();
 
     // Spawn claude-code-acp with auto-approve permissions
     // Capture stderr to detect session errors
     this.stderrBuffer = '';
+    const spawnDir = cwd || process.cwd();
+    console.log('[acp] Spawning agent in cwd:', spawnDir);
     this.agentProcess = spawn('npx', ['@zed-industries/claude-code-acp', '--dangerously-skip-permissions'], {
       stdio: ['pipe', 'pipe', 'pipe'],
+      cwd: spawnDir,
       env: {
         ...process.env,
+        PWD: spawnDir,  // Also set PWD env var
+        INIT_CWD: spawnDir,  // npm uses this
       },
     });
 
@@ -274,17 +301,21 @@ export class ACPClientService {
 
   /**
    * Create a new session (or return existing one if already created)
-   * @param cwd - Working directory for the session
+   * @param cwd - Working directory for the session (defaults to spawn directory or process.cwd())
    * @param mcpServers - Optional MCP servers to connect
    * @param force - If true, always creates a new session even if one exists
    */
-  async newSession(cwd: string, mcpServers?: unknown[], force?: boolean): Promise<{
+  async newSession(cwd?: string, mcpServers?: unknown[], force?: boolean): Promise<{
     sessionId: string;
     modes?: { availableModes: Array<{ id: string; name: string }>; currentModeId: string };
   }> {
     if (!this.connection || !this.isInitialized) {
       throw new Error('Not initialized. Call spawn() and initialize() first.');
     }
+
+    // Use provided cwd, or fall back to spawn directory, or process.cwd()
+    const effectiveCwd = cwd || this.spawnCwd || process.cwd();
+    console.log('[acp] newSession cwd:', effectiveCwd, '(provided:', cwd, ', spawnCwd:', this.spawnCwd, ')');
 
     // If we already have a session and not forcing, return it with cached modes
     if (this.currentSessionId && !force) {
@@ -299,7 +330,7 @@ export class ACPClientService {
     }
 
     // Create session with locking
-    this.sessionPromise = this.doNewSession(cwd, mcpServers);
+    this.sessionPromise = this.doNewSession(effectiveCwd, mcpServers);
 
     try {
       return await this.sessionPromise;
@@ -353,14 +384,20 @@ export class ACPClientService {
 
   /**
    * Resume an existing session (uses unstable_resumeSession)
+   * @param sessionId - The session ID to resume
+   * @param cwd - Working directory for the session (defaults to spawn directory or process.cwd())
    */
-  async resumeSession(sessionId: string, cwd: string): Promise<{
+  async resumeSession(sessionId: string, cwd?: string): Promise<{
     sessionId: string;
     modes?: { availableModes: Array<{ id: string; name: string }>; currentModeId: string };
   }> {
     if (!this.connection || !this.isInitialized) {
       throw new Error('Not initialized');
     }
+
+    // Use provided cwd, or fall back to spawn directory, or process.cwd()
+    const effectiveCwd = cwd || this.spawnCwd || process.cwd();
+    console.log('[acp] resumeSession cwd:', effectiveCwd, '(provided:', cwd, ', spawnCwd:', this.spawnCwd, ')');
 
     console.log('[acp] Attempting to resume session:', sessionId);
 
@@ -377,7 +414,7 @@ export class ACPClientService {
 
     const result = await this.connection.unstable_resumeSession({
       sessionId,
-      cwd,
+      cwd: effectiveCwd,
       mcpServers: [dashboardMcpServer] as never[],
     });
 
@@ -509,8 +546,10 @@ export class ACPClientService {
    * Load conversation history from a session file
    * Returns messages in the format expected by ChatWidget
    * Note: Only works with Claude Code agent - other agents may store sessions differently
+   * @param sessionId - The session ID to load
+   * @param cwd - Working directory (defaults to spawn directory or process.cwd())
    */
-  async loadSessionHistory(sessionId: string, cwd: string): Promise<Array<{
+  async loadSessionHistory(sessionId: string, cwd?: string): Promise<Array<{
     id: string;
     role: 'user' | 'assistant';
     content: string;
@@ -522,7 +561,9 @@ export class ACPClientService {
       return [];
     }
 
-    const sessionPath = this.getSessionFilePath(sessionId, cwd);
+    // Use provided cwd, or fall back to spawn directory, or process.cwd()
+    const effectiveCwd = cwd || this.spawnCwd || process.cwd();
+    const sessionPath = this.getSessionFilePath(sessionId, effectiveCwd);
 
     try {
       await fs.access(sessionPath);

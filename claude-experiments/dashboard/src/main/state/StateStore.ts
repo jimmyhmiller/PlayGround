@@ -420,6 +420,7 @@ export class StateStore {
         const newProject: ProjectState = {
           id: projectId,
           name: p.name,
+          rootDir: p.rootDir,
           defaultTheme: { current: 'dark', overrides: {} },
           dashboardIds: [dashboardId],
           activeDashboardId: dashboardId,

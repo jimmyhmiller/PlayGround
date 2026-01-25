@@ -228,17 +228,17 @@ contextBridge.exposeInMainWorld('pipelineAPI', {
 // ACP (Agent Client Protocol) API for renderer - AI agent communication
 contextBridge.exposeInMainWorld('acpAPI', {
   // Spawn the claude-code-acp agent process
-  spawn: (): Promise<void> => ipcRenderer.invoke('acp:spawn'),
+  spawn: (cwd?: string): Promise<void> => ipcRenderer.invoke('acp:spawn', cwd),
 
   // Initialize the ACP connection
   initialize: (): Promise<void> => ipcRenderer.invoke('acp:initialize'),
 
-  // Create a new session
-  newSession: (cwd: string, mcpServers?: unknown[], force?: boolean): Promise<{ sessionId: string }> =>
+  // Create a new session (cwd defaults to spawn directory or process.cwd())
+  newSession: (cwd?: string, mcpServers?: unknown[], force?: boolean): Promise<{ sessionId: string }> =>
     ipcRenderer.invoke('acp:newSession', cwd, mcpServers, force),
 
-  // Resume an existing session
-  resumeSession: (sessionId: string, cwd: string): Promise<{ sessionId: string; modes?: { availableModes: Array<{ id: string; name: string }>; currentModeId: string } }> =>
+  // Resume an existing session (cwd defaults to spawn directory or process.cwd())
+  resumeSession: (sessionId: string, cwd?: string): Promise<{ sessionId: string; modes?: { availableModes: Array<{ id: string; name: string }>; currentModeId: string } }> =>
     ipcRenderer.invoke('acp:resumeSession', sessionId, cwd),
 
   // Send a prompt to the agent
@@ -286,11 +286,21 @@ contextBridge.exposeInMainWorld('acpAPI', {
     };
   },
 
-  // Load session history from Claude's local files
-  loadSessionHistory: (sessionId: string, cwd: string): Promise<Array<{
+  // Load session history from Claude's local files (cwd defaults to spawn directory or process.cwd())
+  loadSessionHistory: (sessionId: string, cwd?: string): Promise<Array<{
     id: string;
     role: 'user' | 'assistant';
     content: string;
     timestamp: number;
   }>> => ipcRenderer.invoke('acp:loadSessionHistory', sessionId, cwd),
+});
+
+// Dialog API for renderer - native OS dialogs
+contextBridge.exposeInMainWorld('dialogAPI', {
+  // Show a directory picker dialog
+  showDirectoryPicker: (options?: {
+    title?: string;
+    defaultPath?: string;
+    buttonLabel?: string;
+  }): Promise<string | null> => ipcRenderer.invoke('dialog:showDirectoryPicker', options),
 });

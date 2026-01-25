@@ -7,6 +7,7 @@
 
 import React, { useState, useEffect, useRef } from 'react';
 import { usePersistentState } from '../hooks/useWidgetState';
+import { useActiveProject } from '../hooks/useBackendState';
 import type { ChatMessage, UIPlanTask, UIToolCall, SessionNotification } from '../../types/acp';
 
 // Sub-components
@@ -40,6 +41,10 @@ export function ChatWidget({
     id: string;
     name: string;
   }
+
+  // Get active project's rootDir - this is used as the working directory for ACP sessions
+  const [activeProject, projectLoading] = useActiveProject();
+  const effectiveCwd = sessionCwd || activeProject?.rootDir;
 
   // Persistent state (survives dashboard switches)
   const [messages, setMessages] = usePersistentState<ChatMessage[]>('messages', []);
@@ -97,10 +102,10 @@ export function ChatWidget({
     messagesEndRef.current?.scrollIntoView({ behavior: instant ? 'instant' : 'smooth' });
   };
 
-  // Initialize connection once persistence has loaded
+  // Initialize connection once persistence and project have loaded
   useEffect(() => {
-    // Wait for persistence to load before initializing
-    if (!sessionIdLoaded) {
+    // Wait for persistence and project to load before initializing
+    if (!sessionIdLoaded || projectLoading) {
       return;
     }
 
@@ -117,11 +122,12 @@ export function ChatWidget({
         const wasConnected = await window.acpAPI.isConnected();
         if (mounted) setIsConnected(wasConnected);
 
-        const cwd = sessionCwd || '/';
+        const cwd = effectiveCwd;
+        console.log('[ChatWidget] Using cwd:', cwd, 'activeProject:', activeProject?.name, 'rootDir:', activeProject?.rootDir);
 
         if (!wasConnected) {
-          // Spawn and initialize - this starts a new agent process
-          await window.acpAPI.spawn();
+          // Spawn and initialize - this starts a new agent process in the project directory
+          await window.acpAPI.spawn(cwd);
           await window.acpAPI.initialize();
           if (!mounted) return;
           setIsConnected(true);
@@ -173,7 +179,7 @@ export function ChatWidget({
             // Session resume failed - need to respawn and create a new session
             // Clear old messages since they're not part of this session
             try {
-              await window.acpAPI.spawn();
+              await window.acpAPI.spawn(cwd);
               await window.acpAPI.initialize();
             } catch {
               // May already be connected, ignore
@@ -215,7 +221,7 @@ export function ChatWidget({
     return () => {
       mounted = false;
     };
-  }, [sessionIdLoaded, sessionId, sessionCwd]);
+  }, [sessionIdLoaded, sessionId, sessionCwd, projectLoading, effectiveCwd]);
 
   // Auto-send initial prompt if provided
   useEffect(() => {
@@ -537,9 +543,9 @@ Start by understanding what files need to be created or modified, then implement
 
         try {
           // Respawn and create new session
-          await window.acpAPI.spawn();
+          const cwd = effectiveCwd;
+          await window.acpAPI.spawn(cwd);
           await window.acpAPI.initialize();
-          const cwd = sessionCwd || '/';
           const newSession = await window.acpAPI.newSession(cwd);
           setSessionId(newSession.sessionId);
           if (newSession.modes) {
@@ -616,7 +622,7 @@ Start by understanding what files need to be created or modified, then implement
 
   // Start a new session
   const handleNewSession = async () => {
-    const cwd = sessionCwd || '/';
+    const cwd = effectiveCwd;
     // Remember the current mode to restore it in the new session
     const previousModeId = currentModeId;
 

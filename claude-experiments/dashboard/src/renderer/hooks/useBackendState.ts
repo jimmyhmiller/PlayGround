@@ -465,7 +465,7 @@ interface ProjectsStateResult {
   projects: ProjectState[];
   activeProjectId: string | null;
   activeProject: ProjectState | null;
-  createProject: (name: string) => Promise<CommandResult>;
+  createProject: (name: string, rootDir?: string) => Promise<CommandResult>;
   deleteProject: (id: string) => Promise<CommandResult>;
   renameProject: (id: string, name: string) => Promise<CommandResult>;
   setProjectTheme: (id: string, theme: ThemeState) => Promise<CommandResult>;
@@ -480,7 +480,7 @@ export function useProjectsState(): ProjectsStateResult {
   const [state, dispatch, loading] = useBackendState<ProjectsState>('projects');
 
   const createProject = useCallback(
-    (name: string) => dispatch('projects.create', { name }),
+    (name: string, rootDir?: string) => dispatch('projects.create', { name, rootDir }),
     [dispatch]
   );
 
@@ -531,7 +531,7 @@ export function useActiveProject(): [ProjectState | null, boolean] {
 }
 
 interface ProjectCommandsResult {
-  createProject: (name: string) => Promise<CommandResult>;
+  createProject: (name: string, rootDir?: string) => Promise<CommandResult>;
   deleteProject: (id: string) => Promise<CommandResult>;
   renameProject: (id: string, name: string) => Promise<CommandResult>;
   setProjectTheme: (id: string, theme: ThemeState) => Promise<CommandResult>;
@@ -545,7 +545,7 @@ export function useProjectCommands(): ProjectCommandsResult {
   const dispatch = useDispatch();
 
   const createProject = useCallback(
-    (name: string) => dispatch('projects.create', { name }),
+    (name: string, rootDir?: string) => dispatch('projects.create', { name, rootDir }),
     [dispatch]
   );
 

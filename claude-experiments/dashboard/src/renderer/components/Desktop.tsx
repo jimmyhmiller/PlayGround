@@ -304,7 +304,12 @@ const DesktopCommandPalette = memo(function DesktopCommandPalette(): ReactElemen
       action: async () => {
         const name = await showPrompt('Create New Project', 'Enter project name');
         if (name) {
-          await createProject(name);
+          // Use native directory picker
+          const rootDir = await window.dialogAPI.showDirectoryPicker({
+            title: 'Select Project Root Directory',
+            buttonLabel: 'Select',
+          });
+          await createProject(name, rootDir || undefined);
         }
       },
     });
@@ -836,41 +841,52 @@ const DesktopCommandPalette = memo(function DesktopCommandPalette(): ReactElemen
 
   // Handle freeform queries to Claude - runs in background with status indicator
   const handleAskClaude = useCallback(async (query: string) => {
+    const lowerQuery = query.toLowerCase();
+
+    // Quick pattern matching for common requests - no Claude needed
+    if (lowerQuery.includes('chat') && (lowerQuery.includes('add') || lowerQuery.includes('open') || lowerQuery.includes('create') || lowerQuery.includes('new'))) {
+      // Create a chat window directly - no Claude needed!
+      createWindow({
+        title: 'Claude Chat',
+        componentType: 'widget-layout',
+        props: {
+          config: { type: 'chat' },
+        },
+        width: 500,
+        height: 600,
+      });
+      return;
+    }
+
+    // For other requests, use Claude
     setClaudeStatus({ active: true, query, status: 'connecting' });
 
     try {
+      // Get the project's root directory for ACP working directory
+      const cwd = activeProject?.rootDir;
+
       // Check if ACP is connected, if not spawn and initialize
       const isConnected = await window.acpAPI.isConnected();
       if (!isConnected) {
-        await window.acpAPI.spawn();
+        await window.acpAPI.spawn(cwd);
         await window.acpAPI.initialize();
       }
 
       setClaudeStatus({ active: true, query, status: 'working' });
+      const { sessionId } = await window.acpAPI.newSession(cwd);
 
-      // Create a new session
-      const { sessionId } = await window.acpAPI.newSession('/');
+      // Build a prompt that tells Claude to use MCP tools properly
+      const prompt = `You are helping modify a dashboard. The user's request: "${query}"
 
-      // Build a prompt that gives Claude context about the dashboard
-      const prompt = `You are helping modify a React/Electron dashboard application. The user wants to make changes to their dashboard.
+IMPORTANT: Use the MCP tools available to you:
+1. FIRST call dashboard_list_widget_types to see existing widgets
+2. Use window_create with existing widget types when possible
+3. Only use widget_register if you truly need a NEW custom widget
 
-The dashboard has these key features:
-- Window management system (create/move/resize floating windows)
-- Widget-based layouts (widgets can be arranged in grids/layouts)
-- Custom widget support (widgets are React components)
-- Theme system with CSS variables
-- Command palette for actions
-- Projects and dashboards for organization
+DO NOT write widget code from scratch if a similar widget already exists.
+DO NOT modify source files - use the MCP tools to create/configure widgets.
 
-The user's request: "${query}"
-
-Please implement this request by:
-1. Creating or modifying the necessary widget components
-2. Using the dashboard's MCP tools to register widgets or update the UI
-3. If this is a new widget, register it using the dashboard_register_widget tool
-4. Keep the code simple and focused on the request
-
-Start by understanding what files need to be created or modified, then implement the changes.`;
+Be minimal and efficient.`;
 
       // Send the prompt to Claude
       await window.acpAPI.prompt(sessionId, prompt);
@@ -891,7 +907,7 @@ Start by understanding what files need to be created or modified, then implement
         message: (error as Error).message || 'Unknown error',
       });
     }
-  }, []);
+  }, [createWindow]);
 
   return (
     <>

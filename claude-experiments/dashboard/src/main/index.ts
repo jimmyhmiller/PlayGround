@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain } from 'electron';
+import { app, BrowserWindow, ipcMain, dialog } from 'electron';
 import * as path from 'path';
 import * as fs from 'fs';
 import { once } from 'hot-reload/api';
@@ -67,6 +67,25 @@ once(ipcMain.handle('get-message', getMessage));
 once(ipcMain.handle('increment', incrementCounter));
 
 once(ipcMain.handle('get-counter', getCounter));
+
+// Dialog handler for directory picker
+once(ipcMain.handle('dialog:showDirectoryPicker', async (_event, options?: {
+  title?: string;
+  defaultPath?: string;
+  buttonLabel?: string;
+}) => {
+  const result = await dialog.showOpenDialog({
+    title: options?.title || 'Select Directory',
+    defaultPath: options?.defaultPath,
+    buttonLabel: options?.buttonLabel || 'Select',
+    properties: ['openDirectory', 'createDirectory'],
+  });
+
+  if (result.canceled || result.filePaths.length === 0) {
+    return null;
+  }
+  return result.filePaths[0];
+}));
 
 // Initialize event system
 once(events.setupIPC());

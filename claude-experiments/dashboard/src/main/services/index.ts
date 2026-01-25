@@ -292,8 +292,8 @@ function setupACPIPC(): void {
   // which get pushed to the renderer via the existing events:push channel
 
   // Spawn the agent
-  ipcMain.handle('acp:spawn', async () => {
-    await acpService.spawn();
+  ipcMain.handle('acp:spawn', async (_event: IpcMainInvokeEvent, cwd?: string) => {
+    await acpService.spawn(cwd);
   });
 
   // Initialize connection
@@ -302,12 +302,12 @@ function setupACPIPC(): void {
   });
 
   // Create new session
-  ipcMain.handle('acp:newSession', async (_event: IpcMainInvokeEvent, cwd: string, mcpServers?: unknown[], force?: boolean) => {
+  ipcMain.handle('acp:newSession', async (_event: IpcMainInvokeEvent, cwd?: string, mcpServers?: unknown[], force?: boolean) => {
     return await acpService.newSession(cwd, mcpServers, force);
   });
 
   // Resume existing session
-  ipcMain.handle('acp:resumeSession', async (_event: IpcMainInvokeEvent, sessionId: string, cwd: string) => {
+  ipcMain.handle('acp:resumeSession', async (_event: IpcMainInvokeEvent, sessionId: string, cwd?: string) => {
     return await acpService.resumeSession(sessionId, cwd);
   });
 
@@ -351,7 +351,7 @@ function setupACPIPC(): void {
   });
 
   // Load session history from Claude's local files
-  ipcMain.handle('acp:loadSessionHistory', async (_event: IpcMainInvokeEvent, sessionId: string, cwd: string) => {
+  ipcMain.handle('acp:loadSessionHistory', async (_event: IpcMainInvokeEvent, sessionId: string, cwd?: string) => {
     return await acpService.loadSessionHistory(sessionId, cwd);
   });
 

@@ -233,13 +233,13 @@ export interface PipelineAPI {
  */
 export interface ACPAPI {
   /** Spawn the claude-code-acp agent process */
-  spawn(): Promise<void>;
+  spawn(cwd?: string): Promise<void>;
 
   /** Initialize the ACP connection */
   initialize(): Promise<void>;
 
   /** Create a new session */
-  newSession(cwd: string, mcpServers?: unknown[], force?: boolean): Promise<{
+  newSession(cwd?: string, mcpServers?: unknown[], force?: boolean): Promise<{
     sessionId: string;
     modes?: {
       availableModes: Array<{ id: string; name: string }>;
@@ -248,7 +248,7 @@ export interface ACPAPI {
   }>;
 
   /** Resume an existing session */
-  resumeSession(sessionId: string, cwd: string): Promise<{
+  resumeSession(sessionId: string, cwd?: string): Promise<{
     sessionId: string;
     modes?: { availableModes: Array<{ id: string; name: string }>; currentModeId: string };
   }>;
@@ -278,12 +278,24 @@ export interface ACPAPI {
   subscribePermissions(callback: (request: RequestPermissionRequest) => void): () => void;
 
   /** Load session history from Claude's local files */
-  loadSessionHistory(sessionId: string, cwd: string): Promise<Array<{
+  loadSessionHistory(sessionId: string, cwd?: string): Promise<Array<{
     id: string;
     role: 'user' | 'assistant';
     content: string;
     timestamp: number;
   }>>;
+}
+
+/**
+ * Dialog API exposed via preload - native OS dialogs
+ */
+export interface DialogAPI {
+  /** Show a directory picker dialog */
+  showDirectoryPicker: (options?: {
+    title?: string;
+    defaultPath?: string;
+    buttonLabel?: string;
+  }) => Promise<string | null>;
 }
 
 /**
@@ -300,6 +312,7 @@ declare global {
     shellAPI: ShellAPI;
     pipelineAPI: PipelineAPI;
     acpAPI: ACPAPI;
+    dialogAPI: DialogAPI;
   }
 }
 

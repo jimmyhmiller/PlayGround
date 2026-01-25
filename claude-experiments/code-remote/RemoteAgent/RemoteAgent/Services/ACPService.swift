@@ -847,6 +847,164 @@ class ACPService: ObservableObject {
         }
     }
 
+    /// Load session history directly to ChatDisplayMessage, preserving order and tool outputs
+    func loadSessionHistoryForDisplay(cwd: String, sessionId: String) async throws -> [ChatDisplayMessage] {
+        // Path pattern: ~/.claude/projects/{encoded-cwd}/{sessionId}.jsonl
+        let encodedCwd = cwd.replacingOccurrences(of: "/", with: "-")
+        let remotePath = "~/.claude/projects/\(encodedCwd)/\(sessionId).jsonl"
+
+        log("loadSessionHistoryForDisplay: reading \(remotePath)")
+
+        guard let connection = sshConnection else {
+            log("loadSessionHistoryForDisplay: no SSH connection")
+            throw ACPServiceError.notConnected
+        }
+
+        // Check if file exists
+        let exists = try await connection.remoteFileExists(remotePath)
+        if !exists {
+            log("loadSessionHistoryForDisplay: file not found")
+            return []
+        }
+
+        // Read file content
+        let content = try await connection.readRemoteFile(remotePath)
+        if content.isEmpty {
+            return []
+        }
+
+        // Parse directly to ChatDisplayMessage
+        return parseSessionHistoryForDisplay(content)
+    }
+
+    /// Parse session history JSONL content directly to ChatDisplayMessage, preserving order and tool outputs
+    private func parseSessionHistoryForDisplay(_ content: String) -> [ChatDisplayMessage] {
+        let lines = content.components(separatedBy: "\n").filter { !$0.isEmpty }
+
+        // First pass: collect all tool results keyed by tool_use_id
+        var toolOutputs: [String: String] = [:]
+        var toolErrors: Set<String> = []
+
+        for line in lines {
+            guard let data = line.data(using: .utf8),
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let type = json["type"] as? String,
+                  type == "user",
+                  let message = json["message"] as? [String: Any],
+                  let contentBlocks = message["content"] as? [[String: Any]] else {
+                continue
+            }
+
+            for block in contentBlocks {
+                if let blockType = block["type"] as? String,
+                   blockType == "tool_result",
+                   let toolUseId = block["tool_use_id"] as? String {
+
+                    // Track errors
+                    if let isError = block["is_error"] as? Bool, isError {
+                        toolErrors.insert(toolUseId)
+                    }
+
+                    // Extract output from content
+                    if let content = block["content"] {
+                        if let str = content as? String {
+                            toolOutputs[toolUseId] = str
+                        } else if let arr = content as? [[String: Any]] {
+                            let texts = arr.compactMap { $0["text"] as? String }
+                            toolOutputs[toolUseId] = texts.joined(separator: "\n")
+                        }
+                    }
+                }
+            }
+        }
+
+        log("parseSessionHistoryForDisplay: found \(toolOutputs.count) tool outputs")
+
+        // Second pass: build ChatDisplayMessage preserving content block order
+        var messages: [ChatDisplayMessage] = []
+
+        for line in lines {
+            guard let data = line.data(using: .utf8),
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let type = json["type"] as? String,
+                  (type == "user" || type == "assistant"),
+                  let message = json["message"] as? [String: Any],
+                  let contentBlocks = message["content"] as? [[String: Any]] else {
+                continue
+            }
+
+            let role: DisplayMessageRole = type == "user" ? .user : .assistant
+            let uuid = json["uuid"] as? String ?? UUID().uuidString
+
+            // Parse timestamp
+            var timestamp = Date()
+            if let timestampStr = json["timestamp"] as? String {
+                let formatter = ISO8601DateFormatter()
+                formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+                timestamp = formatter.date(from: timestampStr) ?? Date()
+            }
+
+            // Build content blocks IN ORDER
+            var orderedBlocks: [MessageContentBlock] = []
+            var hasActualContent = false
+
+            for block in contentBlocks {
+                guard let blockType = block["type"] as? String else { continue }
+
+                switch blockType {
+                case "text":
+                    if let text = block["text"] as? String, !text.isEmpty {
+                        orderedBlocks.append(.text(id: UUID().uuidString, content: text))
+                        hasActualContent = true
+                    }
+                case "tool_use":
+                    if let toolId = block["id"] as? String,
+                       let toolName = block["name"] as? String {
+                        var inputStr = ""
+                        if let input = block["input"] as? [String: Any],
+                           let inputData = try? JSONSerialization.data(withJSONObject: input),
+                           let str = String(data: inputData, encoding: .utf8) {
+                            inputStr = str
+                        }
+
+                        let output = toolOutputs[toolId]
+                        let isError = toolErrors.contains(toolId)
+
+                        let toolCall = DisplayToolCall(
+                            id: toolId,
+                            name: toolName,
+                            input: inputStr,
+                            output: output,
+                            isExpanded: false,
+                            status: isError ? .error : .completed
+                        )
+                        orderedBlocks.append(.toolCall(toolCall))
+                        hasActualContent = true
+                    }
+                case "tool_result":
+                    // Skip - handled in first pass
+                    break
+                default:
+                    break
+                }
+            }
+
+            // Skip empty messages and user messages that only have tool_results
+            guard hasActualContent else { continue }
+
+            messages.append(ChatDisplayMessage(
+                id: uuid,
+                role: role,
+                contentBlocks: orderedBlocks,
+                timestamp: timestamp,
+                isStreaming: false
+            ))
+        }
+
+        log("parseSessionHistoryForDisplay: built \(messages.count) display messages")
+        return messages
+    }
+
     /// List sessions from the remote server by reading .jsonl files
     /// Returns sessions sorted by modification time (newest first)
     func listRemoteSessions(cwd: String, projectId: UUID) async -> [Session] {

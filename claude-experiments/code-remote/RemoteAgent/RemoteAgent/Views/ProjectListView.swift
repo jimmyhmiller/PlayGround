@@ -6,7 +6,7 @@ struct ProjectListView: View {
     @Bindable var server: Server
 
     @State private var isAddingProject = false
-    @State private var runningSessions: [String] = []
+    @State private var runningSessions: [ACPSSHConnection.RunningSession] = []
     @State private var isLoadingSessions = false
     @State private var sessionError: String?
 
@@ -83,21 +83,15 @@ struct ProjectListView: View {
                                 .foregroundStyle(.secondary)
                         }
                     } else {
-                        ForEach(runningSessions, id: \.self) { sessionId in
-                            NavigationLink {
-                                // TODO: Reconnect view
-                                ReconnectSessionView(server: server, sessionId: sessionId)
-                            } label: {
-                                HStack {
-                                    Image(systemName: "terminal.fill")
-                                        .foregroundStyle(.green)
-                                    Text(sessionId)
-                                        .font(.system(.caption, design: .monospaced))
-                                }
-                            }
+                        ForEach(runningSessions) { session in
+                            RunningSessionRow(
+                                session: session,
+                                project: projectForSession(session),
+                                modelContainer: modelContext.container
+                            )
                             .swipeActions(edge: .trailing, allowsFullSwipe: true) {
                                 Button(role: .destructive) {
-                                    Task { await killSession(sessionId) }
+                                    Task { await killSession(session.id) }
                                 } label: {
                                     Label("Kill", systemImage: "xmark.circle")
                                 }
@@ -189,6 +183,61 @@ struct ProjectListView: View {
 
     private func deleteProject(_ project: Project) {
         modelContext.delete(project)
+    }
+
+    /// Find the project that matches a running session's working directory
+    private func projectForSession(_ session: ACPSSHConnection.RunningSession) -> Project? {
+        guard let cwd = session.workingDirectory else { return nil }
+        return server.projects.first { $0.remotePath == cwd }
+    }
+}
+
+// MARK: - Running Session Row
+
+struct RunningSessionRow: View {
+    let session: ACPSSHConnection.RunningSession
+    let project: Project?
+    let modelContainer: ModelContainer
+
+    @StateObject private var acpService = ACPService()
+
+    var body: some View {
+        if let project = project {
+            // Session has a matching project - go straight to chat
+            NavigationLink {
+                ACPChatView(project: project, resumeSession: nil, modelContainer: modelContainer, acpService: acpService)
+            } label: {
+                sessionLabel
+            }
+        } else {
+            // No matching project - just show info
+            sessionLabel
+        }
+    }
+
+    private var sessionLabel: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "terminal.fill")
+                .foregroundStyle(.green)
+
+            VStack(alignment: .leading, spacing: 2) {
+                if let project = project {
+                    Text(project.name)
+                        .font(.subheadline)
+                }
+                Text(session.id)
+                    .font(.system(.caption, design: .monospaced))
+                    .foregroundStyle(project == nil ? .primary : .secondary)
+            }
+
+            Spacer()
+
+            if project != nil {
+                Image(systemName: "chevron.right")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
     }
 }
 

@@ -86,6 +86,7 @@ export interface DashboardState {
 export interface ProjectState {
   id: string;
   name: string;
+  rootDir?: string;  // Root directory for this project (used by Claude for cwd)
   defaultTheme: ThemeState;
   dashboardIds: string[];
   activeDashboardId: string | null;
@@ -276,6 +277,7 @@ export interface ComponentUpdatePropsPayload {
  */
 export interface ProjectCreatePayload {
   name: string;
+  rootDir?: string;
 }
 
 /**

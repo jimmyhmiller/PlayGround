@@ -234,21 +234,21 @@ class ACPChatViewModel: ObservableObject {
                 sessionId = result.sessionId
                 log("resumeSession: resumed session \(result.sessionId)")
 
-                // Load FULL history from JSONL file (ACP protocol only returns recent messages)
-                var history: [ACPHistoryMessage] = []
-
-                // Always load from remote JSONL file for complete history
-                log("resumeSession: loading full history from remote JSONL file...")
+                // Load FULL history from JSONL file with preserved order and tool outputs
+                log("resumeSession: loading full history for display...")
                 do {
-                    history = try await acpService.loadSessionHistory(
+                    messages = try await acpService.loadSessionHistoryForDisplay(
                         cwd: project.remotePath,
                         sessionId: session.id
                     )
-                    log("resumeSession: loaded \(history.count) messages from remote JSONL")
+                    log("resumeSession: loaded \(messages.count) display messages")
                 } catch {
-                    log("resumeSession: failed to load remote history: \(error)")
+                    log("resumeSession: failed to load history for display: \(error)")
 
-                    // Fall back to cache if remote fails
+                    // Fallback to old approach if new method fails
+                    var history: [ACPHistoryMessage] = []
+
+                    // Try cache first
                     if let cache = cacheService {
                         let cached = await cache.loadCachedHistory(sessionId: session.id)
                         if !cached.isEmpty {
@@ -262,60 +262,45 @@ class ACPChatViewModel: ObservableObject {
                         history = result.history
                         log("resumeSession: using ACP history with \(history.count) messages")
                     }
-                }
 
-                // Cache the full history for next time
-                if !history.isEmpty, let cache = cacheService {
-                    await cache.cacheHistory(
-                        sessionId: session.id,
-                        projectId: project.id,
-                        workingDirectory: project.remotePath,
-                        messages: history
-                    )
-                    log("resumeSession: cached history locally")
-                }
-
-                messages = history.compactMap { historyMsg -> ChatDisplayMessage? in
-                    // Skip user messages that are just tool results (no actual text)
-                    if historyMsg.role == .user && historyMsg.content.isEmpty {
-                        return nil
-                    }
-
-                    // Build content blocks from text and tool calls
-                    var contentBlocks: [MessageContentBlock] = []
-
-                    // Add text content if present
-                    if !historyMsg.content.isEmpty {
-                        contentBlocks.append(.text(id: UUID().uuidString, content: historyMsg.content))
-                    }
-
-                    // Add tool calls if present (for assistant messages)
-                    if let toolCalls = historyMsg.toolCalls {
-                        for tc in toolCalls {
-                            let displayToolCall = DisplayToolCall(
-                                id: tc.id,
-                                name: tc.name,
-                                input: tc.input ?? "",
-                                output: tc.output,
-                                isExpanded: false,
-                                status: .completed
-                            )
-                            contentBlocks.append(.toolCall(displayToolCall))
+                    // Convert to display messages (old approach - loses order)
+                    messages = history.compactMap { historyMsg -> ChatDisplayMessage? in
+                        if historyMsg.role == .user && historyMsg.content.isEmpty {
+                            return nil
                         }
+
+                        var contentBlocks: [MessageContentBlock] = []
+
+                        if !historyMsg.content.isEmpty {
+                            contentBlocks.append(.text(id: UUID().uuidString, content: historyMsg.content))
+                        }
+
+                        if let toolCalls = historyMsg.toolCalls {
+                            for tc in toolCalls {
+                                let displayToolCall = DisplayToolCall(
+                                    id: tc.id,
+                                    name: tc.name,
+                                    input: tc.input ?? "",
+                                    output: tc.output,
+                                    isExpanded: false,
+                                    status: .completed
+                                )
+                                contentBlocks.append(.toolCall(displayToolCall))
+                            }
+                        }
+
+                        guard !contentBlocks.isEmpty else { return nil }
+
+                        return ChatDisplayMessage(
+                            id: historyMsg.id,
+                            role: historyMsg.role == .user ? .user : .assistant,
+                            contentBlocks: contentBlocks,
+                            timestamp: historyMsg.timestamp,
+                            isStreaming: false
+                        )
                     }
-
-                    // Skip if no content at all
-                    guard !contentBlocks.isEmpty else { return nil }
-
-                    return ChatDisplayMessage(
-                        id: historyMsg.id,
-                        role: historyMsg.role == .user ? .user : .assistant,
-                        contentBlocks: contentBlocks,
-                        timestamp: historyMsg.timestamp,
-                        isStreaming: false
-                    )
+                    log("resumeSession: fallback - displaying \(messages.count) messages")
                 }
-                log("resumeSession: displaying \(messages.count) messages")
             } else {
                 // Session doesn't exist on server - create new session
                 log("resumeSession: session not found on server, creating new session")
