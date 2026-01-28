@@ -121,9 +121,9 @@ import_electron.contextBridge.exposeInMainWorld("acpAPI", {
   spawn: (cwd) => import_electron.ipcRenderer.invoke("acp:spawn", cwd),
   // Initialize the ACP connection
   initialize: () => import_electron.ipcRenderer.invoke("acp:initialize"),
-  // Create a new session
+  // Create a new session (cwd defaults to spawn directory or process.cwd())
   newSession: (cwd, mcpServers, force) => import_electron.ipcRenderer.invoke("acp:newSession", cwd, mcpServers, force),
-  // Resume an existing session
+  // Resume an existing session (cwd defaults to spawn directory or process.cwd())
   resumeSession: (sessionId, cwd) => import_electron.ipcRenderer.invoke("acp:resumeSession", sessionId, cwd),
   // Send a prompt to the agent
   prompt: (sessionId, content) => import_electron.ipcRenderer.invoke("acp:prompt", sessionId, content),
@@ -157,7 +157,7 @@ import_electron.contextBridge.exposeInMainWorld("acpAPI", {
       import_electron.ipcRenderer.removeListener("acp:permissionRequest", handler);
     };
   },
-  // Load session history from Claude's local files
+  // Load session history from Claude's local files (cwd defaults to spawn directory or process.cwd())
   loadSessionHistory: (sessionId, cwd) => import_electron.ipcRenderer.invoke("acp:loadSessionHistory", sessionId, cwd)
 });
 import_electron.contextBridge.exposeInMainWorld("dialogAPI", {

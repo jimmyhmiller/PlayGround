@@ -118,20 +118,20 @@ export function ChatWidget({
 
     async function init() {
       try {
-        // Check if already connected
-        const wasConnected = await window.acpAPI.isConnected();
-        if (mounted) setIsConnected(wasConnected);
-
         const cwd = effectiveCwd;
         console.log('[ChatWidget] Using cwd:', cwd, 'activeProject:', activeProject?.name, 'rootDir:', activeProject?.rootDir);
 
+        // Always spawn - the spawn() method will respawn in a different directory if needed
+        await window.acpAPI.spawn(cwd);
+        
+        // Check if we need to initialize (spawn may have reused existing connection)
+        const wasConnected = await window.acpAPI.isConnected();
         if (!wasConnected) {
-          // Spawn and initialize - this starts a new agent process in the project directory
-          await window.acpAPI.spawn(cwd);
           await window.acpAPI.initialize();
-          if (!mounted) return;
-          setIsConnected(true);
         }
+        
+        if (!mounted) return;
+        setIsConnected(true);
 
         // If we have a persisted sessionId, try to resume it
         if (sessionId) {

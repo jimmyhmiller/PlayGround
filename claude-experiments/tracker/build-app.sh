@@ -9,6 +9,38 @@ swift build -c release
 echo "Creating app bundle..."
 cp .build/release/Ease Ease.app/Contents/MacOS/
 
+# Compile .icon file for macOS Tahoe with dark mode support
+echo "Compiling icon with dark mode support..."
+xcrun actool Ease/AppIcon.icon \
+    --compile Ease.app/Contents/Resources \
+    --app-icon AppIcon \
+    --enable-on-demand-resources NO \
+    --development-region en \
+    --target-device mac \
+    --platform macosx \
+    --enable-icon-stack-fallback-generation=disabled \
+    --include-all-app-icons \
+    --minimum-deployment-target 14.0 \
+    --output-partial-info-plist /tmp/icon-partial.plist
+
+# Create legacy .icns for backward compatibility
+echo "Creating legacy icon..."
+mkdir -p /tmp/legacy.iconset
+LIGHT_SOURCE="$(find /Users/jimmyhmiller/Downloads/icon -name '*-macOS-Default-1024x1024@2x.png' | head -1)"
+if [ -n "$LIGHT_SOURCE" ]; then
+    sips -z 16 16 "$LIGHT_SOURCE" --out /tmp/legacy.iconset/icon_16x16.png >/dev/null
+    sips -z 32 32 "$LIGHT_SOURCE" --out /tmp/legacy.iconset/icon_16x16@2x.png >/dev/null
+    sips -z 32 32 "$LIGHT_SOURCE" --out /tmp/legacy.iconset/icon_32x32.png >/dev/null
+    sips -z 64 64 "$LIGHT_SOURCE" --out /tmp/legacy.iconset/icon_32x32@2x.png >/dev/null
+    sips -z 128 128 "$LIGHT_SOURCE" --out /tmp/legacy.iconset/icon_128x128.png >/dev/null
+    sips -z 256 256 "$LIGHT_SOURCE" --out /tmp/legacy.iconset/icon_128x128@2x.png >/dev/null
+    sips -z 256 256 "$LIGHT_SOURCE" --out /tmp/legacy.iconset/icon_256x256.png >/dev/null
+    sips -z 512 512 "$LIGHT_SOURCE" --out /tmp/legacy.iconset/icon_256x256@2x.png >/dev/null
+    sips -z 512 512 "$LIGHT_SOURCE" --out /tmp/legacy.iconset/icon_512x512.png >/dev/null
+    sips -z 1024 1024 "$LIGHT_SOURCE" --out /tmp/legacy.iconset/icon_512x512@2x.png >/dev/null
+    iconutil -c icns /tmp/legacy.iconset -o Ease.app/Contents/Resources/AppIcon.icns
+fi
+
 # Add rpath for Frameworks directory
 echo "Setting rpath..."
 install_name_tool -add_rpath @executable_path/../Frameworks Ease.app/Contents/MacOS/Ease 2>/dev/null || true

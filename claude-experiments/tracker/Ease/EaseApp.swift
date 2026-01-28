@@ -21,10 +21,46 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let updateManager = UpdateManager.shared
     private var clearMenuItem: NSMenuItem?
     private var modifierTimer: Timer?
+    private var appearanceObserver: NSKeyValueObservation?
+
+    private static let showInDockKey = "showInDock"
+
+    private var showInDock: Bool {
+        get { UserDefaults.standard.bool(forKey: Self.showInDockKey) }
+        set {
+            UserDefaults.standard.set(newValue, forKey: Self.showInDockKey)
+            updateDockVisibility()
+        }
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         setupStatusItem()
         setupPopover()
+        setupAppearanceObserver()
+        updateAppIcon()
+        updateDockVisibility()
+    }
+
+    private func updateDockVisibility() {
+        NSApp.setActivationPolicy(showInDock ? .regular : .accessory)
+    }
+
+    private func setupAppearanceObserver() {
+        appearanceObserver = NSApp.observe(\.effectiveAppearance, options: [.new]) { [weak self] _, _ in
+            Task { @MainActor in
+                self?.updateAppIcon()
+            }
+        }
+    }
+
+    private func updateAppIcon() {
+        let isDarkMode = NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+        let iconName = isDarkMode ? "AppIcon-Dark" : "AppIcon-Light"
+
+        if let iconURL = Bundle.main.url(forResource: iconName, withExtension: "icns"),
+           let icon = NSImage(contentsOf: iconURL) {
+            NSApp.applicationIconImage = icon
+        }
     }
 
     private func setupStatusItem() {
@@ -125,6 +161,17 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         menu.addItem(NSMenuItem.separator())
 
+        // Show in Dock
+        let dockItem = NSMenuItem(
+            title: "Show in Dock",
+            action: #selector(toggleShowInDock),
+            keyEquivalent: ""
+        )
+        dockItem.state = showInDock ? .on : .off
+        menu.addItem(dockItem)
+
+        menu.addItem(NSMenuItem.separator())
+
         // Clear Data
         let modifiersHeld = NSEvent.modifierFlags.contains([.command, .option])
         let clearItem = NSMenuItem(
@@ -155,6 +202,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func clearDataClicked() {
         viewModel.clearAllData()
+    }
+
+    @objc private func toggleShowInDock() {
+        showInDock.toggle()
     }
 
     func menuWillOpen(_ menu: NSMenu) {
