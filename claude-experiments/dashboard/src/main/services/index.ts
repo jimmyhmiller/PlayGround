@@ -10,7 +10,7 @@ import { FileWatcherService } from './fileWatcher';
 import { GitService } from './gitService';
 import { initEvaluationService, getEvaluationService, EvaluationRequest, ExecutorConfig } from './evaluationService';
 import { initPipelineService, setupPipelineIPC, closePipelineService } from '../pipeline';
-import { initACPService, getACPService } from './acpClientService';
+import { getACPServiceForWidget, removeACPServiceForWidget, shutdownAllACPServices, setAcpDebug, isAcpDebugEnabled } from './acpClientService';
 
 // Track running processes
 const runningProcesses: Map<string, ChildProcess> = new Map();
@@ -38,6 +38,9 @@ let gitService: GitService | null = null;
 export function initServices(events: EventEmitter, options: ServiceOptions = {}): Services {
   const repoPath = options.repoPath ?? process.cwd();
 
+  // Store events for ACP service creation
+  globalEvents = events;
+
   // Initialize file watcher
   fileWatcher = new FileWatcherService(events);
 
@@ -50,8 +53,7 @@ export function initServices(events: EventEmitter, options: ServiceOptions = {})
   // Initialize pipeline service
   initPipelineService(events as EventEmitter & { subscribe: (pattern: string, callback: (event: { type: string; payload: unknown }) => void) => () => void });
 
-  // Initialize ACP service
-  initACPService(events);
+  // Note: ACP services are now created per-widget on demand, not at initialization
 
   console.log('[services] Initialized');
 
@@ -253,18 +255,32 @@ const pendingPermissions: Map<string, {
   reject: (error: Error) => void;
 }> = new Map();
 
+// Get events emitter for ACP service creation
+let globalEvents: EventEmitter | null = null;
+
+// Helper to get widget ID from event
+function getWidgetId(event: IpcMainInvokeEvent): string {
+  // Use the webContents ID as the widget identifier
+  return `widget-${event.sender.id}`;
+}
+
+// Helper to get ACP service for the requesting widget
+function getACPService(event: IpcMainInvokeEvent): any {
+  if (!globalEvents) {
+    throw new Error('Events not initialized');
+  }
+  const widgetId = getWidgetId(event);
+  return getACPServiceForWidget(widgetId, globalEvents);
+}
+
 /**
  * Setup ACP IPC handlers
  */
 function setupACPIPC(): void {
-  const acpService = getACPService();
-  if (!acpService) {
-    console.warn('[acp] Service not initialized, skipping IPC setup');
-    return;
-  }
-
-  // Set up permission callback to forward to renderer
-  acpService.setPermissionCallback(async (request: unknown): Promise<{ outcome: { outcome: 'selected'; optionId: string } | { outcome: 'cancelled' } }> => {
+  // Permission callback setup - this needs to be per-service
+  // We'll set it up when services are created
+  const setupPermissionCallback = (acpService: any) => {
+    acpService.setPermissionCallback(async (request: unknown): Promise<{ outcome: { outcome: 'selected'; optionId: string } | { outcome: 'cancelled' } }> => {
     const requestId = `perm-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
     // Forward to all renderer windows
@@ -285,55 +301,66 @@ function setupACPIPC(): void {
         }
       }, 5 * 60 * 1000);
     });
-  });
+    });
+  };
 
   // Subscribe to session updates and forward to renderer
   // This is done via the event system - the service emits 'acp.session.update' events
   // which get pushed to the renderer via the existing events:push channel
 
   // Spawn the agent
-  ipcMain.handle('acp:spawn', async (_event: IpcMainInvokeEvent, cwd?: string) => {
-    await acpService.spawn(cwd);
+  ipcMain.handle('acp:spawn', async (event: IpcMainInvokeEvent, cwd?: string) => {
+    const service = getACPService(event);
+    setupPermissionCallback(service);
+    await service.spawn(cwd);
   });
 
   // Initialize connection
-  ipcMain.handle('acp:initialize', async () => {
-    await acpService.initialize();
+  ipcMain.handle('acp:initialize', async (event: IpcMainInvokeEvent) => {
+    const service = getACPService(event);
+    await service.initialize();
   });
 
   // Create new session
-  ipcMain.handle('acp:newSession', async (_event: IpcMainInvokeEvent, cwd?: string, mcpServers?: unknown[], force?: boolean) => {
-    return await acpService.newSession(cwd, mcpServers, force);
+  ipcMain.handle('acp:newSession', async (event: IpcMainInvokeEvent, cwd?: string, mcpServers?: unknown[], force?: boolean) => {
+    const service = getACPService(event);
+    return await service.newSession(cwd, mcpServers, force);
   });
 
   // Resume existing session
-  ipcMain.handle('acp:resumeSession', async (_event: IpcMainInvokeEvent, sessionId: string, cwd?: string) => {
-    return await acpService.resumeSession(sessionId, cwd);
+  ipcMain.handle('acp:resumeSession', async (event: IpcMainInvokeEvent, sessionId: string, cwd?: string) => {
+    const service = getACPService(event);
+    return await service.resumeSession(sessionId, cwd);
   });
 
   // Send prompt
-  ipcMain.handle('acp:prompt', async (_event: IpcMainInvokeEvent, sessionId: string, content: string | unknown[]) => {
-    return await acpService.prompt(sessionId, content as string | Array<{ type: string; text?: string }>);
+  ipcMain.handle('acp:prompt', async (event: IpcMainInvokeEvent, sessionId: string, content: string | unknown[]) => {
+    const service = getACPService(event);
+    return await service.prompt(sessionId, content as string | Array<{ type: string; text?: string }>);
   });
 
   // Cancel prompt
-  ipcMain.handle('acp:cancel', async (_event: IpcMainInvokeEvent, sessionId: string) => {
-    await acpService.cancel(sessionId);
+  ipcMain.handle('acp:cancel', async (event: IpcMainInvokeEvent, sessionId: string) => {
+    const service = getACPService(event);
+    await service.cancel(sessionId);
   });
 
   // Set mode
-  ipcMain.handle('acp:setMode', async (_event: IpcMainInvokeEvent, sessionId: string, modeId: string) => {
-    await acpService.setMode(sessionId, modeId);
+  ipcMain.handle('acp:setMode', async (event: IpcMainInvokeEvent, sessionId: string, modeId: string) => {
+    const service = getACPService(event);
+    await service.setMode(sessionId, modeId);
   });
 
   // Shutdown
-  ipcMain.handle('acp:shutdown', async () => {
-    await acpService.shutdown();
+  ipcMain.handle('acp:shutdown', async (event: IpcMainInvokeEvent) => {
+    const widgetId = getWidgetId(event);
+    await removeACPServiceForWidget(widgetId);
   });
 
   // Check connection
-  ipcMain.handle('acp:isConnected', () => {
-    return acpService.isConnected();
+  ipcMain.handle('acp:isConnected', (event: IpcMainInvokeEvent) => {
+    const service = getACPService(event);
+    return service.isConnected();
   });
 
   // Respond to permission request
@@ -351,8 +378,20 @@ function setupACPIPC(): void {
   });
 
   // Load session history from Claude's local files
-  ipcMain.handle('acp:loadSessionHistory', async (_event: IpcMainInvokeEvent, sessionId: string, cwd?: string) => {
-    return await acpService.loadSessionHistory(sessionId, cwd);
+  ipcMain.handle('acp:loadSessionHistory', async (event: IpcMainInvokeEvent, sessionId: string, cwd?: string) => {
+    const service = getACPService(event);
+    return await service.loadSessionHistory(sessionId, cwd);
+  });
+
+  // Toggle ACP debug logging (logs all JSON-RPC messages)
+  ipcMain.handle('acp:setDebug', (_event: IpcMainInvokeEvent, enabled: boolean) => {
+    setAcpDebug(enabled);
+    return enabled;
+  });
+
+  // Get current ACP debug state
+  ipcMain.handle('acp:isDebugEnabled', () => {
+    return isAcpDebugEnabled();
   });
 
   console.log('[acp] IPC handlers registered');
@@ -370,11 +409,8 @@ export async function closeServices(): Promise<void> {
   }
   closePipelineService();
 
-  // Shutdown ACP service
-  const acpService = getACPService();
-  if (acpService) {
-    await acpService.shutdown();
-  }
+  // Shutdown all ACP services
+  await shutdownAllACPServices();
 
   console.log('[services] Closed');
 }

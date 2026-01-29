@@ -105,19 +105,33 @@ function getContentType(fileName) {
 
 async function main() {
   try {
-    console.log('Finding latest file with "jimmy" in filename...');
-    const latestFile = await findLatestJimmyFile();
-    console.log(`Found: ${path.basename(latestFile)}`);
-    
+    let fileToUpload;
+    const argFile = process.argv[2];
+
+    if (argFile) {
+      // Use the provided file path
+      const resolvedPath = path.resolve(argFile);
+      if (!fs.existsSync(resolvedPath)) {
+        throw new Error(`File not found: ${resolvedPath}`);
+      }
+      fileToUpload = resolvedPath;
+      console.log(`Using provided file: ${path.basename(fileToUpload)}`);
+    } else {
+      // Fall back to finding latest jimmy file
+      console.log('Finding latest file with "jimmy" in filename...');
+      fileToUpload = await findLatestJimmyFile();
+      console.log(`Found: ${path.basename(fileToUpload)}`);
+    }
+
     console.log('Uploading to S3...');
-    const publicUrl = await uploadToS3(latestFile);
-    
+    const publicUrl = await uploadToS3(fileToUpload);
+
     console.log('Copying URL to clipboard...');
     clipboard.writeSync(publicUrl);
-    
+
     console.log(`✅ Success! Public URL copied to clipboard:`);
     console.log(publicUrl);
-    
+
   } catch (error) {
     console.error(`❌ Error: ${error.message}`);
     process.exit(1);

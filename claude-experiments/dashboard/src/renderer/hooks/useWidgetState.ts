@@ -189,6 +189,10 @@ export function usePersistentState<T>(
         ? (newValue as (prev: T) => T)(valueRef.current)
         : newValue;
 
+      // Update ref IMMEDIATELY so subsequent calls in the same tick see the new value
+      // This fixes race conditions when rapid streaming updates happen before React re-renders
+      valueRef.current = resolvedValue;
+
       setValue(resolvedValue);
 
       // Mark as loaded to prevent any pending load from overwriting this value

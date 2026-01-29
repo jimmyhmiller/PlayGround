@@ -44,7 +44,6 @@ export function ChatWidget({
 
   // Get active project's rootDir - this is used as the working directory for ACP sessions
   const [activeProject, projectLoading] = useActiveProject();
-  const effectiveCwd = sessionCwd || activeProject?.rootDir;
 
   // Persistent state (survives dashboard switches)
   const [messages, setMessages] = usePersistentState<ChatMessage[]>('messages', []);
@@ -118,17 +117,15 @@ export function ChatWidget({
 
     async function init() {
       try {
-        const cwd = effectiveCwd;
+        // Compute cwd inside the effect after project has loaded
+        const cwd = sessionCwd || activeProject?.rootDir;
         console.log('[ChatWidget] Using cwd:', cwd, 'activeProject:', activeProject?.name, 'rootDir:', activeProject?.rootDir);
 
         // Always spawn - the spawn() method will respawn in a different directory if needed
         await window.acpAPI.spawn(cwd);
         
-        // Check if we need to initialize (spawn may have reused existing connection)
-        const wasConnected = await window.acpAPI.isConnected();
-        if (!wasConnected) {
-          await window.acpAPI.initialize();
-        }
+        // Always initialize after spawn - spawn handles skipping if already initialized
+        await window.acpAPI.initialize();
         
         if (!mounted) return;
         setIsConnected(true);
@@ -221,7 +218,7 @@ export function ChatWidget({
     return () => {
       mounted = false;
     };
-  }, [sessionIdLoaded, sessionId, sessionCwd, projectLoading, effectiveCwd]);
+  }, [sessionIdLoaded, sessionId, sessionCwd, projectLoading, activeProject]);
 
   // Auto-send initial prompt if provided
   useEffect(() => {
@@ -543,7 +540,7 @@ Start by understanding what files need to be created or modified, then implement
 
         try {
           // Respawn and create new session
-          const cwd = effectiveCwd;
+          const cwd = sessionCwd || activeProject?.rootDir;
           await window.acpAPI.spawn(cwd);
           await window.acpAPI.initialize();
           const newSession = await window.acpAPI.newSession(cwd);
@@ -622,7 +619,7 @@ Start by understanding what files need to be created or modified, then implement
 
   // Start a new session
   const handleNewSession = async () => {
-    const cwd = effectiveCwd;
+    const cwd = sessionCwd || activeProject?.rootDir;
     // Remember the current mode to restore it in the new session
     const previousModeId = currentModeId;
 

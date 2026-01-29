@@ -6,7 +6,7 @@
  */
 
 import { spawn, ChildProcess } from 'child_process';
-import { Readable, Writable } from 'stream';
+import { Readable, Writable, PassThrough } from 'stream';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import * as os from 'os';
@@ -61,6 +61,18 @@ async function getACPModule(): Promise<ACPModule> {
   return acpModule;
 }
 
+// Debug logging for ACP messages - toggle with ACP_DEBUG=0 env var to disable or setAcpDebug(false)
+let acpDebugEnabled = process.env.ACP_DEBUG !== '0';
+
+export function setAcpDebug(enabled: boolean): void {
+  acpDebugEnabled = enabled;
+  console.log(`[acp] Debug logging ${enabled ? 'enabled' : 'disabled'}`);
+}
+
+export function isAcpDebugEnabled(): boolean {
+  return acpDebugEnabled;
+}
+
 /**
  * ACP Client Service
  */
@@ -79,6 +91,8 @@ export class ACPClientService {
   private sessionPromise: Promise<{ sessionId: string; modes?: { availableModes: Array<{ id: string; name: string }>; currentModeId: string } }> | null = null;
   private stderrBuffer: string = '';
   private agentInfo: { name: string; title?: string; version?: string } | null = null;
+  // Track cwd for each session so we can use it for terminal commands
+  private sessionCwdMap: Map<string, string> = new Map();
 
   constructor(events: EventEmitter) {
     this.events = events;
@@ -106,10 +120,13 @@ export class ACPClientService {
    * @param cwd - Working directory to spawn the agent in
    */
   async spawn(cwd?: string): Promise<void> {
+    console.log('[acp] spawn() called with cwd:', cwd, 'current spawnCwd:', this.spawnCwd, 'isInitialized:', this.isInitialized);
+    
     // Already connected - but check if we need to respawn in a different directory
     if (this.isInitialized && this.connection) {
+      console.log('[acp] Already initialized, checking if respawn needed');
       if (cwd && this.spawnCwd !== cwd) {
-        console.log('[acp] Respawning in new directory:', cwd, '(was:', this.spawnCwd, ')');
+        console.log('[acp] RESPAWNING in new directory:', cwd, '(was:', this.spawnCwd, ')');
         // Kill and wait for cleanup
         if (this.agentProcess) {
           this.agentProcess.kill();
@@ -123,7 +140,7 @@ export class ACPClientService {
         this.agentInfo = null;
         this.spawnCwd = null;
       } else {
-        console.log('[acp] Already connected in correct directory:', this.spawnCwd);
+        console.log('[acp] Already connected in correct directory:', this.spawnCwd, '- SKIPPING SPAWN');
         return;
       }
     }
@@ -139,6 +156,8 @@ export class ACPClientService {
     if (this.agentProcess) {
       console.log('[acp] Cleaning up existing agent process');
       this.agentProcess.kill();
+      // Wait for the process to actually exit before proceeding
+      await new Promise(resolve => setTimeout(resolve, 300));
       this.agentProcess = null;
       this.connection = null;
       this.agent = null;
@@ -171,15 +190,20 @@ export class ACPClientService {
     this.stderrBuffer = '';
     const spawnDir = cwd || process.cwd();
     console.log('[acp] Spawning agent in cwd:', spawnDir);
-    this.agentProcess = spawn('npx', ['@zed-industries/claude-code-acp', '--dangerously-skip-permissions'], {
+    console.log('[acp] Current process.cwd():', process.cwd());
+    console.log('[acp] ENV PWD before:', process.env.PWD);
+    
+    // Use direct path to claude-code-acp instead of npx to ensure cwd is honored
+    this.agentProcess = spawn('claude-code-acp', ['--dangerously-skip-permissions'], {
       stdio: ['pipe', 'pipe', 'pipe'],
       cwd: spawnDir,
       env: {
         ...process.env,
         PWD: spawnDir,  // Also set PWD env var
-        INIT_CWD: spawnDir,  // npm uses this
       },
     });
+    
+    console.log('[acp] Agent process spawned, pid:', this.agentProcess.pid);
 
     if (!this.agentProcess.stdin || !this.agentProcess.stdout || !this.agentProcess.stderr) {
       throw new Error('Failed to get stdio pipes from agent process');
@@ -193,9 +217,51 @@ export class ACPClientService {
       process.stderr.write(text);
     });
 
+    // Create PassThrough for stdout to enable logging while still passing to SDK
+    const stdoutPassThrough = new PassThrough();
+    this.agentProcess.stdout.pipe(stdoutPassThrough);
+
+    // Log incoming messages (from agent) when debug enabled
+    this.agentProcess.stdout.on('data', (data: Buffer) => {
+      if (acpDebugEnabled) {
+        const text = data.toString();
+        for (const line of text.split('\n')) {
+          if (line.trim()) {
+            try {
+              const msg = JSON.parse(line);
+              console.log('[acp] <<< RECV:', JSON.stringify(msg, null, 2));
+            } catch {
+              console.log('[acp] <<< RECV (raw):', line);
+            }
+          }
+        }
+      }
+    });
+
+    // Wrap stdin to log outgoing messages when debug enabled
+    const originalStdin = this.agentProcess.stdin;
+    const loggingStdin = new Writable({
+      write(chunk: Buffer, encoding: BufferEncoding, callback: (error?: Error | null) => void) {
+        if (acpDebugEnabled) {
+          const text = chunk.toString();
+          for (const line of text.split('\n')) {
+            if (line.trim()) {
+              try {
+                const msg = JSON.parse(line);
+                console.log('[acp] >>> SEND:', JSON.stringify(msg, null, 2));
+              } catch {
+                console.log('[acp] >>> SEND (raw):', line);
+              }
+            }
+          }
+        }
+        originalStdin.write(chunk, encoding, callback);
+      },
+    });
+
     // Convert Node streams to Web streams for the SDK
-    const input = Writable.toWeb(this.agentProcess.stdin) as WritableStream<Uint8Array>;
-    const output = Readable.toWeb(this.agentProcess.stdout) as ReadableStream<Uint8Array>;
+    const input = Writable.toWeb(loggingStdin) as WritableStream<Uint8Array>;
+    const output = Readable.toWeb(stdoutPassThrough) as ReadableStream<Uint8Array>;
 
     // Create the ndjson stream
     const stream = acp.ndJsonStream(input, output);
@@ -214,9 +280,17 @@ export class ACPClientService {
       this.isInitialized = false;
     });
 
+    // Track if process has exited for early detection
+    let processExited = false;
+    let processExitCode: number | null = null;
+    let processExitSignal: string | null = null;
+
     // Handle process exit
     this.agentProcess.on('exit', (code, signal) => {
       console.log(`[acp] Agent process exited with code ${code}, signal ${signal}`);
+      processExited = true;
+      processExitCode = code;
+      processExitSignal = signal;
       this.agentProcess = null;
       this.connection = null;
       this.agent = null;
@@ -225,6 +299,15 @@ export class ACPClientService {
       this.agentInfo = null;
       this.events.emit('acp.process.exit', { code, signal });
     });
+
+    // Wait a moment to verify the process is still running
+    // This catches immediate exits (SIGTERM, command not found, etc.)
+    await new Promise(resolve => setTimeout(resolve, 200));
+
+    if (processExited) {
+      const exitInfo = processExitSignal ? `signal ${processExitSignal}` : `code ${processExitCode}`;
+      throw new Error(`Agent process exited immediately with ${exitInfo}. Check stderr for details.`);
+    }
 
     this.agentProcess.on('error', (err) => {
       console.error('[acp] Agent process error:', err);
@@ -239,6 +322,10 @@ export class ACPClientService {
    */
   async initialize(): Promise<void> {
     if (!this.connection) {
+      // Check if process exists to give better error message
+      if (!this.agentProcess) {
+        throw new Error('Agent process not running. The process may have exited immediately after spawn. Check logs for details.');
+      }
       throw new Error('Connection not established. Call spawn() first.');
     }
 
@@ -269,7 +356,7 @@ export class ACPClientService {
   private async doInitialize(): Promise<void> {
     const acp = await getACPModule();
 
-    const result = await this.connection!.initialize({
+    const initParams = {
       protocolVersion: acp.PROTOCOL_VERSION,
       clientCapabilities: {
         fs: {
@@ -282,7 +369,9 @@ export class ACPClientService {
         name: 'dashboard',
         version: '1.0.0',
       },
-    });
+    };
+
+    const result = await this.connection!.initialize(initParams);
 
     console.log('[acp] Initialized:', result);
     this.isInitialized = true;
@@ -370,6 +459,9 @@ export class ACPClientService {
     console.log('[acp] New session:', result.sessionId);
     console.log('[acp] Available modes:', result.modes);
     this.currentSessionId = result.sessionId;
+    // Store the session's cwd so we can use it for terminal commands
+    this.sessionCwdMap.set(result.sessionId, cwd);
+    console.log('[acp] Stored session cwd:', result.sessionId, '->', cwd);
     this.sessionModes = result.modes as { availableModes: Array<{ id: string; name: string }>; currentModeId: string } | null;
     this.events.emit('acp.session.new', {
       sessionId: result.sessionId,
@@ -434,6 +526,9 @@ export class ACPClientService {
 
     console.log('[acp] Resume session result:', result);
     this.currentSessionId = sessionId;
+    // Store the session's cwd so we can use it for terminal commands
+    this.sessionCwdMap.set(sessionId, effectiveCwd);
+    console.log('[acp] Stored session cwd:', sessionId, '->', effectiveCwd);
     this.sessionModes = result.modes as { availableModes: Array<{ id: string; name: string }>; currentModeId: string } | null;
     this.events.emit('acp.session.resumed', { sessionId, modes: result.modes });
 
@@ -474,11 +569,17 @@ export class ACPClientService {
    */
   async cancel(sessionId: string): Promise<void> {
     if (!this.connection) {
-      throw new Error('Not connected');
+      console.log('[acp] Cannot cancel - not connected');
+      return; // Silently return rather than throw - cancel is best-effort
     }
 
-    await this.connection.cancel({ sessionId });
-    console.log('[acp] Cancelled session:', sessionId);
+    try {
+      await this.connection.cancel({ sessionId });
+      console.log('[acp] Cancelled session:', sessionId);
+    } catch (err) {
+      // Cancel errors are usually not critical (session may have already ended)
+      console.log('[acp] Cancel failed (session may not exist):', (err as Error).message);
+    }
   }
 
   /**
@@ -699,9 +800,24 @@ export class ACPClientService {
 
       // Terminal: create
       createTerminal: async (
-        params: { command: string; args?: string[]; cwd?: string; env?: Record<string, string> }
+        params: { command: string; args?: string[]; cwd?: string; env?: Record<string, string>; sessionId?: string }
       ): Promise<{ terminalId: string }> => {
         const id = `terminal-${++this.terminalIdCounter}`;
+
+        // Determine the working directory:
+        // 1. Use explicit cwd from params if provided
+        // 2. Fall back to session's cwd if sessionId is provided
+        // 3. Fall back to spawnCwd
+        // 4. Fall back to process.cwd()
+        let effectiveCwd = params.cwd;
+        if (!effectiveCwd && params.sessionId) {
+          effectiveCwd = this.sessionCwdMap.get(params.sessionId);
+          console.log('[acp] Terminal using session cwd:', params.sessionId, '->', effectiveCwd);
+        }
+        if (!effectiveCwd) {
+          effectiveCwd = this.spawnCwd || process.cwd();
+          console.log('[acp] Terminal falling back to spawnCwd:', effectiveCwd);
+        }
 
         // Create exit promise
         let exitResolve: () => void = () => {};
@@ -712,7 +828,7 @@ export class ACPClientService {
         const terminal: ManagedTerminal = {
           id,
           process: spawn(params.command, params.args ?? [], {
-            cwd: params.cwd,
+            cwd: effectiveCwd,
             shell: true,
             stdio: ['ignore', 'pipe', 'pipe'],
             env: { ...process.env, ...params.env },
@@ -834,21 +950,43 @@ export class ACPClientService {
   }
 }
 
-// Singleton instance
-let acpService: ACPClientService | null = null;
+// Map of ACP services by widget ID - each ChatWidget gets its own agent
+const acpServices: Map<string, ACPClientService> = new Map();
 
 /**
- * Initialize the ACP client service
+ * Get or create an ACP service for a specific widget
+ * @param widgetId - Unique identifier for the widget (e.g., window ID)
+ * @param events - Event emitter
  */
-export function initACPService(events: EventEmitter): ACPClientService {
-  acpService = new ACPClientService(events);
-  console.log('[acp] Service initialized');
-  return acpService;
+export function getACPServiceForWidget(widgetId: string, events: EventEmitter): ACPClientService {
+  let service = acpServices.get(widgetId);
+  if (!service) {
+    service = new ACPClientService(events);
+    acpServices.set(widgetId, service);
+    console.log('[acp] Created new service for widget:', widgetId);
+  }
+  return service;
 }
 
 /**
- * Get the ACP client service instance
+ * Remove an ACP service for a widget
  */
-export function getACPService(): ACPClientService | null {
-  return acpService;
+export async function removeACPServiceForWidget(widgetId: string): Promise<void> {
+  const service = acpServices.get(widgetId);
+  if (service) {
+    await service.shutdown();
+    acpServices.delete(widgetId);
+    console.log('[acp] Removed service for widget:', widgetId);
+  }
+}
+
+/**
+ * Shutdown all ACP services
+ */
+export async function shutdownAllACPServices(): Promise<void> {
+  for (const [widgetId, service] of acpServices.entries()) {
+    await service.shutdown();
+    console.log('[acp] Shutdown service for widget:', widgetId);
+  }
+  acpServices.clear();
 }
