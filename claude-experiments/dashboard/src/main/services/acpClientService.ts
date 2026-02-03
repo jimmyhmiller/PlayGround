@@ -61,8 +61,8 @@ async function getACPModule(): Promise<ACPModule> {
   return acpModule;
 }
 
-// Debug logging for ACP messages - toggle with ACP_DEBUG=0 env var to disable or setAcpDebug(false)
-let acpDebugEnabled = process.env.ACP_DEBUG !== '0';
+// Debug logging for ACP messages - toggle with ACP_DEBUG=1 env var or setAcpDebug(true)
+let acpDebugEnabled = process.env.ACP_DEBUG === '1';
 
 export function setAcpDebug(enabled: boolean): void {
   acpDebugEnabled = enabled;

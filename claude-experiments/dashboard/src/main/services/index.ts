@@ -5,15 +5,19 @@
  */
 
 import { ipcMain, IpcMainInvokeEvent, BrowserWindow } from 'electron';
-import { spawn, ChildProcess } from 'child_process';
 import { FileWatcherService } from './fileWatcher';
 import { GitService } from './gitService';
 import { initEvaluationService, getEvaluationService, EvaluationRequest, ExecutorConfig } from './evaluationService';
 import { initPipelineService, setupPipelineIPC, closePipelineService } from '../pipeline';
 import { getACPServiceForWidget, removeACPServiceForWidget, shutdownAllACPServices, setAcpDebug, isAcpDebugEnabled } from './acpClientService';
-
-// Track running processes
-const runningProcesses: Map<string, ChildProcess> = new Map();
+import {
+  initShellService,
+  shellSpawn,
+  shellKill,
+  shellIsRunning,
+  shellKillAll,
+  getRunningProcesses,
+} from './shellService';
 
 // Type for the events module
 interface EventEmitter {
@@ -40,6 +44,9 @@ export function initServices(events: EventEmitter, options: ServiceOptions = {})
 
   // Store events for ACP service creation
   globalEvents = events;
+
+  // Initialize shell service with events
+  initShellService(events);
 
   // Initialize file watcher
   fileWatcher = new FileWatcherService(events);
@@ -171,7 +178,7 @@ export function setupServiceIPC(): void {
     return evalService.getExecutors();
   });
 
-  // Shell command operations
+  // Shell command operations (using shared shell service)
   ipcMain.handle(
     'shell:spawn',
     async (
@@ -181,62 +188,42 @@ export function setupServiceIPC(): void {
       args: string[] = [],
       options: { cwd?: string; env?: Record<string, string> } = {}
     ) => {
-      // Kill existing process with same ID if any
+      // Kill existing process with same ID if any (for backward compatibility)
+      const runningProcesses = getRunningProcesses();
       const existing = runningProcesses.get(id);
       if (existing) {
         existing.kill();
         runningProcesses.delete(id);
       }
 
-      const cwd = options.cwd ?? process.cwd();
-      const env = { ...process.env, ...options.env };
-
-      const proc = spawn(command, args, {
-        cwd,
-        env,
-        shell: true,
-        stdio: ['ignore', 'pipe', 'pipe'],
+      // Use the shell service to spawn
+      const result = shellSpawn({
+        command,
+        args,
+        cwd: options.cwd,
+        env: options.env,
       });
 
-      runningProcesses.set(id, proc);
+      // For backward compatibility, also store with the provided ID
+      if (result.success && result.pid !== id) {
+        const proc = runningProcesses.get(result.pid);
+        if (proc) {
+          runningProcesses.set(id, proc);
+          runningProcesses.delete(result.pid);
+        }
+      }
 
-      // Forward output via events
-      const events = fileWatcher ? (fileWatcher as unknown as { events: EventEmitter }).events : null;
-
-      proc.stdout?.on('data', (data: Buffer) => {
-        events?.emit(`shell.stdout.${id}`, { id, data: data.toString() });
-      });
-
-      proc.stderr?.on('data', (data: Buffer) => {
-        events?.emit(`shell.stderr.${id}`, { id, data: data.toString() });
-      });
-
-      proc.on('close', (code: number | null) => {
-        runningProcesses.delete(id);
-        events?.emit(`shell.exit.${id}`, { id, code });
-      });
-
-      proc.on('error', (err: Error) => {
-        runningProcesses.delete(id);
-        events?.emit(`shell.error.${id}`, { id, error: err.message });
-      });
-
-      return { success: true, id, pid: proc.pid };
+      return { success: result.success, id, pid: result.pid, error: result.error };
     }
   );
 
-  ipcMain.handle('shell:kill', (_event: IpcMainInvokeEvent, id: string) => {
-    const proc = runningProcesses.get(id);
-    if (proc) {
-      proc.kill();
-      runningProcesses.delete(id);
-      return { success: true, id };
-    }
-    return { success: false, error: 'Process not found' };
+  ipcMain.handle('shell:kill', async (_event: IpcMainInvokeEvent, id: string) => {
+    const result = await shellKill({ pid: id });
+    return { success: result.success, id, error: result.error };
   });
 
   ipcMain.handle('shell:isRunning', (_event: IpcMainInvokeEvent, id: string) => {
-    return { running: runningProcesses.has(id) };
+    return shellIsRunning(id);
   });
 
   // Setup pipeline IPC handlers
@@ -408,6 +395,9 @@ export async function closeServices(): Promise<void> {
     gitService.stopPolling();
   }
   closePipelineService();
+
+  // Kill all tracked shell processes
+  shellKillAll();
 
   // Shutdown all ACP services
   await shutdownAllACPServices();

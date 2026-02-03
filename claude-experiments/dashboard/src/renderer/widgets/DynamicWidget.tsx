@@ -202,7 +202,25 @@ import { WIDGET_TYPES } from './BuiltinWidgets';
 const compiledWidgetCache = new Map<string, {
   code: string;
   component: React.ComponentType<Record<string, unknown>>;
+  version: number;
 }>();
+
+// Listeners for widget updates (used to trigger re-renders)
+const widgetUpdateListeners = new Map<string, Set<() => void>>();
+
+function subscribeToWidgetUpdates(name: string, callback: () => void): () => void {
+  if (!widgetUpdateListeners.has(name)) {
+    widgetUpdateListeners.set(name, new Set());
+  }
+  widgetUpdateListeners.get(name)!.add(callback);
+  return () => {
+    widgetUpdateListeners.get(name)?.delete(callback);
+  };
+}
+
+function notifyWidgetUpdate(name: string): void {
+  widgetUpdateListeners.get(name)?.forEach(callback => callback());
+}
 
 /**
  * Register a custom widget type in the registry
@@ -228,19 +246,27 @@ export function registerCustomWidget(definition: CustomWidgetDefinition): boolea
     compiledWidgetCache.set(definition.name, {
       code: definition.code,
       component: compiled,
+      version: 1,
     });
 
     // Create a wrapper component that uses the definition
+    const widgetName = definition.name;
     const WidgetComponent = memo(function CustomWidget(props: Record<string, unknown>): ReactElement {
+      // Subscribe to updates for this widget to trigger re-renders
+      const [, forceUpdate] = useState(0);
+      useEffect(() => {
+        return subscribeToWidgetUpdates(widgetName, () => forceUpdate(v => v + 1));
+      }, []);
+
       // Get the latest definition from cache
-      const cachedEntry = compiledWidgetCache.get(definition.name);
+      const cachedEntry = compiledWidgetCache.get(widgetName);
       if (!cachedEntry) {
         return (
           <div style={{
             ...baseWidgetStyle,
             color: 'var(--theme-status-error)',
           }}>
-            Widget not found: {definition.name}
+            Widget not found: {widgetName}
           </div>
         );
       }
@@ -295,10 +321,15 @@ export function updateCustomWidget(definition: CustomWidgetDefinition): boolean 
     return false;
   }
 
-  // Update cache
+  // Get current version
+  const currentEntry = compiledWidgetCache.get(definition.name);
+  const currentVersion = currentEntry?.version ?? 0;
+
+  // Update cache with incremented version
   compiledWidgetCache.set(definition.name, {
     code: definition.code,
     component: compiled,
+    version: currentVersion + 1,
   });
 
   // Update default props in registry if present
@@ -306,7 +337,10 @@ export function updateCustomWidget(definition: CustomWidgetDefinition): boolean 
     WIDGET_TYPES[definition.name]!.defaultProps = definition.defaultProps;
   }
 
-  console.log(`[DynamicWidget] Updated widget: ${definition.name}`);
+  // Notify all instances of this widget to re-render
+  notifyWidgetUpdate(definition.name);
+
+  console.log(`[DynamicWidget] Updated widget: ${definition.name} (version ${currentVersion + 1})`);
   return true;
 }
 

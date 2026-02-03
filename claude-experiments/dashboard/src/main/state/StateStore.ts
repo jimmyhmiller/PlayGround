@@ -44,7 +44,18 @@ import type {
   CustomWidgetRegisterPayload,
   CustomWidgetUnregisterPayload,
   CustomWidgetUpdatePayload,
+  ShellSpawnPayload,
+  ShellKillPayload,
+  ShellExecPayload,
+  ShellIsRunningPayload,
 } from '../../types/state';
+import {
+  shellSpawn,
+  shellKill,
+  shellExec,
+  shellIsRunning,
+  shellList,
+} from '../services/shellService';
 
 // Type for the events module
 interface EventEmitter {
@@ -150,8 +161,9 @@ export class StateStore {
 
   /**
    * Handle a command to update state
+   * Some commands (like shell operations) may be async
    */
-  handleCommand(type: string, payload: unknown): CommandResult {
+  handleCommand(type: string, payload: unknown): CommandResult | Promise<CommandResult> {
     const [domain, action] = type.split('.');
 
     switch (domain) {
@@ -173,6 +185,8 @@ export class StateStore {
         return this.handleWidgetStateCommand(action!, payload);
       case 'customWidgets':
         return this.handleCustomWidgetsCommand(action!, payload);
+      case 'shell':
+        return this.handleShellCommand(action!, payload);
       default:
         throw new Error(`Unknown command domain: ${domain}`);
     }
@@ -1183,6 +1197,77 @@ export class StateStore {
 
       default:
         throw new Error(`Unknown customWidgets action: ${action}`);
+    }
+  }
+
+  // ========== Shell Commands ==========
+
+  private handleShellCommand(action: string, payload: unknown): CommandResult | Promise<CommandResult> {
+    switch (action) {
+      case 'spawn': {
+        const p = payload as ShellSpawnPayload;
+        const result = shellSpawn({
+          command: p.command,
+          args: p.args,
+          cwd: p.cwd,
+          env: p.env,
+        });
+        return {
+          success: result.success,
+          pid: result.pid,
+          error: result.error,
+        } as CommandResult & { pid: string };
+      }
+
+      case 'kill': {
+        const p = payload as ShellKillPayload;
+        return shellKill({
+          pid: p.pid,
+          pattern: p.pattern,
+          signal: p.signal,
+        }).then((result) => ({
+          success: result.success,
+          killed: result.killed,
+          error: result.error,
+        } as CommandResult & { killed: number }));
+      }
+
+      case 'exec': {
+        const p = payload as ShellExecPayload;
+        return shellExec({
+          command: p.command,
+          args: p.args,
+          cwd: p.cwd,
+          timeout: p.timeout,
+        }).then((result) => ({
+          success: result.success,
+          stdout: result.stdout,
+          stderr: result.stderr,
+          exitCode: result.exitCode,
+          error: result.error,
+        } as CommandResult & { stdout: string; stderr: string; exitCode: number }));
+      }
+
+      case 'isRunning': {
+        const p = payload as ShellIsRunningPayload;
+        const result = shellIsRunning(p.pid);
+        return {
+          success: true,
+          running: result.running,
+          pid: result.pid,
+        } as CommandResult & { running: boolean; pid?: string };
+      }
+
+      case 'list': {
+        const result = shellList();
+        return {
+          success: true,
+          processes: result.processes,
+        } as CommandResult & { processes: Array<{ pid: string; running: boolean }> };
+      }
+
+      default:
+        throw new Error(`Unknown shell action: ${action}`);
     }
   }
 }

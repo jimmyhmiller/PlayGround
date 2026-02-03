@@ -346,14 +346,23 @@
 
         // Communication with dashboard
         function sendGameEvent(type, data = {}) {
-            // Post message to parent window (for dashboard integration)
-            if (window.parent !== window) {
-                window.parent.postMessage({
-                    type: 'game-event',
-                    eventType: type,
-                    data: data,
-                    timestamp: Date.now()
-                }, '*');
+            const eventData = {
+                type: 'game-event',
+                eventType: type,
+                data: data,
+                timestamp: Date.now()
+            };
+            
+            // Try multiple targets to ensure message gets through
+            try {
+                if (window.parent && window.parent !== window) {
+                    window.parent.postMessage(eventData, '*');
+                }
+                if (window.top && window.top !== window) {
+                    window.top.postMessage(eventData, '*');
+                }
+            } catch (e) {
+                console.error('Failed to send message:', e);
             }
             
             // Also dispatch custom event for local listeners
@@ -369,6 +378,24 @@
                 sendGameEvent('params.updated', window.gameParams);
             }
         });
+        
+        // Poll params.json for parameter updates
+        setInterval(async () => {
+            try {
+                const response = await fetch('/params.json?t=' + Date.now());
+                const newParams = await response.json();
+                Object.assign(window.gameParams, newParams);
+                
+                // Update existing pipes with new gap
+                for (const pipe of gameState.pipes) {
+                    const currentGap = pipe.bottomY - pipe.topHeight;
+                    const gapDiff = newParams.pipeGap - currentGap;
+                    pipe.bottomY += gapDiff;
+                }
+            } catch (e) {
+                // Ignore errors
+            }
+        }, 100);
 
         // Initialize and start
         init();

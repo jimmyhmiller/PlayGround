@@ -163,4 +163,30 @@ class EaseViewModel: ObservableObject {
 
         return totals.map { ($0.goal, $0.total / grandTotal) }
     }
+
+    // MARK: - Icon Goals
+
+    /// Proportions for the first 3 goals (used for icon rendering)
+    func iconProportions(for period: TimePeriod) -> [(proportion: Double, colorHex: String)] {
+        let iconGoalsList = Array(goals.prefix(3))
+
+        if iconGoalsList.isEmpty {
+            // No goals - show 3 equal bars with default gray
+            return [(1.0/3.0, "#888888"), (1.0/3.0, "#888888"), (1.0/3.0, "#888888")]
+        }
+
+        let totals = iconGoalsList.map { goal in
+            (colorHex: goal.colorHex, total: totalForGoal(goal, in: period))
+        }
+
+        let grandTotal = totals.reduce(0) { $0 + $1.total }
+
+        if grandTotal == 0 {
+            // No data logged - show equal-length bars
+            let equalProportion = 1.0 / Double(iconGoalsList.count)
+            return totals.map { (equalProportion, $0.colorHex) }
+        }
+
+        return totals.map { ($0.total / grandTotal, $0.colorHex) }
+    }
 }

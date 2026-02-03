@@ -1,6 +1,15 @@
 #!/bin/bash
 set -e
 
+ICON_STYLE="${1:-new}"
+
+if [[ "$ICON_STYLE" != "new" && "$ICON_STYLE" != "old" ]]; then
+    echo "Usage: ./build-app.sh [new|old]"
+    echo "  new - Use AppIcon.icon with Short/Long/Medium bars (default)"
+    echo "  old - Use AppIcon-original.icon with Long/Short/Medium bars"
+    exit 1
+fi
+
 # Build release version
 echo "Building release..."
 swift build -c release
@@ -9,9 +18,51 @@ swift build -c release
 echo "Creating app bundle..."
 cp .build/release/Ease Ease.app/Contents/MacOS/
 
+# Select icon source based on style
+if [[ "$ICON_STYLE" == "new" ]]; then
+    ICON_SOURCE="Ease/AppIcon.icon"
+    echo "Using new icon: Short / Long / Medium"
+else
+    ICON_SOURCE="Ease/AppIcon-original.icon"
+    echo "Using old icon: Long / Short / Medium"
+fi
+
+# Create MenuBarConfig.plist with matching proportions
+if [[ "$ICON_STYLE" == "new" ]]; then
+    cat > Ease.app/Contents/Resources/MenuBarConfig.plist << 'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>barWidths</key>
+    <array>
+        <real>7</real>
+        <real>14</real>
+        <real>11</real>
+    </array>
+</dict>
+</plist>
+EOF
+else
+    cat > Ease.app/Contents/Resources/MenuBarConfig.plist << 'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>barWidths</key>
+    <array>
+        <real>14</real>
+        <real>8</real>
+        <real>11</real>
+    </array>
+</dict>
+</plist>
+EOF
+fi
+
 # Compile .icon file for macOS Tahoe with dark mode support
 echo "Compiling icon with dark mode support..."
-xcrun actool Ease/AppIcon.icon \
+xcrun actool "$ICON_SOURCE" \
     --compile Ease.app/Contents/Resources \
     --app-icon AppIcon \
     --enable-on-demand-resources NO \

@@ -409,6 +409,44 @@ export interface CustomWidgetUpdatePayload {
   propsSchema?: Record<string, string>;
 }
 
+// ========== Shell Command Payloads ==========
+
+/**
+ * Shell spawn payload - spawn a background process
+ */
+export interface ShellSpawnPayload {
+  command: string;
+  args?: string[];
+  cwd?: string;
+  env?: Record<string, string>;
+}
+
+/**
+ * Shell kill payload - kill running processes
+ */
+export interface ShellKillPayload {
+  pid?: string;
+  pattern?: string;
+  signal?: 'SIGTERM' | 'SIGKILL' | 'SIGINT';
+}
+
+/**
+ * Shell exec payload - execute command and wait for completion
+ */
+export interface ShellExecPayload {
+  command: string;
+  args?: string[];
+  cwd?: string;
+  timeout?: number;
+}
+
+/**
+ * Shell isRunning payload - check if process is running
+ */
+export interface ShellIsRunningPayload {
+  pid: string;
+}
+
 /**
  * StateStore interface
  */
@@ -416,6 +454,6 @@ export interface IStateStore {
   events: IEventStore;
   getState(path?: string): unknown;
   setState(path: string, value: unknown): void;
-  handleCommand(type: string, payload: unknown): CommandResult;
+  handleCommand(type: string, payload: unknown): CommandResult | Promise<CommandResult>;
   save(): void;
 }

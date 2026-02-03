@@ -15,7 +15,10 @@ let package = Package(
             dependencies: [
                 .product(name: "Sparkle", package: "Sparkle")
             ],
-            path: "Ease"
+            path: "Ease",
+            resources: [
+                .copy("AppIcon.icon")
+            ]
         )
     ]
 )

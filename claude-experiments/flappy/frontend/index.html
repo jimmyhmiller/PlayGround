@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Flappy Bird - Premium Edition</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            overflow: hidden;
+        }
+        
+        #app {
+            display: flex;
+            gap: 20px;
+            padding: 20px;
+            max-width: 1400px;
+        }
+        
+        #gameSection {
+            position: relative;
+        }
+        
+        canvas {
+            border: 4px solid #000;
+            display: block;
+            background: linear-gradient(to bottom, #4ec0ca 0%, #4ec0ca 80%, #ded895 80%, #ded895 100%);
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.3);
+            border-radius: 8px;
+        }
+        
+        #gameOver {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background: rgba(0, 0, 0, 0.95);
+            color: white;
+            padding: 40px;
+            border-radius: 15px;
+            text-align: center;
+            display: none;
+            min-width: 300px;
+            box-shadow: 0 10px 50px rgba(0, 0, 0, 0.5);
+        }
+        
+        #gameOver h2 {
+            margin-bottom: 15px;
+            font-size: 36px;
+            color: #FFD700;
+        }
+        
+        #gameOver p {
+            margin-bottom: 10px;
+            font-size: 18px;
+        }
+        
+        #gameOver input {
+            width: 100%;
+            padding: 10px;
+            margin: 15px 0;
+            border: 2px solid #667eea;
+            border-radius: 5px;
+            font-size: 16px;
+        }
+        
+        #gameOver button {
+            padding: 12px 40px;
+            margin: 5px;
+            font-size: 18px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: transform 0.2s;
+        }
+        
+        #gameOver button:hover {
+            transform: scale(1.05);
+        }
+        
+        #score {
+            position: absolute;
+            top: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            font-size: 56px;
+            font-weight: bold;
+            color: white;
+            text-shadow: 3px 3px 6px rgba(0, 0, 0, 0.7);
+        }
+        
+        #instructions {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            font-size: 24px;
+            color: white;
+            text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.8);
+            text-align: center;
+            background: rgba(0, 0, 0, 0.6);
+            padding: 20px 40px;
+            border-radius: 10px;
+        }
+        
+        #sidebar {
+            background: rgba(255, 255, 255, 0.95);
+            padding: 20px;
+            border-radius: 10px;
+            width: 300px;
+            max-height: 600px;
+            overflow-y: auto;
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.3);
+        }
+        
+        .panel {
+            margin-bottom: 20px;
+            padding: 15px;
+            background: #f8f9fa;
+            border-radius: 8px;
+            border: 2px solid #e9ecef;
+        }
+        
+        .panel h3 {
+            margin-bottom: 10px;
+            color: #667eea;
+            font-size: 18px;
+        }
+        
+        .stat-row {
+            display: flex;
+            justify-content: space-between;
+            padding: 8px 0;
+            border-bottom: 1px solid #dee2e6;
+        }
+        
+        .stat-row:last-child {
+            border-bottom: none;
+        }
+        
+        .stat-label {
+            font-weight: 600;
+            color: #495057;
+        }
+        
+        .stat-value {
+            color: #667eea;
+            font-weight: bold;
+        }
+        
+        #leaderboard-list {
+            list-style: none;
+        }
+        
+        #leaderboard-list li {
+            padding: 8px;
+            margin: 5px 0;
+            background: white;
+            border-radius: 5px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        #leaderboard-list li:nth-child(1) {
+            background: linear-gradient(135deg, #FFD700 0%, #FFA500 100%);
+            color: white;
+            font-weight: bold;
+        }
+        
+        #leaderboard-list li:nth-child(2) {
+            background: linear-gradient(135deg, #C0C0C0 0%, #A9A9A9 100%);
+        }
+        
+        #leaderboard-list li:nth-child(3) {
+            background: linear-gradient(135deg, #CD7F32 0%, #B87333 100%);
+        }
+        
+        .connection-status {
+            display: inline-block;
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            margin-right: 5px;
+        }
+        
+        .connection-status.connected {
+            background: #28a745;
+            box-shadow: 0 0 8px #28a745;
+        }
+        
+        .connection-status.disconnected {
+            background: #dc3545;
+        }
+        
+        @keyframes pulse {
+            0%, 100% { transform: scale(1); }
+            50% { transform: scale(1.1); }
+        }
+        
+        .pulse {
+            animation: pulse 2s infinite;
+        }
+        
+        @keyframes fadeOut {
+            0% { opacity: 1; transform: translateX(-50%) translateY(0); }
+            80% { opacity: 1; }
+            100% { opacity: 0; transform: translateX(-50%) translateY(-20px); }
+        }
+    </style>
+</head>
+<body>
+    <div id="app">
+        <div id="gameSection">
+            <canvas id="gameCanvas" width="400" height="600"></canvas>
+            <div id="score">0</div>
+            <div id="instructions">Click or Press Space to Start</div>
+            <div id="gameOver">
+                <h2>Game Over!</h2>
+                <p>Score: <span id="finalScore">0</span></p>
+                <p id="highScoreMsg" style="color: #FFD700; display: none;">🎉 New High Score! 🎉</p>
+                <input type="text" id="playerName" placeholder="Enter your name" maxlength="20">
+                <div>
+                    <button onclick="submitScore()">Submit Score</button>
+                    <button onclick="restartGame()">Play Again</button>
+                </div>
+            </div>
+        </div>
+        
+        <div id="sidebar">
+            <div class="panel">
+                <h3>
+                    <span class="connection-status disconnected" id="wsStatus"></span>
+                    Server Status
+                </h3>
+                <div class="stat-row">
+                    <span class="stat-label">Connection:</span>
+                    <span class="stat-value" id="wsStatusText">Connecting...</span>
+                </div>
+            </div>
+            
+            <div class="panel">
+                <h3>⚙️ Game Parameters</h3>
+                <div class="stat-row">
+                    <span class="stat-label">Gravity:</span>
+                    <span class="stat-value" id="debugGravity">-</span>
+                </div>
+                <div class="stat-row">
+                    <span class="stat-label">Jump Strength:</span>
+                    <span class="stat-value" id="debugJumpStrength">-</span>
+                </div>
+                <div class="stat-row">
+                    <span class="stat-label">Pipe Speed:</span>
+                    <span class="stat-value" id="debugPipeSpeed">-</span>
+                </div>
+            </div>
+            
+            <div class="panel">
+                <h3>Current Session</h3>
+                <div class="stat-row">
+                    <span class="stat-label">Score:</span>
+                    <span class="stat-value" id="currentScore">0</span>
+                </div>
+                <div class="stat-row">
+                    <span class="stat-label">Jumps:</span>
+                    <span class="stat-value" id="totalJumps">0</span>
+                </div>
+                <div class="stat-row">
+                    <span class="stat-label">Best Velocity:</span>
+                    <span class="stat-value" id="maxVelocity">0</span>
+                </div>
+            </div>
+            
+            <div class="panel">
+                <h3>Global Stats</h3>
+                <div class="stat-row">
+                    <span class="stat-label">Total Games:</span>
+                    <span class="stat-value" id="totalGames">-</span>
+                </div>
+                <div class="stat-row">
+                    <span class="stat-label">Avg Score:</span>
+                    <span class="stat-value" id="avgScore">-</span>
+                </div>
+                <div class="stat-row">
+                    <span class="stat-label">Max Score:</span>
+                    <span class="stat-value" id="maxScore">-</span>
+                </div>
+            </div>
+            
+            <div class="panel">
+                <h3>🏆 Leaderboard</h3>
+                <ul id="leaderboard-list"></ul>
+            </div>
+        </div>
+    </div>
+
+    <script src="audio.js"></script>
+    <script src="game.js"></script>
+</body>
+</html>

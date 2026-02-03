@@ -3,6 +3,7 @@ import { useWindowList, useWindowFocus, useWindowCommands, useWindow } from '../
 import Window from './Window';
 import type { WindowUpdates } from '../../types/components';
 import type { WindowState } from '../../types/state';
+import { WIDGET_TYPES } from '../widgets/BuiltinWidgets';
 
 /**
  * Window Manager Context
@@ -135,8 +136,9 @@ const WindowWrapper = memo(function WindowWrapper({
   if (!win) return null;
 
   // Look up component from registry by type string
+  // First check the static registry, then fall back to WIDGET_TYPES (includes custom widgets)
   const registry = componentRegistry.current || {};
-  const ComponentEntry = registry[win.component];
+  const ComponentEntry = registry[win.component] || WIDGET_TYPES[win.component];
   const Component: ComponentType<DynamicComponentProps> = ComponentEntry?.component || (() => (
     <div style={{ padding: '16px', color: 'var(--theme-text-muted)' }}>
       Unknown component: {win.component}
