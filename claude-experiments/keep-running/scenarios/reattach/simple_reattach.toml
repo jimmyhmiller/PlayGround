@@ -1,0 +1,36 @@
+# Reattach test: detach and reattach to see buffered output
+
+name = "simple_reattach"
+description = "Detach and reattach to see buffered output"
+timeout_secs = 15
+
+[command]
+program = "sh"
+args = ["-c", "echo first; sleep 1; echo second"]
+
+[[actions]]
+type = "attach"
+
+[[actions]]
+type = "wait_for_output"
+contains = "first"
+timeout_secs = 5
+
+[[actions]]
+type = "detach"
+
+[[actions]]
+type = "sleep"
+duration_ms = 1500
+
+[[actions]]
+type = "attach"
+expect_replay_contains = "second"
+
+[[actions]]
+type = "wait_for_exit"
+expected_code = 0
+timeout_secs = 5
+
+[expected_final_state]
+daemon_alive = false

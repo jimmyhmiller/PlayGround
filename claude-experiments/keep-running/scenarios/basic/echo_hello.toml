@@ -1,0 +1,26 @@
+# Basic test: start session with echo, verify output, exit
+
+name = "echo_hello"
+description = "Start session with echo, verify output, exit"
+timeout_secs = 10
+
+[command]
+program = "echo"
+args = ["hello world"]
+
+[[actions]]
+type = "attach"
+
+[[actions]]
+type = "wait_for_output"
+contains = "hello world"
+timeout_secs = 5
+
+[[actions]]
+type = "wait_for_exit"
+expected_code = 0
+timeout_secs = 5
+
+[expected_final_state]
+daemon_alive = false
+session_file_exists = false

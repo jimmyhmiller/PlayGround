@@ -1,0 +1,32 @@
+# Basic test: send input to cat, receive it back
+
+name = "cat_echo"
+description = "Send input to cat, receive it back"
+timeout_secs = 10
+
+[command]
+program = "cat"
+
+[[actions]]
+type = "attach"
+
+[[actions]]
+type = "send_input"
+text = "test input\n"
+
+[[actions]]
+type = "wait_for_output"
+contains = "test input"
+timeout_secs = 5
+
+[[actions]]
+type = "send_bytes"
+bytes = [4]  # Ctrl+D (EOF)
+
+[[actions]]
+type = "wait_for_exit"
+expected_code = 0
+timeout_secs = 5
+
+[expected_final_state]
+daemon_alive = false

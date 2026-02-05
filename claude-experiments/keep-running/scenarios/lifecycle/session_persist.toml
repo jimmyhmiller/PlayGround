@@ -1,0 +1,44 @@
+# Session persist: verify session persists while process runs
+
+name = "session_persist"
+description = "Verify session files persist while process is running"
+timeout_secs = 15
+
+[command]
+program = "sh"
+args = ["-c", "echo running; sleep 5; echo done"]
+
+[[actions]]
+type = "attach"
+
+[[actions]]
+type = "wait_for_output"
+contains = "running"
+timeout_secs = 5
+
+# Session should exist while process runs
+[[actions]]
+type = "assert_session_exists"
+
+[[actions]]
+type = "detach"
+
+# Even after detach, session should persist
+[[actions]]
+type = "sleep"
+duration_ms = 500
+
+[[actions]]
+type = "assert_session_exists"
+
+# Reattach and wait for completion
+[[actions]]
+type = "attach"
+
+[[actions]]
+type = "wait_for_exit"
+expected_code = 0
+timeout_secs = 10
+
+[expected_final_state]
+daemon_alive = false

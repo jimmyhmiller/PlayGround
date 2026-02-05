@@ -1,0 +1,87 @@
+# Rapid attach/detach: stress test rapid connection cycling
+
+name = "rapid_attach_detach"
+description = "Stress test with rapid attach/detach cycles"
+timeout_secs = 30
+
+[command]
+program = "sh"
+args = ["-c", "for i in $(seq 1 20); do echo \"tick:$i\"; sleep 0.2; done; echo COMPLETE"]
+
+# Cycle 1
+[[actions]]
+type = "attach"
+
+[[actions]]
+type = "sleep"
+duration_ms = 100
+
+[[actions]]
+type = "detach"
+
+# Cycle 2
+[[actions]]
+type = "sleep"
+duration_ms = 50
+
+[[actions]]
+type = "attach"
+
+[[actions]]
+type = "sleep"
+duration_ms = 100
+
+[[actions]]
+type = "detach"
+
+# Cycle 3
+[[actions]]
+type = "sleep"
+duration_ms = 50
+
+[[actions]]
+type = "attach"
+
+[[actions]]
+type = "sleep"
+duration_ms = 100
+
+[[actions]]
+type = "detach"
+
+# Cycle 4
+[[actions]]
+type = "sleep"
+duration_ms = 50
+
+[[actions]]
+type = "attach"
+
+[[actions]]
+type = "sleep"
+duration_ms = 100
+
+[[actions]]
+type = "detach"
+
+# Cycle 5
+[[actions]]
+type = "sleep"
+duration_ms = 50
+
+[[actions]]
+type = "attach"
+
+# Final attach - wait for completion
+[[actions]]
+type = "wait_for_output"
+contains = "COMPLETE"
+timeout_secs = 15
+
+[[actions]]
+type = "wait_for_exit"
+expected_code = 0
+timeout_secs = 5
+
+[expected_final_state]
+daemon_alive = false

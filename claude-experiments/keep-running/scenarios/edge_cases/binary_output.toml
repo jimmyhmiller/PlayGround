@@ -1,0 +1,25 @@
+# Binary output: handle binary/non-UTF8 output
+
+name = "binary_output"
+description = "Handle binary/non-UTF8 output correctly"
+timeout_secs = 15
+
+[command]
+program = "sh"
+args = ["-c", "printf 'START\\x00\\x01\\x02\\xff\\xfe\\x80END\\n'; echo DONE"]
+
+[[actions]]
+type = "attach"
+
+[[actions]]
+type = "wait_for_output"
+contains = "DONE"
+timeout_secs = 10
+
+[[actions]]
+type = "wait_for_exit"
+expected_code = 0
+timeout_secs = 5
+
+[expected_final_state]
+daemon_alive = false

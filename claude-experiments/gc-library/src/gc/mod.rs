@@ -20,6 +20,12 @@ pub mod mark_and_sweep;
 pub mod mutex_allocator;
 pub mod usdt_probes;
 
+#[cfg(test)]
+mod tests;
+
+#[cfg(test)]
+mod adversarial_tests;
+
 // =============================================================================
 // Platform Utilities
 // =============================================================================

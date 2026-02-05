@@ -1,0 +1,31 @@
+# Session cleanup: verify session files are cleaned up after exit
+
+name = "session_cleanup"
+description = "Verify session files are cleaned up after process exits"
+timeout_secs = 10
+
+[command]
+program = "sh"
+args = ["-c", "echo hello; exit 0"]
+
+[[actions]]
+type = "attach"
+
+[[actions]]
+type = "wait_for_output"
+contains = "hello"
+timeout_secs = 5
+
+[[actions]]
+type = "wait_for_exit"
+expected_code = 0
+timeout_secs = 5
+
+# After exit and client disconnect, session should be cleaned up
+[[actions]]
+type = "sleep"
+duration_ms = 500
+
+[expected_final_state]
+daemon_alive = false
+session_file_exists = false

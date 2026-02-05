@@ -1,0 +1,37 @@
+# Exit while detached: process exits while client is detached
+
+name = "exit_while_detached"
+description = "Process exits while client is detached, reattach sees exit"
+timeout_secs = 15
+
+[command]
+program = "sh"
+args = ["-c", "echo starting; sleep 1; echo done; exit 42"]
+
+[[actions]]
+type = "attach"
+
+[[actions]]
+type = "wait_for_output"
+contains = "starting"
+timeout_secs = 5
+
+[[actions]]
+type = "detach"
+
+[[actions]]
+type = "sleep"
+duration_ms = 2000
+
+# Process should have exited by now
+[[actions]]
+type = "attach"
+expect_replay_contains = "done"
+
+[[actions]]
+type = "wait_for_exit"
+expected_code = 42
+timeout_secs = 5
+
+[expected_final_state]
+daemon_alive = false

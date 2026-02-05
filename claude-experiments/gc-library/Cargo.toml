@@ -5,6 +5,9 @@ edition = "2024"
 description = "Generic garbage collection library with multiple algorithms"
 license = "MIT"
 
+[lib]
+crate-type = ["lib", "cdylib", "staticlib"]
+
 [dependencies]
 libc = "0.2"
 usdt = "0.5"

@@ -1,0 +1,47 @@
+# Multi-cycle reattach: multiple sequential attach/detach cycles
+
+name = "multi_cycle"
+description = "Multiple sequential attach/detach cycles"
+timeout_secs = 20
+
+[command]
+program = "sh"
+args = ["-c", "for i in 1 2 3 4 5; do echo count:$i; sleep 0.5; done"]
+
+[[actions]]
+type = "attach"
+
+[[actions]]
+type = "wait_for_output"
+contains = "count:1"
+timeout_secs = 5
+
+[[actions]]
+type = "detach"
+
+[[actions]]
+type = "sleep"
+duration_ms = 600
+
+[[actions]]
+type = "attach"
+expect_replay_contains = "count:2"
+
+[[actions]]
+type = "detach"
+
+[[actions]]
+type = "sleep"
+duration_ms = 600
+
+[[actions]]
+type = "attach"
+expect_replay_contains = "count:3"
+
+[[actions]]
+type = "wait_for_exit"
+expected_code = 0
+timeout_secs = 10
+
+[expected_final_state]
+daemon_alive = false

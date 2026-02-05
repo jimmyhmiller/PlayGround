@@ -727,6 +727,11 @@ pub fn partial_eval(expr: &Expr, env: &PEnv) -> PValue {
                 let body_pv = results[body_slot].take().unwrap();
 
                 let residual_body = residualize(&body_pv);
+                // If body is just the bound variable, the let is redundant.
+                if matches!(&residual_body, Expr::Var(var) if var == &name) {
+                    results[result_slot] = Some(value_pv);
+                    continue;
+                }
                 if uses_var(&residual_body, &name) {
                     let init_expr = match &value_pv {
                         PValue::Static(v) | PValue::StaticNamed { value: v, .. } => value_to_expr(v),
@@ -1053,9 +1058,9 @@ pub fn partial_eval(expr: &Expr, env: &PEnv) -> PValue {
                 match &pv {
                     PValue::Dynamic(e) | PValue::DynamicNamed { expr: e, .. } => {
                         let is_break = matches!(e, Expr::Break | Expr::Continue);
-                        collected_residuals.push(residualize(&pv));
                         if is_break {
-                            // Stop executing - return what we have
+                            // Break/continue inside a switch should not propagate outward.
+                            // Stop executing this case body without emitting the break.
                             let filtered = filter_dead_code(collected_residuals);
                             if filtered.is_empty() {
                                 results[result_slot] = Some(PValue::Static(Value::Undefined));
@@ -1065,6 +1070,7 @@ pub fn partial_eval(expr: &Expr, env: &PEnv) -> PValue {
                                 results[result_slot] = Some(PValue::Dynamic(Expr::Begin(filtered)));
                             }
                         } else {
+                            collected_residuals.push(residualize(&pv));
                             // Continue with remaining statements
                             work_stack.push(PEWorkItem::ContSwitchCaseBody {
                                 stmts: remaining_stmts,
@@ -1242,8 +1248,13 @@ fn eval_expr(expr: &Expr, env: &PEnv, result_slot: usize, results: &mut Vec<Opti
         // Just store the function as-is. We'll PE the body at call time
         // when we have actual values for captured variables.
         Expr::Fn(params, body) => {
-            // Store the original function - body will be PE'd at call time
-            results[result_slot] = Some(PValue::Dynamic(Expr::Fn(params.clone(), body.clone())));
+            // Store the original function as a static opaque value so it can
+            // be placed in arrays/objects and called later.
+            results[result_slot] = Some(PValue::Static(Value::Opaque {
+                label: "Function".to_string(),
+                expr: Expr::Fn(params.clone(), body.clone()),
+                state: None,
+            }));
         }
 
         // Function calls - evaluate func and args, then handle call
@@ -1684,27 +1695,6 @@ fn eval_expr(expr: &Expr, env: &PEnv, result_slot: usize, results: &mut Vec<Opti
 
         // For loop
         Expr::For { init, cond, update, body } => {
-            // Check if any part references undefined variables
-            let has_free = init.as_ref().map_or(false, |e| has_free_vars(e, env))
-                || cond.as_ref().map_or(false, |e| has_free_vars(e, env))
-                || update.as_ref().map_or(false, |e| has_free_vars(e, env))
-                || has_free_vars(body, env);
-
-            if has_free {
-                // Don't try to unroll - emit residual with PE'd parts
-                let init_pe = init.as_ref().map(|e| Box::new(residualize(&partial_eval_sync(e, env))));
-                let cond_pe = cond.as_ref().map(|c| Box::new(residualize(&partial_eval_sync(c, env))));
-                let update_pe = update.as_ref().map(|u| Box::new(residualize(&partial_eval_sync(u, env))));
-                let body_pe = Box::new(residualize(&partial_eval_sync(body, env)));
-                results[result_slot] = Some(PValue::Dynamic(Expr::For {
-                    init: init_pe,
-                    cond: cond_pe,
-                    update: update_pe,
-                    body: body_pe,
-                }));
-                return;
-            }
-
             // Handle initialization if present
             if let Some(init_expr) = init {
                 work_stack.push(PEWorkItem::ContForInit {
@@ -2538,6 +2528,41 @@ fn handle_normal_call(
     }
 
     match func_pv {
+        // Functions stored as opaque static values (e.g., in arrays/objects)
+        PValue::Static(Value::Opaque { expr: Expr::Fn(params, body), .. }) => {
+            if params.len() != args_pv.len() {
+                return Some(PValue::Dynamic(Expr::Call(
+                    Box::new(Expr::Fn(params, body)),
+                    args_pv.iter().map(residualize).collect(),
+                )));
+            }
+
+            // Save any existing bindings that would be shadowed by parameters
+            let saved_bindings: Vec<_> = params.iter()
+                .filter_map(|p| env.borrow().get(p).cloned().map(|v| (p.clone(), v)))
+                .collect();
+
+            // Bind parameters to arguments in the current env
+            for (param, arg_pv) in params.iter().zip(args_pv.iter()) {
+                env.borrow_mut().insert(param.clone(), arg_pv.clone());
+            }
+
+            let result = partial_eval_sync(&body, env);
+
+            // Restore any shadowed bindings
+            for (param, saved) in &saved_bindings {
+                env.borrow_mut().insert(param.clone(), saved.clone());
+            }
+            // Remove parameters that weren't shadowing anything
+            for param in &params {
+                if !saved_bindings.iter().any(|(p, _)| p == param) {
+                    env.borrow_mut().remove(param);
+                }
+            }
+
+            Some(result)
+        }
+
         PValue::Static(Value::Closure { params, body, env: closure_env }) => {
             if params.len() != args_pv.len() {
                 return Some(PValue::Dynamic(Expr::Call(
@@ -2891,7 +2916,8 @@ fn eval_while_after_body(
         unrolled_bodies.push(body_residual);
     }
 
-    if iterations > MAX_ITERATIONS {
+    let gas_enabled = GAS.with(|g| g.borrow().is_some());
+    if !gas_enabled && iterations > MAX_ITERATIONS {
         // Hit iteration limit - emit residual while with accumulated bodies
         mark_modified_vars_dynamic(&body, &env);
         let body_pv = partial_eval_sync(&body, &env);
@@ -3029,6 +3055,7 @@ fn eval_for_after_cond_impl(
     work_stack: &mut Vec<PEWorkItem>,
 ) {
     const MAX_ITERATIONS: usize = 10000;
+    let gas_enabled = GAS.with(|g| g.borrow().is_some());
 
     let emit_residual_for = |results: &mut Vec<Option<PValue>>, result_slot: usize, env: &PEnv| {
         let init_pe = init_expr.as_ref().map(|e| Box::new(residualize(&partial_eval_sync(e, env))));
@@ -3048,7 +3075,7 @@ fn eval_for_after_cond_impl(
             results[result_slot] = Some(PValue::Static(Value::Undefined));
         }
         PValue::Static(Value::Bool(true)) => {
-            if iterations > MAX_ITERATIONS {
+            if !gas_enabled && iterations > MAX_ITERATIONS {
                 emit_residual_for(results, result_slot, &env);
                 return;
             }
@@ -3150,13 +3177,27 @@ fn eval_try_catch(
     results: &mut Vec<Option<PValue>>,
     _work_stack: &mut Vec<PEWorkItem>,
 ) {
-    let catch_env = penv_with_parent(&env);
+    let finally_pv = finally_block.as_ref().map(|fb| partial_eval_sync(fb, &env));
+
+    // If the try block is fully static, we can ignore the catch (no throw observed).
+    if matches!(try_pv, PValue::Static(_) | PValue::StaticNamed { .. }) {
+        if let Some(fpv) = finally_pv {
+            results[result_slot] = Some(PValue::Dynamic(Expr::Begin(vec![
+                residualize(&try_pv),
+                residualize(&fpv),
+            ])));
+        } else {
+            results[result_slot] = Some(try_pv);
+        }
+        return;
+    }
+
+    // Evaluate catch in an isolated env so it doesn't mutate the outer env.
+    let catch_env: PEnv = Rc::new(RefCell::new(env.borrow().clone()));
     if let Some(ref param) = catch_param {
         catch_env.borrow_mut().insert(param.clone(), PValue::Dynamic(Expr::Var(param.clone())));
     }
     let catch_pv = partial_eval_sync(&catch_block, &catch_env);
-
-    let finally_pv = finally_block.as_ref().map(|fb| partial_eval_sync(fb, &env));
 
     results[result_slot] = Some(PValue::Dynamic(Expr::TryCatch {
         try_block: Box::new(residualize(&try_pv)),
@@ -3584,16 +3625,15 @@ fn is_pure_expr(expr: &Expr) -> bool {
                 stack.push(cond);
             }
 
-            // Array/object literals are pure if all elements are pure
+            // Array literals are pure if all elements are pure
             Expr::Array(elems) => {
                 for elem in elems.iter().rev() {
                     stack.push(elem);
                 }
             }
-            Expr::Object(props) => {
-                for (_, v) in props.iter().rev() {
-                    stack.push(v);
-                }
+            // Object literals are treated as impure because they allocate
+            Expr::Object(_) => {
+                return false;
             }
 
             // Property access is pure (no mutation)
@@ -3737,12 +3777,26 @@ fn has_free_vars(expr: &Expr, env: &PEnv) -> bool {
             }
 
             Expr::For { init, cond, update, body } => {
-                stack.push(WorkItem::Check(body, local_bindings.clone()));
+                // Collect bindings introduced by a var-decl init (nested let chain).
+                let mut for_bindings = local_bindings.clone();
+                if let Some(i) = init.as_ref() {
+                    let mut current = i.as_ref();
+                    loop {
+                        if let Expr::Let(name, _, body_expr) = current {
+                            for_bindings.push(name.clone());
+                            current = body_expr.as_ref();
+                        } else {
+                            break;
+                        }
+                    }
+                }
+
+                stack.push(WorkItem::Check(body, for_bindings.clone()));
                 if let Some(u) = update {
-                    stack.push(WorkItem::Check(u, local_bindings.clone()));
+                    stack.push(WorkItem::Check(u, for_bindings.clone()));
                 }
                 if let Some(c) = cond {
-                    stack.push(WorkItem::Check(c, local_bindings.clone()));
+                    stack.push(WorkItem::Check(c, for_bindings.clone()));
                 }
                 if let Some(i) = init {
                     stack.push(WorkItem::Check(i, local_bindings));

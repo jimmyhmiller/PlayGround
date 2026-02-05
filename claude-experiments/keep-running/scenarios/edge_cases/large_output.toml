@@ -1,0 +1,25 @@
+# Large output: handle large amounts of output data
+
+name = "large_output"
+description = "Handle large amounts of output data without issues"
+timeout_secs = 120
+
+[command]
+program = "sh"
+args = ["-c", "for i in $(seq 1 10000); do echo \"Line $i\"; done; echo DONE"]
+
+[[actions]]
+type = "attach"
+
+[[actions]]
+type = "wait_for_output"
+contains = "DONE"
+timeout_secs = 60
+
+[[actions]]
+type = "wait_for_exit"
+expected_code = 0
+timeout_secs = 15
+
+[expected_final_state]
+daemon_alive = false
