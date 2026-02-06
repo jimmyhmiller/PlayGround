@@ -1,0 +1,49 @@
+enum TokenKind {
+    Ident {},
+    Int {},
+    KwFn {},
+    KwLet {},
+    KwStruct {},
+    KwEnum {},
+    KwExtern {},
+    KwUse {},
+    KwMatch {},
+    KwIf {},
+    KwElse {},
+    KwWhile {},
+    KwReturn {},
+    KwMut {},
+    KwTrue {},
+    KwFalse {},
+    Arrow {},
+    ColonColon {},
+    Sym { code: I64 },
+    Eof {}
+}
+
+struct Token { kind: TokenKind, start: I64, end: I64 }
+
+enum TokenList { Nil {}, Cons { head: Token, tail: TokenList } }
+
+fn list_len(list: TokenList) -> I64 {
+    let zero: I64 = 0;
+    let one: I64 = 1;
+    match list {
+        TokenList::Nil {} => zero,
+        TokenList::Cons { head, tail } => one + list_len(tail)
+    }
+}
+
+fn list_reverse_inner(list: TokenList, acc: TokenList) -> TokenList {
+    match list {
+        TokenList::Nil {} => acc,
+        TokenList::Cons { head, tail } => {
+            let next: TokenList = TokenList::Cons { head: head, tail: acc };
+            list_reverse_inner(tail, next)
+        },
+    }
+}
+
+fn list_reverse(list: TokenList) -> TokenList {
+    list_reverse_inner(list, TokenList::Nil {})
+}

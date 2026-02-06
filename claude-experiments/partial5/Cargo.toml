@@ -1,0 +1,23 @@
+[package]
+name = "partial5"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Pin serde to pre-1.0.219 to avoid __private removal
+serde = "=1.0.218"
+
+# JavaScript parser
+swc_ecma_parser = "6"
+swc_ecma_ast = "5"
+swc_common = { version = "5", features = ["tty-emitter"] }
+
+# Code generation
+swc_ecma_codegen = "5"
+
+# Utilities
+thiserror = "1.0"
+anyhow = "1.0"
+
+[dev-dependencies]
+pretty_assertions = "1.4"

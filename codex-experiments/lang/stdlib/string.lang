@@ -1,0 +1,10 @@
+extern fn string_len(s: String) -> I64;
+extern fn string_eq(a: String, b: String) -> I64;
+extern fn string_concat(a: String, b: String) -> String;
+extern fn string_slice(s: String, start: I64, end_pos: I64) -> String;
+extern fn string_byte_at(s: String, index: I64) -> I64;
+
+fn string_is_empty(s: String) -> I64 {
+    let zero: I64 = 0;
+    if string_len(s) == zero { 1 } else { 0 }
+}

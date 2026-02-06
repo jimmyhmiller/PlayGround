@@ -154,8 +154,8 @@ fn convert_stmt(stmt: &Stmt) -> Result<Expr, String> {
         Stmt::Block(block) => convert_statements(&block.stmts),
 
         Stmt::Return(ret) => match &ret.arg {
-            Some(arg) => convert_expr(arg),
-            None => Ok(Expr::Undefined),
+            Some(arg) => Ok(Expr::Return(Box::new(convert_expr(arg)?))),
+            None => Ok(Expr::Return(Box::new(Expr::Undefined))),
         },
 
         Stmt::If(if_stmt) => {

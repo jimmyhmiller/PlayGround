@@ -441,6 +441,11 @@ impl Parser {
                 let inner = self.parse_expr()?;
                 Ok(Expr::Throw(Box::new(inner)))
             }
+            // Return
+            "return" => {
+                let inner = self.parse_expr()?;
+                Ok(Expr::Return(Box::new(inner)))
+            }
 
             // Try-catch
             "try" => {

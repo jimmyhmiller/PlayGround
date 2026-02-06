@@ -1,0 +1,9 @@
+extern fn vec_new() -> RawPointer<I8>;
+extern fn vec_len(v: RawPointer<I8>) -> I64;
+extern fn vec_get(v: RawPointer<I8>, index: I64) -> RawPointer<I8>;
+extern fn vec_push(v: RawPointer<I8>, item: RawPointer<I8>) -> I64;
+
+fn vec_is_empty(v: RawPointer<I8>) -> I64 {
+    let zero: I64 = 0;
+    if vec_len(v) == zero { 1 } else { 0 }
+}

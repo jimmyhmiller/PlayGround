@@ -3,14 +3,13 @@
 //! This is a copying/semi-space collector that compacts live objects,
 //! eliminating fragmentation and providing fast bump-pointer allocation.
 
-use std::{ffi::c_void, io::Error, marker::PhantomData, mem};
+use alloc::vec::Vec;
+use core::marker::PhantomData;
+use core::mem;
 
-use libc::mprotect;
-
-use super::get_page_size;
 use crate::traits::{ForwardingSupport, GcObject, GcTypes, RootProvider, TaggedPointer};
 
-use super::{AllocateAction, Allocator, AllocatorOptions};
+use super::{AllocError, AllocateAction, Allocator, AllocatorOptions, MemoryProvider};
 
 const DEFAULT_PAGE_COUNT: usize = 1024;
 const MAX_PAGE_COUNT: usize = 1000000;
@@ -19,24 +18,25 @@ const MAX_PAGE_COUNT: usize = 1000000;
 // Memory Space
 // =============================================================================
 
-struct Space {
+struct Space<M: MemoryProvider> {
     start: *const u8,
     page_count: usize,
     allocation_offset: usize,
+    memory: M,
     #[cfg(debug_assertions)]
     protected: bool,
 }
 
-unsafe impl Send for Space {}
-unsafe impl Sync for Space {}
+unsafe impl<M: MemoryProvider + Send> Send for Space<M> {}
+unsafe impl<M: MemoryProvider + Sync> Sync for Space<M> {}
 
-impl Space {
+impl<M: MemoryProvider> Space<M> {
     fn word_count(&self) -> usize {
-        (self.page_count * get_page_size()) / 8
+        (self.page_count * self.memory.page_size()) / 8
     }
 
     fn byte_count(&self) -> usize {
-        self.page_count * get_page_size()
+        self.page_count * self.memory.page_size()
     }
 
     fn contains(&self, pointer: *const u8) -> bool {
@@ -54,7 +54,7 @@ impl Space {
             if self.allocation_offset % 8 != 0 {
                 panic!("Heap offset is not aligned");
             }
-            std::ptr::copy_nonoverlapping(data.as_ptr(), start as *mut u8, data.len());
+            core::ptr::copy_nonoverlapping(data.as_ptr(), start as *mut u8, data.len());
             new_pointer
         }
     }
@@ -66,10 +66,10 @@ impl Space {
         assert!(self.contains(heap_object.get_pointer()));
 
         // Zero the full object memory (header + fields) to prevent stale pointers
-        let header_size = 8; // Assume simple 8-byte header
+        let header_size = 8;
         let full_size = size_bytes + header_size;
         unsafe {
-            std::ptr::write_bytes(self.start.add(offset) as *mut u8, 0, full_size);
+            core::ptr::write_bytes(self.start.add(offset) as *mut u8, 0, full_size);
         }
 
         heap_object.write_header(size_bytes);
@@ -80,7 +80,7 @@ impl Space {
     fn allocate<T: GcTypes>(&mut self, words: usize) -> *const u8 {
         let offset = self.allocation_offset;
         let size_bytes = words * 8;
-        let header_size = 8; // Assume simple 8-byte header
+        let header_size = 8;
         let full_size = size_bytes + header_size;
         let pointer = self.write_object::<T>(offset, size_bytes);
         self.increment_current_offset(full_size);
@@ -91,103 +91,44 @@ impl Space {
         self.allocation_offset += size;
     }
 
-    #[cfg(debug_assertions)]
-    fn protect(&mut self) {
-        unsafe {
-            mprotect(
-                self.start as *mut _,
-                self.byte_count() - 1024,
-                libc::PROT_NONE,
-            )
-        };
-        self.protected = true;
-    }
-
-    #[cfg(debug_assertions)]
-    fn unprotect(&mut self) {
-        unsafe {
-            mprotect(
-                self.start as *mut _,
-                self.byte_count() - 1024,
-                libc::PROT_READ | libc::PROT_WRITE,
-            )
-        };
-        self.protected = false;
-    }
-
     fn clear(&mut self) {
         self.allocation_offset = 0;
     }
 
-    fn new(default_page_count: usize) -> Self {
-        let pre_allocated_space = unsafe {
-            libc::mmap(
-                std::ptr::null_mut(),
-                get_page_size() * MAX_PAGE_COUNT,
-                libc::PROT_NONE,
-                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
-                -1,
-                0,
-            )
-        };
-        Self::commit_memory(pre_allocated_space, default_page_count * get_page_size()).unwrap();
-        Self {
-            start: pre_allocated_space as *const u8,
+    fn new(mut memory: M, default_page_count: usize) -> Result<Self, AllocError> {
+        let page_size = memory.page_size();
+        let total_size = page_size * MAX_PAGE_COUNT;
+
+        let start = memory
+            .allocate_region(total_size)
+            .ok_or(AllocError::ProviderFailed)?;
+
+        let initial_size = default_page_count * page_size;
+        if !memory.commit(start, initial_size) {
+            return Err(AllocError::ProviderFailed);
+        }
+
+        Ok(Self {
+            start: start as *const u8,
             page_count: default_page_count,
             allocation_offset: 0,
+            memory,
             #[cfg(debug_assertions)]
             protected: false,
-        }
+        })
     }
 
-    fn commit_memory(addr: *mut c_void, size: usize) -> Result<(), Error> {
-        unsafe {
-            if mprotect(addr, size, libc::PROT_READ | libc::PROT_WRITE) != 0 {
-                Err(Error::last_os_error())
-            } else {
-                Ok(())
-            }
-        }
-    }
-
-    fn double_committed_memory(&mut self) {
+    fn double_committed_memory(&mut self) -> bool {
+        let page_size = self.memory.page_size();
         let new_page_count = self.page_count * 2;
-        Self::commit_memory(self.start as *mut c_void, new_page_count * get_page_size()).unwrap();
-        self.page_count = new_page_count;
-    }
-}
+        let new_size = new_page_count * page_size;
 
-// =============================================================================
-// Object Iterator
-// =============================================================================
-
-struct ObjectIterator<'a, T: GcTypes> {
-    space: &'a Space,
-    offset: usize,
-    _phantom: PhantomData<T>,
-}
-
-impl<'a, T: GcTypes> Iterator for ObjectIterator<'a, T> {
-    type Item = T::ObjectHandle;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.offset >= self.space.allocation_offset {
-            return None;
+        if self.memory.commit(self.start as *mut u8, new_size) {
+            self.page_count = new_page_count;
+            true
+        } else {
+            false
         }
-
-        if self.space.allocation_offset == 0 {
-            return None;
-        }
-
-        let pointer = unsafe { self.space.start.add(self.offset) };
-        let object = T::ObjectHandle::from_untagged(pointer);
-        let size = object.full_size();
-
-        self.offset += size;
-        if self.offset % 8 != 0 {
-            panic!("Heap offset is not aligned");
-        }
-        Some(object)
     }
 }
 
@@ -202,31 +143,24 @@ impl<'a, T: GcTypes> Iterator for ObjectIterator<'a, T> {
 ///
 /// # Type Parameters
 /// - `T`: The runtime's type system implementing [`GcTypes`]
+/// - `M`: The memory provider implementing [`MemoryProvider`]
 ///
 /// # Requirements
 /// - `T::ObjectHandle` must implement [`ForwardingSupport`] for object relocation
-pub struct CompactingHeap<T: GcTypes>
+pub struct CompactingHeap<T: GcTypes, M: MemoryProvider>
 where
     T::ObjectHandle: ForwardingSupport,
 {
-    to_space: Space,
-    from_space: Space,
+    to_space: Space<M>,
+    from_space: Space<M>,
     options: AllocatorOptions,
     _phantom: PhantomData<T>,
 }
 
-impl<T: GcTypes> CompactingHeap<T>
+impl<T: GcTypes, M: MemoryProvider> CompactingHeap<T, M>
 where
     T::ObjectHandle: ForwardingSupport,
 {
-    fn object_iter_from_position(&self, offset: usize) -> ObjectIterator<'_, T> {
-        ObjectIterator {
-            space: &self.to_space,
-            offset,
-            _phantom: PhantomData,
-        }
-    }
-
     fn copy_using_cheneys_algorithm(&mut self, mut heap_object: T::ObjectHandle) -> T::TaggedValue {
         let untagged = heap_object.get_pointer() as usize;
 
@@ -264,7 +198,7 @@ where
 
     unsafe fn copy_all(&mut self, roots: Vec<T::TaggedValue>) -> Vec<T::TaggedValue> {
         let start_offset = self.to_space.allocation_offset;
-        let mut new_roots = vec![];
+        let mut new_roots = Vec::new();
 
         for root in roots.iter() {
             let heap_object = T::ObjectHandle::from_tagged(*root);
@@ -277,7 +211,6 @@ where
     }
 
     fn copy_remaining(&mut self, start_offset: usize) {
-        // Iterate over objects in to_space starting from start_offset
         let mut offset = start_offset;
         while offset < self.to_space.allocation_offset {
             let ptr = unsafe { self.to_space.start.add(offset) };
@@ -307,13 +240,16 @@ where
     }
 }
 
-impl<T: GcTypes> Allocator<T> for CompactingHeap<T>
+impl<T: GcTypes, M: MemoryProvider> Allocator<T, M> for CompactingHeap<T, M>
 where
     T::ObjectHandle: ForwardingSupport,
+    M: Clone,
 {
-    fn new(options: AllocatorOptions) -> Self {
-        let to_space = Space::new(DEFAULT_PAGE_COUNT / 2);
-        let from_space = Space::new(DEFAULT_PAGE_COUNT / 2);
+    fn new(options: AllocatorOptions, memory: M) -> Self {
+        let to_space = Space::new(memory.clone(), DEFAULT_PAGE_COUNT / 2)
+            .expect("Failed to create to_space");
+        let from_space = Space::new(memory, DEFAULT_PAGE_COUNT / 2)
+            .expect("Failed to create from_space");
 
         Self {
             to_space,
@@ -327,7 +263,7 @@ where
         &mut self,
         words: usize,
         _kind: T::ObjectKind,
-    ) -> Result<AllocateAction, Box<dyn std::error::Error>> {
+    ) -> Result<AllocateAction, AllocError> {
         if words > self.from_space.word_count() {
             self.grow();
         }
@@ -344,11 +280,6 @@ where
     fn gc(&mut self, roots: &dyn RootProvider<T::TaggedValue>) {
         if !self.options.gc {
             return;
-        }
-
-        #[cfg(debug_assertions)]
-        {
-            self.to_space.unprotect();
         }
 
         // Collect roots with their slot addresses
@@ -381,32 +312,11 @@ where
         mem::swap(&mut self.from_space, &mut self.to_space);
 
         self.to_space.clear();
-
-        #[cfg(debug_assertions)]
-        {
-            self.to_space.protect();
-        }
     }
 
     fn grow(&mut self) {
         self.from_space.double_committed_memory();
-
-        #[cfg(debug_assertions)]
-        {
-            let currently_protected = self.to_space.protected;
-            if currently_protected {
-                self.to_space.unprotect();
-            }
-            self.to_space.double_committed_memory();
-            if currently_protected {
-                self.to_space.protect();
-            }
-        }
-
-        #[cfg(not(debug_assertions))]
-        {
-            self.to_space.double_committed_memory();
-        }
+        self.to_space.double_committed_memory();
     }
 
     fn get_allocation_options(&self) -> AllocatorOptions {

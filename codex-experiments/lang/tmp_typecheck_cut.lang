@@ -1,0 +1,427 @@
+extern fn string_byte_at(s: String, index: I64) -> I64;
+
+enum Ty { I64 {}, Bool {}, Unit {}, Named { name: Span } }
+
+struct ParamTy { name: Span, ty: Ty }
+enum ParamTyList { Nil {}, Cons { head: ParamTy, tail: ParamTyList } }
+
+struct FieldTy { name: Span, ty: Ty }
+enum FieldTyList { Nil {}, Cons { head: FieldTy, tail: FieldTyList } }
+
+struct VariantInfo { name: Span, fields: FieldTyList }
+enum VariantInfoList { Nil {}, Cons { head: VariantInfo, tail: VariantInfoList } }
+
+struct StructInfo { name: Span, fields: FieldTyList }
+enum StructInfoList { Nil {}, Cons { head: StructInfo, tail: StructInfoList } }
+
+struct EnumInfo { name: Span, variants: VariantInfoList }
+enum EnumInfoList { Nil {}, Cons { head: EnumInfo, tail: EnumInfoList } }
+
+struct FnSig { name: Span, params: ParamTyList, ret: Ty }
+enum FnSigList { Nil {}, Cons { head: FnSig, tail: FnSigList } }
+
+struct Env { fns: FnSigList, structs: StructInfoList, enums: EnumInfoList }
+
+struct Local { name: Span, ty: Ty, mutable: I64 }
+enum LocalList { Nil {}, Cons { head: Local, tail: LocalList } }
+
+struct CheckResult { ty: Ty, errors: I64 }
+struct CheckStmt { ty: Ty, locals: LocalList, errors: I64 }
+struct CheckBlock { ty: Ty, locals: LocalList, errors: I64 }
+
+fn span_len(span: Span) -> I64 {
+    span.end - span.start
+}
+
+fn span_eq(src: String, a: Span, b: Span) -> I64 {
+    let one: I64 = 1;
+    let zero: I64 = 0;
+    let len_a: I64 = span_len(a);
+    let len_b: I64 = span_len(b);
+    if len_a != len_b { return zero; };
+    let mut i: I64 = 0;
+    while i < len_a {
+        if string_byte_at(src, a.start + i) != string_byte_at(src, b.start + i) { return zero; };
+        i = i + one;
+    };
+    one
+}
+
+fn span_is_i64(src: String, span: Span) -> I64 {
+    let one: I64 = 1;
+    let zero: I64 = 0;
+    let i: I64 = 73;
+    let six: I64 = 54;
+    let four: I64 = 52;
+    if span_len(span) != 3 { return zero; };
+    if string_byte_at(src, span.start) == i {
+        if string_byte_at(src, span.start + one) == six {
+            if string_byte_at(src, span.start + 2) == four { one } else { zero }
+        } else {
+            zero
+        }
+    } else {
+        zero
+    }
+}
+
+fn span_is_bool(src: String, span: Span) -> I64 {
+    let one: I64 = 1;
+    let zero: I64 = 0;
+    let b: I64 = 66;
+    let o: I64 = 111;
+    let l: I64 = 108;
+    if span_len(span) != 4 { return zero; };
+    if string_byte_at(src, span.start) == b {
+        if string_byte_at(src, span.start + one) == o {
+            if string_byte_at(src, span.start + 2) == o {
+                if string_byte_at(src, span.start + 3) == l { one } else { zero }
+            } else {
+                zero
+            }
+        } else {
+            zero
+        }
+    } else {
+        zero
+    }
+}
+
+fn ty_from_ast(src: String, ty: Type) -> Ty {
+    match ty {
+        Type::Unit {} => Ty::Unit {},
+        Type::Path { name } => {
+            if span_is_i64(src, name) == 1 { return Ty::I64 {}; };
+            if span_is_bool(src, name) == 1 { return Ty::Bool {}; };
+            Ty::Named { name: name }
+        },
+    }
+}
+
+fn ty_eq(src: String, a: Ty, b: Ty) -> I64 {
+    let one: I64 = 1;
+    let zero: I64 = 0;
+    match a {
+        Ty::I64 {} => match b { Ty::I64 {} => one, _ => zero },
+        Ty::Bool {} => match b { Ty::Bool {} => one, _ => zero },
+        Ty::Unit {} => match b { Ty::Unit {} => one, _ => zero },
+        Ty::Named { name } => match b {
+            Ty::Named { name: other } => span_eq(src, name, other),
+            _ => zero,
+        },
+    }
+}
+
+fn path_len(path: PathList) -> I64 {
+    match path {
+        PathList::Nil {} => 0,
+        PathList::Cons { head, tail } => 1 + path_len(tail),
+    }
+}
+
+fn path_head(path: PathList) -> Span {
+    match path {
+        PathList::Nil {} => Span { start: 0, end: 0 },
+        PathList::Cons { head, tail } => head,
+    }
+}
+
+fn path_second(path: PathList) -> Span {
+    match path {
+        PathList::Nil {} => Span { start: 0, end: 0 },
+        PathList::Cons { head, tail } => match tail {
+            PathList::Nil {} => Span { start: 0, end: 0 },
+            PathList::Cons { head: head2, tail: tail2 } => head2,
+        },
+    }
+}
+
+fn param_ty_reverse_inner(list: ParamTyList, acc: ParamTyList) -> ParamTyList {
+    match list {
+        ParamTyList::Nil {} => acc,
+        ParamTyList::Cons { head, tail } => {
+            let next: ParamTyList = ParamTyList::Cons { head: head, tail: acc };
+            param_ty_reverse_inner(tail, next)
+        },
+    }
+}
+
+fn param_ty_reverse(list: ParamTyList) -> ParamTyList {
+    param_ty_reverse_inner(list, ParamTyList::Nil {})
+}
+
+fn field_ty_reverse_inner(list: FieldTyList, acc: FieldTyList) -> FieldTyList {
+    match list {
+        FieldTyList::Nil {} => acc,
+        FieldTyList::Cons { head, tail } => {
+            let next: FieldTyList = FieldTyList::Cons { head: head, tail: acc };
+            field_ty_reverse_inner(tail, next)
+        },
+    }
+}
+
+fn field_ty_reverse(list: FieldTyList) -> FieldTyList {
+    field_ty_reverse_inner(list, FieldTyList::Nil {})
+}
+
+fn variant_info_reverse_inner(list: VariantInfoList, acc: VariantInfoList) -> VariantInfoList {
+    match list {
+        VariantInfoList::Nil {} => acc,
+        VariantInfoList::Cons { head, tail } => {
+            let next: VariantInfoList = VariantInfoList::Cons { head: head, tail: acc };
+            variant_info_reverse_inner(tail, next)
+        },
+    }
+}
+
+fn variant_info_reverse(list: VariantInfoList) -> VariantInfoList {
+    variant_info_reverse_inner(list, VariantInfoList::Nil {})
+}
+
+fn struct_info_reverse_inner(list: StructInfoList, acc: StructInfoList) -> StructInfoList {
+    match list {
+        StructInfoList::Nil {} => acc,
+        StructInfoList::Cons { head, tail } => {
+            let next: StructInfoList = StructInfoList::Cons { head: head, tail: acc };
+            struct_info_reverse_inner(tail, next)
+        },
+    }
+}
+
+fn struct_info_reverse(list: StructInfoList) -> StructInfoList {
+    struct_info_reverse_inner(list, StructInfoList::Nil {})
+}
+
+fn enum_info_reverse_inner(list: EnumInfoList, acc: EnumInfoList) -> EnumInfoList {
+    match list {
+        EnumInfoList::Nil {} => acc,
+        EnumInfoList::Cons { head, tail } => {
+            let next: EnumInfoList = EnumInfoList::Cons { head: head, tail: acc };
+            enum_info_reverse_inner(tail, next)
+        },
+    }
+}
+
+fn enum_info_reverse(list: EnumInfoList) -> EnumInfoList {
+    enum_info_reverse_inner(list, EnumInfoList::Nil {})
+}
+
+fn fn_sig_reverse_inner(list: FnSigList, acc: FnSigList) -> FnSigList {
+    match list {
+        FnSigList::Nil {} => acc,
+        FnSigList::Cons { head, tail } => {
+            let next: FnSigList = FnSigList::Cons { head: head, tail: acc };
+            fn_sig_reverse_inner(tail, next)
+        },
+    }
+}
+
+fn fn_sig_reverse(list: FnSigList) -> FnSigList {
+    fn_sig_reverse_inner(list, FnSigList::Nil {})
+}
+
+fn convert_params(src: String, params: ParamList) -> ParamTyList {
+    match params {
+        ParamList::Nil {} => ParamTyList::Nil {},
+        ParamList::Cons { head, tail } => {
+            let ty: Ty = ty_from_ast(src, head.ty);
+            let param: ParamTy = ParamTy { name: head.name, ty: ty };
+            let rest: ParamTyList = convert_params(src, tail);
+            ParamTyList::Cons { head: param, tail: rest }
+        },
+    }
+}
+
+fn convert_fields(src: String, fields: FieldList) -> FieldTyList {
+    match fields {
+        FieldList::Nil {} => FieldTyList::Nil {},
+        FieldList::Cons { head, tail } => {
+            let ty: Ty = ty_from_ast(src, head.ty);
+            let field: FieldTy = FieldTy { name: head.name, ty: ty };
+            let rest: FieldTyList = convert_fields(src, tail);
+            FieldTyList::Cons { head: field, tail: rest }
+        },
+    }
+}
+
+fn convert_variants(src: String, variants: VariantList) -> VariantInfoList {
+    match variants {
+        VariantList::Nil {} => VariantInfoList::Nil {},
+        VariantList::Cons { head, tail } => {
+            let fields: FieldTyList = convert_fields(src, head.fields);
+            let variant: VariantInfo = VariantInfo { name: head.name, fields: fields };
+            let rest: VariantInfoList = convert_variants(src, tail);
+            VariantInfoList::Cons { head: variant, tail: rest }
+        },
+    }
+}
+
+fn collect_env(src: String, items: ItemList) -> Env {
+    Env {
+        fns: collect_fns(src, items),
+        structs: collect_structs(src, items),
+        enums: collect_enums(src, items),
+    }
+}
+
+fn collect_fns(src: String, items: ItemList) -> FnSigList {
+    match items {
+        ItemList::Nil {} => FnSigList::Nil {},
+        ItemList::Cons { head, tail } => {
+            let rest: FnSigList = collect_fns(src, tail);
+            match head {
+                Item::Fn { decl } => {
+                    let sig: FnSig = FnSig {
+                        name: decl.name,
+                        params: convert_params(src, decl.params),
+                        ret: ty_from_ast(src, decl.ret),
+                    };
+                    FnSigList::Cons { head: sig, tail: rest }
+                },
+                Item::ExternFn { decl } => {
+                    let sig: FnSig = FnSig {
+                        name: decl.name,
+                        params: convert_params(src, decl.params),
+                        ret: ty_from_ast(src, decl.ret),
+                    };
+                    FnSigList::Cons { head: sig, tail: rest }
+                },
+                _ => rest,
+            }
+        },
+    }
+}
+
+fn collect_structs(src: String, items: ItemList) -> StructInfoList {
+    match items {
+        ItemList::Nil {} => StructInfoList::Nil {},
+        ItemList::Cons { head, tail } => {
+            let rest: StructInfoList = collect_structs(src, tail);
+            match head {
+                Item::Struct { decl } => {
+                    let info: StructInfo = StructInfo { name: decl.name, fields: convert_fields(src, decl.fields) };
+                    StructInfoList::Cons { head: info, tail: rest }
+                },
+                _ => rest,
+            }
+        },
+    }
+}
+
+fn collect_enums(src: String, items: ItemList) -> EnumInfoList {
+    match items {
+        ItemList::Nil {} => EnumInfoList::Nil {},
+        ItemList::Cons { head, tail } => {
+            let rest: EnumInfoList = collect_enums(src, tail);
+            match head {
+                Item::Enum { decl } => {
+                    let info: EnumInfo = EnumInfo { name: decl.name, variants: convert_variants(src, decl.variants) };
+                    EnumInfoList::Cons { head: info, tail: rest }
+                },
+                _ => rest,
+            }
+        },
+    }
+}
+
+struct FindFn { found: I64, sig: FnSig }
+struct FindStruct { found: I64, info: StructInfo }
+struct FindEnum { found: I64, info: EnumInfo }
+struct FindVariant { found: I64, info: VariantInfo }
+struct FindField { found: I64, info: FieldTy }
+struct FindLocal { found: I64, ty: Ty }
+
+fn find_fn(src: String, list: FnSigList, name: Span) -> FindFn {
+    let empty: FnSig = FnSig { name: Span { start: 0, end: 0 }, params: ParamTyList::Nil {}, ret: Ty::Unit {} };
+    match list {
+        FnSigList::Nil {} => FindFn { found: 0, sig: empty },
+        FnSigList::Cons { head, tail } => {
+            if span_eq(src, head.name, name) == 1 {
+                FindFn { found: 1, sig: head }
+            } else {
+                find_fn(src, tail, name)
+            }
+        },
+    }
+}
+
+fn find_struct(src: String, list: StructInfoList, name: Span) -> FindStruct {
+    let empty: StructInfo = StructInfo { name: Span { start: 0, end: 0 }, fields: FieldTyList::Nil {} };
+    match list {
+        StructInfoList::Nil {} => FindStruct { found: 0, info: empty },
+        StructInfoList::Cons { head, tail } => {
+            if span_eq(src, head.name, name) == 1 {
+                FindStruct { found: 1, info: head }
+            } else {
+                find_struct(src, tail, name)
+            }
+        },
+    }
+}
+
+fn find_enum(src: String, list: EnumInfoList, name: Span) -> FindEnum {
+    let empty: EnumInfo = EnumInfo { name: Span { start: 0, end: 0 }, variants: VariantInfoList::Nil {} };
+    match list {
+        EnumInfoList::Nil {} => FindEnum { found: 0, info: empty },
+        EnumInfoList::Cons { head, tail } => {
+            if span_eq(src, head.name, name) == 1 {
+                FindEnum { found: 1, info: head }
+            } else {
+                find_enum(src, tail, name)
+            }
+        },
+    }
+}
+
+fn find_variant(src: String, list: VariantInfoList, name: Span) -> FindVariant {
+    let empty: VariantInfo = VariantInfo { name: Span { start: 0, end: 0 }, fields: FieldTyList::Nil {} };
+    match list {
+        VariantInfoList::Nil {} => FindVariant { found: 0, info: empty },
+        VariantInfoList::Cons { head, tail } => {
+            if span_eq(src, head.name, name) == 1 {
+                FindVariant { found: 1, info: head }
+            } else {
+                find_variant(src, tail, name)
+            }
+        },
+    }
+}
+
+fn find_field(src: String, list: FieldTyList, name: Span) -> FindField {
+    let empty: FieldTy = FieldTy { name: Span { start: 0, end: 0 }, ty: Ty::Unit {} };
+    match list {
+        FieldTyList::Nil {} => FindField { found: 0, info: empty },
+        FieldTyList::Cons { head, tail } => {
+            if span_eq(src, head.name, name) == 1 {
+                FindField { found: 1, info: head }
+            } else {
+                find_field(src, tail, name)
+            }
+        },
+    }
+}
+
+fn find_local(src: String, list: LocalList, name: Span) -> FindLocal {
+    match list {
+        LocalList::Nil {} => FindLocal { found: 0, ty: Ty::Unit {} },
+        LocalList::Cons { head, tail } => {
+            if span_eq(src, head.name, name) == 1 {
+                FindLocal { found: 1, ty: head.ty }
+            } else {
+                find_local(src, tail, name)
+            }
+        },
+    }
+}
+
+fn locals_from_params(params: ParamTyList) -> LocalList {
+    match params {
+        ParamTyList::Nil {} => LocalList::Nil {},
+        ParamTyList::Cons { head, tail } => {
+            let tail_locals: LocalList = locals_from_params(tail);
+            let local: Local = Local { name: head.name, ty: head.ty, mutable: 0 };
+            LocalList::Cons { head: local, tail: tail_locals }
+        },
+    }
+}
+

@@ -1,0 +1,39 @@
+extern fn read_file(path: String) -> String;
+extern fn arg_str(index: I64) -> String;
+extern fn print_int(v: I64) -> I64;
+
+fn tok_code(tok: Token) -> I64 {
+    let one: I64 = 1;
+    let two: I64 = 2;
+    let three: I64 = 3;
+    match tok.kind {
+        TokenKind::Ident {} => one,
+        TokenKind::ColonColon {} => two,
+        TokenKind::Sym { code: c } => {
+            let base: I64 = 1000;
+            base + c
+        },
+        _ => three,
+    }
+}
+
+fn dump(list: TokenList, limit: I64) -> I64 {
+    let zero: I64 = 0;
+    if limit == 0 { return zero; };
+    match list {
+        TokenList::Nil {} => zero,
+        TokenList::Cons { head, tail } => {
+            let _x: I64 = print_int(tok_code(head));
+            dump(tail, limit - 1)
+        }
+    }
+}
+
+fn main() -> I64 {
+    let path: String = arg_str(0);
+    let src: String = read_file(path);
+    let toks: TokenList = lex_list(src);
+    let _d: I64 = dump(toks, 10);
+    let zero: I64 = 0;
+    zero
+}

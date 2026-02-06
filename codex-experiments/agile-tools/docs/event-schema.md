@@ -83,6 +83,14 @@ Records a conflict resolution.
 {"type":"issue.resolve_conflict","data":{"conflict_id":"conf_001","resolution":"keep_local"}}
 ```
 
+### 3.7 `issue.delete`
+
+Marks an issue as deleted.
+
+```json
+{"type":"issue.delete","data":{}}
+```
+
 ## 4) Allowed Fields in `data`
 
 Fields allowed in `issue.update` and `issue.create`:

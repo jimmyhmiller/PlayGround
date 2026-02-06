@@ -1,0 +1,43 @@
+{
+  "name": "basic-issue-flow",
+  "steps": [
+    {
+      "cmd": ["issues", "init", "--project", "demo"]
+    },
+    {
+      "cmd": ["issues", "create", "--project", "demo", "--title", "First issue"],
+      "capture": "id"
+    },
+    {
+      "cmd": ["issues", "list", "--project", "demo"],
+      "expect_stdout_contains": ["${id}", "First issue"]
+    },
+    {
+      "cmd": ["issues", "show", "--project", "demo", "${id}"],
+      "expect_stdout_contains": ["First issue", "status: todo"]
+    },
+    {
+      "cmd": ["issues", "update", "--project", "demo", "${id}", "--status", "in_progress", "--add-label", "cli"],
+      "expect_stdout_contains": []
+    },
+    {
+      "cmd": ["issues", "list", "--project", "demo", "--status", "in_progress"],
+      "expect_stdout_contains": ["${id}"]
+    },
+    {
+      "cmd": ["issues", "comments", "add", "--project", "demo", "${id}", "--body", "Looks good"],
+      "expect_stdout_contains": []
+    },
+    {
+      "cmd": ["issues", "comments", "list", "--project", "demo", "${id}"],
+      "expect_stdout_contains": ["Looks good"]
+    },
+    {
+      "cmd": ["issues", "close", "--project", "demo", "${id}"]
+    },
+    {
+      "cmd": ["issues", "show", "--project", "demo", "${id}"],
+      "expect_stdout_contains": ["status: done"]
+    }
+  ]
+}

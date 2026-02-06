@@ -43,7 +43,7 @@ use crate::example::{ExampleObject, ExampleRuntime, ExampleTaggedPtr, ExampleTyp
 use crate::gc::generational::GenerationalGC;
 use crate::gc::mark_and_sweep::MarkAndSweep;
 use crate::gc::mutex_allocator::MutexAllocator;
-use crate::gc::{AllocateAction, Allocator, AllocatorOptions};
+use crate::gc::{AllocateAction, Allocator, AllocatorOptions, LibcMemoryProvider};
 use crate::traits::{GcObject, RootProvider, TaggedPointer};
 
 // =============================================================================
@@ -55,10 +55,10 @@ use crate::traits::{GcObject, RootProvider, TaggedPointer};
 /// This is an enum internally to support different GC algorithms,
 /// but is opaque to C code.
 pub enum GcHandle {
-    MarkSweep(MarkAndSweep<ExampleRuntime>),
-    Generational(GenerationalGC<ExampleRuntime>),
-    MarkSweepThreadSafe(MutexAllocator<MarkAndSweep<ExampleRuntime>, ExampleRuntime>),
-    GenerationalThreadSafe(MutexAllocator<GenerationalGC<ExampleRuntime>, ExampleRuntime>),
+    MarkSweep(MarkAndSweep<ExampleRuntime, LibcMemoryProvider>),
+    Generational(GenerationalGC<ExampleRuntime, LibcMemoryProvider>),
+    MarkSweepThreadSafe(MutexAllocator<MarkAndSweep<ExampleRuntime, LibcMemoryProvider>, ExampleRuntime, LibcMemoryProvider>),
+    GenerationalThreadSafe(MutexAllocator<GenerationalGC<ExampleRuntime, LibcMemoryProvider>, ExampleRuntime, LibcMemoryProvider>),
 }
 
 /// Callback type for root enumeration.
@@ -151,7 +151,7 @@ impl RootProvider<ExampleTaggedPtr> for CRootProvider {
 /// Pointer to a new GC handle, or NULL on failure.
 #[unsafe(no_mangle)]
 pub extern "C" fn gc_lib_create_mark_sweep() -> *mut GcHandle {
-    let gc = MarkAndSweep::new(AllocatorOptions::new());
+    let gc = MarkAndSweep::new(AllocatorOptions::new(), LibcMemoryProvider::new());
     Box::into_raw(Box::new(GcHandle::MarkSweep(gc)))
 }
 
@@ -173,7 +173,7 @@ pub extern "C" fn gc_lib_create_mark_sweep_with_options(
         print_stats,
         gc_always: false,
     };
-    let gc = MarkAndSweep::new(options);
+    let gc = MarkAndSweep::new(options, LibcMemoryProvider::new());
     Box::into_raw(Box::new(GcHandle::MarkSweep(gc)))
 }
 
@@ -183,7 +183,7 @@ pub extern "C" fn gc_lib_create_mark_sweep_with_options(
 /// Pointer to a new GC handle, or NULL on failure.
 #[unsafe(no_mangle)]
 pub extern "C" fn gc_lib_create_generational() -> *mut GcHandle {
-    let gc = GenerationalGC::new(AllocatorOptions::new());
+    let gc = GenerationalGC::new(AllocatorOptions::new(), LibcMemoryProvider::new());
     Box::into_raw(Box::new(GcHandle::Generational(gc)))
 }
 
@@ -205,7 +205,7 @@ pub extern "C" fn gc_lib_create_generational_with_options(
         print_stats,
         gc_always: false,
     };
-    let gc = GenerationalGC::new(options);
+    let gc = GenerationalGC::new(options, LibcMemoryProvider::new());
     Box::into_raw(Box::new(GcHandle::Generational(gc)))
 }
 
@@ -215,7 +215,7 @@ pub extern "C" fn gc_lib_create_generational_with_options(
 /// Pointer to a new GC handle, or NULL on failure.
 #[unsafe(no_mangle)]
 pub extern "C" fn gc_lib_create_mark_sweep_threadsafe() -> *mut GcHandle {
-    let gc = MutexAllocator::new(AllocatorOptions::new());
+    let gc = MutexAllocator::new(AllocatorOptions::new(), LibcMemoryProvider::new());
     Box::into_raw(Box::new(GcHandle::MarkSweepThreadSafe(gc)))
 }
 
@@ -225,7 +225,7 @@ pub extern "C" fn gc_lib_create_mark_sweep_threadsafe() -> *mut GcHandle {
 /// Pointer to a new GC handle, or NULL on failure.
 #[unsafe(no_mangle)]
 pub extern "C" fn gc_lib_create_generational_threadsafe() -> *mut GcHandle {
-    let gc = MutexAllocator::new(AllocatorOptions::new());
+    let gc = MutexAllocator::new(AllocatorOptions::new(), LibcMemoryProvider::new());
     Box::into_raw(Box::new(GcHandle::GenerationalThreadSafe(gc)))
 }
 

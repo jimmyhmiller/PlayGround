@@ -1,0 +1,12 @@
+{
+  "name": "s3-share",
+  "version": "1.0.0",
+  "description": "Upload files to S3 and get presigned URLs",
+  "bin": {
+    "s3-share": "./index.js"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.0.0",
+    "@aws-sdk/s3-request-presigner": "^3.0.0"
+  }
+}

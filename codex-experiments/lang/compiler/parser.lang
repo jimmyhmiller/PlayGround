@@ -1,0 +1,1058 @@
+struct ParseIdent { name: Span, rest: TokenList }
+struct ParseType { ty: Type, rest: TokenList }
+struct ParseParams { params: ParamList, rest: TokenList }
+struct ParseItem { item: Item, rest: TokenList }
+struct ParseFields { fields: FieldList, rest: TokenList }
+struct ParseVariants { variants: VariantList, rest: TokenList }
+struct ParseExpr { expr: Expr, rest: TokenList }
+struct ParseBlock { block: Block, rest: TokenList }
+struct ParsePath { path: PathList, rest: TokenList }
+struct ParseArgs { args: ExprListOpt, rest: TokenList }
+struct ParseArms { arms: MatchArmList, rest: TokenList }
+
+fn token_eof() -> Token {
+    Token { kind: TokenKind::Eof {}, start: 0, end: 0 }
+}
+
+fn peek(list: TokenList) -> Token {
+    match list {
+        TokenList::Nil {} => token_eof(),
+        TokenList::Cons { head, tail } => head,
+    }
+}
+
+fn advance(list: TokenList) -> TokenList {
+    match list {
+        TokenList::Nil {} => TokenList::Nil {},
+        TokenList::Cons { head, tail } => tail,
+    }
+}
+
+fn token_is_sym(tok: Token, code: I64) -> I64 {
+    let one: I64 = 1;
+    let zero: I64 = 0;
+    match tok.kind {
+        TokenKind::Sym { code: c } => if c == code { one } else { zero },
+        _ => zero,
+    }
+}
+
+fn token_is_coloncolon(tok: Token) -> I64 {
+    match tok.kind {
+        TokenKind::ColonColon {} => 1,
+        _ => 0,
+    }
+}
+
+fn token_kind_code(tok: Token) -> I64 {
+    match tok.kind {
+        TokenKind::Ident {} => 1,
+        TokenKind::ColonColon {} => 2,
+        TokenKind::Sym { code: c } => {
+            let base: I64 = 1000;
+            base + c
+        },
+        _ => 0,
+    }
+}
+
+fn token_is_kw_fn(tok: Token) -> I64 {
+    match tok.kind {
+        TokenKind::KwFn {} => 1,
+        _ => 0,
+    }
+}
+
+fn token_is_kw_extern(tok: Token) -> I64 {
+    match tok.kind {
+        TokenKind::KwExtern {} => 1,
+        _ => 0,
+    }
+}
+
+fn token_is_ident(tok: Token) -> I64 {
+    match tok.kind {
+        TokenKind::Ident {} => 1,
+        _ => 0,
+    }
+}
+
+fn token_is_kw_struct(tok: Token) -> I64 {
+    match tok.kind {
+        TokenKind::KwStruct {} => 1,
+        _ => 0,
+    }
+}
+
+fn token_is_kw_enum(tok: Token) -> I64 {
+    match tok.kind {
+        TokenKind::KwEnum {} => 1,
+        _ => 0,
+    }
+}
+
+fn param_reverse_inner(list: ParamList, acc: ParamList) -> ParamList {
+    match list {
+        ParamList::Nil {} => acc,
+        ParamList::Cons { head, tail } => {
+            let next: ParamList = ParamList::Cons { head: head, tail: acc };
+            param_reverse_inner(tail, next)
+        },
+    }
+}
+
+fn param_reverse(list: ParamList) -> ParamList {
+    param_reverse_inner(list, ParamList::Nil {})
+}
+
+fn item_reverse_inner(list: ItemList, acc: ItemList) -> ItemList {
+    match list {
+        ItemList::Nil {} => acc,
+        ItemList::Cons { head, tail } => {
+            let next: ItemList = ItemList::Cons { head: head, tail: acc };
+            item_reverse_inner(tail, next)
+        },
+    }
+}
+
+fn item_reverse(list: ItemList) -> ItemList {
+    item_reverse_inner(list, ItemList::Nil {})
+}
+
+fn field_reverse_inner(list: FieldList, acc: FieldList) -> FieldList {
+    match list {
+        FieldList::Nil {} => acc,
+        FieldList::Cons { head, tail } => {
+            let next: FieldList = FieldList::Cons { head: head, tail: acc };
+            field_reverse_inner(tail, next)
+        },
+    }
+}
+
+fn field_reverse(list: FieldList) -> FieldList {
+    field_reverse_inner(list, FieldList::Nil {})
+}
+
+fn variant_reverse_inner(list: VariantList, acc: VariantList) -> VariantList {
+    match list {
+        VariantList::Nil {} => acc,
+        VariantList::Cons { head, tail } => {
+            let next: VariantList = VariantList::Cons { head: head, tail: acc };
+            variant_reverse_inner(tail, next)
+        },
+    }
+}
+
+fn variant_reverse(list: VariantList) -> VariantList {
+    variant_reverse_inner(list, VariantList::Nil {})
+}
+
+fn parse_ident(src: String, list: TokenList) -> ParseIdent {
+    let tok: Token = peek(list);
+    let name: Span = Span { start: tok.start, end: tok.end };
+    let rest: TokenList = advance(list);
+    ParseIdent { name: name, rest: rest }
+}
+
+fn parse_type(src: String, list: TokenList) -> ParseType {
+    let tok: Token = peek(list);
+    match tok.kind {
+        TokenKind::Ident {} => {
+            let name: Span = Span { start: tok.start, end: tok.end };
+            ParseType { ty: Type::Path { name: name }, rest: advance(list) }
+        },
+        _ => {
+            ParseType { ty: Type::Unit {}, rest: list }
+        },
+    }
+}
+
+fn parse_params(src: String, list: TokenList) -> ParseParams {
+    let lparen: I64 = 40;
+    let rparen: I64 = 41;
+    let comma: I64 = 44;
+    let colon: I64 = 58;
+    let mut cur: TokenList = list;
+    if token_is_sym(peek(cur), lparen) == 1 {
+        cur = advance(cur);
+    };
+    let mut params: ParamList = ParamList::Nil {};
+    let mut done: I64 = 0;
+    while token_is_sym(peek(cur), rparen) == 0 && done == 0 {
+        let ident: ParseIdent = parse_ident(src, cur);
+        cur = ident.rest;
+        if token_is_sym(peek(cur), colon) == 1 {
+            cur = advance(cur);
+        };
+        let ty: ParseType = parse_type(src, cur);
+        cur = ty.rest;
+        let param: Param = Param { name: ident.name, ty: ty.ty };
+        params = ParamList::Cons { head: param, tail: params };
+        if token_is_sym(peek(cur), comma) == 1 {
+            cur = advance(cur);
+        } else {
+            done = 1;
+        }
+    };
+    if token_is_sym(peek(cur), rparen) == 1 {
+        cur = advance(cur);
+    };
+    ParseParams { params: param_reverse(params), rest: cur }
+}
+
+fn parse_fields(src: String, list: TokenList) -> ParseFields {
+    let lbrace: I64 = 123;
+    let rbrace: I64 = 125;
+    let comma: I64 = 44;
+    let colon: I64 = 58;
+    let mut cur: TokenList = list;
+    if token_is_sym(peek(cur), lbrace) == 1 {
+        cur = advance(cur);
+    };
+    let mut fields: FieldList = FieldList::Nil {};
+    let mut done: I64 = 0;
+    while token_is_sym(peek(cur), rbrace) == 0 && done == 0 {
+        let name: ParseIdent = parse_ident(src, cur);
+        cur = name.rest;
+        if token_is_sym(peek(cur), colon) == 1 {
+            cur = advance(cur);
+        };
+        let ty: ParseType = parse_type(src, cur);
+        cur = ty.rest;
+        let field: Field = Field { name: name.name, ty: ty.ty };
+        fields = FieldList::Cons { head: field, tail: fields };
+        if token_is_sym(peek(cur), comma) == 1 {
+            cur = advance(cur);
+        } else {
+            done = 1;
+        }
+    };
+    if token_is_sym(peek(cur), rbrace) == 1 {
+        cur = advance(cur);
+    };
+    ParseFields { fields: field_reverse(fields), rest: cur }
+}
+
+fn peek2(list: TokenList) -> Token {
+    match list {
+        TokenList::Nil {} => token_eof(),
+        TokenList::Cons { head, tail } => peek(tail),
+    }
+}
+
+fn is_double_sym(list: TokenList, first: I64, second: I64) -> I64 {
+    let one: I64 = 1;
+    let zero: I64 = 0;
+    if token_is_sym(peek(list), first) == one && token_is_sym(peek2(list), second) == one { one } else { zero }
+}
+
+fn span_len(span: Span) -> I64 {
+    span.end - span.start
+}
+
+fn is_underscore(src: String, span: Span) -> I64 {
+    let one: I64 = 1;
+    let zero: I64 = 0;
+    let underscore: I64 = 95;
+    if span_len(span) != one { return zero; };
+    if string_byte_at(src, span.start) == underscore { one } else { zero }
+}
+
+fn parse_path(src: String, list: TokenList) -> ParsePath {
+    let colon: I64 = 58;
+    let ident: ParseIdent = parse_ident(src, list);
+    let mut cur: TokenList = ident.rest;
+    if token_is_coloncolon(peek(cur)) == 1 || token_is_sym(peek(cur), colon) == 1 {
+        let base: I64 = 900;
+        let v1: I64 = token_is_coloncolon(peek(cur));
+        let v2: I64 = token_is_sym(peek(cur), colon);
+        let _dbg1: I64 = print_int(base + v1 + v2 + v2);
+    };
+    let mut has_sep: I64 = 0;
+    if token_is_coloncolon(peek(cur)) == 1 {
+        cur = advance(cur);
+        has_sep = 1;
+    } else {
+        if token_is_sym(peek(cur), colon) == 1 {
+            if token_is_sym(peek2(cur), colon) == 1 {
+                cur = advance(cur);
+                cur = advance(cur);
+                has_sep = 1;
+            } else {
+                if token_is_ident(peek2(cur)) == 1 {
+                    cur = advance(cur);
+                    has_sep = 1;
+                }
+            }
+        }
+    };
+    if has_sep == 1 {
+        let tail: ParsePath = parse_path(src, cur);
+        let path: PathList = PathList::Cons { head: ident.name, tail: tail.path };
+        ParsePath { path: path, rest: tail.rest }
+    } else {
+        let path: PathList = PathList::Cons { head: ident.name, tail: PathList::Nil {} };
+        ParsePath { path: path, rest: cur }
+    }
+}
+
+fn parse_args(src: String, list: TokenList) -> ParseArgs {
+    let lparen: I64 = 40;
+    let rparen: I64 = 41;
+    let comma: I64 = 44;
+    let mut cur: TokenList = list;
+    if token_is_sym(peek(cur), lparen) == 1 {
+        cur = advance(cur);
+    };
+    if token_is_sym(peek(cur), rparen) == 1 {
+        cur = advance(cur);
+        return ParseArgs { args: ExprListOpt::Nil {}, rest: cur };
+    };
+    let mut args: ExprListOpt = ExprListOpt::Nil {};
+    let mut done: I64 = 0;
+    while token_is_sym(peek(cur), rparen) == 0 && done == 0 {
+        let parsed: ParseExpr = parse_expr(src, cur);
+        cur = parsed.rest;
+        args = ExprListOpt::Cons { head: parsed.expr, tail: args };
+        if token_is_sym(peek(cur), comma) == 1 {
+            cur = advance(cur);
+        } else {
+            done = 1;
+        }
+    };
+    if token_is_sym(peek(cur), rparen) == 1 {
+        cur = advance(cur);
+    };
+    ParseArgs { args: expr_list_reverse(args), rest: cur }
+}
+
+fn expr_list_reverse_inner(list: ExprListOpt, acc: ExprListOpt) -> ExprListOpt {
+    match list {
+        ExprListOpt::Nil {} => acc,
+        ExprListOpt::Cons { head, tail } => {
+            let next: ExprListOpt = ExprListOpt::Cons { head: head, tail: acc };
+            expr_list_reverse_inner(tail, next)
+        },
+    }
+}
+
+fn expr_list_reverse(list: ExprListOpt) -> ExprListOpt {
+    expr_list_reverse_inner(list, ExprListOpt::Nil {})
+}
+
+fn field_init_reverse_inner(list: FieldInitList, acc: FieldInitList) -> FieldInitList {
+    match list {
+        FieldInitList::Nil {} => acc,
+        FieldInitList::Cons { head, tail } => {
+            let next: FieldInitList = FieldInitList::Cons { head: head, tail: acc };
+            field_init_reverse_inner(tail, next)
+        },
+    }
+}
+
+fn field_init_reverse(list: FieldInitList) -> FieldInitList {
+    field_init_reverse_inner(list, FieldInitList::Nil {})
+}
+
+fn parse_field_inits(src: String, list: TokenList) -> ParseFieldsInit {
+    let lbrace: I64 = 123;
+    let rbrace: I64 = 125;
+    let comma: I64 = 44;
+    let colon: I64 = 58;
+    let mut cur: TokenList = list;
+    if token_is_sym(peek(cur), lbrace) == 1 {
+        cur = advance(cur);
+    };
+    let mut fields: FieldInitList = FieldInitList::Nil {};
+    let mut done: I64 = 0;
+    while token_is_sym(peek(cur), rbrace) == 0 && done == 0 {
+        let name: ParseIdent = parse_ident(src, cur);
+        cur = name.rest;
+        if token_is_sym(peek(cur), colon) == 1 {
+            cur = advance(cur);
+        };
+        let value: ParseExpr = parse_expr(src, cur);
+        cur = value.rest;
+        let field: FieldInit = FieldInit { name: name.name, value: value.expr };
+        fields = FieldInitList::Cons { head: field, tail: fields };
+        if token_is_sym(peek(cur), comma) == 1 {
+            cur = advance(cur);
+        } else {
+            done = 1;
+        }
+    };
+    if token_is_sym(peek(cur), rbrace) == 1 {
+        cur = advance(cur);
+    };
+    ParseFieldsInit { fields: field_init_reverse(fields), rest: cur }
+}
+
+struct ParseFieldsInit { fields: FieldInitList, rest: TokenList }
+
+fn pat_field_reverse_inner(list: PatFieldList, acc: PatFieldList) -> PatFieldList {
+    match list {
+        PatFieldList::Nil {} => acc,
+        PatFieldList::Cons { head, tail } => {
+            let next: PatFieldList = PatFieldList::Cons { head: head, tail: acc };
+            pat_field_reverse_inner(tail, next)
+        },
+    }
+}
+
+fn pat_field_reverse(list: PatFieldList) -> PatFieldList {
+    pat_field_reverse_inner(list, PatFieldList::Nil {})
+}
+
+fn parse_pat_fields(src: String, list: TokenList) -> ParsePatFields {
+    let lbrace: I64 = 123;
+    let rbrace: I64 = 125;
+    let comma: I64 = 44;
+    let colon: I64 = 58;
+    let mut cur: TokenList = list;
+    if token_is_sym(peek(cur), lbrace) == 1 {
+        cur = advance(cur);
+    };
+    let mut fields: PatFieldList = PatFieldList::Nil {};
+    let mut done: I64 = 0;
+    while token_is_sym(peek(cur), rbrace) == 0 && done == 0 {
+        let name: ParseIdent = parse_ident(src, cur);
+        cur = name.rest;
+        let mut binding: Span = name.name;
+        if token_is_sym(peek(cur), colon) == 1 {
+            cur = advance(cur);
+            let bind: ParseIdent = parse_ident(src, cur);
+            binding = bind.name;
+            cur = bind.rest;
+        };
+        let field: PatField = PatField { name: name.name, binding: binding };
+        fields = PatFieldList::Cons { head: field, tail: fields };
+        if token_is_sym(peek(cur), comma) == 1 {
+            cur = advance(cur);
+        } else {
+            done = 1;
+        }
+    };
+    if token_is_sym(peek(cur), rbrace) == 1 {
+        cur = advance(cur);
+    };
+    ParsePatFields { fields: pat_field_reverse(fields), rest: cur }
+}
+
+struct ParsePatFields { fields: PatFieldList, rest: TokenList }
+
+fn parse_pattern(src: String, list: TokenList) -> ParsePattern {
+    let tok: Token = peek(list);
+    let span: Span = Span { start: tok.start, end: tok.end };
+    if token_is_ident(tok) == 1 && is_underscore(src, span) == 1 {
+        ParsePattern { pat: Pattern::Wildcard {}, rest: advance(list) }
+    } else {
+        let path: ParsePath = parse_path(src, list);
+        let mut cur: TokenList = path.rest;
+        let mut fields: PatFieldList = PatFieldList::Nil {};
+        let mut has_braces: I64 = 0;
+        if token_is_sym(peek(cur), 123) == 1 {
+            let parsed: ParsePatFields = parse_pat_fields(src, cur);
+            fields = parsed.fields;
+            cur = parsed.rest;
+            has_braces = 1;
+        };
+        if has_braces == 1 {
+            ParsePattern { pat: Pattern::Struct { path: path.path, fields: fields }, rest: cur }
+        } else {
+            ParsePattern { pat: Pattern::Path { path: path.path }, rest: cur }
+        }
+    }
+}
+
+struct ParsePattern { pat: Pattern, rest: TokenList }
+
+fn parse_match_arms(src: String, list: TokenList) -> ParseArms {
+    let lbrace: I64 = 123;
+    let rbrace: I64 = 125;
+    let comma: I64 = 44;
+    let eq: I64 = 61;
+    let gt: I64 = 62;
+    let mut cur: TokenList = list;
+    if token_is_sym(peek(cur), lbrace) == 1 {
+        cur = advance(cur);
+    };
+    let mut arms: MatchArmList = MatchArmList::Nil {};
+    let mut done: I64 = 0;
+    while token_is_sym(peek(cur), rbrace) == 0 && done == 0 {
+        let pat: ParsePattern = parse_pattern(src, cur);
+        cur = pat.rest;
+        if is_double_sym(cur, eq, gt) == 1 {
+            cur = advance(cur);
+            cur = advance(cur);
+        };
+        let body: ParseExpr = parse_expr(src, cur);
+        cur = body.rest;
+        let arm: MatchArm = MatchArm { pat: pat.pat, body: body.expr };
+        arms = MatchArmList::Cons { head: arm, tail: arms };
+        if token_is_sym(peek(cur), comma) == 1 {
+            cur = advance(cur);
+        } else {
+            done = 1;
+        }
+    };
+    if token_is_sym(peek(cur), rbrace) == 1 {
+        cur = advance(cur);
+    };
+    ParseArms { arms: match_arm_reverse(arms), rest: cur }
+}
+
+fn match_arm_reverse_inner(list: MatchArmList, acc: MatchArmList) -> MatchArmList {
+    match list {
+        MatchArmList::Nil {} => acc,
+        MatchArmList::Cons { head, tail } => {
+            let next: MatchArmList = MatchArmList::Cons { head: head, tail: acc };
+            match_arm_reverse_inner(tail, next)
+        },
+    }
+}
+
+fn match_arm_reverse(list: MatchArmList) -> MatchArmList {
+    match_arm_reverse_inner(list, MatchArmList::Nil {})
+}
+
+fn parse_block(src: String, list: TokenList) -> ParseBlock {
+    let lbrace: I64 = 123;
+    let rbrace: I64 = 125;
+    let mut cur: TokenList = list;
+    if token_is_sym(peek(cur), lbrace) == 1 {
+        cur = advance(cur);
+    };
+    let stmts: ParseStmtList = parse_stmt_list(src, cur);
+    cur = stmts.rest;
+    if token_is_sym(peek(cur), rbrace) == 1 {
+        cur = advance(cur);
+    };
+    ParseBlock { block: Block { stmts: stmts.stmts }, rest: cur }
+}
+
+fn parse_block_skip(list: TokenList) -> ParseBlock {
+    let lbrace: I64 = 123;
+    let rbrace: I64 = 125;
+    let mut cur: TokenList = list;
+    if token_is_sym(peek(cur), lbrace) == 1 {
+        cur = advance(cur);
+    };
+    let mut depth: I64 = 1;
+    while depth > 0 {
+        match cur {
+            TokenList::Nil {} => { depth = 0; },
+            TokenList::Cons { head, tail } => {
+                if token_is_sym(head, lbrace) == 1 {
+                    depth = depth + 1;
+                } else {
+                    if token_is_sym(head, rbrace) == 1 {
+                        depth = depth - 1;
+                    };
+                };
+                cur = tail;
+            },
+        }
+    };
+    ParseBlock { block: Block { stmts: StmtList::Nil {} }, rest: cur }
+}
+
+struct ParseStmtList { stmts: StmtList, rest: TokenList }
+
+fn parse_stmt_list(src: String, list: TokenList) -> ParseStmtList {
+    let rbrace: I64 = 125;
+    let tok: Token = peek(list);
+    if token_is_sym(tok, rbrace) == 1 {
+        return ParseStmtList { stmts: StmtList::Nil {}, rest: list };
+    };
+    if token_is_kw_fn(tok) == 1 || token_is_kw_struct(tok) == 1 || token_is_kw_enum(tok) == 1 || token_is_kw_extern(tok) == 1 {
+        return ParseStmtList { stmts: StmtList::Nil {}, rest: list };
+    };
+    match list {
+        TokenList::Nil {} => ParseStmtList { stmts: StmtList::Nil {}, rest: list },
+        _ => {
+            let stmt: ParseStmt = parse_stmt(src, list);
+            let tail: ParseStmtList = parse_stmt_list(src, stmt.rest);
+            let stmts: StmtList = StmtList::Cons { head: stmt.stmt, tail: tail.stmts };
+            ParseStmtList { stmts: stmts, rest: tail.rest }
+        },
+    }
+}
+
+struct ParseStmt { stmt: Stmt, rest: TokenList }
+
+fn token_is_kw_let(tok: Token) -> I64 {
+    match tok.kind {
+        TokenKind::KwLet {} => 1,
+        _ => 0,
+    }
+}
+
+fn token_is_kw_mut(tok: Token) -> I64 {
+    match tok.kind {
+        TokenKind::KwMut {} => 1,
+        _ => 0,
+    }
+}
+
+fn token_is_kw_return(tok: Token) -> I64 {
+    match tok.kind {
+        TokenKind::KwReturn {} => 1,
+        _ => 0,
+    }
+}
+
+fn token_is_kw_if(tok: Token) -> I64 {
+    match tok.kind {
+        TokenKind::KwIf {} => 1,
+        _ => 0,
+    }
+}
+
+fn token_is_kw_else(tok: Token) -> I64 {
+    match tok.kind {
+        TokenKind::KwElse {} => 1,
+        _ => 0,
+    }
+}
+
+fn token_is_kw_while(tok: Token) -> I64 {
+    match tok.kind {
+        TokenKind::KwWhile {} => 1,
+        _ => 0,
+    }
+}
+
+fn token_is_kw_match(tok: Token) -> I64 {
+    match tok.kind {
+        TokenKind::KwMatch {} => 1,
+        _ => 0,
+    }
+}
+
+fn parse_stmt(src: String, list: TokenList) -> ParseStmt {
+    let semi: I64 = 59;
+    let eq: I64 = 61;
+    let mut cur: TokenList = list;
+    let tok: Token = peek(cur);
+    if token_is_kw_let(tok) == 1 {
+        cur = advance(cur);
+        let mut mutable: I64 = 0;
+        if token_is_kw_mut(peek(cur)) == 1 {
+            mutable = 1;
+            cur = advance(cur);
+        };
+        let name: ParseIdent = parse_ident(src, cur);
+        cur = name.rest;
+        let mut ty: Type = Type::Unit {};
+        if token_is_sym(peek(cur), 58) == 1 {
+            cur = advance(cur);
+            let parsed: ParseType = parse_type(src, cur);
+            ty = parsed.ty;
+            cur = parsed.rest;
+        };
+        if token_is_sym(peek(cur), eq) == 1 {
+            cur = advance(cur);
+        };
+        let value: ParseExpr = parse_expr(src, cur);
+        cur = value.rest;
+        if token_is_sym(peek(cur), semi) == 1 {
+            cur = advance(cur);
+        };
+        let stmt: Stmt = Stmt::Let { name: name.name, mutable: mutable, ty: ty, value: value.expr };
+        return ParseStmt { stmt: stmt, rest: cur };
+    };
+    if token_is_kw_return(tok) == 1 {
+        cur = advance(cur);
+        let value: ParseExpr = parse_expr(src, cur);
+        cur = value.rest;
+        if token_is_sym(peek(cur), semi) == 1 {
+            cur = advance(cur);
+        };
+        let stmt: Stmt = Stmt::Return { expr: value.expr };
+        return ParseStmt { stmt: stmt, rest: cur };
+    };
+    let expr: ParseExpr = parse_expr(src, cur);
+    cur = expr.rest;
+    if token_is_sym(peek(cur), semi) == 1 {
+        cur = advance(cur);
+    };
+    ParseStmt { stmt: Stmt::Expr { expr: expr.expr }, rest: cur }
+}
+
+fn parse_expr(src: String, list: TokenList) -> ParseExpr {
+    parse_assignment(src, list)
+}
+
+fn parse_assignment(src: String, list: TokenList) -> ParseExpr {
+    let eq: I64 = 61;
+    let left: ParseExpr = parse_compare(src, list);
+    let mut cur: TokenList = left.rest;
+    if token_is_sym(peek(cur), eq) == 1 && is_double_sym(cur, eq, eq) == 0 {
+        cur = advance(cur);
+        let right: ParseExpr = parse_assignment(src, cur);
+        let expr: Expr = Expr::Assign { target: left.expr, value: right.expr };
+        ParseExpr { expr: expr, rest: right.rest }
+    } else {
+        ParseExpr { expr: left.expr, rest: cur }
+    }
+}
+
+fn parse_compare(src: String, list: TokenList) -> ParseExpr {
+    let lt: I64 = 60;
+    let gt: I64 = 62;
+    let eq: I64 = 61;
+    let bang: I64 = 33;
+    let left: ParseExpr = parse_add(src, list);
+    let mut cur: TokenList = left.rest;
+    if token_is_sym(peek(cur), lt) == 1 {
+        cur = advance(cur);
+        let mut op: BinOp = BinOp::Lt {};
+        if token_is_sym(peek(cur), eq) == 1 {
+            cur = advance(cur);
+            op = BinOp::Le {};
+        };
+        let right: ParseExpr = parse_add(src, cur);
+        let expr: Expr = Expr::Binary { op: op, left: left.expr, right: right.expr };
+        return ParseExpr { expr: expr, rest: right.rest };
+    };
+    if token_is_sym(peek(cur), gt) == 1 {
+        cur = advance(cur);
+        let mut op: BinOp = BinOp::Gt {};
+        if token_is_sym(peek(cur), eq) == 1 {
+            cur = advance(cur);
+            op = BinOp::Ge {};
+        };
+        let right: ParseExpr = parse_add(src, cur);
+        let expr: Expr = Expr::Binary { op: op, left: left.expr, right: right.expr };
+        return ParseExpr { expr: expr, rest: right.rest };
+    };
+    if is_double_sym(cur, eq, eq) == 1 {
+        cur = advance(cur);
+        cur = advance(cur);
+        let right: ParseExpr = parse_add(src, cur);
+        let expr: Expr = Expr::Binary { op: BinOp::Eq {}, left: left.expr, right: right.expr };
+        return ParseExpr { expr: expr, rest: right.rest };
+    };
+    if is_double_sym(cur, bang, eq) == 1 {
+        cur = advance(cur);
+        cur = advance(cur);
+        let right: ParseExpr = parse_add(src, cur);
+        let expr: Expr = Expr::Binary { op: BinOp::Ne {}, left: left.expr, right: right.expr };
+        return ParseExpr { expr: expr, rest: right.rest };
+    };
+    ParseExpr { expr: left.expr, rest: cur }
+}
+
+fn parse_add(src: String, list: TokenList) -> ParseExpr {
+    let plus: I64 = 43;
+    let minus: I64 = 45;
+    let left: ParseExpr = parse_mul(src, list);
+    parse_add_tail(src, left.expr, left.rest, plus, minus)
+}
+
+fn parse_add_tail(src: String, left: Expr, list: TokenList, plus: I64, minus: I64) -> ParseExpr {
+    let mut cur: TokenList = list;
+    if token_is_sym(peek(cur), plus) == 1 || token_is_sym(peek(cur), minus) == 1 {
+        let op: BinOp = if token_is_sym(peek(cur), plus) == 1 { BinOp::Add {} } else { BinOp::Sub {} };
+        cur = advance(cur);
+        let right: ParseExpr = parse_mul(src, cur);
+        let expr: Expr = Expr::Binary { op: op, left: left, right: right.expr };
+        return parse_add_tail(src, expr, right.rest, plus, minus);
+    };
+    ParseExpr { expr: left, rest: cur }
+}
+
+fn parse_mul(src: String, list: TokenList) -> ParseExpr {
+    let star: I64 = 42;
+    let slash: I64 = 47;
+    let left: ParseExpr = parse_postfix(src, list);
+    parse_mul_tail(src, left.expr, left.rest, star, slash)
+}
+
+fn parse_mul_tail(src: String, left: Expr, list: TokenList, star: I64, slash: I64) -> ParseExpr {
+    let mut cur: TokenList = list;
+    if token_is_sym(peek(cur), star) == 1 || token_is_sym(peek(cur), slash) == 1 {
+        let op: BinOp = if token_is_sym(peek(cur), star) == 1 { BinOp::Mul {} } else { BinOp::Div {} };
+        cur = advance(cur);
+        let right: ParseExpr = parse_postfix(src, cur);
+        let expr: Expr = Expr::Binary { op: op, left: left, right: right.expr };
+        return parse_mul_tail(src, expr, right.rest, star, slash);
+    };
+    ParseExpr { expr: left, rest: cur }
+}
+
+fn parse_postfix(src: String, list: TokenList) -> ParseExpr {
+    let lparen: I64 = 40;
+    let dot: I64 = 46;
+    let mut cur: TokenList = list;
+    let prim: ParseExpr = parse_primary(src, cur);
+    cur = prim.rest;
+    let mut expr: Expr = prim.expr;
+    let mut done: I64 = 0;
+    while done == 0 {
+        if token_is_sym(peek(cur), lparen) == 1 {
+            let args: ParseArgs = parse_args(src, cur);
+            cur = args.rest;
+            expr = Expr::Call { callee: expr, args: args.args };
+        } else {
+            if token_is_sym(peek(cur), dot) == 1 {
+                cur = advance(cur);
+                let name: ParseIdent = parse_ident(src, cur);
+                cur = name.rest;
+                expr = Expr::Field { base: expr, name: name.name };
+            } else {
+                done = 1;
+            }
+        }
+    };
+    ParseExpr { expr: expr, rest: cur }
+}
+
+fn parse_primary(src: String, list: TokenList) -> ParseExpr {
+    let lbrace: I64 = 123;
+    let tok: Token = peek(list);
+    match tok.kind {
+        TokenKind::Int {} => {
+            let span: Span = Span { start: tok.start, end: tok.end };
+            ParseExpr { expr: Expr::Int { span: span }, rest: advance(list) }
+        },
+        TokenKind::KwTrue {} => {
+            let span: Span = Span { start: tok.start, end: tok.end };
+            ParseExpr { expr: Expr::Bool { value: 1 }, rest: advance(list) }
+        },
+        TokenKind::KwFalse {} => {
+            let span: Span = Span { start: tok.start, end: tok.end };
+            ParseExpr { expr: Expr::Bool { value: 0 }, rest: advance(list) }
+        },
+        _ => {
+            if token_is_kw_if(tok) == 1 {
+                return parse_if_expr(src, list);
+            };
+            if token_is_kw_while(tok) == 1 {
+                return parse_while_expr(src, list);
+            };
+            if token_is_kw_match(tok) == 1 {
+                return parse_match_expr(src, list);
+            };
+            if token_is_sym(tok, lbrace) == 1 {
+                let block: ParseBlock = parse_block(src, list);
+                return ParseExpr { expr: Expr::Block { block: block.block }, rest: block.rest };
+            };
+            if token_is_ident(tok) == 1 {
+                let path: ParsePath = parse_path(src, list);
+                let mut cur: TokenList = path.rest;
+                if token_is_sym(peek(cur), lbrace) == 1 {
+                    let fields: ParseFieldsInit = parse_field_inits(src, cur);
+                    cur = fields.rest;
+                    let expr: Expr = Expr::StructInit { path: path.path, fields: fields.fields };
+                    ParseExpr { expr: expr, rest: cur }
+                } else {
+                    ParseExpr { expr: Expr::Path { path: path.path }, rest: cur }
+                }
+            } else {
+                let span: Span = Span { start: tok.start, end: tok.end };
+                ParseExpr { expr: Expr::Int { span: span }, rest: advance(list) }
+            }
+        }
+    }
+}
+
+fn parse_if_expr(src: String, list: TokenList) -> ParseExpr {
+    let mut cur: TokenList = list;
+    if token_is_kw_if(peek(cur)) == 1 {
+        cur = advance(cur);
+    };
+    let cond: ParseExpr = parse_expr(src, cur);
+    cur = cond.rest;
+    let then_block: ParseBlock = parse_block(src, cur);
+    cur = then_block.rest;
+    let mut else_block: Block = Block { stmts: StmtList::Nil {} };
+    if token_is_kw_else(peek(cur)) == 1 {
+        cur = advance(cur);
+        let parsed_else: ParseBlock = parse_block(src, cur);
+        else_block = parsed_else.block;
+        cur = parsed_else.rest;
+    };
+    ParseExpr { expr: Expr::If { cond: cond.expr, then_block: then_block.block, else_block: else_block }, rest: cur }
+}
+
+fn parse_while_expr(src: String, list: TokenList) -> ParseExpr {
+    let mut cur: TokenList = list;
+    if token_is_kw_while(peek(cur)) == 1 {
+        cur = advance(cur);
+    };
+    let cond: ParseExpr = parse_expr(src, cur);
+    cur = cond.rest;
+    let body: ParseBlock = parse_block(src, cur);
+    cur = body.rest;
+    ParseExpr { expr: Expr::While { cond: cond.expr, body: body.block }, rest: cur }
+}
+
+fn parse_match_expr(src: String, list: TokenList) -> ParseExpr {
+    let mut cur: TokenList = list;
+    if token_is_kw_match(peek(cur)) == 1 {
+        cur = advance(cur);
+    };
+    let scrutinee: ParseExpr = parse_expr(src, cur);
+    cur = scrutinee.rest;
+    let arms: ParseArms = parse_match_arms(src, cur);
+    cur = arms.rest;
+    ParseExpr { expr: Expr::Match { scrutinee: scrutinee.expr, arms: arms.arms }, rest: cur }
+}
+
+fn parse_fn_item(src: String, list: TokenList) -> ParseItem {
+    let lbrace: I64 = 123;
+    let mut cur: TokenList = list;
+    if token_is_kw_fn(peek(cur)) == 1 {
+        cur = advance(cur);
+    };
+    let ident: ParseIdent = parse_ident(src, cur);
+    cur = ident.rest;
+    let params: ParseParams = parse_params(src, cur);
+    cur = params.rest;
+    let mut ret_ty: Type = Type::Unit {};
+    let tok: Token = peek(cur);
+    match tok.kind {
+        TokenKind::Arrow {} => {
+            cur = advance(cur);
+            let ty: ParseType = parse_type(src, cur);
+            ret_ty = ty.ty;
+            cur = ty.rest;
+        },
+        _ => {},
+    };
+    if token_is_sym(peek(cur), lbrace) == 1 {
+        let block: ParseBlock = parse_block(src, cur);
+        cur = block.rest;
+        let decl: FnDecl = FnDecl { name: ident.name, params: params.params, ret: ret_ty, body: block.block };
+        ParseItem { item: Item::Fn { decl: decl }, rest: cur }
+    } else {
+        let decl: FnDecl = FnDecl { name: ident.name, params: params.params, ret: ret_ty, body: Block { stmts: StmtList::Nil {} } };
+        ParseItem { item: Item::Fn { decl: decl }, rest: cur }
+    }
+}
+
+fn parse_extern_fn_item(src: String, list: TokenList) -> ParseItem {
+    let semi: I64 = 59;
+    let mut cur: TokenList = list;
+    if token_is_kw_extern(peek(cur)) == 1 {
+        cur = advance(cur);
+    };
+    if token_is_kw_fn(peek(cur)) == 1 {
+        cur = advance(cur);
+    };
+    let ident: ParseIdent = parse_ident(src, cur);
+    cur = ident.rest;
+    let params: ParseParams = parse_params(src, cur);
+    cur = params.rest;
+    let mut ret_ty: Type = Type::Unit {};
+    let tok: Token = peek(cur);
+    match tok.kind {
+        TokenKind::Arrow {} => {
+            cur = advance(cur);
+            let ty: ParseType = parse_type(src, cur);
+            ret_ty = ty.ty;
+            cur = ty.rest;
+        },
+        _ => {},
+    };
+    if token_is_sym(peek(cur), semi) == 1 {
+        cur = advance(cur);
+    };
+    let decl: ExternFn = ExternFn { name: ident.name, params: params.params, ret: ret_ty };
+    ParseItem { item: Item::ExternFn { decl: decl }, rest: cur }
+}
+
+fn parse_struct_item(src: String, list: TokenList) -> ParseItem {
+    let mut cur: TokenList = list;
+    if token_is_kw_struct(peek(cur)) == 1 {
+        cur = advance(cur);
+    };
+    let name: ParseIdent = parse_ident(src, cur);
+    cur = name.rest;
+    let fields: ParseFields = parse_fields(src, cur);
+    cur = fields.rest;
+    let decl: StructDecl = StructDecl { name: name.name, fields: fields.fields };
+    ParseItem { item: Item::Struct { decl: decl }, rest: cur }
+}
+
+fn parse_variants(src: String, list: TokenList) -> ParseVariants {
+    let lbrace: I64 = 123;
+    let rbrace: I64 = 125;
+    let comma: I64 = 44;
+    let mut cur: TokenList = list;
+    if token_is_sym(peek(cur), lbrace) == 1 {
+        cur = advance(cur);
+    };
+    let mut variants: VariantList = VariantList::Nil {};
+    let mut done: I64 = 0;
+    while token_is_sym(peek(cur), rbrace) == 0 && done == 0 {
+        let name: ParseIdent = parse_ident(src, cur);
+        cur = name.rest;
+        let mut fields: FieldList = FieldList::Nil {};
+        if token_is_sym(peek(cur), lbrace) == 1 {
+            let parsed_fields: ParseFields = parse_fields(src, cur);
+            fields = parsed_fields.fields;
+            cur = parsed_fields.rest;
+        };
+        let variant: EnumVariant = EnumVariant { name: name.name, fields: fields };
+        variants = VariantList::Cons { head: variant, tail: variants };
+        if token_is_sym(peek(cur), comma) == 1 {
+            cur = advance(cur);
+        } else {
+            done = 1;
+        }
+    };
+    if token_is_sym(peek(cur), rbrace) == 1 {
+        cur = advance(cur);
+    };
+    ParseVariants { variants: variant_reverse(variants), rest: cur }
+}
+
+fn parse_enum_item(src: String, list: TokenList) -> ParseItem {
+    let mut cur: TokenList = list;
+    if token_is_kw_enum(peek(cur)) == 1 {
+        cur = advance(cur);
+    };
+    let name: ParseIdent = parse_ident(src, cur);
+    cur = name.rest;
+    let variants: ParseVariants = parse_variants(src, cur);
+    cur = variants.rest;
+    let decl: EnumDecl = EnumDecl { name: name.name, variants: variants.variants };
+    ParseItem { item: Item::Enum { decl: decl }, rest: cur }
+}
+
+fn parse_item(src: String, list: TokenList) -> ParseItem {
+    let tok: Token = peek(list);
+    if token_is_kw_extern(tok) == 1 {
+        return parse_extern_fn_item(src, list);
+    };
+    if token_is_kw_fn(tok) == 1 {
+        return parse_fn_item(src, list);
+    };
+    if token_is_kw_struct(tok) == 1 {
+        return parse_struct_item(src, list);
+    };
+    if token_is_kw_enum(tok) == 1 {
+        return parse_enum_item(src, list);
+    };
+    let next: TokenList = advance(list);
+    let span: Span = Span { start: tok.start, end: tok.end };
+    ParseItem { item: Item::Unknown { span: span }, rest: next }
+}
+
+fn parse_items(src: String, list: TokenList) -> ItemList {
+    match list {
+        TokenList::Nil {} => ItemList::Nil {},
+        _ => {
+            let parsed: ParseItem = parse_item(src, list);
+            let tail: ItemList = parse_items(src, parsed.rest);
+            ItemList::Cons { head: parsed.item, tail: tail }
+        },
+    }
+}
+
+fn parse_module(src: String) -> Module {
+    let toks: TokenList = lex_list(src);
+    Module { items: parse_items(src, toks) }
+}
