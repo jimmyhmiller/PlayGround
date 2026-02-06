@@ -1,0 +1,9 @@
+enum Tree { Leaf {}, Node { left: Tree, right: Tree } }
+
+fn itemCheck(t: Tree) -> I64 {
+    let one: I64 = 1;
+    match t {
+        Tree::Leaf {} => one,
+        Tree::Node { left, right } => one
+    }
+}

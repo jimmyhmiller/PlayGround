@@ -20,7 +20,7 @@
 //! 6. **Forwarding Safety**: Forwarding bit must not conflict with valid tags
 //! 7. **Root Completeness**: `RootProvider` must enumerate ALL roots
 
-use std::fmt::Debug;
+use core::fmt::Debug;
 
 // =============================================================================
 // Core Type System Trait

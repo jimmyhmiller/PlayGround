@@ -107,6 +107,7 @@ pub enum Expr {
     },
     Break,
     Continue,
+    Return(Box<Expr>),
 
     // Mutation
     Set(String, Box<Expr>),
@@ -229,6 +230,9 @@ impl fmt::Display for Expr {
             }
             Expr::Break => write!(f, "(break)"),
             Expr::Continue => write!(f, "(continue)"),
+            Expr::Return(expr) => {
+                write!(f, "(return {})", expr)
+            }
             Expr::Set(name, value) => {
                 write!(f, "(set! {} {})", name, value)
             }
@@ -285,6 +289,7 @@ fn pretty_print_indent(expr: &Expr, indent: usize) -> String {
         Expr::Var(name) => name.clone(),
         Expr::Break => "(break)".to_string(),
         Expr::Continue => "(continue)".to_string(),
+        Expr::Return(expr) => format!("(return {})", pretty_print_indent(expr, indent)),
         Expr::Opaque(label) => format!("(opaque \"{}\")", label),
 
         // Binary operations - inline if simple

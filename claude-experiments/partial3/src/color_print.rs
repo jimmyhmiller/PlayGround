@@ -108,6 +108,16 @@ fn pretty_print_pvalue(out: &mut String, pv: &PValue, indent: usize, config: &Co
                 out.push_str(RESET);
             }
         }
+        PValue::Return(inner) => {
+            if config.enabled {
+                out.push_str(config.dynamic_color);
+            }
+            out.push_str("return ");
+            if config.enabled {
+                out.push_str(RESET);
+            }
+            pretty_print_pvalue(out, inner, indent, config);
+        }
     }
 }
 
@@ -459,6 +469,11 @@ fn pretty_print_expr_colored(out: &mut String, e: &Expr, indent: usize, config: 
 
         Expr::Break => out.push_str("(break)"),
         Expr::Continue => out.push_str("(continue)"),
+        Expr::Return(expr) => {
+            out.push_str("(return ");
+            pretty_print_expr_colored(out, expr, indent, config);
+            out.push(')');
+        }
 
         // Mutation - color variable as static if value is static
         Expr::Set(name, value) => {

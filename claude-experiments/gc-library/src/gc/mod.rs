@@ -8,50 +8,164 @@
 //! - [`mark_and_sweep::MarkAndSweep`] - Simple mark-and-sweep collector
 //! - [`compacting::CompactingHeap`] - Copying/compacting collector (Cheney's algorithm)
 //! - [`generational::GenerationalGC`] - Generational collector with write barriers
-//! - [`mutex_allocator::MutexAllocator`] - Thread-safe wrapper for any allocator
-
-use std::{error::Error, thread::ThreadId};
+//! - [`mutex_allocator::MutexAllocator`] - Thread-safe wrapper for any allocator (requires `std`)
 
 use crate::traits::{GcTypes, RootProvider, TaggedPointer};
 
 pub mod compacting;
 pub mod generational;
 pub mod mark_and_sweep;
+
+#[cfg(feature = "std")]
 pub mod mutex_allocator;
+
 pub mod usdt_probes;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "std"))]
 mod tests;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "std"))]
 mod adversarial_tests;
 
 // =============================================================================
-// Platform Utilities
+// Memory Provider Trait
 // =============================================================================
 
-/// Get the system page size.
+/// Trait for providing memory regions to the GC.
 ///
-/// This is cached after the first call for efficiency.
-pub fn get_page_size() -> usize {
-    use std::sync::OnceLock;
-    static PAGE_SIZE: OnceLock<usize> = OnceLock::new();
+/// Implementations handle platform-specific memory allocation (mmap, VirtualAlloc, etc.)
+/// or can provide a simple fixed buffer for no_std environments.
+///
+/// # Example (no_std with fixed buffer)
+/// ```rust,ignore
+/// struct FixedMemory {
+///     buffer: &'static mut [u8],
+///     used: usize,
+/// }
+///
+/// impl MemoryProvider for FixedMemory {
+///     fn allocate_region(&mut self, size: usize) -> Option<*mut u8> {
+///         if self.used + size <= self.buffer.len() {
+///             let ptr = self.buffer[self.used..].as_mut_ptr();
+///             self.used += size;
+///             Some(ptr)
+///         } else {
+///             None
+///         }
+///     }
+///     fn page_size(&self) -> usize { 4096 }
+/// }
+/// ```
+pub trait MemoryProvider {
+    /// Allocate a region of at least `size` bytes.
+    ///
+    /// Returns a pointer to the start of the region, or None if allocation failed.
+    /// The memory should be readable and writable.
+    fn allocate_region(&mut self, size: usize) -> Option<*mut u8>;
 
-    *PAGE_SIZE.get_or_init(|| {
-        #[cfg(target_os = "macos")]
-        {
-            unsafe { libc::vm_page_size as usize }
-        }
-        #[cfg(target_os = "linux")]
-        {
-            unsafe { libc::sysconf(libc::_SC_PAGESIZE) as usize }
-        }
-        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-        {
-            4096 // Default fallback
-        }
-    })
+    /// Commit/make accessible a range of previously allocated memory.
+    ///
+    /// Some systems (like mmap with PROT_NONE) reserve address space without
+    /// making it accessible. This method makes the memory usable.
+    ///
+    /// Default implementation assumes memory is already accessible.
+    fn commit(&mut self, _ptr: *mut u8, _size: usize) -> bool {
+        true
+    }
+
+    /// Return the page size for this memory provider.
+    ///
+    /// Used for alignment and growth calculations.
+    fn page_size(&self) -> usize;
 }
+
+// =============================================================================
+// Libc Memory Provider (std feature only)
+// =============================================================================
+
+#[cfg(feature = "std")]
+mod libc_provider {
+    use super::MemoryProvider;
+
+    /// Get the system page size.
+    ///
+    /// This is cached after the first call for efficiency.
+    pub fn get_page_size() -> usize {
+        use std::sync::OnceLock;
+        static PAGE_SIZE: OnceLock<usize> = OnceLock::new();
+
+        *PAGE_SIZE.get_or_init(|| {
+            #[cfg(target_os = "macos")]
+            {
+                unsafe { libc::vm_page_size as usize }
+            }
+            #[cfg(target_os = "linux")]
+            {
+                unsafe { libc::sysconf(libc::_SC_PAGESIZE) as usize }
+            }
+            #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+            {
+                4096 // Default fallback
+            }
+        })
+    }
+
+    /// Memory provider using libc mmap/mprotect.
+    ///
+    /// This is the default provider when the `std` feature is enabled.
+    #[derive(Clone)]
+    pub struct LibcMemoryProvider {
+        page_size: usize,
+    }
+
+    impl LibcMemoryProvider {
+        /// Create a new libc-based memory provider.
+        pub fn new() -> Self {
+            Self {
+                page_size: get_page_size(),
+            }
+        }
+    }
+
+    impl Default for LibcMemoryProvider {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
+    impl MemoryProvider for LibcMemoryProvider {
+        fn allocate_region(&mut self, size: usize) -> Option<*mut u8> {
+            let ptr = unsafe {
+                libc::mmap(
+                    core::ptr::null_mut(),
+                    size,
+                    libc::PROT_NONE,
+                    libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                    -1,
+                    0,
+                )
+            };
+            if ptr == libc::MAP_FAILED {
+                None
+            } else {
+                Some(ptr as *mut u8)
+            }
+        }
+
+        fn commit(&mut self, ptr: *mut u8, size: usize) -> bool {
+            unsafe {
+                libc::mprotect(ptr as *mut _, size, libc::PROT_READ | libc::PROT_WRITE) == 0
+            }
+        }
+
+        fn page_size(&self) -> usize {
+            self.page_size
+        }
+    }
+}
+
+#[cfg(feature = "std")]
+pub use libc_provider::{get_page_size, LibcMemoryProvider};
 
 // =============================================================================
 // Allocator Configuration
@@ -62,7 +176,7 @@ pub fn get_page_size() -> usize {
 pub struct AllocatorOptions {
     /// Whether GC is enabled. If false, memory is never collected.
     pub gc: bool,
-    /// Whether to print GC timing statistics.
+    /// Whether to print GC timing statistics (requires `std`).
     pub print_stats: bool,
     /// Whether to GC on every allocation (for debugging).
     pub gc_always: bool,
@@ -106,6 +220,31 @@ pub enum AllocateAction {
 }
 
 // =============================================================================
+// Allocation Error
+// =============================================================================
+
+/// Error type for allocation failures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AllocError {
+    /// Out of memory - no space available even after GC
+    OutOfMemory,
+    /// Memory provider failed to allocate/commit
+    ProviderFailed,
+    /// Object too large for this allocator
+    ObjectTooLarge,
+}
+
+impl core::fmt::Display for AllocError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            AllocError::OutOfMemory => write!(f, "out of memory"),
+            AllocError::ProviderFailed => write!(f, "memory provider failed"),
+            AllocError::ObjectTooLarge => write!(f, "object too large"),
+        }
+    }
+}
+
+// =============================================================================
 // Allocator Trait
 // =============================================================================
 
@@ -117,31 +256,10 @@ pub enum AllocateAction {
 /// # Type Parameters
 ///
 /// - `T`: The runtime's type system, implementing [`GcTypes`]
-///
-/// # Example
-///
-/// ```rust,ignore
-/// use gc_library::gc::{Allocator, AllocatorOptions, AllocateAction};
-/// use gc_library::example::ExampleRuntime;
-///
-/// fn allocate_object<A: Allocator<ExampleRuntime>>(
-///     alloc: &mut A,
-///     size_words: usize,
-/// ) -> *const u8 {
-///     loop {
-///         match alloc.try_allocate(size_words, ExampleTypeTag::HeapObject).unwrap() {
-///             AllocateAction::Allocated(ptr) => return ptr,
-///             AllocateAction::Gc => {
-///                 // Collect roots and run GC
-///                 alloc.gc(&mut roots);
-///             }
-///         }
-///     }
-/// }
-/// ```
-pub trait Allocator<T: GcTypes>: Sized {
-    /// Create a new allocator with the given options.
-    fn new(options: AllocatorOptions) -> Self;
+/// - `M`: The memory provider, implementing [`MemoryProvider`]
+pub trait Allocator<T: GcTypes, M: MemoryProvider>: Sized {
+    /// Create a new allocator with the given options and memory provider.
+    fn new(options: AllocatorOptions, memory: M) -> Self;
 
     /// Attempt to allocate space for an object.
     ///
@@ -150,13 +268,14 @@ pub trait Allocator<T: GcTypes>: Sized {
     /// - `kind`: The type of object being allocated
     ///
     /// # Returns
-    /// - `AllocateAction::Allocated(ptr)` - Allocation succeeded
-    /// - `AllocateAction::Gc` - Need to run GC before retrying
+    /// - `Ok(AllocateAction::Allocated(ptr))` - Allocation succeeded
+    /// - `Ok(AllocateAction::Gc)` - Need to run GC before retrying
+    /// - `Err(AllocError)` - Fatal allocation error
     fn try_allocate(
         &mut self,
         words: usize,
         kind: T::ObjectKind,
-    ) -> Result<AllocateAction, Box<dyn Error>>;
+    ) -> Result<AllocateAction, AllocError>;
 
     /// Allocate with zeroed memory.
     ///
@@ -166,7 +285,7 @@ pub trait Allocator<T: GcTypes>: Sized {
         &mut self,
         words: usize,
         kind: T::ObjectKind,
-    ) -> Result<AllocateAction, Box<dyn Error>> {
+    ) -> Result<AllocateAction, AllocError> {
         self.try_allocate(words, kind)
     }
 
@@ -181,10 +300,10 @@ pub trait Allocator<T: GcTypes>: Sized {
         &mut self,
         words: usize,
         kind: T::ObjectKind,
-    ) -> Result<T::TaggedValue, Box<dyn Error>> {
+    ) -> Result<T::TaggedValue, AllocError> {
         match self.try_allocate(words, kind)? {
             AllocateAction::Allocated(ptr) => Ok(T::TaggedValue::tag(ptr, kind)),
-            AllocateAction::Gc => Err("Need GC to allocate runtime object".into()),
+            AllocateAction::Gc => Err(AllocError::OutOfMemory),
         }
     }
 
@@ -198,29 +317,6 @@ pub trait Allocator<T: GcTypes>: Sized {
     ///
     /// Called when allocation fails even after GC.
     fn grow(&mut self);
-
-    /// Get a pointer used for thread pause synchronization.
-    ///
-    /// Returns 0 for allocators that don't support this.
-    #[allow(unused)]
-    fn get_pause_pointer(&self) -> usize {
-        0
-    }
-
-    /// Register a thread with the allocator.
-    ///
-    /// Called when a new thread starts that may allocate.
-    fn register_thread(&mut self, _thread_id: ThreadId) {}
-
-    /// Unregister a thread from the allocator.
-    ///
-    /// Called when a thread exits.
-    fn remove_thread(&mut self, _thread_id: ThreadId) {}
-
-    /// Register a parked thread's stack pointer.
-    ///
-    /// Used for stop-the-world GC to know where to scan.
-    fn register_parked_thread(&mut self, _thread_id: ThreadId, _stack_pointer: usize) {}
 
     /// Get the current allocator options.
     fn get_allocation_options(&self) -> AllocatorOptions;
@@ -240,7 +336,7 @@ pub trait Allocator<T: GcTypes>: Sized {
     /// For generational GC, returns a biased pointer for fast card marking.
     /// For non-generational GCs, returns null.
     fn get_card_table_biased_ptr(&self) -> *mut u8 {
-        std::ptr::null_mut()
+        core::ptr::null_mut()
     }
 
     /// Mark a card unconditionally for an object.
@@ -258,4 +354,37 @@ pub trait Allocator<T: GcTypes>: Sized {
     fn get_young_gen_bounds(&self) -> (usize, usize) {
         (0, 0)
     }
+}
+
+// =============================================================================
+// Thread-related methods (std only)
+// =============================================================================
+
+#[cfg(feature = "std")]
+use std::thread::ThreadId;
+
+/// Extension trait for thread-aware allocators (requires `std`).
+#[cfg(feature = "std")]
+pub trait ThreadAwareAllocator<T: GcTypes, M: MemoryProvider>: Allocator<T, M> {
+    /// Get a pointer used for thread pause synchronization.
+    ///
+    /// Returns 0 for allocators that don't support this.
+    fn get_pause_pointer(&self) -> usize {
+        0
+    }
+
+    /// Register a thread with the allocator.
+    ///
+    /// Called when a new thread starts that may allocate.
+    fn register_thread(&mut self, _thread_id: ThreadId) {}
+
+    /// Unregister a thread from the allocator.
+    ///
+    /// Called when a thread exits.
+    fn remove_thread(&mut self, _thread_id: ThreadId) {}
+
+    /// Register a parked thread's stack pointer.
+    ///
+    /// Used for stop-the-world GC to know where to scan.
+    fn register_parked_thread(&mut self, _thread_id: ThreadId, _stack_pointer: usize) {}
 }

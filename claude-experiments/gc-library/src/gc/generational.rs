@@ -4,15 +4,13 @@
 //! surviving objects to an old generation. Write barriers track old-to-young
 //! pointers using a card table.
 
-use std::{error::Error, ffi::c_void, io, marker::PhantomData};
+use alloc::vec::Vec;
+use core::marker::PhantomData;
 
-use libc::mprotect;
-
-use super::get_page_size;
 use super::usdt_probes;
 use crate::traits::{ForwardingSupport, GcObject, GcTypes, RootProvider, TaggedPointer};
 
-use super::{AllocateAction, Allocator, AllocatorOptions, mark_and_sweep::MarkAndSweep};
+use super::{mark_and_sweep::MarkAndSweep, AllocError, AllocateAction, Allocator, AllocatorOptions, MemoryProvider};
 
 const DEFAULT_PAGE_COUNT: usize = 1024;
 const MAX_PAGE_COUNT: usize = 1000000;
@@ -44,7 +42,7 @@ unsafe impl Sync for CardTable {}
 impl CardTable {
     fn new(heap_start: usize, heap_size: usize) -> Self {
         let card_count = heap_size.div_ceil(CARD_SIZE);
-        let mut cards = vec![0u8; card_count];
+        let mut cards = alloc::vec![0u8; card_count];
         let biased_ptr = unsafe { cards.as_mut_ptr().sub(heap_start >> CARD_SIZE_LOG2) };
         Self {
             cards,
@@ -101,18 +99,19 @@ impl CardTable {
 // Young Generation Space
 // =============================================================================
 
-struct Space {
+struct Space<M: MemoryProvider> {
     start: *const u8,
     page_count: usize,
     allocation_offset: usize,
+    memory: M,
 }
 
-unsafe impl Send for Space {}
-unsafe impl Sync for Space {}
+unsafe impl<M: MemoryProvider + Send> Send for Space<M> {}
+unsafe impl<M: MemoryProvider + Sync> Sync for Space<M> {}
 
-impl Space {
+impl<M: MemoryProvider> Space<M> {
     fn byte_count(&self) -> usize {
-        self.page_count * get_page_size()
+        self.page_count * self.memory.page_size()
     }
 
     fn contains(&self, pointer: *const u8) -> bool {
@@ -120,26 +119,6 @@ impl Space {
         let end = start + self.byte_count();
         let pointer = pointer as usize;
         pointer >= start && pointer < end
-    }
-
-    fn contains_allocated(&self, pointer: *const u8) -> bool {
-        let start = self.start as usize;
-        let end = start + self.allocation_offset;
-        let pointer = pointer as usize;
-        pointer >= start && pointer < end
-    }
-
-    fn copy_data_to_offset(&mut self, data: &[u8]) -> isize {
-        unsafe {
-            let start = self.start.add(self.allocation_offset);
-            let new_pointer = start as isize;
-            self.allocation_offset += data.len();
-            if self.allocation_offset % 8 != 0 {
-                panic!("Heap offset is not aligned");
-            }
-            std::ptr::copy_nonoverlapping(data.as_ptr(), start as *mut u8, data.len());
-            new_pointer
-        }
     }
 
     fn write_object<T: GcTypes>(&mut self, offset: usize, size_bytes: usize) -> *const u8 {
@@ -158,7 +137,7 @@ impl Space {
         let header_size = 8;
         let full_size = size_bytes + header_size;
         unsafe {
-            std::ptr::write_bytes(self.start.add(offset) as *mut u8, 0, full_size);
+            core::ptr::write_bytes(self.start.add(offset) as *mut u8, 0, full_size);
         }
 
         heap_object.write_header(size_bytes);
@@ -191,33 +170,25 @@ impl Space {
         self.allocation_offset = 0;
     }
 
-    fn new(default_page_count: usize) -> Self {
-        let pre_allocated_space = unsafe {
-            libc::mmap(
-                std::ptr::null_mut(),
-                get_page_size() * MAX_PAGE_COUNT,
-                libc::PROT_NONE,
-                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
-                -1,
-                0,
-            )
-        };
-        Self::commit_memory(pre_allocated_space, default_page_count * get_page_size()).unwrap();
-        Self {
-            start: pre_allocated_space as *const u8,
+    fn new(mut memory: M, default_page_count: usize) -> Result<Self, AllocError> {
+        let page_size = memory.page_size();
+        let total_size = page_size * MAX_PAGE_COUNT;
+
+        let start = memory
+            .allocate_region(total_size)
+            .ok_or(AllocError::ProviderFailed)?;
+
+        let initial_size = default_page_count * page_size;
+        if !memory.commit(start, initial_size) {
+            return Err(AllocError::ProviderFailed);
+        }
+
+        Ok(Self {
+            start: start as *const u8,
             page_count: default_page_count,
             allocation_offset: 0,
-        }
-    }
-
-    fn commit_memory(addr: *mut c_void, size: usize) -> Result<(), io::Error> {
-        unsafe {
-            if mprotect(addr, size, libc::PROT_READ | libc::PROT_WRITE) != 0 {
-                Err(io::Error::last_os_error())
-            } else {
-                Ok(())
-            }
-        }
+            memory,
+        })
     }
 
     fn can_allocate(&self, size_bytes: usize) -> bool {
@@ -240,15 +211,16 @@ impl Space {
 ///
 /// # Type Parameters
 /// - `T`: The runtime's type system implementing [`GcTypes`]
+/// - `M`: The memory provider implementing [`MemoryProvider`]
 ///
 /// # Requirements
 /// - `T::ObjectHandle` must implement [`ForwardingSupport`] for object promotion
-pub struct GenerationalGC<T: GcTypes>
+pub struct GenerationalGC<T: GcTypes, M: MemoryProvider>
 where
     T::ObjectHandle: ForwardingSupport,
 {
-    young: Space,
-    old: MarkAndSweep<T>,
+    young: Space<M>,
+    old: MarkAndSweep<T, M>,
     copied: Vec<T::ObjectHandle>,
     gc_count: usize,
     full_gc_frequency: usize,
@@ -259,18 +231,21 @@ where
     _phantom: PhantomData<T>,
 }
 
-impl<T: GcTypes> Allocator<T> for GenerationalGC<T>
+impl<T: GcTypes, M: MemoryProvider> Allocator<T, M> for GenerationalGC<T, M>
 where
     T::ObjectHandle: ForwardingSupport,
+    M: Clone,
 {
-    fn new(options: AllocatorOptions) -> Self {
-        let young = Space::new(DEFAULT_PAGE_COUNT * 10);
-        let old = MarkAndSweep::new_with_page_count(DEFAULT_PAGE_COUNT * 100, options);
+    fn new(options: AllocatorOptions, memory: M) -> Self {
+        let young = Space::new(memory.clone(), DEFAULT_PAGE_COUNT * 10)
+            .expect("Failed to create young generation");
+        let old = MarkAndSweep::new_with_page_count(memory, DEFAULT_PAGE_COUNT * 100, options)
+            .expect("Failed to create old generation");
         let card_table = CardTable::new(old.heap_start(), old.heap_size());
         Self {
             young,
             old,
-            copied: vec![],
+            copied: Vec::new(),
             gc_count: 0,
             full_gc_frequency: 100,
             atomic_pause: [0; 8],
@@ -285,7 +260,7 @@ where
         &mut self,
         words: usize,
         kind: T::ObjectKind,
-    ) -> Result<AllocateAction, Box<dyn Error>> {
+    ) -> Result<AllocateAction, AllocError> {
         self.allocate_inner::<false>(words, kind)
     }
 
@@ -293,7 +268,7 @@ where
         &mut self,
         words: usize,
         kind: T::ObjectKind,
-    ) -> Result<AllocateAction, Box<dyn Error>> {
+    ) -> Result<AllocateAction, AllocError> {
         self.allocate_inner::<true>(words, kind)
     }
 
@@ -319,17 +294,12 @@ where
         &mut self,
         words: usize,
         kind: T::ObjectKind,
-    ) -> Result<T::TaggedValue, Box<dyn Error>> {
+    ) -> Result<T::TaggedValue, AllocError> {
         // Allocate in old generation - runtime objects are long-lived
         match self.old.try_allocate(words, kind)? {
             AllocateAction::Allocated(ptr) => Ok(T::TaggedValue::tag(ptr, kind)),
-            AllocateAction::Gc => Err("Need GC to allocate runtime object".into()),
+            AllocateAction::Gc => Err(AllocError::OutOfMemory),
         }
-    }
-
-    #[allow(unused)]
-    fn get_pause_pointer(&self) -> usize {
-        self.atomic_pause.as_ptr() as usize
     }
 
     fn get_allocation_options(&self) -> AllocatorOptions {
@@ -387,15 +357,20 @@ where
     }
 }
 
-impl<T: GcTypes> GenerationalGC<T>
+impl<T: GcTypes, M: MemoryProvider> GenerationalGC<T, M>
 where
     T::ObjectHandle: ForwardingSupport,
 {
+    /// Get a pointer used for thread pause synchronization.
+    pub fn get_pause_pointer(&self) -> usize {
+        self.atomic_pause.as_ptr() as usize
+    }
+
     fn allocate_inner<const ZEROED: bool>(
         &mut self,
         words: usize,
         _kind: T::ObjectKind,
-    ) -> Result<AllocateAction, Box<dyn Error>> {
+    ) -> Result<AllocateAction, AllocError> {
         let size_bytes = words * 8;
         if self.young.can_allocate(size_bytes) {
             let ptr = if ZEROED {
@@ -410,6 +385,7 @@ where
     }
 
     fn minor_gc(&mut self, roots: &dyn RootProvider<T::TaggedValue>) {
+        #[cfg(feature = "std")]
         let start = std::time::Instant::now();
         usdt_probes::fire_gc_minor_start(self.gc_count);
 
@@ -445,7 +421,7 @@ where
         }
 
         // Process remembered set
-        let remembered = std::mem::take(&mut self.remembered_set);
+        let remembered = core::mem::take(&mut self.remembered_set);
         for old_object in remembered {
             self.process_old_gen_object(old_object);
         }
@@ -460,6 +436,7 @@ where
         self.card_table.clear();
 
         usdt_probes::fire_gc_minor_end(self.gc_count);
+        #[cfg(feature = "std")]
         if self.options.print_stats {
             println!("Minor gc took {:?}", start.elapsed());
         }
@@ -470,7 +447,8 @@ where
             return;
         }
 
-        let dirty_cards: std::collections::HashSet<usize> = self
+        // Collect dirty card indices into a set for fast lookup
+        let dirty_cards: alloc::collections::BTreeSet<usize> = self
             .card_table
             .dirty_card_indices()
             .iter()
@@ -483,7 +461,6 @@ where
         self.old.walk_objects_mut(|obj_addr, _heap_obj| {
             let card_index = (obj_addr - old_start) >> CARD_SIZE_LOG2;
             if dirty_cards.contains(&card_index) {
-                // We need a way to get the tagged pointer - use HeapObject's kind
                 let obj = T::ObjectHandle::from_untagged(obj_addr as *const u8);
                 if let Some(kind) = obj.get_object_kind() {
                     let tagged = T::TaggedValue::tag(obj_addr as *const u8, kind);

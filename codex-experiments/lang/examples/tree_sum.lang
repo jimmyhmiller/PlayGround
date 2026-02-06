@@ -1,0 +1,42 @@
+struct Node { left: OptNode, right: OptNode, value: I64 }
+
+enum OptNode { Some { node: Node }, None {} }
+
+fn sum(opt: OptNode) -> I64 {
+    let zero: I64 = 0;
+    match opt {
+        OptNode::Some { node } => node.value + sum(node.left) + sum(node.right),
+        OptNode::None {} => zero
+    }
+}
+
+fn main() -> I64 {
+    let zero: I64 = 0;
+    let one: I64 = 1;
+    let two: I64 = 2;
+    let three: I64 = 3;
+    let four: I64 = 4;
+
+    let leaf1: Node = Node { left: OptNode::None {}, right: OptNode::None {}, value: one };
+    let leaf2: Node = Node { left: OptNode::None {}, right: OptNode::None {}, value: two };
+    let leaf3: Node = Node { left: OptNode::None {}, right: OptNode::None {}, value: three };
+    let leaf4: Node = Node { left: OptNode::None {}, right: OptNode::None {}, value: four };
+
+    let n1: Node = Node {
+        left: OptNode::Some { node: leaf1 },
+        right: OptNode::Some { node: leaf2 },
+        value: zero
+    };
+    let n2: Node = Node {
+        left: OptNode::Some { node: leaf3 },
+        right: OptNode::Some { node: leaf4 },
+        value: zero
+    };
+    let root: Node = Node {
+        left: OptNode::Some { node: n1 },
+        right: OptNode::Some { node: n2 },
+        value: zero
+    };
+
+    sum(OptNode::Some { node: root })
+}

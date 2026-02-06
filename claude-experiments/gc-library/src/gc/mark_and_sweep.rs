@@ -3,14 +3,12 @@
 //! This is a simple non-moving collector that uses a free list for allocation.
 //! Objects are marked during tracing, then unmarked objects are added to the free list.
 
-use std::{error::Error, ffi::c_void, io, marker::PhantomData};
+use alloc::vec::Vec;
+use core::marker::PhantomData;
 
-use libc::mprotect;
-
-use super::get_page_size;
 use crate::traits::{GcObject, GcTypes, RootProvider, TaggedPointer, Word};
 
-use super::{AllocateAction, Allocator, AllocatorOptions};
+use super::{AllocError, AllocateAction, Allocator, AllocatorOptions, MemoryProvider};
 
 const DEFAULT_PAGE_COUNT: usize = 1024;
 const MAX_PAGE_COUNT: usize = 1000000;
@@ -19,25 +17,19 @@ const MAX_PAGE_COUNT: usize = 1000000;
 // Memory Space
 // =============================================================================
 
-struct Space {
+struct Space<M: MemoryProvider> {
     start: *const u8,
     page_count: usize,
     highmark: usize,
-    #[allow(unused)]
-    protected: bool,
+    memory: M,
 }
 
-unsafe impl Send for Space {}
-unsafe impl Sync for Space {}
+unsafe impl<M: MemoryProvider + Send> Send for Space<M> {}
+unsafe impl<M: MemoryProvider + Sync> Sync for Space<M> {}
 
-impl Space {
-    #[allow(unused)]
-    fn word_count(&self) -> usize {
-        (self.page_count * get_page_size()) / 8
-    }
-
+impl<M: MemoryProvider> Space<M> {
     fn byte_count(&self) -> usize {
-        self.page_count * get_page_size()
+        self.page_count * self.memory.page_size()
     }
 
     fn contains(&self, pointer: *const u8) -> bool {
@@ -51,7 +43,7 @@ impl Space {
         unsafe {
             let start = self.start.add(offset);
             let new_pointer = start as isize;
-            std::ptr::copy_nonoverlapping(data.as_ptr(), start as *mut u8, data.len());
+            core::ptr::copy_nonoverlapping(data.as_ptr(), start as *mut u8, data.len());
             new_pointer
         }
     }
@@ -66,67 +58,38 @@ impl Space {
         heap_object.get_pointer()
     }
 
-    #[allow(unused)]
-    fn protect(&mut self) {
-        unsafe {
-            mprotect(
-                self.start as *mut _,
-                self.byte_count() - 1024,
-                libc::PROT_NONE,
-            )
-        };
-        self.protected = true;
-    }
+    fn new(mut memory: M, default_page_count: usize) -> Result<Self, AllocError> {
+        let page_size = memory.page_size();
+        let total_size = page_size * MAX_PAGE_COUNT;
 
-    #[allow(unused)]
-    fn unprotect(&mut self) {
-        unsafe {
-            mprotect(
-                self.start as *mut _,
-                self.byte_count() - 1024,
-                libc::PROT_READ | libc::PROT_WRITE,
-            )
-        };
+        let start = memory
+            .allocate_region(total_size)
+            .ok_or(AllocError::ProviderFailed)?;
 
-        self.protected = false;
-    }
+        let initial_size = default_page_count * page_size;
+        if !memory.commit(start, initial_size) {
+            return Err(AllocError::ProviderFailed);
+        }
 
-    fn new(default_page_count: usize) -> Self {
-        let pre_allocated_space = unsafe {
-            libc::mmap(
-                std::ptr::null_mut(),
-                get_page_size() * MAX_PAGE_COUNT,
-                libc::PROT_NONE,
-                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
-                -1,
-                0,
-            )
-        };
-
-        Self::commit_memory(pre_allocated_space, default_page_count * get_page_size()).unwrap();
-
-        Self {
-            start: pre_allocated_space as *const u8,
+        Ok(Self {
+            start: start as *const u8,
             page_count: default_page_count,
             highmark: 0,
-            protected: false,
-        }
+            memory,
+        })
     }
 
-    fn commit_memory(addr: *mut c_void, size: usize) -> Result<(), io::Error> {
-        unsafe {
-            if mprotect(addr, size, libc::PROT_READ | libc::PROT_WRITE) != 0 {
-                Err(io::Error::last_os_error())
-            } else {
-                Ok(())
-            }
-        }
-    }
-
-    fn double_committed_memory(&mut self) {
+    fn double_committed_memory(&mut self) -> bool {
+        let page_size = self.memory.page_size();
         let new_page_count = self.page_count * 2;
-        Self::commit_memory(self.start as *mut c_void, new_page_count * get_page_size()).unwrap();
-        self.page_count = new_page_count;
+        let new_size = new_page_count * page_size;
+
+        if self.memory.commit(self.start as *mut u8, new_size) {
+            self.page_count = new_page_count;
+            true
+        } else {
+            false
+        }
     }
 
     fn update_highmark(&mut self, highmark: usize) {
@@ -167,7 +130,7 @@ pub struct FreeList {
 impl FreeList {
     fn new(starting_range: FreeListEntry) -> Self {
         FreeList {
-            ranges: vec![starting_range],
+            ranges: alloc::vec![starting_range],
         }
     }
 
@@ -234,14 +197,15 @@ impl FreeList {
 ///
 /// # Type Parameters
 /// - `T`: The runtime's type system implementing [`GcTypes`]
-pub struct MarkAndSweep<T: GcTypes> {
-    space: Space,
+/// - `M`: The memory provider implementing [`MemoryProvider`]
+pub struct MarkAndSweep<T: GcTypes, M: MemoryProvider> {
+    space: Space<M>,
     free_list: FreeList,
     options: AllocatorOptions,
     _phantom: PhantomData<T>,
 }
 
-impl<T: GcTypes> MarkAndSweep<T> {
+impl<T: GcTypes, M: MemoryProvider> MarkAndSweep<T, M> {
     /// Check if a pointer is within this allocator's space.
     pub fn contains(&self, pointer: *const u8) -> bool {
         self.space.contains(pointer)
@@ -259,7 +223,6 @@ impl<T: GcTypes> MarkAndSweep<T> {
 
     fn can_allocate(&self, words: usize) -> bool {
         let word = Word::from_words(words);
-        // Assume 8-byte header for simplicity (implementations may need 16 for large objects)
         let header_size = 8;
         let size = word.to_bytes() + header_size;
         let spot = self
@@ -274,8 +237,7 @@ impl<T: GcTypes> MarkAndSweep<T> {
         &mut self,
         words: Word,
         data: Option<&[u8]>,
-    ) -> Result<AllocateAction, Box<dyn Error>> {
-        // Assume 8-byte header for simplicity
+    ) -> Result<AllocateAction, AllocError> {
         let header_size = 8;
         let size_bytes = words.to_bytes() + header_size;
 
@@ -294,7 +256,6 @@ impl<T: GcTypes> MarkAndSweep<T> {
 
     #[allow(unused)]
     pub fn copy_data_to_offset(&mut self, data: &[u8]) -> *const u8 {
-        // Header size for small objects
         let header_size = 8;
 
         let pointer = self
@@ -312,14 +273,12 @@ impl<T: GcTypes> MarkAndSweep<T> {
     fn mark(&self, roots: &dyn RootProvider<T::TaggedValue>) {
         let mut to_mark: Vec<T::ObjectHandle> = Vec::with_capacity(128);
 
-        // Gather roots from the provider
         roots.enumerate_roots(&mut |_slot_addr, tagged| {
             if tagged.is_heap_pointer() {
                 to_mark.push(T::ObjectHandle::from_tagged(tagged));
             }
         });
 
-        // Mark phase - traverse object graph
         while let Some(object) = to_mark.pop() {
             if object.marked() {
                 continue;
@@ -327,7 +286,6 @@ impl<T: GcTypes> MarkAndSweep<T> {
 
             object.mark();
 
-            // Add heap references to the worklist
             if !object.is_opaque() {
                 for &field_value in object.get_fields() {
                     let tagged = T::TaggedValue::from_usize(field_value);
@@ -350,7 +308,8 @@ impl<T: GcTypes> MarkAndSweep<T> {
                 offset = entry.end();
                 continue;
             }
-            let heap_object = T::ObjectHandle::from_untagged(unsafe { self.space.start.add(offset) });
+            let heap_object =
+                T::ObjectHandle::from_untagged(unsafe { self.space.start.add(offset) });
 
             let full_size = heap_object.full_size();
 
@@ -375,16 +334,20 @@ impl<T: GcTypes> MarkAndSweep<T> {
         }
     }
 
-    #[allow(unused)]
-    pub fn new_with_page_count(page_count: usize, options: AllocatorOptions) -> Self {
-        let space = Space::new(page_count);
+    /// Create a new allocator with a specific page count.
+    pub fn new_with_page_count(
+        memory: M,
+        page_count: usize,
+        options: AllocatorOptions,
+    ) -> Result<Self, AllocError> {
+        let space = Space::new(memory, page_count)?;
         let size = space.byte_count();
-        Self {
+        Ok(Self {
             space,
             free_list: FreeList::new(FreeListEntry { offset: 0, size }),
             options,
             _phantom: PhantomData,
-        }
+        })
     }
 
     /// Walk all live objects in the heap, calling the provided function for each one.
@@ -410,17 +373,17 @@ impl<T: GcTypes> MarkAndSweep<T> {
     }
 }
 
-impl<T: GcTypes> Allocator<T> for MarkAndSweep<T> {
-    fn new(options: AllocatorOptions) -> Self {
-        let page_count = DEFAULT_PAGE_COUNT;
-        Self::new_with_page_count(page_count, options)
+impl<T: GcTypes, M: MemoryProvider> Allocator<T, M> for MarkAndSweep<T, M> {
+    fn new(options: AllocatorOptions, memory: M) -> Self {
+        Self::new_with_page_count(memory, DEFAULT_PAGE_COUNT, options)
+            .expect("Failed to create MarkAndSweep allocator")
     }
 
     fn try_allocate(
         &mut self,
         words: usize,
         _kind: T::ObjectKind,
-    ) -> Result<AllocateAction, Box<dyn std::error::Error>> {
+    ) -> Result<AllocateAction, AllocError> {
         if self.can_allocate(words) {
             self.allocate_inner(Word::from_words(words), None)
         } else {
@@ -432,11 +395,14 @@ impl<T: GcTypes> Allocator<T> for MarkAndSweep<T> {
         if !self.options.gc {
             return;
         }
+
+        #[cfg(feature = "std")]
         let start = std::time::Instant::now();
 
         self.mark(roots);
         self.sweep();
 
+        #[cfg(feature = "std")]
         if self.options.print_stats {
             println!("Mark and sweep took {:?}", start.elapsed());
         }
@@ -444,12 +410,13 @@ impl<T: GcTypes> Allocator<T> for MarkAndSweep<T> {
 
     fn grow(&mut self) {
         let current_max_offset = self.space.byte_count();
-        self.space.double_committed_memory();
-        let after_max_offset = self.space.byte_count();
-        self.free_list.insert(FreeListEntry {
-            offset: current_max_offset,
-            size: after_max_offset - current_max_offset,
-        });
+        if self.space.double_committed_memory() {
+            let after_max_offset = self.space.byte_count();
+            self.free_list.insert(FreeListEntry {
+                offset: current_max_offset,
+                size: after_max_offset - current_max_offset,
+            });
+        }
     }
 
     fn get_allocation_options(&self) -> AllocatorOptions {

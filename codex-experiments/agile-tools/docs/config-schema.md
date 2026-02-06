@@ -25,6 +25,9 @@ timezone = "local"
 [paths]
 projects_root = "~/.scope/projects"
 
+[projects]
+"/Users/jimmyhmiller/Documents/Code/PlayGround/acme-api" = "acme-api"
+
 [ids]
 prefix = "SC"
 pattern = "{adj}-{adj}-{animal}"
@@ -41,7 +44,7 @@ format_version = 1
 conflict_window_seconds = 300
 
 [sync]
-engine = "git"          # git | service | custom
+engine = "git"          # git | service | noop | custom
 remote = ""             # optional
 ```
 
@@ -70,5 +73,7 @@ conflict_window_seconds = 300
 - `editor` is used by `scope issues edit` if `--editor` is not specified.
 - `timezone = "local"` means timestamps are stored in UTC but displayed in local time.
 - `paths.projects_root` must be an absolute path after expansion.
+- `[projects]` maps absolute filesystem paths to project names for cwd-based resolution.
+- Multiple paths can map to the same project (useful for clones or multiple working copies).
 - `ids.wordlist_*` files are optional; built-in lists are used if missing.
 - Any key can be overridden by CLI flags (not fully enumerated here).

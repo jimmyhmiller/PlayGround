@@ -45,6 +45,10 @@ Proposed shape:
 }
 ```
 
+Storage:
+
+- `~/.scope/projects/<subdir>/index/conflicts.json`
+
 ## 4) Resolution
 
 Resolutions are events:

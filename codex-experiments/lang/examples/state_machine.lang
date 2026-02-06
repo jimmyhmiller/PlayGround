@@ -1,0 +1,21 @@
+enum State { Start, Working, Done }
+struct Counter { value: I64 }
+
+fn main() -> I64 {
+    let zero: I64 = 0;
+    let one: I64 = 1;
+    let three: I64 = 3;
+    let five: I64 = 5;
+    let neg_one: I64 = zero - one;
+
+    let mut c: Counter = Counter { value: zero };
+    let mut s: State = State::Start();
+
+    let mut i: I64 = zero;
+    while i < five { c.value = c.value + one; i = i + one; };
+
+    s = State::Working();
+    let x: I64 = match s { State::Start => zero, State::Working => c.value, State::Done => neg_one };
+
+    if x > three { x } else { zero }
+}

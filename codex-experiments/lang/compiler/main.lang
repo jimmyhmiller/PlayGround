@@ -1,0 +1,22 @@
+extern fn read_file(path: String) -> String;
+extern fn arg_str(index: I64) -> String;
+extern fn print_int(v: I64) -> I64;
+
+fn main() -> I64 {
+    let path: String = arg_str(0);
+    let src: String = read_file(path);
+    let mod_ast: Module = parse_module(src);
+    let fn_count: I64 = count_fns(mod_ast.items);
+    let extern_count: I64 = count_externs(mod_ast.items);
+    let struct_count: I64 = count_structs(mod_ast.items);
+    let enum_count: I64 = count_enums(mod_ast.items);
+    let unknown_count: I64 = count_unknown(mod_ast.items);
+    let type_errors: I64 = typecheck_module(src, mod_ast);
+    let _x: I64 = print_int(fn_count);
+    let _y: I64 = print_int(extern_count);
+    let _z: I64 = print_int(struct_count);
+    let _w: I64 = print_int(enum_count);
+    let _u: I64 = print_int(unknown_count);
+    let _t: I64 = print_int(type_errors);
+    0
+}

@@ -6,11 +6,21 @@ description = "Generic garbage collection library with multiple algorithms"
 license = "MIT"
 
 [lib]
-crate-type = ["lib", "cdylib", "staticlib"]
+crate-type = ["lib", "staticlib"]
 
 [dependencies]
-libc = "0.2"
-usdt = "0.5"
+libc = { version = "0.2", optional = true }
+usdt = { version = "0.5", optional = true }
 
 [features]
-thread-safe = []
+default = ["std"]
+std = ["libc"]
+thread-safe = ["std"]
+dtrace = ["usdt", "std"]
+
+[profile.release]
+opt-level = "z"      # Optimize for size
+lto = true           # Link-time optimization
+codegen-units = 1    # Better optimization
+panic = "abort"      # Smaller than unwinding
+strip = true         # Remove symbols

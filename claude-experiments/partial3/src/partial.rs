@@ -45,6 +45,17 @@ fn use_gas(expr: &Expr) {
     });
 }
 
+fn with_gas_disabled<F, R>(f: F) -> R
+where
+    F: FnOnce() -> R,
+{
+    let saved = GAS.with(|g| g.borrow().clone());
+    GAS.with(|g| *g.borrow_mut() = None);
+    let result = f();
+    GAS.with(|g| *g.borrow_mut() = saved);
+    result
+}
+
 /// Set the opaque registry for the current thread
 pub fn set_opaque_registry(registry: OpaqueRegistry) {
     OPAQUE_REGISTRY.with(|r| {
@@ -113,6 +124,14 @@ fn is_var_mutated(name: &str) -> bool {
     MUTATED_VARS.with(|m| {
         m.borrow().contains(name)
     })
+}
+
+fn is_internal_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    if chars.next() != Some('v') {
+        return false;
+    }
+    chars.all(|c| c.is_ascii_digit())
 }
 
 /// Clear the mutated vars tracking - call at the start of a fresh partial evaluation
@@ -251,7 +270,7 @@ fn collect_captured_mutations(expr: &Expr, local_vars: &[String], result: &mut H
                 stack.push((obj, locals));
             }
 
-            Expr::BitNot(inner) | Expr::LogNot(inner) | Expr::Throw(inner) => {
+            Expr::BitNot(inner) | Expr::LogNot(inner) | Expr::Throw(inner) | Expr::Return(inner) => {
                 stack.push((inner, locals));
             }
 
@@ -412,7 +431,7 @@ fn contains_captured_mutation(expr: &Expr, local_vars: &[String]) -> bool {
                 stack.push((obj, locals));
             }
 
-            Expr::BitNot(inner) | Expr::LogNot(inner) | Expr::Throw(inner) => {
+            Expr::BitNot(inner) | Expr::LogNot(inner) | Expr::Throw(inner) | Expr::Return(inner) => {
                 stack.push((inner, locals));
             }
 
@@ -468,6 +487,8 @@ pub enum PValue {
     Static(Value),
     /// A dynamic expression that must be preserved in residual
     Dynamic(Expr),
+    /// A return control-flow value carrying the actual result
+    Return(Box<PValue>),
     /// A static value bound to a variable name - used for mutable values (objects, arrays)
     /// where we need to preserve the variable reference in residuals rather than inlining
     StaticNamed { name: String, value: Value },
@@ -481,6 +502,7 @@ pub fn residualize(pv: &PValue) -> Expr {
     match pv {
         PValue::Static(v) => value_to_expr(v),
         PValue::Dynamic(e) => e.clone(),
+        PValue::Return(inner) => Expr::Return(Box::new(residualize(inner))),
         // For named static values, emit the variable reference instead of the value literal
         PValue::StaticNamed { name, .. } => Expr::Var(name.clone()),
         // For named dynamic values, emit the variable reference (keeps expr for optimization)
@@ -502,7 +524,7 @@ fn is_js_truthy(pv: &PValue) -> Option<bool> {
                 Value::Array(_) | Value::Object(_) | Value::Closure { .. } | Value::Opaque { .. } => true,
             })
         }
-        PValue::Dynamic(_) | PValue::DynamicNamed { .. } => None,
+        PValue::Dynamic(_) | PValue::DynamicNamed { .. } | PValue::Return(_) => None,
     }
 }
 
@@ -535,6 +557,9 @@ enum PEWorkItem {
 
     /// Continue after evaluating call function and args
     ContCall { func_slot: usize, arg_slots: Vec<usize>, result_slot: usize, original_func_expr: Expr, original_args: Vec<Expr>, env: PEnv },
+
+    /// Continue after evaluating inlined call body (unwrap return)
+    ContCallBody { body_slot: usize, result_slot: usize },
 
     /// Continue after evaluating array elements
     ContArray { elem_slots: Vec<usize>, result_slot: usize },
@@ -575,6 +600,9 @@ enum PEWorkItem {
     /// Continue after evaluating throw operand
     ContThrow { inner_slot: usize, result_slot: usize },
 
+    /// Continue after evaluating return operand
+    ContReturn { inner_slot: usize, result_slot: usize },
+
     /// Continue after evaluating new constructor and args
     ContNew { ctor_slot: usize, arg_slots: Vec<usize>, result_slot: usize, original_ctor: Expr, original_args: Vec<Expr>, env: PEnv },
 
@@ -600,7 +628,7 @@ enum PEWorkItem {
     ContWhileBody { cond: Expr, body: Expr, env: PEnv, body_slot: usize, result_slot: usize, initial_env_snapshot: HashMap<String, PValue>, pre_iteration_snapshot: HashMap<String, PValue>, iterations: usize, unrolled_bodies: Vec<Expr> },
 
     /// Continue after evaluating for init
-    ContForInit { cond: Option<Expr>, update: Option<Expr>, body: Expr, env: PEnv, result_slot: usize },
+    ContForInit { cond: Option<Expr>, update: Option<Expr>, body: Expr, env: PEnv, result_slot: usize, init_expr: Option<Expr> },
 
     /// Continue after evaluating for condition
     ContForCond { cond: Option<Expr>, update: Option<Expr>, body: Expr, env: PEnv, cond_slot: usize, result_slot: usize, iterations: usize, init_expr: Option<Expr> },
@@ -634,6 +662,10 @@ pub fn partial_eval(expr: &Expr, env: &PEnv) -> PValue {
 
             PEWorkItem::ContIfCond { then_branch, else_branch, env, cond_slot, result_slot } => {
                 let cond_pv = results[cond_slot].take().unwrap();
+                if matches!(cond_pv, PValue::Return(_)) {
+                    results[result_slot] = Some(cond_pv);
+                    continue;
+                }
                 match is_js_truthy(&cond_pv) {
                     Some(true) => {
                         // Static true - evaluate only then branch
@@ -689,6 +721,10 @@ pub fn partial_eval(expr: &Expr, env: &PEnv) -> PValue {
 
             PEWorkItem::ContLetValue { name, body, outer_env, value_slot, result_slot } => {
                 let value_pv = results[value_slot].clone().unwrap();
+                if matches!(&value_pv, PValue::Return(_)) {
+                    results[result_slot] = Some(value_pv);
+                    continue;
+                }
                 let new_env = penv_with_parent(&outer_env);
 
                 // Determine the binding type
@@ -709,6 +745,7 @@ pub fn partial_eval(expr: &Expr, env: &PEnv) -> PValue {
                     PValue::DynamicNamed { expr, .. } => {
                         PValue::DynamicNamed { name: name.clone(), expr: expr.clone() }
                     }
+                    PValue::Return(inner) => PValue::Return(Box::new(inner.as_ref().clone())),
                 };
                 if name == "v11" || name == "v9" || name == "v21" {
                     eprintln!("DEBUG: ContLetValue binding {} = {:?}, env_ptr={:?}", name, binding, new_env.as_ptr());
@@ -736,6 +773,7 @@ pub fn partial_eval(expr: &Expr, env: &PEnv) -> PValue {
                     let init_expr = match &value_pv {
                         PValue::Static(v) | PValue::StaticNamed { value: v, .. } => value_to_expr(v),
                         PValue::Dynamic(e) | PValue::DynamicNamed { expr: e, .. } => e.clone(),
+                        PValue::Return(inner) => Expr::Return(Box::new(residualize(inner))),
                     };
                     results[result_slot] = Some(PValue::Dynamic(Expr::Let(
                         name,
@@ -791,6 +829,11 @@ pub fn partial_eval(expr: &Expr, env: &PEnv) -> PValue {
                 // If call_result is None, it means we pushed more work items
             }
 
+            PEWorkItem::ContCallBody { body_slot, result_slot } => {
+                let body_pv = results[body_slot].take().unwrap();
+                results[result_slot] = Some(unwrap_return_pv(body_pv));
+            }
+
             PEWorkItem::ContArray { elem_slots, result_slot } => {
                 let elem_pvs: Vec<PValue> = elem_slots.iter().map(|s| results[*s].take().unwrap()).collect();
 
@@ -816,7 +859,14 @@ pub fn partial_eval(expr: &Expr, env: &PEnv) -> PValue {
 
             PEWorkItem::ContLen { arr_slot, result_slot } => {
                 let arr_pv = results[arr_slot].take().unwrap();
+                if let Some(cf) = control_flow_pv(&arr_pv) {
+                    results[result_slot] = Some(cf);
+                    continue;
+                }
                 results[result_slot] = Some(match &arr_pv {
+                    PValue::StaticNamed { name, value: Value::Array(_), .. } if !is_internal_name(name) && is_var_mutated(name) => {
+                        PValue::Dynamic(Expr::Len(Box::new(residualize(&arr_pv))))
+                    }
                     PValue::Static(Value::Array(elements)) |
                     PValue::StaticNamed { value: Value::Array(elements), .. } => {
                         PValue::Static(Value::Int(elements.borrow().len() as i64))
@@ -902,6 +952,15 @@ pub fn partial_eval(expr: &Expr, env: &PEnv) -> PValue {
             PEWorkItem::ContThrow { inner_slot, result_slot } => {
                 let inner_pv = results[inner_slot].take().unwrap();
                 results[result_slot] = Some(PValue::Dynamic(Expr::Throw(Box::new(residualize(&inner_pv)))));
+            }
+
+            PEWorkItem::ContReturn { inner_slot, result_slot } => {
+                let inner_pv = results[inner_slot].take().unwrap();
+                let return_inner = match inner_pv {
+                    PValue::Return(nested) => *nested,
+                    other => other,
+                };
+                results[result_slot] = Some(PValue::Return(Box::new(return_inner)));
             }
 
             PEWorkItem::ContNew { ctor_slot, arg_slots, result_slot, original_ctor, original_args, env } => {
@@ -1056,8 +1115,26 @@ pub fn partial_eval(expr: &Expr, env: &PEnv) -> PValue {
             PEWorkItem::ContSwitchCaseBodyStmt { stmt_slot, remaining_stmts, env, result_slot, mut collected_residuals, last_static } => {
                 let pv = results[stmt_slot].take().unwrap();
                 match &pv {
+                    PValue::Return(inner) => {
+                        if collected_residuals.is_empty() {
+                            results[result_slot] = Some(PValue::Return(Box::new(inner.as_ref().clone())));
+                        } else {
+                            collected_residuals.push(Expr::Return(Box::new(residualize(inner))));
+                            let filtered = filter_dead_code(collected_residuals);
+                            if filtered.is_empty() {
+                                results[result_slot] = Some(PValue::Static(Value::Undefined));
+                            } else if filtered.len() == 1 {
+                                results[result_slot] = Some(PValue::Dynamic(filtered.into_iter().next().unwrap()));
+                            } else {
+                                results[result_slot] = Some(PValue::Dynamic(Expr::Begin(filtered)));
+                            }
+                        }
+                    }
                     PValue::Dynamic(e) | PValue::DynamicNamed { expr: e, .. } => {
+                        let residual = residualize(&pv);
                         let is_break = matches!(e, Expr::Break | Expr::Continue);
+                        let is_return = ends_with_return(&residual);
+                        let is_throw = ends_with_throw(&residual);
                         if is_break {
                             // Break/continue inside a switch should not propagate outward.
                             // Stop executing this case body without emitting the break.
@@ -1069,8 +1146,18 @@ pub fn partial_eval(expr: &Expr, env: &PEnv) -> PValue {
                             } else {
                                 results[result_slot] = Some(PValue::Dynamic(Expr::Begin(filtered)));
                             }
+                        } else if is_return || is_throw {
+                            collected_residuals.push(residual);
+                            let filtered = filter_dead_code(collected_residuals);
+                            if filtered.is_empty() {
+                                results[result_slot] = Some(PValue::Static(Value::Undefined));
+                            } else if filtered.len() == 1 {
+                                results[result_slot] = Some(PValue::Dynamic(filtered.into_iter().next().unwrap()));
+                            } else {
+                                results[result_slot] = Some(PValue::Dynamic(Expr::Begin(filtered)));
+                            }
                         } else {
-                            collected_residuals.push(residualize(&pv));
+                            collected_residuals.push(residual);
                             // Continue with remaining statements
                             work_stack.push(PEWorkItem::ContSwitchCaseBody {
                                 stmts: remaining_stmts,
@@ -1106,8 +1193,8 @@ pub fn partial_eval(expr: &Expr, env: &PEnv) -> PValue {
                 eval_while_after_body(body_pv, cond, body, env, result_slot, initial_env_snapshot, pre_iteration_snapshot, iterations, unrolled_bodies, &mut results, &mut work_stack);
             }
 
-            PEWorkItem::ContForInit { cond, update, body, env, result_slot } => {
-                eval_for_after_init(cond, update, body, env, result_slot, &mut results, &mut work_stack);
+            PEWorkItem::ContForInit { cond, update, body, env, result_slot, init_expr } => {
+                eval_for_after_init(cond, update, body, env, result_slot, init_expr, &mut results, &mut work_stack);
             }
 
             PEWorkItem::ContForCond { cond, update, body, env, cond_slot, result_slot, iterations, init_expr } => {
@@ -1170,12 +1257,12 @@ fn eval_expr(expr: &Expr, env: &PEnv, result_slot: usize, results: &mut Vec<Opti
                 .get(name)
                 .cloned()
                 .unwrap_or_else(|| {
-                    if name == "v11" || name == "v9" || name == "v21" {
+                    if name == "v11" || name == "v9" || name == "v21" || name == "v10" {
                         eprintln!("DEBUG: {} NOT IN ENV, returning Dynamic", name);
                     }
                     PValue::Dynamic(Expr::Var(name.clone()))
                 });
-            if name == "v11" || name == "v9" || name == "v21" {
+            if name == "v11" || name == "v9" || name == "v21" || name == "v10" {
                 eprintln!("DEBUG: Var lookup {} = {:?}", name, pv);
             }
             results[result_slot] = Some(pv);
@@ -1248,11 +1335,29 @@ fn eval_expr(expr: &Expr, env: &PEnv, result_slot: usize, results: &mut Vec<Opti
         // Just store the function as-is. We'll PE the body at call time
         // when we have actual values for captured variables.
         Expr::Fn(params, body) => {
-            // Store the original function as a static opaque value so it can
-            // be placed in arrays/objects and called later.
+            // Store the function as a static opaque value so it can be
+            // placed in arrays/objects and called later. We still PE the
+            // body with params bound to dynamic vars to simplify static
+            // control flow when the body is small enough.
+            const MAX_FN_PE_NODES: usize = 600;
+            let pe_body = if is_pure_expr(body.as_ref())
+                && expr_size_with_limit(body.as_ref(), MAX_FN_PE_NODES) <= MAX_FN_PE_NODES
+            {
+                let fn_env: PEnv = Rc::new(RefCell::new(env.borrow().clone()));
+                for param in params {
+                    fn_env
+                        .borrow_mut()
+                        .insert(param.clone(), PValue::Dynamic(Expr::Var(param.clone())));
+                }
+                let pe = with_gas_disabled(|| partial_eval_sync(body, &fn_env));
+                Box::new(residualize(&pe))
+            } else {
+                body.clone()
+            };
+
             results[result_slot] = Some(PValue::Static(Value::Opaque {
                 label: "Function".to_string(),
-                expr: Expr::Fn(params.clone(), body.clone()),
+                expr: Expr::Fn(params.clone(), pe_body),
                 state: None,
             }));
         }
@@ -1616,6 +1721,21 @@ fn eval_expr(expr: &Expr, env: &PEnv, result_slot: usize, results: &mut Vec<Opti
             });
         }
 
+        Expr::Return(inner) => {
+            let inner_slot = results.len();
+            results.push(None);
+
+            work_stack.push(PEWorkItem::ContReturn {
+                inner_slot,
+                result_slot,
+            });
+            work_stack.push(PEWorkItem::Eval {
+                expr: (**inner).clone(),
+                env: env.clone(),
+                result_slot: inner_slot,
+            });
+        }
+
         // New expression
         Expr::New(ctor, args) => {
             let ctor_slot = results.len();
@@ -1703,6 +1823,7 @@ fn eval_expr(expr: &Expr, env: &PEnv, result_slot: usize, results: &mut Vec<Opti
                     body: (**body).clone(),
                     env: env.clone(),
                     result_slot,
+                    init_expr: Some((**init_expr).clone()),
                 });
                 let init_slot = results.len();
                 results.push(None);
@@ -1719,6 +1840,7 @@ fn eval_expr(expr: &Expr, env: &PEnv, result_slot: usize, results: &mut Vec<Opti
                     (**body).clone(),
                     env.clone(),
                     result_slot,
+                    None,
                     results,
                     work_stack
                 );
@@ -1759,20 +1881,36 @@ fn partial_eval_sync(expr: &Expr, env: &PEnv) -> PValue {
 
 /// Evaluate index operation
 fn eval_index(arr_pv: PValue, idx_pv: PValue) -> PValue {
+    if let Some(cf) = control_flow_pv(&arr_pv) {
+        return cf;
+    }
+    if let Some(cf) = control_flow_pv(&idx_pv) {
+        return cf;
+    }
     eprintln!("DEBUG eval_index: arr_pv type={}, idx_pv type={}",
         match &arr_pv {
             PValue::Static(_) => "Static",
             PValue::StaticNamed { .. } => "StaticNamed",
             PValue::Dynamic(_) => "Dynamic",
             PValue::DynamicNamed { .. } => "DynamicNamed",
+            PValue::Return(_) => "Return",
         },
         match &idx_pv {
             PValue::Static(_) => "Static",
             PValue::StaticNamed { .. } => "StaticNamed",
             PValue::Dynamic(_) => "Dynamic",
             PValue::DynamicNamed { .. } => "DynamicNamed",
+            PValue::Return(_) => "Return",
         }
     );
+    if let PValue::StaticNamed { name, value: Value::Array(_), .. } = &arr_pv {
+        if !is_internal_name(name) && is_var_mutated(name) {
+            return PValue::Dynamic(Expr::Index(
+                Box::new(Expr::Var(name.clone())),
+                Box::new(residualize(&idx_pv)),
+            ));
+        }
+    }
     // Try Uint8Array index access first
     if let (PValue::Static(Value::Opaque { state: Some(ref s), .. }), PValue::Static(Value::Int(i)))
         | (PValue::StaticNamed { value: Value::Opaque { state: Some(ref s), .. }, .. }, PValue::Static(Value::Int(i))) = (&arr_pv, &idx_pv)
@@ -1827,6 +1965,26 @@ fn eval_index(arr_pv: PValue, idx_pv: PValue) -> PValue {
 
 /// Evaluate property access
 fn eval_prop_access(obj_pv: PValue, prop: &str) -> PValue {
+    if let Some(cf) = control_flow_pv(&obj_pv) {
+        return cf;
+    }
+    if let PValue::StaticNamed { name, value: Value::Object(_), .. } = &obj_pv {
+        if !is_internal_name(name) && is_var_mutated(name) {
+            return PValue::Dynamic(Expr::PropAccess(
+                Box::new(Expr::Var(name.clone())),
+                prop.to_string(),
+            ));
+        }
+    }
+    if let PValue::StaticNamed { name, value: Value::Array(_), .. } = &obj_pv {
+        if !is_internal_name(name) && is_var_mutated(name) {
+            return PValue::Dynamic(Expr::PropAccess(
+                Box::new(Expr::Var(name.clone())),
+                prop.to_string(),
+            ));
+        }
+    }
+
     match &obj_pv {
         PValue::Static(Value::Object(obj_ref)) |
         PValue::StaticNamed { value: Value::Object(obj_ref), .. } => {
@@ -1892,10 +2050,16 @@ fn eval_prop_access(obj_pv: PValue, prop: &str) -> PValue {
 
 /// Evaluate property set
 fn eval_prop_set(obj_pv: PValue, prop: &str, value_pv: PValue) -> PValue {
-    let obj_ref = match &obj_pv {
-        PValue::Static(Value::Object(r)) => Some(r.clone()),
-        PValue::StaticNamed { value: Value::Object(r), .. } => Some(r.clone()),
-        _ => None,
+    if let Some(cf) = control_flow_pv(&obj_pv) {
+        return cf;
+    }
+    if let Some(cf) = control_flow_pv(&value_pv) {
+        return cf;
+    }
+    let (obj_ref, obj_name) = match &obj_pv {
+        PValue::Static(Value::Object(r)) => (Some(r.clone()), None),
+        PValue::StaticNamed { name, value: Value::Object(r), .. } => (Some(r.clone()), Some(name.clone())),
+        _ => (None, None),
     };
     let static_value = match &value_pv {
         PValue::Static(v) => Some(v.clone()),
@@ -1903,21 +2067,53 @@ fn eval_prop_set(obj_pv: PValue, prop: &str, value_pv: PValue) -> PValue {
         _ => None,
     };
 
-    match (obj_ref, static_value) {
-        (Some(obj_r), Some(v)) => {
-            obj_r.borrow_mut().insert(prop.to_string(), v.clone());
-            PValue::Static(v)
+    if let (Some(obj_r), Some(v)) = (&obj_ref, &static_value) {
+        if let Some(name) = obj_name {
+            if !is_internal_name(&name) {
+                mark_var_mutated(&name);
+                return PValue::Dynamic(Expr::PropSet(
+                    Box::new(Expr::Var(name)),
+                    prop.to_string(),
+                    Box::new(residualize(&value_pv)),
+                ));
+            }
         }
-        _ => PValue::Dynamic(Expr::PropSet(
-            Box::new(residualize(&obj_pv)),
-            prop.to_string(),
-            Box::new(residualize(&value_pv)),
-        )),
+        obj_r.borrow_mut().insert(prop.to_string(), v.clone());
+        return PValue::Static(v.clone());
     }
+
+    PValue::Dynamic(Expr::PropSet(
+        Box::new(residualize(&obj_pv)),
+        prop.to_string(),
+        Box::new(residualize(&value_pv)),
+    ))
 }
 
 /// Evaluate computed access
 fn eval_computed_access(obj_pv: PValue, key_pv: PValue) -> PValue {
+    if let Some(cf) = control_flow_pv(&obj_pv) {
+        return cf;
+    }
+    if let Some(cf) = control_flow_pv(&key_pv) {
+        return cf;
+    }
+    if let PValue::StaticNamed { name, value: Value::Object(_), .. } = &obj_pv {
+        if !is_internal_name(name) && is_var_mutated(name) {
+            return PValue::Dynamic(Expr::ComputedAccess(
+                Box::new(Expr::Var(name.clone())),
+                Box::new(residualize(&key_pv)),
+            ));
+        }
+    }
+    if let PValue::StaticNamed { name, value: Value::Array(_), .. } = &obj_pv {
+        if !is_internal_name(name) && is_var_mutated(name) {
+            return PValue::Dynamic(Expr::ComputedAccess(
+                Box::new(Expr::Var(name.clone())),
+                Box::new(residualize(&key_pv)),
+            ));
+        }
+    }
+
     match (&obj_pv, &key_pv) {
         (PValue::Static(Value::Object(obj_ref)), PValue::Static(Value::String(k))) |
         (PValue::StaticNamed { value: Value::Object(obj_ref), .. }, PValue::Static(Value::String(k))) |
@@ -1952,6 +2148,15 @@ fn eval_computed_access(obj_pv: PValue, key_pv: PValue) -> PValue {
 
 /// Evaluate computed set
 fn eval_computed_set(obj_pv: PValue, key_pv: PValue, value_pv: PValue) -> PValue {
+    if let Some(cf) = control_flow_pv(&obj_pv) {
+        return cf;
+    }
+    if let Some(cf) = control_flow_pv(&key_pv) {
+        return cf;
+    }
+    if let Some(cf) = control_flow_pv(&value_pv) {
+        return cf;
+    }
     let static_value = match &value_pv {
         PValue::Static(v) => Some(v.clone()),
         PValue::StaticNamed { value: v, .. } => Some(v.clone()),
@@ -1959,10 +2164,10 @@ fn eval_computed_set(obj_pv: PValue, key_pv: PValue, value_pv: PValue) -> PValue
     };
 
     // Try array with integer index
-    let arr_ref = match &obj_pv {
-        PValue::Static(Value::Array(r)) => Some(r.clone()),
-        PValue::StaticNamed { value: Value::Array(r), .. } => Some(r.clone()),
-        _ => None,
+    let (arr_ref, arr_name) = match &obj_pv {
+        PValue::Static(Value::Array(r)) => (Some(r.clone()), None),
+        PValue::StaticNamed { name, value: Value::Array(r), .. } => (Some(r.clone()), Some(name.clone())),
+        _ => (None, None),
     };
     let key_int = match &key_pv {
         PValue::Static(Value::Int(i)) => Some(*i),
@@ -1973,6 +2178,16 @@ fn eval_computed_set(obj_pv: PValue, key_pv: PValue, value_pv: PValue) -> PValue
     if let (Some(arr), Some(i), Some(v)) = (arr_ref, key_int, static_value.clone()) {
         if i >= 0 {
             let i = i as usize;
+            if let Some(name) = arr_name {
+                if !is_internal_name(&name) {
+                    mark_var_mutated(&name);
+                    return PValue::Dynamic(Expr::ComputedSet(
+                        Box::new(Expr::Var(name)),
+                        Box::new(residualize(&key_pv)),
+                        Box::new(residualize(&value_pv)),
+                    ));
+                }
+            }
             let mut borrowed = arr.borrow_mut();
             if i >= borrowed.len() {
                 borrowed.resize(i + 1, Value::Undefined);
@@ -1983,10 +2198,10 @@ fn eval_computed_set(obj_pv: PValue, key_pv: PValue, value_pv: PValue) -> PValue
     }
 
     // Try object with string key
-    let obj_ref = match &obj_pv {
-        PValue::Static(Value::Object(r)) => Some(r.clone()),
-        PValue::StaticNamed { value: Value::Object(r), .. } => Some(r.clone()),
-        _ => None,
+    let (obj_ref, obj_name) = match &obj_pv {
+        PValue::Static(Value::Object(r)) => (Some(r.clone()), None),
+        PValue::StaticNamed { name, value: Value::Object(r), .. } => (Some(r.clone()), Some(name.clone())),
+        _ => (None, None),
     };
     let key_str = match &key_pv {
         PValue::Static(Value::String(k)) => Some(k.clone()),
@@ -1996,6 +2211,16 @@ fn eval_computed_set(obj_pv: PValue, key_pv: PValue, value_pv: PValue) -> PValue
 
     match (obj_ref, key_str, static_value) {
         (Some(obj_r), Some(k), Some(v)) => {
+            if let Some(name) = obj_name {
+                if !is_internal_name(&name) {
+                    mark_var_mutated(&name);
+                    return PValue::Dynamic(Expr::ComputedSet(
+                        Box::new(Expr::Var(name)),
+                        Box::new(residualize(&key_pv)),
+                        Box::new(residualize(&value_pv)),
+                    ));
+                }
+            }
             obj_r.borrow_mut().insert(k, v.clone());
             PValue::Static(v)
         }
@@ -2009,8 +2234,11 @@ fn eval_computed_set(obj_pv: PValue, key_pv: PValue, value_pv: PValue) -> PValue
 
 /// Evaluate set (mutation)
 fn eval_set(name: &str, value_pv: PValue, env: &PEnv) -> PValue {
+    if let Some(cf) = control_flow_pv(&value_pv) {
+        return cf;
+    }
     // Debug: trace v35, v23, v37 assignments
-    if name == "v35" || name == "v23" || name == "v37" || name == "v32" {
+    if name == "v35" || name == "v23" || name == "v37" || name == "v32" || name == "v10" {
         match &value_pv {
             PValue::Static(v) => {
                 if let Value::Int(n) = v {
@@ -2021,6 +2249,9 @@ fn eval_set(name: &str, value_pv: PValue, env: &PEnv) -> PValue {
             }
             PValue::Dynamic(e) => {
                 eprintln!("DEBUG: {} assigned DYNAMIC: {:?}", name, e);
+            }
+            PValue::Return(_) => {
+                eprintln!("DEBUG: {} assigned RETURN", name);
             }
             _ => {
                 eprintln!("DEBUG: {} assigned other: {:?}", name, value_pv);
@@ -2060,8 +2291,9 @@ fn eval_set(name: &str, value_pv: PValue, env: &PEnv) -> PValue {
                 }
                 PValue::DynamicNamed { name: name.to_string(), expr: expr.clone() }
             }
+            PValue::Return(inner) => PValue::Return(Box::new(inner.as_ref().clone())),
         };
-        if name == "v9" || name == "v11" || name == "v21" {
+        if name == "v9" || name == "v11" || name == "v21" || name == "v10" {
             eprintln!("DEBUG: {} reassignment (was_dynamic={}), binding={:?}, value_pv={:?}, env_ptr={:p}",
                 name,
                 was_dynamic,
@@ -2070,16 +2302,24 @@ fn eval_set(name: &str, value_pv: PValue, env: &PEnv) -> PValue {
                     PValue::StaticNamed { .. } => "StaticNamed",
                     PValue::Dynamic(_) => "Dynamic",
                     PValue::DynamicNamed { .. } => "DynamicNamed",
+                    PValue::Return(_) => "Return",
                 },
                 match &value_pv {
                     PValue::Static(_) => "Static",
                     PValue::StaticNamed { .. } => "StaticNamed",
                     PValue::Dynamic(_) => "Dynamic",
                     PValue::DynamicNamed { .. } => "DynamicNamed",
+                    PValue::Return(_) => "Return",
                 },
                 env.as_ptr());
         }
         env.borrow_mut().insert(name.to_string(), binding.clone());
+
+        if is_internal_name(name) {
+            if matches!(binding, PValue::Static(_) | PValue::StaticNamed { .. }) {
+                return binding;
+            }
+        }
 
         match &binding {
             PValue::Static(v) if !is_mutable_value(v) && !was_dynamic => binding,
@@ -2102,17 +2342,24 @@ fn eval_set(name: &str, value_pv: PValue, env: &PEnv) -> PValue {
             PValue::DynamicNamed { expr, .. } => {
                 PValue::DynamicNamed { name: name.to_string(), expr: expr.clone() }
             }
+            PValue::Return(inner) => PValue::Return(Box::new(inner.as_ref().clone())),
         };
-        if name == "v9" {
-            eprintln!("DEBUG: v9 global assignment, binding={:?}",
+        if name == "v9" || name == "v10" {
+            eprintln!("DEBUG: {} global assignment, binding={:?}", name,
                 match &binding {
                     PValue::Static(_) => "Static",
                     PValue::StaticNamed { .. } => "StaticNamed",
                     PValue::Dynamic(_) => "Dynamic",
                     PValue::DynamicNamed { .. } => "DynamicNamed",
+                    PValue::Return(_) => "Return",
                 });
         }
-        env.borrow_mut().insert(name.to_string(), binding);
+        env.borrow_mut().insert(name.to_string(), binding.clone());
+        if is_internal_name(name) {
+            if matches!(binding, PValue::Static(_) | PValue::StaticNamed { .. }) {
+                return binding;
+            }
+        }
         PValue::Dynamic(Expr::Set(name.to_string(), Box::new(residualize(&value_pv))))
     }
 }
@@ -2128,17 +2375,38 @@ fn eval_begin(pvs: Vec<PValue>) -> PValue {
 
     for (i, pv) in pvs.iter().enumerate() {
         let is_last = i == pvs.len() - 1;
+        if let PValue::Return(inner) = pv {
+            if residual_exprs.is_empty() {
+                return PValue::Return(Box::new(inner.as_ref().clone()));
+            }
+            residual_exprs.push(Expr::Return(Box::new(residualize(inner))));
+            let result_expr = if residual_exprs.len() == 1 {
+                residual_exprs.pop().unwrap()
+            } else {
+                Expr::Begin(residual_exprs)
+            };
+            return PValue::Dynamic(result_expr);
+        }
+
+        let is_dynamic = matches!(pv, PValue::Dynamic(_) | PValue::DynamicNamed { .. });
+        if is_dynamic {
+            has_dynamic = true;
+        }
 
         if has_dynamic {
             let residual = residualize(pv);
-            if is_last || !is_pure_expr(&residual) {
-                residual_exprs.push(residual);
+            let is_return = ends_with_return(&residual);
+            let is_throw = ends_with_throw(&residual);
+            if is_last || !is_pure_expr(&residual) || is_return || is_throw {
+                residual_exprs.push(residual.clone());
             }
-        } else if matches!(pv, PValue::Dynamic(_)) {
-            has_dynamic = true;
-            let residual = residualize(pv);
-            if is_last || !is_pure_expr(&residual) {
-                residual_exprs.push(residual);
+            if is_return || is_throw {
+                let result_expr = if residual_exprs.len() == 1 {
+                    residual_exprs.pop().unwrap()
+                } else {
+                    Expr::Begin(residual_exprs)
+                };
+                return PValue::Dynamic(result_expr);
             }
         }
     }
@@ -2158,6 +2426,9 @@ fn eval_begin(pvs: Vec<PValue>) -> PValue {
 
 /// Evaluate logical not
 fn eval_log_not(inner_pv: PValue) -> PValue {
+    if let Some(cf) = control_flow_pv(&inner_pv) {
+        return cf;
+    }
     match inner_pv {
         PValue::Static(Value::Bool(b)) => PValue::Static(Value::Bool(!b)),
         PValue::Static(Value::Int(0)) => PValue::Static(Value::Bool(true)),
@@ -2198,6 +2469,7 @@ fn handle_call(
                 PValue::Dynamic(e) => format!("Dynamic({:?})", std::mem::discriminant(e)),
                 PValue::StaticNamed { .. } => "StaticNamed".to_string(),
                 PValue::DynamicNamed { expr, .. } => format!("DynamicNamed(expr={:?})", std::mem::discriminant(expr)),
+                PValue::Return(_) => "Return".to_string(),
             };
             eprintln!("DEBUG handle_call: v2() called, func_pv type: {}", type_str);
         }
@@ -2411,10 +2683,10 @@ fn handle_call(
         }
 
         // Try Array methods (push, slice, etc.)
-        let arr_ref: Option<Rc<RefCell<Vec<Value>>>> = match &obj_pv {
-            PValue::Static(Value::Array(r)) => Some(r.clone()),
-            PValue::StaticNamed { value: Value::Array(r), .. } => Some(r.clone()),
-            _ => None,
+        let (arr_ref, arr_name): (Option<Rc<RefCell<Vec<Value>>>>, Option<String>) = match &obj_pv {
+            PValue::Static(Value::Array(r)) => (Some(r.clone()), None),
+            PValue::StaticNamed { name, value: Value::Array(r), .. } => (Some(r.clone()), Some(name.clone())),
+            _ => (None, None),
         };
 
         if let Some(arr) = arr_ref {
@@ -2423,6 +2695,16 @@ fn handle_call(
                     // Push all static arguments to the array
                     let all_static = args_pv.iter().all(|pv| matches!(pv, PValue::Static(_) | PValue::StaticNamed { .. }));
                     if all_static {
+                        // push returns the new length
+                        if let Some(name) = &arr_name {
+                            if !is_internal_name(name) {
+                                mark_var_mutated(name);
+                                return Some(PValue::Dynamic(Expr::Call(
+                                    Box::new(Expr::PropAccess(Box::new(Expr::Var(name.clone())), method.clone())),
+                                    args_pv.iter().map(residualize).collect(),
+                                )));
+                            }
+                        }
                         let mut borrowed = arr.borrow_mut();
                         for arg_pv in &args_pv {
                             let value = match arg_pv {
@@ -2432,7 +2714,6 @@ fn handle_call(
                             };
                             borrowed.push(value);
                         }
-                        // push returns the new length
                         return Some(PValue::Static(Value::Int(borrowed.len() as i64)));
                     }
                     // Dynamic args - fall through to residualization
@@ -2463,19 +2744,55 @@ fn handle_call(
                 "pop" => {
                     let mut borrowed = arr.borrow_mut();
                     let popped = borrowed.pop().unwrap_or(Value::Undefined);
+                    if let Some(name) = &arr_name {
+                        if !is_internal_name(name) {
+                            mark_var_mutated(name);
+                            return Some(PValue::Dynamic(Expr::Call(
+                                Box::new(Expr::PropAccess(Box::new(Expr::Var(name.clone())), method.clone())),
+                                args_pv.iter().map(residualize).collect(),
+                            )));
+                        }
+                    }
                     return Some(PValue::Static(popped));
                 }
                 "shift" => {
                     let mut borrowed = arr.borrow_mut();
                     if borrowed.is_empty() {
+                        if let Some(name) = &arr_name {
+                            if !is_internal_name(name) {
+                                mark_var_mutated(name);
+                                return Some(PValue::Dynamic(Expr::Call(
+                                    Box::new(Expr::PropAccess(Box::new(Expr::Var(name.clone())), method.clone())),
+                                    args_pv.iter().map(residualize).collect(),
+                                )));
+                            }
+                        }
                         return Some(PValue::Static(Value::Undefined));
                     }
                     let shifted = borrowed.remove(0);
+                    if let Some(name) = &arr_name {
+                        if !is_internal_name(name) {
+                            mark_var_mutated(name);
+                            return Some(PValue::Dynamic(Expr::Call(
+                                Box::new(Expr::PropAccess(Box::new(Expr::Var(name.clone())), method.clone())),
+                                args_pv.iter().map(residualize).collect(),
+                            )));
+                        }
+                    }
                     return Some(PValue::Static(shifted));
                 }
                 "unshift" => {
                     let all_static = args_pv.iter().all(|pv| matches!(pv, PValue::Static(_) | PValue::StaticNamed { .. }));
                     if all_static {
+                        if let Some(name) = &arr_name {
+                            if !is_internal_name(name) {
+                                mark_var_mutated(name);
+                                return Some(PValue::Dynamic(Expr::Call(
+                                    Box::new(Expr::PropAccess(Box::new(Expr::Var(name.clone())), method.clone())),
+                                    args_pv.iter().map(residualize).collect(),
+                                )));
+                            }
+                        }
                         let mut borrowed = arr.borrow_mut();
                         for (i, arg_pv) in args_pv.iter().enumerate() {
                             let value = match arg_pv {
@@ -2547,7 +2864,7 @@ fn handle_normal_call(
                 env.borrow_mut().insert(param.clone(), arg_pv.clone());
             }
 
-            let result = partial_eval_sync(&body, env);
+            let result = unwrap_return_pv(partial_eval_sync(&body, env));
 
             // Restore any shadowed bindings
             for (param, saved) in &saved_bindings {
@@ -2579,15 +2896,22 @@ fn handle_normal_call(
             // If so, we should NOT inline the call during definition of another closure,
             // because the values might be different at actual call time.
             // We detect this by checking if the closure's env has variables marked as mutated.
+            let free_vars = collect_free_vars(&body, &params);
             let closure_keys: Vec<_> = closure_env.borrow().keys().cloned().collect();
-            let has_mutable_captures = closure_keys.iter().any(|k| is_var_mutated(k));
+            let has_mutable_captures = free_vars
+                .iter()
+                .any(|k| is_var_mutated(k) && !is_internal_name(k) && closure_env.borrow().contains_key(k));
             eprintln!("DEBUG: Closure call - closure_keys: {:?}, has_mutable_captures: {}", closure_keys.iter().take(5).cloned().collect::<Vec<_>>(), has_mutable_captures);
 
             // Also check if the calling environment has variables that this closure needs
             // but which weren't captured (because they were out of scope at definition time)
             let needs_outer_vars = {
                 let closure_borrowed = closure_env.borrow();
-                env.borrow().keys().any(|k| !closure_borrowed.contains_key(k) && is_var_mutated(k))
+                free_vars.iter().any(|k| {
+                    !closure_borrowed.contains_key(k)
+                        && is_var_mutated(k)
+                        && !is_internal_name(k)
+                })
             };
             eprintln!("DEBUG: needs_outer_vars: {}", needs_outer_vars);
 
@@ -2634,11 +2958,18 @@ fn handle_normal_call(
                 call_env.borrow_mut().insert(param.clone(), arg_pv.clone());
             }
 
-            // Push evaluation of body - result goes to our result slot
+            let body_slot = results.len();
+            results.push(None);
+
+            // Push evaluation of body, then unwrap any return
+            work_stack.push(PEWorkItem::ContCallBody {
+                body_slot,
+                result_slot,
+            });
             work_stack.push(PEWorkItem::Eval {
                 expr: body,
                 env: call_env,
-                result_slot,
+                result_slot: body_slot,
             });
             None // Indicates we pushed more work
         }
@@ -2677,7 +3008,7 @@ fn handle_normal_call(
 
             // We need to evaluate the body and then restore the env
             // For now, evaluate synchronously (this is a limitation)
-            let result = partial_eval_sync(&body, env);
+            let result = unwrap_return_pv(partial_eval_sync(&body, env));
 
             // Restore any shadowed bindings
             for (param, saved) in &saved_bindings {
@@ -2714,6 +3045,10 @@ fn eval_switch(
     results: &mut Vec<Option<PValue>>,
     work_stack: &mut Vec<PEWorkItem>,
 ) {
+    if let PValue::Return(inner) = &disc_pv {
+        results[result_slot] = Some(PValue::Return(Box::new(inner.as_ref().clone())));
+        return;
+    }
     match &disc_pv {
         PValue::Static(disc_val) => {
             // Debug: log which static case value we're dispatching on
@@ -2775,6 +3110,17 @@ fn execute_switch_case_body(body: &[Expr], env: &PEnv) -> PValue {
     for stmt in body {
         let pv = partial_eval_sync(stmt, env);
         match &pv {
+            PValue::Return(inner) => {
+                if residuals.is_empty() {
+                    return PValue::Return(Box::new(inner.as_ref().clone()));
+                }
+                residuals.push(Expr::Return(Box::new(residualize(inner))));
+                return if residuals.len() == 1 {
+                    PValue::Dynamic(residuals.pop().unwrap())
+                } else {
+                    PValue::Dynamic(Expr::Begin(residuals))
+                };
+            }
             PValue::Dynamic(e) | PValue::DynamicNamed { expr: e, .. } => {
                 last_static = None;
                 let is_break = matches!(e, Expr::Break | Expr::Continue);
@@ -2812,6 +3158,10 @@ fn eval_while_after_cond(
     results: &mut Vec<Option<PValue>>,
     work_stack: &mut Vec<PEWorkItem>,
 ) {
+    if matches!(cond_pv, PValue::Return(_)) {
+        results[result_slot] = Some(cond_pv);
+        return;
+    }
     // Check if the condition is statically known to be truthy or falsy
     let static_truthiness = is_js_truthy(&cond_pv);
 
@@ -2881,6 +3231,7 @@ fn eval_while_after_body(
             PValue::StaticNamed { value, .. } => value_to_expr(value),
             PValue::Dynamic(e) => e.clone(),
             PValue::DynamicNamed { expr, .. } => expr.clone(),
+            PValue::Return(inner) => Expr::Return(Box::new(residualize(inner))),
         }
     };
 
@@ -2899,8 +3250,26 @@ fn eval_while_after_body(
         updates
     };
 
+    if let PValue::Return(inner) = &body_pv {
+        if unrolled_bodies.is_empty() {
+            results[result_slot] = Some(PValue::Return(Box::new(inner.as_ref().clone())));
+        } else {
+            unrolled_bodies.push(Expr::Return(Box::new(residualize(inner))));
+            if unrolled_bodies.len() == 1 {
+                results[result_slot] = Some(PValue::Dynamic(unrolled_bodies.into_iter().next().unwrap()));
+            } else {
+                results[result_slot] = Some(PValue::Dynamic(Expr::Begin(unrolled_bodies)));
+            }
+        }
+        return;
+    }
+
     // Accumulate the body into unrolled_bodies if it's dynamic
     let body_residual = residualize(&body_pv);
+    if ends_with_return(&body_residual) || ends_with_throw(&body_residual) {
+        results[result_slot] = Some(PValue::Dynamic(body_residual));
+        return;
+    }
     if matches!(body_pv, PValue::Dynamic(_) | PValue::DynamicNamed { .. }) {
         // Check for break - if body always breaks, we're done with this iteration
         if body_always_breaks(&body_residual) {
@@ -2936,6 +3305,10 @@ fn eval_while_after_body(
 
     // Re-evaluate condition after body execution
     let new_cond_pv = partial_eval_sync(&cond, &env);
+    if matches!(new_cond_pv, PValue::Return(_)) {
+        results[result_slot] = Some(new_cond_pv);
+        return;
+    }
     let static_truthiness = is_js_truthy(&new_cond_pv);
 
     match static_truthiness {
@@ -3000,6 +3373,7 @@ fn eval_for_after_init(
     body: Expr,
     env: PEnv,
     result_slot: usize,
+    init_expr: Option<Expr>,
     results: &mut Vec<Option<PValue>>,
     work_stack: &mut Vec<PEWorkItem>,
 ) {
@@ -3021,7 +3395,7 @@ fn eval_for_after_init(
         env,
         result_slot,
         0,
-        None,
+        init_expr,
         results,
         work_stack,
     );
@@ -3057,11 +3431,16 @@ fn eval_for_after_cond_impl(
     const MAX_ITERATIONS: usize = 10000;
     let gas_enabled = GAS.with(|g| g.borrow().is_some());
 
-    let emit_residual_for = |results: &mut Vec<Option<PValue>>, result_slot: usize, env: &PEnv| {
-        let init_pe = init_expr.as_ref().map(|e| Box::new(residualize(&partial_eval_sync(e, env))));
-        let cond_pe = cond.as_ref().map(|c| Box::new(residualize(&partial_eval_sync(c, env))));
-        let update_pe = update.as_ref().map(|u| Box::new(residualize(&partial_eval_sync(u, env))));
-        let body_pe = Box::new(residualize(&partial_eval_sync(&body, env)));
+    if let PValue::Return(inner) = &cond_pv {
+        results[result_slot] = Some(PValue::Return(Box::new(inner.as_ref().clone())));
+        return;
+    }
+
+    let emit_residual_for = |results: &mut Vec<Option<PValue>>, result_slot: usize| {
+        let init_pe = init_expr.as_ref().map(|e| Box::new(e.clone()));
+        let cond_pe = cond.as_ref().map(|c| Box::new(c.clone()));
+        let update_pe = update.as_ref().map(|u| Box::new(u.clone()));
+        let body_pe = Box::new(body.clone());
         results[result_slot] = Some(PValue::Dynamic(Expr::For {
             init: init_pe,
             cond: cond_pe,
@@ -3076,22 +3455,40 @@ fn eval_for_after_cond_impl(
         }
         PValue::Static(Value::Bool(true)) => {
             if !gas_enabled && iterations > MAX_ITERATIONS {
-                emit_residual_for(results, result_slot, &env);
+                emit_residual_for(results, result_slot);
                 return;
             }
 
             // Evaluate body
             let body_pv = partial_eval_sync(&body, &env);
+            if let PValue::Return(inner) = &body_pv {
+                results[result_slot] = Some(PValue::Return(Box::new(inner.as_ref().clone())));
+                return;
+            }
+            let body_residual = residualize(&body_pv);
+            if ends_with_return(&body_residual) || ends_with_throw(&body_residual) {
+                results[result_slot] = Some(PValue::Dynamic(body_residual));
+                return;
+            }
             if matches!(body_pv, PValue::Dynamic(_)) {
-                emit_residual_for(results, result_slot, &env);
+                emit_residual_for(results, result_slot);
                 return;
             }
 
             // Evaluate update if present
             if let Some(ref upd) = update {
                 let upd_pv = partial_eval_sync(upd, &env);
+                if let PValue::Return(inner) = &upd_pv {
+                    results[result_slot] = Some(PValue::Return(Box::new(inner.as_ref().clone())));
+                    return;
+                }
+                let upd_residual = residualize(&upd_pv);
+                if ends_with_return(&upd_residual) || ends_with_throw(&upd_residual) {
+                    results[result_slot] = Some(PValue::Dynamic(upd_residual));
+                    return;
+                }
                 if matches!(upd_pv, PValue::Dynamic(_)) {
-                    emit_residual_for(results, result_slot, &env);
+                    emit_residual_for(results, result_slot);
                     return;
                 }
             }
@@ -3104,6 +3501,9 @@ fn eval_for_after_cond_impl(
             };
 
             match new_cond {
+                PValue::Return(inner) => {
+                    results[result_slot] = Some(PValue::Return(inner));
+                }
                 PValue::Static(Value::Bool(false)) => {
                     results[result_slot] = Some(PValue::Static(Value::Undefined));
                 }
@@ -3123,18 +3523,18 @@ fn eval_for_after_cond_impl(
                     );
                 }
                 _ => {
-                    emit_residual_for(results, result_slot, &env);
+                    emit_residual_for(results, result_slot);
                 }
             }
         }
         _ => {
-            emit_residual_for(results, result_slot, &env);
+            emit_residual_for(results, result_slot);
         }
     }
 }
 
 fn eval_for_after_body(
-    _body_pv: PValue,
+    body_pv: PValue,
     cond: Option<Expr>,
     update: Option<Expr>,
     body: Expr,
@@ -3145,6 +3545,10 @@ fn eval_for_after_body(
     results: &mut Vec<Option<PValue>>,
     work_stack: &mut Vec<PEWorkItem>,
 ) {
+    if let PValue::Return(inner) = body_pv {
+        results[result_slot] = Some(PValue::Return(inner));
+        return;
+    }
     // For now, redirect to the after_cond_impl which handles the loop
     let new_cond = if let Some(ref c) = cond {
         partial_eval_sync(c, &env)
@@ -3179,11 +3583,70 @@ fn eval_try_catch(
 ) {
     let finally_pv = finally_block.as_ref().map(|fb| partial_eval_sync(fb, &env));
 
+    if let PValue::Return(inner) = &try_pv {
+        if let Some(fpv) = finally_pv {
+            let finally_residual = residualize(&fpv);
+            if ends_with_return(&finally_residual) || ends_with_throw(&finally_residual) {
+                results[result_slot] = Some(PValue::Dynamic(finally_residual));
+            } else if is_pure_expr(&finally_residual) {
+                results[result_slot] = Some(PValue::Return(Box::new(inner.as_ref().clone())));
+            } else {
+                results[result_slot] = Some(PValue::Dynamic(Expr::Begin(vec![
+                    finally_residual,
+                    Expr::Return(Box::new(residualize(inner))),
+                ])));
+            }
+        } else {
+            results[result_slot] = Some(PValue::Return(Box::new(inner.as_ref().clone())));
+        }
+        return;
+    }
+
+    let try_residual = residualize(&try_pv);
+    if let Some(thrown_expr) = extract_throw_value(&try_residual) {
+        // Evaluate catch in the current env to allow internal state updates.
+        let mut saved_param: Option<(String, PValue)> = None;
+        if let Some(ref param) = catch_param {
+            if let Some(prev) = env.borrow().get(param).cloned() {
+                saved_param = Some((param.clone(), prev));
+            }
+            let thrown_pv = partial_eval_sync(&thrown_expr, &env);
+            env.borrow_mut().insert(param.clone(), thrown_pv);
+        }
+
+        let catch_pv = partial_eval_sync(&catch_block, &env);
+
+        // Restore catch param binding if it existed.
+        if let Some(ref param) = catch_param {
+            if let Some((_, prev)) = saved_param {
+                env.borrow_mut().insert(param.clone(), prev);
+            } else {
+                env.borrow_mut().remove(param);
+            }
+        }
+
+        results[result_slot] = Some(catch_pv);
+        return;
+    }
+
+    // If the try block can't throw (no explicit throw), ignore catch.
+    if !may_throw_expr(&try_residual) {
+        if let Some(fpv) = finally_pv {
+            results[result_slot] = Some(PValue::Dynamic(Expr::Begin(vec![
+                try_residual,
+                residualize(&fpv),
+            ])));
+        } else {
+            results[result_slot] = Some(try_pv);
+        }
+        return;
+    }
+
     // If the try block is fully static, we can ignore the catch (no throw observed).
     if matches!(try_pv, PValue::Static(_) | PValue::StaticNamed { .. }) {
         if let Some(fpv) = finally_pv {
             results[result_slot] = Some(PValue::Dynamic(Expr::Begin(vec![
-                residualize(&try_pv),
+                try_residual,
                 residualize(&fpv),
             ])));
         } else {
@@ -3209,6 +3672,12 @@ fn eval_try_catch(
 
 /// Partial evaluation of binary operations
 fn partial_eval_binop(op: &BinOp, left: PValue, right: PValue) -> PValue {
+    if let Some(cf) = control_flow_pv(&left) {
+        return cf;
+    }
+    if let Some(cf) = control_flow_pv(&right) {
+        return cf;
+    }
     // First, try to fold if both are static
     if let (PValue::Static(lv), PValue::Static(rv)) = (&left, &right) {
         if let Some(result) = eval_static_binop(op, lv, rv) {
@@ -3511,6 +3980,9 @@ fn mark_modified_vars_dynamic(expr: &Expr, env: &PEnv) {
                 stack.push(catch_block);
                 stack.push(try_block);
             }
+            Expr::Return(inner) => {
+                stack.push(inner);
+            }
 
             _ => {}
         }
@@ -3536,6 +4008,359 @@ fn filter_dead_code(exprs: Vec<Expr>) -> Vec<Expr> {
     }
 
     result
+}
+
+/// Check if an expression may throw (explicit throw only)
+fn may_throw_expr(expr: &Expr) -> bool {
+    let mut stack: Vec<&Expr> = vec![expr];
+
+    while let Some(e) = stack.pop() {
+        match e {
+            Expr::Throw(_) => return true,
+
+            Expr::BinOp(_, l, r) => {
+                stack.push(r);
+                stack.push(l);
+            }
+            Expr::If(cond, then_br, else_br) => {
+                stack.push(else_br);
+                stack.push(then_br);
+                stack.push(cond);
+            }
+            Expr::Let(_, value, body) => {
+                stack.push(body);
+                stack.push(value);
+            }
+            Expr::Fn(_, body) => {
+                stack.push(body);
+            }
+            Expr::Call(func, args) => {
+                for arg in args.iter().rev() {
+                    stack.push(arg);
+                }
+                stack.push(func);
+            }
+            Expr::Begin(exprs) => {
+                for expr in exprs.iter().rev() {
+                    stack.push(expr);
+                }
+            }
+            Expr::While(cond, body) => {
+                stack.push(body);
+                stack.push(cond);
+            }
+            Expr::For { init, cond, update, body } => {
+                stack.push(body);
+                if let Some(u) = update {
+                    stack.push(u);
+                }
+                if let Some(c) = cond {
+                    stack.push(c);
+                }
+                if let Some(i) = init {
+                    stack.push(i);
+                }
+            }
+            Expr::Set(_, value) => {
+                stack.push(value);
+            }
+            Expr::Array(elems) => {
+                for elem in elems.iter().rev() {
+                    stack.push(elem);
+                }
+            }
+            Expr::Index(arr, idx) => {
+                stack.push(idx);
+                stack.push(arr);
+            }
+            Expr::Len(arr) => {
+                stack.push(arr);
+            }
+            Expr::Object(props) => {
+                for (_, v) in props.iter().rev() {
+                    stack.push(v);
+                }
+            }
+            Expr::PropAccess(obj, _) => {
+                stack.push(obj);
+            }
+            Expr::PropSet(obj, _, value) => {
+                stack.push(value);
+                stack.push(obj);
+            }
+            Expr::ComputedAccess(obj, key) => {
+                stack.push(key);
+                stack.push(obj);
+            }
+            Expr::ComputedSet(obj, key, value) => {
+                stack.push(value);
+                stack.push(key);
+                stack.push(obj);
+            }
+            Expr::BitNot(inner) | Expr::LogNot(inner) | Expr::Return(inner) => {
+                stack.push(inner);
+            }
+            Expr::New(ctor, args) => {
+                for a in args.iter().rev() {
+                    stack.push(a);
+                }
+                stack.push(ctor);
+            }
+            Expr::Switch { discriminant, cases, default } => {
+                if let Some(d) = default {
+                    for stmt in d.iter().rev() {
+                        stack.push(stmt);
+                    }
+                }
+                for (cv, body) in cases.iter().rev() {
+                    for stmt in body.iter().rev() {
+                        stack.push(stmt);
+                    }
+                    stack.push(cv);
+                }
+                stack.push(discriminant);
+            }
+            Expr::TryCatch { try_block, catch_block, finally_block, .. } => {
+                if let Some(fb) = finally_block {
+                    stack.push(fb);
+                }
+                stack.push(catch_block);
+                stack.push(try_block);
+            }
+
+            Expr::Int(_) | Expr::Bool(_) | Expr::String(_) | Expr::Var(_)
+            | Expr::Undefined | Expr::Null | Expr::Break | Expr::Continue
+            | Expr::Opaque(_) => {}
+        }
+    }
+
+    false
+}
+
+fn extract_throw_value(expr: &Expr) -> Option<Expr> {
+    match expr {
+        Expr::Throw(inner) => Some((**inner).clone()),
+        Expr::Begin(exprs) => exprs.last().and_then(extract_throw_value),
+        _ => None,
+    }
+}
+
+/// Count nodes in an expression, stopping once the limit is exceeded
+fn expr_size_with_limit(expr: &Expr, limit: usize) -> usize {
+    let mut count: usize = 0;
+    let mut stack: Vec<&Expr> = vec![expr];
+
+    while let Some(e) = stack.pop() {
+        count += 1;
+        if count > limit {
+            return count;
+        }
+
+        match e {
+            Expr::BinOp(_, l, r) => {
+                stack.push(r);
+                stack.push(l);
+            }
+            Expr::If(cond, then_br, else_br) => {
+                stack.push(else_br);
+                stack.push(then_br);
+                stack.push(cond);
+            }
+            Expr::Let(_, value, body) => {
+                stack.push(body);
+                stack.push(value);
+            }
+            Expr::Fn(_, body) => {
+                stack.push(body);
+            }
+            Expr::Call(func, args) => {
+                for arg in args.iter().rev() {
+                    stack.push(arg);
+                }
+                stack.push(func);
+            }
+            Expr::Begin(exprs) => {
+                for expr in exprs.iter().rev() {
+                    stack.push(expr);
+                }
+            }
+            Expr::While(cond, body) => {
+                stack.push(body);
+                stack.push(cond);
+            }
+            Expr::For { init, cond, update, body } => {
+                stack.push(body);
+                if let Some(u) = update {
+                    stack.push(u);
+                }
+                if let Some(c) = cond {
+                    stack.push(c);
+                }
+                if let Some(i) = init {
+                    stack.push(i);
+                }
+            }
+            Expr::Set(_, value) => {
+                stack.push(value);
+            }
+            Expr::Array(elems) => {
+                for elem in elems.iter().rev() {
+                    stack.push(elem);
+                }
+            }
+            Expr::Index(arr, idx) => {
+                stack.push(idx);
+                stack.push(arr);
+            }
+            Expr::Len(arr) => {
+                stack.push(arr);
+            }
+            Expr::Object(props) => {
+                for (_, v) in props.iter().rev() {
+                    stack.push(v);
+                }
+            }
+            Expr::PropAccess(obj, _) => {
+                stack.push(obj);
+            }
+            Expr::PropSet(obj, _, value) => {
+                stack.push(value);
+                stack.push(obj);
+            }
+            Expr::ComputedAccess(obj, key) => {
+                stack.push(key);
+                stack.push(obj);
+            }
+            Expr::ComputedSet(obj, key, value) => {
+                stack.push(value);
+                stack.push(key);
+                stack.push(obj);
+            }
+            Expr::BitNot(inner) | Expr::LogNot(inner) | Expr::Throw(inner) | Expr::Return(inner) => {
+                stack.push(inner);
+            }
+            Expr::New(ctor, args) => {
+                for a in args.iter().rev() {
+                    stack.push(a);
+                }
+                stack.push(ctor);
+            }
+            Expr::Switch { discriminant, cases, default } => {
+                if let Some(d) = default {
+                    for stmt in d.iter().rev() {
+                        stack.push(stmt);
+                    }
+                }
+                for (cv, body) in cases.iter().rev() {
+                    for stmt in body.iter().rev() {
+                        stack.push(stmt);
+                    }
+                    stack.push(cv);
+                }
+                stack.push(discriminant);
+            }
+            Expr::TryCatch { try_block, catch_block, finally_block, .. } => {
+                if let Some(fb) = finally_block {
+                    stack.push(fb);
+                }
+                stack.push(catch_block);
+                stack.push(try_block);
+            }
+
+            Expr::Int(_) | Expr::Bool(_) | Expr::String(_) | Expr::Var(_)
+            | Expr::Undefined | Expr::Null | Expr::Break | Expr::Continue
+            | Expr::Opaque(_) => {}
+        }
+    }
+
+    count
+}
+
+/// Check if an expression ends with a return statement
+fn ends_with_return(expr: &Expr) -> bool {
+    match expr {
+        Expr::Return(_) => true,
+        Expr::Begin(exprs) => exprs.last().map_or(false, ends_with_return),
+        Expr::Let(_, _, body) => ends_with_return(body),
+        Expr::If(_, then_br, else_br) => ends_with_return(then_br) && ends_with_return(else_br),
+        Expr::TryCatch { try_block, catch_block, .. } => {
+            ends_with_return(try_block) && ends_with_return(catch_block)
+        }
+        _ => false,
+    }
+}
+
+fn ends_with_throw(expr: &Expr) -> bool {
+    match expr {
+        Expr::Throw(_) => true,
+        Expr::Begin(exprs) => exprs.last().map_or(false, ends_with_throw),
+        Expr::Let(_, _, body) => ends_with_throw(body),
+        Expr::If(_, then_br, else_br) => ends_with_throw(then_br) && ends_with_throw(else_br),
+        Expr::TryCatch { try_block, catch_block, .. } => {
+            ends_with_throw(try_block) && ends_with_throw(catch_block)
+        }
+        _ => false,
+    }
+}
+
+/// Replace a trailing return with its inner value, preserving side effects
+fn unwrap_return_expr(expr: Expr) -> Expr {
+    match expr {
+        Expr::Return(inner) => *inner,
+        Expr::Begin(mut exprs) => {
+            if let Some(last) = exprs.pop() {
+                let unwrapped = unwrap_return_expr(last);
+                exprs.push(unwrapped);
+                if exprs.len() == 1 {
+                    exprs.pop().unwrap()
+                } else {
+                    Expr::Begin(exprs)
+                }
+            } else {
+                Expr::Undefined
+            }
+        }
+        Expr::Let(name, value, body) => {
+            Expr::Let(name, value, Box::new(unwrap_return_expr(*body)))
+        }
+        Expr::If(cond, then_br, else_br) => {
+            Expr::If(
+                cond,
+                Box::new(unwrap_return_expr(*then_br)),
+                Box::new(unwrap_return_expr(*else_br)),
+            )
+        }
+        Expr::TryCatch { try_block, catch_param, catch_block, finally_block } => {
+            Expr::TryCatch {
+                try_block: Box::new(unwrap_return_expr(*try_block)),
+                catch_param,
+                catch_block: Box::new(unwrap_return_expr(*catch_block)),
+                finally_block,
+            }
+        }
+        other => other,
+    }
+}
+
+/// If a PValue represents a return, unwrap it to the returned value
+fn unwrap_return_pv(pv: PValue) -> PValue {
+    match pv {
+        PValue::Return(inner) => *inner,
+        PValue::Dynamic(e) if ends_with_return(&e) => PValue::Dynamic(unwrap_return_expr(e)),
+        PValue::DynamicNamed { expr, .. } if ends_with_return(&expr) => {
+            PValue::Dynamic(unwrap_return_expr(expr))
+        }
+        other => other,
+    }
+}
+
+fn control_flow_pv(pv: &PValue) -> Option<PValue> {
+    match pv {
+        PValue::Return(inner) => Some(PValue::Return(Box::new(inner.as_ref().clone()))),
+        PValue::Dynamic(e) if ends_with_throw(e) => Some(PValue::Dynamic(e.clone())),
+        PValue::DynamicNamed { expr, .. } if ends_with_throw(expr) => Some(PValue::Dynamic(expr.clone())),
+        _ => None,
+    }
 }
 
 /// Check if a switch case body is empty (contains only break or is empty)
@@ -3656,7 +4481,7 @@ fn is_pure_expr(expr: &Expr) -> bool {
             Expr::Call(_, _) | Expr::Set(_, _) | Expr::PropSet(_, _, _)
             | Expr::ComputedSet(_, _, _) | Expr::While(_, _) | Expr::For { .. }
             | Expr::Begin(_) | Expr::Switch { .. } | Expr::Break | Expr::Continue
-            | Expr::Throw(_) | Expr::TryCatch { .. } | Expr::New(_, _)
+            | Expr::Return(_) | Expr::Throw(_) | Expr::TryCatch { .. } | Expr::New(_, _)
             | Expr::Let(_, _, _) | Expr::Opaque(_) => {
                 return false;
             }
@@ -3701,7 +4526,7 @@ fn has_free_vars(expr: &Expr, env: &PEnv) -> bool {
                 stack.push(WorkItem::Check(left, local_bindings));
             }
 
-            Expr::BitNot(inner) | Expr::LogNot(inner) | Expr::Len(inner) | Expr::Throw(inner) => {
+            Expr::BitNot(inner) | Expr::LogNot(inner) | Expr::Len(inner) | Expr::Throw(inner) | Expr::Return(inner) => {
                 stack.push(WorkItem::Check(inner, local_bindings));
             }
 
@@ -4041,7 +4866,7 @@ fn collect_free_vars(expr: &Expr, bound_vars: &[String]) -> HashSet<String> {
                     stack.push((fb, bound));
                 }
             }
-            Expr::Throw(e) | Expr::BitNot(e) | Expr::LogNot(e) | Expr::Len(e) => {
+            Expr::Throw(e) | Expr::BitNot(e) | Expr::LogNot(e) | Expr::Len(e) | Expr::Return(e) => {
                 stack.push((e, bound));
             }
             Expr::New(ctor, args) => {
@@ -4096,7 +4921,7 @@ fn uses_var(expr: &Expr, var: &str) -> bool {
                         stack.push(WorkItem::Check(left, shadowed));
                     }
 
-                    Expr::BitNot(inner) | Expr::LogNot(inner) | Expr::Len(inner) | Expr::Throw(inner) => {
+                    Expr::BitNot(inner) | Expr::LogNot(inner) | Expr::Len(inner) | Expr::Throw(inner) | Expr::Return(inner) => {
                         stack.push(WorkItem::Check(inner, shadowed));
                     }
 

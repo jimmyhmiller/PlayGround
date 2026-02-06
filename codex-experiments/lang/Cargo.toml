@@ -1,0 +1,14 @@
+[package]
+name = "langc"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "lang_runtime"
+path = "src/lib.rs"
+crate-type = ["staticlib"]
+
+[dependencies]
+inkwell = { version = "0.8.0", features = ["llvm19-1"] }
+
+[dev-dependencies]

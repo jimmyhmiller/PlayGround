@@ -136,6 +136,7 @@ Allowed transitions:
 scope issues init --project acme-api
 scope issues init --project acme-api --sync-engine git
 scope issues init --project lab-notes --sync-engine service
+scope issues init
 ```
 
 Behavior:
@@ -145,6 +146,7 @@ Behavior:
 - Creates `issues/`, `index/`, and `project.toml`
 - Initializes empty `index/issues.json`
 - Registers project in global config if needed
+- If `--project` is omitted, prompts to use the current directory name
 
 Project targeting (all commands):
 
@@ -274,23 +276,64 @@ Behavior:
 - `verify`: checks for drift, duplicates, missing files
 - `scope issues rebuild`: regenerate issue snapshots and index from events
 
-### 6.10 Project and sync management
+### 6.10 Comments
+
+```bash
+scope issues comments add SC:brisk-silent-otter --body "Looks good to me."
+scope issues comments add SC:brisk-silent-otter --body-file ./comment.md
+scope issues comments list SC:brisk-silent-otter
+scope issues comments list SC:brisk-silent-otter --json
+```
+
+Behavior:
+
+- Appends an `issue.comment` event
+- Renders comments into the issue snapshot
+- `list` returns comments from the event log
+
+### 6.11 Conflicts
+
+```bash
+scope issues conflicts list
+scope issues conflicts show conf_001
+scope issues conflicts resolve conf_001 --keep local
+```
+
+Behavior:
+
+- `list` shows unresolved conflicts
+- `show` prints conflict details
+- `resolve` writes a resolution event and updates the issue snapshot
+
+### 6.12 Project and sync management
 
 ```bash
 scope issues projects
+scope issues projects --json
 scope issues project show --project acme-api
 scope issues project config set --project acme-api sync.engine git
 scope issues project config set --project acme-api sync.remote git@github.com:org/acme-scope.git
+scope issues project links --project acme-api
+scope issues project links --json
+scope issues project link --project acme-api --path /path/to/repo
 scope issues sync pull --project acme-api
 scope issues sync push --project acme-api
+scope issues sync status --project acme-api
+scope skills install
+scope skills install --codex
+scope skills install --claude
 ```
 
 Behavior:
 
 - `projects`: list all local project subdirs under `~/.scope/projects/`
+- `projects --json`: machine-readable project list
 - `project show`: print resolved config and paths
 - `project config set`: update per-project overrides in `project.toml`
-- `sync pull/push`: run selected sync engine for that project
+- `project links`: list all paths mapped to projects (optionally filtered)
+- `project link`: map a working directory to a project for cwd-based resolution
+- `sync pull/push/status`: run selected sync engine for that project
+- `skills install`: writes the `scope-cli` skill into `~/.codex/skills` and `~/.claude/skills`
 
 ## 7) History and Events
 

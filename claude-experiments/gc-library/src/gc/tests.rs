@@ -10,7 +10,7 @@ use crate::example::{ExampleObject, ExampleRuntime, ExampleTaggedPtr, ExampleTyp
 use crate::gc::compacting::CompactingHeap;
 use crate::gc::generational::GenerationalGC;
 use crate::gc::mark_and_sweep::MarkAndSweep;
-use crate::gc::{AllocateAction, Allocator, AllocatorOptions};
+use crate::gc::{AllocateAction, Allocator, AllocatorOptions, LibcMemoryProvider};
 use crate::traits::{GcObject, RootProvider, TaggedPointer};
 
 // =============================================================================
@@ -18,7 +18,7 @@ use crate::traits::{GcObject, RootProvider, TaggedPointer};
 // =============================================================================
 
 /// Allocate an object, running GC if needed.
-fn alloc_with_gc<A: Allocator<ExampleRuntime>>(
+fn alloc_with_gc<A: Allocator<ExampleRuntime, LibcMemoryProvider>>(
     gc: &mut A,
     words: usize,
     roots: &dyn RootProvider<ExampleTaggedPtr>,
@@ -39,7 +39,7 @@ fn alloc_with_gc<A: Allocator<ExampleRuntime>>(
 }
 
 /// Allocate an object without running GC (panics if GC needed).
-fn alloc_no_gc<A: Allocator<ExampleRuntime>>(gc: &mut A, words: usize) -> *const u8 {
+fn alloc_no_gc<A: Allocator<ExampleRuntime, LibcMemoryProvider>>(gc: &mut A, words: usize) -> *const u8 {
     match gc.try_allocate(words, ExampleTypeTag::HeapObject).unwrap() {
         AllocateAction::Allocated(ptr) => {
             let mut obj = ExampleObject::from_untagged(ptr);
@@ -120,7 +120,7 @@ mod mark_and_sweep_tests {
 
     #[test]
     fn test_basic_allocation() {
-        let mut gc: MarkAndSweep<ExampleRuntime> = MarkAndSweep::new(AllocatorOptions::new());
+        let mut gc: MarkAndSweep<ExampleRuntime, LibcMemoryProvider> = MarkAndSweep::new(AllocatorOptions::new(), LibcMemoryProvider::new());
 
         // Allocate a simple object with 2 fields
         let ptr = alloc_no_gc(&mut gc, 2);
@@ -133,7 +133,7 @@ mod mark_and_sweep_tests {
 
     #[test]
     fn test_multiple_allocations() {
-        let mut gc: MarkAndSweep<ExampleRuntime> = MarkAndSweep::new(AllocatorOptions::new());
+        let mut gc: MarkAndSweep<ExampleRuntime, LibcMemoryProvider> = MarkAndSweep::new(AllocatorOptions::new(), LibcMemoryProvider::new());
 
         let mut ptrs = Vec::new();
         for i in 0..100 {
@@ -151,7 +151,7 @@ mod mark_and_sweep_tests {
 
     #[test]
     fn test_gc_collects_unreachable() {
-        let mut gc: MarkAndSweep<ExampleRuntime> = MarkAndSweep::new(AllocatorOptions::new());
+        let mut gc: MarkAndSweep<ExampleRuntime, LibcMemoryProvider> = MarkAndSweep::new(AllocatorOptions::new(), LibcMemoryProvider::new());
         let roots = VecRoots::new();
 
         // Allocate objects without rooting them
@@ -170,7 +170,7 @@ mod mark_and_sweep_tests {
 
     #[test]
     fn test_gc_preserves_rooted() {
-        let mut gc: MarkAndSweep<ExampleRuntime> = MarkAndSweep::new(AllocatorOptions::new());
+        let mut gc: MarkAndSweep<ExampleRuntime, LibcMemoryProvider> = MarkAndSweep::new(AllocatorOptions::new(), LibcMemoryProvider::new());
         let mut roots = VecRoots::new();
 
         // Allocate and root an object
@@ -199,7 +199,7 @@ mod mark_and_sweep_tests {
 
     #[test]
     fn test_gc_traces_object_graph() {
-        let mut gc: MarkAndSweep<ExampleRuntime> = MarkAndSweep::new(AllocatorOptions::new());
+        let mut gc: MarkAndSweep<ExampleRuntime, LibcMemoryProvider> = MarkAndSweep::new(AllocatorOptions::new(), LibcMemoryProvider::new());
         let mut roots = VecRoots::new();
 
         // Create a linked list: root -> A -> B -> C
@@ -232,7 +232,7 @@ mod mark_and_sweep_tests {
 
     #[test]
     fn test_gc_handles_cycles() {
-        let mut gc: MarkAndSweep<ExampleRuntime> = MarkAndSweep::new(AllocatorOptions::new());
+        let mut gc: MarkAndSweep<ExampleRuntime, LibcMemoryProvider> = MarkAndSweep::new(AllocatorOptions::new(), LibcMemoryProvider::new());
         let mut roots = VecRoots::new();
 
         // Create a cycle: A -> B -> A
@@ -256,7 +256,7 @@ mod mark_and_sweep_tests {
 
     #[test]
     fn test_gc_with_allocation_pressure() {
-        let mut gc: MarkAndSweep<ExampleRuntime> = MarkAndSweep::new(AllocatorOptions::new());
+        let mut gc: MarkAndSweep<ExampleRuntime, LibcMemoryProvider> = MarkAndSweep::new(AllocatorOptions::new(), LibcMemoryProvider::new());
         let mut roots = VecRoots::new();
 
         // Keep a few long-lived objects
@@ -276,7 +276,7 @@ mod mark_and_sweep_tests {
 
     #[test]
     fn test_zero_field_objects() {
-        let mut gc: MarkAndSweep<ExampleRuntime> = MarkAndSweep::new(AllocatorOptions::new());
+        let mut gc: MarkAndSweep<ExampleRuntime, LibcMemoryProvider> = MarkAndSweep::new(AllocatorOptions::new(), LibcMemoryProvider::new());
         let mut roots = VecRoots::new();
 
         // Allocate zero-field object
@@ -296,7 +296,7 @@ mod mark_and_sweep_tests {
 
     #[test]
     fn test_large_objects() {
-        let mut gc: MarkAndSweep<ExampleRuntime> = MarkAndSweep::new(AllocatorOptions::new());
+        let mut gc: MarkAndSweep<ExampleRuntime, LibcMemoryProvider> = MarkAndSweep::new(AllocatorOptions::new(), LibcMemoryProvider::new());
         let mut roots = VecRoots::new();
 
         // Allocate a large object (100 fields = 800 bytes)
@@ -327,8 +327,8 @@ mod generational_tests {
 
     #[test]
     fn test_basic_allocation() {
-        let mut gc: GenerationalGC<ExampleRuntime> =
-            GenerationalGC::new(AllocatorOptions::new());
+        let mut gc: GenerationalGC<ExampleRuntime, LibcMemoryProvider> =
+            GenerationalGC::new(AllocatorOptions::new(), LibcMemoryProvider::new());
 
         let ptr = alloc_no_gc(&mut gc, 2);
         assert!(!ptr.is_null());
@@ -339,7 +339,7 @@ mod generational_tests {
 
     #[test]
     fn test_young_gen_bounds() {
-        let gc: GenerationalGC<ExampleRuntime> = GenerationalGC::new(AllocatorOptions::new());
+        let gc: GenerationalGC<ExampleRuntime, LibcMemoryProvider> = GenerationalGC::new(AllocatorOptions::new(), LibcMemoryProvider::new());
 
         let (start, end) = gc.get_young_gen_bounds();
         assert!(start > 0);
@@ -348,8 +348,8 @@ mod generational_tests {
 
     #[test]
     fn test_allocation_in_young_gen() {
-        let mut gc: GenerationalGC<ExampleRuntime> =
-            GenerationalGC::new(AllocatorOptions::new());
+        let mut gc: GenerationalGC<ExampleRuntime, LibcMemoryProvider> =
+            GenerationalGC::new(AllocatorOptions::new(), LibcMemoryProvider::new());
 
         let (young_start, young_end) = gc.get_young_gen_bounds();
 
@@ -368,8 +368,8 @@ mod generational_tests {
 
     #[test]
     fn test_minor_gc_promotes_survivors() {
-        let mut gc: GenerationalGC<ExampleRuntime> =
-            GenerationalGC::new(AllocatorOptions::new());
+        let mut gc: GenerationalGC<ExampleRuntime, LibcMemoryProvider> =
+            GenerationalGC::new(AllocatorOptions::new(), LibcMemoryProvider::new());
         let mut roots = VecRoots::new();
 
         let (young_start, young_end) = gc.get_young_gen_bounds();
@@ -406,8 +406,8 @@ mod generational_tests {
 
     #[test]
     fn test_minor_gc_collects_garbage() {
-        let mut gc: GenerationalGC<ExampleRuntime> =
-            GenerationalGC::new(AllocatorOptions::new());
+        let mut gc: GenerationalGC<ExampleRuntime, LibcMemoryProvider> =
+            GenerationalGC::new(AllocatorOptions::new(), LibcMemoryProvider::new());
         let roots = VecRoots::new();
 
         // Allocate garbage in young gen
@@ -426,8 +426,8 @@ mod generational_tests {
 
     #[test]
     fn test_write_barrier_tracks_old_to_young() {
-        let mut gc: GenerationalGC<ExampleRuntime> =
-            GenerationalGC::new(AllocatorOptions::new());
+        let mut gc: GenerationalGC<ExampleRuntime, LibcMemoryProvider> =
+            GenerationalGC::new(AllocatorOptions::new(), LibcMemoryProvider::new());
         let mut roots = VecRoots::new();
 
         // Allocate and promote an object to old gen
@@ -459,8 +459,8 @@ mod generational_tests {
 
     #[test]
     fn test_object_graph_promotion() {
-        let mut gc: GenerationalGC<ExampleRuntime> =
-            GenerationalGC::new(AllocatorOptions::new());
+        let mut gc: GenerationalGC<ExampleRuntime, LibcMemoryProvider> =
+            GenerationalGC::new(AllocatorOptions::new(), LibcMemoryProvider::new());
         let mut roots = VecRoots::new();
 
         // Create a chain: A -> B -> C
@@ -489,8 +489,8 @@ mod generational_tests {
 
     #[test]
     fn test_mixed_generations() {
-        let mut gc: GenerationalGC<ExampleRuntime> =
-            GenerationalGC::new(AllocatorOptions::new());
+        let mut gc: GenerationalGC<ExampleRuntime, LibcMemoryProvider> =
+            GenerationalGC::new(AllocatorOptions::new(), LibcMemoryProvider::new());
         let mut roots = VecRoots::new();
 
         // Create old gen object
@@ -534,8 +534,8 @@ mod compacting_tests {
 
     #[test]
     fn test_basic_allocation() {
-        let mut gc: CompactingHeap<ExampleRuntime> =
-            CompactingHeap::new(AllocatorOptions::new());
+        let mut gc: CompactingHeap<ExampleRuntime, LibcMemoryProvider> =
+            CompactingHeap::new(AllocatorOptions::new(), LibcMemoryProvider::new());
 
         let ptr = alloc_no_gc(&mut gc, 2);
         assert!(!ptr.is_null());
@@ -546,8 +546,8 @@ mod compacting_tests {
 
     #[test]
     fn test_gc_compacts_and_updates_refs() {
-        let mut gc: CompactingHeap<ExampleRuntime> =
-            CompactingHeap::new(AllocatorOptions::new());
+        let mut gc: CompactingHeap<ExampleRuntime, LibcMemoryProvider> =
+            CompactingHeap::new(AllocatorOptions::new(), LibcMemoryProvider::new());
         let mut roots = VecRoots::new();
 
         // Allocate objects
@@ -579,8 +579,8 @@ mod compacting_tests {
 
     #[test]
     fn test_compaction_reclaims_space() {
-        let mut gc: CompactingHeap<ExampleRuntime> =
-            CompactingHeap::new(AllocatorOptions::new());
+        let mut gc: CompactingHeap<ExampleRuntime, LibcMemoryProvider> =
+            CompactingHeap::new(AllocatorOptions::new(), LibcMemoryProvider::new());
         let mut roots = VecRoots::new();
 
         // Allocate one object to keep
@@ -603,8 +603,8 @@ mod compacting_tests {
 
     #[test]
     fn test_forwarding_pointers() {
-        let mut gc: CompactingHeap<ExampleRuntime> =
-            CompactingHeap::new(AllocatorOptions::new());
+        let mut gc: CompactingHeap<ExampleRuntime, LibcMemoryProvider> =
+            CompactingHeap::new(AllocatorOptions::new(), LibcMemoryProvider::new());
         let mut roots = VecRoots::new();
 
         // Create a diamond: root -> A, A -> B, A -> C, B -> D, C -> D
@@ -645,7 +645,7 @@ mod stress_tests {
 
     #[test]
     fn test_mark_sweep_many_allocations() {
-        let mut gc: MarkAndSweep<ExampleRuntime> = MarkAndSweep::new(AllocatorOptions::new());
+        let mut gc: MarkAndSweep<ExampleRuntime, LibcMemoryProvider> = MarkAndSweep::new(AllocatorOptions::new(), LibcMemoryProvider::new());
         let mut roots = VecRoots::new();
 
         // Keep 100 objects alive
@@ -665,8 +665,8 @@ mod stress_tests {
 
     #[test]
     fn test_generational_many_allocations() {
-        let mut gc: GenerationalGC<ExampleRuntime> =
-            GenerationalGC::new(AllocatorOptions::new());
+        let mut gc: GenerationalGC<ExampleRuntime, LibcMemoryProvider> =
+            GenerationalGC::new(AllocatorOptions::new(), LibcMemoryProvider::new());
         let mut roots = VecRoots::new();
 
         // Keep some long-lived objects
@@ -686,7 +686,7 @@ mod stress_tests {
 
     #[test]
     fn test_deep_object_graph() {
-        let mut gc: MarkAndSweep<ExampleRuntime> = MarkAndSweep::new(AllocatorOptions::new());
+        let mut gc: MarkAndSweep<ExampleRuntime, LibcMemoryProvider> = MarkAndSweep::new(AllocatorOptions::new(), LibcMemoryProvider::new());
         let mut roots = VecRoots::new();
 
         // Create a very deep linked list (1000 nodes)
@@ -717,7 +717,7 @@ mod stress_tests {
 
     #[test]
     fn test_wide_object_graph() {
-        let mut gc: MarkAndSweep<ExampleRuntime> = MarkAndSweep::new(AllocatorOptions::new());
+        let mut gc: MarkAndSweep<ExampleRuntime, LibcMemoryProvider> = MarkAndSweep::new(AllocatorOptions::new(), LibcMemoryProvider::new());
         let mut roots = VecRoots::new();
 
         // Create a wide tree: 1 root with 100 children
@@ -743,7 +743,7 @@ mod stress_tests {
 
     #[test]
     fn test_allocation_sizes() {
-        let mut gc: MarkAndSweep<ExampleRuntime> = MarkAndSweep::new(AllocatorOptions::new());
+        let mut gc: MarkAndSweep<ExampleRuntime, LibcMemoryProvider> = MarkAndSweep::new(AllocatorOptions::new(), LibcMemoryProvider::new());
         let mut roots = VecRoots::new();
 
         // Allocate objects of various sizes
@@ -773,7 +773,7 @@ mod heap_growth_tests {
 
     #[test]
     fn test_mark_sweep_heap_growth() {
-        let mut gc: MarkAndSweep<ExampleRuntime> = MarkAndSweep::new(AllocatorOptions::new());
+        let mut gc: MarkAndSweep<ExampleRuntime, LibcMemoryProvider> = MarkAndSweep::new(AllocatorOptions::new(), LibcMemoryProvider::new());
         let mut roots = VecRoots::new();
 
         // Allocate until we trigger heap growth
@@ -800,8 +800,8 @@ mod heap_growth_tests {
 
     #[test]
     fn test_generational_heap_growth() {
-        let mut gc: GenerationalGC<ExampleRuntime> =
-            GenerationalGC::new(AllocatorOptions::new());
+        let mut gc: GenerationalGC<ExampleRuntime, LibcMemoryProvider> =
+            GenerationalGC::new(AllocatorOptions::new(), LibcMemoryProvider::new());
         let mut roots = VecRoots::new();
 
         // Allocate many objects, forcing promotions and old gen growth
@@ -824,7 +824,7 @@ mod heap_growth_tests {
 
     #[test]
     fn test_explicit_grow() {
-        let mut gc: MarkAndSweep<ExampleRuntime> = MarkAndSweep::new(AllocatorOptions::new());
+        let mut gc: MarkAndSweep<ExampleRuntime, LibcMemoryProvider> = MarkAndSweep::new(AllocatorOptions::new(), LibcMemoryProvider::new());
 
         // Explicitly grow the heap
         gc.grow();
@@ -843,8 +843,8 @@ mod thread_safe_tests {
 
     #[test]
     fn test_mutex_mark_sweep_basic() {
-        let mut gc: MutexAllocator<MarkAndSweep<ExampleRuntime>, ExampleRuntime> =
-            MutexAllocator::new(AllocatorOptions::new());
+        let mut gc: MutexAllocator<MarkAndSweep<ExampleRuntime, LibcMemoryProvider>, ExampleRuntime, LibcMemoryProvider> =
+            MutexAllocator::new(AllocatorOptions::new(), LibcMemoryProvider::new());
         let mut roots = VecRoots::new();
 
         // Basic allocation
@@ -861,8 +861,8 @@ mod thread_safe_tests {
 
     #[test]
     fn test_mutex_generational_basic() {
-        let mut gc: MutexAllocator<GenerationalGC<ExampleRuntime>, ExampleRuntime> =
-            MutexAllocator::new(AllocatorOptions::new());
+        let mut gc: MutexAllocator<GenerationalGC<ExampleRuntime, LibcMemoryProvider>, ExampleRuntime, LibcMemoryProvider> =
+            MutexAllocator::new(AllocatorOptions::new(), LibcMemoryProvider::new());
         let mut roots = VecRoots::new();
 
         let ptr = alloc_no_gc(&mut gc, 2);
@@ -881,7 +881,7 @@ mod edge_case_tests {
 
     #[test]
     fn test_empty_gc() {
-        let mut gc: MarkAndSweep<ExampleRuntime> = MarkAndSweep::new(AllocatorOptions::new());
+        let mut gc: MarkAndSweep<ExampleRuntime, LibcMemoryProvider> = MarkAndSweep::new(AllocatorOptions::new(), LibcMemoryProvider::new());
         let roots = VecRoots::new();
 
         // GC with nothing allocated should be fine
@@ -892,7 +892,7 @@ mod edge_case_tests {
 
     #[test]
     fn test_gc_disabled() {
-        let mut gc: MarkAndSweep<ExampleRuntime> = MarkAndSweep::new(AllocatorOptions::no_gc());
+        let mut gc: MarkAndSweep<ExampleRuntime, LibcMemoryProvider> = MarkAndSweep::new(AllocatorOptions::no_gc(), LibcMemoryProvider::new());
         let roots = VecRoots::new();
 
         // Allocate many objects
@@ -906,7 +906,7 @@ mod edge_case_tests {
 
     #[test]
     fn test_self_referential() {
-        let mut gc: MarkAndSweep<ExampleRuntime> = MarkAndSweep::new(AllocatorOptions::new());
+        let mut gc: MarkAndSweep<ExampleRuntime, LibcMemoryProvider> = MarkAndSweep::new(AllocatorOptions::new(), LibcMemoryProvider::new());
         let mut roots = VecRoots::new();
 
         // Object pointing to itself
@@ -922,7 +922,7 @@ mod edge_case_tests {
 
     #[test]
     fn test_multiple_roots_same_object() {
-        let mut gc: MarkAndSweep<ExampleRuntime> = MarkAndSweep::new(AllocatorOptions::new());
+        let mut gc: MarkAndSweep<ExampleRuntime, LibcMemoryProvider> = MarkAndSweep::new(AllocatorOptions::new(), LibcMemoryProvider::new());
         let mut roots = VecRoots::new();
 
         let obj = alloc_no_gc(&mut gc, 1);
@@ -945,7 +945,7 @@ mod edge_case_tests {
 
     #[test]
     fn test_null_fields_not_traced() {
-        let mut gc: MarkAndSweep<ExampleRuntime> = MarkAndSweep::new(AllocatorOptions::new());
+        let mut gc: MarkAndSweep<ExampleRuntime, LibcMemoryProvider> = MarkAndSweep::new(AllocatorOptions::new(), LibcMemoryProvider::new());
         let mut roots = VecRoots::new();
 
         // Object with null fields
@@ -965,7 +965,7 @@ mod edge_case_tests {
 
     #[test]
     fn test_int_fields_not_traced() {
-        let mut gc: MarkAndSweep<ExampleRuntime> = MarkAndSweep::new(AllocatorOptions::new());
+        let mut gc: MarkAndSweep<ExampleRuntime, LibcMemoryProvider> = MarkAndSweep::new(AllocatorOptions::new(), LibcMemoryProvider::new());
         let mut roots = VecRoots::new();
 
         // Object with integer fields (should not be traced as pointers)
@@ -985,7 +985,7 @@ mod edge_case_tests {
 
     #[test]
     fn test_complex_cycle() {
-        let mut gc: MarkAndSweep<ExampleRuntime> = MarkAndSweep::new(AllocatorOptions::new());
+        let mut gc: MarkAndSweep<ExampleRuntime, LibcMemoryProvider> = MarkAndSweep::new(AllocatorOptions::new(), LibcMemoryProvider::new());
         let mut roots = VecRoots::new();
 
         // Create a complex cycle: A -> B -> C -> D -> A
@@ -1018,7 +1018,7 @@ mod edge_case_tests {
 
     #[test]
     fn test_sparse_object() {
-        let mut gc: MarkAndSweep<ExampleRuntime> = MarkAndSweep::new(AllocatorOptions::new());
+        let mut gc: MarkAndSweep<ExampleRuntime, LibcMemoryProvider> = MarkAndSweep::new(AllocatorOptions::new(), LibcMemoryProvider::new());
         let mut roots = VecRoots::new();
 
         // Object with mostly null fields but a few pointers
@@ -1065,11 +1065,11 @@ mod correctness_tests {
     /// Test that building and traversing a binary tree works correctly.
     #[test]
     fn test_binary_tree() {
-        let mut gc: MarkAndSweep<ExampleRuntime> = MarkAndSweep::new(AllocatorOptions::new());
+        let mut gc: MarkAndSweep<ExampleRuntime, LibcMemoryProvider> = MarkAndSweep::new(AllocatorOptions::new(), LibcMemoryProvider::new());
         let mut roots = VecRoots::new();
 
         // Build a small binary tree (depth 4 = 15 nodes)
-        fn build_tree<A: Allocator<ExampleRuntime>>(
+        fn build_tree<A: Allocator<ExampleRuntime, LibcMemoryProvider>>(
             gc: &mut A,
             depth: usize,
             roots: &VecRoots,
@@ -1115,7 +1115,7 @@ mod correctness_tests {
     /// Test that unreachable subgraphs are collected.
     #[test]
     fn test_unreachable_subgraph_collected() {
-        let mut gc: MarkAndSweep<ExampleRuntime> = MarkAndSweep::new(AllocatorOptions::new());
+        let mut gc: MarkAndSweep<ExampleRuntime, LibcMemoryProvider> = MarkAndSweep::new(AllocatorOptions::new(), LibcMemoryProvider::new());
         let mut roots = VecRoots::new();
 
         // Create two separate graphs
@@ -1157,7 +1157,7 @@ mod correctness_tests {
     /// Test mixed pointer and non-pointer fields.
     #[test]
     fn test_mixed_fields() {
-        let mut gc: MarkAndSweep<ExampleRuntime> = MarkAndSweep::new(AllocatorOptions::new());
+        let mut gc: MarkAndSweep<ExampleRuntime, LibcMemoryProvider> = MarkAndSweep::new(AllocatorOptions::new(), LibcMemoryProvider::new());
         let mut roots = VecRoots::new();
 
         // Object with mix of pointers, integers, and nulls
@@ -1197,7 +1197,7 @@ mod correctness_tests {
     /// Stress test with random-ish object graph structure.
     #[test]
     fn test_pseudo_random_graph() {
-        let mut gc: MarkAndSweep<ExampleRuntime> = MarkAndSweep::new(AllocatorOptions::new());
+        let mut gc: MarkAndSweep<ExampleRuntime, LibcMemoryProvider> = MarkAndSweep::new(AllocatorOptions::new(), LibcMemoryProvider::new());
         let mut roots = VecRoots::new();
 
         // Allocate 100 objects with 3 fields each

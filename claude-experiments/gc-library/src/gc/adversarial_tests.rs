@@ -9,7 +9,7 @@
 use crate::example::{ExampleObject, ExampleRuntime, ExampleTaggedPtr, ExampleTypeTag};
 use crate::gc::mark_and_sweep::MarkAndSweep;
 use crate::gc::generational::GenerationalGC;
-use crate::gc::{AllocateAction, Allocator, AllocatorOptions};
+use crate::gc::{AllocateAction, Allocator, AllocatorOptions, LibcMemoryProvider};
 use crate::traits::{GcObject, RootProvider, TaggedPointer};
 
 // =============================================================================
@@ -109,7 +109,7 @@ fn verify_canaries_raw(obj: *const u8, count: usize, base: u64) -> bool {
     true
 }
 
-fn alloc_with_gc<A: Allocator<ExampleRuntime>>(
+fn alloc_with_gc<A: Allocator<ExampleRuntime, LibcMemoryProvider>>(
     gc: &mut A,
     words: usize,
     roots: &dyn RootProvider<ExampleTaggedPtr>,
@@ -128,7 +128,7 @@ fn alloc_with_gc<A: Allocator<ExampleRuntime>>(
     }
 }
 
-fn alloc_no_gc<A: Allocator<ExampleRuntime>>(gc: &mut A, words: usize) -> *const u8 {
+fn alloc_no_gc<A: Allocator<ExampleRuntime, LibcMemoryProvider>>(gc: &mut A, words: usize) -> *const u8 {
     match gc.try_allocate(words, ExampleTypeTag::HeapObject).unwrap() {
         AllocateAction::Allocated(ptr) => {
             let mut obj = ExampleObject::from_untagged(ptr);
@@ -147,7 +147,7 @@ fn alloc_no_gc<A: Allocator<ExampleRuntime>>(gc: &mut A, words: usize) -> *const
 /// This catches: heap corruption, incorrect object sizes, overwriting live data.
 #[test]
 fn test_canary_survival_mark_sweep() {
-    let mut gc: MarkAndSweep<ExampleRuntime> = MarkAndSweep::new(AllocatorOptions::new());
+    let mut gc: MarkAndSweep<ExampleRuntime, LibcMemoryProvider> = MarkAndSweep::new(AllocatorOptions::new(), LibcMemoryProvider::new());
     let mut roots = LiveRoots::new();
 
     // Allocate objects with unique canary patterns
@@ -179,7 +179,7 @@ fn test_canary_survival_mark_sweep() {
 
 #[test]
 fn test_canary_survival_generational() {
-    let mut gc: GenerationalGC<ExampleRuntime> = GenerationalGC::new(AllocatorOptions::new());
+    let mut gc: GenerationalGC<ExampleRuntime, LibcMemoryProvider> = GenerationalGC::new(AllocatorOptions::new(), LibcMemoryProvider::new());
     let mut roots = LiveRoots::new();
 
     // Allocate objects with canaries
@@ -219,7 +219,7 @@ fn test_canary_survival_generational() {
 /// This catches: missed reference updates, incorrect forwarding pointers.
 #[test]
 fn test_reference_integrity_after_gc() {
-    let mut gc: MarkAndSweep<ExampleRuntime> = MarkAndSweep::new(AllocatorOptions::new());
+    let mut gc: MarkAndSweep<ExampleRuntime, LibcMemoryProvider> = MarkAndSweep::new(AllocatorOptions::new(), LibcMemoryProvider::new());
     let mut roots = LiveRoots::new();
 
     // Create 100 objects, each with pointers to random other objects
@@ -301,7 +301,7 @@ fn test_reference_integrity_after_gc() {
 /// Allocate in a pattern designed to fragment the heap, then verify GC handles it.
 #[test]
 fn test_fragmentation_pattern() {
-    let mut gc: MarkAndSweep<ExampleRuntime> = MarkAndSweep::new(AllocatorOptions::new());
+    let mut gc: MarkAndSweep<ExampleRuntime, LibcMemoryProvider> = MarkAndSweep::new(AllocatorOptions::new(), LibcMemoryProvider::new());
     let mut roots = LiveRoots::new();
 
     // Allocate alternating live/dead objects to create fragmentation
@@ -343,7 +343,7 @@ fn test_fragmentation_pattern() {
 /// Test that objects allocated right before GC are handled correctly.
 #[test]
 fn test_allocation_just_before_gc() {
-    let mut gc: MarkAndSweep<ExampleRuntime> = MarkAndSweep::new(AllocatorOptions::new());
+    let mut gc: MarkAndSweep<ExampleRuntime, LibcMemoryProvider> = MarkAndSweep::new(AllocatorOptions::new(), LibcMemoryProvider::new());
     let mut roots = LiveRoots::new();
 
     // Allocate until we're close to needing GC
@@ -375,7 +375,7 @@ fn test_allocation_just_before_gc() {
 /// Test objects of many different sizes to catch size calculation bugs.
 #[test]
 fn test_varied_object_sizes() {
-    let mut gc: MarkAndSweep<ExampleRuntime> = MarkAndSweep::new(AllocatorOptions::new());
+    let mut gc: MarkAndSweep<ExampleRuntime, LibcMemoryProvider> = MarkAndSweep::new(AllocatorOptions::new(), LibcMemoryProvider::new());
     let mut roots = LiveRoots::new();
     let mut expected_sizes: Vec<usize> = Vec::new();
 
@@ -431,7 +431,7 @@ fn test_varied_object_sizes() {
 /// then with barrier, verifies it works.
 #[test]
 fn test_write_barrier_necessity() {
-    let mut gc: GenerationalGC<ExampleRuntime> = GenerationalGC::new(AllocatorOptions::new());
+    let mut gc: GenerationalGC<ExampleRuntime, LibcMemoryProvider> = GenerationalGC::new(AllocatorOptions::new(), LibcMemoryProvider::new());
     let mut roots = LiveRoots::new();
 
     // Create an old-gen object
@@ -477,7 +477,7 @@ fn test_write_barrier_necessity() {
 /// Test card table coverage by writing to objects at various positions in old gen.
 #[test]
 fn test_card_table_coverage() {
-    let mut gc: GenerationalGC<ExampleRuntime> = GenerationalGC::new(AllocatorOptions::new());
+    let mut gc: GenerationalGC<ExampleRuntime, LibcMemoryProvider> = GenerationalGC::new(AllocatorOptions::new(), LibcMemoryProvider::new());
     let mut roots = LiveRoots::new();
 
     // Allocate many objects to spread across cards
@@ -529,7 +529,7 @@ fn test_card_table_coverage() {
 /// Heavy allocation with continuous integrity checking.
 #[test]
 fn test_stress_with_verification() {
-    let mut gc: MarkAndSweep<ExampleRuntime> = MarkAndSweep::new(AllocatorOptions::new());
+    let mut gc: MarkAndSweep<ExampleRuntime, LibcMemoryProvider> = MarkAndSweep::new(AllocatorOptions::new(), LibcMemoryProvider::new());
     let mut roots = LiveRoots::new();
 
     // Keep track of expected values
@@ -588,7 +588,7 @@ fn test_stress_with_verification() {
 /// Test that repeated GC cycles don't cause drift or accumulating errors.
 #[test]
 fn test_gc_idempotence() {
-    let mut gc: MarkAndSweep<ExampleRuntime> = MarkAndSweep::new(AllocatorOptions::new());
+    let mut gc: MarkAndSweep<ExampleRuntime, LibcMemoryProvider> = MarkAndSweep::new(AllocatorOptions::new(), LibcMemoryProvider::new());
     let mut roots = LiveRoots::new();
 
     // Set up a stable object graph

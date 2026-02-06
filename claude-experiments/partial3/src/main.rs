@@ -4,11 +4,12 @@ use std::fs;
 
 use partial3::ast::{pretty_print, Expr};
 use partial3::color_print::{pretty_print_colored, print_legend};
+use partial3::eval::{eval, set_verbose};
 use partial3::js_to_lisp;
 use partial3::opaque::OpaqueRegistry;
 use partial3::parse;
-use partial3::partial::{new_penv, partial_eval, set_gas, with_opaque_registry, PValue};
-use partial3::value::Value;
+use partial3::partial::{new_penv, partial_eval, residualize, set_gas, with_opaque_registry, PValue};
+use partial3::value::{new_env, Value};
 
 fn main() {
     let args: Vec<String> = env::args().collect();
@@ -20,6 +21,7 @@ fn main() {
         eprintln!("JavaScript files are automatically transpiled to Lisp before partial evaluation.");
         eprintln!();
         eprintln!("Options:");
+        eprintln!("  --run                    Run directly without partial evaluation");
         eprintln!("  --dynamic var1,var2,...  Mark variables as dynamic (unknown at compile time)");
         eprintln!("  --gas N                  Set gas limit for evaluation (default: 10000000)");
         eprintln!("  --show-lisp              Show the Lisp representation (useful for JS files)");
@@ -44,6 +46,7 @@ fn main() {
     #[allow(unused_assignments)]
     let mut use_color = false;
     let mut parse_only = false;
+    let mut run_direct = false;
     let mut gas_limit: Option<usize> = None;
     let mut i = 2;
     while i < args.len() {
@@ -75,6 +78,10 @@ fn main() {
             }
             "--parse-only" => {
                 parse_only = true;
+                i += 1;
+            }
+            "--run" => {
+                run_direct = true;
                 i += 1;
             }
             "--gas" => {
@@ -141,6 +148,46 @@ fn main() {
         return;
     }
 
+    // If --run, use direct interpreter instead of partial evaluation
+    if run_direct {
+        set_verbose(true);
+        let env = new_env();
+        // Add JS built-in globals as opaque values
+        let builtins = vec![
+            "Date", "DataView", "ArrayBuffer", "Uint8Array", "Int8Array",
+            "Uint16Array", "Int16Array", "Uint32Array", "Int32Array",
+            "Float32Array", "Float64Array", "BigInt64Array", "BigUint64Array",
+            "Array", "Object", "String", "Number", "Boolean", "Symbol",
+            "Map", "Set", "WeakMap", "WeakSet", "Promise", "Proxy", "Reflect",
+            "JSON", "Math", "console", "parseInt", "parseFloat", "isNaN",
+            "isFinite", "encodeURI", "decodeURI", "encodeURIComponent",
+            "decodeURIComponent", "Error", "TypeError", "RangeError",
+            "SyntaxError", "ReferenceError", "RegExp", "Function",
+            "Intl", "WebAssembly", "Atomics", "SharedArrayBuffer",
+        ];
+        for name in builtins {
+            env.borrow_mut().insert(
+                name.to_string(),
+                Value::Opaque {
+                    label: name.to_string(),
+                    expr: Expr::Var(name.to_string()),
+                    state: None,
+                },
+            );
+        }
+        match eval(&expr, &env) {
+            Ok(v) => {
+                println!("Result:");
+                print_value(&v);
+            }
+            Err(e) => {
+                eprintln!("Runtime error: {}", e);
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
     // Build initial partial environment
     let penv = new_penv();
     for var in &dynamic_vars {
@@ -190,6 +237,35 @@ fn main() {
                 println!("=== Opaque calls with static arguments ===");
                 let mut opaque_calls: HashMap<String, usize> = HashMap::new();
                 collect_opaque_calls(e, &mut opaque_calls);
+
+                if opaque_calls.is_empty() {
+                    println!("(none found)");
+                } else {
+                    let mut sorted: Vec<_> = opaque_calls.iter().collect();
+                    sorted.sort_by(|a, b| b.1.cmp(a.1)); // Sort by count descending
+                    for (call, count) in sorted {
+                        println!("  {:4}x  {}", count, call);
+                    }
+                }
+            }
+        }
+        PValue::Return(_) => {
+            println!("Residual program:");
+            if use_color {
+                print_legend();
+                println!();
+                println!("{}", pretty_print_colored(&result));
+            } else {
+                let residual = residualize(&result);
+                println!("{}", pretty_print(&residual));
+            }
+
+            if show_opaque {
+                println!();
+                println!("=== Opaque calls with static arguments ===");
+                let residual = residualize(&result);
+                let mut opaque_calls: HashMap<String, usize> = HashMap::new();
+                collect_opaque_calls(&residual, &mut opaque_calls);
 
                 if opaque_calls.is_empty() {
                     println!("(none found)");
@@ -338,6 +414,9 @@ fn collect_opaque_calls(expr: &Expr, calls: &mut HashMap<String, usize>) {
             collect_opaque_calls(inner, calls);
         }
         Expr::Throw(inner) => {
+            collect_opaque_calls(inner, calls);
+        }
+        Expr::Return(inner) => {
             collect_opaque_calls(inner, calls);
         }
         Expr::Switch { discriminant, cases, default } => {

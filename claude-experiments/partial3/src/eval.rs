@@ -4,8 +4,102 @@
 
 use crate::ast::{BinOp, Expr};
 use crate::value::{array_from_vec, env_with_parent, new_object, Env, Value};
+use std::cell::Cell;
+
+thread_local! {
+    static STEP_COUNT: Cell<u64> = Cell::new(0);
+    static VERBOSE: Cell<bool> = Cell::new(false);
+}
+
+pub fn set_verbose(v: bool) {
+    VERBOSE.with(|verbose| verbose.set(v));
+}
+
+/// Control flow signals for break/continue/return
+#[derive(Debug, Clone)]
+enum ControlFlow {
+    Break,
+    Continue,
+    Return(Value),
+}
+
+/// Internal error type that handles both errors and control flow
+#[derive(Debug)]
+enum EvalError {
+    Error(String),
+    Control(ControlFlow),
+}
+
+impl From<String> for EvalError {
+    fn from(s: String) -> Self {
+        EvalError::Error(s)
+    }
+}
+
+type EvalResult = Result<Value, EvalError>;
+
+fn err(s: &str) -> EvalError {
+    EvalError::Error(s.to_string())
+}
 
 pub fn eval(expr: &Expr, env: &Env) -> Result<Value, String> {
+    match eval_inner(expr, env) {
+        Ok(v) => Ok(v),
+        Err(EvalError::Error(e)) => Err(e),
+        Err(EvalError::Control(ControlFlow::Break)) => Err("Break outside of loop".to_string()),
+        Err(EvalError::Control(ControlFlow::Continue)) => Err("Continue outside of loop".to_string()),
+        Err(EvalError::Control(ControlFlow::Return(v))) => Ok(v),
+    }
+}
+
+fn expr_kind(expr: &Expr) -> &'static str {
+    match expr {
+        Expr::Int(_) => "Int",
+        Expr::Bool(_) => "Bool",
+        Expr::String(_) => "String",
+        Expr::Var(_) => "Var",
+        Expr::BinOp(..) => "BinOp",
+        Expr::If(..) => "If",
+        Expr::Let(..) => "Let",
+        Expr::Fn(..) => "Fn",
+        Expr::Call(..) => "Call",
+        Expr::Array(..) => "Array",
+        Expr::Index(..) => "Index",
+        Expr::Len(..) => "Len",
+        Expr::While(..) => "While",
+        Expr::For { .. } => "For",
+        Expr::Set(..) => "Set",
+        Expr::Begin(..) => "Begin",
+        Expr::Undefined => "Undefined",
+        Expr::Null => "Null",
+        Expr::BitNot(..) => "BitNot",
+        Expr::LogNot(..) => "LogNot",
+        Expr::Object(..) => "Object",
+        Expr::PropAccess(..) => "PropAccess",
+        Expr::PropSet(..) => "PropSet",
+        Expr::ComputedAccess(..) => "ComputedAccess",
+        Expr::ComputedSet(..) => "ComputedSet",
+        Expr::Switch { .. } => "Switch",
+        Expr::Break => "Break",
+        Expr::Continue => "Continue",
+        Expr::Return(..) => "Return",
+        Expr::Throw(..) => "Throw",
+        Expr::New(..) => "New",
+        Expr::Opaque(..) => "Opaque",
+        Expr::TryCatch { .. } => "TryCatch",
+    }
+}
+
+fn eval_inner(expr: &Expr, env: &Env) -> EvalResult {
+    STEP_COUNT.with(|count| {
+        let c = count.get() + 1;
+        count.set(c);
+        VERBOSE.with(|verbose| {
+            if verbose.get() && c % 50_000 == 0 {
+                eprintln!("[eval] step {}: {} ", c, expr_kind(expr));
+            }
+        });
+    });
     match expr {
         Expr::Int(n) => Ok(Value::Int(*n)),
 
@@ -15,28 +109,28 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, String> {
             .borrow()
             .get(name)
             .cloned()
-            .ok_or_else(|| format!("Undefined variable: {}", name)),
+            .ok_or_else(|| err(&format!("Undefined variable: {}", name))),
 
         Expr::BinOp(op, left, right) => {
-            let left_val = eval(left, env)?;
-            let right_val = eval(right, env)?;
-            eval_binop(op, &left_val, &right_val)
+            let left_val = eval_inner(left, env)?;
+            let right_val = eval_inner(right, env)?;
+            eval_binop(op, &left_val, &right_val).map_err(EvalError::Error)
         }
 
         Expr::If(cond, then_branch, else_branch) => {
-            let cond_val = eval(cond, env)?;
+            let cond_val = eval_inner(cond, env)?;
             match cond_val {
-                Value::Bool(true) => eval(then_branch, env),
-                Value::Bool(false) => eval(else_branch, env),
-                _ => Err("If condition must be a boolean".to_string()),
+                Value::Bool(true) => eval_inner(then_branch, env),
+                Value::Bool(false) => eval_inner(else_branch, env),
+                _ => Err(err("If condition must be a boolean")),
             }
         }
 
         Expr::Let(name, value, body) => {
-            let val = eval(value, env)?;
+            let val = eval_inner(value, env)?;
             let new_env = env_with_parent(env);
             new_env.borrow_mut().insert(name.clone(), val);
-            eval(body, &new_env)
+            eval_inner(body, &new_env)
         }
 
         Expr::Fn(params, body) => Ok(Value::Closure {
@@ -46,7 +140,7 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, String> {
         }),
 
         Expr::Call(func, args) => {
-            let func_val = eval(func, env)?;
+            let func_val = eval_inner(func, env)?;
             match func_val {
                 Value::Closure {
                     params,
@@ -54,34 +148,41 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, String> {
                     env: closure_env,
                 } => {
                     if args.len() != params.len() {
-                        return Err(format!(
+                        return Err(err(&format!(
                             "Function expects {} arguments, got {}",
                             params.len(),
                             args.len()
-                        ));
+                        )));
                     }
 
                     let call_env = env_with_parent(&closure_env);
                     for (param, arg) in params.iter().zip(args.iter()) {
-                        let arg_val = eval(arg, env)?;
+                        let arg_val = eval_inner(arg, env)?;
                         call_env.borrow_mut().insert(param.clone(), arg_val);
                     }
 
-                    eval(&body, &call_env)
+                    // Handle return from function body
+                    match eval_inner(&body, &call_env) {
+                        Ok(v) => Ok(v),
+                        Err(EvalError::Control(ControlFlow::Return(v))) => Ok(v),
+                        Err(e) => Err(e),
+                    }
                 }
-                _ => Err("Cannot call non-function".to_string()),
+                _ => Err(err("Cannot call non-function")),
             }
         }
 
         Expr::Array(elements) => {
-            let values: Result<Vec<Value>, String> =
-                elements.iter().map(|e| eval(e, env)).collect();
-            Ok(Value::Array(array_from_vec(values?)))
+            let mut values = Vec::new();
+            for e in elements {
+                values.push(eval_inner(e, env)?);
+            }
+            Ok(Value::Array(array_from_vec(values)))
         }
 
         Expr::Index(arr, idx) => {
-            let arr_val = eval(arr, env)?;
-            let idx_val = eval(idx, env)?;
+            let arr_val = eval_inner(arr, env)?;
+            let idx_val = eval_inner(idx, env)?;
 
             match (&arr_val, &idx_val) {
                 (Value::Array(elements), Value::Int(i)) => {
@@ -90,46 +191,48 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, String> {
                     if i < borrowed.len() {
                         Ok(borrowed[i].clone())
                     } else {
-                        Err(format!(
+                        Err(err(&format!(
                             "Index {} out of bounds for array of length {}",
                             i,
                             borrowed.len()
-                        ))
+                        )))
                     }
                 }
-                _ => Err("Index requires array and integer".to_string()),
+                _ => Err(err("Index requires array and integer")),
             }
         }
 
         Expr::Len(arr) => {
-            let arr_val = eval(arr, env)?;
+            let arr_val = eval_inner(arr, env)?;
             match arr_val {
                 Value::Array(elements) => Ok(Value::Int(elements.borrow().len() as i64)),
-                _ => Err("Len requires an array".to_string()),
+                _ => Err(err("Len requires an array")),
             }
         }
 
         Expr::While(cond, body) => {
             loop {
-                let cond_val = eval(cond, env)?;
+                let cond_val = eval_inner(cond, env)?;
                 match cond_val {
-                    Value::Bool(false) => return Ok(Value::Bool(false)),
+                    Value::Bool(false) => return Ok(Value::Undefined),
                     Value::Bool(true) => {
-                        eval(body, env)?;
+                        match eval_inner(body, env) {
+                            Ok(_) => {}
+                            Err(EvalError::Control(ControlFlow::Break)) => return Ok(Value::Undefined),
+                            Err(EvalError::Control(ControlFlow::Continue)) => continue,
+                            Err(e) => return Err(e),
+                        }
                     }
-                    _ => return Err("While condition must be a boolean".to_string()),
+                    _ => return Err(err("While condition must be a boolean")),
                 }
             }
         }
 
         Expr::Set(name, value) => {
-            let val = eval(value, env)?;
-            if env.borrow().contains_key(name) {
-                env.borrow_mut().insert(name.clone(), val.clone());
-                Ok(val)
-            } else {
-                Err(format!("Cannot set! undefined variable: {}", name))
-            }
+            let val = eval_inner(value, env)?;
+            // JavaScript allows implicit global creation, so always allow set
+            env.borrow_mut().insert(name.clone(), val.clone());
+            Ok(val)
         }
 
         Expr::Begin(exprs) => {
@@ -138,7 +241,7 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, String> {
             }
             let mut result = Value::Undefined;
             for e in exprs {
-                result = eval(e, env)?;
+                result = eval_inner(e, env)?;
             }
             Ok(result)
         }
@@ -150,15 +253,15 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, String> {
 
         // Unary operations
         Expr::BitNot(inner) => {
-            let v = eval(inner, env)?;
+            let v = eval_inner(inner, env)?;
             match v {
                 Value::Int(n) => Ok(Value::Int(!n)),
-                _ => Err("Bitwise NOT requires an integer".to_string()),
+                _ => Err(err("Bitwise NOT requires an integer")),
             }
         }
 
         Expr::LogNot(inner) => {
-            let v = eval(inner, env)?;
+            let v = eval_inner(inner, env)?;
             // JavaScript truthiness
             let result = match v {
                 Value::Bool(b) => !b,
@@ -180,7 +283,7 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, String> {
         Expr::Object(props) => {
             let obj = new_object();
             for (k, v) in props {
-                let val = eval(v, env)?;
+                let val = eval_inner(v, env)?;
                 obj.borrow_mut().insert(k.clone(), val);
             }
             Ok(Value::Object(obj))
@@ -188,7 +291,7 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, String> {
 
         // Property access: obj.prop
         Expr::PropAccess(obj_expr, prop) => {
-            let obj_val = eval(obj_expr, env)?;
+            let obj_val = eval_inner(obj_expr, env)?;
             match obj_val {
                 Value::Object(obj_ref) => {
                     Ok(obj_ref.borrow().get(prop).cloned().unwrap_or(Value::Undefined))
@@ -199,27 +302,27 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, String> {
                 Value::String(s) if prop == "length" => {
                     Ok(Value::Int(s.len() as i64))
                 }
-                _ => Err(format!("Cannot access property '{}' on {:?}", prop, obj_val)),
+                _ => Err(err(&format!("Cannot access property '{}' on {:?}", prop, obj_val))),
             }
         }
 
         // Property set: obj.prop = value
         Expr::PropSet(obj_expr, prop, val_expr) => {
-            let obj_val = eval(obj_expr, env)?;
-            let value = eval(val_expr, env)?;
+            let obj_val = eval_inner(obj_expr, env)?;
+            let value = eval_inner(val_expr, env)?;
             match obj_val {
                 Value::Object(obj_ref) => {
                     obj_ref.borrow_mut().insert(prop.clone(), value.clone());
                     Ok(value)
                 }
-                _ => Err(format!("Cannot set property '{}' on {:?}", prop, obj_val)),
+                _ => Err(err(&format!("Cannot set property '{}' on {:?}", prop, obj_val))),
             }
         }
 
         // Computed property access: obj[key]
         Expr::ComputedAccess(obj_expr, key_expr) => {
-            let obj_val = eval(obj_expr, env)?;
-            let key_val = eval(key_expr, env)?;
+            let obj_val = eval_inner(obj_expr, env)?;
+            let key_val = eval_inner(key_expr, env)?;
 
             match (&obj_val, &key_val) {
                 (Value::Object(obj_ref), Value::String(k)) => {
@@ -237,50 +340,64 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, String> {
                 (Value::Array(arr), Value::String(s)) if s == "length" => {
                     Ok(Value::Int(arr.borrow().len() as i64))
                 }
-                _ => Err(format!("Cannot access {:?} with key {:?}", obj_val, key_val)),
+                _ => Err(err(&format!("Cannot access {:?} with key {:?}", obj_val, key_val))),
             }
         }
 
         // Computed property set: obj[key] = value
         Expr::ComputedSet(obj_expr, key_expr, val_expr) => {
-            let obj_val = eval(obj_expr, env)?;
-            let key_val = eval(key_expr, env)?;
-            let value = eval(val_expr, env)?;
+            let obj_val = eval_inner(obj_expr, env)?;
+            let key_val = eval_inner(key_expr, env)?;
+            let value = eval_inner(val_expr, env)?;
 
             match (&obj_val, &key_val) {
                 (Value::Object(obj_ref), Value::String(k)) => {
                     obj_ref.borrow_mut().insert(k.clone(), value.clone());
                     Ok(value)
                 }
-                _ => Err(format!("Cannot set {:?}[{:?}]", obj_val, key_val)),
+                (Value::Array(arr), Value::Int(i)) => {
+                    let i = *i as usize;
+                    let mut borrowed = arr.borrow_mut();
+                    // Extend array if needed
+                    while borrowed.len() <= i {
+                        borrowed.push(Value::Undefined);
+                    }
+                    borrowed[i] = value.clone();
+                    Ok(value)
+                }
+                _ => Err(err(&format!("Cannot set {:?}[{:?}]", obj_val, key_val))),
             }
         }
 
         // Switch statement
         Expr::Switch { discriminant, cases, default } => {
-            let disc_val = eval(discriminant, env)?;
+            let disc_val = eval_inner(discriminant, env)?;
 
             // Find matching case
             for (case_val_expr, body) in cases {
-                let case_val = eval(case_val_expr, env)?;
-                if case_val == disc_val {
+                let case_val = eval_inner(case_val_expr, env)?;
+                if values_equal(&case_val, &disc_val) {
                     // Execute this case body
-                    let mut result = Value::Undefined;
                     for stmt in body {
-                        result = eval(stmt, env)?;
-                        // TODO: handle break properly
+                        match eval_inner(stmt, env) {
+                            Ok(_) => {}
+                            Err(EvalError::Control(ControlFlow::Break)) => return Ok(Value::Undefined),
+                            Err(e) => return Err(e),
+                        }
                     }
-                    return Ok(result);
+                    return Ok(Value::Undefined);
                 }
             }
 
             // No match - execute default if present
             if let Some(default_body) = default {
-                let mut result = Value::Undefined;
                 for stmt in default_body {
-                    result = eval(stmt, env)?;
+                    match eval_inner(stmt, env) {
+                        Ok(_) => {}
+                        Err(EvalError::Control(ControlFlow::Break)) => return Ok(Value::Undefined),
+                        Err(e) => return Err(e),
+                    }
                 }
-                return Ok(result);
             }
 
             Ok(Value::Undefined)
@@ -290,16 +407,18 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, String> {
         Expr::For { init, cond, update, body } => {
             // Handle initialization
             if let Some(init_expr) = init {
-                eval(init_expr, env)?;
+                eval_inner(init_expr, env)?;
             }
 
             loop {
                 // Check condition
                 let should_continue = if let Some(c) = cond {
-                    let cond_val = eval(c, env)?;
+                    let cond_val = eval_inner(c, env)?;
                     match cond_val {
                         Value::Bool(b) => b,
-                        _ => return Err("For condition must be a boolean".to_string()),
+                        Value::Int(0) => false,
+                        Value::Int(_) => true,
+                        _ => return Err(err("For condition must be a boolean or number")),
                     }
                 } else {
                     true // Infinite loop if no condition
@@ -310,30 +429,43 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, String> {
                 }
 
                 // Execute body
-                eval(body, env)?;
+                match eval_inner(body, env) {
+                    Ok(_) => {}
+                    Err(EvalError::Control(ControlFlow::Break)) => return Ok(Value::Undefined),
+                    Err(EvalError::Control(ControlFlow::Continue)) => {}
+                    Err(e) => return Err(e),
+                }
 
                 // Execute update
                 if let Some(upd) = update {
-                    eval(upd, env)?;
+                    eval_inner(upd, env)?;
                 }
             }
         }
 
-        // Break and Continue - would need special handling with control flow
-        Expr::Break => Err("Break outside of loop".to_string()),
-        Expr::Continue => Err("Continue outside of loop".to_string()),
+        // Break and Continue
+        Expr::Break => Err(EvalError::Control(ControlFlow::Break)),
+        Expr::Continue => Err(EvalError::Control(ControlFlow::Continue)),
+
+        // Return
+        Expr::Return(inner) => {
+            let v = eval_inner(inner, env)?;
+            Err(EvalError::Control(ControlFlow::Return(v)))
+        }
 
         // Throw
         Expr::Throw(inner) => {
-            let val = eval(inner, env)?;
-            Err(format!("Thrown: {:?}", val))
+            let val = eval_inner(inner, env)?;
+            Err(err(&format!("Thrown: {:?}", val)))
         }
 
         // New expression - creates an opaque value
         Expr::New(constructor, args) => {
-            let ctor = eval(constructor, env)?;
-            let arg_vals: Result<Vec<Value>, String> = args.iter().map(|a| eval(a, env)).collect();
-            let _ = arg_vals?;
+            let ctor = eval_inner(constructor, env)?;
+            let mut arg_vals = Vec::new();
+            for a in args {
+                arg_vals.push(eval_inner(a, env)?);
+            }
             // Create an opaque value representing the new expression
             Ok(Value::Opaque {
                 label: format!("new {:?}", ctor),
@@ -349,30 +481,47 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, String> {
             state: None,
         }),
 
-        // TryCatch - simplified execution (no proper exception propagation)
+        // TryCatch
         Expr::TryCatch { try_block, catch_param, catch_block, finally_block } => {
-            let try_result = eval(try_block, env);
+            let try_result = eval_inner(try_block, env);
 
             let result = match try_result {
                 Ok(v) => Ok(v),
-                Err(e) => {
+                Err(EvalError::Error(e)) => {
                     // Execute catch block
                     let catch_env = env_with_parent(env);
                     if let Some(param) = catch_param {
                         // Bind error to catch parameter as a string
                         catch_env.borrow_mut().insert(param.clone(), Value::String(e));
                     }
-                    eval(catch_block, &catch_env)
+                    eval_inner(catch_block, &catch_env)
+                }
+                Err(EvalError::Control(cf)) => {
+                    // Control flow passes through try/catch
+                    Err(EvalError::Control(cf))
                 }
             };
 
             // Execute finally block if present
             if let Some(finally) = finally_block {
-                eval(finally, env)?;
+                eval_inner(finally, env)?;
             }
 
             result
         }
+    }
+}
+
+fn values_equal(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Int(x), Value::Int(y)) => x == y,
+        (Value::Bool(x), Value::Bool(y)) => x == y,
+        (Value::String(x), Value::String(y)) => x == y,
+        (Value::Undefined, Value::Undefined) => true,
+        (Value::Null, Value::Null) => true,
+        (Value::Undefined, Value::Null) => true,
+        (Value::Null, Value::Undefined) => true,
+        _ => false,
     }
 }
 

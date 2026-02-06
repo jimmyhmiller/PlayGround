@@ -1,0 +1,66 @@
+extern fn arg_i64(index: I64) -> I64;
+extern fn print_stretch(depth: I64, check: I64) -> I64;
+extern fn print_trees(iterations: I64, depth: I64, check: I64) -> I64;
+extern fn print_long_lived(depth: I64, check: I64) -> I64;
+
+enum Tree { Leaf {}, Node { left: Tree, right: Tree } }
+
+fn max(a: I64, b: I64) -> I64 {
+    if a > b { a } else { b }
+}
+
+fn pow2(n: I64) -> I64 {
+    let mut i: I64 = 0;
+    let mut v: I64 = 1;
+    while i < n { v = v + v; i = i + 1; };
+    v
+}
+
+fn bottomUpTree(depth: I64) -> Tree {
+    if depth > 0 {
+        Tree::Node {
+            left: bottomUpTree(depth - 1),
+            right: bottomUpTree(depth - 1)
+        }
+    } else {
+        Tree::Leaf {}
+    }
+}
+
+fn itemCheck(t: Tree) -> I64 {
+    let one: I64 = 1;
+    match t {
+        Tree::Leaf {} => one,
+        Tree::Node { left, right } => one + itemCheck(left) + itemCheck(right)
+    }
+}
+
+fn main() -> I64 {
+    let minDepth: I64 = 4;
+    let n: I64 = arg_i64(0);
+    let maxDepth: I64 = max(minDepth + 2, n);
+    let stretchDepth: I64 = maxDepth + 1;
+
+    let stretchCheck: I64 = itemCheck(bottomUpTree(stretchDepth));
+    print_stretch(stretchDepth, stretchCheck);
+
+    let longLived: Tree = bottomUpTree(maxDepth);
+
+    let mut depth: I64 = minDepth;
+    while depth <= maxDepth {
+        let iterations: I64 = pow2(maxDepth - depth + minDepth);
+        let mut i: I64 = 0;
+        let mut check: I64 = 0;
+        while i < iterations {
+            check = check + itemCheck(bottomUpTree(depth));
+            i = i + 1;
+        };
+        print_trees(iterations, depth, check);
+        depth = depth + 2;
+    };
+
+    let longCheck: I64 = itemCheck(longLived);
+    print_long_lived(maxDepth, longCheck);
+    let zero: I64 = 0;
+    zero
+}
