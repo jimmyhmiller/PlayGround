@@ -12,6 +12,18 @@ use std::process::Command;
 use std::time::Duration;
 
 const MAX_BUFFER_SIZE: usize = 100 * 1024 * 1024; // 100MB
+const WRITE_TIMEOUT: Duration = Duration::from_millis(200);
+
+/// Write to client socket with a timeout to prevent deadlocking the daemon.
+/// Uses blocking mode with SO_SNDTIMEO so write_all works correctly.
+fn write_with_timeout(client: &mut UnixStream, data: &[u8]) -> std::io::Result<()> {
+    client.set_nonblocking(false)?;
+    client.set_write_timeout(Some(WRITE_TIMEOUT))?;
+    let result = client.write_all(data);
+    let _ = client.set_write_timeout(None);
+    let _ = client.set_nonblocking(true);
+    result
+}
 
 /// Shared state for the daemon
 struct DaemonState {
@@ -54,13 +66,8 @@ impl DaemonState {
         if let Some(ref mut client) = self.client {
             let msg = DaemonMessage::Output(data.to_vec());
             if let Ok(encoded) = encode_message(&msg) {
-                // Temporarily set blocking mode to ensure complete write
-                let _ = client.set_nonblocking(false);
-                let write_result = client.write_all(&encoded);
-                let _ = client.set_nonblocking(true);
-
-                if write_result.is_err() {
-                    // Client disconnected
+                if write_with_timeout(client, &encoded).is_err() {
+                    // Client disconnected or write timed out
                     self.client = None;
                 }
             }
@@ -82,9 +89,11 @@ impl DaemonState {
             if !self.buffer.is_empty() {
                 let msg = DaemonMessage::Output(self.buffer.clone());
                 let encoded = encode_message(&msg)?;
-                // Temporarily set blocking mode to ensure complete write
+                // Use a longer timeout for replay since buffer can be large
                 let _ = client.set_nonblocking(false);
+                let _ = client.set_write_timeout(Some(Duration::from_secs(5)));
                 let result = client.write_all(&encoded);
+                let _ = client.set_write_timeout(None)?;
                 let _ = client.set_nonblocking(true);
                 result?;
                 // Don't clear buffer - it's the session history
@@ -102,7 +111,7 @@ impl DaemonState {
             ws_ypixel: 0,
         };
         unsafe {
-            libc::ioctl(self.master_fd, libc::TIOCSWINSZ as libc::c_ulong, &winsize);
+            libc::ioctl(self.master_fd, libc::TIOCSWINSZ as _, &winsize);
         }
     }
 }
@@ -178,7 +187,7 @@ fn spawn_in_pty(command: &[String], cols: u16, rows: u16) -> Result<(i32, Pid)> 
 
         // Set slave as controlling terminal
         unsafe {
-            libc::ioctl(slave_fd, libc::TIOCSCTTY as libc::c_ulong, 0);
+            libc::ioctl(slave_fd, libc::TIOCSCTTY as _, 0);
         }
 
         // Dup slave to stdin/stdout/stderr
@@ -326,11 +335,9 @@ pub fn run_daemon(name: String, command: Vec<String>) -> Result<()> {
                     code: state.exit_code,
                 };
                 if let Ok(encoded) = encode_message(&msg) {
-                    // Ensure complete write with blocking mode
-                    let _ = client.set_nonblocking(false);
-                    let _ = client.write_all(&encoded);
-                    let _ = client.set_nonblocking(true);
-                    state.client_saw_exit = true;
+                    if write_with_timeout(client, &encoded).is_ok() {
+                        state.client_saw_exit = true;
+                    }
                 }
             }
             exit_notified = true;
@@ -363,10 +370,7 @@ pub fn run_daemon(name: String, command: Vec<String>) -> Result<()> {
                                         // Send attached confirmation
                                         let reply = DaemonMessage::Attached;
                                         if let Ok(encoded) = encode_message(&reply) {
-                                            // Ensure complete write with blocking mode
-                                            let _ = client.set_nonblocking(false);
-                                            let _ = client.write_all(&encoded);
-                                            let _ = client.set_nonblocking(true);
+                                            let _ = write_with_timeout(client, &encoded);
                                         }
 
                                         // Mark that we need to replay buffer
@@ -379,11 +383,9 @@ pub fn run_daemon(name: String, command: Vec<String>) -> Result<()> {
                                                 code: state.exit_code,
                                             };
                                             if let Ok(encoded) = encode_message(&msg) {
-                                                // Ensure complete write with blocking mode
-                                                let _ = client.set_nonblocking(false);
-                                                let _ = client.write_all(&encoded);
-                                                let _ = client.set_nonblocking(true);
-                                                notified_exit = true;
+                                                if write_with_timeout(client, &encoded).is_ok() {
+                                                    notified_exit = true;
+                                                }
                                             }
                                         }
                                     }
@@ -441,7 +443,7 @@ pub fn run_daemon(name: String, command: Vec<String>) -> Result<()> {
         }
 
         // Small sleep to avoid busy-waiting
-        std::thread::sleep(Duration::from_millis(10));
+        std::thread::sleep(Duration::from_millis(1));
     }
 }
 

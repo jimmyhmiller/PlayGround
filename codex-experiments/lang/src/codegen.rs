@@ -1,5 +1,7 @@
 use crate::ast::*;
 use crate::runtime;
+use crate::{lexer::Lexer, parser::Parser};
+use crate::{qualify, resolve, typecheck};
 use inkwell::builder::Builder;
 use inkwell::builder::BuilderError;
 use inkwell::context::Context;
@@ -31,6 +33,7 @@ pub struct Codegen<'ctx> {
     object_header_ty: StructType<'ctx>,
     structs: HashMap<String, StructLayout<'ctx>>,
     enums: HashMap<String, EnumLayout<'ctx>>,
+    tuples: HashMap<String, StructLayout<'ctx>>,
     str_lit_id: usize,
 }
 
@@ -82,14 +85,57 @@ struct VariantFieldLayout<'ctx> {
     raw_offset: u64,
 }
 
-pub fn compile_and_run(module: &crate::ast::Module) -> Result<i64, CodegenError> {
+/// Default memory manager that delegates to system allocator.
+/// Used to create MCJIT engine with FastISel disabled.
+#[derive(Debug)]
+struct DefaultMemoryManager;
+
+impl inkwell::memory_manager::McjitMemoryManager for DefaultMemoryManager {
+    fn allocate_code_section(
+        &mut self,
+        size: libc::uintptr_t,
+        alignment: libc::c_uint,
+        _section_id: libc::c_uint,
+        _section_name: &str,
+    ) -> *mut u8 {
+        unsafe {
+            let layout = std::alloc::Layout::from_size_align(size, alignment as usize)
+                .unwrap_or(std::alloc::Layout::from_size_align(size, 16).unwrap());
+            std::alloc::alloc(layout)
+        }
+    }
+
+    fn allocate_data_section(
+        &mut self,
+        size: libc::uintptr_t,
+        alignment: libc::c_uint,
+        _section_id: libc::c_uint,
+        _section_name: &str,
+        _is_read_only: bool,
+    ) -> *mut u8 {
+        unsafe {
+            let layout = std::alloc::Layout::from_size_align(size, alignment as usize)
+                .unwrap_or(std::alloc::Layout::from_size_align(size, 16).unwrap());
+            std::alloc::alloc(layout)
+        }
+    }
+
+    fn finalize_memory(&mut self) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn destroy(&mut self) {}
+}
+
+pub fn compile_and_run(modules: &[crate::ast::Module]) -> Result<i64, CodegenError> {
     use inkwell::targets::{InitializationConfig, Target, TargetMachine, RelocMode, CodeModel};
     let context = Context::create();
     let mut gen = Codegen::new(&context, "lang_module", CodegenMode::Jit);
-    gen.declare_structs(module)?;
-    gen.declare_enums(module)?;
-    gen.declare_functions(module)?;
-    gen.define_functions(module)?;
+    gen.declare_structs(modules)?;
+    gen.declare_enums(modules)?;
+    gen.declare_tuples(modules)?;
+    gen.declare_functions(modules)?;
+    gen.define_functions(modules)?;
     Target::initialize_native(&InitializationConfig::default())
         .map_err(|e| CodegenError { message: format!("target init failed: {e}") })?;
     let triple = TargetMachine::get_default_triple();
@@ -113,7 +159,13 @@ pub fn compile_and_run(module: &crate::ast::Module) -> Result<i64, CodegenError>
     }
     let engine = gen
         .module
-        .create_jit_execution_engine(OptimizationLevel::None)
+        .create_mcjit_execution_engine_with_memory_manager(
+            DefaultMemoryManager,
+            OptimizationLevel::None,
+            inkwell::targets::CodeModel::Default,
+            false, // no_frame_pointer_elim
+            false, // enable_fast_isel = false (DISABLED)
+        )
         .map_err(|e| CodegenError {
             message: format!("jit create failed: {e}"),
         })?;
@@ -125,10 +177,12 @@ pub fn compile_and_run(module: &crate::ast::Module) -> Result<i64, CodegenError>
         gen.gc_allocate_array,
         gen.gc_write_barrier,
     );
+    runtime::gc_init();
     let mut thread = runtime::Thread::new();
     unsafe {
+        let main_name = gen.llvm_fn_name("main");
         let main = engine
-            .get_function::<unsafe extern "C" fn(*mut u8) -> i64>("main")
+            .get_function::<unsafe extern "C" fn(*mut u8) -> i64>(&main_name)
             .map_err(|e| CodegenError {
                 message: format!("missing main: {e}"),
             })?;
@@ -136,17 +190,18 @@ pub fn compile_and_run(module: &crate::ast::Module) -> Result<i64, CodegenError>
     }
 }
 
-pub fn compile_to_object(module: &crate::ast::Module, output: &std::path::Path) -> Result<(), CodegenError> {
+pub fn compile_to_object(modules: &[crate::ast::Module], output: &std::path::Path) -> Result<(), CodegenError> {
     use inkwell::targets::{InitializationConfig, RelocMode, Target, TargetMachine, CodeModel, FileType};
 
     Target::initialize_native(&InitializationConfig::default())
         .map_err(|e| CodegenError { message: format!("target init failed: {e}") })?;
     let context = Context::create();
     let mut gen = Codegen::new(&context, "lang_module", CodegenMode::Aot);
-    gen.declare_structs(module)?;
-    gen.declare_enums(module)?;
-    gen.declare_functions(module)?;
-    gen.define_functions(module)?;
+    gen.declare_structs(modules)?;
+    gen.declare_enums(modules)?;
+    gen.declare_tuples(modules)?;
+    gen.declare_functions(modules)?;
+    gen.define_functions(modules)?;
     gen.emit_aot_wrapper_main()?;
     if std::env::var("LANGC_DUMP_IR").is_ok() {
         eprintln!("{}", gen.module.print_to_string().to_string());
@@ -254,6 +309,258 @@ extern "C" fn rt_arg_str(index: i64) -> *const u8 {
     Box::into_raw(boxed) as *const u8
 }
 
+extern "C" fn rt_arg_is_i64(index: i64) -> i64 {
+    if index < 0 {
+        return 0;
+    }
+    let args: Vec<String> = std::env::args().collect();
+    let mut base = 1usize;
+    if let Some(pos) = args.iter().position(|a| a == "--") {
+        base = pos + 1;
+    } else if args.len() >= 3 && args[1] == "run" {
+        base = 3;
+    }
+    let pos = base as i64 + index;
+    if pos < 0 || pos as usize >= args.len() {
+        return 0;
+    }
+    if args[pos as usize].parse::<i64>().is_ok() { 1 } else { 0 }
+}
+
+extern "C" fn rt_arg_len() -> i64 {
+    let args: Vec<String> = std::env::args().collect();
+    let mut base = 1usize;
+    if let Some(pos) = args.iter().position(|a| a == "--") {
+        base = pos + 1;
+    } else if args.len() >= 3 && args[1] == "run" {
+        base = 3;
+    }
+    if args.len() < base {
+        0
+    } else {
+        (args.len() - base) as i64
+    }
+}
+
+extern "C" fn rt_host_build() -> i64 {
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+
+    fn collect_lang_files(dir: &Path, out: &mut Vec<String>) {
+        if let Ok(entries) = fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    collect_lang_files(&path, out);
+                } else if path.extension().and_then(|s| s.to_str()) == Some("lang") {
+                    out.push(path.to_string_lossy().to_string());
+                }
+            }
+        }
+    }
+
+    fn build_roots(paths: &[String]) -> Vec<PathBuf> {
+        let mut roots = Vec::new();
+        for p in paths {
+            let path = Path::new(p);
+            if path.is_dir() {
+                roots.push(path.to_path_buf());
+            } else if let Some(parent) = path.parent() {
+                roots.push(parent.to_path_buf());
+            }
+        }
+        if roots.is_empty() {
+            roots.push(Path::new(".").to_path_buf());
+        }
+        roots
+    }
+
+    fn derive_module_path(path: &Path, roots: &[PathBuf], root_file: Option<&Path>) -> Option<Vec<String>> {
+        let mut best_root: Option<&PathBuf> = None;
+        let mut best_len = 0usize;
+        for root in roots {
+            if path.starts_with(root) {
+                let len = root.components().count();
+                if len >= best_len {
+                    best_len = len;
+                    best_root = Some(root);
+                }
+            }
+        }
+        let root = best_root?;
+        let rel = path.strip_prefix(root).ok()?;
+        let rel_dir = rel.parent().unwrap_or_else(|| Path::new(""));
+        let mut parts = Vec::new();
+        for comp in rel_dir.components() {
+            if let std::path::Component::Normal(s) = comp {
+                if let Some(text) = s.to_str() {
+                    parts.push(text.to_string());
+                }
+            }
+        }
+        let skip_stem = root_file.map_or(false, |root| root == path);
+        if !skip_stem {
+            let stem = path.file_stem().and_then(|s| s.to_str());
+            if let Some(stem) = stem {
+                let is_root = matches!(stem, "main" | "lib" | "mod");
+                if !is_root {
+                    parts.push(stem.to_string());
+                }
+            }
+        }
+        Some(parts)
+    }
+
+    let args: Vec<String> = std::env::args().collect();
+    let mut forwarded = Vec::new();
+    if let Some(pos) = args.iter().position(|a| a == "--") {
+        forwarded.extend_from_slice(&args[pos + 1..]);
+    }
+    if forwarded.is_empty() {
+        eprintln!("bootstrap build: no target files");
+        return 1;
+    }
+    if forwarded[0].parse::<i64>().is_ok() {
+        forwarded.remove(0);
+    }
+    if forwarded.is_empty() {
+        eprintln!("bootstrap build: no target files");
+        return 1;
+    }
+
+    let mut all_paths: Vec<String> = Vec::new();
+    for p in &forwarded {
+        let path = Path::new(p);
+        if path.is_dir() {
+            collect_lang_files(path, &mut all_paths);
+        } else {
+            all_paths.push(p.clone());
+        }
+    }
+    if all_paths.is_empty() {
+        eprintln!("bootstrap build: no .lang files found");
+        return 1;
+    }
+
+    let roots = build_roots(&forwarded);
+    let root_file = if forwarded.len() == 1 && Path::new(&forwarded[0]).is_file() {
+        Some(Path::new(&forwarded[0]).to_path_buf())
+    } else {
+        None
+    };
+    let mut modules: Vec<crate::ast::Module> = Vec::new();
+    for path in &all_paths {
+        let src = match fs::read_to_string(path) {
+            Ok(s) => s,
+            Err(err) => {
+                eprintln!("failed to read {}: {}", path, err);
+                return 1;
+            }
+        };
+        let tokens = match Lexer::new(&src).lex_all() {
+            Ok(toks) => toks,
+            Err(errors) => {
+                for err in errors {
+                    eprintln!("lex error: {} at {}..{}", err.message, err.span.start, err.span.end);
+                }
+                return 1;
+            }
+        };
+        let mut module = match Parser::new(tokens).parse_module() {
+            Ok(module) => module,
+            Err(errors) => {
+                for err in errors {
+                    eprintln!("parse error: {} at {}..{}", err.message, err.span.start, err.span.end);
+                }
+                return 1;
+            }
+        };
+        if module.path.is_none() {
+            if let Some(p) = derive_module_path(Path::new(path), &roots, root_file.as_deref()) {
+                if !p.is_empty() {
+                    module.path = Some(p);
+                }
+            }
+        }
+        modules.push(module);
+    }
+
+    if let Err(errors) = qualify::qualify_modules(&mut modules) {
+        for err in errors {
+            eprintln!("qualify error: {} at {}..{}", err.message, err.span.start, err.span.end);
+        }
+        return 1;
+    }
+    if let Err(errors) = resolve::resolve_modules(&modules) {
+        for err in errors {
+            eprintln!("resolve error: {} at {}..{}", err.message, err.span.start, err.span.end);
+        }
+        return 1;
+    }
+    if let Err(errors) = typecheck::typecheck_modules(&modules) {
+        for err in errors {
+            eprintln!("type error: {} at {}..{}", err.message, err.span.start, err.span.end);
+        }
+        return 1;
+    }
+
+    let input = Path::new(&all_paths[0]);
+    let obj_path = input.with_extension("o");
+    let mut exe_path = input.with_extension("");
+    if input.extension().is_none() {
+        exe_path = input.with_extension("out");
+    }
+    if let Err(err) = compile_to_object(&modules, &obj_path) {
+        eprintln!("codegen error: {}", err.message);
+        return 1;
+    }
+
+    let status = Command::new("cargo")
+        .arg("build")
+        .arg("--quiet")
+        .arg("--lib")
+        .status();
+    match status {
+        Ok(s) if s.success() => {}
+        Ok(s) => {
+            eprintln!("failed to build runtime lib: {}", s);
+            return 1;
+        }
+        Err(err) => {
+            eprintln!("failed to invoke cargo: {err}");
+            return 1;
+        }
+    }
+
+    let target_dir = std::env::var("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| Path::new(env!("CARGO_MANIFEST_DIR")).join("target"));
+    let profile = std::env::var("PROFILE").unwrap_or_else(|_| "debug".to_string());
+    let lib_path = target_dir.join(profile).join("liblang_runtime.a");
+
+    let status = Command::new("cc")
+        .arg(&obj_path)
+        .arg(&lib_path)
+        .arg("-O2")
+        .arg("-o")
+        .arg(&exe_path)
+        .status();
+    match status {
+        Ok(s) if s.success() => {
+            println!("built {}", exe_path.display());
+            0
+        }
+        Ok(s) => {
+            eprintln!("link failed: {}", s);
+            1
+        }
+        Err(err) => {
+            eprintln!("failed to invoke cc: {err}");
+            1
+        }
+    }
+}
 extern "C" fn rt_string_len(ptr: *const u8) -> i64 {
     if ptr.is_null() {
         return 0;
@@ -399,6 +706,42 @@ extern "C" fn rt_vec_push(vec: *mut u8, item: *mut u8) -> i64 {
     }
 }
 
+extern "C" fn rt_vec_clear(vec: *mut u8) -> i64 {
+    if vec.is_null() {
+        return 0;
+    }
+    unsafe {
+        let v = &mut *(vec as *mut VecPtr);
+        v.len = 0;
+    }
+    0
+}
+
+extern "C" fn rt_vec_set_len(vec: *mut u8, new_len: i64) -> i64 {
+    if vec.is_null() {
+        return 0;
+    }
+    unsafe {
+        let v = &mut *(vec as *mut VecPtr);
+        if new_len < 0 {
+            v.len = 0;
+        } else if new_len < v.len {
+            v.len = new_len;
+        }
+    }
+    0
+}
+
+extern "C" fn rt_enum_tag(obj: *mut u8, raw_base: i64) -> i64 {
+    if obj.is_null() {
+        return -1;
+    }
+    unsafe {
+        let tag_ptr = obj.add(raw_base as usize) as *const i32;
+        *tag_ptr as i64
+    }
+}
+
 extern "C" fn rt_string_byte_at(ptr: *const u8, index: i64) -> i64 {
     if ptr.is_null() || index < 0 {
         return 0;
@@ -413,6 +756,53 @@ extern "C" fn rt_string_byte_at(ptr: *const u8, index: i64) -> i64 {
         }
         0
     }
+}
+
+extern "C" fn rt_exit_process(code: i64) -> i64 {
+    std::process::exit(code as i32);
+}
+
+extern "C" fn rt_string_from_i64(val: i64) -> *const u8 {
+    let s = format!("{val}");
+    let mut bytes = s.into_bytes();
+    bytes.push(0);
+    let boxed = bytes.into_boxed_slice();
+    Box::into_raw(boxed) as *const u8
+}
+
+extern "C" fn rt_string_parse_i64(ptr: *const u8) -> i64 {
+    if ptr.is_null() {
+        return -1;
+    }
+    unsafe {
+        let mut len = 0usize;
+        while *ptr.add(len) != 0 {
+            len += 1;
+        }
+        let slice = std::slice::from_raw_parts(ptr, len);
+        match std::str::from_utf8(slice) {
+            Ok(s) => s.parse::<i64>().unwrap_or(-1),
+            Err(_) => -1,
+        }
+    }
+}
+
+extern "C" fn rt_print_str_stderr(ptr: *const u8) -> i64 {
+    if ptr.is_null() {
+        eprintln!();
+        return 0;
+    }
+    unsafe {
+        let mut len = 0usize;
+        while *ptr.add(len) != 0 {
+            len += 1;
+        }
+        let slice = std::slice::from_raw_parts(ptr, len);
+        if let Ok(s) = std::str::from_utf8(slice) {
+            eprintln!("{s}");
+        }
+    }
+    0
 }
 
 extern "C" fn rt_print_stretch(depth: i64, check: i64) {
@@ -435,94 +825,263 @@ fn add_runtime_mappings<'ctx>(
     gc_allocate_array: FunctionValue<'ctx>,
     gc_write_barrier: FunctionValue<'ctx>,
 ) {
-    if let Some(func) = externs.get("print_int") {
-        engine.add_global_mapping(func, rt_print_int as usize);
+    let map_all = |name: &str, addr: usize| {
+        for (k, v) in externs.iter() {
+            if last_segment(k) == name {
+                engine.add_global_mapping(v, addr);
+            }
+        }
+    };
+    map_all("print_int", rt_print_int as usize);
+    map_all("print_str", rt_print_str as usize);
+    map_all("add_i64", rt_add_i64 as usize);
+    map_all("null_ptr", rt_null_ptr as usize);
+    map_all("ptr_is_null", rt_ptr_is_null as usize);
+    map_all("arg_i64", rt_arg_i64 as usize);
+    map_all("arg_str", rt_arg_str as usize);
+    map_all("arg_is_i64", rt_arg_is_i64 as usize);
+    map_all("arg_len", rt_arg_len as usize);
+    map_all("host_build", rt_host_build as usize);
+    map_all("string_len", rt_string_len as usize);
+    map_all("string_eq", rt_string_eq as usize);
+    map_all("string_concat", rt_string_concat as usize);
+    map_all("string_slice", rt_string_slice as usize);
+    map_all("read_file", rt_read_file as usize);
+    map_all("vec_new", rt_vec_new as usize);
+    map_all("vec_len", rt_vec_len as usize);
+    map_all("vec_get", rt_vec_get as usize);
+    map_all("vec_push", rt_vec_push as usize);
+    map_all("string_byte_at", rt_string_byte_at as usize);
+    map_all("print_stretch", rt_print_stretch as usize);
+    map_all("print_trees", rt_print_trees as usize);
+    map_all("print_long_lived", rt_print_long_lived as usize);
+    map_all("exit_process", rt_exit_process as usize);
+    map_all("string_from_i64", rt_string_from_i64 as usize);
+    map_all("print_str_stderr", rt_print_str_stderr as usize);
+    map_all("vec_clear", rt_vec_clear as usize);
+    map_all("vec_set_len", rt_vec_set_len as usize);
+    map_all("enum_tag", rt_enum_tag as usize);
+    map_all("string_parse_i64", rt_string_parse_i64 as usize);
+    // Vec aliases — all forward to the same rt_vec_push / rt_vec_get
+    for alias in &[
+        "vec_push_str", "vec_push_item", "vec_push_param", "vec_push_field",
+        "vec_push_variant", "vec_push_type", "vec_push_expr", "vec_push_arm",
+        "vec_push_stmt", "vec_push_pfield", "vec_push_slfield",
+        "vec_push_ientry", "vec_push_uentry", "vec_push_vec", "vec_push_module",
+        "vec_push_ventry",
+    ] {
+        map_all(alias, rt_vec_push as usize);
     }
-    if let Some(func) = externs.get("print_str") {
-        engine.add_global_mapping(func, rt_print_str as usize);
-    }
-    if let Some(func) = externs.get("add_i64") {
-        engine.add_global_mapping(func, rt_add_i64 as usize);
-    }
-    if let Some(func) = externs.get("null_ptr") {
-        engine.add_global_mapping(func, rt_null_ptr as usize);
-    }
-    if let Some(func) = externs.get("ptr_is_null") {
-        engine.add_global_mapping(func, rt_ptr_is_null as usize);
-    }
-    if let Some(func) = externs.get("arg_i64") {
-        engine.add_global_mapping(func, rt_arg_i64 as usize);
-    }
-    if let Some(func) = externs.get("arg_str") {
-        engine.add_global_mapping(func, rt_arg_str as usize);
-    }
-    if let Some(func) = externs.get("string_len") {
-        engine.add_global_mapping(func, rt_string_len as usize);
-    }
-    if let Some(func) = externs.get("string_eq") {
-        engine.add_global_mapping(func, rt_string_eq as usize);
-    }
-    if let Some(func) = externs.get("string_concat") {
-        engine.add_global_mapping(func, rt_string_concat as usize);
-    }
-    if let Some(func) = externs.get("string_slice") {
-        engine.add_global_mapping(func, rt_string_slice as usize);
-    }
-    if let Some(func) = externs.get("read_file") {
-        engine.add_global_mapping(func, rt_read_file as usize);
-    }
-    if let Some(func) = externs.get("vec_new") {
-        engine.add_global_mapping(func, rt_vec_new as usize);
-    }
-    if let Some(func) = externs.get("vec_len") {
-        engine.add_global_mapping(func, rt_vec_len as usize);
-    }
-    if let Some(func) = externs.get("vec_get") {
-        engine.add_global_mapping(func, rt_vec_get as usize);
-    }
-    if let Some(func) = externs.get("vec_push") {
-        engine.add_global_mapping(func, rt_vec_push as usize);
-    }
-    if let Some(func) = externs.get("string_byte_at") {
-        engine.add_global_mapping(func, rt_string_byte_at as usize);
-    }
-    if let Some(func) = externs.get("print_stretch") {
-        engine.add_global_mapping(func, rt_print_stretch as usize);
-    }
-    if let Some(func) = externs.get("print_trees") {
-        engine.add_global_mapping(func, rt_print_trees as usize);
-    }
-    if let Some(func) = externs.get("print_long_lived") {
-        engine.add_global_mapping(func, rt_print_long_lived as usize);
+    for alias in &[
+        "vec_get_str", "vec_get_item", "vec_get_param", "vec_get_field",
+        "vec_get_variant", "vec_get_type", "vec_get_expr", "vec_get_arm",
+        "vec_get_stmt", "vec_get_pfield", "vec_get_slfield", "vec_get_tok",
+        "vec_get_ientry", "vec_get_uentry", "vec_get_vec", "vec_get_module",
+        "vec_get_ventry",
+    ] {
+        map_all(alias, rt_vec_get as usize);
     }
     engine.add_global_mapping(&gc_pollcheck, runtime::gc_pollcheck_slow as usize);
     engine.add_global_mapping(&gc_allocate, runtime::gc_allocate as usize);
     engine.add_global_mapping(&gc_allocate_array, runtime::gc_allocate_array as usize);
     engine.add_global_mapping(&gc_write_barrier, runtime::gc_write_barrier as usize);
+    map_all("gc_init", runtime::gc_init as usize);
+
+    // LLVM wrapper mappings
+    use crate::llvm_wrappers;
+    map_all("llvm_context_create", llvm_wrappers::llvm_context_create as usize);
+    map_all("llvm_module_create", llvm_wrappers::llvm_module_create as usize);
+    map_all("llvm_create_builder", llvm_wrappers::llvm_create_builder as usize);
+    map_all("llvm_dispose_builder", llvm_wrappers::llvm_dispose_builder as usize);
+    map_all("llvm_dispose_module", llvm_wrappers::llvm_dispose_module as usize);
+    map_all("llvm_context_dispose", llvm_wrappers::llvm_context_dispose as usize);
+    map_all("llvm_int1_type", llvm_wrappers::llvm_int1_type as usize);
+    map_all("llvm_int8_type", llvm_wrappers::llvm_int8_type as usize);
+    map_all("llvm_int16_type", llvm_wrappers::llvm_int16_type as usize);
+    map_all("llvm_int32_type", llvm_wrappers::llvm_int32_type as usize);
+    map_all("llvm_int64_type", llvm_wrappers::llvm_int64_type as usize);
+    map_all("llvm_float_type", llvm_wrappers::llvm_float_type as usize);
+    map_all("llvm_double_type", llvm_wrappers::llvm_double_type as usize);
+    map_all("llvm_ptr_type", llvm_wrappers::llvm_ptr_type as usize);
+    map_all("llvm_void_type", llvm_wrappers::llvm_void_type as usize);
+    map_all("llvm_function_type", llvm_wrappers::llvm_function_type as usize);
+    map_all("llvm_struct_type", llvm_wrappers::llvm_struct_type as usize);
+    map_all("llvm_array_type", llvm_wrappers::llvm_array_type as usize);
+    map_all("llvm_const_int", llvm_wrappers::llvm_const_int as usize);
+    map_all("llvm_const_real", llvm_wrappers::llvm_const_real as usize);
+    map_all("llvm_const_null", llvm_wrappers::llvm_const_null as usize);
+    map_all("llvm_const_string", llvm_wrappers::llvm_const_string as usize);
+    map_all("llvm_const_named_struct", llvm_wrappers::llvm_const_named_struct as usize);
+    map_all("llvm_const_array", llvm_wrappers::llvm_const_array as usize);
+    map_all("llvm_const_gep2", llvm_wrappers::llvm_const_gep2 as usize);
+    map_all("llvm_add_function", llvm_wrappers::llvm_add_function as usize);
+    map_all("llvm_get_named_function", llvm_wrappers::llvm_get_named_function as usize);
+    map_all("llvm_add_global", llvm_wrappers::llvm_add_global as usize);
+    map_all("llvm_set_initializer", llvm_wrappers::llvm_set_initializer as usize);
+    map_all("llvm_get_value_type", llvm_wrappers::llvm_get_value_type as usize);
+    map_all("llvm_print_module_to_string", llvm_wrappers::llvm_print_module_to_string as usize);
+    map_all("llvm_get_param", llvm_wrappers::llvm_get_param as usize);
+    map_all("llvm_count_params", llvm_wrappers::llvm_count_params as usize);
+    map_all("llvm_append_basic_block", llvm_wrappers::llvm_append_basic_block as usize);
+    map_all("llvm_get_first_basic_block", llvm_wrappers::llvm_get_first_basic_block as usize);
+    map_all("llvm_get_bb_terminator", llvm_wrappers::llvm_get_bb_terminator as usize);
+    map_all("llvm_get_insert_block", llvm_wrappers::llvm_get_insert_block as usize);
+    map_all("llvm_position_at_end", llvm_wrappers::llvm_position_at_end as usize);
+    map_all("llvm_position_before", llvm_wrappers::llvm_position_before as usize);
+    map_all("llvm_build_alloca", llvm_wrappers::llvm_build_alloca as usize);
+    map_all("llvm_build_load", llvm_wrappers::llvm_build_load as usize);
+    map_all("llvm_build_store", llvm_wrappers::llvm_build_store as usize);
+    map_all("llvm_build_call", llvm_wrappers::llvm_build_call as usize);
+    map_all("llvm_build_ret", llvm_wrappers::llvm_build_ret as usize);
+    map_all("llvm_build_ret_void", llvm_wrappers::llvm_build_ret_void as usize);
+    map_all("llvm_build_br", llvm_wrappers::llvm_build_br as usize);
+    map_all("llvm_build_cond_br", llvm_wrappers::llvm_build_cond_br as usize);
+    map_all("llvm_build_switch", llvm_wrappers::llvm_build_switch as usize);
+    map_all("llvm_build_phi", llvm_wrappers::llvm_build_phi as usize);
+    map_all("llvm_build_gep2", llvm_wrappers::llvm_build_gep2 as usize);
+    map_all("llvm_build_inbounds_gep2", llvm_wrappers::llvm_build_inbounds_gep2 as usize);
+    map_all("llvm_build_bitcast", llvm_wrappers::llvm_build_bitcast as usize);
+    map_all("llvm_build_struct_gep2", llvm_wrappers::llvm_build_struct_gep2 as usize);
+    map_all("llvm_build_memset", llvm_wrappers::llvm_build_memset as usize);
+    map_all("llvm_build_global_string_ptr", llvm_wrappers::llvm_build_global_string_ptr as usize);
+    map_all("llvm_build_add", llvm_wrappers::llvm_build_add as usize);
+    map_all("llvm_build_sub", llvm_wrappers::llvm_build_sub as usize);
+    map_all("llvm_build_mul", llvm_wrappers::llvm_build_mul as usize);
+    map_all("llvm_build_sdiv", llvm_wrappers::llvm_build_sdiv as usize);
+    map_all("llvm_build_srem", llvm_wrappers::llvm_build_srem as usize);
+    map_all("llvm_build_icmp", llvm_wrappers::llvm_build_icmp as usize);
+    map_all("llvm_build_and", llvm_wrappers::llvm_build_and as usize);
+    map_all("llvm_build_or", llvm_wrappers::llvm_build_or as usize);
+    map_all("llvm_build_xor", llvm_wrappers::llvm_build_xor as usize);
+    map_all("llvm_build_zext", llvm_wrappers::llvm_build_zext as usize);
+    map_all("llvm_build_trunc", llvm_wrappers::llvm_build_trunc as usize);
+    map_all("llvm_build_fadd", llvm_wrappers::llvm_build_fadd as usize);
+    map_all("llvm_build_fsub", llvm_wrappers::llvm_build_fsub as usize);
+    map_all("llvm_build_fmul", llvm_wrappers::llvm_build_fmul as usize);
+    map_all("llvm_build_fdiv", llvm_wrappers::llvm_build_fdiv as usize);
+    map_all("llvm_build_frem", llvm_wrappers::llvm_build_frem as usize);
+    map_all("llvm_build_fcmp", llvm_wrappers::llvm_build_fcmp as usize);
+    map_all("llvm_build_fneg", llvm_wrappers::llvm_build_fneg as usize);
+    map_all("llvm_add_incoming", llvm_wrappers::llvm_add_incoming as usize);
+    map_all("llvm_add_case", llvm_wrappers::llvm_add_case as usize);
+    map_all("llvm_set_volatile", llvm_wrappers::llvm_set_volatile as usize);
+    map_all("llvm_init_native_target", llvm_wrappers::llvm_init_native_target as usize);
+    map_all("llvm_init_native_asm_printer", llvm_wrappers::llvm_init_native_asm_printer as usize);
+    map_all("llvm_get_default_triple", llvm_wrappers::llvm_get_default_triple as usize);
+    map_all("llvm_get_target_from_triple", llvm_wrappers::llvm_get_target_from_triple as usize);
+    map_all("llvm_get_host_cpu_name", llvm_wrappers::llvm_get_host_cpu_name as usize);
+    map_all("llvm_get_host_cpu_features", llvm_wrappers::llvm_get_host_cpu_features as usize);
+    map_all("llvm_create_target_machine", llvm_wrappers::llvm_create_target_machine as usize);
+    map_all("llvm_set_module_target", llvm_wrappers::llvm_set_module_target as usize);
+    map_all("llvm_emit_to_file", llvm_wrappers::llvm_emit_to_file as usize);
+    map_all("llvm_get_first_instruction", llvm_wrappers::llvm_get_first_instruction as usize);
+    map_all("llvm_is_null", llvm_wrappers::llvm_is_null as usize);
+    map_all("llvm_get_global_value_type", llvm_wrappers::llvm_get_global_value_type as usize);
+    map_all("llvm_get_element_type", llvm_wrappers::llvm_get_element_type as usize);
+    map_all("llvm_pointer_type", llvm_wrappers::llvm_pointer_type as usize);
+    map_all("llvm_get_type_kind", llvm_wrappers::llvm_get_type_kind as usize);
+
+    // Runtime helpers
+    map_all("write_file", runtime::write_file as usize);
+    map_all("system_cmd", runtime::system_cmd as usize);
+    map_all("vec_data", runtime::vec_data as usize);
+
+    // Codegen pass vec aliases
+    for alias in &["vec_push_cgfn","vec_push_cgsl","vec_push_cgel","vec_push_cgfl",
+                    "vec_push_cgvfl","vec_push_cgvl","vec_push_cgloc","vec_push_loop"] {
+        map_all(alias, rt_vec_push as usize);
+    }
+    for alias in &["vec_get_cgfn","vec_get_cgsl","vec_get_cgel","vec_get_cgfl",
+                    "vec_get_cgvfl","vec_get_cgvl","vec_get_cgloc","vec_get_loop"] {
+        map_all(alias, rt_vec_get as usize);
+    }
+    // Typecheck pass vec aliases
+    for alias in &["vec_push_ty","vec_push_smentry","vec_push_ementry","vec_push_fnentry",
+                    "vec_push_vdentry","vec_push_subst","vec_push_local","vec_push_tfield"] {
+        map_all(alias, rt_vec_push as usize);
+    }
+    for alias in &["vec_get_ty","vec_get_smentry","vec_get_ementry","vec_get_fnentry",
+                    "vec_get_vdentry","vec_get_subst","vec_get_local","vec_get_tfield"] {
+        map_all(alias, rt_vec_get as usize);
+    }
 }
 
 impl<'ctx> Codegen<'ctx> {
-    fn declare_structs(&mut self, module: &crate::ast::Module) -> Result<(), CodegenError> {
-        for item in &module.items {
-            if let Item::Struct(s) = item {
-                let layout = self.compute_struct_layout(s)?;
-                self.structs.insert(s.name.clone(), layout);
+    fn declare_structs(&mut self, modules: &[crate::ast::Module]) -> Result<(), CodegenError> {
+        for module in modules {
+            let module_path = module.path.clone().unwrap_or_default();
+            for item in &module.items {
+                if let Item::Struct(s) = item {
+                    let full_name = full_item_name(&module_path, &s.name);
+                    let layout = self.compute_struct_layout(&full_name, s)?;
+                    self.structs.insert(full_name, layout);
+                }
             }
         }
         Ok(())
     }
 
-    fn declare_enums(&mut self, module: &crate::ast::Module) -> Result<(), CodegenError> {
-        for item in &module.items {
-            if let Item::Enum(e) = item {
-                let layout = self.compute_enum_layout(e)?;
-                self.enums.insert(e.name.clone(), layout);
+    fn declare_enums(&mut self, modules: &[crate::ast::Module]) -> Result<(), CodegenError> {
+        for module in modules {
+            let module_path = module.path.clone().unwrap_or_default();
+            for item in &module.items {
+                if let Item::Enum(e) = item {
+                    let full_name = full_item_name(&module_path, &e.name);
+                    let layout = self.compute_enum_layout(&full_name, e)?;
+                    self.enums.insert(full_name, layout);
+                }
             }
         }
         Ok(())
     }
 
-    fn compute_struct_layout(&mut self, s: &StructDecl) -> Result<StructLayout<'ctx>, CodegenError> {
+    fn declare_tuples(&mut self, modules: &[crate::ast::Module]) -> Result<(), CodegenError> {
+        for module in modules {
+            for item in &module.items {
+                match item {
+                    Item::Struct(s) => {
+                        for field in &s.fields {
+                            self.collect_tuple_types(&field.ty)?;
+                        }
+                    }
+                    Item::Enum(e) => {
+                        for variant in &e.variants {
+                            match &variant.kind {
+                                EnumVariantKind::Unit => {}
+                                EnumVariantKind::Tuple(types) => {
+                                    for ty in types {
+                                        self.collect_tuple_types(ty)?;
+                                    }
+                                }
+                                EnumVariantKind::Struct(fields) => {
+                                    for field in fields {
+                                        self.collect_tuple_types(&field.ty)?;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Item::Fn(f) => {
+                        for param in &f.params {
+                            self.collect_tuple_types(&param.ty)?;
+                        }
+                        self.collect_tuple_types(&f.ret_type)?;
+                        self.collect_tuple_types_in_block(&f.body)?;
+                    }
+                    Item::ExternFn(f) => {
+                        for param in &f.params {
+                            self.collect_tuple_types(&param.ty)?;
+                        }
+                        self.collect_tuple_types(&f.ret_type)?;
+                    }
+                    Item::Use(_) => {}
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn compute_struct_layout(&mut self, full_name: &str, s: &StructDecl) -> Result<StructLayout<'ctx>, CodegenError> {
         let ptr_size = std::mem::size_of::<usize>() as u64;
         let mut ptr_fields = Vec::new();
         let mut raw_fields = Vec::new();
@@ -577,7 +1136,7 @@ impl<'ctx> Codegen<'ctx> {
             .map(|f| header_size + f.offset)
             .collect();
 
-        let meta = self.create_type_info(&s.name, 0, total_size, &ptr_offsets)?;
+        let meta = self.create_type_info(full_name, 0, total_size, &ptr_offsets)?;
 
         Ok(StructLayout {
             size: total_size,
@@ -586,7 +1145,7 @@ impl<'ctx> Codegen<'ctx> {
         })
     }
 
-    fn compute_enum_layout(&mut self, e: &EnumDecl) -> Result<EnumLayout<'ctx>, CodegenError> {
+    fn compute_enum_layout(&mut self, full_name: &str, e: &EnumDecl) -> Result<EnumLayout<'ctx>, CodegenError> {
         let ptr_size = std::mem::size_of::<usize>() as u64;
         let header_size = 16u64;
         let mut variants = HashMap::new();
@@ -659,7 +1218,7 @@ impl<'ctx> Codegen<'ctx> {
         let ptr_offsets: Vec<u64> = (0..max_ptrs)
             .map(|i| header_size + (i as u64) * ptr_size)
             .collect();
-        let meta = self.create_type_info(&e.name, 1, total_size, &ptr_offsets)?;
+        let meta = self.create_type_info(full_name, 1, total_size, &ptr_offsets)?;
 
         Ok(EnumLayout {
             size: total_size,
@@ -668,6 +1227,170 @@ impl<'ctx> Codegen<'ctx> {
             raw_base,
             meta,
             variants,
+        })
+    }
+
+    fn collect_tuple_types(&mut self, ty: &Type) -> Result<(), CodegenError> {
+        match ty {
+            Type::Tuple(items) => {
+                self.ensure_tuple_layout(items)?;
+                for item in items {
+                    self.collect_tuple_types(item)?;
+                }
+            }
+            Type::RawPointer(inner) => self.collect_tuple_types(inner)?,
+            Type::Path(_, _) => {}
+        }
+        Ok(())
+    }
+
+    fn collect_tuple_types_in_block(&mut self, block: &Block) -> Result<(), CodegenError> {
+        for stmt in &block.stmts {
+            match stmt {
+                Stmt::Expr(expr, _) => self.collect_tuple_types_in_expr(expr)?,
+                Stmt::Return(expr, _) => {
+                    if let Some(expr) = expr {
+                        self.collect_tuple_types_in_expr(expr)?;
+                    }
+                }
+            }
+        }
+        if let Some(tail) = &block.tail {
+            self.collect_tuple_types_in_expr(tail)?;
+        }
+        Ok(())
+    }
+
+    fn collect_tuple_types_in_expr(&mut self, expr: &Expr) -> Result<(), CodegenError> {
+        match expr {
+            Expr::Let { ty, value, .. } => {
+                if let Some(ty) = ty {
+                    self.collect_tuple_types(ty)?;
+                }
+                self.collect_tuple_types_in_expr(value)?;
+            }
+            Expr::If { cond, then_branch, else_branch, .. } => {
+                self.collect_tuple_types_in_expr(cond)?;
+                self.collect_tuple_types_in_block(then_branch)?;
+                if let Some(else_branch) = else_branch {
+                    self.collect_tuple_types_in_block(else_branch)?;
+                }
+            }
+            Expr::While { cond, body, .. } => {
+                self.collect_tuple_types_in_expr(cond)?;
+                self.collect_tuple_types_in_block(body)?;
+            }
+            Expr::Match { scrutinee, arms, .. } => {
+                self.collect_tuple_types_in_expr(scrutinee)?;
+                for arm in arms {
+                    self.collect_tuple_types_in_expr(&arm.body)?;
+                }
+            }
+            Expr::Assign { target, value, .. } => {
+                self.collect_tuple_types_in_expr(target)?;
+                self.collect_tuple_types_in_expr(value)?;
+            }
+            Expr::Binary { left, right, .. } => {
+                self.collect_tuple_types_in_expr(left)?;
+                self.collect_tuple_types_in_expr(right)?;
+            }
+            Expr::Unary { expr, .. } => self.collect_tuple_types_in_expr(expr)?,
+            Expr::Call { callee, args, .. } => {
+                self.collect_tuple_types_in_expr(callee)?;
+                for arg in args {
+                    self.collect_tuple_types_in_expr(arg)?;
+                }
+            }
+            Expr::Field { base, .. } => self.collect_tuple_types_in_expr(base)?,
+            Expr::StructLit { fields, .. } => {
+                for (_, expr) in fields {
+                    self.collect_tuple_types_in_expr(expr)?;
+                }
+            }
+            Expr::Tuple { items, .. } => {
+                for item in items {
+                    self.collect_tuple_types_in_expr(item)?;
+                }
+            }
+            Expr::Block(block) => {
+                self.collect_tuple_types_in_block(block)?;
+            }
+            Expr::Literal(_, _) | Expr::Path(_, _) => {}
+            Expr::Break { .. } | Expr::Continue { .. } => {}
+        }
+        Ok(())
+    }
+
+    fn ensure_tuple_layout(&mut self, items: &[Type]) -> Result<String, CodegenError> {
+        let key = tuple_key(items);
+        if !self.tuples.contains_key(&key) {
+            let layout = self.compute_tuple_layout(&key, items)?;
+            self.tuples.insert(key.clone(), layout);
+        }
+        Ok(key)
+    }
+
+    fn compute_tuple_layout(&mut self, name: &str, items: &[Type]) -> Result<StructLayout<'ctx>, CodegenError> {
+        let ptr_size = std::mem::size_of::<usize>() as u64;
+        let mut ptr_fields = Vec::new();
+        let mut raw_fields = Vec::new();
+
+        for (i, ty) in items.iter().enumerate() {
+            let is_ptr = self.is_gc_ref_type(ty);
+            let llvm_ty = self.field_llvm_type(ty)?;
+            let entry = FieldLayout {
+                name: i.to_string(),
+                ty: ty.clone(),
+                llvm_ty,
+                offset: 0,
+                is_ptr,
+            };
+            if is_ptr {
+                ptr_fields.push(entry);
+            } else {
+                raw_fields.push(entry);
+            }
+        }
+
+        let mut fields = Vec::new();
+        let mut offset = 0u64;
+
+        for mut field in ptr_fields {
+            field.offset = offset;
+            offset += ptr_size;
+            fields.push(field);
+        }
+
+        for mut field in raw_fields {
+            let align = match field.llvm_ty {
+                BasicTypeEnum::IntType(t) if t.get_bit_width() == 1 => 1,
+                BasicTypeEnum::IntType(t) => (t.get_bit_width() / 8) as u64,
+                _ => 8,
+            };
+            if offset % align != 0 {
+                offset += align - (offset % align);
+            }
+            field.offset = offset;
+            offset += align.max(1);
+            fields.push(field);
+        }
+
+        let payload_size = offset;
+        let header_size = 16u64;
+        let total_size = header_size + payload_size;
+
+        let ptr_offsets: Vec<u64> = fields
+            .iter()
+            .filter(|f| f.is_ptr)
+            .map(|f| header_size + f.offset)
+            .collect();
+
+        let meta = self.create_type_info(name, 0, total_size, &ptr_offsets)?;
+
+        Ok(StructLayout {
+            size: total_size,
+            fields,
+            meta,
         })
     }
 
@@ -688,10 +1411,11 @@ impl<'ctx> Codegen<'ctx> {
                 .map(|v| i64_ty.const_int(*v, false))
                 .collect::<Vec<_>>(),
         );
+        let sym = mangle_name(name);
         let offsets_global = self.module.add_global(
             offsets_const.get_type(),
             None,
-            &format!("__ptr_offsets_{}", name),
+            &format!("__ptr_offsets_{}", sym),
         );
         offsets_global.set_initializer(&offsets_const);
         let zero = i32_ty.const_zero();
@@ -704,7 +1428,7 @@ impl<'ctx> Codegen<'ctx> {
         let name_const = self.context.const_string(name.as_bytes(), true);
         let name_global = self
             .module
-            .add_global(name_const.get_type(), None, &format!("__type_name_{}", name));
+            .add_global(name_const.get_type(), None, &format!("__type_name_{}", sym));
         name_global.set_initializer(&name_const);
         let name_ptr = unsafe {
             name_global
@@ -740,7 +1464,7 @@ impl<'ctx> Codegen<'ctx> {
 
         let global = self
             .module
-            .add_global(typeinfo_ty, None, &format!("__typeinfo_{}", name));
+            .add_global(typeinfo_ty, None, &format!("__typeinfo_{}", sym));
         global.set_initializer(&init);
         Ok(global.as_pointer_value())
     }
@@ -785,15 +1509,16 @@ impl<'ctx> Codegen<'ctx> {
             object_header_ty,
             structs: HashMap::new(),
             enums: HashMap::new(),
+            tuples: HashMap::new(),
             str_lit_id: 0,
         }
     }
 
-    fn llvm_fn_name(&self, name: &str) -> String {
-        if self.mode == CodegenMode::Aot && name == "main" {
+    fn llvm_fn_name(&self, full_name: &str) -> String {
+        if self.mode == CodegenMode::Aot && full_name == "main" {
             "__lang_main".to_string()
         } else {
-            name.to_string()
+            mangle_name(full_name)
         }
     }
 
@@ -830,24 +1555,29 @@ impl<'ctx> Codegen<'ctx> {
         module.add_function("gc_write_barrier", fn_ty, None)
     }
 
-    fn declare_functions(&mut self, module: &crate::ast::Module) -> Result<(), CodegenError> {
-        for item in &module.items {
-            match item {
-                Item::Fn(f) => {
-                    let fn_val = self.declare_fn(f)?;
-                    self.functions.insert(f.name.clone(), fn_val);
+    fn declare_functions(&mut self, modules: &[crate::ast::Module]) -> Result<(), CodegenError> {
+        for module in modules {
+            let module_path = module.path.clone().unwrap_or_default();
+            for item in &module.items {
+                match item {
+                    Item::Fn(f) => {
+                        let full_name = full_item_name(&module_path, &f.name);
+                        let fn_val = self.declare_fn(&full_name, f)?;
+                        self.functions.insert(full_name, fn_val);
+                    }
+                    Item::ExternFn(f) => {
+                        let full_name = full_item_name(&module_path, &f.name);
+                        let fn_val = self.declare_extern_fn(&full_name, f)?;
+                        self.externs.insert(full_name, fn_val);
+                    }
+                    _ => {}
                 }
-                Item::ExternFn(f) => {
-                    let fn_val = self.declare_extern_fn(f)?;
-                    self.externs.insert(f.name.clone(), fn_val);
-                }
-                _ => {}
             }
         }
         Ok(())
     }
 
-    fn declare_fn(&self, f: &FnDecl) -> Result<FunctionValue<'ctx>, CodegenError> {
+    fn declare_fn(&self, full_name: &str, f: &FnDecl) -> Result<FunctionValue<'ctx>, CodegenError> {
         let mut param_tys = Vec::new();
         param_tys.push(self.thread_ty.into());
         for param in &f.params {
@@ -859,11 +1589,16 @@ impl<'ctx> Codegen<'ctx> {
             BasicTypeEnum::PointerType(t) => t.fn_type(&param_tys, false),
             _ => return Err(CodegenError { message: "unsupported return type".to_string() }),
         };
-        let llvm_name = self.llvm_fn_name(&f.name);
+        let llvm_name = self.llvm_fn_name(full_name);
         Ok(self.module.add_function(&llvm_name, fn_ty, None))
     }
 
-    fn declare_extern_fn(&self, f: &ExternFnDecl) -> Result<FunctionValue<'ctx>, CodegenError> {
+    fn declare_extern_fn(&self, full_name: &str, f: &ExternFnDecl) -> Result<FunctionValue<'ctx>, CodegenError> {
+        let symbol = extern_symbol_name(full_name);
+        // Reuse existing LLVM function if already declared by another module
+        if let Some(existing) = self.module.get_function(symbol) {
+            return Ok(existing);
+        }
         let mut param_tys = Vec::new();
         for param in &f.params {
             param_tys.push(self.llvm_type(&param.ty)?.into());
@@ -874,22 +1609,26 @@ impl<'ctx> Codegen<'ctx> {
             BasicTypeEnum::PointerType(t) => t.fn_type(&param_tys, f.varargs),
             _ => return Err(CodegenError { message: "unsupported extern return type".to_string() }),
         };
-        Ok(self.module.add_function(&f.name, fn_ty, None))
+        Ok(self.module.add_function(symbol, fn_ty, None))
     }
 
-    fn define_functions(&mut self, module: &crate::ast::Module) -> Result<(), CodegenError> {
-        for item in &module.items {
-            if let Item::Fn(f) = item {
-                self.define_fn(f)?;
+    fn define_functions(&mut self, modules: &[crate::ast::Module]) -> Result<(), CodegenError> {
+        for module in modules {
+            let module_path = module.path.clone().unwrap_or_default();
+            for item in &module.items {
+                if let Item::Fn(f) = item {
+                    let full_name = full_item_name(&module_path, &f.name);
+                    self.define_fn(&full_name, f)?;
+                }
             }
         }
         Ok(())
     }
 
-    fn define_fn(&mut self, f: &FnDecl) -> Result<(), CodegenError> {
+    fn define_fn(&mut self, full_name: &str, f: &FnDecl) -> Result<(), CodegenError> {
         let function = *self
             .functions
-            .get(&f.name)
+            .get(full_name)
             .ok_or_else(|| CodegenError { message: "missing function".to_string() })?;
         let entry = self.context.append_basic_block(function, "entry");
         self.builder.position_at_end(entry);
@@ -899,7 +1638,7 @@ impl<'ctx> Codegen<'ctx> {
 
         let num_roots = self.count_roots_in_fn(f);
         let frame_ty = self.frame_type(num_roots);
-        let (frame_ptr, frame_origin, root_base) = self.emit_prologue(thread, &f.name, num_roots, frame_ty)?;
+        let (frame_ptr, frame_origin, root_base) = self.emit_prologue(thread, full_name, num_roots, frame_ty)?;
 
         let mut param_root_index = 0usize;
         for (i, param) in f.params.iter().enumerate() {
@@ -928,9 +1667,11 @@ impl<'ctx> Codegen<'ctx> {
             frame_ty,
             root_base,
             next_root: self.count_param_roots(&f.params),
+            loop_stack: Vec::new(),
         };
 
-        let value = self.codegen_block_value(&f.body, &mut ctx, Some(&f.ret_type))?;
+        let value = self.codegen_block_value(&f.body, &mut ctx, Some(&f.ret_type))
+            .map_err(|e| CodegenError { message: format!("{} (in fn {})", e.message, full_name) })?;
         let terminated = self
             .builder
             .get_insert_block()
@@ -975,6 +1716,17 @@ impl<'ctx> Codegen<'ctx> {
             .unwrap_or_else(|| self.module.add_function("rt_init_args", init_ty, None));
         self.map_builder(
             self.builder.build_call(init_fn, &[argc.into(), argv.into()], "init_args"),
+            "call",
+        )?;
+
+        // Call gc_init() before any allocations
+        let gc_init_ty = self.context.void_type().fn_type(&[], false);
+        let gc_init_fn = self
+            .module
+            .get_function("gc_init")
+            .unwrap_or_else(|| self.module.add_function("gc_init", gc_init_ty, None));
+        self.map_builder(
+            self.builder.build_call(gc_init_fn, &[], "gc_init"),
             "call",
         )?;
 
@@ -1075,7 +1827,7 @@ impl<'ctx> Codegen<'ctx> {
                 match &**target {
                     Expr::Path(path, _) => {
                         let name = path.last().ok_or_else(|| CodegenError { message: "invalid assignment".to_string() })?;
-                        let local = ctx.locals.get(name).ok_or_else(|| CodegenError { message: "unknown local".to_string() })?;
+                        let local = ctx.locals.get(name).ok_or_else(|| CodegenError { message: format!("unknown local '{}' in assign", name) })?;
                         if let Some(v) = v {
                             self.store_local(local, v)?;
                             if self.is_gc_ref_type(&local.lang_ty) {
@@ -1086,7 +1838,7 @@ impl<'ctx> Codegen<'ctx> {
                     }
                     Expr::Field { base, name, .. } => {
                         let (obj_ptr, _layout, field) = self.resolve_field(base, name, ctx)?;
-                        let field_ptr = self.field_ptr(obj_ptr, field)?;
+                        let field_ptr = self.field_ptr(obj_ptr, &field)?;
                         if let Some(v) = v {
                             let store_val = if self.is_bool_type(&field.ty) {
                                 let zext = self.map_builder(
@@ -1110,20 +1862,22 @@ impl<'ctx> Codegen<'ctx> {
             }
             Expr::Literal(lit, _) => match lit {
                 Literal::Int(text) => Ok(Some(self.const_i64(text)?)),
+                Literal::Char(value) => Ok(Some(self.context.i64_type().const_int(*value as u64, false).into())),
                 Literal::Float(text) => {
-                    let ty = expected.ok_or_else(|| CodegenError { message: "float literal requires type context".to_string() })?;
-                    match ty {
-                        Type::Path(path) if path.last().map(|s| s.as_str()) == Some("F32") => {
-                            let value = text.parse::<f32>().map_err(|_| CodegenError { message: "invalid float literal".to_string() })?;
-                            Ok(Some(self.context.f32_type().const_float(value as f64).into()))
-                        }
-                        _ => {
-                            let value = text.parse::<f64>().map_err(|_| CodegenError { message: "invalid float literal".to_string() })?;
-                            Ok(Some(self.context.f64_type().const_float(value).into()))
-                        }
+                    let is_f32 = matches!(
+                        expected,
+                        Some(Type::Path(path, _)) if path.last().map(|s| s.as_str()) == Some("F32")
+                    );
+                    if is_f32 {
+                        let value = text.parse::<f32>().map_err(|_| CodegenError { message: "invalid float literal".to_string() })?;
+                        Ok(Some(self.context.f32_type().const_float(value as f64).into()))
+                    } else {
+                        let value = text.parse::<f64>().map_err(|_| CodegenError { message: "invalid float literal".to_string() })?;
+                        Ok(Some(self.context.f64_type().const_float(value).into()))
                     }
                 }
                 Literal::Bool(b) => Ok(Some(self.context.bool_type().const_int(*b as u64, false).into())),
+                Literal::Unit => Ok(Some(self.context.i64_type().const_zero().into())),
                 Literal::Str(text) => {
                     let bytes = text.as_bytes();
                     let const_str = self.context.const_string(bytes, true);
@@ -1145,13 +1899,13 @@ impl<'ctx> Codegen<'ctx> {
             },
             Expr::Path(path, _) => {
                 let name = path.last().ok_or_else(|| CodegenError { message: "empty path".to_string() })?;
-                let local = ctx.locals.get(name).ok_or_else(|| CodegenError { message: "unknown local".to_string() })?;
+                let local = ctx.locals.get(name).ok_or_else(|| CodegenError { message: format!("unknown local '{}' in path expr", name) })?;
                 let loaded = self.load_local(local, name)?;
                 Ok(Some(loaded))
             }
             Expr::Field { base, name, .. } => {
                 let (obj_ptr, _layout, field) = self.resolve_field(base, name, ctx)?;
-                let field_ptr = self.field_ptr(obj_ptr, field)?;
+                let field_ptr = self.field_ptr(obj_ptr, &field)?;
                 let loaded = self.map_builder(self.builder.build_load(field.llvm_ty, field_ptr, "field"), "load")?;
                 if self.is_bool_type(&field.ty) {
                     let zero = self.context.i8_type().const_zero();
@@ -1245,7 +1999,9 @@ impl<'ctx> Codegen<'ctx> {
                 )?;
 
                 self.builder.position_at_end(body_bb);
+                ctx.loop_stack.push((cond_bb, cont_bb));
                 let _ = self.codegen_block(body, ctx, None)?;
+                ctx.loop_stack.pop();
                 if !self.builder.get_insert_block().unwrap().get_terminator().is_some() {
                     self.emit_pollcheck(ctx)?;
                     self.map_builder(self.builder.build_unconditional_branch(cond_bb), "br")?;
@@ -1258,15 +2014,10 @@ impl<'ctx> Codegen<'ctx> {
                 let mut enum_name = None;
                 for arm in arms {
                     match &arm.pattern {
-                        Pattern::Path(path, _) => {
+                        Pattern::Path(path, _) | Pattern::Struct { path, .. } => {
                             if path.len() >= 2 {
-                                enum_name = Some(path[0].clone());
-                                break;
-                            }
-                        }
-                        Pattern::Struct { path, .. } => {
-                            if path.len() >= 2 {
-                                enum_name = Some(path[0].clone());
+                                let (enum_path, _) = enum_path_and_variant(path);
+                                enum_name = Some(enum_path);
                                 break;
                             }
                         }
@@ -1408,12 +2159,11 @@ impl<'ctx> Codegen<'ctx> {
             Expr::Call { callee, args, .. } => {
                 if let Expr::Path(path, _) = &**callee {
                     if path.len() >= 2 {
-                        let enum_name = &path[0];
-                        if let Some(layout) = self.enums.get(enum_name).cloned() {
-                            let variant_name = &path[1];
+                        let (enum_name, variant_name) = enum_path_and_variant(path);
+                        if let Some(layout) = self.enums.get(&enum_name).cloned() {
                             let variant = layout
                                 .variants
-                                .get(variant_name)
+                                .get(&variant_name)
                                 .cloned()
                                 .ok_or_else(|| CodegenError { message: "unknown enum variant".to_string() })?;
                             if variant.fields.iter().any(|f| f.name.is_some()) {
@@ -1476,10 +2226,10 @@ impl<'ctx> Codegen<'ctx> {
 
                 let (func, pass_thread) = match &**callee {
                     Expr::Path(path, _) => {
-                        let name = path.last().ok_or_else(|| CodegenError { message: "empty callee".to_string() })?;
-                        if let Some(f) = self.functions.get(name) {
+                        let key = path_to_string(path);
+                        if let Some(f) = self.functions.get(&key) {
                             (*f, true)
-                        } else if let Some(f) = self.externs.get(name) {
+                        } else if let Some(f) = self.externs.get(&key) {
                             (*f, false)
                         } else {
                             return Err(CodegenError { message: "unknown function".to_string() });
@@ -1501,12 +2251,11 @@ impl<'ctx> Codegen<'ctx> {
             }
             Expr::StructLit { path, fields, .. } => {
                 if path.len() >= 2 {
-                    let enum_name = &path[0];
-                    let variant_name = &path[1];
-                    if let Some(layout) = self.enums.get(enum_name).cloned() {
+                    let (enum_name, variant_name) = enum_path_and_variant(path);
+                    if let Some(layout) = self.enums.get(&enum_name).cloned() {
                         let variant = layout
                             .variants
-                            .get(variant_name)
+                            .get(&variant_name)
                             .cloned()
                             .ok_or_else(|| CodegenError { message: "unknown enum variant".to_string() })?;
                         if variant.fields.iter().all(|f| f.name.is_some()) {
@@ -1567,7 +2316,7 @@ impl<'ctx> Codegen<'ctx> {
                     }
                 }
 
-                let name = path.last().cloned().unwrap_or_default();
+                let name = path_to_string(path);
                 let layout = self
                     .structs
                     .get(&name)
@@ -1613,7 +2362,80 @@ impl<'ctx> Codegen<'ctx> {
                 self.emit_pollcheck(ctx)?;
                 Ok(Some(obj_ptr.into()))
             }
+            Expr::Tuple { items, .. } => {
+                let expected = expected.ok_or_else(|| CodegenError { message: "tuple requires type context".to_string() })?;
+                let elem_types = match expected {
+                    Type::Tuple(types) => types,
+                    _ => return Err(CodegenError { message: "tuple requires tuple type".to_string() }),
+                };
+                if elem_types.len() != items.len() {
+                    return Err(CodegenError { message: "tuple arity mismatch".to_string() });
+                }
+                let key = self.ensure_tuple_layout(elem_types)?;
+                let layout = self
+                    .tuples
+                    .get(&key)
+                    .ok_or_else(|| CodegenError { message: "unknown tuple layout".to_string() })?
+                    .clone();
+                let size_val = self.context.i64_type().const_int(layout.size, false);
+                let meta_ptr = self.map_builder(
+                    self.builder.build_bit_cast(layout.meta, self.context.ptr_type(inkwell::AddressSpace::default()), "meta"),
+                    "bitcast",
+                )?;
+                let args = &[
+                    ctx.thread.into(),
+                    meta_ptr.into(),
+                    size_val.into(),
+                ];
+                let call = self.map_builder(self.builder.build_call(self.gc_allocate, args, "alloc_tuple"), "call")?;
+                let obj_ptr = call
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or_else(|| CodegenError { message: "alloc returned void".to_string() })?
+                    .into_pointer_value();
+                self.init_header(obj_ptr, meta_ptr.into_pointer_value())?;
+                for (i, item) in items.iter().enumerate() {
+                    let field_name = i.to_string();
+                    let field = layout
+                        .fields
+                        .iter()
+                        .find(|f| f.name == field_name)
+                        .cloned()
+                        .ok_or_else(|| CodegenError { message: "unknown tuple field".to_string() })?;
+                    let value = self.codegen_expr(item, ctx, Some(&field.ty))?.ok_or_else(|| CodegenError { message: "missing tuple value".to_string() })?;
+                    let field_ptr = self.field_ptr(obj_ptr, &field)?;
+                    let store_val = if self.is_bool_type(&field.ty) {
+                        let zext = self.map_builder(
+                            self.builder.build_int_z_extend(value.into_int_value(), self.context.i8_type(), "boolz"),
+                            "zext",
+                        )?;
+                        zext.into()
+                    } else {
+                        value
+                    };
+                    self.map_builder(self.builder.build_store(field_ptr, store_val), "store")?;
+                    if field.is_ptr {
+                        let args = &[ctx.thread.into(), obj_ptr.into(), value.into()];
+                        let _ = self.map_builder(self.builder.build_call(self.gc_write_barrier, args, "wb"), "call")?;
+                    }
+                }
+                self.emit_pollcheck(ctx)?;
+                Ok(Some(obj_ptr.into()))
+            }
             Expr::Block(block) => self.codegen_block_value(block, ctx, expected),
+            Expr::Break { .. } => {
+                let (_, break_bb) = ctx.loop_stack.last().ok_or_else(|| CodegenError { message: "break outside of loop".to_string() })?;
+                let break_bb = *break_bb;
+                self.map_builder(self.builder.build_unconditional_branch(break_bb), "br")?;
+                Ok(None)
+            }
+            Expr::Continue { .. } => {
+                let (continue_bb, _) = ctx.loop_stack.last().ok_or_else(|| CodegenError { message: "continue outside of loop".to_string() })?;
+                let continue_bb = *continue_bb;
+                self.emit_pollcheck(ctx)?;
+                self.map_builder(self.builder.build_unconditional_branch(continue_bb), "br")?;
+                Ok(None)
+            }
             _ => Err(CodegenError { message: "unsupported expression".to_string() }),
         }
     }
@@ -1734,7 +2556,7 @@ impl<'ctx> Codegen<'ctx> {
 
     fn llvm_type(&self, ty: &Type) -> Result<BasicTypeEnum<'ctx>, CodegenError> {
         match ty {
-            Type::Path(path) => {
+            Type::Path(path, _) => {
                 let name = path.last().ok_or_else(|| CodegenError { message: "empty type".to_string() })?;
                 match name.as_str() {
                     "I64" => Ok(self.context.i64_type().into()),
@@ -1748,7 +2570,7 @@ impl<'ctx> Codegen<'ctx> {
                 }
             }
             Type::RawPointer(_) => Ok(self.context.ptr_type(inkwell::AddressSpace::default()).into()),
-            _ => Err(CodegenError { message: "unsupported type".to_string() }),
+            Type::Tuple(_) => Ok(self.context.ptr_type(inkwell::AddressSpace::default()).into()),
         }
     }
 
@@ -1846,8 +2668,8 @@ impl<'ctx> Codegen<'ctx> {
     fn is_gc_ref_type(&self, ty: &Type) -> bool {
         match ty {
             Type::RawPointer(_) => false,
-            Type::Tuple(_) => false,
-            Type::Path(path) => {
+            Type::Tuple(_) => true,
+            Type::Path(path, _) => {
                 let name = path.last().map(|s| s.as_str()).unwrap_or("");
                 !matches!(
                     name,
@@ -1927,6 +2749,7 @@ impl<'ctx> Codegen<'ctx> {
             }
             Expr::Field { base, .. } => self.count_roots_in_expr(base),
             Expr::StructLit { fields, .. } => fields.iter().map(|(_, e)| self.count_roots_in_expr(e)).sum(),
+            Expr::Tuple { items, .. } => items.iter().map(|e| self.count_roots_in_expr(e)).sum(),
             Expr::Block(block) => self.count_roots_in_block(block),
             _ => 0,
         }
@@ -1938,13 +2761,12 @@ impl<'ctx> Codegen<'ctx> {
                 if path.len() < 2 {
                     return 0;
                 }
-                let enum_name = &path[0];
-                let variant_name = &path[1];
-                let layout = match self.enums.get(enum_name) {
+                let (enum_name, variant_name) = enum_path_and_variant(path);
+                let layout = match self.enums.get(&enum_name) {
                     Some(l) => l,
                     None => return 0,
                 };
-                let variant = match layout.variants.get(variant_name) {
+                let variant = match layout.variants.get(&variant_name) {
                     Some(v) => v,
                     None => return 0,
                 };
@@ -2095,13 +2917,14 @@ impl<'ctx> Codegen<'ctx> {
         let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
 
         let name_const = self.context.const_string(fn_name.as_bytes(), true);
-        let name_global = self.module.add_global(name_const.get_type(), None, &format!("__fn_name_{}", fn_name));
+        let sym = mangle_name(fn_name);
+        let name_global = self.module.add_global(name_const.get_type(), None, &format!("__fn_name_{}", sym));
         name_global.set_initializer(&name_const);
         let zero = i32_ty.const_zero();
         let name_ptr = unsafe { name_global.as_pointer_value().const_gep(name_const.get_type(), &[zero, zero]) };
 
         let origin_ty = self.context.struct_type(&[i32_ty.into(), ptr_ty.into()], false);
-        let origin_global = self.module.add_global(origin_ty, None, &format!("__frame_origin_{}", fn_name));
+        let origin_global = self.module.add_global(origin_ty, None, &format!("__frame_origin_{}", sym));
         let num = i32_ty.const_int(num_roots as u64, false);
         let init = origin_ty.const_named_struct(&[num.into(), name_ptr.into()]);
         origin_global.set_initializer(&init);
@@ -2110,17 +2933,24 @@ impl<'ctx> Codegen<'ctx> {
 
     fn field_llvm_type(&self, ty: &Type) -> Result<BasicTypeEnum<'ctx>, CodegenError> {
         match ty {
-            Type::Path(path) => {
+            Type::Path(path, _) => {
                 let name = path.last().ok_or_else(|| CodegenError { message: "empty type".to_string() })?;
                 match name.as_str() {
-                    "I64" => Ok(self.context.i64_type().into()),
+                    "I8" | "U8" => Ok(self.context.i8_type().into()),
+                    "I16" | "U16" => Ok(self.context.i16_type().into()),
+                    "I32" | "U32" => Ok(self.context.i32_type().into()),
+                    "I64" | "U64" => Ok(self.context.i64_type().into()),
+                    "F32" => Ok(self.context.f32_type().into()),
+                    "F64" => Ok(self.context.f64_type().into()),
                     "Bool" => Ok(self.context.i8_type().into()),
+                    "String" => Ok(self.context.ptr_type(inkwell::AddressSpace::default()).into()),
+                    "Unit" => Ok(self.context.i64_type().into()),
                     _ if self.is_gc_ref_type(ty) => Ok(self.context.ptr_type(inkwell::AddressSpace::default()).into()),
-                    _ => Err(CodegenError { message: "unsupported field type".to_string() }),
+                    _ => Err(CodegenError { message: format!("unsupported field type '{}'", name) }),
                 }
             }
             Type::RawPointer(_) => Ok(self.context.ptr_type(inkwell::AddressSpace::default()).into()),
-            _ => Err(CodegenError { message: "unsupported field type".to_string() }),
+            Type::Tuple(_) => Ok(self.context.ptr_type(inkwell::AddressSpace::default()).into()),
         }
     }
 
@@ -2135,26 +2965,45 @@ impl<'ctx> Codegen<'ctx> {
 
     fn struct_name_from_type(&self, ty: &Type) -> Result<String, CodegenError> {
         match ty {
-            Type::Path(path) => Ok(path.last().cloned().unwrap_or_default()),
+            Type::Path(path, _) => Ok(path_to_string(path)),
+            _ => Err(CodegenError { message: "expected struct type".to_string() }),
+        }
+    }
+
+    fn layout_for_type(&mut self, ty: &Type) -> Result<StructLayout<'ctx>, CodegenError> {
+        match ty {
+            Type::Path(path, _) => {
+                let name = path_to_string(path);
+                self.structs
+                    .get(&name)
+                    .cloned()
+                    .ok_or_else(|| CodegenError { message: "unknown struct layout".to_string() })
+            }
+            Type::Tuple(items) => {
+                let key = self.ensure_tuple_layout(items)?;
+                self.tuples
+                    .get(&key)
+                    .cloned()
+                    .ok_or_else(|| CodegenError { message: "unknown tuple layout".to_string() })
+            }
             _ => Err(CodegenError { message: "expected struct type".to_string() }),
         }
     }
 
     fn is_bool_type(&self, ty: &Type) -> bool {
-        matches!(ty, Type::Path(path) if path.last().map(|s| s.as_str()) == Some("Bool"))
+        matches!(ty, Type::Path(path, _) if path.last().map(|s| s.as_str()) == Some("Bool"))
     }
 
     fn resolve_struct_base(
-        &self,
+        &mut self,
         base: &Expr,
         ctx: &FnCtx<'ctx>,
-    ) -> Result<(PointerValue<'ctx>, &StructLayout<'ctx>), CodegenError> {
+    ) -> Result<(PointerValue<'ctx>, StructLayout<'ctx>), CodegenError> {
         match base {
             Expr::Path(path, _) => {
                 let var = path.last().ok_or_else(|| CodegenError { message: "empty base".to_string() })?;
                 let local = ctx.locals.get(var).ok_or_else(|| CodegenError { message: "unknown local".to_string() })?;
-                let struct_name = self.struct_name_from_type(&local.lang_ty)?;
-                let layout = self.structs.get(&struct_name).ok_or_else(|| CodegenError { message: "unknown struct layout".to_string() })?;
+                let layout = self.layout_for_type(&local.lang_ty)?;
                 let obj_ptr = self.load_local(local, "obj")?;
                 Ok((obj_ptr.into_pointer_value(), layout))
             }
@@ -2163,10 +3012,9 @@ impl<'ctx> Codegen<'ctx> {
                 if !self.is_gc_ref_type(&field.ty) {
                     return Err(CodegenError { message: "field base must be gc ref".to_string() });
                 }
-                let field_ptr = self.field_ptr(obj_ptr, field)?;
+                let field_ptr = self.field_ptr(obj_ptr, &field)?;
                 let loaded = self.map_builder(self.builder.build_load(field.llvm_ty, field_ptr, "field_obj"), "load")?;
-                let struct_name = self.struct_name_from_type(&field.ty)?;
-                let layout = self.structs.get(&struct_name).ok_or_else(|| CodegenError { message: "unknown struct layout".to_string() })?;
+                let layout = self.layout_for_type(&field.ty)?;
                 Ok((loaded.into_pointer_value(), layout))
             }
             _ => Err(CodegenError { message: "field base must be path or field in codegen".to_string() }),
@@ -2174,16 +3022,17 @@ impl<'ctx> Codegen<'ctx> {
     }
 
     fn resolve_field(
-        &self,
+        &mut self,
         base: &Expr,
         name: &str,
         ctx: &FnCtx<'ctx>,
-    ) -> Result<(PointerValue<'ctx>, &StructLayout<'ctx>, &FieldLayout<'ctx>), CodegenError> {
+    ) -> Result<(PointerValue<'ctx>, StructLayout<'ctx>, FieldLayout<'ctx>), CodegenError> {
         let (obj_ptr, layout) = self.resolve_struct_base(base, ctx)?;
         let field = layout
             .fields
             .iter()
             .find(|f| f.name == name)
+            .cloned()
             .ok_or_else(|| CodegenError { message: "unknown field".to_string() })?;
         Ok((obj_ptr, layout, field))
     }
@@ -2329,6 +3178,64 @@ impl<'ctx> Codegen<'ctx> {
     }
 }
 
+fn path_to_string(path: &[String]) -> String {
+    path.join("::")
+}
+
+fn full_item_name(module_path: &[String], name: &str) -> String {
+    if module_path.is_empty() {
+        name.to_string()
+    } else {
+        let mut parts = module_path.to_vec();
+        parts.push(name.to_string());
+        path_to_string(&parts)
+    }
+}
+
+fn enum_path_and_variant(path: &[String]) -> (String, String) {
+    let variant = path.last().cloned().unwrap_or_default();
+    let enum_path = path[..path.len() - 1].to_vec();
+    (path_to_string(&enum_path), variant)
+}
+
+fn last_segment(full: &str) -> &str {
+    full.rsplit("::").next().unwrap_or(full)
+}
+
+fn extern_symbol_name(full: &str) -> &str {
+    last_segment(full)
+}
+
+fn mangle_name(name: &str) -> String {
+    name.replace("::", "__")
+}
+
+fn tuple_key(items: &[Type]) -> String {
+    let mut out = String::from("__tuple__");
+    for (i, ty) in items.iter().enumerate() {
+        if i > 0 {
+            out.push('_');
+        }
+        out.push_str(&type_key(ty));
+    }
+    out
+}
+
+fn type_key(ty: &Type) -> String {
+    match ty {
+        Type::Path(path, _) => mangle_name(&path_to_string(path)),
+        Type::RawPointer(inner) => format!("ptr_{}", type_key(inner)),
+        Type::Tuple(items) => {
+            let mut out = String::from("tup");
+            for item in items {
+                out.push('_');
+                out.push_str(&type_key(item));
+            }
+            out
+        }
+    }
+}
+
 struct Local<'ctx> {
     ptr: PointerValue<'ctx>,
     ty: BasicTypeEnum<'ctx>,
@@ -2345,6 +3252,7 @@ struct FnCtx<'ctx> {
     frame_ty: StructType<'ctx>,
     root_base: Option<PointerValue<'ctx>>,
     next_root: usize,
+    loop_stack: Vec<(inkwell::basic_block::BasicBlock<'ctx>, inkwell::basic_block::BasicBlock<'ctx>)>,
 }
 
 #[cfg(test)]
@@ -2361,7 +3269,7 @@ mod tests {
         let module = Parser::new(tokens).parse_module().unwrap();
         resolve_module(&module).unwrap();
         typecheck_module(&module).unwrap();
-        compile_and_run(&module).unwrap()
+        compile_and_run(std::slice::from_ref(&module)).unwrap()
     }
 
     fn compile_object(src: &str) -> std::path::PathBuf {
@@ -2373,7 +3281,7 @@ mod tests {
         let mut path = std::env::temp_dir();
         let id = COUNTER.fetch_add(1, Ordering::SeqCst);
         path.push(format!("langc_test_{id}.o"));
-        compile_to_object(&module, &path).unwrap();
+        compile_to_object(std::slice::from_ref(&module), &path).unwrap();
         path
     }
 
@@ -2387,7 +3295,7 @@ mod tests {
         let mut obj_path = std::env::temp_dir();
         let id = COUNTER.fetch_add(1, Ordering::SeqCst);
         obj_path.push(format!("langc_e2e_{id}.o"));
-        compile_to_object(&module, &obj_path).unwrap();
+        compile_to_object(std::slice::from_ref(&module), &obj_path).unwrap();
 
         let mut exe_path = std::env::temp_dir();
         exe_path.push(format!("langc_e2e_{id}"));

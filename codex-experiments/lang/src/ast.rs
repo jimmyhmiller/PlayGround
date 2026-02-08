@@ -42,6 +42,7 @@ pub struct ExternFnDecl {
 #[derive(Debug, Clone)]
 pub struct StructDecl {
     pub name: String,
+    pub type_params: Vec<String>,
     pub fields: Vec<Field>,
     pub span: Span,
 }
@@ -49,6 +50,7 @@ pub struct StructDecl {
 #[derive(Debug, Clone)]
 pub struct EnumDecl {
     pub name: String,
+    pub type_params: Vec<String>,
     pub variants: Vec<EnumVariant>,
     pub span: Span,
 }
@@ -151,8 +153,14 @@ pub enum Expr {
         fields: Vec<(String, Expr)>,
         span: Span,
     },
+    Tuple {
+        items: Vec<Expr>,
+        span: Span,
+    },
     Literal(Literal, Span),
     Block(Box<Block>),
+    Break { span: Span },
+    Continue { span: Span },
 }
 
 #[derive(Debug, Clone)]
@@ -186,6 +194,8 @@ pub enum Literal {
     Float(String),
     Str(String),
     Bool(bool),
+    Char(u8),
+    Unit,
 }
 
 #[derive(Debug, Clone)]
@@ -213,7 +223,7 @@ pub enum UnaryOp {
 
 #[derive(Debug, Clone)]
 pub enum Type {
-    Path(Vec<String>),
+    Path(Vec<String>, Vec<Type>),
     RawPointer(Box<Type>),
     Tuple(Vec<Type>),
 }

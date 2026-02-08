@@ -31,6 +31,8 @@ extern, repr, true, false
 - Integers: decimal only for v0. Example: `0`, `42`, `1_000`.
 - Floats: `123.45`, `1.0`, `0.5`.
 - Strings: double-quoted UTF-8, with `\n`, `\t`, `\"`, `\\` escapes.
+- Chars: single-quoted ASCII byte, with `\n`, `\t`, `\r`, `\'`, `\\`, `\0`, `\xNN` escapes.
+- Unit: `()` literal.
 
 ## 2. Operators and precedence
 
@@ -133,13 +135,14 @@ arg_list = expr (',' expr)* ','?
 primary = literal
         | path
         | '(' expr ')'
+        | '(' expr ',' expr (',' expr)* ','? ')'
         | struct_lit
 
 struct_lit = type_path '{' field_init_list? '}'
 field_init_list = field_init (',' field_init)* ','?
 field_init = ident ':' expr
 
-literal = int | float | string | 'true' | 'false'
+literal = int | float | string | char | 'true' | 'false' | unit
 ```
 
 ## 7. Statements and blocks

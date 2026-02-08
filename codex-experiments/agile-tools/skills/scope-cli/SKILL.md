@@ -14,7 +14,7 @@ Use the `scope` CLI in this repo to manage local-first issues stored as markdown
 1. Initialize a project:
    - `scope issues init --project <name>`
 2. Create an issue:
-   - `scope issues create --project <name> --title "..." [--priority p1] [--assignee ...] [--label ...]`
+   - `scope issues create --project <name> --title "..." [--priority p1] [--assignee ...] [--label ...] [--body "..."] [--body-file ./issue.md]`
 3. List and show:
    - `scope issues list --project <name>`
    - `scope issues show --project <name> <id>`
@@ -25,7 +25,9 @@ Use the `scope` CLI in this repo to manage local-first issues stored as markdown
 
 - Update fields: `scope issues update <id> --status in_progress --add-label planning`
 - Close/reopen: `scope issues close <id>` / `scope issues reopen <id>`
+- Delete/restore (no prompts): `scope issues delete <id>` / `scope issues restore <id>` (`--force` is permanent)
 - Edit body: `scope issues edit <id>`
+  - Avoid stdin/heredoc bodies (ex: `/dev/stdin`, `<<EOF`) in agent shells; prefer `--body`, a real file path, or `scope issues edit`
 
 ### Comments
 

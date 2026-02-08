@@ -73,6 +73,7 @@ impl Parser {
     fn parse_struct_decl(&mut self) -> StructDecl {
         let start = self.expect(TokenKind::Struct, "expected 'struct'");
         let name = self.expect_ident("expected struct name");
+        let type_params = self.parse_type_params();
         self.expect(TokenKind::LBrace, "expected '{' in struct");
         let fields = if self.peek_kind_is(&TokenKind::RBrace) {
             Vec::new()
@@ -82,6 +83,7 @@ impl Parser {
         let end = self.expect(TokenKind::RBrace, "expected '}' after struct");
         StructDecl {
             name,
+            type_params,
             fields,
             span: Span::new(start, end),
         }
@@ -90,6 +92,7 @@ impl Parser {
     fn parse_enum_decl(&mut self) -> EnumDecl {
         let start = self.expect(TokenKind::Enum, "expected 'enum'");
         let name = self.expect_ident("expected enum name");
+        let type_params = self.parse_type_params();
         self.expect(TokenKind::LBrace, "expected '{' in enum");
         let mut variants = Vec::new();
         while !self.peek_kind_is(&TokenKind::RBrace) && !self.is_eof() {
@@ -130,6 +133,7 @@ impl Parser {
         let end = self.expect(TokenKind::RBrace, "expected '}' after enum");
         EnumDecl {
             name,
+            type_params,
             variants,
             span: Span::new(start, end),
         }
@@ -250,7 +254,52 @@ impl Parser {
             return Type::RawPointer(Box::new(inner));
         }
         let path = self.parse_path();
-        Type::Path(path)
+        let type_args = self.parse_type_args();
+        Type::Path(path, type_args)
+    }
+
+    fn parse_type_params(&mut self) -> Vec<String> {
+        if !self.peek_kind_is(&TokenKind::Lt) {
+            return Vec::new();
+        }
+        self.bump(); // <
+        let mut params = Vec::new();
+        loop {
+            let name = self.expect_ident("expected type parameter name");
+            params.push(name);
+            if self.peek_kind_is(&TokenKind::Comma) {
+                self.bump();
+                if self.peek_kind_is(&TokenKind::Gt) {
+                    break;
+                }
+                continue;
+            }
+            break;
+        }
+        self.expect(TokenKind::Gt, "expected '>' after type parameters");
+        params
+    }
+
+    fn parse_type_args(&mut self) -> Vec<Type> {
+        if !self.peek_kind_is(&TokenKind::Lt) {
+            return Vec::new();
+        }
+        self.bump(); // <
+        let mut args = Vec::new();
+        loop {
+            let ty = self.parse_type();
+            args.push(ty);
+            if self.peek_kind_is(&TokenKind::Comma) {
+                self.bump();
+                if self.peek_kind_is(&TokenKind::Gt) {
+                    break;
+                }
+                continue;
+            }
+            break;
+        }
+        self.expect(TokenKind::Gt, "expected '>' after type arguments");
+        args
     }
 
     fn parse_type_list(&mut self) -> Vec<Type> {
@@ -318,6 +367,14 @@ impl Parser {
         }
         if self.peek_kind_is(&TokenKind::Match) {
             return self.parse_match_expr();
+        }
+        if self.peek_kind_is(&TokenKind::Break) {
+            let tok = self.bump();
+            return Expr::Break { span: tok.span };
+        }
+        if self.peek_kind_is(&TokenKind::Continue) {
+            let tok = self.bump();
+            return Expr::Continue { span: tok.span };
         }
         if self.peek_kind_is(&TokenKind::LBrace) {
             let block = self.parse_block();
@@ -509,7 +566,19 @@ impl Parser {
             if self.peek_kind_is(&TokenKind::Dot) {
                 let start = expr_span_start(&expr);
                 self.bump();
-                let name = self.expect_ident("expected field name after '.'");
+                let name = match self.peek_kind() {
+                    Some(TokenKind::Ident(text)) => {
+                        let name = text.clone();
+                        self.bump();
+                        name
+                    }
+                    Some(TokenKind::Int(text)) => {
+                        let name = text.clone();
+                        self.bump();
+                        name
+                    }
+                    _ => self.expect_ident("expected field name after '.'"),
+                };
                 let end = self.last_span_end(start);
                 expr = Expr::Field {
                     base: Box::new(expr),
@@ -537,6 +606,10 @@ impl Parser {
                 let tok = self.bump();
                 Expr::Literal(Literal::Str(text), tok.span)
             }
+            Some(TokenKind::Char(value)) => {
+                let tok = self.bump();
+                Expr::Literal(Literal::Char(value), tok.span)
+            }
             Some(TokenKind::True) => {
                 let tok = self.bump();
                 Expr::Literal(Literal::Bool(true), tok.span)
@@ -546,10 +619,37 @@ impl Parser {
                 Expr::Literal(Literal::Bool(false), tok.span)
             }
             Some(TokenKind::LParen) => {
-                self.bump();
-                let expr = self.parse_expr();
+                let start = self.bump().span.start;
+                if self.peek_kind_is(&TokenKind::RParen) {
+                    let end = self.expect(TokenKind::RParen, "expected ')' after unit literal");
+                    return Expr::Literal(Literal::Unit, Span::new(start, end));
+                }
+                let first = self.parse_expr();
+                if self.peek_kind_is(&TokenKind::Comma) {
+                    self.bump();
+                    let mut items = vec![first];
+                    if !self.peek_kind_is(&TokenKind::RParen) {
+                        loop {
+                            let expr = self.parse_expr();
+                            items.push(expr);
+                            if self.peek_kind_is(&TokenKind::Comma) {
+                                self.bump();
+                                if self.peek_kind_is(&TokenKind::RParen) {
+                                    break;
+                                }
+                                continue;
+                            }
+                            break;
+                        }
+                    }
+                    let end = self.expect(TokenKind::RParen, "expected ')' after tuple");
+                    return Expr::Tuple {
+                        items,
+                        span: Span::new(start, end),
+                    };
+                }
                 self.expect(TokenKind::RParen, "expected ')' after expression");
-                expr
+                first
             }
             Some(TokenKind::Ident(_)) => {
                 let path = self.parse_path();
@@ -830,8 +930,11 @@ fn expr_span_start(expr: &Expr) -> usize {
         | Expr::Call { span, .. }
         | Expr::Field { span, .. }
         | Expr::StructLit { span, .. }
+        | Expr::Tuple { span, .. }
         | Expr::Literal(_, span)
-        | Expr::Path(_, span) => span.start,
+        | Expr::Path(_, span)
+        | Expr::Break { span }
+        | Expr::Continue { span } => span.start,
         Expr::Block(block) => block.span.start,
     }
 }
@@ -848,8 +951,11 @@ fn expr_span_end(expr: &Expr) -> usize {
         | Expr::Call { span, .. }
         | Expr::Field { span, .. }
         | Expr::StructLit { span, .. }
+        | Expr::Tuple { span, .. }
         | Expr::Literal(_, span)
-        | Expr::Path(_, span) => span.end,
+        | Expr::Path(_, span)
+        | Expr::Break { span }
+        | Expr::Continue { span } => span.end,
         Expr::Block(block) => block.span.end,
     }
 }
@@ -919,5 +1025,40 @@ mod tests {
         } else {
             panic!("expected enum item");
         }
+    }
+
+    #[test]
+    fn parse_char_literal() {
+        let src = r#"
+            fn main() -> I64 {
+                let x: I64 = 'a';
+                x
+            }
+        "#;
+        let module = parse(src);
+        assert!(matches!(module.items[0], Item::Fn(_)));
+    }
+
+    #[test]
+    fn parse_unit_literal() {
+        let src = r#"
+            fn main() -> Unit {
+                ()
+            }
+        "#;
+        let module = parse(src);
+        assert!(matches!(module.items[0], Item::Fn(_)));
+    }
+
+    #[test]
+    fn parse_tuple_literal_and_field() {
+        let src = r#"
+            fn main() -> I64 {
+                let t: (I64, I64) = (1, 2);
+                t.0
+            }
+        "#;
+        let module = parse(src);
+        assert!(matches!(module.items[0], Item::Fn(_)));
     }
 }

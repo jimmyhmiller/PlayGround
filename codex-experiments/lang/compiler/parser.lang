@@ -1,1058 +1,1228 @@
-struct ParseIdent { name: Span, rest: TokenList }
-struct ParseType { ty: Type, rest: TokenList }
-struct ParseParams { params: ParamList, rest: TokenList }
-struct ParseItem { item: Item, rest: TokenList }
-struct ParseFields { fields: FieldList, rest: TokenList }
-struct ParseVariants { variants: VariantList, rest: TokenList }
-struct ParseExpr { expr: Expr, rest: TokenList }
-struct ParseBlock { block: Block, rest: TokenList }
-struct ParsePath { path: PathList, rest: TokenList }
-struct ParseArgs { args: ExprListOpt, rest: TokenList }
-struct ParseArms { arms: MatchArmList, rest: TokenList }
+// ---------------------------------------------------------------------------
+// Bootstrap recursive descent parser
+// ---------------------------------------------------------------------------
 
-fn token_eof() -> Token {
-    Token { kind: TokenKind::Eof {}, start: 0, end: 0 }
+use lexer::Token;
+use lexer::TokenKind;
+use lexer::token_kind_tag;
+use lexer::token_kind_name;
+use ast::Option;
+use ast::Span;
+use ast::Module;
+use ast::Item;
+use ast::FnDecl;
+use ast::ExternFnDecl;
+use ast::StructDecl;
+use ast::EnumDecl;
+use ast::EnumVariant;
+use ast::EnumVariantKind;
+use ast::UseDecl;
+use ast::Field;
+use ast::Param;
+use ast::Block;
+use ast::Stmt;
+use ast::Expr;
+use ast::Literal;
+use ast::BinaryOp;
+use ast::UnaryOp;
+use ast::Type;
+use ast::Pattern;
+use ast::MatchArm;
+use ast::PatternField;
+use ast::StructLitField;
+
+// ---------------------------------------------------------------------------
+// Extern functions
+// ---------------------------------------------------------------------------
+
+extern fn vec_new() -> RawPointer<I8>;
+extern fn vec_len(v: RawPointer<I8>) -> I64;
+
+extern fn vec_push_str(v: RawPointer<I8>, item: String) -> I64;
+extern fn vec_get_str(v: RawPointer<I8>, index: I64) -> String;
+extern fn vec_push_item(v: RawPointer<I8>, item: Item) -> I64;
+extern fn vec_get_item(v: RawPointer<I8>, index: I64) -> Item;
+extern fn vec_push_param(v: RawPointer<I8>, item: Param) -> I64;
+extern fn vec_get_param(v: RawPointer<I8>, index: I64) -> Param;
+extern fn vec_push_field(v: RawPointer<I8>, item: Field) -> I64;
+extern fn vec_get_field(v: RawPointer<I8>, index: I64) -> Field;
+extern fn vec_push_variant(v: RawPointer<I8>, item: EnumVariant) -> I64;
+extern fn vec_get_variant(v: RawPointer<I8>, index: I64) -> EnumVariant;
+extern fn vec_push_type(v: RawPointer<I8>, item: Type) -> I64;
+extern fn vec_get_type(v: RawPointer<I8>, index: I64) -> Type;
+extern fn vec_push_expr(v: RawPointer<I8>, item: Expr) -> I64;
+extern fn vec_get_expr(v: RawPointer<I8>, index: I64) -> Expr;
+extern fn vec_push_arm(v: RawPointer<I8>, item: MatchArm) -> I64;
+extern fn vec_get_arm(v: RawPointer<I8>, index: I64) -> MatchArm;
+extern fn vec_push_stmt(v: RawPointer<I8>, item: Stmt) -> I64;
+extern fn vec_get_stmt(v: RawPointer<I8>, index: I64) -> Stmt;
+extern fn vec_push_pfield(v: RawPointer<I8>, item: PatternField) -> I64;
+extern fn vec_get_pfield(v: RawPointer<I8>, index: I64) -> PatternField;
+extern fn vec_push_slfield(v: RawPointer<I8>, item: StructLitField) -> I64;
+extern fn vec_get_slfield(v: RawPointer<I8>, index: I64) -> StructLitField;
+extern fn vec_get_tok(v: RawPointer<I8>, index: I64) -> Token;
+
+extern fn string_eq(a: String, b: String) -> I64;
+extern fn string_concat(a: String, b: String) -> String;
+extern fn string_from_i64(val: I64) -> String;
+extern fn print_str(s: String) -> I64;
+extern fn print_str_stderr(s: String) -> I64;
+extern fn exit_process(code: I64) -> I64;
+
+// ---------------------------------------------------------------------------
+// Token kind tag constants
+// ---------------------------------------------------------------------------
+
+fn TK_IDENT() -> I64 { 1 }
+fn TK_INT_LIT() -> I64 { 2 }
+fn TK_FLOAT_LIT() -> I64 { 3 }
+fn TK_STR_LIT() -> I64 { 4 }
+fn TK_CHAR_LIT() -> I64 { 5 }
+fn TK_FN() -> I64 { 6 }
+fn TK_STRUCT() -> I64 { 7 }
+fn TK_ENUM() -> I64 { 8 }
+fn TK_LET() -> I64 { 9 }
+fn TK_MUT() -> I64 { 10 }
+fn TK_IF() -> I64 { 11 }
+fn TK_ELSE() -> I64 { 12 }
+fn TK_WHILE() -> I64 { 13 }
+fn TK_MATCH() -> I64 { 14 }
+fn TK_RETURN() -> I64 { 15 }
+fn TK_BREAK() -> I64 { 16 }
+fn TK_CONTINUE() -> I64 { 17 }
+fn TK_TRUE() -> I64 { 18 }
+fn TK_FALSE() -> I64 { 19 }
+fn TK_EXTERN() -> I64 { 20 }
+fn TK_USE() -> I64 { 21 }
+fn TK_MODULE() -> I64 { 22 }
+fn TK_LPAREN() -> I64 { 23 }
+fn TK_RPAREN() -> I64 { 24 }
+fn TK_LBRACE() -> I64 { 25 }
+fn TK_RBRACE() -> I64 { 26 }
+fn TK_LBRACKET() -> I64 { 27 }
+fn TK_RBRACKET() -> I64 { 28 }
+fn TK_COMMA() -> I64 { 29 }
+fn TK_SEMI() -> I64 { 30 }
+fn TK_COLON() -> I64 { 31 }
+fn TK_COLONCOLON() -> I64 { 32 }
+fn TK_ARROW() -> I64 { 33 }
+fn TK_FATARROW() -> I64 { 34 }
+fn TK_DOT() -> I64 { 35 }
+fn TK_PLUS() -> I64 { 36 }
+fn TK_MINUS() -> I64 { 37 }
+fn TK_STAR() -> I64 { 38 }
+fn TK_SLASH() -> I64 { 39 }
+fn TK_PERCENT() -> I64 { 40 }
+fn TK_EQ() -> I64 { 41 }
+fn TK_EQEQ() -> I64 { 42 }
+fn TK_BANG() -> I64 { 43 }
+fn TK_BANGEQ() -> I64 { 44 }
+fn TK_LT() -> I64 { 45 }
+fn TK_LTEQ() -> I64 { 46 }
+fn TK_GT() -> I64 { 47 }
+fn TK_GTEQ() -> I64 { 48 }
+fn TK_ANDAND() -> I64 { 49 }
+fn TK_OROR() -> I64 { 50 }
+fn TK_ELLIPSIS() -> I64 { 51 }
+fn TK_EOF() -> I64 { 52 }
+
+// ---------------------------------------------------------------------------
+// Parser state
+// ---------------------------------------------------------------------------
+
+struct Parser {
+    tokens: RawPointer<I8>,
+    pos: I64,
+    len: I64
 }
 
-fn peek(list: TokenList) -> Token {
-    match list {
-        TokenList::Nil {} => token_eof(),
-        TokenList::Cons { head, tail } => head,
-    }
+fn new_parser(tokens: RawPointer<I8>) -> Parser {
+    Parser { tokens: tokens, pos: 0, len: vec_len(tokens) }
 }
 
-fn advance(list: TokenList) -> TokenList {
-    match list {
-        TokenList::Nil {} => TokenList::Nil {},
-        TokenList::Cons { head, tail } => tail,
-    }
-}
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
 
-fn token_is_sym(tok: Token, code: I64) -> I64 {
-    let one: I64 = 1;
-    let zero: I64 = 0;
-    match tok.kind {
-        TokenKind::Sym { code: c } => if c == code { one } else { zero },
-        _ => zero,
-    }
-}
-
-fn token_is_coloncolon(tok: Token) -> I64 {
-    match tok.kind {
-        TokenKind::ColonColon {} => 1,
-        _ => 0,
-    }
-}
-
-fn token_kind_code(tok: Token) -> I64 {
-    match tok.kind {
-        TokenKind::Ident {} => 1,
-        TokenKind::ColonColon {} => 2,
-        TokenKind::Sym { code: c } => {
-            let base: I64 = 1000;
-            base + c
-        },
-        _ => 0,
-    }
-}
-
-fn token_is_kw_fn(tok: Token) -> I64 {
-    match tok.kind {
-        TokenKind::KwFn {} => 1,
-        _ => 0,
-    }
-}
-
-fn token_is_kw_extern(tok: Token) -> I64 {
-    match tok.kind {
-        TokenKind::KwExtern {} => 1,
-        _ => 0,
-    }
-}
-
-fn token_is_ident(tok: Token) -> I64 {
-    match tok.kind {
-        TokenKind::Ident {} => 1,
-        _ => 0,
-    }
-}
-
-fn token_is_kw_struct(tok: Token) -> I64 {
-    match tok.kind {
-        TokenKind::KwStruct {} => 1,
-        _ => 0,
-    }
-}
-
-fn token_is_kw_enum(tok: Token) -> I64 {
-    match tok.kind {
-        TokenKind::KwEnum {} => 1,
-        _ => 0,
-    }
-}
-
-fn param_reverse_inner(list: ParamList, acc: ParamList) -> ParamList {
-    match list {
-        ParamList::Nil {} => acc,
-        ParamList::Cons { head, tail } => {
-            let next: ParamList = ParamList::Cons { head: head, tail: acc };
-            param_reverse_inner(tail, next)
-        },
-    }
-}
-
-fn param_reverse(list: ParamList) -> ParamList {
-    param_reverse_inner(list, ParamList::Nil {})
-}
-
-fn item_reverse_inner(list: ItemList, acc: ItemList) -> ItemList {
-    match list {
-        ItemList::Nil {} => acc,
-        ItemList::Cons { head, tail } => {
-            let next: ItemList = ItemList::Cons { head: head, tail: acc };
-            item_reverse_inner(tail, next)
-        },
-    }
-}
-
-fn item_reverse(list: ItemList) -> ItemList {
-    item_reverse_inner(list, ItemList::Nil {})
-}
-
-fn field_reverse_inner(list: FieldList, acc: FieldList) -> FieldList {
-    match list {
-        FieldList::Nil {} => acc,
-        FieldList::Cons { head, tail } => {
-            let next: FieldList = FieldList::Cons { head: head, tail: acc };
-            field_reverse_inner(tail, next)
-        },
-    }
-}
-
-fn field_reverse(list: FieldList) -> FieldList {
-    field_reverse_inner(list, FieldList::Nil {})
-}
-
-fn variant_reverse_inner(list: VariantList, acc: VariantList) -> VariantList {
-    match list {
-        VariantList::Nil {} => acc,
-        VariantList::Cons { head, tail } => {
-            let next: VariantList = VariantList::Cons { head: head, tail: acc };
-            variant_reverse_inner(tail, next)
-        },
-    }
-}
-
-fn variant_reverse(list: VariantList) -> VariantList {
-    variant_reverse_inner(list, VariantList::Nil {})
-}
-
-fn parse_ident(src: String, list: TokenList) -> ParseIdent {
-    let tok: Token = peek(list);
-    let name: Span = Span { start: tok.start, end: tok.end };
-    let rest: TokenList = advance(list);
-    ParseIdent { name: name, rest: rest }
-}
-
-fn parse_type(src: String, list: TokenList) -> ParseType {
-    let tok: Token = peek(list);
-    match tok.kind {
-        TokenKind::Ident {} => {
-            let name: Span = Span { start: tok.start, end: tok.end };
-            ParseType { ty: Type::Path { name: name }, rest: advance(list) }
-        },
-        _ => {
-            ParseType { ty: Type::Unit {}, rest: list }
-        },
-    }
-}
-
-fn parse_params(src: String, list: TokenList) -> ParseParams {
-    let lparen: I64 = 40;
-    let rparen: I64 = 41;
-    let comma: I64 = 44;
-    let colon: I64 = 58;
-    let mut cur: TokenList = list;
-    if token_is_sym(peek(cur), lparen) == 1 {
-        cur = advance(cur);
-    };
-    let mut params: ParamList = ParamList::Nil {};
-    let mut done: I64 = 0;
-    while token_is_sym(peek(cur), rparen) == 0 && done == 0 {
-        let ident: ParseIdent = parse_ident(src, cur);
-        cur = ident.rest;
-        if token_is_sym(peek(cur), colon) == 1 {
-            cur = advance(cur);
-        };
-        let ty: ParseType = parse_type(src, cur);
-        cur = ty.rest;
-        let param: Param = Param { name: ident.name, ty: ty.ty };
-        params = ParamList::Cons { head: param, tail: params };
-        if token_is_sym(peek(cur), comma) == 1 {
-            cur = advance(cur);
-        } else {
-            done = 1;
-        }
-    };
-    if token_is_sym(peek(cur), rparen) == 1 {
-        cur = advance(cur);
-    };
-    ParseParams { params: param_reverse(params), rest: cur }
-}
-
-fn parse_fields(src: String, list: TokenList) -> ParseFields {
-    let lbrace: I64 = 123;
-    let rbrace: I64 = 125;
-    let comma: I64 = 44;
-    let colon: I64 = 58;
-    let mut cur: TokenList = list;
-    if token_is_sym(peek(cur), lbrace) == 1 {
-        cur = advance(cur);
-    };
-    let mut fields: FieldList = FieldList::Nil {};
-    let mut done: I64 = 0;
-    while token_is_sym(peek(cur), rbrace) == 0 && done == 0 {
-        let name: ParseIdent = parse_ident(src, cur);
-        cur = name.rest;
-        if token_is_sym(peek(cur), colon) == 1 {
-            cur = advance(cur);
-        };
-        let ty: ParseType = parse_type(src, cur);
-        cur = ty.rest;
-        let field: Field = Field { name: name.name, ty: ty.ty };
-        fields = FieldList::Cons { head: field, tail: fields };
-        if token_is_sym(peek(cur), comma) == 1 {
-            cur = advance(cur);
-        } else {
-            done = 1;
-        }
-    };
-    if token_is_sym(peek(cur), rbrace) == 1 {
-        cur = advance(cur);
-    };
-    ParseFields { fields: field_reverse(fields), rest: cur }
-}
-
-fn peek2(list: TokenList) -> Token {
-    match list {
-        TokenList::Nil {} => token_eof(),
-        TokenList::Cons { head, tail } => peek(tail),
-    }
-}
-
-fn is_double_sym(list: TokenList, first: I64, second: I64) -> I64 {
-    let one: I64 = 1;
-    let zero: I64 = 0;
-    if token_is_sym(peek(list), first) == one && token_is_sym(peek2(list), second) == one { one } else { zero }
-}
-
-fn span_len(span: Span) -> I64 {
-    span.end - span.start
-}
-
-fn is_underscore(src: String, span: Span) -> I64 {
-    let one: I64 = 1;
-    let zero: I64 = 0;
-    let underscore: I64 = 95;
-    if span_len(span) != one { return zero; };
-    if string_byte_at(src, span.start) == underscore { one } else { zero }
-}
-
-fn parse_path(src: String, list: TokenList) -> ParsePath {
-    let colon: I64 = 58;
-    let ident: ParseIdent = parse_ident(src, list);
-    let mut cur: TokenList = ident.rest;
-    if token_is_coloncolon(peek(cur)) == 1 || token_is_sym(peek(cur), colon) == 1 {
-        let base: I64 = 900;
-        let v1: I64 = token_is_coloncolon(peek(cur));
-        let v2: I64 = token_is_sym(peek(cur), colon);
-        let _dbg1: I64 = print_int(base + v1 + v2 + v2);
-    };
-    let mut has_sep: I64 = 0;
-    if token_is_coloncolon(peek(cur)) == 1 {
-        cur = advance(cur);
-        has_sep = 1;
+fn peek(p: Parser) -> Token {
+    if p.pos >= p.len {
+        Token { kind: TokenKind::Eof {}, start: 0, end: 0 }
     } else {
-        if token_is_sym(peek(cur), colon) == 1 {
-            if token_is_sym(peek2(cur), colon) == 1 {
-                cur = advance(cur);
-                cur = advance(cur);
-                has_sep = 1;
-            } else {
-                if token_is_ident(peek2(cur)) == 1 {
-                    cur = advance(cur);
-                    has_sep = 1;
-                }
+        vec_get_tok(p.tokens, p.pos)
+    }
+}
+
+fn peek_tag(p: Parser) -> I64 {
+    let tok: Token = peek(p);
+    token_kind_tag(tok.kind)
+}
+
+fn peek_tag_at(p: Parser, offset: I64) -> I64 {
+    let idx: I64 = p.pos + offset;
+    if idx >= p.len {
+        TK_EOF()
+    } else {
+        let tok: Token = vec_get_tok(p.tokens, idx);
+        token_kind_tag(tok.kind)
+    }
+}
+
+fn bump(p: Parser) -> Token {
+    let tok: Token = peek(p);
+    if p.pos < p.len {
+        p.pos = p.pos + 1;
+    };
+    tok
+}
+
+fn is_eof(p: Parser) -> Bool {
+    peek_tag(p) == TK_EOF()
+}
+
+fn parse_error(msg: String, span: Span) -> Unit {
+    let loc: String = string_concat("parse error at ", string_concat(string_from_i64(span.start), string_concat("..", string_from_i64(span.end))));
+    print_str_stderr(loc);
+    print_str_stderr(msg);
+    exit_process(1);
+    ()
+}
+
+fn expect_tag(p: Parser, tag: I64, msg: String) -> I64 {
+    let t: I64 = peek_tag(p);
+    if t == tag {
+        let tok: Token = bump(p);
+        tok.end
+    } else {
+        let tok: Token = peek(p);
+        parse_error(string_concat(msg, string_concat(" (got ", string_concat(token_kind_name(tok.kind), ")"))), Span { start: tok.start, end: tok.end });
+        0
+    }
+}
+
+fn expect_ident(p: Parser, msg: String) -> String {
+    let t: I64 = peek_tag(p);
+    if t == TK_IDENT() {
+        let tok: Token = bump(p);
+        match tok.kind {
+            TokenKind::Ident { name } => name,
+            _ => {
+                parse_error("unreachable: expected ident", Span { start: tok.start, end: tok.end });
+                ""
             }
         }
-    };
-    if has_sep == 1 {
-        let tail: ParsePath = parse_path(src, cur);
-        let path: PathList = PathList::Cons { head: ident.name, tail: tail.path };
-        ParsePath { path: path, rest: tail.rest }
     } else {
-        let path: PathList = PathList::Cons { head: ident.name, tail: PathList::Nil {} };
-        ParsePath { path: path, rest: cur }
+        let tok: Token = peek(p);
+        parse_error(string_concat(msg, string_concat(" (got ", string_concat(token_kind_name(tok.kind), ")"))), Span { start: tok.start, end: tok.end });
+        ""
     }
 }
 
-fn parse_args(src: String, list: TokenList) -> ParseArgs {
-    let lparen: I64 = 40;
-    let rparen: I64 = 41;
-    let comma: I64 = 44;
-    let mut cur: TokenList = list;
-    if token_is_sym(peek(cur), lparen) == 1 {
-        cur = advance(cur);
-    };
-    if token_is_sym(peek(cur), rparen) == 1 {
-        cur = advance(cur);
-        return ParseArgs { args: ExprListOpt::Nil {}, rest: cur };
-    };
-    let mut args: ExprListOpt = ExprListOpt::Nil {};
-    let mut done: I64 = 0;
-    while token_is_sym(peek(cur), rparen) == 0 && done == 0 {
-        let parsed: ParseExpr = parse_expr(src, cur);
-        cur = parsed.rest;
-        args = ExprListOpt::Cons { head: parsed.expr, tail: args };
-        if token_is_sym(peek(cur), comma) == 1 {
-            cur = advance(cur);
-        } else {
-            done = 1;
+fn peek_ident_is(p: Parser, name: String) -> Bool {
+    if peek_tag(p) == TK_IDENT() {
+        let tok: Token = peek(p);
+        match tok.kind {
+            TokenKind::Ident { name: n } => string_eq(n, name) == 1,
+            _ => false
         }
-    };
-    if token_is_sym(peek(cur), rparen) == 1 {
-        cur = advance(cur);
-    };
-    ParseArgs { args: expr_list_reverse(args), rest: cur }
-}
-
-fn expr_list_reverse_inner(list: ExprListOpt, acc: ExprListOpt) -> ExprListOpt {
-    match list {
-        ExprListOpt::Nil {} => acc,
-        ExprListOpt::Cons { head, tail } => {
-            let next: ExprListOpt = ExprListOpt::Cons { head: head, tail: acc };
-            expr_list_reverse_inner(tail, next)
-        },
-    }
-}
-
-fn expr_list_reverse(list: ExprListOpt) -> ExprListOpt {
-    expr_list_reverse_inner(list, ExprListOpt::Nil {})
-}
-
-fn field_init_reverse_inner(list: FieldInitList, acc: FieldInitList) -> FieldInitList {
-    match list {
-        FieldInitList::Nil {} => acc,
-        FieldInitList::Cons { head, tail } => {
-            let next: FieldInitList = FieldInitList::Cons { head: head, tail: acc };
-            field_init_reverse_inner(tail, next)
-        },
-    }
-}
-
-fn field_init_reverse(list: FieldInitList) -> FieldInitList {
-    field_init_reverse_inner(list, FieldInitList::Nil {})
-}
-
-fn parse_field_inits(src: String, list: TokenList) -> ParseFieldsInit {
-    let lbrace: I64 = 123;
-    let rbrace: I64 = 125;
-    let comma: I64 = 44;
-    let colon: I64 = 58;
-    let mut cur: TokenList = list;
-    if token_is_sym(peek(cur), lbrace) == 1 {
-        cur = advance(cur);
-    };
-    let mut fields: FieldInitList = FieldInitList::Nil {};
-    let mut done: I64 = 0;
-    while token_is_sym(peek(cur), rbrace) == 0 && done == 0 {
-        let name: ParseIdent = parse_ident(src, cur);
-        cur = name.rest;
-        if token_is_sym(peek(cur), colon) == 1 {
-            cur = advance(cur);
-        };
-        let value: ParseExpr = parse_expr(src, cur);
-        cur = value.rest;
-        let field: FieldInit = FieldInit { name: name.name, value: value.expr };
-        fields = FieldInitList::Cons { head: field, tail: fields };
-        if token_is_sym(peek(cur), comma) == 1 {
-            cur = advance(cur);
-        } else {
-            done = 1;
-        }
-    };
-    if token_is_sym(peek(cur), rbrace) == 1 {
-        cur = advance(cur);
-    };
-    ParseFieldsInit { fields: field_init_reverse(fields), rest: cur }
-}
-
-struct ParseFieldsInit { fields: FieldInitList, rest: TokenList }
-
-fn pat_field_reverse_inner(list: PatFieldList, acc: PatFieldList) -> PatFieldList {
-    match list {
-        PatFieldList::Nil {} => acc,
-        PatFieldList::Cons { head, tail } => {
-            let next: PatFieldList = PatFieldList::Cons { head: head, tail: acc };
-            pat_field_reverse_inner(tail, next)
-        },
-    }
-}
-
-fn pat_field_reverse(list: PatFieldList) -> PatFieldList {
-    pat_field_reverse_inner(list, PatFieldList::Nil {})
-}
-
-fn parse_pat_fields(src: String, list: TokenList) -> ParsePatFields {
-    let lbrace: I64 = 123;
-    let rbrace: I64 = 125;
-    let comma: I64 = 44;
-    let colon: I64 = 58;
-    let mut cur: TokenList = list;
-    if token_is_sym(peek(cur), lbrace) == 1 {
-        cur = advance(cur);
-    };
-    let mut fields: PatFieldList = PatFieldList::Nil {};
-    let mut done: I64 = 0;
-    while token_is_sym(peek(cur), rbrace) == 0 && done == 0 {
-        let name: ParseIdent = parse_ident(src, cur);
-        cur = name.rest;
-        let mut binding: Span = name.name;
-        if token_is_sym(peek(cur), colon) == 1 {
-            cur = advance(cur);
-            let bind: ParseIdent = parse_ident(src, cur);
-            binding = bind.name;
-            cur = bind.rest;
-        };
-        let field: PatField = PatField { name: name.name, binding: binding };
-        fields = PatFieldList::Cons { head: field, tail: fields };
-        if token_is_sym(peek(cur), comma) == 1 {
-            cur = advance(cur);
-        } else {
-            done = 1;
-        }
-    };
-    if token_is_sym(peek(cur), rbrace) == 1 {
-        cur = advance(cur);
-    };
-    ParsePatFields { fields: pat_field_reverse(fields), rest: cur }
-}
-
-struct ParsePatFields { fields: PatFieldList, rest: TokenList }
-
-fn parse_pattern(src: String, list: TokenList) -> ParsePattern {
-    let tok: Token = peek(list);
-    let span: Span = Span { start: tok.start, end: tok.end };
-    if token_is_ident(tok) == 1 && is_underscore(src, span) == 1 {
-        ParsePattern { pat: Pattern::Wildcard {}, rest: advance(list) }
     } else {
-        let path: ParsePath = parse_path(src, list);
-        let mut cur: TokenList = path.rest;
-        let mut fields: PatFieldList = PatFieldList::Nil {};
-        let mut has_braces: I64 = 0;
-        if token_is_sym(peek(cur), 123) == 1 {
-            let parsed: ParsePatFields = parse_pat_fields(src, cur);
-            fields = parsed.fields;
-            cur = parsed.rest;
-            has_braces = 1;
-        };
-        if has_braces == 1 {
-            ParsePattern { pat: Pattern::Struct { path: path.path, fields: fields }, rest: cur }
-        } else {
-            ParsePattern { pat: Pattern::Path { path: path.path }, rest: cur }
+        false
+    }
+}
+
+// Get the name from a token that is known to be Ident
+fn token_ident_name(tok: Token) -> String {
+    match tok.kind {
+        TokenKind::Ident { name } => name,
+        _ => {
+            parse_error("expected ident token", Span { start: tok.start, end: tok.end });
+            ""
         }
     }
 }
 
-struct ParsePattern { pat: Pattern, rest: TokenList }
+// ---------------------------------------------------------------------------
+// Parse module
+// ---------------------------------------------------------------------------
 
-fn parse_match_arms(src: String, list: TokenList) -> ParseArms {
-    let lbrace: I64 = 123;
-    let rbrace: I64 = 125;
-    let comma: I64 = 44;
-    let eq: I64 = 61;
-    let gt: I64 = 62;
-    let mut cur: TokenList = list;
-    if token_is_sym(peek(cur), lbrace) == 1 {
-        cur = advance(cur);
-    };
-    let mut arms: MatchArmList = MatchArmList::Nil {};
-    let mut done: I64 = 0;
-    while token_is_sym(peek(cur), rbrace) == 0 && done == 0 {
-        let pat: ParsePattern = parse_pattern(src, cur);
-        cur = pat.rest;
-        if is_double_sym(cur, eq, gt) == 1 {
-            cur = advance(cur);
-            cur = advance(cur);
-        };
-        let body: ParseExpr = parse_expr(src, cur);
-        cur = body.rest;
-        let arm: MatchArm = MatchArm { pat: pat.pat, body: body.expr };
-        arms = MatchArmList::Cons { head: arm, tail: arms };
-        if token_is_sym(peek(cur), comma) == 1 {
-            cur = advance(cur);
+fn parse_module(p: Parser) -> Module {
+    let items: RawPointer<I8> = vec_new();
+
+    while !is_eof(p) {
+        let tag: I64 = peek_tag(p);
+        if tag == TK_USE() {
+            vec_push_item(items, Item::UseItem { decl: parse_use_decl(p) });
         } else {
-            done = 1;
-        }
-    };
-    if token_is_sym(peek(cur), rbrace) == 1 {
-        cur = advance(cur);
-    };
-    ParseArms { arms: match_arm_reverse(arms), rest: cur }
-}
-
-fn match_arm_reverse_inner(list: MatchArmList, acc: MatchArmList) -> MatchArmList {
-    match list {
-        MatchArmList::Nil {} => acc,
-        MatchArmList::Cons { head, tail } => {
-            let next: MatchArmList = MatchArmList::Cons { head: head, tail: acc };
-            match_arm_reverse_inner(tail, next)
-        },
-    }
-}
-
-fn match_arm_reverse(list: MatchArmList) -> MatchArmList {
-    match_arm_reverse_inner(list, MatchArmList::Nil {})
-}
-
-fn parse_block(src: String, list: TokenList) -> ParseBlock {
-    let lbrace: I64 = 123;
-    let rbrace: I64 = 125;
-    let mut cur: TokenList = list;
-    if token_is_sym(peek(cur), lbrace) == 1 {
-        cur = advance(cur);
-    };
-    let stmts: ParseStmtList = parse_stmt_list(src, cur);
-    cur = stmts.rest;
-    if token_is_sym(peek(cur), rbrace) == 1 {
-        cur = advance(cur);
-    };
-    ParseBlock { block: Block { stmts: stmts.stmts }, rest: cur }
-}
-
-fn parse_block_skip(list: TokenList) -> ParseBlock {
-    let lbrace: I64 = 123;
-    let rbrace: I64 = 125;
-    let mut cur: TokenList = list;
-    if token_is_sym(peek(cur), lbrace) == 1 {
-        cur = advance(cur);
-    };
-    let mut depth: I64 = 1;
-    while depth > 0 {
-        match cur {
-            TokenList::Nil {} => { depth = 0; },
-            TokenList::Cons { head, tail } => {
-                if token_is_sym(head, lbrace) == 1 {
-                    depth = depth + 1;
+            if tag == TK_EXTERN() {
+                vec_push_item(items, Item::ExternFnItem { decl: parse_extern_fn_decl(p) });
+            } else {
+                if tag == TK_FN() {
+                    vec_push_item(items, Item::FnItem { decl: parse_fn_decl(p) });
                 } else {
-                    if token_is_sym(head, rbrace) == 1 {
-                        depth = depth - 1;
+                    if tag == TK_STRUCT() {
+                        vec_push_item(items, Item::StructItem { decl: parse_struct_decl(p) });
+                    } else {
+                        if tag == TK_ENUM() {
+                            vec_push_item(items, Item::EnumItem { decl: parse_enum_decl(p) });
+                        } else {
+                            let tok: Token = peek(p);
+                            parse_error(string_concat("unexpected token at item position: ", token_kind_name(tok.kind)), Span { start: tok.start, end: tok.end });
+                        }
+                    }
+                }
+            }
+        };
+    };
+
+    Module { path: vec_new(), items: items }
+}
+
+// ---------------------------------------------------------------------------
+// Parse use declaration
+// ---------------------------------------------------------------------------
+
+fn parse_use_decl(p: Parser) -> UseDecl {
+    let start_tok: Token = bump(p); // consume 'use'
+    let start: I64 = start_tok.start;
+    let path: RawPointer<I8> = parse_path(p);
+    let end: I64 = expect_tag(p, TK_SEMI(), "expected ';' after use");
+    UseDecl { path: path, span: Span { start: start, end: end } }
+}
+
+// ---------------------------------------------------------------------------
+// Parse struct declaration
+// ---------------------------------------------------------------------------
+
+fn parse_struct_decl(p: Parser) -> StructDecl {
+    let start_tok: Token = bump(p); // consume 'struct'
+    let start: I64 = start_tok.start;
+    let name: String = expect_ident(p, "expected struct name");
+    let type_params: RawPointer<I8> = parse_type_params(p);
+    expect_tag(p, TK_LBRACE(), "expected '{' in struct");
+    let fields: RawPointer<I8> = if peek_tag(p) == TK_RBRACE() {
+        vec_new()
+    } else {
+        parse_field_list(p)
+    };
+    let end: I64 = expect_tag(p, TK_RBRACE(), "expected '}' after struct");
+    StructDecl { name: name, type_params: type_params, fields: fields, span: Span { start: start, end: end } }
+}
+
+// ---------------------------------------------------------------------------
+// Parse enum declaration
+// ---------------------------------------------------------------------------
+
+fn parse_enum_decl(p: Parser) -> EnumDecl {
+    let start_tok: Token = bump(p); // consume 'enum'
+    let start: I64 = start_tok.start;
+    let name: String = expect_ident(p, "expected enum name");
+    let type_params: RawPointer<I8> = parse_type_params(p);
+    expect_tag(p, TK_LBRACE(), "expected '{' in enum");
+    let variants: RawPointer<I8> = vec_new();
+    while peek_tag(p) != TK_RBRACE() && !is_eof(p) {
+        let v_name: String = expect_ident(p, "expected variant name");
+        let v_start_tok: Token = peek(p);
+        let v_start: I64 = v_start_tok.start;
+        let kind: EnumVariantKind = if peek_tag(p) == TK_LPAREN() {
+            bump(p); // consume '('
+            let types: RawPointer<I8> = if peek_tag(p) == TK_RPAREN() {
+                vec_new()
+            } else {
+                parse_type_list(p)
+            };
+            expect_tag(p, TK_RPAREN(), "expected ')' in variant");
+            EnumVariantKind::TupleKind { types: types }
+        } else {
+            if peek_tag(p) == TK_LBRACE() {
+                bump(p); // consume '{'
+                let fields: RawPointer<I8> = if peek_tag(p) == TK_RBRACE() {
+                    vec_new()
+                } else {
+                    parse_field_list(p)
+                };
+                expect_tag(p, TK_RBRACE(), "expected '}' in variant");
+                EnumVariantKind::StructKind { fields: fields }
+            } else {
+                EnumVariantKind::UnitKind {}
+            }
+        };
+        // v_end: use current position
+        let v_end_tok: Token = peek(p);
+        let v_end: I64 = v_end_tok.start;
+        vec_push_variant(variants, EnumVariant { name: v_name, kind: kind, span: Span { start: v_start, end: v_end } });
+        if peek_tag(p) == TK_COMMA() {
+            bump(p);
+        } else {
+            // no comma, must be end
+        };
+    };
+    let end: I64 = expect_tag(p, TK_RBRACE(), "expected '}' after enum");
+    EnumDecl { name: name, type_params: type_params, variants: variants, span: Span { start: start, end: end } }
+}
+
+// ---------------------------------------------------------------------------
+// Parse fn declaration
+// ---------------------------------------------------------------------------
+
+fn parse_fn_decl(p: Parser) -> FnDecl {
+    let start_tok: Token = bump(p); // consume 'fn'
+    let start: I64 = start_tok.start;
+    let name: String = expect_ident(p, "expected function name");
+    expect_tag(p, TK_LPAREN(), "expected '(' after fn name");
+    let params: RawPointer<I8> = if peek_tag(p) == TK_RPAREN() {
+        vec_new()
+    } else {
+        parse_param_list(p)
+    };
+    expect_tag(p, TK_RPAREN(), "expected ')' after params");
+    expect_tag(p, TK_ARROW(), "expected '->' return type");
+    let ret_type: Type = parse_type(p);
+    let body: Block = parse_block(p);
+    let end: I64 = body.span.end;
+    FnDecl { name: name, params: params, ret_type: ret_type, body: body, span: Span { start: start, end: end } }
+}
+
+// ---------------------------------------------------------------------------
+// Parse extern fn declaration
+// ---------------------------------------------------------------------------
+
+fn parse_extern_fn_decl(p: Parser) -> ExternFnDecl {
+    let start_tok: Token = bump(p); // consume 'extern'
+    let start: I64 = start_tok.start;
+    expect_tag(p, TK_FN(), "expected 'fn' after extern");
+    let name: String = expect_ident(p, "expected extern fn name");
+    expect_tag(p, TK_LPAREN(), "expected '(' after extern fn name");
+    let params: RawPointer<I8> = vec_new();
+    let mut varargs: Bool = false;
+    if peek_tag(p) != TK_RPAREN() {
+        let mut cont: Bool = true;
+        while cont {
+            if peek_tag(p) == TK_ELLIPSIS() {
+                bump(p);
+                varargs = true;
+                cont = false;
+            } else {
+                let pname: String = expect_ident(p, "expected param name");
+                let pstart_tok: Token = peek(p);
+                let pstart: I64 = pstart_tok.start;
+                expect_tag(p, TK_COLON(), "expected ':' in param");
+                let pty: Type = parse_type(p);
+                let pend_tok: Token = peek(p);
+                let pend: I64 = pend_tok.start;
+                vec_push_param(params, Param { name: pname, ty: pty, span: Span { start: pstart, end: pend } });
+                if peek_tag(p) == TK_COMMA() {
+                    bump(p);
+                    if peek_tag(p) == TK_RPAREN() {
+                        cont = false;
+                    };
+                } else {
+                    cont = false;
+                };
+            };
+        };
+    };
+    expect_tag(p, TK_RPAREN(), "expected ')' after extern params");
+    expect_tag(p, TK_ARROW(), "expected '->' return type");
+    let ret_type: Type = parse_type(p);
+    let end: I64 = expect_tag(p, TK_SEMI(), "expected ';' after extern fn");
+    ExternFnDecl { name: name, params: params, varargs: varargs, ret_type: ret_type, span: Span { start: start, end: end } }
+}
+
+// ---------------------------------------------------------------------------
+// Parse param list
+// ---------------------------------------------------------------------------
+
+fn parse_param_list(p: Parser) -> RawPointer<I8> {
+    let params: RawPointer<I8> = vec_new();
+    let mut cont: Bool = true;
+    while cont {
+        let name: String = expect_ident(p, "expected param name");
+        let pstart_tok: Token = peek(p);
+        let pstart: I64 = pstart_tok.start;
+        expect_tag(p, TK_COLON(), "expected ':' in param");
+        let ty: Type = parse_type(p);
+        let pend_tok: Token = peek(p);
+        let pend: I64 = pend_tok.start;
+        vec_push_param(params, Param { name: name, ty: ty, span: Span { start: pstart, end: pend } });
+        if peek_tag(p) == TK_COMMA() {
+            bump(p);
+            if peek_tag(p) == TK_RPAREN() {
+                cont = false;
+            };
+        } else {
+            cont = false;
+        };
+    };
+    params
+}
+
+// ---------------------------------------------------------------------------
+// Parse field list
+// ---------------------------------------------------------------------------
+
+fn parse_field_list(p: Parser) -> RawPointer<I8> {
+    let fields: RawPointer<I8> = vec_new();
+    while peek_tag(p) != TK_RBRACE() && !is_eof(p) {
+        let name: String = expect_ident(p, "expected field name");
+        let fstart_tok: Token = peek(p);
+        let fstart: I64 = fstart_tok.start;
+        expect_tag(p, TK_COLON(), "expected ':' in field");
+        let ty: Type = parse_type(p);
+        let fend_tok: Token = peek(p);
+        let fend: I64 = fend_tok.start;
+        vec_push_field(fields, Field { name: name, ty: ty, span: Span { start: fstart, end: fend } });
+        if peek_tag(p) == TK_COMMA() {
+            bump(p);
+        } else {
+            // end of fields
+        };
+    };
+    fields
+}
+
+// ---------------------------------------------------------------------------
+// Parse type
+// ---------------------------------------------------------------------------
+
+fn parse_type(p: Parser) -> Type {
+    // Tuple type: (T1, T2, ...)
+    if peek_tag(p) == TK_LPAREN() {
+        bump(p); // consume '('
+        let types: RawPointer<I8> = if peek_tag(p) == TK_RPAREN() {
+            vec_new()
+        } else {
+            parse_type_list(p)
+        };
+        expect_tag(p, TK_RPAREN(), "expected ')' in tuple type");
+        return Type::TupleType { types: types };
+    };
+
+    // RawPointer<T>
+    if peek_ident_is(p, "RawPointer") {
+        bump(p); // consume 'RawPointer'
+        expect_tag(p, TK_LT(), "expected '<' after RawPointer");
+        let inner: Type = parse_type(p);
+        expect_tag(p, TK_GT(), "expected '>' after RawPointer");
+        return Type::RawPtrType { inner: inner };
+    };
+
+    // Path type with optional type args
+    let path: RawPointer<I8> = parse_path(p);
+    let type_args: RawPointer<I8> = parse_type_args(p);
+    Type::PathType { path: path, type_args: type_args }
+}
+
+// ---------------------------------------------------------------------------
+// Parse type params: <T, U, ...>
+// ---------------------------------------------------------------------------
+
+fn parse_type_params(p: Parser) -> RawPointer<I8> {
+    if peek_tag(p) != TK_LT() {
+        return vec_new();
+    };
+    bump(p); // consume '<'
+    let params: RawPointer<I8> = vec_new();
+    let mut cont: Bool = true;
+    while cont {
+        let name: String = expect_ident(p, "expected type parameter name");
+        vec_push_str(params, name);
+        if peek_tag(p) == TK_COMMA() {
+            bump(p);
+            if peek_tag(p) == TK_GT() {
+                cont = false;
+            };
+        } else {
+            cont = false;
+        };
+    };
+    expect_tag(p, TK_GT(), "expected '>' after type parameters");
+    params
+}
+
+// ---------------------------------------------------------------------------
+// Parse type args: <T, U, ...>
+// ---------------------------------------------------------------------------
+
+fn parse_type_args(p: Parser) -> RawPointer<I8> {
+    if peek_tag(p) != TK_LT() {
+        return vec_new();
+    };
+    bump(p); // consume '<'
+    let args: RawPointer<I8> = vec_new();
+    let mut cont: Bool = true;
+    while cont {
+        let ty: Type = parse_type(p);
+        vec_push_type(args, ty);
+        if peek_tag(p) == TK_COMMA() {
+            bump(p);
+            if peek_tag(p) == TK_GT() {
+                cont = false;
+            };
+        } else {
+            cont = false;
+        };
+    };
+    expect_tag(p, TK_GT(), "expected '>' after type arguments");
+    args
+}
+
+// ---------------------------------------------------------------------------
+// Parse type list (comma separated, used for tuple types and tuple variant payloads)
+// ---------------------------------------------------------------------------
+
+fn parse_type_list(p: Parser) -> RawPointer<I8> {
+    let types: RawPointer<I8> = vec_new();
+    let mut cont: Bool = true;
+    while cont {
+        let ty: Type = parse_type(p);
+        vec_push_type(types, ty);
+        if peek_tag(p) == TK_COMMA() {
+            bump(p);
+            if peek_tag(p) == TK_RPAREN() {
+                cont = false;
+            };
+        } else {
+            cont = false;
+        };
+    };
+    types
+}
+
+// ---------------------------------------------------------------------------
+// Parse path: ident (:: ident)*
+// ---------------------------------------------------------------------------
+
+fn parse_path(p: Parser) -> RawPointer<I8> {
+    let segments: RawPointer<I8> = vec_new();
+    let first: String = expect_ident(p, "expected identifier in path");
+    vec_push_str(segments, first);
+    while peek_tag(p) == TK_COLONCOLON() {
+        bump(p); // consume '::'
+        let seg: String = expect_ident(p, "expected identifier after '::'");
+        vec_push_str(segments, seg);
+    };
+    segments
+}
+
+// ---------------------------------------------------------------------------
+// Parse block
+// ---------------------------------------------------------------------------
+
+fn parse_block(p: Parser) -> Block {
+    let start: I64 = expect_tag(p, TK_LBRACE(), "expected '{' to start block");
+    let stmts: RawPointer<I8> = vec_new();
+    let mut tail: Option<Expr> = Option::None {};
+    while peek_tag(p) != TK_RBRACE() && !is_eof(p) {
+        if peek_tag(p) == TK_RETURN() {
+            let ret_tok: Token = bump(p);
+            let s_start: I64 = ret_tok.start;
+            if peek_tag(p) == TK_SEMI() {
+                let end: I64 = expect_tag(p, TK_SEMI(), "expected ';' after return");
+                vec_push_stmt(stmts, Stmt::ReturnStmt { value: Option::None {}, span: Span { start: s_start, end: end } });
+            } else {
+                let expr: Expr = parse_expr(p);
+                let end: I64 = expect_tag(p, TK_SEMI(), "expected ';' after return expr");
+                vec_push_stmt(stmts, Stmt::ReturnStmt { value: Option::Some { value: expr }, span: Span { start: s_start, end: end } });
+            };
+        } else {
+            let expr: Expr = parse_expr(p);
+            if peek_tag(p) == TK_SEMI() {
+                let end: I64 = expect_tag(p, TK_SEMI(), "expected ';'");
+                let s: I64 = expr_span_start(expr);
+                vec_push_stmt(stmts, Stmt::ExprStmt { expr: expr, span: Span { start: s, end: end } });
+            } else {
+                // tail expression (no semicolon)
+                tail = Option::Some { value: expr };
+            };
+        };
+    };
+    let end: I64 = expect_tag(p, TK_RBRACE(), "expected '}' to end block");
+    Block { stmts: stmts, tail: tail, span: Span { start: start, end: end } }
+}
+
+// ---------------------------------------------------------------------------
+// Parse expressions
+// ---------------------------------------------------------------------------
+
+fn parse_expr(p: Parser) -> Expr {
+    let tag: I64 = peek_tag(p);
+    if tag == TK_LET() {
+        return parse_let_expr(p);
+    };
+    if tag == TK_IF() {
+        return parse_if_expr(p);
+    };
+    if tag == TK_WHILE() {
+        return parse_while_expr(p);
+    };
+    if tag == TK_MATCH() {
+        return parse_match_expr(p);
+    };
+    if tag == TK_BREAK() {
+        let tok: Token = bump(p);
+        return Expr::BreakExpr { span: Span { start: tok.start, end: tok.end } };
+    };
+    if tag == TK_CONTINUE() {
+        let tok: Token = bump(p);
+        return Expr::ContinueExpr { span: Span { start: tok.start, end: tok.end } };
+    };
+    if tag == TK_LBRACE() {
+        let block: Block = parse_block(p);
+        return Expr::BlockExpr { block: block };
+    };
+    parse_assign_expr(p)
+}
+
+// ---------------------------------------------------------------------------
+// Let expression
+// ---------------------------------------------------------------------------
+
+fn parse_let_expr(p: Parser) -> Expr {
+    let let_tok: Token = bump(p); // consume 'let'
+    let start: I64 = let_tok.start;
+    let mutable: Bool = peek_tag(p) == TK_MUT();
+    if mutable {
+        bump(p);
+    };
+    let name: String = expect_ident(p, "expected identifier after let");
+    let ty: Option<Type> = if peek_tag(p) == TK_COLON() {
+        bump(p);
+        Option::Some { value: parse_type(p) }
+    } else {
+        Option::None {}
+    };
+    expect_tag(p, TK_EQ(), "expected '=' in let binding");
+    let value: Expr = parse_expr(p);
+    let end: I64 = expr_span_end(value);
+    Expr::LetExpr { name: name, mutable: mutable, ty: ty, value: value, span: Span { start: start, end: end } }
+}
+
+// ---------------------------------------------------------------------------
+// If expression
+// ---------------------------------------------------------------------------
+
+fn parse_if_expr(p: Parser) -> Expr {
+    let if_tok: Token = bump(p); // consume 'if'
+    let start: I64 = if_tok.start;
+    let cond: Expr = parse_expr(p);
+    let then_branch: Block = parse_block(p);
+    let else_branch: Option<Block> = if peek_tag(p) == TK_ELSE() {
+        bump(p);
+        // Support else-if by parsing another if expression wrapped in a block
+        if peek_tag(p) == TK_IF() {
+            let elif: Expr = parse_if_expr(p);
+            let elif_start: I64 = expr_span_start(elif);
+            let elif_end: I64 = expr_span_end(elif);
+            let elif_stmts: RawPointer<I8> = vec_new();
+            Option::Some { value: Block { stmts: elif_stmts, tail: Option::Some { value: elif }, span: Span { start: elif_start, end: elif_end } } }
+        } else {
+            Option::Some { value: parse_block(p) }
+        }
+    } else {
+        Option::None {}
+    };
+    let end: I64 = then_branch.span.end;
+    Expr::IfExpr { cond: cond, then_branch: then_branch, else_branch: else_branch, span: Span { start: start, end: end } }
+}
+
+// ---------------------------------------------------------------------------
+// While expression
+// ---------------------------------------------------------------------------
+
+fn parse_while_expr(p: Parser) -> Expr {
+    let while_tok: Token = bump(p); // consume 'while'
+    let start: I64 = while_tok.start;
+    let cond: Expr = parse_expr(p);
+    let body: Block = parse_block(p);
+    let end: I64 = body.span.end;
+    Expr::WhileExpr { cond: cond, body: body, span: Span { start: start, end: end } }
+}
+
+// ---------------------------------------------------------------------------
+// Match expression
+// ---------------------------------------------------------------------------
+
+fn parse_match_expr(p: Parser) -> Expr {
+    let match_tok: Token = bump(p); // consume 'match'
+    let start: I64 = match_tok.start;
+    let scrutinee: Expr = parse_expr(p);
+    expect_tag(p, TK_LBRACE(), "expected '{' after match scrutinee");
+    let arms: RawPointer<I8> = vec_new();
+    while peek_tag(p) != TK_RBRACE() && !is_eof(p) {
+        let pattern: Pattern = parse_pattern(p);
+        let p_start: I64 = pattern_span_start(pattern);
+        expect_tag(p, TK_FATARROW(), "expected '=>' in match arm");
+        let body: Expr = parse_expr(p);
+        let arm_end: I64 = expr_span_end(body);
+        vec_push_arm(arms, MatchArm { pattern: pattern, body: body, span: Span { start: p_start, end: arm_end } });
+        if peek_tag(p) == TK_COMMA() {
+            bump(p);
+            if peek_tag(p) == TK_RBRACE() {
+                // trailing comma before }
+            };
+        } else {
+            // no comma, must be end or error
+        };
+    };
+    let end: I64 = expect_tag(p, TK_RBRACE(), "expected '}' after match arms");
+    Expr::MatchExpr { scrutinee: scrutinee, arms: arms, span: Span { start: start, end: end } }
+}
+
+// ---------------------------------------------------------------------------
+// Assignment expression
+// ---------------------------------------------------------------------------
+
+fn parse_assign_expr(p: Parser) -> Expr {
+    let left: Expr = parse_binary_expr(p, 0);
+    if peek_tag(p) == TK_EQ() {
+        let start: I64 = expr_span_start(left);
+        bump(p); // consume '='
+        let right: Expr = parse_expr(p);
+        let end: I64 = expr_span_end(right);
+        return Expr::AssignExpr { target: left, value: right, span: Span { start: start, end: end } };
+    };
+    left
+}
+
+// ---------------------------------------------------------------------------
+// Binary expression with precedence climbing
+// ---------------------------------------------------------------------------
+
+// Returns packed: prec * 100 + op_index, or -1 if not a binary op.
+// op_index: 1=Add, 2=Sub, 3=Mul, 4=Div, 5=Rem, 6=Eq, 7=NotEq, 8=Lt, 9=LtEq, 10=Gt, 11=GtEq, 12=AndAnd, 13=OrOr
+fn peek_binary_op_info(p: Parser) -> I64 {
+    let tag: I64 = peek_tag(p);
+    if tag == TK_STAR() { 503 }
+    else { if tag == TK_SLASH() { 504 }
+    else { if tag == TK_PERCENT() { 505 }
+    else { if tag == TK_PLUS() { 401 }
+    else { if tag == TK_MINUS() { 402 }
+    else { if tag == TK_EQEQ() { 306 }
+    else { if tag == TK_BANGEQ() { 307 }
+    else { if tag == TK_LT() { 308 }
+    else { if tag == TK_LTEQ() { 309 }
+    else { if tag == TK_GT() { 310 }
+    else { if tag == TK_GTEQ() { 311 }
+    else { if tag == TK_ANDAND() { 212 }
+    else { if tag == TK_OROR() { 113 }
+    else { 0 - 1
+    } } } } } } } } } } } } }
+}
+
+fn make_binary_op(op_index: I64) -> BinaryOp {
+    if op_index == 1 { BinaryOp::Add {} }
+    else { if op_index == 2 { BinaryOp::Sub {} }
+    else { if op_index == 3 { BinaryOp::Mul {} }
+    else { if op_index == 4 { BinaryOp::Div {} }
+    else { if op_index == 5 { BinaryOp::Rem {} }
+    else { if op_index == 6 { BinaryOp::Eq {} }
+    else { if op_index == 7 { BinaryOp::NotEq {} }
+    else { if op_index == 8 { BinaryOp::Lt {} }
+    else { if op_index == 9 { BinaryOp::LtEq {} }
+    else { if op_index == 10 { BinaryOp::Gt {} }
+    else { if op_index == 11 { BinaryOp::GtEq {} }
+    else { if op_index == 12 { BinaryOp::AndAnd {} }
+    else { BinaryOp::OrOr {} }
+    } } } } } } } } } } }
+}
+
+fn parse_binary_expr(p: Parser, min_prec: I64) -> Expr {
+    let mut left: Expr = parse_unary_expr(p);
+    let mut cont: Bool = true;
+    while cont {
+        let info: I64 = peek_binary_op_info(p);
+        if info < 0 {
+            cont = false;
+        } else {
+            let prec: I64 = info / 100;
+            let op_index: I64 = info - prec * 100;
+            if prec < min_prec {
+                cont = false;
+            } else {
+                bump(p); // consume operator
+                let next_min: I64 = prec + 1; // left-associative
+                let right: Expr = parse_binary_expr(p, next_min);
+                let span: Span = Span { start: expr_span_start(left), end: expr_span_end(right) };
+                left = Expr::BinaryExpr { op: make_binary_op(op_index), left: left, right: right, span: span };
+            };
+        };
+    };
+    left
+}
+
+// ---------------------------------------------------------------------------
+// Unary expression
+// ---------------------------------------------------------------------------
+
+fn parse_unary_expr(p: Parser) -> Expr {
+    if peek_tag(p) == TK_BANG() {
+        let tok: Token = bump(p);
+        let start: I64 = tok.start;
+        let operand: Expr = parse_unary_expr(p);
+        let end: I64 = expr_span_end(operand);
+        return Expr::UnaryExpr { op: UnaryOp::Not {}, operand: operand, span: Span { start: start, end: end } };
+    };
+    if peek_tag(p) == TK_MINUS() {
+        let tok: Token = bump(p);
+        let start: I64 = tok.start;
+        let operand: Expr = parse_unary_expr(p);
+        let end: I64 = expr_span_end(operand);
+        return Expr::UnaryExpr { op: UnaryOp::Neg {}, operand: operand, span: Span { start: start, end: end } };
+    };
+    parse_call_expr(p)
+}
+
+// ---------------------------------------------------------------------------
+// Call expression (includes field access)
+// ---------------------------------------------------------------------------
+
+fn parse_call_expr(p: Parser) -> Expr {
+    let mut expr: Expr = parse_primary_expr(p);
+    let mut cont: Bool = true;
+    while cont {
+        if peek_tag(p) == TK_LPAREN() {
+            let start: I64 = expr_span_start(expr);
+            bump(p); // consume '('
+            let args: RawPointer<I8> = vec_new();
+            if peek_tag(p) != TK_RPAREN() {
+                let mut args_cont: Bool = true;
+                while args_cont {
+                    let arg: Expr = parse_expr(p);
+                    vec_push_expr(args, arg);
+                    if peek_tag(p) == TK_COMMA() {
+                        bump(p);
+                        if peek_tag(p) == TK_RPAREN() {
+                            args_cont = false;
+                        };
+                    } else {
+                        args_cont = false;
                     };
                 };
-                cur = tail;
-            },
-        }
-    };
-    ParseBlock { block: Block { stmts: StmtList::Nil {} }, rest: cur }
-}
-
-struct ParseStmtList { stmts: StmtList, rest: TokenList }
-
-fn parse_stmt_list(src: String, list: TokenList) -> ParseStmtList {
-    let rbrace: I64 = 125;
-    let tok: Token = peek(list);
-    if token_is_sym(tok, rbrace) == 1 {
-        return ParseStmtList { stmts: StmtList::Nil {}, rest: list };
-    };
-    if token_is_kw_fn(tok) == 1 || token_is_kw_struct(tok) == 1 || token_is_kw_enum(tok) == 1 || token_is_kw_extern(tok) == 1 {
-        return ParseStmtList { stmts: StmtList::Nil {}, rest: list };
-    };
-    match list {
-        TokenList::Nil {} => ParseStmtList { stmts: StmtList::Nil {}, rest: list },
-        _ => {
-            let stmt: ParseStmt = parse_stmt(src, list);
-            let tail: ParseStmtList = parse_stmt_list(src, stmt.rest);
-            let stmts: StmtList = StmtList::Cons { head: stmt.stmt, tail: tail.stmts };
-            ParseStmtList { stmts: stmts, rest: tail.rest }
-        },
-    }
-}
-
-struct ParseStmt { stmt: Stmt, rest: TokenList }
-
-fn token_is_kw_let(tok: Token) -> I64 {
-    match tok.kind {
-        TokenKind::KwLet {} => 1,
-        _ => 0,
-    }
-}
-
-fn token_is_kw_mut(tok: Token) -> I64 {
-    match tok.kind {
-        TokenKind::KwMut {} => 1,
-        _ => 0,
-    }
-}
-
-fn token_is_kw_return(tok: Token) -> I64 {
-    match tok.kind {
-        TokenKind::KwReturn {} => 1,
-        _ => 0,
-    }
-}
-
-fn token_is_kw_if(tok: Token) -> I64 {
-    match tok.kind {
-        TokenKind::KwIf {} => 1,
-        _ => 0,
-    }
-}
-
-fn token_is_kw_else(tok: Token) -> I64 {
-    match tok.kind {
-        TokenKind::KwElse {} => 1,
-        _ => 0,
-    }
-}
-
-fn token_is_kw_while(tok: Token) -> I64 {
-    match tok.kind {
-        TokenKind::KwWhile {} => 1,
-        _ => 0,
-    }
-}
-
-fn token_is_kw_match(tok: Token) -> I64 {
-    match tok.kind {
-        TokenKind::KwMatch {} => 1,
-        _ => 0,
-    }
-}
-
-fn parse_stmt(src: String, list: TokenList) -> ParseStmt {
-    let semi: I64 = 59;
-    let eq: I64 = 61;
-    let mut cur: TokenList = list;
-    let tok: Token = peek(cur);
-    if token_is_kw_let(tok) == 1 {
-        cur = advance(cur);
-        let mut mutable: I64 = 0;
-        if token_is_kw_mut(peek(cur)) == 1 {
-            mutable = 1;
-            cur = advance(cur);
-        };
-        let name: ParseIdent = parse_ident(src, cur);
-        cur = name.rest;
-        let mut ty: Type = Type::Unit {};
-        if token_is_sym(peek(cur), 58) == 1 {
-            cur = advance(cur);
-            let parsed: ParseType = parse_type(src, cur);
-            ty = parsed.ty;
-            cur = parsed.rest;
-        };
-        if token_is_sym(peek(cur), eq) == 1 {
-            cur = advance(cur);
-        };
-        let value: ParseExpr = parse_expr(src, cur);
-        cur = value.rest;
-        if token_is_sym(peek(cur), semi) == 1 {
-            cur = advance(cur);
-        };
-        let stmt: Stmt = Stmt::Let { name: name.name, mutable: mutable, ty: ty, value: value.expr };
-        return ParseStmt { stmt: stmt, rest: cur };
-    };
-    if token_is_kw_return(tok) == 1 {
-        cur = advance(cur);
-        let value: ParseExpr = parse_expr(src, cur);
-        cur = value.rest;
-        if token_is_sym(peek(cur), semi) == 1 {
-            cur = advance(cur);
-        };
-        let stmt: Stmt = Stmt::Return { expr: value.expr };
-        return ParseStmt { stmt: stmt, rest: cur };
-    };
-    let expr: ParseExpr = parse_expr(src, cur);
-    cur = expr.rest;
-    if token_is_sym(peek(cur), semi) == 1 {
-        cur = advance(cur);
-    };
-    ParseStmt { stmt: Stmt::Expr { expr: expr.expr }, rest: cur }
-}
-
-fn parse_expr(src: String, list: TokenList) -> ParseExpr {
-    parse_assignment(src, list)
-}
-
-fn parse_assignment(src: String, list: TokenList) -> ParseExpr {
-    let eq: I64 = 61;
-    let left: ParseExpr = parse_compare(src, list);
-    let mut cur: TokenList = left.rest;
-    if token_is_sym(peek(cur), eq) == 1 && is_double_sym(cur, eq, eq) == 0 {
-        cur = advance(cur);
-        let right: ParseExpr = parse_assignment(src, cur);
-        let expr: Expr = Expr::Assign { target: left.expr, value: right.expr };
-        ParseExpr { expr: expr, rest: right.rest }
-    } else {
-        ParseExpr { expr: left.expr, rest: cur }
-    }
-}
-
-fn parse_compare(src: String, list: TokenList) -> ParseExpr {
-    let lt: I64 = 60;
-    let gt: I64 = 62;
-    let eq: I64 = 61;
-    let bang: I64 = 33;
-    let left: ParseExpr = parse_add(src, list);
-    let mut cur: TokenList = left.rest;
-    if token_is_sym(peek(cur), lt) == 1 {
-        cur = advance(cur);
-        let mut op: BinOp = BinOp::Lt {};
-        if token_is_sym(peek(cur), eq) == 1 {
-            cur = advance(cur);
-            op = BinOp::Le {};
-        };
-        let right: ParseExpr = parse_add(src, cur);
-        let expr: Expr = Expr::Binary { op: op, left: left.expr, right: right.expr };
-        return ParseExpr { expr: expr, rest: right.rest };
-    };
-    if token_is_sym(peek(cur), gt) == 1 {
-        cur = advance(cur);
-        let mut op: BinOp = BinOp::Gt {};
-        if token_is_sym(peek(cur), eq) == 1 {
-            cur = advance(cur);
-            op = BinOp::Ge {};
-        };
-        let right: ParseExpr = parse_add(src, cur);
-        let expr: Expr = Expr::Binary { op: op, left: left.expr, right: right.expr };
-        return ParseExpr { expr: expr, rest: right.rest };
-    };
-    if is_double_sym(cur, eq, eq) == 1 {
-        cur = advance(cur);
-        cur = advance(cur);
-        let right: ParseExpr = parse_add(src, cur);
-        let expr: Expr = Expr::Binary { op: BinOp::Eq {}, left: left.expr, right: right.expr };
-        return ParseExpr { expr: expr, rest: right.rest };
-    };
-    if is_double_sym(cur, bang, eq) == 1 {
-        cur = advance(cur);
-        cur = advance(cur);
-        let right: ParseExpr = parse_add(src, cur);
-        let expr: Expr = Expr::Binary { op: BinOp::Ne {}, left: left.expr, right: right.expr };
-        return ParseExpr { expr: expr, rest: right.rest };
-    };
-    ParseExpr { expr: left.expr, rest: cur }
-}
-
-fn parse_add(src: String, list: TokenList) -> ParseExpr {
-    let plus: I64 = 43;
-    let minus: I64 = 45;
-    let left: ParseExpr = parse_mul(src, list);
-    parse_add_tail(src, left.expr, left.rest, plus, minus)
-}
-
-fn parse_add_tail(src: String, left: Expr, list: TokenList, plus: I64, minus: I64) -> ParseExpr {
-    let mut cur: TokenList = list;
-    if token_is_sym(peek(cur), plus) == 1 || token_is_sym(peek(cur), minus) == 1 {
-        let op: BinOp = if token_is_sym(peek(cur), plus) == 1 { BinOp::Add {} } else { BinOp::Sub {} };
-        cur = advance(cur);
-        let right: ParseExpr = parse_mul(src, cur);
-        let expr: Expr = Expr::Binary { op: op, left: left, right: right.expr };
-        return parse_add_tail(src, expr, right.rest, plus, minus);
-    };
-    ParseExpr { expr: left, rest: cur }
-}
-
-fn parse_mul(src: String, list: TokenList) -> ParseExpr {
-    let star: I64 = 42;
-    let slash: I64 = 47;
-    let left: ParseExpr = parse_postfix(src, list);
-    parse_mul_tail(src, left.expr, left.rest, star, slash)
-}
-
-fn parse_mul_tail(src: String, left: Expr, list: TokenList, star: I64, slash: I64) -> ParseExpr {
-    let mut cur: TokenList = list;
-    if token_is_sym(peek(cur), star) == 1 || token_is_sym(peek(cur), slash) == 1 {
-        let op: BinOp = if token_is_sym(peek(cur), star) == 1 { BinOp::Mul {} } else { BinOp::Div {} };
-        cur = advance(cur);
-        let right: ParseExpr = parse_postfix(src, cur);
-        let expr: Expr = Expr::Binary { op: op, left: left, right: right.expr };
-        return parse_mul_tail(src, expr, right.rest, star, slash);
-    };
-    ParseExpr { expr: left, rest: cur }
-}
-
-fn parse_postfix(src: String, list: TokenList) -> ParseExpr {
-    let lparen: I64 = 40;
-    let dot: I64 = 46;
-    let mut cur: TokenList = list;
-    let prim: ParseExpr = parse_primary(src, cur);
-    cur = prim.rest;
-    let mut expr: Expr = prim.expr;
-    let mut done: I64 = 0;
-    while done == 0 {
-        if token_is_sym(peek(cur), lparen) == 1 {
-            let args: ParseArgs = parse_args(src, cur);
-            cur = args.rest;
-            expr = Expr::Call { callee: expr, args: args.args };
+            };
+            let end: I64 = expect_tag(p, TK_RPAREN(), "expected ')' after args");
+            expr = Expr::CallExpr { callee: expr, args: args, span: Span { start: start, end: end } };
         } else {
-            if token_is_sym(peek(cur), dot) == 1 {
-                cur = advance(cur);
-                let name: ParseIdent = parse_ident(src, cur);
-                cur = name.rest;
-                expr = Expr::Field { base: expr, name: name.name };
-            } else {
-                done = 1;
-            }
-        }
-    };
-    ParseExpr { expr: expr, rest: cur }
-}
-
-fn parse_primary(src: String, list: TokenList) -> ParseExpr {
-    let lbrace: I64 = 123;
-    let tok: Token = peek(list);
-    match tok.kind {
-        TokenKind::Int {} => {
-            let span: Span = Span { start: tok.start, end: tok.end };
-            ParseExpr { expr: Expr::Int { span: span }, rest: advance(list) }
-        },
-        TokenKind::KwTrue {} => {
-            let span: Span = Span { start: tok.start, end: tok.end };
-            ParseExpr { expr: Expr::Bool { value: 1 }, rest: advance(list) }
-        },
-        TokenKind::KwFalse {} => {
-            let span: Span = Span { start: tok.start, end: tok.end };
-            ParseExpr { expr: Expr::Bool { value: 0 }, rest: advance(list) }
-        },
-        _ => {
-            if token_is_kw_if(tok) == 1 {
-                return parse_if_expr(src, list);
-            };
-            if token_is_kw_while(tok) == 1 {
-                return parse_while_expr(src, list);
-            };
-            if token_is_kw_match(tok) == 1 {
-                return parse_match_expr(src, list);
-            };
-            if token_is_sym(tok, lbrace) == 1 {
-                let block: ParseBlock = parse_block(src, list);
-                return ParseExpr { expr: Expr::Block { block: block.block }, rest: block.rest };
-            };
-            if token_is_ident(tok) == 1 {
-                let path: ParsePath = parse_path(src, list);
-                let mut cur: TokenList = path.rest;
-                if token_is_sym(peek(cur), lbrace) == 1 {
-                    let fields: ParseFieldsInit = parse_field_inits(src, cur);
-                    cur = fields.rest;
-                    let expr: Expr = Expr::StructInit { path: path.path, fields: fields.fields };
-                    ParseExpr { expr: expr, rest: cur }
+            if peek_tag(p) == TK_DOT() {
+                let start: I64 = expr_span_start(expr);
+                bump(p); // consume '.'
+                let tag: I64 = peek_tag(p);
+                let name: String = if tag == TK_IDENT() {
+                    let tok: Token = bump(p);
+                    token_ident_name(tok)
                 } else {
-                    ParseExpr { expr: Expr::Path { path: path.path }, rest: cur }
-                }
+                    if tag == TK_INT_LIT() {
+                        // tuple field access like .0, .1
+                        let tok: Token = bump(p);
+                        match tok.kind {
+                            TokenKind::IntLit { text } => text,
+                            _ => {
+                                parse_error("unreachable", Span { start: tok.start, end: tok.end });
+                                ""
+                            }
+                        }
+                    } else {
+                        expect_ident(p, "expected field name after '.'")
+                    }
+                };
+                let end_tok: Token = peek(p);
+                let end: I64 = end_tok.start;
+                expr = Expr::FieldExpr { base: expr, name: name, span: Span { start: start, end: end } };
             } else {
-                let span: Span = Span { start: tok.start, end: tok.end };
-                ParseExpr { expr: Expr::Int { span: span }, rest: advance(list) }
-            }
-        }
-    }
-}
-
-fn parse_if_expr(src: String, list: TokenList) -> ParseExpr {
-    let mut cur: TokenList = list;
-    if token_is_kw_if(peek(cur)) == 1 {
-        cur = advance(cur);
-    };
-    let cond: ParseExpr = parse_expr(src, cur);
-    cur = cond.rest;
-    let then_block: ParseBlock = parse_block(src, cur);
-    cur = then_block.rest;
-    let mut else_block: Block = Block { stmts: StmtList::Nil {} };
-    if token_is_kw_else(peek(cur)) == 1 {
-        cur = advance(cur);
-        let parsed_else: ParseBlock = parse_block(src, cur);
-        else_block = parsed_else.block;
-        cur = parsed_else.rest;
-    };
-    ParseExpr { expr: Expr::If { cond: cond.expr, then_block: then_block.block, else_block: else_block }, rest: cur }
-}
-
-fn parse_while_expr(src: String, list: TokenList) -> ParseExpr {
-    let mut cur: TokenList = list;
-    if token_is_kw_while(peek(cur)) == 1 {
-        cur = advance(cur);
-    };
-    let cond: ParseExpr = parse_expr(src, cur);
-    cur = cond.rest;
-    let body: ParseBlock = parse_block(src, cur);
-    cur = body.rest;
-    ParseExpr { expr: Expr::While { cond: cond.expr, body: body.block }, rest: cur }
-}
-
-fn parse_match_expr(src: String, list: TokenList) -> ParseExpr {
-    let mut cur: TokenList = list;
-    if token_is_kw_match(peek(cur)) == 1 {
-        cur = advance(cur);
-    };
-    let scrutinee: ParseExpr = parse_expr(src, cur);
-    cur = scrutinee.rest;
-    let arms: ParseArms = parse_match_arms(src, cur);
-    cur = arms.rest;
-    ParseExpr { expr: Expr::Match { scrutinee: scrutinee.expr, arms: arms.arms }, rest: cur }
-}
-
-fn parse_fn_item(src: String, list: TokenList) -> ParseItem {
-    let lbrace: I64 = 123;
-    let mut cur: TokenList = list;
-    if token_is_kw_fn(peek(cur)) == 1 {
-        cur = advance(cur);
-    };
-    let ident: ParseIdent = parse_ident(src, cur);
-    cur = ident.rest;
-    let params: ParseParams = parse_params(src, cur);
-    cur = params.rest;
-    let mut ret_ty: Type = Type::Unit {};
-    let tok: Token = peek(cur);
-    match tok.kind {
-        TokenKind::Arrow {} => {
-            cur = advance(cur);
-            let ty: ParseType = parse_type(src, cur);
-            ret_ty = ty.ty;
-            cur = ty.rest;
-        },
-        _ => {},
-    };
-    if token_is_sym(peek(cur), lbrace) == 1 {
-        let block: ParseBlock = parse_block(src, cur);
-        cur = block.rest;
-        let decl: FnDecl = FnDecl { name: ident.name, params: params.params, ret: ret_ty, body: block.block };
-        ParseItem { item: Item::Fn { decl: decl }, rest: cur }
-    } else {
-        let decl: FnDecl = FnDecl { name: ident.name, params: params.params, ret: ret_ty, body: Block { stmts: StmtList::Nil {} } };
-        ParseItem { item: Item::Fn { decl: decl }, rest: cur }
-    }
-}
-
-fn parse_extern_fn_item(src: String, list: TokenList) -> ParseItem {
-    let semi: I64 = 59;
-    let mut cur: TokenList = list;
-    if token_is_kw_extern(peek(cur)) == 1 {
-        cur = advance(cur);
-    };
-    if token_is_kw_fn(peek(cur)) == 1 {
-        cur = advance(cur);
-    };
-    let ident: ParseIdent = parse_ident(src, cur);
-    cur = ident.rest;
-    let params: ParseParams = parse_params(src, cur);
-    cur = params.rest;
-    let mut ret_ty: Type = Type::Unit {};
-    let tok: Token = peek(cur);
-    match tok.kind {
-        TokenKind::Arrow {} => {
-            cur = advance(cur);
-            let ty: ParseType = parse_type(src, cur);
-            ret_ty = ty.ty;
-            cur = ty.rest;
-        },
-        _ => {},
-    };
-    if token_is_sym(peek(cur), semi) == 1 {
-        cur = advance(cur);
-    };
-    let decl: ExternFn = ExternFn { name: ident.name, params: params.params, ret: ret_ty };
-    ParseItem { item: Item::ExternFn { decl: decl }, rest: cur }
-}
-
-fn parse_struct_item(src: String, list: TokenList) -> ParseItem {
-    let mut cur: TokenList = list;
-    if token_is_kw_struct(peek(cur)) == 1 {
-        cur = advance(cur);
-    };
-    let name: ParseIdent = parse_ident(src, cur);
-    cur = name.rest;
-    let fields: ParseFields = parse_fields(src, cur);
-    cur = fields.rest;
-    let decl: StructDecl = StructDecl { name: name.name, fields: fields.fields };
-    ParseItem { item: Item::Struct { decl: decl }, rest: cur }
-}
-
-fn parse_variants(src: String, list: TokenList) -> ParseVariants {
-    let lbrace: I64 = 123;
-    let rbrace: I64 = 125;
-    let comma: I64 = 44;
-    let mut cur: TokenList = list;
-    if token_is_sym(peek(cur), lbrace) == 1 {
-        cur = advance(cur);
-    };
-    let mut variants: VariantList = VariantList::Nil {};
-    let mut done: I64 = 0;
-    while token_is_sym(peek(cur), rbrace) == 0 && done == 0 {
-        let name: ParseIdent = parse_ident(src, cur);
-        cur = name.rest;
-        let mut fields: FieldList = FieldList::Nil {};
-        if token_is_sym(peek(cur), lbrace) == 1 {
-            let parsed_fields: ParseFields = parse_fields(src, cur);
-            fields = parsed_fields.fields;
-            cur = parsed_fields.rest;
+                cont = false;
+            };
         };
-        let variant: EnumVariant = EnumVariant { name: name.name, fields: fields };
-        variants = VariantList::Cons { head: variant, tail: variants };
-        if token_is_sym(peek(cur), comma) == 1 {
-            cur = advance(cur);
+    };
+    expr
+}
+
+// ---------------------------------------------------------------------------
+// Primary expression
+// ---------------------------------------------------------------------------
+
+fn parse_primary_expr(p: Parser) -> Expr {
+    let tag: I64 = peek_tag(p);
+
+    // Integer literal
+    if tag == TK_INT_LIT() {
+        let tok: Token = bump(p);
+        let text: String = match tok.kind {
+            TokenKind::IntLit { text } => text,
+            _ => { parse_error("unreachable", Span { start: tok.start, end: tok.end }); "" }
+        };
+        return Expr::LitExpr { lit: Literal::IntLiteral { text: text }, span: Span { start: tok.start, end: tok.end } };
+    };
+
+    // Float literal
+    if tag == TK_FLOAT_LIT() {
+        let tok: Token = bump(p);
+        let text: String = match tok.kind {
+            TokenKind::FloatLit { text } => text,
+            _ => { parse_error("unreachable", Span { start: tok.start, end: tok.end }); "" }
+        };
+        return Expr::LitExpr { lit: Literal::FloatLiteral { text: text }, span: Span { start: tok.start, end: tok.end } };
+    };
+
+    // String literal
+    if tag == TK_STR_LIT() {
+        let tok: Token = bump(p);
+        let text: String = match tok.kind {
+            TokenKind::StrLit { text } => text,
+            _ => { parse_error("unreachable", Span { start: tok.start, end: tok.end }); "" }
+        };
+        return Expr::LitExpr { lit: Literal::StrLiteral { text: text }, span: Span { start: tok.start, end: tok.end } };
+    };
+
+    // Char literal
+    if tag == TK_CHAR_LIT() {
+        let tok: Token = bump(p);
+        let value: I64 = match tok.kind {
+            TokenKind::CharLit { value } => value,
+            _ => { parse_error("unreachable", Span { start: tok.start, end: tok.end }); 0 }
+        };
+        return Expr::LitExpr { lit: Literal::CharLiteral { value: value }, span: Span { start: tok.start, end: tok.end } };
+    };
+
+    // true
+    if tag == TK_TRUE() {
+        let tok: Token = bump(p);
+        return Expr::LitExpr { lit: Literal::BoolLiteral { value: true }, span: Span { start: tok.start, end: tok.end } };
+    };
+
+    // false
+    if tag == TK_FALSE() {
+        let tok: Token = bump(p);
+        return Expr::LitExpr { lit: Literal::BoolLiteral { value: false }, span: Span { start: tok.start, end: tok.end } };
+    };
+
+    // Parenthesized expression, unit literal, or tuple
+    if tag == TK_LPAREN() {
+        let open_tok: Token = bump(p);
+        let start: I64 = open_tok.start;
+        // Unit literal: ()
+        if peek_tag(p) == TK_RPAREN() {
+            let end: I64 = expect_tag(p, TK_RPAREN(), "expected ')'");
+            return Expr::LitExpr { lit: Literal::UnitLiteral {}, span: Span { start: start, end: end } };
+        };
+        let first: Expr = parse_expr(p);
+        // Tuple: (a, b, ...)
+        if peek_tag(p) == TK_COMMA() {
+            bump(p);
+            let items: RawPointer<I8> = vec_new();
+            vec_push_expr(items, first);
+            if peek_tag(p) != TK_RPAREN() {
+                let mut tuple_cont: Bool = true;
+                while tuple_cont {
+                    let expr: Expr = parse_expr(p);
+                    vec_push_expr(items, expr);
+                    if peek_tag(p) == TK_COMMA() {
+                        bump(p);
+                        if peek_tag(p) == TK_RPAREN() {
+                            tuple_cont = false;
+                        };
+                    } else {
+                        tuple_cont = false;
+                    };
+                };
+            };
+            let end: I64 = expect_tag(p, TK_RPAREN(), "expected ')' after tuple");
+            return Expr::TupleExpr { items: items, span: Span { start: start, end: end } };
+        };
+        // Parenthesized expression
+        expect_tag(p, TK_RPAREN(), "expected ')' after expression");
+        return first;
+    };
+
+    // Identifier / path / struct literal
+    if tag == TK_IDENT() {
+        let path: RawPointer<I8> = parse_path(p);
+        let path_start_tok: Token = peek(p);
+        let start: I64 = path_start_tok.start;
+        // Check for struct literal: Path { ... }
+        if peek_tag(p) == TK_LBRACE() && looks_like_struct_literal(p) {
+            bump(p); // consume '{'
+            let fields: RawPointer<I8> = vec_new();
+            if peek_tag(p) != TK_RBRACE() {
+                let mut sl_cont: Bool = true;
+                while sl_cont {
+                    let fname: String = expect_ident(p, "expected field name in struct literal");
+                    expect_tag(p, TK_COLON(), "expected ':' in struct literal");
+                    let fvalue: Expr = parse_expr(p);
+                    vec_push_slfield(fields, StructLitField { name: fname, value: fvalue });
+                    if peek_tag(p) == TK_COMMA() {
+                        bump(p);
+                        if peek_tag(p) == TK_RBRACE() {
+                            sl_cont = false;
+                        };
+                    } else {
+                        sl_cont = false;
+                    };
+                };
+            };
+            let end: I64 = expect_tag(p, TK_RBRACE(), "expected '}' after struct literal");
+            // Get the span start from the first path segment
+            return Expr::StructLitExpr { path: path, fields: fields, span: Span { start: start, end: end } };
+        };
+        // Just a path expression
+        let end_tok: Token = peek(p);
+        let end: I64 = end_tok.start;
+        return Expr::PathExpr { path: path, span: Span { start: start, end: end } };
+    };
+
+    // Block expression handled in parse_expr already, but just in case
+    if tag == TK_LBRACE() {
+        let block: Block = parse_block(p);
+        return Expr::BlockExpr { block: block };
+    };
+
+    // Error
+    let tok: Token = peek(p);
+    parse_error(string_concat("expected expression, got ", token_kind_name(tok.kind)), Span { start: tok.start, end: tok.end });
+    // unreachable, but need a return value for type checker
+    Expr::LitExpr { lit: Literal::UnitLiteral {}, span: Span { start: 0, end: 0 } }
+}
+
+// ---------------------------------------------------------------------------
+// Struct literal disambiguation
+// ---------------------------------------------------------------------------
+
+fn looks_like_struct_literal(p: Parser) -> Bool {
+    // Current token should be LBrace
+    // Look ahead: { } or { ident : ... }
+    let t1: I64 = peek_tag_at(p, 0); // should be LBrace
+    let t2: I64 = peek_tag_at(p, 1);
+    if t2 == TK_RBRACE() {
+        true
+    } else {
+        if t2 == TK_IDENT() {
+            let t3: I64 = peek_tag_at(p, 2);
+            t3 == TK_COLON()
         } else {
-            done = 1;
+            false
         }
-    };
-    if token_is_sym(peek(cur), rbrace) == 1 {
-        cur = advance(cur);
-    };
-    ParseVariants { variants: variant_reverse(variants), rest: cur }
-}
-
-fn parse_enum_item(src: String, list: TokenList) -> ParseItem {
-    let mut cur: TokenList = list;
-    if token_is_kw_enum(peek(cur)) == 1 {
-        cur = advance(cur);
-    };
-    let name: ParseIdent = parse_ident(src, cur);
-    cur = name.rest;
-    let variants: ParseVariants = parse_variants(src, cur);
-    cur = variants.rest;
-    let decl: EnumDecl = EnumDecl { name: name.name, variants: variants.variants };
-    ParseItem { item: Item::Enum { decl: decl }, rest: cur }
-}
-
-fn parse_item(src: String, list: TokenList) -> ParseItem {
-    let tok: Token = peek(list);
-    if token_is_kw_extern(tok) == 1 {
-        return parse_extern_fn_item(src, list);
-    };
-    if token_is_kw_fn(tok) == 1 {
-        return parse_fn_item(src, list);
-    };
-    if token_is_kw_struct(tok) == 1 {
-        return parse_struct_item(src, list);
-    };
-    if token_is_kw_enum(tok) == 1 {
-        return parse_enum_item(src, list);
-    };
-    let next: TokenList = advance(list);
-    let span: Span = Span { start: tok.start, end: tok.end };
-    ParseItem { item: Item::Unknown { span: span }, rest: next }
-}
-
-fn parse_items(src: String, list: TokenList) -> ItemList {
-    match list {
-        TokenList::Nil {} => ItemList::Nil {},
-        _ => {
-            let parsed: ParseItem = parse_item(src, list);
-            let tail: ItemList = parse_items(src, parsed.rest);
-            ItemList::Cons { head: parsed.item, tail: tail }
-        },
     }
 }
 
-fn parse_module(src: String) -> Module {
-    let toks: TokenList = lex_list(src);
-    Module { items: parse_items(src, toks) }
+// ---------------------------------------------------------------------------
+// Parse pattern
+// ---------------------------------------------------------------------------
+
+fn parse_pattern(p: Parser) -> Pattern {
+    let tag: I64 = peek_tag(p);
+    if tag == TK_IDENT() {
+        let tok: Token = bump(p);
+        let name: String = token_ident_name(tok);
+        // Wildcard: _
+        if string_eq(name, "_") == 1 {
+            return Pattern::WildcardPat { span: Span { start: tok.start, end: tok.end } };
+        };
+        // Path: ident (:: ident)*
+        let segments: RawPointer<I8> = vec_new();
+        vec_push_str(segments, name);
+        while peek_tag(p) == TK_COLONCOLON() {
+            bump(p);
+            let seg: String = expect_ident(p, "expected identifier after '::' in pattern");
+            vec_push_str(segments, seg);
+        };
+        // Struct pattern: Path { ... }
+        if peek_tag(p) == TK_LBRACE() {
+            bump(p); // consume '{'
+            let fields: RawPointer<I8> = parse_pattern_fields(p);
+            let end: I64 = expect_tag(p, TK_RBRACE(), "expected '}' in pattern");
+            return Pattern::StructPat { path: segments, fields: fields, span: Span { start: tok.start, end: end } };
+        };
+        // Simple path pattern
+        let end_tok: Token = peek(p);
+        let end: I64 = end_tok.start;
+        Pattern::PathPat { path: segments, span: Span { start: tok.start, end: end } }
+    } else {
+        let tok: Token = peek(p);
+        parse_error(string_concat("expected pattern, got ", token_kind_name(tok.kind)), Span { start: tok.start, end: tok.end });
+        Pattern::WildcardPat { span: Span { start: 0, end: 0 } }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Parse pattern fields
+// ---------------------------------------------------------------------------
+
+fn parse_pattern_fields(p: Parser) -> RawPointer<I8> {
+    let fields: RawPointer<I8> = vec_new();
+    while peek_tag(p) != TK_RBRACE() && !is_eof(p) {
+        let name: String = expect_ident(p, "expected field name in pattern");
+        let fstart_tok: Token = peek(p);
+        let fstart: I64 = fstart_tok.start;
+        let binding: Option<String> = if peek_tag(p) == TK_COLON() {
+            bump(p);
+            let bind: String = expect_ident(p, "expected binding name in pattern");
+            if string_eq(bind, "_") == 1 {
+                Option::None {}
+            } else {
+                Option::Some { value: bind }
+            }
+        } else {
+            Option::Some { value: name }
+        };
+        let fend_tok: Token = peek(p);
+        let fend: I64 = fend_tok.start;
+        vec_push_pfield(fields, PatternField { name: name, binding: binding, span: Span { start: fstart, end: fend } });
+        if peek_tag(p) == TK_COMMA() {
+            bump(p);
+        } else {
+            // end of pattern fields
+        };
+    };
+    fields
+}
+
+// ---------------------------------------------------------------------------
+// Span helpers for expressions
+// ---------------------------------------------------------------------------
+
+fn expr_span_start(e: Expr) -> I64 {
+    match e {
+        Expr::LetExpr { name, mutable, ty, value, span } => span.start,
+        Expr::IfExpr { cond, then_branch, else_branch, span } => span.start,
+        Expr::WhileExpr { cond, body, span } => span.start,
+        Expr::MatchExpr { scrutinee, arms, span } => span.start,
+        Expr::AssignExpr { target, value, span } => span.start,
+        Expr::BinaryExpr { op, left, right, span } => span.start,
+        Expr::UnaryExpr { op, operand, span } => span.start,
+        Expr::CallExpr { callee, args, span } => span.start,
+        Expr::FieldExpr { base, name, span } => span.start,
+        Expr::PathExpr { path, span } => span.start,
+        Expr::StructLitExpr { path, fields, span } => span.start,
+        Expr::TupleExpr { items, span } => span.start,
+        Expr::LitExpr { lit, span } => span.start,
+        Expr::BlockExpr { block } => block.span.start,
+        Expr::BreakExpr { span } => span.start,
+        Expr::ContinueExpr { span } => span.start
+    }
+}
+
+fn expr_span_end(e: Expr) -> I64 {
+    match e {
+        Expr::LetExpr { name, mutable, ty, value, span } => span.end,
+        Expr::IfExpr { cond, then_branch, else_branch, span } => span.end,
+        Expr::WhileExpr { cond, body, span } => span.end,
+        Expr::MatchExpr { scrutinee, arms, span } => span.end,
+        Expr::AssignExpr { target, value, span } => span.end,
+        Expr::BinaryExpr { op, left, right, span } => span.end,
+        Expr::UnaryExpr { op, operand, span } => span.end,
+        Expr::CallExpr { callee, args, span } => span.end,
+        Expr::FieldExpr { base, name, span } => span.end,
+        Expr::PathExpr { path, span } => span.end,
+        Expr::StructLitExpr { path, fields, span } => span.end,
+        Expr::TupleExpr { items, span } => span.end,
+        Expr::LitExpr { lit, span } => span.end,
+        Expr::BlockExpr { block } => block.span.end,
+        Expr::BreakExpr { span } => span.end,
+        Expr::ContinueExpr { span } => span.end
+    }
+}
+
+fn pattern_span_start(pat: Pattern) -> I64 {
+    match pat {
+        Pattern::WildcardPat { span } => span.start,
+        Pattern::PathPat { path, span } => span.start,
+        Pattern::StructPat { path, fields, span } => span.start
+    }
 }

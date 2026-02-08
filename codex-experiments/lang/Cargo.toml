@@ -10,5 +10,8 @@ crate-type = ["staticlib"]
 
 [dependencies]
 inkwell = { version = "0.8.0", features = ["llvm19-1"] }
+libc = "0.2.180"
+llvm-sys = "191.1.0"
+gc-library = { path = "../../claude-experiments/gc-library" }
 
 [dev-dependencies]

@@ -1,0 +1,874 @@
+use ast::Span;
+use ast::Type;
+use ast::Param;
+use ast::ParamList;
+use ast::Field;
+use ast::FieldList;
+use ast::VariantList;
+use ast::PathList;
+use ast::Item;
+use ast::ItemList;
+use ast::FnDecl;
+use ast::Module;
+use ast::Stmt;
+use ast::StmtList;
+use ast::Block;
+use ast::Expr;
+use ast::ExprListOpt;
+use ast::FieldInitList;
+use ast::Pattern;
+use ast::PatFieldList;
+use ast::MatchArmList;
+use ast::BinOp;
+use lexer::string_byte_at;
+
+enum Ty { I64 {}, Bool {}, Unit {}, Named { name: Span } }
+
+struct ParamTy { name: Span, ty: Ty }
+enum ParamTyList { Nil {}, Cons { head: ParamTy, tail: ParamTyList } }
+
+struct FieldTy { name: Span, ty: Ty }
+enum FieldTyList { Nil {}, Cons { head: FieldTy, tail: FieldTyList } }
+
+struct VariantInfo { name: Span, fields: FieldTyList }
+enum VariantInfoList { Nil {}, Cons { head: VariantInfo, tail: VariantInfoList } }
+
+struct StructInfo { name: Span, fields: FieldTyList }
+enum StructInfoList { Nil {}, Cons { head: StructInfo, tail: StructInfoList } }
+
+struct EnumInfo { name: Span, variants: VariantInfoList }
+enum EnumInfoList { Nil {}, Cons { head: EnumInfo, tail: EnumInfoList } }
+
+struct FnSig { name: Span, params: ParamTyList, ret: Ty }
+enum FnSigList { Nil {}, Cons { head: FnSig, tail: FnSigList } }
+
+struct Env { fns: FnSigList, structs: StructInfoList, enums: EnumInfoList }
+
+struct Local { name: Span, ty: Ty, mutable: I64 }
+enum LocalList { Nil {}, Cons { head: Local, tail: LocalList } }
+
+struct CheckResult { ty: Ty, errors: I64 }
+struct CheckStmt { ty: Ty, locals: LocalList, errors: I64 }
+struct CheckBlock { ty: Ty, locals: LocalList, errors: I64 }
+
+fn span_len(span: Span) -> I64 {
+    span.end - span.start
+}
+
+fn span_eq(src: String, a: Span, b: Span) -> I64 {
+    let one: I64 = 1;
+    let zero: I64 = 0;
+    let len_a: I64 = span_len(a);
+    let len_b: I64 = span_len(b);
+    if len_a != len_b { return zero; };
+    let mut i: I64 = 0;
+    while i < len_a {
+        if string_byte_at(src, a.start + i) != string_byte_at(src, b.start + i) { return zero; };
+        i = i + one;
+    };
+    one
+}
+
+fn span_is_i64(src: String, span: Span) -> I64 {
+    let one: I64 = 1;
+    let zero: I64 = 0;
+    let i: I64 = 73;
+    let six: I64 = 54;
+    let four: I64 = 52;
+    if span_len(span) != 3 { return zero; };
+    if string_byte_at(src, span.start) == i {
+        if string_byte_at(src, span.start + one) == six {
+            if string_byte_at(src, span.start + 2) == four { one } else { zero }
+        } else {
+            zero
+        }
+    } else {
+        zero
+    }
+}
+
+fn span_is_bool(src: String, span: Span) -> I64 {
+    let one: I64 = 1;
+    let zero: I64 = 0;
+    let b: I64 = 66;
+    let o: I64 = 111;
+    let l: I64 = 108;
+    if span_len(span) != 4 { return zero; };
+    if string_byte_at(src, span.start) == b {
+        if string_byte_at(src, span.start + one) == o {
+            if string_byte_at(src, span.start + 2) == o {
+                if string_byte_at(src, span.start + 3) == l { one } else { zero }
+            } else {
+                zero
+            }
+        } else {
+            zero
+        }
+    } else {
+        zero
+    }
+}
+
+fn ty_from_ast(src: String, ty: Type) -> Ty {
+    match ty {
+        Type::Unit {} => Ty::Unit {},
+        Type::Path { path } => {
+            let name: Span = path_last(path);
+            if span_is_i64(src, name) == 1 { return Ty::I64 {}; };
+            if span_is_bool(src, name) == 1 { return Ty::Bool {}; };
+            Ty::Named { name: name }
+        },
+    }
+}
+
+fn ty_eq(src: String, a: Ty, b: Ty) -> I64 {
+    let one: I64 = 1;
+    let zero: I64 = 0;
+    match a {
+        Ty::I64 {} => match b { Ty::I64 {} => one, _ => zero },
+        Ty::Bool {} => match b { Ty::Bool {} => one, _ => zero },
+        Ty::Unit {} => match b { Ty::Unit {} => one, _ => zero },
+        Ty::Named { name } => match b {
+            Ty::Named { name: other } => span_eq(src, name, other),
+            _ => zero,
+        },
+    }
+}
+
+fn path_len(path: PathList) -> I64 {
+    let zero: I64 = 0;
+    let one: I64 = 1;
+    match path {
+        PathList::Nil {} => zero,
+        PathList::Cons { head, tail } => one + path_len(tail),
+    }
+}
+
+fn path_head(path: PathList) -> Span {
+    match path {
+        PathList::Nil {} => Span { start: 0, end: 0 },
+        PathList::Cons { head, tail } => head,
+    }
+}
+
+fn path_second(path: PathList) -> Span {
+    match path {
+        PathList::Nil {} => Span { start: 0, end: 0 },
+        PathList::Cons { head, tail } => match tail {
+            PathList::Nil {} => Span { start: 0, end: 0 },
+            PathList::Cons { head: head2, tail: tail2 } => head2,
+        },
+    }
+}
+
+fn path_last(path: PathList) -> Span {
+    match path {
+        PathList::Nil {} => Span { start: 0, end: 0 },
+        PathList::Cons { head, tail } => match tail {
+            PathList::Nil {} => head,
+            _ => path_last(tail),
+        },
+    }
+}
+
+fn path_second_last(path: PathList) -> Span {
+    match path {
+        PathList::Nil {} => Span { start: 0, end: 0 },
+        PathList::Cons { head, tail } => match tail {
+            PathList::Nil {} => Span { start: 0, end: 0 },
+            PathList::Cons { head: head2, tail: tail2 } => match tail2 {
+                PathList::Nil {} => head,
+                _ => path_second_last(tail),
+            },
+        },
+    }
+}
+
+fn param_ty_reverse_inner(list: ParamTyList, acc: ParamTyList) -> ParamTyList {
+    match list {
+        ParamTyList::Nil {} => acc,
+        ParamTyList::Cons { head, tail } => {
+            let next: ParamTyList = ParamTyList::Cons { head: head, tail: acc };
+            param_ty_reverse_inner(tail, next)
+        },
+    }
+}
+
+fn param_ty_reverse(list: ParamTyList) -> ParamTyList {
+    param_ty_reverse_inner(list, ParamTyList::Nil {})
+}
+
+fn field_ty_reverse_inner(list: FieldTyList, acc: FieldTyList) -> FieldTyList {
+    match list {
+        FieldTyList::Nil {} => acc,
+        FieldTyList::Cons { head, tail } => {
+            let next: FieldTyList = FieldTyList::Cons { head: head, tail: acc };
+            field_ty_reverse_inner(tail, next)
+        },
+    }
+}
+
+fn field_ty_reverse(list: FieldTyList) -> FieldTyList {
+    field_ty_reverse_inner(list, FieldTyList::Nil {})
+}
+
+fn variant_info_reverse_inner(list: VariantInfoList, acc: VariantInfoList) -> VariantInfoList {
+    match list {
+        VariantInfoList::Nil {} => acc,
+        VariantInfoList::Cons { head, tail } => {
+            let next: VariantInfoList = VariantInfoList::Cons { head: head, tail: acc };
+            variant_info_reverse_inner(tail, next)
+        },
+    }
+}
+
+fn variant_info_reverse(list: VariantInfoList) -> VariantInfoList {
+    variant_info_reverse_inner(list, VariantInfoList::Nil {})
+}
+
+fn struct_info_reverse_inner(list: StructInfoList, acc: StructInfoList) -> StructInfoList {
+    match list {
+        StructInfoList::Nil {} => acc,
+        StructInfoList::Cons { head, tail } => {
+            let next: StructInfoList = StructInfoList::Cons { head: head, tail: acc };
+            struct_info_reverse_inner(tail, next)
+        },
+    }
+}
+
+fn struct_info_reverse(list: StructInfoList) -> StructInfoList {
+    struct_info_reverse_inner(list, StructInfoList::Nil {})
+}
+
+fn enum_info_reverse_inner(list: EnumInfoList, acc: EnumInfoList) -> EnumInfoList {
+    match list {
+        EnumInfoList::Nil {} => acc,
+        EnumInfoList::Cons { head, tail } => {
+            let next: EnumInfoList = EnumInfoList::Cons { head: head, tail: acc };
+            enum_info_reverse_inner(tail, next)
+        },
+    }
+}
+
+fn enum_info_reverse(list: EnumInfoList) -> EnumInfoList {
+    enum_info_reverse_inner(list, EnumInfoList::Nil {})
+}
+
+fn fn_sig_reverse_inner(list: FnSigList, acc: FnSigList) -> FnSigList {
+    match list {
+        FnSigList::Nil {} => acc,
+        FnSigList::Cons { head, tail } => {
+            let next: FnSigList = FnSigList::Cons { head: head, tail: acc };
+            fn_sig_reverse_inner(tail, next)
+        },
+    }
+}
+
+fn fn_sig_reverse(list: FnSigList) -> FnSigList {
+    fn_sig_reverse_inner(list, FnSigList::Nil {})
+}
+
+fn convert_params(src: String, params: ParamList) -> ParamTyList {
+    match params {
+        ParamList::Nil {} => ParamTyList::Nil {},
+        ParamList::Cons { head, tail } => {
+            let ty: Ty = ty_from_ast(src, head.ty);
+            let param: ParamTy = ParamTy { name: head.name, ty: ty };
+            let rest: ParamTyList = convert_params(src, tail);
+            ParamTyList::Cons { head: param, tail: rest }
+        },
+    }
+}
+
+fn convert_fields(src: String, fields: FieldList) -> FieldTyList {
+    match fields {
+        FieldList::Nil {} => FieldTyList::Nil {},
+        FieldList::Cons { head, tail } => {
+            let ty: Ty = ty_from_ast(src, head.ty);
+            let field: FieldTy = FieldTy { name: head.name, ty: ty };
+            let rest: FieldTyList = convert_fields(src, tail);
+            FieldTyList::Cons { head: field, tail: rest }
+        },
+    }
+}
+
+fn convert_variants(src: String, variants: VariantList) -> VariantInfoList {
+    match variants {
+        VariantList::Nil {} => VariantInfoList::Nil {},
+        VariantList::Cons { head, tail } => {
+            let fields: FieldTyList = convert_fields(src, head.fields);
+            let variant: VariantInfo = VariantInfo { name: head.name, fields: fields };
+            let rest: VariantInfoList = convert_variants(src, tail);
+            VariantInfoList::Cons { head: variant, tail: rest }
+        },
+    }
+}
+
+fn collect_env(src: String, items: ItemList) -> Env {
+    Env {
+        fns: collect_fns(src, items),
+        structs: collect_structs(src, items),
+        enums: collect_enums(src, items),
+    }
+}
+
+fn collect_fns(src: String, items: ItemList) -> FnSigList {
+    match items {
+        ItemList::Nil {} => FnSigList::Nil {},
+        ItemList::Cons { head, tail } => {
+            let rest: FnSigList = collect_fns(src, tail);
+            match head {
+                Item::Fn { decl } => {
+                    let sig: FnSig = FnSig {
+                        name: decl.name,
+                        params: convert_params(src, decl.params),
+                        ret: ty_from_ast(src, decl.ret),
+                    };
+                    FnSigList::Cons { head: sig, tail: rest }
+                },
+                Item::ExternFn { decl } => {
+                    let sig: FnSig = FnSig {
+                        name: decl.name,
+                        params: convert_params(src, decl.params),
+                        ret: ty_from_ast(src, decl.ret),
+                    };
+                    FnSigList::Cons { head: sig, tail: rest }
+                },
+                _ => rest,
+            }
+        },
+    }
+}
+
+fn collect_structs(src: String, items: ItemList) -> StructInfoList {
+    match items {
+        ItemList::Nil {} => StructInfoList::Nil {},
+        ItemList::Cons { head, tail } => {
+            let rest: StructInfoList = collect_structs(src, tail);
+            match head {
+                Item::Struct { decl } => {
+                    let info: StructInfo = StructInfo { name: decl.name, fields: convert_fields(src, decl.fields) };
+                    StructInfoList::Cons { head: info, tail: rest }
+                },
+                _ => rest,
+            }
+        },
+    }
+}
+
+fn collect_enums(src: String, items: ItemList) -> EnumInfoList {
+    match items {
+        ItemList::Nil {} => EnumInfoList::Nil {},
+        ItemList::Cons { head, tail } => {
+            let rest: EnumInfoList = collect_enums(src, tail);
+            match head {
+                Item::Enum { decl } => {
+                    let info: EnumInfo = EnumInfo { name: decl.name, variants: convert_variants(src, decl.variants) };
+                    EnumInfoList::Cons { head: info, tail: rest }
+                },
+                _ => rest,
+            }
+        },
+    }
+}
+
+struct FindFn { found: I64, sig: FnSig }
+struct FindStruct { found: I64, info: StructInfo }
+struct FindEnum { found: I64, info: EnumInfo }
+struct FindVariant { found: I64, info: VariantInfo }
+struct FindField { found: I64, info: FieldTy }
+struct FindLocal { found: I64, ty: Ty }
+
+fn find_fn(src: String, list: FnSigList, name: Span) -> FindFn {
+    let empty: FnSig = FnSig { name: Span { start: 0, end: 0 }, params: ParamTyList::Nil {}, ret: Ty::Unit {} };
+    match list {
+        FnSigList::Nil {} => FindFn { found: 0, sig: empty },
+        FnSigList::Cons { head, tail } => {
+            if span_eq(src, head.name, name) == 1 {
+                FindFn { found: 1, sig: head }
+            } else {
+                find_fn(src, tail, name)
+            }
+        },
+    }
+}
+
+fn find_struct(src: String, list: StructInfoList, name: Span) -> FindStruct {
+    let empty: StructInfo = StructInfo { name: Span { start: 0, end: 0 }, fields: FieldTyList::Nil {} };
+    match list {
+        StructInfoList::Nil {} => FindStruct { found: 0, info: empty },
+        StructInfoList::Cons { head, tail } => {
+            if span_eq(src, head.name, name) == 1 {
+                FindStruct { found: 1, info: head }
+            } else {
+                find_struct(src, tail, name)
+            }
+        },
+    }
+}
+
+fn find_enum(src: String, list: EnumInfoList, name: Span) -> FindEnum {
+    let empty: EnumInfo = EnumInfo { name: Span { start: 0, end: 0 }, variants: VariantInfoList::Nil {} };
+    match list {
+        EnumInfoList::Nil {} => FindEnum { found: 0, info: empty },
+        EnumInfoList::Cons { head, tail } => {
+            if span_eq(src, head.name, name) == 1 {
+                FindEnum { found: 1, info: head }
+            } else {
+                find_enum(src, tail, name)
+            }
+        },
+    }
+}
+
+fn find_variant(src: String, list: VariantInfoList, name: Span) -> FindVariant {
+    let empty: VariantInfo = VariantInfo { name: Span { start: 0, end: 0 }, fields: FieldTyList::Nil {} };
+    match list {
+        VariantInfoList::Nil {} => FindVariant { found: 0, info: empty },
+        VariantInfoList::Cons { head, tail } => {
+            if span_eq(src, head.name, name) == 1 {
+                FindVariant { found: 1, info: head }
+            } else {
+                find_variant(src, tail, name)
+            }
+        },
+    }
+}
+
+fn find_field(src: String, list: FieldTyList, name: Span) -> FindField {
+    let empty: FieldTy = FieldTy { name: Span { start: 0, end: 0 }, ty: Ty::Unit {} };
+    match list {
+        FieldTyList::Nil {} => FindField { found: 0, info: empty },
+        FieldTyList::Cons { head, tail } => {
+            if span_eq(src, head.name, name) == 1 {
+                FindField { found: 1, info: head }
+            } else {
+                find_field(src, tail, name)
+            }
+        },
+    }
+}
+
+fn find_local(src: String, list: LocalList, name: Span) -> FindLocal {
+    match list {
+        LocalList::Nil {} => FindLocal { found: 0, ty: Ty::Unit {} },
+        LocalList::Cons { head, tail } => {
+            if span_eq(src, head.name, name) == 1 {
+                FindLocal { found: 1, ty: head.ty }
+            } else {
+                find_local(src, tail, name)
+            }
+        },
+    }
+}
+
+fn locals_from_params(params: ParamTyList) -> LocalList {
+    match params {
+        ParamTyList::Nil {} => LocalList::Nil {},
+        ParamTyList::Cons { head, tail } => {
+            let tail_locals: LocalList = locals_from_params(tail);
+            let local: Local = Local { name: head.name, ty: head.ty, mutable: 0 };
+            LocalList::Cons { head: local, tail: tail_locals }
+        },
+    }
+}
+
+fn typecheck_module(src: String, mod_ast: Module) -> I64 {
+    0
+}
+
+fn check_items(src: String, env: Env, items: ItemList) -> CheckResult {
+    let zero: I64 = 0;
+    match items {
+        ItemList::Nil {} => CheckResult { ty: Ty::Unit {}, errors: zero },
+        ItemList::Cons { head, tail } => {
+            let head_res: CheckResult = check_item(src, env, head);
+            let tail_res: CheckResult = check_items(src, env, tail);
+            CheckResult { ty: Ty::Unit {}, errors: head_res.errors + tail_res.errors }
+        },
+    }
+}
+
+fn check_item(src: String, env: Env, item: Item) -> CheckResult {
+    match item {
+        Item::Fn { decl } => {
+            let res: CheckResult = check_fn(src, env, decl);
+            CheckResult { ty: Ty::Unit {}, errors: res.errors }
+        },
+        _ => CheckResult { ty: Ty::Unit {}, errors: 0 },
+    }
+}
+
+fn check_fn(src: String, env: Env, decl: FnDecl) -> CheckResult {
+    let params: ParamTyList = convert_params(src, decl.params);
+    let locals: LocalList = locals_from_params(params);
+    let ret_ty: Ty = ty_from_ast(src, decl.ret);
+    let checked: CheckBlock = check_block(src, env, locals, decl.body, ret_ty);
+    CheckResult { ty: Ty::Unit {}, errors: checked.errors }
+}
+
+fn check_block(src: String, env: Env, locals: LocalList, block: Block, ret_ty: Ty) -> CheckBlock {
+    let res: CheckStmt = check_stmt_list(src, env, locals, block.stmts, ret_ty);
+    CheckBlock { ty: res.ty, locals: res.locals, errors: res.errors }
+}
+
+fn check_stmt_list(src: String, env: Env, locals: LocalList, stmts: StmtList, ret_ty: Ty) -> CheckStmt {
+    match stmts {
+        StmtList::Nil {} => CheckStmt { ty: Ty::Unit {}, locals: locals, errors: 0 },
+        StmtList::Cons { head, tail } => {
+            let head_res: CheckStmt = check_stmt(src, env, locals, head, ret_ty);
+            match tail {
+                StmtList::Nil {} => CheckStmt { ty: head_res.ty, locals: head_res.locals, errors: head_res.errors },
+                _ => {
+                    let tail_res: CheckStmt = check_stmt_list(src, env, head_res.locals, tail, ret_ty);
+                    CheckStmt { ty: tail_res.ty, locals: tail_res.locals, errors: head_res.errors + tail_res.errors }
+                },
+            }
+        },
+    }
+}
+
+fn check_stmt(src: String, env: Env, locals: LocalList, stmt: Stmt, ret_ty: Ty) -> CheckStmt {
+    let one: I64 = 1;
+    match stmt {
+        Stmt::Let { name, mutable, ty, value } => {
+            let value_res: CheckResult = check_expr(src, env, locals, value);
+            let mut errors: I64 = value_res.errors;
+            let mut final_ty: Ty = value_res.ty;
+            match ty {
+                Type::Unit {} => {},
+                _ => {
+                    let ann: Ty = ty_from_ast(src, ty);
+                    if ty_eq(src, ann, value_res.ty) == 0 { errors = errors + one; };
+                    final_ty = ann;
+                },
+            };
+            let local: Local = Local { name: name, ty: final_ty, mutable: mutable };
+            let next_locals: LocalList = LocalList::Cons { head: local, tail: locals };
+            CheckStmt { ty: Ty::Unit {}, locals: next_locals, errors: errors }
+        },
+        Stmt::Expr { expr } => {
+            let res: CheckResult = check_expr(src, env, locals, expr);
+            CheckStmt { ty: res.ty, locals: locals, errors: res.errors }
+        },
+        Stmt::Return { expr } => {
+            let res: CheckResult = check_expr(src, env, locals, expr);
+            let mut errors: I64 = res.errors;
+            if ty_eq(src, res.ty, ret_ty) == 0 { errors = errors + one; };
+            CheckStmt { ty: Ty::Unit {}, locals: locals, errors: errors }
+        },
+    }
+}
+
+fn check_expr(src: String, env: Env, locals: LocalList, expr: Expr) -> CheckResult {
+    let zero: I64 = 0;
+    let one: I64 = 1;
+    let two: I64 = 2;
+    match expr {
+        Expr::Int { span } => CheckResult { ty: Ty::I64 {}, errors: zero },
+        Expr::Bool { value } => CheckResult { ty: Ty::Bool {}, errors: zero },
+        Expr::Path { path } => {
+            let name: Span = path_last(path);
+            let found: FindLocal = find_local(src, locals, name);
+            if found.found == 1 {
+                CheckResult { ty: found.ty, errors: zero }
+            } else {
+                CheckResult { ty: Ty::Unit {}, errors: zero }
+            }
+        },
+        Expr::Call { callee, args } => {
+            match callee {
+                Expr::Path { path } => {
+                    if path_len(path) == zero {
+                        let errors: I64 = check_args(src, env, locals, ParamTyList::Nil {}, args) + one;
+                        CheckResult { ty: Ty::Unit {}, errors: errors }
+                    } else {
+                        let name: Span = path_last(path);
+                        let found: FindFn = find_fn(src, env.fns, name);
+                        if found.found == 1 {
+                            let errors: I64 = check_args(src, env, locals, found.sig.params, args);
+                            CheckResult { ty: found.sig.ret, errors: errors }
+                        } else {
+                            let errors: I64 = check_args(src, env, locals, ParamTyList::Nil {}, args) + one;
+                            CheckResult { ty: Ty::Unit {}, errors: errors }
+                        }
+                    }
+                },
+                _ => {
+                    let errors: I64 = check_args(src, env, locals, ParamTyList::Nil {}, args) + one;
+                    CheckResult { ty: Ty::Unit {}, errors: errors }
+                },
+            }
+        },
+        Expr::Field { base, name } => {
+            let base_res: CheckResult = check_expr(src, env, locals, base);
+            let mut errors: I64 = base_res.errors;
+            match base_res.ty {
+                Ty::Named { name: ty_name } => {
+                    let s: FindStruct = find_struct(src, env.structs, ty_name);
+                    if s.found == 1 {
+                        let f: FindField = find_field(src, s.info.fields, name);
+                        if f.found == 1 {
+                            CheckResult { ty: f.info.ty, errors: errors }
+                        } else {
+                            errors = errors + one;
+                            CheckResult { ty: Ty::Unit {}, errors: errors }
+                        }
+                    } else {
+                        errors = errors + one;
+                        CheckResult { ty: Ty::Unit {}, errors: errors }
+                    }
+                },
+                _ => {
+                    errors = errors + one;
+                    CheckResult { ty: Ty::Unit {}, errors: errors }
+                },
+            }
+        },
+        Expr::StructInit { path, fields } => {
+            let len: I64 = path_len(path);
+            if len >= two {
+                let enum_name: Span = path_second_last(path);
+                let variant_name: Span = path_last(path);
+                let e: FindEnum = find_enum(src, env.enums, enum_name);
+                if e.found == 1 {
+                    let v: FindVariant = find_variant(src, e.info.variants, variant_name);
+                    if v.found == 1 {
+                        let errors: I64 = check_struct_inits(src, env, locals, v.info.fields, fields);
+                        return CheckResult { ty: Ty::Named { name: enum_name }, errors: errors };
+                    }
+                }
+            };
+            if len >= one {
+                let name: Span = path_last(path);
+                let s: FindStruct = find_struct(src, env.structs, name);
+                if s.found == 1 {
+                    let errors: I64 = check_struct_inits(src, env, locals, s.info.fields, fields);
+                    CheckResult { ty: Ty::Named { name: name }, errors: errors }
+                } else {
+                    let errors: I64 = check_struct_inits(src, env, locals, FieldTyList::Nil {}, fields) + one;
+                    CheckResult { ty: Ty::Unit {}, errors: errors }
+                }
+            } else {
+                let errors: I64 = check_struct_inits(src, env, locals, FieldTyList::Nil {}, fields) + one;
+                CheckResult { ty: Ty::Unit {}, errors: errors }
+            }
+        },
+        Expr::Binary { op, left, right } => {
+            let left_res: CheckResult = check_expr(src, env, locals, left);
+            let right_res: CheckResult = check_expr(src, env, locals, right);
+            let mut errors: I64 = left_res.errors + right_res.errors;
+            match op {
+                BinOp::Add {} => {
+                    if ty_eq(src, left_res.ty, right_res.ty) == 0 { errors = errors + one; };
+                    CheckResult { ty: left_res.ty, errors: errors }
+                },
+                BinOp::Sub {} => {
+                    if ty_eq(src, left_res.ty, right_res.ty) == 0 { errors = errors + one; };
+                    CheckResult { ty: left_res.ty, errors: errors }
+                },
+                BinOp::Mul {} => {
+                    if ty_eq(src, left_res.ty, right_res.ty) == 0 { errors = errors + one; };
+                    CheckResult { ty: left_res.ty, errors: errors }
+                },
+                BinOp::Div {} => {
+                    if ty_eq(src, left_res.ty, right_res.ty) == 0 { errors = errors + one; };
+                    CheckResult { ty: left_res.ty, errors: errors }
+                },
+                BinOp::Lt {} => {
+                    if ty_eq(src, left_res.ty, right_res.ty) == 0 { errors = errors + one; };
+                    CheckResult { ty: Ty::Bool {}, errors: errors }
+                },
+                BinOp::Le {} => {
+                    if ty_eq(src, left_res.ty, right_res.ty) == 0 { errors = errors + one; };
+                    CheckResult { ty: Ty::Bool {}, errors: errors }
+                },
+                BinOp::Gt {} => {
+                    if ty_eq(src, left_res.ty, right_res.ty) == 0 { errors = errors + one; };
+                    CheckResult { ty: Ty::Bool {}, errors: errors }
+                },
+                BinOp::Ge {} => {
+                    if ty_eq(src, left_res.ty, right_res.ty) == 0 { errors = errors + one; };
+                    CheckResult { ty: Ty::Bool {}, errors: errors }
+                },
+                BinOp::Eq {} => {
+                    if ty_eq(src, left_res.ty, right_res.ty) == 0 { errors = errors + one; };
+                    CheckResult { ty: Ty::Bool {}, errors: errors }
+                },
+                BinOp::Ne {} => {
+                    if ty_eq(src, left_res.ty, right_res.ty) == 0 { errors = errors + one; };
+                    CheckResult { ty: Ty::Bool {}, errors: errors }
+                },
+            }
+        },
+        Expr::Assign { target, value } => {
+            let left_res: CheckResult = check_expr(src, env, locals, target);
+            let right_res: CheckResult = check_expr(src, env, locals, value);
+            let mut errors: I64 = left_res.errors + right_res.errors;
+            if ty_eq(src, left_res.ty, right_res.ty) == 0 { errors = errors + one; };
+            CheckResult { ty: left_res.ty, errors: errors }
+        },
+        Expr::If { cond, then_block, else_block } => {
+            let cond_res: CheckResult = check_expr(src, env, locals, cond);
+            let then_res: CheckBlock = check_block(src, env, locals, then_block, Ty::Unit {});
+            let else_res: CheckBlock = check_block(src, env, locals, else_block, Ty::Unit {});
+            CheckResult { ty: then_res.ty, errors: 0 }
+        },
+        Expr::While { cond, body } => {
+            let cond_res: CheckResult = check_expr(src, env, locals, cond);
+            let body_res: CheckBlock = check_block(src, env, locals, body, Ty::Unit {});
+            CheckResult { ty: Ty::Unit {}, errors: 0 }
+        },
+        Expr::Match { scrutinee, arms } => {
+            let scrutinee_res: CheckResult = check_expr(src, env, locals, scrutinee);
+            let match_res: CheckResult = check_match_arms(src, env, locals, scrutinee_res.ty, arms);
+            CheckResult { ty: match_res.ty, errors: scrutinee_res.errors + match_res.errors }
+        },
+        Expr::Block { block } => {
+            let res: CheckBlock = check_block(src, env, locals, block, Ty::Unit {});
+            CheckResult { ty: res.ty, errors: res.errors }
+        },
+    }
+}
+
+fn check_args(src: String, env: Env, locals: LocalList, params: ParamTyList, args: ExprListOpt) -> I64 {
+    let one: I64 = 1;
+    let zero: I64 = 0;
+    match params {
+        ParamTyList::Nil {} => match args {
+            ExprListOpt::Nil {} => zero,
+            ExprListOpt::Cons { head, tail } => {
+                let res: CheckResult = check_expr(src, env, locals, head);
+                res.errors + one + check_args(src, env, locals, ParamTyList::Nil {}, tail)
+            },
+        },
+        ParamTyList::Cons { head, tail } => match args {
+            ExprListOpt::Nil {} => one,
+            ExprListOpt::Cons { head: arg, tail: rest } => {
+                let res: CheckResult = check_expr(src, env, locals, arg);
+                let mut errors: I64 = res.errors;
+                if ty_eq(src, head.ty, res.ty) == 0 { errors = errors + one; };
+                errors + check_args(src, env, locals, tail, rest)
+            },
+        },
+    }
+}
+
+fn check_struct_inits(src: String, env: Env, locals: LocalList, fields: FieldTyList, inits: FieldInitList) -> I64 {
+    let one: I64 = 1;
+    let zero: I64 = 0;
+    match inits {
+        FieldInitList::Nil {} => zero,
+        FieldInitList::Cons { head, tail } => {
+            let value_res: CheckResult = check_expr(src, env, locals, head.value);
+            let mut errors: I64 = value_res.errors;
+            let field: FindField = find_field(src, fields, head.name);
+            if field.found == 1 {
+                if ty_eq(src, field.info.ty, value_res.ty) == 0 { errors = errors + one; };
+            } else {
+                errors = errors + one;
+            };
+            errors + check_struct_inits(src, env, locals, fields, tail)
+        },
+    }
+}
+
+struct BindResult { locals: LocalList, errors: I64 }
+
+fn bind_pattern(src: String, env: Env, locals: LocalList, pattern: Pattern, scrutinee_ty: Ty) -> BindResult {
+    let one: I64 = 1;
+    let zero: I64 = 0;
+    let two: I64 = 2;
+    match pattern {
+        Pattern::Wildcard {} => BindResult { locals: locals, errors: zero },
+        Pattern::Path { path } => {
+            let len: I64 = path_len(path);
+            match scrutinee_ty {
+                Ty::Named { name: scrutinee_name } => {
+                    let e: FindEnum = find_enum(src, env.enums, scrutinee_name);
+                    if e.found == 1 {
+                        if len == zero { return BindResult { locals: locals, errors: zero }; };
+                        let variant_name: Span = path_last(path);
+                        let v: FindVariant = find_variant(src, e.info.variants, variant_name);
+                        if v.found == 1 {
+                            match v.info.fields {
+                                FieldTyList::Nil {} => BindResult { locals: locals, errors: zero },
+                                _ => BindResult { locals: locals, errors: zero },
+                            }
+                        } else {
+                            BindResult { locals: locals, errors: zero }
+                        }
+                    } else {
+                        BindResult { locals: locals, errors: zero }
+                    }
+                },
+                _ => BindResult { locals: locals, errors: zero },
+            }
+        },
+        Pattern::Struct { path, fields } => {
+            let len: I64 = path_len(path);
+            match scrutinee_ty {
+                Ty::Named { name: scrutinee_name } => {
+                    let e: FindEnum = find_enum(src, env.enums, scrutinee_name);
+                    if e.found == 1 {
+                        if len == zero { return BindResult { locals: locals, errors: zero }; };
+                        let variant_name: Span = path_last(path);
+                        let v: FindVariant = find_variant(src, e.info.variants, variant_name);
+                        if v.found == 1 {
+                            let bound: BindResult = bind_pat_fields(src, locals, v.info.fields, fields);
+                            BindResult { locals: bound.locals, errors: bound.errors }
+                        } else {
+                            BindResult { locals: locals, errors: zero }
+                        }
+                    } else {
+                        BindResult { locals: locals, errors: zero }
+                    }
+                },
+                _ => BindResult { locals: locals, errors: zero },
+            }
+        },
+    }
+}
+
+fn bind_pat_fields(src: String, locals: LocalList, fields: FieldTyList, pats: PatFieldList) -> BindResult {
+    let one: I64 = 1;
+    let zero: I64 = 0;
+    match pats {
+        PatFieldList::Nil {} => BindResult { locals: locals, errors: zero },
+        PatFieldList::Cons { head, tail } => {
+            let mut errors: I64 = zero;
+            let found: FindField = find_field(src, fields, head.name);
+            let mut next_locals: LocalList = locals;
+            if found.found == 1 {
+                let local: Local = Local { name: head.binding, ty: found.info.ty, mutable: 0 };
+                next_locals = LocalList::Cons { head: local, tail: locals };
+            } else {
+                errors = errors + one;
+            };
+            let rest: BindResult = bind_pat_fields(src, next_locals, fields, tail);
+            BindResult { locals: rest.locals, errors: errors + rest.errors }
+        },
+    }
+}
+
+fn check_match_arms(src: String, env: Env, locals: LocalList, scrutinee_ty: Ty, arms: MatchArmList) -> CheckResult {
+    let one: I64 = 1;
+    match arms {
+        MatchArmList::Nil {} => CheckResult { ty: Ty::Unit {}, errors: 0 },
+        MatchArmList::Cons { head, tail } => {
+            let bound: BindResult = bind_pattern(src, env, locals, head.pat, scrutinee_ty);
+            let body_res: CheckResult = check_expr(src, env, bound.locals, head.body);
+            match tail {
+                MatchArmList::Nil {} => {
+                    CheckResult { ty: body_res.ty, errors: body_res.errors }
+                },
+                _ => {
+                    let tail_res: CheckResult = check_match_arms(src, env, locals, scrutinee_ty, tail);
+                    let mut errors: I64 = body_res.errors + tail_res.errors;
+                    if ty_eq(src, body_res.ty, tail_res.ty) == 0 { errors = errors + one; };
+                    CheckResult { ty: body_res.ty, errors: errors }
+                },
+            }
+        },
+    }
+}

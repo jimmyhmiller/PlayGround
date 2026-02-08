@@ -1,0 +1,20 @@
+extern fn print_int(n: I64) -> I64;
+
+enum Option<T> {
+    Some { value: T },
+    None {}
+}
+
+fn test_option() -> I64 {
+    let o: Option<I64> = Option::Some { value: 42 };
+    match o {
+        Option::Some { value } => value,
+        Option::None {} => 0
+    }
+}
+
+fn main() -> I64 {
+    let result = test_option();
+    print_int(result);
+    0
+}

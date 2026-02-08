@@ -5,7 +5,16 @@
       "cmd": ["issues", "init", "--project", "demo"]
     },
     {
-      "cmd": ["issues", "create", "--project", "demo", "--title", "First issue"],
+      "cmd": [
+        "issues",
+        "create",
+        "--project",
+        "demo",
+        "--title",
+        "First issue",
+        "--body",
+        "## Summary\nBody from flag\n\n## Acceptance Criteria\n- Works"
+      ],
       "capture": "id"
     },
     {
@@ -14,7 +23,7 @@
     },
     {
       "cmd": ["issues", "show", "--project", "demo", "${id}"],
-      "expect_stdout_contains": ["First issue", "status: todo"]
+      "expect_stdout_contains": ["First issue", "status: todo", "Body from flag"]
     },
     {
       "cmd": ["issues", "update", "--project", "demo", "${id}", "--status", "in_progress", "--add-label", "cli"],
@@ -36,8 +45,21 @@
       "cmd": ["issues", "close", "--project", "demo", "${id}"]
     },
     {
+      "cmd": ["issues", "rebuild", "--project", "demo"]
+    },
+    {
       "cmd": ["issues", "show", "--project", "demo", "${id}"],
-      "expect_stdout_contains": ["status: done"]
+      "expect_stdout_contains": ["status: done", "Body from flag"]
+    },
+    {
+      "cmd": ["issues", "delete", "--project", "demo", "${id}"]
+    },
+    {
+      "cmd": ["issues", "restore", "--project", "demo", "${id}"]
+    },
+    {
+      "cmd": ["issues", "show", "--project", "demo", "${id}"],
+      "expect_stdout_contains": ["status: done", "Body from flag"]
     }
   ]
 }

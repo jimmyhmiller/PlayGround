@@ -1,22 +1,101 @@
+// ---------------------------------------------------------------------------
+// Bootstrap compiler entry point: lex -> parse -> qualify -> resolve -> typecheck -> codegen
+// ---------------------------------------------------------------------------
+
+use lexer::lex_all;
+use parser::parse_module;
+use parser::new_parser;
+use ast::Module;
+use qualify::qualify_modules;
+use resolve::resolve_modules;
+use typecheck::typecheck_modules;
+use codegen::codegen_modules;
+
 extern fn read_file(path: String) -> String;
 extern fn arg_str(index: I64) -> String;
-extern fn print_int(v: I64) -> I64;
+extern fn arg_len() -> I64;
+extern fn print_str(s: String) -> I64;
+extern fn print_str_stderr(s: String) -> I64;
+extern fn print_int(n: I64) -> I64;
+extern fn vec_len(v: RawPointer<I8>) -> I64;
+extern fn vec_new() -> RawPointer<I8>;
+extern fn vec_push_module(v: RawPointer<I8>, item: Module) -> I64;
+extern fn vec_push_str(v: RawPointer<I8>, item: String) -> I64;
+extern fn exit_process(code: I64) -> I64;
+extern fn string_len(s: String) -> I64;
+extern fn string_eq(a: String, b: String) -> I64;
+extern fn string_byte_at(s: String, index: I64) -> I64;
+extern fn string_slice(s: String, start: I64, end: I64) -> String;
+extern fn string_concat(a: String, b: String) -> String;
+
+// Extract filename stem from a path like "compiler/foo.lang" -> "foo"
+fn path_stem(path: String) -> String {
+    let len: I64 = string_len(path);
+    // Find last '/'
+    let mut slash_pos: I64 = 0 - 1;
+    let mut i: I64 = 0;
+    while i < len {
+        if string_byte_at(path, i) == 47 {
+            slash_pos = i;
+        };
+        i = i + 1;
+    };
+    let name_start: I64 = slash_pos + 1;
+    // Find last '.'
+    let mut dot_pos: I64 = len;
+    let mut j: I64 = len - 1;
+    while j > name_start {
+        if string_byte_at(path, j) == 46 {
+            dot_pos = j;
+            j = 0;
+        };
+        j = j - 1;
+    };
+    string_slice(path, name_start, dot_pos)
+}
+
+fn is_root_stem(stem: String) -> Bool {
+    if string_eq(stem, "main") == 1 { return true; };
+    if string_eq(stem, "lib") == 1 { return true; };
+    if string_eq(stem, "mod") == 1 { return true; };
+    false
+}
 
 fn main() -> I64 {
-    let path: String = arg_str(0);
-    let src: String = read_file(path);
-    let mod_ast: Module = parse_module(src);
-    let fn_count: I64 = count_fns(mod_ast.items);
-    let extern_count: I64 = count_externs(mod_ast.items);
-    let struct_count: I64 = count_structs(mod_ast.items);
-    let enum_count: I64 = count_enums(mod_ast.items);
-    let unknown_count: I64 = count_unknown(mod_ast.items);
-    let type_errors: I64 = typecheck_module(src, mod_ast);
-    let _x: I64 = print_int(fn_count);
-    let _y: I64 = print_int(extern_count);
-    let _z: I64 = print_int(struct_count);
-    let _w: I64 = print_int(enum_count);
-    let _u: I64 = print_int(unknown_count);
-    let _t: I64 = print_int(type_errors);
+    if arg_len() < 1 {
+        print_str("usage: bootstrap <file1.lang> [file2.lang ...]");
+        exit_process(1);
+    };
+    let modules: RawPointer<I8> = vec_new();
+    let mut i: I64 = 0;
+    while i < arg_len() {
+        let path: String = arg_str(i);
+        let source: String = read_file(path);
+        if string_len(source) == 0 {
+            print_str_stderr(string_concat("error: could not read file: ", path));
+            exit_process(1);
+        };
+        let tokens: RawPointer<I8> = lex_all(source);
+        let m: Module = parse_module(new_parser(tokens));
+        // Derive module path from filename
+        // Single-file compiles are always root
+        if arg_len() > 1 {
+            let stem: String = path_stem(path);
+            if !is_root_stem(stem) {
+                vec_push_str(m.path, stem);
+            };
+        };
+        vec_push_module(modules, m);
+        i = i + 1;
+    };
+    print_str("parsed ok");
+    qualify_modules(modules);
+    print_str("qualified ok");
+    resolve_modules(modules);
+    print_str("resolved ok");
+    typecheck_modules(modules);
+    print_str("typechecked ok");
+    codegen_modules(modules, "output.o");
+    print_str("codegen ok");
     0
 }

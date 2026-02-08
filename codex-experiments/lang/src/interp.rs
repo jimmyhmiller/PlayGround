@@ -12,6 +12,7 @@ pub enum Value {
     Unit,
     Struct(Rc<RefCell<StructVal>>),
     Enum(EnumVal),
+    Tuple(Vec<Value>),
 }
 
 #[derive(Debug, Clone)]
@@ -92,6 +93,8 @@ struct Evaluator<'a> {
 enum Control {
     Value(Value),
     Return(Value),
+    Break,
+    Continue,
 }
 
 impl<'a> Evaluator<'a> {
@@ -143,8 +146,12 @@ impl<'a> Evaluator<'a> {
             self.set_local(param.name.clone(), arg);
         }
         let result = match self.eval_block(&f.body)? {
-            Control::Value(v) => v,
-            Control::Return(v) => v,
+            Control::Value(v) | Control::Return(v) => v,
+            Control::Break | Control::Continue => {
+                return Err(RuntimeError {
+                    message: "break/continue outside of loop".to_string(),
+                });
+            }
         };
         self.pop_scope();
         Ok(result)
@@ -155,7 +162,13 @@ impl<'a> Evaluator<'a> {
         for stmt in &block.stmts {
             match stmt {
                 Stmt::Expr(expr, _) => {
-                    let _ = self.eval_expr(expr)?;
+                    match self.eval_expr_control(expr)? {
+                        Control::Value(_) => {}
+                        ctrl => {
+                            self.pop_scope();
+                            return Ok(ctrl);
+                        }
+                    }
                 }
                 Stmt::Return(expr, _) => {
                     let value = if let Some(expr) = expr {
@@ -169,12 +182,26 @@ impl<'a> Evaluator<'a> {
             }
         }
         let result = if let Some(tail) = &block.tail {
-            self.eval_expr(tail)?
+            match self.eval_expr_control(tail)? {
+                Control::Value(v) => v,
+                ctrl => {
+                    self.pop_scope();
+                    return Ok(ctrl);
+                }
+            }
         } else {
             Value::Unit
         };
         self.pop_scope();
         Ok(Control::Value(result))
+    }
+
+    fn eval_expr_control(&mut self, expr: &Expr) -> Result<Control, RuntimeError> {
+        match expr {
+            Expr::Break { .. } => Ok(Control::Break),
+            Expr::Continue { .. } => Ok(Control::Continue),
+            _ => Ok(Control::Value(self.eval_expr(expr)?)),
+        }
     }
 
     fn eval_expr(&mut self, expr: &Expr) -> Result<Value, RuntimeError> {
@@ -197,14 +224,14 @@ impl<'a> Evaluator<'a> {
                 let c = self.eval_expr(cond)?;
                 match c {
                     Value::Bool(true) => match self.eval_block(then_branch)? {
-                        Control::Value(v) => Ok(v),
-                        Control::Return(v) => Ok(v),
+                        Control::Value(v) | Control::Return(v) => Ok(v),
+                        Control::Break | Control::Continue => Ok(Value::Unit),
                     },
                     Value::Bool(false) => {
                         if let Some(else_branch) = else_branch {
                             match self.eval_block(else_branch)? {
-                                Control::Value(v) => Ok(v),
-                                Control::Return(v) => Ok(v),
+                                Control::Value(v) | Control::Return(v) => Ok(v),
+                                Control::Break | Control::Continue => Ok(Value::Unit),
                             }
                         } else {
                             Ok(Value::Unit)
@@ -220,8 +247,9 @@ impl<'a> Evaluator<'a> {
                     let c = self.eval_expr(cond)?;
                     match c {
                         Value::Bool(true) => match self.eval_block(body)? {
-                            Control::Value(_) => {}
+                            Control::Value(_) | Control::Continue => {}
                             Control::Return(v) => return Ok(v),
+                            Control::Break => break,
                         },
                         Value::Bool(false) => break,
                         _ => {
@@ -316,6 +344,16 @@ impl<'a> Evaluator<'a> {
                             message: "unknown field".to_string(),
                         }),
                     },
+                    Value::Tuple(items) => {
+                        if let Ok(idx) = name.parse::<usize>() {
+                            if idx < items.len() {
+                                return Ok(items[idx].clone());
+                            }
+                        }
+                        Err(RuntimeError {
+                            message: "unknown tuple field".to_string(),
+                        })
+                    }
                     _ => Err(RuntimeError {
                         message: "field access requires struct".to_string(),
                     }),
@@ -344,16 +382,31 @@ impl<'a> Evaluator<'a> {
                 }
                 Ok(Value::Struct(Rc::new(RefCell::new(StructVal { name, fields: map }))))
             }
+            Expr::Tuple { items, .. } => {
+                let mut out = Vec::new();
+                for item in items {
+                    out.push(self.eval_expr(item)?);
+                }
+                Ok(Value::Tuple(out))
+            }
             Expr::Literal(lit, _) => match lit {
                 Literal::Int(s) => Ok(Value::Int(parse_i64(s)?)),
+                Literal::Char(b) => Ok(Value::Int(*b as i64)),
                 Literal::Float(s) => Ok(Value::Float(parse_f64(s)?)),
                 Literal::Str(s) => Ok(Value::Str(s.clone())),
                 Literal::Bool(b) => Ok(Value::Bool(*b)),
+                Literal::Unit => Ok(Value::Unit),
             },
             Expr::Block(block) => match self.eval_block(block)? {
-                Control::Value(v) => Ok(v),
-                Control::Return(v) => Ok(v),
+                Control::Value(v) | Control::Return(v) => Ok(v),
+                Control::Break | Control::Continue => Ok(Value::Unit),
             },
+            Expr::Break { .. } => Err(RuntimeError {
+                message: "break outside of loop".to_string(),
+            }),
+            Expr::Continue { .. } => Err(RuntimeError {
+                message: "continue outside of loop".to_string(),
+            }),
         }
     }
 
@@ -469,6 +522,17 @@ fn values_equal(a: &Value, b: &Value) -> bool {
         (Value::Float(x), Value::Float(y)) => x == y,
         (Value::Bool(x), Value::Bool(y)) => x == y,
         (Value::Str(x), Value::Str(y)) => x == y,
+        (Value::Tuple(xs), Value::Tuple(ys)) => {
+            if xs.len() != ys.len() {
+                return false;
+            }
+            for (x, y) in xs.iter().zip(ys.iter()) {
+                if !values_equal(x, y) {
+                    return false;
+                }
+            }
+            true
+        }
         _ => false,
     }
 }

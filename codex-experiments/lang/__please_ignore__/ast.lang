@@ -1,0 +1,147 @@
+struct Span { start: I64, end: I64 }
+
+enum Type { Path { path: PathList }, Unit {} }
+
+struct Param { name: Span, ty: Type }
+enum ParamList { Nil {}, Cons { head: Param, tail: ParamList } }
+
+struct Field { name: Span, ty: Type }
+enum FieldList { Nil {}, Cons { head: Field, tail: FieldList } }
+
+struct StructDecl { name: Span, fields: FieldList }
+
+struct EnumVariant { name: Span, fields: FieldList }
+enum VariantList { Nil {}, Cons { head: EnumVariant, tail: VariantList } }
+struct EnumDecl { name: Span, variants: VariantList }
+
+enum BinOp { Add {}, Sub {}, Mul {}, Div {}, Lt {}, Le {}, Gt {}, Ge {}, Eq {}, Ne {} }
+
+enum PathList { Nil {}, Cons { head: Span, tail: PathList } }
+
+struct ExprList { head: Expr, tail: ExprList }
+enum ExprListOpt { Nil {}, Cons { head: Expr, tail: ExprListOpt } }
+
+struct FieldInit { name: Span, value: Expr }
+enum FieldInitList { Nil {}, Cons { head: FieldInit, tail: FieldInitList } }
+
+enum Pattern {
+    Wildcard {},
+    Path { path: PathList },
+    Struct { path: PathList, fields: PatFieldList }
+}
+
+struct PatField { name: Span, binding: Span }
+enum PatFieldList { Nil {}, Cons { head: PatField, tail: PatFieldList } }
+
+struct MatchArm { pat: Pattern, body: Expr }
+enum MatchArmList { Nil {}, Cons { head: MatchArm, tail: MatchArmList } }
+
+struct Block { stmts: StmtList }
+enum StmtList { Nil {}, Cons { head: Stmt, tail: StmtList } }
+
+enum Expr {
+    Int { span: Span },
+    Bool { value: I64 },
+    Path { path: PathList },
+    Call { callee: Expr, args: ExprListOpt },
+    Field { base: Expr, name: Span },
+    StructInit { path: PathList, fields: FieldInitList },
+    Binary { op: BinOp, left: Expr, right: Expr },
+    Assign { target: Expr, value: Expr },
+    If { cond: Expr, then_block: Block, else_block: Block },
+    While { cond: Expr, body: Block },
+    Match { scrutinee: Expr, arms: MatchArmList },
+    Block { block: Block }
+}
+
+enum Stmt {
+    Let { name: Span, mutable: I64, ty: Type, value: Expr },
+    Expr { expr: Expr },
+    Return { expr: Expr }
+}
+
+struct FnDecl { name: Span, params: ParamList, ret: Type, body: Block }
+struct ExternFn { name: Span, params: ParamList, ret: Type }
+
+enum Item {
+    Fn { decl: FnDecl },
+    ExternFn { decl: ExternFn },
+    Struct { decl: StructDecl },
+    Enum { decl: EnumDecl },
+    Use { path: PathList },
+    Unknown { span: Span }
+}
+
+enum ItemList { Nil {}, Cons { head: Item, tail: ItemList } }
+
+struct Module { items: ItemList }
+
+fn count_fns(items: ItemList) -> I64 {
+    let zero: I64 = 0;
+    let one: I64 = 1;
+    match items {
+        ItemList::Nil {} => zero,
+        ItemList::Cons { head, tail } => {
+            match head {
+                Item::Fn { decl } => one + count_fns(tail),
+                _ => count_fns(tail)
+            }
+        }
+    }
+}
+
+fn count_externs(items: ItemList) -> I64 {
+    let zero: I64 = 0;
+    let one: I64 = 1;
+    match items {
+        ItemList::Nil {} => zero,
+        ItemList::Cons { head, tail } => {
+            match head {
+                Item::ExternFn { decl } => one + count_externs(tail),
+                _ => count_externs(tail)
+            }
+        }
+    }
+}
+
+fn count_structs(items: ItemList) -> I64 {
+    let zero: I64 = 0;
+    let one: I64 = 1;
+    match items {
+        ItemList::Nil {} => zero,
+        ItemList::Cons { head, tail } => {
+            match head {
+                Item::Struct { decl } => one + count_structs(tail),
+                _ => count_structs(tail)
+            }
+        }
+    }
+}
+
+fn count_enums(items: ItemList) -> I64 {
+    let zero: I64 = 0;
+    let one: I64 = 1;
+    match items {
+        ItemList::Nil {} => zero,
+        ItemList::Cons { head, tail } => {
+            match head {
+                Item::Enum { decl } => one + count_enums(tail),
+                _ => count_enums(tail)
+            }
+        }
+    }
+}
+
+fn count_unknown(items: ItemList) -> I64 {
+    let zero: I64 = 0;
+    let one: I64 = 1;
+    match items {
+        ItemList::Nil {} => zero,
+        ItemList::Cons { head, tail } => {
+            match head {
+                Item::Unknown { span } => one + count_unknown(tail),
+                _ => count_unknown(tail)
+            }
+        }
+    }
+}

@@ -1,0 +1,58 @@
+use ast::Module;
+use ast::count_fns;
+use ast::count_externs;
+use ast::count_structs;
+use ast::count_enums;
+use ast::count_unknown;
+use parser::parse_module;
+use typecheck::typecheck_module;
+
+extern fn read_file(path: String) -> String;
+extern fn arg_i64(index: I64) -> I64;
+extern fn arg_str(index: I64) -> String;
+extern fn arg_is_i64(index: I64) -> I64;
+extern fn arg_len() -> I64;
+extern fn print_int(v: I64) -> I64;
+extern fn host_build() -> I64;
+
+fn main() -> I64 {
+    let mut total_fns: I64 = 0;
+    let mut total_externs: I64 = 0;
+    let mut total_structs: I64 = 0;
+    let mut total_enums: I64 = 0;
+    let mut total_unknown: I64 = 0;
+    let mut total_errors: I64 = 0;
+    let mut mode: I64 = 0;
+    let mut start: I64 = 0;
+    let count: I64 = arg_len();
+    if count > 0 {
+        if arg_is_i64(0) == 1 {
+            mode = arg_i64(0);
+            start = 1;
+        };
+    };
+    let mut i: I64 = start;
+    while i < count {
+        let path: String = arg_str(i);
+        let src: String = read_file(path);
+        let mod_ast: Module = parse_module(src);
+        total_fns = total_fns + count_fns(mod_ast.items);
+        total_externs = total_externs + count_externs(mod_ast.items);
+        total_structs = total_structs + count_structs(mod_ast.items);
+        total_enums = total_enums + count_enums(mod_ast.items);
+        total_unknown = total_unknown + count_unknown(mod_ast.items);
+        total_errors = total_errors + typecheck_module(src, mod_ast);
+        i = i + 1;
+    };
+    let _x: I64 = print_int(total_fns);
+    let _y: I64 = print_int(total_externs);
+    let _z: I64 = print_int(total_structs);
+    let _w: I64 = print_int(total_enums);
+    let _u: I64 = print_int(total_unknown);
+    let _t: I64 = print_int(total_errors);
+    if mode == 1 {
+        if total_errors == 0 { return host_build(); };
+        return total_errors;
+    };
+    0
+}

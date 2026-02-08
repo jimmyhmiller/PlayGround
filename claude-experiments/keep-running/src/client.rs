@@ -135,47 +135,66 @@ pub fn attach(session: &SessionInfo) -> Result<()> {
                 let data = &input_buf[..n as usize];
 
                 // Check for detach/kill sequence (Ctrl+a then d/k)
-                for &byte in data {
+                // Batch regular bytes together for efficiency (critical for paste)
+                let mut i = 0;
+                while i < data.len() {
                     if saw_ctrl_a {
-                        if byte == b'd' || byte == b'D' {
-                            // Detach!
-                            let msg = ClientMessage::Detach;
-                            if let Ok(encoded) = encode_message(&msg) {
-                                let _ = stream.write_all(&encoded);
+                        saw_ctrl_a = false;
+                        let byte = data[i];
+                        i += 1;
+
+                        match byte {
+                            b'd' | b'D' => {
+                                // Detach!
+                                let msg = ClientMessage::Detach;
+                                if let Ok(encoded) = encode_message(&msg) {
+                                    let _ = stream.write_all(&encoded);
+                                }
+                                eprintln!("\r\n[detached from {}]", session.name);
+                                return Ok(());
                             }
-                            eprintln!("\r\n[detached from {}]", session.name);
-                            return Ok(());
-                        } else if byte == b'k' || byte == b'K' {
-                            // Kill session!
-                            // Send SIGHUP to the daemon to terminate gracefully
-                            eprintln!("\r\n[killing session {}]", session.name);
-                            unsafe {
-                                libc::kill(session.pid as i32, libc::SIGHUP);
+                            b'k' | b'K' => {
+                                // Kill session!
+                                eprintln!("\r\n[killing session {}]", session.name);
+                                unsafe {
+                                    libc::kill(session.pid as i32, libc::SIGHUP);
+                                }
+                                return Ok(());
                             }
-                            return Ok(());
-                        } else if byte == CTRL_A {
-                            // Double Ctrl+a - send a literal Ctrl+a
-                            saw_ctrl_a = false;
-                            let msg = ClientMessage::Input(vec![CTRL_A]);
-                            if let Ok(encoded) = encode_message(&msg) {
-                                let _ = stream.write_all(&encoded);
+                            CTRL_A => {
+                                // Double Ctrl+a - send a literal Ctrl+a
+                                let msg = ClientMessage::Input(vec![CTRL_A]);
+                                if let Ok(encoded) = encode_message(&msg) {
+                                    let _ = stream.write_all(&encoded);
+                                }
                             }
-                        } else {
-                            // Not a command, send the Ctrl+a we held back, plus this byte
-                            saw_ctrl_a = false;
-                            let to_send = vec![CTRL_A, byte];
-                            let msg = ClientMessage::Input(to_send);
+                            _ => {
+                                // Not a command, send the Ctrl+a we held back, plus this byte
+                                let msg = ClientMessage::Input(vec![CTRL_A, byte]);
+                                if let Ok(encoded) = encode_message(&msg) {
+                                    let _ = stream.write_all(&encoded);
+                                }
+                            }
+                        }
+                    } else {
+                        // Find the next Ctrl+A or end of data
+                        let start = i;
+                        while i < data.len() && data[i] != CTRL_A {
+                            i += 1;
+                        }
+
+                        // Send batch of regular bytes as a single message
+                        if i > start {
+                            let msg = ClientMessage::Input(data[start..i].to_vec());
                             if let Ok(encoded) = encode_message(&msg) {
                                 let _ = stream.write_all(&encoded);
                             }
                         }
-                    } else if byte == CTRL_A {
-                        saw_ctrl_a = true;
-                    } else {
-                        // Regular byte
-                        let msg = ClientMessage::Input(vec![byte]);
-                        if let Ok(encoded) = encode_message(&msg) {
-                            let _ = stream.write_all(&encoded);
+
+                        // If we stopped at Ctrl+A, consume it and set flag
+                        if i < data.len() && data[i] == CTRL_A {
+                            saw_ctrl_a = true;
+                            i += 1;
                         }
                     }
                 }

@@ -146,7 +146,7 @@ Behavior:
 - Creates `issues/`, `index/`, and `project.toml`
 - Initializes empty `index/issues.json`
 - Registers project in global config if needed
-- If `--project` is omitted, prompts to use the current directory name
+- If `--project` is omitted, uses the current directory name (no prompt) and prints how to undo
 
 Project targeting (all commands):
 
@@ -166,6 +166,7 @@ Behavior:
 ```bash
 scope issues create --title "Add blocked filter"
 scope issues create --title "Index rebuild command" --priority p1 --assignee jimmy --label cli --label index
+scope issues create --title "Document status transitions" --body "## Summary\n...\n\n## Acceptance Criteria\n..."
 scope issues create --title "Document status transitions" --body-file ./tmp/issue.md
 ```
 
@@ -175,6 +176,7 @@ Behavior:
 - Writes markdown issue file
 - Updates local index
 - Prints created ID
+- Agent/automation guidance: avoid stdin/heredoc bodies (ex: `/dev/stdin`, `<<EOF`) since some tool shells can hang; prefer `--body`, a real file path, or create then `scope issues edit`
 
 ### 6.3 List issues
 
@@ -256,11 +258,22 @@ scope issues delete SC:brisk-silent-otter --force
 
 Behavior:
 
-- Soft default: prompt confirmation
-- `--force` skips prompt
-- Removes issue file and index record
+- Default is a soft delete (no prompt): moves issue + events to `trash/` and prints an undo command
+- `--force` is permanent and skips trash/undo
+- Removes issue from the index
 
-### 6.9 Index commands
+### 6.9 Restore issue
+
+```bash
+scope issues restore SC:brisk-silent-otter
+```
+
+Behavior:
+
+- Restores a previously soft-deleted issue from `trash/`
+- Rebuilds the index entry for the issue
+
+### 6.10 Index commands
 
 ```bash
 scope issues index status
@@ -276,7 +289,7 @@ Behavior:
 - `verify`: checks for drift, duplicates, missing files
 - `scope issues rebuild`: regenerate issue snapshots and index from events
 
-### 6.10 Comments
+### 6.11 Comments
 
 ```bash
 scope issues comments add SC:brisk-silent-otter --body "Looks good to me."
@@ -291,7 +304,7 @@ Behavior:
 - Renders comments into the issue snapshot
 - `list` returns comments from the event log
 
-### 6.11 Conflicts
+### 6.12 Conflicts
 
 ```bash
 scope issues conflicts list
@@ -305,7 +318,7 @@ Behavior:
 - `show` prints conflict details
 - `resolve` writes a resolution event and updates the issue snapshot
 
-### 6.12 Project and sync management
+### 6.13 Project and sync management
 
 ```bash
 scope issues projects

@@ -117,6 +117,7 @@ impl<'a> Lexer<'a> {
         }
         match b {
             b'"' => self.lex_string(),
+            b'\'' => self.lex_char(),
             b'(' => Ok(self.simple_token(TokenKind::LParen, 1)),
             b')' => Ok(self.simple_token(TokenKind::RParen, 1)),
             b'{' => Ok(self.simple_token(TokenKind::LBrace, 1)),
@@ -242,6 +243,8 @@ impl<'a> Lexer<'a> {
             "while" => TokenKind::While,
             "match" => TokenKind::Match,
             "return" => TokenKind::Return,
+            "break" => TokenKind::Break,
+            "continue" => TokenKind::Continue,
             "extern" => TokenKind::Extern,
             "repr" => TokenKind::Repr,
             "true" => TokenKind::True,
@@ -323,6 +326,105 @@ impl<'a> Lexer<'a> {
             span: Span::new(start, self.pos),
         })
     }
+
+    fn lex_char(&mut self) -> Result<Token, LexError> {
+        let start = self.pos;
+        self.pos += 1; // skip opening '
+        if self.pos >= self.len {
+            return Err(LexError {
+                message: "Unterminated char literal".to_string(),
+                span: Span::new(start, self.pos),
+            });
+        }
+        let b = self.bytes[self.pos];
+        let value = if b == b'\\' {
+            if self.pos + 1 >= self.len {
+                return Err(LexError {
+                    message: "Unterminated char escape".to_string(),
+                    span: Span::new(start, self.pos),
+                });
+            }
+            let esc = self.bytes[self.pos + 1];
+            match esc {
+                b'n' => {
+                    self.pos += 2;
+                    b'\n'
+                }
+                b't' => {
+                    self.pos += 2;
+                    b'\t'
+                }
+                b'r' => {
+                    self.pos += 2;
+                    b'\r'
+                }
+                b'0' => {
+                    self.pos += 2;
+                    0
+                }
+                b'\'' => {
+                    self.pos += 2;
+                    b'\''
+                }
+                b'\\' => {
+                    self.pos += 2;
+                    b'\\'
+                }
+                b'x' => {
+                    if self.pos + 3 >= self.len {
+                        return Err(LexError {
+                            message: "Invalid hex escape".to_string(),
+                            span: Span::new(self.pos, self.pos + 2),
+                        });
+                    }
+                    let h1 = self.bytes[self.pos + 2];
+                    let h2 = self.bytes[self.pos + 3];
+                    let v1 = hex_val(h1);
+                    let v2 = hex_val(h2);
+                    if v1.is_none() || v2.is_none() {
+                        return Err(LexError {
+                            message: "Invalid hex escape".to_string(),
+                            span: Span::new(self.pos, self.pos + 4),
+                        });
+                    }
+                    self.pos += 4;
+                    (v1.unwrap() << 4) | v2.unwrap()
+                }
+                _ => {
+                    return Err(LexError {
+                        message: "Invalid char escape".to_string(),
+                        span: Span::new(self.pos, self.pos + 2),
+                    });
+                }
+            }
+        } else {
+            if b == b'\n' || b == b'\r' {
+                return Err(LexError {
+                    message: "Unterminated char literal".to_string(),
+                    span: Span::new(start, self.pos),
+                });
+            }
+            if b >= 0x80 {
+                return Err(LexError {
+                    message: "Non-ASCII char literal".to_string(),
+                    span: Span::new(self.pos, self.pos + 1),
+                });
+            }
+            self.pos += 1;
+            b
+        };
+        if self.pos >= self.len || self.bytes[self.pos] != b'\'' {
+            return Err(LexError {
+                message: "Char literal must be a single byte".to_string(),
+                span: Span::new(start, self.pos),
+            });
+        }
+        self.pos += 1; // closing '
+        Ok(Token {
+            kind: TokenKind::Char(value),
+            span: Span::new(start, self.pos),
+        })
+    }
 }
 
 fn is_ident_start(b: u8) -> bool {
@@ -335,6 +437,15 @@ fn is_ident_continue(b: u8) -> bool {
 
 fn is_digit(b: u8) -> bool {
     (b'0'..=b'9').contains(&b)
+}
+
+fn hex_val(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(10 + (b - b'a')),
+        b'A'..=b'F' => Some(10 + (b - b'A')),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -368,5 +479,14 @@ mod tests {
         let tokens = Lexer::new(src).lex_all().unwrap();
         assert!(tokens.iter().any(|t| matches!(t.kind, TokenKind::Fn)));
         assert!(tokens.iter().any(|t| matches!(t.kind, TokenKind::Int(_))));
+    }
+
+    #[test]
+    fn lex_char_literal() {
+        let src = "'a' '\\n' '\\x41'";
+        let tokens = Lexer::new(src).lex_all().unwrap();
+        assert!(matches!(tokens[0].kind, TokenKind::Char(b'a')));
+        assert!(matches!(tokens[1].kind, TokenKind::Char(b'\n')));
+        assert!(matches!(tokens[2].kind, TokenKind::Char(0x41)));
     }
 }

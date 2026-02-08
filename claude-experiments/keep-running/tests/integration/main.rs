@@ -174,3 +174,18 @@ fn test_multi_cycle() {
     let scenario = parser::parse_scenario_file(&path).expect("Failed to parse scenario");
     harness::run_scenario(&scenario).expect("Scenario failed");
 }
+
+/// Test that multi-line paste doesn't lock up
+#[test]
+fn test_multiline_paste() {
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
+    let path = PathBuf::from(&manifest_dir).join("scenarios/edge_cases/multiline_paste.toml");
+
+    if !path.exists() {
+        println!("Scenario file not found, skipping: {}", path.display());
+        return;
+    }
+
+    let scenario = parser::parse_scenario_file(&path).expect("Failed to parse scenario");
+    harness::run_scenario(&scenario).expect("Scenario failed");
+}

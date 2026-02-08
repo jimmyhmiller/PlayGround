@@ -22,6 +22,7 @@ pub enum TokenKind {
     Int(String),
     Float(String),
     Str(String),
+    Char(u8),
 
     // Keywords
     Module,
@@ -39,6 +40,8 @@ pub enum TokenKind {
     While,
     Match,
     Return,
+    Break,
+    Continue,
     Extern,
     Repr,
     True,
@@ -93,6 +96,8 @@ impl TokenKind {
                 | TokenKind::While
                 | TokenKind::Match
                 | TokenKind::Return
+                | TokenKind::Break
+                | TokenKind::Continue
                 | TokenKind::Extern
                 | TokenKind::Repr
                 | TokenKind::True

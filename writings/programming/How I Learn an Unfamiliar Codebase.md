@@ -152,7 +152,7 @@ Add the following dependencies to your workspace package.json:
 
 ```
 
-I go to build my project and **HERERE!!!!!!!** Does not show up at all...
+I go to build my project and **HERERE!!!!!!!** does not show up at all...
 
 ### Understanding the Build System
 
@@ -168,7 +168,7 @@ node_modules/@next/swc
 # empty
 ```
 
-So I have a sneaking suspicion my turbo pack code should be in that tar. So let's look at the tar
+So I have a sneaking suspicion my turbopack code should be in that tar. So let's look at the tar
 
 ```bash
 ❯ du -h /Users/jimmyhmiller/Documents/Code/open-source/next.js-88009/tarballs/next-swc.tar
@@ -229,35 +229,91 @@ return packageFiles.filter((f) => {
 })
 ```
 
-But my gut says the sorting let's us do this much simpler. If the directory comes first in the sorting order, we should be able to do something like check for prefix, but does that requires us to make sure people have a trailing `/` if it is a directory so we don't include `turbopack/` because someone wanted to include `turbo`? I  left that aside. A plan on filing a bug about it. But after this change we can finally see **HERERE!!!!!!!** a lot.
+But my gut says the sorting let's us do this much simpler. If the directory comes first in the sorting order, we should be able to do something like check for prefix, but does that requires us to make sure people have a trailing `/` if it is a directory so we don't include `turbopack/` because someone wanted to include `turbo`? I  left that aside. I plan on filing a bug about it. But after this change we can finally see **HERERE!!!!!!!** a lot.
 
 ## For Real This Time?
 
-We have finally got our project building properly. We can now know if we've made changes to our bug. We can start understanding how our code is being processed. The simpliest answer is just a quick grep around the codebase for treeshaking. Luckily it comes up. In fact in the code we added our print to we can see
+Okay, we now have something we can test. But where do we even begin? This is one reason we choose this bug. It gives a few avenues to go down. First the report says that these enums are not being "tree-shaken" is that the right term? One thing I've learned from experience is to never assue that the end user is using terms in the same manner as the codebase. So this can be a starting point, but it might be wrong. 
 
-```rust
-let tree_shaking_mode = module_asset_context
-         .module_options_context()
-         .await?
+With some searching around we can actually see that there is a configuration for turning turbopackTreeShaking on or off
+
+```typescript
+const nextConfig: NextConfig = {
+  experimental: {
+    turbopackTreeShaking: true,
+  },
+};
 ```
 
-So let's throw in some prints.
+It was actually a bit hard out exactly where the default for this was. It isn't actually documented. So let's just enable it and see what we get.
 
-```rust
-println!("Tree shaking mode: {:?}, {:?}", tree_shaking_mode, *source.ident().await?);
+```bash
+> Build error occurred
+Error [TurbopackInternalError]: Failed to write app endpoint /page
+
+Caused by:
+- index out of bounds: the len is 79 but the index is 79
+
+Debug info:
+- Execution of get_all_written_entrypoints_with_issues_operation failed
+- Execution of EntrypointsOperation::new failed
+- Execution of all_entrypoints_write_to_disk_operation failed
+- Execution of Project::emit_all_output_assets failed
+- Execution of *emit_assets failed
+- Execution of all_assets_from_entries_operation failed
+- Execution of *all_assets_from_entries failed
+- Execution of output_assets_operation failed
+- Execution of <AppEndpoint as Endpoint>::output failed
+- Failed to write app endpoint /page
+- Execution of AppEndpoint::output failed
+- Execution of whole_app_module_graph_operation failed
+- Execution of *ModuleGraph::from_single_graph failed
+- Execution of *SingleModuleGraph::new_with_entries failed
+- Execution of Project::get_all_entries failed
+- Execution of <AppEndpoint as Endpoint>::entries failed
+- Execution of get_app_page_entry failed
+- Execution of *ProcessResult::module failed
+- Execution of <ModuleAssetContext as AssetContext>::process failed
+- Execution of EcmascriptModulePartAsset::select_part failed
+- Execution of split_module failed
+- index out of bounds: the len is 79 but the index is 79
+    at <unknown> (TurbopackInternalError: Failed to write app endpoint /page) {
+  type: 'TurbopackInternalError',
+  location: 'turbopack/crates/turbopack-ecmascript/src/tree_shake/graph.rs:745:16'
+}
 ```
 
-We end up with a ton of prints. But one looks promising
+Well, I think we figured out that the default is off. So one option is that we never "tree shake" anything. But that seems wrong. At this point I looked into tree shaking a bit in the codebase and while I started to understand a few things, I've been at this point before. Sometimes it is good to go deep. But how much of this codebase do I really understand? If tree shaking is our culprit (seeming unlikely at this point), it might be good to know how code gets there.
 
-```rust
-Tree shaking mode: Some(ReexportsOnly), AssetIdent { path: FileSystemPath { fs: ResolvedVc(RawVc::TaskCell(8, "turbo_tasks_fs::DiskFileSystem#0")), path: "app/utility.ts" }, query: "", fragment: "", assets: [], modifiers: [], parts: [], layer: None, content_type: None }
+## How a Chunk is Made
+
+Our "search around the codebase" strategy failed. So now we try a different tactic. We know a couple things.
+
+1. Our utilities.ts file is read and parsed
+2. It ends up in a file under a "chunks" directory.
+
+We now have two points we can use try to trace what happens. Let's start with parsing. Luckily here it is straightforward `parse_file_content`. When we look at this code, we can see that swc does the heavy lifting. First it parses it into a typescript ast, then applies transforms to turn it into javascript. At this point point we don't write to a string, but if you edit the code and use an emitter you see this:
+
+```javascript
+export var MyEnum = /*#__PURE__*/ function(MyEnum) {
+    MyEnum["UNIQUE_1"] = "UNIQUE_1";
+    MyEnum["UNIQUE_2"] = "UNIQUE_2";
+    return MyEnum;
+}({});
+export const greeting = "Hello!";
 ```
 
-This leaves us with so many questions! The kinds of questions we need to understand to learn this new codebase.
+Now to find where we write the chunks. In most programs this would be pretty easy. Typically there is a linear flow somewhere that just shows you the steps. Or if you can't piece one together, you can simply breakpoint and follow the flow. But turbopack as a rather advanced system involving async rust (more on this later). So in keeping with the tradition of not trying to do things the rely too heavily on my knowledge, I have did the tried and true, log random things until they look relavant. And what I found made realize that logging was not going to be enough. It was time to do my tried and true learning technique, visualization
 
-1. What is a Vc?
-2. What are these Tasks?
-3. What does ReexportsOnly mean?
+## Building a Visualizer
 
-Let's take the last first. This actually gets to the heart of our "bug". We still haven't even established if it is a feature request or a bug. Does turbopack intended to treeshake away these enums? Well, it is definitely going to depend on this treeshaking mode. 
+Ever since my [first job](https://jimmyhmiller.com/ugliest-beautiful-codebase) I have been building custom tools to visualize codebases. Perhaps this is due to my aphantasia. I'm not really sure. Some of these visualizers make there way into general use for me. But more often than not they are a means of understanding. When I applied for a job at Shopify working on YJIT I built a [simple visualizer](https://jimmyhmiller.com/yjit) but never got around to make it more useful than a learning tool. The same thing is true here but this time thanks to AI it looks a bit more professional.
+
+This time we want to give a bit more structure to what we'd do with print. We are trying to get events out that have a bunch of information. Mostly we are interested in files and their contents over time. Looking through the codebase we find that one key abstract is an ident, this will help us indentiy files. We will simple find points that seem interesting, make a corresponding event, make sure it has idents associated with it and send that event over websocket. 
+
+Then with that raw information we can have our visualizer stitch together the what exactly happens. [add foot note about the various things next has].
+
+
+
+
 

@@ -1,3 +1,5 @@
 extern fn read_file(path: String) -> String;
 extern fn arg_i64(index: I64) -> I64;
 extern fn arg_str(index: I64) -> String;
+extern fn arg_is_i64(index: I64) -> I64;
+extern fn arg_len() -> I64;

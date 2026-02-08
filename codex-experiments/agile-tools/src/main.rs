@@ -5,7 +5,7 @@ use rand::seq::SliceRandom;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io::{self, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use ulid::Ulid;
 
@@ -73,6 +73,8 @@ enum IssuesCommand {
         assignee: Option<String>,
         #[arg(long = "label")]
         labels: Vec<String>,
+        #[arg(long, conflicts_with = "body_file")]
+        body: Option<String>,
         #[arg(long)]
         body_file: Option<PathBuf>,
     },
@@ -120,6 +122,11 @@ enum IssuesCommand {
         id: String,
         #[arg(long)]
         force: bool,
+    },
+    Restore {
+        #[arg(long)]
+        project: Option<String>,
+        id: String,
     },
     List {
         #[arg(long)]
@@ -423,10 +430,11 @@ fn main() -> anyhow::Result<()> {
                 priority,
                 assignee,
                 labels,
+                body,
                 body_file,
             } => {
                 let project = resolve_project(project)?;
-                issues_create(&project, &title, priority, assignee, labels, body_file)?;
+                issues_create(&project, &title, priority, assignee, labels, body, body_file)?;
             }
             IssuesCommand::Update {
                 project,
@@ -467,6 +475,10 @@ fn main() -> anyhow::Result<()> {
             IssuesCommand::Delete { project, id, force } => {
                 let project = resolve_project(project)?;
                 issues_delete(&project, &id, force)?;
+            }
+            IssuesCommand::Restore { project, id } => {
+                let project = resolve_project(project)?;
+                issues_restore(&project, &id)?;
             }
             IssuesCommand::List {
                 project,
@@ -568,6 +580,7 @@ fn main() -> anyhow::Result<()> {
 fn issues_init(project: &str, _sync_engine: Option<&str>) -> anyhow::Result<()> {
     let projects_root = projects_root()?;
     let project_root = projects_root.join(project);
+    let project_existed = project_root.exists();
     fs::create_dir_all(project_root.join("issues"))?;
     fs::create_dir_all(project_root.join("events"))?;
     fs::create_dir_all(project_root.join("index"))?;
@@ -590,10 +603,22 @@ fn issues_init(project: &str, _sync_engine: Option<&str>) -> anyhow::Result<()> 
     }
 
     let global_config = global_config_path()?;
+    let mut created_global = false;
     if !global_config.exists() {
         let content = format!("default_project = \"{}\"\n", project);
         fs::create_dir_all(global_config.parent().unwrap())?;
-        fs::write(global_config, content)?;
+        fs::write(&global_config, content)?;
+        created_global = true;
+    }
+
+    if project_existed {
+        println!("Project {} already exists; ensured required directories.", project);
+    } else {
+        println!("Initialized project {}", project);
+        println!("Undo (if you just created this project): rm -rf {}", project_root.display());
+    }
+    if created_global {
+        println!("Undo (if you want to remove the created config): rm -f {}", global_config.display());
     }
 
     Ok(())
@@ -611,18 +636,8 @@ fn resolve_init_project(project: Option<String>) -> anyhow::Result<String> {
         .ok_or_else(|| anyhow::anyhow!("cannot derive project name from cwd"))?
         .to_string();
 
-    println!("No project specified.");
-    println!("Use current directory name as project? {}", name);
-    print!("Create project '{}' [Y/n]: ", name);
-    io::stdout().flush()?;
-    let mut input = String::new();
-    io::stdin().read_line(&mut input)?;
-    let input = input.trim().to_lowercase();
-    if input.is_empty() || input == "y" || input == "yes" {
-        return Ok(name);
-    }
-
-    Err(anyhow::anyhow!("project is required (use --project)"))
+    println!("No project specified. Using current directory name: {}", name);
+    Ok(name)
 }
 
 fn issues_create(
@@ -631,6 +646,7 @@ fn issues_create(
     priority: Option<String>,
     assignee: Option<String>,
     labels: Vec<String>,
+    body: Option<String>,
     body_file: Option<PathBuf>,
 ) -> anyhow::Result<()> {
     let project_root = project_root(project)?;
@@ -649,7 +665,9 @@ fn issues_create(
         updated_at: now.clone(),
     };
 
-    let body = if let Some(path) = body_file {
+    let body = if let Some(body) = body {
+        body
+    } else if let Some(path) = body_file {
         fs::read_to_string(path)?
     } else {
         "## Summary\n\n## Acceptance Criteria\n".to_string()
@@ -669,6 +687,7 @@ fn issues_create(
             "priority": frontmatter.priority,
             "assignee": frontmatter.assignee,
             "labels": frontmatter.labels,
+            "body": body,
         }),
     )?;
 
@@ -824,32 +843,99 @@ fn issues_reopen(project: &str, id: &str, status: Option<String>) -> anyhow::Res
 
 fn issues_delete(project: &str, id: &str, force: bool) -> anyhow::Result<()> {
     let project_root = project_root(project)?;
-    if !force {
-        print!("delete {}? [y/N]: ", id);
-        io::stdout().flush()?;
-        let mut input = String::new();
-        io::stdin().read_line(&mut input)?;
-        let input = input.trim().to_lowercase();
-        if input != "y" && input != "yes" {
-            return Ok(());
-        }
-    }
-
     let issue_path = project_root.join("issues").join(format!("{}.md", id));
-    if issue_path.exists() {
-        fs::remove_file(&issue_path)?;
+    let events_path = project_root.join("events").join(format!("{}.jsonl", id));
+
+    if force {
+        if issue_path.exists() {
+            fs::remove_file(&issue_path)?;
+        }
+        if events_path.exists() {
+            fs::remove_file(&events_path)?;
+        }
+        let mut index = read_index_or_empty(project, &project_root)?;
+        index.issues.retain(|i| i.id != id);
+        index.generated_at = now_ts();
+        write_index(&project_root.join("index").join("issues.json"), &index)?;
+        println!("Deleted {} (hard).", id);
+        println!("No undo available (used --force).");
+        return Ok(());
     }
 
-    let events_path = project_root.join("events").join(format!("{}.jsonl", id));
+    if !issue_path.exists() {
+        return Err(anyhow::anyhow!("issue not found: {}", id));
+    }
+
+    let (trash_issue_path, trash_events_path) = issue_trash_paths(&project_root, id);
+    if let Some(parent) = trash_issue_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    if let Some(parent) = trash_events_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    if trash_issue_path.exists() {
+        fs::remove_file(&trash_issue_path)?;
+    }
+    fs::rename(&issue_path, &trash_issue_path)?;
+
     if events_path.exists() {
         append_event(&events_path, "issue.delete", id, serde_json::json!({}))?;
+        if trash_events_path.exists() {
+            fs::remove_file(&trash_events_path)?;
+        }
+        fs::rename(&events_path, &trash_events_path)?;
     }
 
     let mut index = read_index_or_empty(project, &project_root)?;
     index.issues.retain(|i| i.id != id);
     index.generated_at = now_ts();
     write_index(&project_root.join("index").join("issues.json"), &index)?;
+    println!("Deleted {}.", id);
+    println!("Undo: scope issues restore --project {} {}", project, id);
     Ok(())
+}
+
+fn issues_restore(project: &str, id: &str) -> anyhow::Result<()> {
+    let project_root = project_root(project)?;
+    let issue_path = project_root.join("issues").join(format!("{}.md", id));
+    let events_path = project_root.join("events").join(format!("{}.jsonl", id));
+    let (trash_issue_path, trash_events_path) = issue_trash_paths(&project_root, id);
+
+    if issue_path.exists() {
+        return Err(anyhow::anyhow!("issue already exists: {}", id));
+    }
+    if !trash_issue_path.exists() {
+        return Err(anyhow::anyhow!("no trashed issue found for {}", id));
+    }
+
+    if let Some(parent) = issue_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    if let Some(parent) = events_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    fs::rename(&trash_issue_path, &issue_path)?;
+    if trash_events_path.exists() {
+        if events_path.exists() {
+            return Err(anyhow::anyhow!("events already exist for {}", id));
+        }
+        fs::rename(&trash_events_path, &events_path)?;
+    }
+
+    let content = fs::read_to_string(&issue_path)?;
+    let (frontmatter, _) = parse_frontmatter(&content)?;
+    upsert_index_from_issue(project, &project_root, &frontmatter)?;
+    println!("Restored {}.", id);
+    Ok(())
+}
+
+fn issue_trash_paths(project_root: &Path, id: &str) -> (PathBuf, PathBuf) {
+    let trash_root = project_root.join("trash");
+    let issue_path = trash_root.join("issues").join(format!("{}.md", id));
+    let events_path = trash_root.join("events").join(format!("{}.jsonl", id));
+    (issue_path, events_path)
 }
 
 fn issues_list(
@@ -1356,7 +1442,7 @@ Use the `scope` CLI to manage local-first issues stored as markdown snapshots pl
 1. Initialize a project:
    - `scope issues init --project <name>`
 2. Create an issue:
-   - `scope issues create --project <name> --title "..." [--priority p1] [--assignee ...] [--label ...]`
+   - `scope issues create --project <name> --title "..." [--priority p1] [--assignee ...] [--label ...] [--body "..."] [--body-file ./issue.md]`
 3. List and show:
    - `scope issues list --project <name>`
    - `scope issues show --project <name> <id>`
@@ -1367,7 +1453,9 @@ Use the `scope` CLI to manage local-first issues stored as markdown snapshots pl
 
 - Update fields: `scope issues update <id> --status in_progress --add-label planning`
 - Close/reopen: `scope issues close <id>` / `scope issues reopen <id>`
+- Delete/restore (no prompts): `scope issues delete <id>` / `scope issues restore <id>` (`--force` is permanent)
 - Edit body: `scope issues edit <id>`
+  - Avoid stdin/heredoc bodies (ex: `/dev/stdin`, `<<EOF`) in agent shells; prefer `--body`, a real file path, or `scope issues edit`
 
 ### Comments
 
@@ -1405,7 +1493,7 @@ Read these when you need the detailed spec or schema:
 fn embedded_openai_yaml() -> &'static str {
     r#"display_name: Scope CLI
 short_description: Developer-first issue tracking via scope CLI
-default_prompt: Help with the scope CLI: create/update/list/show issues, comments, conflicts, indexes, projects, and local config. Prefer CLI commands and reference the spec docs in this repo when needed.
+default_prompt: Help with the scope CLI: create/update/list/show issues, comments, conflicts, indexes, projects, and local config. Prefer CLI commands, avoid stdin/heredoc bodies; use --body or a real file path, and reference the spec docs in this repo when needed.
 "#
 }
 
@@ -1426,13 +1514,14 @@ fn embedded_cli_md() -> &'static str {
 
 ```bash
 scope issues init --project <name>
-scope issues create --project <name> --title "..."
+scope issues create --project <name> --title "..." [--body "..."] [--body-file ./issue.md]
 scope issues list --project <name> [--json]
 scope issues show --project <name> <id>
 scope issues update <id> [--status ...] [--priority ...] [--add-label ...]
 scope issues close <id>
 scope issues reopen <id> [--status ...]
 scope issues delete <id> [--force]
+scope issues restore <id>
 
 scope issues comments add <id> --body "..."
 scope issues comments list <id> [--json]
@@ -1450,6 +1539,8 @@ scope issues conflicts list
 scope issues conflicts show <conflict_id>
 scope issues conflicts resolve <conflict_id> --keep local|remote
 ```
+
+Note: avoid stdin/heredoc bodies (ex: `/dev/stdin`, `<<EOF`) in agent shells; prefer `--body`, a real file path, or `scope issues edit`. `scope issues delete` is a soft delete by default and prints an undo command; use `--force` for permanent removal.
 "#
 }
 

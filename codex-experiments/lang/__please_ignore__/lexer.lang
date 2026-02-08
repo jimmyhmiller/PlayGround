@@ -1,0 +1,388 @@
+use token::TokenKind;
+use token::Token;
+use token::TokenList;
+use token::list_reverse;
+use token::list_len;
+
+extern fn string_len(s: String) -> I64;
+extern fn string_byte_at(s: String, index: I64) -> I64;
+
+fn is_whitespace(c: I64) -> I64 {
+    let one: I64 = 1;
+    let zero: I64 = 0;
+    let space: I64 = 32;
+    let nl: I64 = 10;
+    let tab: I64 = 9;
+    let cr: I64 = 13;
+    if c == space { one } else { if c == nl { one } else { if c == tab { one } else { if c == cr { one } else { zero } } } }
+}
+
+fn is_alpha(c: I64) -> I64 {
+    let one: I64 = 1;
+    let zero: I64 = 0;
+    let a_upper: I64 = 65;
+    let z_upper: I64 = 90;
+    let a_lower: I64 = 97;
+    let z_lower: I64 = 122;
+    if c >= a_upper {
+        if c <= z_upper {
+            one
+        } else {
+            if c >= a_lower {
+                if c <= z_lower { one } else { zero }
+            } else {
+                zero
+            }
+        }
+    } else {
+        if c >= a_lower {
+            if c <= z_lower { one } else { zero }
+        } else {
+            zero
+        }
+    }
+}
+
+fn is_digit(c: I64) -> I64 {
+    let one: I64 = 1;
+    let zero: I64 = 0;
+    let d0: I64 = 48;
+    let d9: I64 = 57;
+    if c >= d0 {
+        if c <= d9 { one } else { zero }
+    } else {
+        zero
+    }
+}
+
+fn is_alnum(c: I64) -> I64 {
+    let one: I64 = 1;
+    let zero: I64 = 0;
+    if is_alpha(c) == one { one } else { if is_digit(c) == one { one } else { zero } }
+}
+
+fn is_ident_char(c: I64) -> I64 {
+    let one: I64 = 1;
+    let zero: I64 = 0;
+    let underscore: I64 = 95;
+    if is_alnum(c) == one { one } else { if c == underscore { one } else { zero } }
+}
+
+fn is_kw_fn(src: String, start: I64, end_pos: I64) -> I64 {
+    let one: I64 = 1;
+    let zero: I64 = 0;
+    let f: I64 = 102;
+    let n: I64 = 110;
+    if end_pos - start != 2 { return zero; };
+    if string_byte_at(src, start) == f && string_byte_at(src, start + one) == n { one } else { zero }
+}
+
+fn is_kw_let(src: String, start: I64, end_pos: I64) -> I64 {
+    let one: I64 = 1;
+    let zero: I64 = 0;
+    let l: I64 = 108;
+    let e: I64 = 101;
+    let t: I64 = 116;
+    if end_pos - start != 3 { return zero; };
+    if string_byte_at(src, start) == l && string_byte_at(src, start + one) == e && string_byte_at(src, start + 2) == t { one } else { zero }
+}
+
+fn is_kw_struct(src: String, start: I64, end_pos: I64) -> I64 {
+    let one: I64 = 1;
+    let zero: I64 = 0;
+    let s: I64 = 115;
+    let t: I64 = 116;
+    let r: I64 = 114;
+    let u: I64 = 117;
+    let c: I64 = 99;
+    if end_pos - start != 6 { return zero; };
+    if string_byte_at(src, start) == s
+        && string_byte_at(src, start + one) == t
+        && string_byte_at(src, start + 2) == r
+        && string_byte_at(src, start + 3) == u
+        && string_byte_at(src, start + 4) == c
+        && string_byte_at(src, start + 5) == t { one } else { zero }
+}
+
+fn is_kw_enum(src: String, start: I64, end_pos: I64) -> I64 {
+    let one: I64 = 1;
+    let zero: I64 = 0;
+    let e: I64 = 101;
+    let n: I64 = 110;
+    let u: I64 = 117;
+    let m: I64 = 109;
+    if end_pos - start != 4 { return zero; };
+    if string_byte_at(src, start) == e
+        && string_byte_at(src, start + one) == n
+        && string_byte_at(src, start + 2) == u
+        && string_byte_at(src, start + 3) == m { one } else { zero }
+}
+
+fn is_kw_extern(src: String, start: I64, end_pos: I64) -> I64 {
+    let one: I64 = 1;
+    let zero: I64 = 0;
+    let e: I64 = 101;
+    let x: I64 = 120;
+    let t: I64 = 116;
+    let r: I64 = 114;
+    let n: I64 = 110;
+    if end_pos - start != 6 { return zero; };
+    if string_byte_at(src, start) == e
+        && string_byte_at(src, start + one) == x
+        && string_byte_at(src, start + 2) == t
+        && string_byte_at(src, start + 3) == e
+        && string_byte_at(src, start + 4) == r
+        && string_byte_at(src, start + 5) == n { one } else { zero }
+}
+
+fn is_kw_use(src: String, start: I64, end_pos: I64) -> I64 {
+    let one: I64 = 1;
+    let zero: I64 = 0;
+    let u: I64 = 117;
+    let s: I64 = 115;
+    let e: I64 = 101;
+    if end_pos - start != 3 { return zero; };
+    if string_byte_at(src, start) == u && string_byte_at(src, start + one) == s && string_byte_at(src, start + 2) == e { one } else { zero }
+}
+
+fn is_kw_match(src: String, start: I64, end_pos: I64) -> I64 {
+    let one: I64 = 1;
+    let zero: I64 = 0;
+    let m: I64 = 109;
+    let a: I64 = 97;
+    let t: I64 = 116;
+    let c: I64 = 99;
+    let h: I64 = 104;
+    if end_pos - start != 5 { return zero; };
+    if string_byte_at(src, start) == m
+        && string_byte_at(src, start + one) == a
+        && string_byte_at(src, start + 2) == t
+        && string_byte_at(src, start + 3) == c
+        && string_byte_at(src, start + 4) == h { one } else { zero }
+}
+
+fn is_kw_if(src: String, start: I64, end_pos: I64) -> I64 {
+    let one: I64 = 1;
+    let zero: I64 = 0;
+    let i: I64 = 105;
+    let f: I64 = 102;
+    if end_pos - start != 2 { return zero; };
+    if string_byte_at(src, start) == i && string_byte_at(src, start + one) == f { one } else { zero }
+}
+
+fn is_kw_else(src: String, start: I64, end_pos: I64) -> I64 {
+    let one: I64 = 1;
+    let zero: I64 = 0;
+    let e: I64 = 101;
+    let l: I64 = 108;
+    let s: I64 = 115;
+    if end_pos - start != 4 { return zero; };
+    if string_byte_at(src, start) == e
+        && string_byte_at(src, start + one) == l
+        && string_byte_at(src, start + 2) == s
+        && string_byte_at(src, start + 3) == e { one } else { zero }
+}
+
+fn is_kw_while(src: String, start: I64, end_pos: I64) -> I64 {
+    let one: I64 = 1;
+    let zero: I64 = 0;
+    let w: I64 = 119;
+    let h: I64 = 104;
+    let i: I64 = 105;
+    let l: I64 = 108;
+    let e: I64 = 101;
+    if end_pos - start != 5 { return zero; };
+    if string_byte_at(src, start) == w
+        && string_byte_at(src, start + one) == h
+        && string_byte_at(src, start + 2) == i
+        && string_byte_at(src, start + 3) == l
+        && string_byte_at(src, start + 4) == e { one } else { zero }
+}
+
+fn is_kw_return(src: String, start: I64, end_pos: I64) -> I64 {
+    let one: I64 = 1;
+    let zero: I64 = 0;
+    let r: I64 = 114;
+    let e: I64 = 101;
+    let t: I64 = 116;
+    let u: I64 = 117;
+    let n: I64 = 110;
+    if end_pos - start != 6 { return zero; };
+    if string_byte_at(src, start) == r
+        && string_byte_at(src, start + one) == e
+        && string_byte_at(src, start + 2) == t
+        && string_byte_at(src, start + 3) == u
+        && string_byte_at(src, start + 4) == r
+        && string_byte_at(src, start + 5) == n { one } else { zero }
+}
+
+fn is_kw_mut(src: String, start: I64, end_pos: I64) -> I64 {
+    let one: I64 = 1;
+    let zero: I64 = 0;
+    let m: I64 = 109;
+    let u: I64 = 117;
+    let t: I64 = 116;
+    if end_pos - start != 3 { return zero; };
+    if string_byte_at(src, start) == m && string_byte_at(src, start + one) == u && string_byte_at(src, start + 2) == t { one } else { zero }
+}
+
+fn is_kw_true(src: String, start: I64, end_pos: I64) -> I64 {
+    let one: I64 = 1;
+    let zero: I64 = 0;
+    let t: I64 = 116;
+    let r: I64 = 114;
+    let u: I64 = 117;
+    let e: I64 = 101;
+    if end_pos - start != 4 { return zero; };
+    if string_byte_at(src, start) == t
+        && string_byte_at(src, start + one) == r
+        && string_byte_at(src, start + 2) == u
+        && string_byte_at(src, start + 3) == e { one } else { zero }
+}
+
+fn is_kw_false(src: String, start: I64, end_pos: I64) -> I64 {
+    let one: I64 = 1;
+    let zero: I64 = 0;
+    let f: I64 = 102;
+    let a: I64 = 97;
+    let l: I64 = 108;
+    let s: I64 = 115;
+    let e: I64 = 101;
+    if end_pos - start != 5 { return zero; };
+    if string_byte_at(src, start) == f
+        && string_byte_at(src, start + one) == a
+        && string_byte_at(src, start + 2) == l
+        && string_byte_at(src, start + 3) == s
+        && string_byte_at(src, start + 4) == e { one } else { zero }
+}
+
+fn keyword_kind(src: String, start: I64, end_pos: I64) -> TokenKind {
+    if is_kw_fn(src, start, end_pos) == 1 { return TokenKind::KwFn {}; };
+    if is_kw_let(src, start, end_pos) == 1 { return TokenKind::KwLet {}; };
+    if is_kw_struct(src, start, end_pos) == 1 { return TokenKind::KwStruct {}; };
+    if is_kw_enum(src, start, end_pos) == 1 { return TokenKind::KwEnum {}; };
+    if is_kw_extern(src, start, end_pos) == 1 { return TokenKind::KwExtern {}; };
+    if is_kw_use(src, start, end_pos) == 1 { return TokenKind::KwUse {}; };
+    if is_kw_match(src, start, end_pos) == 1 { return TokenKind::KwMatch {}; };
+    if is_kw_if(src, start, end_pos) == 1 { return TokenKind::KwIf {}; };
+    if is_kw_else(src, start, end_pos) == 1 { return TokenKind::KwElse {}; };
+    if is_kw_while(src, start, end_pos) == 1 { return TokenKind::KwWhile {}; };
+    if is_kw_return(src, start, end_pos) == 1 { return TokenKind::KwReturn {}; };
+    if is_kw_mut(src, start, end_pos) == 1 { return TokenKind::KwMut {}; };
+    if is_kw_true(src, start, end_pos) == 1 { return TokenKind::KwTrue {}; };
+    if is_kw_false(src, start, end_pos) == 1 { return TokenKind::KwFalse {}; };
+    TokenKind::Ident {}
+}
+
+fn lex_list(src: String) -> TokenList {
+    let zero: I64 = 0;
+    let one: I64 = 1;
+    let two: I64 = 2;
+    let slash: I64 = 47;
+    let newline: I64 = 10;
+    let quote: I64 = 34;
+    let underscore: I64 = 95;
+    let dash: I64 = 45;
+    let gt: I64 = 62;
+    let colon: I64 = 58;
+    let mut pos: I64 = 0;
+    let len: I64 = string_len(src);
+    let mut list: TokenList = TokenList::Nil {};
+
+    while pos < len {
+        let c: I64 = string_byte_at(src, pos);
+        let mut handled: I64 = zero;
+
+        if is_whitespace(c) == one {
+            pos = pos + one;
+            handled = one;
+        };
+
+        if handled == zero {
+            if c == slash {
+                let next: I64 = if pos + one < len { string_byte_at(src, pos + one) } else { zero };
+                if next == slash {
+                    pos = pos + two;
+                    while pos < len && string_byte_at(src, pos) != newline { pos = pos + one; };
+                    handled = one;
+                }
+            }
+        };
+
+        if handled == zero {
+            let start: I64 = pos;
+            let mut end_pos: I64 = pos + one;
+            let mut kind: TokenKind = TokenKind::Sym { code: c };
+            if c == dash {
+                let next: I64 = if pos + one < len { string_byte_at(src, pos + one) } else { zero };
+                if next == gt {
+                    pos = pos + two;
+                    end_pos = pos;
+                    kind = TokenKind::Arrow {};
+                    handled = one;
+                }
+            };
+            if handled == zero {
+                if c == colon {
+                    let next: I64 = if pos + one < len { string_byte_at(src, pos + one) } else { zero };
+                    if next == colon {
+                        pos = pos + two;
+                        end_pos = pos;
+                        kind = TokenKind::ColonColon {};
+                        handled = one;
+                    }
+                }
+            };
+            if is_alpha(c) == one {
+                pos = pos + one;
+                while pos < len && is_ident_char(string_byte_at(src, pos)) == one { pos = pos + one; };
+                end_pos = pos;
+                kind = keyword_kind(src, start, end_pos);
+                handled = one;
+            };
+            if handled == zero {
+                if c == underscore {
+                    pos = pos + one;
+                    while pos < len && is_ident_char(string_byte_at(src, pos)) == one { pos = pos + one; };
+                    end_pos = pos;
+                    kind = keyword_kind(src, start, end_pos);
+                    handled = one;
+                };
+            };
+            if handled == zero {
+                if is_digit(c) == one {
+                    pos = pos + one;
+                    while pos < len && is_digit(string_byte_at(src, pos)) == one { pos = pos + one; };
+                    end_pos = pos;
+                    kind = TokenKind::Int {};
+                    handled = one;
+                };
+            };
+            if handled == zero {
+                if c == quote {
+                    pos = pos + one;
+                    while pos < len && string_byte_at(src, pos) != quote { pos = pos + one; };
+                    if pos < len { pos = pos + one; };
+                    end_pos = pos;
+                    kind = TokenKind::Sym { code: c };
+                    handled = one;
+                };
+            };
+            if handled == zero {
+                pos = pos + one;
+                end_pos = pos;
+            };
+
+            let tok: Token = Token { kind: kind, start: start, end: end_pos };
+            list = TokenList::Cons { head: tok, tail: list };
+        };
+
+    };
+
+    list_reverse(list)
+}
+
+fn count_tokens(src: String) -> I64 {
+    let list: TokenList = lex_list(src);
+    list_len(list)
+}
