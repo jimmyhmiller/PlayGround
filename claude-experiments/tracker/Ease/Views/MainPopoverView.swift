@@ -51,12 +51,18 @@ struct MainPopoverView: View {
     private var mainContent: some View {
         VStack(spacing: 16) {
             // Time period picker
-            TimePeriodPicker(selection: $viewModel.selectedPeriod)
+            TimePeriodPicker(selection: $viewModel.selectedPeriod, animate: !viewModel.showCalendarView)
 
-            // Proportional bars visualization
+            // Bars or calendar heatmap visualization
             if !viewModel.goals.isEmpty {
-                ProportionalBarsView()
-                    .padding(.horizontal, 8)
+                Group {
+                    if viewModel.showCalendarView {
+                        CalendarHeatmapView()
+                    } else {
+                        ProportionalBarsView()
+                    }
+                }
+                .padding(.horizontal, 4)
 
                 Divider()
             }
@@ -83,6 +89,9 @@ struct MainPopoverView: View {
                                 viewModel.updateGoalColor(goal, colorHex: colorHex)
                             }
                         )
+                        .onHover { hovering in
+                            viewModel.hoveredGoalId = hovering ? goal.id : nil
+                        }
                         .opacity(draggingGoal?.id == goal.id ? 0.5 : 1.0)
                         .animation(.easeInOut(duration: 0.15), value: draggingGoal?.id)
                         .onDrag {

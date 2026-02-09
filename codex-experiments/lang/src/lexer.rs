@@ -249,6 +249,7 @@ impl<'a> Lexer<'a> {
             "repr" => TokenKind::Repr,
             "true" => TokenKind::True,
             "false" => TokenKind::False,
+            "link" => TokenKind::Link,
             _ => TokenKind::Ident(text.to_string()),
         };
         Token {

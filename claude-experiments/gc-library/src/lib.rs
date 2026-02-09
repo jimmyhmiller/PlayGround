@@ -65,6 +65,9 @@ pub mod example;
 #[cfg(feature = "std")]
 pub mod ffi;
 
+#[cfg(feature = "std")]
+pub mod lang_gc;
+
 // Re-export commonly used items
 pub use gc::{AllocateAction, Allocator, AllocatorOptions};
 pub use traits::{
@@ -84,3 +87,7 @@ pub use gc::get_page_size;
 // Re-export FFI types for C interop
 #[cfg(feature = "std")]
 pub use ffi::{GcHandle, GcRootCallback, GcRootEnumerator};
+
+// Re-export custom GC types for C interop
+#[cfg(feature = "std")]
+pub use lang_gc::{GcCustomConfig, GcCustomHandle};

@@ -77,8 +77,9 @@ pub fn typecheck_modules(modules: &[Module]) -> Result<(), Vec<TypeError>> {
 
     for module in modules {
         let module_path = module.path.clone().unwrap_or_default();
-        // Build per-module extern fns so each module sees its own declarations
-        let mut mod_extern_fns = HashMap::new();
+        // Start from global extern fns and add per-module declarations on top,
+        // so cross-module extern fn calls (via `use`) are resolvable.
+        let mut mod_extern_fns = env.extern_fns.clone();
         let empty_tp: Vec<String> = Vec::new();
         for item in &module.items {
             if let Item::ExternFn(f) = item {
@@ -221,7 +222,7 @@ fn build_env(modules: &[Module], errors: &mut Vec<TypeError>) -> TypeEnv {
                         },
                     );
                 }
-                Item::Use(_) => {}
+                Item::Use(_) | Item::Link(_) => {}
             }
         }
     }
@@ -1012,10 +1013,10 @@ fn is_raw_ptr_i8(ty: &Ty) -> bool {
 }
 
 fn types_compatible(a: &Ty, b: &Ty) -> bool {
-    if is_raw_ptr_i8(a) && matches!(b, Ty::Struct(..) | Ty::Enum(..) | Ty::RawPtr(..)) {
+    if is_raw_ptr_i8(a) && matches!(b, Ty::Struct(..) | Ty::Enum(..) | Ty::RawPtr(..) | Ty::String) {
         return true;
     }
-    if is_raw_ptr_i8(b) && matches!(a, Ty::Struct(..) | Ty::Enum(..) | Ty::RawPtr(..)) {
+    if is_raw_ptr_i8(b) && matches!(a, Ty::Struct(..) | Ty::Enum(..) | Ty::RawPtr(..) | Ty::String) {
         return true;
     }
     false

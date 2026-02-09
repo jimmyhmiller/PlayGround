@@ -1,9 +1,82 @@
-extern fn vec_new() -> RawPointer<I8>;
-extern fn vec_len(v: RawPointer<I8>) -> I64;
-extern fn vec_get(v: RawPointer<I8>, index: I64) -> RawPointer<I8>;
-extern fn vec_push(v: RawPointer<I8>, item: RawPointer<I8>) -> I64;
+// Vec — opaque GC-allocated vector object
+//
+// Vec layout (3 fields, type_id=0):
+//   field 0: data ptr (GC ref) — pointer to data array GC object
+//   field 1: len (raw i64)
+//   field 2: cap (raw i64)
+//
+// Implementation is in runtime/gc_bridge.c.
+// This file provides extern declarations and typed aliases.
 
-fn vec_is_empty(v: RawPointer<I8>) -> I64 {
-    let zero: I64 = 0;
-    if vec_len(v) == zero { 1 } else { 0 }
-}
+struct Vec { }
+
+use ast::Module;
+use ast::Item;
+use ast::Param;
+use ast::Field;
+use ast::EnumVariant;
+use ast::Type;
+use ast::Expr;
+use ast::MatchArm;
+use ast::Stmt;
+use ast::PatternField;
+use ast::StructLitField;
+use lexer::Token;
+
+// -- core vec operations (implemented in C) --
+extern fn vec_new() -> Vec;
+extern fn vec_len(v: Vec) -> I64;
+extern fn vec_push(v: Vec, item: RawPointer<I8>) -> I64;
+extern fn vec_push_raw_val(v: Vec, item: RawPointer<I8>) -> I64;
+extern fn vec_get(v: Vec, index: I64) -> RawPointer<I8>;
+extern fn vec_clear(v: Vec) -> I64;
+extern fn vec_set_len(v: Vec, new_len: I64) -> I64;
+extern fn vec_is_empty(v: Vec) -> I64;
+extern fn vec_data(v: Vec) -> RawPointer<I8>;
+
+// -- utility externs --
+extern fn null_ptr() -> RawPointer<I8>;
+extern fn ptr_is_null(p: RawPointer<I8>) -> I64;
+
+// =============================================================================
+// Typed aliases — GC ref types use vec_push/vec_get,
+//                 raw types (String, RawPointer) use vec_push_raw_val/vec_get
+// =============================================================================
+
+// String is NOT a GC ref — use raw variants
+fn vec_push_str(v: Vec, item: String) -> I64 { vec_push_raw_val(v, item) }
+fn vec_get_str(v: Vec, index: I64) -> String { vec_get(v, index) }
+
+// RawPointer<I8> is NOT a GC ref — use raw variants
+fn vec_push_raw(v: Vec, item: RawPointer<I8>) -> I64 { vec_push_raw_val(v, item) }
+fn vec_get_raw(v: Vec, index: I64) -> RawPointer<I8> { vec_get(v, index) }
+
+// All struct/enum types ARE GC refs — use ptr variants
+fn vec_push_item(v: Vec, item: Item) -> I64 { vec_push(v, item) }
+fn vec_get_item(v: Vec, index: I64) -> Item { vec_get(v, index) }
+fn vec_push_param(v: Vec, item: Param) -> I64 { vec_push(v, item) }
+fn vec_get_param(v: Vec, index: I64) -> Param { vec_get(v, index) }
+fn vec_push_field(v: Vec, item: Field) -> I64 { vec_push(v, item) }
+fn vec_get_field(v: Vec, index: I64) -> Field { vec_get(v, index) }
+fn vec_push_variant(v: Vec, item: EnumVariant) -> I64 { vec_push(v, item) }
+fn vec_get_variant(v: Vec, index: I64) -> EnumVariant { vec_get(v, index) }
+fn vec_push_type(v: Vec, item: Type) -> I64 { vec_push(v, item) }
+fn vec_get_type(v: Vec, index: I64) -> Type { vec_get(v, index) }
+fn vec_push_expr(v: Vec, item: Expr) -> I64 { vec_push(v, item) }
+fn vec_get_expr(v: Vec, index: I64) -> Expr { vec_get(v, index) }
+fn vec_push_arm(v: Vec, item: MatchArm) -> I64 { vec_push(v, item) }
+fn vec_get_arm(v: Vec, index: I64) -> MatchArm { vec_get(v, index) }
+fn vec_push_stmt(v: Vec, item: Stmt) -> I64 { vec_push(v, item) }
+fn vec_get_stmt(v: Vec, index: I64) -> Stmt { vec_get(v, index) }
+fn vec_push_pfield(v: Vec, item: PatternField) -> I64 { vec_push(v, item) }
+fn vec_get_pfield(v: Vec, index: I64) -> PatternField { vec_get(v, index) }
+fn vec_push_slfield(v: Vec, item: StructLitField) -> I64 { vec_push(v, item) }
+fn vec_get_slfield(v: Vec, index: I64) -> StructLitField { vec_get(v, index) }
+fn vec_push_module(v: Vec, item: Module) -> I64 { vec_push(v, item) }
+fn vec_get_module(v: Vec, index: I64) -> Module { vec_get(v, index) }
+fn vec_push_tok(v: Vec, item: Token) -> I64 { vec_push(v, item) }
+fn vec_get_tok(v: Vec, index: I64) -> Token { vec_get(v, index) }
+
+// Vec of Vecs — Vec IS a GC ref
+fn vec_push_vec(v: Vec, item: Vec) -> I64 { vec_push(v, item) }
+fn vec_get_vec(v: Vec, index: I64) -> Vec { vec_get(v, index) }

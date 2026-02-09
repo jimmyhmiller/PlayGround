@@ -1,5 +1,67 @@
-extern fn read_file(path: String) -> String;
-extern fn arg_i64(index: I64) -> I64;
-extern fn arg_str(index: I64) -> String;
-extern fn arg_is_i64(index: I64) -> I64;
-extern fn arg_len() -> I64;
+// I/O operations implemented in .lang using libc + C runtime extern fns.
+
+link "c";
+
+use string::string_len;
+use string::string_from_i64;
+
+// libc (String and RawPointer<I8> are both pointers at ABI level)
+extern fn write(fd: I64, buf: String, count: I64) -> I64;
+extern fn read(fd: I64, buf: RawPointer<I8>, count: I64) -> I64;
+extern fn open(path: String, flags: I64) -> I64;
+extern fn close(fd: I64) -> I64;
+extern fn lseek(fd: I64, offset: I64, whence: I64) -> I64;
+extern fn malloc(size: I64) -> RawPointer<I8>;
+
+// C runtime (from runtime.c)
+extern fn exit_process(code: I64) -> I64;
+extern fn system_cmd(cmd: String) -> I64;
+extern fn create_dir(path: String) -> I64;
+extern fn write_file(path: String, data: String, len: I64) -> I64;
+extern fn file_exists(path: String) -> I64;
+extern fn get_stdlib_path() -> String;
+extern fn rt_get_argc() -> I64;
+extern fn rt_get_argv() -> RawPointer<I8>;
+extern fn ptr_load_ptr(p: RawPointer<I8>, off: I64) -> RawPointer<I8>;
+extern fn ptr_store_i8(p: RawPointer<I8>, off: I64, val: I64) -> I64;
+
+fn print_str(s: String) -> I64 {
+    let len: I64 = string_len(s);
+    write(1, s, len);
+    write(1, "\n", 1);
+    0
+}
+
+fn print_str_stderr(s: String) -> I64 {
+    let len: I64 = string_len(s);
+    write(2, s, len);
+    write(2, "\n", 1);
+    0
+}
+
+fn print_int(n: I64) -> I64 {
+    print_str(string_from_i64(n))
+}
+
+fn read_file(path: String) -> String {
+    let fd: I64 = open(path, 0);
+    if fd < 0 { return ""; };
+    let size: I64 = lseek(fd, 0, 2);
+    lseek(fd, 0, 0);
+    let buf: RawPointer<I8> = malloc(size + 1);
+    read(fd, buf, size);
+    ptr_store_i8(buf, size, 0);
+    close(fd);
+    buf
+}
+
+fn arg_len() -> I64 {
+    let argc: I64 = rt_get_argc();
+    if argc < 1 { 0 } else { argc - 1 }
+}
+
+fn arg_str(index: I64) -> String {
+    let argv: RawPointer<I8> = rt_get_argv();
+    let actual: I64 = index + 1;
+    ptr_load_ptr(argv, actual * 8)
+}

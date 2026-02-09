@@ -448,6 +448,7 @@ fn main() -> anyhow::Result<()> {
                 remove_labels,
             } => {
                 let project = resolve_project(project)?;
+                let id = resolve_issue_id(&project, &id)?;
                 issues_update(
                     &project,
                     &id,
@@ -462,22 +463,27 @@ fn main() -> anyhow::Result<()> {
             }
             IssuesCommand::Edit { project, id, editor } => {
                 let project = resolve_project(project)?;
+                let id = resolve_issue_id(&project, &id)?;
                 issues_edit(&project, &id, editor)?;
             }
             IssuesCommand::Close { project, id } => {
                 let project = resolve_project(project)?;
+                let id = resolve_issue_id(&project, &id)?;
                 issues_close(&project, &id)?;
             }
             IssuesCommand::Reopen { project, id, status } => {
                 let project = resolve_project(project)?;
+                let id = resolve_issue_id(&project, &id)?;
                 issues_reopen(&project, &id, status)?;
             }
             IssuesCommand::Delete { project, id, force } => {
                 let project = resolve_project(project)?;
+                let id = resolve_issue_id(&project, &id)?;
                 issues_delete(&project, &id, force)?;
             }
             IssuesCommand::Restore { project, id } => {
                 let project = resolve_project(project)?;
+                let id = resolve_issue_id(&project, &id)?;
                 issues_restore(&project, &id)?;
             }
             IssuesCommand::List {
@@ -495,6 +501,7 @@ fn main() -> anyhow::Result<()> {
             }
             IssuesCommand::Show { project, id, json } => {
                 let project = resolve_project(project)?;
+                let id = resolve_issue_id(&project, &id)?;
                 issues_show(&project, &id, json)?;
             }
             IssuesCommand::Rebuild { project } => {
@@ -505,8 +512,12 @@ fn main() -> anyhow::Result<()> {
                 let project = resolve_project(project)?;
                 match command {
                     ConflictsCommand::List => issues_conflicts_list(&project)?,
-                    ConflictsCommand::Show { id } => issues_conflicts_show(&project, &id)?,
+                    ConflictsCommand::Show { id } => {
+                        let id = resolve_issue_id(&project, &id)?;
+                        issues_conflicts_show(&project, &id)?
+                    }
                     ConflictsCommand::Resolve { id, keep } => {
+                        let id = resolve_issue_id(&project, &id)?;
                         issues_conflicts_resolve(&project, &id, &keep)?
                     }
                 }
@@ -514,6 +525,7 @@ fn main() -> anyhow::Result<()> {
             IssuesCommand::Comments { command } => match command {
                 CommentsCommand::List { project, id, json } => {
                     let project = resolve_project(project)?;
+                    let id = resolve_issue_id(&project, &id)?;
                     issues_comments_list(&project, &id, json)?;
                 }
                 CommentsCommand::Add {
@@ -523,6 +535,7 @@ fn main() -> anyhow::Result<()> {
                     body_file,
                 } => {
                     let project = resolve_project(project)?;
+                    let id = resolve_issue_id(&project, &id)?;
                     issues_comments_add(&project, &id, body, body_file)?;
                 }
             },
@@ -960,9 +973,10 @@ fn issues_list(
             labels.iter().all(|l| i.labels.iter().any(|il| il == l))
         })
         .filter(|i| {
-            query
-                .as_ref()
-                .map_or(true, |q| i.title.to_lowercase().contains(&q.to_lowercase()))
+            query.as_ref().map_or(true, |q| {
+                let q = q.to_lowercase();
+                i.title.to_lowercase().contains(&q) || i.id.to_lowercase().contains(&q)
+            })
         })
         .collect();
 
@@ -985,10 +999,42 @@ fn issues_list(
     Ok(())
 }
 
+fn resolve_issue_id(project: &str, id: &str) -> anyhow::Result<String> {
+    let project_root = project_root(project)?;
+    let index = read_index(&project_root)?;
+    // Exact match first
+    if index.issues.iter().any(|i| i.id == id) {
+        return Ok(id.to_string());
+    }
+    // Substring match
+    let matches: Vec<&IndexIssue> = index
+        .issues
+        .iter()
+        .filter(|i| i.id.contains(id))
+        .collect();
+    match matches.len() {
+        0 => Err(anyhow::anyhow!("no issue found matching '{}'", id)),
+        1 => Ok(matches[0].id.clone()),
+        _ => {
+            let mut msg = format!(
+                "ambiguous ID '{}' matches {} issues:\n",
+                id,
+                matches.len()
+            );
+            for m in &matches {
+                msg.push_str(&format!("  {} - {}\n", m.id, m.title));
+            }
+            Err(anyhow::anyhow!(msg))
+        }
+    }
+}
+
 fn issues_show(project: &str, id: &str, json: bool) -> anyhow::Result<()> {
+    let id = resolve_issue_id(project, id)?;
     let project_root = project_root(project)?;
     let issue_path = project_root.join("issues").join(format!("{}.md", id));
-    let content = fs::read_to_string(issue_path)?;
+    let content = fs::read_to_string(&issue_path)
+        .map_err(|_| anyhow::anyhow!("issue file not found for '{}'", id))?;
     let (frontmatter, body) = parse_frontmatter(&content)?;
 
     if json {

@@ -28,18 +28,36 @@ enum UndoAction {
     case deleteGoal(Goal, [Entry]) // Goal and its associated entries
 }
 
+struct HeatmapCell {
+    let index: Int
+    let date: Date
+    let totalAmount: Double
+    let goalAmounts: [(goalId: UUID, amount: Double)]
+}
+
 @MainActor
 class EaseViewModel: ObservableObject {
     @Published var goals: [Goal] = []
     @Published var entries: [Entry] = []
-    @Published var selectedPeriod: TimePeriod = .week
+    @Published var selectedPeriod: TimePeriod = .week {
+        didSet { UserDefaults.standard.set(selectedPeriod.rawValue, forKey: "selectedPeriod") }
+    }
     @Published var isAddingGoal: Bool = false
+    @Published var showCalendarView: Bool = false {
+        didSet { UserDefaults.standard.set(showCalendarView, forKey: "showCalendarView") }
+    }
+    @Published var hoveredGoalId: UUID? = nil
 
     private let dataStore = DataStore.shared
     private var undoStack: [UndoAction] = []
     private var redoStack: [UndoAction] = []
 
     init() {
+        if let savedPeriod = UserDefaults.standard.string(forKey: "selectedPeriod"),
+           let period = TimePeriod(rawValue: savedPeriod) {
+            selectedPeriod = period
+        }
+        showCalendarView = UserDefaults.standard.bool(forKey: "showCalendarView")
         loadData()
     }
 
@@ -165,6 +183,67 @@ class EaseViewModel: ObservableObject {
     }
 
     // MARK: - Icon Goals
+
+    // MARK: - Heatmap Data
+
+    func heatmapCells(for period: TimePeriod) -> [HeatmapCell] {
+        let calendar = Calendar.current
+
+        switch period {
+        case .day:
+            let startOfDay = calendar.startOfDay(for: Date())
+            return (0..<24).map { hour in
+                let hourStart = calendar.date(byAdding: .hour, value: hour, to: startOfDay)!
+                let hourEnd = calendar.date(byAdding: .hour, value: 1, to: hourStart)!
+                return makeCell(index: hour, date: hourStart, from: hourStart, to: hourEnd)
+            }
+
+        case .week:
+            let startOfWeek = period.startDate!
+            return (0..<7).map { day in
+                let dayStart = calendar.date(byAdding: .day, value: day, to: startOfWeek)!
+                let dayEnd = calendar.date(byAdding: .day, value: 1, to: dayStart)!
+                return makeCell(index: day, date: dayStart, from: dayStart, to: dayEnd)
+            }
+
+        case .month:
+            let startOfMonth = period.startDate!
+            let range = calendar.range(of: .day, in: .month, for: startOfMonth)!
+            return range.enumerated().map { (i, day) in
+                let dayDate = calendar.date(byAdding: .day, value: day - 1, to: startOfMonth)!
+                let dayStart = calendar.startOfDay(for: dayDate)
+                let dayEnd = calendar.date(byAdding: .day, value: 1, to: dayStart)!
+                return makeCell(index: i, date: dayStart, from: dayStart, to: dayEnd)
+            }
+
+        case .all:
+            let today = calendar.startOfDay(for: Date())
+            guard let earliest = entries.map({ $0.timestamp }).min() else {
+                return []
+            }
+            let startOfFirstWeek = calendar.date(from: calendar.dateComponents([.yearForWeekOfYear, .weekOfYear], from: earliest))!
+            let startOfCurrentWeek = calendar.date(from: calendar.dateComponents([.yearForWeekOfYear, .weekOfYear], from: today))!
+            let endDate = calendar.date(byAdding: .day, value: 6, to: startOfCurrentWeek)!
+            let totalDays = calendar.dateComponents([.day], from: startOfFirstWeek, to: endDate).day! + 1
+            let totalWeeks = (totalDays + 6) / 7
+            let totalCells = totalWeeks * 7
+            return (0..<totalCells).map { offset in
+                let dayStart = calendar.date(byAdding: .day, value: offset, to: startOfFirstWeek)!
+                let dayEnd = calendar.date(byAdding: .day, value: 1, to: dayStart)!
+                return makeCell(index: offset, date: dayStart, from: dayStart, to: dayEnd)
+            }
+        }
+    }
+
+    private func makeCell(index: Int, date: Date, from: Date, to: Date) -> HeatmapCell {
+        let cellEntries = entries.filter { $0.timestamp >= from && $0.timestamp < to }
+        let goalAmounts = goals.compactMap { goal -> (goalId: UUID, amount: Double)? in
+            let amount = cellEntries.filter { $0.goalId == goal.id }.reduce(0) { $0 + $1.amount }
+            return amount > 0 ? (goalId: goal.id, amount: amount) : nil
+        }
+        let total = cellEntries.reduce(0) { $0 + $1.amount }
+        return HeatmapCell(index: index, date: date, totalAmount: total, goalAmounts: goalAmounts)
+    }
 
     /// Proportions for the first 3 goals (used for icon rendering)
     func iconProportions(for period: TimePeriod) -> [(proportion: Double, colorHex: String)] {

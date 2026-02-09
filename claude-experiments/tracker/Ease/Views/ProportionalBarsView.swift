@@ -25,7 +25,11 @@ struct ProportionalBarsView: View {
                 .help(item.goal.name)
             }
         }
-        .animation(.easeInOut(duration: 0.3), value: viewModel.selectedPeriod)
-        .animation(.easeInOut(duration: 0.3), value: viewModel.entries.count)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            withAnimation(.easeInOut(duration: 0.2)) {
+                viewModel.showCalendarView = true
+            }
+        }
     }
 }

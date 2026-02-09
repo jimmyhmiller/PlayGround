@@ -48,6 +48,7 @@ struct GoalRowView: View {
 
             Text(goal.name)
                 .font(.system(size: 13))
+                .lineLimit(1)
 
             Spacer()
 

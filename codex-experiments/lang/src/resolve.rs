@@ -45,7 +45,7 @@ pub fn resolve_modules(modules: &[Module]) -> Result<(), Vec<ResolveError>> {
                     let name = full_item_name(&module_path, &f.name);
                     insert_item(&mut items, &mut errors, name, f.span, ItemKind::ExternFn);
                 }
-                Item::Use(_) => {}
+                Item::Use(_) | Item::Link(_) => {}
             }
         }
     }
@@ -112,7 +112,7 @@ pub fn resolve_modules(modules: &[Module]) -> Result<(), Vec<ResolveError>> {
                     }
                     resolve_type(&f.ret_type, &items, &builtins, &mut errors, &empty_tp);
                 }
-                Item::Use(_) => {}
+                Item::Use(_) | Item::Link(_) => {}
             }
         }
     }

@@ -1,10 +1,118 @@
-extern fn string_len(s: String) -> I64;
-extern fn string_eq(a: String, b: String) -> I64;
-extern fn string_concat(a: String, b: String) -> String;
-extern fn string_slice(s: String, start: I64, end_pos: I64) -> String;
-extern fn string_byte_at(s: String, index: I64) -> I64;
+// String operations implemented in pure .lang using pointer intrinsics.
+// Strings are null-terminated C strings (RawPointer<I8>).
+
+link "c";
+
+extern fn malloc(size: I64) -> RawPointer<I8>;
+extern fn ptr_load_i8(p: RawPointer<I8>, off: I64) -> I64;
+extern fn ptr_store_i8(p: RawPointer<I8>, off: I64, val: I64) -> I64;
+
+fn string_len(s: String) -> I64 {
+    let mut i: I64 = 0;
+    while ptr_load_i8(s, i) != 0 {
+        i = i + 1;
+    };
+    i
+}
+
+fn string_eq(a: String, b: String) -> I64 {
+    let mut i: I64 = 0;
+    while 1 == 1 {
+        let ca: I64 = ptr_load_i8(a, i);
+        let cb: I64 = ptr_load_i8(b, i);
+        if ca != cb { return 0; };
+        if ca == 0 { return 1; };
+        i = i + 1;
+    };
+    0
+}
+
+fn string_concat(a: String, b: String) -> String {
+    let len_a: I64 = string_len(a);
+    let len_b: I64 = string_len(b);
+    let buf: RawPointer<I8> = malloc(len_a + len_b + 1);
+    let mut i: I64 = 0;
+    while i < len_a {
+        ptr_store_i8(buf, i, ptr_load_i8(a, i));
+        i = i + 1;
+    };
+    let mut j: I64 = 0;
+    while j < len_b {
+        ptr_store_i8(buf, len_a + j, ptr_load_i8(b, j));
+        j = j + 1;
+    };
+    ptr_store_i8(buf, len_a + len_b, 0);
+    buf
+}
+
+fn string_slice(s: String, start: I64, end_pos: I64) -> String {
+    let len: I64 = end_pos - start;
+    let buf: RawPointer<I8> = malloc(len + 1);
+    let mut i: I64 = 0;
+    while i < len {
+        ptr_store_i8(buf, i, ptr_load_i8(s, start + i));
+        i = i + 1;
+    };
+    ptr_store_i8(buf, len, 0);
+    buf
+}
+
+fn string_byte_at(s: String, index: I64) -> I64 {
+    ptr_load_i8(s, index)
+}
+
+fn string_from_i64(val: I64) -> String {
+    if val == 0 {
+        return "0";
+    };
+    let is_neg: I64 = if val < 0 { 1 } else { 0 };
+    let mut n: I64 = if is_neg == 1 { 0 - val } else { val };
+    // Max digits in i64: 19, plus sign, plus null = 21
+    let buf: RawPointer<I8> = malloc(21);
+    let mut pos: I64 = 0;
+    while n > 0 {
+        let digit: I64 = n - (n / 10) * 10;
+        ptr_store_i8(buf, pos, digit + 48);
+        n = n / 10;
+        pos = pos + 1;
+    };
+    if is_neg == 1 {
+        ptr_store_i8(buf, pos, 45);
+        pos = pos + 1;
+    };
+    ptr_store_i8(buf, pos, 0);
+    // Reverse in-place
+    let mut lo: I64 = 0;
+    let mut hi: I64 = pos - 1;
+    while lo < hi {
+        let tmp: I64 = ptr_load_i8(buf, lo);
+        ptr_store_i8(buf, lo, ptr_load_i8(buf, hi));
+        ptr_store_i8(buf, hi, tmp);
+        lo = lo + 1;
+        hi = hi - 1;
+    };
+    buf
+}
+
+fn string_parse_i64(s: String) -> I64 {
+    let mut i: I64 = 0;
+    let mut neg: I64 = 0;
+    let first: I64 = ptr_load_i8(s, 0);
+    if first == 45 {
+        neg = 1;
+        i = 1;
+    };
+    let mut result: I64 = 0;
+    while ptr_load_i8(s, i) != 0 {
+        let ch: I64 = ptr_load_i8(s, i);
+        if ch < 48 { return 0 - 1; };
+        if ch > 57 { return 0 - 1; };
+        result = result * 10 + (ch - 48);
+        i = i + 1;
+    };
+    if neg == 1 { 0 - result } else { result }
+}
 
 fn string_is_empty(s: String) -> I64 {
-    let zero: I64 = 0;
-    if string_len(s) == zero { 1 } else { 0 }
+    if ptr_load_i8(s, 0) == 0 { 1 } else { 0 }
 }

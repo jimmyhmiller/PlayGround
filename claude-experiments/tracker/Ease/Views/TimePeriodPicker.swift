@@ -2,12 +2,17 @@ import SwiftUI
 
 struct TimePeriodPicker: View {
     @Binding var selection: TimePeriod
+    var animate: Bool = false
 
     var body: some View {
         HStack(spacing: 2) {
             ForEach(TimePeriod.allCases, id: \.self) { period in
                 Button {
-                    withAnimation(.easeInOut(duration: 0.2)) {
+                    if animate {
+                        withAnimation(.easeInOut(duration: 0.2)) {
+                            selection = period
+                        }
+                    } else {
                         selection = period
                     }
                 } label: {

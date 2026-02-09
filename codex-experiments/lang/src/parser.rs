@@ -37,6 +37,7 @@ impl Parser {
         while !self.is_eof() {
             match self.peek_kind() {
                 Some(TokenKind::Use) => items.push(Item::Use(self.parse_use_decl())),
+                Some(TokenKind::Link) => items.push(Item::Link(self.parse_link_decl())),
                 Some(TokenKind::Extern) => items.push(Item::ExternFn(self.parse_extern_fn_decl())),
                 Some(TokenKind::Fn) => items.push(Item::Fn(self.parse_fn_decl())),
                 Some(TokenKind::Struct) => items.push(Item::Struct(self.parse_struct_decl())),
@@ -66,6 +67,29 @@ impl Parser {
         let end = self.expect(TokenKind::Semi, "expected ';' after use");
         UseDecl {
             path,
+            span: Span::new(start, end),
+        }
+    }
+
+    fn parse_link_decl(&mut self) -> LinkDecl {
+        let start = self.expect(TokenKind::Link, "expected 'link'");
+        let lib = match self.peek_kind().cloned() {
+            Some(TokenKind::Str(s)) => {
+                self.bump();
+                s
+            }
+            _ => {
+                let span = self.peek_span().unwrap_or(Span::new(0, 0));
+                self.errors.push(ParseError {
+                    message: "expected string literal after 'link'".to_string(),
+                    span,
+                });
+                String::new()
+            }
+        };
+        let end = self.expect(TokenKind::Semi, "expected ';' after link declaration");
+        LinkDecl {
+            lib,
             span: Span::new(start, end),
         }
     }

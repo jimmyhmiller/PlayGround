@@ -2,6 +2,8 @@
 // AST node types for the bootstrap parser
 // ---------------------------------------------------------------------------
 
+use vec::Vec;
+
 // Generic option type
 enum Option<T> {
     Some { value: T },
@@ -16,8 +18,8 @@ struct Span {
 
 // Module
 struct Module {
-    path: RawPointer<I8>,
-    items: RawPointer<I8>
+    path: Vec,
+    items: Vec
 }
 
 // Items
@@ -26,12 +28,13 @@ enum Item {
     StructItem { decl: StructDecl },
     EnumItem { decl: EnumDecl },
     ExternFnItem { decl: ExternFnDecl },
-    UseItem { decl: UseDecl }
+    UseItem { decl: UseDecl },
+    LinkItem { decl: LinkDecl }
 }
 
 struct FnDecl {
     name: String,
-    params: RawPointer<I8>,
+    params: Vec,
     ret_type: Type,
     body: Block,
     span: Span
@@ -39,7 +42,7 @@ struct FnDecl {
 
 struct ExternFnDecl {
     name: String,
-    params: RawPointer<I8>,
+    params: Vec,
     varargs: Bool,
     ret_type: Type,
     span: Span
@@ -47,15 +50,15 @@ struct ExternFnDecl {
 
 struct StructDecl {
     name: String,
-    type_params: RawPointer<I8>,
-    fields: RawPointer<I8>,
+    type_params: Vec,
+    fields: Vec,
     span: Span
 }
 
 struct EnumDecl {
     name: String,
-    type_params: RawPointer<I8>,
-    variants: RawPointer<I8>,
+    type_params: Vec,
+    variants: Vec,
     span: Span
 }
 
@@ -67,12 +70,17 @@ struct EnumVariant {
 
 enum EnumVariantKind {
     UnitKind {},
-    TupleKind { types: RawPointer<I8> },
-    StructKind { fields: RawPointer<I8> }
+    TupleKind { types: Vec },
+    StructKind { fields: Vec }
 }
 
 struct UseDecl {
-    path: RawPointer<I8>,
+    path: Vec,
+    span: Span
+}
+
+struct LinkDecl {
+    lib: String,
     span: Span
 }
 
@@ -91,7 +99,7 @@ struct Param {
 
 // Block
 struct Block {
-    stmts: RawPointer<I8>,
+    stmts: Vec,
     tail: Option<Expr>,
     span: Span
 }
@@ -107,15 +115,15 @@ enum Expr {
     LetExpr { name: String, mutable: Bool, ty: Option<Type>, value: Expr, span: Span },
     IfExpr { cond: Expr, then_branch: Block, else_branch: Option<Block>, span: Span },
     WhileExpr { cond: Expr, body: Block, span: Span },
-    MatchExpr { scrutinee: Expr, arms: RawPointer<I8>, span: Span },
+    MatchExpr { scrutinee: Expr, arms: Vec, span: Span },
     AssignExpr { target: Expr, value: Expr, span: Span },
     BinaryExpr { op: BinaryOp, left: Expr, right: Expr, span: Span },
     UnaryExpr { op: UnaryOp, operand: Expr, span: Span },
-    CallExpr { callee: Expr, args: RawPointer<I8>, span: Span },
+    CallExpr { callee: Expr, args: Vec, span: Span },
     FieldExpr { base: Expr, name: String, span: Span },
-    PathExpr { path: RawPointer<I8>, span: Span },
-    StructLitExpr { path: RawPointer<I8>, fields: RawPointer<I8>, span: Span },
-    TupleExpr { items: RawPointer<I8>, span: Span },
+    PathExpr { path: Vec, span: Span },
+    StructLitExpr { path: Vec, fields: Vec, span: Span },
+    TupleExpr { items: Vec, span: Span },
     LitExpr { lit: Literal, span: Span },
     BlockExpr { block: Block },
     BreakExpr { span: Span },
@@ -156,16 +164,16 @@ enum UnaryOp {
 
 // Types
 enum Type {
-    PathType { path: RawPointer<I8>, type_args: RawPointer<I8> },
+    PathType { path: Vec, type_args: Vec },
     RawPtrType { inner: Type },
-    TupleType { types: RawPointer<I8> }
+    TupleType { types: Vec }
 }
 
 // Patterns
 enum Pattern {
     WildcardPat { span: Span },
-    PathPat { path: RawPointer<I8>, span: Span },
-    StructPat { path: RawPointer<I8>, fields: RawPointer<I8>, span: Span }
+    PathPat { path: Vec, span: Span },
+    StructPat { path: Vec, fields: Vec, span: Span }
 }
 
 // Match arm
@@ -196,7 +204,7 @@ struct ItemEntry {
 
 struct UseEntry {
     alias: String,
-    path: RawPointer<I8>
+    path: Vec
 }
 
 // Resolve pass helper types
@@ -225,9 +233,9 @@ enum Ty {
     TyUnit {},
     TyString {},
     TyRawPtr { inner: Ty },
-    TyStruct { name: String, type_args: RawPointer<I8> },
-    TyEnum { name: String, type_args: RawPointer<I8> },
-    TyTuple { items: RawPointer<I8> },
+    TyStruct { name: String, type_args: Vec },
+    TyEnum { name: String, type_args: Vec },
+    TyTuple { items: Vec },
     TyParam { name: String }
 }
 
@@ -243,8 +251,8 @@ struct SubstEntry {
 
 enum VariantDef {
     VUnit {},
-    VTuple { types: RawPointer<I8> },
-    VStruct { fields: RawPointer<I8> }
+    VTuple { types: Vec },
+    VStruct { fields: Vec }
 }
 
 struct VariantDefEntry {
@@ -254,19 +262,19 @@ struct VariantDefEntry {
 
 struct StructMapEntry {
     name: String,
-    type_params: RawPointer<I8>,
-    fields: RawPointer<I8>
+    type_params: Vec,
+    fields: Vec
 }
 
 struct EnumMapEntry {
     name: String,
-    type_params: RawPointer<I8>,
-    variants: RawPointer<I8>
+    type_params: Vec,
+    variants: Vec
 }
 
 struct FnMapEntry {
     name: String,
-    params: RawPointer<I8>,
+    params: Vec,
     ret: Ty,
     varargs: Bool
 }
@@ -286,7 +294,7 @@ struct LocalEntry {
 struct CgFieldLayout {
     name: String,
     type_name: String,
-    offset: I64,
+    index: I64,
     is_ptr: Bool,
     llvm_ty: RawPointer<I8>,
     lang_ty_tag: I64
@@ -294,17 +302,17 @@ struct CgFieldLayout {
 
 struct CgStructLayout {
     name: String,
-    size: I64,
-    fields: RawPointer<I8>,
-    meta: RawPointer<I8>
+    field_count: I64,
+    ptr_field_count: I64,
+    type_id: I64,
+    fields: Vec
 }
 
 struct CgVariantFieldLayout {
     name: String,
     type_name: String,
     is_ptr: Bool,
-    ptr_index: I64,
-    raw_offset: I64,
+    field_index: I64,
     llvm_ty: RawPointer<I8>,
     lang_ty_tag: I64
 }
@@ -312,17 +320,15 @@ struct CgVariantFieldLayout {
 struct CgVariantLayout {
     name: String,
     tag: I64,
-    fields: RawPointer<I8>
+    fields: Vec
 }
 
 struct CgEnumLayout {
     name: String,
-    size: I64,
-    ptr_count: I64,
-    raw_size: I64,
-    raw_base: I64,
-    meta: RawPointer<I8>,
-    variants: RawPointer<I8>
+    field_count: I64,
+    ptr_field_count: I64,
+    type_id: I64,
+    variants: Vec
 }
 
 struct CgLocal {

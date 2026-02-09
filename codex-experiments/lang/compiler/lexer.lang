@@ -1,17 +1,18 @@
-extern fn string_len(s: String) -> I64;
-extern fn string_byte_at(s: String, i: I64) -> I64;
-extern fn string_slice(s: String, start: I64, end_pos: I64) -> String;
-extern fn string_eq(a: String, b: String) -> I64;
-extern fn string_concat(a: String, b: String) -> String;
-extern fn print_str(s: String) -> I64;
-extern fn print_int(n: I64) -> I64;
-extern fn read_file(path: String) -> String;
-extern fn arg_str(index: I64) -> String;
-extern fn arg_len() -> I64;
-extern fn vec_new() -> RawPointer<I8>;
-extern fn vec_len(v: RawPointer<I8>) -> I64;
-extern fn vec_push(v: RawPointer<I8>, item: Token) -> I64;
-extern fn vec_get(v: RawPointer<I8>, index: I64) -> Token;
+use string::string_len;
+use string::string_byte_at;
+use string::string_slice;
+use string::string_eq;
+use string::string_concat;
+use io::print_str;
+use io::print_int;
+use io::read_file;
+use io::arg_str;
+use io::arg_len;
+use vec::vec_new;
+use vec::vec_len;
+use vec::vec_push_tok;
+use vec::vec_get_tok;
+use vec::Vec;
 
 // ---------------------------------------------------------------------------
 // Token types
@@ -42,6 +43,7 @@ enum TokenKind {
     KwExtern {},
     KwUse {},
     KwModule {},
+    KwLink {},
     // Punctuation
     LParen {},
     RParen {},
@@ -222,6 +224,7 @@ fn keyword_or_ident(text: String) -> TokenKind {
     if string_eq(text, "extern") == 1 { return TokenKind::KwExtern {}; };
     if string_eq(text, "use") == 1 { return TokenKind::KwUse {}; };
     if string_eq(text, "module") == 1 { return TokenKind::KwModule {}; };
+    if string_eq(text, "link") == 1 { return TokenKind::KwLink {}; };
     TokenKind::Ident { name: text }
 }
 
@@ -491,13 +494,13 @@ fn lex_token(lex: Lexer) -> Token {
 // Lex all tokens
 // ---------------------------------------------------------------------------
 
-fn lex_all(source: String) -> RawPointer<I8> {
+fn lex_all(source: String) -> Vec {
     let lex: Lexer = new_lexer(source);
-    let tokens: RawPointer<I8> = vec_new();
+    let tokens: Vec = vec_new();
     let mut done: Bool = false;
     while !done {
         let tok: Token = lex_token(lex);
-        vec_push(tokens, tok);
+        vec_push_tok(tokens, tok);
         match tok.kind {
             TokenKind::Eof {} => {
                 done = true;
@@ -536,6 +539,7 @@ fn token_kind_name(kind: TokenKind) -> String {
         TokenKind::KwExtern {} => "extern",
         TokenKind::KwUse {} => "use",
         TokenKind::KwModule {} => "module",
+        TokenKind::KwLink {} => "link",
         TokenKind::LParen {} => "(",
         TokenKind::RParen {} => ")",
         TokenKind::LBrace {} => "{",
@@ -593,6 +597,7 @@ fn token_kind_tag(kind: TokenKind) -> I64 {
         TokenKind::KwExtern {} => 20,
         TokenKind::KwUse {} => 21,
         TokenKind::KwModule {} => 22,
+        TokenKind::KwLink {} => 53,
         TokenKind::LParen {} => 23,
         TokenKind::RParen {} => 24,
         TokenKind::LBrace {} => 25,
@@ -642,11 +647,11 @@ fn main() -> I64 {
     };
     let path: String = arg_str(0);
     let source: String = read_file(path);
-    let tokens: RawPointer<I8> = lex_all(source);
+    let tokens: Vec = lex_all(source);
     let count: I64 = vec_len(tokens);
     let mut i: I64 = 0;
     while i < count {
-        let tok: Token = vec_get(tokens, i);
+        let tok: Token = vec_get_tok(tokens, i);
         print_token(tok);
         i = i + 1;
     };

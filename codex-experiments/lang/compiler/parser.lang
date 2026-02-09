@@ -17,6 +17,7 @@ use ast::EnumDecl;
 use ast::EnumVariant;
 use ast::EnumVariantKind;
 use ast::UseDecl;
+use ast::LinkDecl;
 use ast::Field;
 use ast::Param;
 use ast::Block;
@@ -35,39 +36,39 @@ use ast::StructLitField;
 // Extern functions
 // ---------------------------------------------------------------------------
 
-extern fn vec_new() -> RawPointer<I8>;
-extern fn vec_len(v: RawPointer<I8>) -> I64;
+use vec::Vec;
+use vec::vec_new;
+use vec::vec_len;
+use vec::vec_push_str;
+use vec::vec_get_str;
+use vec::vec_push_item;
+use vec::vec_get_item;
+use vec::vec_push_param;
+use vec::vec_get_param;
+use vec::vec_push_field;
+use vec::vec_get_field;
+use vec::vec_push_variant;
+use vec::vec_get_variant;
+use vec::vec_push_type;
+use vec::vec_get_type;
+use vec::vec_push_expr;
+use vec::vec_get_expr;
+use vec::vec_push_arm;
+use vec::vec_get_arm;
+use vec::vec_push_stmt;
+use vec::vec_get_stmt;
+use vec::vec_push_pfield;
+use vec::vec_get_pfield;
+use vec::vec_push_slfield;
+use vec::vec_get_slfield;
+use vec::vec_get_tok;
 
-extern fn vec_push_str(v: RawPointer<I8>, item: String) -> I64;
-extern fn vec_get_str(v: RawPointer<I8>, index: I64) -> String;
-extern fn vec_push_item(v: RawPointer<I8>, item: Item) -> I64;
-extern fn vec_get_item(v: RawPointer<I8>, index: I64) -> Item;
-extern fn vec_push_param(v: RawPointer<I8>, item: Param) -> I64;
-extern fn vec_get_param(v: RawPointer<I8>, index: I64) -> Param;
-extern fn vec_push_field(v: RawPointer<I8>, item: Field) -> I64;
-extern fn vec_get_field(v: RawPointer<I8>, index: I64) -> Field;
-extern fn vec_push_variant(v: RawPointer<I8>, item: EnumVariant) -> I64;
-extern fn vec_get_variant(v: RawPointer<I8>, index: I64) -> EnumVariant;
-extern fn vec_push_type(v: RawPointer<I8>, item: Type) -> I64;
-extern fn vec_get_type(v: RawPointer<I8>, index: I64) -> Type;
-extern fn vec_push_expr(v: RawPointer<I8>, item: Expr) -> I64;
-extern fn vec_get_expr(v: RawPointer<I8>, index: I64) -> Expr;
-extern fn vec_push_arm(v: RawPointer<I8>, item: MatchArm) -> I64;
-extern fn vec_get_arm(v: RawPointer<I8>, index: I64) -> MatchArm;
-extern fn vec_push_stmt(v: RawPointer<I8>, item: Stmt) -> I64;
-extern fn vec_get_stmt(v: RawPointer<I8>, index: I64) -> Stmt;
-extern fn vec_push_pfield(v: RawPointer<I8>, item: PatternField) -> I64;
-extern fn vec_get_pfield(v: RawPointer<I8>, index: I64) -> PatternField;
-extern fn vec_push_slfield(v: RawPointer<I8>, item: StructLitField) -> I64;
-extern fn vec_get_slfield(v: RawPointer<I8>, index: I64) -> StructLitField;
-extern fn vec_get_tok(v: RawPointer<I8>, index: I64) -> Token;
-
-extern fn string_eq(a: String, b: String) -> I64;
-extern fn string_concat(a: String, b: String) -> String;
-extern fn string_from_i64(val: I64) -> String;
-extern fn print_str(s: String) -> I64;
-extern fn print_str_stderr(s: String) -> I64;
-extern fn exit_process(code: I64) -> I64;
+use string::string_eq;
+use string::string_concat;
+use string::string_from_i64;
+use io::print_str;
+use io::print_str_stderr;
+use io::exit_process;
 
 // ---------------------------------------------------------------------------
 // Token kind tag constants
@@ -125,18 +126,19 @@ fn TK_ANDAND() -> I64 { 49 }
 fn TK_OROR() -> I64 { 50 }
 fn TK_ELLIPSIS() -> I64 { 51 }
 fn TK_EOF() -> I64 { 52 }
+fn TK_LINK() -> I64 { 53 }
 
 // ---------------------------------------------------------------------------
 // Parser state
 // ---------------------------------------------------------------------------
 
 struct Parser {
-    tokens: RawPointer<I8>,
+    tokens: Vec,
     pos: I64,
     len: I64
 }
 
-fn new_parser(tokens: RawPointer<I8>) -> Parser {
+fn new_parser(tokens: Vec) -> Parser {
     Parser { tokens: tokens, pos: 0, len: vec_len(tokens) }
 }
 
@@ -245,10 +247,13 @@ fn token_ident_name(tok: Token) -> String {
 // ---------------------------------------------------------------------------
 
 fn parse_module(p: Parser) -> Module {
-    let items: RawPointer<I8> = vec_new();
+    let items: Vec = vec_new();
 
     while !is_eof(p) {
         let tag: I64 = peek_tag(p);
+        if tag == TK_LINK() {
+            vec_push_item(items, Item::LinkItem { decl: parse_link_decl(p) });
+        } else {
         if tag == TK_USE() {
             vec_push_item(items, Item::UseItem { decl: parse_use_decl(p) });
         } else {
@@ -270,6 +275,7 @@ fn parse_module(p: Parser) -> Module {
                     }
                 }
             }
+        }
         };
     };
 
@@ -283,9 +289,34 @@ fn parse_module(p: Parser) -> Module {
 fn parse_use_decl(p: Parser) -> UseDecl {
     let start_tok: Token = bump(p); // consume 'use'
     let start: I64 = start_tok.start;
-    let path: RawPointer<I8> = parse_path(p);
+    let path: Vec = parse_path(p);
     let end: I64 = expect_tag(p, TK_SEMI(), "expected ';' after use");
     UseDecl { path: path, span: Span { start: start, end: end } }
+}
+
+// ---------------------------------------------------------------------------
+// Parse link declaration
+// ---------------------------------------------------------------------------
+
+fn parse_link_decl(p: Parser) -> LinkDecl {
+    let start_tok: Token = bump(p); // consume 'link'
+    let start: I64 = start_tok.start;
+    let tok: Token = peek(p);
+    let lib: String = if peek_tag(p) == TK_STR_LIT() {
+        let stok: Token = bump(p);
+        match stok.kind {
+            TokenKind::StrLit { text } => text,
+            _ => {
+                parse_error("expected string literal after 'link'", Span { start: tok.start, end: tok.end });
+                ""
+            }
+        }
+    } else {
+        parse_error("expected string literal after 'link'", Span { start: tok.start, end: tok.end });
+        ""
+    };
+    let end: I64 = expect_tag(p, TK_SEMI(), "expected ';' after link declaration");
+    LinkDecl { lib: lib, span: Span { start: start, end: end } }
 }
 
 // ---------------------------------------------------------------------------
@@ -296,9 +327,9 @@ fn parse_struct_decl(p: Parser) -> StructDecl {
     let start_tok: Token = bump(p); // consume 'struct'
     let start: I64 = start_tok.start;
     let name: String = expect_ident(p, "expected struct name");
-    let type_params: RawPointer<I8> = parse_type_params(p);
+    let type_params: Vec = parse_type_params(p);
     expect_tag(p, TK_LBRACE(), "expected '{' in struct");
-    let fields: RawPointer<I8> = if peek_tag(p) == TK_RBRACE() {
+    let fields: Vec = if peek_tag(p) == TK_RBRACE() {
         vec_new()
     } else {
         parse_field_list(p)
@@ -315,16 +346,16 @@ fn parse_enum_decl(p: Parser) -> EnumDecl {
     let start_tok: Token = bump(p); // consume 'enum'
     let start: I64 = start_tok.start;
     let name: String = expect_ident(p, "expected enum name");
-    let type_params: RawPointer<I8> = parse_type_params(p);
+    let type_params: Vec = parse_type_params(p);
     expect_tag(p, TK_LBRACE(), "expected '{' in enum");
-    let variants: RawPointer<I8> = vec_new();
+    let variants: Vec = vec_new();
     while peek_tag(p) != TK_RBRACE() && !is_eof(p) {
         let v_name: String = expect_ident(p, "expected variant name");
         let v_start_tok: Token = peek(p);
         let v_start: I64 = v_start_tok.start;
         let kind: EnumVariantKind = if peek_tag(p) == TK_LPAREN() {
             bump(p); // consume '('
-            let types: RawPointer<I8> = if peek_tag(p) == TK_RPAREN() {
+            let types: Vec = if peek_tag(p) == TK_RPAREN() {
                 vec_new()
             } else {
                 parse_type_list(p)
@@ -334,7 +365,7 @@ fn parse_enum_decl(p: Parser) -> EnumDecl {
         } else {
             if peek_tag(p) == TK_LBRACE() {
                 bump(p); // consume '{'
-                let fields: RawPointer<I8> = if peek_tag(p) == TK_RBRACE() {
+                let fields: Vec = if peek_tag(p) == TK_RBRACE() {
                     vec_new()
                 } else {
                     parse_field_list(p)
@@ -368,7 +399,7 @@ fn parse_fn_decl(p: Parser) -> FnDecl {
     let start: I64 = start_tok.start;
     let name: String = expect_ident(p, "expected function name");
     expect_tag(p, TK_LPAREN(), "expected '(' after fn name");
-    let params: RawPointer<I8> = if peek_tag(p) == TK_RPAREN() {
+    let params: Vec = if peek_tag(p) == TK_RPAREN() {
         vec_new()
     } else {
         parse_param_list(p)
@@ -391,7 +422,7 @@ fn parse_extern_fn_decl(p: Parser) -> ExternFnDecl {
     expect_tag(p, TK_FN(), "expected 'fn' after extern");
     let name: String = expect_ident(p, "expected extern fn name");
     expect_tag(p, TK_LPAREN(), "expected '(' after extern fn name");
-    let params: RawPointer<I8> = vec_new();
+    let params: Vec = vec_new();
     let mut varargs: Bool = false;
     if peek_tag(p) != TK_RPAREN() {
         let mut cont: Bool = true;
@@ -431,8 +462,8 @@ fn parse_extern_fn_decl(p: Parser) -> ExternFnDecl {
 // Parse param list
 // ---------------------------------------------------------------------------
 
-fn parse_param_list(p: Parser) -> RawPointer<I8> {
-    let params: RawPointer<I8> = vec_new();
+fn parse_param_list(p: Parser) -> Vec {
+    let params: Vec = vec_new();
     let mut cont: Bool = true;
     while cont {
         let name: String = expect_ident(p, "expected param name");
@@ -459,8 +490,8 @@ fn parse_param_list(p: Parser) -> RawPointer<I8> {
 // Parse field list
 // ---------------------------------------------------------------------------
 
-fn parse_field_list(p: Parser) -> RawPointer<I8> {
-    let fields: RawPointer<I8> = vec_new();
+fn parse_field_list(p: Parser) -> Vec {
+    let fields: Vec = vec_new();
     while peek_tag(p) != TK_RBRACE() && !is_eof(p) {
         let name: String = expect_ident(p, "expected field name");
         let fstart_tok: Token = peek(p);
@@ -487,7 +518,7 @@ fn parse_type(p: Parser) -> Type {
     // Tuple type: (T1, T2, ...)
     if peek_tag(p) == TK_LPAREN() {
         bump(p); // consume '('
-        let types: RawPointer<I8> = if peek_tag(p) == TK_RPAREN() {
+        let types: Vec = if peek_tag(p) == TK_RPAREN() {
             vec_new()
         } else {
             parse_type_list(p)
@@ -506,8 +537,8 @@ fn parse_type(p: Parser) -> Type {
     };
 
     // Path type with optional type args
-    let path: RawPointer<I8> = parse_path(p);
-    let type_args: RawPointer<I8> = parse_type_args(p);
+    let path: Vec = parse_path(p);
+    let type_args: Vec = parse_type_args(p);
     Type::PathType { path: path, type_args: type_args }
 }
 
@@ -515,12 +546,12 @@ fn parse_type(p: Parser) -> Type {
 // Parse type params: <T, U, ...>
 // ---------------------------------------------------------------------------
 
-fn parse_type_params(p: Parser) -> RawPointer<I8> {
+fn parse_type_params(p: Parser) -> Vec {
     if peek_tag(p) != TK_LT() {
         return vec_new();
     };
     bump(p); // consume '<'
-    let params: RawPointer<I8> = vec_new();
+    let params: Vec = vec_new();
     let mut cont: Bool = true;
     while cont {
         let name: String = expect_ident(p, "expected type parameter name");
@@ -542,12 +573,12 @@ fn parse_type_params(p: Parser) -> RawPointer<I8> {
 // Parse type args: <T, U, ...>
 // ---------------------------------------------------------------------------
 
-fn parse_type_args(p: Parser) -> RawPointer<I8> {
+fn parse_type_args(p: Parser) -> Vec {
     if peek_tag(p) != TK_LT() {
         return vec_new();
     };
     bump(p); // consume '<'
-    let args: RawPointer<I8> = vec_new();
+    let args: Vec = vec_new();
     let mut cont: Bool = true;
     while cont {
         let ty: Type = parse_type(p);
@@ -569,8 +600,8 @@ fn parse_type_args(p: Parser) -> RawPointer<I8> {
 // Parse type list (comma separated, used for tuple types and tuple variant payloads)
 // ---------------------------------------------------------------------------
 
-fn parse_type_list(p: Parser) -> RawPointer<I8> {
-    let types: RawPointer<I8> = vec_new();
+fn parse_type_list(p: Parser) -> Vec {
+    let types: Vec = vec_new();
     let mut cont: Bool = true;
     while cont {
         let ty: Type = parse_type(p);
@@ -591,8 +622,8 @@ fn parse_type_list(p: Parser) -> RawPointer<I8> {
 // Parse path: ident (:: ident)*
 // ---------------------------------------------------------------------------
 
-fn parse_path(p: Parser) -> RawPointer<I8> {
-    let segments: RawPointer<I8> = vec_new();
+fn parse_path(p: Parser) -> Vec {
+    let segments: Vec = vec_new();
     let first: String = expect_ident(p, "expected identifier in path");
     vec_push_str(segments, first);
     while peek_tag(p) == TK_COLONCOLON() {
@@ -609,7 +640,7 @@ fn parse_path(p: Parser) -> RawPointer<I8> {
 
 fn parse_block(p: Parser) -> Block {
     let start: I64 = expect_tag(p, TK_LBRACE(), "expected '{' to start block");
-    let stmts: RawPointer<I8> = vec_new();
+    let stmts: Vec = vec_new();
     let mut tail: Option<Expr> = Option::None {};
     while peek_tag(p) != TK_RBRACE() && !is_eof(p) {
         if peek_tag(p) == TK_RETURN() {
@@ -712,7 +743,7 @@ fn parse_if_expr(p: Parser) -> Expr {
             let elif: Expr = parse_if_expr(p);
             let elif_start: I64 = expr_span_start(elif);
             let elif_end: I64 = expr_span_end(elif);
-            let elif_stmts: RawPointer<I8> = vec_new();
+            let elif_stmts: Vec = vec_new();
             Option::Some { value: Block { stmts: elif_stmts, tail: Option::Some { value: elif }, span: Span { start: elif_start, end: elif_end } } }
         } else {
             Option::Some { value: parse_block(p) }
@@ -746,7 +777,7 @@ fn parse_match_expr(p: Parser) -> Expr {
     let start: I64 = match_tok.start;
     let scrutinee: Expr = parse_expr(p);
     expect_tag(p, TK_LBRACE(), "expected '{' after match scrutinee");
-    let arms: RawPointer<I8> = vec_new();
+    let arms: Vec = vec_new();
     while peek_tag(p) != TK_RBRACE() && !is_eof(p) {
         let pattern: Pattern = parse_pattern(p);
         let p_start: I64 = pattern_span_start(pattern);
@@ -882,7 +913,7 @@ fn parse_call_expr(p: Parser) -> Expr {
         if peek_tag(p) == TK_LPAREN() {
             let start: I64 = expr_span_start(expr);
             bump(p); // consume '('
-            let args: RawPointer<I8> = vec_new();
+            let args: Vec = vec_new();
             if peek_tag(p) != TK_RPAREN() {
                 let mut args_cont: Bool = true;
                 while args_cont {
@@ -1006,7 +1037,7 @@ fn parse_primary_expr(p: Parser) -> Expr {
         // Tuple: (a, b, ...)
         if peek_tag(p) == TK_COMMA() {
             bump(p);
-            let items: RawPointer<I8> = vec_new();
+            let items: Vec = vec_new();
             vec_push_expr(items, first);
             if peek_tag(p) != TK_RPAREN() {
                 let mut tuple_cont: Bool = true;
@@ -1033,13 +1064,13 @@ fn parse_primary_expr(p: Parser) -> Expr {
 
     // Identifier / path / struct literal
     if tag == TK_IDENT() {
-        let path: RawPointer<I8> = parse_path(p);
+        let path: Vec = parse_path(p);
         let path_start_tok: Token = peek(p);
         let start: I64 = path_start_tok.start;
         // Check for struct literal: Path { ... }
         if peek_tag(p) == TK_LBRACE() && looks_like_struct_literal(p) {
             bump(p); // consume '{'
-            let fields: RawPointer<I8> = vec_new();
+            let fields: Vec = vec_new();
             if peek_tag(p) != TK_RBRACE() {
                 let mut sl_cont: Bool = true;
                 while sl_cont {
@@ -1115,7 +1146,7 @@ fn parse_pattern(p: Parser) -> Pattern {
             return Pattern::WildcardPat { span: Span { start: tok.start, end: tok.end } };
         };
         // Path: ident (:: ident)*
-        let segments: RawPointer<I8> = vec_new();
+        let segments: Vec = vec_new();
         vec_push_str(segments, name);
         while peek_tag(p) == TK_COLONCOLON() {
             bump(p);
@@ -1125,7 +1156,7 @@ fn parse_pattern(p: Parser) -> Pattern {
         // Struct pattern: Path { ... }
         if peek_tag(p) == TK_LBRACE() {
             bump(p); // consume '{'
-            let fields: RawPointer<I8> = parse_pattern_fields(p);
+            let fields: Vec = parse_pattern_fields(p);
             let end: I64 = expect_tag(p, TK_RBRACE(), "expected '}' in pattern");
             return Pattern::StructPat { path: segments, fields: fields, span: Span { start: tok.start, end: end } };
         };
@@ -1144,8 +1175,8 @@ fn parse_pattern(p: Parser) -> Pattern {
 // Parse pattern fields
 // ---------------------------------------------------------------------------
 
-fn parse_pattern_fields(p: Parser) -> RawPointer<I8> {
-    let fields: RawPointer<I8> = vec_new();
+fn parse_pattern_fields(p: Parser) -> Vec {
+    let fields: Vec = vec_new();
     while peek_tag(p) != TK_RBRACE() && !is_eof(p) {
         let name: String = expect_ident(p, "expected field name in pattern");
         let fstart_tok: Token = peek(p);

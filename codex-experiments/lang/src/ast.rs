@@ -13,11 +13,18 @@ pub enum Item {
     Enum(EnumDecl),
     ExternFn(ExternFnDecl),
     Use(UseDecl),
+    Link(LinkDecl),
 }
 
 #[derive(Debug, Clone)]
 pub struct UseDecl {
     pub path: Vec<String>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone)]
+pub struct LinkDecl {
+    pub lib: String,
     pub span: Span,
 }
 

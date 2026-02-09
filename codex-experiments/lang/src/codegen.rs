@@ -27,14 +27,13 @@ pub struct Codegen<'ctx> {
     functions: HashMap<String, FunctionValue<'ctx>>,
     externs: HashMap<String, FunctionValue<'ctx>>,
     gc_pollcheck: FunctionValue<'ctx>,
-    gc_allocate: FunctionValue<'ctx>,
-    gc_allocate_array: FunctionValue<'ctx>,
+    gc_allocate_obj: FunctionValue<'ctx>,
     gc_write_barrier: FunctionValue<'ctx>,
-    object_header_ty: StructType<'ctx>,
     structs: HashMap<String, StructLayout<'ctx>>,
     enums: HashMap<String, EnumLayout<'ctx>>,
     tuples: HashMap<String, StructLayout<'ctx>>,
     str_lit_id: usize,
+    next_type_id: u16,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -45,9 +44,10 @@ pub enum CodegenMode {
 
 #[derive(Clone)]
 struct StructLayout<'ctx> {
-    size: u64,
+    field_count: u64,
+    ptr_field_count: u64,
+    type_id: u16,
     fields: Vec<FieldLayout<'ctx>>,
-    meta: PointerValue<'ctx>,
 }
 
 #[derive(Clone)]
@@ -55,17 +55,15 @@ struct FieldLayout<'ctx> {
     name: String,
     ty: Type,
     llvm_ty: BasicTypeEnum<'ctx>,
-    offset: u64,
-    is_ptr: bool,
+    index: u64,
+    is_gc_ref: bool,
 }
 
 #[derive(Clone)]
 struct EnumLayout<'ctx> {
-    size: u64,
-    ptr_count: usize,
-    raw_size: u64,
-    raw_base: u64,
-    meta: PointerValue<'ctx>,
+    field_count: u64,
+    ptr_field_count: u64,
+    type_id: u16,
     variants: HashMap<String, VariantLayout<'ctx>>,
 }
 
@@ -80,9 +78,8 @@ struct VariantFieldLayout<'ctx> {
     name: Option<String>,
     ty: Type,
     llvm_ty: BasicTypeEnum<'ctx>,
-    is_ptr: bool,
-    ptr_index: usize,
-    raw_offset: u64,
+    is_gc_ref: bool,
+    field_index: u64,
 }
 
 /// Default memory manager that delegates to system allocator.
@@ -169,17 +166,11 @@ pub fn compile_and_run(modules: &[crate::ast::Module]) -> Result<i64, CodegenErr
         .map_err(|e| CodegenError {
             message: format!("jit create failed: {e}"),
         })?;
-    add_runtime_mappings(
-        &engine,
-        &gen.externs,
-        gen.gc_pollcheck,
-        gen.gc_allocate,
-        gen.gc_allocate_array,
-        gen.gc_write_barrier,
-    );
-    runtime::gc_init();
+    add_runtime_mappings(&engine, &gen.externs, gen.gc_pollcheck, gen.gc_allocate_obj, gen.gc_write_barrier);
+    unsafe { runtime::gc_init(); }
     let mut thread = runtime::Thread::new();
     unsafe {
+        runtime::gc_set_thread(&mut thread as *mut _ as *mut u8);
         let main_name = gen.llvm_fn_name("main");
         let main = engine
             .get_function::<unsafe extern "C" fn(*mut u8) -> i64>(&main_name)
@@ -516,36 +507,91 @@ extern "C" fn rt_host_build() -> i64 {
         return 1;
     }
 
-    let status = Command::new("cargo")
-        .arg("build")
-        .arg("--quiet")
-        .arg("--lib")
-        .status();
-    match status {
-        Ok(s) if s.success() => {}
-        Ok(s) => {
-            eprintln!("failed to build runtime lib: {}", s);
-            return 1;
-        }
-        Err(err) => {
-            eprintln!("failed to invoke cargo: {err}");
-            return 1;
-        }
-    }
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let runtime_dir = manifest_dir.join("runtime");
 
-    let target_dir = std::env::var("CARGO_TARGET_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| Path::new(env!("CARGO_MANIFEST_DIR")).join("target"));
-    let profile = std::env::var("PROFILE").unwrap_or_else(|_| "debug".to_string());
-    let lib_path = target_dir.join(profile).join("liblang_runtime.a");
-
+    // Compile runtime.c
+    let runtime_o = runtime_dir.join("runtime.o");
     let status = Command::new("cc")
-        .arg(&obj_path)
-        .arg(&lib_path)
+        .arg("-c")
+        .arg(runtime_dir.join("runtime.c"))
         .arg("-O2")
         .arg("-o")
-        .arg(&exe_path)
+        .arg(&runtime_o)
         .status();
+    if !status.map(|s| s.success()).unwrap_or(false) {
+        eprintln!("failed to compile runtime.c");
+        return 1;
+    }
+
+    // Compile gc_bridge.c
+    let gc_bridge_o = runtime_dir.join("gc_bridge.o");
+    let gc_include = manifest_dir.join("../../claude-experiments/gc-library/include");
+    let status = Command::new("cc")
+        .arg("-c")
+        .arg(runtime_dir.join("gc_bridge.c"))
+        .arg("-I").arg(&gc_include)
+        .arg("-O2")
+        .arg("-o")
+        .arg(&gc_bridge_o)
+        .status();
+    if !status.map(|s| s.success()).unwrap_or(false) {
+        eprintln!("failed to compile gc_bridge.c");
+        return 1;
+    }
+
+    // Compile llvm_shims.c
+    let llvm_config = crate::find_llvm_config();
+    let shims_c = runtime_dir.join("llvm_shims.c");
+    let shims_o = runtime_dir.join("llvm_shims.o");
+    let cflags = Command::new(&llvm_config)
+        .arg("--cflags")
+        .output();
+    let mut cc_cmd = Command::new("cc");
+    if let Ok(ref out) = cflags {
+        let cflags_str = String::from_utf8_lossy(&out.stdout);
+        for flag in cflags_str.split_whitespace() {
+            if !flag.is_empty() {
+                cc_cmd.arg(flag);
+            }
+        }
+    }
+    cc_cmd.arg("-c").arg(&shims_c).arg("-o").arg(&shims_o);
+    let status = cc_cmd.status();
+    if !status.map(|s| s.success()).unwrap_or(false) {
+        eprintln!("failed to compile llvm_shims.c");
+        return 1;
+    }
+
+    // Find libgc_library.a
+    let gc_lib = manifest_dir.join("../../claude-experiments/gc-library/target/release/libgc_library.a");
+
+    // Link
+    let mut link_cmd = Command::new("cc");
+    link_cmd
+        .arg(&obj_path)
+        .arg(&runtime_o)
+        .arg(&gc_bridge_o)
+        .arg(&shims_o)
+        .arg(&gc_lib)
+        .arg("-O2")
+        .arg("-o")
+        .arg(&exe_path);
+    // Add LLVM link flags
+    if let Ok(output) = Command::new(&llvm_config).args(["--ldflags", "--libs", "--system-libs"]).output() {
+        if output.status.success() {
+            let flags = String::from_utf8_lossy(&output.stdout);
+            for flag in flags.split_whitespace() {
+                if !flag.is_empty() {
+                    link_cmd.arg(flag);
+                }
+            }
+            link_cmd.arg("-lc++");
+            link_cmd.arg("-lz");
+            link_cmd.arg("-lzstd");
+        }
+    }
+    let status = link_cmd.status();
     match status {
         Ok(s) if s.success() => {
             println!("built {}", exe_path.display());
@@ -621,7 +667,7 @@ extern "C" fn rt_string_concat(a: *const u8, b: *const u8) -> *const u8 {
 }
 
 extern "C" fn rt_string_slice(ptr: *const u8, start: i64, end_pos: i64) -> *const u8 {
-    runtime::string_slice(ptr, start, end_pos)
+    unsafe { runtime::string_slice(ptr, start, end_pos) }
 }
 
 extern "C" fn rt_read_file(path: *const u8) -> *const u8 {
@@ -732,6 +778,16 @@ extern "C" fn rt_vec_set_len(vec: *mut u8, new_len: i64) -> i64 {
     0
 }
 
+extern "C" fn rt_vec_data(vec: *mut u8) -> *mut u8 {
+    if vec.is_null() {
+        return std::ptr::null_mut();
+    }
+    unsafe {
+        let v = &*(vec as *mut VecPtr);
+        v.data as *mut u8
+    }
+}
+
 extern "C" fn rt_enum_tag(obj: *mut u8, raw_base: i64) -> i64 {
     if obj.is_null() {
         return -1;
@@ -805,6 +861,23 @@ extern "C" fn rt_print_str_stderr(ptr: *const u8) -> i64 {
     0
 }
 
+extern "C" fn rt_create_dir(ptr: *const u8) -> i64 {
+    if ptr.is_null() {
+        return 1;
+    }
+    unsafe {
+        let mut len = 0usize;
+        while *ptr.add(len) != 0 {
+            len += 1;
+        }
+        let slice = std::slice::from_raw_parts(ptr, len);
+        if let Ok(s) = std::str::from_utf8(slice) {
+            let _ = std::fs::create_dir_all(s);
+        }
+    }
+    0
+}
+
 extern "C" fn rt_print_stretch(depth: i64, check: i64) {
     println!("stretch tree of depth {depth}\t check: {check}");
 }
@@ -817,12 +890,22 @@ extern "C" fn rt_print_long_lived(depth: i64, check: i64) {
     println!("long lived tree of depth {depth}\t check: {check}");
 }
 
+// Pointer intrinsic wrappers for JIT
+extern "C" fn rt_ptr_load_ptr(p: *mut u8, off: i64) -> *mut u8 { unsafe { runtime::ptr_load_ptr(p, off) } }
+extern "C" fn rt_ptr_store_ptr(p: *mut u8, off: i64, val: *mut u8) -> i64 { unsafe { runtime::ptr_store_ptr(p, off, val) } }
+extern "C" fn rt_ptr_load_i64(p: *mut u8, off: i64) -> i64 { unsafe { runtime::ptr_load_i64(p, off) } }
+extern "C" fn rt_ptr_store_i64(p: *mut u8, off: i64, val: i64) -> i64 { unsafe { runtime::ptr_store_i64(p, off, val) } }
+extern "C" fn rt_ptr_load_i32(p: *mut u8, off: i64) -> i64 { unsafe { runtime::ptr_load_i32(p, off) } }
+extern "C" fn rt_ptr_store_i32(p: *mut u8, off: i64, val: i64) -> i64 { unsafe { runtime::ptr_store_i32(p, off, val) } }
+extern "C" fn rt_ptr_load_i8(p: *mut u8, off: i64) -> i64 { unsafe { runtime::ptr_load_i8(p, off) } }
+extern "C" fn rt_ptr_store_i8(p: *mut u8, off: i64, val: i64) -> i64 { unsafe { runtime::ptr_store_i8(p, off, val) } }
+extern "C" fn rt_ptr_offset(p: *mut u8, off: i64) -> *mut u8 { unsafe { runtime::ptr_offset(p, off) } }
+
 fn add_runtime_mappings<'ctx>(
     engine: &ExecutionEngine<'ctx>,
     externs: &HashMap<String, FunctionValue<'ctx>>,
     gc_pollcheck: FunctionValue<'ctx>,
-    gc_allocate: FunctionValue<'ctx>,
-    gc_allocate_array: FunctionValue<'ctx>,
+    gc_allocate_obj: FunctionValue<'ctx>,
     gc_write_barrier: FunctionValue<'ctx>,
 ) {
     let map_all = |name: &str, addr: usize| {
@@ -858,6 +941,9 @@ fn add_runtime_mappings<'ctx>(
     map_all("exit_process", rt_exit_process as usize);
     map_all("string_from_i64", rt_string_from_i64 as usize);
     map_all("print_str_stderr", rt_print_str_stderr as usize);
+    map_all("create_dir", rt_create_dir as usize);
+    map_all("vec_push_raw_val", rt_vec_push as usize);
+    map_all("vec_data", rt_vec_data as usize);
     map_all("vec_clear", rt_vec_clear as usize);
     map_all("vec_set_len", rt_vec_set_len as usize);
     map_all("enum_tag", rt_enum_tag as usize);
@@ -882,109 +968,172 @@ fn add_runtime_mappings<'ctx>(
         map_all(alias, rt_vec_get as usize);
     }
     engine.add_global_mapping(&gc_pollcheck, runtime::gc_pollcheck_slow as usize);
-    engine.add_global_mapping(&gc_allocate, runtime::gc_allocate as usize);
-    engine.add_global_mapping(&gc_allocate_array, runtime::gc_allocate_array as usize);
+    engine.add_global_mapping(&gc_allocate_obj, runtime::gc_alloc as usize);
     engine.add_global_mapping(&gc_write_barrier, runtime::gc_write_barrier as usize);
     map_all("gc_init", runtime::gc_init as usize);
+    map_all("gc_set_thread", runtime::gc_set_thread as usize);
+    map_all("gc_alloc", runtime::gc_alloc as usize);
+    map_all("gc_read_field", runtime::gc_read_field as usize);
+    map_all("gc_write_field", runtime::gc_write_field as usize);
+    map_all("gc_read_field_i64", runtime::gc_read_field_i64 as usize);
+    map_all("gc_write_field_i64", runtime::gc_write_field_i64 as usize);
 
-    // LLVM wrapper mappings
-    use crate::llvm_wrappers;
-    map_all("llvm_context_create", llvm_wrappers::llvm_context_create as usize);
-    map_all("llvm_module_create", llvm_wrappers::llvm_module_create as usize);
-    map_all("llvm_create_builder", llvm_wrappers::llvm_create_builder as usize);
-    map_all("llvm_dispose_builder", llvm_wrappers::llvm_dispose_builder as usize);
-    map_all("llvm_dispose_module", llvm_wrappers::llvm_dispose_module as usize);
-    map_all("llvm_context_dispose", llvm_wrappers::llvm_context_dispose as usize);
-    map_all("llvm_int1_type", llvm_wrappers::llvm_int1_type as usize);
-    map_all("llvm_int8_type", llvm_wrappers::llvm_int8_type as usize);
-    map_all("llvm_int16_type", llvm_wrappers::llvm_int16_type as usize);
-    map_all("llvm_int32_type", llvm_wrappers::llvm_int32_type as usize);
-    map_all("llvm_int64_type", llvm_wrappers::llvm_int64_type as usize);
-    map_all("llvm_float_type", llvm_wrappers::llvm_float_type as usize);
-    map_all("llvm_double_type", llvm_wrappers::llvm_double_type as usize);
-    map_all("llvm_ptr_type", llvm_wrappers::llvm_ptr_type as usize);
-    map_all("llvm_void_type", llvm_wrappers::llvm_void_type as usize);
-    map_all("llvm_function_type", llvm_wrappers::llvm_function_type as usize);
-    map_all("llvm_struct_type", llvm_wrappers::llvm_struct_type as usize);
-    map_all("llvm_array_type", llvm_wrappers::llvm_array_type as usize);
-    map_all("llvm_const_int", llvm_wrappers::llvm_const_int as usize);
-    map_all("llvm_const_real", llvm_wrappers::llvm_const_real as usize);
-    map_all("llvm_const_null", llvm_wrappers::llvm_const_null as usize);
-    map_all("llvm_const_string", llvm_wrappers::llvm_const_string as usize);
-    map_all("llvm_const_named_struct", llvm_wrappers::llvm_const_named_struct as usize);
-    map_all("llvm_const_array", llvm_wrappers::llvm_const_array as usize);
-    map_all("llvm_const_gep2", llvm_wrappers::llvm_const_gep2 as usize);
-    map_all("llvm_add_function", llvm_wrappers::llvm_add_function as usize);
-    map_all("llvm_get_named_function", llvm_wrappers::llvm_get_named_function as usize);
-    map_all("llvm_add_global", llvm_wrappers::llvm_add_global as usize);
-    map_all("llvm_set_initializer", llvm_wrappers::llvm_set_initializer as usize);
-    map_all("llvm_get_value_type", llvm_wrappers::llvm_get_value_type as usize);
-    map_all("llvm_print_module_to_string", llvm_wrappers::llvm_print_module_to_string as usize);
-    map_all("llvm_get_param", llvm_wrappers::llvm_get_param as usize);
-    map_all("llvm_count_params", llvm_wrappers::llvm_count_params as usize);
-    map_all("llvm_append_basic_block", llvm_wrappers::llvm_append_basic_block as usize);
-    map_all("llvm_get_first_basic_block", llvm_wrappers::llvm_get_first_basic_block as usize);
-    map_all("llvm_get_bb_terminator", llvm_wrappers::llvm_get_bb_terminator as usize);
-    map_all("llvm_get_insert_block", llvm_wrappers::llvm_get_insert_block as usize);
-    map_all("llvm_position_at_end", llvm_wrappers::llvm_position_at_end as usize);
-    map_all("llvm_position_before", llvm_wrappers::llvm_position_before as usize);
-    map_all("llvm_build_alloca", llvm_wrappers::llvm_build_alloca as usize);
-    map_all("llvm_build_load", llvm_wrappers::llvm_build_load as usize);
-    map_all("llvm_build_store", llvm_wrappers::llvm_build_store as usize);
-    map_all("llvm_build_call", llvm_wrappers::llvm_build_call as usize);
-    map_all("llvm_build_ret", llvm_wrappers::llvm_build_ret as usize);
-    map_all("llvm_build_ret_void", llvm_wrappers::llvm_build_ret_void as usize);
-    map_all("llvm_build_br", llvm_wrappers::llvm_build_br as usize);
-    map_all("llvm_build_cond_br", llvm_wrappers::llvm_build_cond_br as usize);
-    map_all("llvm_build_switch", llvm_wrappers::llvm_build_switch as usize);
-    map_all("llvm_build_phi", llvm_wrappers::llvm_build_phi as usize);
-    map_all("llvm_build_gep2", llvm_wrappers::llvm_build_gep2 as usize);
-    map_all("llvm_build_inbounds_gep2", llvm_wrappers::llvm_build_inbounds_gep2 as usize);
-    map_all("llvm_build_bitcast", llvm_wrappers::llvm_build_bitcast as usize);
-    map_all("llvm_build_struct_gep2", llvm_wrappers::llvm_build_struct_gep2 as usize);
-    map_all("llvm_build_memset", llvm_wrappers::llvm_build_memset as usize);
-    map_all("llvm_build_global_string_ptr", llvm_wrappers::llvm_build_global_string_ptr as usize);
-    map_all("llvm_build_add", llvm_wrappers::llvm_build_add as usize);
-    map_all("llvm_build_sub", llvm_wrappers::llvm_build_sub as usize);
-    map_all("llvm_build_mul", llvm_wrappers::llvm_build_mul as usize);
-    map_all("llvm_build_sdiv", llvm_wrappers::llvm_build_sdiv as usize);
-    map_all("llvm_build_srem", llvm_wrappers::llvm_build_srem as usize);
-    map_all("llvm_build_icmp", llvm_wrappers::llvm_build_icmp as usize);
-    map_all("llvm_build_and", llvm_wrappers::llvm_build_and as usize);
-    map_all("llvm_build_or", llvm_wrappers::llvm_build_or as usize);
-    map_all("llvm_build_xor", llvm_wrappers::llvm_build_xor as usize);
-    map_all("llvm_build_zext", llvm_wrappers::llvm_build_zext as usize);
-    map_all("llvm_build_trunc", llvm_wrappers::llvm_build_trunc as usize);
-    map_all("llvm_build_fadd", llvm_wrappers::llvm_build_fadd as usize);
-    map_all("llvm_build_fsub", llvm_wrappers::llvm_build_fsub as usize);
-    map_all("llvm_build_fmul", llvm_wrappers::llvm_build_fmul as usize);
-    map_all("llvm_build_fdiv", llvm_wrappers::llvm_build_fdiv as usize);
-    map_all("llvm_build_frem", llvm_wrappers::llvm_build_frem as usize);
-    map_all("llvm_build_fcmp", llvm_wrappers::llvm_build_fcmp as usize);
-    map_all("llvm_build_fneg", llvm_wrappers::llvm_build_fneg as usize);
-    map_all("llvm_add_incoming", llvm_wrappers::llvm_add_incoming as usize);
-    map_all("llvm_add_case", llvm_wrappers::llvm_add_case as usize);
-    map_all("llvm_set_volatile", llvm_wrappers::llvm_set_volatile as usize);
-    map_all("llvm_init_native_target", llvm_wrappers::llvm_init_native_target as usize);
-    map_all("llvm_init_native_asm_printer", llvm_wrappers::llvm_init_native_asm_printer as usize);
-    map_all("llvm_get_default_triple", llvm_wrappers::llvm_get_default_triple as usize);
-    map_all("llvm_get_target_from_triple", llvm_wrappers::llvm_get_target_from_triple as usize);
-    map_all("llvm_get_host_cpu_name", llvm_wrappers::llvm_get_host_cpu_name as usize);
-    map_all("llvm_get_host_cpu_features", llvm_wrappers::llvm_get_host_cpu_features as usize);
-    map_all("llvm_create_target_machine", llvm_wrappers::llvm_create_target_machine as usize);
-    map_all("llvm_set_module_target", llvm_wrappers::llvm_set_module_target as usize);
-    map_all("llvm_emit_to_file", llvm_wrappers::llvm_emit_to_file as usize);
-    map_all("llvm_get_first_instruction", llvm_wrappers::llvm_get_first_instruction as usize);
-    map_all("llvm_is_null", llvm_wrappers::llvm_is_null as usize);
-    map_all("llvm_get_global_value_type", llvm_wrappers::llvm_get_global_value_type as usize);
-    map_all("llvm_get_element_type", llvm_wrappers::llvm_get_element_type as usize);
-    map_all("llvm_pointer_type", llvm_wrappers::llvm_pointer_type as usize);
-    map_all("llvm_get_type_kind", llvm_wrappers::llvm_get_type_kind as usize);
+    // Direct LLVM C API mappings
+    use llvm_sys::core::*;
+    use llvm_sys::target_machine::*;
+    map_all("LLVMContextCreate", LLVMContextCreate as usize);
+    map_all("LLVMModuleCreateWithNameInContext", LLVMModuleCreateWithNameInContext as usize);
+    map_all("LLVMCreateBuilderInContext", LLVMCreateBuilderInContext as usize);
+    map_all("LLVMInt1TypeInContext", LLVMInt1TypeInContext as usize);
+    map_all("LLVMInt8TypeInContext", LLVMInt8TypeInContext as usize);
+    map_all("LLVMInt16TypeInContext", LLVMInt16TypeInContext as usize);
+    map_all("LLVMInt32TypeInContext", LLVMInt32TypeInContext as usize);
+    map_all("LLVMInt64TypeInContext", LLVMInt64TypeInContext as usize);
+    map_all("LLVMFloatTypeInContext", LLVMFloatTypeInContext as usize);
+    map_all("LLVMDoubleTypeInContext", LLVMDoubleTypeInContext as usize);
+    map_all("LLVMVoidTypeInContext", LLVMVoidTypeInContext as usize);
+    map_all("LLVMConstNull", LLVMConstNull as usize);
+    map_all("LLVMAddFunction", LLVMAddFunction as usize);
+    map_all("LLVMGetNamedFunction", LLVMGetNamedFunction as usize);
+    map_all("LLVMAddGlobal", LLVMAddGlobal as usize);
+    map_all("LLVMTypeOf", LLVMTypeOf as usize);
+    map_all("LLVMGlobalGetValueType", LLVMGlobalGetValueType as usize);
+    map_all("LLVMGetElementType", LLVMGetElementType as usize);
+    map_all("LLVMAppendBasicBlockInContext", LLVMAppendBasicBlockInContext as usize);
+    map_all("LLVMGetFirstBasicBlock", LLVMGetFirstBasicBlock as usize);
+    map_all("LLVMGetBasicBlockTerminator", LLVMGetBasicBlockTerminator as usize);
+    map_all("LLVMGetInsertBlock", LLVMGetInsertBlock as usize);
+    map_all("LLVMGetFirstInstruction", LLVMGetFirstInstruction as usize);
+    map_all("LLVMBuildAlloca", LLVMBuildAlloca as usize);
+    map_all("LLVMBuildLoad2", LLVMBuildLoad2 as usize);
+    map_all("LLVMBuildStore", LLVMBuildStore as usize);
+    map_all("LLVMBuildRet", LLVMBuildRet as usize);
+    map_all("LLVMBuildRetVoid", LLVMBuildRetVoid as usize);
+    map_all("LLVMBuildBr", LLVMBuildBr as usize);
+    map_all("LLVMBuildCondBr", LLVMBuildCondBr as usize);
+    map_all("LLVMBuildPhi", LLVMBuildPhi as usize);
+    map_all("LLVMBuildBitCast", LLVMBuildBitCast as usize);
+    map_all("LLVMBuildGlobalStringPtr", LLVMBuildGlobalStringPtr as usize);
+    map_all("LLVMBuildAdd", LLVMBuildAdd as usize);
+    map_all("LLVMBuildSub", LLVMBuildSub as usize);
+    map_all("LLVMBuildMul", LLVMBuildMul as usize);
+    map_all("LLVMBuildSDiv", LLVMBuildSDiv as usize);
+    map_all("LLVMBuildSRem", LLVMBuildSRem as usize);
+    map_all("LLVMBuildAnd", LLVMBuildAnd as usize);
+    map_all("LLVMBuildOr", LLVMBuildOr as usize);
+    map_all("LLVMBuildXor", LLVMBuildXor as usize);
+    map_all("LLVMBuildZExt", LLVMBuildZExt as usize);
+    map_all("LLVMBuildTrunc", LLVMBuildTrunc as usize);
+    map_all("LLVMBuildFAdd", LLVMBuildFAdd as usize);
+    map_all("LLVMBuildFSub", LLVMBuildFSub as usize);
+    map_all("LLVMBuildFMul", LLVMBuildFMul as usize);
+    map_all("LLVMBuildFDiv", LLVMBuildFDiv as usize);
+    map_all("LLVMBuildFRem", LLVMBuildFRem as usize);
+    map_all("LLVMBuildFNeg", LLVMBuildFNeg as usize);
+    map_all("LLVMGetDefaultTargetTriple", LLVMGetDefaultTargetTriple as usize);
+    map_all("LLVMGetHostCPUName", LLVMGetHostCPUName as usize);
+    map_all("LLVMGetHostCPUFeatures", LLVMGetHostCPUFeatures as usize);
+
+    // C shim mappings (runtime/llvm_shims.c, linked at compile time)
+    extern "C" {
+        fn lang_llvm_dispose_builder(b: *mut u8) -> i64;
+        fn lang_llvm_dispose_module(m: *mut u8) -> i64;
+        fn lang_llvm_context_dispose(ctx: *mut u8) -> i64;
+        fn lang_llvm_ptr_type(ctx: *mut u8) -> *mut u8;
+        fn lang_llvm_function_type(ret: *mut u8, params: *mut u8, count: i64, vararg: i64) -> *mut u8;
+        fn lang_llvm_struct_type(ctx: *mut u8, elems: *mut u8, count: i64, packed: i64) -> *mut u8;
+        fn lang_llvm_array_type(elem: *mut u8, count: i64) -> *mut u8;
+        fn lang_llvm_const_int(ty: *mut u8, val: i64, sign_extend: i64) -> *mut u8;
+        fn lang_llvm_const_string(ctx: *mut u8, s: *const u8, len: i64, null_terminate: i64) -> *mut u8;
+        fn lang_llvm_const_named_struct(ty: *mut u8, vals: *mut u8, count: i64) -> *mut u8;
+        fn lang_llvm_const_array(elem: *mut u8, vals: *mut u8, count: i64) -> *mut u8;
+        fn lang_llvm_const_gep2(ty: *mut u8, val: *mut u8, indices: *mut u8, count: i64) -> *mut u8;
+        fn lang_llvm_set_initializer(global: *mut u8, val: *mut u8) -> i64;
+        fn lang_llvm_get_type_kind(ty: *mut u8) -> i64;
+        fn lang_llvm_pointer_type(ty: *mut u8) -> *mut u8;
+        fn lang_llvm_get_param(f: *mut u8, index: i64) -> *mut u8;
+        fn lang_llvm_count_params(f: *mut u8) -> i64;
+        fn lang_llvm_position_at_end(builder: *mut u8, bb: *mut u8) -> i64;
+        fn lang_llvm_position_before(builder: *mut u8, instr: *mut u8) -> i64;
+        fn lang_llvm_build_call(b: *mut u8, ty: *mut u8, f: *mut u8, args: *mut u8, count: i64, name: *const u8) -> *mut u8;
+        fn lang_llvm_build_switch(b: *mut u8, val: *mut u8, def: *mut u8, cases: i64) -> *mut u8;
+        fn lang_llvm_build_gep2(b: *mut u8, ty: *mut u8, ptr: *mut u8, idx: *mut u8, count: i64, name: *const u8) -> *mut u8;
+        fn lang_llvm_build_inbounds_gep2(b: *mut u8, ty: *mut u8, ptr: *mut u8, idx: *mut u8, count: i64, name: *const u8) -> *mut u8;
+        fn lang_llvm_build_struct_gep2(b: *mut u8, ty: *mut u8, ptr: *mut u8, idx: i64, name: *const u8) -> *mut u8;
+        fn lang_llvm_build_icmp(b: *mut u8, pred: i64, l: *mut u8, r: *mut u8, name: *const u8) -> *mut u8;
+        fn lang_llvm_build_fcmp(b: *mut u8, pred: i64, l: *mut u8, r: *mut u8, name: *const u8) -> *mut u8;
+        fn lang_llvm_build_memset(b: *mut u8, ptr: *mut u8, val: *mut u8, len: *mut u8, align: i64) -> *mut u8;
+        fn lang_llvm_add_incoming(phi: *mut u8, vals: *mut u8, blocks: *mut u8, count: i64) -> i64;
+        fn lang_llvm_add_case(sw: *mut u8, val: *mut u8, dest: *mut u8) -> i64;
+        fn lang_llvm_set_volatile(instr: *mut u8, is_volatile: i64) -> i64;
+        fn lang_llvm_init_native_target() -> i64;
+        fn lang_llvm_init_native_asm_printer() -> i64;
+        fn lang_llvm_get_target_from_triple(triple: *const u8) -> *mut u8;
+        fn lang_llvm_create_target_machine(target: *mut u8, triple: *const u8, cpu: *const u8, features: *const u8) -> *mut u8;
+        fn lang_llvm_set_module_target(module: *mut u8, machine: *mut u8) -> i64;
+        fn lang_llvm_emit_to_file(machine: *mut u8, module: *mut u8, filename: *const u8) -> i64;
+        fn lang_llvm_print_module_to_string(m: *mut u8) -> *const u8;
+    }
+    map_all("lang_llvm_dispose_builder", lang_llvm_dispose_builder as usize);
+    map_all("lang_llvm_dispose_module", lang_llvm_dispose_module as usize);
+    map_all("lang_llvm_context_dispose", lang_llvm_context_dispose as usize);
+    map_all("lang_llvm_ptr_type", lang_llvm_ptr_type as usize);
+    map_all("lang_llvm_function_type", lang_llvm_function_type as usize);
+    map_all("lang_llvm_struct_type", lang_llvm_struct_type as usize);
+    map_all("lang_llvm_array_type", lang_llvm_array_type as usize);
+    map_all("lang_llvm_const_int", lang_llvm_const_int as usize);
+    map_all("lang_llvm_const_string", lang_llvm_const_string as usize);
+    map_all("lang_llvm_const_named_struct", lang_llvm_const_named_struct as usize);
+    map_all("lang_llvm_const_array", lang_llvm_const_array as usize);
+    map_all("lang_llvm_const_gep2", lang_llvm_const_gep2 as usize);
+    map_all("lang_llvm_set_initializer", lang_llvm_set_initializer as usize);
+    map_all("lang_llvm_get_type_kind", lang_llvm_get_type_kind as usize);
+    map_all("lang_llvm_pointer_type", lang_llvm_pointer_type as usize);
+    map_all("lang_llvm_get_param", lang_llvm_get_param as usize);
+    map_all("lang_llvm_count_params", lang_llvm_count_params as usize);
+    map_all("lang_llvm_position_at_end", lang_llvm_position_at_end as usize);
+    map_all("lang_llvm_position_before", lang_llvm_position_before as usize);
+    map_all("lang_llvm_build_call", lang_llvm_build_call as usize);
+    map_all("lang_llvm_build_switch", lang_llvm_build_switch as usize);
+    map_all("lang_llvm_build_gep2", lang_llvm_build_gep2 as usize);
+    map_all("lang_llvm_build_inbounds_gep2", lang_llvm_build_inbounds_gep2 as usize);
+    map_all("lang_llvm_build_struct_gep2", lang_llvm_build_struct_gep2 as usize);
+    map_all("lang_llvm_build_icmp", lang_llvm_build_icmp as usize);
+    map_all("lang_llvm_build_fcmp", lang_llvm_build_fcmp as usize);
+    map_all("lang_llvm_build_memset", lang_llvm_build_memset as usize);
+    map_all("lang_llvm_add_incoming", lang_llvm_add_incoming as usize);
+    map_all("lang_llvm_add_case", lang_llvm_add_case as usize);
+    map_all("lang_llvm_set_volatile", lang_llvm_set_volatile as usize);
+    map_all("lang_llvm_init_native_target", lang_llvm_init_native_target as usize);
+    map_all("lang_llvm_init_native_asm_printer", lang_llvm_init_native_asm_printer as usize);
+    map_all("lang_llvm_get_target_from_triple", lang_llvm_get_target_from_triple as usize);
+    map_all("lang_llvm_create_target_machine", lang_llvm_create_target_machine as usize);
+    map_all("lang_llvm_set_module_target", lang_llvm_set_module_target as usize);
+    map_all("lang_llvm_emit_to_file", lang_llvm_emit_to_file as usize);
+    map_all("lang_llvm_print_module_to_string", lang_llvm_print_module_to_string as usize);
+
+    // Pointer intrinsics
+    map_all("ptr_load_ptr", rt_ptr_load_ptr as usize);
+    map_all("ptr_store_ptr", rt_ptr_store_ptr as usize);
+    map_all("ptr_load_i64", rt_ptr_load_i64 as usize);
+    map_all("ptr_store_i64", rt_ptr_store_i64 as usize);
+    map_all("ptr_load_i32", rt_ptr_load_i32 as usize);
+    map_all("ptr_store_i32", rt_ptr_store_i32 as usize);
+    map_all("ptr_load_i8", rt_ptr_load_i8 as usize);
+    map_all("ptr_store_i8", rt_ptr_store_i8 as usize);
+    map_all("ptr_offset", rt_ptr_offset as usize);
+
+    // C allocator functions
+    map_all("malloc", libc::malloc as usize);
+    map_all("realloc", libc::realloc as usize);
+    map_all("free", libc::free as usize);
+    map_all("memcpy", libc::memcpy as usize);
 
     // Runtime helpers
     map_all("write_file", runtime::write_file as usize);
     map_all("system_cmd", runtime::system_cmd as usize);
-    map_all("vec_data", runtime::vec_data as usize);
+    map_all("file_exists", runtime::file_exists as usize);
+    map_all("get_stdlib_path", runtime::get_stdlib_path as usize);
 
     // Codegen pass vec aliases
     for alias in &["vec_push_cgfn","vec_push_cgsl","vec_push_cgel","vec_push_cgfl",
@@ -1074,133 +1223,128 @@ impl<'ctx> Codegen<'ctx> {
                         }
                         self.collect_tuple_types(&f.ret_type)?;
                     }
-                    Item::Use(_) => {}
+                    Item::Use(_) | Item::Link(_) => {}
                 }
             }
         }
         Ok(())
     }
 
-    fn compute_struct_layout(&mut self, full_name: &str, s: &StructDecl) -> Result<StructLayout<'ctx>, CodegenError> {
-        let ptr_size = std::mem::size_of::<usize>() as u64;
+    fn compute_struct_layout(&mut self, _full_name: &str, s: &StructDecl) -> Result<StructLayout<'ctx>, CodegenError> {
         let mut ptr_fields = Vec::new();
         let mut raw_fields = Vec::new();
 
         for field in &s.fields {
-            let is_ptr = self.is_gc_ref_type(&field.ty);
+            let is_gc_ref = self.is_gc_ref_type(&field.ty);
             let llvm_ty = self.field_llvm_type(&field.ty)?;
             let entry = FieldLayout {
                 name: field.name.clone(),
                 ty: field.ty.clone(),
                 llvm_ty,
-                offset: 0,
-                is_ptr,
+                index: 0,
+                is_gc_ref,
             };
-            if is_ptr {
+            if is_gc_ref {
                 ptr_fields.push(entry);
             } else {
                 raw_fields.push(entry);
             }
         }
 
+        let ptr_field_count = ptr_fields.len() as u64;
         let mut fields = Vec::new();
-        let mut offset = 0u64;
+        let mut index = 0u64;
 
         for mut field in ptr_fields {
-            field.offset = offset;
-            offset += ptr_size;
+            field.index = index;
+            index += 1;
             fields.push(field);
         }
 
         for mut field in raw_fields {
-            let align = match field.llvm_ty {
-                BasicTypeEnum::IntType(t) if t.get_bit_width() == 1 => 1,
-                BasicTypeEnum::IntType(t) => (t.get_bit_width() / 8) as u64,
-                _ => 8,
-            };
-            if offset % align != 0 {
-                offset += align - (offset % align);
-            }
-            field.offset = offset;
-            offset += align.max(1);
+            field.index = index;
+            index += 1;
             fields.push(field);
         }
 
-        let payload_size = offset;
-        let header_size = 16u64;
-        let total_size = header_size + payload_size;
-
-        let ptr_offsets: Vec<u64> = fields
-            .iter()
-            .filter(|f| f.is_ptr)
-            .map(|f| header_size + f.offset)
-            .collect();
-
-        let meta = self.create_type_info(full_name, 0, total_size, &ptr_offsets)?;
+        let field_count = index;
+        let type_id = self.next_type_id;
+        self.next_type_id += 1;
 
         Ok(StructLayout {
-            size: total_size,
+            field_count,
+            ptr_field_count,
+            type_id,
             fields,
-            meta,
         })
     }
 
-    fn compute_enum_layout(&mut self, full_name: &str, e: &EnumDecl) -> Result<EnumLayout<'ctx>, CodegenError> {
-        let ptr_size = std::mem::size_of::<usize>() as u64;
-        let header_size = 16u64;
+    fn compute_enum_layout(&mut self, _full_name: &str, e: &EnumDecl) -> Result<EnumLayout<'ctx>, CodegenError> {
         let mut variants = HashMap::new();
         let mut max_ptrs = 0usize;
-        let mut max_raw = 0u64;
+        let mut max_raw_fields = 0usize; // raw fields excluding tag
 
-        for (tag, variant) in e.variants.iter().enumerate() {
-            let mut ptr_index = 0usize;
-            let mut raw_offset = 4u64; // tag at offset 0 in raw section
-            let mut fields = Vec::new();
+        // First pass: find max ptr count and max raw field count across all variants
+        for variant in &e.variants {
             let field_specs: Vec<(Option<String>, Type)> = match &variant.kind {
                 EnumVariantKind::Unit => Vec::new(),
                 EnumVariantKind::Tuple(types) => types.iter().map(|t| (None, t.clone())).collect(),
                 EnumVariantKind::Struct(fields) => fields.iter().map(|f| (Some(f.name.clone()), f.ty.clone())).collect(),
             };
-            for (name, ty) in field_specs {
-                let is_ptr = self.is_gc_ref_type(&ty);
-                let llvm_ty = self.field_llvm_type(&ty)?;
-                if is_ptr {
-                    fields.push(VariantFieldLayout {
-                        name,
-                        ty: ty.clone(),
-                        llvm_ty,
-                        is_ptr: true,
-                        ptr_index,
-                        raw_offset: 0,
-                    });
-                    ptr_index += 1;
+            let mut ptr_count = 0usize;
+            let mut raw_count = 0usize;
+            for (_name, ty) in &field_specs {
+                if self.is_gc_ref_type(ty) {
+                    ptr_count += 1;
                 } else {
-                    let align = match llvm_ty {
-                        BasicTypeEnum::IntType(t) if t.get_bit_width() == 1 => 1,
-                        BasicTypeEnum::IntType(t) => (t.get_bit_width() / 8) as u64,
-                        _ => 8,
-                    };
-                    if raw_offset % align != 0 {
-                        raw_offset += align - (raw_offset % align);
-                    }
-                    fields.push(VariantFieldLayout {
-                        name,
-                        ty: ty.clone(),
-                        llvm_ty,
-                        is_ptr: false,
-                        ptr_index: 0,
-                        raw_offset,
-                    });
-                    raw_offset += align.max(1);
+                    raw_count += 1;
                 }
             }
-            let variant_ptrs = ptr_index;
-            let variant_raw = raw_offset;
-            if variant_ptrs > max_ptrs {
-                max_ptrs = variant_ptrs;
+            if ptr_count > max_ptrs {
+                max_ptrs = ptr_count;
             }
-            if variant_raw > max_raw {
-                max_raw = variant_raw;
+            if raw_count > max_raw_fields {
+                max_raw_fields = raw_count;
+            }
+        }
+
+        // Layout: [ptr fields 0..max_ptrs-1] [tag at max_ptrs] [raw fields max_ptrs+1..]
+        // total_fields = max_ptrs + 1 (tag) + max_raw_fields
+        let tag_index = max_ptrs as u64;
+        let field_count = max_ptrs as u64 + 1 + max_raw_fields as u64;
+
+        // Second pass: assign field indices per variant
+        for (tag, variant) in e.variants.iter().enumerate() {
+            let field_specs: Vec<(Option<String>, Type)> = match &variant.kind {
+                EnumVariantKind::Unit => Vec::new(),
+                EnumVariantKind::Tuple(types) => types.iter().map(|t| (None, t.clone())).collect(),
+                EnumVariantKind::Struct(fields) => fields.iter().map(|f| (Some(f.name.clone()), f.ty.clone())).collect(),
+            };
+            let mut ptr_idx = 0u64;
+            let mut raw_idx = tag_index + 1; // first raw field after tag
+            let mut fields = Vec::new();
+            for (name, ty) in field_specs {
+                let is_gc_ref = self.is_gc_ref_type(&ty);
+                let llvm_ty = self.field_llvm_type(&ty)?;
+                if is_gc_ref {
+                    fields.push(VariantFieldLayout {
+                        name,
+                        ty: ty.clone(),
+                        llvm_ty,
+                        is_gc_ref: true,
+                        field_index: ptr_idx,
+                    });
+                    ptr_idx += 1;
+                } else {
+                    fields.push(VariantFieldLayout {
+                        name,
+                        ty: ty.clone(),
+                        llvm_ty,
+                        is_gc_ref: false,
+                        field_index: raw_idx,
+                    });
+                    raw_idx += 1;
+                }
             }
             variants.insert(
                 variant.name.clone(),
@@ -1211,21 +1355,13 @@ impl<'ctx> Codegen<'ctx> {
             );
         }
 
-        let raw_size = if max_raw == 0 { 4 } else { max_raw };
-        let raw_base = header_size + (max_ptrs as u64) * ptr_size;
-        let total_size = raw_base + raw_size;
-
-        let ptr_offsets: Vec<u64> = (0..max_ptrs)
-            .map(|i| header_size + (i as u64) * ptr_size)
-            .collect();
-        let meta = self.create_type_info(full_name, 1, total_size, &ptr_offsets)?;
+        let type_id = self.next_type_id;
+        self.next_type_id += 1;
 
         Ok(EnumLayout {
-            size: total_size,
-            ptr_count: max_ptrs,
-            raw_size,
-            raw_base,
-            meta,
+            field_count,
+            ptr_field_count: max_ptrs as u64,
+            type_id,
             variants,
         })
     }
@@ -1330,144 +1466,55 @@ impl<'ctx> Codegen<'ctx> {
         Ok(key)
     }
 
-    fn compute_tuple_layout(&mut self, name: &str, items: &[Type]) -> Result<StructLayout<'ctx>, CodegenError> {
-        let ptr_size = std::mem::size_of::<usize>() as u64;
+    fn compute_tuple_layout(&mut self, _name: &str, items: &[Type]) -> Result<StructLayout<'ctx>, CodegenError> {
         let mut ptr_fields = Vec::new();
         let mut raw_fields = Vec::new();
 
         for (i, ty) in items.iter().enumerate() {
-            let is_ptr = self.is_gc_ref_type(ty);
+            let is_gc_ref = self.is_gc_ref_type(ty);
             let llvm_ty = self.field_llvm_type(ty)?;
             let entry = FieldLayout {
                 name: i.to_string(),
                 ty: ty.clone(),
                 llvm_ty,
-                offset: 0,
-                is_ptr,
+                index: 0,
+                is_gc_ref,
             };
-            if is_ptr {
+            if is_gc_ref {
                 ptr_fields.push(entry);
             } else {
                 raw_fields.push(entry);
             }
         }
 
+        let ptr_field_count = ptr_fields.len() as u64;
         let mut fields = Vec::new();
-        let mut offset = 0u64;
+        let mut index = 0u64;
 
         for mut field in ptr_fields {
-            field.offset = offset;
-            offset += ptr_size;
+            field.index = index;
+            index += 1;
             fields.push(field);
         }
 
         for mut field in raw_fields {
-            let align = match field.llvm_ty {
-                BasicTypeEnum::IntType(t) if t.get_bit_width() == 1 => 1,
-                BasicTypeEnum::IntType(t) => (t.get_bit_width() / 8) as u64,
-                _ => 8,
-            };
-            if offset % align != 0 {
-                offset += align - (offset % align);
-            }
-            field.offset = offset;
-            offset += align.max(1);
+            field.index = index;
+            index += 1;
             fields.push(field);
         }
 
-        let payload_size = offset;
-        let header_size = 16u64;
-        let total_size = header_size + payload_size;
-
-        let ptr_offsets: Vec<u64> = fields
-            .iter()
-            .filter(|f| f.is_ptr)
-            .map(|f| header_size + f.offset)
-            .collect();
-
-        let meta = self.create_type_info(name, 0, total_size, &ptr_offsets)?;
+        let field_count = index;
+        let type_id = self.next_type_id;
+        self.next_type_id += 1;
 
         Ok(StructLayout {
-            size: total_size,
+            field_count,
+            ptr_field_count,
+            type_id,
             fields,
-            meta,
         })
     }
 
-    fn create_type_info(
-        &self,
-        name: &str,
-        kind: u32,
-        size: u64,
-        ptr_offsets: &[u64],
-    ) -> Result<PointerValue<'ctx>, CodegenError> {
-        let i32_ty = self.context.i32_type();
-        let i64_ty = self.context.i64_type();
-        let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
-
-        let offsets_const = i64_ty.const_array(
-            &ptr_offsets
-                .iter()
-                .map(|v| i64_ty.const_int(*v, false))
-                .collect::<Vec<_>>(),
-        );
-        let sym = mangle_name(name);
-        let offsets_global = self.module.add_global(
-            offsets_const.get_type(),
-            None,
-            &format!("__ptr_offsets_{}", sym),
-        );
-        offsets_global.set_initializer(&offsets_const);
-        let zero = i32_ty.const_zero();
-        let offsets_ptr = unsafe {
-            offsets_global
-                .as_pointer_value()
-                .const_gep(offsets_const.get_type(), &[zero, zero])
-        };
-
-        let name_const = self.context.const_string(name.as_bytes(), true);
-        let name_global = self
-            .module
-            .add_global(name_const.get_type(), None, &format!("__type_name_{}", sym));
-        name_global.set_initializer(&name_const);
-        let name_ptr = unsafe {
-            name_global
-                .as_pointer_value()
-                .const_gep(name_const.get_type(), &[zero, zero])
-        };
-
-        let typeinfo_ty = self.context.struct_type(
-            &[
-                i32_ty.into(), // kind
-                i32_ty.into(), // pad
-                i64_ty.into(), // size
-                i32_ty.into(), // num_ptrs
-                i32_ty.into(), // pad
-                ptr_ty.into(), // name
-                ptr_ty.into(), // ptr_offsets
-            ],
-            false,
-        );
-
-        let kind = i32_ty.const_int(kind as u64, false);
-        let size_val = i64_ty.const_int(size, false);
-        let num_ptrs = i32_ty.const_int(ptr_offsets.len() as u64, false);
-        let init = typeinfo_ty.const_named_struct(&[
-            kind.into(),
-            i32_ty.const_zero().into(),
-            size_val.into(),
-            num_ptrs.into(),
-            i32_ty.const_zero().into(),
-            name_ptr.into(),
-            offsets_ptr.into(),
-        ]);
-
-        let global = self
-            .module
-            .add_global(typeinfo_ty, None, &format!("__typeinfo_{}", sym));
-        global.set_initializer(&init);
-        Ok(global.as_pointer_value())
-    }
     fn new(context: &'ctx Context, name: &str, mode: CodegenMode) -> Self {
         let module = context.create_module(name);
         let builder = context.create_builder();
@@ -1481,17 +1528,8 @@ impl<'ctx> Codegen<'ctx> {
             false,
         );
         let thread_ty = thread_struct_ty.ptr_type(inkwell::AddressSpace::default());
-        let object_header_ty = context.struct_type(
-            &[
-                ptr_ty.into(),             // meta
-                context.i32_type().into(), // gc_flags
-                context.i32_type().into(), // aux
-            ],
-            false,
-        );
         let gc_pollcheck = Self::declare_gc_pollcheck(&module, thread_ty, context);
-        let gc_allocate = Self::declare_gc_allocate(&module, thread_ty, context, "gc_allocate");
-        let gc_allocate_array = Self::declare_gc_allocate(&module, thread_ty, context, "gc_allocate_array");
+        let gc_allocate_obj = Self::declare_gc_alloc(&module, context);
         let gc_write_barrier = Self::declare_gc_write_barrier(&module, thread_ty, context);
         Self {
             context,
@@ -1503,14 +1541,13 @@ impl<'ctx> Codegen<'ctx> {
             functions: HashMap::new(),
             externs: HashMap::new(),
             gc_pollcheck,
-            gc_allocate,
-            gc_allocate_array,
+            gc_allocate_obj,
             gc_write_barrier,
-            object_header_ty,
             structs: HashMap::new(),
             enums: HashMap::new(),
             tuples: HashMap::new(),
             str_lit_id: 0,
+            next_type_id: 0,
         }
     }
 
@@ -1533,16 +1570,14 @@ impl<'ctx> Codegen<'ctx> {
         module.add_function("gc_pollcheck_slow", fn_ty, None)
     }
 
-    fn declare_gc_allocate(
+    fn declare_gc_alloc(
         module: &Module<'ctx>,
-        thread_ty: inkwell::types::PointerType<'ctx>,
         context: &'ctx Context,
-        name: &str,
     ) -> FunctionValue<'ctx> {
         let ptr_ty = context.ptr_type(inkwell::AddressSpace::default());
         let i64_ty = context.i64_type();
-        let fn_ty = ptr_ty.fn_type(&[thread_ty.into(), ptr_ty.into(), i64_ty.into()], false);
-        module.add_function(name, fn_ty, None)
+        let fn_ty = ptr_ty.fn_type(&[i64_ty.into(), i64_ty.into(), i64_ty.into()], false);
+        module.add_function("gc_alloc", fn_ty, None)
     }
 
     fn declare_gc_write_barrier(
@@ -1751,6 +1786,18 @@ impl<'ctx> Codegen<'ctx> {
         self.map_builder(self.builder.build_store(pad_ptr, i32_ty.const_zero()), "store")?;
 
         let thread_ptr = self.map_builder(self.builder.build_bit_cast(thread_alloca, ptr_ty, "thread_ptr"), "bitcast")?;
+
+        // Call gc_set_thread(thread_ptr)
+        let gc_set_thread_ty = self.context.void_type().fn_type(&[ptr_ty.into()], false);
+        let gc_set_thread_fn = self
+            .module
+            .get_function("gc_set_thread")
+            .unwrap_or_else(|| self.module.add_function("gc_set_thread", gc_set_thread_ty, None));
+        self.map_builder(
+            self.builder.build_call(gc_set_thread_fn, &[thread_ptr.into()], "set_thread"),
+            "call",
+        )?;
+
         let call = self.map_builder(self.builder.build_call(lang_main, &[thread_ptr.into()], "lang_main"), "call")?;
         let ret_val = call
             .try_as_basic_value()
@@ -1840,16 +1887,7 @@ impl<'ctx> Codegen<'ctx> {
                         let (obj_ptr, _layout, field) = self.resolve_field(base, name, ctx)?;
                         let field_ptr = self.field_ptr(obj_ptr, &field)?;
                         if let Some(v) = v {
-                            let store_val = if self.is_bool_type(&field.ty) {
-                                let zext = self.map_builder(
-                                    self.builder.build_int_z_extend(v.into_int_value(), self.context.i8_type(), "boolz"),
-                                    "zext",
-                                )?;
-                                zext.into()
-                            } else {
-                                v
-                            };
-                            self.map_builder(self.builder.build_store(field_ptr, store_val), "store")?;
+                            self.store_gc_field(field_ptr, &field, v)?;
                             if self.is_gc_ref_type(&field.ty) {
                                 let args = &[ctx.thread.into(), obj_ptr.into(), v.into()];
                                 let _ = self.map_builder(self.builder.build_call(self.gc_write_barrier, args, "wb"), "call")?;
@@ -1906,18 +1944,8 @@ impl<'ctx> Codegen<'ctx> {
             Expr::Field { base, name, .. } => {
                 let (obj_ptr, _layout, field) = self.resolve_field(base, name, ctx)?;
                 let field_ptr = self.field_ptr(obj_ptr, &field)?;
-                let loaded = self.map_builder(self.builder.build_load(field.llvm_ty, field_ptr, "field"), "load")?;
-                if self.is_bool_type(&field.ty) {
-                    let zero = self.context.i8_type().const_zero();
-                    let cmp = self.map_builder(
-                        self.builder
-                            .build_int_compare(inkwell::IntPredicate::NE, loaded.into_int_value(), zero, "bool"),
-                        "icmp",
-                    )?;
-                    Ok(Some(cmp.into()))
-                } else {
-                    Ok(Some(loaded))
-                }
+                let loaded = self.load_gc_field(field_ptr, &field)?;
+                Ok(Some(loaded))
             }
             Expr::Binary { op, left, right, .. } => {
                 let l = self.codegen_expr(left, ctx, None)?.ok_or_else(|| CodegenError { message: "missing lhs".to_string() })?;
@@ -2083,7 +2111,6 @@ impl<'ctx> Codegen<'ctx> {
                             .variants
                             .get(variant_name)
                             .ok_or_else(|| CodegenError { message: "unknown variant".to_string() })?;
-                        let raw_base = self.enum_raw_base_ptr(obj_ptr, enum_layout.raw_base)?;
                         for pat_field in fields {
                             let binding = match &pat_field.binding {
                                 Some(b) => b,
@@ -2094,17 +2121,18 @@ impl<'ctx> Codegen<'ctx> {
                                 .iter()
                                 .find(|f| f.name.as_deref() == Some(pat_field.name.as_str()))
                                 .ok_or_else(|| CodegenError { message: "unknown field".to_string() })?;
-                            let loaded = if field.is_ptr {
-                                let slot_ptr = self.enum_ptr_slot(obj_ptr, field.ptr_index)?;
+                            let fld_ptr = self.enum_field_ptr(obj_ptr, field.field_index)?;
+                            let loaded = if field.is_gc_ref {
+                                let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
                                 self.map_builder(
-                                    self.builder.build_load(self.context.ptr_type(inkwell::AddressSpace::default()), slot_ptr, "enum_field"),
+                                    self.builder.build_load(ptr_ty, fld_ptr, "enum_field"),
                                     "load",
                                 )?
                             } else {
-                                let field_ptr = self.enum_raw_field_ptr(raw_base, field.raw_offset, field.llvm_ty)?;
-                                let raw = self.map_builder(self.builder.build_load(field.llvm_ty, field_ptr, "enum_field"), "load")?;
+                                let load_ty = self.context.i64_type();
+                                let raw = self.map_builder(self.builder.build_load(load_ty, fld_ptr, "enum_field"), "load")?;
                                 if self.is_bool_type(&field.ty) {
-                                    let zero = self.context.i8_type().const_zero();
+                                    let zero = self.context.i64_type().const_zero();
                                     let cmp = self.map_builder(
                                         self.builder
                                             .build_int_compare(inkwell::IntPredicate::NE, raw.into_int_value(), zero, "bool"),
@@ -2169,31 +2197,23 @@ impl<'ctx> Codegen<'ctx> {
                             if variant.fields.iter().any(|f| f.name.is_some()) {
                                 return Err(CodegenError { message: "struct variant requires field syntax".to_string() });
                             }
-                            let size_val = self.context.i64_type().const_int(layout.size, false);
-                            let meta_ptr = self.map_builder(
-                                self.builder.build_bit_cast(layout.meta, self.context.ptr_type(inkwell::AddressSpace::default()), "meta"),
-                                "bitcast",
-                            )?;
-                            let args_alloc = &[
-                                ctx.thread.into(),
-                                meta_ptr.into(),
-                                size_val.into(),
-                            ];
-                            let call = self.map_builder(self.builder.build_call(self.gc_allocate, args_alloc, "alloc_enum"), "call")?;
+                            let i64_ty = self.context.i64_type();
+                            let total_fields = i64_ty.const_int(layout.field_count, false);
+                            let ptr_fields = i64_ty.const_int(layout.ptr_field_count, false);
+                            let type_id_val = i64_ty.const_int(layout.type_id as u64, false);
+                            let args_alloc = &[total_fields.into(), ptr_fields.into(), type_id_val.into()];
+                            let call = self.map_builder(self.builder.build_call(self.gc_allocate_obj, args_alloc, "alloc_enum"), "call")?;
                             let obj_ptr = call
                                 .try_as_basic_value()
                                 .basic()
                                 .ok_or_else(|| CodegenError { message: "alloc returned void".to_string() })?
                                 .into_pointer_value();
-                            self.init_header(obj_ptr, meta_ptr.into_pointer_value())?;
 
-                            let raw_base = self.enum_raw_base_ptr(obj_ptr, layout.raw_base)?;
-                            let tag_ptr = self.map_builder(
-                                self.builder.build_bit_cast(raw_base, self.context.i32_type().ptr_type(inkwell::AddressSpace::default()), "tag"),
-                                "bitcast",
-                            )?;
-                            let tag_val = self.context.i32_type().const_int(variant.tag as u64, false);
-                            self.map_builder(self.builder.build_store(tag_ptr.into_pointer_value(), tag_val), "store")?;
+                            // Write tag as i64 at tag field index
+                            let tag_index = layout.ptr_field_count;
+                            let tag_ptr = self.gc_field_ptr(obj_ptr, tag_index)?;
+                            let tag_val = i64_ty.const_int(variant.tag as u64, false);
+                            self.map_builder(self.builder.build_store(tag_ptr, tag_val), "store")?;
 
                             if args.len() != variant.fields.len() {
                                 return Err(CodegenError { message: "arg count mismatch".to_string() });
@@ -2201,22 +2221,17 @@ impl<'ctx> Codegen<'ctx> {
                             for (i, arg) in args.iter().enumerate() {
                                 let arg_val = self.codegen_expr(arg, ctx, None)?.ok_or_else(|| CodegenError { message: "missing arg".to_string() })?;
                                 let arg_layout = variant.fields.get(i).ok_or_else(|| CodegenError { message: "arg count mismatch".to_string() })?;
-                                if arg_layout.is_ptr {
-                                    let slot_ptr = self.enum_ptr_slot(obj_ptr, arg_layout.ptr_index)?;
-                                    self.map_builder(self.builder.build_store(slot_ptr, arg_val), "store")?;
+                                let fld_ptr = self.enum_field_ptr(obj_ptr, arg_layout.field_index)?;
+                                let store_val = if self.is_bool_type(&arg_layout.ty) {
+                                    let zext = self.map_builder(
+                                        self.builder.build_int_z_extend(arg_val.into_int_value(), i64_ty, "boolz"),
+                                        "zext",
+                                    )?;
+                                    zext.into()
                                 } else {
-                                    let field_ptr = self.enum_raw_field_ptr(raw_base, arg_layout.raw_offset, arg_layout.llvm_ty)?;
-                                    let store_val = if self.is_bool_type(&arg_layout.ty) {
-                                        let zext = self.map_builder(
-                                            self.builder.build_int_z_extend(arg_val.into_int_value(), self.context.i8_type(), "boolz"),
-                                            "zext",
-                                        )?;
-                                        zext.into()
-                                    } else {
-                                        arg_val
-                                    };
-                                    self.map_builder(self.builder.build_store(field_ptr, store_val), "store")?;
-                                }
+                                    arg_val
+                                };
+                                self.map_builder(self.builder.build_store(fld_ptr, store_val), "store")?;
                             }
                             self.emit_pollcheck(ctx)?;
                             return Ok(Some(obj_ptr.into()));
@@ -2259,31 +2274,23 @@ impl<'ctx> Codegen<'ctx> {
                             .cloned()
                             .ok_or_else(|| CodegenError { message: "unknown enum variant".to_string() })?;
                         if variant.fields.iter().all(|f| f.name.is_some()) {
-                            let size_val = self.context.i64_type().const_int(layout.size, false);
-                            let meta_ptr = self.map_builder(
-                                self.builder.build_bit_cast(layout.meta, self.context.ptr_type(inkwell::AddressSpace::default()), "meta"),
-                                "bitcast",
-                            )?;
-                            let args_alloc = &[
-                                ctx.thread.into(),
-                                meta_ptr.into(),
-                                size_val.into(),
-                            ];
-                            let call = self.map_builder(self.builder.build_call(self.gc_allocate, args_alloc, "alloc_enum"), "call")?;
+                            let i64_ty = self.context.i64_type();
+                            let total_fields = i64_ty.const_int(layout.field_count, false);
+                            let ptr_fields_val = i64_ty.const_int(layout.ptr_field_count, false);
+                            let type_id_val = i64_ty.const_int(layout.type_id as u64, false);
+                            let args_alloc = &[total_fields.into(), ptr_fields_val.into(), type_id_val.into()];
+                            let call = self.map_builder(self.builder.build_call(self.gc_allocate_obj, args_alloc, "alloc_enum"), "call")?;
                             let obj_ptr = call
                                 .try_as_basic_value()
                                 .basic()
                                 .ok_or_else(|| CodegenError { message: "alloc returned void".to_string() })?
                                 .into_pointer_value();
-                            self.init_header(obj_ptr, meta_ptr.into_pointer_value())?;
 
-                            let raw_base = self.enum_raw_base_ptr(obj_ptr, layout.raw_base)?;
-                            let tag_ptr = self.map_builder(
-                                self.builder.build_bit_cast(raw_base, self.context.i32_type().ptr_type(inkwell::AddressSpace::default()), "tag"),
-                                "bitcast",
-                            )?;
-                            let tag_val = self.context.i32_type().const_int(variant.tag as u64, false);
-                            self.map_builder(self.builder.build_store(tag_ptr.into_pointer_value(), tag_val), "store")?;
+                            // Write tag as i64 at tag field index
+                            let tag_index = layout.ptr_field_count;
+                            let tag_ptr = self.gc_field_ptr(obj_ptr, tag_index)?;
+                            let tag_val = i64_ty.const_int(variant.tag as u64, false);
+                            self.map_builder(self.builder.build_store(tag_ptr, tag_val), "store")?;
 
                             for (field_name, field_expr) in fields {
                                 let field = variant
@@ -2293,22 +2300,17 @@ impl<'ctx> Codegen<'ctx> {
                                     .cloned()
                                     .ok_or_else(|| CodegenError { message: "unknown field".to_string() })?;
                                 let value = self.codegen_expr(field_expr, ctx, Some(&field.ty))?.ok_or_else(|| CodegenError { message: "missing field value".to_string() })?;
-                                if field.is_ptr {
-                                    let slot_ptr = self.enum_ptr_slot(obj_ptr, field.ptr_index)?;
-                                    self.map_builder(self.builder.build_store(slot_ptr, value), "store")?;
+                                let fld_ptr = self.enum_field_ptr(obj_ptr, field.field_index)?;
+                                let store_val = if self.is_bool_type(&field.ty) {
+                                    let zext = self.map_builder(
+                                        self.builder.build_int_z_extend(value.into_int_value(), i64_ty, "boolz"),
+                                        "zext",
+                                    )?;
+                                    zext.into()
                                 } else {
-                                    let field_ptr = self.enum_raw_field_ptr(raw_base, field.raw_offset, field.llvm_ty)?;
-                                    let store_val = if self.is_bool_type(&field.ty) {
-                                        let zext = self.map_builder(
-                                            self.builder.build_int_z_extend(value.into_int_value(), self.context.i8_type(), "boolz"),
-                                            "zext",
-                                        )?;
-                                        zext.into()
-                                    } else {
-                                        value
-                                    };
-                                    self.map_builder(self.builder.build_store(field_ptr, store_val), "store")?;
-                                }
+                                    value
+                                };
+                                self.map_builder(self.builder.build_store(fld_ptr, store_val), "store")?;
                             }
                             self.emit_pollcheck(ctx)?;
                             return Ok(Some(obj_ptr.into()));
@@ -2322,23 +2324,17 @@ impl<'ctx> Codegen<'ctx> {
                     .get(&name)
                     .cloned()
                     .ok_or_else(|| CodegenError { message: "unknown struct".to_string() })?;
-                let size_val = self.context.i64_type().const_int(layout.size, false);
-                let meta_ptr = self.map_builder(
-                    self.builder.build_bit_cast(layout.meta, self.context.ptr_type(inkwell::AddressSpace::default()), "meta"),
-                    "bitcast",
-                )?;
-                let args = &[
-                    ctx.thread.into(),
-                    meta_ptr.into(),
-                    size_val.into(),
-                ];
-                let call = self.map_builder(self.builder.build_call(self.gc_allocate, args, "alloc"), "call")?;
+                let i64_ty = self.context.i64_type();
+                let total_fields = i64_ty.const_int(layout.field_count, false);
+                let ptr_fields_val = i64_ty.const_int(layout.ptr_field_count, false);
+                let type_id_val = i64_ty.const_int(layout.type_id as u64, false);
+                let alloc_args = &[total_fields.into(), ptr_fields_val.into(), type_id_val.into()];
+                let call = self.map_builder(self.builder.build_call(self.gc_allocate_obj, alloc_args, "alloc"), "call")?;
                 let obj_ptr = call
                     .try_as_basic_value()
                     .basic()
                     .ok_or_else(|| CodegenError { message: "alloc returned void".to_string() })?
                     .into_pointer_value();
-                self.init_header(obj_ptr, meta_ptr.into_pointer_value())?;
                 for (field_name, field_expr) in fields {
                     let field = layout
                         .fields
@@ -2348,16 +2344,7 @@ impl<'ctx> Codegen<'ctx> {
                         .ok_or_else(|| CodegenError { message: "unknown field".to_string() })?;
                     let value = self.codegen_expr(field_expr, ctx, Some(&field.ty))?.ok_or_else(|| CodegenError { message: "missing field value".to_string() })?;
                     let field_ptr = self.field_ptr(obj_ptr, &field)?;
-                    let store_val = if self.is_bool_type(&field.ty) {
-                        let zext = self.map_builder(
-                            self.builder.build_int_z_extend(value.into_int_value(), self.context.i8_type(), "boolz"),
-                            "zext",
-                        )?;
-                        zext.into()
-                    } else {
-                        value
-                    };
-                    self.map_builder(self.builder.build_store(field_ptr, store_val), "store")?;
+                    self.store_gc_field(field_ptr, &field, value)?;
                 }
                 self.emit_pollcheck(ctx)?;
                 Ok(Some(obj_ptr.into()))
@@ -2377,23 +2364,17 @@ impl<'ctx> Codegen<'ctx> {
                     .get(&key)
                     .ok_or_else(|| CodegenError { message: "unknown tuple layout".to_string() })?
                     .clone();
-                let size_val = self.context.i64_type().const_int(layout.size, false);
-                let meta_ptr = self.map_builder(
-                    self.builder.build_bit_cast(layout.meta, self.context.ptr_type(inkwell::AddressSpace::default()), "meta"),
-                    "bitcast",
-                )?;
-                let args = &[
-                    ctx.thread.into(),
-                    meta_ptr.into(),
-                    size_val.into(),
-                ];
-                let call = self.map_builder(self.builder.build_call(self.gc_allocate, args, "alloc_tuple"), "call")?;
+                let i64_ty = self.context.i64_type();
+                let total_fields = i64_ty.const_int(layout.field_count, false);
+                let ptr_fields_val = i64_ty.const_int(layout.ptr_field_count, false);
+                let type_id_val = i64_ty.const_int(layout.type_id as u64, false);
+                let alloc_args = &[total_fields.into(), ptr_fields_val.into(), type_id_val.into()];
+                let call = self.map_builder(self.builder.build_call(self.gc_allocate_obj, alloc_args, "alloc_tuple"), "call")?;
                 let obj_ptr = call
                     .try_as_basic_value()
                     .basic()
                     .ok_or_else(|| CodegenError { message: "alloc returned void".to_string() })?
                     .into_pointer_value();
-                self.init_header(obj_ptr, meta_ptr.into_pointer_value())?;
                 for (i, item) in items.iter().enumerate() {
                     let field_name = i.to_string();
                     let field = layout
@@ -2404,17 +2385,8 @@ impl<'ctx> Codegen<'ctx> {
                         .ok_or_else(|| CodegenError { message: "unknown tuple field".to_string() })?;
                     let value = self.codegen_expr(item, ctx, Some(&field.ty))?.ok_or_else(|| CodegenError { message: "missing tuple value".to_string() })?;
                     let field_ptr = self.field_ptr(obj_ptr, &field)?;
-                    let store_val = if self.is_bool_type(&field.ty) {
-                        let zext = self.map_builder(
-                            self.builder.build_int_z_extend(value.into_int_value(), self.context.i8_type(), "boolz"),
-                            "zext",
-                        )?;
-                        zext.into()
-                    } else {
-                        value
-                    };
-                    self.map_builder(self.builder.build_store(field_ptr, store_val), "store")?;
-                    if field.is_ptr {
+                    self.store_gc_field(field_ptr, &field, value)?;
+                    if field.is_gc_ref {
                         let args = &[ctx.thread.into(), obj_ptr.into(), value.into()];
                         let _ = self.map_builder(self.builder.build_call(self.gc_write_barrier, args, "wb"), "call")?;
                     }
@@ -2780,7 +2752,7 @@ impl<'ctx> Codegen<'ctx> {
                         .iter()
                         .find(|f| f.name.as_deref() == Some(pat_field.name.as_str()))
                     {
-                        if field.is_ptr {
+                        if field.is_gc_ref {
                             count += 1;
                         }
                     }
@@ -3013,7 +2985,8 @@ impl<'ctx> Codegen<'ctx> {
                     return Err(CodegenError { message: "field base must be gc ref".to_string() });
                 }
                 let field_ptr = self.field_ptr(obj_ptr, &field)?;
-                let loaded = self.map_builder(self.builder.build_load(field.llvm_ty, field_ptr, "field_obj"), "load")?;
+                let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+                let loaded = self.map_builder(self.builder.build_load(ptr_ty, field_ptr, "field_obj"), "load")?;
                 let layout = self.layout_for_type(&field.ty)?;
                 Ok((loaded.into_pointer_value(), layout))
             }
@@ -3042,76 +3015,138 @@ impl<'ctx> Codegen<'ctx> {
         obj_ptr: PointerValue<'ctx>,
         field: &FieldLayout<'ctx>,
     ) -> Result<PointerValue<'ctx>, CodegenError> {
-        let i8_ty = self.context.i8_type();
-        let header_size = self.context.i64_type().const_int(16, false);
-        let payload_ptr = unsafe {
-            self.map_builder(
-                self.builder.build_gep(i8_ty, obj_ptr, &[header_size], "payload"),
-                "gep",
-            )?
-        };
-        let offset = self.context.i64_type().const_int(field.offset, false);
-        let field_i8 = unsafe {
-            self.map_builder(
-                self.builder.build_gep(i8_ty, payload_ptr, &[offset], "field_i8"),
-                "gep",
-            )?
-        };
-        let field_ptr_ty = field.llvm_ty.ptr_type(inkwell::AddressSpace::default());
-        let cast = self.map_builder(self.builder.build_bit_cast(field_i8, field_ptr_ty, "field_cast"), "bitcast")?;
-        Ok(cast.into_pointer_value())
+        self.gc_field_ptr(obj_ptr, field.index)
     }
 
-    fn enum_raw_base_ptr(&self, obj_ptr: PointerValue<'ctx>, raw_base: u64) -> Result<PointerValue<'ctx>, CodegenError> {
-        let i8_ty = self.context.i8_type();
-        let offset = self.context.i64_type().const_int(raw_base, false);
-        let raw_ptr = unsafe {
-            self.map_builder(
-                self.builder.build_gep(i8_ty, obj_ptr, &[offset], "enum_raw"),
-                "gep",
-            )?
-        };
-        Ok(raw_ptr)
-    }
-
-    fn enum_ptr_slot(&self, obj_ptr: PointerValue<'ctx>, index: usize) -> Result<PointerValue<'ctx>, CodegenError> {
-        let i8_ty = self.context.i8_type();
-        let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
-        let header = self.context.i64_type().const_int(16, false);
-        let ptr_base = unsafe {
-            self.map_builder(
-                self.builder.build_gep(i8_ty, obj_ptr, &[header], "enum_ptrs"),
-                "gep",
-            )?
-        };
-        let ptr_ptr = self.map_builder(self.builder.build_bit_cast(ptr_base, ptr_ty.ptr_type(inkwell::AddressSpace::default()), "ptr_base"), "bitcast")?;
-        let idx = self.context.i64_type().const_int(index as u64, false);
-        let slot = unsafe {
-            self.map_builder(
-                self.builder.build_gep(ptr_ty, ptr_ptr.into_pointer_value(), &[idx], "enum_slot"),
-                "gep",
-            )?
-        };
-        Ok(slot)
-    }
-
-    fn enum_raw_field_ptr(
+    /// Compute pointer to field at given index: obj + 8 + index * 8
+    fn gc_field_ptr(
         &self,
-        raw_base: PointerValue<'ctx>,
-        offset: u64,
-        ty: BasicTypeEnum<'ctx>,
+        obj_ptr: PointerValue<'ctx>,
+        index: u64,
     ) -> Result<PointerValue<'ctx>, CodegenError> {
         let i8_ty = self.context.i8_type();
-        let off = self.context.i64_type().const_int(offset, false);
+        let byte_offset = 8 + index * 8; // HEADER_SIZE=8, each field is 8 bytes
+        let offset = self.context.i64_type().const_int(byte_offset, false);
         let field_i8 = unsafe {
             self.map_builder(
-                self.builder.build_gep(i8_ty, raw_base, &[off], "enum_raw_field"),
+                self.builder.build_gep(i8_ty, obj_ptr, &[offset], "field_ptr"),
                 "gep",
             )?
         };
-        let field_ptr_ty = ty.ptr_type(inkwell::AddressSpace::default());
-        let cast = self.map_builder(self.builder.build_bit_cast(field_i8, field_ptr_ty, "enum_raw_cast"), "bitcast")?;
-        Ok(cast.into_pointer_value())
+        Ok(field_i8)
+    }
+
+    /// Compute pointer to enum field at given index: obj + 8 + index * 8
+    /// This works for both ptr fields and raw fields since all use 8-byte slots.
+    fn enum_field_ptr(&self, obj_ptr: PointerValue<'ctx>, field_index: u64) -> Result<PointerValue<'ctx>, CodegenError> {
+        self.gc_field_ptr(obj_ptr, field_index)
+    }
+
+    /// Load a value from a GC object field (8-byte slot).
+    /// GC ref fields are loaded as ptr, non-GC fields as i64 then truncated/converted.
+    fn load_gc_field(&self, field_ptr: PointerValue<'ctx>, field: &FieldLayout<'ctx>) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+        if field.is_gc_ref {
+            let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+            let loaded = self.map_builder(self.builder.build_load(ptr_ty, field_ptr, "field"), "load")?;
+            Ok(loaded)
+        } else {
+            let i64_ty = self.context.i64_type();
+            let loaded = self.map_builder(self.builder.build_load(i64_ty, field_ptr, "field"), "load")?;
+            if self.is_bool_type(&field.ty) {
+                let zero = i64_ty.const_zero();
+                let cmp = self.map_builder(
+                    self.builder
+                        .build_int_compare(inkwell::IntPredicate::NE, loaded.into_int_value(), zero, "bool"),
+                    "icmp",
+                )?;
+                Ok(cmp.into())
+            } else {
+                // For I64, F64 etc. the i64 value is the right width.
+                // For smaller types (I32, I16, I8, F32) we need to truncate/bitcast.
+                match field.llvm_ty {
+                    BasicTypeEnum::IntType(t) if t.get_bit_width() < 64 => {
+                        let trunc = self.map_builder(
+                            self.builder.build_int_truncate(loaded.into_int_value(), t, "trunc"),
+                            "trunc",
+                        )?;
+                        Ok(trunc.into())
+                    }
+                    BasicTypeEnum::FloatType(t) => {
+                        if t == self.context.f64_type() {
+                            let cast = self.map_builder(
+                                self.builder.build_bit_cast(loaded, self.context.f64_type(), "f64cast"),
+                                "bitcast",
+                            )?;
+                            Ok(cast)
+                        } else {
+                            // f32: truncate i64 to i32, then bitcast to f32
+                            let trunc = self.map_builder(
+                                self.builder.build_int_truncate(loaded.into_int_value(), self.context.i32_type(), "trunc32"),
+                                "trunc",
+                            )?;
+                            let cast = self.map_builder(
+                                self.builder.build_bit_cast(trunc, self.context.f32_type(), "f32cast"),
+                                "bitcast",
+                            )?;
+                            Ok(cast)
+                        }
+                    }
+                    _ => Ok(loaded),
+                }
+            }
+        }
+    }
+
+    /// Store a value to a GC object field (8-byte slot).
+    /// GC ref fields are stored as ptr, non-GC fields are extended/converted to i64.
+    fn store_gc_field(&self, field_ptr: PointerValue<'ctx>, field: &FieldLayout<'ctx>, value: BasicValueEnum<'ctx>) -> Result<(), CodegenError> {
+        if field.is_gc_ref {
+            self.map_builder(self.builder.build_store(field_ptr, value), "store")?;
+        } else {
+            let i64_ty = self.context.i64_type();
+            let store_val = if self.is_bool_type(&field.ty) {
+                let zext = self.map_builder(
+                    self.builder.build_int_z_extend(value.into_int_value(), i64_ty, "boolz"),
+                    "zext",
+                )?;
+                zext.into()
+            } else if value.is_float_value() {
+                let fv = value.into_float_value();
+                if fv.get_type() == self.context.f32_type() {
+                    // f32 -> bitcast to i32 -> zext to i64
+                    let i32_val = self.map_builder(
+                        self.builder.build_bit_cast(fv, self.context.i32_type(), "f32toi32"),
+                        "bitcast",
+                    )?;
+                    let zext = self.map_builder(
+                        self.builder.build_int_z_extend(i32_val.into_int_value(), i64_ty, "zext64"),
+                        "zext",
+                    )?;
+                    zext.into()
+                } else {
+                    // f64 -> bitcast to i64
+                    self.map_builder(
+                        self.builder.build_bit_cast(fv, i64_ty, "f64toi64"),
+                        "bitcast",
+                    )?
+                }
+            } else if value.is_int_value() {
+                let iv = value.into_int_value();
+                if iv.get_type().get_bit_width() < 64 {
+                    let zext = self.map_builder(
+                        self.builder.build_int_z_extend(iv, i64_ty, "zext"),
+                        "zext",
+                    )?;
+                    zext.into()
+                } else {
+                    value
+                }
+            } else {
+                value
+            };
+            self.map_builder(self.builder.build_store(field_ptr, store_val), "store")?;
+        }
+        Ok(())
     }
 
     fn resolve_enum_scrutinee(
@@ -3133,49 +3168,21 @@ impl<'ctx> Codegen<'ctx> {
     }
 
     fn load_enum_tag(&self, obj_ptr: PointerValue<'ctx>, layout: &EnumLayout<'ctx>) -> Result<inkwell::values::IntValue<'ctx>, CodegenError> {
-        let raw_base = self.enum_raw_base_ptr(obj_ptr, layout.raw_base)?;
-        let tag_ptr = self.map_builder(
-            self.builder.build_bit_cast(raw_base, self.context.i32_type().ptr_type(inkwell::AddressSpace::default()), "tag_ptr"),
-            "bitcast",
-        )?;
-        let tag = self.map_builder(
-            self.builder.build_load(self.context.i32_type(), tag_ptr.into_pointer_value(), "tag"),
+        let tag_index = layout.ptr_field_count; // tag is first raw field
+        let tag_ptr = self.gc_field_ptr(obj_ptr, tag_index)?;
+        let i64_ty = self.context.i64_type();
+        let tag_i64 = self.map_builder(
+            self.builder.build_load(i64_ty, tag_ptr, "tag_i64"),
             "load",
         )?;
-        Ok(tag.into_int_value())
+        // Truncate to i32 for switch instruction
+        let tag = self.map_builder(
+            self.builder.build_int_truncate(tag_i64.into_int_value(), self.context.i32_type(), "tag"),
+            "trunc",
+        )?;
+        Ok(tag)
     }
 
-    fn init_header(&self, obj_ptr: PointerValue<'ctx>, meta_ptr: PointerValue<'ctx>) -> Result<(), CodegenError> {
-        let header_ptr = self.map_builder(
-            self.builder.build_bit_cast(
-                obj_ptr,
-                self.object_header_ty.ptr_type(inkwell::AddressSpace::default()),
-                "header",
-            ),
-            "bitcast",
-        )?;
-        let header_ptr = header_ptr.into_pointer_value();
-        let meta_slot = self.map_builder(
-            self.builder
-                .build_struct_gep(self.object_header_ty, header_ptr, 0, "meta"),
-            "gep",
-        )?;
-        let flags_slot = self.map_builder(
-            self.builder
-                .build_struct_gep(self.object_header_ty, header_ptr, 1, "flags"),
-            "gep",
-        )?;
-        let aux_slot = self.map_builder(
-            self.builder
-                .build_struct_gep(self.object_header_ty, header_ptr, 2, "aux"),
-            "gep",
-        )?;
-        self.map_builder(self.builder.build_store(meta_slot, meta_ptr), "store")?;
-        let zero = self.context.i32_type().const_zero();
-        self.map_builder(self.builder.build_store(flags_slot, zero), "store")?;
-        self.map_builder(self.builder.build_store(aux_slot, zero), "store")?;
-        Ok(())
-    }
 }
 
 fn path_to_string(path: &[String]) -> String {

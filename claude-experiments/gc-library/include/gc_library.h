@@ -350,6 +350,164 @@ size_t gc_lib_tag_bits(void);
 #define GC_LIB_WORD_SIZE   8
 #define GC_LIB_TAG_BITS    3
 
+/* ==========================================================================
+ * Callback-Based GC API (Custom Object Model)
+ *
+ * This API makes no assumptions about object layout, pointer tagging,
+ * or header format. The GC manages memory blocks and triggers collection;
+ * the caller provides callbacks for all object-model-specific operations.
+ *
+ * The GC is a pure memory manager + collector. The caller controls:
+ *   - Marking: is_marked/set_mark callbacks own mark bits
+ *   - Sizing: get_size callback returns object sizes from caller headers
+ *   - Tracing: tracer callback knows which fields are pointers
+ *   - Roots: root_enumerator callback knows where roots live
+ *
+ * Contract:
+ *   - get_size(obj) must return the byte count passed to gc_lib_custom_allocate
+ *   - All objects must be initialized before GC runs (headers written)
+ *   - tracer/root_enumerator must only visit slots with valid GC pointers
+ *
+ * Usage:
+ *   1. Define callbacks for root enumeration, tracing, marking, and sizing
+ *   2. Create a GC with gc_lib_custom_create()
+ *   3. Allocate with gc_lib_custom_allocate() (may trigger collection)
+ *   4. Destroy with gc_lib_custom_destroy()
+ * ========================================================================== */
+
+/**
+ * Opaque handle to a callback-based GC instance.
+ */
+typedef struct GcCustomHandle GcCustomHandle;
+
+/**
+ * Visit callback: called for each pointer slot during root enumeration
+ * or object tracing.
+ *
+ * @param slot    Address where the pointer is stored (void**).
+ *                The GC reads *slot to find the pointed-to object.
+ *                For a moving GC, the GC may update *slot.
+ * @param gc_ctx  Opaque GC context (pass through unchanged).
+ */
+typedef void (*GcCustomVisitor)(void** slot, void* gc_ctx);
+
+/**
+ * Root enumerator: called during collection to discover all GC roots.
+ *
+ * Must call `visit` for every root slot containing a GC-managed pointer.
+ *
+ * @param user_ctx  The value passed to gc_lib_custom_allocate/gc_lib_custom_collect
+ *                  (typically a thread pointer or VM state).
+ * @param visit     Visitor function to call for each root slot.
+ * @param gc_ctx    Opaque GC context (pass to visit unchanged).
+ */
+typedef void (*GcCustomRootEnumerator)(void* user_ctx, GcCustomVisitor visit, void* gc_ctx);
+
+/**
+ * Object tracer: called during marking for each reachable object.
+ *
+ * Must call `visit` for every pointer field in the object.
+ *
+ * @param object  Pointer to the object being traced.
+ * @param visit   Visitor function to call for each pointer field.
+ * @param gc_ctx  Opaque GC context (pass to visit unchanged).
+ */
+typedef void (*GcCustomTracer)(void* object, GcCustomVisitor visit, void* gc_ctx);
+
+/**
+ * Check if an object is marked.
+ *
+ * @param object  Pointer to the object.
+ * @return  Non-zero if marked, zero if unmarked.
+ */
+typedef int (*GcCustomIsMarked)(void* object);
+
+/**
+ * Set or clear the mark on an object.
+ *
+ * @param object  Pointer to the object.
+ * @param marked  Non-zero to mark, zero to unmark.
+ */
+typedef void (*GcCustomSetMark)(void* object, int marked);
+
+/**
+ * Get the total byte size of an object (including caller-managed headers).
+ *
+ * Must return the same size that was passed to gc_lib_custom_allocate.
+ *
+ * @param object    Pointer to the object.
+ * @param size_out  Output: the total size in bytes.
+ */
+typedef void (*GcCustomGetSize)(void* object, size_t* size_out);
+
+/**
+ * Configuration for creating a callback-based GC instance.
+ */
+typedef struct {
+    GcCustomRootEnumerator root_enumerator;
+    GcCustomTracer         tracer;
+    GcCustomIsMarked       is_marked;
+    GcCustomSetMark        set_mark;
+    GcCustomGetSize        get_size;
+    size_t                 initial_heap;  /**< Initial heap size in bytes. */
+} GcCustomConfig;
+
+/**
+ * Create a callback-based GC instance.
+ *
+ * @param config  Configuration with callbacks and initial heap size.
+ * @return  GC handle, or NULL on failure.
+ */
+GcCustomHandle* gc_lib_custom_create(GcCustomConfig config);
+
+/**
+ * Destroy a callback-based GC instance and free its resources.
+ *
+ * @param gc  GC handle. May be NULL (no-op).
+ */
+void gc_lib_custom_destroy(GcCustomHandle* gc);
+
+/**
+ * Allocate `size` bytes of zeroed memory, managed by the GC.
+ *
+ * May trigger collection (calling root_enumerator + tracer).
+ * The caller must initialize the object (write headers) before the next
+ * allocation or collection, so that get_size returns the correct value.
+ *
+ * @param gc        GC handle.
+ * @param size      Number of bytes to allocate.
+ * @param user_ctx  Passed to root_enumerator (typically a thread pointer).
+ * @return  Pointer to zeroed memory, or NULL on out-of-memory.
+ */
+void* gc_lib_custom_allocate(GcCustomHandle* gc, size_t size, void* user_ctx);
+
+/**
+ * Run an explicit garbage collection cycle.
+ *
+ * @param gc        GC handle.
+ * @param user_ctx  Passed to root_enumerator.
+ */
+void gc_lib_custom_collect(GcCustomHandle* gc, void* user_ctx);
+
+/**
+ * Write barrier (for future generational support).
+ *
+ * Currently a no-op for the mark-and-sweep collector.
+ *
+ * @param gc         GC handle.
+ * @param object     Pointer to the object being written to.
+ * @param new_value  The new pointer value being stored.
+ */
+void gc_lib_custom_write_barrier(GcCustomHandle* gc, void* object, void* new_value);
+
+/**
+ * Check if collection is recommended (for safepoints).
+ *
+ * @param gc  GC handle.
+ * @return  Non-zero if collection is recommended, zero otherwise.
+ */
+int gc_lib_custom_should_collect(GcCustomHandle* gc);
+
 #ifdef __cplusplus
 }
 #endif

@@ -35,69 +35,70 @@ use ast::EnumMapEntry;
 use ast::FnMapEntry;
 use ast::LocalEntry;
 
-extern fn vec_new() -> RawPointer<I8>;
-extern fn vec_len(v: RawPointer<I8>) -> I64;
-extern fn vec_push(v: RawPointer<I8>, item: RawPointer<I8>) -> I64;
-extern fn vec_get(v: RawPointer<I8>, index: I64) -> RawPointer<I8>;
-extern fn vec_set_len(v: RawPointer<I8>, new_len: I64) -> I64;
+use vec::Vec;
+use vec::vec_new;
+use vec::vec_len;
+use vec::vec_push;
+use vec::vec_get;
+use vec::vec_set_len;
+use vec::vec_push_str;
+use vec::vec_get_str;
+use vec::vec_get_module;
+use vec::vec_get_item;
+use vec::vec_get_field;
+use vec::vec_get_param;
+use vec::vec_get_variant;
+use vec::vec_get_type;
+use vec::vec_get_expr;
+use vec::vec_get_arm;
+use vec::vec_get_stmt;
+use vec::vec_get_pfield;
+use vec::vec_get_slfield;
+use vec::vec_get_vec;
 
-extern fn vec_push_str(v: RawPointer<I8>, item: String) -> I64;
-extern fn vec_get_str(v: RawPointer<I8>, index: I64) -> String;
-extern fn vec_get_module(v: RawPointer<I8>, index: I64) -> Module;
-extern fn vec_get_item(v: RawPointer<I8>, index: I64) -> Item;
-extern fn vec_get_field(v: RawPointer<I8>, index: I64) -> Field;
-extern fn vec_get_param(v: RawPointer<I8>, index: I64) -> Param;
-extern fn vec_get_variant(v: RawPointer<I8>, index: I64) -> EnumVariant;
-extern fn vec_get_type(v: RawPointer<I8>, index: I64) -> Type;
-extern fn vec_get_expr(v: RawPointer<I8>, index: I64) -> Expr;
-extern fn vec_get_arm(v: RawPointer<I8>, index: I64) -> MatchArm;
-extern fn vec_get_stmt(v: RawPointer<I8>, index: I64) -> Stmt;
-extern fn vec_get_pfield(v: RawPointer<I8>, index: I64) -> PatternField;
-extern fn vec_get_slfield(v: RawPointer<I8>, index: I64) -> StructLitField;
-extern fn vec_get_vec(v: RawPointer<I8>, index: I64) -> RawPointer<I8>;
+// typecheck-specific vec aliases
+fn vec_push_ty(v: Vec, item: Ty) -> I64 { vec_push(v, item) }
+fn vec_get_ty(v: Vec, index: I64) -> Ty { vec_get(v, index) }
+fn vec_push_smentry(v: Vec, item: StructMapEntry) -> I64 { vec_push(v, item) }
+fn vec_get_smentry(v: Vec, index: I64) -> StructMapEntry { vec_get(v, index) }
+fn vec_push_ementry(v: Vec, item: EnumMapEntry) -> I64 { vec_push(v, item) }
+fn vec_get_ementry(v: Vec, index: I64) -> EnumMapEntry { vec_get(v, index) }
+fn vec_push_fnentry(v: Vec, item: FnMapEntry) -> I64 { vec_push(v, item) }
+fn vec_get_fnentry(v: Vec, index: I64) -> FnMapEntry { vec_get(v, index) }
+fn vec_push_vdentry(v: Vec, item: VariantDefEntry) -> I64 { vec_push(v, item) }
+fn vec_get_vdentry(v: Vec, index: I64) -> VariantDefEntry { vec_get(v, index) }
+fn vec_push_subst(v: Vec, item: SubstEntry) -> I64 { vec_push(v, item) }
+fn vec_get_subst(v: Vec, index: I64) -> SubstEntry { vec_get(v, index) }
+fn vec_push_local(v: Vec, item: LocalEntry) -> I64 { vec_push(v, item) }
+fn vec_get_local(v: Vec, index: I64) -> LocalEntry { vec_get(v, index) }
+fn vec_push_tfield(v: Vec, item: TypeField) -> I64 { vec_push(v, item) }
+fn vec_get_tfield(v: Vec, index: I64) -> TypeField { vec_get(v, index) }
 
-extern fn vec_push_ty(v: RawPointer<I8>, item: Ty) -> I64;
-extern fn vec_get_ty(v: RawPointer<I8>, index: I64) -> Ty;
-extern fn vec_push_smentry(v: RawPointer<I8>, item: StructMapEntry) -> I64;
-extern fn vec_get_smentry(v: RawPointer<I8>, index: I64) -> StructMapEntry;
-extern fn vec_push_ementry(v: RawPointer<I8>, item: EnumMapEntry) -> I64;
-extern fn vec_get_ementry(v: RawPointer<I8>, index: I64) -> EnumMapEntry;
-extern fn vec_push_fnentry(v: RawPointer<I8>, item: FnMapEntry) -> I64;
-extern fn vec_get_fnentry(v: RawPointer<I8>, index: I64) -> FnMapEntry;
-extern fn vec_push_vdentry(v: RawPointer<I8>, item: VariantDefEntry) -> I64;
-extern fn vec_get_vdentry(v: RawPointer<I8>, index: I64) -> VariantDefEntry;
-extern fn vec_push_subst(v: RawPointer<I8>, item: SubstEntry) -> I64;
-extern fn vec_get_subst(v: RawPointer<I8>, index: I64) -> SubstEntry;
-extern fn vec_push_local(v: RawPointer<I8>, item: LocalEntry) -> I64;
-extern fn vec_get_local(v: RawPointer<I8>, index: I64) -> LocalEntry;
-extern fn vec_push_tfield(v: RawPointer<I8>, item: TypeField) -> I64;
-extern fn vec_get_tfield(v: RawPointer<I8>, index: I64) -> TypeField;
-
-extern fn string_eq(a: String, b: String) -> I64;
-extern fn string_concat(a: String, b: String) -> String;
-extern fn string_from_i64(v: I64) -> String;
-extern fn string_parse_i64(s: String) -> I64;
-extern fn print_str_stderr(s: String) -> I64;
-extern fn exit_process(code: I64) -> I64;
+use string::string_eq;
+use string::string_concat;
+use string::string_from_i64;
+use string::string_parse_i64;
+use io::print_str_stderr;
+use io::exit_process;
 
 // ---------------------------------------------------------------------------
 // TypeEnv and TypeChecker structs
 // ---------------------------------------------------------------------------
 
 struct TypeEnv {
-    structs: RawPointer<I8>,
-    enums: RawPointer<I8>,
-    fns: RawPointer<I8>,
-    extern_fns: RawPointer<I8>,
-    struct_names: RawPointer<I8>,
-    enum_names: RawPointer<I8>
+    structs: Vec,
+    enums: Vec,
+    fns: Vec,
+    extern_fns: Vec,
+    struct_names: Vec,
+    enum_names: Vec
 }
 
 struct TypeChecker {
     env: TypeEnv,
-    locals: RawPointer<I8>,
+    locals: Vec,
     return_type: Ty,
-    errors: RawPointer<I8>,
+    errors: Vec,
     loop_depth: I64
 }
 
@@ -105,7 +106,7 @@ struct TypeChecker {
 // Utility: path and name helpers
 // ---------------------------------------------------------------------------
 
-fn path_to_string(path: RawPointer<I8>) -> String {
+fn path_to_string(path: Vec) -> String {
     let len: I64 = vec_len(path);
     if len == 0 { return ""; };
     let mut result: String = vec_get_str(path, 0);
@@ -117,21 +118,21 @@ fn path_to_string(path: RawPointer<I8>) -> String {
     result
 }
 
-fn full_item_name(module_path: RawPointer<I8>, name: String) -> String {
+fn full_item_name(module_path: Vec, name: String) -> String {
     if vec_len(module_path) == 0 { name }
     else { string_concat(path_to_string(module_path), string_concat("::", name)) }
 }
 
-fn enum_path_str(path: RawPointer<I8>) -> String {
+fn enum_path_str(path: Vec) -> String {
     let len: I64 = vec_len(path);
     if len < 2 { return ""; };
-    let ep: RawPointer<I8> = vec_new();
+    let ep: Vec = vec_new();
     let mut i: I64 = 0;
     while i < len - 1 { vec_push_str(ep, vec_get_str(path, i)); i = i + 1; };
     path_to_string(ep)
 }
 
-fn variant_name_from_path(path: RawPointer<I8>) -> String {
+fn variant_name_from_path(path: Vec) -> String {
     let len: I64 = vec_len(path);
     if len < 1 { return ""; };
     vec_get_str(path, len - 1)
@@ -158,7 +159,7 @@ fn expr_span(expr: Expr) -> Span {
     }
 }
 
-fn str_vec_contains(v: RawPointer<I8>, s: String) -> Bool {
+fn str_vec_contains(v: Vec, s: String) -> Bool {
     let len: I64 = vec_len(v);
     let mut i: I64 = 0;
     while i < len {
@@ -295,7 +296,7 @@ fn ty_eq(a: Ty, b: Ty) -> Bool {
     }
 }
 
-fn tys_eq(a: RawPointer<I8>, b: RawPointer<I8>) -> Bool {
+fn tys_eq(a: Vec, b: Vec) -> Bool {
     let la: I64 = vec_len(a);
     let lb: I64 = vec_len(b);
     if la != lb { return false; };
@@ -377,7 +378,7 @@ fn env_has_extern_fn(env: TypeEnv, name: String) -> Bool {
     string_eq(e.name, "") == 0
 }
 
-fn variant_get(variants: RawPointer<I8>, name: String) -> VariantDefEntry {
+fn variant_get(variants: Vec, name: String) -> VariantDefEntry {
     let len: I64 = vec_len(variants);
     let mut i: I64 = 0;
     while i < len {
@@ -388,12 +389,12 @@ fn variant_get(variants: RawPointer<I8>, name: String) -> VariantDefEntry {
     VariantDefEntry { name: "", def: VariantDef::VUnit {} }
 }
 
-fn variant_has(variants: RawPointer<I8>, name: String) -> Bool {
+fn variant_has(variants: Vec, name: String) -> Bool {
     let e: VariantDefEntry = variant_get(variants, name);
     string_eq(e.name, "") == 0
 }
 
-fn subst_get(map: RawPointer<I8>, name: String) -> Ty {
+fn subst_get(map: Vec, name: String) -> Ty {
     let len: I64 = vec_len(map);
     let mut i: I64 = 0;
     while i < len {
@@ -408,7 +409,7 @@ fn subst_get(map: RawPointer<I8>, name: String) -> Ty {
 // Type lowering: AST Type -> Ty
 // ---------------------------------------------------------------------------
 
-fn lower_type(ty: Type, struct_names: RawPointer<I8>, enum_names: RawPointer<I8>, type_params: RawPointer<I8>) -> Ty {
+fn lower_type(ty: Type, struct_names: Vec, enum_names: Vec, type_params: Vec) -> Ty {
     match ty {
         Type::PathType { path, type_args } => {
             if vec_len(path) == 1 {
@@ -417,7 +418,7 @@ fn lower_type(ty: Type, struct_names: RawPointer<I8>, enum_names: RawPointer<I8>
                 if str_vec_contains(type_params, name) { return Ty::TyParam { name: name }; };
             };
             let key: String = path_to_string(path);
-            let lowered_args: RawPointer<I8> = lower_type_list(type_args, struct_names, enum_names, type_params);
+            let lowered_args: Vec = lower_type_list(type_args, struct_names, enum_names, type_params);
             if str_vec_contains(enum_names, key) {
                 return Ty::TyEnum { name: key, type_args: lowered_args };
             };
@@ -432,8 +433,8 @@ fn lower_type(ty: Type, struct_names: RawPointer<I8>, enum_names: RawPointer<I8>
     }
 }
 
-fn lower_type_list(types: RawPointer<I8>, struct_names: RawPointer<I8>, enum_names: RawPointer<I8>, type_params: RawPointer<I8>) -> RawPointer<I8> {
-    let result: RawPointer<I8> = vec_new();
+fn lower_type_list(types: Vec, struct_names: Vec, enum_names: Vec, type_params: Vec) -> Vec {
+    let result: Vec = vec_new();
     let len: I64 = vec_len(types);
     let mut i: I64 = 0;
     while i < len {
@@ -444,7 +445,7 @@ fn lower_type_list(types: RawPointer<I8>, struct_names: RawPointer<I8>, enum_nam
     result
 }
 
-fn lower_type_env(ty: Type, env: TypeEnv, type_params: RawPointer<I8>) -> Ty {
+fn lower_type_env(ty: Type, env: TypeEnv, type_params: Vec) -> Ty {
     lower_type(ty, env.struct_names, env.enum_names, type_params)
 }
 
@@ -452,7 +453,7 @@ fn lower_type_env(ty: Type, env: TypeEnv, type_params: RawPointer<I8>) -> Ty {
 // Substitution
 // ---------------------------------------------------------------------------
 
-fn substitute(ty: Ty, map: RawPointer<I8>) -> Ty {
+fn substitute(ty: Ty, map: Vec) -> Ty {
     if vec_len(map) == 0 { return ty; };
     match ty {
         Ty::TyParam { name } => { subst_get(map, name) },
@@ -472,8 +473,8 @@ fn substitute(ty: Ty, map: RawPointer<I8>) -> Ty {
     }
 }
 
-fn substitute_list(tys: RawPointer<I8>, map: RawPointer<I8>) -> RawPointer<I8> {
-    let result: RawPointer<I8> = vec_new();
+fn substitute_list(tys: Vec, map: Vec) -> Vec {
+    let result: Vec = vec_new();
     let len: I64 = vec_len(tys);
     let mut i: I64 = 0;
     while i < len {
@@ -484,8 +485,8 @@ fn substitute_list(tys: RawPointer<I8>, map: RawPointer<I8>) -> RawPointer<I8> {
     result
 }
 
-fn build_subst_map(type_params: RawPointer<I8>, type_args: RawPointer<I8>) -> RawPointer<I8> {
-    let map: RawPointer<I8> = vec_new();
+fn build_subst_map(type_params: Vec, type_args: Vec) -> Vec {
+    let map: Vec = vec_new();
     let len: I64 = vec_len(type_params);
     let arg_len: I64 = vec_len(type_args);
     let mut i: I64 = 0;
@@ -503,20 +504,20 @@ fn build_subst_map(type_params: RawPointer<I8>, type_args: RawPointer<I8>) -> Ra
 // Build type environment from modules
 // ---------------------------------------------------------------------------
 
-fn build_env(modules: RawPointer<I8>) -> TypeEnv {
-    let struct_names: RawPointer<I8> = vec_new();
-    let enum_names: RawPointer<I8> = vec_new();
-    let structs: RawPointer<I8> = vec_new();
-    let enums: RawPointer<I8> = vec_new();
-    let fns: RawPointer<I8> = vec_new();
-    let extern_fns: RawPointer<I8> = vec_new();
+fn build_env(modules: Vec) -> TypeEnv {
+    let struct_names: Vec = vec_new();
+    let enum_names: Vec = vec_new();
+    let structs: Vec = vec_new();
+    let enums: Vec = vec_new();
+    let fns: Vec = vec_new();
+    let extern_fns: Vec = vec_new();
 
     // Pass 1: collect struct/enum names
     let num_modules: I64 = vec_len(modules);
     let mut mi: I64 = 0;
     while mi < num_modules {
         let m: Module = vec_get_module(modules, mi);
-        let mod_path: RawPointer<I8> = m.path;
+        let mod_path: Vec = m.path;
         let num_items: I64 = vec_len(m.items);
         let mut ii: I64 = 0;
         while ii < num_items {
@@ -539,15 +540,15 @@ fn build_env(modules: RawPointer<I8>) -> TypeEnv {
     mi = 0;
     while mi < num_modules {
         let m: Module = vec_get_module(modules, mi);
-        let mod_path: RawPointer<I8> = m.path;
+        let mod_path: Vec = m.path;
         let num_items: I64 = vec_len(m.items);
         let mut ii: I64 = 0;
         while ii < num_items {
             let item: Item = vec_get_item(m.items, ii);
             match item {
                 Item::StructItem { decl } => {
-                    let tp: RawPointer<I8> = decl.type_params;
-                    let fields: RawPointer<I8> = vec_new();
+                    let tp: Vec = decl.type_params;
+                    let fields: Vec = vec_new();
                     let num_fields: I64 = vec_len(decl.fields);
                     let mut fi: I64 = 0;
                     while fi < num_fields {
@@ -560,8 +561,8 @@ fn build_env(modules: RawPointer<I8>) -> TypeEnv {
                     vec_push_smentry(structs, StructMapEntry { name: sname, type_params: tp, fields: fields });
                 },
                 Item::EnumItem { decl } => {
-                    let tp: RawPointer<I8> = decl.type_params;
-                    let variants: RawPointer<I8> = vec_new();
+                    let tp: Vec = decl.type_params;
+                    let variants: Vec = vec_new();
                     let num_variants: I64 = vec_len(decl.variants);
                     let mut vi: I64 = 0;
                     while vi < num_variants {
@@ -571,11 +572,11 @@ fn build_env(modules: RawPointer<I8>) -> TypeEnv {
                                 vec_push_vdentry(variants, VariantDefEntry { name: v.name, def: VariantDef::VUnit {} });
                             },
                             EnumVariantKind::TupleKind { types } => {
-                                let vtypes: RawPointer<I8> = lower_type_list(types, struct_names, enum_names, tp);
+                                let vtypes: Vec = lower_type_list(types, struct_names, enum_names, tp);
                                 vec_push_vdentry(variants, VariantDefEntry { name: v.name, def: VariantDef::VTuple { types: vtypes } });
                             },
                             EnumVariantKind::StructKind { fields } => {
-                                let vfields: RawPointer<I8> = vec_new();
+                                let vfields: Vec = vec_new();
                                 let num_sf: I64 = vec_len(fields);
                                 let mut sfi: I64 = 0;
                                 while sfi < num_sf {
@@ -593,8 +594,8 @@ fn build_env(modules: RawPointer<I8>) -> TypeEnv {
                     vec_push_ementry(enums, EnumMapEntry { name: ename, type_params: tp, variants: variants });
                 },
                 Item::FnItem { decl } => {
-                    let empty_tp: RawPointer<I8> = vec_new();
-                    let params: RawPointer<I8> = vec_new();
+                    let empty_tp: Vec = vec_new();
+                    let params: Vec = vec_new();
                     let num_params: I64 = vec_len(decl.params);
                     let mut pi: I64 = 0;
                     while pi < num_params {
@@ -606,8 +607,22 @@ fn build_env(modules: RawPointer<I8>) -> TypeEnv {
                     let fname: String = full_item_name(mod_path, decl.name);
                     vec_push_fnentry(fns, FnMapEntry { name: fname, params: params, ret: ret, varargs: false });
                 },
-                Item::ExternFnItem { decl } => {},
-                Item::UseItem { decl } => {}
+                Item::ExternFnItem { decl } => {
+                    let empty_tp: Vec = vec_new();
+                    let eparams: Vec = vec_new();
+                    let enum_ps: I64 = vec_len(decl.params);
+                    let mut epi: I64 = 0;
+                    while epi < enum_ps {
+                        let ep: Param = vec_get_param(decl.params, epi);
+                        vec_push_ty(eparams, lower_type(ep.ty, struct_names, enum_names, empty_tp));
+                        epi = epi + 1;
+                    };
+                    let eret: Ty = lower_type(decl.ret_type, struct_names, enum_names, empty_tp);
+                    let efname: String = full_item_name(mod_path, decl.name);
+                    vec_push_fnentry(extern_fns, FnMapEntry { name: efname, params: eparams, ret: eret, varargs: decl.varargs });
+                },
+                Item::UseItem { decl } => {},
+                Item::LinkItem { decl } => {}
             };
             ii = ii + 1;
         };
@@ -638,7 +653,7 @@ fn tc_locals_pop(tc: TypeChecker) -> I64 {
 fn tc_locals_insert(tc: TypeChecker, name: String, ty: Ty) -> I64 {
     let len: I64 = vec_len(tc.locals);
     if len > 0 {
-        let frame: RawPointer<I8> = vec_get_vec(tc.locals, len - 1);
+        let frame: Vec = vec_get_vec(tc.locals, len - 1);
         vec_push_local(frame, LocalEntry { name: name, ty: ty });
     };
     0
@@ -648,7 +663,7 @@ fn tc_locals_get(tc: TypeChecker, name: String) -> Ty {
     let num_frames: I64 = vec_len(tc.locals);
     let mut fi: I64 = num_frames - 1;
     while fi >= 0 {
-        let frame: RawPointer<I8> = vec_get_vec(tc.locals, fi);
+        let frame: Vec = vec_get_vec(tc.locals, fi);
         let frame_len: I64 = vec_len(frame);
         let mut j: I64 = 0;
         while j < frame_len {
@@ -665,7 +680,7 @@ fn tc_locals_has(tc: TypeChecker, name: String) -> Bool {
     let num_frames: I64 = vec_len(tc.locals);
     let mut fi: I64 = num_frames - 1;
     while fi >= 0 {
-        let frame: RawPointer<I8> = vec_get_vec(tc.locals, fi);
+        let frame: Vec = vec_get_vec(tc.locals, fi);
         let frame_len: I64 = vec_len(frame);
         let mut j: I64 = 0;
         while j < frame_len {
@@ -710,9 +725,45 @@ fn ty_to_string(ty: Ty) -> String {
     }
 }
 
+fn is_raw_ptr_i8(t: Ty) -> Bool {
+    match t {
+        Ty::TyRawPtr { inner } => {
+            match inner {
+                Ty::TyI8 {} => { true },
+                _ => { false }
+            }
+        },
+        _ => { false }
+    }
+}
+
+fn types_compatible(a: Ty, b: Ty) -> Bool {
+    if is_raw_ptr_i8(a) {
+        match b {
+            Ty::TyStruct { name, type_args } => { return true; },
+            Ty::TyEnum { name, type_args } => { return true; },
+            Ty::TyRawPtr { inner } => { return true; },
+            Ty::TyString {} => { return true; },
+            _ => {}
+        };
+    };
+    if is_raw_ptr_i8(b) {
+        match a {
+            Ty::TyStruct { name, type_args } => { return true; },
+            Ty::TyEnum { name, type_args } => { return true; },
+            Ty::TyRawPtr { inner } => { return true; },
+            Ty::TyString {} => { return true; },
+            _ => {}
+        };
+    };
+    false
+}
+
 fn expect_type(tc: TypeChecker, expected: Ty, actual: Ty, msg: String) -> I64 {
     if ty_eq(expected, actual) == false {
-        tc_error(tc, string_concat(msg, string_concat(": expected ", string_concat(ty_to_string(expected), string_concat(", got ", ty_to_string(actual))))));
+        if types_compatible(expected, actual) == false {
+            tc_error(tc, string_concat(msg, string_concat(": expected ", string_concat(ty_to_string(expected), string_concat(", got ", ty_to_string(actual))))));
+        };
     };
     0
 }
@@ -766,7 +817,7 @@ fn check_expr(tc: TypeChecker, expr: Expr, expected: Ty, has_expected: Bool) -> 
         Expr::LetExpr { name, mutable, ty, value, span } => {
             match ty {
                 Option::Some { value: annot } => {
-                    let empty_tp: RawPointer<I8> = vec_new();
+                    let empty_tp: Vec = vec_new();
                     let annot_ty: Ty = lower_type_env(annot, tc.env, empty_tp);
                     let value_ty: Ty = check_expr(tc, value, annot_ty, true);
                     expect_type(tc, annot_ty, value_ty, "let type mismatch");
@@ -935,10 +986,10 @@ fn check_numeric(tc: TypeChecker, ty: Ty, msg: String) -> I64 {
     0
 }
 
-fn check_call(tc: TypeChecker, callee: Expr, args: RawPointer<I8>, span: Span) -> Ty {
+fn check_call(tc: TypeChecker, callee: Expr, args: Vec, span: Span) -> Ty {
     match callee {
         Expr::PathExpr { path, span: cspan } => {
-            let resolved: RawPointer<I8> = resolve_callable(tc, path);
+            let resolved: Vec = resolve_callable(tc, path);
             if vec_len(resolved) == 0 {
                 tc_error(tc, string_concat("unknown function '", string_concat(path_to_string(path), "'")));
                 return Ty::TyUnit {};
@@ -947,7 +998,7 @@ fn check_call(tc: TypeChecker, callee: Expr, args: RawPointer<I8>, span: Span) -
             let ret: Ty = vec_get_ty(resolved, 0);
             let varargs_marker: Ty = vec_get_ty(resolved, 1);
             let is_varargs: Bool = match varargs_marker { Ty::TyBool {} => { true }, _ => { false } };
-            let params: RawPointer<I8> = vec_new();
+            let params: Vec = vec_new();
             let mut pi: I64 = 2;
             while pi < vec_len(resolved) {
                 let pt: Ty = vec_get_ty(resolved, pi);
@@ -964,7 +1015,7 @@ fn check_call(tc: TypeChecker, callee: Expr, args: RawPointer<I8>, span: Span) -
     }
 }
 
-fn resolve_callable(tc: TypeChecker, path: RawPointer<I8>) -> RawPointer<I8> {
+fn resolve_callable(tc: TypeChecker, path: Vec) -> Vec {
     let key: String = path_to_string(path);
     if env_has_fn(tc.env, key) {
         let sig: FnMapEntry = env_get_fn(tc.env, key);
@@ -995,8 +1046,8 @@ fn resolve_callable(tc: TypeChecker, path: RawPointer<I8>) -> RawPointer<I8> {
     vec_new()
 }
 
-fn callable_found(ret: Ty, params: RawPointer<I8>, varargs: Bool) -> RawPointer<I8> {
-    let result: RawPointer<I8> = vec_new();
+fn callable_found(ret: Ty, params: Vec, varargs: Bool) -> Vec {
+    let result: Vec = vec_new();
     vec_push_ty(result, ret);
     if varargs { vec_push_ty(result, Ty::TyBool {}); }
     else { vec_push_ty(result, Ty::TyUnit {}); };
@@ -1010,7 +1061,7 @@ fn callable_found(ret: Ty, params: RawPointer<I8>, varargs: Bool) -> RawPointer<
     result
 }
 
-fn check_call_args(tc: TypeChecker, args: RawPointer<I8>, params: RawPointer<I8>, varargs: Bool, span: Span) -> I64 {
+fn check_call_args(tc: TypeChecker, args: Vec, params: Vec, varargs: Bool, span: Span) -> I64 {
     let num_args: I64 = vec_len(args);
     let num_params: I64 = vec_len(params);
     if varargs == false {
@@ -1044,7 +1095,7 @@ fn check_field_access(tc: TypeChecker, base: Expr, name: String, span: Span) -> 
         Ty::TyStruct { name: sname, type_args } => {
             if env_has_struct(tc.env, sname) {
                 let info: StructMapEntry = env_get_struct(tc.env, sname);
-                let subst: RawPointer<I8> = build_subst_map(info.type_params, type_args);
+                let subst: Vec = build_subst_map(info.type_params, type_args);
                 let num_fields: I64 = vec_len(info.fields);
                 let mut i: I64 = 0;
                 while i < num_fields {
@@ -1078,7 +1129,7 @@ fn check_field_access(tc: TypeChecker, base: Expr, name: String, span: Span) -> 
     }
 }
 
-fn check_struct_lit(tc: TypeChecker, path: RawPointer<I8>, fields: RawPointer<I8>, expected: Ty, has_expected: Bool) -> Ty {
+fn check_struct_lit(tc: TypeChecker, path: Vec, fields: Vec, expected: Ty, has_expected: Bool) -> Ty {
     // Check if this is an enum variant struct literal
     if vec_len(path) >= 2 {
         let en: String = enum_path_str(path);
@@ -1089,13 +1140,13 @@ fn check_struct_lit(tc: TypeChecker, path: RawPointer<I8>, fields: RawPointer<I8
                 let ventry: VariantDefEntry = variant_get(info.variants, vn);
                 match ventry.def {
                     VariantDef::VStruct { fields: vfields } => {
-                        let type_args: RawPointer<I8> = match expected {
+                        let type_args: Vec = match expected {
                             Ty::TyEnum { name: ename, type_args: ea } => {
                                 if string_eq(ename, en) == 1 { ea } else { vec_new() }
                             },
                             _ => { vec_new() }
                         };
-                        let subst: RawPointer<I8> = build_subst_map(info.type_params, type_args);
+                        let subst: Vec = build_subst_map(info.type_params, type_args);
                         check_struct_fields(tc, fields, vfields, subst);
                         return Ty::TyEnum { name: en, type_args: type_args };
                     },
@@ -1109,13 +1160,13 @@ fn check_struct_lit(tc: TypeChecker, path: RawPointer<I8>, fields: RawPointer<I8
     let sname: String = path_to_string(path);
     if env_has_struct(tc.env, sname) {
         let info: StructMapEntry = env_get_struct(tc.env, sname);
-        let type_args: RawPointer<I8> = match expected {
+        let type_args: Vec = match expected {
             Ty::TyStruct { name: ename, type_args: ea } => {
                 if string_eq(ename, sname) == 1 { ea } else { vec_new() }
             },
             _ => { vec_new() }
         };
-        let subst: RawPointer<I8> = build_subst_map(info.type_params, type_args);
+        let subst: Vec = build_subst_map(info.type_params, type_args);
         check_struct_fields(tc, fields, info.fields, subst);
         return Ty::TyStruct { name: sname, type_args: type_args };
     };
@@ -1123,7 +1174,7 @@ fn check_struct_lit(tc: TypeChecker, path: RawPointer<I8>, fields: RawPointer<I8
     Ty::TyUnit {}
 }
 
-fn check_struct_fields(tc: TypeChecker, lit_fields: RawPointer<I8>, def_fields: RawPointer<I8>, subst: RawPointer<I8>) -> I64 {
+fn check_struct_fields(tc: TypeChecker, lit_fields: Vec, def_fields: Vec, subst: Vec) -> I64 {
     let num_def: I64 = vec_len(def_fields);
     let mut di: I64 = 0;
     while di < num_def {
@@ -1149,9 +1200,9 @@ fn check_struct_fields(tc: TypeChecker, lit_fields: RawPointer<I8>, def_fields: 
     0
 }
 
-fn check_tuple(tc: TypeChecker, items: RawPointer<I8>, expected: Ty, has_expected: Bool) -> Ty {
+fn check_tuple(tc: TypeChecker, items: Vec, expected: Ty, has_expected: Bool) -> Ty {
     let num_items: I64 = vec_len(items);
-    let result: RawPointer<I8> = vec_new();
+    let result: Vec = vec_new();
     let mut i: I64 = 0;
     while i < num_items {
         let exp_item: Ty = Ty::TyUnit {};
@@ -1247,7 +1298,7 @@ fn bind_pattern(tc: TypeChecker, pat: Pattern, scrutinee: Ty) -> I64 {
             };
             let en: String = enum_path_str(path);
             let vn: String = variant_name_from_path(path);
-            let scrutinee_type_args: RawPointer<I8> = match scrutinee {
+            let scrutinee_type_args: Vec = match scrutinee {
                 Ty::TyEnum { name, type_args } => {
                     if string_eq(en, name) == 0 {
                         tc_error(tc, "pattern enum mismatch");
@@ -1261,7 +1312,7 @@ fn bind_pattern(tc: TypeChecker, pat: Pattern, scrutinee: Ty) -> I64 {
             };
             if env_has_enum(tc.env, en) == false { return 0; };
             let info: EnumMapEntry = env_get_enum(tc.env, en);
-            let subst: RawPointer<I8> = build_subst_map(info.type_params, scrutinee_type_args);
+            let subst: Vec = build_subst_map(info.type_params, scrutinee_type_args);
             if variant_has(info.variants, vn) == false {
                 tc_error(tc, "unknown enum variant");
                 return 0;
@@ -1310,17 +1361,25 @@ fn bind_pattern(tc: TypeChecker, pat: Pattern, scrutinee: Ty) -> I64 {
 // Entry point
 // ---------------------------------------------------------------------------
 
-fn build_module_extern_fns(m: Module, env: TypeEnv) -> RawPointer<I8> {
-    let extern_fns: RawPointer<I8> = vec_new();
-    let mod_path: RawPointer<I8> = m.path;
+fn build_module_extern_fns(m: Module, env: TypeEnv) -> Vec {
+    // Start from global extern fns so cross-module extern fn calls are resolvable
+    let extern_fns: Vec = vec_new();
+    let num_global: I64 = vec_len(env.extern_fns);
+    let mut gi: I64 = 0;
+    while gi < num_global {
+        let ge: FnMapEntry = vec_get_fnentry(env.extern_fns, gi);
+        vec_push_fnentry(extern_fns, ge);
+        gi = gi + 1;
+    };
+    let mod_path: Vec = m.path;
     let num_items: I64 = vec_len(m.items);
     let mut ii: I64 = 0;
     while ii < num_items {
         let item: Item = vec_get_item(m.items, ii);
         match item {
             Item::ExternFnItem { decl } => {
-                let empty_tp: RawPointer<I8> = vec_new();
-                let params: RawPointer<I8> = vec_new();
+                let empty_tp: Vec = vec_new();
+                let params: Vec = vec_new();
                 let num_params: I64 = vec_len(decl.params);
                 let mut pi: I64 = 0;
                 while pi < num_params {
@@ -1339,17 +1398,17 @@ fn build_module_extern_fns(m: Module, env: TypeEnv) -> RawPointer<I8> {
     extern_fns
 }
 
-fn typecheck_modules(modules: RawPointer<I8>) -> I64 {
+fn typecheck_modules(modules: Vec) -> I64 {
     let env: TypeEnv = build_env(modules);
-    let errors: RawPointer<I8> = vec_new();
+    let errors: Vec = vec_new();
 
     let num_modules: I64 = vec_len(modules);
     let mut mi: I64 = 0;
     while mi < num_modules {
         let m: Module = vec_get_module(modules, mi);
-        let mod_path: RawPointer<I8> = m.path;
+        let mod_path: Vec = m.path;
         // Build per-module extern fn map so each module sees its own declarations
-        let mod_extern_fns: RawPointer<I8> = build_module_extern_fns(m, env);
+        let mod_extern_fns: Vec = build_module_extern_fns(m, env);
         let mod_env: TypeEnv = TypeEnv {
             structs: env.structs, enums: env.enums, fns: env.fns,
             extern_fns: mod_extern_fns,
@@ -1364,7 +1423,7 @@ fn typecheck_modules(modules: RawPointer<I8>) -> I64 {
                     let fname: String = full_item_name(mod_path, decl.name);
                     if env_has_fn(mod_env, fname) {
                         let sig: FnMapEntry = env_get_fn(mod_env, fname);
-                        let locals: RawPointer<I8> = vec_new();
+                        let locals: Vec = vec_new();
                         vec_push(locals, vec_new());
                         let tc: TypeChecker = TypeChecker {
                             env: mod_env, locals: locals,

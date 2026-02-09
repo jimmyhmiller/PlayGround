@@ -6,27 +6,36 @@ use lexer::lex_all;
 use parser::parse_module;
 use parser::new_parser;
 use ast::Module;
+use ast::Item;
+use ast::LinkDecl;
 use qualify::qualify_modules;
 use resolve::resolve_modules;
 use typecheck::typecheck_modules;
 use codegen::codegen_modules;
 
-extern fn read_file(path: String) -> String;
-extern fn arg_str(index: I64) -> String;
-extern fn arg_len() -> I64;
-extern fn print_str(s: String) -> I64;
-extern fn print_str_stderr(s: String) -> I64;
-extern fn print_int(n: I64) -> I64;
-extern fn vec_len(v: RawPointer<I8>) -> I64;
-extern fn vec_new() -> RawPointer<I8>;
-extern fn vec_push_module(v: RawPointer<I8>, item: Module) -> I64;
-extern fn vec_push_str(v: RawPointer<I8>, item: String) -> I64;
-extern fn exit_process(code: I64) -> I64;
-extern fn string_len(s: String) -> I64;
-extern fn string_eq(a: String, b: String) -> I64;
-extern fn string_byte_at(s: String, index: I64) -> I64;
-extern fn string_slice(s: String, start: I64, end: I64) -> String;
-extern fn string_concat(a: String, b: String) -> String;
+use io::read_file;
+use io::arg_str;
+use io::arg_len;
+use io::print_str;
+use io::print_str_stderr;
+use io::print_int;
+use io::exit_process;
+use io::create_dir;
+use io::file_exists;
+use io::get_stdlib_path;
+use string::string_len;
+use string::string_eq;
+use string::string_byte_at;
+use string::string_slice;
+use string::string_concat;
+use vec::vec_len;
+use vec::Vec;
+use vec::vec_new;
+use vec::vec_push_module;
+use vec::vec_push_str;
+use vec::vec_get_str;
+use vec::vec_get_item;
+use vec::vec_get_module;
 
 // Extract filename stem from a path like "compiler/foo.lang" -> "foo"
 fn path_stem(path: String) -> String {
@@ -54,6 +63,25 @@ fn path_stem(path: String) -> String {
     string_slice(path, name_start, dot_pos)
 }
 
+// Extract directory from a path like "compiler/foo.lang" -> "compiler"
+// Returns "" if no directory component.
+fn path_dir(path: String) -> String {
+    let len: I64 = string_len(path);
+    let mut slash_pos: I64 = 0 - 1;
+    let mut i: I64 = 0;
+    while i < len {
+        if string_byte_at(path, i) == 47 {
+            slash_pos = i;
+        };
+        i = i + 1;
+    };
+    if slash_pos < 0 {
+        ""
+    } else {
+        string_slice(path, 0, slash_pos)
+    }
+}
+
 fn is_root_stem(stem: String) -> Bool {
     if string_eq(stem, "main") == 1 { return true; };
     if string_eq(stem, "lib") == 1 { return true; };
@@ -61,33 +89,194 @@ fn is_root_stem(stem: String) -> Bool {
     false
 }
 
-fn main() -> I64 {
-    if arg_len() < 1 {
-        print_str("usage: bootstrap <file1.lang> [file2.lang ...]");
-        exit_process(1);
-    };
-    let modules: RawPointer<I8> = vec_new();
+// Check if a string is already in a Vec of strings
+fn vec_contains_str(v: Vec, s: String) -> Bool {
+    let len: I64 = vec_len(v);
     let mut i: I64 = 0;
-    while i < arg_len() {
-        let path: String = arg_str(i);
-        let source: String = read_file(path);
-        if string_len(source) == 0 {
-            print_str_stderr(string_concat("error: could not read file: ", path));
-            exit_process(1);
-        };
-        let tokens: RawPointer<I8> = lex_all(source);
-        let m: Module = parse_module(new_parser(tokens));
-        // Derive module path from filename
-        // Single-file compiles are always root
-        if arg_len() > 1 {
-            let stem: String = path_stem(path);
-            if !is_root_stem(stem) {
-                vec_push_str(m.path, stem);
-            };
-        };
-        vec_push_module(modules, m);
+    while i < len {
+        if string_eq(vec_get_str(v, i), s) == 1 { return true; };
         i = i + 1;
     };
+    false
+}
+
+// Try to find a module file: check importing file's directory first, then search paths
+fn resolve_module_file(mod_name: String, importing_file: String, search_paths: Vec) -> String {
+    let lang_ext: String = ".lang";
+    let filename: String = string_concat(mod_name, lang_ext);
+
+    // Check importing file's directory first
+    let dir: String = path_dir(importing_file);
+    if string_len(dir) > 0 {
+        let candidate: String = string_concat(dir, string_concat("/", filename));
+        if file_exists(candidate) == 1 { return candidate; };
+    } else {
+        if file_exists(filename) == 1 { return filename; };
+    };
+
+    // Check search paths
+    let num_paths: I64 = vec_len(search_paths);
+    let mut i: I64 = 0;
+    while i < num_paths {
+        let sp: String = vec_get_str(search_paths, i);
+        let candidate: String = string_concat(sp, string_concat("/", filename));
+        if file_exists(candidate) == 1 { return candidate; };
+        i = i + 1;
+    };
+
+    // Not found
+    ""
+}
+
+// Parse a file and derive module path, returning a Module
+fn parse_file(path: String) -> Module {
+    let source: String = read_file(path);
+    if string_len(source) == 0 {
+        print_str_stderr(string_concat("error: could not read file: ", path));
+        exit_process(1);
+    };
+    let tokens: Vec = lex_all(source);
+    parse_module(new_parser(tokens))
+}
+
+// Extract use-declared module names from a module's items
+// Only multi-segment use paths (use foo::bar) produce module name "foo"
+fn extract_use_modules(m: Module) -> Vec {
+    let mod_names: Vec = vec_new();
+    let num_items: I64 = vec_len(m.items);
+    let mut i: I64 = 0;
+    while i < num_items {
+        let item: Item = vec_get_item(m.items, i);
+        match item {
+            Item::UseItem { decl } => {
+                let path_len: I64 = vec_len(decl.path);
+                if path_len >= 2 {
+                    let mod_name: String = vec_get_str(decl.path, 0);
+                    if vec_contains_str(mod_names, mod_name) == false {
+                        vec_push_str(mod_names, mod_name);
+                    };
+                };
+            },
+            _ => {}
+        };
+        i = i + 1;
+    };
+    mod_names
+}
+
+// Extract link library names from a module's items
+fn extract_link_libs(m: Module) -> Vec {
+    let libs: Vec = vec_new();
+    let num_items: I64 = vec_len(m.items);
+    let mut i: I64 = 0;
+    while i < num_items {
+        let item: Item = vec_get_item(m.items, i);
+        match item {
+            Item::LinkItem { decl } => {
+                if vec_contains_str(libs, decl.lib) == false {
+                    vec_push_str(libs, decl.lib);
+                };
+            },
+            _ => {}
+        };
+        i = i + 1;
+    };
+    libs
+}
+
+// Discover all modules starting from entry files, following use declarations
+fn discover_modules(entry_paths: Vec, search_paths: Vec) -> Vec {
+    let modules: Vec = vec_new();
+    let loaded_files: Vec = vec_new();
+    let link_libs: Vec = vec_new();
+    let multi_file: Bool = true;
+
+    // Queue of files to process
+    let queue: Vec = vec_new();
+    let num_entries: I64 = vec_len(entry_paths);
+    let mut ei: I64 = 0;
+    while ei < num_entries {
+        vec_push_str(queue, vec_get_str(entry_paths, ei));
+        ei = ei + 1;
+    };
+
+    let mut qi: I64 = 0;
+    while qi < vec_len(queue) {
+        let path: String = vec_get_str(queue, qi);
+        qi = qi + 1;
+
+        // Skip if already loaded
+        if vec_contains_str(loaded_files, path) {
+            continue;
+        };
+        vec_push_str(loaded_files, path);
+
+        // Parse the file
+        let m: Module = parse_file(path);
+
+        // Derive module path from filename
+        let stem: String = path_stem(path);
+        if !is_root_stem(stem) {
+            vec_push_str(m.path, stem);
+        };
+
+        // Extract use-declared module names and queue their files
+        let use_mods: Vec = extract_use_modules(m);
+        let num_mods: I64 = vec_len(use_mods);
+        let mut mi: I64 = 0;
+        while mi < num_mods {
+            let mod_name: String = vec_get_str(use_mods, mi);
+            let resolved: String = resolve_module_file(mod_name, path, search_paths);
+            if string_len(resolved) > 0 {
+                if vec_contains_str(loaded_files, resolved) == false {
+                    vec_push_str(queue, resolved);
+                };
+            };
+            mi = mi + 1;
+        };
+
+        // Extract link libs
+        let libs: Vec = extract_link_libs(m);
+        let num_libs: I64 = vec_len(libs);
+        let mut li: I64 = 0;
+        while li < num_libs {
+            let lib: String = vec_get_str(libs, li);
+            if vec_contains_str(link_libs, lib) == false {
+                vec_push_str(link_libs, lib);
+            };
+            li = li + 1;
+        };
+
+        vec_push_module(modules, m);
+    };
+
+    modules
+}
+
+fn main() -> I64 {
+    if arg_len() < 1 {
+        print_str("usage: bootstrap <file.lang> [files...]");
+        exit_process(1);
+    };
+
+    // Collect entry files from args; stdlib path is built-in
+    let search_paths: Vec = vec_new();
+    vec_push_str(search_paths, get_stdlib_path());
+    let entry_files: Vec = vec_new();
+    let mut i: I64 = 0;
+    while i < arg_len() {
+        vec_push_str(entry_files, arg_str(i));
+        i = i + 1;
+    };
+
+    if vec_len(entry_files) < 1 {
+        print_str_stderr("error: no input files");
+        exit_process(1);
+    };
+
+    // Discover all modules via use-path following
+    let modules: Vec = discover_modules(entry_files, search_paths);
+
     print_str("parsed ok");
     qualify_modules(modules);
     print_str("qualified ok");
@@ -95,7 +284,8 @@ fn main() -> I64 {
     print_str("resolved ok");
     typecheck_modules(modules);
     print_str("typechecked ok");
-    codegen_modules(modules, "output.o");
+    create_dir("build");
+    codegen_modules(modules, "build/output.o");
     print_str("codegen ok");
     0
 }

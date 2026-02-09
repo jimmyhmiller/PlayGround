@@ -42,7 +42,7 @@ fn collect_global_items(modules: &[Module], errors: &mut Vec<QualifyError>) -> H
                 Item::Enum(e) => (&e.name, ItemKind::Enum, e.span),
                 Item::Fn(f) => (&f.name, ItemKind::Fn, f.span),
                 Item::ExternFn(f) => (&f.name, ItemKind::ExternFn, f.span),
-                Item::Use(_) => continue,
+                Item::Use(_) | Item::Link(_) => continue,
             };
             let full = full_item_name(&module_path, name);
             if items.contains_key(&full) {
@@ -179,7 +179,7 @@ impl<'a> Qualifier<'a> {
                     }
                     self.qualify_type(&mut f.ret_type);
                 }
-                Item::Use(_) => {}
+                Item::Use(_) | Item::Link(_) => {}
             }
         }
     }

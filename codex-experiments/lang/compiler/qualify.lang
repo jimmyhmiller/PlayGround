@@ -13,6 +13,7 @@ use ast::EnumDecl;
 use ast::EnumVariant;
 use ast::EnumVariantKind;
 use ast::UseDecl;
+use ast::LinkDecl;
 use ast::Field;
 use ast::Param;
 use ast::Block;
@@ -29,45 +30,49 @@ use ast::StructLitField;
 use ast::ItemEntry;
 use ast::UseEntry;
 
-extern fn vec_new() -> RawPointer<I8>;
-extern fn vec_len(v: RawPointer<I8>) -> I64;
-extern fn vec_clear(v: RawPointer<I8>) -> I64;
-extern fn vec_set_len(v: RawPointer<I8>, new_len: I64) -> I64;
+use vec::Vec;
+use vec::vec_new;
+use vec::vec_len;
+use vec::vec_clear;
+use vec::vec_set_len;
+use vec::vec_push;
+use vec::vec_get;
+use vec::vec_push_str;
+use vec::vec_get_str;
+use vec::vec_push_item;
+use vec::vec_get_item;
+use vec::vec_push_vec;
+use vec::vec_get_vec;
+use vec::vec_push_module;
+use vec::vec_get_module;
+use vec::vec_push_field;
+use vec::vec_get_field;
+use vec::vec_push_param;
+use vec::vec_get_param;
+use vec::vec_get_variant;
+use vec::vec_push_type;
+use vec::vec_get_type;
+use vec::vec_push_expr;
+use vec::vec_get_expr;
+use vec::vec_get_arm;
+use vec::vec_get_stmt;
+use vec::vec_get_pfield;
+use vec::vec_get_slfield;
+use vec::null_ptr;
 
-extern fn vec_push_str(v: RawPointer<I8>, item: String) -> I64;
-extern fn vec_get_str(v: RawPointer<I8>, index: I64) -> String;
-extern fn vec_push_item(v: RawPointer<I8>, item: Item) -> I64;
-extern fn vec_get_item(v: RawPointer<I8>, index: I64) -> Item;
-extern fn vec_push_ientry(v: RawPointer<I8>, item: ItemEntry) -> I64;
-extern fn vec_get_ientry(v: RawPointer<I8>, index: I64) -> ItemEntry;
-extern fn vec_push_uentry(v: RawPointer<I8>, item: UseEntry) -> I64;
-extern fn vec_get_uentry(v: RawPointer<I8>, index: I64) -> UseEntry;
-extern fn vec_push_vec(v: RawPointer<I8>, item: RawPointer<I8>) -> I64;
-extern fn vec_get_vec(v: RawPointer<I8>, index: I64) -> RawPointer<I8>;
-extern fn vec_push_module(v: RawPointer<I8>, item: Module) -> I64;
-extern fn vec_get_module(v: RawPointer<I8>, index: I64) -> Module;
-extern fn vec_push_field(v: RawPointer<I8>, item: Field) -> I64;
-extern fn vec_get_field(v: RawPointer<I8>, index: I64) -> Field;
-extern fn vec_push_param(v: RawPointer<I8>, item: Param) -> I64;
-extern fn vec_get_param(v: RawPointer<I8>, index: I64) -> Param;
-extern fn vec_get_variant(v: RawPointer<I8>, index: I64) -> EnumVariant;
-extern fn vec_push_type(v: RawPointer<I8>, item: Type) -> I64;
-extern fn vec_get_type(v: RawPointer<I8>, index: I64) -> Type;
-extern fn vec_push_expr(v: RawPointer<I8>, item: Expr) -> I64;
-extern fn vec_get_expr(v: RawPointer<I8>, index: I64) -> Expr;
-extern fn vec_get_arm(v: RawPointer<I8>, index: I64) -> MatchArm;
-extern fn vec_get_stmt(v: RawPointer<I8>, index: I64) -> Stmt;
-extern fn vec_get_pfield(v: RawPointer<I8>, index: I64) -> PatternField;
-extern fn vec_get_slfield(v: RawPointer<I8>, index: I64) -> StructLitField;
+// qualify-specific vec aliases
+fn vec_push_ientry(v: Vec, item: ItemEntry) -> I64 { vec_push(v, item) }
+fn vec_get_ientry(v: Vec, index: I64) -> ItemEntry { vec_get(v, index) }
+fn vec_push_uentry(v: Vec, item: UseEntry) -> I64 { vec_push(v, item) }
+fn vec_get_uentry(v: Vec, index: I64) -> UseEntry { vec_get(v, index) }
 
-extern fn string_eq(a: String, b: String) -> I64;
-extern fn string_concat(a: String, b: String) -> String;
-extern fn string_from_i64(val: I64) -> String;
-extern fn print_str(s: String) -> I64;
-extern fn print_str_stderr(s: String) -> I64;
-extern fn exit_process(code: I64) -> I64;
-extern fn null_ptr() -> RawPointer<I8>;
-extern fn ptr_is_null(p: RawPointer<I8>) -> I64;
+use string::string_eq;
+use string::string_concat;
+use string::string_from_i64;
+use io::print_str;
+use io::print_str_stderr;
+use io::exit_process;
+use vec::ptr_is_null;
 
 fn IK_STRUCT() -> I64 { 1 }
 fn IK_ENUM() -> I64 { 2 }
@@ -75,14 +80,14 @@ fn IK_FN() -> I64 { 3 }
 fn IK_EXTERN_FN() -> I64 { 4 }
 
 struct Qualifier {
-    module_path: RawPointer<I8>,
-    use_map: RawPointer<I8>,
-    items: RawPointer<I8>,
-    locals: RawPointer<I8>,
-    type_params: RawPointer<I8>
+    module_path: Vec,
+    use_map: Vec,
+    items: Vec,
+    locals: Vec,
+    type_params: Vec
 }
 
-fn path_to_string(path: RawPointer<I8>) -> String {
+fn path_to_string(path: Vec) -> String {
     let len: I64 = vec_len(path);
     if len == 0 { return ""; };
     let mut result: String = vec_get_str(path, 0);
@@ -94,7 +99,7 @@ fn path_to_string(path: RawPointer<I8>) -> String {
     result
 }
 
-fn full_item_name(module_path: RawPointer<I8>, name: String) -> String {
+fn full_item_name(module_path: Vec, name: String) -> String {
     if vec_len(module_path) == 0 { name }
     else { string_concat(path_to_string(module_path), string_concat("::", name)) }
 }
@@ -121,7 +126,7 @@ fn qualify_error(msg: String) -> I64 {
     exit_process(1); 0
 }
 
-fn items_contains(items: RawPointer<I8>, name: String) -> Bool {
+fn items_contains(items: Vec, name: String) -> Bool {
     let len: I64 = vec_len(items);
     let mut i: I64 = 0;
     while i < len {
@@ -132,7 +137,7 @@ fn items_contains(items: RawPointer<I8>, name: String) -> Bool {
     false
 }
 
-fn use_map_get(use_map: RawPointer<I8>, alias: String) -> RawPointer<I8> {
+fn use_map_get(use_map: Vec, alias: String) -> Vec {
     let len: I64 = vec_len(use_map);
     let mut i: I64 = 0;
     while i < len {
@@ -143,7 +148,7 @@ fn use_map_get(use_map: RawPointer<I8>, alias: String) -> RawPointer<I8> {
     null_ptr()
 }
 
-fn use_map_contains(use_map: RawPointer<I8>, alias: String) -> Bool {
+fn use_map_contains(use_map: Vec, alias: String) -> Bool {
     ptr_is_null(use_map_get(use_map, alias)) == 0
 }
 
@@ -165,7 +170,7 @@ fn locals_contains(q: Qualifier, name: String) -> Bool {
     let num_frames: I64 = vec_len(q.locals);
     let mut fi: I64 = num_frames - 1;
     while fi >= 0 {
-        let frame: RawPointer<I8> = vec_get_vec(q.locals, fi);
+        let frame: Vec = vec_get_vec(q.locals, fi);
         let frame_len: I64 = vec_len(frame);
         let mut j: I64 = 0;
         while j < frame_len {
@@ -177,7 +182,7 @@ fn locals_contains(q: Qualifier, name: String) -> Bool {
     false
 }
 
-fn type_params_contains(tp: RawPointer<I8>, name: String) -> Bool {
+fn type_params_contains(tp: Vec, name: String) -> Bool {
     let len: I64 = vec_len(tp);
     let mut i: I64 = 0;
     while i < len {
@@ -187,7 +192,7 @@ fn type_params_contains(tp: RawPointer<I8>, name: String) -> Bool {
     false
 }
 
-fn replace_path(old_path: RawPointer<I8>, new_segments: RawPointer<I8>) -> I64 {
+fn replace_path(old_path: Vec, new_segments: Vec) -> I64 {
     vec_clear(old_path);
     let len: I64 = vec_len(new_segments);
     let mut i: I64 = 0;
@@ -195,13 +200,13 @@ fn replace_path(old_path: RawPointer<I8>, new_segments: RawPointer<I8>) -> I64 {
     0
 }
 
-fn collect_global_items(modules: RawPointer<I8>) -> RawPointer<I8> {
-    let items: RawPointer<I8> = vec_new();
+fn collect_global_items(modules: Vec) -> Vec {
+    let items: Vec = vec_new();
     let num_modules: I64 = vec_len(modules);
     let mut mi: I64 = 0;
     while mi < num_modules {
         let m: Module = vec_get_module(modules, mi);
-        let mod_path: RawPointer<I8> = m.path;
+        let mod_path: Vec = m.path;
         let num_items: I64 = vec_len(m.items);
         let mut ii: I64 = 0;
         while ii < num_items {
@@ -227,7 +232,8 @@ fn collect_global_items(modules: RawPointer<I8>) -> RawPointer<I8> {
                     if items_contains(items, full) { qualify_error(string_concat("duplicate item '", string_concat(full, "'"))); };
                     vec_push_ientry(items, ItemEntry { name: full, kind: IK_EXTERN_FN() });
                 },
-                Item::UseItem { decl } => {}
+                Item::UseItem { decl } => {},
+                Item::LinkItem { decl } => {}
             };
             ii = ii + 1;
         };
@@ -236,15 +242,15 @@ fn collect_global_items(modules: RawPointer<I8>) -> RawPointer<I8> {
     items
 }
 
-fn build_use_map(items: RawPointer<I8>, module_path: RawPointer<I8>, m: Module) -> RawPointer<I8> {
-    let use_map: RawPointer<I8> = vec_new();
+fn build_use_map(items: Vec, module_path: Vec, m: Module) -> Vec {
+    let use_map: Vec = vec_new();
     let num_items: I64 = vec_len(m.items);
     let mut ii: I64 = 0;
     while ii < num_items {
         let item: Item = vec_get_item(m.items, ii);
         match item {
             Item::UseItem { decl } => {
-                let path: RawPointer<I8> = decl.path;
+                let path: Vec = decl.path;
                 let path_len: I64 = vec_len(path);
                 if path_len > 0 {
                     let alias: String = vec_get_str(path, path_len - 1);
@@ -254,7 +260,7 @@ fn build_use_map(items: RawPointer<I8>, module_path: RawPointer<I8>, m: Module) 
                         vec_push_uentry(use_map, UseEntry { alias: alias, path: path });
                     } else {
                         if vec_len(module_path) > 0 {
-                            let rel: RawPointer<I8> = vec_new();
+                            let rel: Vec = vec_new();
                             let mp_len: I64 = vec_len(module_path);
                             let mut k: I64 = 0;
                             while k < mp_len { vec_push_str(rel, vec_get_str(module_path, k)); k = k + 1; };
@@ -275,15 +281,15 @@ fn build_use_map(items: RawPointer<I8>, module_path: RawPointer<I8>, m: Module) 
     use_map
 }
 
-fn qualify_path_common(q: Qualifier, path: RawPointer<I8>) -> I64 {
+fn qualify_path_common(q: Qualifier, path: Vec) -> I64 {
     let len: I64 = vec_len(path);
     if len == 0 { return 0; };
     if len == 1 {
         let name: String = vec_get_str(path, 0);
-        let mapped: RawPointer<I8> = use_map_get(q.use_map, name);
+        let mapped: Vec = use_map_get(q.use_map, name);
         if ptr_is_null(mapped) == 0 { replace_path(path, mapped); return 0; };
         if vec_len(q.module_path) > 0 {
-            let full: RawPointer<I8> = vec_new();
+            let full: Vec = vec_new();
             let mp_len: I64 = vec_len(q.module_path);
             let mut k: I64 = 0;
             while k < mp_len { vec_push_str(full, vec_get_str(q.module_path, k)); k = k + 1; };
@@ -293,9 +299,9 @@ fn qualify_path_common(q: Qualifier, path: RawPointer<I8>) -> I64 {
         return 0;
     };
     let first: String = vec_get_str(path, 0);
-    let mapped: RawPointer<I8> = use_map_get(q.use_map, first);
+    let mapped: Vec = use_map_get(q.use_map, first);
     if ptr_is_null(mapped) == 0 {
-        let out: RawPointer<I8> = vec_new();
+        let out: Vec = vec_new();
         let mapped_len: I64 = vec_len(mapped);
         let mut k: I64 = 0;
         while k < mapped_len { vec_push_str(out, vec_get_str(mapped, k)); k = k + 1; };
@@ -305,13 +311,13 @@ fn qualify_path_common(q: Qualifier, path: RawPointer<I8>) -> I64 {
         return 0;
     };
     if vec_len(q.module_path) > 0 {
-        let candidate: RawPointer<I8> = vec_new();
+        let candidate: Vec = vec_new();
         let mp_len: I64 = vec_len(q.module_path);
         let mut k: I64 = 0;
         while k < mp_len { vec_push_str(candidate, vec_get_str(q.module_path, k)); k = k + 1; };
         vec_push_str(candidate, first);
         if items_contains(q.items, path_to_string(candidate)) {
-            let out: RawPointer<I8> = vec_new();
+            let out: Vec = vec_new();
             k = 0;
             while k < mp_len { vec_push_str(out, vec_get_str(q.module_path, k)); k = k + 1; };
             k = 0;
@@ -322,7 +328,7 @@ fn qualify_path_common(q: Qualifier, path: RawPointer<I8>) -> I64 {
     0
 }
 
-fn qualify_type_path(q: Qualifier, path: RawPointer<I8>) -> I64 {
+fn qualify_type_path(q: Qualifier, path: Vec) -> I64 {
     let len: I64 = vec_len(path);
     if len == 1 {
         let name: String = vec_get_str(path, 0);
@@ -332,7 +338,7 @@ fn qualify_type_path(q: Qualifier, path: RawPointer<I8>) -> I64 {
     qualify_path_common(q, path); 0
 }
 
-fn qualify_value_path(q: Qualifier, path: RawPointer<I8>, span: Span) -> I64 {
+fn qualify_value_path(q: Qualifier, path: Vec, span: Span) -> I64 {
     let len: I64 = vec_len(path);
     if len == 1 { if locals_contains(q, vec_get_str(path, 0)) { return 0; }; };
     qualify_path_common(q, path); 0
@@ -483,7 +489,7 @@ fn qualify_expr(q: Qualifier, expr: Expr) -> I64 {
     0
 }
 
-fn qualify_fields_types(q: Qualifier, fields: RawPointer<I8>) -> I64 {
+fn qualify_fields_types(q: Qualifier, fields: Vec) -> I64 {
     let num: I64 = vec_len(fields);
     let mut i: I64 = 0;
     while i < num {
@@ -494,7 +500,7 @@ fn qualify_fields_types(q: Qualifier, fields: RawPointer<I8>) -> I64 {
     0
 }
 
-fn qualify_params(q: Qualifier, params: RawPointer<I8>, register_locals: Bool) -> I64 {
+fn qualify_params(q: Qualifier, params: Vec, register_locals: Bool) -> I64 {
     let num: I64 = vec_len(params);
     let mut i: I64 = 0;
     while i < num {
@@ -555,21 +561,22 @@ fn qualify_module(q: Qualifier, m: Module) -> I64 {
                 qualify_params(q, decl.params, false);
                 qualify_type(q, decl.ret_type);
             },
-            Item::UseItem { decl } => {}
+            Item::UseItem { decl } => {},
+                Item::LinkItem { decl } => {}
         };
         ii = ii + 1;
     };
     0
 }
 
-fn qualify_modules(modules: RawPointer<I8>) -> I64 {
-    let items: RawPointer<I8> = collect_global_items(modules);
+fn qualify_modules(modules: Vec) -> I64 {
+    let items: Vec = collect_global_items(modules);
     let num_modules: I64 = vec_len(modules);
     let mut mi: I64 = 0;
     while mi < num_modules {
         let m: Module = vec_get_module(modules, mi);
-        let use_map: RawPointer<I8> = build_use_map(items, m.path, m);
-        let locals: RawPointer<I8> = vec_new();
+        let use_map: Vec = build_use_map(items, m.path, m);
+        let locals: Vec = vec_new();
         vec_push_vec(locals, vec_new());
         let q: Qualifier = Qualifier {
             module_path: m.path, use_map: use_map, items: items,

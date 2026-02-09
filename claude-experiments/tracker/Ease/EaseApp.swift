@@ -2,6 +2,7 @@ import SwiftUI
 import AppKit
 import Sparkle
 import Combine
+import UniformTypeIdentifiers
 
 @main
 struct EaseApp: App {
@@ -294,6 +295,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         dataProportionsItem.state = useDataProportions ? .on : .off
         menu.addItem(dataProportionsItem)
 
+        // Export Heatmap
+        let exportItem = NSMenuItem(
+            title: "Export Heatmap...",
+            action: #selector(exportHeatmap),
+            keyEquivalent: ""
+        )
+        menu.addItem(exportItem)
+
         menu.addItem(NSMenuItem.separator())
 
         // Clear Data
@@ -351,6 +360,32 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func menuDidClose(_ menu: NSMenu) {
         modifierTimer?.invalidate()
         modifierTimer = nil
+    }
+
+    @objc private func exportHeatmap() {
+        let cells = viewModel.heatmapCells(for: .all)
+        guard !cells.isEmpty else { return }
+
+        let exportView = ExportHeatmapView(goals: viewModel.goals, cells: cells)
+            .environment(\.colorScheme, .light)
+
+        let renderer = ImageRenderer(content: exportView)
+        renderer.scale = 2.0
+        renderer.proposedSize = .unspecified
+
+        guard let image = renderer.nsImage else { return }
+
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.png]
+        panel.nameFieldStringValue = "ease-heatmap.png"
+
+        panel.begin { response in
+            guard response == .OK, let url = panel.url else { return }
+            guard let tiffData = image.tiffRepresentation,
+                  let bitmap = NSBitmapImageRep(data: tiffData),
+                  let pngData = bitmap.representation(using: .png, properties: [:]) else { return }
+            try? pngData.write(to: url)
+        }
     }
 
     @objc private func quitApp() {

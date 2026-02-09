@@ -46,6 +46,7 @@ pub enum TokenKind {
     Repr,
     True,
     False,
+    Link,
 
     // Symbols
     LParen,
@@ -102,6 +103,7 @@ impl TokenKind {
                 | TokenKind::Repr
                 | TokenKind::True
                 | TokenKind::False
+                | TokenKind::Link
         )
     }
 }
