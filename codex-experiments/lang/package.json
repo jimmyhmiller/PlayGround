@@ -1,0 +1,34 @@
+{
+	"name": "lang-syntax",
+	"displayName": "Lang Syntax",
+	"description": "Syntax highlighting for the .lang programming language",
+	"version": "0.0.1",
+	"engines": {
+		"vscode": "^1.91.0"
+	},
+	"categories": [
+		"Programming Languages"
+	],
+	"contributes": {
+		"languages": [
+			{
+				"id": "lang",
+				"aliases": [
+					"Lang",
+					"lang"
+				],
+				"extensions": [
+					".lang"
+				],
+				"configuration": "./language-configuration.json"
+			}
+		],
+		"grammars": [
+			{
+				"language": "lang",
+				"scopeName": "source.lang",
+				"path": "./syntaxes/lang.tmLanguage.json"
+			}
+		]
+	}
+}

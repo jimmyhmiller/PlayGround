@@ -65,3 +65,11 @@ fn arg_str(index: I64) -> String {
     let actual: I64 = index + 1;
     ptr_load_ptr(argv, actual * 8)
 }
+
+fn system(cmd: String) -> I64 {
+    system_cmd(cmd)
+}
+
+fn write_string(path: String, data: String) -> I64 {
+    write_file(path, data, string_len(data))
+}

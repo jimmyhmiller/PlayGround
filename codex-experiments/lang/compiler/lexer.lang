@@ -3,6 +3,10 @@ use string::string_byte_at;
 use string::string_slice;
 use string::string_eq;
 use string::string_concat;
+
+link "c";
+extern fn malloc(size: I64) -> RawPointer<I8>;
+extern fn ptr_store_i8(p: RawPointer<I8>, off: I64, val: I64) -> I64;
 use io::print_str;
 use io::print_int;
 use io::read_file;
@@ -262,15 +266,21 @@ fn lex_number(lex: Lexer) -> Token {
 
 fn lex_string(lex: Lexer) -> Token {
     let start: I64 = lex.pos;
+    let content_start: I64 = lex.pos + 1;  // Position after opening quote
     advance(lex); // skip opening "
+
+    // First pass: count characters and find end quote
     let mut escaped: Bool = false;
     let mut cont: Bool = true;
+    let mut result_len: I64 = 0;
+
     while cont {
         let ch: I64 = peek(lex);
         if ch < 0 {
             cont = false;
         } else {
             if escaped {
+                result_len = result_len + 1;  // Escape sequence becomes one char
                 advance(lex);
                 escaped = false;
             } else {
@@ -282,15 +292,73 @@ fn lex_string(lex: Lexer) -> Token {
                         advance(lex);
                         cont = false;
                     } else {
+                        result_len = result_len + 1;
                         advance(lex);
                     }
                 }
             };
         };
     };
-    // Extract the content between quotes
-    let text: String = string_slice(lex.source, start + 1, lex.pos - 1);
-    Token { kind: TokenKind::StrLit { text: text }, start: start, end: lex.pos }
+
+    // Second pass: build result string with escapes processed
+    let buf: RawPointer<I8> = malloc(result_len + 1);
+    lex.pos = content_start;  // Reset to start of string content
+    let mut write_pos: I64 = 0;
+    escaped = false;
+    cont = true;
+
+    while cont {
+        let ch: I64 = peek(lex);
+        if ch < 0 {
+            cont = false;
+        } else {
+            if escaped {
+                // Process escape sequence
+                let esc_char: I64 = if ch == 'n' {
+                    10  // newline
+                } else {
+                    if ch == 't' {
+                        9  // tab
+                    } else {
+                        if ch == 'r' {
+                            13  // carriage return
+                        } else {
+                            if ch == '\\' {
+                                92  // backslash
+                            } else {
+                                if ch == '"' {
+                                    34  // quote
+                                } else {
+                                    ch  // unknown escape, keep as-is
+                                }
+                            }
+                        }
+                    }
+                };
+                ptr_store_i8(buf, write_pos, esc_char);
+                write_pos = write_pos + 1;
+                advance(lex);
+                escaped = false;
+            } else {
+                if ch == '\\' {
+                    advance(lex);
+                    escaped = true;
+                } else {
+                    if ch == '"' {
+                        advance(lex);
+                        cont = false;
+                    } else {
+                        ptr_store_i8(buf, write_pos, ch);
+                        write_pos = write_pos + 1;
+                        advance(lex);
+                    }
+                }
+            };
+        };
+    };
+
+    ptr_store_i8(buf, write_pos, 0);  // null terminator
+    Token { kind: TokenKind::StrLit { text: buf }, start: start, end: lex.pos }
 }
 
 fn lex_char(lex: Lexer) -> Token {

@@ -83,41 +83,11 @@ fn main() {
         std::process::exit(1);
     }
     if mode == "run" {
-        let obj_path = std::env::temp_dir().join(format!("langc_run_{}.o", std::process::id()));
         let exe_path = std::env::temp_dir().join(format!("langc_run_{}", std::process::id()));
 
-        if let Err(err) = codegen::compile_to_object(&modules, &obj_path) {
-            eprintln!("codegen error: {}", err.message);
+        if let Err(err) = codegen::compile_to_executable(&modules, &exe_path, &link_libs) {
+            eprintln!("compilation error: {}", err.message);
             std::process::exit(1);
-        }
-
-        let (runtime_o, gc_bridge_o) = compile_c_runtime();
-        let shims_o = compile_llvm_shims();
-
-        let mut link_cmd = Command::new("cc");
-        link_cmd
-            .arg(&obj_path)
-            .arg(&runtime_o)
-            .arg(&gc_bridge_o)
-            .arg(&shims_o)
-            .arg(gc_library_path())
-            .arg("-O2")
-            .arg("-o")
-            .arg(&exe_path);
-        add_llvm_link_flags(&mut link_cmd);
-        add_link_libs(&mut link_cmd, &link_libs);
-        let status = link_cmd.status();
-        let _ = fs::remove_file(&obj_path);
-        match status {
-            Ok(s) if s.success() => {}
-            Ok(s) => {
-                eprintln!("link failed: {}", s);
-                std::process::exit(1);
-            }
-            Err(err) => {
-                eprintln!("failed to invoke cc: {err}");
-                std::process::exit(1);
-            }
         }
 
         let result = Command::new(&exe_path)
@@ -136,43 +106,14 @@ fn main() {
         let build_dir = Path::new("build");
         fs::create_dir_all(build_dir).expect("failed to create build/ directory");
         let stem = input.file_stem().unwrap_or_else(|| std::ffi::OsStr::new("output"));
-        let obj_path = build_dir.join(Path::new(stem).with_extension("o"));
         let exe_path = build_dir.join(stem);
 
-        if let Err(err) = codegen::compile_to_object(&modules, &obj_path) {
-            eprintln!("codegen error: {}", err.message);
+        if let Err(err) = codegen::compile_to_executable(&modules, &exe_path, &link_libs) {
+            eprintln!("compilation error: {}", err.message);
             std::process::exit(1);
         }
 
-        let (runtime_o, gc_bridge_o) = compile_c_runtime();
-        let shims_o = compile_llvm_shims();
-
-        let mut link_cmd = Command::new("cc");
-        link_cmd
-            .arg(&obj_path)
-            .arg(&runtime_o)
-            .arg(&gc_bridge_o)
-            .arg(&shims_o)
-            .arg(gc_library_path())
-            .arg("-O2")
-            .arg("-o")
-            .arg(&exe_path);
-        add_llvm_link_flags(&mut link_cmd);
-        add_link_libs(&mut link_cmd, &link_libs);
-        let status = link_cmd.status();
-        match status {
-            Ok(s) if s.success() => {
-                println!("built {}", exe_path.display());
-            }
-            Ok(s) => {
-                eprintln!("link failed: {}", s);
-                std::process::exit(1);
-            }
-            Err(err) => {
-                eprintln!("failed to invoke cc: {err}");
-                std::process::exit(1);
-            }
-        }
+        println!("built {}", exe_path.display());
     } else {
         println!("ok");
     }

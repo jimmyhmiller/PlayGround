@@ -1,13 +1,9 @@
 use crate::ast::*;
-use crate::runtime;
-use crate::{lexer::Lexer, parser::Parser};
-use crate::{qualify, resolve, typecheck};
 use inkwell::builder::Builder;
 use inkwell::builder::BuilderError;
 use inkwell::context::Context;
-use inkwell::execution_engine::ExecutionEngine;
 use inkwell::module::Module;
-use inkwell::types::{BasicType, BasicTypeEnum, StructType};
+use inkwell::types::{BasicTypeEnum, StructType};
 use inkwell::values::{BasicMetadataValueEnum, BasicValue, BasicValueEnum, FunctionValue, PointerValue};
 use inkwell::OptimizationLevel;
 use std::collections::HashMap;
@@ -38,7 +34,6 @@ pub struct Codegen<'ctx> {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CodegenMode {
-    Jit,
     Aot,
 }
 
@@ -80,105 +75,6 @@ struct VariantFieldLayout<'ctx> {
     llvm_ty: BasicTypeEnum<'ctx>,
     is_gc_ref: bool,
     field_index: u64,
-}
-
-/// Default memory manager that delegates to system allocator.
-/// Used to create MCJIT engine with FastISel disabled.
-#[derive(Debug)]
-struct DefaultMemoryManager;
-
-impl inkwell::memory_manager::McjitMemoryManager for DefaultMemoryManager {
-    fn allocate_code_section(
-        &mut self,
-        size: libc::uintptr_t,
-        alignment: libc::c_uint,
-        _section_id: libc::c_uint,
-        _section_name: &str,
-    ) -> *mut u8 {
-        unsafe {
-            let layout = std::alloc::Layout::from_size_align(size, alignment as usize)
-                .unwrap_or(std::alloc::Layout::from_size_align(size, 16).unwrap());
-            std::alloc::alloc(layout)
-        }
-    }
-
-    fn allocate_data_section(
-        &mut self,
-        size: libc::uintptr_t,
-        alignment: libc::c_uint,
-        _section_id: libc::c_uint,
-        _section_name: &str,
-        _is_read_only: bool,
-    ) -> *mut u8 {
-        unsafe {
-            let layout = std::alloc::Layout::from_size_align(size, alignment as usize)
-                .unwrap_or(std::alloc::Layout::from_size_align(size, 16).unwrap());
-            std::alloc::alloc(layout)
-        }
-    }
-
-    fn finalize_memory(&mut self) -> Result<(), String> {
-        Ok(())
-    }
-
-    fn destroy(&mut self) {}
-}
-
-pub fn compile_and_run(modules: &[crate::ast::Module]) -> Result<i64, CodegenError> {
-    use inkwell::targets::{InitializationConfig, Target, TargetMachine, RelocMode, CodeModel};
-    let context = Context::create();
-    let mut gen = Codegen::new(&context, "lang_module", CodegenMode::Jit);
-    gen.declare_structs(modules)?;
-    gen.declare_enums(modules)?;
-    gen.declare_tuples(modules)?;
-    gen.declare_functions(modules)?;
-    gen.define_functions(modules)?;
-    Target::initialize_native(&InitializationConfig::default())
-        .map_err(|e| CodegenError { message: format!("target init failed: {e}") })?;
-    let triple = TargetMachine::get_default_triple();
-    let target = Target::from_triple(&triple)
-        .map_err(|e| CodegenError { message: format!("target lookup failed: {e}") })?;
-    let cpu = TargetMachine::get_host_cpu_name();
-    let features = TargetMachine::get_host_cpu_features();
-    let cpu_str = cpu.to_str().unwrap_or("generic");
-    let feat_str = features.to_str().unwrap_or("");
-    if let Some(tm) = target.create_target_machine(
-        &triple,
-        cpu_str,
-        feat_str,
-        OptimizationLevel::None,
-        RelocMode::Default,
-        CodeModel::Default,
-    ) {
-        gen.module.set_triple(&triple);
-        let data_layout = tm.get_target_data().get_data_layout();
-        gen.module.set_data_layout(&data_layout);
-    }
-    let engine = gen
-        .module
-        .create_mcjit_execution_engine_with_memory_manager(
-            DefaultMemoryManager,
-            OptimizationLevel::None,
-            inkwell::targets::CodeModel::Default,
-            false, // no_frame_pointer_elim
-            false, // enable_fast_isel = false (DISABLED)
-        )
-        .map_err(|e| CodegenError {
-            message: format!("jit create failed: {e}"),
-        })?;
-    add_runtime_mappings(&engine, &gen.externs, gen.gc_pollcheck, gen.gc_allocate_obj, gen.gc_write_barrier);
-    unsafe { runtime::gc_init(); }
-    let mut thread = runtime::Thread::new();
-    unsafe {
-        runtime::gc_set_thread(&mut thread as *mut _ as *mut u8);
-        let main_name = gen.llvm_fn_name("main");
-        let main = engine
-            .get_function::<unsafe extern "C" fn(*mut u8) -> i64>(&main_name)
-            .map_err(|e| CodegenError {
-                message: format!("missing main: {e}"),
-            })?;
-        Ok(main.call(&mut thread as *mut _ as *mut u8))
-    }
 }
 
 pub fn compile_to_object(modules: &[crate::ast::Module], output: &std::path::Path) -> Result<(), CodegenError> {
@@ -226,291 +122,21 @@ pub fn compile_to_object(modules: &[crate::ast::Module], output: &std::path::Pat
     Ok(())
 }
 
-extern "C" fn rt_print_int(value: i64) -> i64 {
-    println!("{value}");
-    0
-}
-
-extern "C" fn rt_print_str(ptr: *const u8) -> i64 {
-    if ptr.is_null() {
-        println!();
-        return 0;
-    }
-    unsafe {
-        let mut len = 0usize;
-        while *ptr.add(len) != 0 {
-            len += 1;
-        }
-        let slice = std::slice::from_raw_parts(ptr, len);
-        if let Ok(s) = std::str::from_utf8(slice) {
-            println!("{s}");
-        }
-    }
-    0
-}
-
-extern "C" fn rt_add_i64(a: i64, b: i64) -> i64 {
-    a + b
-}
-
-extern "C" fn rt_null_ptr() -> *mut u8 {
-    std::ptr::null_mut()
-}
-
-extern "C" fn rt_ptr_is_null(p: *mut u8) -> i64 {
-    if p.is_null() { 1 } else { 0 }
-}
-
-extern "C" fn rt_arg_i64(index: i64) -> i64 {
-    if index < 0 {
-        return 0;
-    }
-    let args: Vec<String> = std::env::args().collect();
-    let mut base = 1usize;
-    if let Some(pos) = args.iter().position(|a| a == "--") {
-        base = pos + 1;
-    } else if args.len() >= 3 && args[1] == "run" {
-        base = 3;
-    }
-    let pos = base as i64 + index;
-    if pos < 0 || pos as usize >= args.len() {
-        return 0;
-    }
-    args[pos as usize].parse::<i64>().unwrap_or(0)
-}
-
-extern "C" fn rt_arg_str(index: i64) -> *const u8 {
-    if index < 0 {
-        return std::ptr::null();
-    }
-    let args: Vec<String> = std::env::args().collect();
-    let mut base = 1usize;
-    if let Some(pos) = args.iter().position(|a| a == "--") {
-        base = pos + 1;
-    } else if args.len() >= 3 && args[1] == "run" {
-        base = 3;
-    }
-    let pos = base as i64 + index;
-    if pos < 0 || pos as usize >= args.len() {
-        return std::ptr::null();
-    }
-    let mut bytes = args[pos as usize].as_bytes().to_vec();
-    bytes.push(0);
-    let boxed = bytes.into_boxed_slice();
-    Box::into_raw(boxed) as *const u8
-}
-
-extern "C" fn rt_arg_is_i64(index: i64) -> i64 {
-    if index < 0 {
-        return 0;
-    }
-    let args: Vec<String> = std::env::args().collect();
-    let mut base = 1usize;
-    if let Some(pos) = args.iter().position(|a| a == "--") {
-        base = pos + 1;
-    } else if args.len() >= 3 && args[1] == "run" {
-        base = 3;
-    }
-    let pos = base as i64 + index;
-    if pos < 0 || pos as usize >= args.len() {
-        return 0;
-    }
-    if args[pos as usize].parse::<i64>().is_ok() { 1 } else { 0 }
-}
-
-extern "C" fn rt_arg_len() -> i64 {
-    let args: Vec<String> = std::env::args().collect();
-    let mut base = 1usize;
-    if let Some(pos) = args.iter().position(|a| a == "--") {
-        base = pos + 1;
-    } else if args.len() >= 3 && args[1] == "run" {
-        base = 3;
-    }
-    if args.len() < base {
-        0
-    } else {
-        (args.len() - base) as i64
-    }
-}
-
-extern "C" fn rt_host_build() -> i64 {
-    use std::fs;
-    use std::path::{Path, PathBuf};
+pub fn compile_to_executable(
+    modules: &[crate::ast::Module],
+    output: &std::path::Path,
+    _link_libs: &[String],
+) -> Result<(), CodegenError> {
     use std::process::Command;
 
-    fn collect_lang_files(dir: &Path, out: &mut Vec<String>) {
-        if let Ok(entries) = fs::read_dir(dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_dir() {
-                    collect_lang_files(&path, out);
-                } else if path.extension().and_then(|s| s.to_str()) == Some("lang") {
-                    out.push(path.to_string_lossy().to_string());
-                }
-            }
-        }
-    }
-
-    fn build_roots(paths: &[String]) -> Vec<PathBuf> {
-        let mut roots = Vec::new();
-        for p in paths {
-            let path = Path::new(p);
-            if path.is_dir() {
-                roots.push(path.to_path_buf());
-            } else if let Some(parent) = path.parent() {
-                roots.push(parent.to_path_buf());
-            }
-        }
-        if roots.is_empty() {
-            roots.push(Path::new(".").to_path_buf());
-        }
-        roots
-    }
-
-    fn derive_module_path(path: &Path, roots: &[PathBuf], root_file: Option<&Path>) -> Option<Vec<String>> {
-        let mut best_root: Option<&PathBuf> = None;
-        let mut best_len = 0usize;
-        for root in roots {
-            if path.starts_with(root) {
-                let len = root.components().count();
-                if len >= best_len {
-                    best_len = len;
-                    best_root = Some(root);
-                }
-            }
-        }
-        let root = best_root?;
-        let rel = path.strip_prefix(root).ok()?;
-        let rel_dir = rel.parent().unwrap_or_else(|| Path::new(""));
-        let mut parts = Vec::new();
-        for comp in rel_dir.components() {
-            if let std::path::Component::Normal(s) = comp {
-                if let Some(text) = s.to_str() {
-                    parts.push(text.to_string());
-                }
-            }
-        }
-        let skip_stem = root_file.map_or(false, |root| root == path);
-        if !skip_stem {
-            let stem = path.file_stem().and_then(|s| s.to_str());
-            if let Some(stem) = stem {
-                let is_root = matches!(stem, "main" | "lib" | "mod");
-                if !is_root {
-                    parts.push(stem.to_string());
-                }
-            }
-        }
-        Some(parts)
-    }
-
-    let args: Vec<String> = std::env::args().collect();
-    let mut forwarded = Vec::new();
-    if let Some(pos) = args.iter().position(|a| a == "--") {
-        forwarded.extend_from_slice(&args[pos + 1..]);
-    }
-    if forwarded.is_empty() {
-        eprintln!("bootstrap build: no target files");
-        return 1;
-    }
-    if forwarded[0].parse::<i64>().is_ok() {
-        forwarded.remove(0);
-    }
-    if forwarded.is_empty() {
-        eprintln!("bootstrap build: no target files");
-        return 1;
-    }
-
-    let mut all_paths: Vec<String> = Vec::new();
-    for p in &forwarded {
-        let path = Path::new(p);
-        if path.is_dir() {
-            collect_lang_files(path, &mut all_paths);
-        } else {
-            all_paths.push(p.clone());
-        }
-    }
-    if all_paths.is_empty() {
-        eprintln!("bootstrap build: no .lang files found");
-        return 1;
-    }
-
-    let roots = build_roots(&forwarded);
-    let root_file = if forwarded.len() == 1 && Path::new(&forwarded[0]).is_file() {
-        Some(Path::new(&forwarded[0]).to_path_buf())
-    } else {
-        None
-    };
-    let mut modules: Vec<crate::ast::Module> = Vec::new();
-    for path in &all_paths {
-        let src = match fs::read_to_string(path) {
-            Ok(s) => s,
-            Err(err) => {
-                eprintln!("failed to read {}: {}", path, err);
-                return 1;
-            }
-        };
-        let tokens = match Lexer::new(&src).lex_all() {
-            Ok(toks) => toks,
-            Err(errors) => {
-                for err in errors {
-                    eprintln!("lex error: {} at {}..{}", err.message, err.span.start, err.span.end);
-                }
-                return 1;
-            }
-        };
-        let mut module = match Parser::new(tokens).parse_module() {
-            Ok(module) => module,
-            Err(errors) => {
-                for err in errors {
-                    eprintln!("parse error: {} at {}..{}", err.message, err.span.start, err.span.end);
-                }
-                return 1;
-            }
-        };
-        if module.path.is_none() {
-            if let Some(p) = derive_module_path(Path::new(path), &roots, root_file.as_deref()) {
-                if !p.is_empty() {
-                    module.path = Some(p);
-                }
-            }
-        }
-        modules.push(module);
-    }
-
-    if let Err(errors) = qualify::qualify_modules(&mut modules) {
-        for err in errors {
-            eprintln!("qualify error: {} at {}..{}", err.message, err.span.start, err.span.end);
-        }
-        return 1;
-    }
-    if let Err(errors) = resolve::resolve_modules(&modules) {
-        for err in errors {
-            eprintln!("resolve error: {} at {}..{}", err.message, err.span.start, err.span.end);
-        }
-        return 1;
-    }
-    if let Err(errors) = typecheck::typecheck_modules(&modules) {
-        for err in errors {
-            eprintln!("type error: {} at {}..{}", err.message, err.span.start, err.span.end);
-        }
-        return 1;
-    }
-
-    let input = Path::new(&all_paths[0]);
-    let obj_path = input.with_extension("o");
-    let mut exe_path = input.with_extension("");
-    if input.extension().is_none() {
-        exe_path = input.with_extension("out");
-    }
-    if let Err(err) = compile_to_object(&modules, &obj_path) {
-        eprintln!("codegen error: {}", err.message);
-        return 1;
-    }
-
-    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let runtime_dir = manifest_dir.join("runtime");
 
-    // Compile runtime.c
+    // Step 1: Compile to object file
+    let obj_path = std::env::temp_dir().join(format!("langc_obj_{}.o", std::process::id()));
+    compile_to_object(modules, &obj_path)?;
+
+    // Step 2: Compile runtime.c
     let runtime_o = runtime_dir.join("runtime.o");
     let status = Command::new("cc")
         .arg("-c")
@@ -518,13 +144,13 @@ extern "C" fn rt_host_build() -> i64 {
         .arg("-O2")
         .arg("-o")
         .arg(&runtime_o)
-        .status();
-    if !status.map(|s| s.success()).unwrap_or(false) {
-        eprintln!("failed to compile runtime.c");
-        return 1;
+        .status()
+        .map_err(|e| CodegenError { message: format!("failed to invoke cc: {e}") })?;
+    if !status.success() {
+        return Err(CodegenError { message: "failed to compile runtime.c".to_string() });
     }
 
-    // Compile gc_bridge.c
+    // Step 3: Compile gc_bridge.c
     let gc_bridge_o = runtime_dir.join("gc_bridge.o");
     let gc_include = manifest_dir.join("../../claude-experiments/gc-library/include");
     let status = Command::new("cc")
@@ -534,39 +160,38 @@ extern "C" fn rt_host_build() -> i64 {
         .arg("-O2")
         .arg("-o")
         .arg(&gc_bridge_o)
-        .status();
-    if !status.map(|s| s.success()).unwrap_or(false) {
-        eprintln!("failed to compile gc_bridge.c");
-        return 1;
+        .status()
+        .map_err(|e| CodegenError { message: format!("failed to invoke cc: {e}") })?;
+    if !status.success() {
+        return Err(CodegenError { message: "failed to compile gc_bridge.c".to_string() });
     }
 
-    // Compile llvm_shims.c
+    // Step 4: Compile llvm_shims.c
     let llvm_config = crate::find_llvm_config();
     let shims_c = runtime_dir.join("llvm_shims.c");
     let shims_o = runtime_dir.join("llvm_shims.o");
     let cflags = Command::new(&llvm_config)
         .arg("--cflags")
-        .output();
+        .output()
+        .map_err(|e| CodegenError { message: format!("failed to run llvm-config: {e}") })?;
     let mut cc_cmd = Command::new("cc");
-    if let Ok(ref out) = cflags {
-        let cflags_str = String::from_utf8_lossy(&out.stdout);
-        for flag in cflags_str.split_whitespace() {
-            if !flag.is_empty() {
-                cc_cmd.arg(flag);
-            }
+    let cflags_str = String::from_utf8_lossy(&cflags.stdout);
+    for flag in cflags_str.split_whitespace() {
+        if !flag.is_empty() {
+            cc_cmd.arg(flag);
         }
     }
     cc_cmd.arg("-c").arg(&shims_c).arg("-o").arg(&shims_o);
-    let status = cc_cmd.status();
-    if !status.map(|s| s.success()).unwrap_or(false) {
-        eprintln!("failed to compile llvm_shims.c");
-        return 1;
+    let status = cc_cmd.status()
+        .map_err(|e| CodegenError { message: format!("failed to invoke cc: {e}") })?;
+    if !status.success() {
+        return Err(CodegenError { message: "failed to compile llvm_shims.c".to_string() });
     }
 
-    // Find libgc_library.a
+    // Step 5: Find libgc_library.a
     let gc_lib = manifest_dir.join("../../claude-experiments/gc-library/target/release/libgc_library.a");
 
-    // Link
+    // Step 6: Link everything
     let mut link_cmd = Command::new("cc");
     link_cmd
         .arg(&obj_path)
@@ -576,583 +201,31 @@ extern "C" fn rt_host_build() -> i64 {
         .arg(&gc_lib)
         .arg("-O2")
         .arg("-o")
-        .arg(&exe_path);
+        .arg(output);
+
     // Add LLVM link flags
-    if let Ok(output) = Command::new(&llvm_config).args(["--ldflags", "--libs", "--system-libs"]).output() {
-        if output.status.success() {
-            let flags = String::from_utf8_lossy(&output.stdout);
+    if let Ok(llvm_output) = Command::new(&llvm_config).args(["--ldflags", "--libs", "--system-libs"]).output() {
+        if llvm_output.status.success() {
+            let flags = String::from_utf8_lossy(&llvm_output.stdout);
             for flag in flags.split_whitespace() {
                 if !flag.is_empty() {
                     link_cmd.arg(flag);
                 }
             }
-            link_cmd.arg("-lc++");
-            link_cmd.arg("-lz");
-            link_cmd.arg("-lzstd");
         }
     }
-    let status = link_cmd.status();
-    match status {
-        Ok(s) if s.success() => {
-            println!("built {}", exe_path.display());
-            0
-        }
-        Ok(s) => {
-            eprintln!("link failed: {}", s);
-            1
-        }
-        Err(err) => {
-            eprintln!("failed to invoke cc: {err}");
-            1
-        }
-    }
-}
-extern "C" fn rt_string_len(ptr: *const u8) -> i64 {
-    if ptr.is_null() {
-        return 0;
-    }
-    unsafe {
-        let mut len = 0usize;
-        while *ptr.add(len) != 0 {
-            len += 1;
-        }
-        len as i64
-    }
-}
+    link_cmd.arg("-lc++").arg("-lz").arg("-lzstd");
 
-extern "C" fn rt_string_eq(a: *const u8, b: *const u8) -> i64 {
-    if a.is_null() || b.is_null() {
-        return if a == b { 1 } else { 0 };
+    let status = link_cmd.status()
+        .map_err(|e| CodegenError { message: format!("failed to invoke linker: {e}") })?;
+    if !status.success() {
+        return Err(CodegenError { message: "linking failed".to_string() });
     }
-    unsafe {
-        let mut i = 0usize;
-        loop {
-            let ca = *a.add(i);
-            let cb = *b.add(i);
-            if ca != cb {
-                return 0;
-            }
-            if ca == 0 {
-                return 1;
-            }
-            i += 1;
-        }
-    }
-}
 
-extern "C" fn rt_string_concat(a: *const u8, b: *const u8) -> *const u8 {
-    if a.is_null() && b.is_null() {
-        return std::ptr::null();
-    }
-    unsafe {
-        let mut bytes: Vec<u8> = Vec::new();
-        if !a.is_null() {
-            let mut i = 0usize;
-            while *a.add(i) != 0 {
-                bytes.push(*a.add(i));
-                i += 1;
-            }
-        }
-        if !b.is_null() {
-            let mut i = 0usize;
-            while *b.add(i) != 0 {
-                bytes.push(*b.add(i));
-                i += 1;
-            }
-        }
-        bytes.push(0);
-        let boxed = bytes.into_boxed_slice();
-        Box::into_raw(boxed) as *const u8
-    }
-}
+    // Clean up temp object file
+    let _ = std::fs::remove_file(&obj_path);
 
-extern "C" fn rt_string_slice(ptr: *const u8, start: i64, end_pos: i64) -> *const u8 {
-    unsafe { runtime::string_slice(ptr, start, end_pos) }
-}
-
-extern "C" fn rt_read_file(path: *const u8) -> *const u8 {
-    if path.is_null() {
-        return std::ptr::null();
-    }
-    unsafe {
-        let mut len = 0usize;
-        while *path.add(len) != 0 {
-            len += 1;
-        }
-        let slice = std::slice::from_raw_parts(path, len);
-        let path_str = match std::str::from_utf8(slice) {
-            Ok(s) => s,
-            Err(_) => return std::ptr::null(),
-        };
-        match std::fs::read(path_str) {
-            Ok(mut bytes) => {
-                bytes.push(0);
-                let boxed = bytes.into_boxed_slice();
-                Box::into_raw(boxed) as *const u8
-            }
-            Err(_) => std::ptr::null(),
-        }
-    }
-}
-
-#[repr(C)]
-struct VecPtr {
-    len: i64,
-    cap: i64,
-    data: *mut *mut u8,
-}
-
-extern "C" fn rt_vec_new() -> *mut u8 {
-    let v = VecPtr { len: 0, cap: 0, data: std::ptr::null_mut() };
-    Box::into_raw(Box::new(v)) as *mut u8
-}
-
-extern "C" fn rt_vec_len(vec: *mut u8) -> i64 {
-    if vec.is_null() {
-        return 0;
-    }
-    unsafe { (*(vec as *mut VecPtr)).len }
-}
-
-extern "C" fn rt_vec_get(vec: *mut u8, index: i64) -> *mut u8 {
-    if vec.is_null() || index < 0 {
-        return std::ptr::null_mut();
-    }
-    unsafe {
-        let v = &mut *(vec as *mut VecPtr);
-        if index >= v.len {
-            return std::ptr::null_mut();
-        }
-        if v.data.is_null() {
-            return std::ptr::null_mut();
-        }
-        *v.data.add(index as usize)
-    }
-}
-
-extern "C" fn rt_vec_push(vec: *mut u8, item: *mut u8) -> i64 {
-    if vec.is_null() {
-        return 0;
-    }
-    unsafe {
-        let v = &mut *(vec as *mut VecPtr);
-        let len = v.len as usize;
-        let cap = v.cap as usize;
-        let mut buf: Vec<*mut u8> = if v.data.is_null() || cap == 0 {
-            Vec::new()
-        } else {
-            Vec::from_raw_parts(v.data, len, cap)
-        };
-        buf.push(item);
-        v.len = buf.len() as i64;
-        v.cap = buf.capacity() as i64;
-        v.data = buf.as_mut_ptr();
-        std::mem::forget(buf);
-        v.len
-    }
-}
-
-extern "C" fn rt_vec_clear(vec: *mut u8) -> i64 {
-    if vec.is_null() {
-        return 0;
-    }
-    unsafe {
-        let v = &mut *(vec as *mut VecPtr);
-        v.len = 0;
-    }
-    0
-}
-
-extern "C" fn rt_vec_set_len(vec: *mut u8, new_len: i64) -> i64 {
-    if vec.is_null() {
-        return 0;
-    }
-    unsafe {
-        let v = &mut *(vec as *mut VecPtr);
-        if new_len < 0 {
-            v.len = 0;
-        } else if new_len < v.len {
-            v.len = new_len;
-        }
-    }
-    0
-}
-
-extern "C" fn rt_vec_data(vec: *mut u8) -> *mut u8 {
-    if vec.is_null() {
-        return std::ptr::null_mut();
-    }
-    unsafe {
-        let v = &*(vec as *mut VecPtr);
-        v.data as *mut u8
-    }
-}
-
-extern "C" fn rt_enum_tag(obj: *mut u8, raw_base: i64) -> i64 {
-    if obj.is_null() {
-        return -1;
-    }
-    unsafe {
-        let tag_ptr = obj.add(raw_base as usize) as *const i32;
-        *tag_ptr as i64
-    }
-}
-
-extern "C" fn rt_string_byte_at(ptr: *const u8, index: i64) -> i64 {
-    if ptr.is_null() || index < 0 {
-        return 0;
-    }
-    unsafe {
-        let mut i = 0i64;
-        while *ptr.add(i as usize) != 0 {
-            if i == index {
-                return *ptr.add(i as usize) as i64;
-            }
-            i += 1;
-        }
-        0
-    }
-}
-
-extern "C" fn rt_exit_process(code: i64) -> i64 {
-    std::process::exit(code as i32);
-}
-
-extern "C" fn rt_string_from_i64(val: i64) -> *const u8 {
-    let s = format!("{val}");
-    let mut bytes = s.into_bytes();
-    bytes.push(0);
-    let boxed = bytes.into_boxed_slice();
-    Box::into_raw(boxed) as *const u8
-}
-
-extern "C" fn rt_string_parse_i64(ptr: *const u8) -> i64 {
-    if ptr.is_null() {
-        return -1;
-    }
-    unsafe {
-        let mut len = 0usize;
-        while *ptr.add(len) != 0 {
-            len += 1;
-        }
-        let slice = std::slice::from_raw_parts(ptr, len);
-        match std::str::from_utf8(slice) {
-            Ok(s) => s.parse::<i64>().unwrap_or(-1),
-            Err(_) => -1,
-        }
-    }
-}
-
-extern "C" fn rt_print_str_stderr(ptr: *const u8) -> i64 {
-    if ptr.is_null() {
-        eprintln!();
-        return 0;
-    }
-    unsafe {
-        let mut len = 0usize;
-        while *ptr.add(len) != 0 {
-            len += 1;
-        }
-        let slice = std::slice::from_raw_parts(ptr, len);
-        if let Ok(s) = std::str::from_utf8(slice) {
-            eprintln!("{s}");
-        }
-    }
-    0
-}
-
-extern "C" fn rt_create_dir(ptr: *const u8) -> i64 {
-    if ptr.is_null() {
-        return 1;
-    }
-    unsafe {
-        let mut len = 0usize;
-        while *ptr.add(len) != 0 {
-            len += 1;
-        }
-        let slice = std::slice::from_raw_parts(ptr, len);
-        if let Ok(s) = std::str::from_utf8(slice) {
-            let _ = std::fs::create_dir_all(s);
-        }
-    }
-    0
-}
-
-extern "C" fn rt_print_stretch(depth: i64, check: i64) {
-    println!("stretch tree of depth {depth}\t check: {check}");
-}
-
-extern "C" fn rt_print_trees(iterations: i64, depth: i64, check: i64) {
-    println!("{iterations}\t trees of depth {depth}\t check: {check}");
-}
-
-extern "C" fn rt_print_long_lived(depth: i64, check: i64) {
-    println!("long lived tree of depth {depth}\t check: {check}");
-}
-
-// Pointer intrinsic wrappers for JIT
-extern "C" fn rt_ptr_load_ptr(p: *mut u8, off: i64) -> *mut u8 { unsafe { runtime::ptr_load_ptr(p, off) } }
-extern "C" fn rt_ptr_store_ptr(p: *mut u8, off: i64, val: *mut u8) -> i64 { unsafe { runtime::ptr_store_ptr(p, off, val) } }
-extern "C" fn rt_ptr_load_i64(p: *mut u8, off: i64) -> i64 { unsafe { runtime::ptr_load_i64(p, off) } }
-extern "C" fn rt_ptr_store_i64(p: *mut u8, off: i64, val: i64) -> i64 { unsafe { runtime::ptr_store_i64(p, off, val) } }
-extern "C" fn rt_ptr_load_i32(p: *mut u8, off: i64) -> i64 { unsafe { runtime::ptr_load_i32(p, off) } }
-extern "C" fn rt_ptr_store_i32(p: *mut u8, off: i64, val: i64) -> i64 { unsafe { runtime::ptr_store_i32(p, off, val) } }
-extern "C" fn rt_ptr_load_i8(p: *mut u8, off: i64) -> i64 { unsafe { runtime::ptr_load_i8(p, off) } }
-extern "C" fn rt_ptr_store_i8(p: *mut u8, off: i64, val: i64) -> i64 { unsafe { runtime::ptr_store_i8(p, off, val) } }
-extern "C" fn rt_ptr_offset(p: *mut u8, off: i64) -> *mut u8 { unsafe { runtime::ptr_offset(p, off) } }
-
-fn add_runtime_mappings<'ctx>(
-    engine: &ExecutionEngine<'ctx>,
-    externs: &HashMap<String, FunctionValue<'ctx>>,
-    gc_pollcheck: FunctionValue<'ctx>,
-    gc_allocate_obj: FunctionValue<'ctx>,
-    gc_write_barrier: FunctionValue<'ctx>,
-) {
-    let map_all = |name: &str, addr: usize| {
-        for (k, v) in externs.iter() {
-            if last_segment(k) == name {
-                engine.add_global_mapping(v, addr);
-            }
-        }
-    };
-    map_all("print_int", rt_print_int as usize);
-    map_all("print_str", rt_print_str as usize);
-    map_all("add_i64", rt_add_i64 as usize);
-    map_all("null_ptr", rt_null_ptr as usize);
-    map_all("ptr_is_null", rt_ptr_is_null as usize);
-    map_all("arg_i64", rt_arg_i64 as usize);
-    map_all("arg_str", rt_arg_str as usize);
-    map_all("arg_is_i64", rt_arg_is_i64 as usize);
-    map_all("arg_len", rt_arg_len as usize);
-    map_all("host_build", rt_host_build as usize);
-    map_all("string_len", rt_string_len as usize);
-    map_all("string_eq", rt_string_eq as usize);
-    map_all("string_concat", rt_string_concat as usize);
-    map_all("string_slice", rt_string_slice as usize);
-    map_all("read_file", rt_read_file as usize);
-    map_all("vec_new", rt_vec_new as usize);
-    map_all("vec_len", rt_vec_len as usize);
-    map_all("vec_get", rt_vec_get as usize);
-    map_all("vec_push", rt_vec_push as usize);
-    map_all("string_byte_at", rt_string_byte_at as usize);
-    map_all("print_stretch", rt_print_stretch as usize);
-    map_all("print_trees", rt_print_trees as usize);
-    map_all("print_long_lived", rt_print_long_lived as usize);
-    map_all("exit_process", rt_exit_process as usize);
-    map_all("string_from_i64", rt_string_from_i64 as usize);
-    map_all("print_str_stderr", rt_print_str_stderr as usize);
-    map_all("create_dir", rt_create_dir as usize);
-    map_all("vec_push_raw_val", rt_vec_push as usize);
-    map_all("vec_data", rt_vec_data as usize);
-    map_all("vec_clear", rt_vec_clear as usize);
-    map_all("vec_set_len", rt_vec_set_len as usize);
-    map_all("enum_tag", rt_enum_tag as usize);
-    map_all("string_parse_i64", rt_string_parse_i64 as usize);
-    // Vec aliases — all forward to the same rt_vec_push / rt_vec_get
-    for alias in &[
-        "vec_push_str", "vec_push_item", "vec_push_param", "vec_push_field",
-        "vec_push_variant", "vec_push_type", "vec_push_expr", "vec_push_arm",
-        "vec_push_stmt", "vec_push_pfield", "vec_push_slfield",
-        "vec_push_ientry", "vec_push_uentry", "vec_push_vec", "vec_push_module",
-        "vec_push_ventry",
-    ] {
-        map_all(alias, rt_vec_push as usize);
-    }
-    for alias in &[
-        "vec_get_str", "vec_get_item", "vec_get_param", "vec_get_field",
-        "vec_get_variant", "vec_get_type", "vec_get_expr", "vec_get_arm",
-        "vec_get_stmt", "vec_get_pfield", "vec_get_slfield", "vec_get_tok",
-        "vec_get_ientry", "vec_get_uentry", "vec_get_vec", "vec_get_module",
-        "vec_get_ventry",
-    ] {
-        map_all(alias, rt_vec_get as usize);
-    }
-    engine.add_global_mapping(&gc_pollcheck, runtime::gc_pollcheck_slow as usize);
-    engine.add_global_mapping(&gc_allocate_obj, runtime::gc_alloc as usize);
-    engine.add_global_mapping(&gc_write_barrier, runtime::gc_write_barrier as usize);
-    map_all("gc_init", runtime::gc_init as usize);
-    map_all("gc_set_thread", runtime::gc_set_thread as usize);
-    map_all("gc_alloc", runtime::gc_alloc as usize);
-    map_all("gc_read_field", runtime::gc_read_field as usize);
-    map_all("gc_write_field", runtime::gc_write_field as usize);
-    map_all("gc_read_field_i64", runtime::gc_read_field_i64 as usize);
-    map_all("gc_write_field_i64", runtime::gc_write_field_i64 as usize);
-
-    // Direct LLVM C API mappings
-    use llvm_sys::core::*;
-    use llvm_sys::target_machine::*;
-    map_all("LLVMContextCreate", LLVMContextCreate as usize);
-    map_all("LLVMModuleCreateWithNameInContext", LLVMModuleCreateWithNameInContext as usize);
-    map_all("LLVMCreateBuilderInContext", LLVMCreateBuilderInContext as usize);
-    map_all("LLVMInt1TypeInContext", LLVMInt1TypeInContext as usize);
-    map_all("LLVMInt8TypeInContext", LLVMInt8TypeInContext as usize);
-    map_all("LLVMInt16TypeInContext", LLVMInt16TypeInContext as usize);
-    map_all("LLVMInt32TypeInContext", LLVMInt32TypeInContext as usize);
-    map_all("LLVMInt64TypeInContext", LLVMInt64TypeInContext as usize);
-    map_all("LLVMFloatTypeInContext", LLVMFloatTypeInContext as usize);
-    map_all("LLVMDoubleTypeInContext", LLVMDoubleTypeInContext as usize);
-    map_all("LLVMVoidTypeInContext", LLVMVoidTypeInContext as usize);
-    map_all("LLVMConstNull", LLVMConstNull as usize);
-    map_all("LLVMAddFunction", LLVMAddFunction as usize);
-    map_all("LLVMGetNamedFunction", LLVMGetNamedFunction as usize);
-    map_all("LLVMAddGlobal", LLVMAddGlobal as usize);
-    map_all("LLVMTypeOf", LLVMTypeOf as usize);
-    map_all("LLVMGlobalGetValueType", LLVMGlobalGetValueType as usize);
-    map_all("LLVMGetElementType", LLVMGetElementType as usize);
-    map_all("LLVMAppendBasicBlockInContext", LLVMAppendBasicBlockInContext as usize);
-    map_all("LLVMGetFirstBasicBlock", LLVMGetFirstBasicBlock as usize);
-    map_all("LLVMGetBasicBlockTerminator", LLVMGetBasicBlockTerminator as usize);
-    map_all("LLVMGetInsertBlock", LLVMGetInsertBlock as usize);
-    map_all("LLVMGetFirstInstruction", LLVMGetFirstInstruction as usize);
-    map_all("LLVMBuildAlloca", LLVMBuildAlloca as usize);
-    map_all("LLVMBuildLoad2", LLVMBuildLoad2 as usize);
-    map_all("LLVMBuildStore", LLVMBuildStore as usize);
-    map_all("LLVMBuildRet", LLVMBuildRet as usize);
-    map_all("LLVMBuildRetVoid", LLVMBuildRetVoid as usize);
-    map_all("LLVMBuildBr", LLVMBuildBr as usize);
-    map_all("LLVMBuildCondBr", LLVMBuildCondBr as usize);
-    map_all("LLVMBuildPhi", LLVMBuildPhi as usize);
-    map_all("LLVMBuildBitCast", LLVMBuildBitCast as usize);
-    map_all("LLVMBuildGlobalStringPtr", LLVMBuildGlobalStringPtr as usize);
-    map_all("LLVMBuildAdd", LLVMBuildAdd as usize);
-    map_all("LLVMBuildSub", LLVMBuildSub as usize);
-    map_all("LLVMBuildMul", LLVMBuildMul as usize);
-    map_all("LLVMBuildSDiv", LLVMBuildSDiv as usize);
-    map_all("LLVMBuildSRem", LLVMBuildSRem as usize);
-    map_all("LLVMBuildAnd", LLVMBuildAnd as usize);
-    map_all("LLVMBuildOr", LLVMBuildOr as usize);
-    map_all("LLVMBuildXor", LLVMBuildXor as usize);
-    map_all("LLVMBuildZExt", LLVMBuildZExt as usize);
-    map_all("LLVMBuildTrunc", LLVMBuildTrunc as usize);
-    map_all("LLVMBuildFAdd", LLVMBuildFAdd as usize);
-    map_all("LLVMBuildFSub", LLVMBuildFSub as usize);
-    map_all("LLVMBuildFMul", LLVMBuildFMul as usize);
-    map_all("LLVMBuildFDiv", LLVMBuildFDiv as usize);
-    map_all("LLVMBuildFRem", LLVMBuildFRem as usize);
-    map_all("LLVMBuildFNeg", LLVMBuildFNeg as usize);
-    map_all("LLVMGetDefaultTargetTriple", LLVMGetDefaultTargetTriple as usize);
-    map_all("LLVMGetHostCPUName", LLVMGetHostCPUName as usize);
-    map_all("LLVMGetHostCPUFeatures", LLVMGetHostCPUFeatures as usize);
-
-    // C shim mappings (runtime/llvm_shims.c, linked at compile time)
-    extern "C" {
-        fn lang_llvm_dispose_builder(b: *mut u8) -> i64;
-        fn lang_llvm_dispose_module(m: *mut u8) -> i64;
-        fn lang_llvm_context_dispose(ctx: *mut u8) -> i64;
-        fn lang_llvm_ptr_type(ctx: *mut u8) -> *mut u8;
-        fn lang_llvm_function_type(ret: *mut u8, params: *mut u8, count: i64, vararg: i64) -> *mut u8;
-        fn lang_llvm_struct_type(ctx: *mut u8, elems: *mut u8, count: i64, packed: i64) -> *mut u8;
-        fn lang_llvm_array_type(elem: *mut u8, count: i64) -> *mut u8;
-        fn lang_llvm_const_int(ty: *mut u8, val: i64, sign_extend: i64) -> *mut u8;
-        fn lang_llvm_const_string(ctx: *mut u8, s: *const u8, len: i64, null_terminate: i64) -> *mut u8;
-        fn lang_llvm_const_named_struct(ty: *mut u8, vals: *mut u8, count: i64) -> *mut u8;
-        fn lang_llvm_const_array(elem: *mut u8, vals: *mut u8, count: i64) -> *mut u8;
-        fn lang_llvm_const_gep2(ty: *mut u8, val: *mut u8, indices: *mut u8, count: i64) -> *mut u8;
-        fn lang_llvm_set_initializer(global: *mut u8, val: *mut u8) -> i64;
-        fn lang_llvm_get_type_kind(ty: *mut u8) -> i64;
-        fn lang_llvm_pointer_type(ty: *mut u8) -> *mut u8;
-        fn lang_llvm_get_param(f: *mut u8, index: i64) -> *mut u8;
-        fn lang_llvm_count_params(f: *mut u8) -> i64;
-        fn lang_llvm_position_at_end(builder: *mut u8, bb: *mut u8) -> i64;
-        fn lang_llvm_position_before(builder: *mut u8, instr: *mut u8) -> i64;
-        fn lang_llvm_build_call(b: *mut u8, ty: *mut u8, f: *mut u8, args: *mut u8, count: i64, name: *const u8) -> *mut u8;
-        fn lang_llvm_build_switch(b: *mut u8, val: *mut u8, def: *mut u8, cases: i64) -> *mut u8;
-        fn lang_llvm_build_gep2(b: *mut u8, ty: *mut u8, ptr: *mut u8, idx: *mut u8, count: i64, name: *const u8) -> *mut u8;
-        fn lang_llvm_build_inbounds_gep2(b: *mut u8, ty: *mut u8, ptr: *mut u8, idx: *mut u8, count: i64, name: *const u8) -> *mut u8;
-        fn lang_llvm_build_struct_gep2(b: *mut u8, ty: *mut u8, ptr: *mut u8, idx: i64, name: *const u8) -> *mut u8;
-        fn lang_llvm_build_icmp(b: *mut u8, pred: i64, l: *mut u8, r: *mut u8, name: *const u8) -> *mut u8;
-        fn lang_llvm_build_fcmp(b: *mut u8, pred: i64, l: *mut u8, r: *mut u8, name: *const u8) -> *mut u8;
-        fn lang_llvm_build_memset(b: *mut u8, ptr: *mut u8, val: *mut u8, len: *mut u8, align: i64) -> *mut u8;
-        fn lang_llvm_add_incoming(phi: *mut u8, vals: *mut u8, blocks: *mut u8, count: i64) -> i64;
-        fn lang_llvm_add_case(sw: *mut u8, val: *mut u8, dest: *mut u8) -> i64;
-        fn lang_llvm_set_volatile(instr: *mut u8, is_volatile: i64) -> i64;
-        fn lang_llvm_init_native_target() -> i64;
-        fn lang_llvm_init_native_asm_printer() -> i64;
-        fn lang_llvm_get_target_from_triple(triple: *const u8) -> *mut u8;
-        fn lang_llvm_create_target_machine(target: *mut u8, triple: *const u8, cpu: *const u8, features: *const u8) -> *mut u8;
-        fn lang_llvm_set_module_target(module: *mut u8, machine: *mut u8) -> i64;
-        fn lang_llvm_emit_to_file(machine: *mut u8, module: *mut u8, filename: *const u8) -> i64;
-        fn lang_llvm_print_module_to_string(m: *mut u8) -> *const u8;
-    }
-    map_all("lang_llvm_dispose_builder", lang_llvm_dispose_builder as usize);
-    map_all("lang_llvm_dispose_module", lang_llvm_dispose_module as usize);
-    map_all("lang_llvm_context_dispose", lang_llvm_context_dispose as usize);
-    map_all("lang_llvm_ptr_type", lang_llvm_ptr_type as usize);
-    map_all("lang_llvm_function_type", lang_llvm_function_type as usize);
-    map_all("lang_llvm_struct_type", lang_llvm_struct_type as usize);
-    map_all("lang_llvm_array_type", lang_llvm_array_type as usize);
-    map_all("lang_llvm_const_int", lang_llvm_const_int as usize);
-    map_all("lang_llvm_const_string", lang_llvm_const_string as usize);
-    map_all("lang_llvm_const_named_struct", lang_llvm_const_named_struct as usize);
-    map_all("lang_llvm_const_array", lang_llvm_const_array as usize);
-    map_all("lang_llvm_const_gep2", lang_llvm_const_gep2 as usize);
-    map_all("lang_llvm_set_initializer", lang_llvm_set_initializer as usize);
-    map_all("lang_llvm_get_type_kind", lang_llvm_get_type_kind as usize);
-    map_all("lang_llvm_pointer_type", lang_llvm_pointer_type as usize);
-    map_all("lang_llvm_get_param", lang_llvm_get_param as usize);
-    map_all("lang_llvm_count_params", lang_llvm_count_params as usize);
-    map_all("lang_llvm_position_at_end", lang_llvm_position_at_end as usize);
-    map_all("lang_llvm_position_before", lang_llvm_position_before as usize);
-    map_all("lang_llvm_build_call", lang_llvm_build_call as usize);
-    map_all("lang_llvm_build_switch", lang_llvm_build_switch as usize);
-    map_all("lang_llvm_build_gep2", lang_llvm_build_gep2 as usize);
-    map_all("lang_llvm_build_inbounds_gep2", lang_llvm_build_inbounds_gep2 as usize);
-    map_all("lang_llvm_build_struct_gep2", lang_llvm_build_struct_gep2 as usize);
-    map_all("lang_llvm_build_icmp", lang_llvm_build_icmp as usize);
-    map_all("lang_llvm_build_fcmp", lang_llvm_build_fcmp as usize);
-    map_all("lang_llvm_build_memset", lang_llvm_build_memset as usize);
-    map_all("lang_llvm_add_incoming", lang_llvm_add_incoming as usize);
-    map_all("lang_llvm_add_case", lang_llvm_add_case as usize);
-    map_all("lang_llvm_set_volatile", lang_llvm_set_volatile as usize);
-    map_all("lang_llvm_init_native_target", lang_llvm_init_native_target as usize);
-    map_all("lang_llvm_init_native_asm_printer", lang_llvm_init_native_asm_printer as usize);
-    map_all("lang_llvm_get_target_from_triple", lang_llvm_get_target_from_triple as usize);
-    map_all("lang_llvm_create_target_machine", lang_llvm_create_target_machine as usize);
-    map_all("lang_llvm_set_module_target", lang_llvm_set_module_target as usize);
-    map_all("lang_llvm_emit_to_file", lang_llvm_emit_to_file as usize);
-    map_all("lang_llvm_print_module_to_string", lang_llvm_print_module_to_string as usize);
-
-    // Pointer intrinsics
-    map_all("ptr_load_ptr", rt_ptr_load_ptr as usize);
-    map_all("ptr_store_ptr", rt_ptr_store_ptr as usize);
-    map_all("ptr_load_i64", rt_ptr_load_i64 as usize);
-    map_all("ptr_store_i64", rt_ptr_store_i64 as usize);
-    map_all("ptr_load_i32", rt_ptr_load_i32 as usize);
-    map_all("ptr_store_i32", rt_ptr_store_i32 as usize);
-    map_all("ptr_load_i8", rt_ptr_load_i8 as usize);
-    map_all("ptr_store_i8", rt_ptr_store_i8 as usize);
-    map_all("ptr_offset", rt_ptr_offset as usize);
-
-    // C allocator functions
-    map_all("malloc", libc::malloc as usize);
-    map_all("realloc", libc::realloc as usize);
-    map_all("free", libc::free as usize);
-    map_all("memcpy", libc::memcpy as usize);
-
-    // Runtime helpers
-    map_all("write_file", runtime::write_file as usize);
-    map_all("system_cmd", runtime::system_cmd as usize);
-    map_all("file_exists", runtime::file_exists as usize);
-    map_all("get_stdlib_path", runtime::get_stdlib_path as usize);
-
-    // Codegen pass vec aliases
-    for alias in &["vec_push_cgfn","vec_push_cgsl","vec_push_cgel","vec_push_cgfl",
-                    "vec_push_cgvfl","vec_push_cgvl","vec_push_cgloc","vec_push_loop"] {
-        map_all(alias, rt_vec_push as usize);
-    }
-    for alias in &["vec_get_cgfn","vec_get_cgsl","vec_get_cgel","vec_get_cgfl",
-                    "vec_get_cgvfl","vec_get_cgvl","vec_get_cgloc","vec_get_loop"] {
-        map_all(alias, rt_vec_get as usize);
-    }
-    // Typecheck pass vec aliases
-    for alias in &["vec_push_ty","vec_push_smentry","vec_push_ementry","vec_push_fnentry",
-                    "vec_push_vdentry","vec_push_subst","vec_push_local","vec_push_tfield"] {
-        map_all(alias, rt_vec_push as usize);
-    }
-    for alias in &["vec_get_ty","vec_get_smentry","vec_get_ementry","vec_get_fnentry",
-                    "vec_get_vdentry","vec_get_subst","vec_get_local","vec_get_tfield"] {
-        map_all(alias, rt_vec_get as usize);
-    }
+    Ok(())
 }
 
 impl<'ctx> Codegen<'ctx> {
@@ -3271,14 +2344,6 @@ mod tests {
     use crate::typecheck::typecheck_module;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    fn compile_run(src: &str) -> i64 {
-        let tokens = Lexer::new(src).lex_all().unwrap();
-        let module = Parser::new(tokens).parse_module().unwrap();
-        resolve_module(&module).unwrap();
-        typecheck_module(&module).unwrap();
-        compile_and_run(std::slice::from_ref(&module)).unwrap()
-    }
-
     fn compile_object(src: &str) -> std::path::PathBuf {
         static COUNTER: AtomicUsize = AtomicUsize::new(0);
         let tokens = Lexer::new(src).lex_all().unwrap();
@@ -3299,120 +2364,17 @@ mod tests {
         resolve_module(&module).unwrap();
         typecheck_module(&module).unwrap();
 
-        let mut obj_path = std::env::temp_dir();
         let id = COUNTER.fetch_add(1, Ordering::SeqCst);
-        obj_path.push(format!("langc_e2e_{id}.o"));
-        compile_to_object(std::slice::from_ref(&module), &obj_path).unwrap();
-
         let mut exe_path = std::env::temp_dir();
         exe_path.push(format!("langc_e2e_{id}"));
 
-        let status = std::process::Command::new("cargo")
-            .arg("build")
-            .arg("--quiet")
-            .arg("--lib")
-            .status()
-            .expect("failed to build runtime lib");
-        assert!(status.success());
-
-        let target_dir = std::env::var("CARGO_TARGET_DIR")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|_| std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target"));
-        let profile = std::env::var("PROFILE").unwrap_or_else(|_| "debug".to_string());
-        let lib_path = target_dir.join(profile).join("liblang_runtime.a");
-
-        let status = std::process::Command::new("cc")
-            .arg(&obj_path)
-            .arg(&lib_path)
-            .arg("-O2")
-            .arg("-o")
-            .arg(&exe_path)
-            .status()
-            .expect("failed to invoke cc");
-        assert!(status.success());
+        compile_to_executable(std::slice::from_ref(&module), &exe_path, &[]).unwrap();
 
         let output = std::process::Command::new(&exe_path)
             .output()
             .expect("failed to run exe");
-        let _ = std::fs::remove_file(&obj_path);
         let _ = std::fs::remove_file(&exe_path);
         output.status.code().unwrap_or(-1)
-    }
-
-    #[test]
-    fn codegen_arithmetic() {
-        let src = r#"
-            fn main() -> I64 {
-                let x: I64 = 4;
-                x * 2 + 1
-            }
-        "#;
-        assert_eq!(compile_run(src), 9);
-    }
-
-    #[test]
-    fn codegen_if() {
-        let src = r#"
-            fn main() -> I64 {
-                if true { 1 } else { 2 }
-            }
-        "#;
-        assert_eq!(compile_run(src), 1);
-    }
-
-    #[test]
-    fn codegen_while_loop() {
-        let src = r#"
-            fn main() -> I64 {
-                let mut i: I64 = 0;
-                let mut sum: I64 = 0;
-                while i < 3 { sum = sum + i; i = i + 1; };
-                sum
-            }
-        "#;
-        assert_eq!(compile_run(src), 3);
-    }
-
-    #[test]
-    fn codegen_struct_field() {
-        let src = r#"
-            struct User { id: I64 }
-            fn main() -> I64 {
-                let u: User = User { id: 7 };
-                u.id
-            }
-        "#;
-        assert_eq!(compile_run(src), 7);
-    }
-
-    #[test]
-    fn codegen_nested_struct_field() {
-        let src = r#"
-            struct Box { value: I64 }
-            struct Holder { inner: Box }
-            fn main() -> I64 {
-                let b: Box = Box { value: 4 };
-                let h: Holder = Holder { inner: b };
-                h.inner.value
-            }
-        "#;
-        assert_eq!(compile_run(src), 4);
-    }
-
-    #[test]
-    fn codegen_field_assign_gc_ref() {
-        let src = r#"
-            struct Box { value: I64 }
-            struct Holder { inner: Box }
-            fn main() -> I64 {
-                let b1: Box = Box { value: 1 };
-                let b2: Box = Box { value: 9 };
-                let h: Holder = Holder { inner: b1 };
-                h.inner = b2;
-                h.inner.value
-            }
-        "#;
-        assert_eq!(compile_run(src), 9);
     }
 
     #[test]
@@ -3423,37 +2385,6 @@ mod tests {
         let path = compile_object(src);
         assert!(path.exists());
         let _ = std::fs::remove_file(path);
-    }
-
-    #[test]
-    fn codegen_e2e_jit_all_features() {
-        let src = r#"
-            extern fn add_i64(a: I64, b: I64) -> I64;
-            extern fn null_ptr() -> RawPointer<I8>;
-            extern fn ptr_is_null(p: RawPointer<I8>) -> I64;
-
-            struct Pair { a: I64, b: I64 }
-            enum Flag { On {}, Off {} }
-
-            fn inc(x: I64) -> I64 { x + 1 }
-
-            fn main() -> I64 {
-                let mut i: I64 = 0;
-                let mut sum: I64 = 0;
-                while i < 3 { sum = sum + i; i = inc(i); };
-
-                let mut p: Pair = Pair { a: sum, b: add_i64(1, 2) };
-                p.b = p.b + 1;
-                let mut total: I64 = p.a + p.b;
-
-                let f: Flag = Flag::On {};
-                total = match f { Flag::On {} => total + 10, Flag::Off {} => total + 1 };
-
-                let ptr: RawPointer<I8> = null_ptr();
-                if ptr_is_null(ptr) == 1 { total } else { 0 }
-            }
-        "#;
-        assert_eq!(compile_run(src), 17);
     }
 
     #[test]
@@ -3486,235 +2417,6 @@ mod tests {
             }
         "#;
         assert_eq!(compile_link_run(src), 42);
-    }
-
-    #[test]
-    fn codegen_enum_match() {
-        let src = r#"
-            enum Result { Ok(I64), Err(I64) }
-            fn main() -> I64 {
-                let r: Result = Result::Ok(1);
-                match r { Result::Ok => 5, Result::Err => 2 }
-            }
-        "#;
-        assert_eq!(compile_run(src), 5);
-    }
-
-    #[test]
-    fn codegen_enum_payload_alloc() {
-        let src = r#"
-            struct Box { value: I64 }
-            enum Maybe { Some(Box, I64), None }
-            fn main() -> I64 {
-                let b: Box = Box { value: 6 };
-                let m: Maybe = Maybe::Some(b, 1);
-                match m { Maybe::Some => 2, Maybe::None => 3 }
-            }
-        "#;
-        assert_eq!(compile_run(src), 2);
-    }
-
-    #[test]
-    fn codegen_struct_variant_match_binding() {
-        let src = r#"
-            struct Box { value: I64 }
-            enum Wrap { Some { inner: Box }, None {} }
-            fn main() -> I64 {
-                let b: Box = Box { value: 8 };
-                let w: Wrap = Wrap::Some { inner: b };
-                match w { Wrap::Some { inner } => inner.value, Wrap::None {} => 0 }
-            }
-        "#;
-        assert_eq!(compile_run(src), 8);
-    }
-
-    #[test]
-    fn codegen_return_struct() {
-        let src = r#"
-            struct Box { value: I64 }
-            fn make() -> Box {
-                let one: I64 = 1;
-                Box { value: one }
-            }
-            fn main() -> I64 {
-                let b: Box = make();
-                b.value
-            }
-        "#;
-        assert_eq!(compile_run(src), 1);
-    }
-
-    #[test]
-    fn codegen_return_enum() {
-        let src = r#"
-            enum Flag { On {}, Off {} }
-            fn make() -> Flag { Flag::On {} }
-            fn main() -> I64 {
-                let one: I64 = 1;
-                let two: I64 = 2;
-                let f: Flag = make();
-                match f { Flag::On {} => one, Flag::Off {} => two }
-            }
-        "#;
-        assert_eq!(compile_run(src), 1);
-    }
-
-    #[test]
-    fn codegen_string_ops() {
-        let src = r#"
-            extern fn string_len(s: String) -> I64;
-            extern fn string_eq(a: String, b: String) -> I64;
-            extern fn string_concat(a: String, b: String) -> String;
-            extern fn string_slice(s: String, start: I64, end_pos: I64) -> String;
-
-            fn main() -> I64 {
-                let one: I64 = 1;
-                let zero: I64 = 0;
-                let two: I64 = 2;
-                let four: I64 = 4;
-                let three: I64 = 3;
-                let a: String = "hi";
-                let b: String = "hi";
-                let c: String = "ho";
-                let ab: String = string_concat(a, c);
-                let s: String = "hello";
-                let sub: String = string_slice(s, one, four);
-                let len_a: I64 = string_len(a);
-                let len_ab: I64 = string_len(ab);
-                let len_sub: I64 = string_len(sub);
-                let eq1: I64 = string_eq(a, b);
-                let eq2: I64 = string_eq(a, c);
-                if len_a == two && len_ab == four && len_sub == three && eq1 == one && eq2 == zero { one } else { zero }
-            }
-        "#;
-        assert_eq!(compile_run(src), 1);
-    }
-
-    #[test]
-    fn codegen_read_file() {
-        let dir = std::env::temp_dir();
-        let path = dir.join("langc_read_file_test.txt");
-        std::fs::write(&path, b"abc").expect("write temp file");
-        let path_str = path.to_string_lossy().replace('\\', "\\\\").replace('"', "\\\"");
-            let src = format!(
-            r#"
-            extern fn read_file(path: String) -> String;
-            extern fn string_len(s: String) -> I64;
-
-            fn main() -> I64 {{
-                let one: I64 = 1;
-                let zero: I64 = 0;
-                let three: I64 = 3;
-                let data: String = read_file("{path}");
-                if string_len(data) == three {{ one }} else {{ zero }}
-            }}
-        "#,
-            path = path_str
-        );
-        assert_eq!(compile_run(&src), 1);
-        let _ = std::fs::remove_file(&path);
-    }
-
-    #[test]
-    fn codegen_string_byte_at() {
-        let src = r#"
-            extern fn string_byte_at(s: String, index: I64) -> I64;
-            fn main() -> I64 {
-                let one: I64 = 1;
-                let ninety_eight: I64 = 98;
-                let s: String = "abc";
-                if string_byte_at(s, one) == ninety_eight { 1 } else { 0 }
-            }
-        "#;
-        assert_eq!(compile_run(src), 1);
-    }
-
-    #[test]
-    fn codegen_vec_ptr() {
-        let src = r#"
-            extern fn vec_new() -> RawPointer<I8>;
-            extern fn vec_len(v: RawPointer<I8>) -> I64;
-            extern fn vec_get(v: RawPointer<I8>, index: I64) -> String;
-            extern fn vec_push(v: RawPointer<I8>, item: String) -> I64;
-            extern fn string_eq(a: String, b: String) -> I64;
-
-            fn main() -> I64 {
-                let one: I64 = 1;
-                let zero: I64 = 0;
-                let two: I64 = 2;
-                let v: RawPointer<I8> = vec_new();
-                let a: String = "a";
-                let b: String = "b";
-                vec_push(v, a);
-                vec_push(v, b);
-                let first: String = vec_get(v, zero);
-                if vec_len(v) == two && string_eq(first, a) == one { one } else { zero }
-            }
-        "#;
-        assert_eq!(compile_run(src), 1);
-    }
-
-    #[test]
-    fn codegen_float_arithmetic() {
-        let src = r#"
-            fn main() -> I64 {
-                let one: I64 = 1;
-                let zero: I64 = 0;
-                let a: F64 = 1.5;
-                let b: F64 = 2.0;
-                let three: F64 = 3.0;
-                let sum: F64 = a + b;
-                if sum > three { one } else { zero }
-            }
-        "#;
-        assert_eq!(compile_run(src), 1);
-    }
-
-    #[test]
-    fn codegen_tree_sum_jit() {
-        let src = r#"
-            struct Node { left: OptNode, right: OptNode, value: I64 }
-            enum OptNode { Some { node: Node }, None {} }
-
-            fn sum(opt: OptNode) -> I64 {
-                match opt {
-                    OptNode::Some { node } => node.value + sum(node.left) + sum(node.right),
-                    OptNode::None {} => 0
-                }
-            }
-
-            fn main() -> I64 {
-                let zero: I64 = 0;
-                let one: I64 = 1;
-                let two: I64 = 2;
-                let three: I64 = 3;
-                let four: I64 = 4;
-
-                let leaf1: Node = Node { left: OptNode::None {}, right: OptNode::None {}, value: one };
-                let leaf2: Node = Node { left: OptNode::None {}, right: OptNode::None {}, value: two };
-                let leaf3: Node = Node { left: OptNode::None {}, right: OptNode::None {}, value: three };
-                let leaf4: Node = Node { left: OptNode::None {}, right: OptNode::None {}, value: four };
-
-                let n1: Node = Node {
-                    left: OptNode::Some { node: leaf1 },
-                    right: OptNode::Some { node: leaf2 },
-                    value: zero
-                };
-                let n2: Node = Node {
-                    left: OptNode::Some { node: leaf3 },
-                    right: OptNode::Some { node: leaf4 },
-                    value: zero
-                };
-                let root: Node = Node {
-                    left: OptNode::Some { node: n1 },
-                    right: OptNode::Some { node: n2 },
-                    value: zero
-                };
-
-                sum(OptNode::Some { node: root })
-            }
-        "#;
-        assert_eq!(compile_run(src), 10);
     }
 
     #[test]

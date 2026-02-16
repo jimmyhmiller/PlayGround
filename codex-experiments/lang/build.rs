@@ -32,8 +32,10 @@ fn main() {
         .compile("gc_bridge");
 
     // Link gc-library static lib
+    // Use debug build for tests, release for release builds
+    let profile = std::env::var("PROFILE").unwrap_or_else(|_| "debug".to_string());
     let gc_lib_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../claude-experiments/gc-library/target/release");
+        .join(format!("../../claude-experiments/gc-library/target/{}", profile));
     println!("cargo:rustc-link-search=native={}", gc_lib_dir.display());
     println!("cargo:rustc-link-lib=static=gc_library");
 }

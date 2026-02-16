@@ -9,7 +9,7 @@
  *
  * Object header layout (8 bytes):
  *   offset 0: u8  mark_flag
- *   offset 1: u8  pad
+ *   offset 1: u8  forwarded_flag  (NEW - for generational GC)
  *   offset 2: u16 type_id
  *   offset 4: u16 num_ptr_fields
  *   offset 6: u16 num_total_fields
@@ -17,6 +17,9 @@
  * After header: num_total_fields * 8 bytes of field data.
  * Fields 0..num_ptr_fields-1 are GC pointers (tracer visits these).
  * Fields num_ptr_fields..num_total_fields-1 are raw values (not traced).
+ *
+ * FORWARDING: When forwarded_flag==1, the first field contains the forwarding
+ * pointer instead of normal data. The object has been moved by generational GC.
  *
  * Frame chain layout:
  *   offset 0:  parent (ptr)
@@ -91,6 +94,29 @@ void lang_get_size(void* obj, size_t* out) {
     *out = HEADER_SIZE + (size_t)total * 8;
 }
 
+/* --- Forwarding pointer support (for generational GC) --- */
+
+int lang_is_forwarded(void* obj) {
+    if (!obj) return 0;
+    return ((uint8_t*)obj)[1];  /* forwarded_flag at offset 1 */
+}
+
+void* lang_get_forwarding(void* obj) {
+    if (!obj) return NULL;
+    /* When forwarded, first field contains new location */
+    void** fields = (void**)((uint8_t*)obj + HEADER_SIZE);
+    return fields[0];
+}
+
+void lang_set_forwarding(void* obj, void* new_location) {
+    if (!obj) return;
+    /* Set forwarded_flag */
+    ((uint8_t*)obj)[1] = 1;
+    /* Store new location in first field */
+    void** fields = (void**)((uint8_t*)obj + HEADER_SIZE);
+    fields[0] = new_location;
+}
+
 /* =========================================================================
  * Public API
  * ========================================================================= */
@@ -102,7 +128,12 @@ void gc_init(void) {
     cfg.is_marked = lang_is_marked;
     cfg.set_mark = lang_set_mark;
     cfg.get_size = lang_get_size;
+    /* NEW - forwarding pointer support for generational GC */
+    cfg.is_forwarded = lang_is_forwarded;
+    cfg.get_forwarding = lang_get_forwarding;
+    cfg.set_forwarding = lang_set_forwarding;
     cfg.initial_heap = 32 * 1024 * 1024;  /* 32 MB */
+    cfg.strategy = GC_STRATEGY_GENERATIONAL;  /* Now using generational GC! */
     gc = gc_lib_custom_create(cfg);
 }
 

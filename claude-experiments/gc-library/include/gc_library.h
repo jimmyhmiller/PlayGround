@@ -441,6 +441,48 @@ typedef void (*GcCustomSetMark)(void* object, int marked);
 typedef void (*GcCustomGetSize)(void* object, size_t* size_out);
 
 /**
+ * Check if an object has been forwarded (moved by copying GC).
+ *
+ * Required for GC_STRATEGY_GENERATIONAL (copying collector).
+ *
+ * @param object  Pointer to the object.
+ * @return  Non-zero if forwarded, zero otherwise.
+ */
+typedef int (*GcCustomIsForwarded)(void* object);
+
+/**
+ * Get the forwarding pointer from a forwarded object.
+ *
+ * Only called if is_forwarded returns non-zero.
+ * Required for GC_STRATEGY_GENERATIONAL.
+ *
+ * @param object  Pointer to the old object location.
+ * @return  Pointer to the new object location.
+ */
+typedef void* (*GcCustomGetForwarding)(void* object);
+
+/**
+ * Set a forwarding pointer in an object (mark it as moved).
+ *
+ * Called by copying/compacting GC when relocating objects.
+ * Required for GC_STRATEGY_GENERATIONAL.
+ *
+ * @param object       Pointer to the old object location.
+ * @param new_location Pointer to the new object location.
+ */
+typedef void (*GcCustomSetForwarding)(void* object, void* new_location);
+
+/**
+ * GC collection strategy.
+ */
+typedef enum {
+    /** Mark-and-sweep: Simple non-moving collector. No write barriers or forwarding needed. */
+    GC_STRATEGY_MARK_SWEEP = 0,
+    /** Generational: Copying collector with write barriers. REQUIRES forwarding pointer support! */
+    GC_STRATEGY_GENERATIONAL = 1,
+} GcStrategy;
+
+/**
  * Configuration for creating a callback-based GC instance.
  */
 typedef struct {
@@ -449,7 +491,12 @@ typedef struct {
     GcCustomIsMarked       is_marked;
     GcCustomSetMark        set_mark;
     GcCustomGetSize        get_size;
+    /** Forwarding pointer support (REQUIRED for GC_STRATEGY_GENERATIONAL) */
+    GcCustomIsForwarded    is_forwarded;
+    GcCustomGetForwarding  get_forwarding;
+    GcCustomSetForwarding  set_forwarding;
     size_t                 initial_heap;  /**< Initial heap size in bytes. */
+    GcStrategy             strategy;      /**< Collection strategy (mark-sweep or generational). */
 } GcCustomConfig;
 
 /**
@@ -490,9 +537,10 @@ void* gc_lib_custom_allocate(GcCustomHandle* gc, size_t size, void* user_ctx);
 void gc_lib_custom_collect(GcCustomHandle* gc, void* user_ctx);
 
 /**
- * Write barrier (for future generational support).
+ * Write barrier for generational GC.
  *
- * Currently a no-op for the mark-and-sweep collector.
+ * Call this after writing a pointer field in an object.
+ * For mark-and-sweep, this is a no-op.
  *
  * @param gc         GC handle.
  * @param object     Pointer to the object being written to.
@@ -507,6 +555,28 @@ void gc_lib_custom_write_barrier(GcCustomHandle* gc, void* object, void* new_val
  * @return  Non-zero if collection is recommended, zero otherwise.
  */
 int gc_lib_custom_should_collect(GcCustomHandle* gc);
+
+/**
+ * Get young generation bounds (for generational GC write barrier optimization).
+ *
+ * Returns the memory range of the young generation. Objects in young gen
+ * don't need write barriers. For mark-and-sweep, both values will be 0.
+ *
+ * @param gc         GC handle.
+ * @param start_out  Output: start address of young generation.
+ * @param end_out    Output: end address of young generation.
+ */
+void gc_lib_custom_get_young_gen_bounds(GcCustomHandle* gc, uintptr_t* start_out, uintptr_t* end_out);
+
+/**
+ * Get the card table biased pointer for JIT-generated write barriers.
+ *
+ * Returns a biased pointer for fast card marking, or NULL for mark-and-sweep GC.
+ *
+ * @param gc  GC handle.
+ * @return  Biased pointer for card marking, or NULL for non-generational GCs.
+ */
+uint8_t* gc_lib_custom_get_card_table_ptr(GcCustomHandle* gc);
 
 #ifdef __cplusplus
 }

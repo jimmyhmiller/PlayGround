@@ -23,6 +23,8 @@ use io::exit_process;
 use io::create_dir;
 use io::file_exists;
 use io::get_stdlib_path;
+use io::system;
+use io::write_string;
 use string::string_len;
 use string::string_eq;
 use string::string_byte_at;
@@ -285,7 +287,70 @@ fn main() -> I64 {
     typecheck_modules(modules);
     print_str("typechecked ok");
     create_dir("build");
-    codegen_modules(modules, "build/output.o");
+
+    let obj_path: String = "build/output.o";
+    let exe_path: String = "build/output";
+
+    codegen_modules(modules, obj_path);
     print_str("codegen ok");
+
+    link_executable(obj_path, exe_path);
+    print_str("link ok");
+
+    print_str(string_concat("created executable: ", exe_path));
+    0
+}
+
+fn link_executable(obj_path: String, exe_path: String) -> I64 {
+    // Compile runtime.c - use a wrapper script to avoid quoting issues
+    let runtime_c: String = "runtime/runtime.c";
+    let runtime_o: String = "build/runtime.o";
+    let stdlib_path: String = get_stdlib_path();
+
+    // Write a temporary shell script to compile runtime
+    let script: String = string_concat("#!/bin/sh\ncc -c ",
+        string_concat(runtime_c,
+        string_concat(" \"-DLANG_STDLIB_PATH=\\\"",
+        string_concat(stdlib_path,
+        string_concat("\\\"\" -O2 -o ", runtime_o)))));
+
+    write_string("build/compile_runtime.sh", script);
+    system("chmod +x build/compile_runtime.sh");
+
+    let ret: I64 = system("build/compile_runtime.sh");
+    if ret != 0 {
+        print_str_stderr("error: failed to compile runtime.c");
+        exit_process(1);
+    };
+
+    // Find runtime libraries built by Rust compiler
+    // They're in target/release/build/langc-*/out/
+    let gc_bridge: String = "target/release/build/langc-*/out/libgc_bridge.a";
+    let llvm_shims: String = "target/release/build/langc-*/out/libllvm_shims.a";
+    let gc_lib: String = "../../claude-experiments/gc-library/target/release/libgc_library.a";
+
+    // Get LLVM link flags
+    let llvm_flags_cmd: String = "llvm-config --ldflags --libs --system-libs 2>/dev/null | tr '\\n' ' '";
+
+    // Build link command with all runtime libraries
+    let link_cmd_base: String = string_concat("cc ", string_concat(obj_path, " "));
+    let link_cmd_runtime: String = string_concat(link_cmd_base, string_concat(runtime_o, " "));
+    let link_cmd_gc: String = string_concat(link_cmd_runtime, string_concat(gc_bridge, " "));
+    let link_cmd_shims: String = string_concat(link_cmd_gc, string_concat(llvm_shims, " "));
+    let link_cmd_gclib: String = string_concat(link_cmd_shims, string_concat(gc_lib, " "));
+    let link_cmd_llvm: String = string_concat(link_cmd_gclib, "`");
+    let link_cmd_llvm2: String = string_concat(link_cmd_llvm, llvm_flags_cmd);
+    let link_cmd_llvm3: String = string_concat(link_cmd_llvm2, "` ");
+    let link_cmd: String = string_concat(link_cmd_llvm3, string_concat("-O2 -o ", exe_path));
+
+    print_str(string_concat("linking: ", link_cmd));
+    let link_ret: I64 = system(link_cmd);
+    if link_ret != 0 {
+        print_str_stderr("error: link failed");
+        exit_process(1);
+    };
+
+    // Clean up object file
+    system(string_concat("rm -f ", obj_path));
     0
 }

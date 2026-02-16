@@ -130,6 +130,11 @@ rm -f Ease.dmg
 
 # Check if create-dmg is available
 if command -v create-dmg &> /dev/null; then
+    # Stage contents in a temp folder with an explicit Applications symlink
+    DMG_STAGING=$(mktemp -d)
+    cp -R Ease.app "$DMG_STAGING/"
+    ln -s /Applications "$DMG_STAGING/Applications"
+
     create-dmg \
         --volname "Ease" \
         --window-pos 200 120 \
@@ -137,9 +142,11 @@ if command -v create-dmg &> /dev/null; then
         --icon-size 100 \
         --icon "Ease.app" 150 185 \
         --hide-extension "Ease.app" \
-        --app-drop-link 450 185 \
+        --icon "Applications" 450 185 \
         Ease.dmg \
-        Ease.app
+        "$DMG_STAGING"
+
+    rm -rf "$DMG_STAGING"
 else
     echo "Error: create-dmg not found. Install it with: brew install create-dmg"
     exit 1

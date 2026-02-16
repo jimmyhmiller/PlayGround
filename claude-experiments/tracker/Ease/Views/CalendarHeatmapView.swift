@@ -13,37 +13,28 @@ struct CalendarHeatmapView: View {
     private let allTimeCellHeight: CGFloat = 8
     private let allTimeCellSpacing: CGFloat = 1
 
-    @State private var fadeOpacity: Double = 1
     @State private var displayedPeriod: TimePeriod = .week
 
     var body: some View {
         let cells = viewModel.heatmapCells(for: displayedPeriod)
         let filteredGoalId = viewModel.hoveredGoalId
-        let maxAmount = computeMaxAmount(cells: cells, filteredGoalId: filteredGoalId)
 
         VStack(spacing: 4) {
             switch displayedPeriod {
             case .day:
-                dayView(cells: cells, maxAmount: maxAmount, filteredGoalId: filteredGoalId)
+                dayView(cells: cells, filteredGoalId: filteredGoalId)
             case .week:
-                weekView(cells: cells, maxAmount: maxAmount, filteredGoalId: filteredGoalId)
+                weekView(cells: cells, filteredGoalId: filteredGoalId)
             case .month:
-                monthView(cells: cells, maxAmount: maxAmount, filteredGoalId: filteredGoalId)
+                monthView(cells: cells, filteredGoalId: filteredGoalId)
             case .all:
-                allTimeView(cells: cells, maxAmount: maxAmount, filteredGoalId: filteredGoalId)
+                allTimeView(cells: cells, filteredGoalId: filteredGoalId)
             }
         }
-        .opacity(fadeOpacity)
         .onAppear { displayedPeriod = viewModel.selectedPeriod }
         .onChange(of: viewModel.selectedPeriod) { newPeriod in
-            withAnimation(.easeIn(duration: 0.15)) {
-                fadeOpacity = 0
-            }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+            withAnimation(.easeInOut(duration: 0.25)) {
                 displayedPeriod = newPeriod
-                withAnimation(.easeOut(duration: 0.25)) {
-                    fadeOpacity = 1
-                }
             }
         }
         .contentShape(Rectangle())
@@ -56,18 +47,18 @@ struct CalendarHeatmapView: View {
 
     // MARK: - Day View (24 hours, 2 rows of 12)
 
-    private func dayView(cells: [HeatmapCell], maxAmount: Double, filteredGoalId: UUID?) -> some View {
+    private func dayView(cells: [HeatmapCell], filteredGoalId: UUID?) -> some View {
         VStack(spacing: 2) {
             HStack(spacing: 2) {
                 ForEach(0..<12, id: \.self) { i in
-                    segmentedCell(cells[i], maxAmount: maxAmount, filteredGoalId: filteredGoalId)
+                    segmentedCell(cells[i], filteredGoalId: filteredGoalId)
                         .frame(height: dayCellHeight)
                         .help(hourLabel(i))
                 }
             }
             HStack(spacing: 2) {
                 ForEach(12..<24, id: \.self) { i in
-                    segmentedCell(cells[i], maxAmount: maxAmount, filteredGoalId: filteredGoalId)
+                    segmentedCell(cells[i], filteredGoalId: filteredGoalId)
                         .frame(height: dayCellHeight)
                         .help(hourLabel(i))
                 }
@@ -84,7 +75,7 @@ struct CalendarHeatmapView: View {
 
     // MARK: - Week View (7 days)
 
-    private func weekView(cells: [HeatmapCell], maxAmount: Double, filteredGoalId: UUID?) -> some View {
+    private func weekView(cells: [HeatmapCell], filteredGoalId: UUID?) -> some View {
         let dayLabels = ["S", "M", "T", "W", "T", "F", "S"]
 
         return VStack(spacing: 2) {
@@ -94,7 +85,7 @@ struct CalendarHeatmapView: View {
                         Text(dayLabels[i])
                             .font(.system(size: 9, weight: .medium))
                             .foregroundColor(.secondary)
-                        segmentedCell(cells[i], maxAmount: maxAmount, filteredGoalId: filteredGoalId)
+                        segmentedCell(cells[i], filteredGoalId: filteredGoalId)
                             .frame(height: weekMonthCellHeight)
                     }
                 }
@@ -104,7 +95,7 @@ struct CalendarHeatmapView: View {
 
     // MARK: - Month View (calendar grid)
 
-    private func monthView(cells: [HeatmapCell], maxAmount: Double, filteredGoalId: UUID?) -> some View {
+    private func monthView(cells: [HeatmapCell], filteredGoalId: UUID?) -> some View {
         let startOfMonth = displayedPeriod.startDate!
         let weekday = calendar.component(.weekday, from: startOfMonth)
         let offset = weekday - 1
@@ -131,7 +122,7 @@ struct CalendarHeatmapView: View {
                         let cellIndex = slotIndex - offset
                         if cellIndex >= 0 && cellIndex < cells.count {
                             ZStack {
-                                segmentedCell(cells[cellIndex], maxAmount: maxAmount, filteredGoalId: filteredGoalId)
+                                segmentedCell(cells[cellIndex], filteredGoalId: filteredGoalId)
                                 Text("\(calendar.component(.day, from: cells[cellIndex].date))")
                                     .font(.system(size: 8))
                                     .foregroundColor(.primary.opacity(0.5))
@@ -149,7 +140,7 @@ struct CalendarHeatmapView: View {
 
     // MARK: - All Time View (vertical, compact rows)
 
-    private func allTimeView(cells: [HeatmapCell], maxAmount: Double, filteredGoalId: UUID?) -> some View {
+    private func allTimeView(cells: [HeatmapCell], filteredGoalId: UUID?) -> some View {
         let numWeeks = cells.count / 7
         let today = calendar.startOfDay(for: Date())
         let dayLabels = ["S", "M", "T", "W", "T", "F", "S"]
@@ -198,7 +189,7 @@ struct CalendarHeatmapView: View {
                                             Color.clear
                                                 .frame(height: allTimeCellHeight)
                                         } else {
-                                            segmentedCell(cell, maxAmount: maxAmount, filteredGoalId: filteredGoalId, cornerRadius: 1.5, horizontal: true)
+                                            segmentedCell(cell, filteredGoalId: filteredGoalId, cornerRadius: 1.5, horizontal: true)
                                                 .frame(height: allTimeCellHeight)
                                         }
                                     }
@@ -244,59 +235,55 @@ struct CalendarHeatmapView: View {
 
     private func segmentedCell(
         _ cell: HeatmapCell,
-        maxAmount: Double,
         filteredGoalId: UUID?,
         cornerRadius: CGFloat = 2,
         horizontal: Bool = false
     ) -> some View {
-        GeometryReader { geo in
+        Group {
             if let goalId = filteredGoalId {
                 let goal = viewModel.goals.first(where: { $0.id == goalId })
                 let amount = cell.goalAmounts.first(where: { $0.goalId == goalId })?.amount ?? 0
-                let intensity = maxAmount > 0 && amount > 0
-                    ? 0.2 + 0.8 * (amount / maxAmount)
-                    : 0.0
-                RoundedRectangle(cornerRadius: cornerRadius)
-                    .fill((goal?.color ?? .gray).opacity(intensity))
+                if amount > 0 {
+                    RoundedRectangle(cornerRadius: cornerRadius)
+                        .fill(goal?.color ?? .gray)
+                } else {
+                    RoundedRectangle(cornerRadius: cornerRadius)
+                        .fill(Color.primary.opacity(0.06))
+                }
             } else if cell.totalAmount > 0 {
                 let amounts = orderedGoalAmounts(for: cell)
-                let intensity = maxAmount > 0 ? 0.2 + 0.8 * (cell.totalAmount / maxAmount) : 0.0
-
-                if amounts.count == 1,
-                   let goal = viewModel.goals.first(where: { $0.id == amounts[0].goalId }) {
-                    RoundedRectangle(cornerRadius: cornerRadius)
-                        .fill(goal.color.opacity(intensity))
-                } else if horizontal {
-                    HStack(spacing: 0) {
-                        ForEach(amounts.indices, id: \.self) { idx in
-                            let ga = amounts[idx]
-                            if let goal = viewModel.goals.first(where: { $0.id == ga.goalId }) {
-                                goal.color.opacity(intensity)
-                                    .frame(width: geo.size.width * (ga.amount / cell.totalAmount))
+                if horizontal {
+                    GeometryReader { geo in
+                        HStack(spacing: 0) {
+                            ForEach(amounts.indices, id: \.self) { idx in
+                                let ga = amounts[idx]
+                                if let goal = viewModel.goals.first(where: { $0.id == ga.goalId }) {
+                                    goal.color
+                                        .frame(width: geo.size.width * (ga.amount / cell.totalAmount))
+                                }
                             }
                         }
+                        .clipShape(RoundedRectangle(cornerRadius: cornerRadius))
                     }
-                    .clipShape(RoundedRectangle(cornerRadius: cornerRadius))
                 } else {
-                    VStack(spacing: 0) {
-                        ForEach(amounts.indices, id: \.self) { idx in
-                            let ga = amounts[idx]
-                            if let goal = viewModel.goals.first(where: { $0.id == ga.goalId }) {
-                                goal.color.opacity(intensity)
-                                    .frame(height: geo.size.height * (ga.amount / cell.totalAmount))
+                    GeometryReader { geo in
+                        VStack(spacing: 0) {
+                            ForEach(amounts.indices, id: \.self) { idx in
+                                let ga = amounts[idx]
+                                if let goal = viewModel.goals.first(where: { $0.id == ga.goalId }) {
+                                    goal.color
+                                        .frame(height: geo.size.height * (ga.amount / cell.totalAmount))
+                                }
                             }
                         }
+                        .clipShape(RoundedRectangle(cornerRadius: cornerRadius))
                     }
-                    .clipShape(RoundedRectangle(cornerRadius: cornerRadius))
                 }
             } else {
-                Color.clear
+                RoundedRectangle(cornerRadius: cornerRadius)
+                    .fill(Color.primary.opacity(0.06))
             }
         }
-        .background(
-            RoundedRectangle(cornerRadius: cornerRadius)
-                .fill(Color.primary.opacity(0.06))
-        )
     }
 
     // MARK: - Helpers
@@ -304,16 +291,6 @@ struct CalendarHeatmapView: View {
     private func orderedGoalAmounts(for cell: HeatmapCell) -> [(goalId: UUID, amount: Double)] {
         viewModel.goals.compactMap { goal in
             cell.goalAmounts.first(where: { $0.goalId == goal.id })
-        }
-    }
-
-    private func computeMaxAmount(cells: [HeatmapCell], filteredGoalId: UUID?) -> Double {
-        if let goalId = filteredGoalId {
-            return cells.map { cell in
-                cell.goalAmounts.first(where: { $0.goalId == goalId })?.amount ?? 0
-            }.max() ?? 1
-        } else {
-            return cells.map { $0.totalAmount }.max() ?? 1
         }
     }
 

@@ -39,16 +39,16 @@ extern fn null_ptr() -> RawPointer<I8>;
 extern fn ptr_is_null(p: RawPointer<I8>) -> I64;
 
 // =============================================================================
-// Typed aliases — GC ref types use vec_push/vec_get,
-//                 raw types (String, RawPointer) use vec_push_raw_val/vec_get
+// Typed aliases — All types use the same vec_push/vec_get underneath.
+// These wrappers just provide type safety at the Lang level.
 // =============================================================================
 
-// String is NOT a GC ref — use raw variants
-fn vec_push_str(v: Vec, item: String) -> I64 { vec_push_raw_val(v, item) }
+// Strings (represented as raw pointers)
+fn vec_push_str(v: Vec, item: String) -> I64 { vec_push(v, item) }
 fn vec_get_str(v: Vec, index: I64) -> String { vec_get(v, index) }
 
-// RawPointer<I8> is NOT a GC ref — use raw variants
-fn vec_push_raw(v: Vec, item: RawPointer<I8>) -> I64 { vec_push_raw_val(v, item) }
+// Raw pointers
+fn vec_push_raw(v: Vec, item: RawPointer<I8>) -> I64 { vec_push(v, item) }
 fn vec_get_raw(v: Vec, index: I64) -> RawPointer<I8> { vec_get(v, index) }
 
 // All struct/enum types ARE GC refs — use ptr variants
