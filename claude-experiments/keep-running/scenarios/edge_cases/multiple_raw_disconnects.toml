@@ -1,0 +1,69 @@
+# Multiple raw disconnects: repeatedly crash-disconnect without Detach
+# Tests daemon resilience when clients drop without clean disconnect.
+
+name = "multiple_raw_disconnects"
+description = "Daemon survives multiple raw disconnects without clean Detach"
+timeout_secs = 20
+
+[command]
+program = "sh"
+args = ["-c", "i=0; while true; do i=$((i+1)); echo alive:$i; sleep 0.3; done"]
+
+# Cycle 1: connect then crash-disconnect
+[[actions]]
+type = "attach"
+
+[[actions]]
+type = "wait_for_output"
+contains = "alive:1"
+timeout_secs = 5
+
+[[actions]]
+type = "disconnect_raw"
+
+# Cycle 2: immediate reconnect after crash
+[[actions]]
+type = "attach"
+
+[[actions]]
+type = "wait_for_output"
+contains = "alive:3"
+timeout_secs = 5
+
+[[actions]]
+type = "disconnect_raw"
+
+# Cycle 3: slight delay then reconnect
+[[actions]]
+type = "sleep"
+duration_ms = 200
+
+[[actions]]
+type = "attach"
+
+[[actions]]
+type = "wait_for_output"
+contains = "alive:5"
+timeout_secs = 5
+
+[[actions]]
+type = "disconnect_raw"
+
+# Cycle 4: reconnect and detach cleanly this time
+[[actions]]
+type = "sleep"
+duration_ms = 100
+
+[[actions]]
+type = "attach"
+
+[[actions]]
+type = "wait_for_output"
+contains = "alive:7"
+timeout_secs = 5
+
+[[actions]]
+type = "detach"
+
+[expected_final_state]
+daemon_alive = true

@@ -1,0 +1,56 @@
+# Rapid reattach: disconnect and immediately reattach
+# Tests that the daemon handles a raw disconnect followed by
+# an immediate reconnect without showing "session ended".
+
+name = "rapid_reattach"
+description = "Raw disconnect and immediate reattach should work reliably"
+timeout_secs = 15
+
+[command]
+program = "sh"
+args = ["-c", "for i in $(seq 1 30); do echo tick:$i; sleep 0.2; done"]
+
+# Attach, see some output
+[[actions]]
+type = "attach"
+
+[[actions]]
+type = "wait_for_output"
+contains = "tick:1"
+timeout_secs = 5
+
+# Drop connection without sending Detach (simulates crash/network issue)
+[[actions]]
+type = "disconnect_raw"
+
+# Immediately reattach — this is the scenario that was failing
+[[actions]]
+type = "attach"
+expect_replay_contains = "tick:1"
+
+[[actions]]
+type = "wait_for_output"
+contains = "tick:5"
+timeout_secs = 10
+
+[[actions]]
+type = "detach"
+
+# One more cycle to make sure the daemon is stable
+[[actions]]
+type = "sleep"
+duration_ms = 100
+
+[[actions]]
+type = "attach"
+
+[[actions]]
+type = "wait_for_output"
+contains = "tick:10"
+timeout_secs = 10
+
+[[actions]]
+type = "detach"
+
+[expected_final_state]
+daemon_alive = true

@@ -147,18 +147,29 @@ impl TestContext {
         ))
     }
 
-    /// Check if the daemon process is alive
+    /// Check if the daemon process is alive.
+    /// The `start` command forks the actual daemon and exits, so we can't
+    /// just check the spawned child. Instead, read the daemon PID from the
+    /// session file and check if that process is alive.
     pub fn is_daemon_alive(&mut self) -> bool {
+        // Reap the 'start' wrapper if it hasn't been reaped yet
         if let Some(ref mut child) = self.daemon_process {
-            match child.try_wait() {
-                Ok(Some(_)) => false, // Process has exited
-                Ok(None) => true,     // Still running
-                Err(_) => false,
-            }
-        } else {
-            // Check if socket exists as a proxy
-            self.socket_path().exists()
+            let _ = child.try_wait();
         }
+
+        // Read the session file to get the actual daemon PID
+        let session_file = self.session_file_path();
+        if !session_file.exists() {
+            return false;
+        }
+        if let Ok(json) = std::fs::read_to_string(&session_file) {
+            if let Ok(info) = serde_json::from_str::<serde_json::Value>(&json) {
+                if let Some(pid) = info.get("pid").and_then(|v| v.as_u64()) {
+                    return unsafe { libc::kill(pid as i32, 0) == 0 };
+                }
+            }
+        }
+        false
     }
 
     /// Check if the session file exists
@@ -166,13 +177,38 @@ impl TestContext {
         self.session_file_path().exists()
     }
 
+    /// Get the daemon PID from the session file
+    fn daemon_pid(&self) -> Option<i32> {
+        let session_file = self.session_file_path();
+        if let Ok(json) = std::fs::read_to_string(&session_file) {
+            if let Ok(info) = serde_json::from_str::<serde_json::Value>(&json) {
+                return info.get("pid").and_then(|v| v.as_i64()).map(|p| p as i32);
+            }
+        }
+        None
+    }
+
     /// Kill the daemon if running
     pub fn kill_daemon(&mut self) {
+        // Kill the 'start' wrapper process if still around
         if let Some(ref mut child) = self.daemon_process {
             let _ = child.kill();
             let _ = child.wait();
         }
         self.daemon_process = None;
+
+        // Also kill the actual daemon process (which is a separate forked process)
+        if let Some(pid) = self.daemon_pid() {
+            unsafe {
+                libc::kill(pid, libc::SIGTERM);
+            }
+            // Give it a moment to clean up
+            std::thread::sleep(Duration::from_millis(100));
+            // Force kill if still alive
+            unsafe {
+                libc::kill(pid, libc::SIGKILL);
+            }
+        }
     }
 }
 
@@ -493,27 +529,37 @@ pub fn run_scenario(scenario: &Scenario) -> Result<(), String> {
                 new_client.attach(80, 24)?;
 
                 if let Some(expected) = expect_replay_contains {
-                    // Give a moment for replay to arrive and drain pending messages
-                    std::thread::sleep(Duration::from_millis(100));
+                    // Wait for replay data to arrive (may come in chunks)
+                    let replay_start = Instant::now();
+                    let replay_timeout = Duration::from_secs(5);
                     loop {
-                        match new_client.try_read_message()? {
-                            Some(DaemonMessage::Output(data)) => {
-                                new_client.accumulated_output.extend(data);
+                        // Drain all available messages
+                        loop {
+                            match new_client.try_read_message()? {
+                                Some(DaemonMessage::Output(data)) => {
+                                    new_client.accumulated_output.extend(data);
+                                }
+                                Some(DaemonMessage::ChildExited { code }) => {
+                                    new_client.exit_received = Some(code);
+                                }
+                                Some(_) => {}
+                                None => break,
                             }
-                            Some(DaemonMessage::ChildExited { code }) => {
-                                new_client.exit_received = Some(code);
-                            }
-                            Some(_) => {}
-                            None => break,
                         }
-                    }
 
-                    if !new_client.check_replay_contains(expected) {
-                        let output = String::from_utf8_lossy(new_client.get_output());
-                        return Err(format!(
-                            "Expected replay to contain '{}', got: {}",
-                            expected, output
-                        ));
+                        if new_client.check_replay_contains(expected) {
+                            break;
+                        }
+
+                        if replay_start.elapsed() > replay_timeout {
+                            let output = String::from_utf8_lossy(new_client.get_output());
+                            return Err(format!(
+                                "Expected replay to contain '{}', got: {}",
+                                expected, output
+                            ));
+                        }
+
+                        std::thread::sleep(Duration::from_millis(10));
                     }
                 }
 

@@ -411,27 +411,58 @@ Benefits:
 - **Zero-cost sharing** — history, meta events, scopes all just store TermIds
 - **Cheap rewrite events** — `{old: TermId, new: TermId}` is four integers
 
-### RETE Network (Rule Matching)
+### Rule Matching (Term Indexing)
 
-Instead of scanning all rules against all sub-expressions on every step, a
-RETE network pre-compiles rules into a discrimination network.
+The system is designed for **live coding** — rules change constantly as the
+programmer edits code. This rules out approaches like RETE networks, which
+optimize for the opposite case (stable rules, changing data). RETE's partial
+match caches are expensive to rebuild when rules change, and in an interactive
+session rules change on every keystroke.
 
-When a term changes in a scope, only the affected partial matches are
-re-evaluated. This makes incremental rewriting efficient — adding a record to
-`@history` doesn't re-check every rule, only the ones whose patterns overlap
-with the changed data.
+Instead, we use **term indexing by top-level constructor** — a simple index
+that maps the outermost symbol of a pattern to the rules that start with it:
 
-Key properties:
-- Rules with shared sub-patterns share match work
-- Scope changes propagate as deltas through the network
-- Dynamic rule addition extends the network incrementally
+```
+index = {
+    fact  => [rule 0 clause 0, rule 0 clause 1],
+    if    => [rule 3 clause 0, rule 3 clause 1],
+    _     => [rule 7 clause 0],   // wildcard (pattern starts with ?x)
+}
+```
+
+When a term like `fact(3)` needs matching, we only check the `fact` bucket
+plus the `_` (wildcard) bucket — not every rule in the system. This is O(bucket
+size) instead of O(total rules).
+
+Rebuilding the index when rules change is cheap — just re-bucket. No partial
+match state to invalidate.
+
+For map patterns like `{type: "user", ...}`, we can index on the set of keys
+present, or on the first key-value pair. The index is a fast pre-filter; full
+matching still happens per-candidate.
+
+### Incremental Scope Recomputation
+
+For **pipelines** (`@source -> @ast -> @core`), we want incrementality in the
+other direction: when a rule changes, which outputs need recomputation?
+
+Each scope tracks **dependencies** — which input terms contributed to which
+output terms. When a rule in the `desugar` pass changes:
+
+1. Mark all outputs in `@core` that were produced by `desugar` rules as stale
+2. Re-run only the stale terms through the updated rules
+3. Propagate staleness downstream if outputs changed
+
+This is similar to build systems (Salsa, Adapton) — fine-grained dependency
+tracking with minimal recomputation. The hash-consed term store helps here:
+if a re-run produces the same TermId as before, downstream is unaffected.
 
 ### Scopes
 
 Each scope is a store of terms (TermIds). The engine maintains:
 - A focus (current reducible expression)
 - Exhaustion tracking (which sub-expressions have no matching rules)
-- The RETE network nodes relevant to that scope
+- Dependency info (which rules produced which terms, for incremental recomputation)
 
 ### Evaluation Loop
 
@@ -439,12 +470,12 @@ Each scope is a store of terms (TermIds). The engine maintains:
 loop {
     for each active scope:
         find next reducible sub-expression (not exhausted, not quoted)
-        query RETE for matching rules
+        lookup matching rules via term index
         if @strategy says :block, skip
         apply first matching rule (substitute logic variables)
         emit result into output scope
         emit meta-event into @meta
-        propagate deltas through RETE
+        update term index if rules changed
     if all scopes exhausted:
         break
 }
@@ -453,7 +484,7 @@ loop {
 ### Compilation (Future)
 
 Hot-path rules (stable, non-dynamic) can be compiled to:
-- **Discrimination trees** for fast pattern dispatch
+- **Discrimination trees** for deeper pattern dispatch beyond top-level indexing
 - **ARM-style bytecode** (Match/Build/Skip/Retract) for individual rule execution
 - **Native code** via LLVM for the innermost loops
 

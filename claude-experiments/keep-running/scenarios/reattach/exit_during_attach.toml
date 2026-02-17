@@ -1,0 +1,30 @@
+# Exit during attach: process exits right as client connects
+# Tests that exit notification is delivered even when the process
+# exits during or immediately after the attach handshake.
+
+name = "exit_during_attach"
+description = "Process that exits quickly still delivers exit notification on attach"
+timeout_secs = 15
+
+[command]
+program = "sh"
+args = ["-c", "echo quick_exit; exit 7"]
+
+# Small delay to let the process exit before we attach
+[[actions]]
+type = "sleep"
+duration_ms = 500
+
+# Attach to an already-exited session — should get replay + exit code
+[[actions]]
+type = "attach"
+expect_replay_contains = "quick_exit"
+
+[[actions]]
+type = "wait_for_exit"
+expected_code = 7
+timeout_secs = 5
+
+[expected_final_state]
+daemon_alive = false
+session_file_exists = false

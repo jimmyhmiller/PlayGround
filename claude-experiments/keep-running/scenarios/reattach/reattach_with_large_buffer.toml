@@ -1,0 +1,46 @@
+# Reattach with large replay buffer
+# Tests that the non-blocking send buffer correctly delivers
+# a large replay without dropping the connection.
+
+name = "reattach_with_large_buffer"
+description = "Reattach works correctly when there is a large output buffer to replay"
+timeout_secs = 30
+
+[command]
+program = "sh"
+args = ["-c", "for i in $(seq 1 2000); do echo \"line_$i: padding_data_to_make_lines_longer_xxxxxxxxxxxxxxxxxxxxxxxxxx\"; done; echo BUFFER_FILLED; sleep 5; echo STILL_ALIVE"]
+
+# Attach, wait for the buffer to fill
+[[actions]]
+type = "attach"
+
+[[actions]]
+type = "wait_for_output"
+contains = "BUFFER_FILLED"
+timeout_secs = 15
+
+# Detach — buffer now has ~2000 lines
+[[actions]]
+type = "detach"
+
+[[actions]]
+type = "sleep"
+duration_ms = 500
+
+# Reattach — daemon must replay the large buffer without dropping us
+[[actions]]
+type = "attach"
+expect_replay_contains = "BUFFER_FILLED"
+
+[[actions]]
+type = "wait_for_output"
+contains = "STILL_ALIVE"
+timeout_secs = 10
+
+[[actions]]
+type = "wait_for_exit"
+expected_code = 0
+timeout_secs = 5
+
+[expected_final_state]
+daemon_alive = false

@@ -202,12 +202,12 @@ pub fn attach(session: &SessionInfo) -> Result<()> {
         }
 
         // Check socket
+        let mut socket_eof = false;
         if poll_fds[1].revents & libc::POLLIN != 0 {
             match stream.read(&mut daemon_buf) {
                 Ok(0) => {
-                    // Daemon disconnected
-                    eprintln!("\r\n[session ended]");
-                    break;
+                    // Daemon disconnected - but process buffered messages first
+                    socket_eof = true;
                 }
                 Ok(n) => {
                     daemon_msg_buf.extend_from_slice(&daemon_buf[..n]);
@@ -217,12 +217,11 @@ pub fn attach(session: &SessionInfo) -> Result<()> {
                     return Err(e).context("Error reading from daemon");
                 }
             }
-        }
-
-        // Check for hangup on socket
-        if poll_fds[1].revents & (libc::POLLHUP | libc::POLLERR) != 0 {
-            eprintln!("\r\n[session ended]");
-            break;
+        } else if poll_fds[1].revents & (libc::POLLHUP | libc::POLLERR) != 0 {
+            // Only treat hangup as fatal when there's no data to read (POLLIN not set).
+            // On macOS, POLLHUP can be returned alongside POLLIN during normal
+            // socket state transitions; we should drain data before exiting.
+            socket_eof = true;
         }
 
         // Process any messages in the buffer
@@ -258,6 +257,12 @@ pub fn attach(session: &SessionInfo) -> Result<()> {
                     break;
                 }
             }
+        }
+
+        // Now that we've processed all buffered messages, handle EOF/hangup
+        if socket_eof {
+            eprintln!("\r\n[session ended]");
+            break;
         }
     }
 

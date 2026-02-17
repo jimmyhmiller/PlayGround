@@ -12,18 +12,8 @@ use std::process::Command;
 use std::time::Duration;
 
 const MAX_BUFFER_SIZE: usize = 100 * 1024 * 1024; // 100MB
-const WRITE_TIMEOUT: Duration = Duration::from_millis(200);
-
-/// Write to client socket with a timeout to prevent deadlocking the daemon.
-/// Uses blocking mode with SO_SNDTIMEO so write_all works correctly.
-fn write_with_timeout(client: &mut UnixStream, data: &[u8]) -> std::io::Result<()> {
-    client.set_nonblocking(false)?;
-    client.set_write_timeout(Some(WRITE_TIMEOUT))?;
-    let result = client.write_all(data);
-    let _ = client.set_write_timeout(None);
-    let _ = client.set_nonblocking(true);
-    result
-}
+/// If the client's send buffer exceeds this, the client is stuck and we drop it.
+const MAX_SEND_BUF: usize = 16 * 1024 * 1024; // 16MB
 
 /// Shared state for the daemon
 struct DaemonState {
@@ -31,6 +21,8 @@ struct DaemonState {
     buffer: Vec<u8>,
     /// Current client connection (if any)
     client: Option<UnixStream>,
+    /// Outgoing data queued for the client
+    send_buf: Vec<u8>,
     /// Child process ID (for informational purposes)
     #[allow(dead_code)]
     child_pid: Pid,
@@ -49,6 +41,7 @@ impl DaemonState {
         Self {
             buffer: Vec::new(),
             client: None,
+            send_buf: Vec::new(),
             child_pid,
             child_exited: false,
             exit_code: None,
@@ -57,21 +50,64 @@ impl DaemonState {
         }
     }
 
+    /// Queue an encoded message for sending to the client.
+    /// Returns false if client was dropped (send buffer overflow or encode error).
+    fn queue_message(&mut self, msg: &DaemonMessage) -> bool {
+        if self.client.is_none() {
+            return false;
+        }
+        match encode_message(msg) {
+            Ok(encoded) => {
+                self.send_buf.extend_from_slice(&encoded);
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
+    /// Flush as much of send_buf as possible using non-blocking writes.
+    /// Drops the client if the send buffer is too large (client is stuck).
+    fn flush_send_buf(&mut self) {
+        if self.send_buf.is_empty() || self.client.is_none() {
+            return;
+        }
+
+        if let Some(ref mut client) = self.client {
+            loop {
+                match client.write(&self.send_buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        self.send_buf.drain(0..n);
+                        if self.send_buf.is_empty() {
+                            break;
+                        }
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                    Err(_) => {
+                        // Real write error — client is gone
+                        self.send_buf.clear();
+                        self.client = None;
+                        return;
+                    }
+                }
+            }
+        }
+
+        // If send buffer is huge, client isn't draining — drop it
+        if self.send_buf.len() > MAX_SEND_BUF {
+            self.send_buf.clear();
+            self.client = None;
+        }
+    }
+
     /// Buffer output data AND send to client if connected
     fn handle_output(&mut self, data: &[u8]) {
         // Always buffer output for session history
         self.buffer_data(data);
 
-        // Also send to client if connected
-        if let Some(ref mut client) = self.client {
-            let msg = DaemonMessage::Output(data.to_vec());
-            if let Ok(encoded) = encode_message(&msg) {
-                if write_with_timeout(client, &encoded).is_err() {
-                    // Client disconnected or write timed out
-                    self.client = None;
-                }
-            }
-        }
+        // Also queue for client if connected
+        let msg = DaemonMessage::Output(data.to_vec());
+        self.queue_message(&msg);
     }
 
     fn buffer_data(&mut self, data: &[u8]) {
@@ -83,23 +119,23 @@ impl DaemonState {
         }
     }
 
-    /// Send buffered output (session history) to new client
-    fn replay_buffer(&mut self) -> Result<()> {
-        if let Some(ref mut client) = self.client {
-            if !self.buffer.is_empty() {
-                let msg = DaemonMessage::Output(self.buffer.clone());
-                let encoded = encode_message(&msg)?;
-                // Use a longer timeout for replay since buffer can be large
-                let _ = client.set_nonblocking(false);
-                let _ = client.set_write_timeout(Some(Duration::from_secs(5)));
-                let result = client.write_all(&encoded);
-                let _ = client.set_write_timeout(None)?;
-                let _ = client.set_nonblocking(true);
-                result?;
-                // Don't clear buffer - it's the session history
+    /// Queue buffered output (session history) for replay to new client.
+    /// Sends in chunks to avoid creating one giant JSON message.
+    fn replay_buffer(&mut self) {
+        if self.client.is_none() || self.buffer.is_empty() {
+            return;
+        }
+        const CHUNK_SIZE: usize = 32 * 1024; // 32KB per message
+        let mut offset = 0;
+        while offset < self.buffer.len() {
+            let end = (offset + CHUNK_SIZE).min(self.buffer.len());
+            let chunk = self.buffer[offset..end].to_vec();
+            offset = end;
+            let msg = DaemonMessage::Output(chunk);
+            if !self.queue_message(&msg) {
+                break; // Client was dropped
             }
         }
-        Ok(())
     }
 
     /// Resize the PTY
@@ -291,6 +327,7 @@ pub fn run_daemon(name: String, command: Vec<String>) -> Result<()> {
         if let Ok((stream, _)) = listener.accept() {
             stream.set_nonblocking(true).ok();
             state.client = Some(stream);
+            state.send_buf.clear();
             client_msg_buf.clear();
             // Reset exit notification for new client
             exit_notified = false;
@@ -330,15 +367,11 @@ pub fn run_daemon(name: String, command: Vec<String>) -> Result<()> {
 
         // Send ChildExited only after PTY is drained
         if state.child_exited && pty_drained && !exit_notified {
-            if let Some(ref mut client) = state.client {
-                let msg = DaemonMessage::ChildExited {
-                    code: state.exit_code,
-                };
-                if let Ok(encoded) = encode_message(&msg) {
-                    if write_with_timeout(client, &encoded).is_ok() {
-                        state.client_saw_exit = true;
-                    }
-                }
+            let msg = DaemonMessage::ChildExited {
+                code: state.exit_code,
+            };
+            if state.queue_message(&msg) {
+                state.client_saw_exit = true;
             }
             exit_notified = true;
         }
@@ -347,7 +380,6 @@ pub fn run_daemon(name: String, command: Vec<String>) -> Result<()> {
         let mut client_disconnected = false;
         let mut should_replay = false;
         let mut resize_request: Option<(u16, u16)> = None;
-        let mut notified_exit = false;
 
         if let Some(ref mut client) = state.client {
             match client.read(&mut client_read_buf) {
@@ -368,24 +400,19 @@ pub fn run_daemon(name: String, command: Vec<String>) -> Result<()> {
                                         resize_request = Some((cols, rows));
 
                                         // Send attached confirmation
-                                        let reply = DaemonMessage::Attached;
-                                        if let Ok(encoded) = encode_message(&reply) {
-                                            let _ = write_with_timeout(client, &encoded);
-                                        }
+                                        state.queue_message(&DaemonMessage::Attached);
 
                                         // Mark that we need to replay buffer
                                         should_replay = true;
 
                                         // If child already exited and PTY drained, notify client
-                                        // Otherwise the main loop will send it after draining
                                         if state.child_exited && pty_drained && !exit_notified {
                                             let msg = DaemonMessage::ChildExited {
                                                 code: state.exit_code,
                                             };
-                                            if let Ok(encoded) = encode_message(&msg) {
-                                                if write_with_timeout(client, &encoded).is_ok() {
-                                                    notified_exit = true;
-                                                }
+                                            if state.queue_message(&msg) {
+                                                state.client_saw_exit = true;
+                                                exit_notified = true;
                                             }
                                         }
                                     }
@@ -428,19 +455,17 @@ pub fn run_daemon(name: String, command: Vec<String>) -> Result<()> {
 
         // Replay buffer after processing attach message
         if should_replay {
-            let _ = state.replay_buffer();
-        }
-
-        // Track if client was notified about exit
-        if notified_exit {
-            state.client_saw_exit = true;
-            exit_notified = true;
+            state.replay_buffer();
         }
 
         if client_disconnected {
             state.client = None;
+            state.send_buf.clear();
             client_msg_buf.clear();
         }
+
+        // Flush queued data to client (non-blocking)
+        state.flush_send_buf();
 
         // Small sleep to avoid busy-waiting
         std::thread::sleep(Duration::from_millis(1));

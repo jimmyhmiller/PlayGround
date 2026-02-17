@@ -1,0 +1,44 @@
+# Output during attach: high-throughput output while client is connecting
+# Tests that the daemon doesn't drop the client when PTY output
+# arrives during the attach handshake.
+
+name = "output_during_attach"
+description = "High-throughput output during attach handshake should not drop client"
+timeout_secs = 30
+
+[command]
+program = "sh"
+args = ["-c", "while true; do echo \"output_$(date +%s%N)\"; done"]
+
+# Attach while output is flowing at full speed
+[[actions]]
+type = "attach"
+
+# We should be able to see output despite the flood
+[[actions]]
+type = "wait_for_output"
+contains = "output_"
+timeout_secs = 5
+
+# Detach cleanly
+[[actions]]
+type = "detach"
+
+[[actions]]
+type = "sleep"
+duration_ms = 200
+
+# Reattach during the flood — should still work
+[[actions]]
+type = "attach"
+
+[[actions]]
+type = "wait_for_output"
+contains = "output_"
+timeout_secs = 5
+
+[[actions]]
+type = "detach"
+
+[expected_final_state]
+daemon_alive = true

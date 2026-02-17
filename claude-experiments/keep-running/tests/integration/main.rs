@@ -189,3 +189,78 @@ fn test_multiline_paste() {
     let scenario = parser::parse_scenario_file(&path).expect("Failed to parse scenario");
     harness::run_scenario(&scenario).expect("Scenario failed");
 }
+
+/// Test rapid reattach after raw disconnect
+#[test]
+fn test_rapid_reattach() {
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
+    let path = PathBuf::from(&manifest_dir).join("scenarios/reattach/rapid_reattach.toml");
+
+    if !path.exists() {
+        println!("Scenario file not found, skipping: {}", path.display());
+        return;
+    }
+
+    let scenario = parser::parse_scenario_file(&path).expect("Failed to parse scenario");
+    harness::run_scenario(&scenario).expect("Scenario failed");
+}
+
+/// Test reattach with a large replay buffer
+#[test]
+fn test_reattach_large_buffer() {
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
+    let path = PathBuf::from(&manifest_dir).join("scenarios/reattach/reattach_with_large_buffer.toml");
+
+    if !path.exists() {
+        println!("Scenario file not found, skipping: {}", path.display());
+        return;
+    }
+
+    let scenario = parser::parse_scenario_file(&path).expect("Failed to parse scenario");
+    harness::run_scenario(&scenario).expect("Scenario failed");
+}
+
+/// Test high-throughput output during attach
+#[test]
+fn test_output_during_attach() {
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
+    let path = PathBuf::from(&manifest_dir).join("scenarios/edge_cases/output_during_attach.toml");
+
+    if !path.exists() {
+        println!("Scenario file not found, skipping: {}", path.display());
+        return;
+    }
+
+    let scenario = parser::parse_scenario_file(&path).expect("Failed to parse scenario");
+    harness::run_scenario(&scenario).expect("Scenario failed");
+}
+
+/// Test daemon survives multiple raw disconnects
+#[test]
+fn test_multiple_raw_disconnects() {
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
+    let path = PathBuf::from(&manifest_dir).join("scenarios/edge_cases/multiple_raw_disconnects.toml");
+
+    if !path.exists() {
+        println!("Scenario file not found, skipping: {}", path.display());
+        return;
+    }
+
+    let scenario = parser::parse_scenario_file(&path).expect("Failed to parse scenario");
+    harness::run_scenario(&scenario).expect("Scenario failed");
+}
+
+/// Test attaching to session where process already exited
+#[test]
+fn test_exit_during_attach() {
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
+    let path = PathBuf::from(&manifest_dir).join("scenarios/reattach/exit_during_attach.toml");
+
+    if !path.exists() {
+        println!("Scenario file not found, skipping: {}", path.display());
+        return;
+    }
+
+    let scenario = parser::parse_scenario_file(&path).expect("Failed to parse scenario");
+    harness::run_scenario(&scenario).expect("Scenario failed");
+}
