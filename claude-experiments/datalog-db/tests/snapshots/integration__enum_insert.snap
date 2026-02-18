@@ -1,0 +1,8 @@
+---
+source: tests/integration.rs
+expression: snapshot_datoms(&datoms)
+---
+[e=3 Drawing/label                  "my circle" tx=3 assert]
+[e=3 Drawing/shape.Circle/radius    5 tx=3 assert]
+[e=3 Drawing/shape/__tag            "Circle" tx=3 assert]
+[e=3 __type                         "Drawing" tx=3 assert]

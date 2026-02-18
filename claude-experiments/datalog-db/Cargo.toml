@@ -1,0 +1,30 @@
+[package]
+name = "datalog-db"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rocksdb = "0.22"
+bytes = "1"
+byteorder = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+async-trait = "0.1"
+
+[features]
+default = []
+tikv = ["tikv-client"]
+
+[dev-dependencies]
+tempfile = "3.25.0"
+insta = "1"
+proptest = "1"
+tokio-test = "0.4"
+
+[dependencies.tikv-client]
+version = "0.3"
+optional = true

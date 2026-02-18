@@ -1,0 +1,14 @@
+# Stepper: print each reduction, wait for enter
+
+rule stepper : @meta -> @io {
+  reduction(?s, ?old, ?new, ?kind) => {
+    println("[", ?s, "] ", ?old, "  =>  ", ?new, "  (", ?kind, ")")
+    println("  press enter to continue...")
+    readline()
+  }
+}
+
+fn fact(0) = 1
+fn fact(?n) = ?n * fact(?n - 1)
+
+fact(5)

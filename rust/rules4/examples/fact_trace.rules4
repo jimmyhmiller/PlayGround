@@ -1,0 +1,8 @@
+fn fact(0) = 1
+fn fact(?n) = ?n * fact(?n - 1)
+
+rule trace : @meta -> @io {
+  reduction(?s, ?old, ?new, ?kind) => println("[", ?s, "] ", ?old, "  =>  ", ?new, "  (", ?kind, ")")
+}
+
+fact(5)

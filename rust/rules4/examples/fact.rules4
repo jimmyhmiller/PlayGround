@@ -1,0 +1,4 @@
+fn fact(0) = 1
+fn fact(?n) = ?n * fact(?n - 1)
+
+fact(10)

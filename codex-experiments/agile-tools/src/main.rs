@@ -1,8 +1,12 @@
+use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine;
 use clap::{Parser, Subcommand};
 use chrono::{SecondsFormat, Utc};
 use dirs_next::home_dir;
+use ed25519_dalek::{Signer, SigningKey};
 use rand::seq::SliceRandom;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::Write;
@@ -36,6 +40,10 @@ enum Command {
         #[command(subcommand)]
         command: IssuesCommand,
     },
+    Auth {
+        #[command(subcommand)]
+        command: AuthCommand,
+    },
     Skills {
         #[command(subcommand)]
         command: SkillsCommand,
@@ -52,6 +60,28 @@ enum SkillsCommand {
         #[arg(long)]
         force: bool,
     },
+}
+
+#[derive(Subcommand)]
+enum AuthCommand {
+    Keys {
+        #[command(subcommand)]
+        command: KeysCommand,
+    },
+    Signup {
+        #[arg(long)]
+        remote: String,
+    },
+    Whoami,
+}
+
+#[derive(Subcommand)]
+enum KeysCommand {
+    Generate {
+        #[arg(long)]
+        force: bool,
+    },
+    Show,
 }
 
 #[derive(Subcommand)]
@@ -575,6 +605,14 @@ fn main() -> anyhow::Result<()> {
                     IndexCommand::Verify => issues_index_verify(&project)?,
                 }
             }
+        },
+        Command::Auth { command } => match command {
+            AuthCommand::Keys { command } => match command {
+                KeysCommand::Generate { force } => auth_keys_generate(force)?,
+                KeysCommand::Show => auth_keys_show()?,
+            },
+            AuthCommand::Signup { remote } => auth_signup(&remote)?,
+            AuthCommand::Whoami => auth_whoami()?,
         },
         Command::Skills { command } => match command {
             SkillsCommand::Install {
@@ -1256,6 +1294,12 @@ fn issues_sync_pull(project: &str) -> anyhow::Result<()> {
             Ok(())
         }
         "noop" => Ok(()),
+        "service" => {
+            let remote = sync
+                .remote
+                .ok_or_else(|| anyhow::anyhow!("sync.remote is required for service engine"))?;
+            service_sync_pull(project, &project_root, &remote)
+        }
         other => Err(anyhow::anyhow!("sync engine not implemented: {}", other)),
     }
 }
@@ -1266,6 +1310,12 @@ fn issues_sync_push(project: &str) -> anyhow::Result<()> {
     match sync.engine.as_deref().unwrap_or("git") {
         "git" => run_git(&project_root, &["push"]),
         "noop" => Ok(()),
+        "service" => {
+            let remote = sync
+                .remote
+                .ok_or_else(|| anyhow::anyhow!("sync.remote is required for service engine"))?;
+            service_sync_push(project, &project_root, &remote)
+        }
         other => Err(anyhow::anyhow!("sync engine not implemented: {}", other)),
     }
 }
@@ -1276,6 +1326,12 @@ fn issues_sync_status(project: &str) -> anyhow::Result<()> {
     match sync.engine.as_deref().unwrap_or("git") {
         "git" => run_git(&project_root, &["status", "-sb"]),
         "noop" => Ok(()),
+        "service" => {
+            let remote = sync
+                .remote
+                .ok_or_else(|| anyhow::anyhow!("sync.remote is required for service engine"))?;
+            service_sync_status(project, &project_root, &remote)
+        }
         other => Err(anyhow::anyhow!("sync engine not implemented: {}", other)),
     }
 }
@@ -2322,4 +2378,484 @@ fn read_project_config(project: &str) -> anyhow::Result<Option<ProjectConfig>> {
     }
     let content = fs::read_to_string(path)?;
     Ok(Some(toml::from_str(&content)?))
+}
+
+// ── Auth & key management ──────────────────────────────────────────────
+
+fn keys_dir() -> anyhow::Result<PathBuf> {
+    let home = home_dir().ok_or_else(|| anyhow::anyhow!("cannot resolve home dir"))?;
+    Ok(home.join(".scope").join("keys"))
+}
+
+fn auth_keys_generate(force: bool) -> anyhow::Result<()> {
+    let dir = keys_dir()?;
+    let priv_path = dir.join("private.key");
+    let pub_path = dir.join("public.key");
+
+    if priv_path.exists() && !force {
+        return Err(anyhow::anyhow!(
+            "keys already exist at {}. Use --force to overwrite.",
+            dir.display()
+        ));
+    }
+
+    fs::create_dir_all(&dir)?;
+
+    let mut csprng = rand::rngs::OsRng;
+    let signing_key = SigningKey::generate(&mut csprng);
+    let verifying_key = signing_key.verifying_key();
+
+    let priv_b64 = BASE64.encode(signing_key.to_bytes());
+    let pub_b64 = BASE64.encode(verifying_key.to_bytes());
+
+    fs::write(&priv_path, &priv_b64)?;
+    fs::write(&pub_path, &pub_b64)?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&priv_path, fs::Permissions::from_mode(0o600))?;
+    }
+
+    println!("Generated Ed25519 keypair");
+    println!("  Private key: {}", priv_path.display());
+    println!("  Public key:  {}", pub_path.display());
+    println!("\nYour public key:");
+    println!("  {}", pub_b64);
+    Ok(())
+}
+
+fn auth_keys_show() -> anyhow::Result<()> {
+    let pub_b64 = load_public_key_b64()?;
+    println!("{}", pub_b64);
+    Ok(())
+}
+
+fn auth_whoami() -> anyhow::Result<()> {
+    let pub_b64 = load_public_key_b64()?;
+    let pub_bytes = BASE64.decode(&pub_b64)?;
+    let account_id = derive_account_id(&pub_bytes);
+    println!("Account ID: {}", account_id);
+    println!("Public key: {}", pub_b64);
+    Ok(())
+}
+
+fn auth_signup(remote: &str) -> anyhow::Result<()> {
+    let pub_b64 = load_public_key_b64()?;
+    let signing_key = load_signing_key()?;
+    let pub_bytes = BASE64.decode(&pub_b64)?;
+    let account_id = derive_account_id(&pub_bytes);
+
+    let body = serde_json::json!({
+        "public_key": pub_b64,
+        "display_name": current_user(),
+    });
+    let body_str = serde_json::to_string(&body)?;
+
+    let url = format!("{}/auth/signup", remote.trim_end_matches('/'));
+    let (timestamp, pubkey_header, signature) = sign_request("POST", "/auth/signup", &body_str, &signing_key)?;
+
+    let client = reqwest::blocking::Client::new();
+    let resp = client
+        .post(&url)
+        .header("Content-Type", "application/json")
+        .header("X-Scope-PublicKey", &pubkey_header)
+        .header("X-Scope-Timestamp", &timestamp)
+        .header("X-Scope-Signature", &signature)
+        .body(body_str)
+        .send()?;
+
+    let status = resp.status();
+    let resp_body: serde_json::Value = resp.json()?;
+
+    if status.is_success() {
+        println!("Signed up successfully");
+        println!("Account ID: {}", account_id);
+    } else {
+        let msg = resp_body
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown error");
+        return Err(anyhow::anyhow!("signup failed ({}): {}", status, msg));
+    }
+
+    Ok(())
+}
+
+fn load_public_key_b64() -> anyhow::Result<String> {
+    let dir = keys_dir()?;
+    let pub_path = dir.join("public.key");
+    if !pub_path.exists() {
+        return Err(anyhow::anyhow!(
+            "no keys found. Run `scope auth keys generate` first."
+        ));
+    }
+    let content = fs::read_to_string(pub_path)?;
+    Ok(content.trim().to_string())
+}
+
+fn load_signing_key() -> anyhow::Result<SigningKey> {
+    let dir = keys_dir()?;
+    let priv_path = dir.join("private.key");
+    if !priv_path.exists() {
+        return Err(anyhow::anyhow!(
+            "no private key found. Run `scope auth keys generate` first."
+        ));
+    }
+    let content = fs::read_to_string(priv_path)?;
+    let bytes = BASE64.decode(content.trim())?;
+    let key_bytes: [u8; 32] = bytes
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("invalid private key length"))?;
+    Ok(SigningKey::from_bytes(&key_bytes))
+}
+
+fn derive_account_id(public_key_bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(public_key_bytes);
+    let hash = hasher.finalize();
+    let hex = hex_encode(&hash);
+    format!("acct_{}", &hex[..16])
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{:02x}", b)).collect()
+}
+
+fn sign_request(
+    method: &str,
+    path: &str,
+    body: &str,
+    signing_key: &SigningKey,
+) -> anyhow::Result<(String, String, String)> {
+    let timestamp = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
+    let body_hash = {
+        let mut hasher = Sha256::new();
+        hasher.update(body.as_bytes());
+        hex_encode(&hasher.finalize())
+    };
+    let payload = format!("{}:{}:{}:{}", method, path, timestamp, body_hash);
+    let signature = signing_key.sign(payload.as_bytes());
+    let pubkey_b64 = BASE64.encode(signing_key.verifying_key().to_bytes());
+    let sig_b64 = BASE64.encode(signature.to_bytes());
+    Ok((timestamp, pubkey_b64, sig_b64))
+}
+
+// ── Sync state ─────────────────────────────────────────────────────────
+
+#[derive(Debug, Serialize, Deserialize, Default)]
+struct SyncState {
+    last_pushed_event: Option<String>,
+    last_pulled_batch: Option<String>,
+    last_sync_at: Option<String>,
+}
+
+fn sync_state_path(project: &str) -> anyhow::Result<PathBuf> {
+    let root = project_root(project)?;
+    Ok(root.join("sync.json"))
+}
+
+fn read_sync_state(project: &str) -> anyhow::Result<SyncState> {
+    let path = sync_state_path(project)?;
+    if !path.exists() {
+        return Ok(SyncState::default());
+    }
+    let content = fs::read_to_string(path)?;
+    Ok(serde_json::from_str(&content)?)
+}
+
+fn write_sync_state(project: &str, state: &SyncState) -> anyhow::Result<()> {
+    let path = sync_state_path(project)?;
+    fs::write(path, serde_json::to_string_pretty(state)?)?;
+    Ok(())
+}
+
+// ── Collect events since cursor ────────────────────────────────────────
+
+fn collect_events_since(
+    project_root: &Path,
+    cursor: Option<&str>,
+) -> anyhow::Result<Vec<serde_json::Value>> {
+    let events_dir = project_root.join("events");
+    if !events_dir.exists() {
+        return Ok(Vec::new());
+    }
+    let mut all_events = Vec::new();
+    for entry in fs::read_dir(&events_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+            continue;
+        }
+        let content = fs::read_to_string(&path)?;
+        for line in content.lines() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let event: serde_json::Value = serde_json::from_str(line)?;
+            if let Some(cursor) = cursor {
+                if let Some(id) = event.get("id").and_then(|v| v.as_str()) {
+                    if id <= cursor {
+                        continue;
+                    }
+                }
+            }
+            all_events.push(event);
+        }
+    }
+    all_events.sort_by(|a, b| {
+        let a_id = a.get("id").and_then(|v| v.as_str()).unwrap_or("");
+        let b_id = b.get("id").and_then(|v| v.as_str()).unwrap_or("");
+        a_id.cmp(b_id)
+    });
+    Ok(all_events)
+}
+
+// ── Signed API request helper ──────────────────────────────────────────
+
+fn signed_api_request(
+    client: &reqwest::blocking::Client,
+    method: &str,
+    remote: &str,
+    path: &str,
+    body_str: &str,
+    signing_key: &SigningKey,
+) -> anyhow::Result<serde_json::Value> {
+    let url = format!("{}{}", remote.trim_end_matches('/'), path);
+    let (timestamp, pubkey, signature) = sign_request(method, path, body_str, signing_key)?;
+
+    let resp = match method {
+        "GET" => client
+            .get(&url)
+            .header("X-Scope-PublicKey", &pubkey)
+            .header("X-Scope-Timestamp", &timestamp)
+            .header("X-Scope-Signature", &signature)
+            .send()?,
+        _ => client
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .header("X-Scope-PublicKey", &pubkey)
+            .header("X-Scope-Timestamp", &timestamp)
+            .header("X-Scope-Signature", &signature)
+            .body(body_str.to_string())
+            .send()?,
+    };
+
+    let status = resp.status();
+    let resp_body: serde_json::Value = resp.json()?;
+
+    if !status.is_success() {
+        let msg = resp_body
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown error");
+        return Err(anyhow::anyhow!("request failed ({}): {}", status, msg));
+    }
+
+    Ok(resp_body)
+}
+
+// ── Service sync engine ────────────────────────────────────────────────
+
+fn service_sync_push(project: &str, project_root: &Path, remote: &str) -> anyhow::Result<()> {
+    let signing_key = load_signing_key()?;
+    let sync_state = read_sync_state(project)?;
+
+    let events = collect_events_since(project_root, sync_state.last_pushed_event.as_deref())?;
+    if events.is_empty() {
+        println!("Nothing to push (no new events).");
+        return Ok(());
+    }
+
+    let client = reqwest::blocking::Client::new();
+
+    // 1. Get presigned upload URL from server
+    let body = serde_json::json!({ "project": project });
+    let resp = signed_api_request(
+        &client, "POST", remote, "/sync/push",
+        &serde_json::to_string(&body)?, &signing_key,
+    )?;
+
+    let upload_url = resp
+        .get("upload_url")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("server did not return upload_url"))?;
+    let batch_id = resp
+        .get("batch_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+
+    // 2. Build batch JSONL content
+    let batch_content: String = events
+        .iter()
+        .map(|e| serde_json::to_string(e).unwrap())
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+
+    // 3. Upload batch directly to storage
+    let upload_resp = client
+        .put(upload_url)
+        .header("Content-Type", "application/x-ndjson")
+        .body(batch_content)
+        .send()?;
+
+    if !upload_resp.status().is_success() {
+        return Err(anyhow::anyhow!("batch upload failed ({})", upload_resp.status()));
+    }
+
+    // 4. Track the last event we pushed
+    let last_event_id = events
+        .last()
+        .and_then(|e| e.get("id").and_then(|v| v.as_str()))
+        .map(|s| s.to_string());
+
+    let mut state = read_sync_state(project)?;
+    state.last_pushed_event = last_event_id;
+    state.last_sync_at = Some(now_ts());
+    write_sync_state(project, &state)?;
+
+    println!("Pushed {} events in batch {}.", events.len(), batch_id);
+    Ok(())
+}
+
+fn service_sync_pull(project: &str, project_root: &Path, remote: &str) -> anyhow::Result<()> {
+    let signing_key = load_signing_key()?;
+    let sync_state = read_sync_state(project)?;
+
+    let client = reqwest::blocking::Client::new();
+
+    // 1. Get batch download URLs from server
+    let body = serde_json::json!({
+        "project": project,
+        "since_batch": sync_state.last_pulled_batch,
+    });
+    let resp = signed_api_request(
+        &client, "POST", remote, "/sync/pull",
+        &serde_json::to_string(&body)?, &signing_key,
+    )?;
+
+    let batches = resp
+        .get("batches")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    if batches.is_empty() {
+        println!("Already up to date.");
+        return Ok(());
+    }
+
+    // 2. Download each batch and apply events
+    let mut total_events = 0usize;
+    let mut latest_batch: Option<String> = sync_state.last_pulled_batch.clone();
+
+    for batch in &batches {
+        let batch_id = batch
+            .get("id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow::anyhow!("batch missing id"))?;
+        let download_url = batch
+            .get("url")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow::anyhow!("batch missing url"))?;
+
+        let batch_resp = client.get(download_url).send()?;
+        if !batch_resp.status().is_success() {
+            return Err(anyhow::anyhow!("failed to download batch {} ({})", batch_id, batch_resp.status()));
+        }
+        let batch_content = batch_resp.text()?;
+
+        // Parse events and append to local JSONL files, deduplicating
+        for line in batch_content.lines() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let event: serde_json::Value = serde_json::from_str(line)?;
+            let issue_id = event
+                .get("issue")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow::anyhow!("event missing issue field"))?;
+
+            let events_path = project_root
+                .join("events")
+                .join(format!("{}.jsonl", issue_id));
+            fs::create_dir_all(events_path.parent().unwrap())?;
+
+            let existing_ids = if events_path.exists() {
+                let content = fs::read_to_string(&events_path)?;
+                content
+                    .lines()
+                    .filter_map(|l| {
+                        serde_json::from_str::<serde_json::Value>(l)
+                            .ok()
+                            .and_then(|v| v.get("id").and_then(|id| id.as_str().map(|s| s.to_string())))
+                    })
+                    .collect::<HashSet<_>>()
+            } else {
+                HashSet::new()
+            };
+
+            let event_id = event.get("id").and_then(|v| v.as_str()).unwrap_or("");
+            if !existing_ids.contains(event_id) {
+                let mut file = fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&events_path)?;
+                writeln!(file, "{}", serde_json::to_string(&event)?)?;
+                total_events += 1;
+            }
+        }
+
+        match &latest_batch {
+            Some(b) if batch_id > b.as_str() => latest_batch = Some(batch_id.to_string()),
+            None => latest_batch = Some(batch_id.to_string()),
+            _ => {}
+        }
+    }
+
+    if total_events > 0 {
+        issues_rebuild(project)?;
+    }
+
+    let mut state = read_sync_state(project)?;
+    state.last_pulled_batch = latest_batch;
+    state.last_sync_at = Some(now_ts());
+    write_sync_state(project, &state)?;
+
+    println!("Pulled {} batches ({} new events).", batches.len(), total_events);
+    Ok(())
+}
+
+fn service_sync_status(project: &str, _project_root: &Path, remote: &str) -> anyhow::Result<()> {
+    let signing_key = load_signing_key()?;
+    let sync_state = read_sync_state(project)?;
+
+    let client = reqwest::blocking::Client::new();
+    let path_str = format!("/sync/status?project={}", project);
+    let resp = signed_api_request(&client, "GET", remote, &path_str, "", &signing_key)?;
+
+    println!("Remote sync status for project '{}':", project);
+    if let Some(total) = resp.get("total_batches").and_then(|v| v.as_u64()) {
+        println!("  Remote batches: {}", total);
+    }
+    if let Some(latest) = resp.get("latest_batch").and_then(|v| v.as_str()) {
+        println!("  Latest batch:   {}", latest);
+    }
+
+    println!("\nLocal sync state:");
+    println!(
+        "  Last pushed event: {}",
+        sync_state.last_pushed_event.as_deref().unwrap_or("(none)")
+    );
+    println!(
+        "  Last pulled batch: {}",
+        sync_state.last_pulled_batch.as_deref().unwrap_or("(none)")
+    );
+    println!(
+        "  Last sync at:      {}",
+        sync_state.last_sync_at.as_deref().unwrap_or("(never)")
+    );
+
+    Ok(())
 }
