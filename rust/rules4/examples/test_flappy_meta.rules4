@@ -1,0 +1,62 @@
+# Simulate flappy bird meta rule behavior natively
+
+rule debugger: @meta -> @io {
+  result(?step, score(), ?val) => {
+    rule(dbg_score, ?val)
+    rule(dbg_steps, ?step)
+    println("[meta] score=", ?val, " steps=", ?step)
+  }
+  result(?step, check_ground(), ?val) => {
+    rule(dbg_ground, ?val)
+    println("[meta] ground=", ?val)
+  }
+}
+
+fn init() = {
+  rule(screen, game)
+  rule(player_y, 50.0)
+  rule(velocity, 0.0)
+  rule(distance, 0.0)
+  rule(dbg_score, "-")
+  rule(dbg_steps, "-")
+  rule(dbg_ground, "-")
+}
+
+fn score() = floor(distance)
+
+fn check_ground() =
+  if player_y > 88.0 then rule(screen, dead)
+  else if player_y < 0.0 then rule(screen, dead)
+  else 0
+
+fn handle_tick() =
+  if screen == game then {
+    rule(distance, distance + 0.015)
+    rule(velocity, velocity + 0.065)
+    rule(player_y, player_y + velocity)
+    check_ground()
+  }
+  else 0
+
+fn render_ui() =
+  if screen == game then score()
+  else if screen == dead then score()
+  else 0
+
+fn render_debug() = "score=" ++ dbg_score ++ " ground=" ++ dbg_ground
+
+{
+  init()
+  # Simulate 3 ticks
+  handle_tick()
+  println("tick1 render_ui: ", render_ui())
+  println("tick1 debug: ", render_debug())
+
+  handle_tick()
+  println("tick2 render_ui: ", render_ui())
+  println("tick2 debug: ", render_debug())
+
+  handle_tick()
+  println("tick3 render_ui: ", render_ui())
+  println("tick3 debug: ", render_debug())
+}

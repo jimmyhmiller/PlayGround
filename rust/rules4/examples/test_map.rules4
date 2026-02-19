@@ -1,0 +1,4 @@
+fn map(?f, nil) = nil
+fn map(?f, cons(?h, ?t)) = cons(?f(?h), map(?f, ?t))
+fn double(?x) = ?x * 2
+map(double, [1, 2, 3])

@@ -1,0 +1,385 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Drawing — Rules4 Learnable Programming</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: #f7f7f8;
+      padding: 20px;
+    }
+    .page { max-width: 1200px; margin: 0 auto; }
+    .header {
+      display: flex; align-items: center; gap: 10px; margin-bottom: 14px;
+    }
+    h1 { font-size: 20px; font-weight: 700; color: #1a1a1a; }
+    .status-dot {
+      width: 8px; height: 8px; border-radius: 50%;
+      display: inline-block; transition: background 0.2s;
+    }
+    .status-dot.ok { background: #22c55e; }
+    .status-dot.err { background: #ef4444; }
+    .status-dot.running { background: #f59e0b; }
+
+    .main {
+      display: flex; gap: 16px; margin-bottom: 12px;
+      height: 500px;
+    }
+    .editor-col {
+      flex: 1; display: flex; flex-direction: column; min-width: 0;
+    }
+    .canvas-col {
+      flex: 1; min-width: 0;
+      background: white;
+      border: 1px solid #eaeaee;
+      border-radius: 12px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      overflow: hidden;
+    }
+    #canvas { width: 100%; height: 100%; }
+
+    .editor-wrap {
+      flex: 1;
+      border: 2px solid #e0e0e4;
+      border-radius: 10px;
+      overflow: hidden;
+    }
+    .cm-editor { height: 100%; }
+    .cm-editor .cm-scroller { overflow: auto; }
+    .cm-editor .cm-content {
+      font-family: 'SF Mono', 'Fira Code', 'Menlo', monospace;
+      font-size: 13px;
+    }
+    .cm-editor .cm-gutters { background: #fafafa; border-right: 1px solid #eee; }
+    .cm-editor.cm-focused { outline: none; }
+
+    .error {
+      background: #fef2f2; color: #dc2626; border-radius: 8px;
+      padding: 6px 10px; font-size: 11px; margin-top: 6px;
+      font-family: 'SF Mono', monospace;
+      max-height: 50px; overflow: auto;
+      display: none; white-space: pre-wrap;
+    }
+    .error.visible { display: block; }
+
+    .controls {
+      display: flex; align-items: center; gap: 14px;
+    }
+    input[type="range"] {
+      flex: 1; height: 6px; background: #ddd;
+      border-radius: 3px; outline: none; cursor: pointer;
+      -webkit-appearance: none; appearance: none;
+    }
+    input[type="range"]::-webkit-slider-thumb {
+      -webkit-appearance: none; width: 20px; height: 20px;
+      background: white; border-radius: 50%;
+      border: 3px solid #1976d2; cursor: pointer;
+      box-shadow: 0 1px 4px rgba(0,0,0,0.18);
+    }
+    .frame-label {
+      font-size: 12px; color: #999; min-width: 120px; text-align: center;
+      font-variant-numeric: tabular-nums; font-weight: 600;
+    }
+  </style>
+</head>
+<body>
+<div class="page">
+  <div class="header">
+    <h1>Drawing</h1>
+    <span class="status-dot ok" id="status"></span>
+  </div>
+
+  <div class="main">
+    <div class="editor-col">
+      <div class="editor-wrap" id="editor-wrap">
+        <div id="editor"></div>
+      </div>
+      <div class="error" id="error"></div>
+    </div>
+    <div class="canvas-col">
+      <svg id="canvas" viewBox="0 0 400 300"></svg>
+    </div>
+  </div>
+
+  <div class="controls">
+    <input type="range" id="slider" min="0" max="39" value="39">
+    <span class="frame-label" id="frame-label">frame 39</span>
+  </div>
+</div>
+
+<script type="module">
+import { Rules4 } from './bridge.js';
+
+const { EditorView, basicSetup } = await import('https://esm.sh/codemirror@6.0.1');
+
+const DEFAULT_CODE = `\
+# === Bouncing ball ===
+# Change the numbers and watch the path update!
+
+fn ball_x(?f) = ?f * 9 + 20
+
+fn gravity() = 3
+
+fn ball_vy(0) = 0
+fn ball_vy(?f) =
+  if ball_y(?f - 1) + ball_vy(?f - 1) + gravity() > 270
+  then 0 - ball_vy(?f - 1)
+  else ball_vy(?f - 1) + gravity()
+
+fn ball_y(0) = 30
+fn ball_y(?f) = ball_y(?f - 1) + ball_vy(?f)
+
+fn draw(?f) = circle(ball_x(?f), ball_y(?f), 15)
+
+# Meta rule: capture each draw result and emit to @draw
+rule trace_draws : @meta -> @draw {
+  result(?step, draw(?f), ?shape) => frame(?f, ?shape)
+}
+
+# Drive all frames
+fn run_frames(?f) =
+  if ?f >= 40 then 0
+  else { draw(?f) run_frames(?f + 1) }
+
+{ run_frames(0) }`;
+
+// ── Elements ──
+
+const slider      = document.getElementById('slider');
+const frameLabel  = document.getElementById('frame-label');
+const errorEl     = document.getElementById('error');
+const statusEl    = document.getElementById('status');
+const canvasSvg   = document.getElementById('canvas');
+
+// ── State ──
+
+let shapes = [];        // [{type, frame, cx, cy, r, ...}]
+let numFrames = 0;
+let currentFrame = 0;
+let runGeneration = 0;
+
+// ── WASM module cache ──
+
+let cachedModule = null;
+
+async function freshR4() {
+  if (!cachedModule) {
+    const resp = await fetch('./rules4.wasm');
+    const bytes = await resp.arrayBuffer();
+    cachedModule = await WebAssembly.compile(bytes);
+  }
+  const instance = await WebAssembly.instantiate(cachedModule, {});
+  const r4 = new Rules4(instance);
+  r4.wasm.engine_new();
+  return r4;
+}
+
+// ── Editor with live update ──
+
+const editorView = new EditorView({
+  doc: DEFAULT_CODE,
+  extensions: [
+    basicSetup,
+    EditorView.updateListener.of(update => {
+      if (update.docChanged) scheduleRun();
+    }),
+  ],
+  parent: document.getElementById('editor'),
+});
+
+// ── Debounced run ──
+
+let runTimer = null;
+function scheduleRun() {
+  clearTimeout(runTimer);
+  runTimer = setTimeout(run, 300);
+}
+
+// ── Run: eval the program, collect @draw output ──
+
+async function run() {
+  const thisGen = ++runGeneration;
+  statusEl.className = 'status-dot running';
+
+  try {
+    const r4 = await freshR4();
+    if (thisGen !== runGeneration) return;
+
+    const code = editorView.state.doc.toString();
+    r4.eval(r4.loadProgram(code));
+    if (thisGen !== runGeneration) return;
+
+    // Collect everything the program emitted via @draw
+    const pending = r4.scopeTakePending("draw");
+    const newShapes = [];
+
+    for (const termId of pending) {
+      const parsed = parseDrawTerm(r4, termId);
+      if (parsed) newShapes.push(parsed);
+    }
+
+    shapes = newShapes;
+    numFrames = shapes.reduce((m, s) => Math.max(m, s.frame + 1), 0);
+
+    slider.max = Math.max(0, numFrames - 1);
+    if (currentFrame >= numFrames) currentFrame = Math.max(0, numFrames - 1);
+    slider.value = currentFrame;
+
+    renderCanvas();
+
+    errorEl.classList.remove('visible');
+    statusEl.className = 'status-dot ok';
+
+  } catch (e) {
+    if (thisGen !== runGeneration) return;
+    errorEl.textContent = e.message;
+    errorEl.classList.add('visible');
+    statusEl.className = 'status-dot err';
+  }
+}
+
+// ── Parse @draw terms ──
+// The program emits frame(?f, shape) via @draw.
+// We interpret: frame(N, circle(x, y, r)), frame(N, line(x1,y1,x2,y2)), etc.
+
+function parseDrawTerm(r4, termId) {
+  if (r4.termTag(termId) !== 2) return null;
+  const head = r4.termCallHead(termId);
+  if (r4.termTag(head) !== 1) return null;
+  const headName = r4.termSymName(head);
+
+  // frame(?f, ?shape)
+  if (headName === 'frame' && r4.termCallArity(termId) >= 2) {
+    const frameArg = r4.termCallArg(termId, 0);
+    const frame = termToNumber(r4, frameArg);
+    const shapeTerm = r4.termCallArg(termId, 1);
+    return parseShapeTerm(r4, shapeTerm, frame);
+  }
+
+  // Bare shape (no frame wrapper) — treat as frame 0
+  return parseShapeTerm(r4, termId, 0);
+}
+
+function termToNumber(r4, id) {
+  const tag = r4.termTag(id);
+  if (tag === 0) return r4.termNum(id);
+  if (tag === 3) return r4.termFloat(id);
+  return 0;
+}
+
+function parseShapeTerm(r4, termId, frame) {
+  if (r4.termTag(termId) !== 2) return null;
+  const head = r4.termCallHead(termId);
+  if (r4.termTag(head) !== 1) return null;
+
+  const name = r4.termSymName(head);
+  const arity = r4.termCallArity(termId);
+  const arg = (i) => termToNumber(r4, r4.termCallArg(termId, i));
+
+  if (name === 'circle' && arity >= 3)
+    return { type: 'circle', frame, cx: arg(0), cy: arg(1), r: arg(2) };
+  if (name === 'ellipse' && arity >= 4)
+    return { type: 'ellipse', frame, cx: arg(0), cy: arg(1), rx: arg(2), ry: arg(3) };
+  if (name === 'line' && arity >= 4)
+    return { type: 'line', frame, x1: arg(0), y1: arg(1), x2: arg(2), y2: arg(3) };
+  if (name === 'rect' && arity >= 4)
+    return { type: 'rect', frame, x: arg(0), y: arg(1), w: arg(2), h: arg(3) };
+
+  return null;
+}
+
+// ── Canvas rendering ──
+
+const SVG_NS = "http://www.w3.org/2000/svg";
+
+function renderCanvas() {
+  while (canvasSvg.firstChild) canvasSvg.removeChild(canvasSvg.firstChild);
+
+  for (const shape of shapes) {
+    let el;
+
+    if (shape.type === 'circle') {
+      el = document.createElementNS(SVG_NS, 'circle');
+      el.setAttribute('cx', shape.cx);
+      el.setAttribute('cy', shape.cy);
+      el.setAttribute('r', shape.r);
+    } else if (shape.type === 'ellipse') {
+      el = document.createElementNS(SVG_NS, 'ellipse');
+      el.setAttribute('cx', shape.cx);
+      el.setAttribute('cy', shape.cy);
+      el.setAttribute('rx', shape.rx);
+      el.setAttribute('ry', shape.ry);
+    } else if (shape.type === 'line') {
+      el = document.createElementNS(SVG_NS, 'line');
+      el.setAttribute('x1', shape.x1);
+      el.setAttribute('y1', shape.y1);
+      el.setAttribute('x2', shape.x2);
+      el.setAttribute('y2', shape.y2);
+    } else if (shape.type === 'rect') {
+      el = document.createElementNS(SVG_NS, 'rect');
+      el.setAttribute('x', shape.x);
+      el.setAttribute('y', shape.y);
+      el.setAttribute('width', shape.w);
+      el.setAttribute('height', shape.h);
+    } else {
+      continue;
+    }
+
+    const isCurrent = shape.frame === currentFrame;
+    const isPast    = shape.frame < currentFrame;
+
+    el.setAttribute('fill', 'none');
+
+    if (isCurrent) {
+      el.setAttribute('stroke', '#222');
+      el.setAttribute('stroke-width', '2.5');
+      el.setAttribute('opacity', '1');
+    } else if (isPast) {
+      el.setAttribute('stroke', '#666');
+      el.setAttribute('stroke-width', '1');
+      el.setAttribute('opacity', '0.3');
+    } else {
+      el.setAttribute('stroke', '#bbb');
+      el.setAttribute('stroke-width', '0.7');
+      el.setAttribute('opacity', '0.15');
+    }
+
+    canvasSvg.appendChild(el);
+  }
+
+  frameLabel.textContent = `frame ${currentFrame} of ${Math.max(0, numFrames - 1)}`;
+}
+
+// ── Slider ──
+
+slider.addEventListener('input', () => {
+  currentFrame = parseInt(slider.value);
+  renderCanvas();
+});
+
+// ── Arrow keys ──
+
+document.addEventListener('keydown', e => {
+  if (e.target.closest('.cm-editor') || e.target.tagName === 'INPUT') return;
+  if (!shapes.length) return;
+
+  const s = parseInt(slider.value);
+  if (e.key === 'ArrowLeft')  { e.preventDefault(); currentFrame = Math.max(0, s - 1); }
+  if (e.key === 'ArrowRight') { e.preventDefault(); currentFrame = Math.min(numFrames - 1, s + 1); }
+  if (e.key === 'Home')       { e.preventDefault(); currentFrame = 0; }
+  if (e.key === 'End')        { e.preventDefault(); currentFrame = numFrames - 1; }
+
+  slider.value = currentFrame;
+  renderCanvas();
+});
+
+// ── Initial run ──
+
+await run();
+</script>
+</body>
+</html>

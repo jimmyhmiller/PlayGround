@@ -1,0 +1,6 @@
+fn filter(?p, nil) = nil
+fn filter(?p, cons(?h, ?t)) = if ?p(?h) then cons(?h, filter(?p, ?t)) else filter(?p, ?t)
+
+fn is_even(?n) = ?n % 2 == 0
+
+filter(is_even, [1, 2, 3, 4, 5, 6])

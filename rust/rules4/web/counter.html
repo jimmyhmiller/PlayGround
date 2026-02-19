@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Rules4 Counter</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+      display: flex; justify-content: center; align-items: center;
+      min-height: 100vh; margin: 0;
+      background: #1a1a2e; color: #e0e0e0;
+    }
+    .counter { text-align: center; }
+    h1 { font-size: 4em; margin: 0; color: #e94560; }
+    button {
+      font-size: 2em; padding: 10px 30px; margin: 10px;
+      cursor: pointer; border: 2px solid #e94560; background: transparent;
+      color: #e94560; border-radius: 8px;
+    }
+    button:hover { background: #e94560; color: white; }
+  </style>
+</head>
+<body>
+  <div id="app"></div>
+
+  <script type="module">
+    import { App } from './app.js';
+
+    const program = `
+      fn init() = rule(counter, 0)
+
+      fn handle_event(increment, ?ev) = rule(counter, counter + 1)
+      fn handle_event(decrement, ?ev) = rule(counter, counter - 1)
+
+      fn render() = @dom element("div",
+        [attr("class", "counter")],
+        [element("h1", [], [text(counter)]),
+         element("div", [],
+           [element("button", [attr("on-click", decrement)], [text("-")]),
+            element("button", [attr("on-click", increment)], [text("+")])])])
+
+      init()
+    `;
+
+    App.create(
+      './rules4.wasm',
+      document.getElementById('app'),
+      program
+    ).then(() => {
+      console.log('Counter app loaded!');
+    }).catch(e => {
+      document.body.innerHTML = '<pre style="color:red">' + e.message + '\n' + e.stack + '</pre>';
+    });
+  </script>
+</body>
+</html>

@@ -1,0 +1,8 @@
+# Test floor with dynamic rules
+fn init() = rule(distance, 3.7)
+fn score() = floor(distance)
+
+{
+  init()
+  score()
+}

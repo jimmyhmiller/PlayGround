@@ -1,0 +1,8 @@
+fn count(nil) = 0
+fn count(cons(?h, ?t)) = 1 + count(?t)
+
+{
+  rule(todo(1), entry("buy milk", false))
+  rule(todo(2), entry("clean", true))
+  count(query_all(entry))
+}

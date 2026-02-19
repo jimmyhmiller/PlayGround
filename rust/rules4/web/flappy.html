@@ -1,0 +1,299 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Flappy Bird — Rules4</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: #2c3e50;
+      display: flex; justify-content: center; align-items: center;
+      min-height: 100vh;
+      font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+      overflow: hidden;
+      user-select: none;
+    }
+    #app {
+      cursor: pointer;
+    }
+    svg { display: block; }
+  </style>
+</head>
+<body>
+  <div id="app"></div>
+
+  <script type="module">
+    import { App } from './app.js';
+
+    const program = `
+      # ── Flappy Bird in Rules4 ──
+
+      # ── Initial state ──
+      fn init() = {
+        rule(screen, menu)
+        rule(player_y, 50.0)
+        rule(velocity, 0.0)
+        rule(distance, 0.0)
+        rule(best, 0)
+        rule(pipe_gap_0, 35.0)
+        rule(pipe_off_0, 0.0)
+        rule(pipe_h_0, 25.0)
+        rule(pipe_gap_1, 35.0)
+        rule(pipe_off_1, -1.0)
+        rule(pipe_h_1, 45.0)
+        rule(dbg_score, "-")
+        rule(dbg_steps, "-")
+        rule(dbg_pipe_x, "-")
+        rule(dbg_ground, "-")
+        rule(dbg_pipe0, "-")
+        rule(dbg_pipe1, "-")
+      }
+
+      fn score() = floor(distance)
+
+      # ── Tick handler (game loop) ──
+      fn handle_event(tick, ?frame) =
+        if screen == game then {
+          rule(distance, distance + 0.015)
+          rule(velocity, velocity + 0.065)
+          rule(player_y, player_y + velocity)
+          check_collisions()
+        }
+        else 0
+
+      # ── Click handler ──
+      fn handle_event(click, ?ev) =
+        if screen == game then rule(velocity, -1.25)
+        else if screen == menu then start_game()
+        else start_game()
+
+      fn start_game() = {
+        rule(best, if score() > best then score() else best)
+        rule(screen, game)
+        rule(distance, 0.0)
+        rule(player_y, 50.0)
+        rule(velocity, 0.0)
+        rule(pipe_off_0, 0.0)
+        rule(pipe_h_0, 25.0)
+        rule(pipe_off_1, -1.0)
+        rule(pipe_h_1, 45.0)
+      }
+
+      # ── Collision detection ──
+      fn check_collisions() = {
+        check_ground()
+        check_pipe_0()
+        check_pipe_1()
+      }
+
+      fn check_ground() =
+        if player_y > 88.0 then { rule(screen, dead) hit_floor }
+        else if player_y < 0.0 then { rule(screen, dead) hit_ceil }
+        else ok
+
+      # Pipe x position: scrolls from right to left, wrapping every 2.0 distance units
+      fn pipe_x(?off) = 100.0 - (50.0 * ((distance + ?off) % 2.0))
+
+      fn check_pipe_0() =
+        if pipe_x(pipe_off_0) > 15.0 then far
+        else if pipe_x(pipe_off_0) < 25.0 then
+          if player_y < pipe_h_0 then { rule(screen, dead) hit_top }
+          else if player_y > (pipe_h_0 + pipe_gap_0) then { rule(screen, dead) hit_bot }
+          else pass
+        else past
+
+      fn check_pipe_1() =
+        if pipe_x(pipe_off_1) > 15.0 then far
+        else if pipe_x(pipe_off_1) < 25.0 then
+          if player_y < pipe_h_1 then { rule(screen, dead) hit_top }
+          else if player_y > (pipe_h_1 + pipe_gap_1) then { rule(screen, dead) hit_bot }
+          else pass
+        else past
+
+      # ── Meta rules: capture function results for debug panel ──
+      rule debugger: @meta -> @rules {
+        result(?step, score(), ?val) => {
+          rule(dbg_score, ?val)
+          rule(dbg_steps, ?step)
+        }
+        result(?step, pipe_x(?off), ?val) => rule(dbg_pipe_x, "pipe_x(" ++ ?off ++ ")=" ++ ?val)
+        result(?step, check_ground(), ?val) => rule(dbg_ground, ?val)
+        result(?step, check_pipe_0(), ?val) => rule(dbg_pipe0, ?val)
+        result(?step, check_pipe_1(), ?val) => rule(dbg_pipe1, ?val)
+      }
+
+      # ── Rendering ──
+      fn render() = @dom element("svg",
+        [attr("viewBox", "0 0 100 100"),
+         attr("width", 480),
+         attr("height", 480),
+         attr("style", "background: #70c5ce")],
+        [render_bg(),
+         render_pipe(pipe_off_0, pipe_h_0, pipe_gap_0),
+         render_pipe(pipe_off_1, pipe_h_1, pipe_gap_1),
+         render_player(),
+         render_ground(),
+         render_ui(),
+         render_debug()])
+
+      # ── Background ──
+      fn render_bg() = element("g", [], [
+        element("rect", [attr("x", 0), attr("y", 0),
+                         attr("width", 100), attr("height", 100),
+                         attr("fill", "#70c5ce")], [])])
+
+      # ── Ground ──
+      fn render_ground() = element("rect",
+        [attr("x", 0), attr("y", 90),
+         attr("width", 100), attr("height", 10),
+         attr("fill", "#ded895")], [])
+
+      # ── Player (bird) ──
+      fn render_player() = element("g", [], [
+        element("circle",
+          [attr("cx", 20),
+           attr("cy", player_y),
+           attr("r", 3),
+           attr("fill", "#f7dc6f")], []),
+        element("circle",
+          [attr("cx", 21.5),
+           attr("cy", player_y - 0.8),
+           attr("r", 0.8),
+           attr("fill", "white")], []),
+        element("circle",
+          [attr("cx", 22.0),
+           attr("cy", player_y - 0.8),
+           attr("r", 0.4),
+           attr("fill", "black")], []),
+        element("polygon",
+          [attr("points", "23," ++ (player_y - 0.3) ++ " 26," ++ player_y ++ " 23," ++ (player_y + 0.3)),
+           attr("fill", "#e74c3c")], [])])
+
+      # ── Pipes ──
+      fn render_pipe(?off, ?h, ?gap) = element("g", [], [
+        element("rect",
+          [attr("x", pipe_x(?off)),
+           attr("y", 0),
+           attr("width", 8),
+           attr("height", ?h),
+           attr("fill", "#27ae60")], []),
+        element("rect",
+          [attr("x", pipe_x(?off)),
+           attr("y", ?h + ?gap),
+           attr("width", 8),
+           attr("height", 100.0 - ?h - ?gap),
+           attr("fill", "#27ae60")], [])])
+
+      # ── UI overlay ──
+      fn render_ui() =
+        if screen == menu then element("g", [], [
+          element("text",
+            [attr("x", 50), attr("y", 35),
+             attr("text-anchor", "middle"),
+             attr("font-size", 8),
+             attr("fill", "white"),
+             attr("font-family", "sans-serif")],
+            [text("Flappy Bird")]),
+          element("text",
+            [attr("x", 50), attr("y", 55),
+             attr("text-anchor", "middle"),
+             attr("font-size", 4),
+             attr("fill", "white"),
+             attr("font-family", "sans-serif")],
+            [text("Click to start")])])
+        else if screen == dead then element("g", [], [
+          element("rect",
+            [attr("x", 20), attr("y", 25),
+             attr("width", 60), attr("height", 40),
+             attr("fill", "rgba(0,0,0,0.5)"),
+             attr("rx", 3)], []),
+          element("text",
+            [attr("x", 50), attr("y", 38),
+             attr("text-anchor", "middle"),
+             attr("font-size", 6),
+             attr("fill", "#e74c3c"),
+             attr("font-family", "sans-serif")],
+            [text("Game Over")]),
+          element("text",
+            [attr("x", 50), attr("y", 48),
+             attr("text-anchor", "middle"),
+             attr("font-size", 4),
+             attr("fill", "white"),
+             attr("font-family", "sans-serif")],
+            [text("Score: " ++ score())]),
+          element("text",
+            [attr("x", 50), attr("y", 55),
+             attr("text-anchor", "middle"),
+             attr("font-size", 4),
+             attr("fill", "#f7dc6f"),
+             attr("font-family", "sans-serif")],
+            [text("Best: " ++ best)]),
+          element("text",
+            [attr("x", 50), attr("y", 62),
+             attr("text-anchor", "middle"),
+             attr("font-size", 3),
+             attr("fill", "#bbb"),
+             attr("font-family", "sans-serif")],
+            [text("Click to restart")])])
+        else element("g", [], [
+          element("text",
+            [attr("x", 50), attr("y", 10),
+             attr("text-anchor", "middle"),
+             attr("font-size", 6),
+             attr("fill", "white"),
+             attr("font-family", "sans-serif"),
+             attr("font-weight", "bold")],
+            [text(score())])])
+
+      # ── Debug overlay (driven by @meta rules) ──
+      fn render_debug() = element("g", [], [
+        element("rect",
+          [attr("x", 0), attr("y", 0),
+           attr("width", 38), attr("height", 22),
+           attr("fill", "rgba(0,0,0,0.65)"),
+           attr("rx", 1)], []),
+        dbg_text(3, "steps: " ++ dbg_steps),
+        dbg_text(6, "score: " ++ dbg_score),
+        dbg_text(9, "y: " ++ player_y),
+        dbg_text(12, "vel: " ++ velocity),
+        dbg_text(15, dbg_pipe_x),
+        dbg_text(18, "ground: " ++ dbg_ground),
+        dbg_text(21, "pipe0: " ++ dbg_pipe0 ++ " pipe1: " ++ dbg_pipe1)])
+
+      fn dbg_text(?y, ?msg) = element("text",
+        [attr("x", 1), attr("y", ?y),
+         attr("font-size", 2.2),
+         attr("fill", "#0f0"),
+         attr("font-family", "monospace")],
+        [text(?msg)])
+
+      init()
+    `;
+
+    App.create(
+      './rules4.wasm?v=' + Date.now(),
+      document.getElementById('app'),
+      program,
+      { tick: true }
+    ).then((app) => {
+      // Window click → send click event
+      window.addEventListener('mousedown', () => {
+        const clickSym = app.r4.sym("click");
+        const evSym = app.r4.sym("mouse");
+        app.sendEvent(clickSym, evSym);
+      });
+      // Space/Enter also count as jump
+      window.addEventListener('keydown', (e) => {
+        if (e.code === 'Space' || e.code === 'Enter') {
+          e.preventDefault();
+          const clickSym = app.r4.sym("click");
+          const evSym = app.r4.sym("key");
+          app.sendEvent(clickSym, evSym);
+        }
+      });
+      console.log('Flappy Bird loaded!');
+    }).catch(e => {
+      document.body.innerHTML = '<pre style="color:red">' + e.message + '\n' + e.stack + '</pre>';
+    });
+  </script>
+</body>
+</html>

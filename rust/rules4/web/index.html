@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Rules4 • TodoMVC</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="app"></div>
+  <footer class="info">
+    <p>Double-click to edit a todo</p>
+    <p>Built with <a href="https://github.com/rules4">Rules4</a> — a term rewriting engine compiled to WASM</p>
+    <p>Part of <a href="http://todomvc.com">TodoMVC</a></p>
+  </footer>
+
+  <script type="module">
+    import { App } from './app.js';
+
+    // Fetch the rules4 program source
+    const resp = await fetch('./todomvc.rules4');
+    const programSource = await resp.text();
+
+    try {
+      const app = await App.create(
+        './rules4.wasm',
+        document.getElementById('app'),
+        programSource
+      );
+      console.log('TodoMVC loaded!');
+      window.app = app; // for debugging
+    } catch (e) {
+      console.error('Failed to load TodoMVC:', e);
+      document.getElementById('app').innerHTML =
+        `<pre style="color:red;padding:20px">${e.message}\n${e.stack}</pre>`;
+    }
+  </script>
+</body>
+</html>

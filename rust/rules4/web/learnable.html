@@ -1,0 +1,1126 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Learnable Programming — Rules4</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: #f7f7f8; color: #333;
+      padding: 28px 20px; line-height: 1.5;
+    }
+    .page { max-width: 1000px; margin: 0 auto; }
+    h1 { font-size: 22px; font-weight: 700; color: #1a1a1a; }
+    .subtitle { font-size: 14px; color: #888; margin-top: 2px; margin-bottom: 16px; }
+    .result { font-weight: 700; color: #2e7d32; background: #e8f5e9;
+      padding: 1px 8px; border-radius: 8px; font-family: 'SF Mono', monospace; font-size: 13px; }
+
+    /* Editor */
+    .editor-wrap {
+      border: 2px solid #e0e0e4; border-radius: 10px; overflow: hidden;
+      margin-bottom: 12px;
+    }
+    .cm-editor { font-size: 13px; }
+    .cm-editor .cm-scroller { min-height: 300px; max-height: 520px; overflow: auto; }
+    .cm-editor .cm-content { font-family: 'SF Mono', 'Fira Code', 'Menlo', monospace; }
+    .cm-editor .cm-gutters { background: #fafafa; border-right: 1px solid #eee; }
+    .cm-editor.cm-focused { outline: none; }
+
+    /* Controls row */
+    .controls-row {
+      display: flex; align-items: center; gap: 12px; margin-bottom: 14px; flex-wrap: wrap;
+    }
+    #run-btn {
+      background: #1976d2; color: white; border: none; border-radius: 6px;
+      padding: 6px 18px; font-size: 13px; font-weight: 700; cursor: pointer;
+    }
+    #run-btn:hover { background: #1565c0; }
+    #run-btn:active { background: #0d47a1; }
+    .shortcut-hint { font-size: 11px; color: #bbb; }
+
+    .viz-toggles {
+      display: flex; gap: 12px; align-items: center;
+      font-size: 12px; color: #666;
+    }
+    .viz-toggles label { cursor: pointer; user-select: none; display: flex; align-items: center; gap: 3px; }
+    .viz-toggles input[type="checkbox"] { margin: 0; }
+
+    #preset-select {
+      margin-left: auto;
+      font-size: 12px; padding: 4px 8px; border-radius: 6px;
+      border: 1px solid #ccc; background: white; color: #333;
+    }
+
+    .error-msg {
+      background: #fbe9e7; color: #c62828; border-radius: 8px;
+      padding: 8px 14px; font-size: 13px; margin-bottom: 14px;
+      font-family: 'SF Mono', monospace; white-space: pre-wrap;
+    }
+
+    /* slider */
+    .slider-row {
+      display: flex; align-items: center; gap: 14px; padding: 4px 0 12px 0;
+    }
+    .slider-label {
+      font-size: 12px; color: #999; min-width: 108px; text-align: center;
+      font-variant-numeric: tabular-nums; font-weight: 600; letter-spacing: 0.3px;
+    }
+    input[type="range"] {
+      -webkit-appearance: none; appearance: none;
+      flex: 1; height: 6px; background: #ddd;
+      border-radius: 3px; outline: none; cursor: pointer;
+    }
+    input[type="range"]::-webkit-slider-thumb {
+      -webkit-appearance: none; width: 20px; height: 20px;
+      background: white; border-radius: 50%;
+      border: 3px solid #1976d2; cursor: pointer;
+      box-shadow: 0 1px 4px rgba(0,0,0,0.18);
+    }
+
+    /* styles for rules4-rendered DOM */
+    .tree-container {
+      background: white; border: 1px solid #eaeaee; border-radius: 12px;
+      padding: 16px 8px 8px 8px; margin-bottom: 16px; overflow-x: auto;
+    }
+    .tree-container svg { display: block; margin: 0 auto; }
+    .tree-container circle { transition: fill 0.12s, stroke 0.12s; }
+    .tree-container line   { transition: stroke 0.12s; }
+    .tree-container text   { transition: fill 0.12s; }
+    .legend {
+      display: flex; gap: 16px; justify-content: center;
+      margin-bottom: 10px; font-size: 11px; color: #999;
+    }
+    .legend-dot {
+      display: inline-block; width: 10px; height: 10px;
+      border-radius: 50%; margin-right: 4px; vertical-align: middle;
+    }
+    .step-card {
+      background: white; border: 1px solid #eaeaee; border-radius: 10px;
+      padding: 12px 16px; display: flex; align-items: baseline; gap: 10px;
+      flex-wrap: wrap; min-height: 44px;
+    }
+    .step-num { color: #bbb; font-size: 11px; font-weight: 700; letter-spacing: 0.4px; }
+    .step-old { font-family: 'SF Mono', monospace; font-size: 14px; color: #555; }
+    .step-arrow { color: #ccc; font-weight: bold; font-size: 14px; }
+    .step-new { font-family: 'SF Mono', monospace; font-size: 14px; color: #1565c0; font-weight: 600; }
+    .kind-badge {
+      margin-left: auto; font-size: 10px; padding: 2px 8px;
+      border-radius: 8px; font-weight: 700; letter-spacing: 0.3px;
+    }
+    .fn-badge { background: #e3f2fd; color: #1565c0; }
+    .builtin-badge { background: #fff3e0; color: #e65100; }
+    .result-val { color: #2e7d32; font-weight: 600; }
+    .result-badge { background: #e8f5e9; color: #2e7d32; }
+
+    /* Value Timeline */
+    .timeline-container {
+      background: white; border: 1px solid #eaeaee; border-radius: 12px;
+      padding: 16px 8px 8px 8px; margin-bottom: 16px; overflow-x: auto;
+    }
+    .timeline-container svg { display: block; margin: 0 auto; }
+
+    /* Iteration Table */
+    .iter-table-container {
+      background: white; border: 1px solid #eaeaee; border-radius: 12px;
+      padding: 16px; margin-bottom: 16px; overflow-x: auto;
+    }
+    .iter-table {
+      border-collapse: collapse; width: 100%; font-size: 13px;
+      font-family: 'SF Mono', monospace;
+    }
+    .iter-table th {
+      background: #f5f5f7; color: #888; font-size: 11px; font-weight: 700;
+      letter-spacing: 0.4px; text-transform: uppercase;
+      padding: 6px 12px; text-align: left; border-bottom: 2px solid #eaeaee;
+    }
+    .iter-table td {
+      padding: 6px 12px; border-bottom: 1px solid #f0f0f2;
+    }
+    .iter-row-active { background: #e3f2fd; }
+    .iter-row-future { color: #ccc; }
+  </style>
+</head>
+<body>
+<div class="page">
+  <h1>Learnable Programming</h1>
+  <div class="subtitle">Watching <span class="result" id="result-badge">...</span></div>
+
+  <div class="editor-wrap">
+    <div id="editor"></div>
+  </div>
+
+  <div class="controls-row">
+    <button id="run-btn">Run &#x25B8;</button>
+    <span class="shortcut-hint">&#x2318;Enter</span>
+
+    <div class="viz-toggles" id="viz-toggles"></div>
+
+    <select id="preset-select">
+      <option value="fib_memo">Fibonacci (memoized)</option>
+      <option value="map_list">Map over list</option>
+      <option value="sum_acc">Sum (accumulator)</option>
+      <option value="custom">Custom</option>
+    </select>
+  </div>
+
+  <div id="error-msg" class="error-msg" style="display:none"></div>
+
+  <!-- rules4 @dom renders into here -->
+  <div id="viz"></div>
+
+  <!-- slider stays in static HTML for responsive dragging -->
+  <div class="slider-row">
+    <input type="range" id="slider" min="0" max="0" value="0">
+    <span class="slider-label" id="slider-label">Step 0</span>
+  </div>
+</div>
+
+<script type="module">
+import { Rules4 } from './bridge.js';
+import { renderTerm, patch } from './vdom.js';
+import {
+  allModules, callTreeModule, stepCardModule,
+  valueTimelineModule, iterationTableModule,
+  assertNum,
+} from './viz-modules.js';
+
+// ── Presets ──
+
+const PRESETS = {
+  fib_memo: {
+    enabledModules: ['call_tree', 'step_card', 'value_timeline'],
+    code: `\
+# === Program ===
+fn fib(0) = 0
+fn fib(1) = 1
+fn fib(?n) = fib(?n - 1) + fib(?n - 2)
+
+rule memo : @meta -> @rules {
+  result(?s, fib(?n), ?val) => rule(fib(?n), ?val)
+}
+
+fn fact(0) = 1
+fn fact(?n) = ?n * fact(?n - 1)
+
+# === Meta Rules ===
+rule tracer : @meta -> @rules {
+  reduction(?step, ?old, ?new, fn(?name, ?idx)) =>
+    if should_trace(?name) then {
+      rule(trace(trace_count), reduced(?old, ?new, fn(?name, ?idx)))
+      rule(trace_count, trace_count + 1)
+    } else 0
+  result(?step, ?call, ?val) => {
+    rule(call_result(quote(?call)), ?val)
+    rule(trace(trace_count), completed(quote(?call), ?val))
+    rule(trace_count, trace_count + 1)
+  }
+}
+
+# === Harness ===
+{
+  rule(trace_count, 0)
+  rule(should_trace(fib), true)
+  rule(should_trace(fact), true)
+  rule(result_val, fib(5) + fact(4))
+  rule(max_step, trace_count - 1)
+}
+
+# === View ===
+fn cls(?c) = attr("class", ?c)
+
+fn node_fill(?i) =
+  if current_step < node_entry(?i) then "#f0f0f0"
+  else if current_step < node_completion(?i) then "#fff3e0"
+  else "#42a5f5"
+
+fn node_stroke(?i) =
+  if current_step < node_entry(?i) then "#ddd"
+  else if current_step < node_completion(?i) then "#ff9800"
+  else "#1976d2"
+
+fn node_text_fill(?i) =
+  if current_step < node_entry(?i) then "#bbb"
+  else if current_step < node_completion(?i) then "#e65100"
+  else "#fff"
+
+fn node_label(?i) =
+  if current_step >= node_completion(?i) then call_result(node_call(?i))
+  else node_call(?i)
+
+fn edge_stroke(?i) =
+  if current_step >= node_entry(edge_to(?i)) then "#90caf9" else "#e8e8e8"
+
+fn render_node(?i) = element("g", [], [
+  element("circle", [
+    attr("cx", node_cx(?i)), attr("cy", node_cy(?i)), attr("r", 20),
+    attr("fill", node_fill(?i)), attr("stroke", node_stroke(?i)),
+    attr("stroke-width", 2)
+  ], []),
+  element("text", [
+    attr("x", node_cx(?i)), attr("y", node_cy(?i) + 4),
+    attr("text-anchor", "middle"), attr("font-size", 10),
+    attr("font-weight", 700), attr("fill", node_text_fill(?i)),
+    attr("font-family", "-apple-system, sans-serif")
+  ], [text(node_label(?i))])])
+
+fn render_edge(?i) = element("line", [
+  attr("x1", node_cx(edge_from(?i))), attr("y1", node_cy(edge_from(?i)) + 20),
+  attr("x2", node_cx(edge_to(?i))),   attr("y2", node_cy(edge_to(?i)) - 20),
+  attr("stroke", edge_stroke(?i)), attr("stroke-width", 2)
+], [])
+
+fn render_nodes(?i) =
+  if ?i >= node_count then nil
+  else cons(render_node(?i), render_nodes(?i + 1))
+
+fn render_edges(?i) =
+  if ?i >= edge_count then nil
+  else cons(render_edge(?i), render_edges(?i + 1))
+
+fn append(nil, ?ys) = ?ys
+fn append(cons(?x, ?xs), ?ys) = cons(?x, append(?xs, ?ys))
+
+fn kind_badge(fn(?name, ?idx)) =
+  element("span", [cls("kind-badge fn-badge")], [text(?name)])
+fn kind_badge(builtin(?op)) =
+  element("span", [cls("kind-badge builtin-badge")], [text(?op)])
+
+fn step_card_for(reduced(?old, ?new, ?kind)) = element("div", [cls("step-card")], [
+  element("span", [cls("step-num")], [text("STEP " ++ current_step)]),
+  element("span", [cls("step-old")], [text(?old)]),
+  element("span", [cls("step-arrow")], [text(" → ")]),
+  element("span", [cls("step-new")], [text(?new)]),
+  kind_badge(?kind)])
+
+fn step_card_for(completed(?call, ?val)) = element("div", [cls("step-card")], [
+  element("span", [cls("step-num")], [text("STEP " ++ current_step)]),
+  element("span", [cls("step-old")], [text(?call)]),
+  element("span", [cls("step-arrow")], [text(" = ")]),
+  element("span", [cls("step-new result-val")], [text(?val)]),
+  element("span", [cls("kind-badge result-badge")], [text("result")])])
+
+fn step_card() = step_card_for(trace(current_step))
+
+fn vt_color(0) = "#1976d2"
+fn vt_color(1) = "#e65100"
+fn vt_color(2) = "#2e7d32"
+fn vt_color(3) = "#7b1fa2"
+
+fn vt_dot_fill(?s, ?j) =
+  if current_step >= vt_point_step(?s, ?j) then vt_color(?s) else "#e0e0e0"
+
+fn vt_dot_r(?s, ?j) =
+  if current_step >= vt_point_step(?s, ?j) then 5 else 3
+
+fn vt_label_opacity(?s, ?j) =
+  if current_step >= vt_point_step(?s, ?j) then 1 else 0
+
+fn vt_render_point(?s, ?j) = element("g", [], [
+  element("circle", [
+    attr("cx", vt_point_x(?s, ?j)), attr("cy", vt_point_y(?s, ?j)),
+    attr("r", vt_dot_r(?s, ?j)),
+    attr("fill", vt_dot_fill(?s, ?j))
+  ], []),
+  element("text", [
+    attr("x", vt_point_x(?s, ?j)), attr("y", vt_point_y(?s, ?j) - 8),
+    attr("text-anchor", "middle"), attr("font-size", 9),
+    attr("fill", vt_dot_fill(?s, ?j)),
+    attr("opacity", vt_label_opacity(?s, ?j)),
+    attr("font-family", "-apple-system, sans-serif")
+  ], [text(vt_point_label(?s, ?j))])])
+
+fn vt_render_points(?s, ?j) =
+  if ?j >= vt_point_count(?s) then nil
+  else cons(vt_render_point(?s, ?j), vt_render_points(?s, ?j + 1))
+
+fn vt_render_series_label(?s) = element("text", [
+  attr("x", 4), attr("y", vt_series_y(?s) + 4),
+  attr("font-size", 11), attr("fill", vt_color(?s)),
+  attr("font-weight", 700),
+  attr("font-family", "-apple-system, sans-serif")
+], [text(vt_series_name(?s))])
+
+fn vt_render_series_row(?s) = element("g", [], append(
+  cons(vt_render_series_label(?s),
+    cons(element("line", [
+      attr("x1", 40), attr("y1", vt_series_y(?s)),
+      attr("x2", vt_svg_width - 20), attr("y2", vt_series_y(?s)),
+      attr("stroke", "#f0f0f0"), attr("stroke-width", 1)
+    ], []), nil)),
+  vt_render_points(?s, 0)))
+
+fn vt_render_all_series(?s) =
+  if ?s >= vt_series_count then nil
+  else cons(vt_render_series_row(?s), vt_render_all_series(?s + 1))
+
+fn render_timeline() = element("div", [cls("timeline-container")], [
+  element("svg", [
+    attr("viewBox", "0 0 " ++ vt_svg_width ++ " " ++ vt_svg_height),
+    attr("width", "100%")
+  ], vt_render_all_series(0))])
+
+fn render_call_tree() = element("div", [cls("tree-container")], [
+  element("div", [cls("legend")], [
+    element("span", [], [
+      element("span", [cls("legend-dot"), attr("style", "background:#e0e0e0")], []),
+      text(" waiting")]),
+    element("span", [], [
+      element("span", [cls("legend-dot"), attr("style", "background:#ffb74d")], []),
+      text(" computing")]),
+    element("span", [], [
+      element("span", [cls("legend-dot"), attr("style", "background:#42a5f5")], []),
+      text(" done")])]),
+  element("svg", [
+    attr("viewBox", "0 0 " ++ svg_width ++ " " ++ svg_height),
+    attr("width", "100%")
+  ], append(render_edges(0), render_nodes(0)))])
+
+fn it_row_cls(?r) =
+  if current_step >= it_row_step(?r) then "iter-row-active" else "iter-row-future"
+
+fn it_render_cell(?r, ?c) = element("td", [], [text(it_cell(?r, ?c))])
+
+fn it_render_cells(?r, ?c) =
+  if ?c >= it_col_count then nil
+  else cons(it_render_cell(?r, ?c), it_render_cells(?r, ?c + 1))
+
+fn it_render_row(?r) = element("tr", [cls(it_row_cls(?r))], it_render_cells(?r, 0))
+
+fn it_render_rows(?r) =
+  if ?r >= it_row_count then nil
+  else cons(it_render_row(?r), it_render_rows(?r + 1))
+
+fn it_render_header_cell(?c) = element("th", [], [text(it_header(?c))])
+
+fn it_render_header_cells(?c) =
+  if ?c >= it_col_count then nil
+  else cons(it_render_header_cell(?c), it_render_header_cells(?c + 1))
+
+fn render_iter_table() = element("div", [cls("iter-table-container")], [
+  element("table", [cls("iter-table")], [
+    element("thead", [], [element("tr", [], it_render_header_cells(0))]),
+    element("tbody", [], it_render_rows(0))])])
+
+fn render() = @dom element("div", [], [
+  render_call_tree(),
+  render_timeline(),
+  step_card()])
+
+0`,
+  },
+
+  map_list: {
+    enabledModules: ['call_tree', 'step_card', 'iteration_table', 'value_timeline'],
+    code: `\
+# === Program ===
+fn map(?f, nil) = nil
+fn map(?f, cons(?h, ?t)) = cons(?f(?h), map(?f, ?t))
+fn double(?x) = ?x * 2
+
+# === Meta Rules ===
+rule tracer : @meta -> @rules {
+  reduction(?step, ?old, ?new, fn(?name, ?idx)) =>
+    if should_trace(?name) then {
+      rule(trace(trace_count), reduced(?old, ?new, fn(?name, ?idx)))
+      rule(trace_count, trace_count + 1)
+    } else 0
+  result(?step, ?call, ?val) => {
+    rule(call_result(quote(?call)), ?val)
+    rule(trace(trace_count), completed(quote(?call), ?val))
+    rule(trace_count, trace_count + 1)
+  }
+}
+
+# === Harness ===
+{
+  rule(trace_count, 0)
+  rule(should_trace(map), true)
+  rule(should_trace(double), true)
+  rule(result_val, map(double, [1, 2, 3, 4, 5]))
+  rule(max_step, trace_count - 1)
+}
+
+# === View ===
+fn cls(?c) = attr("class", ?c)
+fn append(nil, ?ys) = ?ys
+fn append(cons(?x, ?xs), ?ys) = cons(?x, append(?xs, ?ys))
+
+fn node_fill(?i) =
+  if current_step < node_entry(?i) then "#f0f0f0"
+  else if current_step < node_completion(?i) then "#fff3e0"
+  else "#42a5f5"
+
+fn node_stroke(?i) =
+  if current_step < node_entry(?i) then "#ddd"
+  else if current_step < node_completion(?i) then "#ff9800"
+  else "#1976d2"
+
+fn node_text_fill(?i) =
+  if current_step < node_entry(?i) then "#bbb"
+  else if current_step < node_completion(?i) then "#e65100"
+  else "#fff"
+
+fn node_label(?i) =
+  if current_step >= node_completion(?i) then call_result(node_call(?i))
+  else node_call(?i)
+
+fn edge_stroke(?i) =
+  if current_step >= node_entry(edge_to(?i)) then "#90caf9" else "#e8e8e8"
+
+fn render_node(?i) = element("g", [], [
+  element("circle", [
+    attr("cx", node_cx(?i)), attr("cy", node_cy(?i)), attr("r", 20),
+    attr("fill", node_fill(?i)), attr("stroke", node_stroke(?i)),
+    attr("stroke-width", 2)
+  ], []),
+  element("text", [
+    attr("x", node_cx(?i)), attr("y", node_cy(?i) + 4),
+    attr("text-anchor", "middle"), attr("font-size", 10),
+    attr("font-weight", 700), attr("fill", node_text_fill(?i)),
+    attr("font-family", "-apple-system, sans-serif")
+  ], [text(node_label(?i))])])
+
+fn render_edge(?i) = element("line", [
+  attr("x1", node_cx(edge_from(?i))), attr("y1", node_cy(edge_from(?i)) + 20),
+  attr("x2", node_cx(edge_to(?i))),   attr("y2", node_cy(edge_to(?i)) - 20),
+  attr("stroke", edge_stroke(?i)), attr("stroke-width", 2)
+], [])
+
+fn render_nodes(?i) =
+  if ?i >= node_count then nil
+  else cons(render_node(?i), render_nodes(?i + 1))
+
+fn render_edges(?i) =
+  if ?i >= edge_count then nil
+  else cons(render_edge(?i), render_edges(?i + 1))
+
+fn render_call_tree() = element("div", [cls("tree-container")], [
+  element("div", [cls("legend")], [
+    element("span", [], [
+      element("span", [cls("legend-dot"), attr("style", "background:#e0e0e0")], []),
+      text(" waiting")]),
+    element("span", [], [
+      element("span", [cls("legend-dot"), attr("style", "background:#ffb74d")], []),
+      text(" computing")]),
+    element("span", [], [
+      element("span", [cls("legend-dot"), attr("style", "background:#42a5f5")], []),
+      text(" done")])]),
+  element("svg", [
+    attr("viewBox", "0 0 " ++ svg_width ++ " " ++ svg_height),
+    attr("width", "100%")
+  ], append(render_edges(0), render_nodes(0)))])
+
+fn kind_badge(fn(?name, ?idx)) =
+  element("span", [cls("kind-badge fn-badge")], [text(?name)])
+fn kind_badge(builtin(?op)) =
+  element("span", [cls("kind-badge builtin-badge")], [text(?op)])
+
+fn step_card_for(reduced(?old, ?new, ?kind)) = element("div", [cls("step-card")], [
+  element("span", [cls("step-num")], [text("STEP " ++ current_step)]),
+  element("span", [cls("step-old")], [text(?old)]),
+  element("span", [cls("step-arrow")], [text(" → ")]),
+  element("span", [cls("step-new")], [text(?new)]),
+  kind_badge(?kind)])
+
+fn step_card_for(completed(?call, ?val)) = element("div", [cls("step-card")], [
+  element("span", [cls("step-num")], [text("STEP " ++ current_step)]),
+  element("span", [cls("step-old")], [text(?call)]),
+  element("span", [cls("step-arrow")], [text(" = ")]),
+  element("span", [cls("step-new result-val")], [text(?val)]),
+  element("span", [cls("kind-badge result-badge")], [text("result")])])
+
+fn step_card() = step_card_for(trace(current_step))
+
+fn it_row_cls(?r) =
+  if current_step >= it_row_step(?r) then "iter-row-active" else "iter-row-future"
+
+fn it_render_cell(?r, ?c) = element("td", [], [text(it_cell(?r, ?c))])
+
+fn it_render_cells(?r, ?c) =
+  if ?c >= it_col_count then nil
+  else cons(it_render_cell(?r, ?c), it_render_cells(?r, ?c + 1))
+
+fn it_render_row(?r) = element("tr", [cls(it_row_cls(?r))], it_render_cells(?r, 0))
+
+fn it_render_rows(?r) =
+  if ?r >= it_row_count then nil
+  else cons(it_render_row(?r), it_render_rows(?r + 1))
+
+fn it_render_header_cell(?c) = element("th", [], [text(it_header(?c))])
+
+fn it_render_header_cells(?c) =
+  if ?c >= it_col_count then nil
+  else cons(it_render_header_cell(?c), it_render_header_cells(?c + 1))
+
+fn render_iter_table() = element("div", [cls("iter-table-container")], [
+  element("table", [cls("iter-table")], [
+    element("thead", [], [element("tr", [], it_render_header_cells(0))]),
+    element("tbody", [], it_render_rows(0))])])
+
+fn vt_color(0) = "#1976d2"
+fn vt_color(1) = "#e65100"
+fn vt_color(2) = "#2e7d32"
+fn vt_color(3) = "#7b1fa2"
+
+fn vt_dot_fill(?s, ?j) =
+  if current_step >= vt_point_step(?s, ?j) then vt_color(?s) else "#e0e0e0"
+
+fn vt_dot_r(?s, ?j) =
+  if current_step >= vt_point_step(?s, ?j) then 5 else 3
+
+fn vt_label_opacity(?s, ?j) =
+  if current_step >= vt_point_step(?s, ?j) then 1 else 0
+
+fn vt_render_point(?s, ?j) = element("g", [], [
+  element("circle", [
+    attr("cx", vt_point_x(?s, ?j)), attr("cy", vt_point_y(?s, ?j)),
+    attr("r", vt_dot_r(?s, ?j)),
+    attr("fill", vt_dot_fill(?s, ?j))
+  ], []),
+  element("text", [
+    attr("x", vt_point_x(?s, ?j)), attr("y", vt_point_y(?s, ?j) - 8),
+    attr("text-anchor", "middle"), attr("font-size", 9),
+    attr("fill", vt_dot_fill(?s, ?j)),
+    attr("opacity", vt_label_opacity(?s, ?j)),
+    attr("font-family", "-apple-system, sans-serif")
+  ], [text(vt_point_label(?s, ?j))])])
+
+fn vt_render_points(?s, ?j) =
+  if ?j >= vt_point_count(?s) then nil
+  else cons(vt_render_point(?s, ?j), vt_render_points(?s, ?j + 1))
+
+fn vt_render_series_label(?s) = element("text", [
+  attr("x", 4), attr("y", vt_series_y(?s) + 4),
+  attr("font-size", 11), attr("fill", vt_color(?s)),
+  attr("font-weight", 700),
+  attr("font-family", "-apple-system, sans-serif")
+], [text(vt_series_name(?s))])
+
+fn vt_render_series_row(?s) = element("g", [], append(
+  cons(vt_render_series_label(?s),
+    cons(element("line", [
+      attr("x1", 40), attr("y1", vt_series_y(?s)),
+      attr("x2", vt_svg_width - 20), attr("y2", vt_series_y(?s)),
+      attr("stroke", "#f0f0f0"), attr("stroke-width", 1)
+    ], []), nil)),
+  vt_render_points(?s, 0)))
+
+fn vt_render_all_series(?s) =
+  if ?s >= vt_series_count then nil
+  else cons(vt_render_series_row(?s), vt_render_all_series(?s + 1))
+
+fn render_timeline() = element("div", [cls("timeline-container")], [
+  element("svg", [
+    attr("viewBox", "0 0 " ++ vt_svg_width ++ " " ++ vt_svg_height),
+    attr("width", "100%")
+  ], vt_render_all_series(0))])
+
+fn render() = @dom element("div", [], [
+  render_call_tree(),
+  render_iter_table(),
+  render_timeline(),
+  step_card()])
+
+0`,
+  },
+
+  sum_acc: {
+    enabledModules: ['call_tree', 'step_card', 'value_timeline'],
+    code: `\
+# === Program ===
+fn sum(nil) = 0
+fn sum(cons(?h, ?t)) = ?h + sum(?t)
+
+# === Meta Rules ===
+rule tracer : @meta -> @rules {
+  reduction(?step, ?old, ?new, fn(?name, ?idx)) =>
+    if should_trace(?name) then {
+      rule(trace(trace_count), reduced(?old, ?new, fn(?name, ?idx)))
+      rule(trace_count, trace_count + 1)
+    } else 0
+  result(?step, ?call, ?val) => {
+    rule(call_result(quote(?call)), ?val)
+    rule(trace(trace_count), completed(quote(?call), ?val))
+    rule(trace_count, trace_count + 1)
+  }
+}
+
+# === Harness ===
+{
+  rule(trace_count, 0)
+  rule(should_trace(sum), true)
+  rule(result_val, sum([1, 2, 3, 4, 5]))
+  rule(max_step, trace_count - 1)
+}
+
+# === View ===
+fn cls(?c) = attr("class", ?c)
+fn append(nil, ?ys) = ?ys
+fn append(cons(?x, ?xs), ?ys) = cons(?x, append(?xs, ?ys))
+
+fn node_fill(?i) =
+  if current_step < node_entry(?i) then "#f0f0f0"
+  else if current_step < node_completion(?i) then "#fff3e0"
+  else "#42a5f5"
+
+fn node_stroke(?i) =
+  if current_step < node_entry(?i) then "#ddd"
+  else if current_step < node_completion(?i) then "#ff9800"
+  else "#1976d2"
+
+fn node_text_fill(?i) =
+  if current_step < node_entry(?i) then "#bbb"
+  else if current_step < node_completion(?i) then "#e65100"
+  else "#fff"
+
+fn node_label(?i) =
+  if current_step >= node_completion(?i) then call_result(node_call(?i))
+  else node_call(?i)
+
+fn edge_stroke(?i) =
+  if current_step >= node_entry(edge_to(?i)) then "#90caf9" else "#e8e8e8"
+
+fn render_node(?i) = element("g", [], [
+  element("circle", [
+    attr("cx", node_cx(?i)), attr("cy", node_cy(?i)), attr("r", 20),
+    attr("fill", node_fill(?i)), attr("stroke", node_stroke(?i)),
+    attr("stroke-width", 2)
+  ], []),
+  element("text", [
+    attr("x", node_cx(?i)), attr("y", node_cy(?i) + 4),
+    attr("text-anchor", "middle"), attr("font-size", 10),
+    attr("font-weight", 700), attr("fill", node_text_fill(?i)),
+    attr("font-family", "-apple-system, sans-serif")
+  ], [text(node_label(?i))])])
+
+fn render_edge(?i) = element("line", [
+  attr("x1", node_cx(edge_from(?i))), attr("y1", node_cy(edge_from(?i)) + 20),
+  attr("x2", node_cx(edge_to(?i))),   attr("y2", node_cy(edge_to(?i)) - 20),
+  attr("stroke", edge_stroke(?i)), attr("stroke-width", 2)
+], [])
+
+fn render_nodes(?i) =
+  if ?i >= node_count then nil
+  else cons(render_node(?i), render_nodes(?i + 1))
+
+fn render_edges(?i) =
+  if ?i >= edge_count then nil
+  else cons(render_edge(?i), render_edges(?i + 1))
+
+fn render_call_tree() = element("div", [cls("tree-container")], [
+  element("div", [cls("legend")], [
+    element("span", [], [
+      element("span", [cls("legend-dot"), attr("style", "background:#e0e0e0")], []),
+      text(" waiting")]),
+    element("span", [], [
+      element("span", [cls("legend-dot"), attr("style", "background:#ffb74d")], []),
+      text(" computing")]),
+    element("span", [], [
+      element("span", [cls("legend-dot"), attr("style", "background:#42a5f5")], []),
+      text(" done")])]),
+  element("svg", [
+    attr("viewBox", "0 0 " ++ svg_width ++ " " ++ svg_height),
+    attr("width", "100%")
+  ], append(render_edges(0), render_nodes(0)))])
+
+fn kind_badge(fn(?name, ?idx)) =
+  element("span", [cls("kind-badge fn-badge")], [text(?name)])
+fn kind_badge(builtin(?op)) =
+  element("span", [cls("kind-badge builtin-badge")], [text(?op)])
+
+fn step_card_for(reduced(?old, ?new, ?kind)) = element("div", [cls("step-card")], [
+  element("span", [cls("step-num")], [text("STEP " ++ current_step)]),
+  element("span", [cls("step-old")], [text(?old)]),
+  element("span", [cls("step-arrow")], [text(" → ")]),
+  element("span", [cls("step-new")], [text(?new)]),
+  kind_badge(?kind)])
+
+fn step_card_for(completed(?call, ?val)) = element("div", [cls("step-card")], [
+  element("span", [cls("step-num")], [text("STEP " ++ current_step)]),
+  element("span", [cls("step-old")], [text(?call)]),
+  element("span", [cls("step-arrow")], [text(" = ")]),
+  element("span", [cls("step-new result-val")], [text(?val)]),
+  element("span", [cls("kind-badge result-badge")], [text("result")])])
+
+fn step_card() = step_card_for(trace(current_step))
+
+fn vt_color(0) = "#1976d2"
+fn vt_color(1) = "#e65100"
+fn vt_color(2) = "#2e7d32"
+fn vt_color(3) = "#7b1fa2"
+
+fn vt_dot_fill(?s, ?j) =
+  if current_step >= vt_point_step(?s, ?j) then vt_color(?s) else "#e0e0e0"
+
+fn vt_dot_r(?s, ?j) =
+  if current_step >= vt_point_step(?s, ?j) then 5 else 3
+
+fn vt_label_opacity(?s, ?j) =
+  if current_step >= vt_point_step(?s, ?j) then 1 else 0
+
+fn vt_render_point(?s, ?j) = element("g", [], [
+  element("circle", [
+    attr("cx", vt_point_x(?s, ?j)), attr("cy", vt_point_y(?s, ?j)),
+    attr("r", vt_dot_r(?s, ?j)),
+    attr("fill", vt_dot_fill(?s, ?j))
+  ], []),
+  element("text", [
+    attr("x", vt_point_x(?s, ?j)), attr("y", vt_point_y(?s, ?j) - 8),
+    attr("text-anchor", "middle"), attr("font-size", 9),
+    attr("fill", vt_dot_fill(?s, ?j)),
+    attr("opacity", vt_label_opacity(?s, ?j)),
+    attr("font-family", "-apple-system, sans-serif")
+  ], [text(vt_point_label(?s, ?j))])])
+
+fn vt_render_points(?s, ?j) =
+  if ?j >= vt_point_count(?s) then nil
+  else cons(vt_render_point(?s, ?j), vt_render_points(?s, ?j + 1))
+
+fn vt_render_series_label(?s) = element("text", [
+  attr("x", 4), attr("y", vt_series_y(?s) + 4),
+  attr("font-size", 11), attr("fill", vt_color(?s)),
+  attr("font-weight", 700),
+  attr("font-family", "-apple-system, sans-serif")
+], [text(vt_series_name(?s))])
+
+fn vt_render_series_row(?s) = element("g", [], append(
+  cons(vt_render_series_label(?s),
+    cons(element("line", [
+      attr("x1", 40), attr("y1", vt_series_y(?s)),
+      attr("x2", vt_svg_width - 20), attr("y2", vt_series_y(?s)),
+      attr("stroke", "#f0f0f0"), attr("stroke-width", 1)
+    ], []), nil)),
+  vt_render_points(?s, 0)))
+
+fn vt_render_all_series(?s) =
+  if ?s >= vt_series_count then nil
+  else cons(vt_render_series_row(?s), vt_render_all_series(?s + 1))
+
+fn render_timeline() = element("div", [cls("timeline-container")], [
+  element("svg", [
+    attr("viewBox", "0 0 " ++ vt_svg_width ++ " " ++ vt_svg_height),
+    attr("width", "100%")
+  ], vt_render_all_series(0))])
+
+fn render() = @dom element("div", [], [
+  render_call_tree(),
+  render_timeline(),
+  step_card()])
+
+0`,
+  },
+
+  custom: {
+    enabledModules: ['call_tree', 'step_card'],
+    code: `\
+# === Program ===
+# Write your program here
+
+
+# === Meta Rules ===
+rule tracer : @meta -> @rules {
+  reduction(?step, ?old, ?new, fn(?name, ?idx)) =>
+    if should_trace(?name) then {
+      rule(trace(trace_count), reduced(?old, ?new, fn(?name, ?idx)))
+      rule(trace_count, trace_count + 1)
+    } else 0
+  result(?step, ?call, ?val) => {
+    rule(call_result(quote(?call)), ?val)
+    rule(trace(trace_count), completed(quote(?call), ?val))
+    rule(trace_count, trace_count + 1)
+  }
+}
+
+# === Harness ===
+{
+  rule(trace_count, 0)
+  rule(should_trace(my_fn), true)
+  rule(result_val, 0)
+  rule(max_step, trace_count - 1)
+}
+
+# === View ===
+fn cls(?c) = attr("class", ?c)
+fn append(nil, ?ys) = ?ys
+fn append(cons(?x, ?xs), ?ys) = cons(?x, append(?xs, ?ys))
+
+fn node_fill(?i) =
+  if current_step < node_entry(?i) then "#f0f0f0"
+  else if current_step < node_completion(?i) then "#fff3e0"
+  else "#42a5f5"
+
+fn node_stroke(?i) =
+  if current_step < node_entry(?i) then "#ddd"
+  else if current_step < node_completion(?i) then "#ff9800"
+  else "#1976d2"
+
+fn node_text_fill(?i) =
+  if current_step < node_entry(?i) then "#bbb"
+  else if current_step < node_completion(?i) then "#e65100"
+  else "#fff"
+
+fn node_label(?i) =
+  if current_step >= node_completion(?i) then call_result(node_call(?i))
+  else node_call(?i)
+
+fn edge_stroke(?i) =
+  if current_step >= node_entry(edge_to(?i)) then "#90caf9" else "#e8e8e8"
+
+fn render_node(?i) = element("g", [], [
+  element("circle", [
+    attr("cx", node_cx(?i)), attr("cy", node_cy(?i)), attr("r", 20),
+    attr("fill", node_fill(?i)), attr("stroke", node_stroke(?i)),
+    attr("stroke-width", 2)
+  ], []),
+  element("text", [
+    attr("x", node_cx(?i)), attr("y", node_cy(?i) + 4),
+    attr("text-anchor", "middle"), attr("font-size", 10),
+    attr("font-weight", 700), attr("fill", node_text_fill(?i)),
+    attr("font-family", "-apple-system, sans-serif")
+  ], [text(node_label(?i))])])
+
+fn render_edge(?i) = element("line", [
+  attr("x1", node_cx(edge_from(?i))), attr("y1", node_cy(edge_from(?i)) + 20),
+  attr("x2", node_cx(edge_to(?i))),   attr("y2", node_cy(edge_to(?i)) - 20),
+  attr("stroke", edge_stroke(?i)), attr("stroke-width", 2)
+], [])
+
+fn render_nodes(?i) =
+  if ?i >= node_count then nil
+  else cons(render_node(?i), render_nodes(?i + 1))
+
+fn render_edges(?i) =
+  if ?i >= edge_count then nil
+  else cons(render_edge(?i), render_edges(?i + 1))
+
+fn render_call_tree() = element("div", [cls("tree-container")], [
+  element("svg", [
+    attr("viewBox", "0 0 " ++ svg_width ++ " " ++ svg_height),
+    attr("width", "100%")
+  ], append(render_edges(0), render_nodes(0)))])
+
+fn kind_badge(fn(?name, ?idx)) =
+  element("span", [cls("kind-badge fn-badge")], [text(?name)])
+fn kind_badge(builtin(?op)) =
+  element("span", [cls("kind-badge builtin-badge")], [text(?op)])
+
+fn step_card_for(reduced(?old, ?new, ?kind)) = element("div", [cls("step-card")], [
+  element("span", [cls("step-num")], [text("STEP " ++ current_step)]),
+  element("span", [cls("step-old")], [text(?old)]),
+  element("span", [cls("step-arrow")], [text(" → ")]),
+  element("span", [cls("step-new")], [text(?new)]),
+  kind_badge(?kind)])
+
+fn step_card_for(completed(?call, ?val)) = element("div", [cls("step-card")], [
+  element("span", [cls("step-num")], [text("STEP " ++ current_step)]),
+  element("span", [cls("step-old")], [text(?call)]),
+  element("span", [cls("step-arrow")], [text(" = ")]),
+  element("span", [cls("step-new result-val")], [text(?val)]),
+  element("span", [cls("kind-badge result-badge")], [text("result")])])
+
+fn step_card() = step_card_for(trace(current_step))
+
+fn render() = @dom element("div", [], [
+  render_call_tree(),
+  step_card()])
+
+0`,
+  },
+};
+
+// ── CodeMirror setup ──
+
+const { EditorView, basicSetup } = await import('https://esm.sh/codemirror@6.0.1');
+const { keymap } = await import('https://esm.sh/@codemirror/view@6.0.0');
+
+const runBtn      = document.getElementById('run-btn');
+const resultBadge = document.getElementById('result-badge');
+const vizEl       = document.getElementById('viz');
+const errorMsg    = document.getElementById('error-msg');
+const slider      = document.getElementById('slider');
+const sliderLabel = document.getElementById('slider-label');
+const presetSel   = document.getElementById('preset-select');
+const togglesEl   = document.getElementById('viz-toggles');
+
+// Create editor
+const runKeymap = keymap.of([{
+  key: 'Mod-Enter',
+  run: () => { run(); return true; },
+}]);
+
+let editorView = new EditorView({
+  doc: PRESETS.fib_memo.code,
+  extensions: [basicSetup, runKeymap],
+  parent: document.getElementById('editor'),
+});
+
+// ── Visualization toggles ──
+
+const enabledModules = new Set(PRESETS.fib_memo.enabledModules);
+
+function buildToggles() {
+  togglesEl.innerHTML = '';
+  for (const mod of allModules) {
+    const label = document.createElement('label');
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.checked = enabledModules.has(mod.name);
+    cb.addEventListener('change', () => {
+      if (cb.checked) enabledModules.add(mod.name);
+      else enabledModules.delete(mod.name);
+    });
+    label.appendChild(cb);
+    label.appendChild(document.createTextNode(' ' + mod.label));
+    togglesEl.appendChild(label);
+  }
+}
+buildToggles();
+
+// ── Preset selector ──
+
+presetSel.addEventListener('change', () => {
+  const preset = PRESETS[presetSel.value];
+  if (!preset) return;
+
+  // Replace editor content
+  editorView.dispatch({
+    changes: { from: 0, to: editorView.state.doc.length, insert: preset.code },
+  });
+
+  // Update toggles
+  enabledModules.clear();
+  for (const m of preset.enabledModules) enabledModules.add(m);
+  buildToggles();
+});
+
+// ── Run pipeline ──
+
+let r4 = null, maxStep = 0;
+let currentTree = null, currentTermId = null, renderSym = null;
+
+async function run() {
+  errorMsg.style.display = 'none';
+  runBtn.disabled = true;
+  runBtn.textContent = 'Running...';
+
+  try {
+    // Phase 1: fresh engine, load program + meta + harness
+    r4 = await Rules4.load('./rules4.wasm');
+
+    const fullCode = editorView.state.doc.toString();
+    const viewMarker = '# === View ===';
+    const viewIdx = fullCode.indexOf(viewMarker);
+
+    let programCode, viewCode;
+    if (viewIdx >= 0) {
+      programCode = fullCode.substring(0, viewIdx);
+      viewCode = fullCode.substring(viewIdx + viewMarker.length);
+    } else {
+      programCode = fullCode;
+      viewCode = '';
+    }
+
+    r4.eval(r4.loadProgram(programCode));
+
+    maxStep = r4.termNum(r4.eval(r4.sym("max_step")));
+    const resultTerm = r4.eval(r4.sym("result_val"));
+    resultBadge.textContent = `result_val = ${r4.display(resultTerm)}`;
+
+    // Phase 2: run enabled layout modules
+    const tracedFns = new Set();
+
+    // Call tree must run first to populate tracedFns for other modules
+    for (const mod of allModules) {
+      if (enabledModules.has(mod.name)) {
+        mod.analyze(r4, maxStep, tracedFns);
+      }
+    }
+
+    // If no modules populated tracedFns, scan manually
+    if (tracedFns.size === 0) {
+      for (let i = 0; i <= maxStep; i++) {
+        const event = r4.eval(r4.call(r4.sym("trace"), [r4.num(i)]));
+        const eventHead = r4.termCallHead(event);
+        if (r4.termTag(eventHead) !== 1) continue;
+        const eventType = r4.termSymName(eventHead);
+        if (eventType === 'reduced') {
+          const kind = r4.termCallArg(event, 2);
+          const fnName = r4.termSymName(r4.termCallArg(kind, 0));
+          tracedFns.add(fnName);
+        }
+      }
+    }
+
+    // Phase 3: load view code
+    if (viewCode.trim()) {
+      r4.eval(r4.loadProgram(viewCode));
+    }
+
+    // Phase 4: set initial step and render
+    r4.assertRule(r4.sym("current_step"), r4.num(maxStep));
+    renderSym = r4.sym("render");
+    currentTree = null;
+    currentTermId = null;
+    doRender();
+
+    slider.max = maxStep;
+    slider.value = maxStep;
+    sliderLabel.textContent = `Step ${maxStep} of ${maxStep}`;
+
+  } catch (e) {
+    console.error('[ERROR]', e);
+    errorMsg.textContent = e.message + '\n' + e.stack;
+    errorMsg.style.display = 'block';
+  }
+
+  runBtn.disabled = false;
+  runBtn.textContent = 'Run \u25B8';
+}
+
+// ── VDOM render loop ──
+function doRender() {
+  r4.eval(r4.call(renderSym, []));
+  const pending = r4.scopeTakePending("dom");
+  if (pending.length === 0) return;
+  const newTermId = pending[pending.length - 1];
+
+  if (currentTree === null) {
+    const dom = renderTerm(r4, newTermId, () => {});
+    vizEl.innerHTML = '';
+    vizEl.appendChild(dom);
+    currentTree = dom;
+  } else {
+    currentTree = patch(r4, currentTermId, newTermId, currentTree, vizEl, () => {});
+  }
+  currentTermId = newTermId;
+}
+
+function setStep(s) {
+  s = Math.max(0, Math.min(maxStep, s));
+  slider.value = s;
+  sliderLabel.textContent = `Step ${s} of ${maxStep}`;
+  r4.assertRule(r4.sym("current_step"), r4.num(s));
+  doRender();
+}
+
+// ── Slider + keyboard ──
+slider.addEventListener('input', () => setStep(+slider.value));
+document.addEventListener('keydown', e => {
+  if (e.target.closest('.cm-editor') || e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') {
+    if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); run(); }
+    return;
+  }
+  if (!r4) return;
+  const s = +slider.value;
+  if (e.key === 'ArrowLeft')  { e.preventDefault(); setStep(s - 1); }
+  if (e.key === 'ArrowRight') { e.preventDefault(); setStep(s + 1); }
+  if (e.key === 'Home')       { e.preventDefault(); setStep(0); }
+  if (e.key === 'End')        { e.preventDefault(); setStep(maxStep); }
+});
+
+runBtn.addEventListener('click', run);
+await run();
+</script>
+</body>
+</html>

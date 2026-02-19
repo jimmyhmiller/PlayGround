@@ -1,0 +1,27 @@
+# Test meta rule that uses rule() to set dynamic values (like flappy bird debug)
+
+rule debugger: @meta -> @io {
+  result(?step, score(), ?val) => {
+    rule(dbg_score, ?val)
+    rule(dbg_steps, ?step)
+    println("meta fired: dbg_score=", ?val, " dbg_steps=", ?step)
+  }
+}
+
+fn init() = {
+  rule(distance, 3.7)
+  rule(dbg_score, "-")
+  rule(dbg_steps, "-")
+}
+
+fn score() = floor(distance)
+
+fn render_debug() = "score=" ++ dbg_score ++ " steps=" ++ dbg_steps
+
+# Combine init and test into single top-level expression
+{
+  init()
+  println("before: ", render_debug())
+  println("score: ", score())
+  println("after: ", render_debug())
+}

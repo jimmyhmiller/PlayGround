@@ -1,0 +1,1048 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { overflow: hidden; background: #1a1a1a; width: 100vw; height: 100vh; }
+  #controls { position: fixed; top: 10px; right: 10px; z-index: 30; display: flex; gap: 8px; flex-wrap: wrap; max-width: 500px; justify-content: flex-end; }
+  button {
+    padding: 8px 16px; border: none; border-radius: 4px; cursor: pointer;
+    font-size: 14px; background: #333; color: #fff;
+  }
+  button.active { background: #4a9eff; }
+  #viewport {
+    width: 100vw; height: 100vh; position: relative;
+    overflow: hidden; cursor: grab;
+  }
+  #viewport:active { cursor: grabbing; }
+  #canvas {
+    position: absolute; transform-origin: 0 0;
+  }
+  #canvas svg { display: block; }
+
+  .bg-none #canvas { background: transparent; }
+  .bg-checker #canvas {
+    background-image:
+      linear-gradient(45deg, #ccc 25%, transparent 25%),
+      linear-gradient(-45deg, #ccc 25%, transparent 25%),
+      linear-gradient(45deg, transparent 75%, #ccc 75%),
+      linear-gradient(-45deg, transparent 75%, #ccc 75%);
+    background-size: 20px 20px;
+    background-position: 0 0, 0 10px, 10px -10px, -10px 0px;
+  }
+  .bg-white #canvas { background: #ffffff; }
+  .bg-black #canvas { background: #000000; }
+  .bg-navy #canvas { background: #001f3f; }
+
+  /* Color panel */
+  #color-panel {
+    position: fixed; top: 0; left: 0; width: 340px; height: 100vh;
+    background: #222; z-index: 20; overflow-y: auto; padding: 12px;
+    transform: translateX(-100%); transition: transform 0.2s;
+  }
+  #color-panel.open { transform: translateX(0); }
+  #color-panel h3 { color: #fff; margin-bottom: 8px; font-size: 14px; }
+  #color-panel .panel-controls { display: flex; gap: 6px; margin-bottom: 10px; flex-wrap: wrap; }
+  #color-panel .panel-controls button { font-size: 12px; padding: 4px 10px; }
+  .color-item {
+    display: flex; align-items: center; gap: 6px; padding: 5px 4px;
+    border-bottom: 1px solid #333;
+  }
+  .color-swatch {
+    width: 24px; height: 24px; border-radius: 3px; border: 2px solid #555;
+    flex-shrink: 0;
+  }
+  .color-label { color: #ccc; font-size: 13px; font-family: monospace; }
+  .color-count { color: #777; font-size: 11px; margin-left: auto; flex-shrink: 0; }
+  .color-toggle {
+    background: #444; color: #fff; border: none; border-radius: 3px;
+    padding: 2px 6px; cursor: pointer; font-size: 11px; flex-shrink: 0;
+  }
+  .color-toggle.hidden-color { background: #900; }
+  .color-remap-input {
+    width: 70px; background: #333; color: #fff; border: 1px solid #555;
+    border-radius: 3px; padding: 2px 4px; font-size: 12px; font-family: monospace;
+  }
+  .color-remap-input.remapped { border-color: #0f0; }
+  .color-opacity-input {
+    width: 42px; background: #333; color: #fff; border: 1px solid #555;
+    border-radius: 3px; padding: 2px 4px; font-size: 12px; font-family: monospace;
+  }
+  .color-opacity-input.remapped { border-color: #0f0; }
+  .remap-swatch {
+    width: 24px; height: 24px; border-radius: 3px; border: 2px solid #0f0;
+    flex-shrink: 0; display: none;
+  }
+  .remap-swatch.visible { display: block; }
+
+  #drop-prompt {
+    position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+    color: #666; font-size: 24px; font-family: sans-serif;
+    pointer-events: none; user-select: none;
+  }
+
+  /* Path selection - highlight is done via SVG clone overlay */
+  #path-editor {
+    position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+    background: #222; border: 1px solid #555; border-radius: 6px;
+    padding: 12px 16px; z-index: 40; display: none;
+    color: #ccc; font-size: 13px; font-family: monospace;
+    min-width: 300px;
+  }
+  #path-editor.open { display: flex; flex-direction: column; gap: 8px; }
+  #path-editor .pe-header {
+    display: flex; justify-content: space-between; align-items: center;
+  }
+  #path-editor .pe-header span { font-size: 12px; color: #999; }
+  #path-editor .pe-close {
+    background: #444; color: #fff; border: none; border-radius: 3px;
+    padding: 2px 8px; cursor: pointer; font-size: 12px;
+  }
+  #path-editor .pe-row {
+    display: flex; align-items: center; gap: 8px;
+  }
+  #path-editor .pe-label { width: 50px; color: #999; font-size: 12px; }
+  #path-editor .pe-swatch {
+    width: 20px; height: 20px; border-radius: 3px; border: 1px solid #555;
+    flex-shrink: 0;
+  }
+  #path-editor .pe-input {
+    width: 80px; background: #333; color: #fff; border: 1px solid #555;
+    border-radius: 3px; padding: 2px 4px; font-size: 12px; font-family: monospace;
+  }
+  #path-editor .pe-opacity-input {
+    width: 50px; background: #333; color: #fff; border: 1px solid #555;
+    border-radius: 3px; padding: 2px 4px; font-size: 12px; font-family: monospace;
+  }
+</style>
+</head>
+<body>
+  <div id="controls">
+    <button onclick="toggleColorPanel()" id="btn-colors">Colors</button>
+    <button onclick="setBg('none')" id="btn-none">None</button>
+    <button onclick="setBg('checker')" id="btn-checker" class="active">Checker</button>
+    <button onclick="setBg('white')" id="btn-white">White</button>
+    <button onclick="setBg('black')" id="btn-black">Black</button>
+    <button onclick="setBg('navy')" id="btn-navy">Navy</button>
+    <button onclick="resetView()">Reset View</button>
+    <button onclick="undoPathEdit()">Undo</button>
+    <button onclick="redoPathEdit()">Redo</button>
+    <button onclick="resetAll()" style="background:#900">Reset All</button>
+  </div>
+
+  <div id="color-panel">
+    <h3>Colors</h3>
+    <div class="panel-controls">
+      <button onclick="showAllColors()">Show All</button>
+      <button onclick="hideAllColors()">Hide All</button>
+      <button onclick="resetRemaps()">Reset Remaps</button>
+      <button onclick="exportSvg()">Export SVG</button>
+    </div>
+    <div id="color-list"></div>
+  </div>
+
+  <div id="path-editor">
+    <div class="pe-header">
+      <span id="pe-tag"></span>
+      <button class="pe-close" onclick="deselectPath()">X</button>
+    </div>
+    <div id="pe-rows"></div>
+  </div>
+
+  <div id="viewport" class="bg-checker">
+    <div id="canvas"></div>
+    <div id="drop-prompt">Drop an SVG file here</div>
+  </div>
+
+  <script>
+    var viewport = document.getElementById('viewport');
+    var canvas = document.getElementById('canvas');
+    var colorPanel = document.getElementById('color-panel');
+    var colorList = document.getElementById('color-list');
+
+    var scale = 1, tx = 0, ty = 0;
+    var isDragging = false;
+    var dragStartX, dragStartY, dragTxStart, dragTyStart;
+    var svgEl = null;
+
+    var STORAGE_KEY = 'svg-viewer-state';
+    var colorMap = {};
+    var hiddenColors = {};
+    var remapColors = {};
+    var remapOpacities = {}; // originalColor -> opacity string (0-1)
+    var pathEdits = {}; // elKey -> { fill, stroke, 'fill-opacity', 'stroke-opacity' }
+    var elKeyMap = {}; // elKey -> element (built after SVG loads)
+    var elToKey = null; // WeakMap: element -> elKey
+    var undoStack = []; // [{el, type, prop, oldColor, oldOpacity}]
+    var redoStack = [];
+    var selectionOverlay = null; // cloned SVG element used for outline
+
+    function buildElKeys(svg) {
+      elKeyMap = {};
+      elToKey = new WeakMap();
+      var allEls = svg.querySelectorAll('*');
+      for (var i = 0; i < allEls.length; i++) {
+        var el = allEls[i];
+        var key = el.id ? 'id:' + el.id : 'idx:' + i;
+        elKeyMap[key] = el;
+        elToKey.set(el, key);
+      }
+    }
+
+    function getElKey(el) {
+      return elToKey ? elToKey.get(el) : null;
+    }
+
+    function saveState() {
+      var bgClass = viewport.className || 'bg-checker';
+      var state = {
+        remapColors: remapColors,
+        remapOpacities: remapOpacities,
+        hiddenColors: hiddenColors,
+        bgMode: bgClass,
+        pathEdits: pathEdits
+      };
+      try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+      } catch(e) {}
+    }
+
+    function loadState() {
+      try {
+        var raw = localStorage.getItem(STORAGE_KEY);
+        if (!raw) return null;
+        return JSON.parse(raw);
+      } catch(e) {
+        return null;
+      }
+    }
+
+    function applyPathEdits() {
+      var keys = Object.keys(pathEdits);
+      for (var i = 0; i < keys.length; i++) {
+        var el = elKeyMap[keys[i]];
+        if (!el) continue;
+        var edits = pathEdits[keys[i]];
+        if (edits.fill) {
+          var style = el.getAttribute('style') || '';
+          if (/fill\s*:/.test(style)) {
+            el.setAttribute('style', style.replace(/(fill\s*:\s*)([^;]+)/, '$1' + edits.fill));
+          } else if (el.hasAttribute('fill')) {
+            el.setAttribute('fill', edits.fill);
+          }
+        }
+        if (edits.stroke) {
+          var style = el.getAttribute('style') || '';
+          if (/stroke\s*:/.test(style)) {
+            el.setAttribute('style', style.replace(/(stroke\s*:\s*)([^;]+)/, '$1' + edits.stroke));
+          } else if (el.hasAttribute('stroke')) {
+            el.setAttribute('stroke', edits.stroke);
+          }
+        }
+        if (edits['fill-opacity'] !== undefined) {
+          setOpacity(el, 'fill', edits['fill-opacity']);
+        }
+        if (edits['stroke-opacity'] !== undefined) {
+          setOpacity(el, 'stroke', edits['stroke-opacity']);
+        }
+      }
+    }
+
+    function recordPathEdit(el, type, value) {
+      var key = getElKey(el);
+      if (!key) return;
+      if (!pathEdits[key]) pathEdits[key] = {};
+      pathEdits[key][type] = value;
+      saveState();
+    }
+
+    function applyTransform() {
+      canvas.style.transform = 'translate(' + tx + 'px, ' + ty + 'px) scale(' + scale + ')';
+    }
+
+    function resetView() {
+      var vw = window.innerWidth;
+      var vh = window.innerHeight;
+      var svgW = svgEl ? parseFloat(svgEl.getAttribute('width')) || 1605 : 1605;
+      var svgH = svgEl ? parseFloat(svgEl.getAttribute('height')) || 1958 : 1958;
+      scale = Math.min(vw / svgW, vh / svgH) * 0.9;
+      tx = (vw - svgW * scale) / 2;
+      ty = (vh - svgH * scale) / 2;
+      applyTransform();
+    }
+
+    function setBg(mode) {
+      viewport.className = 'bg-' + mode;
+      var btns = document.querySelectorAll('#controls button');
+      for (var i = 0; i < btns.length; i++) btns[i].classList.remove('active');
+      var btn = document.getElementById('btn-' + mode);
+      if (btn) btn.classList.add('active');
+      saveState();
+    }
+
+    function toggleColorPanel() {
+      colorPanel.classList.toggle('open');
+      document.getElementById('btn-colors').classList.toggle('active');
+    }
+
+    function normalizeColor(c) {
+      if (!c || c === 'none' || c === 'transparent') return null;
+      c = c.trim().toLowerCase();
+      if (/^#[0-9a-f]{3}$/.test(c)) {
+        c = '#' + c[1]+c[1] + c[2]+c[2] + c[3]+c[3];
+      }
+      var rgbMatch = c.match(/^rgb\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\)$/);
+      if (rgbMatch) {
+        c = '#' + parseInt(rgbMatch[1]).toString(16).padStart(2,'0')
+              + parseInt(rgbMatch[2]).toString(16).padStart(2,'0')
+              + parseInt(rgbMatch[3]).toString(16).padStart(2,'0');
+      }
+      return c;
+    }
+
+    function getOriginalOpacity(el, type) {
+      // type is 'fill' or 'stroke' -> look for fill-opacity or stroke-opacity
+      var opacityProp = type + '-opacity';
+      var style = el.getAttribute('style') || '';
+      var match = style.match(new RegExp('(?:^|;)\\s*' + opacityProp + '\\s*:\\s*([^;]+)'));
+      if (match) return match[1].trim();
+      var attr = el.getAttribute(opacityProp);
+      if (attr) return attr;
+      return null; // means default (1.0)
+    }
+
+    function extractColors(el) {
+      var results = [];
+      var fill = el.getAttribute('fill');
+      var nf = normalizeColor(fill);
+      if (nf) results.push({ color: nf, type: 'fill', prop: 'attr', origOpacity: getOriginalOpacity(el, 'fill') });
+
+      var stroke = el.getAttribute('stroke');
+      var ns = normalizeColor(stroke);
+      if (ns) results.push({ color: ns, type: 'stroke', prop: 'attr', origOpacity: getOriginalOpacity(el, 'stroke') });
+
+      var style = el.getAttribute('style');
+      if (style) {
+        var fillMatch = style.match(/(?:^|;)\s*fill\s*:\s*([^;]+)/);
+        if (fillMatch) {
+          var nfc = normalizeColor(fillMatch[1]);
+          if (nfc) results.push({ color: nfc, type: 'fill', prop: 'style', origOpacity: getOriginalOpacity(el, 'fill') });
+        }
+        var strokeMatch = style.match(/(?:^|;)\s*stroke\s*:\s*([^;]+)/);
+        if (strokeMatch) {
+          var nsc = normalizeColor(strokeMatch[1]);
+          if (nsc) results.push({ color: nsc, type: 'stroke', prop: 'style', origOpacity: getOriginalOpacity(el, 'stroke') });
+        }
+      }
+      return results;
+    }
+
+    function buildColorMap(svg) {
+      colorMap = {};
+      var allEls = svg.querySelectorAll('*');
+      for (var i = 0; i < allEls.length; i++) {
+        var el = allEls[i];
+        var colors = extractColors(el);
+        for (var j = 0; j < colors.length; j++) {
+          var entry = colors[j];
+          if (!colorMap[entry.color]) colorMap[entry.color] = [];
+          colorMap[entry.color].push({ el: el, type: entry.type, prop: entry.prop, origOpacity: entry.origOpacity });
+        }
+      }
+    }
+
+    function applyRemap(origColor, newColor) {
+      var entries = colorMap[origColor] || [];
+      for (var i = 0; i < entries.length; i++) {
+        var e = entries[i];
+        if (e.prop === 'attr') {
+          e.el.setAttribute(e.type, newColor);
+        } else {
+          var style = e.el.getAttribute('style') || '';
+          var regex = new RegExp('(' + e.type + '\\s*:\\s*)([^;]+)');
+          e.el.setAttribute('style', style.replace(regex, '$1' + newColor));
+        }
+      }
+    }
+
+    function setOpacity(el, type, val) {
+      var opacityProp = type + '-opacity';
+      var style = el.getAttribute('style') || '';
+      var regex = new RegExp('(' + opacityProp + '\\s*:\\s*)([^;]+)');
+      if (regex.test(style)) {
+        el.setAttribute('style', style.replace(regex, '$1' + val));
+      } else if (style) {
+        el.setAttribute('style', style + ';' + opacityProp + ':' + val);
+      } else {
+        el.setAttribute(opacityProp, val);
+      }
+    }
+
+    function resetOpacity(el, type, origOpacity) {
+      var opacityProp = type + '-opacity';
+      if (origOpacity === null) {
+        // Remove it
+        el.removeAttribute(opacityProp);
+        var style = el.getAttribute('style') || '';
+        var regex = new RegExp(';?\\s*' + opacityProp + '\\s*:\\s*[^;]+');
+        el.setAttribute('style', style.replace(regex, ''));
+      } else {
+        setOpacity(el, type, origOpacity);
+      }
+    }
+
+    function applyAllRemaps() {
+      // Reset all to original first
+      var origColors = Object.keys(colorMap);
+      for (var i = 0; i < origColors.length; i++) {
+        var origColor = origColors[i];
+        var entries = colorMap[origColor];
+        for (var j = 0; j < entries.length; j++) {
+          var e = entries[j];
+          if (e.prop === 'attr') {
+            e.el.setAttribute(e.type, origColor);
+          } else {
+            var style = e.el.getAttribute('style') || '';
+            var regex = new RegExp('(' + e.type + '\\s*:\\s*)([^;]+)');
+            e.el.setAttribute('style', style.replace(regex, '$1' + origColor));
+          }
+          resetOpacity(e.el, e.type, e.origOpacity);
+        }
+      }
+      // Then apply color remaps
+      var remapKeys = Object.keys(remapColors);
+      for (var i = 0; i < remapKeys.length; i++) {
+        applyRemap(remapKeys[i], remapColors[remapKeys[i]]);
+      }
+      // Then apply opacity remaps
+      var opacityKeys = Object.keys(remapOpacities);
+      for (var i = 0; i < opacityKeys.length; i++) {
+        var origColor = opacityKeys[i];
+        var opacity = remapOpacities[origColor];
+        var entries = colorMap[origColor] || [];
+        for (var j = 0; j < entries.length; j++) {
+          setOpacity(entries[j].el, entries[j].type, opacity);
+        }
+      }
+    }
+
+    function handleRemapInput(origColor, inputEl, swatchEl) {
+      var val = inputEl.value.trim().toLowerCase();
+      if (!val) {
+        delete remapColors[origColor];
+        inputEl.classList.remove('remapped');
+        swatchEl.classList.remove('visible');
+      } else {
+        if (val[0] !== '#') val = '#' + val;
+        if (/^#[0-9a-f]{6}$/.test(val) || /^#[0-9a-f]{3}$/.test(val)) {
+          remapColors[origColor] = val;
+          inputEl.classList.add('remapped');
+          swatchEl.style.background = val;
+          swatchEl.classList.add('visible');
+        } else {
+          return; // invalid, do nothing
+        }
+      }
+      applyAllRemaps();
+      saveState();
+    }
+
+    function renderColorList() {
+      colorList.innerHTML = '';
+      var sorted = Object.keys(colorMap).sort(function(a, b) {
+        return colorMap[b].length - colorMap[a].length;
+      });
+      for (var i = 0; i < sorted.length; i++) {
+        var color = sorted[i];
+        var entries = colorMap[color];
+        var isHidden = !!hiddenColors[color];
+        var remapped = remapColors[color] || '';
+
+        var item = document.createElement('div');
+        item.className = 'color-item';
+
+        // Toggle button
+        var toggle = document.createElement('button');
+        toggle.className = 'color-toggle' + (isHidden ? ' hidden-color' : '');
+        toggle.textContent = isHidden ? 'OFF' : 'ON';
+        toggle.setAttribute('data-color', color);
+        toggle.addEventListener('click', (function(c) {
+          return function(e) {
+            e.stopPropagation();
+            toggleColor(c);
+          };
+        })(color));
+
+        // Original swatch
+        var swatch = document.createElement('div');
+        swatch.className = 'color-swatch';
+        swatch.style.background = color;
+
+        // Figure out the original opacity (most common among entries)
+        var opacityCounts = {};
+        for (var j = 0; j < entries.length; j++) {
+          var op = entries[j].origOpacity || '1';
+          opacityCounts[op] = (opacityCounts[op] || 0) + 1;
+        }
+        var origOpacity = '1';
+        var maxCount = 0;
+        var opKeys = Object.keys(opacityCounts);
+        for (var j = 0; j < opKeys.length; j++) {
+          if (opacityCounts[opKeys[j]] > maxCount) {
+            maxCount = opacityCounts[opKeys[j]];
+            origOpacity = opKeys[j];
+          }
+        }
+
+        // Label
+        var label = document.createElement('span');
+        label.className = 'color-label';
+        label.textContent = color + ' @ ' + origOpacity;
+
+        // Remap input
+        var input = document.createElement('input');
+        input.className = 'color-remap-input' + (remapped ? ' remapped' : '');
+        input.type = 'text';
+        input.placeholder = '#hex';
+        input.value = remapped;
+
+        // Remap preview swatch
+        var remapSwatch = document.createElement('div');
+        remapSwatch.className = 'remap-swatch' + (remapped ? ' visible' : '');
+        if (remapped) remapSwatch.style.background = remapped;
+
+        input.addEventListener('change', (function(c, inp, sw) {
+          return function() { handleRemapInput(c, inp, sw); };
+        })(color, input, remapSwatch));
+        input.addEventListener('click', function(e) { e.stopPropagation(); });
+
+        // Opacity input
+        var opacityVal = remapOpacities[color] || '';
+        var opInput = document.createElement('input');
+        opInput.className = 'color-opacity-input' + (opacityVal ? ' remapped' : '');
+        opInput.type = 'text';
+        opInput.placeholder = origOpacity;
+        opInput.title = 'Opacity 0-1 (orig: ' + origOpacity + ')';
+        opInput.value = opacityVal;
+        opInput.addEventListener('change', (function(c) {
+          return function(e) {
+            var v = e.target.value.trim();
+            if (!v) {
+              delete remapOpacities[c];
+              e.target.classList.remove('remapped');
+            } else {
+              var num = parseFloat(v);
+              if (!isNaN(num) && num >= 0 && num <= 1) {
+                remapOpacities[c] = v;
+                e.target.classList.add('remapped');
+              } else {
+                return;
+              }
+            }
+            applyAllRemaps();
+            saveState();
+          };
+        })(color));
+        opInput.addEventListener('click', function(e) { e.stopPropagation(); });
+
+        // Count
+        var count = document.createElement('span');
+        count.className = 'color-count';
+        count.textContent = entries.length;
+
+        item.appendChild(toggle);
+        item.appendChild(swatch);
+        item.appendChild(label);
+        item.appendChild(input);
+        item.appendChild(remapSwatch);
+        item.appendChild(opInput);
+        item.appendChild(count);
+
+        colorList.appendChild(item);
+      }
+    }
+
+    function toggleColor(color) {
+      if (hiddenColors[color]) delete hiddenColors[color];
+      else hiddenColors[color] = true;
+      applyColorVisibility();
+      renderColorList();
+      saveState();
+    }
+
+    function showAllColors() {
+      hiddenColors = {};
+      applyColorVisibility();
+      renderColorList();
+      saveState();
+    }
+
+    function hideAllColors() {
+      var keys = Object.keys(colorMap);
+      for (var i = 0; i < keys.length; i++) hiddenColors[keys[i]] = true;
+      applyColorVisibility();
+      renderColorList();
+      saveState();
+    }
+
+    function resetRemaps() {
+      var origColors = Object.keys(colorMap);
+      for (var i = 0; i < origColors.length; i++) {
+        var origColor = origColors[i];
+        var entries = colorMap[origColor];
+        for (var j = 0; j < entries.length; j++) {
+          var e = entries[j];
+          if (e.prop === 'attr') {
+            e.el.setAttribute(e.type, origColor);
+          } else {
+            var style = e.el.getAttribute('style') || '';
+            var regex = new RegExp('(' + e.type + '\\s*:\\s*)([^;]+)');
+            e.el.setAttribute('style', style.replace(regex, '$1' + origColor));
+          }
+        }
+      }
+      remapColors = {};
+      remapOpacities = {};
+      renderColorList();
+      saveState();
+    }
+
+    function exportSvg() {
+      if (!svgEl) return;
+      // Clone the SVG so we can remove hidden elements without affecting the live DOM
+      var clone = svgEl.cloneNode(true);
+      // Remove selection overlay if present
+      var overlays = clone.querySelectorAll('[stroke-dasharray="8 4"]');
+      for (var i = 0; i < overlays.length; i++) overlays[i].remove();
+      // Remove all visibility:hidden elements
+      var hidden = clone.querySelectorAll('[visibility="hidden"]');
+      for (var i = 0; i < hidden.length; i++) hidden[i].remove();
+      var serializer = new XMLSerializer();
+      var svgStr = serializer.serializeToString(clone);
+      var blob = new Blob([svgStr], { type: 'image/svg+xml' });
+      var url = URL.createObjectURL(blob);
+      var a = document.createElement('a');
+      a.href = url;
+      a.download = 'remapped_shirt.svg';
+      a.click();
+      URL.revokeObjectURL(url);
+    }
+
+    function applyColorVisibility() {
+      var hideEls = {};
+      var hiddenKeys = Object.keys(hiddenColors);
+      for (var i = 0; i < hiddenKeys.length; i++) {
+        var entries = colorMap[hiddenKeys[i]] || [];
+        for (var j = 0; j < entries.length; j++) {
+          hideEls[entries[j].el] = entries[j].el;
+        }
+      }
+      // We need a proper set, use a WeakSet-like approach with a marker
+      var allColors = Object.keys(colorMap);
+      // First, collect all hidden elements
+      var hiddenElSet = new Set();
+      for (var i = 0; i < hiddenKeys.length; i++) {
+        var entries = colorMap[hiddenKeys[i]] || [];
+        for (var j = 0; j < entries.length; j++) hiddenElSet.add(entries[j].el);
+      }
+      // Then set visibility on all mapped elements
+      for (var i = 0; i < allColors.length; i++) {
+        var entries = colorMap[allColors[i]];
+        for (var j = 0; j < entries.length; j++) {
+          if (hiddenElSet.has(entries[j].el)) {
+            entries[j].el.setAttribute('visibility', 'hidden');
+          } else {
+            entries[j].el.removeAttribute('visibility');
+          }
+        }
+      }
+    }
+
+    // Undo for path edits
+    function pushUndo(el, type, prop) {
+      var oldColor = null;
+      var oldOpacity = null;
+      if (prop === 'attr') {
+        oldColor = el.getAttribute(type);
+      } else {
+        var style = el.getAttribute('style') || '';
+        var m = style.match(new RegExp(type + '\\s*:\\s*([^;]+)'));
+        if (m) oldColor = m[1].trim();
+      }
+      var opProp = type + '-opacity';
+      var styleStr = el.getAttribute('style') || '';
+      var opMatch = styleStr.match(new RegExp(opProp + '\\s*:\\s*([^;]+)'));
+      if (opMatch) oldOpacity = opMatch[1].trim();
+      else if (el.hasAttribute(opProp)) oldOpacity = el.getAttribute(opProp);
+
+      undoStack.push({ el: el, type: type, prop: prop, oldColor: oldColor, oldOpacity: oldOpacity });
+      redoStack = []; // clear redo on new action
+    }
+
+    function captureCurrentState(el, type, prop) {
+      var curColor = null;
+      var curOpacity = null;
+      if (prop === 'attr') {
+        curColor = el.getAttribute(type);
+      } else {
+        var style = el.getAttribute('style') || '';
+        var m = style.match(new RegExp(type + '\\s*:\\s*([^;]+)'));
+        if (m) curColor = m[1].trim();
+      }
+      var opProp = type + '-opacity';
+      var styleStr = el.getAttribute('style') || '';
+      var opMatch = styleStr.match(new RegExp(opProp + '\\s*:\\s*([^;]+)'));
+      if (opMatch) curOpacity = opMatch[1].trim();
+      else if (el.hasAttribute(opProp)) curOpacity = el.getAttribute(opProp);
+      return { el: el, type: type, prop: prop, oldColor: curColor, oldOpacity: curOpacity };
+    }
+
+    function restoreEntry(entry) {
+      var el = entry.el;
+      if (entry.oldColor !== null) {
+        if (entry.prop === 'attr') {
+          el.setAttribute(entry.type, entry.oldColor);
+        } else {
+          var style = el.getAttribute('style') || '';
+          var regex = new RegExp('(' + entry.type + '\\s*:\\s*)([^;]+)');
+          el.setAttribute('style', style.replace(regex, '$1' + entry.oldColor));
+        }
+      }
+      if (entry.oldOpacity !== null) {
+        setOpacity(el, entry.type, entry.oldOpacity);
+      }
+      // Sync pathEdits
+      var key = getElKey(el);
+      if (key) {
+        var colors = extractColors(el);
+        var found = false;
+        for (var i = 0; i < colors.length; i++) {
+          if (colors[i].type === entry.type) {
+            if (!pathEdits[key]) pathEdits[key] = {};
+            pathEdits[key][entry.type] = colors[i].color;
+            pathEdits[key][entry.type + '-opacity'] = colors[i].origOpacity || '1';
+            found = true;
+          }
+        }
+        if (!found && pathEdits[key]) delete pathEdits[key];
+      }
+    }
+
+    function undoPathEdit() {
+      if (undoStack.length === 0) return;
+      var entry = undoStack.pop();
+      // Capture current state for redo before restoring
+      var redoEntry = captureCurrentState(entry.el, entry.type, entry.prop);
+      redoStack.push(redoEntry);
+      restoreEntry(entry);
+      saveState();
+      if (selectedEl === entry.el) selectPath(entry.el);
+    }
+
+    function redoPathEdit() {
+      if (redoStack.length === 0) return;
+      var entry = redoStack.pop();
+      // Capture current state for undo before restoring
+      var undoEntry = captureCurrentState(entry.el, entry.type, entry.prop);
+      undoStack.push(undoEntry);
+      restoreEntry(entry);
+      saveState();
+      if (selectedEl === entry.el) selectPath(entry.el);
+    }
+
+    function resetAll() {
+      if (!confirm('Reset ALL changes? This will clear all color remaps, opacity changes, path edits, and hidden colors.')) return;
+      localStorage.removeItem(STORAGE_KEY);
+      // Re-serialize from original if we have the SVG, or re-fetch default
+      if (currentFileName === 'final_shirt.svg') {
+        fetch('final_shirt.svg')
+          .then(function(r) { return r.text(); })
+          .then(function(text) { loadSvgText(text, currentFileName); });
+      } else {
+        // For dropped files we can't re-fetch, so just clear state and reload from DOM
+        // Best we can do: strip all modifications by re-parsing
+        var serializer = new XMLSerializer();
+        var text = serializer.serializeToString(svgEl);
+        loadSvgText(text, currentFileName);
+      }
+    }
+
+    // Path selection
+    var selectedEl = null;
+    var pathEditor = document.getElementById('path-editor');
+    var peTag = document.getElementById('pe-tag');
+    var peRows = document.getElementById('pe-rows');
+
+    function selectPath(el) {
+      deselectPath();
+      selectedEl = el;
+
+      // Create an SVG overlay that traces the path
+      var clone = el.cloneNode(false);
+      clone.removeAttribute('id');
+      clone.setAttribute('fill', 'none');
+      clone.setAttribute('stroke', '#ff0');
+      clone.setAttribute('stroke-width', '3');
+      clone.setAttribute('stroke-dasharray', '8 4');
+      clone.setAttribute('pointer-events', 'none');
+      clone.setAttribute('opacity', '1');
+      // Remove any style fill/stroke and replace
+      var cloneStyle = clone.getAttribute('style') || '';
+      cloneStyle = cloneStyle
+        .replace(/fill\s*:\s*[^;]+;?/g, '')
+        .replace(/stroke\s*:\s*[^;]+;?/g, '')
+        .replace(/stroke-opacity\s*:\s*[^;]+;?/g, '')
+        .replace(/fill-opacity\s*:\s*[^;]+;?/g, '')
+        .replace(/stroke-width\s*:\s*[^;]+;?/g, '')
+        .replace(/opacity\s*:\s*[^;]+;?/g, '');
+      cloneStyle += ';fill:none;stroke:#ff0;stroke-width:3;stroke-dasharray:8 4;stroke-opacity:1;opacity:1';
+      clone.setAttribute('style', cloneStyle);
+      clone.removeAttribute('visibility');
+      // Insert after the selected element
+      if (el.parentNode) {
+        el.parentNode.insertBefore(clone, el.nextSibling);
+      }
+      selectionOverlay = clone;
+
+      pathEditor.classList.add('open');
+
+      peTag.textContent = '<' + el.tagName + '>' + (el.id ? ' #' + el.id : '');
+      peRows.innerHTML = '';
+
+      // Show fill if present
+      var colors = extractColors(el);
+      if (colors.length === 0) {
+        peRows.innerHTML = '<div style="color:#999;font-size:12px">No fill or stroke on this element</div>';
+        return;
+      }
+
+      for (var i = 0; i < colors.length; i++) {
+        var c = colors[i];
+        var row = document.createElement('div');
+        row.className = 'pe-row';
+
+        var lbl = document.createElement('span');
+        lbl.className = 'pe-label';
+        lbl.textContent = c.type;
+
+        var sw = document.createElement('div');
+        sw.className = 'pe-swatch';
+        sw.style.background = c.color;
+
+        var inp = document.createElement('input');
+        inp.className = 'pe-input';
+        inp.type = 'text';
+        inp.value = c.color;
+
+        var opLbl = document.createElement('span');
+        opLbl.className = 'pe-label';
+        opLbl.textContent = 'a';
+        opLbl.style.width = '12px';
+
+        var origOp = c.origOpacity || '1';
+        var opInp = document.createElement('input');
+        opInp.className = 'pe-opacity-input';
+        opInp.type = 'text';
+        opInp.value = origOp;
+
+        inp.addEventListener('change', (function(element, type, prop, swatch) {
+          return function(e) {
+            var val = e.target.value.trim().toLowerCase();
+            if (val && val[0] !== '#') val = '#' + val;
+            if (/^#[0-9a-f]{6}$/.test(val) || /^#[0-9a-f]{3}$/.test(val)) {
+              pushUndo(element, type, prop);
+              if (prop === 'attr') {
+                element.setAttribute(type, val);
+              } else {
+                var style = element.getAttribute('style') || '';
+                var regex = new RegExp('(' + type + '\\s*:\\s*)([^;]+)');
+                element.setAttribute('style', style.replace(regex, '$1' + val));
+              }
+              swatch.style.background = val;
+              recordPathEdit(element, type, val);
+            }
+          };
+        })(el, c.type, c.prop, sw));
+
+        opInp.addEventListener('change', (function(element, type, prop) {
+          return function(e) {
+            var v = parseFloat(e.target.value.trim());
+            if (!isNaN(v) && v >= 0 && v <= 1) {
+              pushUndo(element, type, prop);
+              setOpacity(element, type, v);
+              recordPathEdit(element, type + '-opacity', '' + v);
+            }
+          };
+        })(el, c.type, c.prop));
+
+        row.appendChild(lbl);
+        row.appendChild(sw);
+        row.appendChild(inp);
+        row.appendChild(opLbl);
+        row.appendChild(opInp);
+        peRows.appendChild(row);
+      }
+    }
+
+    function deselectPath() {
+      if (selectionOverlay && selectionOverlay.parentNode) {
+        selectionOverlay.parentNode.removeChild(selectionOverlay);
+      }
+      selectionOverlay = null;
+      selectedEl = null;
+      pathEditor.classList.remove('open');
+    }
+
+    // Keyboard shortcuts
+    window.addEventListener('keydown', function(e) {
+      if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key === 'z') {
+        e.preventDefault();
+        redoPathEdit();
+      } else if ((e.metaKey || e.ctrlKey) && e.key === 'z') {
+        e.preventDefault();
+        undoPathEdit();
+      }
+    });
+
+    // Wheel/trackpad zoom
+    viewport.addEventListener('wheel', function(e) {
+      e.preventDefault();
+      if (e.ctrlKey) {
+        var zoomFactor = Math.exp(-e.deltaY * 0.01);
+        var rect = viewport.getBoundingClientRect();
+        var mx = e.clientX - rect.left;
+        var my = e.clientY - rect.top;
+        tx = mx - (mx - tx) * zoomFactor;
+        ty = my - (my - ty) * zoomFactor;
+        scale *= zoomFactor;
+      } else {
+        tx -= e.deltaX;
+        ty -= e.deltaY;
+      }
+      applyTransform();
+    }, { passive: false });
+
+    var dragMoved = false;
+    viewport.addEventListener('mousedown', function(e) {
+      if (e.target.closest('#controls') || e.target.closest('#color-panel') || e.target.closest('#path-editor')) return;
+      isDragging = true;
+      dragMoved = false;
+      dragStartX = e.clientX;
+      dragStartY = e.clientY;
+      dragTxStart = tx;
+      dragTyStart = ty;
+    });
+    window.addEventListener('mousemove', function(e) {
+      if (!isDragging) return;
+      var dx = e.clientX - dragStartX;
+      var dy = e.clientY - dragStartY;
+      if (Math.abs(dx) > 3 || Math.abs(dy) > 3) dragMoved = true;
+      tx = dragTxStart + dx;
+      ty = dragTyStart + dy;
+      applyTransform();
+    });
+    window.addEventListener('mouseup', function(e) {
+      if (isDragging && !dragMoved) {
+        // This was a click, not a drag
+        var target = e.target;
+        if (target.closest('#controls') || target.closest('#color-panel') || target.closest('#path-editor')) {
+          // ignore
+        } else if (svgEl && svgEl.contains(target) && target !== svgEl) {
+          selectPath(target);
+        } else {
+          deselectPath();
+        }
+      }
+      isDragging = false;
+    });
+
+    var currentFileName = 'final_shirt.svg';
+
+    function loadSvgText(text, fileName) {
+      // Reset all state for the new file
+      deselectPath();
+      remapColors = {};
+      remapOpacities = {};
+      hiddenColors = {};
+      pathEdits = {};
+      undoStack = [];
+      redoStack = [];
+
+      currentFileName = fileName || 'dropped.svg';
+      STORAGE_KEY = 'svg-viewer-' + currentFileName;
+
+      var prompt = document.getElementById('drop-prompt');
+      if (prompt) prompt.style.display = 'none';
+
+      canvas.innerHTML = text;
+      svgEl = canvas.querySelector('svg');
+      if (!svgEl) return;
+
+      // Read viewBox dimensions for proper sizing
+      var vb = svgEl.getAttribute('viewBox');
+      if (vb) {
+        var parts = vb.split(/[\s,]+/);
+        var svgW = parseFloat(parts[2]) || 1605;
+        var svgH = parseFloat(parts[3]) || 1958;
+        svgEl.setAttribute('width', svgW);
+        svgEl.setAttribute('height', svgH);
+      } else {
+        svgEl.setAttribute('width', '1605');
+        svgEl.setAttribute('height', '1958');
+      }
+
+      buildElKeys(svgEl);
+      buildColorMap(svgEl);
+
+      // Restore saved state for this file
+      var saved = loadState();
+      if (saved) {
+        remapColors = saved.remapColors || {};
+        remapOpacities = saved.remapOpacities || {};
+        hiddenColors = saved.hiddenColors || {};
+        pathEdits = saved.pathEdits || {};
+        if (saved.bgMode) {
+          viewport.className = saved.bgMode;
+          var bgName = saved.bgMode.replace('bg-', '');
+          var btns = document.querySelectorAll('#controls button');
+          for (var i = 0; i < btns.length; i++) btns[i].classList.remove('active');
+          var btn = document.getElementById('btn-' + bgName);
+          if (btn) btn.classList.add('active');
+        }
+        applyAllRemaps();
+        applyPathEdits();
+        applyColorVisibility();
+      }
+
+      renderColorList();
+      resetView();
+    }
+
+    // Drag and drop
+    document.addEventListener('dragover', function(e) {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'copy';
+      viewport.style.outline = '3px dashed #4a9eff';
+    });
+    document.addEventListener('dragleave', function(e) {
+      if (e.relatedTarget === null || !document.contains(e.relatedTarget)) {
+        viewport.style.outline = '';
+      }
+    });
+    document.addEventListener('drop', function(e) {
+      e.preventDefault();
+      viewport.style.outline = '';
+      var file = e.dataTransfer.files[0];
+      if (!file || !file.name.toLowerCase().endsWith('.svg')) return;
+      var reader = new FileReader();
+      reader.onload = function(ev) {
+        loadSvgText(ev.target.result, file.name);
+      };
+      reader.readAsText(file);
+    });
+
+    // No default SVG - wait for drag and drop
+  </script>
+</body>
+</html>

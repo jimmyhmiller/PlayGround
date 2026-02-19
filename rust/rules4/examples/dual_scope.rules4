@@ -1,0 +1,15 @@
+# Two rules on same LHS, different target scopes
+
+rule trace : @meta -> @io {
+  reduction(?s, ?old, ?new, ?kind) => println("[", ?s, "] ", ?old, "  =>  ", ?new)
+}
+
+rule memo : @meta -> @rules {
+  result(?s, fib(?n), ?val) => rule(fib(?n), ?val)
+}
+
+fn fib(0) = 0
+fn fib(1) = 1
+fn fib(?n) = fib(?n - 1) + fib(?n - 2)
+
+fib(10)

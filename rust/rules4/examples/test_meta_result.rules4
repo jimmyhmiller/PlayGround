@@ -1,0 +1,12 @@
+# Test meta rule result events
+
+rule debugger: @meta -> @io {
+  result(?step, score(), ?val) => println("score result: step=", ?step, " val=", ?val)
+  result(?step, double(?x), ?val) => println("double result: step=", ?step, " x=", ?x, " val=", ?val)
+}
+
+fn score() = 42
+fn double(?n) = ?n + ?n
+
+# Test that result fires for score()
+score()

@@ -1,0 +1,18 @@
+# Test: outer meta variable ?val is captured (substituted) into the inner rule
+
+rule capture_score: @meta -> @rules {
+  result(?step, score(), ?val) =>
+    rule show_score: @meta -> @io {
+      result(?s, render(), ?r) => println("Score was: ", ?val)
+    }
+}
+
+fn score() = 100
+fn render() = "done"
+
+# score() fires -> capture_score installs show_score with ?val = 100 baked in
+# render() fires -> show_score observes it and prints "Score was: 100"
+{
+  score()
+  render()
+}

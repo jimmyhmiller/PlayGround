@@ -1,0 +1,22 @@
+# Test meta rules with @rules scope (non-registered scope)
+
+rule debugger: @meta -> @rules {
+  result(?step, score(), ?val) => {
+    rule(dbg_score, ?val)
+    rule(dbg_steps, ?step)
+  }
+}
+
+fn init() = {
+  rule(distance, 3.7)
+  rule(dbg_score, "-")
+  rule(dbg_steps, "-")
+}
+
+fn score() = floor(distance)
+
+{
+  init()
+  score()
+  dbg_score
+}

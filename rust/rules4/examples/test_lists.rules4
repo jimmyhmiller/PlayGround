@@ -1,0 +1,9 @@
+fn len(nil) = 0
+fn len(cons(?h, ?t)) = 1 + len(?t)
+
+fn map(?f, nil) = nil
+fn map(?f, cons(?h, ?t)) = cons(?f(?h), map(?f, ?t))
+
+fn double(?x) = ?x * 2
+
+len([1, 2, 3])

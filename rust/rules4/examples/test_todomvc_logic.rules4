@@ -1,0 +1,36 @@
+# Test the core TodoMVC logic without DOM
+
+fn len(nil) = 0
+fn len(cons(?h, ?t)) = 1 + len(?t)
+
+fn filter_list(?p, nil) = nil
+fn filter_list(?p, cons(?h, ?t)) = if ?p(?h) then cons(?h, filter_list(?p, ?t)) else filter_list(?p, ?t)
+
+fn is_active(entry(?id, ?body, false)) = true
+fn is_active(entry(?id, ?body, true)) = false
+
+fn all_todos() = query_all(entry)
+fn active_todos() = filter_list(is_active, all_todos())
+fn items_left() = len(active_todos())
+
+fn toggle_entry(?id) = toggle_with(?id, todo(?id))
+fn toggle_with(?id, entry(?i, ?body, true)) = rule(todo(?id), entry(?i, ?body, false))
+fn toggle_with(?id, entry(?i, ?body, false)) = rule(todo(?id), entry(?i, ?body, true))
+
+{
+  rule(next_id, 1)
+  rule(filter, all)
+  rule(input_value, "")
+
+  # Add three todos
+  rule(todo(1), entry(1, "buy milk", false))
+  rule(todo(2), entry(2, "clean house", true))
+  rule(todo(3), entry(3, "write code", false))
+  rule(next_id, 4)
+
+  # Toggle todo 2 (was completed, now active)
+  toggle_entry(2)
+
+  # Check items left (should be 3 now, all active)
+  items_left()
+}

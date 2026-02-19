@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Rules4 WASM Test</title>
+  <style>
+    body { font-family: monospace; padding: 20px; background: #1a1a2e; color: #e0e0e0; }
+    .pass { color: #00ff88; }
+    .fail { color: #ff4444; }
+    pre { background: #16213e; padding: 10px; border-radius: 4px; }
+    h1 { color: #e94560; }
+  </style>
+</head>
+<body>
+  <h1>Rules4 WASM Tests</h1>
+  <div id="results"></div>
+
+  <script type="module">
+    import { Rules4 } from './bridge.js';
+
+    const results = document.getElementById('results');
+    let passed = 0, failed = 0;
+
+    function test(name, actual, expected) {
+      const ok = JSON.stringify(actual) === JSON.stringify(expected);
+      if (ok) {
+        passed++;
+        results.innerHTML += `<div class="pass">PASS: ${name}</div>`;
+      } else {
+        failed++;
+        results.innerHTML += `<div class="fail">FAIL: ${name} — got ${JSON.stringify(actual)}, expected ${JSON.stringify(expected)}</div>`;
+      }
+    }
+
+    try {
+      const r4 = await Rules4.load('./rules4.wasm');
+
+      // Test 1: factorial
+      {
+        r4.reset();
+        const expr = r4.loadProgram(`
+          fn fact(0) = 1
+          fn fact(?n) = ?n * fact(?n - 1)
+          fact(10)
+        `);
+        const result = r4.eval(expr);
+        test("fact(10) = 3628800", r4.termToJS(result), 3628800);
+      }
+
+      // Test 2: booleans
+      {
+        r4.reset();
+        const expr = r4.loadProgram(`
+          fn not(true) = false
+          fn not(false) = true
+          not(true)
+        `);
+        const result = r4.eval(expr);
+        test("not(true) = false", r4.termToJS(result), false);
+      }
+
+      // Test 3: comparisons
+      {
+        r4.reset();
+        const expr = r4.loadProgram(`3 == 3`);
+        const result = r4.eval(expr);
+        test("3 == 3 = true", r4.termToJS(result), true);
+      }
+
+      // Test 4: if/then/else
+      {
+        r4.reset();
+        const expr = r4.loadProgram(`
+          fn abs(?n) = if ?n < 0 then 0 - ?n else ?n
+          abs(0 - 5)
+        `);
+        const result = r4.eval(expr);
+        test("abs(-5) = 5", r4.termToJS(result), 5);
+      }
+
+      // Test 5: string concat
+      {
+        r4.reset();
+        const expr = r4.loadProgram(`"hello" ++ " world"`);
+        const result = r4.eval(expr);
+        test('str_concat = "hello world"', r4.termToJS(result), "hello world");
+      }
+
+      // Test 6: lists
+      {
+        r4.reset();
+        const expr = r4.loadProgram(`
+          fn len(nil) = 0
+          fn len(cons(?h, ?t)) = 1 + len(?t)
+          len([1, 2, 3])
+        `);
+        const result = r4.eval(expr);
+        test("len([1,2,3]) = 3", r4.termToJS(result), 3);
+      }
+
+      // Test 7: query_all
+      {
+        r4.reset();
+        const expr = r4.loadProgram(`
+          fn count(nil) = 0
+          fn count(cons(?h, ?t)) = 1 + count(?t)
+          {
+            rule(todo(1), entry("buy milk", false))
+            rule(todo(2), entry("clean house", true))
+            rule(todo(3), entry("write code", false))
+            count(query_all(entry))
+          }
+        `);
+        const result = r4.eval(expr);
+        test("query_all count = 3", r4.termToJS(result), 3);
+      }
+
+      // Test 8: term construction from JS
+      {
+        r4.reset();
+        r4.loadProgram(`
+          fn fact(0) = 1
+          fn fact(?n) = ?n * fact(?n - 1)
+          0
+        `);
+        const factSym = r4.sym("fact");
+        const five = r4.num(5);
+        const call = r4.call(factSym, [five]);
+        const result = r4.eval(call);
+        test("JS-constructed fact(5) = 120", r4.termToJS(result), 120);
+      }
+
+      // Test 9: display
+      {
+        r4.reset();
+        const expr = r4.loadProgram(`[1, 2, 3]`);
+        const result = r4.eval(expr);
+        const disp = r4.display(result);
+        test('display([1,2,3])', disp, "cons(1, cons(2, cons(3, nil)))");
+      }
+
+      // Test 10: higher-order map
+      {
+        r4.reset();
+        const expr = r4.loadProgram(`
+          fn map(?f, nil) = nil
+          fn map(?f, cons(?h, ?t)) = cons(?f(?h), map(?f, ?t))
+          fn double(?x) = ?x * 2
+          map(double, [1, 2, 3])
+        `);
+        const result = r4.eval(expr);
+        test("map(double, [1,2,3]) = [2,4,6]", r4.termToJS(result), [2, 4, 6]);
+      }
+
+      results.innerHTML += `<hr><div style="font-size:1.2em">${passed} passed, ${failed} failed</div>`;
+
+    } catch (e) {
+      results.innerHTML += `<div class="fail">ERROR: ${e.message}<pre>${e.stack}</pre></div>`;
+    }
+  </script>
+</body>
+</html>

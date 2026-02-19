@@ -1,0 +1,59 @@
+# Test the trace-capturing approach for the learnable programming visualization
+
+fn fib(0) = 0
+fn fib(1) = 1
+fn fib(?n) = fib(?n - 1) + fib(?n - 2)
+
+# Meta rule: capture reductions when tracing is enabled
+rule tracer : @meta -> @rules {
+  reduction(?step, ?old, ?new, ?kind) =>
+    if tracing == true then {
+      rule(trace(trace_count), entry(?old, ?new, ?kind))
+      rule(trace_count, trace_count + 1)
+    } else 0
+}
+
+rule fib_vals : @meta -> @rules {
+  result(?step, fib(?n), ?val) =>
+    if tracing == true then rule(fib_val(?n), ?val) else 0
+}
+
+# Destructuring helpers
+fn get_old(entry(?old, ?new, ?kind)) = ?old
+fn get_new(entry(?old, ?new, ?kind)) = ?new
+fn get_kind(entry(?old, ?new, ?kind)) = ?kind
+
+fn kind_label(fn(?name, ?idx)) = ?name
+fn kind_label(builtin(?op)) = ?op
+
+fn print_step(?n) = @io println("[", ?n, "] ", get_old(trace(?n)), " -> ", get_new(trace(?n)), "  (", kind_label(get_kind(trace(?n))), ")")
+
+fn print_steps(?n, ?max) = if ?n > ?max then 0 else {
+  print_step(?n)
+  print_steps(?n + 1, ?max)
+}
+
+fn print_fib_val(?n) = @io println("fib(", ?n, ") = ", fib_val(?n))
+
+fn print_fib_vals(?n, ?max) = if ?n > ?max then 0 else {
+  print_fib_val(?n)
+  print_fib_vals(?n + 1, ?max)
+}
+
+{
+  rule(trace_count, 0)
+  rule(target_n, 4)
+  rule(tracing, true)
+  rule(result_val, fib(4))
+  rule(tracing, false)
+  rule(max_step, trace_count - 1)
+
+  @io println("=== fib(4) = ", result_val, " ===")
+  @io println("Total steps: ", max_step + 1)
+  @io println("")
+  @io println("=== Trace ===")
+  print_steps(0, max_step)
+  @io println("")
+  @io println("=== Values ===")
+  print_fib_vals(0, target_n)
+}

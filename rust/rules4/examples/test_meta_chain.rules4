@@ -1,0 +1,19 @@
+# Test: meta rule dynamically creates a new @meta -> @io rule
+# The outer meta rule observes score() and installs a tracer for double()
+
+rule setup: @meta -> @rules {
+  result(?step, score(), ?val) =>
+    rule double_tracer: @meta -> @io {
+      result(?s, double(?x), ?v) => println("double(", ?x, ") = ", ?v)
+    }
+}
+
+fn score() = 42
+fn double(?n) = ?n + ?n
+
+# score() triggers setup, which installs double_tracer
+# then double(5) fires, and the new tracer observes it
+{
+  score()
+  double(5)
+}

@@ -1,0 +1,61 @@
+fn fib(0) = 0
+fn fib(1) = 1
+fn fib(?n) = fib(?n - 1) + fib(?n - 2)
+
+rule tracer : @meta -> @rules {
+  reduction(?step, ?old, ?new, ?kind) =>
+    if tracing == true then {
+      rule(trace(trace_count), entry(?old, ?new, ?kind))
+      rule(trace_count, trace_count + 1)
+    } else 0
+}
+
+rule fib_vals : @meta -> @rules {
+  result(?step, fib(?n), ?val) =>
+    if tracing == true then {
+      rule(fib_val(?n), ?val)
+      if fib_computed(?n) < 0 then rule(fib_computed(?n), trace_count - 1) else 0
+    } else 0
+}
+
+fn get_old(entry(?old, ?new, ?kind)) = ?old
+fn get_new(entry(?old, ?new, ?kind)) = ?new
+fn get_kind(entry(?old, ?new, ?kind)) = ?kind
+fn kind_label(fn(?name, ?idx)) = ?name
+fn kind_label(builtin(?op)) = ?op
+
+{
+  rule(trace_count, 0)
+  rule(target_n, 6)
+  rule(fib_computed(0), 0 - 1)
+  rule(fib_computed(1), 0 - 1)
+  rule(fib_computed(2), 0 - 1)
+  rule(fib_computed(3), 0 - 1)
+  rule(fib_computed(4), 0 - 1)
+  rule(fib_computed(5), 0 - 1)
+  rule(fib_computed(6), 0 - 1)
+  rule(tracing, true)
+  rule(result_val, fib(6))
+  rule(tracing, false)
+  rule(max_step, trace_count - 1)
+
+  @io println("fib(6) = ", result_val)
+  @io println("max_step = ", max_step)
+  @io println("")
+  @io println("fib_computed steps:")
+  @io println("  fib(0) computed at step ", fib_computed(0))
+  @io println("  fib(1) computed at step ", fib_computed(1))
+  @io println("  fib(2) computed at step ", fib_computed(2))
+  @io println("  fib(3) computed at step ", fib_computed(3))
+  @io println("  fib(4) computed at step ", fib_computed(4))
+  @io println("  fib(5) computed at step ", fib_computed(5))
+  @io println("  fib(6) computed at step ", fib_computed(6))
+  @io println("")
+  @io println("values:")
+  @io println("  fib_val(0) = ", fib_val(0))
+  @io println("  fib_val(6) = ", fib_val(6))
+  @io println("")
+  @io println("sample trace:")
+  @io println("  [0] ", get_old(trace(0)), " -> ", get_new(trace(0)), " (", kind_label(get_kind(trace(0))), ")")
+  @io println("  [", max_step, "] ", get_old(trace(max_step)), " -> ", get_new(trace(max_step)), " (", kind_label(get_kind(trace(max_step))), ")")
+}

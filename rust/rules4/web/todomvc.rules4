@@ -1,0 +1,166 @@
+# ── TodoMVC in Rules4 ──
+
+# ── DOM helpers ──
+fn div(?a, ?c) = element("div", ?a, ?c)
+fn span(?a, ?c) = element("span", ?a, ?c)
+fn section(?a, ?c) = element("section", ?a, ?c)
+fn header(?a, ?c) = element("header", ?a, ?c)
+fn footer(?a, ?c) = element("footer", ?a, ?c)
+fn h1(?a, ?c) = element("h1", ?a, ?c)
+fn ul(?a, ?c) = element("ul", ?a, ?c)
+fn li(?a, ?c) = element("li", ?a, ?c)
+fn label(?a, ?c) = element("label", ?a, ?c)
+fn button(?a, ?c) = element("button", ?a, ?c)
+fn input_el(?a) = element("input", ?a, [])
+fn a_el(?a, ?c) = element("a", ?a, ?c)
+fn strong(?c) = element("strong", [], ?c)
+
+# ── Attribute helpers ──
+fn cls(?v) = attr("class", ?v)
+fn on(?ev, ?handler) = attr("on-" ++ ?ev, ?handler)
+fn placeholder(?v) = attr("placeholder", ?v)
+fn type_attr(?v) = attr("type", ?v)
+fn href(?v) = attr("href", ?v)
+fn value(?v) = attr("value", ?v)
+fn checked_attr() = attr("checked", "true")
+fn autofocus() = attr("autofocus", "true")
+fn for_attr(?v) = attr("for", ?v)
+
+# ── List utilities ──
+fn len(nil) = 0
+fn len(cons(?h, ?t)) = 1 + len(?t)
+
+fn map(?f, nil) = nil
+fn map(?f, cons(?h, ?t)) = cons(?f(?h), map(?f, ?t))
+
+fn filter_list(?p, nil) = nil
+fn filter_list(?p, cons(?h, ?t)) = if ?p(?h) then cons(?h, filter_list(?p, ?t)) else filter_list(?p, ?t)
+
+fn append(nil, ?ys) = ?ys
+fn append(cons(?x, ?xs), ?ys) = cons(?x, append(?xs, ?ys))
+
+# ── State queries ──
+fn all_todos() = query_all(entry)
+fn active_todos() = filter_list(is_active, all_todos())
+fn completed_todos() = filter_list(is_completed, all_todos())
+fn items_left() = len(active_todos())
+
+fn is_active(entry(?id, ?body, false)) = true
+fn is_active(entry(?id, ?body, true)) = false
+
+fn is_completed(entry(?id, ?body, true)) = true
+fn is_completed(entry(?id, ?body, false)) = false
+
+fn visible_todos() = if filter == all then all_todos() else if filter == active then active_todos() else completed_todos()
+
+fn has_todos() = if len(all_todos()) > 0 then true else false
+fn has_completed() = if len(completed_todos()) > 0 then true else false
+fn all_completed() = items_left() == 0
+
+# ── Event handlers ──
+
+# Add new todo on Enter
+fn handle_event(add_todo, keydown("Enter")) = if input_value == "" then 0 else {
+  rule(todo(next_id), entry(next_id, input_value, false))
+  rule(next_id, next_id + 1)
+  rule(input_value, "")
+}
+# Ignore other keys in the input
+fn handle_event(add_todo, keydown(?k)) = 0
+
+# Track input value
+fn handle_event(update_input, input_event(?val)) = rule(input_value, ?val)
+
+# Toggle a single todo
+fn handle_event(toggle(?id), ?ev) = toggle_entry(?id)
+
+fn toggle_entry(?id) = toggle_with(?id, todo(?id))
+fn toggle_with(?id, entry(?i, ?body, true)) = rule(todo(?id), entry(?i, ?body, false))
+fn toggle_with(?id, entry(?i, ?body, false)) = rule(todo(?id), entry(?i, ?body, true))
+
+# Delete a todo
+fn handle_event(delete(?id), ?ev) = retract(todo(?id))
+
+# Filter buttons
+fn handle_event(set_filter(?f), ?ev) = rule(filter, ?f)
+
+# Clear completed
+fn handle_event(clear_completed, ?ev) = clear_each(completed_ids(all_todos()))
+
+fn completed_ids(nil) = nil
+fn completed_ids(cons(entry(?id, ?body, true), ?t)) = cons(?id, completed_ids(?t))
+fn completed_ids(cons(entry(?id, ?body, false), ?t)) = completed_ids(?t)
+
+fn clear_each(nil) = 0
+fn clear_each(cons(?id, ?rest)) = { retract(todo(?id)) clear_each(?rest) }
+
+# Toggle all
+fn handle_event(toggle_all, ?ev) = if all_completed() then set_all(false, all_todos()) else set_all(true, all_todos())
+
+fn set_all(?done, nil) = 0
+fn set_all(?done, cons(entry(?id, ?body, ?old), ?rest)) = { rule(todo(?id), entry(?id, ?body, ?done)) set_all(?done, ?rest) }
+
+# ── Render ──
+fn render() = @dom if has_todos() then render_app() else render_empty()
+
+fn render_empty() = section([cls("todoapp")], [render_header()])
+
+fn render_app() = section([cls("todoapp")],
+  [render_header(), render_main(), render_footer()])
+
+fn render_header() = header([cls("header")],
+  [h1([], [text("todos")]),
+   input_el([cls("new-todo"), placeholder("What needs to be done?"),
+             on("keydown", add_todo), on("input", update_input),
+             value(input_value), autofocus()])])
+
+fn render_main() = section([cls("main")],
+  [input_el([attr("id", "toggle-all"), cls("toggle-all"),
+             type_attr("checkbox"), on("click", toggle_all)]),
+   label([for_attr("toggle-all")], [text("Mark all as complete")]),
+   ul([cls("todo-list")], map(render_todo_item, visible_todos()))])
+
+fn render_todo_item(entry(?id, ?body, ?done)) = li([cls(todo_item_class(?done))],
+  [div([cls("view")],
+    [render_checkbox(?id, ?done),
+     label([], [text(?body)]),
+     button([cls("destroy"), on("click", delete(?id))], [])])])
+
+fn render_checkbox(?id, true) = input_el(
+  [cls("toggle"), type_attr("checkbox"), checked_attr(), on("click", toggle(?id))])
+fn render_checkbox(?id, false) = input_el(
+  [cls("toggle"), type_attr("checkbox"), on("click", toggle(?id))])
+
+fn todo_item_class(true) = "completed"
+fn todo_item_class(false) = ""
+
+fn render_footer() = footer([cls("footer")],
+  [span([cls("todo-count")],
+     [strong([text(items_left())]), text(items_left_text())]),
+   ul([cls("filters")],
+     [render_filter("All", all),
+      render_filter("Active", active),
+      render_filter("Completed", completed)]),
+   render_clear_button()])
+
+fn items_left_text() = if items_left() == 1 then " item left" else " items left"
+
+fn render_filter(?label, ?value) = li([],
+  [a_el([cls(filter_class(?value)), href("#"), on("click", set_filter(?value))],
+     [text(?label)])])
+
+fn filter_class(?f) = if filter == ?f then "selected" else ""
+
+fn render_clear_button() = if has_completed()
+  then button([cls("clear-completed"), on("click", clear_completed)],
+    [text("Clear completed")])
+  else text("")
+
+# ── Init ──
+fn init() = {
+  rule(next_id, 1)
+  rule(filter, all)
+  rule(input_value, "")
+}
+
+init()

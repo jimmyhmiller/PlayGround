@@ -32,8 +32,6 @@ struct DaemonState {
     exit_code: Option<i32>,
     /// PTY master fd
     master_fd: i32,
-    /// Whether a client has seen the exit notification
-    client_saw_exit: bool,
 }
 
 impl DaemonState {
@@ -46,7 +44,6 @@ impl DaemonState {
             child_exited: false,
             exit_code: None,
             master_fd,
-            client_saw_exit: false,
         }
     }
 
@@ -297,6 +294,16 @@ pub fn run_daemon(name: String, command: Vec<String>) -> Result<()> {
     let mut exit_notified = false;
     // Track if PTY has been drained after child exit
     let mut pty_drained = false;
+    // When child exited (for grace period)
+    let mut child_exit_time: Option<std::time::Instant> = None;
+    // True when a client received the ChildExited message and then disconnected
+    let mut exit_delivered = false;
+
+    let listener_fd = listener.as_raw_fd();
+
+    // Grace period: keep daemon alive this long after child exits with no client,
+    // so detached clients have time to reattach and see the output.
+    const EXIT_GRACE_PERIOD: Duration = Duration::from_secs(30);
 
     loop {
         // Check if child has exited
@@ -305,63 +312,132 @@ pub fn run_daemon(name: String, command: Vec<String>) -> Result<()> {
                 Ok(WaitStatus::Exited(_, code)) => {
                     state.child_exited = true;
                     state.exit_code = Some(code);
-                    // Don't notify client yet - drain PTY first
+                    child_exit_time = Some(std::time::Instant::now());
                 }
                 Ok(WaitStatus::Signaled(_, _, _)) => {
                     state.child_exited = true;
                     state.exit_code = None;
-                    // Don't notify client yet - drain PTY first
+                    child_exit_time = Some(std::time::Instant::now());
                 }
                 _ => {}
             }
         }
 
-        // If child exited and client disconnected after seeing it, daemon exits
-        // (client_saw_exit is set when we send ChildExited and client later disconnects)
-        if state.child_exited && state.client.is_none() && state.client_saw_exit {
-            let _ = session::remove_session(&name);
-            return Ok(());
+        // Daemon exits when child has exited, PTY is drained, no client connected, AND either:
+        // - a client received the ChildExited notification and then disconnected, OR
+        // - the grace period has elapsed (no one is coming back)
+        if state.child_exited && pty_drained && state.client.is_none() {
+            let should_exit = exit_delivered
+                || child_exit_time
+                    .map(|t| t.elapsed() >= EXIT_GRACE_PERIOD)
+                    .unwrap_or(false);
+            if should_exit {
+                let _ = session::remove_session(&name);
+                return Ok(());
+            }
         }
 
-        // Try to accept new connection
-        if let Ok((stream, _)) = listener.accept() {
-            stream.set_nonblocking(true).ok();
-            state.client = Some(stream);
-            state.send_buf.clear();
-            client_msg_buf.clear();
-            // Reset exit notification for new client
-            exit_notified = false;
+        // Build poll fds: [pty_master, listener, client?]
+        let mut pollfds: Vec<libc::pollfd> = Vec::with_capacity(3);
+
+        // Always poll PTY master for readable data
+        pollfds.push(libc::pollfd {
+            fd: master_fd,
+            events: libc::POLLIN,
+            revents: 0,
+        });
+
+        // Always poll listener for new connections
+        pollfds.push(libc::pollfd {
+            fd: listener_fd,
+            events: libc::POLLIN,
+            revents: 0,
+        });
+
+        // Poll client if connected
+        let client_poll_idx = if let Some(ref client) = state.client {
+            let mut events = libc::POLLIN;
+            if !state.send_buf.is_empty() {
+                events |= libc::POLLOUT;
+            }
+            pollfds.push(libc::pollfd {
+                fd: client.as_raw_fd(),
+                events,
+                revents: 0,
+            });
+            Some(pollfds.len() - 1)
+        } else {
+            None
+        };
+
+        // Use a longer timeout when idle, short when we have pending sends
+        let timeout_ms = if !state.send_buf.is_empty() {
+            10 // Short timeout when we have data to flush
+        } else {
+            500 // Longer timeout when idle; still wakes to check child status
+        };
+
+        let poll_ret = unsafe {
+            libc::poll(pollfds.as_mut_ptr(), pollfds.len() as libc::nfds_t, timeout_ms)
+        };
+
+        // poll error (not EINTR)
+        if poll_ret < 0 {
+            let err = std::io::Error::last_os_error();
+            if err.kind() != std::io::ErrorKind::Interrupted {
+                // Unexpected poll error, brief sleep and retry
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            continue;
+        }
+
+        // Try to accept new connection (if listener is readable or on timeout)
+        if pollfds[1].revents & libc::POLLIN != 0 {
+            if let Ok((stream, _)) = listener.accept() {
+                stream.set_nonblocking(true).ok();
+                state.client = Some(stream);
+                state.send_buf.clear();
+                client_msg_buf.clear();
+                exit_notified = false;
+            }
         }
 
         // Read from PTY
-        let pty_read = unsafe {
-            libc::read(
-                master_fd,
-                pty_read_buf.as_mut_ptr() as *mut libc::c_void,
-                pty_read_buf.len(),
-            )
-        };
+        if pollfds[0].revents & (libc::POLLIN | libc::POLLHUP) != 0 {
+            loop {
+                let pty_read = unsafe {
+                    libc::read(
+                        master_fd,
+                        pty_read_buf.as_mut_ptr() as *mut libc::c_void,
+                        pty_read_buf.len(),
+                    )
+                };
 
-        if pty_read > 0 {
-            let data = &pty_read_buf[..pty_read as usize];
-            state.handle_output(data);
-            pty_drained = false; // More data might be coming
-        } else if pty_read < 0 {
-            let err = std::io::Error::last_os_error();
-            if err.kind() == std::io::ErrorKind::WouldBlock {
-                // No data available right now
-                if state.child_exited {
+                if pty_read > 0 {
+                    let data = &pty_read_buf[..pty_read as usize];
+                    state.handle_output(data);
+                    pty_drained = false;
+                } else if pty_read < 0 {
+                    let err = std::io::Error::last_os_error();
+                    if err.kind() == std::io::ErrorKind::WouldBlock {
+                        if state.child_exited {
+                            pty_drained = true;
+                        }
+                    } else {
+                        if !state.child_exited {
+                            state.child_exited = true;
+                        }
+                        pty_drained = true;
+                    }
+                    break;
+                } else {
+                    // EOF
                     pty_drained = true;
+                    break;
                 }
-            } else {
-                // PTY error - child probably exited
-                if !state.child_exited {
-                    state.child_exited = true;
-                }
-                pty_drained = true;
             }
-        } else {
-            // pty_read == 0 means EOF
+        } else if state.child_exited {
+            // Child exited and poll didn't report PTY readable — it's drained
             pty_drained = true;
         }
 
@@ -370,9 +446,7 @@ pub fn run_daemon(name: String, command: Vec<String>) -> Result<()> {
             let msg = DaemonMessage::ChildExited {
                 code: state.exit_code,
             };
-            if state.queue_message(&msg) {
-                state.client_saw_exit = true;
-            }
+            state.queue_message(&msg);
             exit_notified = true;
         }
 
@@ -381,69 +455,68 @@ pub fn run_daemon(name: String, command: Vec<String>) -> Result<()> {
         let mut should_replay = false;
         let mut resize_request: Option<(u16, u16)> = None;
 
-        if let Some(ref mut client) = state.client {
-            match client.read(&mut client_read_buf) {
-                Ok(0) => {
-                    client_disconnected = true;
-                }
-                Ok(n) => {
-                    client_msg_buf.extend_from_slice(&client_read_buf[..n]);
+        if let Some(idx) = client_poll_idx {
+            let client_revents = pollfds[idx].revents;
 
-                    // Process messages
-                    loop {
-                        match decode_message::<ClientMessage>(&client_msg_buf) {
-                            Ok(Some((msg, consumed))) => {
-                                client_msg_buf.drain(0..consumed);
+            if client_revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR) != 0 {
+                if let Some(ref mut client) = state.client {
+                    match client.read(&mut client_read_buf) {
+                        Ok(0) => {
+                            client_disconnected = true;
+                        }
+                        Ok(n) => {
+                            client_msg_buf.extend_from_slice(&client_read_buf[..n]);
 
-                                match msg {
-                                    ClientMessage::Attach { cols, rows } => {
-                                        resize_request = Some((cols, rows));
+                            // Process messages
+                            loop {
+                                match decode_message::<ClientMessage>(&client_msg_buf) {
+                                    Ok(Some((msg, consumed))) => {
+                                        client_msg_buf.drain(0..consumed);
 
-                                        // Send attached confirmation
-                                        state.queue_message(&DaemonMessage::Attached);
+                                        match msg {
+                                            ClientMessage::Attach { cols, rows } => {
+                                                resize_request = Some((cols, rows));
+                                                state.queue_message(&DaemonMessage::Attached);
+                                                should_replay = true;
 
-                                        // Mark that we need to replay buffer
-                                        should_replay = true;
-
-                                        // If child already exited and PTY drained, notify client
-                                        if state.child_exited && pty_drained && !exit_notified {
-                                            let msg = DaemonMessage::ChildExited {
-                                                code: state.exit_code,
-                                            };
-                                            if state.queue_message(&msg) {
-                                                state.client_saw_exit = true;
-                                                exit_notified = true;
+                                                if state.child_exited && pty_drained && !exit_notified {
+                                                    let msg = DaemonMessage::ChildExited {
+                                                        code: state.exit_code,
+                                                    };
+                                                    state.queue_message(&msg);
+                                                    exit_notified = true;
+                                                }
+                                            }
+                                            ClientMessage::Input(data) => {
+                                                unsafe {
+                                                    libc::write(
+                                                        master_fd,
+                                                        data.as_ptr() as *const libc::c_void,
+                                                        data.len(),
+                                                    );
+                                                }
+                                            }
+                                            ClientMessage::Resize { cols, rows } => {
+                                                resize_request = Some((cols, rows));
+                                            }
+                                            ClientMessage::Detach => {
+                                                client_disconnected = true;
                                             }
                                         }
                                     }
-                                    ClientMessage::Input(data) => {
-                                        unsafe {
-                                            libc::write(
-                                                master_fd,
-                                                data.as_ptr() as *const libc::c_void,
-                                                data.len(),
-                                            );
-                                        }
-                                    }
-                                    ClientMessage::Resize { cols, rows } => {
-                                        resize_request = Some((cols, rows));
-                                    }
-                                    ClientMessage::Detach => {
+                                    Ok(None) => break,
+                                    Err(_) => {
                                         client_disconnected = true;
+                                        break;
                                     }
                                 }
                             }
-                            Ok(None) => break, // Need more data
-                            Err(_) => {
-                                client_disconnected = true;
-                                break;
-                            }
+                        }
+                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                        Err(_) => {
+                            client_disconnected = true;
                         }
                     }
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
-                Err(_) => {
-                    client_disconnected = true;
                 }
             }
         }
@@ -459,6 +532,10 @@ pub fn run_daemon(name: String, command: Vec<String>) -> Result<()> {
         }
 
         if client_disconnected {
+            // If we already sent ChildExited to this client, the info was delivered
+            if exit_notified {
+                exit_delivered = true;
+            }
             state.client = None;
             state.send_buf.clear();
             client_msg_buf.clear();
@@ -466,9 +543,6 @@ pub fn run_daemon(name: String, command: Vec<String>) -> Result<()> {
 
         // Flush queued data to client (non-blocking)
         state.flush_send_buf();
-
-        // Small sleep to avoid busy-waiting
-        std::thread::sleep(Duration::from_millis(1));
     }
 }
 

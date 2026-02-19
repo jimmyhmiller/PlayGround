@@ -1,0 +1,850 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Flappy Bird Lab — Rules4</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: #1a1a2e;
+      color: #e0e0e0;
+      overflow-x: hidden;
+    }
+    .page { max-width: 1400px; margin: 0 auto; padding: 12px 16px; }
+    .header {
+      display: flex; align-items: center; gap: 10px; margin-bottom: 10px;
+    }
+    h1 { font-size: 18px; font-weight: 700; color: #f0f0f0; }
+    .status-dot {
+      width: 8px; height: 8px; border-radius: 50%;
+      display: inline-block; transition: background 0.2s;
+    }
+    .status-dot.ok { background: #22c55e; }
+    .status-dot.err { background: #ef4444; }
+    .status-dot.loading { background: #f59e0b; }
+
+    .main {
+      display: flex; gap: 12px; margin-bottom: 8px;
+      height: 480px;
+    }
+    .editor-col {
+      flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0;
+    }
+    .game-col {
+      width: 480px; flex-shrink: 0;
+      background: #0f0f23;
+      border: 1px solid #333;
+      border-radius: 8px;
+      overflow: hidden;
+      cursor: pointer;
+      position: relative;
+    }
+    .game-col svg { display: block; }
+
+    .tab-bar {
+      display: flex; gap: 0; margin-bottom: 0;
+    }
+    .tab-btn {
+      padding: 6px 16px;
+      font-size: 12px; font-weight: 600;
+      background: #12122a;
+      color: #666;
+      border: 1px solid #333;
+      border-bottom: none;
+      border-radius: 6px 6px 0 0;
+      cursor: pointer;
+      margin-right: 2px;
+    }
+    .tab-btn.active {
+      background: #1e1e2e;
+      color: #e0e0e0;
+      border-bottom: 1px solid #1e1e2e;
+      position: relative;
+      z-index: 1;
+    }
+    .editor-wrap {
+      flex: 1;
+      min-height: 0;
+      border: 1px solid #333;
+      border-radius: 0 8px 8px 8px;
+      overflow: hidden;
+      background: #1e1e2e;
+      position: relative;
+    }
+    .editor-pane {
+      position: absolute;
+      top: 0; left: 0; right: 0; bottom: 0;
+      display: none;
+    }
+    .editor-pane.active {
+      display: block;
+    }
+    .cm-editor { height: 100%; }
+    .cm-editor .cm-scroller { overflow: auto !important; }
+    .cm-editor .cm-content {
+      font-family: 'SF Mono', 'Fira Code', 'Menlo', monospace;
+      font-size: 12px;
+    }
+    .cm-editor .cm-gutters {
+      background: #16162a;
+      border-right: 1px solid #333;
+    }
+    .cm-editor.cm-focused { outline: none; }
+
+    .error-bar {
+      background: #3b1111; color: #f87171; border-radius: 6px;
+      padding: 4px 10px; font-size: 11px; margin-top: 6px;
+      font-family: 'SF Mono', monospace;
+      max-height: 40px; overflow: auto;
+      display: none; white-space: pre-wrap;
+    }
+    .error-bar.visible { display: block; }
+
+    .viz-row {
+      display: flex; flex-wrap: wrap; gap: 10px;
+      margin-top: 10px;
+    }
+    .viz-panel {
+      flex: 1; min-width: 280px; max-width: 460px;
+      background: #16162a;
+      border: 1px solid #333;
+      border-radius: 8px;
+      padding: 8px 10px;
+    }
+    .viz-panel h3 {
+      font-size: 11px; font-weight: 600;
+      color: #888; text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin-bottom: 4px;
+    }
+    .viz-panel svg { display: block; width: 100%; }
+  </style>
+</head>
+<body>
+<div class="page">
+  <div class="header">
+    <h1>Flappy Bird Lab</h1>
+    <span class="status-dot loading" id="status"></span>
+  </div>
+
+  <div class="main">
+    <div class="editor-col">
+      <div class="tab-bar">
+        <button class="tab-btn" data-tab="game">Game</button>
+        <button class="tab-btn active" data-tab="meta">Meta / Viz</button>
+        <button class="tab-btn" data-tab="js">Support JS</button>
+      </div>
+      <div class="editor-wrap" id="editor-wrap">
+        <div class="editor-pane" id="editor-game"></div>
+        <div class="editor-pane active" id="editor-meta"></div>
+        <div class="editor-pane" id="editor-js"></div>
+      </div>
+      <div class="error-bar" id="error"></div>
+    </div>
+    <div class="game-col" id="game">
+    </div>
+  </div>
+
+  <div class="viz-row" id="viz-row"></div>
+</div>
+
+<script type="module">
+import { Rules4 } from './bridge.js';
+import { renderTerm, patch } from './vdom.js';
+
+// ── Default programs ──
+
+const DEFAULT_GAME = `\
+# ── Flappy Bird in Rules4 ──
+
+# ── Initial state ──
+fn init() = {
+  rule(screen, menu)
+  rule(player_y, 50.0)
+  rule(velocity, 0.0)
+  rule(distance, 0.0)
+  rule(best, 0)
+  rule(pipe_gap_0, 35.0)
+  rule(pipe_off_0, 0.0)
+  rule(pipe_h_0, 25.0)
+  rule(pipe_gap_1, 35.0)
+  rule(pipe_off_1, -1.0)
+  rule(pipe_h_1, 45.0)
+}
+
+fn score() = floor(distance)
+
+# ── Tick handler (game loop) ──
+fn handle_event(tick, ?frame) =
+  if screen == game then {
+    rule(distance, distance + 0.015)
+    rule(velocity, velocity + 0.065)
+    rule(player_y, player_y + velocity)
+    check_collisions()
+  }
+  else 0
+
+# ── Click handler ──
+fn handle_event(click, ?ev) =
+  if screen == game then rule(velocity, -1.25)
+  else if screen == menu then start_game()
+  else start_game()
+
+fn start_game() = {
+  rule(best, if score() > best then score() else best)
+  rule(screen, game)
+  rule(distance, 0.0)
+  rule(player_y, 50.0)
+  rule(velocity, 0.0)
+  rule(pipe_off_0, 0.0)
+  rule(pipe_h_0, 25.0)
+  rule(pipe_off_1, -1.0)
+  rule(pipe_h_1, 45.0)
+}
+
+# ── Collision detection ──
+fn check_collisions() = {
+  check_ground()
+  check_pipe_0()
+  check_pipe_1()
+}
+
+fn check_ground() =
+  if player_y > 88.0 then { rule(screen, dead) hit_floor }
+  else if player_y < 0.0 then { rule(screen, dead) hit_ceil }
+  else ok
+
+fn pipe_x(?off) = 100.0 - (50.0 * ((distance + ?off) % 2.0))
+
+fn check_pipe_0() =
+  if pipe_x(pipe_off_0) > 15.0 then far
+  else if pipe_x(pipe_off_0) < 25.0 then
+    if player_y < pipe_h_0 then { rule(screen, dead) hit_top }
+    else if player_y > (pipe_h_0 + pipe_gap_0) then { rule(screen, dead) hit_bot }
+    else pass
+  else past
+
+fn check_pipe_1() =
+  if pipe_x(pipe_off_1) > 15.0 then far
+  else if pipe_x(pipe_off_1) < 25.0 then
+    if player_y < pipe_h_1 then { rule(screen, dead) hit_top }
+    else if player_y > (pipe_h_1 + pipe_gap_1) then { rule(screen, dead) hit_bot }
+    else pass
+  else past
+
+# ── Rendering ──
+fn render() = @dom element("svg",
+  [attr("viewBox", "0 0 100 100"),
+   attr("width", 480),
+   attr("height", 480),
+   attr("style", "background: #70c5ce")],
+  [render_bg(),
+   render_pipe(pipe_off_0, pipe_h_0, pipe_gap_0),
+   render_pipe(pipe_off_1, pipe_h_1, pipe_gap_1),
+   render_player(),
+   render_ground(),
+   render_ui(),
+   render_debug()])
+
+fn render_bg() = element("g", [], [
+  element("rect", [attr("x", 0), attr("y", 0),
+                   attr("width", 100), attr("height", 100),
+                   attr("fill", "#70c5ce")], [])])
+
+fn render_ground() = element("rect",
+  [attr("x", 0), attr("y", 90),
+   attr("width", 100), attr("height", 10),
+   attr("fill", "#ded895")], [])
+
+fn render_player() = element("g", [], [
+  element("circle",
+    [attr("cx", 20),
+     attr("cy", player_y),
+     attr("r", 3),
+     attr("fill", "#f7dc6f")], []),
+  element("circle",
+    [attr("cx", 21.5),
+     attr("cy", player_y - 0.8),
+     attr("r", 0.8),
+     attr("fill", "white")], []),
+  element("circle",
+    [attr("cx", 22.0),
+     attr("cy", player_y - 0.8),
+     attr("r", 0.4),
+     attr("fill", "black")], []),
+  element("polygon",
+    [attr("points", "23," ++ (player_y - 0.3) ++ " 26," ++ player_y ++ " 23," ++ (player_y + 0.3)),
+     attr("fill", "#e74c3c")], [])])
+
+fn render_pipe(?off, ?h, ?gap) = element("g", [], [
+  element("rect",
+    [attr("x", pipe_x(?off)),
+     attr("y", 0),
+     attr("width", 8),
+     attr("height", ?h),
+     attr("fill", "#27ae60")], []),
+  element("rect",
+    [attr("x", pipe_x(?off)),
+     attr("y", ?h + ?gap),
+     attr("width", 8),
+     attr("height", 100.0 - ?h - ?gap),
+     attr("fill", "#27ae60")], [])])
+
+fn render_ui() =
+  if screen == menu then element("g", [], [
+    element("text",
+      [attr("x", 50), attr("y", 35),
+       attr("text-anchor", "middle"),
+       attr("font-size", 8),
+       attr("fill", "white"),
+       attr("font-family", "sans-serif")],
+      [text("Flappy Bird")]),
+    element("text",
+      [attr("x", 50), attr("y", 55),
+       attr("text-anchor", "middle"),
+       attr("font-size", 4),
+       attr("fill", "white"),
+       attr("font-family", "sans-serif")],
+      [text("Click to start")])])
+  else if screen == dead then element("g", [], [
+    element("rect",
+      [attr("x", 20), attr("y", 25),
+       attr("width", 60), attr("height", 40),
+       attr("fill", "rgba(0,0,0,0.5)"),
+       attr("rx", 3)], []),
+    element("text",
+      [attr("x", 50), attr("y", 38),
+       attr("text-anchor", "middle"),
+       attr("font-size", 6),
+       attr("fill", "#e74c3c"),
+       attr("font-family", "sans-serif")],
+      [text("Game Over")]),
+    element("text",
+      [attr("x", 50), attr("y", 48),
+       attr("text-anchor", "middle"),
+       attr("font-size", 4),
+       attr("fill", "white"),
+       attr("font-family", "sans-serif")],
+      [text("Score: " ++ score())]),
+    element("text",
+      [attr("x", 50), attr("y", 55),
+       attr("text-anchor", "middle"),
+       attr("font-size", 4),
+       attr("fill", "#f7dc6f"),
+       attr("font-family", "sans-serif")],
+      [text("Best: " ++ best)]),
+    element("text",
+      [attr("x", 50), attr("y", 62),
+       attr("text-anchor", "middle"),
+       attr("font-size", 3),
+       attr("fill", "#bbb"),
+       attr("font-family", "sans-serif")],
+      [text("Click to restart")])])
+  else element("g", [], [
+    element("text",
+      [attr("x", 50), attr("y", 10),
+       attr("text-anchor", "middle"),
+       attr("font-size", 6),
+       attr("fill", "white"),
+       attr("font-family", "sans-serif"),
+       attr("font-weight", "bold")],
+      [text(score())])])
+
+# ── Debug overlay: renders all debug(...) dynamic rules ──
+# Meta rules write: rule(debug_KEY, debug(element(...)))
+# query_all(debug) collects all values whose head is debug
+fn unwrap_debug(cons(debug(?el), ?rest)) = cons(?el, unwrap_debug(?rest))
+fn unwrap_debug(nil) = nil
+
+fn render_debug() = element("g", [],
+  cons(element("rect",
+    [attr("x", 0), attr("y", 0),
+     attr("width", 30), attr("height", 23),
+     attr("fill", "rgba(0,0,0,0.65)"),
+     attr("rx", 1)], []),
+  unwrap_debug(query_all(debug))))
+
+init()
+`;
+
+const DEFAULT_META = `\
+# ── Debug overlay ──
+# Write debug(element(...)) values to dynamic rules.
+# The game's render_debug() collects them via query_all(debug).
+
+fn dbg_text(?y, ?msg) = element("text",
+  [attr("x", 1), attr("y", ?y),
+   attr("font-size", 2.2),
+   attr("fill", "#0f0"),
+   attr("font-family", "monospace")],
+  [text(?msg)])
+
+rule debug_info : @meta -> @rules {
+  result(?step, score(), ?val) => {
+    rule(debug_score, debug(dbg_text(3, "score: " ++ ?val)))
+    rule(debug_steps, debug(dbg_text(6, "steps: " ++ ?step)))
+  }
+  result(?step, handle_event(tick, ?f), ?val) => {
+    rule(debug_y, debug(dbg_text(9, "y: " ++ player_y)))
+    rule(debug_vel, debug(dbg_text(12, "vel: " ++ velocity)))
+  }
+  result(?step, check_ground(), ?val) =>
+    rule(debug_ground, debug(dbg_text(15, "ground: " ++ ?val)))
+  result(?step, check_pipe_0(), ?val) =>
+    rule(debug_pipe0, debug(dbg_text(18, "pipe0: " ++ ?val)))
+  result(?step, check_pipe_1(), ?val) =>
+    rule(debug_pipe1, debug(dbg_text(21, "pipe1: " ++ ?val)))
+}
+
+# ── Visualizations (meta rules -> @viz scope) ──
+
+# Track bird position over time
+rule track_position : @meta -> @viz {
+  result(?step, handle_event(tick, ?f), ?val) =>
+    graph(bird_y, point(distance, player_y))
+}
+
+# Track velocity over time
+rule track_velocity : @meta -> @viz {
+  result(?step, handle_event(tick, ?f), ?val) =>
+    graph(vel, point(distance, velocity))
+}
+
+# Track score over time
+rule track_score : @meta -> @viz {
+  result(?step, handle_event(tick, ?f), ?val) =>
+    graph(score, point(distance, score()))
+}
+`;
+
+// ── Elements ──
+
+const statusEl  = document.getElementById('status');
+const errorEl   = document.getElementById('error');
+const gameEl    = document.getElementById('game');
+const vizRowEl  = document.getElementById('viz-row');
+
+// ── WASM module cache ──
+
+let cachedModule = null;
+
+async function freshR4() {
+  if (!cachedModule) {
+    const resp = await fetch('./rules4.wasm');
+    const bytes = await resp.arrayBuffer();
+    cachedModule = await WebAssembly.compile(bytes);
+  }
+  const instance = await WebAssembly.instantiate(cachedModule, {});
+  const r4 = new Rules4(instance);
+  r4.wasm.engine_new();
+  return r4;
+}
+
+// ── CodeMirror 6 ──
+
+const { EditorView, basicSetup } = await import('https://esm.sh/codemirror@6.0.1');
+const { oneDark } = await import('https://esm.sh/@codemirror/theme-one-dark@6.1.2');
+const { StreamLanguage } = await import('https://esm.sh/@codemirror/language@6.10.8');
+const { EditorState } = await import('https://esm.sh/@codemirror/state@6');
+const { javascript } = await import('https://esm.sh/@codemirror/lang-javascript@6');
+
+// Simple Rules4 syntax highlighting (CM5-style token names for StreamLanguage)
+const rules4Lang = StreamLanguage.define({
+  token(stream) {
+    // Comments
+    if (stream.match('#')) { stream.skipToEnd(); return 'comment'; }
+    // Strings
+    if (stream.match('"')) {
+      while (!stream.eol()) {
+        if (stream.next() === '"') break;
+      }
+      return 'string';
+    }
+    // Numbers (including negative and float)
+    if (stream.match(/^-?\d+(\.\d+)?/)) return 'number';
+    // Pattern variables (?x, ?name)
+    if (stream.match(/^\?[a-zA-Z_]\w*/)) return 'variable-2';
+    // Scope annotations (@meta, @viz, @rules, @dom)
+    if (stream.match(/^@[a-zA-Z_]\w*/)) return 'meta';
+    // Keywords
+    if (stream.match(/^(fn|rule|if|then|else|emit)\b/)) return 'keyword';
+    // Operators
+    if (stream.match(/^(=>|->|==|!=|>=|<=|>|<|\+\+)/)) return 'operator';
+    // Builtins / constants
+    if (stream.match(/^(retract|query_all|floor|abs|random|mod|add|sub|mul|div|eq|neq|lt|gt|lte|gte|str_concat|str_len|true|false|nil|cons|result)\b/)) return 'atom';
+    // Identifiers
+    if (stream.match(/^[a-zA-Z_]\w*/)) return 'variable';
+    // Brackets / punctuation
+    if (stream.match(/^[()[\]{},=]/)) return 'bracket';
+    stream.next();
+    return null;
+  },
+});
+
+const r4Extensions = [basicSetup, oneDark, rules4Lang];
+
+const gameEditor = new EditorView({
+  doc: DEFAULT_GAME,
+  extensions: [
+    ...r4Extensions,
+    EditorView.updateListener.of(update => {
+      if (update.docChanged) scheduleRestart();
+    }),
+  ],
+  parent: document.getElementById('editor-game'),
+});
+
+const metaEditor = new EditorView({
+  doc: DEFAULT_META,
+  extensions: [
+    ...r4Extensions,
+    EditorView.updateListener.of(update => {
+      if (update.docChanged) scheduleRestart();
+    }),
+  ],
+  parent: document.getElementById('editor-meta'),
+});
+
+// ── Support JS editor (read-only, shows bridge.js + vdom.js) ──
+
+const [bridgeSrc, vdomSrc] = await Promise.all([
+  fetch('./bridge.js').then(r => r.text()),
+  fetch('./vdom.js').then(r => r.text()),
+]);
+
+const jsSource = `// ── bridge.js ── Rules4 WASM Bridge\n\n${bridgeSrc}\n\n// ── vdom.js ── Term-to-DOM renderer with diffing\n\n${vdomSrc}`;
+
+const jsEditor = new EditorView({
+  doc: jsSource,
+  extensions: [
+    basicSetup,
+    oneDark,
+    javascript(),
+    EditorState.readOnly.of(true),
+  ],
+  parent: document.getElementById('editor-js'),
+});
+
+// ── Tab switching ──
+
+const editors = { game: gameEditor, meta: metaEditor, js: jsEditor };
+const tabBtns = document.querySelectorAll('.tab-btn');
+const editorPanes = document.querySelectorAll('.editor-pane');
+
+tabBtns.forEach(btn => {
+  btn.addEventListener('click', () => {
+    const tab = btn.dataset.tab;
+    tabBtns.forEach(b => b.classList.toggle('active', b === btn));
+    editorPanes.forEach(p => p.classList.toggle('active', p.id === `editor-${tab}`));
+    // Refresh the newly visible editor so it measures correctly
+    if (editors[tab]) editors[tab].requestMeasure();
+  });
+});
+
+// ── Viz data ──
+
+const COLORS = ['#06b6d4', '#f59e0b', '#10b981', '#f472b6', '#a78bfa', '#fb923c'];
+const MAX_POINTS = 500;
+
+// Map<string, { points: [{x, y}], color: string, panelEl: Element, svgEl: SVGElement }>
+let vizSeries = new Map();
+let colorIdx = 0;
+
+function getOrCreateSeries(name) {
+  if (vizSeries.has(name)) return vizSeries.get(name);
+  const color = COLORS[colorIdx++ % COLORS.length];
+  const panel = document.createElement('div');
+  panel.className = 'viz-panel';
+  panel.innerHTML = `<h3>${name}</h3>`;
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.setAttribute('viewBox', '0 0 400 120');
+  svg.setAttribute('height', '120');
+  panel.appendChild(svg);
+  vizRowEl.appendChild(panel);
+  const series = { points: [], color, panelEl: panel, svgEl: svg };
+  vizSeries.set(name, series);
+  return series;
+}
+
+function clearAllViz() {
+  vizSeries.clear();
+  vizRowEl.innerHTML = '';
+  colorIdx = 0;
+}
+
+function termToNumber(r4, id) {
+  const tag = r4.termTag(id);
+  if (tag === 0) return r4.termNum(id);
+  if (tag === 3) return r4.termFloat(id);
+  return null;
+}
+
+function drainViz(r4) {
+  const pending = r4.scopeTakePending("viz");
+  if (pending.length === 0) return;
+
+  for (const termId of pending) {
+    // Expect graph(name, point(x, y))
+    if (r4.termTag(termId) !== 2) continue;
+    const head = r4.termCallHead(termId);
+    if (r4.termTag(head) !== 1) continue;
+    if (r4.termSymName(head) !== 'graph') continue;
+    if (r4.termCallArity(termId) < 2) continue;
+
+    const nameId = r4.termCallArg(termId, 0);
+    if (r4.termTag(nameId) !== 1) continue;
+    const name = r4.termSymName(nameId);
+
+    const pointId = r4.termCallArg(termId, 1);
+    if (r4.termTag(pointId) !== 2) continue;
+    const pointHead = r4.termCallHead(pointId);
+    if (r4.termTag(pointHead) !== 1 || r4.termSymName(pointHead) !== 'point') continue;
+    if (r4.termCallArity(pointId) < 2) continue;
+
+    const x = termToNumber(r4, r4.termCallArg(pointId, 0));
+    const y = termToNumber(r4, r4.termCallArg(pointId, 1));
+    if (x === null || y === null) continue;
+
+    const series = getOrCreateSeries(name);
+    const last = series.points[series.points.length - 1];
+    // If x went backwards (game restart), discard old data
+    if (last && x < last.x) {
+      series.points.length = 0;
+    }
+    // Skip duplicate x values (e.g. while on menu/dead screen)
+    if (last && x === last.x) {
+      last.y = y; // update in place
+    } else {
+      series.points.push({ x, y });
+    }
+    if (series.points.length > MAX_POINTS) {
+      series.points.shift();
+    }
+  }
+}
+
+function renderVizCharts() {
+  for (const [name, series] of vizSeries) {
+    renderChart(series);
+  }
+}
+
+const SVG_NS = 'http://www.w3.org/2000/svg';
+
+function svgEl(tag, attrs) {
+  const el = document.createElementNS(SVG_NS, tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    el.setAttribute(k, v);
+  }
+  return el;
+}
+
+function renderChart(series) {
+  const svg = series.svgEl;
+  const pts = series.points;
+  if (pts.length < 2) return;
+
+  const W = 400, H = 120;
+  const pad = { l: 0, r: 10, t: 8, b: 16 };
+  const cw = W - pad.l - pad.r;
+  const ch = H - pad.t - pad.b;
+
+  let minY = Infinity, maxY = -Infinity;
+  for (const p of pts) {
+    if (p.y < minY) minY = p.y;
+    if (p.y > maxY) maxY = p.y;
+  }
+  if (maxY === minY) { maxY += 1; minY -= 1; }
+  const rangeY = maxY - minY;
+  const minX = pts[0].x, maxX = pts[pts.length - 1].x;
+  const rangeX = maxX - minX || 1;
+
+  const toSX = (x) => pad.l + ((x - minX) / rangeX) * cw;
+  const toSY = (y) => pad.t + ch - ((y - minY) / rangeY) * ch;
+
+  // Build polyline path
+  let pathD = '';
+  for (let i = 0; i < pts.length; i++) {
+    const sx = toSX(pts[i].x);
+    const sy = toSY(pts[i].y);
+    pathD += (i === 0 ? 'M' : 'L') + sx.toFixed(1) + ',' + sy.toFixed(1);
+  }
+
+  const last = pts[pts.length - 1];
+  const lastSX = toSX(last.x);
+  const lastSY = toSY(last.y);
+
+  const gridY1 = toSY(minY);
+  const gridY2 = toSY(maxY);
+  const gridMid = toSY((minY + maxY) / 2);
+
+  // Clear and rebuild with proper SVG DOM
+  while (svg.firstChild) svg.removeChild(svg.firstChild);
+
+  svg.appendChild(svgEl('line', { x1: pad.l, y1: gridY1, x2: W - pad.r, y2: gridY1, stroke: '#333', 'stroke-width': '0.5' }));
+  svg.appendChild(svgEl('line', { x1: pad.l, y1: gridMid, x2: W - pad.r, y2: gridMid, stroke: '#333', 'stroke-width': '0.5', 'stroke-dasharray': '4' }));
+  svg.appendChild(svgEl('line', { x1: pad.l, y1: gridY2, x2: W - pad.r, y2: gridY2, stroke: '#333', 'stroke-width': '0.5' }));
+  svg.appendChild(svgEl('path', { d: pathD, fill: 'none', stroke: series.color, 'stroke-width': '1.5', 'stroke-linejoin': 'round' }));
+  svg.appendChild(svgEl('circle', { cx: lastSX, cy: lastSY, r: 3, fill: series.color }));
+
+  const valLabel = svgEl('text', { x: lastSX + 6, y: lastSY + 3, fill: series.color, 'font-size': '10', 'font-family': 'monospace' });
+  valLabel.textContent = last.y.toFixed(1);
+  svg.appendChild(valLabel);
+
+  const minLabel = svgEl('text', { x: pad.l, y: H - 2, fill: '#666', 'font-size': '9', 'font-family': 'monospace' });
+  minLabel.textContent = minY.toFixed(1);
+  svg.appendChild(minLabel);
+
+  const maxLabel = svgEl('text', { x: W - pad.r, y: H - 2, fill: '#666', 'font-size': '9', 'font-family': 'monospace', 'text-anchor': 'end' });
+  maxLabel.textContent = maxY.toFixed(1);
+  svg.appendChild(maxLabel);
+}
+
+// ── FlappyLab: game loop ──
+
+let lab = null;   // current lab instance (survives event wiring)
+
+class FlappyLab {
+  constructor(r4) {
+    this.r4 = r4;
+    this._raf = null;
+    this._frame = 0;
+    this._tickCount = 0;
+    this.currentTree = null;
+    this.currentTermId = null;
+    this.handleEventSym = r4.sym("handle_event");
+    this.renderSym = r4.sym("render");
+  }
+
+  start() {
+    const tickSym = this.r4.sym("tick");
+    const tick = () => {
+      try {
+        this._frame++;
+        this._tickCount++;
+        const frameTerm = this.r4.num(this._frame);
+        const call = this.r4.call(this.handleEventSym, [tickSym, frameTerm]);
+        this.r4.eval(call);
+        this.renderGame();
+        // Drain viz every 3rd frame for perf
+        if (this._tickCount % 3 === 0) {
+          drainViz(this.r4);
+          renderVizCharts();
+        }
+      } catch (e) {
+        console.error("[flappy-lab] tick error:", e);
+      }
+      this._raf = requestAnimationFrame(tick);
+    };
+    this._raf = requestAnimationFrame(tick);
+  }
+
+  stop() {
+    if (this._raf != null) {
+      cancelAnimationFrame(this._raf);
+      this._raf = null;
+    }
+  }
+
+  sendEvent(sym, payload) {
+    const call = this.r4.call(this.handleEventSym, [sym, payload]);
+    this.r4.eval(call);
+    this.renderGame();
+  }
+
+  renderGame() {
+    const r4 = this.r4;
+    const renderCall = r4.call(this.renderSym, []);
+    r4.eval(renderCall);
+
+    const pending = r4.scopeTakePending("dom");
+    if (pending.length === 0) return;
+    const newTermId = pending[pending.length - 1];
+
+    if (this.currentTree === null) {
+      const dom = renderTerm(r4, newTermId, () => {});
+      gameEl.innerHTML = '';
+      gameEl.appendChild(dom);
+      this.currentTree = dom;
+    } else {
+      this.currentTree = patch(
+        r4,
+        this.currentTermId,
+        newTermId,
+        this.currentTree,
+        gameEl,
+        () => {}
+      );
+    }
+    this.currentTermId = newTermId;
+  }
+}
+
+// ── Restart logic ──
+
+let restartTimer = null;
+let generation = 0;
+
+function scheduleRestart() {
+  clearTimeout(restartTimer);
+  restartTimer = setTimeout(restart, 600);
+}
+
+async function restart() {
+  const thisGen = ++generation;
+  statusEl.className = 'status-dot loading';
+
+  try {
+    // Stop old loop
+    if (lab) lab.stop();
+
+    const r4 = await freshR4();
+    if (thisGen !== generation) return;
+
+    const code = gameEditor.state.doc.toString() + '\n' + metaEditor.state.doc.toString();
+    r4.eval(r4.loadProgram(code));
+    if (thisGen !== generation) return;
+
+    clearAllViz();
+    lab = new FlappyLab(r4);
+    lab.start();
+
+    errorEl.classList.remove('visible');
+    statusEl.className = 'status-dot ok';
+  } catch (e) {
+    if (thisGen !== generation) return;
+    errorEl.textContent = e.message;
+    errorEl.classList.add('visible');
+    statusEl.className = 'status-dot err';
+  }
+}
+
+// ── Event wiring (once, references `lab`) ──
+
+gameEl.addEventListener('mousedown', (e) => {
+  e.preventDefault();
+  if (!lab) return;
+  const clickSym = lab.r4.sym("click");
+  const evSym = lab.r4.sym("mouse");
+  lab.sendEvent(clickSym, evSym);
+});
+
+document.addEventListener('keydown', (e) => {
+  // Don't capture keys when typing in editor
+  if (e.target.closest('.cm-editor')) return;
+  if (e.code === 'Space' || e.code === 'Enter') {
+    e.preventDefault();
+    if (!lab) return;
+    const clickSym = lab.r4.sym("click");
+    const evSym = lab.r4.sym("key");
+    lab.sendEvent(clickSym, evSym);
+  }
+});
+
+// ── Initial boot ──
+
+await restart();
+</script>
+</body>
+</html>
