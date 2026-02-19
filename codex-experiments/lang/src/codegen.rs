@@ -30,6 +30,7 @@ pub struct Codegen<'ctx> {
     tuples: HashMap<String, StructLayout<'ctx>>,
     str_lit_id: usize,
     next_type_id: u16,
+    compiler_used_globals: Vec<PointerValue<'ctx>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -90,6 +91,7 @@ pub fn compile_to_object(modules: &[crate::ast::Module], output: &std::path::Pat
     gen.declare_functions(modules)?;
     gen.define_functions(modules)?;
     gen.emit_aot_wrapper_main()?;
+    gen.emit_compiler_used();
     if std::env::var("LANGC_DUMP_IR").is_ok() {
         eprintln!("{}", gen.module.print_to_string().to_string());
     }
@@ -621,6 +623,7 @@ impl<'ctx> Codegen<'ctx> {
             tuples: HashMap::new(),
             str_lit_id: 0,
             next_type_id: 0,
+            compiler_used_globals: Vec::new(),
         }
     }
 
@@ -938,7 +941,6 @@ impl<'ctx> Codegen<'ctx> {
                 }
                 if self.is_gc_ref_type(ty) {
                     ctx.next_root += 1;
-                    self.emit_pollcheck(ctx)?;
                 }
                 Ok(None)
             }
@@ -950,9 +952,6 @@ impl<'ctx> Codegen<'ctx> {
                         let local = ctx.locals.get(name).ok_or_else(|| CodegenError { message: format!("unknown local '{}' in assign", name) })?;
                         if let Some(v) = v {
                             self.store_local(local, v)?;
-                            if self.is_gc_ref_type(&local.lang_ty) {
-                                self.emit_pollcheck(ctx)?;
-                            }
                         }
                         Ok(None)
                     }
@@ -1957,7 +1956,7 @@ impl<'ctx> Codegen<'ctx> {
         self.context.struct_type(&[ptr_ty.into(), ptr_ty.into(), roots_ty.into()], false)
     }
 
-    fn create_frame_origin(&self, fn_name: &str, num_roots: usize) -> Result<PointerValue<'ctx>, CodegenError> {
+    fn create_frame_origin(&mut self, fn_name: &str, num_roots: usize) -> Result<PointerValue<'ctx>, CodegenError> {
         let i32_ty = self.context.i32_type();
         let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
 
@@ -1973,7 +1972,30 @@ impl<'ctx> Codegen<'ctx> {
         let num = i32_ty.const_int(num_roots as u64, false);
         let init = origin_ty.const_named_struct(&[num.into(), name_ptr.into()]);
         origin_global.set_initializer(&init);
+
+        self.compiler_used_globals.push(name_global.as_pointer_value());
+        self.compiler_used_globals.push(origin_global.as_pointer_value());
+
         Ok(origin_global.as_pointer_value())
+    }
+
+    fn emit_compiler_used(&self) {
+        if self.compiler_used_globals.is_empty() {
+            return;
+        }
+        let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+        let arr_ty = ptr_ty.array_type(self.compiler_used_globals.len() as u32);
+        let global = self.module.add_global(arr_ty, None, "llvm.compiler.used");
+        let arr = ptr_ty.const_array(&self.compiler_used_globals);
+        global.set_initializer(&arr);
+        global.set_linkage(inkwell::module::Linkage::Appending);
+        // Bypass inkwell's set_section which prepends "," on macOS for Mach-O.
+        // llvm.compiler.used needs the raw section name "llvm.metadata".
+        unsafe {
+            use inkwell::values::AsValueRef;
+            let section = std::ffi::CString::new("llvm.metadata").unwrap();
+            inkwell::llvm_sys::core::LLVMSetSection(global.as_pointer_value().as_value_ref(), section.as_ptr());
+        }
     }
 
     fn field_llvm_type(&self, ty: &Type) -> Result<BasicTypeEnum<'ctx>, CodegenError> {

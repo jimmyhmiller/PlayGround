@@ -184,6 +184,9 @@ extern fn lang_llvm_create_target_machine(target: RawPointer<I8>, triple: String
 extern fn lang_llvm_set_module_target(m: RawPointer<I8>, machine: RawPointer<I8>) -> I64;
 extern fn lang_llvm_emit_to_file(machine: RawPointer<I8>, m: RawPointer<I8>, filename: String) -> I64;
 extern fn lang_llvm_print_module_to_string(m: RawPointer<I8>) -> String;
+extern fn lang_llvm_set_section(global: RawPointer<I8>, section: String) -> I64;
+extern fn lang_llvm_set_linkage(global: RawPointer<I8>, linkage: I64) -> I64;
+extern fn lang_llvm_set_unnamed_addr(global: RawPointer<I8>, unnamed: I64) -> I64;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -250,7 +253,8 @@ struct Codegen {
     enums: Vec,
     tuples: Vec,
     str_lit_id: I64,
-    next_type_id: I64
+    next_type_id: I64,
+    compiler_used: Vec
 }
 
 struct FnCtx {
@@ -858,7 +862,8 @@ fn new_codegen() -> Codegen {
         enums: vec_new(),
         tuples: vec_new(),
         str_lit_id: 0,
-        next_type_id: 1
+        next_type_id: 1,
+        compiler_used: vec_new()
     }
 }
 
@@ -1184,6 +1189,10 @@ fn create_frame_origin(cg: Codegen, fn_name: String, num_roots: I64) -> RawPoint
     vec_push_raw(origin_vals, name_ptr);
     let init: RawPointer<I8> = lang_llvm_const_named_struct(origin_ty, vec_data(origin_vals), 2);
     lang_llvm_set_initializer(origin_global, init);
+
+    vec_push_raw(cg.compiler_used, name_global);
+    vec_push_raw(cg.compiler_used, origin_global);
+
     origin_global
 }
 
@@ -1749,7 +1758,6 @@ fn codegen_expr(cg: Codegen, expr: Expr, ctx: FnCtx) -> RawPointer<I8> {
             ctx_insert_local(ctx, name, local);
             if is_gc_ref_type(the_ty) {
                 ctx.next_root = ctx.next_root + 1;
-                emit_pollcheck(cg, ctx);
             };
             null
         },
@@ -1834,7 +1842,6 @@ fn codegen_assign(cg: Codegen, target: Expr, v: RawPointer<I8>, ctx: FnCtx) -> I
             let name: String = vec_get_str(path, vec_len(path) - 1);
             let local: CgLocal = ctx_get_local(ctx, name);
             store_local(cg, local, v);
-            if local.is_gc_ref { emit_pollcheck(cg, ctx); };
         },
         Expr::FieldExpr { base, name, span } => {
             let obj_ptr: RawPointer<I8> = resolve_struct_base(cg, base, ctx);
@@ -2459,6 +2466,26 @@ fn emit_aot_wrapper_main(cg: Codegen) -> I64 {
 }
 
 // ---------------------------------------------------------------------------
+// llvm.compiler.used — protect GC metadata globals from optimization
+// ---------------------------------------------------------------------------
+
+fn LINKAGE_APPENDING() -> I64 { 7 }
+
+fn emit_compiler_used(cg: Codegen) -> I64 {
+    let count: I64 = vec_len(cg.compiler_used);
+    if count == 0 { return 0; };
+
+    let ptr_ty: RawPointer<I8> = lang_llvm_ptr_type(cg.context);
+    let arr_ty: RawPointer<I8> = lang_llvm_array_type(ptr_ty, count);
+    let arr_val: RawPointer<I8> = lang_llvm_const_array(ptr_ty, vec_data(cg.compiler_used), count);
+    let global: RawPointer<I8> = LLVMAddGlobal(cg.llmod, arr_ty, "llvm.compiler.used");
+    lang_llvm_set_initializer(global, arr_val);
+    lang_llvm_set_linkage(global, LINKAGE_APPENDING());
+    lang_llvm_set_section(global, "llvm.metadata");
+    0
+}
+
+// ---------------------------------------------------------------------------
 // Compile to object file
 // ---------------------------------------------------------------------------
 
@@ -2492,6 +2519,7 @@ fn codegen_modules(modules: Vec, output_path: String) -> I64 {
     declare_functions(cg, modules);
     define_functions(cg, modules);
     emit_aot_wrapper_main(cg);
+    emit_compiler_used(cg);
     compile_to_object(cg, output_path);
     0
 }

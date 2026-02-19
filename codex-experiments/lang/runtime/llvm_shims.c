@@ -279,3 +279,18 @@ int64_t lang_llvm_get_type_kind(void* ty) {
 const char* lang_llvm_print_module_to_string(void* m) {
     return LLVMPrintModuleToString((LLVMModuleRef)m);
 }
+
+int64_t lang_llvm_set_section(void* global, const char* section) {
+    LLVMSetSection((LLVMValueRef)global, section);
+    return 0;
+}
+
+int64_t lang_llvm_set_linkage(void* global, int64_t linkage) {
+    LLVMSetLinkage((LLVMValueRef)global, (LLVMLinkage)linkage);
+    return 0;
+}
+
+int64_t lang_llvm_set_unnamed_addr(void* global, int64_t unnamed) {
+    LLVMSetUnnamedAddress((LLVMValueRef)global, unnamed ? LLVMGlobalUnnamedAddr : LLVMNoUnnamedAddr);
+    return 0;
+}
