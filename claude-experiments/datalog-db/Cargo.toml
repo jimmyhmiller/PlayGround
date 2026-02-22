@@ -26,6 +26,11 @@ tikv = ["tikv-client", "tokio"]
 tempfile = "3.25.0"
 insta = "1"
 proptest = "1"
+postgres = "0.19"
+
+[[bench]]
+name = "comparative"
+harness = false
 
 [dependencies.tikv-client]
 version = "0.3"

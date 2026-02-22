@@ -19,11 +19,20 @@ pub type Result<T> = std::result::Result<T, StorageError>;
 pub trait ReadOps {
     fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>>;
     fn scan(&self, start: &[u8], end: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>>;
+    /// Iterate over entries without materializing all at once.
+    /// Callback receives borrowed key/value slices. Return false to stop early.
+    fn scan_foreach(
+        &self,
+        start: &[u8],
+        end: &[u8],
+        f: &mut dyn FnMut(&[u8], &[u8]) -> bool,
+    ) -> Result<()>;
 }
 
 /// Read-write operations available inside a transaction.
 pub trait TxnOps: ReadOps {
     fn put(&self, key: Vec<u8>, value: Vec<u8>) -> Result<()>;
+    fn delete(&self, key: &[u8]) -> Result<()>;
     fn get_for_update(&self, key: &[u8], exclusive: bool) -> Result<Option<Vec<u8>>>;
 }
 

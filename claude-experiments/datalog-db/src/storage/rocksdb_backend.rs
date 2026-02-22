@@ -63,6 +63,27 @@ impl ReadOps for RocksDbSnapshotOps<'_> {
         }
         Ok(results)
     }
+
+    fn scan_foreach(
+        &self,
+        start: &[u8],
+        end: &[u8],
+        f: &mut dyn FnMut(&[u8], &[u8]) -> bool,
+    ) -> Result<()> {
+        let iter = self
+            .snapshot
+            .iterator(IteratorMode::From(start, Direction::Forward));
+        for item in iter {
+            let (key, value) = item.map_err(|e| StorageError::Backend(e.to_string()))?;
+            if key.as_ref() >= end {
+                break;
+            }
+            if !f(&key, &value) {
+                break;
+            }
+        }
+        Ok(())
+    }
 }
 
 // -- Transaction (read-write) --
@@ -93,12 +114,39 @@ impl ReadOps for RocksDbTxnOps<'_> {
         }
         Ok(results)
     }
+
+    fn scan_foreach(
+        &self,
+        start: &[u8],
+        end: &[u8],
+        f: &mut dyn FnMut(&[u8], &[u8]) -> bool,
+    ) -> Result<()> {
+        let iter = self
+            .txn
+            .iterator(IteratorMode::From(start, Direction::Forward));
+        for item in iter {
+            let (key, value) = item.map_err(|e| StorageError::Backend(e.to_string()))?;
+            if key.as_ref() >= end {
+                break;
+            }
+            if !f(&key, &value) {
+                break;
+            }
+        }
+        Ok(())
+    }
 }
 
 impl TxnOps for RocksDbTxnOps<'_> {
     fn put(&self, key: Vec<u8>, value: Vec<u8>) -> Result<()> {
         self.txn
             .put(&key, &value)
+            .map_err(|e| StorageError::Backend(e.to_string()))
+    }
+
+    fn delete(&self, key: &[u8]) -> Result<()> {
+        self.txn
+            .delete(key)
             .map_err(|e| StorageError::Backend(e.to_string()))
     }
 

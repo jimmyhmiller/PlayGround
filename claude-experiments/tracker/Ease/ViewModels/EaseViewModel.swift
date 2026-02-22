@@ -49,8 +49,11 @@ class EaseViewModel: ObservableObject {
     @Published var hoveredGoalId: UUID? = nil
 
     private let dataStore = DataStore.shared
+    private let cloudKit = CloudKitManager()
     private var undoStack: [UndoAction] = []
     private var redoStack: [UndoAction] = []
+    private var deletedGoalIds: Set<UUID> = []
+    private var deletedEntryIds: Set<UUID> = []
 
     init() {
         if let savedPeriod = UserDefaults.standard.string(forKey: "selectedPeriod"),
@@ -59,48 +62,98 @@ class EaseViewModel: ObservableObject {
         }
         showCalendarView = UserDefaults.standard.bool(forKey: "showCalendarView")
         loadData()
+        startCloudKitSync()
     }
 
     func loadData() {
         let stored = dataStore.load()
         goals = stored.goals
         entries = stored.entries
+        deletedGoalIds = stored.deletedGoalIds
+        deletedEntryIds = stored.deletedEntryIds
     }
 
     func save() {
-        dataStore.saveGoals(goals, entries: entries)
+        dataStore.saveGoals(goals, entries: entries, deletedGoalIds: deletedGoalIds, deletedEntryIds: deletedEntryIds)
+    }
+
+    // MARK: - CloudKit Sync
+
+    private func startCloudKitSync() {
+        Task {
+            await cloudKit.setupZoneAndSubscription()
+            await fetchRemoteChanges()
+        }
+    }
+
+    private func pushToCloud() {
+        Task {
+            await cloudKit.pushChanges(
+                goals: goals,
+                entries: entries,
+                deletedGoalIds: deletedGoalIds,
+                deletedEntryIds: deletedEntryIds
+            )
+        }
+    }
+
+    private func fetchRemoteChanges() async {
+        let remote = await cloudKit.fetchChanges()
+        guard !remote.goals.isEmpty || !remote.entries.isEmpty || !remote.deletedGoalIds.isEmpty || !remote.deletedEntryIds.isEmpty else { return }
+
+        let localData = StoredData(goals: goals, entries: entries, deletedGoalIds: deletedGoalIds, deletedEntryIds: deletedEntryIds)
+        let merged = cloudKit.merge(local: localData, remote: remote)
+
+        goals = merged.goals
+        entries = merged.entries
+        deletedGoalIds = merged.deletedGoalIds
+        deletedEntryIds = merged.deletedEntryIds
+        save()
     }
 
     func addGoal(name: String, colorHex: String) {
         let goal = Goal(name: name, colorHex: colorHex)
         goals.append(goal)
         save()
+        pushToCloud()
     }
 
     func deleteGoal(_ goal: Goal) {
         let goalEntries = entries.filter { $0.goalId == goal.id }
+        deletedGoalIds.insert(goal.id)
+        for entry in goalEntries {
+            deletedEntryIds.insert(entry.id)
+        }
         goals.removeAll { $0.id == goal.id }
         entries.removeAll { $0.goalId == goal.id }
         undoStack.append(.deleteGoal(goal, goalEntries))
         redoStack.removeAll()
         save()
+        pushToCloud()
     }
 
     func clearAllData() {
+        for entry in entries {
+            deletedEntryIds.insert(entry.id)
+        }
         entries = []
         save()
+        pushToCloud()
     }
 
     func updateGoalColor(_ goal: Goal, colorHex: String) {
         if let index = goals.firstIndex(where: { $0.id == goal.id }) {
             goals[index].colorHex = colorHex
+            goals[index].modifiedAt = Date()
             save()
+            pushToCloud()
         }
     }
 
     func moveGoal(from source: IndexSet, to destination: Int) {
         goals.move(fromOffsets: source, toOffset: destination)
         save()
+        pushToCloud()
     }
 
     func addEntry(for goal: Goal, amount: Double) {
@@ -120,35 +173,48 @@ class EaseViewModel: ObservableObject {
         undoStack.append(.addEntry(entry))
         redoStack.removeAll()
         save()
+        pushToCloud()
     }
 
     func undo() {
         guard let action = undoStack.popLast() else { return }
         switch action {
         case .addEntry(let entry):
+            deletedEntryIds.insert(entry.id)
             entries.removeAll { $0.id == entry.id }
             redoStack.append(action)
         case .deleteGoal(let goal, let goalEntries):
+            deletedGoalIds.remove(goal.id)
+            for entry in goalEntries {
+                deletedEntryIds.remove(entry.id)
+            }
             goals.append(goal)
             entries.append(contentsOf: goalEntries)
             redoStack.append(action)
         }
         save()
+        pushToCloud()
     }
 
     func redo() {
         guard let action = redoStack.popLast() else { return }
         switch action {
         case .addEntry(let entry):
+            deletedEntryIds.remove(entry.id)
             entries.append(entry)
             undoStack.append(action)
         case .deleteGoal(let goal, _):
+            deletedGoalIds.insert(goal.id)
             let goalEntries = entries.filter { $0.goalId == goal.id }
+            for entry in goalEntries {
+                deletedEntryIds.insert(entry.id)
+            }
             goals.removeAll { $0.id == goal.id }
             entries.removeAll { $0.goalId == goal.id }
             undoStack.append(.deleteGoal(goal, goalEntries))
         }
         save()
+        pushToCloud()
     }
 
     var canUndo: Bool { !undoStack.isEmpty }

@@ -1,4 +1,6 @@
 use std::any::Any;
+use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -9,7 +11,9 @@ use byteorder::{BigEndian, ByteOrder};
 use crate::datom::{EntityId, TxId, Value};
 use crate::index;
 use crate::query::executor::{self, QueryResult};
-use crate::query::Query;
+use crate::query::planner;
+pub use crate::query::planner::QueryPlan;
+use crate::query::{Pattern, Query};
 use crate::schema::{EntityTypeDef, EnumTypeDef, FieldDef, FieldType, SchemaRegistry};
 use crate::storage::{StorageBackend, StorageError, TxnOps};
 use crate::tx::{self, TxOp};
@@ -31,9 +35,60 @@ pub enum DbError {
 
 pub type Result<T> = std::result::Result<T, DbError>;
 
+/// Cache key derived from query shape, with literal values erased.
+/// Two queries that differ only in constant values share the same plan.
+#[derive(Clone, PartialEq, Eq)]
+struct PlanCacheKey {
+    hash: u64,
+}
+
+impl PlanCacheKey {
+    fn from_query(query: &Query) -> Self {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        // Hash find variables
+        query.find.hash(&mut hasher);
+        // Hash whether as_of is present (not the value)
+        query.as_of.is_some().hash(&mut hasher);
+        // Hash clause shapes
+        for clause in &query.where_clauses {
+            clause.entity_type.hash(&mut hasher);
+            clause.bind.hash(&mut hasher);
+            for (field_name, pattern) in &clause.field_patterns {
+                field_name.hash(&mut hasher);
+                // Hash pattern shape, not values
+                std::mem::discriminant(pattern).hash(&mut hasher);
+                match pattern {
+                    Pattern::Variable(v) => v.hash(&mut hasher),
+                    Pattern::Constant(_) => { /* value erased */ }
+                    Pattern::Predicate { op, .. } => {
+                        std::mem::discriminant(op).hash(&mut hasher);
+                    }
+                    Pattern::EnumMatch { variant, field_patterns } => {
+                        std::mem::discriminant(variant.as_ref()).hash(&mut hasher);
+                        for (name, pat) in field_patterns {
+                            name.hash(&mut hasher);
+                            std::mem::discriminant(pat).hash(&mut hasher);
+                        }
+                    }
+                }
+            }
+        }
+        PlanCacheKey {
+            hash: hasher.finish(),
+        }
+    }
+}
+
+impl Hash for PlanCacheKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.hash.hash(state);
+    }
+}
+
 pub struct Database {
     storage: Arc<dyn StorageBackend>,
     schema: RwLock<SchemaRegistry>,
+    plan_cache: RwLock<HashMap<PlanCacheKey, Arc<QueryPlan>>>,
 }
 
 impl Database {
@@ -42,6 +97,7 @@ impl Database {
         let db = Self {
             storage,
             schema: RwLock::new(SchemaRegistry::new()),
+            plan_cache: RwLock::new(HashMap::new()),
         };
 
         // Load schema from storage
@@ -187,6 +243,7 @@ impl Database {
 
         let tx_id = *result.downcast::<TxId>().expect("wrong type");
         schema.register_enum(enum_def);
+        self.plan_cache.write().clear();
 
         Ok(tx_id)
     }
@@ -287,6 +344,7 @@ impl Database {
 
         let tx_id = *result.downcast::<TxId>().expect("wrong type");
         schema.register(type_def);
+        self.plan_cache.write().clear();
 
         Ok(tx_id)
     }
@@ -380,15 +438,76 @@ impl Database {
             }
         }
 
+        // Check plan cache
+        let cache_key = PlanCacheKey::from_query(&query);
+        let cached_plan = {
+            let cache = self.plan_cache.read();
+            cache.get(&cache_key).cloned()
+        };
+
+        if let Some(plan) = cached_plan {
+            // Re-use cached plan, just update as_of
+            let mut plan = (*plan).clone();
+            plan.as_of = query.as_of;
+            let result = self
+                .storage
+                .execute_read(Box::new(move |snap| {
+                    let qr = executor::execute_plan(snap, &plan, &schema)
+                        .map_err(|e| StorageError::Backend(e))?;
+                    Ok(Box::new(qr) as Box<dyn Any + Send>)
+                }))?;
+            return Ok(*result.downcast::<QueryResult>().expect("wrong type"));
+        }
+
         let result = self
             .storage
             .execute_read(Box::new(move |snap| {
-                let qr = executor::execute_query(snap, &query, &schema)
+                let plan = planner::plan_query(snap, &query, &schema)
                     .map_err(|e| StorageError::Backend(e))?;
-                Ok(Box::new(qr) as Box<dyn Any + Send>)
+
+                let qr = executor::execute_plan(snap, &plan, &schema)
+                    .map_err(|e| StorageError::Backend(e))?;
+
+                Ok(Box::new((plan, qr)) as Box<dyn Any + Send>)
             }))?;
 
-        Ok(*result.downcast::<QueryResult>().expect("wrong type"))
+        let (plan, qr) = *result
+            .downcast::<(QueryPlan, QueryResult)>()
+            .expect("wrong type");
+
+        // Store in cache
+        {
+            let mut cache = self.plan_cache.write();
+            cache.insert(cache_key, Arc::new(plan));
+        }
+
+        Ok(qr)
+    }
+
+    /// Generate a query plan without executing.
+    pub fn explain(&self, query: &Query) -> Result<QueryPlan> {
+        let schema = self.schema.read().clone();
+        let mut query = query.clone();
+
+        // Convert as_of_time to as_of if needed
+        if query.as_of.is_none() {
+            if let Some(target_ms) = query.as_of_time {
+                match self.resolve_tx_for_time(target_ms)? {
+                    Some(tx_id) => query.as_of = Some(tx_id),
+                    None => query.as_of = Some(0),
+                }
+            }
+        }
+
+        let result = self
+            .storage
+            .execute_read(Box::new(move |snap| {
+                let plan = planner::plan_query(snap, &query, &schema)
+                    .map_err(|e| StorageError::Backend(e))?;
+                Ok(Box::new(plan) as Box<dyn Any + Send>)
+            }))?;
+
+        Ok(*result.downcast::<QueryPlan>().expect("wrong type"))
     }
 
     /// Get all current field values for an entity.

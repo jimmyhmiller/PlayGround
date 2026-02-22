@@ -10,6 +10,10 @@ pub const AVET_PREFIX: u8 = 0x03;
 pub const VAET_PREFIX: u8 = 0x04;
 pub const META_PREFIX: u8 = 0x00;
 
+// Current-state indexes (no tx/added, latest value only)
+pub const CURRENT_AEVT_PREFIX: u8 = 0x11;
+pub const CURRENT_AVET_PREFIX: u8 = 0x12;
+
 // --- Encoding helpers ---
 
 fn encode_value(buf: &mut Vec<u8>, value: &Value) {
@@ -167,6 +171,16 @@ pub fn avet_attr_value_prefix(attr: &str, value: &Value) -> Vec<u8> {
     buf
 }
 
+/// Build AVET prefix for scanning all values of a given type under an attribute.
+/// Key layout: [AVET_PREFIX][attr_len(u16)][attr_bytes][type_tag]
+pub fn avet_attr_type_prefix(attr: &str, type_tag: u8) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(4 + attr.len());
+    buf.push(AVET_PREFIX);
+    encode_attr(&mut buf, attr);
+    buf.push(type_tag);
+    buf
+}
+
 pub fn meta_key(name: &str) -> Vec<u8> {
     let mut buf = Vec::with_capacity(1 + name.len());
     buf.push(META_PREFIX);
@@ -300,6 +314,89 @@ pub fn decode_datom_from_avet(key: &[u8]) -> Option<Datom> {
         tx,
         added,
     })
+}
+
+// --- Current-state index encoding ---
+// CURRENT_AEVT: Key = [0x11][attr_len(u16)][attr_bytes][entity_id(u64)]
+//               Value = encoded Value bytes
+// CURRENT_AVET: Key = [0x12][attr_len(u16)][attr_bytes][type_tag][value_data][entity_id(u64)]
+//               Value = empty
+
+/// Encode a current-state AEVT key + value.
+/// Returns (key, value_bytes).
+pub fn encode_current_aevt(attr: &str, entity: EntityId, value: &Value) -> (Vec<u8>, Vec<u8>) {
+    let mut key = Vec::with_capacity(3 + attr.len() + 8);
+    key.push(CURRENT_AEVT_PREFIX);
+    encode_attr(&mut key, attr);
+    encode_entity(&mut key, entity);
+
+    let mut val_buf = Vec::with_capacity(16);
+    encode_value(&mut val_buf, value);
+
+    (key, val_buf)
+}
+
+/// Encode a current-state AVET key. Value is empty.
+pub fn encode_current_avet(attr: &str, value: &Value, entity: EntityId) -> Vec<u8> {
+    let mut key = Vec::with_capacity(16 + attr.len());
+    key.push(CURRENT_AVET_PREFIX);
+    encode_attr(&mut key, attr);
+    encode_value(&mut key, value);
+    encode_entity(&mut key, entity);
+    key
+}
+
+/// Build prefix for scanning CURRENT_AEVT by attribute.
+pub fn current_aevt_attr_prefix(attr: &str) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(3 + attr.len());
+    buf.push(CURRENT_AEVT_PREFIX);
+    encode_attr(&mut buf, attr);
+    buf
+}
+
+/// Build prefix for scanning CURRENT_AVET by attribute.
+pub fn current_avet_attr_prefix(attr: &str) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(3 + attr.len());
+    buf.push(CURRENT_AVET_PREFIX);
+    encode_attr(&mut buf, attr);
+    buf
+}
+
+/// Build prefix for scanning CURRENT_AVET by attribute + value.
+pub fn current_avet_attr_value_prefix(attr: &str, value: &Value) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(16 + attr.len());
+    buf.push(CURRENT_AVET_PREFIX);
+    encode_attr(&mut buf, attr);
+    encode_value(&mut buf, value);
+    buf
+}
+
+/// Build prefix for scanning CURRENT_AVET by attribute + type tag.
+pub fn current_avet_attr_type_prefix(attr: &str, type_tag: u8) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(4 + attr.len());
+    buf.push(CURRENT_AVET_PREFIX);
+    encode_attr(&mut buf, attr);
+    buf.push(type_tag);
+    buf
+}
+
+/// Extract entity ID from a CURRENT_AEVT key, given the known attr byte length.
+/// Key layout: [1 prefix][2 attr_len][attr_bytes][8 entity_id]
+pub fn current_aevt_entity_at(key: &[u8], attr_byte_len: usize) -> EntityId {
+    let offset = 1 + 2 + attr_byte_len;
+    u64::from_be_bytes(key[offset..offset + 8].try_into().unwrap())
+}
+
+/// Extract entity ID from a CURRENT_AVET key (entity is always the last 8 bytes).
+pub fn current_avet_entity_at(key: &[u8]) -> EntityId {
+    let offset = key.len() - 8;
+    u64::from_be_bytes(key[offset..offset + 8].try_into().unwrap())
+}
+
+/// Decode a Value from raw bytes (as stored in CURRENT_AEVT RocksDB value).
+pub fn decode_current_value(data: &[u8]) -> Option<Value> {
+    let mut cursor = Cursor::new(data);
+    decode_value(&mut cursor)
 }
 
 /// Compute the exclusive upper bound for a prefix scan.

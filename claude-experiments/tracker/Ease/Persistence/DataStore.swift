@@ -3,6 +3,23 @@ import Foundation
 struct StoredData: Codable {
     var goals: [Goal]
     var entries: [Entry]
+    var deletedGoalIds: Set<UUID>
+    var deletedEntryIds: Set<UUID>
+
+    init(goals: [Goal] = [], entries: [Entry] = [], deletedGoalIds: Set<UUID> = [], deletedEntryIds: Set<UUID> = []) {
+        self.goals = goals
+        self.entries = entries
+        self.deletedGoalIds = deletedGoalIds
+        self.deletedEntryIds = deletedEntryIds
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        goals = try container.decode([Goal].self, forKey: .goals)
+        entries = try container.decode([Entry].self, forKey: .entries)
+        deletedGoalIds = try container.decodeIfPresent(Set<UUID>.self, forKey: .deletedGoalIds) ?? []
+        deletedEntryIds = try container.decodeIfPresent(Set<UUID>.self, forKey: .deletedEntryIds) ?? []
+    }
 }
 
 class DataStore {
@@ -26,7 +43,7 @@ class DataStore {
         guard fileManager.fileExists(atPath: dataFileURL.path),
               let data = try? Data(contentsOf: dataFileURL),
               let stored = try? JSONDecoder().decode(StoredData.self, from: data) else {
-            return StoredData(goals: [], entries: [])
+            return StoredData()
         }
         return stored
     }
@@ -36,7 +53,7 @@ class DataStore {
         try? encoded.write(to: dataFileURL, options: .atomic)
     }
 
-    func saveGoals(_ goals: [Goal], entries: [Entry]) {
-        save(StoredData(goals: goals, entries: entries))
+    func saveGoals(_ goals: [Goal], entries: [Entry], deletedGoalIds: Set<UUID> = [], deletedEntryIds: Set<UUID> = []) {
+        save(StoredData(goals: goals, entries: entries, deletedGoalIds: deletedGoalIds, deletedEntryIds: deletedEntryIds))
     }
 }

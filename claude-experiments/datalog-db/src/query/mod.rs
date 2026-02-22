@@ -1,4 +1,5 @@
 pub mod executor;
+pub mod planner;
 
 use serde::{Deserialize, Serialize};
 
@@ -149,6 +150,8 @@ pub struct Query {
     pub where_clauses: Vec<WhereClause>,
     pub as_of: Option<TxId>,
     pub as_of_time: Option<u64>,
+    /// If true, return the query plan instead of executing.
+    pub explain: bool,
 }
 
 impl Query {
@@ -198,12 +201,14 @@ impl Query {
 
         let as_of = v.get("as_of").and_then(|a| a.as_u64());
         let as_of_time = v.get("as_of_time").and_then(|a| a.as_u64());
+        let explain = v.get("explain").and_then(|e| e.as_bool()).unwrap_or(false);
 
         Ok(Query {
             find,
             where_clauses,
             as_of,
             as_of_time,
+            explain,
         })
     }
 }

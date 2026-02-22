@@ -418,8 +418,59 @@ pub fn process_transaction(
 
     let datom_count = datoms.len();
     for datom in &datoms {
+        // Write historical indexes
         for (key, value) in index::encode_datom(datom) {
             txn.put(key, value)?;
+        }
+
+        // Maintain current-state indexes
+        if datom.added {
+            // Assert: look up old value to clean up stale CURRENT_AVET entry
+            let (aevt_key, aevt_val) =
+                index::encode_current_aevt(&datom.attribute, datom.entity, &datom.value);
+
+            // Check for previous value to delete stale CURRENT_AVET
+            if let Some(old_val_bytes) = txn.get(&aevt_key)? {
+                if let Some(old_val) = index::decode_current_value(&old_val_bytes) {
+                    let old_avet_key = index::encode_current_avet(
+                        &datom.attribute,
+                        &old_val,
+                        datom.entity,
+                    );
+                    txn.delete(&old_avet_key)?;
+                }
+            }
+
+            txn.put(aevt_key, aevt_val)?;
+
+            let avet_key =
+                index::encode_current_avet(&datom.attribute, &datom.value, datom.entity);
+            txn.put(avet_key, vec![])?;
+
+            // Track entity count: new entity type assertion
+            if datom.attribute == "__type" {
+                if let Value::String(type_name) = &datom.value {
+                    increment_type_count(txn, type_name)?;
+                }
+            }
+        } else {
+            // Retract: delete current-state entries
+            let aevt_prefix = index::current_aevt_attr_prefix(&datom.attribute);
+            let mut aevt_key = aevt_prefix;
+            aevt_key.extend_from_slice(&datom.entity.to_be_bytes());
+
+            txn.delete(&aevt_key)?;
+
+            let avet_key =
+                index::encode_current_avet(&datom.attribute, &datom.value, datom.entity);
+            txn.delete(&avet_key)?;
+
+            // Track entity count: entity type retraction
+            if datom.attribute == "__type" {
+                if let Value::String(type_name) = &datom.value {
+                    decrement_type_count(txn, type_name)?;
+                }
+            }
         }
     }
 
@@ -581,6 +632,33 @@ fn extract_enum_parts(value: &Value) -> (String, HashMap<String, Value>) {
         Value::Enum { variant, fields } => (variant.clone(), fields.clone()),
         _ => panic!("extract_enum_parts called on non-enum value"),
     }
+}
+
+fn type_count_key(type_name: &str) -> Vec<u8> {
+    index::meta_key(&format!("type_count:{}", type_name))
+}
+
+fn increment_type_count(txn: &dyn TxnOps, type_name: &str) -> Result<()> {
+    let key = type_count_key(type_name);
+    let count = match txn.get(&key)? {
+        Some(b) if b.len() == 8 => u64::from_be_bytes(b.try_into().unwrap()) + 1,
+        _ => 1,
+    };
+    txn.put(key, count.to_be_bytes().to_vec())?;
+    Ok(())
+}
+
+fn decrement_type_count(txn: &dyn TxnOps, type_name: &str) -> Result<()> {
+    let key = type_count_key(type_name);
+    let count = match txn.get(&key)? {
+        Some(b) if b.len() == 8 => {
+            let c = u64::from_be_bytes(b.try_into().unwrap());
+            c.saturating_sub(1)
+        }
+        _ => 0,
+    };
+    txn.put(key, count.to_be_bytes().to_vec())?;
+    Ok(())
 }
 
 fn retract_current_enum(

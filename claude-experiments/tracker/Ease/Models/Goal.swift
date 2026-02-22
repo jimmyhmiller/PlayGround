@@ -4,11 +4,24 @@ struct Goal: Identifiable, Codable, Equatable {
     let id: UUID
     var name: String
     var colorHex: String
+    var modifiedAt: Date
+    var isDeleted: Bool
 
-    init(id: UUID = UUID(), name: String, colorHex: String) {
+    init(id: UUID = UUID(), name: String, colorHex: String, modifiedAt: Date = Date(), isDeleted: Bool = false) {
         self.id = id
         self.name = name
         self.colorHex = colorHex
+        self.modifiedAt = modifiedAt
+        self.isDeleted = isDeleted
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        name = try container.decode(String.self, forKey: .name)
+        colorHex = try container.decode(String.self, forKey: .colorHex)
+        modifiedAt = try container.decodeIfPresent(Date.self, forKey: .modifiedAt) ?? Date()
+        isDeleted = try container.decodeIfPresent(Bool.self, forKey: .isDeleted) ?? false
     }
 
     var color: Color {

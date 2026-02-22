@@ -2468,3 +2468,500 @@ fn test_as_of_time_before_all_transactions() {
     let result = db.query(&query).unwrap();
     assert_eq!(result.rows.len(), 0, "should find no data before all transactions");
 }
+
+// --- Query planner tests ---
+
+#[test]
+fn test_hash_join_correctness() {
+    let (db, _dir) = test_db();
+    db.define_type(user_type()).unwrap();
+    db.define_type(post_type()).unwrap();
+
+    // Insert 20 users
+    for i in 0..20 {
+        let mut data = HashMap::new();
+        data.insert("name".to_string(), Value::String(format!("user_{}", i)));
+        data.insert("age".to_string(), Value::I64(20 + i));
+        data.insert(
+            "email".to_string(),
+            Value::String(format!("user_{}@example.com", i)),
+        );
+        db.transact(vec![TxOp::Assert {
+            entity_type: "User".to_string(),
+            entity: None,
+            data,
+        }])
+        .unwrap();
+    }
+
+    // Get entity IDs for first 5 users to create posts
+    let all_users_json = serde_json::json!({
+        "find": ["?u", "?name"],
+        "where": [{"bind": "?u", "type": "User", "name": "?name"}]
+    });
+    let all_users = db.query(&Query::from_json(&all_users_json).unwrap()).unwrap();
+    let user_ids: Vec<u64> = all_users.rows.iter().filter_map(|row| {
+        if let Value::Ref(id) = &row[0] { Some(*id) } else { None }
+    }).collect();
+
+    // Create 3 posts for each of the first 5 users
+    for &uid in &user_ids[..5] {
+        for j in 0..3 {
+            let mut data = HashMap::new();
+            data.insert(
+                "title".to_string(),
+                Value::String(format!("Post {} by user {}", j, uid)),
+            );
+            data.insert("author".to_string(), Value::Ref(uid));
+            db.transact(vec![TxOp::Assert {
+                entity_type: "Post".to_string(),
+                entity: None,
+                data,
+            }])
+            .unwrap();
+        }
+    }
+
+    // Join query — should find 15 results (5 users × 3 posts each)
+    let query_json = serde_json::json!({
+        "find": ["?name", "?title"],
+        "where": [
+            {"bind": "?u", "type": "User", "name": "?name"},
+            {"bind": "?p", "type": "Post", "author": "?u", "title": "?title"}
+        ]
+    });
+    let query = Query::from_json(&query_json).unwrap();
+    let result = db.query(&query).unwrap();
+    assert_eq!(result.rows.len(), 15);
+
+    // All rows should have valid name and title
+    for row in &result.rows {
+        if let Value::String(name) = &row[0] {
+            assert!(name.starts_with("user_"));
+        } else {
+            panic!("expected string name");
+        }
+        if let Value::String(title) = &row[1] {
+            assert!(title.starts_with("Post "));
+        } else {
+            panic!("expected string title");
+        }
+    }
+}
+
+#[test]
+fn test_explain_returns_plan() {
+    let (db, _dir) = test_db();
+    db.define_type(user_type()).unwrap();
+    db.define_type(post_type()).unwrap();
+
+    // Insert some data so counts are non-zero
+    for i in 0..5 {
+        let mut data = HashMap::new();
+        data.insert("name".to_string(), Value::String(format!("user_{}", i)));
+        data.insert(
+            "email".to_string(),
+            Value::String(format!("user_{}@example.com", i)),
+        );
+        db.transact(vec![TxOp::Assert {
+            entity_type: "User".to_string(),
+            entity: None,
+            data,
+        }])
+        .unwrap();
+    }
+
+    let query_json = serde_json::json!({
+        "find": ["?name", "?title"],
+        "where": [
+            {"bind": "?u", "type": "User", "name": "?name"},
+            {"bind": "?p", "type": "Post", "author": "?u", "title": "?title"}
+        ]
+    });
+    let query = Query::from_json(&query_json).unwrap();
+
+    let plan = db.explain(&query).unwrap();
+    let display = format!("{}", plan);
+    let json = plan.to_json();
+
+    // Display should contain Project and scan types
+    assert!(display.contains("Project"), "display should show Project: {}", display);
+    assert!(display.contains("Scan"), "display should show Scan: {}", display);
+    assert!(display.contains("User"), "display should mention User: {}", display);
+    assert!(display.contains("Post"), "display should mention Post: {}", display);
+
+    // JSON should have expected structure
+    assert_eq!(json["node"], "Project");
+    assert!(json["variables"].as_array().unwrap().contains(&serde_json::json!("?name")));
+    assert!(json["variables"].as_array().unwrap().contains(&serde_json::json!("?title")));
+    assert!(json["input"].is_object());
+}
+
+#[test]
+fn test_explain_via_query_flag() {
+    let (db, _dir) = test_db();
+    db.define_type(user_type()).unwrap();
+
+    // Query with explain: true — should NOT execute, just return plan info
+    let query_json = serde_json::json!({
+        "find": ["?name"],
+        "where": [{"bind": "?u", "type": "User", "name": "?name"}],
+        "explain": true
+    });
+    let query = Query::from_json(&query_json).unwrap();
+    assert!(query.explain);
+
+    // The explain method should work
+    let plan = db.explain(&query).unwrap();
+    let display = format!("{}", plan);
+    assert!(display.contains("Project"));
+}
+
+#[test]
+fn test_explain_wire_protocol() {
+    let (db, _dir) = test_db();
+    db.define_type(user_type()).unwrap();
+    db.define_type(post_type()).unwrap();
+
+    let server = datalog_db::server::Server::bind("127.0.0.1:0", db).unwrap();
+    let addr = server.local_addr().unwrap().to_string();
+    std::thread::spawn(move || { let _ = server.run(); });
+    std::thread::sleep(std::time::Duration::from_millis(50));
+
+    let mut client = datalog_db::client::Client::connect(&addr).unwrap();
+
+    let result = client.explain(&serde_json::json!({
+        "find": ["?name", "?title"],
+        "where": [
+            {"bind": "?u", "type": "User", "name": "?name"},
+            {"bind": "?p", "type": "Post", "author": "?u", "title": "?title"}
+        ]
+    })).unwrap();
+
+    assert!(!result.display.is_empty(), "display should not be empty");
+    assert!(result.display.contains("Project"), "display: {}", result.display);
+    assert!(result.plan.is_object(), "plan should be JSON object");
+    assert_eq!(result.plan["node"], "Project");
+}
+
+#[test]
+fn test_reorder_preserves_results() {
+    let (db, _dir) = test_db();
+    db.define_type(user_type()).unwrap();
+    db.define_type(post_type()).unwrap();
+
+    // Insert users
+    let mut user_ids = Vec::new();
+    for i in 0..10 {
+        let mut data = HashMap::new();
+        data.insert("name".to_string(), Value::String(format!("user_{}", i)));
+        data.insert("age".to_string(), Value::I64(20 + i));
+        data.insert(
+            "email".to_string(),
+            Value::String(format!("user_{}@example.com", i)),
+        );
+        let result = db
+            .transact(vec![TxOp::Assert {
+                entity_type: "User".to_string(),
+                entity: None,
+                data,
+            }])
+            .unwrap();
+        user_ids.push(result.entity_ids[0]);
+    }
+
+    // Insert posts for first 3 users
+    for &uid in &user_ids[..3] {
+        let mut data = HashMap::new();
+        data.insert("title".to_string(), Value::String(format!("Post by {}", uid)));
+        data.insert("author".to_string(), Value::Ref(uid));
+        db.transact(vec![TxOp::Assert {
+            entity_type: "Post".to_string(),
+            entity: None,
+            data,
+        }])
+        .unwrap();
+    }
+
+    // Query with clauses in "natural" order (User first, then Post)
+    let q1_json = serde_json::json!({
+        "find": ["?name", "?title"],
+        "where": [
+            {"bind": "?u", "type": "User", "name": "?name"},
+            {"bind": "?p", "type": "Post", "author": "?u", "title": "?title"}
+        ]
+    });
+    let q1 = Query::from_json(&q1_json).unwrap();
+    let result1 = db.query(&q1).unwrap();
+
+    // Query with clauses in reversed order (Post first, then User)
+    let q2_json = serde_json::json!({
+        "find": ["?name", "?title"],
+        "where": [
+            {"bind": "?p", "type": "Post", "author": "?u", "title": "?title"},
+            {"bind": "?u", "type": "User", "name": "?name"}
+        ]
+    });
+    let q2 = Query::from_json(&q2_json).unwrap();
+    let result2 = db.query(&q2).unwrap();
+
+    // Both should produce same number of results
+    assert_eq!(result1.rows.len(), result2.rows.len());
+    assert_eq!(result1.rows.len(), 3);
+
+    // Collect and sort for comparison
+    let mut names1: Vec<String> = result1.rows.iter().map(|r| format!("{}", r[0])).collect();
+    let mut names2: Vec<String> = result2.rows.iter().map(|r| format!("{}", r[0])).collect();
+    names1.sort();
+    names2.sort();
+    assert_eq!(names1, names2);
+}
+
+#[test]
+fn test_hash_join_empty_result() {
+    let (db, _dir) = test_db();
+    db.define_type(user_type()).unwrap();
+    db.define_type(post_type()).unwrap();
+
+    // Insert users but NO posts
+    for i in 0..5 {
+        let mut data = HashMap::new();
+        data.insert("name".to_string(), Value::String(format!("user_{}", i)));
+        data.insert(
+            "email".to_string(),
+            Value::String(format!("user_{}@example.com", i)),
+        );
+        db.transact(vec![TxOp::Assert {
+            entity_type: "User".to_string(),
+            entity: None,
+            data,
+        }])
+        .unwrap();
+    }
+
+    // Join should return empty
+    let query_json = serde_json::json!({
+        "find": ["?name", "?title"],
+        "where": [
+            {"bind": "?u", "type": "User", "name": "?name"},
+            {"bind": "?p", "type": "Post", "author": "?u", "title": "?title"}
+        ]
+    });
+    let query = Query::from_json(&query_json).unwrap();
+    let result = db.query(&query).unwrap();
+    assert_eq!(result.rows.len(), 0);
+}
+
+#[test]
+fn test_multi_clause_join() {
+    let (db, _dir) = test_db();
+    db.define_type(user_type()).unwrap();
+    db.define_type(post_type()).unwrap();
+
+    // Define a Comment type
+    db.define_type(EntityTypeDef {
+        name: "Comment".to_string(),
+        fields: vec![
+            FieldDef {
+                name: "body".to_string(),
+                field_type: FieldType::String,
+                required: true,
+                unique: false,
+                indexed: false,
+            },
+            FieldDef {
+                name: "post".to_string(),
+                field_type: FieldType::Ref("Post".to_string()),
+                required: true,
+                unique: false,
+                indexed: true,
+            },
+            FieldDef {
+                name: "commenter".to_string(),
+                field_type: FieldType::Ref("User".to_string()),
+                required: true,
+                unique: false,
+                indexed: true,
+            },
+        ],
+    })
+    .unwrap();
+
+    // Insert a user
+    let mut data = HashMap::new();
+    data.insert("name".to_string(), Value::String("Alice".to_string()));
+    data.insert(
+        "email".to_string(),
+        Value::String("alice@example.com".to_string()),
+    );
+    let alice_result = db
+        .transact(vec![TxOp::Assert {
+            entity_type: "User".to_string(),
+            entity: None,
+            data,
+        }])
+        .unwrap();
+    let alice_id = alice_result.entity_ids[0];
+
+    // Insert a post
+    let mut data = HashMap::new();
+    data.insert("title".to_string(), Value::String("Hello".to_string()));
+    data.insert("author".to_string(), Value::Ref(alice_id));
+    let post_result = db
+        .transact(vec![TxOp::Assert {
+            entity_type: "Post".to_string(),
+            entity: None,
+            data,
+        }])
+        .unwrap();
+    let post_id = post_result.entity_ids[0];
+
+    // Insert a comment
+    let mut data = HashMap::new();
+    data.insert("body".to_string(), Value::String("Great post!".to_string()));
+    data.insert("post".to_string(), Value::Ref(post_id));
+    data.insert("commenter".to_string(), Value::Ref(alice_id));
+    db.transact(vec![TxOp::Assert {
+        entity_type: "Comment".to_string(),
+        entity: None,
+        data,
+    }])
+    .unwrap();
+
+    // 3-way join: User → Post → Comment
+    let query_json = serde_json::json!({
+        "find": ["?name", "?title", "?body"],
+        "where": [
+            {"bind": "?u", "type": "User", "name": "?name"},
+            {"bind": "?p", "type": "Post", "author": "?u", "title": "?title"},
+            {"bind": "?c", "type": "Comment", "post": "?p", "body": "?body"}
+        ]
+    });
+    let query = Query::from_json(&query_json).unwrap();
+    let result = db.query(&query).unwrap();
+    assert_eq!(result.rows.len(), 1);
+    assert_eq!(result.rows[0][0], Value::String("Alice".to_string()));
+    assert_eq!(result.rows[0][1], Value::String("Hello".to_string()));
+    assert_eq!(result.rows[0][2], Value::String("Great post!".to_string()));
+
+    // Verify the plan builds a left-deep tree
+    let plan = db.explain(&query).unwrap();
+    let display = format!("{}", plan);
+    assert!(display.contains("Project"), "plan: {}", display);
+    let json = plan.to_json();
+    // Should have 3 scans in the tree — count Scan nodes in JSON
+    let json_str = serde_json::to_string(&json).unwrap();
+    let scan_count = json_str.matches("\"node\":\"Scan\"").count();
+    assert_eq!(scan_count, 3, "should have 3 scan nodes: {}", display);
+}
+
+#[test]
+fn test_explain_single_clause() {
+    let (db, _dir) = test_db();
+    db.define_type(user_type()).unwrap();
+
+    let query_json = serde_json::json!({
+        "find": ["?name"],
+        "where": [{"bind": "?u", "type": "User", "name": "?name"}]
+    });
+    let query = Query::from_json(&query_json).unwrap();
+    let plan = db.explain(&query).unwrap();
+    let json = plan.to_json();
+
+    // Single clause → Project wrapping a Scan (no Join)
+    assert_eq!(json["node"], "Project");
+    assert_eq!(json["input"]["node"], "Scan");
+    assert_eq!(json["input"]["type"], "User");
+}
+
+#[test]
+fn test_explain_constant_uses_index_lookup() {
+    let (db, _dir) = test_db();
+    db.define_type(user_type()).unwrap();
+
+    // Insert data so type count > 0
+    let mut data = HashMap::new();
+    data.insert("name".to_string(), Value::String("Alice".to_string()));
+    data.insert(
+        "email".to_string(),
+        Value::String("alice@example.com".to_string()),
+    );
+    db.transact(vec![TxOp::Assert {
+        entity_type: "User".to_string(),
+        entity: None,
+        data,
+    }])
+    .unwrap();
+
+    let query_json = serde_json::json!({
+        "find": ["?age"],
+        "where": [{"bind": "?u", "type": "User", "name": "Alice", "age": "?age"}]
+    });
+    let query = Query::from_json(&query_json).unwrap();
+    let plan = db.explain(&query).unwrap();
+    let json = plan.to_json();
+
+    assert_eq!(json["input"]["node"], "Scan");
+    let strategy = json["input"]["strategy"].as_str().unwrap();
+    assert!(strategy.contains("IndexLookup"), "strategy should be IndexLookup, got: {}", strategy);
+}
+
+#[test]
+fn test_explain_range_uses_range_scan() {
+    let (db, _dir) = test_db();
+    db.define_type(user_type()).unwrap();
+
+    // Insert data so type count > 0
+    let mut data = HashMap::new();
+    data.insert("name".to_string(), Value::String("Alice".to_string()));
+    data.insert("age".to_string(), Value::I64(30));
+    data.insert(
+        "email".to_string(),
+        Value::String("alice@example.com".to_string()),
+    );
+    db.transact(vec![TxOp::Assert {
+        entity_type: "User".to_string(),
+        entity: None,
+        data,
+    }])
+    .unwrap();
+
+    let query_json = serde_json::json!({
+        "find": ["?name"],
+        "where": [{"bind": "?u", "type": "User", "name": "?name", "age": {"gt": 25}}]
+    });
+    let query = Query::from_json(&query_json).unwrap();
+    let plan = db.explain(&query).unwrap();
+    let json = plan.to_json();
+
+    assert_eq!(json["input"]["node"], "Scan");
+    let strategy = json["input"]["strategy"].as_str().unwrap();
+    assert!(strategy.contains("RangeScan"), "strategy should be RangeScan, got: {}", strategy);
+}
+
+#[test]
+fn test_explain_join_shows_join_vars() {
+    let (db, _dir) = test_db();
+    db.define_type(user_type()).unwrap();
+    db.define_type(post_type()).unwrap();
+
+    let query_json = serde_json::json!({
+        "find": ["?name", "?title"],
+        "where": [
+            {"bind": "?u", "type": "User", "name": "?name"},
+            {"bind": "?p", "type": "Post", "author": "?u", "title": "?title"}
+        ]
+    });
+    let query = Query::from_json(&query_json).unwrap();
+    let plan = db.explain(&query).unwrap();
+    let json = plan.to_json();
+
+    // The input should be a join node
+    let input = &json["input"];
+    let join_on = input["join_on"].as_array().unwrap();
+    assert!(
+        join_on.contains(&serde_json::json!("?u")),
+        "join should be on ?u, got: {:?}",
+        join_on
+    );
+}

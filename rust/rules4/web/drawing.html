@@ -25,13 +25,18 @@
 
     .main {
       display: flex; gap: 16px; margin-bottom: 12px;
-      height: 500px;
+      height: calc(100vh - 120px);
+      min-height: 500px;
     }
     .editor-col {
       flex: 1; display: flex; flex-direction: column; min-width: 0;
     }
     .canvas-col {
       flex: 1; min-width: 0;
+      display: flex; flex-direction: column; gap: 10px;
+    }
+    .canvas-wrap {
+      flex: 1;
       background: white;
       border: 1px solid #eaeaee;
       border-radius: 12px;
@@ -128,6 +133,7 @@
       color: #1976d2;
       border-bottom: 1.5px dashed rgba(25, 118, 210, 0.5);
       cursor: col-resize;
+      padding: 3px 2px;
     }
     .cm-tangle-number:hover {
       background: rgba(25, 118, 210, 0.1);
@@ -151,25 +157,26 @@
       <div class="tab-bar">
         <button class="tab active" data-tab="animation">Animation</button>
         <button class="tab" data-tab="meta">Meta</button>
-        <button class="tab" data-tab="drawing">Drawing</button>
+        <button class="tab" data-tab="js">JS</button>
       </div>
       <div class="editor-wrap">
         <div class="editor-panel active" id="ep-animation"><div id="editor-animation"></div></div>
-        <div class="editor-panel" id="ep-drawing"><div id="editor-drawing"></div></div>
         <div class="editor-panel" id="ep-meta"><div id="editor-meta"></div></div>
+        <div class="editor-panel" id="ep-js"><div id="editor-js"></div></div>
       </div>
       <div class="error" id="error"></div>
     </div>
     <div class="canvas-col">
-      <div id="canvas-root"></div>
+      <div class="canvas-wrap">
+        <div id="canvas-root"></div>
+      </div>
+      <div class="controls">
+        <button class="btn" id="play-pause">Pause</button>
+        <input type="range" id="slider" min="0" max="39" value="0">
+        <span class="frame-label" id="frame-label">frame 0</span>
+        <button class="btn" id="apply-meta">Apply Meta</button>
+      </div>
     </div>
-  </div>
-
-  <div class="controls">
-    <button class="btn" id="play-pause">Pause</button>
-    <input type="range" id="slider" min="0" max="39" value="0">
-    <span class="frame-label" id="frame-label">frame 0</span>
-    <button class="btn" id="apply-meta">Apply Meta</button>
   </div>
 </div>
 
@@ -179,6 +186,61 @@ import { renderTerm, patch } from './vdom.js';
 
 const { EditorView, basicSetup } = await import('https://esm.sh/codemirror@6.0.1');
 const { ViewPlugin, Decoration } = await import('https://esm.sh/@codemirror/view@6');
+const { StreamLanguage } = await import('https://esm.sh/@codemirror/language@6');
+const { javascript } = await import('https://esm.sh/@codemirror/lang-javascript@6');
+
+// ── rules4 syntax highlighting ──
+
+const rules4Parser = {
+  name: "rules4",
+  startState() { return { inString: false }; },
+  token(stream, state) {
+    if (state.inString) {
+      while (!stream.eol()) {
+        if (stream.peek() === '\\') { stream.next(); stream.next(); }
+        else if (stream.next() === '"') { state.inString = false; return "string"; }
+      }
+      return "string";
+    }
+    if (stream.eatSpace()) return null;
+    if (stream.peek() === '#') { stream.skipToEnd(); return "lineComment"; }
+    if (stream.peek() === '"') {
+      stream.next(); state.inString = true;
+      while (!stream.eol()) {
+        if (stream.peek() === '\\') { stream.next(); stream.next(); }
+        else if (stream.next() === '"') { state.inString = false; return "string"; }
+      }
+      return "string";
+    }
+    if (stream.eat('@')) { stream.eatWhile(/[a-zA-Z_0-9]/); return "meta"; }
+    if (stream.eat('?')) { stream.eatWhile(/[a-zA-Z_0-9]/); return "variableName.special"; }
+    if (stream.match(/^\d+(\.\d+)?/)) return "number";
+    if (stream.match("=>")) return "operator";
+    if (stream.match("->")) return "operator";
+    if (stream.match("==")) return "operator";
+    if (stream.match("!=")) return "operator";
+    if (stream.match(">=")) return "operator";
+    if (stream.match("<=")) return "operator";
+    if (stream.eat(/[=+\-*\/<>%]/)) return "operator";
+    if (stream.eat(/[()]/)) return "paren";
+    if (stream.eat(/[[\]]/)) return "squareBracket";
+    if (stream.eat(/[{}]/)) return "brace";
+    if (stream.eat(',')) return "separator";
+    if (stream.match(/^[a-zA-Z_][a-zA-Z_0-9]*/)) {
+      const w = stream.current();
+      if (w === "fn" || w === "rule") return "definitionKeyword";
+      if (w === "if" || w === "then" || w === "else") return "controlKeyword";
+      if (w === "true" || w === "false" || w === "nil") return "atom";
+      if (w === "cons" || w === "result") return "keyword";
+      return "name";
+    }
+    stream.next();
+    return null;
+  },
+  languageData: { commentTokens: { line: "#" } },
+};
+
+const rules4Language = StreamLanguage.define(rules4Parser);
 
 // ── Tangle-style number scrubbing ──
 
@@ -266,7 +328,9 @@ const tangleDragHandlers = EditorView.domEventHandlers({
 
     const line = view.state.doc.lineAt(pos);
     const col = pos - line.from;
-    const num = findNumberAt(line.text, col);
+    let num = findNumberAt(line.text, col);
+    if (!num && col > 0) num = findNumberAt(line.text, col - 1);
+    if (!num) num = findNumberAt(line.text, col + 1);
     if (!num) return false;
 
     event.preventDefault();
@@ -297,7 +361,7 @@ function tangleExtension() {
 // ── Default code for each tab ──
 
 const ANIM_CODE = `\
-# === Bouncing ball physics ===
+# === Bouncing ball animation ===
 
 fn ball_x(?f) = ?f * 9 + 20
 
@@ -312,26 +376,52 @@ fn ball_vy(?f) =
 fn ball_y(0) = 30
 fn ball_y(?f) = ball_y(?f - 1) + ball_vy(?f)
 
+# Drawing
+fn draw(?f) = circle(ball_x(?f), ball_y(?f), 15)
+
+fn ball_element() =
+  element("circle",
+    [attr("cx", ball_x(current_frame)),
+     attr("cy", ball_y(current_frame)),
+     attr("r", 15),
+     attr("fill", "none"),
+     attr("stroke", "#222"),
+     attr("stroke-width", "2.5")], [])
+
+fn render() = @dom element("svg",
+  [attr("viewBox", "0 0 400 300"),
+   attr("width", "100%"), attr("height", "100%")],
+  cons(ball_element(), nil))
+
 # State
-fn init() = {
-  rule(current_frame, 0)
-  rule(render_mode, normal)
-}
+fn init() = rule(current_frame, 0)
 fn handle_event(set_frame, ?f) = rule(current_frame, ?f)
 
 init()`;
 
 const META_CODE = `\
-# === Meta ===
-# Click "Apply Meta" to observe every draw()
-# rewrite via @meta, then override render()
-# to show ghost trails of all frame positions.
+# === Meta: Ghost Trail ===
+# Two meta rules work together:
+# 1. trace_draws captures draw() rewrites into @draw
+# 2. render_override intercepts render() and replaces
+#    its output with the ghost trail when active
 
 rule trace_draws : @meta -> @draw {
   result(?step, draw(?f), ?shape) =>
-    frame(?f, ?shape)
+    pair(ghost(?f), ?shape)
 }
 
+rule render_override : @meta -> @dom {
+  result(?step, render(), ?val) =>
+    if meta_active then
+      element("svg",
+        [attr("viewBox", "0 0 400 300"),
+         attr("width", "100%"), attr("height", "100%")],
+        ghost_and_ball(0))
+    else ?val
+}
+
+# Drive all frames so draw() is evaluated for each
 fn run_frames(?f) =
   if ?f >= 40 then 0
   else { draw(?f) run_frames(?f + 1) }
@@ -371,52 +461,67 @@ fn ghost_and_ball(?f) =
   else cons(ghost_element(?f),
             ghost_and_ball(?f + 1))
 
-# Ghost children mode for render dispatch
-fn render_children(ghost) =
-  ghost_and_ball(0)
+# Meta state
+fn meta_init() = rule(meta_active, false)
+meta_init()
 
-# Store ghost data as dynamic rules
-fn apply_ghosts(?f) =
-  if ?f >= 40 then 0
-  else {
-    rule(ghost(?f), draw(?f))
-    apply_ghosts(?f + 1)
+# Toggle meta on/off
+fn handle_event(apply_meta, ?ev) =
+  { run_frames(0) rule(meta_active, true) }
+fn handle_event(remove_meta, ?ev) =
+  rule(meta_active, false)`;
+
+const JS_CODE = `\
+import { Rules4 } from './bridge.js';
+import { renderTerm, patch } from './vdom.js';
+
+const r4 = await Rules4.load('./rules4.wasm');
+r4.eval(r4.loadProgram(code));
+
+let currentTree, currentTermId;
+
+// Generic: apply any pending rule assertions from @draw
+// Any 2-arg term pair(lhs, rhs) becomes assertRule(lhs, rhs)
+function processRules() {
+  for (const t of r4.scopeTakePending("draw")) {
+    if (r4.termTag(t) === 2 && r4.termCallArity(t) === 2) {
+      r4.assertRule(
+        r4.termCallArg(t, 0),
+        r4.termCallArg(t, 1));
+    }
   }
-
-# Apply: store ghosts + switch render mode
-fn handle_event(apply_meta, ?ev) = {
-  apply_ghosts(0)
-  rule(render_mode, ghost)
 }
 
-# Remove: restore normal render mode
-fn handle_event(remove_meta, ?ev) =
-  rule(render_mode, normal)`;
+// Render: process pending rules, eval render(), patch DOM
+function doRender() {
+  processRules();
+  r4.eval(r4.call(r4.sym("render"), []));
+  const pending = r4.scopeTakePending("dom");
+  if (!pending.length) return;
+  const term = pending[pending.length - 1];
+  if (!currentTree) {
+    currentTree = renderTerm(r4, term, handleEvent);
+    root.appendChild(currentTree);
+  } else {
+    currentTree = patch(r4, currentTermId, term,
+      currentTree, root, handleEvent);
+  }
+  currentTermId = term;
+}
 
-const DRAW_CODE = `\
-# === Drawing ===
-# Pure render — just the current ball.
-# render_mode dispatches children; other tabs
-# can add modes (e.g. ghost) without changing this.
+// Send named events into the rules4 engine
+function sendEvent(name, value) {
+  r4.eval(r4.call(r4.sym("handle_event"),
+    [r4.sym(name), value]));
+  doRender();
+}
 
-fn draw(?f) = circle(ball_x(?f), ball_y(?f), 15)
-
-fn ball_element() =
-  element("circle",
-    [attr("cx", ball_x(current_frame)),
-     attr("cy", ball_y(current_frame)),
-     attr("r", 15),
-     attr("fill", "none"),
-     attr("stroke", "#222"),
-     attr("stroke-width", "2.5")], [])
-
-fn render_children(normal) =
-  cons(ball_element(), nil)
-
-fn render() = @dom element("svg",
-  [attr("viewBox", "0 0 400 300"),
-   attr("width", "100%"), attr("height", "100%")],
-  render_children(render_mode))`;
+// Animation: tick each frame
+let frame = 0;
+requestAnimationFrame(function loop() {
+  sendEvent("set_frame", r4.num(frame++ % 40));
+  requestAnimationFrame(loop);
+});`;
 
 // ── Elements ──
 
@@ -446,6 +551,7 @@ function makeEditor(parentId, doc) {
     doc,
     extensions: [
       basicSetup,
+      rules4Language,
       tangleExtension(),
       EditorView.updateListener.of(u => { if (u.docChanged) scheduleRun(); }),
     ],
@@ -454,12 +560,16 @@ function makeEditor(parentId, doc) {
 }
 
 const animEditor = makeEditor('editor-animation', ANIM_CODE);
-const drawEditor = makeEditor('editor-drawing', DRAW_CODE);
 const metaEditor = makeEditor('editor-meta', META_CODE);
+
+const jsEditor = new EditorView({
+  doc: JS_CODE,
+  extensions: [basicSetup, javascript(), EditorView.editable.of(false)],
+  parent: document.getElementById('editor-js'),
+});
 
 function getAllCode() {
   return animEditor.state.doc.toString() + '\n' +
-         drawEditor.state.doc.toString() + '\n' +
          metaEditor.state.doc.toString();
 }
 
@@ -536,11 +646,24 @@ async function run() {
   }
 }
 
-// ── Render: call render() in r4, patch @dom output ──
+// ── Generic: process any pending rule assertions from @draw ──
+
+function processRules() {
+  if (!r4) return;
+  const pending = r4.scopeTakePending("draw");
+  for (const t of pending) {
+    if (r4.termTag(t) === 2 && r4.termCallArity(t) === 2) {
+      r4.assertRule(r4.termCallArg(t, 0), r4.termCallArg(t, 1));
+    }
+  }
+}
+
+// ── Render: process rules, call render(), patch @dom output ──
 
 function doRender() {
   if (!r4) return;
   try {
+    processRules();
     r4.eval(r4.call(r4.sym("render"), []));
     const pending = r4.scopeTakePending("dom");
     if (pending.length === 0) return;
@@ -602,8 +725,8 @@ applyMetaBtn.addEventListener('click', () => {
   applyMetaBtn.classList.toggle('active', metaApplied);
 
   if (r4) {
-    const eventSym = metaApplied ? r4.sym("apply_meta") : r4.sym("remove_meta");
-    r4.eval(r4.call(r4.sym("handle_event"), [eventSym, r4.num(0)]));
+    const eventName = metaApplied ? "apply_meta" : "remove_meta";
+    r4.eval(r4.call(r4.sym("handle_event"), [r4.sym(eventName), r4.num(0)]));
     doRender();
   }
 });

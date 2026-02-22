@@ -1,31 +1,33 @@
 namespace ease
 
 use appkit as ak
-use beagle.fs as fs
 
 // ─── Data Model ─────────────────────────────────────────────────────
 
-struct Goal {
-    name
-    color
-    count
-}
+struct Goal { id, name, color }
+struct Entry { id, goal-id, amount, timestamp }
+struct AppData { goals, entries }
 
-let DATA-PATH = "/tmp/ease-beagle-data.txt"
+// ─── Constants ──────────────────────────────────────────────────────
+
+let PRESET-COLORS = [
+    "#E74C3C", "#3498DB", "#2ECC71", "#F39C12", "#9B59B6",
+    "#1ABC9C", "#E91E63", "#34495E", "#00BCD4", "#FF5722"
+]
+
+let POP-W = 280.0
+let POP-H = 400.0
+let PAD = 16.0
+let SECS-PER-DAY = 86400.0
 
 // ─── Hex Color Parsing ──────────────────────────────────────────────
 
 fn hex-digit(c) {
     let code = char-code(c)
-    if code >= 48 && code <= 57 {
-        code - 48
-    } else if code >= 65 && code <= 70 {
-        code - 55
-    } else if code >= 97 && code <= 102 {
-        code - 87
-    } else {
-        0
-    }
+    if code >= 48 && code <= 57 { code - 48 }
+    else if code >= 65 && code <= 70 { code - 55 }
+    else if code >= 97 && code <= 102 { code - 87 }
+    else { 0 }
 }
 
 fn parse-hex-color(hex) {
@@ -35,283 +37,1371 @@ fn parse-hex-color(hex) {
     [r / 255.0, g / 255.0, b / 255.0]
 }
 
+fn nscolor-for-hex(hex) {
+    let rgb = parse-hex-color(hex)
+    ak/color(get(rgb, 0), get(rgb, 1), get(rgb, 2), 1.0)
+}
+
 // ─── Persistence ────────────────────────────────────────────────────
 
-fn default-goals() {
-    [
-        Goal { name: "Exercise",   color: "#E74C3C", count: 0 },
-        Goal { name: "Reading",    color: "#3498DB", count: 0 },
-        Goal { name: "Meditation", color: "#2ECC71", count: 0 }
-    ]
+fn data-dir() {
+    ak/home-directory() ++ "/Library/Application Support/EaseBeagle"
+}
+
+fn data-path() {
+    data-dir() ++ "/data.json"
+}
+
+fn default-data() {
+    AppData {
+        goals: [
+            Goal { id: "default-1", name: "Exercise",   color: "#E74C3C" },
+            Goal { id: "default-2", name: "Reading",    color: "#3498DB" },
+            Goal { id: "default-3", name: "Meditation", color: "#2ECC71" }
+        ],
+        entries: []
+    }
+}
+
+fn map-to-goal(m) {
+    Goal { id: get(m, "id"), name: get(m, "name"), color: get(m, "color") }
+}
+
+fn map-to-entry(m) {
+    Entry { id: get(m, "id"), goal-id: get(m, "goal-id"),
+            amount: get(m, "amount"), timestamp: get(m, "timestamp") }
 }
 
 fn load-data() {
-    let exists-result = fs/blocking-exists?(DATA-PATH)
-    let exists = match exists-result {
-        Result.Ok { value } => value,
-        Result.Err { error } => false
-    }
-    if exists == false {
-        default-goals()
-    } else {
-        let content = read-full-file(DATA-PATH)
-        let lines = split(content, "\n")
-        let mut goals = []
-        let mut i = 0
-        while i < length(lines) {
-            let line = get(lines, i)
-            if length(trim(line)) > 0 {
-                let parts = split(line, "|")
-                if length(parts) >= 3 {
-                    let cnt = parse-int(get(parts, 2))
-                    goals = push(goals, Goal {
-                        name: get(parts, 0),
-                        color: get(parts, 1),
-                        count: if cnt == null { 0 } else { cnt }
-                    })
-                }
+    if ak/file-exists(data-path()) {
+        let content = ak/read-file(data-path())
+        if content == null { default-data() }
+        else {
+            let decoded = json-decode(content)
+            let raw-goals = get(decoded, "goals")
+            if raw-goals == null { default-data() }
+            else {
+                let raw-entries = get(decoded, "entries")
+                let goals = map(raw-goals, map-to-goal)
+                let entries = if raw-entries == null { [] } else { map(raw-entries, map-to-entry) }
+                AppData { goals: goals, entries: entries }
             }
-            i = i + 1
         }
-        if length(goals) == 0 {
-            default-goals()
-        } else {
-            goals
-        }
+    } else {
+        default-data()
     }
-}
-
-fn save-data(goals) {
-    let lines = map(goals, fn(g) {
-        g.name ++ "|" ++ g.color ++ "|" ++ to-string(g.count)
-    })
-    let content = join(lines, "\n")
-    fs/blocking-write-file(DATA-PATH, content)
 }
 
 // ─── State ──────────────────────────────────────────────────────────
 
-let state = atom(load-data())
+let app-data = atom(load-data())
+let popover-ref = atom(null)
+let status-item-ref = atom(null)
+let rebuild-counter = atom(0)
+let is-adding-goal = atom(false)
+let add-color-idx = atom(0)
+let undo-stack = atom([])
+let redo-stack = atom([])
+let selected-period = atom(1)
+let picking-color-for = atom(-1)
+let show-heatmap = atom(false)
+let drag-start-y = atom(0.0)
+let drag-amount = atom(0)
+let drag-counter = atom(0)
+let drag-rect-ptr = atom(null)
+let reorder-mode = atom(false)
+let responder-ref = atom(null)
+let alt-pressed = atom(false)
+let is-dragging = atom(false)
+let prev-bar-widths = atom([])
+let reorder-row-data = atom([])
+let reorder-bar-data = atom([])
+let reorder-drag-from = atom(-1)
+let reorder-current-slot = atom(-1)
 
-fn update-count(goals, idx, delta) {
+fn save-data() {
+    let data = deref(app-data)
+    ak/ensure-directory(data-dir())
+    ak/write-file(data-path(), json-encode(data))
+}
+
+// ─── Helpers ────────────────────────────────────────────────────────
+
+fn remove-at(arr, idx) {
     let mut result = []
     let mut i = 0
-    while i < length(goals) {
-        let g = get(goals, i)
-        if i == idx {
-            let new-count = g.count + delta
-            let clamped = if new-count < 0 { 0 } else { new-count }
-            result = push(result, Goal { name: g.name, color: g.color, count: clamped })
-        } else {
-            result = push(result, g)
-        }
+    while i < length(arr) {
+        if i != idx { result = push(result, get(arr, i)) }
         i = i + 1
     }
     result
 }
 
-// ─── UI Layout Constants ────────────────────────────────────────────
-
-let POP-W = 340.0
-let POP-H = 360.0
-let MARGIN = 20.0
-let BAR-W = 300.0
-let BAR-H = 20.0
-let BAR-Y = 260.0
-let ROW-H = 46.0
-let ROW-START-Y = 200.0
-
-// ─── UI References (filled during construction) ─────────────────────
-
-let count-labels = atom([])
-let bar-views = atom([])
-let popover-ref = atom(null)
-let status-item-ref = atom(null)
-
-// ─── UI Update ──────────────────────────────────────────────────────
-
-fn refresh-ui() {
-    let goals = deref(state)
-    let labels = deref(count-labels)
-    let bars = deref(bar-views)
-
-    // Update count labels
-    let mut i = 0
-    while i < length(goals) {
-        let g = get(goals, i)
-        let lbl = get(labels, i)
-        if lbl != null {
-            ak/set-text(lbl, to-string(g.count))
-        }
-        i = i + 1
+fn swap-at(arr, i, j) {
+    let mut result = []
+    let mut k = 0
+    while k < length(arr) {
+        if k == i { result = push(result, get(arr, j)) }
+        else if k == j { result = push(result, get(arr, i)) }
+        else { result = push(result, get(arr, k)) }
+        k = k + 1
     }
-
-    // Update proportional bars
-    let total = reduce(goals, 0.0, fn(acc, g) { acc + g.count })
-    let mut x = MARGIN
-    i = 0
-    while i < length(goals) {
-        let g = get(goals, i)
-        let bar = get(bars, i)
-        if bar != null {
-            let w = if total == 0.0 {
-                BAR-W / length(goals)
-            } else {
-                (g.count / total) * BAR-W
-            }
-            let final-w = if g.count > 0 && w < 4.0 { 4.0 } else { w }
-            ak/set-frame(bar, x, BAR-Y, final-w, BAR-H)
-            x = x + final-w
-        }
-        i = i + 1
-    }
-
-    save-data(goals)
+    result
 }
 
-// ─── Build UI ───────────────────────────────────────────────────────
-
-fn main() {
-    let goals = deref(state)
-
-    // ── Menu bar app (no dock icon) ─────────────────────────────
-    let app = ak/menu-bar-app()
-
-    // ── Status bar item ─────────────────────────────────────────
-    let si = ak/status-item("Ease")
-    reset!(status-item-ref, si)
-
-    // ── Popover ─────────────────────────────────────────────────
-    let pop = ak/popover(POP-W, POP-H)
-    reset!(popover-ref, pop)
-    let view = pop.content-view
-
-    // ── Handler (register before wiring buttons) ────────────────
-    let handler = ak/handler("EaseHandler")
-
-    // Toggle popover on status bar click
-    ak/add-method(handler, "toggle:", fn(self_, sel, sender) {
-        let p = deref(popover-ref)
-        let s = deref(status-item-ref)
-        ak/toggle-popover(p, s)
-    })
-
-    // Quit
-    ak/add-method(handler, "quit:", fn(self_, sel, sender) {
-        ak/terminate()
-    })
-
-    // Goal increment/decrement methods
+fn insert-at(arr, idx, item) {
+    let mut result = []
     let mut i = 0
-    while i < length(goals) {
-        let idx = i
-        let inc-sel = "inc" ++ to-string(i) ++ ":"
-        ak/add-method(handler, inc-sel, fn(self_, sel, sender) {
-            swap!(state, fn(goals) { update-count(goals, idx, 1) })
-            refresh-ui()
-        })
-        let dec-sel = "dec" ++ to-string(i) ++ ":"
-        ak/add-method(handler, dec-sel, fn(self_, sel, sender) {
-            swap!(state, fn(goals) { update-count(goals, idx, -1) })
-            refresh-ui()
-        })
+    while i < length(arr) {
+        if i == idx { result = push(result, item) }
+        result = push(result, get(arr, i))
         i = i + 1
     }
+    if idx >= length(arr) { result = push(result, item) }
+    result
+}
 
-    let handler = ak/register(handler)
+fn with-undo(action-fn) {
+    swap!(undo-stack, fn(s) { push(s, deref(app-data)) })
+    reset!(redo-stack, [])
+    action-fn()
+    save-data()
+}
 
-    // Wire status bar button
-    ak/status-on-click(si, handler, "toggle:")
+fn undo() {
+    let stack = deref(undo-stack)
+    if length(stack) > 0 {
+        swap!(redo-stack, fn(s) { push(s, deref(app-data)) })
+        let prev = get(stack, length(stack) - 1)
+        reset!(undo-stack, remove-at(stack, length(stack) - 1))
+        reset!(app-data, prev)
+        save-data()
+        rebuild-ui()
+    }
+}
 
-    // ── Title ───────────────────────────────────────────────────
-    let title = ak/label("Ease", 0.0, 310.0, POP-W, 40.0)
-    ak/set-font(title, ak/bold-font(28.0))
+fn redo() {
+    let stack = deref(redo-stack)
+    if length(stack) > 0 {
+        swap!(undo-stack, fn(s) { push(s, deref(app-data)) })
+        let prev = get(stack, length(stack) - 1)
+        reset!(redo-stack, remove-at(stack, length(stack) - 1))
+        reset!(app-data, prev)
+        save-data()
+        rebuild-ui()
+    }
+}
+
+// ─── Goal Operations ────────────────────────────────────────────────
+
+fn add-goal(name, color) {
+    with-undo(fn() {
+        swap!(app-data, fn(d) {
+            AppData { goals: push(d.goals, Goal { id: ak/uuid(), name: name, color: color }),
+                      entries: d.entries }
+        })
+    })
+}
+
+fn delete-goal(idx) {
+    with-undo(fn() {
+        swap!(app-data, fn(d) {
+            let g = get(d.goals, idx)
+            AppData { goals: remove-at(d.goals, idx),
+                      entries: filter(d.entries, fn(e) { e.goal-id != g.id }) }
+        })
+    })
+}
+
+fn log-amount(goal-id, amount) {
+    with-undo(fn() {
+        swap!(app-data, fn(d) {
+            AppData { goals: d.goals,
+                      entries: push(d.entries, Entry {
+                          id: ak/uuid(), goal-id: goal-id,
+                          amount: amount, timestamp: ak/epoch-seconds()
+                      }) }
+        })
+    })
+}
+
+fn move-goal(from-idx, to-idx) {
+    with-undo(fn() {
+        swap!(app-data, fn(d) {
+            AppData { goals: swap-at(d.goals, from-idx, to-idx), entries: d.entries }
+        })
+    })
+}
+
+fn move-goal-to(from-idx, to-idx) {
+    if from-idx != to-idx {
+        with-undo(fn() {
+            swap!(app-data, fn(d) {
+                let g = get(d.goals, from-idx)
+                let without = remove-at(d.goals, from-idx)
+                let inserted = insert-at(without, to-idx, g)
+                AppData { goals: inserted, entries: d.entries }
+            })
+        })
+    }
+}
+
+fn change-goal-color(idx, new-color) {
+    with-undo(fn() {
+        swap!(app-data, fn(d) {
+            let mut gs = []
+            let mut i = 0
+            while i < length(d.goals) {
+                let g = get(d.goals, i)
+                if i == idx {
+                    gs = push(gs, Goal { id: g.id, name: g.name, color: new-color })
+                } else {
+                    gs = push(gs, g)
+                }
+                i = i + 1
+            }
+            AppData { goals: gs, entries: d.entries }
+        })
+    })
+}
+
+// ─── Period Filtering ───────────────────────────────────────────────
+
+fn period-start() {
+    let now = ak/epoch-seconds()
+    let p = deref(selected-period)
+    if p == 0 { now - SECS-PER-DAY }
+    else if p == 1 { now - (7.0 * SECS-PER-DAY) }
+    else if p == 2 { now - (30.0 * SECS-PER-DAY) }
+    else { 0.0 }
+}
+
+fn goal-count(data, goal-id) {
+    let start = period-start()
+    let filtered = filter(data.entries, fn(e) { e.goal-id == goal-id && e.timestamp >= start })
+    reduce(filtered, 0.0, fn(acc, e) { acc + e.amount })
+}
+
+fn all-total(data) {
+    reduce(data.goals, 0.0, fn(acc, g) { acc + goal-count(data, g.id) })
+}
+
+fn entries-in-range(data, goal-id, start, end) {
+    reduce(filter(data.entries, fn(e) {
+        e.goal-id == goal-id && e.timestamp >= start && e.timestamp < end
+    }), 0.0, fn(acc, e) { acc + e.amount })
+}
+
+fn total-in-range(data, start, end) {
+    reduce(data.entries, 0.0, fn(acc, e) {
+        if e.timestamp >= start && e.timestamp < end { acc + e.amount } else { acc }
+    })
+}
+
+// ─── Dynamic Popover Height ────────────────────────────────────────
+
+fn compute-main-height() {
+    let data = deref(app-data)
+    let num = length(data.goals)
+    let is-hm = deref(show-heatmap)
+    let avail-w = POP-W - (2.0 * PAD) - 8.0
+
+    let mut h = PAD
+    // Period picker pill
+    h = h + 30.0
+    h = h + 16.0
+
+    // Visualization + divider
+    if num > 0 {
+        if is-hm {
+            let p = deref(selected-period)
+            if p == 0 {
+                let cw = (avail-w - 22.0) / 12.0
+                h = h + 2.0 * (cw + 2.0) + 2.0
+            } else if p == 1 {
+                let cw = (avail-w - 12.0) / 7.0
+                h = h + 14.0 + cw + 4.0
+            } else if p == 2 {
+                let cw = (avail-w - 12.0) / 7.0
+                h = h + 5.0 * (cw + 2.0)
+            } else {
+                h = h + 14.0 + 2.0 + 12.0 * 9.0
+            }
+        } else {
+            h = h + to-float(num) * 12.0
+            if num > 1 { h = h + to-float(num - 1) * 4.0 }
+        }
+        h = h + 16.0
+        h = h + 1.0
+        h = h + 16.0
+    }
+
+    // Goal rows
+    if num == 0 {
+        h = h + 50.0
+    } else {
+        h = h + to-float(num) * 44.0
+        if num > 1 { h = h + to-float(num - 1) * 1.0 }
+    }
+
+    // Add button
+    h = h + 16.0
+    h = h + 24.0
+    h = h + PAD
+    h
+}
+
+fn compute-add-goal-height() {
+    let mut h = PAD
+    h = h + 24.0   // header row
+    h = h + 16.0   // gap
+    h = h + 24.0   // text field
+    h = h + 16.0   // gap
+    h = h + 16.0   // "Color" label
+    h = h + 8.0    // gap
+    h = h + 56.0   // color grid (2 rows of 24 + 8 gap)
+    h = h + 16.0   // gap
+    h = h + 24.0   // buttons
+    h = h + PAD
+    h
+}
+
+fn compute-color-picker-height() {
+    let mut h = PAD
+    h = h + 24.0   // header
+    h = h + 8.0    // gap
+    h = h + 20.0   // goal name subtitle
+    h = h + 16.0   // gap
+    h = h + 64.0   // color grid (2 rows of 28 + 8 gap)
+    h = h + PAD
+    h
+}
+
+// ─── Status Bar Icon ────────────────────────────────────────────────
+
+fn update-status-icon() {
+    let si = deref(status-item-ref)
+    if si == null { null }
+    else {
+        // Original icon: 3 horizontal bars at fixed positions, template mode
+        // Bar positions: y=2, y=7, y=12.5, all height=4, rx=2
+        // Default widths: [7, 14, 11], starting at x=2
+        let img = ak/image(18.0, 18.0)
+        ak/lock-focus(img)
+        ak/set-fill-color(ak/color(0.0, 0.0, 0.0, 1.0))
+        ak/fill-rounded-rect(2.0, 12.0, 7.0, 4.0, 2.0, 2.0)
+        ak/fill-rounded-rect(2.0, 7.0, 14.0, 4.0, 2.0, 2.0)
+        ak/fill-rounded-rect(2.0, 2.0, 11.0, 4.0, 2.0, 2.0)
+        ak/unlock-focus(img)
+        // Set as template so system handles light/dark
+        ak/set-template(img)
+        ak/set-button-image(si, img)
+    }
+}
+
+// ─── Rebuild UI ─────────────────────────────────────────────────────
+
+fn rebuild-ui() {
+    let pop = deref(popover-ref)
+    if pop == null { null }
+    else {
+        // Compute dynamic height for each view state
+        let actual-h = if deref(is-adding-goal) {
+            compute-add-goal-height()
+        } else if deref(picking-color-for) >= 0 {
+            compute-color-picker-height()
+        } else {
+            compute-main-height()
+        }
+        ak/set-popover-content-size(pop, POP-W, actual-h)
+        ak/set-frame(pop.content-view, 0.0, 0.0, POP-W, actual-h)
+        let view = pop.content-view
+        ak/remove-all-subviews(view)
+
+        let n = deref(rebuild-counter)
+        swap!(rebuild-counter, fn(x) { x + 1 })
+        let h = ak/handler("H" ++ to-string(n))
+        let h = ak/register(h)
+
+        if deref(is-adding-goal) {
+            build-add-goal-view(view, h, n)
+        } else if deref(picking-color-for) >= 0 {
+            build-color-picker-view(view, h, n)
+        } else {
+            build-main-view(view, h, n, actual-h)
+        }
+
+        // Re-add the persistent responder view for keyboard/flags events
+        let resp = deref(responder-ref)
+        if resp != null {
+            ak/add-view(view, resp)
+            ak/make-first-responder(pop, resp)
+        }
+        update-status-icon()
+        null
+    }
+}
+
+// ─── Main View ──────────────────────────────────────────────────────
+
+fn build-main-view(view, handler, n, pop-h) {
+    let data = deref(app-data)
+    let goals = data.goals
+    let num = length(goals)
+    let mut y = pop-h - PAD
+
+    // ─── Period Picker (pill background, 4 buttons) ──────
+    let period-labels = ["Day", "Week", "Month", "All"]
+    let current-period = deref(selected-period)
+    let btn-widths = [42.0, 50.0, 56.0, 38.0]
+    let btn-gap = 2.0
+    let pill-pad = 4.0
+    let btn-h = 22.0
+    let total-btns-w = 42.0 + 50.0 + 56.0 + 38.0 + (3.0 * btn-gap)
+    let pill-w = total-btns-w + (pill-pad * 2.0)
+    let pill-h = btn-h + (pill-pad * 2.0)
+    let pill-x = (POP-W - pill-w) / 2.0
+
+    y = y - pill-h
+    let pill-bg = ak/colored-view(pill-x, y, pill-w, pill-h, 0.5, 0.5, 0.5, 0.1)
+    ak/set-corner-radius(pill-bg, 6.0)
+    ak/add-view(view, pill-bg)
+
+    let mut bx = pill-x + pill-pad
+    let mut pi = 0
+    while pi < 4 {
+        let bw = get(btn-widths, pi)
+        let by = y + pill-pad
+        let is-sel = pi == current-period
+
+        if is-sel {
+            let sel-bg = ak/colored-view(bx, by, bw, btn-h, 0.25, 0.5, 1.0, 0.2)
+            ak/set-corner-radius(sel-bg, 4.0)
+            ak/add-view(view, sel-bg)
+        }
+
+        let plbl = ak/label(get(period-labels, pi), bx, by, bw, btn-h)
+        ak/set-font(plbl, if is-sel { ak/bold-font(11.0) } else { ak/font(11.0) })
+        ak/set-text-color(plbl, if is-sel { ak/white } else { ak/color(0.6, 0.6, 0.65, 1.0) })
+        ak/add-to(view, plbl)
+
+        let psel = "p" ++ to-string(pi) ++ "_" ++ to-string(n) ++ ":"
+        let pidx = pi
+        ak/add-method(handler, psel, fn(self_, sel, sender) {
+            reset!(selected-period, pidx)
+            rebuild-ui()
+        })
+        let pbtn = ak/button("", bx, by, bw, btn-h)
+        ak/set-bordered(pbtn, 0)
+        ak/on-click(pbtn, handler, psel)
+        ak/add-to(view, pbtn)
+
+        bx = bx + bw + btn-gap
+        pi = pi + 1
+    }
+
+    y = y - 16.0
+
+    // ─── Visualization: Bars or Heatmap (tap to toggle) ──
+    if num > 0 {
+        let is-heatmap = deref(show-heatmap)
+        let viz-x = PAD + 4.0
+        let viz-w = POP-W - (2.0 * PAD) - 8.0
+        let viz-top = y
+
+        if is-heatmap {
+            y = build-heatmap(view, handler, data, goals, y, n)
+        } else {
+            let total = all-total(data)
+            let prev-widths = deref(prev-bar-widths)
+            let mut new-widths = []
+            let is-reorder-bars = deref(reorder-mode)
+            if is-reorder-bars { reset!(reorder-bar-data, []) }
+            let mut i = 0
+            while i < num {
+                let g = get(goals, i)
+                let count = goal-count(data, g.id)
+                let proportion = if total == 0.0 { 0.0 } else { count / total }
+                let bar-fill-w = if proportion > 0.0 {
+                    let w = proportion * viz-w
+                    if w < 8.0 { 8.0 } else { w }
+                } else { 0.0 }
+
+                y = y - 12.0
+                let rgb = parse-hex-color(g.color)
+
+                let bg = ak/colored-view(viz-x, y, viz-w, 12.0,
+                    get(rgb, 0), get(rgb, 1), get(rgb, 2), 0.15)
+                ak/set-corner-radius(bg, 4.0)
+                ak/add-view(view, bg)
+
+                let mut cur-fill-ptr = 0
+                if bar-fill-w > 0.0 {
+                    // Start at previous width if available, else at target
+                    let prev-w = if i < length(prev-widths) { get(prev-widths, i) } else { bar-fill-w }
+                    let start-w = if prev-w > 0.0 { prev-w } else { bar-fill-w }
+                    let bar = ak/colored-view(viz-x, y, start-w, 12.0,
+                        get(rgb, 0), get(rgb, 1), get(rgb, 2), 1.0)
+                    ak/set-corner-radius(bar, 4.0)
+                    ak/add-view(view, bar)
+                    // Animate from old width to new width if different
+                    let target-w = bar-fill-w
+                    let bar-y = y
+                    if start-w != target-w {
+                        ak/animate(0.3, fn() {
+                            ak/animated-set-frame(bar.ptr, viz-x, bar-y, target-w, 12.0)
+                        })
+                    }
+                    cur-fill-ptr = bar.ptr
+                }
+                // Store bar data for live reorder animation
+                if is-reorder-bars {
+                    let stored-y = y
+                    let stored-fw = bar-fill-w
+                    swap!(reorder-bar-data, fn(arr) {
+                        push(arr, [bg.ptr, cur-fill-ptr, stored-fw, stored-y])
+                    })
+                }
+                new-widths = push(new-widths, bar-fill-w)
+
+                if i < num - 1 { y = y - 4.0 }
+                i = i + 1
+            }
+            reset!(prev-bar-widths, new-widths)
+        }
+
+        // Invisible toggle button covering visualization area
+        let toggle-sel = "tv_" ++ to-string(n) ++ ":"
+        ak/add-method(handler, toggle-sel, fn(self_, sel, sender) {
+            swap!(show-heatmap, fn(v) { !v })
+            rebuild-ui()
+        })
+        let toggle-btn = ak/button("", viz-x, y, viz-w, viz-top - y)
+        ak/set-bordered(toggle-btn, 0)
+        ak/on-click(toggle-btn, handler, toggle-sel)
+        ak/add-to(view, toggle-btn)
+
+        y = y - 16.0
+
+        // Divider
+        let divider = ak/colored-view(PAD, y, POP-W - (2.0 * PAD), 1.0, 1.0, 1.0, 1.0, 0.15)
+        ak/add-view(view, divider)
+        y = y - 16.0
+    }
+
+    // ─── Goal Rows (1pt spacing between rows) ────────────
+    if num == 0 {
+        y = y - 30.0
+        let empty = ak/label("No goals yet", 0.0, y, POP-W, 20.0)
+        ak/set-font(empty, ak/font(13.0))
+        ak/set-text-color(empty, ak/color(0.5, 0.5, 0.55, 1.0))
+        ak/add-to(view, empty)
+    } else {
+        if deref(reorder-mode) { reset!(reorder-row-data, []) }
+        let mut i = 0
+        while i < num {
+            let g = get(goals, i)
+            y = build-goal-row(view, handler, g, i, y, n)
+            if i < num - 1 { y = y - 1.0 }
+            i = i + 1
+        }
+    }
+
+    // ─── "+ Add Goal" button (centered) ──────────────────
+    y = y - 16.0
+    let add-sel = "add_" ++ to-string(n) ++ ":"
+    ak/add-method(handler, add-sel, fn(self_, sel, sender) {
+        let data = deref(app-data)
+        let used = map(data.goals, fn(g) { g.color })
+        let idx = find-index(PRESET-COLORS, fn(c) { !any?(used, fn(u) { u == c }) })
+        reset!(add-color-idx, if idx == -1 { 0 } else { idx })
+        reset!(is-adding-goal, true)
+        rebuild-ui()
+    })
+    let add-lbl = ak/label("+ Add Goal", 0.0, y, POP-W, 20.0)
+    ak/set-font(add-lbl, ak/font(11.0))
+    ak/set-text-color(add-lbl, ak/color(0.5, 0.5, 0.55, 1.0))
+    ak/add-to(view, add-lbl)
+    let add-btn = ak/button("", (POP-W - 100.0) / 2.0, y - 2.0, 100.0, 24.0)
+    ak/set-bordered(add-btn, 0)
+    ak/on-click(add-btn, handler, add-sel)
+    ak/add-to(view, add-btn)
+
+}
+
+// ─── Goal Row ───────────────────────────────────────────────────────
+// Spec: HStack(spacing: 12), padding horizontal 12 vertical 8, cornerRadius 8
+// Normal: [handle 16w invis] [dot 12] [name] [Spacer] [indicator 40x28] [delete]
+// Reorder: [handle 16w vis] [dot 12] [name] [Spacer] [▲] [▼]
+// Drag feedback: growing colored rounded rect in indicator area (8-28pt tall)
+
+fn build-goal-row(view, handler, goal, idx, y, n) {
+    let row-h = 44.0
+    let row-y = y - row-h
+    let row-x = PAD
+    let row-w = POP-W - (2.0 * PAD)
+    let rgb = parse-hex-color(goal.color)
+    let h-pad = 12.0
+    let is-reorder = deref(reorder-mode)
+
+    let handle-x = row-x + h-pad
+    let dot-x = handle-x + 16.0 + 12.0
+    let name-x = dot-x + 12.0 + 12.0
+    let del-x = row-x + row-w - h-pad - 16.0
+    let ind-x = del-x - 12.0 - 40.0
+    let name-w = ind-x - name-x
+
+    let goal-r = get(rgb, 0)
+    let goal-g = get(rgb, 1)
+    let goal-b = get(rgb, 2)
+
+    if is-reorder {
+        // ─── Reorder mode: live reorder with row animation ────
+        let dc = deref(drag-counter)
+        swap!(drag-counter, fn(x) { x + 1 })
+        let reorder-idx = idx
+        let data = deref(app-data)
+        let num-goals = length(data.goals)
+        let cap-row-y = row-y
+        let cap-row-h = row-h
+        let cap-row-x = row-x
+        let cap-row-w = row-w
+
+        let rv = ak/custom-tracking-view(
+            "RO" ++ to-string(dc), row-x, row-y, row-w, row-h,
+            fn(self_, sel, event) {
+                // mouseDown: start drag, record origin
+                let loc = ak/event-location(event)
+                reset!(drag-start-y, get(loc, 1))
+                reset!(is-dragging, true)
+                reset!(reorder-drag-from, reorder-idx)
+                reset!(reorder-current-slot, reorder-idx)
+                ak/set-layer-bg(self_, ak/color(goal-r, goal-g, goal-b, 0.2))
+            },
+            fn(self_, sel, event) {
+                // mouseDragged: move view + live reorder other rows
+                let loc = ak/event-location(event)
+                let dy = get(loc, 1) - deref(drag-start-y)
+                ak/set-frame-raw(self_, cap-row-x, cap-row-y + dy, cap-row-w, cap-row-h)
+
+                // Calculate target slot (swap at midpoint of adjacent row)
+                let stride = cap-row-h + 1.0
+                let target-offset = if dy >= 0.0 {
+                    to-int((dy + stride * 0.5) / stride)
+                } else {
+                    0 - to-int(((0.0 - dy) + stride * 0.5) / stride)
+                }
+                let drag-from = deref(reorder-drag-from)
+                let raw-target = drag-from - target-offset
+                let clamped = if raw-target < 0 { 0 }
+                              else if raw-target >= num-goals { num-goals - 1 }
+                              else { raw-target }
+
+                let prev-slot = deref(reorder-current-slot)
+                if clamped != prev-slot {
+                    reset!(reorder-current-slot, clamped)
+                    // Animate other rows to shift
+                    let rows = deref(reorder-row-data)
+                    let mut i = 0
+                    while i < length(rows) {
+                        if i != drag-from {
+                            let info = get(rows, i)
+                            let rptr = get(info, 0)
+                            let base-y = get(info, 1)
+                            let new-y = if drag-from < clamped {
+                                if i > drag-from && i <= clamped { base-y + stride }
+                                else { base-y }
+                            } else if drag-from > clamped {
+                                if i >= clamped && i < drag-from { base-y - stride }
+                                else { base-y }
+                            } else { base-y }
+                            ak/animate(0.2, fn() {
+                                ak/animated-set-frame(rptr, cap-row-x, new-y, cap-row-w, cap-row-h)
+                            })
+                        }
+                        i = i + 1
+                    }
+                    // Animate bars to match reorder
+                    let bars = deref(reorder-bar-data)
+                    let bar-stride = 16.0
+                    let bviz-x = PAD + 4.0
+                    let bviz-w = POP-W - (2.0 * PAD) - 8.0
+                    let mut bi = 0
+                    while bi < length(bars) {
+                        let binfo = get(bars, bi)
+                        let bg-ptr = get(binfo, 0)
+                        let bfill-ptr = get(binfo, 1)
+                        let bfill-w = get(binfo, 2)
+                        let bar-base-y = get(binfo, 3)
+                        let bar-new-y = if bi == drag-from {
+                            // Dragged goal's bar moves to target slot
+                            bar-base-y + to-float(drag-from - clamped) * bar-stride
+                        } else if drag-from < clamped {
+                            if bi > drag-from && bi <= clamped { bar-base-y + bar-stride }
+                            else { bar-base-y }
+                        } else if drag-from > clamped {
+                            if bi >= clamped && bi < drag-from { bar-base-y - bar-stride }
+                            else { bar-base-y }
+                        } else { bar-base-y }
+                        ak/animate(0.2, fn() {
+                            ak/animated-set-frame(bg-ptr, bviz-x, bar-new-y, bviz-w, 12.0)
+                            if bfill-ptr != 0 {
+                                ak/animated-set-frame(bfill-ptr, bviz-x, bar-new-y, bfill-w, 12.0)
+                            }
+                        })
+                        bi = bi + 1
+                    }
+                }
+            },
+            fn(self_, sel, event) {
+                // mouseUp: commit the reorder
+                reset!(is-dragging, false)
+                let final-slot = deref(reorder-current-slot)
+                let from = deref(reorder-drag-from)
+                if final-slot != from {
+                    move-goal-to(from, final-slot)
+                }
+                rebuild-ui()
+            }
+        )
+        ak/set-layer-corner-radius(rv.ptr, 8.0)
+        ak/set-layer-bg(rv.ptr, ak/color(goal-r, goal-g, goal-b, 0.05))
+
+        // Row content in local coords (origin 0,0 of tracking view)
+        let lh-x = h-pad
+        let rh = ak/label("≡", lh-x, 12.0, 16.0, 20.0)
+        ak/set-font(rh, ak/font(12.0))
+        ak/set-text-color(rh, ak/color(0.5, 0.5, 0.55, 1.0))
+        ak/add-to(rv, rh)
+
+        let ld-x = dot-x - row-x
+        let ld-cy = (row-h - 12.0) / 2.0
+        let rd = ak/colored-view(ld-x, ld-cy, 12.0, 12.0, goal-r, goal-g, goal-b, 1.0)
+        ak/set-corner-radius(rd, 6.0)
+        ak/add-view(rv, rd)
+
+        let ln-x = name-x - row-x
+        let ln-cy = (row-h - 20.0) / 2.0
+        let reorder-name-w = row-w - ln-x - h-pad
+        let rn = ak/left-label(goal.name, ln-x, ln-cy, reorder-name-w, 20.0)
+        ak/set-font(rn, ak/font(13.0))
+        ak/set-text-color(rn, ak/white)
+        ak/set-line-break-mode(rn, 5)
+        ak/add-to(rv, rn)
+
+        ak/add-view(view, rv)
+        // Store row data for live reorder (ptr + base y position)
+        swap!(reorder-row-data, fn(arr) { push(arr, [rv.ptr, cap-row-y]) })
+    } else {
+        // ─── Normal mode ────────────────────────────────────────
+        let row-bg = ak/colored-view(row-x, row-y, row-w, row-h, 0.0, 0.0, 0.0, 0.0)
+        ak/set-corner-radius(row-bg, 8.0)
+        ak/add-view(view, row-bg)
+
+        // Color dot
+        let dot-cy = row-y + (row-h - 12.0) / 2.0
+        let dot = ak/colored-view(dot-x, dot-cy, 12.0, 12.0, goal-r, goal-g, goal-b, 1.0)
+        ak/set-corner-radius(dot, 6.0)
+        ak/add-view(view, dot)
+
+        let clr-sel = "c" ++ to-string(idx) ++ "_" ++ to-string(n) ++ ":"
+        let clr-idx = idx
+        ak/add-method(handler, clr-sel, fn(self_, sel, sender) {
+            reset!(picking-color-for, clr-idx)
+            rebuild-ui()
+        })
+        let clr-btn = ak/button("", dot-x - 4.0, dot-cy - 4.0, 20.0, 20.0)
+        ak/set-bordered(clr-btn, 0)
+        ak/on-click(clr-btn, handler, clr-sel)
+        ak/add-to(view, clr-btn)
+
+        // Goal name
+        let name-cy = row-y + (row-h - 20.0) / 2.0
+        let name-lbl = ak/left-label(goal.name, name-x, name-cy, name-w, 20.0)
+        ak/set-font(name-lbl, ak/font(13.0))
+        ak/set-text-color(name-lbl, ak/white)
+        ak/set-line-break-mode(name-lbl, 5)
+        ak/add-to(view, name-lbl)
+
+        // Pull indicator (SF Symbol arrow)
+        let ind-cy = row-y + (row-h - 28.0) / 2.0
+        let is-alt = deref(alt-pressed)
+        let arrow-name = if is-alt { "arrow.down.circle" } else { "arrow.up.circle" }
+        let arrow-tint = if is-alt { ak/color(0.898, 0.451, 0.451, 1.0) } else { ak/color(0.5, 0.5, 0.55, 1.0) }
+        let ind-view = ak/symbol-image-view(arrow-name, 14.0, ind-x, ind-cy, 40.0, 28.0, arrow-tint)
+        ak/add-view(view, ind-view)
+        let arrow-ptr = ind-view.ptr
+
+        // Delete button
+        let del-cy = row-y + (row-h - 18.0) / 2.0
+        let del-sel = "d" ++ to-string(idx) ++ "_" ++ to-string(n) ++ ":"
+        let del-idx = idx
+        ak/add-method(handler, del-sel, fn(self_, sel, sender) {
+            delete-goal(del-idx)
+            rebuild-ui()
+        })
+        let del-icon = ak/symbol-image-view("xmark.circle.fill", 14.0, del-x, del-cy, 16.0, 18.0,
+            ak/color(0.5, 0.5, 0.55, 0.5))
+        ak/add-view(view, del-icon)
+        let delete-ptr = del-icon.ptr
+        let del-btn = ak/button("", del-x - 3.0, del-cy - 3.0, 22.0, 24.0)
+        ak/set-bordered(del-btn, 0)
+        ak/on-click(del-btn, handler, del-sel)
+        ak/add-to(view, del-btn)
+        let del-btn-ptr = del-btn.ptr
+
+        // Drag-to-log tracking view
+        let dc = deref(drag-counter)
+        swap!(drag-counter, fn(x) { x + 1 })
+        let row-goal-id = goal.id
+        let ind-local-x = ind-x - row-x
+        let ind-local-cy = (row-h - 28.0) / 2.0
+
+        let drag-view = ak/custom-tracking-view(
+            "R" ++ to-string(dc), row-x, row-y, row-w, row-h,
+            fn(self_, sel, event) {
+                let loc = ak/event-location(event)
+                reset!(drag-start-y, get(loc, 1))
+                reset!(drag-amount, 0)
+                reset!(is-dragging, true)
+                ak/set-layer-corner-radius(self_, 8.0)
+                ak/animate(0.15, fn() {
+                    ak/set-layer-bg(self_, ak/color(goal-r, goal-g, goal-b, 0.1))
+                    ak/set-alpha(arrow-ptr, 0.0)
+                    ak/set-alpha(delete-ptr, 0.0)
+                    ak/set-alpha(del-btn-ptr, 0.0)
+                })
+                let flags = ak/event-modifier-flags(event)
+                let alt = has-flag(flags, 524288)
+                let rr = if alt { 0.898 } else { goal-r }
+                let rg = if alt { 0.451 } else { goal-g }
+                let rb = if alt { 0.451 } else { goal-b }
+                let rect = ak/colored-view(ind-local-x, ind-local-cy + 10.0, 40.0, 8.0,
+                    rr, rg, rb, 0.3)
+                ak/set-corner-radius(rect, 4.0)
+                ak/add-subview-to(self_, rect.ptr)
+                reset!(drag-rect-ptr, rect.ptr)
+            },
+            fn(self_, sel, event) {
+                let loc = ak/event-location(event)
+                let dy = get(loc, 1) - deref(drag-start-y)
+                let flags = ak/event-modifier-flags(event)
+                let alt = has-flag(flags, 524288)
+                let effective = if alt { 0.0 - dy } else { dy }
+                let offset = if effective < 0.0 { 0.0 } else { effective }
+                let p = if offset > 100.0 { 1.0 } else { offset / 100.0 }
+                let amt = to-int(1.0 + (p * 9.0))
+                reset!(drag-amount, amt)
+                let rect-ptr = deref(drag-rect-ptr)
+                if rect-ptr != null {
+                    let new-h = 8.0 + (p * 20.0)
+                    let new-y = ind-local-cy + (28.0 - new-h) / 2.0
+                    ak/animate(0.08, fn() {
+                        ak/animated-set-frame(rect-ptr, ind-local-x, new-y, 40.0, new-h)
+                    })
+                }
+            },
+            fn(self_, sel, event) {
+                let rect-ptr = deref(drag-rect-ptr)
+                if rect-ptr != null {
+                    ak/animate(0.2, fn() {
+                        ak/animated-set-frame(rect-ptr, ind-local-x, ind-local-cy + 10.0, 40.0, 8.0)
+                        ak/set-alpha(rect-ptr, 0.0)
+                    })
+                    ak/remove-from-superview(rect-ptr)
+                    reset!(drag-rect-ptr, null)
+                }
+                ak/set-layer-bg(self_, ak/color(0.0, 0.0, 0.0, 0.0))
+                reset!(is-dragging, false)
+                let flags = ak/event-modifier-flags(event)
+                let alt = has-flag(flags, 524288)
+                let amt = deref(drag-amount)
+                let magnitude = if amt <= 0 { 1.0 } else { to-float(amt) }
+                let final-amt = if alt { 0.0 - magnitude } else { magnitude }
+                log-amount(row-goal-id, final-amt)
+                rebuild-ui()
+            }
+        )
+        ak/add-view(view, drag-view)
+    }
+
+    row-y
+}
+
+// ─── Heatmap ────────────────────────────────────────────────────────
+// All modes compute cell-w from available width to fill the popover.
+// to-float() is used wherever integer loop vars mix with float dimensions.
+
+fn build-heatmap(view, handler, data, goals, y, n) {
+    let p = deref(selected-period)
+    let now = ak/epoch-seconds()
+    let num = length(goals)
+    let avail-w = POP-W - (2.0 * PAD) - 8.0
+    let grid-x = PAD + 4.0
+
+    if p == 0 {
+        // Day: 2 rows of 12 cells (square)
+        let cell-gap = 2.0
+        let cell-w = (avail-w - (11.0 * cell-gap)) / 12.0
+        let cell-h = cell-w
+        let start-of-day = now - (now % SECS-PER-DAY)
+
+        let mut hour = 0
+        while hour < 24 {
+            let col = hour % 12
+            let row = 1 - (hour / 12)
+            let cx = grid-x + (to-float(col) * (cell-w + cell-gap))
+            let cy = y - (2.0 * (cell-h + cell-gap)) + (to-float(row) * (cell-h + cell-gap))
+
+            let h-start = start-of-day + (to-float(hour) * 3600.0)
+            let h-end = h-start + 3600.0
+            let h-total = total-in-range(data, h-start, h-end)
+
+            if h-total > 0.0 {
+                let mut cur-y = 0.0
+                let mut gi = 0
+                while gi < num {
+                    let g = get(goals, gi)
+                    let g-amt = entries-in-range(data, g.id, h-start, h-end)
+                    let seg-h = (g-amt / h-total) * cell-h
+                    if seg-h > 0.5 {
+                        let crgb = parse-hex-color(g.color)
+                        let fill = ak/colored-view(cx, cy + cur-y, cell-w, seg-h,
+                            get(crgb, 0), get(crgb, 1), get(crgb, 2), 1.0)
+                        ak/set-corner-radius(fill, 2.0)
+                        ak/add-view(view, fill)
+                    }
+                    cur-y = cur-y + seg-h
+                    gi = gi + 1
+                }
+            } else {
+                let empty = ak/colored-view(cx, cy, cell-w, cell-h, 1.0, 1.0, 1.0, 0.06)
+                ak/set-corner-radius(empty, 2.0)
+                ak/add-view(view, empty)
+            }
+
+            hour = hour + 1
+        }
+        y - (2.0 * (cell-h + cell-gap)) - 2.0
+    } else if p == 1 {
+        // Week: 7 cells in a row (square)
+        let cell-gap = 2.0
+        let cell-w = (avail-w - (6.0 * cell-gap)) / 7.0
+        let cell-h = cell-w
+        let day-labels = ["S", "M", "T", "W", "T", "F", "S"]
+        let start-of-week = now - (7.0 * SECS-PER-DAY)
+
+        let label-y = y - 14.0
+        let mut di = 0
+        while di < 7 {
+            let lx = grid-x + (to-float(di) * (cell-w + cell-gap))
+            let dl = ak/label(get(day-labels, di), lx, label-y, cell-w, 12.0)
+            ak/set-font(dl, ak/bold-font(9.0))
+            ak/set-text-color(dl, ak/color(0.5, 0.5, 0.55, 1.0))
+            ak/add-to(view, dl)
+            di = di + 1
+        }
+
+        let cell-y = label-y - cell-h - 2.0
+        let mut day = 0
+        while day < 7 {
+            let cx = grid-x + (to-float(day) * (cell-w + cell-gap))
+            let d-start = start-of-week + (to-float(day) * SECS-PER-DAY)
+            let d-end = d-start + SECS-PER-DAY
+            let d-total = total-in-range(data, d-start, d-end)
+
+            if d-total > 0.0 {
+                let mut cur-h = 0.0
+                let mut gi = 0
+                while gi < num {
+                    let g = get(goals, gi)
+                    let g-amt = entries-in-range(data, g.id, d-start, d-end)
+                    let seg-h = (g-amt / d-total) * cell-h
+                    if seg-h > 0.5 {
+                        let crgb = parse-hex-color(g.color)
+                        let fill = ak/colored-view(cx, cell-y + cur-h, cell-w, seg-h,
+                            get(crgb, 0), get(crgb, 1), get(crgb, 2), 1.0)
+                        ak/set-corner-radius(fill, 2.0)
+                        ak/add-view(view, fill)
+                    }
+                    cur-h = cur-h + seg-h
+                    gi = gi + 1
+                }
+            } else {
+                let empty = ak/colored-view(cx, cell-y, cell-w, cell-h, 1.0, 1.0, 1.0, 0.06)
+                ak/set-corner-radius(empty, 2.0)
+                ak/add-view(view, empty)
+            }
+
+            day = day + 1
+        }
+        cell-y - 2.0
+    } else if p == 2 {
+        // Month: 7 cols x 5 rows (square cells)
+        let cell-gap = 2.0
+        let cell-w = (avail-w - (6.0 * cell-gap)) / 7.0
+        let cell-h = cell-w
+        let corner-r = 2.0
+        let weeks = 5
+        let period-days = 35
+        let period-start = now - (35.0 * SECS-PER-DAY)
+
+        let mut day = 0
+        while day < period-days {
+            let col = day % 7
+            let week = day / 7
+            let row = weeks - 1 - week
+            let cx = grid-x + (to-float(col) * (cell-w + cell-gap))
+            let cy = y - (to-float(weeks) * (cell-h + cell-gap)) + (to-float(row) * (cell-h + cell-gap))
+
+            let d-start = period-start + (to-float(day) * SECS-PER-DAY)
+            let d-end = d-start + SECS-PER-DAY
+            let d-total = total-in-range(data, d-start, d-end)
+
+            if d-total > 0.0 {
+                let mut cur-h = 0.0
+                let mut gi = 0
+                while gi < num {
+                    let g = get(goals, gi)
+                    let g-amt = entries-in-range(data, g.id, d-start, d-end)
+                    let seg-h = (g-amt / d-total) * cell-h
+                    if seg-h > 0.3 {
+                        let crgb = parse-hex-color(g.color)
+                        let fill = ak/colored-view(cx, cy + cur-h, cell-w, seg-h,
+                            get(crgb, 0), get(crgb, 1), get(crgb, 2), 1.0)
+                        ak/set-corner-radius(fill, corner-r)
+                        ak/add-view(view, fill)
+                    }
+                    cur-h = cur-h + seg-h
+                    gi = gi + 1
+                }
+            } else {
+                let empty = ak/colored-view(cx, cy, cell-w, cell-h, 1.0, 1.0, 1.0, 0.06)
+                ak/set-corner-radius(empty, corner-r)
+                ak/add-view(view, empty)
+            }
+
+            day = day + 1
+        }
+        y - (to-float(weeks) * (cell-h + cell-gap))
+    } else {
+        // All: 7 cols x 12 rows, full-width cells but 8pt tall
+        let cell-gap = 1.0
+        let cell-w = (avail-w - (6.0 * cell-gap)) / 7.0
+        let cell-h = 8.0
+        let corner-r = 1.5
+        let weeks = 12
+        let period-days = 84
+        let period-start = now - (84.0 * SECS-PER-DAY)
+
+        // Day labels header
+        let day-labels = ["S", "M", "T", "W", "T", "F", "S"]
+        let label-y = y - 12.0
+        let mut di = 0
+        while di < 7 {
+            let lx = grid-x + (to-float(di) * (cell-w + cell-gap))
+            let dl = ak/label(get(day-labels, di), lx, label-y, cell-w, 10.0)
+            ak/set-font(dl, ak/bold-font(8.0))
+            ak/set-text-color(dl, ak/color(0.5, 0.5, 0.55, 1.0))
+            ak/add-to(view, dl)
+            di = di + 1
+        }
+        let grid-top = label-y - 2.0
+
+        let mut day = 0
+        while day < period-days {
+            let col = day % 7
+            let week = day / 7
+            let row = weeks - 1 - week
+            let cx = grid-x + (to-float(col) * (cell-w + cell-gap))
+            let cy = grid-top - (to-float(weeks) * (cell-h + cell-gap)) + (to-float(row) * (cell-h + cell-gap))
+
+            let d-start = period-start + (to-float(day) * SECS-PER-DAY)
+            let d-end = d-start + SECS-PER-DAY
+            let d-total = total-in-range(data, d-start, d-end)
+
+            if d-total > 0.0 {
+                let mut cur-h = 0.0
+                let mut gi = 0
+                while gi < num {
+                    let g = get(goals, gi)
+                    let g-amt = entries-in-range(data, g.id, d-start, d-end)
+                    let seg-h = (g-amt / d-total) * cell-h
+                    if seg-h > 0.3 {
+                        let crgb = parse-hex-color(g.color)
+                        let fill = ak/colored-view(cx, cy + cur-h, cell-w, seg-h,
+                            get(crgb, 0), get(crgb, 1), get(crgb, 2), 1.0)
+                        ak/set-corner-radius(fill, corner-r)
+                        ak/add-view(view, fill)
+                    }
+                    cur-h = cur-h + seg-h
+                    gi = gi + 1
+                }
+            } else {
+                let empty = ak/colored-view(cx, cy, cell-w, cell-h, 1.0, 1.0, 1.0, 0.06)
+                ak/set-corner-radius(empty, corner-r)
+                ak/add-view(view, empty)
+            }
+
+            day = day + 1
+        }
+        grid-top - (to-float(weeks) * (cell-h + cell-gap))
+    }
+}
+
+// ─── Color Picker View ──────────────────────────────────────────────
+
+fn build-color-picker-view(view, handler, n) {
+    let idx = deref(picking-color-for)
+    let data = deref(app-data)
+    let goal = get(data.goals, idx)
+
+    let back-sel = "cpb_" ++ to-string(n) ++ ":"
+    ak/add-method(handler, back-sel, fn(self_, sel, sender) {
+        reset!(picking-color-for, 0 - 1)
+        rebuild-ui()
+    })
+    let back-lbl = ak/left-label("‹", 8.0, POP-H - 40.0, 20.0, 24.0)
+    ak/set-font(back-lbl, ak/bold-font(16.0))
+    ak/set-text-color(back-lbl, ak/color(0.4, 0.6, 1.0, 1.0))
+    ak/add-to(view, back-lbl)
+    let back-btn = ak/button("", 4.0, POP-H - 44.0, 28.0, 32.0)
+    ak/set-bordered(back-btn, 0)
+    ak/on-click(back-btn, handler, back-sel)
+    ak/add-to(view, back-btn)
+
+    let title = ak/label("Change Color", 0.0, POP-H - 42.0, POP-W, 24.0)
+    ak/set-font(title, ak/bold-font(17.0))
     ak/set-text-color(title, ak/white)
     ak/add-to(view, title)
 
-    let sub = ak/label("Track your daily goals", 0.0, 290.0, POP-W, 20.0)
-    ak/set-font(sub, ak/font(12.0))
-    ak/set-text-color(sub, ak/color(0.55, 0.55, 0.6, 1.0))
-    ak/add-to(view, sub)
+    let name-lbl = ak/label(goal.name, 0.0, POP-H - 70.0, POP-W, 20.0)
+    ak/set-font(name-lbl, ak/font(13.0))
+    ak/set-text-color(name-lbl, ak/color(0.6, 0.6, 0.65, 1.0))
+    ak/add-to(view, name-lbl)
 
-    // ── Proportional bars ───────────────────────────────────────
-    let bar-bg = ak/colored-view(MARGIN, BAR-Y - 2.0, BAR-W, BAR-H + 4.0, 0.22, 0.22, 0.26, 1.0)
-    ak/set-corner-radius(bar-bg, 5.0)
-    ak/set-layer-mask(bar-bg)
-    ak/add-view(view, bar-bg)
+    // Color grid: 5 columns x 2 rows
+    let dot-size = 28.0
+    let gap = 8.0
+    let grid-w = (5.0 * dot-size) + (4.0 * gap)
+    let grid-x = (POP-W - grid-w) / 2.0
+    let grid-y = POP-H - 150.0
 
-    let total = reduce(goals, 0.0, fn(acc, g) { acc + g.count })
-    let mut bars = []
-    let mut bar-x = MARGIN
-    i = 0
-    while i < length(goals) {
-        let g = get(goals, i)
-        let rgb = parse-hex-color(g.color)
-        let w = if total == 0.0 {
-            BAR-W / length(goals)
-        } else {
-            (g.count / total) * BAR-W
+    let mut ci = 0
+    while ci < length(PRESET-COLORS) {
+        let col = ci % 5
+        let row = ci / 5
+        let cx = grid-x + (to-float(col) * (dot-size + gap))
+        let cy = grid-y + (to-float(1 - row) * (dot-size + gap))
+        let c = get(PRESET-COLORS, ci)
+        let crgb = parse-hex-color(c)
+
+        let dot = ak/colored-view(cx, cy, dot-size, dot-size,
+            get(crgb, 0), get(crgb, 1), get(crgb, 2), 1.0)
+        ak/set-corner-radius(dot, dot-size / 2.0)
+        if c == goal.color {
+            ak/set-border(dot, 2.0, ak/white)
         }
-        let bar = ak/colored-view(
-            bar-x, BAR-Y, w, BAR-H,
-            get(rgb, 0), get(rgb, 1), get(rgb, 2), 1.0
-        )
-        ak/add-view(view, bar)
-        bars = push(bars, bar)
-        bar-x = bar-x + w
-        i = i + 1
-    }
-    reset!(bar-views, bars)
-
-    // ── Goal rows ───────────────────────────────────────────────
-    let mut labels = []
-    i = 0
-    while i < length(goals) {
-        let g = get(goals, i)
-        let y = ROW-START-Y - (i * ROW-H)
-        let rgb = parse-hex-color(g.color)
-
-        // Color dot
-        let dot = ak/colored-view(MARGIN, y + 7.0, 14.0, 14.0,
-            get(rgb, 0), get(rgb, 1), get(rgb, 2), 1.0)
-        ak/set-corner-radius(dot, 7.0)
         ak/add-view(view, dot)
 
-        // Goal name
-        let name-lbl = ak/left-label(g.name, MARGIN + 20.0, y, 120.0, 28.0)
-        ak/set-font(name-lbl, ak/font(16.0))
-        ak/set-text-color(name-lbl, ak/white)
-        ak/add-to(view, name-lbl)
+        let pk-sel = "cp" ++ to-string(ci) ++ "_" ++ to-string(n) ++ ":"
+        let pk-ci = ci
+        let pk-idx = idx
+        ak/add-method(handler, pk-sel, fn(self_, sel, sender) {
+            change-goal-color(pk-idx, get(PRESET-COLORS, pk-ci))
+            reset!(picking-color-for, 0 - 1)
+            rebuild-ui()
+        })
+        let pk-btn = ak/button("", cx, cy, dot-size, dot-size)
+        ak/set-bordered(pk-btn, 0)
+        ak/on-click(pk-btn, handler, pk-sel)
+        ak/add-to(view, pk-btn)
 
-        // Count
-        let count-lbl = ak/label(to-string(g.count), 170.0, y, 50.0, 28.0)
-        ak/set-font(count-lbl, ak/mono-digit-font(20.0))
-        ak/set-text-color(count-lbl, ak/white)
-        ak/add-to(view, count-lbl)
-        labels = push(labels, count-lbl)
-
-        // Minus button
-        let minus = ak/button("-", 230.0, y + 1.0, 36.0, 26.0)
-        ak/set-font(minus, ak/bold-font(16.0))
-        ak/on-click(minus, handler, "dec" ++ to-string(i) ++ ":")
-        ak/add-to(view, minus)
-
-        // Plus button
-        let plus = ak/button("+", 274.0, y + 1.0, 36.0, 26.0)
-        ak/set-font(plus, ak/bold-font(16.0))
-        ak/on-click(plus, handler, "inc" ++ to-string(i) ++ ":")
-        ak/add-to(view, plus)
-
-        i = i + 1
+        ci = ci + 1
     }
-    reset!(count-labels, labels)
+}
 
-    // ── Quit button ─────────────────────────────────────────────
-    let quit-btn = ak/button("Quit", POP-W - 70.0, 10.0, 50.0, 24.0)
-    ak/set-font(quit-btn, ak/font(11.0))
-    ak/on-click(quit-btn, handler, "quit:")
-    ak/add-to(view, quit-btn)
+// ─── Add Goal View ──────────────────────────────────────────────────
 
+fn build-add-goal-view(view, handler, n) {
+    let add-h = compute-add-goal-height()
+    let content-w = POP-W - (2.0 * PAD)
+    let mut y = add-h - PAD
+
+    // Header: [‹ back] [spacer] [New Goal] [spacer] [invisible]
+    y = y - 24.0
+    let back-sel = "bk_" ++ to-string(n) ++ ":"
+    ak/add-method(handler, back-sel, fn(self_, sel, sender) {
+        reset!(is-adding-goal, false)
+        rebuild-ui()
+    })
+    let back-lbl = ak/left-label("‹", PAD, y, 20.0, 24.0)
+    ak/set-font(back-lbl, ak/bold-font(12.0))
+    ak/set-text-color(back-lbl, ak/color(0.4, 0.6, 1.0, 1.0))
+    ak/add-to(view, back-lbl)
+    let back-btn = ak/button("", PAD - 4.0, y - 4.0, 28.0, 32.0)
+    ak/set-bordered(back-btn, 0)
+    ak/on-click(back-btn, handler, back-sel)
+    ak/add-to(view, back-btn)
+
+    let title = ak/label("New Goal", 0.0, y, POP-W, 24.0)
+    ak/set-font(title, ak/bold-font(15.0))
+    ak/set-text-color(title, ak/white)
+    ak/add-to(view, title)
+
+    y = y - 16.0
+
+    // Name field
+    y = y - 24.0
+    let tf = ak/text-field("Goal name", PAD, y, content-w, 24.0)
+    ak/set-font(tf, ak/font(13.0))
+    ak/add-to(view, tf)
+
+    y = y - 16.0
+
+    // "Color" label
+    y = y - 16.0
+    let clbl = ak/left-label("Color", PAD, y, 60.0, 16.0)
+    ak/set-font(clbl, ak/font(11.0))
+    ak/set-text-color(clbl, ak/color(0.5, 0.5, 0.55, 1.0))
+    ak/add-to(view, clbl)
+
+    y = y - 8.0
+
+    // Color grid: 5x2
+    let dot-size = 24.0
+    let gap = 8.0
+    let grid-x = PAD
+    y = y - (2.0 * dot-size + gap)
+    let grid-y = y
+    let selected = deref(add-color-idx)
+
+    let mut ci = 0
+    while ci < length(PRESET-COLORS) {
+        let col = ci % 5
+        let row = ci / 5
+        let cx = grid-x + (to-float(col) * (dot-size + gap))
+        let cy = grid-y + (to-float(1 - row) * (dot-size + gap))
+        let c = get(PRESET-COLORS, ci)
+        let crgb = parse-hex-color(c)
+
+        let dot = ak/colored-view(cx, cy, dot-size, dot-size,
+            get(crgb, 0), get(crgb, 1), get(crgb, 2), 1.0)
+        ak/set-corner-radius(dot, dot-size / 2.0)
+        if ci == selected {
+            ak/set-border(dot, 2.0, ak/white)
+        }
+        ak/add-view(view, dot)
+
+        let pk-sel = "pk" ++ to-string(ci) ++ "_" ++ to-string(n) ++ ":"
+        let pk-idx = ci
+        ak/add-method(handler, pk-sel, fn(self_, sel, sender) {
+            reset!(add-color-idx, pk-idx)
+            rebuild-ui()
+        })
+        let pk-btn = ak/button("", cx, cy, dot-size, dot-size)
+        ak/set-bordered(pk-btn, 0)
+        ak/on-click(pk-btn, handler, pk-sel)
+        ak/add-to(view, pk-btn)
+
+        ci = ci + 1
+    }
+
+    y = y - 16.0
+
+    // Cancel / Add buttons
+    y = y - 24.0
+    let cancel-sel = "cn_" ++ to-string(n) ++ ":"
+    ak/add-method(handler, cancel-sel, fn(self_, sel, sender) {
+        reset!(is-adding-goal, false)
+        rebuild-ui()
+    })
+    let cancel-btn = ak/button("Cancel", PAD, y, 60.0, 24.0)
+    ak/set-font(cancel-btn, ak/font(12.0))
+    ak/on-click(cancel-btn, handler, cancel-sel)
+    ak/add-to(view, cancel-btn)
+
+    let confirm-sel = "cf_" ++ to-string(n) ++ ":"
+    ak/add-method(handler, confirm-sel, fn(self_, sel, sender) {
+        let name = ak/get-text(tf)
+        if length(trim(name)) > 0 {
+            let color = get(PRESET-COLORS, deref(add-color-idx))
+            add-goal(trim(name), color)
+            reset!(is-adding-goal, false)
+            rebuild-ui()
+        }
+    })
+    let confirm-btn = ak/button("Add", POP-W - PAD - 44.0, y, 44.0, 24.0)
+    ak/set-font(confirm-btn, ak/bold-font(12.0))
+    ak/on-click(confirm-btn, handler, confirm-sel)
+    ak/add-to(view, confirm-btn)
+}
+
+// ─── Flag Helpers ──────────────────────────────────────────────────
+// Check if a specific modifier flag bit is set using integer division.
+// has-flag(flags, 1048576) checks Cmd, has-flag(flags, 131072) checks Shift.
+
+fn has-flag(flags, mask) {
+    (flags / mask) % 2 == 1
+}
+
+// ─── Main ───────────────────────────────────────────────────────────
+
+fn main() {
+    let app = ak/menu-bar-app()
+    let si = ak/status-item("Ease")
+    reset!(status-item-ref, si)
+
+    let pop = ak/popover(POP-W, POP-H)
+    reset!(popover-ref, pop)
+
+    // Create persistent responder view for keyboard shortcuts and Cmd-hold reorder
+    let resp = ak/custom-responder-view("EaseResponder", 0.0, 0.0, 1.0, 1.0,
+        fn(self_, sel, event) {
+            // keyDown: Cmd+Z = undo, Cmd+Shift+Z = redo
+            let flags = ak/event-modifier-flags(event)
+            let key = ak/event-keycode(event)
+            if has-flag(flags, 1048576) && key == 6 {
+                if has-flag(flags, 131072) { redo() } else { undo() }
+            }
+        },
+        fn(self_, sel, event) {
+            // flagsChanged: track Cmd (reorder) and Alt (subtract mode)
+            let flags = ak/event-modifier-flags(event)
+            let cmd = has-flag(flags, 1048576)
+            let alt = has-flag(flags, 524288)
+            let was-cmd = deref(reorder-mode)
+            let was-alt = deref(alt-pressed)
+            reset!(alt-pressed, alt)
+            let dragging = deref(is-dragging)
+            if !dragging {
+                if cmd != was-cmd {
+                    reset!(reorder-mode, cmd)
+                    rebuild-ui()
+                } else if alt != was-alt {
+                    rebuild-ui()
+                }
+            }
+        }
+    )
+    reset!(responder-ref, resp)
+
+    let toggle-handler = ak/handler("EaseToggle")
+    ak/add-method(toggle-handler, "toggle:", fn(self_, sel, sender) {
+        let p = deref(popover-ref)
+        let s = deref(status-item-ref)
+        if ak/is-popover-shown(p) {
+            ak/close-popover(p)
+        } else {
+            ak/show-popover(p, s)
+            ak/make-popover-key(p)
+            rebuild-ui()
+        }
+    })
+    let toggle-handler = ak/register(toggle-handler)
+    ak/status-on-click(si, toggle-handler, "toggle:")
+
+    update-status-icon()
     println("Ease running in menu bar!")
     ak/run(app)
 }

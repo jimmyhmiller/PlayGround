@@ -573,12 +573,25 @@ fn unlock-focus(img) {
     msg0(img.ptr, "unlockFocus", ffi/Type.Void)
 }
 
+fn set-template(img) {
+    msg1(img.ptr, "setTemplate:", 1, ffi/Type.U8, ffi/Type.Void)
+}
+
 fn fill-rect(x, y, w, h) {
     let NSBezierPath = objc_getClass("NSBezierPath")
     let sel = sel_registerName("fillRect:")
     ffi/call-variadic(msgSend, [NSBezierPath, sel, x, y, w, h],
         [ffi/Type.Pointer, ffi/Type.Pointer, ffi/Type.F64, ffi/Type.F64, ffi/Type.F64, ffi/Type.F64],
         ffi/Type.Void)
+}
+
+fn fill-rounded-rect(x, y, w, h, rx, ry) {
+    let NSBezierPath = objc_getClass("NSBezierPath")
+    let sel = sel_registerName("bezierPathWithRoundedRect:xRadius:yRadius:")
+    let path = ffi/call-variadic(msgSend, [NSBezierPath, sel, x, y, w, h, rx, ry],
+        [ffi/Type.Pointer, ffi/Type.Pointer, ffi/Type.F64, ffi/Type.F64, ffi/Type.F64, ffi/Type.F64, ffi/Type.F64, ffi/Type.F64],
+        ffi/Type.Pointer)
+    msg0(path, "fill", ffi/Type.Void)
 }
 
 fn set-fill-color(nscolor) {
@@ -710,6 +723,136 @@ fn custom-key-view(name, x, y, w, h, on-key-down) {
 
     let view = msg-initWithFrame(msg0(cls, "alloc", ffi/Type.Pointer), x, y, w, h)
     View { ptr: view }
+}
+
+fn custom-responder-view(name, x, y, w, h, on-key-down, on-flags-changed) {
+    let NSView = objc_getClass("NSView")
+    let cls = objc_allocateClassPair(NSView, name, 0)
+
+    let key-cb = ffi/create-callback(on-key-down,
+        [ffi/Type.Pointer, ffi/Type.Pointer, ffi/Type.Pointer], ffi/Type.Void)
+    class_addMethod(cls, sel_registerName("keyDown:"), key-cb, "v@:@")
+
+    let flags-cb = ffi/create-callback(on-flags-changed,
+        [ffi/Type.Pointer, ffi/Type.Pointer, ffi/Type.Pointer], ffi/Type.Void)
+    class_addMethod(cls, sel_registerName("flagsChanged:"), flags-cb, "v@:@")
+
+    let accepts-cb = ffi/create-callback(fn(self_, sel, _) { 1 },
+        [ffi/Type.Pointer, ffi/Type.Pointer, ffi/Type.Pointer], ffi/Type.U8)
+    class_addMethod(cls, sel_registerName("acceptsFirstResponder"), accepts-cb, "B@:")
+
+    objc_registerClassPair(cls)
+
+    let view = msg-initWithFrame(msg0(cls, "alloc", ffi/Type.Pointer), x, y, w, h)
+    View { ptr: view }
+}
+
+fn make-first-responder(pop, view) {
+    let window = msg0(view.ptr, "window", ffi/Type.Pointer)
+    if window != null {
+        msg1(window, "makeFirstResponder:", view.ptr, ffi/Type.Pointer, ffi/Type.U8)
+    }
+}
+
+fn make-popover-key(pop) {
+    let window = msg0(pop.content-view.ptr, "window", ffi/Type.Pointer)
+    if window != null {
+        msg0(window, "makeKeyWindow", ffi/Type.Void)
+    }
+    let NSApplication = objc_getClass("NSApplication")
+    let a = msg0(NSApplication, "sharedApplication", ffi/Type.Pointer)
+    msg1(a, "activateIgnoringOtherApps:", 1, ffi/Type.U8, ffi/Type.Void)
+}
+
+fn set-layer-bg(view-ptr, nscolor) {
+    msg1(view-ptr, "setWantsLayer:", 1, ffi/Type.U8, ffi/Type.Void)
+    let layer = msg0(view-ptr, "layer", ffi/Type.Pointer)
+    msg1(layer, "setBackgroundColor:", msg0(nscolor, "CGColor", ffi/Type.Pointer), ffi/Type.Pointer, ffi/Type.Void)
+}
+
+fn set-layer-corner-radius(view-ptr, radius) {
+    let layer = msg0(view-ptr, "layer", ffi/Type.Pointer)
+    msg1(layer, "setCornerRadius:", radius, ffi/Type.F64, ffi/Type.Void)
+}
+
+// ─── Raw pointer helpers (for use from callbacks) ──────────────────
+
+fn hide-view(ptr) {
+    msg1(ptr, "setHidden:", 1, ffi/Type.U8, ffi/Type.Void)
+}
+
+fn show-view(ptr) {
+    msg1(ptr, "setHidden:", 0, ffi/Type.U8, ffi/Type.Void)
+}
+
+fn remove-from-superview(ptr) {
+    msg0(ptr, "removeFromSuperview", ffi/Type.Void)
+}
+
+fn add-subview-to(parent-ptr, child-ptr) {
+    msg1(parent-ptr, "addSubview:", child-ptr, ffi/Type.Pointer, ffi/Type.Void)
+}
+
+// ─── Animation ─────────────────────────────────────────────────────
+
+fn animate(duration, callback) {
+    let NSAnimationContext = objc_getClass("NSAnimationContext")
+    msg0(NSAnimationContext, "beginGrouping", ffi/Type.Void)
+    let ctx = msg0(NSAnimationContext, "currentContext", ffi/Type.Pointer)
+    msg1(ctx, "setDuration:", duration, ffi/Type.F64, ffi/Type.Void)
+    msg1(ctx, "setAllowsImplicitAnimation:", 1, ffi/Type.U8, ffi/Type.Void)
+    callback()
+    msg0(NSAnimationContext, "endGrouping", ffi/Type.Void)
+}
+
+fn set-alpha(view-ptr, alpha) {
+    let animator = msg0(view-ptr, "animator", ffi/Type.Pointer)
+    msg1(animator, "setAlphaValue:", alpha, ffi/Type.F64, ffi/Type.Void)
+}
+
+fn animated-set-frame(view-ptr, x, y, w, h) {
+    let animator = msg0(view-ptr, "animator", ffi/Type.Pointer)
+    let sel = sel_registerName("setFrame:")
+    ffi/call-variadic(msgSend, [animator, sel, x, y, w, h],
+        [ffi/Type.Pointer, ffi/Type.Pointer, ffi/Type.F64, ffi/Type.F64, ffi/Type.F64, ffi/Type.F64],
+        ffi/Type.Void)
+}
+
+// ─── SF Symbols ─────────────────────────────────────────────────────
+
+fn symbol-image-view(name, pt-size, x, y, w, h, tint-color) {
+    let NSImage = objc_getClass("NSImage")
+    let img = msg2(NSImage, "imageWithSystemSymbolName:accessibilityDescription:",
+        nsstring(name), ffi/Type.Pointer,
+        0, ffi/Type.Pointer,
+        ffi/Type.Pointer)
+    let NSImageSymbolConfiguration = objc_getClass("NSImageSymbolConfiguration")
+    let config = msg2(NSImageSymbolConfiguration, "configurationWithPointSize:weight:",
+        pt-size, ffi/Type.F64,
+        0.0, ffi/Type.F64,
+        ffi/Type.Pointer)
+    let sized-img = msg1(img, "imageWithSymbolConfiguration:", config, ffi/Type.Pointer, ffi/Type.Pointer)
+    let NSImageView = objc_getClass("NSImageView")
+    let iv = msg-initWithFrame(msg0(NSImageView, "alloc", ffi/Type.Pointer), x, y, w, h)
+    msg1(iv, "setImage:", sized-img, ffi/Type.Pointer, ffi/Type.Void)
+    msg1(iv, "setContentTintColor:", tint-color, ffi/Type.Pointer, ffi/Type.Void)
+    View { ptr: iv }
+}
+
+fn update-image-view-symbol(iv-ptr, name, pt-size, tint-color) {
+    let NSImage = objc_getClass("NSImage")
+    let img = msg2(NSImage, "imageWithSystemSymbolName:accessibilityDescription:",
+        nsstring(name), ffi/Type.Pointer,
+        0, ffi/Type.Pointer,
+        ffi/Type.Pointer)
+    let NSImageSymbolConfiguration = objc_getClass("NSImageSymbolConfiguration")
+    let config = msg2(NSImageSymbolConfiguration, "configurationWithPointSize:weight:",
+        pt-size, ffi/Type.F64,
+        0.0, ffi/Type.F64,
+        ffi/Type.Pointer)
+    let sized-img = msg1(img, "imageWithSymbolConfiguration:", config, ffi/Type.Pointer, ffi/Type.Pointer)
+    msg1(iv-ptr, "setImage:", sized-img, ffi/Type.Pointer, ffi/Type.Void)
+    msg1(iv-ptr, "setContentTintColor:", tint-color, ffi/Type.Pointer, ffi/Type.Void)
 }
 
 // ─── Snapshot / Export ──────────────────────────────────────────────

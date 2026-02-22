@@ -1,3 +1,4 @@
+pub mod client;
 pub mod datom;
 pub mod db;
 pub mod index;

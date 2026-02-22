@@ -116,10 +116,10 @@ IDENTITY="${CODESIGN_IDENTITY:-}"
 
 if [ -n "$IDENTITY" ]; then
     echo "Signing with identity: $IDENTITY"
-    codesign --force --deep --sign "$IDENTITY" Ease.app
+    codesign --force --deep --sign "$IDENTITY" --entitlements Ease.entitlements Ease.app
 else
     echo "No CODESIGN_IDENTITY set, signing for local use only..."
-    codesign --force --deep --sign - Ease.app
+    codesign --force --deep --sign - --entitlements Ease.entitlements Ease.app
 fi
 
 echo "App bundle created at Ease.app"

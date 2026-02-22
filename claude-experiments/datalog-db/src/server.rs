@@ -78,6 +78,7 @@ fn dispatch(db: &Database, msg: &Message) -> serde_json::Value {
         "define_enum" => handle_define_enum(db, &msg.payload),
         "transact" => handle_transact(db, &msg.payload),
         "query" => handle_query(db, &msg.payload),
+        "explain" => handle_explain(db, &msg.payload),
         "schema" => handle_schema(db),
         "status" => handle_status(),
         other => serde_json::json!({
@@ -189,6 +190,11 @@ fn handle_query(db: &Database, payload: &serde_json::Value) -> serde_json::Value
         }
     };
 
+    // If explain flag is set, return the plan instead of executing
+    if query.explain {
+        return handle_explain(db, payload);
+    }
+
     match db.query(&query) {
         Ok(result) => {
             let rows: Vec<Vec<serde_json::Value>> = result
@@ -202,6 +208,34 @@ fn handle_query(db: &Database, payload: &serde_json::Value) -> serde_json::Value
                 "data": {
                     "columns": result.columns,
                     "rows": rows
+                }
+            })
+        }
+        Err(e) => serde_json::json!({
+            "status": "error",
+            "error": e.to_string()
+        }),
+    }
+}
+
+fn handle_explain(db: &Database, payload: &serde_json::Value) -> serde_json::Value {
+    let query = match Query::from_json(payload) {
+        Ok(q) => q,
+        Err(e) => {
+            return serde_json::json!({
+                "status": "error",
+                "error": e
+            })
+        }
+    };
+
+    match db.explain(&query) {
+        Ok(plan) => {
+            serde_json::json!({
+                "status": "ok",
+                "data": {
+                    "plan": plan.to_json(),
+                    "display": format!("{}", plan)
                 }
             })
         }

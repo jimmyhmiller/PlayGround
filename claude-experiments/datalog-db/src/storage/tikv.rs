@@ -113,6 +113,21 @@ impl ReadOps for TiKvSnapshotOps<'_> {
             })
             .collect())
     }
+
+    fn scan_foreach(
+        &self,
+        start: &[u8],
+        end: &[u8],
+        f: &mut dyn FnMut(&[u8], &[u8]) -> bool,
+    ) -> Result<()> {
+        let entries = self.scan(start, end)?;
+        for (k, v) in &entries {
+            if !f(k, v) {
+                break;
+            }
+        }
+        Ok(())
+    }
 }
 
 // -- Transaction (read-write) --
@@ -148,6 +163,21 @@ impl ReadOps for TiKvTxnOps<'_> {
             })
             .collect())
     }
+
+    fn scan_foreach(
+        &self,
+        start: &[u8],
+        end: &[u8],
+        f: &mut dyn FnMut(&[u8], &[u8]) -> bool,
+    ) -> Result<()> {
+        let entries = self.scan(start, end)?;
+        for (k, v) in &entries {
+            if !f(k, v) {
+                break;
+            }
+        }
+        Ok(())
+    }
 }
 
 impl TxnOps for TiKvTxnOps<'_> {
@@ -155,6 +185,13 @@ impl TxnOps for TiKvTxnOps<'_> {
         let k = prefixed_key(&self.prefix, &key);
         self.runtime
             .block_on(self.txn.borrow_mut().put(k, value))
+            .map_err(|e| StorageError::Backend(e.to_string()))
+    }
+
+    fn delete(&self, key: &[u8]) -> Result<()> {
+        let k = prefixed_key(&self.prefix, key);
+        self.runtime
+            .block_on(self.txn.borrow_mut().delete(k))
             .map_err(|e| StorageError::Backend(e.to_string()))
     }
 

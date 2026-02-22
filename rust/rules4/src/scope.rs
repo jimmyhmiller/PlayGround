@@ -52,9 +52,9 @@ impl BrowserHandler {
 }
 
 impl ScopeHandler for BrowserHandler {
-    fn try_eval(&mut self, store: &mut TermStore, term: TermId) -> Option<TermId> {
+    fn try_eval(&mut self, _store: &mut TermStore, term: TermId) -> Option<TermId> {
         self.pending.borrow_mut().push(term);
-        Some(store.num(0))
+        Some(term)
     }
 }
 

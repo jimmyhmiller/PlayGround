@@ -7,69 +7,113 @@
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-      background: #f7f7f8; color: #333;
-      padding: 28px 20px; line-height: 1.5;
+      background: #f7f7f8;
+      padding: 20px;
     }
-    .page { max-width: 1000px; margin: 0 auto; }
-    h1 { font-size: 22px; font-weight: 700; color: #1a1a1a; }
-    .subtitle { font-size: 14px; color: #888; margin-top: 2px; margin-bottom: 16px; }
-    .result { font-weight: 700; color: #2e7d32; background: #e8f5e9;
-      padding: 1px 8px; border-radius: 8px; font-family: 'SF Mono', monospace; font-size: 13px; }
-
-    /* Editor */
-    .editor-wrap {
-      border: 2px solid #e0e0e4; border-radius: 10px; overflow: hidden;
-      margin-bottom: 12px;
+    .page { max-width: 1200px; margin: 0 auto; }
+    .header {
+      display: flex; align-items: center; gap: 10px; margin-bottom: 14px;
     }
-    .cm-editor { font-size: 13px; }
-    .cm-editor .cm-scroller { min-height: 300px; max-height: 520px; overflow: auto; }
-    .cm-editor .cm-content { font-family: 'SF Mono', 'Fira Code', 'Menlo', monospace; }
-    .cm-editor .cm-gutters { background: #fafafa; border-right: 1px solid #eee; }
-    .cm-editor.cm-focused { outline: none; }
-
-    /* Controls row */
-    .controls-row {
-      display: flex; align-items: center; gap: 12px; margin-bottom: 14px; flex-wrap: wrap;
+    h1 { font-size: 20px; font-weight: 700; color: #1a1a1a; }
+    .status-dot {
+      width: 8px; height: 8px; border-radius: 50%;
+      display: inline-block; transition: background 0.2s;
     }
-    #run-btn {
-      background: #1976d2; color: white; border: none; border-radius: 6px;
-      padding: 6px 18px; font-size: 13px; font-weight: 700; cursor: pointer;
+    .status-dot.ok { background: #22c55e; }
+    .status-dot.err { background: #ef4444; }
+    .status-dot.running { background: #f59e0b; }
+    .result {
+      font-weight: 700; color: #2e7d32; background: #e8f5e9;
+      padding: 1px 8px; border-radius: 8px;
+      font-family: 'SF Mono', monospace; font-size: 13px;
     }
-    #run-btn:hover { background: #1565c0; }
-    #run-btn:active { background: #0d47a1; }
-    .shortcut-hint { font-size: 11px; color: #bbb; }
-
-    .viz-toggles {
-      display: flex; gap: 12px; align-items: center;
-      font-size: 12px; color: #666;
-    }
-    .viz-toggles label { cursor: pointer; user-select: none; display: flex; align-items: center; gap: 3px; }
-    .viz-toggles input[type="checkbox"] { margin: 0; }
-
     #preset-select {
       margin-left: auto;
       font-size: 12px; padding: 4px 8px; border-radius: 6px;
       border: 1px solid #ccc; background: white; color: #333;
     }
 
-    .error-msg {
-      background: #fbe9e7; color: #c62828; border-radius: 8px;
-      padding: 8px 14px; font-size: 13px; margin-bottom: 14px;
-      font-family: 'SF Mono', monospace; white-space: pre-wrap;
+    .main {
+      display: flex; gap: 16px; margin-bottom: 12px;
+      height: calc(100vh - 120px);
+      min-height: 500px;
+    }
+    .editor-col {
+      flex: 6; display: flex; flex-direction: column; min-width: 0;
+    }
+    .viz-col {
+      flex: 5; min-width: 0;
+      display: flex; flex-direction: column; gap: 10px;
+    }
+    .viz-wrap {
+      flex: 1;
+      background: white;
+      border: 1px solid #eaeaee;
+      border-radius: 12px;
+      overflow-y: auto;
+      padding: 12px;
     }
 
-    /* slider */
-    .slider-row {
-      display: flex; align-items: center; gap: 14px; padding: 4px 0 12px 0;
+    /* ── Tab bar ── */
+    .tab-bar {
+      display: flex; gap: 0;
+      border-bottom: 2px solid #e0e0e4;
+      flex-shrink: 0;
     }
-    .slider-label {
-      font-size: 12px; color: #999; min-width: 108px; text-align: center;
-      font-variant-numeric: tabular-nums; font-weight: 600; letter-spacing: 0.3px;
+    .tab {
+      padding: 8px 18px;
+      border: none; background: none;
+      font-size: 13px; font-weight: 600;
+      color: #888; cursor: pointer;
+      border-bottom: 2px solid transparent;
+      margin-bottom: -2px;
+      transition: color 0.15s, border-color 0.15s;
+    }
+    .tab:hover { color: #555; }
+    .tab.active { color: #1976d2; border-bottom-color: #1976d2; }
+
+    /* ── Editor panels ── */
+    .editor-wrap {
+      flex: 1;
+      border: 2px solid #e0e0e4;
+      border-top: none;
+      border-radius: 0 0 10px 10px;
+      overflow: hidden;
+      position: relative;
+    }
+    .editor-panel {
+      position: absolute; inset: 0;
+      display: none;
+      overflow: hidden;
+    }
+    .editor-panel.active { display: flex; flex-direction: column; }
+    .editor-panel > div { flex: 1; overflow: hidden; }
+    .cm-editor { height: 100%; overflow: hidden; }
+    .cm-editor .cm-scroller { overflow: auto !important; }
+    .cm-editor .cm-content {
+      font-family: 'SF Mono', 'Fira Code', 'Menlo', monospace;
+      font-size: 13px;
+    }
+    .cm-editor .cm-gutters { background: #fafafa; border-right: 1px solid #eee; }
+    .cm-editor.cm-focused { outline: none; }
+
+    .error {
+      background: #fef2f2; color: #dc2626; border-radius: 8px;
+      padding: 6px 10px; font-size: 11px; margin-top: 6px;
+      font-family: 'SF Mono', monospace;
+      max-height: 50px; overflow: auto;
+      display: none; white-space: pre-wrap;
+    }
+    .error.visible { display: block; }
+
+    /* ── Controls ── */
+    .controls {
+      display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
     }
     input[type="range"] {
-      -webkit-appearance: none; appearance: none;
       flex: 1; height: 6px; background: #ddd;
       border-radius: 3px; outline: none; cursor: pointer;
+      -webkit-appearance: none; appearance: none;
     }
     input[type="range"]::-webkit-slider-thumb {
       -webkit-appearance: none; width: 20px; height: 20px;
@@ -77,8 +121,37 @@
       border: 3px solid #1976d2; cursor: pointer;
       box-shadow: 0 1px 4px rgba(0,0,0,0.18);
     }
+    .step-label {
+      font-size: 12px; color: #999; min-width: 110px; text-align: center;
+      font-variant-numeric: tabular-nums; font-weight: 600;
+    }
+    .viz-toggles {
+      display: flex; gap: 10px; align-items: center;
+      font-size: 12px; color: #666;
+    }
+    .viz-toggles label {
+      cursor: pointer; user-select: none;
+      display: flex; align-items: center; gap: 3px;
+    }
+    .viz-toggles input[type="checkbox"] { margin: 0; }
 
-    /* styles for rules4-rendered DOM */
+    /* ── Tangle number scrubbing ── */
+    .cm-tangle-number {
+      color: #1976d2;
+      border-bottom: 1.5px dashed rgba(25, 118, 210, 0.5);
+      cursor: col-resize;
+      padding: 3px 2px;
+    }
+    .cm-tangle-number:hover {
+      background: rgba(25, 118, 210, 0.1);
+      border-bottom-style: solid;
+    }
+    body.tangle-dragging, body.tangle-dragging * {
+      cursor: col-resize !important;
+      user-select: none !important;
+    }
+
+    /* ── Viz-specific styles ── */
     .tree-container {
       background: white; border: 1px solid #eaeaee; border-radius: 12px;
       padding: 16px 8px 8px 8px; margin-bottom: 16px; overflow-x: auto;
@@ -113,49 +186,20 @@
     .result-val { color: #2e7d32; font-weight: 600; }
     .result-badge { background: #e8f5e9; color: #2e7d32; }
 
-    /* Value Timeline */
     .timeline-container {
       background: white; border: 1px solid #eaeaee; border-radius: 12px;
       padding: 16px 8px 8px 8px; margin-bottom: 16px; overflow-x: auto;
     }
     .timeline-container svg { display: block; margin: 0 auto; }
 
-    /* Iteration Table */
-    .iter-table-container {
-      background: white; border: 1px solid #eaeaee; border-radius: 12px;
-      padding: 16px; margin-bottom: 16px; overflow-x: auto;
-    }
-    .iter-table {
-      border-collapse: collapse; width: 100%; font-size: 13px;
-      font-family: 'SF Mono', monospace;
-    }
-    .iter-table th {
-      background: #f5f5f7; color: #888; font-size: 11px; font-weight: 700;
-      letter-spacing: 0.4px; text-transform: uppercase;
-      padding: 6px 12px; text-align: left; border-bottom: 2px solid #eaeaee;
-    }
-    .iter-table td {
-      padding: 6px 12px; border-bottom: 1px solid #f0f0f2;
-    }
-    .iter-row-active { background: #e3f2fd; }
-    .iter-row-future { color: #ccc; }
   </style>
 </head>
 <body>
 <div class="page">
-  <h1>Learnable Programming</h1>
-  <div class="subtitle">Watching <span class="result" id="result-badge">...</span></div>
-
-  <div class="editor-wrap">
-    <div id="editor"></div>
-  </div>
-
-  <div class="controls-row">
-    <button id="run-btn">Run &#x25B8;</button>
-    <span class="shortcut-hint">&#x2318;Enter</span>
-
-    <div class="viz-toggles" id="viz-toggles"></div>
-
+  <div class="header">
+    <h1>Learnable Programming</h1>
+    <span class="status-dot ok" id="status"></span>
+    <span class="result" id="result-badge">...</span>
     <select id="preset-select">
       <option value="fib_memo">Fibonacci (memoized)</option>
       <option value="map_list">Map over list</option>
@@ -164,15 +208,28 @@
     </select>
   </div>
 
-  <div id="error-msg" class="error-msg" style="display:none"></div>
-
-  <!-- rules4 @dom renders into here -->
-  <div id="viz"></div>
-
-  <!-- slider stays in static HTML for responsive dragging -->
-  <div class="slider-row">
-    <input type="range" id="slider" min="0" max="0" value="0">
-    <span class="slider-label" id="slider-label">Step 0</span>
+  <div class="main">
+    <div class="editor-col">
+      <div class="tab-bar">
+        <button class="tab active" data-tab="program">Program</button>
+        <button class="tab" data-tab="view">View</button>
+        <button class="tab" data-tab="js">JS</button>
+      </div>
+      <div class="editor-wrap">
+        <div class="editor-panel active" id="ep-program"><div id="editor-program"></div></div>
+        <div class="editor-panel" id="ep-view"><div id="editor-view"></div></div>
+        <div class="editor-panel" id="ep-js"><div id="editor-js"></div></div>
+      </div>
+      <div class="error" id="error"></div>
+    </div>
+    <div class="viz-col">
+      <div class="viz-wrap" id="viz"></div>
+      <div class="controls">
+        <input type="range" id="slider" min="0" max="0" value="0">
+        <span class="step-label" id="step-label">Step 0</span>
+        <div class="viz-toggles" id="viz-toggles"></div>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -180,12 +237,200 @@
 import { Rules4 } from './bridge.js';
 import { renderTerm, patch } from './vdom.js';
 import {
-  allModules, callTreeModule, stepCardModule,
-  valueTimelineModule, iterationTableModule,
-  assertNum,
+  allModules as _allModules, callTreeModule, stepCardModule,
+  valueTimelineModule, assertNum,
 } from './viz-modules.js';
 
-// ── Presets ──
+const allModules = _allModules.filter(m => m.name !== 'iteration_table');
+
+const { EditorView, basicSetup } = await import('https://esm.sh/codemirror@6.0.1');
+const { ViewPlugin, Decoration } = await import('https://esm.sh/@codemirror/view@6');
+const { StreamLanguage } = await import('https://esm.sh/@codemirror/language@6');
+const { javascript } = await import('https://esm.sh/@codemirror/lang-javascript@6');
+
+// ── rules4 syntax highlighting ──
+
+const rules4Parser = {
+  name: "rules4",
+  startState() { return { inString: false }; },
+  token(stream, state) {
+    if (state.inString) {
+      while (!stream.eol()) {
+        if (stream.peek() === '\\') { stream.next(); stream.next(); }
+        else if (stream.next() === '"') { state.inString = false; return "string"; }
+      }
+      return "string";
+    }
+    if (stream.eatSpace()) return null;
+    if (stream.peek() === '#') { stream.skipToEnd(); return "lineComment"; }
+    if (stream.peek() === '"') {
+      stream.next(); state.inString = true;
+      while (!stream.eol()) {
+        if (stream.peek() === '\\') { stream.next(); stream.next(); }
+        else if (stream.next() === '"') { state.inString = false; return "string"; }
+      }
+      return "string";
+    }
+    if (stream.eat('@')) { stream.eatWhile(/[a-zA-Z_0-9]/); return "meta"; }
+    if (stream.eat('?')) { stream.eatWhile(/[a-zA-Z_0-9]/); return "variableName.special"; }
+    if (stream.match(/^\d+(\.\d+)?/)) return "number";
+    if (stream.match("=>")) return "operator";
+    if (stream.match("->")) return "operator";
+    if (stream.match("==")) return "operator";
+    if (stream.match("!=")) return "operator";
+    if (stream.match(">=")) return "operator";
+    if (stream.match("<=")) return "operator";
+    if (stream.eat(/[=+\-*\/<>%]/)) return "operator";
+    if (stream.eat(/[()]/)) return "paren";
+    if (stream.eat(/[[\]]/)) return "squareBracket";
+    if (stream.eat(/[{}]/)) return "brace";
+    if (stream.eat(',')) return "separator";
+    if (stream.match(/^[a-zA-Z_][a-zA-Z_0-9]*/)) {
+      const w = stream.current();
+      if (w === "fn" || w === "rule") return "definitionKeyword";
+      if (w === "if" || w === "then" || w === "else") return "controlKeyword";
+      if (w === "true" || w === "false" || w === "nil") return "atom";
+      if (w === "cons" || w === "result") return "keyword";
+      return "name";
+    }
+    stream.next();
+    return null;
+  },
+  languageData: { commentTokens: { line: "#" } },
+};
+
+const rules4Language = StreamLanguage.define(rules4Parser);
+
+// ── Tangle-style number scrubbing ──
+
+function findNumberAt(lineText, col) {
+  const commentIdx = lineText.indexOf('#');
+  const searchEnd = commentIdx >= 0 ? commentIdx : lineText.length;
+  const re = /\b(\d+(\.\d+)?)\b/g;
+  let m;
+  while ((m = re.exec(lineText)) !== null) {
+    if (m.index >= searchEnd) break;
+    if (col >= m.index && col < m.index + m[0].length) {
+      return { text: m[0], start: m.index, end: m.index + m[0].length };
+    }
+  }
+  return null;
+}
+
+const tangleNumberMark = Decoration.mark({ class: "cm-tangle-number" });
+
+function buildNumberDecos(view) {
+  const ranges = [];
+  for (let i = 1; i <= view.state.doc.lines; i++) {
+    const line = view.state.doc.line(i);
+    const commentIdx = line.text.indexOf('#');
+    const searchEnd = commentIdx >= 0 ? commentIdx : line.text.length;
+    const re = /\b(\d+(\.\d+)?)\b/g;
+    let m;
+    while ((m = re.exec(line.text)) !== null) {
+      if (m.index >= searchEnd) break;
+      ranges.push(tangleNumberMark.range(line.from + m.index, line.from + m.index + m[0].length));
+    }
+  }
+  return Decoration.set(ranges, true);
+}
+
+const tangleDecoPlugin = ViewPlugin.fromClass(class {
+  constructor(view) { this.decorations = buildNumberDecos(view); }
+  update(update) {
+    if (update.docChanged || update.viewportChanged) {
+      this.decorations = buildNumberDecos(update.view);
+    }
+  }
+}, { decorations: v => v.decorations });
+
+let isScrubbing = false;
+let dragState = null;
+
+function onDragMove(e) {
+  if (!dragState) return;
+  const dx = e.clientX - dragState.startX;
+  const steps = Math.round(dx / 5);
+  let newValue = dragState.startValue + steps * dragState.step;
+
+  let newText;
+  if (dragState.precision > 0) {
+    newText = newValue.toFixed(dragState.precision);
+  } else {
+    newText = String(Math.round(newValue));
+  }
+
+  if (newText === dragState.lastText) return;
+
+  dragState.view.dispatch({
+    changes: {
+      from: dragState.from,
+      to: dragState.from + dragState.lastText.length,
+      insert: newText,
+    },
+  });
+  dragState.lastText = newText;
+}
+
+function onDragEnd() {
+  isScrubbing = false;
+  dragState = null;
+  document.body.classList.remove('tangle-dragging');
+  document.removeEventListener('mousemove', onDragMove);
+  document.removeEventListener('mouseup', onDragEnd);
+}
+
+const tangleDragHandlers = EditorView.domEventHandlers({
+  mousedown(event, view) {
+    const pos = view.posAtCoords({ x: event.clientX, y: event.clientY });
+    if (pos === null) return false;
+
+    const line = view.state.doc.lineAt(pos);
+    const col = pos - line.from;
+    let num = findNumberAt(line.text, col);
+    if (!num && col > 0) num = findNumberAt(line.text, col - 1);
+    if (!num) num = findNumberAt(line.text, col + 1);
+    if (!num) return false;
+
+    event.preventDefault();
+    isScrubbing = true;
+    document.body.classList.add('tangle-dragging');
+
+    const isFloat = num.text.includes('.');
+    dragState = {
+      view,
+      startX: event.clientX,
+      startValue: parseFloat(num.text),
+      step: isFloat ? 0.1 : 1,
+      precision: isFloat ? (num.text.split('.')[1] || '').length : 0,
+      from: line.from + num.start,
+      lastText: num.text,
+    };
+
+    document.addEventListener('mousemove', onDragMove);
+    document.addEventListener('mouseup', onDragEnd);
+    return true;
+  },
+});
+
+function tangleExtension() {
+  return [tangleDecoPlugin, tangleDragHandlers];
+}
+
+// ── Presets (split into program + view) ──
+
+const VIEW_MARKER = '# === View ===';
+
+function splitCode(code) {
+  const idx = code.indexOf(VIEW_MARKER);
+  if (idx >= 0) {
+    return {
+      program: code.substring(0, idx).trimEnd(),
+      view: code.substring(idx + VIEW_MARKER.length).trimStart(),
+    };
+  }
+  return { program: code, view: '' };
+}
 
 const PRESETS = {
   fib_memo: {
@@ -376,32 +621,6 @@ fn render_call_tree() = element("div", [cls("tree-container")], [
     attr("width", "100%")
   ], append(render_edges(0), render_nodes(0)))])
 
-fn it_row_cls(?r) =
-  if current_step >= it_row_step(?r) then "iter-row-active" else "iter-row-future"
-
-fn it_render_cell(?r, ?c) = element("td", [], [text(it_cell(?r, ?c))])
-
-fn it_render_cells(?r, ?c) =
-  if ?c >= it_col_count then nil
-  else cons(it_render_cell(?r, ?c), it_render_cells(?r, ?c + 1))
-
-fn it_render_row(?r) = element("tr", [cls(it_row_cls(?r))], it_render_cells(?r, 0))
-
-fn it_render_rows(?r) =
-  if ?r >= it_row_count then nil
-  else cons(it_render_row(?r), it_render_rows(?r + 1))
-
-fn it_render_header_cell(?c) = element("th", [], [text(it_header(?c))])
-
-fn it_render_header_cells(?c) =
-  if ?c >= it_col_count then nil
-  else cons(it_render_header_cell(?c), it_render_header_cells(?c + 1))
-
-fn render_iter_table() = element("div", [cls("iter-table-container")], [
-  element("table", [cls("iter-table")], [
-    element("thead", [], [element("tr", [], it_render_header_cells(0))]),
-    element("tbody", [], it_render_rows(0))])])
-
 fn render() = @dom element("div", [], [
   render_call_tree(),
   render_timeline(),
@@ -411,7 +630,7 @@ fn render() = @dom element("div", [], [
   },
 
   map_list: {
-    enabledModules: ['call_tree', 'step_card', 'iteration_table', 'value_timeline'],
+    enabledModules: ['call_tree', 'step_card', 'value_timeline'],
     code: `\
 # === Program ===
 fn map(?f, nil) = nil
@@ -437,7 +656,7 @@ rule tracer : @meta -> @rules {
   rule(trace_count, 0)
   rule(should_trace(map), true)
   rule(should_trace(double), true)
-  rule(result_val, map(double, [1, 2, 3, 4, 5]))
+  rule(result_val, map(double, cons(1, cons(2, cons(3, cons(4, cons(5, nil)))))))
   rule(max_step, trace_count - 1)
 }
 
@@ -532,32 +751,6 @@ fn step_card_for(completed(?call, ?val)) = element("div", [cls("step-card")], [
 
 fn step_card() = step_card_for(trace(current_step))
 
-fn it_row_cls(?r) =
-  if current_step >= it_row_step(?r) then "iter-row-active" else "iter-row-future"
-
-fn it_render_cell(?r, ?c) = element("td", [], [text(it_cell(?r, ?c))])
-
-fn it_render_cells(?r, ?c) =
-  if ?c >= it_col_count then nil
-  else cons(it_render_cell(?r, ?c), it_render_cells(?r, ?c + 1))
-
-fn it_render_row(?r) = element("tr", [cls(it_row_cls(?r))], it_render_cells(?r, 0))
-
-fn it_render_rows(?r) =
-  if ?r >= it_row_count then nil
-  else cons(it_render_row(?r), it_render_rows(?r + 1))
-
-fn it_render_header_cell(?c) = element("th", [], [text(it_header(?c))])
-
-fn it_render_header_cells(?c) =
-  if ?c >= it_col_count then nil
-  else cons(it_render_header_cell(?c), it_render_header_cells(?c + 1))
-
-fn render_iter_table() = element("div", [cls("iter-table-container")], [
-  element("table", [cls("iter-table")], [
-    element("thead", [], [element("tr", [], it_render_header_cells(0))]),
-    element("tbody", [], it_render_rows(0))])])
-
 fn vt_color(0) = "#1976d2"
 fn vt_color(1) = "#e65100"
 fn vt_color(2) = "#2e7d32"
@@ -618,7 +811,6 @@ fn render_timeline() = element("div", [cls("timeline-container")], [
 
 fn render() = @dom element("div", [], [
   render_call_tree(),
-  render_iter_table(),
   render_timeline(),
   step_card()])
 
@@ -650,7 +842,7 @@ rule tracer : @meta -> @rules {
 {
   rule(trace_count, 0)
   rule(should_trace(sum), true)
-  rule(result_val, sum([1, 2, 3, 4, 5]))
+  rule(result_val, sum(cons(1, cons(2, cons(3, cons(4, cons(5, nil)))))))
   rule(max_step, trace_count - 1)
 }
 
@@ -929,31 +1121,86 @@ fn render() = @dom element("div", [], [
   },
 };
 
-// ── CodeMirror setup ──
+const JS_CODE = `\
+// Pipeline overview (read-only)
+const r4 = await Rules4.load('./rules4.wasm');
 
-const { EditorView, basicSetup } = await import('https://esm.sh/codemirror@6.0.1');
-const { keymap } = await import('https://esm.sh/@codemirror/view@6.0.0');
+// 1. Load program + meta rules + harness
+r4.eval(r4.loadProgram(programCode));
 
-const runBtn      = document.getElementById('run-btn');
+// 2. Read computed values
+const maxStep = r4.termNum(r4.eval(r4.sym("max_step")));
+const resultVal = r4.display(r4.eval(r4.sym("result_val")));
+
+// 3. Run viz modules (call tree, timeline, etc.)
+for (const mod of enabledModules) {
+  mod.analyze(r4, maxStep, tracedFns);
+}
+
+// 4. Load view code (render functions)
+r4.eval(r4.loadProgram(viewCode));
+
+// 5. Set step and render
+r4.assertRule(r4.sym("current_step"), r4.num(step));
+r4.eval(r4.call(r4.sym("render"), []));
+
+// 6. Read @dom output and patch into page
+const dom = r4.scopeTakePending("dom");
+patch(r4, oldTerm, dom[dom.length - 1], tree, root, handler);`;
+
+// ── Elements ──
+
+const statusEl   = document.getElementById('status');
+const errorEl    = document.getElementById('error');
 const resultBadge = document.getElementById('result-badge');
-const vizEl       = document.getElementById('viz');
-const errorMsg    = document.getElementById('error-msg');
-const slider      = document.getElementById('slider');
-const sliderLabel = document.getElementById('slider-label');
-const presetSel   = document.getElementById('preset-select');
-const togglesEl   = document.getElementById('viz-toggles');
+const vizEl      = document.getElementById('viz');
+const slider     = document.getElementById('slider');
+const stepLabel  = document.getElementById('step-label');
+const presetSel  = document.getElementById('preset-select');
+const togglesEl  = document.getElementById('viz-toggles');
 
-// Create editor
-const runKeymap = keymap.of([{
-  key: 'Mod-Enter',
-  run: () => { run(); return true; },
-}]);
+// ── Tabbed editors ──
 
-let editorView = new EditorView({
-  doc: PRESETS.fib_memo.code,
-  extensions: [basicSetup, runKeymap],
-  parent: document.getElementById('editor'),
+const tabs = document.querySelectorAll('.tab');
+const editorPanels = document.querySelectorAll('.editor-panel');
+
+tabs.forEach(tab => {
+  tab.addEventListener('click', () => {
+    const id = tab.dataset.tab;
+    tabs.forEach(t => t.classList.toggle('active', t.dataset.tab === id));
+    editorPanels.forEach(p => p.classList.toggle('active', p.id === `ep-${id}`));
+  });
 });
+
+function makeEditor(parentId, doc) {
+  return new EditorView({
+    doc,
+    extensions: [
+      basicSetup,
+      rules4Language,
+      tangleExtension(),
+      EditorView.updateListener.of(u => { if (u.docChanged) scheduleRun(); }),
+    ],
+    parent: document.getElementById(parentId),
+  });
+}
+
+const initSplit = splitCode(PRESETS.fib_memo.code);
+
+const programEditor = makeEditor('editor-program', initSplit.program);
+const viewEditor    = makeEditor('editor-view', initSplit.view);
+
+const jsEditor = new EditorView({
+  doc: JS_CODE,
+  extensions: [basicSetup, javascript(), EditorView.editable.of(false)],
+  parent: document.getElementById('editor-js'),
+});
+
+// ── Engine creation ──
+
+async function freshR4() {
+  return await Rules4.load('./rules4.wasm');
+}
 
 // ── Visualization toggles ──
 
@@ -983,134 +1230,150 @@ presetSel.addEventListener('change', () => {
   const preset = PRESETS[presetSel.value];
   if (!preset) return;
 
-  // Replace editor content
-  editorView.dispatch({
-    changes: { from: 0, to: editorView.state.doc.length, insert: preset.code },
+  const { program, view } = splitCode(preset.code);
+
+  programEditor.dispatch({
+    changes: { from: 0, to: programEditor.state.doc.length, insert: program },
+  });
+  viewEditor.dispatch({
+    changes: { from: 0, to: viewEditor.state.doc.length, insert: view },
   });
 
-  // Update toggles
   enabledModules.clear();
   for (const m of preset.enabledModules) enabledModules.add(m);
   buildToggles();
+
+  scheduleRun();
 });
 
-// ── Run pipeline ──
+// ── Engine state ──
 
 let r4 = null, maxStep = 0;
 let currentTree = null, currentTermId = null, renderSym = null;
+let runGeneration = 0;
+
+// ── Debounced run ──
+
+let runTimer = null;
+function scheduleRun() {
+  clearTimeout(runTimer);
+  runTimer = setTimeout(() => run(), isScrubbing ? 0 : 300);
+}
+
+// ── Run pipeline ──
 
 async function run() {
-  errorMsg.style.display = 'none';
-  runBtn.disabled = true;
-  runBtn.textContent = 'Running...';
+  const thisGen = ++runGeneration;
+  statusEl.className = 'status-dot running';
 
   try {
-    // Phase 1: fresh engine, load program + meta + harness
-    r4 = await Rules4.load('./rules4.wasm');
+    const newR4 = await freshR4();
+    if (thisGen !== runGeneration) return;
 
-    const fullCode = editorView.state.doc.toString();
-    const viewMarker = '# === View ===';
-    const viewIdx = fullCode.indexOf(viewMarker);
+    // Phase 1: load program code
+    const programCode = programEditor.state.doc.toString();
+    newR4.eval(newR4.loadProgram(programCode));
+    if (thisGen !== runGeneration) return;
 
-    let programCode, viewCode;
-    if (viewIdx >= 0) {
-      programCode = fullCode.substring(0, viewIdx);
-      viewCode = fullCode.substring(viewIdx + viewMarker.length);
-    } else {
-      programCode = fullCode;
-      viewCode = '';
-    }
+    maxStep = newR4.termNum(newR4.eval(newR4.sym("max_step")));
+    const resultTerm = newR4.eval(newR4.sym("result_val"));
+    resultBadge.textContent = `result = ${newR4.display(resultTerm)}`;
 
-    r4.eval(r4.loadProgram(programCode));
-
-    maxStep = r4.termNum(r4.eval(r4.sym("max_step")));
-    const resultTerm = r4.eval(r4.sym("result_val"));
-    resultBadge.textContent = `result_val = ${r4.display(resultTerm)}`;
-
-    // Phase 2: run enabled layout modules
+    // Phase 2: run enabled viz modules
     const tracedFns = new Set();
-
-    // Call tree must run first to populate tracedFns for other modules
     for (const mod of allModules) {
       if (enabledModules.has(mod.name)) {
-        mod.analyze(r4, maxStep, tracedFns);
+        mod.analyze(newR4, maxStep, tracedFns);
       }
     }
 
-    // If no modules populated tracedFns, scan manually
     if (tracedFns.size === 0) {
       for (let i = 0; i <= maxStep; i++) {
-        const event = r4.eval(r4.call(r4.sym("trace"), [r4.num(i)]));
-        const eventHead = r4.termCallHead(event);
-        if (r4.termTag(eventHead) !== 1) continue;
-        const eventType = r4.termSymName(eventHead);
+        const event = newR4.eval(newR4.call(newR4.sym("trace"), [newR4.num(i)]));
+        const eventHead = newR4.termCallHead(event);
+        if (newR4.termTag(eventHead) !== 1) continue;
+        const eventType = newR4.termSymName(eventHead);
         if (eventType === 'reduced') {
-          const kind = r4.termCallArg(event, 2);
-          const fnName = r4.termSymName(r4.termCallArg(kind, 0));
+          const kind = newR4.termCallArg(event, 2);
+          const fnName = newR4.termSymName(newR4.termCallArg(kind, 0));
           tracedFns.add(fnName);
         }
       }
     }
 
     // Phase 3: load view code
+    const viewCode = viewEditor.state.doc.toString();
     if (viewCode.trim()) {
-      r4.eval(r4.loadProgram(viewCode));
+      newR4.eval(newR4.loadProgram(viewCode));
     }
+    if (thisGen !== runGeneration) return;
 
-    // Phase 4: set initial step and render
-    r4.assertRule(r4.sym("current_step"), r4.num(maxStep));
+    // Phase 4: set step and render
+    r4 = newR4;
     renderSym = r4.sym("render");
     currentTree = null;
     currentTermId = null;
+
+    r4.assertRule(r4.sym("current_step"), r4.num(maxStep));
     doRender();
 
     slider.max = maxStep;
     slider.value = maxStep;
-    sliderLabel.textContent = `Step ${maxStep} of ${maxStep}`;
+    stepLabel.textContent = `Step ${maxStep} of ${maxStep}`;
 
+    errorEl.classList.remove('visible');
+    statusEl.className = 'status-dot ok';
   } catch (e) {
+    if (thisGen !== runGeneration) return;
     console.error('[ERROR]', e);
-    errorMsg.textContent = e.message + '\n' + e.stack;
-    errorMsg.style.display = 'block';
+    errorEl.textContent = e.message;
+    errorEl.classList.add('visible');
+    statusEl.className = 'status-dot err';
   }
-
-  runBtn.disabled = false;
-  runBtn.textContent = 'Run \u25B8';
 }
 
-// ── VDOM render loop ──
-function doRender() {
-  r4.eval(r4.call(renderSym, []));
-  const pending = r4.scopeTakePending("dom");
-  if (pending.length === 0) return;
-  const newTermId = pending[pending.length - 1];
+// ── VDOM render ──
 
-  if (currentTree === null) {
-    const dom = renderTerm(r4, newTermId, () => {});
-    vizEl.innerHTML = '';
-    vizEl.appendChild(dom);
-    currentTree = dom;
-  } else {
-    currentTree = patch(r4, currentTermId, newTermId, currentTree, vizEl, () => {});
+function doRender() {
+  if (!r4 || !renderSym) return;
+  try {
+    r4.eval(r4.call(renderSym, []));
+    const pending = r4.scopeTakePending("dom");
+    if (pending.length === 0) return;
+    const newTermId = pending[pending.length - 1];
+
+    if (currentTree === null) {
+      const dom = renderTerm(r4, newTermId, () => {});
+      vizEl.innerHTML = '';
+      vizEl.appendChild(dom);
+      currentTree = dom;
+    } else {
+      currentTree = patch(r4, currentTermId, newTermId, currentTree, vizEl, () => {});
+    }
+    currentTermId = newTermId;
+  } catch (e) {
+    console.error('[render]', e);
+    errorEl.textContent = e.message;
+    errorEl.classList.add('visible');
+    statusEl.className = 'status-dot err';
   }
-  currentTermId = newTermId;
 }
 
 function setStep(s) {
+  if (!r4) return;
   s = Math.max(0, Math.min(maxStep, s));
   slider.value = s;
-  sliderLabel.textContent = `Step ${s} of ${maxStep}`;
+  stepLabel.textContent = `Step ${s} of ${maxStep}`;
   r4.assertRule(r4.sym("current_step"), r4.num(s));
   doRender();
 }
 
 // ── Slider + keyboard ──
+
 slider.addEventListener('input', () => setStep(+slider.value));
+
 document.addEventListener('keydown', e => {
-  if (e.target.closest('.cm-editor') || e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') {
-    if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); run(); }
-    return;
-  }
+  if (e.target.closest('.cm-editor') || e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
   if (!r4) return;
   const s = +slider.value;
   if (e.key === 'ArrowLeft')  { e.preventDefault(); setStep(s - 1); }
@@ -1119,7 +1382,8 @@ document.addEventListener('keydown', e => {
   if (e.key === 'End')        { e.preventDefault(); setStep(maxStep); }
 });
 
-runBtn.addEventListener('click', run);
+// ── Init ──
+
 await run();
 </script>
 </body>
