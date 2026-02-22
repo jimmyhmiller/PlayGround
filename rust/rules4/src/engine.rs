@@ -4225,4 +4225,80 @@ fn init() = {
         let _render_result = engine.eval(render_call);
         // If we get here without panic, everything works
     }
+
+    #[test]
+    fn learnable_fib_memo_flow() {
+        // Mimics the learnable HTML's JS flow for the fib_memo preset
+        let mut engine = new_engine();
+
+        let program_code = r#"
+fn fib(0) = 0
+fn fib(1) = 1
+fn fib(?n) = fib(?n - 1) + fib(?n - 2)
+
+rule memo : @meta -> @rules {
+  result(?s, fib(?n), ?val) => rule(fib(?n), ?val)
+}
+
+fn fact(0) = 1
+fn fact(?n) = ?n * fact(?n - 1)
+
+rule tracer : @meta -> @rules {
+  reduction(?step, ?old, ?new, fn(?name, ?idx)) =>
+    if should_trace(?name) then {
+      rule(trace(trace_count), reduced(?old, ?new, fn(?name, ?idx)))
+      rule(trace_count, trace_count + 1)
+    } else 0
+  result(?step, ?call, ?val) => {
+    rule(call_result(quote(?call)), ?val)
+    rule(trace(trace_count), completed(quote(?call), ?val))
+    rule(trace_count, trace_count + 1)
+  }
+}
+
+{
+  rule(trace_count, 0)
+  rule(should_trace(fib), true)
+  rule(should_trace(fact), true)
+  rule(result_val, fib(5) + fact(4))
+  rule(max_step, trace_count - 1)
+}
+"#;
+
+        // Phase 1: load and eval program
+        let term = engine.load_program(program_code);
+        engine.invalidate_cache();
+        engine.reset_eval_counters();
+        let result = engine.eval(term);
+        eprintln!("Program eval result: {}", engine.display(result));
+
+        // Phase 2: look up max_step
+        let max_step_sym = engine.make_sym("max_step");
+        engine.invalidate_cache();
+        engine.reset_eval_counters();
+        let max_step_val = engine.eval(max_step_sym);
+        let max_step = engine.term_num(max_step_val);
+        eprintln!("max_step = {}", max_step);
+        assert!(max_step > 0, "max_step should be > 0, got {}", max_step);
+
+        // Phase 3: look up result_val
+        let result_val_sym = engine.make_sym("result_val");
+        engine.invalidate_cache();
+        engine.reset_eval_counters();
+        let result_val = engine.eval(result_val_sym);
+        eprintln!("result_val = {}", engine.display(result_val));
+        assert_eq!(engine.term_num(result_val), 29); // fib(5)=5, fact(4)=24, sum=29
+
+        // Phase 4: check trace events
+        let trace_sym_id = engine.store.sym("trace");
+        let trace_head = engine.store.sym_term(trace_sym_id);
+        let idx0 = engine.make_num(0);
+        let trace0_call = engine.store.call(trace_head, &[idx0]);
+        engine.invalidate_cache();
+        engine.reset_eval_counters();
+        let trace0 = engine.eval(trace0_call);
+        eprintln!("trace(0) = {}", engine.display(trace0));
+        // trace(0) should be resolved to something (not just trace(0) back)
+        assert_ne!(engine.display(trace0), "trace(0)", "trace(0) should have been captured");
+    }
 }

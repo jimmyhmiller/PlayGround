@@ -4,7 +4,7 @@ use crate::datom::{Datom, EntityId, TxId, Value};
 use crate::index;
 use crate::query::{Pattern, Query, WhereClause};
 use crate::schema::{FieldType, SchemaRegistry};
-use crate::storage::TxnOps;
+use crate::storage::ReadOps;
 
 /// A set of variable bindings produced during query execution.
 type Bindings = HashMap<String, Value>;
@@ -18,7 +18,7 @@ pub struct QueryResult {
 
 /// Execute a query inside a transaction.
 pub fn execute_query(
-    txn: &dyn TxnOps,
+    txn: &dyn ReadOps,
     query: &Query,
     schema: &SchemaRegistry,
 ) -> Result<QueryResult, String> {
@@ -62,7 +62,7 @@ pub fn execute_query(
 /// Evaluate a single where clause against current bindings.
 /// Returns extended binding sets for each matching entity.
 fn evaluate_clause(
-    txn: &dyn TxnOps,
+    txn: &dyn ReadOps,
     clause: &WhereClause,
     bindings: &Bindings,
     as_of: Option<TxId>,
@@ -174,7 +174,7 @@ fn find_indexable_patterns(
 /// Find entity IDs that have a specific (attribute, value) via AVET index scan.
 /// Resolves retract history to only return currently-active entities.
 fn find_entities_by_avet(
-    txn: &dyn TxnOps,
+    txn: &dyn ReadOps,
     attr: &str,
     value: &Value,
     as_of: Option<TxId>,
@@ -216,7 +216,7 @@ fn find_entities_by_avet(
 
 /// Find all entity IDs of a given type.
 fn find_entities_of_type(
-    txn: &dyn TxnOps,
+    txn: &dyn ReadOps,
     type_name: &str,
     as_of: Option<TxId>,
 ) -> Result<Vec<EntityId>, String> {
@@ -266,7 +266,7 @@ fn find_entities_of_type(
 ///   "field.__tag" => Value::String("Circle")
 ///   "field.Circle/radius" => Value::F64(5.0)
 fn load_entity_fields(
-    txn: &dyn TxnOps,
+    txn: &dyn ReadOps,
     entity: EntityId,
     entity_type: &str,
     as_of: Option<TxId>,

@@ -1,0 +1,117 @@
+/* ─── Graph Canvas Background ─────────────────────────────── */
+
+.graph-canvas-bg {
+  position: relative;
+  overflow: hidden;
+}
+
+.graph-canvas-bg::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background-image:
+    radial-gradient(1px 1px at 10% 20%, rgba(255,255,255,0.4) 0%, transparent 100%),
+    radial-gradient(1px 1px at 30% 65%, rgba(255,255,255,0.3) 0%, transparent 100%),
+    radial-gradient(1px 1px at 55% 15%, rgba(255,255,255,0.35) 0%, transparent 100%),
+    radial-gradient(1px 1px at 70% 80%, rgba(255,255,255,0.25) 0%, transparent 100%),
+    radial-gradient(1px 1px at 85% 35%, rgba(255,255,255,0.3) 0%, transparent 100%),
+    radial-gradient(1px 1px at 15% 90%, rgba(255,255,255,0.2) 0%, transparent 100%),
+    radial-gradient(1px 1px at 45% 45%, rgba(255,255,255,0.25) 0%, transparent 100%),
+    radial-gradient(1px 1px at 92% 55%, rgba(255,255,255,0.3) 0%, transparent 100%),
+    radial-gradient(1px 1px at 5% 50%, rgba(255,255,255,0.2) 0%, transparent 100%),
+    radial-gradient(1px 1px at 60% 95%, rgba(255,255,255,0.15) 0%, transparent 100%),
+    radial-gradient(1.5px 1.5px at 25% 40%, rgba(255,255,255,0.5) 0%, transparent 100%),
+    radial-gradient(1.5px 1.5px at 78% 12%, rgba(255,255,255,0.45) 0%, transparent 100%),
+    radial-gradient(1px 1px at 40% 75%, rgba(255,255,255,0.2) 0%, transparent 100%),
+    radial-gradient(1px 1px at 88% 90%, rgba(255,255,255,0.15) 0%, transparent 100%),
+    radial-gradient(1px 1px at 65% 50%, rgba(255,255,255,0.3) 0%, transparent 100%);
+  pointer-events: none;
+}
+
+/* Vignette */
+.graph-canvas-bg::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(ellipse at center, transparent 40%, rgba(0,0,0,0.6) 100%);
+  pointer-events: none;
+}
+
+/* ─── Animations ──────────────────────────────────────────── */
+
+@keyframes graph-ui-materialize {
+  from { opacity: 0; transform: scale(0.9); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+@keyframes graph-ui-dematerialize {
+  from { opacity: 1; transform: scale(1); }
+  to { opacity: 0; transform: scale(0.85); }
+}
+
+@keyframes graph-ui-state-flash {
+  0% { filter: brightness(1); }
+  30% { filter: brightness(1.8); }
+  100% { filter: brightness(1); }
+}
+
+@keyframes graph-ui-port-flash {
+  0% { opacity: 1; }
+  50% { opacity: 1; background: rgba(255, 255, 255, 0.3); }
+  100% { opacity: 1; }
+}
+
+.graph-ui-materialize {
+  animation: graph-ui-materialize 300ms ease-out forwards;
+}
+
+.graph-ui-state-flash {
+  animation: graph-ui-state-flash 600ms ease-out forwards;
+}
+
+.graph-ui-port-flash {
+  animation: graph-ui-port-flash 600ms ease-out forwards;
+}
+
+/* ─── Port Items ──────────────────────────────────────────── */
+
+.graph-ui-port-item {
+  transition: all 0.15s ease-out;
+  cursor: pointer;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.graph-ui-port-item:hover {
+  border-color: var(--port-accent, rgba(255,255,255,0.2));
+  box-shadow: 0 0 12px var(--port-glow, rgba(255,255,255,0.1));
+  background: var(--port-hover-bg, rgba(255,255,255,0.05));
+  transform: scale(1.02);
+}
+
+.graph-ui-port-item:active {
+  transform: scale(0.98);
+}
+
+/* ─── Card Glow ───────────────────────────────────────────── */
+
+@keyframes graph-ui-glow-pulse {
+  0%, 100% {
+    box-shadow:
+      0 0 12px 2px var(--state-glow),
+      inset 0 0 12px 0 var(--state-glow);
+  }
+  50% {
+    box-shadow:
+      0 0 24px 4px var(--state-glow),
+      inset 0 0 20px 0 var(--state-glow);
+  }
+}
+
+.graph-ui-card-glow {
+  --state-glow: rgba(113, 113, 122, 0.15);
+  border: 1px solid rgba(113, 113, 122, 0.3);
+  box-shadow:
+    0 0 15px 2px var(--state-glow),
+    inset 0 0 15px 0 var(--state-glow);
+  transition: box-shadow 0.4s ease, border-color 0.4s ease;
+}

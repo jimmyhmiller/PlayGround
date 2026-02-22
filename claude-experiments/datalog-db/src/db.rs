@@ -1,5 +1,7 @@
 use std::any::Any;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+
+use parking_lot::RwLock;
 
 use byteorder::{BigEndian, ByteOrder};
 
@@ -51,14 +53,14 @@ impl Database {
     fn load_schema(&self) -> Result<()> {
         let result = self
             .storage
-            .execute_txn(Box::new(|txn| {
+            .execute_read(Box::new(|snap| {
                 let enum_prefix = index::aevt_attr_prefix("__schema_enum");
                 let enum_end = index::prefix_end(&enum_prefix);
-                let enum_entries = txn.scan(&enum_prefix, &enum_end)?;
+                let enum_entries = snap.scan(&enum_prefix, &enum_end)?;
 
                 let type_prefix = index::aevt_attr_prefix("__schema_type");
                 let type_end = index::prefix_end(&type_prefix);
-                let type_entries = txn.scan(&type_prefix, &type_end)?;
+                let type_entries = snap.scan(&type_prefix, &type_end)?;
 
                 Ok(Box::new((enum_entries, type_entries))
                     as Box<dyn Any + Send>)
@@ -68,7 +70,7 @@ impl Database {
             .downcast::<(Vec<(Vec<u8>, Vec<u8>)>, Vec<(Vec<u8>, Vec<u8>)>)>()
             .expect("wrong type");
 
-        let mut schema = self.schema.write().unwrap();
+        let mut schema = self.schema.write();
 
         for (key, _) in &enum_entries {
             if let Some(datom) = index::decode_datom_from_aevt(key) {
@@ -113,30 +115,30 @@ impl Database {
             return Err(DbError::Schema("enum must have at least one variant".into()));
         }
 
+        // Hold write lock across validate + persist + register to prevent TOCTOU races
+        let mut schema = self.schema.write();
+
         // Validate variant field types
-        {
-            let schema = self.schema.read().unwrap();
-            for variant in &enum_def.variants {
-                for field in &variant.fields {
-                    match &field.field_type {
-                        FieldType::Ref(target) => {
-                            if !schema.contains(target) {
-                                return Err(DbError::Schema(format!(
-                                    "variant '{}' field '{}' references unknown type '{}'",
-                                    variant.name, field.name, target
-                                )));
-                            }
+        for variant in &enum_def.variants {
+            for field in &variant.fields {
+                match &field.field_type {
+                    FieldType::Ref(target) => {
+                        if !schema.contains(target) {
+                            return Err(DbError::Schema(format!(
+                                "variant '{}' field '{}' references unknown type '{}'",
+                                variant.name, field.name, target
+                            )));
                         }
-                        FieldType::Enum(target) => {
-                            if target != &enum_def.name && !schema.contains_enum(target) {
-                                return Err(DbError::Schema(format!(
-                                    "variant '{}' field '{}' references unknown enum '{}'",
-                                    variant.name, field.name, target
-                                )));
-                            }
-                        }
-                        _ => {}
                     }
+                    FieldType::Enum(target) => {
+                        if target != &enum_def.name && !schema.contains_enum(target) {
+                            return Err(DbError::Schema(format!(
+                                "variant '{}' field '{}' references unknown enum '{}'",
+                                variant.name, field.name, target
+                            )));
+                        }
+                    }
+                    _ => {}
                 }
             }
         }
@@ -179,7 +181,7 @@ impl Database {
             }))?;
 
         let tx_id = *result.downcast::<TxId>().expect("wrong type");
-        self.schema.write().unwrap().register_enum(enum_def);
+        schema.register_enum(enum_def);
 
         Ok(tx_id)
     }
@@ -196,38 +198,38 @@ impl Database {
             ));
         }
 
+        // Hold write lock across validate + persist + register to prevent TOCTOU races
+        let mut schema = self.schema.write();
+
         // Validate field types
-        {
-            let schema = self.schema.read().unwrap();
-            for field in &type_def.fields {
-                // Reject unique on enum-typed fields (unclear semantics)
-                if field.unique {
-                    if let FieldType::Enum(_) = &field.field_type {
+        for field in &type_def.fields {
+            // Reject unique on enum-typed fields (unclear semantics)
+            if field.unique {
+                if let FieldType::Enum(_) = &field.field_type {
+                    return Err(DbError::Schema(format!(
+                        "unique constraint is not supported on enum field '{}'",
+                        field.name
+                    )));
+                }
+            }
+            match &field.field_type {
+                FieldType::Ref(target) => {
+                    if target != &type_def.name && !schema.contains(target) {
                         return Err(DbError::Schema(format!(
-                            "unique constraint is not supported on enum field '{}'",
-                            field.name
+                            "ref field '{}' references unknown type '{}'",
+                            field.name, target
                         )));
                     }
                 }
-                match &field.field_type {
-                    FieldType::Ref(target) => {
-                        if target != &type_def.name && !schema.contains(target) {
-                            return Err(DbError::Schema(format!(
-                                "ref field '{}' references unknown type '{}'",
-                                field.name, target
-                            )));
-                        }
+                FieldType::Enum(target) => {
+                    if !schema.contains_enum(target) {
+                        return Err(DbError::Schema(format!(
+                            "enum field '{}' references unknown enum type '{}'. Define the enum first.",
+                            field.name, target
+                        )));
                     }
-                    FieldType::Enum(target) => {
-                        if !schema.contains_enum(target) {
-                            return Err(DbError::Schema(format!(
-                                "enum field '{}' references unknown enum type '{}'. Define the enum first.",
-                                field.name, target
-                            )));
-                        }
-                    }
-                    _ => {}
                 }
+                _ => {}
             }
         }
 
@@ -269,16 +271,14 @@ impl Database {
             }))?;
 
         let tx_id = *result.downcast::<TxId>().expect("wrong type");
-
-        // Register in memory
-        self.schema.write().unwrap().register(type_def);
+        schema.register(type_def);
 
         Ok(tx_id)
     }
 
     /// Execute a transaction.
     pub fn transact(&self, ops: Vec<TxOp>) -> Result<tx::TransactionResult> {
-        let schema = self.schema.read().unwrap().clone();
+        let schema = self.schema.read().clone();
 
         let result = self
             .storage
@@ -314,13 +314,13 @@ impl Database {
 
     /// Execute a query.
     pub fn query(&self, query: &Query) -> Result<QueryResult> {
-        let schema = self.schema.read().unwrap().clone();
+        let schema = self.schema.read().clone();
         let query = query.clone();
 
         let result = self
             .storage
-            .execute_txn(Box::new(move |txn| {
-                let qr = executor::execute_query(txn, &query, &schema)
+            .execute_read(Box::new(move |snap| {
+                let qr = executor::execute_query(snap, &query, &schema)
                     .map_err(|e| StorageError::Backend(e))?;
                 Ok(Box::new(qr) as Box<dyn Any + Send>)
             }))?;
@@ -335,10 +335,10 @@ impl Database {
     ) -> Result<Option<std::collections::HashMap<String, Value>>> {
         let result = self
             .storage
-            .execute_txn(Box::new(move |txn| {
+            .execute_read(Box::new(move |snap| {
                 let prefix = index::eavt_entity_prefix(entity);
                 let end = index::prefix_end(&prefix);
-                let entries = txn.scan(&prefix, &end)?;
+                let entries = snap.scan(&prefix, &end)?;
 
                 if entries.is_empty() {
                     return Ok(
@@ -388,10 +388,10 @@ impl Database {
     pub fn all_datoms(&self) -> Result<Vec<crate::datom::Datom>> {
         let result = self
             .storage
-            .execute_txn(Box::new(|txn| {
+            .execute_read(Box::new(|snap| {
                 let prefix = vec![index::EAVT_PREFIX];
                 let end = index::prefix_end(&prefix);
-                let entries = txn.scan(&prefix, &end)?;
+                let entries = snap.scan(&prefix, &end)?;
                 let datoms: Vec<crate::datom::Datom> = entries
                     .iter()
                     .filter_map(|(k, _)| index::decode_datom_from_eavt(k))
@@ -406,10 +406,10 @@ impl Database {
     pub fn entity_datoms(&self, entity: EntityId) -> Result<Vec<crate::datom::Datom>> {
         let result = self
             .storage
-            .execute_txn(Box::new(move |txn| {
+            .execute_read(Box::new(move |snap| {
                 let prefix = index::eavt_entity_prefix(entity);
                 let end = index::prefix_end(&prefix);
-                let entries = txn.scan(&prefix, &end)?;
+                let entries = snap.scan(&prefix, &end)?;
                 let datoms: Vec<crate::datom::Datom> = entries
                     .iter()
                     .filter_map(|(k, _)| index::decode_datom_from_eavt(k))

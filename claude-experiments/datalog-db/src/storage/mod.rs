@@ -15,18 +15,29 @@ pub enum StorageError {
 
 pub type Result<T> = std::result::Result<T, StorageError>;
 
-/// Synchronous read/write operations available inside a transaction.
-pub trait TxnOps {
+/// Read-only operations available inside a snapshot.
+pub trait ReadOps {
     fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>>;
     fn scan(&self, start: &[u8], end: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>>;
+}
+
+/// Read-write operations available inside a transaction.
+pub trait TxnOps: ReadOps {
     fn put(&self, key: Vec<u8>, value: Vec<u8>) -> Result<()>;
     fn get_for_update(&self, key: &[u8], exclusive: bool) -> Result<Option<Vec<u8>>>;
 }
 
+pub type ReadCallback =
+    Box<dyn FnOnce(&dyn ReadOps) -> Result<Box<dyn std::any::Any + Send>> + Send>;
+
 pub type TxnCallback =
     Box<dyn FnOnce(&dyn TxnOps) -> Result<Box<dyn std::any::Any + Send>> + Send>;
 
-/// Storage backend. All operations run inside transactions via `execute_txn`.
+/// Storage backend with separate read (snapshot) and read-write (transaction) paths.
 pub trait StorageBackend: Send + Sync {
+    /// Execute a read-only operation against a consistent snapshot.
+    fn execute_read(&self, f: ReadCallback) -> Result<Box<dyn std::any::Any + Send>>;
+
+    /// Execute a read-write transaction.
     fn execute_txn(&self, f: TxnCallback) -> Result<Box<dyn std::any::Any + Send>>;
 }

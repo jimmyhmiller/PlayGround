@@ -1,5 +1,5 @@
-use super::{Result, StorageBackend, StorageError, TxnCallback, TxnOps};
-use rocksdb::{Direction, IteratorMode, Options, TransactionDB, TransactionDBOptions};
+use super::{ReadCallback, ReadOps, Result, StorageBackend, StorageError, TxnCallback, TxnOps};
+use rocksdb::{Direction, IteratorMode, Options, SnapshotWithThreadMode, TransactionDB, TransactionDBOptions};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -19,6 +19,12 @@ impl RocksDbStorage {
 }
 
 impl StorageBackend for RocksDbStorage {
+    fn execute_read(&self, f: ReadCallback) -> Result<Box<dyn std::any::Any + Send>> {
+        let snapshot = self.db.snapshot();
+        let ops = RocksDbSnapshotOps { snapshot: &snapshot };
+        f(&ops)
+    }
+
     fn execute_txn(&self, f: TxnCallback) -> Result<Box<dyn std::any::Any + Send>> {
         let txn = self.db.transaction();
         let ops = RocksDbTxnOps { txn: &txn };
@@ -29,11 +35,43 @@ impl StorageBackend for RocksDbStorage {
     }
 }
 
+// -- Snapshot (read-only) --
+
+struct RocksDbSnapshotOps<'a> {
+    snapshot: &'a SnapshotWithThreadMode<'a, TransactionDB>,
+}
+
+impl ReadOps for RocksDbSnapshotOps<'_> {
+    fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
+        self.snapshot
+            .get(key)
+            .map(|opt| opt.map(|v| v.to_vec()))
+            .map_err(|e| StorageError::Backend(e.to_string()))
+    }
+
+    fn scan(&self, start: &[u8], end: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        let iter = self
+            .snapshot
+            .iterator(IteratorMode::From(start, Direction::Forward));
+        let mut results = Vec::new();
+        for item in iter {
+            let (key, value) = item.map_err(|e| StorageError::Backend(e.to_string()))?;
+            if key.as_ref() >= end {
+                break;
+            }
+            results.push((key.to_vec(), value.to_vec()));
+        }
+        Ok(results)
+    }
+}
+
+// -- Transaction (read-write) --
+
 struct RocksDbTxnOps<'a> {
     txn: &'a rocksdb::Transaction<'a, TransactionDB>,
 }
 
-impl TxnOps for RocksDbTxnOps<'_> {
+impl ReadOps for RocksDbTxnOps<'_> {
     fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
         self.txn
             .get(key)
@@ -55,7 +93,9 @@ impl TxnOps for RocksDbTxnOps<'_> {
         }
         Ok(results)
     }
+}
 
+impl TxnOps for RocksDbTxnOps<'_> {
     fn put(&self, key: Vec<u8>, value: Vec<u8>) -> Result<()> {
         self.txn
             .put(&key, &value)

@@ -1,0 +1,24 @@
+{
+  "name": "graph-ui",
+  "version": "0.1.0",
+  "description": "Reusable infinite canvas graph UI with pan/zoom, node positioning, and SVG edge rendering",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc && cp src/styles/graph-canvas.css dist/graph-canvas.css",
+    "clean": "rm -rf dist"
+  },
+  "peerDependencies": {
+    "react": ">=18.0.0",
+    "react-dom": ">=18.0.0"
+  },
+  "devDependencies": {
+    "@types/react": "^18.2.0",
+    "@types/react-dom": "^18.2.0",
+    "typescript": "^5.3.0"
+  },
+  "license": "MIT"
+}
