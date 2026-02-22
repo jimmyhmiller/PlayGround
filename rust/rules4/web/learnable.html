@@ -2,19 +2,55 @@
 <html>
 <head>
   <meta charset="UTF-8">
-  <title>Learnable Programming — Rules4</title>
+  <title>Execution Meta-Programming — Rules4</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
       background: #f7f7f8;
-      padding: 20px;
+      height: 100vh; overflow: hidden;
     }
-    .page { max-width: 1200px; margin: 0 auto; }
-    .header {
-      display: flex; align-items: center; gap: 10px; margin-bottom: 14px;
+    .page {
+      max-width: 1200px; margin: 0 auto;
+      height: 100vh;
+      display: flex; flex-direction: column;
+      padding: 20px 20px 16px 20px;
     }
-    h1 { font-size: 20px; font-weight: 700; color: #1a1a1a; }
+
+    /* ── Book header ── */
+    .book-header {
+      display: flex; align-items: baseline; gap: 16px;
+      margin-bottom: 14px; flex-shrink: 0;
+    }
+    h1 { font-size: 22px; font-weight: 700; color: #1a1a1a; }
+    .page-indicator {
+      font-size: 13px; color: #999; font-weight: 600;
+      font-variant-numeric: tabular-nums;
+    }
+    .page-nav {
+      margin-left: auto; display: flex; gap: 8px;
+    }
+    .page-btn {
+      width: 36px; height: 36px;
+      border: 2px solid #d0d0d4; background: white;
+      border-radius: 8px; cursor: pointer;
+      font-size: 16px; color: #666;
+      display: flex; align-items: center; justify-content: center;
+      transition: border-color 0.15s, color 0.15s, background 0.15s;
+    }
+    .page-btn:hover:not(:disabled) { border-color: #1976d2; color: #1976d2; }
+    .page-btn:disabled { opacity: 0.3; cursor: default; }
+
+    /* ── Pages ── */
+    .example { display: none; flex: 1; flex-direction: column; min-height: 0; }
+    .example.active { display: flex; }
+    .example-header {
+      display: flex; align-items: center; gap: 10px; margin-bottom: 12px;
+      flex-shrink: 0;
+    }
+    .example-header h2 {
+      font-size: 17px; font-weight: 700; color: #333;
+    }
     .status-dot {
       width: 8px; height: 8px; border-radius: 50%;
       display: inline-block; transition: background 0.2s;
@@ -22,21 +58,15 @@
     .status-dot.ok { background: #22c55e; }
     .status-dot.err { background: #ef4444; }
     .status-dot.running { background: #f59e0b; }
-    .result {
+    .result-badge {
       font-weight: 700; color: #2e7d32; background: #e8f5e9;
       padding: 1px 8px; border-radius: 8px;
       font-family: 'SF Mono', monospace; font-size: 13px;
     }
-    #preset-select {
-      margin-left: auto;
-      font-size: 12px; padding: 4px 8px; border-radius: 6px;
-      border: 1px solid #ccc; background: white; color: #333;
-    }
 
     .main {
-      display: flex; gap: 16px; margin-bottom: 12px;
-      height: calc(100vh - 120px);
-      min-height: 500px;
+      display: flex; gap: 16px; margin-bottom: 10px;
+      flex: 1; min-height: 0;
     }
     .editor-col {
       flex: 6; display: flex; flex-direction: column; min-width: 0;
@@ -121,6 +151,10 @@
       border: 3px solid #1976d2; cursor: pointer;
       box-shadow: 0 1px 4px rgba(0,0,0,0.18);
     }
+    .frame-label {
+      font-size: 12px; color: #999; min-width: 90px; text-align: center;
+      font-variant-numeric: tabular-nums; font-weight: 600;
+    }
     .step-label {
       font-size: 12px; color: #999; min-width: 110px; text-align: center;
       font-variant-numeric: tabular-nums; font-weight: 600;
@@ -134,7 +168,6 @@
       display: flex; align-items: center; gap: 3px;
     }
     .viz-toggles input[type="checkbox"] { margin: 0; }
-
     .btn {
       padding: 6px 16px;
       border: 2px solid #1976d2;
@@ -204,49 +237,74 @@
       padding: 16px 8px 8px 8px; margin-bottom: 16px; overflow-x: auto;
     }
     .timeline-container svg { display: block; margin: 0 auto; }
-
   </style>
 </head>
 <body>
 <div class="page">
-  <div class="header">
-    <h1>Learnable Programming</h1>
-    <span class="status-dot ok" id="status"></span>
-    <span class="result" id="result-badge">...</span>
-    <select id="preset-select">
-      <option value="fib_memo">Fibonacci (memoized)</option>
-      <option value="map_list">Map double</option>
-      <option value="bouncing_ball">Bouncing ball</option>
-      <option value="custom">Custom</option>
-    </select>
+  <div class="book-header">
+    <h1>Execution Meta-Programming</h1>
+    <span class="page-indicator" id="page-indicator">1 / 2</span>
+    <div class="page-nav">
+      <button class="page-btn" id="prev-page" disabled>&larr;</button>
+      <button class="page-btn" id="next-page">&rarr;</button>
+    </div>
   </div>
 
-  <div class="main">
-    <div class="editor-col">
-      <div class="tab-bar">
-        <button class="tab active" data-tab="program">Program</button>
-        <button class="tab" data-tab="view">View</button>
-        <button class="tab" data-tab="js">JS</button>
-      </div>
-      <div class="editor-wrap">
-        <div class="editor-panel active" id="ep-program"><div id="editor-program"></div></div>
-        <div class="editor-panel" id="ep-view"><div id="editor-view"></div></div>
-        <div class="editor-panel" id="ep-js"><div id="editor-js"></div></div>
-      </div>
-      <div class="error" id="error"></div>
+  <!-- ══ Page 1: Fibonacci ══ -->
+  <div class="example active" id="sec-fib">
+    <div class="example-header">
+      <h2>Tracing Fibonacci</h2>
+      <span class="status-dot ok" data-role="status"></span>
+      <span class="result-badge" data-role="result">...</span>
     </div>
-    <div class="viz-col">
-      <div class="viz-wrap" id="viz"></div>
-      <div class="controls" id="controls-trace">
-        <input type="range" id="slider" min="0" max="0" value="0">
-        <span class="step-label" id="step-label">Step 0</span>
-        <div class="viz-toggles" id="viz-toggles"></div>
+    <div class="main">
+      <div class="editor-col">
+        <div class="tab-bar">
+          <button class="tab active" data-tab="program">Program</button>
+          <button class="tab" data-tab="view">View</button>
+        </div>
+        <div class="editor-wrap">
+          <div class="editor-panel active" data-panel="program"><div data-role="editor-program"></div></div>
+          <div class="editor-panel" data-panel="view"><div data-role="editor-view"></div></div>
+        </div>
+        <div class="error" data-role="error"></div>
       </div>
-      <div class="controls" id="controls-anim" style="display:none">
-        <button class="btn" id="play-pause">Pause</button>
-        <input type="range" id="frame-slider" min="0" max="39" value="0">
-        <span class="step-label" id="frame-label">frame 0</span>
-        <button class="btn" id="apply-meta">Apply Meta</button>
+      <div class="viz-col">
+        <div class="viz-wrap" data-role="viz"></div>
+        <div class="controls">
+          <input type="range" data-role="slider" min="0" max="0" value="0">
+          <span class="step-label" data-role="step-label">Step 0</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ══ Section 2: Bouncing Ball ══ -->
+  <div class="example" id="sec-ball">
+    <div class="example-header">
+      <h2>Ghost Trail</h2>
+      <span class="status-dot ok" data-role="status"></span>
+    </div>
+    <div class="main">
+      <div class="editor-col">
+        <div class="tab-bar">
+          <button class="tab active" data-tab="animation">Animation</button>
+          <button class="tab" data-tab="meta">Meta</button>
+        </div>
+        <div class="editor-wrap">
+          <div class="editor-panel active" data-panel="animation"><div data-role="editor-program"></div></div>
+          <div class="editor-panel" data-panel="meta"><div data-role="editor-view"></div></div>
+        </div>
+        <div class="error" data-role="error"></div>
+      </div>
+      <div class="viz-col">
+        <div class="viz-wrap" data-role="viz"></div>
+        <div class="controls">
+          <button class="btn" data-role="play-pause">Pause</button>
+          <input type="range" data-role="slider" min="0" max="39" value="0">
+          <span class="frame-label" data-role="step-label">frame 0</span>
+          <button class="btn" data-role="apply-meta">Apply Meta</button>
+        </div>
       </div>
     </div>
   </div>
@@ -256,8 +314,7 @@
 import { Rules4 } from './bridge.js';
 import { renderTerm, patch } from './vdom.js';
 import {
-  allModules as _allModules, callTreeModule, stepCardModule,
-  valueTimelineModule, assertNum,
+  allModules as _allModules, assertNum,
 } from './viz-modules.js';
 
 const allModules = _allModules.filter(m => m.name !== 'iteration_table');
@@ -265,11 +322,10 @@ const allModules = _allModules.filter(m => m.name !== 'iteration_table');
 const { EditorView, basicSetup } = await import('https://esm.sh/codemirror@6.0.1');
 const { ViewPlugin, Decoration } = await import('https://esm.sh/@codemirror/view@6');
 const { StreamLanguage } = await import('https://esm.sh/@codemirror/language@6');
-const { javascript } = await import('https://esm.sh/@codemirror/lang-javascript@6');
 
 // ── rules4 syntax highlighting ──
 
-const rules4Parser = {
+const rules4Language = StreamLanguage.define({
   name: "rules4",
   startState() { return { inString: false }; },
   token(stream, state) {
@@ -316,11 +372,9 @@ const rules4Parser = {
     return null;
   },
   languageData: { commentTokens: { line: "#" } },
-};
+});
 
-const rules4Language = StreamLanguage.define(rules4Parser);
-
-// ── Tangle-style number scrubbing ──
+// ── Tangle-style number scrubbing (shared) ──
 
 function findNumberAt(lineText, col) {
   const commentIdx = lineText.indexOf('#');
@@ -371,22 +425,12 @@ function onDragMove(e) {
   const dx = e.clientX - dragState.startX;
   const steps = Math.round(dx / 5);
   let newValue = dragState.startValue + steps * dragState.step;
-
   let newText;
-  if (dragState.precision > 0) {
-    newText = newValue.toFixed(dragState.precision);
-  } else {
-    newText = String(Math.round(newValue));
-  }
-
+  if (dragState.precision > 0) newText = newValue.toFixed(dragState.precision);
+  else newText = String(Math.round(newValue));
   if (newText === dragState.lastText) return;
-
   dragState.view.dispatch({
-    changes: {
-      from: dragState.from,
-      to: dragState.from + dragState.lastText.length,
-      insert: newText,
-    },
+    changes: { from: dragState.from, to: dragState.from + dragState.lastText.length, insert: newText },
   });
   dragState.lastText = newText;
 }
@@ -403,29 +447,22 @@ const tangleDragHandlers = EditorView.domEventHandlers({
   mousedown(event, view) {
     const pos = view.posAtCoords({ x: event.clientX, y: event.clientY });
     if (pos === null) return false;
-
     const line = view.state.doc.lineAt(pos);
     const col = pos - line.from;
     let num = findNumberAt(line.text, col);
     if (!num && col > 0) num = findNumberAt(line.text, col - 1);
     if (!num) num = findNumberAt(line.text, col + 1);
     if (!num) return false;
-
     event.preventDefault();
     isScrubbing = true;
     document.body.classList.add('tangle-dragging');
-
     const isFloat = num.text.includes('.');
     dragState = {
-      view,
-      startX: event.clientX,
-      startValue: parseFloat(num.text),
+      view, startX: event.clientX, startValue: parseFloat(num.text),
       step: isFloat ? 0.1 : 1,
       precision: isFloat ? (num.text.split('.')[1] || '').length : 0,
-      from: line.from + num.start,
-      lastText: num.text,
+      from: line.from + num.start, lastText: num.text,
     };
-
     document.addEventListener('mousemove', onDragMove);
     document.addEventListener('mouseup', onDragEnd);
     return true;
@@ -436,7 +473,7 @@ function tangleExtension() {
   return [tangleDecoPlugin, tangleDragHandlers];
 }
 
-// ── Presets (split into program + view) ──
+// ── Code constants ──
 
 const VIEW_MARKER = '# === View ===';
 
@@ -451,12 +488,7 @@ function splitCode(code) {
   return { program: code, view: '' };
 }
 
-const PRESETS = {
-  fib_memo: {
-    mode: 'trace',
-    enabledModules: ['call_tree', 'step_card', 'value_timeline'],
-    code: `\
-# === Program ===
+const FIB_CODE = `\
 fn fib(0) = 0
 fn fib(1) = 1
 fn fib(?n) = fib(?n - 1) + fib(?n - 2)
@@ -489,9 +521,9 @@ rule tracer : @meta -> @rules {
   rule(should_trace(fact), true)
   rule(result_val, fib(5) + fact(4))
   rule(max_step, trace_count - 1)
-}
+}`;
 
-# === View ===
+const FIB_VIEW = `\
 fn cls(?c) = attr("class", ?c)
 
 fn node_fill(?i) =
@@ -646,204 +678,9 @@ fn render() = @dom element("div", [], [
   render_timeline(),
   step_card()])
 
-0`,
-  },
+0`;
 
-  map_list: {
-    mode: 'trace',
-    enabledModules: ['call_tree', 'step_card', 'value_timeline'],
-    code: `\
-# === Program ===
-fn double(?x) = ?x * 2
-fn map_double(nil) = nil
-fn map_double(cons(?h, ?t)) = cons(double(?h), map_double(?t))
-
-# === Meta Rules ===
-rule tracer : @meta -> @rules {
-  reduction(?step, ?old, ?new, fn(?name, ?idx)) =>
-    if should_trace(?name) then {
-      rule(trace(trace_count), reduced(?old, ?new, fn(?name, ?idx)))
-      rule(trace_count, trace_count + 1)
-    } else 0
-  result(?step, ?call, ?val) => {
-    rule(call_result(quote(?call)), ?val)
-    rule(trace(trace_count), completed(quote(?call), ?val))
-    rule(trace_count, trace_count + 1)
-  }
-}
-
-# === Harness ===
-{
-  rule(trace_count, 0)
-  rule(should_trace(map_double), true)
-  rule(should_trace(double), true)
-  rule(result_val, map_double(cons(1, cons(2, cons(3, cons(4, cons(5, nil)))))))
-  rule(max_step, trace_count - 1)
-}
-
-# === View ===
-fn cls(?c) = attr("class", ?c)
-fn append(nil, ?ys) = ?ys
-fn append(cons(?x, ?xs), ?ys) = cons(?x, append(?xs, ?ys))
-
-fn node_fill(?i) =
-  if current_step < node_entry(?i) then "#f0f0f0"
-  else if current_step < node_completion(?i) then "#fff3e0"
-  else "#e3f2fd"
-
-fn node_stroke(?i) =
-  if current_step < node_entry(?i) then "#ddd"
-  else if current_step < node_completion(?i) then "#ff9800"
-  else "#1976d2"
-
-fn node_text_fill(?i) =
-  if current_step < node_entry(?i) then "#bbb"
-  else if current_step < node_completion(?i) then "#e65100"
-  else "#1565c0"
-
-fn node_label(?i) =
-  if current_step >= node_completion(?i) then call_result(node_call(?i))
-  else node_call(?i)
-
-fn edge_stroke(?i) =
-  if current_step >= node_entry(edge_to(?i)) then "#90caf9" else "#e8e8e8"
-
-fn render_node(?i) = element("g", [], [
-  element("circle", [
-    attr("cx", node_cx(?i)), attr("cy", node_cy(?i)), attr("r", node_r),
-    attr("fill", node_fill(?i)), attr("stroke", node_stroke(?i)),
-    attr("stroke-width", 2)
-  ], []),
-  element("text", [
-    attr("x", node_cx(?i)), attr("y", node_cy(?i) + 4),
-    attr("text-anchor", "middle"), attr("font-size", 10),
-    attr("font-weight", 700), attr("fill", node_text_fill(?i)),
-    attr("font-family", "-apple-system, sans-serif")
-  ], [text(node_label(?i))])])
-
-fn render_edge(?i) = element("line", [
-  attr("x1", node_cx(edge_from(?i))), attr("y1", node_cy(edge_from(?i)) + node_r),
-  attr("x2", node_cx(edge_to(?i))),   attr("y2", node_cy(edge_to(?i)) - node_r),
-  attr("stroke", edge_stroke(?i)), attr("stroke-width", 2)
-], [])
-
-fn render_nodes(?i) =
-  if ?i >= node_count then nil
-  else cons(render_node(?i), render_nodes(?i + 1))
-
-fn render_edges(?i) =
-  if ?i >= edge_count then nil
-  else cons(render_edge(?i), render_edges(?i + 1))
-
-fn render_call_tree() = element("div", [cls("tree-container")], [
-  element("div", [cls("legend")], [
-    element("span", [], [
-      element("span", [cls("legend-dot"), attr("style", "background:#e0e0e0")], []),
-      text(" waiting")]),
-    element("span", [], [
-      element("span", [cls("legend-dot"), attr("style", "background:#ffb74d")], []),
-      text(" computing")]),
-    element("span", [], [
-      element("span", [cls("legend-dot"), attr("style", "background:#42a5f5")], []),
-      text(" done")])]),
-  element("svg", [
-    attr("viewBox", "0 0 " ++ svg_width ++ " " ++ svg_height),
-    attr("width", "100%")
-  ], append(render_edges(0), render_nodes(0)))])
-
-fn kind_badge(fn(?name, ?idx)) =
-  element("span", [cls("kind-badge fn-badge")], [text(?name)])
-fn kind_badge(builtin(?op)) =
-  element("span", [cls("kind-badge builtin-badge")], [text(?op)])
-
-fn step_card_for(reduced(?old, ?new, ?kind)) = element("div", [cls("step-card")], [
-  element("span", [cls("step-num")], [text("STEP " ++ current_step)]),
-  element("span", [cls("step-old")], [text(?old)]),
-  element("span", [cls("step-arrow")], [text(" → ")]),
-  element("span", [cls("step-new")], [text(?new)]),
-  kind_badge(?kind)])
-
-fn step_card_for(completed(?call, ?val)) = element("div", [cls("step-card")], [
-  element("span", [cls("step-num")], [text("STEP " ++ current_step)]),
-  element("span", [cls("step-old")], [text(?call)]),
-  element("span", [cls("step-arrow")], [text(" = ")]),
-  element("span", [cls("step-new result-val")], [text(?val)]),
-  element("span", [cls("kind-badge result-badge")], [text("result")])])
-
-fn step_card() = step_card_for(trace(current_step))
-
-fn vt_color(0) = "#1976d2"
-fn vt_color(1) = "#e65100"
-fn vt_color(2) = "#2e7d32"
-fn vt_color(3) = "#7b1fa2"
-
-fn vt_dot_fill(?s, ?j) =
-  if current_step >= vt_point_step(?s, ?j) then vt_color(?s) else "#e0e0e0"
-
-fn vt_dot_r(?s, ?j) =
-  if current_step >= vt_point_step(?s, ?j) then 5 else 3
-
-fn vt_label_opacity(?s, ?j) =
-  if current_step >= vt_point_step(?s, ?j) then 1 else 0
-
-fn vt_render_point(?s, ?j) = element("g", [], [
-  element("circle", [
-    attr("cx", vt_point_x(?s, ?j)), attr("cy", vt_point_y(?s, ?j)),
-    attr("r", vt_dot_r(?s, ?j)),
-    attr("fill", vt_dot_fill(?s, ?j))
-  ], []),
-  element("text", [
-    attr("x", vt_point_x(?s, ?j)), attr("y", vt_point_y(?s, ?j) - 8),
-    attr("text-anchor", "middle"), attr("font-size", 9),
-    attr("fill", vt_dot_fill(?s, ?j)),
-    attr("opacity", vt_label_opacity(?s, ?j)),
-    attr("font-family", "-apple-system, sans-serif")
-  ], [text(vt_point_label(?s, ?j))])])
-
-fn vt_render_points(?s, ?j) =
-  if ?j >= vt_point_count(?s) then nil
-  else cons(vt_render_point(?s, ?j), vt_render_points(?s, ?j + 1))
-
-fn vt_render_series_label(?s) = element("text", [
-  attr("x", 4), attr("y", vt_series_y(?s) + 4),
-  attr("font-size", 11), attr("fill", vt_color(?s)),
-  attr("font-weight", 700),
-  attr("font-family", "-apple-system, sans-serif")
-], [text(vt_series_name(?s))])
-
-fn vt_render_series_row(?s) = element("g", [], append(
-  cons(vt_render_series_label(?s),
-    cons(element("line", [
-      attr("x1", 40), attr("y1", vt_series_y(?s)),
-      attr("x2", vt_svg_width - 20), attr("y2", vt_series_y(?s)),
-      attr("stroke", "#f0f0f0"), attr("stroke-width", 1)
-    ], []), nil)),
-  vt_render_points(?s, 0)))
-
-fn vt_render_all_series(?s) =
-  if ?s >= vt_series_count then nil
-  else cons(vt_render_series_row(?s), vt_render_all_series(?s + 1))
-
-fn render_timeline() = element("div", [cls("timeline-container")], [
-  element("svg", [
-    attr("viewBox", "0 0 " ++ vt_svg_width ++ " " ++ vt_svg_height),
-    attr("width", "100%")
-  ], vt_render_all_series(0))])
-
-fn render() = @dom element("div", [], [
-  render_call_tree(),
-  render_timeline(),
-  step_card()])
-
-0`,
-  },
-
-  bouncing_ball: {
-    mode: 'animation',
-    maxFrames: 40,
-    enabledModules: [],
-    code: `\
-# === Program ===
+const BALL_PROGRAM = `\
 # Bouncing ball animation
 
 fn ball_x(?f) = ?f * 9 + 20
@@ -880,9 +717,9 @@ fn render() = @dom element("svg",
 fn init() = rule(current_frame, 0)
 fn handle_event(set_frame, ?f) = rule(current_frame, ?f)
 
-init()
+init()`;
 
-# === View ===
+const BALL_META = `\
 # Ghost Trail Meta
 # Two meta rules work together:
 # 1. trace_draws captures draw() rewrites into @draw
@@ -952,558 +789,340 @@ meta_init()
 fn handle_event(apply_meta, ?ev) =
   { run_frames(0) rule(meta_active, true) }
 fn handle_event(remove_meta, ?ev) =
-  rule(meta_active, false)
+  rule(meta_active, false)`;
 
-0`,
-  },
+// ══════════════════════════════════════════════
+// Example class — self-contained section runtime
+// ══════════════════════════════════════════════
 
-  custom: {
-    mode: 'trace',
-    enabledModules: ['call_tree', 'step_card'],
-    code: `\
-# === Program ===
-# Write your program here
+class Example {
+  constructor(containerEl, opts) {
+    this.el = containerEl;
+    this.mode = opts.mode; // 'trace' | 'animation'
+    this.enabledModuleNames = new Set(opts.enabledModules || []);
+    this.maxFrames = opts.maxFrames || 40;
 
+    // DOM refs
+    this.statusEl = this.el.querySelector('[data-role="status"]');
+    this.errorEl = this.el.querySelector('[data-role="error"]');
+    this.resultEl = this.el.querySelector('[data-role="result"]');
+    this.vizEl = this.el.querySelector('[data-role="viz"]');
+    this.sliderEl = this.el.querySelector('[data-role="slider"]');
+    this.labelEl = this.el.querySelector('[data-role="step-label"]');
+    this.playPauseBtn = this.el.querySelector('[data-role="play-pause"]');
+    this.applyMetaBtn = this.el.querySelector('[data-role="apply-meta"]');
 
-# === Meta Rules ===
-rule tracer : @meta -> @rules {
-  reduction(?step, ?old, ?new, fn(?name, ?idx)) =>
-    if should_trace(?name) then {
-      rule(trace(trace_count), reduced(?old, ?new, fn(?name, ?idx)))
-      rule(trace_count, trace_count + 1)
-    } else 0
-  result(?step, ?call, ?val) => {
-    rule(call_result(quote(?call)), ?val)
-    rule(trace(trace_count), completed(quote(?call), ?val))
-    rule(trace_count, trace_count + 1)
-  }
-}
-
-# === Harness ===
-{
-  rule(trace_count, 0)
-  rule(should_trace(my_fn), true)
-  rule(result_val, 0)
-  rule(max_step, trace_count - 1)
-}
-
-# === View ===
-fn cls(?c) = attr("class", ?c)
-fn append(nil, ?ys) = ?ys
-fn append(cons(?x, ?xs), ?ys) = cons(?x, append(?xs, ?ys))
-
-fn node_fill(?i) =
-  if current_step < node_entry(?i) then "#f0f0f0"
-  else if current_step < node_completion(?i) then "#fff3e0"
-  else "#e3f2fd"
-
-fn node_stroke(?i) =
-  if current_step < node_entry(?i) then "#ddd"
-  else if current_step < node_completion(?i) then "#ff9800"
-  else "#1976d2"
-
-fn node_text_fill(?i) =
-  if current_step < node_entry(?i) then "#bbb"
-  else if current_step < node_completion(?i) then "#e65100"
-  else "#1565c0"
-
-fn node_label(?i) =
-  if current_step >= node_completion(?i) then call_result(node_call(?i))
-  else node_call(?i)
-
-fn edge_stroke(?i) =
-  if current_step >= node_entry(edge_to(?i)) then "#90caf9" else "#e8e8e8"
-
-fn render_node(?i) = element("g", [], [
-  element("circle", [
-    attr("cx", node_cx(?i)), attr("cy", node_cy(?i)), attr("r", node_r),
-    attr("fill", node_fill(?i)), attr("stroke", node_stroke(?i)),
-    attr("stroke-width", 2)
-  ], []),
-  element("text", [
-    attr("x", node_cx(?i)), attr("y", node_cy(?i) + 4),
-    attr("text-anchor", "middle"), attr("font-size", 10),
-    attr("font-weight", 700), attr("fill", node_text_fill(?i)),
-    attr("font-family", "-apple-system, sans-serif")
-  ], [text(node_label(?i))])])
-
-fn render_edge(?i) = element("line", [
-  attr("x1", node_cx(edge_from(?i))), attr("y1", node_cy(edge_from(?i)) + node_r),
-  attr("x2", node_cx(edge_to(?i))),   attr("y2", node_cy(edge_to(?i)) - node_r),
-  attr("stroke", edge_stroke(?i)), attr("stroke-width", 2)
-], [])
-
-fn render_nodes(?i) =
-  if ?i >= node_count then nil
-  else cons(render_node(?i), render_nodes(?i + 1))
-
-fn render_edges(?i) =
-  if ?i >= edge_count then nil
-  else cons(render_edge(?i), render_edges(?i + 1))
-
-fn render_call_tree() = element("div", [cls("tree-container")], [
-  element("svg", [
-    attr("viewBox", "0 0 " ++ svg_width ++ " " ++ svg_height),
-    attr("width", "100%")
-  ], append(render_edges(0), render_nodes(0)))])
-
-fn kind_badge(fn(?name, ?idx)) =
-  element("span", [cls("kind-badge fn-badge")], [text(?name)])
-fn kind_badge(builtin(?op)) =
-  element("span", [cls("kind-badge builtin-badge")], [text(?op)])
-
-fn step_card_for(reduced(?old, ?new, ?kind)) = element("div", [cls("step-card")], [
-  element("span", [cls("step-num")], [text("STEP " ++ current_step)]),
-  element("span", [cls("step-old")], [text(?old)]),
-  element("span", [cls("step-arrow")], [text(" → ")]),
-  element("span", [cls("step-new")], [text(?new)]),
-  kind_badge(?kind)])
-
-fn step_card_for(completed(?call, ?val)) = element("div", [cls("step-card")], [
-  element("span", [cls("step-num")], [text("STEP " ++ current_step)]),
-  element("span", [cls("step-old")], [text(?call)]),
-  element("span", [cls("step-arrow")], [text(" = ")]),
-  element("span", [cls("step-new result-val")], [text(?val)]),
-  element("span", [cls("kind-badge result-badge")], [text("result")])])
-
-fn step_card() = step_card_for(trace(current_step))
-
-fn render() = @dom element("div", [], [
-  render_call_tree(),
-  step_card()])
-
-0`,
-  },
-};
-
-const JS_CODE = `\
-// Pipeline overview (read-only)
-const r4 = await Rules4.load('./rules4.wasm');
-
-// 1. Load program + meta rules + harness
-r4.eval(r4.loadProgram(programCode));
-
-// 2. Read computed values
-const maxStep = r4.termNum(r4.eval(r4.sym("max_step")));
-const resultVal = r4.display(r4.eval(r4.sym("result_val")));
-
-// 3. Run viz modules (call tree, timeline, etc.)
-for (const mod of enabledModules) {
-  mod.analyze(r4, maxStep, tracedFns);
-}
-
-// 4. Load view code (render functions)
-r4.eval(r4.loadProgram(viewCode));
-
-// 5. Set step and render
-r4.assertRule(r4.sym("current_step"), r4.num(step));
-r4.eval(r4.call(r4.sym("render"), []));
-
-// 6. Read @dom output and patch into page
-const dom = r4.scopeTakePending("dom");
-patch(r4, oldTerm, dom[dom.length - 1], tree, root, handler);`;
-
-// ── Elements ──
-
-const statusEl      = document.getElementById('status');
-const errorEl       = document.getElementById('error');
-const resultBadge   = document.getElementById('result-badge');
-const vizEl         = document.getElementById('viz');
-const slider        = document.getElementById('slider');
-const stepLabel     = document.getElementById('step-label');
-const presetSel     = document.getElementById('preset-select');
-const togglesEl     = document.getElementById('viz-toggles');
-const controlsTrace = document.getElementById('controls-trace');
-const controlsAnim  = document.getElementById('controls-anim');
-const playPauseBtn  = document.getElementById('play-pause');
-const frameSlider   = document.getElementById('frame-slider');
-const frameLabelEl  = document.getElementById('frame-label');
-const applyMetaBtn  = document.getElementById('apply-meta');
-const programTab    = document.querySelector('[data-tab="program"]');
-const viewTab       = document.querySelector('[data-tab="view"]');
-
-// ── Tabbed editors ──
-
-const tabs = document.querySelectorAll('.tab');
-const editorPanels = document.querySelectorAll('.editor-panel');
-
-tabs.forEach(tab => {
-  tab.addEventListener('click', () => {
-    const id = tab.dataset.tab;
-    tabs.forEach(t => t.classList.toggle('active', t.dataset.tab === id));
-    editorPanels.forEach(p => p.classList.toggle('active', p.id === `ep-${id}`));
-  });
-});
-
-function makeEditor(parentId, doc) {
-  return new EditorView({
-    doc,
-    extensions: [
-      basicSetup,
-      rules4Language,
-      tangleExtension(),
-      EditorView.updateListener.of(u => { if (u.docChanged) scheduleRun(); }),
-    ],
-    parent: document.getElementById(parentId),
-  });
-}
-
-const initSplit = splitCode(PRESETS.fib_memo.code);
-
-const programEditor = makeEditor('editor-program', initSplit.program);
-const viewEditor    = makeEditor('editor-view', initSplit.view);
-
-const jsEditor = new EditorView({
-  doc: JS_CODE,
-  extensions: [basicSetup, javascript(), EditorView.editable.of(false)],
-  parent: document.getElementById('editor-js'),
-});
-
-// ── Engine creation ──
-
-async function freshR4() {
-  return await Rules4.load('./rules4.wasm');
-}
-
-// ── Visualization toggles ──
-
-const enabledModules = new Set(PRESETS.fib_memo.enabledModules);
-
-function buildToggles() {
-  togglesEl.innerHTML = '';
-  for (const mod of allModules) {
-    const label = document.createElement('label');
-    const cb = document.createElement('input');
-    cb.type = 'checkbox';
-    cb.checked = enabledModules.has(mod.name);
-    cb.addEventListener('change', () => {
-      if (cb.checked) enabledModules.add(mod.name);
-      else enabledModules.delete(mod.name);
+    // Tab switching
+    const tabs = this.el.querySelectorAll('.tab');
+    const panels = this.el.querySelectorAll('.editor-panel');
+    tabs.forEach(tab => {
+      tab.addEventListener('click', () => {
+        const id = tab.dataset.tab;
+        tabs.forEach(t => t.classList.toggle('active', t.dataset.tab === id));
+        panels.forEach(p => p.classList.toggle('active', p.dataset.panel === id));
+      });
     });
-    label.appendChild(cb);
-    label.appendChild(document.createTextNode(' ' + mod.label));
-    togglesEl.appendChild(label);
-  }
-}
-buildToggles();
 
-// ── Preset selector ──
+    // Editors
+    const scheduleRun = () => this.scheduleRun();
+    this.programEditor = new EditorView({
+      doc: opts.programCode,
+      extensions: [
+        basicSetup, rules4Language, tangleExtension(),
+        EditorView.updateListener.of(u => { if (u.docChanged) scheduleRun(); }),
+      ],
+      parent: this.el.querySelector('[data-role="editor-program"]'),
+    });
+    this.viewEditor = new EditorView({
+      doc: opts.viewCode,
+      extensions: [
+        basicSetup, rules4Language, tangleExtension(),
+        EditorView.updateListener.of(u => { if (u.docChanged) scheduleRun(); }),
+      ],
+      parent: this.el.querySelector('[data-role="editor-view"]'),
+    });
 
-presetSel.addEventListener('change', () => {
-  const preset = PRESETS[presetSel.value];
-  if (!preset) return;
+    // Engine state
+    this.r4 = null;
+    this.renderSym = null;
+    this.currentTree = null;
+    this.currentTermId = null;
+    this.runGeneration = 0;
+    this.runTimer = null;
 
-  const { program, view } = splitCode(preset.code);
+    // Trace mode state
+    this.maxStep = 0;
 
-  programEditor.dispatch({
-    changes: { from: 0, to: programEditor.state.doc.length, insert: program },
-  });
-  viewEditor.dispatch({
-    changes: { from: 0, to: viewEditor.state.doc.length, insert: view },
-  });
+    // Animation mode state
+    this.playing = true;
+    this.metaApplied = false;
+    this.currentFrame = 0;
+    this.tickCounter = 0;
+    this.raf = null;
 
-  enabledModules.clear();
-  for (const m of preset.enabledModules) enabledModules.add(m);
-  buildToggles();
+    // Controls
+    this.sliderEl.addEventListener('input', () => {
+      if (this.mode === 'trace') {
+        this.setStep(+this.sliderEl.value);
+      } else {
+        this.currentFrame = parseInt(this.sliderEl.value);
+        if (this.r4) {
+          this.r4.eval(this.r4.call(this.r4.sym("handle_event"),
+            [this.r4.sym("set_frame"), this.r4.num(this.currentFrame)]));
+          this.doRender();
+          this.labelEl.textContent = `frame ${this.currentFrame}`;
+        }
+      }
+    });
 
-  // Switch mode
-  const newMode = preset.mode || 'trace';
-  setMode(newMode);
+    if (this.playPauseBtn) {
+      this.playPauseBtn.addEventListener('click', () => {
+        this.playing = !this.playing;
+        this.playPauseBtn.textContent = this.playing ? 'Pause' : 'Play';
+        this.playPauseBtn.classList.toggle('active', !this.playing);
+      });
+    }
 
-  // Reset animation state when switching to animation mode
-  if (newMode === 'animation') {
-    currentFrame = 0;
-    playing = true;
-    metaApplied = false;
-    playPauseBtn.textContent = 'Pause';
-    playPauseBtn.classList.remove('active');
-    applyMetaBtn.textContent = 'Apply Meta';
-    applyMetaBtn.classList.remove('active');
-    frameSlider.value = 0;
-    frameLabelEl.textContent = 'frame 0';
-    const maxFrames = preset.maxFrames || 40;
-    frameSlider.max = maxFrames - 1;
-  }
-
-  scheduleRun();
-});
-
-// ── Engine state ──
-
-let r4 = null, maxStep = 0;
-let currentTree = null, currentTermId = null, renderSym = null;
-let runGeneration = 0;
-let currentMode = 'trace';
-
-// Animation mode state
-let playing = true;
-let metaApplied = false;
-let currentFrame = 0;
-let tickCounter = 0;
-let raf = null;
-
-// ── Mode switching ──
-
-function setMode(mode) {
-  currentMode = mode;
-  const isAnim = mode === 'animation';
-  controlsTrace.style.display = isAnim ? 'none' : '';
-  controlsAnim.style.display = isAnim ? '' : 'none';
-  resultBadge.style.display = isAnim ? 'none' : '';
-  programTab.textContent = isAnim ? 'Animation' : 'Program';
-  viewTab.textContent = isAnim ? 'Meta' : 'View';
-
-  // Stop any running animation when switching away
-  if (!isAnim && raf) {
-    cancelAnimationFrame(raf);
-    raf = null;
-  }
-}
-
-// ── Debounced run ──
-
-let runTimer = null;
-function scheduleRun() {
-  clearTimeout(runTimer);
-  runTimer = setTimeout(() => run(), isScrubbing ? 0 : 300);
-}
-
-// ── Process @draw scope pending rules ──
-
-function processDrawRules() {
-  if (!r4) return;
-  const pending = r4.scopeTakePending("draw");
-  for (const t of pending) {
-    if (r4.termTag(t) === 2 && r4.termCallArity(t) === 2) {
-      r4.assertRule(r4.termCallArg(t, 0), r4.termCallArg(t, 1));
+    if (this.applyMetaBtn) {
+      this.applyMetaBtn.addEventListener('click', () => {
+        this.metaApplied = !this.metaApplied;
+        this.applyMetaBtn.textContent = this.metaApplied ? 'Remove Meta' : 'Apply Meta';
+        this.applyMetaBtn.classList.toggle('active', this.metaApplied);
+        this.scheduleRun();
+      });
     }
   }
-}
 
-// ── Run pipeline ──
-
-async function run() {
-  const thisGen = ++runGeneration;
-  statusEl.className = 'status-dot running';
-
-  try {
-    const newR4 = await freshR4();
-    if (thisGen !== runGeneration) return;
-
-    if (currentMode === 'animation') {
-      await runAnimation(newR4, thisGen);
-    } else {
-      await runTrace(newR4, thisGen);
-    }
-  } catch (e) {
-    if (thisGen !== runGeneration) return;
-    console.error('[ERROR]', e);
-    errorEl.textContent = e.message;
-    errorEl.classList.add('visible');
-    statusEl.className = 'status-dot err';
+  scheduleRun() {
+    clearTimeout(this.runTimer);
+    this.runTimer = setTimeout(() => this.run(), isScrubbing ? 0 : 300);
   }
-}
 
-async function runTrace(newR4, thisGen) {
-    // Phase 1: load program code
-    const programCode = programEditor.state.doc.toString();
-    newR4.eval(newR4.loadProgram(programCode));
-    if (thisGen !== runGeneration) return;
+  async run() {
+    const thisGen = ++this.runGeneration;
+    this.statusEl.className = 'status-dot running';
 
-    maxStep = newR4.termNum(newR4.eval(newR4.sym("max_step")));
-    const resultTerm = newR4.eval(newR4.sym("result_val"));
-    resultBadge.textContent = `result = ${newR4.display(resultTerm)}`;
+    try {
+      const r4 = await Rules4.load('./rules4.wasm');
+      if (thisGen !== this.runGeneration) return;
 
-    // Phase 2: run enabled viz modules
+      if (this.mode === 'animation') {
+        this.runAnimation(r4, thisGen);
+      } else {
+        this.runTrace(r4, thisGen);
+      }
+    } catch (e) {
+      if (thisGen !== this.runGeneration) return;
+      console.error('[ERROR]', e);
+      this.errorEl.textContent = e.message;
+      this.errorEl.classList.add('visible');
+      this.statusEl.className = 'status-dot err';
+    }
+  }
+
+  runTrace(r4, thisGen) {
+    const programCode = this.programEditor.state.doc.toString();
+    r4.eval(r4.loadProgram(programCode));
+    if (thisGen !== this.runGeneration) return;
+
+    this.maxStep = r4.termNum(r4.eval(r4.sym("max_step")));
+    const resultTerm = r4.eval(r4.sym("result_val"));
+    if (this.resultEl) {
+      this.resultEl.textContent = `result = ${r4.display(resultTerm)}`;
+    }
+
+    // Run viz modules
     const tracedFns = new Set();
     for (const mod of allModules) {
-      if (enabledModules.has(mod.name)) {
-        mod.analyze(newR4, maxStep, tracedFns);
+      if (this.enabledModuleNames.has(mod.name)) {
+        mod.analyze(r4, this.maxStep, tracedFns);
       }
     }
 
-    if (tracedFns.size === 0) {
-      for (let i = 0; i <= maxStep; i++) {
-        const event = newR4.eval(newR4.call(newR4.sym("trace"), [newR4.num(i)]));
-        const eventHead = newR4.termCallHead(event);
-        if (newR4.termTag(eventHead) !== 1) continue;
-        const eventType = newR4.termSymName(eventHead);
-        if (eventType === 'reduced') {
-          const kind = newR4.termCallArg(event, 2);
-          const fnName = newR4.termSymName(newR4.termCallArg(kind, 0));
-          tracedFns.add(fnName);
-        }
-      }
-    }
-
-    // Phase 3: load view code
-    const viewCode = viewEditor.state.doc.toString();
+    // Load view code
+    const viewCode = this.viewEditor.state.doc.toString();
     if (viewCode.trim()) {
-      newR4.eval(newR4.loadProgram(viewCode));
+      r4.eval(r4.loadProgram(viewCode));
     }
-    if (thisGen !== runGeneration) return;
+    if (thisGen !== this.runGeneration) return;
 
-    // Phase 4: set step and render
-    r4 = newR4;
-    renderSym = r4.sym("render");
-    currentTree = null;
-    currentTermId = null;
+    this.r4 = r4;
+    this.renderSym = r4.sym("render");
+    this.currentTree = null;
+    this.currentTermId = null;
 
-    r4.assertRule(r4.sym("current_step"), r4.num(maxStep));
-    doRender();
+    r4.assertRule(r4.sym("current_step"), r4.num(this.maxStep));
+    this.doRender();
 
-    slider.max = maxStep;
-    slider.value = maxStep;
-    stepLabel.textContent = `Step ${maxStep} of ${maxStep}`;
+    this.sliderEl.max = this.maxStep;
+    this.sliderEl.value = this.maxStep;
+    this.labelEl.textContent = `Step ${this.maxStep} of ${this.maxStep}`;
 
-    errorEl.classList.remove('visible');
-    statusEl.className = 'status-dot ok';
-}
-
-async function runAnimation(newR4, thisGen) {
-    // Load program code always
-    const programCode = programEditor.state.doc.toString();
-    const metaCode = viewEditor.state.doc.toString();
-
-    // Only include meta code when meta is applied,
-    // otherwise the meta rule outputs unevaluated if-expressions to @dom
-    if (metaApplied && metaCode.trim()) {
-      newR4.eval(newR4.loadProgram(programCode + '\n' + metaCode));
-    } else {
-      newR4.eval(newR4.loadProgram(programCode));
-    }
-    if (thisGen !== runGeneration) return;
-
-    r4 = newR4;
-    renderSym = r4.sym("render");
-    currentTree = null;
-    currentTermId = null;
-
-    // Restore frame
-    r4.eval(r4.call(r4.sym("handle_event"), [r4.sym("set_frame"), r4.num(currentFrame)]));
-
-    // Trigger apply_meta so the meta rules run their setup
-    if (metaApplied) {
-      r4.eval(r4.call(r4.sym("handle_event"), [r4.sym("apply_meta"), r4.num(0)]));
-    }
-
-    doRender();
-
-    errorEl.classList.remove('visible');
-    statusEl.className = 'status-dot ok';
-
-    // Start animation loop if not running
-    if (!raf) startAnimLoop();
-}
-
-// ── VDOM render ──
-
-function doRender() {
-  if (!r4 || !renderSym) return;
-  try {
-    if (currentMode === 'animation') processDrawRules();
-    r4.eval(r4.call(renderSym, []));
-    const pending = r4.scopeTakePending("dom");
-    if (pending.length === 0) return;
-    const newTermId = pending[pending.length - 1];
-
-    if (currentTree === null) {
-      const dom = renderTerm(r4, newTermId, () => {});
-      vizEl.innerHTML = '';
-      vizEl.appendChild(dom);
-      currentTree = dom;
-    } else {
-      currentTree = patch(r4, currentTermId, newTermId, currentTree, vizEl, () => {});
-    }
-    currentTermId = newTermId;
-  } catch (e) {
-    console.error('[render]', e);
-    errorEl.textContent = e.message;
-    errorEl.classList.add('visible');
-    statusEl.className = 'status-dot err';
+    this.errorEl.classList.remove('visible');
+    this.statusEl.className = 'status-dot ok';
   }
-}
 
-// ── Trace mode: step controls ──
+  runAnimation(r4, thisGen) {
+    const programCode = this.programEditor.state.doc.toString();
+    const metaCode = this.viewEditor.state.doc.toString();
 
-function setStep(s) {
-  if (!r4) return;
-  s = Math.max(0, Math.min(maxStep, s));
-  slider.value = s;
-  stepLabel.textContent = `Step ${s} of ${maxStep}`;
-  r4.assertRule(r4.sym("current_step"), r4.num(s));
-  doRender();
-}
+    if (this.metaApplied && metaCode.trim()) {
+      r4.eval(r4.loadProgram(programCode + '\n' + metaCode));
+    } else {
+      r4.eval(r4.loadProgram(programCode));
+    }
+    if (thisGen !== this.runGeneration) return;
 
-slider.addEventListener('input', () => setStep(+slider.value));
+    this.r4 = r4;
+    this.renderSym = r4.sym("render");
+    this.currentTree = null;
+    this.currentTermId = null;
 
-// ── Animation mode: loop + controls ──
+    r4.eval(r4.call(r4.sym("handle_event"),
+      [r4.sym("set_frame"), r4.num(this.currentFrame)]));
 
-function startAnimLoop() {
-  if (raf) return;
-  function animLoop() {
-    if (playing && r4 && currentMode === 'animation') {
-      tickCounter++;
-      if (tickCounter % 3 === 0) {
-        try {
-          const preset = PRESETS[presetSel.value];
-          const maxFrames = (preset && preset.maxFrames) || 40;
-          currentFrame = (currentFrame + 1) % maxFrames;
-          r4.eval(r4.call(r4.sym("handle_event"), [r4.sym("set_frame"), r4.num(currentFrame)]));
-          doRender();
-          frameSlider.value = currentFrame;
-          frameLabelEl.textContent = `frame ${currentFrame}`;
-        } catch (e) {
-          console.error("[rules4] anim tick error:", e);
-        }
+    if (this.metaApplied) {
+      r4.eval(r4.call(r4.sym("handle_event"),
+        [r4.sym("apply_meta"), r4.num(0)]));
+    }
+
+    this.doRender();
+    this.errorEl.classList.remove('visible');
+    this.statusEl.className = 'status-dot ok';
+
+    if (!this.raf) this.startAnimLoop();
+  }
+
+  processDrawRules() {
+    if (!this.r4) return;
+    const pending = this.r4.scopeTakePending("draw");
+    for (const t of pending) {
+      if (this.r4.termTag(t) === 2 && this.r4.termCallArity(t) === 2) {
+        this.r4.assertRule(this.r4.termCallArg(t, 0), this.r4.termCallArg(t, 1));
       }
     }
-    raf = requestAnimationFrame(animLoop);
   }
-  raf = requestAnimationFrame(animLoop);
+
+  doRender() {
+    if (!this.r4 || !this.renderSym) return;
+    try {
+      if (this.mode === 'animation') this.processDrawRules();
+      this.r4.eval(this.r4.call(this.renderSym, []));
+      const pending = this.r4.scopeTakePending("dom");
+      if (pending.length === 0) return;
+      const newTermId = pending[pending.length - 1];
+
+      if (this.currentTree === null) {
+        const dom = renderTerm(this.r4, newTermId, () => {});
+        this.vizEl.innerHTML = '';
+        this.vizEl.appendChild(dom);
+        this.currentTree = dom;
+      } else {
+        this.currentTree = patch(this.r4, this.currentTermId, newTermId,
+          this.currentTree, this.vizEl, () => {});
+      }
+      this.currentTermId = newTermId;
+    } catch (e) {
+      console.error('[render]', e);
+      this.errorEl.textContent = e.message;
+      this.errorEl.classList.add('visible');
+      this.statusEl.className = 'status-dot err';
+    }
+  }
+
+  setStep(s) {
+    if (!this.r4) return;
+    s = Math.max(0, Math.min(this.maxStep, s));
+    this.sliderEl.value = s;
+    this.labelEl.textContent = `Step ${s} of ${this.maxStep}`;
+    this.r4.assertRule(this.r4.sym("current_step"), this.r4.num(s));
+    this.doRender();
+  }
+
+  startAnimLoop() {
+    if (this.raf) return;
+    const tick = () => {
+      if (this.playing && this.r4 && this.mode === 'animation') {
+        this.tickCounter++;
+        if (this.tickCounter % 3 === 0) {
+          try {
+            this.currentFrame = (this.currentFrame + 1) % this.maxFrames;
+            this.r4.eval(this.r4.call(this.r4.sym("handle_event"),
+              [this.r4.sym("set_frame"), this.r4.num(this.currentFrame)]));
+            this.doRender();
+            this.sliderEl.value = this.currentFrame;
+            this.labelEl.textContent = `frame ${this.currentFrame}`;
+          } catch (e) {
+            console.error("[rules4] anim tick error:", e);
+          }
+        }
+      }
+      this.raf = requestAnimationFrame(tick);
+    };
+    this.raf = requestAnimationFrame(tick);
+  }
 }
 
-playPauseBtn.addEventListener('click', () => {
-  playing = !playing;
-  playPauseBtn.textContent = playing ? 'Pause' : 'Play';
-  playPauseBtn.classList.toggle('active', !playing);
+// ── Create both sections ──
+
+const fibExample = new Example(document.getElementById('sec-fib'), {
+  mode: 'trace',
+  enabledModules: ['call_tree', 'step_card', 'value_timeline'],
+  programCode: FIB_CODE,
+  viewCode: FIB_VIEW,
 });
 
-frameSlider.addEventListener('input', () => {
-  if (!r4) return;
-  currentFrame = parseInt(frameSlider.value);
-  r4.eval(r4.call(r4.sym("handle_event"), [r4.sym("set_frame"), r4.num(currentFrame)]));
-  doRender();
-  frameLabelEl.textContent = `frame ${currentFrame}`;
+const ballExample = new Example(document.getElementById('sec-ball'), {
+  mode: 'animation',
+  maxFrames: 40,
+  enabledModules: [],
+  programCode: BALL_PROGRAM,
+  viewCode: BALL_META,
 });
 
-applyMetaBtn.addEventListener('click', () => {
-  metaApplied = !metaApplied;
-  applyMetaBtn.textContent = metaApplied ? 'Remove Meta' : 'Apply Meta';
-  applyMetaBtn.classList.toggle('active', metaApplied);
-  // Full reload needed since meta changes which code is loaded
-  scheduleRun();
-});
+// ── Page navigation ──
 
-// ── Keyboard navigation ──
+const pages = [
+  { el: document.getElementById('sec-fib'), example: fibExample },
+  { el: document.getElementById('sec-ball'), example: ballExample },
+];
+let currentPage = 0;
+
+const prevBtn = document.getElementById('prev-page');
+const nextBtn = document.getElementById('next-page');
+const pageIndicator = document.getElementById('page-indicator');
+
+function showPage(idx) {
+  currentPage = idx;
+  pages.forEach((p, i) => p.el.classList.toggle('active', i === idx));
+  prevBtn.disabled = idx === 0;
+  nextBtn.disabled = idx === pages.length - 1;
+  pageIndicator.textContent = `${idx + 1} / ${pages.length}`;
+}
+
+prevBtn.addEventListener('click', () => { if (currentPage > 0) showPage(currentPage - 1); });
+nextBtn.addEventListener('click', () => { if (currentPage < pages.length - 1) showPage(currentPage + 1); });
+
+// ── Keyboard nav ──
 
 document.addEventListener('keydown', e => {
-  if (e.target.closest('.cm-editor') || e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
-  if (!r4) return;
+  if (e.target.closest('.cm-editor') || e.target.tagName === 'INPUT') return;
 
-  if (currentMode === 'trace') {
-    const s = +slider.value;
-    if (e.key === 'ArrowLeft')  { e.preventDefault(); setStep(s - 1); }
-    if (e.key === 'ArrowRight') { e.preventDefault(); setStep(s + 1); }
-    if (e.key === 'Home')       { e.preventDefault(); setStep(0); }
-    if (e.key === 'End')        { e.preventDefault(); setStep(maxStep); }
+  const ex = pages[currentPage].example;
+
+  if (ex.mode === 'trace' && ex.r4) {
+    const s = +ex.sliderEl.value;
+    if (e.key === 'ArrowLeft')  { e.preventDefault(); ex.setStep(s - 1); return; }
+    if (e.key === 'ArrowRight') { e.preventDefault(); ex.setStep(s + 1); return; }
+    if (e.key === 'Home')       { e.preventDefault(); ex.setStep(0); return; }
+    if (e.key === 'End')        { e.preventDefault(); ex.setStep(ex.maxStep); return; }
   }
 });
 
 // ── Init ──
 
-setMode(PRESETS.fib_memo.mode || 'trace');
-await run();
+showPage(0);
+await Promise.all([fibExample.run(), ballExample.run()]);
 </script>
 </body>
 </html>

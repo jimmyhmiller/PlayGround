@@ -618,13 +618,18 @@ fn choose_join_strategy(
     JoinStrategy::HashJoin { build_side }
 }
 
-/// Build a left-deep join tree from sorted clause estimates.
+/// Build a left-deep join tree, greedily picking the next clause that is
+/// connected (shares join variables) with the current tree. Among connected
+/// candidates, prefer the one with the lowest cardinality estimate.
+/// This avoids catastrophic cross products when a smaller but unconnected
+/// clause would otherwise be joined first.
 fn build_join_tree(
     clauses: &[(WhereClause, ScanStrategy, CostEstimate)],
     schema: &SchemaRegistry,
 ) -> PlanNode {
     assert!(!clauses.is_empty());
 
+    // Start with the lowest-cardinality clause (already sorted)
     let (clause, strategy, estimate) = &clauses[0];
     let mut tree = PlanNode::Scan(ClauseScan {
         clause: clause.clone(),
@@ -632,7 +637,36 @@ fn build_join_tree(
         estimate: estimate.clone(),
     });
 
-    for (clause, strategy, estimate) in &clauses[1..] {
+    let mut remaining: Vec<usize> = (1..clauses.len()).collect();
+
+    while !remaining.is_empty() {
+        // Find the best next clause: prefer connected (has join vars with tree),
+        // break ties by cardinality estimate.
+        let mut best_idx = None;
+        let mut best_connected = false;
+        let mut best_est = usize::MAX;
+
+        for (pos, &clause_idx) in remaining.iter().enumerate() {
+            let (clause, _, estimate) = &clauses[clause_idx];
+            let join_vars = find_join_vars_with_tree(&tree, clause);
+            let connected = !join_vars.is_empty();
+            let est = estimate.estimated_rows;
+
+            // Prefer connected over disconnected; among same connectivity, prefer smaller
+            if connected && !best_connected {
+                best_idx = Some(pos);
+                best_connected = true;
+                best_est = est;
+            } else if connected == best_connected && est < best_est {
+                best_idx = Some(pos);
+                best_est = est;
+            }
+        }
+
+        let pos = best_idx.unwrap();
+        let clause_idx = remaining.remove(pos);
+        let (clause, strategy, estimate) = &clauses[clause_idx];
+
         let right = PlanNode::Scan(ClauseScan {
             clause: clause.clone(),
             strategy: strategy.clone(),
