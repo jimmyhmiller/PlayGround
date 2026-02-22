@@ -315,7 +315,7 @@ fn ball_y(?f) = ball_y(?f - 1) + ball_vy(?f)
 # State
 fn init() = {
   rule(current_frame, 0)
-  rule(show_ghosts, false)
+  rule(render_mode, normal)
 }
 fn handle_event(set_frame, ?f) = rule(current_frame, ?f)
 
@@ -323,56 +323,34 @@ init()`;
 
 const META_CODE = `\
 # === Meta ===
-# Click "Apply Meta" to run this rule.
-# It observes every draw() rewrite via @meta
-# and stores ghost positions as dynamic rules.
+# Click "Apply Meta" to observe every draw()
+# rewrite via @meta, then override render()
+# to show ghost trails of all frame positions.
 
 rule trace_draws : @meta -> @draw {
   result(?step, draw(?f), ?shape) =>
     frame(?f, ?shape)
 }
 
-# Drive all frames so draw() is called for each
 fn run_frames(?f) =
   if ?f >= 40 then 0
   else { draw(?f) run_frames(?f + 1) }
-
-# Store ghost data as dynamic rules
-fn apply_ghosts(?f) =
-  if ?f >= 40 then 0
-  else {
-    rule(ghost(?f), draw(?f))
-    apply_ghosts(?f + 1)
-  }
-
-fn handle_event(apply_meta, ?ev) = {
-  apply_ghosts(0)
-  rule(show_ghosts, true)
-}
-
-fn handle_event(remove_meta, ?ev) =
-  rule(show_ghosts, false)`;
-
-const DRAW_CODE = `\
-# === Drawing ===
-# Renders the ball and ghost trail via @dom
-
-fn draw(?f) = circle(ball_x(?f), ball_y(?f), 15)
 
 # Destructure circle terms
 fn circle_cx(circle(?cx, ?cy, ?r)) = ?cx
 fn circle_cy(circle(?cx, ?cy, ?r)) = ?cy
 fn circle_r(circle(?cx, ?cy, ?r)) = ?r
 
-# Ghost element styling
+# Ghost styling (past vs future)
 fn ghost_opacity(?f) =
-  if ?f < current_frame then "0.45" else "0.25"
-
+  if ?f < current_frame then "0.45"
+  else "0.25"
 fn ghost_stroke(?f) =
-  if ?f < current_frame then "#555" else "#999"
-
+  if ?f < current_frame then "#555"
+  else "#999"
 fn ghost_sw(?f) =
-  if ?f < current_frame then "1.2" else "0.9"
+  if ?f < current_frame then "1.2"
+  else "0.9"
 
 fn ghost_element(?f) =
   element("circle",
@@ -384,13 +362,44 @@ fn ghost_element(?f) =
      attr("stroke-width", ghost_sw(?f)),
      attr("opacity", ghost_opacity(?f))], [])
 
-# Build children list: all ghosts + ball on top
-fn ghost_and_ball(40) = cons(ball_element(), nil)
+# Build children: all ghosts + ball on top
+fn ghost_and_ball(40) =
+  cons(ball_element(), nil)
 fn ghost_and_ball(?f) =
   if ?f == current_frame
   then ghost_and_ball(?f + 1)
   else cons(ghost_element(?f),
             ghost_and_ball(?f + 1))
+
+# Ghost children mode for render dispatch
+fn render_children(ghost) =
+  ghost_and_ball(0)
+
+# Store ghost data as dynamic rules
+fn apply_ghosts(?f) =
+  if ?f >= 40 then 0
+  else {
+    rule(ghost(?f), draw(?f))
+    apply_ghosts(?f + 1)
+  }
+
+# Apply: store ghosts + switch render mode
+fn handle_event(apply_meta, ?ev) = {
+  apply_ghosts(0)
+  rule(render_mode, ghost)
+}
+
+# Remove: restore normal render mode
+fn handle_event(remove_meta, ?ev) =
+  rule(render_mode, normal)`;
+
+const DRAW_CODE = `\
+# === Drawing ===
+# Pure render — just the current ball.
+# render_mode dispatches children; other tabs
+# can add modes (e.g. ghost) without changing this.
+
+fn draw(?f) = circle(ball_x(?f), ball_y(?f), 15)
 
 fn ball_element() =
   element("circle",
@@ -401,15 +410,13 @@ fn ball_element() =
      attr("stroke", "#222"),
      attr("stroke-width", "2.5")], [])
 
-fn all_children(false) =
+fn render_children(normal) =
   cons(ball_element(), nil)
-fn all_children(true) =
-  ghost_and_ball(0)
 
 fn render() = @dom element("svg",
   [attr("viewBox", "0 0 400 300"),
    attr("width", "100%"), attr("height", "100%")],
-  all_children(show_ghosts))`;
+  render_children(render_mode))`;
 
 // ── Elements ──
 
@@ -559,11 +566,15 @@ function animLoop() {
   if (playing && r4) {
     tickCounter++;
     if (tickCounter % 3 === 0) {
-      currentFrame = (currentFrame + 1) % 40;
-      r4.eval(r4.call(r4.sym("handle_event"), [r4.sym("set_frame"), r4.num(currentFrame)]));
-      doRender();
-      slider.value = currentFrame;
-      frameLabel.textContent = `frame ${currentFrame}`;
+      try {
+        currentFrame = (currentFrame + 1) % 40;
+        r4.eval(r4.call(r4.sym("handle_event"), [r4.sym("set_frame"), r4.num(currentFrame)]));
+        doRender();
+        slider.value = currentFrame;
+        frameLabel.textContent = `frame ${currentFrame}`;
+      } catch (e) {
+        console.error("[rules4] anim tick error:", e);
+      }
     }
   }
   raf = requestAnimationFrame(animLoop);

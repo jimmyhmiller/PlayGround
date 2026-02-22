@@ -51,6 +51,12 @@ fn msg3(obj, sel_name, a1, t1, a2, t2, a3, t3, ret_type) {
         [ffi/Type.Pointer, ffi/Type.Pointer, t1, t2, t3], ret_type)
 }
 
+fn msg4(obj, sel_name, a1, t1, a2, t2, a3, t3, a4, t4, ret_type) {
+    let sel = sel_registerName(sel_name)
+    ffi/call-variadic(msgSend, [obj, sel, a1, a2, a3, a4],
+        [ffi/Type.Pointer, ffi/Type.Pointer, t1, t2, t3, t4], ret_type)
+}
+
 fn nsstring(str) {
     let NSString = objc_getClass("NSString")
     msg1(NSString, "stringWithUTF8String:", str, ffi/Type.String, ffi/Type.Pointer)
@@ -104,6 +110,11 @@ struct Button { ptr }
 struct Handler { ptr, cls }
 struct StatusItem { ptr, button }
 struct Popover { ptr, content-view }
+struct Image { ptr }
+struct ScrollView { ptr, document-view }
+struct Menu { ptr }
+struct MenuItem { ptr }
+struct TextField { ptr }
 
 // ─── Widget Protocol ────────────────────────────────────────────────
 
@@ -135,6 +146,19 @@ extend Button with Widget {
         msg1(self.ptr, "setFont:", font, ffi/Type.Pointer, ffi/Type.Void)
     }
     fn set-text-color(self, color) { null }
+    fn widget-ptr(self) { self.ptr }
+}
+
+extend TextField with Widget {
+    fn set-text(self, text) {
+        msg1(self.ptr, "setStringValue:", nsstring(text), ffi/Type.Pointer, ffi/Type.Void)
+    }
+    fn set-font(self, font) {
+        msg1(self.ptr, "setFont:", font, ffi/Type.Pointer, ffi/Type.Void)
+    }
+    fn set-text-color(self, color) {
+        msg1(self.ptr, "setTextColor:", color, ffi/Type.Pointer, ffi/Type.Void)
+    }
     fn widget-ptr(self) { self.ptr }
 }
 
@@ -177,12 +201,9 @@ fn app(name) {
     App { ptr: a }
 }
 
-// Menu bar app: accessory activation policy (no dock icon),
-// no "quit on last window close" delegate
 fn menu-bar-app() {
     let NSApplication = objc_getClass("NSApplication")
     let a = msg0(NSApplication, "sharedApplication", ffi/Type.Pointer)
-    // 1 = NSApplicationActivationPolicyAccessory (no dock icon)
     msg1(a, "setActivationPolicy:", 1, ffi/Type.U64, ffi/Type.U8)
     App { ptr: a }
 }
@@ -192,7 +213,6 @@ fn menu-bar-app() {
 fn status-item(title) {
     let NSStatusBar = objc_getClass("NSStatusBar")
     let systemBar = msg0(NSStatusBar, "systemStatusBar", ffi/Type.Pointer)
-    // NSVariableStatusBarItemLength = -1
     let sel = sel_registerName("statusItemWithLength:")
     let item = ffi/call-variadic(msgSend, [systemBar, sel, -1.0],
         [ffi/Type.Pointer, ffi/Type.Pointer, ffi/Type.F64],
@@ -207,28 +227,29 @@ fn status-on-click(si, handler, sel_name) {
     msg1(si.button, "setAction:", sel_registerName(sel_name), ffi/Type.Pointer, ffi/Type.Void)
 }
 
+fn set-button-image(si, img) {
+    msg1(si.button, "setImage:", img.ptr, ffi/Type.Pointer, ffi/Type.Void)
+    msg1(si.button, "setTitle:", nsstring(""), ffi/Type.Pointer, ffi/Type.Void)
+}
+
 // ─── Popover ────────────────────────────────────────────────────────
 
 fn popover(w, h) {
     let NSPopover = objc_getClass("NSPopover")
     let pop = alloc-init(NSPopover)
 
-    // Content size
     let sel = sel_registerName("setContentSize:")
     ffi/call-variadic(msgSend, [pop, sel, w, h],
         [ffi/Type.Pointer, ffi/Type.Pointer, ffi/Type.F64, ffi/Type.F64],
         ffi/Type.Void)
 
-    // Transient behavior (dismiss on click outside)
     msg1(pop, "setBehavior:", 1, ffi/Type.U64, ffi/Type.Void)
 
-    // Dark appearance
     let NSAppearance = objc_getClass("NSAppearance")
     let dark = msg1(NSAppearance, "appearanceNamed:",
         nsstring("NSAppearanceNameDarkAqua"), ffi/Type.Pointer, ffi/Type.Pointer)
     msg1(pop, "setAppearance:", dark, ffi/Type.Pointer, ffi/Type.Void)
 
-    // Create view controller with content view
     let NSViewController = objc_getClass("NSViewController")
     let vc = alloc-init(NSViewController)
     let NSView = objc_getClass("NSView")
@@ -239,10 +260,15 @@ fn popover(w, h) {
     Popover { ptr: pop, content-view: View { ptr: cv } }
 }
 
+fn set-popover-content-size(pop, w, h) {
+    let sel = sel_registerName("setContentSize:")
+    ffi/call-variadic(msgSend, [pop.ptr, sel, w, h],
+        [ffi/Type.Pointer, ffi/Type.Pointer, ffi/Type.F64, ffi/Type.F64],
+        ffi/Type.Void)
+}
+
 fn show-popover(pop, si) {
     let sel = sel_registerName("showRelativeToRect:ofView:preferredEdge:")
-    // Pass zero rect; popover positions relative to the view itself
-    // preferredEdge: 1 = NSMinYEdge (below the button)
     ffi/call-variadic(msgSend, [pop.ptr, sel, 0.0, 0.0, 0.0, 0.0, si.button, 1],
         [ffi/Type.Pointer, ffi/Type.Pointer,
          ffi/Type.F64, ffi/Type.F64, ffi/Type.F64, ffi/Type.F64,
@@ -323,6 +349,24 @@ fn left-label(text, x, y, w, h) {
     Label { ptr: lbl }
 }
 
+fn text-field(placeholder, x, y, w, h) {
+    let NSTextField = objc_getClass("NSTextField")
+    let tf = msg-initWithFrame(
+        msg0(NSTextField, "alloc", ffi/Type.Pointer),
+        x, y, w, h
+    )
+    msg1(tf, "setEditable:", 1, ffi/Type.U8, ffi/Type.Void)
+    msg1(tf, "setBezeled:", 1, ffi/Type.U8, ffi/Type.Void)
+    msg1(tf, "setDrawsBackground:", 1, ffi/Type.U8, ffi/Type.Void)
+    msg1(tf, "setPlaceholderString:", nsstring(placeholder), ffi/Type.Pointer, ffi/Type.Void)
+    TextField { ptr: tf }
+}
+
+fn get-text(widget) {
+    let ns = msg0(widget.ptr, "stringValue", ffi/Type.Pointer)
+    msg0(ns, "UTF8String", ffi/Type.String)
+}
+
 fn button(title, x, y, w, h) {
     let NSButton = objc_getClass("NSButton")
     let btn = msg-initWithFrame(
@@ -332,6 +376,14 @@ fn button(title, x, y, w, h) {
     msg1(btn, "setTitle:", nsstring(title), ffi/Type.Pointer, ffi/Type.Void)
     msg1(btn, "setBezelStyle:", 1, ffi/Type.U64, ffi/Type.Void)
     Button { ptr: btn }
+}
+
+fn set-bordered(btn, flag) {
+    msg1(btn.ptr, "setBordered:", flag, ffi/Type.U8, ffi/Type.Void)
+}
+
+fn set-bezel-style(btn, style) {
+    msg1(btn.ptr, "setBezelStyle:", style, ffi/Type.U64, ffi/Type.Void)
 }
 
 // ─── Handler ────────────────────────────────────────────────────────
@@ -364,6 +416,10 @@ fn add-view(parent, child) {
     msg1(parent.ptr, "addSubview:", child.ptr, ffi/Type.Pointer, ffi/Type.Void)
 }
 
+fn add-raw-view(parent, child-ptr) {
+    msg1(parent.ptr, "addSubview:", child-ptr, ffi/Type.Pointer, ffi/Type.Void)
+}
+
 fn on-click(button, handler, sel_name) {
     msg1(button.ptr, "setTarget:", handler.ptr, ffi/Type.Pointer, ffi/Type.Void)
     msg1(button.ptr, "setAction:", sel_registerName(sel_name), ffi/Type.Pointer, ffi/Type.Void)
@@ -384,6 +440,32 @@ fn terminate() {
     let NSApplication = objc_getClass("NSApplication")
     let a = msg0(NSApplication, "sharedApplication", ffi/Type.Pointer)
     msg1(a, "terminate:", 0, ffi/Type.Pointer, ffi/Type.Void)
+}
+
+// ─── View Management ────────────────────────────────────────────────
+
+fn remove-all-subviews(view) {
+    let empty = msg0(objc_getClass("NSArray"), "array", ffi/Type.Pointer)
+    msg1(view.ptr, "setSubviews:", empty, ffi/Type.Pointer, ffi/Type.Void)
+}
+
+fn set-hidden(view, hidden) {
+    msg1(view.ptr, "setHidden:", hidden, ffi/Type.U8, ffi/Type.Void)
+}
+
+fn set-tag(view, tag) {
+    msg1(view.ptr, "setTag:", tag, ffi/Type.U64, ffi/Type.Void)
+}
+
+fn get-tag(view-ptr) {
+    msg0(view-ptr, "tag", ffi/Type.U64)
+}
+
+fn focus-view(pop, widget) {
+    let window = msg0(pop.ptr, "window", ffi/Type.Pointer)
+    if window != null {
+        msg1(window, "makeFirstResponder:", widget.ptr, ffi/Type.Pointer, ffi/Type.U8)
+    }
 }
 
 // ─── Style Helpers ──────────────────────────────────────────────────
@@ -409,6 +491,11 @@ fn mono-digit-font(size) {
     msg2(NSFont_, "monospacedDigitSystemFontOfSize:weight:", size, ffi/Type.F64, 0.0, ffi/Type.F64, ffi/Type.Pointer)
 }
 
+fn set-line-break-mode(lbl, mode) {
+    let cell = msg0(lbl.ptr, "cell", ffi/Type.Pointer)
+    msg1(cell, "setLineBreakMode:", mode, ffi/Type.U64, ffi/Type.Void)
+}
+
 // ─── View Helpers ───────────────────────────────────────────────────
 
 fn colored-view(x, y, w, h, r, g, b, a) {
@@ -428,6 +515,13 @@ fn set-frame(view, x, y, w, h) {
         ffi/Type.Void)
 }
 
+fn set-frame-raw(view-ptr, x, y, w, h) {
+    let sel = sel_registerName("setFrame:")
+    ffi/call-variadic(msgSend, [view-ptr, sel, x, y, w, h],
+        [ffi/Type.Pointer, ffi/Type.Pointer, ffi/Type.F64, ffi/Type.F64, ffi/Type.F64, ffi/Type.F64],
+        ffi/Type.Void)
+}
+
 fn set-corner-radius(view, radius) {
     msg1(view.ptr, "setWantsLayer:", 1, ffi/Type.U8, ffi/Type.Void)
     let layer = msg0(view.ptr, "layer", ffi/Type.Pointer)
@@ -441,7 +535,273 @@ fn set-bg-color(view, r, g, b, a) {
     msg1(layer, "setBackgroundColor:", msg0(c, "CGColor", ffi/Type.Pointer), ffi/Type.Pointer, ffi/Type.Void)
 }
 
+fn set-bg-nscolor(view, nscolor) {
+    msg1(view.ptr, "setWantsLayer:", 1, ffi/Type.U8, ffi/Type.Void)
+    let layer = msg0(view.ptr, "layer", ffi/Type.Pointer)
+    msg1(layer, "setBackgroundColor:", msg0(nscolor, "CGColor", ffi/Type.Pointer), ffi/Type.Pointer, ffi/Type.Void)
+}
+
 fn set-layer-mask(view) {
     let layer = msg0(view.ptr, "layer", ffi/Type.Pointer)
     msg1(layer, "setMasksToBounds:", 1, ffi/Type.U8, ffi/Type.Void)
+}
+
+fn set-border(view, width, nscolor) {
+    msg1(view.ptr, "setWantsLayer:", 1, ffi/Type.U8, ffi/Type.Void)
+    let layer = msg0(view.ptr, "layer", ffi/Type.Pointer)
+    msg1(layer, "setBorderWidth:", width, ffi/Type.F64, ffi/Type.Void)
+    msg1(layer, "setBorderColor:", msg0(nscolor, "CGColor", ffi/Type.Pointer), ffi/Type.Pointer, ffi/Type.Void)
+}
+
+// ─── NSImage Drawing ────────────────────────────────────────────────
+
+fn image(w, h) {
+    let NSImage = objc_getClass("NSImage")
+    let img = msg0(NSImage, "alloc", ffi/Type.Pointer)
+    let sel = sel_registerName("initWithSize:")
+    let result = ffi/call-variadic(msgSend, [img, sel, w, h],
+        [ffi/Type.Pointer, ffi/Type.Pointer, ffi/Type.F64, ffi/Type.F64],
+        ffi/Type.Pointer)
+    Image { ptr: result }
+}
+
+fn lock-focus(img) {
+    msg0(img.ptr, "lockFocus", ffi/Type.Void)
+}
+
+fn unlock-focus(img) {
+    msg0(img.ptr, "unlockFocus", ffi/Type.Void)
+}
+
+fn fill-rect(x, y, w, h) {
+    let NSBezierPath = objc_getClass("NSBezierPath")
+    let sel = sel_registerName("fillRect:")
+    ffi/call-variadic(msgSend, [NSBezierPath, sel, x, y, w, h],
+        [ffi/Type.Pointer, ffi/Type.Pointer, ffi/Type.F64, ffi/Type.F64, ffi/Type.F64, ffi/Type.F64],
+        ffi/Type.Void)
+}
+
+fn set-fill-color(nscolor) {
+    msg0(nscolor, "set", ffi/Type.Void)
+}
+
+// ─── ScrollView ─────────────────────────────────────────────────────
+
+fn scroll-view(x, y, w, h) {
+    let NSScrollView = objc_getClass("NSScrollView")
+    let sv = msg-initWithFrame(msg0(NSScrollView, "alloc", ffi/Type.Pointer), x, y, w, h)
+    msg1(sv, "setHasVerticalScroller:", 1, ffi/Type.U8, ffi/Type.Void)
+    msg1(sv, "setHasHorizontalScroller:", 0, ffi/Type.U8, ffi/Type.Void)
+    msg1(sv, "setDrawsBackground:", 0, ffi/Type.U8, ffi/Type.Void)
+
+    let NSView = objc_getClass("NSView")
+    let doc = msg-initWithFrame(msg0(NSView, "alloc", ffi/Type.Pointer), 0.0, 0.0, w, h)
+    msg1(sv, "setDocumentView:", doc, ffi/Type.Pointer, ffi/Type.Void)
+
+    ScrollView { ptr: sv, document-view: View { ptr: doc } }
+}
+
+fn set-document-size(sv, w, h) {
+    set-frame(sv.document-view, 0.0, 0.0, w, h)
+}
+
+// ─── NSMenu ─────────────────────────────────────────────────────────
+
+fn menu() {
+    Menu { ptr: alloc-init(objc_getClass("NSMenu")) }
+}
+
+fn menu-item(title, handler, sel_name) {
+    let NSMenuItem = objc_getClass("NSMenuItem")
+    let item = msg3(
+        msg0(NSMenuItem, "alloc", ffi/Type.Pointer),
+        "initWithTitle:action:keyEquivalent:",
+        nsstring(title), ffi/Type.Pointer,
+        sel_registerName(sel_name), ffi/Type.Pointer,
+        nsstring(""), ffi/Type.Pointer,
+        ffi/Type.Pointer)
+    msg1(item, "setTarget:", handler.ptr, ffi/Type.Pointer, ffi/Type.Void)
+    MenuItem { ptr: item }
+}
+
+fn menu-separator() {
+    MenuItem { ptr: msg0(objc_getClass("NSMenuItem"), "separatorItem", ffi/Type.Pointer) }
+}
+
+fn menu-add-item(menu, item) {
+    msg1(menu.ptr, "addItem:", item.ptr, ffi/Type.Pointer, ffi/Type.Void)
+}
+
+fn popup-menu(menu, view-ptr) {
+    let event = current-event()
+    let NSMenu = objc_getClass("NSMenu")
+    msg3(NSMenu, "popUpContextMenu:withEvent:forView:",
+        menu.ptr, ffi/Type.Pointer,
+        event, ffi/Type.Pointer,
+        view-ptr, ffi/Type.Pointer,
+        ffi/Type.Void)
+}
+
+// ─── NSEvent ────────────────────────────────────────────────────────
+
+fn current-event() {
+    let NSApp = msg0(objc_getClass("NSApplication"), "sharedApplication", ffi/Type.Pointer)
+    msg0(NSApp, "currentEvent", ffi/Type.Pointer)
+}
+
+fn event-type(event) {
+    msg0(event, "type", ffi/Type.U64)
+}
+
+fn event-location(event) {
+    let sel = sel_registerName("locationInWindow")
+    let result = ffi/call-variadic(msgSend, [event, sel],
+        [ffi/Type.Pointer, ffi/Type.Pointer],
+        ffi/Type.Structure { types: [ffi/Type.F64, ffi/Type.F64] })
+    [result.low, result.high]
+}
+
+fn event-keycode(event) {
+    msg0(event, "keyCode", ffi/Type.U16)
+}
+
+fn event-modifier-flags(event) {
+    msg0(event, "modifierFlags", ffi/Type.U64)
+}
+
+// ─── Custom View Subclasses ─────────────────────────────────────────
+
+fn custom-tracking-view(name, x, y, w, h, on-mouse-down, on-mouse-dragged, on-mouse-up) {
+    let NSView = objc_getClass("NSView")
+    let cls = objc_allocateClassPair(NSView, name, 0)
+
+    let down-cb = ffi/create-callback(on-mouse-down,
+        [ffi/Type.Pointer, ffi/Type.Pointer, ffi/Type.Pointer], ffi/Type.Void)
+    class_addMethod(cls, sel_registerName("mouseDown:"), down-cb, "v@:@")
+
+    let drag-cb = ffi/create-callback(on-mouse-dragged,
+        [ffi/Type.Pointer, ffi/Type.Pointer, ffi/Type.Pointer], ffi/Type.Void)
+    class_addMethod(cls, sel_registerName("mouseDragged:"), drag-cb, "v@:@")
+
+    let up-cb = ffi/create-callback(on-mouse-up,
+        [ffi/Type.Pointer, ffi/Type.Pointer, ffi/Type.Pointer], ffi/Type.Void)
+    class_addMethod(cls, sel_registerName("mouseUp:"), up-cb, "v@:@")
+
+    objc_registerClassPair(cls)
+
+    let view = msg-initWithFrame(msg0(cls, "alloc", ffi/Type.Pointer), x, y, w, h)
+    msg1(view, "setWantsLayer:", 1, ffi/Type.U8, ffi/Type.Void)
+    View { ptr: view }
+}
+
+fn custom-key-view(name, x, y, w, h, on-key-down) {
+    let NSView = objc_getClass("NSView")
+    let cls = objc_allocateClassPair(NSView, name, 0)
+
+    let key-cb = ffi/create-callback(on-key-down,
+        [ffi/Type.Pointer, ffi/Type.Pointer, ffi/Type.Pointer], ffi/Type.Void)
+    class_addMethod(cls, sel_registerName("keyDown:"), key-cb, "v@:@")
+
+    let accepts-cb = ffi/create-callback(fn(self_, sel, _) { 1 },
+        [ffi/Type.Pointer, ffi/Type.Pointer, ffi/Type.Pointer], ffi/Type.U8)
+    class_addMethod(cls, sel_registerName("acceptsFirstResponder"), accepts-cb, "B@:")
+
+    objc_registerClassPair(cls)
+
+    let view = msg-initWithFrame(msg0(cls, "alloc", ffi/Type.Pointer), x, y, w, h)
+    View { ptr: view }
+}
+
+// ─── Snapshot / Export ──────────────────────────────────────────────
+
+fn view-pdf-data(view, w, h) {
+    let sel = sel_registerName("dataWithPDFInsideRect:")
+    ffi/call-variadic(msgSend, [view.ptr, sel, 0.0, 0.0, w, h],
+        [ffi/Type.Pointer, ffi/Type.Pointer, ffi/Type.F64, ffi/Type.F64, ffi/Type.F64, ffi/Type.F64],
+        ffi/Type.Pointer)
+}
+
+fn save-panel-run(filename) {
+    let NSSavePanel = objc_getClass("NSSavePanel")
+    let panel = msg0(NSSavePanel, "savePanel", ffi/Type.Pointer)
+    msg1(panel, "setNameFieldStringValue:", nsstring(filename), ffi/Type.Pointer, ffi/Type.Void)
+    let result = msg0(panel, "runModal", ffi/Type.U64)
+    if result == 1 {
+        let url = msg0(panel, "URL", ffi/Type.Pointer)
+        let path = msg0(url, "path", ffi/Type.Pointer)
+        msg0(path, "UTF8String", ffi/Type.String)
+    } else {
+        null
+    }
+}
+
+fn nsdata-write-to-file(data, path) {
+    msg2(data, "writeToFile:atomically:",
+        nsstring(path), ffi/Type.Pointer,
+        1, ffi/Type.U8,
+        ffi/Type.U8)
+}
+
+// ─── Utilities ──────────────────────────────────────────────────────
+
+fn uuid() {
+    let NSUUID = objc_getClass("NSUUID")
+    let u = msg0(NSUUID, "UUID", ffi/Type.Pointer)
+    let s = msg0(u, "UUIDString", ffi/Type.Pointer)
+    msg0(s, "UTF8String", ffi/Type.String)
+}
+
+fn epoch-seconds() {
+    let NSDate = objc_getClass("NSDate")
+    let now = msg0(NSDate, "date", ffi/Type.Pointer)
+    msg0(now, "timeIntervalSince1970", ffi/Type.F64)
+}
+
+fn home-directory() {
+    let NSFileManager = objc_getClass("NSFileManager")
+    let fm = msg0(NSFileManager, "defaultManager", ffi/Type.Pointer)
+    let url = msg0(fm, "homeDirectoryForCurrentUser", ffi/Type.Pointer)
+    let path = msg0(url, "path", ffi/Type.Pointer)
+    msg0(path, "UTF8String", ffi/Type.String)
+}
+
+fn ensure-directory(path) {
+    let NSFileManager = objc_getClass("NSFileManager")
+    let fm = msg0(NSFileManager, "defaultManager", ffi/Type.Pointer)
+    msg4(fm, "createDirectoryAtPath:withIntermediateDirectories:attributes:error:",
+        nsstring(path), ffi/Type.Pointer,
+        1, ffi/Type.U8,
+        0, ffi/Type.Pointer,
+        0, ffi/Type.Pointer,
+        ffi/Type.U8)
+}
+
+fn file-exists(path) {
+    let NSFileManager = objc_getClass("NSFileManager")
+    let fm = msg0(NSFileManager, "defaultManager", ffi/Type.Pointer)
+    msg1(fm, "fileExistsAtPath:", nsstring(path), ffi/Type.Pointer, ffi/Type.U8) == 1
+}
+
+fn read-file(path) {
+    let NSString = objc_getClass("NSString")
+    let s = msg3(NSString, "stringWithContentsOfFile:encoding:error:",
+        nsstring(path), ffi/Type.Pointer,
+        4, ffi/Type.U64,
+        0, ffi/Type.Pointer,
+        ffi/Type.Pointer)
+    if s == null {
+        null
+    } else {
+        msg0(s, "UTF8String", ffi/Type.String)
+    }
+}
+
+fn write-file(path, content) {
+    let ns = nsstring(content)
+    msg4(ns, "writeToFile:atomically:encoding:error:",
+        nsstring(path), ffi/Type.Pointer,
+        1, ffi/Type.U8,
+        4, ffi/Type.U64,
+        0, ffi/Type.Pointer,
+        ffi/Type.U8)
 }
