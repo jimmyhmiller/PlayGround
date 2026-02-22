@@ -303,7 +303,6 @@ checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
 name = "datalog-db"
 version = "0.1.0"
 dependencies = [
- "async-trait",
  "byteorder",
  "bytes",
  "insta",
@@ -315,7 +314,6 @@ dependencies = [
  "thiserror 2.0.18",
  "tikv-client",
  "tokio",
- "tokio-test",
  "tracing",
  "tracing-subscriber",
 ]
@@ -2250,17 +2248,6 @@ dependencies = [
  "futures-core",
  "pin-project-lite",
  "tokio",
-]
-
-[[package]]
-name = "tokio-test"
-version = "0.4.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3f6d24790a10a7af737693a3e8f1d03faef7e6ca0cc99aae5066f533766de545"
-dependencies = [
- "futures-core",
- "tokio",
- "tokio-stream",
 ]
 
 [[package]]

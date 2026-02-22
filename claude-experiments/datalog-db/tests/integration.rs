@@ -9,11 +9,11 @@ use datalog_db::storage::rocksdb_backend::RocksDbStorage;
 use datalog_db::tx::TxOp;
 
 /// Create a temporary database for testing.
-async fn test_db() -> (Arc<Database>, tempfile::TempDir) {
+fn test_db() -> (Arc<Database>, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let storage = RocksDbStorage::open(dir.path()).unwrap();
     let storage = Arc::new(storage);
-    let db = Database::open(storage).await.unwrap();
+    let db = Database::open(storage).unwrap();
     (Arc::new(db), dir)
 }
 
@@ -68,18 +68,18 @@ fn post_type() -> EntityTypeDef {
     }
 }
 
-#[tokio::test]
-async fn test_define_type() {
-    let (db, _dir) = test_db().await;
+#[test]
+fn test_define_type() {
+    let (db, _dir) = test_db();
 
-    let tx_id = db.define_type(user_type()).await.unwrap();
+    let tx_id = db.define_type(user_type()).unwrap();
     assert!(tx_id > 0);
 }
 
-#[tokio::test]
-async fn test_transact_insert() {
-    let (db, _dir) = test_db().await;
-    db.define_type(user_type()).await.unwrap();
+#[test]
+fn test_transact_insert() {
+    let (db, _dir) = test_db();
+    db.define_type(user_type()).unwrap();
 
     let mut data = HashMap::new();
     data.insert("name".to_string(), Value::String("Alice".to_string()));
@@ -95,7 +95,6 @@ async fn test_transact_insert() {
             entity: None,
             data,
         }])
-        .await
         .unwrap();
 
     assert!(result.tx_id > 0);
@@ -104,10 +103,10 @@ async fn test_transact_insert() {
     assert_eq!(result.datom_count, 4); // name + age + email + __type
 }
 
-#[tokio::test]
-async fn test_transact_and_get_entity() {
-    let (db, _dir) = test_db().await;
-    db.define_type(user_type()).await.unwrap();
+#[test]
+fn test_transact_and_get_entity() {
+    let (db, _dir) = test_db();
+    db.define_type(user_type()).unwrap();
 
     let mut data = HashMap::new();
     data.insert("name".to_string(), Value::String("Bob".to_string()));
@@ -119,11 +118,10 @@ async fn test_transact_and_get_entity() {
             entity: None,
             data,
         }])
-        .await
         .unwrap();
 
     let eid = result.entity_ids[0];
-    let entity = db.get_entity(eid).await.unwrap().unwrap();
+    let entity = db.get_entity(eid).unwrap().unwrap();
 
     assert_eq!(entity.get("User/name"), Some(&Value::String("Bob".to_string())));
     assert_eq!(entity.get("User/age"), Some(&Value::I64(25)));
@@ -133,10 +131,10 @@ async fn test_transact_and_get_entity() {
     );
 }
 
-#[tokio::test]
-async fn test_transact_update() {
-    let (db, _dir) = test_db().await;
-    db.define_type(user_type()).await.unwrap();
+#[test]
+fn test_transact_update() {
+    let (db, _dir) = test_db();
+    db.define_type(user_type()).unwrap();
 
     // Insert
     let mut data = HashMap::new();
@@ -149,7 +147,6 @@ async fn test_transact_update() {
             entity: None,
             data,
         }])
-        .await
         .unwrap();
     let eid = result.entity_ids[0];
 
@@ -162,10 +159,9 @@ async fn test_transact_update() {
         entity: Some(eid),
         data: update_data,
     }])
-    .await
     .unwrap();
 
-    let entity = db.get_entity(eid).await.unwrap().unwrap();
+    let entity = db.get_entity(eid).unwrap().unwrap();
     // Should show latest age
     assert_eq!(entity.get("User/age"), Some(&Value::I64(21)));
     // Name should still be there
@@ -175,10 +171,10 @@ async fn test_transact_update() {
     );
 }
 
-#[tokio::test]
-async fn test_transact_retract() {
-    let (db, _dir) = test_db().await;
-    db.define_type(user_type()).await.unwrap();
+#[test]
+fn test_transact_retract() {
+    let (db, _dir) = test_db();
+    db.define_type(user_type()).unwrap();
 
     let mut data = HashMap::new();
     data.insert("name".to_string(), Value::String("Diana".to_string()));
@@ -194,7 +190,6 @@ async fn test_transact_retract() {
             entity: None,
             data,
         }])
-        .await
         .unwrap();
     let eid = result.entity_ids[0];
 
@@ -204,10 +199,9 @@ async fn test_transact_retract() {
         entity: eid,
         fields: vec!["email".to_string()],
     }])
-    .await
     .unwrap();
 
-    let entity = db.get_entity(eid).await.unwrap().unwrap();
+    let entity = db.get_entity(eid).unwrap().unwrap();
     assert_eq!(
         entity.get("User/name"),
         Some(&Value::String("Diana".to_string()))
@@ -216,9 +210,9 @@ async fn test_transact_retract() {
     assert!(entity.get("User/email").is_none()); // retracted
 }
 
-#[tokio::test]
-async fn test_schema_validation_unknown_type() {
-    let (db, _dir) = test_db().await;
+#[test]
+fn test_schema_validation_unknown_type() {
+    let (db, _dir) = test_db();
 
     let mut data = HashMap::new();
     data.insert("name".to_string(), Value::String("Eve".to_string()));
@@ -228,16 +222,15 @@ async fn test_schema_validation_unknown_type() {
             entity_type: "NonExistent".to_string(),
             entity: None,
             data,
-        }])
-        .await;
+        }]);
 
     assert!(result.is_err());
 }
 
-#[tokio::test]
-async fn test_schema_validation_type_mismatch() {
-    let (db, _dir) = test_db().await;
-    db.define_type(user_type()).await.unwrap();
+#[test]
+fn test_schema_validation_type_mismatch() {
+    let (db, _dir) = test_db();
+    db.define_type(user_type()).unwrap();
 
     let mut data = HashMap::new();
     data.insert("name".to_string(), Value::String("Frank".to_string()));
@@ -248,16 +241,15 @@ async fn test_schema_validation_type_mismatch() {
             entity_type: "User".to_string(),
             entity: None,
             data,
-        }])
-        .await;
+        }]);
 
     assert!(result.is_err());
 }
 
-#[tokio::test]
-async fn test_schema_validation_missing_required() {
-    let (db, _dir) = test_db().await;
-    db.define_type(user_type()).await.unwrap();
+#[test]
+fn test_schema_validation_missing_required() {
+    let (db, _dir) = test_db();
+    db.define_type(user_type()).unwrap();
 
     let mut data = HashMap::new();
     data.insert("age".to_string(), Value::I64(25)); // missing required "name"
@@ -267,16 +259,15 @@ async fn test_schema_validation_missing_required() {
             entity_type: "User".to_string(),
             entity: None,
             data,
-        }])
-        .await;
+        }]);
 
     assert!(result.is_err());
 }
 
-#[tokio::test]
-async fn test_basic_query() {
-    let (db, _dir) = test_db().await;
-    db.define_type(user_type()).await.unwrap();
+#[test]
+fn test_basic_query() {
+    let (db, _dir) = test_db();
+    db.define_type(user_type()).unwrap();
 
     // Insert two users
     for (name, age) in [("Alice", 30), ("Bob", 25)] {
@@ -288,7 +279,6 @@ async fn test_basic_query() {
             entity: None,
             data,
         }])
-        .await
         .unwrap();
     }
 
@@ -300,7 +290,7 @@ async fn test_basic_query() {
         ]
     });
     let query = Query::from_json(&query_json).unwrap();
-    let result = db.query(&query).await.unwrap();
+    let result = db.query(&query).unwrap();
 
     assert_eq!(result.columns, vec!["?name", "?age"]);
     assert_eq!(result.rows.len(), 2);
@@ -311,10 +301,10 @@ async fn test_basic_query() {
     assert!(names.contains(&&Value::String("Bob".to_string())));
 }
 
-#[tokio::test]
-async fn test_query_with_constant_filter() {
-    let (db, _dir) = test_db().await;
-    db.define_type(user_type()).await.unwrap();
+#[test]
+fn test_query_with_constant_filter() {
+    let (db, _dir) = test_db();
+    db.define_type(user_type()).unwrap();
 
     for (name, age) in [("Alice", 30), ("Bob", 25), ("Charlie", 35)] {
         let mut data = HashMap::new();
@@ -325,7 +315,6 @@ async fn test_query_with_constant_filter() {
             entity: None,
             data,
         }])
-        .await
         .unwrap();
     }
 
@@ -337,16 +326,16 @@ async fn test_query_with_constant_filter() {
         ]
     });
     let query = Query::from_json(&query_json).unwrap();
-    let result = db.query(&query).await.unwrap();
+    let result = db.query(&query).unwrap();
 
     assert_eq!(result.rows.len(), 1);
     assert_eq!(result.rows[0][0], Value::I64(25));
 }
 
-#[tokio::test]
-async fn test_query_with_predicate() {
-    let (db, _dir) = test_db().await;
-    db.define_type(user_type()).await.unwrap();
+#[test]
+fn test_query_with_predicate() {
+    let (db, _dir) = test_db();
+    db.define_type(user_type()).unwrap();
 
     for (name, age) in [("Alice", 30), ("Bob", 25), ("Charlie", 35)] {
         let mut data = HashMap::new();
@@ -357,7 +346,6 @@ async fn test_query_with_predicate() {
             entity: None,
             data,
         }])
-        .await
         .unwrap();
     }
 
@@ -369,7 +357,7 @@ async fn test_query_with_predicate() {
         ]
     });
     let query = Query::from_json(&query_json).unwrap();
-    let result = db.query(&query).await.unwrap();
+    let result = db.query(&query).unwrap();
 
     assert_eq!(result.rows.len(), 2);
     let names: Vec<&Value> = result.rows.iter().map(|r| &r[0]).collect();
@@ -377,11 +365,11 @@ async fn test_query_with_predicate() {
     assert!(names.contains(&&Value::String("Charlie".to_string())));
 }
 
-#[tokio::test]
-async fn test_query_with_join() {
-    let (db, _dir) = test_db().await;
-    db.define_type(user_type()).await.unwrap();
-    db.define_type(post_type()).await.unwrap();
+#[test]
+fn test_query_with_join() {
+    let (db, _dir) = test_db();
+    db.define_type(user_type()).unwrap();
+    db.define_type(post_type()).unwrap();
 
     // Create users
     let mut data = HashMap::new();
@@ -393,7 +381,6 @@ async fn test_query_with_join() {
             entity: None,
             data,
         }])
-        .await
         .unwrap();
     let alice_id = alice_result.entity_ids[0];
 
@@ -405,7 +392,6 @@ async fn test_query_with_join() {
         entity: None,
         data,
     }])
-    .await
     .unwrap();
 
     // Create posts by Alice
@@ -418,7 +404,6 @@ async fn test_query_with_join() {
             entity: None,
             data,
         }])
-        .await
         .unwrap();
     }
 
@@ -431,7 +416,7 @@ async fn test_query_with_join() {
         ]
     });
     let query = Query::from_json(&query_json).unwrap();
-    let result = db.query(&query).await.unwrap();
+    let result = db.query(&query).unwrap();
 
     // Alice has 2 posts, Bob has 0 — so 2 result rows
     assert_eq!(result.rows.len(), 2);
@@ -443,10 +428,10 @@ async fn test_query_with_join() {
     assert!(titles.contains(&&Value::String("Second Post".to_string())));
 }
 
-#[tokio::test]
-async fn test_time_travel_query() {
-    let (db, _dir) = test_db().await;
-    db.define_type(user_type()).await.unwrap();
+#[test]
+fn test_time_travel_query() {
+    let (db, _dir) = test_db();
+    db.define_type(user_type()).unwrap();
 
     // Insert user at tx1
     let mut data = HashMap::new();
@@ -458,7 +443,6 @@ async fn test_time_travel_query() {
             entity: None,
             data,
         }])
-        .await
         .unwrap();
     let eid = result1.entity_ids[0];
     let tx1 = result1.tx_id;
@@ -472,7 +456,6 @@ async fn test_time_travel_query() {
             entity: Some(eid),
             data,
         }])
-        .await
         .unwrap();
     let _tx2 = result2.tx_id;
 
@@ -485,7 +468,7 @@ async fn test_time_travel_query() {
         "as_of": tx1
     });
     let query = Query::from_json(&query_json).unwrap();
-    let result = db.query(&query).await.unwrap();
+    let result = db.query(&query).unwrap();
     assert_eq!(result.rows.len(), 1);
     assert_eq!(result.rows[0][0], Value::I64(30));
 
@@ -497,20 +480,20 @@ async fn test_time_travel_query() {
         ]
     });
     let query = Query::from_json(&query_json).unwrap();
-    let result = db.query(&query).await.unwrap();
+    let result = db.query(&query).unwrap();
     assert_eq!(result.rows.len(), 1);
     assert_eq!(result.rows[0][0], Value::I64(31));
 }
 
-#[tokio::test]
-async fn test_schema_persists_across_reopen() {
+#[test]
+fn test_schema_persists_across_reopen() {
     let dir = tempfile::tempdir().unwrap();
 
     // Open, define type, close
     {
         let storage = Arc::new(RocksDbStorage::open(dir.path()).unwrap());
-        let db = Database::open(storage).await.unwrap();
-        db.define_type(user_type()).await.unwrap();
+        let db = Database::open(storage).unwrap();
+        db.define_type(user_type()).unwrap();
 
         // Transact a user
         let mut data = HashMap::new();
@@ -520,14 +503,13 @@ async fn test_schema_persists_across_reopen() {
             entity: None,
             data,
         }])
-        .await
         .unwrap();
     }
 
     // Reopen and verify schema is loaded
     {
         let storage = Arc::new(RocksDbStorage::open(dir.path()).unwrap());
-        let db = Database::open(storage).await.unwrap();
+        let db = Database::open(storage).unwrap();
 
         // Should be able to transact without re-defining
         let mut data = HashMap::new();
@@ -537,8 +519,7 @@ async fn test_schema_persists_across_reopen() {
                 entity_type: "User".to_string(),
                 entity: None,
                 data,
-            }])
-            .await;
+            }]);
         assert!(result.is_ok());
 
         // And query should work
@@ -549,82 +530,70 @@ async fn test_schema_persists_across_reopen() {
             ]
         });
         let query = Query::from_json(&query_json).unwrap();
-        let result = db.query(&query).await.unwrap();
+        let result = db.query(&query).unwrap();
         assert_eq!(result.rows.len(), 2); // both users
     }
 }
 
-#[tokio::test]
-async fn test_tcp_protocol_roundtrip() {
+#[test]
+fn test_tcp_protocol_roundtrip() {
     use datalog_db::protocol;
-    use tokio::net::TcpListener;
+    use std::net::TcpListener;
 
-    let (db, _dir) = test_db().await;
-    db.define_type(user_type()).await.unwrap();
+    let (db, _dir) = test_db();
+    db.define_type(user_type()).unwrap();
 
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
 
-    // Server task
-    let server_handle = tokio::spawn(async move {
-        let (stream, _) = listener.accept().await.unwrap();
-        let mut stream = stream;
-        protocol::server_handshake(&mut stream).await.unwrap();
+    // Server thread
+    let server_handle = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        protocol::server_handshake(&mut stream).unwrap();
 
         // Read one message
-        let msg = protocol::read_message(&mut stream).await.unwrap();
+        let msg = protocol::read_message(&mut stream).unwrap();
         assert_eq!(msg.request_id, 1);
 
         // Send response
         let response = serde_json::json!({"status": "ok", "data": "hello"});
-        protocol::write_message(&mut stream, msg.request_id, &response)
-            .await
-            .unwrap();
+        protocol::write_message(&mut stream, msg.request_id, &response).unwrap();
     });
 
     // Client
-    let mut client = tokio::net::TcpStream::connect(addr).await.unwrap();
-    protocol::client_handshake(&mut client).await.unwrap();
+    let mut client = std::net::TcpStream::connect(addr).unwrap();
+    protocol::client_handshake(&mut client).unwrap();
 
     // Send a message
     let payload = serde_json::json!({"type": "status"});
-    protocol::write_message(&mut client, 1, &payload)
-        .await
-        .unwrap();
+    protocol::write_message(&mut client, 1, &payload).unwrap();
 
     // Read response
-    let response = protocol::read_message(&mut client).await.unwrap();
+    let response = protocol::read_message(&mut client).unwrap();
     assert_eq!(response.request_id, 1);
     assert_eq!(response.payload["status"], "ok");
 
-    server_handle.await.unwrap();
+    server_handle.join().unwrap();
 }
 
-#[tokio::test]
-async fn test_full_server_define_transact_query() {
+#[test]
+fn test_full_server_define_transact_query() {
     use datalog_db::protocol;
-    use datalog_db::server::Server;
+    use std::net::TcpListener;
 
-    let (db, _dir) = test_db().await;
+    let (db, _dir) = test_db();
 
-    let server = Server::bind("127.0.0.1:0", db.clone()).await.unwrap();
-    // We need the address before running the server
-    // Unfortunately Server doesn't expose the address, so let's use a different approach
-    // Let's just bind manually and use the server dispatch logic
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
-    // Drop the server we created, we'll use the listener directly
-    drop(server);
 
     let db_clone = db.clone();
-    let server_handle = tokio::spawn(async move {
-        let (stream, _) = listener.accept().await.unwrap();
-        let mut stream = stream;
-        protocol::server_handshake(&mut stream).await.unwrap();
+    let server_handle = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        protocol::server_handshake(&mut stream).unwrap();
 
         // Process messages until client disconnects
         loop {
-            let msg = match protocol::read_message(&mut stream).await {
+            let msg = match protocol::read_message(&mut stream) {
                 Ok(msg) => msg,
                 Err(_) => break,
             };
@@ -640,7 +609,7 @@ async fn test_full_server_define_transact_query() {
                     let type_def =
                         datalog_db::db::parse_define_request(&msg.payload).unwrap();
                     let name = type_def.name.clone();
-                    let tx_id = db_clone.define_type(type_def).await.unwrap();
+                    let tx_id = db_clone.define_type(type_def).unwrap();
                     serde_json::json!({"status": "ok", "data": {"tx_id": tx_id, "entity_type": name}})
                 }
                 "transact" => {
@@ -653,7 +622,7 @@ async fn test_full_server_define_transact_query() {
                         .iter()
                         .map(|o| datalog_db::tx::TxOp::from_json(o).unwrap())
                         .collect();
-                    let result = db_clone.transact(ops).await.unwrap();
+                    let result = db_clone.transact(ops).unwrap();
                     serde_json::json!({
                         "status": "ok",
                         "data": {
@@ -665,7 +634,7 @@ async fn test_full_server_define_transact_query() {
                 "query" => {
                     let query =
                         datalog_db::query::Query::from_json(&msg.payload).unwrap();
-                    let result = db_clone.query(&query).await.unwrap();
+                    let result = db_clone.query(&query).unwrap();
                     let rows: Vec<Vec<serde_json::Value>> = result
                         .rows
                         .iter()
@@ -687,15 +656,13 @@ async fn test_full_server_define_transact_query() {
                 _ => serde_json::json!({"status": "error", "error": "unknown type"}),
             };
 
-            protocol::write_message(&mut stream, msg.request_id, &response)
-                .await
-                .unwrap();
+            protocol::write_message(&mut stream, msg.request_id, &response).unwrap();
         }
     });
 
     // Client side
-    let mut client = tokio::net::TcpStream::connect(addr).await.unwrap();
-    protocol::client_handshake(&mut client).await.unwrap();
+    let mut client = std::net::TcpStream::connect(addr).unwrap();
+    protocol::client_handshake(&mut client).unwrap();
 
     // 1. Define User type
     let define_payload = serde_json::json!({
@@ -706,10 +673,8 @@ async fn test_full_server_define_transact_query() {
             {"name": "age", "type": "i64"}
         ]
     });
-    protocol::write_message(&mut client, 1, &define_payload)
-        .await
-        .unwrap();
-    let resp = protocol::read_message(&mut client).await.unwrap();
+    protocol::write_message(&mut client, 1, &define_payload).unwrap();
+    let resp = protocol::read_message(&mut client).unwrap();
     assert_eq!(resp.payload["status"], "ok");
 
     // 2. Transact: insert users
@@ -720,10 +685,8 @@ async fn test_full_server_define_transact_query() {
             {"assert": "User", "data": {"name": "Bob", "age": 25}}
         ]
     });
-    protocol::write_message(&mut client, 2, &transact_payload)
-        .await
-        .unwrap();
-    let resp = protocol::read_message(&mut client).await.unwrap();
+    protocol::write_message(&mut client, 2, &transact_payload).unwrap();
+    let resp = protocol::read_message(&mut client).unwrap();
     assert_eq!(resp.payload["status"], "ok");
     assert_eq!(resp.payload["data"]["entity_ids"].as_array().unwrap().len(), 2);
 
@@ -735,17 +698,15 @@ async fn test_full_server_define_transact_query() {
             {"bind": "?u", "type": "User", "name": "?name", "age": "?age"}
         ]
     });
-    protocol::write_message(&mut client, 3, &query_payload)
-        .await
-        .unwrap();
-    let resp = protocol::read_message(&mut client).await.unwrap();
+    protocol::write_message(&mut client, 3, &query_payload).unwrap();
+    let resp = protocol::read_message(&mut client).unwrap();
     assert_eq!(resp.payload["status"], "ok");
     let rows = resp.payload["data"]["rows"].as_array().unwrap();
     assert_eq!(rows.len(), 2);
 
     // Drop client to close connection, ending the server loop
     drop(client);
-    server_handle.await.unwrap();
+    server_handle.join().unwrap();
 }
 
 // --- Enum (sum type) tests ---
@@ -813,18 +774,18 @@ fn drawing_type() -> EntityTypeDef {
     }
 }
 
-#[tokio::test]
-async fn test_define_enum() {
-    let (db, _dir) = test_db().await;
-    let tx_id = db.define_enum(shape_enum()).await.unwrap();
+#[test]
+fn test_define_enum() {
+    let (db, _dir) = test_db();
+    let tx_id = db.define_enum(shape_enum()).unwrap();
     assert!(tx_id > 0);
 }
 
-#[tokio::test]
-async fn test_enum_insert_and_query() {
-    let (db, _dir) = test_db().await;
-    db.define_enum(shape_enum()).await.unwrap();
-    db.define_type(drawing_type()).await.unwrap();
+#[test]
+fn test_enum_insert_and_query() {
+    let (db, _dir) = test_db();
+    db.define_enum(shape_enum()).unwrap();
+    db.define_type(drawing_type()).unwrap();
 
     // Insert a circle
     let mut data = HashMap::new();
@@ -842,7 +803,6 @@ async fn test_enum_insert_and_query() {
             entity: None,
             data,
         }])
-        .await
         .unwrap();
     assert!(result.tx_id > 0);
     // __type + label + shape.__tag + shape.Circle/radius = 4 datoms
@@ -857,17 +817,17 @@ async fn test_enum_insert_and_query() {
         ]
     });
     let query = Query::from_json(&query_json).unwrap();
-    let result = db.query(&query).await.unwrap();
+    let result = db.query(&query).unwrap();
     assert_eq!(result.rows.len(), 1);
     assert_eq!(result.rows[0][0], Value::String("my circle".to_string()));
     assert_eq!(result.rows[0][1], Value::F64(5.0));
 }
 
-#[tokio::test]
-async fn test_enum_unit_variant() {
-    let (db, _dir) = test_db().await;
-    db.define_enum(shape_enum()).await.unwrap();
-    db.define_type(drawing_type()).await.unwrap();
+#[test]
+fn test_enum_unit_variant() {
+    let (db, _dir) = test_db();
+    db.define_enum(shape_enum()).unwrap();
+    db.define_type(drawing_type()).unwrap();
 
     // Insert a Point (unit variant — no fields)
     let mut data = HashMap::new();
@@ -878,7 +838,6 @@ async fn test_enum_unit_variant() {
         entity: None,
         data,
     }])
-    .await
     .unwrap();
 
     // Query for points using constant match
@@ -890,16 +849,16 @@ async fn test_enum_unit_variant() {
         ]
     });
     let query = Query::from_json(&query_json).unwrap();
-    let result = db.query(&query).await.unwrap();
+    let result = db.query(&query).unwrap();
     assert_eq!(result.rows.len(), 1);
     assert_eq!(result.rows[0][0], Value::String("origin".to_string()));
 }
 
-#[tokio::test]
-async fn test_enum_match_filters_variants() {
-    let (db, _dir) = test_db().await;
-    db.define_enum(shape_enum()).await.unwrap();
-    db.define_type(drawing_type()).await.unwrap();
+#[test]
+fn test_enum_match_filters_variants() {
+    let (db, _dir) = test_db();
+    db.define_enum(shape_enum()).unwrap();
+    db.define_type(drawing_type()).unwrap();
 
     // Insert one of each variant
     let drawings = vec![
@@ -932,7 +891,6 @@ async fn test_enum_match_filters_variants() {
             entity: None,
             data,
         }])
-        .await
         .unwrap();
     }
 
@@ -945,7 +903,7 @@ async fn test_enum_match_filters_variants() {
         ]
     });
     let query = Query::from_json(&query_json).unwrap();
-    let result = db.query(&query).await.unwrap();
+    let result = db.query(&query).unwrap();
     assert_eq!(result.rows.len(), 1);
     assert_eq!(result.rows[0][0], Value::String("my circle".to_string()));
     assert_eq!(result.rows[0][1], Value::F64(5.0));
@@ -959,7 +917,7 @@ async fn test_enum_match_filters_variants() {
         ]
     });
     let query = Query::from_json(&query_json).unwrap();
-    let result = db.query(&query).await.unwrap();
+    let result = db.query(&query).unwrap();
     assert_eq!(result.rows.len(), 1);
     assert_eq!(result.rows[0][0], Value::String("my rect".to_string()));
     assert_eq!(result.rows[0][1], Value::F64(10.0));
@@ -974,16 +932,16 @@ async fn test_enum_match_filters_variants() {
         ]
     });
     let query = Query::from_json(&query_json).unwrap();
-    let result = db.query(&query).await.unwrap();
+    let result = db.query(&query).unwrap();
     assert_eq!(result.rows.len(), 1);
     assert_eq!(result.rows[0][0], Value::String("origin".to_string()));
 }
 
-#[tokio::test]
-async fn test_enum_bind_variant_tag() {
-    let (db, _dir) = test_db().await;
-    db.define_enum(shape_enum()).await.unwrap();
-    db.define_type(drawing_type()).await.unwrap();
+#[test]
+fn test_enum_bind_variant_tag() {
+    let (db, _dir) = test_db();
+    db.define_enum(shape_enum()).unwrap();
+    db.define_type(drawing_type()).unwrap();
 
     for (label, shape) in [
         (
@@ -1003,7 +961,6 @@ async fn test_enum_bind_variant_tag() {
             entity: None,
             data,
         }])
-        .await
         .unwrap();
     }
 
@@ -1015,7 +972,7 @@ async fn test_enum_bind_variant_tag() {
         ]
     });
     let query = Query::from_json(&query_json).unwrap();
-    let result = db.query(&query).await.unwrap();
+    let result = db.query(&query).unwrap();
     assert_eq!(result.rows.len(), 2);
 
     let mut tags: Vec<_> = result
@@ -1036,11 +993,11 @@ async fn test_enum_bind_variant_tag() {
     assert_eq!(tags[1].1, Value::String("Point".to_string()));
 }
 
-#[tokio::test]
-async fn test_enum_variant_change() {
-    let (db, _dir) = test_db().await;
-    db.define_enum(shape_enum()).await.unwrap();
-    db.define_type(drawing_type()).await.unwrap();
+#[test]
+fn test_enum_variant_change() {
+    let (db, _dir) = test_db();
+    db.define_enum(shape_enum()).unwrap();
+    db.define_type(drawing_type()).unwrap();
 
     // Insert as Circle
     let mut data = HashMap::new();
@@ -1058,7 +1015,6 @@ async fn test_enum_variant_change() {
             entity: None,
             data,
         }])
-        .await
         .unwrap();
     let eid = result.entity_ids[0];
 
@@ -1079,7 +1035,6 @@ async fn test_enum_variant_change() {
         entity: Some(eid),
         data,
     }])
-    .await
     .unwrap();
 
     // Should NOT match as Circle anymore
@@ -1091,7 +1046,7 @@ async fn test_enum_variant_change() {
         ]
     });
     let query = Query::from_json(&query_json).unwrap();
-    let result = db.query(&query).await.unwrap();
+    let result = db.query(&query).unwrap();
     assert_eq!(result.rows.len(), 0);
 
     // Should match as Rect
@@ -1103,15 +1058,15 @@ async fn test_enum_variant_change() {
         ]
     });
     let query = Query::from_json(&query_json).unwrap();
-    let result = db.query(&query).await.unwrap();
+    let result = db.query(&query).unwrap();
     assert_eq!(result.rows.len(), 1);
     assert_eq!(result.rows[0][1], Value::F64(10.0));
     assert_eq!(result.rows[0][2], Value::F64(20.0));
 }
 
-#[tokio::test]
-async fn test_enum_same_variant_stale_field_retraction() {
-    let (db, _dir) = test_db().await;
+#[test]
+fn test_enum_same_variant_stale_field_retraction() {
+    let (db, _dir) = test_db();
 
     // Enum with optional fields
     let status_enum = EnumTypeDef {
@@ -1142,7 +1097,7 @@ async fn test_enum_same_variant_stale_field_retraction() {
             },
         ],
     };
-    db.define_enum(status_enum).await.unwrap();
+    db.define_enum(status_enum).unwrap();
 
     let account_type = EntityTypeDef {
         name: "Account".to_string(),
@@ -1163,7 +1118,7 @@ async fn test_enum_same_variant_stale_field_retraction() {
             },
         ],
     };
-    db.define_type(account_type).await.unwrap();
+    db.define_type(account_type).unwrap();
 
     // Insert with Suspended{reason: "TOS", until: 1000}
     let mut data = HashMap::new();
@@ -1184,7 +1139,6 @@ async fn test_enum_same_variant_stale_field_retraction() {
             entity: None,
             data,
         }])
-        .await
         .unwrap();
     let eid = result.entity_ids[0];
 
@@ -1202,7 +1156,6 @@ async fn test_enum_same_variant_stale_field_retraction() {
         entity: Some(eid),
         data,
     }])
-    .await
     .unwrap();
 
     // Query: 'until' should NOT leak through from the first assertion
@@ -1214,7 +1167,7 @@ async fn test_enum_same_variant_stale_field_retraction() {
         ]
     });
     let query = Query::from_json(&query_json).unwrap();
-    let result = db.query(&query).await.unwrap();
+    let result = db.query(&query).unwrap();
     // Should find 0 rows because 'until' was retracted
     assert_eq!(result.rows.len(), 0);
 
@@ -1227,16 +1180,16 @@ async fn test_enum_same_variant_stale_field_retraction() {
         ]
     });
     let query = Query::from_json(&query_json).unwrap();
-    let result = db.query(&query).await.unwrap();
+    let result = db.query(&query).unwrap();
     assert_eq!(result.rows.len(), 1);
     assert_eq!(result.rows[0][0], Value::String("Spam".to_string()));
 }
 
-#[tokio::test]
-async fn test_enum_retract_whole_field() {
-    let (db, _dir) = test_db().await;
-    db.define_enum(shape_enum()).await.unwrap();
-    db.define_type(drawing_type()).await.unwrap();
+#[test]
+fn test_enum_retract_whole_field() {
+    let (db, _dir) = test_db();
+    db.define_enum(shape_enum()).unwrap();
+    db.define_type(drawing_type()).unwrap();
 
     let mut data = HashMap::new();
     data.insert("label".to_string(), Value::String("gone".to_string()));
@@ -1253,7 +1206,6 @@ async fn test_enum_retract_whole_field() {
             entity: None,
             data,
         }])
-        .await
         .unwrap();
     let eid = result.entity_ids[0];
 
@@ -1263,7 +1215,6 @@ async fn test_enum_retract_whole_field() {
         entity: eid,
         fields: vec!["shape".to_string()],
     }])
-    .await
     .unwrap();
 
     // Query should find no circles
@@ -1275,15 +1226,15 @@ async fn test_enum_retract_whole_field() {
         ]
     });
     let query = Query::from_json(&query_json).unwrap();
-    let result = db.query(&query).await.unwrap();
+    let result = db.query(&query).unwrap();
     assert_eq!(result.rows.len(), 0);
 }
 
-#[tokio::test]
-async fn test_enum_schema_validation() {
-    let (db, _dir) = test_db().await;
-    db.define_enum(shape_enum()).await.unwrap();
-    db.define_type(drawing_type()).await.unwrap();
+#[test]
+fn test_enum_schema_validation() {
+    let (db, _dir) = test_db();
+    db.define_enum(shape_enum()).unwrap();
+    db.define_type(drawing_type()).unwrap();
 
     // Wrong variant name
     let mut data = HashMap::new();
@@ -1300,8 +1251,7 @@ async fn test_enum_schema_validation() {
             entity_type: "Drawing".to_string(),
             entity: None,
             data,
-        }])
-        .await;
+        }]);
     assert!(result.is_err());
 
     // Wrong field type in variant
@@ -1319,8 +1269,7 @@ async fn test_enum_schema_validation() {
             entity_type: "Drawing".to_string(),
             entity: None,
             data,
-        }])
-        .await;
+        }]);
     assert!(result.is_err());
 
     // Missing required variant field
@@ -1338,16 +1287,15 @@ async fn test_enum_schema_validation() {
             entity_type: "Drawing".to_string(),
             entity: None,
             data,
-        }])
-        .await;
+        }]);
     assert!(result.is_err());
 }
 
-#[tokio::test]
-async fn test_enum_json_wire_format() {
-    let (db, _dir) = test_db().await;
-    db.define_enum(shape_enum()).await.unwrap();
-    db.define_type(drawing_type()).await.unwrap();
+#[test]
+fn test_enum_json_wire_format() {
+    let (db, _dir) = test_db();
+    db.define_enum(shape_enum()).unwrap();
+    db.define_type(drawing_type()).unwrap();
 
     // Insert via JSON (as it would come over the wire)
     let op_json = serde_json::json!({
@@ -1358,7 +1306,7 @@ async fn test_enum_json_wire_format() {
         }
     });
     let op = TxOp::from_json(&op_json).unwrap();
-    db.transact(vec![op]).await.unwrap();
+    db.transact(vec![op]).unwrap();
 
     // Also test unit variant over the wire
     let op_json = serde_json::json!({
@@ -1369,7 +1317,7 @@ async fn test_enum_json_wire_format() {
         }
     });
     let op = TxOp::from_json(&op_json).unwrap();
-    db.transact(vec![op]).await.unwrap();
+    db.transact(vec![op]).unwrap();
 
     // Query to verify
     let query_json = serde_json::json!({
@@ -1380,21 +1328,21 @@ async fn test_enum_json_wire_format() {
         ]
     });
     let query = Query::from_json(&query_json).unwrap();
-    let result = db.query(&query).await.unwrap();
+    let result = db.query(&query).unwrap();
     assert_eq!(result.rows.len(), 1);
     assert_eq!(result.rows[0][0], Value::String("wire circle".to_string()));
     assert_eq!(result.rows[0][1], Value::F64(7.5));
 }
 
-#[tokio::test]
-async fn test_enum_persists_across_reopen() {
+#[test]
+fn test_enum_persists_across_reopen() {
     let dir = tempfile::tempdir().unwrap();
 
     {
         let storage = Arc::new(RocksDbStorage::open(dir.path()).unwrap());
-        let db = Database::open(storage).await.unwrap();
-        db.define_enum(shape_enum()).await.unwrap();
-        db.define_type(drawing_type()).await.unwrap();
+        let db = Database::open(storage).unwrap();
+        db.define_enum(shape_enum()).unwrap();
+        db.define_type(drawing_type()).unwrap();
 
         let mut data = HashMap::new();
         data.insert("label".to_string(), Value::String("persistent".to_string()));
@@ -1410,14 +1358,13 @@ async fn test_enum_persists_across_reopen() {
             entity: None,
             data,
         }])
-        .await
         .unwrap();
     }
 
     // Reopen
     {
         let storage = Arc::new(RocksDbStorage::open(dir.path()).unwrap());
-        let db = Database::open(storage).await.unwrap();
+        let db = Database::open(storage).unwrap();
 
         // Should be able to insert without re-defining
         let mut data = HashMap::new();
@@ -1437,7 +1384,6 @@ async fn test_enum_persists_across_reopen() {
             entity: None,
             data,
         }])
-        .await
         .unwrap();
 
         // Query the circle from the first session
@@ -1449,7 +1395,7 @@ async fn test_enum_persists_across_reopen() {
             ]
         });
         let query = Query::from_json(&query_json).unwrap();
-        let result = db.query(&query).await.unwrap();
+        let result = db.query(&query).unwrap();
         assert_eq!(result.rows.len(), 1);
         assert_eq!(result.rows[0][0], Value::String("persistent".to_string()));
         assert_eq!(result.rows[0][1], Value::F64(42.0));
@@ -1480,13 +1426,13 @@ fn snapshot_datoms(datoms: &[datalog_db::datom::Datom]) -> String {
     lines.join("\n")
 }
 
-#[tokio::test]
-async fn test_snapshot_scalar_insert() {
-    let (db, _dir) = test_db().await;
-    db.define_type(user_type()).await.unwrap();
+#[test]
+fn test_snapshot_scalar_insert() {
+    let (db, _dir) = test_db();
+    db.define_type(user_type()).unwrap();
 
     // Before: no data datoms
-    let before = db.all_datoms().await.unwrap();
+    let before = db.all_datoms().unwrap();
     assert_eq!(
         snapshot_datoms(&before),
         "",
@@ -1502,17 +1448,16 @@ async fn test_snapshot_scalar_insert() {
         entity: None,
         data,
     }])
-    .await
     .unwrap();
 
-    let after = db.all_datoms().await.unwrap();
+    let after = db.all_datoms().unwrap();
     insta::assert_snapshot!("scalar_insert", snapshot_datoms(&after));
 }
 
-#[tokio::test]
-async fn test_snapshot_scalar_update() {
-    let (db, _dir) = test_db().await;
-    db.define_type(user_type()).await.unwrap();
+#[test]
+fn test_snapshot_scalar_update() {
+    let (db, _dir) = test_db();
+    db.define_type(user_type()).unwrap();
 
     // Insert
     let mut data = HashMap::new();
@@ -1524,11 +1469,10 @@ async fn test_snapshot_scalar_update() {
             entity: None,
             data,
         }])
-        .await
         .unwrap();
     let eid = result.entity_ids[0];
 
-    let after_insert = db.all_datoms().await.unwrap();
+    let after_insert = db.all_datoms().unwrap();
     insta::assert_snapshot!("scalar_update__after_insert", snapshot_datoms(&after_insert));
 
     // Update age 30 -> 31 (should retract 30, assert 31)
@@ -1539,18 +1483,17 @@ async fn test_snapshot_scalar_update() {
         entity: Some(eid),
         data,
     }])
-    .await
     .unwrap();
 
-    let after_update = db.all_datoms().await.unwrap();
+    let after_update = db.all_datoms().unwrap();
     insta::assert_snapshot!("scalar_update__after_update", snapshot_datoms(&after_update));
 }
 
-#[tokio::test]
-async fn test_snapshot_enum_insert() {
-    let (db, _dir) = test_db().await;
-    db.define_enum(shape_enum()).await.unwrap();
-    db.define_type(drawing_type()).await.unwrap();
+#[test]
+fn test_snapshot_enum_insert() {
+    let (db, _dir) = test_db();
+    db.define_enum(shape_enum()).unwrap();
+    db.define_type(drawing_type()).unwrap();
 
     let mut data = HashMap::new();
     data.insert("label".to_string(), Value::String("my circle".to_string()));
@@ -1566,18 +1509,17 @@ async fn test_snapshot_enum_insert() {
         entity: None,
         data,
     }])
-    .await
     .unwrap();
 
-    let datoms = db.all_datoms().await.unwrap();
+    let datoms = db.all_datoms().unwrap();
     insta::assert_snapshot!("enum_insert", snapshot_datoms(&datoms));
 }
 
-#[tokio::test]
-async fn test_snapshot_enum_variant_change() {
-    let (db, _dir) = test_db().await;
-    db.define_enum(shape_enum()).await.unwrap();
-    db.define_type(drawing_type()).await.unwrap();
+#[test]
+fn test_snapshot_enum_variant_change() {
+    let (db, _dir) = test_db();
+    db.define_enum(shape_enum()).unwrap();
+    db.define_type(drawing_type()).unwrap();
 
     // Insert Circle
     let mut data = HashMap::new();
@@ -1595,11 +1537,10 @@ async fn test_snapshot_enum_variant_change() {
             entity: None,
             data,
         }])
-        .await
         .unwrap();
     let eid = result.entity_ids[0];
 
-    let after_insert = db.all_datoms().await.unwrap();
+    let after_insert = db.all_datoms().unwrap();
     insta::assert_snapshot!(
         "enum_variant_change__after_insert",
         snapshot_datoms(&after_insert)
@@ -1622,19 +1563,18 @@ async fn test_snapshot_enum_variant_change() {
         entity: Some(eid),
         data,
     }])
-    .await
     .unwrap();
 
-    let after_change = db.all_datoms().await.unwrap();
+    let after_change = db.all_datoms().unwrap();
     insta::assert_snapshot!(
         "enum_variant_change__after_change",
         snapshot_datoms(&after_change)
     );
 }
 
-#[tokio::test]
-async fn test_snapshot_enum_same_variant_update() {
-    let (db, _dir) = test_db().await;
+#[test]
+fn test_snapshot_enum_same_variant_update() {
+    let (db, _dir) = test_db();
 
     let status_enum = EnumTypeDef {
         name: "Status".to_string(),
@@ -1664,7 +1604,7 @@ async fn test_snapshot_enum_same_variant_update() {
             },
         ],
     };
-    db.define_enum(status_enum).await.unwrap();
+    db.define_enum(status_enum).unwrap();
 
     let account_type = EntityTypeDef {
         name: "Account".to_string(),
@@ -1685,7 +1625,7 @@ async fn test_snapshot_enum_same_variant_update() {
             },
         ],
     };
-    db.define_type(account_type).await.unwrap();
+    db.define_type(account_type).unwrap();
 
     // Insert: Suspended{reason: "TOS", until: 1000}
     let mut data = HashMap::new();
@@ -1706,11 +1646,10 @@ async fn test_snapshot_enum_same_variant_update() {
             entity: None,
             data,
         }])
-        .await
         .unwrap();
     let eid = result.entity_ids[0];
 
-    let after_insert = db.all_datoms().await.unwrap();
+    let after_insert = db.all_datoms().unwrap();
     insta::assert_snapshot!(
         "enum_same_variant_update__after_insert",
         snapshot_datoms(&after_insert)
@@ -1730,12 +1669,575 @@ async fn test_snapshot_enum_same_variant_update() {
         entity: Some(eid),
         data,
     }])
-    .await
     .unwrap();
 
-    let after_update = db.all_datoms().await.unwrap();
+    let after_update = db.all_datoms().unwrap();
     insta::assert_snapshot!(
         "enum_same_variant_update__after_update",
         snapshot_datoms(&after_update)
     );
+}
+
+// --- Concurrent stress test ---
+
+#[test]
+fn test_concurrent_stress() {
+    let (db, _dir) = test_db();
+    db.define_type(EntityTypeDef {
+        name: "Counter".to_string(),
+        fields: vec![
+            FieldDef {
+                name: "label".to_string(),
+                field_type: FieldType::String,
+                required: true,
+                unique: false,
+                indexed: false,
+            },
+            FieldDef {
+                name: "value".to_string(),
+                field_type: FieldType::I64,
+                required: true,
+                unique: false,
+                indexed: false,
+            },
+        ],
+    })
+    .unwrap();
+
+    let mut handles = Vec::new();
+    for i in 0..50 {
+        let db = db.clone();
+        handles.push(std::thread::spawn(move || {
+            // Insert
+            let mut data = HashMap::new();
+            data.insert("label".to_string(), Value::String(format!("task_{}", i)));
+            data.insert("value".to_string(), Value::I64(i));
+            let result = db
+                .transact(vec![TxOp::Assert {
+                    entity_type: "Counter".to_string(),
+                    entity: None,
+                    data,
+                }])
+                .unwrap();
+
+            // Query back
+            let query_json = serde_json::json!({
+                "find": ["?label"],
+                "where": [
+                    {"bind": "?c", "type": "Counter", "label": format!("task_{}", i)}
+                ]
+            });
+            let query = Query::from_json(&query_json).unwrap();
+            let qr = db.query(&query).unwrap();
+            assert!(!qr.rows.is_empty(), "task {} should find its entity", i);
+
+            result.entity_ids[0]
+        }));
+    }
+
+    let mut all_eids = Vec::new();
+    for h in handles {
+        all_eids.push(h.join().unwrap());
+    }
+
+    // All 50 entities should exist
+    let query_json = serde_json::json!({
+        "find": ["?label", "?value"],
+        "where": [
+            {"bind": "?c", "type": "Counter", "label": "?label", "value": "?value"}
+        ]
+    });
+    let query = Query::from_json(&query_json).unwrap();
+    let result = db.query(&query).unwrap();
+    assert_eq!(result.rows.len(), 50);
+}
+
+// --- Unique constraint tests ---
+
+#[test]
+fn test_unique_basic() {
+    let (db, _dir) = test_db();
+    db.define_type(user_type()).unwrap();
+
+    // Insert user with unique email
+    let mut data = HashMap::new();
+    data.insert("name".to_string(), Value::String("Alice".to_string()));
+    data.insert(
+        "email".to_string(),
+        Value::String("alice@example.com".to_string()),
+    );
+    db.transact(vec![TxOp::Assert {
+        entity_type: "User".to_string(),
+        entity: None,
+        data,
+    }])
+    .unwrap();
+
+    // Try to insert another user with the same email — should fail
+    let mut data = HashMap::new();
+    data.insert("name".to_string(), Value::String("Bob".to_string()));
+    data.insert(
+        "email".to_string(),
+        Value::String("alice@example.com".to_string()),
+    );
+    let result = db
+        .transact(vec![TxOp::Assert {
+            entity_type: "User".to_string(),
+            entity: None,
+            data,
+        }]);
+    assert!(result.is_err());
+    let err = format!("{}", result.unwrap_err());
+    assert!(err.contains("Unique constraint violated"), "got: {}", err);
+}
+
+#[test]
+fn test_unique_same_entity_update() {
+    let (db, _dir) = test_db();
+    db.define_type(user_type()).unwrap();
+
+    let mut data = HashMap::new();
+    data.insert("name".to_string(), Value::String("Alice".to_string()));
+    data.insert(
+        "email".to_string(),
+        Value::String("alice@example.com".to_string()),
+    );
+    let result = db
+        .transact(vec![TxOp::Assert {
+            entity_type: "User".to_string(),
+            entity: None,
+            data,
+        }])
+        .unwrap();
+    let eid = result.entity_ids[0];
+
+    // Re-assert the same unique value on the same entity — should be ok (no-op)
+    let mut data = HashMap::new();
+    data.insert(
+        "email".to_string(),
+        Value::String("alice@example.com".to_string()),
+    );
+    let result = db
+        .transact(vec![TxOp::Assert {
+            entity_type: "User".to_string(),
+            entity: Some(eid),
+            data,
+        }]);
+    assert!(result.is_ok());
+}
+
+#[test]
+fn test_unique_after_retract() {
+    let (db, _dir) = test_db();
+    db.define_type(user_type()).unwrap();
+
+    // Alice claims the email
+    let mut data = HashMap::new();
+    data.insert("name".to_string(), Value::String("Alice".to_string()));
+    data.insert(
+        "email".to_string(),
+        Value::String("alice@example.com".to_string()),
+    );
+    let result = db
+        .transact(vec![TxOp::Assert {
+            entity_type: "User".to_string(),
+            entity: None,
+            data,
+        }])
+        .unwrap();
+    let alice_eid = result.entity_ids[0];
+
+    // Retract Alice's email
+    db.transact(vec![TxOp::Retract {
+        entity_type: "User".to_string(),
+        entity: alice_eid,
+        fields: vec!["email".to_string()],
+    }])
+    .unwrap();
+
+    // Bob can now take the email
+    let mut data = HashMap::new();
+    data.insert("name".to_string(), Value::String("Bob".to_string()));
+    data.insert(
+        "email".to_string(),
+        Value::String("alice@example.com".to_string()),
+    );
+    let result = db
+        .transact(vec![TxOp::Assert {
+            entity_type: "User".to_string(),
+            entity: None,
+            data,
+        }]);
+    assert!(result.is_ok());
+}
+
+#[test]
+fn test_unique_update_to_taken_value() {
+    let (db, _dir) = test_db();
+    db.define_type(user_type()).unwrap();
+
+    // Alice
+    let mut data = HashMap::new();
+    data.insert("name".to_string(), Value::String("Alice".to_string()));
+    data.insert(
+        "email".to_string(),
+        Value::String("alice@example.com".to_string()),
+    );
+    db.transact(vec![TxOp::Assert {
+        entity_type: "User".to_string(),
+        entity: None,
+        data,
+    }])
+    .unwrap();
+
+    // Bob with different email
+    let mut data = HashMap::new();
+    data.insert("name".to_string(), Value::String("Bob".to_string()));
+    data.insert(
+        "email".to_string(),
+        Value::String("bob@example.com".to_string()),
+    );
+    let result = db
+        .transact(vec![TxOp::Assert {
+            entity_type: "User".to_string(),
+            entity: None,
+            data,
+        }])
+        .unwrap();
+    let bob_eid = result.entity_ids[0];
+
+    // Bob tries to take Alice's email — should fail
+    let mut data = HashMap::new();
+    data.insert(
+        "email".to_string(),
+        Value::String("alice@example.com".to_string()),
+    );
+    let result = db
+        .transact(vec![TxOp::Assert {
+            entity_type: "User".to_string(),
+            entity: Some(bob_eid),
+            data,
+        }]);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_unique_within_single_tx() {
+    let (db, _dir) = test_db();
+    db.define_type(user_type()).unwrap();
+
+    // Two inserts in one transaction with same unique email — should fail
+    let mut data1 = HashMap::new();
+    data1.insert("name".to_string(), Value::String("Alice".to_string()));
+    data1.insert(
+        "email".to_string(),
+        Value::String("shared@example.com".to_string()),
+    );
+    let mut data2 = HashMap::new();
+    data2.insert("name".to_string(), Value::String("Bob".to_string()));
+    data2.insert(
+        "email".to_string(),
+        Value::String("shared@example.com".to_string()),
+    );
+    let result = db
+        .transact(vec![
+            TxOp::Assert {
+                entity_type: "User".to_string(),
+                entity: None,
+                data: data1,
+            },
+            TxOp::Assert {
+                entity_type: "User".to_string(),
+                entity: None,
+                data: data2,
+            },
+        ]);
+    assert!(result.is_err());
+    let err = format!("{}", result.unwrap_err());
+    assert!(err.contains("Unique constraint violated"), "got: {}", err);
+}
+
+#[test]
+fn test_unique_different_types_independent() {
+    let (db, _dir) = test_db();
+    db.define_type(user_type()).unwrap();
+
+    // Define a second type with its own unique field
+    db.define_type(EntityTypeDef {
+        name: "Admin".to_string(),
+        fields: vec![
+            FieldDef {
+                name: "name".to_string(),
+                field_type: FieldType::String,
+                required: true,
+                unique: false,
+                indexed: false,
+            },
+            FieldDef {
+                name: "email".to_string(),
+                field_type: FieldType::String,
+                required: false,
+                unique: true,
+                indexed: true,
+            },
+        ],
+    })
+    .unwrap();
+
+    // User with email
+    let mut data = HashMap::new();
+    data.insert("name".to_string(), Value::String("Alice".to_string()));
+    data.insert(
+        "email".to_string(),
+        Value::String("alice@example.com".to_string()),
+    );
+    db.transact(vec![TxOp::Assert {
+        entity_type: "User".to_string(),
+        entity: None,
+        data,
+    }])
+    .unwrap();
+
+    // Admin with same email value — should succeed (different type → different attribute)
+    let mut data = HashMap::new();
+    data.insert("name".to_string(), Value::String("Alice Admin".to_string()));
+    data.insert(
+        "email".to_string(),
+        Value::String("alice@example.com".to_string()),
+    );
+    let result = db
+        .transact(vec![TxOp::Assert {
+            entity_type: "Admin".to_string(),
+            entity: None,
+            data,
+        }]);
+    assert!(result.is_ok());
+}
+
+// --- Index-based query optimization tests ---
+
+#[test]
+fn test_query_constant_uses_index() {
+    let (db, _dir) = test_db();
+    db.define_type(user_type()).unwrap();
+
+    // Insert 100 users, one named "target"
+    for i in 0..100 {
+        let mut data = HashMap::new();
+        let name = if i == 42 {
+            "target".to_string()
+        } else {
+            format!("user_{}", i)
+        };
+        data.insert("name".to_string(), Value::String(name));
+        data.insert("age".to_string(), Value::I64(i));
+        db.transact(vec![TxOp::Assert {
+            entity_type: "User".to_string(),
+            entity: None,
+            data,
+        }])
+        .unwrap();
+    }
+
+    // Query by exact constant — should use AVET index
+    let query_json = serde_json::json!({
+        "find": ["?age"],
+        "where": [
+            {"bind": "?u", "type": "User", "name": "target", "age": "?age"}
+        ]
+    });
+    let query = Query::from_json(&query_json).unwrap();
+    let result = db.query(&query).unwrap();
+    assert_eq!(result.rows.len(), 1);
+    assert_eq!(result.rows[0][0], Value::I64(42));
+}
+
+#[test]
+fn test_query_bound_variable_uses_index() {
+    let (db, _dir) = test_db();
+    db.define_type(user_type()).unwrap();
+    db.define_type(post_type()).unwrap();
+
+    // Create Alice
+    let mut data = HashMap::new();
+    data.insert("name".to_string(), Value::String("Alice".to_string()));
+    let alice_result = db
+        .transact(vec![TxOp::Assert {
+            entity_type: "User".to_string(),
+            entity: None,
+            data,
+        }])
+        .unwrap();
+    let alice_id = alice_result.entity_ids[0];
+
+    // Create Bob
+    let mut data = HashMap::new();
+    data.insert("name".to_string(), Value::String("Bob".to_string()));
+    db.transact(vec![TxOp::Assert {
+        entity_type: "User".to_string(),
+        entity: None,
+        data,
+    }])
+    .unwrap();
+
+    // Create posts — some by Alice, some by Bob
+    for i in 0..10 {
+        let mut data = HashMap::new();
+        data.insert("title".to_string(), Value::String(format!("Post {}", i)));
+        data.insert("author".to_string(), Value::Ref(alice_id));
+        db.transact(vec![TxOp::Assert {
+            entity_type: "Post".to_string(),
+            entity: None,
+            data,
+        }])
+        .unwrap();
+    }
+
+    // Join query: second clause should use bound ?u to index into Post/author
+    let query_json = serde_json::json!({
+        "find": ["?title"],
+        "where": [
+            {"bind": "?u", "type": "User", "name": "Alice"},
+            {"bind": "?p", "type": "Post", "author": "?u", "title": "?title"}
+        ]
+    });
+    let query = Query::from_json(&query_json).unwrap();
+    let result = db.query(&query).unwrap();
+    assert_eq!(result.rows.len(), 10);
+    for row in &result.rows {
+        // All titles should be strings starting with "Post "
+        if let Value::String(s) = &row[0] {
+            assert!(s.starts_with("Post "));
+        } else {
+            panic!("expected string title");
+        }
+    }
+}
+
+#[test]
+fn test_query_enum_field_still_works() {
+    let (db, _dir) = test_db();
+    db.define_enum(shape_enum()).unwrap();
+    db.define_type(drawing_type()).unwrap();
+
+    // Insert drawings
+    let mut data = HashMap::new();
+    data.insert("label".to_string(), Value::String("circle1".to_string()));
+    data.insert(
+        "shape".to_string(),
+        Value::Enum {
+            variant: "Circle".to_string(),
+            fields: HashMap::from([("radius".to_string(), Value::F64(5.0))]),
+        },
+    );
+    db.transact(vec![TxOp::Assert {
+        entity_type: "Drawing".to_string(),
+        entity: None,
+        data,
+    }])
+    .unwrap();
+
+    let mut data = HashMap::new();
+    data.insert("label".to_string(), Value::String("rect1".to_string()));
+    data.insert(
+        "shape".to_string(),
+        Value::Enum {
+            variant: "Rect".to_string(),
+            fields: HashMap::from([
+                ("w".to_string(), Value::F64(10.0)),
+                ("h".to_string(), Value::F64(20.0)),
+            ]),
+        },
+    );
+    db.transact(vec![TxOp::Assert {
+        entity_type: "Drawing".to_string(),
+        entity: None,
+        data,
+    }])
+    .unwrap();
+
+    // Query with constant on enum field — should fall back to scan and still work
+    let query_json = serde_json::json!({
+        "find": ["?label", "?r"],
+        "where": [
+            {"bind": "?d", "type": "Drawing", "label": "?label",
+             "shape": {"match": "Circle", "radius": "?r"}}
+        ]
+    });
+    let query = Query::from_json(&query_json).unwrap();
+    let result = db.query(&query).unwrap();
+    assert_eq!(result.rows.len(), 1);
+    assert_eq!(result.rows[0][0], Value::String("circle1".to_string()));
+    assert_eq!(result.rows[0][1], Value::F64(5.0));
+}
+
+#[test]
+fn test_query_multiple_constants() {
+    let (db, _dir) = test_db();
+    db.define_type(user_type()).unwrap();
+
+    // Insert several users
+    for (name, age, email) in [
+        ("Alice", 30, "alice@example.com"),
+        ("Bob", 25, "bob@example.com"),
+        ("Charlie", 30, "charlie@example.com"),
+    ] {
+        let mut data = HashMap::new();
+        data.insert("name".to_string(), Value::String(name.to_string()));
+        data.insert("age".to_string(), Value::I64(age));
+        data.insert("email".to_string(), Value::String(email.to_string()));
+        db.transact(vec![TxOp::Assert {
+            entity_type: "User".to_string(),
+            entity: None,
+            data,
+        }])
+        .unwrap();
+    }
+
+    // Query with two constants — intersection of AVET lookups
+    let query_json = serde_json::json!({
+        "find": ["?email"],
+        "where": [
+            {"bind": "?u", "type": "User", "name": "Alice", "age": 30, "email": "?email"}
+        ]
+    });
+    let query = Query::from_json(&query_json).unwrap();
+    let result = db.query(&query).unwrap();
+    assert_eq!(result.rows.len(), 1);
+    assert_eq!(
+        result.rows[0][0],
+        Value::String("alice@example.com".to_string())
+    );
+}
+
+#[test]
+fn test_query_predicate_falls_back() {
+    let (db, _dir) = test_db();
+    db.define_type(user_type()).unwrap();
+
+    for (name, age) in [("Alice", 30), ("Bob", 25), ("Charlie", 35)] {
+        let mut data = HashMap::new();
+        data.insert("name".to_string(), Value::String(name.to_string()));
+        data.insert("age".to_string(), Value::I64(age));
+        db.transact(vec![TxOp::Assert {
+            entity_type: "User".to_string(),
+            entity: None,
+            data,
+        }])
+        .unwrap();
+    }
+
+    // Predicate pattern — can't use AVET index, should fall back to scan
+    let query_json = serde_json::json!({
+        "find": ["?name"],
+        "where": [
+            {"bind": "?u", "type": "User", "name": "?name", "age": {"gt": 27}}
+        ]
+    });
+    let query = Query::from_json(&query_json).unwrap();
+    let result = db.query(&query).unwrap();
+    assert_eq!(result.rows.len(), 2);
+    let names: Vec<&Value> = result.rows.iter().map(|r| &r[0]).collect();
+    assert!(names.contains(&&Value::String("Alice".to_string())));
+    assert!(names.contains(&&Value::String("Charlie".to_string())));
 }

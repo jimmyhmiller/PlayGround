@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use crate::datom::{Datom, EntityId, TxId, Value};
 use crate::index;
 use crate::schema::{FieldType, SchemaRegistry};
-use crate::storage::{self, StorageBackend};
+use crate::storage::{self, TxnOps};
 
 #[derive(Debug, thiserror::Error)]
 pub enum TxError {
@@ -45,6 +45,12 @@ pub enum TxError {
     },
     #[error("Entity {0} not found")]
     EntityNotFound(EntityId),
+    #[error("Unique constraint violated: attribute '{attribute}' already has value {value} on entity {existing_entity}")]
+    UniqueViolation {
+        attribute: String,
+        value: String,
+        existing_entity: EntityId,
+    },
     #[error("Storage error: {0}")]
     Storage(#[from] storage::StorageError),
 }
@@ -163,8 +169,8 @@ pub struct TransactionResult {
 }
 
 /// Process a transaction: validate against schema, generate datoms, write to storage.
-pub async fn process_transaction(
-    storage: &dyn StorageBackend,
+pub fn process_transaction(
+    txn: &dyn TxnOps,
     schema: &SchemaRegistry,
     tx_id: TxId,
     entity_counter: &mut EntityId,
@@ -172,6 +178,7 @@ pub async fn process_transaction(
 ) -> Result<TransactionResult> {
     let mut datoms = Vec::new();
     let mut entity_ids = Vec::new();
+    let mut pending_unique: HashMap<(String, String), EntityId> = HashMap::new();
 
     for op in &ops {
         match op {
@@ -184,7 +191,6 @@ pub async fn process_transaction(
                     .get(entity_type)
                     .ok_or_else(|| TxError::UnknownType(entity_type.clone()))?;
 
-                // Validate fields
                 for (field_name, value) in data {
                     let field_def = type_def.get_field(field_name).ok_or_else(|| {
                         TxError::UnknownField {
@@ -223,7 +229,6 @@ pub async fn process_transaction(
 
                 entity_ids.push(eid);
 
-                // Check required fields for new entities
                 if is_new {
                     for field_def in &type_def.fields {
                         if field_def.required && !data.contains_key(&field_def.name) {
@@ -235,7 +240,6 @@ pub async fn process_transaction(
                     }
                 }
 
-                // Generate datoms for each field
                 for (field_name, value) in data {
                     let field_def = type_def.get_field(field_name).unwrap();
 
@@ -245,19 +249,10 @@ pub async fn process_transaction(
                         let _variant_def = enum_def.get_variant(&variant_name).unwrap();
                         let base_attr = type_def.attribute_name(field_name);
 
-                        // On update: retract current enum state (tag + all variant fields)
                         if !is_new {
-                            retract_current_enum(
-                                storage,
-                                &mut datoms,
-                                eid,
-                                &base_attr,
-                                tx_id,
-                            )
-                            .await?;
+                            retract_current_enum(txn, &mut datoms, eid, &base_attr, tx_id)?;
                         }
 
-                        // Assert new tag
                         datoms.push(Datom {
                             entity: eid,
                             attribute: format!("{}/__tag", base_attr),
@@ -266,30 +261,23 @@ pub async fn process_transaction(
                             added: true,
                         });
 
-                        // Assert variant fields
                         for (vf_name, vf_value) in &variant_fields {
                             datoms.push(Datom {
                                 entity: eid,
-                                attribute: format!(
-                                    "{}.{}/{}",
-                                    base_attr, variant_name, vf_name
-                                ),
+                                attribute: format!("{}.{}/{}", base_attr, variant_name, vf_name),
                                 value: vf_value.clone(),
                                 tx: tx_id,
                                 added: true,
                             });
                         }
                     } else {
-                        // Scalar field
                         let attr = type_def.attribute_name(field_name);
+                        let field_def = type_def.get_field(field_name).unwrap();
 
                         if !is_new {
-                            // Retract old value if it exists and differs
-                            if let Some(current_val) =
-                                get_latest_value(storage, eid, &attr).await?
-                            {
+                            if let Some(current_val) = get_latest_value(txn, eid, &attr)? {
                                 if current_val == *value {
-                                    continue; // Same value — no-op
+                                    continue;
                                 }
                                 datoms.push(Datom {
                                     entity: eid,
@@ -299,6 +287,12 @@ pub async fn process_transaction(
                                     added: false,
                                 });
                             }
+                        }
+
+                        if field_def.unique {
+                            check_unique_constraint(txn, eid, &attr, value, &pending_unique)?;
+                            pending_unique
+                                .insert((attr.clone(), format!("{}", value)), eid);
                         }
 
                         datoms.push(Datom {
@@ -332,18 +326,15 @@ pub async fn process_transaction(
 
                     if let FieldType::Enum(_) = &field_def.field_type {
                         retract_current_enum(
-                            storage,
+                            txn,
                             &mut datoms,
                             *entity,
                             &type_def.attribute_name(field_name),
                             tx_id,
-                        )
-                        .await?;
+                        )?;
                     } else {
                         let attr = type_def.attribute_name(field_name);
-                        if let Some(current_val) =
-                            get_latest_value(storage, *entity, &attr).await?
-                        {
+                        if let Some(current_val) = get_latest_value(txn, *entity, &attr)? {
                             datoms.push(Datom {
                                 entity: *entity,
                                 attribute: attr,
@@ -358,15 +349,12 @@ pub async fn process_transaction(
         }
     }
 
-    // Encode all datoms into index keys
     let datom_count = datoms.len();
-    let mut kv_ops = Vec::new();
     for datom in &datoms {
-        kv_ops.extend(index::encode_datom(datom));
+        for (key, value) in index::encode_datom(datom) {
+            txn.put(key, value)?;
+        }
     }
-
-    // Write atomically
-    storage.batch_write(kv_ops).await?;
 
     Ok(TransactionResult {
         tx_id,
@@ -375,25 +363,20 @@ pub async fn process_transaction(
     })
 }
 
-// --- Helpers ---
-
-/// Get the latest live value for a (entity, attribute) pair.
-/// Resolves assert/retract history to find the current state.
-async fn get_latest_value(
-    storage: &dyn StorageBackend,
+fn get_latest_value(
+    txn: &dyn TxnOps,
     entity: EntityId,
     attr: &str,
 ) -> Result<Option<Value>> {
     let prefix = index::eavt_entity_attr_prefix(entity, attr);
     let end = index::prefix_end(&prefix);
-    let existing = storage.scan(&prefix, &end).await?;
+    let existing = txn.scan(&prefix, &end)?;
 
     let mut datoms: Vec<Datom> = existing
         .iter()
         .filter_map(|(k, _)| index::decode_datom_from_eavt(k))
         .collect();
 
-    // Sort by tx, retracts before asserts within same tx
     datoms.sort_by(|a, b| a.tx.cmp(&b.tx).then_with(|| a.added.cmp(&b.added)));
 
     let mut current: Option<Value> = None;
@@ -408,7 +391,58 @@ async fn get_latest_value(
     Ok(current)
 }
 
-/// Validate that a value is a valid enum value for the given enum type.
+fn check_unique_constraint(
+    txn: &dyn TxnOps,
+    entity: EntityId,
+    attr: &str,
+    value: &Value,
+    pending_unique: &HashMap<(String, String), EntityId>,
+) -> Result<()> {
+    let value_str = format!("{}", value);
+
+    let key = (attr.to_string(), value_str.clone());
+    if let Some(&existing_eid) = pending_unique.get(&key) {
+        if existing_eid != entity {
+            return Err(TxError::UniqueViolation {
+                attribute: attr.to_string(),
+                value: value_str,
+                existing_entity: existing_eid,
+            });
+        }
+    }
+
+    let prefix = index::avet_attr_value_prefix(attr, value);
+    let end = index::prefix_end(&prefix);
+    let entries = txn.scan(&prefix, &end)?;
+
+    let mut entity_datoms: HashMap<EntityId, Vec<Datom>> = HashMap::new();
+    for (k, _) in &entries {
+        if let Some(datom) = index::decode_datom_from_avet(k) {
+            entity_datoms.entry(datom.entity).or_default().push(datom);
+        }
+    }
+
+    for (eid, mut datoms) in entity_datoms {
+        if eid == entity {
+            continue;
+        }
+        datoms.sort_by(|a, b| a.tx.cmp(&b.tx).then_with(|| a.added.cmp(&b.added)));
+        let mut currently_asserted = false;
+        for d in datoms {
+            currently_asserted = d.added;
+        }
+        if currently_asserted {
+            return Err(TxError::UniqueViolation {
+                attribute: attr.to_string(),
+                value: value_str,
+                existing_entity: eid,
+            });
+        }
+    }
+
+    Ok(())
+}
+
 fn validate_enum_value(
     schema: &SchemaRegistry,
     enum_name: &str,
@@ -473,7 +507,6 @@ fn validate_enum_value(
     Ok(())
 }
 
-/// Extract variant name and fields from a Value (String for unit, Enum for data variant).
 fn extract_enum_parts(value: &Value) -> (String, HashMap<String, Value>) {
     match value {
         Value::String(s) => (s.clone(), HashMap::new()),
@@ -482,17 +515,15 @@ fn extract_enum_parts(value: &Value) -> (String, HashMap<String, Value>) {
     }
 }
 
-/// Retract all current state of an enum field: tag + all variant field datoms.
-async fn retract_current_enum(
-    storage: &dyn StorageBackend,
+fn retract_current_enum(
+    txn: &dyn TxnOps,
     datoms: &mut Vec<Datom>,
     entity: EntityId,
-    field_attr_base: &str, // e.g. "Drawing/shape"
+    field_attr_base: &str,
     tx_id: TxId,
 ) -> Result<()> {
-    // Retract the tag
     let tag_attr = format!("{}/__tag", field_attr_base);
-    if let Some(tag_val) = get_latest_value(storage, entity, &tag_attr).await? {
+    if let Some(tag_val) = get_latest_value(txn, entity, &tag_attr)? {
         datoms.push(Datom {
             entity,
             attribute: tag_attr,
@@ -502,13 +533,9 @@ async fn retract_current_enum(
         });
     }
 
-    // Scan all datoms for this entity and filter for variant field attributes.
-    // We can't use eavt_entity_attr_prefix for a partial attribute match because
-    // the attribute encoding includes a length prefix, so "Drawing/shape." (len=15)
-    // won't match "Drawing/shape.Circle/radius" (len=27) in the key bytes.
     let scan_prefix = index::eavt_entity_prefix(entity);
     let scan_end = index::prefix_end(&scan_prefix);
-    let all_entries = storage.scan(&scan_prefix, &scan_end).await?;
+    let all_entries = txn.scan(&scan_prefix, &scan_end)?;
 
     let variant_attr_prefix = format!("{}.", field_attr_base);
     let mut attr_datoms: HashMap<String, Vec<Datom>> = HashMap::new();
@@ -524,7 +551,6 @@ async fn retract_current_enum(
     }
 
     for (attr, mut attr_history) in attr_datoms {
-        // Sort by tx, retracts before asserts within same tx
         attr_history.sort_by(|a, b| a.tx.cmp(&b.tx).then_with(|| a.added.cmp(&b.added)));
 
         let mut current: Option<Value> = None;

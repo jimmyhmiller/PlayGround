@@ -7,8 +7,7 @@ use datalog_db::db::Database;
 use datalog_db::server::Server;
 use datalog_db::storage::rocksdb_backend::RocksDbStorage;
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt::init();
 
     let args: Vec<String> = std::env::args().collect();
@@ -33,12 +32,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let storage = RocksDbStorage::open(&data_dir)?;
     let storage = Arc::new(storage);
 
-    let db = Database::open(storage).await?;
+    let db = Database::open(storage)?;
     let db = Arc::new(db);
 
     info!("Starting server on {}", bind_addr);
-    let server = Server::bind(bind_addr, db).await?;
-    server.run().await?;
+    let server = Server::bind(bind_addr, db)?;
+    server.run()?;
 
     Ok(())
 }

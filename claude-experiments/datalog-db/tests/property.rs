@@ -13,10 +13,10 @@ use proptest::prelude::*;
 // Helpers
 // ---------------------------------------------------------------------------
 
-async fn test_db() -> (Arc<Database>, tempfile::TempDir) {
+fn test_db() -> (Arc<Database>, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let storage = RocksDbStorage::open(dir.path()).unwrap();
-    let db = Database::open(Arc::new(storage)).await.unwrap();
+    let db = Database::open(Arc::new(storage)).unwrap();
     (Arc::new(db), dir)
 }
 
@@ -129,9 +129,8 @@ fn widget_type() -> EntityTypeDef {
 }
 
 /// Count datoms excluding schema internals.
-async fn data_datom_count(db: &Database) -> usize {
+fn data_datom_count(db: &Database) -> usize {
     db.all_datoms()
-        .await
         .unwrap()
         .iter()
         .filter(|d| !d.attribute.starts_with("__schema_"))
@@ -272,9 +271,6 @@ fn arb_color_seq() -> impl Strategy<Value = Vec<Value>> {
 
 // ---------------------------------------------------------------------------
 // Property 1: Insert-Get Roundtrip (all value types)
-//
-// For any arbitrary subset of fields across all types (String, i64, f64,
-// bool, Bytes), inserting and reading back returns identical values.
 // ---------------------------------------------------------------------------
 
 proptest! {
@@ -282,37 +278,31 @@ proptest! {
 
     #[test]
     fn prop_insert_get_roundtrip(fields in arb_wide_fields()) {
-        tokio_test::block_on(async {
-            let (db, _dir) = test_db().await;
-            db.define_type(wide_type()).await.unwrap();
+        let (db, _dir) = test_db();
+        db.define_type(wide_type()).unwrap();
 
-            let result = db.transact(vec![TxOp::Assert {
-                entity_type: "Wide".to_string(),
-                entity: None,
-                data: fields.clone(),
-            }]).await.unwrap();
+        let result = db.transact(vec![TxOp::Assert {
+            entity_type: "Wide".to_string(),
+            entity: None,
+            data: fields.clone(),
+        }]).unwrap();
 
-            let eid = result.entity_ids[0];
-            let entity = db.get_entity(eid).await.unwrap().unwrap();
+        let eid = result.entity_ids[0];
+        let entity = db.get_entity(eid).unwrap().unwrap();
 
-            for (field_name, expected) in &fields {
-                let key = format!("Wide/{}", field_name);
-                let actual = entity.get(&key);
-                prop_assert_eq!(
-                    actual, Some(expected),
-                    "field '{}': expected {:?}, got {:?}", field_name, expected, actual
-                );
-            }
-            Ok(())
-        })?;
+        for (field_name, expected) in &fields {
+            let key = format!("Wide/{}", field_name);
+            let actual = entity.get(&key);
+            prop_assert_eq!(
+                actual, Some(expected),
+                "field '{}': expected {:?}, got {:?}", field_name, expected, actual
+            );
+        }
     }
 }
 
 // ---------------------------------------------------------------------------
 // Property 2: Last-Write-Wins for Scalars (multi-field, all types)
-//
-// Given a sequence of updates that each set a random subset of fields,
-// get_entity returns the values from the most recent assertion of each field.
 // ---------------------------------------------------------------------------
 
 proptest! {
@@ -320,52 +310,46 @@ proptest! {
 
     #[test]
     fn prop_last_write_wins(updates in arb_wide_update_seq()) {
-        tokio_test::block_on(async {
-            let (db, _dir) = test_db().await;
-            db.define_type(wide_type()).await.unwrap();
+        let (db, _dir) = test_db();
+        db.define_type(wide_type()).unwrap();
 
-            // Insert with first update
-            let result = db.transact(vec![TxOp::Assert {
+        // Insert with first update
+        let result = db.transact(vec![TxOp::Assert {
+            entity_type: "Wide".to_string(),
+            entity: None,
+            data: updates[0].clone(),
+        }]).unwrap();
+        let eid = result.entity_ids[0];
+
+        // Track expected state: last asserted value per field
+        let mut expected: HashMap<String, Value> = updates[0].clone();
+
+        for update in &updates[1..] {
+            db.transact(vec![TxOp::Assert {
                 entity_type: "Wide".to_string(),
-                entity: None,
-                data: updates[0].clone(),
-            }]).await.unwrap();
-            let eid = result.entity_ids[0];
+                entity: Some(eid),
+                data: update.clone(),
+            }]).unwrap();
 
-            // Track expected state: last asserted value per field
-            let mut expected: HashMap<String, Value> = updates[0].clone();
-
-            for update in &updates[1..] {
-                db.transact(vec![TxOp::Assert {
-                    entity_type: "Wide".to_string(),
-                    entity: Some(eid),
-                    data: update.clone(),
-                }]).await.unwrap();
-
-                for (k, v) in update {
-                    expected.insert(k.clone(), v.clone());
-                }
+            for (k, v) in update {
+                expected.insert(k.clone(), v.clone());
             }
+        }
 
-            let entity = db.get_entity(eid).await.unwrap().unwrap();
+        let entity = db.get_entity(eid).unwrap().unwrap();
 
-            for (field_name, expected_val) in &expected {
-                let key = format!("Wide/{}", field_name);
-                prop_assert_eq!(
-                    entity.get(&key), Some(expected_val),
-                    "field '{}' should be {:?}", field_name, expected_val
-                );
-            }
-            Ok(())
-        })?;
+        for (field_name, expected_val) in &expected {
+            let key = format!("Wide/{}", field_name);
+            prop_assert_eq!(
+                entity.get(&key), Some(expected_val),
+                "field '{}' should be {:?}", field_name, expected_val
+            );
+        }
     }
 }
 
 // ---------------------------------------------------------------------------
 // Property 3: Datom Count Monotonicity (Append-Only)
-//
-// The total number of datoms never decreases. Verified across a sequence
-// of multi-field updates with all value types.
 // ---------------------------------------------------------------------------
 
 proptest! {
@@ -373,44 +357,39 @@ proptest! {
 
     #[test]
     fn prop_datom_count_monotonic(updates in arb_wide_update_seq()) {
-        tokio_test::block_on(async {
-            let (db, _dir) = test_db().await;
-            db.define_type(wide_type()).await.unwrap();
+        let (db, _dir) = test_db();
+        db.define_type(wide_type()).unwrap();
 
-            let result = db.transact(vec![TxOp::Assert {
+        let result = db.transact(vec![TxOp::Assert {
+            entity_type: "Wide".to_string(),
+            entity: None,
+            data: updates[0].clone(),
+        }]).unwrap();
+        let eid = result.entity_ids[0];
+
+        let mut prev_count = data_datom_count(&db);
+
+        for update in &updates[1..] {
+            db.transact(vec![TxOp::Assert {
                 entity_type: "Wide".to_string(),
-                entity: None,
-                data: updates[0].clone(),
-            }]).await.unwrap();
-            let eid = result.entity_ids[0];
+                entity: Some(eid),
+                data: update.clone(),
+            }]).unwrap();
 
-            let mut prev_count = data_datom_count(&db).await;
-
-            for update in &updates[1..] {
-                db.transact(vec![TxOp::Assert {
-                    entity_type: "Wide".to_string(),
-                    entity: Some(eid),
-                    data: update.clone(),
-                }]).await.unwrap();
-
-                let new_count = data_datom_count(&db).await;
-                prop_assert!(
-                    new_count >= prev_count,
-                    "datom count decreased from {} to {} (append-only violated)",
-                    prev_count,
-                    new_count
-                );
-                prev_count = new_count;
-            }
-            Ok(())
-        })?;
+            let new_count = data_datom_count(&db);
+            prop_assert!(
+                new_count >= prev_count,
+                "datom count decreased from {} to {} (append-only violated)",
+                prev_count,
+                new_count
+            );
+            prev_count = new_count;
+        }
     }
 }
 
 // ---------------------------------------------------------------------------
 // Property 4: Idempotent Same-Value Update (all types)
-//
-// Updating any field to its current value produces zero new datoms.
 // ---------------------------------------------------------------------------
 
 proptest! {
@@ -418,46 +397,40 @@ proptest! {
 
     #[test]
     fn prop_idempotent_update(fields in arb_wide_fields()) {
-        tokio_test::block_on(async {
-            let (db, _dir) = test_db().await;
-            db.define_type(wide_type()).await.unwrap();
+        let (db, _dir) = test_db();
+        db.define_type(wide_type()).unwrap();
 
-            let result = db.transact(vec![TxOp::Assert {
-                entity_type: "Wide".to_string(),
-                entity: None,
-                data: fields.clone(),
-            }]).await.unwrap();
-            let eid = result.entity_ids[0];
+        let result = db.transact(vec![TxOp::Assert {
+            entity_type: "Wide".to_string(),
+            entity: None,
+            data: fields.clone(),
+        }]).unwrap();
+        let eid = result.entity_ids[0];
 
-            let count_before = data_datom_count(&db).await;
+        let count_before = data_datom_count(&db);
 
-            // Update to the SAME values
-            let update_result = db.transact(vec![TxOp::Assert {
-                entity_type: "Wide".to_string(),
-                entity: Some(eid),
-                data: fields.clone(),
-            }]).await.unwrap();
+        // Update to the SAME values
+        let update_result = db.transact(vec![TxOp::Assert {
+            entity_type: "Wide".to_string(),
+            entity: Some(eid),
+            data: fields.clone(),
+        }]).unwrap();
 
-            let count_after = data_datom_count(&db).await;
-            prop_assert_eq!(
-                count_before, count_after,
-                "same-value update should produce 0 new datoms, but count went {} -> {}",
-                count_before, count_after
-            );
-            prop_assert_eq!(
-                update_result.datom_count, 0,
-                "transaction should report 0 datoms for no-op"
-            );
-            Ok(())
-        })?;
+        let count_after = data_datom_count(&db);
+        prop_assert_eq!(
+            count_before, count_after,
+            "same-value update should produce 0 new datoms, but count went {} -> {}",
+            count_before, count_after
+        );
+        prop_assert_eq!(
+            update_result.datom_count, 0,
+            "transaction should report 0 datoms for no-op"
+        );
     }
 }
 
 // ---------------------------------------------------------------------------
 // Property 5: Time Travel Immutability
-//
-// The state visible at as_of(T) is frozen — later transactions don't
-// alter it. Tested with arbitrary value types.
 // ---------------------------------------------------------------------------
 
 proptest! {
@@ -468,70 +441,64 @@ proptest! {
         initial in arb_wide_fields(),
         later_updates in prop::collection::vec(arb_wide_fields(), 1..5)
     ) {
-        tokio_test::block_on(async {
-            let (db, _dir) = test_db().await;
-            db.define_type(wide_type()).await.unwrap();
+        let (db, _dir) = test_db();
+        db.define_type(wide_type()).unwrap();
 
-            let result = db.transact(vec![TxOp::Assert {
+        let result = db.transact(vec![TxOp::Assert {
+            entity_type: "Wide".to_string(),
+            entity: None,
+            data: initial.clone(),
+        }]).unwrap();
+        let eid = result.entity_ids[0];
+        let snapshot_tx = result.tx_id;
+
+        // Pick one field that was in the initial insert to query for
+        let (query_field, query_val) = initial.iter().next().unwrap();
+
+        let query_json = serde_json::json!({
+            "find": ["?e"],
+            "where": [
+                {"bind": "?e", "type": "Wide"}
+            ],
+            "as_of": snapshot_tx
+        });
+        let query = datalog_db::query::Query::from_json(&query_json).unwrap();
+        let baseline = db.query(&query).unwrap();
+        prop_assert_eq!(baseline.rows.len(), 1, "should find entity at snapshot tx");
+
+        // Apply later transactions
+        for update in &later_updates {
+            db.transact(vec![TxOp::Assert {
                 entity_type: "Wide".to_string(),
-                entity: None,
-                data: initial.clone(),
-            }]).await.unwrap();
-            let eid = result.entity_ids[0];
-            let snapshot_tx = result.tx_id;
+                entity: Some(eid),
+                data: update.clone(),
+            }]).unwrap();
+        }
 
-            // Pick one field that was in the initial insert to query for
-            let (query_field, query_val) = initial.iter().next().unwrap();
+        // as_of should still return exactly 1 entity
+        let after = db.query(&query).unwrap();
+        prop_assert_eq!(
+            after.rows.len(), 1,
+            "time travel should still find 1 entity"
+        );
 
-            let query_json = serde_json::json!({
-                "find": ["?e"],
-                "where": [
-                    {"bind": "?e", "type": "Wide"}
-                ],
-                "as_of": snapshot_tx
-            });
-            let query = datalog_db::query::Query::from_json(&query_json).unwrap();
-            let baseline = db.query(&query).await.unwrap();
-            prop_assert_eq!(baseline.rows.len(), 1, "should find entity at snapshot tx");
-
-            // Apply later transactions
-            for update in &later_updates {
-                db.transact(vec![TxOp::Assert {
-                    entity_type: "Wide".to_string(),
-                    entity: Some(eid),
-                    data: update.clone(),
-                }]).await.unwrap();
-            }
-
-            // as_of should still return exactly 1 entity
-            let after = db.query(&query).await.unwrap();
-            prop_assert_eq!(
-                after.rows.len(), 1,
-                "time travel should still find 1 entity"
-            );
-
-            // Also verify via get_entity + resolve_current_values at as_of
-            // by checking the raw datoms haven't been mutated
-            let datoms = db.entity_datoms(eid).await.unwrap();
-            let at_snapshot: Vec<_> = datoms.iter()
-                .filter(|d| d.tx <= snapshot_tx)
-                .collect();
-            // The initial field should appear as asserted
-            let attr = format!("Wide/{}", query_field);
-            let found = at_snapshot.iter().any(|d| {
-                d.attribute == attr && d.added && d.value == *query_val
-            });
-            prop_assert!(found, "initial field {}={:?} should be in datoms at snapshot", query_field, query_val);
-            Ok(())
-        })?;
+        // Also verify via get_entity + resolve_current_values at as_of
+        // by checking the raw datoms haven't been mutated
+        let datoms = db.entity_datoms(eid).unwrap();
+        let at_snapshot: Vec<_> = datoms.iter()
+            .filter(|d| d.tx <= snapshot_tx)
+            .collect();
+        // The initial field should appear as asserted
+        let attr = format!("Wide/{}", query_field);
+        let found = at_snapshot.iter().any(|d| {
+            d.attribute == attr && d.added && d.value == *query_val
+        });
+        prop_assert!(found, "initial field {}={:?} should be in datoms at snapshot", query_field, query_val);
     }
 }
 
 // ---------------------------------------------------------------------------
 // Property 6: Retract Removes Field (all types)
-//
-// After retracting a field, get_entity no longer includes it.
-// Other fields are unaffected.
 // ---------------------------------------------------------------------------
 
 proptest! {
@@ -542,54 +509,48 @@ proptest! {
         // Need at least 2 fields to retract one and keep one
         prop_assume!(fields.len() >= 2);
 
-        tokio_test::block_on(async {
-            let (db, _dir) = test_db().await;
-            db.define_type(wide_type()).await.unwrap();
+        let (db, _dir) = test_db();
+        db.define_type(wide_type()).unwrap();
 
-            let result = db.transact(vec![TxOp::Assert {
-                entity_type: "Wide".to_string(),
-                entity: None,
-                data: fields.clone(),
-            }]).await.unwrap();
-            let eid = result.entity_ids[0];
+        let result = db.transact(vec![TxOp::Assert {
+            entity_type: "Wide".to_string(),
+            entity: None,
+            data: fields.clone(),
+        }]).unwrap();
+        let eid = result.entity_ids[0];
 
-            // Retract the first field
-            let retract_field = fields.keys().next().unwrap().clone();
-            db.transact(vec![TxOp::Retract {
-                entity_type: "Wide".to_string(),
-                entity: eid,
-                fields: vec![retract_field.clone()],
-            }]).await.unwrap();
+        // Retract the first field
+        let retract_field = fields.keys().next().unwrap().clone();
+        db.transact(vec![TxOp::Retract {
+            entity_type: "Wide".to_string(),
+            entity: eid,
+            fields: vec![retract_field.clone()],
+        }]).unwrap();
 
-            let entity = db.get_entity(eid).await.unwrap().unwrap();
-            let retract_key = format!("Wide/{}", retract_field);
-            prop_assert!(
-                !entity.contains_key(&retract_key),
-                "retracted field '{}' should be gone, but found {:?}",
-                retract_field, entity.get(&retract_key)
-            );
+        let entity = db.get_entity(eid).unwrap().unwrap();
+        let retract_key = format!("Wide/{}", retract_field);
+        prop_assert!(
+            !entity.contains_key(&retract_key),
+            "retracted field '{}' should be gone, but found {:?}",
+            retract_field, entity.get(&retract_key)
+        );
 
-            // Other fields should remain
-            for (field_name, expected) in &fields {
-                if *field_name == retract_field {
-                    continue;
-                }
-                let key = format!("Wide/{}", field_name);
-                prop_assert_eq!(
-                    entity.get(&key), Some(expected),
-                    "non-retracted field '{}' should still be present", field_name
-                );
+        // Other fields should remain
+        for (field_name, expected) in &fields {
+            if *field_name == retract_field {
+                continue;
             }
-            Ok(())
-        })?;
+            let key = format!("Wide/{}", field_name);
+            prop_assert_eq!(
+                entity.get(&key), Some(expected),
+                "non-retracted field '{}' should still be present", field_name
+            );
+        }
     }
 }
 
 // ---------------------------------------------------------------------------
 // Property 7: Enum Variant Exclusivity (with partial Custom fields)
-//
-// After a sequence of variant changes, only the final variant's tag and
-// fields are visible. Old variant fields are fully cleaned up.
 // ---------------------------------------------------------------------------
 
 proptest! {
@@ -597,94 +558,89 @@ proptest! {
 
     #[test]
     fn prop_enum_variant_exclusivity(colors in arb_color_seq()) {
-        tokio_test::block_on(async {
-            let (db, _dir) = test_db().await;
-            db.define_enum(color_enum()).await.unwrap();
-            db.define_type(widget_type()).await.unwrap();
+        let (db, _dir) = test_db();
+        db.define_enum(color_enum()).unwrap();
+        db.define_type(widget_type()).unwrap();
 
+        let mut data = HashMap::new();
+        data.insert("name".to_string(), Value::String("w".to_string()));
+        data.insert("color".to_string(), colors[0].clone());
+        let result = db.transact(vec![TxOp::Assert {
+            entity_type: "Widget".to_string(),
+            entity: None,
+            data,
+        }]).unwrap();
+        let eid = result.entity_ids[0];
+
+        for color in &colors[1..] {
             let mut data = HashMap::new();
-            data.insert("name".to_string(), Value::String("w".to_string()));
-            data.insert("color".to_string(), colors[0].clone());
-            let result = db.transact(vec![TxOp::Assert {
+            data.insert("color".to_string(), color.clone());
+            db.transact(vec![TxOp::Assert {
                 entity_type: "Widget".to_string(),
-                entity: None,
+                entity: Some(eid),
                 data,
-            }]).await.unwrap();
-            let eid = result.entity_ids[0];
+            }]).unwrap();
+        }
 
-            for color in &colors[1..] {
-                let mut data = HashMap::new();
-                data.insert("color".to_string(), color.clone());
-                db.transact(vec![TxOp::Assert {
-                    entity_type: "Widget".to_string(),
-                    entity: Some(eid),
-                    data,
-                }]).await.unwrap();
-            }
+        let entity = db.get_entity(eid).unwrap().unwrap();
+        let last_color = colors.last().unwrap();
 
-            let entity = db.get_entity(eid).await.unwrap().unwrap();
-            let last_color = colors.last().unwrap();
+        let (expected_variant, expected_fields) = match last_color {
+            Value::String(s) => (s.clone(), HashMap::new()),
+            Value::Enum { variant, fields } => (variant.clone(), fields.clone()),
+            _ => panic!("unexpected color value"),
+        };
 
-            let (expected_variant, expected_fields) = match last_color {
-                Value::String(s) => (s.clone(), HashMap::new()),
-                Value::Enum { variant, fields } => (variant.clone(), fields.clone()),
-                _ => panic!("unexpected color value"),
-            };
+        // Tag should match
+        prop_assert_eq!(
+            entity.get("Widget/color/__tag"),
+            Some(&Value::String(expected_variant.clone())),
+            "tag should be '{}'", expected_variant
+        );
 
-            // Tag should match
+        // Expected variant fields should be present
+        for (fname, fval) in &expected_fields {
+            let key = format!("Widget/color.{}/{}", expected_variant, fname);
             prop_assert_eq!(
-                entity.get("Widget/color/__tag"),
-                Some(&Value::String(expected_variant.clone())),
-                "tag should be '{}'", expected_variant
+                entity.get(&key), Some(fval),
+                "expected field {} = {:?}", key, fval
             );
+        }
 
-            // Expected variant fields should be present
-            for (fname, fval) in &expected_fields {
-                let key = format!("Widget/color.{}/{}", expected_variant, fname);
-                prop_assert_eq!(
-                    entity.get(&key), Some(fval),
-                    "expected field {} = {:?}", key, fval
-                );
+        // Fields from OTHER variants should NOT be present
+        for variant in &["Red", "Green", "Custom"] {
+            if *variant == expected_variant {
+                continue;
             }
+            let stale: Vec<_> = entity.keys()
+                .filter(|k| k.starts_with(&format!("Widget/color.{}/", variant)))
+                .collect();
+            prop_assert!(
+                stale.is_empty(),
+                "stale fields from variant '{}' still present: {:?}",
+                variant, stale
+            );
+        }
 
-            // Fields from OTHER variants should NOT be present
-            for variant in &["Red", "Green", "Custom"] {
-                if *variant == expected_variant {
+        // If current variant is Custom, fields NOT in expected_fields should be gone
+        if expected_variant == "Custom" {
+            for f in &["r", "g", "b"] {
+                if expected_fields.contains_key(*f) {
                     continue;
                 }
-                let stale: Vec<_> = entity.keys()
-                    .filter(|k| k.starts_with(&format!("Widget/color.{}/", variant)))
-                    .collect();
+                let key = format!("Widget/color.Custom/{}", f);
                 prop_assert!(
-                    stale.is_empty(),
-                    "stale fields from variant '{}' still present: {:?}",
-                    variant, stale
+                    !entity.contains_key(&key),
+                    "Custom/{} was not asserted this time, should be retracted",
+                    f
                 );
             }
-
-            // If current variant is Custom, fields NOT in expected_fields should be gone
-            if expected_variant == "Custom" {
-                for f in &["r", "g", "b"] {
-                    if expected_fields.contains_key(*f) {
-                        continue;
-                    }
-                    let key = format!("Widget/color.Custom/{}", f);
-                    prop_assert!(
-                        !entity.contains_key(&key),
-                        "Custom/{} was not asserted this time, should be retracted",
-                        f
-                    );
-                }
-            }
-            Ok(())
-        })?;
+        }
     }
 }
 
 // ---------------------------------------------------------------------------
 // Property 8: Entity Independence (all types)
-//
-// Updating one entity doesn't affect another, even with same type/fields.
 // ---------------------------------------------------------------------------
 
 proptest! {
@@ -696,50 +652,44 @@ proptest! {
         b_fields in arb_wide_fields(),
         a_update in arb_wide_fields(),
     ) {
-        tokio_test::block_on(async {
-            let (db, _dir) = test_db().await;
-            db.define_type(wide_type()).await.unwrap();
+        let (db, _dir) = test_db();
+        db.define_type(wide_type()).unwrap();
 
-            let result_a = db.transact(vec![TxOp::Assert {
-                entity_type: "Wide".to_string(),
-                entity: None,
-                data: a_fields.clone(),
-            }]).await.unwrap();
-            let eid_a = result_a.entity_ids[0];
+        let result_a = db.transact(vec![TxOp::Assert {
+            entity_type: "Wide".to_string(),
+            entity: None,
+            data: a_fields.clone(),
+        }]).unwrap();
+        let eid_a = result_a.entity_ids[0];
 
-            let result_b = db.transact(vec![TxOp::Assert {
-                entity_type: "Wide".to_string(),
-                entity: None,
-                data: b_fields.clone(),
-            }]).await.unwrap();
-            let eid_b = result_b.entity_ids[0];
+        let result_b = db.transact(vec![TxOp::Assert {
+            entity_type: "Wide".to_string(),
+            entity: None,
+            data: b_fields.clone(),
+        }]).unwrap();
+        let eid_b = result_b.entity_ids[0];
 
-            // Update only entity A
-            db.transact(vec![TxOp::Assert {
-                entity_type: "Wide".to_string(),
-                entity: Some(eid_a),
-                data: a_update.clone(),
-            }]).await.unwrap();
+        // Update only entity A
+        db.transact(vec![TxOp::Assert {
+            entity_type: "Wide".to_string(),
+            entity: Some(eid_a),
+            data: a_update.clone(),
+        }]).unwrap();
 
-            // Entity B should be completely unaffected
-            let entity_b = db.get_entity(eid_b).await.unwrap().unwrap();
-            for (field_name, expected) in &b_fields {
-                let key = format!("Wide/{}", field_name);
-                prop_assert_eq!(
-                    entity_b.get(&key), Some(expected),
-                    "entity B's field '{}' should be unchanged", field_name
-                );
-            }
-            Ok(())
-        })?;
+        // Entity B should be completely unaffected
+        let entity_b = db.get_entity(eid_b).unwrap().unwrap();
+        for (field_name, expected) in &b_fields {
+            let key = format!("Wide/{}", field_name);
+            prop_assert_eq!(
+                entity_b.get(&key), Some(expected),
+                "entity B's field '{}' should be unchanged", field_name
+            );
+        }
     }
 }
 
 // ---------------------------------------------------------------------------
 // Property 9: f64 Sort Order Preserved
-//
-// The AVET index should maintain f64 sort order through the sign-bit
-// encoding. Insert multiple f64 values, scan the index, verify order.
 // ---------------------------------------------------------------------------
 
 proptest! {
@@ -751,45 +701,38 @@ proptest! {
         let values: Vec<f64> = values.into_iter().filter(|v| !v.is_nan()).collect();
         prop_assume!(values.len() >= 2);
 
-        tokio_test::block_on(async {
-            let (db, _dir) = test_db().await;
-            db.define_type(wide_type()).await.unwrap();
+        let (db, _dir) = test_db();
+        db.define_type(wide_type()).unwrap();
 
-            for val in &values {
-                let mut data = HashMap::new();
-                data.insert("f".to_string(), Value::F64(*val));
-                db.transact(vec![TxOp::Assert {
-                    entity_type: "Wide".to_string(),
-                    entity: None,
-                    data,
-                }]).await.unwrap();
-            }
+        for val in &values {
+            let mut data = HashMap::new();
+            data.insert("f".to_string(), Value::F64(*val));
+            db.transact(vec![TxOp::Assert {
+                entity_type: "Wide".to_string(),
+                entity: None,
+                data,
+            }]).unwrap();
+        }
 
-            // Every inserted value should roundtrip correctly
-            let datoms = db.all_datoms().await.unwrap();
-            let f_datoms: Vec<f64> = datoms.iter()
-                .filter(|d| d.attribute == "Wide/f" && d.added)
-                .filter_map(|d| if let Value::F64(v) = d.value { Some(v) } else { None })
-                .collect();
+        // Every inserted value should roundtrip correctly
+        let datoms = db.all_datoms().unwrap();
+        let f_datoms: Vec<f64> = datoms.iter()
+            .filter(|d| d.attribute == "Wide/f" && d.added)
+            .filter_map(|d| if let Value::F64(v) = d.value { Some(v) } else { None })
+            .collect();
 
-            for val in &values {
-                prop_assert!(
-                    f_datoms.contains(val),
-                    "f64 value {} should be in stored datoms, got {:?}",
-                    val, f_datoms
-                );
-            }
-            Ok(())
-        })?;
+        for val in &values {
+            prop_assert!(
+                f_datoms.contains(val),
+                "f64 value {} should be in stored datoms, got {:?}",
+                val, f_datoms
+            );
+        }
     }
 }
 
 // ---------------------------------------------------------------------------
 // Property 10: i64 Sort Order Preserved
-//
-// The AVET index should maintain i64 sort order through sign-bit encoding.
-// Insert several i64 values, verify encode→decode roundtrip preserves
-// the original value and lexicographic ordering.
 // ---------------------------------------------------------------------------
 
 proptest! {
@@ -797,34 +740,31 @@ proptest! {
 
     #[test]
     fn prop_i64_encoding_roundtrip(values in prop::collection::vec(arb_i64(), 2..10)) {
-        tokio_test::block_on(async {
-            let (db, _dir) = test_db().await;
-            db.define_type(wide_type()).await.unwrap();
+        let (db, _dir) = test_db();
+        db.define_type(wide_type()).unwrap();
 
-            for val in &values {
-                let mut data = HashMap::new();
-                data.insert("i".to_string(), Value::I64(*val));
-                db.transact(vec![TxOp::Assert {
-                    entity_type: "Wide".to_string(),
-                    entity: None,
-                    data,
-                }]).await.unwrap();
-            }
+        for val in &values {
+            let mut data = HashMap::new();
+            data.insert("i".to_string(), Value::I64(*val));
+            db.transact(vec![TxOp::Assert {
+                entity_type: "Wide".to_string(),
+                entity: None,
+                data,
+            }]).unwrap();
+        }
 
-            let datoms = db.all_datoms().await.unwrap();
-            let i_datoms: Vec<i64> = datoms.iter()
-                .filter(|d| d.attribute == "Wide/i" && d.added)
-                .filter_map(|d| if let Value::I64(v) = d.value { Some(v) } else { None })
-                .collect();
+        let datoms = db.all_datoms().unwrap();
+        let i_datoms: Vec<i64> = datoms.iter()
+            .filter(|d| d.attribute == "Wide/i" && d.added)
+            .filter_map(|d| if let Value::I64(v) = d.value { Some(v) } else { None })
+            .collect();
 
-            for val in &values {
-                prop_assert!(
-                    i_datoms.contains(val),
-                    "i64 value {} should roundtrip through storage, got {:?}",
-                    val, i_datoms
-                );
-            }
-            Ok(())
-        })?;
+        for val in &values {
+            prop_assert!(
+                i_datoms.contains(val),
+                "i64 value {} should roundtrip through storage, got {:?}",
+                val, i_datoms
+            );
+        }
     }
 }

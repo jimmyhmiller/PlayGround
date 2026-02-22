@@ -252,6 +252,34 @@ pub extern "C" fn scope_pending_clear(name_ptr: *const u8, name_len: u32) {
     with_engine(|engine| engine.scope_pending_clear(name))
 }
 
+// ── Tick (actor scope scheduling) ──
+
+#[unsafe(no_mangle)]
+pub extern "C" fn tick(budget: u32) -> u32 {
+    with_engine(|engine| engine.tick(budget as usize) as u32)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn scope_queue_count(name_ptr: *const u8, name_len: u32) -> u32 {
+    let name = unsafe {
+        let slice = std::slice::from_raw_parts(name_ptr, name_len as usize);
+        std::str::from_utf8(slice).expect("Invalid UTF-8")
+    };
+    with_engine(|engine| engine.scope_queue_count(name) as u32)
+}
+
+// ── Garbage collection ──
+
+#[unsafe(no_mangle)]
+pub extern "C" fn gc() {
+    with_engine(|engine| engine.gc())
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn term_count() -> u32 {
+    with_engine(|engine| engine.term_count() as u32)
+}
+
 // ── Memory access ──
 
 #[unsafe(no_mangle)]

@@ -1,0 +1,865 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Sokoban — PuzzleScript Dialect in Rules4</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: #1a1a2e;
+      color: #e0e0e0;
+      height: 100vh;
+      overflow: hidden;
+    }
+    .page {
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+      padding: 12px;
+      gap: 8px;
+    }
+    .header {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      flex-shrink: 0;
+    }
+    h1 { font-size: 20px; font-weight: 700; color: #f0f0f0; }
+    .subtitle { font-size: 12px; color: #888; }
+    .subtitle code {
+      background: #2a2a4a; padding: 2px 6px; border-radius: 3px;
+      color: #e94560; font-size: 11px;
+    }
+    .main {
+      display: flex;
+      gap: 12px;
+      flex: 1;
+      min-height: 0;
+    }
+    .editor-col {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      min-width: 0;
+    }
+    .tab-bar {
+      display: flex; gap: 0; margin-bottom: 0;
+    }
+    .tab-btn {
+      padding: 6px 16px;
+      font-size: 12px; font-weight: 600;
+      background: #12122a;
+      color: #666;
+      border: 1px solid #333;
+      border-bottom: none;
+      border-radius: 6px 6px 0 0;
+      cursor: pointer;
+      margin-right: 2px;
+    }
+    .tab-btn.active {
+      background: #1e1e2e;
+      color: #e0e0e0;
+      border-bottom: 1px solid #1e1e2e;
+      position: relative;
+      z-index: 1;
+    }
+    .editor-wrap {
+      flex: 1;
+      overflow: hidden;
+      border: 1px solid #333;
+      border-radius: 0 8px 8px 8px;
+      background: #1e1e2e;
+      position: relative;
+    }
+    .editor-pane {
+      position: absolute;
+      top: 0; left: 0; right: 0; bottom: 0;
+      display: none;
+    }
+    .editor-pane.active {
+      display: block;
+    }
+    .editor-wrap .cm-editor {
+      height: 100%;
+    }
+    .editor-wrap .cm-scroller {
+      overflow: auto;
+    }
+    .game-col {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 8px;
+      flex-shrink: 0;
+    }
+    .game-area {
+      background: #0f0f23;
+      border: 2px solid #333;
+      border-radius: 12px;
+      overflow: hidden;
+    }
+    .game-area svg { display: block; }
+    .controls { font-size: 11px; color: #666; text-align: center; }
+    .status-dot {
+      width: 8px; height: 8px; border-radius: 50%;
+      display: inline-block; margin-left: 8px; vertical-align: middle;
+    }
+    .status-dot.ok { background: #22c55e; }
+    .status-dot.err { background: #ef4444; }
+    .status-dot.loading { background: #f59e0b; }
+    .error-bar {
+      background: #3b1111; color: #f87171; border-radius: 6px;
+      padding: 6px 12px; font-size: 11px; margin-top: 4px;
+      font-family: 'SF Mono', monospace;
+      display: none; white-space: pre-wrap;
+      max-height: 60px; overflow: auto;
+    }
+    .error-bar.visible { display: block; }
+  </style>
+</head>
+<body>
+<div class="page">
+  <div class="header">
+    <h1>Sokoban <span class="status-dot loading" id="status"></span></h1>
+    <div class="subtitle">
+      Powered by PuzzleScript rule: <code>[&gt; player | crate] -&gt; [&gt; player | &gt; crate]</code>
+    </div>
+  </div>
+
+  <div class="main">
+    <div class="editor-col">
+      <div class="tab-bar">
+        <button class="tab-btn active" data-tab="game">Game</button>
+        <button class="tab-btn" data-tab="renderer">Engine / Renderer</button>
+      </div>
+      <div class="editor-wrap">
+        <div class="editor-pane active" id="editor-game"></div>
+        <div class="editor-pane" id="editor-renderer"></div>
+      </div>
+      <div class="error-bar" id="error"></div>
+    </div>
+    <div class="game-col">
+      <div class="game-area" id="game" tabindex="0"></div>
+      <div class="controls">Arrow keys to move &middot; R to restart &middot; N for next level</div>
+    </div>
+  </div>
+</div>
+
+<script type="module">
+import { Rules4 } from './bridge.js';
+
+// ── Default game program (split into two tabs) ──
+const GAME_CODE = `\
+# ──────────────────────────────────────────────
+# Sokoban — PuzzleScript dialect in Rules4
+# ──────────────────────────────────────────────
+
+# ── THE GAME RULE (PuzzleScript syntax!) ──
+fn game_rules() = [
+  [> player | crate] -> [> player | > crate]
+]
+
+# ── List helpers (cons-list) ──
+fn append(nil, ?ys) = ?ys
+fn append(cons(?h, ?t), ?ys) = cons(?h, append(?t, ?ys))
+
+# ── Target membership (search cons-list) ──
+fn is_target(?x, ?y) = find_target(target_list, ?x, ?y)
+fn find_target(nil, ?x, ?y) = false
+fn find_target(cons(pos(?tx, ?ty), ?rest), ?x, ?y) =
+  if ?tx == ?x then
+    if ?ty == ?y then true
+    else find_target(?rest, ?x, ?y)
+  else find_target(?rest, ?x, ?y)
+
+# ── Passability ──
+fn is_passable(floor) = true
+fn is_passable(?x) = false
+
+# ── Cell loading ──
+fn load_map(?rows) = load_map_y(?rows, 0)
+fn load_map_y(?rows, ?y) =
+  if ?y == vec_len(?rows) then 0
+  else {
+    load_map_x(vec_get(?rows, ?y), 0, ?y)
+    load_map_y(?rows, ?y + 1)
+  }
+fn load_map_x(?row, ?x, ?y) =
+  if ?x == vec_len(?row) then 0
+  else {
+    place(vec_get(?row, ?x), ?x, ?y)
+    load_map_x(?row, ?x + 1, ?y)
+  }
+
+fn place(w, ?x, ?y) = rule(cell(?x, ?y), wall)
+fn place(f, ?x, ?y) = rule(cell(?x, ?y), floor)
+fn place(p, ?x, ?y) = {
+  rule(cell(?x, ?y), player)
+  rule(player_x, ?x)
+  rule(player_y, ?y)
+}
+fn place(o, ?x, ?y) = rule(cell(?x, ?y), crate)
+fn place(t, ?x, ?y) = {
+  rule(cell(?x, ?y), floor)
+  rule(target_list, cons(pos(?x, ?y), target_list))
+}
+
+# ── Levels ──
+fn level(1) = {
+  rule(grid_w, 7) rule(grid_h, 5) rule(target_list, nil)
+  load_map([
+    [w, w, w, w, w, w, w],
+    [w, f, f, w, f, f, w],
+    [w, f, t, o, f, f, w],
+    [w, f, f, p, f, f, w],
+    [w, w, w, w, w, w, w]
+  ])
+}
+
+fn level(2) = {
+  rule(grid_w, 8) rule(grid_h, 6) rule(target_list, nil)
+  load_map([
+    [w, w, w, w, w, w, w, w],
+    [w, f, f, f, f, f, f, w],
+    [w, f, p, f, o, f, f, w],
+    [w, f, f, w, o, f, f, w],
+    [w, f, f, t, t, f, f, w],
+    [w, w, w, w, w, w, w, w]
+  ])
+}
+
+fn level(3) = {
+  rule(grid_w, 8) rule(grid_h, 8) rule(target_list, nil)
+  load_map([
+    [w, w, w, w, w, w, w, w],
+    [w, f, f, f, f, f, f, w],
+    [w, f, o, f, w, f, f, w],
+    [w, f, f, o, f, f, f, w],
+    [w, w, f, w, f, o, f, w],
+    [w, f, f, t, f, t, f, w],
+    [w, f, p, f, f, t, f, w],
+    [w, w, w, w, w, w, w, w]
+  ])
+}
+
+# ── Initialization ──
+fn init() = {
+  rule(current_level, 1)
+  rule(moves, 0)
+  rule(pushes, 0)
+  rule(screen, playing)
+  rule(num_levels, 3)
+  level(1)
+}
+
+# ── Event handling ──
+fn handle_event(keydown, right) = do_move(1, 0)
+fn handle_event(keydown, left) = do_move(-1, 0)
+fn handle_event(keydown, up) = do_move(0, -1)
+fn handle_event(keydown, down) = do_move(0, 1)
+fn handle_event(keydown, restart) = restart_level()
+fn handle_event(keydown, next_level) = next_level()
+fn handle_event(?a, ?b) = 0
+
+# ── Movement ──
+fn do_move(?dx, ?dy) =
+  if screen == won then 0
+  else do_move_result(?dx, ?dy, try_rules(game_rules(), ?dx, ?dy, 0))
+
+fn do_move_result(?dx, ?dy, true) = 0
+fn do_move_result(?dx, ?dy, ?other) =
+  move_to(?dx, ?dy, cell(player_x + ?dx, player_y + ?dy))
+
+fn move_to(?dx, ?dy, floor) = {
+  move_player(?dx, ?dy)
+  rule(moves, moves + 1)
+  0
+}
+fn move_to(?dx, ?dy, ?other) = 0
+
+fn move_player(?dx, ?dy) = {
+  rule(cell(player_x, player_y), floor)
+  rule(cell(player_x + ?dx, player_y + ?dy), player)
+  rule(player_x, player_x + ?dx)
+  rule(player_y, player_y + ?dy)
+}
+
+# ── Generic PuzzleScript Rule Engine ──
+# Interprets arrow(cells(...), cells(...)) terms as spatial rules.
+# Supports: dir_right (>), dir_left (<), ellipsis (...), any cell count.
+# Direction constraints: > means "moving in scan direction", < means "opposite".
+# Rules are tried in all 4 scan directions automatically.
+
+fn cell_obj(dir_right(?x)) = ?x
+fn cell_obj(dir_left(?x)) = ?x
+fn cell_obj(?x) = ?x
+fn cell_dir(dir_right(?x)) = 1
+fn cell_dir(dir_left(?x)) = -1
+fn cell_dir(?x) = 0
+fn is_ellipsis(ellipsis) = true
+fn is_ellipsis(?x) = false
+
+fn first_dir(?cells, ?i) =
+  if ?i == vec_len(?cells) then 0
+  else if cell_dir(vec_get(?cells, ?i)) != 0 then cell_dir(vec_get(?cells, ?i))
+  else first_dir(?cells, ?i + 1)
+
+fn dir_ok(?fd, ?dx, ?dy, ?sdx, ?sdy) =
+  if ?fd == 0 then true
+  else if ?fd == 1 then if ?dx == ?sdx then if ?dy == ?sdy then true else false else false
+  else if ?dx == (0 - ?sdx) then if ?dy == (0 - ?sdy) then true else false else false
+
+fn scan_sdx(0) = 1
+fn scan_sdx(1) = 0
+fn scan_sdx(2) = 0 - 1
+fn scan_sdx(3) = 0
+fn scan_sdy(0) = 0
+fn scan_sdy(1) = 1
+fn scan_sdy(2) = 0
+fn scan_sdy(3) = 0 - 1
+
+fn count_non_ellipsis(?cells, ?i) =
+  if ?i == vec_len(?cells) then 0
+  else if is_ellipsis(vec_get(?cells, ?i)) then count_non_ellipsis(?cells, ?i + 1)
+  else 1 + count_non_ellipsis(?cells, ?i + 1)
+
+fn match_lhs(?cells, ?i, ?ax, ?ay, ?sdx, ?sdy, ?off) =
+  if ?i == vec_len(?cells) then ?off
+  else if is_ellipsis(vec_get(?cells, ?i)) then
+    match_ellipsis(?cells, ?i + 1, ?ax, ?ay, ?sdx, ?sdy, ?off)
+  else if cell_obj(vec_get(?cells, ?i)) == cell(?ax + ?off * ?sdx, ?ay + ?off * ?sdy) then
+    match_lhs(?cells, ?i + 1, ?ax, ?ay, ?sdx, ?sdy, ?off + 1)
+  else false
+
+fn match_ellipsis(?cells, ?next_i, ?ax, ?ay, ?sdx, ?sdy, ?off) =
+  if ?next_i == vec_len(?cells) then ?off
+  else if cell_obj(vec_get(?cells, ?next_i)) == cell(?ax + ?off * ?sdx, ?ay + ?off * ?sdy) then
+    match_lhs(?cells, ?next_i + 1, ?ax, ?ay, ?sdx, ?sdy, ?off + 1)
+  else if ?off > 20 then false
+  else match_ellipsis(?cells, ?next_i, ?ax, ?ay, ?sdx, ?sdy, ?off + 1)
+
+fn check_dest(?rhs, ?i, ?ax, ?ay, ?sdx, ?sdy, ?off, ?n, ?gap) =
+  if ?i == vec_len(?rhs) then true
+  else if is_ellipsis(vec_get(?rhs, ?i)) then
+    check_dest(?rhs, ?i + 1, ?ax, ?ay, ?sdx, ?sdy, ?off + ?gap, ?n, ?gap)
+  else check_one_dest(vec_get(?rhs, ?i), ?i, ?ax, ?ay, ?sdx, ?sdy, ?off, ?rhs, ?n, ?gap)
+
+fn check_one_dest(?cell, ?i, ?ax, ?ay, ?sdx, ?sdy, ?off, ?rhs, ?n, ?gap) =
+  if cell_dir(?cell) == 0 then
+    check_dest(?rhs, ?i + 1, ?ax, ?ay, ?sdx, ?sdy, ?off + 1, ?n, ?gap)
+  else if (?off + cell_dir(?cell)) >= 0 then
+    if (?off + cell_dir(?cell)) < ?n then
+      check_dest(?rhs, ?i + 1, ?ax, ?ay, ?sdx, ?sdy, ?off + 1, ?n, ?gap)
+    else
+      if is_passable(cell(?ax + (?off + cell_dir(?cell)) * ?sdx, ?ay + (?off + cell_dir(?cell)) * ?sdy)) then
+        check_dest(?rhs, ?i + 1, ?ax, ?ay, ?sdx, ?sdy, ?off + 1, ?n, ?gap)
+      else false
+  else
+    if is_passable(cell(?ax + (?off + cell_dir(?cell)) * ?sdx, ?ay + (?off + cell_dir(?cell)) * ?sdy)) then
+      check_dest(?rhs, ?i + 1, ?ax, ?ay, ?sdx, ?sdy, ?off + 1, ?n, ?gap)
+    else false
+
+fn clear_cells(?lhs, ?i, ?ax, ?ay, ?sdx, ?sdy, ?off, ?gap) =
+  if ?i == vec_len(?lhs) then 0
+  else if is_ellipsis(vec_get(?lhs, ?i)) then
+    clear_cells(?lhs, ?i + 1, ?ax, ?ay, ?sdx, ?sdy, ?off + ?gap, ?gap)
+  else {
+    rule(cell(?ax + ?off * ?sdx, ?ay + ?off * ?sdy), floor)
+    clear_cells(?lhs, ?i + 1, ?ax, ?ay, ?sdx, ?sdy, ?off + 1, ?gap)
+  }
+
+fn place_cells(?rhs, ?i, ?ax, ?ay, ?sdx, ?sdy, ?off, ?gap) =
+  if ?i == vec_len(?rhs) then 0
+  else if is_ellipsis(vec_get(?rhs, ?i)) then
+    place_cells(?rhs, ?i + 1, ?ax, ?ay, ?sdx, ?sdy, ?off + ?gap, ?gap)
+  else {
+    rule(cell(?ax + (?off + cell_dir(vec_get(?rhs, ?i))) * ?sdx, ?ay + (?off + cell_dir(vec_get(?rhs, ?i))) * ?sdy), cell_obj(vec_get(?rhs, ?i)))
+    place_cells(?rhs, ?i + 1, ?ax, ?ay, ?sdx, ?sdy, ?off + 1, ?gap)
+  }
+
+fn update_player_pos(?rhs, ?i, ?ax, ?ay, ?sdx, ?sdy, ?off, ?gap) =
+  if ?i == vec_len(?rhs) then 0
+  else if is_ellipsis(vec_get(?rhs, ?i)) then
+    update_player_pos(?rhs, ?i + 1, ?ax, ?ay, ?sdx, ?sdy, ?off + ?gap, ?gap)
+  else if cell_obj(vec_get(?rhs, ?i)) == player then {
+    rule(player_x, ?ax + (?off + cell_dir(vec_get(?rhs, ?i))) * ?sdx)
+    rule(player_y, ?ay + (?off + cell_dir(vec_get(?rhs, ?i))) * ?sdy)
+  }
+  else update_player_pos(?rhs, ?i + 1, ?ax, ?ay, ?sdx, ?sdy, ?off + 1, ?gap)
+
+fn apply_rule(arrow(?lhs, ?rhs), ?dx, ?dy) =
+  try_scan(?lhs, ?rhs, ?dx, ?dy, first_dir(?lhs, 0), 0)
+
+fn try_scan(?lhs, ?rhs, ?dx, ?dy, ?fd, 4) = false
+fn try_scan(?lhs, ?rhs, ?dx, ?dy, ?fd, ?si) =
+  if dir_ok(?fd, ?dx, ?dy, scan_sdx(?si), scan_sdy(?si)) then
+    try_match(?lhs, ?rhs, ?dx, ?dy, ?fd, ?si, match_lhs(?lhs, 0, player_x, player_y, scan_sdx(?si), scan_sdy(?si), 0))
+  else try_scan(?lhs, ?rhs, ?dx, ?dy, ?fd, ?si + 1)
+
+fn try_match(?lhs, ?rhs, ?dx, ?dy, ?fd, ?si, false) =
+  try_scan(?lhs, ?rhs, ?dx, ?dy, ?fd, ?si + 1)
+fn try_match(?lhs, ?rhs, ?dx, ?dy, ?fd, ?si, ?n) =
+  apply_with_gap(?lhs, ?rhs, scan_sdx(?si), scan_sdy(?si), ?n, ?n - count_non_ellipsis(?lhs, 0))
+
+fn apply_with_gap(?lhs, ?rhs, ?sdx, ?sdy, ?n, ?gap) =
+  if check_dest(?rhs, 0, player_x, player_y, ?sdx, ?sdy, 0, ?n, ?gap) == true then {
+    clear_cells(?lhs, 0, player_x, player_y, ?sdx, ?sdy, 0, ?gap)
+    place_cells(?rhs, 0, player_x, player_y, ?sdx, ?sdy, 0, ?gap)
+    update_player_pos(?rhs, 0, player_x, player_y, ?sdx, ?sdy, 0, ?gap)
+    true
+  } else false
+fn apply_rule(?other, ?dx, ?dy) = false
+
+# ── Rule application — driven by game_rules() terms! ──
+fn try_rules(?rules, ?dx, ?dy, ?i) =
+  if ?i == vec_len(?rules) then false
+  else try_one_rule(vec_get(?rules, ?i), ?rules, ?dx, ?dy, ?i)
+
+fn try_one_rule(?rule, ?rules, ?dx, ?dy, ?i) =
+  if apply_rule(?rule, ?dx, ?dy) == true then {
+    rule(moves, moves + 1)
+    rule(pushes, pushes + 1)
+    check_win()
+    true
+  }
+  else try_rules(?rules, ?dx, ?dy, ?i + 1)
+
+# ── Win checking ──
+fn check_win() =
+  if all_on_targets(target_list) then rule(screen, won) else 0
+
+fn all_on_targets(nil) = true
+fn all_on_targets(cons(pos(?x, ?y), ?rest)) =
+  if cell(?x, ?y) == crate then all_on_targets(?rest) else false
+
+# ── Level navigation ──
+fn restart_level() = {
+  rule(moves, 0)
+  rule(pushes, 0)
+  rule(screen, playing)
+  level(current_level)
+}
+
+fn next_level() =
+  if screen == won then
+    if current_level < num_levels then {
+      rule(current_level, current_level + 1)
+      rule(moves, 0)
+      rule(pushes, 0)
+      rule(screen, playing)
+      level(current_level)
+    }
+    else 0
+  else 0
+
+init()
+`;
+
+const RENDERER_CODE = `\
+# ──────────────────────────────────────────────
+# Engine / Renderer
+# ──────────────────────────────────────────────
+
+# ── Rendering helpers ──
+fn floor_rect(?x, ?y) = element("rect",
+  [attr("x", ?x * 64 + 1), attr("y", ?y * 64 + 1),
+   attr("width", 62), attr("height", 62),
+   attr("rx", 4), attr("fill", "#3a3a4a")], [])
+
+fn target_marker(?x, ?y) = cons(
+  element("circle",
+    [attr("cx", ?x * 64 + 32), attr("cy", ?y * 64 + 32),
+     attr("r", 8), attr("fill", "none"),
+     attr("stroke", "#e74c3c"), attr("stroke-width", 3),
+     attr("opacity", "0.7")], []),
+  cons(element("circle",
+    [attr("cx", ?x * 64 + 32), attr("cy", ?y * 64 + 32),
+     attr("r", 3), attr("fill", "#e74c3c"),
+     attr("opacity", "0.7")], []), nil))
+
+# ── Cell rendering (returns cons-list of SVG elements) ──
+fn cell_elems(?x, ?y) = tile(?x, ?y, cell(?x, ?y), is_target(?x, ?y))
+
+# Wall
+fn tile(?x, ?y, wall, ?t) = cons(element("rect",
+  [attr("x", ?x * 64 + 1), attr("y", ?y * 64 + 1),
+   attr("width", 62), attr("height", 62),
+   attr("rx", 4), attr("fill", "#5D4E37")], []), nil)
+
+# Floor + target
+fn tile(?x, ?y, floor, true) =
+  cons(floor_rect(?x, ?y), target_marker(?x, ?y))
+
+# Plain floor
+fn tile(?x, ?y, floor, ?t) = cons(floor_rect(?x, ?y), nil)
+
+# Player
+fn tile(?x, ?y, player, ?t) = cons(floor_rect(?x, ?y),
+  cons(element("circle",
+    [attr("cx", ?x * 64 + 32), attr("cy", ?y * 64 + 32),
+     attr("r", 22), attr("fill", "#3498DB")], []),
+  cons(element("circle",
+    [attr("cx", ?x * 64 + 32), attr("cy", ?y * 64 + 32),
+     attr("r", 16), attr("fill", "#5DADE2")], []),
+  cons(element("circle",
+    [attr("cx", ?x * 64 + 26), attr("cy", ?y * 64 + 28),
+     attr("r", 3), attr("fill", "white")], []),
+  cons(element("circle",
+    [attr("cx", ?x * 64 + 38), attr("cy", ?y * 64 + 28),
+     attr("r", 3), attr("fill", "white")], []),
+  nil)))))
+
+# Crate on target (green)
+fn tile(?x, ?y, crate, true) = cons(floor_rect(?x, ?y),
+  cons(element("circle",
+    [attr("cx", ?x * 64 + 32), attr("cy", ?y * 64 + 32),
+     attr("r", 8), attr("fill", "none"),
+     attr("stroke", "#e74c3c"), attr("stroke-width", 3),
+     attr("opacity", "0.3")], []),
+  cons(element("rect",
+    [attr("x", ?x * 64 + 8), attr("y", ?y * 64 + 8),
+     attr("width", 48), attr("height", 48),
+     attr("rx", 6), attr("fill", "#27ae60")], []),
+  cons(element("rect",
+    [attr("x", ?x * 64 + 14), attr("y", ?y * 64 + 14),
+     attr("width", 36), attr("height", 36),
+     attr("rx", 4), attr("fill", "#2ecc71"),
+     attr("opacity", "0.4")], []),
+  nil))))
+
+# Crate (orange)
+fn tile(?x, ?y, crate, ?t) = cons(floor_rect(?x, ?y),
+  cons(element("rect",
+    [attr("x", ?x * 64 + 8), attr("y", ?y * 64 + 8),
+     attr("width", 48), attr("height", 48),
+     attr("rx", 6), attr("fill", "#E67E22")], []),
+  cons(element("rect",
+    [attr("x", ?x * 64 + 14), attr("y", ?y * 64 + 14),
+     attr("width", 36), attr("height", 36),
+     attr("rx", 4), attr("fill", "#F39C12"),
+     attr("opacity", "0.4")], []),
+  nil)))
+
+# ── Grid rendering ──
+fn render_cells(?x, ?y) =
+  if ?y == grid_h then nil
+  else if ?x == grid_w then render_cells(0, ?y + 1)
+  else append(cell_elems(?x, ?y), render_cells(?x + 1, ?y))
+
+# ── HUD ──
+fn render_hud() = cons(
+  element("rect",
+    [attr("x", 0), attr("y", grid_h * 64),
+     attr("width", grid_w * 64), attr("height", 48),
+     attr("fill", "#1a1a2e")], []),
+  cons(element("text",
+    [attr("x", 10), attr("y", grid_h * 64 + 30),
+     attr("fill", "#888"), attr("font-size", 14),
+     attr("font-family", "sans-serif")],
+    [text("Level " ++ current_level)]),
+  cons(element("text",
+    [attr("x", grid_w * 32), attr("y", grid_h * 64 + 30),
+     attr("text-anchor", "middle"),
+     attr("fill", "#888"), attr("font-size", 14),
+     attr("font-family", "sans-serif")],
+    [text("Moves: " ++ moves)]),
+  cons(element("text",
+    [attr("x", grid_w * 64 - 10), attr("y", grid_h * 64 + 30),
+     attr("text-anchor", "end"),
+     attr("fill", "#888"), attr("font-size", 14),
+     attr("font-family", "sans-serif")],
+    [text("Pushes: " ++ pushes)]),
+  nil))))
+
+# ── Win overlay ──
+fn render_win() = render_win_screen(screen)
+
+fn render_win_screen(won) = cons(
+  element("rect",
+    [attr("x", 0), attr("y", 0),
+     attr("width", grid_w * 64), attr("height", grid_h * 64),
+     attr("fill", "rgba(0,0,0,0.65)")], []),
+  cons(element("text",
+    [attr("x", grid_w * 32), attr("y", grid_h * 32 - 10),
+     attr("text-anchor", "middle"),
+     attr("font-size", 32), attr("fill", "#22c55e"),
+     attr("font-family", "sans-serif"),
+     attr("font-weight", "bold")],
+    [text("Level Complete!")]),
+  cons(element("text",
+    [attr("x", grid_w * 32), attr("y", grid_h * 32 + 20),
+     attr("text-anchor", "middle"),
+     attr("font-size", 16), attr("fill", "#ccc"),
+     attr("font-family", "sans-serif")],
+    [text("Moves: " ++ moves ++ "  Pushes: " ++ pushes)]),
+  cons(element("text",
+    [attr("x", grid_w * 32), attr("y", grid_h * 32 + 48),
+     attr("text-anchor", "middle"),
+     attr("font-size", 13), attr("fill", "#888"),
+     attr("font-family", "sans-serif")],
+    [text(win_message())]),
+  nil))))
+
+fn render_win_screen(?other) = nil
+
+fn win_message() =
+  if current_level < num_levels then "Press N for next level"
+  else "All levels complete! Press R to replay."
+
+# ── Main render function ──
+fn render() = @dom element("svg",
+  [attr("viewBox", "0 0 " ++ (grid_w * 64) ++ " " ++ (grid_h * 64 + 48)),
+   attr("width", grid_w * 64),
+   attr("height", grid_h * 64 + 48),
+   attr("style", "background:#2c2c3a")],
+  append(render_cells(0, 0), append(render_hud(), render_win())))
+`;
+
+// ── Minimal DOM renderer (handles both vec and cons lists) ──
+
+const SVG_NS = "http://www.w3.org/2000/svg";
+const SVG_TAGS = new Set([
+  "svg","g","rect","circle","ellipse","line","polyline","polygon",
+  "path","text","tspan","image","defs","clipPath","use",
+]);
+
+function termToString(r4, id) {
+  const tag = r4.termTag(id);
+  if (tag === 0) return String(r4.termNum(id));
+  if (tag === 3) return String(r4.termFloat(id));
+  if (tag === 1) return r4.termSymName(id);
+  return r4.display(id);
+}
+
+function forEachItem(r4, listTerm, fn) {
+  const tag = r4.termTag(listTerm);
+  if (tag === 1 && r4.termSymName(listTerm) === "nil") return;
+  if (tag !== 2) return;
+  const headId = r4.termCallHead(listTerm);
+  if (r4.termTag(headId) !== 1) return;
+  const headName = r4.termSymName(headId);
+  if (headName === "vec") {
+    const arity = r4.termCallArity(listTerm);
+    for (let i = 0; i < arity; i++) fn(r4.termCallArg(listTerm, i));
+  } else if (headName === "cons") {
+    let cur = listTerm;
+    while (true) {
+      const t = r4.termTag(cur);
+      if (t === 1 && r4.termSymName(cur) === "nil") break;
+      if (t !== 2) break;
+      const h = r4.termCallHead(cur);
+      if (r4.termTag(h) !== 1 || r4.termSymName(h) !== "cons") break;
+      fn(r4.termCallArg(cur, 0));
+      cur = r4.termCallArg(cur, 1);
+    }
+  }
+}
+
+function renderTerm(r4, termId, svgCtx = false) {
+  const tag = r4.termTag(termId);
+  if (tag === 0) return document.createTextNode(String(r4.termNum(termId)));
+  if (tag === 3) return document.createTextNode(String(r4.termFloat(termId)));
+  if (tag === 1) return document.createTextNode(r4.termSymName(termId));
+  const headId = r4.termCallHead(termId);
+  if (r4.termTag(headId) !== 1) return document.createTextNode(r4.display(termId));
+  const headName = r4.termSymName(headId);
+  if (headName === "text") {
+    return document.createTextNode(termToString(r4, r4.termCallArg(termId, 0)));
+  }
+  if (headName === "element") {
+    const tagName = termToString(r4, r4.termCallArg(termId, 0));
+    const isSvg = tagName === "svg" || svgCtx || SVG_TAGS.has(tagName);
+    const el = isSvg
+      ? document.createElementNS(SVG_NS, tagName)
+      : document.createElement(tagName);
+    forEachItem(r4, r4.termCallArg(termId, 1), (attrTerm) => {
+      const ah = r4.termCallHead(attrTerm);
+      if (r4.termTag(ah) === 1 && r4.termSymName(ah) === "attr") {
+        const name = termToString(r4, r4.termCallArg(attrTerm, 0));
+        const val = termToString(r4, r4.termCallArg(attrTerm, 1));
+        el.setAttribute(name, val);
+      }
+    });
+    forEachItem(r4, r4.termCallArg(termId, 2), (childTerm) => {
+      el.appendChild(renderTerm(r4, childTerm, isSvg));
+    });
+    return el;
+  }
+  return document.createTextNode(r4.display(termId));
+}
+
+// ── Elements ──
+
+const statusEl = document.getElementById('status');
+const errorEl = document.getElementById('error');
+const gameEl = document.getElementById('game');
+
+// ── WASM module cache ──
+
+let cachedModule = null;
+
+async function freshR4() {
+  if (!cachedModule) {
+    const resp = await fetch('./rules4.wasm');
+    const bytes = await resp.arrayBuffer();
+    cachedModule = await WebAssembly.compile(bytes);
+  }
+  const instance = await WebAssembly.instantiate(cachedModule, {});
+  const r4 = new Rules4(instance);
+  r4.wasm.engine_new();
+  return r4;
+}
+
+// ── CodeMirror 6 ──
+
+const { EditorView, basicSetup } = await import('https://esm.sh/codemirror@6.0.1');
+const { oneDark } = await import('https://esm.sh/@codemirror/theme-one-dark@6.1.2');
+const { StreamLanguage } = await import('https://esm.sh/@codemirror/language@6.10.8');
+
+const rules4Lang = StreamLanguage.define({
+  token(stream) {
+    if (stream.match('#')) { stream.skipToEnd(); return 'comment'; }
+    if (stream.match('"')) {
+      while (!stream.eol()) { if (stream.next() === '"') break; }
+      return 'string';
+    }
+    if (stream.match(/^-?\d+(\.\d+)?/)) return 'number';
+    if (stream.match(/^\?[a-zA-Z_]\w*/)) return 'variable-2';
+    if (stream.match(/^@[a-zA-Z_]\w*/)) return 'meta';
+    if (stream.match(/^(fn|rule|if|then|else|emit)\b/)) return 'keyword';
+    if (stream.match(/^(=>|->|==|!=|>=|<=|>|<|\+\+)/)) return 'operator';
+    if (stream.match(/^(retract|query_all|floor|abs|random|mod|true|false|nil|cons|vec_get|vec_len|vec_push)\b/)) return 'atom';
+    if (stream.match(/^[a-zA-Z_]\w*/)) return 'variable';
+    if (stream.match(/^[()[\]{},=|]/)) return 'bracket';
+    stream.next();
+    return null;
+  },
+});
+
+const gameEditor = new EditorView({
+  doc: GAME_CODE,
+  extensions: [
+    basicSetup,
+    oneDark,
+    rules4Lang,
+    EditorView.updateListener.of(update => {
+      if (update.docChanged) scheduleRestart();
+    }),
+  ],
+  parent: document.getElementById('editor-game'),
+});
+
+const rendererEditor = new EditorView({
+  doc: RENDERER_CODE,
+  extensions: [
+    basicSetup,
+    oneDark,
+    rules4Lang,
+    EditorView.updateListener.of(update => {
+      if (update.docChanged) scheduleRestart();
+    }),
+  ],
+  parent: document.getElementById('editor-renderer'),
+});
+
+// ── Tab switching ──
+
+const editors = { game: gameEditor, renderer: rendererEditor };
+const tabBtns = document.querySelectorAll('.tab-btn');
+const editorPanes = document.querySelectorAll('.editor-pane');
+
+tabBtns.forEach(btn => {
+  btn.addEventListener('click', () => {
+    const tab = btn.dataset.tab;
+    tabBtns.forEach(b => b.classList.toggle('active', b === btn));
+    editorPanes.forEach(p => p.classList.toggle('active', p.id === `editor-${tab}`));
+    if (editors[tab]) editors[tab].requestMeasure();
+  });
+});
+
+// ── Game state ──
+
+let currentR4 = null;
+let handleEventSym = null;
+let renderSym = null;
+let keydownSym = null;
+
+function doRender() {
+  if (!currentR4) return;
+  const call = currentR4.call(renderSym, []);
+  currentR4.eval(call);
+  const pending = currentR4.scopeTakePending("dom");
+  if (pending.length === 0) return;
+  const dom = renderTerm(currentR4, pending[pending.length - 1]);
+  gameEl.innerHTML = '';
+  gameEl.appendChild(dom);
+}
+
+function sendKey(name) {
+  if (!currentR4) return;
+  const sym = currentR4.sym(name);
+  const call = currentR4.call(handleEventSym, [keydownSym, sym]);
+  currentR4.eval(call);
+  doRender();
+}
+
+// ── Restart on code change ──
+
+let restartTimer = null;
+let generation = 0;
+
+function scheduleRestart() {
+  clearTimeout(restartTimer);
+  restartTimer = setTimeout(restart, 600);
+}
+
+async function restart() {
+  const thisGen = ++generation;
+  statusEl.className = 'status-dot loading';
+
+  try {
+    const r4 = await freshR4();
+    if (thisGen !== generation) return;
+
+    const code = rendererEditor.state.doc.toString() + '\n' + gameEditor.state.doc.toString();
+    r4.eval(r4.loadProgram(code));
+    if (thisGen !== generation) return;
+
+    currentR4 = r4;
+    handleEventSym = r4.sym("handle_event");
+    renderSym = r4.sym("render");
+    keydownSym = r4.sym("keydown");
+
+    doRender();
+    errorEl.classList.remove('visible');
+    statusEl.className = 'status-dot ok';
+  } catch (e) {
+    if (thisGen !== generation) return;
+    errorEl.textContent = e.message;
+    errorEl.classList.add('visible');
+    statusEl.className = 'status-dot err';
+  }
+}
+
+// ── Key event wiring ──
+
+const KEY_MAP = {
+  ArrowUp: 'up', ArrowDown: 'down', ArrowLeft: 'left', ArrowRight: 'right',
+  w: 'up', s: 'down', a: 'left', d: 'right',
+};
+
+document.addEventListener('keydown', (e) => {
+  if (e.target.closest('.cm-editor')) return;
+  if (e.key === 'r' || e.key === 'R') { sendKey('restart'); return; }
+  if (e.key === 'n' || e.key === 'N') { sendKey('next_level'); return; }
+  const dir = KEY_MAP[e.key];
+  if (dir) { e.preventDefault(); sendKey(dir); }
+});
+
+// ── Initial boot ──
+
+await restart();
+</script>
+</body>
+</html>

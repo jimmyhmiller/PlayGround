@@ -1,11 +1,40 @@
 use crate::term::*;
 use std::cell::RefCell;
+use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::rc::Rc;
 
 // ── Scope Handler ──
 
 pub trait ScopeHandler {
     fn try_eval(&mut self, store: &mut TermStore, term: TermId) -> Option<TermId>;
+}
+
+// ── Scope ──
+// An independent actor with its own dynamic rules, work queue, and pending buffer.
+
+pub struct Scope {
+    pub name: String,
+    pub dynamic_rules: Vec<(TermId, TermId)>,
+    pub dynamic_rules_map: HashMap<TermId, TermId>,
+    pub work_queue: VecDeque<TermId>,
+    pub handler: Option<Box<dyn ScopeHandler>>,
+    pub pending: Rc<RefCell<Vec<TermId>>>,
+    pub output_only: bool, // true = buffer-only (DOM), false = full actor
+}
+
+impl Scope {
+    pub fn new(name: String, output_only: bool) -> Self {
+        Scope {
+            name,
+            dynamic_rules: Vec::new(),
+            dynamic_rules_map: HashMap::new(),
+            work_queue: VecDeque::new(),
+            handler: None,
+            pending: Rc::new(RefCell::new(Vec::new())),
+            output_only,
+        }
+    }
 }
 
 // ── Browser/DOM Scope Handler ──

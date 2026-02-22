@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::fmt;
 
@@ -42,10 +43,19 @@ pub struct TermStore {
     call_dedup: HashMap<[u32; 6], TermId>,
     symbols: Vec<String>,
     sym_dedup: HashMap<String, SymId>,
+    transient_sym_pool: Vec<SymId>,
+    transient_sym_next: usize,
 }
 
 impl TermStore {
     pub fn new() -> Self {
+        let mut symbols = Vec::new();
+        let mut transient_sym_pool = Vec::with_capacity(16);
+        for _ in 0..16 {
+            let id = SymId(symbols.len() as u32);
+            symbols.push(String::new());
+            transient_sym_pool.push(id);
+        }
         TermStore {
             terms: Vec::with_capacity(1024),
             args_pool: Vec::with_capacity(2048),
@@ -55,9 +65,24 @@ impl TermStore {
             float_dedup: HashMap::new(),
             sym_term_dedup: HashMap::new(),
             call_dedup: HashMap::new(),
-            symbols: Vec::new(),
+            symbols,
             sym_dedup: HashMap::new(),
+            transient_sym_pool,
+            transient_sym_next: 0,
         }
+    }
+
+    /// Allocate a transient symbol term: overwrites a pooled SymId's name and
+    /// creates a fresh (non-deduped) TermId so the vdom sees changes between frames.
+    pub fn transient_sym_term(&mut self, content: String) -> TermId {
+        let pool_idx = self.transient_sym_next % self.transient_sym_pool.len();
+        self.transient_sym_next += 1;
+        let sym_id = self.transient_sym_pool[pool_idx];
+        self.symbols[sym_id.0 as usize] = content;
+        // Fresh TermId (no dedup) so vdom sees changes between frames
+        let term_id = TermId(self.terms.len() as u32);
+        self.terms.push(TermData::Sym(sym_id));
+        term_id
     }
 
     #[inline]
@@ -156,6 +181,152 @@ impl TermStore {
         }
     }
 
+    pub fn term_count(&self) -> usize {
+        self.terms.len()
+    }
+
+    /// Total ordering on terms for canonical sorting of sets and map keys.
+    /// Num < Float < Sym < Call. Within each: natural ordering.
+    pub fn term_cmp(&self, a: TermId, b: TermId) -> Ordering {
+        if a == b { return Ordering::Equal; }
+        let ta = self.get(a);
+        let tb = self.get(b);
+        match (ta, tb) {
+            (TermData::Num(na), TermData::Num(nb)) => na.cmp(&nb),
+            (TermData::Num(_), _) => Ordering::Less,
+            (_, TermData::Num(_)) => Ordering::Greater,
+
+            (TermData::Float(fa), TermData::Float(fb)) => {
+                f64::from_bits(fa).partial_cmp(&f64::from_bits(fb)).unwrap_or(Ordering::Equal)
+            }
+            (TermData::Float(_), _) => Ordering::Less,
+            (_, TermData::Float(_)) => Ordering::Greater,
+
+            (TermData::Sym(sa), TermData::Sym(sb)) => {
+                self.sym_name(sa).cmp(self.sym_name(sb))
+            }
+            (TermData::Sym(_), _) => Ordering::Less,
+            (_, TermData::Sym(_)) => Ordering::Greater,
+
+            (TermData::Call { head: ha, args_start: asa, args_len: ala },
+             TermData::Call { head: hb, args_start: asb, args_len: alb }) => {
+                let hcmp = self.term_cmp(ha, hb);
+                if hcmp != Ordering::Equal { return hcmp; }
+                let lcmp = ala.cmp(&alb);
+                if lcmp != Ordering::Equal { return lcmp; }
+                for i in 0..ala as usize {
+                    let aa = self.args_pool[asa as usize + i];
+                    let ab = self.args_pool[asb as usize + i];
+                    let c = self.term_cmp(aa, ab);
+                    if c != Ordering::Equal { return c; }
+                }
+                Ordering::Equal
+            }
+        }
+    }
+
+    /// Mark-compact garbage collection.  Takes root TermIds, compacts the
+    /// store, and returns a remap table (indexed by old TermId.0).
+    pub fn gc(&mut self, roots: &[TermId]) -> Vec<TermId> {
+        let n = self.terms.len();
+        let mut marked = vec![false; n];
+        let mut stack: Vec<u32> = Vec::with_capacity(roots.len() * 2);
+
+        for root in roots {
+            let i = root.0 as usize;
+            if i < n && !marked[i] {
+                stack.push(root.0);
+            }
+        }
+
+        // Mark phase — BFS through Call children
+        while let Some(idx) = stack.pop() {
+            let i = idx as usize;
+            if i >= n || marked[i] { continue; }
+            marked[i] = true;
+            if let TermData::Call { head, args_start, args_len } = self.terms[i] {
+                stack.push(head.0);
+                for j in 0..args_len as usize {
+                    stack.push(self.args_pool[args_start as usize + j].0);
+                }
+            }
+        }
+
+        // Build remap table
+        let mut remap = vec![TermId(u32::MAX); n];
+        let mut new_count = 0u32;
+        for (old_idx, &is_marked) in marked.iter().enumerate() {
+            if is_marked {
+                remap[old_idx] = TermId(new_count);
+                new_count += 1;
+            }
+        }
+
+        // Compact terms and args_pool
+        let mut new_terms = Vec::with_capacity(new_count as usize);
+        let mut new_args_pool = Vec::new();
+
+        for (old_idx, &is_marked) in marked.iter().enumerate() {
+            if !is_marked { continue; }
+            match self.terms[old_idx] {
+                TermData::Num(val) => new_terms.push(TermData::Num(val)),
+                TermData::Float(bits) => new_terms.push(TermData::Float(bits)),
+                TermData::Sym(s) => new_terms.push(TermData::Sym(s)),
+                TermData::Call { head, args_start, args_len } => {
+                    let new_head = remap[head.0 as usize];
+                    let new_start = new_args_pool.len() as u32;
+                    for j in 0..args_len as usize {
+                        let old_arg = self.args_pool[args_start as usize + j];
+                        new_args_pool.push(remap[old_arg.0 as usize]);
+                    }
+                    new_terms.push(TermData::Call {
+                        head: new_head, args_start: new_start, args_len,
+                    });
+                }
+            }
+        }
+
+        self.terms = new_terms;
+        self.args_pool = new_args_pool;
+
+        // Rebuild all dedup maps and caches from the compacted store
+        self.num_dedup.clear();
+        self.float_dedup.clear();
+        self.sym_term_dedup.clear();
+        self.call_dedup.clear();
+        self.num_cache_valid = 0;
+        self.transient_sym_next = 0;
+
+        for (idx, term) in self.terms.iter().enumerate() {
+            let tid = TermId(idx as u32);
+            match *term {
+                TermData::Num(val) => {
+                    if val >= 0 && (val as usize) < NUM_CACHE_SIZE {
+                        self.num_cache[val as usize] = tid;
+                        self.num_cache_valid |= 1u64 << (val as usize);
+                    } else {
+                        self.num_dedup.insert(val, tid);
+                    }
+                }
+                TermData::Float(bits) => { self.float_dedup.insert(bits, tid); }
+                TermData::Sym(s) => { self.sym_term_dedup.entry(s).or_insert(tid); }
+                TermData::Call { head, args_start, args_len } => {
+                    if args_len <= 4 {
+                        let mut key = [0u32; 6];
+                        key[0] = args_len as u32;
+                        key[1] = head.0;
+                        for i in 0..args_len as usize {
+                            key[i + 2] = self.args_pool[args_start as usize + i].0;
+                        }
+                        self.call_dedup.insert(key, tid);
+                    }
+                }
+            }
+        }
+
+        remap
+    }
+
     pub fn display(&self, id: TermId) -> TermDisplay<'_> {
         TermDisplay { store: self, id }
     }
@@ -180,13 +351,53 @@ impl fmt::Display for TermDisplay<'_> {
             }
             TermData::Sym(s) => write!(f, "{}", self.store.sym_name(s)),
             TermData::Call { head, args_start, args_len } => {
-                // quote(x) displays transparently as x
-                if args_len == 1 {
-                    if let TermData::Sym(s) = self.store.get(head) {
-                        if self.store.sym_name(s) == "quote" {
-                            let inner = self.store.args_pool[args_start as usize];
-                            return write!(f, "{}", self.store.display(inner));
+                if let TermData::Sym(s) = self.store.get(head) {
+                    let name = self.store.sym_name(s);
+                    // quote(x) displays transparently as x
+                    if name == "quote" && args_len == 1 {
+                        let inner = self.store.args_pool[args_start as usize];
+                        return write!(f, "{}", self.store.display(inner));
+                    }
+                    // vec(...) displays as [...]
+                    if name == "vec" {
+                        write!(f, "[")?;
+                        for i in 0..args_len as usize {
+                            if i > 0 { write!(f, ", ")?; }
+                            let arg = self.store.args_pool[args_start as usize + i];
+                            write!(f, "{}", self.store.display(arg))?;
                         }
+                        return write!(f, "]");
+                    }
+                    // set(...) displays as #{...}
+                    if name == "set" {
+                        write!(f, "#{{")?;
+                        for i in 0..args_len as usize {
+                            if i > 0 { write!(f, ", ")?; }
+                            let arg = self.store.args_pool[args_start as usize + i];
+                            write!(f, "{}", self.store.display(arg))?;
+                        }
+                        return write!(f, "}}");
+                    }
+                    // map(entry(k,v), ...) displays as {:k v ...}
+                    if name == "map" {
+                        write!(f, "{{")?;
+                        for i in 0..args_len as usize {
+                            if i > 0 { write!(f, " ")?; }
+                            let arg = self.store.args_pool[args_start as usize + i];
+                            if let TermData::Call { head: eh, args_start: eas, args_len: 2 } = self.store.get(arg) {
+                                if let TermData::Sym(es) = self.store.get(eh) {
+                                    if self.store.sym_name(es) == "entry" {
+                                        let k = self.store.args_pool[eas as usize];
+                                        let v = self.store.args_pool[eas as usize + 1];
+                                        write!(f, "{} {}", self.store.display(k), self.store.display(v))?;
+                                        continue;
+                                    }
+                                }
+                            }
+                            // fallback: display the arg directly
+                            write!(f, "{}", self.store.display(arg))?;
+                        }
+                        return write!(f, "}}");
                     }
                 }
                 write!(f, "{}(", self.store.display(head))?;

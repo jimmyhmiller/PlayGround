@@ -151,6 +151,49 @@
         test("map(double, [1,2,3]) = [2,4,6]", r4.termToJS(result), [2, 4, 6]);
       }
 
+      // Test 11: scope isolation — emit to actor scope, tick, query_all per scope
+      {
+        r4.reset();
+        // Load rules that both scopes can use
+        r4.loadProgram(`
+          fn count(nil) = 0
+          fn count(cons(?h, ?t)) = 1 + count(?t)
+          0
+        `);
+
+        // Assert dynamic rules in main scope
+        const counterSym = r4.sym("counter");
+        const valSym = r4.sym("val");
+        const one = r4.num(1);
+        const two = r4.num(2);
+        const mainVal = r4.call(valSym, [one]);
+        r4.assertRule(counterSym, mainVal);
+
+        // Emit rule() to actor scope "physics" — pushes to work queue
+        const emitSym = r4.sym("emit");
+        const physicsSym = r4.sym("physics");
+        const ruleSym = r4.sym("rule");
+        const physicsVal = r4.call(valSym, [two]);
+        const ruleCall = r4.call(ruleSym, [counterSym, physicsVal]);
+        const emitCall = r4.call(emitSym, [physicsSym, ruleCall]);
+        r4.eval(emitCall);
+
+        // Should have 1 item in physics work queue
+        test("physics queue has 1 item", r4.scopeQueueCount("physics"), 1);
+
+        // Tick to process the physics scope's work item
+        const processed = r4.tick(10);
+        test("tick processed 1 item", processed, 1);
+        test("physics queue empty after tick", r4.scopeQueueCount("physics"), 0);
+
+        // Main scope's counter should still be val(1) — not affected by physics
+        const qa = r4.sym("query_all");
+        const qaCall = r4.call(qa, [valSym]);
+        const mainResult = r4.eval(qaCall);
+        const mainCount = r4.termToJS(mainResult);
+        test("main scope has val(1)", Array.isArray(mainCount) && mainCount.length === 1, true);
+      }
+
       results.innerHTML += `<hr><div style="font-size:1.2em">${passed} passed, ${failed} failed</div>`;
 
     } catch (e) {

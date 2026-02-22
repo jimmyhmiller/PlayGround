@@ -23,6 +23,7 @@ pub enum Token {
     RBrace,
     LBracket,
     RBracket,
+    HashBrace,  // #{
     Comma,
     Colon,
     Str(String),
@@ -41,6 +42,8 @@ pub enum Token {
     Star,
     Slash,
     Percent,
+    Pipe,      // |
+    Ellipsis,  // ...
     Eof,
 }
 
@@ -68,6 +71,10 @@ impl Lexer {
         loop {
             while self.peek().is_whitespace() { self.advance(); }
             if self.peek() == '#' {
+                // #{ is a HashBrace token, not a comment
+                if self.chars.get(self.pos + 1).copied() == Some('{') {
+                    break;
+                }
                 while self.peek() != '\n' && self.peek() != '\0' { self.advance(); }
             } else {
                 break;
@@ -166,6 +173,11 @@ impl Lexer {
             '}' => Token::RBrace,
             '[' => Token::LBracket,
             ']' => Token::RBracket,
+            '#' => {
+                if self.peek() == '{' { self.advance(); Token::HashBrace }
+                else { panic!("Unexpected '#' — expected '#{{' for set literal") }
+            }
+            '|' => Token::Pipe,
             ',' => Token::Comma,
             ':' => Token::Colon,
             '+' => {
@@ -196,6 +208,19 @@ impl Lexer {
                 else if self.peek() == '=' { self.advance(); Token::EqEq }
                 else { Token::Eq }
             }
+            '.' => {
+                if self.peek() == '.' {
+                    self.advance();
+                    if self.peek() == '.' {
+                        self.advance();
+                        Token::Ellipsis
+                    } else {
+                        panic!("Expected '...' (ellipsis)")
+                    }
+                } else {
+                    panic!("Unexpected '.'")
+                }
+            }
             _ => panic!("Unexpected character: '{}'", c),
         }
     }
@@ -217,6 +242,7 @@ impl Lexer {
 pub struct Program {
     pub rules: Vec<Rule>,
     pub meta_rules: Vec<(Rule, String)>, // (rule, target_scope_name)
+    pub emit_scopes: Vec<String>,        // scope names used via @scope in expressions
     pub expr: Pattern,
 }
 
@@ -226,11 +252,12 @@ pub struct Parser<'a> {
     store: &'a mut TermStore,
     clause_vars: HashMap<String, VarId>,
     next_var: u32,
+    emit_scopes: Vec<String>,
 }
 
 impl<'a> Parser<'a> {
     pub fn new(tokens: Vec<Token>, store: &'a mut TermStore) -> Self {
-        Parser { tokens, pos: 0, store, clause_vars: HashMap::new(), next_var: 0 }
+        Parser { tokens, pos: 0, store, clause_vars: HashMap::new(), next_var: 0, emit_scopes: Vec::new() }
     }
 
     fn peek(&self) -> &Token {
@@ -308,9 +335,11 @@ impl<'a> Parser<'a> {
         }
         rules.extend(main_rules);
 
+        let emit_scopes = std::mem::take(&mut self.emit_scopes);
         Program {
             rules,
             meta_rules,
+            emit_scopes,
             expr: last_expr.expect("No expression to evaluate"),
         }
     }
@@ -327,13 +356,27 @@ impl<'a> Parser<'a> {
         self.expect(Token::LParen);
         let args = self.parse_expr_list_until(Token::RParen);
         self.expect(Token::RParen);
+
+        // Parse optional where-guards: fn foo(?x, ?y) where ?x > 0, ?y > 0 = ...
+        let guards = if matches!(self.peek(), Token::Ident(s) if s == "where") {
+            self.advance(); // consume 'where'
+            let mut guards = vec![self.parse_expr()];
+            while *self.peek() == Token::Comma {
+                self.advance();
+                guards.push(self.parse_expr());
+            }
+            guards
+        } else {
+            vec![]
+        };
+
         self.expect(Token::Eq);
 
         let name_sym = self.store.sym(&name);
         let lhs = Pattern::Call(Box::new(Pattern::Sym(name_sym)), args);
         let rhs = self.parse_expr();
 
-        (name, Clause { lhs, rhs })
+        (name, Clause { lhs, rhs, guards })
     }
 
     fn parse_rule_decl(&mut self) -> (Rule, bool, String) {
@@ -363,7 +406,7 @@ impl<'a> Parser<'a> {
             let lhs = self.parse_expr();
             self.expect(Token::FatArrow);
             let rhs = self.parse_expr();
-            clauses.push(Clause { lhs, rhs });
+            clauses.push(Clause { lhs, rhs, guards: vec![] });
         }
         self.expect(Token::RBrace);
 
@@ -443,11 +486,32 @@ impl<'a> Parser<'a> {
                 let inner_id = v.0 - outer_next_var;
                 Pattern::Call(Box::new(Pattern::Sym(pvar_sym)), vec![Pattern::Num(inner_id as i64)])
             }
+            Pattern::Wildcard | Pattern::WildSpread => pat.clone(),
             Pattern::Var(_) => pat.clone(),
+            Pattern::Spread(v) if v.0 >= outer_next_var => {
+                let inner_id = v.0 - outer_next_var;
+                // Reify spread var as __pvar(N) wrapped in a Spread-like marker
+                // For now, spreads in nested rules are uncommon; reify as Call pattern
+                Pattern::Call(Box::new(Pattern::Sym(pvar_sym)), vec![Pattern::Num(inner_id as i64)])
+            }
+            Pattern::Spread(_) => pat.clone(),
             Pattern::Call(head, args) => {
                 Pattern::Call(
                     Box::new(self.reify_inner_vars(head, outer_next_var, pvar_sym)),
                     args.iter().map(|a| self.reify_inner_vars(a, outer_next_var, pvar_sym)).collect(),
+                )
+            }
+            Pattern::Map(entries) => {
+                Pattern::Map(
+                    entries.iter().map(|(k, v)| {
+                        (self.reify_inner_vars(k, outer_next_var, pvar_sym),
+                         self.reify_inner_vars(v, outer_next_var, pvar_sym))
+                    }).collect(),
+                )
+            }
+            Pattern::Set(elems) => {
+                Pattern::Set(
+                    elems.iter().map(|e| self.reify_inner_vars(e, outer_next_var, pvar_sym)).collect(),
                 )
             }
             _ => pat.clone(),
@@ -482,7 +546,19 @@ impl<'a> Parser<'a> {
             let if_sym = self.store.sym("if");
             return Pattern::Call(Box::new(Pattern::Sym(if_sym)), vec![cond, then_branch, else_branch]);
         }
-        self.parse_concat()
+        self.parse_arrow()
+    }
+
+    fn parse_arrow(&mut self) -> Pattern {
+        let left = self.parse_concat();
+        if *self.peek() == Token::Arrow {
+            self.advance();
+            let right = self.parse_arrow(); // right-associative
+            let s = self.store.sym("arrow");
+            Pattern::Call(Box::new(Pattern::Sym(s)), vec![left, right])
+        } else {
+            left
+        }
     }
 
     fn parse_concat(&mut self) -> Pattern {
@@ -591,6 +667,26 @@ impl<'a> Parser<'a> {
         match tok {
             Token::Num(n) => { self.pos += 1; Pattern::Num(n) }
             Token::Float(f) => { self.pos += 1; Pattern::Float(f.to_bits()) }
+            Token::Gt => {
+                // Prefix >: > x → dir_right(x) (unary direction marker)
+                self.pos += 1;
+                let inner = self.parse_atom();
+                let s = self.store.sym("dir_right");
+                Pattern::Call(Box::new(Pattern::Sym(s)), vec![inner])
+            }
+            Token::Lt => {
+                // Prefix <: < x → dir_left(x) (unary direction marker)
+                self.pos += 1;
+                let inner = self.parse_atom();
+                let s = self.store.sym("dir_left");
+                Pattern::Call(Box::new(Pattern::Sym(s)), vec![inner])
+            }
+            Token::Ellipsis => {
+                // Standalone ... → ellipsis symbol (for PuzzleScript cell patterns)
+                self.pos += 1;
+                let s = self.store.sym("ellipsis");
+                Pattern::Sym(s)
+            }
             Token::Minus => {
                 // Unary minus: -3, -3.5, or -(expr) → sub(0, expr)
                 self.pos += 1;
@@ -603,6 +699,10 @@ impl<'a> Parser<'a> {
                         Pattern::Call(Box::new(Pattern::Sym(s)), vec![Pattern::Num(0), inner])
                     }
                 }
+            }
+            Token::Ident(ref s) if s == "_" => {
+                self.pos += 1;
+                Pattern::Wildcard
             }
             Token::Ident(s) => {
                 self.pos += 1;
@@ -629,6 +729,10 @@ impl<'a> Parser<'a> {
                 let sym = self.store.sym(&s);
                 Pattern::Sym(sym)
             }
+            Token::Var(ref name) if name == "_" => {
+                self.pos += 1;
+                Pattern::Wildcard
+            }
             Token::Var(name) => {
                 self.pos += 1;
                 let v = self.get_var(&name);
@@ -648,6 +752,11 @@ impl<'a> Parser<'a> {
             }
             Token::LBrace => {
                 self.pos += 1;
+                // Disambiguate: if next is Keyword, }, or ?var, it's a map literal
+                if matches!(self.peek(), Token::Keyword(_) | Token::RBrace | Token::Var(_)) {
+                    return self.parse_map_literal();
+                }
+                // Otherwise block: seq of expressions
                 let mut exprs = Vec::new();
                 while *self.peek() != Token::RBrace {
                     exprs.push(self.parse_expr());
@@ -661,25 +770,95 @@ impl<'a> Parser<'a> {
                 }
                 result
             }
-            Token::LBracket => {
+            Token::HashBrace => {
+                // Set literal: #{elem, elem, ...} — produces Pattern::Set for subset matching
                 self.pos += 1;
-                let nil_sym = self.store.sym("nil");
-                let cons_sym = self.store.sym("cons");
-                if *self.peek() == Token::RBracket {
+                if *self.peek() == Token::RBrace {
                     self.advance();
-                    return Pattern::Sym(nil_sym);
+                    return Pattern::Set(vec![]);
                 }
                 let mut elems = vec![self.parse_expr()];
+                // Check for spread
+                if *self.peek() == Token::Ellipsis {
+                    self.advance();
+                    let last = elems.pop().unwrap();
+                    match last {
+                        Pattern::Var(v) => elems.push(Pattern::Spread(v)),
+                        Pattern::Wildcard => elems.push(Pattern::WildSpread),
+                        _ => panic!("Spread '...' can only follow a variable (?x...) or wildcard (_...)"),
+                    }
+                    self.expect(Token::RBrace);
+                    return Pattern::Set(elems);
+                }
                 while *self.peek() == Token::Comma {
                     self.advance();
                     elems.push(self.parse_expr());
+                    if *self.peek() == Token::Ellipsis {
+                        self.advance();
+                        let last = elems.pop().unwrap();
+                        match last {
+                            Pattern::Var(v) => elems.push(Pattern::Spread(v)),
+                            Pattern::Wildcard => elems.push(Pattern::WildSpread),
+                            _ => panic!("Spread '...' can only follow a variable (?x...) or wildcard (_...)"),
+                        }
+                        break;
+                    }
+                }
+                self.expect(Token::RBrace);
+                Pattern::Set(elems)
+            }
+            Token::LBracket => {
+                // [elem, elem, ...] → vec(...)  (comma-separated, existing)
+                // [elem | elem | ...] → cells(...) (pipe-separated, new)
+                self.pos += 1;
+                let vec_sym = self.store.sym("vec");
+                if *self.peek() == Token::RBracket {
+                    self.advance();
+                    return Pattern::Call(Box::new(Pattern::Sym(vec_sym)), vec![]);
+                }
+                let first = self.parse_expr();
+                // Check for spread on first element
+                if *self.peek() == Token::Ellipsis {
+                    self.advance();
+                    let mut elems = Vec::new();
+                    match first {
+                        Pattern::Var(v) => elems.push(Pattern::Spread(v)),
+                        Pattern::Wildcard => elems.push(Pattern::WildSpread),
+                        _ => panic!("Spread '...' can only follow a variable (?x...) or wildcard (_...)"),
+                    }
+                    self.expect(Token::RBracket);
+                    return Pattern::Call(Box::new(Pattern::Sym(vec_sym)), elems);
+                }
+                // Check for pipe → cells(...)
+                if *self.peek() == Token::Pipe {
+                    let cells_sym = self.store.sym("cells");
+                    let mut elems = vec![first];
+                    while *self.peek() == Token::Pipe {
+                        self.advance();
+                        elems.push(self.parse_expr());
+                    }
+                    self.expect(Token::RBracket);
+                    return Pattern::Call(Box::new(Pattern::Sym(cells_sym)), elems);
+                }
+                // Comma-separated → vec(...)
+                let mut elems = vec![first];
+                while *self.peek() == Token::Comma {
+                    self.advance();
+                    elems.push(self.parse_expr());
+                    // Check for spread on the element just parsed
+                    if *self.peek() == Token::Ellipsis {
+                        self.advance();
+                        let last = elems.pop().unwrap();
+                        match last {
+                            Pattern::Var(v) => elems.push(Pattern::Spread(v)),
+                            Pattern::Wildcard => elems.push(Pattern::WildSpread),
+                            _ => panic!("Spread '...' can only follow a variable (?x...) or wildcard (_...)"),
+                        }
+                        break;
+                    }
                 }
                 self.expect(Token::RBracket);
-                let mut result = Pattern::Sym(nil_sym);
-                for elem in elems.into_iter().rev() {
-                    result = Pattern::Call(Box::new(Pattern::Sym(cons_sym)), vec![elem, result]);
-                }
-                result
+                Pattern::Call(Box::new(Pattern::Sym(vec_sym)), elems)
             }
             Token::KwIf => {
                 // Handled in parse_expr, but can appear as atom if parenthesized
@@ -695,6 +874,9 @@ impl<'a> Parser<'a> {
             Token::Scope(name) => {
                 // @scope_name expr → emit(scope_name_sym, expr)
                 self.pos += 1;
+                if !self.emit_scopes.contains(&name) {
+                    self.emit_scopes.push(name.clone());
+                }
                 let scope_sym = self.store.sym(&name);
                 let expr = self.parse_expr();
                 let emit_sym = self.store.sym("emit");
@@ -709,10 +891,43 @@ impl<'a> Parser<'a> {
             return vec![];
         }
         let mut list = vec![self.parse_expr()];
+        if *self.peek() == Token::Ellipsis {
+            self.advance();
+            let last = list.pop().unwrap();
+            match last {
+                Pattern::Var(v) => list.push(Pattern::Spread(v)),
+                Pattern::Wildcard => list.push(Pattern::WildSpread),
+                _ => panic!("Spread '...' can only follow a variable (?x...) or wildcard (_...)"),
+            }
+            return list;
+        }
         while *self.peek() == Token::Comma {
             self.advance();
             list.push(self.parse_expr());
+            if *self.peek() == Token::Ellipsis {
+                self.advance();
+                let last = list.pop().unwrap();
+                match last {
+                    Pattern::Var(v) => list.push(Pattern::Spread(v)),
+                    Pattern::Wildcard => list.push(Pattern::WildSpread),
+                    _ => panic!("Spread '...' can only follow a variable (?x...) or wildcard (_...)"),
+                }
+                break;
+            }
         }
         list
+    }
+
+    /// Parse map literal body after the opening `{` has been consumed.
+    /// Expects `:key expr` pairs until `}`. No commas between entries.
+    fn parse_map_literal(&mut self) -> Pattern {
+        let mut entries: Vec<(Pattern, Pattern)> = Vec::new();
+        while *self.peek() != Token::RBrace {
+            let key = self.parse_expr();
+            let val = self.parse_expr();
+            entries.push((key, val));
+        }
+        self.expect(Token::RBrace);
+        Pattern::Map(entries)
     }
 }

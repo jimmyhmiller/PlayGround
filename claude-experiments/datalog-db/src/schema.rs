@@ -94,7 +94,7 @@ impl EnumTypeDef {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct SchemaRegistry {
     types: HashMap<std::string::String, EntityTypeDef>,
     enums: HashMap<std::string::String, EnumTypeDef>,

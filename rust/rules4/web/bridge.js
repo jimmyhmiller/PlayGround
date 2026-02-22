@@ -221,6 +221,30 @@ export class Rules4 {
     return { head: this.termToJS(headId), args };
   }
 
+  // ── Actor scope scheduling ──
+
+  tick(budget = 1) {
+    return this.wasm.tick(budget);
+  }
+
+  scopeQueueCount(name) {
+    const [ptr, len] = this._writeString(name);
+    const count = this.wasm.scope_queue_count(ptr, len);
+    this.wasm.free_string(ptr, len);
+    return count;
+  }
+
+  gc() {
+    this.wasm.gc();
+    // All TermIds are invalidated by compaction — clear caches
+    this._symCache.clear();
+    this._nameCache.clear();
+  }
+
+  termCount() {
+    return this.wasm.term_count();
+  }
+
   reset() {
     this.wasm.engine_reset();
     this._symCache.clear();

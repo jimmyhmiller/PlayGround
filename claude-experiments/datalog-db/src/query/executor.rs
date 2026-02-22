@@ -3,7 +3,8 @@ use std::collections::HashMap;
 use crate::datom::{Datom, EntityId, TxId, Value};
 use crate::index;
 use crate::query::{Pattern, Query, WhereClause};
-use crate::storage::StorageBackend;
+use crate::schema::{FieldType, SchemaRegistry};
+use crate::storage::TxnOps;
 
 /// A set of variable bindings produced during query execution.
 type Bindings = HashMap<String, Value>;
@@ -15,10 +16,11 @@ pub struct QueryResult {
     pub rows: Vec<Vec<Value>>,
 }
 
-/// Execute a query against the storage backend.
-pub async fn execute_query(
-    storage: &dyn StorageBackend,
+/// Execute a query inside a transaction.
+pub fn execute_query(
+    txn: &dyn TxnOps,
     query: &Query,
+    schema: &SchemaRegistry,
 ) -> Result<QueryResult, String> {
     let mut binding_sets: Vec<Bindings> = vec![HashMap::new()];
 
@@ -26,7 +28,8 @@ pub async fn execute_query(
         let mut next_binding_sets = Vec::new();
 
         for bindings in &binding_sets {
-            let matches = evaluate_clause(storage, clause, bindings, query.as_of).await?;
+            let matches =
+                evaluate_clause(txn, clause, bindings, query.as_of, schema)?;
             next_binding_sets.extend(matches);
         }
 
@@ -58,11 +61,12 @@ pub async fn execute_query(
 
 /// Evaluate a single where clause against current bindings.
 /// Returns extended binding sets for each matching entity.
-async fn evaluate_clause(
-    storage: &dyn StorageBackend,
+fn evaluate_clause(
+    txn: &dyn TxnOps,
     clause: &WhereClause,
     bindings: &Bindings,
     as_of: Option<TxId>,
+    schema: &SchemaRegistry,
 ) -> Result<Vec<Bindings>, String> {
     // Check if the entity variable is already bound
     let bound_entity = bindings.get(&clause.bind).and_then(|v| {
@@ -77,15 +81,34 @@ async fn evaluate_clause(
         // Entity already bound — just check this one
         vec![eid]
     } else {
-        // Find all entities of this type via AVET index on __type
-        find_entities_of_type(storage, &clause.entity_type, as_of).await?
+        // Try to use AVET index for constant or already-bound patterns
+        let indexable = find_indexable_patterns(clause, bindings, schema);
+        if !indexable.is_empty() {
+            // Use AVET to find candidate entities, then intersect
+            let mut candidate_sets: Vec<Vec<EntityId>> = Vec::new();
+            for (attr, value) in &indexable {
+                let eids = find_entities_by_avet(txn, attr, value, as_of)?;
+                candidate_sets.push(eids);
+            }
+            // Intersect all candidate sets
+            let mut result = candidate_sets.remove(0);
+            for set in &candidate_sets {
+                let set_lookup: std::collections::HashSet<EntityId> =
+                    set.iter().copied().collect();
+                result.retain(|eid| set_lookup.contains(eid));
+            }
+            result
+        } else {
+            // Fall back to full type scan
+            find_entities_of_type(txn, &clause.entity_type, as_of)?
+        }
     };
 
     let mut results = Vec::new();
 
     for eid in entities {
         // Load all current field values for this entity
-        let fields = load_entity_fields(storage, eid, &clause.entity_type, as_of).await?;
+        let fields = load_entity_fields(txn, eid, &clause.entity_type, as_of)?;
 
         // Try to match all field patterns
         if let Some(new_bindings) =
@@ -102,9 +125,98 @@ async fn evaluate_clause(
     Ok(results)
 }
 
+/// Find patterns in a clause that can use the AVET index for direct lookup.
+/// Returns (attribute, value) pairs for patterns with known values.
+fn find_indexable_patterns(
+    clause: &WhereClause,
+    bindings: &Bindings,
+    schema: &SchemaRegistry,
+) -> Vec<(String, Value)> {
+    let type_def = match schema.get(&clause.entity_type) {
+        Some(td) => td,
+        None => return vec![],
+    };
+
+    let mut indexable = Vec::new();
+
+    for (field_name, pattern) in &clause.field_patterns {
+        // Skip enum fields — they use sub-attributes (__tag, .Variant/field)
+        // and can't be directly looked up via a single AVET scan
+        let field_def = type_def.get_field(field_name);
+        if let Some(fd) = field_def {
+            if matches!(fd.field_type, FieldType::Enum(_)) {
+                continue;
+            }
+        }
+
+        let attr = type_def.attribute_name(field_name);
+
+        match pattern {
+            Pattern::Constant(value) => {
+                indexable.push((attr, value.clone()));
+            }
+            Pattern::Variable(var) => {
+                // If the variable is already bound, we can use its value
+                if let Some(bound_value) = bindings.get(var) {
+                    // For Ref-typed fields, the bound value is a Ref
+                    indexable.push((attr, bound_value.clone()));
+                }
+            }
+            _ => {
+                // Predicates, EnumMatch — can't use AVET index
+            }
+        }
+    }
+
+    indexable
+}
+
+/// Find entity IDs that have a specific (attribute, value) via AVET index scan.
+/// Resolves retract history to only return currently-active entities.
+fn find_entities_by_avet(
+    txn: &dyn TxnOps,
+    attr: &str,
+    value: &Value,
+    as_of: Option<TxId>,
+) -> Result<Vec<EntityId>, String> {
+    let prefix = index::avet_attr_value_prefix(attr, value);
+    let end = index::prefix_end(&prefix);
+
+    let entries = txn
+        .scan(&prefix, &end)
+        .map_err(|e| e.to_string())?;
+
+    let mut entity_datoms: HashMap<EntityId, Vec<Datom>> = HashMap::new();
+
+    for (key, _) in &entries {
+        if let Some(datom) = index::decode_datom_from_avet(key) {
+            if let Some(max_tx) = as_of {
+                if datom.tx > max_tx {
+                    continue;
+                }
+            }
+            entity_datoms.entry(datom.entity).or_default().push(datom);
+        }
+    }
+
+    let mut entities = Vec::new();
+    for (eid, mut datoms) in entity_datoms {
+        datoms.sort_by(|a, b| a.tx.cmp(&b.tx).then_with(|| a.added.cmp(&b.added)));
+        let mut exists = false;
+        for d in datoms {
+            exists = d.added;
+        }
+        if exists {
+            entities.push(eid);
+        }
+    }
+
+    Ok(entities)
+}
+
 /// Find all entity IDs of a given type.
-async fn find_entities_of_type(
-    storage: &dyn StorageBackend,
+fn find_entities_of_type(
+    txn: &dyn TxnOps,
     type_name: &str,
     as_of: Option<TxId>,
 ) -> Result<Vec<EntityId>, String> {
@@ -112,9 +224,8 @@ async fn find_entities_of_type(
     let prefix = index::avet_attr_value_prefix("__type", &type_value);
     let end = index::prefix_end(&prefix);
 
-    let entries = storage
+    let entries = txn
         .scan(&prefix, &end)
-        .await
         .map_err(|e| e.to_string())?;
 
     // Group datoms by entity, then resolve history properly
@@ -154,8 +265,8 @@ async fn find_entities_of_type(
 /// the returned map contains entries like:
 ///   "field.__tag" => Value::String("Circle")
 ///   "field.Circle/radius" => Value::F64(5.0)
-async fn load_entity_fields(
-    storage: &dyn StorageBackend,
+fn load_entity_fields(
+    txn: &dyn TxnOps,
     entity: EntityId,
     entity_type: &str,
     as_of: Option<TxId>,
@@ -163,9 +274,8 @@ async fn load_entity_fields(
     let prefix = index::eavt_entity_prefix(entity);
     let end = index::prefix_end(&prefix);
 
-    let entries = storage
+    let entries = txn
         .scan(&prefix, &end)
-        .await
         .map_err(|e| e.to_string())?;
 
     // Group datoms by attribute, find latest value

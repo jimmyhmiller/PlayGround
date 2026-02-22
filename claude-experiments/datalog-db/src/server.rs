@@ -1,6 +1,6 @@
+use std::net::TcpListener;
 use std::sync::Arc;
 
-use tokio::net::{TcpListener, TcpStream};
 use tracing::{info, warn};
 
 use crate::db::{self, Database};
@@ -14,8 +14,8 @@ pub struct Server {
 }
 
 impl Server {
-    pub async fn bind(addr: &str, db: Arc<Database>) -> std::io::Result<Self> {
-        let listener = TcpListener::bind(addr).await?;
+    pub fn bind(addr: &str, db: Arc<Database>) -> std::io::Result<Self> {
+        let listener = TcpListener::bind(addr)?;
         info!("Server listening on {}", addr);
         Ok(Self { db, listener })
     }
@@ -24,31 +24,33 @@ impl Server {
         self.listener.local_addr()
     }
 
-    pub async fn run(self) -> std::io::Result<()> {
-        loop {
-            let (stream, addr) = self.listener.accept().await?;
+    pub fn run(self) -> std::io::Result<()> {
+        for stream in self.listener.incoming() {
+            let stream = stream?;
+            let addr = stream.peer_addr()?;
             info!("New connection from {}", addr);
             let db = self.db.clone();
-            tokio::spawn(async move {
-                if let Err(e) = handle_connection(stream, db).await {
+            std::thread::spawn(move || {
+                if let Err(e) = handle_connection(stream, db) {
                     warn!("Connection error from {}: {}", addr, e);
                 }
                 info!("Connection closed: {}", addr);
             });
         }
+        Ok(())
     }
 }
 
-async fn handle_connection(
-    mut stream: TcpStream,
+fn handle_connection(
+    mut stream: std::net::TcpStream,
     db: Arc<Database>,
 ) -> std::result::Result<(), Box<dyn std::error::Error>> {
     // Handshake
-    protocol::server_handshake(&mut stream).await?;
+    protocol::server_handshake(&mut stream)?;
 
     // Message loop
     loop {
-        let msg = match protocol::read_message(&mut stream).await {
+        let msg = match protocol::read_message(&mut stream) {
             Ok(msg) => msg,
             Err(protocol::ProtocolError::Io(e))
                 if e.kind() == std::io::ErrorKind::UnexpectedEof =>
@@ -59,12 +61,12 @@ async fn handle_connection(
             Err(e) => return Err(e.into()),
         };
 
-        let response = dispatch(&db, &msg).await;
-        protocol::write_message(&mut stream, msg.request_id, &response).await?;
+        let response = dispatch(&db, &msg);
+        protocol::write_message(&mut stream, msg.request_id, &response)?;
     }
 }
 
-async fn dispatch(db: &Database, msg: &Message) -> serde_json::Value {
+fn dispatch(db: &Database, msg: &Message) -> serde_json::Value {
     let request_type = msg
         .payload
         .get("type")
@@ -72,10 +74,10 @@ async fn dispatch(db: &Database, msg: &Message) -> serde_json::Value {
         .unwrap_or("");
 
     match request_type {
-        "define" => handle_define(db, &msg.payload).await,
-        "define_enum" => handle_define_enum(db, &msg.payload).await,
-        "transact" => handle_transact(db, &msg.payload).await,
-        "query" => handle_query(db, &msg.payload).await,
+        "define" => handle_define(db, &msg.payload),
+        "define_enum" => handle_define_enum(db, &msg.payload),
+        "transact" => handle_transact(db, &msg.payload),
+        "query" => handle_query(db, &msg.payload),
         "status" => handle_status(),
         other => serde_json::json!({
             "status": "error",
@@ -84,11 +86,11 @@ async fn dispatch(db: &Database, msg: &Message) -> serde_json::Value {
     }
 }
 
-async fn handle_define(db: &Database, payload: &serde_json::Value) -> serde_json::Value {
+fn handle_define(db: &Database, payload: &serde_json::Value) -> serde_json::Value {
     match db::parse_define_request(payload) {
         Ok(type_def) => {
             let name = type_def.name.clone();
-            match db.define_type(type_def).await {
+            match db.define_type(type_def) {
                 Ok(tx_id) => serde_json::json!({
                     "status": "ok",
                     "data": {
@@ -109,11 +111,11 @@ async fn handle_define(db: &Database, payload: &serde_json::Value) -> serde_json
     }
 }
 
-async fn handle_define_enum(db: &Database, payload: &serde_json::Value) -> serde_json::Value {
+fn handle_define_enum(db: &Database, payload: &serde_json::Value) -> serde_json::Value {
     match db::parse_define_enum_request(payload) {
         Ok(enum_def) => {
             let name = enum_def.name.clone();
-            match db.define_enum(enum_def).await {
+            match db.define_enum(enum_def) {
                 Ok(tx_id) => serde_json::json!({
                     "status": "ok",
                     "data": {
@@ -134,7 +136,7 @@ async fn handle_define_enum(db: &Database, payload: &serde_json::Value) -> serde
     }
 }
 
-async fn handle_transact(db: &Database, payload: &serde_json::Value) -> serde_json::Value {
+fn handle_transact(db: &Database, payload: &serde_json::Value) -> serde_json::Value {
     let ops_json = match payload.get("ops").and_then(|o| o.as_array()) {
         Some(ops) => ops,
         None => {
@@ -158,7 +160,7 @@ async fn handle_transact(db: &Database, payload: &serde_json::Value) -> serde_js
         }
     }
 
-    match db.transact(ops).await {
+    match db.transact(ops) {
         Ok(result) => serde_json::json!({
             "status": "ok",
             "data": {
@@ -174,7 +176,7 @@ async fn handle_transact(db: &Database, payload: &serde_json::Value) -> serde_js
     }
 }
 
-async fn handle_query(db: &Database, payload: &serde_json::Value) -> serde_json::Value {
+fn handle_query(db: &Database, payload: &serde_json::Value) -> serde_json::Value {
     let query = match Query::from_json(payload) {
         Ok(q) => q,
         Err(e) => {
@@ -185,7 +187,7 @@ async fn handle_query(db: &Database, payload: &serde_json::Value) -> serde_json:
         }
     };
 
-    match db.query(&query).await {
+    match db.query(&query) {
         Ok(result) => {
             let rows: Vec<Vec<serde_json::Value>> = result
                 .rows

@@ -1,7 +1,7 @@
 use byteorder::{BigEndian, ByteOrder};
 use bytes::{BufMut, BytesMut};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
+use std::io::{Read, Write};
+use std::net::TcpStream;
 
 pub const MAGIC: u32 = 0xDA7A_1061;
 pub const VERSION: u32 = 1;
@@ -32,46 +32,46 @@ pub struct Message {
 }
 
 /// Perform server-side handshake.
-pub async fn server_handshake(stream: &mut TcpStream) -> Result<()> {
+pub fn server_handshake(stream: &mut TcpStream) -> Result<()> {
     let mut buf = [0u8; 8];
-    stream.read_exact(&mut buf).await?;
+    stream.read_exact(&mut buf)?;
 
     let magic = BigEndian::read_u32(&buf[0..4]);
     let version = BigEndian::read_u32(&buf[4..8]);
 
     if magic != MAGIC {
         let err_msg = "invalid magic number";
-        send_handshake_error(stream, err_msg).await?;
+        send_handshake_error(stream, err_msg)?;
         return Err(ProtocolError::InvalidMagic);
     }
 
     if version != VERSION {
         let err_msg = format!("unsupported version: {}", version);
-        send_handshake_error(stream, &err_msg).await?;
+        send_handshake_error(stream, &err_msg)?;
         return Err(ProtocolError::UnsupportedVersion(version));
     }
 
     // Send OK
-    stream.write_all(&[0x00]).await?;
-    stream.flush().await?;
+    stream.write_all(&[0x00])?;
+    stream.flush()?;
     Ok(())
 }
 
-async fn send_handshake_error(stream: &mut TcpStream, msg: &str) -> Result<()> {
+fn send_handshake_error(stream: &mut TcpStream, msg: &str) -> Result<()> {
     let msg_bytes = msg.as_bytes();
     let mut buf = vec![0x01];
     buf.extend_from_slice(&(msg_bytes.len() as u32).to_be_bytes());
     buf.extend_from_slice(msg_bytes);
-    stream.write_all(&buf).await?;
-    stream.flush().await?;
+    stream.write_all(&buf)?;
+    stream.flush()?;
     Ok(())
 }
 
 /// Read a framed message from the stream.
-pub async fn read_message(stream: &mut TcpStream) -> Result<Message> {
+pub fn read_message(stream: &mut TcpStream) -> Result<Message> {
     // Read header: request_id (8) + payload_length (4)
     let mut header = [0u8; 12];
-    stream.read_exact(&mut header).await?;
+    stream.read_exact(&mut header)?;
 
     let request_id = BigEndian::read_u64(&header[0..8]);
     let payload_length = BigEndian::read_u32(&header[8..12]);
@@ -81,7 +81,7 @@ pub async fn read_message(stream: &mut TcpStream) -> Result<Message> {
     }
 
     let mut payload_buf = vec![0u8; payload_length as usize];
-    stream.read_exact(&mut payload_buf).await?;
+    stream.read_exact(&mut payload_buf)?;
 
     let payload: serde_json::Value = serde_json::from_slice(&payload_buf)
         .map_err(|e| ProtocolError::InvalidJson(e.to_string()))?;
@@ -93,7 +93,7 @@ pub async fn read_message(stream: &mut TcpStream) -> Result<Message> {
 }
 
 /// Write a framed response message to the stream.
-pub async fn write_message(stream: &mut TcpStream, request_id: u64, payload: &serde_json::Value) -> Result<()> {
+pub fn write_message(stream: &mut TcpStream, request_id: u64, payload: &serde_json::Value) -> Result<()> {
     let payload_bytes = serde_json::to_vec(payload)
         .map_err(|e| ProtocolError::InvalidJson(e.to_string()))?;
 
@@ -102,32 +102,32 @@ pub async fn write_message(stream: &mut TcpStream, request_id: u64, payload: &se
     buf.put_u32(payload_bytes.len() as u32);
     buf.put_slice(&payload_bytes);
 
-    stream.write_all(&buf).await?;
-    stream.flush().await?;
+    stream.write_all(&buf)?;
+    stream.flush()?;
     Ok(())
 }
 
 /// Perform client-side handshake.
-pub async fn client_handshake(stream: &mut TcpStream) -> Result<()> {
+pub fn client_handshake(stream: &mut TcpStream) -> Result<()> {
     let mut buf = [0u8; 8];
     BigEndian::write_u32(&mut buf[0..4], MAGIC);
     BigEndian::write_u32(&mut buf[4..8], VERSION);
-    stream.write_all(&buf).await?;
-    stream.flush().await?;
+    stream.write_all(&buf)?;
+    stream.flush()?;
 
     // Read response
     let mut resp = [0u8; 1];
-    stream.read_exact(&mut resp).await?;
+    stream.read_exact(&mut resp)?;
 
     if resp[0] == 0x00 {
         Ok(())
     } else {
         // Read error message
         let mut len_buf = [0u8; 4];
-        stream.read_exact(&mut len_buf).await?;
+        stream.read_exact(&mut len_buf)?;
         let len = BigEndian::read_u32(&len_buf) as usize;
         let mut msg_buf = vec![0u8; len];
-        stream.read_exact(&mut msg_buf).await?;
+        stream.read_exact(&mut msg_buf)?;
         let msg = String::from_utf8_lossy(&msg_buf).to_string();
         Err(ProtocolError::InvalidJson(msg))
     }

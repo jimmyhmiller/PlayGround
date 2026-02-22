@@ -131,11 +131,13 @@
   <div class="main">
     <div class="editor-col">
       <div class="tab-bar">
+        <button class="tab-btn" data-tab="chart">Chart Lib</button>
         <button class="tab-btn" data-tab="game">Game</button>
         <button class="tab-btn active" data-tab="meta">Meta / Viz</button>
         <button class="tab-btn" data-tab="js">Support JS</button>
       </div>
       <div class="editor-wrap" id="editor-wrap">
+        <div class="editor-pane" id="editor-chart"></div>
         <div class="editor-pane" id="editor-game"></div>
         <div class="editor-pane active" id="editor-meta"></div>
         <div class="editor-pane" id="editor-js"></div>
@@ -146,7 +148,7 @@
     </div>
   </div>
 
-  <div class="viz-row" id="viz-row"></div>
+  <div id="viz-row"></div>
 </div>
 
 <script type="module">
@@ -154,6 +156,115 @@ import { Rules4 } from './bridge.js';
 import { renderTerm, patch } from './vdom.js';
 
 // ── Default programs ──
+
+const DEFAULT_CHART = `\
+# ── Pure Rules4 Scatter Plot Library ──
+
+# ── List utilities ──
+fn take(0, ?xs) = nil
+fn take(?n, cons(?h, ?t)) = cons(?h, take(?n - 1, ?t))
+fn take(?n, nil) = nil
+
+fn len(?xs) = list_len(?xs)
+fn reverse(?xs) = list_reverse(?xs)
+
+fn concat_lists(nil, ?ys) = ?ys
+fn concat_lists(cons(?h, ?t), ?ys) = cons(?h, concat_lists(?t, ?ys))
+
+# ── Min/max/endpoint helpers ──
+fn min_y(cons(point(?x, ?y), ?rest)) = min_y_acc(?rest, ?y)
+fn min_y_acc(nil, ?acc) = ?acc
+fn min_y_acc(cons(point(?x, ?y), ?rest), ?acc) =
+  if ?y < ?acc then min_y_acc(?rest, ?y) else min_y_acc(?rest, ?acc)
+
+fn max_y(cons(point(?x, ?y), ?rest)) = max_y_acc(?rest, ?y)
+fn max_y_acc(nil, ?acc) = ?acc
+fn max_y_acc(cons(point(?x, ?y), ?rest), ?acc) =
+  if ?y > ?acc then max_y_acc(?rest, ?y) else max_y_acc(?rest, ?acc)
+
+fn first_x(cons(point(?x, ?y), ?rest)) = ?x
+fn last_x(cons(point(?x, ?y), nil)) = ?x
+fn last_x(cons(?h, ?t)) = last_x(?t)
+
+fn last_y(cons(point(?x, ?y), nil)) = ?y
+fn last_y(cons(?h, ?t)) = last_y(?t)
+
+fn safe_range(?min, ?max) =
+  if ?max == ?min then 2.0 else ?max - ?min
+
+# ── Coordinate scaling (W=390, H=96, padTop=8) ──
+fn sx(?x, ?minX, ?rX) = (?x - ?minX) / ?rX * 390.0
+fn sy(?y, ?minY, ?rY) = 8.0 + 96.0 - ((?y - ?minY) / ?rY * 96.0)
+
+fn round1(?x) = floor(?x * 10.0) / 10.0
+
+# ── Scatter dot builder ──
+fn build_dots(nil, ?minX, ?rX, ?minY, ?rY, ?color, ?idx) = nil
+fn build_dots(cons(point(?x, ?y), ?rest), ?minX, ?rX, ?minY, ?rY, ?color, ?idx) =
+  cons(element("circle",
+    [attr("cx", round1(sx(?x, ?minX, ?rX))),
+     attr("cy", round1(sy(?y, ?minY, ?rY))),
+     attr("r", 2.5),
+     attr("fill", ?color),
+     attr("opacity", 0.3 + 0.7 * (?idx / 60.0))], []),
+  build_dots(?rest, ?minX, ?rX, ?minY, ?rY, ?color, ?idx + 1.0))
+
+# ── Scatter plot rendering pipeline ──
+fn render_scatter(?title, ?pts, ?color) =
+  render_scatter_check(?title, ?pts, ?color, len(?pts))
+
+fn render_scatter_check(?title, ?pts, ?color, ?n) =
+  if ?n < 2 then element("div", [attr("class", "viz-panel")], [
+    element("h3", [], [text(?title)]),
+    element("svg", [attr("viewBox", "0 0 400 120"), attr("height", "120")], [])])
+  else render_scatter_data(?title, list_reverse(?pts), ?color)
+
+fn render_scatter_data(?title, ?pts, ?color) =
+  render_scatter_scaled(?title, ?pts, ?color,
+    first_x(?pts), last_x(?pts), min_y(?pts), max_y(?pts))
+
+fn render_scatter_scaled(?title, ?pts, ?color, ?x0, ?x1, ?yMin, ?yMax) =
+  render_scatter_final(?title, ?pts, ?color, ?x0, ?yMin,
+    safe_range(?x0, ?x1), safe_range(?yMin, ?yMax), ?yMin, ?yMax,
+    last_x(?pts), last_y(?pts))
+
+fn render_scatter_final(?title, ?pts, ?color, ?minX, ?minY, ?rX, ?rY, ?yMin, ?yMax, ?lx, ?ly) =
+  element("div", [attr("class", "viz-panel")], [
+    element("h3", [], [text(?title)]),
+    element("svg",
+      [attr("viewBox", "0 0 400 120"), attr("height", "120")],
+      concat_lists(
+        [element("line", [attr("x1", 0), attr("y1", sy(?yMin, ?minY, ?rY)),
+                          attr("x2", 390), attr("y2", sy(?yMin, ?minY, ?rY)),
+                          attr("stroke", "#333"), attr("stroke-width", "0.5")], []),
+         element("line", [attr("x1", 0), attr("y1", sy((?yMin + ?yMax) / 2.0, ?minY, ?rY)),
+                          attr("x2", 390), attr("y2", sy((?yMin + ?yMax) / 2.0, ?minY, ?rY)),
+                          attr("stroke", "#333"), attr("stroke-width", "0.5"),
+                          attr("stroke-dasharray", "4")], []),
+         element("line", [attr("x1", 0), attr("y1", sy(?yMax, ?minY, ?rY)),
+                          attr("x2", 390), attr("y2", sy(?yMax, ?minY, ?rY)),
+                          attr("stroke", "#333"), attr("stroke-width", "0.5")], [])],
+        concat_lists(
+          build_dots(?pts, ?minX, ?rX, ?minY, ?rY, ?color, 0.0),
+          [element("circle", [attr("cx", round1(sx(?lx, ?minX, ?rX))),
+                              attr("cy", round1(sy(?ly, ?minY, ?rY))),
+                              attr("r", 4), attr("fill", ?color),
+                              attr("stroke", "white"), attr("stroke-width", "1")], []),
+           element("text", [attr("x", round1(sx(?lx, ?minX, ?rX)) + 8.0),
+                            attr("y", round1(sy(?ly, ?minY, ?rY)) + 3.0),
+                            attr("fill", ?color), attr("font-size", "10"),
+                            attr("font-weight", "bold"),
+                            attr("font-family", "monospace")],
+                  [text(round1(?ly))]),
+           element("text", [attr("x", 0), attr("y", 118),
+                            attr("fill", "#666"), attr("font-size", "9"),
+                            attr("font-family", "monospace")],
+                  [text(round1(?yMin))]),
+           element("text", [attr("x", 390), attr("y", 118),
+                            attr("fill", "#666"), attr("font-size", "9"),
+                            attr("font-family", "monospace"), attr("text-anchor", "end")],
+                  [text(round1(?yMax))])])))])
+`;
 
 const DEFAULT_GAME = `\
 # ── Flappy Bird in Rules4 ──
@@ -169,18 +280,27 @@ fn init() = {
   rule(pipe_off_0, 0.0)
   rule(pipe_h_0, 25.0)
   rule(pipe_gap_1, 35.0)
-  rule(pipe_off_1, -1.0)
+  rule(pipe_off_1, -1.1)
   rule(pipe_h_1, 45.0)
+  rule(chart_bird_y, nil)
+  rule(chart_score, nil)
+  rule(chart_score_n, 0.0)
 }
 
 fn score() = floor(distance)
+
+# ── Bird physics ──
+fn update_bird() = {
+  rule(velocity, velocity + 0.065)
+  rule(player_y, player_y + velocity)
+  player_y
+}
 
 # ── Tick handler (game loop) ──
 fn handle_event(tick, ?frame) =
   if screen == game then {
     rule(distance, distance + 0.015)
-    rule(velocity, velocity + 0.065)
-    rule(player_y, player_y + velocity)
+    update_bird()
     check_collisions()
   }
   else 0
@@ -199,8 +319,10 @@ fn start_game() = {
   rule(velocity, 0.0)
   rule(pipe_off_0, 0.0)
   rule(pipe_h_0, 25.0)
-  rule(pipe_off_1, -1.0)
+  rule(pipe_off_1, -1.1)
   rule(pipe_h_1, 45.0)
+  rule(chart_bird_y, nil)
+  rule(chart_score, nil)
 }
 
 # ── Collision detection ──
@@ -215,7 +337,7 @@ fn check_ground() =
   else if player_y < 0.0 then { rule(screen, dead) hit_ceil }
   else ok
 
-fn pipe_x(?off) = 100.0 - (50.0 * ((distance + ?off) % 2.0))
+fn pipe_x(?off) = 100.0 - (50.0 * ((distance + ?off) % 2.2))
 
 fn check_pipe_0() =
   if pipe_x(pipe_off_0) > 15.0 then far
@@ -382,40 +504,39 @@ fn dbg_text(?y, ?msg) = element("text",
 
 rule debug_info : @meta -> @rules {
   result(?step, score(), ?val) => {
-    rule(debug_score, debug(dbg_text(3, "score: " ++ ?val)))
-    rule(debug_steps, debug(dbg_text(6, "steps: " ++ ?step)))
+    rule(debug_score, debug(dbg_text(3, "score() -> " ++ ?val)))
+    rule(debug_steps, debug(dbg_text(6, "step: " ++ ?step)))
   }
-  result(?step, handle_event(tick, ?f), ?val) => {
+  result(_, handle_event(tick, _), _) => {
     rule(debug_y, debug(dbg_text(9, "y: " ++ player_y)))
     rule(debug_vel, debug(dbg_text(12, "vel: " ++ velocity)))
   }
-  result(?step, check_ground(), ?val) =>
-    rule(debug_ground, debug(dbg_text(15, "ground: " ++ ?val)))
-  result(?step, check_pipe_0(), ?val) =>
-    rule(debug_pipe0, debug(dbg_text(18, "pipe0: " ++ ?val)))
-  result(?step, check_pipe_1(), ?val) =>
-    rule(debug_pipe1, debug(dbg_text(21, "pipe1: " ++ ?val)))
+  result(_, check_ground(), ?val) =>
+    rule(debug_ground, debug(dbg_text(15, "check_ground() -> " ++ ?val)))
+  result(_, check_pipe_0(), ?val) =>
+    rule(debug_pipe0, debug(dbg_text(18, "check_pipe_0() -> " ++ ?val)))
+  result(_, check_pipe_1(), ?val) =>
+    rule(debug_pipe1, debug(dbg_text(21, "check_pipe_1() -> " ++ ?val)))
 }
 
-# ── Visualizations (meta rules -> @viz scope) ──
+# ── Chart data: capture function results via meta rules ──
 
-# Track bird position over time
-rule track_position : @meta -> @viz {
-  result(?step, handle_event(tick, ?f), ?val) =>
-    graph(bird_y, point(distance, player_y))
+rule track_bird : @meta -> @rules {
+  result(_, update_bird(), ?val) =>
+    rule(chart_bird_y, take(60, cons(point(distance, ?val), chart_bird_y)))
 }
 
-# Track velocity over time
-rule track_velocity : @meta -> @viz {
-  result(?step, handle_event(tick, ?f), ?val) =>
-    graph(vel, point(distance, velocity))
+rule track_score : @meta -> @rules {
+  result(_, score(), ?val) => {
+    rule(chart_score_n, chart_score_n + 1.0)
+    rule(chart_score, take(60, cons(point(chart_score_n, ?val), chart_score)))
+  }
 }
 
-# Track score over time
-rule track_score : @meta -> @viz {
-  result(?step, handle_event(tick, ?f), ?val) =>
-    graph(score, point(distance, score()))
-}
+# ── Render scatter plots (called from JS every 6th frame) ──
+fn render_charts() = @viz element("div", [attr("class", "viz-row")], [
+  render_scatter("update_bird()", chart_bird_y, "#06b6d4"),
+  render_scatter("score()", chart_score, "#10b981")])
 `;
 
 // ── Elements ──
@@ -472,7 +593,7 @@ const rules4Lang = StreamLanguage.define({
     // Operators
     if (stream.match(/^(=>|->|==|!=|>=|<=|>|<|\+\+)/)) return 'operator';
     // Builtins / constants
-    if (stream.match(/^(retract|query_all|floor|abs|random|mod|add|sub|mul|div|eq|neq|lt|gt|lte|gte|str_concat|str_len|true|false|nil|cons|result)\b/)) return 'atom';
+    if (stream.match(/^(retract|query_all|floor|abs|random|mod|add|sub|mul|div|eq|neq|lt|gt|lte|gte|str_concat|str_len|str_join|list_reverse|list_len|true|false|nil|cons|result)\b/)) return 'atom';
     // Identifiers
     if (stream.match(/^[a-zA-Z_]\w*/)) return 'variable';
     // Brackets / punctuation
@@ -483,6 +604,17 @@ const rules4Lang = StreamLanguage.define({
 });
 
 const r4Extensions = [basicSetup, oneDark, rules4Lang];
+
+const chartEditor = new EditorView({
+  doc: DEFAULT_CHART,
+  extensions: [
+    ...r4Extensions,
+    EditorView.updateListener.of(update => {
+      if (update.docChanged) scheduleRestart();
+    }),
+  ],
+  parent: document.getElementById('editor-chart'),
+});
 
 const gameEditor = new EditorView({
   doc: DEFAULT_GAME,
@@ -528,7 +660,7 @@ const jsEditor = new EditorView({
 
 // ── Tab switching ──
 
-const editors = { game: gameEditor, meta: metaEditor, js: jsEditor };
+const editors = { chart: chartEditor, game: gameEditor, meta: metaEditor, js: jsEditor };
 const tabBtns = document.querySelectorAll('.tab-btn');
 const editorPanes = document.querySelectorAll('.editor-pane');
 
@@ -542,163 +674,35 @@ tabBtns.forEach(btn => {
   });
 });
 
-// ── Viz data ──
+// ── Viz rendering (pure Rules4 charts via vdom) ──
 
-const COLORS = ['#06b6d4', '#f59e0b', '#10b981', '#f472b6', '#a78bfa', '#fb923c'];
-const MAX_POINTS = 500;
+let vizTree = null;
+let vizTermId = null;
 
-// Map<string, { points: [{x, y}], color: string, panelEl: Element, svgEl: SVGElement }>
-let vizSeries = new Map();
-let colorIdx = 0;
+function renderViz(r4) {
+  const renderChartsSym = r4.sym("render_charts");
+  const call = r4.call(renderChartsSym, []);
+  r4.eval(call);
 
-function getOrCreateSeries(name) {
-  if (vizSeries.has(name)) return vizSeries.get(name);
-  const color = COLORS[colorIdx++ % COLORS.length];
-  const panel = document.createElement('div');
-  panel.className = 'viz-panel';
-  panel.innerHTML = `<h3>${name}</h3>`;
-  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-  svg.setAttribute('viewBox', '0 0 400 120');
-  svg.setAttribute('height', '120');
-  panel.appendChild(svg);
-  vizRowEl.appendChild(panel);
-  const series = { points: [], color, panelEl: panel, svgEl: svg };
-  vizSeries.set(name, series);
-  return series;
-}
-
-function clearAllViz() {
-  vizSeries.clear();
-  vizRowEl.innerHTML = '';
-  colorIdx = 0;
-}
-
-function termToNumber(r4, id) {
-  const tag = r4.termTag(id);
-  if (tag === 0) return r4.termNum(id);
-  if (tag === 3) return r4.termFloat(id);
-  return null;
-}
-
-function drainViz(r4) {
   const pending = r4.scopeTakePending("viz");
   if (pending.length === 0) return;
+  const newTermId = pending[pending.length - 1];
 
-  for (const termId of pending) {
-    // Expect graph(name, point(x, y))
-    if (r4.termTag(termId) !== 2) continue;
-    const head = r4.termCallHead(termId);
-    if (r4.termTag(head) !== 1) continue;
-    if (r4.termSymName(head) !== 'graph') continue;
-    if (r4.termCallArity(termId) < 2) continue;
-
-    const nameId = r4.termCallArg(termId, 0);
-    if (r4.termTag(nameId) !== 1) continue;
-    const name = r4.termSymName(nameId);
-
-    const pointId = r4.termCallArg(termId, 1);
-    if (r4.termTag(pointId) !== 2) continue;
-    const pointHead = r4.termCallHead(pointId);
-    if (r4.termTag(pointHead) !== 1 || r4.termSymName(pointHead) !== 'point') continue;
-    if (r4.termCallArity(pointId) < 2) continue;
-
-    const x = termToNumber(r4, r4.termCallArg(pointId, 0));
-    const y = termToNumber(r4, r4.termCallArg(pointId, 1));
-    if (x === null || y === null) continue;
-
-    const series = getOrCreateSeries(name);
-    const last = series.points[series.points.length - 1];
-    // If x went backwards (game restart), discard old data
-    if (last && x < last.x) {
-      series.points.length = 0;
-    }
-    // Skip duplicate x values (e.g. while on menu/dead screen)
-    if (last && x === last.x) {
-      last.y = y; // update in place
-    } else {
-      series.points.push({ x, y });
-    }
-    if (series.points.length > MAX_POINTS) {
-      series.points.shift();
-    }
+  if (vizTree === null) {
+    const dom = renderTerm(r4, newTermId, () => {});
+    vizRowEl.innerHTML = '';
+    vizRowEl.appendChild(dom);
+    vizTree = dom;
+  } else {
+    vizTree = patch(r4, vizTermId, newTermId, vizTree, vizRowEl, () => {});
   }
+  vizTermId = newTermId;
 }
 
-function renderVizCharts() {
-  for (const [name, series] of vizSeries) {
-    renderChart(series);
-  }
-}
-
-const SVG_NS = 'http://www.w3.org/2000/svg';
-
-function svgEl(tag, attrs) {
-  const el = document.createElementNS(SVG_NS, tag);
-  for (const [k, v] of Object.entries(attrs)) {
-    el.setAttribute(k, v);
-  }
-  return el;
-}
-
-function renderChart(series) {
-  const svg = series.svgEl;
-  const pts = series.points;
-  if (pts.length < 2) return;
-
-  const W = 400, H = 120;
-  const pad = { l: 0, r: 10, t: 8, b: 16 };
-  const cw = W - pad.l - pad.r;
-  const ch = H - pad.t - pad.b;
-
-  let minY = Infinity, maxY = -Infinity;
-  for (const p of pts) {
-    if (p.y < minY) minY = p.y;
-    if (p.y > maxY) maxY = p.y;
-  }
-  if (maxY === minY) { maxY += 1; minY -= 1; }
-  const rangeY = maxY - minY;
-  const minX = pts[0].x, maxX = pts[pts.length - 1].x;
-  const rangeX = maxX - minX || 1;
-
-  const toSX = (x) => pad.l + ((x - minX) / rangeX) * cw;
-  const toSY = (y) => pad.t + ch - ((y - minY) / rangeY) * ch;
-
-  // Build polyline path
-  let pathD = '';
-  for (let i = 0; i < pts.length; i++) {
-    const sx = toSX(pts[i].x);
-    const sy = toSY(pts[i].y);
-    pathD += (i === 0 ? 'M' : 'L') + sx.toFixed(1) + ',' + sy.toFixed(1);
-  }
-
-  const last = pts[pts.length - 1];
-  const lastSX = toSX(last.x);
-  const lastSY = toSY(last.y);
-
-  const gridY1 = toSY(minY);
-  const gridY2 = toSY(maxY);
-  const gridMid = toSY((minY + maxY) / 2);
-
-  // Clear and rebuild with proper SVG DOM
-  while (svg.firstChild) svg.removeChild(svg.firstChild);
-
-  svg.appendChild(svgEl('line', { x1: pad.l, y1: gridY1, x2: W - pad.r, y2: gridY1, stroke: '#333', 'stroke-width': '0.5' }));
-  svg.appendChild(svgEl('line', { x1: pad.l, y1: gridMid, x2: W - pad.r, y2: gridMid, stroke: '#333', 'stroke-width': '0.5', 'stroke-dasharray': '4' }));
-  svg.appendChild(svgEl('line', { x1: pad.l, y1: gridY2, x2: W - pad.r, y2: gridY2, stroke: '#333', 'stroke-width': '0.5' }));
-  svg.appendChild(svgEl('path', { d: pathD, fill: 'none', stroke: series.color, 'stroke-width': '1.5', 'stroke-linejoin': 'round' }));
-  svg.appendChild(svgEl('circle', { cx: lastSX, cy: lastSY, r: 3, fill: series.color }));
-
-  const valLabel = svgEl('text', { x: lastSX + 6, y: lastSY + 3, fill: series.color, 'font-size': '10', 'font-family': 'monospace' });
-  valLabel.textContent = last.y.toFixed(1);
-  svg.appendChild(valLabel);
-
-  const minLabel = svgEl('text', { x: pad.l, y: H - 2, fill: '#666', 'font-size': '9', 'font-family': 'monospace' });
-  minLabel.textContent = minY.toFixed(1);
-  svg.appendChild(minLabel);
-
-  const maxLabel = svgEl('text', { x: W - pad.r, y: H - 2, fill: '#666', 'font-size': '9', 'font-family': 'monospace', 'text-anchor': 'end' });
-  maxLabel.textContent = maxY.toFixed(1);
-  svg.appendChild(maxLabel);
+function clearViz() {
+  vizTree = null;
+  vizTermId = null;
+  vizRowEl.innerHTML = '';
 }
 
 // ── FlappyLab: game loop ──
@@ -717,20 +721,33 @@ class FlappyLab {
     this.renderSym = r4.sym("render");
   }
 
+  refreshSyms() {
+    this.handleEventSym = this.r4.sym("handle_event");
+    this.renderSym = this.r4.sym("render");
+    // Invalidate vdom trees so next render does a full rebuild
+    this.currentTree = null;
+    this.currentTermId = null;
+  }
+
   start() {
-    const tickSym = this.r4.sym("tick");
+    let tickSym = this.r4.sym("tick");
+    const GC_THRESHOLD = 50000;
     const tick = () => {
       try {
+        this.r4._nameCache.clear();
         this._frame++;
         this._tickCount++;
         const frameTerm = this.r4.num(this._frame);
         const call = this.r4.call(this.handleEventSym, [tickSym, frameTerm]);
         this.r4.eval(call);
         this.renderGame();
-        // Drain viz every 3rd frame for perf
-        if (this._tickCount % 3 === 0) {
-          drainViz(this.r4);
-          renderVizCharts();
+        renderViz(this.r4);
+        // GC when term store grows too large
+        if (this.r4.termCount() > GC_THRESHOLD) {
+          this.r4.gc();
+          this.refreshSyms();
+          tickSym = this.r4.sym("tick");
+          clearViz();
         }
       } catch (e) {
         console.error("[flappy-lab] tick error:", e);
@@ -802,11 +819,11 @@ async function restart() {
     const r4 = await freshR4();
     if (thisGen !== generation) return;
 
-    const code = gameEditor.state.doc.toString() + '\n' + metaEditor.state.doc.toString();
+    const code = chartEditor.state.doc.toString() + '\n' + gameEditor.state.doc.toString() + '\n' + metaEditor.state.doc.toString();
     r4.eval(r4.loadProgram(code));
     if (thisGen !== generation) return;
 
-    clearAllViz();
+    clearViz();
     lab = new FlappyLab(r4);
     lab.start();
 
