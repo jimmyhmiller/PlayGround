@@ -7,43 +7,123 @@
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-      background: #f7f7f8;
+      background: #e8e0d8;
+      background-image: linear-gradient(135deg, #ece4dc 0%, #d5ccc2 50%, #c8bfb5 100%);
       height: 100vh; overflow: hidden;
+      display: flex; align-items: center; justify-content: center;
     }
-    .page {
-      max-width: 1200px; margin: 0 auto;
-      height: 100vh;
+
+    /* ── The Book ── */
+    .book {
+      max-width: 1200px; width: calc(100% - 40px);
+      height: calc(100vh - 40px); max-height: 950px;
       display: flex; flex-direction: column;
-      padding: 20px 20px 16px 20px;
+      position: relative;
     }
 
     /* ── Book header ── */
     .book-header {
       display: flex; align-items: baseline; gap: 16px;
-      margin-bottom: 14px; flex-shrink: 0;
+      margin-bottom: 8px; flex-shrink: 0;
+      padding: 0 8px;
     }
-    h1 { font-size: 22px; font-weight: 700; color: #1a1a1a; }
+    h1 {
+      font-family: 'Georgia', 'Palatino Linotype', 'Book Antiqua', serif;
+      font-size: 20px; font-weight: 700; color: #5a4a3a;
+    }
     .page-indicator {
-      font-size: 13px; color: #999; font-weight: 600;
-      font-variant-numeric: tabular-nums;
+      font-family: 'Georgia', serif;
+      font-size: 13px; color: #8a7a6a;
+      font-style: italic;
     }
-    .page-nav {
-      margin-left: auto; display: flex; gap: 8px;
+
+    /* ── Book body (StPageFlip container) ── */
+    .book-body {
+      flex: 1; position: relative;
+      min-height: 0;
     }
-    .page-btn {
-      width: 36px; height: 36px;
-      border: 2px solid #d0d0d4; background: white;
-      border-radius: 8px; cursor: pointer;
-      font-size: 16px; color: #666;
-      display: flex; align-items: center; justify-content: center;
-      transition: border-color 0.15s, color 0.15s, background 0.15s;
-    }
-    .page-btn:hover:not(:disabled) { border-color: #1976d2; color: #1976d2; }
-    .page-btn:disabled { opacity: 0.3; cursor: default; }
 
     /* ── Pages ── */
-    .example { display: none; flex: 1; flex-direction: column; min-height: 0; }
-    .example.active { display: flex; }
+    .example {
+      position: absolute; inset: 0;
+      background-color: #fefcf9;
+      padding: 28px 36px 20px 36px;
+      display: flex; flex-direction: column;
+      overflow: hidden;
+      opacity: 0; pointer-events: none;
+      z-index: 0;
+    }
+    .example.active {
+      opacity: 1; pointer-events: auto; z-index: 2;
+    }
+
+    /* ── Prose pages ── */
+    .page-prose {
+      padding: 40px 60px;
+      overflow-y: auto;
+      font-family: 'Georgia', 'Palatino Linotype', 'Book Antiqua', serif;
+      color: #3a3025;
+      line-height: 1.7;
+    }
+    .page-prose h2 {
+      font-size: 22px; font-weight: 700; color: #5a4a3a;
+      margin-bottom: 20px; border-bottom: 1.5px solid #e0dbd3;
+      padding-bottom: 8px;
+    }
+    .page-prose h3 {
+      font-size: 16px; font-weight: 700; color: #5a4a3a;
+      margin-top: 24px; margin-bottom: 8px;
+    }
+    .page-prose p {
+      margin-bottom: 14px; font-size: 15px;
+    }
+    .page-prose code {
+      font-family: 'SF Mono', 'Fira Code', 'Menlo', monospace;
+      font-size: 13px; background: #f5f0ea; padding: 2px 6px;
+      border-radius: 4px; color: #1565c0;
+    }
+    .page-prose pre {
+      background: #faf8f4; border: 1px solid #e0dbd3;
+      border-radius: 8px; padding: 14px 18px;
+      margin-bottom: 16px; overflow-x: auto;
+      font-family: 'SF Mono', 'Fira Code', 'Menlo', monospace;
+      font-size: 13px; line-height: 1.55; color: #3a3025;
+    }
+    .page-prose ul {
+      margin-bottom: 14px; padding-left: 24px;
+    }
+    .page-prose li {
+      margin-bottom: 6px; font-size: 15px;
+    }
+
+    /* ── Page nav buttons ── */
+    .page-nav {
+      display: flex; gap: 6px; margin-left: auto;
+    }
+    .page-nav button {
+      background: none; border: 1.5px solid #b0a898;
+      border-radius: 6px; padding: 3px 12px;
+      font-family: 'Georgia', serif; font-size: 13px;
+      color: #7a6a5a; cursor: pointer;
+      transition: background 0.15s, color 0.15s, border-color 0.15s;
+    }
+    .page-nav button:hover:not(:disabled) {
+      background: #5a4a3a; color: #fefcf9; border-color: #5a4a3a;
+    }
+    .page-nav button:disabled {
+      opacity: 0.35; cursor: default;
+    }
+
+    /* ── Page footer ── */
+    .book-footer {
+      text-align: center; padding-top: 8px; flex-shrink: 0;
+    }
+    .book-footer .page-number {
+      font-family: 'Georgia', serif;
+      font-size: 12px; color: #a09585;
+      font-style: italic;
+    }
+
     .example-header {
       display: flex; align-items: center; gap: 10px; margin-bottom: 12px;
       flex-shrink: 0;
@@ -78,7 +158,7 @@
     .viz-wrap {
       flex: 1;
       background: white;
-      border: 1px solid #eaeaee;
+      border: 1px solid #e0dbd3;
       border-radius: 12px;
       overflow-y: auto;
       padding: 12px;
@@ -87,7 +167,7 @@
     /* ── Tab bar ── */
     .tab-bar {
       display: flex; gap: 0;
-      border-bottom: 2px solid #e0e0e4;
+      border-bottom: 2px solid #e0dbd3;
       flex-shrink: 0;
     }
     .tab {
@@ -105,7 +185,7 @@
     /* ── Editor panels ── */
     .editor-wrap {
       flex: 1;
-      border: 2px solid #e0e0e4;
+      border: 2px solid #e0dbd3;
       border-top: none;
       border-radius: 0 0 10px 10px;
       overflow: hidden;
@@ -124,7 +204,7 @@
       font-family: 'SF Mono', 'Fira Code', 'Menlo', monospace;
       font-size: 13px;
     }
-    .cm-editor .cm-gutters { background: #fafafa; border-right: 1px solid #eee; }
+    .cm-editor .cm-gutters { background: #faf8f4; border-right: 1px solid #eae5dd; }
     .cm-editor.cm-focused { outline: none; }
 
     .error {
@@ -199,7 +279,7 @@
 
     /* ── Viz-specific styles ── */
     .tree-container {
-      background: white; border: 1px solid #eaeaee; border-radius: 12px;
+      background: white; border: 1px solid #e0dbd3; border-radius: 12px;
       padding: 16px 8px 8px 8px; margin-bottom: 16px; overflow-x: auto;
     }
     .tree-container svg { display: block; margin: 0 auto; }
@@ -215,7 +295,7 @@
       border-radius: 50%; margin-right: 4px; vertical-align: middle;
     }
     .step-card {
-      background: white; border: 1px solid #eaeaee; border-radius: 10px;
+      background: white; border: 1px solid #e0dbd3; border-radius: 10px;
       padding: 12px 16px; display: flex; align-items: baseline; gap: 10px;
       flex-wrap: wrap; min-height: 44px;
     }
@@ -233,25 +313,86 @@
     .result-badge { background: #e8f5e9; color: #2e7d32; }
 
     .timeline-container {
-      background: white; border: 1px solid #eaeaee; border-radius: 12px;
+      background: white; border: 1px solid #e0dbd3; border-radius: 12px;
       padding: 16px 8px 8px 8px; margin-bottom: 16px; overflow-x: auto;
     }
     .timeline-container svg { display: block; margin: 0 auto; }
   </style>
 </head>
 <body>
-<div class="page">
+<div class="book">
   <div class="book-header">
     <h1>Execution Meta-Programming</h1>
-    <span class="page-indicator" id="page-indicator">1 / 2</span>
+    <span class="page-indicator" id="page-indicator">page 1 of 4</span>
     <div class="page-nav">
-      <button class="page-btn" id="prev-page" disabled>&larr;</button>
-      <button class="page-btn" id="next-page">&rarr;</button>
+      <button id="prev-page" disabled>&larr; Prev</button>
+      <button id="next-page">Next &rarr;</button>
     </div>
   </div>
 
-  <!-- ══ Page 1: Fibonacci ══ -->
-  <div class="example active" id="sec-fib">
+  <div class="book-body">
+  <!-- ══ Page 1: Basics of Term Rewriting ══ -->
+  <div class="example active page-prose" id="sec-basics">
+    <h2>Basics of Term Rewriting</h2>
+    <p>Rules4 programs are built from <strong>terms</strong> &mdash; nested tree structures like
+    <code>fib(5)</code> or <code>circle(100, 200, 15)</code>. A term is either a number, a symbol,
+    or a function call: a name applied to arguments.</p>
+
+    <h3>Pattern Matching &amp; Variables</h3>
+    <p>A <strong>rule</strong> says "when you see <em>this</em> pattern, replace it with <em>that</em>."
+    Variables start with <code>?</code> and match anything:</p>
+<pre>rule(double(?x), ?x + ?x)      # double(5) => 5 + 5</pre>
+    <p>Rules are tried top-to-bottom. The first matching pattern wins.</p>
+
+    <h3>Functions as Sugar</h3>
+    <p>Writing <code>fn</code> definitions is just shorthand for rules:</p>
+<pre>fn fib(0) = 0                   # same as: rule(fib(0), 0)
+fn fib(1) = 1
+fn fib(?n) = fib(?n - 1) + fib(?n - 2)</pre>
+
+    <h3>Evaluation = Repeated Rewriting</h3>
+    <p>The engine rewrites terms over and over until nothing changes.
+    <code>fib(3)</code> becomes <code>fib(2) + fib(1)</code>, then each part rewrites
+    further, until only numbers remain and arithmetic produces the final answer.</p>
+    <p>There are no statements, assignments, or side effects &mdash; just terms being
+    rewritten by pattern-matching rules.</p>
+  </div>
+
+  <!-- ══ Page 2: How Meta Works ══ -->
+  <div class="example page-prose" id="sec-meta-explain">
+    <h2>How Meta Works</h2>
+
+    <h3>Scopes</h3>
+    <p>Every rule lives in a <strong>scope</strong>. Ordinary rules live in the default scope.
+    Prefixes like <code>@meta</code>, <code>@dom</code>, and <code>@draw</code> name other scopes.</p>
+    <p>Scopes are isolated: rules in <code>@draw</code> don't interfere with rules in the default scope.</p>
+
+    <h3>Meta-rules</h3>
+    <p>A <strong>meta-rule</strong> observes the engine as it works. It reacts to two events:</p>
+    <ul>
+      <li><code>reduction(?step, ?old, ?new, ?kind)</code> &mdash; a term was rewritten</li>
+      <li><code>result(?step, ?call, ?val)</code> &mdash; a function call finished evaluating</li>
+    </ul>
+<pre>rule tracer : @meta -> @rules {
+  result(?step, fib(?n), ?val) =>
+    rule(fib(?n), ?val)          # inject a memo rule!
+}</pre>
+    <p>The header <code>: @meta -> @rules</code> means: "observe from <code>@meta</code>, write results
+    into <code>@rules</code>." The arrow target determines where the output goes.</p>
+
+    <h3>Writing to @rules</h3>
+    <p>When a meta-rule produces <code>rule(fib(3), 2)</code> and its target is <code>@rules</code>,
+    that new rule is injected into the default scope. Future evaluations of <code>fib(3)</code>
+    will match immediately &mdash; memoization for free.</p>
+
+    <p>Meta-rules can target any scope: <code>@dom</code> to produce UI,
+    <code>@draw</code> to capture drawing commands, or even <code>@rules</code> to modify
+    the program's own rules while it runs.</p>
+  </div>
+
+  <!-- ══ Page 3: Fibonacci ══ -->
+  <div class="example" id="sec-fib">
+
     <div class="example-header">
       <h2>Tracing Fibonacci</h2>
       <span class="status-dot ok" data-role="status"></span>
@@ -262,10 +403,12 @@
         <div class="tab-bar">
           <button class="tab active" data-tab="program">Program</button>
           <button class="tab" data-tab="view">View</button>
+          <button class="tab" data-tab="js">JS</button>
         </div>
         <div class="editor-wrap">
           <div class="editor-panel active" data-panel="program"><div data-role="editor-program"></div></div>
           <div class="editor-panel" data-panel="view"><div data-role="editor-view"></div></div>
+          <div class="editor-panel" data-panel="js"><div data-role="editor-js"></div></div>
         </div>
         <div class="error" data-role="error"></div>
       </div>
@@ -281,6 +424,7 @@
 
   <!-- ══ Section 2: Bouncing Ball ══ -->
   <div class="example" id="sec-ball">
+
     <div class="example-header">
       <h2>Ghost Trail</h2>
       <span class="status-dot ok" data-role="status"></span>
@@ -290,10 +434,12 @@
         <div class="tab-bar">
           <button class="tab active" data-tab="animation">Animation</button>
           <button class="tab" data-tab="meta">Meta</button>
+          <button class="tab" data-tab="js">JS</button>
         </div>
         <div class="editor-wrap">
           <div class="editor-panel active" data-panel="animation"><div data-role="editor-program"></div></div>
           <div class="editor-panel" data-panel="meta"><div data-role="editor-view"></div></div>
+          <div class="editor-panel" data-panel="js"><div data-role="editor-js"></div></div>
         </div>
         <div class="error" data-role="error"></div>
       </div>
@@ -307,6 +453,10 @@
         </div>
       </div>
     </div>
+  </div>
+  </div>
+  <div class="book-footer">
+    <span class="page-number" id="page-number">— 1 —</span>
   </div>
 </div>
 
@@ -322,6 +472,7 @@ const allModules = _allModules.filter(m => m.name !== 'iteration_table');
 const { EditorView, basicSetup } = await import('https://esm.sh/codemirror@6.0.1');
 const { ViewPlugin, Decoration } = await import('https://esm.sh/@codemirror/view@6');
 const { StreamLanguage } = await import('https://esm.sh/@codemirror/language@6');
+const { javascript } = await import('https://esm.sh/@codemirror/lang-javascript@6');
 
 // ── rules4 syntax highlighting ──
 
@@ -791,6 +942,86 @@ fn handle_event(apply_meta, ?ev) =
 fn handle_event(remove_meta, ?ev) =
   rule(meta_active, false)`;
 
+const FIB_JS_CODE = `\
+// Load the Rules4 WASM engine
+const r4 = await Rules4.load('./rules4.wasm');
+
+// Parse & evaluate the program rules (fib, fact, tracer)
+r4.eval(r4.loadProgram(programCode));
+
+// Read computed values back from the engine
+const maxStep = r4.termNum(r4.eval(r4.sym("max_step")));
+const result  = r4.display(r4.eval(r4.sym("result_val")));
+
+// Run viz-module analysis (call tree, timeline)
+for (const mod of modules) {
+  mod.analyze(r4, maxStep, tracedFns);
+}
+
+// Load the view code (rendering rules)
+r4.eval(r4.loadProgram(viewCode));
+
+// Step through the trace: set current_step, then render
+function setStep(s) {
+  r4.assertRule(r4.sym("current_step"), r4.num(s));
+
+  // render() writes a vdom tree to the @dom scope
+  r4.eval(r4.call(r4.sym("render"), []));
+  const pending = r4.scopeTakePending("dom");
+  const termId  = pending[pending.length - 1];
+
+  // Patch the real DOM using the vdom diff
+  tree = patch(r4, prevTermId, termId, tree, container, () => {});
+  prevTermId = termId;
+}`;
+
+const BALL_JS_CODE = `\
+// Load the Rules4 WASM engine
+const r4 = await Rules4.load('./rules4.wasm');
+
+// Parse program; optionally include meta rules
+if (metaApplied) {
+  r4.eval(r4.loadProgram(programCode + '\\n' + metaCode));
+} else {
+  r4.eval(r4.loadProgram(programCode));
+}
+
+// Set the initial frame and trigger meta if active
+r4.eval(r4.call(r4.sym("handle_event"),
+  [r4.sym("set_frame"), r4.num(currentFrame)]));
+
+if (metaApplied) {
+  r4.eval(r4.call(r4.sym("handle_event"),
+    [r4.sym("apply_meta"), r4.num(0)]));
+}
+
+// Animation loop — advance frame every 3 ticks
+function tick() {
+  tickCounter++;
+  if (tickCounter % 3 === 0) {
+    currentFrame = (currentFrame + 1) % 40;
+    r4.eval(r4.call(r4.sym("handle_event"),
+      [r4.sym("set_frame"), r4.num(currentFrame)]));
+    doRender();
+  }
+  requestAnimationFrame(tick);
+}
+
+// Render: collect @draw scope, then render @dom vdom
+function doRender() {
+  // Process any draw-scope outputs into rules
+  for (const t of r4.scopeTakePending("draw")) {
+    r4.assertRule(r4.termCallArg(t, 0), r4.termCallArg(t, 1));
+  }
+
+  // Evaluate render() and patch the DOM
+  r4.eval(r4.call(r4.sym("render"), []));
+  const pending = r4.scopeTakePending("dom");
+  const termId  = pending[pending.length - 1];
+  tree = patch(r4, prevTermId, termId, tree, container, () => {});
+  prevTermId = termId;
+}`;
+
 // ══════════════════════════════════════════════
 // Example class — self-contained section runtime
 // ══════════════════════════════════════════════
@@ -841,6 +1072,19 @@ class Example {
       ],
       parent: this.el.querySelector('[data-role="editor-view"]'),
     });
+
+    // JS tab (read-only)
+    const jsEl = this.el.querySelector('[data-role="editor-js"]');
+    if (jsEl && opts.jsCode) {
+      this.jsEditor = new EditorView({
+        doc: opts.jsCode,
+        extensions: [
+          basicSetup, javascript(),
+          EditorView.editable.of(false),
+        ],
+        parent: jsEl,
+      });
+    }
 
     // Engine state
     this.r4 = null;
@@ -951,12 +1195,12 @@ class Example {
     this.currentTree = null;
     this.currentTermId = null;
 
-    r4.assertRule(r4.sym("current_step"), r4.num(this.maxStep));
+    r4.assertRule(r4.sym("current_step"), r4.num(0));
     this.doRender();
 
     this.sliderEl.max = this.maxStep;
-    this.sliderEl.value = this.maxStep;
-    this.labelEl.textContent = `Step ${this.maxStep} of ${this.maxStep}`;
+    this.sliderEl.value = 0;
+    this.labelEl.textContent = `Step 0 of ${this.maxStep}`;
 
     this.errorEl.classList.remove('visible');
     this.statusEl.className = 'status-dot ok';
@@ -1070,6 +1314,7 @@ const fibExample = new Example(document.getElementById('sec-fib'), {
   enabledModules: ['call_tree', 'step_card', 'value_timeline'],
   programCode: FIB_CODE,
   viewCode: FIB_VIEW,
+  jsCode: FIB_JS_CODE,
 });
 
 const ballExample = new Example(document.getElementById('sec-ball'), {
@@ -1078,30 +1323,41 @@ const ballExample = new Example(document.getElementById('sec-ball'), {
   enabledModules: [],
   programCode: BALL_PROGRAM,
   viewCode: BALL_META,
+  jsCode: BALL_JS_CODE,
 });
 
-// ── Page navigation ──
+// ── Page navigation (buttons) ──
 
 const pages = [
+  { el: document.getElementById('sec-basics'), example: null },
+  { el: document.getElementById('sec-meta-explain'), example: null },
   { el: document.getElementById('sec-fib'), example: fibExample },
   { el: document.getElementById('sec-ball'), example: ballExample },
 ];
 let currentPage = 0;
 
+const pageIndicator = document.getElementById('page-indicator');
+const pageNumberEl = document.getElementById('page-number');
 const prevBtn = document.getElementById('prev-page');
 const nextBtn = document.getElementById('next-page');
-const pageIndicator = document.getElementById('page-indicator');
 
-function showPage(idx) {
+function goToPage(idx) {
+  if (idx < 0 || idx >= pages.length || idx === currentPage) return;
+  pages[currentPage].el.classList.remove('active');
   currentPage = idx;
-  pages.forEach((p, i) => p.el.classList.toggle('active', i === idx));
-  prevBtn.disabled = idx === 0;
-  nextBtn.disabled = idx === pages.length - 1;
-  pageIndicator.textContent = `${idx + 1} / ${pages.length}`;
+  pages[currentPage].el.classList.add('active');
+  updateIndicator();
 }
 
-prevBtn.addEventListener('click', () => { if (currentPage > 0) showPage(currentPage - 1); });
-nextBtn.addEventListener('click', () => { if (currentPage < pages.length - 1) showPage(currentPage + 1); });
+function updateIndicator() {
+  pageIndicator.textContent = `page ${currentPage + 1} of ${pages.length}`;
+  if (pageNumberEl) pageNumberEl.textContent = `— ${currentPage + 1} —`;
+  prevBtn.disabled = currentPage === 0;
+  nextBtn.disabled = currentPage === pages.length - 1;
+}
+
+prevBtn.addEventListener('click', () => goToPage(currentPage - 1));
+nextBtn.addEventListener('click', () => goToPage(currentPage + 1));
 
 // ── Keyboard nav ──
 
@@ -1109,6 +1365,7 @@ document.addEventListener('keydown', e => {
   if (e.target.closest('.cm-editor') || e.target.tagName === 'INPUT') return;
 
   const ex = pages[currentPage].example;
+  if (!ex) return;
 
   if (ex.mode === 'trace' && ex.r4) {
     const s = +ex.sliderEl.value;
@@ -1121,7 +1378,7 @@ document.addEventListener('keydown', e => {
 
 // ── Init ──
 
-showPage(0);
+updateIndicator();
 await Promise.all([fibExample.run(), ballExample.run()]);
 </script>
 </body>

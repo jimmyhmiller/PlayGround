@@ -8,6 +8,7 @@ use parking_lot::RwLock;
 
 use byteorder::{BigEndian, ByteOrder};
 
+use crate::cache::QueryCache;
 use crate::datom::{EntityId, TxId, Value};
 use crate::index;
 use crate::query::executor::{self, QueryResult};
@@ -89,6 +90,7 @@ pub struct Database {
     storage: Arc<dyn StorageBackend>,
     schema: RwLock<SchemaRegistry>,
     plan_cache: RwLock<HashMap<PlanCacheKey, Arc<QueryPlan>>>,
+    query_cache: Arc<QueryCache>,
 }
 
 impl Database {
@@ -98,6 +100,7 @@ impl Database {
             storage,
             schema: RwLock::new(SchemaRegistry::new()),
             plan_cache: RwLock::new(HashMap::new()),
+            query_cache: Arc::new(QueryCache::new()),
         };
 
         // Load schema from storage
@@ -244,6 +247,7 @@ impl Database {
         let tx_id = *result.downcast::<TxId>().expect("wrong type");
         schema.register_enum(enum_def);
         self.plan_cache.write().clear();
+        self.query_cache.invalidate_all();
 
         Ok(tx_id)
     }
@@ -345,6 +349,7 @@ impl Database {
         let tx_id = *result.downcast::<TxId>().expect("wrong type");
         schema.register(type_def);
         self.plan_cache.write().clear();
+        self.query_cache.invalidate_all();
 
         Ok(tx_id)
     }
@@ -353,6 +358,16 @@ impl Database {
     pub fn transact(&self, ops: Vec<TxOp>) -> Result<tx::TransactionResult> {
         let schema = self.schema.read().clone();
         let timestamp_ms = now_millis();
+
+        // Collect type names for cache invalidation before ops are consumed
+        let modified_types: Vec<String> = ops
+            .iter()
+            .map(|op| match op {
+                TxOp::Assert { entity_type, .. } => entity_type.clone(),
+                TxOp::Retract { entity_type, .. } => entity_type.clone(),
+                TxOp::RetractEntity { entity_type, .. } => entity_type.clone(),
+            })
+            .collect();
 
         let result = self
             .storage
@@ -387,7 +402,14 @@ impl Database {
                 Ok(Box::new(tx_result) as Box<dyn Any + Send>)
             }))?;
 
-        Ok(*result.downcast::<tx::TransactionResult>().expect("wrong type"))
+        let tx_result = *result.downcast::<tx::TransactionResult>().expect("wrong type");
+
+        // Invalidate cache for modified types
+        for type_name in modified_types {
+            self.query_cache.invalidate_type(&type_name);
+        }
+
+        Ok(tx_result)
     }
 
     /// Resolve a wall-clock timestamp to the last tx_id at or before that time.
@@ -449,23 +471,25 @@ impl Database {
             // Re-use cached plan, just update as_of
             let mut plan = (*plan).clone();
             plan.as_of = query.as_of;
+            let cache = self.query_cache.clone();
             let result = self
                 .storage
                 .execute_read(Box::new(move |snap| {
-                    let qr = executor::execute_plan(snap, &plan, &schema)
+                    let qr = executor::execute_plan(snap, &plan, &schema, &cache)
                         .map_err(|e| StorageError::Backend(e))?;
                     Ok(Box::new(qr) as Box<dyn Any + Send>)
                 }))?;
             return Ok(*result.downcast::<QueryResult>().expect("wrong type"));
         }
 
+        let cache = self.query_cache.clone();
         let result = self
             .storage
             .execute_read(Box::new(move |snap| {
                 let plan = planner::plan_query(snap, &query, &schema)
                     .map_err(|e| StorageError::Backend(e))?;
 
-                let qr = executor::execute_plan(snap, &plan, &schema)
+                let qr = executor::execute_plan(snap, &plan, &schema, &cache)
                     .map_err(|e| StorageError::Backend(e))?;
 
                 Ok(Box::new((plan, qr)) as Box<dyn Any + Send>)

@@ -1,7 +1,9 @@
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::mem::discriminant;
+use std::sync::Arc;
 
+use crate::cache::QueryCache;
 use crate::datom::{Datom, EntityId, TxId, Value};
 use crate::index;
 use crate::query::planner::{self, JoinSide, JoinStrategy, PlanNode, QueryPlan, SlotMap};
@@ -113,9 +115,10 @@ pub fn execute_query(
     txn: &dyn ReadOps,
     query: &Query,
     schema: &SchemaRegistry,
+    cache: &QueryCache,
 ) -> Result<QueryResult, String> {
     let plan = planner::plan_query(txn, query, schema)?;
-    execute_plan(txn, &plan, schema)
+    execute_plan(txn, &plan, schema, cache)
 }
 
 /// Execute a pre-built query plan.
@@ -123,9 +126,10 @@ pub fn execute_plan(
     txn: &dyn ReadOps,
     plan: &QueryPlan,
     schema: &SchemaRegistry,
+    cache: &QueryCache,
 ) -> Result<QueryResult, String> {
     let slots = &plan.slot_map;
-    let tuples = execute_node(txn, &plan.root, plan.as_of, schema, slots)?;
+    let tuples = execute_node(txn, &plan.root, plan.as_of, schema, slots, cache)?;
 
     // The Project node determines which variables to return
     let columns = match &plan.root {
@@ -167,11 +171,12 @@ fn execute_node(
     as_of: Option<TxId>,
     schema: &SchemaRegistry,
     slots: &SlotMap,
+    cache: &QueryCache,
 ) -> Result<Vec<Tuple>, String> {
     match node {
         PlanNode::Scan(scan) => {
             let empty = Tuple::new(slots.num_slots);
-            evaluate_clause(txn, &scan.clause, &empty, as_of, schema, slots)
+            evaluate_clause(txn, &scan.clause, &empty, as_of, schema, slots, cache)
         }
         PlanNode::Join {
             left,
@@ -181,14 +186,14 @@ fn execute_node(
             ..
         } => match strategy {
             JoinStrategy::NestedLoop => {
-                execute_nested_loop(txn, left, right, as_of, schema, slots)
+                execute_nested_loop(txn, left, right, as_of, schema, slots, cache)
             }
             JoinStrategy::HashJoin { build_side } => {
-                execute_hash_join(txn, left, right, join_vars, *build_side, as_of, schema, slots)
+                execute_hash_join(txn, left, right, join_vars, *build_side, as_of, schema, slots, cache)
             }
         },
         PlanNode::Project { input, .. } => {
-            execute_node(txn, input, as_of, schema, slots)
+            execute_node(txn, input, as_of, schema, slots, cache)
         }
     }
 }
@@ -201,8 +206,9 @@ fn execute_nested_loop(
     as_of: Option<TxId>,
     schema: &SchemaRegistry,
     slots: &SlotMap,
+    cache: &QueryCache,
 ) -> Result<Vec<Tuple>, String> {
-    let left_tuples = execute_node(txn, left, as_of, schema, slots)?;
+    let left_tuples = execute_node(txn, left, as_of, schema, slots, cache)?;
 
     // For nested loop, we need to get the right clause to call evaluate_clause
     // with the left values so index lookups can use bound variables.
@@ -211,7 +217,7 @@ fn execute_nested_loop(
         _ => {
             // For non-scan right sides, fall back to executing both independently
             // and merging (effectively a hash join)
-            let right_tuples = execute_node(txn, right, as_of, schema, slots)?;
+            let right_tuples = execute_node(txn, right, as_of, schema, slots, cache)?;
             let mut results = Vec::new();
             for lt in &left_tuples {
                 for rt in &right_tuples {
@@ -226,7 +232,7 @@ fn execute_nested_loop(
 
     let mut results = Vec::new();
     for lt in &left_tuples {
-        let matches = evaluate_clause(txn, right_clause, lt, as_of, schema, slots)?;
+        let matches = evaluate_clause(txn, right_clause, lt, as_of, schema, slots, cache)?;
         results.extend(matches);
     }
 
@@ -243,9 +249,10 @@ fn execute_hash_join(
     as_of: Option<TxId>,
     schema: &SchemaRegistry,
     slots: &SlotMap,
+    cache: &QueryCache,
 ) -> Result<Vec<Tuple>, String> {
-    let left_tuples = execute_node(txn, left, as_of, schema, slots)?;
-    let right_tuples = execute_node(txn, right, as_of, schema, slots)?;
+    let left_tuples = execute_node(txn, left, as_of, schema, slots, cache)?;
+    let right_tuples = execute_node(txn, right, as_of, schema, slots, cache)?;
 
     // Resolve join_vars to slot indices once
     let join_slots: Vec<usize> = join_vars
@@ -314,6 +321,7 @@ fn evaluate_clause(
     as_of: Option<TxId>,
     schema: &SchemaRegistry,
     slots: &SlotMap,
+    cache: &QueryCache,
 ) -> Result<Vec<Tuple>, String> {
     // Check if the entity variable is already bound
     let bind_slot = slots.slot(&clause.bind).unwrap();
@@ -325,6 +333,79 @@ fn evaluate_clause(
         }
     });
 
+    let use_current = as_of.is_none();
+
+    // For current-state queries, eagerly load entire type into cache
+    let type_data: Option<Arc<HashMap<EntityId, HashMap<String, Value>>>> = if use_current {
+        cache.ensure_type_loaded(txn, &clause.entity_type, schema)?
+    } else {
+        None
+    };
+
+    // ========== CACHED PATH (current-state queries) ==========
+    if let Some(ref td) = type_data {
+        let empty_fields = HashMap::new();
+
+        // Fast path: entity already bound — single HashMap lookup, no Vec allocation
+        if let Some(eid) = bound_entity {
+            let fields = td.get(&eid).unwrap_or(&empty_fields);
+            let mut extended = tuple.clone();
+            extended.set(bind_slot, Value::Ref(eid));
+            if match_field_patterns(&clause.field_patterns, fields, &mut extended, slots) {
+                return Ok(vec![extended]);
+            }
+            return Ok(Vec::new());
+        }
+
+        let plans = find_indexable_patterns(clause, tuple, schema, slots);
+        if !plans.is_empty() {
+            // Use AVET for selective entity discovery
+            let mut candidate_sets: Vec<Vec<EntityId>> = Vec::new();
+            for plan in &plans {
+                match plan {
+                    AttrPlan::Exact(attr, value) => {
+                        let eids = find_entities_by_avet_current(txn, attr, value)?;
+                        candidate_sets.push(eids);
+                    }
+                    AttrPlan::Range(attr, op, value) => {
+                        let results =
+                            find_entities_by_avet_range_current(txn, attr, op, value)?;
+                        candidate_sets
+                            .push(results.into_iter().map(|(eid, _)| eid).collect());
+                    }
+                }
+            }
+            let mut result = candidate_sets.remove(0);
+            for set in &candidate_sets {
+                let set_lookup: HashSet<EntityId> = set.iter().copied().collect();
+                result.retain(|eid| set_lookup.contains(eid));
+            }
+            let mut results = Vec::new();
+            for eid in result {
+                let fields = td.get(&eid).unwrap_or(&empty_fields);
+                let mut extended = tuple.clone();
+                extended.set(bind_slot, Value::Ref(eid));
+                if match_field_patterns(&clause.field_patterns, fields, &mut extended, slots) {
+                    results.push(extended);
+                }
+            }
+            return Ok(results);
+        }
+
+        // No AVET patterns: iterate directly over cached entities (avoid Vec allocation)
+        let mut results = Vec::new();
+        for (&eid, fields) in td.iter() {
+            let mut extended = tuple.clone();
+            extended.set(bind_slot, Value::Ref(eid));
+            if match_field_patterns(&clause.field_patterns, fields, &mut extended, slots) {
+                results.push(extended);
+            }
+        }
+        return Ok(results);
+    }
+
+    // ========== UNCACHED PATH (historical queries) ==========
+
     // Compute needed fields early so we can optimize entity discovery
     let needed_fields = compute_needed_fields(clause, schema);
 
@@ -332,8 +413,6 @@ fn evaluate_clause(
     let mut known_fields: HashMap<EntityId, HashMap<String, Value>> = HashMap::new();
     let attr_prefix = format!("{}/", clause.entity_type);
     let mut bulk_loaded = false;
-
-    let use_current = as_of.is_none();
 
     let entities = if let Some(eid) = bound_entity {
         // Entity already bound — just check this one
@@ -346,11 +425,7 @@ fn evaluate_clause(
             for plan in &plans {
                 match plan {
                     AttrPlan::Exact(attr, value) => {
-                        let eids = if use_current {
-                            find_entities_by_avet_current(txn, attr, value)?
-                        } else {
-                            find_entities_by_avet(txn, attr, value, as_of)?
-                        };
+                        let eids = find_entities_by_avet(txn, attr, value, as_of)?;
                         // Pre-populate known field values
                         if let Some(field_name) = attr.strip_prefix(&attr_prefix) {
                             for &eid in &eids {
@@ -363,11 +438,8 @@ fn evaluate_clause(
                         candidate_sets.push(eids);
                     }
                     AttrPlan::Range(attr, op, value) => {
-                        let results = if use_current {
-                            find_entities_by_avet_range_current(txn, attr, op, value)?
-                        } else {
-                            find_entities_by_avet_range(txn, attr, op, value, as_of)?
-                        };
+                        let results =
+                            find_entities_by_avet_range(txn, attr, op, value, as_of)?;
                         let field_name = attr.strip_prefix(&attr_prefix);
                         let eids: Vec<EntityId> =
                             results.iter().map(|(eid, _)| *eid).collect();
@@ -395,20 +467,12 @@ fn evaluate_clause(
             // No AVET lookups — try to use AEVT scan on a required field
             // to discover entities AND load field values in one scan
             if let Some(required_field) = find_required_field(needed, clause, schema) {
-                let (entities, field_map) = if use_current {
-                    scan_entities_and_field_current(
-                        txn,
-                        &clause.entity_type,
-                        &required_field,
-                    )?
-                } else {
-                    scan_entities_and_field_via_aevt(
-                        txn,
-                        &clause.entity_type,
-                        &required_field,
-                        as_of,
-                    )?
-                };
+                let (entities, field_map) = scan_entities_and_field_via_aevt(
+                    txn,
+                    &clause.entity_type,
+                    &required_field,
+                    as_of,
+                )?;
                 known_fields = field_map;
 
                 // Bulk-load remaining needed fields
@@ -419,64 +483,39 @@ fn evaluate_clause(
                     .collect();
                 if !remaining.is_empty() {
                     let entity_set: HashSet<EntityId> = entities.iter().copied().collect();
-                    let extra = if use_current {
-                        bulk_load_fields_current(
-                            txn,
-                            &clause.entity_type,
-                            &remaining,
-                            &entity_set,
-                        )?
-                    } else {
-                        bulk_load_fields_via_aevt(
-                            txn,
-                            &clause.entity_type,
-                            &remaining,
-                            &entity_set,
-                            as_of,
-                        )?
-                    };
+                    let extra = bulk_load_fields_via_aevt(
+                        txn,
+                        &clause.entity_type,
+                        &remaining,
+                        &entity_set,
+                        as_of,
+                    )?;
                     for (eid, fields) in extra {
                         known_fields.entry(eid).or_default().extend(fields);
                     }
                 }
                 bulk_loaded = true;
                 entities
-            } else if use_current {
-                find_entities_of_type_current(txn, &clause.entity_type)?
             } else {
                 find_entities_of_type(txn, &clause.entity_type, as_of)?
             }
         } else {
             // Fall back to full type scan
-            if use_current {
-                find_entities_of_type_current(txn, &clause.entity_type)?
-            } else {
-                find_entities_of_type(txn, &clause.entity_type, as_of)?
-            }
+            find_entities_of_type(txn, &clause.entity_type, as_of)?
         }
     };
 
     // Bulk-load fields via AEVT scan when doing a full type scan with many entities.
-    // Instead of N individual EAVT scans per field, we do 1 AEVT scan per field.
     if !bulk_loaded && known_fields.is_empty() && entities.len() > 16 {
         if let Some(ref needed) = needed_fields {
             let entity_set: HashSet<EntityId> = entities.iter().copied().collect();
-            known_fields = if use_current {
-                bulk_load_fields_current(
-                    txn,
-                    &clause.entity_type,
-                    needed,
-                    &entity_set,
-                )?
-            } else {
-                bulk_load_fields_via_aevt(
-                    txn,
-                    &clause.entity_type,
-                    needed,
-                    &entity_set,
-                    as_of,
-                )?
-            };
+            known_fields = bulk_load_fields_via_aevt(
+                txn,
+                &clause.entity_type,
+                needed,
+                &entity_set,
+                as_of,
+            )?;
             bulk_loaded = true;
         }
     }
@@ -499,22 +538,13 @@ fn evaluate_clause(
                     .collect()
             });
 
-            let mut fields = if use_current {
-                load_entity_fields_current(
-                    txn,
-                    eid,
-                    &clause.entity_type,
-                    field_filter.as_deref(),
-                )?
-            } else {
-                load_entity_fields(
-                    txn,
-                    eid,
-                    &clause.entity_type,
-                    as_of,
-                    field_filter.as_deref(),
-                )?
-            };
+            let mut fields = load_entity_fields(
+                txn,
+                eid,
+                &clause.entity_type,
+                as_of,
+                field_filter.as_deref(),
+            )?;
 
             // Merge in known values from AVET scans
             for (k, v) in entity_known {
@@ -1111,24 +1141,6 @@ fn match_field_patterns(
 // Current-state index query functions (used when as_of is None)
 // ---------------------------------------------------------------------------
 
-/// Find all entity IDs of a given type via CURRENT_AVET index.
-/// No retraction resolution needed — current state index only has live entries.
-fn find_entities_of_type_current(
-    txn: &dyn ReadOps,
-    type_name: &str,
-) -> Result<Vec<EntityId>, String> {
-    let type_value = Value::String(type_name.to_string());
-    let prefix = index::current_avet_attr_value_prefix("__type", &type_value);
-    let end = index::prefix_end(&prefix);
-    let mut entities = Vec::new();
-    txn.scan_foreach(&prefix, &end, &mut |key, _value| {
-        entities.push(index::current_avet_entity_at(key));
-        true
-    })
-    .map_err(|e| e.to_string())?;
-    Ok(entities)
-}
-
 /// Find entity IDs by exact (attr, value) via CURRENT_AVET index.
 fn find_entities_by_avet_current(
     txn: &dyn ReadOps,
@@ -1203,117 +1215,3 @@ fn find_entities_by_avet_range_current(
     Ok(results)
 }
 
-/// Scan CURRENT_AEVT for a single field to discover entity IDs AND load field values.
-fn scan_entities_and_field_current(
-    txn: &dyn ReadOps,
-    entity_type: &str,
-    field_name: &str,
-) -> Result<(Vec<EntityId>, HashMap<EntityId, HashMap<String, Value>>), String> {
-    let attr = format!("{}/{}", entity_type, field_name);
-    let prefix = index::current_aevt_attr_prefix(&attr);
-    let end = index::prefix_end(&prefix);
-    let attr_byte_len = attr.as_bytes().len();
-
-    let mut entities = Vec::new();
-    let mut field_map: HashMap<EntityId, HashMap<String, Value>> = HashMap::new();
-
-    txn.scan_foreach(&prefix, &end, &mut |key, value| {
-        let eid = index::current_aevt_entity_at(key, attr_byte_len);
-        if let Some(val) = index::decode_current_value(value) {
-            entities.push(eid);
-            let mut fields = HashMap::new();
-            fields.insert(field_name.to_string(), val);
-            field_map.insert(eid, fields);
-        }
-        true
-    })
-    .map_err(|e| e.to_string())?;
-
-    Ok((entities, field_map))
-}
-
-/// Bulk-load field values for many entities via CURRENT_AEVT index.
-fn bulk_load_fields_current(
-    txn: &dyn ReadOps,
-    entity_type: &str,
-    field_names: &[String],
-    entity_set: &HashSet<EntityId>,
-) -> Result<HashMap<EntityId, HashMap<String, Value>>, String> {
-    let mut result: HashMap<EntityId, HashMap<String, Value>> = HashMap::new();
-
-    for field_name in field_names {
-        let attr = format!("{}/{}", entity_type, field_name);
-        let prefix = index::current_aevt_attr_prefix(&attr);
-        let end = index::prefix_end(&prefix);
-        let attr_byte_len = attr.as_bytes().len();
-
-        txn.scan_foreach(&prefix, &end, &mut |key, value| {
-            let eid = index::current_aevt_entity_at(key, attr_byte_len);
-            if entity_set.contains(&eid) {
-                if let Some(val) = index::decode_current_value(value) {
-                    result
-                        .entry(eid)
-                        .or_default()
-                        .insert(field_name.clone(), val);
-                }
-            }
-            true
-        })
-        .map_err(|e| e.to_string())?;
-    }
-
-    Ok(result)
-}
-
-/// Load current field values for an entity from CURRENT_AEVT (single get per field).
-fn load_entity_fields_current(
-    txn: &dyn ReadOps,
-    entity: EntityId,
-    entity_type: &str,
-    field_filter: Option<&[String]>,
-) -> Result<HashMap<String, Value>, String> {
-    let mut fields = HashMap::new();
-
-    if let Some(fields_to_load) = field_filter {
-        for field_name in fields_to_load {
-            let attr = format!("{}/{}", entity_type, field_name);
-            // Key = [0x11][attr_len][attr_bytes][entity_id] — independent of value
-            let mut lookup_key = index::current_aevt_attr_prefix(&attr);
-            lookup_key.extend_from_slice(&entity.to_be_bytes());
-
-            if let Some(val_bytes) = txn.get(&lookup_key).map_err(|e| e.to_string())? {
-                if let Some(val) = index::decode_current_value(&val_bytes) {
-                    fields.insert(field_name.clone(), val);
-                }
-            }
-        }
-    } else {
-        // Full entity scan: scan all attrs for this entity type that start with Type/
-        // We need to scan the entity's EAVT prefix and filter. But with current state,
-        // we don't have an entity-first current index. Fall back to EAVT historical.
-        // This only happens for enum fields or >4 field patterns, which is rare.
-        let prefix = index::eavt_entity_prefix(entity);
-        let end_key = index::prefix_end(&prefix);
-        let entries = txn.scan(&prefix, &end_key).map_err(|e| e.to_string())?;
-
-        let attr_prefix = format!("{}/", entity_type);
-        let mut attr_state: HashMap<String, Vec<Datom>> = HashMap::new();
-        for (key, _) in &entries {
-            if let Some(datom) = index::decode_datom_from_eavt(key) {
-                attr_state
-                    .entry(datom.attribute.clone())
-                    .or_default()
-                    .push(datom);
-            }
-        }
-
-        let resolved = crate::db::resolve_current_values(attr_state, None);
-        for (attr, value) in resolved {
-            if let Some(field_name) = attr.strip_prefix(&attr_prefix) {
-                fields.insert(field_name.to_string(), value);
-            }
-        }
-    }
-
-    Ok(fields)
-}

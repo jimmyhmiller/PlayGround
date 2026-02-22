@@ -70,6 +70,8 @@ HealthFinch created a rules engine that would help with prescription renewals. I
 
 One of my favorite projects while I was there was actually working on a legacy ruby application that formed the template of an old version of the software. The templates were incredibly complex. But I [wrote a visualizer](/learn-codebase-visualizer) for them that showed you precisely where each bit of data had come from. Making a change that tool quite a while before almost instaneous.
 
+I only left healthfinch because the company was running out of money. There were layoffs. They brought in [Jack Barker](https://silicon-valley.fandom.com/wiki/Jack_Barker) to run the company. It was all a mess.
+
 ### What I Learned
 
 I learned just how productive Clojure can be. I learned that languages are not silver bullets for solving all your technical problems. I learned that the values people hold about code can lead them to vastly different solutions. I learned the value of mentoring as a means to learn yourself. I learned about logic programming and the power of state machines as an abstraction.
@@ -81,4 +83,50 @@ When I joined the company it was called Adzerk. By the time I left it had rebran
 As the former maintainer steps onto other things, I was on a team of one for a while before we hired [Grzegorz](https://github.com/nabacg) to join the team. This was an absolute massive change. Together we were able to transform this hand built system into something with complete cloudformation defined services, all with CI, autoscaling, automatic deployments, automatic rollback, etc. Not only that, we did a live migration of all the old api traffic to our complete rewrite, all with zero downtime and no customer visiable breakages. 
 
 I also wrote some very awful software using lambdas. There was a new process at the company obsessed with writing big long documents and I was given a project for which the document was needed. I quickly learned just how not value I found the process. Documents can absolutely be wonderful. And I've worked with many engineers who are great at producing them. But they are not how I think, I need to [discover the code](https://jimmyhmiller.com/discovery-coding) first, then write the document.
+
+### What I Learned
+
+I learned a ton about "big data". Learned what it takes to get a proper CI/CD setup. I learned how to run a system that processed billions of requests a month, while making massive changes to it, and yet never get a single late night call. I learned the cost of a bad hire and the benefits of a good ones. I learned the true cost of technical debt and that not every one who is stuck in it sees it.
+
+## Cisco: Threat Response (2021 - 2022)
+
+I joined Cisco with a number of my former coworkers from healthfinch. One of my former co-workers was now my manager. Cisco was quite a change. It was by far the largest company I had worked at, but felt really small. I had no real visibility outside my little org. When I was brought in there were a number of performance problems the team faced. 
+
+We were building some semi-sophisticated analysis software in the browser that would look at threat intelligence data and IOC and various sensor data and connect the dots. This would allow security teams to explore graphs to understand the potential impact of a security intrusion. Most of the data we were connecting was fairly small, but in certain pathological cases, we could spend upwards of 30 mins in the browser doing graph computations. I was able to bring this down first to second, then milliseconds.
+
+This may sound like I'm really clever, but truth be told, it is quite easy for systems to evolve and have massive pathological cases. This was one of them. The code was trying to be exceedingly general, when a very particular solution could apply.
+
+A lot of my time at Cisco was spent prototyping, exploring, and arguing for greater capabilities. With my "big data" background, I saw a lot of opportunities for a larger scope that our team could tackle. When another former coworker from healthfinch joined, I knew the team was in good hands. She was incredibly capable engineer and I had found an idea position getting me into the area I had always longed for, compilers.
+
+### What I Learned
+
+I learned a ton about the security field. I had interest in security from a software engineering side, but had never really understood what security personnel spent their time doing. I had no idea about the various vocabulary, about the organizations involved in standardization, about the techniques that go into reverse engineering, detecting, etc malware. I also learned a lot about how to operate in a large company.
+
+## Shopify (2022 - 2023)
+
+I will start with the negative first. I got laid off. I was caught in a cross the board 20% layoff. It was sad. While I was there I got to work with by far the smartest people I've had the pleasure of working with. Every single person on that team knew way more than me.
+
+At Shopify I got to work on YJIT a JIT compiler for Ruby written in Rust. My team lead was [Maxime Chevalier-Boisvert](https://arxiv.org/search/cs?searchtype=author&query=Chevalier-Boisvert,+M) creater of the technique that YJIT took advantage of [Lazy Basic Block Versioning](https://arxiv.org/abs/1411.0352). I was working with some of the powerhouses of Ruby world. I spent my team split between contributing to YJIT and helping some internal teams. For YJIT I spent time speeding up edge cases around various ways in which function calls could happen in ruby (is this a c call? Is it a method with named arguments, is it a method default arguments?) All of these paths needed code generation or else we'd have to exit the JIT back to the interpreter. I spent a good amount of time knocking these down.
+
+Internally, we had teams working on some wasm based things. I spent some time helping make sure benchmarks between our two teams made sense. Spent some time debugging some things with them. When I joined, in many ways that team felt like competition and I tried to instead make us colaborators. 
+
+Shopify was a big learning curve for me. I think I got up to speed fast. But I was definitely nowhere near as knowledgeable as my teammates. But it was also a cultural learning curve for me. My team was far less social than I was used to. Cameras were generally off. The Ruby world was full of politics I didn't know. I was also joining right after a large layoff and I realized way to late how much of an impact that had on the way teams operated.
+
+### What I Learned
+
+I learned a ton about compilers, about Ruby. I learned a good amount about the difference in values that low-level programmers have vs people like myself that had come from a high-level world. I learned a lot from Maxime on what it takes to push an ambitious project at a large company an make it succeed.
+
+## Service Now (2023-Now)
+
+I'll admit, Sevice Now is not where I expected to find myself. On the surface, it's a large enterprise that makes software that people on hacker news love to complain about. But at the heart of the system is a very interesting choice, the [Rhino Javascript Runtime](https://github.com/mozilla/rhino/). Yes the very old runtime written in Java. What this means is that customers are able to write full applications on their Service Now instances. They are able to customize ever aspect of what they do. 
+
+When I joined, the internal fork had been abandoned for years. Since I've joined, we've formed a team that has brought life back into it. We have our own fetch implemenation, growing compability with the node ecosystem. By integrating upstream and committing changes upstream we've gone from having very little support for modern javascript to a half-way decent runtime, and hopefully within this year will have a modern javascript runtime.
+
+For my part, I've contributed a decent amount myself, but I've also served in the mentor and sheppard role. I helped our intern [Cam Walter](https://www.linkedin.com/in/camnwalter/) write a brand new version of the interpreter inspired by JRuby that will hopefully be open sourced before too long. I've help teammates get up to speed on compiler work. But I've also just worked alongside some incredibly talented, very experierenced engineers.
+
+### What I've Learned
+
+This time has been one of the most interesting times in my career, not directly from the job, but because of the ecosystem change. When I started this job AI was not much of a big factor. But today these tools have matured to the point where they really are starting to change what we are able to do. I am just at the beginning of seeing how fast AI can help us move even at a large enterprise like Service Now.
+
+
 
