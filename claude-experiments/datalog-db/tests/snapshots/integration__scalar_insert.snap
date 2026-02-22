@@ -3,5 +3,6 @@ source: tests/integration.rs
 expression: snapshot_datoms(&after)
 ---
 [e=2 User/age                       30 tx=2 assert]
+[e=2 User/email                     "alice@example.com" tx=2 assert]
 [e=2 User/name                      "Alice" tx=2 assert]
 [e=2 __type                         "User" tx=2 assert]

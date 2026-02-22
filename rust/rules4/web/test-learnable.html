@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html>
+<head><title>Learnable Test</title></head>
+<body>
+<div id="output" style="font-family: monospace; white-space: pre-wrap;"></div>
+<div id="viz"></div>
+<script type="module">
+import { Rules4 } from './bridge.js';
+import { renderTerm } from './vdom.js';
+import {
+  allModules, callTreeModule, stepCardModule,
+  valueTimelineModule, iterationTableModule,
+  assertNum,
+} from './viz-modules.js';
+
+const out = document.getElementById('output');
+function log(msg) { out.textContent += msg + '\n'; console.log(msg); }
+
+try {
+  log('Loading WASM...');
+  const r4 = await Rules4.load('./rules4.wasm');
+  log('Engine created.');
+
+  const programCode = `
+fn fib(0) = 0
+fn fib(1) = 1
+fn fib(?n) = fib(?n - 1) + fib(?n - 2)
+
+rule memo : @meta -> @rules {
+  result(?s, fib(?n), ?val) => rule(fib(?n), ?val)
+}
+
+fn fact(0) = 1
+fn fact(?n) = ?n * fact(?n - 1)
+
+rule tracer : @meta -> @rules {
+  reduction(?step, ?old, ?new, fn(?name, ?idx)) =>
+    if should_trace(?name) then {
+      rule(trace(trace_count), reduced(?old, ?new, fn(?name, ?idx)))
+      rule(trace_count, trace_count + 1)
+    } else 0
+  result(?step, ?call, ?val) => {
+    rule(call_result(quote(?call)), ?val)
+    rule(trace(trace_count), completed(quote(?call), ?val))
+    rule(trace_count, trace_count + 1)
+  }
+}
+
+{
+  rule(trace_count, 0)
+  rule(should_trace(fib), true)
+  rule(should_trace(fact), true)
+  rule(result_val, fib(5) + fact(4))
+  rule(max_step, trace_count - 1)
+}
+`;
+
+  log('Phase 1: Loading program...');
+  r4.eval(r4.loadProgram(programCode));
+  log('  Done.');
+
+  const maxStep = r4.termNum(r4.eval(r4.sym("max_step")));
+  log('  max_step = ' + maxStep);
+
+  const resultTerm = r4.eval(r4.sym("result_val"));
+  log('  result_val = ' + r4.display(resultTerm));
+
+  // Check trace events
+  for (let i = 0; i <= Math.min(maxStep, 3); i++) {
+    const event = r4.eval(r4.call(r4.sym("trace"), [r4.num(i)]));
+    log('  trace(' + i + ') = ' + r4.display(event).substring(0, 80));
+  }
+
+  log('\nPhase 2: Running viz modules...');
+  const enabledModules = new Set(['call_tree', 'step_card', 'value_timeline']);
+  const tracedFns = new Set();
+  for (const mod of allModules) {
+    if (enabledModules.has(mod.name)) {
+      log('  Running ' + mod.name + '...');
+      mod.analyze(r4, maxStep, tracedFns);
+      log('    Done.');
+    }
+  }
+  log('  Traced functions: ' + [...tracedFns].join(', '));
+
+  const viewCode = `
+fn cls(?c) = attr("class", ?c)
+
+fn node_fill(?i) =
+  if current_step < node_entry(?i) then "#f0f0f0"
+  else if current_step < node_completion(?i) then "#fff3e0"
+  else "#42a5f5"
+
+fn node_stroke(?i) =
+  if current_step < node_entry(?i) then "#ddd"
+  else if current_step < node_completion(?i) then "#ff9800"
+  else "#1976d2"
+
+fn node_text_fill(?i) =
+  if current_step < node_entry(?i) then "#bbb"
+  else if current_step < node_completion(?i) then "#e65100"
+  else "#fff"
+
+fn node_label(?i) =
+  if current_step >= node_completion(?i) then call_result(node_call(?i))
+  else node_call(?i)
+
+fn edge_stroke(?i) =
+  if current_step >= node_entry(edge_to(?i)) then "#90caf9" else "#e8e8e8"
+
+fn render_node(?i) = element("g", [], [
+  element("circle", [
+    attr("cx", node_cx(?i)), attr("cy", node_cy(?i)), attr("r", 20),
+    attr("fill", node_fill(?i)), attr("stroke", node_stroke(?i)),
+    attr("stroke-width", 2)
+  ], []),
+  element("text", [
+    attr("x", node_cx(?i)), attr("y", node_cy(?i) + 4),
+    attr("text-anchor", "middle"), attr("font-size", 10),
+    attr("font-weight", 700), attr("fill", node_text_fill(?i)),
+    attr("font-family", "-apple-system, sans-serif")
+  ], [text(node_label(?i))])])
+
+fn render_edge(?i) = element("line", [
+  attr("x1", node_cx(edge_from(?i))), attr("y1", node_cy(edge_from(?i)) + 20),
+  attr("x2", node_cx(edge_to(?i))),   attr("y2", node_cy(edge_to(?i)) - 20),
+  attr("stroke", edge_stroke(?i)), attr("stroke-width", 2)
+], [])
+
+fn render_nodes(?i) =
+  if ?i >= node_count then nil
+  else cons(render_node(?i), render_nodes(?i + 1))
+
+fn render_edges(?i) =
+  if ?i >= edge_count then nil
+  else cons(render_edge(?i), render_edges(?i + 1))
+
+fn append(nil, ?ys) = ?ys
+fn append(cons(?x, ?xs), ?ys) = cons(?x, append(?xs, ?ys))
+
+fn kind_badge(fn(?name, ?idx)) =
+  element("span", [cls("kind-badge fn-badge")], [text(?name)])
+fn kind_badge(builtin(?op)) =
+  element("span", [cls("kind-badge builtin-badge")], [text(?op)])
+
+fn step_card_for(reduced(?old, ?new, ?kind)) = element("div", [cls("step-card")], [
+  element("span", [cls("step-num")], [text("STEP " ++ current_step)]),
+  element("span", [cls("step-old")], [text(?old)]),
+  element("span", [cls("step-arrow")], [text(" -> ")]),
+  element("span", [cls("step-new")], [text(?new)]),
+  kind_badge(?kind)])
+
+fn step_card_for(completed(?call, ?val)) = element("div", [cls("step-card")], [
+  element("span", [cls("step-num")], [text("STEP " ++ current_step)]),
+  element("span", [cls("step-old")], [text(?call)]),
+  element("span", [cls("step-arrow")], [text(" = ")]),
+  element("span", [cls("step-new result-val")], [text(?val)]),
+  element("span", [cls("kind-badge result-badge")], [text("result")])])
+
+fn step_card() = step_card_for(trace(current_step))
+
+fn vt_color(0) = "#1976d2"
+fn vt_color(1) = "#e65100"
+fn vt_color(2) = "#2e7d32"
+fn vt_color(3) = "#7b1fa2"
+
+fn render_call_tree() = element("div", [cls("tree-container")], [
+  element("svg", [
+    attr("viewBox", "0 0 " ++ svg_width ++ " " ++ svg_height),
+    attr("width", "100%")
+  ], append(render_edges(0), render_nodes(0)))])
+
+fn render() = @dom element("div", [], [
+  render_call_tree(),
+  step_card()])
+
+0
+`;
+
+  log('\nPhase 3: Loading view code...');
+  r4.eval(r4.loadProgram(viewCode));
+  log('  Done.');
+
+  log('\nPhase 4: Rendering...');
+  r4.assertRule(r4.sym("current_step"), r4.num(maxStep));
+
+  const renderSym = r4.sym("render");
+  r4.eval(r4.call(renderSym, []));
+
+  const pending = r4.scopeTakePending("dom");
+  log('  DOM pending count: ' + pending.length);
+
+  if (pending.length > 0) {
+    const termId = pending[pending.length - 1];
+    const dom = renderTerm(r4, termId, () => {});
+    document.getElementById('viz').appendChild(dom);
+    log('  DOM rendered!');
+  } else {
+    log('  ERROR: No DOM terms!');
+  }
+
+  log('\nDone!');
+} catch (e) {
+  log('ERROR: ' + e.message);
+  log(e.stack);
+  console.error(e);
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,317 @@
+namespace ease
+
+use appkit as ak
+use beagle.fs as fs
+
+// ─── Data Model ─────────────────────────────────────────────────────
+
+struct Goal {
+    name
+    color
+    count
+}
+
+let DATA-PATH = "/tmp/ease-beagle-data.txt"
+
+// ─── Hex Color Parsing ──────────────────────────────────────────────
+
+fn hex-digit(c) {
+    let code = char-code(c)
+    if code >= 48 && code <= 57 {
+        code - 48
+    } else if code >= 65 && code <= 70 {
+        code - 55
+    } else if code >= 97 && code <= 102 {
+        code - 87
+    } else {
+        0
+    }
+}
+
+fn parse-hex-color(hex) {
+    let r = (hex-digit(get(hex, 1)) * 16 + hex-digit(get(hex, 2)))
+    let g = (hex-digit(get(hex, 3)) * 16 + hex-digit(get(hex, 4)))
+    let b = (hex-digit(get(hex, 5)) * 16 + hex-digit(get(hex, 6)))
+    [r / 255.0, g / 255.0, b / 255.0]
+}
+
+// ─── Persistence ────────────────────────────────────────────────────
+
+fn default-goals() {
+    [
+        Goal { name: "Exercise",   color: "#E74C3C", count: 0 },
+        Goal { name: "Reading",    color: "#3498DB", count: 0 },
+        Goal { name: "Meditation", color: "#2ECC71", count: 0 }
+    ]
+}
+
+fn load-data() {
+    let exists-result = fs/blocking-exists?(DATA-PATH)
+    let exists = match exists-result {
+        Result.Ok { value } => value,
+        Result.Err { error } => false
+    }
+    if exists == false {
+        default-goals()
+    } else {
+        let content = read-full-file(DATA-PATH)
+        let lines = split(content, "\n")
+        let mut goals = []
+        let mut i = 0
+        while i < length(lines) {
+            let line = get(lines, i)
+            if length(trim(line)) > 0 {
+                let parts = split(line, "|")
+                if length(parts) >= 3 {
+                    let cnt = parse-int(get(parts, 2))
+                    goals = push(goals, Goal {
+                        name: get(parts, 0),
+                        color: get(parts, 1),
+                        count: if cnt == null { 0 } else { cnt }
+                    })
+                }
+            }
+            i = i + 1
+        }
+        if length(goals) == 0 {
+            default-goals()
+        } else {
+            goals
+        }
+    }
+}
+
+fn save-data(goals) {
+    let lines = map(goals, fn(g) {
+        g.name ++ "|" ++ g.color ++ "|" ++ to-string(g.count)
+    })
+    let content = join(lines, "\n")
+    fs/blocking-write-file(DATA-PATH, content)
+}
+
+// ─── State ──────────────────────────────────────────────────────────
+
+let state = atom(load-data())
+
+fn update-count(goals, idx, delta) {
+    let mut result = []
+    let mut i = 0
+    while i < length(goals) {
+        let g = get(goals, i)
+        if i == idx {
+            let new-count = g.count + delta
+            let clamped = if new-count < 0 { 0 } else { new-count }
+            result = push(result, Goal { name: g.name, color: g.color, count: clamped })
+        } else {
+            result = push(result, g)
+        }
+        i = i + 1
+    }
+    result
+}
+
+// ─── UI Layout Constants ────────────────────────────────────────────
+
+let POP-W = 340.0
+let POP-H = 360.0
+let MARGIN = 20.0
+let BAR-W = 300.0
+let BAR-H = 20.0
+let BAR-Y = 260.0
+let ROW-H = 46.0
+let ROW-START-Y = 200.0
+
+// ─── UI References (filled during construction) ─────────────────────
+
+let count-labels = atom([])
+let bar-views = atom([])
+let popover-ref = atom(null)
+let status-item-ref = atom(null)
+
+// ─── UI Update ──────────────────────────────────────────────────────
+
+fn refresh-ui() {
+    let goals = deref(state)
+    let labels = deref(count-labels)
+    let bars = deref(bar-views)
+
+    // Update count labels
+    let mut i = 0
+    while i < length(goals) {
+        let g = get(goals, i)
+        let lbl = get(labels, i)
+        if lbl != null {
+            ak/set-text(lbl, to-string(g.count))
+        }
+        i = i + 1
+    }
+
+    // Update proportional bars
+    let total = reduce(goals, 0.0, fn(acc, g) { acc + g.count })
+    let mut x = MARGIN
+    i = 0
+    while i < length(goals) {
+        let g = get(goals, i)
+        let bar = get(bars, i)
+        if bar != null {
+            let w = if total == 0.0 {
+                BAR-W / length(goals)
+            } else {
+                (g.count / total) * BAR-W
+            }
+            let final-w = if g.count > 0 && w < 4.0 { 4.0 } else { w }
+            ak/set-frame(bar, x, BAR-Y, final-w, BAR-H)
+            x = x + final-w
+        }
+        i = i + 1
+    }
+
+    save-data(goals)
+}
+
+// ─── Build UI ───────────────────────────────────────────────────────
+
+fn main() {
+    let goals = deref(state)
+
+    // ── Menu bar app (no dock icon) ─────────────────────────────
+    let app = ak/menu-bar-app()
+
+    // ── Status bar item ─────────────────────────────────────────
+    let si = ak/status-item("Ease")
+    reset!(status-item-ref, si)
+
+    // ── Popover ─────────────────────────────────────────────────
+    let pop = ak/popover(POP-W, POP-H)
+    reset!(popover-ref, pop)
+    let view = pop.content-view
+
+    // ── Handler (register before wiring buttons) ────────────────
+    let handler = ak/handler("EaseHandler")
+
+    // Toggle popover on status bar click
+    ak/add-method(handler, "toggle:", fn(self_, sel, sender) {
+        let p = deref(popover-ref)
+        let s = deref(status-item-ref)
+        ak/toggle-popover(p, s)
+    })
+
+    // Quit
+    ak/add-method(handler, "quit:", fn(self_, sel, sender) {
+        ak/terminate()
+    })
+
+    // Goal increment/decrement methods
+    let mut i = 0
+    while i < length(goals) {
+        let idx = i
+        let inc-sel = "inc" ++ to-string(i) ++ ":"
+        ak/add-method(handler, inc-sel, fn(self_, sel, sender) {
+            swap!(state, fn(goals) { update-count(goals, idx, 1) })
+            refresh-ui()
+        })
+        let dec-sel = "dec" ++ to-string(i) ++ ":"
+        ak/add-method(handler, dec-sel, fn(self_, sel, sender) {
+            swap!(state, fn(goals) { update-count(goals, idx, -1) })
+            refresh-ui()
+        })
+        i = i + 1
+    }
+
+    let handler = ak/register(handler)
+
+    // Wire status bar button
+    ak/status-on-click(si, handler, "toggle:")
+
+    // ── Title ───────────────────────────────────────────────────
+    let title = ak/label("Ease", 0.0, 310.0, POP-W, 40.0)
+    ak/set-font(title, ak/bold-font(28.0))
+    ak/set-text-color(title, ak/white)
+    ak/add-to(view, title)
+
+    let sub = ak/label("Track your daily goals", 0.0, 290.0, POP-W, 20.0)
+    ak/set-font(sub, ak/font(12.0))
+    ak/set-text-color(sub, ak/color(0.55, 0.55, 0.6, 1.0))
+    ak/add-to(view, sub)
+
+    // ── Proportional bars ───────────────────────────────────────
+    let bar-bg = ak/colored-view(MARGIN, BAR-Y - 2.0, BAR-W, BAR-H + 4.0, 0.22, 0.22, 0.26, 1.0)
+    ak/set-corner-radius(bar-bg, 5.0)
+    ak/set-layer-mask(bar-bg)
+    ak/add-view(view, bar-bg)
+
+    let total = reduce(goals, 0.0, fn(acc, g) { acc + g.count })
+    let mut bars = []
+    let mut bar-x = MARGIN
+    i = 0
+    while i < length(goals) {
+        let g = get(goals, i)
+        let rgb = parse-hex-color(g.color)
+        let w = if total == 0.0 {
+            BAR-W / length(goals)
+        } else {
+            (g.count / total) * BAR-W
+        }
+        let bar = ak/colored-view(
+            bar-x, BAR-Y, w, BAR-H,
+            get(rgb, 0), get(rgb, 1), get(rgb, 2), 1.0
+        )
+        ak/add-view(view, bar)
+        bars = push(bars, bar)
+        bar-x = bar-x + w
+        i = i + 1
+    }
+    reset!(bar-views, bars)
+
+    // ── Goal rows ───────────────────────────────────────────────
+    let mut labels = []
+    i = 0
+    while i < length(goals) {
+        let g = get(goals, i)
+        let y = ROW-START-Y - (i * ROW-H)
+        let rgb = parse-hex-color(g.color)
+
+        // Color dot
+        let dot = ak/colored-view(MARGIN, y + 7.0, 14.0, 14.0,
+            get(rgb, 0), get(rgb, 1), get(rgb, 2), 1.0)
+        ak/set-corner-radius(dot, 7.0)
+        ak/add-view(view, dot)
+
+        // Goal name
+        let name-lbl = ak/left-label(g.name, MARGIN + 20.0, y, 120.0, 28.0)
+        ak/set-font(name-lbl, ak/font(16.0))
+        ak/set-text-color(name-lbl, ak/white)
+        ak/add-to(view, name-lbl)
+
+        // Count
+        let count-lbl = ak/label(to-string(g.count), 170.0, y, 50.0, 28.0)
+        ak/set-font(count-lbl, ak/mono-digit-font(20.0))
+        ak/set-text-color(count-lbl, ak/white)
+        ak/add-to(view, count-lbl)
+        labels = push(labels, count-lbl)
+
+        // Minus button
+        let minus = ak/button("-", 230.0, y + 1.0, 36.0, 26.0)
+        ak/set-font(minus, ak/bold-font(16.0))
+        ak/on-click(minus, handler, "dec" ++ to-string(i) ++ ":")
+        ak/add-to(view, minus)
+
+        // Plus button
+        let plus = ak/button("+", 274.0, y + 1.0, 36.0, 26.0)
+        ak/set-font(plus, ak/bold-font(16.0))
+        ak/on-click(plus, handler, "inc" ++ to-string(i) ++ ":")
+        ak/add-to(view, plus)
+
+        i = i + 1
+    }
+    reset!(count-labels, labels)
+
+    // ── Quit button ─────────────────────────────────────────────
+    let quit-btn = ak/button("Quit", POP-W - 70.0, 10.0, 50.0, 24.0)
+    ak/set-font(quit-btn, ak/font(11.0))
+    ak/on-click(quit-btn, handler, "quit:")
+    ak/add-to(view, quit-btn)
+
+    println("Ease running in menu bar!")
+    ak/run(app)
+}

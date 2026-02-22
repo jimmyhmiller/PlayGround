@@ -131,4 +131,16 @@ impl SchemaRegistry {
     pub fn contains_enum(&self, name: &str) -> bool {
         self.enums.contains_key(name)
     }
+
+    pub fn all_types(&self) -> Vec<&EntityTypeDef> {
+        let mut types: Vec<_> = self.types.values().collect();
+        types.sort_by_key(|t| &t.name);
+        types
+    }
+
+    pub fn all_enums(&self) -> Vec<&EnumTypeDef> {
+        let mut enums: Vec<_> = self.enums.values().collect();
+        enums.sort_by_key(|e| &e.name);
+        enums
+    }
 }

@@ -35,21 +35,56 @@
       background: white;
       border: 1px solid #eaeaee;
       border-radius: 12px;
-      display: flex;
-      align-items: center;
-      justify-content: center;
       overflow: hidden;
+      position: relative;
     }
-    #canvas { width: 100%; height: 100%; }
+    #ghost-layer {
+      position: absolute; inset: 0;
+      width: 100%; height: 100%;
+      z-index: 1;
+      pointer-events: none;
+    }
+    #canvas-root {
+      position: absolute; inset: 0;
+      width: 100%; height: 100%;
+      z-index: 2;
+    }
 
+    /* ── Tab bar ── */
+    .tab-bar {
+      display: flex; gap: 0;
+      border-bottom: 2px solid #e0e0e4;
+      flex-shrink: 0;
+    }
+    .tab {
+      padding: 8px 18px;
+      border: none; background: none;
+      font-size: 13px; font-weight: 600;
+      color: #888; cursor: pointer;
+      border-bottom: 2px solid transparent;
+      margin-bottom: -2px;
+      transition: color 0.15s, border-color 0.15s;
+    }
+    .tab:hover { color: #555; }
+    .tab.active { color: #1976d2; border-bottom-color: #1976d2; }
+
+    /* ── Editor panels ── */
     .editor-wrap {
       flex: 1;
       border: 2px solid #e0e0e4;
-      border-radius: 10px;
+      border-top: none;
+      border-radius: 0 0 10px 10px;
+      overflow: hidden;
+      position: relative;
+    }
+    .editor-panel {
+      position: absolute; inset: 0;
+      display: none;
       overflow: hidden;
     }
-    .cm-editor { height: 100%; }
-    .cm-editor .cm-scroller { overflow: auto; }
+    .editor-panel.active { display: flex; flex-direction: column; }
+    .cm-editor { height: 100%; overflow: hidden; }
+    .cm-editor .cm-scroller { overflow: auto !important; }
     .cm-editor .cm-content {
       font-family: 'SF Mono', 'Fira Code', 'Menlo', monospace;
       font-size: 13px;
@@ -66,6 +101,7 @@
     }
     .error.visible { display: block; }
 
+    /* ── Controls ── */
     .controls {
       display: flex; align-items: center; gap: 14px;
     }
@@ -81,9 +117,21 @@
       box-shadow: 0 1px 4px rgba(0,0,0,0.18);
     }
     .frame-label {
-      font-size: 12px; color: #999; min-width: 120px; text-align: center;
+      font-size: 12px; color: #999; min-width: 90px; text-align: center;
       font-variant-numeric: tabular-nums; font-weight: 600;
     }
+    .btn {
+      padding: 6px 16px;
+      border: 2px solid #1976d2;
+      background: transparent;
+      color: #1976d2;
+      font-size: 12px; font-weight: 600;
+      border-radius: 8px; cursor: pointer;
+      transition: background 0.15s, color 0.15s;
+      white-space: nowrap;
+    }
+    .btn:hover { background: #1976d2; color: white; }
+    .btn.active { background: #1976d2; color: white; }
   </style>
 </head>
 <body>
@@ -95,30 +143,42 @@
 
   <div class="main">
     <div class="editor-col">
-      <div class="editor-wrap" id="editor-wrap">
-        <div id="editor"></div>
+      <div class="tab-bar">
+        <button class="tab active" data-tab="animation">Animation</button>
+        <button class="tab" data-tab="drawing">Drawing</button>
+        <button class="tab" data-tab="meta">Meta</button>
+      </div>
+      <div class="editor-wrap">
+        <div class="editor-panel active" id="ep-animation"><div id="editor-animation"></div></div>
+        <div class="editor-panel" id="ep-drawing"><div id="editor-drawing"></div></div>
+        <div class="editor-panel" id="ep-meta"><div id="editor-meta"></div></div>
       </div>
       <div class="error" id="error"></div>
     </div>
     <div class="canvas-col">
-      <svg id="canvas" viewBox="0 0 400 300"></svg>
+      <svg id="ghost-layer" viewBox="0 0 400 300"></svg>
+      <div id="canvas-root"></div>
     </div>
   </div>
 
   <div class="controls">
-    <input type="range" id="slider" min="0" max="39" value="39">
-    <span class="frame-label" id="frame-label">frame 39</span>
+    <button class="btn" id="play-pause">Pause</button>
+    <input type="range" id="slider" min="0" max="39" value="0">
+    <span class="frame-label" id="frame-label">frame 0</span>
+    <button class="btn" id="apply-meta">Apply Meta</button>
   </div>
 </div>
 
 <script type="module">
 import { Rules4 } from './bridge.js';
+import { renderTerm, patch } from './vdom.js';
 
 const { EditorView, basicSetup } = await import('https://esm.sh/codemirror@6.0.1');
 
-const DEFAULT_CODE = `\
-# === Bouncing ball ===
-# Change the numbers and watch the path update!
+// ── Default code for each tab ──
+
+const ANIM_CODE = `\
+# === Bouncing ball physics ===
 
 fn ball_x(?f) = ?f * 9 + 20
 
@@ -133,34 +193,91 @@ fn ball_vy(?f) =
 fn ball_y(0) = 30
 fn ball_y(?f) = ball_y(?f - 1) + ball_vy(?f)
 
+# State
+fn init() = rule(current_frame, 0)
+fn handle_event(set_frame, ?f) = rule(current_frame, ?f)
+
+init()`;
+
+const DRAW_CODE = `\
+# === Drawing ===
+# Renders the current ball position via @dom
+
 fn draw(?f) = circle(ball_x(?f), ball_y(?f), 15)
 
-# Meta rule: capture each draw result and emit to @draw
+fn render() = @dom element("svg",
+  [attr("viewBox", "0 0 400 300"),
+   attr("width", "100%"), attr("height", "100%")],
+  [element("circle",
+    [attr("cx", ball_x(current_frame)),
+     attr("cy", ball_y(current_frame)),
+     attr("r", 15),
+     attr("fill", "none"),
+     attr("stroke", "#222"),
+     attr("stroke-width", "2.5")], [])])`;
+
+const META_CODE = `\
+# === Meta ===
+# Click "Apply Meta" to run this rule.
+# It observes every draw() rewrite via @meta
+# and emits the results to @draw, producing
+# the ghost trail of all frame positions.
+
 rule trace_draws : @meta -> @draw {
-  result(?step, draw(?f), ?shape) => frame(?f, ?shape)
+  result(?step, draw(?f), ?shape) =>
+    frame(?f, ?shape)
 }
 
-# Drive all frames
+# Drive all frames so draw() is called for each
 fn run_frames(?f) =
   if ?f >= 40 then 0
-  else { draw(?f) run_frames(?f + 1) }
-
-{ run_frames(0) }`;
+  else { draw(?f) run_frames(?f + 1) }`;
 
 // ── Elements ──
 
+const SVG_NS = "http://www.w3.org/2000/svg";
+const statusEl    = document.getElementById('status');
+const errorEl     = document.getElementById('error');
 const slider      = document.getElementById('slider');
 const frameLabel  = document.getElementById('frame-label');
-const errorEl     = document.getElementById('error');
-const statusEl    = document.getElementById('status');
-const canvasSvg   = document.getElementById('canvas');
+const playPauseBtn = document.getElementById('play-pause');
+const applyMetaBtn = document.getElementById('apply-meta');
+const canvasRoot  = document.getElementById('canvas-root');
+const ghostLayer  = document.getElementById('ghost-layer');
 
-// ── State ──
+// ── Tabbed editors ──
 
-let shapes = [];        // [{type, frame, cx, cy, r, ...}]
-let numFrames = 0;
-let currentFrame = 0;
-let runGeneration = 0;
+const tabs = document.querySelectorAll('.tab');
+const editorPanels = document.querySelectorAll('.editor-panel');
+
+tabs.forEach(tab => {
+  tab.addEventListener('click', () => {
+    const id = tab.dataset.tab;
+    tabs.forEach(t => t.classList.toggle('active', t.dataset.tab === id));
+    editorPanels.forEach(p => p.classList.toggle('active', p.id === `ep-${id}`));
+  });
+});
+
+function makeEditor(parentId, doc) {
+  return new EditorView({
+    doc,
+    extensions: [
+      basicSetup,
+      EditorView.updateListener.of(u => { if (u.docChanged) scheduleRun(); }),
+    ],
+    parent: document.getElementById(parentId),
+  });
+}
+
+const animEditor = makeEditor('editor-animation', ANIM_CODE);
+const drawEditor = makeEditor('editor-drawing', DRAW_CODE);
+const metaEditor = makeEditor('editor-meta', META_CODE);
+
+function getAllCode() {
+  return animEditor.state.doc.toString() + '\n' +
+         drawEditor.state.doc.toString() + '\n' +
+         metaEditor.state.doc.toString();
+}
 
 // ── WASM module cache ──
 
@@ -178,62 +295,54 @@ async function freshR4() {
   return r4;
 }
 
-// ── Editor with live update ──
+// ── Engine state ──
 
-const editorView = new EditorView({
-  doc: DEFAULT_CODE,
-  extensions: [
-    basicSetup,
-    EditorView.updateListener.of(update => {
-      if (update.docChanged) scheduleRun();
-    }),
-  ],
-  parent: document.getElementById('editor'),
-});
+let r4 = null;
+let currentTree = null;
+let currentTermId = null;
+let currentFrame = 0;
+let playing = true;
+let metaApplied = false;
+let ghostShapes = [];   // captured by meta rule: [{frame, cx, cy, r}]
+let tickCounter = 0;
+let raf = null;
+let runGeneration = 0;
 
 // ── Debounced run ──
 
 let runTimer = null;
 function scheduleRun() {
   clearTimeout(runTimer);
-  runTimer = setTimeout(run, 300);
+  runTimer = setTimeout(() => {
+    run();
+    if (metaApplied) runMeta();
+  }, 300);
 }
 
-// ── Run: eval the program, collect @draw output ──
+// ── Run: reload program ──
 
 async function run() {
   const thisGen = ++runGeneration;
   statusEl.className = 'status-dot running';
 
   try {
-    const r4 = await freshR4();
+    const newR4 = await freshR4();
     if (thisGen !== runGeneration) return;
 
-    const code = editorView.state.doc.toString();
-    r4.eval(r4.loadProgram(code));
+    const code = getAllCode();
+    newR4.eval(newR4.loadProgram(code));
     if (thisGen !== runGeneration) return;
 
-    // Collect everything the program emitted via @draw
-    const pending = r4.scopeTakePending("draw");
-    const newShapes = [];
+    r4 = newR4;
+    currentTree = null;
+    currentTermId = null;
 
-    for (const termId of pending) {
-      const parsed = parseDrawTerm(r4, termId);
-      if (parsed) newShapes.push(parsed);
-    }
+    // Restore frame
+    r4.eval(r4.call(r4.sym("handle_event"), [r4.sym("set_frame"), r4.num(currentFrame)]));
 
-    shapes = newShapes;
-    numFrames = shapes.reduce((m, s) => Math.max(m, s.frame + 1), 0);
-
-    slider.max = Math.max(0, numFrames - 1);
-    if (currentFrame >= numFrames) currentFrame = Math.max(0, numFrames - 1);
-    slider.value = currentFrame;
-
-    renderCanvas();
-
+    doRender();
     errorEl.classList.remove('visible');
     statusEl.className = 'status-dot ok';
-
   } catch (e) {
     if (thisGen !== runGeneration) return;
     errorEl.textContent = e.message;
@@ -242,144 +351,159 @@ async function run() {
   }
 }
 
-// ── Parse @draw terms ──
-// The program emits frame(?f, shape) via @draw.
-// We interpret: frame(N, circle(x, y, r)), frame(N, line(x1,y1,x2,y2)), etc.
+// ── Render: call render() in r4, patch @dom output ──
 
-function parseDrawTerm(r4, termId) {
-  if (r4.termTag(termId) !== 2) return null;
-  const head = r4.termCallHead(termId);
-  if (r4.termTag(head) !== 1) return null;
-  const headName = r4.termSymName(head);
+function doRender() {
+  if (!r4) return;
+  try {
+    r4.eval(r4.call(r4.sym("render"), []));
+    const pending = r4.scopeTakePending("dom");
+    if (pending.length === 0) return;
+    const newTermId = pending[pending.length - 1];
 
-  // frame(?f, ?shape)
-  if (headName === 'frame' && r4.termCallArity(termId) >= 2) {
-    const frameArg = r4.termCallArg(termId, 0);
-    const frame = termToNumber(r4, frameArg);
-    const shapeTerm = r4.termCallArg(termId, 1);
-    return parseShapeTerm(r4, shapeTerm, frame);
-  }
-
-  // Bare shape (no frame wrapper) — treat as frame 0
-  return parseShapeTerm(r4, termId, 0);
-}
-
-function termToNumber(r4, id) {
-  const tag = r4.termTag(id);
-  if (tag === 0) return r4.termNum(id);
-  if (tag === 3) return r4.termFloat(id);
-  return 0;
-}
-
-function parseShapeTerm(r4, termId, frame) {
-  if (r4.termTag(termId) !== 2) return null;
-  const head = r4.termCallHead(termId);
-  if (r4.termTag(head) !== 1) return null;
-
-  const name = r4.termSymName(head);
-  const arity = r4.termCallArity(termId);
-  const arg = (i) => termToNumber(r4, r4.termCallArg(termId, i));
-
-  if (name === 'circle' && arity >= 3)
-    return { type: 'circle', frame, cx: arg(0), cy: arg(1), r: arg(2) };
-  if (name === 'ellipse' && arity >= 4)
-    return { type: 'ellipse', frame, cx: arg(0), cy: arg(1), rx: arg(2), ry: arg(3) };
-  if (name === 'line' && arity >= 4)
-    return { type: 'line', frame, x1: arg(0), y1: arg(1), x2: arg(2), y2: arg(3) };
-  if (name === 'rect' && arity >= 4)
-    return { type: 'rect', frame, x: arg(0), y: arg(1), w: arg(2), h: arg(3) };
-
-  return null;
-}
-
-// ── Canvas rendering ──
-
-const SVG_NS = "http://www.w3.org/2000/svg";
-
-function renderCanvas() {
-  while (canvasSvg.firstChild) canvasSvg.removeChild(canvasSvg.firstChild);
-
-  for (const shape of shapes) {
-    let el;
-
-    if (shape.type === 'circle') {
-      el = document.createElementNS(SVG_NS, 'circle');
-      el.setAttribute('cx', shape.cx);
-      el.setAttribute('cy', shape.cy);
-      el.setAttribute('r', shape.r);
-    } else if (shape.type === 'ellipse') {
-      el = document.createElementNS(SVG_NS, 'ellipse');
-      el.setAttribute('cx', shape.cx);
-      el.setAttribute('cy', shape.cy);
-      el.setAttribute('rx', shape.rx);
-      el.setAttribute('ry', shape.ry);
-    } else if (shape.type === 'line') {
-      el = document.createElementNS(SVG_NS, 'line');
-      el.setAttribute('x1', shape.x1);
-      el.setAttribute('y1', shape.y1);
-      el.setAttribute('x2', shape.x2);
-      el.setAttribute('y2', shape.y2);
-    } else if (shape.type === 'rect') {
-      el = document.createElementNS(SVG_NS, 'rect');
-      el.setAttribute('x', shape.x);
-      el.setAttribute('y', shape.y);
-      el.setAttribute('width', shape.w);
-      el.setAttribute('height', shape.h);
+    if (!currentTree) {
+      const dom = renderTerm(r4, newTermId, () => {});
+      canvasRoot.innerHTML = '';
+      canvasRoot.appendChild(dom);
+      currentTree = dom;
     } else {
-      continue;
+      currentTree = patch(r4, currentTermId, newTermId, currentTree, canvasRoot, () => {});
     }
+    currentTermId = newTermId;
+  } catch (e) {
+    // render errors non-fatal during animation
+  }
+}
 
-    const isCurrent = shape.frame === currentFrame;
-    const isPast    = shape.frame < currentFrame;
+// ── Ghost layer: render shapes captured by meta rule ──
 
+function renderGhosts() {
+  while (ghostLayer.firstChild) ghostLayer.removeChild(ghostLayer.firstChild);
+  if (ghostShapes.length === 0) return;
+
+  for (const s of ghostShapes) {
+    if (s.frame === currentFrame) continue; // @dom draws the current one
+    const el = document.createElementNS(SVG_NS, 'circle');
+    el.setAttribute('cx', s.cx);
+    el.setAttribute('cy', s.cy);
+    el.setAttribute('r', s.r);
     el.setAttribute('fill', 'none');
-
-    if (isCurrent) {
-      el.setAttribute('stroke', '#222');
-      el.setAttribute('stroke-width', '2.5');
-      el.setAttribute('opacity', '1');
-    } else if (isPast) {
-      el.setAttribute('stroke', '#666');
-      el.setAttribute('stroke-width', '1');
-      el.setAttribute('opacity', '0.3');
+    if (s.frame < currentFrame) {
+      el.setAttribute('stroke', '#555');
+      el.setAttribute('stroke-width', '1.2');
+      el.setAttribute('opacity', '0.45');
     } else {
-      el.setAttribute('stroke', '#bbb');
-      el.setAttribute('stroke-width', '0.7');
-      el.setAttribute('opacity', '0.15');
+      el.setAttribute('stroke', '#999');
+      el.setAttribute('stroke-width', '0.9');
+      el.setAttribute('opacity', '0.25');
     }
-
-    canvasSvg.appendChild(el);
+    ghostLayer.appendChild(el);
   }
-
-  frameLabel.textContent = `frame ${currentFrame} of ${Math.max(0, numFrames - 1)}`;
 }
 
-// ── Slider ──
+// ── Run meta: execute program with meta rule, collect @draw ──
+
+async function runMeta() {
+  try {
+    const metaR4 = await freshR4();
+    const code = getAllCode();
+    metaR4.eval(metaR4.loadProgram(code));
+
+    // Call run_frames(0) to trigger draw() for every frame
+    metaR4.eval(metaR4.call(metaR4.sym("run_frames"), [metaR4.num(0)]));
+
+    // Collect captured frame() terms from @draw scope
+    const pending = metaR4.scopeTakePending("draw");
+    ghostShapes = [];
+
+    for (const termId of pending) {
+      const parsed = parseFrameTerm(metaR4, termId);
+      if (parsed) ghostShapes.push(parsed);
+    }
+
+    ghostShapes.sort((a, b) => a.frame - b.frame);
+    renderGhosts();
+  } catch (e) {
+    console.error('Meta run failed:', e);
+  }
+}
+
+function parseFrameTerm(r4, termId) {
+  if (r4.termTag(termId) !== 2) return null;
+  const head = r4.termCallHead(termId);
+  if (r4.termTag(head) !== 1 || r4.termSymName(head) !== 'frame') return null;
+  if (r4.termCallArity(termId) < 2) return null;
+
+  const frameArg = r4.termCallArg(termId, 0);
+  const frame = r4.termTag(frameArg) === 0 ? r4.termNum(frameArg)
+              : r4.termTag(frameArg) === 3 ? r4.termFloat(frameArg) : 0;
+
+  const shapeTerm = r4.termCallArg(termId, 1);
+  if (r4.termTag(shapeTerm) !== 2) return null;
+  const sHead = r4.termCallHead(shapeTerm);
+  if (r4.termTag(sHead) !== 1 || r4.termSymName(sHead) !== 'circle') return null;
+  if (r4.termCallArity(shapeTerm) < 3) return null;
+
+  const num = (i) => {
+    const id = r4.termCallArg(shapeTerm, i);
+    const t = r4.termTag(id);
+    return t === 0 ? r4.termNum(id) : t === 3 ? r4.termFloat(id) : 0;
+  };
+
+  return { frame, cx: num(0), cy: num(1), r: num(2) };
+}
+
+// ── Animation loop ──
+
+function animLoop() {
+  if (playing && r4) {
+    tickCounter++;
+    if (tickCounter % 3 === 0) {
+      currentFrame = (currentFrame + 1) % 40;
+      r4.eval(r4.call(r4.sym("handle_event"), [r4.sym("set_frame"), r4.num(currentFrame)]));
+      doRender();
+      if (metaApplied) renderGhosts();
+      slider.value = currentFrame;
+      frameLabel.textContent = `frame ${currentFrame}`;
+    }
+  }
+  raf = requestAnimationFrame(animLoop);
+}
+
+// ── Controls ──
+
+playPauseBtn.addEventListener('click', () => {
+  playing = !playing;
+  playPauseBtn.textContent = playing ? 'Pause' : 'Play';
+  playPauseBtn.classList.toggle('active', !playing);
+});
 
 slider.addEventListener('input', () => {
+  if (!r4) return;
   currentFrame = parseInt(slider.value);
-  renderCanvas();
+  r4.eval(r4.call(r4.sym("handle_event"), [r4.sym("set_frame"), r4.num(currentFrame)]));
+  doRender();
+  if (metaApplied) renderGhosts();
+  frameLabel.textContent = `frame ${currentFrame}`;
 });
 
-// ── Arrow keys ──
+applyMetaBtn.addEventListener('click', async () => {
+  metaApplied = !metaApplied;
+  applyMetaBtn.textContent = metaApplied ? 'Remove Meta' : 'Apply Meta';
+  applyMetaBtn.classList.toggle('active', metaApplied);
 
-document.addEventListener('keydown', e => {
-  if (e.target.closest('.cm-editor') || e.target.tagName === 'INPUT') return;
-  if (!shapes.length) return;
-
-  const s = parseInt(slider.value);
-  if (e.key === 'ArrowLeft')  { e.preventDefault(); currentFrame = Math.max(0, s - 1); }
-  if (e.key === 'ArrowRight') { e.preventDefault(); currentFrame = Math.min(numFrames - 1, s + 1); }
-  if (e.key === 'Home')       { e.preventDefault(); currentFrame = 0; }
-  if (e.key === 'End')        { e.preventDefault(); currentFrame = numFrames - 1; }
-
-  slider.value = currentFrame;
-  renderCanvas();
+  if (metaApplied) {
+    await runMeta();
+  } else {
+    ghostShapes = [];
+    while (ghostLayer.firstChild) ghostLayer.removeChild(ghostLayer.firstChild);
+  }
 });
 
-// ── Initial run ──
+// ── Init ──
 
 await run();
+raf = requestAnimationFrame(animLoop);
 </script>
 </body>
 </html>

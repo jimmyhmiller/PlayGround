@@ -78,6 +78,7 @@ fn dispatch(db: &Database, msg: &Message) -> serde_json::Value {
         "define_enum" => handle_define_enum(db, &msg.payload),
         "transact" => handle_transact(db, &msg.payload),
         "query" => handle_query(db, &msg.payload),
+        "schema" => handle_schema(db),
         "status" => handle_status(),
         other => serde_json::json!({
             "status": "error",
@@ -210,6 +211,13 @@ fn handle_query(db: &Database, payload: &serde_json::Value) -> serde_json::Value
     }
 }
 
+fn handle_schema(db: &Database) -> serde_json::Value {
+    serde_json::json!({
+        "status": "ok",
+        "data": db.schema_json()
+    })
+}
+
 fn handle_status() -> serde_json::Value {
     serde_json::json!({
         "status": "ok",
@@ -237,6 +245,7 @@ fn value_to_json(v: &crate::datom::Value) -> serde_json::Value {
                 .collect();
             serde_json::json!({ variant: field_json })
         }
+        crate::datom::Value::Null => serde_json::Value::Null,
     }
 }
 

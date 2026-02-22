@@ -190,6 +190,15 @@ export class Rules4 {
     const headTag = this.termTag(headId);
     if (headTag === 1) {
       const headName = this.termSymName(headId);
+      if (headName === "vec") {
+        // vec(a, b, c) — flat list
+        const arr = [];
+        const arity = this.termCallArity(id);
+        for (let i = 0; i < arity; i++) {
+          arr.push(this.termToJS(this.termCallArg(id, i)));
+        }
+        return arr;
+      }
       if (headName === "cons") {
         // Flatten cons list to array
         const arr = [];

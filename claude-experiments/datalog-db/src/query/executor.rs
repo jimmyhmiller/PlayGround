@@ -339,18 +339,20 @@ fn match_field_patterns(
                         new_bindings.insert(var.clone(), tag_val.clone());
                     }
                 } else {
-                    // Regular scalar field
+                    // Regular scalar field — use Null for missing optional fields
+                    let field_val = fields
+                        .get(field_name)
+                        .cloned()
+                        .unwrap_or(Value::Null);
                     if let Some(bound_value) = existing_bindings
                         .get(var)
                         .or_else(|| new_bindings.get(var))
                     {
-                        let field_val = fields.get(field_name)?;
-                        if bound_value != field_val {
+                        if *bound_value != field_val {
                             return None;
                         }
                     } else {
-                        let field_val = fields.get(field_name)?;
-                        new_bindings.insert(var.clone(), field_val.clone());
+                        new_bindings.insert(var.clone(), field_val);
                     }
                 }
             }

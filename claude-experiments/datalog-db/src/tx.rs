@@ -72,6 +72,11 @@ pub enum TxOp {
         entity: EntityId,
         fields: Vec<String>,
     },
+    /// Retract an entire entity (soft delete): retract all currently-asserted datoms.
+    RetractEntity {
+        entity_type: String,
+        entity: EntityId,
+    },
 }
 
 impl TxOp {
@@ -114,8 +119,18 @@ impl TxOp {
                 entity,
                 fields,
             })
+        } else if let Some(type_name) = obj.get("retract_entity").and_then(|t| t.as_str()) {
+            let entity = obj
+                .get("entity")
+                .and_then(|e| e.as_u64())
+                .ok_or("retract_entity op requires 'entity'")?;
+
+            Ok(TxOp::RetractEntity {
+                entity_type: type_name.to_string(),
+                entity,
+            })
         } else {
-            Err("tx op must have 'assert' or 'retract' key".to_string())
+            Err("tx op must have 'assert', 'retract', or 'retract_entity' key".to_string())
         }
     }
 }
@@ -343,6 +358,57 @@ pub fn process_transaction(
                                 added: false,
                             });
                         }
+                    }
+                }
+            }
+            TxOp::RetractEntity {
+                entity_type,
+                entity,
+            } => {
+                // Validate the entity type exists
+                let _type_def = schema
+                    .get(entity_type)
+                    .ok_or_else(|| TxError::UnknownType(entity_type.clone()))?;
+
+                entity_ids.push(*entity);
+
+                // Scan all datoms for this entity
+                let scan_prefix = index::eavt_entity_prefix(*entity);
+                let scan_end = index::prefix_end(&scan_prefix);
+                let all_entries = txn.scan(&scan_prefix, &scan_end)?;
+
+                // Group by attribute
+                let mut attr_datoms: HashMap<String, Vec<Datom>> = HashMap::new();
+                for (key, _) in &all_entries {
+                    if let Some(datom) = index::decode_datom_from_eavt(key) {
+                        attr_datoms
+                            .entry(datom.attribute.clone())
+                            .or_default()
+                            .push(datom);
+                    }
+                }
+
+                // Resolve current values and retract them all
+                for (attr, mut history) in attr_datoms {
+                    history.sort_by(|a, b| a.tx.cmp(&b.tx).then_with(|| a.added.cmp(&b.added)));
+
+                    let mut current: Option<Value> = None;
+                    for d in history {
+                        if d.added {
+                            current = Some(d.value);
+                        } else if current.as_ref() == Some(&d.value) {
+                            current = None;
+                        }
+                    }
+
+                    if let Some(val) = current {
+                        datoms.push(Datom {
+                            entity: *entity,
+                            attribute: attr,
+                            value: val,
+                            tx: tx_id,
+                            added: false,
+                        });
                     }
                 }
             }

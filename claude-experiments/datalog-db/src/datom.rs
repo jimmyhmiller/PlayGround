@@ -27,6 +27,10 @@ pub enum Value {
         variant: String,
         fields: HashMap<String, Value>,
     },
+    /// Null — represents a missing optional field in query results.
+    /// Never stored as a datom.
+    #[serde(rename = "null")]
+    Null,
 }
 
 impl Value {
@@ -40,6 +44,7 @@ impl Value {
             Value::Ref(_) => 0x05,
             Value::Bytes(_) => 0x06,
             Value::Enum { .. } => panic!("Enum values cannot be stored directly as datoms"),
+            Value::Null => panic!("Null values cannot be stored directly as datoms"),
         }
     }
 }
@@ -60,6 +65,7 @@ impl std::fmt::Display for Value {
                     write!(f, "{}{{...}}", variant)
                 }
             }
+            Value::Null => write!(f, "null"),
         }
     }
 }

@@ -45,6 +45,7 @@ fn encode_value(buf: &mut Vec<u8>, value: &Value) {
             buf.extend_from_slice(bytes);
         }
         Value::Enum { .. } => panic!("Enum values cannot be encoded in index keys"),
+        Value::Null => panic!("Null values cannot be encoded in index keys"),
     }
 }
 

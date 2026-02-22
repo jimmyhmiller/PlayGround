@@ -203,6 +203,12 @@ impl Database {
 
         // Validate field types
         for field in &type_def.fields {
+            if field.unique && !field.required {
+                return Err(DbError::Schema(format!(
+                    "unique field '{}' must also be required",
+                    field.name
+                )));
+            }
             // Reject unique on enum-typed fields (unclear semantics)
             if field.unique {
                 if let FieldType::Enum(_) = &field.field_type {
@@ -400,6 +406,15 @@ impl Database {
             }))?;
 
         Ok(*result.downcast::<Vec<crate::datom::Datom>>().expect("wrong type"))
+    }
+
+    /// Return the current schema as JSON.
+    pub fn schema_json(&self) -> serde_json::Value {
+        let schema = self.schema.read();
+        serde_json::json!({
+            "types": schema.all_types(),
+            "enums": schema.all_enums(),
+        })
     }
 
     /// Return all datoms for a specific entity in EAVT order.

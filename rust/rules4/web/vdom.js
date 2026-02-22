@@ -142,17 +142,33 @@ function applyAttrs(r4, attrsId, el, onEvent, isSvg = false) {
 }
 
 /**
- * Iterate over a cons-list, calling fn for each element.
+ * Iterate over a list (cons-list or vec), calling fn for each element.
  */
 function forEachCons(r4, listId, fn) {
+  const tag = r4.termTag(listId);
+  if (tag !== 2) return; // not a call
+  const head = r4.termCallHead(listId);
+  if (r4.termTag(head) !== 1) return;
+  const headName = r4.termSymName(head);
+
+  // vec(a, b, c, ...) — flat list
+  if (headName === "vec") {
+    const arity = r4.termCallArity(listId);
+    for (let i = 0; i < arity; i++) {
+      fn(r4.termCallArg(listId, i));
+    }
+    return;
+  }
+
+  // cons(head, tail) — linked list
   let cur = listId;
   while (true) {
-    const tag = r4.termTag(cur);
-    if (tag === 1 && r4.termSymName(cur) === "nil") break;
-    if (tag !== 2) break;
+    const t = r4.termTag(cur);
+    if (t === 1 && r4.termSymName(cur) === "nil") break;
+    if (t !== 2) break;
 
-    const head = r4.termCallHead(cur);
-    if (r4.termTag(head) !== 1 || r4.termSymName(head) !== "cons") break;
+    const h = r4.termCallHead(cur);
+    if (r4.termTag(h) !== 1 || r4.termSymName(h) !== "cons") break;
 
     const elem = r4.termCallArg(cur, 0);
     fn(elem);

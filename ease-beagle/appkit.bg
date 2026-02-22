@@ -1,0 +1,447 @@
+namespace appkit
+
+use beagle.ffi as ffi
+
+// ─── ObjC Runtime Bindings (internal) ───────────────────────────────
+
+let objc = ffi/load-library("libobjc.dylib")
+let _appkit = ffi/load-library("/System/Library/Frameworks/AppKit.framework/AppKit")
+
+let objc_getClass = ffi/get-function(objc, "objc_getClass", [ffi/Type.String], ffi/Type.Pointer)
+let sel_registerName = ffi/get-function(objc, "sel_registerName", [ffi/Type.String], ffi/Type.Pointer)
+let objc_allocateClassPair = ffi/get-function(
+    objc, "objc_allocateClassPair",
+    [ffi/Type.Pointer, ffi/Type.String, ffi/Type.U64],
+    ffi/Type.Pointer
+)
+let class_addMethod = ffi/get-function(
+    objc, "class_addMethod",
+    [ffi/Type.Pointer, ffi/Type.Pointer, ffi/Type.Pointer, ffi/Type.String],
+    ffi/Type.U8
+)
+let objc_registerClassPair = ffi/get-function(
+    objc, "objc_registerClassPair",
+    [ffi/Type.Pointer],
+    ffi/Type.Void
+)
+
+let msgSend = ffi/get-symbol(objc, "objc_msgSend")
+
+// ─── Raw message sending ────────────────────────────────────────────
+
+fn msg0(obj, sel_name, ret_type) {
+    let sel = sel_registerName(sel_name)
+    ffi/call-variadic(msgSend, [obj, sel], [ffi/Type.Pointer, ffi/Type.Pointer], ret_type)
+}
+
+fn msg1(obj, sel_name, a1, t1, ret_type) {
+    let sel = sel_registerName(sel_name)
+    ffi/call-variadic(msgSend, [obj, sel, a1], [ffi/Type.Pointer, ffi/Type.Pointer, t1], ret_type)
+}
+
+fn msg2(obj, sel_name, a1, t1, a2, t2, ret_type) {
+    let sel = sel_registerName(sel_name)
+    ffi/call-variadic(msgSend, [obj, sel, a1, a2],
+        [ffi/Type.Pointer, ffi/Type.Pointer, t1, t2], ret_type)
+}
+
+fn msg3(obj, sel_name, a1, t1, a2, t2, a3, t3, ret_type) {
+    let sel = sel_registerName(sel_name)
+    ffi/call-variadic(msgSend, [obj, sel, a1, a2, a3],
+        [ffi/Type.Pointer, ffi/Type.Pointer, t1, t2, t3], ret_type)
+}
+
+fn nsstring(str) {
+    let NSString = objc_getClass("NSString")
+    msg1(NSString, "stringWithUTF8String:", str, ffi/Type.String, ffi/Type.Pointer)
+}
+
+fn get-class(name) {
+    objc_getClass(name)
+}
+
+fn sel(name) {
+    sel_registerName(name)
+}
+
+// ─── Internal helpers ───────────────────────────────────────────────
+
+fn msg-initWithFrame(obj, x, y, w, h) {
+    let sel = sel_registerName("initWithFrame:")
+    ffi/call-variadic(msgSend, [obj, sel, x, y, w, h],
+        [ffi/Type.Pointer, ffi/Type.Pointer, ffi/Type.F64, ffi/Type.F64, ffi/Type.F64, ffi/Type.F64],
+        ffi/Type.Pointer)
+}
+
+fn msg-initWithRect(obj, x, y, w, h, style, backing, defer_) {
+    let sel = sel_registerName("initWithContentRect:styleMask:backing:defer:")
+    ffi/call-variadic(msgSend,
+        [obj, sel, x, y, w, h, style, backing, defer_],
+        [ffi/Type.Pointer, ffi/Type.Pointer,
+         ffi/Type.F64, ffi/Type.F64, ffi/Type.F64, ffi/Type.F64,
+         ffi/Type.U64, ffi/Type.U64, ffi/Type.U64],
+        ffi/Type.Pointer)
+}
+
+fn msg-rgba(obj, sel_name, r, g, b, a) {
+    let sel = sel_registerName(sel_name)
+    ffi/call-variadic(msgSend, [obj, sel, r, g, b, a],
+        [ffi/Type.Pointer, ffi/Type.Pointer, ffi/Type.F64, ffi/Type.F64, ffi/Type.F64, ffi/Type.F64],
+        ffi/Type.Pointer)
+}
+
+fn alloc-init(cls) {
+    msg0(msg0(cls, "alloc", ffi/Type.Pointer), "init", ffi/Type.Pointer)
+}
+
+// ─── Wrapper Structs ────────────────────────────────────────────────
+
+struct App { ptr }
+struct Window { ptr }
+struct View { ptr }
+struct Label { ptr }
+struct Button { ptr }
+struct Handler { ptr, cls }
+struct StatusItem { ptr, button }
+struct Popover { ptr, content-view }
+
+// ─── Widget Protocol ────────────────────────────────────────────────
+
+protocol Widget {
+    fn set-text(self, text)
+    fn set-font(self, font)
+    fn set-text-color(self, color)
+    fn widget-ptr(self)
+}
+
+extend Label with Widget {
+    fn set-text(self, text) {
+        msg1(self.ptr, "setStringValue:", nsstring(text), ffi/Type.Pointer, ffi/Type.Void)
+    }
+    fn set-font(self, font) {
+        msg1(self.ptr, "setFont:", font, ffi/Type.Pointer, ffi/Type.Void)
+    }
+    fn set-text-color(self, color) {
+        msg1(self.ptr, "setTextColor:", color, ffi/Type.Pointer, ffi/Type.Void)
+    }
+    fn widget-ptr(self) { self.ptr }
+}
+
+extend Button with Widget {
+    fn set-text(self, text) {
+        msg1(self.ptr, "setTitle:", nsstring(text), ffi/Type.Pointer, ffi/Type.Void)
+    }
+    fn set-font(self, font) {
+        msg1(self.ptr, "setFont:", font, ffi/Type.Pointer, ffi/Type.Void)
+    }
+    fn set-text-color(self, color) { null }
+    fn widget-ptr(self) { self.ptr }
+}
+
+// ─── App Constructors ───────────────────────────────────────────────
+
+fn should-terminate(self_, sel, sender) { 1 }
+
+fn app(name) {
+    let NSApplication = objc_getClass("NSApplication")
+    let a = msg0(NSApplication, "sharedApplication", ffi/Type.Pointer)
+    msg1(a, "setActivationPolicy:", 0, ffi/Type.U64, ffi/Type.U8)
+
+    let NSObject = objc_getClass("NSObject")
+    let delegateCls = objc_allocateClassPair(NSObject, "BeagleAppDelegate", 0)
+    let terminateSel = sel_registerName("applicationShouldTerminateAfterLastWindowClosed:")
+    let cb = ffi/create-callback(should-terminate,
+        [ffi/Type.Pointer, ffi/Type.Pointer, ffi/Type.Pointer], ffi/Type.U8)
+    class_addMethod(delegateCls, terminateSel, cb, "B@:@")
+    objc_registerClassPair(delegateCls)
+    let delegate = alloc-init(delegateCls)
+    msg1(a, "setDelegate:", delegate, ffi/Type.Pointer, ffi/Type.Void)
+
+    let NSMenu = objc_getClass("NSMenu")
+    let NSMenuItem = objc_getClass("NSMenuItem")
+    let menubar = alloc-init(NSMenu)
+    msg1(a, "setMainMenu:", menubar, ffi/Type.Pointer, ffi/Type.Void)
+    let appMenu = alloc-init(NSMenu)
+    let quitItem = msg3(
+        msg0(NSMenuItem, "alloc", ffi/Type.Pointer),
+        "initWithTitle:action:keyEquivalent:",
+        nsstring("Quit " ++ name), ffi/Type.Pointer,
+        sel_registerName("terminate:"), ffi/Type.Pointer,
+        nsstring("q"), ffi/Type.Pointer,
+        ffi/Type.Pointer)
+    msg1(appMenu, "addItem:", quitItem, ffi/Type.Pointer, ffi/Type.Void)
+    let appMenuItem = alloc-init(NSMenuItem)
+    msg1(appMenuItem, "setSubmenu:", appMenu, ffi/Type.Pointer, ffi/Type.Void)
+    msg1(menubar, "addItem:", appMenuItem, ffi/Type.Pointer, ffi/Type.Void)
+
+    App { ptr: a }
+}
+
+// Menu bar app: accessory activation policy (no dock icon),
+// no "quit on last window close" delegate
+fn menu-bar-app() {
+    let NSApplication = objc_getClass("NSApplication")
+    let a = msg0(NSApplication, "sharedApplication", ffi/Type.Pointer)
+    // 1 = NSApplicationActivationPolicyAccessory (no dock icon)
+    msg1(a, "setActivationPolicy:", 1, ffi/Type.U64, ffi/Type.U8)
+    App { ptr: a }
+}
+
+// ─── Status Bar ─────────────────────────────────────────────────────
+
+fn status-item(title) {
+    let NSStatusBar = objc_getClass("NSStatusBar")
+    let systemBar = msg0(NSStatusBar, "systemStatusBar", ffi/Type.Pointer)
+    // NSVariableStatusBarItemLength = -1
+    let sel = sel_registerName("statusItemWithLength:")
+    let item = ffi/call-variadic(msgSend, [systemBar, sel, -1.0],
+        [ffi/Type.Pointer, ffi/Type.Pointer, ffi/Type.F64],
+        ffi/Type.Pointer)
+    let button = msg0(item, "button", ffi/Type.Pointer)
+    msg1(button, "setTitle:", nsstring(title), ffi/Type.Pointer, ffi/Type.Void)
+    StatusItem { ptr: item, button: button }
+}
+
+fn status-on-click(si, handler, sel_name) {
+    msg1(si.button, "setTarget:", handler.ptr, ffi/Type.Pointer, ffi/Type.Void)
+    msg1(si.button, "setAction:", sel_registerName(sel_name), ffi/Type.Pointer, ffi/Type.Void)
+}
+
+// ─── Popover ────────────────────────────────────────────────────────
+
+fn popover(w, h) {
+    let NSPopover = objc_getClass("NSPopover")
+    let pop = alloc-init(NSPopover)
+
+    // Content size
+    let sel = sel_registerName("setContentSize:")
+    ffi/call-variadic(msgSend, [pop, sel, w, h],
+        [ffi/Type.Pointer, ffi/Type.Pointer, ffi/Type.F64, ffi/Type.F64],
+        ffi/Type.Void)
+
+    // Transient behavior (dismiss on click outside)
+    msg1(pop, "setBehavior:", 1, ffi/Type.U64, ffi/Type.Void)
+
+    // Dark appearance
+    let NSAppearance = objc_getClass("NSAppearance")
+    let dark = msg1(NSAppearance, "appearanceNamed:",
+        nsstring("NSAppearanceNameDarkAqua"), ffi/Type.Pointer, ffi/Type.Pointer)
+    msg1(pop, "setAppearance:", dark, ffi/Type.Pointer, ffi/Type.Void)
+
+    // Create view controller with content view
+    let NSViewController = objc_getClass("NSViewController")
+    let vc = alloc-init(NSViewController)
+    let NSView = objc_getClass("NSView")
+    let cv = msg-initWithFrame(msg0(NSView, "alloc", ffi/Type.Pointer), 0.0, 0.0, w, h)
+    msg1(vc, "setView:", cv, ffi/Type.Pointer, ffi/Type.Void)
+    msg1(pop, "setContentViewController:", vc, ffi/Type.Pointer, ffi/Type.Void)
+
+    Popover { ptr: pop, content-view: View { ptr: cv } }
+}
+
+fn show-popover(pop, si) {
+    let sel = sel_registerName("showRelativeToRect:ofView:preferredEdge:")
+    // Pass zero rect; popover positions relative to the view itself
+    // preferredEdge: 1 = NSMinYEdge (below the button)
+    ffi/call-variadic(msgSend, [pop.ptr, sel, 0.0, 0.0, 0.0, 0.0, si.button, 1],
+        [ffi/Type.Pointer, ffi/Type.Pointer,
+         ffi/Type.F64, ffi/Type.F64, ffi/Type.F64, ffi/Type.F64,
+         ffi/Type.Pointer, ffi/Type.U64],
+        ffi/Type.Void)
+}
+
+fn close-popover(pop) {
+    msg1(pop.ptr, "performClose:", 0, ffi/Type.Pointer, ffi/Type.Void)
+}
+
+fn is-popover-shown(pop) {
+    msg0(pop.ptr, "isShown", ffi/Type.U8) == 1
+}
+
+fn toggle-popover(pop, si) {
+    if is-popover-shown(pop) {
+        close-popover(pop)
+    } else {
+        show-popover(pop, si)
+    }
+}
+
+// ─── Window ─────────────────────────────────────────────────────────
+
+fn window(title, w, h) {
+    let NSWindow = objc_getClass("NSWindow")
+    let win = msg-initWithRect(
+        msg0(NSWindow, "alloc", ffi/Type.Pointer),
+        0.0, 0.0, w, h, 15, 2, 0
+    )
+    msg0(win, "center", ffi/Type.Void)
+    msg1(win, "setTitle:", nsstring(title), ffi/Type.Pointer, ffi/Type.Void)
+
+    let contentView = msg0(win, "contentView", ffi/Type.Pointer)
+    let NSColor = objc_getClass("NSColor")
+    let bg = msg-rgba(NSColor, "colorWithRed:green:blue:alpha:", 0.12, 0.12, 0.15, 1.0)
+    msg1(contentView, "setWantsLayer:", 1, ffi/Type.U8, ffi/Type.Void)
+    let layer = msg0(contentView, "layer", ffi/Type.Pointer)
+    msg1(layer, "setBackgroundColor:", msg0(bg, "CGColor", ffi/Type.Pointer), ffi/Type.Pointer, ffi/Type.Void)
+
+    Window { ptr: win }
+}
+
+fn content-view(window) {
+    View { ptr: msg0(window.ptr, "contentView", ffi/Type.Pointer) }
+}
+
+// ─── Widgets ────────────────────────────────────────────────────────
+
+fn label(text, x, y, w, h) {
+    let NSTextField = objc_getClass("NSTextField")
+    let lbl = msg-initWithFrame(
+        msg0(NSTextField, "alloc", ffi/Type.Pointer),
+        x, y, w, h
+    )
+    msg1(lbl, "setBezeled:", 0, ffi/Type.U8, ffi/Type.Void)
+    msg1(lbl, "setDrawsBackground:", 0, ffi/Type.U8, ffi/Type.Void)
+    msg1(lbl, "setEditable:", 0, ffi/Type.U8, ffi/Type.Void)
+    msg1(lbl, "setSelectable:", 0, ffi/Type.U8, ffi/Type.Void)
+    msg1(lbl, "setAlignment:", 1, ffi/Type.U64, ffi/Type.Void)
+    msg1(lbl, "setStringValue:", nsstring(text), ffi/Type.Pointer, ffi/Type.Void)
+    Label { ptr: lbl }
+}
+
+fn left-label(text, x, y, w, h) {
+    let NSTextField = objc_getClass("NSTextField")
+    let lbl = msg-initWithFrame(
+        msg0(NSTextField, "alloc", ffi/Type.Pointer),
+        x, y, w, h
+    )
+    msg1(lbl, "setBezeled:", 0, ffi/Type.U8, ffi/Type.Void)
+    msg1(lbl, "setDrawsBackground:", 0, ffi/Type.U8, ffi/Type.Void)
+    msg1(lbl, "setEditable:", 0, ffi/Type.U8, ffi/Type.Void)
+    msg1(lbl, "setSelectable:", 0, ffi/Type.U8, ffi/Type.Void)
+    msg1(lbl, "setAlignment:", 0, ffi/Type.U64, ffi/Type.Void)
+    msg1(lbl, "setStringValue:", nsstring(text), ffi/Type.Pointer, ffi/Type.Void)
+    Label { ptr: lbl }
+}
+
+fn button(title, x, y, w, h) {
+    let NSButton = objc_getClass("NSButton")
+    let btn = msg-initWithFrame(
+        msg0(NSButton, "alloc", ffi/Type.Pointer),
+        x, y, w, h
+    )
+    msg1(btn, "setTitle:", nsstring(title), ffi/Type.Pointer, ffi/Type.Void)
+    msg1(btn, "setBezelStyle:", 1, ffi/Type.U64, ffi/Type.Void)
+    Button { ptr: btn }
+}
+
+// ─── Handler ────────────────────────────────────────────────────────
+
+fn handler(name) {
+    let NSObject = objc_getClass("NSObject")
+    let cls = objc_allocateClassPair(NSObject, name, 0)
+    Handler { ptr: null, cls: cls }
+}
+
+fn add-method(handler, sel_name, callback) {
+    let cb = ffi/create-callback(callback,
+        [ffi/Type.Pointer, ffi/Type.Pointer, ffi/Type.Pointer], ffi/Type.Void)
+    class_addMethod(handler.cls, sel_registerName(sel_name), cb, "v@:@")
+    handler
+}
+
+fn register(handler) {
+    objc_registerClassPair(handler.cls)
+    Handler { ptr: alloc-init(handler.cls), cls: handler.cls }
+}
+
+// ─── Actions ────────────────────────────────────────────────────────
+
+fn add-to(view, widget) {
+    msg1(view.ptr, "addSubview:", widget-ptr(widget), ffi/Type.Pointer, ffi/Type.Void)
+}
+
+fn add-view(parent, child) {
+    msg1(parent.ptr, "addSubview:", child.ptr, ffi/Type.Pointer, ffi/Type.Void)
+}
+
+fn on-click(button, handler, sel_name) {
+    msg1(button.ptr, "setTarget:", handler.ptr, ffi/Type.Pointer, ffi/Type.Void)
+    msg1(button.ptr, "setAction:", sel_registerName(sel_name), ffi/Type.Pointer, ffi/Type.Void)
+}
+
+fn show(window) {
+    msg1(window.ptr, "makeKeyAndOrderFront:", 0, ffi/Type.Pointer, ffi/Type.Void)
+    let NSApplication = objc_getClass("NSApplication")
+    let a = msg0(NSApplication, "sharedApplication", ffi/Type.Pointer)
+    msg1(a, "activateIgnoringOtherApps:", 1, ffi/Type.U8, ffi/Type.Void)
+}
+
+fn run(app) {
+    msg0(app.ptr, "run", ffi/Type.Void)
+}
+
+fn terminate() {
+    let NSApplication = objc_getClass("NSApplication")
+    let a = msg0(NSApplication, "sharedApplication", ffi/Type.Pointer)
+    msg1(a, "terminate:", 0, ffi/Type.Pointer, ffi/Type.Void)
+}
+
+// ─── Style Helpers ──────────────────────────────────────────────────
+
+let NSColor_ = objc_getClass("NSColor")
+let NSFont_ = objc_getClass("NSFont")
+
+let white = msg0(NSColor_, "whiteColor", ffi/Type.Pointer)
+
+fn color(r, g, b, a) {
+    msg-rgba(NSColor_, "colorWithRed:green:blue:alpha:", r, g, b, a)
+}
+
+fn font(size) {
+    msg1(NSFont_, "systemFontOfSize:", size, ffi/Type.F64, ffi/Type.Pointer)
+}
+
+fn bold-font(size) {
+    msg1(NSFont_, "boldSystemFontOfSize:", size, ffi/Type.F64, ffi/Type.Pointer)
+}
+
+fn mono-digit-font(size) {
+    msg2(NSFont_, "monospacedDigitSystemFontOfSize:weight:", size, ffi/Type.F64, 0.0, ffi/Type.F64, ffi/Type.Pointer)
+}
+
+// ─── View Helpers ───────────────────────────────────────────────────
+
+fn colored-view(x, y, w, h, r, g, b, a) {
+    let NSView = objc_getClass("NSView")
+    let view = msg-initWithFrame(msg0(NSView, "alloc", ffi/Type.Pointer), x, y, w, h)
+    msg1(view, "setWantsLayer:", 1, ffi/Type.U8, ffi/Type.Void)
+    let c = color(r, g, b, a)
+    let layer = msg0(view, "layer", ffi/Type.Pointer)
+    msg1(layer, "setBackgroundColor:", msg0(c, "CGColor", ffi/Type.Pointer), ffi/Type.Pointer, ffi/Type.Void)
+    View { ptr: view }
+}
+
+fn set-frame(view, x, y, w, h) {
+    let sel = sel_registerName("setFrame:")
+    ffi/call-variadic(msgSend, [view.ptr, sel, x, y, w, h],
+        [ffi/Type.Pointer, ffi/Type.Pointer, ffi/Type.F64, ffi/Type.F64, ffi/Type.F64, ffi/Type.F64],
+        ffi/Type.Void)
+}
+
+fn set-corner-radius(view, radius) {
+    msg1(view.ptr, "setWantsLayer:", 1, ffi/Type.U8, ffi/Type.Void)
+    let layer = msg0(view.ptr, "layer", ffi/Type.Pointer)
+    msg1(layer, "setCornerRadius:", radius, ffi/Type.F64, ffi/Type.Void)
+}
+
+fn set-bg-color(view, r, g, b, a) {
+    msg1(view.ptr, "setWantsLayer:", 1, ffi/Type.U8, ffi/Type.Void)
+    let c = color(r, g, b, a)
+    let layer = msg0(view.ptr, "layer", ffi/Type.Pointer)
+    msg1(layer, "setBackgroundColor:", msg0(c, "CGColor", ffi/Type.Pointer), ffi/Type.Pointer, ffi/Type.Void)
+}
+
+fn set-layer-mask(view) {
+    let layer = msg0(view.ptr, "layer", ffi/Type.Pointer)
+    msg1(layer, "setMasksToBounds:", 1, ffi/Type.U8, ffi/Type.Void)
+}

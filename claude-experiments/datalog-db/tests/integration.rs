@@ -38,7 +38,7 @@ fn user_type() -> EntityTypeDef {
             FieldDef {
                 name: "email".to_string(),
                 field_type: FieldType::String,
-                required: false,
+                required: true,
                 unique: true,
                 indexed: true,
             },
@@ -111,6 +111,7 @@ fn test_transact_and_get_entity() {
     let mut data = HashMap::new();
     data.insert("name".to_string(), Value::String("Bob".to_string()));
     data.insert("age".to_string(), Value::I64(25));
+    data.insert("email".to_string(), Value::String("bob@example.com".to_string()));
 
     let result = db
         .transact(vec![TxOp::Assert {
@@ -140,6 +141,7 @@ fn test_transact_update() {
     let mut data = HashMap::new();
     data.insert("name".to_string(), Value::String("Charlie".to_string()));
     data.insert("age".to_string(), Value::I64(20));
+    data.insert("email".to_string(), Value::String("charlie@example.com".to_string()));
 
     let result = db
         .transact(vec![TxOp::Assert {
@@ -270,10 +272,11 @@ fn test_basic_query() {
     db.define_type(user_type()).unwrap();
 
     // Insert two users
-    for (name, age) in [("Alice", 30), ("Bob", 25)] {
+    for (name, age, email) in [("Alice", 30, "alice@example.com"), ("Bob", 25, "bob@example.com")] {
         let mut data = HashMap::new();
         data.insert("name".to_string(), Value::String(name.to_string()));
         data.insert("age".to_string(), Value::I64(age));
+        data.insert("email".to_string(), Value::String(email.to_string()));
         db.transact(vec![TxOp::Assert {
             entity_type: "User".to_string(),
             entity: None,
@@ -306,10 +309,11 @@ fn test_query_with_constant_filter() {
     let (db, _dir) = test_db();
     db.define_type(user_type()).unwrap();
 
-    for (name, age) in [("Alice", 30), ("Bob", 25), ("Charlie", 35)] {
+    for (name, age, email) in [("Alice", 30, "alice@example.com"), ("Bob", 25, "bob@example.com"), ("Charlie", 35, "charlie@example.com")] {
         let mut data = HashMap::new();
         data.insert("name".to_string(), Value::String(name.to_string()));
         data.insert("age".to_string(), Value::I64(age));
+        data.insert("email".to_string(), Value::String(email.to_string()));
         db.transact(vec![TxOp::Assert {
             entity_type: "User".to_string(),
             entity: None,
@@ -337,10 +341,11 @@ fn test_query_with_predicate() {
     let (db, _dir) = test_db();
     db.define_type(user_type()).unwrap();
 
-    for (name, age) in [("Alice", 30), ("Bob", 25), ("Charlie", 35)] {
+    for (name, age, email) in [("Alice", 30, "alice@example.com"), ("Bob", 25, "bob@example.com"), ("Charlie", 35, "charlie@example.com")] {
         let mut data = HashMap::new();
         data.insert("name".to_string(), Value::String(name.to_string()));
         data.insert("age".to_string(), Value::I64(age));
+        data.insert("email".to_string(), Value::String(email.to_string()));
         db.transact(vec![TxOp::Assert {
             entity_type: "User".to_string(),
             entity: None,
@@ -375,6 +380,7 @@ fn test_query_with_join() {
     let mut data = HashMap::new();
     data.insert("name".to_string(), Value::String("Alice".to_string()));
     data.insert("age".to_string(), Value::I64(30));
+    data.insert("email".to_string(), Value::String("alice@example.com".to_string()));
     let alice_result = db
         .transact(vec![TxOp::Assert {
             entity_type: "User".to_string(),
@@ -387,6 +393,7 @@ fn test_query_with_join() {
     let mut data = HashMap::new();
     data.insert("name".to_string(), Value::String("Bob".to_string()));
     data.insert("age".to_string(), Value::I64(25));
+    data.insert("email".to_string(), Value::String("bob@example.com".to_string()));
     db.transact(vec![TxOp::Assert {
         entity_type: "User".to_string(),
         entity: None,
@@ -437,6 +444,7 @@ fn test_time_travel_query() {
     let mut data = HashMap::new();
     data.insert("name".to_string(), Value::String("Alice".to_string()));
     data.insert("age".to_string(), Value::I64(30));
+    data.insert("email".to_string(), Value::String("alice@example.com".to_string()));
     let result1 = db
         .transact(vec![TxOp::Assert {
             entity_type: "User".to_string(),
@@ -498,6 +506,7 @@ fn test_schema_persists_across_reopen() {
         // Transact a user
         let mut data = HashMap::new();
         data.insert("name".to_string(), Value::String("Persist".to_string()));
+        data.insert("email".to_string(), Value::String("persist@example.com".to_string()));
         db.transact(vec![TxOp::Assert {
             entity_type: "User".to_string(),
             entity: None,
@@ -514,6 +523,7 @@ fn test_schema_persists_across_reopen() {
         // Should be able to transact without re-defining
         let mut data = HashMap::new();
         data.insert("name".to_string(), Value::String("Persist2".to_string()));
+        data.insert("email".to_string(), Value::String("persist2@example.com".to_string()));
         let result = db
             .transact(vec![TxOp::Assert {
                 entity_type: "User".to_string(),
@@ -1443,6 +1453,7 @@ fn test_snapshot_scalar_insert() {
     let mut data = HashMap::new();
     data.insert("name".to_string(), Value::String("Alice".to_string()));
     data.insert("age".to_string(), Value::I64(30));
+    data.insert("email".to_string(), Value::String("alice@example.com".to_string()));
     db.transact(vec![TxOp::Assert {
         entity_type: "User".to_string(),
         entity: None,
@@ -1463,6 +1474,7 @@ fn test_snapshot_scalar_update() {
     let mut data = HashMap::new();
     data.insert("name".to_string(), Value::String("Alice".to_string()));
     data.insert("age".to_string(), Value::I64(30));
+    data.insert("email".to_string(), Value::String("alice@example.com".to_string()));
     let result = db
         .transact(vec![TxOp::Assert {
             entity_type: "User".to_string(),
@@ -1976,7 +1988,7 @@ fn test_unique_different_types_independent() {
             FieldDef {
                 name: "email".to_string(),
                 field_type: FieldType::String,
-                required: false,
+                required: true,
                 unique: true,
                 indexed: true,
             },
@@ -2031,6 +2043,7 @@ fn test_query_constant_uses_index() {
         };
         data.insert("name".to_string(), Value::String(name));
         data.insert("age".to_string(), Value::I64(i));
+        data.insert("email".to_string(), Value::String(format!("user{}@example.com", i)));
         db.transact(vec![TxOp::Assert {
             entity_type: "User".to_string(),
             entity: None,
@@ -2061,6 +2074,7 @@ fn test_query_bound_variable_uses_index() {
     // Create Alice
     let mut data = HashMap::new();
     data.insert("name".to_string(), Value::String("Alice".to_string()));
+    data.insert("email".to_string(), Value::String("alice@example.com".to_string()));
     let alice_result = db
         .transact(vec![TxOp::Assert {
             entity_type: "User".to_string(),
@@ -2073,6 +2087,7 @@ fn test_query_bound_variable_uses_index() {
     // Create Bob
     let mut data = HashMap::new();
     data.insert("name".to_string(), Value::String("Bob".to_string()));
+    data.insert("email".to_string(), Value::String("bob@example.com".to_string()));
     db.transact(vec![TxOp::Assert {
         entity_type: "User".to_string(),
         entity: None,
@@ -2215,10 +2230,11 @@ fn test_query_predicate_falls_back() {
     let (db, _dir) = test_db();
     db.define_type(user_type()).unwrap();
 
-    for (name, age) in [("Alice", 30), ("Bob", 25), ("Charlie", 35)] {
+    for (name, age, email) in [("Alice", 30, "alice@example.com"), ("Bob", 25, "bob@example.com"), ("Charlie", 35, "charlie@example.com")] {
         let mut data = HashMap::new();
         data.insert("name".to_string(), Value::String(name.to_string()));
         data.insert("age".to_string(), Value::I64(age));
+        data.insert("email".to_string(), Value::String(email.to_string()));
         db.transact(vec![TxOp::Assert {
             entity_type: "User".to_string(),
             entity: None,
@@ -2240,4 +2256,74 @@ fn test_query_predicate_falls_back() {
     let names: Vec<&Value> = result.rows.iter().map(|r| &r[0]).collect();
     assert!(names.contains(&&Value::String("Alice".to_string())));
     assert!(names.contains(&&Value::String("Charlie".to_string())));
+}
+
+// --- Retract entity (soft delete) tests ---
+
+#[test]
+fn test_retract_entity() {
+    let (db, _dir) = test_db();
+    db.define_type(user_type()).unwrap();
+
+    // Insert two users
+    let mut data = HashMap::new();
+    data.insert("name".to_string(), Value::String("Alice".to_string()));
+    data.insert("age".to_string(), Value::I64(30));
+    data.insert("email".to_string(), Value::String("alice@example.com".to_string()));
+    let result = db
+        .transact(vec![TxOp::Assert {
+            entity_type: "User".to_string(),
+            entity: None,
+            data,
+        }])
+        .unwrap();
+    let alice_eid = result.entity_ids[0];
+    let insert_tx = result.tx_id;
+
+    let mut data = HashMap::new();
+    data.insert("name".to_string(), Value::String("Bob".to_string()));
+    data.insert("age".to_string(), Value::I64(25));
+    data.insert("email".to_string(), Value::String("bob@example.com".to_string()));
+    db.transact(vec![TxOp::Assert {
+        entity_type: "User".to_string(),
+        entity: None,
+        data,
+    }])
+    .unwrap();
+
+    // Retract Alice entirely
+    db.transact(vec![TxOp::RetractEntity {
+        entity_type: "User".to_string(),
+        entity: alice_eid,
+    }])
+    .unwrap();
+
+    // get_entity should return None (all attributes retracted)
+    let entity = db.get_entity(alice_eid).unwrap();
+    assert!(entity.is_none(), "retracted entity should return None");
+
+    // Query should only find Bob
+    let query_json = serde_json::json!({
+        "find": ["?name"],
+        "where": [
+            {"bind": "?u", "type": "User", "name": "?name"}
+        ]
+    });
+    let query = Query::from_json(&query_json).unwrap();
+    let result = db.query(&query).unwrap();
+    assert_eq!(result.rows.len(), 1);
+    assert_eq!(result.rows[0][0], Value::String("Bob".to_string()));
+
+    // Time-travel query as_of the insert tx should still show Alice
+    let query_json = serde_json::json!({
+        "find": ["?name", "?age"],
+        "where": [
+            {"bind": "?u", "type": "User", "name": "?name", "age": "?age"}
+        ],
+        "as_of": insert_tx
+    });
+    let query = Query::from_json(&query_json).unwrap();
+    let result = db.query(&query).unwrap();
+    let names: Vec<&Value> = result.rows.iter().map(|r| &r[0]).collect();
+    assert!(names.contains(&&Value::String("Alice".to_string())));
 }
