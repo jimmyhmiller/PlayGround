@@ -123,15 +123,18 @@ export const callTreeModule = {
         layoutX(roots[ri], 0);
       }
 
-      const HSPC = 54, R = 20, PAD = 36, VSPC = 60;
+      const HSPC = 54, R = 16, PAD = 36, VSPC = 52;
       const maxDepth = allNodes.reduce((m, nd) => Math.max(m, nd.depth), 0);
       const svgW = Math.max(leafIdx * HSPC + PAD * 2, 120);
       const svgH = (maxDepth + 1) * VSPC + PAD * 2;
+
+      const nodeR = allNodes.length <= 6 ? 10 : allNodes.length <= 12 ? 14 : 16;
 
       assertNum(r4, "node_count", allNodes.length);
       assertNum(r4, "edge_count", allEdges.length);
       assertNum(r4, "svg_width", svgW);
       assertNum(r4, "svg_height", svgH);
+      assertNum(r4, "node_r", nodeR);
 
       for (const nd of allNodes) {
         const cx = Math.round(PAD + nd.x * HSPC + HSPC / 2);
@@ -152,6 +155,7 @@ export const callTreeModule = {
       assertNum(r4, "edge_count", 0);
       assertNum(r4, "svg_width", 100);
       assertNum(r4, "svg_height", 60);
+      assertNum(r4, "node_r", 10);
     }
   }
 };

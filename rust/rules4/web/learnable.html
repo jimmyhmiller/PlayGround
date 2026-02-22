@@ -135,6 +135,19 @@
     }
     .viz-toggles input[type="checkbox"] { margin: 0; }
 
+    .btn {
+      padding: 6px 16px;
+      border: 2px solid #1976d2;
+      background: transparent;
+      color: #1976d2;
+      font-size: 12px; font-weight: 600;
+      border-radius: 8px; cursor: pointer;
+      transition: background 0.15s, color 0.15s;
+      white-space: nowrap;
+    }
+    .btn:hover { background: #1976d2; color: white; }
+    .btn.active { background: #1976d2; color: white; }
+
     /* ── Tangle number scrubbing ── */
     .cm-tangle-number {
       color: #1976d2;
@@ -202,8 +215,8 @@
     <span class="result" id="result-badge">...</span>
     <select id="preset-select">
       <option value="fib_memo">Fibonacci (memoized)</option>
-      <option value="map_list">Map over list</option>
-      <option value="sum_acc">Sum (accumulator)</option>
+      <option value="map_list">Map double</option>
+      <option value="bouncing_ball">Bouncing ball</option>
       <option value="custom">Custom</option>
     </select>
   </div>
@@ -224,10 +237,16 @@
     </div>
     <div class="viz-col">
       <div class="viz-wrap" id="viz"></div>
-      <div class="controls">
+      <div class="controls" id="controls-trace">
         <input type="range" id="slider" min="0" max="0" value="0">
         <span class="step-label" id="step-label">Step 0</span>
         <div class="viz-toggles" id="viz-toggles"></div>
+      </div>
+      <div class="controls" id="controls-anim" style="display:none">
+        <button class="btn" id="play-pause">Pause</button>
+        <input type="range" id="frame-slider" min="0" max="39" value="0">
+        <span class="step-label" id="frame-label">frame 0</span>
+        <button class="btn" id="apply-meta">Apply Meta</button>
       </div>
     </div>
   </div>
@@ -434,6 +453,7 @@ function splitCode(code) {
 
 const PRESETS = {
   fib_memo: {
+    mode: 'trace',
     enabledModules: ['call_tree', 'step_card', 'value_timeline'],
     code: `\
 # === Program ===
@@ -441,9 +461,9 @@ fn fib(0) = 0
 fn fib(1) = 1
 fn fib(?n) = fib(?n - 1) + fib(?n - 2)
 
-rule memo : @meta -> @rules {
-  result(?s, fib(?n), ?val) => rule(fib(?n), ?val)
-}
+# rule memo : @meta -> @rules {
+#   result(?s, fib(?n), ?val) => rule(fib(?n), ?val)
+# }
 
 fn fact(0) = 1
 fn fact(?n) = ?n * fact(?n - 1)
@@ -477,7 +497,7 @@ fn cls(?c) = attr("class", ?c)
 fn node_fill(?i) =
   if current_step < node_entry(?i) then "#f0f0f0"
   else if current_step < node_completion(?i) then "#fff3e0"
-  else "#42a5f5"
+  else "#e3f2fd"
 
 fn node_stroke(?i) =
   if current_step < node_entry(?i) then "#ddd"
@@ -487,7 +507,7 @@ fn node_stroke(?i) =
 fn node_text_fill(?i) =
   if current_step < node_entry(?i) then "#bbb"
   else if current_step < node_completion(?i) then "#e65100"
-  else "#fff"
+  else "#1565c0"
 
 fn node_label(?i) =
   if current_step >= node_completion(?i) then call_result(node_call(?i))
@@ -498,7 +518,7 @@ fn edge_stroke(?i) =
 
 fn render_node(?i) = element("g", [], [
   element("circle", [
-    attr("cx", node_cx(?i)), attr("cy", node_cy(?i)), attr("r", 20),
+    attr("cx", node_cx(?i)), attr("cy", node_cy(?i)), attr("r", node_r),
     attr("fill", node_fill(?i)), attr("stroke", node_stroke(?i)),
     attr("stroke-width", 2)
   ], []),
@@ -510,8 +530,8 @@ fn render_node(?i) = element("g", [], [
   ], [text(node_label(?i))])])
 
 fn render_edge(?i) = element("line", [
-  attr("x1", node_cx(edge_from(?i))), attr("y1", node_cy(edge_from(?i)) + 20),
-  attr("x2", node_cx(edge_to(?i))),   attr("y2", node_cy(edge_to(?i)) - 20),
+  attr("x1", node_cx(edge_from(?i))), attr("y1", node_cy(edge_from(?i)) + node_r),
+  attr("x2", node_cx(edge_to(?i))),   attr("y2", node_cy(edge_to(?i)) - node_r),
   attr("stroke", edge_stroke(?i)), attr("stroke-width", 2)
 ], [])
 
@@ -630,12 +650,13 @@ fn render() = @dom element("div", [], [
   },
 
   map_list: {
+    mode: 'trace',
     enabledModules: ['call_tree', 'step_card', 'value_timeline'],
     code: `\
 # === Program ===
-fn map(?f, nil) = nil
-fn map(?f, cons(?h, ?t)) = cons(?f(?h), map(?f, ?t))
 fn double(?x) = ?x * 2
+fn map_double(nil) = nil
+fn map_double(cons(?h, ?t)) = cons(double(?h), map_double(?t))
 
 # === Meta Rules ===
 rule tracer : @meta -> @rules {
@@ -654,9 +675,9 @@ rule tracer : @meta -> @rules {
 # === Harness ===
 {
   rule(trace_count, 0)
-  rule(should_trace(map), true)
+  rule(should_trace(map_double), true)
   rule(should_trace(double), true)
-  rule(result_val, map(double, cons(1, cons(2, cons(3, cons(4, cons(5, nil)))))))
+  rule(result_val, map_double(cons(1, cons(2, cons(3, cons(4, cons(5, nil)))))))
   rule(max_step, trace_count - 1)
 }
 
@@ -668,7 +689,7 @@ fn append(cons(?x, ?xs), ?ys) = cons(?x, append(?xs, ?ys))
 fn node_fill(?i) =
   if current_step < node_entry(?i) then "#f0f0f0"
   else if current_step < node_completion(?i) then "#fff3e0"
-  else "#42a5f5"
+  else "#e3f2fd"
 
 fn node_stroke(?i) =
   if current_step < node_entry(?i) then "#ddd"
@@ -678,7 +699,7 @@ fn node_stroke(?i) =
 fn node_text_fill(?i) =
   if current_step < node_entry(?i) then "#bbb"
   else if current_step < node_completion(?i) then "#e65100"
-  else "#fff"
+  else "#1565c0"
 
 fn node_label(?i) =
   if current_step >= node_completion(?i) then call_result(node_call(?i))
@@ -689,7 +710,7 @@ fn edge_stroke(?i) =
 
 fn render_node(?i) = element("g", [], [
   element("circle", [
-    attr("cx", node_cx(?i)), attr("cy", node_cy(?i)), attr("r", 20),
+    attr("cx", node_cx(?i)), attr("cy", node_cy(?i)), attr("r", node_r),
     attr("fill", node_fill(?i)), attr("stroke", node_stroke(?i)),
     attr("stroke-width", 2)
   ], []),
@@ -701,8 +722,8 @@ fn render_node(?i) = element("g", [], [
   ], [text(node_label(?i))])])
 
 fn render_edge(?i) = element("line", [
-  attr("x1", node_cx(edge_from(?i))), attr("y1", node_cy(edge_from(?i)) + 20),
-  attr("x2", node_cx(edge_to(?i))),   attr("y2", node_cy(edge_to(?i)) - 20),
+  attr("x1", node_cx(edge_from(?i))), attr("y1", node_cy(edge_from(?i)) + node_r),
+  attr("x2", node_cx(edge_to(?i))),   attr("y2", node_cy(edge_to(?i)) - node_r),
   attr("stroke", edge_stroke(?i)), attr("stroke-width", 2)
 ], [])
 
@@ -817,193 +838,127 @@ fn render() = @dom element("div", [], [
 0`,
   },
 
-  sum_acc: {
-    enabledModules: ['call_tree', 'step_card', 'value_timeline'],
+  bouncing_ball: {
+    mode: 'animation',
+    maxFrames: 40,
+    enabledModules: [],
     code: `\
 # === Program ===
-fn sum(nil) = 0
-fn sum(cons(?h, ?t)) = ?h + sum(?t)
+# Bouncing ball animation
 
-# === Meta Rules ===
-rule tracer : @meta -> @rules {
-  reduction(?step, ?old, ?new, fn(?name, ?idx)) =>
-    if should_trace(?name) then {
-      rule(trace(trace_count), reduced(?old, ?new, fn(?name, ?idx)))
-      rule(trace_count, trace_count + 1)
-    } else 0
-  result(?step, ?call, ?val) => {
-    rule(call_result(quote(?call)), ?val)
-    rule(trace(trace_count), completed(quote(?call), ?val))
-    rule(trace_count, trace_count + 1)
-  }
-}
+fn ball_x(?f) = ?f * 9 + 20
 
-# === Harness ===
-{
-  rule(trace_count, 0)
-  rule(should_trace(sum), true)
-  rule(result_val, sum(cons(1, cons(2, cons(3, cons(4, cons(5, nil)))))))
-  rule(max_step, trace_count - 1)
-}
+fn gravity() = 3
+
+fn ball_vy(0) = 0
+fn ball_vy(?f) =
+  if ball_y(?f - 1) + ball_vy(?f - 1) + gravity() > 270
+  then 0 - ball_vy(?f - 1)
+  else ball_vy(?f - 1) + gravity()
+
+fn ball_y(0) = 30
+fn ball_y(?f) = ball_y(?f - 1) + ball_vy(?f)
+
+# Drawing
+fn draw(?f) = circle(ball_x(?f), ball_y(?f), 15)
+
+fn ball_element() =
+  element("circle",
+    [attr("cx", ball_x(current_frame)),
+     attr("cy", ball_y(current_frame)),
+     attr("r", 15),
+     attr("fill", "none"),
+     attr("stroke", "#222"),
+     attr("stroke-width", "2.5")], [])
+
+fn render() = @dom element("svg",
+  [attr("viewBox", "0 0 400 300"),
+   attr("width", "100%"), attr("height", "100%")],
+  cons(ball_element(), nil))
+
+# State
+fn init() = rule(current_frame, 0)
+fn handle_event(set_frame, ?f) = rule(current_frame, ?f)
+
+init()
 
 # === View ===
-fn cls(?c) = attr("class", ?c)
-fn append(nil, ?ys) = ?ys
-fn append(cons(?x, ?xs), ?ys) = cons(?x, append(?xs, ?ys))
+# Ghost Trail Meta
+# Two meta rules work together:
+# 1. trace_draws captures draw() rewrites into @draw
+# 2. render_override intercepts render() and replaces
+#    its output with the ghost trail when active
 
-fn node_fill(?i) =
-  if current_step < node_entry(?i) then "#f0f0f0"
-  else if current_step < node_completion(?i) then "#fff3e0"
-  else "#42a5f5"
+rule trace_draws : @meta -> @draw {
+  result(?step, draw(?f), ?shape) =>
+    pair(ghost(?f), ?shape)
+}
 
-fn node_stroke(?i) =
-  if current_step < node_entry(?i) then "#ddd"
-  else if current_step < node_completion(?i) then "#ff9800"
-  else "#1976d2"
+rule render_override : @meta -> @dom {
+  result(?step, render(), ?val) =>
+    if meta_active then
+      element("svg",
+        [attr("viewBox", "0 0 400 300"),
+         attr("width", "100%"), attr("height", "100%")],
+        ghost_and_ball(0))
+    else ?val
+}
 
-fn node_text_fill(?i) =
-  if current_step < node_entry(?i) then "#bbb"
-  else if current_step < node_completion(?i) then "#e65100"
-  else "#fff"
+# Drive all frames so draw() is evaluated for each
+fn run_frames(?f) =
+  if ?f >= 40 then 0
+  else { draw(?f) run_frames(?f + 1) }
 
-fn node_label(?i) =
-  if current_step >= node_completion(?i) then call_result(node_call(?i))
-  else node_call(?i)
+# Destructure circle terms
+fn circle_cx(circle(?cx, ?cy, ?r)) = ?cx
+fn circle_cy(circle(?cx, ?cy, ?r)) = ?cy
+fn circle_r(circle(?cx, ?cy, ?r)) = ?r
 
-fn edge_stroke(?i) =
-  if current_step >= node_entry(edge_to(?i)) then "#90caf9" else "#e8e8e8"
+# Ghost styling (past vs future)
+fn ghost_opacity(?f) =
+  if ?f < current_frame then "0.45"
+  else "0.25"
+fn ghost_stroke(?f) =
+  if ?f < current_frame then "#555"
+  else "#999"
+fn ghost_sw(?f) =
+  if ?f < current_frame then "1.2"
+  else "0.9"
 
-fn render_node(?i) = element("g", [], [
-  element("circle", [
-    attr("cx", node_cx(?i)), attr("cy", node_cy(?i)), attr("r", 20),
-    attr("fill", node_fill(?i)), attr("stroke", node_stroke(?i)),
-    attr("stroke-width", 2)
-  ], []),
-  element("text", [
-    attr("x", node_cx(?i)), attr("y", node_cy(?i) + 4),
-    attr("text-anchor", "middle"), attr("font-size", 10),
-    attr("font-weight", 700), attr("fill", node_text_fill(?i)),
-    attr("font-family", "-apple-system, sans-serif")
-  ], [text(node_label(?i))])])
+fn ghost_element(?f) =
+  element("circle",
+    [attr("cx", circle_cx(ghost(?f))),
+     attr("cy", circle_cy(ghost(?f))),
+     attr("r", circle_r(ghost(?f))),
+     attr("fill", "none"),
+     attr("stroke", ghost_stroke(?f)),
+     attr("stroke-width", ghost_sw(?f)),
+     attr("opacity", ghost_opacity(?f))], [])
 
-fn render_edge(?i) = element("line", [
-  attr("x1", node_cx(edge_from(?i))), attr("y1", node_cy(edge_from(?i)) + 20),
-  attr("x2", node_cx(edge_to(?i))),   attr("y2", node_cy(edge_to(?i)) - 20),
-  attr("stroke", edge_stroke(?i)), attr("stroke-width", 2)
-], [])
+# Build children: all ghosts + ball on top
+fn ghost_and_ball(40) =
+  cons(ball_element(), nil)
+fn ghost_and_ball(?f) =
+  if ?f == current_frame
+  then ghost_and_ball(?f + 1)
+  else cons(ghost_element(?f),
+            ghost_and_ball(?f + 1))
 
-fn render_nodes(?i) =
-  if ?i >= node_count then nil
-  else cons(render_node(?i), render_nodes(?i + 1))
+# Meta state
+fn meta_init() = rule(meta_active, false)
+meta_init()
 
-fn render_edges(?i) =
-  if ?i >= edge_count then nil
-  else cons(render_edge(?i), render_edges(?i + 1))
-
-fn render_call_tree() = element("div", [cls("tree-container")], [
-  element("div", [cls("legend")], [
-    element("span", [], [
-      element("span", [cls("legend-dot"), attr("style", "background:#e0e0e0")], []),
-      text(" waiting")]),
-    element("span", [], [
-      element("span", [cls("legend-dot"), attr("style", "background:#ffb74d")], []),
-      text(" computing")]),
-    element("span", [], [
-      element("span", [cls("legend-dot"), attr("style", "background:#42a5f5")], []),
-      text(" done")])]),
-  element("svg", [
-    attr("viewBox", "0 0 " ++ svg_width ++ " " ++ svg_height),
-    attr("width", "100%")
-  ], append(render_edges(0), render_nodes(0)))])
-
-fn kind_badge(fn(?name, ?idx)) =
-  element("span", [cls("kind-badge fn-badge")], [text(?name)])
-fn kind_badge(builtin(?op)) =
-  element("span", [cls("kind-badge builtin-badge")], [text(?op)])
-
-fn step_card_for(reduced(?old, ?new, ?kind)) = element("div", [cls("step-card")], [
-  element("span", [cls("step-num")], [text("STEP " ++ current_step)]),
-  element("span", [cls("step-old")], [text(?old)]),
-  element("span", [cls("step-arrow")], [text(" → ")]),
-  element("span", [cls("step-new")], [text(?new)]),
-  kind_badge(?kind)])
-
-fn step_card_for(completed(?call, ?val)) = element("div", [cls("step-card")], [
-  element("span", [cls("step-num")], [text("STEP " ++ current_step)]),
-  element("span", [cls("step-old")], [text(?call)]),
-  element("span", [cls("step-arrow")], [text(" = ")]),
-  element("span", [cls("step-new result-val")], [text(?val)]),
-  element("span", [cls("kind-badge result-badge")], [text("result")])])
-
-fn step_card() = step_card_for(trace(current_step))
-
-fn vt_color(0) = "#1976d2"
-fn vt_color(1) = "#e65100"
-fn vt_color(2) = "#2e7d32"
-fn vt_color(3) = "#7b1fa2"
-
-fn vt_dot_fill(?s, ?j) =
-  if current_step >= vt_point_step(?s, ?j) then vt_color(?s) else "#e0e0e0"
-
-fn vt_dot_r(?s, ?j) =
-  if current_step >= vt_point_step(?s, ?j) then 5 else 3
-
-fn vt_label_opacity(?s, ?j) =
-  if current_step >= vt_point_step(?s, ?j) then 1 else 0
-
-fn vt_render_point(?s, ?j) = element("g", [], [
-  element("circle", [
-    attr("cx", vt_point_x(?s, ?j)), attr("cy", vt_point_y(?s, ?j)),
-    attr("r", vt_dot_r(?s, ?j)),
-    attr("fill", vt_dot_fill(?s, ?j))
-  ], []),
-  element("text", [
-    attr("x", vt_point_x(?s, ?j)), attr("y", vt_point_y(?s, ?j) - 8),
-    attr("text-anchor", "middle"), attr("font-size", 9),
-    attr("fill", vt_dot_fill(?s, ?j)),
-    attr("opacity", vt_label_opacity(?s, ?j)),
-    attr("font-family", "-apple-system, sans-serif")
-  ], [text(vt_point_label(?s, ?j))])])
-
-fn vt_render_points(?s, ?j) =
-  if ?j >= vt_point_count(?s) then nil
-  else cons(vt_render_point(?s, ?j), vt_render_points(?s, ?j + 1))
-
-fn vt_render_series_label(?s) = element("text", [
-  attr("x", 4), attr("y", vt_series_y(?s) + 4),
-  attr("font-size", 11), attr("fill", vt_color(?s)),
-  attr("font-weight", 700),
-  attr("font-family", "-apple-system, sans-serif")
-], [text(vt_series_name(?s))])
-
-fn vt_render_series_row(?s) = element("g", [], append(
-  cons(vt_render_series_label(?s),
-    cons(element("line", [
-      attr("x1", 40), attr("y1", vt_series_y(?s)),
-      attr("x2", vt_svg_width - 20), attr("y2", vt_series_y(?s)),
-      attr("stroke", "#f0f0f0"), attr("stroke-width", 1)
-    ], []), nil)),
-  vt_render_points(?s, 0)))
-
-fn vt_render_all_series(?s) =
-  if ?s >= vt_series_count then nil
-  else cons(vt_render_series_row(?s), vt_render_all_series(?s + 1))
-
-fn render_timeline() = element("div", [cls("timeline-container")], [
-  element("svg", [
-    attr("viewBox", "0 0 " ++ vt_svg_width ++ " " ++ vt_svg_height),
-    attr("width", "100%")
-  ], vt_render_all_series(0))])
-
-fn render() = @dom element("div", [], [
-  render_call_tree(),
-  render_timeline(),
-  step_card()])
+# Toggle meta on/off
+fn handle_event(apply_meta, ?ev) =
+  { run_frames(0) rule(meta_active, true) }
+fn handle_event(remove_meta, ?ev) =
+  rule(meta_active, false)
 
 0`,
   },
 
   custom: {
+    mode: 'trace',
     enabledModules: ['call_tree', 'step_card'],
     code: `\
 # === Program ===
@@ -1040,7 +995,7 @@ fn append(cons(?x, ?xs), ?ys) = cons(?x, append(?xs, ?ys))
 fn node_fill(?i) =
   if current_step < node_entry(?i) then "#f0f0f0"
   else if current_step < node_completion(?i) then "#fff3e0"
-  else "#42a5f5"
+  else "#e3f2fd"
 
 fn node_stroke(?i) =
   if current_step < node_entry(?i) then "#ddd"
@@ -1050,7 +1005,7 @@ fn node_stroke(?i) =
 fn node_text_fill(?i) =
   if current_step < node_entry(?i) then "#bbb"
   else if current_step < node_completion(?i) then "#e65100"
-  else "#fff"
+  else "#1565c0"
 
 fn node_label(?i) =
   if current_step >= node_completion(?i) then call_result(node_call(?i))
@@ -1061,7 +1016,7 @@ fn edge_stroke(?i) =
 
 fn render_node(?i) = element("g", [], [
   element("circle", [
-    attr("cx", node_cx(?i)), attr("cy", node_cy(?i)), attr("r", 20),
+    attr("cx", node_cx(?i)), attr("cy", node_cy(?i)), attr("r", node_r),
     attr("fill", node_fill(?i)), attr("stroke", node_stroke(?i)),
     attr("stroke-width", 2)
   ], []),
@@ -1073,8 +1028,8 @@ fn render_node(?i) = element("g", [], [
   ], [text(node_label(?i))])])
 
 fn render_edge(?i) = element("line", [
-  attr("x1", node_cx(edge_from(?i))), attr("y1", node_cy(edge_from(?i)) + 20),
-  attr("x2", node_cx(edge_to(?i))),   attr("y2", node_cy(edge_to(?i)) - 20),
+  attr("x1", node_cx(edge_from(?i))), attr("y1", node_cy(edge_from(?i)) + node_r),
+  attr("x2", node_cx(edge_to(?i))),   attr("y2", node_cy(edge_to(?i)) - node_r),
   attr("stroke", edge_stroke(?i)), attr("stroke-width", 2)
 ], [])
 
@@ -1150,14 +1105,22 @@ patch(r4, oldTerm, dom[dom.length - 1], tree, root, handler);`;
 
 // ── Elements ──
 
-const statusEl   = document.getElementById('status');
-const errorEl    = document.getElementById('error');
-const resultBadge = document.getElementById('result-badge');
-const vizEl      = document.getElementById('viz');
-const slider     = document.getElementById('slider');
-const stepLabel  = document.getElementById('step-label');
-const presetSel  = document.getElementById('preset-select');
-const togglesEl  = document.getElementById('viz-toggles');
+const statusEl      = document.getElementById('status');
+const errorEl       = document.getElementById('error');
+const resultBadge   = document.getElementById('result-badge');
+const vizEl         = document.getElementById('viz');
+const slider        = document.getElementById('slider');
+const stepLabel     = document.getElementById('step-label');
+const presetSel     = document.getElementById('preset-select');
+const togglesEl     = document.getElementById('viz-toggles');
+const controlsTrace = document.getElementById('controls-trace');
+const controlsAnim  = document.getElementById('controls-anim');
+const playPauseBtn  = document.getElementById('play-pause');
+const frameSlider   = document.getElementById('frame-slider');
+const frameLabelEl  = document.getElementById('frame-label');
+const applyMetaBtn  = document.getElementById('apply-meta');
+const programTab    = document.querySelector('[data-tab="program"]');
+const viewTab       = document.querySelector('[data-tab="view"]');
 
 // ── Tabbed editors ──
 
@@ -1243,6 +1206,25 @@ presetSel.addEventListener('change', () => {
   for (const m of preset.enabledModules) enabledModules.add(m);
   buildToggles();
 
+  // Switch mode
+  const newMode = preset.mode || 'trace';
+  setMode(newMode);
+
+  // Reset animation state when switching to animation mode
+  if (newMode === 'animation') {
+    currentFrame = 0;
+    playing = true;
+    metaApplied = false;
+    playPauseBtn.textContent = 'Pause';
+    playPauseBtn.classList.remove('active');
+    applyMetaBtn.textContent = 'Apply Meta';
+    applyMetaBtn.classList.remove('active');
+    frameSlider.value = 0;
+    frameLabelEl.textContent = 'frame 0';
+    const maxFrames = preset.maxFrames || 40;
+    frameSlider.max = maxFrames - 1;
+  }
+
   scheduleRun();
 });
 
@@ -1251,6 +1233,32 @@ presetSel.addEventListener('change', () => {
 let r4 = null, maxStep = 0;
 let currentTree = null, currentTermId = null, renderSym = null;
 let runGeneration = 0;
+let currentMode = 'trace';
+
+// Animation mode state
+let playing = true;
+let metaApplied = false;
+let currentFrame = 0;
+let tickCounter = 0;
+let raf = null;
+
+// ── Mode switching ──
+
+function setMode(mode) {
+  currentMode = mode;
+  const isAnim = mode === 'animation';
+  controlsTrace.style.display = isAnim ? 'none' : '';
+  controlsAnim.style.display = isAnim ? '' : 'none';
+  resultBadge.style.display = isAnim ? 'none' : '';
+  programTab.textContent = isAnim ? 'Animation' : 'Program';
+  viewTab.textContent = isAnim ? 'Meta' : 'View';
+
+  // Stop any running animation when switching away
+  if (!isAnim && raf) {
+    cancelAnimationFrame(raf);
+    raf = null;
+  }
+}
 
 // ── Debounced run ──
 
@@ -1258,6 +1266,18 @@ let runTimer = null;
 function scheduleRun() {
   clearTimeout(runTimer);
   runTimer = setTimeout(() => run(), isScrubbing ? 0 : 300);
+}
+
+// ── Process @draw scope pending rules ──
+
+function processDrawRules() {
+  if (!r4) return;
+  const pending = r4.scopeTakePending("draw");
+  for (const t of pending) {
+    if (r4.termTag(t) === 2 && r4.termCallArity(t) === 2) {
+      r4.assertRule(r4.termCallArg(t, 0), r4.termCallArg(t, 1));
+    }
+  }
 }
 
 // ── Run pipeline ──
@@ -1270,6 +1290,21 @@ async function run() {
     const newR4 = await freshR4();
     if (thisGen !== runGeneration) return;
 
+    if (currentMode === 'animation') {
+      await runAnimation(newR4, thisGen);
+    } else {
+      await runTrace(newR4, thisGen);
+    }
+  } catch (e) {
+    if (thisGen !== runGeneration) return;
+    console.error('[ERROR]', e);
+    errorEl.textContent = e.message;
+    errorEl.classList.add('visible');
+    statusEl.className = 'status-dot err';
+  }
+}
+
+async function runTrace(newR4, thisGen) {
     // Phase 1: load program code
     const programCode = programEditor.state.doc.toString();
     newR4.eval(newR4.loadProgram(programCode));
@@ -1323,13 +1358,42 @@ async function run() {
 
     errorEl.classList.remove('visible');
     statusEl.className = 'status-dot ok';
-  } catch (e) {
+}
+
+async function runAnimation(newR4, thisGen) {
+    // Load program code always
+    const programCode = programEditor.state.doc.toString();
+    const metaCode = viewEditor.state.doc.toString();
+
+    // Only include meta code when meta is applied,
+    // otherwise the meta rule outputs unevaluated if-expressions to @dom
+    if (metaApplied && metaCode.trim()) {
+      newR4.eval(newR4.loadProgram(programCode + '\n' + metaCode));
+    } else {
+      newR4.eval(newR4.loadProgram(programCode));
+    }
     if (thisGen !== runGeneration) return;
-    console.error('[ERROR]', e);
-    errorEl.textContent = e.message;
-    errorEl.classList.add('visible');
-    statusEl.className = 'status-dot err';
-  }
+
+    r4 = newR4;
+    renderSym = r4.sym("render");
+    currentTree = null;
+    currentTermId = null;
+
+    // Restore frame
+    r4.eval(r4.call(r4.sym("handle_event"), [r4.sym("set_frame"), r4.num(currentFrame)]));
+
+    // Trigger apply_meta so the meta rules run their setup
+    if (metaApplied) {
+      r4.eval(r4.call(r4.sym("handle_event"), [r4.sym("apply_meta"), r4.num(0)]));
+    }
+
+    doRender();
+
+    errorEl.classList.remove('visible');
+    statusEl.className = 'status-dot ok';
+
+    // Start animation loop if not running
+    if (!raf) startAnimLoop();
 }
 
 // ── VDOM render ──
@@ -1337,6 +1401,7 @@ async function run() {
 function doRender() {
   if (!r4 || !renderSym) return;
   try {
+    if (currentMode === 'animation') processDrawRules();
     r4.eval(r4.call(renderSym, []));
     const pending = r4.scopeTakePending("dom");
     if (pending.length === 0) return;
@@ -1359,6 +1424,8 @@ function doRender() {
   }
 }
 
+// ── Trace mode: step controls ──
+
 function setStep(s) {
   if (!r4) return;
   s = Math.max(0, Math.min(maxStep, s));
@@ -1368,22 +1435,74 @@ function setStep(s) {
   doRender();
 }
 
-// ── Slider + keyboard ──
-
 slider.addEventListener('input', () => setStep(+slider.value));
+
+// ── Animation mode: loop + controls ──
+
+function startAnimLoop() {
+  if (raf) return;
+  function animLoop() {
+    if (playing && r4 && currentMode === 'animation') {
+      tickCounter++;
+      if (tickCounter % 3 === 0) {
+        try {
+          const preset = PRESETS[presetSel.value];
+          const maxFrames = (preset && preset.maxFrames) || 40;
+          currentFrame = (currentFrame + 1) % maxFrames;
+          r4.eval(r4.call(r4.sym("handle_event"), [r4.sym("set_frame"), r4.num(currentFrame)]));
+          doRender();
+          frameSlider.value = currentFrame;
+          frameLabelEl.textContent = `frame ${currentFrame}`;
+        } catch (e) {
+          console.error("[rules4] anim tick error:", e);
+        }
+      }
+    }
+    raf = requestAnimationFrame(animLoop);
+  }
+  raf = requestAnimationFrame(animLoop);
+}
+
+playPauseBtn.addEventListener('click', () => {
+  playing = !playing;
+  playPauseBtn.textContent = playing ? 'Pause' : 'Play';
+  playPauseBtn.classList.toggle('active', !playing);
+});
+
+frameSlider.addEventListener('input', () => {
+  if (!r4) return;
+  currentFrame = parseInt(frameSlider.value);
+  r4.eval(r4.call(r4.sym("handle_event"), [r4.sym("set_frame"), r4.num(currentFrame)]));
+  doRender();
+  frameLabelEl.textContent = `frame ${currentFrame}`;
+});
+
+applyMetaBtn.addEventListener('click', () => {
+  metaApplied = !metaApplied;
+  applyMetaBtn.textContent = metaApplied ? 'Remove Meta' : 'Apply Meta';
+  applyMetaBtn.classList.toggle('active', metaApplied);
+  // Full reload needed since meta changes which code is loaded
+  scheduleRun();
+});
+
+// ── Keyboard navigation ──
 
 document.addEventListener('keydown', e => {
   if (e.target.closest('.cm-editor') || e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
   if (!r4) return;
-  const s = +slider.value;
-  if (e.key === 'ArrowLeft')  { e.preventDefault(); setStep(s - 1); }
-  if (e.key === 'ArrowRight') { e.preventDefault(); setStep(s + 1); }
-  if (e.key === 'Home')       { e.preventDefault(); setStep(0); }
-  if (e.key === 'End')        { e.preventDefault(); setStep(maxStep); }
+
+  if (currentMode === 'trace') {
+    const s = +slider.value;
+    if (e.key === 'ArrowLeft')  { e.preventDefault(); setStep(s - 1); }
+    if (e.key === 'ArrowRight') { e.preventDefault(); setStep(s + 1); }
+    if (e.key === 'Home')       { e.preventDefault(); setStep(0); }
+    if (e.key === 'End')        { e.preventDefault(); setStep(maxStep); }
+  }
 });
 
 // ── Init ──
 
+setMode(PRESETS.fib_memo.mode || 'trace');
 await run();
 </script>
 </body>

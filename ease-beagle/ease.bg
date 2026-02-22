@@ -1152,40 +1152,51 @@ fn build-heatmap(view, handler, data, goals, y, n) {
 // ─── Color Picker View ──────────────────────────────────────────────
 
 fn build-color-picker-view(view, handler, n) {
+    let cp-h = compute-color-picker-height()
     let idx = deref(picking-color-for)
     let data = deref(app-data)
     let goal = get(data.goals, idx)
+    let mut y = cp-h - PAD
 
+    // Header
+    y = y - 24.0
     let back-sel = "cpb_" ++ to-string(n) ++ ":"
     ak/add-method(handler, back-sel, fn(self_, sel, sender) {
         reset!(picking-color-for, 0 - 1)
         rebuild-ui()
     })
-    let back-lbl = ak/left-label("‹", 8.0, POP-H - 40.0, 20.0, 24.0)
+    let back-lbl = ak/left-label("‹", PAD, y, 20.0, 24.0)
     ak/set-font(back-lbl, ak/bold-font(16.0))
     ak/set-text-color(back-lbl, ak/color(0.4, 0.6, 1.0, 1.0))
     ak/add-to(view, back-lbl)
-    let back-btn = ak/button("", 4.0, POP-H - 44.0, 28.0, 32.0)
+    let back-btn = ak/button("", PAD - 4.0, y - 4.0, 28.0, 32.0)
     ak/set-bordered(back-btn, 0)
     ak/on-click(back-btn, handler, back-sel)
     ak/add-to(view, back-btn)
 
-    let title = ak/label("Change Color", 0.0, POP-H - 42.0, POP-W, 24.0)
+    let title = ak/label("Change Color", 0.0, y, POP-W, 24.0)
     ak/set-font(title, ak/bold-font(17.0))
     ak/set-text-color(title, ak/white)
     ak/add-to(view, title)
 
-    let name-lbl = ak/label(goal.name, 0.0, POP-H - 70.0, POP-W, 20.0)
+    y = y - 8.0
+
+    // Goal name subtitle
+    y = y - 20.0
+    let name-lbl = ak/label(goal.name, 0.0, y, POP-W, 20.0)
     ak/set-font(name-lbl, ak/font(13.0))
     ak/set-text-color(name-lbl, ak/color(0.6, 0.6, 0.65, 1.0))
     ak/add-to(view, name-lbl)
+
+    y = y - 16.0
 
     // Color grid: 5 columns x 2 rows
     let dot-size = 28.0
     let gap = 8.0
     let grid-w = (5.0 * dot-size) + (4.0 * gap)
     let grid-x = (POP-W - grid-w) / 2.0
-    let grid-y = POP-H - 150.0
+    y = y - (2.0 * dot-size + gap)
+    let grid-y = y
 
     let mut ci = 0
     while ci < length(PRESET-COLORS) {

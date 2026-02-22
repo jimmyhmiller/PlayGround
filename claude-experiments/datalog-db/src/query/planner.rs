@@ -76,11 +76,86 @@ impl PlanNode {
     }
 }
 
+/// Maps variable names to fixed slot indices in a tuple.
+#[derive(Debug, Clone)]
+pub struct SlotMap {
+    name_to_slot: HashMap<String, usize>,
+    pub num_slots: usize,
+}
+
+impl SlotMap {
+    /// Build a SlotMap by collecting all unique variable names from a query.
+    pub fn from_query(query: &Query) -> Self {
+        let mut name_to_slot = HashMap::new();
+        let mut next_slot = 0usize;
+
+        // find variables
+        for var in &query.find {
+            Self::ensure_slot(var, &mut name_to_slot, &mut next_slot);
+        }
+
+        // where clause variables
+        for clause in &query.where_clauses {
+            Self::ensure_slot(&clause.bind, &mut name_to_slot, &mut next_slot);
+            Self::collect_pattern_vars(&clause.field_patterns, &mut name_to_slot, &mut next_slot);
+        }
+
+        SlotMap {
+            name_to_slot,
+            num_slots: next_slot,
+        }
+    }
+
+    fn ensure_slot(name: &str, map: &mut HashMap<String, usize>, next: &mut usize) {
+        if !map.contains_key(name) {
+            map.insert(name.to_string(), *next);
+            *next += 1;
+        }
+    }
+
+    fn collect_pattern_vars(
+        patterns: &[(String, Pattern)],
+        map: &mut HashMap<String, usize>,
+        next: &mut usize,
+    ) {
+        for (_field_name, pattern) in patterns {
+            Self::collect_from_pattern(pattern, map, next);
+        }
+    }
+
+    fn collect_from_pattern(
+        pattern: &Pattern,
+        map: &mut HashMap<String, usize>,
+        next: &mut usize,
+    ) {
+        match pattern {
+            Pattern::Variable(v) => {
+                if !map.contains_key(v) {
+                    map.insert(v.clone(), *next);
+                    *next += 1;
+                }
+            }
+            Pattern::EnumMatch { variant, field_patterns } => {
+                Self::collect_from_pattern(variant, map, next);
+                Self::collect_pattern_vars(field_patterns, map, next);
+            }
+            Pattern::Constant(_) | Pattern::Predicate { .. } => {}
+        }
+    }
+
+    /// Look up the slot index for a variable name.
+    #[inline]
+    pub fn slot(&self, name: &str) -> Option<usize> {
+        self.name_to_slot.get(name).copied()
+    }
+}
+
 /// The complete query plan.
 #[derive(Debug, Clone)]
 pub struct QueryPlan {
     pub root: PlanNode,
     pub as_of: Option<TxId>,
+    pub slot_map: SlotMap,
 }
 
 // ---------------------------------------------------------------------------
@@ -289,9 +364,12 @@ pub fn plan_query(
         variables: query.find.clone(),
     };
 
+    let slot_map = SlotMap::from_query(query);
+
     Ok(QueryPlan {
         root,
         as_of: query.as_of,
+        slot_map,
     })
 }
 
@@ -502,11 +580,19 @@ fn choose_join_strategy(
     right_clause: &WhereClause,
     schema: &SchemaRegistry,
 ) -> JoinStrategy {
-    // If left is very small AND right has indexed/unique field matching join var → NestedLoop
-    if left_est <= 10 && !join_vars.is_empty() {
-        if let Some(type_def) = schema.get(&right_clause.entity_type) {
-            for jv in join_vars {
-                // Check if any field pattern on the right uses this join var
+    if !join_vars.is_empty() {
+        for jv in join_vars {
+            // Case 1: Join var IS the right clause's bind variable.
+            // The right entity is directly bound by ID from the left tuple,
+            // so evaluate_clause just does a single entity lookup — always fast.
+            if jv == &right_clause.bind {
+                return JoinStrategy::NestedLoop;
+            }
+
+            // Case 2: Join var matches an indexed/unique field on the right side.
+            // NestedLoop does index probes per left tuple instead of scanning
+            // the entire right side. Better when left < right.
+            if let Some(type_def) = schema.get(&right_clause.entity_type) {
                 for (field_name, pattern) in &right_clause.field_patterns {
                     if let Pattern::Variable(v) = pattern {
                         if v == jv {

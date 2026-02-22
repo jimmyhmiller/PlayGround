@@ -4,13 +4,35 @@ use std::mem::discriminant;
 
 use crate::datom::{Datom, EntityId, TxId, Value};
 use crate::index;
-use crate::query::planner::{self, JoinSide, JoinStrategy, PlanNode, QueryPlan};
+use crate::query::planner::{self, JoinSide, JoinStrategy, PlanNode, QueryPlan, SlotMap};
 use crate::query::{Pattern, PredOp, Query, WhereClause};
 use crate::schema::{FieldType, SchemaRegistry};
 use crate::storage::ReadOps;
 
-/// A set of variable bindings produced during query execution.
-pub type Bindings = HashMap<String, Value>;
+/// A fixed-size tuple of slot values, indexed by position (no string keys).
+#[derive(Clone)]
+struct Tuple {
+    values: Vec<Option<Value>>,
+}
+
+impl Tuple {
+    #[inline]
+    fn new(num_slots: usize) -> Self {
+        Tuple {
+            values: vec![None; num_slots],
+        }
+    }
+
+    #[inline]
+    fn get(&self, slot: usize) -> Option<&Value> {
+        self.values[slot].as_ref()
+    }
+
+    #[inline]
+    fn set(&mut self, slot: usize, value: Value) {
+        self.values[slot] = Some(value);
+    }
+}
 
 /// Query result: rows of bound values in `find` order.
 #[derive(Debug)]
@@ -58,11 +80,11 @@ impl PartialEq for HashableValue {
 
 impl Eq for HashableValue {}
 
-/// Compute a hash key from bindings for the given join variables.
-fn join_key(bindings: &Bindings, join_vars: &[String]) -> Option<Vec<HashableValue>> {
-    let mut key = Vec::with_capacity(join_vars.len());
-    for var in join_vars {
-        match bindings.get(var) {
+/// Compute a hash key from a tuple for the given join slot indices.
+fn join_key(tuple: &Tuple, join_slots: &[usize]) -> Option<Vec<HashableValue>> {
+    let mut key = Vec::with_capacity(join_slots.len());
+    for &slot in join_slots {
+        match tuple.get(slot) {
             Some(v) => key.push(HashableValue(v.clone())),
             None => return None,
         }
@@ -102,7 +124,8 @@ pub fn execute_plan(
     plan: &QueryPlan,
     schema: &SchemaRegistry,
 ) -> Result<QueryResult, String> {
-    let binding_sets = execute_node(txn, &plan.root, plan.as_of, schema)?;
+    let slots = &plan.slot_map;
+    let tuples = execute_node(txn, &plan.root, plan.as_of, schema, slots)?;
 
     // The Project node determines which variables to return
     let columns = match &plan.root {
@@ -110,16 +133,25 @@ pub fn execute_plan(
         _ => vec![],
     };
 
-    let rows = binding_sets
+    // Pre-compute output slot indices
+    let output_slots: Vec<usize> = columns
+        .iter()
+        .map(|var| slots.slot(var).unwrap_or(usize::MAX))
+        .collect();
+
+    let rows = tuples
         .into_iter()
-        .map(|bindings| {
-            columns
+        .map(|tuple| {
+            output_slots
                 .iter()
-                .map(|var| {
-                    bindings
-                        .get(var)
-                        .cloned()
-                        .unwrap_or(Value::String("<unbound>".to_string()))
+                .map(|&slot| {
+                    if slot == usize::MAX {
+                        Value::String("<unbound>".to_string())
+                    } else {
+                        tuple.get(slot)
+                            .cloned()
+                            .unwrap_or(Value::String("<unbound>".to_string()))
+                    }
                 })
                 .collect()
         })
@@ -134,12 +166,12 @@ fn execute_node(
     node: &PlanNode,
     as_of: Option<TxId>,
     schema: &SchemaRegistry,
-) -> Result<Vec<Bindings>, String> {
+    slots: &SlotMap,
+) -> Result<Vec<Tuple>, String> {
     match node {
         PlanNode::Scan(scan) => {
-            // Evaluate clause independently with empty bindings
-            let empty = Bindings::new();
-            evaluate_clause(txn, &scan.clause, &empty, as_of, schema)
+            let empty = Tuple::new(slots.num_slots);
+            evaluate_clause(txn, &scan.clause, &empty, as_of, schema, slots)
         }
         PlanNode::Join {
             left,
@@ -149,40 +181,41 @@ fn execute_node(
             ..
         } => match strategy {
             JoinStrategy::NestedLoop => {
-                execute_nested_loop(txn, left, right, as_of, schema)
+                execute_nested_loop(txn, left, right, as_of, schema, slots)
             }
             JoinStrategy::HashJoin { build_side } => {
-                execute_hash_join(txn, left, right, join_vars, *build_side, as_of, schema)
+                execute_hash_join(txn, left, right, join_vars, *build_side, as_of, schema, slots)
             }
         },
         PlanNode::Project { input, .. } => {
-            execute_node(txn, input, as_of, schema)
+            execute_node(txn, input, as_of, schema, slots)
         }
     }
 }
 
-/// Nested-loop join: for each left binding, evaluate right clause with left bindings.
+/// Nested-loop join: for each left tuple, evaluate right clause with left values.
 fn execute_nested_loop(
     txn: &dyn ReadOps,
     left: &PlanNode,
     right: &PlanNode,
     as_of: Option<TxId>,
     schema: &SchemaRegistry,
-) -> Result<Vec<Bindings>, String> {
-    let left_bindings = execute_node(txn, left, as_of, schema)?;
+    slots: &SlotMap,
+) -> Result<Vec<Tuple>, String> {
+    let left_tuples = execute_node(txn, left, as_of, schema, slots)?;
 
     // For nested loop, we need to get the right clause to call evaluate_clause
-    // with the left bindings so index lookups can use bound variables.
+    // with the left values so index lookups can use bound variables.
     let right_clause = match right {
         PlanNode::Scan(scan) => &scan.clause,
         _ => {
             // For non-scan right sides, fall back to executing both independently
             // and merging (effectively a hash join)
-            let right_bindings = execute_node(txn, right, as_of, schema)?;
+            let right_tuples = execute_node(txn, right, as_of, schema, slots)?;
             let mut results = Vec::new();
-            for lb in &left_bindings {
-                for rb in &right_bindings {
-                    if let Some(merged) = merge_bindings(lb, rb) {
+            for lt in &left_tuples {
+                for rt in &right_tuples {
+                    if let Some(merged) = merge_tuples(lt, rt) {
                         results.push(merged);
                     }
                 }
@@ -192,8 +225,8 @@ fn execute_nested_loop(
     };
 
     let mut results = Vec::new();
-    for lb in &left_bindings {
-        let matches = evaluate_clause(txn, right_clause, lb, as_of, schema)?;
+    for lt in &left_tuples {
+        let matches = evaluate_clause(txn, right_clause, lt, as_of, schema, slots)?;
         results.extend(matches);
     }
 
@@ -209,30 +242,37 @@ fn execute_hash_join(
     build_side: JoinSide,
     as_of: Option<TxId>,
     schema: &SchemaRegistry,
-) -> Result<Vec<Bindings>, String> {
-    let left_bindings = execute_node(txn, left, as_of, schema)?;
-    let right_bindings = execute_node(txn, right, as_of, schema)?;
+    slots: &SlotMap,
+) -> Result<Vec<Tuple>, String> {
+    let left_tuples = execute_node(txn, left, as_of, schema, slots)?;
+    let right_tuples = execute_node(txn, right, as_of, schema, slots)?;
 
-    let (build_bindings, probe_bindings) = match build_side {
-        JoinSide::Left => (&left_bindings, &right_bindings),
-        JoinSide::Right => (&right_bindings, &left_bindings),
+    // Resolve join_vars to slot indices once
+    let join_slots: Vec<usize> = join_vars
+        .iter()
+        .filter_map(|v| slots.slot(v))
+        .collect();
+
+    let (build_tuples, probe_tuples) = match build_side {
+        JoinSide::Left => (&left_tuples, &right_tuples),
+        JoinSide::Right => (&right_tuples, &left_tuples),
     };
 
     // Build hash table
-    let mut hash_table: HashMap<JoinKey, Vec<&Bindings>> = HashMap::new();
-    for b in build_bindings {
-        if let Some(key) = join_key(b, join_vars) {
-            hash_table.entry(JoinKey(key)).or_default().push(b);
+    let mut hash_table: HashMap<JoinKey, Vec<&Tuple>> = HashMap::new();
+    for t in build_tuples {
+        if let Some(key) = join_key(t, &join_slots) {
+            hash_table.entry(JoinKey(key)).or_default().push(t);
         }
     }
 
     // Probe
     let mut results = Vec::new();
-    for pb in probe_bindings {
-        if let Some(key) = join_key(pb, join_vars) {
+    for pt in probe_tuples {
+        if let Some(key) = join_key(pt, &join_slots) {
             if let Some(matches) = hash_table.get(&JoinKey(key)) {
-                for mb in matches {
-                    if let Some(merged) = merge_bindings(pb, mb) {
+                for mt in matches {
+                    if let Some(merged) = merge_tuples(pt, mt) {
                         results.push(merged);
                     }
                 }
@@ -243,17 +283,19 @@ fn execute_hash_join(
     Ok(results)
 }
 
-/// Merge two binding sets. Returns None if there's a conflict
-/// (same variable bound to different values).
-fn merge_bindings(left: &Bindings, right: &Bindings) -> Option<Bindings> {
+/// Merge two tuples. Returns None if there's a conflict
+/// (same slot bound to different values).
+fn merge_tuples(left: &Tuple, right: &Tuple) -> Option<Tuple> {
     let mut merged = left.clone();
-    for (k, v) in right {
-        if let Some(existing) = merged.get(k) {
-            if existing != v {
-                return None;
+    for (i, rv) in right.values.iter().enumerate() {
+        if let Some(val) = rv {
+            if let Some(existing) = &merged.values[i] {
+                if existing != val {
+                    return None;
+                }
+            } else {
+                merged.values[i] = Some(val.clone());
             }
-        } else {
-            merged.insert(k.clone(), v.clone());
         }
     }
     Some(merged)
@@ -263,17 +305,19 @@ fn merge_bindings(left: &Bindings, right: &Bindings) -> Option<Bindings> {
 // Clause-level execution (leaf engine — unchanged from original)
 // ---------------------------------------------------------------------------
 
-/// Evaluate a single where clause against current bindings.
-/// Returns extended binding sets for each matching entity.
-pub fn evaluate_clause(
+/// Evaluate a single where clause against a current tuple.
+/// Returns extended tuples for each matching entity.
+fn evaluate_clause(
     txn: &dyn ReadOps,
     clause: &WhereClause,
-    bindings: &Bindings,
+    tuple: &Tuple,
     as_of: Option<TxId>,
     schema: &SchemaRegistry,
-) -> Result<Vec<Bindings>, String> {
+    slots: &SlotMap,
+) -> Result<Vec<Tuple>, String> {
     // Check if the entity variable is already bound
-    let bound_entity = bindings.get(&clause.bind).and_then(|v| {
+    let bind_slot = slots.slot(&clause.bind).unwrap();
+    let bound_entity = tuple.get(bind_slot).and_then(|v| {
         if let Value::Ref(id) = v {
             Some(*id)
         } else {
@@ -296,7 +340,7 @@ pub fn evaluate_clause(
         vec![eid]
     } else {
         // Try to use AVET index for constant, bound, or range patterns
-        let plans = find_indexable_patterns(clause, bindings, schema);
+        let plans = find_indexable_patterns(clause, tuple, schema, slots);
         if !plans.is_empty() {
             let mut candidate_sets: Vec<Vec<EntityId>> = Vec::new();
             for plan in &plans {
@@ -481,13 +525,9 @@ pub fn evaluate_clause(
         };
 
         // Try to match all field patterns
-        if let Some(new_bindings) =
-            match_field_patterns(&clause.field_patterns, &fields, bindings)
-        {
-            let mut extended = bindings.clone();
-            // Bind the entity variable as a Ref
-            extended.insert(clause.bind.clone(), Value::Ref(eid));
-            extended.extend(new_bindings);
+        let mut extended = tuple.clone();
+        extended.set(bind_slot, Value::Ref(eid));
+        if match_field_patterns(&clause.field_patterns, &fields, &mut extended, slots) {
             results.push(extended);
         }
     }
@@ -499,8 +539,9 @@ pub fn evaluate_clause(
 /// Returns plans for exact lookups and range scans.
 fn find_indexable_patterns(
     clause: &WhereClause,
-    bindings: &Bindings,
+    tuple: &Tuple,
     schema: &SchemaRegistry,
+    slots: &SlotMap,
 ) -> Vec<AttrPlan> {
     let type_def = match schema.get(&clause.entity_type) {
         Some(td) => td,
@@ -527,8 +568,10 @@ fn find_indexable_patterns(
             }
             Pattern::Variable(var) => {
                 // If the variable is already bound, we can use its value
-                if let Some(bound_value) = bindings.get(var) {
-                    plans.push(AttrPlan::Exact(attr, bound_value.clone()));
+                if let Some(slot) = slots.slot(var) {
+                    if let Some(bound_value) = tuple.get(slot) {
+                        plans.push(AttrPlan::Exact(attr, bound_value.clone()));
+                    }
                 }
             }
             Pattern::Predicate { op, value } => {
@@ -917,31 +960,32 @@ fn load_entity_fields(
     Ok(fields)
 }
 
-/// Try to match field patterns against entity fields. Returns new bindings if successful.
+/// Try to match field patterns against entity fields.
+/// Writes bound variables directly into `tuple`. Returns false on conflict or mismatch.
 fn match_field_patterns(
     patterns: &[(String, Pattern)],
     fields: &HashMap<String, Value>,
-    existing_bindings: &Bindings,
-) -> Option<Bindings> {
-    let mut new_bindings = Bindings::new();
-
+    tuple: &mut Tuple,
+    slots: &SlotMap,
+) -> bool {
     for (field_name, pattern) in patterns {
         match pattern {
             Pattern::Variable(var) => {
+                let slot = match slots.slot(var) {
+                    Some(s) => s,
+                    None => return false,
+                };
                 // For enum fields, a bare variable on an enum field binds the tag
                 // Check if this is an enum field by looking for __tag
                 let tag_key = format!("{}/__tag", field_name);
                 if let Some(tag_val) = fields.get(&tag_key) {
                     // This is an enum field — bind the tag
-                    if let Some(bound_value) = existing_bindings
-                        .get(var)
-                        .or_else(|| new_bindings.get(var))
-                    {
-                        if bound_value != tag_val {
-                            return None;
+                    if let Some(existing) = tuple.get(slot) {
+                        if existing != tag_val {
+                            return false;
                         }
                     } else {
-                        new_bindings.insert(var.clone(), tag_val.clone());
+                        tuple.set(slot, tag_val.clone());
                     }
                 } else {
                     // Regular scalar field — use Null for missing optional fields
@@ -949,15 +993,12 @@ fn match_field_patterns(
                         .get(field_name)
                         .cloned()
                         .unwrap_or(Value::Null);
-                    if let Some(bound_value) = existing_bindings
-                        .get(var)
-                        .or_else(|| new_bindings.get(var))
-                    {
-                        if *bound_value != field_val {
-                            return None;
+                    if let Some(existing) = tuple.get(slot) {
+                        if *existing != field_val {
+                            return false;
                         }
                     } else {
-                        new_bindings.insert(var.clone(), field_val);
+                        tuple.set(slot, field_val);
                     }
                 }
             }
@@ -966,19 +1007,19 @@ fn match_field_patterns(
                 let tag_key = format!("{}/__tag", field_name);
                 if let Some(tag_val) = fields.get(&tag_key) {
                     if tag_val != expected {
-                        return None;
+                        return false;
                     }
                 } else {
-                    let field_val = fields.get(field_name)?;
-                    if field_val != expected {
-                        return None;
+                    match fields.get(field_name) {
+                        Some(field_val) if field_val == expected => {}
+                        _ => return false,
                     }
                 }
             }
             Pattern::Predicate { op, value } => {
-                let field_val = fields.get(field_name)?;
-                if !op.evaluate(field_val, value) {
-                    return None;
+                match fields.get(field_name) {
+                    Some(field_val) if op.evaluate(field_val, value) => {}
+                    _ => return false,
                 }
             }
             Pattern::EnumMatch {
@@ -987,33 +1028,37 @@ fn match_field_patterns(
             } => {
                 // Match enum tag
                 let tag_key = format!("{}/__tag", field_name);
-                let tag_val = fields.get(&tag_key)?;
+                let tag_val = match fields.get(&tag_key) {
+                    Some(v) => v,
+                    None => return false,
+                };
 
                 match variant.as_ref() {
                     Pattern::Variable(var) => {
-                        if let Some(bound_value) = existing_bindings
-                            .get(var)
-                            .or_else(|| new_bindings.get(var))
-                        {
-                            if bound_value != tag_val {
-                                return None;
+                        let slot = match slots.slot(var) {
+                            Some(s) => s,
+                            None => return false,
+                        };
+                        if let Some(existing) = tuple.get(slot) {
+                            if existing != tag_val {
+                                return false;
                             }
                         } else {
-                            new_bindings.insert(var.clone(), tag_val.clone());
+                            tuple.set(slot, tag_val.clone());
                         }
                     }
                     Pattern::Constant(expected) => {
                         if tag_val != expected {
-                            return None;
+                            return false;
                         }
                     }
-                    _ => return None,
+                    _ => return false,
                 }
 
                 // Get the variant name to construct field keys
                 let variant_name = match tag_val {
                     Value::String(s) => s.as_str(),
-                    _ => return None,
+                    _ => return false,
                 };
 
                 // Match variant field patterns
@@ -1021,34 +1066,37 @@ fn match_field_patterns(
                     let vf_key = format!("{}.{}/{}", field_name, variant_name, vf_name);
                     match vf_pattern {
                         Pattern::Variable(var) => {
-                            if let Some(bound_value) = existing_bindings
-                                .get(var)
-                                .or_else(|| new_bindings.get(var))
-                            {
-                                let vf_val = fields.get(&vf_key)?;
-                                if bound_value != vf_val {
-                                    return None;
+                            let slot = match slots.slot(var) {
+                                Some(s) => s,
+                                None => return false,
+                            };
+                            let vf_val = match fields.get(&vf_key) {
+                                Some(v) => v,
+                                None => return false,
+                            };
+                            if let Some(existing) = tuple.get(slot) {
+                                if existing != vf_val {
+                                    return false;
                                 }
                             } else {
-                                let vf_val = fields.get(&vf_key)?;
-                                new_bindings.insert(var.clone(), vf_val.clone());
+                                tuple.set(slot, vf_val.clone());
                             }
                         }
                         Pattern::Constant(expected) => {
-                            let vf_val = fields.get(&vf_key)?;
-                            if vf_val != expected {
-                                return None;
+                            match fields.get(&vf_key) {
+                                Some(vf_val) if vf_val == expected => {}
+                                _ => return false,
                             }
                         }
                         Pattern::Predicate { op, value } => {
-                            let vf_val = fields.get(&vf_key)?;
-                            if !op.evaluate(vf_val, value) {
-                                return None;
+                            match fields.get(&vf_key) {
+                                Some(vf_val) if op.evaluate(vf_val, value) => {}
+                                _ => return false,
                             }
                         }
                         Pattern::EnumMatch { .. } => {
                             // Nested enum matching not supported
-                            return None;
+                            return false;
                         }
                     }
                 }
@@ -1056,7 +1104,7 @@ fn match_field_patterns(
         }
     }
 
-    Some(new_bindings)
+    true
 }
 
 // ---------------------------------------------------------------------------

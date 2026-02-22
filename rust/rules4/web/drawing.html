@@ -568,6 +568,10 @@ const jsEditor = new EditorView({
   parent: document.getElementById('editor-js'),
 });
 
+function getAnimCode() {
+  return animEditor.state.doc.toString();
+}
+
 function getAllCode() {
   return animEditor.state.doc.toString() + '\n' +
          metaEditor.state.doc.toString();
@@ -619,7 +623,9 @@ async function run() {
     const newR4 = await freshR4();
     if (thisGen !== runGeneration) return;
 
-    const code = getAllCode();
+    // Only include meta code when meta is applied,
+    // otherwise meta rules output unevaluated if-expressions to @dom
+    const code = metaApplied ? getAllCode() : getAnimCode();
     newR4.eval(newR4.loadProgram(code));
     if (thisGen !== runGeneration) return;
 
@@ -630,7 +636,7 @@ async function run() {
     // Restore frame
     r4.eval(r4.call(r4.sym("handle_event"), [r4.sym("set_frame"), r4.num(currentFrame)]));
 
-    // Re-apply meta if it was on
+    // Trigger apply_meta so the meta rules run their setup
     if (metaApplied) {
       r4.eval(r4.call(r4.sym("handle_event"), [r4.sym("apply_meta"), r4.num(0)]));
     }
@@ -723,12 +729,8 @@ applyMetaBtn.addEventListener('click', () => {
   metaApplied = !metaApplied;
   applyMetaBtn.textContent = metaApplied ? 'Remove Meta' : 'Apply Meta';
   applyMetaBtn.classList.toggle('active', metaApplied);
-
-  if (r4) {
-    const eventName = metaApplied ? "apply_meta" : "remove_meta";
-    r4.eval(r4.call(r4.sym("handle_event"), [r4.sym(eventName), r4.num(0)]));
-    doRender();
-  }
+  // Full reload: meta changes which code is loaded
+  scheduleRun();
 });
 
 // ── Init ──
