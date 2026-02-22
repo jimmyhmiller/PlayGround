@@ -148,6 +148,7 @@ pub struct Query {
     pub find: Vec<String>,
     pub where_clauses: Vec<WhereClause>,
     pub as_of: Option<TxId>,
+    pub as_of_time: Option<u64>,
 }
 
 impl Query {
@@ -196,11 +197,13 @@ impl Query {
             .collect::<std::result::Result<Vec<_>, String>>()?;
 
         let as_of = v.get("as_of").and_then(|a| a.as_u64());
+        let as_of_time = v.get("as_of_time").and_then(|a| a.as_u64());
 
         Ok(Query {
             find,
             where_clauses,
             as_of,
+            as_of_time,
         })
     }
 }

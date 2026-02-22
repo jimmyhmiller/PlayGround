@@ -2327,3 +2327,144 @@ fn test_retract_entity() {
     let names: Vec<&Value> = result.rows.iter().map(|r| &r[0]).collect();
     assert!(names.contains(&&Value::String("Alice".to_string())));
 }
+
+// --- Wall-clock timestamp tests ---
+
+#[test]
+fn test_transact_returns_timestamp() {
+    let (db, _dir) = test_db();
+    db.define_type(user_type()).unwrap();
+
+    let mut data = HashMap::new();
+    data.insert("name".to_string(), Value::String("Alice".to_string()));
+    data.insert("age".to_string(), Value::I64(30));
+    data.insert("email".to_string(), Value::String("alice@example.com".to_string()));
+
+    let before = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+
+    let result = db
+        .transact(vec![TxOp::Assert {
+            entity_type: "User".to_string(),
+            entity: None,
+            data,
+        }])
+        .unwrap();
+
+    let after = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+
+    assert!(result.timestamp_ms >= before, "timestamp_ms {} should be >= before {}", result.timestamp_ms, before);
+    assert!(result.timestamp_ms <= after, "timestamp_ms {} should be <= after {}", result.timestamp_ms, after);
+}
+
+#[test]
+fn test_as_of_time_between_transactions() {
+    let (db, _dir) = test_db();
+    db.define_type(user_type()).unwrap();
+
+    // Insert Alice
+    let mut data = HashMap::new();
+    data.insert("name".to_string(), Value::String("Alice".to_string()));
+    data.insert("age".to_string(), Value::I64(30));
+    data.insert("email".to_string(), Value::String("alice@example.com".to_string()));
+    let result1 = db
+        .transact(vec![TxOp::Assert {
+            entity_type: "User".to_string(),
+            entity: None,
+            data,
+        }])
+        .unwrap();
+    let _ts1 = result1.timestamp_ms;
+
+    // Small delay to ensure distinct timestamps
+    std::thread::sleep(std::time::Duration::from_millis(10));
+
+    // Get a midpoint timestamp
+    let midpoint = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+
+    std::thread::sleep(std::time::Duration::from_millis(10));
+
+    // Insert Bob
+    let mut data = HashMap::new();
+    data.insert("name".to_string(), Value::String("Bob".to_string()));
+    data.insert("age".to_string(), Value::I64(25));
+    data.insert("email".to_string(), Value::String("bob@example.com".to_string()));
+    let result2 = db
+        .transact(vec![TxOp::Assert {
+            entity_type: "User".to_string(),
+            entity: None,
+            data,
+        }])
+        .unwrap();
+    let _ts2 = result2.timestamp_ms;
+
+    // Query as_of_time at midpoint — should only see Alice
+    let query_json = serde_json::json!({
+        "find": ["?name"],
+        "where": [
+            {"bind": "?u", "type": "User", "name": "?name"}
+        ],
+        "as_of_time": midpoint
+    });
+    let query = Query::from_json(&query_json).unwrap();
+    let result = db.query(&query).unwrap();
+    assert_eq!(result.rows.len(), 1);
+    assert_eq!(result.rows[0][0], Value::String("Alice".to_string()));
+
+    // Query latest — should see both
+    let query_json = serde_json::json!({
+        "find": ["?name"],
+        "where": [
+            {"bind": "?u", "type": "User", "name": "?name"}
+        ]
+    });
+    let query = Query::from_json(&query_json).unwrap();
+    let result = db.query(&query).unwrap();
+    assert_eq!(result.rows.len(), 2);
+}
+
+#[test]
+fn test_as_of_time_before_all_transactions() {
+    let (db, _dir) = test_db();
+    db.define_type(user_type()).unwrap();
+
+    // Capture time before any data transactions
+    let before_all = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    // Subtract 1000ms to be safely before the define_type tx
+    let before_all = before_all.saturating_sub(1000);
+
+    // Insert Alice
+    let mut data = HashMap::new();
+    data.insert("name".to_string(), Value::String("Alice".to_string()));
+    data.insert("age".to_string(), Value::I64(30));
+    data.insert("email".to_string(), Value::String("alice@example.com".to_string()));
+    db.transact(vec![TxOp::Assert {
+        entity_type: "User".to_string(),
+        entity: None,
+        data,
+    }])
+    .unwrap();
+
+    // Query as_of_time before everything — should return no data
+    let query_json = serde_json::json!({
+        "find": ["?name"],
+        "where": [
+            {"bind": "?u", "type": "User", "name": "?name"}
+        ],
+        "as_of_time": before_all
+    });
+    let query = Query::from_json(&query_json).unwrap();
+    let result = db.query(&query).unwrap();
+    assert_eq!(result.rows.len(), 0, "should find no data before all transactions");
+}

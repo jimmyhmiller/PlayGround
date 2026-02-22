@@ -1,5 +1,6 @@
 use std::any::Any;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use parking_lot::RwLock;
 
@@ -10,7 +11,7 @@ use crate::index;
 use crate::query::executor::{self, QueryResult};
 use crate::query::Query;
 use crate::schema::{EntityTypeDef, EnumTypeDef, FieldDef, FieldType, SchemaRegistry};
-use crate::storage::{StorageBackend, StorageError};
+use crate::storage::{StorageBackend, StorageError, TxnOps};
 use crate::tx::{self, TxOp};
 
 const TX_COUNTER_KEY: &str = "tx_counter";
@@ -145,6 +146,7 @@ impl Database {
 
         let json =
             serde_json::to_string(&enum_def).map_err(|e| DbError::Schema(e.to_string()))?;
+        let timestamp_ms = now_millis();
 
         let result = self
             .storage
@@ -176,6 +178,9 @@ impl Database {
                 for (key, value) in index::encode_datom(&datom) {
                     txn.put(key, value)?;
                 }
+
+                // Store wall-clock timestamp
+                store_tx_timestamp(txn, tx_id, timestamp_ms)?;
 
                 Ok(Box::new(tx_id) as Box<dyn Any + Send>)
             }))?;
@@ -241,6 +246,7 @@ impl Database {
 
         let json =
             serde_json::to_string(&type_def).map_err(|e| DbError::Schema(e.to_string()))?;
+        let timestamp_ms = now_millis();
 
         let result = self
             .storage
@@ -273,6 +279,9 @@ impl Database {
                     txn.put(key, value)?;
                 }
 
+                // Store wall-clock timestamp
+                store_tx_timestamp(txn, tx_id, timestamp_ms)?;
+
                 Ok(Box::new(tx_id) as Box<dyn Any + Send>)
             }))?;
 
@@ -285,6 +294,7 @@ impl Database {
     /// Execute a transaction.
     pub fn transact(&self, ops: Vec<TxOp>) -> Result<tx::TransactionResult> {
         let schema = self.schema.read().clone();
+        let timestamp_ms = now_millis();
 
         let result = self
             .storage
@@ -305,12 +315,16 @@ impl Database {
                 };
 
                 // Run transaction logic
-                let tx_result =
+                let mut tx_result =
                     tx::process_transaction(txn, &schema, tx_id, &mut entity_counter, ops)
                         .map_err(|e| StorageError::Backend(e.to_string()))?;
 
                 // Persist updated entity counter
                 txn.put(ec_key, encode_u64(entity_counter))?;
+
+                // Store wall-clock timestamp
+                store_tx_timestamp(txn, tx_id, timestamp_ms)?;
+                tx_result.timestamp_ms = timestamp_ms;
 
                 Ok(Box::new(tx_result) as Box<dyn Any + Send>)
             }))?;
@@ -318,10 +332,53 @@ impl Database {
         Ok(*result.downcast::<tx::TransactionResult>().expect("wrong type"))
     }
 
+    /// Resolve a wall-clock timestamp to the last tx_id at or before that time.
+    pub fn resolve_tx_for_time(&self, target_ms: u64) -> Result<Option<TxId>> {
+        let result = self
+            .storage
+            .execute_read(Box::new(move |snap| {
+                let prefix = index::meta_key("tx_ts:");
+                let end = index::prefix_end(&prefix);
+                let entries = snap.scan(&prefix, &end)?;
+
+                let mut best: Option<TxId> = None;
+                for (key, value) in &entries {
+                    if value.len() != 8 {
+                        continue;
+                    }
+                    let ts = BigEndian::read_u64(value);
+                    if ts <= target_ms {
+                        // Extract tx_id from the key: meta key is "tx_ts:{20-digit tx_id}"
+                        let key_str = String::from_utf8_lossy(key);
+                        if let Some(tx_part) = key_str.rsplit("tx_ts:").next() {
+                            if let Ok(tx_id) = tx_part.parse::<u64>() {
+                                best = Some(tx_id);
+                            }
+                        }
+                    }
+                }
+
+                Ok(Box::new(best) as Box<dyn Any + Send>)
+            }))?;
+
+        Ok(*result.downcast::<Option<TxId>>().expect("wrong type"))
+    }
+
     /// Execute a query.
     pub fn query(&self, query: &Query) -> Result<QueryResult> {
         let schema = self.schema.read().clone();
-        let query = query.clone();
+        let mut query = query.clone();
+
+        // Convert as_of_time to as_of if needed
+        if query.as_of.is_none() {
+            if let Some(target_ms) = query.as_of_time {
+                match self.resolve_tx_for_time(target_ms)? {
+                    Some(tx_id) => query.as_of = Some(tx_id),
+                    // Time is before all transactions — use tx 0 so nothing matches
+                    None => query.as_of = Some(0),
+                }
+            }
+        }
 
         let result = self
             .storage
@@ -440,6 +497,22 @@ fn encode_u64(val: u64) -> Vec<u8> {
     let mut buf = vec![0u8; 8];
     BigEndian::write_u64(&mut buf, val);
     buf
+}
+
+fn now_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock before unix epoch")
+        .as_millis() as u64
+}
+
+fn tx_timestamp_key(tx_id: TxId) -> Vec<u8> {
+    index::meta_key(&format!("tx_ts:{:020}", tx_id))
+}
+
+/// Store tx_id -> timestamp mapping as metadata.
+fn store_tx_timestamp(txn: &dyn TxnOps, tx_id: TxId, ts: u64) -> std::result::Result<(), StorageError> {
+    txn.put(tx_timestamp_key(tx_id), encode_u64(ts))
 }
 
 /// Resolve the current value for each attribute from a full history of datoms.

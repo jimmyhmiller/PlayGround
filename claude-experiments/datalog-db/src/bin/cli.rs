@@ -642,13 +642,61 @@ fn parse_find(p: &mut Parser) -> Result<serde_json::Value, String> {
         "where": where_clauses,
     });
 
-    // Check for as_of
-    if p.try_keyword("as_of") {
+    // Check for as_of or as_of_time
+    if p.try_keyword("as_of_time") {
+        p.skip_ws();
+        if p.peek() == Some('"') {
+            let iso = p.read_string_literal()?;
+            let ms = parse_iso8601_to_millis(&iso)
+                .map_err(|e| format!("invalid ISO 8601 timestamp: {}", e))?;
+            query["as_of_time"] = serde_json::json!(ms);
+        } else {
+            let ms = p.read_number()?;
+            query["as_of_time"] = ms;
+        }
+    } else if p.try_keyword("as_of") {
         let tx_id = p.read_number()?;
         query["as_of"] = tx_id;
     }
 
     Ok(query)
+}
+
+/// Parse a subset of ISO 8601: "YYYY-MM-DDTHH:MM:SSZ"
+fn parse_iso8601_to_millis(s: &str) -> Result<u64, String> {
+    let s = s.trim();
+    if s.len() != 20 || !s.ends_with('Z') {
+        return Err(format!("expected format YYYY-MM-DDTHH:MM:SSZ, got '{}'", s));
+    }
+    let b = s.as_bytes();
+    if b[4] != b'-' || b[7] != b'-' || b[10] != b'T' || b[13] != b':' || b[16] != b':' {
+        return Err(format!("expected format YYYY-MM-DDTHH:MM:SSZ, got '{}'", s));
+    }
+
+    let year: i64 = s[0..4].parse().map_err(|_| "invalid year")?;
+    let month: i64 = s[5..7].parse().map_err(|_| "invalid month")?;
+    let day: i64 = s[8..10].parse().map_err(|_| "invalid day")?;
+    let hour: i64 = s[11..13].parse().map_err(|_| "invalid hour")?;
+    let min: i64 = s[14..16].parse().map_err(|_| "invalid minute")?;
+    let sec: i64 = s[17..19].parse().map_err(|_| "invalid second")?;
+
+    if !(1..=12).contains(&month) { return Err("month out of range".into()); }
+    if !(1..=31).contains(&day) { return Err("day out of range".into()); }
+    if !(0..=23).contains(&hour) { return Err("hour out of range".into()); }
+    if !(0..=59).contains(&min) { return Err("minute out of range".into()); }
+    if !(0..=59).contains(&sec) { return Err("second out of range".into()); }
+
+    // Days from civil date to unix epoch (algorithm from Howard Hinnant)
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = y.div_euclid(400);
+    let yoe = y.rem_euclid(400);
+    let m = if month > 2 { month - 3 } else { month + 9 };
+    let doy = (153 * m + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146097 + doe - 719468;
+
+    let total_secs = days * 86400 + hour * 3600 + min * 60 + sec;
+    Ok((total_secs * 1000) as u64)
 }
 
 // --- Response formatting ---
@@ -897,6 +945,8 @@ DSL COMMANDS (REPL):
   retract User #42
   find ?name, ?age where ?u: User {{ name: ?name, age: > 25 }}
   find ?n where ?u: User {{ name: ?n }} as_of 100
+  find ?n where ?u: User {{ name: ?n }} as_of_time 1740192000000
+  find ?n where ?u: User {{ name: ?n }} as_of_time "2025-02-22T02:00:00Z"
   json {{"type": "status"}}
   help
   quit

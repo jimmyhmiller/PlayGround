@@ -185,6 +185,10 @@ echo "════════════════════════�
 echo "  RETRACT ENTITY + TIME TRAVEL"
 echo "═══════════════════════════════════════════"
 
+# Capture timestamp before the retraction
+BEFORE_RETRACT_MS=$(python3 -c "import time; print(int(time.time() * 1000))")
+sleep 1
+
 echo ""
 echo "Soft-deleting Chelsey Dietrich (#$CHELSEY_EID)..."
 cli json "{\"type\":\"transact\",\"ops\":[{\"retract_entity\":\"User\",\"entity\":$CHELSEY_EID}]}"
@@ -196,6 +200,10 @@ cli query 'find ?name, ?city where ?u: User { name: ?name, city: ?city }'
 echo ""
 echo "── Time travel: as_of tx 5 (all 10 users, Chelsey reappears) ──"
 cli query 'find ?name, ?city where ?u: User { name: ?name, city: ?city } as_of 5'
+
+echo ""
+echo "── Wall-clock time travel: as_of_time $BEFORE_RETRACT_MS (all 10 users) ──"
+cli query "find ?name, ?city where ?u: User { name: ?name, city: ?city } as_of_time $BEFORE_RETRACT_MS"
 
 echo ""
 echo "── Chelsey's todos after retraction (should be empty) ──"

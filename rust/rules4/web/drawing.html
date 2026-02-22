@@ -36,19 +36,8 @@
       border: 1px solid #eaeaee;
       border-radius: 12px;
       overflow: hidden;
-      position: relative;
     }
-    #ghost-layer {
-      position: absolute; inset: 0;
-      width: 100%; height: 100%;
-      z-index: 1;
-      pointer-events: none;
-    }
-    #canvas-root {
-      position: absolute; inset: 0;
-      width: 100%; height: 100%;
-      z-index: 2;
-    }
+    #canvas-root { width: 100%; height: 100%; }
 
     /* ── Tab bar ── */
     .tab-bar {
@@ -83,6 +72,7 @@
       overflow: hidden;
     }
     .editor-panel.active { display: flex; flex-direction: column; }
+    .editor-panel > div { flex: 1; overflow: hidden; }
     .cm-editor { height: 100%; overflow: hidden; }
     .cm-editor .cm-scroller { overflow: auto !important; }
     .cm-editor .cm-content {
@@ -132,6 +122,21 @@
     }
     .btn:hover { background: #1976d2; color: white; }
     .btn.active { background: #1976d2; color: white; }
+
+    /* ── Tangle number scrubbing ── */
+    .cm-tangle-number {
+      color: #1976d2;
+      border-bottom: 1.5px dashed rgba(25, 118, 210, 0.5);
+      cursor: col-resize;
+    }
+    .cm-tangle-number:hover {
+      background: rgba(25, 118, 210, 0.1);
+      border-bottom-style: solid;
+    }
+    body.tangle-dragging, body.tangle-dragging * {
+      cursor: col-resize !important;
+      user-select: none !important;
+    }
   </style>
 </head>
 <body>
@@ -145,8 +150,8 @@
     <div class="editor-col">
       <div class="tab-bar">
         <button class="tab active" data-tab="animation">Animation</button>
-        <button class="tab" data-tab="drawing">Drawing</button>
         <button class="tab" data-tab="meta">Meta</button>
+        <button class="tab" data-tab="drawing">Drawing</button>
       </div>
       <div class="editor-wrap">
         <div class="editor-panel active" id="ep-animation"><div id="editor-animation"></div></div>
@@ -156,7 +161,6 @@
       <div class="error" id="error"></div>
     </div>
     <div class="canvas-col">
-      <svg id="ghost-layer" viewBox="0 0 400 300"></svg>
       <div id="canvas-root"></div>
     </div>
   </div>
@@ -174,6 +178,121 @@ import { Rules4 } from './bridge.js';
 import { renderTerm, patch } from './vdom.js';
 
 const { EditorView, basicSetup } = await import('https://esm.sh/codemirror@6.0.1');
+const { ViewPlugin, Decoration } = await import('https://esm.sh/@codemirror/view@6');
+
+// ── Tangle-style number scrubbing ──
+
+function findNumberAt(lineText, col) {
+  const commentIdx = lineText.indexOf('#');
+  const searchEnd = commentIdx >= 0 ? commentIdx : lineText.length;
+  const re = /\b(\d+(\.\d+)?)\b/g;
+  let m;
+  while ((m = re.exec(lineText)) !== null) {
+    if (m.index >= searchEnd) break;
+    if (col >= m.index && col < m.index + m[0].length) {
+      return { text: m[0], start: m.index, end: m.index + m[0].length };
+    }
+  }
+  return null;
+}
+
+const tangleNumberMark = Decoration.mark({ class: "cm-tangle-number" });
+
+function buildNumberDecos(view) {
+  const ranges = [];
+  for (let i = 1; i <= view.state.doc.lines; i++) {
+    const line = view.state.doc.line(i);
+    const commentIdx = line.text.indexOf('#');
+    const searchEnd = commentIdx >= 0 ? commentIdx : line.text.length;
+    const re = /\b(\d+(\.\d+)?)\b/g;
+    let m;
+    while ((m = re.exec(line.text)) !== null) {
+      if (m.index >= searchEnd) break;
+      ranges.push(tangleNumberMark.range(line.from + m.index, line.from + m.index + m[0].length));
+    }
+  }
+  return Decoration.set(ranges, true);
+}
+
+const tangleDecoPlugin = ViewPlugin.fromClass(class {
+  constructor(view) { this.decorations = buildNumberDecos(view); }
+  update(update) {
+    if (update.docChanged || update.viewportChanged) {
+      this.decorations = buildNumberDecos(update.view);
+    }
+  }
+}, { decorations: v => v.decorations });
+
+let isScrubbing = false;
+let dragState = null;
+
+function onDragMove(e) {
+  if (!dragState) return;
+  const dx = e.clientX - dragState.startX;
+  const steps = Math.round(dx / 5);
+  let newValue = dragState.startValue + steps * dragState.step;
+
+  let newText;
+  if (dragState.precision > 0) {
+    newText = newValue.toFixed(dragState.precision);
+  } else {
+    newText = String(Math.round(newValue));
+  }
+
+  if (newText === dragState.lastText) return;
+
+  dragState.view.dispatch({
+    changes: {
+      from: dragState.from,
+      to: dragState.from + dragState.lastText.length,
+      insert: newText,
+    },
+  });
+  dragState.lastText = newText;
+}
+
+function onDragEnd() {
+  isScrubbing = false;
+  dragState = null;
+  document.body.classList.remove('tangle-dragging');
+  document.removeEventListener('mousemove', onDragMove);
+  document.removeEventListener('mouseup', onDragEnd);
+}
+
+const tangleDragHandlers = EditorView.domEventHandlers({
+  mousedown(event, view) {
+    const pos = view.posAtCoords({ x: event.clientX, y: event.clientY });
+    if (pos === null) return false;
+
+    const line = view.state.doc.lineAt(pos);
+    const col = pos - line.from;
+    const num = findNumberAt(line.text, col);
+    if (!num) return false;
+
+    event.preventDefault();
+    isScrubbing = true;
+    document.body.classList.add('tangle-dragging');
+
+    const isFloat = num.text.includes('.');
+    dragState = {
+      view,
+      startX: event.clientX,
+      startValue: parseFloat(num.text),
+      step: isFloat ? 0.1 : 1,
+      precision: isFloat ? (num.text.split('.')[1] || '').length : 0,
+      from: line.from + num.start,
+      lastText: num.text,
+    };
+
+    document.addEventListener('mousemove', onDragMove);
+    document.addEventListener('mouseup', onDragEnd);
+    return true;
+  },
+});
+
+function tangleExtension() {
+  return [tangleDecoPlugin, tangleDragHandlers];
+}
 
 // ── Default code for each tab ──
 
@@ -194,34 +313,19 @@ fn ball_y(0) = 30
 fn ball_y(?f) = ball_y(?f - 1) + ball_vy(?f)
 
 # State
-fn init() = rule(current_frame, 0)
+fn init() = {
+  rule(current_frame, 0)
+  rule(show_ghosts, false)
+}
 fn handle_event(set_frame, ?f) = rule(current_frame, ?f)
 
 init()`;
-
-const DRAW_CODE = `\
-# === Drawing ===
-# Renders the current ball position via @dom
-
-fn draw(?f) = circle(ball_x(?f), ball_y(?f), 15)
-
-fn render() = @dom element("svg",
-  [attr("viewBox", "0 0 400 300"),
-   attr("width", "100%"), attr("height", "100%")],
-  [element("circle",
-    [attr("cx", ball_x(current_frame)),
-     attr("cy", ball_y(current_frame)),
-     attr("r", 15),
-     attr("fill", "none"),
-     attr("stroke", "#222"),
-     attr("stroke-width", "2.5")], [])])`;
 
 const META_CODE = `\
 # === Meta ===
 # Click "Apply Meta" to run this rule.
 # It observes every draw() rewrite via @meta
-# and emits the results to @draw, producing
-# the ghost trail of all frame positions.
+# and stores ghost positions as dynamic rules.
 
 rule trace_draws : @meta -> @draw {
   result(?step, draw(?f), ?shape) =>
@@ -231,11 +335,84 @@ rule trace_draws : @meta -> @draw {
 # Drive all frames so draw() is called for each
 fn run_frames(?f) =
   if ?f >= 40 then 0
-  else { draw(?f) run_frames(?f + 1) }`;
+  else { draw(?f) run_frames(?f + 1) }
+
+# Store ghost data as dynamic rules
+fn apply_ghosts(?f) =
+  if ?f >= 40 then 0
+  else {
+    rule(ghost(?f), draw(?f))
+    apply_ghosts(?f + 1)
+  }
+
+fn handle_event(apply_meta, ?ev) = {
+  apply_ghosts(0)
+  rule(show_ghosts, true)
+}
+
+fn handle_event(remove_meta, ?ev) =
+  rule(show_ghosts, false)`;
+
+const DRAW_CODE = `\
+# === Drawing ===
+# Renders the ball and ghost trail via @dom
+
+fn draw(?f) = circle(ball_x(?f), ball_y(?f), 15)
+
+# Destructure circle terms
+fn circle_cx(circle(?cx, ?cy, ?r)) = ?cx
+fn circle_cy(circle(?cx, ?cy, ?r)) = ?cy
+fn circle_r(circle(?cx, ?cy, ?r)) = ?r
+
+# Ghost element styling
+fn ghost_opacity(?f) =
+  if ?f < current_frame then "0.45" else "0.25"
+
+fn ghost_stroke(?f) =
+  if ?f < current_frame then "#555" else "#999"
+
+fn ghost_sw(?f) =
+  if ?f < current_frame then "1.2" else "0.9"
+
+fn ghost_element(?f) =
+  element("circle",
+    [attr("cx", circle_cx(ghost(?f))),
+     attr("cy", circle_cy(ghost(?f))),
+     attr("r", circle_r(ghost(?f))),
+     attr("fill", "none"),
+     attr("stroke", ghost_stroke(?f)),
+     attr("stroke-width", ghost_sw(?f)),
+     attr("opacity", ghost_opacity(?f))], [])
+
+# Build children list: all ghosts + ball on top
+fn ghost_and_ball(40) = cons(ball_element(), nil)
+fn ghost_and_ball(?f) =
+  if ?f == current_frame
+  then ghost_and_ball(?f + 1)
+  else cons(ghost_element(?f),
+            ghost_and_ball(?f + 1))
+
+fn ball_element() =
+  element("circle",
+    [attr("cx", ball_x(current_frame)),
+     attr("cy", ball_y(current_frame)),
+     attr("r", 15),
+     attr("fill", "none"),
+     attr("stroke", "#222"),
+     attr("stroke-width", "2.5")], [])
+
+fn all_children(false) =
+  cons(ball_element(), nil)
+fn all_children(true) =
+  ghost_and_ball(0)
+
+fn render() = @dom element("svg",
+  [attr("viewBox", "0 0 400 300"),
+   attr("width", "100%"), attr("height", "100%")],
+  all_children(show_ghosts))`;
 
 // ── Elements ──
 
-const SVG_NS = "http://www.w3.org/2000/svg";
 const statusEl    = document.getElementById('status');
 const errorEl     = document.getElementById('error');
 const slider      = document.getElementById('slider');
@@ -243,7 +420,6 @@ const frameLabel  = document.getElementById('frame-label');
 const playPauseBtn = document.getElementById('play-pause');
 const applyMetaBtn = document.getElementById('apply-meta');
 const canvasRoot  = document.getElementById('canvas-root');
-const ghostLayer  = document.getElementById('ghost-layer');
 
 // ── Tabbed editors ──
 
@@ -263,6 +439,7 @@ function makeEditor(parentId, doc) {
     doc,
     extensions: [
       basicSetup,
+      tangleExtension(),
       EditorView.updateListener.of(u => { if (u.docChanged) scheduleRun(); }),
     ],
     parent: document.getElementById(parentId),
@@ -303,7 +480,6 @@ let currentTermId = null;
 let currentFrame = 0;
 let playing = true;
 let metaApplied = false;
-let ghostShapes = [];   // captured by meta rule: [{frame, cx, cy, r}]
 let tickCounter = 0;
 let raf = null;
 let runGeneration = 0;
@@ -313,10 +489,7 @@ let runGeneration = 0;
 let runTimer = null;
 function scheduleRun() {
   clearTimeout(runTimer);
-  runTimer = setTimeout(() => {
-    run();
-    if (metaApplied) runMeta();
-  }, 300);
+  runTimer = setTimeout(() => run(), isScrubbing ? 0 : 300);
 }
 
 // ── Run: reload program ──
@@ -339,6 +512,11 @@ async function run() {
 
     // Restore frame
     r4.eval(r4.call(r4.sym("handle_event"), [r4.sym("set_frame"), r4.num(currentFrame)]));
+
+    // Re-apply meta if it was on
+    if (metaApplied) {
+      r4.eval(r4.call(r4.sym("handle_event"), [r4.sym("apply_meta"), r4.num(0)]));
+    }
 
     doRender();
     errorEl.classList.remove('visible');
@@ -375,84 +553,6 @@ function doRender() {
   }
 }
 
-// ── Ghost layer: render shapes captured by meta rule ──
-
-function renderGhosts() {
-  while (ghostLayer.firstChild) ghostLayer.removeChild(ghostLayer.firstChild);
-  if (ghostShapes.length === 0) return;
-
-  for (const s of ghostShapes) {
-    if (s.frame === currentFrame) continue; // @dom draws the current one
-    const el = document.createElementNS(SVG_NS, 'circle');
-    el.setAttribute('cx', s.cx);
-    el.setAttribute('cy', s.cy);
-    el.setAttribute('r', s.r);
-    el.setAttribute('fill', 'none');
-    if (s.frame < currentFrame) {
-      el.setAttribute('stroke', '#555');
-      el.setAttribute('stroke-width', '1.2');
-      el.setAttribute('opacity', '0.45');
-    } else {
-      el.setAttribute('stroke', '#999');
-      el.setAttribute('stroke-width', '0.9');
-      el.setAttribute('opacity', '0.25');
-    }
-    ghostLayer.appendChild(el);
-  }
-}
-
-// ── Run meta: execute program with meta rule, collect @draw ──
-
-async function runMeta() {
-  try {
-    const metaR4 = await freshR4();
-    const code = getAllCode();
-    metaR4.eval(metaR4.loadProgram(code));
-
-    // Call run_frames(0) to trigger draw() for every frame
-    metaR4.eval(metaR4.call(metaR4.sym("run_frames"), [metaR4.num(0)]));
-
-    // Collect captured frame() terms from @draw scope
-    const pending = metaR4.scopeTakePending("draw");
-    ghostShapes = [];
-
-    for (const termId of pending) {
-      const parsed = parseFrameTerm(metaR4, termId);
-      if (parsed) ghostShapes.push(parsed);
-    }
-
-    ghostShapes.sort((a, b) => a.frame - b.frame);
-    renderGhosts();
-  } catch (e) {
-    console.error('Meta run failed:', e);
-  }
-}
-
-function parseFrameTerm(r4, termId) {
-  if (r4.termTag(termId) !== 2) return null;
-  const head = r4.termCallHead(termId);
-  if (r4.termTag(head) !== 1 || r4.termSymName(head) !== 'frame') return null;
-  if (r4.termCallArity(termId) < 2) return null;
-
-  const frameArg = r4.termCallArg(termId, 0);
-  const frame = r4.termTag(frameArg) === 0 ? r4.termNum(frameArg)
-              : r4.termTag(frameArg) === 3 ? r4.termFloat(frameArg) : 0;
-
-  const shapeTerm = r4.termCallArg(termId, 1);
-  if (r4.termTag(shapeTerm) !== 2) return null;
-  const sHead = r4.termCallHead(shapeTerm);
-  if (r4.termTag(sHead) !== 1 || r4.termSymName(sHead) !== 'circle') return null;
-  if (r4.termCallArity(shapeTerm) < 3) return null;
-
-  const num = (i) => {
-    const id = r4.termCallArg(shapeTerm, i);
-    const t = r4.termTag(id);
-    return t === 0 ? r4.termNum(id) : t === 3 ? r4.termFloat(id) : 0;
-  };
-
-  return { frame, cx: num(0), cy: num(1), r: num(2) };
-}
-
 // ── Animation loop ──
 
 function animLoop() {
@@ -462,7 +562,6 @@ function animLoop() {
       currentFrame = (currentFrame + 1) % 40;
       r4.eval(r4.call(r4.sym("handle_event"), [r4.sym("set_frame"), r4.num(currentFrame)]));
       doRender();
-      if (metaApplied) renderGhosts();
       slider.value = currentFrame;
       frameLabel.textContent = `frame ${currentFrame}`;
     }
@@ -483,20 +582,18 @@ slider.addEventListener('input', () => {
   currentFrame = parseInt(slider.value);
   r4.eval(r4.call(r4.sym("handle_event"), [r4.sym("set_frame"), r4.num(currentFrame)]));
   doRender();
-  if (metaApplied) renderGhosts();
   frameLabel.textContent = `frame ${currentFrame}`;
 });
 
-applyMetaBtn.addEventListener('click', async () => {
+applyMetaBtn.addEventListener('click', () => {
   metaApplied = !metaApplied;
   applyMetaBtn.textContent = metaApplied ? 'Remove Meta' : 'Apply Meta';
   applyMetaBtn.classList.toggle('active', metaApplied);
 
-  if (metaApplied) {
-    await runMeta();
-  } else {
-    ghostShapes = [];
-    while (ghostLayer.firstChild) ghostLayer.removeChild(ghostLayer.firstChild);
+  if (r4) {
+    const eventSym = metaApplied ? r4.sym("apply_meta") : r4.sym("remove_meta");
+    r4.eval(r4.call(r4.sym("handle_event"), [eventSym, r4.num(0)]));
+    doRender();
   }
 });
 

@@ -167,7 +167,8 @@ fn handle_transact(db: &Database, payload: &serde_json::Value) -> serde_json::Va
             "data": {
                 "tx_id": result.tx_id,
                 "entity_ids": result.entity_ids,
-                "datom_count": result.datom_count
+                "datom_count": result.datom_count,
+                "timestamp_ms": result.timestamp_ms
             }
         }),
         Err(e) => serde_json::json!({

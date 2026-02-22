@@ -181,6 +181,7 @@ pub struct TransactionResult {
     pub tx_id: TxId,
     pub entity_ids: Vec<EntityId>,
     pub datom_count: usize,
+    pub timestamp_ms: u64,
 }
 
 /// Process a transaction: validate against schema, generate datoms, write to storage.
@@ -426,6 +427,7 @@ pub fn process_transaction(
         tx_id,
         entity_ids,
         datom_count,
+        timestamp_ms: 0, // Filled in by Database::transact()
     })
 }
 
