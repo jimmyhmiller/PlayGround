@@ -21,6 +21,10 @@ Real world programs are orders of magnitude harder to understand than fibonacci.
 
 When trying to understand a code base, my goal is not to understand the code, it is to understand the program. What problem is this program trying to solve? What data does it work with? How does it run? What other systems is it talking to? Where does it allocate? How many events does it process? How do various queues and caches grow?
 
+## Out of the Box Dynamic Visualizations
+
+
+
 ### Advice on Custom Visualizations
 
 The number one advice I'd give if you want to understand a programs behavior is to start by thinking about time. Programs unfold in time. This is the fundamental aspect of the dynamic behavior of a system that isn't captured in its static representation. (My [cohost](https://feelingof.com/episodes/) might say we just need [better programming systems](https://ivanish.ca/hest/podcast/)). There are of course times where you will want to ignore time. But if you don't capture it at the beginning, you will miss something crucial about your program, the way in which it changes and grows is incredibly valuable.

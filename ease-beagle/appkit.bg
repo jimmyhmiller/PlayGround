@@ -515,6 +515,13 @@ fn set-frame(view, x, y, w, h) {
         ffi/Type.Void)
 }
 
+fn set-frame-size(view, w, h) {
+    let sel = sel_registerName("setFrameSize:")
+    ffi/call-variadic(msgSend, [view.ptr, sel, w, h],
+        [ffi/Type.Pointer, ffi/Type.Pointer, ffi/Type.F64, ffi/Type.F64],
+        ffi/Type.Void)
+}
+
 fn set-frame-raw(view-ptr, x, y, w, h) {
     let sel = sel_registerName("setFrame:")
     ffi/call-variadic(msgSend, [view-ptr, sel, x, y, w, h],
@@ -678,11 +685,38 @@ fn event-keycode(event) {
     msg0(event, "keyCode", ffi/Type.U16)
 }
 
+// nextEventMatchingMask: for modal drag tracking loops inside mouseDown:
+// mask bits: LeftMouseDragged = 1<<6 = 64, LeftMouseUp = 1<<2 = 4
+fn next-event(view-ptr, mask) {
+    let window = msg0(view-ptr, "window", ffi/Type.Pointer)
+    msg4(window, "nextEventMatchingMask:untilDate:inMode:dequeue:",
+        mask, ffi/Type.U64,
+        msg0(objc_getClass("NSDate"), "distantFuture", ffi/Type.Pointer), ffi/Type.Pointer,
+        nsstring("kCFRunLoopDefaultMode"), ffi/Type.Pointer,
+        1, ffi/Type.U8,
+        ffi/Type.Pointer)
+}
+
 fn event-modifier-flags(event) {
     msg0(event, "modifierFlags", ffi/Type.U64)
 }
 
 // ─── Custom View Subclasses ─────────────────────────────────────────
+
+fn custom-mousedown-view(name, x, y, w, h, on-mouse-down) {
+    let NSView = objc_getClass("NSView")
+    let cls = objc_allocateClassPair(NSView, name, 0)
+
+    let down-cb = ffi/create-callback(on-mouse-down,
+        [ffi/Type.Pointer, ffi/Type.Pointer, ffi/Type.Pointer], ffi/Type.Void)
+    class_addMethod(cls, sel_registerName("mouseDown:"), down-cb, "v@:@")
+
+    objc_registerClassPair(cls)
+
+    let view = msg-initWithFrame(msg0(cls, "alloc", ffi/Type.Pointer), x, y, w, h)
+    msg1(view, "setWantsLayer:", 1, ffi/Type.U8, ffi/Type.Void)
+    View { ptr: view }
+}
 
 fn custom-tracking-view(name, x, y, w, h, on-mouse-down, on-mouse-dragged, on-mouse-up) {
     let NSView = objc_getClass("NSView")

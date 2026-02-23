@@ -17,7 +17,7 @@ let PRESET-COLORS = [
 
 let POP-W = 280.0
 let POP-H = 400.0
-let PAD = 16.0
+let PAD = 20.0
 let SECS-PER-DAY = 86400.0
 
 // ─── Hex Color Parsing ──────────────────────────────────────────────
@@ -308,7 +308,7 @@ fn compute-main-height() {
 
     let mut h = PAD
     // Period picker pill
-    h = h + 30.0
+    h = h + 20.0
     h = h + 16.0
 
     // Visualization + divider
@@ -414,7 +414,7 @@ fn rebuild-ui() {
             compute-main-height()
         }
         ak/set-popover-content-size(pop, POP-W, actual-h)
-        ak/set-frame(pop.content-view, 0.0, 0.0, POP-W, actual-h)
+        ak/set-frame-size(pop.content-view, POP-W, actual-h)
         let view = pop.content-view
         ak/remove-all-subviews(view)
 
@@ -453,18 +453,18 @@ fn build-main-view(view, handler, n, pop-h) {
     // ─── Period Picker (pill background, 4 buttons) ──────
     let period-labels = ["Day", "Week", "Month", "All"]
     let current-period = deref(selected-period)
-    let btn-widths = [42.0, 50.0, 56.0, 38.0]
+    let btn-widths = [29.0, 44.0, 43.0, 29.0]
     let btn-gap = 2.0
-    let pill-pad = 4.0
-    let btn-h = 22.0
-    let total-btns-w = 42.0 + 50.0 + 56.0 + 38.0 + (3.0 * btn-gap)
+    let pill-pad = 0.0
+    let btn-h = 20.0
+    let total-btns-w = 29.0 + 44.0 + 43.0 + 29.0 + (3.0 * btn-gap)
     let pill-w = total-btns-w + (pill-pad * 2.0)
     let pill-h = btn-h + (pill-pad * 2.0)
     let pill-x = (POP-W - pill-w) / 2.0
 
     y = y - pill-h
     let pill-bg = ak/colored-view(pill-x, y, pill-w, pill-h, 0.5, 0.5, 0.5, 0.1)
-    ak/set-corner-radius(pill-bg, 6.0)
+    ak/set-corner-radius(pill-bg, 5.0)
     ak/add-view(view, pill-bg)
 
     let mut bx = pill-x + pill-pad
@@ -667,101 +667,104 @@ fn build-goal-row(view, handler, goal, idx, y, n) {
         let cap-row-x = row-x
         let cap-row-w = row-w
 
-        let rv = ak/custom-tracking-view(
+        let rv = ak/custom-mousedown-view(
             "RO" ++ to-string(dc), row-x, row-y, row-w, row-h,
             fn(self_, sel, event) {
-                // mouseDown: start drag, record origin
                 let loc = ak/event-location(event)
-                reset!(drag-start-y, get(loc, 1))
+                let start-y = get(loc, 1)
                 reset!(is-dragging, true)
                 reset!(reorder-drag-from, reorder-idx)
                 reset!(reorder-current-slot, reorder-idx)
                 ak/set-layer-bg(self_, ak/color(goal-r, goal-g, goal-b, 0.2))
-            },
-            fn(self_, sel, event) {
-                // mouseDragged: move view + live reorder other rows
-                let loc = ak/event-location(event)
-                let dy = get(loc, 1) - deref(drag-start-y)
-                ak/set-frame-raw(self_, cap-row-x, cap-row-y + dy, cap-row-w, cap-row-h)
 
-                // Calculate target slot (swap at midpoint of adjacent row)
-                let stride = cap-row-h + 1.0
-                let target-offset = if dy >= 0.0 {
-                    to-int((dy + stride * 0.5) / stride)
-                } else {
-                    0 - to-int(((0.0 - dy) + stride * 0.5) / stride)
-                }
-                let drag-from = deref(reorder-drag-from)
-                let raw-target = drag-from - target-offset
-                let clamped = if raw-target < 0 { 0 }
-                              else if raw-target >= num-goals { num-goals - 1 }
-                              else { raw-target }
+                // Modal event tracking loop
+                let mask = 68  // LeftMouseDragged(64) | LeftMouseUp(4)
+                let mut tracking = true
+                while tracking {
+                    let ev = ak/next-event(self_, mask)
+                    let evtype = ak/event-type(ev)
+                    if evtype == 6 {
+                        // Dragged: move view + live reorder other rows
+                        let dloc = ak/event-location(ev)
+                        let dy = get(dloc, 1) - start-y
+                        ak/set-frame-raw(self_, cap-row-x, cap-row-y + dy, cap-row-w, cap-row-h)
 
-                let prev-slot = deref(reorder-current-slot)
-                if clamped != prev-slot {
-                    reset!(reorder-current-slot, clamped)
-                    // Animate other rows to shift
-                    let rows = deref(reorder-row-data)
-                    let mut i = 0
-                    while i < length(rows) {
-                        if i != drag-from {
-                            let info = get(rows, i)
-                            let rptr = get(info, 0)
-                            let base-y = get(info, 1)
-                            let new-y = if drag-from < clamped {
-                                if i > drag-from && i <= clamped { base-y + stride }
-                                else { base-y }
-                            } else if drag-from > clamped {
-                                if i >= clamped && i < drag-from { base-y - stride }
-                                else { base-y }
-                            } else { base-y }
-                            ak/animate(0.2, fn() {
-                                ak/animated-set-frame(rptr, cap-row-x, new-y, cap-row-w, cap-row-h)
-                            })
+                        let stride = cap-row-h + 1.0
+                        let target-offset = if dy >= 0.0 {
+                            to-int((dy + stride * 0.5) / stride)
+                        } else {
+                            0 - to-int(((0.0 - dy) + stride * 0.5) / stride)
                         }
-                        i = i + 1
-                    }
-                    // Animate bars to match reorder
-                    let bars = deref(reorder-bar-data)
-                    let bar-stride = 16.0
-                    let bviz-x = PAD + 4.0
-                    let bviz-w = POP-W - (2.0 * PAD) - 8.0
-                    let mut bi = 0
-                    while bi < length(bars) {
-                        let binfo = get(bars, bi)
-                        let bg-ptr = get(binfo, 0)
-                        let bfill-ptr = get(binfo, 1)
-                        let bfill-w = get(binfo, 2)
-                        let bar-base-y = get(binfo, 3)
-                        let bar-new-y = if bi == drag-from {
-                            // Dragged goal's bar moves to target slot
-                            bar-base-y + to-float(drag-from - clamped) * bar-stride
-                        } else if drag-from < clamped {
-                            if bi > drag-from && bi <= clamped { bar-base-y + bar-stride }
-                            else { bar-base-y }
-                        } else if drag-from > clamped {
-                            if bi >= clamped && bi < drag-from { bar-base-y - bar-stride }
-                            else { bar-base-y }
-                        } else { bar-base-y }
-                        ak/animate(0.2, fn() {
-                            ak/animated-set-frame(bg-ptr, bviz-x, bar-new-y, bviz-w, 12.0)
-                            if bfill-ptr != 0 {
-                                ak/animated-set-frame(bfill-ptr, bviz-x, bar-new-y, bfill-w, 12.0)
+                        let drag-from = deref(reorder-drag-from)
+                        let raw-target = drag-from - target-offset
+                        let clamped = if raw-target < 0 { 0 }
+                                      else if raw-target >= num-goals { num-goals - 1 }
+                                      else { raw-target }
+
+                        let prev-slot = deref(reorder-current-slot)
+                        if clamped != prev-slot {
+                            reset!(reorder-current-slot, clamped)
+                            let rows = deref(reorder-row-data)
+                            let mut i = 0
+                            while i < length(rows) {
+                                if i != drag-from {
+                                    let info = get(rows, i)
+                                    let rptr = get(info, 0)
+                                    let base-y = get(info, 1)
+                                    let new-y = if drag-from < clamped {
+                                        if i > drag-from && i <= clamped { base-y + stride }
+                                        else { base-y }
+                                    } else if drag-from > clamped {
+                                        if i >= clamped && i < drag-from { base-y - stride }
+                                        else { base-y }
+                                    } else { base-y }
+                                    ak/animate(0.2, fn() {
+                                        ak/animated-set-frame(rptr, cap-row-x, new-y, cap-row-w, cap-row-h)
+                                    })
+                                }
+                                i = i + 1
                             }
-                        })
-                        bi = bi + 1
+                            let bars = deref(reorder-bar-data)
+                            let bar-stride = 16.0
+                            let bviz-x = PAD + 4.0
+                            let bviz-w = POP-W - (2.0 * PAD) - 8.0
+                            let mut bi = 0
+                            while bi < length(bars) {
+                                let binfo = get(bars, bi)
+                                let bg-ptr = get(binfo, 0)
+                                let bfill-ptr = get(binfo, 1)
+                                let bfill-w = get(binfo, 2)
+                                let bar-base-y = get(binfo, 3)
+                                let bar-new-y = if bi == drag-from {
+                                    bar-base-y + to-float(drag-from - clamped) * bar-stride
+                                } else if drag-from < clamped {
+                                    if bi > drag-from && bi <= clamped { bar-base-y + bar-stride }
+                                    else { bar-base-y }
+                                } else if drag-from > clamped {
+                                    if bi >= clamped && bi < drag-from { bar-base-y - bar-stride }
+                                    else { bar-base-y }
+                                } else { bar-base-y }
+                                ak/animate(0.2, fn() {
+                                    ak/animated-set-frame(bg-ptr, bviz-x, bar-new-y, bviz-w, 12.0)
+                                    if bfill-ptr != 0 {
+                                        ak/animated-set-frame(bfill-ptr, bviz-x, bar-new-y, bfill-w, 12.0)
+                                    }
+                                })
+                                bi = bi + 1
+                            }
+                        }
+                    } else if evtype == 2 {
+                        // Mouse up: commit the reorder
+                        reset!(is-dragging, false)
+                        let final-slot = deref(reorder-current-slot)
+                        let from = deref(reorder-drag-from)
+                        if final-slot != from {
+                            move-goal-to(from, final-slot)
+                        }
+                        rebuild-ui()
+                        tracking = false
                     }
                 }
-            },
-            fn(self_, sel, event) {
-                // mouseUp: commit the reorder
-                reset!(is-dragging, false)
-                let final-slot = deref(reorder-current-slot)
-                let from = deref(reorder-drag-from)
-                if final-slot != from {
-                    move-goal-to(from, final-slot)
-                }
-                rebuild-ui()
             }
         )
         ak/set-layer-corner-radius(rv.ptr, 8.0)
@@ -769,10 +772,10 @@ fn build-goal-row(view, handler, goal, idx, y, n) {
 
         // Row content in local coords (origin 0,0 of tracking view)
         let lh-x = h-pad
-        let rh = ak/label("≡", lh-x, 12.0, 16.0, 20.0)
-        ak/set-font(rh, ak/font(12.0))
-        ak/set-text-color(rh, ak/color(0.5, 0.5, 0.55, 1.0))
-        ak/add-to(rv, rh)
+        let lh-cy = (row-h - 20.0) / 2.0
+        let rh = ak/symbol-image-view("line.3.horizontal", 12.0, lh-x, lh-cy, 16.0, 20.0,
+            ak/color(0.5, 0.5, 0.55, 1.0))
+        ak/add-view(rv, rh)
 
         let ld-x = dot-x - row-x
         let ld-cy = (row-h - 12.0) / 2.0
@@ -857,12 +860,12 @@ fn build-goal-row(view, handler, goal, idx, y, n) {
         let ind-local-x = ind-x - row-x
         let ind-local-cy = (row-h - 28.0) / 2.0
 
-        let drag-view = ak/custom-tracking-view(
+        let drag-view = ak/custom-mousedown-view(
             "R" ++ to-string(dc), row-x, row-y, row-w, row-h,
             fn(self_, sel, event) {
                 let loc = ak/event-location(event)
-                reset!(drag-start-y, get(loc, 1))
-                reset!(drag-amount, 0)
+                let start-y = get(loc, 1)
+                let mut amt = 0
                 reset!(is-dragging, true)
                 ak/set-layer-corner-radius(self_, 8.0)
                 ak/animate(0.15, fn() {
@@ -880,46 +883,46 @@ fn build-goal-row(view, handler, goal, idx, y, n) {
                     rr, rg, rb, 0.3)
                 ak/set-corner-radius(rect, 4.0)
                 ak/add-subview-to(self_, rect.ptr)
-                reset!(drag-rect-ptr, rect.ptr)
-            },
-            fn(self_, sel, event) {
-                let loc = ak/event-location(event)
-                let dy = get(loc, 1) - deref(drag-start-y)
-                let flags = ak/event-modifier-flags(event)
-                let alt = has-flag(flags, 524288)
-                let effective = if alt { 0.0 - dy } else { dy }
-                let offset = if effective < 0.0 { 0.0 } else { effective }
-                let p = if offset > 100.0 { 1.0 } else { offset / 100.0 }
-                let amt = to-int(1.0 + (p * 9.0))
-                reset!(drag-amount, amt)
-                let rect-ptr = deref(drag-rect-ptr)
-                if rect-ptr != null {
-                    let new-h = 8.0 + (p * 20.0)
-                    let new-y = ind-local-cy + (28.0 - new-h) / 2.0
-                    ak/animate(0.08, fn() {
-                        ak/animated-set-frame(rect-ptr, ind-local-x, new-y, 40.0, new-h)
-                    })
+
+                // Modal event tracking loop
+                let mask = 68  // LeftMouseDragged(64) | LeftMouseUp(4)
+                let mut tracking = true
+                while tracking {
+                    let ev = ak/next-event(self_, mask)
+                    let evtype = ak/event-type(ev)
+                    if evtype == 6 {
+                        // Dragged
+                        let dloc = ak/event-location(ev)
+                        let dy = get(dloc, 1) - start-y
+                        let eflags = ak/event-modifier-flags(ev)
+                        let ealt = has-flag(eflags, 524288)
+                        let effective = if ealt { 0.0 - dy } else { dy }
+                        let offset = if effective < 0.0 { 0.0 } else { effective }
+                        let p = if offset > 100.0 { 1.0 } else { offset / 100.0 }
+                        amt = to-int(1.0 + (p * 9.0))
+                        let new-h = 8.0 + (p * 20.0)
+                        let new-y = ind-local-cy + (28.0 - new-h) / 2.0
+                        ak/animate(0.08, fn() {
+                            ak/animated-set-frame(rect.ptr, ind-local-x, new-y, 40.0, new-h)
+                        })
+                    } else if evtype == 2 {
+                        // Mouse up
+                        ak/animate(0.2, fn() {
+                            ak/animated-set-frame(rect.ptr, ind-local-x, ind-local-cy + 10.0, 40.0, 8.0)
+                            ak/set-alpha(rect.ptr, 0.0)
+                        })
+                        ak/remove-from-superview(rect.ptr)
+                        ak/set-layer-bg(self_, ak/color(0.0, 0.0, 0.0, 0.0))
+                        reset!(is-dragging, false)
+                        let eflags = ak/event-modifier-flags(ev)
+                        let ealt = has-flag(eflags, 524288)
+                        let magnitude = if amt <= 0 { 1.0 } else { to-float(amt) }
+                        let final-amt = if ealt { 0.0 - magnitude } else { magnitude }
+                        log-amount(row-goal-id, final-amt)
+                        rebuild-ui()
+                        tracking = false
+                    }
                 }
-            },
-            fn(self_, sel, event) {
-                let rect-ptr = deref(drag-rect-ptr)
-                if rect-ptr != null {
-                    ak/animate(0.2, fn() {
-                        ak/animated-set-frame(rect-ptr, ind-local-x, ind-local-cy + 10.0, 40.0, 8.0)
-                        ak/set-alpha(rect-ptr, 0.0)
-                    })
-                    ak/remove-from-superview(rect-ptr)
-                    reset!(drag-rect-ptr, null)
-                }
-                ak/set-layer-bg(self_, ak/color(0.0, 0.0, 0.0, 0.0))
-                reset!(is-dragging, false)
-                let flags = ak/event-modifier-flags(event)
-                let alt = has-flag(flags, 524288)
-                let amt = deref(drag-amount)
-                let magnitude = if amt <= 0 { 1.0 } else { to-float(amt) }
-                let final-amt = if alt { 0.0 - magnitude } else { magnitude }
-                log-amount(row-goal-id, final-amt)
-                rebuild-ui()
             }
         )
         ak/add-view(view, drag-view)
