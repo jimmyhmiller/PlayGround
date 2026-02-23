@@ -681,6 +681,14 @@ fn event-location(event) {
     [result.low, result.high]
 }
 
+fn event-delta-x(event) {
+    msg0(event, "deltaX", ffi/Type.F64)
+}
+
+fn event-delta-y(event) {
+    msg0(event, "deltaY", ffi/Type.F64)
+}
+
 fn event-keycode(event) {
     msg0(event, "keyCode", ffi/Type.U16)
 }

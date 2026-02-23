@@ -670,14 +670,13 @@ fn build-goal-row(view, handler, goal, idx, y, n) {
         let rv = ak/custom-mousedown-view(
             "RO" ++ to-string(dc), row-x, row-y, row-w, row-h,
             fn(self_, sel, event) {
-                let loc = ak/event-location(event)
-                let start-y = get(loc, 1)
+                let mut total-dy = 0.0
                 reset!(is-dragging, true)
                 reset!(reorder-drag-from, reorder-idx)
                 reset!(reorder-current-slot, reorder-idx)
                 ak/set-layer-bg(self_, ak/color(goal-r, goal-g, goal-b, 0.2))
 
-                // Modal event tracking loop
+                // Modal event tracking loop using deltaY
                 let mask = 68  // LeftMouseDragged(64) | LeftMouseUp(4)
                 let mut tracking = true
                 while tracking {
@@ -685,8 +684,8 @@ fn build-goal-row(view, handler, goal, idx, y, n) {
                     let evtype = ak/event-type(ev)
                     if evtype == 6 {
                         // Dragged: move view + live reorder other rows
-                        let dloc = ak/event-location(ev)
-                        let dy = get(dloc, 1) - start-y
+                        total-dy = total-dy - ak/event-delta-y(ev)
+                        let dy = total-dy
                         ak/set-frame-raw(self_, cap-row-x, cap-row-y + dy, cap-row-w, cap-row-h)
 
                         let stride = cap-row-h + 1.0
@@ -863,9 +862,8 @@ fn build-goal-row(view, handler, goal, idx, y, n) {
         let drag-view = ak/custom-mousedown-view(
             "R" ++ to-string(dc), row-x, row-y, row-w, row-h,
             fn(self_, sel, event) {
-                let loc = ak/event-location(event)
-                let start-y = get(loc, 1)
                 let mut amt = 0
+                let mut total-dy = 0.0
                 reset!(is-dragging, true)
                 ak/set-layer-corner-radius(self_, 8.0)
                 ak/animate(0.15, fn() {
@@ -884,16 +882,16 @@ fn build-goal-row(view, handler, goal, idx, y, n) {
                 ak/set-corner-radius(rect, 4.0)
                 ak/add-subview-to(self_, rect.ptr)
 
-                // Modal event tracking loop
+                // Modal event tracking loop using deltaY (locationInWindow struct return is broken)
                 let mask = 68  // LeftMouseDragged(64) | LeftMouseUp(4)
                 let mut tracking = true
                 while tracking {
                     let ev = ak/next-event(self_, mask)
                     let evtype = ak/event-type(ev)
                     if evtype == 6 {
-                        // Dragged
-                        let dloc = ak/event-location(ev)
-                        let dy = get(dloc, 1) - start-y
+                        // Dragged - accumulate deltaY
+                        total-dy = total-dy - ak/event-delta-y(ev)
+                        let dy = total-dy
                         let eflags = ak/event-modifier-flags(ev)
                         let ealt = has-flag(eflags, 524288)
                         let effective = if ealt { 0.0 - dy } else { dy }

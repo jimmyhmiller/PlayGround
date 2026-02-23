@@ -193,6 +193,38 @@ impl Compiler {
             Expr::ProtocolCall { method_name, args } => {
                 self.compile_protocol_call(method_name, args)
             }
+            Expr::VectorExpr { elements } => {
+                self.compile_call(
+                    &Expr::Var {
+                        namespace: Some("clojure.core".to_string()),
+                        name: "vector".to_string(),
+                    },
+                    elements,
+                )
+            }
+            Expr::MapExpr { pairs } => {
+                let mut kv_exprs: Vec<Expr> = Vec::new();
+                for (k, v) in pairs {
+                    kv_exprs.push(k.clone());
+                    kv_exprs.push(v.clone());
+                }
+                self.compile_call(
+                    &Expr::Var {
+                        namespace: Some("clojure.core".to_string()),
+                        name: "hash-map".to_string(),
+                    },
+                    &kv_exprs,
+                )
+            }
+            Expr::SetExpr { elements } => {
+                self.compile_call(
+                    &Expr::Var {
+                        namespace: Some("clojure.core".to_string()),
+                        name: "hash-set".to_string(),
+                    },
+                    elements,
+                )
+            }
             Expr::Debugger { expr } => self.compile_debugger(expr),
             Expr::TopLevelDo { .. } => {
                 // TopLevelDo should only appear at the top level and is handled by compile_toplevel
@@ -523,11 +555,14 @@ impl Compiler {
     fn is_builtin(&self, name: &str) -> bool {
         matches!(
             name,
-            "prim-add" | "prim-sub" | "prim-mul" | "prim-div" | "<" | ">" | "<=" | ">=" | "=" | "__gc" |
+            "prim-add" | "prim-sub" | "prim-mul" | "prim-div" | "prim-eq" | "__gc" |
                  "bit-and" | "bit-or" | "bit-xor" | "bit-not" |
                  "bit-shift-left" | "bit-shift-right" | "unsigned-bit-shift-right" |
                  "bit-shift-right-zero-fill" |  // CLJS alias for unsigned-bit-shift-right
-                 "nil?" | "number?" | "string?" | "fn?" | "identical?" |
+                 "prim-lt" | "prim-gt" | "prim-le" | "prim-ge" |
+                 "nil?" | "number?" | "integer?" | "float?" | "int?" | "string?" | "fn?" | "identical?" |
+                 // Note: <, >, <=, >= are NOT builtins - they have defn wrappers in core.clj
+                 // that support multi-arity. Use prim-lt/gt/le/ge for inline compilation.
                  "instance?" | "satisfies?" | "keyword?" | "hash-primitive" |
                  "cons?" | "cons-first" | "cons-rest" |
                  "_println" | "_print" | "_newline" | "_print-space" |
@@ -544,6 +579,7 @@ impl Compiler {
                  "__reader_vector_nth" | "__reader_vector_conj" |
                  // Reader type predicates
                  "__reader_list?" | "__reader_vector?" | "__reader_map?" | "__reader_symbol?" |
+                "__reader_symbol_name" | "__reader_symbol_namespace" |
                  // New builtins for defmacro support
                  "__is_string" | "__is_symbol" | "__set_macro!" |
                  "__symbol_1" | "__symbol_2" |
@@ -551,7 +587,7 @@ impl Compiler {
                  // Array operations
                  "make-array" | "aget" | "aset" | "aset!" | "alength" | "aclone" |
                  // Core function builtins
-                 "__keyword_name" | "__apply" | "__str_concat" |
+                 "__string_count" | "__keyword_name" | "__apply" | "__str_concat" |
                  // Reader set operations
                  "__reader_set_count" | "__reader_set_contains" | "__reader_set_conj" | "__reader_set_get" |
                  "__is_reader_set"
@@ -2527,6 +2563,19 @@ impl Compiler {
                 self.collect_free_vars_from_expr(expr, bound, free);
             }
 
+            Expr::VectorExpr { elements } | Expr::SetExpr { elements } => {
+                for elem in elements {
+                    self.collect_free_vars_from_expr(elem, bound, free);
+                }
+            }
+
+            Expr::MapExpr { pairs } => {
+                for (k, v) in pairs {
+                    self.collect_free_vars_from_expr(k, bound, free);
+                    self.collect_free_vars_from_expr(v, bound, free);
+                }
+            }
+
             // TopLevelDo is only used at the top level and handled specially
             // It should never appear in a context where we're collecting free vars
             Expr::TopLevelDo { .. } => {}
@@ -2552,11 +2601,11 @@ impl Compiler {
                     "prim-sub" => self.compile_builtin_sub(args),
                     "prim-mul" => self.compile_builtin_mul(args),
                     "prim-div" => self.compile_builtin_div(args),
-                    "<" => self.compile_builtin_lt(args),
-                    ">" => self.compile_builtin_gt(args),
-                    "<=" => self.compile_builtin_le(args),
-                    ">=" => self.compile_builtin_ge(args),
-                    "=" => self.compile_builtin_eq(args),
+                    "prim-lt" => self.compile_builtin_lt(args),
+                    "prim-gt" => self.compile_builtin_gt(args),
+                    "prim-le" => self.compile_builtin_le(args),
+                    "prim-ge" => self.compile_builtin_ge(args),
+                    "prim-eq" => self.compile_builtin_eq(args),
                     "__gc" => self.compile_builtin_gc(args),
                     "bit-and" => self.compile_builtin_bit_and(args),
                     "bit-or" => self.compile_builtin_bit_or(args),
@@ -2572,6 +2621,9 @@ impl Compiler {
                     } // CLJS alias
                     "nil?" => self.compile_builtin_nil_pred(args),
                     "number?" => self.compile_builtin_number_pred(args),
+                    "integer?" => self.compile_builtin_integer_pred(args),
+                    "float?" => self.compile_builtin_float_pred(args),
+                    "int?" => self.compile_builtin_integer_pred(args),
                     "string?" => self.compile_builtin_string_pred(args),
                     "fn?" => self.compile_builtin_fn_pred(args),
                     "identical?" => self.compile_builtin_identical(args),
@@ -2615,6 +2667,8 @@ impl Compiler {
                     "__reader_vector?" => self.compile_builtin_reader_prim_1(args, "__reader_vector?"),
                     "__reader_map?" => self.compile_builtin_reader_prim_1(args, "__reader_map?"),
                     "__reader_symbol?" => self.compile_builtin_reader_prim_1(args, "__reader_symbol?"),
+                    "__reader_symbol_name" => self.compile_builtin_reader_prim_1(args, "__reader_symbol_name"),
+                    "__reader_symbol_namespace" => self.compile_builtin_reader_prim_1(args, "__reader_symbol_namespace"),
                     // New builtins for defmacro support
                     "__is_string" => self.compile_builtin_reader_prim_1(args, "__is_string"),
                     "__is_symbol" => self.compile_builtin_reader_prim_1(args, "__is_symbol"),
@@ -2631,6 +2685,7 @@ impl Compiler {
                     "alength" => self.compile_builtin_alength(args),
                     "aclone" => self.compile_builtin_aclone(args),
                     // Core function builtins
+                    "__string_count" => self.compile_builtin_string_count(args),
                     "__keyword_name" => self.compile_builtin_keyword_name(args),
                     "__apply" => self.compile_builtin_apply(args),
                     "__str_concat" => self.compile_builtin_str_concat(args),
@@ -3280,6 +3335,22 @@ impl Compiler {
         Ok(result)
     }
 
+    fn compile_builtin_string_count(&mut self, args: &[Expr]) -> Result<IrValue, String> {
+        if args.len() != 1 {
+            return Err(format!("__string_count requires 1 argument, got {}", args.len()));
+        }
+        let s = self.compile(&args[0])?;
+        let s_reg = self.builder.assign_new(s);
+        let result = self.builder.new_register();
+        let builtin_addr = crate::trampoline::builtin_string_count as usize;
+        self.builder.emit(Instruction::ExternalCall(
+            result,
+            builtin_addr,
+            vec![s_reg],
+        ));
+        Ok(result)
+    }
+
     fn compile_builtin_alength(&mut self, args: &[Expr]) -> Result<IrValue, String> {
         if args.len() != 1 {
             return Err(format!("alength requires 1 argument, got {}", args.len()));
@@ -3648,6 +3719,58 @@ impl Compiler {
             tag,
             two_const,
             Condition::LessThan,
+        ));
+        Ok(result)
+    }
+
+    fn compile_builtin_integer_pred(&mut self, args: &[Expr]) -> Result<IrValue, String> {
+        if args.len() != 1 {
+            return Err(format!("integer? requires 1 argument, got {}", args.len()));
+        }
+        let val = self.compile(&args[0])?;
+        let val = self.ensure_register(val);
+        let tag = self.builder.new_register();
+        self.builder.emit(Instruction::GetTag(tag, val));
+
+        // Check if tag == 0 (integer tag)
+        let zero_const = self.builder.new_register();
+        self.builder.emit(Instruction::LoadConstant(
+            zero_const,
+            IrValue::TaggedConstant(0),
+        ));
+
+        let result = self.builder.new_register();
+        self.builder.emit(Instruction::Compare(
+            result,
+            tag,
+            zero_const,
+            Condition::Equal,
+        ));
+        Ok(result)
+    }
+
+    fn compile_builtin_float_pred(&mut self, args: &[Expr]) -> Result<IrValue, String> {
+        if args.len() != 1 {
+            return Err(format!("float? requires 1 argument, got {}", args.len()));
+        }
+        let val = self.compile(&args[0])?;
+        let val = self.ensure_register(val);
+        let tag = self.builder.new_register();
+        self.builder.emit(Instruction::GetTag(tag, val));
+
+        // Check if tag == 1 (float tag)
+        let one_const = self.builder.new_register();
+        self.builder.emit(Instruction::LoadConstant(
+            one_const,
+            IrValue::TaggedConstant(1),
+        ));
+
+        let result = self.builder.new_register();
+        self.builder.emit(Instruction::Compare(
+            result,
+            tag,
+            one_const,
+            Condition::Equal,
         ));
         Ok(result)
     }

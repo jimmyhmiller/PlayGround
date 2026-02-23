@@ -21,7 +21,7 @@ use crate::arm_codegen::{Arm64CodeGen, CompiledFunction};
 use crate::clojure_ast::{Expr, analyze_toplevel_tagged};
 use crate::compiler::Compiler;
 use crate::gc_runtime::GCRuntime;
-use crate::reader::{read, read_to_tagged};
+use crate::reader::{read, read_to_tagged, read_all_to_tagged};
 use crate::trampoline::Trampoline;
 use std::cell::UnsafeCell;
 use std::io::{self, BufRead, Write};
@@ -476,6 +476,29 @@ fn print_ast(ast: &Expr, indent: usize) {
                 print_ast(arg, indent + 2);
             }
         }
+        Expr::VectorExpr { elements } => {
+            println!("{}VectorExpr", prefix);
+            for (i, elem) in elements.iter().enumerate() {
+                println!("{}  [{}]:", prefix, i);
+                print_ast(elem, indent + 2);
+            }
+        }
+        Expr::MapExpr { pairs } => {
+            println!("{}MapExpr", prefix);
+            for (i, (k, v)) in pairs.iter().enumerate() {
+                println!("{}  [{}] key:", prefix, i);
+                print_ast(k, indent + 2);
+                println!("{}  [{}] val:", prefix, i);
+                print_ast(v, indent + 2);
+            }
+        }
+        Expr::SetExpr { elements } => {
+            println!("{}SetExpr", prefix);
+            for (i, elem) in elements.iter().enumerate() {
+                println!("{}  [{}]:", prefix, i);
+                print_ast(elem, indent + 2);
+            }
+        }
         Expr::Debugger { expr } => {
             println!("{}Debugger", prefix);
             print_ast(expr, indent + 1);
@@ -746,52 +769,27 @@ fn load_clojure_file(
     print_results: bool,
 ) -> Result<(), String> {
     use std::fs;
-    use std::io::BufRead;
 
-    let file = match fs::File::open(filename) {
-        Ok(f) => f,
+    let content = match fs::read_to_string(filename) {
+        Ok(c) => c,
         Err(e) => return Err(format!("Error reading file '{}': {}", filename, e)),
     };
 
-    let reader = std::io::BufReader::new(file);
-    let mut accumulated = String::new();
+    // Read all forms from the file at once
+    let tagged_forms = unsafe {
+        let rt = &mut *runtime.get();
+        reader::read_all_to_tagged(&content, rt)?
+    };
 
-    for line in reader.lines() {
-        let line = match line {
-            Ok(l) => l,
-            Err(e) => return Err(format!("Error reading line: {}", e)),
-        };
-
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with(';') {
-            continue;
-        }
-
-        accumulated.push_str(&line);
-        accumulated.push('\n');
-
-        // Try to read using tagged pointer reader
+    for tagged in tagged_forms {
         let ast = unsafe {
             let rt = &mut *runtime.get();
-            match read_to_tagged(&accumulated, rt) {
-                Ok(tagged) => {
-                    // Register the parsed form as a temporary GC root during analysis
-                    let root_id = rt.register_temporary_root(tagged);
-                    let result = analyze_toplevel_tagged(rt, tagged);
-                    rt.unregister_temporary_root(root_id);
-                    match result {
-                        Ok(ast) => ast,
-                        Err(e) => {
-                            // Analysis error - but might be incomplete expression
-                            // Try the old reader to distinguish
-                            match read(&accumulated) {
-                                Ok(_) => return Err(format!("Analysis error: {}", e)),
-                                Err(_) => continue, // Incomplete expression
-                            }
-                        }
-                    }
-                }
-                Err(_) => continue, // Incomplete expression, keep accumulating
+            let root_id = rt.register_temporary_root(tagged);
+            let result = analyze_toplevel_tagged(rt, tagged);
+            rt.unregister_temporary_root(root_id);
+            match result {
+                Ok(ast) => ast,
+                Err(e) => return Err(format!("Analysis error: {}", e)),
             }
         };
 
@@ -802,8 +800,6 @@ fn load_clojure_file(
 
                 match Arm64CodeGen::compile_function(&instructions, num_locals, 0) {
                     Ok(compiled) => {
-                        // Execute as 0-argument function via trampoline
-                        // Stack maps must be registered BEFORE execution for GC safety
                         let trampoline = Trampoline::new(64 * 1024);
                         let result =
                             register_stack_maps_and_execute(&compiled, &runtime, &trampoline);
@@ -827,18 +823,13 @@ fn load_clojure_file(
             }
             Err(e) => return Err(format!("Compile error: {}", e)),
         }
-        accumulated.clear();
-    }
-
-    if !accumulated.trim().is_empty() {
-        return Err("Incomplete expression at end of file".to_string());
     }
 
     Ok(())
 }
 
-/// Execute a single Clojure expression (like `clj -e "(+ 1 2)"`)
-/// Prints the result of the expression
+/// Execute Clojure expression(s) (like `clj -e "(+ 1 2)"`)
+/// Supports multiple forms. Prints the result of the last expression.
 fn run_expr(expr: &str, gc_always: bool) {
     // Create runtime with GC
     let runtime = Arc::new(UnsafeCell::new(GCRuntime::new()));
@@ -871,55 +862,72 @@ fn run_expr(expr: &str, gc_always: bool) {
     // Set up user namespace (refer clojure.core and switch to it)
     compiler.setup_user_namespace();
 
-    // Parse and analyze the expression using tagged pointers
-    let ast = unsafe {
+    // Parse all forms from the expression string
+    let tagged_forms = unsafe {
         let rt = &mut *runtime.get();
-        let tagged = match read_to_tagged(expr, rt) {
-            Ok(t) => t,
+        match read_all_to_tagged(expr, rt) {
+            Ok(forms) => forms,
             Err(e) => {
                 eprintln!("Read error: {}", e);
                 std::process::exit(1);
             }
+        }
+    };
+
+    // Process each form sequentially, print result of last one
+    let last_idx = tagged_forms.len().saturating_sub(1);
+    for (i, tagged) in tagged_forms.iter().enumerate() {
+        let ast = unsafe {
+            let rt = &mut *runtime.get();
+            let root_id = rt.register_temporary_root(*tagged);
+            let result = analyze_toplevel_tagged(rt, *tagged);
+            rt.unregister_temporary_root(root_id);
+            match result {
+                Ok(a) => a,
+                Err(e) => {
+                    eprintln!("Analysis error: {}", e);
+                    std::process::exit(1);
+                }
+            }
         };
-        // Register parsed form as temporary root during analysis
-        let root_id = rt.register_temporary_root(tagged);
-        let result = analyze_toplevel_tagged(rt, tagged);
-        rt.unregister_temporary_root(root_id);
-        match result {
-            Ok(a) => a,
+
+        match compiler.compile_toplevel(&ast) {
+            Ok(_) => {
+                let instructions = compiler.take_instructions();
+                let num_locals = compiler.builder.num_locals;
+
+                match Arm64CodeGen::compile_function(&instructions, num_locals, 0) {
+                    Ok(compiled) => {
+                        let trampoline = Trampoline::new(64 * 1024);
+                        let result =
+                            register_stack_maps_and_execute(&compiled, &runtime, &trampoline);
+
+                        // Print result of last form only (unless it's a def/ns/use)
+                        if i == last_idx
+                            && !matches!(
+                                ast,
+                                Expr::Def { .. }
+                                    | Expr::Ns { .. }
+                                    | Expr::Use { .. }
+                            )
+                        {
+                            unsafe {
+                                let rt = &*runtime.get();
+                                print_tagged_value(result, rt);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("Codegen error: {}", e);
+                        std::process::exit(1);
+                    }
+                }
+            }
             Err(e) => {
-                eprintln!("Analysis error: {}", e);
+                eprintln!("Compile error: {}", e);
                 std::process::exit(1);
             }
         }
-    };
-
-    // Compile the expression
-    if let Err(e) = compiler.compile_toplevel(&ast) {
-        eprintln!("Compile error: {}", e);
-        std::process::exit(1);
-    }
-
-    let instructions = compiler.take_instructions();
-    let num_locals = compiler.builder.num_locals;
-
-    // Generate machine code
-    let compiled = match Arm64CodeGen::compile_function(&instructions, num_locals, 0) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("Codegen error: {}", e);
-            std::process::exit(1);
-        }
-    };
-
-    // Execute as 0-argument function via trampoline
-    // Stack maps must be registered BEFORE execution for GC safety
-    let trampoline = Trampoline::new(64 * 1024);
-    let result = register_stack_maps_and_execute(&compiled, &runtime, &trampoline);
-
-    unsafe {
-        let rt = &*runtime.get();
-        print_tagged_value(result, rt);
     }
 }
 
@@ -927,11 +935,10 @@ fn run_expr(expr: &str, gc_always: bool) {
 /// Like Clojure, scripts don't print results - only explicit print calls produce output
 fn run_script(filename: &str, gc_always: bool) {
     use std::fs;
-    use std::io::BufRead;
 
-    // Read file
-    let file = match fs::File::open(filename) {
-        Ok(f) => f,
+    // Read entire file
+    let content = match fs::read_to_string(filename) {
+        Ok(c) => c,
         Err(e) => {
             eprintln!("Error reading file '{}': {}", filename, e);
             std::process::exit(1);
@@ -969,54 +976,30 @@ fn run_script(filename: &str, gc_always: bool) {
     // Set up user namespace (refer clojure.core and switch to it)
     compiler.setup_user_namespace();
 
-    // Read and accumulate lines until we have a complete expression
-    let reader = std::io::BufReader::new(file);
-    let mut accumulated = String::new();
-
-    for line in reader.lines() {
-        let line = match line {
-            Ok(l) => l,
+    // Read all forms from the file
+    let tagged_forms = unsafe {
+        let rt = &mut *runtime.get();
+        match reader::read_all_to_tagged(&content, rt) {
+            Ok(forms) => forms,
             Err(e) => {
-                eprintln!("Error reading line: {}", e);
+                eprintln!("Read error: {}", e);
                 std::process::exit(1);
             }
-        };
-
-        // Skip comments and empty lines
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with(';') {
-            continue;
         }
+    };
 
-        accumulated.push_str(&line);
-        accumulated.push('\n');
-
-        // Try to read and analyze using tagged pointers
+    for tagged in tagged_forms {
         let ast = unsafe {
             let rt = &mut *runtime.get();
-            match read_to_tagged(&accumulated, rt) {
-                Ok(tagged) => {
-                    // Register the parsed form as a temporary GC root during analysis
-                    // This prevents it from being collected if GC runs during analysis
-                    let root_id = rt.register_temporary_root(tagged);
-                    let result = analyze_toplevel_tagged(rt, tagged);
-                    rt.unregister_temporary_root(root_id);
-                    match result {
-                        Ok(ast) => ast,
-                        Err(e) => {
-                            // Analysis error - but might be incomplete expression
-                            // Try the old reader to distinguish
-                            match read(&accumulated) {
-                                Ok(_) => {
-                                    eprintln!("Analysis error: {}", e);
-                                    std::process::exit(1);
-                                }
-                                Err(_) => continue, // Incomplete expression
-                            }
-                        }
-                    }
+            let root_id = rt.register_temporary_root(tagged);
+            let result = analyze_toplevel_tagged(rt, tagged);
+            rt.unregister_temporary_root(root_id);
+            match result {
+                Ok(ast) => ast,
+                Err(e) => {
+                    eprintln!("Analysis error: {}", e);
+                    std::process::exit(1);
                 }
-                Err(_) => continue, // Incomplete expression, keep accumulating
             }
         };
 
@@ -1028,10 +1011,6 @@ fn run_script(filename: &str, gc_always: bool) {
 
                 match Arm64CodeGen::compile_function(&instructions, num_locals, 0) {
                     Ok(compiled) => {
-                        // Execute as 0-argument function via trampoline
-                        // Stack maps must be registered BEFORE execution for GC safety
-                        // Like Clojure, scripts don't print results automatically
-                        // Only explicit print/println calls produce output
                         let trampoline = Trampoline::new(64 * 1024);
                         let _result =
                             register_stack_maps_and_execute(&compiled, &runtime, &trampoline);
@@ -1047,15 +1026,6 @@ fn run_script(filename: &str, gc_always: bool) {
                 std::process::exit(1);
             }
         }
-
-        // Clear accumulated for next expression
-        accumulated.clear();
-    }
-
-    // Check if there's any remaining incomplete expression
-    if !accumulated.trim().is_empty() {
-        eprintln!("Error: Incomplete expression at end of file");
-        std::process::exit(1);
     }
 }
 

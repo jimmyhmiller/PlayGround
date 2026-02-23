@@ -1,0 +1,6 @@
+(ns clojure.test-clojure.clojure-instant
+  (:use clojure.test)
+  (:require [clojure.instant :as instant]))
+
+(deftest test-roundtrip
+  (is (= "#inst \"1990-12-19T10:10:00.000-00:00\"" (pr-str #inst "1990-12-19T10:10:00.000-00:00"))))

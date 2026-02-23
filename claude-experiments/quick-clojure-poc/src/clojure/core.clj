@@ -648,6 +648,92 @@
        acc
        (recur (prim-div acc (first s)) (next s))))))
 
+(defn <
+  "Returns true if nums are in monotonically increasing order."
+  ([x] true)
+  ([x y] (prim-lt x y))
+  ([x y & more]
+   (if (prim-lt x y)
+     (loop [prev y s more]
+       (if (nil? (seq s))
+         true
+         (let [v (first s)]
+           (if (prim-lt prev v)
+             (recur v (next s))
+             false))))
+     false)))
+
+(defn >
+  "Returns true if nums are in monotonically decreasing order."
+  ([x] true)
+  ([x y] (prim-gt x y))
+  ([x y & more]
+   (if (prim-gt x y)
+     (loop [prev y s more]
+       (if (nil? (seq s))
+         true
+         (let [v (first s)]
+           (if (prim-gt prev v)
+             (recur v (next s))
+             false))))
+     false)))
+
+(defn <=
+  "Returns true if nums are in monotonically non-decreasing order."
+  ([x] true)
+  ([x y] (prim-le x y))
+  ([x y & more]
+   (if (prim-le x y)
+     (loop [prev y s more]
+       (if (nil? (seq s))
+         true
+         (let [v (first s)]
+           (if (prim-le prev v)
+             (recur v (next s))
+             false))))
+     false)))
+
+(defn >=
+  "Returns true if nums are in monotonically non-increasing order."
+  ([x] true)
+  ([x y] (prim-ge x y))
+  ([x y & more]
+   (if (prim-ge x y)
+     (loop [prev y s more]
+       (if (nil? (seq s))
+         true
+         (let [v (first s)]
+           (if (prim-ge prev v)
+             (recur v (next s))
+             false))))
+     false)))
+
+(defn =
+  "Equality. Returns true if x equals y, false if not."
+  ([x] true)
+  ([x y] (prim-eq x y))
+  ([x y & more]
+   (if (prim-eq x y)
+     (loop [prev y s more]
+       (if (nil? (seq s))
+         true
+         (if (prim-eq prev (first s))
+           (recur (first s) (next s))
+           false)))
+     false)))
+
+(defn not=
+  "Same as (not (= obj1 obj2))"
+  ([x] false)
+  ([x y] (not (prim-eq x y)))
+  ([x y & more]
+   (not (apply = x y more))))
+
+(defn nil?
+  "Returns true if x is nil, false otherwise."
+  [x]
+  (prim-eq x nil))
+
 ;; =============================================================================
 ;; Hashing Infrastructure
 ;; =============================================================================
@@ -699,13 +785,13 @@
 ;; Uses hash-primitive builtin for keywords and strings
 (def hash
   (fn [x]
-    (if (nil? x)
-      0
-      (if (number? x)
-        x
-        (if (keyword? x)
-          (hash-primitive x)
-          (-hash x))))))
+    (cond
+      (nil? x) 0
+      (number? x) x
+      (keyword? x) (hash-primitive x)
+      (prim-eq x true) 1231
+      (prim-eq x false) 1237
+      :else (-hash x))))
 
 (def hash-ordered-coll
   (fn [coll]
@@ -1230,13 +1316,14 @@
   ([a b c d] (concat2 a (concat2 b (concat2 c d))))
   ([a b c d e] (concat2 a (concat2 b (concat2 c (concat2 d e))))))
 
-;; DEVIATION: count function - calls the ICounted protocol
+;; DEVIATION: count function - calls the ICounted protocol, with string support
 (defn count
   "Returns the number of items in the collection."
   [coll]
-  (if (nil? coll)
-    0
-    (-count coll)))
+  (cond
+    (nil? coll) 0
+    (string? coll) (__string_count coll)
+    :else (-count coll)))
 
 ;; DEVIATION: rest function - calls -rest protocol method
 (defn rest
@@ -1266,9 +1353,8 @@
 (defn caching-hash [coll hash-fn hash-key]
   0)
 
-;; DEVIATION: integer? - uses number? since we only have integers and floats
-(defn integer? [x]
-  (number? x))
+;; integer? - checks tag == 0 (integer tag)
+;; integer? is a compiler builtin that checks the tagged pointer tag
 
 ;; NOTE: vector? is defined after PersistentVector to use instance? properly
 
@@ -2774,7 +2860,8 @@
    val(s). When applied to a vector, returns a new vector that
    contains val at index."
   [coll k v & kvs]
-  (let [ret (-assoc coll k v)]
+  (let [coll (if (nil? coll) {} coll)
+        ret (-assoc coll k v)]
     (if kvs
       (loop [ret ret kvs kvs]
         (if kvs
@@ -3090,8 +3177,7 @@
     (nil? x) nil
     (string? x) x
     (keyword? x) (__keyword_name x)
-    (__is_reader_symbol x) (__reader_symbol_name x)
-    (__is_symbol x) (__reader_symbol_name x)
+    (symbol? x) (__reader_symbol_name x)
     :else (throw (Error. "name: Doesn't support type of argument"))))
 
 (defn str
@@ -3210,3 +3296,370 @@
        (if (= n (count p))
          (cons p (partition n step (drop step coll)))
          nil)))))
+
+;; =============================================================================
+;; Higher-order function combinators
+;; =============================================================================
+
+(defn comp
+  "Takes a set of functions and returns a fn that is the composition
+  of those fns."
+  ([] identity)
+  ([f] f)
+  ([f g]
+   (fn
+     ([] (f (g)))
+     ([x] (f (g x)))
+     ([x y] (f (g x y)))
+     ([x y & zs] (f (apply g x y zs)))))
+  ([f g & fs]
+   (reduce comp (list* f g fs))))
+
+(defn partial
+  "Takes a function f and fewer than the normal arguments to f, and
+  returns a fn that takes a variable number of additional args."
+  ([f] f)
+  ([f arg1]
+   (fn [& args] (apply f arg1 args)))
+  ([f arg1 arg2]
+   (fn [& args] (apply f arg1 arg2 args)))
+  ([f arg1 arg2 arg3]
+   (fn [& args] (apply f arg1 arg2 arg3 args)))
+  ([f arg1 arg2 arg3 & more]
+   (fn [& args] (apply f arg1 arg2 arg3 (concat more args)))))
+
+(defn constantly
+  "Returns a function that takes any number of arguments and returns x."
+  [x]
+  (fn [& args] x))
+
+(defn complement
+  "Takes a fn f and returns a fn that takes the same arguments as f,
+  has the same effects, if any, and returns the opposite truth value."
+  [f]
+  (fn
+    ([] (not (f)))
+    ([x] (not (f x)))
+    ([x y] (not (f x y)))
+    ([x y & zs] (not (apply f x y zs)))))
+
+(defn juxt
+  "Takes a set of functions and returns a fn that is the juxtaposition
+  of those fns."
+  ([f]
+   (fn
+     ([] (vector (f)))
+     ([x] (vector (f x)))
+     ([x y] (vector (f x y)))
+     ([x y & zs] (vector (apply f x y zs)))))
+  ([f g]
+   (fn
+     ([] (vector (f) (g)))
+     ([x] (vector (f x) (g x)))
+     ([x y] (vector (f x y) (g x y)))
+     ([x y & zs] (vector (apply f x y zs) (apply g x y zs)))))
+  ([f g h]
+   (fn
+     ([] (vector (f) (g) (h)))
+     ([x] (vector (f x) (g x) (h x)))
+     ([x y] (vector (f x y) (g x y) (h x y)))
+     ([x y & zs] (vector (apply f x y zs) (apply g x y zs) (apply h x y zs)))))
+  ([f g h & fs]
+   (let [fs (list* f g h fs)]
+     (fn [& args]
+       (reduce (fn [ret f] (conj ret (apply f args)))
+               [] fs)))))
+
+;; =============================================================================
+;; Sequence functions
+;; =============================================================================
+
+(defn last
+  "Return the last item in coll, in linear time"
+  [coll]
+  (let [s (seq coll)]
+    (if s
+      (let [n (next s)]
+        (if n
+          (last n)
+          (first s)))
+      nil)))
+
+(defn butlast
+  "Return a seq of all but the last item in coll, in linear time"
+  [coll]
+  (let [ret []]
+    (loop [s (seq coll)
+           ret ret]
+      (if (next s)
+        (recur (next s) (conj ret (first s)))
+        (seq ret)))))
+
+(defn mapcat
+  "Returns the result of applying concat to the result of applying map
+  to f and colls."
+  [f coll]
+  (apply concat (map f coll)))
+
+(defn keep
+  "Returns a lazy sequence of the non-nil results of (f item)."
+  [f coll]
+  (if (nil? (seq coll))
+    nil
+    (let [v (f (first coll))]
+      (if (nil? v)
+        (keep f (rest coll))
+        (cons v (keep f (rest coll)))))))
+
+(defn map-indexed
+  "Returns a lazy sequence consisting of the result of applying f to 0
+  and the first item of coll, followed by applying f to 1 and the second
+  item in coll, etc, until coll is exhausted."
+  [f coll]
+  (loop [idx 0
+         s (seq coll)
+         result []]
+    (if (nil? s)
+      (seq result)
+      (recur (inc idx) (next s) (conj result (f idx (first s)))))))
+
+(defn interleave
+  "Returns a lazy seq of the first item in each coll, then the second etc."
+  ([c1 c2]
+   (let [s1 (seq c1)
+         s2 (seq c2)]
+     (if (and s1 s2)
+       (cons (first s1) (cons (first s2)
+                              (interleave (rest s1) (rest s2))))
+       nil)))
+  ([c1 c2 & colls]
+   (let [ss (map seq (list* c1 c2 colls))]
+     (if (every? identity ss)
+       (concat (map first ss) (apply interleave (map rest ss)))
+       nil))))
+
+(defn iterate
+  "Returns a lazy sequence of x, (f x), (f (f x)) etc."
+  [f x]
+  (cons x (iterate f (f x))))
+
+(defn repeat
+  "Returns a lazy (infinite!, or length n if supplied) sequence of xs."
+  ([x] (cons x (repeat x)))
+  ([n x]
+   (if (<= n 0)
+     nil
+     (cons x (repeat (dec n) x)))))
+
+(defn range
+  "Returns a lazy seq of nums from start (inclusive) to end
+  (exclusive), by step, where start defaults to 0, step to 1, and end to
+  infinity."
+  ([] (iterate inc 0))
+  ([end] (range 0 end 1))
+  ([start end] (range start end 1))
+  ([start end step]
+   (if (pos? step)
+     (if (>= start end)
+       nil
+       (cons start (range (+ start step) end step)))
+     (if (neg? step)
+       (if (<= start end)
+         nil
+         (cons start (range (+ start step) end step)))
+       (throw (Error. "range: step must not be zero"))))))
+
+(defn distinct
+  "Returns a lazy sequence of the elements of coll with duplicates removed."
+  [coll]
+  (loop [s (seq coll)
+         seen #{}
+         result []]
+    (if (nil? s)
+      (seq result)
+      (let [f (first s)]
+        (if (contains? seen f)
+          (recur (next s) seen result)
+          (recur (next s) (conj seen f) (conj result f)))))))
+
+(defn flatten
+  "Takes any nested combination of sequential things (lists, vectors,
+  etc.) and returns their contents as a single, flat lazy sequence."
+  [coll]
+  (if (nil? (seq coll))
+    nil
+    (let [f (first coll)]
+      (if (or (sequential? f) (list? f))
+        (concat (flatten f) (flatten (rest coll)))
+        (cons f (flatten (rest coll)))))))
+
+(defn sort
+  "Returns a sorted sequence of the items in coll."
+  ([coll]
+   (sort < coll))
+  ([comp coll]
+   (let [s (seq coll)]
+     (if (nil? s)
+       nil
+       (if (nil? (next s))
+         s
+         ;; Simple insertion sort using loop/recur to avoid named fn self-ref issue
+         (let [insert-one (fn [sorted x]
+                            (if (nil? (seq sorted))
+                              (list x)
+                              (if (comp x (first sorted))
+                                (cons x sorted)
+                                (loop [before []
+                                       remaining sorted]
+                                  (if (nil? (seq remaining))
+                                    (concat before (list x))
+                                    (if (comp x (first remaining))
+                                      (concat before (cons x remaining))
+                                      (recur (conj before (first remaining))
+                                             (rest remaining))))))))]
+           (reduce insert-one (list (first s)) (rest s))))))))
+
+;; =============================================================================
+;; Predicate functions
+;; =============================================================================
+
+(defn every?
+  "Returns true if (pred x) is logical true for every x in coll, else false."
+  [pred coll]
+  (cond
+    (nil? (seq coll)) true
+    (pred (first coll)) (every? pred (rest coll))
+    :else false))
+
+(defn some
+  "Returns the first logical true value of (pred x) for any x in coll,
+  else nil."
+  [pred coll]
+  (if (nil? (seq coll))
+    nil
+    (or (pred (first coll))
+        (some pred (rest coll)))))
+
+(defn not-every?
+  "Returns false if (pred x) is logical true for every x in
+  coll, else true."
+  [pred coll]
+  (not (every? pred coll)))
+
+(defn not-any?
+  "Returns false if (pred x) is logical true for any x in coll,
+  else true."
+  [pred coll]
+  (not (some pred coll)))
+
+(defn coll?
+  "Returns true if x implements IPersistentCollection"
+  [x]
+  (or (vector? x) (list? x) (map? x) (set? x) (sequential? x)))
+
+(defn empty?
+  "Returns true if coll has no items"
+  [coll]
+  (not (seq coll)))
+
+;; =============================================================================
+;; Map/collection utility functions
+;; =============================================================================
+
+(defn get-in
+  "Returns the value in a nested associative structure."
+  ([m ks]
+   (get-in m ks nil))
+  ([m ks not-found]
+   (loop [sentinel not-found
+          m m
+          ks (seq ks)]
+     (if ks
+       (let [m (get m (first ks) sentinel)]
+         (if (identical? m sentinel)
+           sentinel
+           (recur sentinel m (next ks))))
+       m))))
+
+(defn assoc-in
+  "Associates a value in a nested associative structure."
+  [m ks v]
+  (let [ks (vec ks)
+        k (first ks)]
+    (if (= 1 (count ks))
+      (assoc m k v)
+      (assoc m k (assoc-in (get m k) (rest ks) v)))))
+
+(defn update
+  "Updates a value in a map."
+  ([m k f] (assoc m k (f (get m k))))
+  ([m k f x] (assoc m k (f (get m k) x)))
+  ([m k f x y] (assoc m k (f (get m k) x y)))
+  ([m k f x y z] (assoc m k (f (get m k) x y z)))
+  ([m k f x y z & more] (assoc m k (apply f (get m k) x y z more))))
+
+(defn update-in
+  "Updates a value in a nested associative structure."
+  ([m ks f & args]
+   (let [ks (vec ks)
+         k (first ks)]
+     (if (= 1 (count ks))
+       (assoc m k (apply f (get m k) args))
+       (assoc m k (apply update-in (get m k) (rest ks) f args))))))
+
+(defn frequencies
+  "Returns a map from distinct items in coll to the number of times
+  they appear."
+  [coll]
+  (reduce (fn [counts x]
+            (assoc counts x (inc (get counts x 0))))
+          {} coll))
+
+(defn group-by
+  "Returns a map of the elements of coll keyed by the result of
+  f on each element."
+  [f coll]
+  (reduce (fn [ret x]
+            (let [k (f x)]
+              (assoc ret k (conj (get ret k []) x))))
+          {} coll))
+
+(defn zipmap
+  "Returns a map with the keys mapped to the corresponding vals."
+  [keys vals]
+  (loop [map {}
+         ks (seq keys)
+         vs (seq vals)]
+    (if (and ks vs)
+      (recur (assoc map (first ks) (first vs))
+             (next ks)
+             (next vs))
+      map)))
+
+;; =============================================================================
+;; Macros: if-let, when-let, defn-, etc.
+;; =============================================================================
+
+(def ^:macro if-let
+  (fn [form env bindings then else]
+    (let [bind (first bindings)
+          test (second bindings)
+          temp (gensym "temp__")]
+      (list (quote let) (vector temp test)
+            (list (quote if) temp
+              (list (quote let) (vector bind temp) then)
+              else)))))
+
+(def ^:macro when-let
+  (fn [form env bindings & body]
+    (let [bind (first bindings)
+          test (second bindings)
+          temp (gensym "temp__")]
+      (list (quote let) (vector temp test)
+            (list (quote if) temp
+              (cons (quote let) (cons (vector bind temp) body))
+              nil)))))
+
+(def ^:macro defn-
+  (fn [form env name & fdecl]
+    (cons (quote defn) (cons name fdecl))))

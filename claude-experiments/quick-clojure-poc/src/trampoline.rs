@@ -1977,6 +1977,16 @@ pub extern "C" fn builtin_alength(arr_ptr: usize) -> usize {
     }
 }
 
+/// String count - returns the length of a string in bytes
+#[allow(dead_code)]
+pub extern "C" fn builtin_string_count(str_ptr: usize) -> usize {
+    let untagged = str_ptr >> 3;
+    let heap_obj = crate::gc::types::HeapObject::from_untagged(untagged as *const u8);
+    let header = heap_obj.get_header();
+    // String length is stored in type_data
+    (header.type_data as usize) << 3
+}
+
 /// Trampoline: Clone an array
 ///
 /// ARM64 Calling Convention:

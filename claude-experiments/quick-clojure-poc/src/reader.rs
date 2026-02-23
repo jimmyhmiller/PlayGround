@@ -1,6 +1,6 @@
 use crate::gc_runtime::GCRuntime;
 use crate::value::Value;
-use clojure_reader::edn::{Edn, read_string};
+use clojure_reader::edn::{self, Edn, read_string};
 use im::{hashmap, hashset, vector};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -630,6 +630,49 @@ pub fn read_to_tagged(input: &str, rt: &mut GCRuntime) -> Result<usize, String> 
         Ok(edn) => edn_to_tagged(&edn, rt),
         Err(e) => Err(format!("Parse error: {:?}", e)),
     }
+}
+
+/// Read all forms from a string, returning a Vec of tagged heap pointers.
+/// Handles multiple forms on a single line.
+pub fn read_all_to_tagged(input: &str, rt: &mut GCRuntime) -> Result<Vec<usize>, String> {
+    let preprocessed = preprocess(input);
+    let mut remaining = preprocessed.as_str();
+    let mut forms = Vec::new();
+
+    loop {
+        // Skip whitespace and comments
+        remaining = remaining.trim_start();
+        if remaining.is_empty() {
+            break;
+        }
+        // Skip line comments
+        if remaining.starts_with(';') {
+            if let Some(pos) = remaining.find('\n') {
+                remaining = &remaining[pos + 1..];
+                continue;
+            } else {
+                break;
+            }
+        }
+
+        match edn::read(remaining) {
+            Ok((edn, rest)) => {
+                let tagged = edn_to_tagged(&edn, rt)?;
+                forms.push(tagged);
+                remaining = rest;
+            }
+            Err(e) => {
+                if forms.is_empty() {
+                    return Err(format!("Parse error: {:?}", e));
+                }
+                // If we've already read some forms and hit an error, it might be
+                // incomplete - return what we have
+                break;
+            }
+        }
+    }
+
+    Ok(forms)
 }
 
 /// Check if a character can be part of a keyword/symbol name

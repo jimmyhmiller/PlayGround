@@ -51,6 +51,21 @@ pub enum Expr {
     // Literals
     Literal(Value),
 
+    /// [expr1 expr2 ...] - vector with evaluated elements
+    VectorExpr {
+        elements: Vec<Expr>,
+    },
+
+    /// {k1 v1 k2 v2 ...} - map with evaluated keys and values
+    MapExpr {
+        pairs: Vec<(Expr, Expr)>,
+    },
+
+    /// #{expr1 expr2 ...} - set with evaluated elements
+    SetExpr {
+        elements: Vec<Expr>,
+    },
+
     // Variable reference
     Var {
         namespace: Option<String>, // None = unqualified, Some("user") = qualified
@@ -384,25 +399,55 @@ pub fn analyze_tagged(rt: &mut GCRuntime, tagged: usize) -> Result<Expr, String>
         });
     }
 
-    // Check for vector BEFORE seq (vectors are seqable but should be treated as literals, not calls)
+    // Check for vector BEFORE seq (vectors are seqable but should be treated as collections, not calls)
     if rt.prim_is_vector(tagged) {
-        // Vectors are literals - convert to Value::Vector
-        let vec = tagged_to_value(rt, tagged)?;
-        return Ok(Expr::Literal(vec));
+        // Recursively analyze each element so symbols/exprs get evaluated
+        let count = rt.prim_count(tagged)?;
+        let mut elements = Vec::with_capacity(count);
+        for i in 0..count {
+            let elem = rt.prim_nth(tagged, i)?;
+            elements.push(analyze_tagged(rt, elem)?);
+        }
+        return Ok(Expr::VectorExpr { elements });
     }
 
-    // Check for map BEFORE seq (maps are seqable but should be treated as literals, not calls)
+    // Check for map BEFORE seq (maps are seqable but should be treated as collections, not calls)
     if rt.prim_is_map(tagged) {
-        // Maps are literals - convert to Value::Map
-        let map = tagged_to_value(rt, tagged)?;
-        return Ok(Expr::Literal(map));
+        let type_id_map = get_type_id(rt, tagged);
+        if type_id_map == TYPE_READER_MAP {
+            let count = rt.reader_map_count(tagged);
+            let keys_ptr = rt.reader_map_keys(tagged)?;
+            let vals_ptr = rt.reader_map_vals(tagged)?;
+            let mut pairs = Vec::with_capacity(count);
+            for i in 0..count {
+                let k = rt.prim_nth(keys_ptr, i)?;
+                let v = rt.prim_nth(vals_ptr, i)?;
+                pairs.push((analyze_tagged(rt, k)?, analyze_tagged(rt, v)?));
+            }
+            return Ok(Expr::MapExpr { pairs });
+        } else {
+            // Runtime map - convert to Value for now
+            let map = tagged_to_value(rt, tagged)?;
+            return Ok(Expr::Literal(map));
+        }
     }
 
-    // Check for set BEFORE seq (sets are seqable but should be treated as literals, not calls)
+    // Check for set BEFORE seq (sets are seqable but should be treated as collections, not calls)
     if rt.prim_is_set(tagged) {
-        // Sets are literals - convert to Value::Set
-        let set = tagged_to_value(rt, tagged)?;
-        return Ok(Expr::Literal(set));
+        let type_id_set = get_type_id(rt, tagged);
+        if type_id_set == TYPE_READER_SET {
+            let count = rt.reader_set_count(tagged);
+            let mut elements = Vec::with_capacity(count);
+            for i in 0..count {
+                let elem = rt.reader_set_get(tagged, i)?;
+                elements.push(analyze_tagged(rt, elem)?);
+            }
+            return Ok(Expr::SetExpr { elements });
+        } else {
+            // Runtime set - convert to Value for now
+            let set = tagged_to_value(rt, tagged)?;
+            return Ok(Expr::Literal(set));
+        }
     }
 
     // Check for seq (ReaderList, PersistentList, or any ISeq impl)
@@ -702,8 +747,8 @@ fn lookup_var_for_macro_check(rt: &GCRuntime, ns: Option<&str>, name: &str) -> O
 
 fn analyze_def_tagged(rt: &mut GCRuntime, list_ptr: usize) -> Result<Expr, String> {
     let items = list_to_vec(rt, list_ptr);
-    if items.len() != 3 {
-        return Err(format!("def requires 2 arguments, got {}", items.len() - 1));
+    if items.len() < 2 || items.len() > 4 {
+        return Err(format!("def requires 1-3 arguments, got {}", items.len() - 1));
     }
 
     // Get symbol name
@@ -714,7 +759,21 @@ fn analyze_def_tagged(rt: &mut GCRuntime, list_ptr: usize) -> Result<Expr, Strin
     let meta_ptr = get_symbol_metadata(rt, items[1]);
     let metadata = reader_map_to_metadata(rt, meta_ptr);
 
-    let value = analyze_tagged(rt, items[2])?;
+    let value = match items.len() {
+        2 => {
+            // (def foo) - bare def, value is nil
+            Expr::Literal(Value::Nil)
+        }
+        3 => {
+            // (def foo value)
+            analyze_tagged(rt, items[2])?
+        }
+        4 => {
+            // (def foo "docstring" value) - skip the docstring
+            analyze_tagged(rt, items[3])?
+        }
+        _ => unreachable!(),
+    };
 
     Ok(Expr::Def {
         name,
@@ -2127,10 +2186,10 @@ mod tests {
         let tagged = read_to_tagged("[1 2 3]", &mut rt).unwrap();
         let expr = analyze_tagged(&mut rt, tagged).unwrap();
         match expr {
-            Expr::Literal(Value::Vector(v)) => {
-                assert_eq!(v.len(), 3);
+            Expr::VectorExpr { elements } => {
+                assert_eq!(elements.len(), 3);
             }
-            other => panic!("Expected Vector literal, got {:?}", other),
+            other => panic!("Expected VectorExpr, got {:?}", other),
         }
     }
 
