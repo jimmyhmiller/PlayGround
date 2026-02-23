@@ -2182,6 +2182,27 @@ pub extern "C" fn builtin_cons_rest(value: usize) -> usize {
     }
 }
 
+/// Structural equality for tagged values
+///
+/// Compares two tagged values for structural equality:
+/// - Primitives (int, nil, bool): pointer equality
+/// - Strings: content comparison
+/// - Keywords: text comparison
+/// - Symbols: namespace + name comparison
+/// Returns tagged true (11) or false (3)
+#[allow(dead_code)]
+pub extern "C" fn builtin_value_eq(a: usize, b: usize) -> usize {
+    unsafe {
+        let runtime_ptr = std::ptr::addr_of!(RUNTIME);
+        let rt = &*(*runtime_ptr).as_ref().unwrap().get();
+        if rt.values_equal(a, b) {
+            11 // tagged true
+        } else {
+            3 // tagged false
+        }
+    }
+}
+
 /// Invoke an object as a function via IFn protocol dispatch
 ///
 /// Called when trying to invoke a non-function/closure value (e.g., keyword, map).

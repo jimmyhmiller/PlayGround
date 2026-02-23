@@ -590,7 +590,8 @@ impl Compiler {
                  "__string_count" | "__keyword_name" | "__apply" | "__str_concat" |
                  // Reader set operations
                  "__reader_set_count" | "__reader_set_contains" | "__reader_set_conj" | "__reader_set_get" |
-                 "__is_reader_set"
+                 "__is_reader_set" |
+                 "__value_eq"
         )
     }
 
@@ -2695,6 +2696,7 @@ impl Compiler {
                     "__reader_set_conj" => self.compile_builtin_reader_set_conj(args),
                     "__reader_set_get" => self.compile_builtin_reader_prim_2(args, "__reader_set_get"),
                     "__is_reader_set" => self.compile_builtin_reader_prim_1(args, "__is_reader_set"),
+                    "__value_eq" => self.compile_builtin_value_eq(args),
                     _ => unreachable!(),
                 };
             }
@@ -3258,6 +3260,24 @@ impl Compiler {
             .emit(Instruction::Compare(result, left, right, Condition::Equal));
 
         // Compare returns properly tagged boolean (3 or 11)
+        Ok(result)
+    }
+
+    fn compile_builtin_value_eq(&mut self, args: &[Expr]) -> Result<IrValue, String> {
+        if args.len() != 2 {
+            return Err(format!("__value_eq requires 2 arguments, got {}", args.len()));
+        }
+        let left = self.compile(&args[0])?;
+        let right = self.compile(&args[1])?;
+        let left = self.builder.assign_new(left);
+        let right = self.builder.assign_new(right);
+        let result = self.builder.new_register();
+        let builtin_addr = crate::trampoline::builtin_value_eq as usize;
+        self.builder.emit(Instruction::ExternalCall(
+            result,
+            builtin_addr,
+            vec![left, right],
+        ));
         Ok(result)
     }
 

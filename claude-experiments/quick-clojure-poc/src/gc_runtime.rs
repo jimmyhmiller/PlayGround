@@ -1697,7 +1697,7 @@ impl GCRuntime {
     /// For primitives: uses identity
     /// For strings/keywords: compares content
     /// For other heap objects: uses identity (for now)
-    fn values_equal(&self, a: usize, b: usize) -> bool {
+    pub fn values_equal(&self, a: usize, b: usize) -> bool {
         if a == b {
             return true;
         }

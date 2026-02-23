@@ -711,13 +711,20 @@
 (defn =
   "Equality. Returns true if x equals y, false if not."
   ([x] true)
-  ([x y] (prim-eq x y))
-  ([x y & more]
+  ([x y]
    (if (prim-eq x y)
+     true
+     (if (__value_eq x y)
+       true
+       (if (satisfies? IEquiv x)
+         (-equiv x y)
+         false))))
+  ([x y & more]
+   (if (= x y)
      (loop [prev y s more]
        (if (nil? (seq s))
          true
-         (if (prim-eq prev (first s))
+         (if (= prev (first s))
            (recur (first s) (next s))
            false)))
      false)))
@@ -970,6 +977,22 @@
   ICounted
   (-count [this] (.-count this))
 
+  IIndexed
+  (-nth [this n]
+    (loop [s this i n]
+      (if (nil? s)
+        (throw "Index out of bounds")
+        (if (prim-eq i 0)
+          (.-first s)
+          (recur (.-rest s) (prim-sub i 1))))))
+  (-nth [this n not-found]
+    (loop [s this i n]
+      (if (nil? s)
+        not-found
+        (if (prim-eq i 0)
+          (.-first s)
+          (recur (.-rest s) (prim-sub i 1))))))
+
   IReduce
   (-reduce [this f] (seq-reduce f this))
   (-reduce [this f start] (seq-reduce f start this)))
@@ -1033,6 +1056,22 @@
         cnt
         (recur (-next s) (inc cnt)))))
 
+  IIndexed
+  (-nth [this n]
+    (loop [s this i n]
+      (if (nil? s)
+        (throw "Index out of bounds")
+        (if (prim-eq i 0)
+          (-first s)
+          (recur (-next s) (prim-sub i 1))))))
+  (-nth [this n not-found]
+    (loop [s this i n]
+      (if (nil? s)
+        not-found
+        (if (prim-eq i 0)
+          (-first s)
+          (recur (-next s) (prim-sub i 1))))))
+
   IReduce
   (-reduce [this f] (seq-reduce f this))
   (-reduce [this f start] (seq-reduce f start this)))
@@ -1045,11 +1084,19 @@
     (Cons. nil x (seq coll) nil)))
 
 (defn conj
-  "Returns a new collection with x 'added' to coll."
-  [coll x]
-  (if (nil? coll)
-    (PList. nil x nil 1 nil)
-    (-conj coll x)))
+  "Returns a new collection with xs 'added' to coll."
+  ([coll x]
+   (if (nil? coll)
+     (PList. nil x nil 1 nil)
+     (-conj coll x)))
+  ([coll x & xs]
+   (let [ret (conj coll x)]
+     (if xs
+       (loop [ret ret s xs]
+         (if s
+           (recur (conj ret (first s)) (next s))
+           ret))
+       ret))))
 
 (defn reverse
   "Returns a seq of the items in coll in reverse order. Not lazy."
@@ -3663,3 +3710,339 @@
 (def ^:macro defn-
   (fn [form env name & fdecl]
     (cons (quote defn) (cons name fdecl))))
+
+;; =============================================================================
+;; Additional Core Functions
+;; =============================================================================
+
+(defn not-empty
+  "If coll is empty, returns nil, else coll."
+  [coll]
+  (if (seq coll) coll nil))
+
+(defn mapv
+  "Returns a vector consisting of the result of applying f to the
+  set of first items of each coll, followed by applying f to the set
+  of second items in each coll, until any one of the colls is
+  exhausted. Any remaining items in other colls are ignored. Function
+  f should accept number-of-colls arguments. Returns a vector."
+  [f coll]
+  (vec (map f coll)))
+
+(defn filterv
+  "Returns a vector of the items in coll for which
+  (pred item) returns logical true."
+  [pred coll]
+  (vec (filter pred coll)))
+
+(defn interpose
+  "Returns a lazy seq of the elements of coll separated by sep."
+  [sep coll]
+  (drop 1 (interleave (repeat (count coll) sep) coll)))
+
+(defn sort-by
+  "Returns a sorted sequence of the items in coll, where the sort
+  order is determined by comparing (keyfn item)."
+  ([keyfn coll] (sort-by keyfn < coll))
+  ([keyfn comp coll]
+    (sort (fn [x y] (comp (keyfn x) (keyfn y))) coll)))
+
+(defn merge-with
+  "Returns a map that consists of the rest of the maps conj-ed onto
+  the first. If a key occurs in more than one map, the mapping(s)
+  from the latter (left-to-right) will be combined with the mapping in
+  the result by calling (f val-in-result val-in-latter)."
+  [f & maps]
+  (reduce
+    (fn [result m]
+      (reduce
+        (fn [r entry]
+          (let [k (key entry) v (val entry)]
+            (if (contains? r k)
+              (assoc r k (f (get r k) v))
+              (assoc r k v))))
+        result
+        (seq m)))
+    {}
+    (filter some? maps)))
+
+(defn partition-all
+  "Returns a lazy sequence of lists like partition, but may include
+  partitions with fewer than n items at the end."
+  ([n coll]
+    (loop [s (seq coll) result []]
+      (if (nil? s)
+        (seq result)
+        (let [p (take n s)
+              remaining (drop n s)]
+          (recur (seq remaining) (conj result p)))))))
+
+(defn partition-by
+  "Applies f to each value in coll, splitting it each time f returns a
+  new value. Returns a lazy seq of partitions."
+  [f coll]
+  (loop [s (seq coll) result [] current [] prev nil first? true]
+    (if (nil? s)
+      (if (empty? current) (seq result) (seq (conj result (seq current))))
+      (let [v (first s)
+            fv (f v)]
+        (if (or first? (= fv prev))
+          (recur (next s) result (conj current v) fv false)
+          (recur (next s) (conj result (seq current)) [v] fv false))))))
+
+(defn take-nth
+  "Returns a lazy seq of every nth item in coll."
+  [n coll]
+  (loop [s (seq coll) result [] i 0]
+    (if (nil? s)
+      (seq result)
+      (if (zero? (rem i n))
+        (recur (next s) (conj result (first s)) (inc i))
+        (recur (next s) result (inc i))))))
+
+(defn reductions
+  "Returns a lazy seq of the intermediate values of the reduction (as
+  per reduce) of coll by f, starting with init."
+  ([f coll]
+    (if (seq coll)
+      (reductions f (first coll) (rest coll))
+      (list (f))))
+  ([f init coll]
+    (loop [s (seq coll) acc init result [init]]
+      (if (nil? s)
+        (seq result)
+        (let [new-acc (f acc (first s))]
+          (recur (next s) new-acc (conj result new-acc)))))))
+
+(defn subvec
+  "Returns a persistent vector of the items in vector from
+  start (inclusive) to end (exclusive)."
+  ([v start] (subvec v start (count v)))
+  ([v start end]
+    (loop [i start result []]
+      (if (>= i end)
+        result
+        (recur (inc i) (conj result (nth v i)))))))
+
+(defn peek
+  "For a list, same as first. For a vector, same as last."
+  [coll]
+  (if (nil? coll) nil
+    (if (vector? coll)
+      (if (zero? (count coll)) nil (nth coll (dec (count coll))))
+      (first coll))))
+
+(defn pop
+  "For a list, returns a new list without the first item.
+  For a vector, returns a new vector without the last item."
+  [coll]
+  (if (vector? coll)
+    (subvec coll 0 (dec (count coll)))
+    (rest coll)))
+
+(defn keep-indexed
+  "Returns a lazy sequence of the non-nil results of (f index item)."
+  [f coll]
+  (loop [s (seq coll) i 0 result []]
+    (if (nil? s)
+      (seq result)
+      (let [v (f i (first s))]
+        (if (nil? v)
+          (recur (next s) (inc i) result)
+          (recur (next s) (inc i) (conj result v)))))))
+
+(defn ffirst
+  "Same as (first (first x))."
+  [x]
+  (first (first x)))
+
+(defn nnext
+  "Same as (next (next x))."
+  [x]
+  (next (next x)))
+
+(defn nthrest
+  "Returns the nth rest of coll, coll when n is 0."
+  [coll n]
+  (loop [s coll i n]
+    (if (and (pos? i) (seq s))
+      (recur (rest s) (dec i))
+      s)))
+
+(defn nthnext
+  "Returns the nth next of coll, (seq coll) when n is 0."
+  [coll n]
+  (loop [s (seq coll) i n]
+    (if (and (pos? i) s)
+      (recur (next s) (dec i))
+      s)))
+
+(defn drop-last
+  "Return a lazy sequence of all but the last n (default 1) items in coll."
+  ([coll] (drop-last 1 coll))
+  ([n coll]
+    (let [c (count coll)]
+      (take (- c n) coll))))
+
+(defn split-at
+  "Returns a vector of [(take n coll) (drop n coll)]."
+  [n coll]
+  [(take n coll) (drop n coll)])
+
+(defn split-with
+  "Returns a vector of [(take-while pred coll) (drop-while pred coll)]."
+  [pred coll]
+  [(take-while pred coll) (drop-while pred coll)])
+
+(defn dedupe
+  "Returns a lazy sequence removing consecutive duplicates in coll."
+  [coll]
+  (loop [s (seq coll) prev nil result [] first? true]
+    (if (nil? s)
+      (seq result)
+      (let [v (first s)]
+        (if (and (not first?) (= v prev))
+          (recur (next s) prev result false)
+          (recur (next s) v (conj result v) false))))))
+
+(defn boolean
+  "Coerce to boolean."
+  [x]
+  (if x true false))
+
+;; =============================================================================
+;; Additional Threading & Control Flow Macros
+;; =============================================================================
+
+;; as-> thread with named binding
+(def ^:macro as->
+  (fn [form env expr name & forms]
+    (let [steps (reduce (fn [acc f]
+                          (list (quote let) (vector name acc) f))
+                        expr
+                        forms)]
+      steps)))
+
+;; some-> thread first, short-circuit on nil
+(def ^:macro some->
+  (fn [form env expr & forms]
+    (let [g (gensym "some__")]
+      (reduce (fn [acc f]
+                (let [step (if (list? f)
+                             (cons (first f) (cons g (rest f)))
+                             (list f g))]
+                  (list (quote let) (vector g acc)
+                        (list (quote if) (list (quote nil?) g) nil step))))
+              expr
+              forms))))
+
+;; some->> thread last, short-circuit on nil
+(def ^:macro some->>
+  (fn [form env expr & forms]
+    (let [g (gensym "some__")]
+      (reduce (fn [acc f]
+                (let [step (if (list? f)
+                             (concat f (list g))
+                             (list f g))]
+                  (list (quote let) (vector g acc)
+                        (list (quote if) (list (quote nil?) g) nil step))))
+              expr
+              forms))))
+
+;; cond-> thread first with conditions
+(def ^:macro cond->
+  (fn [form env expr & clauses]
+    (let [g (gensym "cond__")
+          pairs (partition 2 clauses)]
+      (loop [s (seq pairs) acc expr]
+        (if (nil? s)
+          (list (quote let) (vector g acc) g)
+          (let [pair (first s)
+                test (first pair)
+                step (second pair)
+                threaded (if (list? step)
+                           (cons (first step) (cons g (rest step)))
+                           (list step g))]
+            (recur (next s)
+                   (list (quote let) (vector g acc)
+                         (list (quote if) test threaded g)))))))))
+
+;; cond->> thread last with conditions
+(def ^:macro cond->>
+  (fn [form env expr & clauses]
+    (let [g (gensym "cond__")
+          pairs (partition 2 clauses)]
+      (loop [s (seq pairs) acc expr]
+        (if (nil? s)
+          (list (quote let) (vector g acc) g)
+          (let [pair (first s)
+                test (first pair)
+                step (second pair)
+                threaded (if (list? step)
+                           (concat step (list g))
+                           (list step g))]
+            (recur (next s)
+                   (list (quote let) (vector g acc)
+                         (list (quote if) test threaded g)))))))))
+
+;; if-some - like if-let but tests for non-nil (not just truthy)
+(def ^:macro if-some
+  (fn [form env bindings then else]
+    (let [bind (first bindings)
+          test (second bindings)
+          temp (gensym "temp__")]
+      (list (quote let) (vector temp test)
+            (list (quote if) (list (quote nil?) temp)
+              else
+              (list (quote let) (vector bind temp) then))))))
+
+;; when-some - like when-let but tests for non-nil
+(def ^:macro when-some
+  (fn [form env bindings & body]
+    (let [bind (first bindings)
+          test (second bindings)
+          temp (gensym "temp__")]
+      (list (quote let) (vector temp test)
+            (list (quote if) (list (quote nil?) temp)
+              nil
+              (cons (quote let) (cons (vector bind temp) body)))))))
+
+;; defonce - simplified version that always defines
+(def ^:macro defonce
+  (fn [form env name expr]
+    (list (quote def) name expr)))
+
+;; assert - throw if not truthy
+(def ^:macro assert
+  (fn [form env x & args]
+    (let [msg (first args)]
+      (list (quote when) (list (quote not) x)
+            (list (quote throw) (if msg msg "Assert failed"))))))
+
+;; doseq - simplified, single binding only
+(def ^:macro doseq
+  (fn [form env bindings & body]
+    (let [bind (first bindings)
+          coll (second bindings)
+          g (gensym "s__")]
+      (list (quote loop) (vector g (list (quote seq) coll))
+            (list (quote when) g
+              (cons (quote let) (cons (vector bind (list (quote first) g))
+                body))
+              (list (quote recur) (list (quote next) g)))))))
+
+;; case - match expression against constant values
+(def ^:macro case
+  (fn [form env expr & clauses]
+    (let [g (gensym "case__")
+          has-default (odd? (count clauses))
+          default (if has-default (last clauses) (list (quote throw) "No matching clause"))
+          test-pairs (if has-default (partition 2 (butlast clauses)) (partition 2 clauses))]
+      (loop [s (seq (reverse (seq test-pairs))) acc default]
+        (if (nil? s)
+          (list (quote let) (vector g expr) acc)
+          (let [pair (first s)
+                test-val (first pair)
+                result (second pair)]
+            (recur (next s)
+                   (list (quote if) (list (quote =) g test-val) result acc))))))))
