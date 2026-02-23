@@ -1,6 +1,7 @@
 import AVFoundation
 import Accelerate
 import Combine
+import CoreAudio
 import SwiftUI
 
 class AudioMonitor: ObservableObject {
@@ -41,8 +42,30 @@ class AudioMonitor: ObservableObject {
         }
     }
 
+    private func isMicInUseByCoreAudio() -> Bool {
+        var deviceID = AudioDeviceID(0)
+        var size = UInt32(MemoryLayout<AudioDeviceID>.size)
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultInputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        guard AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size, &deviceID) == noErr,
+              deviceID != kAudioDeviceUnknown else { return false }
+
+        var isRunning: UInt32 = 0
+        size = UInt32(MemoryLayout<UInt32>.size)
+        address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyDeviceIsRunningSomewhere,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        guard AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, &isRunning) == noErr else { return false }
+        return isRunning != 0
+    }
+
     private func tick() {
-        let inUse = AVCaptureDevice.default(for: .audio)?.isInUseByAnotherApplication ?? false
+        let inUse = isMicInUseByCoreAudio()
 
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }

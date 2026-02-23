@@ -38,6 +38,7 @@
 
 static GcCustomHandle* gc = NULL;
 static void* g_thread = NULL;
+static int gc_always = 0;
 
 void gc_set_thread(void* thread) {
     g_thread = thread;
@@ -135,6 +136,13 @@ void gc_init(void) {
     cfg.initial_heap = 32 * 1024 * 1024;  /* 32 MB */
     cfg.strategy = GC_STRATEGY_GENERATIONAL;  /* Now using generational GC! */
     gc = gc_lib_custom_create(cfg);
+
+    /* GC stress mode: collect on every allocation */
+    const char* env = getenv("LANG_GC_ALWAYS");
+    if (env && env[0] == '1') {
+        gc_always = 1;
+        fprintf(stderr, "[gc] gc-always mode enabled\n");
+    }
 }
 
 /* Allocate a GC object.
@@ -142,6 +150,9 @@ void gc_init(void) {
  * ptr_fields: number of GC pointer fields (must come first in layout)
  * type_id: runtime type identifier */
 void* gc_alloc(int64_t total_fields, int64_t ptr_fields, int64_t type_id) {
+    if (gc_always && g_thread) {
+        gc_lib_custom_collect(gc, g_thread);
+    }
     size_t size = HEADER_SIZE + (size_t)total_fields * 8;
     void* obj = gc_lib_custom_allocate(gc, size, g_thread);
     if (!obj) return NULL;

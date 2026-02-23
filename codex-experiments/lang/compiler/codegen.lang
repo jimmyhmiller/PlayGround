@@ -32,6 +32,7 @@ use ast::CgVariantLayout;
 use ast::CgEnumLayout;
 use ast::CgLocal;
 use ast::CgFnEntry;
+use ast::I64Wrap;
 use ast::LoopEntry;
 
 // -- vec ops ---------------------------------------------------------------
@@ -59,6 +60,7 @@ use vec::vec_get_slfield;
 use vec::ptr_is_null;
 use vec::Vec;
 use vec::vec_push_raw;
+use vec::vec_get_raw;
 
 // codegen-specific vec aliases
 fn vec_push_cgfn(v: Vec, item: CgFnEntry) -> I64 { vec_push(v, item) }
@@ -77,6 +79,8 @@ fn vec_push_cgloc(v: Vec, item: CgLocal) -> I64 { vec_push(v, item) }
 fn vec_get_cgloc(v: Vec, index: I64) -> CgLocal { vec_get(v, index) }
 fn vec_push_loop(v: Vec, item: LoopEntry) -> I64 { vec_push(v, item) }
 fn vec_get_loop(v: Vec, index: I64) -> LoopEntry { vec_get(v, index) }
+fn vec_push_i64w(v: Vec, item: I64Wrap) -> I64 { vec_push(v, item) }
+fn vec_get_i64w(v: Vec, index: I64) -> I64Wrap { vec_get(v, index) }
 
 // -- string + io ops (from stdlib) -----------------------------------------
 use string::string_eq;
@@ -582,7 +586,7 @@ fn cg_get_fn(cg: Codegen, name: String) -> CgFnEntry {
     };
     print_str_stderr(string_concat("codegen error: unknown function: ", name));
     exit_process(1);
-    // unreachable
+    // unreachable - dummy has empty gc_mask
     let dummy: CgFnEntry = vec_get_cgfn(cg.functions, 0);
     dummy
 }
@@ -1081,26 +1085,45 @@ fn declare_enums(cg: Codegen, modules: Vec) -> I64 {
 
 fn declare_fn(cg: Codegen, full_name: String, params: Vec, ret_type: Type) -> CgFnEntry {
     let param_tys: Vec = vec_new();
+    let mut gc_mask: String = "";
     vec_push_raw(param_tys, lang_llvm_ptr_type(cg.context));
     let mut i: I64 = 0;
     while i < vec_len(params) {
         let p: Param = vec_get_param(params, i);
         vec_push_raw(param_tys, llvm_type(cg, p.ty));
+        let tag: I64 = type_to_tag(p.ty);
+        if tag_is_gc_ref(tag) {
+            gc_mask = string_concat(gc_mask, "1");
+        } else {
+            gc_mask = string_concat(gc_mask, "0");
+        };
         i = i + 1;
     };
     let ret: RawPointer<I8> = llvm_type(cg, ret_type);
     let fn_ty: RawPointer<I8> = lang_llvm_function_type(ret, vec_data(param_tys), vec_len(param_tys), 0);
     let llvm_name: String = llvm_fn_name(full_name);
     let fn_val: RawPointer<I8> = LLVMAddFunction(cg.llmod, llvm_name, fn_ty);
-    CgFnEntry { name: full_name, fn_val: fn_val, fn_ty: fn_ty }
+    CgFnEntry { name: full_name, fn_val: fn_val, fn_ty: fn_ty, gc_mask: gc_mask }
 }
 
 fn declare_extern_fn_entry(cg: Codegen, full_name: String, params: Vec, ret_type: Type, varargs: Bool) -> CgFnEntry {
+    let mut gc_mask: String = "";
+    let mut mi: I64 = 0;
+    while mi < vec_len(params) {
+        let mp: Param = vec_get_param(params, mi);
+        let tag: I64 = type_to_tag(mp.ty);
+        if tag_is_gc_ref(tag) {
+            gc_mask = string_concat(gc_mask, "1");
+        } else {
+            gc_mask = string_concat(gc_mask, "0");
+        };
+        mi = mi + 1;
+    };
     let symbol: String = last_segment(full_name);
     let existing: RawPointer<I8> = LLVMGetNamedFunction(cg.llmod, symbol);
     if ptr_is_null(existing) == 0 {
         let fn_ty: RawPointer<I8> = LLVMGlobalGetValueType(existing);
-        return CgFnEntry { name: full_name, fn_val: existing, fn_ty: fn_ty };
+        return CgFnEntry { name: full_name, fn_val: existing, fn_ty: fn_ty, gc_mask: gc_mask };
     };
     let param_tys: Vec = vec_new();
     let mut i: I64 = 0;
@@ -1113,7 +1136,7 @@ fn declare_extern_fn_entry(cg: Codegen, full_name: String, params: Vec, ret_type
     let va: I64 = if varargs { 1 } else { 0 };
     let fn_ty: RawPointer<I8> = lang_llvm_function_type(ret, vec_data(param_tys), vec_len(param_tys), va);
     let fn_val: RawPointer<I8> = LLVMAddFunction(cg.llmod, symbol, fn_ty);
-    CgFnEntry { name: full_name, fn_val: fn_val, fn_ty: fn_ty }
+    CgFnEntry { name: full_name, fn_val: fn_val, fn_ty: fn_ty, gc_mask: gc_mask }
 }
 
 fn declare_functions(cg: Codegen, modules: Vec) -> I64 {
@@ -1332,6 +1355,30 @@ fn store_local(cg: Codegen, local: CgLocal, value: RawPointer<I8>) -> I64 {
     0
 }
 
+fn store_temp_root(cg: Codegen, ctx: FnCtx, value: RawPointer<I8>) -> I64 {
+    let slot: I64 = ctx.next_root;
+    ctx.next_root = ctx.next_root + 1;
+    let ptr_ty: RawPointer<I8> = lang_llvm_ptr_type(cg.context);
+    let idx: RawPointer<I8> = lang_llvm_const_int(LLVMInt32TypeInContext(cg.context), slot, 0);
+    let indices: Vec = vec_new();
+    vec_push_raw(indices, idx);
+    let slot_ptr: RawPointer<I8> = lang_llvm_build_gep2(cg.builder, ptr_ty, ctx.root_base, vec_data(indices), 1, "temp_root_slot");
+    let inst: RawPointer<I8> = LLVMBuildStore(cg.builder, value, slot_ptr);
+    lang_llvm_set_volatile(inst, 1);
+    slot
+}
+
+fn load_temp_root(cg: Codegen, ctx: FnCtx, slot: I64) -> RawPointer<I8> {
+    let ptr_ty: RawPointer<I8> = lang_llvm_ptr_type(cg.context);
+    let idx: RawPointer<I8> = lang_llvm_const_int(LLVMInt32TypeInContext(cg.context), slot, 0);
+    let indices: Vec = vec_new();
+    vec_push_raw(indices, idx);
+    let slot_ptr: RawPointer<I8> = lang_llvm_build_gep2(cg.builder, ptr_ty, ctx.root_base, vec_data(indices), 1, "temp_root_slot");
+    let loaded: RawPointer<I8> = LLVMBuildLoad2(cg.builder, ptr_ty, slot_ptr, "temp_reload");
+    lang_llvm_set_volatile(loaded, 1);
+    loaded
+}
+
 // ---------------------------------------------------------------------------
 // Root counting (pre-scan to determine frame size)
 // ---------------------------------------------------------------------------
@@ -1430,6 +1477,51 @@ fn count_roots_in_expr(cg: Codegen, expr: Expr) -> I64 {
                 count = count + count_roots_in_expr(cg, arg);
                 i = i + 1;
             };
+            match callee {
+                Expr::PathExpr { path, span: s2 } => {
+                    // If enum variant constructor, +1 for obj_ptr rooting
+                    if vec_len(path) >= 2 {
+                        let en: String = enum_path_and_variant(path);
+                        if cg_find_enum(cg, en) == 1 {
+                            if vec_len(args) > 0 {
+                                count = count + 1;
+                            };
+                        };
+                    };
+                    // Temp roots for GC-ref call args
+                    if vec_len(args) >= 2 {
+                        let key: String = path_to_string(path);
+                        let mut gc_mask: String = "";
+                        let mut found: Bool = false;
+                        if cg_find_fn(cg, key) == 1 {
+                            let ent: CgFnEntry = cg_get_fn(cg, key);
+                            gc_mask = ent.gc_mask;
+                            found = true;
+                        } else {
+                            if cg_find_extern(cg, key) == 1 {
+                                let ent: CgFnEntry = cg_get_extern(cg, key);
+                                gc_mask = ent.gc_mask;
+                                found = true;
+                            };
+                        };
+                        if found {
+                            let mut pi: I64 = 0;
+                            while pi < string_len(gc_mask) {
+                                if pi < vec_len(args) - 1 {
+                                    if string_byte_at(gc_mask, pi) == 49 {
+                                        count = count + 1;
+                                    };
+                                };
+                                pi = pi + 1;
+                            };
+                        } else {
+                            // Unknown function — conservative
+                            count = count + vec_len(args);
+                        };
+                    };
+                },
+                _ => {}
+            };
             count
         },
         Expr::FieldExpr { base, name, span } => {
@@ -1443,6 +1535,10 @@ fn count_roots_in_expr(cg: Codegen, expr: Expr) -> I64 {
                 count = count + count_roots_in_expr(cg, f.value);
                 i = i + 1;
             };
+            // +1 temp root for obj_ptr during field evaluation
+            if vec_len(fields) > 0 {
+                count = count + 1;
+            };
             count
         },
         Expr::TupleExpr { items, span } => {
@@ -1452,6 +1548,10 @@ fn count_roots_in_expr(cg: Codegen, expr: Expr) -> I64 {
                 let it: Expr = vec_get_expr(items, i);
                 count = count + count_roots_in_expr(cg, it);
                 i = i + 1;
+            };
+            // +1 temp root for obj_ptr during element evaluation
+            if vec_len(items) > 0 {
+                count = count + 1;
             };
             count
         },
@@ -2183,29 +2283,67 @@ fn codegen_call(cg: Codegen, callee: Expr, args: Vec, ctx: FnCtx) -> RawPointer<
             let mut fn_val: RawPointer<I8> = LLVMConstNull(lang_llvm_ptr_type(cg.context));
             let mut fn_ty: RawPointer<I8> = LLVMConstNull(lang_llvm_ptr_type(cg.context));
             let mut pass_thread: Bool = false;
+            let mut gc_mask: String = "";
             if cg_find_fn(cg, key) == 1 {
                 let entry: CgFnEntry = cg_get_fn(cg, key);
                 fn_val = entry.fn_val;
                 fn_ty = entry.fn_ty;
+                gc_mask = entry.gc_mask;
                 pass_thread = true;
             } else {
                 if cg_find_extern(cg, key) == 1 {
                     let entry: CgFnEntry = cg_get_extern(cg, key);
                     fn_val = entry.fn_val;
                     fn_ty = entry.fn_ty;
+                    gc_mask = entry.gc_mask;
                 } else {
                     print_str_stderr(string_concat("codegen error: unknown function: ", key));
                     exit_process(1);
                 };
             };
-            let arg_vals: Vec = vec_new();
-            if pass_thread { vec_push_raw(arg_vals, ctx.thread); };
+            let need_rooting: Bool = vec_len(args) >= 2;
+            // Phase 1: Evaluate all args, rooting GC-ref non-last args
+            let eval_vals: Vec = vec_new();
+            let rooted_slots: Vec = vec_new();
+            let mut rooted_bitmap: String = "";
             let mut i: I64 = 0;
             while i < vec_len(args) {
                 let arg: Expr = vec_get_expr(args, i);
                 let val: RawPointer<I8> = codegen_expr(cg, arg, ctx);
-                vec_push_raw(arg_vals, val);
+                vec_push_raw(eval_vals, val);
+                if need_rooting && i < vec_len(args) - 1 {
+                    let is_gc: Bool = if i < string_len(gc_mask) {
+                        string_byte_at(gc_mask, i) == 49
+                    } else {
+                        false
+                    };
+                    if is_gc {
+                        let slot: I64 = store_temp_root(cg, ctx, val);
+                        vec_push_i64w(rooted_slots, I64Wrap { v: slot });
+                        rooted_bitmap = string_concat(rooted_bitmap, "1");
+                    } else {
+                        rooted_bitmap = string_concat(rooted_bitmap, "0");
+                    };
+                } else {
+                    rooted_bitmap = string_concat(rooted_bitmap, "0");
+                };
                 i = i + 1;
+            };
+            // Phase 2: Build final arg_vals, reloading rooted args from root slots
+            let arg_vals: Vec = vec_new();
+            if pass_thread { vec_push_raw(arg_vals, ctx.thread); };
+            let mut j: I64 = 0;
+            let mut rooted_idx: I64 = 0;
+            while j < vec_len(eval_vals) {
+                if j < string_len(rooted_bitmap) && string_byte_at(rooted_bitmap, j) == 49 {
+                    let sw: I64Wrap = vec_get_i64w(rooted_slots, rooted_idx);
+                    let reloaded: RawPointer<I8> = load_temp_root(cg, ctx, sw.v);
+                    vec_push_raw(arg_vals, reloaded);
+                    rooted_idx = rooted_idx + 1;
+                } else {
+                    vec_push_raw(arg_vals, vec_get_raw(eval_vals, j));
+                };
+                j = j + 1;
             };
             let call: RawPointer<I8> = lang_llvm_build_call(cg.builder, fn_ty, fn_val, vec_data(arg_vals), vec_len(arg_vals), "call");
             emit_pollcheck(cg, ctx);
@@ -2235,12 +2373,20 @@ fn codegen_enum_tuple_construct(cg: Codegen, enum_name: String, vname: String, a
     let tag_val: RawPointer<I8> = lang_llvm_const_int(i64_ty, vlayout.tag, 0);
     LLVMBuildStore(cg.builder, tag_val, tag_ptr);
 
+    // Root obj_ptr across field evaluation (GC may relocate it)
+    let obj_root_slot: I64 = if vec_len(args) > 0 {
+        store_temp_root(cg, ctx, obj_ptr)
+    } else { 0 - 1 };
     let mut i: I64 = 0;
     while i < vec_len(args) {
         let arg: Expr = vec_get_expr(args, i);
         let arg_val: RawPointer<I8> = codegen_expr(cg, arg, ctx);
+        // Reload obj_ptr from root slot (may have been relocated by GC during arg eval)
+        let current_obj_ptr: RawPointer<I8> = if obj_root_slot >= 0 {
+            load_temp_root(cg, ctx, obj_root_slot)
+        } else { obj_ptr };
         let vfl: CgVariantFieldLayout = vec_get_cgvfl(vlayout.fields, i);
-        let fp: RawPointer<I8> = enum_field_ptr(cg, obj_ptr, vfl.field_index);
+        let fp: RawPointer<I8> = enum_field_ptr(cg, current_obj_ptr, vfl.field_index);
         let sv: RawPointer<I8> = if tag_is_bool(vfl.lang_ty_tag) {
             LLVMBuildZExt(cg.builder, arg_val, LLVMInt8TypeInContext(cg.context), "boolz")
         } else { arg_val };
@@ -2248,7 +2394,10 @@ fn codegen_enum_tuple_construct(cg: Codegen, enum_name: String, vname: String, a
         i = i + 1;
     };
     emit_pollcheck(cg, ctx);
-    obj_ptr
+    // Return reloaded obj_ptr
+    if obj_root_slot >= 0 {
+        load_temp_root(cg, ctx, obj_root_slot)
+    } else { obj_ptr }
 }
 
 fn codegen_struct_lit(cg: Codegen, path: Vec, fields: Vec, ctx: FnCtx) -> RawPointer<I8> {
@@ -2270,12 +2419,19 @@ fn codegen_struct_lit(cg: Codegen, path: Vec, fields: Vec, ctx: FnCtx) -> RawPoi
     vec_push_raw(alloc_args, lang_llvm_const_int(i64_ty, layout.type_id, 0));
     let obj_ptr: RawPointer<I8> = lang_llvm_build_call(cg.builder, cg.gc_alloc_ty, cg.gc_alloc_fn, vec_data(alloc_args), 3, "alloc");
 
+    // Root obj_ptr across field evaluation
+    let obj_root_slot: I64 = if vec_len(fields) > 0 {
+        store_temp_root(cg, ctx, obj_ptr)
+    } else { 0 - 1 };
     let mut i: I64 = 0;
     while i < vec_len(fields) {
         let sf: StructLitField = vec_get_slfield(fields, i);
         let fl: CgFieldLayout = find_field_layout(layout.fields, sf.name);
         let value: RawPointer<I8> = codegen_expr(cg, sf.value, ctx);
-        let fp: RawPointer<I8> = field_ptr(cg, obj_ptr, fl);
+        let current_obj_ptr: RawPointer<I8> = if obj_root_slot >= 0 {
+            load_temp_root(cg, ctx, obj_root_slot)
+        } else { obj_ptr };
+        let fp: RawPointer<I8> = field_ptr(cg, current_obj_ptr, fl);
         let sv: RawPointer<I8> = if tag_is_bool(fl.lang_ty_tag) {
             LLVMBuildZExt(cg.builder, value, LLVMInt8TypeInContext(cg.context), "boolz")
         } else { value };
@@ -2283,7 +2439,9 @@ fn codegen_struct_lit(cg: Codegen, path: Vec, fields: Vec, ctx: FnCtx) -> RawPoi
         i = i + 1;
     };
     emit_pollcheck(cg, ctx);
-    obj_ptr
+    if obj_root_slot >= 0 {
+        load_temp_root(cg, ctx, obj_root_slot)
+    } else { obj_ptr }
 }
 
 fn codegen_enum_struct_construct(cg: Codegen, enum_name: String, vname: String, fields: Vec, ctx: FnCtx) -> RawPointer<I8> {
@@ -2302,12 +2460,19 @@ fn codegen_enum_struct_construct(cg: Codegen, enum_name: String, vname: String, 
     let tag_val: RawPointer<I8> = lang_llvm_const_int(i64_ty, vlayout.tag, 0);
     LLVMBuildStore(cg.builder, tag_val, tag_ptr);
 
+    // Root obj_ptr across field evaluation
+    let obj_root_slot: I64 = if vec_len(fields) > 0 {
+        store_temp_root(cg, ctx, obj_ptr)
+    } else { 0 - 1 };
     let mut i: I64 = 0;
     while i < vec_len(fields) {
         let sf: StructLitField = vec_get_slfield(fields, i);
         let vfl: CgVariantFieldLayout = cg_get_variant_field(vlayout, sf.name);
         let value: RawPointer<I8> = codegen_expr(cg, sf.value, ctx);
-        let fp: RawPointer<I8> = enum_field_ptr(cg, obj_ptr, vfl.field_index);
+        let current_obj_ptr: RawPointer<I8> = if obj_root_slot >= 0 {
+            load_temp_root(cg, ctx, obj_root_slot)
+        } else { obj_ptr };
+        let fp: RawPointer<I8> = enum_field_ptr(cg, current_obj_ptr, vfl.field_index);
         let sv: RawPointer<I8> = if tag_is_bool(vfl.lang_ty_tag) {
             LLVMBuildZExt(cg.builder, value, LLVMInt8TypeInContext(cg.context), "boolz")
         } else { value };
@@ -2315,7 +2480,9 @@ fn codegen_enum_struct_construct(cg: Codegen, enum_name: String, vname: String, 
         i = i + 1;
     };
     emit_pollcheck(cg, ctx);
-    obj_ptr
+    if obj_root_slot >= 0 {
+        load_temp_root(cg, ctx, obj_root_slot)
+    } else { obj_ptr }
 }
 
 // ---------------------------------------------------------------------------

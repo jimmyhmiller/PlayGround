@@ -5,27 +5,17 @@
 /// Tests that require features not yet implemented are marked #[ignore].
 ///
 /// Known limitations of this implementation:
-/// - Structural equality (=) on collections uses reference equality (always false for different instances)
-/// - Maps print as "{... N entries}", sets as "#{... N elements}"
 /// - No lazy sequences (iterate/repeat with 1 arg, cycle will hang)
 /// - No destructuring in fn params or loop bindings
 /// - No named fn self-reference
-/// - No some->, some->>, cond->, cond->>, as-> macros
-/// - No case, for, doseq (with :let/:when/:while), while macros
-/// - No atoms/deref/swap!/reset! via -e mode
 /// - No sorted-set, sorted-map
-/// - No subs, keyword constructor, boolean, boolean?, char, int, double, float coercions
-/// - No pr-str, prn-str, println-str
 /// - No ex-info/ex-message/ex-data
 /// - No regex
-/// - No compare function
-/// - No interpose, partition-all, partition-by, take-nth, dedupe, reductions, sort-by
-/// - No seq on strings
-/// - conj only accepts one value at a time
-/// - str on floats shows odd output; println on floats works
-/// - rest/next on empty collections returns nil (not empty seq)
-/// - reduce with (reduced ...) does not unwrap properly
-/// - name on namespaced keywords returns full "ns/name" not just "name"
+/// - No letfn
+/// - No delay/deref
+/// - No defonce (with re-def protection)
+/// - No meta/with-meta
+/// - No extend-type on nil
 
 use std::fs;
 use std::path::PathBuf;
@@ -906,8 +896,9 @@ fn cljs_map_hash_map() {
 fn cljs_map_keys_vals() {
     assert_eq!(eval_expr("(count (keys {:a 1 :b 2}))"), "2");
     assert_eq!(eval_expr("(count (vals {:a 1 :b 2}))"), "2");
-    assert_eq!(eval_expr("(str (keys {:a 1 :b 2}))"), "\"(:a :b)\"");
-    assert_eq!(eval_expr("(str (vals {:a 1 :b 2}))"), "\"(1 2)\"");
+    // Map iteration order is not guaranteed, so check via sort
+    assert_eq!(eval_expr("(str (sort (keys {:a 1 :b 2})))"), "\"(:a :b)\"");
+    assert_eq!(eval_expr("(str (sort (vals {:a 1 :b 2})))"), "\"(1 2)\"");
 }
 
 #[test]
@@ -2346,7 +2337,6 @@ fn cljs_fn_literal_rest_args() {
 // ============================================================================
 
 #[test]
-#[ignore] // some-> macro not implemented
 fn cljs_some_thread_first() {
     assert_eq!(eval_expr("(some-> nil)"), "nil");
     assert_eq!(eval_expr("(some-> 0)"), "0");
@@ -2354,7 +2344,6 @@ fn cljs_some_thread_first() {
 }
 
 #[test]
-#[ignore] // some->> macro not implemented
 fn cljs_some_thread_last() {
     assert_eq!(eval_expr("(some->> nil)"), "nil");
     assert_eq!(eval_expr("(some->> 0)"), "0");
@@ -2362,7 +2351,6 @@ fn cljs_some_thread_last() {
 }
 
 #[test]
-#[ignore] // cond-> macro not implemented
 fn cljs_cond_thread_first() {
     assert_eq!(eval_expr("(cond-> 0)"), "0");
     assert_eq!(eval_expr("(cond-> 0 true inc true (- 2))"), "-1");
@@ -2370,7 +2358,6 @@ fn cljs_cond_thread_first() {
 }
 
 #[test]
-#[ignore] // cond->> macro not implemented
 fn cljs_cond_thread_last() {
     assert_eq!(eval_expr("(cond->> 0)"), "0");
     assert_eq!(eval_expr("(cond->> 0 true inc true (- 2))"), "1");
@@ -2378,33 +2365,28 @@ fn cljs_cond_thread_last() {
 }
 
 #[test]
-#[ignore] // as-> macro not implemented
 fn cljs_as_thread() {
     assert_eq!(eval_expr("(as-> 0 x)"), "0");
     assert_eq!(eval_expr("(as-> 0 x (inc x))"), "1");
 }
 
 #[test]
-#[ignore] // case not implemented
 fn cljs_case_basic() {
     assert_eq!(eval_expr("(case 1, 1 :one, 2 :two, :default)"), ":one");
     assert_eq!(eval_expr("(case 3, 1 :one, 2 :two, :default)"), ":default");
 }
 
 #[test]
-#[ignore] // for macro not implemented
 fn cljs_for_basic() {
     assert_eq!(eval_expr("(str (for [x [1 2 3]] (* x x)))"), "\"(1 4 9)\"");
 }
 
 #[test]
-#[ignore] // atoms not available in -e mode
 fn cljs_atom_basic() {
     assert_eq!(eval_expr("(let [a (atom 0)] (swap! a inc) @a)"), "1");
 }
 
 #[test]
-#[ignore] // compare not implemented
 fn cljs_compare_basic() {
     assert_eq!(eval_expr("(compare 1 2)"), "-1");
     assert_eq!(eval_expr("(compare 2 1)"), "1");
@@ -2412,7 +2394,6 @@ fn cljs_compare_basic() {
 }
 
 #[test]
-#[ignore] // boolean/boolean? not implemented
 fn cljs_boolean_fn() {
     assert_eq!(eval_expr("(boolean true)"), "true");
     assert_eq!(eval_expr("(boolean false)"), "false");
@@ -2421,14 +2402,12 @@ fn cljs_boolean_fn() {
 }
 
 #[test]
-#[ignore] // subs not implemented
 fn cljs_subs() {
     assert_eq!(eval_expr("(subs \"hello\" 1)"), "\"ello\"");
     assert_eq!(eval_expr("(subs \"hello\" 1 3)"), "\"el\"");
 }
 
 #[test]
-#[ignore] // keyword constructor not implemented
 fn cljs_keyword_constructor() {
     assert_eq!(eval_expr("(keyword \"foo\")"), ":foo");
     assert_eq!(eval_expr("(keyword \"ns\" \"name\")"), ":ns/name");
@@ -2447,37 +2426,31 @@ fn cljs_sorted_map() {
 }
 
 #[test]
-#[ignore] // interpose not implemented
 fn cljs_interpose() {
     assert_eq!(eval_expr("(str (interpose :x [1 2 3]))"), "\"(1 :x 2 :x 3)\"");
 }
 
 #[test]
-#[ignore] // partition-all not implemented
 fn cljs_partition_all() {
     assert_eq!(eval_expr("(str (partition-all 3 [1 2 3 4 5]))"), "\"((1 2 3) (4 5))\"");
 }
 
 #[test]
-#[ignore] // partition-by not implemented
 fn cljs_partition_by() {
     assert_eq!(eval_expr("(str (partition-by even? [1 1 2 2 3 3]))"), "\"((1 1) (2 2) (3 3))\"");
 }
 
 #[test]
-#[ignore] // take-nth not implemented
 fn cljs_take_nth() {
     assert_eq!(eval_expr("(str (take-nth 2 (range 10)))"), "\"(0 2 4 6 8)\"");
 }
 
 #[test]
-#[ignore] // dedupe not implemented
 fn cljs_dedupe() {
     assert_eq!(eval_expr("(str (dedupe [1 1 2 2 3 3]))"), "\"(1 2 3)\"");
 }
 
 #[test]
-#[ignore] // reductions not implemented
 fn cljs_reductions() {
     assert_eq!(eval_expr("(str (reductions + [1 2 3 4]))"), "\"(1 3 6 10)\"");
 }
@@ -2501,57 +2474,48 @@ fn cljs_repeat_infinite() {
 }
 
 #[test]
-#[ignore] // sort-by not implemented
 fn cljs_sort_by() {
     assert_eq!(eval_expr("(str (sort-by count [\"aaa\" \"bb\" \"c\"]))"), "\"(\"c\" \"bb\" \"aaa\")\"");
 }
 
 #[test]
-#[ignore] // merge-with not implemented
 fn cljs_merge_with() {
     assert_eq!(eval_expr("(get (merge-with + {:a 1} {:a 2}) :a)"), "3");
 }
 
 #[test]
-#[ignore] // mapv not implemented
 fn cljs_mapv() {
     assert_eq!(eval_expr("(str (mapv inc [1 2 3]))"), "\"[2 3 4]\"");
 }
 
 #[test]
-#[ignore] // filterv not implemented
 fn cljs_filterv() {
     assert_eq!(eval_expr("(str (filterv even? [1 2 3 4]))"), "\"[2 4]\"");
 }
 
 #[test]
-#[ignore] // subvec not implemented
 fn cljs_subvec() {
-    assert_eq!(eval_expr("(str (subvec [0 1 2 3 4] 2 4))"), "\"[2 3 4]\"");
+    assert_eq!(eval_expr("(str (subvec [0 1 2 3 4] 2 4))"), "\"[2 3]\"");
 }
 
 #[test]
-#[ignore] // peek not implemented
 fn cljs_peek() {
     assert_eq!(eval_expr("(peek [1 2 3])"), "3");
     assert_eq!(eval_expr("(peek (list 1 2 3))"), "1");
 }
 
 #[test]
-#[ignore] // pop not implemented
 fn cljs_pop() {
     assert_eq!(eval_expr("(str (pop [1 2 3]))"), "\"[1 2]\"");
     assert_eq!(eval_expr("(str (pop (list 1 2 3)))"), "\"(2 3)\"");
 }
 
 #[test]
-#[ignore] // rseq not implemented
 fn cljs_rseq() {
     assert_eq!(eval_expr("(str (rseq [1 2 3]))"), "\"(3 2 1)\"");
 }
 
 #[test]
-#[ignore] // keep-indexed not implemented
 fn cljs_keep_indexed() {
     assert_eq!(
         eval_expr("(str (keep-indexed #(when (odd? %1) %2) [:a :b :c :d :e]))"),
@@ -2560,46 +2524,39 @@ fn cljs_keep_indexed() {
 }
 
 #[test]
-#[ignore] // seq? not implemented
 fn cljs_seq_pred() {
     assert_eq!(eval_expr("(seq? (list 1 2))"), "true");
     assert_eq!(eval_expr("(seq? [1 2])"), "false");
 }
 
 #[test]
-#[ignore] // not-empty not implemented
 fn cljs_not_empty() {
     assert_eq!(eval_expr("(not-empty [1 2 3])"), "[1 2 3]");
     assert_eq!(eval_expr("(not-empty [])"), "nil");
 }
 
 #[test]
-#[ignore] // fnil not implemented
 fn cljs_fnil() {
     assert_eq!(eval_expr("((fnil + 0) nil 3)"), "3");
     assert_eq!(eval_expr("((fnil + 0) 5 3)"), "8");
 }
 
 #[test]
-#[ignore] // ffirst not implemented
 fn cljs_ffirst() {
     assert_eq!(eval_expr("(ffirst [[1 2] [3 4]])"), "1");
 }
 
 #[test]
-#[ignore] // while not implemented
 fn cljs_while() {
     assert_eq!(eval_expr("(let [x 1] (while false 1) x)"), "1");
 }
 
 #[test]
-#[ignore] // doseq not implemented (not the same as dotimes)
 fn cljs_doseq() {
     assert_eq!(eval_expr("(doseq [x [1 2 3]] x)"), "nil");
 }
 
 #[test]
-#[ignore] // run! not implemented
 fn cljs_run() {
     assert_eq!(eval_expr("(run! identity [1 2 3])"), "nil");
 }
@@ -2611,7 +2568,6 @@ fn cljs_into_with_transducer() {
 }
 
 #[test]
-#[ignore] // reduced not properly unwrapped in reduce
 fn cljs_reduce_reduced() {
     assert_eq!(
         eval_expr("(reduce (fn [acc x] (if (= x 3) (reduced acc) (+ acc x))) 0 [1 2 3 4 5])"),
@@ -2620,7 +2576,6 @@ fn cljs_reduce_reduced() {
 }
 
 #[test]
-#[ignore] // namespace function not implemented
 fn cljs_namespace() {
     assert_eq!(eval_expr("(namespace :foo/bar)"), "\"foo\"");
     assert_eq!(eval_expr("(namespace :foo)"), "nil");
@@ -2636,7 +2591,6 @@ fn cljs_ex_info() {
 }
 
 #[test]
-#[ignore] // pr-str not implemented
 fn cljs_pr_str() {
     assert_eq!(eval_expr("(pr-str [1 2 3])"), "\"[1 2 3]\"");
 }
@@ -2684,7 +2638,6 @@ fn cljs_loop_destructure() {
 }
 
 #[test]
-#[ignore] // for macro not implemented
 fn cljs_for_while_when() {
     assert_output(
         "(println (str (for [i [1 2 3] :while (< i 2) j [4 5 6] :when (even? j)] [i j])))",
@@ -2708,26 +2661,22 @@ fn cljs_defonce() {
 }
 
 #[test]
-#[ignore] // condp not implemented
 fn cljs_condp() {
     assert_eq!(eval_expr("(condp = 1 1 \"one\")"), "\"one\"");
 }
 
 #[test]
-#[ignore] // if-some not implemented
 fn cljs_if_some() {
     assert_eq!(eval_expr("(if-some [foo nil] 1 2)"), "2");
     assert_eq!(eval_expr("(if-some [foo false] 1 2)"), "1");
 }
 
 #[test]
-#[ignore] // when-some not implemented
 fn cljs_when_some() {
     assert_eq!(eval_expr("(when-some [foo nil] 1)"), "nil");
 }
 
 #[test]
-#[ignore] // trampoline not implemented
 fn cljs_trampoline() {
     assert_output(
         "(defn hello [x] (if (< x 10000) #(hello (inc x)) x)) (println (trampoline hello 0))",
@@ -2742,43 +2691,36 @@ fn cljs_delay() {
 }
 
 #[test]
-#[ignore] // structural equality on collections doesn't work
 fn cljs_equality_vectors() {
     assert_eq!(eval_expr("(= [1 2 3] [1 2 3])"), "true");
 }
 
 #[test]
-#[ignore] // structural equality on collections doesn't work
 fn cljs_equality_maps() {
     assert_eq!(eval_expr("(= {:a 1 :b 2} {:b 2 :a 1})"), "true");
 }
 
 #[test]
-#[ignore] // structural equality on collections doesn't work
 fn cljs_equality_sets() {
     assert_eq!(eval_expr("(= #{1 2} #{2 1})"), "true");
 }
 
 #[test]
-#[ignore] // structural equality on strings doesn't work
 fn cljs_equality_strings() {
     assert_eq!(eval_expr("(= \"hello\" \"hello\")"), "true");
 }
 
 #[test]
-#[ignore] // structural equality on lists doesn't work
 fn cljs_equality_lists() {
     assert_eq!(eval_expr("(= (list 1 2 3) (list 1 2 3))"), "true");
 }
 
 #[test]
-#[ignore] // conj with multiple values only adds first
 fn cljs_conj_multiple_values() {
     assert_eq!(eval_expr("(str (conj [1] 2 3))"), "\"[1 2 3]\"");
 }
 
 #[test]
-#[ignore] // reduce with (reduced) doesn't unwrap
 fn cljs_reduce_reduced_unwrap() {
     assert_eq!(
         eval_expr("(str (reduce (fn [acc x] (if (> x 3) (reduced acc) (conj acc x))) [] [1 2 3 4 5]))"),

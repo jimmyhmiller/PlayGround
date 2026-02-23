@@ -559,7 +559,6 @@ fn sci_loop_let_shadow() {
 // ============================================================================
 
 #[test]
-#[ignore] // for macro not implemented
 fn sci_for_while_when() {
     assert_output(
         "(println (str (for [i [1 2 3] :while (< i 2) j [4 5 6] :when (even? j)] [i j])))",
@@ -595,7 +594,6 @@ fn sci_cond_else() {
 // ============================================================================
 
 #[test]
-#[ignore] // condp not implemented
 fn sci_condp_basic() {
     assert_eq!(eval_expr("(condp = 1 1 \"one\")"), "\"one\"");
 }
@@ -605,13 +603,11 @@ fn sci_condp_basic() {
 // ============================================================================
 
 #[test]
-#[ignore] // case not implemented
 fn sci_case_match() {
     assert_eq!(eval_expr("(case 1, 1 true, 2 (+ 1 2 3), 6)"), "true");
 }
 
 #[test]
-#[ignore] // case not implemented
 fn sci_case_default() {
     assert_eq!(eval_expr("(case (inc 2), 1 true, 2 (+ 1 2 3), 7)"), "7");
 }
@@ -721,13 +717,11 @@ fn sci_if_let_truthy() {
 }
 
 #[test]
-#[ignore] // if-some not implemented
 fn sci_if_some_nil() {
     assert_eq!(eval_expr("(if-some [foo nil] 1 2)"), "2");
 }
 
 #[test]
-#[ignore] // if-some not implemented
 fn sci_if_some_false() {
     assert_eq!(eval_expr("(if-some [foo false] 1 2)"), "1");
 }
@@ -752,7 +746,6 @@ fn sci_when_let_truthy() {
 }
 
 #[test]
-#[ignore] // when-some not implemented
 fn sci_when_some_nil() {
     assert_eq!(eval_expr("(when-some [foo nil] 1)"), "nil");
 }
@@ -1295,20 +1288,17 @@ fn sci_name() {
 }
 
 #[test]
-#[ignore] // clojure.string not available
 fn sci_str_upper_lower() {
     assert_output("(println (clojure.string/upper-case \"hello\"))", "HELLO");
     assert_output("(println (clojure.string/lower-case \"HELLO\"))", "hello");
 }
 
 #[test]
-#[ignore] // clojure.string not available
 fn sci_str_join() {
     assert_output("(println (clojure.string/join \", \" [1 2 3]))", "1, 2, 3");
 }
 
 #[test]
-#[ignore] // clojure.string not available
 fn sci_str_includes() {
     assert_eq!(
         eval_expr("(clojure.string/includes? \"hello world\" \"world\")"),
@@ -1414,7 +1404,6 @@ fn sci_group_by() {
 // ============================================================================
 
 #[test]
-#[ignore] // atom/swap!/deref not implemented
 fn sci_while_atom() {
     assert_output(
         "(def a (atom 0)) (while (< @a 10) (swap! a inc)) (println @a)",
@@ -1437,7 +1426,6 @@ fn sci_delay() {
 // ============================================================================
 
 #[test]
-#[ignore] // trampoline not implemented
 fn sci_trampoline() {
     assert_output(
         "(defn hello [x] (if (< x 10000) #(hello (inc x)) x)) (println (trampoline hello 0))",

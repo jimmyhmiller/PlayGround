@@ -1409,12 +1409,14 @@
 (defn with-meta [o meta]
   (-with-meta o meta))
 
-;; DEVIATION: reduce - calls the IReduce protocol
+;; DEVIATION: reduce - calls the IReduce protocol, handles nil, unwraps reduced
 (defn reduce
   ([f coll]
-   (-reduce coll f))
+   (let [ret (if (nil? coll) (f) (-reduce coll f))]
+     (if (reduced? ret) (-deref ret) ret)))
   ([f init coll]
-   (-reduce coll f init)))
+   (let [ret (if (nil? coll) init (-reduce coll f init))]
+     (if (reduced? ret) (-deref ret) ret))))
 
 ;; DEVIATION: Simple MapEntry type for IFind protocol
 (deftype MapEntry [key val __hash]
@@ -4046,3 +4048,180 @@
                 result (second pair)]
             (recur (next s)
                    (list (quote if) (list (quote =) g test-val) result acc))))))))
+
+;; =============================================================================
+;; Additional Functions and Macros
+;; =============================================================================
+
+;; condp - match with predicate
+(def ^:macro condp
+  (fn [form env pred expr & clauses]
+    (let [has-default (odd? (count clauses))
+          default (if has-default (last clauses) (list (quote throw) "No matching clause in condp"))
+          test-pairs (if has-default (partition 2 (butlast clauses)) (partition 2 clauses))
+          g (gensym "condp__")]
+      (loop [s (seq (reverse (seq test-pairs))) acc default]
+        (if (nil? s)
+          (list (quote let) (vector g expr) acc)
+          (let [pair (first s)
+                test-val (first pair)
+                result (second pair)]
+            (recur (next s)
+                   (list (quote let) (vector g expr)
+                         (list (quote if) (list pred test-val g) result acc)))))))))
+
+;; while - loop while test is truthy
+(def ^:macro while
+  (fn [form env test & body]
+    (list (quote loop) (vector)
+          (cons (quote when) (cons test (concat body (list (list (quote recur)))))))))
+
+;; run! - call proc for side effects on each element
+(defn run! [proc coll]
+  (reduce (fn [_ x] (proc x) nil) nil coll)
+  nil)
+
+;; seq? - test if something is a seq (list or cons, not vector/map/set)
+(defn seq? [s]
+  (if (nil? s) false (or (list? s) (cons? s))))
+
+;; fnil - wrap fn to replace nil first arg with default
+(defn fnil [f x]
+  (fn [a & args]
+    (apply f (if (nil? a) x a) args)))
+
+;; boolean? - test if value is true or false
+(defn boolean? [x]
+  (or (true? x) (false? x)))
+
+;; trampoline - call fn, if result is fn keep calling until not fn
+(defn trampoline
+  ([f] (let [ret (f)]
+         (if (fn? ret) (recur ret) ret)))
+  ([f & args]
+    (trampoline (fn [] (apply f args)))))
+
+;; rseq - reverse a vector
+(defn rseq [rev]
+  (seq (reverse rev)))
+
+;; namespace - get namespace of keyword or symbol
+(defn namespace [x]
+  (if (keyword? x)
+    (__keyword_namespace x)
+    (if (symbol? x)
+      (__reader_symbol_namespace x)
+      (throw (str "Doesn't support namespace: " (type x))))))
+
+;; subs - substring
+(defn subs
+  ([s start] (__subs s start))
+  ([s start end] (__subs_3 s start end)))
+
+;; compare - comparator returning -1/0/1
+(defn compare [x y]
+  (__compare x y))
+
+;; keyword constructor - create keyword from string(s)
+(defn keyword
+  ([name] (__keyword_from_string_1 name))
+  ([ns name] (__keyword_from_string_2 ns name)))
+
+;; for - eager list comprehension
+;; Supports :when, :while, and :let modifiers
+(defn ^:private for-helper [seq-exprs body-expr]
+  ;; Parse the binding vector into segments: each segment is [sym expr & modifiers]
+  ;; Returns a nested expression using reduce/concat
+  (if (empty? seq-exprs)
+    ;; Base case: just wrap body in a list
+    (list (quote list) body-expr)
+    ;; Parse first binding pair and any modifiers
+    (let [sym (first seq-exprs)
+          rest-exprs (rest seq-exprs)]
+      (if (keyword? sym)
+        ;; Handle :when, :while, :let modifiers
+        (cond
+          (= sym :when)
+          (let [test-expr (first rest-exprs)
+                remaining (rest rest-exprs)]
+            (list (quote if) test-expr
+                  (for-helper remaining body-expr)
+                  (quote (list))))
+
+          (= sym :while)
+          (let [test-expr (first rest-exprs)
+                remaining (rest rest-exprs)]
+            (list (quote if) test-expr
+                  (for-helper remaining body-expr)
+                  (quote (list))))
+
+          (= sym :let)
+          (let [let-bindings (first rest-exprs)
+                remaining (rest rest-exprs)]
+            (list (quote let) let-bindings
+                  (for-helper remaining body-expr)))
+
+          :else
+          (throw (str "Unsupported for modifier: " sym)))
+
+        ;; Regular binding: sym expr
+        (let [coll-expr (first rest-exprs)
+              remaining (rest rest-exprs)
+              inner (for-helper remaining body-expr)]
+          (list (quote mapcat)
+                (list (quote fn) (vector sym) inner)
+                coll-expr))))))
+
+(def ^:macro for
+  (fn [form env bindings body]
+    (for-helper (seq bindings) body)))
+
+;; ============================================================================
+;; Atoms
+;; ============================================================================
+
+(defn atom [x] (__atom_create x))
+
+(defn deref [ref] (__atom_deref ref))
+
+(defn reset! [atom new-value] (__atom_reset atom new-value))
+
+(defn swap!
+  ([atom f] (reset! atom (f (deref atom))))
+  ([atom f x] (reset! atom (f (deref atom) x)))
+  ([atom f x y] (reset! atom (f (deref atom) x y)))
+  ([atom f x y & args] (reset! atom (apply f (deref atom) x y args))))
+
+(defn compare-and-set! [atom old-val new-val]
+  (__atom_compare_and_set atom old-val new-val))
+
+(defn swap-vals! [atom f & args]
+  (let [old (deref atom)
+        new-val (apply f old args)]
+    (reset! atom new-val)
+    [old new-val]))
+
+(defn reset-vals! [atom new-val]
+  (let [old (deref atom)]
+    (reset! atom new-val)
+    [old new-val]))
+
+;; pr-str - returns a string representation with pr semantics (strings quoted)
+(defn pr-str [x] (__pr_str x))
+
+;; ============================================================================
+;; clojure.string namespace
+;; ============================================================================
+(ns clojure.string)
+
+(defn upper-case [s] (__string_upper_case s))
+(defn lower-case [s] (__string_lower_case s))
+(defn includes? [s substr] (__string_includes s substr))
+(defn join
+  ([coll] (__string_join "" coll))
+  ([separator coll] (__string_join separator coll)))
+(defn trim [s] (__string_trim s))
+(defn replace [s match replacement] (__string_replace s match replacement))
+
+;; Switch back to clojure.core
+(ns clojure.core)

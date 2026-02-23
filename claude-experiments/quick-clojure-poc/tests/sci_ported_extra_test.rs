@@ -104,7 +104,6 @@ fn assert_error(code: &str) {
 // ============================================================================
 
 #[test]
-#[ignore] // as-> not implemented
 fn sci_as_arrow_basic() {
     assert_eq!(
         eval_expr("(as-> 1 x (inc x) (inc x) (inc x) (str x))"),
@@ -113,7 +112,6 @@ fn sci_as_arrow_basic() {
 }
 
 #[test]
-#[ignore] // as-> not implemented
 fn sci_as_arrow_repeat() {
     assert_eq!(
         eval_expr("(as-> 1 x (inc x) (inc x) (inc x) (apply str (repeat 10 (str x))))"),
@@ -126,19 +124,16 @@ fn sci_as_arrow_repeat() {
 // ============================================================================
 
 #[test]
-#[ignore] // some-> not implemented
 fn sci_some_arrow_nil_short_circuit() {
     assert_eq!(eval_expr("(some-> {:a {:a nil}} :a :a :a)"), "nil");
 }
 
 #[test]
-#[ignore] // some-> not implemented
 fn sci_some_arrow_success() {
     assert_eq!(eval_expr("(some-> {:a {:b 42}} :a :b inc)"), "43");
 }
 
 #[test]
-#[ignore] // some->> not implemented
 fn sci_some_last_arrow_basic() {
     assert_eq!(
         eval_expr("(some->> [1 2 3] (map inc) (reduce +))"),
@@ -849,7 +844,6 @@ fn sci_dotimes_ten_returns_nil() {
 // ============================================================================
 
 #[test]
-#[ignore] // for macro not implemented
 fn sci_for_basic() {
     assert_output(
         "(println (str (for [i [1 2 3]] (* i i))))",
@@ -862,7 +856,6 @@ fn sci_for_basic() {
 // ============================================================================
 
 #[test]
-#[ignore] // doseq not implemented
 fn sci_doseq_basic() {
     assert_output(
         "(doseq [i [1 2 3]] (println i))",
@@ -875,7 +868,6 @@ fn sci_doseq_basic() {
 // ============================================================================
 
 #[test]
-#[ignore] // condp not implemented
 fn sci_condp_equals() {
     assert_eq!(eval_expr(r#"(condp = 1 1 "one")"#), r#""one""#);
 }
@@ -885,13 +877,11 @@ fn sci_condp_equals() {
 // ============================================================================
 
 #[test]
-#[ignore] // case not implemented
 fn sci_case_int() {
     assert_eq!(eval_expr("(case 1, 1 true, 2 false)"), "true");
 }
 
 #[test]
-#[ignore] // case not implemented
 fn sci_case_inc_default() {
     assert_eq!(eval_expr("(case (inc 2), 1 true, 2 (+ 1 2 3), 7)"), "7");
 }
@@ -901,13 +891,11 @@ fn sci_case_inc_default() {
 // ============================================================================
 
 #[test]
-#[ignore] // assert not implemented
 fn sci_assert_true() {
     assert_eq!(eval_expr("(assert true)"), "nil");
 }
 
 #[test]
-#[ignore] // assert not implemented
 fn sci_assert_false_throws() {
     assert_error("(assert false)");
 }
@@ -2248,13 +2236,11 @@ fn sci_comment_complex() {
 // ============================================================================
 
 #[test]
-#[ignore] // cond-> not implemented
 fn sci_cond_arrow_basic() {
     assert_eq!(eval_expr("(cond-> 1 true inc true inc)"), "3");
 }
 
 #[test]
-#[ignore] // cond->> not implemented
 fn sci_cond_last_arrow_basic() {
     assert_eq!(eval_expr("(cond->> 1 true inc true inc)"), "3");
 }

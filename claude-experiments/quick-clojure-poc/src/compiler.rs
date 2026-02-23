@@ -665,7 +665,18 @@ impl Compiler {
                  // Reader set operations
                  "__reader_set_count" | "__reader_set_contains" | "__reader_set_conj" | "__reader_set_get" |
                  "__is_reader_set" |
-                 "__value_eq"
+                 "__value_eq" |
+                 // subs, keyword, compare, namespace
+                 "__subs" | "__subs_3" |
+                 "__keyword_namespace" |
+                 "__keyword_from_string_1" | "__keyword_from_string_2" |
+                 "__compare" |
+                 "__atom_create" | "__atom_deref" | "__atom_reset" | "__atom_compare_and_set" |
+                 "__pr_str" |
+                 // clojure.string operations
+                 "__string_upper_case" | "__string_lower_case" |
+                 "__string_includes" | "__string_join" |
+                 "__string_trim" | "__string_replace"
         )
     }
 
@@ -2789,6 +2800,25 @@ impl Compiler {
                     "__reader_set_get" => self.compile_builtin_reader_prim_2(args, "__reader_set_get"),
                     "__is_reader_set" => self.compile_builtin_reader_prim_1(args, "__is_reader_set"),
                     "__value_eq" => self.compile_builtin_value_eq(args),
+                    // subs, keyword, compare, namespace
+                    "__subs" => self.compile_builtin_subs(args),
+                    "__subs_3" => self.compile_builtin_subs_3(args),
+                    "__keyword_namespace" => self.compile_builtin_keyword_namespace(args),
+                    "__keyword_from_string_1" => self.compile_builtin_keyword_from_string_1(args),
+                    "__keyword_from_string_2" => self.compile_builtin_keyword_from_string_2(args),
+                    "__compare" => self.compile_builtin_reader_prim_2(args, "__compare"),
+                    "__atom_create" => self.compile_builtin_atom_create(args),
+                    "__atom_deref" => self.compile_builtin_reader_prim_1(args, "__atom_deref"),
+                    "__atom_reset" => self.compile_builtin_reader_prim_2(args, "__atom_reset"),
+                    "__atom_compare_and_set" => self.compile_builtin_atom_compare_and_set(args),
+                    "__pr_str" => self.compile_builtin_pr_str(args),
+                    // clojure.string operations
+                    "__string_upper_case" => self.compile_builtin_string_upper_case(args),
+                    "__string_lower_case" => self.compile_builtin_string_lower_case(args),
+                    "__string_includes" => self.compile_builtin_reader_prim_2(args, "__string_includes"),
+                    "__string_join" => self.compile_builtin_string_join(args),
+                    "__string_trim" => self.compile_builtin_string_trim(args),
+                    "__string_replace" => self.compile_builtin_string_replace(args),
                     _ => unreachable!(),
                 };
             }
@@ -3557,6 +3587,239 @@ impl Compiler {
     fn compile_builtin_reader_set_conj(&mut self, args: &[Expr]) -> Result<IrValue, String> {
         // Just use the standard 2-arg pattern
         self.compile_builtin_reader_prim_2(args, "__reader_set_conj")
+    }
+
+    /// Compile __subs (2 arguments, allocating)
+    fn compile_builtin_subs(&mut self, args: &[Expr]) -> Result<IrValue, String> {
+        if args.len() != 2 {
+            return Err(format!("__subs requires 2 arguments, got {}", args.len()));
+        }
+        let s = self.compile(&args[0])?;
+        let start = self.compile(&args[1])?;
+        let s_reg = self.builder.assign_new(s);
+        let start_reg = self.builder.assign_new(start);
+        let result = self.builder.new_register();
+        let builtin_addr = crate::builtins::builtin__subs as usize;
+        self.builder.emit(Instruction::ExternalCall(
+            result,
+            builtin_addr,
+            vec![IrValue::FramePointer, s_reg, start_reg],
+        ));
+        Ok(result)
+    }
+
+    /// Compile __subs_3 (3 arguments, allocating)
+    fn compile_builtin_subs_3(&mut self, args: &[Expr]) -> Result<IrValue, String> {
+        if args.len() != 3 {
+            return Err(format!("__subs_3 requires 3 arguments, got {}", args.len()));
+        }
+        let s = self.compile(&args[0])?;
+        let start = self.compile(&args[1])?;
+        let end = self.compile(&args[2])?;
+        let s_reg = self.builder.assign_new(s);
+        let start_reg = self.builder.assign_new(start);
+        let end_reg = self.builder.assign_new(end);
+        let result = self.builder.new_register();
+        let builtin_addr = crate::builtins::builtin__subs_3 as usize;
+        self.builder.emit(Instruction::ExternalCall(
+            result,
+            builtin_addr,
+            vec![IrValue::FramePointer, s_reg, start_reg, end_reg],
+        ));
+        Ok(result)
+    }
+
+    /// Compile __keyword_namespace (1 argument, allocating)
+    fn compile_builtin_keyword_namespace(&mut self, args: &[Expr]) -> Result<IrValue, String> {
+        if args.len() != 1 {
+            return Err(format!("__keyword_namespace requires 1 argument, got {}", args.len()));
+        }
+        let kw = self.compile(&args[0])?;
+        let kw_reg = self.builder.assign_new(kw);
+        let result = self.builder.new_register();
+        let builtin_addr = crate::builtins::builtin__keyword_namespace as usize;
+        self.builder.emit(Instruction::ExternalCall(
+            result,
+            builtin_addr,
+            vec![IrValue::FramePointer, kw_reg],
+        ));
+        Ok(result)
+    }
+
+    /// Compile __keyword_from_string_1 (1 argument, allocating)
+    fn compile_builtin_keyword_from_string_1(&mut self, args: &[Expr]) -> Result<IrValue, String> {
+        if args.len() != 1 {
+            return Err(format!("__keyword_from_string_1 requires 1 argument, got {}", args.len()));
+        }
+        let name = self.compile(&args[0])?;
+        let name_reg = self.builder.assign_new(name);
+        let result = self.builder.new_register();
+        let builtin_addr = crate::builtins::builtin__keyword_from_string_1 as usize;
+        self.builder.emit(Instruction::ExternalCall(
+            result,
+            builtin_addr,
+            vec![IrValue::FramePointer, name_reg],
+        ));
+        Ok(result)
+    }
+
+    /// Compile __keyword_from_string_2 (2 arguments, allocating)
+    fn compile_builtin_keyword_from_string_2(&mut self, args: &[Expr]) -> Result<IrValue, String> {
+        if args.len() != 2 {
+            return Err(format!("__keyword_from_string_2 requires 2 arguments, got {}", args.len()));
+        }
+        let ns = self.compile(&args[0])?;
+        let name = self.compile(&args[1])?;
+        let ns_reg = self.builder.assign_new(ns);
+        let name_reg = self.builder.assign_new(name);
+        let result = self.builder.new_register();
+        let builtin_addr = crate::builtins::builtin__keyword_from_string_2 as usize;
+        self.builder.emit(Instruction::ExternalCall(
+            result,
+            builtin_addr,
+            vec![IrValue::FramePointer, ns_reg, name_reg],
+        ));
+        Ok(result)
+    }
+
+    fn compile_builtin_atom_create(&mut self, args: &[Expr]) -> Result<IrValue, String> {
+        if args.len() != 1 {
+            return Err(format!("__atom_create requires 1 argument, got {}", args.len()));
+        }
+        let val = self.compile(&args[0])?;
+        let val_reg = self.builder.assign_new(val);
+        let result = self.builder.new_register();
+        let builtin_addr = crate::builtins::builtin__atom_create as usize;
+        self.builder.emit(Instruction::ExternalCall(
+            result,
+            builtin_addr,
+            vec![IrValue::FramePointer, val_reg],
+        ));
+        Ok(result)
+    }
+
+    fn compile_builtin_atom_compare_and_set(&mut self, args: &[Expr]) -> Result<IrValue, String> {
+        if args.len() != 3 {
+            return Err(format!("__atom_compare_and_set requires 3 arguments, got {}", args.len()));
+        }
+        let atom = self.compile(&args[0])?;
+        let old_val = self.compile(&args[1])?;
+        let new_val = self.compile(&args[2])?;
+        let atom_reg = self.builder.assign_new(atom);
+        let old_reg = self.builder.assign_new(old_val);
+        let new_reg = self.builder.assign_new(new_val);
+        let result = self.builder.new_register();
+        let builtin_addr = crate::builtins::builtin__atom_compare_and_set as usize;
+        self.builder.emit(Instruction::ExternalCall(
+            result,
+            builtin_addr,
+            vec![atom_reg, old_reg, new_reg],
+        ));
+        Ok(result)
+    }
+
+    fn compile_builtin_pr_str(&mut self, args: &[Expr]) -> Result<IrValue, String> {
+        if args.len() != 1 {
+            return Err(format!("__pr_str requires 1 argument, got {}", args.len()));
+        }
+        let val = self.compile(&args[0])?;
+        let val_reg = self.builder.assign_new(val);
+        let result = self.builder.new_register();
+        let builtin_addr = crate::builtins::builtin__pr_str as usize;
+        self.builder.emit(Instruction::ExternalCall(
+            result,
+            builtin_addr,
+            vec![IrValue::FramePointer, val_reg],
+        ));
+        Ok(result)
+    }
+
+    // clojure.string compile methods
+
+    fn compile_builtin_string_upper_case(&mut self, args: &[Expr]) -> Result<IrValue, String> {
+        if args.len() != 1 {
+            return Err(format!("__string_upper_case requires 1 argument, got {}", args.len()));
+        }
+        let s = self.compile(&args[0])?;
+        let s_reg = self.builder.assign_new(s);
+        let result = self.builder.new_register();
+        let builtin_addr = crate::builtins::builtin__string_upper_case as usize;
+        self.builder.emit(Instruction::ExternalCall(
+            result,
+            builtin_addr,
+            vec![IrValue::FramePointer, s_reg],
+        ));
+        Ok(result)
+    }
+
+    fn compile_builtin_string_lower_case(&mut self, args: &[Expr]) -> Result<IrValue, String> {
+        if args.len() != 1 {
+            return Err(format!("__string_lower_case requires 1 argument, got {}", args.len()));
+        }
+        let s = self.compile(&args[0])?;
+        let s_reg = self.builder.assign_new(s);
+        let result = self.builder.new_register();
+        let builtin_addr = crate::builtins::builtin__string_lower_case as usize;
+        self.builder.emit(Instruction::ExternalCall(
+            result,
+            builtin_addr,
+            vec![IrValue::FramePointer, s_reg],
+        ));
+        Ok(result)
+    }
+
+    fn compile_builtin_string_join(&mut self, args: &[Expr]) -> Result<IrValue, String> {
+        if args.len() != 2 {
+            return Err(format!("__string_join requires 2 arguments, got {}", args.len()));
+        }
+        let sep = self.compile(&args[0])?;
+        let coll = self.compile(&args[1])?;
+        let sep_reg = self.builder.assign_new(sep);
+        let coll_reg = self.builder.assign_new(coll);
+        let result = self.builder.new_register();
+        let builtin_addr = crate::builtins::builtin__string_join as usize;
+        self.builder.emit(Instruction::ExternalCall(
+            result,
+            builtin_addr,
+            vec![IrValue::FramePointer, sep_reg, coll_reg],
+        ));
+        Ok(result)
+    }
+
+    fn compile_builtin_string_trim(&mut self, args: &[Expr]) -> Result<IrValue, String> {
+        if args.len() != 1 {
+            return Err(format!("__string_trim requires 1 argument, got {}", args.len()));
+        }
+        let s = self.compile(&args[0])?;
+        let s_reg = self.builder.assign_new(s);
+        let result = self.builder.new_register();
+        let builtin_addr = crate::builtins::builtin__string_trim as usize;
+        self.builder.emit(Instruction::ExternalCall(
+            result,
+            builtin_addr,
+            vec![IrValue::FramePointer, s_reg],
+        ));
+        Ok(result)
+    }
+
+    fn compile_builtin_string_replace(&mut self, args: &[Expr]) -> Result<IrValue, String> {
+        if args.len() != 3 {
+            return Err(format!("__string_replace requires 3 arguments, got {}", args.len()));
+        }
+        let s = self.compile(&args[0])?;
+        let match_str = self.compile(&args[1])?;
+        let replacement = self.compile(&args[2])?;
+        let s_reg = self.builder.assign_new(s);
+        let match_reg = self.builder.assign_new(match_str);
+        let repl_reg = self.builder.assign_new(replacement);
+        let result = self.builder.new_register();
+        let builtin_addr = crate::builtins::builtin__string_replace as usize;
+        self.builder.emit(Instruction::ExternalCall(
+            result,
+            builtin_addr,
+            vec![IrValue::FramePointer, s_reg, match_reg, repl_reg],
+        ));
+        Ok(result)
     }
 
     // Bitwise operations - all work on untagged integers:

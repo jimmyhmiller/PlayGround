@@ -28,6 +28,7 @@ pub struct Codegen<'ctx> {
     structs: HashMap<String, StructLayout<'ctx>>,
     enums: HashMap<String, EnumLayout<'ctx>>,
     tuples: HashMap<String, StructLayout<'ctx>>,
+    fn_param_types: HashMap<String, Vec<Type>>,
     str_lit_id: usize,
     next_type_id: u16,
     compiler_used_globals: Vec<PointerValue<'ctx>>,
@@ -621,6 +622,7 @@ impl<'ctx> Codegen<'ctx> {
             structs: HashMap::new(),
             enums: HashMap::new(),
             tuples: HashMap::new(),
+            fn_param_types: HashMap::new(),
             str_lit_id: 0,
             next_type_id: 0,
             compiler_used_globals: Vec::new(),
@@ -674,12 +676,14 @@ impl<'ctx> Codegen<'ctx> {
                     Item::Fn(f) => {
                         let full_name = full_item_name(&module_path, &f.name);
                         let fn_val = self.declare_fn(&full_name, f)?;
-                        self.functions.insert(full_name, fn_val);
+                        self.functions.insert(full_name.clone(), fn_val);
+                        self.fn_param_types.insert(full_name, f.params.iter().map(|p| p.ty.clone()).collect());
                     }
                     Item::ExternFn(f) => {
                         let full_name = full_item_name(&module_path, &f.name);
                         let fn_val = self.declare_extern_fn(&full_name, f)?;
-                        self.externs.insert(full_name, fn_val);
+                        self.externs.insert(full_name.clone(), fn_val);
+                        self.fn_param_types.insert(full_name, f.params.iter().map(|p| p.ty.clone()).collect());
                     }
                     _ => {}
                 }
@@ -1290,10 +1294,22 @@ impl<'ctx> Codegen<'ctx> {
                             if args.len() != variant.fields.len() {
                                 return Err(CodegenError { message: "arg count mismatch".to_string() });
                             }
+                            // Root obj_ptr across field evaluation (GC may relocate it)
+                            let obj_root_slot = if !args.is_empty() {
+                                Some(self.store_temp_root(ctx, obj_ptr.into())?)
+                            } else {
+                                None
+                            };
                             for (i, arg) in args.iter().enumerate() {
                                 let arg_val = self.codegen_expr(arg, ctx, None)?.ok_or_else(|| CodegenError { message: "missing arg".to_string() })?;
+                                // Reload obj_ptr from root slot (may have been relocated by GC during arg eval)
+                                let current_obj_ptr = if let Some(slot) = obj_root_slot {
+                                    self.load_temp_root(ctx, slot)?.into_pointer_value()
+                                } else {
+                                    obj_ptr
+                                };
                                 let arg_layout = variant.fields.get(i).ok_or_else(|| CodegenError { message: "arg count mismatch".to_string() })?;
-                                let fld_ptr = self.enum_field_ptr(obj_ptr, arg_layout.field_index)?;
+                                let fld_ptr = self.enum_field_ptr(current_obj_ptr, arg_layout.field_index)?;
                                 let store_val = if self.is_bool_type(&arg_layout.ty) {
                                     let zext = self.map_builder(
                                         self.builder.build_int_z_extend(arg_val.into_int_value(), i64_ty, "boolz"),
@@ -1306,31 +1322,58 @@ impl<'ctx> Codegen<'ctx> {
                                 self.map_builder(self.builder.build_store(fld_ptr, store_val), "store")?;
                             }
                             self.emit_pollcheck(ctx)?;
-                            return Ok(Some(obj_ptr.into()));
+                            // Return reloaded obj_ptr
+                            let final_obj_ptr = if let Some(slot) = obj_root_slot {
+                                self.load_temp_root(ctx, slot)?.into_pointer_value()
+                            } else {
+                                obj_ptr
+                            };
+                            return Ok(Some(final_obj_ptr.into()));
                         }
                     }
                 }
 
-                let (func, pass_thread) = match &**callee {
+                let (func, pass_thread, callee_key) = match &**callee {
                     Expr::Path(path, _) => {
                         let key = path_to_string(path);
                         if let Some(f) = self.functions.get(&key) {
-                            (*f, true)
+                            (*f, true, Some(key))
                         } else if let Some(f) = self.externs.get(&key) {
-                            (*f, false)
+                            (*f, false, Some(key))
                         } else {
                             return Err(CodegenError { message: "unknown function".to_string() });
                         }
                     }
                     _ => return Err(CodegenError { message: "callee must be path".to_string() }),
                 };
+                let param_types = callee_key.as_ref().and_then(|k| self.fn_param_types.get(k)).cloned();
                 let mut arg_vals: Vec<BasicMetadataValueEnum> = Vec::new();
-                if pass_thread {
+                let thread_offset = if pass_thread {
                     arg_vals.push(ctx.thread.into());
-                }
-                for arg in args {
+                    1
+                } else {
+                    0
+                };
+                let need_rooting = args.len() >= 2;
+                let mut rooted_args: Vec<(usize, usize)> = Vec::new(); // (index in arg_vals, root slot)
+                for (i, arg) in args.iter().enumerate() {
                     let v = self.codegen_expr(arg, ctx, None)?.ok_or_else(|| CodegenError { message: "missing arg".to_string() })?;
                     arg_vals.push(v.into());
+                    // Root GC-ref args that precede later args (which may trigger GC)
+                    if need_rooting && i < args.len() - 1 {
+                        let is_gc = param_types.as_ref().map_or(false, |pts| {
+                            pts.get(i).map_or(false, |t| self.is_gc_ref_type(t))
+                        });
+                        if is_gc {
+                            let slot = self.store_temp_root(ctx, v)?;
+                            rooted_args.push((i + thread_offset, slot));
+                        }
+                    }
+                }
+                // Reload rooted args (GC may have relocated them)
+                for (idx, slot) in &rooted_args {
+                    let reloaded = self.load_temp_root(ctx, *slot)?;
+                    arg_vals[*idx] = reloaded.into();
                 }
                 let call = self.map_builder(self.builder.build_call(func, &arg_vals, "call"), "call")?;
                 self.emit_pollcheck(ctx)?;
@@ -1364,6 +1407,12 @@ impl<'ctx> Codegen<'ctx> {
                             let tag_val = i64_ty.const_int(variant.tag as u64, false);
                             self.map_builder(self.builder.build_store(tag_ptr, tag_val), "store")?;
 
+                            // Root obj_ptr across field evaluation
+                            let obj_root_slot = if !fields.is_empty() {
+                                Some(self.store_temp_root(ctx, obj_ptr.into())?)
+                            } else {
+                                None
+                            };
                             for (field_name, field_expr) in fields {
                                 let field = variant
                                     .fields
@@ -1372,7 +1421,12 @@ impl<'ctx> Codegen<'ctx> {
                                     .cloned()
                                     .ok_or_else(|| CodegenError { message: "unknown field".to_string() })?;
                                 let value = self.codegen_expr(field_expr, ctx, Some(&field.ty))?.ok_or_else(|| CodegenError { message: "missing field value".to_string() })?;
-                                let fld_ptr = self.enum_field_ptr(obj_ptr, field.field_index)?;
+                                let current_obj_ptr = if let Some(slot) = obj_root_slot {
+                                    self.load_temp_root(ctx, slot)?.into_pointer_value()
+                                } else {
+                                    obj_ptr
+                                };
+                                let fld_ptr = self.enum_field_ptr(current_obj_ptr, field.field_index)?;
                                 let store_val = if self.is_bool_type(&field.ty) {
                                     let zext = self.map_builder(
                                         self.builder.build_int_z_extend(value.into_int_value(), i64_ty, "boolz"),
@@ -1385,7 +1439,12 @@ impl<'ctx> Codegen<'ctx> {
                                 self.map_builder(self.builder.build_store(fld_ptr, store_val), "store")?;
                             }
                             self.emit_pollcheck(ctx)?;
-                            return Ok(Some(obj_ptr.into()));
+                            let final_obj_ptr = if let Some(slot) = obj_root_slot {
+                                self.load_temp_root(ctx, slot)?.into_pointer_value()
+                            } else {
+                                obj_ptr
+                            };
+                            return Ok(Some(final_obj_ptr.into()));
                         }
                     }
                 }
@@ -1407,6 +1466,12 @@ impl<'ctx> Codegen<'ctx> {
                     .basic()
                     .ok_or_else(|| CodegenError { message: "alloc returned void".to_string() })?
                     .into_pointer_value();
+                // Root obj_ptr across field evaluation
+                let obj_root_slot = if !fields.is_empty() {
+                    Some(self.store_temp_root(ctx, obj_ptr.into())?)
+                } else {
+                    None
+                };
                 for (field_name, field_expr) in fields {
                     let field = layout
                         .fields
@@ -1415,11 +1480,21 @@ impl<'ctx> Codegen<'ctx> {
                         .cloned()
                         .ok_or_else(|| CodegenError { message: "unknown field".to_string() })?;
                     let value = self.codegen_expr(field_expr, ctx, Some(&field.ty))?.ok_or_else(|| CodegenError { message: "missing field value".to_string() })?;
-                    let field_ptr = self.field_ptr(obj_ptr, &field)?;
+                    let current_obj_ptr = if let Some(slot) = obj_root_slot {
+                        self.load_temp_root(ctx, slot)?.into_pointer_value()
+                    } else {
+                        obj_ptr
+                    };
+                    let field_ptr = self.field_ptr(current_obj_ptr, &field)?;
                     self.store_gc_field(field_ptr, &field, value)?;
                 }
                 self.emit_pollcheck(ctx)?;
-                Ok(Some(obj_ptr.into()))
+                let final_obj_ptr = if let Some(slot) = obj_root_slot {
+                    self.load_temp_root(ctx, slot)?.into_pointer_value()
+                } else {
+                    obj_ptr
+                };
+                Ok(Some(final_obj_ptr.into()))
             }
             Expr::Tuple { items, .. } => {
                 let expected = expected.ok_or_else(|| CodegenError { message: "tuple requires type context".to_string() })?;
@@ -1447,6 +1522,12 @@ impl<'ctx> Codegen<'ctx> {
                     .basic()
                     .ok_or_else(|| CodegenError { message: "alloc returned void".to_string() })?
                     .into_pointer_value();
+                // Root obj_ptr across element evaluation
+                let obj_root_slot = if !items.is_empty() {
+                    Some(self.store_temp_root(ctx, obj_ptr.into())?)
+                } else {
+                    None
+                };
                 for (i, item) in items.iter().enumerate() {
                     let field_name = i.to_string();
                     let field = layout
@@ -1456,15 +1537,25 @@ impl<'ctx> Codegen<'ctx> {
                         .cloned()
                         .ok_or_else(|| CodegenError { message: "unknown tuple field".to_string() })?;
                     let value = self.codegen_expr(item, ctx, Some(&field.ty))?.ok_or_else(|| CodegenError { message: "missing tuple value".to_string() })?;
-                    let field_ptr = self.field_ptr(obj_ptr, &field)?;
+                    let current_obj_ptr = if let Some(slot) = obj_root_slot {
+                        self.load_temp_root(ctx, slot)?.into_pointer_value()
+                    } else {
+                        obj_ptr
+                    };
+                    let field_ptr = self.field_ptr(current_obj_ptr, &field)?;
                     self.store_gc_field(field_ptr, &field, value)?;
                     if field.is_gc_ref {
-                        let args = &[ctx.thread.into(), obj_ptr.into(), value.into()];
+                        let args = &[ctx.thread.into(), current_obj_ptr.into(), value.into()];
                         let _ = self.map_builder(self.builder.build_call(self.gc_write_barrier, args, "wb"), "call")?;
                     }
                 }
                 self.emit_pollcheck(ctx)?;
-                Ok(Some(obj_ptr.into()))
+                let final_obj_ptr = if let Some(slot) = obj_root_slot {
+                    self.load_temp_root(ctx, slot)?.into_pointer_value()
+                } else {
+                    obj_ptr
+                };
+                Ok(Some(final_obj_ptr.into()))
             }
             Expr::Block(block) => self.codegen_block_value(block, ctx, expected),
             Expr::Break { .. } => {
@@ -1693,6 +1784,42 @@ impl<'ctx> Codegen<'ctx> {
         Ok(())
     }
 
+    fn store_temp_root(&self, ctx: &mut FnCtx<'ctx>, value: BasicValueEnum<'ctx>) -> Result<usize, CodegenError> {
+        let root_base = ctx.root_base.ok_or_else(|| CodegenError { message: "missing root base for temp root".to_string() })?;
+        let slot = ctx.next_root;
+        ctx.next_root += 1;
+        let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+        let idx = self.context.i32_type().const_int(slot as u64, false);
+        let slot_ptr = unsafe {
+            self.map_builder(
+                self.builder.build_gep(ptr_ty, root_base, &[idx], "temp_root_slot"),
+                "gep",
+            )?
+        };
+        let inst = self.map_builder(self.builder.build_store(slot_ptr, value), "store")?;
+        inst.set_volatile(true)
+            .map_err(|e| CodegenError { message: format!("volatile store failed: {e}") })?;
+        Ok(slot)
+    }
+
+    fn load_temp_root(&self, ctx: &FnCtx<'ctx>, slot: usize) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+        let root_base = ctx.root_base.ok_or_else(|| CodegenError { message: "missing root base for temp root".to_string() })?;
+        let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+        let idx = self.context.i32_type().const_int(slot as u64, false);
+        let slot_ptr = unsafe {
+            self.map_builder(
+                self.builder.build_gep(ptr_ty, root_base, &[idx], "temp_root_slot"),
+                "gep",
+            )?
+        };
+        let loaded = self.map_builder(self.builder.build_load(ptr_ty, slot_ptr, "temp_reload"), "load")?;
+        if let Some(inst) = loaded.as_instruction_value() {
+            inst.set_volatile(true)
+                .map_err(|e| CodegenError { message: format!("volatile load failed: {e}") })?;
+        }
+        Ok(loaded)
+    }
+
     fn push_scope(&self, ctx: &mut FnCtx<'ctx>) {
         ctx.scopes.push(Vec::new());
     }
@@ -1789,11 +1916,49 @@ impl<'ctx> Codegen<'ctx> {
                 for arg in args {
                     count += self.count_roots_in_expr(arg);
                 }
+                if let Expr::Path(path, _) = &**callee {
+                    let key = path_to_string(path);
+                    // Check if this is an enum variant constructor
+                    if path.len() >= 2 {
+                        let (enum_name, _) = enum_path_and_variant(path);
+                        if self.enums.contains_key(&enum_name) && !args.is_empty() {
+                            // +1 for obj_ptr rooting
+                            count += 1;
+                        }
+                    }
+                    // Temp roots for GC-ref args (only count params that are actually GC refs)
+                    if args.len() >= 2 {
+                        if let Some(param_types) = self.fn_param_types.get(&key) {
+                            for (i, pt) in param_types.iter().enumerate() {
+                                if i < args.len() - 1 && self.is_gc_ref_type(pt) {
+                                    count += 1;
+                                }
+                            }
+                        } else {
+                            // Unknown function — conservative: count all args
+                            count += args.len();
+                        }
+                    }
+                }
                 count
             }
             Expr::Field { base, .. } => self.count_roots_in_expr(base),
-            Expr::StructLit { fields, .. } => fields.iter().map(|(_, e)| self.count_roots_in_expr(e)).sum(),
-            Expr::Tuple { items, .. } => items.iter().map(|e| self.count_roots_in_expr(e)).sum(),
+            Expr::StructLit { fields, .. } => {
+                let mut count: usize = fields.iter().map(|(_, e)| self.count_roots_in_expr(e)).sum();
+                // +1 temp root for obj_ptr during field evaluation
+                if !fields.is_empty() {
+                    count += 1;
+                }
+                count
+            }
+            Expr::Tuple { items, .. } => {
+                let mut count: usize = items.iter().map(|e| self.count_roots_in_expr(e)).sum();
+                // +1 temp root for obj_ptr during element evaluation
+                if !items.is_empty() {
+                    count += 1;
+                }
+                count
+            }
             Expr::Block(block) => self.count_roots_in_block(block),
             _ => 0,
         }

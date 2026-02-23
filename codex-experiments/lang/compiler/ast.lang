@@ -343,7 +343,12 @@ struct CgLocal {
 struct CgFnEntry {
     name: String,
     fn_val: RawPointer<I8>,
-    fn_ty: RawPointer<I8>
+    fn_ty: RawPointer<I8>,
+    gc_mask: String
+}
+
+struct I64Wrap {
+    v: I64
 }
 
 struct LoopEntry {

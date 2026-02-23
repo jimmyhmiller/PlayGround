@@ -1016,6 +1016,129 @@ pub extern "C" fn builtin__make_reader_map_0() -> usize {
 // Builtin registration
 // ============================================================================
 
+// ============================================================================
+// Atom operations
+// ============================================================================
+
+#[unsafe(no_mangle)]
+pub extern "C" fn builtin__atom_create(frame_pointer: usize, initial_value: usize) -> usize {
+    crate::trampoline::builtin_atom_create(frame_pointer, initial_value)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn builtin__atom_deref(atom: usize) -> usize {
+    crate::trampoline::builtin_atom_deref(atom)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn builtin__atom_reset(atom: usize, new_value: usize) -> usize {
+    crate::trampoline::builtin_atom_reset(atom, new_value)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn builtin__atom_compare_and_set(atom: usize, old_val: usize, new_val: usize) -> usize {
+    crate::trampoline::builtin_atom_compare_and_set(atom, old_val, new_val)
+}
+
+// ============================================================================
+// pr-str
+// ============================================================================
+
+#[unsafe(no_mangle)]
+pub extern "C" fn builtin__pr_str(frame_pointer: usize, value: usize) -> usize {
+    crate::trampoline::builtin_pr_str(frame_pointer, value)
+}
+
+// ============================================================================
+// clojure.string operations
+// ============================================================================
+
+#[unsafe(no_mangle)]
+pub extern "C" fn builtin__string_upper_case(frame_pointer: usize, string: usize) -> usize {
+    crate::trampoline::builtin_string_upper_case(frame_pointer, string)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn builtin__string_lower_case(frame_pointer: usize, string: usize) -> usize {
+    crate::trampoline::builtin_string_lower_case(frame_pointer, string)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn builtin__string_includes(string: usize, substr: usize) -> usize {
+    crate::trampoline::builtin_string_includes(string, substr)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn builtin__string_join(frame_pointer: usize, separator: usize, coll: usize) -> usize {
+    crate::trampoline::builtin_string_join(frame_pointer, separator, coll)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn builtin__string_trim(frame_pointer: usize, string: usize) -> usize {
+    crate::trampoline::builtin_string_trim(frame_pointer, string)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn builtin__string_replace(frame_pointer: usize, s: usize, match_str: usize, replacement: usize) -> usize {
+    crate::trampoline::builtin_string_replace(frame_pointer, s, match_str, replacement)
+}
+
+// ============================================================================
+// subs - substring
+// ============================================================================
+
+/// __subs(string, start) -> new string
+#[unsafe(no_mangle)]
+pub extern "C" fn builtin__subs(frame_pointer: usize, string: usize, start: usize) -> usize {
+    crate::trampoline::builtin_subs(frame_pointer, string, start)
+}
+
+/// __subs_3(string, start, end) -> new string
+#[unsafe(no_mangle)]
+pub extern "C" fn builtin__subs_3(frame_pointer: usize, string: usize, start: usize, end: usize) -> usize {
+    crate::trampoline::builtin_subs_3(frame_pointer, string, start, end)
+}
+
+// ============================================================================
+// keyword namespace
+// ============================================================================
+
+/// __keyword_namespace(keyword) -> string or nil
+#[unsafe(no_mangle)]
+pub extern "C" fn builtin__keyword_namespace(frame_pointer: usize, value: usize) -> usize {
+    crate::trampoline::builtin_keyword_namespace(frame_pointer, value)
+}
+
+// ============================================================================
+// keyword constructor
+// ============================================================================
+
+/// __keyword_from_string_1(name) -> keyword
+#[unsafe(no_mangle)]
+pub extern "C" fn builtin__keyword_from_string_1(frame_pointer: usize, name: usize) -> usize {
+    crate::trampoline::builtin_keyword_from_string_1(frame_pointer, name)
+}
+
+/// __keyword_from_string_2(ns, name) -> keyword
+#[unsafe(no_mangle)]
+pub extern "C" fn builtin__keyword_from_string_2(frame_pointer: usize, ns: usize, name: usize) -> usize {
+    crate::trampoline::builtin_keyword_from_string_2(frame_pointer, ns, name)
+}
+
+// ============================================================================
+// compare
+// ============================================================================
+
+/// __compare(x, y) -> tagged integer
+#[unsafe(no_mangle)]
+pub extern "C" fn builtin__compare(x: usize, y: usize) -> usize {
+    crate::trampoline::builtin_compare(x, y)
+}
+
+// ============================================================================
+// Builtin registration
+// ============================================================================
+
 /// Builtin function descriptor
 pub struct BuiltinDescriptor {
     pub name: &'static str,
@@ -1313,6 +1436,79 @@ pub fn get_builtin_descriptors() -> Vec<BuiltinDescriptor> {
         BuiltinDescriptor {
             name: "__str_concat",
             function_ptr: builtin__str_concat as usize,
+        },
+        // subs - substring
+        BuiltinDescriptor {
+            name: "__subs",
+            function_ptr: builtin__subs as usize,
+        },
+        BuiltinDescriptor {
+            name: "__subs_3",
+            function_ptr: builtin__subs_3 as usize,
+        },
+        // keyword namespace
+        BuiltinDescriptor {
+            name: "__keyword_namespace",
+            function_ptr: builtin__keyword_namespace as usize,
+        },
+        // keyword constructor
+        BuiltinDescriptor {
+            name: "__keyword_from_string_1",
+            function_ptr: builtin__keyword_from_string_1 as usize,
+        },
+        BuiltinDescriptor {
+            name: "__keyword_from_string_2",
+            function_ptr: builtin__keyword_from_string_2 as usize,
+        },
+        // compare
+        BuiltinDescriptor {
+            name: "__compare",
+            function_ptr: builtin__compare as usize,
+        },
+        // clojure.string operations
+        BuiltinDescriptor {
+            name: "__atom_create",
+            function_ptr: builtin__atom_create as usize,
+        },
+        BuiltinDescriptor {
+            name: "__atom_deref",
+            function_ptr: builtin__atom_deref as usize,
+        },
+        BuiltinDescriptor {
+            name: "__atom_reset",
+            function_ptr: builtin__atom_reset as usize,
+        },
+        BuiltinDescriptor {
+            name: "__atom_compare_and_set",
+            function_ptr: builtin__atom_compare_and_set as usize,
+        },
+        BuiltinDescriptor {
+            name: "__pr_str",
+            function_ptr: builtin__pr_str as usize,
+        },
+        BuiltinDescriptor {
+            name: "__string_upper_case",
+            function_ptr: builtin__string_upper_case as usize,
+        },
+        BuiltinDescriptor {
+            name: "__string_lower_case",
+            function_ptr: builtin__string_lower_case as usize,
+        },
+        BuiltinDescriptor {
+            name: "__string_includes",
+            function_ptr: builtin__string_includes as usize,
+        },
+        BuiltinDescriptor {
+            name: "__string_join",
+            function_ptr: builtin__string_join as usize,
+        },
+        BuiltinDescriptor {
+            name: "__string_trim",
+            function_ptr: builtin__string_trim as usize,
+        },
+        BuiltinDescriptor {
+            name: "__string_replace",
+            function_ptr: builtin__string_replace as usize,
         },
     ]
 }

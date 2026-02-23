@@ -60,7 +60,7 @@ fn find_anon_fn_args(edn: &Edn) -> (usize, bool) {
             (max_arg, has_rest)
         }
         // Recursively check nested structures
-        Edn::Quote(inner) | Edn::SyntaxQuote(inner) | Edn::Unquote(inner) | Edn::UnquoteSplicing(inner) => {
+        Edn::Quote(inner) | Edn::SyntaxQuote(inner) | Edn::Unquote(inner) | Edn::UnquoteSplicing(inner) | Edn::Deref(inner) => {
             find_anon_fn_args(inner)
         }
         Edn::Meta(_, inner) => find_anon_fn_args(inner),
@@ -131,6 +131,7 @@ fn replace_anon_fn_args(edn: &Edn, suffix: usize) -> Edn<'static> {
         Edn::SyntaxQuote(inner) => Edn::SyntaxQuote(Box::new(replace_anon_fn_args(inner, suffix))),
         Edn::Unquote(inner) => Edn::Unquote(Box::new(replace_anon_fn_args(inner, suffix))),
         Edn::UnquoteSplicing(inner) => Edn::UnquoteSplicing(Box::new(replace_anon_fn_args(inner, suffix))),
+        Edn::Deref(inner) => Edn::Deref(Box::new(replace_anon_fn_args(inner, suffix))),
         Edn::Meta(meta, inner) => Edn::Meta(
             Box::new(replace_anon_fn_args(meta, suffix)),
             Box::new(replace_anon_fn_args(inner, suffix))
@@ -476,6 +477,13 @@ pub fn edn_to_tagged(edn: &Edn, rt: &mut GCRuntime) -> Result<usize, String> {
             let inner_tagged = edn_to_tagged(inner, rt)?;
             let unquote_splicing_sym = rt.allocate_reader_symbol(None, "clojure.core/unquote-splicing")?;
             rt.allocate_reader_list(&[unquote_splicing_sym, inner_tagged])
+        }
+
+        // Deref: @form -> (deref form)
+        Edn::Deref(inner) => {
+            let inner_tagged = edn_to_tagged(inner, rt)?;
+            let deref_sym = rt.allocate_reader_symbol(None, "deref")?;
+            rt.allocate_reader_list(&[deref_sym, inner_tagged])
         }
 
         // Tagged literals: #tag value

@@ -1,0 +1,28 @@
+struct Pair { a: I64, b: I64 }
+
+fn make_pair(x: I64, y: I64) -> Pair {
+    Pair { a: x, b: y }
+}
+
+fn add_pairs(p1: Pair, p2: Pair) -> I64 {
+    p1.a + p1.b + p2.a + p2.b
+}
+
+fn alloc_junk(n: I64) -> I64 {
+    let mut i: I64 = 0;
+    while i < n {
+        let junk: Pair = Pair { a: i, b: i };
+        i = i + 1;
+    };
+    0
+}
+
+fn make_pair_with_junk(x: I64, y: I64) -> Pair {
+    alloc_junk(100);
+    Pair { a: x, b: y }
+}
+
+fn main() -> I64 {
+    let result: I64 = add_pairs(make_pair_with_junk(1, 2), make_pair_with_junk(3, 4));
+    result
+}

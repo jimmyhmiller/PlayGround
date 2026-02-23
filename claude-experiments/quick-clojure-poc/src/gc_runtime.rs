@@ -51,6 +51,7 @@ pub const TYPE_ARRAY: usize = 15;
 pub const TYPE_MULTI_ARITY_FN: usize = 16;
 pub const TYPE_DEFTYPE: usize = 17; // Base for deftypes, actual ID = TYPE_DEFTYPE + type_data
 pub const TYPE_DYNAMIC_ARRAY: usize = 18; // Dynamic array: header.size = capacity, header.type_data = used count
+pub const TYPE_ATOM: usize = 19; // Atom: mutable reference cell, 1 field (value)
 
 // ========== Reader Types ==========
 // Opaque types produced by the Rust reader, used directly by macros.
@@ -1196,6 +1197,41 @@ impl GCRuntime {
 
         // Return the symbol pointer so it can be reused for namespace binding
         Ok((tagged_var_ptr, symbol_ptr))
+    }
+
+    /// Allocate an atom with an initial value.
+    /// Atom layout: 1 field [value]
+    pub fn allocate_atom(&mut self, initial_value: usize) -> Result<usize, String> {
+        let atom_ptr = self.allocate_raw(1, TYPE_ATOM as u8)?;
+        let heap_obj = HeapObject::from_untagged(atom_ptr as *const u8);
+        heap_obj.write_field(0, initial_value);
+        Ok(self.tag_heap_object(atom_ptr))
+    }
+
+    /// Read the current value of an atom
+    pub fn atom_deref(&self, atom_tagged: usize) -> usize {
+        let untagged = atom_tagged >> 3;
+        let heap_obj = HeapObject::from_untagged(untagged as *const u8);
+        heap_obj.get_field(0)
+    }
+
+    /// Reset an atom to a new value, returns the new value
+    pub fn atom_reset(&mut self, atom_tagged: usize, new_value: usize) -> usize {
+        let untagged = atom_tagged >> 3;
+        let heap_obj = HeapObject::from_untagged(untagged as *const u8);
+        heap_obj.write_field(0, new_value);
+        new_value
+    }
+
+    /// Compare-and-set: if current value == old_val, set to new_val and return true
+    pub fn atom_compare_and_set(&mut self, atom_tagged: usize, old_val: usize, new_val: usize) -> bool {
+        let current = self.atom_deref(atom_tagged);
+        if current == old_val {
+            self.atom_reset(atom_tagged, new_val);
+            true
+        } else {
+            false
+        }
     }
 
     /// Bootstrap all builtin functions as Vars in clojure.core.
@@ -2682,6 +2718,11 @@ impl GCRuntime {
                     TYPE_LIST => {
                         // Format cons cells as a list
                         self.format_list(value)
+                    }
+                    TYPE_ATOM => {
+                        let inner_val = self.atom_deref(value);
+                        let inner_str = self.format_value(inner_val);
+                        format!("#<Atom@{:x}: {}>", untagged, inner_str)
                     }
                     TYPE_KEYWORD => {
                         // Format keyword with colon prefix

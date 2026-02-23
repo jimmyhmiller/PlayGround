@@ -346,7 +346,6 @@ fn clj_seq_nth_vec_last() {
 }
 
 #[test]
-#[ignore] // nth on lists not supported (only vectors)
 fn clj_seq_nth_list() {
     assert_eq!(eval_expr("(nth (list 10 20 30) 2)"), "30");
 }
@@ -1180,13 +1179,11 @@ fn clj_seq_juxt() {
 // -- unsupported: interpose, partition-all, partition-by, reductions, etc. --
 
 #[test]
-#[ignore] // interpose not implemented
 fn clj_seq_interpose() {
     assert_eq!(eval_expr("(interpose 0 [1 2 3])"), "(1 0 2 0 3)");
 }
 
 #[test]
-#[ignore] // partition-all not implemented
 fn clj_seq_partition_all() {
     assert_eq!(
         eval_expr("(partition-all 4 [1 2 3 4 5 6 7 8 9])"),
@@ -1195,7 +1192,6 @@ fn clj_seq_partition_all() {
 }
 
 #[test]
-#[ignore] // partition-by not implemented
 fn clj_seq_partition_by() {
     assert_eq!(
         eval_expr("(partition-by odd? [1 3 2 4 5])"),
@@ -1204,7 +1200,6 @@ fn clj_seq_partition_by() {
 }
 
 #[test]
-#[ignore] // reductions not implemented
 fn clj_seq_reductions() {
     assert_eq!(
         eval_expr("(reductions + [1 2 3 4 5])"),
@@ -1213,13 +1208,11 @@ fn clj_seq_reductions() {
 }
 
 #[test]
-#[ignore] // take-nth not implemented
 fn clj_seq_take_nth() {
     assert_eq!(eval_expr("(take-nth 2 [1 2 3 4 5])"), "(1 3 5)");
 }
 
 #[test]
-#[ignore] // split-at not implemented
 fn clj_seq_split_at() {
     assert_eq!(
         eval_expr("(split-at 2 [1 2 3 4 5])"),
@@ -1228,7 +1221,6 @@ fn clj_seq_split_at() {
 }
 
 #[test]
-#[ignore] // split-with not implemented
 fn clj_seq_split_with() {
     assert_eq!(
         eval_expr("(split-with pos? [1 2 -1 3])"),
@@ -1237,7 +1229,6 @@ fn clj_seq_split_with() {
 }
 
 #[test]
-#[ignore] // sort-by not implemented
 fn clj_seq_sort_by() {
     assert_eq!(
         eval_expr("(sort-by first [[2 1] [1 3] [3 2]])"),
@@ -1246,61 +1237,53 @@ fn clj_seq_sort_by() {
 }
 
 #[test]
-#[ignore] // cycle not implemented
+#[ignore] // cycle not defined, needs lazy-seq for infinite sequences
 fn clj_seq_cycle() {
     assert_eq!(eval_expr("(take 5 (cycle [1 2 3]))"), "(1 2 3 1 2)");
 }
 
 #[test]
-#[ignore] // iterate not implemented
+#[ignore] // iterate is eagerly recursive, needs lazy-seq to work with infinite sequences
 fn clj_seq_iterate() {
     assert_eq!(eval_expr("(take 5 (iterate inc 0))"), "(0 1 2 3 4)");
 }
 
 #[test]
-#[ignore] // drop-last not implemented
 fn clj_seq_drop_last() {
     assert_eq!(eval_expr("(drop-last [1 2 3])"), "(1 2)");
 }
 
 #[test]
-#[ignore] // nthrest not implemented
 fn clj_seq_nthrest() {
     assert_eq!(eval_expr("(nthrest [1 2 3 4 5] 2)"), "(3 4 5)");
 }
 
 #[test]
-#[ignore] // nthnext not implemented
 fn clj_seq_nthnext() {
     assert_eq!(eval_expr("(nthnext [1 2 3 4 5] 2)"), "(3 4 5)");
 }
 
 #[test]
-#[ignore] // ffirst not implemented
 fn clj_seq_ffirst() {
     assert_eq!(eval_expr("(ffirst [[1 2] [3 4]])"), "1");
 }
 
 #[test]
-#[ignore] // nnext not implemented
 fn clj_seq_nnext() {
     assert_eq!(eval_expr("(nnext [1 2 3 4])"), "(3 4)");
 }
 
 #[test]
-#[ignore] // mapv not implemented
 fn clj_seq_mapv() {
     assert_eq!(eval_expr("(mapv inc [1 2 3])"), "[2 3 4]");
 }
 
 #[test]
-#[ignore] // filterv not implemented
 fn clj_seq_filterv() {
     assert_eq!(eval_expr("(filterv even? [1 2 3 4 5])"), "[2 4]");
 }
 
 #[test]
-#[ignore] // keep-indexed not implemented
 fn clj_seq_keep_indexed() {
     assert_eq!(
         eval_expr("(keep-indexed (fn [i v] (if (odd? i) v)) [10 20 30 40 50])"),
@@ -1309,7 +1292,6 @@ fn clj_seq_keep_indexed() {
 }
 
 #[test]
-#[ignore] // merge-with not implemented
 fn clj_seq_merge_with() {
     assert_eq!(
         eval_expr("(get (merge-with + {:a 1} {:a 2}) :a)"),
@@ -1318,31 +1300,26 @@ fn clj_seq_merge_with() {
 }
 
 #[test]
-#[ignore] // not-empty not implemented
 fn clj_seq_not_empty_empty() {
     assert_eq!(eval_expr("(not-empty [])"), "nil");
 }
 
 #[test]
-#[ignore] // not-empty not implemented
 fn clj_seq_not_empty_nonempty() {
     assert_eq!(eval_expr("(not-empty [1 2])"), "[1 2]");
 }
 
 #[test]
-#[ignore] // peek not implemented
 fn clj_vec_peek() {
     assert_eq!(eval_expr("(peek [1 2 3])"), "3");
 }
 
 #[test]
-#[ignore] // pop not implemented
 fn clj_vec_pop() {
     assert_eq!(eval_expr("(pop [1 2 3])"), "[1 2]");
 }
 
 #[test]
-#[ignore] // subvec not implemented
 fn clj_vec_subvec() {
     assert_eq!(eval_expr("(subvec [0 1 2 3 4] 2 4)"), "[2 3]");
 }
@@ -2200,35 +2177,29 @@ fn clj_logic_when_let_nil() {
 
 // ============================================================================
 // ATOM TESTS (from atoms.clj)
-// All marked #[ignore] because `atom` is not implemented
 // ============================================================================
 
 #[test]
-#[ignore] // atom not implemented
 fn clj_atom_create_deref() {
     assert_eq!(eval_expr("(let [a (atom 0)] (deref a))"), "0");
 }
 
 #[test]
-#[ignore] // atom not implemented
 fn clj_atom_reset() {
     assert_eq!(eval_expr("(let [a (atom 0)] (reset! a 42) (deref a))"), "42");
 }
 
 #[test]
-#[ignore] // atom not implemented
 fn clj_atom_swap_inc() {
     assert_eq!(eval_expr("(let [a (atom 0)] (swap! a inc) (deref a))"), "1");
 }
 
 #[test]
-#[ignore] // atom not implemented
 fn clj_atom_swap_plus() {
     assert_eq!(eval_expr("(let [a (atom 0)] (swap! a + 5) (deref a))"), "5");
 }
 
 #[test]
-#[ignore] // atom not implemented
 fn clj_atom_compare_and_set_success() {
     assert_eq!(
         eval_expr("(let [a (atom 10)] (compare-and-set! a 10 20) (deref a))"),
@@ -2237,7 +2208,6 @@ fn clj_atom_compare_and_set_success() {
 }
 
 #[test]
-#[ignore] // atom not implemented
 fn clj_atom_compare_and_set_failure() {
     assert_eq!(
         eval_expr("(let [a (atom 10)] (compare-and-set! a 99 20) (deref a))"),
@@ -2246,7 +2216,6 @@ fn clj_atom_compare_and_set_failure() {
 }
 
 #[test]
-#[ignore] // atom not implemented
 fn clj_atom_swap_vals() {
     assert_eq!(
         eval_expr("(let [a (atom 0)] (swap-vals! a inc))"),
@@ -2255,7 +2224,6 @@ fn clj_atom_swap_vals() {
 }
 
 #[test]
-#[ignore] // atom not implemented
 fn clj_atom_reset_vals() {
     assert_eq!(
         eval_expr("(let [a (atom 0)] (reset-vals! a :b))"),

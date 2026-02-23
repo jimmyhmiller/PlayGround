@@ -1,0 +1,421 @@
+namespace ui
+
+use appkit as ak
+
+// ─── Element Format ─────────────────────────────────────────────────
+// Every element is an array: [:tag, {attrs}, child1, child2, ...]
+// Attrs map is always the second element (even if empty {}).
+
+fn is-element?(x) {
+    is-array(x) && length(x) >= 2 && is-keyword(get(x, 0))
+}
+
+fn el-tag(el) { get(el, 0) }
+fn el-attrs(el) { get(el, 1) }
+
+fn el-children(el) {
+    let mut result = []
+    let mut i = 2
+    while i < length(el) {
+        result = push(result, get(el, i))
+        i = i + 1
+    }
+    result
+}
+
+fn attr-or(attrs, key, default) {
+    let v = get(attrs, key)
+    if v == null { default } else { v }
+}
+
+// ─── Flatten Children ───────────────────────────────────────────────
+// Distinguishes single elements (array starting with keyword) from
+// arrays of elements (from map()), and skips nulls.
+
+fn flatten-children(args) {
+    let mut result = []
+    let mut i = 0
+    while i < length(args) {
+        let item = get(args, i)
+        if item == null {
+            // skip
+        } else if is-element?(item) {
+            result = push(result, item)
+        } else if is-array(item) {
+            // array of elements from map()
+            let mut j = 0
+            while j < length(item) {
+                let sub = get(item, j)
+                if sub != null {
+                    result = push(result, sub)
+                }
+                j = j + 1
+            }
+        }
+        i = i + 1
+    }
+    result
+}
+
+// ─── Builder Helpers ────────────────────────────────────────────────
+
+fn vstack(attrs, ...children) {
+    let flat = flatten-children(children)
+    let mut el = [:vstack, attrs]
+    let mut i = 0
+    while i < length(flat) {
+        el = push(el, get(flat, i))
+        i = i + 1
+    }
+    el
+}
+
+fn hstack(attrs, ...children) {
+    let flat = flatten-children(children)
+    let mut el = [:hstack, attrs]
+    let mut i = 0
+    while i < length(flat) {
+        el = push(el, get(flat, i))
+        i = i + 1
+    }
+    el
+}
+
+fn zstack(attrs, ...children) {
+    let flat = flatten-children(children)
+    let mut el = [:zstack, attrs]
+    let mut i = 0
+    while i < length(flat) {
+        el = push(el, get(flat, i))
+        i = i + 1
+    }
+    el
+}
+
+fn spacer(h) {
+    [:spacer, {:height h}]
+}
+
+fn divider() {
+    [:divider, {}]
+}
+
+fn divider-colored(c) {
+    [:divider, {:color c}]
+}
+
+// ─── Measure (bottom-up height computation) ─────────────────────────
+
+fn measure(el, w) {
+    let tag = el-tag(el)
+    let attrs = el-attrs(el)
+
+    if tag == :vstack { measure-vstack(el, w) }
+    else if tag == :hstack { attr-or(attrs, :height, 20.0) }
+    else if tag == :zstack { attr-or(attrs, :height, 20.0) }
+    else if tag == :label { attr-or(attrs, :height, 20.0) }
+    else if tag == :button { attr-or(attrs, :height, 24.0) }
+    else if tag == :divider { 1.0 }
+    else if tag == :spacer { attr-or(attrs, :height, 8.0) }
+    else if tag == :view { attr-or(attrs, :height, 0.0) }
+    else if tag == :text-field { attr-or(attrs, :height, 24.0) }
+    else if tag == :symbol { attr-or(attrs, :height, 20.0) }
+    else if tag == :custom { attr-or(attrs, :height, 0.0) }
+    else { 0.0 }
+}
+
+fn measure-vstack(el, w) {
+    let attrs = el-attrs(el)
+    let children = el-children(el)
+    let pad-y = attr-or(attrs, :padding-y, attr-or(attrs, :padding, 0.0))
+    let gap = attr-or(attrs, :gap, 0.0)
+    let num = length(children)
+
+    let mut total = pad-y * 2.0
+    let mut i = 0
+    while i < num {
+        let child = get(children, i)
+        total = total + measure(child, w)
+        if i < num - 1 { total = total + gap }
+        i = i + 1
+    }
+    total
+}
+
+// ─── Layout (top-down pass creating AppKit views) ───────────────────
+
+fn layout(el, parent, x, y, w, h, ctx) {
+    let tag = el-tag(el)
+
+    if tag == :vstack { layout-vstack(el, parent, x, y, w, h, ctx) }
+    else if tag == :hstack { layout-hstack(el, parent, x, y, w, h, ctx) }
+    else if tag == :zstack { layout-zstack(el, parent, x, y, w, h, ctx) }
+    else if tag == :label { layout-label(el, parent, x, y, w, h, ctx) }
+    else if tag == :button { layout-button(el, parent, x, y, w, h, ctx) }
+    else if tag == :divider { layout-divider(el, parent, x, y, w, h, ctx) }
+    else if tag == :spacer { null }
+    else if tag == :view { layout-view(el, parent, x, y, w, h, ctx) }
+    else if tag == :text-field { layout-text-field(el, parent, x, y, w, h, ctx) }
+    else if tag == :symbol { layout-symbol(el, parent, x, y, w, h, ctx) }
+    else if tag == :custom { layout-custom(el, parent, x, y, w, h, ctx) }
+    else { null }
+}
+
+fn layout-vstack(el, parent, x, y, w, h, ctx) {
+    let attrs = el-attrs(el)
+    let children = el-children(el)
+    let pad = attr-or(attrs, :padding, 0.0)
+    let pad-x = attr-or(attrs, :padding-x, pad)
+    let pad-y = attr-or(attrs, :padding-y, pad)
+    let gap = attr-or(attrs, :gap, 0.0)
+    let bg-color = get(attrs, :bg-color)
+    let corner-r = attr-or(attrs, :corner-radius, 0.0)
+
+    let inner-w = w - (pad-x * 2.0)
+    let inner-x = x + pad-x
+
+    // Optional background
+    if bg-color != null {
+        let bg = ak/colored-view(x, y, w, h,
+            get(bg-color, 0), get(bg-color, 1), get(bg-color, 2),
+            attr-or(bg-color, 3, 1.0))
+        if corner-r > 0.0 { ak/set-corner-radius(bg, corner-r) }
+        ak/add-view(parent, bg)
+    }
+
+    // Layout children top-to-bottom (AppKit: high y = top)
+    let num = length(children)
+    let mut cursor = y + h - pad-y
+    let mut i = 0
+    while i < num {
+        let child = get(children, i)
+        let ch = measure(child, inner-w)
+        cursor = cursor - ch
+        layout(child, parent, inner-x, cursor, inner-w, ch, ctx)
+        if i < num - 1 { cursor = cursor - gap }
+        i = i + 1
+    }
+    null
+}
+
+fn layout-hstack(el, parent, x, y, w, h, ctx) {
+    let attrs = el-attrs(el)
+    let children = el-children(el)
+    let pad-x = attr-or(attrs, :padding-x, 0.0)
+    let pad-y = attr-or(attrs, :padding-y, 0.0)
+    let gap = attr-or(attrs, :gap, 0.0)
+    let bg-color = get(attrs, :bg-color)
+    let corner-r = attr-or(attrs, :corner-radius, 0.0)
+
+    let inner-w = w - (pad-x * 2.0)
+    let inner-x = x + pad-x
+    let inner-h = h - (pad-y * 2.0)
+    let inner-y = y + pad-y
+
+    if bg-color != null {
+        let bg = ak/colored-view(x, y, w, h,
+            get(bg-color, 0), get(bg-color, 1), get(bg-color, 2),
+            attr-or(bg-color, 3, 1.0))
+        if corner-r > 0.0 { ak/set-corner-radius(bg, corner-r) }
+        ak/add-view(parent, bg)
+    }
+
+    // Compute fixed vs flex widths
+    let num = length(children)
+    let mut fixed-total = 0.0
+    let mut flex-count = 0
+    let mut i = 0
+    while i < num {
+        let child = get(children, i)
+        let cw = get(el-attrs(child), :width)
+        if cw != null {
+            fixed-total = fixed-total + cw
+        } else {
+            flex-count = flex-count + 1
+        }
+        i = i + 1
+    }
+    let total-gaps = if num > 1 { to-float(num - 1) * gap } else { 0.0 }
+    let flex-w = if flex-count > 0 {
+        (inner-w - fixed-total - total-gaps) / to-float(flex-count)
+    } else { 0.0 }
+
+    // Layout left-to-right
+    let mut cx = inner-x
+    i = 0
+    while i < num {
+        let child = get(children, i)
+        let child-attrs = el-attrs(child)
+        let cw = get(child-attrs, :width)
+        let actual-w = if cw != null { cw } else { flex-w }
+        layout(child, parent, cx, inner-y, actual-w, inner-h, ctx)
+        cx = cx + actual-w
+        if i < num - 1 { cx = cx + gap }
+        i = i + 1
+    }
+    null
+}
+
+fn layout-zstack(el, parent, x, y, w, h, ctx) {
+    let children = el-children(el)
+    let mut i = 0
+    while i < length(children) {
+        layout(get(children, i), parent, x, y, w, h, ctx)
+        i = i + 1
+    }
+    null
+}
+
+// ─── Leaf Renderers ─────────────────────────────────────────────────
+
+fn layout-label(el, parent, x, y, w, h, ctx) {
+    let attrs = el-attrs(el)
+    let text = attr-or(attrs, :text, "")
+    let align = attr-or(attrs, :align, :center)
+    let lbl = if align == :left {
+        ak/left-label(text, x, y, w, h)
+    } else {
+        ak/label(text, x, y, w, h)
+    }
+    let f = get(attrs, :font)
+    if f != null { ak/set-font(lbl, f) }
+    let c = get(attrs, :color)
+    if c != null { ak/set-text-color(lbl, c) }
+    let lbm = get(attrs, :line-break-mode)
+    if lbm != null { ak/set-line-break-mode(lbl, lbm) }
+    ak/add-to(parent, lbl)
+
+    // on-click: invisible button overlay
+    let on-click = get(attrs, :on-click)
+    if on-click != null {
+        wire-click-over(parent, on-click, x, y, w, h, ctx)
+    }
+    null
+}
+
+fn layout-button(el, parent, x, y, w, h, ctx) {
+    let attrs = el-attrs(el)
+    let title = attr-or(attrs, :title, "")
+    let btn = ak/button(title, x, y, w, h)
+    let f = get(attrs, :font)
+    if f != null { ak/set-font(btn, f) }
+    let bordered = get(attrs, :bordered)
+    if bordered != null { ak/set-bordered(btn, bordered) }
+    let on-click = get(attrs, :on-click)
+    if on-click != null {
+        let handler = get(ctx, :handler)
+        let n = get(ctx, :n)
+        let idx = deref(get(ctx, :click-idx))
+        swap!(get(ctx, :click-idx), fn(x) { x + 1 })
+        let sel-name = "ui" ++ to-string(idx) ++ "_" ++ to-string(n) ++ ":"
+        ak/add-method(handler, sel-name, fn(self_, sel, sender) {
+            on-click()
+        })
+        ak/on-click(btn, handler, sel-name)
+    }
+    ak/add-to(parent, btn)
+    null
+}
+
+fn layout-divider(el, parent, x, y, w, h, ctx) {
+    let attrs = el-attrs(el)
+    let c = attr-or(attrs, :color, ak/color(1.0, 1.0, 1.0, 0.15))
+    let div = ak/colored-view(x, y, w, 1.0, 1.0, 1.0, 1.0, 0.15)
+    ak/add-view(parent, div)
+    null
+}
+
+fn layout-view(el, parent, x, y, w, h, ctx) {
+    let attrs = el-attrs(el)
+    let bg-color = get(attrs, :bg-color)
+    let v = if bg-color != null {
+        ak/colored-view(x, y, w, h,
+            get(bg-color, 0), get(bg-color, 1), get(bg-color, 2),
+            attr-or(bg-color, 3, 1.0))
+    } else {
+        ak/colored-view(x, y, w, h, 0.0, 0.0, 0.0, 0.0)
+    }
+    let cr = get(attrs, :corner-radius)
+    if cr != null { ak/set-corner-radius(v, cr) }
+    let bw = get(attrs, :border-width)
+    if bw != null {
+        let bc = attr-or(attrs, :border-color, ak/white)
+        ak/set-border(v, bw, bc)
+    }
+    ak/add-view(parent, v)
+    null
+}
+
+fn layout-text-field(el, parent, x, y, w, h, ctx) {
+    let attrs = el-attrs(el)
+    let ph = attr-or(attrs, :placeholder, "")
+    let tf = ak/text-field(ph, x, y, w, h)
+    let f = get(attrs, :font)
+    if f != null { ak/set-font(tf, f) }
+    let ref = get(attrs, :ref)
+    if ref != null { reset!(ref, tf) }
+    ak/add-to(parent, tf)
+    null
+}
+
+fn layout-symbol(el, parent, x, y, w, h, ctx) {
+    let attrs = el-attrs(el)
+    let name = attr-or(attrs, :name, "star")
+    let pt-size = attr-or(attrs, :pt-size, 14.0)
+    let tint = attr-or(attrs, :tint-color, ak/white)
+    let sv = ak/symbol-image-view(name, pt-size, x, y, w, h, tint)
+    ak/add-view(parent, sv)
+    null
+}
+
+fn layout-custom(el, parent, x, y, w, h, ctx) {
+    let attrs = el-attrs(el)
+    let render-fn = get(attrs, :render)
+    if render-fn != null {
+        render-fn(parent, x, y, w, h, ctx)
+    }
+    null
+}
+
+// ─── Handler Wiring Helpers ─────────────────────────────────────────
+
+fn wire-click(btn, callback, ctx) {
+    let handler = get(ctx, :handler)
+    let n = get(ctx, :n)
+    let idx = deref(get(ctx, :click-idx))
+    swap!(get(ctx, :click-idx), fn(x) { x + 1 })
+    let sel-name = "ui" ++ to-string(idx) ++ "_" ++ to-string(n) ++ ":"
+    ak/add-method(handler, sel-name, fn(self_, sel, sender) {
+        callback()
+    })
+    ak/on-click(btn, handler, sel-name)
+}
+
+fn wire-click-over(parent, callback, x, y, w, h, ctx) {
+    let handler = get(ctx, :handler)
+    let n = get(ctx, :n)
+    let idx = deref(get(ctx, :click-idx))
+    swap!(get(ctx, :click-idx), fn(x) { x + 1 })
+    let sel-name = "ui" ++ to-string(idx) ++ "_" ++ to-string(n) ++ ":"
+    ak/add-method(handler, sel-name, fn(self_, sel, sender) {
+        callback()
+    })
+    let btn = ak/button("", x, y, w, h)
+    ak/set-bordered(btn, 0)
+    ak/on-click(btn, handler, sel-name)
+    ak/add-to(parent, btn)
+}
+
+// ─── Top-Level Render ───────────────────────────────────────────────
+
+fn render(parent-view, tree, width, handler, n) {
+    let h = measure(tree, width)
+    ak/remove-all-subviews(parent-view)
+    let ctx = {
+        :handler handler,
+        :n n,
+        :click-idx atom(0)
+    }
+    layout(tree, parent-view, 0.0, 0.0, width, h, ctx)
+    h
+}

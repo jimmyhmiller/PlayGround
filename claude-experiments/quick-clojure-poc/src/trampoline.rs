@@ -3425,6 +3425,410 @@ fn value_to_string(rt: &mut GCRuntime, value: usize) -> String {
     }
 }
 
+// ============================================================================
+// Atom operations
+// ============================================================================
+
+/// __atom_create(frame_pointer, initial_value) -> tagged atom pointer
+#[allow(dead_code)]
+pub extern "C" fn builtin_atom_create(frame_pointer: usize, initial_value: usize) -> usize {
+    let gc_return_addr = get_gc_return_addr();
+    unsafe {
+        let runtime_ptr = std::ptr::addr_of!(RUNTIME);
+        let rt = &mut *(*runtime_ptr).as_ref().unwrap().get();
+        rt.maybe_gc_before_alloc(frame_pointer, gc_return_addr);
+        rt.allocate_atom(initial_value).unwrap_or(7)
+    }
+}
+
+/// __atom_deref(atom) -> current value
+#[allow(dead_code)]
+pub extern "C" fn builtin_atom_deref(atom: usize) -> usize {
+    unsafe {
+        let runtime_ptr = std::ptr::addr_of!(RUNTIME);
+        let rt = &mut *(*runtime_ptr).as_ref().unwrap().get();
+        rt.atom_deref(atom)
+    }
+}
+
+/// __atom_reset(atom, new_value) -> new_value
+#[allow(dead_code)]
+pub extern "C" fn builtin_atom_reset(atom: usize, new_value: usize) -> usize {
+    unsafe {
+        let runtime_ptr = std::ptr::addr_of!(RUNTIME);
+        let rt = &mut *(*runtime_ptr).as_ref().unwrap().get();
+        rt.atom_reset(atom, new_value)
+    }
+}
+
+/// __atom_compare_and_set(atom, old_val, new_val) -> boolean
+#[allow(dead_code)]
+pub extern "C" fn builtin_atom_compare_and_set(atom: usize, old_val: usize, new_val: usize) -> usize {
+    unsafe {
+        let runtime_ptr = std::ptr::addr_of!(RUNTIME);
+        let rt = &mut *(*runtime_ptr).as_ref().unwrap().get();
+        if rt.atom_compare_and_set(atom, old_val, new_val) {
+            11 // true
+        } else {
+            3 // false
+        }
+    }
+}
+
+/// pr-str: like value_to_string but strings are quoted, nil is "nil"
+fn pr_str_value(rt: &mut GCRuntime, value: usize) -> String {
+    use crate::gc_runtime::{TYPE_STRING, TYPE_KEYWORD, TYPE_READER_SYMBOL, TYPE_SYMBOL};
+
+    // nil
+    if value == 7 {
+        return "nil".to_string();
+    }
+
+    let tag = value & 0b111;
+    match tag {
+        0b000 => {
+            // Integer
+            format!("{}", (value as isize) >> 3)
+        }
+        0b001 => {
+            // Float
+            let float_val = rt.untag_float(value);
+            let bits = (float_val << 3) as u64;
+            let f = f64::from_bits(bits);
+            format!("{}", f)
+        }
+        0b010 => {
+            // String - quote it for pr-str
+            let s = rt.read_string(value);
+            format!("\"{}\"", s)
+        }
+        0b011 => {
+            // Boolean
+            if value == 11 { "true".to_string() } else { "false".to_string() }
+        }
+        0b110 => {
+            // Heap object
+            let type_id = rt.get_type_id_for_value(value);
+            match type_id {
+                TYPE_STRING => {
+                    let s = rt.read_string(value);
+                    format!("\"{}\"", s)
+                }
+                TYPE_KEYWORD => {
+                    match rt.get_keyword_text(value) {
+                        Ok(text) => format!(":{}", text),
+                        Err(_) => format!("<keyword>")
+                    }
+                }
+                TYPE_READER_SYMBOL | TYPE_SYMBOL => {
+                    let name = rt.prim_symbol_name(value).unwrap_or_else(|_| "<symbol>".to_string());
+                    match rt.prim_symbol_namespace(value) {
+                        Ok(Some(ns)) => format!("{}/{}", ns, name),
+                        _ => name,
+                    }
+                }
+                _ => {
+                    rt.format_value(value)
+                }
+            }
+        }
+        _ => {
+            format!("<unknown tag {}>", tag)
+        }
+    }
+}
+
+/// __pr_str(frame_pointer, value) -> string representation with pr semantics
+#[allow(dead_code)]
+pub extern "C" fn builtin_pr_str(frame_pointer: usize, value: usize) -> usize {
+    let gc_return_addr = get_gc_return_addr();
+    unsafe {
+        let runtime_ptr = std::ptr::addr_of!(RUNTIME);
+        let rt = &mut *(*runtime_ptr).as_ref().unwrap().get();
+        let result = pr_str_value(rt, value);
+        rt.maybe_gc_before_alloc(frame_pointer, gc_return_addr);
+        rt.allocate_string(&result).unwrap_or(7)
+    }
+}
+
+// ============================================================================
+// string operations for clojure.string
+// ============================================================================
+
+/// __string_upper_case(frame_pointer, string) -> new uppercase string
+#[allow(dead_code)]
+pub extern "C" fn builtin_string_upper_case(frame_pointer: usize, string: usize) -> usize {
+    let gc_return_addr = get_gc_return_addr();
+    unsafe {
+        let runtime_ptr = std::ptr::addr_of!(RUNTIME);
+        let rt = &mut *(*runtime_ptr).as_ref().unwrap().get();
+        let s = rt.read_string(string);
+        let result = s.to_uppercase();
+        rt.maybe_gc_before_alloc(frame_pointer, gc_return_addr);
+        rt.allocate_string(&result).unwrap_or(7)
+    }
+}
+
+/// __string_lower_case(frame_pointer, string) -> new lowercase string
+#[allow(dead_code)]
+pub extern "C" fn builtin_string_lower_case(frame_pointer: usize, string: usize) -> usize {
+    let gc_return_addr = get_gc_return_addr();
+    unsafe {
+        let runtime_ptr = std::ptr::addr_of!(RUNTIME);
+        let rt = &mut *(*runtime_ptr).as_ref().unwrap().get();
+        let s = rt.read_string(string);
+        let result = s.to_lowercase();
+        rt.maybe_gc_before_alloc(frame_pointer, gc_return_addr);
+        rt.allocate_string(&result).unwrap_or(7)
+    }
+}
+
+/// __string_includes(string, substr) -> tagged_boolean
+#[allow(dead_code)]
+pub extern "C" fn builtin_string_includes(string: usize, substr: usize) -> usize {
+    unsafe {
+        let runtime_ptr = std::ptr::addr_of!(RUNTIME);
+        let rt = &*(*runtime_ptr).as_ref().unwrap().get();
+        let s = rt.read_string(string);
+        let sub = rt.read_string(substr);
+        if s.contains(&sub) { 11 } else { 3 }
+    }
+}
+
+/// __string_join(frame_pointer, separator, coll) -> new string
+/// coll is a seq of values to join with separator between them
+#[allow(dead_code)]
+pub extern "C" fn builtin_string_join(frame_pointer: usize, separator: usize, coll: usize) -> usize {
+    let gc_return_addr = get_gc_return_addr();
+    unsafe {
+        let runtime_ptr = std::ptr::addr_of!(RUNTIME);
+        let rt = &mut *(*runtime_ptr).as_ref().unwrap().get();
+        let sep = rt.read_string(separator);
+        let values = match seq_to_vec(rt, coll) {
+            Ok(v) => v,
+            Err(msg) => {
+                eprintln!("string/join: error: {}", msg);
+                return 7;
+            }
+        };
+        let parts: Vec<String> = values.iter().map(|v| value_to_string(rt, *v)).collect();
+        let result = parts.join(&sep);
+        rt.maybe_gc_before_alloc(frame_pointer, gc_return_addr);
+        rt.allocate_string(&result).unwrap_or(7)
+    }
+}
+
+/// __string_trim(frame_pointer, string) -> new trimmed string
+#[allow(dead_code)]
+pub extern "C" fn builtin_string_trim(frame_pointer: usize, string: usize) -> usize {
+    let gc_return_addr = get_gc_return_addr();
+    unsafe {
+        let runtime_ptr = std::ptr::addr_of!(RUNTIME);
+        let rt = &mut *(*runtime_ptr).as_ref().unwrap().get();
+        let s = rt.read_string(string);
+        let result = s.trim().to_string();
+        rt.maybe_gc_before_alloc(frame_pointer, gc_return_addr);
+        rt.allocate_string(&result).unwrap_or(7)
+    }
+}
+
+/// __string_replace(frame_pointer, s, match_str, replacement) -> new string
+#[allow(dead_code)]
+pub extern "C" fn builtin_string_replace(frame_pointer: usize, s: usize, match_str: usize, replacement: usize) -> usize {
+    let gc_return_addr = get_gc_return_addr();
+    unsafe {
+        let runtime_ptr = std::ptr::addr_of!(RUNTIME);
+        let rt = &mut *(*runtime_ptr).as_ref().unwrap().get();
+        let string = rt.read_string(s);
+        let m = rt.read_string(match_str);
+        let r = rt.read_string(replacement);
+        let result = string.replace(&m, &r);
+        rt.maybe_gc_before_alloc(frame_pointer, gc_return_addr);
+        rt.allocate_string(&result).unwrap_or(7)
+    }
+}
+
+// ============================================================================
+// subs - substring
+// ============================================================================
+
+/// __subs(frame_pointer, string, start) -> new string
+/// Returns substring from start to end of string.
+#[allow(dead_code)]
+pub extern "C" fn builtin_subs(frame_pointer: usize, string: usize, start: usize) -> usize {
+    let gc_return_addr = get_gc_return_addr();
+    unsafe {
+        let runtime_ptr = std::ptr::addr_of!(RUNTIME);
+        let rt = &mut *(*runtime_ptr).as_ref().unwrap().get();
+        let s = rt.read_string(string);
+        let start_idx = (start as isize >> 3) as usize;
+        if start_idx > s.len() {
+            panic!("StringIndexOutOfBoundsException: subs start {} > length {}", start_idx, s.len());
+        }
+        let result_str = &s[start_idx..];
+        rt.maybe_gc_before_alloc(frame_pointer, gc_return_addr);
+        match rt.allocate_string(result_str) {
+            Ok(ptr) => ptr,
+            Err(e) => {
+                eprintln!("subs: error: {}", e);
+                7
+            }
+        }
+    }
+}
+
+/// __subs_3(frame_pointer, string, start, end) -> new string
+/// Returns substring from start (inclusive) to end (exclusive).
+#[allow(dead_code)]
+pub extern "C" fn builtin_subs_3(frame_pointer: usize, string: usize, start: usize, end: usize) -> usize {
+    let gc_return_addr = get_gc_return_addr();
+    unsafe {
+        let runtime_ptr = std::ptr::addr_of!(RUNTIME);
+        let rt = &mut *(*runtime_ptr).as_ref().unwrap().get();
+        let s = rt.read_string(string);
+        let start_idx = (start as isize >> 3) as usize;
+        let end_idx = (end as isize >> 3) as usize;
+        if start_idx > s.len() || end_idx > s.len() || start_idx > end_idx {
+            panic!("StringIndexOutOfBoundsException: subs [{}, {}) on string of length {}", start_idx, end_idx, s.len());
+        }
+        let result_str = &s[start_idx..end_idx];
+        rt.maybe_gc_before_alloc(frame_pointer, gc_return_addr);
+        match rt.allocate_string(result_str) {
+            Ok(ptr) => ptr,
+            Err(e) => {
+                eprintln!("subs: error: {}", e);
+                7
+            }
+        }
+    }
+}
+
+// ============================================================================
+// keyword namespace - extract namespace from keyword
+// ============================================================================
+
+/// __keyword_namespace(frame_pointer, keyword) -> string or nil
+/// Returns the namespace part of a namespaced keyword, or nil.
+#[allow(dead_code)]
+pub extern "C" fn builtin_keyword_namespace(frame_pointer: usize, value: usize) -> usize {
+    use crate::gc_runtime::TYPE_KEYWORD;
+    let gc_return_addr = get_gc_return_addr();
+    unsafe {
+        let runtime_ptr = std::ptr::addr_of!(RUNTIME);
+        let rt = &mut *(*runtime_ptr).as_ref().unwrap().get();
+        let type_id = rt.get_type_id_for_value(value);
+        if type_id != TYPE_KEYWORD {
+            eprintln!("keyword-namespace: expected keyword, got type {}", type_id);
+            return 7; // nil
+        }
+        let text = match rt.get_keyword_text(value) {
+            Ok(t) => t.to_string(),
+            Err(e) => {
+                eprintln!("keyword-namespace: error: {}", e);
+                return 7;
+            }
+        };
+        // Check if keyword has namespace (contains /)
+        if let Some(pos) = text.find('/') {
+            let ns = &text[..pos];
+            rt.maybe_gc_before_alloc(frame_pointer, gc_return_addr);
+            match rt.allocate_string(ns) {
+                Ok(ptr) => ptr,
+                Err(e) => {
+                    eprintln!("keyword-namespace: error allocating string: {}", e);
+                    7
+                }
+            }
+        } else {
+            7 // nil - no namespace
+        }
+    }
+}
+
+// ============================================================================
+// keyword constructor - create keyword from string(s)
+// ============================================================================
+
+/// __keyword_from_string_1(frame_pointer, name_str) -> keyword
+/// Creates a keyword from a name string.
+#[allow(dead_code)]
+pub extern "C" fn builtin_keyword_from_string_1(frame_pointer: usize, name: usize) -> usize {
+    let gc_return_addr = get_gc_return_addr();
+    unsafe {
+        let runtime_ptr = std::ptr::addr_of!(RUNTIME);
+        let rt = &mut *(*runtime_ptr).as_ref().unwrap().get();
+        let name_str = rt.read_string(name);
+        rt.maybe_gc_before_alloc(frame_pointer, gc_return_addr);
+        match rt.allocate_keyword(&name_str) {
+            Ok(ptr) => ptr,
+            Err(e) => {
+                eprintln!("keyword: error: {}", e);
+                7
+            }
+        }
+    }
+}
+
+/// __keyword_from_string_2(frame_pointer, ns_str, name_str) -> keyword
+/// Creates a namespaced keyword from namespace and name strings.
+#[allow(dead_code)]
+pub extern "C" fn builtin_keyword_from_string_2(frame_pointer: usize, ns: usize, name: usize) -> usize {
+    let gc_return_addr = get_gc_return_addr();
+    unsafe {
+        let runtime_ptr = std::ptr::addr_of!(RUNTIME);
+        let rt = &mut *(*runtime_ptr).as_ref().unwrap().get();
+        let ns_str = rt.read_string(ns);
+        let name_str = rt.read_string(name);
+        let kw_text = format!("{}/{}", ns_str, name_str);
+        rt.maybe_gc_before_alloc(frame_pointer, gc_return_addr);
+        match rt.allocate_keyword(&kw_text) {
+            Ok(ptr) => ptr,
+            Err(e) => {
+                eprintln!("keyword: error: {}", e);
+                7
+            }
+        }
+    }
+}
+
+// ============================================================================
+// compare - generic comparator
+// ============================================================================
+
+/// __compare(x, y) -> tagged integer (-1, 0, or 1)
+/// Compares two values.
+#[allow(dead_code)]
+pub extern "C" fn builtin_compare(x: usize, y: usize) -> usize {
+    unsafe {
+        let runtime_ptr = std::ptr::addr_of!(RUNTIME);
+        let rt = &*(*runtime_ptr).as_ref().unwrap().get();
+
+        let tag_x = x & 0b111;
+        let tag_y = y & 0b111;
+
+        let result: isize = if tag_x == 0b000 && tag_y == 0b000 {
+            // Both integers
+            let ix = (x as isize) >> 3;
+            let iy = (y as isize) >> 3;
+            if ix < iy { -1 } else if ix > iy { 1 } else { 0 }
+        } else if tag_x == 0b010 && tag_y == 0b010 {
+            // Both heap objects - check if strings
+            let sx = rt.read_string(x);
+            let sy = rt.read_string(y);
+            match sx.cmp(&sy) {
+                std::cmp::Ordering::Less => -1,
+                std::cmp::Ordering::Equal => 0,
+                std::cmp::Ordering::Greater => 1,
+            }
+        } else {
+            panic!("compare: cannot compare values with tags {} and {}", tag_x, tag_y);
+        };
+
+        // Tag as integer
+        ((result << 3) as usize) | 0b000
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

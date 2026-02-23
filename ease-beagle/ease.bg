@@ -1,6 +1,7 @@
 namespace ease
 
 use appkit as ak
+use ui
 
 // ─── Data Model ─────────────────────────────────────────────────────
 
@@ -118,6 +119,7 @@ let reorder-row-data = atom([])
 let reorder-bar-data = atom([])
 let reorder-drag-from = atom(-1)
 let reorder-current-slot = atom(-1)
+let add-name-tf-ref = atom(null)
 
 fn save-data() {
     let data = deref(app-data)
@@ -298,83 +300,9 @@ fn total-in-range(data, start, end) {
     })
 }
 
-// ─── Dynamic Popover Height ────────────────────────────────────────
-
-fn compute-main-height() {
-    let data = deref(app-data)
-    let num = length(data.goals)
-    let is-hm = deref(show-heatmap)
-    let avail-w = POP-W - (2.0 * PAD) - 8.0
-
-    let mut h = PAD
-    // Period picker pill
-    h = h + 20.0
-    h = h + 16.0
-
-    // Visualization + divider
-    if num > 0 {
-        if is-hm {
-            let p = deref(selected-period)
-            if p == 0 {
-                let cw = (avail-w - 22.0) / 12.0
-                h = h + 2.0 * (cw + 2.0) + 2.0
-            } else if p == 1 {
-                let cw = (avail-w - 12.0) / 7.0
-                h = h + 14.0 + cw + 4.0
-            } else if p == 2 {
-                let cw = (avail-w - 12.0) / 7.0
-                h = h + 5.0 * (cw + 2.0)
-            } else {
-                h = h + 14.0 + 2.0 + 12.0 * 9.0
-            }
-        } else {
-            h = h + to-float(num) * 12.0
-            if num > 1 { h = h + to-float(num - 1) * 4.0 }
-        }
-        h = h + 16.0
-        h = h + 1.0
-        h = h + 16.0
-    }
-
-    // Goal rows
-    if num == 0 {
-        h = h + 50.0
-    } else {
-        h = h + to-float(num) * 44.0
-        if num > 1 { h = h + to-float(num - 1) * 1.0 }
-    }
-
-    // Add button
-    h = h + 16.0
-    h = h + 24.0
-    h = h + PAD
-    h
-}
-
-fn compute-add-goal-height() {
-    let mut h = PAD
-    h = h + 24.0   // header row
-    h = h + 16.0   // gap
-    h = h + 24.0   // text field
-    h = h + 16.0   // gap
-    h = h + 16.0   // "Color" label
-    h = h + 8.0    // gap
-    h = h + 56.0   // color grid (2 rows of 24 + 8 gap)
-    h = h + 16.0   // gap
-    h = h + 24.0   // buttons
-    h = h + PAD
-    h
-}
-
-fn compute-color-picker-height() {
-    let mut h = PAD
-    h = h + 24.0   // header
-    h = h + 8.0    // gap
-    h = h + 20.0   // goal name subtitle
-    h = h + 16.0   // gap
-    h = h + 64.0   // color grid (2 rows of 28 + 8 gap)
-    h = h + PAD
-    h
+// ─── Flag Helpers ──────────────────────────────────────────────────
+fn has-flag(flags, mask) {
+    (flags / mask) % 2 == 1
 }
 
 // ─── Status Bar Icon ────────────────────────────────────────────────
@@ -383,9 +311,6 @@ fn update-status-icon() {
     let si = deref(status-item-ref)
     if si == null { null }
     else {
-        // Original icon: 3 horizontal bars at fixed positions, template mode
-        // Bar positions: y=2, y=7, y=12.5, all height=4, rx=2
-        // Default widths: [7, 14, 11], starting at x=2
         let img = ak/image(18.0, 18.0)
         ak/lock-focus(img)
         ak/set-fill-color(ak/color(0.0, 0.0, 0.0, 1.0))
@@ -393,7 +318,6 @@ fn update-status-icon() {
         ak/fill-rounded-rect(2.0, 7.0, 14.0, 4.0, 2.0, 2.0)
         ak/fill-rounded-rect(2.0, 2.0, 11.0, 4.0, 2.0, 2.0)
         ak/unlock-focus(img)
-        // Set as template so system handles light/dark
         ak/set-template(img)
         ak/set-button-image(si, img)
     }
@@ -405,33 +329,26 @@ fn rebuild-ui() {
     let pop = deref(popover-ref)
     if pop == null { null }
     else {
-        // Compute dynamic height for each view state
-        let actual-h = if deref(is-adding-goal) {
-            compute-add-goal-height()
-        } else if deref(picking-color-for) >= 0 {
-            compute-color-picker-height()
-        } else {
-            compute-main-height()
-        }
-        ak/set-popover-content-size(pop, POP-W, actual-h)
-        ak/set-frame-size(pop.content-view, POP-W, actual-h)
-        let view = pop.content-view
-        ak/remove-all-subviews(view)
-
         let n = deref(rebuild-counter)
         swap!(rebuild-counter, fn(x) { x + 1 })
         let h = ak/handler("H" ++ to-string(n))
         let h = ak/register(h)
 
-        if deref(is-adding-goal) {
-            build-add-goal-view(view, h, n)
+        let tree = if deref(is-adding-goal) {
+            build-add-goal-tree()
         } else if deref(picking-color-for) >= 0 {
-            build-color-picker-view(view, h, n)
+            build-color-picker-tree()
         } else {
-            build-main-view(view, h, n, actual-h)
+            build-main-tree()
         }
 
-        // Re-add the persistent responder view for keyboard/flags events
+        let view = pop.content-view
+        let actual-h = ui/render(view, tree, POP-W, h, n)
+
+        ak/set-popover-content-size(pop, POP-W, actual-h)
+        ak/set-frame-size(pop.content-view, POP-W, actual-h)
+
+        // Re-add the persistent responder view
         let resp = deref(responder-ref)
         if resp != null {
             ak/add-view(view, resp)
@@ -442,204 +359,349 @@ fn rebuild-ui() {
     }
 }
 
-// ─── Main View ──────────────────────────────────────────────────────
+// ─── Period Picker ──────────────────────────────────────────────────
 
-fn build-main-view(view, handler, n, pop-h) {
-    let data = deref(app-data)
-    let goals = data.goals
-    let num = length(goals)
-    let mut y = pop-h - PAD
-
-    // ─── Period Picker (pill background, 4 buttons) ──────
+fn build-period-picker() {
     let period-labels = ["Day", "Week", "Month", "All"]
     let current-period = deref(selected-period)
     let btn-widths = [29.0, 44.0, 43.0, 29.0]
-    let btn-gap = 2.0
-    let pill-pad = 0.0
-    let btn-h = 20.0
-    let total-btns-w = 29.0 + 44.0 + 43.0 + 29.0 + (3.0 * btn-gap)
-    let pill-w = total-btns-w + (pill-pad * 2.0)
-    let pill-h = btn-h + (pill-pad * 2.0)
-    let pill-x = (POP-W - pill-w) / 2.0
 
-    y = y - pill-h
-    let pill-bg = ak/colored-view(pill-x, y, pill-w, pill-h, 0.5, 0.5, 0.5, 0.1)
-    ak/set-corner-radius(pill-bg, 5.0)
-    ak/add-view(view, pill-bg)
-
-    let mut bx = pill-x + pill-pad
-    let mut pi = 0
-    while pi < 4 {
+    let buttons = map([0, 1, 2, 3], fn(pi) {
         let bw = get(btn-widths, pi)
-        let by = y + pill-pad
         let is-sel = pi == current-period
-
-        if is-sel {
-            let sel-bg = ak/colored-view(bx, by, bw, btn-h, 0.25, 0.5, 1.0, 0.2)
-            ak/set-corner-radius(sel-bg, 4.0)
-            ak/add-view(view, sel-bg)
-        }
-
-        let plbl = ak/label(get(period-labels, pi), bx, by, bw, btn-h)
-        ak/set-font(plbl, if is-sel { ak/bold-font(11.0) } else { ak/font(11.0) })
-        ak/set-text-color(plbl, if is-sel { ak/white } else { ak/color(0.6, 0.6, 0.65, 1.0) })
-        ak/add-to(view, plbl)
-
-        let psel = "p" ++ to-string(pi) ++ "_" ++ to-string(n) ++ ":"
         let pidx = pi
-        ak/add-method(handler, psel, fn(self_, sel, sender) {
-            reset!(selected-period, pidx)
-            rebuild-ui()
-        })
-        let pbtn = ak/button("", bx, by, bw, btn-h)
-        ak/set-bordered(pbtn, 0)
-        ak/on-click(pbtn, handler, psel)
-        ak/add-to(view, pbtn)
-
-        bx = bx + bw + btn-gap
-        pi = pi + 1
-    }
-
-    y = y - 16.0
-
-    // ─── Visualization: Bars or Heatmap (tap to toggle) ──
-    if num > 0 {
-        let is-heatmap = deref(show-heatmap)
-        let viz-x = PAD + 4.0
-        let viz-w = POP-W - (2.0 * PAD) - 8.0
-        let viz-top = y
-
-        if is-heatmap {
-            y = build-heatmap(view, handler, data, goals, y, n)
-        } else {
-            let total = all-total(data)
-            let prev-widths = deref(prev-bar-widths)
-            let mut new-widths = []
-            let is-reorder-bars = deref(reorder-mode)
-            if is-reorder-bars { reset!(reorder-bar-data, []) }
-            let mut i = 0
-            while i < num {
-                let g = get(goals, i)
-                let count = goal-count(data, g.id)
-                let proportion = if total == 0.0 { 0.0 } else { count / total }
-                let bar-fill-w = if proportion > 0.0 {
-                    let w = proportion * viz-w
-                    if w < 8.0 { 8.0 } else { w }
-                } else { 0.0 }
-
-                y = y - 12.0
-                let rgb = parse-hex-color(g.color)
-
-                let bg = ak/colored-view(viz-x, y, viz-w, 12.0,
-                    get(rgb, 0), get(rgb, 1), get(rgb, 2), 0.15)
-                ak/set-corner-radius(bg, 4.0)
-                ak/add-view(view, bg)
-
-                let mut cur-fill-ptr = 0
-                if bar-fill-w > 0.0 {
-                    // Start at previous width if available, else at target
-                    let prev-w = if i < length(prev-widths) { get(prev-widths, i) } else { bar-fill-w }
-                    let start-w = if prev-w > 0.0 { prev-w } else { bar-fill-w }
-                    let bar = ak/colored-view(viz-x, y, start-w, 12.0,
-                        get(rgb, 0), get(rgb, 1), get(rgb, 2), 1.0)
-                    ak/set-corner-radius(bar, 4.0)
-                    ak/add-view(view, bar)
-                    // Animate from old width to new width if different
-                    let target-w = bar-fill-w
-                    let bar-y = y
-                    if start-w != target-w {
-                        ak/animate(0.3, fn() {
-                            ak/animated-set-frame(bar.ptr, viz-x, bar-y, target-w, 12.0)
-                        })
-                    }
-                    cur-fill-ptr = bar.ptr
-                }
-                // Store bar data for live reorder animation
-                if is-reorder-bars {
-                    let stored-y = y
-                    let stored-fw = bar-fill-w
-                    swap!(reorder-bar-data, fn(arr) {
-                        push(arr, [bg.ptr, cur-fill-ptr, stored-fw, stored-y])
-                    })
-                }
-                new-widths = push(new-widths, bar-fill-w)
-
-                if i < num - 1 { y = y - 4.0 }
-                i = i + 1
-            }
-            reset!(prev-bar-widths, new-widths)
-        }
-
-        // Invisible toggle button covering visualization area
-        let toggle-sel = "tv_" ++ to-string(n) ++ ":"
-        ak/add-method(handler, toggle-sel, fn(self_, sel, sender) {
-            swap!(show-heatmap, fn(v) { !v })
-            rebuild-ui()
-        })
-        let toggle-btn = ak/button("", viz-x, y, viz-w, viz-top - y)
-        ak/set-bordered(toggle-btn, 0)
-        ak/on-click(toggle-btn, handler, toggle-sel)
-        ak/add-to(view, toggle-btn)
-
-        y = y - 16.0
-
-        // Divider
-        let divider = ak/colored-view(PAD, y, POP-W - (2.0 * PAD), 1.0, 1.0, 1.0, 1.0, 0.15)
-        ak/add-view(view, divider)
-        y = y - 16.0
-    }
-
-    // ─── Goal Rows (1pt spacing between rows) ────────────
-    if num == 0 {
-        y = y - 30.0
-        let empty = ak/label("No goals yet", 0.0, y, POP-W, 20.0)
-        ak/set-font(empty, ak/font(13.0))
-        ak/set-text-color(empty, ak/color(0.5, 0.5, 0.55, 1.0))
-        ak/add-to(view, empty)
-    } else {
-        if deref(reorder-mode) { reset!(reorder-row-data, []) }
-        let mut i = 0
-        while i < num {
-            let g = get(goals, i)
-            y = build-goal-row(view, handler, g, i, y, n)
-            if i < num - 1 { y = y - 1.0 }
-            i = i + 1
-        }
-    }
-
-    // ─── "+ Add Goal" button (centered) ──────────────────
-    y = y - 16.0
-    let add-sel = "add_" ++ to-string(n) ++ ":"
-    ak/add-method(handler, add-sel, fn(self_, sel, sender) {
-        let data = deref(app-data)
-        let used = map(data.goals, fn(g) { g.color })
-        let idx = find-index(PRESET-COLORS, fn(c) { !any?(used, fn(u) { u == c }) })
-        reset!(add-color-idx, if idx == -1 { 0 } else { idx })
-        reset!(is-adding-goal, true)
-        rebuild-ui()
+        ui/zstack({:height 20.0, :width bw},
+            if is-sel {
+                [:view, {:bg-color [0.25, 0.5, 1.0, 0.2], :corner-radius 4.0, :height 20.0}]
+            } else { null },
+            [:label, {:text get(period-labels, pi),
+                      :font if is-sel { ak/bold-font(11.0) } else { ak/font(11.0) },
+                      :color if is-sel { ak/white } else { ak/color(0.6, 0.6, 0.65, 1.0) },
+                      :height 20.0,
+                      :on-click fn() {
+                          reset!(selected-period, pidx)
+                          rebuild-ui()
+                      }}]
+        )
     })
-    let add-lbl = ak/label("+ Add Goal", 0.0, y, POP-W, 20.0)
-    ak/set-font(add-lbl, ak/font(11.0))
-    ak/set-text-color(add-lbl, ak/color(0.5, 0.5, 0.55, 1.0))
-    ak/add-to(view, add-lbl)
-    let add-btn = ak/button("", (POP-W - 100.0) / 2.0, y - 2.0, 100.0, 24.0)
-    ak/set-bordered(add-btn, 0)
-    ak/on-click(add-btn, handler, add-sel)
-    ak/add-to(view, add-btn)
 
+    ui/hstack({:height 20.0, :bg-color [0.5, 0.5, 0.5, 0.1], :corner-radius 5.0,
+               :gap 2.0}, buttons)
 }
 
-// ─── Goal Row ───────────────────────────────────────────────────────
-// Spec: HStack(spacing: 12), padding horizontal 12 vertical 8, cornerRadius 8
-// Normal: [handle 16w invis] [dot 12] [name] [Spacer] [indicator 40x28] [delete]
-// Reorder: [handle 16w vis] [dot 12] [name] [Spacer] [▲] [▼]
-// Drag feedback: growing colored rounded rect in indicator area (8-28pt tall)
+// ─── Visualization (custom) ─────────────────────────────────────────
 
-fn build-goal-row(view, handler, goal, idx, y, n) {
+fn viz-height() {
+    let data = deref(app-data)
+    let num = length(data.goals)
+    if num == 0 { 0.0 }
+    else {
+        let is-hm = deref(show-heatmap)
+        let avail-w = POP-W - (2.0 * PAD) - 8.0
+        if is-hm {
+            let p = deref(selected-period)
+            if p == 0 {
+                let cw = (avail-w - 22.0) / 12.0
+                2.0 * (cw + 2.0) + 2.0
+            } else if p == 1 {
+                let cw = (avail-w - 12.0) / 7.0
+                14.0 + cw + 4.0
+            } else if p == 2 {
+                let cw = (avail-w - 12.0) / 7.0
+                5.0 * (cw + 2.0)
+            } else {
+                14.0 + 2.0 + 12.0 * 9.0
+            }
+        } else {
+            let h = to-float(num) * 12.0
+            let gaps = if num > 1 { to-float(num - 1) * 4.0 } else { 0.0 }
+            h + gaps
+        }
+    }
+}
+
+fn render-bars(parent, x, y, w, h, ctx) {
+    let data = deref(app-data)
+    let goals = data.goals
+    let num = length(goals)
+    let total = all-total(data)
+    let prev-widths = deref(prev-bar-widths)
+    let mut new-widths = []
+    let is-reorder-bars = deref(reorder-mode)
+    if is-reorder-bars { reset!(reorder-bar-data, []) }
+
+    let viz-x = x
+    let viz-w = w
+    let mut cy = y + h
+
+    let mut i = 0
+    while i < num {
+        let g = get(goals, i)
+        let count = goal-count(data, g.id)
+        let proportion = if total == 0.0 { 0.0 } else { count / total }
+        let bar-fill-w = if proportion > 0.0 {
+            let bw = proportion * viz-w
+            if bw < 8.0 { 8.0 } else { bw }
+        } else { 0.0 }
+
+        cy = cy - 12.0
+        let rgb = parse-hex-color(g.color)
+
+        let bg = ak/colored-view(viz-x, cy, viz-w, 12.0,
+            get(rgb, 0), get(rgb, 1), get(rgb, 2), 0.15)
+        ak/set-corner-radius(bg, 4.0)
+        ak/add-view(parent, bg)
+
+        let mut cur-fill-ptr = 0
+        if bar-fill-w > 0.0 {
+            let prev-w = if i < length(prev-widths) { get(prev-widths, i) } else { bar-fill-w }
+            let start-w = if prev-w > 0.0 { prev-w } else { bar-fill-w }
+            let bar = ak/colored-view(viz-x, cy, start-w, 12.0,
+                get(rgb, 0), get(rgb, 1), get(rgb, 2), 1.0)
+            ak/set-corner-radius(bar, 4.0)
+            ak/add-view(parent, bar)
+            let target-w = bar-fill-w
+            let bar-y = cy
+            if start-w != target-w {
+                ak/animate(0.3, fn() {
+                    ak/animated-set-frame(bar.ptr, viz-x, bar-y, target-w, 12.0)
+                })
+            }
+            cur-fill-ptr = bar.ptr
+        }
+        if is-reorder-bars {
+            let stored-y = cy
+            let stored-fw = bar-fill-w
+            swap!(reorder-bar-data, fn(arr) {
+                push(arr, [bg.ptr, cur-fill-ptr, stored-fw, stored-y])
+            })
+        }
+        new-widths = push(new-widths, bar-fill-w)
+
+        if i < num - 1 { cy = cy - 4.0 }
+        i = i + 1
+    }
+    reset!(prev-bar-widths, new-widths)
+}
+
+fn render-viz(parent, x, y, w, h, ctx) {
+    let data = deref(app-data)
+    let goals = data.goals
+    let is-heatmap = deref(show-heatmap)
+    let viz-x = PAD + 4.0
+    let viz-w = POP-W - (2.0 * PAD) - 8.0
+
+    if is-heatmap {
+        build-heatmap-at(parent, data, goals, viz-x, y, viz-w, h)
+    } else {
+        render-bars(parent, viz-x, y, viz-w, h, ctx)
+    }
+
+    // Toggle button covering viz area
+    ui/wire-click-over(parent, fn() {
+        swap!(show-heatmap, fn(v) { !v })
+        rebuild-ui()
+    }, viz-x, y, viz-w, h, ctx)
+}
+
+// ─── Heatmap ────────────────────────────────────────────────────────
+
+fn build-heatmap-at(view, data, goals, grid-x, base-y, avail-w, total-h) {
+    let p = deref(selected-period)
+    let now = ak/epoch-seconds()
+    let num = length(goals)
+
+    if p == 0 {
+        let cell-gap = 2.0
+        let cell-w = (avail-w - (11.0 * cell-gap)) / 12.0
+        let cell-h = cell-w
+        let start-of-day = now - (now % SECS-PER-DAY)
+        let mut hour = 0
+        while hour < 24 {
+            let col = hour % 12
+            let row = 1 - (hour / 12)
+            let cx = grid-x + (to-float(col) * (cell-w + cell-gap))
+            let cy = base-y + total-h - (2.0 * (cell-h + cell-gap)) + (to-float(row) * (cell-h + cell-gap))
+            let h-start = start-of-day + (to-float(hour) * 3600.0)
+            let h-end = h-start + 3600.0
+            let h-total = total-in-range(data, h-start, h-end)
+            if h-total > 0.0 {
+                let mut cur-y = 0.0
+                let mut gi = 0
+                while gi < num {
+                    let g = get(goals, gi)
+                    let g-amt = entries-in-range(data, g.id, h-start, h-end)
+                    let seg-h = (g-amt / h-total) * cell-h
+                    if seg-h > 0.5 {
+                        let crgb = parse-hex-color(g.color)
+                        let fill = ak/colored-view(cx, cy + cur-y, cell-w, seg-h,
+                            get(crgb, 0), get(crgb, 1), get(crgb, 2), 1.0)
+                        ak/set-corner-radius(fill, 2.0)
+                        ak/add-view(view, fill)
+                    }
+                    cur-y = cur-y + seg-h
+                    gi = gi + 1
+                }
+            } else {
+                let empty = ak/colored-view(cx, cy, cell-w, cell-h, 1.0, 1.0, 1.0, 0.06)
+                ak/set-corner-radius(empty, 2.0)
+                ak/add-view(view, empty)
+            }
+            hour = hour + 1
+        }
+    } else if p == 1 {
+        let cell-gap = 2.0
+        let cell-w = (avail-w - (6.0 * cell-gap)) / 7.0
+        let cell-h = cell-w
+        let day-labels = ["S", "M", "T", "W", "T", "F", "S"]
+        let start-of-week = now - (7.0 * SECS-PER-DAY)
+        let label-y = base-y + total-h - 14.0
+        let mut di = 0
+        while di < 7 {
+            let lx = grid-x + (to-float(di) * (cell-w + cell-gap))
+            let dl = ak/label(get(day-labels, di), lx, label-y, cell-w, 12.0)
+            ak/set-font(dl, ak/bold-font(9.0))
+            ak/set-text-color(dl, ak/color(0.5, 0.5, 0.55, 1.0))
+            ak/add-to(view, dl)
+            di = di + 1
+        }
+        let cell-y = label-y - cell-h - 2.0
+        let mut day = 0
+        while day < 7 {
+            let cx = grid-x + (to-float(day) * (cell-w + cell-gap))
+            let d-start = start-of-week + (to-float(day) * SECS-PER-DAY)
+            let d-end = d-start + SECS-PER-DAY
+            let d-total = total-in-range(data, d-start, d-end)
+            if d-total > 0.0 {
+                let mut cur-h = 0.0
+                let mut gi = 0
+                while gi < num {
+                    let g = get(goals, gi)
+                    let g-amt = entries-in-range(data, g.id, d-start, d-end)
+                    let seg-h = (g-amt / d-total) * cell-h
+                    if seg-h > 0.5 {
+                        let crgb = parse-hex-color(g.color)
+                        let fill = ak/colored-view(cx, cell-y + cur-h, cell-w, seg-h,
+                            get(crgb, 0), get(crgb, 1), get(crgb, 2), 1.0)
+                        ak/set-corner-radius(fill, 2.0)
+                        ak/add-view(view, fill)
+                    }
+                    cur-h = cur-h + seg-h
+                    gi = gi + 1
+                }
+            } else {
+                let empty = ak/colored-view(cx, cell-y, cell-w, cell-h, 1.0, 1.0, 1.0, 0.06)
+                ak/set-corner-radius(empty, 2.0)
+                ak/add-view(view, empty)
+            }
+            day = day + 1
+        }
+    } else if p == 2 {
+        let cell-gap = 2.0
+        let cell-w = (avail-w - (6.0 * cell-gap)) / 7.0
+        let cell-h = cell-w
+        let corner-r = 2.0
+        let weeks = 5
+        let period-days = 35
+        let period-start = now - (35.0 * SECS-PER-DAY)
+        let mut day = 0
+        while day < period-days {
+            let col = day % 7
+            let week = day / 7
+            let row = weeks - 1 - week
+            let cx = grid-x + (to-float(col) * (cell-w + cell-gap))
+            let cy = base-y + (to-float(row) * (cell-h + cell-gap))
+            let d-start = period-start + (to-float(day) * SECS-PER-DAY)
+            let d-end = d-start + SECS-PER-DAY
+            let d-total = total-in-range(data, d-start, d-end)
+            if d-total > 0.0 {
+                let mut cur-h = 0.0
+                let mut gi = 0
+                while gi < num {
+                    let g = get(goals, gi)
+                    let g-amt = entries-in-range(data, g.id, d-start, d-end)
+                    let seg-h = (g-amt / d-total) * cell-h
+                    if seg-h > 0.3 {
+                        let crgb = parse-hex-color(g.color)
+                        let fill = ak/colored-view(cx, cy + cur-h, cell-w, seg-h,
+                            get(crgb, 0), get(crgb, 1), get(crgb, 2), 1.0)
+                        ak/set-corner-radius(fill, corner-r)
+                        ak/add-view(view, fill)
+                    }
+                    cur-h = cur-h + seg-h
+                    gi = gi + 1
+                }
+            } else {
+                let empty = ak/colored-view(cx, cy, cell-w, cell-h, 1.0, 1.0, 1.0, 0.06)
+                ak/set-corner-radius(empty, corner-r)
+                ak/add-view(view, empty)
+            }
+            day = day + 1
+        }
+    } else {
+        let cell-gap = 1.0
+        let cell-w = (avail-w - (6.0 * cell-gap)) / 7.0
+        let cell-h = 8.0
+        let corner-r = 1.5
+        let weeks = 12
+        let period-days = 84
+        let period-start = now - (84.0 * SECS-PER-DAY)
+        let day-labels = ["S", "M", "T", "W", "T", "F", "S"]
+        let label-y = base-y + total-h - 12.0
+        let mut di = 0
+        while di < 7 {
+            let lx = grid-x + (to-float(di) * (cell-w + cell-gap))
+            let dl = ak/label(get(day-labels, di), lx, label-y, cell-w, 10.0)
+            ak/set-font(dl, ak/bold-font(8.0))
+            ak/set-text-color(dl, ak/color(0.5, 0.5, 0.55, 1.0))
+            ak/add-to(view, dl)
+            di = di + 1
+        }
+        let grid-top = label-y - 2.0
+        let mut day = 0
+        while day < period-days {
+            let col = day % 7
+            let week = day / 7
+            let row = weeks - 1 - week
+            let cx = grid-x + (to-float(col) * (cell-w + cell-gap))
+            let cy = grid-top - (to-float(weeks) * (cell-h + cell-gap)) + (to-float(row) * (cell-h + cell-gap))
+            let d-start = period-start + (to-float(day) * SECS-PER-DAY)
+            let d-end = d-start + SECS-PER-DAY
+            let d-total = total-in-range(data, d-start, d-end)
+            if d-total > 0.0 {
+                let mut cur-h = 0.0
+                let mut gi = 0
+                while gi < num {
+                    let g = get(goals, gi)
+                    let g-amt = entries-in-range(data, g.id, d-start, d-end)
+                    let seg-h = (g-amt / d-total) * cell-h
+                    if seg-h > 0.3 {
+                        let crgb = parse-hex-color(g.color)
+                        let fill = ak/colored-view(cx, cy + cur-h, cell-w, seg-h,
+                            get(crgb, 0), get(crgb, 1), get(crgb, 2), 1.0)
+                        ak/set-corner-radius(fill, corner-r)
+                        ak/add-view(view, fill)
+                    }
+                    cur-h = cur-h + seg-h
+                    gi = gi + 1
+                }
+            } else {
+                let empty = ak/colored-view(cx, cy, cell-w, cell-h, 1.0, 1.0, 1.0, 0.06)
+                ak/set-corner-radius(empty, corner-r)
+                ak/add-view(view, empty)
+            }
+            day = day + 1
+        }
+    }
+}
+
+// ─── Goal Row (custom - drag/reorder logic) ─────────────────────────
+
+fn render-goal-row(parent, x, y, w, h, ctx, goal, idx) {
     let row-h = 44.0
-    let row-y = y - row-h
-    let row-x = PAD
-    let row-w = POP-W - (2.0 * PAD)
+    let row-x = x
+    let row-y = y
+    let row-w = w
     let rgb = parse-hex-color(goal.color)
     let h-pad = 12.0
     let is-reorder = deref(reorder-mode)
@@ -656,7 +718,6 @@ fn build-goal-row(view, handler, goal, idx, y, n) {
     let goal-b = get(rgb, 2)
 
     if is-reorder {
-        // ─── Reorder mode: live reorder with row animation ────
         let dc = deref(drag-counter)
         swap!(drag-counter, fn(x) { x + 1 })
         let reorder-idx = idx
@@ -675,19 +736,15 @@ fn build-goal-row(view, handler, goal, idx, y, n) {
                 reset!(reorder-drag-from, reorder-idx)
                 reset!(reorder-current-slot, reorder-idx)
                 ak/set-layer-bg(self_, ak/color(goal-r, goal-g, goal-b, 0.2))
-
-                // Modal event tracking loop using deltaY
-                let mask = 68  // LeftMouseDragged(64) | LeftMouseUp(4)
+                let mask = 68
                 let mut tracking = true
                 while tracking {
                     let ev = ak/next-event(self_, mask)
                     let evtype = ak/event-type(ev)
                     if evtype == 6 {
-                        // Dragged: move view + live reorder other rows
                         total-dy = total-dy - ak/event-delta-y(ev)
                         let dy = total-dy
                         ak/set-frame-raw(self_, cap-row-x, cap-row-y + dy, cap-row-w, cap-row-h)
-
                         let stride = cap-row-h + 1.0
                         let target-offset = if dy >= 0.0 {
                             to-int((dy + stride * 0.5) / stride)
@@ -699,7 +756,6 @@ fn build-goal-row(view, handler, goal, idx, y, n) {
                         let clamped = if raw-target < 0 { 0 }
                                       else if raw-target >= num-goals { num-goals - 1 }
                                       else { raw-target }
-
                         let prev-slot = deref(reorder-current-slot)
                         if clamped != prev-slot {
                             reset!(reorder-current-slot, clamped)
@@ -753,7 +809,6 @@ fn build-goal-row(view, handler, goal, idx, y, n) {
                             }
                         }
                     } else if evtype == 2 {
-                        // Mouse up: commit the reorder
                         reset!(is-dragging, false)
                         let final-slot = deref(reorder-current-slot)
                         let from = deref(reorder-drag-from)
@@ -769,7 +824,6 @@ fn build-goal-row(view, handler, goal, idx, y, n) {
         ak/set-layer-corner-radius(rv.ptr, 8.0)
         ak/set-layer-bg(rv.ptr, ak/color(goal-r, goal-g, goal-b, 0.05))
 
-        // Row content in local coords (origin 0,0 of tracking view)
         let lh-x = h-pad
         let lh-cy = (row-h - 20.0) / 2.0
         let rh = ak/symbol-image-view("line.3.horizontal", 12.0, lh-x, lh-cy, 16.0, 20.0,
@@ -791,73 +845,59 @@ fn build-goal-row(view, handler, goal, idx, y, n) {
         ak/set-line-break-mode(rn, 5)
         ak/add-to(rv, rn)
 
-        ak/add-view(view, rv)
-        // Store row data for live reorder (ptr + base y position)
+        ak/add-view(parent, rv)
         swap!(reorder-row-data, fn(arr) { push(arr, [rv.ptr, cap-row-y]) })
     } else {
-        // ─── Normal mode ────────────────────────────────────────
         let row-bg = ak/colored-view(row-x, row-y, row-w, row-h, 0.0, 0.0, 0.0, 0.0)
         ak/set-corner-radius(row-bg, 8.0)
-        ak/add-view(view, row-bg)
+        ak/add-view(parent, row-bg)
 
-        // Color dot
         let dot-cy = row-y + (row-h - 12.0) / 2.0
         let dot = ak/colored-view(dot-x, dot-cy, 12.0, 12.0, goal-r, goal-g, goal-b, 1.0)
         ak/set-corner-radius(dot, 6.0)
-        ak/add-view(view, dot)
+        ak/add-view(parent, dot)
 
-        let clr-sel = "c" ++ to-string(idx) ++ "_" ++ to-string(n) ++ ":"
         let clr-idx = idx
-        ak/add-method(handler, clr-sel, fn(self_, sel, sender) {
+        ui/wire-click-over(parent, fn() {
             reset!(picking-color-for, clr-idx)
             rebuild-ui()
-        })
-        let clr-btn = ak/button("", dot-x - 4.0, dot-cy - 4.0, 20.0, 20.0)
-        ak/set-bordered(clr-btn, 0)
-        ak/on-click(clr-btn, handler, clr-sel)
-        ak/add-to(view, clr-btn)
+        }, dot-x - 4.0, dot-cy - 4.0, 20.0, 20.0, ctx)
 
-        // Goal name
         let name-cy = row-y + (row-h - 20.0) / 2.0
         let name-lbl = ak/left-label(goal.name, name-x, name-cy, name-w, 20.0)
         ak/set-font(name-lbl, ak/font(13.0))
         ak/set-text-color(name-lbl, ak/white)
         ak/set-line-break-mode(name-lbl, 5)
-        ak/add-to(view, name-lbl)
+        ak/add-to(parent, name-lbl)
 
-        // Pull indicator (SF Symbol arrow)
         let ind-cy = row-y + (row-h - 28.0) / 2.0
         let is-alt = deref(alt-pressed)
         let arrow-name = if is-alt { "arrow.down.circle" } else { "arrow.up.circle" }
         let arrow-tint = if is-alt { ak/color(0.898, 0.451, 0.451, 1.0) } else { ak/color(0.5, 0.5, 0.55, 1.0) }
         let ind-view = ak/symbol-image-view(arrow-name, 14.0, ind-x, ind-cy, 40.0, 28.0, arrow-tint)
-        ak/add-view(view, ind-view)
+        ak/add-view(parent, ind-view)
         let arrow-ptr = ind-view.ptr
 
-        // Delete button
         let del-cy = row-y + (row-h - 18.0) / 2.0
-        let del-sel = "d" ++ to-string(idx) ++ "_" ++ to-string(n) ++ ":"
         let del-idx = idx
-        ak/add-method(handler, del-sel, fn(self_, sel, sender) {
-            delete-goal(del-idx)
-            rebuild-ui()
-        })
         let del-icon = ak/symbol-image-view("xmark.circle.fill", 14.0, del-x, del-cy, 16.0, 18.0,
             ak/color(0.5, 0.5, 0.55, 0.5))
-        ak/add-view(view, del-icon)
+        ak/add-view(parent, del-icon)
         let delete-ptr = del-icon.ptr
         let del-btn = ak/button("", del-x - 3.0, del-cy - 3.0, 22.0, 24.0)
         ak/set-bordered(del-btn, 0)
-        ak/on-click(del-btn, handler, del-sel)
-        ak/add-to(view, del-btn)
-        let del-btn-ptr = del-btn.ptr
+        ui/wire-click(del-btn, fn() {
+            delete-goal(del-idx)
+            rebuild-ui()
+        }, ctx)
+        ak/add-to(parent, del-btn)
 
-        // Drag-to-log tracking view
         let dc = deref(drag-counter)
         swap!(drag-counter, fn(x) { x + 1 })
         let row-goal-id = goal.id
         let ind-local-x = ind-x - row-x
         let ind-local-cy = (row-h - 28.0) / 2.0
+        let del-btn-ptr = del-btn.ptr
 
         let drag-view = ak/custom-mousedown-view(
             "R" ++ to-string(dc), row-x, row-y, row-w, row-h,
@@ -881,15 +921,12 @@ fn build-goal-row(view, handler, goal, idx, y, n) {
                     rr, rg, rb, 0.3)
                 ak/set-corner-radius(rect, 4.0)
                 ak/add-subview-to(self_, rect.ptr)
-
-                // Modal event tracking loop using deltaY (locationInWindow struct return is broken)
-                let mask = 68  // LeftMouseDragged(64) | LeftMouseUp(4)
+                let mask = 68
                 let mut tracking = true
                 while tracking {
                     let ev = ak/next-event(self_, mask)
                     let evtype = ak/event-type(ev)
                     if evtype == 6 {
-                        // Dragged - accumulate deltaY
                         total-dy = total-dy - ak/event-delta-y(ev)
                         let dy = total-dy
                         let eflags = ak/event-modifier-flags(ev)
@@ -904,7 +941,6 @@ fn build-goal-row(view, handler, goal, idx, y, n) {
                             ak/animated-set-frame(rect.ptr, ind-local-x, new-y, 40.0, new-h)
                         })
                     } else if evtype == 2 {
-                        // Mouse up
                         ak/animate(0.2, fn() {
                             ak/animated-set-frame(rect.ptr, ind-local-x, ind-local-cy + 10.0, 40.0, 8.0)
                             ak/set-alpha(rect.ptr, 0.0)
@@ -923,438 +959,211 @@ fn build-goal-row(view, handler, goal, idx, y, n) {
                 }
             }
         )
-        ak/add-view(view, drag-view)
+        ak/add-view(parent, drag-view)
     }
-
-    row-y
 }
 
-// ─── Heatmap ────────────────────────────────────────────────────────
-// All modes compute cell-w from available width to fill the popover.
-// to-float() is used wherever integer loop vars mix with float dimensions.
-
-fn build-heatmap(view, handler, data, goals, y, n) {
-    let p = deref(selected-period)
-    let now = ak/epoch-seconds()
+fn render-goal-rows(parent, x, y, w, h, ctx) {
+    let data = deref(app-data)
+    let goals = data.goals
     let num = length(goals)
-    let avail-w = POP-W - (2.0 * PAD) - 8.0
-    let grid-x = PAD + 4.0
-
-    if p == 0 {
-        // Day: 2 rows of 12 cells (square)
-        let cell-gap = 2.0
-        let cell-w = (avail-w - (11.0 * cell-gap)) / 12.0
-        let cell-h = cell-w
-        let start-of-day = now - (now % SECS-PER-DAY)
-
-        let mut hour = 0
-        while hour < 24 {
-            let col = hour % 12
-            let row = 1 - (hour / 12)
-            let cx = grid-x + (to-float(col) * (cell-w + cell-gap))
-            let cy = y - (2.0 * (cell-h + cell-gap)) + (to-float(row) * (cell-h + cell-gap))
-
-            let h-start = start-of-day + (to-float(hour) * 3600.0)
-            let h-end = h-start + 3600.0
-            let h-total = total-in-range(data, h-start, h-end)
-
-            if h-total > 0.0 {
-                let mut cur-y = 0.0
-                let mut gi = 0
-                while gi < num {
-                    let g = get(goals, gi)
-                    let g-amt = entries-in-range(data, g.id, h-start, h-end)
-                    let seg-h = (g-amt / h-total) * cell-h
-                    if seg-h > 0.5 {
-                        let crgb = parse-hex-color(g.color)
-                        let fill = ak/colored-view(cx, cy + cur-y, cell-w, seg-h,
-                            get(crgb, 0), get(crgb, 1), get(crgb, 2), 1.0)
-                        ak/set-corner-radius(fill, 2.0)
-                        ak/add-view(view, fill)
-                    }
-                    cur-y = cur-y + seg-h
-                    gi = gi + 1
-                }
-            } else {
-                let empty = ak/colored-view(cx, cy, cell-w, cell-h, 1.0, 1.0, 1.0, 0.06)
-                ak/set-corner-radius(empty, 2.0)
-                ak/add-view(view, empty)
-            }
-
-            hour = hour + 1
-        }
-        y - (2.0 * (cell-h + cell-gap)) - 2.0
-    } else if p == 1 {
-        // Week: 7 cells in a row (square)
-        let cell-gap = 2.0
-        let cell-w = (avail-w - (6.0 * cell-gap)) / 7.0
-        let cell-h = cell-w
-        let day-labels = ["S", "M", "T", "W", "T", "F", "S"]
-        let start-of-week = now - (7.0 * SECS-PER-DAY)
-
-        let label-y = y - 14.0
-        let mut di = 0
-        while di < 7 {
-            let lx = grid-x + (to-float(di) * (cell-w + cell-gap))
-            let dl = ak/label(get(day-labels, di), lx, label-y, cell-w, 12.0)
-            ak/set-font(dl, ak/bold-font(9.0))
-            ak/set-text-color(dl, ak/color(0.5, 0.5, 0.55, 1.0))
-            ak/add-to(view, dl)
-            di = di + 1
-        }
-
-        let cell-y = label-y - cell-h - 2.0
-        let mut day = 0
-        while day < 7 {
-            let cx = grid-x + (to-float(day) * (cell-w + cell-gap))
-            let d-start = start-of-week + (to-float(day) * SECS-PER-DAY)
-            let d-end = d-start + SECS-PER-DAY
-            let d-total = total-in-range(data, d-start, d-end)
-
-            if d-total > 0.0 {
-                let mut cur-h = 0.0
-                let mut gi = 0
-                while gi < num {
-                    let g = get(goals, gi)
-                    let g-amt = entries-in-range(data, g.id, d-start, d-end)
-                    let seg-h = (g-amt / d-total) * cell-h
-                    if seg-h > 0.5 {
-                        let crgb = parse-hex-color(g.color)
-                        let fill = ak/colored-view(cx, cell-y + cur-h, cell-w, seg-h,
-                            get(crgb, 0), get(crgb, 1), get(crgb, 2), 1.0)
-                        ak/set-corner-radius(fill, 2.0)
-                        ak/add-view(view, fill)
-                    }
-                    cur-h = cur-h + seg-h
-                    gi = gi + 1
-                }
-            } else {
-                let empty = ak/colored-view(cx, cell-y, cell-w, cell-h, 1.0, 1.0, 1.0, 0.06)
-                ak/set-corner-radius(empty, 2.0)
-                ak/add-view(view, empty)
-            }
-
-            day = day + 1
-        }
-        cell-y - 2.0
-    } else if p == 2 {
-        // Month: 7 cols x 5 rows (square cells)
-        let cell-gap = 2.0
-        let cell-w = (avail-w - (6.0 * cell-gap)) / 7.0
-        let cell-h = cell-w
-        let corner-r = 2.0
-        let weeks = 5
-        let period-days = 35
-        let period-start = now - (35.0 * SECS-PER-DAY)
-
-        let mut day = 0
-        while day < period-days {
-            let col = day % 7
-            let week = day / 7
-            let row = weeks - 1 - week
-            let cx = grid-x + (to-float(col) * (cell-w + cell-gap))
-            let cy = y - (to-float(weeks) * (cell-h + cell-gap)) + (to-float(row) * (cell-h + cell-gap))
-
-            let d-start = period-start + (to-float(day) * SECS-PER-DAY)
-            let d-end = d-start + SECS-PER-DAY
-            let d-total = total-in-range(data, d-start, d-end)
-
-            if d-total > 0.0 {
-                let mut cur-h = 0.0
-                let mut gi = 0
-                while gi < num {
-                    let g = get(goals, gi)
-                    let g-amt = entries-in-range(data, g.id, d-start, d-end)
-                    let seg-h = (g-amt / d-total) * cell-h
-                    if seg-h > 0.3 {
-                        let crgb = parse-hex-color(g.color)
-                        let fill = ak/colored-view(cx, cy + cur-h, cell-w, seg-h,
-                            get(crgb, 0), get(crgb, 1), get(crgb, 2), 1.0)
-                        ak/set-corner-radius(fill, corner-r)
-                        ak/add-view(view, fill)
-                    }
-                    cur-h = cur-h + seg-h
-                    gi = gi + 1
-                }
-            } else {
-                let empty = ak/colored-view(cx, cy, cell-w, cell-h, 1.0, 1.0, 1.0, 0.06)
-                ak/set-corner-radius(empty, corner-r)
-                ak/add-view(view, empty)
-            }
-
-            day = day + 1
-        }
-        y - (to-float(weeks) * (cell-h + cell-gap))
-    } else {
-        // All: 7 cols x 12 rows, full-width cells but 8pt tall
-        let cell-gap = 1.0
-        let cell-w = (avail-w - (6.0 * cell-gap)) / 7.0
-        let cell-h = 8.0
-        let corner-r = 1.5
-        let weeks = 12
-        let period-days = 84
-        let period-start = now - (84.0 * SECS-PER-DAY)
-
-        // Day labels header
-        let day-labels = ["S", "M", "T", "W", "T", "F", "S"]
-        let label-y = y - 12.0
-        let mut di = 0
-        while di < 7 {
-            let lx = grid-x + (to-float(di) * (cell-w + cell-gap))
-            let dl = ak/label(get(day-labels, di), lx, label-y, cell-w, 10.0)
-            ak/set-font(dl, ak/bold-font(8.0))
-            ak/set-text-color(dl, ak/color(0.5, 0.5, 0.55, 1.0))
-            ak/add-to(view, dl)
-            di = di + 1
-        }
-        let grid-top = label-y - 2.0
-
-        let mut day = 0
-        while day < period-days {
-            let col = day % 7
-            let week = day / 7
-            let row = weeks - 1 - week
-            let cx = grid-x + (to-float(col) * (cell-w + cell-gap))
-            let cy = grid-top - (to-float(weeks) * (cell-h + cell-gap)) + (to-float(row) * (cell-h + cell-gap))
-
-            let d-start = period-start + (to-float(day) * SECS-PER-DAY)
-            let d-end = d-start + SECS-PER-DAY
-            let d-total = total-in-range(data, d-start, d-end)
-
-            if d-total > 0.0 {
-                let mut cur-h = 0.0
-                let mut gi = 0
-                while gi < num {
-                    let g = get(goals, gi)
-                    let g-amt = entries-in-range(data, g.id, d-start, d-end)
-                    let seg-h = (g-amt / d-total) * cell-h
-                    if seg-h > 0.3 {
-                        let crgb = parse-hex-color(g.color)
-                        let fill = ak/colored-view(cx, cy + cur-h, cell-w, seg-h,
-                            get(crgb, 0), get(crgb, 1), get(crgb, 2), 1.0)
-                        ak/set-corner-radius(fill, corner-r)
-                        ak/add-view(view, fill)
-                    }
-                    cur-h = cur-h + seg-h
-                    gi = gi + 1
-                }
-            } else {
-                let empty = ak/colored-view(cx, cy, cell-w, cell-h, 1.0, 1.0, 1.0, 0.06)
-                ak/set-corner-radius(empty, corner-r)
-                ak/add-view(view, empty)
-            }
-
-            day = day + 1
-        }
-        grid-top - (to-float(weeks) * (cell-h + cell-gap))
+    if deref(reorder-mode) { reset!(reorder-row-data, []) }
+    let row-h = 44.0
+    let gap = 1.0
+    let mut cy = y + h
+    let mut i = 0
+    while i < num {
+        cy = cy - row-h
+        render-goal-row(parent, PAD, cy, POP-W - (2.0 * PAD), row-h, ctx, get(goals, i), i)
+        if i < num - 1 { cy = cy - gap }
+        i = i + 1
     }
 }
 
-// ─── Color Picker View ──────────────────────────────────────────────
+fn goal-rows-height() {
+    let data = deref(app-data)
+    let num = length(data.goals)
+    if num == 0 { 50.0 }
+    else {
+        let h = to-float(num) * 44.0
+        let gaps = if num > 1 { to-float(num - 1) * 1.0 } else { 0.0 }
+        h + gaps
+    }
+}
 
-fn build-color-picker-view(view, handler, n) {
-    let cp-h = compute-color-picker-height()
+// ─── Color Grid (custom) ────────────────────────────────────────────
+
+fn render-color-grid(parent, x, y, w, h, ctx, dot-size, selected-idx, current-color, on-pick) {
+    let gap = 8.0
+    let grid-w = (5.0 * dot-size) + (4.0 * gap)
+    let grid-x = x + (w - grid-w) / 2.0
+    let grid-y = y
+
+    let mut ci = 0
+    while ci < length(PRESET-COLORS) {
+        let col = ci % 5
+        let row = ci / 5
+        let cx = grid-x + (to-float(col) * (dot-size + gap))
+        let cy = grid-y + (to-float(1 - row) * (dot-size + gap))
+        let c = get(PRESET-COLORS, ci)
+        let crgb = parse-hex-color(c)
+
+        let dot = ak/colored-view(cx, cy, dot-size, dot-size,
+            get(crgb, 0), get(crgb, 1), get(crgb, 2), 1.0)
+        ak/set-corner-radius(dot, dot-size / 2.0)
+        let is-selected = if current-color != null { c == current-color }
+                          else { ci == selected-idx }
+        if is-selected {
+            ak/set-border(dot, 2.0, ak/white)
+        }
+        ak/add-view(parent, dot)
+
+        let pk-ci = ci
+        ui/wire-click-over(parent, fn() { on-pick(pk-ci) }, cx, cy, dot-size, dot-size, ctx)
+
+        ci = ci + 1
+    }
+}
+
+fn color-grid-height(dot-size) {
+    let gap = 8.0
+    (2.0 * dot-size) + gap
+}
+
+// ─── Main View Tree ─────────────────────────────────────────────────
+
+fn build-main-tree() {
+    let data = deref(app-data)
+    let num = length(data.goals)
+    let vh = viz-height()
+    let grh = goal-rows-height()
+
+    let picker = build-period-picker()
+    let picker-w = 29.0 + 44.0 + 43.0 + 29.0 + 6.0
+    let centered-picker = ui/hstack({:height 20.0},
+        [:spacer, {:width (POP-W - picker-w) / 2.0, :height 20.0}],
+        picker
+    )
+
+    ui/vstack({:padding PAD, :gap 16.0},
+        centered-picker,
+        if num > 0 {
+            ui/vstack({:gap 16.0},
+                [:custom, {:height vh, :render fn(p, x, y, w, h, ctx) {
+                    render-viz(p, x, y, w, h, ctx)
+                }}],
+                ui/divider(),
+                [:custom, {:height grh, :render fn(p, x, y, w, h, ctx) {
+                    render-goal-rows(p, x, y, w, h, ctx)
+                }}]
+            )
+        } else {
+            [:label, {:text "No goals yet", :font ak/font(13.0),
+                      :color ak/color(0.5, 0.5, 0.55, 1.0), :height 50.0}]
+        },
+        [:label, {:text "+ Add Goal", :font ak/font(11.0),
+                  :color ak/color(0.5, 0.5, 0.55, 1.0), :height 20.0,
+                  :on-click fn() {
+                      let data = deref(app-data)
+                      let used = map(data.goals, fn(g) { g.color })
+                      let idx = find-index(PRESET-COLORS, fn(c) { !any?(used, fn(u) { u == c }) })
+                      reset!(add-color-idx, if idx == -1 { 0 } else { idx })
+                      reset!(is-adding-goal, true)
+                      rebuild-ui()
+                  }}]
+    )
+}
+
+// ─── Add Goal Tree ──────────────────────────────────────────────────
+
+fn build-add-goal-tree() {
+    let cgh = color-grid-height(24.0)
+    reset!(add-name-tf-ref, null)
+    let tf-ref = add-name-tf-ref
+
+    ui/vstack({:padding PAD, :gap 16.0},
+        // Header
+        ui/hstack({:height 24.0},
+            [:label, {:text "‹", :font ak/bold-font(12.0), :width 20.0,
+                      :color ak/color(0.4, 0.6, 1.0, 1.0), :align :left, :height 24.0,
+                      :on-click fn() {
+                          reset!(is-adding-goal, false)
+                          rebuild-ui()
+                      }}],
+            [:label, {:text "New Goal", :font ak/bold-font(15.0), :color ak/white, :height 24.0}]
+        ),
+        // Text field
+        [:text-field, {:placeholder "Goal name", :font ak/font(13.0), :height 24.0, :ref tf-ref}],
+        // Color label
+        [:label, {:text "Color", :font ak/font(11.0), :color ak/color(0.5, 0.5, 0.55, 1.0),
+                  :height 16.0, :align :left}],
+        // Color grid
+        [:custom, {:height cgh, :render fn(p, x, y, w, h, ctx) {
+            render-color-grid(p, x, y, w, h, ctx, 24.0, deref(add-color-idx), null, fn(ci) {
+                reset!(add-color-idx, ci)
+                rebuild-ui()
+            })
+        }}],
+        // Buttons
+        ui/hstack({:height 24.0},
+            [:button, {:title "Cancel", :font ak/font(12.0), :width 60.0, :height 24.0,
+                       :on-click fn() {
+                           reset!(is-adding-goal, false)
+                           rebuild-ui()
+                       }}],
+            [:spacer, {:height 24.0}],
+            [:button, {:title "Add", :font ak/bold-font(12.0), :width 44.0, :height 24.0,
+                       :on-click fn() {
+                           let tf = deref(tf-ref)
+                           if tf != null {
+                               let name = ak/get-text(tf)
+                               if length(trim(name)) > 0 {
+                                   let color = get(PRESET-COLORS, deref(add-color-idx))
+                                   add-goal(trim(name), color)
+                                   reset!(is-adding-goal, false)
+                                   rebuild-ui()
+                               }
+                           }
+                       }}]
+        )
+    )
+}
+
+// ─── Color Picker Tree ──────────────────────────────────────────────
+
+fn build-color-picker-tree() {
     let idx = deref(picking-color-for)
     let data = deref(app-data)
     let goal = get(data.goals, idx)
-    let mut y = cp-h - PAD
+    let cgh = color-grid-height(28.0)
 
-    // Header
-    y = y - 24.0
-    let back-sel = "cpb_" ++ to-string(n) ++ ":"
-    ak/add-method(handler, back-sel, fn(self_, sel, sender) {
-        reset!(picking-color-for, 0 - 1)
-        rebuild-ui()
-    })
-    let back-lbl = ak/left-label("‹", PAD, y, 20.0, 24.0)
-    ak/set-font(back-lbl, ak/bold-font(16.0))
-    ak/set-text-color(back-lbl, ak/color(0.4, 0.6, 1.0, 1.0))
-    ak/add-to(view, back-lbl)
-    let back-btn = ak/button("", PAD - 4.0, y - 4.0, 28.0, 32.0)
-    ak/set-bordered(back-btn, 0)
-    ak/on-click(back-btn, handler, back-sel)
-    ak/add-to(view, back-btn)
-
-    let title = ak/label("Change Color", 0.0, y, POP-W, 24.0)
-    ak/set-font(title, ak/bold-font(17.0))
-    ak/set-text-color(title, ak/white)
-    ak/add-to(view, title)
-
-    y = y - 8.0
-
-    // Goal name subtitle
-    y = y - 20.0
-    let name-lbl = ak/label(goal.name, 0.0, y, POP-W, 20.0)
-    ak/set-font(name-lbl, ak/font(13.0))
-    ak/set-text-color(name-lbl, ak/color(0.6, 0.6, 0.65, 1.0))
-    ak/add-to(view, name-lbl)
-
-    y = y - 16.0
-
-    // Color grid: 5 columns x 2 rows
-    let dot-size = 28.0
-    let gap = 8.0
-    let grid-w = (5.0 * dot-size) + (4.0 * gap)
-    let grid-x = (POP-W - grid-w) / 2.0
-    y = y - (2.0 * dot-size + gap)
-    let grid-y = y
-
-    let mut ci = 0
-    while ci < length(PRESET-COLORS) {
-        let col = ci % 5
-        let row = ci / 5
-        let cx = grid-x + (to-float(col) * (dot-size + gap))
-        let cy = grid-y + (to-float(1 - row) * (dot-size + gap))
-        let c = get(PRESET-COLORS, ci)
-        let crgb = parse-hex-color(c)
-
-        let dot = ak/colored-view(cx, cy, dot-size, dot-size,
-            get(crgb, 0), get(crgb, 1), get(crgb, 2), 1.0)
-        ak/set-corner-radius(dot, dot-size / 2.0)
-        if c == goal.color {
-            ak/set-border(dot, 2.0, ak/white)
-        }
-        ak/add-view(view, dot)
-
-        let pk-sel = "cp" ++ to-string(ci) ++ "_" ++ to-string(n) ++ ":"
-        let pk-ci = ci
-        let pk-idx = idx
-        ak/add-method(handler, pk-sel, fn(self_, sel, sender) {
-            change-goal-color(pk-idx, get(PRESET-COLORS, pk-ci))
-            reset!(picking-color-for, 0 - 1)
-            rebuild-ui()
-        })
-        let pk-btn = ak/button("", cx, cy, dot-size, dot-size)
-        ak/set-bordered(pk-btn, 0)
-        ak/on-click(pk-btn, handler, pk-sel)
-        ak/add-to(view, pk-btn)
-
-        ci = ci + 1
-    }
-}
-
-// ─── Add Goal View ──────────────────────────────────────────────────
-
-fn build-add-goal-view(view, handler, n) {
-    let add-h = compute-add-goal-height()
-    let content-w = POP-W - (2.0 * PAD)
-    let mut y = add-h - PAD
-
-    // Header: [‹ back] [spacer] [New Goal] [spacer] [invisible]
-    y = y - 24.0
-    let back-sel = "bk_" ++ to-string(n) ++ ":"
-    ak/add-method(handler, back-sel, fn(self_, sel, sender) {
-        reset!(is-adding-goal, false)
-        rebuild-ui()
-    })
-    let back-lbl = ak/left-label("‹", PAD, y, 20.0, 24.0)
-    ak/set-font(back-lbl, ak/bold-font(12.0))
-    ak/set-text-color(back-lbl, ak/color(0.4, 0.6, 1.0, 1.0))
-    ak/add-to(view, back-lbl)
-    let back-btn = ak/button("", PAD - 4.0, y - 4.0, 28.0, 32.0)
-    ak/set-bordered(back-btn, 0)
-    ak/on-click(back-btn, handler, back-sel)
-    ak/add-to(view, back-btn)
-
-    let title = ak/label("New Goal", 0.0, y, POP-W, 24.0)
-    ak/set-font(title, ak/bold-font(15.0))
-    ak/set-text-color(title, ak/white)
-    ak/add-to(view, title)
-
-    y = y - 16.0
-
-    // Name field
-    y = y - 24.0
-    let tf = ak/text-field("Goal name", PAD, y, content-w, 24.0)
-    ak/set-font(tf, ak/font(13.0))
-    ak/add-to(view, tf)
-
-    y = y - 16.0
-
-    // "Color" label
-    y = y - 16.0
-    let clbl = ak/left-label("Color", PAD, y, 60.0, 16.0)
-    ak/set-font(clbl, ak/font(11.0))
-    ak/set-text-color(clbl, ak/color(0.5, 0.5, 0.55, 1.0))
-    ak/add-to(view, clbl)
-
-    y = y - 8.0
-
-    // Color grid: 5x2
-    let dot-size = 24.0
-    let gap = 8.0
-    let grid-x = PAD
-    y = y - (2.0 * dot-size + gap)
-    let grid-y = y
-    let selected = deref(add-color-idx)
-
-    let mut ci = 0
-    while ci < length(PRESET-COLORS) {
-        let col = ci % 5
-        let row = ci / 5
-        let cx = grid-x + (to-float(col) * (dot-size + gap))
-        let cy = grid-y + (to-float(1 - row) * (dot-size + gap))
-        let c = get(PRESET-COLORS, ci)
-        let crgb = parse-hex-color(c)
-
-        let dot = ak/colored-view(cx, cy, dot-size, dot-size,
-            get(crgb, 0), get(crgb, 1), get(crgb, 2), 1.0)
-        ak/set-corner-radius(dot, dot-size / 2.0)
-        if ci == selected {
-            ak/set-border(dot, 2.0, ak/white)
-        }
-        ak/add-view(view, dot)
-
-        let pk-sel = "pk" ++ to-string(ci) ++ "_" ++ to-string(n) ++ ":"
-        let pk-idx = ci
-        ak/add-method(handler, pk-sel, fn(self_, sel, sender) {
-            reset!(add-color-idx, pk-idx)
-            rebuild-ui()
-        })
-        let pk-btn = ak/button("", cx, cy, dot-size, dot-size)
-        ak/set-bordered(pk-btn, 0)
-        ak/on-click(pk-btn, handler, pk-sel)
-        ak/add-to(view, pk-btn)
-
-        ci = ci + 1
-    }
-
-    y = y - 16.0
-
-    // Cancel / Add buttons
-    y = y - 24.0
-    let cancel-sel = "cn_" ++ to-string(n) ++ ":"
-    ak/add-method(handler, cancel-sel, fn(self_, sel, sender) {
-        reset!(is-adding-goal, false)
-        rebuild-ui()
-    })
-    let cancel-btn = ak/button("Cancel", PAD, y, 60.0, 24.0)
-    ak/set-font(cancel-btn, ak/font(12.0))
-    ak/on-click(cancel-btn, handler, cancel-sel)
-    ak/add-to(view, cancel-btn)
-
-    let confirm-sel = "cf_" ++ to-string(n) ++ ":"
-    ak/add-method(handler, confirm-sel, fn(self_, sel, sender) {
-        let name = ak/get-text(tf)
-        if length(trim(name)) > 0 {
-            let color = get(PRESET-COLORS, deref(add-color-idx))
-            add-goal(trim(name), color)
-            reset!(is-adding-goal, false)
-            rebuild-ui()
-        }
-    })
-    let confirm-btn = ak/button("Add", POP-W - PAD - 44.0, y, 44.0, 24.0)
-    ak/set-font(confirm-btn, ak/bold-font(12.0))
-    ak/on-click(confirm-btn, handler, confirm-sel)
-    ak/add-to(view, confirm-btn)
-}
-
-// ─── Flag Helpers ──────────────────────────────────────────────────
-// Check if a specific modifier flag bit is set using integer division.
-// has-flag(flags, 1048576) checks Cmd, has-flag(flags, 131072) checks Shift.
-
-fn has-flag(flags, mask) {
-    (flags / mask) % 2 == 1
+    ui/vstack({:padding PAD, :gap 8.0},
+        // Header
+        ui/hstack({:height 24.0},
+            [:label, {:text "‹", :font ak/bold-font(16.0), :width 20.0,
+                      :color ak/color(0.4, 0.6, 1.0, 1.0), :align :left, :height 24.0,
+                      :on-click fn() {
+                          reset!(picking-color-for, 0 - 1)
+                          rebuild-ui()
+                      }}],
+            [:label, {:text "Change Color", :font ak/bold-font(17.0), :color ak/white, :height 24.0}]
+        ),
+        // Goal name subtitle
+        [:label, {:text goal.name, :font ak/font(13.0),
+                  :color ak/color(0.6, 0.6, 0.65, 1.0), :height 20.0}],
+        ui/spacer(8.0),
+        // Color grid
+        [:custom, {:height cgh, :render fn(p, x, y, w, h, ctx) {
+            let cur-idx = deref(picking-color-for)
+            let cur-data = deref(app-data)
+            let cur-goal = get(cur-data.goals, cur-idx)
+            render-color-grid(p, x, y, w, h, ctx, 28.0, -1, cur-goal.color, fn(ci) {
+                change-goal-color(cur-idx, get(PRESET-COLORS, ci))
+                reset!(picking-color-for, 0 - 1)
+                rebuild-ui()
+            })
+        }}]
+    )
 }
 
 // ─── Main ───────────────────────────────────────────────────────────
@@ -1367,10 +1176,8 @@ fn main() {
     let pop = ak/popover(POP-W, POP-H)
     reset!(popover-ref, pop)
 
-    // Create persistent responder view for keyboard shortcuts and Cmd-hold reorder
     let resp = ak/custom-responder-view("EaseResponder", 0.0, 0.0, 1.0, 1.0,
         fn(self_, sel, event) {
-            // keyDown: Cmd+Z = undo, Cmd+Shift+Z = redo
             let flags = ak/event-modifier-flags(event)
             let key = ak/event-keycode(event)
             if has-flag(flags, 1048576) && key == 6 {
@@ -1378,7 +1185,6 @@ fn main() {
             }
         },
         fn(self_, sel, event) {
-            // flagsChanged: track Cmd (reorder) and Alt (subtract mode)
             let flags = ak/event-modifier-flags(event)
             let cmd = has-flag(flags, 1048576)
             let alt = has-flag(flags, 524288)
