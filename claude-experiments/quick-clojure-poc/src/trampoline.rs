@@ -3475,7 +3475,7 @@ mod tests {
                 sys_icache_invalidate(ptr, code_size);
             }
 
-            let trampoline = Trampoline::new(64 * 1024); // 64KB stack
+            let trampoline = Trampoline::new(512 * 1024); // 512KB stack
             let result = trampoline.execute(ptr as *const u8);
 
             assert_eq!(result, 42);

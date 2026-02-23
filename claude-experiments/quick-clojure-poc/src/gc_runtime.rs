@@ -1710,6 +1710,14 @@ impl GCRuntime {
             return false;
         }
 
+        // For floats, compare values
+        if tag_a == 0b001 {
+            // Float tag
+            let float_a = self.read_float(a);
+            let float_b = self.read_float(b);
+            return float_a == float_b;
+        }
+
         // For strings, compare content
         if tag_a == 0b010 {
             // String tag

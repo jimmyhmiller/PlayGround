@@ -81,6 +81,11 @@ pub enum Expr {
         namespace: String,
     },
 
+    /// (load-file "path/to/file.clj")
+    LoadFile {
+        filename: String,
+    },
+
     // Special forms
     Def {
         name: String,
@@ -494,6 +499,7 @@ pub fn analyze_tagged(rt: &mut GCRuntime, tagged: usize) -> Result<Expr, String>
                     "dotimes" => return analyze_dotimes_tagged(rt, tagged),
                     "ns" => return analyze_ns_tagged(rt, tagged),
                     "use" => return analyze_use_tagged(rt, tagged),
+                    "load-file" => return analyze_load_file_tagged(rt, tagged),
                     "binding" => return analyze_binding_tagged(rt, tagged),
                     "deftype*" | "deftype" => return analyze_deftype_tagged(rt, tagged),
                     "defprotocol" => return analyze_defprotocol_tagged(rt, tagged),
@@ -1005,7 +1011,8 @@ fn analyze_cond_tagged(rt: &mut GCRuntime, list_ptr: usize) -> Result<Expr, Stri
 fn analyze_do_tagged(rt: &mut GCRuntime, list_ptr: usize) -> Result<Expr, String> {
     let items = list_to_vec(rt, list_ptr);
     if items.len() < 2 {
-        return Err("do requires at least 1 argument".to_string());
+        // (do) with no body returns nil, like Clojure
+        return Ok(Expr::Do { exprs: vec![Expr::Literal(Value::Nil)] });
     }
 
     let mut exprs = Vec::new();
@@ -1640,6 +1647,23 @@ fn analyze_use_tagged(rt: &mut GCRuntime, list_ptr: usize) -> Result<Expr, Strin
     };
 
     Ok(Expr::Use { namespace: ns_name })
+}
+
+fn analyze_load_file_tagged(rt: &mut GCRuntime, list_ptr: usize) -> Result<Expr, String> {
+    let items = list_to_vec(rt, list_ptr);
+    if items.len() != 2 {
+        return Err(format!(
+            "load-file requires 1 argument, got {}",
+            items.len() - 1
+        ));
+    }
+    // The argument should be a string literal
+    let tag = items[1] & 0b111;
+    if tag != 0b010 {
+        return Err("load-file requires a string argument".to_string());
+    }
+    let filename = rt.read_string(items[1]);
+    Ok(Expr::LoadFile { filename })
 }
 
 fn analyze_binding_tagged(rt: &mut GCRuntime, list_ptr: usize) -> Result<Expr, String> {

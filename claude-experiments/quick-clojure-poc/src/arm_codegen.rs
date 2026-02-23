@@ -75,6 +75,10 @@ pub struct Arm64CodeGen {
     /// Used to compute exception slot offsets (exception slots come after spill slots)
     num_spill_slots: usize,
 
+    /// Stack base for exception handler saves, keyed by exception_slot
+    /// Used to restore registers at catch labels after longjmp-style exception handling
+    exception_save_stack_base: HashMap<usize, usize>,
+
     /// Number of reserved exception slots (from compiler)
     reserved_exception_slots: usize,
 
@@ -109,6 +113,7 @@ impl Arm64CodeGen {
             num_locals: 0,
             num_spill_slots: 0,
             reserved_exception_slots: 0,
+            exception_save_stack_base: HashMap::new(),
             // Current instruction for error reporting
             current_instruction: None,
         }
@@ -209,6 +214,7 @@ impl Arm64CodeGen {
         // Reset stack tracking for push/pop during compilation
         codegen.current_stack_size = 0;
         codegen.max_stack_size = 0;
+        codegen.exception_save_stack_base.clear();
 
         // Compile instructions
         for inst in &allocated_instructions {
@@ -286,6 +292,10 @@ impl Arm64CodeGen {
                         // Use LR (x30) for GC stack map lookup.
                         // The return address identifies which stack map entry describes the frame.
                         self.emit_mov(dst_reg, 30);
+                    }
+                    IrValue::StackPointer => {
+                        // Use SP (x31) for exception handling.
+                        self.emit_mov_sp(dst_reg, 31);
                     }
                     _ => return Err(format!("Invalid constant: {:?}", value)),
                 }
@@ -1024,19 +1034,28 @@ impl Arm64CodeGen {
             // NOTE: CallWithSaves is handled later in the match with multi-arity support
 
             // NOTE: Println has been refactored out - now uses ExternalCall to builtin_println_regs
-            Instruction::PushExceptionHandler(catch_label, exception_slot) => {
-                // PushExceptionHandler: Setup exception handler
-                // Call builtin_push_exception_handler(handler_addr, result_local, LR, SP, FP)
+            Instruction::PushExceptionHandler(_, _) => {
+                // Should have been transformed to PushExceptionHandlerWithSaves by register allocator
+                panic!("PushExceptionHandler should have been transformed to PushExceptionHandlerWithSaves");
+            }
+
+            Instruction::PushExceptionHandlerWithSaves(catch_label, exception_slot, saves) => {
+                // PushExceptionHandler with register saves.
+                // Uses push_to_stack/pop_from_stack (FP-relative addressing).
+                // Records the stack base so RestoreExceptionSaves can reload after longjmp.
+
+                // Record the stack base BEFORE pushing saves
+                let stack_base = self.current_stack_size;
+                self.exception_save_stack_base.insert(*exception_slot, stack_base);
+
+                // STEP 1: Save live registers using push_to_stack
+                for save in saves.iter() {
+                    let save_reg = self.get_physical_reg_for_irvalue(save, false)?;
+                    self.push_to_stack(save_reg);
+                    self.clear_temp_registers();
+                }
 
                 // Compute FP-relative offset for the exception slot
-                // Exception slots come AFTER spill slots in the stack frame:
-                //   FP - 8:  spill slot 0
-                //   FP - 16: spill slot 1
-                //   ...
-                //   FP - (num_spill_slots * 8):     last spill slot
-                //   FP - ((num_spill_slots + 1) * 8): exception slot 0
-                //   FP - ((num_spill_slots + 2) * 8): exception slot 1
-                //   ...
                 let slot_offset = self.num_spill_slots + exception_slot + 1;
                 let result_local_offset = -((slot_offset as i64) * 8);
 
@@ -1066,34 +1085,12 @@ impl Arm64CodeGen {
                 let func_addr = crate::trampoline::builtin_push_exception_handler as usize;
                 self.emit_mov_imm(15, func_addr as i64);
                 self.emit_blr(15);
-            }
 
-            Instruction::PopExceptionHandler => {
-                // PopExceptionHandler: Remove exception handler (normal exit from try)
-                let func_addr = crate::trampoline::builtin_pop_exception_handler as usize;
-                self.emit_mov_imm(15, func_addr as i64);
-                self.emit_blr(15);
-                // Result in x0 is nil, we ignore it
-            }
-
-            Instruction::Throw(exc) => {
-                // Throw: Throw exception, never returns
-                // Call builtin_throw(SP, exception_value)
-                let exc_reg = self.get_physical_reg_for_irvalue(exc, false)?;
-
-                // IMPORTANT: Move exception value to x1 FIRST, before clobbering x0 with SP
-                // Otherwise if exc is in x0, we would clobber it with SP
-                if exc_reg != 1 {
-                    self.emit_mov(1, exc_reg);
-                }
-                // x0 = SP (for potential stack trace) - use ADD x0, sp, #0
-                self.emit_mov_sp(0, 31);
-
-                // Call builtin_throw (never returns)
-                let func_addr = crate::trampoline::builtin_throw as usize;
-                self.emit_mov_imm(15, func_addr as i64);
-                self.emit_blr(15);
-                // Never returns, but ARM64 codegen continues
+                // DO NOT restore saves here! Leave them on the stack (current_stack_size stays elevated).
+                // This ensures that CallWithSaves inside the try body uses higher stack offsets
+                // and doesn't overwrite our saves. Both the normal path (via RestoreExceptionSaves
+                // after PopExceptionHandler) and the catch path (via RestoreExceptionSaves after
+                // LoadExceptionLocal) will restore them.
             }
 
             Instruction::LoadExceptionLocal(dest, exception_slot) => {
@@ -1110,6 +1107,43 @@ impl Arm64CodeGen {
                 // Store to spill location if this is a spilled register
                 let spill_offset = self.dest_spill(dest);
                 self.store_spill(dest_reg, spill_offset);
+            }
+
+            Instruction::DropExceptionSaves(count) => {
+                // Normal path (no exception): registers are still in their correct physical
+                // registers. Just decrement current_stack_size to "pop" the save slots.
+                self.current_stack_size = self.current_stack_size.saturating_sub(*count);
+            }
+
+            Instruction::RestoreExceptionSaves(saves, exception_slot) => {
+                // Restore registers that were saved by PushExceptionHandlerWithSaves.
+                // After a longjmp-style exception catch, registers hold garbage.
+                // The saves were pushed to FP-relative stack slots by push_to_stack.
+                //
+                // We use the exception_save_stack_base map (keyed by exception_slot) to find
+                // the stack base where saves were pushed, then load directly via FP-relative offsets.
+                let save_count = saves.len();
+                if save_count > 0 {
+                    let stack_base = self.exception_save_stack_base
+                        .get(exception_slot)
+                        .copied()
+                        .unwrap_or(0);
+
+                    // Saves were pushed in forward order at positions:
+                    //   FP - ((num_stack_slots + stack_base + 1) * 8) = save[0]
+                    //   FP - ((num_stack_slots + stack_base + 2) * 8) = save[1]
+                    //   ...
+                    for (i, save) in saves.iter().enumerate() {
+                        let save_reg = self.get_physical_reg_for_irvalue(save, true)?;
+                        let slot = self.num_stack_slots + stack_base + i + 1;
+                        let offset = -(slot as i32 * 8);
+                        self.emit_load_from_fp(save_reg, offset);
+                        self.clear_temp_registers();
+                    }
+
+                    // Decrement current_stack_size to "pop" the save slots (same as DropExceptionSaves)
+                    self.current_stack_size = self.current_stack_size.saturating_sub(save_count);
+                }
             }
 
             // ========== Local Variable Instructions ==========
@@ -1214,6 +1248,16 @@ impl Arm64CodeGen {
                             match arg {
                                 IrValue::RawConstant(val) => {
                                     self.emit_mov_imm(i, *val);
+                                }
+                                IrValue::StackPointer => {
+                                    // SP needs special MOV encoding (ADD xN, sp, #0)
+                                    self.emit_mov_sp(i, 31);
+                                }
+                                IrValue::FramePointer => {
+                                    self.emit_mov(i, 29);
+                                }
+                                IrValue::ReturnAddress => {
+                                    self.emit_mov(i, 30);
                                 }
                                 _ => {
                                     let arg_reg = self.get_physical_reg_for_irvalue(arg, false)?;
@@ -1805,6 +1849,13 @@ impl Arm64CodeGen {
             IrValue::ReturnAddress => {
                 // Return LR (x30) for GC stack map lookup.
                 Ok(30)
+            }
+            IrValue::StackPointer => {
+                // SP is special on ARM64 - we need to copy it to a temp register
+                // because SP can't be used as a general-purpose register operand.
+                let temp_reg = self.allocate_temp_register();
+                self.emit_mov_sp(temp_reg, 31); // ADD temp, sp, #0
+                Ok(temp_reg)
             }
             IrValue::TaggedConstant(_) | IrValue::Null => {
                 // TaggedConstant and Null should be converted to registers via assign_new

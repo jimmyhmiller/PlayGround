@@ -155,6 +155,7 @@ impl Compiler {
             Expr::Set { var, value } => self.compile_set(var, value),
             Expr::Ns { name } => self.compile_ns(name),
             Expr::Use { namespace } => self.compile_use(namespace),
+            Expr::LoadFile { filename } => self.compile_load_file(filename),
             Expr::If { test, then, else_ } => self.compile_if(test, then, else_),
             Expr::Do { exprs } => self.compile_do(exprs),
             Expr::Let { bindings, body } => self.compile_let(bindings, body),
@@ -242,6 +243,11 @@ impl Compiler {
             return self.compile_toplevel_do(forms);
         }
 
+        // Handle load-file specially - read, parse, compile and execute all forms
+        if let Expr::LoadFile { filename } = expr {
+            return self.compile_load_file(filename);
+        }
+
         // Reset builder for each top-level expression to start with fresh temp registers
         self.builder.reset();
         let result = self.compile(expr)?;
@@ -284,11 +290,12 @@ impl Compiler {
             let result = self.compile(&ast)?;
             self.builder.emit(Instruction::Ret(result));
 
+            let reserved_exception_slots = self.builder.reserved_exception_slots;
             let instructions = self.take_instructions();
             let num_locals = self.builder.num_locals;
 
             // Generate machine code
-            let compiled = Arm64CodeGen::compile_function(&instructions, num_locals, 0)
+            let compiled = Arm64CodeGen::compile_function(&instructions, num_locals, reserved_exception_slots)
                 .map_err(|e| format!("Codegen error in toplevel do: {}", e))?;
 
             // Register stack maps BEFORE execution - critical for GC safety
@@ -308,7 +315,7 @@ impl Compiler {
             }
 
             // Execute this form
-            let trampoline = Trampoline::new(64 * 1024);
+            let trampoline = Trampoline::new(512 * 1024);
             let exec_result = unsafe { trampoline.execute(compiled.code_ptr as *const u8) };
 
             // If this is the last form, we need to return its result
@@ -332,6 +339,73 @@ impl Compiler {
             }
         }
 
+        Ok(last_result)
+    }
+
+    /// Load and compile a Clojure file, executing all forms in sequence.
+    fn compile_load_file(&mut self, filename: &str) -> Result<IrValue, String> {
+        use crate::clojure_ast::analyze_toplevel_tagged;
+        use crate::reader::read_all_to_tagged;
+
+        let content = std::fs::read_to_string(filename)
+            .map_err(|e| format!("Error reading file '{}': {}", filename, e))?;
+
+        let tagged_forms = unsafe {
+            let rt = &mut *self.runtime.get();
+            read_all_to_tagged(&content, rt)?
+        };
+
+        let mut last_result = IrValue::Null;
+
+        for tagged in tagged_forms {
+            let ast = unsafe {
+                let rt = &mut *self.runtime.get();
+                let root_id = rt.register_temporary_root(tagged);
+                let result = analyze_toplevel_tagged(rt, tagged);
+                rt.unregister_temporary_root(root_id);
+                result?
+            };
+
+            // Use compile_toplevel to handle TopLevelDo, LoadFile, etc. recursively
+            match self.compile_toplevel(&ast) {
+                Ok(_) => {
+                    let reserved_exception_slots = self.builder.reserved_exception_slots;
+                    let instructions = self.take_instructions();
+                    let num_locals = self.builder.num_locals;
+
+                    let compiled =
+                        Arm64CodeGen::compile_function(&instructions, num_locals, reserved_exception_slots)
+                            .map_err(|e| format!("Codegen error in load-file: {}", e))?;
+
+                    unsafe {
+                        let rt = &mut *self.runtime.get();
+                        for (pc, stack_size) in &compiled.stack_map {
+                            rt.add_stack_map_entry(
+                                *pc,
+                                gc::StackMapDetails {
+                                    function_name: None,
+                                    number_of_locals: compiled.num_stack_slots,
+                                    current_stack_size: *stack_size,
+                                    max_stack_size: *stack_size,
+                                },
+                            );
+                        }
+                    }
+
+                    let trampoline = Trampoline::new(512 * 1024);
+                    let exec_result = unsafe {
+                        trampoline.execute(compiled.code_ptr as *const u8) as i64
+                    };
+
+                    last_result = IrValue::TaggedConstant(exec_result as isize);
+                }
+                Err(e) => return Err(e),
+            }
+        }
+
+        // Emit final return
+        self.builder.reset();
+        self.builder.emit(Instruction::Ret(last_result));
         Ok(last_result)
     }
 
@@ -864,13 +938,16 @@ impl Compiler {
         // Compile the exception expression
         let exc_val = self.compile(exception)?;
 
-        // Emit Throw instruction
-        self.builder.emit(Instruction::Throw(exc_val));
-
-        // Throw never returns, but return dummy nil for type consistency
+        // Emit Throw as an ExternalCall so register allocator handles saves properly.
+        // builtin_throw(stack_pointer, exception_value) -> never returns
+        let func_addr = crate::trampoline::builtin_throw as usize;
         let dummy = self.builder.new_register();
-        self.builder
-            .emit(Instruction::LoadConstant(dummy, IrValue::Null));
+        self.builder.emit(Instruction::ExternalCall(
+            dummy,
+            func_addr,
+            vec![IrValue::StackPointer, exc_val],
+        ));
+
         Ok(dummy)
     }
 
@@ -917,8 +994,18 @@ impl Compiler {
         let body_result = self.compile_do(body)?;
         self.builder.emit(Instruction::Assign(result, body_result));
 
-        // 3. Pop handler (normal exit)
-        self.builder.emit(Instruction::PopExceptionHandler);
+        // 3. Pop handler (normal exit) - as a proper ExternalCall
+        let _pop_result = self.builder.new_register();
+        let pop_addr = crate::trampoline::builtin_pop_exception_handler as usize;
+        self.builder.emit(Instruction::ExternalCall(
+            _pop_result,
+            pop_addr,
+            vec![],
+        ));
+
+        // 3b. Drop exception saves (normal path - registers are still valid, just adjust stack)
+        // The count will be filled in by the register allocator to match PushExceptionHandlerWithSaves
+        self.builder.emit(Instruction::DropExceptionSaves(exception_slot));
 
         // 4. Handle finally for normal path
         if let Some(finally_body) = finally {
@@ -948,8 +1035,14 @@ impl Compiler {
 
             self.pop_scope();
         } else {
-            // No catch - just re-throw
-            self.builder.emit(Instruction::Throw(exception_local));
+            // No catch - just re-throw via ExternalCall
+            let throw_addr = crate::trampoline::builtin_throw as usize;
+            let _throw_result = self.builder.new_register();
+            self.builder.emit(Instruction::ExternalCall(
+                _throw_result,
+                throw_addr,
+                vec![IrValue::StackPointer, exception_local],
+            ));
         }
 
         // 6. Handle finally for catch path
@@ -2462,7 +2555,7 @@ impl Compiler {
             }
 
             // These don't contain free variables
-            Expr::Literal(_) | Expr::Quote(_) | Expr::Ns { .. } | Expr::Use { .. } => {}
+            Expr::Literal(_) | Expr::Quote(_) | Expr::Ns { .. } | Expr::Use { .. } | Expr::LoadFile { .. } => {}
 
             // Qualified vars are not free (they're global)
             Expr::Var {
@@ -2578,7 +2671,6 @@ impl Compiler {
             }
 
             // TopLevelDo is only used at the top level and handled specially
-            // It should never appear in a context where we're collecting free vars
             Expr::TopLevelDo { .. } => {}
         }
     }

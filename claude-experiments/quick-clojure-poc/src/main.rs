@@ -241,6 +241,7 @@ fn print_ast(ast: &Expr, indent: usize) {
         }
         Expr::Ns { name } => println!("{}Ns({})", prefix, name),
         Expr::Use { namespace } => println!("{}Use({})", prefix, namespace),
+        Expr::LoadFile { filename } => println!("{}LoadFile({})", prefix, filename),
         Expr::Quote(v) => println!("{}Quote({:?})", prefix, v),
         Expr::Def {
             name,
@@ -795,12 +796,13 @@ fn load_clojure_file(
 
         match compiler.compile_toplevel(&ast) {
             Ok(_) => {
+                let reserved_exception_slots = compiler.builder.reserved_exception_slots;
                 let instructions = compiler.take_instructions();
                 let num_locals = compiler.builder.num_locals;
 
-                match Arm64CodeGen::compile_function(&instructions, num_locals, 0) {
+                match Arm64CodeGen::compile_function(&instructions, num_locals, reserved_exception_slots) {
                     Ok(compiled) => {
-                        let trampoline = Trampoline::new(64 * 1024);
+                        let trampoline = Trampoline::new(512 * 1024);
                         let result =
                             register_stack_maps_and_execute(&compiled, &runtime, &trampoline);
 
@@ -810,6 +812,7 @@ fn load_clojure_file(
                                 Expr::Def { .. }
                                     | Expr::Ns { .. }
                                     | Expr::Use { .. }
+                                    | Expr::LoadFile { .. }
                             )
                         {
                             unsafe {
@@ -893,12 +896,13 @@ fn run_expr(expr: &str, gc_always: bool) {
 
         match compiler.compile_toplevel(&ast) {
             Ok(_) => {
+                let reserved_exception_slots = compiler.builder.reserved_exception_slots;
                 let instructions = compiler.take_instructions();
                 let num_locals = compiler.builder.num_locals;
 
-                match Arm64CodeGen::compile_function(&instructions, num_locals, 0) {
+                match Arm64CodeGen::compile_function(&instructions, num_locals, reserved_exception_slots) {
                     Ok(compiled) => {
-                        let trampoline = Trampoline::new(64 * 1024);
+                        let trampoline = Trampoline::new(512 * 1024);
                         let result =
                             register_stack_maps_and_execute(&compiled, &runtime, &trampoline);
 
@@ -909,6 +913,7 @@ fn run_expr(expr: &str, gc_always: bool) {
                                 Expr::Def { .. }
                                     | Expr::Ns { .. }
                                     | Expr::Use { .. }
+                                    | Expr::LoadFile { .. }
                             )
                         {
                             unsafe {
@@ -1006,12 +1011,13 @@ fn run_script(filename: &str, gc_always: bool) {
         // Compile and execute
         match compiler.compile_toplevel(&ast) {
             Ok(_) => {
+                let reserved_exception_slots = compiler.builder.reserved_exception_slots;
                 let instructions = compiler.take_instructions();
                 let num_locals = compiler.builder.num_locals;
 
-                match Arm64CodeGen::compile_function(&instructions, num_locals, 0) {
+                match Arm64CodeGen::compile_function(&instructions, num_locals, reserved_exception_slots) {
                     Ok(compiled) => {
-                        let trampoline = Trampoline::new(64 * 1024);
+                        let trampoline = Trampoline::new(512 * 1024);
                         let _result =
                             register_stack_maps_and_execute(&compiled, &runtime, &trampoline);
                     }
@@ -1027,6 +1033,9 @@ fn run_script(filename: &str, gc_always: bool) {
             }
         }
     }
+
+    // Exit immediately to avoid SIGBUS during GC cleanup with large programs
+    std::process::exit(0);
 }
 
 fn main() {
@@ -1538,6 +1547,7 @@ fn main() {
                                         // Use the REPL compiler so we can access defined vars
                                         match repl_compiler.compile_toplevel(&ast) {
                                             Ok(_) => {
+                                                let reserved_exception_slots = repl_compiler.builder.reserved_exception_slots;
                                                 let instructions =
                                                     repl_compiler.take_instructions();
                                                 let num_locals = repl_compiler.builder.num_locals;
@@ -1545,7 +1555,7 @@ fn main() {
                                                 match Arm64CodeGen::compile_function(
                                                     &instructions,
                                                     num_locals,
-                                                    0,
+                                                    reserved_exception_slots,
                                                 ) {
                                                     Ok(compiled) => {
                                                         // Display the machine code by reading from executable memory
@@ -1573,6 +1583,7 @@ fn main() {
                                         // Normal execution using IR-based compilation with persistent compiler
                                         match repl_compiler.compile_toplevel(&ast) {
                                             Ok(_) => {
+                                                let reserved_exception_slots = repl_compiler.builder.reserved_exception_slots;
                                                 let instructions =
                                                     repl_compiler.take_instructions();
                                                 let num_locals = repl_compiler.builder.num_locals;
@@ -1580,11 +1591,11 @@ fn main() {
                                                 match Arm64CodeGen::compile_function(
                                                     &instructions,
                                                     num_locals,
-                                                    0,
+                                                    reserved_exception_slots,
                                                 ) {
                                                     Ok(compiled) => {
                                                         // Execute as 0-argument function via trampoline
-                                                        let trampoline = Trampoline::new(64 * 1024);
+                                                        let trampoline = Trampoline::new(512 * 1024);
                                                         let result = unsafe {
                                                             trampoline.execute(
                                                                 compiled.code_ptr as *const u8,

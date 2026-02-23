@@ -341,22 +341,35 @@ impl LinearScan {
 
             // Note: LoadKeyword is now a builtin function call handled by Call instruction
             Instruction::PushExceptionHandler(_label, _slot) => {
-                // No registers - uses pre-allocated stack slot
+                // No IR registers - call args are architectural (SP, FP, LR, label addr)
+                // Treated as a call by transform_calls_to_saves for register saving.
             }
 
-            Instruction::PopExceptionHandler => {
-                // No registers
+            Instruction::PushExceptionHandlerWithSaves(_label, _slot, saves) => {
+                // Same as PushExceptionHandler but with register saves
+                for s in saves {
+                    if let IrValue::Register(r) = s {
+                        regs.push(*r);
+                    }
+                }
             }
 
-            Instruction::Throw(exc) => {
-                if let IrValue::Register(r) = exc {
+            Instruction::LoadExceptionLocal(dest, _slot) => {
+                if let IrValue::Register(r) = dest {
                     regs.push(*r);
                 }
             }
 
-            Instruction::LoadExceptionLocal(dest, _label) => {
-                if let IrValue::Register(r) = dest {
-                    regs.push(*r);
+            Instruction::DropExceptionSaves(_count) => {
+                // No registers - just adjusts codegen stack tracking
+            }
+
+            Instruction::RestoreExceptionSaves(saves, _stack_base) => {
+                // Inserted post-allocation; registers are physical
+                for s in saves {
+                    if let IrValue::Register(r) = s {
+                        regs.push(*r);
+                    }
                 }
             }
 
@@ -674,19 +687,27 @@ impl LinearScan {
 
             // Note: LoadKeyword is now a builtin function call handled by Call instruction
             Instruction::PushExceptionHandler(_label, _slot) => {
-                // No registers - uses pre-allocated stack slot
+                // No IR registers to replace
             }
 
-            Instruction::PopExceptionHandler => {
-                // No registers
-            }
-
-            Instruction::Throw(exc) => {
-                replace(exc);
+            Instruction::PushExceptionHandlerWithSaves(_label, _slot, saves) => {
+                for s in saves {
+                    replace(s);
+                }
             }
 
             Instruction::LoadExceptionLocal(dest, _slot) => {
                 replace(dest);
+            }
+
+            Instruction::DropExceptionSaves(_count) => {
+                // No registers to replace
+            }
+
+            Instruction::RestoreExceptionSaves(saves, _stack_base) => {
+                for s in saves {
+                    replace(s);
+                }
             }
 
             // External calls (trampolines)
@@ -986,19 +1007,27 @@ impl LinearScan {
 
             // Note: LoadKeyword is now a builtin function call handled by Call instruction
             Instruction::PushExceptionHandler(_label, _slot) => {
-                // No registers - uses pre-allocated stack slot
+                // No IR registers to replace
             }
 
-            Instruction::PopExceptionHandler => {
-                // No registers
-            }
-
-            Instruction::Throw(exc) => {
-                replace(exc);
+            Instruction::PushExceptionHandlerWithSaves(_label, _slot, saves) => {
+                for s in saves {
+                    replace(s);
+                }
             }
 
             Instruction::LoadExceptionLocal(dest, _slot) => {
                 replace(dest);
+            }
+
+            Instruction::DropExceptionSaves(_count) => {
+                // No registers to replace
+            }
+
+            Instruction::RestoreExceptionSaves(saves, _stack_base) => {
+                for s in saves {
+                    replace(s);
+                }
             }
 
             // External calls (trampolines)
@@ -1042,26 +1071,31 @@ impl LinearScan {
         }
     }
 
-    /// Transform Call and ExternalCall instructions to their WithSaves variants
+    /// Transform Call, ExternalCall, and PushExceptionHandler instructions to their WithSaves variants
     ///
     /// This analyzes which registers are live across each call site and generates
-    /// CallWithSaves instructions with explicit register preservation.
-    /// NOTE: Recur is no longer handled here - it's lowered to Assign + Jump in the compiler.
+    /// WithSaves instructions with explicit register preservation.
+    /// PushExceptionHandler is treated as a call because it calls builtin_push_exception_handler
+    /// which clobbers caller-saved registers.
     fn transform_calls_to_saves(&mut self) {
         for i in 0..self.instructions.len() {
-            // Check if this is a Call or ExternalCall instruction
+            // Check instruction type
             let is_call = matches!(self.instructions[i], Instruction::Call(_, _, _));
             let is_external_call =
                 matches!(self.instructions[i], Instruction::ExternalCall(_, _, _));
+            let is_push_handler =
+                matches!(self.instructions[i], Instruction::PushExceptionHandler(_, _));
 
-            if !is_call && !is_external_call {
+            if !is_call && !is_external_call && !is_push_handler {
                 continue;
             }
 
             // Extract destination register for exclusion from saves
+            // PushExceptionHandler has no destination register
             let dest = match &self.instructions[i] {
-                Instruction::Call(d, _, _) => *d,
-                Instruction::ExternalCall(d, _, _) => *d,
+                Instruction::Call(d, _, _) => Some(*d),
+                Instruction::ExternalCall(d, _, _) => Some(*d),
+                Instruction::PushExceptionHandler(_, _) => None,
                 _ => continue,
             };
 
@@ -1069,29 +1103,26 @@ impl LinearScan {
             let mut saves = Vec::new();
 
             for (vreg, (start, end)) in &self.lifetimes {
-                // For Call/ExternalCall: standard liveness check
-                // Register is live across if it starts before and ends after
                 let is_live_across =
                     *start <= i && *end > i && !self.spill_locations.contains_key(vreg);
 
                 if is_live_across {
-                    // Get the physical register
                     if let Some(&physical_reg) = self.allocated_registers.get(vreg) {
                         // Don't save the destination register (it's about to be overwritten)
-                        let is_dest = match &dest {
-                            IrValue::Register(dest_vreg) => self
-                                .allocated_registers
-                                .get(dest_vreg)
-                                .map(|&dest_phys| dest_phys == physical_reg)
-                                .unwrap_or(false),
-                            _ => false,
+                        let is_dest = if let Some(ref d) = dest {
+                            match d {
+                                IrValue::Register(dest_vreg) => self
+                                    .allocated_registers
+                                    .get(dest_vreg)
+                                    .map(|&dest_phys| dest_phys == physical_reg)
+                                    .unwrap_or(false),
+                                _ => false,
+                            }
+                        } else {
+                            false
                         };
 
                         if !is_dest {
-                            // IMPORTANT: Push the VIRTUAL register, not the physical register!
-                            // The codegen will look up the physical register from the allocation map.
-                            // If we pushed the physical register (e.g., Temp(1) meaning x1), it would
-                            // get confused with any IR virtual register that happens to have the same name.
                             saves.push(IrValue::Register(*vreg));
                         }
                     }
@@ -1099,7 +1130,6 @@ impl LinearScan {
             }
 
             // Remove duplicates - sort by physical register and dedup
-            // Multiple virtual registers might map to the same physical register
             saves.sort_by_key(|v| match v {
                 IrValue::Register(vreg) => self
                     .allocated_registers
@@ -1108,7 +1138,6 @@ impl LinearScan {
                     .unwrap_or(vreg.index()),
                 _ => 0,
             });
-            // Dedup by physical register, not by virtual register
             let mut seen_physical = std::collections::HashSet::new();
             saves.retain(|v| match v {
                 IrValue::Register(vreg) => {
@@ -1122,10 +1151,7 @@ impl LinearScan {
                 _ => true,
             });
 
-            // Note: saves are always Registers, never Spills
-            // (line 1205 already excludes spilled values via !self.spill_locations.contains_key)
-
-            // Transform to unified CallWithSaves with appropriate CallTarget
+            // Transform to appropriate WithSaves variant
             if is_call {
                 let (func, args) = if let Instruction::Call(_, f, a) = &self.instructions[i] {
                     (*f, a.clone())
@@ -1133,7 +1159,7 @@ impl LinearScan {
                     continue;
                 };
                 self.instructions[i] =
-                    Instruction::CallWithSaves(dest, CallTarget::Dynamic(func), args, saves);
+                    Instruction::CallWithSaves(dest.unwrap(), CallTarget::Dynamic(func), args, saves);
             } else if is_external_call {
                 let (func_addr, args) =
                     if let Instruction::ExternalCall(_, addr, a) = &self.instructions[i] {
@@ -1142,7 +1168,16 @@ impl LinearScan {
                         continue;
                     };
                 self.instructions[i] =
-                    Instruction::CallWithSaves(dest, CallTarget::External(func_addr), args, saves);
+                    Instruction::CallWithSaves(dest.unwrap(), CallTarget::External(func_addr), args, saves);
+            } else if is_push_handler {
+                let (label, slot) =
+                    if let Instruction::PushExceptionHandler(l, s) = &self.instructions[i] {
+                        (l.clone(), *s)
+                    } else {
+                        continue;
+                    };
+                self.instructions[i] =
+                    Instruction::PushExceptionHandlerWithSaves(label, slot, saves);
             }
         }
     }
@@ -1152,10 +1187,61 @@ impl LinearScan {
         self.next_stack_slot
     }
 
+    /// Insert RestoreExceptionSaves after each LoadExceptionLocal that corresponds to
+    /// a PushExceptionHandlerWithSaves. This ensures that registers saved before the try
+    /// block are restored after a longjmp-style exception catch.
+    fn insert_exception_restores(&mut self) {
+        // Collect (exception_slot -> saves) from PushExceptionHandlerWithSaves
+        let mut slot_saves: std::collections::HashMap<usize, Vec<IrValue>> =
+            std::collections::HashMap::new();
+        for inst in self.instructions.iter() {
+            if let Instruction::PushExceptionHandlerWithSaves(_, slot, saves) = inst {
+                slot_saves.insert(*slot, saves.clone());
+            }
+        }
+
+        if slot_saves.is_empty() {
+            return;
+        }
+
+        // 1. Find LoadExceptionLocal instructions and insert RestoreExceptionSaves after them (catch path)
+        let mut insertions = Vec::new();
+        for (i, inst) in self.instructions.iter().enumerate() {
+            if let Instruction::LoadExceptionLocal(_, slot) = inst {
+                if let Some(saves) = slot_saves.get(slot) {
+                    if !saves.is_empty() {
+                        // Pass the exception_slot so codegen can look up the stack base
+                        insertions.push((i + 1, Instruction::RestoreExceptionSaves(saves.clone(), *slot)));
+                    }
+                }
+            }
+        }
+
+        // Insert in reverse order to preserve indices
+        for (idx, inst) in insertions.into_iter().rev() {
+            self.instructions.insert(idx, inst);
+        }
+
+        // 2. Update DropExceptionSaves with actual save counts (normal path)
+        // DropExceptionSaves(exception_slot) -> DropExceptionSaves(save_count)
+        // We rewrite in-place, changing the slot to the save count.
+        for inst in self.instructions.iter_mut() {
+            if let Instruction::DropExceptionSaves(slot) = inst {
+                if let Some(saves) = slot_saves.get(slot) {
+                    *slot = saves.len();
+                } else {
+                    *slot = 0;
+                }
+            }
+        }
+    }
+
     /// Get the allocated instructions (consumes self)
     pub fn finish(mut self) -> Vec<Instruction> {
         // Transform Call instructions to CallWithSaves after register allocation
         self.transform_calls_to_saves();
+        // Insert exception restore instructions
+        self.insert_exception_restores();
 
         self.instructions
     }

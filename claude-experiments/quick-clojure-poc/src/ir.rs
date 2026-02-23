@@ -98,6 +98,9 @@ pub enum IrValue {
     /// ReturnAddress - represents x30 (LR) in ARM64
     /// Used for passing return address to allocation trampolines for GC stack map lookup
     ReturnAddress,
+    /// StackPointer - represents x31 (SP) in ARM64
+    /// Used for exception handling (passing SP to push_exception_handler and throw)
+    StackPointer,
 }
 
 pub type Label = String;
@@ -232,21 +235,42 @@ pub enum Instruction {
     // See builtins.rs for implementation.
 
     // Exception handling
+    // These are implemented as proper function calls through ExternalCall/CallWithSaves,
+    // so the register allocator correctly saves/restores registers across them.
+    //
+    // PushExceptionHandler is special because it needs a label address and architectural
+    // registers (SP, FP, LR). It uses PushExceptionHandlerWithSaves which the codegen
+    // handles by saving live registers, computing label address via ADR, then calling
+    // the builtin.
+    //
+    // PopExceptionHandler and Throw use ExternalCall (converted to CallWithSaves by regalloc).
+
     /// PushExceptionHandler(catch_label, exception_slot_index) - setup exception handler
-    /// Saves SP/FP/LR and catch label; if exception occurs, jumps to catch_label
-    /// with exception stored at the given stack slot index
-    /// The slot index is pre-allocated by the compiler to ensure proper stack frame sizing
+    /// This instruction is a CALL that clobbers caller-saved registers.
+    /// The register allocator converts it to PushExceptionHandlerWithSaves.
     PushExceptionHandler(Label, usize),
 
-    /// PopExceptionHandler - remove exception handler (normal exit from try)
-    PopExceptionHandler,
+    /// PushExceptionHandlerWithSaves(catch_label, exception_slot, saves) - with register saves
+    /// Post-register-allocation form. Saves live registers to spill slots before the call,
+    /// so they survive the longjmp-style exception path. The matching RestoreExceptionSaves
+    /// at the catch label reloads them.
+    PushExceptionHandlerWithSaves(Label, usize, Vec<IrValue>),
 
-    /// Throw(exception_value) - throw exception, never returns
-    /// Pops handler, stores exception, restores SP/FP/LR, jumps to catch
-    Throw(IrValue),
+    /// DropExceptionSaves(count) - decrement stack size for normal path after try
+    /// On the normal path (no exception), registers are still valid. We just need to
+    /// "pop" the save slots to keep the stack tracking consistent.
+    DropExceptionSaves(usize),
+
+    /// RestoreExceptionSaves(saves, stack_base) - reload registers saved by PushExceptionHandlerWithSaves
+    /// Emitted at the catch label entry point to restore registers that were live
+    /// before the try block. These registers were spilled by PushExceptionHandlerWithSaves
+    /// and need reloading after a longjmp-style exception jump.
+    /// stack_base is the current_stack_size at which the saves were pushed.
+    RestoreExceptionSaves(Vec<IrValue>, usize),
 
     /// LoadExceptionLocal(dest, exception_slot_index) - load exception value from stack after catch
     /// Loads the exception from the pre-allocated stack slot into dest register
+    /// This is a simple stack load, not a function call.
     LoadExceptionLocal(IrValue, usize),
 
     // Assertion checking (pre/post conditions)
