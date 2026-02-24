@@ -344,7 +344,7 @@ struct CgFnEntry {
     name: String,
     fn_val: RawPointer<I8>,
     fn_ty: RawPointer<I8>,
-    gc_mask: String
+    param_types: Vec
 }
 
 struct I64Wrap {

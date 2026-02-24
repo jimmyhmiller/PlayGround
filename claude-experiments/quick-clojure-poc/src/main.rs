@@ -239,7 +239,7 @@ fn print_ast(ast: &Expr, indent: usize) {
                 println!("{}Var({})", prefix, name)
             }
         }
-        Expr::Ns { name } => println!("{}Ns({})", prefix, name),
+        Expr::Ns { name, .. } => println!("{}Ns({})", prefix, name),
         Expr::Use { namespace } => println!("{}Use({})", prefix, namespace),
         Expr::LoadFile { filename } => println!("{}LoadFile({})", prefix, filename),
         Expr::Quote(v) => println!("{}Quote({:?})", prefix, v),

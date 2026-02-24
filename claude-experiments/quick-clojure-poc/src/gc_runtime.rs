@@ -2596,7 +2596,7 @@ impl GCRuntime {
             }
             TYPE_NAMESPACE => {
                 let name = self.namespace_name(tagged_ptr);
-                Some(format!("#<ns:{}>", name))
+                Some(name)
             }
             TYPE_VAR => {
                 let (ns, sym) = self.var_info(tagged_ptr);
@@ -2681,7 +2681,7 @@ impl GCRuntime {
                 match type_id {
                     TYPE_NAMESPACE => {
                         let name = self.namespace_name(value);
-                        format!("#<ns:{}>", name)
+                        name
                     }
                     TYPE_VAR => {
                         let (ns, sym) = self.var_info(value);
@@ -2702,6 +2702,9 @@ impl GCRuntime {
                             } else if def.name == "clojure.core/IndexedSeq" {
                                 // Format IndexedSeq as a list
                                 self.format_indexed_seq(value)
+                            } else if def.name == "clojure.core/PersistentArrayMap" {
+                                // Format as {k v, ...} preserving insertion order
+                                self.format_persistent_array_map(value)
                             } else if def.name == "clojure.core/PersistentHashMap" {
                                 // Format as {:k v, ...}
                                 self.format_persistent_hash_map(value)
@@ -3012,6 +3015,38 @@ impl GCRuntime {
         } else {
             format!("{{... {} entries}}", cnt)
         }
+    }
+
+    /// Format a PersistentArrayMap as {k v, ...}
+    /// PersistentArrayMap has fields: [meta, cnt, arr, __hash]
+    /// arr is a flat array of alternating keys/values: [k0, v0, k1, v1, ...]
+    fn format_persistent_array_map(&self, value: usize) -> String {
+        let untagged = value >> 3;
+        let obj = HeapObject::from_untagged(untagged as *const u8);
+
+        // PersistentArrayMap fields: [meta=0, cnt=1, arr=2, __hash=3]
+        let cnt = (obj.get_field(1) >> 3) as usize;
+
+        if cnt == 0 {
+            return "{}".to_string();
+        }
+
+        let arr = obj.get_field(2);
+        if BuiltInTypes::get_kind(arr) == BuiltInTypes::HeapObject {
+            let arr_untagged = arr >> 3;
+            let arr_obj = HeapObject::from_untagged(arr_untagged as *const u8);
+            // Array has length at field 0, elements at field 1+
+            // Each pair is (key at 2i+1, val at 2i+2) in 1-indexed terms
+            let mut pairs = Vec::with_capacity(cnt);
+            for i in 0..cnt {
+                let k = arr_obj.get_field(i * 2 + 1); // +1 to skip length field
+                let v = arr_obj.get_field(i * 2 + 2);
+                pairs.push(format!("{} {}", self.format_value(k), self.format_value(v)));
+            }
+            return format!("{{{}}}", pairs.join(", "));
+        }
+
+        format!("{{... {} entries}}", cnt)
     }
 
     /// Format a PersistentHashSet as #{...}

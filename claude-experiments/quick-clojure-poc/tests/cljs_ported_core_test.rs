@@ -2582,7 +2582,6 @@ fn cljs_namespace() {
 }
 
 #[test]
-#[ignore] // ex-info/ex-message/ex-data not implemented
 fn cljs_ex_info() {
     assert_eq!(
         eval_expr("(try (throw (ex-info \"test\" {:a 1})) (catch Exception e (ex-message e)))"),
@@ -2611,7 +2610,6 @@ fn cljs_extend_type_nil() {
 }
 
 #[test]
-#[ignore] // named fn self-reference doesn't work
 fn cljs_fn_named_recursive() {
     assert_eq!(
         eval_expr("((fn foo [x] (if (< x 3) (foo (inc x)) x)) 0)"),
@@ -2655,7 +2653,6 @@ fn cljs_letfn() {
 }
 
 #[test]
-#[ignore] // defonce not implemented
 fn cljs_defonce() {
     assert_output("(defonce x 1) (defonce x 2) (println x)", "1");
 }
@@ -2685,7 +2682,6 @@ fn cljs_trampoline() {
 }
 
 #[test]
-#[ignore] // delay/deref not implemented
 fn cljs_delay() {
     assert_eq!(eval_expr("@(delay 1)"), "1");
 }

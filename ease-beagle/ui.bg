@@ -5,50 +5,33 @@ use appkit as ak
 // ─── Element Format ─────────────────────────────────────────────────
 // Every element is an array: [:tag, {attrs}, child1, child2, ...]
 // Attrs map is always the second element (even if empty {}).
+// IMPORTANT: Do NOT put array literals as map values inside array literals
+// (beagle parser limitation). Use pre-assigned variables or function calls.
 
 fn is-element?(x) {
-    is-array(x) && length(x) >= 2 && is-keyword(get(x, 0))
+    if x == null { false }
+    else { keyword?(get(x, 0)) }
 }
 
 fn el-tag(el) { get(el, 0) }
 fn el-attrs(el) { get(el, 1) }
 
 fn el-children(el) {
+    // Flatten children: skip nulls, spread non-element arrays (from map())
     let mut result = []
     let mut i = 2
     while i < length(el) {
-        result = push(result, get(el, i))
-        i = i + 1
-    }
-    result
-}
-
-fn attr-or(attrs, key, default) {
-    let v = get(attrs, key)
-    if v == null { default } else { v }
-}
-
-// ─── Flatten Children ───────────────────────────────────────────────
-// Distinguishes single elements (array starting with keyword) from
-// arrays of elements (from map()), and skips nulls.
-
-fn flatten-children(args) {
-    let mut result = []
-    let mut i = 0
-    while i < length(args) {
-        let item = get(args, i)
+        let item = get(el, i)
         if item == null {
             // skip
         } else if is-element?(item) {
             result = push(result, item)
-        } else if is-array(item) {
-            // array of elements from map()
+        } else {
+            // array of elements — spread it (e.g. result of map())
             let mut j = 0
             while j < length(item) {
                 let sub = get(item, j)
-                if sub != null {
-                    result = push(result, sub)
-                }
+                if sub != null { result = push(result, sub) }
                 j = j + 1
             }
         }
@@ -57,51 +40,9 @@ fn flatten-children(args) {
     result
 }
 
-// ─── Builder Helpers ────────────────────────────────────────────────
-
-fn vstack(attrs, ...children) {
-    let flat = flatten-children(children)
-    let mut el = [:vstack, attrs]
-    let mut i = 0
-    while i < length(flat) {
-        el = push(el, get(flat, i))
-        i = i + 1
-    }
-    el
-}
-
-fn hstack(attrs, ...children) {
-    let flat = flatten-children(children)
-    let mut el = [:hstack, attrs]
-    let mut i = 0
-    while i < length(flat) {
-        el = push(el, get(flat, i))
-        i = i + 1
-    }
-    el
-}
-
-fn zstack(attrs, ...children) {
-    let flat = flatten-children(children)
-    let mut el = [:zstack, attrs]
-    let mut i = 0
-    while i < length(flat) {
-        el = push(el, get(flat, i))
-        i = i + 1
-    }
-    el
-}
-
-fn spacer(h) {
-    [:spacer, {:height h}]
-}
-
-fn divider() {
-    [:divider, {}]
-}
-
-fn divider-colored(c) {
-    [:divider, {:color c}]
+fn attr-or(attrs, key, default) {
+    let v = get(attrs, key)
+    if v == null { default } else { v }
 }
 
 // ─── Measure (bottom-up height computation) ─────────────────────────
@@ -174,11 +115,10 @@ fn layout-vstack(el, parent, x, y, w, h, ctx) {
     let inner-w = w - (pad-x * 2.0)
     let inner-x = x + pad-x
 
-    // Optional background
+    // Optional background — bg-color must be an NSColor object
     if bg-color != null {
-        let bg = ak/colored-view(x, y, w, h,
-            get(bg-color, 0), get(bg-color, 1), get(bg-color, 2),
-            attr-or(bg-color, 3, 1.0))
+        let bg = ak/colored-view(x, y, w, h, 0.0, 0.0, 0.0, 0.0)
+        ak/set-bg-nscolor(bg, bg-color)
         if corner-r > 0.0 { ak/set-corner-radius(bg, corner-r) }
         ak/add-view(parent, bg)
     }
@@ -213,9 +153,8 @@ fn layout-hstack(el, parent, x, y, w, h, ctx) {
     let inner-y = y + pad-y
 
     if bg-color != null {
-        let bg = ak/colored-view(x, y, w, h,
-            get(bg-color, 0), get(bg-color, 1), get(bg-color, 2),
-            attr-or(bg-color, 3, 1.0))
+        let bg = ak/colored-view(x, y, w, h, 0.0, 0.0, 0.0, 0.0)
+        ak/set-bg-nscolor(bg, bg-color)
         if corner-r > 0.0 { ak/set-corner-radius(bg, corner-r) }
         ak/add-view(parent, bg)
     }
@@ -303,23 +242,13 @@ fn layout-button(el, parent, x, y, w, h, ctx) {
     if bordered != null { ak/set-bordered(btn, bordered) }
     let on-click = get(attrs, :on-click)
     if on-click != null {
-        let handler = get(ctx, :handler)
-        let n = get(ctx, :n)
-        let idx = deref(get(ctx, :click-idx))
-        swap!(get(ctx, :click-idx), fn(x) { x + 1 })
-        let sel-name = "ui" ++ to-string(idx) ++ "_" ++ to-string(n) ++ ":"
-        ak/add-method(handler, sel-name, fn(self_, sel, sender) {
-            on-click()
-        })
-        ak/on-click(btn, handler, sel-name)
+        wire-click(btn, on-click, ctx)
     }
     ak/add-to(parent, btn)
     null
 }
 
 fn layout-divider(el, parent, x, y, w, h, ctx) {
-    let attrs = el-attrs(el)
-    let c = attr-or(attrs, :color, ak/color(1.0, 1.0, 1.0, 0.15))
     let div = ak/colored-view(x, y, w, 1.0, 1.0, 1.0, 1.0, 0.15)
     ak/add-view(parent, div)
     null
@@ -328,13 +257,8 @@ fn layout-divider(el, parent, x, y, w, h, ctx) {
 fn layout-view(el, parent, x, y, w, h, ctx) {
     let attrs = el-attrs(el)
     let bg-color = get(attrs, :bg-color)
-    let v = if bg-color != null {
-        ak/colored-view(x, y, w, h,
-            get(bg-color, 0), get(bg-color, 1), get(bg-color, 2),
-            attr-or(bg-color, 3, 1.0))
-    } else {
-        ak/colored-view(x, y, w, h, 0.0, 0.0, 0.0, 0.0)
-    }
+    let v = ak/colored-view(x, y, w, h, 0.0, 0.0, 0.0, 0.0)
+    if bg-color != null { ak/set-bg-nscolor(v, bg-color) }
     let cr = get(attrs, :corner-radius)
     if cr != null { ak/set-corner-radius(v, cr) }
     let bw = get(attrs, :border-width)
@@ -383,7 +307,7 @@ fn wire-click(btn, callback, ctx) {
     let handler = get(ctx, :handler)
     let n = get(ctx, :n)
     let idx = deref(get(ctx, :click-idx))
-    swap!(get(ctx, :click-idx), fn(x) { x + 1 })
+    swap!(get(ctx, :click-idx), fn(v) { v + 1 })
     let sel-name = "ui" ++ to-string(idx) ++ "_" ++ to-string(n) ++ ":"
     ak/add-method(handler, sel-name, fn(self_, sel, sender) {
         callback()
@@ -395,7 +319,7 @@ fn wire-click-over(parent, callback, x, y, w, h, ctx) {
     let handler = get(ctx, :handler)
     let n = get(ctx, :n)
     let idx = deref(get(ctx, :click-idx))
-    swap!(get(ctx, :click-idx), fn(x) { x + 1 })
+    swap!(get(ctx, :click-idx), fn(v) { v + 1 })
     let sel-name = "ui" ++ to-string(idx) ++ "_" ++ to-string(n) ++ ":"
     ak/add-method(handler, sel-name, fn(self_, sel, sender) {
         callback()
@@ -411,11 +335,7 @@ fn wire-click-over(parent, callback, x, y, w, h, ctx) {
 fn render(parent-view, tree, width, handler, n) {
     let h = measure(tree, width)
     ak/remove-all-subviews(parent-view)
-    let ctx = {
-        :handler handler,
-        :n n,
-        :click-idx atom(0)
-    }
+    let ctx = {:handler handler, :n n, :click-idx atom(0)}
     layout(tree, parent-view, 0.0, 0.0, width, h, ctx)
     h
 }

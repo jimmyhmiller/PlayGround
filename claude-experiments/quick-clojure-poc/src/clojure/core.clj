@@ -570,6 +570,39 @@
     ;; Note: Returns a new ReaderSet by filtering out v
     (throw "disjoin not supported on ReaderSet - convert to PersistentHashSet first using (set this)")))
 
+(extend-type __ReaderMap
+  ICounted
+  (-count [this] (__reader_map_count this))
+
+  ISeqable
+  (-seq [this]
+    (if (== (__reader_map_count this) 0)
+      nil
+      (loop [ks (__reader_map_keys this) result nil]
+        (if (nil? ks)
+          result
+          (let [k (-first ks)
+                v (__reader_map_lookup this k nil)]
+            (recur (-next ks) (cons [k v] result)))))))
+
+  ILookup
+  (-lookup [this key]
+    (__reader_map_lookup this key nil))
+  (-lookup [this key not-found]
+    (__reader_map_lookup this key not-found))
+
+  IAssociative
+  (-assoc [this key val]
+    (__reader_map_assoc this key val))
+  (-contains-key? [this k]
+    ;; Iterate keys to check membership (no sentinel needed)
+    (loop [ks (__reader_map_keys this)]
+      (if (nil? ks)
+        false
+        (if (= (-first ks) k)
+          true
+          (recur (-next ks)))))))
+
 ;; =============================================================================
 ;; Polymorphic Sequence Functions
 ;; =============================================================================
@@ -4009,7 +4042,10 @@
               nil
               (cons (quote let) (cons (vector bind temp) body)))))))
 
-;; defonce - simplified version that always defines
+;; defonce - only defines if var is not already bound
+;; Handled as a builtin special form in clojure_ast.rs
+;; This macro definition exists as a fallback but the AST analyzer
+;; intercepts (defonce ...) before macro expansion.
 (def ^:macro defonce
   (fn [form env name expr]
     (list (quote def) name expr)))
@@ -4182,7 +4218,10 @@
 
 (defn atom [x] (__atom_create x))
 
-(defn deref [ref] (__atom_deref ref))
+(defn deref [ref]
+  (if (fn? ref)
+    (ref)
+    (__atom_deref ref)))
 
 (defn reset! [atom new-value] (__atom_reset atom new-value))
 
@@ -4206,8 +4245,106 @@
     (reset! atom new-val)
     [old new-val]))
 
+;; delay - wraps expression in a memoized thunk
+;; Returns a function; deref calls the function (which caches the result)
+(def ^:macro delay
+  (fn [form env & body]
+    (let [val-sym (gensym "delay_val__")
+          done-sym (gensym "delay_done__")]
+      (list (quote let) (vector val-sym (list (quote atom) nil)
+                                done-sym (list (quote atom) false))
+        (list (quote fn) (vector)
+          (list (quote when) (list (quote not) (list (quote deref) done-sym))
+            (list (quote reset!) val-sym (cons (quote do) body))
+            (list (quote reset!) done-sym true))
+          (list (quote deref) val-sym))))))
+
 ;; pr-str - returns a string representation with pr semantics (strings quoted)
 (defn pr-str [x] (__pr_str x))
+
+;; ex-info / ex-message / ex-data
+;; ex-info creates an exception map that can be thrown
+;; ex-message and ex-data extract the message and data from it
+(defn ex-info
+  ([msg data] {:message msg :data data})
+  ([msg data cause] {:message msg :data data :cause cause}))
+
+(defn ex-message [ex]
+  (if (string? ex)
+    ex
+    (get ex :message)))
+
+(defn ex-data [ex]
+  (get ex :data))
+
+(defn ex-cause [ex]
+  (get ex :cause))
+
+;; ============================================================================
+;; Namespace functions
+;; ============================================================================
+
+(defn namespace? [x] (__ns? x))
+
+(defn ns-name
+  "Returns the name of the namespace, as a symbol."
+  [ns]
+  (__ns_name ns))
+
+(defn find-ns
+  "Returns the namespace named by symbol, or nil if it doesn't exist."
+  [sym]
+  (__find_ns sym))
+
+(defn create-ns
+  "Finds or creates a namespace named by symbol.
+  If the namespace doesn't exist, creates it with clojure.core referred in."
+  [sym]
+  (__create_ns sym))
+
+(defn the-ns
+  "If passed a namespace, returns it. If passed a symbol, returns the
+  namespace named by it, throwing an exception if not found."
+  [x]
+  (if (namespace? x)
+    x
+    (or (find-ns x)
+        (throw (str "No namespace: " x)))))
+
+(defn all-ns
+  "Returns a sequence of all namespaces."
+  []
+  (__all_ns))
+
+(defn ns-map
+  "Returns a map of all the mappings for the namespace ns."
+  [ns]
+  (__ns_map (the-ns ns)))
+
+(defn ns-interns
+  "Returns a map of the intern mappings for the namespace ns."
+  [ns]
+  (__ns_interns (the-ns ns)))
+
+(defn ns-refers
+  "Returns a map of the refer mappings for the namespace ns."
+  [ns]
+  (__ns_refers (the-ns ns)))
+
+(defn ns-publics
+  "Returns a map of the public intern mappings for the namespace ns."
+  [ns]
+  (ns-interns ns))
+
+(defn ns-aliases
+  "Returns a map of the aliases for the namespace ns."
+  [ns]
+  (__ns_aliases (the-ns ns)))
+
+(defn ns-resolve
+  "Returns the var to which a symbol will be resolved in the namespace ns, else nil."
+  [ns sym]
+  (__ns_resolve (the-ns ns) sym))
 
 ;; ============================================================================
 ;; clojure.string namespace

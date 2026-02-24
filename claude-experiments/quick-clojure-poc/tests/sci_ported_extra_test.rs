@@ -905,7 +905,6 @@ fn sci_assert_false_throws() {
 // ============================================================================
 
 #[test]
-#[ignore] // ex-info / ex-message not implemented
 fn sci_ex_message() {
     assert_eq!(
         eval_expr(r#"(ex-message (ex-info "foo" {:a 1}))"#),

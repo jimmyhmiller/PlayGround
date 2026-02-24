@@ -54,6 +54,10 @@ pub struct Compiler {
     /// Used namespaces per namespace: namespace → list of used namespaces
     used_namespaces: HashMap<String, Vec<String>>,
 
+    /// Namespace aliases: namespace → {alias → actual_namespace}
+    /// e.g. in myapp, "m" → "mylib" when (:require [mylib :as m])
+    namespace_aliases: HashMap<String, HashMap<String, String>>,
+
     /// IR builder
     pub builder: IrBuilder,
 
@@ -132,6 +136,7 @@ impl Compiler {
             current_namespace_ptr: user_ns_ptr,
             namespace_registry,
             used_namespaces,
+            namespace_aliases: HashMap::new(),
             builder: IrBuilder::new(),
             local_scopes: Vec::new(),
             loop_contexts: Vec::new(),
@@ -153,7 +158,7 @@ impl Compiler {
                 metadata,
             } => self.compile_def(name, value, metadata),
             Expr::Set { var, value } => self.compile_set(var, value),
-            Expr::Ns { name } => self.compile_ns(name),
+            Expr::Ns { name, requires } => self.compile_ns(name, requires),
             Expr::Use { namespace } => self.compile_use(namespace),
             Expr::LoadFile { filename } => self.compile_load_file(filename),
             Expr::If { test, then, else_ } => self.compile_if(test, then, else_),
@@ -212,7 +217,7 @@ impl Compiler {
                 self.compile_call(
                     &Expr::Var {
                         namespace: Some("clojure.core".to_string()),
-                        name: "hash-map".to_string(),
+                        name: "array-map".to_string(),
                     },
                     &kv_exprs,
                 )
@@ -517,8 +522,8 @@ impl Compiler {
                 );
             }
             Value::Map(pairs) => {
-                // Compile map literal as call to (hash-map k1 v1 k2 v2 ...)
-                // Flatten the map into key-value pairs
+                // Compile map literal as call to (array-map k1 v1 k2 v2 ...)
+                // array-map preserves insertion order (like Clojure's PersistentArrayMap)
                 let mut kv_exprs: Vec<Expr> = Vec::new();
                 for (k, v) in pairs.iter() {
                     kv_exprs.push(Expr::Literal(k.clone()));
@@ -527,7 +532,7 @@ impl Compiler {
                 return self.compile_call(
                     &Expr::Var {
                         namespace: Some("clojure.core".to_string()),
-                        name: "hash-map".to_string(),
+                        name: "array-map".to_string(),
                     },
                     &kv_exprs,
                 );
@@ -582,11 +587,18 @@ impl Compiler {
 
         // Determine namespace name
         let ns_name = if let Some(ns) = namespace {
+            // Check if it's an alias for the current namespace
+            let current_ns_name = unsafe { &*self.runtime.get() }.namespace_name(self.current_namespace_ptr);
+            let resolved = self.namespace_aliases
+                .get(&current_ns_name)
+                .and_then(|aliases| aliases.get(ns))
+                .cloned()
+                .unwrap_or_else(|| ns.clone());
             // Verify namespace exists
-            if !self.namespace_registry.contains_key(ns) {
-                return Err(format!("Undefined namespace: {}", ns));
+            if !self.namespace_registry.contains_key(&resolved) {
+                return Err(format!("Undefined namespace: {}", resolved));
             }
-            ns.clone()
+            resolved
         } else {
             // Use current namespace
             rt.namespace_name(self.current_namespace_ptr)
@@ -665,6 +677,9 @@ impl Compiler {
                  // Reader set operations
                  "__reader_set_count" | "__reader_set_contains" | "__reader_set_conj" | "__reader_set_get" |
                  "__is_reader_set" |
+                 // Reader map operations
+                 "__reader_map_count" | "__reader_map_lookup" | "__reader_map_assoc" |
+                 "__reader_map_keys" | "__reader_map_vals" |
                  "__value_eq" |
                  // subs, keyword, compare, namespace
                  "__subs" | "__subs_3" |
@@ -676,7 +691,12 @@ impl Compiler {
                  // clojure.string operations
                  "__string_upper_case" | "__string_lower_case" |
                  "__string_includes" | "__string_join" |
-                 "__string_trim" | "__string_replace"
+                 "__string_trim" | "__string_replace" |
+                 // Namespace builtins
+                 "__ns_name" | "__find_ns" | "__create_ns" | "__ns?" |
+                 "__all_ns" |
+                 "__ns_map" | "__ns_interns" | "__ns_refers" | "__ns_aliases" |
+                 "__ns_resolve"
         )
     }
 
@@ -1487,6 +1507,11 @@ impl Compiler {
                 rt.update_namespace_root("user", new_user_ptr);
                 self.namespace_registry.insert("user".to_string(), new_user_ptr);
                 self.current_namespace_ptr = new_user_ptr;
+
+                // Also update *ns* var to point to user namespace at runtime
+                if let Some(ns_var_ptr) = rt.namespace_lookup(core_ns_ptr, "*ns*") {
+                    rt.var_set_value(ns_var_ptr, new_user_ptr);
+                }
             }
         }
     }
@@ -1521,7 +1546,8 @@ impl Compiler {
     }
 
     /// Compile namespace declaration
-    fn compile_ns(&mut self, name: &str) -> Result<IrValue, String> {
+    fn compile_ns(&mut self, name: &str, requires: &[crate::clojure_ast::NsRequire]) -> Result<IrValue, String> {
+        use crate::clojure_ast::NsRefers;
         // Check if namespace already exists
         if let Some(&ns_ptr) = self.namespace_registry.get(name) {
             // Switch to existing namespace
@@ -1554,6 +1580,64 @@ impl Compiler {
                 .insert(name.to_string(), vec!["clojure.core".to_string()]);
         }
 
+        // Process :require clauses
+        for req in requires {
+            let req_ns_name = &req.namespace;
+            // Ensure the required namespace exists (may have been defined earlier)
+            if !self.namespace_registry.contains_key(req_ns_name.as_str()) {
+                // Required namespace doesn't exist yet - skip (could warn)
+                continue;
+            }
+            let req_ns_ptr = *self.namespace_registry.get(req_ns_name.as_str()).unwrap();
+            let current_ns_ptr = self.current_namespace_ptr;
+
+            match &req.refers {
+                NsRefers::All => {
+                    // :refer :all - copy all bindings
+                    let new_ns_ptr = unsafe {
+                        let rt = &mut *self.runtime.get();
+                        let new_ptr = rt.refer_all(current_ns_ptr, req_ns_ptr)?;
+                        rt.update_namespace_root(name, new_ptr);
+                        new_ptr
+                    };
+                    self.current_namespace_ptr = new_ns_ptr;
+                    self.namespace_registry.insert(name.to_string(), new_ns_ptr);
+                }
+                NsRefers::Specific(syms) => {
+                    // :refer [sym1 sym2 ...] - copy specific bindings
+                    for sym_name in syms {
+                        let var_ptr = unsafe {
+                            let rt = &*self.runtime.get();
+                            rt.namespace_lookup(req_ns_ptr, sym_name)
+                        };
+                        if let Some(var_ptr) = var_ptr {
+                            let new_ns_ptr = unsafe {
+                                let rt = &mut *self.runtime.get();
+                                let new_ptr = rt.namespace_add_binding(
+                                    self.current_namespace_ptr,
+                                    sym_name,
+                                    var_ptr,
+                                )?;
+                                rt.update_namespace_root(name, new_ptr);
+                                new_ptr
+                            };
+                            self.current_namespace_ptr = new_ns_ptr;
+                            self.namespace_registry.insert(name.to_string(), new_ns_ptr);
+                        }
+                    }
+                }
+                NsRefers::None => {}
+            }
+
+            // Handle :as alias
+            if let Some(alias) = &req.alias {
+                self.namespace_aliases
+                    .entry(name.to_string())
+                    .or_insert_with(HashMap::new)
+                    .insert(alias.clone(), req_ns_name.clone());
+            }
+        }
+
         // Emit instruction to set *ns* at runtime using symbol-based lookup
         let (core_ns_symbol_id, ns_var_symbol_id) = unsafe {
             let rt = &mut *self.runtime.get();
@@ -1562,11 +1646,13 @@ impl Compiler {
             (core_ns_id, ns_var_id)
         };
 
-        // Load the current namespace pointer as a tagged constant
+        // Load the current namespace pointer as a tagged constant.
+        // current_namespace_ptr is already a tagged heap pointer (from allocate_namespace),
+        // so we use it directly without additional shifting.
         let ns_value = self.builder.new_register();
         self.builder.emit(Instruction::LoadConstant(
             ns_value,
-            IrValue::TaggedConstant((self.current_namespace_ptr << 3) as isize),
+            IrValue::TaggedConstant(self.current_namespace_ptr as isize),
         ));
 
         // Store it into *ns* var using symbol-based lookup
@@ -1587,13 +1673,25 @@ impl Compiler {
 
     /// Compile use declaration
     fn compile_use(&mut self, namespace: &str) -> Result<IrValue, String> {
-        // Add namespace to used list for current namespace
-        // SAFETY: Read-only access, single-threaded
+        // Refer all public vars from source namespace into current namespace at compile time.
+        // This allows unqualified access to the used namespace's symbols.
         let current_ns_name = unsafe {
             let rt = &*self.runtime.get();
             rt.namespace_name(self.current_namespace_ptr)
         };
 
+        if let Some(&source_ns_ptr) = self.namespace_registry.get(namespace) {
+            let current_ns_ptr = self.current_namespace_ptr;
+            let new_ns_ptr = unsafe {
+                let rt = &mut *self.runtime.get();
+                let new_ptr = rt.refer_all(current_ns_ptr, source_ns_ptr)?;
+                rt.update_namespace_root(&current_ns_name, new_ptr);
+                new_ptr
+            };
+            self.current_namespace_ptr = new_ns_ptr;
+            self.namespace_registry.insert(current_ns_name.clone(), new_ns_ptr);
+        }
+        // Track the used namespace
         self.used_namespaces
             .entry(current_ns_name)
             .or_insert_with(|| vec!["clojure.core".to_string()])
@@ -2075,7 +2173,20 @@ impl Compiler {
         // Multi-arity functions ALWAYS use the closure calling convention (x0 = fn object)
         // even if they have no captured closures, because the call site doesn't know
         // which arity will be selected.
-        let is_multi_arity = arities.len() > 1 || arities.iter().any(|a| a.rest_param.is_some());
+        //
+        // Named fn self-reference: if the function has a name that ISN'T already in the
+        // namespace (e.g., anonymous (fn foo [x] (foo x))), we need closure convention
+        // so the name can bind to x0 (the fn object itself).
+        // For defn-defined functions, the name IS in the namespace and is resolved via
+        // runtime var lookup, so no special handling is needed.
+        let needs_self_ref = if let Some(fn_name) = name {
+            let rt = unsafe { &*self.runtime.get() };
+            rt.namespace_lookup(self.current_namespace_ptr, fn_name).is_none()
+        } else {
+            false
+        };
+        let is_multi_arity = arities.len() > 1 || arities.iter().any(|a| a.rest_param.is_some())
+            || needs_self_ref;
 
         let arity_count = arities.len();
         for arity in arities {
@@ -2132,8 +2243,8 @@ impl Compiler {
             IrValue::TaggedConstant(0)
         };
 
-        if arities.len() == 1 && variadic_min.is_none() {
-            // Single fixed arity - create function pointer
+        if arities.len() == 1 && variadic_min.is_none() && !needs_self_ref {
+            // Single fixed arity (no self-reference) - create function pointer
             let code_ptr = compiled_arities[0].1;
 
             self.builder.emit(Instruction::MakeFunctionPtr(
@@ -2271,6 +2382,26 @@ impl Compiler {
                         .emit(Instruction::LoadClosure(closure_reg, *self_reg, i));
                 }
                 self.bind_local(var_name.clone(), closure_reg);
+            }
+        }
+
+        // Bind function name to self (x0) for named fn self-reference
+        // Only for anonymous named fns where the name isn't in the namespace
+        // e.g., (fn foo [x] (foo (dec x))) - foo refers to the function object itself
+        // For defn-defined functions, the name is resolved via runtime var lookup
+        if let Some(fn_name) = name {
+            // Check if the name is NOT in the namespace (anonymous named fn)
+            let needs_self_ref = {
+                let rt = unsafe { &*self.runtime.get() };
+                rt.namespace_lookup(self.current_namespace_ptr, fn_name).is_none()
+            };
+            if needs_self_ref {
+                if let Some(self_reg) = &self_reg {
+                    // Store self_reg to a local slot so it survives across calls
+                    let self_slot = self.builder.allocate_local();
+                    self.builder.emit(Instruction::StoreLocal(self_slot, *self_reg));
+                    self.bind_local_slot(fn_name.clone(), self_slot);
+                }
             }
         }
 
@@ -2799,6 +2930,12 @@ impl Compiler {
                     "__reader_set_conj" => self.compile_builtin_reader_set_conj(args),
                     "__reader_set_get" => self.compile_builtin_reader_prim_2(args, "__reader_set_get"),
                     "__is_reader_set" => self.compile_builtin_reader_prim_1(args, "__is_reader_set"),
+                    // Reader map operations
+                    "__reader_map_count" => self.compile_builtin_reader_prim_1(args, "__reader_map_count"),
+                    "__reader_map_lookup" => self.compile_builtin_reader_prim_3(args, "__reader_map_lookup"),
+                    "__reader_map_assoc" => self.compile_builtin_reader_prim_3(args, "__reader_map_assoc"),
+                    "__reader_map_keys" => self.compile_builtin_reader_prim_1(args, "__reader_map_keys"),
+                    "__reader_map_vals" => self.compile_builtin_reader_prim_1(args, "__reader_map_vals"),
                     "__value_eq" => self.compile_builtin_value_eq(args),
                     // subs, keyword, compare, namespace
                     "__subs" => self.compile_builtin_subs(args),
@@ -2819,6 +2956,17 @@ impl Compiler {
                     "__string_join" => self.compile_builtin_string_join(args),
                     "__string_trim" => self.compile_builtin_string_trim(args),
                     "__string_replace" => self.compile_builtin_string_replace(args),
+                    // Namespace builtins
+                    "__ns_name" => self.compile_builtin_reader_prim_1(args, "__ns_name"),
+                    "__find_ns" => self.compile_builtin_reader_prim_1(args, "__find_ns"),
+                    "__create_ns" => self.compile_builtin_reader_prim_1(args, "__create_ns"),
+                    "__ns?" => self.compile_builtin_reader_prim_1(args, "__ns?"),
+                    "__all_ns" => self.compile_builtin_reader_prim_0(args, "__all_ns"),
+                    "__ns_map" => self.compile_builtin_reader_prim_1(args, "__ns_map"),
+                    "__ns_interns" => self.compile_builtin_reader_prim_1(args, "__ns_interns"),
+                    "__ns_refers" => self.compile_builtin_reader_prim_1(args, "__ns_refers"),
+                    "__ns_aliases" => self.compile_builtin_reader_prim_1(args, "__ns_aliases"),
+                    "__ns_resolve" => self.compile_builtin_reader_prim_2(args, "__ns_resolve"),
                     _ => unreachable!(),
                 };
             }
@@ -3334,6 +3482,13 @@ impl Compiler {
     }
 
     /// Compile 1-arg reader primitive operations (first, rest, count)
+    fn compile_builtin_reader_prim_0(&mut self, args: &[Expr], builtin_name: &str) -> Result<IrValue, String> {
+        if !args.is_empty() {
+            return Err(format!("{} requires 0 arguments, got {}", builtin_name, args.len()));
+        }
+        self.call_builtin(builtin_name, vec![])
+    }
+
     fn compile_builtin_reader_prim_1(&mut self, args: &[Expr], builtin_name: &str) -> Result<IrValue, String> {
         if args.len() != 1 {
             return Err(format!("{} requires 1 argument, got {}", builtin_name, args.len()));
@@ -3353,6 +3508,19 @@ impl Compiler {
         let val1_reg = self.builder.assign_new(val1);
         let val2_reg = self.builder.assign_new(val2);
         self.call_builtin(builtin_name, vec![val1_reg, val2_reg])
+    }
+
+    fn compile_builtin_reader_prim_3(&mut self, args: &[Expr], builtin_name: &str) -> Result<IrValue, String> {
+        if args.len() != 3 {
+            return Err(format!("{} requires 3 arguments, got {}", builtin_name, args.len()));
+        }
+        let val1 = self.compile(&args[0])?;
+        let val2 = self.compile(&args[1])?;
+        let val3 = self.compile(&args[2])?;
+        let val1_reg = self.builder.assign_new(val1);
+        let val2_reg = self.builder.assign_new(val2);
+        let val3_reg = self.builder.assign_new(val3);
+        self.call_builtin(builtin_name, vec![val1_reg, val2_reg, val3_reg])
     }
 
     /// Compile __gensym_0 (no arguments)

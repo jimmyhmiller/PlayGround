@@ -1136,6 +1136,210 @@ pub extern "C" fn builtin__compare(x: usize, y: usize) -> usize {
 }
 
 // ============================================================================
+// Namespace builtins
+// ============================================================================
+
+/// __ns_name(tagged_ns_ptr) -> tagged_reader_symbol
+///
+/// Returns a symbol with the namespace's name string.
+/// Accepts a namespace object, or a symbol/string naming a namespace.
+#[unsafe(no_mangle)]
+pub extern "C" fn builtin__ns_name(tagged_ns_ptr: usize) -> usize {
+    unsafe {
+        let rt = get_runtime();
+        let type_id = rt.get_type_id_for_value(tagged_ns_ptr);
+        let ns_name = if type_id == crate::gc_runtime::TYPE_NAMESPACE {
+            rt.namespace_name(tagged_ns_ptr)
+        } else {
+            // Symbol or string: look up by name
+            let name = rt.prim_symbol_name(tagged_ns_ptr)
+                .expect("__ns_name: argument must be a namespace, symbol, or string");
+            rt.get_namespace_by_name(&name)
+                .map(|ns_ptr| rt.namespace_name(ns_ptr))
+                .unwrap_or_else(|| panic!("__ns_name: No namespace: {}", name))
+        };
+        rt.allocate_reader_symbol(None, &ns_name)
+            .expect("__ns_name: Failed to allocate symbol")
+    }
+}
+
+/// __find_ns(tagged_sym) -> tagged_ns_ptr or nil
+///
+/// Returns the namespace with the given symbol name, or nil if not found.
+#[unsafe(no_mangle)]
+pub extern "C" fn builtin__find_ns(tagged_sym: usize) -> usize {
+    unsafe {
+        let rt = get_runtime();
+        let name = rt.prim_symbol_name(tagged_sym)
+            .expect("__find_ns: argument must be a symbol");
+        rt.get_namespace_by_name(&name).unwrap_or(7) // 7 = nil
+    }
+}
+
+/// __create_ns(tagged_sym) -> tagged_ns_ptr
+///
+/// Creates a namespace with the given symbol name (or returns it if it already exists).
+#[unsafe(no_mangle)]
+pub extern "C" fn builtin__create_ns(tagged_sym: usize) -> usize {
+    unsafe {
+        let rt = get_runtime();
+        let name = rt.prim_symbol_name(tagged_sym)
+            .expect("__create_ns: argument must be a symbol");
+        if let Some(existing) = rt.get_namespace_by_name(&name) {
+            return existing;
+        }
+        let mut ns_ptr = rt.allocate_namespace(&name)
+            .expect("__create_ns: Failed to allocate namespace");
+        rt.add_namespace_root(name.clone(), ns_ptr);
+        // Refer clojure.core
+        if let Some(core_ptr) = rt.get_namespace_by_name("clojure.core") {
+            ns_ptr = rt.refer_all(ns_ptr, core_ptr)
+                .expect("__create_ns: Failed to refer clojure.core");
+            rt.update_namespace_root(&name, ns_ptr);
+        }
+        ns_ptr
+    }
+}
+
+/// __ns?(tagged_val) -> tagged_bool
+///
+/// Returns true if the value is a namespace object.
+#[unsafe(no_mangle)]
+pub extern "C" fn builtin__ns_pred(tagged_val: usize) -> usize {
+    unsafe {
+        let rt = get_runtime();
+        let type_id = rt.get_type_id_for_value(tagged_val);
+        if type_id == crate::gc_runtime::TYPE_NAMESPACE {
+            11 // true: (1 << 3) | 0b011
+        } else {
+            3  // false: (0 << 3) | 0b011
+        }
+    }
+}
+
+/// __all_ns() -> tagged_reader_vector of namespace pointers
+///
+/// Returns a vector of all namespace objects.
+#[unsafe(no_mangle)]
+pub extern "C" fn builtin__all_ns() -> usize {
+    unsafe {
+        let rt = get_runtime();
+        let ns_ptrs: Vec<usize> = rt.get_namespace_pointers().values().copied().collect();
+        rt.allocate_reader_vector(&ns_ptrs)
+            .expect("__all_ns: Failed to allocate vector")
+    }
+}
+
+/// __ns_map(tagged_ns_or_sym) -> tagged_reader_map
+///
+/// Returns a map of {symbol => var} for ALL bindings in the namespace
+/// (including both interned vars and referred vars).
+#[unsafe(no_mangle)]
+pub extern "C" fn builtin__ns_map(tagged_ns_or_sym: usize) -> usize {
+    unsafe {
+        let rt = get_runtime();
+        let ns_ptr = resolve_ns_arg(rt, tagged_ns_or_sym);
+        let bindings = rt.namespace_all_bindings(ns_ptr);
+        build_sym_var_map(rt, &bindings)
+    }
+}
+
+/// __ns_interns(tagged_ns_or_sym) -> tagged_reader_map
+///
+/// Returns a map of {symbol => var} for vars INTERNED in the namespace
+/// (i.e., vars whose home namespace is this namespace).
+#[unsafe(no_mangle)]
+pub extern "C" fn builtin__ns_interns(tagged_ns_or_sym: usize) -> usize {
+    unsafe {
+        let rt = get_runtime();
+        let ns_ptr = resolve_ns_arg(rt, tagged_ns_or_sym);
+        let ns_name = rt.namespace_name(ns_ptr);
+        let all_bindings = rt.namespace_all_bindings(ns_ptr);
+        // Filter to only bindings where the var's home namespace matches
+        let interns: Vec<(String, usize)> = all_bindings.into_iter().filter(|(_, var_ptr)| {
+            let (home_ns, _) = rt.var_info(*var_ptr);
+            home_ns == ns_name
+        }).collect();
+        build_sym_var_map(rt, &interns)
+    }
+}
+
+/// __ns_refers(tagged_ns_or_sym) -> tagged_reader_map
+///
+/// Returns a map of {symbol => var} for vars REFERRED into the namespace
+/// (i.e., vars from other namespaces).
+#[unsafe(no_mangle)]
+pub extern "C" fn builtin__ns_refers(tagged_ns_or_sym: usize) -> usize {
+    unsafe {
+        let rt = get_runtime();
+        let ns_ptr = resolve_ns_arg(rt, tagged_ns_or_sym);
+        let ns_name = rt.namespace_name(ns_ptr);
+        let all_bindings = rt.namespace_all_bindings(ns_ptr);
+        let refers: Vec<(String, usize)> = all_bindings.into_iter().filter(|(_, var_ptr)| {
+            let (home_ns, _) = rt.var_info(*var_ptr);
+            home_ns != ns_name
+        }).collect();
+        build_sym_var_map(rt, &refers)
+    }
+}
+
+/// __ns_aliases(tagged_ns_or_sym) -> tagged_reader_map (currently always empty)
+///
+/// Returns a map of {alias-symbol => namespace} for namespace aliases.
+/// Runtime aliases are not yet tracked; returns empty map.
+#[unsafe(no_mangle)]
+pub extern "C" fn builtin__ns_aliases(_tagged_ns_or_sym: usize) -> usize {
+    unsafe {
+        let rt = get_runtime();
+        rt.allocate_reader_map(&[])
+            .expect("__ns_aliases: Failed to allocate map")
+    }
+}
+
+/// __ns_resolve(tagged_ns_or_sym, tagged_sym) -> tagged_var_ptr or nil
+///
+/// Resolves a symbol in the given namespace. Returns the Var object or nil.
+#[unsafe(no_mangle)]
+pub extern "C" fn builtin__ns_resolve(tagged_ns_or_sym: usize, tagged_sym: usize) -> usize {
+    unsafe {
+        let rt = get_runtime();
+        let ns_ptr = resolve_ns_arg(rt, tagged_ns_or_sym);
+        let sym_name = rt.prim_symbol_name(tagged_sym)
+            .expect("__ns_resolve: second argument must be a symbol");
+        rt.namespace_lookup(ns_ptr, &sym_name).unwrap_or(7) // nil if not found
+    }
+}
+
+/// Helper: resolve a namespace argument which can be either a namespace pointer
+/// or a symbol naming a namespace.
+unsafe fn resolve_ns_arg(rt: &mut crate::gc_runtime::GCRuntime, arg: usize) -> usize {
+    let type_id = rt.get_type_id_for_value(arg);
+    if type_id == crate::gc_runtime::TYPE_NAMESPACE {
+        arg
+    } else {
+        // Try to interpret as symbol
+        let name = rt.prim_symbol_name(arg)
+            .expect("namespace argument must be a namespace or symbol");
+        rt.get_namespace_by_name(&name)
+            .unwrap_or_else(|| panic!("No namespace: {}", name))
+    }
+}
+
+/// Helper: build a ReaderMap from (name, var_ptr) pairs, using symbols as keys.
+unsafe fn build_sym_var_map(rt: &mut crate::gc_runtime::GCRuntime, bindings: &[(String, usize)]) -> usize {
+    // We need to allocate all the symbols first, then build the map.
+    // Since GC can move things, collect entries carefully.
+    let mut entries: Vec<(usize, usize)> = Vec::with_capacity(bindings.len());
+    for (name, var_ptr) in bindings {
+        let sym = rt.allocate_reader_symbol(None, name)
+            .expect("build_sym_var_map: Failed to allocate symbol");
+        entries.push((sym, *var_ptr));
+    }
+    rt.allocate_reader_map(&entries)
+        .expect("build_sym_var_map: Failed to allocate map")
+}
+
+// ============================================================================
 // Builtin registration
 // ============================================================================
 
@@ -1509,6 +1713,47 @@ pub fn get_builtin_descriptors() -> Vec<BuiltinDescriptor> {
         BuiltinDescriptor {
             name: "__string_replace",
             function_ptr: builtin__string_replace as usize,
+        },
+        // Namespace builtins
+        BuiltinDescriptor {
+            name: "__ns_name",
+            function_ptr: builtin__ns_name as usize,
+        },
+        BuiltinDescriptor {
+            name: "__find_ns",
+            function_ptr: builtin__find_ns as usize,
+        },
+        BuiltinDescriptor {
+            name: "__create_ns",
+            function_ptr: builtin__create_ns as usize,
+        },
+        BuiltinDescriptor {
+            name: "__ns?",
+            function_ptr: builtin__ns_pred as usize,
+        },
+        BuiltinDescriptor {
+            name: "__all_ns",
+            function_ptr: builtin__all_ns as usize,
+        },
+        BuiltinDescriptor {
+            name: "__ns_map",
+            function_ptr: builtin__ns_map as usize,
+        },
+        BuiltinDescriptor {
+            name: "__ns_interns",
+            function_ptr: builtin__ns_interns as usize,
+        },
+        BuiltinDescriptor {
+            name: "__ns_refers",
+            function_ptr: builtin__ns_refers as usize,
+        },
+        BuiltinDescriptor {
+            name: "__ns_aliases",
+            function_ptr: builtin__ns_aliases as usize,
+        },
+        BuiltinDescriptor {
+            name: "__ns_resolve",
+            function_ptr: builtin__ns_resolve as usize,
         },
     ]
 }

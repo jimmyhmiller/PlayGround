@@ -287,7 +287,6 @@ fn sci_let_nested_shadow() {
 // ============================================================================
 
 #[test]
-#[ignore] // closure across top-level forms broken
 fn sci_closure_defn_in_let() {
     assert_output("(let [x 1] (defn foo [] x)) (println (foo))", "1");
 }
@@ -331,7 +330,6 @@ fn sci_fn_literal_rest_args() {
 // ============================================================================
 
 #[test]
-#[ignore] // named fn self-reference doesn't work
 fn sci_fn_named_recursive() {
     assert_eq!(
         eval_expr("((fn foo [x] (if (< x 3) (foo (inc x)) x)) 0)"),
@@ -520,7 +518,6 @@ fn sci_recur_defn_with_apply() {
 }
 
 #[test]
-#[ignore] // named fn self-reference not supported
 fn sci_recursion_depth() {
     assert_output(
         "(println ((fn foo [x] (if (= 72 x) x (foo (inc x)))) 0))",
@@ -692,7 +689,6 @@ fn sci_defn_private() {
 // ============================================================================
 
 #[test]
-#[ignore] // defonce not implemented
 fn sci_defonce() {
     assert_output("(defonce x 1) (defonce x 2) (println x)", "1");
 }
@@ -755,13 +751,11 @@ fn sci_when_some_nil() {
 // ============================================================================
 
 #[test]
-#[ignore] // named fn self-reference broken
 fn sci_self_ref_fn_equality() {
     assert_output("(def f (fn foo [] foo)) (println (= f (f)))", "true");
 }
 
 #[test]
-#[ignore] // named fn self-reference broken
 fn sci_self_ref_closure() {
     assert_output(
         r#"(defn foof [x] (let [f (fn f ([] (f nil)) ([_] x))] f))
@@ -1416,7 +1410,6 @@ fn sci_while_atom() {
 // ============================================================================
 
 #[test]
-#[ignore] // delay/deref not implemented
 fn sci_delay() {
     assert_eq!(eval_expr("@(delay 1)"), "1");
 }

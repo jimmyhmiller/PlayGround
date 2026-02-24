@@ -5,6 +5,24 @@ use crate::gc_runtime::{
 };
 use crate::value::Value;
 
+/// Refer spec for a single :require clause in (ns ...)
+#[derive(Debug, Clone, PartialEq)]
+pub struct NsRequire {
+    /// The namespace to require
+    pub namespace: String,
+    /// :as alias (e.g. :as m)
+    pub alias: Option<String>,
+    /// :refer list (None = no refer, Some([]) = :refer :all, Some(names) = specific names)
+    pub refers: NsRefers,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum NsRefers {
+    None,
+    All,
+    Specific(Vec<String>),
+}
+
 // Helper functions that work with both reader types and runtime types
 // This is needed because macro expansion produces PersistentVector/Cons, not __ReaderVector/__ReaderList
 
@@ -75,6 +93,7 @@ pub enum Expr {
     // Namespace special forms
     Ns {
         name: String,
+        requires: Vec<NsRequire>,
     },
 
     Use {
@@ -498,6 +517,7 @@ pub fn analyze_tagged(rt: &mut GCRuntime, tagged: usize) -> Result<Expr, String>
                     "cond" => return analyze_cond_tagged(rt, tagged),
                     "dotimes" => return analyze_dotimes_tagged(rt, tagged),
                     "ns" => return analyze_ns_tagged(rt, tagged),
+                    "in-ns" => return analyze_in_ns_tagged(rt, tagged),
                     "use" => return analyze_use_tagged(rt, tagged),
                     "load-file" => return analyze_load_file_tagged(rt, tagged),
                     "binding" => return analyze_binding_tagged(rt, tagged),
@@ -506,6 +526,7 @@ pub fn analyze_tagged(rt: &mut GCRuntime, tagged: usize) -> Result<Expr, String>
                     "extend-type" => return analyze_extend_type_tagged(rt, tagged),
                     "debugger" => return analyze_debugger_tagged(rt, tagged),
                     "new" => return analyze_new_tagged(rt, tagged),
+                    "defonce" => return analyze_defonce_tagged(rt, tagged),
 
                     _ => {}
                 }
@@ -1307,13 +1328,15 @@ fn analyze_fn_tagged(rt: &mut GCRuntime, list_ptr: usize) -> Result<Expr, String
         // Could be name or could be params - check next item
         if idx + 1 < items.len() {
             if is_vector(rt, items[idx + 1]) {
-                // This is a name, next is params
+                // This is a name, next is params (single arity)
                 let n = get_symbol_name(rt, items[idx]);
                 idx += 1;
                 n
             } else if is_list(rt, items[idx + 1]) {
-                // Multi-arity form, no name
-                None
+                // Named multi-arity form: (fn name ([...] body) ([...] body))
+                let n = get_symbol_name(rt, items[idx]);
+                idx += 1;
+                n
             } else {
                 None
             }
@@ -1513,6 +1536,31 @@ fn analyze_declare_tagged(rt: &mut GCRuntime, list_ptr: usize) -> Result<Expr, S
     }
 }
 
+/// (defonce name expr) - like def but only defines if var doesn't already exist
+fn analyze_defonce_tagged(rt: &mut GCRuntime, list_ptr: usize) -> Result<Expr, String> {
+    let items = list_to_vec(rt, list_ptr);
+    if items.len() != 3 {
+        return Err(format!("defonce requires 2 arguments, got {}", items.len() - 1));
+    }
+
+    let name = get_symbol_name(rt, items[1])
+        .ok_or_else(|| "defonce requires a symbol as first argument".to_string())?;
+
+    // Check if var already exists in any namespace
+    if lookup_var_for_macro_check(rt, None, &name).is_some() {
+        // Var already exists - return nil (don't redefine)
+        return Ok(Expr::Literal(Value::Nil));
+    }
+
+    // Var doesn't exist - define it
+    let value = analyze_tagged(rt, items[2])?;
+    Ok(Expr::Def {
+        name,
+        value: Box::new(value),
+        metadata: None,
+    })
+}
+
 fn analyze_throw_tagged(rt: &mut GCRuntime, list_ptr: usize) -> Result<Expr, String> {
     let items = list_to_vec(rt, list_ptr);
     if items.len() != 2 {
@@ -1604,14 +1652,159 @@ fn analyze_try_tagged(rt: &mut GCRuntime, list_ptr: usize) -> Result<Expr, Strin
 
 fn analyze_ns_tagged(rt: &mut GCRuntime, list_ptr: usize) -> Result<Expr, String> {
     let items = list_to_vec(rt, list_ptr);
-    if items.len() != 2 {
-        return Err(format!("ns requires 1 argument, got {}", items.len() - 1));
+    if items.len() < 2 {
+        return Err(format!("ns requires at least 1 argument, got {}", items.len() - 1));
     }
 
     let ns_name = get_symbol_name(rt, items[1])
         .ok_or_else(|| "ns requires a symbol as namespace name".to_string())?;
 
-    Ok(Expr::Ns { name: ns_name })
+    // Parse optional clauses: (:require [...]) (:use [...]) etc.
+    let mut requires = Vec::new();
+    for i in 2..items.len() {
+        let clause = items[i];
+        let clause_type = rt.get_type_id_for_value(clause);
+        if clause_type != TYPE_READER_LIST {
+            continue; // skip non-list clauses
+        }
+        let clause_items = list_to_vec(rt, clause);
+        if clause_items.is_empty() {
+            continue;
+        }
+        let head_name = get_symbol_name(rt, clause_items[0])
+            .or_else(|| {
+                // Also try keyword
+                if rt.get_type_id_for_value(clause_items[0]) == TYPE_KEYWORD {
+                    rt.get_keyword_text(clause_items[0]).ok().map(|s| s.to_string())
+                } else {
+                    None
+                }
+            });
+        match head_name.as_deref() {
+            Some("require") | Some(":require") => {
+                for j in 1..clause_items.len() {
+                    if let Some(req) = parse_require_spec(rt, clause_items[j])? {
+                        requires.push(req);
+                    }
+                }
+            }
+            _ => {} // ignore other clauses for now
+        }
+    }
+
+    Ok(Expr::Ns { name: ns_name, requires })
+}
+
+/// Parse a single require spec: [ns-sym :as alias :refer [syms]] or just ns-sym
+fn parse_require_spec(rt: &mut GCRuntime, spec: usize) -> Result<Option<NsRequire>, String> {
+    if rt.prim_is_vector(spec) {
+        let count = rt.reader_vector_count(spec);
+        if count == 0 {
+            return Ok(None);
+        }
+        let ns_sym = rt.reader_vector_nth(spec, 0)
+            .map_err(|e| format!("require spec error: {}", e))?;
+        let ns_name = get_symbol_name(rt, ns_sym)
+            .ok_or_else(|| "require spec: first element must be a symbol".to_string())?;
+
+        let mut alias = None;
+        let mut refers = NsRefers::None;
+        let mut i = 1;
+        while i < count {
+            let key = rt.reader_vector_nth(spec, i).unwrap_or(7);
+            let key_type = rt.get_type_id_for_value(key);
+            let key_name = if key_type == TYPE_KEYWORD {
+                rt.get_keyword_text(key).ok().map(|s| s.to_string())
+            } else {
+                None
+            };
+            match key_name.as_deref() {
+                Some("as") => {
+                    i += 1;
+                    if i < count {
+                        let val = rt.reader_vector_nth(spec, i).unwrap_or(7);
+                        alias = get_symbol_name(rt, val);
+                    }
+                }
+                Some("refer") => {
+                    i += 1;
+                    if i < count {
+                        let val = rt.reader_vector_nth(spec, i).unwrap_or(7);
+                        let val_type = rt.get_type_id_for_value(val);
+                        if val_type == TYPE_KEYWORD {
+                            // :refer :all
+                            let kw = rt.get_keyword_text(val).unwrap_or("").to_string();
+                            if kw == "all" {
+                                refers = NsRefers::All;
+                            }
+                        } else if rt.prim_is_vector(val) {
+                            // :refer [sym1 sym2 ...]
+                            let vec_count = rt.reader_vector_count(val);
+                            let mut syms = Vec::new();
+                            for k in 0..vec_count {
+                                let sym = rt.reader_vector_nth(val, k).unwrap_or(7);
+                                if let Some(name) = get_symbol_name(rt, sym) {
+                                    syms.push(name);
+                                }
+                            }
+                            refers = NsRefers::Specific(syms);
+                        }
+                    }
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        Ok(Some(NsRequire { namespace: ns_name, alias, refers }))
+    } else if let Some(ns_name) = get_symbol_name(rt, spec) {
+        // bare symbol: (require 'foo)
+        Ok(Some(NsRequire { namespace: ns_name, alias: None, refers: NsRefers::None }))
+    } else if rt.get_type_id_for_value(spec) == TYPE_READER_LIST {
+        // quoted symbol: (require '[foo :as f]) -- handle quoted vector
+        let items = list_to_vec(rt, spec);
+        if items.len() == 2 {
+            if let Some(q) = get_symbol_name(rt, items[0]) {
+                if q == "quote" {
+                    return parse_require_spec(rt, items[1]);
+                }
+            }
+        }
+        Ok(None)
+    } else {
+        Ok(None)
+    }
+}
+
+fn analyze_in_ns_tagged(rt: &mut GCRuntime, list_ptr: usize) -> Result<Expr, String> {
+    let items = list_to_vec(rt, list_ptr);
+    if items.len() != 2 {
+        return Err(format!("in-ns requires 1 argument, got {}", items.len() - 1));
+    }
+    // The argument should be a quoted symbol: (in-ns 'foo)
+    let arg = items[1];
+    let ns_name = if let Some(name) = get_symbol_name(rt, arg) {
+        name
+    } else if rt.get_type_id_for_value(arg) == TYPE_READER_LIST {
+        let quoted = list_to_vec(rt, arg);
+        if quoted.len() == 2 {
+            if let Some(q) = get_symbol_name(rt, quoted[0]) {
+                if q == "quote" {
+                    get_symbol_name(rt, quoted[1])
+                        .ok_or_else(|| "in-ns requires a quoted symbol".to_string())?
+                } else {
+                    return Err("in-ns requires a quoted symbol like (in-ns 'foo)".to_string());
+                }
+            } else {
+                return Err("in-ns requires a quoted symbol like (in-ns 'foo)".to_string());
+            }
+        } else {
+            return Err("in-ns requires a quoted symbol like (in-ns 'foo)".to_string());
+        }
+    } else {
+        return Err("in-ns requires a quoted symbol like (in-ns 'foo)".to_string());
+    };
+
+    Ok(Expr::Ns { name: ns_name, requires: vec![] })
 }
 
 fn analyze_use_tagged(rt: &mut GCRuntime, list_ptr: usize) -> Result<Expr, String> {

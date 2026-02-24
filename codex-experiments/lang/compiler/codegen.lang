@@ -51,6 +51,7 @@ use vec::vec_get_item;
 use vec::vec_get_field;
 use vec::vec_get_param;
 use vec::vec_get_variant;
+use vec::vec_push_type;
 use vec::vec_get_type;
 use vec::vec_get_expr;
 use vec::vec_get_arm;
@@ -1085,45 +1086,35 @@ fn declare_enums(cg: Codegen, modules: Vec) -> I64 {
 
 fn declare_fn(cg: Codegen, full_name: String, params: Vec, ret_type: Type) -> CgFnEntry {
     let param_tys: Vec = vec_new();
-    let mut gc_mask: String = "";
+    let param_types: Vec = vec_new();
     vec_push_raw(param_tys, lang_llvm_ptr_type(cg.context));
     let mut i: I64 = 0;
     while i < vec_len(params) {
         let p: Param = vec_get_param(params, i);
         vec_push_raw(param_tys, llvm_type(cg, p.ty));
-        let tag: I64 = type_to_tag(p.ty);
-        if tag_is_gc_ref(tag) {
-            gc_mask = string_concat(gc_mask, "1");
-        } else {
-            gc_mask = string_concat(gc_mask, "0");
-        };
+        vec_push_type(param_types, p.ty);
         i = i + 1;
     };
     let ret: RawPointer<I8> = llvm_type(cg, ret_type);
     let fn_ty: RawPointer<I8> = lang_llvm_function_type(ret, vec_data(param_tys), vec_len(param_tys), 0);
     let llvm_name: String = llvm_fn_name(full_name);
     let fn_val: RawPointer<I8> = LLVMAddFunction(cg.llmod, llvm_name, fn_ty);
-    CgFnEntry { name: full_name, fn_val: fn_val, fn_ty: fn_ty, gc_mask: gc_mask }
+    CgFnEntry { name: full_name, fn_val: fn_val, fn_ty: fn_ty, param_types: param_types }
 }
 
 fn declare_extern_fn_entry(cg: Codegen, full_name: String, params: Vec, ret_type: Type, varargs: Bool) -> CgFnEntry {
-    let mut gc_mask: String = "";
+    let param_types: Vec = vec_new();
     let mut mi: I64 = 0;
     while mi < vec_len(params) {
         let mp: Param = vec_get_param(params, mi);
-        let tag: I64 = type_to_tag(mp.ty);
-        if tag_is_gc_ref(tag) {
-            gc_mask = string_concat(gc_mask, "1");
-        } else {
-            gc_mask = string_concat(gc_mask, "0");
-        };
+        vec_push_type(param_types, mp.ty);
         mi = mi + 1;
     };
     let symbol: String = last_segment(full_name);
     let existing: RawPointer<I8> = LLVMGetNamedFunction(cg.llmod, symbol);
     if ptr_is_null(existing) == 0 {
         let fn_ty: RawPointer<I8> = LLVMGlobalGetValueType(existing);
-        return CgFnEntry { name: full_name, fn_val: existing, fn_ty: fn_ty, gc_mask: gc_mask };
+        return CgFnEntry { name: full_name, fn_val: existing, fn_ty: fn_ty, param_types: param_types };
     };
     let param_tys: Vec = vec_new();
     let mut i: I64 = 0;
@@ -1136,7 +1127,7 @@ fn declare_extern_fn_entry(cg: Codegen, full_name: String, params: Vec, ret_type
     let va: I64 = if varargs { 1 } else { 0 };
     let fn_ty: RawPointer<I8> = lang_llvm_function_type(ret, vec_data(param_tys), vec_len(param_tys), va);
     let fn_val: RawPointer<I8> = LLVMAddFunction(cg.llmod, symbol, fn_ty);
-    CgFnEntry { name: full_name, fn_val: fn_val, fn_ty: fn_ty, gc_mask: gc_mask }
+    CgFnEntry { name: full_name, fn_val: fn_val, fn_ty: fn_ty, param_types: param_types }
 }
 
 fn declare_functions(cg: Codegen, modules: Vec) -> I64 {
@@ -1491,24 +1482,24 @@ fn count_roots_in_expr(cg: Codegen, expr: Expr) -> I64 {
                     // Temp roots for GC-ref call args
                     if vec_len(args) >= 2 {
                         let key: String = path_to_string(path);
-                        let mut gc_mask: String = "";
+                        let mut pt: Vec = vec_new();
                         let mut found: Bool = false;
                         if cg_find_fn(cg, key) == 1 {
                             let ent: CgFnEntry = cg_get_fn(cg, key);
-                            gc_mask = ent.gc_mask;
+                            pt = ent.param_types;
                             found = true;
                         } else {
                             if cg_find_extern(cg, key) == 1 {
                                 let ent: CgFnEntry = cg_get_extern(cg, key);
-                                gc_mask = ent.gc_mask;
+                                pt = ent.param_types;
                                 found = true;
                             };
                         };
                         if found {
                             let mut pi: I64 = 0;
-                            while pi < string_len(gc_mask) {
+                            while pi < vec_len(pt) {
                                 if pi < vec_len(args) - 1 {
-                                    if string_byte_at(gc_mask, pi) == 49 {
+                                    if tag_is_gc_ref(type_to_tag(vec_get_type(pt, pi))) {
                                         count = count + 1;
                                     };
                                 };
@@ -2283,19 +2274,19 @@ fn codegen_call(cg: Codegen, callee: Expr, args: Vec, ctx: FnCtx) -> RawPointer<
             let mut fn_val: RawPointer<I8> = LLVMConstNull(lang_llvm_ptr_type(cg.context));
             let mut fn_ty: RawPointer<I8> = LLVMConstNull(lang_llvm_ptr_type(cg.context));
             let mut pass_thread: Bool = false;
-            let mut gc_mask: String = "";
+            let mut param_types: Vec = vec_new();
             if cg_find_fn(cg, key) == 1 {
                 let entry: CgFnEntry = cg_get_fn(cg, key);
                 fn_val = entry.fn_val;
                 fn_ty = entry.fn_ty;
-                gc_mask = entry.gc_mask;
+                param_types = entry.param_types;
                 pass_thread = true;
             } else {
                 if cg_find_extern(cg, key) == 1 {
                     let entry: CgFnEntry = cg_get_extern(cg, key);
                     fn_val = entry.fn_val;
                     fn_ty = entry.fn_ty;
-                    gc_mask = entry.gc_mask;
+                    param_types = entry.param_types;
                 } else {
                     print_str_stderr(string_concat("codegen error: unknown function: ", key));
                     exit_process(1);
@@ -2312,8 +2303,8 @@ fn codegen_call(cg: Codegen, callee: Expr, args: Vec, ctx: FnCtx) -> RawPointer<
                 let val: RawPointer<I8> = codegen_expr(cg, arg, ctx);
                 vec_push_raw(eval_vals, val);
                 if need_rooting && i < vec_len(args) - 1 {
-                    let is_gc: Bool = if i < string_len(gc_mask) {
-                        string_byte_at(gc_mask, i) == 49
+                    let is_gc: Bool = if i < vec_len(param_types) {
+                        tag_is_gc_ref(type_to_tag(vec_get_type(param_types, i)))
                     } else {
                         false
                     };
