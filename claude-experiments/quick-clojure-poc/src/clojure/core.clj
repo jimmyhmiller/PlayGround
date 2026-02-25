@@ -4226,24 +4226,46 @@
 (defn reset! [atom new-value] (__atom_reset atom new-value))
 
 (defn swap!
-  ([atom f] (reset! atom (f (deref atom))))
-  ([atom f x] (reset! atom (f (deref atom) x)))
-  ([atom f x y] (reset! atom (f (deref atom) x y)))
-  ([atom f x y & args] (reset! atom (apply f (deref atom) x y args))))
+  ([atom f]
+   (loop [old (deref atom)]
+     (let [new-val (f old)]
+       (if (compare-and-set! atom old new-val)
+         new-val
+         (recur (deref atom))))))
+  ([atom f x]
+   (loop [old (deref atom)]
+     (let [new-val (f old x)]
+       (if (compare-and-set! atom old new-val)
+         new-val
+         (recur (deref atom))))))
+  ([atom f x y]
+   (loop [old (deref atom)]
+     (let [new-val (f old x y)]
+       (if (compare-and-set! atom old new-val)
+         new-val
+         (recur (deref atom))))))
+  ([atom f x y & args]
+   (loop [old (deref atom)]
+     (let [new-val (apply f old x y args)]
+       (if (compare-and-set! atom old new-val)
+         new-val
+         (recur (deref atom)))))))
 
 (defn compare-and-set! [atom old-val new-val]
   (__atom_compare_and_set atom old-val new-val))
 
 (defn swap-vals! [atom f & args]
-  (let [old (deref atom)
-        new-val (apply f old args)]
-    (reset! atom new-val)
-    [old new-val]))
+  (loop [old (deref atom)]
+    (let [new-val (apply f old args)]
+      (if (compare-and-set! atom old new-val)
+        [old new-val]
+        (recur (deref atom))))))
 
 (defn reset-vals! [atom new-val]
-  (let [old (deref atom)]
-    (reset! atom new-val)
-    [old new-val]))
+  (loop [old (deref atom)]
+    (if (compare-and-set! atom old new-val)
+      [old new-val]
+      (recur (deref atom)))))
 
 ;; delay - wraps expression in a memoized thunk
 ;; Returns a function; deref calls the function (which caches the result)

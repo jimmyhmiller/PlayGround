@@ -430,6 +430,18 @@ impl HeapObject {
         unsafe { *pointer }
     }
 
+    /// Get a pointer to a field as an AtomicUsize reference.
+    /// This doesn't change the layout — it reinterprets the existing aligned word
+    /// for atomic access. Safe because usize and AtomicUsize have identical layout
+    /// and the field is naturally word-aligned.
+    pub fn field_as_atomic(&self, index: usize) -> &std::sync::atomic::AtomicUsize {
+        debug_assert!(index < self.fields_size());
+        let untagged = self.untagged();
+        let pointer = untagged as *mut usize;
+        let pointer = unsafe { pointer.add(index + Self::header_size() / 8) };
+        unsafe { &*(pointer as *const std::sync::atomic::AtomicUsize) }
+    }
+
     #[allow(unused)]
     pub fn get_type_id(&self) -> usize {
         let untagged = self.untagged();

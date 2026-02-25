@@ -151,26 +151,25 @@ unsafe fn call_closure_with_arg_count(
 // SAFETY: Must be initialized before any JIT code runs
 static mut RUNTIME: Option<Arc<UnsafeCell<GCRuntime>>> = None;
 
-// Static storage for the original stack pointer during JIT execution.
+// Thread-local storage for the original stack pointer during JIT execution.
 // We can't use a register (x18 is not callee-saved, x19-x28 are used by JIT code).
-// This is safe because we only have single-threaded JIT execution.
-// SAFETY: Only accessed from a single thread during JIT execution.
-static mut TRAMPOLINE_SAVED_SP: usize = 0;
+// Each thread gets its own saved SP so multiple threads can run JIT code concurrently.
+thread_local! {
+    static TRAMPOLINE_SAVED_SP: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
 /// Save the original stack pointer before switching to JIT stack
 #[inline(never)]
 #[allow(dead_code)]
 pub extern "C" fn builtin_save_original_sp(sp: usize) {
-    unsafe {
-        TRAMPOLINE_SAVED_SP = sp;
-    }
+    TRAMPOLINE_SAVED_SP.with(|cell| cell.set(sp));
 }
 
 /// Restore the original stack pointer after JIT execution
 #[inline(never)]
 #[allow(dead_code)]
 pub extern "C" fn builtin_get_original_sp() -> usize {
-    unsafe { TRAMPOLINE_SAVED_SP }
+    TRAMPOLINE_SAVED_SP.with(|cell| cell.get())
 }
 
 /// Set the global runtime reference for trampolines

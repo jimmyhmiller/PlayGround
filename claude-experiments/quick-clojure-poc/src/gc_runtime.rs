@@ -5,11 +5,19 @@
 // the pluggable GC system from the gc module.
 
 use std::collections::{HashMap, HashSet};
+use std::cell::RefCell;
 
 use crate::gc::{
     AllocateAction, Allocator, AllocatorOptions, BuiltInTypes, DetailedHeapStats, HeapInspector,
     HeapObject, ObjectInfo, ObjectReference, StackMap, StackMapDetails, Word, type_id_to_name,
 };
+
+// Thread-local binding stacks for dynamic vars.
+// Each thread gets its own binding stacks so `binding` is per-thread like real Clojure.
+// Keys are var pointers (tagged), values are stacks of binding values (tagged).
+thread_local! {
+    static DYNAMIC_BINDINGS: RefCell<HashMap<usize, Vec<usize>>> = RefCell::new(HashMap::new());
+}
 
 // Select allocator based on feature flags
 cfg_if::cfg_if! {
@@ -335,9 +343,6 @@ pub struct GCRuntime {
     namespace_name_to_id: HashMap<String, usize>,
     next_namespace_id: usize,
 
-    /// Thread-local binding stacks for dynamic vars
-    dynamic_bindings: HashMap<usize, Vec<usize>>,
-
     /// Set of vars that are marked as dynamic
     dynamic_vars: HashSet<usize>,
 
@@ -422,7 +427,6 @@ impl GCRuntime {
             namespace_roots: HashMap::new(),
             namespace_name_to_id: HashMap::new(),
             next_namespace_id: 0,
-            dynamic_bindings: HashMap::new(),
             dynamic_vars: HashSet::new(),
             type_registry: Vec::new(),
             type_name_to_id: HashMap::new(),
@@ -519,9 +523,12 @@ impl GCRuntime {
                 }
 
                 // Update dynamic_bindings keys if a var was relocated
-                if let Some(stack) = self.dynamic_bindings.remove(&old_ptr) {
-                    self.dynamic_bindings.insert(new_ptr, stack);
-                }
+                DYNAMIC_BINDINGS.with(|bindings| {
+                    let mut bindings = bindings.borrow_mut();
+                    if let Some(stack) = bindings.remove(&old_ptr) {
+                        bindings.insert(new_ptr, stack);
+                    }
+                });
             }
         }
     }
@@ -1208,30 +1215,32 @@ impl GCRuntime {
         Ok(self.tag_heap_object(atom_ptr))
     }
 
-    /// Read the current value of an atom
+    /// Read the current value of an atom (atomic load)
     pub fn atom_deref(&self, atom_tagged: usize) -> usize {
+        use std::sync::atomic::Ordering;
         let untagged = atom_tagged >> 3;
         let heap_obj = HeapObject::from_untagged(untagged as *const u8);
-        heap_obj.get_field(0)
+        heap_obj.field_as_atomic(0).load(Ordering::Acquire)
     }
 
-    /// Reset an atom to a new value, returns the new value
+    /// Reset an atom to a new value, returns the new value (atomic store)
     pub fn atom_reset(&mut self, atom_tagged: usize, new_value: usize) -> usize {
+        use std::sync::atomic::Ordering;
         let untagged = atom_tagged >> 3;
         let heap_obj = HeapObject::from_untagged(untagged as *const u8);
-        heap_obj.write_field(0, new_value);
+        heap_obj.field_as_atomic(0).store(new_value, Ordering::Release);
         new_value
     }
 
-    /// Compare-and-set: if current value == old_val, set to new_val and return true
+    /// Compare-and-set: if current value == old_val, set to new_val and return true.
+    /// Uses a real atomic compare-exchange.
     pub fn atom_compare_and_set(&mut self, atom_tagged: usize, old_val: usize, new_val: usize) -> bool {
-        let current = self.atom_deref(atom_tagged);
-        if current == old_val {
-            self.atom_reset(atom_tagged, new_val);
-            true
-        } else {
-            false
-        }
+        use std::sync::atomic::Ordering;
+        let untagged = atom_tagged >> 3;
+        let heap_obj = HeapObject::from_untagged(untagged as *const u8);
+        heap_obj.field_as_atomic(0)
+            .compare_exchange(old_val, new_val, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
     }
 
     /// Bootstrap all builtin functions as Vars in clojure.core.
@@ -1363,34 +1372,47 @@ impl GCRuntime {
             ));
         }
 
-        self.dynamic_bindings
-            .entry(var_ptr)
-            .or_default()
-            .push(value);
+        DYNAMIC_BINDINGS.with(|bindings| {
+            bindings.borrow_mut()
+                .entry(var_ptr)
+                .or_default()
+                .push(value);
+        });
 
         Ok(())
     }
 
     /// Pop a thread-local binding for a dynamic var
     pub fn pop_binding(&mut self, var_ptr: usize) -> Result<(), String> {
-        if let Some(stack) = self.dynamic_bindings.get_mut(&var_ptr) {
-            if stack.is_empty() {
-                return Err(format!("No bindings to pop for var: {}", var_ptr));
+        DYNAMIC_BINDINGS.with(|bindings| {
+            let mut bindings = bindings.borrow_mut();
+            if let Some(stack) = bindings.get_mut(&var_ptr) {
+                if stack.is_empty() {
+                    return Err(format!("No bindings to pop for var: {}", var_ptr));
+                }
+                stack.pop();
+                Ok(())
+            } else {
+                Err(format!("No binding stack for var: {}", var_ptr))
             }
-            stack.pop();
-            Ok(())
-        } else {
-            Err(format!("No binding stack for var: {}", var_ptr))
-        }
+        })
     }
 
     /// Set the value of a thread-local binding (for set!)
     pub fn set_binding(&mut self, var_ptr: usize, value: usize) -> Result<(), String> {
-        if let Some(stack) = self.dynamic_bindings.get_mut(&var_ptr)
-            && let Some(last) = stack.last_mut() {
-                *last = value;
-                return Ok(());
-            }
+        let found = DYNAMIC_BINDINGS.with(|bindings| {
+            let mut bindings = bindings.borrow_mut();
+            if let Some(stack) = bindings.get_mut(&var_ptr)
+                && let Some(last) = stack.last_mut() {
+                    *last = value;
+                    return true;
+                }
+            false
+        });
+
+        if found {
+            return Ok(());
+        }
 
         let (ns_name, symbol_name) = self.var_info(var_ptr);
         Err(format!(
@@ -1399,12 +1421,20 @@ impl GCRuntime {
         ))
     }
 
-    /// Get the current value of a var, checking dynamic bindings first
+    /// Get the current value of a var, checking thread-local dynamic bindings first
     pub fn var_get_value_dynamic(&self, var_ptr: usize) -> usize {
-        if let Some(stack) = self.dynamic_bindings.get(&var_ptr)
-            && let Some(&value) = stack.last() {
-                return value;
-            }
+        let dynamic_value = DYNAMIC_BINDINGS.with(|bindings| {
+            let bindings = bindings.borrow();
+            if let Some(stack) = bindings.get(&var_ptr)
+                && let Some(&value) = stack.last() {
+                    return Some(value);
+                }
+            None
+        });
+
+        if let Some(value) = dynamic_value {
+            return value;
+        }
         self.var_get_value(var_ptr)
     }
 

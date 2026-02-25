@@ -64,38 +64,47 @@ class AudioMonitor: ObservableObject {
         return isRunning != 0
     }
 
-    // Only used when engine is NOT running — checks if others are using the mic
+    // Runs every 1s. Only checks when NOT monitoring (avoids detecting our own engine).
     private func tick() {
         guard !isMonitoring else { return }
 
         let inUse = isMicInUseByCoreAudio()
         micInUseByOtherApp = inUse
 
-        let shouldMonitor = manualOverride || inUse
-        if shouldMonitor {
+        if inUse || manualOverride {
             requestAndStart()
         }
     }
 
-    // Called periodically while monitoring: briefly stop to check if others are still using mic
+    // Runs every 5s while auto-monitoring. Synchronously stops engine, checks if
+    // others are still using the mic, and restarts immediately if so. The entire
+    // stop→check→restart takes <1ms — no visible UI flicker, no audible gap.
     private func performStopCheck() {
-        guard isMonitoring && !manualOverride else {
+        guard isMonitoring, !manualOverride, let engine = audioEngine else {
             stopCheckTimer?.invalidate()
             stopCheckTimer = nil
             return
         }
 
-        stopEngine()
+        // Synchronous: stop releases our IOProc so isRunningSomewhere
+        // reflects only other processes.
+        engine.stop()
+        let othersRunning = isMicInUseByCoreAudio()
 
-        // After engine releases CoreAudio resources, check if anyone else is still running
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
-            guard let self = self else { return }
-            let inUse = self.isMicInUseByCoreAudio()
-            self.micInUseByOtherApp = inUse
-            if inUse {
-                self.launchEngine()
-            }
-            // If not in use, stay stopped — tick() will restart when another app opens mic
+        if othersRunning {
+            // Others still active — restart immediately. Tap survives stop/start.
+            // No @Published properties change, so zero UI flicker.
+            try? engine.start()
+        } else {
+            // Nobody else using mic — actually tear down.
+            engine.inputNode.removeTap(onBus: 0)
+            audioEngine = nil
+            isMonitoring = false
+            currentLevel = -80
+            smoothedLevel = -80
+            micInUseByOtherApp = false
+            stopCheckTimer?.invalidate()
+            stopCheckTimer = nil
         }
     }
 
@@ -143,12 +152,13 @@ class AudioMonitor: ObservableObject {
             self.audioEngine = engine
             self.isMonitoring = true
 
-            // Schedule periodic check to detect when others stop using the mic.
-            // We must briefly stop our engine to accurately read isRunningSomewhere,
-            // since our own engine would otherwise keep the value true.
-            stopCheckTimer?.invalidate()
-            stopCheckTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
-                self?.performStopCheck()
+            // Only schedule stop-checks for auto-started monitoring.
+            // When manualOverride is on, user controls stop explicitly.
+            if !manualOverride {
+                stopCheckTimer?.invalidate()
+                stopCheckTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
+                    self?.performStopCheck()
+                }
             }
         } catch {
             print("Audio engine failed: \(error)")
