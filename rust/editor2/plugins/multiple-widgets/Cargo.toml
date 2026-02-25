@@ -1,5 +1,5 @@
 [package]
-name = "color-scheme"
+name = "multiple-widgets"
 version = "0.1.0"
 edition = "2021"
 
@@ -9,11 +9,12 @@ edition = "2021"
 crate-type = ['cdylib']
 
 [dependencies]
-framework = { path = "../framework" }
-lsp-types = "0.94.1"
+framework = { path = "../../framework" }
+rand = "0.8.5"
 serde = {version = "1.0.189", features=["derive"] }
+lsp-types = "0.94.1"
 
 
 [features]
-default = []
+default = ["main"]
 main = []

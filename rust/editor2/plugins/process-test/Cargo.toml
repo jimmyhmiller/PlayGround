@@ -1,5 +1,5 @@
 [package]
-name = "multiple-widgets"
+name = "process-test"
 version = "0.1.0"
 edition = "2021"
 
@@ -9,12 +9,11 @@ edition = "2021"
 crate-type = ['cdylib']
 
 [dependencies]
-framework = { path = "../framework" }
-rand = "0.8.5"
-serde = {version = "1.0.189", features=["derive"] }
+framework = { path = "../../framework" }
 lsp-types = "0.94.1"
+serde = {version = "1.0.189", features=["derive"] }
 
 
 [features]
-default = []
+default = ["main"]
 main = []

@@ -93,6 +93,8 @@ impl Widget {
         external_sender: std::sync::mpsc::Sender<Event>,
     ) {
         if let Some(widget) = self.as_wasm_widget_mut() {
+            // Migrate old wasm32-wasi paths to wasm32-wasip1
+            widget.path = widget.path.replace("wasm32-wasi/", "wasm32-wasip1/");
             let (new_wasm_id, receiver) = wasm_messenger.new_instance(
                 &widget.path,
                 None,
@@ -132,7 +134,7 @@ impl Widget {
                 wasm_messenger::SaveState::Empty => {
                     break;
                 }
-                wasm_messenger::SaveState::Saved(value) => {
+                wasm_messenger::SaveState::Saved(_value) => {
                     break;
                 }
             }

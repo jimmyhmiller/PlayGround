@@ -1439,43 +1439,6 @@ impl VirtualCursor for SimpleCursor {
     }
 }
 
-// For right now it is a simple linear history
-// Probably want it to be a tree
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-struct CursorWithHistory {
-    cursor: SimpleCursor,
-    history: Vec<SimpleCursor>,
-}
-
-impl VirtualCursor for CursorWithHistory {
-    fn new(line: usize, column: usize) -> Self {
-        Self {
-            cursor: SimpleCursor::new(line, column),
-            history: Vec::new(),
-        }
-    }
-
-    fn line(&self) -> usize {
-        self.cursor.line()
-    }
-
-    fn column(&self) -> usize {
-        self.cursor.column()
-    }
-
-    fn selection(&self) -> Option<((usize, usize), (usize, usize))> {
-        self.cursor.selection()
-    }
-
-    fn set_selection(&mut self, selection: Option<((usize, usize), (usize, usize))>) {
-        self.cursor.set_selection(selection);
-    }
-
-    fn move_to(&mut self, line: usize, column: usize) {
-        self.history.push(self.cursor);
-        self.cursor.move_to(line, column);
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct MultiCursor<C: VirtualCursor> {
@@ -1636,6 +1599,7 @@ impl<C: VirtualCursor> VirtualCursor for MultiCursor<C> {
 // test it by doing compensating actions
 // and making sure state is always reset.
 
+#[cfg(test)]
 struct EventTextBuffer {
     text_positions: HashMap<(usize, usize), u8>,
     bytes: Vec<u8>,
@@ -1652,6 +1616,7 @@ impl EventTextBuffer {
     }
 }
 
+#[cfg(test)]
 impl TextBuffer for EventTextBuffer {
     type Item = u8;
 

@@ -444,7 +444,10 @@ impl Editor {
                         let path = open_file_dialog();
                         if let Some(path) = path {
                             let path = path.replace("file://", "");
-                            let code_editor = "/Users/jimmyhmiller/Documents/Code/PlayGround/rust/editor2/target/wasm32-wasi/debug/code_editor.wasm";
+                            let mut wasm_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+                            wasm_path.pop(); // editor/ -> workspace root
+                            wasm_path.push("target/wasm32-wasip1/debug/code_editor.wasm");
+                            let code_editor = wasm_path.to_str().unwrap();
 
                             if let Some(watcher) = &mut self.debounce_watcher {
                                 let watcher = watcher.watcher();

@@ -34,6 +34,7 @@ pub struct Context {
     pub raw_mouse_position: Position,
     pub mouse_position: Position,
     pub left_mouse_down: bool,
+    #[allow(dead_code)]
     pub right_mouse_down: bool,
     pub cancel_click: bool,
     pub modifiers: Modifiers,
@@ -60,6 +61,7 @@ pub struct Process {
     pub process_id: usize,
     pub stdout: NonBlockingReader<ChildStdout>,
     pub stdin: std::process::ChildStdin,
+    #[allow(dead_code)]
     pub stderr: NonBlockingReader<std::process::ChildStderr>,
     pub output: String,
     // TODO: I could remove this and just allow
@@ -174,10 +176,21 @@ impl Editor {
 
         let watcher = debouncer.watcher();
 
-        // Probably need to debounce this
-        watcher
-            .watch(Path::new(&widget_config_path), RecursiveMode::NonRecursive)
-            .unwrap();
+        // Watch the config file if it exists; if not, watch the parent directory
+        // so we can pick it up when it's created.
+        let watch_path = if Path::new(&widget_config_path).exists() {
+            widget_config_path.clone()
+        } else {
+            Path::new(&widget_config_path)
+                .parent()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .to_string()
+        };
+        if let Err(e) = watcher.watch(Path::new(&watch_path), RecursiveMode::NonRecursive) {
+            eprintln!("Warning: could not watch {}: {}", watch_path, e);
+        }
 
         let sender_clone = sender.clone();
 
@@ -213,11 +226,20 @@ impl Editor {
     }
 
     pub fn load_widgets(&mut self) {
-        let mut file = File::open(&self.widget_config_path).unwrap();
+        let mut file = match File::open(&self.widget_config_path) {
+            Ok(f) => f,
+            Err(_) => return, // No saved widgets yet
+        };
         let mut contents = String::new();
         file.read_to_string(&mut contents).unwrap();
 
-        let input: SavedInput = serde_json::from_str(&contents).unwrap();
+        let input: SavedInput = match serde_json::from_str(&contents) {
+            Ok(i) => i,
+            Err(e) => {
+                eprintln!("Warning: could not parse {}: {}", self.widget_config_path, e);
+                return;
+            }
+        };
         let widgets = input.widgets;
         self.values = input.values;
 
@@ -233,9 +255,11 @@ impl Editor {
                     let watcher = watcher.watcher();
                     let files_to_watch = widget.files_to_watch();
                     for path in files_to_watch.iter() {
-                        watcher
+                        if let Err(e) = watcher
                             .watch(Path::new(path), RecursiveMode::NonRecursive)
-                            .unwrap();
+                        {
+                            eprintln!("Warning: could not watch {}: {}", path, e);
+                        }
                     }
                 }
                 widget

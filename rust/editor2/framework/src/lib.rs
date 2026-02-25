@@ -1,13 +1,13 @@
 #![allow(unused)]
 use std::{
     any::Any,
+    cell::{Cell, UnsafeCell},
     collections::HashMap,
     ffi::CString,
     fmt::Debug,
     ops::{Deref, DerefMut},
 };
 
-use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 
 #[link(wasm_import_module = "host")]
@@ -291,8 +291,53 @@ impl Canvas {
     }
 }
 
-pub static mut DEBUG: Vec<String> = Vec::new();
-pub static mut STRING_PTR_TO_LEN: Lazy<HashMap<u32, u32>> = Lazy::new(HashMap::new);
+// Thread-local state (WASM is single-threaded).
+// We use UnsafeCell instead of RefCell because WASM plugins can have re-entrant calls
+// (e.g., host calls on_move while another function's borrow is on the stack after a panic).
+// RefCell's borrow tracking causes cascading panics in this scenario. UnsafeCell gives us
+// the same semantics as the original `static mut` without the Rust 2024 lint.
+// SAFETY: All access is single-threaded (WASM).
+thread_local! {
+    static STRING_PTR_TO_LEN: UnsafeCell<HashMap<u32, u32>> = UnsafeCell::new(HashMap::new());
+    static DEBUG_LOG: UnsafeCell<Vec<String>> = UnsafeCell::new(Vec::new());
+    static APPS: UnsafeCell<Vec<Box<dyn App>>> = UnsafeCell::new(Vec::new());
+    static CURRENT_APP: Cell<usize> = Cell::new(0);
+    static CURRENT_EXTERNAL_ID: Cell<Option<usize>> = Cell::new(None);
+    static CONTEXT: UnsafeCell<HashMap<Option<usize>, Context>> = UnsafeCell::new(HashMap::new());
+}
+
+// Public accessors for cross-crate use (macros in plugins)
+pub fn push_app(app: Box<dyn App>) {
+    APPS.with(|apps| unsafe { &mut *apps.get() }.push(app));
+}
+
+pub fn insert_context(key: Option<usize>, ctx: Context) {
+    CONTEXT.with(|c| unsafe { &mut *c.get() }.insert(key, ctx));
+}
+
+pub fn push_debug(msg: String) {
+    DEBUG_LOG.with(|d| unsafe { &mut *d.get() }.push(msg));
+}
+
+/// Get a raw pointer to the current app. The APPS borrow is released before returning,
+/// so the caller can re-enter APPS (e.g., via create_widget) without RefCell panics.
+/// SAFETY: Only safe in single-threaded WASM — pointer is valid as long as APPS vec is not reallocated.
+pub fn current_app_ptr() -> *mut Box<dyn App> {
+    APPS.with(|apps| {
+        let apps = unsafe { &mut *apps.get() };
+        let current = CURRENT_APP.with(|c| c.get());
+        if let Some(app) = apps.get_mut(current) {
+            app as *mut Box<dyn App>
+        } else {
+            if current != 0 {
+                CURRENT_APP.with(|c| c.set(0));
+            } else {
+                panic!("No app");
+            }
+            apps.get_mut(0).unwrap() as *mut Box<dyn App>
+        }
+    })
+}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 pub struct Size {
@@ -387,18 +432,17 @@ pub fn alloc_string(len: usize) -> *mut u8 {
     std::mem::forget(buf);
     // return the pointer so the runtime
     // can write data at this offset
-    unsafe { STRING_PTR_TO_LEN.insert(ptr as u32, len as u32) };
+    STRING_PTR_TO_LEN.with(|m| unsafe { &mut *m.get() }.insert(ptr as u32, len as u32));
     ptr
 }
 
 pub fn fetch_string(str_ptr: u32) -> String {
-    let buffer;
-    unsafe {
-        let len = STRING_PTR_TO_LEN.get(&str_ptr).unwrap();
-        buffer = String::from_raw_parts(str_ptr as *mut u8, *len as usize, *len as usize);
-        STRING_PTR_TO_LEN.remove(&str_ptr);
-    }
-    buffer
+    STRING_PTR_TO_LEN.with(|m| {
+        let map = unsafe { &mut *m.get() };
+        let len = *map.get(&str_ptr).unwrap();
+        map.remove(&str_ptr);
+        unsafe { String::from_raw_parts(str_ptr as *mut u8, len as usize, len as usize) }
+    })
 }
 
 pub fn merge_json(partial_state: Option<String>, state: String) -> String {
@@ -473,13 +517,19 @@ impl Deref for Widget {
     type Target = Box<dyn App>;
 
     fn deref(&self) -> &Self::Target {
-        unsafe { APPS.get(self.app_index).unwrap() }
+        APPS.with(|apps| {
+            let apps = unsafe { &*apps.get() };
+            unsafe { &*(apps.get(self.app_index).unwrap() as *const Box<dyn App>) }
+        })
     }
 }
 
 impl DerefMut for Widget {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        unsafe { APPS.get_mut(self.app_index).unwrap() }
+        APPS.with(|apps| {
+            let apps = unsafe { &mut *apps.get() };
+            unsafe { &mut *(apps.get_mut(self.app_index).unwrap() as *mut Box<dyn App>) }
+        })
     }
 }
 
@@ -490,37 +540,41 @@ pub trait AppExtensions {
     }
 
     fn get_external_id(&self) -> Option<usize> {
-        unsafe { CURRENT_EXTERNAL_ID }
+        CURRENT_EXTERNAL_ID.with(|c| c.get())
     }
 
     fn get_external_ids(&self) -> Vec<usize> {
-        unsafe {
-            CONTEXT
-                .iter()
-                .filter_map(|(key, value)| value.external_id)
+        CONTEXT.with(|ctx| {
+            let ctx = unsafe { &*ctx.get() };
+            ctx.iter()
+                .filter_map(|(_key, value)| value.external_id)
                 .collect()
-        }
+        })
     }
 
     fn get_position2(&self) -> Position {
-        unsafe { CONTEXT.get(&CURRENT_EXTERNAL_ID).unwrap().meta.position }
+        let ext_id = CURRENT_EXTERNAL_ID.with(|c| c.get());
+        CONTEXT.with(|ctx| unsafe { &*ctx.get() }.get(&ext_id).unwrap().meta.position)
     }
 
     fn get_size2(&self) -> Size {
-        unsafe { CONTEXT.get(&CURRENT_EXTERNAL_ID).unwrap().meta.size }
+        let ext_id = CURRENT_EXTERNAL_ID.with(|c| c.get());
+        CONTEXT.with(|ctx| unsafe { &*ctx.get() }.get(&ext_id).unwrap().meta.size)
     }
 
     fn get_scale(&self) -> f32 {
-        unsafe { CONTEXT.get(&CURRENT_EXTERNAL_ID).unwrap().meta.scale }
+        let ext_id = CURRENT_EXTERNAL_ID.with(|c| c.get());
+        CONTEXT.with(|ctx| unsafe { &*ctx.get() }.get(&ext_id).unwrap().meta.scale)
     }
 
     fn get_id(&self) -> usize {
-        unsafe { CONTEXT.get(&CURRENT_EXTERNAL_ID).unwrap().meta.id }
+        let ext_id = CURRENT_EXTERNAL_ID.with(|c| c.get());
+        CONTEXT.with(|ctx| unsafe { &*ctx.get() }.get(&ext_id).unwrap().meta.id)
     }
 
     fn create_widget_ref(&mut self, external_id: u32, data: WidgetData) -> Widget {
-        unsafe {
-            CONTEXT.insert(
+        CONTEXT.with(|ctx| {
+            unsafe { &mut *ctx.get() }.insert(
                 Some(external_id as usize),
                 Context {
                     external_id: Some(external_id as usize),
@@ -534,7 +588,9 @@ pub trait AppExtensions {
                     app_index: self.get_id(),
                 },
             );
+        });
 
+        unsafe {
             create_widget(
                 data.position.x,
                 data.position.y,
@@ -542,17 +598,20 @@ pub trait AppExtensions {
                 data.size.height,
                 external_id,
             );
-            Widget {
-                app_index: external_id as usize,
-            }
+        }
+        Widget {
+            app_index: external_id as usize,
         }
     }
 
     fn create_widget(&mut self, app: Box<dyn App>, data: WidgetData) -> Widget {
-        unsafe {
-            APPS.push(app);
-            let identifer = APPS.len() - 1;
-            CONTEXT.insert(
+        let identifer = APPS.with(|apps| {
+            let apps = unsafe { &mut *apps.get() };
+            apps.push(app);
+            apps.len() - 1
+        });
+        CONTEXT.with(|ctx| {
+            unsafe { &mut *ctx.get() }.insert(
                 Some(identifer as usize),
                 Context {
                     external_id: Some(identifer as usize),
@@ -566,7 +625,9 @@ pub trait AppExtensions {
                     app_index: identifer,
                 },
             );
+        });
 
+        unsafe {
             create_widget(
                 data.position.x,
                 data.position.y,
@@ -574,9 +635,9 @@ pub trait AppExtensions {
                 data.size.height,
                 identifer as u32,
             );
-            Widget {
-                app_index: identifer,
-            }
+        }
+        Widget {
+            app_index: identifer,
         }
     }
 
@@ -682,62 +743,55 @@ pub struct Context {
     pub app_index: usize,
 }
 
-pub static mut APPS: Lazy<Vec<Box<dyn App>>> = Lazy::new(Vec::new);
-pub static mut CURRENT_APP: usize = 0;
-pub static mut CURRENT_EXTERNAL_ID: Option<usize> = None;
-pub static mut CONTEXT: Lazy<HashMap<Option<usize>, Context>> = Lazy::new(|| HashMap::new());
-
 #[no_mangle]
 pub extern "C" fn set_widget_identifier(identifier: u32) {
-    unsafe {
-        let app_index = CONTEXT.get(&Some(identifier as usize)).unwrap().app_index;
-        CURRENT_APP = app_index;
-        CURRENT_EXTERNAL_ID = Some(identifier as usize);
-    }
+    let app_index = CONTEXT.with(|ctx| {
+        unsafe { &*ctx.get() }.get(&Some(identifier as usize)).unwrap().app_index
+    });
+    CURRENT_APP.with(|c| c.set(app_index));
+    CURRENT_EXTERNAL_ID.with(|c| c.set(Some(identifier as usize)));
 }
 
 #[no_mangle]
 pub extern "C" fn clear_widget_identifier() {
-    unsafe {
-        CURRENT_APP = 0;
-        CURRENT_EXTERNAL_ID = None;
-    }
+    CURRENT_APP.with(|c| c.set(0));
+    CURRENT_EXTERNAL_ID.with(|c| c.set(None));
 }
 
 #[no_mangle]
 pub extern "C" fn on_click(x: f32, y: f32) {
-    let app = get_app!();
-    unsafe { app.on_click(x, y) }
+    let app = unsafe { &mut *current_app_ptr() };
+    app.on_click(x, y);
 }
 
 #[no_mangle]
 pub extern "C" fn on_delete() {
-    let app = get_app!();
-    unsafe { app.on_delete() }
+    let app = unsafe { &mut *current_app_ptr() };
+    app.on_delete();
 }
 #[no_mangle]
 pub extern "C" fn on_mouse_down(x: f32, y: f32) {
-    let app = get_app!();
-    unsafe { app.on_mouse_down(x, y) }
+    let app = unsafe { &mut *current_app_ptr() };
+    app.on_mouse_down(x, y);
 }
 
 #[no_mangle]
 pub extern "C" fn on_mouse_up(x: f32, y: f32) {
-    let app = get_app!();
-    unsafe { app.on_mouse_up(x, y) }
+    let app = unsafe { &mut *current_app_ptr() };
+    app.on_mouse_up(x, y);
 }
 
 #[no_mangle]
 pub extern "C" fn on_process_message(process_id: u32, str_ptr: u32) {
-    let app = get_app!();
     let message = fetch_string(str_ptr);
-    unsafe { app.on_process_message(process_id, message) }
+    let app = unsafe { &mut *current_app_ptr() };
+    app.on_process_message(process_id, message);
 }
 
 #[no_mangle]
 pub extern "C" fn draw_debug() {
-    let debug = unsafe { &DEBUG };
-    if debug.is_empty() {
+    let is_empty = DEBUG_LOG.with(|d| unsafe { &*d.get() }.is_empty());
+    if is_empty {
         return;
     }
     let foreground = Color::parse_hex("#62b4a6");
@@ -747,9 +801,11 @@ pub extern "C" fn draw_debug() {
     canvas.draw_rrect(Rect::new(0.0, 0.0, 300.0, 300.0), 20.0);
     canvas.set_color(&foreground);
     canvas.translate(0.0, 30.0);
-    canvas.draw_str(&format!("Debug {}", unsafe { &DEBUG }.len()), 0.0, 0.0);
+    let debug_len = DEBUG_LOG.with(|d| unsafe { &*d.get() }.len());
+    canvas.draw_str(&format!("Debug {}", debug_len), 0.0, 0.0);
     canvas.translate(0.0, 30.0);
-    for line in unsafe { &DEBUG } {
+    let lines: Vec<String> = DEBUG_LOG.with(|d| unsafe { &*d.get() }.clone());
+    for line in &lines {
         canvas.draw_str(line, 0.0, 0.0);
         canvas.translate(0.0, 30.0);
     }
@@ -757,58 +813,66 @@ pub extern "C" fn draw_debug() {
 
 #[no_mangle]
 pub extern "C" fn on_key(key: u32, state: u32, modifiers: u32) {
-    let app = get_app!();
-    unsafe { app.on_key(KeyboardInput::from_u32(key, state, modifiers)) }
+    let app = unsafe { &mut *current_app_ptr() };
+    app.on_key(KeyboardInput::from_u32(key, state, modifiers));
 }
 
 #[no_mangle]
 pub extern "C" fn on_mouse_move(x: f32, y: f32, x_diff: f32, y_diff: f32) {
-    let app = get_app!();
-    unsafe { app.on_mouse_move(x, y, x_diff, y_diff) }
+    let app = unsafe { &mut *current_app_ptr() };
+    app.on_mouse_move(x, y, x_diff, y_diff);
 }
 
 #[no_mangle]
 pub extern "C" fn on_event(kind_ptr: u32, event_ptr: u32) {
-    let app = get_app!();
     let kind = fetch_string(kind_ptr);
     let event = fetch_string(event_ptr);
-    unsafe { app.on_event(kind, event) }
+    let app = unsafe { &mut *current_app_ptr() };
+    app.on_event(kind, event);
 }
 
 #[no_mangle]
 pub extern "C" fn on_size_change(width: f32, height: f32) {
-    let app = get_app!();
-    let context = unsafe { CONTEXT.get_mut(&CURRENT_EXTERNAL_ID) }.unwrap();
-    context.meta.size.width = width;
-    context.meta.size.height = height;
-    unsafe { app.on_size_change(width, height) }
+    let ext_id = CURRENT_EXTERNAL_ID.with(|c| c.get());
+    CONTEXT.with(|ctx| {
+        let ctx = unsafe { &mut *ctx.get() };
+        let context = ctx.get_mut(&ext_id).unwrap();
+        context.meta.size.width = width;
+        context.meta.size.height = height;
+    });
+    let app = unsafe { &mut *current_app_ptr() };
+    app.on_size_change(width, height);
 }
 
 #[no_mangle]
 pub extern "C" fn on_move(x: f32, y: f32) {
-    let app = get_app!();
-    let context = unsafe { CONTEXT.get_mut(&CURRENT_EXTERNAL_ID) }.unwrap();
-    context.meta.position.x = x;
-    context.meta.position.y = y;
-    unsafe { app.on_move(x, y) }
+    let ext_id = CURRENT_EXTERNAL_ID.with(|c| c.get());
+    CONTEXT.with(|ctx| {
+        let ctx = unsafe { &mut *ctx.get() };
+        let context = ctx.get_mut(&ext_id).unwrap();
+        context.meta.position.x = x;
+        context.meta.position.y = y;
+    });
+    let app = unsafe { &mut *current_app_ptr() };
+    app.on_move(x, y);
 }
 
 #[no_mangle]
 pub extern "C" fn on_scroll(x: f64, y: f64) {
-    let app = get_app!();
-    unsafe { app.on_scroll(x, y) }
+    let app = unsafe { &mut *current_app_ptr() };
+    app.on_scroll(x, y);
 }
 
 #[no_mangle]
 pub extern "C" fn get_state() {
-    let app = get_app!();
+    let app = unsafe { &mut *current_app_ptr() };
     let s: String = app.get_state();
     let mut s = s.into_bytes();
     let ptr = s.as_mut_ptr() as usize;
     let len = s.len();
     std::mem::forget(s);
 
-    unsafe { app.set_get_state(ptr as u32, len as u32) };
+    app.set_get_state(ptr as u32, len as u32);
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -820,22 +884,20 @@ struct SavedContext {
 
 #[no_mangle]
 pub extern "C" fn save_context() {
-    unsafe {
-        let context = CONTEXT.clone();
-        let current_app = CURRENT_APP;
-        let current_external_id = CURRENT_EXTERNAL_ID;
-        let state = serde_json::to_string(&SavedContext {
-            context: context.into_iter().collect(),
-            current_app,
-            current_external_id,
-        })
-        .unwrap();
-        let mut state = state.into_bytes();
-        let ptr = state.as_mut_ptr() as usize;
-        let len = state.len();
-        std::mem::forget(state);
-        set_get_state(ptr as u32, len as u32);
-    }
+    let context_clone = CONTEXT.with(|ctx| unsafe { &*ctx.get() }.clone());
+    let current_app = CURRENT_APP.with(|c| c.get());
+    let current_external_id = CURRENT_EXTERNAL_ID.with(|c| c.get());
+    let state = serde_json::to_string(&SavedContext {
+        context: context_clone.into_iter().collect(),
+        current_app,
+        current_external_id,
+    })
+    .unwrap();
+    let mut state = state.into_bytes();
+    let ptr = state.as_mut_ptr() as usize;
+    let len = state.len();
+    std::mem::forget(state);
+    unsafe { set_get_state(ptr as u32, len as u32) };
 }
 
 #[no_mangle]
@@ -843,14 +905,17 @@ pub extern "C" fn set_context(ptr: u32, size: u32) {
     let data = unsafe { Vec::from_raw_parts(ptr as *mut u8, size as usize, size as usize) };
     let saved_context: Result<SavedContext, serde_json::Error> = serde_json::from_slice(&data);
     match saved_context {
-        Ok(saved_context) => unsafe {
-            CONTEXT.clear();
-            for (key, value) in saved_context.context {
-                CONTEXT.insert(key, value);
-            }
-            CURRENT_APP = saved_context.current_app;
-            CURRENT_EXTERNAL_ID = None;
-        },
+        Ok(saved_context) => {
+            CONTEXT.with(|ctx| {
+                let ctx = unsafe { &mut *ctx.get() };
+                ctx.clear();
+                for (key, value) in saved_context.context {
+                    ctx.insert(key, value);
+                }
+            });
+            CURRENT_APP.with(|c| c.set(saved_context.current_app));
+            CURRENT_EXTERNAL_ID.with(|c| c.set(None));
+        }
         Err(err) => {
             panic!("Error loading context {:?}", err)
         }
@@ -867,7 +932,7 @@ pub extern "C" fn finish_get_state(ptr: usize, len: usize) {
 
 #[no_mangle]
 pub extern "C" fn set_state(ptr: u32, size: u32) {
-    let app = get_app!();
+    let app = unsafe { &mut *current_app_ptr() };
     let data = unsafe { Vec::from_raw_parts(ptr as *mut u8, size as usize, size as usize) };
     let s = String::from_utf8(data);
     match s {
@@ -886,8 +951,8 @@ pub extern "C" fn set_state(ptr: u32, size: u32) {
 
 #[no_mangle]
 pub extern "C" fn draw() {
-    let app = get_app!();
-    unsafe { app.draw() }
+    let app = unsafe { &mut *current_app_ptr() };
+    app.draw();
 }
 // TODO: get rid of this
 pub use serde_json;
@@ -904,47 +969,34 @@ pub mod macros {
             fn main(widget_id: usize) {
                 let mut app = $app::init();
                 app.start();
-                unsafe {
-                    framework::APPS.push(Box::new(app));
-                    framework::CONTEXT.insert(
-                        None,
-                        framework::Context {
-                            external_id: None,
-                            meta: framework::WidgetMeta::new(
-                                framework::Position { x: 0.0, y: 0.0 },
-                                framework::Size {
-                                    width: 0.0,
-                                    height: 0.0,
-                                },
-                                1.0,
-                                widget_id,
-                                "wasm".to_string(),
-                            ),
-                            app_index: 0,
-                        },
-                    );
-                }
+                framework::push_app(Box::new(app));
+                framework::insert_context(
+                    None,
+                    framework::Context {
+                        external_id: None,
+                        meta: framework::WidgetMeta::new(
+                            framework::Position { x: 0.0, y: 0.0 },
+                            framework::Size {
+                                width: 0.0,
+                                height: 0.0,
+                            },
+                            1.0,
+                            widget_id,
+                            "wasm".to_string(),
+                        ),
+                        app_index: 0,
+                    },
+                );
             }
         };
     }
 
+    // get_app! is no longer needed — internal code uses current_app_ptr() directly.
+    // Keeping the macro for backward compatibility but it now delegates to the function.
     #[macro_export]
     macro_rules! get_app {
         () => {
-            unsafe {
-                if let Some(app) = APPS.get_mut(CURRENT_APP) {
-                    app
-                } else {
-                    if CURRENT_APP != 0 {
-                        // I need to actually delete this
-                        // But really I need to make reloading work properly
-                        CURRENT_APP = 0;
-                    } else {
-                        panic!("No app");
-                    }
-                    APPS.get_mut(CURRENT_APP).unwrap()
-                }
-            }
+            unsafe { &mut *framework::current_app_ptr() }
         };
     }
 }

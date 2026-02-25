@@ -23,6 +23,7 @@ use wasmtime_wasi::{Dir, WasiCtxBuilder};
 
 use crate::{event::Event, keyboard::KeyboardInput};
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 struct PointerLengthString {
     ptr: u32,
@@ -653,7 +654,7 @@ struct WasmInstance {
 
 impl WasmInstance {
     async fn call_main(&mut self) -> anyhow::Result<()> {
-        self.call_typed_func("main", self.widget_id as u32, 1)
+        self.call_typed_func::<_, ()>("main", self.widget_id as u32, 1)
             .await?;
         Ok(())
     }
@@ -1106,7 +1107,7 @@ impl WasmInstance {
         let _max_width = 0.0;
         let _max_height = 0.0;
 
-        self.call_typed_func(fn_name, (), 1).await?;
+        self.call_typed_func::<_, ()>(fn_name, (), 1).await?;
 
         let state = &mut self.store.data_mut();
 

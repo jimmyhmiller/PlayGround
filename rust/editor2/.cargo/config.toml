@@ -1,0 +1,6 @@
+[alias]
+# Builds all plugins except code-editor (which needs a separate build due to feature conflicts).
+# code-editor is also a library used by pane-editor/symbol-editor, so its `main` feature
+# can't be enabled in a workspace build without causing duplicate symbol errors.
+build-plugins = "build --target wasm32-wasip1 --workspace --exclude editor2 --exclude code_editor"
+build-code-editor = "build --target wasm32-wasip1 -p code_editor --features main"

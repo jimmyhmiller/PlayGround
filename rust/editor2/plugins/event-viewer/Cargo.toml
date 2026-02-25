@@ -9,11 +9,11 @@ edition = "2021"
 crate-type = ['cdylib']
 
 [dependencies]
-framework = { path = "../framework" }
+framework = { path = "../../framework" }
 lsp-types = "0.94.1"
 serde = {version = "1.0.189", features=["derive"] }
 
 
 [features]
-default = []
+default = ["main"]
 main = []
