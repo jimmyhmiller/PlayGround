@@ -1,0 +1,20 @@
+struct Point {
+    x: f64,
+    y: f64,
+}
+
+impl Point {
+    fn new(x: f64, y: f64) -> Point {
+        let p = Point { x: x, y: y };
+        return p;
+    }
+
+    fn display(self) -> String {
+        return "Point";
+    }
+}
+
+fn main() {
+    let p = Point::new(3.0, 4.0);
+    println(p.display());
+}

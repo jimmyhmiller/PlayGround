@@ -81,6 +81,8 @@ pub struct MetaSyms {
     pub spread_sym: SymId,
     pub wild_spread_sym: SymId,
     pub wild_sym: SymId,
+    pub eval_marker: SymId,
+    pub step_marker: SymId,
 }
 
 // ── MetaRule ──
@@ -128,6 +130,7 @@ pub struct Engine {
     builtins: Builtins,
     meta_syms: MetaSyms,
     meta_rules: Vec<MetaRule>,
+    rewrite_rules: Vec<Rule>,
     pattern_ctx: PatternContext,
     // Scopes: index 0 is always the "main" scope
     scopes: Vec<Scope>,
@@ -145,7 +148,7 @@ pub struct Engine {
 }
 
 impl Engine {
-    pub fn new(mut store: TermStore, rules: Vec<Rule>, parsed_meta: Vec<(Rule, String)>) -> Self {
+    pub fn new(mut store: TermStore, rules: Vec<Rule>, parsed_meta: Vec<(Rule, String)>, rewrite_rules: Vec<Rule>) -> Self {
         let builtins = Builtins {
             add: store.sym("add"),
             sub: store.sym("sub"),
@@ -220,6 +223,8 @@ impl Engine {
             spread_sym: store.sym("__spread"),
             wild_spread_sym: store.sym("__wild_spread"),
             wild_sym: store.sym("__wild"),
+            eval_marker: store.sym("__eval"),
+            step_marker: store.sym("__step"),
         };
 
         let pattern_ctx = PatternContext {
@@ -278,6 +283,7 @@ impl Engine {
 
         Engine {
             store, rules, rule_index, builtins, meta_syms, meta_rules,
+            rewrite_rules,
             pattern_ctx,
             scopes, scope_map,
             active_scope_idx: None,
@@ -378,8 +384,200 @@ impl Engine {
         self.step_limit_exceeded = false;
     }
 
+    /// Re-check @self rewrite rules in a loop until no rule matches.
+    /// Used when markers (#eval/#step) control evaluation — avoids full eval.
+    fn rewrite_loop(&mut self, mut current: TermId) -> TermId {
+        loop {
+            let num_rewrite = self.rewrite_rules.len();
+            let mut matched = false;
+            for rule_idx in 0..num_rewrite {
+                let num_clauses = self.rewrite_rules[rule_idx].clauses.len();
+                for clause_idx in 0..num_clauses {
+                    let mut env = Env::new();
+                    if match_pattern(&mut self.store, &self.rewrite_rules[rule_idx].clauses[clause_idx].lhs, current, &mut env, &self.pattern_ctx) {
+                        let result = substitute(&mut self.store, &self.rewrite_rules[rule_idx].clauses[clause_idx].rhs, &env);
+                        let resolved = self.resolve_eval_markers(result);
+                        if resolved == current { continue; }
+                        current = resolved;
+                        matched = true;
+                        break;
+                    }
+                }
+                if matched { break; }
+            }
+            if !matched { break; }
+        }
+        current
+    }
+
+    /// Walk a term tree and resolve __eval/__step sentinel markers.
+    /// - __eval(inner): resolve inner markers first, then fully evaluate
+    /// - __step(inner): resolve inner markers first, then apply one reduction step
+    /// - Other Call nodes: recurse into head and args, reconstruct if changed
+    /// - Leaves (Num, Sym, Float): return unchanged
+    fn resolve_eval_markers(&mut self, term: TermId) -> TermId {
+        match self.store.get(term) {
+            TermData::Num(_) | TermData::Float(_) | TermData::Sym(_) => term,
+            TermData::Call { head, args_start, args_len } => {
+                if let TermData::Sym(s) = self.store.get(head) {
+                    if s == self.meta_syms.eval_marker && args_len == 1 {
+                        let inner = self.store.args_pool[args_start as usize];
+                        let resolved_inner = self.resolve_eval_markers(inner);
+                        return self.eval(resolved_inner);
+                    }
+                    if s == self.meta_syms.step_marker && args_len == 1 {
+                        let inner = self.store.args_pool[args_start as usize];
+                        let resolved_inner = self.resolve_eval_markers(inner);
+                        return self.eval_step(resolved_inner);
+                    }
+                    // seq(a, b) — resolve both, return last (don't leak seq into rewrite loop)
+                    if s == self.builtins.seq && args_len == 2 {
+                        let a = self.store.args_pool[args_start as usize];
+                        let b = self.store.args_pool[args_start as usize + 1];
+                        self.resolve_eval_markers(a);
+                        return self.resolve_eval_markers(b);
+                    }
+                }
+                // Recurse into head and args
+                let h = self.resolve_eval_markers(head);
+                let len = args_len as usize;
+                let mut new_args: Vec<TermId> = Vec::with_capacity(len);
+                let mut changed = h != head;
+                for i in 0..len {
+                    let arg = self.store.args_pool[args_start as usize + i];
+                    let resolved = self.resolve_eval_markers(arg);
+                    changed |= resolved != arg;
+                    new_args.push(resolved);
+                }
+                if changed {
+                    self.store.call(h, &new_args)
+                } else {
+                    term
+                }
+            }
+        }
+    }
+
+    /// Apply one reduction step without recursing into the result.
+    /// Does NOT check @self rewrite rules and does NOT evaluate arguments.
+    fn eval_step(&mut self, term: TermId) -> TermId {
+        // Only Call terms can be stepped
+        if let TermData::Call { head, args_start, args_len } = self.store.get(term) {
+            if let TermData::Sym(head_sym) = self.store.get(head) {
+                // 1. Try user rules (indexed by head sym)
+                if let Some(indices) = self.rule_index.get(&head_sym).cloned() {
+                    for &rule_idx in &indices {
+                        let num_clauses = self.rules[rule_idx].clauses.len();
+                        for clause_idx in 0..num_clauses {
+                            let mut env = Env::new();
+                            if match_pattern(&mut self.store, &self.rules[rule_idx].clauses[clause_idx].lhs, term, &mut env, &self.pattern_ctx) {
+                                let num_guards = self.rules[rule_idx].clauses[clause_idx].guards.len();
+                                let mut guards_pass = true;
+                                for guard_idx in 0..num_guards {
+                                    let guard_term = substitute(&mut self.store, &self.rules[rule_idx].clauses[clause_idx].guards[guard_idx], &env);
+                                    let guard_result = self.eval(guard_term);
+                                    if let TermData::Sym(s) = self.store.get(guard_result) {
+                                        if s != self.builtins.true_sym {
+                                            guards_pass = false;
+                                            break;
+                                        }
+                                    } else {
+                                        guards_pass = false;
+                                        break;
+                                    }
+                                }
+                                if !guards_pass { continue; }
+                                return substitute(&mut self.store, &self.rules[rule_idx].clauses[clause_idx].rhs, &env);
+                            }
+                        }
+                    }
+                }
+
+                // 2. Try builtins: only if args are already values (numbers)
+                if args_len == 2 {
+                    let a = self.store.args_pool[args_start as usize];
+                    let b = self.store.args_pool[args_start as usize + 1];
+                    let a_num = match self.store.get(a) {
+                        TermData::Num(n) => Some((n as f64, true)),
+                        TermData::Float(bits) => Some((f64::from_bits(bits), false)),
+                        _ => None,
+                    };
+                    let b_num = match self.store.get(b) {
+                        TermData::Num(n) => Some((n as f64, true)),
+                        TermData::Float(bits) => Some((f64::from_bits(bits), false)),
+                        _ => None,
+                    };
+                    if let (Some((av, a_int)), Some((bv, b_int))) = (a_num, b_num) {
+                        let both_int = a_int && b_int;
+                        let arith_result = if head_sym == self.builtins.add { Some(av + bv) }
+                            else if head_sym == self.builtins.sub { Some(av - bv) }
+                            else if head_sym == self.builtins.mul { Some(av * bv) }
+                            else if head_sym == self.builtins.div { Some(av / bv) }
+                            else if head_sym == self.builtins.mod_sym {
+                                if both_int { Some((av as i64 % bv as i64) as f64) } else { Some(av.rem_euclid(bv)) }
+                            }
+                            else { None };
+                        if let Some(r) = arith_result {
+                            return if both_int { self.store.num(r as i64) } else { self.store.float(r) };
+                        }
+                    }
+                }
+            }
+        }
+        // No step possible — return unchanged
+        term
+    }
+
     fn eval_inner(&mut self, term: TermId) -> TermId {
         let td = self.store.get(term);
+
+        // 0. Try rewrite meta rules (@self) — fires BEFORE arg evaluation
+        if !self.rewrite_rules.is_empty() {
+            let num_rewrite = self.rewrite_rules.len();
+            for rule_idx in 0..num_rewrite {
+                let num_clauses = self.rewrite_rules[rule_idx].clauses.len();
+                for clause_idx in 0..num_clauses {
+                    let mut env = Env::new();
+                    if match_pattern(&mut self.store, &self.rewrite_rules[rule_idx].clauses[clause_idx].lhs, term, &mut env, &self.pattern_ctx) {
+                        let rhs = &self.rewrite_rules[rule_idx].clauses[clause_idx].rhs;
+                        let uses_markers = has_eval_step_markers(rhs);
+                        let result = substitute(&mut self.store, rhs, &env);
+                        // Resolve #eval/#step markers in the substituted RHS
+                        let resolved = self.resolve_eval_markers(result);
+                        // Prevent infinite loop: if resolved == original term, skip
+                        if resolved == term { break; }
+                        // Fire meta event (observable by other meta rules)
+                        if !self.in_meta {
+                            self.step_count += 1;
+                            if !self.meta_rules.is_empty() {
+                                let name = self.rewrite_rules[rule_idx].name.clone();
+                                let name_sym = self.store.sym(&name);
+                                let name_term = self.store.sym_term(name_sym);
+                                let clause_term = self.store.num(clause_idx as i64);
+                                let fn_head = self.store.sym_term(self.meta_syms.fn_sym);
+                                let kind = self.store.call(fn_head, &[name_term, clause_term]);
+                                self.fire_meta(term, resolved, kind);
+                            }
+                        }
+                        if uses_markers {
+                            // Markers control evaluation — re-check @self rules only
+                            let final_val = self.rewrite_loop(resolved);
+                            if !self.in_meta && !self.meta_rules.is_empty() {
+                                self.fire_result(term, final_val);
+                            }
+                            return final_val;
+                        } else {
+                            // No markers — backward compat: fully evaluate the result
+                            let final_val = self.eval(resolved);
+                            if !self.in_meta && !self.meta_rules.is_empty() {
+                                self.fire_result(term, final_val);
+                            }
+                            return final_val;
+                        }
+                    }
+                }
+            }
+        }
 
         // 1. Innermost: eval head and args of Call terms (with special forms)
         let term = if let TermData::Call { head, args_start, args_len } = td {
@@ -590,6 +788,52 @@ impl Engine {
                 if let TermData::Sym(s) = self.store.get(head) {
                     if s == self.builtins.seq {
                         return self.store.args_pool[args_start as usize + 1];
+                    }
+                }
+            }
+        }
+
+        // 2.5 Try rewrite meta rules again on post-eval term (backward compat)
+        if !self.rewrite_rules.is_empty() {
+            let num_rewrite = self.rewrite_rules.len();
+            for rule_idx in 0..num_rewrite {
+                let num_clauses = self.rewrite_rules[rule_idx].clauses.len();
+                for clause_idx in 0..num_clauses {
+                    let mut env = Env::new();
+                    if match_pattern(&mut self.store, &self.rewrite_rules[rule_idx].clauses[clause_idx].lhs, term, &mut env, &self.pattern_ctx) {
+                        let rhs = &self.rewrite_rules[rule_idx].clauses[clause_idx].rhs;
+                        let uses_markers = has_eval_step_markers(rhs);
+                        let result = substitute(&mut self.store, rhs, &env);
+                        // Resolve #eval/#step markers in the substituted RHS
+                        let resolved = self.resolve_eval_markers(result);
+                        // Prevent infinite loop: if resolved == original term, skip
+                        if resolved == term { break; }
+                        // Fire meta event
+                        if !self.in_meta {
+                            self.step_count += 1;
+                            if !self.meta_rules.is_empty() {
+                                let name = self.rewrite_rules[rule_idx].name.clone();
+                                let name_sym = self.store.sym(&name);
+                                let name_term = self.store.sym_term(name_sym);
+                                let clause_term = self.store.num(clause_idx as i64);
+                                let fn_head = self.store.sym_term(self.meta_syms.fn_sym);
+                                let kind = self.store.call(fn_head, &[name_term, clause_term]);
+                                self.fire_meta(term, resolved, kind);
+                            }
+                        }
+                        if uses_markers {
+                            let final_val = self.rewrite_loop(resolved);
+                            if !self.in_meta && !self.meta_rules.is_empty() {
+                                self.fire_result(term, final_val);
+                            }
+                            return final_val;
+                        } else {
+                            let final_val = self.eval(resolved);
+                            if !self.in_meta && !self.meta_rules.is_empty() {
+                                self.fire_result(term, final_val);
+                            }
+                            return final_val;
+                        }
                     }
                 }
             }
@@ -1665,6 +1909,8 @@ impl Engine {
             let target_scope = Some(self.ensure_scope(&scope_name, true));
             self.meta_rules.push(MetaRule { rule, target_scope });
         }
+        // Install rewrite rules (@meta -> @self)
+        self.rewrite_rules.extend(program.rewrite_rules);
         // Create output-only scopes for @scope annotations in expressions
         for scope_name in program.emit_scopes {
             self.ensure_scope(&scope_name, true);
@@ -1844,7 +2090,7 @@ mod tests {
     use crate::term::TermStore;
 
     fn new_engine() -> Engine {
-        Engine::new(TermStore::new(), Vec::new(), Vec::new())
+        Engine::new(TermStore::new(), Vec::new(), Vec::new(), Vec::new())
     }
 
     fn eval_program(src: &str) -> (Engine, TermId) {
@@ -4300,5 +4546,117 @@ rule tracer : @meta -> @rules {
         eprintln!("trace(0) = {}", engine.display(trace0));
         // trace(0) should be resolved to something (not just trace(0) back)
         assert_ne!(engine.display(trace0), "trace(0)", "trace(0) should have been captured");
+    }
+
+    // ── Rewrite meta rules (doodads) ──
+
+    #[test]
+    fn rewrite_trace_unary() {
+        // trace lifts through a unary function
+        assert_eq!(eval_str(
+            "rule lift : @meta -> @self {\n\
+             ?f(trace(?x)) => trace(?f(?x))\n}\n\
+             fn double(?n) = ?n * 2\n\
+             double(trace(5))"
+        ), "trace(10)");
+    }
+
+    #[test]
+    fn rewrite_trace_arithmetic() {
+        // trace lifts through binary builtins
+        assert_eq!(eval_str(
+            "rule lift : @meta -> @self {\n\
+             ?f(trace(?x), ?y) => trace(?f(?x, ?y))\n\
+             ?f(?x, trace(?y)) => trace(?f(?x, ?y))\n}\n\
+             trace(5) + 3"
+        ), "trace(8)");
+    }
+
+    #[test]
+    fn rewrite_trace_fact() {
+        // trace propagates through recursive factorial
+        assert_eq!(eval_str(
+            "rule lift : @meta -> @self {\n\
+             ?f(trace(?x)) => trace(?f(?x))\n\
+             ?f(trace(?x), ?y) => trace(?f(?x, ?y))\n\
+             ?f(?x, trace(?y)) => trace(?f(?x, ?y))\n}\n\
+             fn fact(0) = 1\n\
+             fn fact(?n) = ?n * fact(?n - 1)\n\
+             fact(trace(5))"
+        ), "trace(120)");
+    }
+
+    #[test]
+    fn rewrite_no_trace_unaffected() {
+        // Without trace wrapper, normal evaluation proceeds
+        assert_eq!(eval_num(
+            "rule lift : @meta -> @self {\n\
+             ?f(trace(?x)) => trace(?f(?x))\n}\n\
+             fn fact(0) = 1\n\
+             fn fact(?n) = ?n * fact(?n - 1)\n\
+             fact(5)"
+        ), 120);
+    }
+
+    #[test]
+    fn rewrite_trace_continuation() {
+        // Result of traced computation stays traced through further ops
+        assert_eq!(eval_str(
+            "rule lift : @meta -> @self {\n\
+             ?f(trace(?x)) => trace(?f(?x))\n\
+             ?f(trace(?x), ?y) => trace(?f(?x, ?y))\n\
+             ?f(?x, trace(?y)) => trace(?f(?x, ?y))\n}\n\
+             fn double(?n) = ?n * 2\n\
+             double(trace(5)) + 1"
+        ), "trace(11)");
+    }
+
+    // ── #eval / #step marker tests ──
+
+    #[test]
+    fn eval_marker_basic() {
+        // #eval forces evaluation of a subexpression
+        assert_eq!(eval_str(
+            "rule wrap : @meta -> @self {\n\
+             wrap(?x) => wrapped(#eval(?x))\n}\n\
+             fn double(?n) = ?n * 2\n\
+             wrap(double(5))"
+        ), "wrapped(10)");
+    }
+
+    #[test]
+    fn eval_marker_lazy_branch() {
+        // Lazy if — only evaluates the taken branch
+        assert_eq!(eval_num(
+            "rule lazy_if : @meta -> @self {\n\
+             lazy_if(?cond, ?then, ?else) => branch(#eval(?cond), ?then, ?else)\n}\n\
+             rule lazy_branch : @meta -> @self {\n\
+             branch(true, ?then, ?else) => #eval(?then)\n\
+             branch(false, ?then, ?else) => #eval(?else)\n}\n\
+             fn double(?n) = ?n * 2\n\
+             lazy_if(true, double(5), double(100))"
+        ), 10);
+    }
+
+    #[test]
+    fn step_marker_one_reduction() {
+        // #step applies one reduction step without recursing
+        assert_eq!(eval_str(
+            "rule stepper : @meta -> @self {\n\
+             step_once(?x) => stepped(#step(?x))\n}\n\
+             fn double(?n) = ?n * 2\n\
+             step_once(double(5))"
+        ), "stepped(mul(5, 2))");
+    }
+
+    #[test]
+    fn no_markers_backward_compat() {
+        // Without markers, @self rules still fully evaluate (backward compat)
+        assert_eq!(eval_str(
+            "rule lift : @meta -> @self {\n\
+             ?f(trace(?x)) => trace(?f(?x))\n}\n\
+             fn double(?n) = ?n * 2\n\
+             double(trace(5))"
+        ), "trace(10)");
     }
 }

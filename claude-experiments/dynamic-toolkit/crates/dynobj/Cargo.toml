@@ -1,0 +1,11 @@
+[package]
+name = "dynobj"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+dynvalue = { path = "../dynvalue" }
+paste = "1.0"
+
+[dev-dependencies]
+dynalloc = { path = "../dynalloc" }

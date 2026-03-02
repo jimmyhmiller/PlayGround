@@ -20,7 +20,7 @@ fn main() {
 
     let term = pattern_to_term(&mut store, &program.expr);
 
-    let mut engine = Engine::new(store, program.rules, program.meta_rules);
+    let mut engine = Engine::new(store, program.rules, program.meta_rules, program.rewrite_rules);
 
     let start = Instant::now();
     let result = engine.eval(term);

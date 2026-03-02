@@ -42,7 +42,7 @@ thread_local! {
 pub extern "C" fn engine_new() {
     ENGINE.with(|e| {
         let store = TermStore::new();
-        let engine = Engine::new(store, Vec::new(), Vec::new());
+        let engine = Engine::new(store, Vec::new(), Vec::new(), Vec::new());
         *e.borrow_mut() = Some(engine);
     });
 }

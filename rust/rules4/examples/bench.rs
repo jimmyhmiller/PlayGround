@@ -134,7 +134,7 @@ fn fresh_engine() -> Engine {
     let tokens = Lexer::new(TODOMVC_PRELUDE).tokenize();
     let program = Parser::new(tokens, &mut store).parse_program();
     let term = pattern_to_term(&mut store, &program.expr);
-    let mut engine = Engine::new(store, program.rules, program.meta_rules);
+    let mut engine = Engine::new(store, program.rules, program.meta_rules, program.rewrite_rules);
     engine.eval(term);
     engine
 }
@@ -285,7 +285,7 @@ fn main() {
         let tokens = Lexer::new(src).tokenize();
         let program = Parser::new(tokens, &mut store).parse_program();
         let term = pattern_to_term(&mut store, &program.expr);
-        let mut engine = Engine::new(store, program.rules, program.meta_rules);
+        let mut engine = Engine::new(store, program.rules, program.meta_rules, program.rewrite_rules);
         engine.eval(term);
         let fact_sym = engine.make_sym("fact");
         let ten = engine.make_num(10);

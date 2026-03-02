@@ -1,0 +1,4067 @@
+import jrust.JRustAsm;
+
+// ============================================================
+// JRust Self-Hosting Compiler
+// A JRust compiler written in JRust, targeting JVM via ASM.
+// ============================================================
+
+// --- ASM Opcode Constants ---
+const V21: i32 = 65;
+const ACC_PUBLIC: i32 = 1;
+const ACC_STATIC: i32 = 8;
+const ACC_SUPER: i32 = 32;
+const ACC_FINAL: i32 = 16;
+const ACC_ABSTRACT: i32 = 1024;
+
+const ALOAD: i32 = 25;
+const ASTORE: i32 = 58;
+const ILOAD: i32 = 21;
+const ISTORE: i32 = 54;
+const LLOAD: i32 = 22;
+const LSTORE: i32 = 55;
+const DLOAD: i32 = 24;
+const DSTORE: i32 = 57;
+
+const ICONST_0: i32 = 3;
+const ICONST_1: i32 = 4;
+const ACONST_NULL: i32 = 1;
+const BIPUSH: i32 = 16;
+const SIPUSH: i32 = 17;
+const LDC: i32 = 18;
+
+const IADD: i32 = 96;
+const ISUB: i32 = 100;
+const IMUL: i32 = 104;
+const IDIV: i32 = 108;
+const IREM: i32 = 112;
+const INEG: i32 = 116;
+const IOR: i32 = 128;
+const IAND: i32 = 126;
+const IXOR: i32 = 130;
+const LADD: i32 = 97;
+const LSUB: i32 = 101;
+const LMUL: i32 = 105;
+const LDIV: i32 = 109;
+const LCMP: i32 = 148;
+const DADD: i32 = 99;
+const DSUB: i32 = 103;
+const DMUL: i32 = 107;
+const DDIV: i32 = 111;
+const DCMPL: i32 = 151;
+const DNEG: i32 = 119;
+
+const I2L: i32 = 133;
+const I2D: i32 = 135;
+const L2I: i32 = 136;
+const D2I: i32 = 142;
+
+const POP: i32 = 87;
+const POP2: i32 = 88;
+const DUP: i32 = 89;
+const SWAP: i32 = 95;
+
+const IFEQ: i32 = 153;
+const IFNE: i32 = 154;
+const IFLT: i32 = 155;
+const IFGE: i32 = 156;
+const IFGT: i32 = 157;
+const IFLE: i32 = 158;
+const IF_ICMPEQ: i32 = 159;
+const IF_ICMPNE: i32 = 160;
+const IF_ICMPLT: i32 = 161;
+const IF_ICMPGE: i32 = 162;
+const IF_ICMPGT: i32 = 163;
+const IF_ICMPLE: i32 = 164;
+const IFNULL: i32 = 198;
+const IFNONNULL: i32 = 199;
+const GOTO: i32 = 167;
+
+const IRETURN: i32 = 172;
+const LRETURN: i32 = 173;
+const DRETURN: i32 = 175;
+const ARETURN: i32 = 176;
+const RETURN_OP: i32 = 177;
+
+const GETSTATIC: i32 = 178;
+const PUTSTATIC: i32 = 179;
+const GETFIELD: i32 = 180;
+const PUTFIELD: i32 = 181;
+const INVOKEVIRTUAL: i32 = 182;
+const INVOKESPECIAL: i32 = 183;
+const INVOKESTATIC: i32 = 184;
+const INVOKEINTERFACE: i32 = 185;
+
+const NEW: i32 = 187;
+const NEWARRAY: i32 = 188;
+const ANEWARRAY: i32 = 189;
+const ATHROW: i32 = 191;
+const CHECKCAST: i32 = 192;
+const INSTANCEOF: i32 = 193;
+
+const T_INT: i32 = 10;
+
+// --- Token Kind ---
+enum TK {
+    // Keywords
+    Fn, Struct, Impl, Let, Mut, SelfKw, Import, Return,
+    True, False, If, Else, While, For, In, Match, Enum, Const, Null,
+    Break, Continue,
+    // Identifiers and literals
+    Ident { text: String },
+    IntLit { value: String },
+    FloatLit { value: String },
+    StrLit { value: String },
+    CharLit { value: String },
+    // Operators
+    Plus, Minus, Star, Slash, Eq, EqEq, BangEq,
+    Lt, Gt, LtEq, GtEq, Dot, DotDot, ColonColon, Arrow, FatArrow,
+    Amp, AmpAmp, Pipe, PipePipe, Bang, Percent,
+    // Delimiters
+    LParen, RParen, LBrace, RBrace, LBracket, RBracket,
+    Comma, Colon, Semi, Underscore,
+    // Special
+    Eof,
+}
+
+// --- Token ---
+struct Token {
+    kind: TK,
+    line: i32,
+    col: i32,
+}
+
+// --- Lexer ---
+struct Lexer {
+    source: String,
+    pos: i32,
+    line: i32,
+    col: i32,
+}
+
+impl Lexer {
+    fn new(source: String) -> Lexer {
+        let l = Lexer { source: source, pos: 0, line: 1, col: 1 };
+        return l;
+    }
+
+    fn at_end(self) -> bool {
+        return self.pos >= self.source.len();
+    }
+
+    fn peek_char(self) -> char {
+        return self.source.char_at(self.pos);
+    }
+
+    fn advance_char(mut self) -> char {
+        let c: char = self.source.char_at(self.pos);
+        self.pos = self.pos + 1;
+        self.col = self.col + 1;
+        return c;
+    }
+
+    fn match_char(mut self, expected: char) -> bool {
+        if self.at_end() {
+            return false;
+        }
+        if self.source.char_at(self.pos) == expected {
+            self.pos = self.pos + 1;
+            self.col = self.col + 1;
+            return true;
+        }
+        return false;
+    }
+
+    fn skip_whitespace(mut self) {
+        while !self.at_end() {
+            let c: char = self.peek_char();
+            if c == ' ' {
+                self.advance_char();
+            } else if c == '\t' {
+                self.advance_char();
+            } else if c == '\r' {
+                self.advance_char();
+            } else if c == '\n' {
+                self.advance_char();
+                self.line = self.line + 1;
+                self.col = 1;
+            } else if c == '/' {
+                if self.pos + 1 < self.source.len() {
+                    if self.source.char_at(self.pos + 1) == '/' {
+                        // line comment
+                        while !self.at_end() {
+                            if self.peek_char() == '\n' {
+                                break;
+                            }
+                            self.advance_char();
+                        }
+                    } else {
+                        return;
+                    }
+                } else {
+                    return;
+                }
+            } else {
+                return;
+            }
+        }
+    }
+
+    fn tokenize(mut self) -> Vec<Token> {
+        let mut tokens: Vec<Token> = Vec::new();
+        while !self.at_end() {
+            self.skip_whitespace();
+            if self.at_end() {
+                break;
+            }
+            let tok: Token = self.next_token();
+            tokens.push(tok);
+        }
+        let eof: Token = Token { kind: TK::Eof, line: self.line, col: self.col };
+        tokens.push(eof);
+        return tokens;
+    }
+
+    fn next_token(mut self) -> Token {
+        let start_line: i32 = self.line;
+        let start_col: i32 = self.col;
+        let c: char = self.advance_char();
+
+        if c == '(' {
+            return Token { kind: TK::LParen, line: start_line, col: start_col };
+        }
+        if c == ')' {
+            return Token { kind: TK::RParen, line: start_line, col: start_col };
+        }
+        if c == '{' {
+            return Token { kind: TK::LBrace, line: start_line, col: start_col };
+        }
+        if c == '}' {
+            return Token { kind: TK::RBrace, line: start_line, col: start_col };
+        }
+        if c == '[' {
+            return Token { kind: TK::LBracket, line: start_line, col: start_col };
+        }
+        if c == ']' {
+            return Token { kind: TK::RBracket, line: start_line, col: start_col };
+        }
+        if c == ',' {
+            return Token { kind: TK::Comma, line: start_line, col: start_col };
+        }
+        if c == ';' {
+            return Token { kind: TK::Semi, line: start_line, col: start_col };
+        }
+        if c == '+' {
+            return Token { kind: TK::Plus, line: start_line, col: start_col };
+        }
+        if c == '*' {
+            return Token { kind: TK::Star, line: start_line, col: start_col };
+        }
+        if c == '%' {
+            return Token { kind: TK::Percent, line: start_line, col: start_col };
+        }
+        if c == '/' {
+            return Token { kind: TK::Slash, line: start_line, col: start_col };
+        }
+
+        if c == '-' {
+            if self.match_char('>') {
+                return Token { kind: TK::Arrow, line: start_line, col: start_col };
+            }
+            return Token { kind: TK::Minus, line: start_line, col: start_col };
+        }
+        if c == '=' {
+            if self.match_char('=') {
+                return Token { kind: TK::EqEq, line: start_line, col: start_col };
+            }
+            if self.match_char('>') {
+                return Token { kind: TK::FatArrow, line: start_line, col: start_col };
+            }
+            return Token { kind: TK::Eq, line: start_line, col: start_col };
+        }
+        if c == '!' {
+            if self.match_char('=') {
+                return Token { kind: TK::BangEq, line: start_line, col: start_col };
+            }
+            return Token { kind: TK::Bang, line: start_line, col: start_col };
+        }
+        if c == '<' {
+            if self.match_char('=') {
+                return Token { kind: TK::LtEq, line: start_line, col: start_col };
+            }
+            return Token { kind: TK::Lt, line: start_line, col: start_col };
+        }
+        if c == '>' {
+            if self.match_char('=') {
+                return Token { kind: TK::GtEq, line: start_line, col: start_col };
+            }
+            return Token { kind: TK::Gt, line: start_line, col: start_col };
+        }
+        if c == ':' {
+            if self.match_char(':') {
+                return Token { kind: TK::ColonColon, line: start_line, col: start_col };
+            }
+            return Token { kind: TK::Colon, line: start_line, col: start_col };
+        }
+        if c == '.' {
+            if self.match_char('.') {
+                return Token { kind: TK::DotDot, line: start_line, col: start_col };
+            }
+            return Token { kind: TK::Dot, line: start_line, col: start_col };
+        }
+        if c == '&' {
+            if self.match_char('&') {
+                return Token { kind: TK::AmpAmp, line: start_line, col: start_col };
+            }
+            return Token { kind: TK::Amp, line: start_line, col: start_col };
+        }
+        if c == '|' {
+            if self.match_char('|') {
+                return Token { kind: TK::PipePipe, line: start_line, col: start_col };
+            }
+            return Token { kind: TK::Pipe, line: start_line, col: start_col };
+        }
+
+        // String literal
+        if c == '"' {
+            return self.lex_string(start_line, start_col);
+        }
+
+        // Char literal
+        if c == '\'' {
+            return self.lex_char(start_line, start_col);
+        }
+
+        // Number
+        if c >= '0' {
+            if c <= '9' {
+                return self.lex_number(c, start_line, start_col);
+            }
+        }
+
+        // Underscore (standalone)
+        if c == '_' {
+            if self.at_end() {
+                return Token { kind: TK::Underscore, line: start_line, col: start_col };
+            }
+            let next: char = self.peek_char();
+            if next >= 'a' {
+                if next <= 'z' {
+                    return self.lex_ident(c, start_line, start_col);
+                }
+            }
+            if next >= 'A' {
+                if next <= 'Z' {
+                    return self.lex_ident(c, start_line, start_col);
+                }
+            }
+            if next >= '0' {
+                if next <= '9' {
+                    return self.lex_ident(c, start_line, start_col);
+                }
+            }
+            if next == '_' {
+                return self.lex_ident(c, start_line, start_col);
+            }
+            return Token { kind: TK::Underscore, line: start_line, col: start_col };
+        }
+
+        // Identifier or keyword
+        if c >= 'a' {
+            if c <= 'z' {
+                return self.lex_ident(c, start_line, start_col);
+            }
+        }
+        if c >= 'A' {
+            if c <= 'Z' {
+                return self.lex_ident(c, start_line, start_col);
+            }
+        }
+
+        panic("Unexpected character at " + start_line + ":" + start_col);
+        return Token { kind: TK::Eof, line: start_line, col: start_col };
+    }
+
+    fn lex_string(mut self, start_line: i32, start_col: i32) -> Token {
+        let mut sb: StringBuilder = StringBuilder::new();
+        while !self.at_end() {
+            let c: char = self.peek_char();
+            if c == '"' {
+                self.advance_char();
+                return Token { kind: TK::StrLit { value: sb.to_string() }, line: start_line, col: start_col };
+            }
+            if c == '\\' {
+                self.advance_char();
+                let esc: char = self.advance_char();
+                if esc == 'n' {
+                    sb.append("\n");
+                } else if esc == 't' {
+                    sb.append("\t");
+                } else if esc == 'r' {
+                    sb.append("\r");
+                } else if esc == '\\' {
+                    sb.append("\\");
+                } else if esc == '"' {
+                    sb.append("\"");
+                } else if esc == '\'' {
+                    sb.append("'");
+                } else if esc == '0' {
+                    sb.append("\0");
+                } else {
+                    panic("Unknown escape");
+                }
+            } else {
+                if c == '\n' {
+                    self.line = self.line + 1;
+                    self.col = 0;
+                }
+                self.advance_char();
+                let mut s: StringBuilder = StringBuilder::new();
+                s.append(c);
+                sb.append(s.to_string());
+            }
+        }
+        panic("Unterminated string");
+        return Token { kind: TK::Eof, line: start_line, col: start_col };
+    }
+
+    fn lex_char(mut self, start_line: i32, start_col: i32) -> Token {
+        let mut val: String = "";
+        let c: char = self.advance_char();
+        if c == '\\' {
+            let esc: char = self.advance_char();
+            if esc == 'n' {
+                val = "\n";
+            } else if esc == 't' {
+                val = "\t";
+            } else if esc == 'r' {
+                val = "\r";
+            } else if esc == '\\' {
+                val = "\\";
+            } else if esc == '\'' {
+                val = "'";
+            } else if esc == '0' {
+                val = "\0";
+            } else {
+                panic("Unknown char escape");
+            }
+        } else {
+            let mut s: StringBuilder = StringBuilder::new();
+            s.append(c);
+            val = s.to_string();
+        }
+        self.advance_char(); // closing '
+        return Token { kind: TK::CharLit { value: val }, line: start_line, col: start_col };
+    }
+
+    fn lex_number(mut self, first: char, start_line: i32, start_col: i32) -> Token {
+        let mut sb: StringBuilder = StringBuilder::new();
+        let mut fc_sb: StringBuilder = StringBuilder::new();
+        fc_sb.append(first);
+        sb.append(fc_sb.to_string());
+        let mut is_float: bool = false;
+        while !self.at_end() {
+            let c: char = self.peek_char();
+            if c >= '0' {
+                if c <= '9' {
+                    self.advance_char();
+                    let mut cs: StringBuilder = StringBuilder::new();
+                    cs.append(c);
+                    sb.append(cs.to_string());
+                } else {
+                    if c == '.' {
+                        if !is_float {
+                            if self.pos + 1 < self.source.len() {
+                                let next: char = self.source.char_at(self.pos + 1);
+                                if next >= '0' {
+                                    if next <= '9' {
+                                        is_float = true;
+                                        self.advance_char();
+                                        sb.append(".");
+                                    } else {
+                                        break;
+                                    }
+                                } else {
+                                    break;
+                                }
+                            } else {
+                                break;
+                            }
+                        } else {
+                            break;
+                        }
+                    } else {
+                        break;
+                    }
+                }
+            } else {
+                if c == '.' {
+                    if !is_float {
+                        if self.pos + 1 < self.source.len() {
+                            let next: char = self.source.char_at(self.pos + 1);
+                            if next >= '0' {
+                                if next <= '9' {
+                                    is_float = true;
+                                    self.advance_char();
+                                    sb.append(".");
+                                } else {
+                                    break;
+                                }
+                            } else {
+                                break;
+                            }
+                        } else {
+                            break;
+                        }
+                    } else {
+                        break;
+                    }
+                } else {
+                    break;
+                }
+            }
+        }
+        let text: String = sb.to_string();
+        if is_float {
+            return Token { kind: TK::FloatLit { value: text }, line: start_line, col: start_col };
+        }
+        return Token { kind: TK::IntLit { value: text }, line: start_line, col: start_col };
+    }
+
+    fn is_alnum(self, c: char) -> bool {
+        if c >= 'a' {
+            if c <= 'z' {
+                return true;
+            }
+        }
+        if c >= 'A' {
+            if c <= 'Z' {
+                return true;
+            }
+        }
+        if c >= '0' {
+            if c <= '9' {
+                return true;
+            }
+        }
+        if c == '_' {
+            return true;
+        }
+        return false;
+    }
+
+    fn lex_ident(mut self, first: char, start_line: i32, start_col: i32) -> Token {
+        let mut sb: StringBuilder = StringBuilder::new();
+        let mut fc_sb: StringBuilder = StringBuilder::new();
+        fc_sb.append(first);
+        sb.append(fc_sb.to_string());
+        while !self.at_end() {
+            let c: char = self.peek_char();
+            if self.is_alnum(c) {
+                self.advance_char();
+                let mut cs: StringBuilder = StringBuilder::new();
+                cs.append(c);
+                sb.append(cs.to_string());
+            } else {
+                break;
+            }
+        }
+        let word: String = sb.to_string();
+        if word == "fn" {
+            return Token { kind: TK::Fn, line: start_line, col: start_col };
+        }
+        if word == "struct" {
+            return Token { kind: TK::Struct, line: start_line, col: start_col };
+        }
+        if word == "impl" {
+            return Token { kind: TK::Impl, line: start_line, col: start_col };
+        }
+        if word == "let" {
+            return Token { kind: TK::Let, line: start_line, col: start_col };
+        }
+        if word == "mut" {
+            return Token { kind: TK::Mut, line: start_line, col: start_col };
+        }
+        if word == "self" {
+            return Token { kind: TK::SelfKw, line: start_line, col: start_col };
+        }
+        if word == "import" {
+            return Token { kind: TK::Import, line: start_line, col: start_col };
+        }
+        if word == "return" {
+            return Token { kind: TK::Return, line: start_line, col: start_col };
+        }
+        if word == "true" {
+            return Token { kind: TK::True, line: start_line, col: start_col };
+        }
+        if word == "false" {
+            return Token { kind: TK::False, line: start_line, col: start_col };
+        }
+        if word == "if" {
+            return Token { kind: TK::If, line: start_line, col: start_col };
+        }
+        if word == "else" {
+            return Token { kind: TK::Else, line: start_line, col: start_col };
+        }
+        if word == "while" {
+            return Token { kind: TK::While, line: start_line, col: start_col };
+        }
+        if word == "for" {
+            return Token { kind: TK::For, line: start_line, col: start_col };
+        }
+        if word == "in" {
+            return Token { kind: TK::In, line: start_line, col: start_col };
+        }
+        if word == "match" {
+            return Token { kind: TK::Match, line: start_line, col: start_col };
+        }
+        if word == "enum" {
+            return Token { kind: TK::Enum, line: start_line, col: start_col };
+        }
+        if word == "const" {
+            return Token { kind: TK::Const, line: start_line, col: start_col };
+        }
+        if word == "null" {
+            return Token { kind: TK::Null, line: start_line, col: start_col };
+        }
+        if word == "break" {
+            return Token { kind: TK::Break, line: start_line, col: start_col };
+        }
+        if word == "continue" {
+            return Token { kind: TK::Continue, line: start_line, col: start_col };
+        }
+        return Token { kind: TK::Ident { text: word }, line: start_line, col: start_col };
+    }
+}
+
+// --- Helper: get ident text from token ---
+fn tok_text(t: Token) -> String {
+    match t.kind {
+        TK::Ident { text } => {
+            return text;
+        }
+        TK::StrLit { value } => {
+            return value;
+        }
+        TK::IntLit { value } => {
+            return value;
+        }
+        TK::FloatLit { value } => {
+            return value;
+        }
+        TK::CharLit { value } => {
+            return value;
+        }
+        _ => {
+            return "";
+        }
+    }
+    return "";
+}
+
+fn tok_is(t: Token, kind_name: String) -> bool {
+    match t.kind {
+        TK::Fn => { return kind_name == "fn"; }
+        TK::Struct => { return kind_name == "struct"; }
+        TK::Impl => { return kind_name == "impl"; }
+        TK::Let => { return kind_name == "let"; }
+        TK::Mut => { return kind_name == "mut"; }
+        TK::SelfKw => { return kind_name == "self"; }
+        TK::Import => { return kind_name == "import"; }
+        TK::Return => { return kind_name == "return"; }
+        TK::True => { return kind_name == "true"; }
+        TK::False => { return kind_name == "false"; }
+        TK::If => { return kind_name == "if"; }
+        TK::Else => { return kind_name == "else"; }
+        TK::While => { return kind_name == "while"; }
+        TK::For => { return kind_name == "for"; }
+        TK::In => { return kind_name == "in"; }
+        TK::Match => { return kind_name == "match"; }
+        TK::Enum => { return kind_name == "enum"; }
+        TK::Const => { return kind_name == "const"; }
+        TK::Null => { return kind_name == "null"; }
+        TK::Break => { return kind_name == "break"; }
+        TK::Continue => { return kind_name == "continue"; }
+        TK::Ident { text } => { return kind_name == "ident"; }
+        TK::IntLit { value } => { return kind_name == "int"; }
+        TK::FloatLit { value } => { return kind_name == "float"; }
+        TK::StrLit { value } => { return kind_name == "str"; }
+        TK::CharLit { value } => { return kind_name == "char"; }
+        TK::Plus => { return kind_name == "+"; }
+        TK::Minus => { return kind_name == "-"; }
+        TK::Star => { return kind_name == "*"; }
+        TK::Slash => { return kind_name == "/"; }
+        TK::Eq => { return kind_name == "="; }
+        TK::EqEq => { return kind_name == "=="; }
+        TK::BangEq => { return kind_name == "!="; }
+        TK::Lt => { return kind_name == "<"; }
+        TK::Gt => { return kind_name == ">"; }
+        TK::LtEq => { return kind_name == "<="; }
+        TK::GtEq => { return kind_name == ">="; }
+        TK::Dot => { return kind_name == "."; }
+        TK::DotDot => { return kind_name == ".."; }
+        TK::ColonColon => { return kind_name == "::"; }
+        TK::Arrow => { return kind_name == "->"; }
+        TK::FatArrow => { return kind_name == "=>"; }
+        TK::Amp => { return kind_name == "&"; }
+        TK::AmpAmp => { return kind_name == "&&"; }
+        TK::Pipe => { return kind_name == "|"; }
+        TK::PipePipe => { return kind_name == "||"; }
+        TK::Bang => { return kind_name == "!"; }
+        TK::Percent => { return kind_name == "%"; }
+        TK::LParen => { return kind_name == "("; }
+        TK::RParen => { return kind_name == ")"; }
+        TK::LBrace => { return kind_name == "{"; }
+        TK::RBrace => { return kind_name == "}"; }
+        TK::LBracket => { return kind_name == "["; }
+        TK::RBracket => { return kind_name == "]"; }
+        TK::Comma => { return kind_name == ","; }
+        TK::Colon => { return kind_name == ":"; }
+        TK::Semi => { return kind_name == ";"; }
+        TK::Underscore => { return kind_name == "_"; }
+        TK::Eof => { return kind_name == "eof"; }
+    }
+    return false;
+}
+
+// --- Helper: get operator text from token ---
+fn tok_op_text(t: Token) -> String {
+    match t.kind {
+        TK::EqEq => { return "=="; }
+        TK::BangEq => { return "!="; }
+        TK::Lt => { return "<"; }
+        TK::Gt => { return ">"; }
+        TK::LtEq => { return "<="; }
+        TK::GtEq => { return ">="; }
+        TK::Plus => { return "+"; }
+        TK::Minus => { return "-"; }
+        TK::Star => { return "*"; }
+        TK::Slash => { return "/"; }
+        TK::Percent => { return "%"; }
+        TK::PipePipe => { return "||"; }
+        TK::AmpAmp => { return "&&"; }
+        TK::Pipe => { return "|"; }
+        TK::Bang => { return "!"; }
+        _ => { return "?"; }
+    }
+    return "?";
+}
+
+fn tok_describe(t: Token) -> String {
+    match t.kind {
+        TK::Ident { text } => { return "IDENT(" + text + ")"; }
+        TK::IntLit { value } => { return "INT(" + value + ")"; }
+        TK::FloatLit { value } => { return "FLOAT(" + value + ")"; }
+        TK::StrLit { value } => { return "STR(...)"; }
+        TK::CharLit { value } => { return "CHAR(...)"; }
+        TK::Fn => { return "FN"; }
+        TK::Struct => { return "STRUCT"; }
+        TK::Impl => { return "IMPL"; }
+        TK::Let => { return "LET"; }
+        TK::Mut => { return "MUT"; }
+        TK::SelfKw => { return "SELF"; }
+        TK::Import => { return "IMPORT"; }
+        TK::Return => { return "RETURN"; }
+        TK::True => { return "TRUE"; }
+        TK::False => { return "FALSE"; }
+        TK::If => { return "IF"; }
+        TK::Else => { return "ELSE"; }
+        TK::While => { return "WHILE"; }
+        TK::For => { return "FOR"; }
+        TK::In => { return "IN"; }
+        TK::Match => { return "MATCH"; }
+        TK::Enum => { return "ENUM"; }
+        TK::Const => { return "CONST"; }
+        TK::Null => { return "NULL"; }
+        TK::Break => { return "BREAK"; }
+        TK::Continue => { return "CONTINUE"; }
+        TK::Plus => { return "+"; }
+        TK::Minus => { return "-"; }
+        TK::Star => { return "*"; }
+        TK::Eq => { return "="; }
+        TK::EqEq => { return "=="; }
+        TK::Arrow => { return "->"; }
+        TK::FatArrow => { return "=>"; }
+        TK::LParen => { return "("; }
+        TK::RParen => { return ")"; }
+        TK::LBrace => { return "{"; }
+        TK::RBrace => { return "}"; }
+        TK::Comma => { return ","; }
+        TK::Colon => { return ":"; }
+        TK::Semi => { return ";"; }
+        TK::ColonColon => { return "::"; }
+        TK::Dot => { return "."; }
+        TK::Eof => { return "EOF"; }
+        _ => { return "?"; }
+    }
+    return "?";
+}
+
+// ============================================================
+// AST Types
+// ============================================================
+
+enum Ty {
+    SimpleTy { name: String },
+    GenericTy { name: String, args: Vec<Ty> },
+    ArrayTy { element: Ty },
+    VoidTy,
+}
+
+enum Expr {
+    IntLitE { value: String },
+    FloatLitE { value: String },
+    StringLitE { value: String },
+    BoolLitE { value: bool },
+    CharLitE { value: String },
+    NullLitE,
+    IdentE { name: String },
+    SelfExprE,
+    BinaryE { left: Expr, op: String, right: Expr },
+    UnaryE { op: String, operand: Expr },
+    CallE { name: String, args: Vec<Expr> },
+    MethodCallE { receiver: Expr, method_name: String, args: Vec<Expr> },
+    FieldAccessE { receiver: Expr, field: String },
+    StructInitE { name: String, fields: Vec<FieldValue> },
+    StaticCallE { type_name: String, method_name: String, args: Vec<Expr> },
+    AssignE { target: Expr, value: Expr },
+    IfE { condition: Expr, then_block: Vec<Stmt>, else_block: Vec<Stmt> },
+    WhileE { condition: Expr, body: Vec<Stmt> },
+    BlockE { stmts: Vec<Stmt> },
+    ForRangeE { var_name: String, start: Expr, end: Expr, body: Vec<Stmt> },
+    ForEachE { var_name: String, iterable: Expr, body: Vec<Stmt> },
+    MatchE { subject: Expr, arms: Vec<MatchArm> },
+    IndexE { receiver: Expr, index: Expr },
+    EnumInitE { enum_name: String, variant: String, fields: Vec<FieldValue> },
+    ThrowE { message: Expr },
+    ArrayLitE { elements: Vec<Expr> },
+    CastE { value: Expr, cast_type: Ty },
+}
+
+struct FieldValue {
+    name: String,
+    value: Expr,
+}
+
+struct MatchArm {
+    pattern: Pattern,
+    body: Vec<Stmt>,
+}
+
+enum Stmt {
+    LetS { name: String, mutable: bool, ty: Ty, init: Expr },
+    ReturnS { value: Expr },
+    BreakS,
+    ContinueS,
+    ExprStmtS { expr: Expr },
+}
+
+enum Pattern {
+    WildcardP,
+    LiteralP { expr: Expr },
+    EnumVariantP { enum_name: String, variant: String, bindings: Vec<String> },
+}
+
+struct Param {
+    name: String,
+    ty: Ty,
+    mutable: bool,
+    is_self: bool,
+}
+
+struct Field {
+    name: String,
+    ty: Ty,
+}
+
+struct EnumVariant {
+    name: String,
+    fields: Vec<Field>,
+}
+
+enum Item {
+    FnDefI { name: String, params: Vec<Param>, return_type: Ty, body: Vec<Stmt> },
+    StructDefI { name: String, fields: Vec<Field> },
+    ImplDefI { type_name: String, methods: Vec<Item> },
+    ImportI { path: String },
+    EnumDefI { name: String, variants: Vec<EnumVariant> },
+    ConstDefI { name: String, ty: Ty, value: Expr },
+}
+
+struct Program {
+    items: Vec<Item>,
+}
+
+// ============================================================
+// Parser
+// ============================================================
+
+struct Parser {
+    tokens: Vec<Token>,
+    pos: i32,
+}
+
+impl Parser {
+    fn new(tokens: Vec<Token>) -> Parser {
+        let p = Parser { tokens: tokens, pos: 0 };
+        return p;
+    }
+
+    fn at_end(self) -> bool {
+        let t: Token = self.tokens.get(self.pos);
+        return tok_is(t, "eof");
+    }
+
+    fn current(self) -> Token {
+        return self.tokens.get(self.pos);
+    }
+
+    fn peek_kind(self, offset: i32) -> Token {
+        let idx: i32 = self.pos + offset;
+        if idx < self.tokens.len() {
+            return self.tokens.get(idx);
+        }
+        return self.tokens.get(self.tokens.len() - 1);
+    }
+
+    fn check(self, kind_name: String) -> bool {
+        let t: Token = self.current();
+        return tok_is(t, kind_name);
+    }
+
+    fn match_token(mut self, kind_name: String) -> bool {
+        if self.check(kind_name) {
+            self.pos = self.pos + 1;
+            return true;
+        }
+        return false;
+    }
+
+    fn advance(mut self) -> Token {
+        let t: Token = self.current();
+        self.pos = self.pos + 1;
+        return t;
+    }
+
+    fn expect(mut self, kind_name: String) -> Token {
+        if !self.check(kind_name) {
+            let t: Token = self.current();
+            panic("Parse error at " + t.line + ":" + t.col + ": Expected " + kind_name + ", got " + tok_describe(t));
+        }
+        return self.advance();
+    }
+
+    // --- Top-level ---
+
+    fn parse(mut self) -> Program {
+        let mut items: Vec<Item> = Vec::new();
+        while !self.at_end() {
+            let item: Item = self.parse_item();
+            items.push(item);
+        }
+        let prog = Program { items: items };
+        return prog;
+    }
+
+    fn parse_item(mut self) -> Item {
+        if self.check("fn") {
+            return self.parse_fn_def();
+        }
+        if self.check("struct") {
+            return self.parse_struct_def();
+        }
+        if self.check("impl") {
+            return self.parse_impl_def();
+        }
+        if self.check("import") {
+            return self.parse_import();
+        }
+        if self.check("enum") {
+            return self.parse_enum_def();
+        }
+        if self.check("const") {
+            return self.parse_const_def();
+        }
+        let t: Token = self.current();
+        panic("Parse error at " + t.line + ":" + t.col + ": Expected item, got " + tok_describe(t));
+        return Item::ImportI { path: "" };
+    }
+
+    fn parse_fn_def(mut self) -> Item {
+        self.expect("fn");
+        let name_tok: Token = self.expect("ident");
+        let name: String = tok_text(name_tok);
+        self.expect("(");
+        let params: Vec<Param> = self.parse_params();
+        self.expect(")");
+        let mut ret_type: Ty = Ty::VoidTy;
+        if self.match_token("->") {
+            ret_type = self.parse_type();
+        }
+        let body: Vec<Stmt> = self.parse_block();
+        return Item::FnDefI { name: name, params: params, return_type: ret_type, body: body };
+    }
+
+    fn parse_params(mut self) -> Vec<Param> {
+        let mut params: Vec<Param> = Vec::new();
+        if self.check(")") {
+            return params;
+        }
+        let p: Param = self.parse_param();
+        params.push(p);
+        while self.match_token(",") {
+            if self.check(")") {
+                break;
+            }
+            let p2: Param = self.parse_param();
+            params.push(p2);
+        }
+        return params;
+    }
+
+    fn parse_param(mut self) -> Param {
+        // self
+        if self.check("self") {
+            self.advance();
+            return Param { name: "self", ty: null, mutable: false, is_self: true };
+        }
+        // mut self
+        if self.check("mut") {
+            let pk: Token = self.peek_kind(1);
+            if tok_is(pk, "self") {
+                self.advance();
+                self.advance();
+                return Param { name: "self", ty: null, mutable: true, is_self: true };
+            }
+        }
+        // &self or &mut self
+        if self.check("&") {
+            self.advance();
+            let mut is_mut: bool = false;
+            if self.match_token("mut") {
+                is_mut = true;
+            }
+            self.expect("self");
+            return Param { name: "self", ty: null, mutable: is_mut, is_self: true };
+        }
+        // Normal param: [mut] name: type
+        let mut is_mut: bool = self.match_token("mut");
+        let name_tok: Token = self.expect("ident");
+        let name: String = tok_text(name_tok);
+        self.expect(":");
+        let ty: Ty = self.parse_type();
+        return Param { name: name, ty: ty, mutable: is_mut, is_self: false };
+    }
+
+    fn parse_struct_def(mut self) -> Item {
+        self.expect("struct");
+        let name_tok: Token = self.expect("ident");
+        let name: String = tok_text(name_tok);
+        self.expect("{");
+        let mut fields: Vec<Field> = Vec::new();
+        while !self.check("}") {
+            let fname_tok: Token = self.expect("ident");
+            let fname: String = tok_text(fname_tok);
+            self.expect(":");
+            let fty: Ty = self.parse_type();
+            let f = Field { name: fname, ty: fty };
+            fields.push(f);
+            self.match_token(",");
+        }
+        self.expect("}");
+        return Item::StructDefI { name: name, fields: fields };
+    }
+
+    fn parse_impl_def(mut self) -> Item {
+        self.expect("impl");
+        let name_tok: Token = self.expect("ident");
+        let type_name: String = tok_text(name_tok);
+        self.expect("{");
+        let mut methods: Vec<Item> = Vec::new();
+        while !self.check("}") {
+            let m: Item = self.parse_fn_def();
+            methods.push(m);
+        }
+        self.expect("}");
+        return Item::ImplDefI { type_name: type_name, methods: methods };
+    }
+
+    fn parse_import(mut self) -> Item {
+        self.expect("import");
+        let mut sb: StringBuilder = StringBuilder::new();
+        let first: Token = self.expect("ident");
+        sb.append(tok_text(first));
+        while self.match_token(".") {
+            sb.append(".");
+            if self.check("*") {
+                let star: Token = self.advance();
+                sb.append("*");
+                break;
+            }
+            let part: Token = self.expect("ident");
+            sb.append(tok_text(part));
+        }
+        self.expect(";");
+        return Item::ImportI { path: sb.to_string() };
+    }
+
+    fn parse_enum_def(mut self) -> Item {
+        self.expect("enum");
+        let name_tok: Token = self.expect("ident");
+        let name: String = tok_text(name_tok);
+        self.expect("{");
+        let mut variants: Vec<EnumVariant> = Vec::new();
+        while !self.check("}") {
+            let vname_tok: Token = self.expect("ident");
+            let vname: String = tok_text(vname_tok);
+            let mut fields: Vec<Field> = Vec::new();
+            if self.match_token("{") {
+                while !self.check("}") {
+                    let fname_tok: Token = self.expect("ident");
+                    let fname: String = tok_text(fname_tok);
+                    self.expect(":");
+                    let fty: Ty = self.parse_type();
+                    let f = Field { name: fname, ty: fty };
+                    fields.push(f);
+                    self.match_token(",");
+                }
+                self.expect("}");
+            }
+            let v = EnumVariant { name: vname, fields: fields };
+            variants.push(v);
+            self.match_token(",");
+        }
+        self.expect("}");
+        return Item::EnumDefI { name: name, variants: variants };
+    }
+
+    fn parse_const_def(mut self) -> Item {
+        self.expect("const");
+        let name_tok: Token = self.expect("ident");
+        let name: String = tok_text(name_tok);
+        self.expect(":");
+        let ty: Ty = self.parse_type();
+        self.expect("=");
+        let value: Expr = self.parse_expr();
+        self.expect(";");
+        return Item::ConstDefI { name: name, ty: ty, value: value };
+    }
+
+    // --- Type parsing ---
+
+    fn parse_type(mut self) -> Ty {
+        let name_tok: Token = self.expect("ident");
+        let name: String = tok_text(name_tok);
+        if self.match_token("<") {
+            let mut args: Vec<Ty> = Vec::new();
+            let first_arg: Ty = self.parse_type();
+            args.push(first_arg);
+            while self.match_token(",") {
+                let arg: Ty = self.parse_type();
+                args.push(arg);
+            }
+            self.expect(">");
+            return Ty::GenericTy { name: name, args: args };
+        }
+        return Ty::SimpleTy { name: name };
+    }
+
+    // --- Statement parsing ---
+
+    fn parse_block(mut self) -> Vec<Stmt> {
+        self.expect("{");
+        let mut stmts: Vec<Stmt> = Vec::new();
+        while !self.check("}") {
+            let s: Stmt = self.parse_stmt();
+            stmts.push(s);
+        }
+        self.expect("}");
+        return stmts;
+    }
+
+    fn parse_stmt(mut self) -> Stmt {
+        if self.check("let") {
+            return self.parse_let_stmt();
+        }
+        if self.check("break") {
+            self.advance();
+            self.expect(";");
+            return Stmt::BreakS;
+        }
+        if self.check("continue") {
+            self.advance();
+            self.expect(";");
+            return Stmt::ContinueS;
+        }
+        if self.check("return") {
+            return self.parse_return_stmt();
+        }
+        return self.parse_expr_stmt();
+    }
+
+    fn parse_let_stmt(mut self) -> Stmt {
+        self.expect("let");
+        let mut is_mut: bool = self.match_token("mut");
+        let name_tok: Token = self.expect("ident");
+        let name: String = tok_text(name_tok);
+        let mut ty: Ty = null;
+        if self.match_token(":") {
+            ty = self.parse_type();
+        }
+        let mut init: Expr = null;
+        if self.match_token("=") {
+            init = self.parse_expr();
+        }
+        self.expect(";");
+        return Stmt::LetS { name: name, mutable: is_mut, ty: ty, init: init };
+    }
+
+    fn parse_return_stmt(mut self) -> Stmt {
+        self.expect("return");
+        let mut value: Expr = null;
+        if !self.check(";") {
+            value = self.parse_expr();
+        }
+        self.expect(";");
+        return Stmt::ReturnS { value: value };
+    }
+
+    fn parse_expr_stmt(mut self) -> Stmt {
+        let expr: Expr = self.parse_expr();
+        // Block-like expressions don't need trailing semicolons
+        let mut is_block_expr: bool = false;
+        match expr {
+            Expr::IfE { condition, then_block, else_block } => { is_block_expr = true; }
+            Expr::WhileE { condition, body } => { is_block_expr = true; }
+            Expr::BlockE { stmts } => { is_block_expr = true; }
+            Expr::ForRangeE { var_name, start, end, body } => { is_block_expr = true; }
+            Expr::ForEachE { var_name, iterable, body } => { is_block_expr = true; }
+            Expr::MatchE { subject, arms } => { is_block_expr = true; }
+            _ => {}
+        }
+        if !is_block_expr {
+            self.expect(";");
+        } else {
+            self.match_token(";");
+        }
+        return Stmt::ExprStmtS { expr: expr };
+    }
+
+    // --- Expression parsing (precedence climbing) ---
+
+    fn parse_expr(mut self) -> Expr {
+        return self.parse_assignment();
+    }
+
+    fn parse_assignment(mut self) -> Expr {
+        let left: Expr = self.parse_or();
+        if self.match_token("=") {
+            let right: Expr = self.parse_assignment();
+            return Expr::AssignE { target: left, value: right };
+        }
+        return left;
+    }
+
+    fn parse_or(mut self) -> Expr {
+        let mut left: Expr = self.parse_and();
+        while self.match_token("||") {
+            let right: Expr = self.parse_and();
+            left = Expr::BinaryE { left: left, op: "||", right: right };
+        }
+        return left;
+    }
+
+    fn parse_and(mut self) -> Expr {
+        let mut left: Expr = self.parse_bitwise_or();
+        while self.match_token("&&") {
+            let right: Expr = self.parse_bitwise_or();
+            left = Expr::BinaryE { left: left, op: "&&", right: right };
+        }
+        return left;
+    }
+
+    fn parse_bitwise_or(mut self) -> Expr {
+        let mut left: Expr = self.parse_equality();
+        while self.match_token("|") {
+            let right: Expr = self.parse_equality();
+            left = Expr::BinaryE { left: left, op: "|", right: right };
+        }
+        return left;
+    }
+
+    fn parse_equality(mut self) -> Expr {
+        let mut left: Expr = self.parse_comparison();
+        while self.check("==") || self.check("!=") {
+            let op_tok: Token = self.advance();
+            let op: String = tok_op_text(op_tok);
+            let right: Expr = self.parse_comparison();
+            left = Expr::BinaryE { left: left, op: op, right: right };
+        }
+        return left;
+    }
+
+    fn parse_comparison(mut self) -> Expr {
+        let mut left: Expr = self.parse_addition();
+        while self.check("<") || self.check(">") || self.check("<=") || self.check(">=") {
+            let op_tok: Token = self.advance();
+            let op: String = tok_op_text(op_tok);
+            let right: Expr = self.parse_addition();
+            left = Expr::BinaryE { left: left, op: op, right: right };
+        }
+        return left;
+    }
+
+    fn parse_addition(mut self) -> Expr {
+        let mut left: Expr = self.parse_multiplication();
+        while self.check("+") || self.check("-") {
+            let op_tok: Token = self.advance();
+            let op: String = tok_op_text(op_tok);
+            let right: Expr = self.parse_multiplication();
+            left = Expr::BinaryE { left: left, op: op, right: right };
+        }
+        return left;
+    }
+
+    fn parse_multiplication(mut self) -> Expr {
+        let mut left: Expr = self.parse_unary();
+        while self.check("*") || self.check("/") || self.check("%") {
+            let op_tok: Token = self.advance();
+            let op: String = tok_op_text(op_tok);
+            let right: Expr = self.parse_unary();
+            left = Expr::BinaryE { left: left, op: op, right: right };
+        }
+        return left;
+    }
+
+    fn parse_unary(mut self) -> Expr {
+        if self.check("-") || self.check("!") {
+            let op_tok: Token = self.advance();
+            let op: String = tok_op_text(op_tok);
+            let operand: Expr = self.parse_unary();
+            return Expr::UnaryE { op: op, operand: operand };
+        }
+        return self.parse_postfix();
+    }
+
+    fn parse_postfix(mut self) -> Expr {
+        let mut expr: Expr = self.parse_primary();
+        while true {
+            if self.match_token(".") {
+                let name_tok: Token = self.expect("ident");
+                let name: String = tok_text(name_tok);
+                if self.match_token("(") {
+                    let args: Vec<Expr> = self.parse_arg_list();
+                    self.expect(")");
+                    expr = Expr::MethodCallE { receiver: expr, method_name: name, args: args };
+                } else {
+                    expr = Expr::FieldAccessE { receiver: expr, field: name };
+                }
+            } else if self.match_token("[") {
+                let index: Expr = self.parse_expr();
+                self.expect("]");
+                expr = Expr::IndexE { receiver: expr, index: index };
+            } else {
+                break;
+            }
+        }
+        return expr;
+    }
+
+    fn parse_primary(mut self) -> Expr {
+        // Int literal
+        if self.check("int") {
+            let t: Token = self.advance();
+            return Expr::IntLitE { value: tok_text(t) };
+        }
+        // Float literal
+        if self.check("float") {
+            let t: Token = self.advance();
+            return Expr::FloatLitE { value: tok_text(t) };
+        }
+        // String literal
+        if self.check("str") {
+            let t: Token = self.advance();
+            return Expr::StringLitE { value: tok_text(t) };
+        }
+        // Char literal
+        if self.check("char") {
+            let t: Token = self.advance();
+            return Expr::CharLitE { value: tok_text(t) };
+        }
+        // Bool literals
+        if self.check("true") {
+            self.advance();
+            return Expr::BoolLitE { value: true };
+        }
+        if self.check("false") {
+            self.advance();
+            return Expr::BoolLitE { value: false };
+        }
+        // Null
+        if self.check("null") {
+            self.advance();
+            return Expr::NullLitE;
+        }
+        // Self
+        if self.check("self") {
+            self.advance();
+            return Expr::SelfExprE;
+        }
+        // If expression
+        if self.check("if") {
+            return self.parse_if_expr();
+        }
+        // While expression
+        if self.check("while") {
+            return self.parse_while_expr();
+        }
+        // For expression
+        if self.check("for") {
+            return self.parse_for_expr();
+        }
+        // Match expression
+        if self.check("match") {
+            return self.parse_match_expr();
+        }
+        // Block expression
+        if self.check("{") {
+            let stmts: Vec<Stmt> = self.parse_block();
+            return Expr::BlockE { stmts: stmts };
+        }
+        // Array literal
+        if self.check("[") {
+            return self.parse_array_lit();
+        }
+        // Identifier-led expressions
+        if self.check("ident") {
+            let ident: Token = self.advance();
+            let ident_text: String = tok_text(ident);
+
+            // Static call / enum init: Type::method(args) or Type::Variant { ... }
+            if self.match_token("::") {
+                let member_tok: Token = self.expect("ident");
+                let member: String = tok_text(member_tok);
+
+                // Enum variant with fields
+                if self.check("{") {
+                    if self.is_enum_init() {
+                        self.advance();
+                        let mut fields: Vec<FieldValue> = Vec::new();
+                        while !self.check("}") {
+                            let fname_tok: Token = self.expect("ident");
+                            let fname: String = tok_text(fname_tok);
+                            self.expect(":");
+                            let val: Expr = self.parse_expr();
+                            let fv = FieldValue { name: fname, value: val };
+                            fields.push(fv);
+                            self.match_token(",");
+                        }
+                        self.expect("}");
+                        return Expr::EnumInitE { enum_name: ident_text, variant: member, fields: fields };
+                    }
+                }
+
+                // Static method call
+                if self.match_token("(") {
+                    let args: Vec<Expr> = self.parse_arg_list();
+                    self.expect(")");
+                    return Expr::StaticCallE { type_name: ident_text, method_name: member, args: args };
+                }
+
+                // Fieldless enum variant
+                let mut empty_fields: Vec<FieldValue> = Vec::new();
+                return Expr::EnumInitE { enum_name: ident_text, variant: member, fields: empty_fields };
+            }
+
+            // Function call
+            if self.match_token("(") {
+                let args: Vec<Expr> = self.parse_arg_list();
+                self.expect(")");
+                return Expr::CallE { name: ident_text, args: args };
+            }
+
+            // Struct init
+            if self.check("{") {
+                if self.is_struct_init(ident_text) {
+                    self.advance();
+                    let mut fields: Vec<FieldValue> = Vec::new();
+                    while !self.check("}") {
+                        let fname_tok: Token = self.expect("ident");
+                        let fname: String = tok_text(fname_tok);
+                        self.expect(":");
+                        let val: Expr = self.parse_expr();
+                        let fv = FieldValue { name: fname, value: val };
+                        fields.push(fv);
+                        self.match_token(",");
+                    }
+                    self.expect("}");
+                    return Expr::StructInitE { name: ident_text, fields: fields };
+                }
+            }
+
+            return Expr::IdentE { name: ident_text };
+        }
+
+        // Parenthesized expression
+        if self.match_token("(") {
+            let expr: Expr = self.parse_expr();
+            self.expect(")");
+            return expr;
+        }
+
+        let t: Token = self.current();
+        panic("Parse error at " + t.line + ":" + t.col + ": Expected expression, got " + tok_describe(t));
+        return Expr::NullLitE;
+    }
+
+    fn is_struct_init(self, name: String) -> bool {
+        // Uppercase first char heuristic
+        let first: char = name.char_at(0);
+        if first < 'A' {
+            return false;
+        }
+        if first > 'Z' {
+            return false;
+        }
+        // Check { ident : pattern or empty struct { }
+        let pk0: Token = self.peek_kind(0);
+        if !tok_is(pk0, "{") {
+            return false;
+        }
+        let pk1: Token = self.peek_kind(1);
+        let pk2: Token = self.peek_kind(2);
+        if tok_is(pk1, "ident") {
+            if tok_is(pk2, ":") {
+                return true;
+            }
+        }
+        if tok_is(pk1, "}") {
+            return true;
+        }
+        return false;
+    }
+
+    fn is_enum_init(self) -> bool {
+        let pk0: Token = self.peek_kind(0);
+        if !tok_is(pk0, "{") {
+            return false;
+        }
+        let pk1: Token = self.peek_kind(1);
+        let pk2: Token = self.peek_kind(2);
+        if tok_is(pk1, "ident") {
+            if tok_is(pk2, ":") {
+                return true;
+            }
+        }
+        if tok_is(pk1, "}") {
+            return true;
+        }
+        return false;
+    }
+
+    fn parse_if_expr(mut self) -> Expr {
+        self.expect("if");
+        let condition: Expr = self.parse_expr();
+        let then_block: Vec<Stmt> = self.parse_block();
+        let mut else_block: Vec<Stmt> = null;
+        if self.match_token("else") {
+            if self.check("if") {
+                let else_if: Expr = self.parse_if_expr();
+                else_block = Vec::new();
+                let es = Stmt::ExprStmtS { expr: else_if };
+                else_block.push(es);
+            } else {
+                else_block = self.parse_block();
+            }
+        }
+        return Expr::IfE { condition: condition, then_block: then_block, else_block: else_block };
+    }
+
+    fn parse_while_expr(mut self) -> Expr {
+        self.expect("while");
+        let condition: Expr = self.parse_expr();
+        let body: Vec<Stmt> = self.parse_block();
+        return Expr::WhileE { condition: condition, body: body };
+    }
+
+    fn parse_for_expr(mut self) -> Expr {
+        self.expect("for");
+        let var_tok: Token = self.expect("ident");
+        let var_name: String = tok_text(var_tok);
+        self.expect("in");
+        let start: Expr = self.parse_expr();
+        if self.match_token("..") {
+            let end: Expr = self.parse_expr();
+            let body: Vec<Stmt> = self.parse_block();
+            return Expr::ForRangeE { var_name: var_name, start: start, end: end, body: body };
+        }
+        let body: Vec<Stmt> = self.parse_block();
+        return Expr::ForEachE { var_name: var_name, iterable: start, body: body };
+    }
+
+    fn parse_match_expr(mut self) -> Expr {
+        self.expect("match");
+        let subject: Expr = self.parse_expr();
+        self.expect("{");
+        let mut arms: Vec<MatchArm> = Vec::new();
+        while !self.check("}") {
+            let pattern: Pattern = self.parse_pattern();
+            self.expect("=>");
+            let mut body: Vec<Stmt> = Vec::new();
+            if self.check("{") {
+                body = self.parse_block();
+            } else {
+                let expr: Expr = self.parse_expr();
+                let es = Stmt::ExprStmtS { expr: expr };
+                body.push(es);
+            }
+            self.match_token(",");
+            let arm = MatchArm { pattern: pattern, body: body };
+            arms.push(arm);
+        }
+        self.expect("}");
+        return Expr::MatchE { subject: subject, arms: arms };
+    }
+
+    fn parse_pattern(mut self) -> Pattern {
+        // Wildcard
+        if self.check("_") {
+            self.advance();
+            return Pattern::WildcardP;
+        }
+        // Literal patterns
+        if self.check("int") {
+            let t: Token = self.advance();
+            return Pattern::LiteralP { expr: Expr::IntLitE { value: tok_text(t) } };
+        }
+        if self.check("float") {
+            let t: Token = self.advance();
+            return Pattern::LiteralP { expr: Expr::FloatLitE { value: tok_text(t) } };
+        }
+        if self.check("str") {
+            let t: Token = self.advance();
+            return Pattern::LiteralP { expr: Expr::StringLitE { value: tok_text(t) } };
+        }
+        if self.check("char") {
+            let t: Token = self.advance();
+            return Pattern::LiteralP { expr: Expr::CharLitE { value: tok_text(t) } };
+        }
+        if self.check("true") {
+            self.advance();
+            return Pattern::LiteralP { expr: Expr::BoolLitE { value: true } };
+        }
+        if self.check("false") {
+            self.advance();
+            return Pattern::LiteralP { expr: Expr::BoolLitE { value: false } };
+        }
+        if self.check("null") {
+            self.advance();
+            return Pattern::LiteralP { expr: Expr::NullLitE };
+        }
+        // Negative number
+        if self.check("-") {
+            let pk: Token = self.peek_kind(1);
+            if tok_is(pk, "int") {
+                self.advance();
+                let t: Token = self.advance();
+                return Pattern::LiteralP { expr: Expr::UnaryE { op: "-", operand: Expr::IntLitE { value: tok_text(t) } } };
+            }
+        }
+        // Enum variant pattern
+        if self.check("ident") {
+            let pk: Token = self.peek_kind(1);
+            if tok_is(pk, "::") {
+                let enum_tok: Token = self.advance();
+                let enum_name: String = tok_text(enum_tok);
+                self.expect("::");
+                let variant_tok: Token = self.expect("ident");
+                let variant: String = tok_text(variant_tok);
+                let mut bindings: Vec<String> = Vec::new();
+                if self.match_token("{") {
+                    while !self.check("}") {
+                        let b_tok: Token = self.expect("ident");
+                        bindings.push(tok_text(b_tok));
+                        self.match_token(",");
+                    }
+                    self.expect("}");
+                }
+                return Pattern::EnumVariantP { enum_name: enum_name, variant: variant, bindings: bindings };
+            }
+        }
+        let t: Token = self.current();
+        panic("Parse error at " + t.line + ":" + t.col + ": Expected pattern, got " + tok_describe(t));
+        return Pattern::WildcardP;
+    }
+
+    fn parse_array_lit(mut self) -> Expr {
+        self.expect("[");
+        let mut elements: Vec<Expr> = Vec::new();
+        if !self.check("]") {
+            let first: Expr = self.parse_expr();
+            elements.push(first);
+            while self.match_token(",") {
+                if self.check("]") {
+                    break;
+                }
+                let elem: Expr = self.parse_expr();
+                elements.push(elem);
+            }
+        }
+        self.expect("]");
+        return Expr::ArrayLitE { elements: elements };
+    }
+
+    fn parse_arg_list(mut self) -> Vec<Expr> {
+        let mut args: Vec<Expr> = Vec::new();
+        if self.check(")") {
+            return args;
+        }
+        let first: Expr = self.parse_expr();
+        args.push(first);
+        while self.match_token(",") {
+            if self.check(")") {
+                break;
+            }
+            let arg: Expr = self.parse_expr();
+            args.push(arg);
+        }
+        return args;
+    }
+}
+
+// --- AST helper functions ---
+fn expr_int_value(e: Expr) -> String {
+    match e {
+        Expr::IntLitE { value } => { return value; }
+        _ => { return ""; }
+    }
+    return "";
+}
+
+fn expr_str_value(e: Expr) -> String {
+    match e {
+        Expr::StringLitE { value } => { return value; }
+        _ => { return ""; }
+    }
+    return "";
+}
+
+fn expr_is_int_lit(e: Expr) -> bool {
+    match e {
+        Expr::IntLitE { value } => { return true; }
+        _ => { return false; }
+    }
+    return false;
+}
+
+fn expr_is_str_lit(e: Expr) -> bool {
+    match e {
+        Expr::StringLitE { value } => { return true; }
+        _ => { return false; }
+    }
+    return false;
+}
+
+fn expr_is_bool_lit(e: Expr) -> bool {
+    match e {
+        Expr::BoolLitE { value } => { return true; }
+        _ => { return false; }
+    }
+    return false;
+}
+
+fn expr_is_null_lit(e: Expr) -> bool {
+    match e {
+        Expr::NullLitE => { return true; }
+        _ => { return false; }
+    }
+    return false;
+}
+
+fn item_fn_name(item: Item) -> String {
+    match item {
+        Item::FnDefI { name, params, return_type, body } => { return name; }
+        Item::ConstDefI { name, ty, value } => { return name; }
+        _ => { return ""; }
+    }
+    return "";
+}
+
+fn item_const_type(item: Item) -> Ty {
+    match item {
+        Item::ConstDefI { name, ty, value } => { return ty; }
+        _ => { return Ty::VoidTy; }
+    }
+    return Ty::VoidTy;
+}
+
+fn item_const_value(item: Item) -> Expr {
+    match item {
+        Item::ConstDefI { name, ty, value } => { return value; }
+        _ => { return Expr::NullLitE; }
+    }
+    return Expr::NullLitE;
+}
+
+fn item_fn_return_type(item: Item) -> Ty {
+    match item {
+        Item::FnDefI { name, params, return_type, body } => { return return_type; }
+        _ => { return Ty::VoidTy; }
+    }
+    return Ty::VoidTy;
+}
+
+fn item_fn_params(item: Item) -> Vec<Param> {
+    match item {
+        Item::FnDefI { name, params, return_type, body } => { return params; }
+        _ => {
+            let empty: Vec<Param> = Vec::new();
+            return empty;
+        }
+    }
+    let empty: Vec<Param> = Vec::new();
+    return empty;
+}
+
+fn item_fn_body(item: Item) -> Vec<Stmt> {
+    match item {
+        Item::FnDefI { name, params, return_type, body } => { return body; }
+        _ => {
+            panic("item_fn_body called with non-FnDefI");
+        }
+    }
+    let empty: Vec<Stmt> = Vec::new();
+    return empty;
+}
+
+// ============================================================
+// Codegen
+// ============================================================
+
+struct Codegen {
+    program: Program,
+    output_dir: String,
+    structs: Map<String, Item>,
+    enums: Map<String, Item>,
+    impl_methods: Map<String, Vec<Item>>,
+    top_level_fns: Vec<Item>,
+    constants: Vec<Item>,
+    imports: Map<String, String>,
+    // Per-method state
+    mv: i32,
+    locals: Map<String, i32>,
+    local_types: Map<String, Ty>,
+    next_local: i32,
+    current_class: String,
+    expected_type: Ty,
+    break_label: i32,
+    continue_label: i32,
+}
+
+impl Codegen {
+    fn new(program: Program, output_dir: String) -> Codegen {
+        let c = Codegen {
+            program: program,
+            output_dir: output_dir,
+            structs: Map::new(),
+            enums: Map::new(),
+            impl_methods: Map::new(),
+            top_level_fns: Vec::new(),
+            constants: Vec::new(),
+            imports: Map::new(),
+            mv: -1,
+            locals: Map::new(),
+            local_types: Map::new(),
+            next_local: 0,
+            current_class: "",
+            expected_type: null,
+            break_label: -1,
+            continue_label: -1,
+        };
+        return c;
+    }
+
+    fn generate(mut self) {
+        // First pass: collect declarations
+        let mut i: i32 = 0;
+        while i < self.program.items.len() {
+            let item: Item = self.program.items.get(i);
+            match item {
+                Item::StructDefI { name, fields } => {
+                    self.structs.insert(name, item);
+                }
+                Item::EnumDefI { name, variants } => {
+                    self.enums.insert(name, item);
+                }
+                Item::ImplDefI { type_name, methods } => {
+                    if self.impl_methods.contains_key(type_name) {
+                        let existing: Vec<Item> = self.impl_methods.get(type_name);
+                        let mut j: i32 = 0;
+                        while j < methods.len() {
+                            existing.push(methods.get(j));
+                            j = j + 1;
+                        }
+                    } else {
+                        let mut new_list: Vec<Item> = Vec::new();
+                        let mut j: i32 = 0;
+                        while j < methods.len() {
+                            new_list.push(methods.get(j));
+                            j = j + 1;
+                        }
+                        self.impl_methods.insert(type_name, new_list);
+                    }
+                }
+                Item::FnDefI { name, params, return_type, body } => {
+                    self.top_level_fns.push(item);
+                }
+                Item::ImportI { path } => {
+                    self.register_import(path);
+                }
+                Item::ConstDefI { name, ty, value } => {
+                    self.constants.push(item);
+                }
+            }
+            i = i + 1;
+        }
+
+        // Generate struct classes
+        let mut si: i32 = 0;
+        let struct_keys: Vec<String> = Vec::new();
+        // Iterate program items to get struct names in order
+        let mut pi: i32 = 0;
+        while pi < self.program.items.len() {
+            let item: Item = self.program.items.get(pi);
+            match item {
+                Item::StructDefI { name, fields } => {
+                    self.generate_struct(name, fields);
+                }
+                _ => {}
+            }
+            pi = pi + 1;
+        }
+
+        // Generate enum classes
+        pi = 0;
+        while pi < self.program.items.len() {
+            let item: Item = self.program.items.get(pi);
+            match item {
+                Item::EnumDefI { name, variants } => {
+                    self.generate_enum(name, variants);
+                }
+                _ => {}
+            }
+            pi = pi + 1;
+        }
+
+        // Generate Main class
+        self.generate_main_class();
+    }
+
+    fn register_import(mut self, path: String) {
+        let jvm_name: String = path.replace(".", "/");
+        let last_dot: i32 = path.len() - 1;
+        // Find last dot
+        let mut idx: i32 = path.len() - 1;
+        let mut dot_pos: i32 = -1;
+        while idx >= 0 {
+            if path.char_at(idx) == '.' {
+                dot_pos = idx;
+                break;
+            }
+            idx = idx - 1;
+        }
+        let simple_name: String = path.substring(dot_pos + 1);
+        self.imports.insert(simple_name, jvm_name);
+    }
+
+    // --- Struct generation ---
+
+    fn generate_struct(mut self, name: String, fields: Vec<Field>) {
+        let cw: i32 = JRustAsm::cw_new(3);
+        JRustAsm::cw_visit(cw, V21, ACC_PUBLIC + ACC_SUPER, name, "java/lang/Object");
+
+        // Fields
+        let mut fi: i32 = 0;
+        while fi < fields.len() {
+            let f: Field = fields.get(fi);
+            let fv: i32 = JRustAsm::cw_visit_field(cw, ACC_PUBLIC, f.name, self.type_descriptor(f.ty));
+            JRustAsm::fv_end(fv);
+            fi = fi + 1;
+        }
+
+        // Default constructor
+        let init: i32 = JRustAsm::cw_visit_method(cw, ACC_PUBLIC, "<init>", "()V");
+        JRustAsm::mv_code(init);
+        JRustAsm::mv_var_insn(init, ALOAD, 0);
+        JRustAsm::mv_method_insn(init, INVOKESPECIAL, "java/lang/Object", "<init>", "()V", 0);
+        JRustAsm::mv_insn(init, RETURN_OP);
+        JRustAsm::mv_maxs(init, 0, 0);
+        JRustAsm::mv_end(init);
+
+        // Impl methods
+        if self.impl_methods.contains_key(name) {
+            let methods: Vec<Item> = self.impl_methods.get(name);
+            let mut mi: i32 = 0;
+            while mi < methods.len() {
+                let m: Item = methods.get(mi);
+                self.generate_method(cw, name, m);
+                mi = mi + 1;
+            }
+        }
+
+        JRustAsm::cw_end(cw);
+        JRustAsm::cw_write(cw, self.output_dir, name);
+    }
+
+    // --- Enum generation ---
+
+    fn generate_enum(mut self, name: String, variants: Vec<EnumVariant>) {
+        // Base class
+        let base_cw: i32 = JRustAsm::cw_new(3);
+        JRustAsm::cw_visit(base_cw, V21, ACC_PUBLIC + ACC_SUPER, name, "java/lang/Object");
+
+        let base_init: i32 = JRustAsm::cw_visit_method(base_cw, ACC_PUBLIC, "<init>", "()V");
+        JRustAsm::mv_code(base_init);
+        JRustAsm::mv_var_insn(base_init, ALOAD, 0);
+        JRustAsm::mv_method_insn(base_init, INVOKESPECIAL, "java/lang/Object", "<init>", "()V", 0);
+        JRustAsm::mv_insn(base_init, RETURN_OP);
+        JRustAsm::mv_maxs(base_init, 0, 0);
+        JRustAsm::mv_end(base_init);
+
+        // Impl methods on base class
+        if self.impl_methods.contains_key(name) {
+            let methods: Vec<Item> = self.impl_methods.get(name);
+            let mut mi: i32 = 0;
+            while mi < methods.len() {
+                let m: Item = methods.get(mi);
+                self.generate_method(base_cw, name, m);
+                mi = mi + 1;
+            }
+        }
+
+        JRustAsm::cw_end(base_cw);
+        JRustAsm::cw_write(base_cw, self.output_dir, name);
+
+        // Variant subclasses
+        let mut vi: i32 = 0;
+        while vi < variants.len() {
+            let v: EnumVariant = variants.get(vi);
+            self.generate_enum_variant(name, v);
+            vi = vi + 1;
+        }
+    }
+
+    fn generate_enum_variant(mut self, enum_name: String, v: EnumVariant) {
+        let variant_class: String = enum_name + "$" + v.name;
+        let cw: i32 = JRustAsm::cw_new(3);
+        JRustAsm::cw_visit(cw, V21, ACC_PUBLIC + ACC_SUPER, variant_class, enum_name);
+
+        // Fields
+        let mut fi: i32 = 0;
+        while fi < v.fields.len() {
+            let f: Field = v.fields.get(fi);
+            let fv: i32 = JRustAsm::cw_visit_field(cw, ACC_PUBLIC, f.name, self.type_descriptor(f.ty));
+            JRustAsm::fv_end(fv);
+            fi = fi + 1;
+        }
+
+        // Constructor
+        let init: i32 = JRustAsm::cw_visit_method(cw, ACC_PUBLIC, "<init>", "()V");
+        JRustAsm::mv_code(init);
+        JRustAsm::mv_var_insn(init, ALOAD, 0);
+        JRustAsm::mv_method_insn(init, INVOKESPECIAL, enum_name, "<init>", "()V", 0);
+        JRustAsm::mv_insn(init, RETURN_OP);
+        JRustAsm::mv_maxs(init, 0, 0);
+        JRustAsm::mv_end(init);
+
+        JRustAsm::cw_end(cw);
+        JRustAsm::cw_write(cw, self.output_dir, variant_class);
+    }
+
+    // --- Main class generation ---
+
+    fn generate_main_class(mut self) {
+        let cw: i32 = JRustAsm::cw_new(3);
+        JRustAsm::cw_visit(cw, V21, ACC_PUBLIC + ACC_SUPER, "Main", "java/lang/Object");
+
+        // Constants as static fields
+        let mut ci: i32 = 0;
+        while ci < self.constants.len() {
+            let cd: Item = self.constants.get(ci);
+            match cd {
+                Item::ConstDefI { name, ty, value } => {
+                    if expr_is_int_lit(value) {
+                        let int_str: String = expr_int_value(value);
+                        let iv: i32 = JRustAsm::parse_int(int_str);
+                        let fv_h: i32 = JRustAsm::cw_visit_field_int(cw, ACC_PUBLIC + ACC_STATIC + ACC_FINAL, name, self.type_descriptor(ty), iv);
+                        JRustAsm::fv_end(fv_h);
+                    } else if expr_is_str_lit(value) {
+                        let str_val: String = expr_str_value(value);
+                        let fv_h: i32 = JRustAsm::cw_visit_field_str(cw, ACC_PUBLIC + ACC_STATIC + ACC_FINAL, name, self.type_descriptor(ty), str_val);
+                        JRustAsm::fv_end(fv_h);
+                    } else if expr_is_bool_lit(value) {
+                        // Bool constants are stored as int 0/1
+                        let fv_h: i32 = JRustAsm::cw_visit_field(cw, ACC_PUBLIC + ACC_STATIC + ACC_FINAL, name, self.type_descriptor(ty));
+                        JRustAsm::fv_end(fv_h);
+                    } else {
+                        let fv_h: i32 = JRustAsm::cw_visit_field(cw, ACC_PUBLIC + ACC_STATIC + ACC_FINAL, name, self.type_descriptor(ty));
+                        JRustAsm::fv_end(fv_h);
+                    }
+                }
+                _ => {}
+            }
+            ci = ci + 1;
+        }
+
+        // Static initializer for non-trivial constants
+        if self.constants.len() > 0 {
+            let clinit: i32 = JRustAsm::cw_visit_method(cw, ACC_STATIC, "<clinit>", "()V");
+            JRustAsm::mv_code(clinit);
+            let mut has_nontrivial: bool = false;
+            ci = 0;
+            while ci < self.constants.len() {
+                let cd: Item = self.constants.get(ci);
+                match cd {
+                    Item::ConstDefI { name, ty, value } => {
+                        let cv: String = self.get_constant_value(value, ty);
+                        if cv == "__nontrivial__" {
+                            has_nontrivial = true;
+                            self.locals = Map::new();
+                            self.local_types = Map::new();
+                            self.next_local = 0;
+                            self.current_class = "Main";
+                            self.mv = clinit;
+                            self.gen_expr(value);
+                            JRustAsm::mv_field_insn(clinit, PUTSTATIC, "Main", name, self.type_descriptor(ty));
+                        }
+                    }
+                    _ => {}
+                }
+                ci = ci + 1;
+            }
+            JRustAsm::mv_insn(clinit, RETURN_OP);
+            JRustAsm::mv_maxs(clinit, 0, 0);
+            JRustAsm::mv_end(clinit);
+        }
+
+        // Top-level functions
+        let mut fi: i32 = 0;
+        while fi < self.top_level_fns.len() {
+            let fn_item: Item = self.top_level_fns.get(fi);
+            self.generate_method(cw, "Main", fn_item);
+            fi = fi + 1;
+        }
+
+        JRustAsm::cw_end(cw);
+        JRustAsm::cw_write(cw, self.output_dir, "Main");
+    }
+
+    fn get_constant_value(self, val_expr: Expr, ty: Ty) -> String {
+        if expr_is_int_lit(val_expr) { return "__int__"; }
+        if expr_is_str_lit(val_expr) { return "__str__"; }
+        if expr_is_bool_lit(val_expr) { return "__int__"; }
+        return "__nontrivial__";
+    }
+
+    // --- Method generation ---
+
+    fn generate_method(mut self, cw: i32, class_name: String, fn_item: Item) {
+        let name: String = item_fn_name(fn_item);
+        let params: Vec<Param> = item_fn_params(fn_item);
+        let return_type: Ty = item_fn_return_type(fn_item);
+        let body: Vec<Stmt> = item_fn_body(fn_item);
+
+        self.locals = Map::new();
+        self.local_types = Map::new();
+        self.next_local = 0;
+        self.current_class = class_name;
+
+        let is_main: bool = name == "main" && class_name == "Main";
+        let mut has_self: bool = false;
+        if params.len() > 0 {
+            let p0: Param = params.get(0);
+            has_self = p0.is_self;
+        }
+        let is_static: bool = !has_self;
+
+        let desc: String = self.method_descriptor(params, return_type, is_static, class_name, name);
+        let mut access: i32 = ACC_PUBLIC;
+        if is_static {
+            access = access + ACC_STATIC;
+        }
+        let method_name: String = name;
+
+        self.mv = JRustAsm::cw_visit_method(cw, access, method_name, desc);
+        JRustAsm::mv_code(self.mv);
+
+        // Assign param slots
+        if is_main && name == "main" {
+            self.locals.insert("__args__", self.next_local);
+            JRustAsm::mv_var_insn(self.mv, ALOAD, self.next_local);
+            JRustAsm::mv_method_insn(self.mv, INVOKESTATIC, "jrust/JRustAsm", "set_args", "([Ljava/lang/String;)V", 0);
+            self.next_local = self.next_local + 1;
+        }
+
+        let mut pi: i32 = 0;
+        while pi < params.len() {
+            let p: Param = params.get(pi);
+            if p.is_self {
+                self.locals.insert("self", self.next_local);
+                self.local_types.insert("self", Ty::SimpleTy { name: class_name });
+                self.next_local = self.next_local + 1;
+            } else {
+                self.locals.insert(p.name, self.next_local);
+                self.local_types.insert(p.name, p.ty);
+                self.next_local = self.next_local + self.local_size(p.ty);
+            }
+            pi = pi + 1;
+        }
+
+        // Generate body
+        let mut bi: i32 = 0;
+        while bi < body.len() {
+            let stmt: Stmt = body.get(bi);
+            self.gen_stmt(stmt);
+            bi = bi + 1;
+        }
+
+        // Add return if void
+        let is_void: bool = self.is_void_type(return_type);
+        if is_void {
+            JRustAsm::mv_insn(self.mv, RETURN_OP);
+        }
+
+        JRustAsm::mv_maxs(self.mv, 0, 0);
+        JRustAsm::mv_end(self.mv);
+    }
+
+    fn method_descriptor(self, params: Vec<Param>, return_type: Ty, is_static: bool, class_name: String, fn_name: String) -> String {
+        let mut sb: StringBuilder = StringBuilder::new();
+        sb.append("(");
+        if fn_name == "main" && class_name == "Main" {
+            sb.append("[Ljava/lang/String;");
+        } else {
+            let mut i: i32 = 0;
+            while i < params.len() {
+                let p: Param = params.get(i);
+                if !p.is_self {
+                    sb.append(self.type_descriptor(p.ty));
+                }
+                i = i + 1;
+            }
+        }
+        sb.append(")");
+        sb.append(self.type_descriptor(return_type));
+        return sb.to_string();
+    }
+
+    // --- Statement codegen ---
+
+    fn gen_stmt(mut self, stmt: Stmt) {
+        match stmt {
+            Stmt::LetS { name, mutable, ty, init } => {
+                self.gen_let(name, mutable, ty, init);
+            }
+            Stmt::ReturnS { value } => {
+                self.gen_return(value);
+            }
+            Stmt::BreakS => {
+                if self.break_label >= 0 {
+                    JRustAsm::mv_jump_insn(self.mv, GOTO, self.break_label);
+                }
+            }
+            Stmt::ContinueS => {
+                if self.continue_label >= 0 {
+                    JRustAsm::mv_jump_insn(self.mv, GOTO, self.continue_label);
+                }
+            }
+            Stmt::ExprStmtS { expr } => {
+                let t: Ty = self.gen_expr(expr);
+                // Pop value if non-void
+                if t != null {
+                    let mut is_void: bool = false;
+                    match t {
+                        Ty::VoidTy => { is_void = true; }
+                        _ => {}
+                    }
+                    if !is_void {
+                        if self.is_wide(t) {
+                            JRustAsm::mv_insn(self.mv, POP2);
+                        } else {
+                            JRustAsm::mv_insn(self.mv, POP);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn gen_let(mut self, name: String, mutable: bool, ty: Ty, init: Expr) {
+        let mut actual_ty: Ty = ty;
+        if actual_ty == null {
+            if init != null {
+                actual_ty = self.infer_type(init);
+            }
+        }
+        if actual_ty == null {
+            panic("Cannot infer type for let binding '" + name + "'");
+        }
+
+        let slot: i32 = self.next_local;
+        self.locals.insert(name, slot);
+        self.local_types.insert(name, actual_ty);
+        self.next_local = self.next_local + self.local_size(actual_ty);
+
+        if init != null {
+            let prev_expected: Ty = self.expected_type;
+            self.expected_type = actual_ty;
+            self.gen_expr(init);
+            self.expected_type = prev_expected;
+            self.store_local(slot, actual_ty);
+        }
+    }
+
+    fn gen_return(mut self, value: Expr) {
+        if value == null {
+            JRustAsm::mv_insn(self.mv, RETURN_OP);
+        } else {
+            let t: Ty = self.gen_expr(value);
+            self.gen_return_insn(t);
+        }
+    }
+
+    fn gen_return_insn(self, t: Ty) {
+        match t {
+            Ty::VoidTy => {
+                JRustAsm::mv_insn(self.mv, RETURN_OP);
+            }
+            Ty::SimpleTy { name } => {
+                if name == "i32" || name == "bool" || name == "char" {
+                    JRustAsm::mv_insn(self.mv, IRETURN);
+                } else if name == "i64" {
+                    JRustAsm::mv_insn(self.mv, LRETURN);
+                } else if name == "f64" {
+                    JRustAsm::mv_insn(self.mv, DRETURN);
+                } else {
+                    JRustAsm::mv_insn(self.mv, ARETURN);
+                }
+            }
+            _ => {
+                JRustAsm::mv_insn(self.mv, ARETURN);
+            }
+        }
+    }
+
+    // --- Expression codegen ---
+
+    fn gen_expr(mut self, expr: Expr) -> Ty {
+        match expr {
+            Expr::IntLitE { value } => {
+                let val: i32 = JRustAsm::parse_int(value);
+                self.push_int(val);
+                return Ty::SimpleTy { name: "i32" };
+            }
+            Expr::FloatLitE { value } => {
+                let val: f64 = JRustAsm::parse_double(value);
+                JRustAsm::mv_ldc_double(self.mv, val);
+                return Ty::SimpleTy { name: "f64" };
+            }
+            Expr::StringLitE { value } => {
+                JRustAsm::mv_ldc_str(self.mv, value);
+                return Ty::SimpleTy { name: "String" };
+            }
+            Expr::CharLitE { value } => {
+                let c: char = value.char_at(0);
+                self.push_int(c);
+                return Ty::SimpleTy { name: "char" };
+            }
+            Expr::BoolLitE { value } => {
+                if value {
+                    JRustAsm::mv_insn(self.mv, ICONST_1);
+                } else {
+                    JRustAsm::mv_insn(self.mv, ICONST_0);
+                }
+                return Ty::SimpleTy { name: "bool" };
+            }
+            Expr::NullLitE => {
+                JRustAsm::mv_insn(self.mv, ACONST_NULL);
+                return Ty::SimpleTy { name: "null" };
+            }
+            Expr::IdentE { name } => {
+                return self.gen_ident(name);
+            }
+            Expr::SelfExprE => {
+                let self_slot: i32 = self.locals.get("self");
+                JRustAsm::mv_var_insn(self.mv, ALOAD, self_slot);
+                return Ty::SimpleTy { name: self.current_class };
+            }
+            Expr::BinaryE { left, op, right } => {
+                return self.gen_binary(left, op, right);
+            }
+            Expr::UnaryE { op, operand } => {
+                return self.gen_unary(op, operand);
+            }
+            Expr::CallE { name, args } => {
+                return self.gen_call(name, args);
+            }
+            Expr::MethodCallE { receiver, method_name, args } => {
+                return self.gen_method_call(receiver, method_name, args);
+            }
+            Expr::FieldAccessE { receiver, field } => {
+                return self.gen_field_access(receiver, field);
+            }
+            Expr::StructInitE { name, fields } => {
+                return self.gen_struct_init(name, fields);
+            }
+            Expr::StaticCallE { type_name, method_name, args } => {
+                return self.gen_static_call(type_name, method_name, args);
+            }
+            Expr::AssignE { target, value } => {
+                return self.gen_assign(target, value);
+            }
+            Expr::IfE { condition, then_block, else_block } => {
+                return self.gen_if(condition, then_block, else_block);
+            }
+            Expr::WhileE { condition, body } => {
+                return self.gen_while(condition, body);
+            }
+            Expr::BlockE { stmts } => {
+                return self.gen_block(stmts);
+            }
+            Expr::ForRangeE { var_name, start, end, body } => {
+                return self.gen_for_range(var_name, start, end, body);
+            }
+            Expr::ForEachE { var_name, iterable, body } => {
+                return self.gen_for_each(var_name, iterable, body);
+            }
+            Expr::MatchE { subject, arms } => {
+                return self.gen_match(subject, arms);
+            }
+            Expr::IndexE { receiver, index } => {
+                return self.gen_index(receiver, index);
+            }
+            Expr::EnumInitE { enum_name, variant, fields } => {
+                return self.gen_enum_init(enum_name, variant, fields);
+            }
+            Expr::ThrowE { message } => {
+                return self.gen_throw(message);
+            }
+            Expr::ArrayLitE { elements } => {
+                return self.gen_array_lit(elements);
+            }
+            Expr::CastE { value, cast_type } => {
+                return self.gen_cast(value, cast_type);
+            }
+        }
+        return Ty::VoidTy;
+    }
+
+    fn gen_ident(mut self, name: String) -> Ty {
+        if self.locals.contains_key(name) {
+            let slot: i32 = self.locals.get(name);
+            let ty: Ty = self.local_types.get(name);
+            self.load_local(slot, ty);
+            return ty;
+        }
+        // Check constants
+        let mut ci: i32 = 0;
+        while ci < self.constants.len() {
+            let cd: Item = self.constants.get(ci);
+            let cn: String = item_fn_name(cd);
+            if cn == name {
+                let cty: Ty = item_const_type(cd);
+                JRustAsm::mv_field_insn(self.mv, GETSTATIC, "Main", cn, self.type_descriptor(cty));
+                return cty;
+            }
+            ci = ci + 1;
+        }
+        panic("Undefined variable: " + name);
+        return Ty::VoidTy;
+    }
+
+    fn gen_binary(mut self, left: Expr, op: String, right: Expr) -> Ty {
+        // Handle null comparisons
+        let mut right_is_null: bool = false;
+        match right {
+            Expr::NullLitE => { right_is_null = true; }
+            _ => {}
+        }
+        let mut left_is_null: bool = false;
+        match left {
+            Expr::NullLitE => { left_is_null = true; }
+            _ => {}
+        }
+
+        if right_is_null {
+            if op == "==" || op == "!=" {
+                self.gen_expr(left);
+                let true_l: i32 = JRustAsm::label_new();
+                let end_l: i32 = JRustAsm::label_new();
+                if op == "==" {
+                    JRustAsm::mv_jump_insn(self.mv, IFNULL, true_l);
+                } else {
+                    JRustAsm::mv_jump_insn(self.mv, IFNONNULL, true_l);
+                }
+                JRustAsm::mv_insn(self.mv, ICONST_0);
+                JRustAsm::mv_jump_insn(self.mv, GOTO, end_l);
+                JRustAsm::mv_label(self.mv, true_l);
+                JRustAsm::mv_insn(self.mv, ICONST_1);
+                JRustAsm::mv_label(self.mv, end_l);
+                return Ty::SimpleTy { name: "bool" };
+            }
+        }
+
+        if left_is_null {
+            if op == "==" || op == "!=" {
+                self.gen_expr(right);
+                let true_l: i32 = JRustAsm::label_new();
+                let end_l: i32 = JRustAsm::label_new();
+                if op == "==" {
+                    JRustAsm::mv_jump_insn(self.mv, IFNULL, true_l);
+                } else {
+                    JRustAsm::mv_jump_insn(self.mv, IFNONNULL, true_l);
+                }
+                JRustAsm::mv_insn(self.mv, ICONST_0);
+                JRustAsm::mv_jump_insn(self.mv, GOTO, end_l);
+                JRustAsm::mv_label(self.mv, true_l);
+                JRustAsm::mv_insn(self.mv, ICONST_1);
+                JRustAsm::mv_label(self.mv, end_l);
+                return Ty::SimpleTy { name: "bool" };
+            }
+        }
+
+        let left_type: Ty = self.gen_expr(left);
+        let right_type: Ty = self.gen_expr(right);
+
+        // String concat
+        if self.is_string(left_type) && op == "+" {
+            if !self.is_string(right_type) {
+                self.gen_to_string(right_type);
+            }
+            JRustAsm::mv_method_insn(self.mv, INVOKEVIRTUAL, "java/lang/String", "concat", "(Ljava/lang/String;)Ljava/lang/String;", 0);
+            return Ty::SimpleTy { name: "String" };
+        }
+
+        // String equality
+        if self.is_string(left_type) && self.is_string(right_type) {
+            if op == "==" || op == "!=" {
+                JRustAsm::mv_method_insn(self.mv, INVOKEVIRTUAL, "java/lang/String", "equals", "(Ljava/lang/Object;)Z", 0);
+                if op == "!=" {
+                    JRustAsm::mv_insn(self.mv, ICONST_1);
+                    JRustAsm::mv_insn(self.mv, IXOR);
+                }
+                return Ty::SimpleTy { name: "bool" };
+            }
+        }
+
+        let type_name: String = self.resolve_type_name(left_type);
+
+        if type_name == "i32" || type_name == "bool" || type_name == "char" {
+            if op == "+" { JRustAsm::mv_insn(self.mv, IADD); }
+            else if op == "-" { JRustAsm::mv_insn(self.mv, ISUB); }
+            else if op == "*" { JRustAsm::mv_insn(self.mv, IMUL); }
+            else if op == "/" { JRustAsm::mv_insn(self.mv, IDIV); }
+            else if op == "%" { JRustAsm::mv_insn(self.mv, IREM); }
+            else if op == "|" { JRustAsm::mv_insn(self.mv, IOR); }
+            else if op == "&&" { JRustAsm::mv_insn(self.mv, IAND); }
+            else if op == "||" { JRustAsm::mv_insn(self.mv, IOR); }
+            else if op == "==" { self.gen_int_comparison(IF_ICMPEQ); }
+            else if op == "!=" { self.gen_int_comparison(IF_ICMPNE); }
+            else if op == "<" { self.gen_int_comparison(IF_ICMPLT); }
+            else if op == ">" { self.gen_int_comparison(IF_ICMPGT); }
+            else if op == "<=" { self.gen_int_comparison(IF_ICMPLE); }
+            else if op == ">=" { self.gen_int_comparison(IF_ICMPGE); }
+            else { panic("Unknown binary op: " + op); }
+            if self.is_comparison_op(op) {
+                return Ty::SimpleTy { name: "bool" };
+            }
+            return left_type;
+        }
+
+        if type_name == "i64" {
+            if op == "+" { JRustAsm::mv_insn(self.mv, LADD); }
+            else if op == "-" { JRustAsm::mv_insn(self.mv, LSUB); }
+            else if op == "*" { JRustAsm::mv_insn(self.mv, LMUL); }
+            else if op == "/" { JRustAsm::mv_insn(self.mv, LDIV); }
+            else if op == "==" || op == "!=" || op == "<" || op == ">" || op == "<=" || op == ">=" {
+                JRustAsm::mv_insn(self.mv, LCMP);
+                self.gen_int_comparison_zero(op);
+            }
+            else { panic("Unknown binary op for i64: " + op); }
+            if self.is_comparison_op(op) {
+                return Ty::SimpleTy { name: "bool" };
+            }
+            return left_type;
+        }
+
+        if type_name == "f64" {
+            if op == "+" { JRustAsm::mv_insn(self.mv, DADD); }
+            else if op == "-" { JRustAsm::mv_insn(self.mv, DSUB); }
+            else if op == "*" { JRustAsm::mv_insn(self.mv, DMUL); }
+            else if op == "/" { JRustAsm::mv_insn(self.mv, DDIV); }
+            else if op == "==" || op == "!=" || op == "<" || op == ">" || op == "<=" || op == ">=" {
+                JRustAsm::mv_insn(self.mv, DCMPL);
+                self.gen_int_comparison_zero(op);
+            }
+            else { panic("Unknown binary op for f64: " + op); }
+            if self.is_comparison_op(op) {
+                return Ty::SimpleTy { name: "bool" };
+            }
+            return left_type;
+        }
+
+        panic("Cannot apply binary op '" + op + "' to type: " + type_name);
+        return Ty::VoidTy;
+    }
+
+    fn gen_to_string(self, ty: Ty) {
+        match ty {
+            Ty::SimpleTy { name } => {
+                if name == "i32" { JRustAsm::mv_method_insn(self.mv, INVOKESTATIC, "java/lang/String", "valueOf", "(I)Ljava/lang/String;", 0); }
+                else if name == "i64" { JRustAsm::mv_method_insn(self.mv, INVOKESTATIC, "java/lang/String", "valueOf", "(J)Ljava/lang/String;", 0); }
+                else if name == "f64" { JRustAsm::mv_method_insn(self.mv, INVOKESTATIC, "java/lang/String", "valueOf", "(D)Ljava/lang/String;", 0); }
+                else if name == "bool" { JRustAsm::mv_method_insn(self.mv, INVOKESTATIC, "java/lang/String", "valueOf", "(Z)Ljava/lang/String;", 0); }
+                else if name == "char" { JRustAsm::mv_method_insn(self.mv, INVOKESTATIC, "java/lang/String", "valueOf", "(C)Ljava/lang/String;", 0); }
+                else { JRustAsm::mv_method_insn(self.mv, INVOKESTATIC, "java/lang/String", "valueOf", "(Ljava/lang/Object;)Ljava/lang/String;", 0); }
+            }
+            _ => {
+                JRustAsm::mv_method_insn(self.mv, INVOKESTATIC, "java/lang/String", "valueOf", "(Ljava/lang/Object;)Ljava/lang/String;", 0);
+            }
+        }
+    }
+
+    fn gen_int_comparison(self, opcode: i32) {
+        let true_l: i32 = JRustAsm::label_new();
+        let end_l: i32 = JRustAsm::label_new();
+        JRustAsm::mv_jump_insn(self.mv, opcode, true_l);
+        JRustAsm::mv_insn(self.mv, ICONST_0);
+        JRustAsm::mv_jump_insn(self.mv, GOTO, end_l);
+        JRustAsm::mv_label(self.mv, true_l);
+        JRustAsm::mv_insn(self.mv, ICONST_1);
+        JRustAsm::mv_label(self.mv, end_l);
+    }
+
+    fn gen_int_comparison_zero(self, op: String) {
+        let true_l: i32 = JRustAsm::label_new();
+        let end_l: i32 = JRustAsm::label_new();
+        let mut opcode: i32 = IFEQ;
+        if op == "==" { opcode = IFEQ; }
+        else if op == "!=" { opcode = IFNE; }
+        else if op == "<" { opcode = IFLT; }
+        else if op == ">" { opcode = IFGT; }
+        else if op == "<=" { opcode = IFLE; }
+        else if op == ">=" { opcode = IFGE; }
+        JRustAsm::mv_jump_insn(self.mv, opcode, true_l);
+        JRustAsm::mv_insn(self.mv, ICONST_0);
+        JRustAsm::mv_jump_insn(self.mv, GOTO, end_l);
+        JRustAsm::mv_label(self.mv, true_l);
+        JRustAsm::mv_insn(self.mv, ICONST_1);
+        JRustAsm::mv_label(self.mv, end_l);
+    }
+
+    fn is_comparison_op(self, op: String) -> bool {
+        if op == "==" { return true; }
+        if op == "!=" { return true; }
+        if op == "<" { return true; }
+        if op == ">" { return true; }
+        if op == "<=" { return true; }
+        if op == ">=" { return true; }
+        return false;
+    }
+
+    fn gen_unary(mut self, op: String, operand: Expr) -> Ty {
+        let ty: Ty = self.gen_expr(operand);
+        let type_name: String = self.resolve_type_name(ty);
+        if op == "-" {
+            if type_name == "i32" { JRustAsm::mv_insn(self.mv, INEG); }
+            else if type_name == "i64" { JRustAsm::mv_insn(self.mv, 117); } // LNEG
+            else if type_name == "f64" { JRustAsm::mv_insn(self.mv, DNEG); }
+            else { panic("Cannot negate type: " + type_name); }
+        } else if op == "!" {
+            JRustAsm::mv_insn(self.mv, ICONST_1);
+            JRustAsm::mv_insn(self.mv, IXOR);
+        } else {
+            panic("Unknown unary op: " + op);
+        }
+        return ty;
+    }
+
+    fn gen_call(mut self, name: String, args: Vec<Expr>) -> Ty {
+        // Built-in: println
+        if name == "println" {
+            JRustAsm::mv_field_insn(self.mv, GETSTATIC, "java/lang/System", "out", "Ljava/io/PrintStream;");
+            if args.len() == 0 {
+                JRustAsm::mv_method_insn(self.mv, INVOKEVIRTUAL, "java/io/PrintStream", "println", "()V", 0);
+            } else {
+                let arg_type: Ty = self.gen_expr(args.get(0));
+                let desc: String = "(" + self.print_stream_descriptor(arg_type) + ")V";
+                JRustAsm::mv_method_insn(self.mv, INVOKEVIRTUAL, "java/io/PrintStream", "println", desc, 0);
+            }
+            return Ty::VoidTy;
+        }
+        if name == "print" {
+            JRustAsm::mv_field_insn(self.mv, GETSTATIC, "java/lang/System", "out", "Ljava/io/PrintStream;");
+            if args.len() > 0 {
+                let arg_type: Ty = self.gen_expr(args.get(0));
+                let desc: String = "(" + self.print_stream_descriptor(arg_type) + ")V";
+                JRustAsm::mv_method_insn(self.mv, INVOKEVIRTUAL, "java/io/PrintStream", "print", desc, 0);
+            }
+            return Ty::VoidTy;
+        }
+        if name == "eprintln" {
+            JRustAsm::mv_field_insn(self.mv, GETSTATIC, "java/lang/System", "err", "Ljava/io/PrintStream;");
+            if args.len() == 0 {
+                JRustAsm::mv_method_insn(self.mv, INVOKEVIRTUAL, "java/io/PrintStream", "println", "()V", 0);
+            } else {
+                let arg_type: Ty = self.gen_expr(args.get(0));
+                let desc: String = "(" + self.print_stream_descriptor(arg_type) + ")V";
+                JRustAsm::mv_method_insn(self.mv, INVOKEVIRTUAL, "java/io/PrintStream", "println", desc, 0);
+            }
+            return Ty::VoidTy;
+        }
+        if name == "panic" {
+            JRustAsm::mv_type_insn(self.mv, NEW, "java/lang/RuntimeException");
+            JRustAsm::mv_insn(self.mv, DUP);
+            if args.len() > 0 {
+                self.gen_expr(args.get(0));
+                JRustAsm::mv_method_insn(self.mv, INVOKESPECIAL, "java/lang/RuntimeException", "<init>", "(Ljava/lang/String;)V", 0);
+            } else {
+                JRustAsm::mv_method_insn(self.mv, INVOKESPECIAL, "java/lang/RuntimeException", "<init>", "()V", 0);
+            }
+            JRustAsm::mv_insn(self.mv, ATHROW);
+            return Ty::VoidTy;
+        }
+        if name == "exit" {
+            self.gen_expr(args.get(0));
+            JRustAsm::mv_method_insn(self.mv, INVOKESTATIC, "java/lang/System", "exit", "(I)V", 0);
+            return Ty::VoidTy;
+        }
+        if name == "read_file" {
+            self.gen_expr(args.get(0));
+            JRustAsm::mv_method_insn(self.mv, INVOKESTATIC, "jrust/JRustAsm", "read_file", "(Ljava/lang/String;)Ljava/lang/String;", 0);
+            return Ty::SimpleTy { name: "String" };
+        }
+        if name == "write_file" {
+            self.gen_expr(args.get(0));
+            self.gen_expr(args.get(1));
+            JRustAsm::mv_method_insn(self.mv, INVOKESTATIC, "jrust/JRustAsm", "write_file", "(Ljava/lang/String;Ljava/lang/String;)V", 0);
+            return Ty::VoidTy;
+        }
+        if name == "system" {
+            self.gen_expr(args.get(0));
+            JRustAsm::mv_method_insn(self.mv, INVOKESTATIC, "jrust/JRustAsm", "run_command", "(Ljava/lang/String;)I", 0);
+            return Ty::SimpleTy { name: "i32" };
+        }
+        if name == "args_len" {
+            JRustAsm::mv_method_insn(self.mv, INVOKESTATIC, "jrust/JRustAsm", "args_len", "()I", 0);
+            return Ty::SimpleTy { name: "i32" };
+        }
+        if name == "args_get" {
+            self.gen_expr(args.get(0));
+            JRustAsm::mv_method_insn(self.mv, INVOKESTATIC, "jrust/JRustAsm", "args_get", "(I)Ljava/lang/String;", 0);
+            return Ty::SimpleTy { name: "String" };
+        }
+
+        // Top-level function call
+        let fn_item: Item = self.find_top_level_fn(name);
+        let fn_params: Vec<Param> = item_fn_params(fn_item);
+        let fn_ret: Ty = item_fn_return_type(fn_item);
+        let mut desc_sb: StringBuilder = StringBuilder::new();
+        desc_sb.append("(");
+        let mut ai: i32 = 0;
+        while ai < args.len() {
+            self.gen_expr(args.get(ai));
+            let p: Param = fn_params.get(ai);
+            desc_sb.append(self.type_descriptor(p.ty));
+            ai = ai + 1;
+        }
+        desc_sb.append(")");
+        desc_sb.append(self.type_descriptor(fn_ret));
+        JRustAsm::mv_method_insn(self.mv, INVOKESTATIC, "Main", name, desc_sb.to_string(), 0);
+        return fn_ret;
+    }
+
+    fn print_stream_descriptor(self, arg_type: Ty) -> String {
+        match arg_type {
+            Ty::SimpleTy { name } => {
+                if name == "i32" { return "I"; }
+                if name == "i64" { return "J"; }
+                if name == "f64" { return "D"; }
+                if name == "bool" { return "Z"; }
+                if name == "char" { return "C"; }
+                if name == "String" { return "Ljava/lang/String;"; }
+                return "Ljava/lang/Object;";
+            }
+            _ => { return "Ljava/lang/Object;"; }
+        }
+        return "Ljava/lang/Object;";
+    }
+
+    fn gen_method_call(mut self, receiver: Expr, method_name: String, args: Vec<Expr>) -> Ty {
+        let recv_type: Ty = self.gen_expr(receiver);
+        let type_name: String = self.resolve_type_name(recv_type);
+
+        // String methods
+        if type_name == "String" {
+            return self.gen_string_method(method_name, args);
+        }
+        // Vec methods
+        if self.is_vec_type(recv_type) {
+            return self.gen_vec_method(recv_type, method_name, args);
+        }
+        // Map methods
+        if self.is_map_type(recv_type) {
+            return self.gen_map_method(recv_type, method_name, args);
+        }
+        // StringBuilder methods
+        if type_name == "StringBuilder" {
+            return self.gen_string_builder_method(method_name, args);
+        }
+
+        // User-defined method
+        let method: Item = self.find_impl_method(type_name, method_name);
+        match method {
+            Item::FnDefI { name, params, return_type, body } => {
+                let mut desc_sb: StringBuilder = StringBuilder::new();
+                desc_sb.append("(");
+                let mut arg_idx: i32 = 0;
+                let mut pi: i32 = 0;
+                while pi < params.len() {
+                    let p: Param = params.get(pi);
+                    if !p.is_self {
+                        if arg_idx < args.len() {
+                            self.gen_expr(args.get(arg_idx));
+                            desc_sb.append(self.type_descriptor(p.ty));
+                            arg_idx = arg_idx + 1;
+                        }
+                    }
+                    pi = pi + 1;
+                }
+                desc_sb.append(")");
+                desc_sb.append(self.type_descriptor(return_type));
+                JRustAsm::mv_method_insn(self.mv, INVOKEVIRTUAL, type_name, method_name, desc_sb.to_string(), 0);
+                return return_type;
+            }
+            _ => {
+                panic("Unknown method: " + type_name + "." + method_name);
+            }
+        }
+        return Ty::VoidTy;
+    }
+
+    fn gen_string_method(mut self, method_name: String, args: Vec<Expr>) -> Ty {
+        if method_name == "len" || method_name == "length" {
+            JRustAsm::mv_method_insn(self.mv, INVOKEVIRTUAL, "java/lang/String", "length", "()I", 0);
+            return Ty::SimpleTy { name: "i32" };
+        }
+        if method_name == "char_at" || method_name == "charAt" {
+            self.gen_expr(args.get(0));
+            JRustAsm::mv_method_insn(self.mv, INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", 0);
+            return Ty::SimpleTy { name: "char" };
+        }
+        if method_name == "contains" {
+            self.gen_expr(args.get(0));
+            JRustAsm::mv_method_insn(self.mv, INVOKEVIRTUAL, "java/lang/String", "contains", "(Ljava/lang/CharSequence;)Z", 0);
+            return Ty::SimpleTy { name: "bool" };
+        }
+        if method_name == "starts_with" || method_name == "startsWith" {
+            self.gen_expr(args.get(0));
+            JRustAsm::mv_method_insn(self.mv, INVOKEVIRTUAL, "java/lang/String", "startsWith", "(Ljava/lang/String;)Z", 0);
+            return Ty::SimpleTy { name: "bool" };
+        }
+        if method_name == "ends_with" || method_name == "endsWith" {
+            self.gen_expr(args.get(0));
+            JRustAsm::mv_method_insn(self.mv, INVOKEVIRTUAL, "java/lang/String", "endsWith", "(Ljava/lang/String;)Z", 0);
+            return Ty::SimpleTy { name: "bool" };
+        }
+        if method_name == "substring" {
+            self.gen_expr(args.get(0));
+            if args.len() > 1 {
+                self.gen_expr(args.get(1));
+                JRustAsm::mv_method_insn(self.mv, INVOKEVIRTUAL, "java/lang/String", "substring", "(II)Ljava/lang/String;", 0);
+            } else {
+                JRustAsm::mv_method_insn(self.mv, INVOKEVIRTUAL, "java/lang/String", "substring", "(I)Ljava/lang/String;", 0);
+            }
+            return Ty::SimpleTy { name: "String" };
+        }
+        if method_name == "equals" {
+            self.gen_expr(args.get(0));
+            JRustAsm::mv_method_insn(self.mv, INVOKEVIRTUAL, "java/lang/String", "equals", "(Ljava/lang/Object;)Z", 0);
+            return Ty::SimpleTy { name: "bool" };
+        }
+        if method_name == "to_string" || method_name == "toString" {
+            return Ty::SimpleTy { name: "String" };
+        }
+        if method_name == "replace" {
+            self.gen_expr(args.get(0));
+            self.gen_expr(args.get(1));
+            JRustAsm::mv_method_insn(self.mv, INVOKEVIRTUAL, "java/lang/String", "replace", "(Ljava/lang/CharSequence;Ljava/lang/CharSequence;)Ljava/lang/String;", 0);
+            return Ty::SimpleTy { name: "String" };
+        }
+        if method_name == "trim" {
+            JRustAsm::mv_method_insn(self.mv, INVOKEVIRTUAL, "java/lang/String", "trim", "()Ljava/lang/String;", 0);
+            return Ty::SimpleTy { name: "String" };
+        }
+        if method_name == "is_empty" || method_name == "isEmpty" {
+            JRustAsm::mv_method_insn(self.mv, INVOKEVIRTUAL, "java/lang/String", "isEmpty", "()Z", 0);
+            return Ty::SimpleTy { name: "bool" };
+        }
+        panic("Unknown String method: " + method_name);
+        return Ty::VoidTy;
+    }
+
+    fn gen_vec_method(mut self, recv_type: Ty, method_name: String, args: Vec<Expr>) -> Ty {
+        let elem_type: Ty = self.get_vec_elem_type(recv_type);
+        if method_name == "push" || method_name == "add" {
+            let arg_type: Ty = self.gen_expr(args.get(0));
+            self.box_if_needed(arg_type);
+            JRustAsm::mv_method_insn(self.mv, INVOKEVIRTUAL, "java/util/ArrayList", "add", "(Ljava/lang/Object;)Z", 0);
+            JRustAsm::mv_insn(self.mv, POP);
+            return Ty::VoidTy;
+        }
+        if method_name == "get" {
+            self.gen_expr(args.get(0));
+            JRustAsm::mv_method_insn(self.mv, INVOKEVIRTUAL, "java/util/ArrayList", "get", "(I)Ljava/lang/Object;", 0);
+            self.cast_and_unbox(elem_type);
+            return elem_type;
+        }
+        if method_name == "set" {
+            self.gen_expr(args.get(0));
+            let arg_type: Ty = self.gen_expr(args.get(1));
+            self.box_if_needed(arg_type);
+            JRustAsm::mv_method_insn(self.mv, INVOKEVIRTUAL, "java/util/ArrayList", "set", "(ILjava/lang/Object;)Ljava/lang/Object;", 0);
+            JRustAsm::mv_insn(self.mv, POP);
+            return Ty::VoidTy;
+        }
+        if method_name == "len" || method_name == "size" {
+            JRustAsm::mv_method_insn(self.mv, INVOKEVIRTUAL, "java/util/ArrayList", "size", "()I", 0);
+            return Ty::SimpleTy { name: "i32" };
+        }
+        if method_name == "is_empty" || method_name == "isEmpty" {
+            JRustAsm::mv_method_insn(self.mv, INVOKEVIRTUAL, "java/util/ArrayList", "isEmpty", "()Z", 0);
+            return Ty::SimpleTy { name: "bool" };
+        }
+        if method_name == "remove" {
+            self.gen_expr(args.get(0));
+            JRustAsm::mv_method_insn(self.mv, INVOKEVIRTUAL, "java/util/ArrayList", "remove", "(I)Ljava/lang/Object;", 0);
+            self.cast_and_unbox(elem_type);
+            return elem_type;
+        }
+        if method_name == "contains" {
+            let arg_type: Ty = self.gen_expr(args.get(0));
+            self.box_if_needed(arg_type);
+            JRustAsm::mv_method_insn(self.mv, INVOKEVIRTUAL, "java/util/ArrayList", "contains", "(Ljava/lang/Object;)Z", 0);
+            return Ty::SimpleTy { name: "bool" };
+        }
+        panic("Unknown Vec method: " + method_name);
+        return Ty::VoidTy;
+    }
+
+    fn gen_map_method(mut self, recv_type: Ty, method_name: String, args: Vec<Expr>) -> Ty {
+        let value_type: Ty = self.get_map_value_type(recv_type);
+        if method_name == "insert" || method_name == "put" {
+            let key_type: Ty = self.gen_expr(args.get(0));
+            self.box_if_needed(key_type);
+            let val_type: Ty = self.gen_expr(args.get(1));
+            self.box_if_needed(val_type);
+            JRustAsm::mv_method_insn(self.mv, INVOKEVIRTUAL, "java/util/HashMap", "put", "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", 0);
+            JRustAsm::mv_insn(self.mv, POP);
+            return Ty::VoidTy;
+        }
+        if method_name == "get" {
+            let key_type: Ty = self.gen_expr(args.get(0));
+            self.box_if_needed(key_type);
+            JRustAsm::mv_method_insn(self.mv, INVOKEVIRTUAL, "java/util/HashMap", "get", "(Ljava/lang/Object;)Ljava/lang/Object;", 0);
+            self.cast_and_unbox(value_type);
+            return value_type;
+        }
+        if method_name == "contains_key" || method_name == "containsKey" {
+            let key_type: Ty = self.gen_expr(args.get(0));
+            self.box_if_needed(key_type);
+            JRustAsm::mv_method_insn(self.mv, INVOKEVIRTUAL, "java/util/HashMap", "containsKey", "(Ljava/lang/Object;)Z", 0);
+            return Ty::SimpleTy { name: "bool" };
+        }
+        if method_name == "get_or_default" || method_name == "getOrDefault" {
+            let key_type: Ty = self.gen_expr(args.get(0));
+            self.box_if_needed(key_type);
+            let def_type: Ty = self.gen_expr(args.get(1));
+            self.box_if_needed(def_type);
+            JRustAsm::mv_method_insn(self.mv, INVOKEVIRTUAL, "java/util/HashMap", "getOrDefault", "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", 0);
+            self.cast_and_unbox(value_type);
+            return value_type;
+        }
+        if method_name == "len" || method_name == "size" {
+            JRustAsm::mv_method_insn(self.mv, INVOKEVIRTUAL, "java/util/HashMap", "size", "()I", 0);
+            return Ty::SimpleTy { name: "i32" };
+        }
+        if method_name == "is_empty" || method_name == "isEmpty" {
+            JRustAsm::mv_method_insn(self.mv, INVOKEVIRTUAL, "java/util/HashMap", "isEmpty", "()Z", 0);
+            return Ty::SimpleTy { name: "bool" };
+        }
+        if method_name == "remove" {
+            let key_type: Ty = self.gen_expr(args.get(0));
+            self.box_if_needed(key_type);
+            JRustAsm::mv_method_insn(self.mv, INVOKEVIRTUAL, "java/util/HashMap", "remove", "(Ljava/lang/Object;)Ljava/lang/Object;", 0);
+            self.cast_and_unbox(value_type);
+            return value_type;
+        }
+        panic("Unknown Map method: " + method_name);
+        return Ty::VoidTy;
+    }
+
+    fn gen_string_builder_method(mut self, method_name: String, args: Vec<Expr>) -> Ty {
+        if method_name == "append" {
+            let arg_type: Ty = self.gen_expr(args.get(0));
+            let mut desc: String = "(" + self.type_descriptor(arg_type) + ")Ljava/lang/StringBuilder;";
+            if self.is_object_type(arg_type) && !self.is_string(arg_type) {
+                desc = "(Ljava/lang/Object;)Ljava/lang/StringBuilder;";
+            }
+            JRustAsm::mv_method_insn(self.mv, INVOKEVIRTUAL, "java/lang/StringBuilder", "append", desc, 0);
+            return Ty::SimpleTy { name: "StringBuilder" };
+        }
+        if method_name == "to_string" || method_name == "toString" {
+            JRustAsm::mv_method_insn(self.mv, INVOKEVIRTUAL, "java/lang/StringBuilder", "toString", "()Ljava/lang/String;", 0);
+            return Ty::SimpleTy { name: "String" };
+        }
+        if method_name == "len" || method_name == "length" {
+            JRustAsm::mv_method_insn(self.mv, INVOKEVIRTUAL, "java/lang/StringBuilder", "length", "()I", 0);
+            return Ty::SimpleTy { name: "i32" };
+        }
+        panic("Unknown StringBuilder method: " + method_name);
+        return Ty::VoidTy;
+    }
+
+    fn gen_field_access(mut self, receiver: Expr, field_name: String) -> Ty {
+        let recv_type: Ty = self.gen_expr(receiver);
+        let type_name: String = self.resolve_type_name(recv_type);
+
+        if self.structs.contains_key(type_name) {
+            let sd: Item = self.structs.get(type_name);
+            match sd {
+                Item::StructDefI { name, fields } => {
+                    let mut fi: i32 = 0;
+                    while fi < fields.len() {
+                        let f: Field = fields.get(fi);
+                        if f.name == field_name {
+                            JRustAsm::mv_field_insn(self.mv, GETFIELD, type_name, f.name, self.type_descriptor(f.ty));
+                            return f.ty;
+                        }
+                        fi = fi + 1;
+                    }
+                }
+                _ => {}
+            }
+        }
+        panic("Unknown field: " + type_name + "." + field_name);
+        return Ty::VoidTy;
+    }
+
+    fn gen_struct_init(mut self, struct_name: String, init_fields: Vec<FieldValue>) -> Ty {
+        let sd: Item = self.structs.get(struct_name);
+        match sd {
+            Item::StructDefI { name, fields } => {
+                JRustAsm::mv_type_insn(self.mv, NEW, struct_name);
+                JRustAsm::mv_insn(self.mv, DUP);
+                JRustAsm::mv_method_insn(self.mv, INVOKESPECIAL, struct_name, "<init>", "()V", 0);
+
+                let mut fi: i32 = 0;
+                while fi < init_fields.len() {
+                    let fv: FieldValue = init_fields.get(fi);
+                    JRustAsm::mv_insn(self.mv, DUP);
+                    self.gen_expr(fv.value);
+                    // Find field type
+                    let mut fty: Ty = null;
+                    let mut si: i32 = 0;
+                    while si < fields.len() {
+                        let sf: Field = fields.get(si);
+                        if sf.name == fv.name {
+                            fty = sf.ty;
+                            break;
+                        }
+                        si = si + 1;
+                    }
+                    if fty == null {
+                        panic("Unknown field in struct init: " + struct_name + "." + fv.name);
+                    }
+                    JRustAsm::mv_field_insn(self.mv, PUTFIELD, struct_name, fv.name, self.type_descriptor(fty));
+                    fi = fi + 1;
+                }
+                return Ty::SimpleTy { name: struct_name };
+            }
+            _ => {
+                panic("Unknown struct: " + struct_name);
+            }
+        }
+        return Ty::VoidTy;
+    }
+
+    fn gen_enum_init(mut self, enum_name: String, variant: String, fields: Vec<FieldValue>) -> Ty {
+        let ed: Item = self.enums.get(enum_name);
+        match ed {
+            Item::EnumDefI { name, variants } => {
+                // Find variant
+                let mut variant_def: EnumVariant = null;
+                let mut vi: i32 = 0;
+                while vi < variants.len() {
+                    let v: EnumVariant = variants.get(vi);
+                    if v.name == variant {
+                        variant_def = v;
+                        break;
+                    }
+                    vi = vi + 1;
+                }
+                if variant_def == null {
+                    panic("Unknown enum variant: " + enum_name + "::" + variant);
+                }
+
+                let variant_class: String = enum_name + "$" + variant;
+                JRustAsm::mv_type_insn(self.mv, NEW, variant_class);
+                JRustAsm::mv_insn(self.mv, DUP);
+                JRustAsm::mv_method_insn(self.mv, INVOKESPECIAL, variant_class, "<init>", "()V", 0);
+
+                let mut fi: i32 = 0;
+                while fi < fields.len() {
+                    let fv: FieldValue = fields.get(fi);
+                    JRustAsm::mv_insn(self.mv, DUP);
+                    self.gen_expr(fv.value);
+                    let mut fty: Ty = null;
+                    let mut si: i32 = 0;
+                    while si < variant_def.fields.len() {
+                        let vf: Field = variant_def.fields.get(si);
+                        if vf.name == fv.name {
+                            fty = vf.ty;
+                            break;
+                        }
+                        si = si + 1;
+                    }
+                    if fty == null {
+                        panic("Unknown field in enum init: " + enum_name + "::" + variant + "." + fv.name);
+                    }
+                    JRustAsm::mv_field_insn(self.mv, PUTFIELD, variant_class, fv.name, self.type_descriptor(fty));
+                    fi = fi + 1;
+                }
+                return Ty::SimpleTy { name: enum_name };
+            }
+            _ => {
+                panic("Unknown enum: " + enum_name);
+            }
+        }
+        return Ty::VoidTy;
+    }
+
+    fn gen_static_call(mut self, type_name: String, method_name: String, args: Vec<Expr>) -> Ty {
+        // Vec::new()
+        if type_name == "Vec" && method_name == "new" {
+            JRustAsm::mv_type_insn(self.mv, NEW, "java/util/ArrayList");
+            JRustAsm::mv_insn(self.mv, DUP);
+            JRustAsm::mv_method_insn(self.mv, INVOKESPECIAL, "java/util/ArrayList", "<init>", "()V", 0);
+            return Ty::SimpleTy { name: "Vec" };
+        }
+        // Map::new()
+        if type_name == "Map" && method_name == "new" {
+            JRustAsm::mv_type_insn(self.mv, NEW, "java/util/HashMap");
+            JRustAsm::mv_insn(self.mv, DUP);
+            JRustAsm::mv_method_insn(self.mv, INVOKESPECIAL, "java/util/HashMap", "<init>", "()V", 0);
+            return Ty::SimpleTy { name: "Map" };
+        }
+        // StringBuilder::new()
+        if type_name == "StringBuilder" && method_name == "new" {
+            JRustAsm::mv_type_insn(self.mv, NEW, "java/lang/StringBuilder");
+            JRustAsm::mv_insn(self.mv, DUP);
+            if args.len() == 0 {
+                JRustAsm::mv_method_insn(self.mv, INVOKESPECIAL, "java/lang/StringBuilder", "<init>", "()V", 0);
+            } else {
+                self.gen_expr(args.get(0));
+                JRustAsm::mv_method_insn(self.mv, INVOKESPECIAL, "java/lang/StringBuilder", "<init>", "(Ljava/lang/String;)V", 0);
+            }
+            return Ty::SimpleTy { name: "StringBuilder" };
+        }
+        // String::from
+        if type_name == "String" && method_name == "from" {
+            let arg_type: Ty = self.gen_expr(args.get(0));
+            self.gen_to_string(arg_type);
+            return Ty::SimpleTy { name: "String" };
+        }
+
+        // Imported class static call
+        if self.imports.contains_key(type_name) {
+            let jvm_class: String = self.imports.get(type_name);
+            let mut desc_sb: StringBuilder = StringBuilder::new();
+            desc_sb.append("(");
+            let mut ai: i32 = 0;
+            while ai < args.len() {
+                let arg_type: Ty = self.gen_expr(args.get(ai));
+                desc_sb.append(self.type_descriptor(arg_type));
+                ai = ai + 1;
+            }
+            desc_sb.append(")");
+            let mut ret_type: Ty = Ty::VoidTy;
+            if self.expected_type != null {
+                ret_type = self.expected_type;
+            }
+            desc_sb.append(self.type_descriptor(ret_type));
+            JRustAsm::mv_method_insn(self.mv, INVOKESTATIC, jvm_class, method_name, desc_sb.to_string(), 0);
+            return ret_type;
+        }
+
+        // User-defined static method
+        let method: Item = self.find_impl_method(type_name, method_name);
+        match method {
+            Item::FnDefI { name, params, return_type, body } => {
+                let mut desc_sb: StringBuilder = StringBuilder::new();
+                desc_sb.append("(");
+                let mut arg_idx: i32 = 0;
+                let mut pi: i32 = 0;
+                while pi < params.len() {
+                    let p: Param = params.get(pi);
+                    if !p.is_self {
+                        if arg_idx < args.len() {
+                            self.gen_expr(args.get(arg_idx));
+                            desc_sb.append(self.type_descriptor(p.ty));
+                            arg_idx = arg_idx + 1;
+                        }
+                    }
+                    pi = pi + 1;
+                }
+                desc_sb.append(")");
+                desc_sb.append(self.type_descriptor(return_type));
+                JRustAsm::mv_method_insn(self.mv, INVOKESTATIC, type_name, method_name, desc_sb.to_string(), 0);
+                return return_type;
+            }
+            _ => {
+                panic("Unknown static method: " + type_name + "::" + method_name);
+            }
+        }
+        return Ty::VoidTy;
+    }
+
+    fn gen_assign(mut self, target: Expr, value: Expr) -> Ty {
+        match target {
+            Expr::IdentE { name } => {
+                if !self.locals.contains_key(name) {
+                    panic("Undefined variable: " + name);
+                }
+                let slot: i32 = self.locals.get(name);
+                let ty: Ty = self.local_types.get(name);
+                let prev_expected: Ty = self.expected_type;
+                self.expected_type = ty;
+                self.gen_expr(value);
+                self.expected_type = prev_expected;
+                self.store_local(slot, ty);
+                return Ty::VoidTy;
+            }
+            Expr::FieldAccessE { receiver, field } => {
+                let recv_type: Ty = self.gen_expr(receiver);
+                let type_name: String = self.resolve_type_name(recv_type);
+                if self.structs.contains_key(type_name) {
+                    let sd: Item = self.structs.get(type_name);
+                    match sd {
+                        Item::StructDefI { name, fields } => {
+                            let mut fi: i32 = 0;
+                            while fi < fields.len() {
+                                let f: Field = fields.get(fi);
+                                if f.name == field {
+                                    let prev_expected: Ty = self.expected_type;
+                                    self.expected_type = f.ty;
+                                    self.gen_expr(value);
+                                    self.expected_type = prev_expected;
+                                    JRustAsm::mv_field_insn(self.mv, PUTFIELD, type_name, f.name, self.type_descriptor(f.ty));
+                                    return Ty::VoidTy;
+                                }
+                                fi = fi + 1;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                panic("Unknown field: " + type_name + "." + field);
+                return Ty::VoidTy;
+            }
+            Expr::IndexE { receiver, index } => {
+                self.gen_expr(receiver);
+                self.gen_expr(index);
+                self.gen_expr(value);
+                JRustAsm::mv_insn(self.mv, 83); // AASTORE
+                return Ty::VoidTy;
+            }
+            _ => {
+                panic("Invalid assignment target");
+                return Ty::VoidTy;
+            }
+        }
+        return Ty::VoidTy;
+    }
+
+    fn gen_if(mut self, condition: Expr, then_block: Vec<Stmt>, else_block: Vec<Stmt>) -> Ty {
+        self.gen_expr(condition);
+        let else_label: i32 = JRustAsm::label_new();
+        let end_label: i32 = JRustAsm::label_new();
+        JRustAsm::mv_jump_insn(self.mv, IFEQ, else_label);
+        let mut i: i32 = 0;
+        while i < then_block.len() {
+            self.gen_stmt(then_block.get(i));
+            i = i + 1;
+        }
+        JRustAsm::mv_jump_insn(self.mv, GOTO, end_label);
+        JRustAsm::mv_label(self.mv, else_label);
+        if else_block != null {
+            i = 0;
+            while i < else_block.len() {
+                self.gen_stmt(else_block.get(i));
+                i = i + 1;
+            }
+        }
+        JRustAsm::mv_label(self.mv, end_label);
+        return Ty::VoidTy;
+    }
+
+    fn gen_while(mut self, condition: Expr, body: Vec<Stmt>) -> Ty {
+        let loop_start: i32 = JRustAsm::label_new();
+        let loop_end: i32 = JRustAsm::label_new();
+        let prev_break: i32 = self.break_label;
+        let prev_continue: i32 = self.continue_label;
+        self.break_label = loop_end;
+        self.continue_label = loop_start;
+
+        JRustAsm::mv_label(self.mv, loop_start);
+        self.gen_expr(condition);
+        JRustAsm::mv_jump_insn(self.mv, IFEQ, loop_end);
+
+        let mut i: i32 = 0;
+        while i < body.len() {
+            self.gen_stmt(body.get(i));
+            i = i + 1;
+        }
+        JRustAsm::mv_jump_insn(self.mv, GOTO, loop_start);
+        JRustAsm::mv_label(self.mv, loop_end);
+        self.break_label = prev_break;
+        self.continue_label = prev_continue;
+        return Ty::VoidTy;
+    }
+
+    fn gen_block(mut self, stmts: Vec<Stmt>) -> Ty {
+        let mut i: i32 = 0;
+        while i < stmts.len() {
+            self.gen_stmt(stmts.get(i));
+            i = i + 1;
+        }
+        return Ty::VoidTy;
+    }
+
+    fn gen_for_range(mut self, var_name: String, start: Expr, end: Expr, body: Vec<Stmt>) -> Ty {
+        self.gen_expr(start);
+        let slot: i32 = self.next_local;
+        self.locals.insert(var_name, slot);
+        self.local_types.insert(var_name, Ty::SimpleTy { name: "i32" });
+        self.next_local = self.next_local + 1;
+        JRustAsm::mv_var_insn(self.mv, ISTORE, slot);
+
+        let loop_start: i32 = JRustAsm::label_new();
+        let loop_end: i32 = JRustAsm::label_new();
+        let prev_break: i32 = self.break_label;
+        let prev_continue: i32 = self.continue_label;
+        self.break_label = loop_end;
+        self.continue_label = loop_start;
+
+        JRustAsm::mv_label(self.mv, loop_start);
+        JRustAsm::mv_var_insn(self.mv, ILOAD, slot);
+        self.gen_expr(end);
+        JRustAsm::mv_jump_insn(self.mv, IF_ICMPGE, loop_end);
+
+        let mut i: i32 = 0;
+        while i < body.len() {
+            self.gen_stmt(body.get(i));
+            i = i + 1;
+        }
+
+        JRustAsm::mv_iinc(self.mv, slot, 1);
+        JRustAsm::mv_jump_insn(self.mv, GOTO, loop_start);
+        JRustAsm::mv_label(self.mv, loop_end);
+        self.break_label = prev_break;
+        self.continue_label = prev_continue;
+        return Ty::VoidTy;
+    }
+
+    fn gen_for_each(mut self, var_name: String, iterable: Expr, body: Vec<Stmt>) -> Ty {
+        let iter_type: Ty = self.gen_expr(iterable);
+        let elem_type: Ty = self.get_vec_elem_type(iter_type);
+
+        JRustAsm::mv_method_insn(self.mv, INVOKEVIRTUAL, "java/util/ArrayList", "iterator", "()Ljava/util/Iterator;", 0);
+        let iter_slot: i32 = self.next_local;
+        self.next_local = self.next_local + 1;
+        JRustAsm::mv_var_insn(self.mv, ASTORE, iter_slot);
+
+        let item_slot: i32 = self.next_local;
+        self.locals.insert(var_name, item_slot);
+        self.local_types.insert(var_name, elem_type);
+        self.next_local = self.next_local + self.local_size(elem_type);
+
+        let loop_start: i32 = JRustAsm::label_new();
+        let loop_end: i32 = JRustAsm::label_new();
+
+        JRustAsm::mv_label(self.mv, loop_start);
+        JRustAsm::mv_var_insn(self.mv, ALOAD, iter_slot);
+        JRustAsm::mv_method_insn(self.mv, INVOKEINTERFACE, "java/util/Iterator", "hasNext", "()Z", 1);
+        JRustAsm::mv_jump_insn(self.mv, IFEQ, loop_end);
+
+        JRustAsm::mv_var_insn(self.mv, ALOAD, iter_slot);
+        JRustAsm::mv_method_insn(self.mv, INVOKEINTERFACE, "java/util/Iterator", "next", "()Ljava/lang/Object;", 1);
+        self.cast_and_unbox(elem_type);
+        self.store_local(item_slot, elem_type);
+
+        let mut i: i32 = 0;
+        while i < body.len() {
+            self.gen_stmt(body.get(i));
+            i = i + 1;
+        }
+        JRustAsm::mv_jump_insn(self.mv, GOTO, loop_start);
+        JRustAsm::mv_label(self.mv, loop_end);
+        return Ty::VoidTy;
+    }
+
+    fn gen_match(mut self, subject: Expr, arms: Vec<MatchArm>) -> Ty {
+        let subject_type: Ty = self.gen_expr(subject);
+        let temp_slot: i32 = self.next_local;
+        self.next_local = self.next_local + self.local_size(subject_type);
+        self.store_local(temp_slot, subject_type);
+
+        let end_label: i32 = JRustAsm::label_new();
+
+        let mut ai: i32 = 0;
+        while ai < arms.len() {
+            let arm: MatchArm = arms.get(ai);
+            let next_arm: i32 = JRustAsm::label_new();
+            let mut is_wildcard: bool = false;
+            match arm.pattern {
+                Pattern::WildcardP => { is_wildcard = true; }
+                _ => {}
+            }
+
+            if !is_wildcard {
+                self.gen_match_condition(arm.pattern, temp_slot, subject_type, next_arm);
+            }
+
+            // Bind enum bindings
+            match arm.pattern {
+                Pattern::EnumVariantP { enum_name, variant, bindings } => {
+                    if bindings.len() > 0 {
+                        self.gen_enum_bindings(enum_name, variant, bindings, temp_slot);
+                    }
+                }
+                _ => {}
+            }
+
+            // Execute arm body
+            let mut bi: i32 = 0;
+            while bi < arm.body.len() {
+                self.gen_stmt(arm.body.get(bi));
+                bi = bi + 1;
+            }
+            JRustAsm::mv_jump_insn(self.mv, GOTO, end_label);
+
+            if !is_wildcard {
+                JRustAsm::mv_label(self.mv, next_arm);
+            }
+            ai = ai + 1;
+        }
+        JRustAsm::mv_label(self.mv, end_label);
+        return Ty::VoidTy;
+    }
+
+    fn gen_match_condition(mut self, pattern: Pattern, temp_slot: i32, subject_type: Ty, fail_label: i32) {
+        match pattern {
+            Pattern::WildcardP => {}
+            Pattern::LiteralP { expr } => {
+                self.load_local(temp_slot, subject_type);
+                let type_name: String = self.resolve_type_name(subject_type);
+                if type_name == "String" {
+                    self.gen_expr(expr);
+                    JRustAsm::mv_method_insn(self.mv, INVOKEVIRTUAL, "java/lang/String", "equals", "(Ljava/lang/Object;)Z", 0);
+                    JRustAsm::mv_jump_insn(self.mv, IFEQ, fail_label);
+                } else if type_name == "char" || type_name == "i32" || type_name == "bool" {
+                    self.gen_expr(expr);
+                    JRustAsm::mv_jump_insn(self.mv, IF_ICMPNE, fail_label);
+                } else if type_name == "i64" {
+                    self.gen_expr(expr);
+                    JRustAsm::mv_insn(self.mv, LCMP);
+                    JRustAsm::mv_jump_insn(self.mv, IFNE, fail_label);
+                } else {
+                    // null check
+                    let mut is_null_lit: bool = false;
+                    match expr {
+                        Expr::NullLitE => { is_null_lit = true; }
+                        _ => {}
+                    }
+                    if is_null_lit {
+                        JRustAsm::mv_jump_insn(self.mv, IFNONNULL, fail_label);
+                    } else {
+                        panic("Cannot match on type: " + type_name);
+                    }
+                }
+            }
+            Pattern::EnumVariantP { enum_name, variant, bindings } => {
+                let variant_class: String = enum_name + "$" + variant;
+                self.load_local(temp_slot, subject_type);
+                JRustAsm::mv_type_insn(self.mv, INSTANCEOF, variant_class);
+                JRustAsm::mv_jump_insn(self.mv, IFEQ, fail_label);
+            }
+        }
+    }
+
+    fn gen_enum_bindings(mut self, enum_name: String, variant: String, bindings: Vec<String>, temp_slot: i32) {
+        let variant_class: String = enum_name + "$" + variant;
+
+        // Find variant def
+        let ed: Item = self.enums.get(enum_name);
+        let mut variant_def: EnumVariant = null;
+        match ed {
+            Item::EnumDefI { name, variants } => {
+                let mut vi: i32 = 0;
+                while vi < variants.len() {
+                    let v: EnumVariant = variants.get(vi);
+                    if v.name == variant {
+                        variant_def = v;
+                        break;
+                    }
+                    vi = vi + 1;
+                }
+            }
+            _ => {}
+        }
+        if variant_def == null {
+            panic("Unknown variant: " + enum_name + "::" + variant);
+        }
+
+        // Cast and store
+        JRustAsm::mv_var_insn(self.mv, ALOAD, temp_slot);
+        JRustAsm::mv_type_insn(self.mv, CHECKCAST, variant_class);
+        let cast_slot: i32 = self.next_local;
+        self.next_local = self.next_local + 1;
+        JRustAsm::mv_var_insn(self.mv, ASTORE, cast_slot);
+
+        let mut bi: i32 = 0;
+        while bi < bindings.len() {
+            if bi < variant_def.fields.len() {
+                let binding_name: String = bindings.get(bi);
+                let f: Field = variant_def.fields.get(bi);
+                JRustAsm::mv_var_insn(self.mv, ALOAD, cast_slot);
+                JRustAsm::mv_field_insn(self.mv, GETFIELD, variant_class, f.name, self.type_descriptor(f.ty));
+                let bind_slot: i32 = self.next_local;
+                self.locals.insert(binding_name, bind_slot);
+                self.local_types.insert(binding_name, f.ty);
+                self.next_local = self.next_local + self.local_size(f.ty);
+                self.store_local(bind_slot, f.ty);
+            }
+            bi = bi + 1;
+        }
+    }
+
+    fn gen_index(mut self, receiver: Expr, index: Expr) -> Ty {
+        let recv_type: Ty = self.gen_expr(receiver);
+        if self.is_vec_type(recv_type) {
+            let elem_type: Ty = self.get_vec_elem_type(recv_type);
+            self.gen_expr(index);
+            JRustAsm::mv_method_insn(self.mv, INVOKEVIRTUAL, "java/util/ArrayList", "get", "(I)Ljava/lang/Object;", 0);
+            self.cast_and_unbox(elem_type);
+            return elem_type;
+        }
+        if self.is_string(recv_type) {
+            self.gen_expr(index);
+            JRustAsm::mv_method_insn(self.mv, INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", 0);
+            return Ty::SimpleTy { name: "char" };
+        }
+        // Array indexing
+        self.gen_expr(index);
+        JRustAsm::mv_insn(self.mv, 50); // AALOAD
+        return Ty::SimpleTy { name: "Object" };
+    }
+
+    fn gen_throw(mut self, message: Expr) -> Ty {
+        JRustAsm::mv_type_insn(self.mv, NEW, "java/lang/RuntimeException");
+        JRustAsm::mv_insn(self.mv, DUP);
+        self.gen_expr(message);
+        JRustAsm::mv_method_insn(self.mv, INVOKESPECIAL, "java/lang/RuntimeException", "<init>", "(Ljava/lang/String;)V", 0);
+        JRustAsm::mv_insn(self.mv, ATHROW);
+        return Ty::VoidTy;
+    }
+
+    fn gen_array_lit(mut self, elements: Vec<Expr>) -> Ty {
+        if elements.len() == 0 {
+            JRustAsm::mv_insn(self.mv, ICONST_0);
+            JRustAsm::mv_type_insn(self.mv, ANEWARRAY, "java/lang/Object");
+            return Ty::ArrayTy { element: Ty::SimpleTy { name: "Object" } };
+        }
+        let elem_type: Ty = self.infer_type(elements.get(0));
+        self.push_int(elements.len());
+        JRustAsm::mv_type_insn(self.mv, ANEWARRAY, self.jvm_class_name(self.resolve_type_name(elem_type)));
+        let mut i: i32 = 0;
+        while i < elements.len() {
+            JRustAsm::mv_insn(self.mv, DUP);
+            self.push_int(i);
+            self.gen_expr(elements.get(i));
+            JRustAsm::mv_insn(self.mv, 83); // AASTORE
+            i = i + 1;
+        }
+        return Ty::ArrayTy { element: elem_type };
+    }
+
+    fn gen_cast(mut self, value: Expr, cast_type: Ty) -> Ty {
+        let src_type: Ty = self.gen_expr(value);
+        let src_name: String = self.resolve_type_name(src_type);
+        let dest_name: String = self.resolve_type_name(cast_type);
+
+        if src_name == "i32" && dest_name == "i64" { JRustAsm::mv_insn(self.mv, I2L); }
+        else if src_name == "i32" && dest_name == "f64" { JRustAsm::mv_insn(self.mv, I2D); }
+        else if src_name == "i64" && dest_name == "i32" { JRustAsm::mv_insn(self.mv, L2I); }
+        else if src_name == "f64" && dest_name == "i32" { JRustAsm::mv_insn(self.mv, D2I); }
+        else {
+            JRustAsm::mv_type_insn(self.mv, CHECKCAST, self.jvm_class_name(dest_name));
+        }
+        return cast_type;
+    }
+
+    // --- Boxing / Unboxing ---
+
+    fn box_if_needed(self, ty: Ty) {
+        match ty {
+            Ty::SimpleTy { name } => {
+                if name == "i32" { JRustAsm::mv_method_insn(self.mv, INVOKESTATIC, "java/lang/Integer", "valueOf", "(I)Ljava/lang/Integer;", 0); }
+                else if name == "i64" { JRustAsm::mv_method_insn(self.mv, INVOKESTATIC, "java/lang/Long", "valueOf", "(J)Ljava/lang/Long;", 0); }
+                else if name == "f64" { JRustAsm::mv_method_insn(self.mv, INVOKESTATIC, "java/lang/Double", "valueOf", "(D)Ljava/lang/Double;", 0); }
+                else if name == "bool" { JRustAsm::mv_method_insn(self.mv, INVOKESTATIC, "java/lang/Boolean", "valueOf", "(Z)Ljava/lang/Boolean;", 0); }
+                else if name == "char" { JRustAsm::mv_method_insn(self.mv, INVOKESTATIC, "java/lang/Character", "valueOf", "(C)Ljava/lang/Character;", 0); }
+            }
+            _ => {}
+        }
+    }
+
+    fn cast_and_unbox(self, target_type: Ty) {
+        match target_type {
+            Ty::SimpleTy { name } => {
+                if name == "i32" {
+                    JRustAsm::mv_type_insn(self.mv, CHECKCAST, "java/lang/Integer");
+                    JRustAsm::mv_method_insn(self.mv, INVOKEVIRTUAL, "java/lang/Integer", "intValue", "()I", 0);
+                } else if name == "i64" {
+                    JRustAsm::mv_type_insn(self.mv, CHECKCAST, "java/lang/Long");
+                    JRustAsm::mv_method_insn(self.mv, INVOKEVIRTUAL, "java/lang/Long", "longValue", "()J", 0);
+                } else if name == "f64" {
+                    JRustAsm::mv_type_insn(self.mv, CHECKCAST, "java/lang/Double");
+                    JRustAsm::mv_method_insn(self.mv, INVOKEVIRTUAL, "java/lang/Double", "doubleValue", "()D", 0);
+                } else if name == "bool" {
+                    JRustAsm::mv_type_insn(self.mv, CHECKCAST, "java/lang/Boolean");
+                    JRustAsm::mv_method_insn(self.mv, INVOKEVIRTUAL, "java/lang/Boolean", "booleanValue", "()Z", 0);
+                } else if name == "char" {
+                    JRustAsm::mv_type_insn(self.mv, CHECKCAST, "java/lang/Character");
+                    JRustAsm::mv_method_insn(self.mv, INVOKEVIRTUAL, "java/lang/Character", "charValue", "()C", 0);
+                } else if name == "String" {
+                    JRustAsm::mv_type_insn(self.mv, CHECKCAST, "java/lang/String");
+                } else if name == "Object" || name == "null" {
+                    // no cast needed
+                } else {
+                    JRustAsm::mv_type_insn(self.mv, CHECKCAST, self.jvm_class_name(name));
+                }
+            }
+            Ty::GenericTy { name, args } => {
+                JRustAsm::mv_type_insn(self.mv, CHECKCAST, self.jvm_class_name(name));
+            }
+            _ => {}
+        }
+    }
+
+    // --- Type helpers ---
+
+    fn is_void_type(self, ty: Ty) -> bool {
+        match ty {
+            Ty::VoidTy => { return true; }
+            _ => { return false; }
+        }
+        return false;
+    }
+
+    fn type_descriptor(self, ty: Ty) -> String {
+        if ty == null {
+            return "Ljava/lang/Object;";
+        }
+        match ty {
+            Ty::VoidTy => { return "V"; }
+            Ty::SimpleTy { name } => {
+                if name == "i32" { return "I"; }
+                if name == "i64" { return "J"; }
+                if name == "f64" { return "D"; }
+                if name == "bool" { return "Z"; }
+                if name == "char" { return "C"; }
+                if name == "String" { return "Ljava/lang/String;"; }
+                if name == "Vec" { return "Ljava/util/ArrayList;"; }
+                if name == "Map" { return "Ljava/util/HashMap;"; }
+                if name == "StringBuilder" { return "Ljava/lang/StringBuilder;"; }
+                if name == "Object" || name == "null" { return "Ljava/lang/Object;"; }
+                return "L" + name + ";";
+            }
+            Ty::GenericTy { name, args } => {
+                if name == "Vec" { return "Ljava/util/ArrayList;"; }
+                if name == "Map" { return "Ljava/util/HashMap;"; }
+                return "L" + name + ";";
+            }
+            Ty::ArrayTy { element } => {
+                return "[" + self.type_descriptor(element);
+            }
+        }
+        return "Ljava/lang/Object;";
+    }
+
+    fn local_size(self, ty: Ty) -> i32 {
+        match ty {
+            Ty::SimpleTy { name } => {
+                if name == "i64" || name == "f64" { return 2; }
+                return 1;
+            }
+            _ => { return 1; }
+        }
+        return 1;
+    }
+
+    fn is_wide(self, ty: Ty) -> bool {
+        match ty {
+            Ty::SimpleTy { name } => {
+                return name == "i64" || name == "f64";
+            }
+            _ => { return false; }
+        }
+        return false;
+    }
+
+    fn is_string(self, ty: Ty) -> bool {
+        match ty {
+            Ty::SimpleTy { name } => {
+                return name == "String";
+            }
+            _ => { return false; }
+        }
+        return false;
+    }
+
+    fn is_object_type(self, ty: Ty) -> bool {
+        match ty {
+            Ty::SimpleTy { name } => {
+                if name == "i32" || name == "i64" || name == "f64" || name == "bool" || name == "char" {
+                    return false;
+                }
+                return true;
+            }
+            _ => { return true; }
+        }
+        return true;
+    }
+
+    fn is_vec_type(self, ty: Ty) -> bool {
+        match ty {
+            Ty::GenericTy { name, args } => { return name == "Vec"; }
+            Ty::SimpleTy { name } => { return name == "Vec"; }
+            _ => { return false; }
+        }
+        return false;
+    }
+
+    fn is_map_type(self, ty: Ty) -> bool {
+        match ty {
+            Ty::GenericTy { name, args } => { return name == "Map"; }
+            Ty::SimpleTy { name } => { return name == "Map"; }
+            _ => { return false; }
+        }
+        return false;
+    }
+
+    fn get_vec_elem_type(self, vec_type: Ty) -> Ty {
+        match vec_type {
+            Ty::GenericTy { name, args } => {
+                if args.len() > 0 {
+                    return args.get(0);
+                }
+            }
+            _ => {}
+        }
+        return Ty::SimpleTy { name: "Object" };
+    }
+
+    fn get_map_value_type(self, map_type: Ty) -> Ty {
+        match map_type {
+            Ty::GenericTy { name, args } => {
+                if args.len() >= 2 {
+                    return args.get(1);
+                }
+            }
+            _ => {}
+        }
+        return Ty::SimpleTy { name: "Object" };
+    }
+
+    fn resolve_type_name(self, ty: Ty) -> String {
+        if ty == null { return "null"; }
+        match ty {
+            Ty::SimpleTy { name } => { return name; }
+            Ty::GenericTy { name, args } => { return name; }
+            Ty::ArrayTy { element } => { return "array"; }
+            Ty::VoidTy => { return "void"; }
+        }
+        return "unknown";
+    }
+
+    fn jvm_class_name(self, type_name: String) -> String {
+        if type_name == "String" { return "java/lang/String"; }
+        if type_name == "Vec" { return "java/util/ArrayList"; }
+        if type_name == "Map" { return "java/util/HashMap"; }
+        if type_name == "StringBuilder" { return "java/lang/StringBuilder"; }
+        if type_name == "Object" { return "java/lang/Object"; }
+        if self.imports.contains_key(type_name) {
+            return self.imports.get(type_name);
+        }
+        return type_name;
+    }
+
+    fn load_local(self, slot: i32, ty: Ty) {
+        match ty {
+            Ty::SimpleTy { name } => {
+                if name == "i32" || name == "bool" || name == "char" {
+                    JRustAsm::mv_var_insn(self.mv, ILOAD, slot);
+                } else if name == "i64" {
+                    JRustAsm::mv_var_insn(self.mv, LLOAD, slot);
+                } else if name == "f64" {
+                    JRustAsm::mv_var_insn(self.mv, DLOAD, slot);
+                } else {
+                    JRustAsm::mv_var_insn(self.mv, ALOAD, slot);
+                }
+            }
+            _ => {
+                JRustAsm::mv_var_insn(self.mv, ALOAD, slot);
+            }
+        }
+    }
+
+    fn store_local(self, slot: i32, ty: Ty) {
+        match ty {
+            Ty::SimpleTy { name } => {
+                if name == "i32" || name == "bool" || name == "char" {
+                    JRustAsm::mv_var_insn(self.mv, ISTORE, slot);
+                } else if name == "i64" {
+                    JRustAsm::mv_var_insn(self.mv, LSTORE, slot);
+                } else if name == "f64" {
+                    JRustAsm::mv_var_insn(self.mv, DSTORE, slot);
+                } else {
+                    JRustAsm::mv_var_insn(self.mv, ASTORE, slot);
+                }
+            }
+            _ => {
+                JRustAsm::mv_var_insn(self.mv, ASTORE, slot);
+            }
+        }
+    }
+
+    fn push_int(self, value: i32) {
+        if value >= -1 && value <= 5 {
+            JRustAsm::mv_insn(self.mv, ICONST_0 + value);
+        } else if value >= -128 && value <= 127 {
+            JRustAsm::mv_int_insn(self.mv, BIPUSH, value);
+        } else if value >= -32768 && value <= 32767 {
+            JRustAsm::mv_int_insn(self.mv, SIPUSH, value);
+        } else {
+            JRustAsm::mv_ldc_int(self.mv, value);
+        }
+    }
+
+    // --- Type inference ---
+
+    fn infer_type(self, expr: Expr) -> Ty {
+        match expr {
+            Expr::IntLitE { value } => { return Ty::SimpleTy { name: "i32" }; }
+            Expr::FloatLitE { value } => { return Ty::SimpleTy { name: "f64" }; }
+            Expr::StringLitE { value } => { return Ty::SimpleTy { name: "String" }; }
+            Expr::CharLitE { value } => { return Ty::SimpleTy { name: "char" }; }
+            Expr::BoolLitE { value } => { return Ty::SimpleTy { name: "bool" }; }
+            Expr::NullLitE => { return Ty::SimpleTy { name: "null" }; }
+            Expr::IdentE { name } => {
+                if self.local_types.contains_key(name) {
+                    return self.local_types.get(name);
+                }
+                let mut ci: i32 = 0;
+                while ci < self.constants.len() {
+                    let cd: Item = self.constants.get(ci);
+                    let cn: String = item_fn_name(cd);
+                    if cn == name { return item_const_type(cd); }
+                    ci = ci + 1;
+                }
+                return Ty::SimpleTy { name: "Object" };
+            }
+            Expr::SelfExprE => { return Ty::SimpleTy { name: self.current_class }; }
+            Expr::CallE { name, args } => {
+                if name == "println" || name == "print" || name == "eprintln" || name == "panic" || name == "exit" {
+                    return Ty::VoidTy;
+                }
+                if name == "read_file" || name == "args_get" {
+                    return Ty::SimpleTy { name: "String" };
+                }
+                if name == "args_len" || name == "system" {
+                    return Ty::SimpleTy { name: "i32" };
+                }
+                let fn_item: Item = self.find_top_level_fn(name);
+                return item_fn_return_type(fn_item);
+            }
+            Expr::StaticCallE { type_name, method_name, args } => {
+                if type_name == "Vec" && method_name == "new" { return Ty::SimpleTy { name: "Vec" }; }
+                if type_name == "Map" && method_name == "new" { return Ty::SimpleTy { name: "Map" }; }
+                if type_name == "StringBuilder" && method_name == "new" { return Ty::SimpleTy { name: "StringBuilder" }; }
+                if type_name == "String" && method_name == "from" { return Ty::SimpleTy { name: "String" }; }
+                let m: Item = self.find_impl_method(type_name, method_name);
+                match m {
+                    Item::FnDefI { name, params, return_type, body } => { return return_type; }
+                    _ => { return Ty::VoidTy; }
+                }
+                return Ty::VoidTy;
+            }
+            Expr::MethodCallE { receiver, method_name, args } => {
+                let recv_type: Ty = self.infer_type(receiver);
+                let recv_name: String = self.resolve_type_name(recv_type);
+                if recv_name == "String" {
+                    if method_name == "len" || method_name == "length" { return Ty::SimpleTy { name: "i32" }; }
+                    if method_name == "char_at" || method_name == "charAt" { return Ty::SimpleTy { name: "char" }; }
+                    if method_name == "contains" || method_name == "starts_with" || method_name == "ends_with" || method_name == "equals" || method_name == "is_empty" || method_name == "isEmpty" { return Ty::SimpleTy { name: "bool" }; }
+                    return Ty::SimpleTy { name: "String" };
+                }
+                if recv_name == "Vec" {
+                    if method_name == "len" || method_name == "size" { return Ty::SimpleTy { name: "i32" }; }
+                    if method_name == "is_empty" || method_name == "isEmpty" || method_name == "contains" { return Ty::SimpleTy { name: "bool" }; }
+                    if method_name == "get" || method_name == "remove" { return self.get_vec_elem_type(recv_type); }
+                    return Ty::VoidTy;
+                }
+                if recv_name == "Map" {
+                    if method_name == "len" || method_name == "size" { return Ty::SimpleTy { name: "i32" }; }
+                    if method_name == "is_empty" || method_name == "isEmpty" || method_name == "contains_key" || method_name == "containsKey" { return Ty::SimpleTy { name: "bool" }; }
+                    if method_name == "get" || method_name == "remove" || method_name == "get_or_default" || method_name == "getOrDefault" { return self.get_map_value_type(recv_type); }
+                    return Ty::VoidTy;
+                }
+                if recv_name == "StringBuilder" {
+                    if method_name == "append" { return Ty::SimpleTy { name: "StringBuilder" }; }
+                    if method_name == "to_string" || method_name == "toString" { return Ty::SimpleTy { name: "String" }; }
+                    if method_name == "len" || method_name == "length" { return Ty::SimpleTy { name: "i32" }; }
+                    return Ty::VoidTy;
+                }
+                let m: Item = self.find_impl_method(recv_name, method_name);
+                match m {
+                    Item::FnDefI { name, params, return_type, body } => { return return_type; }
+                    _ => { return Ty::VoidTy; }
+                }
+                return Ty::VoidTy;
+            }
+            Expr::FieldAccessE { receiver, field } => {
+                let recv_type: Ty = self.infer_type(receiver);
+                let recv_name: String = self.resolve_type_name(recv_type);
+                if self.structs.contains_key(recv_name) {
+                    let sd: Item = self.structs.get(recv_name);
+                    match sd {
+                        Item::StructDefI { name, fields } => {
+                            let mut fi: i32 = 0;
+                            while fi < fields.len() {
+                                let f: Field = fields.get(fi);
+                                if f.name == field { return f.ty; }
+                                fi = fi + 1;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                return Ty::SimpleTy { name: "Object" };
+            }
+            Expr::StructInitE { name, fields } => { return Ty::SimpleTy { name: name }; }
+            Expr::EnumInitE { enum_name, variant, fields } => { return Ty::SimpleTy { name: enum_name }; }
+            Expr::BinaryE { left, op, right } => {
+                if self.is_comparison_op(op) { return Ty::SimpleTy { name: "bool" }; }
+                if op == "&&" || op == "||" { return Ty::SimpleTy { name: "bool" }; }
+                let lt: Ty = self.infer_type(left);
+                if op == "+" && self.is_string(lt) { return Ty::SimpleTy { name: "String" }; }
+                return lt;
+            }
+            Expr::UnaryE { op, operand } => {
+                if op == "!" { return Ty::SimpleTy { name: "bool" }; }
+                return self.infer_type(operand);
+            }
+            Expr::AssignE { target, value } => { return Ty::VoidTy; }
+            Expr::IfE { condition, then_block, else_block } => { return Ty::VoidTy; }
+            Expr::WhileE { condition, body } => { return Ty::VoidTy; }
+            Expr::BlockE { stmts } => { return Ty::VoidTy; }
+            Expr::ForRangeE { var_name, start, end, body } => { return Ty::VoidTy; }
+            Expr::ForEachE { var_name, iterable, body } => { return Ty::VoidTy; }
+            Expr::MatchE { subject, arms } => { return Ty::VoidTy; }
+            Expr::IndexE { receiver, index } => {
+                let recv_type: Ty = self.infer_type(receiver);
+                if self.is_vec_type(recv_type) { return self.get_vec_elem_type(recv_type); }
+                if self.is_string(recv_type) { return Ty::SimpleTy { name: "char" }; }
+                return Ty::SimpleTy { name: "Object" };
+            }
+            Expr::ThrowE { message } => { return Ty::VoidTy; }
+            Expr::ArrayLitE { elements } => {
+                if elements.len() == 0 { return Ty::ArrayTy { element: Ty::SimpleTy { name: "Object" } }; }
+                return Ty::ArrayTy { element: self.infer_type(elements.get(0)) };
+            }
+            Expr::CastE { value, cast_type } => { return cast_type; }
+        }
+        return Ty::VoidTy;
+    }
+
+    // --- Lookup helpers ---
+
+    fn find_top_level_fn(self, name: String) -> Item {
+        let mut i: i32 = 0;
+        while i < self.top_level_fns.len() {
+            let fn_item: Item = self.top_level_fns.get(i);
+            let fn_name: String = item_fn_name(fn_item);
+            if fn_name == name {
+                return fn_item;
+            }
+            i = i + 1;
+        }
+        panic("Unknown function: " + name);
+        return Item::ImportI { path: "" };
+    }
+
+    fn find_impl_method(self, type_name: String, method_name: String) -> Item {
+        if self.impl_methods.contains_key(type_name) {
+            let methods: Vec<Item> = self.impl_methods.get(type_name);
+            let mut i: i32 = 0;
+            while i < methods.len() {
+                let m: Item = methods.get(i);
+                let mn: String = item_fn_name(m);
+                if mn == method_name {
+                    return m;
+                }
+                i = i + 1;
+            }
+        }
+        panic("Unknown method: " + type_name + "." + method_name);
+        return Item::ImportI { path: "" };
+    }
+}
+
+// ============================================================
+// Main entry point
+// ============================================================
+fn main() {
+    if args_len() < 1 {
+        eprintln("Usage: jrust <file.jrs>");
+        exit(1);
+    }
+    let input_file: String = args_get(0);
+    let source: String = read_file(input_file);
+
+    // Lex
+    let mut lexer: Lexer = Lexer::new(source);
+    let tokens: Vec<Token> = lexer.tokenize();
+
+    // Parse
+    let mut parser: Parser = Parser::new(tokens);
+    let program: Program = parser.parse();
+
+    // Codegen
+    let output_dir: String = "output";
+    let mut codegen: Codegen = Codegen::new(program, output_dir);
+    codegen.generate();
+
+    println("Compiled to " + output_dir + "/");
+}

@@ -1,0 +1,15 @@
+# Trace doodad — values that bring their own reduction rules
+#
+# trace(x) wraps a value so that every function application
+# automatically lifts through the wrapper, producing trace(result).
+
+rule trace_lift : @meta -> @self {
+  ?f(trace(?x)) => trace(#eval(?f(?x)))
+  ?f(trace(?x), ?y) => trace(#eval(?f(?x, #eval(?y))))
+  ?f(?x, trace(?y)) => trace(#eval(?f(#eval(?x), ?y)))
+}
+
+fn fact(0) = 1
+fn fact(?n) = ?n * fact(?n - 1)
+
+fact(trace(5))

@@ -1,0 +1,149 @@
+// Test: Enum with impl block
+enum Token {
+    Ident { text: String },
+    IntLit { value: i32 },
+    Plus,
+    Eof,
+}
+
+impl Token {
+    fn is_eof(self) -> bool {
+        match self {
+            Token::Eof => {
+                return true;
+            }
+            _ => {
+                return false;
+            }
+        }
+        return false;
+    }
+}
+
+// Test: Building a token list (simulating lexer output)
+fn make_tokens() -> Vec<Token> {
+    let mut tokens: Vec<Token> = Vec::new();
+    tokens.push(Token::Ident { text: "x" });
+    tokens.push(Token::Plus);
+    tokens.push(Token::IntLit { value: 42 });
+    tokens.push(Token::Eof);
+    return tokens;
+}
+
+// Test: Walking tokens with index (parser-like)
+fn parse_tokens(tokens: Vec<Token>) {
+    for i in 0..tokens.len() {
+        let tok: Token = tokens.get(i);
+        match tok {
+            Token::Ident { text } => {
+                println("ident: " + text);
+            }
+            Token::IntLit { value } => {
+                println("int: " + value);
+            }
+            Token::Plus => {
+                println("plus");
+            }
+            Token::Eof => {
+                println("eof");
+            }
+        }
+    }
+}
+
+// Test: Nested enum match returning values via mutation
+enum Expr {
+    Num { value: i32 },
+    Add { left: Expr, right: Expr },
+}
+
+fn eval(e: Expr) -> i32 {
+    let mut result: i32 = 0;
+    match e {
+        Expr::Num { value } => {
+            result = value;
+        }
+        Expr::Add { left, right } => {
+            result = eval(left) + eval(right);
+        }
+    }
+    return result;
+}
+
+// Test: Map with Vec values
+fn build_index() {
+    let mut index: Map<String, Vec<i32>> = Map::new();
+
+    let mut nums1: Vec<i32> = Vec::new();
+    nums1.push(1);
+    nums1.push(2);
+    nums1.push(3);
+    index.insert("odd", nums1);
+
+    let mut nums2: Vec<i32> = Vec::new();
+    nums2.push(10);
+    nums2.push(20);
+    index.insert("even", nums2);
+
+    let odds: Vec<i32> = index.get("odd");
+    println("odd count: " + odds.len());
+    println("first odd: " + odds.get(0));
+}
+
+// Test: String character processing (like a mini lexer)
+fn count_digits(s: String) -> i32 {
+    let mut count: i32 = 0;
+    for i in 0..s.len() {
+        let c: char = s.char_at(i);
+        if c >= '0' {
+            if c <= '9' {
+                count = count + 1;
+            }
+        }
+    }
+    return count;
+}
+
+// Test: While loop with string building
+fn repeat_str(s: String, n: i32) -> String {
+    let mut result: String = "";
+    let mut i: i32 = 0;
+    while i < n {
+        result = result + s;
+        i = i + 1;
+    }
+    return result;
+}
+
+fn main() {
+    println("=== Token simulation ===");
+    let tokens: Vec<Token> = make_tokens();
+    parse_tokens(tokens);
+
+    println("=== Recursive enum eval ===");
+    let e: Expr = Expr::Add {
+        left: Expr::Num { value: 3 },
+        right: Expr::Add {
+            left: Expr::Num { value: 4 },
+            right: Expr::Num { value: 5 },
+        },
+    };
+    println("3 + (4 + 5) = " + eval(e));
+
+    println("=== Map with Vec values ===");
+    build_index();
+
+    println("=== Character processing ===");
+    println("digits in 'abc123def45': " + count_digits("abc123def45"));
+
+    println("=== String repeat ===");
+    println(repeat_str("ab", 4));
+
+    println("=== Enum impl method ===");
+    let t1: Token = Token::Eof;
+    let t2: Token = Token::Plus;
+    println(t1.is_eof());
+    println(t2.is_eof());
+
+    println("DONE");
+}

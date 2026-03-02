@@ -24,6 +24,8 @@ pub enum Token {
     LBracket,
     RBracket,
     HashBrace,  // #{
+    HashEval,   // #eval
+    HashStep,   // #step
     Comma,
     Colon,
     Str(String),
@@ -67,12 +69,20 @@ impl Lexer {
         c
     }
 
+    fn starts_with_at(&self, pos: usize, s: &str) -> bool {
+        s.chars().enumerate().all(|(i, c)| self.chars.get(pos + i).copied() == Some(c))
+    }
+
     fn skip_whitespace_and_comments(&mut self) {
         loop {
             while self.peek().is_whitespace() { self.advance(); }
             if self.peek() == '#' {
                 // #{ is a HashBrace token, not a comment
                 if self.chars.get(self.pos + 1).copied() == Some('{') {
+                    break;
+                }
+                // Don't treat #eval(...) or #step(...) as comments
+                if self.starts_with_at(self.pos + 1, "eval") || self.starts_with_at(self.pos + 1, "step") {
                     break;
                 }
                 while self.peek() != '\n' && self.peek() != '\0' { self.advance(); }
@@ -175,7 +185,15 @@ impl Lexer {
             ']' => Token::RBracket,
             '#' => {
                 if self.peek() == '{' { self.advance(); Token::HashBrace }
-                else { panic!("Unexpected '#' — expected '#{{' for set literal") }
+                else if self.starts_with_at(self.pos, "eval") {
+                    for _ in 0..4 { self.advance(); }
+                    Token::HashEval
+                }
+                else if self.starts_with_at(self.pos, "step") {
+                    for _ in 0..4 { self.advance(); }
+                    Token::HashStep
+                }
+                else { panic!("Unexpected '#' — expected '#{{', '#eval', or '#step'") }
             }
             '|' => Token::Pipe,
             ',' => Token::Comma,
@@ -242,6 +260,7 @@ impl Lexer {
 pub struct Program {
     pub rules: Vec<Rule>,
     pub meta_rules: Vec<(Rule, String)>, // (rule, target_scope_name)
+    pub rewrite_rules: Vec<Rule>,        // @meta -> @self rules
     pub emit_scopes: Vec<String>,        // scope names used via @scope in expressions
     pub expr: Pattern,
 }
@@ -297,6 +316,7 @@ impl<'a> Parser<'a> {
         let mut fn_clauses: HashMap<String, Vec<Clause>> = HashMap::new();
         let mut fn_order: Vec<String> = Vec::new();
         let mut meta_rules: Vec<(Rule, String)> = Vec::new();
+        let mut rewrite_rules: Vec<Rule> = Vec::new();
         let mut main_rules: Vec<Rule> = Vec::new();
         let mut last_expr: Option<Pattern> = None;
 
@@ -311,7 +331,9 @@ impl<'a> Parser<'a> {
                 }
                 Token::KwRule => {
                     let (rule, is_meta, target_scope) = self.parse_rule_decl();
-                    if is_meta {
+                    if is_meta && target_scope == "self" {
+                        rewrite_rules.push(rule);
+                    } else if is_meta {
                         meta_rules.push((rule, target_scope));
                     } else {
                         main_rules.push(rule);
@@ -339,6 +361,7 @@ impl<'a> Parser<'a> {
         Program {
             rules,
             meta_rules,
+            rewrite_rules,
             emit_scopes,
             expr: last_expr.expect("No expression to evaluate"),
         }
@@ -513,6 +536,12 @@ impl<'a> Parser<'a> {
                 Pattern::Set(
                     elems.iter().map(|e| self.reify_inner_vars(e, outer_next_var, pvar_sym)).collect(),
                 )
+            }
+            Pattern::Eval(inner) => {
+                Pattern::Eval(Box::new(self.reify_inner_vars(inner, outer_next_var, pvar_sym)))
+            }
+            Pattern::Step(inner) => {
+                Pattern::Step(Box::new(self.reify_inner_vars(inner, outer_next_var, pvar_sym)))
             }
             _ => pat.clone(),
         }
@@ -870,6 +899,20 @@ impl<'a> Parser<'a> {
                 let else_branch = self.parse_expr();
                 let if_sym = self.store.sym("if");
                 Pattern::Call(Box::new(Pattern::Sym(if_sym)), vec![cond, then_branch, else_branch])
+            }
+            Token::HashEval => {
+                self.pos += 1;
+                self.expect(Token::LParen);
+                let inner = self.parse_expr();
+                self.expect(Token::RParen);
+                Pattern::Eval(Box::new(inner))
+            }
+            Token::HashStep => {
+                self.pos += 1;
+                self.expect(Token::LParen);
+                let inner = self.parse_expr();
+                self.expect(Token::RParen);
+                Pattern::Step(Box::new(inner))
             }
             Token::Scope(name) => {
                 // @scope_name expr → emit(scope_name_sym, expr)

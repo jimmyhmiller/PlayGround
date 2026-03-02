@@ -1,0 +1,68 @@
+struct Counter {
+    value: i32,
+}
+
+impl Counter {
+    fn new(start: i32) -> Counter {
+        let c = Counter { value: start };
+        return c;
+    }
+
+    fn get(self) -> i32 {
+        return self.value;
+    }
+
+    fn increment(self) -> Counter {
+        let c = Counter { value: self.value + 1 };
+        return c;
+    }
+}
+
+fn add(a: i32, b: i32) -> i32 {
+    return a + b;
+}
+
+fn main() {
+    // Basic arithmetic
+    let x: i32 = 10;
+    let y: i32 = 20;
+    println(add(x, y));
+
+    // Float literals
+    let pi: f64 = 3.14;
+    println(pi);
+
+    // Booleans
+    let flag: bool = true;
+    println(flag);
+
+    // String
+    let msg: String = "Hello, JRust!";
+    println(msg);
+
+    // Struct usage
+    let c = Counter::new(0);
+    let c2 = c.increment();
+    let c3 = c2.increment();
+    println(c3.get());
+
+    // Comparisons
+    let eq: bool = 5 == 5;
+    println(eq);
+    let lt: bool = 3 < 10;
+    println(lt);
+
+    // If expression
+    if x > y {
+        println("x is bigger");
+    } else {
+        println("y is bigger or equal");
+    }
+
+    // While loop
+    let mut i: i32 = 0;
+    while i < 5 {
+        println(i);
+        i = i + 1;
+    }
+}

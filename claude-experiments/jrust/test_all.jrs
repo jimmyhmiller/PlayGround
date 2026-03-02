@@ -1,0 +1,156 @@
+// Test: Enums with data
+enum Shape {
+    Circle { radius: f64 },
+    Rect { width: f64, height: f64 },
+    Point,
+}
+
+// Test: Match on enum
+fn describe(s: Shape) -> String {
+    match s {
+        Shape::Circle { radius } => {
+            return "circle";
+        }
+        Shape::Rect { width, height } => {
+            return "rect";
+        }
+        Shape::Point => {
+            return "point";
+        }
+    }
+    return "unknown";
+}
+
+// Test: Match on string
+fn greet(name: String) -> String {
+    match name {
+        "Alice" => {
+            return "Hello Alice!";
+        }
+        "Bob" => {
+            return "Hi Bob!";
+        }
+        _ => {
+            return "Hey stranger!";
+        }
+    }
+    return "";
+}
+
+// Test: Match on int
+fn fizzbuzz(n: i32) -> String {
+    match n {
+        0 => {
+            return "zero";
+        }
+        1 => {
+            return "one";
+        }
+        _ => {
+            return "other";
+        }
+    }
+    return "";
+}
+
+// Test: const
+const MAX_SIZE: i32 = 100;
+
+fn main() {
+    println("=== Enums ===");
+    let c = Shape::Circle { radius: 5.0 };
+    let r = Shape::Rect { width: 3.0, height: 4.0 };
+    let p = Shape::Point;
+    println(describe(c));
+    println(describe(r));
+    println(describe(p));
+
+    println("=== Match on string ===");
+    println(greet("Alice"));
+    println(greet("Bob"));
+    println(greet("Charlie"));
+
+    println("=== Match on int ===");
+    println(fizzbuzz(0));
+    println(fizzbuzz(1));
+    println(fizzbuzz(42));
+
+    println("=== Vec ===");
+    let mut v: Vec<String> = Vec::new();
+    v.push("hello");
+    v.push("world");
+    v.push("!");
+    println(v.len());
+    println(v.get(0));
+    println(v.get(1));
+
+    println("=== Vec for-each ===");
+    for item in v {
+        println(item);
+    }
+
+    println("=== For range ===");
+    for i in 0..5 {
+        println(i);
+    }
+
+    println("=== Map ===");
+    let mut m: Map<String, i32> = Map::new();
+    m.insert("x", 10);
+    m.insert("y", 20);
+    println(m.get("x"));
+    println(m.get("y"));
+    println(m.contains_key("x"));
+    println(m.contains_key("z"));
+
+    println("=== Char ===");
+    let ch: char = 'A';
+    println(ch);
+    let s: String = "hello";
+    let c2: char = s.char_at(0);
+    println(c2);
+
+    println("=== String ops ===");
+    let greeting: String = "Hello, World!";
+    println(greeting.len());
+    println(greeting.contains("World"));
+    println(greeting.starts_with("Hello"));
+    println(greeting.substring(0, 5));
+
+    println("=== String equality ===");
+    if "abc" == "abc" {
+        println("equal");
+    }
+    if "abc" != "xyz" {
+        println("not equal");
+    }
+
+    println("=== String concat ===");
+    let name: String = "JRust";
+    let msg: String = "Hello, " + name + "!";
+    println(msg);
+
+    println("=== Null ===");
+    let n: String = null;
+    if n == null {
+        println("is null");
+    }
+
+    println("=== Const ===");
+    println(MAX_SIZE);
+
+    println("=== Bitwise OR ===");
+    let flags: i32 = 1 | 2 | 4;
+    println(flags);
+
+    println("=== StringBuilder ===");
+    let mut sb: StringBuilder = StringBuilder::new();
+    sb.append("foo");
+    sb.append("bar");
+    println(sb.to_string());
+
+    println("=== Eprintln ===");
+    eprintln("this goes to stderr");
+
+    println("DONE");
+}

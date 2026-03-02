@@ -15,7 +15,7 @@ pub type Rules4Engine = Engine;
 #[unsafe(no_mangle)]
 pub extern "C" fn r4_engine_new() -> *mut Rules4Engine {
     let store = TermStore::new();
-    let engine = Engine::new(store, Vec::new(), Vec::new());
+    let engine = Engine::new(store, Vec::new(), Vec::new(), Vec::new());
     Box::into_raw(Box::new(engine))
 }
 
