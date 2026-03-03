@@ -16,7 +16,7 @@ javac -cp asm.jar -d build \
     src/jrust/ast/Program.java \
     src/jrust/Parser.java \
     src/jrust/codegen/JvmCodegen.java \
-    src/jrust/JRustAsm.java \
+    src/jrust/JRustRuntime.java \
     src/jrust/Main.java
 
 echo "=== Running JRust on sample.jrs ==="

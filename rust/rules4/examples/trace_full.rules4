@@ -1,0 +1,20 @@
+# Full trace: lift trace out of args, then step_inner through everything
+
+rule trace_lift : @meta -> @self {
+  ?f(trace(?x)) => trace(#step_inner(?f(?x)))
+  ?f(trace(?x), ?y) => trace(#step_inner(?f(?x, #eval(?y))))
+  ?f(?x, trace(?y)) => trace(#step_inner(?f(#eval(?x), ?y)))
+}
+
+rule trace_step : @meta -> @self {
+  trace(?x) => trace(#step_inner(?x))
+}
+
+rule trace_print : @meta -> @io {
+  reduction(?s, ?old, ?new, ?kind) => println("[", ?s, "] ", ?old, "  =>  ", ?new)
+}
+
+fn fact(0) = 1
+fn fact(?n) = ?n * fact(?n - 1)
+
+fact(trace(5))

@@ -1,0 +1,75 @@
+fn main() {
+    println("=== Testing short-circuit && and || ===");
+
+    // Short-circuit &&: right side should NOT execute when left is false
+    let x: String = null;
+    if x != null && x.len() > 0 {
+        println("FAIL: should not reach here");
+    } else {
+        println("PASS: && short-circuits on null check");
+    }
+
+    // Short-circuit ||: right side should NOT execute when left is true
+    let y: String = null;
+    if true || y.len() > 0 {
+        println("PASS: || short-circuits on true left");
+    } else {
+        println("FAIL");
+    }
+
+    // Chained &&
+    let a: i32 = 5;
+    if a > 0 && a < 10 && a != 3 {
+        println("PASS: chained && works");
+    }
+
+    // Mixed && and ||
+    if a == 5 || a == 10 {
+        println("PASS: || with equality");
+    }
+
+    println("");
+    println("=== Testing char classification builtins ===");
+
+    if is_digit('0') && is_digit('9') && !is_digit('a') {
+        println("PASS: is_digit");
+    }
+
+    if is_letter('a') && is_letter('Z') && !is_letter('5') {
+        println("PASS: is_letter");
+    }
+
+    if is_alphanumeric('a') && is_alphanumeric('5') && !is_alphanumeric(' ') {
+        println("PASS: is_alphanumeric");
+    }
+
+    // Combine short-circuit with char builtins
+    let c: char = 'x';
+    if is_letter(c) && !is_digit(c) {
+        println("PASS: short-circuit with char builtins");
+    }
+
+    println("");
+    println("=== Testing 'as' casts ===");
+
+    let i: i32 = 42;
+    let l: i64 = i as i64;
+    println(l);
+
+    let d: f64 = i as f64;
+    println(d);
+
+    let back: i32 = l as i32;
+    if back == 42 {
+        println("PASS: i32 -> i64 -> i32 roundtrip");
+    }
+
+    let pi: f64 = 3.14;
+    let trunc: i32 = pi as i32;
+    if trunc == 3 {
+        println("PASS: f64 -> i32 truncation");
+    }
+
+    println("");
+    println("All features working!");
+}

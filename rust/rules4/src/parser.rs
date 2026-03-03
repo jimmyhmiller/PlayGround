@@ -26,6 +26,8 @@ pub enum Token {
     HashBrace,  // #{
     HashEval,   // #eval
     HashStep,   // #step
+    HashStepInner, // #step_inner
+    HashSubst,     // #subst
     Comma,
     Colon,
     Str(String),
@@ -81,8 +83,8 @@ impl Lexer {
                 if self.chars.get(self.pos + 1).copied() == Some('{') {
                     break;
                 }
-                // Don't treat #eval(...) or #step(...) as comments
-                if self.starts_with_at(self.pos + 1, "eval") || self.starts_with_at(self.pos + 1, "step") {
+                // Don't treat #eval(...) or #step(...) or #subst(...) as comments
+                if self.starts_with_at(self.pos + 1, "eval") || self.starts_with_at(self.pos + 1, "step") || self.starts_with_at(self.pos + 1, "subst") {
                     break;
                 }
                 while self.peek() != '\n' && self.peek() != '\0' { self.advance(); }
@@ -189,11 +191,19 @@ impl Lexer {
                     for _ in 0..4 { self.advance(); }
                     Token::HashEval
                 }
+                else if self.starts_with_at(self.pos, "step_inner") {
+                    for _ in 0..10 { self.advance(); }
+                    Token::HashStepInner
+                }
                 else if self.starts_with_at(self.pos, "step") {
                     for _ in 0..4 { self.advance(); }
                     Token::HashStep
                 }
-                else { panic!("Unexpected '#' — expected '#{{', '#eval', or '#step'") }
+                else if self.starts_with_at(self.pos, "subst") {
+                    for _ in 0..5 { self.advance(); }
+                    Token::HashSubst
+                }
+                else { panic!("Unexpected '#' — expected '#{{', '#eval', '#step', '#step_inner', or '#subst'") }
             }
             '|' => Token::Pipe,
             ',' => Token::Comma,
@@ -542,6 +552,16 @@ impl<'a> Parser<'a> {
             }
             Pattern::Step(inner) => {
                 Pattern::Step(Box::new(self.reify_inner_vars(inner, outer_next_var, pvar_sym)))
+            }
+            Pattern::StepInner(inner) => {
+                Pattern::StepInner(Box::new(self.reify_inner_vars(inner, outer_next_var, pvar_sym)))
+            }
+            Pattern::Subst(term, old, new) => {
+                Pattern::Subst(
+                    Box::new(self.reify_inner_vars(term, outer_next_var, pvar_sym)),
+                    Box::new(self.reify_inner_vars(old, outer_next_var, pvar_sym)),
+                    Box::new(self.reify_inner_vars(new, outer_next_var, pvar_sym)),
+                )
             }
             _ => pat.clone(),
         }
@@ -913,6 +933,24 @@ impl<'a> Parser<'a> {
                 let inner = self.parse_expr();
                 self.expect(Token::RParen);
                 Pattern::Step(Box::new(inner))
+            }
+            Token::HashStepInner => {
+                self.pos += 1;
+                self.expect(Token::LParen);
+                let inner = self.parse_expr();
+                self.expect(Token::RParen);
+                Pattern::StepInner(Box::new(inner))
+            }
+            Token::HashSubst => {
+                self.pos += 1;
+                self.expect(Token::LParen);
+                let term = self.parse_expr();
+                self.expect(Token::Comma);
+                let old = self.parse_expr();
+                self.expect(Token::Comma);
+                let new = self.parse_expr();
+                self.expect(Token::RParen);
+                Pattern::Subst(Box::new(term), Box::new(old), Box::new(new))
             }
             Token::Scope(name) => {
                 // @scope_name expr → emit(scope_name_sym, expr)

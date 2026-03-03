@@ -1,0 +1,18 @@
+# Experiment: trace flowing through fact - will hit base case problem
+
+rule trace_arith : @meta -> @self {
+  trace(?x) + trace(?y) => trace(#eval(#eval(?x) + #eval(?y)))
+  trace(?x) + ?y => trace(#eval(#eval(?x) + #eval(?y)))
+  ?x + trace(?y) => trace(#eval(#eval(?x) + #eval(?y)))
+  trace(?x) * trace(?y) => trace(#eval(#eval(?x) * #eval(?y)))
+  trace(?x) * ?y => trace(#eval(#eval(?x) * #eval(?y)))
+  ?x * trace(?y) => trace(#eval(#eval(?x) * #eval(?y)))
+  trace(?x) - trace(?y) => trace(#eval(#eval(?x) - #eval(?y)))
+  trace(?x) - ?y => trace(#eval(#eval(?x) - #eval(?y)))
+  ?x - trace(?y) => trace(#eval(#eval(?x) - #eval(?y)))
+}
+
+fn fact(0) = 1
+fn fact(?n) = ?n * fact(?n - 1)
+
+fact(trace(2))

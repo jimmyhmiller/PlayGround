@@ -8,6 +8,7 @@ import jrust.ast.Stmt;
 import jrust.ast.Type;
 import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.ClassWriter;
+import org.objectweb.asm.FieldVisitor;
 import org.objectweb.asm.Label;
 import org.objectweb.asm.MethodVisitor;
 
@@ -270,7 +271,7 @@ public class JvmCodegen {
             locals.put("__args__", nextLocal);
             // Pass args to JRustAsm so args_len/args_get work
             mv.visitVarInsn(ALOAD, nextLocal);
-            mv.visitMethodInsn(INVOKESTATIC, "jrust/JRustAsm", "set_args",
+            mv.visitMethodInsn(INVOKESTATIC, "jrust/JRustRuntime", "set_args",
                     "([Ljava/lang/String;)V", false);
             nextLocal++;
         }
@@ -713,7 +714,7 @@ public class JvmCodegen {
         // Built-in: read_file
         if (call.name().equals("read_file")) {
             generateExpr(call.args().get(0));
-            mv.visitMethodInsn(INVOKESTATIC, "jrust/JRustAsm", "read_file",
+            mv.visitMethodInsn(INVOKESTATIC, "jrust/JRustRuntime", "read_file",
                     "(Ljava/lang/String;)Ljava/lang/String;", false);
             return new Type.Simple("String");
         }
@@ -722,7 +723,7 @@ public class JvmCodegen {
         if (call.name().equals("write_file")) {
             generateExpr(call.args().get(0));
             generateExpr(call.args().get(1));
-            mv.visitMethodInsn(INVOKESTATIC, "jrust/JRustAsm", "write_file",
+            mv.visitMethodInsn(INVOKESTATIC, "jrust/JRustRuntime", "write_file",
                     "(Ljava/lang/String;Ljava/lang/String;)V", false);
             return new Type.Void();
         }
@@ -730,21 +731,21 @@ public class JvmCodegen {
         // Built-in: system
         if (call.name().equals("system")) {
             generateExpr(call.args().get(0));
-            mv.visitMethodInsn(INVOKESTATIC, "jrust/JRustAsm", "run_command",
+            mv.visitMethodInsn(INVOKESTATIC, "jrust/JRustRuntime", "run_command",
                     "(Ljava/lang/String;)I", false);
             return new Type.Simple("i32");
         }
 
         // Built-in: args_len
         if (call.name().equals("args_len")) {
-            mv.visitMethodInsn(INVOKESTATIC, "jrust/JRustAsm", "args_len", "()I", false);
+            mv.visitMethodInsn(INVOKESTATIC, "jrust/JRustRuntime", "args_len", "()I", false);
             return new Type.Simple("i32");
         }
 
         // Built-in: args_get
         if (call.name().equals("args_get")) {
             generateExpr(call.args().get(0));
-            mv.visitMethodInsn(INVOKESTATIC, "jrust/JRustAsm", "args_get",
+            mv.visitMethodInsn(INVOKESTATIC, "jrust/JRustRuntime", "args_get",
                     "(I)Ljava/lang/String;", false);
             return new Type.Simple("String");
         }
@@ -803,6 +804,21 @@ public class JvmCodegen {
         // Built-in StringBuilder methods
         if (typeName.equals("StringBuilder")) {
             return generateStringBuilderMethodCall(mc.method(), mc.args());
+        }
+
+        // ASM ClassWriter methods
+        if (typeName.equals("ClassWriter")) {
+            return generateClassWriterMethod(mc.method(), mc.args());
+        }
+
+        // ASM MethodVisitor methods
+        if (typeName.equals("MethodVisitor")) {
+            return generateMethodVisitorMethod(mc.method(), mc.args());
+        }
+
+        // ASM FieldVisitor methods
+        if (typeName.equals("FieldVisitor")) {
+            return generateFieldVisitorMethod(mc.method(), mc.args());
         }
 
         // User-defined method
@@ -1065,6 +1081,252 @@ public class JvmCodegen {
         };
     }
 
+    // --- ASM ClassWriter methods ---
+
+    private Type generateClassWriterMethod(String method, List<Expr> args) {
+        return switch (method) {
+            case "visit" -> {
+                // visit(version, access, name, superName) → visit(ver, acc, name, null/*sig*/, super, null/*ifaces*/)
+                // Args: 0=version, 1=access, 2=name, 3=superName
+                generateExpr(args.get(0)); // version
+                generateExpr(args.get(1)); // access
+                generateExpr(args.get(2)); // name
+                mv.visitInsn(ACONST_NULL); // signature (inserted between name and superName)
+                generateExpr(args.get(3)); // superName
+                mv.visitInsn(ACONST_NULL); // interfaces
+                mv.visitMethodInsn(INVOKEVIRTUAL, "org/objectweb/asm/ClassWriter", "visit",
+                        "(IILjava/lang/String;Ljava/lang/String;Ljava/lang/String;[Ljava/lang/String;)V", false);
+                yield new Type.Void();
+            }
+            case "visit_method" -> {
+                // visit_method(access, name, desc) → visitMethod(acc, name, desc, null, null) → MethodVisitor
+                for (Expr arg : args) generateExpr(arg);
+                mv.visitInsn(ACONST_NULL); // signature
+                mv.visitInsn(ACONST_NULL); // exceptions
+                mv.visitMethodInsn(INVOKEVIRTUAL, "org/objectweb/asm/ClassWriter", "visitMethod",
+                        "(ILjava/lang/String;Ljava/lang/String;Ljava/lang/String;[Ljava/lang/String;)Lorg/objectweb/asm/MethodVisitor;", false);
+                yield new Type.Simple("MethodVisitor");
+            }
+            case "visit_field" -> {
+                if (args.size() == 3) {
+                    // visit_field(access, name, desc) → visitField(acc, name, desc, null, null) → FieldVisitor
+                    for (Expr arg : args) generateExpr(arg);
+                    mv.visitInsn(ACONST_NULL); // signature
+                    mv.visitInsn(ACONST_NULL); // value
+                } else {
+                    // visit_field(access, name, desc, value) → visitField(acc, name, desc, null, value)
+                    // Push first 3 args
+                    generateExpr(args.get(0));
+                    generateExpr(args.get(1));
+                    generateExpr(args.get(2));
+                    mv.visitInsn(ACONST_NULL); // signature
+                    // Push value, box if int
+                    Type valType = generateExpr(args.get(3));
+                    boxIfNeeded(valType);
+                }
+                mv.visitMethodInsn(INVOKEVIRTUAL, "org/objectweb/asm/ClassWriter", "visitField",
+                        "(ILjava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/Object;)Lorg/objectweb/asm/FieldVisitor;", false);
+                yield new Type.Simple("FieldVisitor");
+            }
+            case "visit_end" -> {
+                mv.visitMethodInsn(INVOKEVIRTUAL, "org/objectweb/asm/ClassWriter", "visitEnd", "()V", false);
+                yield new Type.Void();
+            }
+            default -> throw new RuntimeException("Unknown ClassWriter method: " + method);
+        };
+    }
+
+    // --- ASM MethodVisitor methods ---
+
+    private Type generateMethodVisitorMethod(String method, List<Expr> args) {
+        return switch (method) {
+            case "visit_code" -> {
+                mv.visitMethodInsn(INVOKEVIRTUAL, "org/objectweb/asm/MethodVisitor", "visitCode", "()V", false);
+                yield new Type.Void();
+            }
+            case "visit_insn" -> {
+                generateExpr(args.get(0));
+                mv.visitMethodInsn(INVOKEVIRTUAL, "org/objectweb/asm/MethodVisitor", "visitInsn", "(I)V", false);
+                yield new Type.Void();
+            }
+            case "visit_int_insn" -> {
+                generateExpr(args.get(0));
+                generateExpr(args.get(1));
+                mv.visitMethodInsn(INVOKEVIRTUAL, "org/objectweb/asm/MethodVisitor", "visitIntInsn", "(II)V", false);
+                yield new Type.Void();
+            }
+            case "visit_var_insn" -> {
+                generateExpr(args.get(0));
+                generateExpr(args.get(1));
+                mv.visitMethodInsn(INVOKEVIRTUAL, "org/objectweb/asm/MethodVisitor", "visitVarInsn", "(II)V", false);
+                yield new Type.Void();
+            }
+            case "visit_field_insn" -> {
+                for (Expr arg : args) generateExpr(arg);
+                mv.visitMethodInsn(INVOKEVIRTUAL, "org/objectweb/asm/MethodVisitor", "visitFieldInsn",
+                        "(ILjava/lang/String;Ljava/lang/String;Ljava/lang/String;)V", false);
+                yield new Type.Void();
+            }
+            case "visit_method_insn" -> {
+                // visit_method_insn(opcode, owner, name, desc, isInterface)
+                // isInterface is i32 in JRust but Z (boolean) in JVM — JVM treats int as boolean ABI-compatibly
+                for (Expr arg : args) generateExpr(arg);
+                mv.visitMethodInsn(INVOKEVIRTUAL, "org/objectweb/asm/MethodVisitor", "visitMethodInsn",
+                        "(ILjava/lang/String;Ljava/lang/String;Ljava/lang/String;Z)V", false);
+                yield new Type.Void();
+            }
+            case "visit_jump_insn" -> {
+                generateExpr(args.get(0));
+                generateExpr(args.get(1));
+                mv.visitMethodInsn(INVOKEVIRTUAL, "org/objectweb/asm/MethodVisitor", "visitJumpInsn",
+                        "(ILorg/objectweb/asm/Label;)V", false);
+                yield new Type.Void();
+            }
+            case "visit_label" -> {
+                generateExpr(args.get(0));
+                mv.visitMethodInsn(INVOKEVIRTUAL, "org/objectweb/asm/MethodVisitor", "visitLabel",
+                        "(Lorg/objectweb/asm/Label;)V", false);
+                yield new Type.Void();
+            }
+            case "ldc_str" -> {
+                generateExpr(args.get(0));
+                mv.visitMethodInsn(INVOKEVIRTUAL, "org/objectweb/asm/MethodVisitor", "visitLdcInsn",
+                        "(Ljava/lang/Object;)V", false);
+                yield new Type.Void();
+            }
+            case "ldc_int" -> {
+                generateExpr(args.get(0));
+                mv.visitMethodInsn(INVOKESTATIC, "java/lang/Integer", "valueOf", "(I)Ljava/lang/Integer;", false);
+                mv.visitMethodInsn(INVOKEVIRTUAL, "org/objectweb/asm/MethodVisitor", "visitLdcInsn",
+                        "(Ljava/lang/Object;)V", false);
+                yield new Type.Void();
+            }
+            case "ldc_long" -> {
+                generateExpr(args.get(0));
+                mv.visitMethodInsn(INVOKESTATIC, "java/lang/Long", "valueOf", "(J)Ljava/lang/Long;", false);
+                mv.visitMethodInsn(INVOKEVIRTUAL, "org/objectweb/asm/MethodVisitor", "visitLdcInsn",
+                        "(Ljava/lang/Object;)V", false);
+                yield new Type.Void();
+            }
+            case "ldc_double" -> {
+                generateExpr(args.get(0));
+                mv.visitMethodInsn(INVOKESTATIC, "java/lang/Double", "valueOf", "(D)Ljava/lang/Double;", false);
+                mv.visitMethodInsn(INVOKEVIRTUAL, "org/objectweb/asm/MethodVisitor", "visitLdcInsn",
+                        "(Ljava/lang/Object;)V", false);
+                yield new Type.Void();
+            }
+            case "visit_type_insn" -> {
+                generateExpr(args.get(0));
+                generateExpr(args.get(1));
+                mv.visitMethodInsn(INVOKEVIRTUAL, "org/objectweb/asm/MethodVisitor", "visitTypeInsn",
+                        "(ILjava/lang/String;)V", false);
+                yield new Type.Void();
+            }
+            case "visit_iinc_insn" -> {
+                generateExpr(args.get(0));
+                generateExpr(args.get(1));
+                mv.visitMethodInsn(INVOKEVIRTUAL, "org/objectweb/asm/MethodVisitor", "visitIincInsn", "(II)V", false);
+                yield new Type.Void();
+            }
+            case "visit_maxs" -> {
+                generateExpr(args.get(0));
+                generateExpr(args.get(1));
+                mv.visitMethodInsn(INVOKEVIRTUAL, "org/objectweb/asm/MethodVisitor", "visitMaxs", "(II)V", false);
+                yield new Type.Void();
+            }
+            case "visit_end" -> {
+                mv.visitMethodInsn(INVOKEVIRTUAL, "org/objectweb/asm/MethodVisitor", "visitEnd", "()V", false);
+                yield new Type.Void();
+            }
+            default -> throw new RuntimeException("Unknown MethodVisitor method: " + method);
+        };
+    }
+
+    // --- ASM FieldVisitor methods ---
+
+    private Type generateFieldVisitorMethod(String method, List<Expr> args) {
+        return switch (method) {
+            case "visit_end" -> {
+                mv.visitMethodInsn(INVOKEVIRTUAL, "org/objectweb/asm/FieldVisitor", "visitEnd", "()V", false);
+                yield new Type.Void();
+            }
+            default -> throw new RuntimeException("Unknown FieldVisitor method: " + method);
+        };
+    }
+
+    // --- JRustRuntime static calls ---
+
+    private Type generateJRustRuntimeStaticCall(String method, List<Expr> args) {
+        return switch (method) {
+            case "create_class_writer" -> {
+                generateExpr(args.get(0));
+                mv.visitMethodInsn(INVOKESTATIC, "jrust/JRustRuntime", "create_class_writer",
+                        "(I)Lorg/objectweb/asm/ClassWriter;", false);
+                yield new Type.Simple("ClassWriter");
+            }
+            case "write_class" -> {
+                for (Expr arg : args) generateExpr(arg);
+                mv.visitMethodInsn(INVOKESTATIC, "jrust/JRustRuntime", "write_class",
+                        "(Lorg/objectweb/asm/ClassWriter;Ljava/lang/String;Ljava/lang/String;)V", false);
+                yield new Type.Void();
+            }
+            case "read_file" -> {
+                generateExpr(args.get(0));
+                mv.visitMethodInsn(INVOKESTATIC, "jrust/JRustRuntime", "read_file",
+                        "(Ljava/lang/String;)Ljava/lang/String;", false);
+                yield new Type.Simple("String");
+            }
+            case "write_file" -> {
+                generateExpr(args.get(0));
+                generateExpr(args.get(1));
+                mv.visitMethodInsn(INVOKESTATIC, "jrust/JRustRuntime", "write_file",
+                        "(Ljava/lang/String;Ljava/lang/String;)V", false);
+                yield new Type.Void();
+            }
+            case "run_command" -> {
+                generateExpr(args.get(0));
+                mv.visitMethodInsn(INVOKESTATIC, "jrust/JRustRuntime", "run_command",
+                        "(Ljava/lang/String;)I", false);
+                yield new Type.Simple("i32");
+            }
+            case "args_len" -> {
+                mv.visitMethodInsn(INVOKESTATIC, "jrust/JRustRuntime", "args_len", "()I", false);
+                yield new Type.Simple("i32");
+            }
+            case "args_get" -> {
+                generateExpr(args.get(0));
+                mv.visitMethodInsn(INVOKESTATIC, "jrust/JRustRuntime", "args_get",
+                        "(I)Ljava/lang/String;", false);
+                yield new Type.Simple("String");
+            }
+            case "set_args" -> {
+                generateExpr(args.get(0));
+                mv.visitMethodInsn(INVOKESTATIC, "jrust/JRustRuntime", "set_args",
+                        "([Ljava/lang/String;)V", false);
+                yield new Type.Void();
+            }
+            case "parse_int" -> {
+                generateExpr(args.get(0));
+                mv.visitMethodInsn(INVOKESTATIC, "jrust/JRustRuntime", "parse_int",
+                        "(Ljava/lang/String;)I", false);
+                yield new Type.Simple("i32");
+            }
+            case "parse_long" -> {
+                generateExpr(args.get(0));
+                mv.visitMethodInsn(INVOKESTATIC, "jrust/JRustRuntime", "parse_long",
+                        "(Ljava/lang/String;)J", false);
+                yield new Type.Simple("i64");
+            }
+            case "parse_double" -> {
+                generateExpr(args.get(0));
+                mv.visitMethodInsn(INVOKESTATIC, "jrust/JRustRuntime", "parse_double",
+                        "(Ljava/lang/String;)D", false);
+                yield new Type.Simple("f64");
+            }
+            default -> throw new RuntimeException("Unknown JRustRuntime method: " + method);
+        };
+    }
+
     private Type generateFieldAccess(Expr.FieldAccess fa) {
         Type receiverType = generateExpr(fa.receiver());
         String typeName = resolveSimpleTypeName(receiverType);
@@ -1192,6 +1454,27 @@ public class JvmCodegen {
             Type argType = generateExpr(sc.args().get(0));
             generateToString(argType);
             return new Type.Simple("String");
+        }
+
+        // ClassWriter::new(flags) → JRustRuntime.create_class_writer(flags)
+        if (sc.typeName().equals("ClassWriter") && sc.method().equals("new")) {
+            generateExpr(sc.args().get(0));
+            mv.visitMethodInsn(INVOKESTATIC, "jrust/JRustRuntime", "create_class_writer",
+                    "(I)Lorg/objectweb/asm/ClassWriter;", false);
+            return new Type.Simple("ClassWriter");
+        }
+
+        // Label::new() → NEW Label; DUP; INVOKESPECIAL <init>()V
+        if (sc.typeName().equals("Label") && sc.method().equals("new")) {
+            mv.visitTypeInsn(NEW, "org/objectweb/asm/Label");
+            mv.visitInsn(DUP);
+            mv.visitMethodInsn(INVOKESPECIAL, "org/objectweb/asm/Label", "<init>", "()V", false);
+            return new Type.Simple("Label");
+        }
+
+        // JRustRuntime static calls (write_class, create_class_writer, parse_int, parse_double, etc.)
+        if (sc.typeName().equals("JRustRuntime")) {
+            return generateJRustRuntimeStaticCall(sc.method(), sc.args());
         }
 
         // Check if it's an imported class → infer descriptor from arg types + expected return type
@@ -1727,6 +2010,10 @@ public class JvmCodegen {
                 case "Vec" -> "Ljava/util/ArrayList;";
                 case "Map" -> "Ljava/util/HashMap;";
                 case "StringBuilder" -> "Ljava/lang/StringBuilder;";
+                case "ClassWriter" -> "Lorg/objectweb/asm/ClassWriter;";
+                case "MethodVisitor" -> "Lorg/objectweb/asm/MethodVisitor;";
+                case "FieldVisitor" -> "Lorg/objectweb/asm/FieldVisitor;";
+                case "Label" -> "Lorg/objectweb/asm/Label;";
                 case "Object", "null" -> "Ljava/lang/Object;";
                 default -> "L" + s.name() + ";";
             };
@@ -1795,6 +2082,10 @@ public class JvmCodegen {
             case "Map" -> "java/util/HashMap";
             case "StringBuilder" -> "java/lang/StringBuilder";
             case "Object" -> "java/lang/Object";
+            case "ClassWriter" -> "org/objectweb/asm/ClassWriter";
+            case "MethodVisitor" -> "org/objectweb/asm/MethodVisitor";
+            case "FieldVisitor" -> "org/objectweb/asm/FieldVisitor";
+            case "Label" -> "org/objectweb/asm/Label";
             default -> {
                 // Check imports
                 String imported = imports.get(typeName);
@@ -1880,6 +2171,22 @@ public class JvmCodegen {
                 if (sc.typeName().equals("StringBuilder") && sc.method().equals("new")) {
                     yield new Type.Simple("StringBuilder");
                 }
+                if (sc.typeName().equals("ClassWriter") && sc.method().equals("new")) {
+                    yield new Type.Simple("ClassWriter");
+                }
+                if (sc.typeName().equals("Label") && sc.method().equals("new")) {
+                    yield new Type.Simple("Label");
+                }
+                if (sc.typeName().equals("JRustRuntime")) {
+                    yield switch (sc.method()) {
+                        case "create_class_writer" -> new Type.Simple("ClassWriter");
+                        case "read_file", "args_get" -> new Type.Simple("String");
+                        case "args_len", "run_command", "parse_int" -> new Type.Simple("i32");
+                        case "parse_long" -> new Type.Simple("i64");
+                        case "parse_double" -> new Type.Simple("f64");
+                        default -> new Type.Void();
+                    };
+                }
                 Item.FnDef m = findImplMethod(sc.typeName(), sc.method());
                 yield m != null ? m.returnType() : new Type.Void();
             }
@@ -1918,6 +2225,16 @@ public class JvmCodegen {
                         case "len", "length" -> new Type.Simple("i32");
                         default -> new Type.Void();
                     };
+                }
+                if (recvName.equals("ClassWriter")) {
+                    yield switch (mc.method()) {
+                        case "visit_method" -> new Type.Simple("MethodVisitor");
+                        case "visit_field" -> new Type.Simple("FieldVisitor");
+                        default -> new Type.Void();
+                    };
+                }
+                if (recvName.equals("MethodVisitor") || recvName.equals("FieldVisitor")) {
+                    yield new Type.Void();
                 }
                 Item.FnDef m = findImplMethod(recvName, mc.method());
                 yield m != null ? m.returnType() : new Type.Void();

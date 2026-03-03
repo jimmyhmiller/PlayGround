@@ -1,0 +1,15 @@
+# trace via #step_inner — fib
+
+rule trace_stepper : @meta -> @self {
+  trace(?x) => trace(#step_inner(?x))
+}
+
+rule trace_print : @meta -> @io {
+  reduction(?s, ?old, ?new, ?kind) => println("[", ?s, "] ", ?old, "  =>  ", ?new)
+}
+
+fn fib(0) = 0
+fn fib(1) = 1
+fn fib(?n) = fib(?n - 1) + fib(?n - 2)
+
+trace(fib(4))

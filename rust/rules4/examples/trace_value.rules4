@@ -1,0 +1,23 @@
+# Trace a VALUE through a computation.
+# trace(x) wraps x so we can see where it flows.
+
+# Arithmetic: trace propagates through, result stays traced
+rule trace_arith : @meta -> @self {
+  trace(?x) + trace(?y) => trace(#eval(#eval(?x) + #eval(?y)))
+  trace(?x) + ?y => trace(#eval(#eval(?x) + #eval(?y)))
+  ?x + trace(?y) => trace(#eval(#eval(?x) + #eval(?y)))
+  trace(?x) * trace(?y) => trace(#eval(#eval(?x) * #eval(?y)))
+  trace(?x) * ?y => trace(#eval(#eval(?x) * #eval(?y)))
+  ?x * trace(?y) => trace(#eval(#eval(?x) * #eval(?y)))
+  trace(?x) - trace(?y) => trace(#eval(#eval(?x) - #eval(?y)))
+  trace(?x) - ?y => trace(#eval(#eval(?x) - #eval(?y)))
+  ?x - trace(?y) => trace(#eval(#eval(?x) - #eval(?y)))
+}
+
+rule trace_print : @meta -> @io {
+  reduction(?s, ?old, ?new, ?kind) => println("[", ?s, "] ", ?old, "  =>  ", ?new, "  (", ?kind, ")")
+}
+
+fn double(?n) = ?n + ?n
+
+double(trace(3))

@@ -1,4 +1,9 @@
-import jrust.JRustAsm;
+import org.objectweb.asm.ClassWriter;
+import org.objectweb.asm.MethodVisitor;
+import org.objectweb.asm.FieldVisitor;
+import org.objectweb.asm.Label;
+import java.lang.Integer;
+import java.lang.Double;
 
 // ============================================================
 // JRust Self-Hosting Compiler
@@ -58,6 +63,7 @@ const D2I: i32 = 142;
 const POP: i32 = 87;
 const POP2: i32 = 88;
 const DUP: i32 = 89;
+const DUP_X1: i32 = 90;
 const SWAP: i32 = 95;
 
 const IFEQ: i32 = 153;
@@ -91,9 +97,12 @@ const INVOKESPECIAL: i32 = 183;
 const INVOKESTATIC: i32 = 184;
 const INVOKEINTERFACE: i32 = 185;
 
+const AALOAD: i32 = 50;
+const AASTORE_OP: i32 = 83;
 const NEW: i32 = 187;
 const NEWARRAY: i32 = 188;
 const ANEWARRAY: i32 = 189;
+const ARRAYLENGTH: i32 = 190;
 const ATHROW: i32 = 191;
 const CHECKCAST: i32 = 192;
 const INSTANCEOF: i32 = 193;
@@ -105,7 +114,7 @@ enum TK {
     // Keywords
     Fn, Struct, Impl, Let, Mut, SelfKw, Import, Return,
     True, False, If, Else, While, For, In, Match, Enum, Const, Null,
-    Break, Continue,
+    Break, Continue, As, With,
     // Identifiers and literals
     Ident { text: String },
     IntLit { value: String },
@@ -185,17 +194,13 @@ impl Lexer {
                 self.line = self.line + 1;
                 self.col = 1;
             } else if c == '/' {
-                if self.pos + 1 < self.source.len() {
-                    if self.source.char_at(self.pos + 1) == '/' {
-                        // line comment
-                        while !self.at_end() {
-                            if self.peek_char() == '\n' {
-                                break;
-                            }
-                            self.advance_char();
+                if self.pos + 1 < self.source.len() && self.source.char_at(self.pos + 1) == '/' {
+                    // line comment
+                    while !self.at_end() {
+                        if self.peek_char() == '\n' {
+                            break;
                         }
-                    } else {
-                        return;
+                        self.advance_char();
                     }
                 } else {
                     return;
@@ -332,10 +337,8 @@ impl Lexer {
         }
 
         // Number
-        if c >= '0' {
-            if c <= '9' {
-                return self.lex_number(c, start_line, start_col);
-            }
+        if is_digit(c) {
+            return self.lex_number(c, start_line, start_col);
         }
 
         // Underscore (standalone)
@@ -344,37 +347,15 @@ impl Lexer {
                 return Token { kind: TK::Underscore, line: start_line, col: start_col };
             }
             let next: char = self.peek_char();
-            if next >= 'a' {
-                if next <= 'z' {
-                    return self.lex_ident(c, start_line, start_col);
-                }
-            }
-            if next >= 'A' {
-                if next <= 'Z' {
-                    return self.lex_ident(c, start_line, start_col);
-                }
-            }
-            if next >= '0' {
-                if next <= '9' {
-                    return self.lex_ident(c, start_line, start_col);
-                }
-            }
-            if next == '_' {
+            if is_alphanumeric(next) || next == '_' {
                 return self.lex_ident(c, start_line, start_col);
             }
             return Token { kind: TK::Underscore, line: start_line, col: start_col };
         }
 
         // Identifier or keyword
-        if c >= 'a' {
-            if c <= 'z' {
-                return self.lex_ident(c, start_line, start_col);
-            }
-        }
-        if c >= 'A' {
-            if c <= 'Z' {
-                return self.lex_ident(c, start_line, start_col);
-            }
+        if is_letter(c) {
+            return self.lex_ident(c, start_line, start_col);
         }
 
         panic("Unexpected character at " + start_line + ":" + start_col);
@@ -461,63 +442,22 @@ impl Lexer {
         let mut is_float: bool = false;
         while !self.at_end() {
             let c: char = self.peek_char();
-            if c >= '0' {
-                if c <= '9' {
+            if is_digit(c) {
+                self.advance_char();
+                let mut cs: StringBuilder = StringBuilder::new();
+                cs.append(c);
+                sb.append(cs.to_string());
+            } else if c == '.' && !is_float && self.pos + 1 < self.source.len() {
+                let next: char = self.source.char_at(self.pos + 1);
+                if is_digit(next) {
+                    is_float = true;
                     self.advance_char();
-                    let mut cs: StringBuilder = StringBuilder::new();
-                    cs.append(c);
-                    sb.append(cs.to_string());
-                } else {
-                    if c == '.' {
-                        if !is_float {
-                            if self.pos + 1 < self.source.len() {
-                                let next: char = self.source.char_at(self.pos + 1);
-                                if next >= '0' {
-                                    if next <= '9' {
-                                        is_float = true;
-                                        self.advance_char();
-                                        sb.append(".");
-                                    } else {
-                                        break;
-                                    }
-                                } else {
-                                    break;
-                                }
-                            } else {
-                                break;
-                            }
-                        } else {
-                            break;
-                        }
-                    } else {
-                        break;
-                    }
-                }
-            } else {
-                if c == '.' {
-                    if !is_float {
-                        if self.pos + 1 < self.source.len() {
-                            let next: char = self.source.char_at(self.pos + 1);
-                            if next >= '0' {
-                                if next <= '9' {
-                                    is_float = true;
-                                    self.advance_char();
-                                    sb.append(".");
-                                } else {
-                                    break;
-                                }
-                            } else {
-                                break;
-                            }
-                        } else {
-                            break;
-                        }
-                    } else {
-                        break;
-                    }
+                    sb.append(".");
                 } else {
                     break;
                 }
+            } else {
+                break;
             }
         }
         let text: String = sb.to_string();
@@ -528,25 +468,7 @@ impl Lexer {
     }
 
     fn is_alnum(self, c: char) -> bool {
-        if c >= 'a' {
-            if c <= 'z' {
-                return true;
-            }
-        }
-        if c >= 'A' {
-            if c <= 'Z' {
-                return true;
-            }
-        }
-        if c >= '0' {
-            if c <= '9' {
-                return true;
-            }
-        }
-        if c == '_' {
-            return true;
-        }
-        return false;
+        return is_alphanumeric(c) || c == '_';
     }
 
     fn lex_ident(mut self, first: char, start_line: i32, start_col: i32) -> Token {
@@ -629,6 +551,12 @@ impl Lexer {
         if word == "continue" {
             return Token { kind: TK::Continue, line: start_line, col: start_col };
         }
+        if word == "as" {
+            return Token { kind: TK::As, line: start_line, col: start_col };
+        }
+        if word == "with" {
+            return Token { kind: TK::With, line: start_line, col: start_col };
+        }
         return Token { kind: TK::Ident { text: word }, line: start_line, col: start_col };
     }
 }
@@ -681,6 +609,8 @@ fn tok_is(t: Token, kind_name: String) -> bool {
         TK::Null => { return kind_name == "null"; }
         TK::Break => { return kind_name == "break"; }
         TK::Continue => { return kind_name == "continue"; }
+        TK::As => { return kind_name == "as"; }
+        TK::With => { return kind_name == "with"; }
         TK::Ident { text } => { return kind_name == "ident"; }
         TK::IntLit { value } => { return kind_name == "int"; }
         TK::FloatLit { value } => { return kind_name == "float"; }
@@ -774,6 +704,8 @@ fn tok_describe(t: Token) -> String {
         TK::Null => { return "NULL"; }
         TK::Break => { return "BREAK"; }
         TK::Continue => { return "CONTINUE"; }
+        TK::As => { return "AS"; }
+        TK::With => { return "WITH"; }
         TK::Plus => { return "+"; }
         TK::Minus => { return "-"; }
         TK::Star => { return "*"; }
@@ -835,6 +767,7 @@ enum Expr {
     ThrowE { message: Expr },
     ArrayLitE { elements: Vec<Expr> },
     CastE { value: Expr, cast_type: Ty },
+    SubclassE { type_name: String, args: Vec<Expr>, methods: Vec<Item> },
 }
 
 struct FieldValue {
@@ -1359,6 +1292,28 @@ impl Parser {
                 let index: Expr = self.parse_expr();
                 self.expect("]");
                 expr = Expr::IndexE { receiver: expr, index: index };
+            } else if self.check("as") {
+                self.advance();
+                let cast_ty: Ty = self.parse_type();
+                expr = Expr::CastE { value: expr, cast_type: cast_ty };
+            } else if self.check("with") {
+                // Subclass expression: Type::new(args) with { fn method... }
+                match expr {
+                    Expr::StaticCallE { type_name, method_name, args } => {
+                        self.advance();
+                        self.expect("{");
+                        let mut methods: Vec<Item> = Vec::new();
+                        while self.check("fn") {
+                            let method: Item = self.parse_fn_def();
+                            methods.push(method);
+                        }
+                        self.expect("}");
+                        expr = Expr::SubclassE { type_name: type_name, args: args, methods: methods };
+                    }
+                    _ => {
+                        break;
+                    }
+                }
             } else {
                 break;
             }
@@ -1847,14 +1802,15 @@ struct Codegen {
     constants: Vec<Item>,
     imports: Map<String, String>,
     // Per-method state
-    mv: i32,
+    mv: MethodVisitor,
     locals: Map<String, i32>,
     local_types: Map<String, Ty>,
     next_local: i32,
     current_class: String,
     expected_type: Ty,
-    break_label: i32,
-    continue_label: i32,
+    break_label: Label,
+    continue_label: Label,
+    anon_counter: i32,
 }
 
 impl Codegen {
@@ -1868,14 +1824,15 @@ impl Codegen {
             top_level_fns: Vec::new(),
             constants: Vec::new(),
             imports: Map::new(),
-            mv: -1,
+            mv: null,
             locals: Map::new(),
             local_types: Map::new(),
             next_local: 0,
             current_class: "",
             expected_type: null,
-            break_label: -1,
-            continue_label: -1,
+            break_label: null,
+            continue_label: null,
+            anon_counter: 0,
         };
         return c;
     }
@@ -1976,26 +1933,26 @@ impl Codegen {
     // --- Struct generation ---
 
     fn generate_struct(mut self, name: String, fields: Vec<Field>) {
-        let cw: i32 = JRustAsm::cw_new(3);
-        JRustAsm::cw_visit(cw, V21, ACC_PUBLIC + ACC_SUPER, name, "java/lang/Object");
+        let cw: ClassWriter = create_class_writer(3);
+        cw.visit(V21, ACC_PUBLIC + ACC_SUPER, name, "java/lang/Object");
 
         // Fields
         let mut fi: i32 = 0;
         while fi < fields.len() {
             let f: Field = fields.get(fi);
-            let fv: i32 = JRustAsm::cw_visit_field(cw, ACC_PUBLIC, f.name, self.type_descriptor(f.ty));
-            JRustAsm::fv_end(fv);
+            let fv: FieldVisitor = cw.visit_field(ACC_PUBLIC, f.name, self.type_descriptor(f.ty));
+            fv.visit_end();
             fi = fi + 1;
         }
 
         // Default constructor
-        let init: i32 = JRustAsm::cw_visit_method(cw, ACC_PUBLIC, "<init>", "()V");
-        JRustAsm::mv_code(init);
-        JRustAsm::mv_var_insn(init, ALOAD, 0);
-        JRustAsm::mv_method_insn(init, INVOKESPECIAL, "java/lang/Object", "<init>", "()V", 0);
-        JRustAsm::mv_insn(init, RETURN_OP);
-        JRustAsm::mv_maxs(init, 0, 0);
-        JRustAsm::mv_end(init);
+        let init: MethodVisitor = cw.visit_method(ACC_PUBLIC, "<init>", "()V");
+        init.visit_code();
+        init.visit_var_insn(ALOAD, 0);
+        init.visit_method_insn(INVOKESPECIAL, "java/lang/Object", "<init>", "()V", 0);
+        init.visit_insn(RETURN_OP);
+        init.visit_maxs(0, 0);
+        init.visit_end();
 
         // Impl methods
         if self.impl_methods.contains_key(name) {
@@ -2008,24 +1965,24 @@ impl Codegen {
             }
         }
 
-        JRustAsm::cw_end(cw);
-        JRustAsm::cw_write(cw, self.output_dir, name);
+        cw.visit_end();
+        JRustRuntime::write_class(cw, self.output_dir, name);
     }
 
     // --- Enum generation ---
 
     fn generate_enum(mut self, name: String, variants: Vec<EnumVariant>) {
         // Base class
-        let base_cw: i32 = JRustAsm::cw_new(3);
-        JRustAsm::cw_visit(base_cw, V21, ACC_PUBLIC + ACC_SUPER, name, "java/lang/Object");
+        let base_cw: ClassWriter = create_class_writer(3);
+        base_cw.visit(V21, ACC_PUBLIC + ACC_SUPER, name, "java/lang/Object");
 
-        let base_init: i32 = JRustAsm::cw_visit_method(base_cw, ACC_PUBLIC, "<init>", "()V");
-        JRustAsm::mv_code(base_init);
-        JRustAsm::mv_var_insn(base_init, ALOAD, 0);
-        JRustAsm::mv_method_insn(base_init, INVOKESPECIAL, "java/lang/Object", "<init>", "()V", 0);
-        JRustAsm::mv_insn(base_init, RETURN_OP);
-        JRustAsm::mv_maxs(base_init, 0, 0);
-        JRustAsm::mv_end(base_init);
+        let base_init: MethodVisitor = base_cw.visit_method(ACC_PUBLIC, "<init>", "()V");
+        base_init.visit_code();
+        base_init.visit_var_insn(ALOAD, 0);
+        base_init.visit_method_insn(INVOKESPECIAL, "java/lang/Object", "<init>", "()V", 0);
+        base_init.visit_insn(RETURN_OP);
+        base_init.visit_maxs(0, 0);
+        base_init.visit_end();
 
         // Impl methods on base class
         if self.impl_methods.contains_key(name) {
@@ -2038,8 +1995,8 @@ impl Codegen {
             }
         }
 
-        JRustAsm::cw_end(base_cw);
-        JRustAsm::cw_write(base_cw, self.output_dir, name);
+        base_cw.visit_end();
+        JRustRuntime::write_class(base_cw, self.output_dir, name);
 
         // Variant subclasses
         let mut vi: i32 = 0;
@@ -2052,36 +2009,40 @@ impl Codegen {
 
     fn generate_enum_variant(mut self, enum_name: String, v: EnumVariant) {
         let variant_class: String = enum_name + "$" + v.name;
-        let cw: i32 = JRustAsm::cw_new(3);
-        JRustAsm::cw_visit(cw, V21, ACC_PUBLIC + ACC_SUPER, variant_class, enum_name);
+        let cw: ClassWriter = create_class_writer(3);
+        cw.visit(V21, ACC_PUBLIC + ACC_SUPER, variant_class, enum_name);
 
         // Fields
         let mut fi: i32 = 0;
         while fi < v.fields.len() {
             let f: Field = v.fields.get(fi);
-            let fv: i32 = JRustAsm::cw_visit_field(cw, ACC_PUBLIC, f.name, self.type_descriptor(f.ty));
-            JRustAsm::fv_end(fv);
+            let fv: FieldVisitor = cw.visit_field(ACC_PUBLIC, f.name, self.type_descriptor(f.ty));
+            fv.visit_end();
             fi = fi + 1;
         }
 
         // Constructor
-        let init: i32 = JRustAsm::cw_visit_method(cw, ACC_PUBLIC, "<init>", "()V");
-        JRustAsm::mv_code(init);
-        JRustAsm::mv_var_insn(init, ALOAD, 0);
-        JRustAsm::mv_method_insn(init, INVOKESPECIAL, enum_name, "<init>", "()V", 0);
-        JRustAsm::mv_insn(init, RETURN_OP);
-        JRustAsm::mv_maxs(init, 0, 0);
-        JRustAsm::mv_end(init);
+        let init: MethodVisitor = cw.visit_method(ACC_PUBLIC, "<init>", "()V");
+        init.visit_code();
+        init.visit_var_insn(ALOAD, 0);
+        init.visit_method_insn(INVOKESPECIAL, enum_name, "<init>", "()V", 0);
+        init.visit_insn(RETURN_OP);
+        init.visit_maxs(0, 0);
+        init.visit_end();
 
-        JRustAsm::cw_end(cw);
-        JRustAsm::cw_write(cw, self.output_dir, variant_class);
+        cw.visit_end();
+        JRustRuntime::write_class(cw, self.output_dir, variant_class);
     }
 
     // --- Main class generation ---
 
     fn generate_main_class(mut self) {
-        let cw: i32 = JRustAsm::cw_new(3);
-        JRustAsm::cw_visit(cw, V21, ACC_PUBLIC + ACC_SUPER, "Main", "java/lang/Object");
+        let cw: ClassWriter = create_class_writer(3);
+        cw.visit(V21, ACC_PUBLIC + ACC_SUPER, "Main", "java/lang/Object");
+
+        // Static field for program arguments
+        let args_fv: FieldVisitor = cw.visit_field(ACC_PUBLIC + ACC_STATIC, "__args", "[Ljava/lang/String;");
+        args_fv.visit_end();
 
         // Constants as static fields
         let mut ci: i32 = 0;
@@ -2091,20 +2052,20 @@ impl Codegen {
                 Item::ConstDefI { name, ty, value } => {
                     if expr_is_int_lit(value) {
                         let int_str: String = expr_int_value(value);
-                        let iv: i32 = JRustAsm::parse_int(int_str);
-                        let fv_h: i32 = JRustAsm::cw_visit_field_int(cw, ACC_PUBLIC + ACC_STATIC + ACC_FINAL, name, self.type_descriptor(ty), iv);
-                        JRustAsm::fv_end(fv_h);
+                        let iv: i32 = Integer::parseInt(int_str);
+                        let fv_h: FieldVisitor = cw.visit_field(ACC_PUBLIC + ACC_STATIC + ACC_FINAL, name, self.type_descriptor(ty), iv);
+                        fv_h.visit_end();
                     } else if expr_is_str_lit(value) {
                         let str_val: String = expr_str_value(value);
-                        let fv_h: i32 = JRustAsm::cw_visit_field_str(cw, ACC_PUBLIC + ACC_STATIC + ACC_FINAL, name, self.type_descriptor(ty), str_val);
-                        JRustAsm::fv_end(fv_h);
+                        let fv_h: FieldVisitor = cw.visit_field(ACC_PUBLIC + ACC_STATIC + ACC_FINAL, name, self.type_descriptor(ty), str_val);
+                        fv_h.visit_end();
                     } else if expr_is_bool_lit(value) {
                         // Bool constants are stored as int 0/1
-                        let fv_h: i32 = JRustAsm::cw_visit_field(cw, ACC_PUBLIC + ACC_STATIC + ACC_FINAL, name, self.type_descriptor(ty));
-                        JRustAsm::fv_end(fv_h);
+                        let fv_h: FieldVisitor = cw.visit_field(ACC_PUBLIC + ACC_STATIC + ACC_FINAL, name, self.type_descriptor(ty));
+                        fv_h.visit_end();
                     } else {
-                        let fv_h: i32 = JRustAsm::cw_visit_field(cw, ACC_PUBLIC + ACC_STATIC + ACC_FINAL, name, self.type_descriptor(ty));
-                        JRustAsm::fv_end(fv_h);
+                        let fv_h: FieldVisitor = cw.visit_field(ACC_PUBLIC + ACC_STATIC + ACC_FINAL, name, self.type_descriptor(ty));
+                        fv_h.visit_end();
                     }
                 }
                 _ => {}
@@ -2114,8 +2075,8 @@ impl Codegen {
 
         // Static initializer for non-trivial constants
         if self.constants.len() > 0 {
-            let clinit: i32 = JRustAsm::cw_visit_method(cw, ACC_STATIC, "<clinit>", "()V");
-            JRustAsm::mv_code(clinit);
+            let clinit: MethodVisitor = cw.visit_method(ACC_STATIC, "<clinit>", "()V");
+            clinit.visit_code();
             let mut has_nontrivial: bool = false;
             ci = 0;
             while ci < self.constants.len() {
@@ -2131,16 +2092,16 @@ impl Codegen {
                             self.current_class = "Main";
                             self.mv = clinit;
                             self.gen_expr(value);
-                            JRustAsm::mv_field_insn(clinit, PUTSTATIC, "Main", name, self.type_descriptor(ty));
+                            clinit.visit_field_insn(PUTSTATIC, "Main", name, self.type_descriptor(ty));
                         }
                     }
                     _ => {}
                 }
                 ci = ci + 1;
             }
-            JRustAsm::mv_insn(clinit, RETURN_OP);
-            JRustAsm::mv_maxs(clinit, 0, 0);
-            JRustAsm::mv_end(clinit);
+            clinit.visit_insn(RETURN_OP);
+            clinit.visit_maxs(0, 0);
+            clinit.visit_end();
         }
 
         // Top-level functions
@@ -2151,8 +2112,8 @@ impl Codegen {
             fi = fi + 1;
         }
 
-        JRustAsm::cw_end(cw);
-        JRustAsm::cw_write(cw, self.output_dir, "Main");
+        cw.visit_end();
+        JRustRuntime::write_class(cw, self.output_dir, "Main");
     }
 
     fn get_constant_value(self, val_expr: Expr, ty: Ty) -> String {
@@ -2164,7 +2125,7 @@ impl Codegen {
 
     // --- Method generation ---
 
-    fn generate_method(mut self, cw: i32, class_name: String, fn_item: Item) {
+    fn generate_method(mut self, cw: ClassWriter, class_name: String, fn_item: Item) {
         let name: String = item_fn_name(fn_item);
         let params: Vec<Param> = item_fn_params(fn_item);
         let return_type: Ty = item_fn_return_type(fn_item);
@@ -2190,14 +2151,14 @@ impl Codegen {
         }
         let method_name: String = name;
 
-        self.mv = JRustAsm::cw_visit_method(cw, access, method_name, desc);
-        JRustAsm::mv_code(self.mv);
+        self.mv = cw.visit_method(access, method_name, desc);
+        self.mv.visit_code();
 
         // Assign param slots
         if is_main && name == "main" {
             self.locals.insert("__args__", self.next_local);
-            JRustAsm::mv_var_insn(self.mv, ALOAD, self.next_local);
-            JRustAsm::mv_method_insn(self.mv, INVOKESTATIC, "jrust/JRustAsm", "set_args", "([Ljava/lang/String;)V", 0);
+            self.mv.visit_var_insn(ALOAD, self.next_local);
+            self.mv.visit_field_insn(PUTSTATIC, "Main", "__args", "[Ljava/lang/String;");
             self.next_local = self.next_local + 1;
         }
 
@@ -2227,11 +2188,11 @@ impl Codegen {
         // Add return if void
         let is_void: bool = self.is_void_type(return_type);
         if is_void {
-            JRustAsm::mv_insn(self.mv, RETURN_OP);
+            self.mv.visit_insn(RETURN_OP);
         }
 
-        JRustAsm::mv_maxs(self.mv, 0, 0);
-        JRustAsm::mv_end(self.mv);
+        self.mv.visit_maxs(0, 0);
+        self.mv.visit_end();
     }
 
     fn method_descriptor(self, params: Vec<Param>, return_type: Ty, is_static: bool, class_name: String, fn_name: String) -> String {
@@ -2265,13 +2226,13 @@ impl Codegen {
                 self.gen_return(value);
             }
             Stmt::BreakS => {
-                if self.break_label >= 0 {
-                    JRustAsm::mv_jump_insn(self.mv, GOTO, self.break_label);
+                if self.break_label != null {
+                    self.mv.visit_jump_insn(GOTO, self.break_label);
                 }
             }
             Stmt::ContinueS => {
-                if self.continue_label >= 0 {
-                    JRustAsm::mv_jump_insn(self.mv, GOTO, self.continue_label);
+                if self.continue_label != null {
+                    self.mv.visit_jump_insn(GOTO, self.continue_label);
                 }
             }
             Stmt::ExprStmtS { expr } => {
@@ -2285,9 +2246,9 @@ impl Codegen {
                     }
                     if !is_void {
                         if self.is_wide(t) {
-                            JRustAsm::mv_insn(self.mv, POP2);
+                            self.mv.visit_insn(POP2);
                         } else {
-                            JRustAsm::mv_insn(self.mv, POP);
+                            self.mv.visit_insn(POP);
                         }
                     }
                 }
@@ -2322,7 +2283,7 @@ impl Codegen {
 
     fn gen_return(mut self, value: Expr) {
         if value == null {
-            JRustAsm::mv_insn(self.mv, RETURN_OP);
+            self.mv.visit_insn(RETURN_OP);
         } else {
             let t: Ty = self.gen_expr(value);
             self.gen_return_insn(t);
@@ -2332,21 +2293,21 @@ impl Codegen {
     fn gen_return_insn(self, t: Ty) {
         match t {
             Ty::VoidTy => {
-                JRustAsm::mv_insn(self.mv, RETURN_OP);
+                self.mv.visit_insn(RETURN_OP);
             }
             Ty::SimpleTy { name } => {
                 if name == "i32" || name == "bool" || name == "char" {
-                    JRustAsm::mv_insn(self.mv, IRETURN);
+                    self.mv.visit_insn(IRETURN);
                 } else if name == "i64" {
-                    JRustAsm::mv_insn(self.mv, LRETURN);
+                    self.mv.visit_insn(LRETURN);
                 } else if name == "f64" {
-                    JRustAsm::mv_insn(self.mv, DRETURN);
+                    self.mv.visit_insn(DRETURN);
                 } else {
-                    JRustAsm::mv_insn(self.mv, ARETURN);
+                    self.mv.visit_insn(ARETURN);
                 }
             }
             _ => {
-                JRustAsm::mv_insn(self.mv, ARETURN);
+                self.mv.visit_insn(ARETURN);
             }
         }
     }
@@ -2356,17 +2317,17 @@ impl Codegen {
     fn gen_expr(mut self, expr: Expr) -> Ty {
         match expr {
             Expr::IntLitE { value } => {
-                let val: i32 = JRustAsm::parse_int(value);
+                let val: i32 = Integer::parseInt(value);
                 self.push_int(val);
                 return Ty::SimpleTy { name: "i32" };
             }
             Expr::FloatLitE { value } => {
-                let val: f64 = JRustAsm::parse_double(value);
-                JRustAsm::mv_ldc_double(self.mv, val);
+                let val: f64 = Double::parseDouble(value);
+                self.mv.ldc_double(val);
                 return Ty::SimpleTy { name: "f64" };
             }
             Expr::StringLitE { value } => {
-                JRustAsm::mv_ldc_str(self.mv, value);
+                self.mv.ldc_str(value);
                 return Ty::SimpleTy { name: "String" };
             }
             Expr::CharLitE { value } => {
@@ -2376,14 +2337,14 @@ impl Codegen {
             }
             Expr::BoolLitE { value } => {
                 if value {
-                    JRustAsm::mv_insn(self.mv, ICONST_1);
+                    self.mv.visit_insn(ICONST_1);
                 } else {
-                    JRustAsm::mv_insn(self.mv, ICONST_0);
+                    self.mv.visit_insn(ICONST_0);
                 }
                 return Ty::SimpleTy { name: "bool" };
             }
             Expr::NullLitE => {
-                JRustAsm::mv_insn(self.mv, ACONST_NULL);
+                self.mv.visit_insn(ACONST_NULL);
                 return Ty::SimpleTy { name: "null" };
             }
             Expr::IdentE { name } => {
@@ -2391,7 +2352,7 @@ impl Codegen {
             }
             Expr::SelfExprE => {
                 let self_slot: i32 = self.locals.get("self");
-                JRustAsm::mv_var_insn(self.mv, ALOAD, self_slot);
+                self.mv.visit_var_insn(ALOAD, self_slot);
                 return Ty::SimpleTy { name: self.current_class };
             }
             Expr::BinaryE { left, op, right } => {
@@ -2451,6 +2412,9 @@ impl Codegen {
             Expr::CastE { value, cast_type } => {
                 return self.gen_cast(value, cast_type);
             }
+            Expr::SubclassE { type_name, args, methods } => {
+                return self.gen_subclass(type_name, args, methods);
+            }
         }
         return Ty::VoidTy;
     }
@@ -2469,7 +2433,7 @@ impl Codegen {
             let cn: String = item_fn_name(cd);
             if cn == name {
                 let cty: Ty = item_const_type(cd);
-                JRustAsm::mv_field_insn(self.mv, GETSTATIC, "Main", cn, self.type_descriptor(cty));
+                self.mv.visit_field_insn(GETSTATIC, "Main", cn, self.type_descriptor(cty));
                 return cty;
             }
             ci = ci + 1;
@@ -2491,42 +2455,64 @@ impl Codegen {
             _ => {}
         }
 
-        if right_is_null {
-            if op == "==" || op == "!=" {
-                self.gen_expr(left);
-                let true_l: i32 = JRustAsm::label_new();
-                let end_l: i32 = JRustAsm::label_new();
-                if op == "==" {
-                    JRustAsm::mv_jump_insn(self.mv, IFNULL, true_l);
-                } else {
-                    JRustAsm::mv_jump_insn(self.mv, IFNONNULL, true_l);
-                }
-                JRustAsm::mv_insn(self.mv, ICONST_0);
-                JRustAsm::mv_jump_insn(self.mv, GOTO, end_l);
-                JRustAsm::mv_label(self.mv, true_l);
-                JRustAsm::mv_insn(self.mv, ICONST_1);
-                JRustAsm::mv_label(self.mv, end_l);
-                return Ty::SimpleTy { name: "bool" };
+        if right_is_null && (op == "==" || op == "!=") {
+            self.gen_expr(left);
+            let true_l: Label = Label::new();
+            let end_l: Label = Label::new();
+            if op == "==" {
+                self.mv.visit_jump_insn(IFNULL, true_l);
+            } else {
+                self.mv.visit_jump_insn(IFNONNULL, true_l);
             }
+            self.mv.visit_insn(ICONST_0);
+            self.mv.visit_jump_insn(GOTO, end_l);
+            self.mv.visit_label(true_l);
+            self.mv.visit_insn(ICONST_1);
+            self.mv.visit_label(end_l);
+            return Ty::SimpleTy { name: "bool" };
         }
 
-        if left_is_null {
-            if op == "==" || op == "!=" {
-                self.gen_expr(right);
-                let true_l: i32 = JRustAsm::label_new();
-                let end_l: i32 = JRustAsm::label_new();
-                if op == "==" {
-                    JRustAsm::mv_jump_insn(self.mv, IFNULL, true_l);
-                } else {
-                    JRustAsm::mv_jump_insn(self.mv, IFNONNULL, true_l);
-                }
-                JRustAsm::mv_insn(self.mv, ICONST_0);
-                JRustAsm::mv_jump_insn(self.mv, GOTO, end_l);
-                JRustAsm::mv_label(self.mv, true_l);
-                JRustAsm::mv_insn(self.mv, ICONST_1);
-                JRustAsm::mv_label(self.mv, end_l);
-                return Ty::SimpleTy { name: "bool" };
+        if left_is_null && (op == "==" || op == "!=") {
+            self.gen_expr(right);
+            let true_l: Label = Label::new();
+            let end_l: Label = Label::new();
+            if op == "==" {
+                self.mv.visit_jump_insn(IFNULL, true_l);
+            } else {
+                self.mv.visit_jump_insn(IFNONNULL, true_l);
             }
+            self.mv.visit_insn(ICONST_0);
+            self.mv.visit_jump_insn(GOTO, end_l);
+            self.mv.visit_label(true_l);
+            self.mv.visit_insn(ICONST_1);
+            self.mv.visit_label(end_l);
+            return Ty::SimpleTy { name: "bool" };
+        }
+
+        // Short-circuit && and ||
+        if op == "&&" {
+            let false_l: Label = Label::new();
+            let end_l: Label = Label::new();
+            self.gen_expr(left);
+            self.mv.visit_jump_insn(IFEQ, false_l);
+            self.gen_expr(right);
+            self.mv.visit_jump_insn(GOTO, end_l);
+            self.mv.visit_label(false_l);
+            self.mv.visit_insn(ICONST_0);
+            self.mv.visit_label(end_l);
+            return Ty::SimpleTy { name: "bool" };
+        }
+        if op == "||" {
+            let true_l: Label = Label::new();
+            let end_l: Label = Label::new();
+            self.gen_expr(left);
+            self.mv.visit_jump_insn(IFNE, true_l);
+            self.gen_expr(right);
+            self.mv.visit_jump_insn(GOTO, end_l);
+            self.mv.visit_label(true_l);
+            self.mv.visit_insn(ICONST_1);
+            self.mv.visit_label(end_l);
+            return Ty::SimpleTy { name: "bool" };
         }
 
         let left_type: Ty = self.gen_expr(left);
@@ -2537,17 +2523,17 @@ impl Codegen {
             if !self.is_string(right_type) {
                 self.gen_to_string(right_type);
             }
-            JRustAsm::mv_method_insn(self.mv, INVOKEVIRTUAL, "java/lang/String", "concat", "(Ljava/lang/String;)Ljava/lang/String;", 0);
+            self.mv.visit_method_insn(INVOKEVIRTUAL, "java/lang/String", "concat", "(Ljava/lang/String;)Ljava/lang/String;", 0);
             return Ty::SimpleTy { name: "String" };
         }
 
         // String equality
         if self.is_string(left_type) && self.is_string(right_type) {
             if op == "==" || op == "!=" {
-                JRustAsm::mv_method_insn(self.mv, INVOKEVIRTUAL, "java/lang/String", "equals", "(Ljava/lang/Object;)Z", 0);
+                self.mv.visit_method_insn(INVOKEVIRTUAL, "java/lang/String", "equals", "(Ljava/lang/Object;)Z", 0);
                 if op == "!=" {
-                    JRustAsm::mv_insn(self.mv, ICONST_1);
-                    JRustAsm::mv_insn(self.mv, IXOR);
+                    self.mv.visit_insn(ICONST_1);
+                    self.mv.visit_insn(IXOR);
                 }
                 return Ty::SimpleTy { name: "bool" };
             }
@@ -2556,14 +2542,12 @@ impl Codegen {
         let type_name: String = self.resolve_type_name(left_type);
 
         if type_name == "i32" || type_name == "bool" || type_name == "char" {
-            if op == "+" { JRustAsm::mv_insn(self.mv, IADD); }
-            else if op == "-" { JRustAsm::mv_insn(self.mv, ISUB); }
-            else if op == "*" { JRustAsm::mv_insn(self.mv, IMUL); }
-            else if op == "/" { JRustAsm::mv_insn(self.mv, IDIV); }
-            else if op == "%" { JRustAsm::mv_insn(self.mv, IREM); }
-            else if op == "|" { JRustAsm::mv_insn(self.mv, IOR); }
-            else if op == "&&" { JRustAsm::mv_insn(self.mv, IAND); }
-            else if op == "||" { JRustAsm::mv_insn(self.mv, IOR); }
+            if op == "+" { self.mv.visit_insn(IADD); }
+            else if op == "-" { self.mv.visit_insn(ISUB); }
+            else if op == "*" { self.mv.visit_insn(IMUL); }
+            else if op == "/" { self.mv.visit_insn(IDIV); }
+            else if op == "%" { self.mv.visit_insn(IREM); }
+            else if op == "|" { self.mv.visit_insn(IOR); }
             else if op == "==" { self.gen_int_comparison(IF_ICMPEQ); }
             else if op == "!=" { self.gen_int_comparison(IF_ICMPNE); }
             else if op == "<" { self.gen_int_comparison(IF_ICMPLT); }
@@ -2578,12 +2562,12 @@ impl Codegen {
         }
 
         if type_name == "i64" {
-            if op == "+" { JRustAsm::mv_insn(self.mv, LADD); }
-            else if op == "-" { JRustAsm::mv_insn(self.mv, LSUB); }
-            else if op == "*" { JRustAsm::mv_insn(self.mv, LMUL); }
-            else if op == "/" { JRustAsm::mv_insn(self.mv, LDIV); }
+            if op == "+" { self.mv.visit_insn(LADD); }
+            else if op == "-" { self.mv.visit_insn(LSUB); }
+            else if op == "*" { self.mv.visit_insn(LMUL); }
+            else if op == "/" { self.mv.visit_insn(LDIV); }
             else if op == "==" || op == "!=" || op == "<" || op == ">" || op == "<=" || op == ">=" {
-                JRustAsm::mv_insn(self.mv, LCMP);
+                self.mv.visit_insn(LCMP);
                 self.gen_int_comparison_zero(op);
             }
             else { panic("Unknown binary op for i64: " + op); }
@@ -2594,12 +2578,12 @@ impl Codegen {
         }
 
         if type_name == "f64" {
-            if op == "+" { JRustAsm::mv_insn(self.mv, DADD); }
-            else if op == "-" { JRustAsm::mv_insn(self.mv, DSUB); }
-            else if op == "*" { JRustAsm::mv_insn(self.mv, DMUL); }
-            else if op == "/" { JRustAsm::mv_insn(self.mv, DDIV); }
+            if op == "+" { self.mv.visit_insn(DADD); }
+            else if op == "-" { self.mv.visit_insn(DSUB); }
+            else if op == "*" { self.mv.visit_insn(DMUL); }
+            else if op == "/" { self.mv.visit_insn(DDIV); }
             else if op == "==" || op == "!=" || op == "<" || op == ">" || op == "<=" || op == ">=" {
-                JRustAsm::mv_insn(self.mv, DCMPL);
+                self.mv.visit_insn(DCMPL);
                 self.gen_int_comparison_zero(op);
             }
             else { panic("Unknown binary op for f64: " + op); }
@@ -2616,33 +2600,33 @@ impl Codegen {
     fn gen_to_string(self, ty: Ty) {
         match ty {
             Ty::SimpleTy { name } => {
-                if name == "i32" { JRustAsm::mv_method_insn(self.mv, INVOKESTATIC, "java/lang/String", "valueOf", "(I)Ljava/lang/String;", 0); }
-                else if name == "i64" { JRustAsm::mv_method_insn(self.mv, INVOKESTATIC, "java/lang/String", "valueOf", "(J)Ljava/lang/String;", 0); }
-                else if name == "f64" { JRustAsm::mv_method_insn(self.mv, INVOKESTATIC, "java/lang/String", "valueOf", "(D)Ljava/lang/String;", 0); }
-                else if name == "bool" { JRustAsm::mv_method_insn(self.mv, INVOKESTATIC, "java/lang/String", "valueOf", "(Z)Ljava/lang/String;", 0); }
-                else if name == "char" { JRustAsm::mv_method_insn(self.mv, INVOKESTATIC, "java/lang/String", "valueOf", "(C)Ljava/lang/String;", 0); }
-                else { JRustAsm::mv_method_insn(self.mv, INVOKESTATIC, "java/lang/String", "valueOf", "(Ljava/lang/Object;)Ljava/lang/String;", 0); }
+                if name == "i32" { self.mv.visit_method_insn(INVOKESTATIC, "java/lang/String", "valueOf", "(I)Ljava/lang/String;", 0); }
+                else if name == "i64" { self.mv.visit_method_insn(INVOKESTATIC, "java/lang/String", "valueOf", "(J)Ljava/lang/String;", 0); }
+                else if name == "f64" { self.mv.visit_method_insn(INVOKESTATIC, "java/lang/String", "valueOf", "(D)Ljava/lang/String;", 0); }
+                else if name == "bool" { self.mv.visit_method_insn(INVOKESTATIC, "java/lang/String", "valueOf", "(Z)Ljava/lang/String;", 0); }
+                else if name == "char" { self.mv.visit_method_insn(INVOKESTATIC, "java/lang/String", "valueOf", "(C)Ljava/lang/String;", 0); }
+                else { self.mv.visit_method_insn(INVOKESTATIC, "java/lang/String", "valueOf", "(Ljava/lang/Object;)Ljava/lang/String;", 0); }
             }
             _ => {
-                JRustAsm::mv_method_insn(self.mv, INVOKESTATIC, "java/lang/String", "valueOf", "(Ljava/lang/Object;)Ljava/lang/String;", 0);
+                self.mv.visit_method_insn(INVOKESTATIC, "java/lang/String", "valueOf", "(Ljava/lang/Object;)Ljava/lang/String;", 0);
             }
         }
     }
 
     fn gen_int_comparison(self, opcode: i32) {
-        let true_l: i32 = JRustAsm::label_new();
-        let end_l: i32 = JRustAsm::label_new();
-        JRustAsm::mv_jump_insn(self.mv, opcode, true_l);
-        JRustAsm::mv_insn(self.mv, ICONST_0);
-        JRustAsm::mv_jump_insn(self.mv, GOTO, end_l);
-        JRustAsm::mv_label(self.mv, true_l);
-        JRustAsm::mv_insn(self.mv, ICONST_1);
-        JRustAsm::mv_label(self.mv, end_l);
+        let true_l: Label = Label::new();
+        let end_l: Label = Label::new();
+        self.mv.visit_jump_insn(opcode, true_l);
+        self.mv.visit_insn(ICONST_0);
+        self.mv.visit_jump_insn(GOTO, end_l);
+        self.mv.visit_label(true_l);
+        self.mv.visit_insn(ICONST_1);
+        self.mv.visit_label(end_l);
     }
 
     fn gen_int_comparison_zero(self, op: String) {
-        let true_l: i32 = JRustAsm::label_new();
-        let end_l: i32 = JRustAsm::label_new();
+        let true_l: Label = Label::new();
+        let end_l: Label = Label::new();
         let mut opcode: i32 = IFEQ;
         if op == "==" { opcode = IFEQ; }
         else if op == "!=" { opcode = IFNE; }
@@ -2650,12 +2634,12 @@ impl Codegen {
         else if op == ">" { opcode = IFGT; }
         else if op == "<=" { opcode = IFLE; }
         else if op == ">=" { opcode = IFGE; }
-        JRustAsm::mv_jump_insn(self.mv, opcode, true_l);
-        JRustAsm::mv_insn(self.mv, ICONST_0);
-        JRustAsm::mv_jump_insn(self.mv, GOTO, end_l);
-        JRustAsm::mv_label(self.mv, true_l);
-        JRustAsm::mv_insn(self.mv, ICONST_1);
-        JRustAsm::mv_label(self.mv, end_l);
+        self.mv.visit_jump_insn(opcode, true_l);
+        self.mv.visit_insn(ICONST_0);
+        self.mv.visit_jump_insn(GOTO, end_l);
+        self.mv.visit_label(true_l);
+        self.mv.visit_insn(ICONST_1);
+        self.mv.visit_label(end_l);
     }
 
     fn is_comparison_op(self, op: String) -> bool {
@@ -2672,13 +2656,13 @@ impl Codegen {
         let ty: Ty = self.gen_expr(operand);
         let type_name: String = self.resolve_type_name(ty);
         if op == "-" {
-            if type_name == "i32" { JRustAsm::mv_insn(self.mv, INEG); }
-            else if type_name == "i64" { JRustAsm::mv_insn(self.mv, 117); } // LNEG
-            else if type_name == "f64" { JRustAsm::mv_insn(self.mv, DNEG); }
+            if type_name == "i32" { self.mv.visit_insn(INEG); }
+            else if type_name == "i64" { self.mv.visit_insn(117); } // LNEG
+            else if type_name == "f64" { self.mv.visit_insn(DNEG); }
             else { panic("Cannot negate type: " + type_name); }
         } else if op == "!" {
-            JRustAsm::mv_insn(self.mv, ICONST_1);
-            JRustAsm::mv_insn(self.mv, IXOR);
+            self.mv.visit_insn(ICONST_1);
+            self.mv.visit_insn(IXOR);
         } else {
             panic("Unknown unary op: " + op);
         }
@@ -2688,76 +2672,140 @@ impl Codegen {
     fn gen_call(mut self, name: String, args: Vec<Expr>) -> Ty {
         // Built-in: println
         if name == "println" {
-            JRustAsm::mv_field_insn(self.mv, GETSTATIC, "java/lang/System", "out", "Ljava/io/PrintStream;");
+            self.mv.visit_field_insn(GETSTATIC, "java/lang/System", "out", "Ljava/io/PrintStream;");
             if args.len() == 0 {
-                JRustAsm::mv_method_insn(self.mv, INVOKEVIRTUAL, "java/io/PrintStream", "println", "()V", 0);
+                self.mv.visit_method_insn(INVOKEVIRTUAL, "java/io/PrintStream", "println", "()V", 0);
             } else {
                 let arg_type: Ty = self.gen_expr(args.get(0));
                 let desc: String = "(" + self.print_stream_descriptor(arg_type) + ")V";
-                JRustAsm::mv_method_insn(self.mv, INVOKEVIRTUAL, "java/io/PrintStream", "println", desc, 0);
+                self.mv.visit_method_insn(INVOKEVIRTUAL, "java/io/PrintStream", "println", desc, 0);
             }
             return Ty::VoidTy;
         }
         if name == "print" {
-            JRustAsm::mv_field_insn(self.mv, GETSTATIC, "java/lang/System", "out", "Ljava/io/PrintStream;");
+            self.mv.visit_field_insn(GETSTATIC, "java/lang/System", "out", "Ljava/io/PrintStream;");
             if args.len() > 0 {
                 let arg_type: Ty = self.gen_expr(args.get(0));
                 let desc: String = "(" + self.print_stream_descriptor(arg_type) + ")V";
-                JRustAsm::mv_method_insn(self.mv, INVOKEVIRTUAL, "java/io/PrintStream", "print", desc, 0);
+                self.mv.visit_method_insn(INVOKEVIRTUAL, "java/io/PrintStream", "print", desc, 0);
             }
             return Ty::VoidTy;
         }
         if name == "eprintln" {
-            JRustAsm::mv_field_insn(self.mv, GETSTATIC, "java/lang/System", "err", "Ljava/io/PrintStream;");
+            self.mv.visit_field_insn(GETSTATIC, "java/lang/System", "err", "Ljava/io/PrintStream;");
             if args.len() == 0 {
-                JRustAsm::mv_method_insn(self.mv, INVOKEVIRTUAL, "java/io/PrintStream", "println", "()V", 0);
+                self.mv.visit_method_insn(INVOKEVIRTUAL, "java/io/PrintStream", "println", "()V", 0);
             } else {
                 let arg_type: Ty = self.gen_expr(args.get(0));
                 let desc: String = "(" + self.print_stream_descriptor(arg_type) + ")V";
-                JRustAsm::mv_method_insn(self.mv, INVOKEVIRTUAL, "java/io/PrintStream", "println", desc, 0);
+                self.mv.visit_method_insn(INVOKEVIRTUAL, "java/io/PrintStream", "println", desc, 0);
             }
             return Ty::VoidTy;
         }
         if name == "panic" {
-            JRustAsm::mv_type_insn(self.mv, NEW, "java/lang/RuntimeException");
-            JRustAsm::mv_insn(self.mv, DUP);
+            self.mv.visit_type_insn(NEW, "java/lang/RuntimeException");
+            self.mv.visit_insn(DUP);
             if args.len() > 0 {
                 self.gen_expr(args.get(0));
-                JRustAsm::mv_method_insn(self.mv, INVOKESPECIAL, "java/lang/RuntimeException", "<init>", "(Ljava/lang/String;)V", 0);
+                self.mv.visit_method_insn(INVOKESPECIAL, "java/lang/RuntimeException", "<init>", "(Ljava/lang/String;)V", 0);
             } else {
-                JRustAsm::mv_method_insn(self.mv, INVOKESPECIAL, "java/lang/RuntimeException", "<init>", "()V", 0);
+                self.mv.visit_method_insn(INVOKESPECIAL, "java/lang/RuntimeException", "<init>", "()V", 0);
             }
-            JRustAsm::mv_insn(self.mv, ATHROW);
+            self.mv.visit_insn(ATHROW);
             return Ty::VoidTy;
         }
         if name == "exit" {
             self.gen_expr(args.get(0));
-            JRustAsm::mv_method_insn(self.mv, INVOKESTATIC, "java/lang/System", "exit", "(I)V", 0);
+            self.mv.visit_method_insn(INVOKESTATIC, "java/lang/System", "exit", "(I)V", 0);
             return Ty::VoidTy;
+        }
+        if name == "is_digit" {
+            self.gen_expr(args.get(0));
+            self.mv.visit_method_insn(INVOKESTATIC, "java/lang/Character", "isDigit", "(C)Z", 0);
+            return Ty::SimpleTy { name: "bool" };
+        }
+        if name == "is_letter" {
+            self.gen_expr(args.get(0));
+            self.mv.visit_method_insn(INVOKESTATIC, "java/lang/Character", "isLetter", "(C)Z", 0);
+            return Ty::SimpleTy { name: "bool" };
+        }
+        if name == "is_alphanumeric" {
+            self.gen_expr(args.get(0));
+            self.mv.visit_method_insn(INVOKESTATIC, "java/lang/Character", "isLetterOrDigit", "(C)Z", 0);
+            return Ty::SimpleTy { name: "bool" };
         }
         if name == "read_file" {
             self.gen_expr(args.get(0));
-            JRustAsm::mv_method_insn(self.mv, INVOKESTATIC, "jrust/JRustAsm", "read_file", "(Ljava/lang/String;)Ljava/lang/String;", 0);
+            // Path.of(path, new String[0])
+            self.mv.visit_insn(ICONST_0);
+            self.mv.visit_type_insn(ANEWARRAY, "java/lang/String");
+            self.mv.visit_method_insn(INVOKESTATIC, "java/nio/file/Path", "of", "(Ljava/lang/String;[Ljava/lang/String;)Ljava/nio/file/Path;", 1);
+            // Files.readString(path)
+            self.mv.visit_method_insn(INVOKESTATIC, "java/nio/file/Files", "readString", "(Ljava/nio/file/Path;)Ljava/lang/String;", 0);
             return Ty::SimpleTy { name: "String" };
         }
         if name == "write_file" {
             self.gen_expr(args.get(0));
             self.gen_expr(args.get(1));
-            JRustAsm::mv_method_insn(self.mv, INVOKESTATIC, "jrust/JRustAsm", "write_file", "(Ljava/lang/String;Ljava/lang/String;)V", 0);
+            // stack: [path, content]
+            self.mv.visit_insn(SWAP);
+            // stack: [content, path]
+            self.mv.visit_insn(ICONST_0);
+            self.mv.visit_type_insn(ANEWARRAY, "java/lang/String");
+            self.mv.visit_method_insn(INVOKESTATIC, "java/nio/file/Path", "of", "(Ljava/lang/String;[Ljava/lang/String;)Ljava/nio/file/Path;", 1);
+            // stack: [content, path_obj]
+            self.mv.visit_insn(SWAP);
+            // stack: [path_obj, content]
+            self.mv.visit_insn(ICONST_0);
+            self.mv.visit_type_insn(ANEWARRAY, "java/nio/file/OpenOption");
+            self.mv.visit_method_insn(INVOKESTATIC, "java/nio/file/Files", "writeString", "(Ljava/nio/file/Path;Ljava/lang/CharSequence;[Ljava/nio/file/OpenOption;)Ljava/nio/file/Path;", 0);
+            self.mv.visit_insn(POP);
             return Ty::VoidTy;
         }
         if name == "system" {
             self.gen_expr(args.get(0));
-            JRustAsm::mv_method_insn(self.mv, INVOKESTATIC, "jrust/JRustAsm", "run_command", "(Ljava/lang/String;)I", 0);
+            // stack: [cmd]
+            let cmd_local: i32 = self.next_local;
+            self.next_local = self.next_local + 1;
+            self.mv.visit_var_insn(ASTORE, cmd_local);
+            // Build String[] {"sh", "-c", cmd}
+            self.push_int(3);
+            self.mv.visit_type_insn(ANEWARRAY, "java/lang/String");
+            self.mv.visit_insn(DUP);
+            self.mv.visit_insn(ICONST_0);
+            self.mv.ldc_str("sh");
+            self.mv.visit_insn(AASTORE_OP);
+            self.mv.visit_insn(DUP);
+            self.mv.visit_insn(ICONST_1);
+            self.mv.ldc_str("-c");
+            self.mv.visit_insn(AASTORE_OP);
+            self.mv.visit_insn(DUP);
+            self.push_int(2);
+            self.mv.visit_var_insn(ALOAD, cmd_local);
+            self.mv.visit_insn(AASTORE_OP);
+            // stack: [arr]
+            // new ProcessBuilder(arr)
+            self.mv.visit_type_insn(NEW, "java/lang/ProcessBuilder");
+            self.mv.visit_insn(DUP_X1);
+            self.mv.visit_insn(SWAP);
+            self.mv.visit_method_insn(INVOKESPECIAL, "java/lang/ProcessBuilder", "<init>", "([Ljava/lang/String;)V", 0);
+            // stack: [pb]
+            self.mv.visit_method_insn(INVOKEVIRTUAL, "java/lang/ProcessBuilder", "inheritIO", "()Ljava/lang/ProcessBuilder;", 0);
+            self.mv.visit_method_insn(INVOKEVIRTUAL, "java/lang/ProcessBuilder", "start", "()Ljava/lang/Process;", 0);
+            self.mv.visit_method_insn(INVOKEVIRTUAL, "java/lang/Process", "waitFor", "()I", 0);
             return Ty::SimpleTy { name: "i32" };
         }
         if name == "args_len" {
-            JRustAsm::mv_method_insn(self.mv, INVOKESTATIC, "jrust/JRustAsm", "args_len", "()I", 0);
+            self.mv.visit_field_insn(GETSTATIC, "Main", "__args", "[Ljava/lang/String;");
+            self.mv.visit_insn(ARRAYLENGTH);
             return Ty::SimpleTy { name: "i32" };
         }
         if name == "args_get" {
             self.gen_expr(args.get(0));
-            JRustAsm::mv_method_insn(self.mv, INVOKESTATIC, "jrust/JRustAsm", "args_get", "(I)Ljava/lang/String;", 0);
+            // stack: [index]
+            self.mv.visit_field_insn(GETSTATIC, "Main", "__args", "[Ljava/lang/String;");
+            self.mv.visit_insn(SWAP);
+            self.mv.visit_insn(AALOAD);
             return Ty::SimpleTy { name: "String" };
         }
 
@@ -2776,7 +2824,7 @@ impl Codegen {
         }
         desc_sb.append(")");
         desc_sb.append(self.type_descriptor(fn_ret));
-        JRustAsm::mv_method_insn(self.mv, INVOKESTATIC, "Main", name, desc_sb.to_string(), 0);
+        self.mv.visit_method_insn(INVOKESTATIC, "Main", name, desc_sb.to_string(), 0);
         return fn_ret;
     }
 
@@ -2817,6 +2865,19 @@ impl Codegen {
             return self.gen_string_builder_method(method_name, args);
         }
 
+        // ASM ClassWriter methods
+        if type_name == "ClassWriter" {
+            return self.gen_class_writer_method(method_name, args);
+        }
+        // ASM MethodVisitor methods
+        if type_name == "MethodVisitor" {
+            return self.gen_method_visitor_method(method_name, args);
+        }
+        // ASM FieldVisitor methods
+        if type_name == "FieldVisitor" {
+            return self.gen_field_visitor_method(method_name, args);
+        }
+
         // User-defined method
         let method: Item = self.find_impl_method(type_name, method_name);
         match method {
@@ -2838,7 +2899,7 @@ impl Codegen {
                 }
                 desc_sb.append(")");
                 desc_sb.append(self.type_descriptor(return_type));
-                JRustAsm::mv_method_insn(self.mv, INVOKEVIRTUAL, type_name, method_name, desc_sb.to_string(), 0);
+                self.mv.visit_method_insn(INVOKEVIRTUAL, type_name, method_name, desc_sb.to_string(), 0);
                 return return_type;
             }
             _ => {
@@ -2850,42 +2911,42 @@ impl Codegen {
 
     fn gen_string_method(mut self, method_name: String, args: Vec<Expr>) -> Ty {
         if method_name == "len" || method_name == "length" {
-            JRustAsm::mv_method_insn(self.mv, INVOKEVIRTUAL, "java/lang/String", "length", "()I", 0);
+            self.mv.visit_method_insn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", 0);
             return Ty::SimpleTy { name: "i32" };
         }
         if method_name == "char_at" || method_name == "charAt" {
             self.gen_expr(args.get(0));
-            JRustAsm::mv_method_insn(self.mv, INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", 0);
+            self.mv.visit_method_insn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", 0);
             return Ty::SimpleTy { name: "char" };
         }
         if method_name == "contains" {
             self.gen_expr(args.get(0));
-            JRustAsm::mv_method_insn(self.mv, INVOKEVIRTUAL, "java/lang/String", "contains", "(Ljava/lang/CharSequence;)Z", 0);
+            self.mv.visit_method_insn(INVOKEVIRTUAL, "java/lang/String", "contains", "(Ljava/lang/CharSequence;)Z", 0);
             return Ty::SimpleTy { name: "bool" };
         }
         if method_name == "starts_with" || method_name == "startsWith" {
             self.gen_expr(args.get(0));
-            JRustAsm::mv_method_insn(self.mv, INVOKEVIRTUAL, "java/lang/String", "startsWith", "(Ljava/lang/String;)Z", 0);
+            self.mv.visit_method_insn(INVOKEVIRTUAL, "java/lang/String", "startsWith", "(Ljava/lang/String;)Z", 0);
             return Ty::SimpleTy { name: "bool" };
         }
         if method_name == "ends_with" || method_name == "endsWith" {
             self.gen_expr(args.get(0));
-            JRustAsm::mv_method_insn(self.mv, INVOKEVIRTUAL, "java/lang/String", "endsWith", "(Ljava/lang/String;)Z", 0);
+            self.mv.visit_method_insn(INVOKEVIRTUAL, "java/lang/String", "endsWith", "(Ljava/lang/String;)Z", 0);
             return Ty::SimpleTy { name: "bool" };
         }
         if method_name == "substring" {
             self.gen_expr(args.get(0));
             if args.len() > 1 {
                 self.gen_expr(args.get(1));
-                JRustAsm::mv_method_insn(self.mv, INVOKEVIRTUAL, "java/lang/String", "substring", "(II)Ljava/lang/String;", 0);
+                self.mv.visit_method_insn(INVOKEVIRTUAL, "java/lang/String", "substring", "(II)Ljava/lang/String;", 0);
             } else {
-                JRustAsm::mv_method_insn(self.mv, INVOKEVIRTUAL, "java/lang/String", "substring", "(I)Ljava/lang/String;", 0);
+                self.mv.visit_method_insn(INVOKEVIRTUAL, "java/lang/String", "substring", "(I)Ljava/lang/String;", 0);
             }
             return Ty::SimpleTy { name: "String" };
         }
         if method_name == "equals" {
             self.gen_expr(args.get(0));
-            JRustAsm::mv_method_insn(self.mv, INVOKEVIRTUAL, "java/lang/String", "equals", "(Ljava/lang/Object;)Z", 0);
+            self.mv.visit_method_insn(INVOKEVIRTUAL, "java/lang/String", "equals", "(Ljava/lang/Object;)Z", 0);
             return Ty::SimpleTy { name: "bool" };
         }
         if method_name == "to_string" || method_name == "toString" {
@@ -2894,16 +2955,21 @@ impl Codegen {
         if method_name == "replace" {
             self.gen_expr(args.get(0));
             self.gen_expr(args.get(1));
-            JRustAsm::mv_method_insn(self.mv, INVOKEVIRTUAL, "java/lang/String", "replace", "(Ljava/lang/CharSequence;Ljava/lang/CharSequence;)Ljava/lang/String;", 0);
+            self.mv.visit_method_insn(INVOKEVIRTUAL, "java/lang/String", "replace", "(Ljava/lang/CharSequence;Ljava/lang/CharSequence;)Ljava/lang/String;", 0);
             return Ty::SimpleTy { name: "String" };
         }
         if method_name == "trim" {
-            JRustAsm::mv_method_insn(self.mv, INVOKEVIRTUAL, "java/lang/String", "trim", "()Ljava/lang/String;", 0);
+            self.mv.visit_method_insn(INVOKEVIRTUAL, "java/lang/String", "trim", "()Ljava/lang/String;", 0);
             return Ty::SimpleTy { name: "String" };
         }
         if method_name == "is_empty" || method_name == "isEmpty" {
-            JRustAsm::mv_method_insn(self.mv, INVOKEVIRTUAL, "java/lang/String", "isEmpty", "()Z", 0);
+            self.mv.visit_method_insn(INVOKEVIRTUAL, "java/lang/String", "isEmpty", "()Z", 0);
             return Ty::SimpleTy { name: "bool" };
+        }
+        if method_name == "indexOf" || method_name == "index_of" {
+            self.gen_expr(args.get(0));
+            self.mv.visit_method_insn(INVOKEVIRTUAL, "java/lang/String", "indexOf", "(Ljava/lang/String;)I", 0);
+            return Ty::SimpleTy { name: "i32" };
         }
         panic("Unknown String method: " + method_name);
         return Ty::VoidTy;
@@ -2914,13 +2980,13 @@ impl Codegen {
         if method_name == "push" || method_name == "add" {
             let arg_type: Ty = self.gen_expr(args.get(0));
             self.box_if_needed(arg_type);
-            JRustAsm::mv_method_insn(self.mv, INVOKEVIRTUAL, "java/util/ArrayList", "add", "(Ljava/lang/Object;)Z", 0);
-            JRustAsm::mv_insn(self.mv, POP);
+            self.mv.visit_method_insn(INVOKEVIRTUAL, "java/util/ArrayList", "add", "(Ljava/lang/Object;)Z", 0);
+            self.mv.visit_insn(POP);
             return Ty::VoidTy;
         }
         if method_name == "get" {
             self.gen_expr(args.get(0));
-            JRustAsm::mv_method_insn(self.mv, INVOKEVIRTUAL, "java/util/ArrayList", "get", "(I)Ljava/lang/Object;", 0);
+            self.mv.visit_method_insn(INVOKEVIRTUAL, "java/util/ArrayList", "get", "(I)Ljava/lang/Object;", 0);
             self.cast_and_unbox(elem_type);
             return elem_type;
         }
@@ -2928,28 +2994,28 @@ impl Codegen {
             self.gen_expr(args.get(0));
             let arg_type: Ty = self.gen_expr(args.get(1));
             self.box_if_needed(arg_type);
-            JRustAsm::mv_method_insn(self.mv, INVOKEVIRTUAL, "java/util/ArrayList", "set", "(ILjava/lang/Object;)Ljava/lang/Object;", 0);
-            JRustAsm::mv_insn(self.mv, POP);
+            self.mv.visit_method_insn(INVOKEVIRTUAL, "java/util/ArrayList", "set", "(ILjava/lang/Object;)Ljava/lang/Object;", 0);
+            self.mv.visit_insn(POP);
             return Ty::VoidTy;
         }
         if method_name == "len" || method_name == "size" {
-            JRustAsm::mv_method_insn(self.mv, INVOKEVIRTUAL, "java/util/ArrayList", "size", "()I", 0);
+            self.mv.visit_method_insn(INVOKEVIRTUAL, "java/util/ArrayList", "size", "()I", 0);
             return Ty::SimpleTy { name: "i32" };
         }
         if method_name == "is_empty" || method_name == "isEmpty" {
-            JRustAsm::mv_method_insn(self.mv, INVOKEVIRTUAL, "java/util/ArrayList", "isEmpty", "()Z", 0);
+            self.mv.visit_method_insn(INVOKEVIRTUAL, "java/util/ArrayList", "isEmpty", "()Z", 0);
             return Ty::SimpleTy { name: "bool" };
         }
         if method_name == "remove" {
             self.gen_expr(args.get(0));
-            JRustAsm::mv_method_insn(self.mv, INVOKEVIRTUAL, "java/util/ArrayList", "remove", "(I)Ljava/lang/Object;", 0);
+            self.mv.visit_method_insn(INVOKEVIRTUAL, "java/util/ArrayList", "remove", "(I)Ljava/lang/Object;", 0);
             self.cast_and_unbox(elem_type);
             return elem_type;
         }
         if method_name == "contains" {
             let arg_type: Ty = self.gen_expr(args.get(0));
             self.box_if_needed(arg_type);
-            JRustAsm::mv_method_insn(self.mv, INVOKEVIRTUAL, "java/util/ArrayList", "contains", "(Ljava/lang/Object;)Z", 0);
+            self.mv.visit_method_insn(INVOKEVIRTUAL, "java/util/ArrayList", "contains", "(Ljava/lang/Object;)Z", 0);
             return Ty::SimpleTy { name: "bool" };
         }
         panic("Unknown Vec method: " + method_name);
@@ -2963,21 +3029,21 @@ impl Codegen {
             self.box_if_needed(key_type);
             let val_type: Ty = self.gen_expr(args.get(1));
             self.box_if_needed(val_type);
-            JRustAsm::mv_method_insn(self.mv, INVOKEVIRTUAL, "java/util/HashMap", "put", "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", 0);
-            JRustAsm::mv_insn(self.mv, POP);
+            self.mv.visit_method_insn(INVOKEVIRTUAL, "java/util/HashMap", "put", "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", 0);
+            self.mv.visit_insn(POP);
             return Ty::VoidTy;
         }
         if method_name == "get" {
             let key_type: Ty = self.gen_expr(args.get(0));
             self.box_if_needed(key_type);
-            JRustAsm::mv_method_insn(self.mv, INVOKEVIRTUAL, "java/util/HashMap", "get", "(Ljava/lang/Object;)Ljava/lang/Object;", 0);
+            self.mv.visit_method_insn(INVOKEVIRTUAL, "java/util/HashMap", "get", "(Ljava/lang/Object;)Ljava/lang/Object;", 0);
             self.cast_and_unbox(value_type);
             return value_type;
         }
         if method_name == "contains_key" || method_name == "containsKey" {
             let key_type: Ty = self.gen_expr(args.get(0));
             self.box_if_needed(key_type);
-            JRustAsm::mv_method_insn(self.mv, INVOKEVIRTUAL, "java/util/HashMap", "containsKey", "(Ljava/lang/Object;)Z", 0);
+            self.mv.visit_method_insn(INVOKEVIRTUAL, "java/util/HashMap", "containsKey", "(Ljava/lang/Object;)Z", 0);
             return Ty::SimpleTy { name: "bool" };
         }
         if method_name == "get_or_default" || method_name == "getOrDefault" {
@@ -2985,22 +3051,22 @@ impl Codegen {
             self.box_if_needed(key_type);
             let def_type: Ty = self.gen_expr(args.get(1));
             self.box_if_needed(def_type);
-            JRustAsm::mv_method_insn(self.mv, INVOKEVIRTUAL, "java/util/HashMap", "getOrDefault", "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", 0);
+            self.mv.visit_method_insn(INVOKEVIRTUAL, "java/util/HashMap", "getOrDefault", "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", 0);
             self.cast_and_unbox(value_type);
             return value_type;
         }
         if method_name == "len" || method_name == "size" {
-            JRustAsm::mv_method_insn(self.mv, INVOKEVIRTUAL, "java/util/HashMap", "size", "()I", 0);
+            self.mv.visit_method_insn(INVOKEVIRTUAL, "java/util/HashMap", "size", "()I", 0);
             return Ty::SimpleTy { name: "i32" };
         }
         if method_name == "is_empty" || method_name == "isEmpty" {
-            JRustAsm::mv_method_insn(self.mv, INVOKEVIRTUAL, "java/util/HashMap", "isEmpty", "()Z", 0);
+            self.mv.visit_method_insn(INVOKEVIRTUAL, "java/util/HashMap", "isEmpty", "()Z", 0);
             return Ty::SimpleTy { name: "bool" };
         }
         if method_name == "remove" {
             let key_type: Ty = self.gen_expr(args.get(0));
             self.box_if_needed(key_type);
-            JRustAsm::mv_method_insn(self.mv, INVOKEVIRTUAL, "java/util/HashMap", "remove", "(Ljava/lang/Object;)Ljava/lang/Object;", 0);
+            self.mv.visit_method_insn(INVOKEVIRTUAL, "java/util/HashMap", "remove", "(Ljava/lang/Object;)Ljava/lang/Object;", 0);
             self.cast_and_unbox(value_type);
             return value_type;
         }
@@ -3015,18 +3081,328 @@ impl Codegen {
             if self.is_object_type(arg_type) && !self.is_string(arg_type) {
                 desc = "(Ljava/lang/Object;)Ljava/lang/StringBuilder;";
             }
-            JRustAsm::mv_method_insn(self.mv, INVOKEVIRTUAL, "java/lang/StringBuilder", "append", desc, 0);
+            self.mv.visit_method_insn(INVOKEVIRTUAL, "java/lang/StringBuilder", "append", desc, 0);
             return Ty::SimpleTy { name: "StringBuilder" };
         }
         if method_name == "to_string" || method_name == "toString" {
-            JRustAsm::mv_method_insn(self.mv, INVOKEVIRTUAL, "java/lang/StringBuilder", "toString", "()Ljava/lang/String;", 0);
+            self.mv.visit_method_insn(INVOKEVIRTUAL, "java/lang/StringBuilder", "toString", "()Ljava/lang/String;", 0);
             return Ty::SimpleTy { name: "String" };
         }
         if method_name == "len" || method_name == "length" {
-            JRustAsm::mv_method_insn(self.mv, INVOKEVIRTUAL, "java/lang/StringBuilder", "length", "()I", 0);
+            self.mv.visit_method_insn(INVOKEVIRTUAL, "java/lang/StringBuilder", "length", "()I", 0);
             return Ty::SimpleTy { name: "i32" };
         }
         panic("Unknown StringBuilder method: " + method_name);
+        return Ty::VoidTy;
+    }
+
+    // --- ASM ClassWriter methods ---
+
+    fn gen_class_writer_method(mut self, method_name: String, args: Vec<Expr>) -> Ty {
+        if method_name == "visit" {
+            // visit(version, access, name, superName) → visit(ver, acc, name, null/*sig*/, super, null/*ifaces*/)
+            self.gen_expr(args.get(0));
+            self.gen_expr(args.get(1));
+            self.gen_expr(args.get(2));
+            self.mv.visit_insn(ACONST_NULL);
+            self.gen_expr(args.get(3));
+            self.mv.visit_insn(ACONST_NULL);
+            self.mv.visit_method_insn(INVOKEVIRTUAL, "org/objectweb/asm/ClassWriter", "visit", "(IILjava/lang/String;Ljava/lang/String;Ljava/lang/String;[Ljava/lang/String;)V", 0);
+            return Ty::VoidTy;
+        }
+        if method_name == "visit_method" {
+            let mut ai: i32 = 0;
+            while ai < args.len() {
+                self.gen_expr(args.get(ai));
+                ai = ai + 1;
+            }
+            self.mv.visit_insn(ACONST_NULL);
+            self.mv.visit_insn(ACONST_NULL);
+            self.mv.visit_method_insn(INVOKEVIRTUAL, "org/objectweb/asm/ClassWriter", "visitMethod", "(ILjava/lang/String;Ljava/lang/String;Ljava/lang/String;[Ljava/lang/String;)Lorg/objectweb/asm/MethodVisitor;", 0);
+            return Ty::SimpleTy { name: "MethodVisitor" };
+        }
+        if method_name == "visit_field" {
+            if args.len() == 3 {
+                let mut ai: i32 = 0;
+                while ai < args.len() {
+                    self.gen_expr(args.get(ai));
+                    ai = ai + 1;
+                }
+                self.mv.visit_insn(ACONST_NULL);
+                self.mv.visit_insn(ACONST_NULL);
+            } else {
+                self.gen_expr(args.get(0));
+                self.gen_expr(args.get(1));
+                self.gen_expr(args.get(2));
+                self.mv.visit_insn(ACONST_NULL);
+                let val_type: Ty = self.gen_expr(args.get(3));
+                self.box_if_needed(val_type);
+            }
+            self.mv.visit_method_insn(INVOKEVIRTUAL, "org/objectweb/asm/ClassWriter", "visitField", "(ILjava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/Object;)Lorg/objectweb/asm/FieldVisitor;", 0);
+            return Ty::SimpleTy { name: "FieldVisitor" };
+        }
+        if method_name == "visit_end" {
+            self.mv.visit_method_insn(INVOKEVIRTUAL, "org/objectweb/asm/ClassWriter", "visitEnd", "()V", 0);
+            return Ty::VoidTy;
+        }
+        panic("Unknown ClassWriter method: " + method_name);
+        return Ty::VoidTy;
+    }
+
+    // --- ASM MethodVisitor methods ---
+
+    fn gen_method_visitor_method(mut self, method_name: String, args: Vec<Expr>) -> Ty {
+        if method_name == "visit_code" {
+            self.mv.visit_method_insn(INVOKEVIRTUAL, "org/objectweb/asm/MethodVisitor", "visitCode", "()V", 0);
+            return Ty::VoidTy;
+        }
+        if method_name == "visit_insn" {
+            self.gen_expr(args.get(0));
+            self.mv.visit_method_insn(INVOKEVIRTUAL, "org/objectweb/asm/MethodVisitor", "visitInsn", "(I)V", 0);
+            return Ty::VoidTy;
+        }
+        if method_name == "visit_int_insn" {
+            self.gen_expr(args.get(0));
+            self.gen_expr(args.get(1));
+            self.mv.visit_method_insn(INVOKEVIRTUAL, "org/objectweb/asm/MethodVisitor", "visitIntInsn", "(II)V", 0);
+            return Ty::VoidTy;
+        }
+        if method_name == "visit_var_insn" {
+            self.gen_expr(args.get(0));
+            self.gen_expr(args.get(1));
+            self.mv.visit_method_insn(INVOKEVIRTUAL, "org/objectweb/asm/MethodVisitor", "visitVarInsn", "(II)V", 0);
+            return Ty::VoidTy;
+        }
+        if method_name == "visit_field_insn" {
+            let mut ai: i32 = 0;
+            while ai < args.len() {
+                self.gen_expr(args.get(ai));
+                ai = ai + 1;
+            }
+            self.mv.visit_method_insn(INVOKEVIRTUAL, "org/objectweb/asm/MethodVisitor", "visitFieldInsn", "(ILjava/lang/String;Ljava/lang/String;Ljava/lang/String;)V", 0);
+            return Ty::VoidTy;
+        }
+        if method_name == "visit_method_insn" {
+            let mut ai: i32 = 0;
+            while ai < args.len() {
+                self.gen_expr(args.get(ai));
+                ai = ai + 1;
+            }
+            self.mv.visit_method_insn(INVOKEVIRTUAL, "org/objectweb/asm/MethodVisitor", "visitMethodInsn", "(ILjava/lang/String;Ljava/lang/String;Ljava/lang/String;Z)V", 0);
+            return Ty::VoidTy;
+        }
+        if method_name == "visit_jump_insn" {
+            self.gen_expr(args.get(0));
+            self.gen_expr(args.get(1));
+            self.mv.visit_method_insn(INVOKEVIRTUAL, "org/objectweb/asm/MethodVisitor", "visitJumpInsn", "(ILorg/objectweb/asm/Label;)V", 0);
+            return Ty::VoidTy;
+        }
+        if method_name == "visit_label" {
+            self.gen_expr(args.get(0));
+            self.mv.visit_method_insn(INVOKEVIRTUAL, "org/objectweb/asm/MethodVisitor", "visitLabel", "(Lorg/objectweb/asm/Label;)V", 0);
+            return Ty::VoidTy;
+        }
+        if method_name == "ldc_str" {
+            self.gen_expr(args.get(0));
+            self.mv.visit_method_insn(INVOKEVIRTUAL, "org/objectweb/asm/MethodVisitor", "visitLdcInsn", "(Ljava/lang/Object;)V", 0);
+            return Ty::VoidTy;
+        }
+        if method_name == "ldc_int" {
+            self.gen_expr(args.get(0));
+            self.mv.visit_method_insn(INVOKESTATIC, "java/lang/Integer", "valueOf", "(I)Ljava/lang/Integer;", 0);
+            self.mv.visit_method_insn(INVOKEVIRTUAL, "org/objectweb/asm/MethodVisitor", "visitLdcInsn", "(Ljava/lang/Object;)V", 0);
+            return Ty::VoidTy;
+        }
+        if method_name == "ldc_long" {
+            self.gen_expr(args.get(0));
+            self.mv.visit_method_insn(INVOKESTATIC, "java/lang/Long", "valueOf", "(J)Ljava/lang/Long;", 0);
+            self.mv.visit_method_insn(INVOKEVIRTUAL, "org/objectweb/asm/MethodVisitor", "visitLdcInsn", "(Ljava/lang/Object;)V", 0);
+            return Ty::VoidTy;
+        }
+        if method_name == "ldc_double" {
+            self.gen_expr(args.get(0));
+            self.mv.visit_method_insn(INVOKESTATIC, "java/lang/Double", "valueOf", "(D)Ljava/lang/Double;", 0);
+            self.mv.visit_method_insn(INVOKEVIRTUAL, "org/objectweb/asm/MethodVisitor", "visitLdcInsn", "(Ljava/lang/Object;)V", 0);
+            return Ty::VoidTy;
+        }
+        if method_name == "visit_type_insn" {
+            self.gen_expr(args.get(0));
+            self.gen_expr(args.get(1));
+            self.mv.visit_method_insn(INVOKEVIRTUAL, "org/objectweb/asm/MethodVisitor", "visitTypeInsn", "(ILjava/lang/String;)V", 0);
+            return Ty::VoidTy;
+        }
+        if method_name == "visit_iinc_insn" {
+            self.gen_expr(args.get(0));
+            self.gen_expr(args.get(1));
+            self.mv.visit_method_insn(INVOKEVIRTUAL, "org/objectweb/asm/MethodVisitor", "visitIincInsn", "(II)V", 0);
+            return Ty::VoidTy;
+        }
+        if method_name == "visit_maxs" {
+            self.gen_expr(args.get(0));
+            self.gen_expr(args.get(1));
+            self.mv.visit_method_insn(INVOKEVIRTUAL, "org/objectweb/asm/MethodVisitor", "visitMaxs", "(II)V", 0);
+            return Ty::VoidTy;
+        }
+        if method_name == "visit_end" {
+            self.mv.visit_method_insn(INVOKEVIRTUAL, "org/objectweb/asm/MethodVisitor", "visitEnd", "()V", 0);
+            return Ty::VoidTy;
+        }
+        panic("Unknown MethodVisitor method: " + method_name);
+        return Ty::VoidTy;
+    }
+
+    // --- ASM FieldVisitor methods ---
+
+    fn gen_field_visitor_method(mut self, method_name: String, args: Vec<Expr>) -> Ty {
+        if method_name == "visit_end" {
+            self.mv.visit_method_insn(INVOKEVIRTUAL, "org/objectweb/asm/FieldVisitor", "visitEnd", "()V", 0);
+            return Ty::VoidTy;
+        }
+        panic("Unknown FieldVisitor method: " + method_name);
+        return Ty::VoidTy;
+    }
+
+    // --- JRustRuntime static calls ---
+
+    fn gen_jrust_runtime_static_call(mut self, method_name: String, args: Vec<Expr>) -> Ty {
+        if method_name == "write_class" {
+            // write_class(cw, dir, name) — inline bytecode
+            self.gen_expr(args.get(0));
+            self.gen_expr(args.get(1));
+            self.gen_expr(args.get(2));
+            // stack: [cw, dir, name]
+            let wc_name_local: i32 = self.next_local;
+            self.next_local = self.next_local + 1;
+            self.mv.visit_var_insn(ASTORE, wc_name_local);
+            let wc_dir_local: i32 = self.next_local;
+            self.next_local = self.next_local + 1;
+            self.mv.visit_var_insn(ASTORE, wc_dir_local);
+            // stack: [cw]
+            // cw.toByteArray()
+            self.mv.visit_method_insn(INVOKEVIRTUAL, "org/objectweb/asm/ClassWriter", "toByteArray", "()[B", 0);
+            let wc_bytes_local: i32 = self.next_local;
+            self.next_local = self.next_local + 1;
+            self.mv.visit_var_insn(ASTORE, wc_bytes_local);
+            // new File(dir).mkdirs()
+            self.mv.visit_type_insn(NEW, "java/io/File");
+            self.mv.visit_insn(DUP);
+            self.mv.visit_var_insn(ALOAD, wc_dir_local);
+            self.mv.visit_method_insn(INVOKESPECIAL, "java/io/File", "<init>", "(Ljava/lang/String;)V", 0);
+            self.mv.visit_method_insn(INVOKEVIRTUAL, "java/io/File", "mkdirs", "()Z", 0);
+            self.mv.visit_insn(POP);
+            // Build path: dir + "/" + name + ".class"
+            self.mv.visit_type_insn(NEW, "java/lang/StringBuilder");
+            self.mv.visit_insn(DUP);
+            self.mv.visit_method_insn(INVOKESPECIAL, "java/lang/StringBuilder", "<init>", "()V", 0);
+            self.mv.visit_var_insn(ALOAD, wc_dir_local);
+            self.mv.visit_method_insn(INVOKEVIRTUAL, "java/lang/StringBuilder", "append", "(Ljava/lang/String;)Ljava/lang/StringBuilder;", 0);
+            self.mv.ldc_str("/");
+            self.mv.visit_method_insn(INVOKEVIRTUAL, "java/lang/StringBuilder", "append", "(Ljava/lang/String;)Ljava/lang/StringBuilder;", 0);
+            self.mv.visit_var_insn(ALOAD, wc_name_local);
+            self.mv.visit_method_insn(INVOKEVIRTUAL, "java/lang/StringBuilder", "append", "(Ljava/lang/String;)Ljava/lang/StringBuilder;", 0);
+            self.mv.ldc_str(".class");
+            self.mv.visit_method_insn(INVOKEVIRTUAL, "java/lang/StringBuilder", "append", "(Ljava/lang/String;)Ljava/lang/StringBuilder;", 0);
+            self.mv.visit_method_insn(INVOKEVIRTUAL, "java/lang/StringBuilder", "toString", "()Ljava/lang/String;", 0);
+            // stack: [path_string]
+            let wc_path_local: i32 = self.next_local;
+            self.next_local = self.next_local + 1;
+            self.mv.visit_var_insn(ASTORE, wc_path_local);
+            // new FileOutputStream(path)
+            self.mv.visit_type_insn(NEW, "java/io/FileOutputStream");
+            self.mv.visit_insn(DUP);
+            self.mv.visit_var_insn(ALOAD, wc_path_local);
+            self.mv.visit_method_insn(INVOKESPECIAL, "java/io/FileOutputStream", "<init>", "(Ljava/lang/String;)V", 0);
+            // stack: [fos]
+            self.mv.visit_insn(DUP);
+            self.mv.visit_var_insn(ALOAD, wc_bytes_local);
+            self.mv.visit_method_insn(INVOKEVIRTUAL, "java/io/FileOutputStream", "write", "([B)V", 0);
+            // stack: [fos]
+            self.mv.visit_method_insn(INVOKEVIRTUAL, "java/io/FileOutputStream", "close", "()V", 0);
+            return Ty::VoidTy;
+        }
+        if method_name == "parse_int" {
+            self.gen_expr(args.get(0));
+            self.mv.visit_method_insn(INVOKESTATIC, "java/lang/Integer", "parseInt", "(Ljava/lang/String;)I", 0);
+            return Ty::SimpleTy { name: "i32" };
+        }
+        if method_name == "parse_long" {
+            self.gen_expr(args.get(0));
+            self.mv.visit_method_insn(INVOKESTATIC, "java/lang/Long", "parseLong", "(Ljava/lang/String;)J", 0);
+            return Ty::SimpleTy { name: "i64" };
+        }
+        if method_name == "parse_double" {
+            self.gen_expr(args.get(0));
+            self.mv.visit_method_insn(INVOKESTATIC, "java/lang/Double", "parseDouble", "(Ljava/lang/String;)D", 0);
+            return Ty::SimpleTy { name: "f64" };
+        }
+        if method_name == "read_file" {
+            self.gen_expr(args.get(0));
+            self.mv.visit_insn(ICONST_0);
+            self.mv.visit_type_insn(ANEWARRAY, "java/lang/String");
+            self.mv.visit_method_insn(INVOKESTATIC, "java/nio/file/Path", "of", "(Ljava/lang/String;[Ljava/lang/String;)Ljava/nio/file/Path;", 1);
+            self.mv.visit_method_insn(INVOKESTATIC, "java/nio/file/Files", "readString", "(Ljava/nio/file/Path;)Ljava/lang/String;", 0);
+            return Ty::SimpleTy { name: "String" };
+        }
+        if method_name == "write_file" {
+            self.gen_expr(args.get(0));
+            self.gen_expr(args.get(1));
+            self.mv.visit_insn(SWAP);
+            self.mv.visit_insn(ICONST_0);
+            self.mv.visit_type_insn(ANEWARRAY, "java/lang/String");
+            self.mv.visit_method_insn(INVOKESTATIC, "java/nio/file/Path", "of", "(Ljava/lang/String;[Ljava/lang/String;)Ljava/nio/file/Path;", 1);
+            self.mv.visit_insn(SWAP);
+            self.mv.visit_insn(ICONST_0);
+            self.mv.visit_type_insn(ANEWARRAY, "java/nio/file/OpenOption");
+            self.mv.visit_method_insn(INVOKESTATIC, "java/nio/file/Files", "writeString", "(Ljava/nio/file/Path;Ljava/lang/CharSequence;[Ljava/nio/file/OpenOption;)Ljava/nio/file/Path;", 0);
+            self.mv.visit_insn(POP);
+            return Ty::VoidTy;
+        }
+        if method_name == "run_command" {
+            self.gen_expr(args.get(0));
+            let rc_cmd_local: i32 = self.next_local;
+            self.next_local = self.next_local + 1;
+            self.mv.visit_var_insn(ASTORE, rc_cmd_local);
+            self.push_int(3);
+            self.mv.visit_type_insn(ANEWARRAY, "java/lang/String");
+            self.mv.visit_insn(DUP);
+            self.mv.visit_insn(ICONST_0);
+            self.mv.ldc_str("sh");
+            self.mv.visit_insn(AASTORE_OP);
+            self.mv.visit_insn(DUP);
+            self.mv.visit_insn(ICONST_1);
+            self.mv.ldc_str("-c");
+            self.mv.visit_insn(AASTORE_OP);
+            self.mv.visit_insn(DUP);
+            self.push_int(2);
+            self.mv.visit_var_insn(ALOAD, rc_cmd_local);
+            self.mv.visit_insn(AASTORE_OP);
+            self.mv.visit_type_insn(NEW, "java/lang/ProcessBuilder");
+            self.mv.visit_insn(DUP_X1);
+            self.mv.visit_insn(SWAP);
+            self.mv.visit_method_insn(INVOKESPECIAL, "java/lang/ProcessBuilder", "<init>", "([Ljava/lang/String;)V", 0);
+            self.mv.visit_method_insn(INVOKEVIRTUAL, "java/lang/ProcessBuilder", "inheritIO", "()Ljava/lang/ProcessBuilder;", 0);
+            self.mv.visit_method_insn(INVOKEVIRTUAL, "java/lang/ProcessBuilder", "start", "()Ljava/lang/Process;", 0);
+            self.mv.visit_method_insn(INVOKEVIRTUAL, "java/lang/Process", "waitFor", "()I", 0);
+            return Ty::SimpleTy { name: "i32" };
+        }
+        if method_name == "args_len" {
+            self.mv.visit_field_insn(GETSTATIC, "Main", "__args", "[Ljava/lang/String;");
+            self.mv.visit_insn(ARRAYLENGTH);
+            return Ty::SimpleTy { name: "i32" };
+        }
+        if method_name == "args_get" {
+            self.gen_expr(args.get(0));
+            self.mv.visit_field_insn(GETSTATIC, "Main", "__args", "[Ljava/lang/String;");
+            self.mv.visit_insn(SWAP);
+            self.mv.visit_insn(AALOAD);
+            return Ty::SimpleTy { name: "String" };
+        }
+        if method_name == "set_args" {
+            self.gen_expr(args.get(0));
+            self.mv.visit_field_insn(PUTSTATIC, "Main", "__args", "[Ljava/lang/String;");
+            return Ty::VoidTy;
+        }
+        panic("Unknown JRustRuntime method: " + method_name);
         return Ty::VoidTy;
     }
 
@@ -3042,7 +3418,7 @@ impl Codegen {
                     while fi < fields.len() {
                         let f: Field = fields.get(fi);
                         if f.name == field_name {
-                            JRustAsm::mv_field_insn(self.mv, GETFIELD, type_name, f.name, self.type_descriptor(f.ty));
+                            self.mv.visit_field_insn(GETFIELD, type_name, f.name, self.type_descriptor(f.ty));
                             return f.ty;
                         }
                         fi = fi + 1;
@@ -3059,14 +3435,14 @@ impl Codegen {
         let sd: Item = self.structs.get(struct_name);
         match sd {
             Item::StructDefI { name, fields } => {
-                JRustAsm::mv_type_insn(self.mv, NEW, struct_name);
-                JRustAsm::mv_insn(self.mv, DUP);
-                JRustAsm::mv_method_insn(self.mv, INVOKESPECIAL, struct_name, "<init>", "()V", 0);
+                self.mv.visit_type_insn(NEW, struct_name);
+                self.mv.visit_insn(DUP);
+                self.mv.visit_method_insn(INVOKESPECIAL, struct_name, "<init>", "()V", 0);
 
                 let mut fi: i32 = 0;
                 while fi < init_fields.len() {
                     let fv: FieldValue = init_fields.get(fi);
-                    JRustAsm::mv_insn(self.mv, DUP);
+                    self.mv.visit_insn(DUP);
                     self.gen_expr(fv.value);
                     // Find field type
                     let mut fty: Ty = null;
@@ -3082,7 +3458,7 @@ impl Codegen {
                     if fty == null {
                         panic("Unknown field in struct init: " + struct_name + "." + fv.name);
                     }
-                    JRustAsm::mv_field_insn(self.mv, PUTFIELD, struct_name, fv.name, self.type_descriptor(fty));
+                    self.mv.visit_field_insn(PUTFIELD, struct_name, fv.name, self.type_descriptor(fty));
                     fi = fi + 1;
                 }
                 return Ty::SimpleTy { name: struct_name };
@@ -3114,14 +3490,14 @@ impl Codegen {
                 }
 
                 let variant_class: String = enum_name + "$" + variant;
-                JRustAsm::mv_type_insn(self.mv, NEW, variant_class);
-                JRustAsm::mv_insn(self.mv, DUP);
-                JRustAsm::mv_method_insn(self.mv, INVOKESPECIAL, variant_class, "<init>", "()V", 0);
+                self.mv.visit_type_insn(NEW, variant_class);
+                self.mv.visit_insn(DUP);
+                self.mv.visit_method_insn(INVOKESPECIAL, variant_class, "<init>", "()V", 0);
 
                 let mut fi: i32 = 0;
                 while fi < fields.len() {
                     let fv: FieldValue = fields.get(fi);
-                    JRustAsm::mv_insn(self.mv, DUP);
+                    self.mv.visit_insn(DUP);
                     self.gen_expr(fv.value);
                     let mut fty: Ty = null;
                     let mut si: i32 = 0;
@@ -3136,7 +3512,7 @@ impl Codegen {
                     if fty == null {
                         panic("Unknown field in enum init: " + enum_name + "::" + variant + "." + fv.name);
                     }
-                    JRustAsm::mv_field_insn(self.mv, PUTFIELD, variant_class, fv.name, self.type_descriptor(fty));
+                    self.mv.visit_field_insn(PUTFIELD, variant_class, fv.name, self.type_descriptor(fty));
                     fi = fi + 1;
                 }
                 return Ty::SimpleTy { name: enum_name };
@@ -3151,27 +3527,27 @@ impl Codegen {
     fn gen_static_call(mut self, type_name: String, method_name: String, args: Vec<Expr>) -> Ty {
         // Vec::new()
         if type_name == "Vec" && method_name == "new" {
-            JRustAsm::mv_type_insn(self.mv, NEW, "java/util/ArrayList");
-            JRustAsm::mv_insn(self.mv, DUP);
-            JRustAsm::mv_method_insn(self.mv, INVOKESPECIAL, "java/util/ArrayList", "<init>", "()V", 0);
+            self.mv.visit_type_insn(NEW, "java/util/ArrayList");
+            self.mv.visit_insn(DUP);
+            self.mv.visit_method_insn(INVOKESPECIAL, "java/util/ArrayList", "<init>", "()V", 0);
             return Ty::SimpleTy { name: "Vec" };
         }
         // Map::new()
         if type_name == "Map" && method_name == "new" {
-            JRustAsm::mv_type_insn(self.mv, NEW, "java/util/HashMap");
-            JRustAsm::mv_insn(self.mv, DUP);
-            JRustAsm::mv_method_insn(self.mv, INVOKESPECIAL, "java/util/HashMap", "<init>", "()V", 0);
+            self.mv.visit_type_insn(NEW, "java/util/HashMap");
+            self.mv.visit_insn(DUP);
+            self.mv.visit_method_insn(INVOKESPECIAL, "java/util/HashMap", "<init>", "()V", 0);
             return Ty::SimpleTy { name: "Map" };
         }
         // StringBuilder::new()
         if type_name == "StringBuilder" && method_name == "new" {
-            JRustAsm::mv_type_insn(self.mv, NEW, "java/lang/StringBuilder");
-            JRustAsm::mv_insn(self.mv, DUP);
+            self.mv.visit_type_insn(NEW, "java/lang/StringBuilder");
+            self.mv.visit_insn(DUP);
             if args.len() == 0 {
-                JRustAsm::mv_method_insn(self.mv, INVOKESPECIAL, "java/lang/StringBuilder", "<init>", "()V", 0);
+                self.mv.visit_method_insn(INVOKESPECIAL, "java/lang/StringBuilder", "<init>", "()V", 0);
             } else {
                 self.gen_expr(args.get(0));
-                JRustAsm::mv_method_insn(self.mv, INVOKESPECIAL, "java/lang/StringBuilder", "<init>", "(Ljava/lang/String;)V", 0);
+                self.mv.visit_method_insn(INVOKESPECIAL, "java/lang/StringBuilder", "<init>", "(Ljava/lang/String;)V", 0);
             }
             return Ty::SimpleTy { name: "StringBuilder" };
         }
@@ -3180,6 +3556,28 @@ impl Codegen {
             let arg_type: Ty = self.gen_expr(args.get(0));
             self.gen_to_string(arg_type);
             return Ty::SimpleTy { name: "String" };
+        }
+
+        // ClassWriter::new(flags)
+        if type_name == "ClassWriter" && method_name == "new" {
+            self.mv.visit_type_insn(NEW, "org/objectweb/asm/ClassWriter");
+            self.mv.visit_insn(DUP);
+            self.gen_expr(args.get(0));
+            self.mv.visit_method_insn(INVOKESPECIAL, "org/objectweb/asm/ClassWriter", "<init>", "(I)V", 0);
+            return Ty::SimpleTy { name: "ClassWriter" };
+        }
+
+        // Label::new() → NEW Label; DUP; INVOKESPECIAL <init>()V
+        if type_name == "Label" && method_name == "new" {
+            self.mv.visit_type_insn(NEW, "org/objectweb/asm/Label");
+            self.mv.visit_insn(DUP);
+            self.mv.visit_method_insn(INVOKESPECIAL, "org/objectweb/asm/Label", "<init>", "()V", 0);
+            return Ty::SimpleTy { name: "Label" };
+        }
+
+        // JRustRuntime static calls
+        if type_name == "JRustRuntime" {
+            return self.gen_jrust_runtime_static_call(method_name, args);
         }
 
         // Imported class static call
@@ -3199,7 +3597,7 @@ impl Codegen {
                 ret_type = self.expected_type;
             }
             desc_sb.append(self.type_descriptor(ret_type));
-            JRustAsm::mv_method_insn(self.mv, INVOKESTATIC, jvm_class, method_name, desc_sb.to_string(), 0);
+            self.mv.visit_method_insn(INVOKESTATIC, jvm_class, method_name, desc_sb.to_string(), 0);
             return ret_type;
         }
 
@@ -3224,7 +3622,7 @@ impl Codegen {
                 }
                 desc_sb.append(")");
                 desc_sb.append(self.type_descriptor(return_type));
-                JRustAsm::mv_method_insn(self.mv, INVOKESTATIC, type_name, method_name, desc_sb.to_string(), 0);
+                self.mv.visit_method_insn(INVOKESTATIC, type_name, method_name, desc_sb.to_string(), 0);
                 return return_type;
             }
             _ => {
@@ -3264,7 +3662,7 @@ impl Codegen {
                                     self.expected_type = f.ty;
                                     self.gen_expr(value);
                                     self.expected_type = prev_expected;
-                                    JRustAsm::mv_field_insn(self.mv, PUTFIELD, type_name, f.name, self.type_descriptor(f.ty));
+                                    self.mv.visit_field_insn(PUTFIELD, type_name, f.name, self.type_descriptor(f.ty));
                                     return Ty::VoidTy;
                                 }
                                 fi = fi + 1;
@@ -3280,7 +3678,7 @@ impl Codegen {
                 self.gen_expr(receiver);
                 self.gen_expr(index);
                 self.gen_expr(value);
-                JRustAsm::mv_insn(self.mv, 83); // AASTORE
+                self.mv.visit_insn(AASTORE_OP);
                 return Ty::VoidTy;
             }
             _ => {
@@ -3293,16 +3691,16 @@ impl Codegen {
 
     fn gen_if(mut self, condition: Expr, then_block: Vec<Stmt>, else_block: Vec<Stmt>) -> Ty {
         self.gen_expr(condition);
-        let else_label: i32 = JRustAsm::label_new();
-        let end_label: i32 = JRustAsm::label_new();
-        JRustAsm::mv_jump_insn(self.mv, IFEQ, else_label);
+        let else_label: Label = Label::new();
+        let end_label: Label = Label::new();
+        self.mv.visit_jump_insn(IFEQ, else_label);
         let mut i: i32 = 0;
         while i < then_block.len() {
             self.gen_stmt(then_block.get(i));
             i = i + 1;
         }
-        JRustAsm::mv_jump_insn(self.mv, GOTO, end_label);
-        JRustAsm::mv_label(self.mv, else_label);
+        self.mv.visit_jump_insn(GOTO, end_label);
+        self.mv.visit_label(else_label);
         if else_block != null {
             i = 0;
             while i < else_block.len() {
@@ -3310,29 +3708,29 @@ impl Codegen {
                 i = i + 1;
             }
         }
-        JRustAsm::mv_label(self.mv, end_label);
+        self.mv.visit_label(end_label);
         return Ty::VoidTy;
     }
 
     fn gen_while(mut self, condition: Expr, body: Vec<Stmt>) -> Ty {
-        let loop_start: i32 = JRustAsm::label_new();
-        let loop_end: i32 = JRustAsm::label_new();
-        let prev_break: i32 = self.break_label;
-        let prev_continue: i32 = self.continue_label;
+        let loop_start: Label = Label::new();
+        let loop_end: Label = Label::new();
+        let prev_break: Label = self.break_label;
+        let prev_continue: Label = self.continue_label;
         self.break_label = loop_end;
         self.continue_label = loop_start;
 
-        JRustAsm::mv_label(self.mv, loop_start);
+        self.mv.visit_label(loop_start);
         self.gen_expr(condition);
-        JRustAsm::mv_jump_insn(self.mv, IFEQ, loop_end);
+        self.mv.visit_jump_insn(IFEQ, loop_end);
 
         let mut i: i32 = 0;
         while i < body.len() {
             self.gen_stmt(body.get(i));
             i = i + 1;
         }
-        JRustAsm::mv_jump_insn(self.mv, GOTO, loop_start);
-        JRustAsm::mv_label(self.mv, loop_end);
+        self.mv.visit_jump_insn(GOTO, loop_start);
+        self.mv.visit_label(loop_end);
         self.break_label = prev_break;
         self.continue_label = prev_continue;
         return Ty::VoidTy;
@@ -3353,19 +3751,19 @@ impl Codegen {
         self.locals.insert(var_name, slot);
         self.local_types.insert(var_name, Ty::SimpleTy { name: "i32" });
         self.next_local = self.next_local + 1;
-        JRustAsm::mv_var_insn(self.mv, ISTORE, slot);
+        self.mv.visit_var_insn(ISTORE, slot);
 
-        let loop_start: i32 = JRustAsm::label_new();
-        let loop_end: i32 = JRustAsm::label_new();
-        let prev_break: i32 = self.break_label;
-        let prev_continue: i32 = self.continue_label;
+        let loop_start: Label = Label::new();
+        let loop_end: Label = Label::new();
+        let prev_break: Label = self.break_label;
+        let prev_continue: Label = self.continue_label;
         self.break_label = loop_end;
         self.continue_label = loop_start;
 
-        JRustAsm::mv_label(self.mv, loop_start);
-        JRustAsm::mv_var_insn(self.mv, ILOAD, slot);
+        self.mv.visit_label(loop_start);
+        self.mv.visit_var_insn(ILOAD, slot);
         self.gen_expr(end);
-        JRustAsm::mv_jump_insn(self.mv, IF_ICMPGE, loop_end);
+        self.mv.visit_jump_insn(IF_ICMPGE, loop_end);
 
         let mut i: i32 = 0;
         while i < body.len() {
@@ -3373,9 +3771,9 @@ impl Codegen {
             i = i + 1;
         }
 
-        JRustAsm::mv_iinc(self.mv, slot, 1);
-        JRustAsm::mv_jump_insn(self.mv, GOTO, loop_start);
-        JRustAsm::mv_label(self.mv, loop_end);
+        self.mv.visit_iinc_insn(slot, 1);
+        self.mv.visit_jump_insn(GOTO, loop_start);
+        self.mv.visit_label(loop_end);
         self.break_label = prev_break;
         self.continue_label = prev_continue;
         return Ty::VoidTy;
@@ -3385,26 +3783,26 @@ impl Codegen {
         let iter_type: Ty = self.gen_expr(iterable);
         let elem_type: Ty = self.get_vec_elem_type(iter_type);
 
-        JRustAsm::mv_method_insn(self.mv, INVOKEVIRTUAL, "java/util/ArrayList", "iterator", "()Ljava/util/Iterator;", 0);
+        self.mv.visit_method_insn(INVOKEVIRTUAL, "java/util/ArrayList", "iterator", "()Ljava/util/Iterator;", 0);
         let iter_slot: i32 = self.next_local;
         self.next_local = self.next_local + 1;
-        JRustAsm::mv_var_insn(self.mv, ASTORE, iter_slot);
+        self.mv.visit_var_insn(ASTORE, iter_slot);
 
         let item_slot: i32 = self.next_local;
         self.locals.insert(var_name, item_slot);
         self.local_types.insert(var_name, elem_type);
         self.next_local = self.next_local + self.local_size(elem_type);
 
-        let loop_start: i32 = JRustAsm::label_new();
-        let loop_end: i32 = JRustAsm::label_new();
+        let loop_start: Label = Label::new();
+        let loop_end: Label = Label::new();
 
-        JRustAsm::mv_label(self.mv, loop_start);
-        JRustAsm::mv_var_insn(self.mv, ALOAD, iter_slot);
-        JRustAsm::mv_method_insn(self.mv, INVOKEINTERFACE, "java/util/Iterator", "hasNext", "()Z", 1);
-        JRustAsm::mv_jump_insn(self.mv, IFEQ, loop_end);
+        self.mv.visit_label(loop_start);
+        self.mv.visit_var_insn(ALOAD, iter_slot);
+        self.mv.visit_method_insn(INVOKEINTERFACE, "java/util/Iterator", "hasNext", "()Z", 1);
+        self.mv.visit_jump_insn(IFEQ, loop_end);
 
-        JRustAsm::mv_var_insn(self.mv, ALOAD, iter_slot);
-        JRustAsm::mv_method_insn(self.mv, INVOKEINTERFACE, "java/util/Iterator", "next", "()Ljava/lang/Object;", 1);
+        self.mv.visit_var_insn(ALOAD, iter_slot);
+        self.mv.visit_method_insn(INVOKEINTERFACE, "java/util/Iterator", "next", "()Ljava/lang/Object;", 1);
         self.cast_and_unbox(elem_type);
         self.store_local(item_slot, elem_type);
 
@@ -3413,8 +3811,8 @@ impl Codegen {
             self.gen_stmt(body.get(i));
             i = i + 1;
         }
-        JRustAsm::mv_jump_insn(self.mv, GOTO, loop_start);
-        JRustAsm::mv_label(self.mv, loop_end);
+        self.mv.visit_jump_insn(GOTO, loop_start);
+        self.mv.visit_label(loop_end);
         return Ty::VoidTy;
     }
 
@@ -3424,12 +3822,12 @@ impl Codegen {
         self.next_local = self.next_local + self.local_size(subject_type);
         self.store_local(temp_slot, subject_type);
 
-        let end_label: i32 = JRustAsm::label_new();
+        let end_label: Label = Label::new();
 
         let mut ai: i32 = 0;
         while ai < arms.len() {
             let arm: MatchArm = arms.get(ai);
-            let next_arm: i32 = JRustAsm::label_new();
+            let next_arm: Label = Label::new();
             let mut is_wildcard: bool = false;
             match arm.pattern {
                 Pattern::WildcardP => { is_wildcard = true; }
@@ -3456,18 +3854,18 @@ impl Codegen {
                 self.gen_stmt(arm.body.get(bi));
                 bi = bi + 1;
             }
-            JRustAsm::mv_jump_insn(self.mv, GOTO, end_label);
+            self.mv.visit_jump_insn(GOTO, end_label);
 
             if !is_wildcard {
-                JRustAsm::mv_label(self.mv, next_arm);
+                self.mv.visit_label(next_arm);
             }
             ai = ai + 1;
         }
-        JRustAsm::mv_label(self.mv, end_label);
+        self.mv.visit_label(end_label);
         return Ty::VoidTy;
     }
 
-    fn gen_match_condition(mut self, pattern: Pattern, temp_slot: i32, subject_type: Ty, fail_label: i32) {
+    fn gen_match_condition(mut self, pattern: Pattern, temp_slot: i32, subject_type: Ty, fail_label: Label) {
         match pattern {
             Pattern::WildcardP => {}
             Pattern::LiteralP { expr } => {
@@ -3475,15 +3873,15 @@ impl Codegen {
                 let type_name: String = self.resolve_type_name(subject_type);
                 if type_name == "String" {
                     self.gen_expr(expr);
-                    JRustAsm::mv_method_insn(self.mv, INVOKEVIRTUAL, "java/lang/String", "equals", "(Ljava/lang/Object;)Z", 0);
-                    JRustAsm::mv_jump_insn(self.mv, IFEQ, fail_label);
+                    self.mv.visit_method_insn(INVOKEVIRTUAL, "java/lang/String", "equals", "(Ljava/lang/Object;)Z", 0);
+                    self.mv.visit_jump_insn(IFEQ, fail_label);
                 } else if type_name == "char" || type_name == "i32" || type_name == "bool" {
                     self.gen_expr(expr);
-                    JRustAsm::mv_jump_insn(self.mv, IF_ICMPNE, fail_label);
+                    self.mv.visit_jump_insn(IF_ICMPNE, fail_label);
                 } else if type_name == "i64" {
                     self.gen_expr(expr);
-                    JRustAsm::mv_insn(self.mv, LCMP);
-                    JRustAsm::mv_jump_insn(self.mv, IFNE, fail_label);
+                    self.mv.visit_insn(LCMP);
+                    self.mv.visit_jump_insn(IFNE, fail_label);
                 } else {
                     // null check
                     let mut is_null_lit: bool = false;
@@ -3492,7 +3890,7 @@ impl Codegen {
                         _ => {}
                     }
                     if is_null_lit {
-                        JRustAsm::mv_jump_insn(self.mv, IFNONNULL, fail_label);
+                        self.mv.visit_jump_insn(IFNONNULL, fail_label);
                     } else {
                         panic("Cannot match on type: " + type_name);
                     }
@@ -3501,8 +3899,8 @@ impl Codegen {
             Pattern::EnumVariantP { enum_name, variant, bindings } => {
                 let variant_class: String = enum_name + "$" + variant;
                 self.load_local(temp_slot, subject_type);
-                JRustAsm::mv_type_insn(self.mv, INSTANCEOF, variant_class);
-                JRustAsm::mv_jump_insn(self.mv, IFEQ, fail_label);
+                self.mv.visit_type_insn(INSTANCEOF, variant_class);
+                self.mv.visit_jump_insn(IFEQ, fail_label);
             }
         }
     }
@@ -3532,19 +3930,19 @@ impl Codegen {
         }
 
         // Cast and store
-        JRustAsm::mv_var_insn(self.mv, ALOAD, temp_slot);
-        JRustAsm::mv_type_insn(self.mv, CHECKCAST, variant_class);
+        self.mv.visit_var_insn(ALOAD, temp_slot);
+        self.mv.visit_type_insn(CHECKCAST, variant_class);
         let cast_slot: i32 = self.next_local;
         self.next_local = self.next_local + 1;
-        JRustAsm::mv_var_insn(self.mv, ASTORE, cast_slot);
+        self.mv.visit_var_insn(ASTORE, cast_slot);
 
         let mut bi: i32 = 0;
         while bi < bindings.len() {
             if bi < variant_def.fields.len() {
                 let binding_name: String = bindings.get(bi);
                 let f: Field = variant_def.fields.get(bi);
-                JRustAsm::mv_var_insn(self.mv, ALOAD, cast_slot);
-                JRustAsm::mv_field_insn(self.mv, GETFIELD, variant_class, f.name, self.type_descriptor(f.ty));
+                self.mv.visit_var_insn(ALOAD, cast_slot);
+                self.mv.visit_field_insn(GETFIELD, variant_class, f.name, self.type_descriptor(f.ty));
                 let bind_slot: i32 = self.next_local;
                 self.locals.insert(binding_name, bind_slot);
                 self.local_types.insert(binding_name, f.ty);
@@ -3560,45 +3958,45 @@ impl Codegen {
         if self.is_vec_type(recv_type) {
             let elem_type: Ty = self.get_vec_elem_type(recv_type);
             self.gen_expr(index);
-            JRustAsm::mv_method_insn(self.mv, INVOKEVIRTUAL, "java/util/ArrayList", "get", "(I)Ljava/lang/Object;", 0);
+            self.mv.visit_method_insn(INVOKEVIRTUAL, "java/util/ArrayList", "get", "(I)Ljava/lang/Object;", 0);
             self.cast_and_unbox(elem_type);
             return elem_type;
         }
         if self.is_string(recv_type) {
             self.gen_expr(index);
-            JRustAsm::mv_method_insn(self.mv, INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", 0);
+            self.mv.visit_method_insn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", 0);
             return Ty::SimpleTy { name: "char" };
         }
         // Array indexing
         self.gen_expr(index);
-        JRustAsm::mv_insn(self.mv, 50); // AALOAD
+        self.mv.visit_insn(50); // AALOAD
         return Ty::SimpleTy { name: "Object" };
     }
 
     fn gen_throw(mut self, message: Expr) -> Ty {
-        JRustAsm::mv_type_insn(self.mv, NEW, "java/lang/RuntimeException");
-        JRustAsm::mv_insn(self.mv, DUP);
+        self.mv.visit_type_insn(NEW, "java/lang/RuntimeException");
+        self.mv.visit_insn(DUP);
         self.gen_expr(message);
-        JRustAsm::mv_method_insn(self.mv, INVOKESPECIAL, "java/lang/RuntimeException", "<init>", "(Ljava/lang/String;)V", 0);
-        JRustAsm::mv_insn(self.mv, ATHROW);
+        self.mv.visit_method_insn(INVOKESPECIAL, "java/lang/RuntimeException", "<init>", "(Ljava/lang/String;)V", 0);
+        self.mv.visit_insn(ATHROW);
         return Ty::VoidTy;
     }
 
     fn gen_array_lit(mut self, elements: Vec<Expr>) -> Ty {
         if elements.len() == 0 {
-            JRustAsm::mv_insn(self.mv, ICONST_0);
-            JRustAsm::mv_type_insn(self.mv, ANEWARRAY, "java/lang/Object");
+            self.mv.visit_insn(ICONST_0);
+            self.mv.visit_type_insn(ANEWARRAY, "java/lang/Object");
             return Ty::ArrayTy { element: Ty::SimpleTy { name: "Object" } };
         }
         let elem_type: Ty = self.infer_type(elements.get(0));
         self.push_int(elements.len());
-        JRustAsm::mv_type_insn(self.mv, ANEWARRAY, self.jvm_class_name(self.resolve_type_name(elem_type)));
+        self.mv.visit_type_insn(ANEWARRAY, self.jvm_class_name(self.resolve_type_name(elem_type)));
         let mut i: i32 = 0;
         while i < elements.len() {
-            JRustAsm::mv_insn(self.mv, DUP);
+            self.mv.visit_insn(DUP);
             self.push_int(i);
             self.gen_expr(elements.get(i));
-            JRustAsm::mv_insn(self.mv, 83); // AASTORE
+            self.mv.visit_insn(AASTORE_OP);
             i = i + 1;
         }
         return Ty::ArrayTy { element: elem_type };
@@ -3609,14 +4007,111 @@ impl Codegen {
         let src_name: String = self.resolve_type_name(src_type);
         let dest_name: String = self.resolve_type_name(cast_type);
 
-        if src_name == "i32" && dest_name == "i64" { JRustAsm::mv_insn(self.mv, I2L); }
-        else if src_name == "i32" && dest_name == "f64" { JRustAsm::mv_insn(self.mv, I2D); }
-        else if src_name == "i64" && dest_name == "i32" { JRustAsm::mv_insn(self.mv, L2I); }
-        else if src_name == "f64" && dest_name == "i32" { JRustAsm::mv_insn(self.mv, D2I); }
+        if src_name == "i32" && dest_name == "i64" { self.mv.visit_insn(I2L); }
+        else if src_name == "i32" && dest_name == "f64" { self.mv.visit_insn(I2D); }
+        else if src_name == "i64" && dest_name == "i32" { self.mv.visit_insn(L2I); }
+        else if src_name == "f64" && dest_name == "i32" { self.mv.visit_insn(D2I); }
         else {
-            JRustAsm::mv_type_insn(self.mv, CHECKCAST, self.jvm_class_name(dest_name));
+            self.mv.visit_type_insn(CHECKCAST, self.jvm_class_name(dest_name));
         }
         return cast_type;
+    }
+
+    fn gen_subclass(mut self, type_name: String, args: Vec<Expr>, methods: Vec<Item>) -> Ty {
+        let parent_class: String = self.jvm_class_name(type_name);
+
+        // Generate unique anon class name
+        self.anon_counter = self.anon_counter + 1;
+        let anon_name: String = "__Anon" + self.anon_counter;
+
+        // Infer arg types before generating anon class
+        let mut arg_types: Vec<Ty> = Vec::new();
+        let mut ai: i32 = 0;
+        while ai < args.len() {
+            arg_types.push(self.infer_type(args.get(ai)));
+            ai = ai + 1;
+        }
+
+        // Build constructor descriptor
+        let mut desc_sb: StringBuilder = StringBuilder::new();
+        desc_sb.append("(");
+        ai = 0;
+        while ai < arg_types.len() {
+            desc_sb.append(self.type_descriptor(arg_types.get(ai)));
+            ai = ai + 1;
+        }
+        desc_sb.append(")V");
+        let init_desc: String = desc_sb.to_string();
+
+        // Save codegen state
+        let saved_mv: MethodVisitor = self.mv;
+        let saved_locals: Map<String, i32> = self.locals;
+        let saved_local_types: Map<String, Ty> = self.local_types;
+        let saved_next_local: i32 = self.next_local;
+        let saved_current_class: String = self.current_class;
+
+        // Create anonymous subclass
+        let anon_cw: ClassWriter = ClassWriter::new(3);
+        anon_cw.visit(V21, ACC_PUBLIC + ACC_SUPER, anon_name, parent_class);
+
+        // Generate pass-through constructor
+        let init_mv: MethodVisitor = anon_cw.visit_method(ACC_PUBLIC, "<init>", init_desc);
+        init_mv.visit_code();
+        init_mv.visit_var_insn(ALOAD, 0);
+        let mut slot: i32 = 1;
+        ai = 0;
+        while ai < arg_types.len() {
+            let aty: Ty = arg_types.get(ai);
+            let aty_name: String = self.resolve_type_name(aty);
+            if aty_name == "i32" || aty_name == "bool" || aty_name == "char" {
+                init_mv.visit_var_insn(ILOAD, slot);
+                slot = slot + 1;
+            } else if aty_name == "i64" {
+                init_mv.visit_var_insn(LLOAD, slot);
+                slot = slot + 2;
+            } else if aty_name == "f64" {
+                init_mv.visit_var_insn(DLOAD, slot);
+                slot = slot + 2;
+            } else {
+                init_mv.visit_var_insn(ALOAD, slot);
+                slot = slot + 1;
+            }
+            ai = ai + 1;
+        }
+        init_mv.visit_method_insn(INVOKESPECIAL, parent_class, "<init>", init_desc, 0);
+        init_mv.visit_insn(RETURN_OP);
+        init_mv.visit_maxs(0, 0);
+        init_mv.visit_end();
+
+        // Generate override methods
+        let mut mi: i32 = 0;
+        while mi < methods.len() {
+            let m: Item = methods.get(mi);
+            self.generate_method(anon_cw, anon_name, m);
+            mi = mi + 1;
+        }
+
+        anon_cw.visit_end();
+        JRustRuntime::write_class(anon_cw, self.output_dir, anon_name);
+
+        // Restore codegen state
+        self.mv = saved_mv;
+        self.locals = saved_locals;
+        self.local_types = saved_local_types;
+        self.next_local = saved_next_local;
+        self.current_class = saved_current_class;
+
+        // Emit instantiation: NEW anon; DUP; <args>; INVOKESPECIAL <init>
+        self.mv.visit_type_insn(NEW, anon_name);
+        self.mv.visit_insn(DUP);
+        ai = 0;
+        while ai < args.len() {
+            self.gen_expr(args.get(ai));
+            ai = ai + 1;
+        }
+        self.mv.visit_method_insn(INVOKESPECIAL, anon_name, "<init>", init_desc, 0);
+
+        return Ty::SimpleTy { name: type_name };
     }
 
     // --- Boxing / Unboxing ---
@@ -3624,11 +4119,11 @@ impl Codegen {
     fn box_if_needed(self, ty: Ty) {
         match ty {
             Ty::SimpleTy { name } => {
-                if name == "i32" { JRustAsm::mv_method_insn(self.mv, INVOKESTATIC, "java/lang/Integer", "valueOf", "(I)Ljava/lang/Integer;", 0); }
-                else if name == "i64" { JRustAsm::mv_method_insn(self.mv, INVOKESTATIC, "java/lang/Long", "valueOf", "(J)Ljava/lang/Long;", 0); }
-                else if name == "f64" { JRustAsm::mv_method_insn(self.mv, INVOKESTATIC, "java/lang/Double", "valueOf", "(D)Ljava/lang/Double;", 0); }
-                else if name == "bool" { JRustAsm::mv_method_insn(self.mv, INVOKESTATIC, "java/lang/Boolean", "valueOf", "(Z)Ljava/lang/Boolean;", 0); }
-                else if name == "char" { JRustAsm::mv_method_insn(self.mv, INVOKESTATIC, "java/lang/Character", "valueOf", "(C)Ljava/lang/Character;", 0); }
+                if name == "i32" { self.mv.visit_method_insn(INVOKESTATIC, "java/lang/Integer", "valueOf", "(I)Ljava/lang/Integer;", 0); }
+                else if name == "i64" { self.mv.visit_method_insn(INVOKESTATIC, "java/lang/Long", "valueOf", "(J)Ljava/lang/Long;", 0); }
+                else if name == "f64" { self.mv.visit_method_insn(INVOKESTATIC, "java/lang/Double", "valueOf", "(D)Ljava/lang/Double;", 0); }
+                else if name == "bool" { self.mv.visit_method_insn(INVOKESTATIC, "java/lang/Boolean", "valueOf", "(Z)Ljava/lang/Boolean;", 0); }
+                else if name == "char" { self.mv.visit_method_insn(INVOKESTATIC, "java/lang/Character", "valueOf", "(C)Ljava/lang/Character;", 0); }
             }
             _ => {}
         }
@@ -3638,30 +4133,30 @@ impl Codegen {
         match target_type {
             Ty::SimpleTy { name } => {
                 if name == "i32" {
-                    JRustAsm::mv_type_insn(self.mv, CHECKCAST, "java/lang/Integer");
-                    JRustAsm::mv_method_insn(self.mv, INVOKEVIRTUAL, "java/lang/Integer", "intValue", "()I", 0);
+                    self.mv.visit_type_insn(CHECKCAST, "java/lang/Integer");
+                    self.mv.visit_method_insn(INVOKEVIRTUAL, "java/lang/Integer", "intValue", "()I", 0);
                 } else if name == "i64" {
-                    JRustAsm::mv_type_insn(self.mv, CHECKCAST, "java/lang/Long");
-                    JRustAsm::mv_method_insn(self.mv, INVOKEVIRTUAL, "java/lang/Long", "longValue", "()J", 0);
+                    self.mv.visit_type_insn(CHECKCAST, "java/lang/Long");
+                    self.mv.visit_method_insn(INVOKEVIRTUAL, "java/lang/Long", "longValue", "()J", 0);
                 } else if name == "f64" {
-                    JRustAsm::mv_type_insn(self.mv, CHECKCAST, "java/lang/Double");
-                    JRustAsm::mv_method_insn(self.mv, INVOKEVIRTUAL, "java/lang/Double", "doubleValue", "()D", 0);
+                    self.mv.visit_type_insn(CHECKCAST, "java/lang/Double");
+                    self.mv.visit_method_insn(INVOKEVIRTUAL, "java/lang/Double", "doubleValue", "()D", 0);
                 } else if name == "bool" {
-                    JRustAsm::mv_type_insn(self.mv, CHECKCAST, "java/lang/Boolean");
-                    JRustAsm::mv_method_insn(self.mv, INVOKEVIRTUAL, "java/lang/Boolean", "booleanValue", "()Z", 0);
+                    self.mv.visit_type_insn(CHECKCAST, "java/lang/Boolean");
+                    self.mv.visit_method_insn(INVOKEVIRTUAL, "java/lang/Boolean", "booleanValue", "()Z", 0);
                 } else if name == "char" {
-                    JRustAsm::mv_type_insn(self.mv, CHECKCAST, "java/lang/Character");
-                    JRustAsm::mv_method_insn(self.mv, INVOKEVIRTUAL, "java/lang/Character", "charValue", "()C", 0);
+                    self.mv.visit_type_insn(CHECKCAST, "java/lang/Character");
+                    self.mv.visit_method_insn(INVOKEVIRTUAL, "java/lang/Character", "charValue", "()C", 0);
                 } else if name == "String" {
-                    JRustAsm::mv_type_insn(self.mv, CHECKCAST, "java/lang/String");
+                    self.mv.visit_type_insn(CHECKCAST, "java/lang/String");
                 } else if name == "Object" || name == "null" {
                     // no cast needed
                 } else {
-                    JRustAsm::mv_type_insn(self.mv, CHECKCAST, self.jvm_class_name(name));
+                    self.mv.visit_type_insn(CHECKCAST, self.jvm_class_name(name));
                 }
             }
             Ty::GenericTy { name, args } => {
-                JRustAsm::mv_type_insn(self.mv, CHECKCAST, self.jvm_class_name(name));
+                self.mv.visit_type_insn(CHECKCAST, self.jvm_class_name(name));
             }
             _ => {}
         }
@@ -3693,6 +4188,10 @@ impl Codegen {
                 if name == "Vec" { return "Ljava/util/ArrayList;"; }
                 if name == "Map" { return "Ljava/util/HashMap;"; }
                 if name == "StringBuilder" { return "Ljava/lang/StringBuilder;"; }
+                if name == "ClassWriter" { return "Lorg/objectweb/asm/ClassWriter;"; }
+                if name == "MethodVisitor" { return "Lorg/objectweb/asm/MethodVisitor;"; }
+                if name == "FieldVisitor" { return "Lorg/objectweb/asm/FieldVisitor;"; }
+                if name == "Label" { return "Lorg/objectweb/asm/Label;"; }
                 if name == "Object" || name == "null" { return "Ljava/lang/Object;"; }
                 return "L" + name + ";";
             }
@@ -3810,6 +4309,10 @@ impl Codegen {
         if type_name == "Vec" { return "java/util/ArrayList"; }
         if type_name == "Map" { return "java/util/HashMap"; }
         if type_name == "StringBuilder" { return "java/lang/StringBuilder"; }
+        if type_name == "ClassWriter" { return "org/objectweb/asm/ClassWriter"; }
+        if type_name == "MethodVisitor" { return "org/objectweb/asm/MethodVisitor"; }
+        if type_name == "FieldVisitor" { return "org/objectweb/asm/FieldVisitor"; }
+        if type_name == "Label" { return "org/objectweb/asm/Label"; }
         if type_name == "Object" { return "java/lang/Object"; }
         if self.imports.contains_key(type_name) {
             return self.imports.get(type_name);
@@ -3821,17 +4324,17 @@ impl Codegen {
         match ty {
             Ty::SimpleTy { name } => {
                 if name == "i32" || name == "bool" || name == "char" {
-                    JRustAsm::mv_var_insn(self.mv, ILOAD, slot);
+                    self.mv.visit_var_insn(ILOAD, slot);
                 } else if name == "i64" {
-                    JRustAsm::mv_var_insn(self.mv, LLOAD, slot);
+                    self.mv.visit_var_insn(LLOAD, slot);
                 } else if name == "f64" {
-                    JRustAsm::mv_var_insn(self.mv, DLOAD, slot);
+                    self.mv.visit_var_insn(DLOAD, slot);
                 } else {
-                    JRustAsm::mv_var_insn(self.mv, ALOAD, slot);
+                    self.mv.visit_var_insn(ALOAD, slot);
                 }
             }
             _ => {
-                JRustAsm::mv_var_insn(self.mv, ALOAD, slot);
+                self.mv.visit_var_insn(ALOAD, slot);
             }
         }
     }
@@ -3840,30 +4343,30 @@ impl Codegen {
         match ty {
             Ty::SimpleTy { name } => {
                 if name == "i32" || name == "bool" || name == "char" {
-                    JRustAsm::mv_var_insn(self.mv, ISTORE, slot);
+                    self.mv.visit_var_insn(ISTORE, slot);
                 } else if name == "i64" {
-                    JRustAsm::mv_var_insn(self.mv, LSTORE, slot);
+                    self.mv.visit_var_insn(LSTORE, slot);
                 } else if name == "f64" {
-                    JRustAsm::mv_var_insn(self.mv, DSTORE, slot);
+                    self.mv.visit_var_insn(DSTORE, slot);
                 } else {
-                    JRustAsm::mv_var_insn(self.mv, ASTORE, slot);
+                    self.mv.visit_var_insn(ASTORE, slot);
                 }
             }
             _ => {
-                JRustAsm::mv_var_insn(self.mv, ASTORE, slot);
+                self.mv.visit_var_insn(ASTORE, slot);
             }
         }
     }
 
     fn push_int(self, value: i32) {
         if value >= -1 && value <= 5 {
-            JRustAsm::mv_insn(self.mv, ICONST_0 + value);
+            self.mv.visit_insn(ICONST_0 + value);
         } else if value >= -128 && value <= 127 {
-            JRustAsm::mv_int_insn(self.mv, BIPUSH, value);
+            self.mv.visit_int_insn(BIPUSH, value);
         } else if value >= -32768 && value <= 32767 {
-            JRustAsm::mv_int_insn(self.mv, SIPUSH, value);
+            self.mv.visit_int_insn(SIPUSH, value);
         } else {
-            JRustAsm::mv_ldc_int(self.mv, value);
+            self.mv.ldc_int(value);
         }
     }
 
@@ -3909,6 +4412,16 @@ impl Codegen {
                 if type_name == "Map" && method_name == "new" { return Ty::SimpleTy { name: "Map" }; }
                 if type_name == "StringBuilder" && method_name == "new" { return Ty::SimpleTy { name: "StringBuilder" }; }
                 if type_name == "String" && method_name == "from" { return Ty::SimpleTy { name: "String" }; }
+                if type_name == "ClassWriter" && method_name == "new" { return Ty::SimpleTy { name: "ClassWriter" }; }
+                if type_name == "Label" && method_name == "new" { return Ty::SimpleTy { name: "Label" }; }
+                if type_name == "JRustRuntime" {
+                    if method_name == "write_class" || method_name == "write_file" || method_name == "set_args" { return Ty::VoidTy; }
+                    if method_name == "read_file" || method_name == "args_get" { return Ty::SimpleTy { name: "String" }; }
+                    if method_name == "args_len" || method_name == "run_command" || method_name == "parse_int" { return Ty::SimpleTy { name: "i32" }; }
+                    if method_name == "parse_long" { return Ty::SimpleTy { name: "i64" }; }
+                    if method_name == "parse_double" { return Ty::SimpleTy { name: "f64" }; }
+                    return Ty::VoidTy;
+                }
                 let m: Item = self.find_impl_method(type_name, method_name);
                 match m {
                     Item::FnDefI { name, params, return_type, body } => { return return_type; }
@@ -3920,7 +4433,7 @@ impl Codegen {
                 let recv_type: Ty = self.infer_type(receiver);
                 let recv_name: String = self.resolve_type_name(recv_type);
                 if recv_name == "String" {
-                    if method_name == "len" || method_name == "length" { return Ty::SimpleTy { name: "i32" }; }
+                    if method_name == "len" || method_name == "length" || method_name == "indexOf" || method_name == "index_of" { return Ty::SimpleTy { name: "i32" }; }
                     if method_name == "char_at" || method_name == "charAt" { return Ty::SimpleTy { name: "char" }; }
                     if method_name == "contains" || method_name == "starts_with" || method_name == "ends_with" || method_name == "equals" || method_name == "is_empty" || method_name == "isEmpty" { return Ty::SimpleTy { name: "bool" }; }
                     return Ty::SimpleTy { name: "String" };
@@ -3941,6 +4454,14 @@ impl Codegen {
                     if method_name == "append" { return Ty::SimpleTy { name: "StringBuilder" }; }
                     if method_name == "to_string" || method_name == "toString" { return Ty::SimpleTy { name: "String" }; }
                     if method_name == "len" || method_name == "length" { return Ty::SimpleTy { name: "i32" }; }
+                    return Ty::VoidTy;
+                }
+                if recv_name == "ClassWriter" {
+                    if method_name == "visit_method" { return Ty::SimpleTy { name: "MethodVisitor" }; }
+                    if method_name == "visit_field" { return Ty::SimpleTy { name: "FieldVisitor" }; }
+                    return Ty::VoidTy;
+                }
+                if recv_name == "MethodVisitor" || recv_name == "FieldVisitor" {
                     return Ty::VoidTy;
                 }
                 let m: Item = self.find_impl_method(recv_name, method_name);
@@ -4001,6 +4522,7 @@ impl Codegen {
                 return Ty::ArrayTy { element: self.infer_type(elements.get(0)) };
             }
             Expr::CastE { value, cast_type } => { return cast_type; }
+            Expr::SubclassE { type_name, args, methods } => { return Ty::SimpleTy { name: type_name }; }
         }
         return Ty::VoidTy;
     }
@@ -4037,6 +4559,47 @@ impl Codegen {
         panic("Unknown method: " + type_name + "." + method_name);
         return Item::ImportI { path: "" };
     }
+}
+
+fn find_dollar(s: String) -> i32 {
+    let slen: i32 = s.len();
+    let mut i: i32 = 0;
+    while i < slen {
+        if s.charAt(i) == '$' {
+            return i;
+        }
+        i = i + 1;
+    }
+    return -1;
+}
+
+fn create_class_writer(flags: i32) -> ClassWriter {
+    return ClassWriter::new(flags) with {
+        fn getCommonSuperClass(self, type1: String, type2: String) -> String {
+            let d1: i32 = find_dollar(type1);
+            let d2: i32 = find_dollar(type2);
+            if d1 >= 0 && d2 >= 0 {
+                let base1: String = type1.substring(0, d1);
+                let base2: String = type2.substring(0, d2);
+                if base1 == base2 {
+                    return base1;
+                }
+            }
+            if d1 >= 0 {
+                let base1: String = type1.substring(0, d1);
+                if base1 == type2 {
+                    return type2;
+                }
+            }
+            if d2 >= 0 {
+                let base2: String = type2.substring(0, d2);
+                if base2 == type1 {
+                    return type1;
+                }
+            }
+            return "java/lang/Object";
+        }
+    };
 }
 
 // ============================================================

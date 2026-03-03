@@ -1,0 +1,19 @@
+# Experiment: let trace flow through function bodies
+# via arithmetic rewrite rules, WITHOUT the function-call lifter.
+
+rule trace_print : @meta -> @io {
+  reduction(?s, ?old, ?new, ?kind) => println("[", ?s, "] ", ?old, "  =>  ", ?new, "  (", ?kind, ")")
+}
+
+rule trace_arith : @meta -> @self {
+  trace(?x) + ?y => trace(#eval(#eval(?x) + #eval(?y)))
+  ?x + trace(?y) => trace(#eval(#eval(?x) + #eval(?y)))
+  trace(?x) * ?y => trace(#eval(#eval(?x) * #eval(?y)))
+  ?x * trace(?y) => trace(#eval(#eval(?x) * #eval(?y)))
+  trace(?x) - ?y => trace(#eval(#eval(?x) - #eval(?y)))
+  ?x - trace(?y) => trace(#eval(#eval(?x) - #eval(?y)))
+}
+
+fn double(?n) = ?n + ?n
+
+double(trace(3))

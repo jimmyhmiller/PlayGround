@@ -1,0 +1,24 @@
+# Attempt to let trace(x) flow INTO function bodies.
+# Arithmetic rewrite rules propagate trace through ops.
+# Problem: fact(0) can't match fact(trace(0)) → base case fails.
+
+rule trace_arith : @meta -> @self {
+  trace(?x) + trace(?y) => trace(#eval(#eval(?x) + #eval(?y)))
+  trace(?x) + ?y => trace(#eval(#eval(?x) + #eval(?y)))
+  ?x + trace(?y) => trace(#eval(#eval(?x) + #eval(?y)))
+  trace(?x) * trace(?y) => trace(#eval(#eval(?x) * #eval(?y)))
+  trace(?x) * ?y => trace(#eval(#eval(?x) * #eval(?y)))
+  ?x * trace(?y) => trace(#eval(#eval(?x) * #eval(?y)))
+  trace(?x) - trace(?y) => trace(#eval(#eval(?x) - #eval(?y)))
+  trace(?x) - ?y => trace(#eval(#eval(?x) - #eval(?y)))
+  ?x - trace(?y) => trace(#eval(#eval(?x) - #eval(?y)))
+}
+
+rule trace_print : @meta -> @io {
+  reduction(?s, ?old, ?new, ?kind) => println("[", ?s, "] ", ?old, "  =>  ", ?new)
+}
+
+fn double(?n) = ?n + ?n
+
+# Works: no literal patterns
+double(trace(3))

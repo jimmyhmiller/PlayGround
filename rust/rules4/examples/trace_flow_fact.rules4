@@ -1,0 +1,12 @@
+# This will stack overflow — fact(0) can't match fact(trace(0))
+
+rule trace_arith : @meta -> @self {
+  trace(?x) - ?y => trace(#eval(#eval(?x) - #eval(?y)))
+  trace(?x) * ?y => trace(#eval(#eval(?x) * #eval(?y)))
+  ?x * trace(?y) => trace(#eval(#eval(?x) * #eval(?y)))
+}
+
+fn fact(0) = 1
+fn fact(?n) = ?n * fact(?n - 1)
+
+fact(trace(2))

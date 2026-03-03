@@ -83,6 +83,8 @@ pub struct MetaSyms {
     pub wild_sym: SymId,
     pub eval_marker: SymId,
     pub step_marker: SymId,
+    pub step_inner_marker: SymId,
+    pub subst_marker: SymId,
 }
 
 // ── MetaRule ──
@@ -119,6 +121,33 @@ fn splitmix64(mut x: u64) -> u64 {
     x = (x ^ (x >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
     x = (x ^ (x >> 27)).wrapping_mul(0x94d049bb133111eb);
     x ^ (x >> 31)
+}
+
+/// Replace all occurrences of `old` with `new` in `term` (structural, by TermId).
+fn subst_term(store: &mut TermStore, term: TermId, old: TermId, new: TermId) -> TermId {
+    if term == old {
+        return new;
+    }
+    match store.get(term) {
+        TermData::Num(_) | TermData::Float(_) | TermData::Sym(_) => term,
+        TermData::Call { head, args_start, args_len } => {
+            let h = subst_term(store, head, old, new);
+            let len = args_len as usize;
+            let mut new_args: Vec<TermId> = Vec::with_capacity(len);
+            let mut changed = h != head;
+            for i in 0..len {
+                let arg = store.args_pool[args_start as usize + i];
+                let replaced = subst_term(store, arg, old, new);
+                changed |= replaced != arg;
+                new_args.push(replaced);
+            }
+            if changed {
+                store.call(h, &new_args)
+            } else {
+                term
+            }
+        }
+    }
 }
 
 // ── Engine ──
@@ -225,6 +254,8 @@ impl Engine {
             wild_sym: store.sym("__wild"),
             eval_marker: store.sym("__eval"),
             step_marker: store.sym("__step"),
+            step_inner_marker: store.sym("__step_inner"),
+            subst_marker: store.sym("__subst"),
         };
 
         let pattern_ctx = PatternContext {
@@ -430,6 +461,20 @@ impl Engine {
                         let resolved_inner = self.resolve_eval_markers(inner);
                         return self.eval_step(resolved_inner);
                     }
+                    if s == self.meta_syms.step_inner_marker && args_len == 1 {
+                        let inner = self.store.args_pool[args_start as usize];
+                        let resolved_inner = self.resolve_eval_markers(inner);
+                        return self.eval_step_inner(resolved_inner);
+                    }
+                    if s == self.meta_syms.subst_marker && args_len == 3 {
+                        let term = self.store.args_pool[args_start as usize];
+                        let old = self.store.args_pool[args_start as usize + 1];
+                        let new = self.store.args_pool[args_start as usize + 2];
+                        let resolved_term = self.resolve_eval_markers(term);
+                        let resolved_old = self.resolve_eval_markers(old);
+                        let resolved_new = self.resolve_eval_markers(new);
+                        return subst_term(&mut self.store, resolved_term, resolved_old, resolved_new);
+                    }
                     // seq(a, b) — resolve both, return last (don't leak seq into rewrite loop)
                     if s == self.builtins.seq && args_len == 2 {
                         let a = self.store.args_pool[args_start as usize];
@@ -526,6 +571,180 @@ impl Engine {
         }
         // No step possible — return unchanged
         term
+    }
+
+    /// Reduce the innermost (deepest) reducible sub-expression one step.
+    /// Walks the term tree depth-first, evaluating the deepest Call whose
+    /// arguments are all normal forms (values). Fires meta events.
+    fn eval_step_inner(&mut self, term: TermId) -> TermId {
+        match self.store.get(term) {
+            TermData::Num(_) | TermData::Float(_) | TermData::Sym(_) => term,
+            TermData::Call { head, args_start, args_len } => {
+                // First, try to step into arguments (left to right)
+                for i in 0..args_len as usize {
+                    let arg = self.store.args_pool[args_start as usize + i];
+                    let stepped = self.eval_step_inner(arg);
+                    if stepped != arg {
+                        // This argument was stepped — rebuild the term with it replaced
+                        let mut new_args = Vec::with_capacity(args_len as usize);
+                        for j in 0..args_len as usize {
+                            if j == i {
+                                new_args.push(stepped);
+                            } else {
+                                new_args.push(self.store.args_pool[args_start as usize + j]);
+                            }
+                        }
+                        return self.store.call(head, &new_args);
+                    }
+                }
+                // All args are normal forms — try to step this call itself
+                if let TermData::Sym(head_sym) = self.store.get(head) {
+                    // Try user rules (indexed by head sym)
+                    if let Some(indices) = self.rule_index.get(&head_sym).cloned() {
+                        for &rule_idx in &indices {
+                            let num_clauses = self.rules[rule_idx].clauses.len();
+                            for clause_idx in 0..num_clauses {
+                                let mut env = Env::new();
+                                if match_pattern(&mut self.store, &self.rules[rule_idx].clauses[clause_idx].lhs, term, &mut env, &self.pattern_ctx) {
+                                    // Evaluate where-guards
+                                    let num_guards = self.rules[rule_idx].clauses[clause_idx].guards.len();
+                                    let mut guards_pass = true;
+                                    for guard_idx in 0..num_guards {
+                                        let guard_term = substitute(&mut self.store, &self.rules[rule_idx].clauses[clause_idx].guards[guard_idx], &env);
+                                        let guard_result = self.eval(guard_term);
+                                        if let TermData::Sym(s) = self.store.get(guard_result) {
+                                            if s != self.builtins.true_sym {
+                                                guards_pass = false;
+                                                break;
+                                            }
+                                        } else {
+                                            guards_pass = false;
+                                            break;
+                                        }
+                                    }
+                                    if !guards_pass { continue; }
+                                    let result = substitute(&mut self.store, &self.rules[rule_idx].clauses[clause_idx].rhs, &env);
+                                    // Fire meta event
+                                    if !self.in_meta && !self.meta_rules.is_empty() {
+                                        self.step_count += 1;
+                                        let name = self.rules[rule_idx].name.clone();
+                                        let name_sym = self.store.sym(&name);
+                                        let name_term = self.store.sym_term(name_sym);
+                                        let clause_term = self.store.num(clause_idx as i64);
+                                        let fn_head = self.store.sym_term(self.meta_syms.fn_sym);
+                                        let kind = self.store.call(fn_head, &[name_term, clause_term]);
+                                        self.fire_meta(term, result, kind);
+                                    }
+                                    return result;
+                                }
+                            }
+                        }
+                    }
+                    // Try dynamic rules
+                    {
+                        let sidx = self.current_scope_idx();
+                        if let Some(&val) = self.scopes[sidx].dynamic_rules_map.get(&term) {
+                            if !self.in_meta && !self.meta_rules.is_empty() {
+                                self.step_count += 1;
+                                let builtin_head = self.store.sym_term(self.meta_syms.builtin_sym);
+                                let dyn_sym = self.store.sym("dynamic");
+                                let dyn_term = self.store.sym_term(dyn_sym);
+                                let kind = self.store.call(builtin_head, &[dyn_term]);
+                                self.fire_meta(term, val, kind);
+                            }
+                            return val;
+                        }
+                    }
+                    // Try builtins (arithmetic)
+                    if args_len == 2 {
+                        let a = self.store.args_pool[args_start as usize];
+                        let b = self.store.args_pool[args_start as usize + 1];
+                        let a_num = match self.store.get(a) {
+                            TermData::Num(n) => Some((n as f64, true)),
+                            TermData::Float(bits) => Some((f64::from_bits(bits), false)),
+                            _ => None,
+                        };
+                        let b_num = match self.store.get(b) {
+                            TermData::Num(n) => Some((n as f64, true)),
+                            TermData::Float(bits) => Some((f64::from_bits(bits), false)),
+                            _ => None,
+                        };
+                        if let (Some((av, a_int)), Some((bv, b_int))) = (a_num, b_num) {
+                            let both_int = a_int && b_int;
+                            let arith_result = if head_sym == self.builtins.add { Some(av + bv) }
+                                else if head_sym == self.builtins.sub { Some(av - bv) }
+                                else if head_sym == self.builtins.mul { Some(av * bv) }
+                                else if head_sym == self.builtins.div { Some(av / bv) }
+                                else if head_sym == self.builtins.mod_sym {
+                                    if both_int { Some((av as i64 % bv as i64) as f64) } else { Some(av.rem_euclid(bv)) }
+                                }
+                                else { None };
+                            if let Some(r) = arith_result {
+                                let result = if both_int { self.store.num(r as i64) } else { self.store.float(r) };
+                                // Fire meta event for builtin
+                                if !self.in_meta && !self.meta_rules.is_empty() {
+                                    self.step_count += 1;
+                                    let builtin_head = self.store.sym_term(self.meta_syms.builtin_sym);
+                                    let op_term = self.store.sym_term(head_sym);
+                                    let kind = self.store.call(builtin_head, &[op_term]);
+                                    self.fire_meta(term, result, kind);
+                                }
+                                return result;
+                            }
+                        }
+                    }
+                    // Try comparison builtins
+                    if args_len == 2 {
+                        let a = self.store.args_pool[args_start as usize];
+                        let b = self.store.args_pool[args_start as usize + 1];
+                        if head_sym == self.builtins.eq {
+                            let result = if a == b { self.store.sym_term(self.builtins.true_sym) }
+                                else { self.store.sym_term(self.builtins.false_sym) };
+                            if !self.in_meta && !self.meta_rules.is_empty() {
+                                self.step_count += 1;
+                                let builtin_head = self.store.sym_term(self.meta_syms.builtin_sym);
+                                let op_term = self.store.sym_term(head_sym);
+                                let kind = self.store.call(builtin_head, &[op_term]);
+                                self.fire_meta(term, result, kind);
+                            }
+                            return result;
+                        }
+                        // Numeric comparisons
+                        let a_num = match self.store.get(a) {
+                            TermData::Num(n) => Some(n as f64),
+                            TermData::Float(bits) => Some(f64::from_bits(bits)),
+                            _ => None,
+                        };
+                        let b_num = match self.store.get(b) {
+                            TermData::Num(n) => Some(n as f64),
+                            TermData::Float(bits) => Some(f64::from_bits(bits)),
+                            _ => None,
+                        };
+                        if let (Some(av), Some(bv)) = (a_num, b_num) {
+                            let cmp_result = if head_sym == self.builtins.lt { Some(av < bv) }
+                                else if head_sym == self.builtins.gt { Some(av > bv) }
+                                else if head_sym == self.builtins.lte { Some(av <= bv) }
+                                else if head_sym == self.builtins.gte { Some(av >= bv) }
+                                else { None };
+                            if let Some(r) = cmp_result {
+                                let result = if r { self.store.sym_term(self.builtins.true_sym) }
+                                    else { self.store.sym_term(self.builtins.false_sym) };
+                                if !self.in_meta && !self.meta_rules.is_empty() {
+                                    self.step_count += 1;
+                                    let builtin_head = self.store.sym_term(self.meta_syms.builtin_sym);
+                                    let op_term = self.store.sym_term(head_sym);
+                                    let kind = self.store.call(builtin_head, &[op_term]);
+                                    self.fire_meta(term, result, kind);
+                                }
+                                return result;
+                            }
+                        }
+                    }
+                }
+                // No step possible
+                term
+            }
+        }
     }
 
     fn eval_inner(&mut self, term: TermId) -> TermId {
