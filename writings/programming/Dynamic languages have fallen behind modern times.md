@@ -1,6 +1,6 @@
 # Dynamic languages have fallen behind modern times
 
-Dynamically type programming languages have fallen behind modern times. And no, I don’t mean they just need to add types. If you do, just bear with me for a second. Mainstream dynamically typed languages feel antiquated. Today, our machine’s our machines are filled with many higher performance cpu cores. Yet none of the mainstream dynamically typed languages take advantage of that. Javascript is single threaded, ruby and python both “have threads” but due to the GIL and GVL they don’t benefit much from them.
+Dynamically typed programming languages have fallen behind modern times. And no, I don’t mean they just need to add types. If you do, just bear with me for a second. Mainstream dynamically typed languages feel antiquated. Today, our machine’s our machines are filled with many higher performance cpu cores. Yet none of the mainstream dynamically typed languages take advantage of that. Javascript is single threaded, ruby and python both “have threads” but due to the GIL and GVL they don’t benefit much from them.
 
 If we look at the design of these languages, they are clearly languages of the late 90s. Javascript has countless footguns that have been papered over by piles of linting. Python has strange scoping mechanisms and global dependencies management that necessitates confusing virtual environments. Ruby has a global namespace for all imports and pervasive monkey patching.
 

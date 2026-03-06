@@ -1,0 +1,581 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Modern Tools — Dev Studio</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=Inter:wght@300;400;500;600&display=swap');
+  *,*::before,*::after{margin:0;padding:0;box-sizing:border-box}
+  :root{
+    --accent:#e8734a;--accent-glow:#ff8c5a;
+    --text-light:#f0e8e0;--text-muted:#9a8e9e;--text-dim:#6b5f70;
+    --cream:#f5ede4;--cream-dark:#e8ddd2;
+  }
+  html{scroll-behavior:smooth}
+  body{font-family:'Inter',sans-serif;background:var(--cream);color:var(--text-light);overflow-x:hidden}
+
+  /* Noise */
+  .noise{position:fixed;inset:0;pointer-events:none;z-index:9999;opacity:0.03;
+    background-image:url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+    background-repeat:repeat;background-size:256px}
+
+  .hero{background:#1a1520;min-height:100vh;position:relative;overflow:hidden}
+  .hero::before{content:'';position:absolute;inset:0;
+    background:radial-gradient(ellipse 80% 60% at 65% 50%,rgba(232,115,74,0.06) 0%,transparent 70%),
+    radial-gradient(ellipse 50% 70% at 20% 40%,rgba(80,40,60,0.08) 0%,transparent 60%);pointer-events:none}
+
+  nav{display:flex;align-items:center;padding:28px 60px;position:relative;z-index:10;gap:24px}
+  .logo{font-family:'Space Grotesk',sans-serif;font-weight:700;font-size:1.3rem;color:var(--accent);text-transform:uppercase;display:flex;align-items:center;gap:8px}
+  .logo-dot{width:8px;height:8px;background:var(--accent);border-radius:50%;box-shadow:0 0 12px var(--accent-glow);animation:glow 2s ease-in-out infinite}
+  @keyframes glow{0%,100%{box-shadow:0 0 12px var(--accent-glow)}50%{box-shadow:0 0 20px var(--accent-glow),0 0 40px rgba(232,115,74,0.3)}}
+  .nav-div{width:1px;height:20px;background:var(--text-dim);opacity:0.3}
+  .nav-links{display:flex;gap:40px;list-style:none}
+  .nav-links a{color:var(--text-muted);text-decoration:none;font-size:0.9rem;transition:color 0.3s}
+  .nav-links a:hover{color:var(--text-light)}
+
+  .hero-grid{display:grid;grid-template-columns:1fr 1.3fr;gap:40px;padding:40px 60px 0;max-width:1440px;margin:0 auto;align-items:start;position:relative;z-index:5}
+  .hero-text{max-width:520px;padding-top:40px}
+  .badge{display:inline-flex;align-items:center;gap:8px;background:rgba(232,115,74,0.1);border:1px solid rgba(232,115,74,0.2);padding:6px 16px;border-radius:20px;font-size:0.75rem;color:var(--accent);font-weight:500;letter-spacing:0.5px;text-transform:uppercase;margin-bottom:28px}
+  .badge-dot{width:6px;height:6px;background:var(--accent);border-radius:50%;animation:glow 2s ease-in-out infinite}
+  h1{font-family:'Space Grotesk',sans-serif;font-size:3.6rem;font-weight:700;line-height:1.08;letter-spacing:-2px;margin-bottom:24px}
+  h1 .hl{color:var(--accent)}
+  .hero-desc{color:var(--text-muted);font-size:1rem;line-height:1.7;margin-bottom:20px;max-width:420px}
+  .ghost-lines{margin-bottom:32px}
+  .ghost-line{height:6px;margin-bottom:8px;border-radius:3px;background:var(--text-dim);opacity:0.07}
+  .cta-group{display:flex;align-items:center;gap:20px}
+  .btn-primary{display:inline-flex;align-items:center;gap:10px;background:var(--accent);color:#fff;padding:14px 32px;border-radius:10px;font-size:0.95rem;font-weight:600;text-decoration:none;transition:all 0.3s;box-shadow:0 4px 15px rgba(232,115,74,0.35),inset 0 1px 0 rgba(255,255,255,0.15);border:none;cursor:pointer}
+  .btn-primary:hover{background:var(--accent-glow);transform:translateY(-2px);box-shadow:0 8px 25px rgba(232,115,74,0.45)}
+  .btn-primary svg{width:18px;height:18px;transition:transform 0.3s}
+  .btn-primary:hover svg{transform:translateX(3px)}
+  .btn-link{color:var(--text-muted);text-decoration:none;font-size:0.9rem;font-weight:500;display:flex;align-items:center;gap:6px;transition:color 0.3s}
+  .btn-link:hover{color:var(--text-light)}
+
+  /* 3D Canvas */
+  #scene-container{width:100%;height:620px;position:relative}
+  #scene-container canvas{display:block;width:100%!important;height:100%!important}
+
+  /* Bottom */
+  .content-section{background:var(--cream);padding:80px 60px;color:#3a2a2a}
+  .content-inner{max-width:1400px;margin:0 auto}
+  .section-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:48px}
+  .section-title{font-family:'Space Grotesk',sans-serif;font-size:1.6rem;font-weight:600;color:#2a1a1a;letter-spacing:-0.5px}
+  .section-sub{font-size:0.85rem;color:#8a7a7a;margin-top:4px}
+  .grid{display:grid;grid-template-columns:repeat(4,1fr);gap:24px}
+  .card{background:#fff;border-radius:12px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,0.04),0 4px 12px rgba(0,0,0,0.03);transition:all 0.3s;cursor:pointer}
+  .card:hover{transform:translateY(-4px);box-shadow:0 4px 12px rgba(0,0,0,0.06),0 12px 32px rgba(0,0,0,0.08)}
+  .card-img{height:140px;position:relative;overflow:hidden}
+  .card-img.w{background:linear-gradient(135deg,#e8a090,#d4806a)}
+  .card-img.c{background:linear-gradient(135deg,#8a9ab0,#6a7a90)}
+  .card-img.e{background:linear-gradient(135deg,#b0a090,#8a7a6a)}
+  .card-img.a{background:linear-gradient(135deg,var(--accent),#c45a35)}
+  .card-img-inner{position:absolute;inset:12px;background:rgba(255,255,255,0.12);border-radius:6px;backdrop-filter:blur(4px);display:flex;align-items:center;justify-content:center}
+  .card-icon{width:40px;height:40px;background:rgba(255,255,255,0.2);border-radius:8px;display:flex;align-items:center;justify-content:center}
+  .card-icon svg{width:20px;height:20px;fill:rgba(255,255,255,0.8)}
+  .card-body{padding:16px}
+  .card-t{font-family:'Space Grotesk',sans-serif;font-size:0.95rem;font-weight:600;color:#2a1a1a;margin-bottom:6px}
+  .card-d{font-size:0.78rem;color:#8a7a7a;line-height:1.5}
+  .card-tags{display:flex;gap:6px;margin-top:12px;flex-wrap:wrap}
+  .tag{font-size:0.65rem;padding:3px 10px;border-radius:12px;background:var(--cream);color:#6a5a5a;font-weight:500}
+  .bottom-bar{display:flex;align-items:center;justify-content:space-between;margin-top:48px;padding-top:24px;border-top:1px solid var(--cream-dark)}
+  .bottom-logo{font-family:'Space Grotesk',sans-serif;font-weight:700;font-size:0.9rem;color:#4a3a3a;display:flex;align-items:center;gap:6px}
+  .bottom-logo span{width:6px;height:6px;background:var(--accent);border-radius:50%}
+  .bottom-links{display:flex;gap:24px;list-style:none}
+  .bottom-links a{font-size:0.8rem;color:#8a7a7a;text-decoration:none;transition:color 0.3s}
+  .bottom-links a:hover{color:var(--accent)}
+  .bottom-copy{font-size:0.75rem;color:#aaa09a}
+  @media(max-width:1100px){.hero-grid{grid-template-columns:1fr}#scene-container{height:500px}h1{font-size:2.8rem}.grid{grid-template-columns:repeat(2,1fr)}}
+  @media(max-width:600px){nav{padding:20px 24px}.hero-grid{padding:30px 24px 0}h1{font-size:2.2rem}.content-section{padding:40px 24px}.grid{grid-template-columns:1fr}#scene-container{height:380px}}
+</style>
+</head>
+<body>
+<div class="noise"></div>
+
+<section class="hero">
+  <nav>
+    <div class="logo"><div class="logo-dot"></div>DEVKIT</div>
+    <div class="nav-div"></div>
+    <ul class="nav-links">
+      <li><a href="#">Products</a></li>
+      <li><a href="#">Solutions</a></li>
+      <li><a href="#">Resources</a></li>
+      <li><a href="#">Pricing</a></li>
+    </ul>
+  </nav>
+
+  <div class="hero-grid">
+    <div class="hero-text">
+      <div class="badge"><div class="badge-dot"></div>Now Available</div>
+      <h1>Modern Tools<br>For <span class="hl">Dev Studios</span></h1>
+      <p class="hero-desc">Build beautiful interfaces faster with our comprehensive toolkit. Designed for teams who value craft, speed, and attention to detail.</p>
+      <div class="ghost-lines">
+        <div class="ghost-line" style="width:300px"></div>
+        <div class="ghost-line" style="width:260px"></div>
+        <div class="ghost-line" style="width:320px"></div>
+        <div class="ghost-line" style="width:180px"></div>
+      </div>
+      <div class="cta-group">
+        <a href="#" class="btn-primary">Get Started<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M12 5l7 7-7 7"/></svg></a>
+        <a href="#" class="btn-link">Watch Demo<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3" fill="currentColor"/></svg></a>
+      </div>
+    </div>
+    <div id="scene-container"></div>
+  </div>
+</section>
+
+<section class="content-section">
+  <div class="content-inner">
+    <div class="section-header">
+      <div><h2 class="section-title">Featured Portfolio</h2><p class="section-sub">Recent projects from our community</p></div>
+      <a href="#" class="btn-link" style="color:#8a7a7a">View All<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M12 5l7 7-7 7"/></svg></a>
+    </div>
+    <div class="grid">
+      <div class="card"><div class="card-img w"><div class="card-img-inner"><div class="card-icon"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg></div></div></div><div class="card-body"><div class="card-t">Dashboard UI Kit</div><div class="card-d">Complete analytics dashboard with 40+ components</div><div class="card-tags"><span class="tag">React</span><span class="tag">TypeScript</span></div></div></div>
+      <div class="card"><div class="card-img c"><div class="card-img-inner"><div class="card-icon"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/></svg></div></div></div><div class="card-body"><div class="card-t">Design System</div><div class="card-d">Scalable tokens, patterns, and primitives</div><div class="card-tags"><span class="tag">Figma</span><span class="tag">CSS</span></div></div></div>
+      <div class="card"><div class="card-img e"><div class="card-img-inner"><div class="card-icon"><svg viewBox="0 0 24 24"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg></div></div></div><div class="card-body"><div class="card-t">API Toolkit</div><div class="card-d">REST & GraphQL client with built-in caching</div><div class="card-tags"><span class="tag">Node.js</span><span class="tag">GraphQL</span></div></div></div>
+      <div class="card"><div class="card-img a"><div class="card-img-inner"><div class="card-icon"><svg viewBox="0 0 24 24"><polygon points="12,2 15,9 22,9 16,14 18,21 12,17 6,21 8,14 2,9 9,9"/></svg></div></div></div><div class="card-body"><div class="card-t">Motion Library</div><div class="card-d">60fps animations with spring physics engine</div><div class="card-tags"><span class="tag">Animation</span><span class="tag">WASM</span></div></div></div>
+    </div>
+    <div class="bottom-bar">
+      <div class="bottom-logo"><span></span>DEVKIT</div>
+      <ul class="bottom-links"><li><a href="#">Twitter</a></li><li><a href="#">GitHub</a></li><li><a href="#">Discord</a></li></ul>
+      <div class="bottom-copy">&copy; 2026 Devkit Studio</div>
+    </div>
+  </div>
+</section>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+  }
+}
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const container = document.getElementById('scene-container');
+const w = container.clientWidth;
+const h = container.clientHeight;
+
+// Renderer
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+renderer.setSize(w, h);
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 0.9;
+container.appendChild(renderer.domElement);
+
+// Scene
+const scene = new THREE.Scene();
+scene.background = null; // transparent to show hero bg
+scene.fog = new THREE.FogExp2(0x1a1520, 0.06);
+
+// Camera
+const camera = new THREE.PerspectiveCamera(32, w / h, 0.1, 100);
+camera.position.set(4.5, 3.8, 6.5);
+camera.lookAt(0, 1.0, 0);
+
+// === MATERIALS ===
+const mat = {
+  floor: new THREE.MeshStandardMaterial({ color: 0x8a6a5e, roughness: 0.85 }),
+  wallBack: new THREE.MeshStandardMaterial({ color: 0x1a1520, roughness: 0.95 }),
+  wallSide: new THREE.MeshStandardMaterial({ color: 0x161220, roughness: 0.95 }),
+  desk: new THREE.MeshStandardMaterial({ color: 0x7a5a4e, roughness: 0.7 }),
+  deskMat: new THREE.MeshStandardMaterial({ color: 0x28202a, roughness: 0.9 }),
+  monitor: new THREE.MeshStandardMaterial({ color: 0xb08a80, roughness: 0.5, metalness: 0.05 }),
+  monitorDark: new THREE.MeshStandardMaterial({ color: 0x8a6660, roughness: 0.5 }),
+  screen: new THREE.MeshStandardMaterial({ color: 0x1a1424, roughness: 0.3, emissive: 0x1a1424, emissiveIntensity: 0.3 }),
+  screenGlow: new THREE.MeshStandardMaterial({ color: 0xe8734a, emissive: 0xe8734a, emissiveIntensity: 0.5, roughness: 0.5 }),
+  accent: new THREE.MeshStandardMaterial({ color: 0xe8734a, emissive: 0xe8734a, emissiveIntensity: 0.8, roughness: 0.4 }),
+  mugBody: new THREE.MeshStandardMaterial({ color: 0x4a3a38, roughness: 0.7 }),
+  potSalmon: new THREE.MeshStandardMaterial({ color: 0xb08a80, roughness: 0.6 }),
+  potDark: new THREE.MeshStandardMaterial({ color: 0x5a4a40, roughness: 0.7 }),
+  leaf: new THREE.MeshStandardMaterial({ color: 0x6a5a4a, roughness: 0.8, side: THREE.DoubleSide }),
+  leafLight: new THREE.MeshStandardMaterial({ color: 0x8a7a6a, roughness: 0.8, side: THREE.DoubleSide }),
+  leafDark: new THREE.MeshStandardMaterial({ color: 0x5a4a3a, roughness: 0.8, side: THREE.DoubleSide }),
+  mouse: new THREE.MeshStandardMaterial({ color: 0x4a3a38, roughness: 0.6 }),
+  darkObj: new THREE.MeshStandardMaterial({ color: 0x3a2a2a, roughness: 0.7 }),
+  speaker: new THREE.MeshStandardMaterial({ color: 0x3a2a2a, roughness: 0.8 }),
+  door: new THREE.MeshStandardMaterial({ color: 0x1e1a24, roughness: 0.9 }),
+  doorFrame: new THREE.MeshStandardMaterial({ color: 0x221e2a, roughness: 0.85 }),
+  led: new THREE.MeshStandardMaterial({ color: 0xe85a5a, emissive: 0xe85a5a, emissiveIntensity: 1.5 }),
+};
+
+// === HELPER ===
+function box(sx, sy, sz, material) {
+  const g = new THREE.BoxGeometry(sx, sy, sz);
+  return new THREE.Mesh(g, material);
+}
+
+function cylinder(rt, rb, h, segs, material) {
+  const g = new THREE.CylinderGeometry(rt, rb, h, segs);
+  return new THREE.Mesh(g, material);
+}
+
+// === ROOM ===
+// Floor
+const floor = box(10, 0.1, 8, mat.floor);
+floor.position.set(0, 0, 0);
+floor.receiveShadow = true;
+scene.add(floor);
+
+// Back wall
+const backWall = box(10, 6, 0.1, mat.wallBack);
+backWall.position.set(0, 3, -4);
+backWall.receiveShadow = true;
+scene.add(backWall);
+
+// Right wall
+const rightWall = box(0.1, 6, 8, mat.wallSide);
+rightWall.position.set(5, 3, 0);
+rightWall.receiveShadow = true;
+scene.add(rightWall);
+
+// Left wall (just barely visible)
+const leftWall = box(0.1, 6, 8, mat.wallSide);
+leftWall.position.set(-5, 3, 0);
+scene.add(leftWall);
+
+// === DOOR on right wall ===
+const doorFrame = box(1.4, 3.2, 0.08, mat.doorFrame);
+doorFrame.position.set(4.93, 1.6, 1.5);
+scene.add(doorFrame);
+
+const doorPanel = box(1.2, 3.0, 0.06, mat.door);
+doorPanel.position.set(4.92, 1.5, 1.5);
+scene.add(doorPanel);
+
+// Door inset panels
+const doorInsetTop = box(0.9, 1.0, 0.08, mat.wallSide);
+doorInsetTop.position.set(4.91, 2.3, 1.5);
+scene.add(doorInsetTop);
+
+const doorInsetBot = box(0.9, 1.2, 0.08, mat.wallSide);
+doorInsetBot.position.set(4.91, 0.9, 1.5);
+scene.add(doorInsetBot);
+
+// Door handle
+const doorHandle = box(0.06, 0.18, 0.08, mat.monitorDark);
+doorHandle.position.set(4.89, 1.5, 1.15);
+scene.add(doorHandle);
+
+// === ORANGE WALL LIGHT ===
+const wallLight = box(0.6, 0.15, 0.08, mat.accent);
+wallLight.position.set(4.93, 3.5, 0);
+scene.add(wallLight);
+
+// Orange point light from it
+const orangePt = new THREE.PointLight(0xe8734a, 2, 5);
+orangePt.position.set(4.5, 3.5, 0);
+scene.add(orangePt);
+
+// === DESK ===
+// Desk top surface
+const deskTop = box(5.5, 0.12, 2.8, mat.desk);
+deskTop.position.set(-0.2, 1.2, 0.2);
+deskTop.castShadow = true;
+deskTop.receiveShadow = true;
+scene.add(deskTop);
+
+// Desk front edge (thicker)
+const deskFront = box(5.5, 0.25, 0.12, mat.monitorDark);
+deskFront.position.set(-0.2, 1.14, 1.54);
+scene.add(deskFront);
+
+// Desk legs (simple boxes)
+[[-2.8, 0.6, 1.3], [2.6, 0.6, 1.3], [-2.8, 0.6, -1.1], [2.6, 0.6, -1.1]].forEach(p => {
+  const leg = box(0.12, 1.2, 0.12, mat.monitorDark);
+  leg.position.set(p[0], p[1], p[2]);
+  scene.add(leg);
+});
+
+// Desk mat
+const deskMatMesh = box(3.2, 0.02, 1.8, mat.deskMat);
+deskMatMesh.position.set(0, 1.27, 0.2);
+deskMatMesh.receiveShadow = true;
+scene.add(deskMatMesh);
+
+// === CRT MONITOR ===
+const crtGroup = new THREE.Group();
+
+// Main body (chunky box)
+const crtBody = box(2.4, 2.0, 1.6, mat.monitor);
+crtBody.castShadow = true;
+crtBody.receiveShadow = true;
+crtBody.position.set(0, 1.0, 0);
+crtGroup.add(crtBody);
+
+// Screen bezel inset (dark)
+const screenInset = box(1.9, 1.5, 0.05, mat.screen);
+screenInset.position.set(0, 1.1, 0.81);
+crtGroup.add(screenInset);
+
+// Screen glow surface
+const screenSurface = box(1.7, 1.3, 0.02, mat.screenGlow);
+screenSurface.position.set(0, 1.1, 0.83);
+crtGroup.add(screenSurface);
+
+// Power LED
+const powerLed = box(0.06, 0.06, 0.04, mat.led);
+powerLed.position.set(0, 0.2, 0.82);
+crtGroup.add(powerLed);
+
+// Monitor base/stand
+const crtBase = box(2.6, 0.2, 1.7, mat.monitorDark);
+crtBase.position.set(0, -0.1, 0);
+crtBase.castShadow = true;
+crtGroup.add(crtBase);
+
+// Subtle top rim highlight
+const topRim = box(2.42, 0.02, 1.62, new THREE.MeshStandardMaterial({ color: 0xc4a098, roughness: 0.5 }));
+topRim.position.set(0, 2.01, 0);
+crtGroup.add(topRim);
+
+crtGroup.position.set(0, 1.27, -0.2);
+scene.add(crtGroup);
+
+// Screen light (emits from screen)
+const screenLight = new THREE.PointLight(0xe8734a, 0.8, 4);
+screenLight.position.set(0, 2.4, 1.2);
+scene.add(screenLight);
+
+// === SHELF (behind monitor, on back wall) ===
+const shelfBoard = box(3.0, 0.08, 0.5, mat.darkObj);
+shelfBoard.position.set(0.5, 3.0, -3.7);
+shelfBoard.castShadow = true;
+shelfBoard.receiveShadow = true;
+scene.add(shelfBoard);
+
+// Shelf brackets
+[-0.8, 1.8].forEach(x => {
+  const bracket = box(0.06, 0.25, 0.3, mat.darkObj);
+  bracket.position.set(x, 2.85, -3.7);
+  scene.add(bracket);
+});
+
+// === SECONDARY MONITOR (on shelf) ===
+const miniMonGroup = new THREE.Group();
+const miniBody = box(1.0, 0.7, 0.3, mat.darkObj);
+miniBody.position.set(0, 0.35, 0);
+miniMonGroup.add(miniBody);
+
+const miniScreen = box(0.8, 0.5, 0.02, new THREE.MeshStandardMaterial({
+  color: 0x2a1e28, emissive: 0xe8734a, emissiveIntensity: 0.15, roughness: 0.3
+}));
+miniScreen.position.set(0, 0.38, 0.17);
+miniMonGroup.add(miniScreen);
+
+const miniBase = box(0.25, 0.1, 0.2, mat.darkObj);
+miniBase.position.set(0, -0.02, 0.05);
+miniMonGroup.add(miniBase);
+
+miniMonGroup.position.set(-0.3, 3.05, -3.5);
+scene.add(miniMonGroup);
+
+// === WEBCAM (on shelf) ===
+const camBody = box(0.3, 0.22, 0.2, mat.darkObj);
+camBody.position.set(0.8, 3.15, -3.5);
+scene.add(camBody);
+
+const camLens = cylinder(0.04, 0.04, 0.06, 12, mat.accent);
+camLens.rotation.x = Math.PI / 2;
+camLens.position.set(0.8, 3.18, -3.38);
+scene.add(camLens);
+
+// === SPEAKER (on shelf) ===
+const speakerBody = box(0.3, 0.45, 0.25, mat.speaker);
+speakerBody.position.set(1.5, 3.26, -3.5);
+scene.add(speakerBody);
+
+const speakerCone = cylinder(0.08, 0.08, 0.04, 16, mat.wallSide);
+speakerCone.rotation.x = Math.PI / 2;
+speakerCone.position.set(1.5, 3.32, -3.36);
+scene.add(speakerCone);
+
+// Wall indicator LED
+const wallLed = box(0.06, 0.06, 0.04, mat.led);
+wallLed.position.set(0, 2.6, -3.93);
+scene.add(wallLed);
+
+// === COFFEE MUG ===
+const mugGroup = new THREE.Group();
+
+// Mug body (cylinder)
+const mugBody = cylinder(0.18, 0.16, 0.4, 16, mat.mugBody);
+mugBody.position.set(0, 0.2, 0);
+mugBody.castShadow = true;
+mugGroup.add(mugBody);
+
+// Mug handle (torus)
+const handleGeo = new THREE.TorusGeometry(0.1, 0.03, 8, 16, Math.PI);
+const mugHandle = new THREE.Mesh(handleGeo, mat.mugBody);
+mugHandle.rotation.y = Math.PI / 2;
+mugHandle.rotation.z = Math.PI / 2;
+mugHandle.position.set(0.2, 0.22, 0);
+mugGroup.add(mugHandle);
+
+mugGroup.position.set(-1.8, 1.27, 0.5);
+scene.add(mugGroup);
+
+// === SMALL PLANT (near mug) ===
+const smPlantGroup = new THREE.Group();
+const smPot = cylinder(0.14, 0.11, 0.22, 12, mat.potDark);
+smPot.position.set(0, 0.11, 0);
+smPot.castShadow = true;
+smPlantGroup.add(smPot);
+
+// Small leaves
+for (let i = 0; i < 5; i++) {
+  const leafGeo = new THREE.SphereGeometry(0.06, 8, 6, 0, Math.PI * 2, 0, Math.PI / 2);
+  const leafMat = [mat.leaf, mat.leafLight, mat.leafDark][i % 3];
+  const lf = new THREE.Mesh(leafGeo, leafMat);
+  const angle = (i / 5) * Math.PI * 2;
+  lf.position.set(Math.cos(angle) * 0.06, 0.22 + Math.random() * 0.06, Math.sin(angle) * 0.06);
+  lf.rotation.set(Math.random() * 0.3 - 0.15, angle, Math.random() * 0.3);
+  lf.scale.set(1, 1.5, 0.5);
+  smPlantGroup.add(lf);
+}
+
+smPlantGroup.position.set(-1.3, 1.27, 0.3);
+scene.add(smPlantGroup);
+
+// === LARGE TROPICAL PLANT ===
+const lgPlantGroup = new THREE.Group();
+
+// Pot
+const lgPot = cylinder(0.28, 0.22, 0.4, 12, mat.potSalmon);
+lgPot.position.set(0, 0.2, 0);
+lgPot.castShadow = true;
+lgPlantGroup.add(lgPot);
+
+// Pot rim
+const lgPotRim = cylinder(0.3, 0.3, 0.06, 12, mat.potSalmon);
+lgPotRim.position.set(0, 0.4, 0);
+lgPlantGroup.add(lgPotRim);
+
+// Tropical leaves - big elongated shapes
+function createLeaf(height, width, angle, tilt, leafMaterial) {
+  const shape = new THREE.Shape();
+  shape.moveTo(0, 0);
+  shape.quadraticCurveTo(width * 0.6, height * 0.4, width * 0.15, height);
+  shape.quadraticCurveTo(-width * 0.1, height * 0.7, 0, 0);
+
+  const geo = new THREE.ShapeGeometry(shape);
+  const leaf = new THREE.Mesh(geo, leafMaterial);
+  leaf.rotation.y = angle;
+  leaf.rotation.x = -tilt;
+  leaf.position.y = 0.42;
+  return leaf;
+}
+
+const leaves = [
+  { h: 1.2, w: 0.4, angle: -0.5, tilt: 0.2, mat: mat.leaf },
+  { h: 1.4, w: 0.45, angle: 0.2, tilt: 0.15, mat: mat.leafLight },
+  { h: 1.1, w: 0.35, angle: 0.8, tilt: 0.3, mat: mat.leafDark },
+  { h: 0.9, w: 0.3, angle: -1.2, tilt: 0.35, mat: mat.leafLight },
+  { h: 1.0, w: 0.38, angle: 1.5, tilt: 0.25, mat: mat.leaf },
+];
+
+leaves.forEach(l => {
+  const leaf = createLeaf(l.h, l.w, l.angle, l.tilt, l.mat);
+  lgPlantGroup.add(leaf);
+});
+
+lgPlantGroup.position.set(2.0, 1.27, 0.3);
+scene.add(lgPlantGroup);
+
+// === MOUSE ===
+const mouseGroup = new THREE.Group();
+const mouseBody = new THREE.Mesh(
+  new THREE.CapsuleGeometry(0.08, 0.15, 8, 12),
+  mat.mouse
+);
+mouseBody.rotation.x = Math.PI / 2;
+mouseBody.position.set(0, 0.06, 0);
+mouseBody.castShadow = true;
+mouseGroup.add(mouseBody);
+
+mouseGroup.position.set(1.0, 1.27, 0.7);
+mouseGroup.rotation.y = -0.15;
+scene.add(mouseGroup);
+
+// === SMALL SCATTERED ITEMS ===
+const eraser = box(0.18, 0.08, 0.1, mat.monitorDark);
+eraser.position.set(1.5, 1.31, 0.9);
+eraser.rotation.y = 0.4;
+eraser.castShadow = true;
+scene.add(eraser);
+
+const usbDrive = box(0.15, 0.05, 0.06, mat.darkObj);
+usbDrive.position.set(1.8, 1.3, 1.0);
+usbDrive.rotation.y = -0.3;
+usbDrive.castShadow = true;
+scene.add(usbDrive);
+
+// === LIGHTING ===
+// Warm ambient
+scene.add(new THREE.AmbientLight(0x3a2a30, 0.8));
+
+// Main key light (warm, from upper left)
+const keyLight = new THREE.DirectionalLight(0xffd8c0, 1.2);
+keyLight.position.set(-3, 6, 5);
+keyLight.castShadow = true;
+keyLight.shadow.mapSize.width = 1024;
+keyLight.shadow.mapSize.height = 1024;
+keyLight.shadow.camera.near = 0.5;
+keyLight.shadow.camera.far = 20;
+keyLight.shadow.camera.left = -6;
+keyLight.shadow.camera.right = 6;
+keyLight.shadow.camera.top = 6;
+keyLight.shadow.camera.bottom = -2;
+keyLight.shadow.bias = -0.002;
+scene.add(keyLight);
+
+// Fill light (cool, from right)
+const fillLight = new THREE.DirectionalLight(0x8090b0, 0.3);
+fillLight.position.set(4, 3, 2);
+scene.add(fillLight);
+
+// Rim light from behind
+const rimLight = new THREE.DirectionalLight(0xe8734a, 0.4);
+rimLight.position.set(0, 4, -5);
+scene.add(rimLight);
+
+// Screen glow point light
+const screenPt = new THREE.PointLight(0xe8734a, 0.5, 3);
+screenPt.position.set(0, 2.3, 1.5);
+scene.add(screenPt);
+
+// === ANIMATION ===
+let time = 0;
+function animate() {
+  requestAnimationFrame(animate);
+  time += 0.005;
+
+  // Gentle camera sway
+  camera.position.x = 4.5 + Math.sin(time * 0.5) * 0.1;
+  camera.position.y = 3.8 + Math.sin(time * 0.7) * 0.05;
+  camera.lookAt(0, 1.2, 0);
+
+  // Screen glow pulse
+  screenPt.intensity = 0.5 + Math.sin(time * 2) * 0.1;
+
+  renderer.render(scene, camera);
+}
+
+animate();
+
+// Resize
+window.addEventListener('resize', () => {
+  const w = container.clientWidth;
+  const h = container.clientHeight;
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+  renderer.setSize(w, h);
+});
+</script>
+</body>
+</html>

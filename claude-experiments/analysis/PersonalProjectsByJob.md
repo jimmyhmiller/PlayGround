@@ -125,7 +125,7 @@ A summary of what I was building and learning in my personal time during each jo
 - Started a Unity game project — `unity/FirstProject/`
 - Built an egui (immediate-mode GUI) experiment — `try-egui/`
 
-## Funemployment (May-Aug 2023)
+## Unemployment (May-Aug 2023)
 
 ~120,209 lines | 95 commits | 3 months
 

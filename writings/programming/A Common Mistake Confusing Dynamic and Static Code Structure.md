@@ -1,21 +1,11 @@
-# Confusing Dynamic and Static Code Structure
+# Confusing the Program with the Code
 
-I recently published a blog post on how I [learn a new code base](/learn-codebase-visualizer) by building a visualizer. I was super happy with the response it got. I got few emails about related projects and had relatively positive hacker news comments. But In both of these cases I saw a confusion I've seen a number of times in my career. A confusion that causes people to fail to understand a code base, that causes countless bugs. A confusion that on it's surface feels so obvious yet seems to happen to the best of us, the confusion of the static with the dynamic.
+I recently published a blog post on how I [learn a new code base](/learn-codebase-visualizer) by building a visualizer. I was super happy with the response it got. I got few emails about related projects and had relatively positive hacker news comments. But one thing really bothered me about all these responses. Something I want to take the time to clear up. Everyone kept conflating two things that for me are quite distinct. Where I was talking about visualizing the program, people kept talking about visualizing the code.
 
-Sadly our debates about typing have confused us on what the words static and dynamic actually mean. I am not at all referring to types here. A statically typed language still has dynamic behavior. The dynamic behavior of a program is what it does when it is run.  Consider recursive fibonacci:
+## The Distinction
 
-```typescript
-function fib(n: number): number {
-  if (n <= 1) {
-    return n;
-  }
-  return fib(n - 1) + fib(n - 2);
-}
-```
+What do I mean "program" vs "code". I mean the running artifact vs the static text. I mean the dynamic part of the program vs the static structure. The part that only exists when the program is being executed. When I am trying to learn a new code base, I am not interested almost at all in the layout of code. Something like the GitHubNext code visualizer that shows folders and files does not help me. Nor do tools that show dependencies and call graphs.
 
-The source itself is rather simple, but the runtime behavior is something that beginners often trip up on. It isn't at all obvious at first glance that this forms a tree. Nor is it obvious how your programs runtime will concretely run this program. There is no mention of a stack here, in fact, the stack isn't even necessary to understand this program. Dynamically however, it is important to understand if you want to know how your progam truly runs.
+Trying to understand the program by looking at the static structure of the code is like trying to understand a city by staring at the map. Yes, you will learn something. You will learn how to navigate. But to really understand a city, you have to see it in action. You have to experience the city. You have to walk the streets, eat the food, see its sights.
 
-## An Obsession with Static Stucture
-
-
-
+The same is true of a codebase.

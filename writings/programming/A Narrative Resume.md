@@ -10,13 +10,15 @@ While I didn't write this directly in the blog post. It isn't a stretch to figur
 
 I won't recount all the details of this codebase here. But I'll give you some highlights of the tech stack. It was primarily C# codebase. But quite a bit of Visual Basic, a sprinkle of delphi, and a number of other old technologies like JScript.
 
-After my internship quickly turned into a Junior Developer job, I was the junior developer mentoring the interns in a support, bug fixing adjacent role. Basically, the task of our group (1 Senior developer, 1 Analyst, 1 produce person, 5 interns and myself) was to fix the bugs and handle the manual data requests  that the business didn't want to spend money on. In practice, we did a ton of Brownfield development. Our software was made for internal customer support people and we talked to them directly. Gather requirements and built them software with in the existing monolith.
+After my internship quickly turned into a Junior Developer job, I was the junior developer mentoring the interns in a support, bug fixing adjacent role. Basically, the task of our group (1 Senior developer, 1 Analyst, 1 produce person, 5 interns and myself) was to fix the bugs and handle the manual data requests that the business didn't want to spend money on. In practice, we did a ton of Brownfield development. Our software was made for internal customer support people and we talked to them directly. Gather requirements and built them software with in the existing monolith.
 
-In this role I got to do all sorts of fun things. We had paid a contractor for custom time tracking software used by all the employees. But we had lost the source for it. So we had checked in decompiled sources for the software in source control. My job was to add new features using the decompiled sources as my source code. I spent a brief stint as the solo developer on a greenfield project. They brought in a senior developer to the team, but he was reassigned before doing to much work. The project pivoted.
+In this role I got to do all sorts of fun things. For example, we had paid a contractor for custom time tracking software used by all the employees. But we had lost the source for it. So we had checked in decompiled sources for the software in source control. My job was to add new features using the decompiled sources as my source code.
 
-Looking back, I didn't do a great job on the project but also about what I'd expect for an engineer with my experience and this level of instruction. This was in an era where rest was peak hype. I was told to make two different rest api servers for this one project. The first would access the database directly and expose the database tables with a one to one rest interface. The second would be a rest api that would talk to this data layer rest api. Then I was supposed to write a single page application in Backbone js or something similar. Instead, I used C# mvc with Razor as the templating language. 
+I also introduced Heartland to react (it had just come out). There had been a project that had been writen and rewritten in so many different javascript frameworks. It was supposed to be a fairly complex form used by some internal teams. Creating it would free up a ton of busy work interns were tasks to do. But the reason it had been rewritten so many times is that the as it hit full complexity, it became completely unmaintainable by this group of interns. I made one small part of it in react, then handed it off to an intern and told them to follow the pattern, in 3 days they had finished most of the application. The one way data flow of react truly made a massive difference.
 
-I don't think either of these were the right choice. But I'm not sure looking back that there was a great choice for this project. It was ill defined, mostly demo ware. Disconnected from what customers needed. In many ways this was foreshadowing for projects to come later.
+### Outside the Job
+
+This was really the time where I started truly understanding functional programming. I was working on [small clojure](todo) and [haskell programs](todo). But I think one of the most exciting projects I remember during this time was all the macros I made with sweetjs. If you aren't familiar sweetjs was an experimental macro system for javascript that let you add all sorts of amazing features with custom sytnax. I implemented [currying](todo), [algebraic data types](todo), even [go style CSP](). Looking back it I'm honestly amazed about this timeline. I thought for suree 
 
 ### What I Learned
 
@@ -30,11 +32,15 @@ NextGear was a newly created entity. Cox, the large private company, and had bou
 
 This was my transitions very rapidly from Junior to Senior. I lacked a lot of the patience and people skills I now understand are important for these roles (in my defense I was 22). But I get involved with a bunch of technolgies I hadn't been exposed to before. First, there was Java. Now I honeslty knew Java fairly well. First it really isn't that different from C#, but second I had asked for a java book for my birthday when I was in 8th grade. I read that thing cover to cover and vowed never to write java. I didn't until the AP exam (I did get a 5).
 
-But the java I knew was not the complicated Spring mess I encountered here. Our stack was angular 1 and Spring. The whole project was a mess. It was greenfield development. But the constant struggle between the teams to get work, the decisions of spreading out ownership constantly hopping back and forth between different teams caused the whole prokect to be inconsistent. We also were expressly forbidden from talking to customers (who were employees at our own company). 
+But the Java I knew was not the complicated Spring mess I encountered here. Our stack was Angular 1 and Spring. The whole project was a mess. It was greenfield development. But the constant struggle between the teams to get work, the decisions of spreading out ownership constantly hopping back and forth between different teams caused the whole prokect to be inconsistent. We also were expressly forbidden from talking to customers (who were employees at our own company). 
 
-My favorite technical aspect of this job was a part I got to work on separate from this main spring monolith. It was a queue for feeding data into the system. At the time we were told to expect 1000 messages a day at peak. So the devops group setup a simple rabbitmq setup and I made a single server (docker container) to read from. The first day in production I woke up, drove to work, checked the queue and it had 1.2 million messages and counting.
+My favorite technical aspect of this job was a part I got to work on separate from this main Spring monolith. It was a queue for feeding data into the system. At the time we were told to expect 1000 messages a day at peak. So the devops group setup a simple rabbitmq setup and I made a single server (docker container) to read from. The first day in production I woke up, drove to work, checked the queue and it had 1.2 million messages and counting.
 
 We did the math and our single worker was not going to handle the messages in time. In fact, the rabbitmq server was not going to last either. Worse, it didn't have persistence turned on and it was running out of memory. But there was a problem, ordering mattered. Not globally, but per entity. Luckily I had begged to attend strangeloop just a month earlier where I watched ["Building Scalable Stateful Services" by Caitie McCaffrey](https://youtu.be/H0i_bXKwujQ?t=882). There I learned about consistent hashing. To keep a long story short, we had do to some dancing of servers to get a rabbitmq with consistent hashing setup, had to code up a worker that would work with the fan out. But by 5pm that same day we had deployed a fix and were chopping down the queue.
+
+### Outside the Job
+
+This was a time where I started getting into computer science papers and started learning a bit more about the formal side of software engineering. I wrote a large amount of idris. I did some experiments with denotational semantics. I learned about the expression problem and explored interesting solutions to it like object algebras. 
 
 ### What I Learned
 
@@ -47,6 +53,10 @@ I was a big Clojure fan at this time (still love it). I had been searching on Li
 Trabian was a react consultancy for fintech startups, banks, and credit unions. The CEO had been the primary programmer and wanted someone else to take this role and build out a team. That was my job. it was a very small company. When I joined I was the only full time engineer other than the CEO, we grew the team with two other engineers and two interns. We pumped out prototype after prototype. On a good day I was reviewing 8 PRs and write 3 myself. We wrote clean react. Each project we tried one new library to find what stack we believed worked best for our needs.
 
 I also work in very early react native on Android, maintaining a our own fork for some not great reasons. Outside of client work we were working some server side work prototyping in both Clojure and Elixir around some graphql work utilizing CUFX. We did a head to head comparison and found Clojure better for our use case. Sadly this work didn't get off the ground before Trabian ran out of money. On a Wednesday I was told that my paycheck on Friday wasn't coming. By Monday, I had a contract position back at NextGear.
+
+### Outside the job
+
+
 
 ### What I Learned
 

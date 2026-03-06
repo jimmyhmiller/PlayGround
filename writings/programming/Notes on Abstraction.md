@@ -2,7 +2,7 @@
 
 I haven't really enjoyed talks I've heard from programmers about abstraction. It seems there is a lot of confusion and I'd love to try and examine it myself. I think having an account of abstraction would certainly be useful, though I worry there is no one account. I do think that what we call abstract is at least 2 or 3 different things, but perhaps we can pull these apart. To help me think about what abstract is, I will first talk about what it is not.
 
-##Cheng Lou's Proposal
+## Cheng Lou's Proposal
 
 [Cheng Lou's talk](https://www.youtube.com/watch?v=mVVNJKv9esE&t=912s) on abstraction contrasts "abstract" with "useful". Something that is more abstract is less useful in the sense that that we can't "take it off the shelf" and use it. We must build on the abstraction in order to suit our concrete use case. Here abstract corresponds with "power". It isn't really clear what power here is supposed to be. It is actually defined in the talk in a seemingly circular way. But it seems from the rest of the talk that power has to do with having fewer constraints. Or to put it in a different way, a more abstract thing can cover more concrete use cases. 
 

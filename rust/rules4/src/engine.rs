@@ -85,6 +85,7 @@ pub struct MetaSyms {
     pub step_marker: SymId,
     pub step_inner_marker: SymId,
     pub subst_marker: SymId,
+    pub println_marker: SymId,
 }
 
 // ── MetaRule ──
@@ -147,6 +148,59 @@ fn subst_term(store: &mut TermStore, term: TermId, old: TermId, new: TermId) -> 
                 term
             }
         }
+    }
+}
+
+/// Extract a plain numeric value from a term.
+fn extract_num_plain(store: &TermStore, term: TermId) -> Option<(f64, bool)> {
+    match store.get(term) {
+        TermData::Num(n) => Some((n as f64, true)),
+        TermData::Float(bits) => Some((f64::from_bits(bits), false)),
+        _ => None,
+    }
+}
+
+/// Try to extract a numeric value by unwrapping a single-arg wrapper call.
+/// Skips engine-internal symbols (prefixed with `__`) like __pvar.
+/// Returns (value, is_int, wrapper_head).
+fn extract_num_wrapped(store: &TermStore, term: TermId) -> Option<(f64, bool, TermId)> {
+    if let TermData::Call { head, args_start, args_len } = store.get(term) {
+        if args_len == 1 {
+            if let TermData::Sym(s) = store.get(head) {
+                if store.sym_name(s).starts_with("__") {
+                    return None;
+                }
+            }
+            let inner = store.args_pool[args_start as usize];
+            match store.get(inner) {
+                TermData::Num(n) => return Some((n as f64, true, head)),
+                TermData::Float(bits) => return Some((f64::from_bits(bits), false, head)),
+                _ => {}
+            }
+        }
+    }
+    None
+}
+
+/// Extract numeric value for arithmetic. Tries plain first, then wrapped.
+/// Returns (value, is_int, optional_wrapper_head).
+fn extract_num(store: &TermStore, term: TermId) -> Option<(f64, bool, Option<TermId>)> {
+    if let Some((v, is_int)) = extract_num_plain(store, term) {
+        return Some((v, is_int, None));
+    }
+    if let Some((v, is_int, head)) = extract_num_wrapped(store, term) {
+        return Some((v, is_int, Some(head)));
+    }
+    None
+}
+
+/// Unwrap a single-arg wrapper if present, returning the inner term and optional wrapper head.
+fn unwrap_wrapper(store: &TermStore, term: TermId) -> (TermId, Option<TermId>) {
+    match store.get(term) {
+        TermData::Call { head, args_start, args_len } if args_len == 1 => {
+            (store.args_pool[args_start as usize], Some(head))
+        }
+        _ => (term, None),
     }
 }
 
@@ -256,6 +310,7 @@ impl Engine {
             step_marker: store.sym("__step"),
             step_inner_marker: store.sym("__step_inner"),
             subst_marker: store.sym("__subst"),
+            println_marker: store.sym("__println"),
         };
 
         let pattern_ctx = PatternContext {
@@ -475,6 +530,18 @@ impl Engine {
                         let resolved_new = self.resolve_eval_markers(new);
                         return subst_term(&mut self.store, resolved_term, resolved_old, resolved_new);
                     }
+                    // #println(args...) — resolve all args, print them, return last
+                    if s == self.meta_syms.println_marker && args_len >= 1 {
+                        let len = args_len as usize;
+                        let mut last = term;
+                        for i in 0..len {
+                            let arg = self.store.args_pool[args_start as usize + i];
+                            last = self.resolve_eval_markers(arg);
+                            print!("{}", self.store.display(last));
+                        }
+                        println!();
+                        return last;
+                    }
                     // seq(a, b) — resolve both, return last (don't leak seq into rewrite loop)
                     if s == self.builtins.seq && args_len == 2 {
                         let a = self.store.args_pool[args_start as usize];
@@ -538,22 +605,15 @@ impl Engine {
                     }
                 }
 
-                // 2. Try builtins: only if args are already values (numbers)
+                // 2. Try builtins: only if args are already values (numbers or wrapped numbers)
                 if args_len == 2 {
                     let a = self.store.args_pool[args_start as usize];
                     let b = self.store.args_pool[args_start as usize + 1];
-                    let a_num = match self.store.get(a) {
-                        TermData::Num(n) => Some((n as f64, true)),
-                        TermData::Float(bits) => Some((f64::from_bits(bits), false)),
-                        _ => None,
-                    };
-                    let b_num = match self.store.get(b) {
-                        TermData::Num(n) => Some((n as f64, true)),
-                        TermData::Float(bits) => Some((f64::from_bits(bits), false)),
-                        _ => None,
-                    };
-                    if let (Some((av, a_int)), Some((bv, b_int))) = (a_num, b_num) {
+                    let a_ext = extract_num(&self.store, a);
+                    let b_ext = extract_num(&self.store, b);
+                    if let (Some((av, a_int, a_wrap)), Some((bv, b_int, b_wrap))) = (a_ext, b_ext) {
                         let both_int = a_int && b_int;
+                        let wrapper = a_wrap.or(b_wrap);
                         let arith_result = if head_sym == self.builtins.add { Some(av + bv) }
                             else if head_sym == self.builtins.sub { Some(av - bv) }
                             else if head_sym == self.builtins.mul { Some(av * bv) }
@@ -563,7 +623,8 @@ impl Engine {
                             }
                             else { None };
                         if let Some(r) = arith_result {
-                            return if both_int { self.store.num(r as i64) } else { self.store.float(r) };
+                            let raw = if both_int { self.store.num(r as i64) } else { self.store.float(r) };
+                            return if let Some(w) = wrapper { self.store.call(w, &[raw]) } else { raw };
                         }
                     }
                 }
@@ -655,22 +716,15 @@ impl Engine {
                             return val;
                         }
                     }
-                    // Try builtins (arithmetic)
+                    // Try builtins (arithmetic — unwraps single-arg wrappers)
                     if args_len == 2 {
                         let a = self.store.args_pool[args_start as usize];
                         let b = self.store.args_pool[args_start as usize + 1];
-                        let a_num = match self.store.get(a) {
-                            TermData::Num(n) => Some((n as f64, true)),
-                            TermData::Float(bits) => Some((f64::from_bits(bits), false)),
-                            _ => None,
-                        };
-                        let b_num = match self.store.get(b) {
-                            TermData::Num(n) => Some((n as f64, true)),
-                            TermData::Float(bits) => Some((f64::from_bits(bits), false)),
-                            _ => None,
-                        };
-                        if let (Some((av, a_int)), Some((bv, b_int))) = (a_num, b_num) {
+                        let a_ext = extract_num(&self.store, a);
+                        let b_ext = extract_num(&self.store, b);
+                        if let (Some((av, a_int, a_wrap)), Some((bv, b_int, b_wrap))) = (a_ext, b_ext) {
                             let both_int = a_int && b_int;
+                            let wrapper = a_wrap.or(b_wrap);
                             let arith_result = if head_sym == self.builtins.add { Some(av + bv) }
                                 else if head_sym == self.builtins.sub { Some(av - bv) }
                                 else if head_sym == self.builtins.mul { Some(av * bv) }
@@ -680,7 +734,8 @@ impl Engine {
                                 }
                                 else { None };
                             if let Some(r) = arith_result {
-                                let result = if both_int { self.store.num(r as i64) } else { self.store.float(r) };
+                                let raw = if both_int { self.store.num(r as i64) } else { self.store.float(r) };
+                                let result = if let Some(w) = wrapper { self.store.call(w, &[raw]) } else { raw };
                                 // Fire meta event for builtin
                                 if !self.in_meta && !self.meta_rules.is_empty() {
                                     self.step_count += 1;
@@ -693,12 +748,15 @@ impl Engine {
                             }
                         }
                     }
-                    // Try comparison builtins
+                    // Try comparison builtins — unwrap wrappers but don't re-wrap result
                     if args_len == 2 {
                         let a = self.store.args_pool[args_start as usize];
                         let b = self.store.args_pool[args_start as usize + 1];
+                        // Structural eq/neq: unwrap before comparing
+                        let (a_unwrapped, _) = unwrap_wrapper(&self.store, a);
+                        let (b_unwrapped, _) = unwrap_wrapper(&self.store, b);
                         if head_sym == self.builtins.eq {
-                            let result = if a == b { self.store.sym_term(self.builtins.true_sym) }
+                            let result = if a_unwrapped == b_unwrapped { self.store.sym_term(self.builtins.true_sym) }
                                 else { self.store.sym_term(self.builtins.false_sym) };
                             if !self.in_meta && !self.meta_rules.is_empty() {
                                 self.step_count += 1;
@@ -709,16 +767,14 @@ impl Engine {
                             }
                             return result;
                         }
-                        // Numeric comparisons
-                        let a_num = match self.store.get(a) {
-                            TermData::Num(n) => Some(n as f64),
-                            TermData::Float(bits) => Some(f64::from_bits(bits)),
-                            _ => None,
+                        // Numeric comparisons — unwrap wrappers
+                        let a_num = match extract_num(&self.store, a) {
+                            Some((v, _, _)) => Some(v),
+                            None => None,
                         };
-                        let b_num = match self.store.get(b) {
-                            TermData::Num(n) => Some(n as f64),
-                            TermData::Float(bits) => Some(f64::from_bits(bits)),
-                            _ => None,
+                        let b_num = match extract_num(&self.store, b) {
+                            Some((v, _, _)) => Some(v),
+                            None => None,
                         };
                         if let (Some(av), Some(bv)) = (a_num, b_num) {
                             let cmp_result = if head_sym == self.builtins.lt { Some(av < bv) }
@@ -1126,20 +1182,13 @@ impl Engine {
                     let a = self.store.args_pool[args_start as usize];
                     let b = self.store.args_pool[args_start as usize + 1];
 
-                    // Extract numeric values (i64 or f64)
-                    let a_num = match self.store.get(a) {
-                        TermData::Num(n) => Some((n as f64, true)),
-                        TermData::Float(bits) => Some((f64::from_bits(bits), false)),
-                        _ => None,
-                    };
-                    let b_num = match self.store.get(b) {
-                        TermData::Num(n) => Some((n as f64, true)),
-                        TermData::Float(bits) => Some((f64::from_bits(bits), false)),
-                        _ => None,
-                    };
+                    // Extract numeric values (unwrap single-arg wrappers)
+                    let a_ext = extract_num(&self.store, a);
+                    let b_ext = extract_num(&self.store, b);
 
-                    if let (Some((av, a_int)), Some((bv, b_int))) = (a_num, b_num) {
+                    if let (Some((av, a_int, a_wrap)), Some((bv, b_int, b_wrap))) = (a_ext, b_ext) {
                         let both_int = a_int && b_int;
+                        let wrapper = a_wrap.or(b_wrap);
 
                         // Arithmetic
                         let arith_result = if s == self.builtins.add {
@@ -1160,11 +1209,12 @@ impl Engine {
                             None
                         };
                         if let Some((r, op_sym)) = arith_result {
-                            let result_term = if both_int {
+                            let raw = if both_int {
                                 self.store.num(r as i64)
                             } else {
                                 self.store.float(r)
                             };
+                            let result_term = if let Some(w) = wrapper { self.store.call(w, &[raw]) } else { raw };
                             if !self.in_meta {
                                 self.step_count += 1;
                                 if !self.meta_rules.is_empty() {
@@ -1177,7 +1227,7 @@ impl Engine {
                             return result_term;
                         }
 
-                        // Numeric comparisons
+                        // Numeric comparisons (don't re-wrap — booleans aren't numeric values)
                         let cmp_result = if s == self.builtins.eq {
                             Some(av == bv)
                         } else if s == self.builtins.neq {
@@ -1199,13 +1249,17 @@ impl Engine {
                         }
                     }
 
-                    // eq/neq on any terms (structural equality via hash-consing)
+                    // eq/neq on any terms (structural equality — unwrap wrappers)
                     if s == self.builtins.eq {
-                        let sym = if a == b { self.builtins.true_sym } else { self.builtins.false_sym };
+                        let (au, _) = unwrap_wrapper(&self.store, a);
+                        let (bu, _) = unwrap_wrapper(&self.store, b);
+                        let sym = if au == bu { self.builtins.true_sym } else { self.builtins.false_sym };
                         return self.store.sym_term(sym);
                     }
                     if s == self.builtins.neq {
-                        let sym = if a != b { self.builtins.true_sym } else { self.builtins.false_sym };
+                        let (au, _) = unwrap_wrapper(&self.store, a);
+                        let (bu, _) = unwrap_wrapper(&self.store, b);
+                        let sym = if au != bu { self.builtins.true_sym } else { self.builtins.false_sym };
                         return self.store.sym_term(sym);
                     }
 

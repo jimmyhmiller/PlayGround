@@ -1,0 +1,404 @@
+:root {
+    --bg-dark: #12131a;
+    --accent-peach: #ff9d8c;
+    --accent-peach-glow: rgba(255, 157, 140, 0.4);
+    --text-white: #f5f5f7;
+    --text-dark: #2d2e3b;
+    --bg-light: #fffaf5;
+    --wall-color: #1e1f2b;
+    --wall-shadow: #0d0d14;
+    --font-heading: 'Playfair Display', serif;
+    --font-body: 'Outfit', sans-serif;
+    --border-soft: rgba(255, 255, 255, 0.05);
+}
+
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+body {
+    background-color: var(--bg-dark);
+    color: var(--text-white);
+    font-family: var(--font-body);
+    overflow-x: hidden;
+}
+
+.noise-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: url('https://www.transparenttextures.com/patterns/gray-sand.png');
+    opacity: 0.1;
+    pointer-events: none;
+    z-index: 1000;
+}
+
+.container {
+    max-width: 1300px;
+    margin: 0 auto;
+    padding: 0 3rem;
+}
+
+header {
+    height: 80px;
+    display: flex;
+    align-items: center;
+    border-bottom: 1px solid var(--border-soft);
+}
+
+header .container {
+    width: 100%;
+    display: flex;
+    justify-content: space-between;
+}
+
+.logo {
+    font-weight: 600;
+    color: var(--accent-peach);
+    letter-spacing: 2px;
+}
+
+nav ul {
+    display: flex;
+    gap: 2rem;
+    list-style: none;
+}
+
+nav a {
+    text-decoration: none;
+    color: var(--text-white);
+    font-size: 0.9rem;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    opacity: 0.7;
+    transition: opacity 0.3s;
+}
+
+nav a:hover { opacity: 1; }
+
+/* 3D Room Styles */
+.hero {
+    position: relative;
+    padding: 100px 0 180px;
+    overflow: hidden;
+}
+
+.hero-grid {
+    display: grid;
+    grid-template-columns: 0.8fr 1.2fr;
+    gap: 2rem;
+    align-items: center;
+}
+
+.hero-text h1 {
+    font-family: var(--font-heading);
+    font-size: 4rem;
+    line-height: 1.1;
+    color: var(--accent-peach);
+    margin-bottom: 2rem;
+}
+
+/* 3D Scene Setup */
+.hero-illustration {
+    position: relative;
+    height: 600px;
+    perspective: 1500px;
+}
+
+.room-container {
+    position: relative;
+    width: 100%;
+    height: 100%;
+    transform-style: preserve-3d;
+    transform: rotateX(10deg) rotateY(-5deg);
+}
+
+/* Walls */
+.wall {
+    position: absolute;
+    background: var(--wall-color);
+}
+
+.wall-left {
+    width: 100%;
+    height: 100%;
+    background: linear-gradient(to bottom right, #1e1f2b, #12131a);
+    z-index: 1;
+}
+
+.wall-right {
+    width: 50%;
+    height: 100%;
+    right: -200px;
+    top: -50px;
+    background: #1a1b26;
+    transform: rotateY(-60deg);
+    border-left: 2px solid rgba(0,0,0,0.3);
+    z-index: 0;
+}
+
+.door-panel {
+    position: absolute;
+    left: 40px;
+    top: 0;
+    width: 150px;
+    height: 100%;
+    border-left: 1px solid rgba(255,255,255,0.05);
+    background: rgba(0,0,0,0.1);
+}
+
+.floor {
+    position: absolute;
+    bottom: -100px;
+    left: -100px;
+    width: 150%;
+    height: 400px;
+    background: #161721;
+    transform: rotateX(75deg);
+    z-index: 2;
+}
+
+.desk-mat {
+    position: absolute;
+    left: 30%;
+    top: 50px;
+    width: 500px;
+    height: 300px;
+    background: rgba(255, 157, 140, 0.05);
+    border: 1px solid rgba(255, 157, 140, 0.1);
+    border-radius: 20px;
+    box-shadow: 0 0 40px rgba(0,0,0,0.5);
+}
+
+/* 3D Computer Box - Re-engineered for correct geometry */
+.computer-3d {
+    position: absolute;
+    bottom: 240px;
+    right: 22%;
+    width: 340px;
+    height: 260px;
+    transform-style: preserve-3d;
+    transform: rotateY(-20deg) rotateX(5deg);
+    z-index: 10;
+}
+
+.computer-3d .face {
+    position: absolute;
+    background: #eec9c2;
+    border: 1px solid rgba(0,0,0,0.1);
+}
+
+.computer-3d .front {
+    width: 340px;
+    height: 260px;
+    transform: translateZ(40px); /* Move front face forward by half depth */
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 12px;
+    background: #eec9c2;
+    box-shadow: inset 0 0 40px rgba(0,0,0,0.05);
+}
+
+.monitor-screen {
+    width: 88%;
+    height: 84%;
+    background: #2d2e3b;
+    border-radius: 8px;
+    padding: 20px;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    box-shadow: inset 0 0 20px rgba(0,0,0,0.5);
+}
+
+.screen-ui {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.ui-line { height: 6px; background: rgba(255, 157, 140, 0.2); border-radius: 3px; }
+.ui-line.short { width: 40%; background: var(--accent-peach); }
+.ui-line.long { width: 90%; }
+.ui-line.medium { width: 70%; }
+
+.ui-dots { display: flex; gap: 8px; margin-top: 10px; }
+.ui-dots span { width: 8px; height: 8px; background: var(--accent-peach); border-radius: 50%; }
+
+.computer-3d .top {
+    width: 340px;
+    height: 80px; /* This is the depth of the computer */
+    background: #d4b1ab;
+    transform: rotateX(90deg) translateZ(40px);
+    top: -40px;
+}
+
+.computer-3d .right-side {
+    width: 80px; /* Depth */
+    height: 260px;
+    background: #333444;
+    transform: rotateY(90deg) translateZ(300px); /* 340 (width) - 40 (half depth) = 300? No, width/2 = 170. 170 is center. translateZ(170) */
+    right: 130px; /* Offset to center it on the side */
+}
+
+/* Correcting the side translations */
+.computer-3d .right-side {
+    width: 80px;
+    height: 260px;
+    background: #3a3b4a;
+    transform: rotateY(90deg) translateZ(170px);
+    right: -40px; /* (width/2) - (depth/2) = 170 - 40 = 130... actually right: -40 is easier */
+}
+
+.computer-3d .left-side {
+    position: absolute;
+    width: 80px;
+    height: 260px;
+    background: #2d2e3b;
+    transform: rotateY(-90deg) translateZ(170px);
+    left: -40px;
+}
+
+/* Background Accessories (3D) */
+.small-monitor-3d {
+    position: absolute;
+    bottom: 450px;
+    right: 35%;
+    width: 140px;
+    height: 100px;
+    transform-style: preserve-3d;
+    transform: rotateY(-20deg);
+}
+
+.small-monitor-3d .front { width: 100%; height: 100%; background: #2d2e3b; border: 4px solid #3a3b4a; }
+.small-monitor-3d .top { width: 100%; height: 10px; background: #3a3b4a; transform: rotateX(90deg); top: -5px; }
+.small-monitor-3d .right-side { width: 10px; height: 100%; background: #23242e; transform: rotateY(90deg); right: -5px; }
+
+.speaker-3d {
+    position: absolute;
+    bottom: 420px;
+    right: 25%;
+    width: 50px;
+    height: 80px;
+    transform-style: preserve-3d;
+}
+
+.speaker-3d .front { width: 100%; height: 100%; background: #1a1b26; border-radius: 5px; }
+.speaker-3d .top { width: 100%; height: 10px; background: #23242e; transform: rotateX(90deg); top: -5px; }
+
+/* Items in space */
+.mug-3d {
+    position: absolute;
+    bottom: 180px;
+    left: 25%;
+    width: 45px;
+    height: 55px;
+    z-index: 15;
+}
+
+.mug-body {
+    width: 100%;
+    height: 100%;
+    background: #3a3b4a;
+    border-radius: 0 0 15px 15px;
+    box-shadow: 10px 10px 20px rgba(0,0,0,0.5);
+}
+
+.mug-handle {
+    position: absolute;
+    right: -15px;
+    top: 10px;
+    width: 25px;
+    height: 30px;
+    border: 6px solid #3a3b4a;
+    border-radius: 50%;
+}
+
+.plant { position: absolute; z-index: 15; }
+.plant-l { bottom: 220px; left: 40%; transform: scale(0.8); }
+.plant-r { bottom: 200px; right: 5%; transform: scale(1.1); }
+
+.pot {
+    width: 70px;
+    height: 60px;
+    background: #3a3b4a;
+    border-radius: 10px 10px 35px 35px;
+    box-shadow: 5px 10px 20px rgba(0,0,0,0.4);
+}
+
+.leaf {
+    position: absolute;
+    background: #23242e;
+    border-radius: 50% 50% 0 50%;
+    transform-origin: bottom right;
+}
+
+.leaf-1 { width: 30px; height: 60px; top: -50px; left: 10px; transform: rotate(-15deg); }
+.leaf-2 { width: 35px; height: 70px; top: -60px; left: 25px; transform: rotate(20deg); }
+
+.rocks-3d {
+    position: absolute;
+    bottom: 150px;
+    right: 30%;
+    display: flex;
+    gap: 20px;
+    z-index: 15;
+}
+
+.rock { background: #333444; border-radius: 50%; }
+.rock-1 { width: 30px; height: 18px; }
+.rock-2 { width: 15px; height: 10px; margin-top: 5px; }
+
+.light-glow-3d {
+    position: absolute;
+    bottom: 0;
+    right: 0;
+    width: 600px;
+    height: 400px;
+    background: radial-gradient(circle, var(--accent-peach-glow) 0%, transparent 70%);
+    filter: blur(50px);
+    z-index: 5;
+    pointer-events: none;
+    animation: pulse-glow 5s infinite ease-in-out;
+}
+
+@keyframes pulse-glow {
+    0%, 100% { opacity: 0.4; transform: scale(1); }
+    50% { opacity: 0.6; transform: scale(1.1); }
+}
+
+/* Content Section Curve */
+.content-section {
+    position: relative;
+    background: var(--bg-light);
+    color: var(--text-dark);
+    padding: 120px 0;
+    border-radius: 100px 100px 0 0;
+    z-index: 30;
+    box-shadow: 0 -50px 100px rgba(0,0,0,0.3);
+}
+
+.section-title { font-family: var(--font-heading); font-size: 2.5rem; text-align: center; margin-bottom: 4rem; }
+
+.data-grid { display: flex; flex-direction: column; gap: 1rem; }
+.data-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr 2fr 1fr;
+    padding: 1.5rem 2rem;
+    background: white;
+    border-radius: 12px;
+    box-shadow: 0 5px 15px rgba(0,0,0,0.02);
+}
+
+.data-row.header { background: transparent; box-shadow: none; font-weight: 600; text-transform: uppercase; font-size: 0.8rem; border-bottom: 2px solid rgba(0,0,0,0.05); }
+
+@media (max-width: 1024px) {
+    .hero-grid { grid-template-columns: 1fr; text-align: center; }
+    .hero-text h1 { font-size: 3rem; }
+    .hero-illustration { transform: scale(0.7); height: 500px; }
+}

@@ -1,34 +1,18 @@
-# Pricing pipeline — trace a value through multiple function calls
-# Shows trace propagation via #subst through a realistic pipeline
-
-rule trace_arith : @meta -> @self {
-  trace(trace(?x)) => trace(?x)
-  trace(?x) + trace(?y) => trace(#eval(#eval(?x) + #eval(?y)))
-  trace(?x) + ?y => trace(#eval(#eval(?x) + #eval(?y)))
-  ?x + trace(?y) => trace(#eval(#eval(?x) + #eval(?y)))
-  trace(?x) * trace(?y) => trace(#eval(#eval(?x) * #eval(?y)))
-  trace(?x) * ?y => trace(#eval(#eval(?x) * #eval(?y)))
-  ?x * trace(?y) => trace(#eval(#eval(?x) * #eval(?y)))
-  trace(?x) - trace(?y) => trace(#eval(#eval(?x) - #eval(?y)))
-  trace(?x) - ?y => trace(#eval(#eval(?x) - #eval(?y)))
-  ?x - trace(?y) => trace(#eval(#eval(?x) - #eval(?y)))
-  trace(?x) / trace(?y) => trace(#eval(#eval(?x) / #eval(?y)))
-  trace(?x) / ?y => trace(#eval(#eval(?x) / #eval(?y)))
-  ?x / trace(?y) => trace(#eval(#eval(?x) / #eval(?y)))
-}
+# Pricing pipeline — trace flows through multiple function calls.
+# Only the propagation rule is needed; engine handles wrapped arithmetic.
 
 rule trace : @meta -> @self {
-  ?f(trace(?x)) => #eval(#subst(#step(?f(?x)), ?x, trace(?x)))
+  ?f(trace(?x)) => #println(?f(trace(?x)), " => ", #eval(#subst(#step(?f(?x)), ?x, trace(?x))))
 }
 
-rule trace_print : @meta -> @io {
-  reduction(?s, ?old, ?new, ?kind) => println("[", ?s, "] ", ?old, "  =>  ", ?new)
-}
-
-# Pipeline functions
 fn double(?n) = ?n + ?n
 fn add_tax(?price) = ?price + ?price * 20 / 100
 fn apply_discount(?price) = ?price - 10
 fn final_price(?n) = apply_discount(add_tax(double(?n)))
 
+fn fact(0) = 1
+fn fact(?n) = ?n * fact(?n - 1)
+
+double(trace(3))
 final_price(trace(50))
+fact(trace(5))

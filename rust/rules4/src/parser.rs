@@ -28,6 +28,7 @@ pub enum Token {
     HashStep,   // #step
     HashStepInner, // #step_inner
     HashSubst,     // #subst
+    HashPrintln,   // #println
     Comma,
     Colon,
     Str(String),
@@ -84,7 +85,7 @@ impl Lexer {
                     break;
                 }
                 // Don't treat #eval(...) or #step(...) or #subst(...) as comments
-                if self.starts_with_at(self.pos + 1, "eval") || self.starts_with_at(self.pos + 1, "step") || self.starts_with_at(self.pos + 1, "subst") {
+                if self.starts_with_at(self.pos + 1, "eval") || self.starts_with_at(self.pos + 1, "step") || self.starts_with_at(self.pos + 1, "subst") || self.starts_with_at(self.pos + 1, "println") {
                     break;
                 }
                 while self.peek() != '\n' && self.peek() != '\0' { self.advance(); }
@@ -203,7 +204,11 @@ impl Lexer {
                     for _ in 0..5 { self.advance(); }
                     Token::HashSubst
                 }
-                else { panic!("Unexpected '#' — expected '#{{', '#eval', '#step', '#step_inner', or '#subst'") }
+                else if self.starts_with_at(self.pos, "println") {
+                    for _ in 0..7 { self.advance(); }
+                    Token::HashPrintln
+                }
+                else { panic!("Unexpected '#' — expected '#{{', '#eval', '#step', '#step_inner', '#subst', or '#println'") }
             }
             '|' => Token::Pipe,
             ',' => Token::Comma,
@@ -328,7 +333,7 @@ impl<'a> Parser<'a> {
         let mut meta_rules: Vec<(Rule, String)> = Vec::new();
         let mut rewrite_rules: Vec<Rule> = Vec::new();
         let mut main_rules: Vec<Rule> = Vec::new();
-        let mut last_expr: Option<Pattern> = None;
+        let mut exprs: Vec<Pattern> = Vec::new();
 
         loop {
             match self.peek() {
@@ -353,7 +358,7 @@ impl<'a> Parser<'a> {
                 _ => {
                     self.reset_vars();
                     let expr = self.parse_expr();
-                    last_expr = Some(expr);
+                    exprs.push(expr);
                 }
             }
         }
@@ -373,7 +378,13 @@ impl<'a> Parser<'a> {
             meta_rules,
             rewrite_rules,
             emit_scopes,
-            expr: last_expr.expect("No expression to evaluate"),
+            expr: {
+                assert!(!exprs.is_empty(), "No expression to evaluate");
+                let seq_sym = self.store.sym("seq");
+                exprs.into_iter().reduce(|a, b| {
+                    Pattern::Call(Box::new(Pattern::Sym(seq_sym)), vec![a, b])
+                }).unwrap()
+            },
         }
     }
 
@@ -561,6 +572,11 @@ impl<'a> Parser<'a> {
                     Box::new(self.reify_inner_vars(term, outer_next_var, pvar_sym)),
                     Box::new(self.reify_inner_vars(old, outer_next_var, pvar_sym)),
                     Box::new(self.reify_inner_vars(new, outer_next_var, pvar_sym)),
+                )
+            }
+            Pattern::Println(args) => {
+                Pattern::Println(
+                    args.iter().map(|a| self.reify_inner_vars(a, outer_next_var, pvar_sym)).collect(),
                 )
             }
             _ => pat.clone(),
@@ -951,6 +967,17 @@ impl<'a> Parser<'a> {
                 let new = self.parse_expr();
                 self.expect(Token::RParen);
                 Pattern::Subst(Box::new(term), Box::new(old), Box::new(new))
+            }
+            Token::HashPrintln => {
+                self.pos += 1;
+                self.expect(Token::LParen);
+                let mut args = vec![self.parse_expr()];
+                while *self.peek() == Token::Comma {
+                    self.pos += 1;
+                    args.push(self.parse_expr());
+                }
+                self.expect(Token::RParen);
+                Pattern::Println(args)
             }
             Token::Scope(name) => {
                 // @scope_name expr → emit(scope_name_sym, expr)

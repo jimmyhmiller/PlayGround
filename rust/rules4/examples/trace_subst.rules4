@@ -1,31 +1,8 @@
-# Trace propagation via #subst — trace is defined entirely via meta rules.
-#
-# ?f(trace(?x)) strips the trace, steps the function one step to get
-# the body, then substitutes the bare value back in as trace(?x).
-# This lets trace flow INTO function bodies and propagate through
-# arithmetic, without trace being a hardcoded engine primitive.
-
-rule trace_arith : @meta -> @self {
-  # Collapse nested trace (trace_arith can produce trace(trace(x)))
-  trace(trace(?x)) => trace(?x)
-  # Arithmetic with traced values
-  trace(?x) + trace(?y) => trace(#eval(#eval(?x) + #eval(?y)))
-  trace(?x) + ?y => trace(#eval(#eval(?x) + #eval(?y)))
-  ?x + trace(?y) => trace(#eval(#eval(?x) + #eval(?y)))
-  trace(?x) * trace(?y) => trace(#eval(#eval(?x) * #eval(?y)))
-  trace(?x) * ?y => trace(#eval(#eval(?x) * #eval(?y)))
-  ?x * trace(?y) => trace(#eval(#eval(?x) * #eval(?y)))
-  trace(?x) - trace(?y) => trace(#eval(#eval(?x) - #eval(?y)))
-  trace(?x) - ?y => trace(#eval(#eval(?x) - #eval(?y)))
-  ?x - trace(?y) => trace(#eval(#eval(?x) - #eval(?y)))
-}
+# Trace propagation via #subst — NO trace_arith rules needed.
+# The engine handles arithmetic on wrapped values transparently.
 
 rule trace : @meta -> @self {
-  ?f(trace(?x)) => #eval(#subst(#step(?f(?x)), ?x, trace(?x)))
-}
-
-rule trace_print : @meta -> @io {
-  reduction(?s, ?old, ?new, ?kind) => println("[", ?s, "] ", ?old, "  =>  ", ?new)
+  ?f(trace(?x)) => #println(?f(trace(?x)), " => ", #eval(#subst(#step(?f(?x)), ?x, trace(?x))))
 }
 
 fn double(?n) = ?n + ?n

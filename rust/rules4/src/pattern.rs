@@ -18,6 +18,7 @@ pub enum Pattern {
     Step(Box<Pattern>),  // #step(expr) — one reduction step in @self RHS
     StepInner(Box<Pattern>),  // #step_inner(expr) — reduce innermost sub-expression one step
     Subst(Box<Pattern>, Box<Pattern>, Box<Pattern>),  // #subst(term, old, new) — replace old with new in term
+    Println(Vec<Pattern>),  // #println(args...) — print args, return last
 }
 
 pub const MAX_VARS: usize = 16;
@@ -96,6 +97,7 @@ fn pattern_is_ground(pat: &Pattern, env: &Env) -> bool {
         Pattern::Map(entries) => entries.iter().all(|(k, v)| pattern_is_ground(k, env) && pattern_is_ground(v, env)),
         Pattern::Eval(inner) | Pattern::Step(inner) | Pattern::StepInner(inner) => pattern_is_ground(inner, env),
         Pattern::Subst(term, old, new) => pattern_is_ground(term, env) && pattern_is_ground(old, env) && pattern_is_ground(new, env),
+        Pattern::Println(args) => args.iter().all(|a| pattern_is_ground(a, env)),
     }
 }
 
@@ -116,7 +118,7 @@ fn pattern_has_arithmetic(pat: &Pattern, ctx: &PatternContext) -> bool {
         }
         Pattern::Set(elems) => elems.iter().any(|e| pattern_has_arithmetic(e, ctx)),
         Pattern::Map(entries) => entries.iter().any(|(k, v)| pattern_has_arithmetic(k, ctx) || pattern_has_arithmetic(v, ctx)),
-        Pattern::Eval(_) | Pattern::Step(_) | Pattern::StepInner(_) | Pattern::Subst(_, _, _) => false,
+        Pattern::Eval(_) | Pattern::Step(_) | Pattern::StepInner(_) | Pattern::Subst(_, _, _) | Pattern::Println(_) => false,
         _ => false,
     }
 }
@@ -410,8 +412,8 @@ pub fn match_pattern(store: &mut TermStore, pat: &Pattern, term: TermId, env: &m
                 false
             }
         }
-        Pattern::Eval(_) | Pattern::Step(_) | Pattern::StepInner(_) | Pattern::Subst(_, _, _) => {
-            panic!("#eval/#step/#step_inner/#subst markers should only appear in RHS of @self rules, not in LHS patterns");
+        Pattern::Eval(_) | Pattern::Step(_) | Pattern::StepInner(_) | Pattern::Subst(_, _, _) | Pattern::Println(_) => {
+            panic!("#eval/#step/#step_inner/#subst/#println markers should only appear in RHS of @self rules, not in LHS patterns");
         }
         Pattern::Map(entries) => {
             // Partial map matching: the term must be map(entry(k,v), ...).
@@ -555,6 +557,12 @@ pub fn substitute(store: &mut TermStore, pat: &Pattern, env: &Env) -> TermId {
             let head = store.sym_term(sym);
             store.call(head, &[term_val, old_val, new_val])
         }
+        Pattern::Println(args) => {
+            let arg_terms: Vec<TermId> = args.iter().map(|a| substitute(store, a, env)).collect();
+            let sym = store.sym("__println");
+            let head = store.sym_term(sym);
+            store.call(head, &arg_terms)
+        }
     }
 }
 
@@ -590,8 +598,8 @@ pub fn pattern_to_term(store: &mut TermStore, pat: &Pattern) -> TermId {
             }).collect();
             store.call(map_head, &a)
         }
-        Pattern::Eval(_) | Pattern::Step(_) | Pattern::StepInner(_) | Pattern::Subst(_, _, _) => {
-            panic!("#eval/#step/#step_inner/#subst markers should only appear in RHS of @self rules, not in top-level expressions")
+        Pattern::Eval(_) | Pattern::Step(_) | Pattern::StepInner(_) | Pattern::Subst(_, _, _) | Pattern::Println(_) => {
+            panic!("#eval/#step/#step_inner/#subst/#println markers should only appear in RHS of @self rules, not in top-level expressions")
         }
     }
 }
@@ -599,7 +607,7 @@ pub fn pattern_to_term(store: &mut TermStore, pat: &Pattern) -> TermId {
 /// Check if a pattern contains #eval or #step markers anywhere in the tree.
 pub fn has_eval_step_markers(pat: &Pattern) -> bool {
     match pat {
-        Pattern::Eval(_) | Pattern::Step(_) | Pattern::StepInner(_) | Pattern::Subst(_, _, _) => true,
+        Pattern::Eval(_) | Pattern::Step(_) | Pattern::StepInner(_) | Pattern::Subst(_, _, _) | Pattern::Println(_) => true,
         Pattern::Call(head, args) => has_eval_step_markers(head) || args.iter().any(has_eval_step_markers),
         Pattern::Map(entries) => entries.iter().any(|(k, v)| has_eval_step_markers(k) || has_eval_step_markers(v)),
         Pattern::Set(elems) => elems.iter().any(has_eval_step_markers),

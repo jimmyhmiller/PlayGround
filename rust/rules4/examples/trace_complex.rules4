@@ -1,0 +1,43 @@
+# Complex trace: multiple functions, recursion, conditionals, nested calls.
+# Only ONE rule needed — engine handles wrapped arithmetic transparently.
+
+rule trace : @meta -> @self {
+  ?f(trace(?x)) => #println(?f(trace(?x)), " => ", #eval(#subst(#step(?f(?x)), ?x, trace(?x))))
+}
+
+# --- Functions ---
+
+fn fact(0) = 1
+fn fact(?n) = ?n * fact(?n - 1)
+
+fn fib(0) = 0
+fn fib(1) = 1
+fn fib(?n) = fib(?n - 1) + fib(?n - 2)
+
+fn double(?n) = ?n + ?n
+fn square(?n) = ?n * ?n
+
+fn sum_to(0) = 0
+fn sum_to(?n) = ?n + sum_to(?n - 1)
+
+# Multi-step pipeline
+fn unit_price(100) = 100
+fn tier(?qty) where ?qty > 50 = 3
+fn tier(?qty) where ?qty > 20 = 2
+fn tier(?qty) = 1
+fn discount(3) = 25
+fn discount(2) = 15
+fn discount(1) = 0
+fn apply_pct(?base, ?pct) = ?base - ?base * ?pct / 100
+fn total_price(?qty) = apply_pct(?qty * unit_price(?qty), discount(tier(?qty)))
+
+# Nested composition
+fn pipeline(?n) = square(double(?n)) + fact(?n)
+
+# --- All with trace ---
+
+fib(trace(8))
+fact(trace(6))
+sum_to(trace(10))
+total_price(trace(100))
+pipeline(trace(5))

@@ -52,6 +52,14 @@ The temptation here is to respond that clearly this isn't a problem with the bac
 
 ### OKRs / KPIs
 
+OKRs and KPIs are perhaps one of the most obvious forms of legibility. They are quite litterally an attempt to ignore all the true complexity for a team, a group, an individual and instead assign numbers that are meant to be a proxy, for these more complicated facts-on-the-ground. I think a large number of software developers hate these so I won't be labor the point. But I will tell you about a time I failed my OKR.
+
+I worked on a reporting system at a small startup. Our CEO had decided that OKRs (or was it KPIs I don't even remember) were incredibly important now for everyone to do. Anyways, it had been decided that our goal was to "lower median report end to end time by 10%". If we did not meet that goal it was a failure. So what we started with was talking to the customer who used reports the most. They had like 60k Reports a month. We asked them why they had so many they said "What? Umm that must be a bug". The next week the number of reports they ran dropped to like 60 a month and our median time decreased!
+
+Having been so successful, we went to the next highest user. Same exact thing! They were surprised at how much they were using reports and drastically reduced their usage. But this time, the median time increased....You see, most of those reports they were running returned no data, and so they were fast. Now that we got rid of them, our median time got higher. So we failed that okr despite making the system better.
+
+
+
 
 
 
