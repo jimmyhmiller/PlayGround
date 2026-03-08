@@ -224,6 +224,157 @@ impl Drop for BumpAllocator {
     }
 }
 
+// ─── AtomicBumpAllocator ────────────────────────────────────────────
+
+use core::sync::atomic::{AtomicUsize, Ordering};
+
+/// Thread-safe bump allocator using an atomic cursor.
+///
+/// Unlike `BumpAllocator` (which uses `Cell` and is `!Sync`), this
+/// allocator uses `AtomicUsize` for the cursor and can be shared
+/// across threads. Used for:
+/// - Shared from-space allocation (multiple mutator threads)
+/// - To-space allocation during parallel GC copying
+///
+/// Uses `fetch_add` with a CAS retry loop for alignment.
+pub struct AtomicBumpAllocator {
+    base: *mut u8,
+    cursor: AtomicUsize,
+    size: usize,
+    type_info_offset: usize,
+    owned: bool,
+}
+
+// Safety: AtomicBumpAllocator is designed for cross-thread use.
+// The base pointer is immutable after construction, and the cursor
+// uses atomic operations.
+unsafe impl Send for AtomicBumpAllocator {}
+unsafe impl Sync for AtomicBumpAllocator {}
+
+impl AtomicBumpAllocator {
+    /// Create a new atomic bump allocator that owns a region of `size` bytes.
+    pub fn new<H: ObjHeader>(size: usize) -> Self {
+        let layout = std::alloc::Layout::from_size_align(size, 8).unwrap();
+        let base = unsafe { std::alloc::alloc_zeroed(layout) };
+        assert!(!base.is_null(), "AtomicBumpAllocator: allocation failed");
+        Self {
+            base,
+            cursor: AtomicUsize::new(0),
+            size,
+            type_info_offset: H::TYPE_INFO_OFFSET,
+            owned: true,
+        }
+    }
+
+    /// Reset the cursor to 0 and zero the region.
+    ///
+    /// # Safety
+    /// Must only be called when no other thread is allocating.
+    pub fn reset(&self) {
+        self.cursor.store(0, Ordering::Release);
+    }
+
+    /// Number of bytes currently used.
+    pub fn used(&self) -> usize {
+        self.cursor.load(Ordering::Acquire)
+    }
+
+    /// Number of bytes remaining.
+    pub fn remaining(&self) -> usize {
+        self.size - self.cursor.load(Ordering::Acquire)
+    }
+
+    /// Base pointer of the region.
+    pub fn base(&self) -> *mut u8 {
+        self.base
+    }
+
+    /// Total size of the region in bytes.
+    pub fn size(&self) -> usize {
+        self.size
+    }
+
+    /// Check if a pointer falls within this allocator's region.
+    pub fn contains(&self, ptr: *const u8) -> bool {
+        let addr = ptr as usize;
+        let base_addr = self.base as usize;
+        addr >= base_addr && addr < base_addr + self.size
+    }
+
+    /// The type_info_offset stored at construction.
+    pub fn type_info_offset(&self) -> usize {
+        self.type_info_offset
+    }
+}
+
+impl Alloc for AtomicBumpAllocator {
+    fn alloc(&self, info: &'static TypeInfo, varlen_len: usize) -> *mut u8 {
+        let obj_size = info.allocation_size(varlen_len);
+        let align = 1usize << info.align_log2;
+
+        // CAS loop to atomically bump the cursor with alignment
+        loop {
+            let cur = self.cursor.load(Ordering::Relaxed);
+            let aligned = (cur + align - 1) & !(align - 1);
+            let new_cursor = aligned + obj_size;
+
+            if new_cursor > self.size {
+                return core::ptr::null_mut();
+            }
+
+            match self.cursor.compare_exchange_weak(
+                cur,
+                new_cursor,
+                Ordering::AcqRel,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => {
+                    let ptr = unsafe { self.base.add(aligned) };
+                    unsafe {
+                        core::ptr::write_bytes(ptr, 0, obj_size);
+                    }
+                    return ptr;
+                }
+                Err(_) => continue, // Another thread won, retry
+            }
+        }
+    }
+}
+
+impl HeapWalker for AtomicBumpAllocator {
+    unsafe fn walk(&self, visitor: &mut dyn FnMut(*mut u8, &'static TypeInfo)) {
+        let mut offset = 0usize;
+        let used = self.cursor.load(Ordering::Acquire);
+
+        while offset < used {
+            let ptr = unsafe { self.base.add(offset) };
+            let info = unsafe { read_type_info(ptr, self.type_info_offset) };
+
+            let varlen_len = match info.varlen {
+                VarLenKind::None => 0,
+                _ => unsafe { read_varlen_count(ptr, info) },
+            };
+            let obj_size = info.allocation_size(varlen_len);
+
+            visitor(ptr, info);
+
+            let align = 1usize << info.align_log2;
+            offset = ((offset + obj_size) + align - 1) & !(align - 1);
+        }
+    }
+}
+
+impl Drop for AtomicBumpAllocator {
+    fn drop(&mut self) {
+        if self.owned {
+            let layout = std::alloc::Layout::from_size_align(self.size, 8).unwrap();
+            unsafe {
+                std::alloc::dealloc(self.base, layout);
+            }
+        }
+    }
+}
+
 // ─── FFI ─────────────────────────────────────────────────────────────
 
 /// FFI: allocate from a bump allocator (raw, no header init).

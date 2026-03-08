@@ -421,6 +421,144 @@ fn scan_can_update_slots() {
     }
 }
 
+// ─── Shadow Frame Chain ─────────────────────────────────────────────
+
+#[test]
+fn frame_chain_empty() {
+    let chain = crate::roots::FrameChain::new();
+    assert_eq!(chain.depth(), 0);
+
+    let mut slots = vec![];
+    chain.scan_roots(&mut |slot| {
+        slots.push(unsafe { *slot });
+    });
+    assert!(slots.is_empty());
+}
+
+#[test]
+fn frame_chain_push_pop() {
+    let chain = crate::roots::FrameChain::new();
+    let frame = crate::roots::RootFrame::<3>::new();
+    frame.slots[0].set(0xAABB);
+    frame.slots[1].set(0xCCDD);
+    frame.slots[2].set(0xEEFF);
+
+    {
+        let _guard = chain.push(&frame);
+        assert_eq!(chain.depth(), 1);
+
+        let mut slots = vec![];
+        chain.scan_roots(&mut |slot| {
+            slots.push(unsafe { *slot });
+        });
+        assert_eq!(slots, vec![0xAABB, 0xCCDD, 0xEEFF]);
+    }
+    // guard dropped → frame popped
+    assert_eq!(chain.depth(), 0);
+}
+
+#[test]
+fn frame_chain_nested_frames() {
+    let chain = crate::roots::FrameChain::new();
+    let outer = crate::roots::RootFrame::<2>::new();
+    let inner = crate::roots::RootFrame::<1>::new();
+
+    outer.slots[0].set(100);
+    outer.slots[1].set(200);
+
+    let _guard_outer = chain.push(&outer);
+    assert_eq!(chain.depth(), 1);
+
+    inner.slots[0].set(300);
+    {
+        let _guard_inner = chain.push(&inner);
+        assert_eq!(chain.depth(), 2);
+
+        // scan should visit inner first (top of chain), then outer
+        let mut slots = vec![];
+        chain.scan_roots(&mut |slot| {
+            slots.push(unsafe { *slot });
+        });
+        assert_eq!(slots, vec![300, 100, 200]);
+    }
+    // inner popped
+    assert_eq!(chain.depth(), 1);
+
+    let mut slots = vec![];
+    chain.scan_roots(&mut |slot| {
+        slots.push(unsafe { *slot });
+    });
+    assert_eq!(slots, vec![100, 200]);
+}
+
+#[test]
+fn frame_chain_gc_updates_slots() {
+    // Simulate GC updating root slots in-place
+    let chain = crate::roots::FrameChain::new();
+    let frame = crate::roots::RootFrame::<2>::new();
+    frame.slots[0].set(0x1000);
+    frame.slots[1].set(0x2000);
+
+    let _guard = chain.push(&frame);
+
+    // "GC" doubles all values
+    chain.scan_roots(&mut |slot| {
+        unsafe {
+            let old = *slot;
+            *slot = old * 2;
+        }
+    });
+
+    assert_eq!(frame.slots[0].get(), 0x2000);
+    assert_eq!(frame.slots[1].get(), 0x4000);
+}
+
+// ─── RootSet ────────────────────────────────────────────────────────
+
+#[test]
+fn root_set_basic() {
+    let mut rs = crate::roots::RootSet::new();
+    assert!(rs.is_empty());
+
+    let i0 = rs.add(42);
+    let i1 = rs.add(99);
+    assert_eq!(rs.len(), 2);
+    assert_eq!(rs.get(i0), 42);
+    assert_eq!(rs.get(i1), 99);
+
+    rs.set(i0, 123);
+    assert_eq!(rs.get(i0), 123);
+}
+
+#[test]
+fn root_set_scan_roots() {
+    let mut rs = crate::roots::RootSet::new();
+    rs.add(10);
+    rs.add(20);
+    rs.add(30);
+
+    let mut vals = vec![];
+    rs.scan_roots(&mut |slot| {
+        vals.push(unsafe { *slot });
+    });
+    assert_eq!(vals, vec![10, 20, 30]);
+}
+
+#[test]
+fn root_set_gc_update() {
+    let mut rs = crate::roots::RootSet::new();
+    rs.add(100);
+    rs.add(200);
+
+    // "GC" adds 1 to all values
+    rs.scan_roots(&mut |slot| {
+        unsafe { *slot += 1; }
+    });
+
+    assert_eq!(rs.get(0), 101);
+    assert_eq!(rs.get(1), 201);
+}
+
 // ─── Alignment ──────────────────────────────────────────────────────
 
 #[test]
@@ -572,525 +710,6 @@ fn gc_header_with_plain_field() {
     assert_eq!(header.mark(), 3);
     assert_eq!(header.gennum(), 6);
     assert_eq!(header.identity_hash(), 0xCAFE);
-}
-
-// ─── Root tracking ───────────────────────────────────────────────────
-
-use crate::roots::{RootSource, ShadowStack, RootStack, PinnedRoots};
-
-#[test]
-fn shadow_stack_push_pop() {
-    let mut ss = ShadowStack::new(64);
-    assert!(ss.is_empty());
-
-    ss.push_frame(2);
-    assert!(!ss.is_empty());
-
-    ss.set(0, 0xAAAA);
-    ss.set(1, 0xBBBB);
-    assert_eq!(ss.get(0), 0xAAAA);
-    assert_eq!(ss.get(1), 0xBBBB);
-
-    ss.pop_frame();
-    assert!(ss.is_empty());
-}
-
-#[test]
-fn shadow_stack_nested_frames() {
-    let mut ss = ShadowStack::new(64);
-
-    // Frame A: 2 slots
-    ss.push_frame(2);
-    ss.set(0, 100);
-    ss.set(1, 200);
-
-    // Frame B: 1 slot
-    ss.push_frame(1);
-    ss.set(0, 300);
-
-    // Scan should see all 3 slots
-    let mut roots = Vec::new();
-    ss.scan_roots(&mut |slot| unsafe {
-        roots.push(*slot);
-    });
-    assert_eq!(roots.len(), 3);
-    // Frame B's slot
-    assert!(roots.contains(&300));
-    // Frame A's slots
-    assert!(roots.contains(&100));
-    assert!(roots.contains(&200));
-
-    // Pop B, scan should see only A's 2 slots
-    ss.pop_frame();
-    roots.clear();
-    ss.scan_roots(&mut |slot| unsafe {
-        roots.push(*slot);
-    });
-    assert_eq!(roots.len(), 2);
-    assert!(roots.contains(&100));
-    assert!(roots.contains(&200));
-
-    ss.pop_frame();
-    assert!(ss.is_empty());
-}
-
-#[test]
-#[should_panic(expected = "ShadowStack overflow")]
-fn shadow_stack_overflow() {
-    let mut ss = ShadowStack::new(4); // Only 4 u64 slots total
-    // First frame needs 2 (header) + 2 (slots) = 4, exactly fills capacity
-    ss.push_frame(2);
-    // Second frame would need at least 2 more slots — should panic
-    ss.push_frame(1);
-}
-
-#[test]
-fn shadow_stack_frame_raii() {
-    let mut ss = ShadowStack::new(64);
-    {
-        let mut frame = ss.frame(2);
-        frame.set(0, 42);
-        frame.set(1, 84);
-        assert_eq!(frame.get(0), 42);
-        assert_eq!(frame.get(1), 84);
-    }
-    // Frame should be popped by RAII
-    assert!(ss.is_empty());
-}
-
-#[test]
-fn root_stack_push_and_scan() {
-    let mut rs = RootStack::new();
-    rs.push(0xAA);
-    rs.push(0xBB);
-    rs.push(0xCC);
-
-    let mut roots = Vec::new();
-    rs.scan_roots(&mut |slot| unsafe {
-        roots.push(*slot);
-    });
-    assert_eq!(roots, vec![0xAA, 0xBB, 0xCC]);
-}
-
-#[test]
-fn root_stack_watermark_scoping() {
-    let mut rs = RootStack::new();
-    rs.push(10);
-    rs.push(20);
-    let wm = rs.watermark();
-    assert_eq!(wm, 2);
-
-    rs.push(30);
-    rs.push(40);
-    assert_eq!(rs.len(), 4);
-
-    rs.truncate(wm);
-    assert_eq!(rs.len(), 2);
-
-    let mut roots = Vec::new();
-    rs.scan_roots(&mut |slot| unsafe {
-        roots.push(*slot);
-    });
-    assert_eq!(roots, vec![10, 20]);
-}
-
-#[test]
-fn pinned_roots_pin_and_scan() {
-    let pr = PinnedRoots::new();
-    let i0 = pr.pin(0x100);
-    let i1 = pr.pin(0x200);
-    let i2 = pr.pin(0x300);
-    assert_eq!(i0, 0);
-    assert_eq!(i1, 1);
-    assert_eq!(i2, 2);
-
-    assert_eq!(pr.get(0), 0x100);
-    assert_eq!(pr.get(1), 0x200);
-    assert_eq!(pr.get(2), 0x300);
-
-    let mut roots = Vec::new();
-    pr.scan_roots(&mut |slot| unsafe {
-        roots.push(*slot);
-    });
-    assert_eq!(roots, vec![0x100, 0x200, 0x300]);
-}
-
-#[test]
-fn composition_scan_all_sources() {
-    let mut ss = ShadowStack::new(64);
-    ss.push_frame(1);
-    ss.set(0, 0xAA);
-
-    let mut rs = RootStack::new();
-    rs.push(0xBB);
-
-    let pr = PinnedRoots::new();
-    pr.pin(0xCC);
-
-    // Scan all sources through trait objects
-    let sources: Vec<&dyn RootSource> = vec![&ss, &rs, &pr];
-    let mut roots = Vec::new();
-    for source in &sources {
-        source.scan_roots(&mut |slot| unsafe {
-            roots.push(*slot);
-        });
-    }
-    roots.sort();
-    assert_eq!(roots, vec![0xAA, 0xBB, 0xCC]);
-}
-
-#[test]
-fn gc_forwarding_simulation() {
-    // Populate roots across all three sources
-    let mut ss = ShadowStack::new(64);
-    ss.push_frame(2);
-    ss.set(0, 1000);
-    ss.set(1, 2000);
-
-    let mut rs = RootStack::new();
-    rs.push(3000);
-    rs.push(4000);
-
-    let pr = PinnedRoots::new();
-    pr.pin(5000);
-
-    // Simulate GC forwarding: add 1 to each root
-    let sources: Vec<&dyn RootSource> = vec![&ss, &rs, &pr];
-    for source in &sources {
-        source.scan_roots(&mut |slot| unsafe {
-            *slot += 1;
-        });
-    }
-
-    // Verify updated values read back correctly
-    assert_eq!(ss.get(0), 1001);
-    assert_eq!(ss.get(1), 2001);
-    assert_eq!(rs.get(0), 3001);
-    assert_eq!(rs.get(1), 4001);
-    assert_eq!(pr.get(0), 5001);
-}
-
-// ─── Integrated root→heap scanning (simulated GC trace) ─────────────
-
-/// Simulate a GC mark phase: scan roots to discover heap objects,
-/// then scan those objects to find more references.
-#[test]
-fn roots_into_heap_objects_full_trace() {
-    type S = LowBit<3>;
-
-    // --- Set up heap objects ---
-    //
-    //   root0 ──→ obj_a ──→ obj_c
-    //   root1 ──→ obj_b ──→ obj_c
-    //                    ──→ obj_d
-    //
-    // obj_a: 1 value field (points to obj_c)
-    // obj_b: 2 value fields (points to obj_c and obj_d)
-    // obj_c: 0 value fields (leaf)
-    // obj_d: 0 value fields (leaf)
-
-    static INFO_1F: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_fields(1);
-    static INFO_2F: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_fields(2);
-    static INFO_0F: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_fields(0);
-
-    let obj_c = alloc_obj(&INFO_0F, 0);
-    let obj_d = alloc_obj(&INFO_0F, 0);
-    let obj_a = alloc_obj(&INFO_1F, 0);
-    let obj_b = alloc_obj(&INFO_2F, 0);
-
-    unsafe {
-        init_header::<Compact>(obj_a, &INFO_1F as *const TypeInfo);
-        init_header::<Compact>(obj_b, &INFO_2F as *const TypeInfo);
-        init_header::<Compact>(obj_c, &INFO_0F as *const TypeInfo);
-        init_header::<Compact>(obj_d, &INFO_0F as *const TypeInfo);
-
-        // obj_a.field[0] = tagged pointer to obj_c
-        write_value_field(obj_a, &INFO_1F, 0, Value::<S>::tagged(1, obj_c as u64 >> 3));
-        // obj_b.field[0] = tagged pointer to obj_c
-        write_value_field(obj_b, &INFO_2F, 0, Value::<S>::tagged(1, obj_c as u64 >> 3));
-        // obj_b.field[1] = tagged pointer to obj_d
-        write_value_field(obj_b, &INFO_2F, 1, Value::<S>::tagged(1, obj_d as u64 >> 3));
-    }
-
-    // --- Set up roots across different sources ---
-    // ShadowStack holds root for obj_a (like compiled code)
-    let mut ss = ShadowStack::new(32);
-    ss.push_frame(1);
-    ss.set(0, Value::<S>::tagged(1, obj_a as u64 >> 3).to_bits());
-
-    // PinnedRoots holds root for obj_b (like a global variable)
-    let pr = PinnedRoots::new();
-    pr.pin(Value::<S>::tagged(1, obj_b as u64 >> 3).to_bits());
-
-    // --- Simulate GC mark phase ---
-    // 1. Scan roots to get the initial mark stack
-    let mut mark_stack: Vec<*mut u8> = Vec::new();
-    let mut marked: Vec<*mut u8> = Vec::new();
-
-    let sources: Vec<&dyn RootSource> = vec![&ss, &pr];
-    for source in &sources {
-        source.scan_roots(&mut |slot| {
-            let bits = unsafe { *slot };
-            let v = Value::<S>::from_bits(bits);
-            if v.has_tag(1) {
-                let ptr = (v.payload() << 3) as *mut u8;
-                if !marked.contains(&ptr) {
-                    marked.push(ptr);
-                    mark_stack.push(ptr);
-                }
-            }
-        });
-    }
-
-    // Should have discovered obj_a and obj_b from roots
-    assert_eq!(marked.len(), 2);
-    assert!(marked.contains(&obj_a));
-    assert!(marked.contains(&obj_b));
-
-    // 2. Process mark stack: scan each discovered object for more refs
-    while let Some(obj) = mark_stack.pop() {
-        // Look up TypeInfo from the header
-        let header = unsafe { core::ptr::read(obj as *const Compact) };
-        let info = unsafe { &*header.type_info() };
-
-        unsafe {
-            scan_object(obj, info, |slot| {
-                let bits = core::ptr::read(slot);
-                let v = Value::<S>::from_bits(bits);
-                if v.has_tag(1) {
-                    let ptr = (v.payload() << 3) as *mut u8;
-                    if !marked.contains(&ptr) {
-                        marked.push(ptr);
-                        mark_stack.push(ptr);
-                    }
-                }
-            });
-        }
-    }
-
-    // Should now have all 4 objects marked
-    assert_eq!(marked.len(), 4);
-    assert!(marked.contains(&obj_a));
-    assert!(marked.contains(&obj_b));
-    assert!(marked.contains(&obj_c));
-    assert!(marked.contains(&obj_d));
-
-    unsafe {
-        dealloc_obj(obj_a, &INFO_1F, 0);
-        dealloc_obj(obj_b, &INFO_2F, 0);
-        dealloc_obj(obj_c, &INFO_0F, 0);
-        dealloc_obj(obj_d, &INFO_0F, 0);
-    }
-}
-
-/// Simulate GC relocation: scan roots, forward pointers, verify objects
-/// are reachable at their new addresses.
-#[test]
-fn root_forwarding_updates_heap_references() {
-    type S = LowBit<3>;
-
-    // obj_a (1 field) → obj_b (leaf)
-    static INFO_1F: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_fields(1);
-    static INFO_0F: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_fields(0);
-
-    let obj_b = alloc_obj(&INFO_0F, 0);
-    let obj_a = alloc_obj(&INFO_1F, 0);
-    // Allocate "new locations" to simulate relocation
-    let new_a = alloc_obj(&INFO_1F, 0);
-    let new_b = alloc_obj(&INFO_0F, 0);
-
-    unsafe {
-        init_header::<Compact>(obj_a, &INFO_1F as *const TypeInfo);
-        init_header::<Compact>(obj_b, &INFO_0F as *const TypeInfo);
-        init_header::<Compact>(new_a, &INFO_1F as *const TypeInfo);
-        init_header::<Compact>(new_b, &INFO_0F as *const TypeInfo);
-
-        // obj_a.field[0] → obj_b
-        write_value_field(obj_a, &INFO_1F, 0, Value::<S>::tagged(1, obj_b as u64 >> 3));
-    }
-
-    // Root stack holds a ref to obj_a
-    let mut rs = RootStack::new();
-    rs.push(Value::<S>::tagged(1, obj_a as u64 >> 3).to_bits());
-
-    // Build a forwarding table: old → new
-    let forwarding: Vec<(*mut u8, *mut u8)> = vec![
-        (obj_a, new_a),
-        (obj_b, new_b),
-    ];
-
-    let forward = |ptr: *mut u8| -> *mut u8 {
-        for &(old, new) in &forwarding {
-            if old == ptr {
-                return new;
-            }
-        }
-        ptr
-    };
-
-    // 1. Update roots
-    rs.scan_roots(&mut |slot| {
-        let bits = unsafe { *slot };
-        let v = Value::<S>::from_bits(bits);
-        if v.has_tag(1) {
-            let ptr = (v.payload() << 3) as *mut u8;
-            let new_ptr = forward(ptr);
-            if new_ptr != ptr {
-                unsafe { *slot = Value::<S>::tagged(1, new_ptr as u64 >> 3).to_bits() };
-            }
-        }
-    });
-
-    // 2. Update obj_a's field (which points to obj_b)
-    unsafe {
-        scan_object(obj_a, &INFO_1F, |slot| {
-            let bits = core::ptr::read(slot);
-            let v = Value::<S>::from_bits(bits);
-            if v.has_tag(1) {
-                let ptr = (v.payload() << 3) as *mut u8;
-                let new_ptr = forward(ptr);
-                if new_ptr != ptr {
-                    core::ptr::write(slot, Value::<S>::tagged(1, new_ptr as u64 >> 3).to_bits());
-                }
-            }
-        });
-    }
-
-    // Verify: root now points to new_a
-    let root_bits = rs.get(0);
-    let root_val = Value::<S>::from_bits(root_bits);
-    assert_eq!((root_val.payload() << 3) as *mut u8, new_a);
-
-    // Verify: obj_a's field now points to new_b
-    unsafe {
-        let field_val: Value<S> = read_value_field(obj_a, &INFO_1F, 0);
-        assert_eq!((field_val.payload() << 3) as *mut u8, new_b);
-    }
-
-    unsafe {
-        dealloc_obj(obj_a, &INFO_1F, 0);
-        dealloc_obj(obj_b, &INFO_0F, 0);
-        dealloc_obj(new_a, &INFO_1F, 0);
-        dealloc_obj(new_b, &INFO_0F, 0);
-    }
-}
-
-/// Test the fil-c-like pattern: multiple frames on shadow stack representing
-/// a call chain, each frame holding refs to heap objects.
-#[test]
-fn shadow_stack_call_chain_with_heap_objects() {
-    type S = LowBit<3>;
-
-    static INFO_1F: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_fields(1);
-    static INFO_0F: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_fields(0);
-
-    // Simulate: main() calls foo() calls bar()
-    // main has obj_a, foo has obj_b, bar has obj_c
-    // obj_a.field[0] → obj_b, obj_b.field[0] → obj_c
-
-    let obj_c = alloc_obj(&INFO_0F, 0);
-    let obj_b = alloc_obj(&INFO_1F, 0);
-    let obj_a = alloc_obj(&INFO_1F, 0);
-
-    unsafe {
-        init_header::<Compact>(obj_a, &INFO_1F as *const TypeInfo);
-        init_header::<Compact>(obj_b, &INFO_1F as *const TypeInfo);
-        init_header::<Compact>(obj_c, &INFO_0F as *const TypeInfo);
-
-        write_value_field(obj_a, &INFO_1F, 0, Value::<S>::tagged(1, obj_b as u64 >> 3));
-        write_value_field(obj_b, &INFO_1F, 0, Value::<S>::tagged(1, obj_c as u64 >> 3));
-    }
-
-    let mut ss = ShadowStack::new(64);
-
-    // main() pushes frame with obj_a
-    ss.push_frame(1);
-    ss.set(0, Value::<S>::tagged(1, obj_a as u64 >> 3).to_bits());
-
-    // foo() pushes frame with obj_b
-    ss.push_frame(1);
-    ss.set(0, Value::<S>::tagged(1, obj_b as u64 >> 3).to_bits());
-
-    // bar() pushes frame with obj_c
-    ss.push_frame(1);
-    ss.set(0, Value::<S>::tagged(1, obj_c as u64 >> 3).to_bits());
-
-    // GC happens during bar() — full trace should find all 3 objects
-    let mut mark_stack: Vec<*mut u8> = Vec::new();
-    let mut marked: Vec<*mut u8> = Vec::new();
-
-    ss.scan_roots(&mut |slot| {
-        let bits = unsafe { *slot };
-        let v = Value::<S>::from_bits(bits);
-        if v.has_tag(1) {
-            let ptr = (v.payload() << 3) as *mut u8;
-            if !marked.contains(&ptr) {
-                marked.push(ptr);
-                mark_stack.push(ptr);
-            }
-        }
-    });
-
-    // All 3 objects discovered directly from roots (since each frame holds one)
-    assert_eq!(marked.len(), 3);
-    assert!(marked.contains(&obj_a));
-    assert!(marked.contains(&obj_b));
-    assert!(marked.contains(&obj_c));
-
-    // Now simulate bar() returning — pop its frame
-    ss.pop_frame();
-
-    // GC again — should still find obj_a and obj_b from roots,
-    // and obj_c transitively via obj_b's field
-    marked.clear();
-    mark_stack.clear();
-
-    ss.scan_roots(&mut |slot| {
-        let bits = unsafe { *slot };
-        let v = Value::<S>::from_bits(bits);
-        if v.has_tag(1) {
-            let ptr = (v.payload() << 3) as *mut u8;
-            if !marked.contains(&ptr) {
-                marked.push(ptr);
-                mark_stack.push(ptr);
-            }
-        }
-    });
-
-    // Only obj_a and obj_b from roots now
-    assert_eq!(marked.len(), 2);
-
-    // Trace heap objects
-    while let Some(obj) = mark_stack.pop() {
-        let header = unsafe { core::ptr::read(obj as *const Compact) };
-        let info = unsafe { &*header.type_info() };
-        unsafe {
-            scan_object(obj, info, |slot| {
-                let bits = core::ptr::read(slot);
-                let v = Value::<S>::from_bits(bits);
-                if v.has_tag(1) {
-                    let ptr = (v.payload() << 3) as *mut u8;
-                    if !marked.contains(&ptr) {
-                        marked.push(ptr);
-                        mark_stack.push(ptr);
-                    }
-                }
-            });
-        }
-    }
-
-    // obj_c found transitively through obj_b
-    assert_eq!(marked.len(), 3);
-    assert!(marked.contains(&obj_c));
-
-    ss.pop_frame();
-    ss.pop_frame();
-
-    unsafe {
-        dealloc_obj(obj_a, &INFO_1F, 0);
-        dealloc_obj(obj_b, &INFO_1F, 0);
-        dealloc_obj(obj_c, &INFO_0F, 0);
-    }
 }
 
 // ─── TYPE_INFO_OFFSET ────────────────────────────────────────────────

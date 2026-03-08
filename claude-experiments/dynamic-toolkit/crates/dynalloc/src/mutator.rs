@@ -1,17 +1,18 @@
+use std::cell::Cell;
 use std::marker::PhantomData;
 
 use dynvalue::{TagScheme, Value};
 
 use crate::alloc::{alloc_obj, BumpAllocator};
-use dynobj::{read_value_field, ObjHeader, RootStack, TypeInfo};
+use dynobj::{read_value_field, ObjHeader, RootSource, TypeInfo};
 
 // ─── Root ───────────────────────────────────────────────────────────
 
 /// Opaque handle to a GC root slot.
 ///
-/// Just an index into the `RootStack`. `Copy` because it has no ownership
-/// semantics — multiple copies refer to the same slot. The underlying slot
-/// is updated in-place by the GC (forwarding pointers).
+/// Just an index into the mutator's root storage. `Copy` because it has no
+/// ownership semantics — multiple copies refer to the same slot. The underlying
+/// slot is updated in-place by the GC (forwarding pointers).
 ///
 /// Invalidated by [`Mutator::restore`] — debug-mode bounds checks catch
 /// use-after-restore.
@@ -74,7 +75,7 @@ pub struct RootScope {
 
 // ─── Mutator ────────────────────────────────────────────────────────
 
-/// Safe wrapper over [`RootStack`] + [`BumpAllocator`].
+/// Safe wrapper over root storage + [`BumpAllocator`].
 ///
 /// Uses Rust's borrow checker to enforce GC safety:
 /// - **`&self`** methods: read roots (`get`), update values (`set`), save scope
@@ -83,7 +84,7 @@ pub struct RootScope {
 /// Since `&self` and `&mut self` conflict, all [`GcRef`]s must be dropped
 /// before any GC-triggering operation.
 pub struct Mutator {
-    roots: RootStack,
+    roots: Vec<Cell<u64>>,
     bump: BumpAllocator,
 }
 
@@ -91,7 +92,7 @@ impl Mutator {
     /// Create a new mutator with the given bump allocator.
     pub fn new(bump: BumpAllocator) -> Self {
         Mutator {
-            roots: RootStack::new(),
+            roots: Vec::new(),
             bump,
         }
     }
@@ -101,10 +102,11 @@ impl Mutator {
     /// Register a value as a GC root, returning a [`Root`] handle.
     ///
     /// Takes `&mut self` because `Vec::push` may reallocate the root
-    /// stack's backing storage, which would invalidate any outstanding
+    /// storage's backing buffer, which would invalidate any outstanding
     /// `scan_roots` slot pointers.
     pub fn root(&mut self, bits: u64) -> Root {
-        let index = self.roots.push(bits);
+        let index = self.roots.len();
+        self.roots.push(Cell::new(bits));
         Root { index }
     }
 
@@ -143,6 +145,12 @@ impl Mutator {
     ///
     /// Takes `&mut self` to prevent use while `GcRef`s are outstanding.
     pub fn restore(&mut self, scope: RootScope) {
+        assert!(
+            scope.watermark <= self.roots.len(),
+            "Mutator::restore: watermark {} > length {}",
+            scope.watermark,
+            self.roots.len()
+        );
         self.roots.truncate(scope.watermark);
     }
 
@@ -154,7 +162,7 @@ impl Mutator {
     /// forcing a re-read after any GC point.
     pub fn get(&self, root: &Root) -> GcRef<'_> {
         GcRef {
-            bits: self.roots.get(root.index),
+            bits: self.roots[root.index].get(),
             _borrow: PhantomData,
         }
     }
@@ -164,19 +172,19 @@ impl Mutator {
     /// Uses interior mutability (`Cell`), so this takes `&self`.
     /// No GC, no reallocation — safe to call while other roots are read.
     pub fn set(&self, root: &Root, bits: u64) {
-        self.roots.set(root.index, bits);
+        self.roots[root.index].set(bits);
     }
 
     /// Snapshot the current root stack length for later [`restore`](Self::restore).
     pub fn save(&self) -> RootScope {
         RootScope {
-            watermark: self.roots.watermark(),
+            watermark: self.roots.len(),
         }
     }
 
-    /// Access the underlying [`RootStack`] for GC implementation.
-    pub fn roots(&self) -> &RootStack {
-        &self.roots
+    /// Return the number of active root slots.
+    pub fn root_count(&self) -> usize {
+        self.roots.len()
     }
 
     /// Access the underlying [`BumpAllocator`] for GC implementation.
@@ -202,9 +210,17 @@ impl Mutator {
         info: &'static TypeInfo,
         index: u16,
     ) -> Root {
-        let obj_bits = self.roots.get(root.index);
+        let obj_bits = self.roots[root.index].get();
         let obj_ptr = obj_bits as *const u8;
         let field_val: Value<S> = unsafe { read_value_field(obj_ptr, info, index) };
         self.root(field_val.to_bits())
+    }
+}
+
+impl RootSource for Mutator {
+    fn scan_roots(&self, visitor: &mut dyn FnMut(*mut u64)) {
+        for cell in &self.roots {
+            visitor(cell.as_ptr());
+        }
     }
 }
