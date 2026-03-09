@@ -558,24 +558,14 @@ class DrawingCanvasView: NSView {
         let image = drawing.image(from: bounds, scale: NSScreen.main?.backingScaleFactor ?? 2.0)
         image.draw(in: bounds)
 
-        if !currentPoints.isEmpty {
-            guard let context = NSGraphicsContext.current?.cgContext else { return }
-            context.setStrokeColor(currentColor.cgColor)
-            context.setLineWidth(20)
-            context.setLineCap(.round)
-            context.setLineJoin(.round)
-            context.setAlpha(0.5)
-
-            let path = CGMutablePath()
-            for (i, point) in currentPoints.enumerated() {
-                if i == 0 {
-                    path.move(to: point.location)
-                } else {
-                    path.addLine(to: point.location)
-                }
-            }
-            context.addPath(path)
-            context.strokePath()
+        if currentPoints.count >= 2 {
+            let ink = PKInk(.marker, color: currentColor)
+            let strokePath = PKStrokePath(controlPoints: currentPoints, creationDate: Date())
+            let stroke = PKStroke(ink: ink, path: strokePath)
+            var preview = PKDrawing()
+            preview.strokes = [stroke]
+            let previewImage = preview.image(from: bounds, scale: NSScreen.main?.backingScaleFactor ?? 2.0)
+            previewImage.draw(in: bounds)
         }
     }
 
