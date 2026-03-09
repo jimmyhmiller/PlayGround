@@ -1,5 +1,5 @@
 use std::cell::UnsafeCell;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
 use dynobj::{FrameChain, ObjHeader, RootSource, TypeInfo};
@@ -7,6 +7,7 @@ use dynobj::{FrameChain, ObjHeader, RootSource, TypeInfo};
 use crate::barrier::SATBBuffer;
 use crate::heap::Heap;
 use crate::semi_space::PtrPolicy;
+use crate::statemap::TraceState;
 
 // ─── Thread states ──────────────────────────────────────────────────
 
@@ -29,6 +30,10 @@ pub struct ThreadState {
 
     /// Current state: STATE_RUNNING or STATE_AT_SAFEPOINT.
     state: AtomicU8,
+
+    /// Incremented each time the thread enters a safepoint.
+    /// Used by the GC to distinguish old safepoints from new ones.
+    safepoint_gen: AtomicU64,
 
     /// Mutex + Condvar for safepoint suspension.
     safepoint_lock: Mutex<bool>, // bool = "gc_done"
@@ -53,6 +58,7 @@ impl ThreadState {
         ThreadState {
             frame_chain: FrameChain::new(),
             state: AtomicU8::new(STATE_RUNNING),
+            safepoint_gen: AtomicU64::new(0),
             safepoint_lock: Mutex::new(false),
             safepoint_cond: Condvar::new(),
             satb_buffer: UnsafeCell::new(SATBBuffer::new(256)),
@@ -71,6 +77,7 @@ impl ThreadState {
     /// Enter safepoint: mark this thread as suspended and wait
     /// for the GC to finish.
     pub fn enter_safepoint(&self) {
+        self.safepoint_gen.fetch_add(1, Ordering::AcqRel);
         self.state.store(STATE_AT_SAFEPOINT, Ordering::Release);
 
         let mut gc_done = self.safepoint_lock.lock().unwrap();
@@ -82,6 +89,7 @@ impl ThreadState {
         self.state.store(STATE_RUNNING, Ordering::Release);
     }
 
+
     /// Resume this thread after GC completes.
     pub fn resume(&self) {
         let mut gc_done = self.safepoint_lock.lock().unwrap();
@@ -90,9 +98,30 @@ impl ThreadState {
         drop(gc_done);
     }
 
-    /// Check if this thread is at a safepoint.
+    /// Check if this thread is at a safepoint (atomic state only).
     pub fn is_at_safepoint(&self) -> bool {
         self.state.load(Ordering::Acquire) == STATE_AT_SAFEPOINT
+    }
+
+    /// Check if this thread is truly blocked at a safepoint with no
+    /// stale resume pending. This acquires the safepoint lock to verify
+    /// `gc_done` is false, meaning the thread is genuinely waiting on the
+    /// condvar and won't spontaneously wake up.
+    ///
+    /// Use this instead of `is_at_safepoint()` when you need to ensure
+    /// the thread is safe to scan and won't leave its safepoint until
+    /// explicitly resumed.
+    pub fn is_safely_at_safepoint(&self) -> bool {
+        if self.state.load(Ordering::Acquire) != STATE_AT_SAFEPOINT {
+            return false;
+        }
+        let gc_done = self.safepoint_lock.lock().unwrap();
+        !*gc_done
+    }
+
+    /// Current safepoint generation (incremented each enter_safepoint call).
+    pub fn safepoint_gen(&self) -> u64 {
+        self.safepoint_gen.load(Ordering::Acquire)
     }
 }
 
@@ -174,7 +203,15 @@ impl<P: PtrPolicy> MutatorThread<P> {
         if buf.should_flush() {
             self.heap.satb_queue.push(buf.drain());
         }
-        self.heap.safepoint(&self.state);
+        if self.heap.gc_requested() {
+            if let Some(ref tracer) = self.heap.tracer {
+                tracer.record_thread(self.thread_id, TraceState::AtSafepoint);
+            }
+            self.state.enter_safepoint();
+            if let Some(ref tracer) = self.heap.tracer {
+                tracer.record_thread(self.thread_id, TraceState::Running);
+            }
+        }
     }
 
     /// Write barrier: call BEFORE overwriting a pointer field.
@@ -191,6 +228,24 @@ impl<P: PtrPolicy> MutatorThread<P> {
         }
         let buf = unsafe { self.state.satb_buffer() };
         buf.log(old_value);
+    }
+
+    /// Replication barrier: if `obj` has been forwarded during concurrent
+    /// GC, replicate a field write to the to-space copy.
+    ///
+    /// Call this AFTER writing to a from-space object's field. If the
+    /// object has been copied to to-space, the to-space copy's field
+    /// will be updated to match, preventing the GC's STW re-scan from
+    /// seeing stale data.
+    ///
+    /// Fast path when no GC is active: single atomic load + branch.
+    ///
+    /// # Safety
+    /// - `obj` must point to a valid heap object.
+    /// - `field_offset` must be a valid offset within the object.
+    #[inline(always)]
+    pub unsafe fn replication_barrier(&self, obj: *mut u8, field_offset: usize, new_bits: u64) {
+        unsafe { self.heap.replication_barrier(obj, field_offset, new_bits) };
     }
 
     /// Read barrier: follow forwarding pointer if object was relocated.
@@ -213,6 +268,9 @@ impl<P: PtrPolicy> MutatorThread<P> {
     /// Returns null only if allocation still fails after GC
     /// (i.e., live data exceeds half the heap).
     pub fn alloc(&self, info: &'static TypeInfo, varlen_len: usize) -> *mut u8 {
+        if self.heap.gc_every_alloc() {
+            self.trigger_gc();
+        }
         let ptr = self.heap.alloc(info, varlen_len);
         if !ptr.is_null() {
             return ptr;
@@ -227,6 +285,9 @@ impl<P: PtrPolicy> MutatorThread<P> {
         info: &'static TypeInfo,
         varlen_len: usize,
     ) -> *mut u8 {
+        if self.heap.gc_every_alloc() {
+            self.trigger_gc();
+        }
         let ptr = self.heap.alloc_obj::<H>(info, varlen_len);
         if !ptr.is_null() {
             return ptr;
@@ -257,13 +318,21 @@ impl<P: PtrPolicy> MutatorThread<P> {
     /// runs a full STW collection via `mutator_triggered_gc`.
     fn trigger_gc(&self) {
         if self.heap.barriers_active() {
-            // Concurrent GC is running. Participate in safepoints
-            // and wait until space becomes available.
-            // The concurrent GC's STW pauses will request safepoints;
-            // we just need to poll and yield.
+            if let Some(ref tracer) = self.heap.tracer {
+                tracer.record_thread(self.thread_id, TraceState::WaitingForGc);
+            }
             while self.heap.barriers_active() {
-                self.heap.safepoint(&self.state);
-                std::thread::yield_now();
+                if self.heap.gc_requested() {
+                    if let Some(ref tracer) = self.heap.tracer {
+                        tracer.record_thread(self.thread_id, TraceState::AtSafepoint);
+                    }
+                    self.state.enter_safepoint();
+                } else {
+                    std::thread::yield_now();
+                }
+            }
+            if let Some(ref tracer) = self.heap.tracer {
+                tracer.record_thread(self.thread_id, TraceState::Running);
             }
             return;
         }
@@ -273,6 +342,6 @@ impl<P: PtrPolicy> MutatorThread<P> {
 
 impl<P: PtrPolicy> Drop for MutatorThread<P> {
     fn drop(&mut self) {
-        self.heap.deregister_thread(self.thread_id);
+        self.heap.safe_deregister_thread(&self.state);
     }
 }

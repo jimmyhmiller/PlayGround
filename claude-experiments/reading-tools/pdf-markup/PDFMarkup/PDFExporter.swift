@@ -8,16 +8,15 @@
 import Foundation
 import PDFKit
 import PencilKit
+
+#if os(macOS)
+import AppKit
+#else
 import UIKit
+#endif
 
 struct PDFExporter {
 
-    /// Exports a PDF document with drawings flattened onto the pages
-    /// - Parameters:
-    ///   - document: The source PDF document
-    ///   - pdfHash: The hash of the PDF to load drawings for
-    ///   - outputURL: The destination URL for the exported PDF
-    /// - Throws: Any errors that occur during PDF creation or file writing
     static func exportWithMarkups(
         document: PDFDocument,
         pdfHash: String,
@@ -26,43 +25,69 @@ struct PDFExporter {
         let drawingManager = DrawingManager.shared
         let pdfData = NSMutableData()
 
-        // Begin PDF context
-        UIGraphicsBeginPDFContextToData(pdfData, .zero, nil)
-        defer { UIGraphicsEndPDFContext() }
+        #if os(macOS)
+        // macOS: Use CGContext directly
+        var mediaBox = CGRect.zero
+        if let firstPage = document.page(at: 0) {
+            mediaBox = firstPage.bounds(for: .mediaBox)
+        }
 
-        // Process each page
+        guard let consumer = CGDataConsumer(data: pdfData as CFMutableData),
+              let pdfContext = CGContext(consumer: consumer, mediaBox: &mediaBox, nil) else {
+            throw NSError(domain: "PDFExporter", code: 1, userInfo: [NSLocalizedDescriptionKey: "Failed to create PDF context"])
+        }
+
         for pageIndex in 0..<document.pageCount {
             guard let page = document.page(at: pageIndex) else { continue }
             let bounds = page.bounds(for: .mediaBox)
 
-            // Start a new PDF page
+            pdfContext.beginPDFPage(nil)
+
+            // Draw the original PDF page
+            pdfContext.saveGState()
+            page.draw(with: .mediaBox, to: pdfContext)
+            pdfContext.restoreGState()
+
+            // Draw any markups on top
+            if let drawing = drawingManager.loadDrawing(pdfHash: pdfHash, page: pageIndex) {
+                let image = drawing.image(from: bounds, scale: 2.0)
+                if let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) {
+                    pdfContext.draw(cgImage, in: bounds)
+                }
+            }
+
+            pdfContext.endPDFPage()
+        }
+
+        pdfContext.closePDF()
+        #else
+        // iOS: Use UIGraphics PDF context
+        UIGraphicsBeginPDFContextToData(pdfData, .zero, nil)
+        defer { UIGraphicsEndPDFContext() }
+
+        for pageIndex in 0..<document.pageCount {
+            guard let page = document.page(at: pageIndex) else { continue }
+            let bounds = page.bounds(for: .mediaBox)
+
             UIGraphicsBeginPDFPageWithInfo(bounds, nil)
             guard let context = UIGraphicsGetCurrentContext() else { continue }
 
-            // Draw the original PDF page
             context.saveGState()
             context.translateBy(x: 0, y: bounds.height)
             context.scaleBy(x: 1.0, y: -1.0)
             page.draw(with: .mediaBox, to: context)
             context.restoreGState()
 
-            // Draw any markups on top
             if let drawing = drawingManager.loadDrawing(pdfHash: pdfHash, page: pageIndex) {
-                let image = drawing.image(from: bounds, scale: 2.0) // Use 2x scale for better quality
+                let image = drawing.image(from: bounds, scale: 2.0)
                 image.draw(in: bounds)
             }
         }
+        #endif
 
-        // Write to file
         try pdfData.write(to: outputURL, options: .atomic)
     }
 
-    /// Convenience method to export with markups to a temporary file
-    /// - Parameters:
-    ///   - document: The source PDF document
-    ///   - pdfHash: The hash of the PDF to load drawings for
-    /// - Returns: URL of the exported PDF in the temporary directory
-    /// - Throws: Any errors that occur during export
     static func exportToTemporaryFile(
         document: PDFDocument,
         pdfHash: String
@@ -71,16 +96,12 @@ struct PDFExporter {
         let filename = "exported-\(pdfHash).pdf"
         let outputURL = tempDir.appendingPathComponent(filename)
 
-        // Remove existing file if it exists
         try? FileManager.default.removeItem(at: outputURL)
 
         try exportWithMarkups(document: document, pdfHash: pdfHash, outputURL: outputURL)
         return outputURL
     }
 
-    /// Checks if a PDF has any drawings
-    /// - Parameter pdfHash: The hash of the PDF to check
-    /// - Returns: True if the PDF has drawings, false otherwise
     static func hasDrawings(pdfHash: String) -> Bool {
         let drawingManager = DrawingManager.shared
         if let drawings = drawingManager.loadDrawings(pdfHash: pdfHash) {

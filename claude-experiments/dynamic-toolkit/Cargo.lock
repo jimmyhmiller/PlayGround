@@ -11,6 +11,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynasm"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "smallvec",
+]
+
+[[package]]
 name = "dynobj"
 version = "0.1.0"
 dependencies = [
@@ -27,7 +35,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "libc"
+version = "0.2.183"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b5b646652bf6661599e1da8901b3b9522896f01e736bad5f723fe7a3a27f899d"
+
+[[package]]
 name = "paste"
 version = "1.0.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a"
+
+[[package]]
+name = "smallvec"
+version = "1.15.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "67b1b7a3b5fe4f1376887184045fcf45c69e92af734b7aaddc05fb777b6fbd03"

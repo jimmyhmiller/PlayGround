@@ -36,9 +36,16 @@ struct AWSCredentials {
             return cached[key]
         }
 
-        // Load from app bundle
-        guard let bundlePath = Bundle.main.path(forResource: "aws-config", ofType: "plist"),
-              let dict = NSDictionary(contentsOfFile: bundlePath) as? [String: String] else {
+        // Try Bundle.module first (SPM), then Bundle.main (Xcode)
+        let bundlePath: String?
+        #if SWIFT_PACKAGE
+        bundlePath = Bundle.module.path(forResource: "aws-config", ofType: "plist")
+        #else
+        bundlePath = Bundle.main.path(forResource: "aws-config", ofType: "plist")
+        #endif
+
+        guard let path = bundlePath,
+              let dict = NSDictionary(contentsOfFile: path) as? [String: String] else {
             return nil
         }
 

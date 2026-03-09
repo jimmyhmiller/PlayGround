@@ -1,8 +1,8 @@
 {
   "name": "beagle-vs-code-eval",
   "displayName": "beagle-vs-code-eval",
-  "description": "",
-  "version": "0.0.1",
+  "description": "Live evaluation of Beagle code via socket REPL",
+  "version": "0.0.2",
   "engines": {
     "vscode": "^1.96.0"
   },
@@ -15,9 +15,48 @@
     "commands": [
       {
         "command": "beagle-vs-code-eval.sendFile",
-        "title": "Eval Beagle"
+        "title": "Beagle: Eval File"
+      },
+      {
+        "command": "beagle-vs-code-eval.evalSelection",
+        "title": "Beagle: Eval Selection/Line"
+      },
+      {
+        "command": "beagle-vs-code-eval.connect",
+        "title": "Beagle: Connect to REPL"
+      },
+      {
+        "command": "beagle-vs-code-eval.disconnect",
+        "title": "Beagle: Disconnect from REPL"
       }
-    ]
+    ],
+    "keybindings": [
+      {
+        "command": "beagle-vs-code-eval.evalSelection",
+        "key": "ctrl+enter",
+        "mac": "ctrl+enter"
+      },
+      {
+        "command": "beagle-vs-code-eval.sendFile",
+        "key": "ctrl+shift+enter",
+        "mac": "ctrl+shift+enter"
+      }
+    ],
+    "configuration": {
+      "title": "Beagle",
+      "properties": {
+        "beagle.repl.host": {
+          "type": "string",
+          "default": "127.0.0.1",
+          "description": "Beagle REPL server host"
+        },
+        "beagle.repl.port": {
+          "type": "number",
+          "default": 7888,
+          "description": "Beagle REPL server port"
+        }
+      }
+    }
   },
   "scripts": {
     "vscode:prepublish": "npm run compile",

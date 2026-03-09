@@ -42,7 +42,7 @@ struct PDFLibrarySidebar: View {
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 8)
-            .background(Color(.systemGray6).opacity(0.8))
+            .background(Color.systemGray6.opacity(0.8))
             .cornerRadius(10)
             .padding(.horizontal, 12)
             .padding(.vertical, 10)
@@ -111,7 +111,7 @@ struct PDFLibrarySidebar: View {
                             .foregroundColor(.secondary)
                             .padding(.horizontal, 6)
                             .padding(.vertical, 2)
-                            .background(Color(.systemGray5))
+                            .background(Color.systemGray5)
                             .cornerRadius(8)
                     }
                 }
@@ -171,7 +171,7 @@ struct FolderLabel: View {
                 .foregroundColor(.secondary)
                 .padding(.horizontal, 6)
                 .padding(.vertical, 2)
-                .background(Color(.systemGray5))
+                .background(Color.systemGray5)
                 .cornerRadius(8)
         }
     }

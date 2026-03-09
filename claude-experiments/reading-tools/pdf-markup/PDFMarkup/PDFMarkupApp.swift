@@ -2,8 +2,15 @@ import SwiftUI
 import PDFKit
 import CryptoKit
 
+#if os(macOS)
+import AppKit
+#endif
+
 @main
 struct PDFMarkupApp: App {
+    #if os(macOS)
+    @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
+    #endif
     @StateObject private var sharedPDFManager = SharedPDFManager()
 
     var body: some Scene {
@@ -16,6 +23,19 @@ struct PDFMarkupApp: App {
         }
     }
 }
+
+#if os(macOS)
+class AppDelegate: NSObject, NSApplicationDelegate {
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        NSApp.setActivationPolicy(.regular)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        return true
+    }
+}
+#endif
 
 /// Manages PDFs shared via the share sheet or Files app
 class SharedPDFManager: ObservableObject {

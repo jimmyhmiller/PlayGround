@@ -266,7 +266,11 @@ impl AtomicBumpAllocator {
         }
     }
 
-    /// Reset the cursor to 0 and zero the region.
+    /// Reset the cursor to 0, making the entire region available for reuse.
+    ///
+    /// Note: this does NOT zero the memory. Newly allocated objects will
+    /// see stale data in uninitialized fields. Callers must initialize
+    /// all GC-traceable fields before the next collection.
     ///
     /// # Safety
     /// Must only be called when no other thread is allocating.

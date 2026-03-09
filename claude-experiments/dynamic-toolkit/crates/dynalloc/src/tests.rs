@@ -2398,6 +2398,12 @@ fn stress_mutator_thread_concurrent_alloc_gc() {
                     mt.safepoint();
                 }
 
+                // Drain any pending/in-flight GC before verification.
+                loop {
+                    mt.safepoint();
+                    if !heap.gc_requested() { break; }
+                }
+
                 // Verify list is intact
                 let mut cur = LowBit3Tag0::try_decode_ptr(frame.slots[0].get()).unwrap();
                 let mut count = 1;
@@ -2606,6 +2612,11 @@ fn concurrent_collect_basic() {
         let (ts, _id) = heap2.register_thread();
         loop {
             if done2.load(std::sync::atomic::Ordering::Relaxed) {
+                // Drain any pending GC before exiting
+                loop {
+                    heap2.safepoint(&ts);
+                    if !heap2.gc_requested() { break; }
+                }
                 break;
             }
             heap2.safepoint(&ts);
@@ -2863,9 +2874,10 @@ fn stress_concurrent_gc_heap_properties() {
     static NODE: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_fields(2);
 
     let obj_size = NODE.allocation_size(0);
-    let num_mutators: usize = 8;
-    let list_target_len: usize = 20; // each thread maintains a list of ~20 nodes
-    let gc_cycles: usize = 20;
+    let gc_every_alloc = std::env::var("GC_EVERY_ALLOC").map(|v| v == "1").unwrap_or(false);
+    let num_mutators: usize = if gc_every_alloc { 2 } else { 8 };
+    let list_target_len: usize = if gc_every_alloc { 4 } else { 20 };
+    let gc_cycles: usize = if gc_every_alloc { 3 } else { 20 };
     // Space must hold all live data across all threads + some headroom for
     // concurrent allocation. Each thread keeps ~list_target_len nodes alive.
     let space_size = obj_size * (num_mutators * (list_target_len + 10) + 40);
@@ -2889,8 +2901,8 @@ fn stress_concurrent_gc_heap_properties() {
 
             thread::spawn(move || {
                 let mt = MutatorThread::<LowBit3Tag0>::register(heap.clone());
-                // frame slots: [0] = list head, [1] = temp for new node
-                let frame = RootFrame::<2>::new();
+                // frame slots: [0] = list head
+                let frame = RootFrame::<1>::new();
                 let _guard = mt.frame_chain().push(&frame);
 
                 // Allocate initial node
@@ -2940,6 +2952,22 @@ fn stress_concurrent_gc_heap_properties() {
                         );
                     }
 
+                    // Verify old head belongs to this thread before linking
+                    if gc_every_alloc {
+                        let old_head_bits2 = frame.slots[0].get();
+                        if let Some(oh_ptr) = LowBit3Tag0::try_decode_ptr(old_head_bits2) {
+                            let oh_stamp: Value<LowBit<3>> = unsafe {
+                                read_value_field(oh_ptr as *const u8, &NODE, 1)
+                            };
+                            let oh_tid = oh_stamp.payload() / 1000;
+                            assert_eq!(
+                                oh_tid, tid as u64,
+                                "thread {}: BEFORE prepend, root slot points to thread {}'s node (stamp={}), seq={}",
+                                tid, oh_tid, oh_stamp.payload(), seq,
+                            );
+                        }
+                    }
+
                     // Write barrier on the root slot update
                     mt.write_barrier(frame.slots[0].get());
                     frame.slots[0].set(ptr_val(new_node));
@@ -2984,6 +3012,12 @@ fn stress_concurrent_gc_heap_properties() {
 
                 total_allocs.fetch_add(local_allocs, AO::Relaxed);
 
+                // Drain any pending/in-flight GC before verification.
+                loop {
+                    mt.safepoint();
+                    if !heap.gc_requested() { break; }
+                }
+
                 // ── Final verification ─────────────────────────────
                 // P1 + P2 + P4 + P5: walk the list, check every node
                 let stamps = unsafe { walk_list(&heap, frame.slots[0].get(), &NODE) };
@@ -2998,11 +3032,30 @@ fn stress_concurrent_gc_heap_properties() {
 
                 // P4: every stamp should belong to this thread
                 for (i, &s) in stamps.iter().enumerate() {
-                    assert!(
-                        s / 1000 == tid as u64 || s == 0,
-                        "thread {}: node {} has stamp {} from wrong thread",
-                        tid, i, s,
-                    );
+                    if !(s / 1000 == tid as u64 || s == 0) {
+                        // Detailed diagnostic: walk the list again to capture pointer info
+                        let head_bits = frame.slots[0].get();
+                        let mut diag_bits = head_bits;
+                        let mut diag_idx = 0;
+                        while let Some(ptr) = LowBit3Tag0::try_decode_ptr(diag_bits) {
+                            let in_from = heap.contains(ptr as *const u8);
+                            let stamp_val: Value<LowBit<3>> =
+                                unsafe { read_value_field(ptr as *const u8, &NODE, 1) };
+                            eprintln!(
+                                "  diag: node {} at {:p} in_from={} stamp={}",
+                                diag_idx, ptr, in_from, stamp_val.payload(),
+                            );
+                            let next: Value<LowBit<3>> =
+                                unsafe { read_value_field(ptr as *const u8, &NODE, 0) };
+                            diag_bits = next.to_bits();
+                            diag_idx += 1;
+                            if diag_idx > 40 { break; }
+                        }
+                        panic!(
+                            "thread {}: node {} has stamp {} from wrong thread (expected thread {}). list len={}, all stamps={:?}",
+                            tid, i, s, s / 1000, stamps.len(), &stamps,
+                        );
+                    }
                 }
 
                 // P4: stamps should be in decreasing order (most recent at head)
@@ -3027,6 +3080,8 @@ fn stress_concurrent_gc_heap_properties() {
     let gc_count_gc = gc_count.clone();
 
     start_barrier.wait(); // sync with mutators
+    // Enable gc_every_alloc AFTER barrier — all threads have finished init allocs
+    heap.set_gc_every_alloc(gc_every_alloc);
 
     let gc_handle = thread::spawn(move || {
         for _ in 0..gc_cycles {
@@ -3065,7 +3120,9 @@ fn stress_concurrent_gc_heap_properties() {
     // The fact that we completed without OOM is itself evidence.
     // But let's also check that used space is reasonable.
     let used = heap.from_used();
-    let max_live = obj_size * num_mutators * (list_target_len + 10);
+    // Extra margin: mutators may have allocated some transient objects
+    // after the last GC cycle but before the stop flag was set.
+    let max_live = obj_size * num_mutators * (list_target_len + 20);
     assert!(
         used <= max_live,
         "P3 violated: from_used={} but max expected live={}",
@@ -3110,26 +3167,34 @@ fn stress_concurrent_gc_pointer_graph_integrity() {
     static NODE: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_fields(2);
 
     let obj_size = NODE.allocation_size(0);
-    let num_mutators: usize = 6;
-    let pool_size: usize = 8;
-    let iterations: usize = 200;
-    let gc_cycles: usize = 30;
-    // Each thread keeps pool_size objects live, plus some transient.
-    let space_size = obj_size * (num_mutators * (pool_size + 20) + 40);
-    let heap = Arc::new(Heap::new::<Compact>(space_size));
+    let gc_every_alloc = std::env::var("GC_EVERY_ALLOC").map(|v| v == "1").unwrap_or(false);
+    let num_mutators: usize = if gc_every_alloc { 2 } else { 6 };
+    let pool_size: usize = if gc_every_alloc { 3 } else { 8 };
+    let iterations: usize = if gc_every_alloc { 20 } else { 200 };
+    let gc_cycles: usize = if gc_every_alloc { 3 } else { 30 };
+    // Each thread keeps pool_size objects live. Extra space ensures
+    // no allocation failures after the dedicated GC thread finishes
+    // (which would deadlock mutator-triggered GC vs verify barrier).
+    let space_size = obj_size * (num_mutators * (pool_size + iterations / 3 + 10) + 100);
+    let tracer = Arc::new(crate::statemap::StatemapTracer::new());
+    let heap = Arc::new(Heap::new_with_tracer::<Compact>(space_size, tracer.clone()));
 
     let start_barrier = Arc::new(Barrier::new(num_mutators + 1));
+    // All mutators wait here before verification, ensuring no mutator
+    // triggers GC while another is reading root slots for verification.
+    let verify_barrier = Arc::new(Barrier::new(num_mutators));
     let stop = Arc::new(AtomicBool::new(false));
 
     let handles: Vec<_> = (0..num_mutators)
         .map(|tid| {
             let heap = heap.clone();
             let start_barrier = start_barrier.clone();
+            let verify_barrier = verify_barrier.clone();
             let stop = stop.clone();
 
             thread::spawn(move || {
                 let mt = MutatorThread::<LowBit3Tag0>::register(heap.clone());
-                let frame = RootFrame::<8>::new(); // pool_size = 8
+                let frame = RootFrame::<8>::new(); // >= pool_size
                 let _guard = mt.frame_chain().push(&frame);
 
                 // Initialize pool
@@ -3139,6 +3204,11 @@ fn stress_concurrent_gc_pointer_graph_integrity() {
                     assert!(!obj.is_null());
                     let stamp = tid as u64 * 10000 + i as u64;
                     unsafe {
+                        // Initialize field 0 to zero (no pointer)
+                        write_value_field::<LowBit<3>>(
+                            obj, &NODE, 0,
+                            Value::<LowBit<3>>::tagged(1, 0),
+                        );
                         write_value_field::<LowBit<3>>(
                             obj, &NODE, 1,
                             Value::<LowBit<3>>::tagged(1, stamp),
@@ -3190,6 +3260,11 @@ fn stress_concurrent_gc_pointer_graph_integrity() {
                                 let stamp = tid as u64 * 10000 + seq;
                                 seq += 1;
                                 unsafe {
+                                    // Initialize field 0 to zero (no pointer)
+                                    write_value_field::<LowBit<3>>(
+                                        obj, &NODE, 0,
+                                        Value::<LowBit<3>>::tagged(1, 0),
+                                    );
                                     write_value_field::<LowBit<3>>(
                                         obj, &NODE, 1,
                                         Value::<LowBit<3>>::tagged(1, stamp),
@@ -3208,25 +3283,44 @@ fn stress_concurrent_gc_pointer_graph_integrity() {
                     thread::yield_now();
                 }
 
+                // Drain any pending/in-flight GC before verification.
+                // A mutator-triggered GC could start between the last
+                // safepoint() and here, so loop until gc_requested is false.
+                loop {
+                    mt.safepoint();
+                    if !heap.gc_requested() { break; }
+                }
+
+                // Wait for all mutators to stop before any verification.
+                // This prevents one mutator from triggering GC (via allocation
+                // failure) while another is reading root slots for verification.
+                verify_barrier.wait();
+
                 // ── Final verification ─────────────────────────
                 // P1: all pool objects are valid
                 for i in 0..pool_size {
                     let bits = frame.slots[i].get();
                     let ptr = LowBit3Tag0::try_decode_ptr(bits)
-                        .unwrap_or_else(|| panic!("thread {}: slot {} not a pointer", tid, i));
-                    assert!(
-                        heap.contains(ptr as *const u8),
-                        "thread {}: slot {} ptr {:p} not in heap",
-                        tid, i, ptr,
-                    );
+                        .unwrap_or_else(|| panic!("thread {}: slot {} not a pointer (bits={:#x})", tid, i, bits));
+                    if !heap.contains(ptr as *const u8) {
+                        let from_base = heap.from_base();
+                        let from_used = heap.from_used();
+                        let from_size = heap.space_size();
+                        panic!(
+                            "thread {}: slot {} ptr {:p} not in heap \
+                             (bits={:#x}, collections={}, \
+                             from=[{:p}..{:p}), from_used={})",
+                            tid, i, ptr, bits, heap.collections(),
+                            from_base, unsafe { from_base.add(from_size) }, from_used,
+                        );
+                    }
 
                     // P4: stamp belongs to this thread
                     let sv: Value<LowBit<3>> = unsafe {
                         read_value_field(ptr as *const u8, &NODE, 1)
                     };
                     assert_eq!(
-                        sv.payload() / 10000,
-                        tid as u64,
+                        sv.payload() / 10000, tid as u64,
                         "thread {}: slot {} stamp {} from wrong thread",
                         tid, i, sv.payload(),
                     );
@@ -3250,6 +3344,8 @@ fn stress_concurrent_gc_pointer_graph_integrity() {
     // GC thread
     let heap_gc = heap.clone();
     start_barrier.wait();
+    // Enable gc_every_alloc AFTER barrier — all threads have finished init allocs
+    heap.set_gc_every_alloc(gc_every_alloc);
 
     let gc_handle = thread::spawn(move || {
         for _ in 0..gc_cycles {
@@ -3261,20 +3357,31 @@ fn stress_concurrent_gc_pointer_graph_integrity() {
     gc_handle.join().expect("GC thread panicked");
     stop.store(true, AO::Relaxed);
 
+    let mut any_panicked = false;
     for (tid, h) in handles.into_iter().enumerate() {
-        h.join().unwrap_or_else(|_| panic!("mutator thread {} panicked", tid));
+        if h.join().is_err() {
+            eprintln!("mutator thread {} panicked", tid);
+            any_panicked = true;
+        }
+    }
+
+    // Always write trace so we can analyze failures
+    tracer.write_to_file("/tmp/gc_trace_integrity.out").unwrap();
+    eprintln!(
+        "stress_concurrent_gc_pointer_graph_integrity: {} mutators, {} GCs, {} trace events",
+        num_mutators,
+        heap.collections(),
+        tracer.len(),
+    );
+
+    if any_panicked {
+        panic!("one or more mutator threads panicked — trace at /tmp/gc_trace_integrity.out");
     }
 
     assert!(
         heap.collections() >= gc_cycles / 2,
         "expected at least {} collections, got {}",
         gc_cycles / 2,
-        heap.collections(),
-    );
-
-    eprintln!(
-        "stress_concurrent_gc_pointer_graph_integrity: {} mutators, {} GCs",
-        num_mutators,
         heap.collections(),
     );
 }
@@ -3342,6 +3449,12 @@ fn stress_concurrent_gc_rapid_fire() {
                     mt.safepoint();
                 }
 
+                // Drain any pending/in-flight GC before verification.
+                loop {
+                    mt.safepoint();
+                    if !heap.gc_requested() { break; }
+                }
+
                 // P4: root object still has our stamp
                 let bits = frame.slots[0].get();
                 let ptr = LowBit3Tag0::try_decode_ptr(bits).unwrap();
@@ -3391,4 +3504,104 @@ fn stress_concurrent_gc_rapid_fire() {
         "not enough GCs ran: {}",
         heap.collections(),
     );
+}
+
+#[test]
+fn statemap_trace_output() {
+    // Generate a statemap trace file for visualization.
+    // Run with: cargo test -p dynalloc statemap_trace_output -- --nocapture
+    // Then: statemap /tmp/gc_trace.out > /tmp/gc_trace.svg
+
+    use std::sync::atomic::{AtomicBool, Ordering as AO};
+    use std::sync::Barrier;
+    use std::thread;
+
+    use crate::statemap::StatemapTracer;
+    use crate::thread::MutatorThread;
+
+    static NODE: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_fields(2);
+
+    let num_mutators: usize = 4;
+    let gc_cycles: usize = 20;
+    let obj_size = NODE.allocation_size(0);
+    let space_size = obj_size * (num_mutators * 20 + 100);
+
+    let tracer = Arc::new(StatemapTracer::new());
+    let heap = Arc::new(Heap::new_with_tracer::<Compact>(space_size, tracer.clone()));
+
+    let start_barrier = Arc::new(Barrier::new(num_mutators + 1));
+    let stop = Arc::new(AtomicBool::new(false));
+
+    let handles: Vec<_> = (0..num_mutators)
+        .map(|tid| {
+            let heap = heap.clone();
+            let start_barrier = start_barrier.clone();
+            let stop = stop.clone();
+
+            thread::spawn(move || {
+                let mt = MutatorThread::<LowBit3Tag0>::register(heap.clone());
+                let frame = RootFrame::<1>::new();
+                let _guard = mt.frame_chain().push(&frame);
+
+                // Root object with stamp
+                let obj = mt.alloc_obj::<Compact>(&NODE, 0);
+                assert!(!obj.is_null());
+                unsafe {
+                    write_value_field::<LowBit<3>>(
+                        obj, &NODE, 0,
+                        Value::<LowBit<3>>::tagged(1, 0),
+                    );
+                    write_value_field::<LowBit<3>>(
+                        obj, &NODE, 1,
+                        Value::<LowBit<3>>::tagged(1, tid as u64),
+                    );
+                }
+                frame.slots[0].set(ptr_val(obj));
+
+                start_barrier.wait();
+
+                while !stop.load(AO::Relaxed) {
+                    let garbage = mt.alloc_obj::<Compact>(&NODE, 0);
+                    if garbage.is_null() {
+                        mt.safepoint();
+                        continue;
+                    }
+                    mt.safepoint();
+                }
+
+                // Drain any pending/in-flight GC before dropping MutatorThread.
+                // Another mutator may have triggered a GC and is waiting for us.
+                loop {
+                    mt.safepoint();
+                    if !heap.gc_requested() { break; }
+                }
+            })
+        })
+        .collect();
+
+    let heap_gc = heap.clone();
+    start_barrier.wait();
+
+    let gc_handle = thread::spawn(move || {
+        for _ in 0..gc_cycles {
+            unsafe { heap_gc.concurrent_collect::<LowBit3Tag0>() };
+            thread::yield_now();
+        }
+    });
+
+    gc_handle.join().expect("GC thread panicked");
+    stop.store(true, AO::Relaxed);
+
+    for h in handles {
+        h.join().expect("mutator panicked");
+    }
+
+    let path = "/tmp/gc_trace.out";
+    tracer.write_to_file(path).unwrap();
+    eprintln!(
+        "statemap_trace_output: wrote {} events to {}",
+        tracer.len(),
+        path,
+    );
+    eprintln!("  Run: statemap {} > /tmp/gc_trace.svg", path);
 }

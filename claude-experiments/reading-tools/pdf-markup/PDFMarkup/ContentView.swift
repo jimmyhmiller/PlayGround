@@ -2,6 +2,12 @@ import SwiftUI
 import PencilKit
 import PDFKit
 
+#if os(macOS)
+import AppKit
+#else
+import UIKit
+#endif
+
 struct ContentView: View {
     @State private var selectedColor: Color = .yellow
     @State private var pdfDocument: PDFDocument?
@@ -21,10 +27,9 @@ struct ContentView: View {
             // Sidebar
             if let library = library {
                 PDFLibrarySidebar(library: library, selectedPDF: $selectedPDF, onSelectSharedPDF: { hash, document in
-                    // Handle selection of a recently highlighted PDF that might be shared
                     currentDownloadTask?.cancel()
                     currentDownloadTask = nil
-                    loadRequestCounter += 1  // Invalidate any pending loads
+                    loadRequestCounter += 1
                     currentPDFHash = hash
                     pdfDocument = document
                     selectedPDF = nil
@@ -53,7 +58,6 @@ struct ContentView: View {
             }
         } detail: {
             ZStack {
-                // PDF viewer
                 if let pdfDocument = pdfDocument, let pdfHash = currentPDFHash ?? selectedPDF?.hash {
                     PDFMarkupView(pdfDocument: pdfDocument, pdfHash: pdfHash, selectedColor: $selectedColor)
                 } else {
@@ -66,10 +70,9 @@ struct ContentView: View {
                             .foregroundStyle(.secondary)
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .background(Color(.systemGroupedBackground))
+                    .background(Color.systemGroupedBackground)
                 }
 
-                // Floating color palette on the right
                 if pdfDocument != nil {
                     HStack {
                         Spacer()
@@ -78,7 +81,6 @@ struct ContentView: View {
                     }
                 }
 
-                // Download indicator overlay
                 if downloader.isDownloading {
                     VStack {
                         HStack {
@@ -105,16 +107,13 @@ struct ContentView: View {
             await loadLibrary()
         }
         .onChange(of: selectedPDF) { oldValue, newValue in
-            print("🔔 selectedPDF changed: \(newValue?.hash ?? "nil")")
-            // Cancel any in-flight download
+            print("selectedPDF changed: \(newValue?.hash ?? "nil")")
             currentDownloadTask?.cancel()
-
-            // Increment counter to invalidate any pending loads
             loadRequestCounter += 1
 
             if let pdf = newValue {
-                print("📄 Will load PDF: \(pdf.displayTitle)")
-                let requestId = loadRequestCounter  // Capture current counter
+                print("Will load PDF: \(pdf.displayTitle)")
+                let requestId = loadRequestCounter
                 currentPDFHash = pdf.hash
                 currentDownloadTask = Task {
                     await loadPDF(metadata: pdf, requestId: requestId)
@@ -123,12 +122,9 @@ struct ContentView: View {
         }
         .onChange(of: sharedPDFManager.pendingPDF) { oldValue, newValue in
             if let shared = newValue {
-                // Cancel any in-flight download and invalidate pending loads
                 currentDownloadTask?.cancel()
                 currentDownloadTask = nil
                 loadRequestCounter += 1
-
-                // Open the shared PDF
                 currentPDFHash = shared.hash
                 pdfDocument = shared.document
                 selectedPDF = nil
@@ -141,13 +137,10 @@ struct ContentView: View {
         isLoadingLibrary = true
         defer { isLoadingLibrary = false }
 
-        // Do heavy work off main thread
         await Task.detached {
-            // Load S3 state first (off main thread)
             S3StateManager.shared.loadState()
 
             do {
-                // Fetch pdf-index.json from S3
                 guard AWSCredentials.isConfigured() else {
                     await MainActor.run {
                         self.errorMessage = "AWS credentials not configured"
@@ -155,11 +148,14 @@ struct ContentView: View {
                     return
                 }
 
-                let indexURL = URL(string: "https://\(AWSCredentials.bucket).s3.\(AWSCredentials.region).amazonaws.com/pdf-index.json")!
-                let (data, _) = try await URLSession.shared.data(from: indexURL)
+                guard let data = try await DrawingSyncManager.shared.signedDownloadData(key: "pdf-index.json") else {
+                    await MainActor.run {
+                        self.errorMessage = "pdf-index.json not found on S3"
+                    }
+                    return
+                }
                 let pdfs = try JSONDecoder().decode([PDFMetadata].self, from: data)
 
-                // Only keep PDFs that are in S3
                 let s3PDFs = pdfs.filter { pdf in
                     S3StateManager.shared.s3Key(for: pdf.hash) != nil
                 }
@@ -178,18 +174,16 @@ struct ContentView: View {
 
     func loadPDF(metadata: PDFMetadata, requestId: Int) async {
         do {
-            // Sync drawings from S3 first
-            print("📄 Loading PDF: \(metadata.hash)")
+            print("Loading PDF: \(metadata.hash)")
             do {
                 try await DrawingSyncManager.shared.sync(pdfHash: metadata.hash)
-                print("✅ Sync completed for \(metadata.hash)")
+                print("Sync completed for \(metadata.hash)")
             } catch {
-                print("❌ Sync failed: \(error)")
+                print("Sync failed: \(error)")
             }
 
             let document = try await downloader.downloadPDF(metadata: metadata)
 
-            // Check if this request is still current
             guard !Task.isCancelled else { return }
             guard requestId == loadRequestCounter else {
                 print("Discarding stale PDF load (request \(requestId), current \(loadRequestCounter))")
@@ -225,7 +219,6 @@ struct FloatingColorPalette: View {
 
     var body: some View {
         VStack(spacing: 6) {
-            // Eraser at top
             EraserButton(isSelected: selectedColor == .clear) {
                 withAnimation(.easeInOut(duration: 0.15)) {
                     selectedColor = .clear
@@ -236,7 +229,6 @@ struct FloatingColorPalette: View {
                 .frame(width: 20)
                 .padding(.vertical, 2)
 
-            // Default color dots
             ForEach(defaultColors, id: \.1) { color, name in
                 ColorDot(
                     color: color,
@@ -245,7 +237,6 @@ struct FloatingColorPalette: View {
                 )
             }
 
-            // Custom colors
             ForEach(Array(customColors.colors.enumerated()), id: \.offset) { index, colorData in
                 ColorDot(
                     color: colorData.color,
@@ -261,7 +252,6 @@ struct FloatingColorPalette: View {
                 }
             }
 
-            // Add color button
             if customColors.colors.count < 6 {
                 Divider()
                     .frame(width: 20)
@@ -315,7 +305,6 @@ struct FloatingColorPalette: View {
     }
 
     private func isCustomColorSelected(_ colorData: StorableColor) -> Bool {
-        // Compare RGB components
         return colorData.matches(selectedColor)
     }
 
@@ -335,13 +324,11 @@ struct StorableColor: Codable, Equatable {
     let alpha: Double
 
     init(_ color: Color) {
-        let uiColor = UIColor(color)
-        var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
-        uiColor.getRed(&r, green: &g, blue: &b, alpha: &a)
-        self.red = Double(r)
-        self.green = Double(g)
-        self.blue = Double(b)
-        self.alpha = Double(a)
+        let components = color.rgbaComponents()
+        self.red = components.red
+        self.green = components.green
+        self.blue = components.blue
+        self.alpha = components.alpha
     }
 
     var color: Color {
@@ -400,13 +387,36 @@ struct ColorPickerSheet: View {
     let onAdd: () -> Void
 
     var body: some View {
+        #if os(macOS)
+        VStack(spacing: 24) {
+            ColorPicker("Choose a highlight color", selection: $color, supportsOpacity: false)
+                .labelsHidden()
+
+            RoundedRectangle(cornerRadius: 12)
+                .fill(color.opacity(0.5))
+                .frame(height: 60)
+                .overlay(
+                    Text("Preview")
+                        .foregroundColor(.primary)
+                )
+                .padding(.horizontal)
+
+            HStack {
+                Button("Cancel") { dismiss() }
+                Spacer()
+                Button("Add") { onAdd() }
+            }
+            .padding(.horizontal)
+        }
+        .padding(24)
+        .frame(width: 300, height: 200)
+        #else
         NavigationView {
             VStack(spacing: 24) {
                 ColorPicker("Choose a highlight color", selection: $color, supportsOpacity: false)
                     .labelsHidden()
                     .scaleEffect(1.5)
 
-                // Preview
                 RoundedRectangle(cornerRadius: 12)
                     .fill(color.opacity(0.5))
                     .frame(height: 60)
@@ -423,17 +433,14 @@ struct ColorPickerSheet: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") {
-                        dismiss()
-                    }
+                    Button("Cancel") { dismiss() }
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Add") {
-                        onAdd()
-                    }
+                    Button("Add") { onAdd() }
                 }
             }
         }
+        #endif
     }
 }
 
@@ -446,7 +453,7 @@ struct AddColorButton: View {
         Button(action: action) {
             ZStack {
                 Circle()
-                    .fill(Color(.systemGray5))
+                    .fill(Color.systemGray5)
                     .frame(width: 28, height: 28)
                 Image(systemName: "plus")
                     .font(.system(size: 14, weight: .medium))
@@ -469,7 +476,7 @@ struct EraserButton: View {
         Button(action: action) {
             ZStack {
                 Circle()
-                    .fill(Color(.systemGray5))
+                    .fill(Color.systemGray5)
                     .frame(width: 28, height: 28)
                 Image(systemName: "eraser.fill")
                     .font(.system(size: 14))
@@ -523,28 +530,311 @@ struct PDFMarkupView: View {
     @Binding var selectedColor: Color
 
     var body: some View {
-        ScrollView {
-            LazyVStack(spacing: 24) {
-                ForEach(0..<pdfDocument.pageCount, id: \.self) { pageIndex in
-                    if let page = pdfDocument.page(at: pageIndex) {
-                        PDFPageView(page: page, pdfHash: pdfHash, selectedColor: $selectedColor, pageIndex: pageIndex)
-                            .aspectRatio(page.bounds(for: .mediaBox).width / page.bounds(for: .mediaBox).height, contentMode: .fit)
-                            .frame(maxWidth: 800)
-                            .background(Color.white)
-                            .cornerRadius(4)
-                            .shadow(color: Color.black.opacity(0.08), radius: 12, x: 0, y: 4)
-                            .frame(minHeight: 600)
-                    }
-                }
-            }
-            .padding(.vertical, 24)
-            .padding(.horizontal, 40)
-        }
-        .background(Color(.systemGroupedBackground))
-        .scrollIndicators(.visible)
-        .id(pdfHash) // Force view recreation when PDF changes
+        NativePDFView(pdfDocument: pdfDocument, pdfHash: pdfHash, selectedColor: $selectedColor)
+            .id(pdfHash)
     }
 }
+
+// MARK: - PDF Page View (Platform-specific)
+
+#if os(macOS)
+
+/// Drawing overlay that lives in PDF page coordinate space.
+/// Placed via PDFPageOverlayViewProvider so it scales with PDFView zoom automatically.
+class DrawingCanvasView: NSView {
+    var drawing = PKDrawing()
+    var currentPoints: [PKStrokePoint] = []
+    var currentColor: NSColor = NSColor(red: 1, green: 1, blue: 0, alpha: 0.5)
+    var isErasing = false
+    var onDrawingChanged: (() -> Void)?
+    var pdfHash: String = ""
+    var pageIndex: Int = 0
+
+    override var isFlipped: Bool { true }
+    override var acceptsFirstResponder: Bool { true }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        let image = drawing.image(from: bounds, scale: NSScreen.main?.backingScaleFactor ?? 2.0)
+        image.draw(in: bounds)
+
+        if !currentPoints.isEmpty {
+            guard let context = NSGraphicsContext.current?.cgContext else { return }
+            context.setStrokeColor(currentColor.cgColor)
+            context.setLineWidth(20)
+            context.setLineCap(.round)
+            context.setLineJoin(.round)
+            context.setAlpha(0.5)
+
+            let path = CGMutablePath()
+            for (i, point) in currentPoints.enumerated() {
+                if i == 0 {
+                    path.move(to: point.location)
+                } else {
+                    path.addLine(to: point.location)
+                }
+            }
+            context.addPath(path)
+            context.strokePath()
+        }
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        let loc = convert(event.locationInWindow, from: nil)
+        if isErasing {
+            eraseAt(loc)
+            return
+        }
+        currentPoints = [makePoint(at: loc)]
+        needsDisplay = true
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        let loc = convert(event.locationInWindow, from: nil)
+        if isErasing {
+            eraseAt(loc)
+            return
+        }
+        currentPoints.append(makePoint(at: loc))
+        needsDisplay = true
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        if isErasing { return }
+        guard currentPoints.count >= 2 else {
+            currentPoints = []
+            return
+        }
+
+        let ink = PKInk(.marker, color: currentColor)
+        let path = PKStrokePath(controlPoints: currentPoints, creationDate: Date())
+        let stroke = PKStroke(ink: ink, path: path)
+        drawing.strokes.append(stroke)
+        currentPoints = []
+        needsDisplay = true
+        onDrawingChanged?()
+    }
+
+    private func makePoint(at location: CGPoint) -> PKStrokePoint {
+        PKStrokePoint(location: location, timeOffset: 0, size: CGSize(width: 20, height: 20),
+                      opacity: 1.0, force: 1.0, azimuth: 0, altitude: .pi / 2)
+    }
+
+    private func eraseAt(_ point: CGPoint) {
+        let eraseRadius: CGFloat = 20
+        let eraseRect = CGRect(x: point.x - eraseRadius, y: point.y - eraseRadius,
+                               width: eraseRadius * 2, height: eraseRadius * 2)
+        drawing.strokes.removeAll { stroke in
+            stroke.path.interpolatedPoints(by: .distance(5)).contains { pt in
+                eraseRect.contains(pt.location)
+            }
+        }
+        needsDisplay = true
+        onDrawingChanged?()
+    }
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    override func scrollWheel(with event: NSEvent) {
+        nextResponder?.scrollWheel(with: event)
+    }
+
+    override func magnify(with event: NSEvent) {
+        nextResponder?.magnify(with: event)
+    }
+
+    override func smartMagnify(with event: NSEvent) {
+        nextResponder?.smartMagnify(with: event)
+    }
+
+    func saveDrawing() {
+        let mediaBoxSize = bounds.size
+        guard mediaBoxSize.width > 0 else { return }
+        // The overlay view is sized to the page's mediaBox, so drawing coords ARE mediaBox coords
+        DrawingManager.shared.scheduleSave(drawing, pdfHash: pdfHash, page: pageIndex)
+    }
+
+    func loadDrawing() {
+        guard let loaded = DrawingManager.shared.loadDrawing(pdfHash: pdfHash, page: pageIndex) else {
+            drawing = PKDrawing()
+            needsDisplay = true
+            return
+        }
+        drawing = loaded
+        needsDisplay = true
+    }
+}
+
+/// PDFView subclass that routes mouse events to drawing overlays when active
+class MarkupPDFView: PDFView {
+    weak var overlayProvider: DrawingOverlayProvider?
+
+    private func canvasUnderEvent(_ event: NSEvent) -> DrawingCanvasView? {
+        guard let provider = overlayProvider else {
+            Swift.print("[MarkupPDFView] No overlay provider")
+            return nil
+        }
+        Swift.print("[MarkupPDFView] overlays count: \(provider.overlays.count)")
+        let locationInView = convert(event.locationInWindow, from: nil)
+        Swift.print("[MarkupPDFView] locationInView: \(locationInView)")
+        guard let page = page(for: locationInView, nearest: false) else {
+            Swift.print("[MarkupPDFView] No page found at location")
+            // Try nearest
+            if let nearestPage = page(for: locationInView, nearest: true) {
+                Swift.print("[MarkupPDFView] Nearest page exists: \(nearestPage), has overlay: \(provider.overlays[nearestPage] != nil)")
+            }
+            return nil
+        }
+        Swift.print("[MarkupPDFView] Found page: \(page), has overlay: \(provider.overlays[page] != nil)")
+        return provider.overlays[page]
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        Swift.print("[MarkupPDFView] mouseDown called")
+        if let canvas = canvasUnderEvent(event) {
+            Swift.print("[MarkupPDFView] Routing to canvas")
+            canvas.mouseDown(with: event)
+            return
+        }
+        Swift.print("[MarkupPDFView] Falling through to super")
+        super.mouseDown(with: event)
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        if let canvas = canvasUnderEvent(event) {
+            canvas.mouseDragged(with: event)
+            return
+        }
+        super.mouseDragged(with: event)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        if let canvas = canvasUnderEvent(event) {
+            canvas.mouseUp(with: event)
+            return
+        }
+        super.mouseUp(with: event)
+    }
+}
+
+/// Provides drawing overlay views for each PDF page
+class DrawingOverlayProvider: NSObject, PDFPageOverlayViewProvider {
+    var pdfHash: String = ""
+    var currentColor: NSColor = NSColor(red: 1, green: 1, blue: 0, alpha: 0.5)
+    var isErasing = false
+    /// Keeps strong references to overlays so they aren't deallocated
+    var overlays: [PDFPage: DrawingCanvasView] = [:]
+
+    func pdfView(_ view: PDFView, overlayViewFor page: PDFPage) -> NSView? {
+        Swift.print("[OverlayProvider] overlayViewFor called, page: \(page)")
+        if let existing = overlays[page] {
+            return existing
+        }
+        let canvas = DrawingCanvasView()
+        let pageIndex = view.document?.index(for: page) ?? 0
+        canvas.pdfHash = pdfHash
+        canvas.pageIndex = pageIndex
+        canvas.currentColor = currentColor
+        canvas.isErasing = isErasing
+        canvas.onDrawingChanged = { [weak canvas] in
+            canvas?.saveDrawing()
+        }
+        canvas.loadDrawing()
+        overlays[page] = canvas
+        return canvas
+    }
+
+    func pdfView(_ view: PDFView, willDisplayOverlayView overlayView: NSView, for page: PDFPage) {
+        if let canvas = overlayView as? DrawingCanvasView {
+            canvas.currentColor = currentColor
+            canvas.isErasing = isErasing
+        }
+    }
+
+    func updateAllCanvases() {
+        for (_, canvas) in overlays {
+            canvas.currentColor = currentColor
+            canvas.isErasing = isErasing
+        }
+    }
+
+    func reloadAllDrawings(pdfHash: String) {
+        self.pdfHash = pdfHash
+        for (page, canvas) in overlays {
+            // page index might be needed
+            if let doc = canvas.superview?.superview as? PDFView {
+                canvas.pageIndex = doc.document?.index(for: page) ?? canvas.pageIndex
+            }
+            canvas.pdfHash = pdfHash
+            canvas.loadDrawing()
+        }
+    }
+}
+
+struct NativePDFView: NSViewRepresentable {
+    let pdfDocument: PDFDocument
+    let pdfHash: String
+    @Binding var selectedColor: Color
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(pdfHash: pdfHash)
+    }
+
+    func makeNSView(context: Context) -> MarkupPDFView {
+        let pdfView = MarkupPDFView()
+        pdfView.autoScales = true
+        pdfView.displayMode = .singlePageContinuous
+        pdfView.displayDirection = .vertical
+        pdfView.backgroundColor = NSColor.windowBackgroundColor
+
+        let provider = context.coordinator.overlayProvider
+        provider.pdfHash = pdfHash
+        pdfView.isInMarkupMode = true
+        pdfView.pageOverlayViewProvider = provider
+        pdfView.overlayProvider = provider
+
+        // Set document AFTER provider so PDFKit calls overlayViewFor during layout
+        pdfView.document = pdfDocument
+        print("[NativePDFView] makeNSView done, provider set: \(pdfView.pageOverlayViewProvider != nil)")
+
+        context.coordinator.pdfView = pdfView
+
+        return pdfView
+    }
+
+    func updateNSView(_ pdfView: MarkupPDFView, context: Context) {
+        if pdfView.document !== pdfDocument {
+            context.coordinator.overlayProvider.overlays.removeAll()
+            pdfView.document = pdfDocument
+        }
+
+        let provider = context.coordinator.overlayProvider
+        if provider.pdfHash != pdfHash {
+            provider.reloadAllDrawings(pdfHash: pdfHash)
+        }
+
+        if selectedColor == .clear {
+            provider.isErasing = true
+        } else {
+            provider.isErasing = false
+            provider.currentColor = PlatformColor.highlightColor(from: selectedColor)
+        }
+        provider.updateAllCanvases()
+    }
+
+    class Coordinator: NSObject {
+        let overlayProvider = DrawingOverlayProvider()
+        weak var pdfView: MarkupPDFView?
+        var pdfHash: String
+
+        init(pdfHash: String) {
+            self.pdfHash = pdfHash
+            super.init()
+        }
+    }
+}
+
+#else
 
 class LayoutAwareContainerView: UIView {
     var onLayoutChange: (() -> Void)?
@@ -572,20 +862,17 @@ struct PDFPageView: UIViewRepresentable {
     func makeUIView(context: Context) -> UIView {
         let containerView = LayoutAwareContainerView()
 
-        // PDF view
         let pdfView = PDFView()
         pdfView.document = PDFDocument()
         pdfView.document?.insert(page, at: 0)
         pdfView.autoScales = true
         pdfView.displayMode = .singlePage
+        pdfView.isUserInteractionEnabled = false
         pdfView.translatesAutoresizingMaskIntoConstraints = false
         containerView.addSubview(pdfView)
 
-        // PencilKit canvas overlay
         let canvasView = PKCanvasView()
 
-        // On iPad: only allow Apple Pencil, not finger/mouse
-        // On Mac Catalyst: allow any input
         #if targetEnvironment(macCatalyst)
         canvasView.drawingPolicy = .anyInput
         #else
@@ -595,30 +882,26 @@ struct PDFPageView: UIViewRepresentable {
         canvasView.isOpaque = false
         canvasView.backgroundColor = .clear
         canvasView.translatesAutoresizingMaskIntoConstraints = false
-
-        // Allow scroll gestures to pass through to the parent ScrollView
         canvasView.isUserInteractionEnabled = true
 
-        // Important: Allow simultaneous gestures so scrolling still works
+        // Disable PKCanvasView's internal scroll view so parent ScrollView handles scrolling
         if let scrollView = canvasView.subviews.first(where: { $0 is UIScrollView }) as? UIScrollView {
             scrollView.isScrollEnabled = false
         }
 
         containerView.addSubview(canvasView)
 
-        // Setup tool with initial color (or eraser)
         if context.coordinator.selectedColor == .clear {
             canvasView.tool = PKEraserTool(.bitmap)
         } else {
-            let ink = PKInkingTool(.marker, color: UIColor.highlightColor(from: context.coordinator.selectedColor), width: 20)
+            let ink = PKInkingTool(.marker, color: PlatformColor.highlightColor(from: context.coordinator.selectedColor), width: 20)
             canvasView.tool = ink
         }
 
         context.coordinator.canvasView = canvasView
         context.coordinator.containerView = containerView
         context.coordinator.pdfView = pdfView
-
-        // Set up delegate to save drawings when changed
+        context.coordinator.mediaBoxSize = page.bounds(for: .mediaBox).size
         canvasView.delegate = context.coordinator
 
         NSLayoutConstraint.activate([
@@ -633,7 +916,6 @@ struct PDFPageView: UIViewRepresentable {
             canvasView.bottomAnchor.constraint(equalTo: containerView.bottomAnchor)
         ])
 
-        // Load drawings when layout changes (handles initial load and resize)
         containerView.onLayoutChange = { [weak coordinator = context.coordinator] in
             coordinator?.loadDrawing()
         }
@@ -642,7 +924,6 @@ struct PDFPageView: UIViewRepresentable {
     }
 
     func updateUIView(_ uiView: UIView, context: Context) {
-        // Update PDF content if the page changed
         if let pdfView = context.coordinator.pdfView {
             let currentPage = pdfView.document?.page(at: 0)
             if currentPage !== page {
@@ -652,19 +933,17 @@ struct PDFPageView: UIViewRepresentable {
             }
         }
 
-        // Update drawing if hash changed
         if context.coordinator.pdfHash != pdfHash {
             context.coordinator.pdfHash = pdfHash
             context.coordinator.pageIndex = pageIndex
             context.coordinator.loadDrawing()
         }
 
-        // Update the tool when selectedColor changes
         if let canvasView = context.coordinator.canvasView {
             if selectedColor == .clear {
                 canvasView.tool = PKEraserTool(.bitmap)
             } else {
-                let ink = PKInkingTool(.marker, color: UIColor.highlightColor(from: selectedColor), width: 20)
+                let ink = PKInkingTool(.marker, color: PlatformColor.highlightColor(from: selectedColor), width: 20)
                 canvasView.tool = ink
             }
         }
@@ -677,6 +956,8 @@ struct PDFPageView: UIViewRepresentable {
         weak var pdfView: PDFView?
         var pdfHash: String
         var pageIndex: Int
+        var mediaBoxSize: CGSize = .zero
+        var suppressSave = false
 
         init(selectedColor: Binding<Color>, pdfHash: String, pageIndex: Int) {
             self._selectedColor = selectedColor
@@ -685,45 +966,35 @@ struct PDFPageView: UIViewRepresentable {
             super.init()
         }
 
-        // Called when drawing changes - save it
         func canvasViewDrawingDidChange(_ canvasView: PKCanvasView) {
-            DrawingManager.shared.scheduleSave(canvasView.drawing, pdfHash: pdfHash, page: pageIndex)
+            guard !suppressSave else { return }
+            let canvasSize = canvasView.bounds.size
+            guard canvasSize.width > 0, mediaBoxSize.width > 0 else { return }
+
+            // Normalize to mediaBox coordinates for storage
+            let sx = mediaBoxSize.width / canvasSize.width
+            let sy = mediaBoxSize.height / canvasSize.height
+            let normalized = canvasView.drawing.transformed(using: CGAffineTransform(scaleX: sx, y: sy))
+            DrawingManager.shared.scheduleSave(normalized, pdfHash: pdfHash, page: pageIndex)
         }
 
         func loadDrawing() {
-            if let canvas = canvasView,
-               let drawing = DrawingManager.shared.loadDrawing(pdfHash: pdfHash, page: pageIndex) {
-                canvas.drawing = drawing
-            }
+            guard let canvas = canvasView else { return }
+            let canvasSize = canvas.bounds.size
+            guard canvasSize.width > 0, mediaBoxSize.width > 0 else { return }
+
+            guard let drawing = DrawingManager.shared.loadDrawing(pdfHash: pdfHash, page: pageIndex) else { return }
+
+            // Scale from mediaBox coordinates to current canvas size
+            let sx = canvasSize.width / mediaBoxSize.width
+            let sy = canvasSize.height / mediaBoxSize.height
+            let scaled = drawing.transformed(using: CGAffineTransform(scaleX: sx, y: sy))
+
+            suppressSave = true
+            canvas.drawing = scaled
+            suppressSave = false
         }
     }
 }
 
-extension UIColor {
-    static func highlightColor(from color: Color) -> UIColor {
-        // Handle known system colors with specific highlighter values
-        switch color {
-        case .yellow:
-            return UIColor(red: 1.0, green: 1.0, blue: 0.0, alpha: 0.5)
-        case .green:
-            return UIColor(red: 0.0, green: 1.0, blue: 0.0, alpha: 0.5)
-        case .red:
-            return UIColor(red: 1.0, green: 0.35, blue: 0.35, alpha: 0.5)
-        case .orange:
-            return UIColor(red: 1.0, green: 0.65, blue: 0.0, alpha: 0.5)
-        case .blue:
-            return UIColor(red: 0.0, green: 0.5, blue: 1.0, alpha: 0.5)
-        case .purple:
-            return UIColor(red: 0.6, green: 0.3, blue: 0.9, alpha: 0.5)
-        default:
-            // For custom colors, use cgColor to extract components
-            if let cgColor = color.cgColor,
-               let components = cgColor.components,
-               components.count >= 3 {
-                return UIColor(red: components[0], green: components[1], blue: components[2], alpha: 0.5)
-            }
-            // Fallback
-            return UIColor(red: 1.0, green: 1.0, blue: 0.0, alpha: 0.5)
-        }
-    }
-}
+#endif
