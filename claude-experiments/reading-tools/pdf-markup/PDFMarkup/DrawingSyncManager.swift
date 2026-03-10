@@ -8,6 +8,7 @@
 import Foundation
 import Combine
 import CryptoKit
+import PencilKit
 
 class DrawingSyncManager: ObservableObject {
     static let shared = DrawingSyncManager()
@@ -122,12 +123,14 @@ class DrawingSyncManager: ObservableObject {
 
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
+        request.cachePolicy = .reloadIgnoringLocalCacheData
 
         // Sign the request
         try signRequest(&request, body: nil)
 
         do {
             let (data, response) = try await URLSession.shared.data(for: request)
+            print("📥 Downloaded \(data.count) bytes")
 
             guard let httpResponse = response as? HTTPURLResponse else {
                 throw SyncError.downloadFailed
@@ -147,7 +150,7 @@ class DrawingSyncManager: ObservableObject {
             decoder.dateDecodingStrategy = .deferredToDate
             let drawings = try decoder.decode(PDFDrawings.self, from: data)
 
-            print("✅ Successfully downloaded drawings for \(pdfHash) from S3")
+            print("✅ Successfully downloaded drawings for \(pdfHash) from S3: \(drawings.pages.count) pages, keys=\(drawings.pages.keys.sorted())")
             return drawings
         } catch let error as DecodingError {
             print("⚠️  Failed to decode drawings: \(error)")
@@ -251,16 +254,16 @@ class DrawingSyncManager: ObservableObject {
                 print("💾 Saving merged drawings locally...")
                 saveMergedDrawings(merged)
                 print("✅ Saved merged drawings")
-            }
 
-            // Only upload if we have local changes AND we successfully checked remote
-            // This prevents overwriting remote with empty local when download fails
-            let shouldUpload = localDrawings != nil && (remoteDrawings == nil || localDrawings!.lastModified > remoteDrawings!.lastModified)
-            if shouldUpload {
-                print("📤 Uploading local changes to S3...")
-                try await uploadDrawings(pdfHash: pdfHash)
-            } else {
-                print("⏭️ Skipping upload (no local changes or remote is newer)")
+                // Upload merged version if it differs from remote
+                let mergedHasContent = merged.pages.values.contains { $0.count > 88 }
+                let differsFromRemote = remoteDrawings == nil || merged.pages != remoteDrawings!.pages
+                if mergedHasContent && differsFromRemote {
+                    print("📤 Uploading merged drawings to S3...")
+                    try await uploadDrawings(pdfHash: pdfHash)
+                } else {
+                    print("⏭️ Skipping upload (no changes to push)")
+                }
             }
 
             await MainActor.run {
@@ -534,34 +537,62 @@ class DrawingSyncManager: ObservableObject {
             return local ?? remote
         }
 
-        // Last-write-wins
-        if local.lastModified > remote.lastModified {
-            print("✓ Using local version (newer)")
-            return local
-        } else if remote.lastModified > local.lastModified {
-            print("✓ Using remote version (newer)")
-            return remote
-        } else {
-            print("⚠️ Same timestamp - merging pages")
-            var merged = local
+        // Merge at the stroke level for each page
+        var merged = PDFDrawings(pdfHash: pdfHash)
 
-            for (pageIndex, pageData) in remote.pages {
-                if merged.pages[pageIndex] == nil {
-                    merged.pages[pageIndex] = pageData
+        let allPages = Set(local.pages.keys).union(remote.pages.keys)
+
+        for pageIndex in allPages {
+            let localData = local.pages[pageIndex]
+            let remoteData = remote.pages[pageIndex]
+
+            switch (localData, remoteData) {
+            case let (.some(l), .some(r)):
+                if l == r {
+                    // Identical data — no merge needed
+                    merged.pages[pageIndex] = l
+                } else {
+                    // Different data — merge strokes
+                    let localDrawing = local.getDrawing(forPage: pageIndex)
+                    let remoteDrawing = remote.getDrawing(forPage: pageIndex)
+                    if let ld = localDrawing, let rd = remoteDrawing {
+                        var combined = PKDrawing()
+                        // Take all local strokes, then add remote strokes that aren't in local
+                        // Compare by path bounds + ink color as a heuristic for identity
+                        var allStrokes = ld.strokes
+                        for remoteStroke in rd.strokes {
+                            let isDuplicate = ld.strokes.contains { localStroke in
+                                localStroke.path.creationDate == remoteStroke.path.creationDate
+                            }
+                            if !isDuplicate {
+                                allStrokes.append(remoteStroke)
+                            }
+                        }
+                        combined.strokes = allStrokes
+                        print("🔀 Page \(pageIndex): merged \(ld.strokes.count) local + \(rd.strokes.count) remote → \(allStrokes.count) strokes")
+                        merged.setDrawing(combined, forPage: pageIndex)
+                    } else {
+                        // One failed to decode — keep whichever has more data
+                        merged.pages[pageIndex] = l.count >= r.count ? l : r
+                    }
                 }
+            case let (.some(l), .none):
+                merged.pages[pageIndex] = l
+            case let (.none, .some(r)):
+                merged.pages[pageIndex] = r
+            case (.none, .none):
+                break
             }
-
-            merged.lastModified = Date()
-            return merged
         }
+
+        merged.lastModified = Date()
+        return merged
     }
 
     private func saveMergedDrawings(_ drawings: PDFDrawings) {
-        for (pageIndex, _) in drawings.pages {
-            if let drawing = drawings.getDrawing(forPage: pageIndex) {
-                DrawingManager.shared.saveDrawing(drawing, pdfHash: drawings.pdfHash, page: pageIndex)
-            }
-        }
+        // Save the entire PDFDrawings struct directly to disk,
+        // preserving raw Data without decode/re-encode round-trip
+        DrawingManager.shared.saveDrawingsRaw(drawings)
     }
 
     // MARK: - Background Sync

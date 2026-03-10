@@ -379,7 +379,8 @@ mod x86_64_tests {
 
 #[cfg(test)]
 mod executable_tests {
-    use crate::buffer::{CodeBuffer, ExecutableBuffer};
+    use crate::buffer::CodeBuffer;
+    use crate::code_memory::{CodeMemory, PagedCodeMemory};
 
     #[cfg(target_arch = "aarch64")]
     #[test]
@@ -388,14 +389,14 @@ mod executable_tests {
         use crate::arm64::inst::Arm64Inst;
 
         let mut buf: CodeBuffer<Arm64> = CodeBuffer::new();
-        // MOVZ X0, #42
         buf.emit(Arm64Inst::movz(X0, 42, 0));
-        // RET
         buf.emit(Arm64Inst::ret());
-
         buf.finalize();
-        let exec = unsafe { ExecutableBuffer::new(buf.code()) };
-        let f: extern "C" fn() -> u64 = unsafe { std::mem::transmute(exec.as_ptr()) };
+
+        let mut mem = PagedCodeMemory::new();
+        mem.push(buf.code());
+        mem.finalize();
+        let f: extern "C" fn() -> u64 = unsafe { std::mem::transmute(mem.base_ptr()) };
         assert_eq!(f(), 42);
     }
 
@@ -406,13 +407,14 @@ mod executable_tests {
         use crate::arm64::inst::Arm64Inst;
 
         let mut buf: CodeBuffer<Arm64> = CodeBuffer::new();
-        // ADD X0, X0, X1 (args in X0, X1)
         buf.emit(Arm64Inst::add(X0, X0, X1));
         buf.emit(Arm64Inst::ret());
-
         buf.finalize();
-        let exec = unsafe { ExecutableBuffer::new(buf.code()) };
-        let f: extern "C" fn(u64, u64) -> u64 = unsafe { std::mem::transmute(exec.as_ptr()) };
+
+        let mut mem = PagedCodeMemory::new();
+        mem.push(buf.code());
+        mem.finalize();
+        let f: extern "C" fn(u64, u64) -> u64 = unsafe { std::mem::transmute(mem.base_ptr()) };
         assert_eq!(f(10, 32), 42);
     }
 
@@ -425,21 +427,19 @@ mod executable_tests {
         let mut buf: CodeBuffer<Arm64> = CodeBuffer::new();
         let skip = buf.create_label();
 
-        // CBZ X0, skip
         let cbz_off = buf.emit(Arm64Inst::cbz(X0, 0));
         buf.add_reloc(cbz_off, skip, Arm64RelocKind::Cond19);
-
-        // If not zero, return X0
         buf.emit(Arm64Inst::ret());
 
-        // skip: return 99
         buf.bind_label(skip);
         buf.emit(Arm64Inst::movz(X0, 99, 0));
         buf.emit(Arm64Inst::ret());
-
         buf.finalize();
-        let exec = unsafe { ExecutableBuffer::new(buf.code()) };
-        let f: extern "C" fn(u64) -> u64 = unsafe { std::mem::transmute(exec.as_ptr()) };
+
+        let mut mem = PagedCodeMemory::new();
+        mem.push(buf.code());
+        mem.finalize();
+        let f: extern "C" fn(u64) -> u64 = unsafe { std::mem::transmute(mem.base_ptr()) };
         assert_eq!(f(0), 99);
         assert_eq!(f(5), 5);
     }
@@ -451,13 +451,14 @@ mod executable_tests {
         use crate::x86_64::inst::X64Inst;
 
         let mut buf: CodeBuffer<X64> = CodeBuffer::new();
-        // MOV RAX, 42
         buf.emit(X64Inst::MovRI32 { dest: RAX, imm: 42 });
         buf.emit(X64Inst::Ret);
-
         buf.finalize();
-        let exec = unsafe { ExecutableBuffer::new(buf.code()) };
-        let f: extern "C" fn() -> u64 = unsafe { std::mem::transmute(exec.as_ptr()) };
+
+        let mut mem = PagedCodeMemory::new();
+        mem.push(buf.code());
+        mem.finalize();
+        let f: extern "C" fn() -> u64 = unsafe { std::mem::transmute(mem.base_ptr()) };
         assert_eq!(f(), 42);
     }
 
@@ -468,16 +469,15 @@ mod executable_tests {
         use crate::x86_64::inst::X64Inst;
 
         let mut buf: CodeBuffer<X64> = CodeBuffer::new();
-        // Args: RDI, RSI (System V AMD64 ABI)
-        // MOV RAX, RDI
         buf.emit(X64Inst::MovRR { dest: RAX, src: RDI });
-        // ADD RAX, RSI
         buf.emit(X64Inst::AddRR { dest: RAX, src: RSI });
         buf.emit(X64Inst::Ret);
-
         buf.finalize();
-        let exec = unsafe { ExecutableBuffer::new(buf.code()) };
-        let f: extern "C" fn(u64, u64) -> u64 = unsafe { std::mem::transmute(exec.as_ptr()) };
+
+        let mut mem = PagedCodeMemory::new();
+        mem.push(buf.code());
+        mem.finalize();
+        let f: extern "C" fn(u64, u64) -> u64 = unsafe { std::mem::transmute(mem.base_ptr()) };
         assert_eq!(f(10, 32), 42);
     }
 
@@ -490,24 +490,22 @@ mod executable_tests {
         let mut buf: CodeBuffer<X64> = CodeBuffer::new();
         let skip = buf.create_label();
 
-        // TEST RDI, RDI
         buf.emit(X64Inst::TestRR { a: RDI, b: RDI });
-        // JE skip
         let jcc_off = buf.emit(X64Inst::Jcc { offset: 0, cond: Condition::E });
         buf.add_reloc(jcc_off + 2, skip, X64RelocKind::Rel32);
 
-        // Not zero: return RDI
         buf.emit(X64Inst::MovRR { dest: RAX, src: RDI });
         buf.emit(X64Inst::Ret);
 
-        // skip: return 99
         buf.bind_label(skip);
         buf.emit(X64Inst::MovRI32 { dest: RAX, imm: 99 });
         buf.emit(X64Inst::Ret);
-
         buf.finalize();
-        let exec = unsafe { ExecutableBuffer::new(buf.code()) };
-        let f: extern "C" fn(u64) -> u64 = unsafe { std::mem::transmute(exec.as_ptr()) };
+
+        let mut mem = PagedCodeMemory::new();
+        mem.push(buf.code());
+        mem.finalize();
+        let f: extern "C" fn(u64) -> u64 = unsafe { std::mem::transmute(mem.base_ptr()) };
         assert_eq!(f(0), 99);
         assert_eq!(f(5), 5);
     }

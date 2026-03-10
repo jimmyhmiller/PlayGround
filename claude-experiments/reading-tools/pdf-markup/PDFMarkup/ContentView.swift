@@ -175,12 +175,6 @@ struct ContentView: View {
     func loadPDF(metadata: PDFMetadata, requestId: Int) async {
         do {
             print("Loading PDF: \(metadata.hash)")
-            do {
-                try await DrawingSyncManager.shared.sync(pdfHash: metadata.hash)
-                print("Sync completed for \(metadata.hash)")
-            } catch {
-                print("Sync failed: \(error)")
-            }
 
             let document = try await downloader.downloadPDF(metadata: metadata)
 
@@ -191,6 +185,16 @@ struct ContentView: View {
             }
 
             pdfDocument = document
+
+            // Sync drawings in the background after PDF is displayed
+            Task {
+                do {
+                    try await DrawingSyncManager.shared.sync(pdfHash: metadata.hash)
+                    print("Sync completed for \(metadata.hash)")
+                } catch {
+                    print("Sync failed: \(error)")
+                }
+            }
         } catch {
             if !Task.isCancelled {
                 errorMessage = "Failed to load PDF: \(error.localizedDescription)"
@@ -544,7 +548,7 @@ struct PDFMarkupView: View {
 class DrawingCanvasView: NSView {
     var drawing = PKDrawing()
     var currentPoints: [PKStrokePoint] = []
-    var currentColor: NSColor = NSColor(red: 1, green: 1, blue: 0, alpha: 0.5)
+    var currentColor: NSColor = NSColor(red: 1, green: 1, blue: 0, alpha: 0.15)
     var isErasing = false
     var onDrawingChanged: (() -> Void)?
     var pdfHash: String = ""
@@ -562,6 +566,9 @@ class DrawingCanvasView: NSView {
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
         let image = drawing.image(from: bounds, scale: NSScreen.main?.backingScaleFactor ?? 2.0)
+        if !drawing.strokes.isEmpty {
+            Swift.print("[Canvas] draw page=\(pageIndex) bounds=\(bounds) drawingBounds=\(drawing.bounds) strokes=\(drawing.strokes.count) imageSize=\(image.size)")
+        }
         image.draw(in: bounds)
 
         if currentPoints.count >= 2 {
@@ -717,6 +724,9 @@ class DrawingCanvasView: NSView {
     func saveDrawing() {
         let mediaBoxSize = bounds.size
         guard mediaBoxSize.width > 0 else { return }
+        // Don't save empty drawings — this prevents blank canvases from overwriting
+        // real drawings that were synced from another device
+        guard !drawing.strokes.isEmpty else { return }
         // The overlay view is sized to the page's mediaBox, so drawing coords ARE mediaBox coords
         DrawingManager.shared.scheduleSave(drawing, pdfHash: pdfHash, page: pageIndex)
     }
@@ -724,11 +734,14 @@ class DrawingCanvasView: NSView {
     func loadDrawing() {
         undoStack.removeAll()
         redoStack.removeAll()
+        Swift.print("[Canvas] loadDrawing page=\(pageIndex) hash=\(pdfHash)")
         guard let loaded = DrawingManager.shared.loadDrawing(pdfHash: pdfHash, page: pageIndex) else {
+            Swift.print("[Canvas] No drawing found for page \(pageIndex)")
             drawing = PKDrawing()
             needsDisplay = true
             return
         }
+        Swift.print("[Canvas] Loaded drawing for page \(pageIndex): \(loaded.strokes.count) strokes, drawingBounds=\(loaded.bounds), canvasBounds=\(bounds)")
         drawing = loaded
         needsDisplay = true
     }
@@ -737,7 +750,6 @@ class DrawingCanvasView: NSView {
 /// PDFView subclass that routes mouse events to drawing overlays when active
 class MarkupPDFView: PDFView {
     weak var overlayProvider: DrawingOverlayProvider?
-    var isInMarkupMode = false
 
     private func canvasUnderEvent(_ event: NSEvent) -> DrawingCanvasView? {
         guard let provider = overlayProvider else {
@@ -790,7 +802,7 @@ class MarkupPDFView: PDFView {
 /// Provides drawing overlay views for each PDF page
 class DrawingOverlayProvider: NSObject, PDFPageOverlayViewProvider {
     var pdfHash: String = ""
-    var currentColor: NSColor = NSColor(red: 1, green: 1, blue: 0, alpha: 0.5)
+    var currentColor: NSColor = NSColor(red: 1, green: 1, blue: 0, alpha: 0.15)
     var isErasing = false
     /// Keeps strong references to overlays so they aren't deallocated
     var overlays: [PDFPage: DrawingCanvasView] = [:]
@@ -911,7 +923,7 @@ struct NativePDFView: NSViewRepresentable {
 class DrawingCanvasUIView: UIView {
     var drawing = PKDrawing()
     var currentPoints: [PKStrokePoint] = []
-    var currentColor: UIColor = UIColor(red: 1, green: 1, blue: 0, alpha: 0.5)
+    var currentColor: UIColor = UIColor(red: 1, green: 1, blue: 0, alpha: 0.15)
     var isErasing = false
     var onDrawingChanged: (() -> Void)?
     var pdfHash: String = ""
@@ -1057,6 +1069,9 @@ class DrawingCanvasUIView: UIView {
     func saveDrawing() {
         let mediaBoxSize = bounds.size
         guard mediaBoxSize.width > 0 else { return }
+        // Don't save empty drawings — this prevents blank canvases from overwriting
+        // real drawings that were synced from another device
+        guard !drawing.strokes.isEmpty else { return }
         DrawingManager.shared.scheduleSave(drawing, pdfHash: pdfHash, page: pageIndex)
     }
 
@@ -1131,7 +1146,7 @@ class MarkupPDFView: PDFView {
 /// Provides drawing overlay views for each PDF page (iOS)
 class DrawingOverlayProviderIOS: NSObject, PDFPageOverlayViewProvider {
     var pdfHash: String = ""
-    var currentColor: UIColor = UIColor(red: 1, green: 1, blue: 0, alpha: 0.5)
+    var currentColor: UIColor = UIColor(red: 1, green: 1, blue: 0, alpha: 0.15)
     var isErasing = false
     var overlays: [PDFPage: DrawingCanvasUIView] = [:]
 

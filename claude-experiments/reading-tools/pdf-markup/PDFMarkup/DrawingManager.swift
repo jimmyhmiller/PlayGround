@@ -101,8 +101,10 @@ class DrawingManager: ObservableObject {
         // Save to disk
         saveToDisk(pdfDrawings)
 
-        // Mark for S3 sync (if configured)
-        DrawingSyncManager.shared.markForSync(pdfHash: pdfHash)
+        // Upload to S3 immediately (debounced by the scheduleSave caller)
+        Task {
+            try? await DrawingSyncManager.shared.uploadDrawings(pdfHash: pdfHash)
+        }
     }
 
     /// Loads a specific drawing for a PDF page
@@ -206,6 +208,26 @@ class DrawingManager: ObservableObject {
         results.sort { $0.lastModified > $1.lastModified }
 
         return Array(results.prefix(limit))
+    }
+
+    /// Saves an entire PDFDrawings struct directly without decode/re-encode round-trip
+    func saveDrawingsRaw(_ drawings: PDFDrawings) {
+        saveToDisk(drawings)
+        // Update cache for any pages that can be decoded
+        for (pageIndex, _) in drawings.pages {
+            if let drawing = drawings.getDrawing(forPage: pageIndex) {
+                let cacheKey = "\(drawings.pdfHash)-\(pageIndex)"
+                cache[cacheKey] = drawing
+            }
+        }
+    }
+
+    /// Immediately executes all pending debounced saves
+    func flushPendingSaves() {
+        for (_, workItem) in saveWorkItems {
+            workItem.perform()
+        }
+        saveWorkItems.removeAll()
     }
 
     // MARK: - Private Helpers

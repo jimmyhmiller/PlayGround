@@ -24,6 +24,7 @@ let beagProcess: child_process.ChildProcess | undefined;
 let serverOutput: string[] = [];
 
 function killBeagleServer() {
+  disconnectRepl();
   if (beagProcess && !beagProcess.killed) {
     beagProcess.kill();
     beagProcess = undefined;
@@ -32,12 +33,12 @@ function killBeagleServer() {
   }
 }
 
-function startBeagleServer(bgFile: string): child_process.ChildProcess {
+function startBeagleServer(bgFile: string, extraArgs: string[] = []): child_process.ChildProcess {
   // Kill any existing server first
   killBeagleServer();
   serverOutput = [];
 
-  const proc = child_process.spawn("beag", ["run", bgFile], {
+  const proc = child_process.spawn("beag", ["run", ...extraArgs, bgFile], {
     stdio: ["ignore", "pipe", "pipe"],
   });
   proc.stdout?.on("data", (chunk: Buffer) => {
@@ -236,6 +237,150 @@ function formatReplResponse(messages: ReplResponse[]): string {
 }
 
 // ---------------------------------------------------------------------------
+// Source file write-back
+// ---------------------------------------------------------------------------
+
+// Maps namespace name → absolute file path
+const namespaceFiles = new Map<string, string>();
+// Maps session name → current namespace
+const sessionNamespaces = new Map<string, string>();
+
+function trackFileNamespace(filePath: string, content?: string) {
+  const text = content ?? fs.readFileSync(filePath, "utf-8");
+  const match = text.match(/^\s*namespace\s+(\S+)/m);
+  if (match) {
+    namespaceFiles.set(match[1], path.resolve(filePath));
+  }
+}
+
+function trackSessionNamespace(session: string, code: string) {
+  // Check if the eval code sets a namespace
+  const match = code.match(/^\s*namespace\s+(\S+)/m);
+  if (match) {
+    sessionNamespaces.set(session, match[1]);
+  }
+}
+
+interface Definition {
+  kind: string;   // "fn", "struct", "enum", "let"
+  name: string;
+  text: string;   // Full definition text
+}
+
+/** Extract top-level definitions from Beagle code */
+function extractDefinitions(code: string): Definition[] {
+  const defs: Definition[] = [];
+  const lines = code.split("\n");
+  let i = 0;
+
+  while (i < lines.length) {
+    const line = lines[i];
+    const match = line.match(/^(fn|struct|enum|let)\s+(\w+)/);
+    if (!match) {
+      i++;
+      continue;
+    }
+
+    const kind = match[1];
+    const name = match[2];
+    const startLine = i;
+
+    // Find the end of this definition by brace counting
+    let depth = 0;
+    let foundOpen = false;
+    let endLine = i;
+
+    for (let j = i; j < lines.length; j++) {
+      for (const ch of lines[j]) {
+        if (ch === "{") { depth++; foundOpen = true; }
+        else if (ch === "}") { depth--; }
+      }
+      endLine = j;
+      if (foundOpen && depth <= 0) break;
+      // For simple `let x = value` with no braces, end at this line
+      if (!foundOpen && j === i && kind === "let") break;
+    }
+
+    const text = lines.slice(startLine, endLine + 1).join("\n");
+    defs.push({ kind, name, text });
+    i = endLine + 1;
+  }
+
+  return defs;
+}
+
+/** Find the line range of an existing definition in a file.
+ *  Returns [startLine, endLine] (0-indexed) or null if not found. */
+function findDefinitionRange(fileLines: string[], kind: string, name: string): [number, number] | null {
+  for (let i = 0; i < fileLines.length; i++) {
+    const re = new RegExp(`^${kind}\\s+${name}\\b`);
+    if (!re.test(fileLines[i])) continue;
+
+    // Found the start — now find the end via brace counting
+    let depth = 0;
+    let foundOpen = false;
+    let endLine = i;
+
+    for (let j = i; j < fileLines.length; j++) {
+      for (const ch of fileLines[j]) {
+        if (ch === "{") { depth++; foundOpen = true; }
+        else if (ch === "}") { depth--; }
+      }
+      endLine = j;
+      if (foundOpen && depth <= 0) break;
+      if (!foundOpen && j === i && kind === "let") break;
+    }
+
+    return [i, endLine];
+  }
+  return null;
+}
+
+/** After a successful eval, persist any definitions back to the source file */
+function persistDefinitions(code: string, session: string) {
+  const ns = sessionNamespaces.get(session);
+  if (!ns) return;
+  const filePath = namespaceFiles.get(ns);
+  if (!filePath) return;
+
+  const defs = extractDefinitions(code);
+  if (defs.length === 0) return;
+
+  let fileContent: string;
+  try {
+    fileContent = fs.readFileSync(filePath, "utf-8");
+  } catch {
+    return;
+  }
+
+  let fileLines = fileContent.split("\n");
+
+  for (const def of defs) {
+    const range = findDefinitionRange(fileLines, def.kind, def.name);
+    const defLines = def.text.split("\n");
+
+    if (range) {
+      // Replace existing definition
+      fileLines.splice(range[0], range[1] - range[0] + 1, ...defLines);
+    } else {
+      // Append new definition at end of file
+      // Add a blank line separator if file doesn't end with one
+      if (fileLines.length > 0 && fileLines[fileLines.length - 1].trim() !== "") {
+        fileLines.push("");
+      }
+      fileLines.push(...defLines);
+    }
+  }
+
+  fs.writeFileSync(filePath, fileLines.join("\n"));
+}
+
+/** Check if the REPL response indicates an error */
+function isErrorResponse(result: string): boolean {
+  return result.includes("[error]") || result.includes("[stderr]");
+}
+
+// ---------------------------------------------------------------------------
 // MCP Tools
 // ---------------------------------------------------------------------------
 
@@ -244,10 +389,16 @@ const beagleEval = tool(
   "Evaluate Beagle code in a REPL session. Use this for everything: defining functions, " +
   "testing expressions, introspecting namespaces, running reflection queries. " +
   "The code is evaluated in the live running Beagle program. " +
-  "If you define a function, it updates in the running program immediately.",
+  "If you define a function, it updates in the running program AND the source file automatically.",
   { code: z.string().describe("Beagle code to evaluate"), session: z.string().optional().describe("Session name (default: agent)") },
   async (args) => {
-    const result = await replRequest("eval", { code: args.code, session: args.session ?? "agent" });
+    const session = args.session ?? "agent";
+    trackSessionNamespace(session, args.code);
+    const result = await replRequest("eval", { code: args.code, session });
+    // Auto-persist definitions back to source file on success
+    if (!isErrorResponse(result)) {
+      persistDefinitions(args.code, session);
+    }
     return { content: [{ type: "text" as const, text: result }] };
   }
 );
@@ -310,6 +461,9 @@ const beagleRun = tool(
         return { content: [{ type: "text" as const, text: `Error: Could not find a namespace declaration in ${args.file}. The file must have a \`namespace <name>\` at the top.` }] };
       }
 
+      // Track namespace → file for write-back
+      trackFileNamespace(args.file, fileContent);
+
       // Generate wrapper that imports repl-main and the target namespace
       const wrapperCode = `namespace __repl_runner
 
@@ -369,7 +523,11 @@ const beagleLoad = tool(
     } catch (e: any) {
       return { content: [{ type: "text" as const, text: `Error reading file: ${e.message}` }] };
     }
-    const result = await replRequest("eval", { code, session: args.session ?? "agent" });
+    // Track namespace → file mapping for write-back
+    trackFileNamespace(args.file, code);
+    const session = args.session ?? "agent";
+    trackSessionNamespace(session, code);
+    const result = await replRequest("eval", { code, session });
     return { content: [{ type: "text" as const, text: `Loaded ${args.file}\n\n${result}` }] };
   }
 );
@@ -540,11 +698,13 @@ goes through the REPL.
 ## Your tools
 
 ### Lifecycle
-- **beagle_run**: Start (or restart) the REPL server. Call with no arguments to \
-  start the default server. **You must call this before using any other tool.**
+- **beagle_run**: Start (or restart) a Beagle program with an embedded REPL server. \
+  If given a .bg file, runs that file's main() with the REPL server embedded inside it — \
+  so you can eval code in the context of the running program. If no file is given, \
+  starts a standalone REPL server. **You must call this before using any other tool.**
 - **beagle_load**: Load a .bg file into the running REPL. Reads the file from disk \
   and evaluates its entire contents in the REPL session. All definitions from the \
-  file become live immediately. Use this when the user asks you to run/load their file.
+  file become live immediately. Use this when the user asks you to load additional files.
 
 ### Core
 - **beagle_eval**: Evaluate Beagle code in a session. This is your primary tool. \
@@ -591,7 +751,8 @@ Beagle is a functional language with:
 - Persistent data structures: vectors \`[1, 2, 3]\`, maps \`{:a 1, :b 2}\`
 
 When you define or redefine a function via eval, it updates in the running program \
-immediately — no restart needed.
+immediately — no restart needed. The source file on disk is also updated automatically \
+— you do not need to write changes to files yourself.
 
 ## Reflection API (beagle.reflect)
 
@@ -681,7 +842,7 @@ async function main() {
             "mcp__beagle-repl__beagle_search",
             "mcp__beagle-repl__beagle_doc",
           ],
-          model: "claude-opus-4-6",
+          model: "claude-sonnet-4-6",
         };
 
     for await (const message of query({ prompt: userInput, options })) {

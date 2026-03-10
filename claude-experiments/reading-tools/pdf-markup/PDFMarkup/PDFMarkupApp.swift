@@ -13,6 +13,8 @@ struct PDFMarkupApp: App {
     #endif
     @StateObject private var sharedPDFManager = SharedPDFManager()
 
+    @Environment(\.scenePhase) private var scenePhase
+
     var body: some Scene {
         WindowGroup {
             ContentView()
@@ -20,6 +22,15 @@ struct PDFMarkupApp: App {
                 .onOpenURL { url in
                     sharedPDFManager.handleIncomingPDF(url: url)
                 }
+        }
+        .onChange(of: scenePhase) {
+            if scenePhase == .background || scenePhase == .inactive {
+                // Flush any pending drawing saves and sync to S3 immediately
+                DrawingManager.shared.flushPendingSaves()
+                Task {
+                    await DrawingSyncManager.shared.syncAll()
+                }
+            }
         }
     }
 }

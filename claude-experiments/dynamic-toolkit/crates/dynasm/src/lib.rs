@@ -3,12 +3,14 @@
 
 pub mod arm64;
 pub mod buffer;
+pub mod code_memory;
 pub mod x86_64;
 
 #[cfg(test)]
 mod tests;
 
-pub use buffer::{CodeBuffer, ExecutableBuffer, Label, Relocation};
+pub use buffer::{CodeBuffer, Label, Relocation};
+pub use code_memory::{CodeMemory, PagedCodeMemory};
 
 /// Architecture trait — connects instruction type, relocation kind, and
 /// the emit/patch logic that is architecture-specific.

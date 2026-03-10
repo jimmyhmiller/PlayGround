@@ -42,26 +42,27 @@ extension Color {
 
 extension PlatformColor {
     static func highlightColor(from color: Color) -> PlatformColor {
+        let alpha: CGFloat = 0.15
         switch color {
         case .yellow:
-            return PlatformColor(red: 1.0, green: 1.0, blue: 0.0, alpha: 0.5)
+            return PlatformColor(red: 1.0, green: 1.0, blue: 0.0, alpha: alpha)
         case .green:
-            return PlatformColor(red: 0.0, green: 1.0, blue: 0.0, alpha: 0.5)
+            return PlatformColor(red: 0.0, green: 1.0, blue: 0.0, alpha: alpha)
         case .red:
-            return PlatformColor(red: 1.0, green: 0.35, blue: 0.35, alpha: 0.5)
+            return PlatformColor(red: 1.0, green: 0.35, blue: 0.35, alpha: alpha)
         case .orange:
-            return PlatformColor(red: 1.0, green: 0.65, blue: 0.0, alpha: 0.5)
+            return PlatformColor(red: 1.0, green: 0.65, blue: 0.0, alpha: alpha)
         case .blue:
-            return PlatformColor(red: 0.0, green: 0.5, blue: 1.0, alpha: 0.5)
+            return PlatformColor(red: 0.0, green: 0.5, blue: 1.0, alpha: alpha)
         case .purple:
-            return PlatformColor(red: 0.6, green: 0.3, blue: 0.9, alpha: 0.5)
+            return PlatformColor(red: 0.6, green: 0.3, blue: 0.9, alpha: alpha)
         default:
             if let cgColor = color.cgColor,
                let components = cgColor.components,
                components.count >= 3 {
-                return PlatformColor(red: components[0], green: components[1], blue: components[2], alpha: 0.5)
+                return PlatformColor(red: components[0], green: components[1], blue: components[2], alpha: alpha)
             }
-            return PlatformColor(red: 1.0, green: 1.0, blue: 0.0, alpha: 0.5)
+            return PlatformColor(red: 1.0, green: 1.0, blue: 0.0, alpha: alpha)
         }
     }
 }
