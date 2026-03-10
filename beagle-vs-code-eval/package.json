@@ -19,7 +19,11 @@
       },
       {
         "command": "beagle-vs-code-eval.evalSelection",
-        "title": "Beagle: Eval Selection/Line"
+        "title": "Beagle: Eval Expression"
+      },
+      {
+        "command": "beagle-vs-code-eval.evalTopLevel",
+        "title": "Beagle: Eval Top-Level Expression"
       },
       {
         "command": "beagle-vs-code-eval.run",
@@ -41,9 +45,14 @@
         "mac": "ctrl+enter"
       },
       {
-        "command": "beagle-vs-code-eval.sendFile",
+        "command": "beagle-vs-code-eval.evalTopLevel",
         "key": "ctrl+shift+enter",
         "mac": "ctrl+shift+enter"
+      },
+      {
+        "command": "beagle-vs-code-eval.sendFile",
+        "key": "ctrl+alt+enter",
+        "mac": "ctrl+alt+enter"
       }
     ],
     "configuration": {

@@ -6,8 +6,9 @@ use dynobj::{
     ObjHeader, RootSource, TypeInfo, VarLenKind, AtomicRootSet,
 };
 
-use crate::alloc::{Alloc, AtomicBumpAllocator};
+use crate::alloc::{Alloc, AtomicBumpAllocator, HeapWalker};
 use crate::barrier::SATBQueue;
+use crate::card_table::CardTable;
 use crate::semi_space::PtrPolicy;
 use crate::statemap::{StatemapTracer, TraceState};
 use crate::thread::ThreadState;
@@ -28,6 +29,17 @@ pub enum GcPhase {
     Idle = 0,
     /// Concurrent copying in progress. Write barriers are active.
     Copying = 1,
+}
+
+/// State for the generational nursery (young generation).
+struct NurseryState {
+    /// The nursery bump allocator (young generation).
+    nursery: AtomicBumpAllocator,
+    /// Card tables for each tenured space — tracks old→young pointer writes.
+    /// Index matches the `spaces` array: card_tables[0] covers spaces[0], etc.
+    card_tables: [CardTable; 2],
+    /// Number of minor collections performed.
+    minor_collections: AtomicUsize,
 }
 
 pub struct Heap {
@@ -63,6 +75,9 @@ pub struct Heap {
 
     /// When true, trigger GC on every allocation (stress testing).
     gc_every_alloc: AtomicBool,
+
+    /// Generational nursery state. `None` for non-generational heaps.
+    nursery_state: Option<NurseryState>,
 }
 
 // Safety: All fields are either Sync (atomics, mutexes) or accessed
@@ -89,6 +104,43 @@ impl Heap {
             satb_queue: SATBQueue::new(),
             tracer: None,
             gc_every_alloc: AtomicBool::new(false),
+            nursery_state: None,
+        }
+    }
+
+    /// Create a new generational heap with a nursery (young generation)
+    /// and two tenured spaces (old generation).
+    ///
+    /// New allocations go to the nursery. When the nursery fills, a minor
+    /// GC promotes survivors to tenured from-space. When tenured space fills,
+    /// a major GC (STW or concurrent) collects the old generation.
+    pub fn new_generational<H: ObjHeader>(nursery_size: usize, tenured_size: usize) -> Self {
+        let spaces = [
+            AtomicBumpAllocator::new::<H>(tenured_size),
+            AtomicBumpAllocator::new::<H>(tenured_size),
+        ];
+        let card_tables = [
+            CardTable::new(spaces[0].base(), tenured_size),
+            CardTable::new(spaces[1].base(), tenured_size),
+        ];
+        Heap {
+            spaces,
+            from_idx: AtomicUsize::new(0),
+            threads: Mutex::new(Vec::new()),
+            globals: AtomicRootSet::new(),
+            gc_requested: AtomicBool::new(false),
+            gc_lock: Mutex::new(()),
+            type_info_offset: H::TYPE_INFO_OFFSET,
+            collections: AtomicUsize::new(0),
+            gc_phase: AtomicU8::new(GcPhase::Idle as u8),
+            satb_queue: SATBQueue::new(),
+            tracer: None,
+            gc_every_alloc: AtomicBool::new(false),
+            nursery_state: Some(NurseryState {
+                nursery: AtomicBumpAllocator::new::<H>(nursery_size),
+                card_tables,
+                minor_collections: AtomicUsize::new(0),
+            }),
         }
     }
 
@@ -255,6 +307,79 @@ impl Heap {
         unsafe { crate::alloc::alloc_obj::<H>(self.from_space(), info, varlen_len) }
     }
 
+    // ─── Generational helpers ────────────────────────────────────
+
+    /// Check if this heap has a nursery (generational mode).
+    #[inline(always)]
+    pub fn has_nursery(&self) -> bool {
+        self.nursery_state.is_some()
+    }
+
+    /// Check if a pointer is in the nursery.
+    #[inline(always)]
+    pub fn is_nursery(&self, ptr: *const u8) -> bool {
+        match &self.nursery_state {
+            Some(ns) => ns.nursery.contains(ptr),
+            None => false,
+        }
+    }
+
+    /// Check if a pointer is in tenured space (either from or to).
+    #[inline(always)]
+    pub fn is_tenured(&self, ptr: *const u8) -> bool {
+        self.from_space().contains(ptr) || self.to_space().contains(ptr)
+    }
+
+    /// Allocate from the nursery if generational, otherwise from from-space.
+    pub fn alloc_nursery(&self, info: &'static TypeInfo, varlen_len: usize) -> *mut u8 {
+        match &self.nursery_state {
+            Some(ns) => ns.nursery.alloc(info, varlen_len),
+            None => self.from_space().alloc(info, varlen_len),
+        }
+    }
+
+    /// Allocate and init header in the nursery if generational, otherwise from-space.
+    pub fn alloc_nursery_obj<H: ObjHeader>(
+        &self,
+        info: &'static TypeInfo,
+        varlen_len: usize,
+    ) -> *mut u8 {
+        match &self.nursery_state {
+            Some(ns) => unsafe { crate::alloc::alloc_obj::<H>(&ns.nursery, info, varlen_len) },
+            None => unsafe { crate::alloc::alloc_obj::<H>(self.from_space(), info, varlen_len) },
+        }
+    }
+
+    /// Allocate directly in tenured from-space (for promotion during minor GC).
+    pub fn alloc_tenured(&self, info: &'static TypeInfo, varlen_len: usize) -> *mut u8 {
+        self.from_space().alloc(info, varlen_len)
+    }
+
+    /// Mark the card covering `obj` as dirty (old→young pointer write).
+    #[inline(always)]
+    pub fn mark_card_dirty(&self, obj: *const u8) {
+        if let Some(ns) = &self.nursery_state {
+            let from_idx = self.from_idx.load(Ordering::Acquire);
+            ns.card_tables[from_idx].mark_dirty(obj);
+        }
+    }
+
+    /// Number of minor collections performed.
+    pub fn minor_collections(&self) -> usize {
+        match &self.nursery_state {
+            Some(ns) => ns.minor_collections.load(Ordering::Relaxed),
+            None => 0,
+        }
+    }
+
+    /// Nursery bytes used.
+    pub fn nursery_used(&self) -> usize {
+        match &self.nursery_state {
+            Some(ns) => ns.nursery.used(),
+            None => 0,
+        }
+    }
+
     // ─── Safepoint polling ──────────────────────────────────────
 
     /// Check if GC has been requested. Mutator threads should call
@@ -287,15 +412,19 @@ impl Heap {
         self.to_space().base()
     }
 
-    /// Check if a pointer is in from-space.
-    pub fn contains(&self, ptr: *const u8) -> bool {
+    /// Check if a pointer is specifically in tenured from-space (not nursery).
+    pub fn from_space_contains(&self, ptr: *const u8) -> bool {
         self.from_space().contains(ptr)
     }
 
-    /// Check if a pointer is in either space (useful during concurrent GC
-    /// when roots may point to to-space).
+    /// Check if a pointer is in from-space (or nursery for generational heaps).
+    pub fn contains(&self, ptr: *const u8) -> bool {
+        self.from_space().contains(ptr) || self.is_nursery(ptr)
+    }
+
+    /// Check if a pointer is in either tenured space or nursery.
     pub fn contains_either(&self, ptr: *const u8) -> bool {
-        self.from_space().contains(ptr) || self.to_space().contains(ptr)
+        self.from_space().contains(ptr) || self.to_space().contains(ptr) || self.is_nursery(ptr)
     }
 
     /// Total size of each space.
@@ -356,6 +485,18 @@ impl Heap {
             });
         }
 
+        // Nursery objects as roots: during major GC, nursery objects may
+        // hold pointers to tenured from-space objects that need forwarding.
+        if let Some(ns) = &self.nursery_state {
+            unsafe {
+                ns.nursery.walk(&mut |obj, info| {
+                    scan_object(obj, info, |slot| {
+                        self.process_slot::<P>(slot);
+                    });
+                });
+            }
+        }
+
         // Phase 2: Cheney scan — walk to-space linearly
         let mut scan_offset = 0usize;
         while scan_offset < self.to_space().used() {
@@ -381,6 +522,12 @@ impl Heap {
         self.swap_spaces();
         self.to_space().reset();
         self.collections.fetch_add(1, Ordering::Relaxed);
+
+        // Clear card table for new from-space after swap
+        if let Some(ns) = &self.nursery_state {
+            let from_idx = self.from_idx.load(Ordering::Acquire);
+            ns.card_tables[from_idx].clear_all();
+        }
     }
 
     /// Trigger a STW collection cycle: request all threads to stop,
@@ -491,6 +638,17 @@ impl Heap {
             });
         }
 
+        // Nursery objects as roots during major GC
+        if let Some(ns) = &self.nursery_state {
+            unsafe {
+                ns.nursery.walk(&mut |obj, info| {
+                    scan_object(obj, info, |slot| {
+                        self.process_slot::<P>(slot);
+                    });
+                });
+            }
+        }
+
         // Phase 2: Cheney scan
         let mut scan_offset = 0usize;
         while scan_offset < self.to_space().used() {
@@ -516,6 +674,12 @@ impl Heap {
         self.swap_spaces();
         self.to_space().reset();
         self.collections.fetch_add(1, Ordering::Relaxed);
+
+        // Clear card table for new from-space after swap (all tenured pointers updated)
+        if let Some(ns) = &self.nursery_state {
+            let from_idx = self.from_idx.load(Ordering::Acquire);
+            ns.card_tables[from_idx].clear_all();
+        }
 
         // Debug: verify all root slots point to from-space after swap
         if cfg!(debug_assertions) && self.gc_every_alloc() {
@@ -673,6 +837,17 @@ impl Heap {
             });
         }
 
+        // Nursery objects as roots during concurrent major GC
+        if let Some(ns) = &self.nursery_state {
+            unsafe {
+                ns.nursery.walk(&mut |obj, info| {
+                    scan_object(obj, info, |slot| {
+                        self.process_slot::<P>(slot);
+                    });
+                });
+            }
+        }
+
         // Resume threads — they now run with write barriers active.
         // Snapshot generations so STW #2 can distinguish stale safepoints.
         self.trace_gc(TraceState::GcResuming);
@@ -759,6 +934,17 @@ impl Heap {
             });
         }
 
+        // Re-scan nursery objects as roots
+        if let Some(ns) = &self.nursery_state {
+            unsafe {
+                ns.nursery.walk(&mut |obj, info| {
+                    scan_object(obj, info, |slot| {
+                        self.process_slot::<P>(slot);
+                    });
+                });
+            }
+        }
+
         // Drain SATB queue (flushed by mutators) + thread-local SATB buffers
         let satb_values = self.satb_queue.drain_all();
         for bits in satb_values {
@@ -813,6 +999,12 @@ impl Heap {
         self.swap_spaces();
         self.to_space().reset();
         self.collections.fetch_add(1, Ordering::Relaxed);
+
+        // Clear card table for new from-space after swap
+        if let Some(ns) = &self.nursery_state {
+            let from_idx = self.from_idx.load(Ordering::Acquire);
+            ns.card_tables[from_idx].clear_all();
+        }
 
         // Debug: verify all root slots point to from-space after swap
         if cfg!(debug_assertions) && self.gc_every_alloc() {
@@ -874,6 +1066,10 @@ impl Heap {
             atomic.load(Ordering::Relaxed)
         };
         if let Some(ptr) = P::try_decode_ptr(bits) {
+            // Skip nursery pointers during major GC — they aren't being collected
+            if self.is_nursery(ptr) {
+                return;
+            }
             if self.from_space().contains(ptr) {
                 let new_ptr = unsafe { self.copy_or_forward::<P>(ptr) };
                 unsafe {
@@ -900,6 +1096,10 @@ impl Heap {
             atomic.load(Ordering::Relaxed)
         };
         if let Some(ptr) = P::try_decode_ptr(bits) {
+            // Skip nursery pointers during major GC
+            if self.is_nursery(ptr) {
+                return;
+            }
             if self.from_space().contains(ptr) {
                 // Copy the object (installs forwarding pointer) but
                 // don't write the new address back to the parent slot.
@@ -1040,5 +1240,331 @@ impl Heap {
         // correct). The winner's copy is the canonical one.
         // In a production GC, we'd want to reclaim this space.
         winner
+    }
+
+    // ─── Minor GC (Generational) ────────────────────────────────
+
+    /// Promote a nursery object to tenured from-space, or follow its
+    /// forwarding pointer if already promoted.
+    ///
+    /// # Safety
+    /// - `old` must point to a valid nursery object.
+    /// - Must be called during STW (no concurrent access).
+    unsafe fn promote_or_forward<P: PtrPolicy>(&self, old: *mut u8) -> *mut u8 {
+        // Check if already promoted (forwarding pointer installed)
+        if let Some(forwarded) = unsafe { self.check_forwarded(old) } {
+            return forwarded;
+        }
+
+        let info = unsafe { &*read_type_info(old, self.type_info_offset) };
+        let varlen_len = match info.varlen {
+            VarLenKind::None => 0,
+            _ => unsafe { read_varlen_count(old, info) },
+        };
+        let size = info.allocation_size(varlen_len);
+
+        // Allocate in tenured from-space
+        let new = self.from_space().alloc(info, varlen_len);
+        assert!(!new.is_null(), "tenured from-space exhausted during minor GC promotion");
+
+        unsafe {
+            core::ptr::copy_nonoverlapping(old, new, size);
+        }
+
+        // Install forwarding pointer in nursery copy
+        unsafe { self.install_forwarding(old, new) };
+
+        new
+    }
+
+    /// Process a slot during minor GC: if it points to the nursery,
+    /// promote the target and update the slot.
+    ///
+    /// # Safety
+    /// - Must be called during STW.
+    unsafe fn promote_slot<P: PtrPolicy>(&self, slot: *mut u64) {
+        let bits = unsafe {
+            let atomic = &*(slot as *const std::sync::atomic::AtomicU64);
+            atomic.load(Ordering::Relaxed)
+        };
+        if let Some(ptr) = P::try_decode_ptr(bits) {
+            if self.is_nursery(ptr) {
+                let new_ptr = unsafe { self.promote_or_forward::<P>(ptr) };
+                unsafe {
+                    let atomic = &*(slot as *const std::sync::atomic::AtomicU64);
+                    atomic.store(P::encode_ptr(new_ptr), Ordering::Relaxed);
+                };
+            }
+        }
+    }
+
+    /// Run a minor (nursery) collection triggered by a mutator thread.
+    ///
+    /// All live nursery objects are promoted to tenured from-space.
+    /// The nursery is then reset.
+    ///
+    /// # Safety
+    /// - All objects in the nursery and tenured spaces must have valid headers.
+    /// - The triggering thread's frame chain must be stable.
+    pub unsafe fn mutator_triggered_minor_gc<P: PtrPolicy>(
+        &self,
+        triggering_thread: &ThreadState,
+    ) {
+        let ns = match &self.nursery_state {
+            Some(ns) => ns,
+            None => return,
+        };
+
+        // Try to become the GC thread
+        let gc_guard = match self.gc_lock.try_lock() {
+            Ok(guard) => guard,
+            Err(std::sync::TryLockError::WouldBlock) => {
+                // Another thread is already collecting.
+                while self.gc_requested() {
+                    triggering_thread.enter_safepoint();
+                }
+                return;
+            }
+            Err(e) => panic!("gc_lock poisoned: {}", e),
+        };
+
+        // Under gc_lock: if nursery is empty, another thread already did the minor GC.
+        if ns.nursery.used() == 0 {
+            drop(gc_guard);
+            return;
+        }
+
+        // Under gc_lock: if tenured doesn't have enough room for worst-case
+        // promotion, run a major GC first. We already hold gc_lock, so use
+        // the shared STW-from-mutator pattern.
+        if ns.nursery.used() > self.from_space().remaining() {
+            let trigger_ptr = triggering_thread as *const ThreadState as usize;
+            let thread_snapshot: Vec<Arc<ThreadState>> = {
+                let threads = self.threads.lock().unwrap();
+                self.gc_requested.store(true, Ordering::Release);
+                threads.iter().cloned().collect()
+            };
+            for ts in thread_snapshot.iter() {
+                if Arc::as_ptr(ts) as usize == trigger_ptr { continue; }
+                while !ts.is_safely_at_safepoint() {
+                    std::thread::yield_now();
+                }
+            }
+            // Reuse collect_inner — all threads are at safepoints, gc_lock held.
+            unsafe { self.collect_inner::<P>(&[]) };
+            self.gc_requested.store(false, Ordering::Release);
+            for ts in thread_snapshot.iter() {
+                if Arc::as_ptr(ts) as usize == trigger_ptr { continue; }
+                ts.resume();
+            }
+        }
+
+        // Snapshot threads and set gc_requested
+        let trigger_ptr = triggering_thread as *const ThreadState as usize;
+        let thread_snapshot: Vec<Arc<ThreadState>> = {
+            let threads = self.threads.lock().unwrap();
+            self.gc_requested.store(true, Ordering::Release);
+            threads.iter().cloned().collect()
+        };
+
+        // Wait for all threads EXCEPT ourselves to reach safepoints
+        for ts in thread_snapshot.iter() {
+            if Arc::as_ptr(ts) as usize == trigger_ptr {
+                continue;
+            }
+            while !ts.is_safely_at_safepoint() {
+                std::thread::yield_now();
+            }
+        }
+
+        // Record promotion start offset for Cheney scanning
+        let promotion_start = self.from_space().used();
+
+        // Phase 1: Scan roots — promote nursery objects
+        self.globals.scan_roots(&mut |slot| {
+            unsafe { self.promote_slot::<P>(slot) };
+        });
+
+        for ts in thread_snapshot.iter() {
+            ts.scan_roots(&mut |slot| {
+                unsafe { self.promote_slot::<P>(slot) };
+            });
+        }
+
+        // Phase 2: Scan dirty cards in tenured from-space
+        let from_idx = self.from_idx.load(Ordering::Acquire);
+        {
+            let card_table = &ns.card_tables[from_idx];
+            let tenured = &self.spaces[from_idx];
+            let tenured_used = promotion_start; // only scan pre-existing tenured objects
+
+            // Build object-start index: for each card, the offset of the last
+            // object that starts at or before the card boundary. This lets us
+            // jump directly to the right object instead of walking from offset 0.
+            let obj_starts = unsafe {
+                Self::build_object_start_index(tenured, tenured_used, card_table, self.type_info_offset)
+            };
+
+            for (card_idx, card_addr) in card_table.iter_dirty() {
+                let start_offset = if card_idx < obj_starts.len() {
+                    obj_starts[card_idx]
+                } else {
+                    continue;
+                };
+                unsafe {
+                    self.scan_card_from_offset::<P>(
+                        card_addr,
+                        tenured,
+                        tenured_used,
+                        start_offset,
+                    );
+                }
+            }
+        }
+
+        // Phase 3: Cheney scan of promoted objects
+        // Walk tenured from-space from promotion_start to current used(),
+        // processing each newly promoted object's fields.
+        let mut scan_offset = promotion_start;
+        while scan_offset < self.from_space().used() {
+            let obj = unsafe { self.from_space().base().add(scan_offset) };
+            let info = unsafe { &*read_type_info(obj, self.type_info_offset) };
+
+            unsafe {
+                scan_object(obj, info, |slot| {
+                    self.promote_slot::<P>(slot);
+                });
+            }
+
+            let varlen_len = match info.varlen {
+                VarLenKind::None => 0,
+                _ => unsafe { read_varlen_count(obj, info) },
+            };
+            let obj_size = info.allocation_size(varlen_len);
+            let align = 1usize << info.align_log2;
+            scan_offset = (scan_offset + obj_size + align - 1) & !(align - 1);
+        }
+
+        // Phase 4: Reset nursery and clear card table
+        ns.nursery.reset();
+        ns.card_tables[from_idx].clear_all();
+        ns.minor_collections.fetch_add(1, Ordering::Relaxed);
+
+        // Resume threads
+        self.gc_requested.store(false, Ordering::Release);
+        for ts in thread_snapshot.iter() {
+            if Arc::as_ptr(ts) as usize == trigger_ptr {
+                continue;
+            }
+            ts.resume();
+        }
+
+        drop(gc_guard);
+    }
+
+    /// Build an object-start index for card scanning.
+    ///
+    /// Returns a Vec where entry[i] is the offset of the last object that
+    /// starts at or before card i's boundary. This allows O(1) lookup of
+    /// where to start scanning for a given dirty card, instead of walking
+    /// from offset 0.
+    ///
+    /// # Safety
+    /// All objects in the tenured space must have valid headers.
+    unsafe fn build_object_start_index(
+        tenured: &AtomicBumpAllocator,
+        tenured_used: usize,
+        card_table: &CardTable,
+        type_info_offset: usize,
+    ) -> Vec<usize> {
+        let num_cards = card_table.card_count();
+        // Sentinel: usize::MAX means "no object starts in this card".
+        let mut obj_starts = vec![usize::MAX; num_cards];
+        let tenured_base = tenured.base() as usize;
+        let card_size = card_table.card_size();
+
+        let mut offset = 0usize;
+        while offset < tenured_used {
+            let obj = unsafe { tenured.base().add(offset) };
+            let info = unsafe { &*read_type_info(obj, type_info_offset) };
+            let varlen_len = match info.varlen {
+                VarLenKind::None => 0,
+                _ => unsafe { read_varlen_count(obj, info) },
+            };
+            let obj_size = info.allocation_size(varlen_len);
+
+            let obj_addr = obj as usize;
+            let card_idx = (obj_addr - tenured_base) / card_size;
+
+            // Keep the FIRST object per card — earlier objects must also be scanned.
+            if card_idx < num_cards && obj_starts[card_idx] == usize::MAX {
+                obj_starts[card_idx] = offset;
+            }
+
+            let align = 1usize << info.align_log2;
+            offset = (offset + obj_size + align - 1) & !(align - 1);
+        }
+
+        // Forward-fill: cards with no objects inherit the previous card's
+        // start offset. This handles objects that span from an earlier card.
+        // scan_card_from_offset walks forward from this offset and checks
+        // overlap, so scanning a few extra pre-card objects is harmless.
+        if num_cards > 0 && obj_starts[0] == usize::MAX {
+            obj_starts[0] = 0;
+        }
+        for i in 1..num_cards {
+            if obj_starts[i] == usize::MAX {
+                obj_starts[i] = obj_starts[i - 1];
+            }
+        }
+
+        obj_starts
+    }
+
+    /// Scan objects overlapping a dirty card, starting from a known offset.
+    ///
+    /// # Safety
+    /// - Must be called during STW.
+    /// - `start_offset` must be the offset of a valid object in tenured space.
+    unsafe fn scan_card_from_offset<P: PtrPolicy>(
+        &self,
+        card_addr: *const u8,
+        tenured: &AtomicBumpAllocator,
+        tenured_used: usize,
+        start_offset: usize,
+    ) {
+        let card_start = card_addr as usize;
+        let card_end = card_start + 512; // CARD_SHIFT = 9 → 512 bytes
+
+        let mut offset = start_offset;
+        while offset < tenured_used {
+            let obj = unsafe { tenured.base().add(offset) };
+            let obj_addr = obj as usize;
+            let info = unsafe { &*read_type_info(obj, self.type_info_offset) };
+
+            let varlen_len = match info.varlen {
+                VarLenKind::None => 0,
+                _ => unsafe { read_varlen_count(obj, info) },
+            };
+            let obj_size = info.allocation_size(varlen_len);
+            let obj_end = obj_addr + obj_size;
+
+            // Check if object overlaps with the card region
+            if obj_end > card_start && obj_addr < card_end {
+                unsafe {
+                    scan_object(obj, info, |slot| {
+                        self.promote_slot::<P>(slot);
+                    });
+                }
+            }
+
+            // Stop if we've passed the card entirely
+            if obj_addr >= card_end {
+                break;
+            }
+
+            let align = 1usize << info.align_log2;
+            offset = (offset + obj_size + align - 1) & !(align - 1);
+        }
     }
 }

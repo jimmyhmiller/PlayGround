@@ -3642,3 +3642,392 @@ fn statemap_trace_output() {
     );
     eprintln!("  Run: statemap {} > /tmp/gc_trace.svg", path);
 }
+
+// ─── Generational GC Tests ──────────────────────────────────────────
+
+#[test]
+fn minor_gc_basic() {
+    // Allocate in nursery, root some, minor GC, verify survivors in tenured
+    static LEAF: TypeInfo = TypeInfo::for_header(Compact::SIZE);
+
+    let heap = Arc::new(Heap::new_generational::<Compact>(4096, 65536));
+    let (ts, _id) = heap.register_thread();
+
+    let frame = RootFrame::<2>::new();
+    let _guard = ts.frame_chain.push(&frame);
+
+    // Allocate two objects in nursery
+    let obj1 = heap.alloc_nursery_obj::<Compact>(&LEAF, 0);
+    let obj2 = heap.alloc_nursery_obj::<Compact>(&LEAF, 0);
+    assert!(!obj1.is_null());
+    assert!(!obj2.is_null());
+    assert!(heap.is_nursery(obj1));
+    assert!(heap.is_nursery(obj2));
+
+    // Root only obj1
+    frame.slots[0].set(ptr_val(obj1));
+
+    unsafe { heap.mutator_triggered_minor_gc::<LowBit3Tag0>(&ts) };
+
+    // obj1 should be promoted to tenured
+    let new_obj1 = LowBit3Tag0::try_decode_ptr(frame.slots[0].get()).unwrap();
+    assert!(!heap.is_nursery(new_obj1), "promoted object should be in tenured space");
+    assert!(heap.from_space_contains(new_obj1), "promoted object should be in tenured from-space");
+    assert_eq!(heap.minor_collections(), 1);
+    assert_eq!(heap.nursery_used(), 0, "nursery should be reset after minor GC");
+}
+
+#[test]
+fn minor_gc_promotes_linked_list() {
+    // Build a chain in nursery, minor GC, verify all nodes promoted
+    static NODE: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_fields(1);
+
+    let heap = Arc::new(Heap::new_generational::<Compact>(4096, 65536));
+    let (ts, _id) = heap.register_thread();
+
+    let frame = RootFrame::<1>::new();
+    let _guard = ts.frame_chain.push(&frame);
+
+    // Build chain: a → b → c
+    let c = heap.alloc_nursery_obj::<Compact>(&NODE, 0);
+    let b = heap.alloc_nursery_obj::<Compact>(&NODE, 0);
+    let a = heap.alloc_nursery_obj::<Compact>(&NODE, 0);
+
+    unsafe {
+        write_value_field(a, &NODE, 0, Value::<LowBit<3>>::from_bits(ptr_val(b)));
+        write_value_field(b, &NODE, 0, Value::<LowBit<3>>::from_bits(ptr_val(c)));
+    }
+
+    frame.slots[0].set(ptr_val(a));
+
+    unsafe { heap.mutator_triggered_minor_gc::<LowBit3Tag0>(&ts) };
+
+    // Walk the chain and verify all nodes are in tenured
+    let mut cur = LowBit3Tag0::try_decode_ptr(frame.slots[0].get()).unwrap();
+    for _ in 0..2 {
+        assert!(heap.from_space_contains(cur), "node should be in tenured from-space");
+        let field: Value<LowBit<3>> = unsafe { read_value_field(cur, &NODE, 0) };
+        cur = LowBit3Tag0::try_decode_ptr(field.to_bits()).unwrap();
+    }
+    // Last node (c) should also be in tenured
+    assert!(heap.from_space_contains(cur), "tail node should be in tenured from-space");
+}
+
+#[test]
+fn minor_gc_reclaims_garbage() {
+    // Unreachable nursery objects should not be promoted
+    static LEAF: TypeInfo = TypeInfo::for_header(Compact::SIZE);
+
+    let heap = Arc::new(Heap::new_generational::<Compact>(4096, 65536));
+    let (ts, _id) = heap.register_thread();
+
+    let frame = RootFrame::<1>::new();
+    let _guard = ts.frame_chain.push(&frame);
+
+    let tenured_before = heap.from_used();
+
+    // Allocate many unreachable objects
+    for _ in 0..10 {
+        let obj = heap.alloc_nursery_obj::<Compact>(&LEAF, 0);
+        assert!(!obj.is_null());
+    }
+
+    // Root one object
+    let live = heap.alloc_nursery_obj::<Compact>(&LEAF, 0);
+    frame.slots[0].set(ptr_val(live));
+
+    unsafe { heap.mutator_triggered_minor_gc::<LowBit3Tag0>(&ts) };
+
+    // Only 1 object should have been promoted
+    let tenured_after = heap.from_used();
+    assert_eq!(
+        tenured_after - tenured_before,
+        LEAF.allocation_size(0),
+        "only 1 object should be promoted"
+    );
+}
+
+#[test]
+fn card_table_tracks_old_to_young() {
+    // Promote A to tenured, alloc B in nursery, store B into A's field,
+    // mark card, minor GC → B should be promoted and A's field updated.
+    static PAIR: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_fields(2);
+    static LEAF: TypeInfo = TypeInfo::for_header(Compact::SIZE);
+
+    let heap = Arc::new(Heap::new_generational::<Compact>(4096, 65536));
+    let (ts, _id) = heap.register_thread();
+
+    let frame = RootFrame::<1>::new();
+    let _guard = ts.frame_chain.push(&frame);
+
+    // Allocate parent in nursery and root it
+    let parent = heap.alloc_nursery_obj::<Compact>(&PAIR, 0);
+    frame.slots[0].set(ptr_val(parent));
+
+    // Minor GC → parent promoted to tenured
+    unsafe { heap.mutator_triggered_minor_gc::<LowBit3Tag0>(&ts) };
+    let tenured_parent = LowBit3Tag0::try_decode_ptr(frame.slots[0].get()).unwrap();
+    assert!(heap.from_space_contains(tenured_parent));
+
+    // Now allocate child in nursery
+    let child = heap.alloc_nursery_obj::<Compact>(&LEAF, 0);
+    assert!(heap.is_nursery(child));
+
+    // Store child pointer into tenured parent's field (old→young write)
+    unsafe {
+        write_value_field(tenured_parent, &PAIR, 0, Value::<LowBit<3>>::from_bits(ptr_val(child)));
+    }
+    // Mark card dirty (simulating the generational write barrier)
+    heap.mark_card_dirty(tenured_parent as *const u8);
+
+    // Minor GC → child should be promoted, parent's field updated
+    unsafe { heap.mutator_triggered_minor_gc::<LowBit3Tag0>(&ts) };
+
+    let new_parent = LowBit3Tag0::try_decode_ptr(frame.slots[0].get()).unwrap();
+    // Parent is still in tenured (not moved by minor GC)
+    assert_eq!(new_parent, tenured_parent, "tenured parent should not move during minor GC");
+
+    // Parent's field[0] should now point to promoted child
+    let field0: Value<LowBit<3>> = unsafe { read_value_field(new_parent, &PAIR, 0) };
+    let new_child = LowBit3Tag0::try_decode_ptr(field0.to_bits()).unwrap();
+    assert!(heap.from_space_contains(new_child), "child should be promoted to tenured");
+    assert!(!heap.is_nursery(new_child), "child should no longer be in nursery");
+}
+
+#[test]
+fn minor_then_major() {
+    // Fill nursery → minor GC → fill tenured → major GC → verify integrity
+    static NODE: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_fields(1);
+
+    let heap = Arc::new(Heap::new_generational::<Compact>(2048, 65536));
+    let (ts, _id) = heap.register_thread();
+
+    let frame = RootFrame::<1>::new();
+    let _guard = ts.frame_chain.push(&frame);
+
+    // Build a chain of nodes, promoting through multiple minor GCs
+    let mut prev: *mut u8 = core::ptr::null_mut();
+    let node_size = NODE.allocation_size(0);
+    let nodes_per_nursery = 2048 / node_size;
+
+    // Create a chain spanning several minor GC cycles
+    for _i in 0..(nodes_per_nursery * 3) {
+        let node = heap.alloc_nursery_obj::<Compact>(&NODE, 0);
+        if node.is_null() {
+            // Nursery full — minor GC
+            unsafe { heap.mutator_triggered_minor_gc::<LowBit3Tag0>(&ts) };
+            // Update prev from root
+            if !prev.is_null() {
+                prev = LowBit3Tag0::try_decode_ptr(frame.slots[0].get()).unwrap();
+            }
+            // Retry alloc
+            let node = heap.alloc_nursery_obj::<Compact>(&NODE, 0);
+            assert!(!node.is_null(), "alloc should succeed after minor GC");
+            if !prev.is_null() {
+                unsafe {
+                    write_value_field(node, &NODE, 0, Value::<LowBit<3>>::from_bits(ptr_val(prev)));
+                }
+                // Write barrier: node is in nursery, prev is tenured — no card needed
+            }
+            frame.slots[0].set(ptr_val(node));
+            prev = node;
+        } else {
+            if !prev.is_null() {
+                unsafe {
+                    write_value_field(node, &NODE, 0, Value::<LowBit<3>>::from_bits(ptr_val(prev)));
+                }
+            }
+            frame.slots[0].set(ptr_val(node));
+            prev = node;
+        }
+    }
+
+    // Promote remaining nursery objects
+    unsafe { heap.mutator_triggered_minor_gc::<LowBit3Tag0>(&ts) };
+
+    // Now run a major GC
+    unsafe { heap.mutator_triggered_gc::<LowBit3Tag0>(&ts) };
+
+    // Verify the chain is still intact
+    let mut cur = LowBit3Tag0::try_decode_ptr(frame.slots[0].get()).unwrap();
+    assert!(heap.from_space_contains(cur));
+    let mut count = 1;
+    loop {
+        let field: Value<LowBit<3>> = unsafe { read_value_field(cur, &NODE, 0) };
+        match LowBit3Tag0::try_decode_ptr(field.to_bits()) {
+            Some(next) => {
+                assert!(heap.from_space_contains(next));
+                cur = next;
+                count += 1;
+            }
+            None => break,
+        }
+    }
+    assert!(count > 1, "chain should have multiple nodes");
+}
+
+#[test]
+fn generational_multi_thread_stress() {
+    use std::thread;
+    use std::sync::atomic::{AtomicBool, Ordering as AO};
+
+    static NODE: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_fields(1);
+
+    let heap = Arc::new(Heap::new_generational::<Compact>(4096, 1048576));
+    let stop = Arc::new(AtomicBool::new(false));
+    let num_threads = 4;
+    let mut handles = Vec::new();
+
+    for _ in 0..num_threads {
+        let heap = heap.clone();
+        let stop = stop.clone();
+
+        handles.push(thread::spawn(move || {
+            let mt = MutatorThread::<LowBit3Tag0>::register(heap.clone());
+            let frame = RootFrame::<2>::new();
+            let _guard = mt.frame_chain().push(&frame);
+
+            let mut count = 0u64;
+            while !stop.load(AO::Relaxed) {
+                let obj = mt.alloc_obj::<Compact>(&NODE, 0);
+                if obj.is_null() {
+                    continue;
+                }
+                // Link new node to previous head
+                let old_bits = frame.slots[0].get();
+                unsafe {
+                    write_value_field(
+                        obj,
+                        &NODE,
+                        0,
+                        Value::<LowBit<3>>::from_bits(old_bits),
+                    );
+                }
+                frame.slots[0].set(ptr_val(obj));
+
+                count += 1;
+                if count % 10 == 0 {
+                    mt.safepoint();
+                }
+            }
+
+            // Drain any pending GC before drop
+            while heap.gc_requested() || heap.barriers_active() {
+                if heap.gc_requested() {
+                    mt.state().enter_safepoint();
+                } else {
+                    std::thread::yield_now();
+                }
+            }
+        }));
+    }
+
+    // Let threads run for a bit
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    stop.store(true, AO::Release);
+
+    for h in handles {
+        h.join().expect("thread panicked");
+    }
+
+    assert!(heap.minor_collections() > 0, "should have triggered minor GCs");
+}
+
+#[test]
+fn non_generational_unchanged() {
+    // Verify Heap::new still works identically — no nursery overhead
+    static LEAF: TypeInfo = TypeInfo::for_header(Compact::SIZE);
+
+    let heap = Arc::new(Heap::new::<Compact>(4096));
+    assert!(!heap.has_nursery());
+    assert_eq!(heap.minor_collections(), 0);
+    assert_eq!(heap.nursery_used(), 0);
+
+    let (ts, _id) = heap.register_thread();
+    let frame = RootFrame::<1>::new();
+    let _guard = ts.frame_chain.push(&frame);
+
+    let obj = heap.alloc_obj::<Compact>(&LEAF, 0);
+    assert!(!obj.is_null());
+    assert!(!heap.is_nursery(obj));
+    assert!(heap.contains(obj));
+
+    frame.slots[0].set(ptr_val(obj));
+    unsafe { heap.mutator_triggered_gc::<LowBit3Tag0>(&ts) };
+
+    let new_obj = LowBit3Tag0::try_decode_ptr(frame.slots[0].get()).unwrap();
+    assert!(heap.contains(new_obj));
+}
+
+#[test]
+fn stress_generational_concurrent() {
+    // Minor GCs interleaved with concurrent major GCs
+    use std::thread;
+    use std::sync::atomic::{AtomicBool, Ordering as AO};
+
+    static NODE: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_fields(1);
+
+    let heap = Arc::new(Heap::new_generational::<Compact>(4096, 1048576));
+    let stop = Arc::new(AtomicBool::new(false));
+    let num_threads = 3;
+    let mut handles = Vec::new();
+
+    for _ in 0..num_threads {
+        let heap = heap.clone();
+        let stop = stop.clone();
+
+        handles.push(thread::spawn(move || {
+            let mt = MutatorThread::<LowBit3Tag0>::register(heap.clone());
+            let frame = RootFrame::<1>::new();
+            let _guard = mt.frame_chain().push(&frame);
+
+            let mut count = 0u64;
+            while !stop.load(AO::Relaxed) {
+                let obj = mt.alloc_obj::<Compact>(&NODE, 0);
+                if obj.is_null() {
+                    continue;
+                }
+                let old_bits = frame.slots[0].get();
+                unsafe {
+                    write_value_field(
+                        obj, &NODE, 0,
+                        Value::<LowBit<3>>::from_bits(old_bits),
+                    );
+                }
+                frame.slots[0].set(ptr_val(obj));
+
+                count += 1;
+                if count % 5 == 0 {
+                    mt.safepoint();
+                }
+            }
+
+            while heap.gc_requested() || heap.barriers_active() {
+                if heap.gc_requested() {
+                    mt.state().enter_safepoint();
+                } else {
+                    std::thread::yield_now();
+                }
+            }
+        }));
+    }
+
+    // Run a few concurrent major GCs while mutators are active
+    let heap2 = heap.clone();
+    let gc_thread = thread::spawn(move || {
+        for _ in 0..3 {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            unsafe { heap2.concurrent_collect::<LowBit3Tag0>() };
+        }
+    });
+
+    gc_thread.join().expect("GC thread panicked");
+    stop.store(true, AO::Release);
+
+    for h in handles {
+        h.join().expect("mutator panicked");
+    }
+
+    assert!(heap.minor_collections() > 0 || heap.collections() > 0,
+        "should have performed some collections");
+}

@@ -81,7 +81,7 @@ function waitForPort(host: string, port: number, timeoutMs = 15_000): Promise<vo
 }
 
 // ---------------------------------------------------------------------------
-// Beagle REPL socket communication
+// Beagle REPL persistent connection
 // ---------------------------------------------------------------------------
 
 let reqCounter = 0;
@@ -92,46 +92,122 @@ interface ReplResponse {
   err?: string;
   ex?: string;
   status?: string[];
+  id?: string;
   [key: string]: unknown;
 }
 
-function replRequest(op: string, extra: Record<string, string> = {}): Promise<string> {
-  return new Promise((resolve) => {
-    const msg = JSON.stringify({ op, id: String(++reqCounter), ...extra }) + "\n";
-    const sock = new net.Socket();
-    sock.setTimeout(30_000);
+interface PendingEval {
+  messages: ReplResponse[];
+  resolve: (value: string) => void;
+  timer: ReturnType<typeof setTimeout>;
+}
 
-    let rawBuf = "";
-    const messages: ReplResponse[] = [];
+let replSocket: net.Socket | undefined;
+let replConnected = false;
+let replBuffer = "";
+const pendingEvals = new Map<string, PendingEval>();
+
+function disconnectRepl() {
+  if (replSocket) {
+    replSocket.destroy();
+    replSocket = undefined;
+    replConnected = false;
+    replBuffer = "";
+    // Reject all pending evals
+    for (const [id, pending] of pendingEvals) {
+      clearTimeout(pending.timer);
+      pending.resolve(JSON.stringify({ error: "Connection closed" }));
+    }
+    pendingEvals.clear();
+  }
+}
+
+function connectRepl(): Promise<void> {
+  if (replConnected && replSocket) return Promise.resolve();
+
+  return new Promise((resolve, reject) => {
+    disconnectRepl();
+    const sock = new net.Socket();
+    replSocket = sock;
+    replBuffer = "";
 
     sock.connect(REPL_PORT, REPL_HOST, () => {
-      sock.write(msg);
+      replConnected = true;
+      resolve();
     });
 
     sock.on("data", (chunk) => {
-      rawBuf += chunk.toString();
-      // Protocol: newline-delimited JSON messages, ending with {"status":["done"]}
-      const lines = rawBuf.split("\n");
-      rawBuf = lines.pop() ?? ""; // keep incomplete last line in buffer
+      replBuffer += chunk.toString();
+      const lines = replBuffer.split("\n");
+      replBuffer = lines.pop() ?? "";
       for (const line of lines) {
         if (!line.trim()) continue;
         try {
           const parsed: ReplResponse = JSON.parse(line);
-          messages.push(parsed);
-          if (parsed.status?.includes("done")) {
-            sock.destroy();
-            resolve(formatReplResponse(messages));
-            return;
-          }
+          handleReplMessage(parsed);
         } catch {
           // skip unparseable lines
         }
       }
     });
 
-    sock.on("end", () => resolve(formatReplResponse(messages)));
-    sock.on("timeout", () => { sock.destroy(); resolve(JSON.stringify({ error: "Timed out after 30s" })); });
-    sock.on("error", (err) => { resolve(JSON.stringify({ error: err.message })); });
+    sock.on("end", () => {
+      replConnected = false;
+      replSocket = undefined;
+      for (const [id, pending] of pendingEvals) {
+        clearTimeout(pending.timer);
+        pending.resolve(formatReplResponse(pending.messages));
+      }
+      pendingEvals.clear();
+    });
+
+    sock.on("error", (err) => {
+      replConnected = false;
+      replSocket = undefined;
+      for (const [id, pending] of pendingEvals) {
+        clearTimeout(pending.timer);
+        pending.resolve(JSON.stringify({ error: err.message }));
+      }
+      pendingEvals.clear();
+      reject(err);
+    });
+  });
+}
+
+function handleReplMessage(msg: ReplResponse) {
+  const id = msg.id as string | undefined;
+  if (!id) return;
+  const pending = pendingEvals.get(id);
+  if (!pending) return;
+
+  pending.messages.push(msg);
+  if (msg.status?.includes("done") || msg.status?.includes("error")) {
+    clearTimeout(pending.timer);
+    pendingEvals.delete(id);
+    pending.resolve(formatReplResponse(pending.messages));
+  }
+}
+
+async function replRequest(op: string, extra: Record<string, string> = {}): Promise<string> {
+  if (!replConnected) {
+    try {
+      await connectRepl();
+    } catch (err: any) {
+      return JSON.stringify({ error: `Connection failed: ${err.message}` });
+    }
+  }
+
+  const id = String(++reqCounter);
+  const msg = JSON.stringify({ op, id, ...extra }) + "\n";
+
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      pendingEvals.delete(id);
+      resolve(JSON.stringify({ error: "Timed out after 30s" }));
+    }, 30_000);
+
+    pendingEvals.set(id, { messages: [], resolve, timer });
+    replSocket!.write(msg);
   });
 }
 
@@ -212,14 +288,50 @@ const beagleInterrupt = tool(
 
 const beagleRun = tool(
   "beagle_run",
-  "Start (or restart) a Beagle program with a REPL server. " +
-  "The program must call repl/start-repl-server(\"127.0.0.1\", 7888). " +
-  "If no file is given, starts the default REPL server. " +
+  "Start (or restart) a Beagle program with an embedded REPL server. " +
+  "If a .bg file is given, it runs that file's main() with a REPL server embedded inside it, " +
+  "so you can eval code in the context of the running program. " +
+  "If no file is given, starts the default standalone REPL server. " +
   "If a server is already running, it is killed and replaced.",
   { file: z.string().optional().describe("Path to a .bg file to run (default: built-in REPL server)") },
   async (args) => {
-    const bgFile = args.file ?? DEFAULT_REPL_SERVER;
-    beagProcess = startBeagleServer(bgFile);
+    // Disconnect persistent REPL connection before restarting
+    disconnectRepl();
+
+    if (args.file) {
+      // Run-with-REPL pattern: generate a wrapper that embeds the REPL server
+      // inside the user's running program
+      const sourceDir = path.dirname(path.resolve(args.file));
+      const fileContent = fs.readFileSync(args.file, "utf-8");
+      const nsMatch = fileContent.match(/^\s*namespace\s+(\S+)/m);
+      const targetNs = nsMatch ? nsMatch[1] : undefined;
+
+      if (!targetNs) {
+        return { content: [{ type: "text" as const, text: `Error: Could not find a namespace declaration in ${args.file}. The file must have a \`namespace <name>\` at the top.` }] };
+      }
+
+      // Generate wrapper that imports repl-main and the target namespace
+      const wrapperCode = `namespace __repl_runner
+
+use beagle.repl-main as repl-main
+use ${targetNs} as target
+
+fn main() {
+    eval("namespace ${targetNs}")
+    repl-main/run-with-repl("${REPL_HOST}", ${REPL_PORT}, fn() {
+        target/main()
+    })
+}
+`;
+      const wrapperPath = "/tmp/__beagle_repl_runner.bg";
+      fs.writeFileSync(wrapperPath, wrapperCode);
+
+      beagProcess = startBeagleServer(wrapperPath, ["-I", sourceDir]);
+    } else {
+      // Default: start the standalone REPL server
+      beagProcess = startBeagleServer(DEFAULT_REPL_SERVER);
+    }
+
     try {
       await waitForPort(REPL_HOST, REPL_PORT);
     } catch {
@@ -227,8 +339,17 @@ const beagleRun = tool(
       killBeagleServer();
       return { content: [{ type: "text" as const, text: `Failed to start server.\n\nServer output:\n${output}` }] };
     }
+
+    // Connect the persistent socket
+    try {
+      await connectRepl();
+    } catch {
+      // Non-fatal: will auto-connect on first eval
+    }
+
     const output = serverOutput.join("");
-    return { content: [{ type: "text" as const, text: `Server started: ${bgFile}\n\nStartup output:\n${output}` }] };
+    const target = args.file ?? DEFAULT_REPL_SERVER;
+    return { content: [{ type: "text" as const, text: `Server started: ${target}\n\nStartup output:\n${output}` }] };
   }
 );
 

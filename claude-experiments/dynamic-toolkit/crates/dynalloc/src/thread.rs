@@ -248,6 +248,28 @@ impl<P: PtrPolicy> MutatorThread<P> {
         unsafe { self.heap.replication_barrier(obj, field_offset, new_bits) };
     }
 
+    /// Generational write barrier: if a tenured object stores a nursery
+    /// pointer, mark the corresponding card dirty.
+    ///
+    /// Call this AFTER writing to a field. The card table ensures minor
+    /// GC can find old→young pointers without scanning all of tenured space.
+    ///
+    /// Fast path when no nursery: single branch on Option.
+    ///
+    /// # Safety
+    /// - `obj` must point to a valid heap object.
+    #[inline(always)]
+    pub unsafe fn generational_write_barrier(&self, obj: *mut u8, new_bits: u64) {
+        if !self.heap.has_nursery() {
+            return;
+        }
+        if let Some(new_ptr) = P::try_decode_ptr(new_bits) {
+            if self.heap.is_nursery(new_ptr) && self.heap.is_tenured(obj as *const u8) {
+                self.heap.mark_card_dirty(obj as *const u8);
+            }
+        }
+    }
+
     /// Read barrier: follow forwarding pointer if object was relocated.
     ///
     /// During concurrent GC, objects may have been copied to to-space.
@@ -262,16 +284,16 @@ impl<P: PtrPolicy> MutatorThread<P> {
         unsafe { self.heap.read_barrier(ptr) }
     }
 
-    /// Allocate an object from the heap. If from-space is full,
-    /// triggers a STW collection and retries once.
+    /// Allocate an object from the heap. For generational heaps, allocates
+    /// from the nursery first. If space is exhausted, triggers minor GC
+    /// (generational) or major GC (non-generational) and retries.
     ///
-    /// Returns null only if allocation still fails after GC
-    /// (i.e., live data exceeds half the heap).
+    /// Returns null only if allocation still fails after GC.
     pub fn alloc(&self, info: &'static TypeInfo, varlen_len: usize) -> *mut u8 {
         if self.heap.gc_every_alloc() {
             self.trigger_gc();
         }
-        let ptr = self.heap.alloc(info, varlen_len);
+        let ptr = self.heap.alloc_nursery(info, varlen_len);
         if !ptr.is_null() {
             return ptr;
         }
@@ -288,7 +310,7 @@ impl<P: PtrPolicy> MutatorThread<P> {
         if self.heap.gc_every_alloc() {
             self.trigger_gc();
         }
-        let ptr = self.heap.alloc_obj::<H>(info, varlen_len);
+        let ptr = self.heap.alloc_nursery_obj::<H>(info, varlen_len);
         if !ptr.is_null() {
             return ptr;
         }
@@ -297,8 +319,25 @@ impl<P: PtrPolicy> MutatorThread<P> {
 
     #[cold]
     fn alloc_slow_path(&self, info: &'static TypeInfo, varlen_len: usize) -> *mut u8 {
-        self.trigger_gc();
-        self.heap.alloc(info, varlen_len)
+        if self.heap.has_nursery() {
+            // Try minor GC first → retry nursery
+            self.trigger_minor_gc();
+            let ptr = self.heap.alloc_nursery(info, varlen_len);
+            if !ptr.is_null() {
+                return ptr;
+            }
+            // Nursery still full (shouldn't happen after reset) → try major GC
+            self.trigger_gc();
+            let ptr = self.heap.alloc_nursery(info, varlen_len);
+            if !ptr.is_null() {
+                return ptr;
+            }
+            // Last resort: allocate directly in tenured
+            self.heap.alloc_tenured(info, varlen_len)
+        } else {
+            self.trigger_gc();
+            self.heap.alloc(info, varlen_len)
+        }
     }
 
     #[cold]
@@ -307,8 +346,50 @@ impl<P: PtrPolicy> MutatorThread<P> {
         info: &'static TypeInfo,
         varlen_len: usize,
     ) -> *mut u8 {
-        self.trigger_gc();
-        self.heap.alloc_obj::<H>(info, varlen_len)
+        if self.heap.has_nursery() {
+            // Try minor GC first → retry nursery
+            self.trigger_minor_gc();
+            let ptr = self.heap.alloc_nursery_obj::<H>(info, varlen_len);
+            if !ptr.is_null() {
+                return ptr;
+            }
+            // Major GC
+            self.trigger_gc();
+            let ptr = self.heap.alloc_nursery_obj::<H>(info, varlen_len);
+            if !ptr.is_null() {
+                return ptr;
+            }
+            // Last resort: tenured
+            self.heap.alloc_obj::<H>(info, varlen_len)
+        } else {
+            self.trigger_gc();
+            self.heap.alloc_obj::<H>(info, varlen_len)
+        }
+    }
+
+    /// Trigger a minor (nursery) GC from this mutator thread.
+    ///
+    /// If a concurrent major GC is in progress, waits for it to finish
+    /// instead. If tenured space doesn't have enough room for worst-case
+    /// promotion, triggers a major GC first to reclaim tenured space.
+    fn trigger_minor_gc(&self) {
+        if self.heap.barriers_active() {
+            // Concurrent major GC in progress — wait for it
+            while self.heap.barriers_active() {
+                if self.heap.gc_requested() {
+                    self.state.enter_safepoint();
+                } else {
+                    std::thread::yield_now();
+                }
+            }
+            return;
+        }
+        // Check if tenured has enough room for worst-case promotion.
+        // If not, run a major GC first to reclaim tenured space.
+        if self.heap.nursery_used() > self.heap.from_remaining() {
+            unsafe { self.heap.mutator_triggered_gc::<P>(&self.state) };
+        }
+        unsafe { self.heap.mutator_triggered_minor_gc::<P>(&self.state) };
     }
 
     /// Trigger a GC from this mutator thread.

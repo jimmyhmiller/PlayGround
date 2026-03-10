@@ -737,6 +737,7 @@ class DrawingCanvasView: NSView {
 /// PDFView subclass that routes mouse events to drawing overlays when active
 class MarkupPDFView: PDFView {
     weak var overlayProvider: DrawingOverlayProvider?
+    var isInMarkupMode = false
 
     private func canvasUnderEvent(_ event: NSEvent) -> DrawingCanvasView? {
         guard let provider = overlayProvider else {
@@ -905,163 +906,338 @@ struct NativePDFView: NSViewRepresentable {
 
 #else
 
-class LayoutAwareContainerView: UIView {
-    var onLayoutChange: (() -> Void)?
-    private var lastBounds: CGRect = .zero
+/// Drawing overlay that lives in PDF page coordinate space (iOS).
+/// Uses PKCanvasView for native Apple Pencil support.
+class DrawingCanvasUIView: UIView {
+    var drawing = PKDrawing()
+    var currentPoints: [PKStrokePoint] = []
+    var currentColor: UIColor = UIColor(red: 1, green: 1, blue: 0, alpha: 0.5)
+    var isErasing = false
+    var onDrawingChanged: (() -> Void)?
+    var pdfHash: String = ""
+    var pageIndex: Int = 0
 
-    override func layoutSubviews() {
-        super.layoutSubviews()
-        if bounds != lastBounds {
-            lastBounds = bounds
-            onLayoutChange?()
+    private var undoStack: [[PKStroke]] = []
+    private var redoStack: [[PKStroke]] = []
+    private var preEraseStrokes: [PKStroke]?
+
+    override func draw(_ rect: CGRect) {
+        super.draw(rect)
+        let scale = UIScreen.main.scale
+        let image = drawing.image(from: bounds, scale: scale)
+        image.draw(in: bounds)
+
+        if currentPoints.count >= 2 {
+            let ink = PKInk(.marker, color: currentColor)
+            let strokePath = PKStrokePath(controlPoints: currentPoints, creationDate: Date())
+            let stroke = PKStroke(ink: ink, path: strokePath)
+            var preview = PKDrawing()
+            preview.strokes = [stroke]
+            let previewImage = preview.image(from: bounds, scale: scale)
+            previewImage.draw(in: bounds)
+        }
+    }
+
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+        guard let touch = touches.first else { return }
+        let loc = touch.location(in: self)
+        if isErasing {
+            preEraseStrokes = drawing.strokes
+            eraseAt(loc)
+            return
+        }
+        currentPoints = [makePoint(at: loc)]
+        setNeedsDisplay()
+    }
+
+    override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
+        guard let touch = touches.first else { return }
+        let loc = touch.location(in: self)
+        if isErasing {
+            eraseAt(loc)
+            return
+        }
+        currentPoints.append(makePoint(at: loc))
+        setNeedsDisplay()
+    }
+
+    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
+        if isErasing {
+            if let pre = preEraseStrokes {
+                undoStack.append(pre)
+                redoStack.removeAll()
+                onDrawingChanged?()
+            }
+            preEraseStrokes = nil
+            return
+        }
+        guard currentPoints.count >= 2 else {
+            currentPoints = []
+            return
+        }
+
+        undoStack.append(drawing.strokes)
+        redoStack.removeAll()
+
+        let ink = PKInk(.marker, color: currentColor)
+        let path = PKStrokePath(controlPoints: currentPoints, creationDate: Date())
+        let stroke = PKStroke(ink: ink, path: path)
+        drawing.strokes.append(stroke)
+        currentPoints = []
+        setNeedsDisplay()
+        onDrawingChanged?()
+    }
+
+    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
+        currentPoints = []
+        preEraseStrokes = nil
+        setNeedsDisplay()
+    }
+
+    func undo() {
+        guard let previous = undoStack.popLast() else { return }
+        redoStack.append(drawing.strokes)
+        drawing.strokes = previous
+        setNeedsDisplay()
+        onDrawingChanged?()
+    }
+
+    func redo() {
+        guard let next = redoStack.popLast() else { return }
+        undoStack.append(drawing.strokes)
+        drawing.strokes = next
+        setNeedsDisplay()
+        onDrawingChanged?()
+    }
+
+    private func makePoint(at location: CGPoint) -> PKStrokePoint {
+        PKStrokePoint(location: location, timeOffset: 0, size: CGSize(width: 20, height: 20),
+                      opacity: 1.0, force: 1.0, azimuth: 0, altitude: .pi / 2)
+    }
+
+    private func eraseAt(_ point: CGPoint) {
+        let eraseRadius: CGFloat = 10
+        let eraseRect = CGRect(x: point.x - eraseRadius, y: point.y - eraseRadius,
+                               width: eraseRadius * 2, height: eraseRadius * 2)
+
+        var newStrokes: [PKStroke] = []
+        for stroke in drawing.strokes {
+            let allPoints = stroke.path.interpolatedPoints(by: .distance(3)).map { $0 }
+            let hitIndices = Set(allPoints.enumerated().compactMap { (i, pt) in
+                eraseRect.contains(pt.location) ? i : nil
+            })
+
+            if hitIndices.isEmpty {
+                newStrokes.append(stroke)
+                continue
+            }
+
+            var runStart: Int? = nil
+            for i in 0...allPoints.count {
+                let isHit = (i == allPoints.count) || hitIndices.contains(i)
+                if isHit {
+                    if let start = runStart, i - start >= 2 {
+                        let runPoints = Array(allPoints[start..<i])
+                        let controlPoints = runPoints.map { makePoint(at: $0.location) }
+                        let newPath = PKStrokePath(controlPoints: controlPoints, creationDate: Date())
+                        let newStroke = PKStroke(ink: stroke.ink, path: newPath)
+                        newStrokes.append(newStroke)
+                    }
+                    runStart = nil
+                } else if runStart == nil {
+                    runStart = i
+                }
+            }
+        }
+
+        drawing.strokes = newStrokes
+        setNeedsDisplay()
+    }
+
+    func saveDrawing() {
+        let mediaBoxSize = bounds.size
+        guard mediaBoxSize.width > 0 else { return }
+        DrawingManager.shared.scheduleSave(drawing, pdfHash: pdfHash, page: pageIndex)
+    }
+
+    func loadDrawing() {
+        undoStack.removeAll()
+        redoStack.removeAll()
+        guard let loaded = DrawingManager.shared.loadDrawing(pdfHash: pdfHash, page: pageIndex) else {
+            drawing = PKDrawing()
+            setNeedsDisplay()
+            return
+        }
+        drawing = loaded
+        setNeedsDisplay()
+    }
+}
+
+/// Gesture recognizer that fails for pencil touches, used to prevent PDFView's
+/// scroll view from capturing pencil input (so it goes to the drawing overlay instead).
+class BlockPencilGestureRecognizer: UIGestureRecognizer {
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent) {
+        for touch in touches {
+            if touch.type == .pencil {
+                // Do nothing — just having this recognizer on the scroll view
+                // with cancelsTouchesInView won't help. We need the delegate approach below.
+            }
         }
     }
 }
 
-struct PDFPageView: UIViewRepresentable {
-    let page: PDFPage
+/// PDFView subclass that prevents its internal scroll view from capturing pencil touches
+class MarkupPDFView: PDFView {
+    weak var overlayProvider: DrawingOverlayProviderIOS?
+
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        disablePencilScrolling()
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        disablePencilScrolling()
+    }
+
+    private var didConfigureScrollView = false
+
+    private func disablePencilScrolling() {
+        guard !didConfigureScrollView else { return }
+        guard let scrollView = findScrollView() else { return }
+        didConfigureScrollView = true
+
+        // Make all existing pan/pinch gesture recognizers on the scroll view
+        // only respond to direct (finger) touches, not pencil
+        for gestureRecognizer in scrollView.gestureRecognizers ?? [] {
+            if let panGR = gestureRecognizer as? UIPanGestureRecognizer {
+                panGR.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.direct.rawValue)]
+            }
+        }
+    }
+
+    private func findScrollView() -> UIScrollView? {
+        func find(in view: UIView) -> UIScrollView? {
+            for subview in view.subviews {
+                if let sv = subview as? UIScrollView { return sv }
+                if let found = find(in: subview) { return found }
+            }
+            return nil
+        }
+        return find(in: self)
+    }
+}
+
+/// Provides drawing overlay views for each PDF page (iOS)
+class DrawingOverlayProviderIOS: NSObject, PDFPageOverlayViewProvider {
+    var pdfHash: String = ""
+    var currentColor: UIColor = UIColor(red: 1, green: 1, blue: 0, alpha: 0.5)
+    var isErasing = false
+    var overlays: [PDFPage: DrawingCanvasUIView] = [:]
+
+    func pdfView(_ view: PDFView, overlayViewFor page: PDFPage) -> UIView? {
+        if let existing = overlays[page] {
+            return existing
+        }
+        let canvas = DrawingCanvasUIView()
+        canvas.isOpaque = false
+        canvas.backgroundColor = .clear
+        let pageIndex = view.document?.index(for: page) ?? 0
+        canvas.pdfHash = pdfHash
+        canvas.pageIndex = pageIndex
+        canvas.currentColor = currentColor
+        canvas.isErasing = isErasing
+        canvas.onDrawingChanged = { [weak canvas] in
+            canvas?.saveDrawing()
+        }
+        canvas.loadDrawing()
+        overlays[page] = canvas
+        return canvas
+    }
+
+    func pdfView(_ view: PDFView, willDisplayOverlayView overlayView: UIView, for page: PDFPage) {
+        if let canvas = overlayView as? DrawingCanvasUIView {
+            canvas.currentColor = currentColor
+            canvas.isErasing = isErasing
+        }
+    }
+
+    func updateAllCanvases() {
+        for (_, canvas) in overlays {
+            canvas.currentColor = currentColor
+            canvas.isErasing = isErasing
+        }
+    }
+
+    func reloadAllDrawings(pdfHash: String) {
+        self.pdfHash = pdfHash
+        for (page, canvas) in overlays {
+            if let doc = canvas.superview?.superview as? PDFView {
+                canvas.pageIndex = doc.document?.index(for: page) ?? canvas.pageIndex
+            }
+            canvas.pdfHash = pdfHash
+            canvas.loadDrawing()
+        }
+    }
+}
+
+struct NativePDFView: UIViewRepresentable {
+    let pdfDocument: PDFDocument
     let pdfHash: String
     @Binding var selectedColor: Color
-    let pageIndex: Int
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(selectedColor: $selectedColor, pdfHash: pdfHash, pageIndex: pageIndex)
+        Coordinator(pdfHash: pdfHash)
     }
 
-    func makeUIView(context: Context) -> UIView {
-        let containerView = LayoutAwareContainerView()
-
-        let pdfView = PDFView()
-        pdfView.document = PDFDocument()
-        pdfView.document?.insert(page, at: 0)
+    func makeUIView(context: Context) -> MarkupPDFView {
+        let pdfView = MarkupPDFView()
         pdfView.autoScales = true
-        pdfView.displayMode = .singlePage
-        pdfView.isUserInteractionEnabled = false
-        pdfView.translatesAutoresizingMaskIntoConstraints = false
-        containerView.addSubview(pdfView)
+        pdfView.displayMode = .singlePageContinuous
+        pdfView.displayDirection = .vertical
+        pdfView.backgroundColor = UIColor.systemBackground
 
-        let canvasView = PKCanvasView()
+        let provider = context.coordinator.overlayProvider
+        provider.pdfHash = pdfHash
+        pdfView.isInMarkupMode = true
+        pdfView.pageOverlayViewProvider = provider
+        pdfView.overlayProvider = provider
 
-        #if targetEnvironment(macCatalyst)
-        canvasView.drawingPolicy = .anyInput
-        #else
-        canvasView.drawingPolicy = .pencilOnly
-        #endif
+        pdfView.document = pdfDocument
 
-        canvasView.isOpaque = false
-        canvasView.backgroundColor = .clear
-        canvasView.translatesAutoresizingMaskIntoConstraints = false
-        canvasView.isUserInteractionEnabled = true
-
-        // Disable PKCanvasView's internal scroll view so parent ScrollView handles scrolling
-        if let scrollView = canvasView.subviews.first(where: { $0 is UIScrollView }) as? UIScrollView {
-            scrollView.isScrollEnabled = false
-        }
-
-        containerView.addSubview(canvasView)
-
-        if context.coordinator.selectedColor == .clear {
-            canvasView.tool = PKEraserTool(.bitmap)
-        } else {
-            let ink = PKInkingTool(.marker, color: PlatformColor.highlightColor(from: context.coordinator.selectedColor), width: 20)
-            canvasView.tool = ink
-        }
-
-        context.coordinator.canvasView = canvasView
-        context.coordinator.containerView = containerView
         context.coordinator.pdfView = pdfView
-        context.coordinator.mediaBoxSize = page.bounds(for: .mediaBox).size
-        canvasView.delegate = context.coordinator
 
-        NSLayoutConstraint.activate([
-            pdfView.topAnchor.constraint(equalTo: containerView.topAnchor),
-            pdfView.leadingAnchor.constraint(equalTo: containerView.leadingAnchor),
-            pdfView.trailingAnchor.constraint(equalTo: containerView.trailingAnchor),
-            pdfView.bottomAnchor.constraint(equalTo: containerView.bottomAnchor),
-
-            canvasView.topAnchor.constraint(equalTo: containerView.topAnchor),
-            canvasView.leadingAnchor.constraint(equalTo: containerView.leadingAnchor),
-            canvasView.trailingAnchor.constraint(equalTo: containerView.trailingAnchor),
-            canvasView.bottomAnchor.constraint(equalTo: containerView.bottomAnchor)
-        ])
-
-        containerView.onLayoutChange = { [weak coordinator = context.coordinator] in
-            coordinator?.loadDrawing()
-        }
-
-        return containerView
+        return pdfView
     }
 
-    func updateUIView(_ uiView: UIView, context: Context) {
-        if let pdfView = context.coordinator.pdfView {
-            let currentPage = pdfView.document?.page(at: 0)
-            if currentPage !== page {
-                let newDoc = PDFDocument()
-                newDoc.insert(page, at: 0)
-                pdfView.document = newDoc
-            }
+    func updateUIView(_ pdfView: MarkupPDFView, context: Context) {
+        if pdfView.document !== pdfDocument {
+            context.coordinator.overlayProvider.overlays.removeAll()
+            pdfView.document = pdfDocument
         }
 
-        if context.coordinator.pdfHash != pdfHash {
-            context.coordinator.pdfHash = pdfHash
-            context.coordinator.pageIndex = pageIndex
-            context.coordinator.loadDrawing()
+        let provider = context.coordinator.overlayProvider
+        if provider.pdfHash != pdfHash {
+            provider.reloadAllDrawings(pdfHash: pdfHash)
         }
 
-        if let canvasView = context.coordinator.canvasView {
-            if selectedColor == .clear {
-                canvasView.tool = PKEraserTool(.bitmap)
-            } else {
-                let ink = PKInkingTool(.marker, color: PlatformColor.highlightColor(from: selectedColor), width: 20)
-                canvasView.tool = ink
-            }
+        if selectedColor == .clear {
+            provider.isErasing = true
+        } else {
+            provider.isErasing = false
+            provider.currentColor = PlatformColor.highlightColor(from: selectedColor)
         }
+        provider.updateAllCanvases()
     }
 
-    class Coordinator: NSObject, PKCanvasViewDelegate {
-        @Binding var selectedColor: Color
-        weak var canvasView: PKCanvasView?
-        weak var containerView: UIView?
-        weak var pdfView: PDFView?
+    class Coordinator: NSObject {
+        let overlayProvider = DrawingOverlayProviderIOS()
+        weak var pdfView: MarkupPDFView?
         var pdfHash: String
-        var pageIndex: Int
-        var mediaBoxSize: CGSize = .zero
-        var suppressSave = false
 
-        init(selectedColor: Binding<Color>, pdfHash: String, pageIndex: Int) {
-            self._selectedColor = selectedColor
+        init(pdfHash: String) {
             self.pdfHash = pdfHash
-            self.pageIndex = pageIndex
             super.init()
-        }
-
-        func canvasViewDrawingDidChange(_ canvasView: PKCanvasView) {
-            guard !suppressSave else { return }
-            let canvasSize = canvasView.bounds.size
-            guard canvasSize.width > 0, mediaBoxSize.width > 0 else { return }
-
-            // Normalize to mediaBox coordinates for storage
-            let sx = mediaBoxSize.width / canvasSize.width
-            let sy = mediaBoxSize.height / canvasSize.height
-            let normalized = canvasView.drawing.transformed(using: CGAffineTransform(scaleX: sx, y: sy))
-            DrawingManager.shared.scheduleSave(normalized, pdfHash: pdfHash, page: pageIndex)
-        }
-
-        func loadDrawing() {
-            guard let canvas = canvasView else { return }
-            let canvasSize = canvas.bounds.size
-            guard canvasSize.width > 0, mediaBoxSize.width > 0 else { return }
-
-            guard let drawing = DrawingManager.shared.loadDrawing(pdfHash: pdfHash, page: pageIndex) else { return }
-
-            // Scale from mediaBox coordinates to current canvas size
-            let sx = canvasSize.width / mediaBoxSize.width
-            let sy = canvasSize.height / mediaBoxSize.height
-            let scaled = drawing.transformed(using: CGAffineTransform(scaleX: sx, y: sy))
-
-            suppressSave = true
-            canvas.drawing = scaled
-            suppressSave = false
         }
     }
 }
