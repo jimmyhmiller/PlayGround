@@ -2846,11 +2846,17 @@ unsafe fn walk_list(
         match LowBit3Tag0::try_decode_ptr(bits) {
             None => break,
             Some(ptr) => {
-                assert!(
-                    heap.contains(ptr as *const u8),
-                    "list node {:p} not in heap",
-                    ptr,
-                );
+                if !heap.contains_either(ptr as *const u8) {
+                    panic!(
+                        "list node {:p} not in heap. from=[{:p}..+{}), to=[{:p}..+{}), \
+                         bits={:#x}, stamps_so_far={:?}",
+                        ptr,
+                        heap.from_base(), heap.space_size(),
+                        heap.to_base(), heap.space_size(),
+                        bits,
+                        &stamps,
+                    );
+                }
                 let stamp_val: Value<LowBit<3>> =
                     unsafe { read_value_field(ptr as *const u8, node_info, 1) };
                 stamps.push(stamp_val.payload());
@@ -2877,9 +2883,7 @@ fn stress_concurrent_gc_heap_properties() {
     let gc_every_alloc = std::env::var("GC_EVERY_ALLOC").map(|v| v == "1").unwrap_or(false);
     let num_mutators: usize = if gc_every_alloc { 2 } else { 8 };
     let list_target_len: usize = if gc_every_alloc { 4 } else { 20 };
-    // gc_every_alloc: skip concurrent GC thread (tests STW path only;
-    // concurrent+mutator-triggered interleaving is a known separate issue)
-    let gc_cycles: usize = if gc_every_alloc { 0 } else { 20 };
+    let gc_cycles: usize = if gc_every_alloc { 5 } else { 20 };
     // Space must hold all live data across all threads + some headroom for
     // concurrent allocation. Each thread keeps ~list_target_len nodes alive.
     let space_size = obj_size * (num_mutators * (list_target_len + 10) + 40);
@@ -2984,11 +2988,31 @@ fn stress_concurrent_gc_heap_properties() {
                                     Value::<LowBit<3>>::tagged(1, 0), // null-ish (tag 1 = not a ptr)
                                 );
                             }
+                            unsafe {
+                                mt.replication_barrier(
+                                    tail_ptr,
+                                    NODE.value_field_offset(0),
+                                    Value::<LowBit<3>>::tagged(1, 0).to_bits(),
+                                );
+                            }
                             list_len = list_target_len;
                         }
                     }
 
                     mt.safepoint();
+
+                    // Check list integrity after every iteration
+                    if gc_every_alloc {
+                        let check_stamps = unsafe { walk_list(&heap, frame.slots[0].get(), &NODE) };
+                        for (ci, &cs) in check_stamps.iter().enumerate() {
+                            if cs != 0 && cs / 1000 != tid as u64 {
+                                panic!(
+                                    "thread {}: CORRUPTION at seq={}, node {} has stamp {} (thread {}). list={:?}",
+                                    tid, seq, ci, cs, cs / 1000, &check_stamps,
+                                );
+                            }
+                        }
+                    }
 
                     // Yield occasionally to let GC thread run
                     if seq % 4 == 0 {
@@ -2998,10 +3022,36 @@ fn stress_concurrent_gc_heap_properties() {
 
                 total_allocs.fetch_add(local_allocs, AO::Relaxed);
 
+                // Check before drain
+                if gc_every_alloc {
+                    let pre_drain = unsafe { walk_list(&heap, frame.slots[0].get(), &NODE) };
+                    for (ci, &cs) in pre_drain.iter().enumerate() {
+                        if cs != 0 && cs / 1000 != tid as u64 {
+                            panic!(
+                                "thread {}: PRE-DRAIN corruption, node {} stamp {} (thread {}). list={:?}",
+                                tid, ci, cs, cs / 1000, &pre_drain,
+                            );
+                        }
+                    }
+                }
+
                 // Drain any pending/in-flight GC before verification.
                 loop {
                     mt.safepoint();
                     if !heap.gc_requested() { break; }
+                }
+
+                // Check after drain
+                if gc_every_alloc {
+                    let post_drain = unsafe { walk_list(&heap, frame.slots[0].get(), &NODE) };
+                    for (ci, &cs) in post_drain.iter().enumerate() {
+                        if cs != 0 && cs / 1000 != tid as u64 {
+                            panic!(
+                                "thread {}: POST-DRAIN corruption, node {} stamp {} (thread {}). list={:?}",
+                                tid, ci, cs, cs / 1000, &post_drain,
+                            );
+                        }
+                    }
                 }
 
                 // ── Final verification ─────────────────────────────
@@ -3158,7 +3208,7 @@ fn stress_concurrent_gc_pointer_graph_integrity() {
     let pool_size: usize = if gc_every_alloc { 3 } else { 8 };
     let iterations: usize = if gc_every_alloc { 20 } else { 200 };
     // gc_every_alloc: skip concurrent GC thread (tests STW path only)
-    let gc_cycles: usize = if gc_every_alloc { 0 } else { 30 };
+    let gc_cycles: usize = if gc_every_alloc { 5 } else { 30 };
     // Each thread keeps pool_size objects live. Extra space ensures
     // no allocation failures after the dedicated GC thread finishes
     // (which would deadlock mutator-triggered GC vs verify barrier).

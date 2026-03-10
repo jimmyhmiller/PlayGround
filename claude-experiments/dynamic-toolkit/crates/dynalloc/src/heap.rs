@@ -292,6 +292,12 @@ impl Heap {
         self.from_space().contains(ptr)
     }
 
+    /// Check if a pointer is in either space (useful during concurrent GC
+    /// when roots may point to to-space).
+    pub fn contains_either(&self, ptr: *const u8) -> bool {
+        self.from_space().contains(ptr) || self.to_space().contains(ptr)
+    }
+
     /// Total size of each space.
     pub fn space_size(&self) -> usize {
         self.from_space().size()
@@ -511,6 +517,26 @@ impl Heap {
         self.to_space().reset();
         self.collections.fetch_add(1, Ordering::Relaxed);
 
+        // Debug: verify all root slots point to from-space after swap
+        if cfg!(debug_assertions) && self.gc_every_alloc() {
+            for ts in thread_snapshot.iter() {
+                ts.scan_roots(&mut |slot| {
+                    let bits = unsafe { *slot };
+                    if let Some(ptr) = P::try_decode_ptr(bits) {
+                        assert!(
+                            self.from_space().contains(ptr),
+                            "POST-SWAP: root slot {:p} points to {:p} which is NOT in from-space \
+                             [{:p}..+{}). In to-space: {}. collections={}",
+                            slot, ptr,
+                            self.from_space().base(), self.from_space().size(),
+                            self.to_space().contains(ptr),
+                            self.collections.load(Ordering::Relaxed),
+                        );
+                    }
+                });
+            }
+        }
+
         // Clear request flag and resume all other threads.
         self.gc_requested.store(false, Ordering::Release);
 
@@ -535,6 +561,11 @@ impl Heap {
     }
 
     /// Check if write barriers should be active.
+    ///
+    /// Relaxed ordering is correct here because:
+    /// - Before STW #1: mutations are captured in the snapshot copy, no SATB needed.
+    /// - After STW #1 resume: the safepoint Mutex provides a full memory barrier,
+    ///   so gc_phase=Copying is visible to all mutators before they resume.
     #[inline(always)]
     pub fn barriers_active(&self) -> bool {
         self.gc_phase.load(Ordering::Relaxed) != GcPhase::Idle as u8
@@ -566,8 +597,10 @@ impl Heap {
         }
         // Check if this object has been forwarded to to-space
         if let Some(forwarded) = unsafe { self.check_forwarded_atomic(obj) } {
-            let to_slot = unsafe { forwarded.add(field_offset) as *mut u64 };
-            unsafe { core::ptr::write(to_slot, new_bits) };
+            unsafe {
+                let atomic_slot = &*(forwarded.add(field_offset) as *const std::sync::atomic::AtomicU64);
+                atomic_slot.store(new_bits, Ordering::Relaxed);
+            };
         }
     }
 
@@ -781,6 +814,26 @@ impl Heap {
         self.to_space().reset();
         self.collections.fetch_add(1, Ordering::Relaxed);
 
+        // Debug: verify all root slots point to from-space after swap
+        if cfg!(debug_assertions) && self.gc_every_alloc() {
+            for ts in thread_snapshot.iter() {
+                ts.scan_roots(&mut |slot| {
+                    let bits = unsafe { *slot };
+                    if let Some(ptr) = P::try_decode_ptr(bits) {
+                        assert!(
+                            self.from_space().contains(ptr),
+                            "CONCURRENT POST-SWAP: root slot {:p} -> {:p} NOT in from [{:p}..+{}). \
+                             In to: {}. collections={}",
+                            slot, ptr,
+                            self.from_space().base(), self.from_space().size(),
+                            self.to_space().contains(ptr),
+                            self.collections.load(Ordering::Relaxed),
+                        );
+                    }
+                });
+            }
+        }
+
         // Disable write barriers and resume threads
         self.trace_gc(TraceState::GcResuming);
         self.gc_phase.store(GcPhase::Idle as u8, Ordering::Release);
@@ -793,14 +846,40 @@ impl Heap {
         self.trace_gc(TraceState::GcIdle);
     }
 
+    /// Copy `size` bytes word-by-word using Relaxed atomic loads/stores.
+    /// Guarantees each 64-bit field is non-torn even if a mutator is
+    /// concurrently writing to `src`.
+    unsafe fn atomic_copy_words(src: *const u8, dst: *mut u8, size: usize) {
+        use std::sync::atomic::AtomicU64;
+        debug_assert!(size % 8 == 0);
+        let words = size / 8;
+        for i in 0..words {
+            unsafe {
+                let s = &*((src as *const AtomicU64).add(i));
+                let d = &*((dst as *const AtomicU64).add(i));
+                d.store(s.load(Ordering::Relaxed), Ordering::Relaxed);
+            }
+        }
+    }
+
     // ─── Internal GC machinery ──────────────────────────────────
 
     unsafe fn process_slot<P: PtrPolicy>(&self, slot: *mut u64) {
-        let bits = unsafe { *slot };
+        // Use atomic loads/stores even in STW: the slot was last written by
+        // a mutator thread via Cell::set (non-atomic write). Even though the
+        // mutator is parked at a safepoint with a Release/Acquire edge,
+        // Miri requires matching atomic access types across threads.
+        let bits = unsafe {
+            let atomic = &*(slot as *const std::sync::atomic::AtomicU64);
+            atomic.load(Ordering::Relaxed)
+        };
         if let Some(ptr) = P::try_decode_ptr(bits) {
             if self.from_space().contains(ptr) {
                 let new_ptr = unsafe { self.copy_or_forward::<P>(ptr) };
-                unsafe { *slot = P::encode_ptr(new_ptr) };
+                unsafe {
+                    let atomic = &*(slot as *const std::sync::atomic::AtomicU64);
+                    atomic.store(P::encode_ptr(new_ptr), Ordering::Relaxed);
+                };
             }
         }
     }
@@ -816,7 +895,10 @@ impl Heap {
     /// the memcpy that populated the to-space copy is visible
     /// (store-store reordering), causing it to see stale data.
     unsafe fn process_slot_concurrent<P: PtrPolicy>(&self, slot: *mut u64) {
-        let bits = unsafe { *slot };
+        let bits = unsafe {
+            let atomic = &*(slot as *const std::sync::atomic::AtomicU64);
+            atomic.load(Ordering::Relaxed)
+        };
         if let Some(ptr) = P::try_decode_ptr(bits) {
             if self.from_space().contains(ptr) {
                 // Copy the object (installs forwarding pointer) but
@@ -945,9 +1027,10 @@ impl Heap {
         let new = self.to_space().alloc(info, varlen_len);
         assert!(!new.is_null(), "to-space exhausted during collection");
 
-        // Copy the object
+        // Copy the object word-by-word with atomic loads/stores to avoid
+        // torn reads if a mutator is concurrently writing to the source.
         unsafe {
-            core::ptr::copy_nonoverlapping(old, new, size);
+            Self::atomic_copy_words(old, new, size);
         }
 
         // Try to install forwarding pointer atomically

@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>GC Statemap Viewer</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: 'SF Mono', 'Menlo', 'Monaco', monospace; background: #1c2128; color: #adbac7; }
+  #controls { padding: 8px 16px; background: #2d333b; border-bottom: 1px solid #444c56; display: flex; gap: 16px; align-items: center; }
+  #controls label { font-size: 13px; }
+  #controls input[type=file] { font-size: 13px; }
+  #info { font-size: 12px; color: #768390; }
+  #canvas-container { overflow-x: scroll; overflow-y: auto; }
+  canvas { display: block; }
+  #legend { padding: 8px 16px; background: #2d333b; border-top: 1px solid #444c56; display: flex; gap: 16px; flex-wrap: wrap; }
+  .legend-item { display: flex; align-items: center; gap: 4px; font-size: 12px; }
+  .legend-swatch { width: 14px; height: 14px; border-radius: 2px; }
+  #tooltip { position: fixed; background: #2d333b; border: 1px solid #444c56; padding: 6px 10px; font-size: 12px; border-radius: 4px; pointer-events: none; display: none; z-index: 100; }
+</style>
+</head>
+<body>
+<div id="controls">
+  <label>Load trace: <input type="file" id="fileInput" accept=".out,.json,.txt"></label>
+  <span id="info"></span>
+</div>
+<div id="canvas-container">
+  <canvas id="canvas"></canvas>
+</div>
+<div id="legend"></div>
+<div id="tooltip"></div>
+
+<script>
+const ROW_HEIGHT = 24;
+const LABEL_WIDTH = 160;
+const MIN_PX_PER_NS = 0.000005;
+let pxPerNs = 0.00005;
+let data = null;
+
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+const tooltip = document.getElementById('tooltip');
+
+document.getElementById('fileInput').addEventListener('change', async (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  const text = await file.text();
+  data = parseStatemap(text);
+  document.getElementById('info').textContent =
+    `${data.events.length} events, ${data.entities.length} entities, ` +
+    `${(data.maxTime / 1e6).toFixed(2)}ms span`;
+  buildLegend(data.states);
+  render();
+});
+
+function parseStatemap(text) {
+  const lines = text.trim().split('\n');
+  const meta = JSON.parse(lines[0]);
+
+  // Build state lookup: value -> {name, color}
+  const states = {};
+  for (const [name, info] of Object.entries(meta.states)) {
+    states[info.value] = { name, color: info.color };
+  }
+
+  const events = [];
+  for (let i = 1; i < lines.length; i++) {
+    const rec = JSON.parse(lines[i]);
+    events.push(rec);
+  }
+
+  // Sort by time
+  events.sort((a, b) => a.time - b.time);
+
+  // Collect unique entities, preserving order of first appearance
+  const entitySet = new Set();
+  for (const ev of events) entitySet.add(ev.entity);
+  const entities = [...entitySet];
+
+  // Build intervals per entity
+  const intervals = {};
+  const lastState = {};
+  const lastTime = {};
+
+  for (const entity of entities) {
+    intervals[entity] = [];
+  }
+
+  for (const ev of events) {
+    const ent = ev.entity;
+    if (lastState[ent] !== undefined) {
+      intervals[ent].push({
+        start: lastTime[ent],
+        end: ev.time,
+        state: lastState[ent],
+      });
+    }
+    lastState[ent] = ev.state;
+    lastTime[ent] = ev.time;
+  }
+
+  const maxTime = events.length > 0 ? events[events.length - 1].time : 0;
+
+  // Extend last interval to maxTime
+  for (const entity of entities) {
+    if (lastState[entity] !== undefined) {
+      intervals[entity].push({
+        start: lastTime[entity],
+        end: maxTime,
+        state: lastState[entity],
+      });
+    }
+  }
+
+  return { meta, states, events, entities, intervals, maxTime };
+}
+
+function buildLegend(states) {
+  const legend = document.getElementById('legend');
+  legend.innerHTML = '';
+  for (const [value, info] of Object.entries(states)) {
+    const item = document.createElement('div');
+    item.className = 'legend-item';
+    item.innerHTML = `<div class="legend-swatch" style="background:${info.color}"></div>${info.name}`;
+    legend.appendChild(item);
+  }
+}
+
+function render() {
+  if (!data) return;
+
+  const totalWidth = LABEL_WIDTH + Math.max(800, data.maxTime * pxPerNs);
+  const totalHeight = data.entities.length * ROW_HEIGHT + 4;
+
+  canvas.width = totalWidth * devicePixelRatio;
+  canvas.height = totalHeight * devicePixelRatio;
+  canvas.style.width = totalWidth + 'px';
+  canvas.style.height = totalHeight + 'px';
+  ctx.scale(devicePixelRatio, devicePixelRatio);
+
+  // Background
+  ctx.fillStyle = '#1c2128';
+  ctx.fillRect(0, 0, totalWidth, totalHeight);
+
+  // Draw rows
+  for (let i = 0; i < data.entities.length; i++) {
+    const entity = data.entities[i];
+    const y = i * ROW_HEIGHT + 2;
+
+    // Row background (alternating)
+    if (i % 2 === 0) {
+      ctx.fillStyle = '#22272e';
+      ctx.fillRect(0, y, totalWidth, ROW_HEIGHT);
+    }
+
+    // Label
+    ctx.fillStyle = '#adbac7';
+    ctx.font = '11px SF Mono, Menlo, Monaco, monospace';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(entity, 8, y + ROW_HEIGHT / 2);
+
+    // Intervals
+    const ivs = data.intervals[entity] || [];
+    for (const iv of ivs) {
+      const x = LABEL_WIDTH + iv.start * pxPerNs;
+      const w = Math.max(1, (iv.end - iv.start) * pxPerNs);
+      const stateInfo = data.states[iv.state];
+      ctx.fillStyle = stateInfo ? stateInfo.color : '#555';
+      ctx.fillRect(x, y + 2, w, ROW_HEIGHT - 4);
+    }
+
+    // Row separator
+    ctx.strokeStyle = '#2d333b';
+    ctx.beginPath();
+    ctx.moveTo(0, y + ROW_HEIGHT);
+    ctx.lineTo(totalWidth, y + ROW_HEIGHT);
+    ctx.stroke();
+  }
+
+  // Label column separator
+  ctx.strokeStyle = '#444c56';
+  ctx.beginPath();
+  ctx.moveTo(LABEL_WIDTH, 0);
+  ctx.lineTo(LABEL_WIDTH, totalHeight);
+  ctx.stroke();
+}
+
+// Tooltip on hover
+canvas.addEventListener('mousemove', (e) => {
+  if (!data) return;
+  const rect = canvas.getBoundingClientRect();
+  const x = e.clientX - rect.left;
+  const y = e.clientY - rect.top;
+
+  const entityIdx = Math.floor((y - 2) / ROW_HEIGHT);
+  if (entityIdx < 0 || entityIdx >= data.entities.length) {
+    tooltip.style.display = 'none';
+    return;
+  }
+
+  const entity = data.entities[entityIdx];
+  const timeNs = (x - LABEL_WIDTH) / pxPerNs;
+  if (timeNs < 0) {
+    tooltip.style.display = 'none';
+    return;
+  }
+
+  // Find interval at this time
+  const ivs = data.intervals[entity] || [];
+  let found = null;
+  for (const iv of ivs) {
+    if (timeNs >= iv.start && timeNs < iv.end) {
+      found = iv;
+      break;
+    }
+  }
+
+  if (found) {
+    const stateInfo = data.states[found.state] || { name: '?' };
+    const durUs = ((found.end - found.start) / 1000).toFixed(1);
+    tooltip.innerHTML = `<b>${entity}</b>: ${stateInfo.name}<br>` +
+      `duration: ${durUs}µs<br>` +
+      `time: ${(found.start / 1e6).toFixed(3)}ms`;
+    tooltip.style.display = 'block';
+    tooltip.style.left = (e.clientX + 12) + 'px';
+    tooltip.style.top = (e.clientY + 12) + 'px';
+  } else {
+    tooltip.style.display = 'none';
+  }
+});
+
+canvas.addEventListener('mouseleave', () => {
+  tooltip.style.display = 'none';
+});
+
+// Zoom with scroll wheel
+canvas.addEventListener('wheel', (e) => {
+  e.preventDefault();
+  const factor = e.deltaY > 0 ? 0.8 : 1.25;
+  pxPerNs = Math.max(MIN_PX_PER_NS, pxPerNs * factor);
+  render();
+}, { passive: false });
+
+// Also load from URL parameter
+const params = new URLSearchParams(window.location.search);
+const fileUrl = params.get('file');
+if (fileUrl) {
+  fetch(fileUrl).then(r => r.text()).then(text => {
+    data = parseStatemap(text);
+    document.getElementById('info').textContent =
+      `${data.events.length} events, ${data.entities.length} entities, ` +
+      `${(data.maxTime / 1e6).toFixed(2)}ms span`;
+    buildLegend(data.states);
+    render();
+  });
+}
+</script>
+</body>
+</html>

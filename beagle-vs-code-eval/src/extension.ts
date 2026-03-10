@@ -1,5 +1,8 @@
 import * as vscode from 'vscode';
 import * as net from 'net';
+import * as fs from 'fs';
+import * as path from 'path';
+import * as os from 'os';
 
 let connection: BeagleConnection | null = null;
 let outputChannel: vscode.OutputChannel;
@@ -278,6 +281,54 @@ export function activate(context: vscode.ExtensionContext) {
         }
     });
 
+    let runTerminal: vscode.Terminal | null = null;
+
+    const runCommand = vscode.commands.registerCommand('beagle-vs-code-eval.run', async () => {
+        const editor = vscode.window.activeTextEditor;
+        if (!editor) {
+            vscode.window.showErrorMessage('No active editor.');
+            return;
+        }
+
+        const filePath = editor.document.fileName;
+        const text = editor.document.getText();
+        const config = getConfig();
+
+        // Extract namespace from the file
+        const nsMatch = text.match(/^\s*namespace\s+(\S+)/m);
+        if (!nsMatch) {
+            vscode.window.showErrorMessage('Could not find namespace declaration in file.');
+            return;
+        }
+        const ns = nsMatch[1];
+
+        // Generate a wrapper that starts REPL server then calls main
+        const wrapper = `namespace __repl_runner
+
+use beagle.repl-main as repl-main
+use ${ns} as target
+
+fn main() {
+    repl-main/run-with-repl("${config.host}", ${config.port}, fn() {
+        target/main()
+    })
+}
+`;
+        const wrapperPath = path.join(os.tmpdir(), '__beagle_repl_runner.bg');
+        fs.writeFileSync(wrapperPath, wrapper);
+
+        const sourceDir = path.dirname(filePath);
+
+        // Kill existing run terminal if any
+        if (runTerminal) {
+            runTerminal.dispose();
+        }
+
+        runTerminal = vscode.window.createTerminal({ name: 'Beagle' });
+        runTerminal.show();
+        runTerminal.sendText(`beag run -I ${sourceDir} ${wrapperPath}`);
+    });
+
     const connectCommand = vscode.commands.registerCommand('beagle-vs-code-eval.connect', async () => {
         const config = getConfig();
         try {
@@ -299,7 +350,7 @@ export function activate(context: vscode.ExtensionContext) {
         }
     });
 
-    context.subscriptions.push(evalCommand, evalSelectionCommand, connectCommand, disconnectCommand, outputChannel);
+    context.subscriptions.push(evalCommand, evalSelectionCommand, runCommand, connectCommand, disconnectCommand, outputChannel);
 }
 
 export function deactivate() {

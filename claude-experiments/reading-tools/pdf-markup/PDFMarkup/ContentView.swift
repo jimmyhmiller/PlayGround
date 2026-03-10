@@ -550,6 +550,12 @@ class DrawingCanvasView: NSView {
     var pdfHash: String = ""
     var pageIndex: Int = 0
 
+    // Undo/redo stacks store snapshots of strokes
+    private var undoStack: [[PKStroke]] = []
+    private var redoStack: [[PKStroke]] = []
+    // Track pre-erase state for batching erase drag into one undo step
+    private var preEraseStrokes: [PKStroke]?
+
     override var isFlipped: Bool { true }
     override var acceptsFirstResponder: Bool { true }
 
@@ -570,8 +576,10 @@ class DrawingCanvasView: NSView {
     }
 
     override func mouseDown(with event: NSEvent) {
+        window?.makeFirstResponder(self)
         let loc = convert(event.locationInWindow, from: nil)
         if isErasing {
+            preEraseStrokes = drawing.strokes
             eraseAt(loc)
             return
         }
@@ -590,11 +598,23 @@ class DrawingCanvasView: NSView {
     }
 
     override func mouseUp(with event: NSEvent) {
-        if isErasing { return }
+        if isErasing {
+            // Push one undo step for the entire erase drag
+            if let pre = preEraseStrokes {
+                undoStack.append(pre)
+                redoStack.removeAll()
+                onDrawingChanged?()
+            }
+            preEraseStrokes = nil
+            return
+        }
         guard currentPoints.count >= 2 else {
             currentPoints = []
             return
         }
+
+        undoStack.append(drawing.strokes)
+        redoStack.removeAll()
 
         let ink = PKInk(.marker, color: currentColor)
         let path = PKStrokePath(controlPoints: currentPoints, creationDate: Date())
@@ -605,22 +625,79 @@ class DrawingCanvasView: NSView {
         onDrawingChanged?()
     }
 
+    override func keyDown(with event: NSEvent) {
+        if event.modifierFlags.contains(.command) && event.charactersIgnoringModifiers?.lowercased() == "z" {
+            if event.modifierFlags.contains(.shift) {
+                redo()
+            } else {
+                undo()
+            }
+            return
+        }
+        super.keyDown(with: event)
+    }
+
+    func undo() {
+        guard let previous = undoStack.popLast() else { return }
+        redoStack.append(drawing.strokes)
+        drawing.strokes = previous
+        needsDisplay = true
+        onDrawingChanged?()
+    }
+
+    func redo() {
+        guard let next = redoStack.popLast() else { return }
+        undoStack.append(drawing.strokes)
+        drawing.strokes = next
+        needsDisplay = true
+        onDrawingChanged?()
+    }
+
     private func makePoint(at location: CGPoint) -> PKStrokePoint {
         PKStrokePoint(location: location, timeOffset: 0, size: CGSize(width: 20, height: 20),
                       opacity: 1.0, force: 1.0, azimuth: 0, altitude: .pi / 2)
     }
 
     private func eraseAt(_ point: CGPoint) {
-        let eraseRadius: CGFloat = 20
+        let eraseRadius: CGFloat = 10
         let eraseRect = CGRect(x: point.x - eraseRadius, y: point.y - eraseRadius,
                                width: eraseRadius * 2, height: eraseRadius * 2)
-        drawing.strokes.removeAll { stroke in
-            stroke.path.interpolatedPoints(by: .distance(5)).contains { pt in
-                eraseRect.contains(pt.location)
+
+        var newStrokes: [PKStroke] = []
+        for stroke in drawing.strokes {
+            let allPoints = stroke.path.interpolatedPoints(by: .distance(3)).map { $0 }
+            // Find which points are hit by the eraser
+            let hitIndices = Set(allPoints.enumerated().compactMap { (i, pt) in
+                eraseRect.contains(pt.location) ? i : nil
+            })
+
+            if hitIndices.isEmpty {
+                // Stroke not touched, keep as-is
+                newStrokes.append(stroke)
+                continue
+            }
+
+            // Split into runs of non-erased points
+            var runStart: Int? = nil
+            for i in 0...allPoints.count {
+                let isHit = (i == allPoints.count) || hitIndices.contains(i)
+                if isHit {
+                    if let start = runStart, i - start >= 2 {
+                        let runPoints = Array(allPoints[start..<i])
+                        let controlPoints = runPoints.map { makePoint(at: $0.location) }
+                        let newPath = PKStrokePath(controlPoints: controlPoints, creationDate: Date())
+                        let newStroke = PKStroke(ink: stroke.ink, path: newPath)
+                        newStrokes.append(newStroke)
+                    }
+                    runStart = nil
+                } else if runStart == nil {
+                    runStart = i
+                }
             }
         }
+
+        drawing.strokes = newStrokes
         needsDisplay = true
-        onDrawingChanged?()
     }
 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
@@ -645,6 +722,8 @@ class DrawingCanvasView: NSView {
     }
 
     func loadDrawing() {
+        undoStack.removeAll()
+        redoStack.removeAll()
         guard let loaded = DrawingManager.shared.loadDrawing(pdfHash: pdfHash, page: pageIndex) else {
             drawing = PKDrawing()
             needsDisplay = true

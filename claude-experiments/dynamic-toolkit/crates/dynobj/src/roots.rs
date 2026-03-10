@@ -118,7 +118,9 @@ impl FrameChain {
     /// Takes `&RootFrame` because all mutable fields use `Cell`.
     pub fn push<'a, const N: usize>(&'a self, frame: &'a RootFrame<N>) -> FrameGuard<'a> {
         frame.header.parent.set(self.top.get());
-        self.top.set(&frame.header as *const FrameHeader as *mut FrameHeader);
+        // Cast from the whole RootFrame pointer (not &frame.header) so the
+        // raw pointer's provenance covers the trailing slots, not just the header.
+        self.top.set((frame as *const RootFrame<N>).cast::<FrameHeader>().cast_mut());
         FrameGuard { chain: self }
     }
 

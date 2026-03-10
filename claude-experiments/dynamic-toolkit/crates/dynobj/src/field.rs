@@ -1,3 +1,5 @@
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use dynvalue::{TagScheme, Value};
 
 use crate::header::ObjHeader;
@@ -36,6 +38,11 @@ pub unsafe fn init_header<H: ObjHeader>(obj: *mut u8, type_info: *const TypeInfo
 
 /// Read a GC-traced Value field by index.
 ///
+/// Uses a relaxed atomic load to avoid data races with the concurrent GC,
+/// which may read fields via `atomic_copy_words` or `process_slot_concurrent`.
+/// On x86-64 and ARM64, relaxed atomic loads of aligned u64 compile to
+/// plain load instructions — zero overhead.
+///
 /// # Safety
 /// - `obj` must point to a valid heap object described by `info`.
 /// - `index` must be less than `info.value_field_count`.
@@ -48,12 +55,17 @@ pub unsafe fn read_value_field<S: TagScheme>(
     debug_assert!(index < info.value_field_count);
     let offset = info.value_field_offset(index);
     unsafe {
-        let bits = core::ptr::read(obj.add(offset) as *const u64);
-        Value::from_bits(bits)
+        let atomic = &*(obj.add(offset) as *const AtomicU64);
+        Value::from_bits(atomic.load(Ordering::Relaxed))
     }
 }
 
 /// Write a GC-traced Value field by index.
+///
+/// Uses a relaxed atomic store to avoid data races with the concurrent GC,
+/// which may read fields via `atomic_copy_words` or `process_slot_concurrent`.
+/// On x86-64 and ARM64, relaxed atomic stores of aligned u64 compile to
+/// plain store instructions — zero overhead.
 ///
 /// # Safety
 /// - `obj` must point to a valid heap object described by `info`.
@@ -68,7 +80,8 @@ pub unsafe fn write_value_field<S: TagScheme>(
     debug_assert!(index < info.value_field_count);
     let offset = info.value_field_offset(index);
     unsafe {
-        core::ptr::write(obj.add(offset) as *mut u64, value.to_bits());
+        let atomic = &*(obj.add(offset) as *const AtomicU64);
+        atomic.store(value.to_bits(), Ordering::Relaxed);
     }
 }
 
@@ -121,6 +134,8 @@ pub unsafe fn write_varlen_count(obj: *mut u8, info: &TypeInfo, count: usize) {
 
 /// Read a varlen Value element by index.
 ///
+/// Uses a relaxed atomic load for concurrent GC safety (see `read_value_field`).
+///
 /// # Safety
 /// - `obj` must point to a valid heap object with `info.varlen == VarLenKind::Values`.
 /// - `index` must be less than the varlen count.
@@ -133,12 +148,14 @@ pub unsafe fn read_varlen_value<S: TagScheme>(
     debug_assert!(info.varlen == VarLenKind::Values);
     let offset = info.varlen_element_offset(index);
     unsafe {
-        let bits = core::ptr::read(obj.add(offset) as *const u64);
-        Value::from_bits(bits)
+        let atomic = &*(obj.add(offset) as *const AtomicU64);
+        Value::from_bits(atomic.load(Ordering::Relaxed))
     }
 }
 
 /// Write a varlen Value element by index.
+///
+/// Uses a relaxed atomic store for concurrent GC safety (see `write_value_field`).
 ///
 /// # Safety
 /// - `obj` must point to a valid heap object with `info.varlen == VarLenKind::Values`.
@@ -153,7 +170,8 @@ pub unsafe fn write_varlen_value<S: TagScheme>(
     debug_assert!(info.varlen == VarLenKind::Values);
     let offset = info.varlen_element_offset(index);
     unsafe {
-        core::ptr::write(obj.add(offset) as *mut u64, value.to_bits());
+        let atomic = &*(obj.add(offset) as *const AtomicU64);
+        atomic.store(value.to_bits(), Ordering::Relaxed);
     }
 }
 
