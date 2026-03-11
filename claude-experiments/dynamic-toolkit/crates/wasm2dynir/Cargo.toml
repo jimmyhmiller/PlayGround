@@ -1,0 +1,11 @@
+[package]
+name = "wasm2dynir"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+dynir = { path = "../dynir" }
+wasmparser = "0.227"
+
+[dev-dependencies]
+wat = "1"

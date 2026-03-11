@@ -1,0 +1,542 @@
+use crate::types::{Type, Signature};
+
+/// SSA value reference. Globally unique within a function.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Value(pub(crate) u32);
+
+impl Value {
+    pub fn index(self) -> usize {
+        self.0 as usize
+    }
+}
+
+/// Basic block reference.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct BlockId(pub(crate) u32);
+
+impl BlockId {
+    pub fn index(self) -> usize {
+        self.0 as usize
+    }
+}
+
+/// Reference to an externally-declared function.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FuncRef(pub(crate) u32);
+
+impl FuncRef {
+    pub fn index(self) -> usize {
+        self.0 as usize
+    }
+}
+
+/// Reference to deoptimization metadata.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct DeoptId(pub(crate) u32);
+
+impl DeoptId {
+    pub fn index(self) -> usize {
+        self.0 as usize
+    }
+}
+
+/// Deoptimization metadata: describes how to resume in the interpreter.
+#[derive(Debug, Clone)]
+pub struct DeoptInfo {
+    /// Opaque identifier (e.g. bytecode offset) for the interpreter to resume at.
+    pub resume_point: u64,
+    /// Human-readable description (optional, for debugging).
+    pub description: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CmpOp {
+    Eq,
+    Ne,
+    Slt,
+    Sle,
+    Sgt,
+    Sge,
+    Ult,
+    Ule,
+    Ugt,
+    Uge,
+}
+
+/// Overflow-checked arithmetic operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum OverflowOp {
+    SAdd,
+    SSub,
+    SMul,
+    UAdd,
+    USub,
+    UMul,
+}
+
+/// An IR instruction. Most produce a single result value.
+#[derive(Debug, Clone)]
+pub enum Inst {
+    // -- Constants --
+    Iconst(Type, i64),
+    F64Const(f64),
+
+    // -- Integer arithmetic (result type = operand type) --
+    Add(Value, Value),
+    Sub(Value, Value),
+    Mul(Value, Value),
+    SDiv(Value, Value),
+    UDiv(Value, Value),
+
+    // -- Float arithmetic (result type = F64) --
+    FAdd(Value, Value),
+    FSub(Value, Value),
+    FMul(Value, Value),
+    FDiv(Value, Value),
+
+    // -- Bitwise (result type = operand type) --
+    And(Value, Value),
+    Or(Value, Value),
+    Xor(Value, Value),
+    Shl(Value, Value),
+    LShr(Value, Value),
+    AShr(Value, Value),
+
+    // -- Unary --
+    Neg(Value),  // integer negate (0 - x), result type = operand type
+    FNeg(Value), // float negate, result type = F64
+    Not(Value),  // bitwise not (xor with -1), result type = operand type
+
+    // -- Comparison (result type = I8) --
+    Icmp(CmpOp, Value, Value),
+    Fcmp(CmpOp, Value, Value),
+
+    // -- Conversions --
+    Sext(Value, Type),
+    Zext(Value, Type),
+    Trunc(Value, Type),
+    IntToFloat(Value),
+    FloatToInt(Value),
+    Bitcast(Value, Type),
+
+    // -- Memory --
+    Load(Type, Value, i32),
+    Store(Value, Value, i32), // (value, addr, offset) — no result
+
+    // -- Tagged values --
+    TagOf(Value),                // -> I32
+    Payload(Value),              // -> I64
+    MakeTagged(u32, Value),      // (tag, payload) -> I64
+    IsTag(Value, u32),           // -> I8
+
+    // -- Select --
+    Select(Value, Value, Value), // (cond, if_true, if_false)
+
+    // -- Overflow checking (result type = I8) --
+    OverflowCheck(OverflowOp, Value, Value),
+
+    // -- Guard / deoptimization --
+    /// Guard that a condition is true; if false, deoptimize.
+    /// The `live` values are captured for the deopt frame.
+    /// This is a void instruction (side-effect only).
+    Guard(Value, DeoptId, Vec<Value>),
+
+    // -- Calls --
+    Call(FuncRef, Vec<Value>),
+    CallIndirect(Value, Vec<Value>, Option<Type>),
+
+    // -- GC safepoint --
+    /// Explicit safepoint (e.g. at loop backedges). The lowering must emit
+    /// a stack map here so the GC can trace and update live GcPtr values.
+    /// The `live` values are the GcPtr values that the compiler has determined
+    /// are live across this point. This is a void instruction.
+    Safepoint(Vec<Value>),
+}
+
+impl Inst {
+    /// Compute the result type of this instruction, or `None` for void (Store).
+    pub fn result_type(
+        &self,
+        val_ty: impl Fn(Value) -> Type,
+        extern_sigs: &[ExternFunc],
+    ) -> Option<Type> {
+        match self {
+            Inst::Iconst(ty, _) => Some(*ty),
+            Inst::F64Const(_) => Some(Type::F64),
+
+            Inst::Add(a, b)
+            | Inst::Sub(a, b)
+            | Inst::Mul(a, b)
+            | Inst::SDiv(a, b)
+            | Inst::UDiv(a, b) => {
+                // Pointer arithmetic: if either operand is a pointer, result is that pointer type
+                let ta = val_ty(*a);
+                let tb = val_ty(*b);
+                if ta == Type::GcPtr || tb == Type::GcPtr {
+                    Some(Type::GcPtr)
+                } else if ta == Type::Ptr || tb == Type::Ptr {
+                    Some(Type::Ptr)
+                } else {
+                    Some(ta)
+                }
+            }
+
+            Inst::FAdd(_, _) | Inst::FSub(_, _) | Inst::FMul(_, _) | Inst::FDiv(_, _) => {
+                Some(Type::F64)
+            }
+
+            Inst::And(a, _)
+            | Inst::Or(a, _)
+            | Inst::Xor(a, _)
+            | Inst::Shl(a, _)
+            | Inst::LShr(a, _)
+            | Inst::AShr(a, _) => Some(val_ty(*a)),
+
+            Inst::Neg(v) | Inst::Not(v) => Some(val_ty(*v)),
+            Inst::FNeg(_) => Some(Type::F64),
+
+            Inst::Icmp(_, _, _) | Inst::Fcmp(_, _, _) => Some(Type::I8),
+
+            Inst::Sext(_, to) | Inst::Zext(_, to) | Inst::Trunc(_, to) | Inst::Bitcast(_, to) => {
+                Some(*to)
+            }
+            Inst::IntToFloat(_) => Some(Type::F64),
+            Inst::FloatToInt(_) => Some(Type::I64),
+
+            Inst::Load(ty, _, _) => Some(*ty),
+            Inst::Store(_, _, _) => None,
+
+            Inst::TagOf(_) => Some(Type::I32),
+            Inst::Payload(_) => Some(Type::I64),
+            Inst::MakeTagged(_, _) => Some(Type::I64),
+            Inst::IsTag(_, _) => Some(Type::I8),
+
+            Inst::Select(_, t, _) => Some(val_ty(*t)),
+
+            Inst::OverflowCheck(_, _, _) => Some(Type::I8),
+            Inst::Guard(_, _, _) => None,
+
+            Inst::Call(fref, _) => extern_sigs[fref.index()].sig.ret,
+            Inst::CallIndirect(_, _, ret_ty) => *ret_ty,
+            Inst::Safepoint(_) => None,
+        }
+    }
+
+    /// Call `f` on every Value operand.
+    pub fn for_each_value(&self, mut f: impl FnMut(Value)) {
+        match self {
+            Inst::Iconst(_, _) | Inst::F64Const(_) => {}
+
+            Inst::Add(a, b)
+            | Inst::Sub(a, b)
+            | Inst::Mul(a, b)
+            | Inst::SDiv(a, b)
+            | Inst::UDiv(a, b)
+            | Inst::FAdd(a, b)
+            | Inst::FSub(a, b)
+            | Inst::FMul(a, b)
+            | Inst::FDiv(a, b)
+            | Inst::And(a, b)
+            | Inst::Or(a, b)
+            | Inst::Xor(a, b)
+            | Inst::Shl(a, b)
+            | Inst::LShr(a, b)
+            | Inst::AShr(a, b) => {
+                f(*a);
+                f(*b);
+            }
+
+            Inst::Neg(v) | Inst::FNeg(v) | Inst::Not(v) => f(*v),
+
+            Inst::Icmp(_, a, b) | Inst::Fcmp(_, a, b) => {
+                f(*a);
+                f(*b);
+            }
+
+            Inst::Sext(v, _)
+            | Inst::Zext(v, _)
+            | Inst::Trunc(v, _)
+            | Inst::IntToFloat(v)
+            | Inst::FloatToInt(v)
+            | Inst::Bitcast(v, _) => f(*v),
+
+            Inst::Load(_, addr, _) => f(*addr),
+            Inst::Store(val, addr, _) => {
+                f(*val);
+                f(*addr);
+            }
+
+            Inst::TagOf(v) | Inst::Payload(v) | Inst::MakeTagged(_, v) | Inst::IsTag(v, _) => {
+                f(*v)
+            }
+
+            Inst::Select(c, t, e) => {
+                f(*c);
+                f(*t);
+                f(*e);
+            }
+
+            Inst::OverflowCheck(_, a, b) => {
+                f(*a);
+                f(*b);
+            }
+
+            Inst::Guard(cond, _, live) => {
+                f(*cond);
+                live.iter().for_each(|v| f(*v));
+            }
+
+            Inst::Call(_, args) => args.iter().for_each(|v| f(*v)),
+            Inst::CallIndirect(callee, args, _) => {
+                f(*callee);
+                args.iter().for_each(|v| f(*v));
+            }
+            Inst::Safepoint(live) => live.iter().for_each(|v| f(*v)),
+        }
+    }
+
+    /// Call `f` on every Value operand (mutable).
+    pub fn for_each_value_mut(&mut self, mut f: impl FnMut(&mut Value)) {
+        match self {
+            Inst::Iconst(_, _) | Inst::F64Const(_) => {}
+
+            Inst::Add(a, b)
+            | Inst::Sub(a, b)
+            | Inst::Mul(a, b)
+            | Inst::SDiv(a, b)
+            | Inst::UDiv(a, b)
+            | Inst::FAdd(a, b)
+            | Inst::FSub(a, b)
+            | Inst::FMul(a, b)
+            | Inst::FDiv(a, b)
+            | Inst::And(a, b)
+            | Inst::Or(a, b)
+            | Inst::Xor(a, b)
+            | Inst::Shl(a, b)
+            | Inst::LShr(a, b)
+            | Inst::AShr(a, b) => {
+                f(a);
+                f(b);
+            }
+
+            Inst::Neg(v) | Inst::FNeg(v) | Inst::Not(v) => f(v),
+
+            Inst::Icmp(_, a, b) | Inst::Fcmp(_, a, b) => {
+                f(a);
+                f(b);
+            }
+
+            Inst::Sext(v, _)
+            | Inst::Zext(v, _)
+            | Inst::Trunc(v, _)
+            | Inst::IntToFloat(v)
+            | Inst::FloatToInt(v)
+            | Inst::Bitcast(v, _) => f(v),
+
+            Inst::Load(_, addr, _) => f(addr),
+            Inst::Store(val, addr, _) => {
+                f(val);
+                f(addr);
+            }
+
+            Inst::TagOf(v) | Inst::Payload(v) | Inst::MakeTagged(_, v) | Inst::IsTag(v, _) => {
+                f(v)
+            }
+
+            Inst::Select(c, t, e) => {
+                f(c);
+                f(t);
+                f(e);
+            }
+
+            Inst::OverflowCheck(_, a, b) => {
+                f(a);
+                f(b);
+            }
+
+            Inst::Guard(cond, _, live) => {
+                f(cond);
+                live.iter_mut().for_each(|v| f(v));
+            }
+
+            Inst::Call(_, args) => args.iter_mut().for_each(|v| f(v)),
+            Inst::CallIndirect(callee, args, _) => {
+                f(callee);
+                args.iter_mut().for_each(|v| f(v));
+            }
+            Inst::Safepoint(live) => live.iter_mut().for_each(|v| f(v)),
+        }
+    }
+}
+
+/// Block terminator — every block ends with exactly one.
+#[derive(Debug, Clone)]
+pub enum Terminator {
+    Ret(Value),
+    RetVoid,
+    Jump(BlockId, Vec<Value>),
+    BrIf {
+        cond: Value,
+        then_block: BlockId,
+        then_args: Vec<Value>,
+        else_block: BlockId,
+        else_args: Vec<Value>,
+    },
+    /// Multi-way branch on an integer value.
+    /// Each case maps a constant to a (block, args) pair.
+    /// Falls through to `default_block` if no case matches.
+    Switch {
+        val: Value,
+        cases: Vec<(i64, BlockId, Vec<Value>)>,
+        default_block: BlockId,
+        default_args: Vec<Value>,
+    },
+    /// Call that may throw: normal return jumps to `normal`, exception jumps to `exception`.
+    /// The normal block's first param receives the return value (if any).
+    Invoke {
+        func: FuncRef,
+        args: Vec<Value>,
+        normal: BlockId,
+        normal_args: Vec<Value>,
+        exception: BlockId,
+        exception_args: Vec<Value>,
+    },
+    /// Indirect call that may throw.
+    InvokeIndirect {
+        callee: Value,
+        args: Vec<Value>,
+        ret_ty: Option<Type>,
+        normal: BlockId,
+        normal_args: Vec<Value>,
+        exception: BlockId,
+        exception_args: Vec<Value>,
+    },
+    Unreachable,
+}
+
+impl Terminator {
+    pub fn for_each_value(&self, mut f: impl FnMut(Value)) {
+        match self {
+            Terminator::Ret(v) => f(*v),
+            Terminator::RetVoid | Terminator::Unreachable => {}
+            Terminator::Jump(_, args) => args.iter().for_each(|v| f(*v)),
+            Terminator::BrIf {
+                cond,
+                then_args,
+                else_args,
+                ..
+            } => {
+                f(*cond);
+                then_args.iter().for_each(|v| f(*v));
+                else_args.iter().for_each(|v| f(*v));
+            }
+            Terminator::Switch {
+                val,
+                cases,
+                default_args,
+                ..
+            } => {
+                f(*val);
+                for (_, _, args) in cases {
+                    args.iter().for_each(|v| f(*v));
+                }
+                default_args.iter().for_each(|v| f(*v));
+            }
+            Terminator::Invoke { args, normal_args, exception_args, .. } => {
+                args.iter().for_each(|v| f(*v));
+                normal_args.iter().for_each(|v| f(*v));
+                exception_args.iter().for_each(|v| f(*v));
+            }
+            Terminator::InvokeIndirect { callee, args, normal_args, exception_args, .. } => {
+                f(*callee);
+                args.iter().for_each(|v| f(*v));
+                normal_args.iter().for_each(|v| f(*v));
+                exception_args.iter().for_each(|v| f(*v));
+            }
+        }
+    }
+
+    pub fn successors(&self) -> Vec<BlockId> {
+        match self {
+            Terminator::Ret(_) | Terminator::RetVoid | Terminator::Unreachable => vec![],
+            Terminator::Jump(target, _) => vec![*target],
+            Terminator::BrIf {
+                then_block,
+                else_block,
+                ..
+            } => vec![*then_block, *else_block],
+            Terminator::Switch {
+                cases,
+                default_block,
+                ..
+            } => {
+                let mut succs: Vec<BlockId> = cases.iter().map(|(_, b, _)| *b).collect();
+                succs.push(*default_block);
+                succs
+            }
+            Terminator::Invoke { normal, exception, .. }
+            | Terminator::InvokeIndirect { normal, exception, .. } => {
+                vec![*normal, *exception]
+            }
+        }
+    }
+}
+
+/// Instruction with its optional result value.
+#[derive(Debug, Clone)]
+pub struct InstNode {
+    pub value: Option<Value>,
+    pub inst: Inst,
+}
+
+/// A basic block.
+#[derive(Debug, Clone)]
+pub struct Block {
+    pub params: Vec<(Value, Type)>,
+    pub insts: Vec<InstNode>,
+    pub terminator: Terminator,
+}
+
+/// An externally-declared function.
+#[derive(Debug, Clone)]
+pub struct ExternFunc {
+    pub name: String,
+    pub sig: Signature,
+}
+
+/// A complete function in the IR.
+#[derive(Debug, Clone)]
+pub struct Function {
+    pub name: String,
+    pub sig: Signature,
+    pub blocks: Vec<Block>,
+    pub value_types: Vec<Type>,
+    pub extern_funcs: Vec<ExternFunc>,
+    pub deopt_info: Vec<DeoptInfo>,
+}
+
+impl Function {
+    pub fn value_type(&self, v: Value) -> Type {
+        self.value_types[v.index()]
+    }
+
+    pub fn entry_block(&self) -> &Block {
+        &self.blocks[0]
+    }
+
+    pub fn block(&self, id: BlockId) -> &Block {
+        &self.blocks[id.index()]
+    }
+
+    /// Compute predecessors for each block.
+    pub fn predecessors(&self) -> Vec<Vec<BlockId>> {
+        let mut preds = vec![vec![]; self.blocks.len()];
+        for (i, block) in self.blocks.iter().enumerate() {
+            let src = BlockId(i as u32);
+            for succ in block.terminator.successors() {
+                preds[succ.index()].push(src);
+            }
+        }
+        preds
+    }
+}
