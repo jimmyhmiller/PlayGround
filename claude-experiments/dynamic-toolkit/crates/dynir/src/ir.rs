@@ -124,10 +124,15 @@ pub enum Inst {
     Store(Value, Value, i32), // (value, addr, offset) — no result
 
     // -- Tagged values --
-    TagOf(Value),                // -> I32
-    Payload(Value),              // -> I64
-    MakeTagged(u32, Value),      // (tag, payload) -> I64
-    IsTag(Value, u32),           // -> I8
+    /// Extract the tag from a tagged value. The tagging scheme is determined
+    /// by the interpreter/codegen's `TagScheme` type parameter.
+    TagOf(Value),                           // -> I32
+    /// Extract the payload from a tagged value.
+    Payload(Value),                         // -> I64
+    /// Construct a tagged value from a tag constant and payload.
+    MakeTagged(u32, Value),                 // (tag, payload) -> I64
+    /// Check whether a value has a specific tag.
+    IsTag(Value, u32),                      // -> I8
 
     // -- Select --
     Select(Value, Value, Value), // (cond, if_true, if_false)

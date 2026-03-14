@@ -1,0 +1,11 @@
+[package]
+name = "lua2dynir"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+dynir = { path = "../dynir" }
+dynvalue = { path = "../dynvalue" }
+dynlower = { path = "../dynlower" }
+
+[dev-dependencies]

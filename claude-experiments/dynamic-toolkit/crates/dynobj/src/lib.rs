@@ -16,7 +16,7 @@ pub use field::{
     read_varlen_bytes, write_varlen_count,
 };
 pub use scan::scan_object;
-pub use roots::{RootSource, FrameHeader, RootFrame, FrameChain, FrameGuard, RootSet, AtomicRootSet};
+pub use roots::{RootSource, FrameHeader, RootFrame, FrameChain, FrameGuard, DynRootFrame, RootSet, AtomicRootSet};
 
 #[cfg(test)]
 mod tests;

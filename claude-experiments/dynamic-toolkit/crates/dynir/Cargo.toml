@@ -3,6 +3,9 @@ name = "dynir"
 version = "0.1.0"
 edition = "2021"
 
+[dependencies]
+dynvalue = { path = "../dynvalue" }
+
 [dev-dependencies]
 proptest = "1"
 criterion = { version = "0.5", features = ["html_reports"] }

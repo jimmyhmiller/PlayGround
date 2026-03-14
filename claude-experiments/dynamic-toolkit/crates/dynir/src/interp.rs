@@ -1,8 +1,12 @@
+use std::marker::PhantomData;
+
+use dynvalue::{Decoded, TagScheme};
+
 use crate::ir::*;
 use crate::types::Type;
 
 /// Successful execution result.
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum InterpResult {
     Value(u64),
     Void,
@@ -28,19 +32,21 @@ pub enum ExternCallResult {
     Exception(u64),
 }
 
-pub struct Interpreter<'a> {
+pub struct Interpreter<'a, S: TagScheme> {
     func: &'a Function,
     externs: Vec<Option<Box<dyn Fn(&[u64]) -> ExternCallResult>>>,
     indirect_handler: Option<Box<dyn Fn(u64, &[u64]) -> ExternCallResult>>,
+    _scheme: PhantomData<S>,
 }
 
-impl<'a> Interpreter<'a> {
+impl<'a, S: TagScheme> Interpreter<'a, S> {
     pub fn new(func: &'a Function) -> Self {
         let externs = (0..func.extern_funcs.len()).map(|_| None).collect();
         Interpreter {
             func,
             externs,
             indirect_handler: None,
+            _scheme: PhantomData,
         }
     }
 
@@ -69,6 +75,26 @@ impl<'a> Interpreter<'a> {
     }
 
     pub fn run(&self, args: &[u64]) -> Result<InterpResult, InterpError> {
+        self.run_with_safepoint(args, |_, _| {})
+    }
+
+    /// Run the function with a safepoint callback.
+    ///
+    /// At each `Safepoint` instruction, `on_safepoint` is called with:
+    /// - `&mut [u64]`: the SSA value array (GC may update pointer values in-place)
+    /// - `&[Value]`: the live GcPtr values listed in the safepoint
+    ///
+    /// This enables GC integration: the callback can expose live values as
+    /// roots, trigger collection, and the GC will update forwarded pointers
+    /// directly in the value array.
+    pub fn run_with_safepoint<F>(
+        &self,
+        args: &[u64],
+        mut on_safepoint: F,
+    ) -> Result<InterpResult, InterpError>
+    where
+        F: FnMut(&mut [u64], &[Value]),
+    {
         let func = self.func;
         let mut vals: Vec<u64> = vec![0; func.value_types.len()];
 
@@ -85,6 +111,12 @@ impl<'a> Interpreter<'a> {
 
             // Execute instructions.
             for node in &block.insts {
+                // Safepoint: call the GC hook with mutable access to vals.
+                if let Inst::Safepoint(live) = &node.inst {
+                    on_safepoint(&mut vals, live);
+                    continue;
+                }
+
                 let result = self.exec_inst(&node.inst, &vals)?;
                 if let Some(r) = result {
                     match r {
@@ -169,8 +201,6 @@ impl<'a> Interpreter<'a> {
                     let result = self.call_extern(*fref, &arg_vals)?;
                     match result {
                         ExternCallResult::Value(ret) => {
-                            // Normal path: first param of normal block gets return value (if any),
-                            // then normal_args fill remaining params.
                             let target_block = &func.blocks[normal.index()];
                             let mut param_idx = 0;
                             if let Some(ret_val) = ret {
@@ -425,16 +455,23 @@ impl<'a> Interpreter<'a> {
                 Ok(None)
             }
 
-            // Tagged values
-            Inst::TagOf(val) => Ok(Some(InstResult::Val((v(val) >> 48) as u64))),
-            Inst::Payload(val) => Ok(Some(InstResult::Val(v(val) & ((1u64 << 48) - 1)))),
+            // Tagged values — uses the TagScheme type parameter
+            Inst::TagOf(val) => {
+                let bits = v(val);
+                let tag = match S::decode(bits) {
+                    Decoded::Tagged { tag, .. } => tag,
+                    Decoded::Float(_) => panic!("TagOf on unboxed float"),
+                };
+                Ok(Some(InstResult::Val(tag as u64)))
+            }
+            Inst::Payload(val) => {
+                Ok(Some(InstResult::Val(S::extract_payload(v(val)))))
+            }
             Inst::MakeTagged(tag, payload) => {
-                let tagged = ((*tag as u64) << 48) | (v(payload) & ((1u64 << 48) - 1));
-                Ok(Some(InstResult::Val(tagged)))
+                Ok(Some(InstResult::Val(S::encode_tagged(*tag, v(payload)))))
             }
             Inst::IsTag(val, tag) => {
-                let actual_tag = (v(val) >> 48) as u32;
-                Ok(Some(InstResult::Val((actual_tag == *tag) as u64)))
+                Ok(Some(InstResult::Val(S::has_tag(v(val), *tag) as u64)))
             }
 
             // Select
@@ -516,7 +553,7 @@ impl<'a> Interpreter<'a> {
                     }
                 }
             }
-            // Safepoint — no-op in the interpreter (no GC to run).
+            // Safepoint — handled in the main loop above.
             Inst::Safepoint(_) => Ok(None),
 
             Inst::CallIndirect(callee, args, _ret_ty) => {

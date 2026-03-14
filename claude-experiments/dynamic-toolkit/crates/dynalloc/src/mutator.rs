@@ -3,7 +3,7 @@ use std::marker::PhantomData;
 
 use dynvalue::{TagScheme, Value};
 
-use crate::alloc::{alloc_obj, BumpAllocator};
+use crate::alloc::{alloc_obj, Alloc};
 use dynobj::{read_value_field, ObjHeader, RootSource, TypeInfo};
 
 // ─── Root ───────────────────────────────────────────────────────────
@@ -75,7 +75,7 @@ pub struct RootScope {
 
 // ─── Mutator ────────────────────────────────────────────────────────
 
-/// Safe wrapper over root storage + [`BumpAllocator`].
+/// Safe wrapper over root storage.
 ///
 /// Uses Rust's borrow checker to enforce GC safety:
 /// - **`&self`** methods: read roots (`get`), update values (`set`), save scope
@@ -83,17 +83,19 @@ pub struct RootScope {
 ///
 /// Since `&self` and `&mut self` conflict, all [`GcRef`]s must be dropped
 /// before any GC-triggering operation.
+///
+/// Allocation is decoupled from root management: the `alloc` method takes
+/// any `&dyn Alloc`, so a Mutator can work with any allocator (BumpAllocator,
+/// SemiSpace, Heap, etc.).
 pub struct Mutator {
     roots: Vec<Cell<u64>>,
-    bump: BumpAllocator,
 }
 
 impl Mutator {
-    /// Create a new mutator with the given bump allocator.
-    pub fn new(bump: BumpAllocator) -> Self {
+    /// Create a new mutator with empty root storage.
+    pub fn new() -> Self {
         Mutator {
             roots: Vec::new(),
-            bump,
         }
     }
 
@@ -112,7 +114,7 @@ impl Mutator {
 
     /// Allocate a heap object, initialize its header, and auto-root it.
     ///
-    /// Returns `Some(Root)` on success, `None` if the bump allocator is full.
+    /// Returns `Some(Root)` on success, `None` if the allocator is full.
     /// The root slot stores the raw pointer (`ptr as u64`), not a tagged value.
     /// Use [`Mutator::set`] to replace it with a tagged encoding if needed.
     ///
@@ -122,10 +124,11 @@ impl Mutator {
     /// `info` must accurately describe the object layout for header type `H`.
     pub fn alloc<H: ObjHeader>(
         &mut self,
+        allocator: &dyn Alloc,
         info: &'static TypeInfo,
         varlen_len: usize,
     ) -> Option<Root> {
-        let ptr = unsafe { alloc_obj::<H>(&self.bump, info, varlen_len) };
+        let ptr = unsafe { alloc_obj::<H>(allocator, info, varlen_len) };
         if ptr.is_null() {
             return None;
         }
@@ -185,11 +188,6 @@ impl Mutator {
     /// Return the number of active root slots.
     pub fn root_count(&self) -> usize {
         self.roots.len()
-    }
-
-    /// Access the underlying [`BumpAllocator`] for GC implementation.
-    pub fn bump(&self) -> &BumpAllocator {
-        &self.bump
     }
 
     // ─── Convenience (&mut self, no GC) ─────────────────────────

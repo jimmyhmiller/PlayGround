@@ -258,4 +258,123 @@ impl Arm64Inst {
     pub fn sdiv(rd: Arm64Reg, rn: Arm64Reg, rm: Arm64Reg) -> Self {
         Arm64Inst::Sdiv { sf: rd.sf(), rm, rn, rd }
     }
+
+    /// UDIV Rd, Rn, Rm
+    pub fn udiv(rd: Arm64Reg, rn: Arm64Reg, rm: Arm64Reg) -> Self {
+        Arm64Inst::Udiv { sf: rd.sf(), rm, rn, rd }
+    }
+
+    /// B offset (unconditional branch, offset in instructions)
+    pub fn b(offset_insns: i32) -> Self {
+        Arm64Inst::B { imm26: offset_insns }
+    }
+
+    /// CSEL Rd, Rn, Rm, cond
+    pub fn csel(rd: Arm64Reg, rn: Arm64Reg, rm: Arm64Reg, cond: Arm64Cond) -> Self {
+        Arm64Inst::Csel { sf: rd.sf(), rm, cond: cond as i32, rn, rd }
+    }
+
+    /// MVN Rd, Rm  (alias for ORN Rd, XZR, Rm)
+    pub fn mvn(rd: Arm64Reg, rm: Arm64Reg) -> Self {
+        let zr = match rd.size {
+            RegSize::W32 => super::reg::WZR,
+            RegSize::X64 => XZR,
+        };
+        Arm64Inst::OrnShifted { sf: rd.sf(), shift: 0, rm, imm6: 0, rn: zr, rd }
+    }
+
+    /// SXTW Xd, Wn  (sign-extend 32 to 64)
+    pub fn sxtw(rd: Arm64Reg, rn: Arm64Reg) -> Self {
+        Arm64Inst::Sbfm { sf: 1, n: 0, immr: 0, imms: 31, rn, rd }
+    }
+
+    /// SXTB Xd, Wn  (sign-extend 8 to 64)
+    pub fn sxtb(rd: Arm64Reg, rn: Arm64Reg) -> Self {
+        Arm64Inst::Sbfm { sf: rd.sf(), n: if rd.sf() == 1 { 1 } else { 0 }, immr: 0, imms: 7, rn, rd }
+    }
+
+    /// UXTB Wd, Wn  (zero-extend byte)
+    pub fn uxtb(rd: Arm64Reg, rn: Arm64Reg) -> Self {
+        Arm64Inst::Ubfm { sf: 0, n: 0, immr: 0, imms: 7, rn, rd }
+    }
+
+    /// SCVTF Dd, Xn (signed int to double)
+    pub fn scvtf_to_double(rd: Arm64Reg, rn: Arm64Reg) -> Self {
+        // ftype=01 for double, sf from source reg
+        Arm64Inst::ScvtfIntToFloat { sf: rn.sf(), ftype: 1, rn, rd }
+    }
+
+    /// FCVTZS Xd, Dn (double to signed int, round toward zero)
+    pub fn fcvtzs_from_double(rd: Arm64Reg, rn: Arm64Reg) -> Self {
+        Arm64Inst::FcvtzsFloatToInt { sf: rd.sf(), ftype: 1, rn, rd }
+    }
+
+    /// FNEG Dd, Dn
+    pub fn fneg(rd: Arm64Reg, rn: Arm64Reg) -> Self {
+        Arm64Inst::FnegFloat { ftype: 1, rn, rd } // ftype=1 for double
+    }
+
+    /// FCSEL Dd, Dn, Dm, cond
+    pub fn fcsel(rd: Arm64Reg, rn: Arm64Reg, rm: Arm64Reg, cond: Arm64Cond) -> Self {
+        Arm64Inst::FcselFloat { ftype: 1, rm, cond: cond as i32, rn, rd }
+    }
+
+    /// LDR Dt, [Xn, #offset]  (FP, unsigned offset, 8-byte aligned for D regs)
+    pub fn ldr_fp(rt: Arm64Reg, rn: Arm64Reg, offset: i32) -> Self {
+        assert!(offset >= 0 && offset % 8 == 0, "FP LDR offset must be 8-byte aligned and non-negative");
+        Arm64Inst::LdrFpImm { size: 3, imm12: offset / 8, rn, rt }
+    }
+
+    /// STR Dt, [Xn, #offset]  (FP, unsigned offset, 8-byte aligned for D regs)
+    pub fn str_fp(rt: Arm64Reg, rn: Arm64Reg, offset: i32) -> Self {
+        assert!(offset >= 0 && offset % 8 == 0, "FP STR offset must be 8-byte aligned and non-negative");
+        Arm64Inst::StrFpImm { size: 3, imm12: offset / 8, rn, rt }
+    }
+
+    /// LDUR Dt, [Xn, #offset]  (FP, unscaled offset)
+    pub fn ldur_fp(rt: Arm64Reg, rn: Arm64Reg, offset: i32) -> Self {
+        Arm64Inst::LdurFp { size: 3, imm9: offset, rn, rt }
+    }
+
+    /// STUR Dt, [Xn, #offset]  (FP, unscaled offset)
+    pub fn stur_fp(rt: Arm64Reg, rn: Arm64Reg, offset: i32) -> Self {
+        Arm64Inst::SturFp { size: 3, imm9: offset, rn, rt }
+    }
+
+    /// FMOV Dd, Xn  (general to float)
+    pub fn fmov_gp_to_fp(rd: Arm64Reg, rn: Arm64Reg) -> Self {
+        // sf=1, ftype=01 (double), rmode=00, opcode=111
+        Arm64Inst::FmovFloatGen { sf: 1, ftype: 1, rmode: 0, opcode: 7, rn, rd }
+    }
+
+    /// FMOV Xd, Dn  (float to general)
+    pub fn fmov_fp_to_gp(rd: Arm64Reg, rn: Arm64Reg) -> Self {
+        // sf=1, ftype=01 (double), rmode=00, opcode=110
+        Arm64Inst::FmovFloatGen { sf: 1, ftype: 1, rmode: 0, opcode: 6, rn, rd }
+    }
+
+    /// FCMP Dn, Dm (double compare, sets flags)
+    pub fn fcmp_double(rn: Arm64Reg, rm: Arm64Reg) -> Self {
+        Arm64Inst::FcmpFloat { ftype: 1, rm, rn }
+    }
+
+    /// FADD Dd, Dn, Dm (double)
+    pub fn fadd(rd: Arm64Reg, rn: Arm64Reg, rm: Arm64Reg) -> Self {
+        Arm64Inst::FaddFloat { ftype: 1, rm, rn, rd }
+    }
+
+    /// FSUB Dd, Dn, Dm (double)
+    pub fn fsub(rd: Arm64Reg, rn: Arm64Reg, rm: Arm64Reg) -> Self {
+        Arm64Inst::FsubFloat { ftype: 1, rm, rn, rd }
+    }
+
+    /// FMUL Dd, Dn, Dm (double)
+    pub fn fmul(rd: Arm64Reg, rn: Arm64Reg, rm: Arm64Reg) -> Self {
+        Arm64Inst::FmulFloat { ftype: 1, rm, rn, rd }
+    }
+
+    /// FDIV Dd, Dn, Dm (double)
+    pub fn fdiv(rd: Arm64Reg, rn: Arm64Reg, rm: Arm64Reg) -> Self {
+        Arm64Inst::FdivFloat { ftype: 1, rm, rn, rd }
+    }
 }

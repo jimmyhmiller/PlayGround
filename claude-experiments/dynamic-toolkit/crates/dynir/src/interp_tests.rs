@@ -2,9 +2,10 @@ use crate::builder::FunctionBuilder;
 use crate::interp::*;
 use crate::ir::*;
 use crate::types::{Signature, Type};
+use dynvalue::{Decoded, LowBit, NanBox, TagScheme};
 
 fn run_simple(func: &Function, args: &[u64]) -> u64 {
-    let interp = Interpreter::new(func);
+    let interp = Interpreter::<LowBit<3>>::new(func);
     match interp.run(args).unwrap() {
         InterpResult::Value(v) => v,
         other => panic!("expected Value, got {:?}", other),
@@ -383,7 +384,8 @@ fn store_load_i32_with_offset() {
 // ---- Tagged values ----
 
 #[test]
-fn tagged_roundtrip() {
+fn tagged_roundtrip_lowbit() {
+    // LowBit<4>: tag in low 4 bits, payload in upper 60 bits.
     let mut b = FunctionBuilder::new("tag", &[Type::I64], Some(Type::I64));
     let entry = b.entry_block();
     let payload_in = b.block_param(entry, 0);
@@ -392,7 +394,35 @@ fn tagged_roundtrip() {
     let tag = b.tag_of(tagged);
     let payload_out = b.payload(tagged);
 
-    // Return (tag << 48) | payload to verify both
+    // Return (tag << 48) | payload to verify both in one value
+    let tag_ext = b.zext(tag, Type::I64);
+    let forty_eight = b.iconst(Type::I64, 48);
+    let shifted = b.shl(tag_ext, forty_eight);
+    let combined = b.or(shifted, payload_out);
+    b.ret(combined);
+    let func = b.build();
+
+    let input = 0x0ABC_DEF0_1234u64; // must fit in 60 bits
+    let interp = Interpreter::<LowBit<4>>::new(&func);
+    let result = match interp.run(&[input]).unwrap() {
+        InterpResult::Value(v) => v,
+        other => panic!("expected Value, got {:?}", other),
+    };
+    assert_eq!(result >> 48, 7);
+    assert_eq!(result & ((1u64 << 48) - 1), input);
+}
+
+#[test]
+fn tagged_roundtrip_nanbox() {
+    // NanBox: tag in bits 49-48 (2 bits), payload in lower 48 bits.
+    let mut b = FunctionBuilder::new("tag_nan", &[Type::I64], Some(Type::I64));
+    let entry = b.entry_block();
+    let payload_in = b.block_param(entry, 0);
+
+    let tagged = b.make_tagged(2, payload_in);
+    let tag = b.tag_of(tagged);
+    let payload_out = b.payload(tagged);
+
     let tag_ext = b.zext(tag, Type::I64);
     let forty_eight = b.iconst(Type::I64, 48);
     let shifted = b.shl(tag_ext, forty_eight);
@@ -401,13 +431,17 @@ fn tagged_roundtrip() {
     let func = b.build();
 
     let input = 0x1234_5678_9ABCu64;
-    let result = run_simple(&func, &[input]);
-    assert_eq!(result >> 48, 7);
+    let interp = Interpreter::<NanBox>::new(&func);
+    let result = match interp.run(&[input]).unwrap() {
+        InterpResult::Value(v) => v,
+        other => panic!("expected Value, got {:?}", other),
+    };
+    assert_eq!(result >> 48, 2);
     assert_eq!(result & ((1u64 << 48) - 1), input);
 }
 
 #[test]
-fn is_tag_check() {
+fn is_tag_check_lowbit() {
     let mut b = FunctionBuilder::new("istag", &[Type::I64], Some(Type::I8));
     let entry = b.entry_block();
     let val = b.block_param(entry, 0);
@@ -415,10 +449,39 @@ fn is_tag_check() {
     b.ret(result);
     let func = b.build();
 
-    let tagged_3 = (3u64 << 48) | 42;
-    let tagged_5 = (5u64 << 48) | 42;
-    assert_eq!(run_simple(&func, &[tagged_3]), 1);
-    assert_eq!(run_simple(&func, &[tagged_5]), 0);
+    let interp = Interpreter::<LowBit<4>>::new(&func);
+    // LowBit<4>: encode = (payload << 4) | tag
+    let tagged_3 = (42u64 << 4) | 3;
+    let tagged_5 = (42u64 << 4) | 5;
+    let run = |args: &[u64]| match interp.run(args).unwrap() {
+        InterpResult::Value(v) => v,
+        other => panic!("expected Value, got {:?}", other),
+    };
+    assert_eq!(run(&[tagged_3]), 1);
+    assert_eq!(run(&[tagged_5]), 0);
+}
+
+#[test]
+fn is_tag_check_nanbox() {
+    let mut b = FunctionBuilder::new("istag_nan", &[Type::I64], Some(Type::I8));
+    let entry = b.entry_block();
+    let val = b.block_param(entry, 0);
+    let result = b.is_tag(val, 1);
+    b.ret(result);
+    let func = b.build();
+
+    let interp = Interpreter::<NanBox>::new(&func);
+    let run = |args: &[u64]| match interp.run(args).unwrap() {
+        InterpResult::Value(v) => v,
+        other => panic!("expected Value, got {:?}", other),
+    };
+    // NanBox: encode = 0x7FFC_0000_0000_0000 | (tag << 48) | payload
+    let tagged_1 = NanBox::encode_tagged(1, 42);
+    let tagged_2 = NanBox::encode_tagged(2, 42);
+    let float_bits = 3.14f64.to_bits(); // not tagged at all
+    assert_eq!(run(&[tagged_1]), 1);
+    assert_eq!(run(&[tagged_2]), 0);
+    assert_eq!(run(&[float_bits]), 0); // float is not tag 1
 }
 
 // ---- Guard / Deopt ----
@@ -448,7 +511,7 @@ fn guard_fails_deopt() {
     b.ret(arg);
     let func = b.build();
 
-    let interp = Interpreter::new(&func);
+    let interp = Interpreter::<LowBit<3>>::new(&func);
     match interp.run(&[99]).unwrap() {
         InterpResult::Deopt {
             deopt_id,
@@ -481,7 +544,7 @@ fn call_extern() {
     b.ret(result);
     let func = b.build();
 
-    let mut interp = Interpreter::new(&func);
+    let mut interp = Interpreter::<LowBit<3>>::new(&func);
     interp.bind(fref, |args| ExternCallResult::Value(Some(args[0] * 2)));
     match interp.run(&[21]).unwrap() {
         InterpResult::Value(v) => assert_eq!(v, 42),
@@ -505,7 +568,7 @@ fn call_void_extern() {
     b.ret(arg);
     let func = b.build();
 
-    let mut interp = Interpreter::new(&func);
+    let mut interp = Interpreter::<LowBit<3>>::new(&func);
     interp.bind(fref, |_args| ExternCallResult::Value(None));
     assert_eq!(
         match interp.run(&[7]).unwrap() {
@@ -526,7 +589,7 @@ fn call_indirect() {
     b.ret(result);
     let func = b.build();
 
-    let mut interp = Interpreter::new(&func);
+    let mut interp = Interpreter::<LowBit<3>>::new(&func);
     interp.bind_indirect(|_callee, args| ExternCallResult::Value(Some(args[0] + 5)));
     match interp.run(&[0xCAFE]).unwrap() {
         InterpResult::Value(v) => assert_eq!(v, 15),
@@ -562,7 +625,7 @@ fn invoke_normal_path() {
 
     let func = b.build();
 
-    let mut interp = Interpreter::new(&func);
+    let mut interp = Interpreter::<LowBit<3>>::new(&func);
     interp.bind(fref, |args| ExternCallResult::Value(Some(args[0] * 3)));
     match interp.run(&[14]).unwrap() {
         InterpResult::Value(v) => assert_eq!(v, 42),
@@ -601,7 +664,7 @@ fn invoke_exception_path() {
 
     let func = b.build();
 
-    let mut interp = Interpreter::new(&func);
+    let mut interp = Interpreter::<LowBit<3>>::new(&func);
     interp.bind(fref, |_args| ExternCallResult::Exception(0));
     match interp.run(&[1]).unwrap() {
         // 1 (arg passed via exception_args) + 999 = 1000
@@ -671,7 +734,7 @@ fn error_unreachable() {
     let mut b = FunctionBuilder::new("unreach", &[], Some(Type::I64));
     b.unreachable();
     let func = b.build();
-    let interp = Interpreter::new(&func);
+    let interp = Interpreter::<LowBit<3>>::new(&func);
     match interp.run(&[]) {
         Err(InterpError::Unreachable) => {}
         other => panic!("expected Unreachable, got {:?}", other),
@@ -691,7 +754,7 @@ fn error_unbound_extern() {
     let r = b.call(fref, &[]).unwrap();
     b.ret(r);
     let func = b.build();
-    let interp = Interpreter::new(&func);
+    let interp = Interpreter::<LowBit<3>>::new(&func);
     match interp.run(&[]) {
         Err(InterpError::UnknownExternFunc(name)) => assert_eq!(name, "missing"),
         other => panic!("expected UnknownExternFunc, got {:?}", other),
@@ -706,7 +769,7 @@ fn error_divide_by_zero() {
     let r = b.sdiv(a, zero);
     b.ret(r);
     let func = b.build();
-    let interp = Interpreter::new(&func);
+    let interp = Interpreter::<LowBit<3>>::new(&func);
     match interp.run(&[]) {
         Err(InterpError::DivideByZero) => {}
         other => panic!("expected DivideByZero, got {:?}", other),
@@ -726,7 +789,7 @@ fn error_uncaught_exception() {
     let r = b.call(fref, &[]).unwrap();
     b.ret(r);
     let func = b.build();
-    let mut interp = Interpreter::new(&func);
+    let mut interp = Interpreter::<LowBit<3>>::new(&func);
     interp.bind(fref, |_| ExternCallResult::Exception(42));
     match interp.run(&[]) {
         Err(InterpError::UncaughtException(v)) => assert_eq!(v, 42),
@@ -808,15 +871,28 @@ fn pic_add_tagged() {
     let func = b.build();
 
     // Both int-tagged: (tag=1, payload=10) + (tag=1, payload=32) = (tag=1, payload=42)
-    let a_tagged = (1u64 << 48) | 10;
-    let b_tagged = (1u64 << 48) | 32;
-    let result = run_simple(&func, &[a_tagged, b_tagged]);
-    assert_eq!(result >> 48, 1);
-    assert_eq!(result & ((1u64 << 48) - 1), 42);
+    let a_tagged = NanBox::encode_tagged(1, 10);
+    let b_tagged = NanBox::encode_tagged(1, 32);
+    let interp = Interpreter::<NanBox>::new(&func);
+    let result = match interp.run(&[a_tagged, b_tagged]).unwrap() {
+        InterpResult::Value(v) => v,
+        other => panic!("expected Value, got {:?}", other),
+    };
+    // Extract tag and payload from the result
+    match NanBox::decode(result) {
+        Decoded::Tagged { tag, payload } => {
+            assert_eq!(tag, 1);
+            assert_eq!(payload, 42);
+        }
+        other => panic!("expected Tagged, got {:?}", other),
+    }
 
     // Mixed tags: slow path
-    let a_str = (2u64 << 48) | 10;
-    let result = run_simple(&func, &[a_str, b_tagged]);
+    let a_str = NanBox::encode_tagged(2, 10);
+    let result = match interp.run(&[a_str, b_tagged]).unwrap() {
+        InterpResult::Value(v) => v,
+        other => panic!("expected Value, got {:?}", other),
+    };
     assert_eq!(result, (-1i64) as u64);
 }
 
@@ -873,7 +949,7 @@ fn bind_by_name() {
     b.ret(r);
     let func = b.build();
 
-    let mut interp = Interpreter::new(&func);
+    let mut interp = Interpreter::<LowBit<3>>::new(&func);
     interp.bind_by_name("get_value", |_| ExternCallResult::Value(Some(123)));
     match interp.run(&[]).unwrap() {
         InterpResult::Value(v) => assert_eq!(v, 123),
@@ -886,7 +962,7 @@ fn void_return() {
     let mut b = FunctionBuilder::new("void_fn", &[], None);
     b.ret_void();
     let func = b.build();
-    let interp = Interpreter::new(&func);
+    let interp = Interpreter::<LowBit<3>>::new(&func);
     match interp.run(&[]).unwrap() {
         InterpResult::Void => {}
         other => panic!("expected Void, got {:?}", other),
@@ -926,7 +1002,7 @@ fn invoke_indirect_normal() {
 
     let func = b.build();
 
-    let mut interp = Interpreter::new(&func);
+    let mut interp = Interpreter::<LowBit<3>>::new(&func);
     interp.bind_indirect(|_callee, args| ExternCallResult::Value(Some(args[0] * 10)));
     match interp.run(&[0xBEEF]).unwrap() {
         InterpResult::Value(v) => assert_eq!(v, 50),
@@ -946,7 +1022,7 @@ fn guard_with_multiple_live_values() {
     b.ret(a);
     let func = b.build();
 
-    let interp = Interpreter::new(&func);
+    let interp = Interpreter::<LowBit<3>>::new(&func);
     match interp.run(&[10, 20]).unwrap() {
         InterpResult::Deopt { live_values, .. } => {
             assert_eq!(live_values, vec![10, 20]);

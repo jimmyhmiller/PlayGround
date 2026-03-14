@@ -61,14 +61,21 @@ pub struct RootFrame<const N: usize> {
     pub slots: [Cell<u64>; N],
 }
 
+impl FrameHeader {
+    /// Create a new frame header with the given slot count and null parent.
+    pub fn new(slot_count: usize) -> Self {
+        FrameHeader {
+            parent: Cell::new(core::ptr::null_mut()),
+            slot_count,
+        }
+    }
+}
+
 impl<const N: usize> RootFrame<N> {
     /// Create a new frame with all slots zeroed.
     pub fn new() -> Self {
         RootFrame {
-            header: FrameHeader {
-                parent: Cell::new(core::ptr::null_mut()),
-                slot_count: N,
-            },
+            header: FrameHeader::new(N),
             slots: [const { Cell::new(0) }; N],
         }
     }
@@ -124,6 +131,22 @@ impl FrameChain {
         FrameGuard { chain: self }
     }
 
+    /// Push a raw FrameHeader pointer onto the chain.
+    ///
+    /// This supports dynamically-sized frames where `N` isn't known at
+    /// compile time. The header must point to a contiguous block of
+    /// `[FrameHeader][Cell<u64>; slot_count]`.
+    ///
+    /// # Safety
+    /// - `header` must point to valid memory with `slot_count` Cell<u64> slots
+    ///   immediately following the FrameHeader.
+    /// - The memory must remain valid until the returned `FrameGuard` is dropped.
+    pub unsafe fn push_raw<'a>(&'a self, header: *mut FrameHeader) -> FrameGuard<'a> {
+        unsafe { (*header).parent.set(self.top.get()) };
+        self.top.set(header);
+        FrameGuard { chain: self }
+    }
+
     /// Number of frames currently in the chain.
     pub fn depth(&self) -> usize {
         let mut count = 0;
@@ -168,6 +191,103 @@ impl<'a> Drop for FrameGuard<'a> {
         assert!(!top.is_null(), "FrameGuard::drop: chain is empty");
         unsafe {
             self.chain.top.set((*top).parent.get());
+        }
+    }
+}
+
+// ─── DynRootFrame (runtime-sized) ────────────────────────────────────
+
+/// A dynamically-sized root frame compatible with [`FrameChain`].
+///
+/// In compiled code, each function allocates a `RootFrame<N>` on its stack
+/// where N is known at compile time. For the interpreter, we don't know N
+/// until we inspect the function's IR, so we heap-allocate a frame with
+/// the right number of slots.
+///
+/// Memory layout (matches `RootFrame<N>`):
+/// ```text
+/// ┌───────────────────┐
+/// │  FrameHeader      │  16 bytes (parent + slot_count)
+/// ├───────────────────┤
+/// │  slots[0]: u64    │  slot_count × 8 bytes
+/// │  slots[1]: u64    │
+/// │  ...              │
+/// └───────────────────┘
+/// ```
+pub struct DynRootFrame {
+    /// Raw allocation: [FrameHeader][Cell<u64> × slot_count]
+    backing: Vec<u64>,
+    slot_count: usize,
+}
+
+impl DynRootFrame {
+    /// Create a new dynamic root frame with `slot_count` GC root slots.
+    ///
+    /// All slots are initialized to 0 (null).
+    pub fn new(slot_count: usize) -> Self {
+        let header_words = std::mem::size_of::<FrameHeader>() / 8;
+        debug_assert_eq!(header_words, 2);
+        let total_words = header_words + slot_count;
+        let mut backing = vec![0u64; total_words];
+
+        // Initialize the FrameHeader in-place.
+        let header_ptr = backing.as_mut_ptr() as *mut FrameHeader;
+        unsafe {
+            header_ptr.write(FrameHeader::new(slot_count));
+        }
+
+        DynRootFrame {
+            backing,
+            slot_count,
+        }
+    }
+
+    /// Get a raw pointer to the FrameHeader (for pushing onto a FrameChain).
+    pub fn header_ptr(&self) -> *mut FrameHeader {
+        self.backing.as_ptr() as *mut FrameHeader
+    }
+
+    /// Push this frame onto a FrameChain. Returns a guard that pops it on drop.
+    ///
+    /// # Safety
+    /// The DynRootFrame must outlive the returned FrameGuard.
+    pub fn push_onto<'a>(&'a self, chain: &'a FrameChain) -> FrameGuard<'a> {
+        unsafe { chain.push_raw(self.header_ptr()) }
+    }
+
+    /// Number of root slots.
+    pub fn slot_count(&self) -> usize {
+        self.slot_count
+    }
+
+    /// Get the value in slot `i`.
+    pub fn get(&self, i: usize) -> u64 {
+        assert!(i < self.slot_count, "slot index {i} >= slot_count {}", self.slot_count);
+        let header_words = std::mem::size_of::<FrameHeader>() / 8;
+        let slot_ptr = unsafe {
+            (self.backing.as_ptr().add(header_words + i) as *const Cell<u64>)
+                .as_ref()
+                .unwrap()
+        };
+        slot_ptr.get()
+    }
+
+    /// Set the value in slot `i`.
+    pub fn set(&self, i: usize, val: u64) {
+        assert!(i < self.slot_count, "slot index {i} >= slot_count {}", self.slot_count);
+        let header_words = std::mem::size_of::<FrameHeader>() / 8;
+        let slot_ptr = unsafe {
+            (self.backing.as_ptr().add(header_words + i) as *const Cell<u64>)
+                .as_ref()
+                .unwrap()
+        };
+        slot_ptr.set(val);
+    }
+
+    /// Zero all slots (used before mirroring live values at safepoints).
+    pub fn clear_all(&self) {
+        for i in 0..self.slot_count {
+            self.set(i, 0);
         }
     }
 }

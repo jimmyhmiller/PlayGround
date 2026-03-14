@@ -174,10 +174,10 @@ fn bump_integration_roots_scan() {
     static INFO_0F: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_fields(0);
 
     let bump = BumpAllocator::new::<Compact>(4096);
-    let mut m = Mutator::new(bump);
+    let mut m = Mutator::new();
 
-    let root_b = m.alloc::<Compact>(&INFO_0F, 0).unwrap();
-    let root_a = m.alloc::<Compact>(&INFO_1F, 0).unwrap();
+    let root_b = m.alloc::<Compact>(&bump, &INFO_0F, 0).unwrap();
+    let root_a = m.alloc::<Compact>(&bump, &INFO_1F, 0).unwrap();
 
     let obj_b = m.get(&root_b).bits() as *mut u8;
     let obj_a = m.get(&root_a).bits() as *mut u8;
@@ -195,7 +195,7 @@ fn bump_integration_roots_scan() {
         let bits = unsafe { *slot };
         if bits != 0 {
             let ptr = bits as *mut u8;
-            if m.bump().contains(ptr) && !marked.contains(&ptr) {
+            if bump.contains(ptr) && !marked.contains(&ptr) {
                 marked.push(ptr);
                 mark_stack.push(ptr);
             }
@@ -230,7 +230,7 @@ fn bump_integration_roots_scan() {
     // Walk heap and verify same objects found
     let mut walked: Vec<*mut u8> = Vec::new();
     unsafe {
-        m.bump().walk(&mut |ptr, _info| {
+        bump.walk(&mut |ptr, _info| {
             walked.push(ptr);
         });
     }
@@ -243,8 +243,8 @@ fn bump_integration_roots_scan() {
 
 #[test]
 fn mutator_root_get_set() {
-    let bump = BumpAllocator::new::<Compact>(4096);
-    let mut m = Mutator::new(bump);
+    let _bump = BumpAllocator::new::<Compact>(4096);
+    let mut m = Mutator::new();
 
     let r = m.root(42);
     assert_eq!(m.get(&r).bits(), 42);
@@ -255,8 +255,8 @@ fn mutator_root_get_set() {
 
 #[test]
 fn mutator_gcref_value_decode() {
-    let bump = BumpAllocator::new::<Compact>(4096);
-    let mut m = Mutator::new(bump);
+    let _bump = BumpAllocator::new::<Compact>(4096);
+    let mut m = Mutator::new();
 
     // Store a LowBit<3> tagged value: tag=2, payload=100
     let tagged = Value::<LowBit<3>>::tagged(2, 100);
@@ -275,9 +275,9 @@ fn mutator_alloc_returns_rooted_object() {
     const PAIR: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_fields(2);
 
     let bump = BumpAllocator::new::<Compact>(4096);
-    let mut m = Mutator::new(bump);
+    let mut m = Mutator::new();
 
-    let root = m.alloc::<Compact>(&PAIR, 0).unwrap();
+    let root = m.alloc::<Compact>(&bump, &PAIR, 0).unwrap();
     let ptr = m.get(&root).bits();
     assert_ne!(ptr, 0);
 
@@ -290,8 +290,8 @@ fn mutator_alloc_returns_rooted_object() {
 
 #[test]
 fn mutator_save_restore_scoping() {
-    let bump = BumpAllocator::new::<Compact>(4096);
-    let mut m = Mutator::new(bump);
+    let _bump = BumpAllocator::new::<Compact>(4096);
+    let mut m = Mutator::new();
 
     let r1 = m.root(10);
     let r2 = m.root(20);
@@ -321,10 +321,10 @@ fn mutator_root_field() {
     const PAIR: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_fields(2);
 
     let bump = BumpAllocator::new::<Compact>(4096);
-    let mut m = Mutator::new(bump);
+    let mut m = Mutator::new();
 
     // Allocate a pair object
-    let parent = m.alloc::<Compact>(&PAIR, 0).unwrap();
+    let parent = m.alloc::<Compact>(&bump, &PAIR, 0).unwrap();
     let parent_ptr = m.get(&parent).bits() as *mut u8;
 
     // Write a tagged value into field 0: tag=1, payload=0xBEEF
@@ -343,8 +343,8 @@ fn mutator_root_field() {
 
 #[test]
 fn mutator_multiple_gcrefs_same_scope() {
-    let bump = BumpAllocator::new::<Compact>(4096);
-    let mut m = Mutator::new(bump);
+    let _bump = BumpAllocator::new::<Compact>(4096);
+    let mut m = Mutator::new();
 
     let r1 = m.root(111);
     let r2 = m.root(222);
@@ -364,13 +364,13 @@ fn mutator_reread_after_alloc() {
     const LEAF: TypeInfo = TypeInfo::for_header(Compact::SIZE);
 
     let bump = BumpAllocator::new::<Compact>(4096);
-    let mut m = Mutator::new(bump);
+    let mut m = Mutator::new();
 
     let r = m.root(0xAAAA);
     assert_eq!(m.get(&r).bits(), 0xAAAA);
 
     // alloc is a potential GC point — simulate GC updating the root
-    let _new_obj = m.alloc::<Compact>(&LEAF, 0).unwrap();
+    let _new_obj = m.alloc::<Compact>(&bump, &LEAF, 0).unwrap();
 
     // Simulate GC forwarding: manually update root's slot
     m.set(&r, 0xBBBB);
@@ -388,16 +388,16 @@ fn mutator_alloc_full_returns_none() {
 
     // Small bump: room for exactly 2 objects (16 bytes)
     let bump = BumpAllocator::new::<Compact>(16);
-    let mut m = Mutator::new(bump);
+    let mut m = Mutator::new();
 
-    let a = m.alloc::<Compact>(&LEAF, 0);
+    let a = m.alloc::<Compact>(&bump, &LEAF, 0);
     assert!(a.is_some());
 
-    let b = m.alloc::<Compact>(&LEAF, 0);
+    let b = m.alloc::<Compact>(&bump, &LEAF, 0);
     assert!(b.is_some());
 
     // Third allocation should fail
-    let c = m.alloc::<Compact>(&LEAF, 0);
+    let c = m.alloc::<Compact>(&bump, &LEAF, 0);
     assert!(c.is_none());
 }
 
@@ -406,11 +406,11 @@ fn mutator_integration_with_scan() {
     const PAIR: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_fields(2);
 
     let bump = BumpAllocator::new::<Compact>(4096);
-    let mut m = Mutator::new(bump);
+    let mut m = Mutator::new();
 
     // Allocate two objects via mutator
-    let root_a = m.alloc::<Compact>(&PAIR, 0).unwrap();
-    let root_b = m.alloc::<Compact>(&PAIR, 0).unwrap();
+    let root_a = m.alloc::<Compact>(&bump, &PAIR, 0).unwrap();
+    let root_b = m.alloc::<Compact>(&bump, &PAIR, 0).unwrap();
 
     let ptr_a = m.get(&root_a).bits() as *mut u8;
     let ptr_b = m.get(&root_b).bits() as *mut u8;
@@ -438,7 +438,7 @@ fn mutator_integration_with_scan() {
         let bits = unsafe { *slot };
         if bits != 0 {
             let ptr = bits as *mut u8;
-            if m.bump().contains(ptr) && !marked.contains(&ptr) {
+            if bump.contains(ptr) && !marked.contains(&ptr) {
                 marked.push(ptr);
                 mark_stack.push(ptr);
             }
@@ -453,7 +453,7 @@ fn mutator_integration_with_scan() {
                 let v = Value::<LowBit<3>>::from_bits(*slot);
                 if v.has_tag(1) {
                     let ptr = (v.payload() << 3) as *mut u8;
-                    if m.bump().contains(ptr) && !marked.contains(&ptr) {
+                    if bump.contains(ptr) && !marked.contains(&ptr) {
                         marked.push(ptr);
                         mark_stack.push(ptr);
                     }
@@ -473,14 +473,16 @@ fn mutator_integration_with_scan() {
 const PAIR_INFO: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_fields(2);
 const VEC_INFO: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_varlen_values(0);
 
-unsafe extern "C" fn rt_alloc_pair(m: *mut Mutator) -> Root {
+unsafe extern "C" fn rt_alloc_pair(m: *mut Mutator, bump: *const BumpAllocator) -> Root {
     let m = unsafe { &mut *m };
-    m.alloc::<Compact>(&PAIR_INFO, 0).expect("OOM in rt_alloc_pair")
+    let bump = unsafe { &*bump };
+    m.alloc::<Compact>(bump, &PAIR_INFO, 0).expect("OOM in rt_alloc_pair")
 }
 
-unsafe extern "C" fn rt_alloc_vec(m: *mut Mutator, len: usize) -> Root {
+unsafe extern "C" fn rt_alloc_vec(m: *mut Mutator, bump: *const BumpAllocator, len: usize) -> Root {
     let m = unsafe { &mut *m };
-    m.alloc::<Compact>(&VEC_INFO, len).expect("OOM in rt_alloc_vec")
+    let bump = unsafe { &*bump };
+    m.alloc::<Compact>(bump, &VEC_INFO, len).expect("OOM in rt_alloc_vec")
 }
 
 unsafe extern "C" fn rt_get_field(m: *mut Mutator, obj: Root, index: u16) -> Root {
@@ -519,12 +521,13 @@ unsafe extern "C" fn rt_restore(m: *mut Mutator, scope: RootScope) {
 #[test]
 fn extern_c_api_no_raw_pointers() {
     let bump = BumpAllocator::new::<Compact>(4096);
-    let mut m = Mutator::new(bump);
+    let mut m = Mutator::new();
     let mp = &mut m as *mut Mutator;
+    let bp = &bump as *const BumpAllocator;
 
     unsafe {
-        let a = rt_alloc_pair(mp);
-        let b = rt_alloc_pair(mp);
+        let a = rt_alloc_pair(mp, bp);
+        let b = rt_alloc_pair(mp, bp);
 
         rt_set_field(mp, a, 0, b);
 
@@ -542,16 +545,17 @@ fn extern_c_api_no_raw_pointers() {
 #[test]
 fn extern_c_api_scope_lifecycle() {
     let bump = BumpAllocator::new::<Compact>(4096);
-    let mut m = Mutator::new(bump);
+    let mut m = Mutator::new();
     let mp = &mut m as *mut Mutator;
+    let bp = &bump as *const BumpAllocator;
 
     unsafe {
         let fixnum = rt_root_immediate(mp, Value::<LowBit<3>>::tagged(0, 42).to_bits());
 
         let scope = rt_save(mp);
 
-        let tmp1 = rt_alloc_pair(mp);
-        let tmp2 = rt_alloc_pair(mp);
+        let tmp1 = rt_alloc_pair(mp, bp);
+        let tmp2 = rt_alloc_pair(mp, bp);
         rt_set_field(mp, tmp1, 0, tmp2);
 
         assert_ne!(rt_read(mp, tmp1), 0);
@@ -570,15 +574,16 @@ fn extern_c_api_scope_lifecycle() {
 #[test]
 fn extern_c_api_alloc_interleaved_with_reads() {
     let bump = BumpAllocator::new::<Compact>(4096);
-    let mut m = Mutator::new(bump);
+    let mut m = Mutator::new();
     let mp = &mut m as *mut Mutator;
+    let bp = &bump as *const BumpAllocator;
 
     unsafe {
-        let a = rt_alloc_pair(mp);
+        let a = rt_alloc_pair(mp, bp);
         let a_ptr_before = rt_read(mp, a);
 
-        let _b = rt_alloc_pair(mp);
-        let _c = rt_alloc_pair(mp);
+        let _b = rt_alloc_pair(mp, bp);
+        let _c = rt_alloc_pair(mp, bp);
 
         let a_ptr_after = rt_read(mp, a);
         assert_eq!(a_ptr_before, a_ptr_after);
@@ -594,13 +599,14 @@ fn extern_c_api_alloc_interleaved_with_reads() {
 #[test]
 fn extern_c_api_vec_and_scan() {
     let bump = BumpAllocator::new::<Compact>(4096);
-    let mut m = Mutator::new(bump);
+    let mut m = Mutator::new();
     let mp = &mut m as *mut Mutator;
+    let bp = &bump as *const BumpAllocator;
 
     unsafe {
-        let vec_root = rt_alloc_vec(mp, 3);
-        let elem0 = rt_alloc_pair(mp);
-        let elem1 = rt_alloc_pair(mp);
+        let vec_root = rt_alloc_vec(mp, bp, 3);
+        let elem0 = rt_alloc_pair(mp, bp);
+        let elem1 = rt_alloc_pair(mp, bp);
 
         let vec_ptr = rt_read(mp, vec_root) as *mut u8;
         let e0_tagged = Value::<LowBit<3>>::tagged(1, rt_read(mp, elem0) >> 3);
@@ -1210,8 +1216,8 @@ fn semi_space_with_mutator_as_root_source() {
     let mut gc = SemiSpace::new::<Compact>(4096);
 
     // Use a Mutator as the root source — allocate through the gc, root through the mutator
-    let dummy_bump = BumpAllocator::new::<Compact>(64);
-    let mut m = Mutator::new(dummy_bump);
+    let _dummy_bump = BumpAllocator::new::<Compact>(64);
+    let mut m = Mutator::new();
 
     let child = gc.alloc_obj::<Compact>(&LEAF, 0);
     let parent = gc.alloc_obj::<Compact>(&PAIR, 0);
@@ -1612,8 +1618,8 @@ fn semi_space_mixed_root_sources() {
     frame.slots[0].set(ptr_val(stack_obj));
     let _guard = chain.push(&frame);
 
-    let dummy_bump = BumpAllocator::new::<Compact>(64);
-    let mut mutator = Mutator::new(dummy_bump);
+    let _dummy_bump = BumpAllocator::new::<Compact>(64);
+    let mut mutator = Mutator::new();
     let r_mutator = mutator.root(ptr_val(mutator_obj));
 
     // Collect with all three sources

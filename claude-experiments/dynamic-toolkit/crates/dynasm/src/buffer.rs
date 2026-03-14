@@ -88,6 +88,12 @@ impl<A: Arch> CodeBuffer<A> {
         &self.code
     }
 
+    /// Patch bytes at the given offset in the code buffer.
+    /// Used for fixing up instruction fields (e.g., frame sizes) after codegen.
+    pub fn patch_bytes(&mut self, offset: usize, bytes: &[u8]) {
+        self.code[offset..offset + bytes.len()].copy_from_slice(bytes);
+    }
+
     /// Consume the buffer and return the code bytes.
     pub fn into_code(mut self) -> Vec<u8> {
         self.finalize();

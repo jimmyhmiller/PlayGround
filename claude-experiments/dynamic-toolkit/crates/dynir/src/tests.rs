@@ -588,7 +588,7 @@ fn build_random_single_block(decisions: &[u8]) -> Function {
                 }
             }
             9 if !all_vals.is_empty() => {
-                // tagged ops
+                // tagged ops (scheme-agnostic)
                 let vi = dr.pick_index(all_vals.len());
                 let v = all_vals[vi];
                 match dr.next_byte() % 4 {
@@ -603,12 +603,14 @@ fn build_random_single_block(decisions: &[u8]) -> Function {
                         all_vals.push(r);
                     }
                     2 => {
-                        let r = b.is_tag(v, dr.next_byte() as u32);
+                        let tag = (dr.next_byte() as u32) % 8;
+                        let r = b.is_tag(v, tag);
                         int_vals.push(r);
                         all_vals.push(r);
                     }
                     _ => {
-                        let r = b.make_tagged(dr.next_byte() as u32, v);
+                        let tag = (dr.next_byte() as u32) % 8;
+                        let r = b.make_tagged(tag, v);
                         int_vals.push(r);
                         all_vals.push(r);
                     }

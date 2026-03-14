@@ -1,0 +1,14 @@
+[package]
+name = "dynruntime"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+dynir = { path = "../dynir" }
+dynalloc = { path = "../dynalloc" }
+dynobj = { path = "../dynobj" }
+dynvalue = { path = "../dynvalue" }
+
+[dev-dependencies]
+wasm2dynir = { path = "../wasm2dynir" }
+wat = "1"
