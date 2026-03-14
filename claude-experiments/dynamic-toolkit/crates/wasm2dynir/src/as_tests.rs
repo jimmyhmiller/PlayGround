@@ -1,6 +1,7 @@
 use crate::translate_wasm;
 use dynir::interp::*;
 use dynir::verify::verify;
+use dynvalue::NanBox;
 
 fn run_wasm_file_i32(wasm_bytes: &[u8], args: &[u64]) -> i32 {
     let (func, _imports) = translate_wasm(wasm_bytes).expect("failed to translate");
@@ -8,7 +9,7 @@ fn run_wasm_file_i32(wasm_bytes: &[u8], args: &[u64]) -> i32 {
         eprintln!("IR:\n{}", func);
         panic!("IR verification failed: {:?}", errors);
     });
-    let interp = Interpreter::new(&func);
+    let interp = Interpreter::<NanBox>::new(&func);
     match interp.run(args).unwrap() {
         InterpResult::Value(v) => v as i32,
         other => panic!("expected Value, got {:?}", other),
@@ -21,7 +22,7 @@ fn run_wasm_file_i64(wasm_bytes: &[u8], args: &[u64]) -> i64 {
         eprintln!("IR:\n{}", func);
         panic!("IR verification failed: {:?}", errors);
     });
-    let interp = Interpreter::new(&func);
+    let interp = Interpreter::<NanBox>::new(&func);
     match interp.run(args).unwrap() {
         InterpResult::Value(v) => v as i64,
         other => panic!("expected Value, got {:?}", other),

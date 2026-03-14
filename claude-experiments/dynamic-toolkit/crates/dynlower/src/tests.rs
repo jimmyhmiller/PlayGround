@@ -2,9 +2,11 @@ use crate::{call_jit, JitFunction};
 use dynir::builder::FunctionBuilder;
 use dynir::ir::*;
 use dynir::types::Type;
+use dynvalue::{NanBox, TagScheme};
 
 fn run_jit(func: &dynir::Function, args: &[u64]) -> u64 {
-    let jit = JitFunction::compile(func, &[]);
+    // Use NanBox as default scheme for tests that don't use tag operations
+    let jit = JitFunction::compile::<NanBox>(func, &[]);
     unsafe { call_jit(jit.as_ptr(), args) }
 }
 
@@ -740,7 +742,7 @@ fn bench_primes() {
 
     // JIT compile
     let start = std::time::Instant::now();
-    let jit = crate::JitFunction::compile(&func, &[]);
+    let jit = crate::JitFunction::compile::<NanBox>(&func, &[]);
     let compile_time = start.elapsed();
 
     // JIT run
@@ -769,23 +771,34 @@ fn bench_primes() {
 
 #[test]
 fn test_payload_nanbox() {
-    use dynir::builder::FunctionBuilder;
-    use dynir::types::Type;
     let mut b = FunctionBuilder::new("test", &[Type::I64], Some(Type::I64));
     let x = b.block_param(b.entry_block(), 0);
     let p = b.payload(x);
     b.ret(p);
     let func = b.build();
-    let jit = JitFunction::compile(&func, &[]);
+    let jit = JitFunction::compile::<NanBox>(&func, &[]);
     let input = 0x7FFC_0001_0000_1234u64;
     let result = unsafe { call_jit(jit.as_ptr(), &[input]) };
     assert_eq!(result, 0x0000_0001_0000_1234u64);
 }
 
 #[test]
+fn test_payload_lowbit() {
+    use dynvalue::LowBit;
+    let mut b = FunctionBuilder::new("test", &[Type::I64], Some(Type::I64));
+    let x = b.block_param(b.entry_block(), 0);
+    let p = b.payload(x);
+    b.ret(p);
+    let func = b.build();
+    let jit = JitFunction::compile::<LowBit<3>>(&func, &[]);
+    // LowBit<3>: encode_tagged(2, 0x1234) = (0x1234 << 3) | 2 = 0x91A2
+    let input = LowBit::<3>::encode_tagged(2, 0x1234);
+    let result = unsafe { call_jit(jit.as_ptr(), &[input]) };
+    assert_eq!(result, 0x1234);
+}
+
+#[test]
 fn test_payload_then_load() {
-    use dynir::builder::FunctionBuilder;
-    use dynir::types::Type;
     // fn(ptr_nanbox: I64) -> I64
     // result = Load(I64, Payload(ptr_nanbox), 0)
     let mut b = FunctionBuilder::new("test", &[Type::I64], Some(Type::I64));
@@ -794,12 +807,12 @@ fn test_payload_then_load() {
     let loaded = b.load(Type::I64, p, 0);
     b.ret(loaded);
     let func = b.build();
-    let jit = JitFunction::compile(&func, &[]);
+    let jit = JitFunction::compile::<NanBox>(&func, &[]);
 
     // Allocate a u64 on the heap, encode as NanBox TAG_PTR
     let val: Box<u64> = Box::new(0xDEAD_BEEF_CAFE_BABEu64);
     let ptr = Box::into_raw(val) as u64;
-    let nanbox = 0x7FFC_0000_0000_0000u64 | (ptr & 0x0000_FFFF_FFFF_FFFF);
+    let nanbox = NanBox::encode_tagged(0, ptr & ((1u64 << NanBox::PAYLOAD_BITS) - 1));
     let result = unsafe { call_jit(jit.as_ptr(), &[nanbox]) };
     assert_eq!(result, 0xDEAD_BEEF_CAFE_BABEu64);
     unsafe { drop(Box::from_raw(ptr as *mut u64)); }
@@ -807,8 +820,7 @@ fn test_payload_then_load() {
 
 #[test]
 fn test_extern_with_payload() {
-    use dynir::builder::FunctionBuilder;
-    use dynir::types::{Type, Signature};
+    use dynir::types::Signature;
 
     // fn(nanbox: I64) -> I64
     // p = Payload(nanbox)
@@ -823,16 +835,15 @@ fn test_extern_with_payload() {
     b.ret(result);
     let func = b.build();
     let externs = vec![double_val as *const u8];
-    let jit = JitFunction::compile(&func, &externs);
-    let input = 0x7FFC_0000_0000_0005u64; // payload = 5
+    let jit = JitFunction::compile::<NanBox>(&func, &externs);
+    let input = NanBox::encode_tagged(0, 5); // payload = 5
     let result = unsafe { call_jit(jit.as_ptr(), &[input]) };
     assert_eq!(result, 10);
 }
 
 #[test]
 fn test_extern_two_params() {
-    use dynir::builder::FunctionBuilder;
-    use dynir::types::{Type, Signature};
+    use dynir::types::Signature;
 
     // fn(a: I64, b: I64) -> I64
     // Call extern sub(a, b)
@@ -846,15 +857,14 @@ fn test_extern_two_params() {
     b.ret(result);
     let func = b.build();
     let externs = vec![sub_fn as *const u8];
-    let jit = JitFunction::compile(&func, &externs);
+    let jit = JitFunction::compile::<NanBox>(&func, &externs);
     let result = unsafe { call_jit(jit.as_ptr(), &[10, 3]) };
     assert_eq!(result, 7);
 }
 
 #[test]
 fn test_extern_skip_first_param() {
-    use dynir::builder::FunctionBuilder;
-    use dynir::types::{Type, Signature};
+    use dynir::types::Signature;
 
     // fn(unused: I64, a: I64, b: I64) -> I64
     // Call extern sub(a, b)  -- skipping param 0
@@ -869,7 +879,7 @@ fn test_extern_skip_first_param() {
     b.ret(result);
     let func = b.build();
     let externs = vec![sub_fn as *const u8];
-    let jit = JitFunction::compile(&func, &externs);
+    let jit = JitFunction::compile::<NanBox>(&func, &externs);
     // Pass unused=99, a=10, b=3
     let result = unsafe { call_jit(jit.as_ptr(), &[99, 10, 3]) };
     assert_eq!(result, 7);
@@ -881,9 +891,7 @@ fn test_branch_preserves_params() {
     //   result = call extern_check(n)
     //   if result == 1 then return 42
     //   else return call extern_identity(n)  <-- n must survive the branch
-    use dynir::builder::FunctionBuilder;
-    use dynir::types::{Type, Signature};
-    use dynir::ir::CmpOp;
+    use dynir::types::Signature;
 
     extern "C" fn check_fn(x: u64) -> u64 { if x > 5 { 1 } else { 0 } }
     extern "C" fn identity_fn(x: u64) -> u64 { x }
@@ -919,7 +927,7 @@ fn test_branch_preserves_params() {
 
     let func = b.build();
     let externs = vec![check_fn as *const u8, identity_fn as *const u8];
-    let jit = JitFunction::compile(&func, &externs);
+    let jit = JitFunction::compile::<NanBox>(&func, &externs);
 
     // n=10 > 5, so check returns 1, should go to then_block and return 42
     assert_eq!(unsafe { call_jit(jit.as_ptr(), &[99, 10]) }, 42);
@@ -932,9 +940,6 @@ fn test_simple_branch_params_no_extern() {
     // fn(a: I64, b: I64) -> I64
     // if a == 0 then return 42 else return b
     // No extern calls - tests pure branching with params
-    use dynir::builder::FunctionBuilder;
-    use dynir::types::Type;
-    use dynir::ir::CmpOp;
 
     let mut b = FunctionBuilder::new("test", &[Type::I64, Type::I64], Some(Type::I64));
     let a = b.block_param(b.entry_block(), 0);
@@ -956,8 +961,123 @@ fn test_simple_branch_params_no_extern() {
     b.ret(else_b);
 
     let func = b.build();
-    let jit = JitFunction::compile(&func, &[]);
+    let jit = JitFunction::compile::<NanBox>(&func, &[]);
 
     assert_eq!(unsafe { call_jit(jit.as_ptr(), &[0, 99]) }, 42); // a==0 → return 42
     assert_eq!(unsafe { call_jit(jit.as_ptr(), &[1, 77]) }, 77); // a!=0 → return b=77
+}
+
+// ── TagScheme-generic tag operation tests ──────────────────────────
+
+fn build_is_tag_func() -> dynir::Function {
+    let mut b = FunctionBuilder::new("is_tag", &[Type::I64], Some(Type::I64));
+    let x = b.block_param(b.entry_block(), 0);
+    let result = b.is_tag(x, 1);
+    let r64 = b.zext(result, Type::I64);
+    b.ret(r64);
+    b.build()
+}
+
+fn build_make_tagged_func() -> dynir::Function {
+    let mut b = FunctionBuilder::new("make_tagged", &[Type::I64], Some(Type::I64));
+    let payload = b.block_param(b.entry_block(), 0);
+    let tagged = b.make_tagged(2, payload);
+    b.ret(tagged);
+    b.build()
+}
+
+fn build_tag_of_func() -> dynir::Function {
+    let mut b = FunctionBuilder::new("tag_of", &[Type::I64], Some(Type::I64));
+    let x = b.block_param(b.entry_block(), 0);
+    let tag = b.tag_of(x);
+    let tag64 = b.zext(tag, Type::I64);
+    b.ret(tag64);
+    b.build()
+}
+
+#[test]
+fn test_is_tag_nanbox() {
+    let func = build_is_tag_func();
+    let jit = JitFunction::compile::<NanBox>(&func, &[]);
+    let tagged1 = NanBox::encode_tagged(1, 42);
+    let tagged0 = NanBox::encode_tagged(0, 42);
+    assert_eq!(unsafe { call_jit(jit.as_ptr(), &[tagged1]) }, 1);
+    assert_eq!(unsafe { call_jit(jit.as_ptr(), &[tagged0]) }, 0);
+}
+
+#[test]
+fn test_is_tag_lowbit() {
+    use dynvalue::LowBit;
+    let func = build_is_tag_func();
+    let jit = JitFunction::compile::<LowBit<3>>(&func, &[]);
+    let tagged1 = LowBit::<3>::encode_tagged(1, 42);
+    let tagged0 = LowBit::<3>::encode_tagged(0, 42);
+    assert_eq!(unsafe { call_jit(jit.as_ptr(), &[tagged1]) }, 1);
+    assert_eq!(unsafe { call_jit(jit.as_ptr(), &[tagged0]) }, 0);
+}
+
+#[test]
+fn test_make_tagged_nanbox() {
+    let func = build_make_tagged_func();
+    let jit = JitFunction::compile::<NanBox>(&func, &[]);
+    let result = unsafe { call_jit(jit.as_ptr(), &[0x1234]) };
+    assert_eq!(result, NanBox::encode_tagged(2, 0x1234));
+}
+
+#[test]
+fn test_make_tagged_lowbit() {
+    use dynvalue::LowBit;
+    let func = build_make_tagged_func();
+    let jit = JitFunction::compile::<LowBit<3>>(&func, &[]);
+    let result = unsafe { call_jit(jit.as_ptr(), &[0x1234]) };
+    assert_eq!(result, LowBit::<3>::encode_tagged(2, 0x1234));
+}
+
+#[test]
+fn test_tag_of_nanbox() {
+    let func = build_tag_of_func();
+    let jit = JitFunction::compile::<NanBox>(&func, &[]);
+    for tag in 0..4u32 {
+        let tagged = NanBox::encode_tagged(tag, 0xABC);
+        assert_eq!(unsafe { call_jit(jit.as_ptr(), &[tagged]) }, tag as u64);
+    }
+}
+
+#[test]
+fn test_tag_of_lowbit() {
+    use dynvalue::LowBit;
+    let func = build_tag_of_func();
+    let jit = JitFunction::compile::<LowBit<3>>(&func, &[]);
+    for tag in 0..8u32 {
+        let tagged = LowBit::<3>::encode_tagged(tag, 0xABC);
+        assert_eq!(unsafe { call_jit(jit.as_ptr(), &[tagged]) }, tag as u64);
+    }
+}
+
+#[test]
+fn test_roundtrip_lowbit() {
+    // make_tagged then payload should recover the original payload
+    use dynvalue::LowBit;
+    let mut b = FunctionBuilder::new("roundtrip", &[Type::I64], Some(Type::I64));
+    let x = b.block_param(b.entry_block(), 0);
+    let tagged = b.make_tagged(1, x);
+    let recovered = b.payload(tagged);
+    b.ret(recovered);
+    let func = b.build();
+    let jit = JitFunction::compile::<LowBit<3>>(&func, &[]);
+    let result = unsafe { call_jit(jit.as_ptr(), &[0x1234_5678]) };
+    assert_eq!(result, 0x1234_5678);
+}
+
+#[test]
+fn test_roundtrip_nanbox() {
+    let mut b = FunctionBuilder::new("roundtrip", &[Type::I64], Some(Type::I64));
+    let x = b.block_param(b.entry_block(), 0);
+    let tagged = b.make_tagged(1, x);
+    let recovered = b.payload(tagged);
+    b.ret(recovered);
+    let func = b.build();
+    let jit = JitFunction::compile::<NanBox>(&func, &[]);
+    let result = unsafe { call_jit(jit.as_ptr(), &[0x1234_5678]) };
+    assert_eq!(result, 0x1234_5678);
 }

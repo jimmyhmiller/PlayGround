@@ -529,7 +529,7 @@ fn run_lua(source: &str) -> (u64, LuaRuntime) {
         // JIT-compile each child function
         let extern_ptrs = jit_extern_ptrs();
         let child_jits: Vec<JitFunction> = children.iter()
-            .map(|tf| JitFunction::compile(&tf.function, &extern_ptrs))
+            .map(|tf| JitFunction::compile::<NanBox>(&tf.function, &extern_ptrs))
             .collect();
         let child_jit_ptrs: Vec<*const u8> = child_jits.iter()
             .map(|j| j.as_ptr())

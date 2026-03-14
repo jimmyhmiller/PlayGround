@@ -1,3 +1,5 @@
+use std::marker::PhantomData;
+
 use dynasm::arm64::inst::*;
 use dynasm::arm64::reg::*;
 use dynasm::arm64::reloc::*;
@@ -5,6 +7,7 @@ use dynasm::buffer::{CodeBuffer, Label};
 use dynasm::code_memory::{CodeMemory, PagedCodeMemory};
 use dynir::ir::*;
 use dynir::types::Type;
+use dynvalue::TagScheme;
 
 #[cfg(test)]
 mod tests;
@@ -16,8 +19,8 @@ pub struct JitFunction {
 }
 
 impl JitFunction {
-    pub fn compile(func: &Function, externs: &[*const u8]) -> Self {
-        let mut lowerer = Lowerer::new(func, externs);
+    pub fn compile<S: TagScheme>(func: &Function, externs: &[*const u8]) -> Self {
+        let mut lowerer = Lowerer::<S>::new(func, externs);
         lowerer.run();
         let code = lowerer.buf.into_code();
 
@@ -395,7 +398,7 @@ struct BlockMeta {
 
 // ─── Lowerer ───────────────────────────────────────────────────────
 
-struct Lowerer<'a> {
+struct Lowerer<'a, S: TagScheme> {
     func: &'a Function,
     externs: &'a [*const u8],
     buf: CodeBuffer<Arm64>,
@@ -403,9 +406,10 @@ struct Lowerer<'a> {
     block_meta: Vec<BlockMeta>,
     prologue_stp_offset: usize,
     epilogue_ldp_offsets: Vec<usize>, // offsets of LDP instructions to patch
+    _scheme: PhantomData<S>,
 }
 
-impl<'a> Lowerer<'a> {
+impl<'a, S: TagScheme> Lowerer<'a, S> {
     fn new(func: &'a Function, externs: &'a [*const u8]) -> Self {
         let num_values = func.value_types.len();
         let mut buf = CodeBuffer::<Arm64>::new();
@@ -459,6 +463,7 @@ impl<'a> Lowerer<'a> {
             block_meta,
             prologue_stp_offset: 0,
             epilogue_ldp_offsets: Vec::new(),
+            _scheme: PhantomData,
         }
     }
 
@@ -951,73 +956,106 @@ impl<'a> Lowerer<'a> {
                 self.lower_call_indirect(*callee, args, result_val);
             }
 
-            // ── Tagged value operations (NanBox-specific) ──────────
+            // ── Tagged value operations (TagScheme-generic) ─────────
             //
-            // NanBox layout:
-            //   Float:  any non-signaling-NaN IEEE 754 f64
-            //   Tagged: 0x7FFC_0000_0000_0000 | (tag << 48) | payload
-            //     payload = lower 48 bits
-            //     tag = bits [49:48], range 0-3
+            // Uses S: TagScheme constants to emit the correct bit
+            // manipulation for any tagging scheme (NanBox, LowBit, etc).
 
             Inst::Payload(a) => {
-                // extract_payload = bits & 0x0000_FFFF_FFFF_FFFF
+                // S::extract_payload(bits)
                 let val = result_val.unwrap();
                 let ra = self.regs.ensure_in_gp_reg(&mut self.buf, *a);
                 self.regs.dec_use(*a);
                 let rd_idx = self.regs.alloc_gp(&mut self.buf);
                 let rd = gp_reg(rd_idx, RegSize::X64);
                 let rn = gp_reg(ra, RegSize::X64);
-                self.emit_mov_imm(X28, 0x0000_FFFF_FFFF_FFFFu64);
-                self.buf.emit(Arm64Inst::and(rd, rn, X28));
+                if S::HAS_UNBOXED_FLOAT {
+                    // NanBox-style: payload is in low PAYLOAD_BITS → AND with mask
+                    let mask = (1u64 << S::PAYLOAD_BITS) - 1;
+                    self.emit_mov_imm(X28, mask);
+                    self.buf.emit(Arm64Inst::and(rd, rn, X28));
+                } else {
+                    // LowBit-style: payload is in upper bits → LSR by tag_bits
+                    let tag_bits = 64 - S::PAYLOAD_BITS;
+                    self.emit_mov_imm(X28, tag_bits as u64);
+                    self.buf.emit(Arm64Inst::LsrReg { sf: 1, rm: X28, rn, rd });
+                }
                 self.regs.assign_gp(val, rd_idx);
             }
 
             Inst::IsTag(a, tag) => {
-                // has_tag = ((bits >> 48) == (0x7FFC + tag))
+                // S::has_tag(bits, tag)
                 let val = result_val.unwrap();
                 let ra = self.regs.ensure_in_gp_reg(&mut self.buf, *a);
                 self.regs.dec_use(*a);
                 let rn = gp_reg(ra, RegSize::X64);
-                // Shift right by 48 into X28, compare
-                self.emit_mov_imm(X28, 48);
-                self.buf.emit(Arm64Inst::LsrReg { sf: 1, rm: X28, rn, rd: X28 });
-                let expected = 0x7FFCu64 + *tag as u64;
                 let rd_idx = self.regs.alloc_gp(&mut self.buf);
-                let tmp = gp_reg(rd_idx, RegSize::X64);
-                self.emit_mov_imm(tmp, expected);
-                self.buf.emit(Arm64Inst::cmp(X28, tmp));
-                // cset result
+                if S::HAS_UNBOXED_FLOAT {
+                    // NanBox-style: shift right by PAYLOAD_BITS, compare upper bits
+                    let expected = S::encode_tagged(*tag, 0) >> S::PAYLOAD_BITS;
+                    self.emit_mov_imm(X28, S::PAYLOAD_BITS as u64);
+                    self.buf.emit(Arm64Inst::LsrReg { sf: 1, rm: X28, rn, rd: X28 });
+                    let tmp = gp_reg(rd_idx, RegSize::X64);
+                    self.emit_mov_imm(tmp, expected);
+                    self.buf.emit(Arm64Inst::cmp(X28, tmp));
+                } else {
+                    // LowBit-style: mask low tag bits, compare with tag
+                    let tag_mask = S::TAG_COUNT as u64 - 1;
+                    self.emit_mov_imm(X28, tag_mask);
+                    self.buf.emit(Arm64Inst::and(X28, rn, X28));
+                    let tmp = gp_reg(rd_idx, RegSize::X64);
+                    self.emit_mov_imm(tmp, *tag as u64);
+                    self.buf.emit(Arm64Inst::cmp(X28, tmp));
+                }
                 let rd = gp_reg(rd_idx, RegSize::W32);
                 self.buf.emit(Arm64Inst::cset(rd, Arm64Cond::EQ));
                 self.regs.assign_gp(val, rd_idx);
             }
 
             Inst::MakeTagged(tag, payload) => {
-                // encode_tagged = TAG_PATTERN | (tag << 48) | payload
+                // S::encode_tagged(tag, payload)
                 let val = result_val.unwrap();
                 let ra = self.regs.ensure_in_gp_reg(&mut self.buf, *payload);
                 self.regs.dec_use(*payload);
                 let rd_idx = self.regs.alloc_gp(&mut self.buf);
                 let rd = gp_reg(rd_idx, RegSize::X64);
                 let rn = gp_reg(ra, RegSize::X64);
-                let pattern = 0x7FFC_0000_0000_0000u64 | ((*tag as u64) << 48);
-                self.emit_mov_imm(X28, pattern);
-                self.buf.emit(Arm64Inst::orr(rd, rn, X28));
+                if S::HAS_UNBOXED_FLOAT {
+                    // NanBox-style: OR payload (in low bits) with tag pattern
+                    let pattern = S::encode_tagged(*tag, 0);
+                    self.emit_mov_imm(X28, pattern);
+                    self.buf.emit(Arm64Inst::orr(rd, rn, X28));
+                } else {
+                    // LowBit-style: shift payload left by tag_bits, OR with tag
+                    let tag_bits = 64 - S::PAYLOAD_BITS;
+                    self.emit_mov_imm(X28, tag_bits as u64);
+                    self.buf.emit(Arm64Inst::LslReg { sf: 1, rm: X28, rn, rd });
+                    self.emit_mov_imm(X28, *tag as u64);
+                    self.buf.emit(Arm64Inst::orr(rd, rd, X28));
+                }
                 self.regs.assign_gp(val, rd_idx);
             }
 
             Inst::TagOf(a) => {
-                // tag = (bits >> 48) & 0x3
+                // Extract tag from bits
                 let val = result_val.unwrap();
                 let ra = self.regs.ensure_in_gp_reg(&mut self.buf, *a);
                 self.regs.dec_use(*a);
                 let rd_idx = self.regs.alloc_gp(&mut self.buf);
                 let rd = gp_reg(rd_idx, RegSize::X64);
                 let rn = gp_reg(ra, RegSize::X64);
-                self.emit_mov_imm(X28, 48);
-                self.buf.emit(Arm64Inst::LsrReg { sf: 1, rm: X28, rn, rd });
-                self.emit_mov_imm(X28, 3);
-                self.buf.emit(Arm64Inst::and(rd, rd, X28));
+                let tag_mask = S::TAG_COUNT as u64 - 1;
+                if S::HAS_UNBOXED_FLOAT {
+                    // NanBox-style: tag is in upper bits after payload
+                    self.emit_mov_imm(X28, S::PAYLOAD_BITS as u64);
+                    self.buf.emit(Arm64Inst::LsrReg { sf: 1, rm: X28, rn, rd });
+                    self.emit_mov_imm(X28, tag_mask);
+                    self.buf.emit(Arm64Inst::and(rd, rd, X28));
+                } else {
+                    // LowBit-style: tag is in low bits
+                    self.emit_mov_imm(X28, tag_mask);
+                    self.buf.emit(Arm64Inst::and(rd, rn, X28));
+                }
                 self.regs.assign_gp(val, rd_idx);
             }
 
