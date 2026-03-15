@@ -33,7 +33,11 @@ impl<const N: u32> TagScheme for LowBit<N> {
 
     #[inline(always)]
     fn encode_tagged(tag: u32, payload: u64) -> u64 {
-        debug_assert!(tag < Self::TAG_COUNT, "tag {tag} >= TAG_COUNT {}", Self::TAG_COUNT);
+        debug_assert!(
+            tag < Self::TAG_COUNT,
+            "tag {tag} >= TAG_COUNT {}",
+            Self::TAG_COUNT
+        );
         debug_assert!(
             payload < (1u64 << Self::PAYLOAD_BITS),
             "payload {payload:#x} exceeds {} bits",

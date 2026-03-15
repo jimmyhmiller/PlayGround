@@ -1,9 +1,11 @@
-use dynvalue::{LowBit, NanBox, Value};
 use dynobj::*;
+use dynvalue::{LowBit, NanBox, Value};
 
-use crate::{Alloc, HeapWalker, BumpAllocator, AtomicBumpAllocator, alloc_obj, Mutator, Root, RootScope};
-use crate::{PtrPolicy, SemiSpace, Heap};
-use dynobj::{RootSource, FrameChain, RootFrame, RootSet, AtomicRootSet};
+use crate::{
+    Alloc, AtomicBumpAllocator, BumpAllocator, HeapWalker, Mutator, Root, RootScope, alloc_obj,
+};
+use crate::{Heap, PtrPolicy, SemiSpace};
+use dynobj::{AtomicRootSet, FrameChain, RootFrame, RootSet, RootSource};
 
 use std::sync::Arc;
 
@@ -476,13 +478,15 @@ const VEC_INFO: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_varlen_value
 unsafe extern "C" fn rt_alloc_pair(m: *mut Mutator, bump: *const BumpAllocator) -> Root {
     let m = unsafe { &mut *m };
     let bump = unsafe { &*bump };
-    m.alloc::<Compact>(bump, &PAIR_INFO, 0).expect("OOM in rt_alloc_pair")
+    m.alloc::<Compact>(bump, &PAIR_INFO, 0)
+        .expect("OOM in rt_alloc_pair")
 }
 
 unsafe extern "C" fn rt_alloc_vec(m: *mut Mutator, bump: *const BumpAllocator, len: usize) -> Root {
     let m = unsafe { &mut *m };
     let bump = unsafe { &*bump };
-    m.alloc::<Compact>(bump, &VEC_INFO, len).expect("OOM in rt_alloc_vec")
+    m.alloc::<Compact>(bump, &VEC_INFO, len)
+        .expect("OOM in rt_alloc_vec")
 }
 
 unsafe extern "C" fn rt_get_field(m: *mut Mutator, obj: Root, index: u16) -> Root {
@@ -758,7 +762,12 @@ fn semi_space_pointer_fixup() {
 
     // parent.field[0] → child, field[1] = fixnum 42
     unsafe {
-        write_value_field(parent, &PAIR, 0, Value::<LowBit<3>>::from_bits(ptr_val(child)));
+        write_value_field(
+            parent,
+            &PAIR,
+            0,
+            Value::<LowBit<3>>::from_bits(ptr_val(child)),
+        );
         write_value_field(parent, &PAIR, 1, Value::<LowBit<3>>::from_bits(fixnum(42)));
     }
 
@@ -803,8 +812,18 @@ fn semi_space_dag_shared_child() {
     let parent_b = gc.alloc_obj::<Compact>(&PAIR, 0);
 
     unsafe {
-        write_value_field(parent_a, &PAIR, 0, Value::<LowBit<3>>::from_bits(ptr_val(child)));
-        write_value_field(parent_b, &PAIR, 0, Value::<LowBit<3>>::from_bits(ptr_val(child)));
+        write_value_field(
+            parent_a,
+            &PAIR,
+            0,
+            Value::<LowBit<3>>::from_bits(ptr_val(child)),
+        );
+        write_value_field(
+            parent_b,
+            &PAIR,
+            0,
+            Value::<LowBit<3>>::from_bits(ptr_val(child)),
+        );
     }
 
     use std::cell::Cell;
@@ -962,7 +981,12 @@ fn semi_space_multiple_collections() {
     let child = gc.alloc_obj::<Compact>(&LEAF, 0);
     let parent = LowBit3Tag0::try_decode_ptr(root.0.get()).unwrap();
     unsafe {
-        write_value_field(parent, &PAIR, 0, Value::<LowBit<3>>::from_bits(ptr_val(child)));
+        write_value_field(
+            parent,
+            &PAIR,
+            0,
+            Value::<LowBit<3>>::from_bits(ptr_val(child)),
+        );
     }
     unsafe { gc.collect::<LowBit3Tag0>(&mut [&root]) };
     assert_eq!(gc.collections(), 3);
@@ -1039,10 +1063,7 @@ fn semi_space_varlen_bytes() {
     unsafe {
         let bytes = read_varlen_bytes(s, &STR);
         assert_eq!(bytes.len(), 5);
-        let data = core::slice::from_raw_parts_mut(
-            s.add(STR.varlen_element_offset(0)),
-            5,
-        );
+        let data = core::slice::from_raw_parts_mut(s.add(STR.varlen_element_offset(0)), 5);
         data.copy_from_slice(b"hello");
     }
 
@@ -1080,7 +1101,12 @@ fn semi_space_with_full_header() {
     let parent = gc.alloc_obj::<Full>(&PAIR, 0);
 
     unsafe {
-        write_value_field(parent, &PAIR, 0, Value::<LowBit<3>>::from_bits(ptr_val(child)));
+        write_value_field(
+            parent,
+            &PAIR,
+            0,
+            Value::<LowBit<3>>::from_bits(ptr_val(child)),
+        );
         write_value_field(parent, &PAIR, 1, Value::<LowBit<3>>::from_bits(fixnum(99)));
     }
 
@@ -1223,7 +1249,12 @@ fn semi_space_with_mutator_as_root_source() {
     let parent = gc.alloc_obj::<Compact>(&PAIR, 0);
 
     unsafe {
-        write_value_field(parent, &PAIR, 0, Value::<LowBit<3>>::from_bits(ptr_val(child)));
+        write_value_field(
+            parent,
+            &PAIR,
+            0,
+            Value::<LowBit<3>>::from_bits(ptr_val(child)),
+        );
     }
 
     // Root through the Mutator
@@ -1273,7 +1304,10 @@ fn semi_space_fill_collect_refill() {
         let p = gc.alloc_obj::<Compact>(&NODE, 0);
         assert!(!p.is_null());
     }
-    assert!(gc.alloc_obj::<Compact>(&NODE, 0).is_null(), "space should be full");
+    assert!(
+        gc.alloc_obj::<Compact>(&NODE, 0).is_null(),
+        "space should be full"
+    );
 
     // Collect — should free 9 objects
     unsafe { gc.collect::<LowBit3Tag0>(&mut [&root]) };
@@ -1284,7 +1318,10 @@ fn semi_space_fill_collect_refill() {
         let p = gc.alloc_obj::<Compact>(&NODE, 0);
         assert!(!p.is_null());
     }
-    assert!(gc.alloc_obj::<Compact>(&NODE, 0).is_null(), "space should be full again");
+    assert!(
+        gc.alloc_obj::<Compact>(&NODE, 0).is_null(),
+        "space should be full again"
+    );
 
     // Build a chain: root → newest → ... → oldest
     let prev = LowBit3Tag0::try_decode_ptr(root.0.get()).unwrap();
@@ -1495,7 +1532,12 @@ fn semi_space_with_frame_chain() {
     let parent = gc.alloc_obj::<Compact>(&PAIR, 0);
 
     unsafe {
-        write_value_field(parent, &PAIR, 0, Value::<LowBit<3>>::from_bits(ptr_val(child)));
+        write_value_field(
+            parent,
+            &PAIR,
+            0,
+            Value::<LowBit<3>>::from_bits(ptr_val(child)),
+        );
         write_value_field(parent, &PAIR, 1, Value::<LowBit<3>>::from_bits(fixnum(77)));
     }
 
@@ -1605,8 +1647,18 @@ fn semi_space_mixed_root_sources() {
 
     // stack_obj → shared_child, mutator_obj → shared_child
     unsafe {
-        write_value_field(stack_obj, &NODE, 0, Value::<LowBit<3>>::from_bits(ptr_val(shared_child)));
-        write_value_field(mutator_obj, &NODE, 0, Value::<LowBit<3>>::from_bits(ptr_val(shared_child)));
+        write_value_field(
+            stack_obj,
+            &NODE,
+            0,
+            Value::<LowBit<3>>::from_bits(ptr_val(shared_child)),
+        );
+        write_value_field(
+            mutator_obj,
+            &NODE,
+            0,
+            Value::<LowBit<3>>::from_bits(ptr_val(shared_child)),
+        );
     }
 
     // Root via three different strategies
@@ -1850,8 +1902,8 @@ fn atomic_root_set_gc_update() {
     rs.add(200);
 
     // Simulate GC updating slots in-place
-    rs.scan_roots(&mut |slot| {
-        unsafe { *slot += 1; }
+    rs.scan_roots(&mut |slot| unsafe {
+        *slot += 1;
     });
 
     assert_eq!(rs.get(0), 101);
@@ -1895,7 +1947,12 @@ fn heap_basic_alloc_and_collect() {
     let parent = heap.alloc_obj::<Compact>(&PAIR, 0);
 
     unsafe {
-        write_value_field(parent, &PAIR, 0, Value::<LowBit<3>>::from_bits(ptr_val(child)));
+        write_value_field(
+            parent,
+            &PAIR,
+            0,
+            Value::<LowBit<3>>::from_bits(ptr_val(child)),
+        );
         write_value_field(parent, &PAIR, 1, Value::<LowBit<3>>::from_bits(fixnum(42)));
     }
 
@@ -1990,7 +2047,12 @@ fn heap_mixed_globals_and_thread_roots() {
     let _dead = heap.alloc_obj::<Compact>(&LEAF, 0);
 
     unsafe {
-        write_value_field(thread_obj, &PAIR, 0, Value::<LowBit<3>>::from_bits(ptr_val(shared)));
+        write_value_field(
+            thread_obj,
+            &PAIR,
+            0,
+            Value::<LowBit<3>>::from_bits(ptr_val(shared)),
+        );
     }
 
     // Global root
@@ -2021,9 +2083,9 @@ fn heap_mixed_globals_and_thread_roots() {
 
 #[test]
 fn heap_stw_collect_with_threads() {
-    use std::thread;
     use std::sync::Barrier;
     use std::sync::atomic::AtomicBool;
+    use std::thread;
 
     static LEAF: TypeInfo = TypeInfo::for_header(Compact::SIZE);
 
@@ -2081,9 +2143,9 @@ fn heap_stw_collect_with_threads() {
 
 #[test]
 fn heap_stw_preserves_object_graph() {
-    use std::thread;
     use std::sync::Barrier;
     use std::sync::atomic::AtomicBool;
+    use std::thread;
 
     static PAIR: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_fields(2);
     static LEAF: TypeInfo = TypeInfo::for_header(Compact::SIZE);
@@ -2105,7 +2167,12 @@ fn heap_stw_preserves_object_graph() {
         let _dead = heap2.alloc_obj::<Compact>(&LEAF, 0);
 
         unsafe {
-            write_value_field(parent, &PAIR, 0, Value::<LowBit<3>>::from_bits(ptr_val(child)));
+            write_value_field(
+                parent,
+                &PAIR,
+                0,
+                Value::<LowBit<3>>::from_bits(ptr_val(child)),
+            );
             write_value_field(parent, &PAIR, 1, Value::<LowBit<3>>::from_bits(fixnum(99)));
         }
 
@@ -2251,7 +2318,12 @@ fn stress_single_thread_alloc_gc_cycle() {
         // new_node.next = old head
         let old_head_bits = frame.slots[0].get();
         unsafe {
-            write_value_field(new_node, &NODE, 0, Value::<LowBit<3>>::from_bits(old_head_bits));
+            write_value_field(
+                new_node,
+                &NODE,
+                0,
+                Value::<LowBit<3>>::from_bits(old_head_bits),
+            );
         }
 
         // Update root to new head
@@ -2260,7 +2332,10 @@ fn stress_single_thread_alloc_gc_cycle() {
         mt.safepoint();
     }
 
-    assert!(heap.collections() > 0, "should have triggered at least one GC");
+    assert!(
+        heap.collections() > 0,
+        "should have triggered at least one GC"
+    );
 
     // Walk the list to verify integrity
     let mut cur = LowBit3Tag0::try_decode_ptr(frame.slots[0].get()).unwrap();
@@ -2281,9 +2356,9 @@ fn stress_single_thread_alloc_gc_cycle() {
 
 #[test]
 fn stress_multi_thread_alloc_with_gc() {
-    use std::thread;
     use std::sync::Barrier;
     use std::sync::atomic::AtomicBool;
+    use std::thread;
 
     static LEAF: TypeInfo = TypeInfo::for_header(Compact::SIZE);
 
@@ -2356,8 +2431,8 @@ fn stress_multi_thread_alloc_with_gc() {
 
 #[test]
 fn stress_mutator_thread_concurrent_alloc_gc() {
-    use std::thread;
     use std::sync::Barrier;
+    use std::thread;
 
     static NODE: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_fields(1);
 
@@ -2397,8 +2472,7 @@ fn stress_mutator_thread_concurrent_alloc_gc() {
                     }
                     let old_head = frame.slots[0].get();
                     unsafe {
-                        write_value_field(node, &NODE, 0,
-                            Value::<LowBit<3>>::from_bits(old_head));
+                        write_value_field(node, &NODE, 0, Value::<LowBit<3>>::from_bits(old_head));
                     }
                     frame.slots[0].set(ptr_val(node));
                     mt.safepoint();
@@ -2407,7 +2481,9 @@ fn stress_mutator_thread_concurrent_alloc_gc() {
                 // Drain any pending/in-flight GC before verification.
                 loop {
                     mt.safepoint();
-                    if !heap.gc_requested() { break; }
+                    if !heap.gc_requested() {
+                        break;
+                    }
                 }
 
                 // Verify list is intact
@@ -2415,11 +2491,12 @@ fn stress_mutator_thread_concurrent_alloc_gc() {
                 let mut count = 1;
                 loop {
                     assert!(heap.contains(cur as *const u8));
-                    let field: Value<LowBit<3>> = unsafe {
-                        read_value_field(cur, &NODE, 0)
-                    };
+                    let field: Value<LowBit<3>> = unsafe { read_value_field(cur, &NODE, 0) };
                     match LowBit3Tag0::try_decode_ptr(field.to_bits()) {
-                        Some(next) => { cur = next; count += 1; }
+                        Some(next) => {
+                            cur = next;
+                            count += 1;
+                        }
                         None => break,
                     }
                 }
@@ -2571,7 +2648,10 @@ fn write_barrier_noop_when_idle() {
 
     // SATB buffer should remain empty since barriers are inactive
     let buf = unsafe { mt.state().satb_buffer() };
-    assert!(buf.is_empty(), "buffer should be empty when barriers are inactive");
+    assert!(
+        buf.is_empty(),
+        "buffer should be empty when barriers are inactive"
+    );
 }
 
 #[test]
@@ -2621,7 +2701,9 @@ fn concurrent_collect_basic() {
                 // Drain any pending GC before exiting
                 loop {
                     heap2.safepoint(&ts);
-                    if !heap2.gc_requested() { break; }
+                    if !heap2.gc_requested() {
+                        break;
+                    }
                 }
                 break;
             }
@@ -2841,11 +2923,7 @@ fn mutator_thread_read_barrier_integration() {
 /// Checks:
 /// - every node pointer is inside the heap
 /// - every node's stamp (field 1) equals `expected_stamps[i]` if provided
-unsafe fn walk_list(
-    heap: &Heap,
-    head_bits: u64,
-    node_info: &'static TypeInfo,
-) -> Vec<u64> {
+unsafe fn walk_list(heap: &Heap, head_bits: u64, node_info: &'static TypeInfo) -> Vec<u64> {
     let mut stamps = Vec::new();
     let mut bits = head_bits;
     loop {
@@ -2857,8 +2935,10 @@ unsafe fn walk_list(
                         "list node {:p} not in heap. from=[{:p}..+{}), to=[{:p}..+{}), \
                          bits={:#x}, stamps_so_far={:?}",
                         ptr,
-                        heap.from_base(), heap.space_size(),
-                        heap.to_base(), heap.space_size(),
+                        heap.from_base(),
+                        heap.space_size(),
+                        heap.to_base(),
+                        heap.space_size(),
                         bits,
                         &stamps,
                     );
@@ -2878,15 +2958,17 @@ unsafe fn walk_list(
 
 #[test]
 fn stress_concurrent_gc_heap_properties() {
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AO};
     use std::sync::Barrier;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AO};
     use std::thread;
 
     // NODE layout: field 0 = next pointer, field 1 = stamp (tagged int)
     static NODE: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_fields(2);
 
     let obj_size = NODE.allocation_size(0);
-    let gc_every_alloc = std::env::var("GC_EVERY_ALLOC").map(|v| v == "1").unwrap_or(false);
+    let gc_every_alloc = std::env::var("GC_EVERY_ALLOC")
+        .map(|v| v == "1")
+        .unwrap_or(false);
     let num_mutators: usize = if gc_every_alloc { 2 } else { 8 };
     let list_target_len: usize = if gc_every_alloc { 4 } else { 20 };
     let gc_cycles: usize = if gc_every_alloc { 5 } else { 20 };
@@ -3174,11 +3256,7 @@ fn stress_concurrent_gc_heap_properties() {
 
     // P5: every thread reported a valid list length
     for (tid, &len) in list_lengths.iter().enumerate() {
-        assert!(
-            len >= 1,
-            "thread {} has empty list after test",
-            tid,
-        );
+        assert!(len >= 1, "thread {} has empty list after test", tid,);
     }
 
     eprintln!(
@@ -3201,15 +3279,17 @@ fn stress_concurrent_gc_pointer_graph_integrity() {
     //   P2: field pointers of pool objects point into the heap
     //   P4: stamps match expected values
 
-    use std::sync::atomic::{AtomicBool, Ordering as AO};
     use std::sync::Barrier;
+    use std::sync::atomic::{AtomicBool, Ordering as AO};
     use std::thread;
 
     // NODE: field 0 = pointer to another node, field 1 = stamp
     static NODE: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_fields(2);
 
     let obj_size = NODE.allocation_size(0);
-    let gc_every_alloc = std::env::var("GC_EVERY_ALLOC").map(|v| v == "1").unwrap_or(false);
+    let gc_every_alloc = std::env::var("GC_EVERY_ALLOC")
+        .map(|v| v == "1")
+        .unwrap_or(false);
     let num_mutators: usize = if gc_every_alloc { 2 } else { 6 };
     let pool_size: usize = if gc_every_alloc { 3 } else { 8 };
     let iterations: usize = if gc_every_alloc { 20 } else { 200 };
@@ -3249,11 +3329,15 @@ fn stress_concurrent_gc_pointer_graph_integrity() {
                     unsafe {
                         // Initialize field 0 to zero (no pointer)
                         write_value_field::<LowBit<3>>(
-                            obj, &NODE, 0,
+                            obj,
+                            &NODE,
+                            0,
                             Value::<LowBit<3>>::tagged(1, 0),
                         );
                         write_value_field::<LowBit<3>>(
-                            obj, &NODE, 1,
+                            obj,
+                            &NODE,
+                            1,
                             Value::<LowBit<3>>::tagged(1, stamp),
                         );
                     }
@@ -3283,13 +3367,14 @@ fn stress_concurrent_gc_pointer_graph_integrity() {
                         if a != b {
                             // Set pool[a].field0 = pool[b] (creating a pointer edge)
                             let ptr_a = LowBit3Tag0::try_decode_ptr(frame.slots[a].get()).unwrap();
-                            let old_field: Value<LowBit<3>> = unsafe {
-                                read_value_field(ptr_a as *const u8, &NODE, 0)
-                            };
+                            let old_field: Value<LowBit<3>> =
+                                unsafe { read_value_field(ptr_a as *const u8, &NODE, 0) };
                             mt.write_barrier(old_field.to_bits());
                             unsafe {
                                 write_value_field::<LowBit<3>>(
-                                    ptr_a, &NODE, 0,
+                                    ptr_a,
+                                    &NODE,
+                                    0,
                                     Value::<LowBit<3>>::from_bits(frame.slots[b].get()),
                                 );
                             }
@@ -3305,11 +3390,15 @@ fn stress_concurrent_gc_pointer_graph_integrity() {
                                 unsafe {
                                     // Initialize field 0 to zero (no pointer)
                                     write_value_field::<LowBit<3>>(
-                                        obj, &NODE, 0,
+                                        obj,
+                                        &NODE,
+                                        0,
                                         Value::<LowBit<3>>::tagged(1, 0),
                                     );
                                     write_value_field::<LowBit<3>>(
-                                        obj, &NODE, 1,
+                                        obj,
+                                        &NODE,
+                                        1,
                                         Value::<LowBit<3>>::tagged(1, stamp),
                                     );
                                 }
@@ -3331,7 +3420,9 @@ fn stress_concurrent_gc_pointer_graph_integrity() {
                 // safepoint() and here, so loop until gc_requested is false.
                 loop {
                     mt.safepoint();
-                    if !heap.gc_requested() { break; }
+                    if !heap.gc_requested() {
+                        break;
+                    }
                 }
 
                 // Wait for all mutators to stop before any verification.
@@ -3343,8 +3434,12 @@ fn stress_concurrent_gc_pointer_graph_integrity() {
                 // P1: all pool objects are valid
                 for i in 0..pool_size {
                     let bits = frame.slots[i].get();
-                    let ptr = LowBit3Tag0::try_decode_ptr(bits)
-                        .unwrap_or_else(|| panic!("thread {}: slot {} not a pointer (bits={:#x})", tid, i, bits));
+                    let ptr = LowBit3Tag0::try_decode_ptr(bits).unwrap_or_else(|| {
+                        panic!(
+                            "thread {}: slot {} not a pointer (bits={:#x})",
+                            tid, i, bits
+                        )
+                    });
                     if !heap.contains(ptr as *const u8) {
                         let from_base = heap.from_base();
                         let from_used = heap.from_used();
@@ -3353,30 +3448,39 @@ fn stress_concurrent_gc_pointer_graph_integrity() {
                             "thread {}: slot {} ptr {:p} not in heap \
                              (bits={:#x}, collections={}, \
                              from=[{:p}..{:p}), from_used={})",
-                            tid, i, ptr, bits, heap.collections(),
-                            from_base, unsafe { from_base.add(from_size) }, from_used,
+                            tid,
+                            i,
+                            ptr,
+                            bits,
+                            heap.collections(),
+                            from_base,
+                            unsafe { from_base.add(from_size) },
+                            from_used,
                         );
                     }
 
                     // P4: stamp belongs to this thread
-                    let sv: Value<LowBit<3>> = unsafe {
-                        read_value_field(ptr as *const u8, &NODE, 1)
-                    };
+                    let sv: Value<LowBit<3>> =
+                        unsafe { read_value_field(ptr as *const u8, &NODE, 1) };
                     assert_eq!(
-                        sv.payload() / 10000, tid as u64,
+                        sv.payload() / 10000,
+                        tid as u64,
                         "thread {}: slot {} stamp {} from wrong thread",
-                        tid, i, sv.payload(),
+                        tid,
+                        i,
+                        sv.payload(),
                     );
 
                     // P2: if field 0 is a pointer, it should be in the heap
-                    let f0: Value<LowBit<3>> = unsafe {
-                        read_value_field(ptr as *const u8, &NODE, 0)
-                    };
+                    let f0: Value<LowBit<3>> =
+                        unsafe { read_value_field(ptr as *const u8, &NODE, 0) };
                     if let Some(target) = LowBit3Tag0::try_decode_ptr(f0.to_bits()) {
                         assert!(
                             heap.contains(target as *const u8),
                             "thread {}: slot {} field0 {:p} not in heap",
-                            tid, i, target,
+                            tid,
+                            i,
+                            target,
                         );
                     }
                 }
@@ -3440,8 +3544,8 @@ fn stress_concurrent_gc_rapid_fire() {
     //   P3: test completes without OOM (reclamation works)
     //   P4: each thread's single rooted object retains its stamp
 
-    use std::sync::atomic::{AtomicBool, Ordering as AO};
     use std::sync::Barrier;
+    use std::sync::atomic::{AtomicBool, Ordering as AO};
     use std::thread;
 
     static LEAF: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_fields(1);
@@ -3472,7 +3576,9 @@ fn stress_concurrent_gc_rapid_fire() {
                 assert!(!obj.is_null());
                 unsafe {
                     write_value_field::<LowBit<3>>(
-                        obj, &LEAF, 0,
+                        obj,
+                        &LEAF,
+                        0,
                         Value::<LowBit<3>>::tagged(1, tid as u64),
                     );
                 }
@@ -3495,20 +3601,22 @@ fn stress_concurrent_gc_rapid_fire() {
                 // Drain any pending/in-flight GC before verification.
                 loop {
                     mt.safepoint();
-                    if !heap.gc_requested() { break; }
+                    if !heap.gc_requested() {
+                        break;
+                    }
                 }
 
                 // P4: root object still has our stamp
                 let bits = frame.slots[0].get();
                 let ptr = LowBit3Tag0::try_decode_ptr(bits).unwrap();
                 assert!(heap.contains(ptr as *const u8));
-                let v: Value<LowBit<3>> = unsafe {
-                    read_value_field(ptr as *const u8, &LEAF, 0)
-                };
+                let v: Value<LowBit<3>> = unsafe { read_value_field(ptr as *const u8, &LEAF, 0) };
                 assert_eq!(
-                    v.payload(), tid as u64,
+                    v.payload(),
+                    tid as u64,
                     "thread {}: stamp corrupted after GC, got {}",
-                    tid, v.payload(),
+                    tid,
+                    v.payload(),
                 );
 
                 allocs
@@ -3555,8 +3663,8 @@ fn statemap_trace_output() {
     // Run with: cargo test -p dynalloc statemap_trace_output -- --nocapture
     // Then: statemap /tmp/gc_trace.out > /tmp/gc_trace.svg
 
-    use std::sync::atomic::{AtomicBool, Ordering as AO};
     use std::sync::Barrier;
+    use std::sync::atomic::{AtomicBool, Ordering as AO};
     use std::thread;
 
     use crate::statemap::StatemapTracer;
@@ -3590,12 +3698,11 @@ fn statemap_trace_output() {
                 let obj = mt.alloc_obj::<Compact>(&NODE, 0);
                 assert!(!obj.is_null());
                 unsafe {
+                    write_value_field::<LowBit<3>>(obj, &NODE, 0, Value::<LowBit<3>>::tagged(1, 0));
                     write_value_field::<LowBit<3>>(
-                        obj, &NODE, 0,
-                        Value::<LowBit<3>>::tagged(1, 0),
-                    );
-                    write_value_field::<LowBit<3>>(
-                        obj, &NODE, 1,
+                        obj,
+                        &NODE,
+                        1,
                         Value::<LowBit<3>>::tagged(1, tid as u64),
                     );
                 }
@@ -3616,7 +3723,9 @@ fn statemap_trace_output() {
                 // Another mutator may have triggered a GC and is waiting for us.
                 loop {
                     mt.safepoint();
-                    if !heap.gc_requested() { break; }
+                    if !heap.gc_requested() {
+                        break;
+                    }
                 }
             })
         })
@@ -3677,10 +3786,20 @@ fn minor_gc_basic() {
 
     // obj1 should be promoted to tenured
     let new_obj1 = LowBit3Tag0::try_decode_ptr(frame.slots[0].get()).unwrap();
-    assert!(!heap.is_nursery(new_obj1), "promoted object should be in tenured space");
-    assert!(heap.from_space_contains(new_obj1), "promoted object should be in tenured from-space");
+    assert!(
+        !heap.is_nursery(new_obj1),
+        "promoted object should be in tenured space"
+    );
+    assert!(
+        heap.from_space_contains(new_obj1),
+        "promoted object should be in tenured from-space"
+    );
     assert_eq!(heap.minor_collections(), 1);
-    assert_eq!(heap.nursery_used(), 0, "nursery should be reset after minor GC");
+    assert_eq!(
+        heap.nursery_used(),
+        0,
+        "nursery should be reset after minor GC"
+    );
 }
 
 #[test]
@@ -3711,12 +3830,18 @@ fn minor_gc_promotes_linked_list() {
     // Walk the chain and verify all nodes are in tenured
     let mut cur = LowBit3Tag0::try_decode_ptr(frame.slots[0].get()).unwrap();
     for _ in 0..2 {
-        assert!(heap.from_space_contains(cur), "node should be in tenured from-space");
+        assert!(
+            heap.from_space_contains(cur),
+            "node should be in tenured from-space"
+        );
         let field: Value<LowBit<3>> = unsafe { read_value_field(cur, &NODE, 0) };
         cur = LowBit3Tag0::try_decode_ptr(field.to_bits()).unwrap();
     }
     // Last node (c) should also be in tenured
-    assert!(heap.from_space_contains(cur), "tail node should be in tenured from-space");
+    assert!(
+        heap.from_space_contains(cur),
+        "tail node should be in tenured from-space"
+    );
 }
 
 #[test]
@@ -3781,7 +3906,12 @@ fn card_table_tracks_old_to_young() {
 
     // Store child pointer into tenured parent's field (old→young write)
     unsafe {
-        write_value_field(tenured_parent, &PAIR, 0, Value::<LowBit<3>>::from_bits(ptr_val(child)));
+        write_value_field(
+            tenured_parent,
+            &PAIR,
+            0,
+            Value::<LowBit<3>>::from_bits(ptr_val(child)),
+        );
     }
     // Mark card dirty (simulating the generational write barrier)
     heap.mark_card_dirty(tenured_parent as *const u8);
@@ -3791,13 +3921,22 @@ fn card_table_tracks_old_to_young() {
 
     let new_parent = LowBit3Tag0::try_decode_ptr(frame.slots[0].get()).unwrap();
     // Parent is still in tenured (not moved by minor GC)
-    assert_eq!(new_parent, tenured_parent, "tenured parent should not move during minor GC");
+    assert_eq!(
+        new_parent, tenured_parent,
+        "tenured parent should not move during minor GC"
+    );
 
     // Parent's field[0] should now point to promoted child
     let field0: Value<LowBit<3>> = unsafe { read_value_field(new_parent, &PAIR, 0) };
     let new_child = LowBit3Tag0::try_decode_ptr(field0.to_bits()).unwrap();
-    assert!(heap.from_space_contains(new_child), "child should be promoted to tenured");
-    assert!(!heap.is_nursery(new_child), "child should no longer be in nursery");
+    assert!(
+        heap.from_space_contains(new_child),
+        "child should be promoted to tenured"
+    );
+    assert!(
+        !heap.is_nursery(new_child),
+        "child should no longer be in nursery"
+    );
 }
 
 #[test]
@@ -3874,8 +4013,8 @@ fn minor_then_major() {
 
 #[test]
 fn generational_multi_thread_stress() {
-    use std::thread;
     use std::sync::atomic::{AtomicBool, Ordering as AO};
+    use std::thread;
 
     static NODE: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_fields(1);
 
@@ -3902,12 +4041,7 @@ fn generational_multi_thread_stress() {
                 // Link new node to previous head
                 let old_bits = frame.slots[0].get();
                 unsafe {
-                    write_value_field(
-                        obj,
-                        &NODE,
-                        0,
-                        Value::<LowBit<3>>::from_bits(old_bits),
-                    );
+                    write_value_field(obj, &NODE, 0, Value::<LowBit<3>>::from_bits(old_bits));
                 }
                 frame.slots[0].set(ptr_val(obj));
 
@@ -3936,7 +4070,10 @@ fn generational_multi_thread_stress() {
         h.join().expect("thread panicked");
     }
 
-    assert!(heap.minor_collections() > 0, "should have triggered minor GCs");
+    assert!(
+        heap.minor_collections() > 0,
+        "should have triggered minor GCs"
+    );
 }
 
 #[test]
@@ -3968,8 +4105,8 @@ fn non_generational_unchanged() {
 #[test]
 fn stress_generational_concurrent() {
     // Minor GCs interleaved with concurrent major GCs
-    use std::thread;
     use std::sync::atomic::{AtomicBool, Ordering as AO};
+    use std::thread;
 
     static NODE: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_fields(1);
 
@@ -3995,10 +4132,7 @@ fn stress_generational_concurrent() {
                 }
                 let old_bits = frame.slots[0].get();
                 unsafe {
-                    write_value_field(
-                        obj, &NODE, 0,
-                        Value::<LowBit<3>>::from_bits(old_bits),
-                    );
+                    write_value_field(obj, &NODE, 0, Value::<LowBit<3>>::from_bits(old_bits));
                 }
                 frame.slots[0].set(ptr_val(obj));
 
@@ -4034,6 +4168,8 @@ fn stress_generational_concurrent() {
         h.join().expect("mutator panicked");
     }
 
-    assert!(heap.minor_collections() > 0 || heap.collections() > 0,
-        "should have performed some collections");
+    assert!(
+        heap.minor_collections() > 0 || heap.collections() > 0,
+        "should have performed some collections"
+    );
 }

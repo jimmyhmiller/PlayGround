@@ -49,10 +49,13 @@ fn pattern_pic_add() {
     b.switch_to_block(slow_bb);
     let sa = b.block_param(slow_bb, 0);
     let sb = b.block_param(slow_bb, 1);
-    let slow_add = b.declare_func("slow_add", Signature {
-        params: vec![Type::I64, Type::I64],
-        ret: Some(Type::I64),
-    });
+    let slow_add = b.declare_func(
+        "slow_add",
+        Signature {
+            params: vec![Type::I64, Type::I64],
+            ret: Some(Type::I64),
+        },
+    );
     let result = b.call(slow_add, &[sa, sb]).unwrap();
     b.ret(result);
 
@@ -101,11 +104,13 @@ fn pattern_closure_call() {
     let arg = b.block_param(entry, 1);
 
     let ptr = b.payload(closure);
-    let code_ptr = b.load(Type::Ptr, ptr, 8);  // offset 8: code pointer
-    let env = b.load(Type::I64, ptr, 16);       // offset 16: environment
+    let code_ptr = b.load(Type::Ptr, ptr, 8); // offset 8: code pointer
+    let env = b.load(Type::I64, ptr, 16); // offset 16: environment
 
     // Call the closure: fn(env, arg) -> result
-    let result = b.call_indirect(code_ptr, &[env, arg], Some(Type::I64)).unwrap();
+    let result = b
+        .call_indirect(code_ptr, &[env, arg], Some(Type::I64))
+        .unwrap();
     b.ret(result);
 
     let func = b.build();
@@ -148,7 +153,13 @@ fn pattern_array_access() {
 
     // Out of bounds
     b.switch_to_block(oob_bb);
-    let trap = b.declare_func("out_of_bounds", Signature { params: vec![], ret: None });
+    let trap = b.declare_func(
+        "out_of_bounds",
+        Signature {
+            params: vec![],
+            ret: None,
+        },
+    );
     b.call(trap, &[]);
     b.unreachable();
 
@@ -172,7 +183,7 @@ fn pattern_accumulator_loop() {
     let mut b = FunctionBuilder::new("sum_array", &[Type::I64, Type::I64], Some(Type::I64));
     let entry = b.entry_block();
     let arr_ptr = b.block_param(entry, 0); // raw pointer to data
-    let n = b.block_param(entry, 1);       // raw i64 count
+    let n = b.block_param(entry, 1); // raw i64 count
 
     let loop_bb = b.create_block(&[Type::I64, Type::I64, Type::I64]); // (i, sum, arr_ptr)
     let body_bb = b.create_block(&[Type::I64, Type::I64, Type::I64]); // (i, sum, arr_ptr)
@@ -202,7 +213,13 @@ fn pattern_accumulator_loop() {
     let addr = b.add(barr, offset);
     let elem = b.load(Type::I64, addr, 0);
     let is_int = b.is_tag(elem, 1);
-    b.br_if(is_int, fast_bb, &[bi, bsum, barr, elem], slow_bb, &[bi, bsum, barr, elem]);
+    b.br_if(
+        is_int,
+        fast_bb,
+        &[bi, bsum, barr, elem],
+        slow_bb,
+        &[bi, bsum, barr, elem],
+    );
 
     // Fast: extract int payload
     b.switch_to_block(fast_bb);
@@ -220,10 +237,13 @@ fn pattern_accumulator_loop() {
     let ssum = b.block_param(slow_bb, 1);
     let sarr = b.block_param(slow_bb, 2);
     let selem = b.block_param(slow_bb, 3);
-    let to_int = b.declare_func("to_int", Signature {
-        params: vec![Type::I64],
-        ret: Some(Type::I64),
-    });
+    let to_int = b.declare_func(
+        "to_int",
+        Signature {
+            params: vec![Type::I64],
+            ret: Some(Type::I64),
+        },
+    );
     let int_val = b.call(to_int, &[selem]).unwrap();
     let new_sum2 = b.add(ssum, int_val);
     b.jump(cont_bb, &[si, new_sum2, sarr]);
@@ -265,14 +285,20 @@ fn pattern_object_allocation() {
     let x = b.block_param(entry, 0);
     let y = b.block_param(entry, 1);
 
-    let gc_alloc = b.declare_func("gc_alloc", Signature {
-        params: vec![Type::I64],
-        ret: Some(Type::Ptr),
-    });
-    let write_barrier = b.declare_func("write_barrier", Signature {
-        params: vec![Type::Ptr],
-        ret: None,
-    });
+    let gc_alloc = b.declare_func(
+        "gc_alloc",
+        Signature {
+            params: vec![Type::I64],
+            ret: Some(Type::Ptr),
+        },
+    );
+    let write_barrier = b.declare_func(
+        "write_barrier",
+        Signature {
+            params: vec![Type::Ptr],
+            ret: None,
+        },
+    );
 
     let size = b.iconst(Type::I64, 24); // header + 2 fields
     let obj = b.call(gc_alloc, &[size]).unwrap();
@@ -310,18 +336,34 @@ fn pattern_type_dispatch_chain_v2() {
     let entry = b.entry_block();
     let val = b.block_param(entry, 0);
 
-    let int_to_str = b.declare_func("int_to_str", Signature {
-        params: vec![Type::I64], ret: Some(Type::I64),
-    });
-    let float_to_str = b.declare_func("float_to_str", Signature {
-        params: vec![Type::I64], ret: Some(Type::I64),
-    });
-    let bool_to_str = b.declare_func("bool_to_str", Signature {
-        params: vec![Type::I64], ret: Some(Type::I64),
-    });
-    let obj_to_str = b.declare_func("obj_to_str", Signature {
-        params: vec![Type::I64], ret: Some(Type::I64),
-    });
+    let int_to_str = b.declare_func(
+        "int_to_str",
+        Signature {
+            params: vec![Type::I64],
+            ret: Some(Type::I64),
+        },
+    );
+    let float_to_str = b.declare_func(
+        "float_to_str",
+        Signature {
+            params: vec![Type::I64],
+            ret: Some(Type::I64),
+        },
+    );
+    let bool_to_str = b.declare_func(
+        "bool_to_str",
+        Signature {
+            params: vec![Type::I64],
+            ret: Some(Type::I64),
+        },
+    );
+    let obj_to_str = b.declare_func(
+        "obj_to_str",
+        Signature {
+            params: vec![Type::I64],
+            ret: Some(Type::I64),
+        },
+    );
 
     let int_bb = b.create_block(&[Type::I64]);
     let check_float = b.create_block(&[Type::I64]);
@@ -432,7 +474,9 @@ fn pattern_vtable_dispatch() {
     let vtable = b.load(Type::Ptr, obj_ptr, 0);
     // Method at slot 2 (offset 16)
     let method_ptr = b.load(Type::Ptr, vtable, 16);
-    let result = b.call_indirect(method_ptr, &[obj, arg], Some(Type::I64)).unwrap();
+    let result = b
+        .call_indirect(method_ptr, &[obj, arg], Some(Type::I64))
+        .unwrap();
     b.ret(result);
 
     let func = b.build();
@@ -452,10 +496,13 @@ fn pattern_string_concat() {
     let a = b.block_param(entry, 0);
     let bv = b.block_param(entry, 1);
 
-    let concat_fn = b.declare_func("runtime_str_concat", Signature {
-        params: vec![Type::I64, Type::I64],
-        ret: Some(Type::I64),
-    });
+    let concat_fn = b.declare_func(
+        "runtime_str_concat",
+        Signature {
+            params: vec![Type::I64, Type::I64],
+            ret: Some(Type::I64),
+        },
+    );
     let result = b.call(concat_fn, &[a, bv]).unwrap();
     b.ret(result);
 
@@ -485,14 +532,20 @@ fn pattern_exception_via_runtime() {
     let x = b.block_param(entry, 0);
 
     // Runtime handles the try/catch and returns a pair encoded as two values
-    let try_fn = b.declare_func("try_might_throw", Signature {
-        params: vec![Type::I64],
-        ret: Some(Type::I64), // returns result (or sentinel on throw)
-    });
-    let did_throw_fn = b.declare_func("last_call_threw", Signature {
-        params: vec![],
-        ret: Some(Type::I8),
-    });
+    let try_fn = b.declare_func(
+        "try_might_throw",
+        Signature {
+            params: vec![Type::I64],
+            ret: Some(Type::I64), // returns result (or sentinel on throw)
+        },
+    );
+    let did_throw_fn = b.declare_func(
+        "last_call_threw",
+        Signature {
+            params: vec![],
+            ret: Some(Type::I8),
+        },
+    );
 
     let result = b.call(try_fn, &[x]).unwrap();
     let threw = b.call(did_throw_fn, &[]).unwrap();
@@ -558,10 +611,13 @@ fn pattern_deopt_guard() {
     b.switch_to_block(deopt_bb);
     let da = b.block_param(deopt_bb, 0);
     let db = b.block_param(deopt_bb, 1);
-    let deopt = b.declare_func("deoptimize", Signature {
-        params: vec![Type::I64, Type::I64, Type::I64], // (bc_offset, a, b)
-        ret: Some(Type::I64),
-    });
+    let deopt = b.declare_func(
+        "deoptimize",
+        Signature {
+            params: vec![Type::I64, Type::I64, Type::I64], // (bc_offset, a, b)
+            ret: Some(Type::I64),
+        },
+    );
     let bc_offset = b.iconst(Type::I64, 42); // bytecode offset for this point
     let result = b.call(deopt, &[bc_offset, da, db]).unwrap();
     b.ret(result);
@@ -590,18 +646,30 @@ fn pattern_deopt_guard() {
 
 #[test]
 fn pattern_hash_lookup_clean() {
-    let mut b = FunctionBuilder::new("hash_get", &[Type::Ptr, Type::I64, Type::I64], Some(Type::I64));
+    let mut b = FunctionBuilder::new(
+        "hash_get",
+        &[Type::Ptr, Type::I64, Type::I64],
+        Some(Type::I64),
+    );
     let entry = b.entry_block();
     let table = b.block_param(entry, 0);
     let capacity = b.block_param(entry, 1);
     let key = b.block_param(entry, 2);
 
-    let hash_fn = b.declare_func("hash", Signature {
-        params: vec![Type::I64], ret: Some(Type::I64),
-    });
-    let key_eq_fn = b.declare_func("key_eq", Signature {
-        params: vec![Type::I64, Type::I64], ret: Some(Type::I8),
-    });
+    let hash_fn = b.declare_func(
+        "hash",
+        Signature {
+            params: vec![Type::I64],
+            ret: Some(Type::I64),
+        },
+    );
+    let key_eq_fn = b.declare_func(
+        "key_eq",
+        Signature {
+            params: vec![Type::I64, Type::I64],
+            ret: Some(Type::I8),
+        },
+    );
 
     let hash = b.call(hash_fn, &[key]).unwrap();
     let one = b.iconst(Type::I64, 1);
@@ -624,7 +692,13 @@ fn pattern_hash_lookup_clean() {
     let entry_addr = b.add(table, byte_off);
     let entry_key = b.load(Type::I64, entry_addr, 0);
     let is_empty = b.is_tag(entry_key, 0);
-    b.br_if(is_empty, not_found_bb, &[], check_key_bb, &[bucket, entry_key]);
+    b.br_if(
+        is_empty,
+        not_found_bb,
+        &[],
+        check_key_bb,
+        &[bucket, entry_key],
+    );
 
     // Check key equality
     b.switch_to_block(check_key_bb);
@@ -686,10 +760,13 @@ fn pattern_varargs() {
     let argc = b.block_param(entry, 2);
 
     // Just delegate to a runtime function
-    let rt_apply = b.declare_func("runtime_apply", Signature {
-        params: vec![Type::I64, Type::Ptr, Type::I64],
-        ret: Some(Type::I64),
-    });
+    let rt_apply = b.declare_func(
+        "runtime_apply",
+        Signature {
+            params: vec![Type::I64, Type::Ptr, Type::I64],
+            ret: Some(Type::I64),
+        },
+    );
     let result = b.call(rt_apply, &[func_val, args, argc]).unwrap();
     b.ret(result);
 
@@ -710,18 +787,34 @@ fn pattern_type_dispatch_switch() {
     let entry = b.entry_block();
     let val = b.block_param(entry, 0);
 
-    let int_to_str = b.declare_func("int_to_str", Signature {
-        params: vec![Type::I64], ret: Some(Type::I64),
-    });
-    let float_to_str = b.declare_func("float_to_str", Signature {
-        params: vec![Type::I64], ret: Some(Type::I64),
-    });
-    let bool_to_str = b.declare_func("bool_to_str", Signature {
-        params: vec![Type::I64], ret: Some(Type::I64),
-    });
-    let obj_to_str = b.declare_func("obj_to_str", Signature {
-        params: vec![Type::I64], ret: Some(Type::I64),
-    });
+    let int_to_str = b.declare_func(
+        "int_to_str",
+        Signature {
+            params: vec![Type::I64],
+            ret: Some(Type::I64),
+        },
+    );
+    let float_to_str = b.declare_func(
+        "float_to_str",
+        Signature {
+            params: vec![Type::I64],
+            ret: Some(Type::I64),
+        },
+    );
+    let bool_to_str = b.declare_func(
+        "bool_to_str",
+        Signature {
+            params: vec![Type::I64],
+            ret: Some(Type::I64),
+        },
+    );
+    let obj_to_str = b.declare_func(
+        "obj_to_str",
+        Signature {
+            params: vec![Type::I64],
+            ret: Some(Type::I64),
+        },
+    );
 
     let int_bb = b.create_block(&[Type::I64]);
     let float_bb = b.create_block(&[Type::I64]);
@@ -736,7 +829,8 @@ fn pattern_type_dispatch_switch() {
             (2, float_bb, &[val]),
             (3, bool_bb, &[val]),
         ],
-        obj_bb, &[val],
+        obj_bb,
+        &[val],
     );
 
     b.switch_to_block(int_bb);
@@ -851,7 +945,8 @@ fn pattern_polymorphic_add_with_floats() {
             (1, int_bb, &[a, bv]),   // tag 1 = int
             (2, float_bb, &[a, bv]), // tag 2 = float
         ],
-        slow_bb, &[a, bv],
+        slow_bb,
+        &[a, bv],
     );
 
     // Int path
@@ -881,10 +976,13 @@ fn pattern_polymorphic_add_with_floats() {
     b.switch_to_block(slow_bb);
     let sa = b.block_param(slow_bb, 0);
     let sb = b.block_param(slow_bb, 1);
-    let slow_add = b.declare_func("slow_add", Signature {
-        params: vec![Type::I64, Type::I64],
-        ret: Some(Type::I64),
-    });
+    let slow_add = b.declare_func(
+        "slow_add",
+        Signature {
+            params: vec![Type::I64, Type::I64],
+            ret: Some(Type::I64),
+        },
+    );
     let result = b.call(slow_add, &[sa, sb]).unwrap();
     b.ret(result);
 
@@ -931,10 +1029,13 @@ fn pattern_overflow_checked_add() {
     b.switch_to_block(slow_bb);
     let sa = b.block_param(slow_bb, 0);
     let sb = b.block_param(slow_bb, 1);
-    let bignum_add = b.declare_func("bignum_add", Signature {
-        params: vec![Type::I64, Type::I64],
-        ret: Some(Type::I64),
-    });
+    let bignum_add = b.declare_func(
+        "bignum_add",
+        Signature {
+            params: vec![Type::I64, Type::I64],
+            ret: Some(Type::I64),
+        },
+    );
     let result = b.call(bignum_add, &[sa, sb]).unwrap();
     b.ret(result);
 
@@ -959,10 +1060,13 @@ fn pattern_invoke_exception() {
     let entry = b.entry_block();
     let x = b.block_param(entry, 0);
 
-    let might_throw = b.declare_func("might_throw", Signature {
-        params: vec![Type::I64],
-        ret: Some(Type::I64),
-    });
+    let might_throw = b.declare_func(
+        "might_throw",
+        Signature {
+            params: vec![Type::I64],
+            ret: Some(Type::I64),
+        },
+    );
 
     let ok_bb = b.create_block(&[Type::I64]); // receives return value
     let err_bb = b.create_block(&[]);
@@ -990,7 +1094,11 @@ fn pattern_invoke_exception() {
 
 #[test]
 fn pattern_invoke_indirect_exception() {
-    let mut b = FunctionBuilder::new("try_call_indirect", &[Type::Ptr, Type::I64], Some(Type::I64));
+    let mut b = FunctionBuilder::new(
+        "try_call_indirect",
+        &[Type::Ptr, Type::I64],
+        Some(Type::I64),
+    );
     let entry = b.entry_block();
     let callee = b.block_param(entry, 0);
     let arg = b.block_param(entry, 1);

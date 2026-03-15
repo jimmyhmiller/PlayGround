@@ -1,5 +1,5 @@
 use std::cell::UnsafeCell;
-use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
 use dynobj::{FrameChain, ObjHeader, RootSource, TypeInfo};
@@ -88,7 +88,6 @@ impl ThreadState {
         *gc_done = false;
         self.state.store(STATE_RUNNING, Ordering::Release);
     }
-
 
     /// Resume this thread after GC completes.
     pub fn resume(&self) {
@@ -302,11 +301,7 @@ impl<P: PtrPolicy> MutatorThread<P> {
 
     /// Allocate and initialize header + varlen count.
     /// Triggers GC if from-space is full.
-    pub fn alloc_obj<H: ObjHeader>(
-        &self,
-        info: &'static TypeInfo,
-        varlen_len: usize,
-    ) -> *mut u8 {
+    pub fn alloc_obj<H: ObjHeader>(&self, info: &'static TypeInfo, varlen_len: usize) -> *mut u8 {
         if self.heap.gc_every_alloc() {
             self.trigger_gc();
         }

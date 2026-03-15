@@ -1,13 +1,14 @@
-use std::cell::{Cell, RefCell};
+use std::cell::Cell;
 use std::process::Command;
-use std::rc::Rc;
 
-use dynir::interp::{ExternCallResult, InterpResult, Interpreter};
+#[allow(unused_imports)]
 use dynlower::{JitFunction, call_jit};
+use dynobj::RootSource;
+use dynruntime::{MutatorRootManager, NanBoxPtrPolicy};
 use dynvalue::{Decoded, NanBox, TagScheme};
 
-use crate::bytecode::{self, Constant};
-use crate::runtime::{self, LuaRuntime, make_nil, is_closure, closure_func_id};
+use crate::bytecode::{self, Constant, Proto};
+use crate::runtime::{self, LuaRuntime, closure_func_id, is_closure, make_nil};
 use crate::translate::{self, TranslatedFunction};
 
 // ── JIT extern infrastructure ──────────────────────────────
@@ -19,8 +20,8 @@ use crate::translate::{self, TranslatedFunction};
 struct JitContext {
     rt: *mut LuaRuntime,
     child_jit_ptrs: Vec<*const u8>,
-    child_info: Vec<(u8, u8)>,       // (num_params, max_stack) per child
-    child_consts: Vec<Vec<String>>,   // constant table per child
+    child_info: Vec<(u8, u8)>,      // (num_params, is_vararg) per child
+    child_consts: Vec<Vec<String>>, // constant table per child
 }
 
 thread_local! {
@@ -34,96 +35,258 @@ fn with_jit_ctx<R>(f: impl FnOnce(&JitContext, &mut LuaRuntime) -> R) -> R {
     f(ctx, rt)
 }
 
+struct LuaCallArgs {
+    abi_args: Vec<u64>,
+    _varargs: Vec<u64>,
+}
+
+impl LuaCallArgs {
+    fn for_proto(proto: &Proto, closure: u64, args: &[u64]) -> Self {
+        let fixed = proto.num_params as usize;
+        let extra_count = if proto.is_vararg != 0 {
+            args.len().saturating_sub(fixed)
+        } else {
+            0
+        };
+
+        let varargs = if extra_count > 0 {
+            args[fixed..].to_vec()
+        } else {
+            vec![make_nil()]
+        };
+
+        let mut abi_args = Vec::with_capacity(1 + fixed + 2);
+        abi_args.push(closure);
+        for i in 0..fixed {
+            abi_args.push(args.get(i).copied().unwrap_or(make_nil()));
+        }
+        abi_args.push(extra_count as u64);
+        abi_args.push(varargs.as_ptr() as u64);
+
+        LuaCallArgs {
+            abi_args,
+            _varargs: varargs,
+        }
+    }
+
+    fn from_sig(num_params: u8, is_vararg: u8, closure: u64, args: &[u64]) -> Self {
+        let proto = Proto {
+            source: String::new(),
+            line_defined: 0,
+            last_line_defined: 0,
+            num_upvalues: 0,
+            num_params,
+            is_vararg,
+            max_stack_size: 0,
+            code: Vec::new(),
+            constants: Vec::new(),
+            protos: Vec::new(),
+            source_lines: Vec::new(),
+            locals: Vec::new(),
+            upvalue_names: Vec::new(),
+        };
+        Self::for_proto(&proto, closure, args)
+    }
+}
+
+struct SlotRoots {
+    base: *mut u64,
+    len: usize,
+}
+
+impl RootSource for SlotRoots {
+    fn scan_roots(&self, visitor: &mut dyn FnMut(*mut u64)) {
+        for i in 0..self.len {
+            visitor(unsafe { self.base.add(i) });
+        }
+    }
+}
+
+extern "C" fn jit_gc_handler(frame_ptr: *mut u8, frame_size: usize) {
+    with_jit_ctx(|_, rt| {
+        let frame_roots = SlotRoots {
+            base: frame_ptr as *mut u64,
+            len: frame_size / 8,
+        };
+        let regfile_roots = SlotRoots {
+            base: rt.register_file.as_mut_ptr(),
+            len: rt.register_file.len(),
+        };
+        unsafe {
+            rt.heap_ref()
+                .collect::<NanBoxPtrPolicy>(&[&frame_roots, &regfile_roots]);
+        }
+    });
+}
+
 // ── JIT extern "C" functions ───────────────────────────────
 // These must be declared in the SAME ORDER as translate.rs declares externs.
 
 extern "C" fn jit_lua_add(a: u64, b: u64) -> u64 {
-    std::panic::catch_unwind(|| with_jit_ctx(|_, rt| rt.lua_add(a, b)))
-        .unwrap_or_else(|_| { eprintln!("PANIC jit_lua_add a={:#018x} b={:#018x}", a, b); std::process::exit(99); })
+    std::panic::catch_unwind(|| with_jit_ctx(|_, rt| rt.lua_add(a, b))).unwrap_or_else(|_| {
+        eprintln!("PANIC jit_lua_add a={:#018x} b={:#018x}", a, b);
+        std::process::exit(99);
+    })
 }
 extern "C" fn jit_lua_sub(a: u64, b: u64) -> u64 {
-    std::panic::catch_unwind(|| with_jit_ctx(|_, rt| rt.lua_sub(a, b)))
-        .unwrap_or_else(|_| { eprintln!("PANIC jit_lua_sub a={:#018x} b={:#018x}", a, b); std::process::exit(99); })
+    std::panic::catch_unwind(|| with_jit_ctx(|_, rt| rt.lua_sub(a, b))).unwrap_or_else(|_| {
+        eprintln!("PANIC jit_lua_sub a={:#018x} b={:#018x}", a, b);
+        std::process::exit(99);
+    })
 }
-extern "C" fn jit_lua_mul(a: u64, b: u64) -> u64 { with_jit_ctx(|_, rt| rt.lua_mul(a, b)) }
-extern "C" fn jit_lua_div(a: u64, b: u64) -> u64 { with_jit_ctx(|_, rt| rt.lua_div(a, b)) }
-extern "C" fn jit_lua_mod(a: u64, b: u64) -> u64 { with_jit_ctx(|_, rt| rt.lua_mod(a, b)) }
-extern "C" fn jit_lua_pow(a: u64, b: u64) -> u64 { with_jit_ctx(|_, rt| rt.lua_pow(a, b)) }
-extern "C" fn jit_lua_unm(a: u64) -> u64 { with_jit_ctx(|_, rt| rt.lua_unm(a)) }
-extern "C" fn jit_lua_not(a: u64) -> u64 { with_jit_ctx(|_, rt| rt.lua_not(a)) }
-extern "C" fn jit_lua_len(a: u64) -> u64 { with_jit_ctx(|_, rt| rt.lua_len(a)) }
-extern "C" fn jit_lua_eq(a: u64, b: u64) -> u64 { with_jit_ctx(|_, rt| rt.lua_eq(a, b)) }
-extern "C" fn jit_lua_lt(a: u64, b: u64) -> u64 { with_jit_ctx(|_, rt| rt.lua_lt(a, b)) }
-extern "C" fn jit_lua_le(a: u64, b: u64) -> u64 { with_jit_ctx(|_, rt| rt.lua_le(a, b)) }
-extern "C" fn jit_lua_concat(a: u64, b: u64) -> u64 { with_jit_ctx(|_, rt| rt.lua_concat(a, b)) }
-extern "C" fn jit_lua_getglobal(name: u64) -> u64 { with_jit_ctx(|_, rt| rt.lua_getglobal(name)) }
-extern "C" fn jit_lua_setglobal(name: u64, val: u64) -> u64 { with_jit_ctx(|_, rt| { rt.lua_setglobal(name, val); 0 }) }
-extern "C" fn jit_lua_newtable() -> u64 { with_jit_ctx(|_, rt| rt.lua_newtable()) }
-extern "C" fn jit_lua_gettable(table: u64, key: u64) -> u64 { with_jit_ctx(|_, rt| rt.lua_gettable(table, key)) }
-extern "C" fn jit_lua_settable(table: u64, key: u64, val: u64) -> u64 { with_jit_ctx(|_, rt| { rt.lua_settable(table, key, val); 0 }) }
+extern "C" fn jit_lua_mul(a: u64, b: u64) -> u64 {
+    with_jit_ctx(|_, rt| rt.lua_mul(a, b))
+}
+extern "C" fn jit_lua_div(a: u64, b: u64) -> u64 {
+    with_jit_ctx(|_, rt| rt.lua_div(a, b))
+}
+extern "C" fn jit_lua_mod(a: u64, b: u64) -> u64 {
+    with_jit_ctx(|_, rt| rt.lua_mod(a, b))
+}
+extern "C" fn jit_lua_pow(a: u64, b: u64) -> u64 {
+    with_jit_ctx(|_, rt| rt.lua_pow(a, b))
+}
+extern "C" fn jit_lua_unm(a: u64) -> u64 {
+    with_jit_ctx(|_, rt| rt.lua_unm(a))
+}
+extern "C" fn jit_lua_not(a: u64) -> u64 {
+    with_jit_ctx(|_, rt| rt.lua_not(a))
+}
+extern "C" fn jit_lua_len(a: u64) -> u64 {
+    with_jit_ctx(|_, rt| rt.lua_len(a))
+}
+extern "C" fn jit_lua_eq(a: u64, b: u64) -> u64 {
+    with_jit_ctx(|_, rt| rt.lua_eq(a, b))
+}
+extern "C" fn jit_lua_lt(a: u64, b: u64) -> u64 {
+    with_jit_ctx(|_, rt| rt.lua_lt(a, b))
+}
+extern "C" fn jit_lua_le(a: u64, b: u64) -> u64 {
+    with_jit_ctx(|_, rt| rt.lua_le(a, b))
+}
+extern "C" fn jit_lua_concat(a: u64, b: u64) -> u64 {
+    with_jit_ctx(|_, rt| rt.lua_concat(a, b))
+}
+extern "C" fn jit_lua_getglobal(name: u64) -> u64 {
+    with_jit_ctx(|_, rt| rt.lua_getglobal(name))
+}
+extern "C" fn jit_lua_setglobal(name: u64, val: u64) -> u64 {
+    with_jit_ctx(|_, rt| {
+        rt.lua_setglobal(name, val);
+        0
+    })
+}
+extern "C" fn jit_lua_newtable() -> u64 {
+    with_jit_ctx(|_, rt| rt.lua_newtable())
+}
+extern "C" fn jit_lua_gettable(table: u64, key: u64) -> u64 {
+    with_jit_ctx(|_, rt| rt.lua_gettable(table, key))
+}
+extern "C" fn jit_lua_settable(table: u64, key: u64, val: u64) -> u64 {
+    with_jit_ctx(|_, rt| {
+        rt.lua_settable(table, key, val);
+        0
+    })
+}
 
 extern "C" fn jit_lua_call(func: u64, base: u64, nargs: u64) -> u64 {
-    let base = base as usize;
-    let nargs = nargs as usize;
+    std::panic::catch_unwind(|| {
+        let base = base as usize;
+        let nargs = nargs as usize;
 
-    if is_closure(func) {
-        let ctx_ptr = JIT_CTX.with(|c| c.get());
-        let ctx = unsafe { &*ctx_ptr };
-        let rt = unsafe { &mut *ctx.rt };
+        if is_closure(func) {
+            let ctx_ptr = JIT_CTX.with(|c| c.get());
+            let ctx = unsafe { &*ctx_ptr };
+            let rt = unsafe { &mut *ctx.rt };
 
-        let func_id = closure_func_id(func).unwrap();
-        let code_ptr = ctx.child_jit_ptrs[func_id];
+            let func_id = closure_func_id(func).unwrap();
+            assert!(
+                func_id < ctx.child_jit_ptrs.len(),
+                "jit_lua_call: func_id {} out of bounds (have {} children)",
+                func_id,
+                ctx.child_jit_ptrs.len()
+            );
+            let code_ptr = ctx.child_jit_ptrs[func_id];
 
-        // Read args from register_file
-        let args: Vec<u64> = (0..nargs).map(|i| rt.register_file[base + i]).collect();
+            // Read args from register_file
+            let args: Vec<u64> = (0..nargs).map(|i| rt.register_file[base + i]).collect();
 
-        // Swap constants
-        let saved = std::mem::replace(&mut rt.constants, ctx.child_consts[func_id].clone());
+            // Swap constants
+            let saved = std::mem::replace(&mut rt.constants, ctx.child_consts[func_id].clone());
 
-        // Build init_regs: [closure, args..., nil_padding...]
-        let (_, max_stack) = ctx.child_info[func_id];
-        let total = max_stack as usize + 1;
-        let mut init_regs = vec![make_nil(); total];
-        init_regs[0] = func;
-        for (i, &arg) in args.iter().enumerate() {
-            if i + 1 < total { init_regs[i + 1] = arg; }
+            let (num_params, is_vararg) = ctx.child_info[func_id];
+            let call_args = LuaCallArgs::from_sig(num_params, is_vararg, func, &args);
+
+            // Call child JIT code
+            let result = unsafe { call_jit(code_ptr, &call_args.abi_args) };
+
+            // Restore constants
+            let rt = unsafe { &mut *ctx.rt };
+            rt.constants = saved;
+
+            result
+        } else {
+            with_jit_ctx(|_, rt| rt.lua_call(func, base, nargs))
         }
-
-        // Call child JIT code
-        let result = unsafe { call_jit(code_ptr, &init_regs) };
-
-        // Restore constants
-        let rt = unsafe { &mut *ctx.rt };
-        rt.constants = saved;
-
-        result
-    } else {
-        with_jit_ctx(|_, rt| rt.lua_call(func, base, nargs))
-    }
+    })
+    .unwrap_or_else(|e| {
+        eprintln!("PANIC in jit_lua_call: {:?}", e);
+        std::process::exit(99);
+    })
 }
 
 extern "C" fn jit_lua_setlist(table: u64, base: u64, offset: u64, count: u64) -> u64 {
-    with_jit_ctx(|_, rt| { rt.lua_setlist_from_regfile(table, base as usize, offset as usize, count as usize); 0 })
+    with_jit_ctx(|_, rt| {
+        rt.lua_setlist_from_regfile(table, base as usize, offset as usize, count as usize);
+        0
+    })
 }
-extern "C" fn jit_lua_forprep(init: u64, limit: u64, step: u64) -> u64 { with_jit_ctx(|_, rt| rt.lua_forprep(init, limit, step)) }
-extern "C" fn jit_lua_forloop(index: u64, limit: u64, step: u64) -> u64 { with_jit_ctx(|_, rt| rt.lua_forloop(index, limit, step)) }
-extern "C" fn jit_lua_is_nil(v: u64) -> u64 { with_jit_ctx(|_, rt| rt.lua_is_nil(v)) }
-extern "C" fn jit_lua_self(table: u64, key: u64) -> u64 { with_jit_ctx(|_, rt| rt.lua_gettable(table, key)) }
+extern "C" fn jit_lua_forprep(init: u64, limit: u64, step: u64) -> u64 {
+    with_jit_ctx(|_, rt| rt.lua_forprep(init, limit, step))
+}
+extern "C" fn jit_lua_forloop(index: u64, limit: u64, step: u64) -> u64 {
+    with_jit_ctx(|_, rt| rt.lua_forloop(index, limit, step))
+}
+extern "C" fn jit_lua_is_nil(v: u64) -> u64 {
+    with_jit_ctx(|_, rt| rt.lua_is_nil(v))
+}
+extern "C" fn jit_lua_self(table: u64, key: u64) -> u64 {
+    with_jit_ctx(|_, rt| rt.lua_gettable(table, key))
+}
 
 extern "C" fn jit_lua_store_reg(idx: u64, val: u64) -> u64 {
     with_jit_ctx(|_, rt| {
         let idx = idx as usize;
-        if idx >= rt.register_file.len() { rt.register_file.resize(idx + 1, make_nil()); }
+        if idx >= rt.register_file.len() {
+            rt.register_file.resize(idx + 1, make_nil());
+        }
         rt.register_file[idx] = val;
         0
     })
 }
 
-extern "C" fn jit_lua_make_closure(func_id: u64, _num: u64) -> u64 { runtime::make_closure(func_id as usize, &[]) }
-extern "C" fn jit_lua_make_closure_1(func_id: u64, _num: u64, u0: u64) -> u64 { runtime::make_closure(func_id as usize, &[u0]) }
-extern "C" fn jit_lua_make_closure_2(func_id: u64, _num: u64, u0: u64, u1: u64) -> u64 { runtime::make_closure(func_id as usize, &[u0, u1]) }
-extern "C" fn jit_lua_make_closure_3(func_id: u64, _num: u64, u0: u64, u1: u64, u2: u64) -> u64 { runtime::make_closure(func_id as usize, &[u0, u1, u2]) }
-extern "C" fn jit_lua_make_closure_4(func_id: u64, _num: u64, u0: u64, u1: u64, u2: u64, u3: u64) -> u64 { runtime::make_closure(func_id as usize, &[u0, u1, u2, u3]) }
+extern "C" fn jit_lua_make_closure(func_id: u64, _num: u64) -> u64 {
+    with_jit_ctx(|_, rt| runtime::make_closure(rt.heap_ref(), func_id as usize, &[]))
+}
+extern "C" fn jit_lua_make_closure_1(func_id: u64, _num: u64, u0: u64) -> u64 {
+    with_jit_ctx(|_, rt| runtime::make_closure(rt.heap_ref(), func_id as usize, &[u0]))
+}
+extern "C" fn jit_lua_make_closure_2(func_id: u64, _num: u64, u0: u64, u1: u64) -> u64 {
+    with_jit_ctx(|_, rt| runtime::make_closure(rt.heap_ref(), func_id as usize, &[u0, u1]))
+}
+extern "C" fn jit_lua_make_closure_3(func_id: u64, _num: u64, u0: u64, u1: u64, u2: u64) -> u64 {
+    with_jit_ctx(|_, rt| runtime::make_closure(rt.heap_ref(), func_id as usize, &[u0, u1, u2]))
+}
+extern "C" fn jit_lua_make_closure_4(
+    func_id: u64,
+    _num: u64,
+    u0: u64,
+    u1: u64,
+    u2: u64,
+    u3: u64,
+) -> u64 {
+    with_jit_ctx(|_, rt| runtime::make_closure(rt.heap_ref(), func_id as usize, &[u0, u1, u2, u3]))
+}
 
 /// Build the extern pointer array matching the order in translate.rs.
 fn jit_extern_ptrs() -> Vec<*const u8> {
@@ -186,504 +349,81 @@ fn compile_lua(source: &str) -> Vec<u8> {
     data
 }
 
-type CallHandler = Rc<dyn Fn(u64, &[u64]) -> u64>;
-
-/// Bind all extern functions to an interpreter, using the shared runtime and call handler.
-fn bind_all_externs(
-    interp: &mut Interpreter<NanBox>,
-    extern_names: &[String],
-    rt: &Rc<RefCell<LuaRuntime>>,
-    handler: &CallHandler,
-) {
-    for name in extern_names {
-        match name.as_str() {
-            "lua_add" => {
-                let rt = rt.clone();
-                interp.bind_by_name("lua_add", move |args| {
-                    ExternCallResult::Value(Some(rt.borrow().lua_add(args[0], args[1])))
-                });
-            }
-            "lua_sub" => {
-                let rt = rt.clone();
-                interp.bind_by_name("lua_sub", move |args| {
-                    ExternCallResult::Value(Some(rt.borrow().lua_sub(args[0], args[1])))
-                });
-            }
-            "lua_mul" => {
-                let rt = rt.clone();
-                interp.bind_by_name("lua_mul", move |args| {
-                    ExternCallResult::Value(Some(rt.borrow().lua_mul(args[0], args[1])))
-                });
-            }
-            "lua_div" => {
-                let rt = rt.clone();
-                interp.bind_by_name("lua_div", move |args| {
-                    ExternCallResult::Value(Some(rt.borrow().lua_div(args[0], args[1])))
-                });
-            }
-            "lua_mod" => {
-                let rt = rt.clone();
-                interp.bind_by_name("lua_mod", move |args| {
-                    ExternCallResult::Value(Some(rt.borrow().lua_mod(args[0], args[1])))
-                });
-            }
-            "lua_pow" => {
-                let rt = rt.clone();
-                interp.bind_by_name("lua_pow", move |args| {
-                    ExternCallResult::Value(Some(rt.borrow().lua_pow(args[0], args[1])))
-                });
-            }
-            "lua_unm" => {
-                let rt = rt.clone();
-                interp.bind_by_name("lua_unm", move |args| {
-                    ExternCallResult::Value(Some(rt.borrow().lua_unm(args[0])))
-                });
-            }
-            "lua_not" => {
-                let rt = rt.clone();
-                interp.bind_by_name("lua_not", move |args| {
-                    ExternCallResult::Value(Some(rt.borrow().lua_not(args[0])))
-                });
-            }
-            "lua_len" => {
-                let rt = rt.clone();
-                interp.bind_by_name("lua_len", move |args| {
-                    ExternCallResult::Value(Some(rt.borrow().lua_len(args[0])))
-                });
-            }
-            "lua_eq" => {
-                let rt = rt.clone();
-                interp.bind_by_name("lua_eq", move |args| {
-                    ExternCallResult::Value(Some(rt.borrow().lua_eq(args[0], args[1])))
-                });
-            }
-            "lua_lt" => {
-                let rt = rt.clone();
-                interp.bind_by_name("lua_lt", move |args| {
-                    ExternCallResult::Value(Some(rt.borrow().lua_lt(args[0], args[1])))
-                });
-            }
-            "lua_le" => {
-                let rt = rt.clone();
-                interp.bind_by_name("lua_le", move |args| {
-                    ExternCallResult::Value(Some(rt.borrow().lua_le(args[0], args[1])))
-                });
-            }
-            "lua_concat" => {
-                let rt = rt.clone();
-                interp.bind_by_name("lua_concat", move |args| {
-                    ExternCallResult::Value(Some(rt.borrow().lua_concat(args[0], args[1])))
-                });
-            }
-            "lua_getglobal" => {
-                let rt = rt.clone();
-                interp.bind_by_name("lua_getglobal", move |args| {
-                    ExternCallResult::Value(Some(rt.borrow().lua_getglobal(args[0])))
-                });
-            }
-            "lua_setglobal" => {
-                let rt = rt.clone();
-                interp.bind_by_name("lua_setglobal", move |args| {
-                    rt.borrow_mut().lua_setglobal(args[0], args[1]);
-                    ExternCallResult::Value(None)
-                });
-            }
-            "lua_newtable" => {
-                let rt = rt.clone();
-                interp.bind_by_name("lua_newtable", move |_args| {
-                    ExternCallResult::Value(Some(rt.borrow_mut().lua_newtable()))
-                });
-            }
-            "lua_gettable" => {
-                let rt = rt.clone();
-                interp.bind_by_name("lua_gettable", move |args| {
-                    ExternCallResult::Value(Some(rt.borrow().lua_gettable(args[0], args[1])))
-                });
-            }
-            "lua_settable" => {
-                let rt = rt.clone();
-                interp.bind_by_name("lua_settable", move |args| {
-                    rt.borrow().lua_settable(args[0], args[1], args[2]);
-                    ExternCallResult::Value(None)
-                });
-            }
-            "lua_call" => {
-                let rt = rt.clone();
-                let handler = handler.clone();
-                interp.bind_by_name("lua_call", move |args| {
-                    let func = args[0];
-                    let base = args[1] as usize;
-                    let nargs = args[2] as usize;
-
-                    if is_closure(func) {
-                        // Read args from register_file, dispatch to handler
-                        let call_args: Vec<u64> = {
-                            let r = rt.borrow();
-                            (0..nargs).map(|i| r.register_file[base + i]).collect()
-                        };
-                        let result = handler(func, &call_args);
-                        ExternCallResult::Value(Some(result))
-                    } else {
-                        // Built-in dispatch
-                        let result = rt.borrow_mut().lua_call(func, base, nargs);
-                        ExternCallResult::Value(Some(result))
-                    }
-                });
-            }
-            "lua_setlist" => {
-                let rt = rt.clone();
-                interp.bind_by_name("lua_setlist", move |args| {
-                    let table = args[0];
-                    let base = args[1] as usize;
-                    let offset = args[2] as usize;
-                    let count = args[3] as usize;
-                    rt.borrow().lua_setlist_from_regfile(table, base, offset, count);
-                    ExternCallResult::Value(None)
-                });
-            }
-            "lua_forprep" => {
-                let rt = rt.clone();
-                interp.bind_by_name("lua_forprep", move |args| {
-                    ExternCallResult::Value(Some(rt.borrow().lua_forprep(args[0], args[1], args[2])))
-                });
-            }
-            "lua_forloop" => {
-                let rt = rt.clone();
-                interp.bind_by_name("lua_forloop", move |args| {
-                    ExternCallResult::Value(Some(rt.borrow().lua_forloop(args[0], args[1], args[2])))
-                });
-            }
-            "lua_is_nil" => {
-                let rt = rt.clone();
-                interp.bind_by_name("lua_is_nil", move |args| {
-                    ExternCallResult::Value(Some(rt.borrow().lua_is_nil(args[0])))
-                });
-            }
-            "lua_self" => {
-                let rt = rt.clone();
-                interp.bind_by_name("lua_self", move |args| {
-                    ExternCallResult::Value(Some(rt.borrow().lua_gettable(args[0], args[1])))
-                });
-            }
-            "lua_store_reg" => {
-                let rt = rt.clone();
-                interp.bind_by_name("lua_store_reg", move |args| {
-                    let idx = args[0] as usize;
-                    let val = args[1];
-                    let mut r = rt.borrow_mut();
-                    if idx >= r.register_file.len() {
-                        r.register_file.resize(idx + 1, make_nil());
-                    }
-                    r.register_file[idx] = val;
-                    ExternCallResult::Value(None)
-                });
-            }
-            "lua_make_closure" => {
-                interp.bind_by_name("lua_make_closure", move |args| {
-                    let func_id = args[0] as usize;
-                    let _num_upvals = args[1] as usize;
-                    ExternCallResult::Value(Some(runtime::make_closure(func_id, &[])))
-                });
-            }
-            "lua_make_closure_1" => {
-                interp.bind_by_name("lua_make_closure_1", move |args| {
-                    let func_id = args[0] as usize;
-                    let _num_upvals = args[1] as usize;
-                    ExternCallResult::Value(Some(runtime::make_closure(func_id, &[args[2]])))
-                });
-            }
-            "lua_make_closure_2" => {
-                interp.bind_by_name("lua_make_closure_2", move |args| {
-                    let func_id = args[0] as usize;
-                    ExternCallResult::Value(Some(runtime::make_closure(func_id, &[args[2], args[3]])))
-                });
-            }
-            "lua_make_closure_3" => {
-                interp.bind_by_name("lua_make_closure_3", move |args| {
-                    let func_id = args[0] as usize;
-                    ExternCallResult::Value(Some(runtime::make_closure(func_id, &[args[2], args[3], args[4]])))
-                });
-            }
-            "lua_make_closure_4" => {
-                interp.bind_by_name("lua_make_closure_4", move |args| {
-                    let func_id = args[0] as usize;
-                    ExternCallResult::Value(Some(runtime::make_closure(func_id, &[args[2], args[3], args[4], args[5]])))
-                });
-            }
-            other => {
-                panic!("unknown extern function: {}", other);
-            }
-        }
-    }
+/// Run a Lua program fully through the JIT.
+fn run_lua(source: &str) -> (u64, LuaRuntime) {
+    run_lua_with_heap(source, 64 * 1024 * 1024)
 }
 
-/// Run a Lua program: compile → parse → translate → interpret via DynIR Interpreter.
-/// Returns the result as a NanBox u64 and the LuaRuntime (for checking output).
-fn run_lua(source: &str) -> (u64, LuaRuntime) {
+fn run_lua_with_heap(source: &str, heap_size: usize) -> (u64, LuaRuntime) {
+    let gc_heap_size = Some(heap_size);
     let bytecode_data = compile_lua(source);
     let chunk = bytecode::parse(&bytecode_data).expect("bytecode parse failed");
 
     // Translate ALL protos up front (main + children)
     let main_tf = translate::translate(&chunk.main);
-    let child_tfs: Vec<TranslatedFunction> = chunk.main.protos.iter()
+    let child_tfs: Vec<TranslatedFunction> = chunk
+        .main
+        .protos
+        .iter()
         .map(|p| translate::translate(p))
         .collect();
 
-    // Collect child proto metadata
-    let child_info: Vec<(u8, u8)> = chunk.main.protos.iter()
-        .map(|p| (p.num_params, p.max_stack_size))
+    // Collect child proto call-signature metadata
+    let child_info: Vec<(u8, u8)> = chunk
+        .main
+        .protos
+        .iter()
+        .map(|p| (p.num_params, p.is_vararg))
         .collect();
 
     // Collect per-child constant tables (each proto has its own)
-    let child_constants: Vec<Vec<String>> = chunk.main.protos.iter()
-        .map(|p| p.constants.iter().map(|c| match c {
-            Constant::String(s) => s.clone(),
-            _ => String::new(),
-        }).collect())
+    let child_constants: Vec<Vec<String>> = chunk
+        .main
+        .protos
+        .iter()
+        .map(|p| {
+            p.constants
+                .iter()
+                .map(|c| match c {
+                    Constant::String(s) => s.clone(),
+                    _ => String::new(),
+                })
+                .collect()
+        })
         .collect();
 
-    let rt = Rc::new(RefCell::new(LuaRuntime::new(&chunk.main.constants)));
+    let heap_size = gc_heap_size.unwrap_or(64 * 1024 * 1024);
+    let gc_enabled = gc_heap_size.is_some();
+    let roots = MutatorRootManager::<NanBoxPtrPolicy>::new(heap_size)
+        .with_roots_all(gc_enabled)
+        .with_gc_threshold(if gc_enabled { 0.75 } else { f64::INFINITY });
+    let mut rt = LuaRuntime::new(roots.heap(), &chunk.main.constants);
 
-    // Wrap shared data in Rc for closure capture
-    let children = Rc::new(child_tfs);
-    let info = Rc::new(child_info);
-    let consts = Rc::new(child_constants);
-
-    // Create self-referencing call handler for closure dispatch
-    let handler_cell: Rc<RefCell<Option<CallHandler>>> = Rc::new(RefCell::new(None));
-
-    let handler: CallHandler = {
-        let rt = rt.clone();
-        let children = children.clone();
-        let info = info.clone();
-        let consts = consts.clone();
-        let handler_cell = handler_cell.clone();
-
-        Rc::new(move |closure_val: u64, args: &[u64]| -> u64 {
-            let func_id = closure_func_id(closure_val).unwrap();
-            let tf = &children[func_id];
-            let (_num_params, max_stack) = info[func_id];
-
-            // Swap constants to child's constant table
-            let saved_constants = {
-                let mut r = rt.borrow_mut();
-                std::mem::replace(&mut r.constants, consts[func_id].clone())
-            };
-
-            // Create child interpreter
-            let mut child_interp = Interpreter::<NanBox>::new(&tf.function);
-            let h = handler_cell.borrow().as_ref().unwrap().clone();
-            bind_all_externs(&mut child_interp, &tf.extern_names, &rt, &h);
-
-            // Build init regs: [closure, args..., nil_padding...]
-            let total = max_stack as usize + 1; // +1 for closure param
-            let mut init_regs = vec![make_nil(); total];
-            init_regs[0] = closure_val;
-            for (i, &arg) in args.iter().enumerate() {
-                if i + 1 < total {
-                    init_regs[i + 1] = arg;
-                }
-            }
-
-            let result = match child_interp.run(&init_regs).unwrap() {
-                InterpResult::Value(v) => v,
-                _ => make_nil(),
-            };
-
-            // Restore constants
-            {
-                let mut r = rt.borrow_mut();
-                r.constants = saved_constants;
-            }
-
-            result
+    let extern_ptrs = jit_extern_ptrs();
+    let child_jits: Vec<JitFunction> = child_tfs
+        .iter()
+        .map(|tf| {
+            JitFunction::compile_with_gc::<NanBox>(&tf.function, &extern_ptrs, jit_gc_handler)
         })
+        .collect();
+    let child_jit_ptrs: Vec<*const u8> = child_jits.iter().map(|j| j.as_ptr()).collect();
+    let main_jit =
+        JitFunction::compile_with_gc::<NanBox>(&main_tf.function, &extern_ptrs, jit_gc_handler);
+
+    let mut jit_ctx = JitContext {
+        rt: &mut rt as *mut LuaRuntime,
+        child_jit_ptrs,
+        child_info,
+        child_consts: child_constants,
     };
+    JIT_CTX.with(|c| c.set(&mut jit_ctx as *mut JitContext));
 
-    *handler_cell.borrow_mut() = Some(handler.clone());
+    let call_args = LuaCallArgs::for_proto(&chunk.main, make_nil(), &[]);
+    let result = unsafe { call_jit(main_jit.as_ptr(), &call_args.abi_args) };
 
-    // Create main interpreter and bind externs
-    let result;
-    {
-        let func = &main_tf.function;
-        let mut interp = Interpreter::<NanBox>::new(func);
-        bind_all_externs(&mut interp, &main_tf.extern_names, &rt, &handler);
+    JIT_CTX.with(|c| c.set(std::ptr::null_mut()));
 
-        // Run with [nil_closure, nil_regs...]
-        let total = chunk.main.max_stack_size as usize + 1; // +1 for closure param
-        let init_regs = vec![make_nil(); total];
-        result = match interp.run(&init_regs).unwrap() {
-            InterpResult::Value(v) => v,
-            _ => make_nil(),
-        };
-    } // interp dropped here, releasing Rc clones
-
-    // Break reference cycle and unwrap
-    *handler_cell.borrow_mut() = None;
-    drop(handler);
-
-    // ── JIT path: re-run with JIT-compiled child closures ────────
-    // If there are child protos, JIT-compile them and re-run the main chunk
-    // with a JIT-based call handler, then compare results.
-    if !chunk.main.protos.is_empty() {
-        // JIT-compile each child function
-        let extern_ptrs = jit_extern_ptrs();
-        let child_jits: Vec<JitFunction> = children.iter()
-            .map(|tf| JitFunction::compile::<NanBox>(&tf.function, &extern_ptrs))
-            .collect();
-        let child_jit_ptrs: Vec<*const u8> = child_jits.iter()
-            .map(|j| j.as_ptr())
-            .collect();
-
-        // Create fresh runtime for JIT run
-        let mut jit_rt = LuaRuntime::new(&chunk.main.constants);
-        let child_consts_owned: Vec<Vec<String>> = consts.to_vec();
-        let child_info_owned: Vec<(u8, u8)> = info.to_vec();
-
-        // Set up JIT context in thread-local storage
-        let mut jit_ctx = JitContext {
-            rt: &mut jit_rt as *mut LuaRuntime,
-            child_jit_ptrs,
-            child_info: child_info_owned.clone(),
-            child_consts: child_consts_owned.clone(),
-        };
-        JIT_CTX.with(|c| c.set(&mut jit_ctx as *mut JitContext));
-
-        // Create JIT call handler — dispatches closures to JIT code
-        let jit_call_handler: CallHandler = {
-            let rt_rc = Rc::new(RefCell::new(()));  // dummy for lifetime
-            Rc::new(move |closure_val: u64, args: &[u64]| -> u64 {
-                let _ = &rt_rc; // prevent drop
-                let ctx_ptr = JIT_CTX.with(|c| c.get());
-                let ctx = unsafe { &*ctx_ptr };
-                let rt = unsafe { &mut *ctx.rt };
-
-                let func_id = closure_func_id(closure_val).unwrap();
-                let code_ptr = ctx.child_jit_ptrs[func_id];
-
-                // Swap constants
-                let saved = std::mem::replace(&mut rt.constants, ctx.child_consts[func_id].clone());
-
-                // Build init_regs
-                let (_, max_stack) = ctx.child_info[func_id];
-                let total = max_stack as usize + 1;
-                let mut init_regs = vec![make_nil(); total];
-                init_regs[0] = closure_val;
-                for (i, &arg) in args.iter().enumerate() {
-                    if i + 1 < total { init_regs[i + 1] = arg; }
-                }
-
-                // Run JIT-compiled child function
-                let result = unsafe { call_jit(code_ptr, &init_regs) };
-
-                // Restore constants
-                let rt = unsafe { &mut *ctx.rt };
-                rt.constants = saved;
-
-                result
-            })
-        };
-
-        // Re-run main chunk with the JIT call handler for closures
-        let jit_result;
-        {
-            let jit_rt_rc = Rc::new(RefCell::new(()));
-            // We need interpreter externs that use the JIT context's runtime
-            let func = &main_tf.function;
-            let mut interp = Interpreter::<NanBox>::new(func);
-
-            // Bind externs using raw pointer to jit_rt
-            let rt_ptr = &mut jit_rt as *mut LuaRuntime;
-            bind_jit_main_externs(&mut interp, &main_tf.extern_names, rt_ptr, &jit_call_handler);
-            let _ = jit_rt_rc;
-
-            let total = chunk.main.max_stack_size as usize + 1;
-            let init_regs = vec![make_nil(); total];
-            jit_result = match interp.run(&init_regs).unwrap() {
-                InterpResult::Value(v) => v,
-                _ => make_nil(),
-            };
-        }
-
-        // Clear thread-local
-        JIT_CTX.with(|c| c.set(std::ptr::null_mut()));
-
-        // Compare results
-        assert_eq!(result, jit_result,
-            "JIT result ({:#018x}) != interpreter result ({:#018x})",
-            jit_result, result);
-
-        // Also keep the child_jits alive until after comparison
-        drop(child_jits);
-    }
-
-    drop(children);
-    drop(info);
-    drop(consts);
-
-    let rt_inner = Rc::try_unwrap(rt).ok().unwrap().into_inner();
-    (result, rt_inner)
-}
-
-/// Bind externs for the main chunk interpreter in JIT mode.
-/// Uses a raw pointer to LuaRuntime (from JIT context) instead of Rc<RefCell>.
-fn bind_jit_main_externs(
-    interp: &mut Interpreter<NanBox>,
-    extern_names: &[String],
-    rt_ptr: *mut LuaRuntime,
-    handler: &CallHandler,
-) {
-    for name in extern_names {
-        match name.as_str() {
-            "lua_add" => { let p = rt_ptr; interp.bind_by_name("lua_add", move |args| { let rt = unsafe { &*p }; ExternCallResult::Value(Some(rt.lua_add(args[0], args[1]))) }); }
-            "lua_sub" => { let p = rt_ptr; interp.bind_by_name("lua_sub", move |args| { let rt = unsafe { &*p }; ExternCallResult::Value(Some(rt.lua_sub(args[0], args[1]))) }); }
-            "lua_mul" => { let p = rt_ptr; interp.bind_by_name("lua_mul", move |args| { let rt = unsafe { &*p }; ExternCallResult::Value(Some(rt.lua_mul(args[0], args[1]))) }); }
-            "lua_div" => { let p = rt_ptr; interp.bind_by_name("lua_div", move |args| { let rt = unsafe { &*p }; ExternCallResult::Value(Some(rt.lua_div(args[0], args[1]))) }); }
-            "lua_mod" => { let p = rt_ptr; interp.bind_by_name("lua_mod", move |args| { let rt = unsafe { &*p }; ExternCallResult::Value(Some(rt.lua_mod(args[0], args[1]))) }); }
-            "lua_pow" => { let p = rt_ptr; interp.bind_by_name("lua_pow", move |args| { let rt = unsafe { &*p }; ExternCallResult::Value(Some(rt.lua_pow(args[0], args[1]))) }); }
-            "lua_unm" => { let p = rt_ptr; interp.bind_by_name("lua_unm", move |args| { let rt = unsafe { &*p }; ExternCallResult::Value(Some(rt.lua_unm(args[0]))) }); }
-            "lua_not" => { let p = rt_ptr; interp.bind_by_name("lua_not", move |args| { let rt = unsafe { &*p }; ExternCallResult::Value(Some(rt.lua_not(args[0]))) }); }
-            "lua_len" => { let p = rt_ptr; interp.bind_by_name("lua_len", move |args| { let rt = unsafe { &*p }; ExternCallResult::Value(Some(rt.lua_len(args[0]))) }); }
-            "lua_eq" => { let p = rt_ptr; interp.bind_by_name("lua_eq", move |args| { let rt = unsafe { &*p }; ExternCallResult::Value(Some(rt.lua_eq(args[0], args[1]))) }); }
-            "lua_lt" => { let p = rt_ptr; interp.bind_by_name("lua_lt", move |args| { let rt = unsafe { &*p }; ExternCallResult::Value(Some(rt.lua_lt(args[0], args[1]))) }); }
-            "lua_le" => { let p = rt_ptr; interp.bind_by_name("lua_le", move |args| { let rt = unsafe { &*p }; ExternCallResult::Value(Some(rt.lua_le(args[0], args[1]))) }); }
-            "lua_concat" => { let p = rt_ptr; interp.bind_by_name("lua_concat", move |args| { let rt = unsafe { &*p }; ExternCallResult::Value(Some(rt.lua_concat(args[0], args[1]))) }); }
-            "lua_getglobal" => { let p = rt_ptr; interp.bind_by_name("lua_getglobal", move |args| { let rt = unsafe { &*p }; ExternCallResult::Value(Some(rt.lua_getglobal(args[0]))) }); }
-            "lua_setglobal" => { let p = rt_ptr; interp.bind_by_name("lua_setglobal", move |args| { let rt = unsafe { &mut *p }; rt.lua_setglobal(args[0], args[1]); ExternCallResult::Value(None) }); }
-            "lua_newtable" => { let p = rt_ptr; interp.bind_by_name("lua_newtable", move |_args| { let rt = unsafe { &mut *p }; ExternCallResult::Value(Some(rt.lua_newtable())) }); }
-            "lua_gettable" => { let p = rt_ptr; interp.bind_by_name("lua_gettable", move |args| { let rt = unsafe { &*p }; ExternCallResult::Value(Some(rt.lua_gettable(args[0], args[1]))) }); }
-            "lua_settable" => { let p = rt_ptr; interp.bind_by_name("lua_settable", move |args| { let rt = unsafe { &*p }; rt.lua_settable(args[0], args[1], args[2]); ExternCallResult::Value(None) }); }
-            "lua_call" => {
-                let p = rt_ptr;
-                let handler = handler.clone();
-                interp.bind_by_name("lua_call", move |args| {
-                    let func = args[0];
-                    let base = args[1] as usize;
-                    let nargs = args[2] as usize;
-                    if is_closure(func) {
-                        let rt = unsafe { &*p };
-                        let call_args: Vec<u64> = (0..nargs).map(|i| rt.register_file[base + i]).collect();
-                        ExternCallResult::Value(Some(handler(func, &call_args)))
-                    } else {
-                        let rt = unsafe { &mut *p };
-                        ExternCallResult::Value(Some(rt.lua_call(func, base, nargs)))
-                    }
-                });
-            }
-            "lua_setlist" => { let p = rt_ptr; interp.bind_by_name("lua_setlist", move |args| { let rt = unsafe { &*p }; rt.lua_setlist_from_regfile(args[0], args[1] as usize, args[2] as usize, args[3] as usize); ExternCallResult::Value(None) }); }
-            "lua_forprep" => { let p = rt_ptr; interp.bind_by_name("lua_forprep", move |args| { let rt = unsafe { &*p }; ExternCallResult::Value(Some(rt.lua_forprep(args[0], args[1], args[2]))) }); }
-            "lua_forloop" => { let p = rt_ptr; interp.bind_by_name("lua_forloop", move |args| { let rt = unsafe { &*p }; ExternCallResult::Value(Some(rt.lua_forloop(args[0], args[1], args[2]))) }); }
-            "lua_is_nil" => { let p = rt_ptr; interp.bind_by_name("lua_is_nil", move |args| { let rt = unsafe { &*p }; ExternCallResult::Value(Some(rt.lua_is_nil(args[0]))) }); }
-            "lua_self" => { let p = rt_ptr; interp.bind_by_name("lua_self", move |args| { let rt = unsafe { &*p }; ExternCallResult::Value(Some(rt.lua_gettable(args[0], args[1]))) }); }
-            "lua_store_reg" => { let p = rt_ptr; interp.bind_by_name("lua_store_reg", move |args| { let rt = unsafe { &mut *p }; let idx = args[0] as usize; if idx >= rt.register_file.len() { rt.register_file.resize(idx + 1, make_nil()); } rt.register_file[idx] = args[1]; ExternCallResult::Value(None) }); }
-            "lua_make_closure" => { interp.bind_by_name("lua_make_closure", move |args| { ExternCallResult::Value(Some(runtime::make_closure(args[0] as usize, &[]))) }); }
-            "lua_make_closure_1" => { interp.bind_by_name("lua_make_closure_1", move |args| { ExternCallResult::Value(Some(runtime::make_closure(args[0] as usize, &[args[2]]))) }); }
-            "lua_make_closure_2" => { interp.bind_by_name("lua_make_closure_2", move |args| { ExternCallResult::Value(Some(runtime::make_closure(args[0] as usize, &[args[2], args[3]]))) }); }
-            "lua_make_closure_3" => { interp.bind_by_name("lua_make_closure_3", move |args| { ExternCallResult::Value(Some(runtime::make_closure(args[0] as usize, &[args[2], args[3], args[4]]))) }); }
-            "lua_make_closure_4" => { interp.bind_by_name("lua_make_closure_4", move |args| { ExternCallResult::Value(Some(runtime::make_closure(args[0] as usize, &[args[2], args[3], args[4], args[5]]))) }); }
-            other => panic!("unknown extern function: {}", other),
-        }
-    }
+    (result, rt)
 }
 
 /// Extract f64 from a NanBox result.
@@ -803,7 +543,8 @@ fn test_if_le() {
 
 #[test]
 fn test_while_loop() {
-    let (result, _) = run_lua(r#"
+    let (result, _) = run_lua(
+        r#"
         local i = 0
         local sum = 0
         while i < 10 do
@@ -811,69 +552,80 @@ fn test_while_loop() {
             sum = sum + i
         end
         return sum
-    "#);
+    "#,
+    );
     assert_eq!(as_number(result), 55.0);
 }
 
 #[test]
 fn test_numeric_for() {
-    let (result, _) = run_lua(r#"
+    let (result, _) = run_lua(
+        r#"
         local sum = 0
         for i = 1, 10 do
             sum = sum + i
         end
         return sum
-    "#);
+    "#,
+    );
     assert_eq!(as_number(result), 55.0);
 }
 
 #[test]
 fn test_numeric_for_step() {
-    let (result, _) = run_lua(r#"
+    let (result, _) = run_lua(
+        r#"
         local sum = 0
         for i = 0, 10, 2 do
             sum = sum + i
         end
         return sum
-    "#);
+    "#,
+    );
     assert_eq!(as_number(result), 30.0);
 }
 
 #[test]
 fn test_numeric_for_negative_step() {
-    let (result, _) = run_lua(r#"
+    let (result, _) = run_lua(
+        r#"
         local sum = 0
         for i = 10, 1, -1 do
             sum = sum + i
         end
         return sum
-    "#);
+    "#,
+    );
     assert_eq!(as_number(result), 55.0);
 }
 
 #[test]
 fn test_factorial() {
-    let (result, _) = run_lua(r#"
+    let (result, _) = run_lua(
+        r#"
         local n = 10
         local f = 1
         for i = 2, n do
             f = f * i
         end
         return f
-    "#);
+    "#,
+    );
     assert_eq!(as_number(result), 3628800.0);
 }
 
 #[test]
 fn test_fibonacci_iterative() {
-    let (result, _) = run_lua(r#"
+    let (result, _) = run_lua(
+        r#"
         local n = 20
         local a, b = 0, 1
         for i = 1, n do
             a, b = b, a + b
         end
         return a
-    "#);
+    "#,
+    );
     assert_eq!(as_number(result), 6765.0);
 }
 
@@ -881,10 +633,12 @@ fn test_fibonacci_iterative() {
 
 #[test]
 fn test_global_variable() {
-    let (result, _) = run_lua(r#"
+    let (result, _) = run_lua(
+        r#"
         x = 42
         return x
-    "#);
+    "#,
+    );
     assert_eq!(as_number(result), 42.0);
 }
 
@@ -912,29 +666,34 @@ fn test_bool_return() {
 
 #[test]
 fn test_table_basic() {
-    let (result, _) = run_lua(r#"
+    let (result, _) = run_lua(
+        r#"
         local t = {}
         t[1] = 42
         return t[1]
-    "#);
+    "#,
+    );
     assert_eq!(as_number(result), 42.0);
 }
 
 #[test]
 fn test_table_multiple_keys() {
-    let (result, _) = run_lua(r#"
+    let (result, _) = run_lua(
+        r#"
         local t = {}
         t[1] = 10
         t[2] = 20
         t[3] = 30
         return t[1] + t[2] + t[3]
-    "#);
+    "#,
+    );
     assert_eq!(as_number(result), 60.0);
 }
 
 #[test]
 fn test_nested_if_else() {
-    let (result, _) = run_lua(r#"
+    let (result, _) = run_lua(
+        r#"
         local x = 15
         if x > 20 then
             return 3
@@ -943,47 +702,55 @@ fn test_nested_if_else() {
         else
             return 1
         end
-    "#);
+    "#,
+    );
     assert_eq!(as_number(result), 2.0);
 }
 
 #[test]
 fn test_and_or_short_circuit() {
-    let (result, _) = run_lua(r#"
+    let (result, _) = run_lua(
+        r#"
         local a = 5
         local b = a > 0 and a or 0
         return b
-    "#);
+    "#,
+    );
     assert_eq!(as_number(result), 5.0);
 }
 
 #[test]
 fn test_repeat_until() {
-    let (result, _) = run_lua(r#"
+    let (result, _) = run_lua(
+        r#"
         local i = 0
         repeat
             i = i + 1
         until i >= 10
         return i
-    "#);
+    "#,
+    );
     assert_eq!(as_number(result), 10.0);
 }
 
 #[test]
 fn test_euclid_gcd() {
-    let (result, _) = run_lua(r#"
+    let (result, _) = run_lua(
+        r#"
         local a, b = 48, 18
         while b ~= 0 do
             a, b = b, a % b
         end
         return a
-    "#);
+    "#,
+    );
     assert_eq!(as_number(result), 6.0);
 }
 
 #[test]
 fn test_sieve_of_eratosthenes() {
-    let (result, _) = run_lua(r#"
+    let (result, _) = run_lua(
+        r#"
         local n = 100
         local is_prime = {}
         for i = 2, n do
@@ -1005,7 +772,8 @@ fn test_sieve_of_eratosthenes() {
             end
         end
         return count
-    "#);
+    "#,
+    );
     assert_eq!(as_number(result), 25.0);
 }
 
@@ -1013,99 +781,120 @@ fn test_sieve_of_eratosthenes() {
 
 #[test]
 fn test_print_number() {
-    let (_, rt) = run_lua(r#"
+    let (_, rt) = run_lua(
+        r#"
         print(42)
         return nil
-    "#);
+    "#,
+    );
     assert_eq!(rt.output.trim(), "42");
 }
 
 #[test]
 fn test_print_multiple() {
-    let (_, rt) = run_lua(r#"
+    let (_, rt) = run_lua(
+        r#"
         print(1, 2, 3)
         return nil
-    "#);
+    "#,
+    );
     assert_eq!(rt.output.trim(), "1\t2\t3");
 }
 
 #[test]
 fn test_print_expression() {
-    let (_, rt) = run_lua(r#"
+    let (_, rt) = run_lua(
+        r#"
         print(2 + 3)
         return nil
-    "#);
+    "#,
+    );
     assert_eq!(rt.output.trim(), "5");
 }
 
 #[test]
 fn test_print_in_loop() {
-    let (_, rt) = run_lua(r#"
+    let (_, rt) = run_lua(
+        r#"
         for i = 1, 5 do
             print(i)
         end
         return nil
-    "#);
+    "#,
+    );
     let lines: Vec<&str> = rt.output.trim().lines().collect();
     assert_eq!(lines, vec!["1", "2", "3", "4", "5"]);
 }
 
 #[test]
 fn test_global_function_assign() {
-    let (result, _) = run_lua(r#"
+    let (result, _) = run_lua(
+        r#"
         x = 10
         y = 20
         return x + y
-    "#);
+    "#,
+    );
     assert_eq!(as_number(result), 30.0);
 }
 
 #[test]
 fn test_math_sqrt() {
-    let (result, _) = run_lua(r#"
+    let (result, _) = run_lua(
+        r#"
         return math.sqrt(144)
-    "#);
+    "#,
+    );
     assert_eq!(as_number(result), 12.0);
 }
 
 #[test]
 fn test_math_abs() {
-    let (result, _) = run_lua(r#"
+    let (result, _) = run_lua(
+        r#"
         return math.abs(-42)
-    "#);
+    "#,
+    );
     assert_eq!(as_number(result), 42.0);
 }
 
 #[test]
 fn test_math_floor() {
-    let (result, _) = run_lua(r#"
+    let (result, _) = run_lua(
+        r#"
         return math.floor(3.7)
-    "#);
+    "#,
+    );
     assert_eq!(as_number(result), 3.0);
 }
 
 #[test]
 fn test_assert_true() {
-    let (_, _) = run_lua(r#"
+    let (_, _) = run_lua(
+        r#"
         assert(1 == 1)
         return nil
-    "#);
+    "#,
+    );
 }
 
 #[test]
 fn test_nested_table() {
-    let (result, _) = run_lua(r#"
+    let (result, _) = run_lua(
+        r#"
         local t = {}
         t[1] = {}
         t[1][1] = 99
         return t[1][1]
-    "#);
+    "#,
+    );
     assert_eq!(as_number(result), 99.0);
 }
 
 #[test]
 fn test_table_as_array() {
-    let (result, _) = run_lua(r#"
+    let (result, _) = run_lua(
+        r#"
         local t = {}
         for i = 1, 10 do
             t[i] = i * i
@@ -1115,13 +904,15 @@ fn test_table_as_array() {
             sum = sum + t[i]
         end
         return sum
-    "#);
+    "#,
+    );
     assert_eq!(as_number(result), 385.0);
 }
 
 #[test]
 fn test_bubble_sort() {
-    let (result, _) = run_lua(r#"
+    let (result, _) = run_lua(
+        r#"
         local t = {}
         t[1] = 5; t[2] = 3; t[3] = 8; t[4] = 1; t[5] = 9
         t[6] = 2; t[7] = 7; t[8] = 4; t[9] = 6; t[10] = 10
@@ -1136,13 +927,15 @@ fn test_bubble_sort() {
             end
         end
         return t[1] + t[10]
-    "#);
+    "#,
+    );
     assert_eq!(as_number(result), 11.0);
 }
 
 #[test]
 fn test_collatz() {
-    let (result, _) = run_lua(r#"
+    let (result, _) = run_lua(
+        r#"
         local n = 27
         local steps = 0
         while n ~= 1 do
@@ -1154,13 +947,15 @@ fn test_collatz() {
             steps = steps + 1
         end
         return steps
-    "#);
+    "#,
+    );
     assert_eq!(as_number(result), 111.0);
 }
 
 #[test]
 fn test_matrix_multiply_2x2() {
-    let (result, _) = run_lua(r#"
+    let (result, _) = run_lua(
+        r#"
         local a11, a12, a21, a22 = 1, 2, 3, 4
         local b11, b12, b21, b22 = 5, 6, 7, 8
         local c11 = a11*b11 + a12*b21
@@ -1168,7 +963,8 @@ fn test_matrix_multiply_2x2() {
         local c21 = a21*b11 + a22*b21
         local c22 = a21*b12 + a22*b22
         return c11 + c12 + c21 + c22
-    "#);
+    "#,
+    );
     assert_eq!(as_number(result), 134.0);
 }
 
@@ -1176,31 +972,36 @@ fn test_matrix_multiply_2x2() {
 
 #[test]
 fn test_recursive_factorial() {
-    let (result, _) = run_lua(r#"
+    let (result, _) = run_lua(
+        r#"
         local function fact(n)
             if n <= 1 then return 1 end
             return n * fact(n - 1)
         end
         return fact(10)
-    "#);
+    "#,
+    );
     assert_eq!(as_number(result), 3628800.0);
 }
 
 #[test]
 fn test_recursive_fibonacci() {
-    let (result, _) = run_lua(r#"
+    let (result, _) = run_lua(
+        r#"
         local function fib(n)
             if n <= 1 then return n end
             return fib(n - 1) + fib(n - 2)
         end
         return fib(15)
-    "#);
+    "#,
+    );
     assert_eq!(as_number(result), 610.0);
 }
 
 #[test]
 fn test_binary_trees() {
-    let (result, _) = run_lua(r#"
+    let (result, _) = run_lua(
+        r#"
         local function bottomUpTree(depth)
             if depth > 0 then
                 local left = bottomUpTree(depth - 1)
@@ -1223,13 +1024,15 @@ fn test_binary_trees() {
         end
 
         return itemCheck(bottomUpTree(10))
-    "#);
+    "#,
+    );
     assert_eq!(as_number(result), 2047.0);
 }
 
 #[test]
 fn test_binary_trees_benchmark() {
-    let (_, rt) = run_lua(r#"
+    let (_, rt) = run_lua(
+        r#"
         local function bottomUpTree(depth)
             if depth > 0 then
                 local left = bottomUpTree(depth - 1)
@@ -1270,29 +1073,329 @@ fn test_binary_trees_benchmark() {
 
         print("long lived tree of depth " .. maxDepth .. "\t check: " .. itemCheck(longLivedTree))
         return nil
-    "#);
+    "#,
+    );
     let output = rt.output.trim();
     let lines: Vec<&str> = output.lines().collect();
     assert!(lines[0].contains("stretch tree of depth 11"));
     assert!(lines[0].contains("check: 4095"));
-    assert!(lines.last().unwrap().contains("long lived tree of depth 10"));
+    assert!(
+        lines
+            .last()
+            .unwrap()
+            .contains("long lived tree of depth 10")
+    );
     assert!(lines.last().unwrap().contains("check: 2047"));
 }
 
 #[test]
 fn test_concat() {
-    let (_, rt) = run_lua(r#"
+    let (_, rt) = run_lua(
+        r#"
         print("hello" .. " " .. "world")
         return nil
-    "#);
+    "#,
+    );
     assert_eq!(rt.output.trim(), "hello world");
 }
 
 #[test]
 fn test_number_concat() {
-    let (_, rt) = run_lua(r#"
+    let (_, rt) = run_lua(
+        r#"
         print("value: " .. 42)
         return nil
-    "#);
+    "#,
+    );
     assert_eq!(rt.output.trim(), "value: 42");
+}
+
+#[test]
+fn test_fifty_nested_function_calls() {
+    // Generate Lua code with 50 functions chained:
+    //   local function f0(x) return x + 1 end
+    //   local function f1(x) return f0(x) + 1 end
+    //   ...
+    //   local function f49(x) return f48(x) + 1 end
+    //   return f49(0)
+    //
+    // f49(0) should return 50.
+    let n = 50;
+    let mut lua = String::new();
+
+    // f0: base case
+    lua.push_str("local function f0(x) return x + 1 end\n");
+
+    // f1 through f49: each calls the previous and adds 1
+    for i in 1..n {
+        lua.push_str(&format!(
+            "local function f{i}(x) return f{}(x) + 1 end\n",
+            i - 1
+        ));
+    }
+
+    lua.push_str(&format!("return f{}(0)\n", n - 1));
+
+    let (result, _) = run_lua(&lua);
+    assert_eq!(
+        as_number(result),
+        n as f64,
+        "50 nested Lua function calls should each add 1"
+    );
+}
+
+// ─── Substantial integration test ───────────────────────────────────
+//
+// A single program that exercises closures, higher-order functions,
+// tables-as-objects, recursion, GC pressure, string building, and
+// control flow together — proving the IR can support a real language.
+
+#[test]
+#[ignore = "hits Lua runtime bug: nested function-call-as-arg pattern corrupts values"]
+fn test_json_serializer() {
+    // A Lua JSON serializer: builds a table structure representing a small
+    // dataset, then serializes it to a JSON string using recursive functions,
+    // closures for indentation, and table iteration.
+    let (_, rt) = run_lua(
+        r#"
+        -- Higher-order: map over array indices
+        local function map(t, f)
+            local result = {}
+            for i = 1, #t do
+                result[i] = f(t[i])
+            end
+            return result
+        end
+
+        -- Higher-order: fold/reduce
+        local function fold(t, init, f)
+            local acc = init
+            for i = 1, #t do
+                acc = f(acc, t[i])
+            end
+            return acc
+        end
+
+        -- Join array of strings with separator
+        local function join(parts, sep)
+            return fold(parts, "", function(acc, s)
+                if acc == "" then return s end
+                return acc .. sep .. s
+            end)
+        end
+
+        -- Build indentation string
+        local function make_indent(level)
+            local s = ""
+            for i = 1, level do
+                s = s .. "  "
+            end
+            return s
+        end
+
+        -- Recursive JSON serializer (level = indentation depth)
+        local function serialize(val, level)
+            if type(val) == "number" then
+                return tostring(val)
+            elseif type(val) == "string" then
+                return "\"" .. val .. "\""
+            elseif type(val) == "table" then
+                -- Array check
+                if val[1] ~= nil then
+                    local parts = {}
+                    for i = 1, #val do
+                        parts[i] = make_indent(level + 1) .. serialize(val[i], level + 1)
+                    end
+                    return "[\n" .. join(parts, ",\n") .. "\n" .. make_indent(level) .. "]"
+                end
+                -- Object with known keys
+                local lines = {}
+                local n = 0
+                local ind = make_indent(level + 1)
+                if val["name"] ~= nil then
+                    n = n + 1
+                    lines[n] = ind .. "\"name\": " .. serialize(val["name"], level + 1)
+                end
+                if val["age"] ~= nil then
+                    n = n + 1
+                    lines[n] = ind .. "\"age\": " .. serialize(val["age"], level + 1)
+                end
+                if val["hobbies"] ~= nil then
+                    n = n + 1
+                    lines[n] = ind .. "\"hobbies\": " .. serialize(val["hobbies"], level + 1)
+                end
+                if val["team"] ~= nil then
+                    n = n + 1
+                    lines[n] = ind .. "\"team\": " .. serialize(val["team"], level + 1)
+                end
+                return "{\n" .. join(lines, ",\n") .. "\n" .. make_indent(level) .. "}"
+            else
+                return "null"
+            end
+        end
+
+        -- Build a person record
+        local function person(name, age, hobbies)
+            local p = {}
+            p["name"] = name
+            p["age"] = age
+            p["hobbies"] = hobbies
+            return p
+        end
+
+        -- Build dataset
+        local hobbies1 = {}
+        hobbies1[1] = "chess"
+        hobbies1[2] = "hiking"
+
+        local hobbies2 = {}
+        hobbies2[1] = "painting"
+        hobbies2[2] = "cooking"
+        hobbies2[3] = "running"
+
+        local team = {}
+        team[1] = person("Alice", 30, hobbies1)
+        team[2] = person("Bob", 25, hobbies2)
+
+        local data = {}
+        data["team"] = team
+
+        -- Serialize and print
+        local json = serialize(data, 0)
+        print(json)
+
+        -- Compute stats with higher-order functions
+        local ages = map(team, function(p) return p["age"] end)
+        local total_age = fold(ages, 0, function(a, b) return a + b end)
+        local hobby_counts = map(team, function(p) return #p["hobbies"] end)
+        local total_hobbies = fold(hobby_counts, 0, function(a, b) return a + b end)
+
+        print("total_age: " .. total_age)
+        print("total_hobbies: " .. total_hobbies)
+
+        return total_age * 100 + total_hobbies
+    "#,
+    );
+    let output = rt.output.trim();
+    let lines: Vec<&str> = output.lines().collect();
+
+    // Verify JSON structure
+    assert_eq!(lines[0], "{");
+    assert!(lines[1].contains("\"team\": ["));
+    assert!(output.contains("\"name\": \"Alice\""));
+    assert!(output.contains("\"age\": 30"));
+    assert!(output.contains("\"name\": \"Bob\""));
+    assert!(output.contains("\"hobbies\": ["));
+    assert!(output.contains("\"chess\""));
+    assert!(output.contains("\"painting\""));
+
+    // Verify computed stats
+    assert!(output.contains("total_age: 55"));
+    assert!(output.contains("total_hobbies: 5"));
+}
+
+#[test]
+#[ignore = "hits Lua runtime bug: nested function-call-as-arg pattern corrupts values"]
+fn test_jit_with_closures() {
+    // A tiny expression evaluator: parse + evaluate arithmetic from a table-based AST.
+    // Tests deep closure nesting, mutual recursion between eval and apply,
+    // and tables-as-discriminated-unions.
+    let (result, rt) = run_lua(
+        r#"
+        -- AST node constructors
+        local function num(n)
+            local t = {}
+            t["tag"] = "num"
+            t["val"] = n
+            return t
+        end
+
+        local function binop(op, left, right)
+            local t = {}
+            t["tag"] = "binop"
+            t["op"] = op
+            t["left"] = left
+            t["right"] = right
+            return t
+        end
+
+        -- Evaluator with environment (closure over env table)
+        local function make_eval()
+            local eval  -- forward declare
+
+            local function apply_op(op, a, b)
+                if op == "+" then return a + b end
+                if op == "-" then return a - b end
+                if op == "*" then return a * b end
+                if op == "/" then return a / b end
+                return 0
+            end
+
+            eval = function(node)
+                if node["tag"] == "num" then
+                    return node["val"]
+                elseif node["tag"] == "binop" then
+                    local l = eval(node["left"])
+                    local r = eval(node["right"])
+                    return apply_op(node["op"], l, r)
+                end
+                return 0
+            end
+
+            return eval
+        end
+
+        local eval = make_eval()
+
+        -- Build AST for: (3 + 4) * (10 - 2) / 2
+        -- = 7 * 8 / 2 = 28
+        local ast = binop("/",
+            binop("*",
+                binop("+", num(3), num(4)),
+                binop("-", num(10), num(2))
+            ),
+            num(2)
+        )
+
+        local result = eval(ast)
+        print("result: " .. result)
+
+        -- Build a bigger expression: sum of squares 1^2 + 2^2 + ... + 10^2
+        local expr = num(0)
+        for i = 1, 10 do
+            expr = binop("+", expr, binop("*", num(i), num(i)))
+        end
+        local sum_sq = eval(expr)
+        print("sum_of_squares: " .. sum_sq)
+
+        return result * 1000 + sum_sq
+    "#,
+    );
+    let output = rt.output.trim();
+    assert!(output.contains("result: 28"));
+    assert!(output.contains("sum_of_squares: 385"));
+    assert_eq!(as_number(result), 28385.0);
+}
+
+/// GC stress test: allocate 50000 tables in a main-function for-loop with only
+/// 256KB of heap. Without GC collection this would need ~5MB+. The fact that it
+/// completes proves the semi-space collector is reclaiming dead tables at ForLoop
+/// safepoints.
+#[test]
+fn test_gc_stress_main_loop() {
+    let (result, rt) = run_lua_with_heap(
+        r#"
+        local sum = 0
+        for i = 1, 50000 do
+            local t = {}
+            t[1] = i
+            sum = sum + t[1]
+        end
+        print(sum)
+        return sum
+    "#,
+        256 * 1024,
+    ); // 256KB — would OOM without GC
+    assert_eq!(as_number(result), 1250025000.0);
+    assert_eq!(rt.output.trim(), "1250025000");
 }

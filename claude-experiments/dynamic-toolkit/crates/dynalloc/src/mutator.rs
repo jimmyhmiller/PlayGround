@@ -3,8 +3,8 @@ use std::marker::PhantomData;
 
 use dynvalue::{TagScheme, Value};
 
-use crate::alloc::{alloc_obj, Alloc};
-use dynobj::{read_value_field, ObjHeader, RootSource, TypeInfo};
+use crate::alloc::{Alloc, alloc_obj};
+use dynobj::{ObjHeader, RootSource, TypeInfo, read_value_field};
 
 // ─── Root ───────────────────────────────────────────────────────────
 
@@ -94,9 +94,7 @@ pub struct Mutator {
 impl Mutator {
     /// Create a new mutator with empty root storage.
     pub fn new() -> Self {
-        Mutator {
-            roots: Vec::new(),
-        }
+        Mutator { roots: Vec::new() }
     }
 
     // ─── &mut self (structural changes / GC points) ─────────────

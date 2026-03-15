@@ -8,14 +8,14 @@ mod heap;
 pub mod statemap;
 mod thread;
 
-pub use alloc::{Alloc, HeapWalker, alloc_obj, BumpAllocator, AtomicBumpAllocator};
+pub use alloc::{Alloc, AtomicBumpAllocator, BumpAllocator, HeapWalker, alloc_obj};
 pub use barrier::{SATBBuffer, SATBQueue, read_barrier, read_barrier_atomic};
 pub use card_table::CardTable;
-pub use mutator::{Root, GcRef, RootScope, Mutator};
-pub use semi_space::{PtrPolicy, SemiSpace};
 pub use heap::Heap;
+pub use mutator::{GcRef, Mutator, Root, RootScope};
+pub use semi_space::{PtrPolicy, SemiSpace};
 pub use statemap::StatemapTracer;
-pub use thread::{ThreadState, MutatorThread};
+pub use thread::{MutatorThread, ThreadState};
 
 #[cfg(test)]
 mod tests;

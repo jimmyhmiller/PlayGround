@@ -5,8 +5,10 @@ use crate::types::{Signature, Type};
 use dynvalue::{Decoded, LowBit, NanBox, TagScheme};
 
 fn run_simple(func: &Function, args: &[u64]) -> u64 {
-    let interp = Interpreter::<LowBit<3>>::new(func);
-    match interp.run(args).unwrap() {
+    let (module, entry) = Module::from_function(func.clone());
+    let roots = NoGcRoots;
+    let interp = ModuleInterpreter::<LowBit<3>, _>::new(&module, &roots);
+    match interp.run(entry, args).unwrap() {
         InterpResult::Value(v) => v,
         other => panic!("expected Value, got {:?}", other),
     }
@@ -173,14 +175,8 @@ fn fcmp() {
     let r = b.fcmp(CmpOp::Slt, a, bb);
     b.ret(r);
     let func = b.build();
-    assert_eq!(
-        run_simple(&func, &[1.0f64.to_bits(), 2.0f64.to_bits()]),
-        1
-    );
-    assert_eq!(
-        run_simple(&func, &[2.0f64.to_bits(), 1.0f64.to_bits()]),
-        0
-    );
+    assert_eq!(run_simple(&func, &[1.0f64.to_bits(), 2.0f64.to_bits()]), 1);
+    assert_eq!(run_simple(&func, &[2.0f64.to_bits(), 1.0f64.to_bits()]), 0);
 }
 
 // ---- Conversions ----
@@ -403,8 +399,10 @@ fn tagged_roundtrip_lowbit() {
     let func = b.build();
 
     let input = 0x0ABC_DEF0_1234u64; // must fit in 60 bits
-    let interp = Interpreter::<LowBit<4>>::new(&func);
-    let result = match interp.run(&[input]).unwrap() {
+    let (module, entry) = Module::from_function(func.clone());
+    let roots = NoGcRoots;
+    let interp = ModuleInterpreter::<LowBit<4>, _>::new(&module, &roots);
+    let result = match interp.run(entry, &[input]).unwrap() {
         InterpResult::Value(v) => v,
         other => panic!("expected Value, got {:?}", other),
     };
@@ -431,8 +429,10 @@ fn tagged_roundtrip_nanbox() {
     let func = b.build();
 
     let input = 0x1234_5678_9ABCu64;
-    let interp = Interpreter::<NanBox>::new(&func);
-    let result = match interp.run(&[input]).unwrap() {
+    let (module, entry) = Module::from_function(func.clone());
+    let roots = NoGcRoots;
+    let interp = ModuleInterpreter::<NanBox, _>::new(&module, &roots);
+    let result = match interp.run(entry, &[input]).unwrap() {
         InterpResult::Value(v) => v,
         other => panic!("expected Value, got {:?}", other),
     };
@@ -449,11 +449,13 @@ fn is_tag_check_lowbit() {
     b.ret(result);
     let func = b.build();
 
-    let interp = Interpreter::<LowBit<4>>::new(&func);
+    let (module, entry) = Module::from_function(func.clone());
+    let roots = NoGcRoots;
+    let interp = ModuleInterpreter::<LowBit<4>, _>::new(&module, &roots);
     // LowBit<4>: encode = (payload << 4) | tag
     let tagged_3 = (42u64 << 4) | 3;
     let tagged_5 = (42u64 << 4) | 5;
-    let run = |args: &[u64]| match interp.run(args).unwrap() {
+    let run = |args: &[u64]| match interp.run(entry, args).unwrap() {
         InterpResult::Value(v) => v,
         other => panic!("expected Value, got {:?}", other),
     };
@@ -470,8 +472,10 @@ fn is_tag_check_nanbox() {
     b.ret(result);
     let func = b.build();
 
-    let interp = Interpreter::<NanBox>::new(&func);
-    let run = |args: &[u64]| match interp.run(args).unwrap() {
+    let (module, entry) = Module::from_function(func.clone());
+    let roots = NoGcRoots;
+    let interp = ModuleInterpreter::<NanBox, _>::new(&module, &roots);
+    let run = |args: &[u64]| match interp.run(entry, args).unwrap() {
         InterpResult::Value(v) => v,
         other => panic!("expected Value, got {:?}", other),
     };
@@ -511,8 +515,10 @@ fn guard_fails_deopt() {
     b.ret(arg);
     let func = b.build();
 
-    let interp = Interpreter::<LowBit<3>>::new(&func);
-    match interp.run(&[99]).unwrap() {
+    let (module, entry) = Module::from_function(func.clone());
+    let roots = NoGcRoots;
+    let interp = ModuleInterpreter::<LowBit<3>, _>::new(&module, &roots);
+    match interp.run(entry, &[99]).unwrap() {
         InterpResult::Deopt {
             deopt_id,
             resume_point,
@@ -544,9 +550,11 @@ fn call_extern() {
     b.ret(result);
     let func = b.build();
 
-    let mut interp = Interpreter::<LowBit<3>>::new(&func);
+    let (module, entry) = Module::from_function(func.clone());
+    let roots = NoGcRoots;
+    let mut interp = ModuleInterpreter::<LowBit<3>, _>::new(&module, &roots);
     interp.bind(fref, |args| ExternCallResult::Value(Some(args[0] * 2)));
-    match interp.run(&[21]).unwrap() {
+    match interp.run(entry, &[21]).unwrap() {
         InterpResult::Value(v) => assert_eq!(v, 42),
         other => panic!("expected Value, got {:?}", other),
     }
@@ -568,10 +576,12 @@ fn call_void_extern() {
     b.ret(arg);
     let func = b.build();
 
-    let mut interp = Interpreter::<LowBit<3>>::new(&func);
+    let (module, entry) = Module::from_function(func.clone());
+    let roots = NoGcRoots;
+    let mut interp = ModuleInterpreter::<LowBit<3>, _>::new(&module, &roots);
     interp.bind(fref, |_args| ExternCallResult::Value(None));
     assert_eq!(
-        match interp.run(&[7]).unwrap() {
+        match interp.run(entry, &[7]).unwrap() {
             InterpResult::Value(v) => v,
             other => panic!("expected Value, got {:?}", other),
         },
@@ -589,9 +599,11 @@ fn call_indirect() {
     b.ret(result);
     let func = b.build();
 
-    let mut interp = Interpreter::<LowBit<3>>::new(&func);
+    let (module, entry) = Module::from_function(func.clone());
+    let roots = NoGcRoots;
+    let mut interp = ModuleInterpreter::<LowBit<3>, _>::new(&module, &roots);
     interp.bind_indirect(|_callee, args| ExternCallResult::Value(Some(args[0] + 5)));
-    match interp.run(&[0xCAFE]).unwrap() {
+    match interp.run(entry, &[0xCAFE]).unwrap() {
         InterpResult::Value(v) => assert_eq!(v, 15),
         other => panic!("expected Value, got {:?}", other),
     }
@@ -625,9 +637,11 @@ fn invoke_normal_path() {
 
     let func = b.build();
 
-    let mut interp = Interpreter::<LowBit<3>>::new(&func);
+    let (module, entry) = Module::from_function(func.clone());
+    let roots = NoGcRoots;
+    let mut interp = ModuleInterpreter::<LowBit<3>, _>::new(&module, &roots);
     interp.bind(fref, |args| ExternCallResult::Value(Some(args[0] * 3)));
-    match interp.run(&[14]).unwrap() {
+    match interp.run(entry, &[14]).unwrap() {
         InterpResult::Value(v) => assert_eq!(v, 42),
         other => panic!("expected Value, got {:?}", other),
     }
@@ -664,9 +678,11 @@ fn invoke_exception_path() {
 
     let func = b.build();
 
-    let mut interp = Interpreter::<LowBit<3>>::new(&func);
+    let (module, entry) = Module::from_function(func.clone());
+    let roots = NoGcRoots;
+    let mut interp = ModuleInterpreter::<LowBit<3>, _>::new(&module, &roots);
     interp.bind(fref, |_args| ExternCallResult::Exception(0));
-    match interp.run(&[1]).unwrap() {
+    match interp.run(entry, &[1]).unwrap() {
         // 1 (arg passed via exception_args) + 999 = 1000
         InterpResult::Value(v) => assert_eq!(v, 1000),
         other => panic!("expected Value, got {:?}", other),
@@ -734,8 +750,10 @@ fn error_unreachable() {
     let mut b = FunctionBuilder::new("unreach", &[], Some(Type::I64));
     b.unreachable();
     let func = b.build();
-    let interp = Interpreter::<LowBit<3>>::new(&func);
-    match interp.run(&[]) {
+    let (module, entry) = Module::from_function(func.clone());
+    let roots = NoGcRoots;
+    let interp = ModuleInterpreter::<LowBit<3>, _>::new(&module, &roots);
+    match interp.run(entry, &[]) {
         Err(InterpError::Unreachable) => {}
         other => panic!("expected Unreachable, got {:?}", other),
     }
@@ -754,8 +772,10 @@ fn error_unbound_extern() {
     let r = b.call(fref, &[]).unwrap();
     b.ret(r);
     let func = b.build();
-    let interp = Interpreter::<LowBit<3>>::new(&func);
-    match interp.run(&[]) {
+    let (module, entry) = Module::from_function(func.clone());
+    let roots = NoGcRoots;
+    let interp = ModuleInterpreter::<LowBit<3>, _>::new(&module, &roots);
+    match interp.run(entry, &[]) {
         Err(InterpError::UnknownExternFunc(name)) => assert_eq!(name, "missing"),
         other => panic!("expected UnknownExternFunc, got {:?}", other),
     }
@@ -769,8 +789,10 @@ fn error_divide_by_zero() {
     let r = b.sdiv(a, zero);
     b.ret(r);
     let func = b.build();
-    let interp = Interpreter::<LowBit<3>>::new(&func);
-    match interp.run(&[]) {
+    let (module, entry) = Module::from_function(func.clone());
+    let roots = NoGcRoots;
+    let interp = ModuleInterpreter::<LowBit<3>, _>::new(&module, &roots);
+    match interp.run(entry, &[]) {
         Err(InterpError::DivideByZero) => {}
         other => panic!("expected DivideByZero, got {:?}", other),
     }
@@ -789,9 +811,11 @@ fn error_uncaught_exception() {
     let r = b.call(fref, &[]).unwrap();
     b.ret(r);
     let func = b.build();
-    let mut interp = Interpreter::<LowBit<3>>::new(&func);
+    let (module, entry) = Module::from_function(func.clone());
+    let roots = NoGcRoots;
+    let mut interp = ModuleInterpreter::<LowBit<3>, _>::new(&module, &roots);
     interp.bind(fref, |_| ExternCallResult::Exception(42));
-    match interp.run(&[]) {
+    match interp.run(entry, &[]) {
         Err(InterpError::UncaughtException(v)) => assert_eq!(v, 42),
         other => panic!("expected UncaughtException, got {:?}", other),
     }
@@ -873,8 +897,10 @@ fn pic_add_tagged() {
     // Both int-tagged: (tag=1, payload=10) + (tag=1, payload=32) = (tag=1, payload=42)
     let a_tagged = NanBox::encode_tagged(1, 10);
     let b_tagged = NanBox::encode_tagged(1, 32);
-    let interp = Interpreter::<NanBox>::new(&func);
-    let result = match interp.run(&[a_tagged, b_tagged]).unwrap() {
+    let (module, entry) = Module::from_function(func.clone());
+    let roots = NoGcRoots;
+    let interp = ModuleInterpreter::<NanBox, _>::new(&module, &roots);
+    let result = match interp.run(entry, &[a_tagged, b_tagged]).unwrap() {
         InterpResult::Value(v) => v,
         other => panic!("expected Value, got {:?}", other),
     };
@@ -889,7 +915,7 @@ fn pic_add_tagged() {
 
     // Mixed tags: slow path
     let a_str = NanBox::encode_tagged(2, 10);
-    let result = match interp.run(&[a_str, b_tagged]).unwrap() {
+    let result = match interp.run(entry, &[a_str, b_tagged]).unwrap() {
         InterpResult::Value(v) => v,
         other => panic!("expected Value, got {:?}", other),
     };
@@ -949,9 +975,11 @@ fn bind_by_name() {
     b.ret(r);
     let func = b.build();
 
-    let mut interp = Interpreter::<LowBit<3>>::new(&func);
+    let (module, entry) = Module::from_function(func.clone());
+    let roots = NoGcRoots;
+    let mut interp = ModuleInterpreter::<LowBit<3>, _>::new(&module, &roots);
     interp.bind_by_name("get_value", |_| ExternCallResult::Value(Some(123)));
-    match interp.run(&[]).unwrap() {
+    match interp.run(entry, &[]).unwrap() {
         InterpResult::Value(v) => assert_eq!(v, 123),
         other => panic!("expected Value, got {:?}", other),
     }
@@ -962,8 +990,10 @@ fn void_return() {
     let mut b = FunctionBuilder::new("void_fn", &[], None);
     b.ret_void();
     let func = b.build();
-    let interp = Interpreter::<LowBit<3>>::new(&func);
-    match interp.run(&[]).unwrap() {
+    let (module, entry) = Module::from_function(func.clone());
+    let roots = NoGcRoots;
+    let interp = ModuleInterpreter::<LowBit<3>, _>::new(&module, &roots);
+    match interp.run(entry, &[]).unwrap() {
         InterpResult::Void => {}
         other => panic!("expected Void, got {:?}", other),
     }
@@ -1002,9 +1032,11 @@ fn invoke_indirect_normal() {
 
     let func = b.build();
 
-    let mut interp = Interpreter::<LowBit<3>>::new(&func);
+    let (module, entry) = Module::from_function(func.clone());
+    let roots = NoGcRoots;
+    let mut interp = ModuleInterpreter::<LowBit<3>, _>::new(&module, &roots);
     interp.bind_indirect(|_callee, args| ExternCallResult::Value(Some(args[0] * 10)));
-    match interp.run(&[0xBEEF]).unwrap() {
+    match interp.run(entry, &[0xBEEF]).unwrap() {
         InterpResult::Value(v) => assert_eq!(v, 50),
         other => panic!("expected Value, got {:?}", other),
     }
@@ -1022,8 +1054,10 @@ fn guard_with_multiple_live_values() {
     b.ret(a);
     let func = b.build();
 
-    let interp = Interpreter::<LowBit<3>>::new(&func);
-    match interp.run(&[10, 20]).unwrap() {
+    let (module, entry) = Module::from_function(func.clone());
+    let roots = NoGcRoots;
+    let interp = ModuleInterpreter::<LowBit<3>, _>::new(&module, &roots);
+    match interp.run(entry, &[10, 20]).unwrap() {
         InterpResult::Deopt { live_values, .. } => {
             assert_eq!(live_values, vec![10, 20]);
         }
@@ -1060,9 +1094,372 @@ fn float_sub_mul_div() {
     b.ret(quot);
     let func = b.build();
 
-    let result = f64::from_bits(run_simple(
-        &func,
-        &[10.0f64.to_bits(), 3.0f64.to_bits()],
-    ));
+    let result = f64::from_bits(run_simple(&func, &[10.0f64.to_bits(), 3.0f64.to_bits()]));
     assert!((result - 2.1).abs() < 1e-10);
+}
+
+// ─── ModuleInterpreter tests ──────────────────────────────────────
+
+use crate::builder::ModuleBuilder;
+use crate::interp::ModuleInterpreter;
+
+fn run_module_simple(entry: FuncRef, module: &crate::ir::Module, args: &[u64]) -> u64 {
+    let roots = NoGcRoots;
+    let interp = ModuleInterpreter::<LowBit<3>, _>::new(module, &roots);
+    match interp.run(entry, args).unwrap() {
+        InterpResult::Value(v) => v,
+        other => panic!("expected Value, got {:?}", other),
+    }
+}
+
+#[test]
+fn module_a_calls_b() {
+    // B: double(x) = x * 2
+    // A: main(x) = double(x)
+    let mut mb = ModuleBuilder::new();
+    let f_double = mb.declare_func("double", &[Type::I64], Some(Type::I64));
+    let f_main = mb.declare_func("main", &[Type::I64], Some(Type::I64));
+
+    // Define double
+    let mut fb = mb.define_func(f_double);
+    let entry = fb.entry_block();
+    let x = fb.block_param(entry, 0);
+    let two = fb.iconst(Type::I64, 2);
+    let r = fb.mul(x, two);
+    fb.ret(r);
+    mb.finish_func(f_double, fb);
+
+    // Define main
+    let mut fb = mb.define_func(f_main);
+    let entry = fb.entry_block();
+    let x = fb.block_param(entry, 0);
+    let result = fb.call(f_double, &[x]).unwrap();
+    fb.ret(result);
+    mb.finish_func(f_main, fb);
+
+    let module = mb.build();
+    assert_eq!(run_module_simple(f_main, &module, &[21]), 42);
+}
+
+#[test]
+fn module_chain_a_calls_b_calls_c() {
+    // C: triple(x) = x * 3
+    // B: add_one_and_triple(x) = triple(x + 1)
+    // A: main(x) = add_one_and_triple(x)
+    let mut mb = ModuleBuilder::new();
+    let f_triple = mb.declare_func("triple", &[Type::I64], Some(Type::I64));
+    let f_mid = mb.declare_func("add_one_and_triple", &[Type::I64], Some(Type::I64));
+    let f_main = mb.declare_func("main", &[Type::I64], Some(Type::I64));
+
+    let mut fb = mb.define_func(f_triple);
+    let entry = fb.entry_block();
+    let x = fb.block_param(entry, 0);
+    let three = fb.iconst(Type::I64, 3);
+    let r = fb.mul(x, three);
+    fb.ret(r);
+    mb.finish_func(f_triple, fb);
+
+    let mut fb = mb.define_func(f_mid);
+    let entry = fb.entry_block();
+    let x = fb.block_param(entry, 0);
+    let one = fb.iconst(Type::I64, 1);
+    let x1 = fb.add(x, one);
+    let r = fb.call(f_triple, &[x1]).unwrap();
+    fb.ret(r);
+    mb.finish_func(f_mid, fb);
+
+    let mut fb = mb.define_func(f_main);
+    let entry = fb.entry_block();
+    let x = fb.block_param(entry, 0);
+    let r = fb.call(f_mid, &[x]).unwrap();
+    fb.ret(r);
+    mb.finish_func(f_main, fb);
+
+    let module = mb.build();
+    // main(9) = add_one_and_triple(9) = triple(10) = 30
+    assert_eq!(run_module_simple(f_main, &module, &[9]), 30);
+}
+
+#[test]
+fn module_recursive_factorial() {
+    // fact(n) = if n <= 1 then 1 else n * fact(n-1)
+    let mut mb = ModuleBuilder::new();
+    let f_fact = mb.declare_func("fact", &[Type::I64], Some(Type::I64));
+
+    let mut fb = mb.define_func(f_fact);
+    let entry = fb.entry_block();
+    let n = fb.block_param(entry, 0);
+
+    let base_bb = fb.create_block(&[]);
+    let rec_bb = fb.create_block(&[]);
+
+    let one = fb.iconst(Type::I64, 1);
+    let cond = fb.icmp(CmpOp::Sle, n, one);
+    fb.br_if(cond, base_bb, &[], rec_bb, &[]);
+
+    fb.switch_to_block(base_bb);
+    let one2 = fb.iconst(Type::I64, 1);
+    fb.ret(one2);
+
+    fb.switch_to_block(rec_bb);
+    let one3 = fb.iconst(Type::I64, 1);
+    let nm1 = fb.sub(n, one3);
+    let sub_result = fb.call(f_fact, &[nm1]).unwrap();
+    let result = fb.mul(n, sub_result);
+    fb.ret(result);
+
+    mb.finish_func(f_fact, fb);
+
+    let module = mb.build();
+    assert_eq!(run_module_simple(f_fact, &module, &[0]), 1);
+    assert_eq!(run_module_simple(f_fact, &module, &[1]), 1);
+    assert_eq!(run_module_simple(f_fact, &module, &[5]), 120);
+    assert_eq!(run_module_simple(f_fact, &module, &[10]), 3628800);
+}
+
+#[test]
+fn module_mutual_recursion() {
+    // is_even(n) = if n == 0 then 1 else is_odd(n - 1)
+    // is_odd(n) = if n == 0 then 0 else is_even(n - 1)
+    let mut mb = ModuleBuilder::new();
+    let f_even = mb.declare_func("is_even", &[Type::I64], Some(Type::I64));
+    let f_odd = mb.declare_func("is_odd", &[Type::I64], Some(Type::I64));
+
+    // is_even
+    let mut fb = mb.define_func(f_even);
+    let entry = fb.entry_block();
+    let n = fb.block_param(entry, 0);
+    let base_bb = fb.create_block(&[]);
+    let rec_bb = fb.create_block(&[]);
+    let zero = fb.iconst(Type::I64, 0);
+    let cond = fb.icmp(CmpOp::Eq, n, zero);
+    fb.br_if(cond, base_bb, &[], rec_bb, &[]);
+    fb.switch_to_block(base_bb);
+    let one = fb.iconst(Type::I64, 1);
+    fb.ret(one);
+    fb.switch_to_block(rec_bb);
+    let one2 = fb.iconst(Type::I64, 1);
+    let nm1 = fb.sub(n, one2);
+    let r = fb.call(f_odd, &[nm1]).unwrap();
+    fb.ret(r);
+    mb.finish_func(f_even, fb);
+
+    // is_odd
+    let mut fb = mb.define_func(f_odd);
+    let entry = fb.entry_block();
+    let n = fb.block_param(entry, 0);
+    let base_bb = fb.create_block(&[]);
+    let rec_bb = fb.create_block(&[]);
+    let zero = fb.iconst(Type::I64, 0);
+    let cond = fb.icmp(CmpOp::Eq, n, zero);
+    fb.br_if(cond, base_bb, &[], rec_bb, &[]);
+    fb.switch_to_block(base_bb);
+    let zero2 = fb.iconst(Type::I64, 0);
+    fb.ret(zero2);
+    fb.switch_to_block(rec_bb);
+    let one = fb.iconst(Type::I64, 1);
+    let nm1 = fb.sub(n, one);
+    let r = fb.call(f_even, &[nm1]).unwrap();
+    fb.ret(r);
+    mb.finish_func(f_odd, fb);
+
+    let module = mb.build();
+    assert_eq!(run_module_simple(f_even, &module, &[0]), 1);
+    assert_eq!(run_module_simple(f_even, &module, &[1]), 0);
+    assert_eq!(run_module_simple(f_even, &module, &[4]), 1);
+    assert_eq!(run_module_simple(f_even, &module, &[7]), 0);
+    assert_eq!(run_module_simple(f_odd, &module, &[3]), 1);
+    assert_eq!(run_module_simple(f_odd, &module, &[6]), 0);
+}
+
+#[test]
+fn module_with_extern() {
+    // extern print(x) -> void
+    // double(x) = x * 2
+    // main(x) = { print(x); double(x) }
+    let mut mb = ModuleBuilder::new();
+    let f_print = mb.declare_extern(
+        "print",
+        Signature {
+            params: vec![Type::I64],
+            ret: None,
+        },
+    );
+    let f_double = mb.declare_func("double", &[Type::I64], Some(Type::I64));
+    let f_main = mb.declare_func("main", &[Type::I64], Some(Type::I64));
+
+    let mut fb = mb.define_func(f_double);
+    let entry = fb.entry_block();
+    let x = fb.block_param(entry, 0);
+    let two = fb.iconst(Type::I64, 2);
+    let r = fb.mul(x, two);
+    fb.ret(r);
+    mb.finish_func(f_double, fb);
+
+    let mut fb = mb.define_func(f_main);
+    let entry = fb.entry_block();
+    let x = fb.block_param(entry, 0);
+    fb.call(f_print, &[x]);
+    let r = fb.call(f_double, &[x]).unwrap();
+    fb.ret(r);
+    mb.finish_func(f_main, fb);
+
+    let module = mb.build();
+
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
+    let printed = Arc::new(AtomicU64::new(0));
+    let roots = NoGcRoots;
+    let mut interp = ModuleInterpreter::<LowBit<3>, _>::new(&module, &roots);
+    let printed_clone = printed.clone();
+    interp.bind(f_print, move |args| {
+        printed_clone.store(args[0], Ordering::SeqCst);
+        ExternCallResult::Value(None)
+    });
+    match interp.run(f_main, &[21]).unwrap() {
+        InterpResult::Value(v) => assert_eq!(v, 42),
+        other => panic!("expected Value, got {:?}", other),
+    }
+    assert_eq!(printed.load(Ordering::SeqCst), 21);
+}
+
+#[test]
+fn module_void_internal_call() {
+    // noop() = void
+    // main() = { noop(); return 42 }
+    let mut mb = ModuleBuilder::new();
+    let f_noop = mb.declare_func("noop", &[], None);
+    let f_main = mb.declare_func("main", &[], Some(Type::I64));
+
+    let mut fb = mb.define_func(f_noop);
+    fb.ret_void();
+    mb.finish_func(f_noop, fb);
+
+    let mut fb = mb.define_func(f_main);
+    fb.call(f_noop, &[]);
+    let v = fb.iconst(Type::I64, 42);
+    fb.ret(v);
+    mb.finish_func(f_main, fb);
+
+    let module = mb.build();
+    assert_eq!(run_module_simple(f_main, &module, &[]), 42);
+}
+
+#[test]
+fn module_invoke_internal_normal() {
+    // callee(x) = x * 3
+    // main(x) = invoke callee(x) normal->ret, exception->ret(-1)
+    let mut mb = ModuleBuilder::new();
+    let f_callee = mb.declare_func("callee", &[Type::I64], Some(Type::I64));
+    let f_main = mb.declare_func("main", &[Type::I64], Some(Type::I64));
+
+    let mut fb = mb.define_func(f_callee);
+    let entry = fb.entry_block();
+    let x = fb.block_param(entry, 0);
+    let three = fb.iconst(Type::I64, 3);
+    let r = fb.mul(x, three);
+    fb.ret(r);
+    mb.finish_func(f_callee, fb);
+
+    let mut fb = mb.define_func(f_main);
+    let entry = fb.entry_block();
+    let x = fb.block_param(entry, 0);
+    let normal = fb.create_block(&[Type::I64]);
+    let exception = fb.create_block(&[]);
+    fb.invoke(f_callee, &[x], normal, &[], exception, &[]);
+    fb.switch_to_block(normal);
+    let rv = fb.block_param(normal, 0);
+    fb.ret(rv);
+    fb.switch_to_block(exception);
+    let neg = fb.iconst(Type::I64, -1i64);
+    fb.ret(neg);
+    mb.finish_func(f_main, fb);
+
+    let module = mb.build();
+    assert_eq!(run_module_simple(f_main, &module, &[14]), 42);
+}
+
+#[test]
+fn module_invoke_internal_exception() {
+    // callee(x) calls extern that throws, exception propagates
+    // main(x) = invoke callee(x) normal->ret, exception->ret(999)
+    let mut mb = ModuleBuilder::new();
+    let f_throw = mb.declare_extern(
+        "throw_fn",
+        Signature {
+            params: vec![Type::I64],
+            ret: Some(Type::I64),
+        },
+    );
+    let f_callee = mb.declare_func("callee", &[Type::I64], Some(Type::I64));
+    let f_main = mb.declare_func("main", &[Type::I64], Some(Type::I64));
+
+    // callee calls the throwing extern via Call (not Invoke), so exception is uncaught in callee
+    let mut fb = mb.define_func(f_callee);
+    let entry = fb.entry_block();
+    let x = fb.block_param(entry, 0);
+    let r = fb.call(f_throw, &[x]).unwrap();
+    fb.ret(r);
+    mb.finish_func(f_callee, fb);
+
+    // main invokes callee with an exception handler
+    let mut fb = mb.define_func(f_main);
+    let entry = fb.entry_block();
+    let x = fb.block_param(entry, 0);
+    let normal = fb.create_block(&[Type::I64]);
+    let exception = fb.create_block(&[]);
+    fb.invoke(f_callee, &[x], normal, &[], exception, &[]);
+    fb.switch_to_block(normal);
+    let rv = fb.block_param(normal, 0);
+    fb.ret(rv);
+    fb.switch_to_block(exception);
+    let sentinel = fb.iconst(Type::I64, 999);
+    fb.ret(sentinel);
+    mb.finish_func(f_main, fb);
+
+    let module = mb.build();
+    let roots = NoGcRoots;
+    let mut interp = ModuleInterpreter::<LowBit<3>, _>::new(&module, &roots);
+    interp.bind(f_throw, |_args| ExternCallResult::Exception(42));
+    match interp.run(f_main, &[10]).unwrap() {
+        InterpResult::Value(v) => assert_eq!(v, 999),
+        other => panic!("expected Value, got {:?}", other),
+    }
+}
+
+#[test]
+fn module_recursive_fibonacci() {
+    // fib(n) = if n <= 1 then n else fib(n-1) + fib(n-2)
+    let mut mb = ModuleBuilder::new();
+    let f_fib = mb.declare_func("fib", &[Type::I64], Some(Type::I64));
+
+    let mut fb = mb.define_func(f_fib);
+    let entry = fb.entry_block();
+    let n = fb.block_param(entry, 0);
+    let base_bb = fb.create_block(&[]);
+    let rec_bb = fb.create_block(&[]);
+    let one = fb.iconst(Type::I64, 1);
+    let cond = fb.icmp(CmpOp::Sle, n, one);
+    fb.br_if(cond, base_bb, &[], rec_bb, &[]);
+
+    fb.switch_to_block(base_bb);
+    fb.ret(n);
+
+    fb.switch_to_block(rec_bb);
+    let one2 = fb.iconst(Type::I64, 1);
+    let two = fb.iconst(Type::I64, 2);
+    let nm1 = fb.sub(n, one2);
+    let nm2 = fb.sub(n, two);
+    let a = fb.call(f_fib, &[nm1]).unwrap();
+    let b = fb.call(f_fib, &[nm2]).unwrap();
+    let r = fb.add(a, b);
+    fb.ret(r);
+
+    mb.finish_func(f_fib, fb);
+
+    let module = mb.build();
+    assert_eq!(run_module_simple(f_fib, &module, &[0]), 0);
+    assert_eq!(run_module_simple(f_fib, &module, &[1]), 1);
+    assert_eq!(run_module_simple(f_fib, &module, &[10]), 55);
+    assert_eq!(run_module_simple(f_fib, &module, &[15]), 610);
 }

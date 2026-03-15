@@ -66,7 +66,11 @@ impl TagScheme for NanBox {
 
     #[inline(always)]
     fn encode_tagged(tag: u32, payload: u64) -> u64 {
-        debug_assert!(tag < Self::TAG_COUNT, "tag {tag} >= TAG_COUNT {}", Self::TAG_COUNT);
+        debug_assert!(
+            tag < Self::TAG_COUNT,
+            "tag {tag} >= TAG_COUNT {}",
+            Self::TAG_COUNT
+        );
         debug_assert!(
             payload <= PAYLOAD_MASK,
             "payload {payload:#x} exceeds 48 bits"

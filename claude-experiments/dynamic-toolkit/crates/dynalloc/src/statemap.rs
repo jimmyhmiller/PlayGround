@@ -56,14 +56,14 @@ impl TraceState {
 
     fn color(self) -> &'static str {
         match self {
-            TraceState::Running => "#57ab5a",             // green
-            TraceState::AtSafepoint => "#e5534b",         // red
-            TraceState::WaitingForGc => "#c69026",        // yellow/orange
-            TraceState::GcIdle => "#444c56",              // dark grey
-            TraceState::GcStw => "#e5534b",               // red
-            TraceState::GcConcurrent => "#6cb6ff",        // blue
+            TraceState::Running => "#57ab5a",                // green
+            TraceState::AtSafepoint => "#e5534b",            // red
+            TraceState::WaitingForGc => "#c69026",           // yellow/orange
+            TraceState::GcIdle => "#444c56",                 // dark grey
+            TraceState::GcStw => "#e5534b",                  // red
+            TraceState::GcConcurrent => "#6cb6ff",           // blue
             TraceState::GcWaitingForSafepoints => "#c69026", // orange
-            TraceState::GcResuming => "#986ee2",          // purple
+            TraceState::GcResuming => "#986ee2",             // purple
         }
     }
 

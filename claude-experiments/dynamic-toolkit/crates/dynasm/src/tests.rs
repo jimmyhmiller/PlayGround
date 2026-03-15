@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod arm64_tests {
-    use crate::arm64::*;
     use crate::arm64::inst::*;
+    use crate::arm64::*;
     use crate::buffer::CodeBuffer;
     #[test]
     fn test_ret() {
@@ -209,14 +209,17 @@ mod arm64_tests {
 
 #[cfg(test)]
 mod x86_64_tests {
-    use crate::x86_64::*;
-    use crate::x86_64::inst::X64Inst;
     use crate::buffer::CodeBuffer;
+    use crate::x86_64::inst::X64Inst;
+    use crate::x86_64::*;
 
     #[test]
     fn test_mov_rr() {
         // MOV RAX, RBX
-        let instr = X64Inst::MovRR { dest: RAX, src: RBX };
+        let instr = X64Inst::MovRR {
+            dest: RAX,
+            src: RBX,
+        };
         assert_eq!(instr.encode().as_slice(), &[0x48, 0x89, 0xD8]);
 
         // MOV R8, R9
@@ -226,7 +229,10 @@ mod x86_64_tests {
 
     #[test]
     fn test_add_rr() {
-        let instr = X64Inst::AddRR { dest: RAX, src: RBX };
+        let instr = X64Inst::AddRR {
+            dest: RAX,
+            src: RBX,
+        };
         assert_eq!(instr.encode().as_slice(), &[0x48, 0x01, 0xD8]);
     }
 
@@ -244,7 +250,11 @@ mod x86_64_tests {
 
     #[test]
     fn test_lea_rsp_offset() {
-        let instr = X64Inst::Lea { dest: RDX, base: RSP, offset: -8 };
+        let instr = X64Inst::Lea {
+            dest: RDX,
+            base: RSP,
+            offset: -8,
+        };
         assert_eq!(instr.encode().as_slice(), &[0x48, 0x8D, 0x54, 0x24, 0xF8]);
     }
 
@@ -304,7 +314,10 @@ mod x86_64_tests {
         let label = buf.create_label();
 
         // JE with placeholder
-        let jcc_offset = buf.emit(X64Inst::Jcc { offset: 0, cond: Condition::E });
+        let jcc_offset = buf.emit(X64Inst::Jcc {
+            offset: 0,
+            cond: Condition::E,
+        });
         // rel32 starts after 0F 8x (2 bytes)
         buf.add_reloc(jcc_offset + 2, label, X64RelocKind::Rel32);
 
@@ -369,7 +382,10 @@ mod x86_64_tests {
     #[test]
     fn test_mov_ri() {
         // MOV RAX, 0x1234567890ABCDEF
-        let instr = X64Inst::MovRI { dest: RAX, imm: 0x1234567890ABCDEFi64 };
+        let instr = X64Inst::MovRI {
+            dest: RAX,
+            imm: 0x1234567890ABCDEFi64,
+        };
         let encoded = instr.encode();
         assert_eq!(encoded.len(), 10);
         assert_eq!(encoded[0], 0x48); // REX.W
@@ -385,8 +401,8 @@ mod executable_tests {
     #[cfg(target_arch = "aarch64")]
     #[test]
     fn test_arm64_execute_return_42() {
-        use crate::arm64::*;
         use crate::arm64::inst::Arm64Inst;
+        use crate::arm64::*;
 
         let mut buf: CodeBuffer<Arm64> = CodeBuffer::new();
         buf.emit(Arm64Inst::movz(X0, 42, 0));
@@ -403,8 +419,8 @@ mod executable_tests {
     #[cfg(target_arch = "aarch64")]
     #[test]
     fn test_arm64_execute_add() {
-        use crate::arm64::*;
         use crate::arm64::inst::Arm64Inst;
+        use crate::arm64::*;
 
         let mut buf: CodeBuffer<Arm64> = CodeBuffer::new();
         buf.emit(Arm64Inst::add(X0, X0, X1));
@@ -421,8 +437,8 @@ mod executable_tests {
     #[cfg(target_arch = "aarch64")]
     #[test]
     fn test_arm64_execute_forward_branch() {
-        use crate::arm64::*;
         use crate::arm64::inst::Arm64Inst;
+        use crate::arm64::*;
 
         let mut buf: CodeBuffer<Arm64> = CodeBuffer::new();
         let skip = buf.create_label();
@@ -447,8 +463,8 @@ mod executable_tests {
     #[cfg(target_arch = "x86_64")]
     #[test]
     fn test_x64_execute_return_42() {
-        use crate::x86_64::*;
         use crate::x86_64::inst::X64Inst;
+        use crate::x86_64::*;
 
         let mut buf: CodeBuffer<X64> = CodeBuffer::new();
         buf.emit(X64Inst::MovRI32 { dest: RAX, imm: 42 });
@@ -465,12 +481,18 @@ mod executable_tests {
     #[cfg(target_arch = "x86_64")]
     #[test]
     fn test_x64_execute_add() {
-        use crate::x86_64::*;
         use crate::x86_64::inst::X64Inst;
+        use crate::x86_64::*;
 
         let mut buf: CodeBuffer<X64> = CodeBuffer::new();
-        buf.emit(X64Inst::MovRR { dest: RAX, src: RDI });
-        buf.emit(X64Inst::AddRR { dest: RAX, src: RSI });
+        buf.emit(X64Inst::MovRR {
+            dest: RAX,
+            src: RDI,
+        });
+        buf.emit(X64Inst::AddRR {
+            dest: RAX,
+            src: RSI,
+        });
         buf.emit(X64Inst::Ret);
         buf.finalize();
 
@@ -484,17 +506,23 @@ mod executable_tests {
     #[cfg(target_arch = "x86_64")]
     #[test]
     fn test_x64_execute_forward_jump() {
-        use crate::x86_64::*;
         use crate::x86_64::inst::X64Inst;
+        use crate::x86_64::*;
 
         let mut buf: CodeBuffer<X64> = CodeBuffer::new();
         let skip = buf.create_label();
 
         buf.emit(X64Inst::TestRR { a: RDI, b: RDI });
-        let jcc_off = buf.emit(X64Inst::Jcc { offset: 0, cond: Condition::E });
+        let jcc_off = buf.emit(X64Inst::Jcc {
+            offset: 0,
+            cond: Condition::E,
+        });
         buf.add_reloc(jcc_off + 2, skip, X64RelocKind::Rel32);
 
-        buf.emit(X64Inst::MovRR { dest: RAX, src: RDI });
+        buf.emit(X64Inst::MovRR {
+            dest: RAX,
+            src: RDI,
+        });
         buf.emit(X64Inst::Ret);
 
         buf.bind_label(skip);

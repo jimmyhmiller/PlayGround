@@ -1,4 +1,4 @@
-use crate::types::{Type, Signature};
+use crate::types::{Signature, Type};
 
 /// SSA value reference. Globally unique within a function.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -126,13 +126,13 @@ pub enum Inst {
     // -- Tagged values --
     /// Extract the tag from a tagged value. The tagging scheme is determined
     /// by the interpreter/codegen's `TagScheme` type parameter.
-    TagOf(Value),                           // -> I32
+    TagOf(Value), // -> I32
     /// Extract the payload from a tagged value.
-    Payload(Value),                         // -> I64
+    Payload(Value), // -> I64
     /// Construct a tagged value from a tag constant and payload.
-    MakeTagged(u32, Value),                 // (tag, payload) -> I64
+    MakeTagged(u32, Value), // (tag, payload) -> I64
     /// Check whether a value has a specific tag.
-    IsTag(Value, u32),                      // -> I8
+    IsTag(Value, u32), // -> I8
 
     // -- Select --
     Select(Value, Value, Value), // (cond, if_true, if_false)
@@ -271,9 +271,7 @@ impl Inst {
                 f(*addr);
             }
 
-            Inst::TagOf(v) | Inst::Payload(v) | Inst::MakeTagged(_, v) | Inst::IsTag(v, _) => {
-                f(*v)
-            }
+            Inst::TagOf(v) | Inst::Payload(v) | Inst::MakeTagged(_, v) | Inst::IsTag(v, _) => f(*v),
 
             Inst::Select(c, t, e) => {
                 f(*c);
@@ -344,9 +342,7 @@ impl Inst {
                 f(addr);
             }
 
-            Inst::TagOf(v) | Inst::Payload(v) | Inst::MakeTagged(_, v) | Inst::IsTag(v, _) => {
-                f(v)
-            }
+            Inst::TagOf(v) | Inst::Payload(v) | Inst::MakeTagged(_, v) | Inst::IsTag(v, _) => f(v),
 
             Inst::Select(c, t, e) => {
                 f(c);
@@ -447,12 +443,23 @@ impl Terminator {
                 }
                 default_args.iter().for_each(|v| f(*v));
             }
-            Terminator::Invoke { args, normal_args, exception_args, .. } => {
+            Terminator::Invoke {
+                args,
+                normal_args,
+                exception_args,
+                ..
+            } => {
                 args.iter().for_each(|v| f(*v));
                 normal_args.iter().for_each(|v| f(*v));
                 exception_args.iter().for_each(|v| f(*v));
             }
-            Terminator::InvokeIndirect { callee, args, normal_args, exception_args, .. } => {
+            Terminator::InvokeIndirect {
+                callee,
+                args,
+                normal_args,
+                exception_args,
+                ..
+            } => {
                 f(*callee);
                 args.iter().for_each(|v| f(*v));
                 normal_args.iter().for_each(|v| f(*v));
@@ -479,8 +486,12 @@ impl Terminator {
                 succs.push(*default_block);
                 succs
             }
-            Terminator::Invoke { normal, exception, .. }
-            | Terminator::InvokeIndirect { normal, exception, .. } => {
+            Terminator::Invoke {
+                normal, exception, ..
+            }
+            | Terminator::InvokeIndirect {
+                normal, exception, ..
+            } => {
                 vec![*normal, *exception]
             }
         }
@@ -543,5 +554,62 @@ impl Function {
             }
         }
         preds
+    }
+}
+
+// ─── Module ────────────────────────────────────────────────────────
+
+/// A function definition in a module: either an internal IR function or an extern.
+#[derive(Debug, Clone)]
+pub enum FuncDef {
+    /// Index into `Module::functions`.
+    Internal(usize),
+    /// Host-provided extern function.
+    Extern(ExternFunc),
+}
+
+/// A collection of functions with a unified function table.
+///
+/// `FuncRef` values index into `func_table`, which maps to either internal
+/// IR functions or extern declarations.
+#[derive(Debug, Clone)]
+pub struct Module {
+    pub functions: Vec<Function>,
+    pub func_table: Vec<FuncDef>,
+}
+
+impl Module {
+    /// Wrap a single [`Function`] into a [`Module`].
+    ///
+    /// The function's extern declarations are preserved. The function itself
+    /// becomes the only internal function, referenced by the returned [`FuncRef`].
+    pub fn from_function(func: Function) -> (Self, FuncRef) {
+        let mut func_table: Vec<FuncDef> = Vec::new();
+        // Externs first (matching FunctionBuilder's FuncRef indices)
+        for ef in &func.extern_funcs {
+            func_table.push(FuncDef::Extern(ef.clone()));
+        }
+        // Then the internal function
+        let entry_ref = FuncRef(func_table.len() as u32);
+        func_table.push(FuncDef::Internal(0));
+        let module = Module {
+            functions: vec![func],
+            func_table,
+        };
+        (module, entry_ref)
+    }
+
+    pub fn func_sig(&self, fref: FuncRef) -> &Signature {
+        match &self.func_table[fref.index()] {
+            FuncDef::Internal(idx) => &self.functions[*idx].sig,
+            FuncDef::Extern(ef) => &ef.sig,
+        }
+    }
+
+    pub fn func_name(&self, fref: FuncRef) -> &str {
+        match &self.func_table[fref.index()] {
+            FuncDef::Internal(idx) => &self.functions[*idx].name,
+            FuncDef::Extern(ef) => &ef.name,
+        }
     }
 }

@@ -327,7 +327,7 @@ class DrawingSyncManager: ObservableObject {
             try await updatePDFIndex(hash: hash, fileName: fileName, pageCount: pageCount)
 
             // 4. Reload state so the PDF appears in library
-            S3StateManager.shared.loadState()
+            await S3StateManager.shared.loadStateAsync()
 
             await MainActor.run {
                 self.syncState = .synced

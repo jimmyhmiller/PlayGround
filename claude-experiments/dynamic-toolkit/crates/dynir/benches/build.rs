@@ -1,4 +1,4 @@
-use criterion::{criterion_group, criterion_main, Criterion, black_box};
+use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use dynir::*;
 
 fn build_fib() -> Function {
@@ -116,9 +116,7 @@ fn build_diamond() -> Function {
 }
 
 fn bench_build(c: &mut Criterion) {
-    c.bench_function("build_fib", |b| {
-        b.iter(|| black_box(build_fib()))
-    });
+    c.bench_function("build_fib", |b| b.iter(|| black_box(build_fib())));
 
     c.bench_function("build_linear_100", |b| {
         b.iter(|| black_box(build_linear_chain(100)))
@@ -136,9 +134,7 @@ fn bench_build(c: &mut Criterion) {
         b.iter(|| black_box(build_multi_block(100)))
     });
 
-    c.bench_function("build_diamond", |b| {
-        b.iter(|| black_box(build_diamond()))
-    });
+    c.bench_function("build_diamond", |b| b.iter(|| black_box(build_diamond())));
 }
 
 fn bench_verify(c: &mut Criterion) {
@@ -168,9 +164,7 @@ fn bench_display(c: &mut Criterion) {
     let fib = build_fib();
     let linear_1000 = build_linear_chain(1000);
 
-    c.bench_function("display_fib", |b| {
-        b.iter(|| black_box(fib.to_string()))
-    });
+    c.bench_function("display_fib", |b| b.iter(|| black_box(fib.to_string())));
 
     c.bench_function("display_linear_1000", |b| {
         b.iter(|| black_box(linear_1000.to_string()))

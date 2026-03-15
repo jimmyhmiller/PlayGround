@@ -1,14 +1,18 @@
-use crate::translate_wasm;
+use crate::{translate_wasm, translate_wasm_module};
 use dynir::interp::*;
+use dynir::ir::Module;
 use dynir::verify::verify;
+use dynir::NoGcRoots;
 use dynvalue::NanBox;
 
 fn run_wasm_i32(wat: &str, args: &[u64]) -> i32 {
     let wasm = wat::parse_str(wat).expect("failed to parse WAT");
     let (func, _imports) = translate_wasm(&wasm).expect("failed to translate");
     verify(&func).expect("IR verification failed");
-    let interp = Interpreter::<NanBox>::new(&func);
-    match interp.run(args).unwrap() {
+    let (module, entry) = Module::from_function(func.clone());
+    let roots = NoGcRoots;
+    let interp = ModuleInterpreter::<NanBox, _>::new(&module, &roots);
+    match interp.run(entry, args).unwrap() {
         InterpResult::Value(v) => v as i32,
         other => panic!("expected Value, got {:?}", other),
     }
@@ -18,8 +22,10 @@ fn run_wasm_i64(wat: &str, args: &[u64]) -> i64 {
     let wasm = wat::parse_str(wat).expect("failed to parse WAT");
     let (func, _imports) = translate_wasm(&wasm).expect("failed to translate");
     verify(&func).expect("IR verification failed");
-    let interp = Interpreter::<NanBox>::new(&func);
-    match interp.run(args).unwrap() {
+    let (module, entry) = Module::from_function(func.clone());
+    let roots = NoGcRoots;
+    let interp = ModuleInterpreter::<NanBox, _>::new(&module, &roots);
+    match interp.run(entry, args).unwrap() {
         InterpResult::Value(v) => v as i64,
         other => panic!("expected Value, got {:?}", other),
     }
@@ -251,7 +257,10 @@ fn i64_arithmetic() {
             local.get 0
             local.get 1
             i64.add))"#;
-    assert_eq!(run_wasm_i64(wat, &[1_000_000_000_000, 2_000_000_000_000]), 3_000_000_000_000);
+    assert_eq!(
+        run_wasm_i64(wat, &[1_000_000_000_000, 2_000_000_000_000]),
+        3_000_000_000_000
+    );
 }
 
 #[test]
@@ -297,4 +306,176 @@ fn print_ir() {
     let (func, _) = translate_wasm(&wasm).unwrap();
     verify(&func).expect("IR verification failed");
     println!("=== fib IR ===\n{}", func);
+}
+
+// ─── Multi-function module tests ────────────────────────────────────
+
+#[test]
+fn two_functions_call() {
+    let wat = r#"(module
+        (func $double (param i32) (result i32)
+            local.get 0
+            i32.const 2
+            i32.mul)
+        (func (export "main") (param i32) (result i32)
+            local.get 0
+            call $double))"#;
+    let wasm = wat::parse_str(wat).expect("failed to parse WAT");
+    let (module, entry) = translate_wasm_module(&wasm).expect("failed to translate");
+    let roots = NoGcRoots;
+    let interp = ModuleInterpreter::<NanBox, _>::new(&module, &roots);
+    let result = match interp.run(entry, &[21]).unwrap() {
+        InterpResult::Value(v) => v as i32,
+        other => panic!("expected Value, got {:?}", other),
+    };
+    assert_eq!(result, 42);
+}
+
+#[test]
+fn recursive_factorial_module() {
+    let wat = r#"(module
+        (func $fact (param $n i32) (result i32)
+            local.get $n
+            i32.const 1
+            i32.le_s
+            if (result i32)
+                i32.const 1
+            else
+                local.get $n
+                local.get $n
+                i32.const 1
+                i32.sub
+                call $fact
+                i32.mul
+            end)
+        (func (export "main") (param i32) (result i32)
+            local.get 0
+            call $fact))"#;
+    let wasm = wat::parse_str(wat).expect("failed to parse WAT");
+    let (module, entry) = translate_wasm_module(&wasm).expect("failed to translate");
+    let roots = NoGcRoots;
+    let interp = ModuleInterpreter::<NanBox, _>::new(&module, &roots);
+    let result = match interp.run(entry, &[10]).unwrap() {
+        InterpResult::Value(v) => v as i32,
+        other => panic!("expected Value, got {:?}", other),
+    };
+    assert_eq!(result, 3628800);
+}
+
+#[test]
+fn fifty_nested_functions() {
+    // Generate a WAT module with 50 functions chained:
+    //   func_0(x) = x + 1
+    //   func_1(x) = func_0(x) + 1
+    //   func_2(x) = func_1(x) + 1
+    //   ...
+    //   func_49(x) = func_48(x) + 1   (exported as "main")
+    //
+    // main(0) should return 50.
+
+    let n = 50;
+    let mut wat = String::from("(module\n");
+
+    // func_0: base case, just adds 1
+    wat.push_str("  (func $func_0 (param i32) (result i32)\n");
+    wat.push_str("    local.get 0\n");
+    wat.push_str("    i32.const 1\n");
+    wat.push_str("    i32.add)\n");
+
+    // func_1 through func_49: each calls the previous and adds 1
+    for i in 1..n {
+        wat.push_str(&format!("  (func $func_{i} (param i32) (result i32)\n"));
+        wat.push_str("    local.get 0\n");
+        wat.push_str(&format!("    call $func_{}\n", i - 1));
+        wat.push_str("    i32.const 1\n");
+        wat.push_str("    i32.add)\n");
+    }
+
+    // Export the last function
+    wat.push_str(&format!("  (export \"main\" (func $func_{})))\n", n - 1));
+
+    let wasm = wat::parse_str(&wat).expect("failed to parse WAT");
+    let (module, entry) = translate_wasm_module(&wasm).expect("failed to translate");
+
+    let roots = NoGcRoots;
+    let interp = ModuleInterpreter::<NanBox, _>::new(&module, &roots);
+    let result = match interp.run(entry, &[0]).unwrap() {
+        InterpResult::Value(v) => v as i32,
+        other => panic!("expected Value, got {:?}", other),
+    };
+    assert_eq!(result, n as i32, "50 nested calls should each add 1");
+
+    // Also test with a non-zero input
+    let result2 = match interp.run(entry, &[100]).unwrap() {
+        InterpResult::Value(v) => v as i32,
+        other => panic!("expected Value, got {:?}", other),
+    };
+    assert_eq!(result2, 100 + n as i32);
+}
+
+// ─── JIT module tests ──────────────────────────────────────────────
+
+#[test]
+fn two_functions_call_jit() {
+    let wat = r#"(module
+        (func $double (param i32) (result i32)
+            local.get 0
+            i32.const 2
+            i32.mul)
+        (func (export "main") (param i32) (result i32)
+            local.get 0
+            call $double))"#;
+    let wasm = wat::parse_str(wat).expect("failed to parse WAT");
+    let (module, entry) = translate_wasm_module(&wasm).expect("failed to translate");
+    let jit = dynlower::JitModule::compile::<NanBox>(&module, &[]);
+    assert_eq!(jit.call(entry, &[21]) as i32, 42);
+}
+
+#[test]
+fn recursive_factorial_module_jit() {
+    let wat = r#"(module
+        (func $fact (param $n i32) (result i32)
+            local.get $n
+            i32.const 1
+            i32.le_s
+            if (result i32)
+                i32.const 1
+            else
+                local.get $n
+                local.get $n
+                i32.const 1
+                i32.sub
+                call $fact
+                i32.mul
+            end)
+        (func (export "main") (param i32) (result i32)
+            local.get 0
+            call $fact))"#;
+    let wasm = wat::parse_str(wat).expect("failed to parse WAT");
+    let (module, entry) = translate_wasm_module(&wasm).expect("failed to translate");
+    let jit = dynlower::JitModule::compile::<NanBox>(&module, &[]);
+    assert_eq!(jit.call(entry, &[1]) as i32, 1);
+    assert_eq!(jit.call(entry, &[5]) as i32, 120);
+    assert_eq!(jit.call(entry, &[10]) as i32, 3628800);
+}
+
+#[test]
+fn fifty_nested_functions_jit() {
+    let n = 50;
+    let mut wat = String::from("(module\n");
+    wat.push_str("  (func $func_0 (param i32) (result i32)\n");
+    wat.push_str("    local.get 0\n    i32.const 1\n    i32.add)\n");
+    for i in 1..n {
+        wat.push_str(&format!("  (func $func_{i} (param i32) (result i32)\n"));
+        wat.push_str("    local.get 0\n");
+        wat.push_str(&format!("    call $func_{}\n", i - 1));
+        wat.push_str("    i32.const 1\n    i32.add)\n");
+    }
+    wat.push_str(&format!("  (export \"main\" (func $func_{})))\n", n - 1));
+
+    let wasm = wat::parse_str(&wat).expect("failed to parse WAT");
+    let (module, entry) = translate_wasm_module(&wasm).expect("failed to translate");
+    let jit = dynlower::JitModule::compile::<NanBox>(&module, &[]);
+    assert_eq!(jit.call(entry, &[0]) as i32, 50);
+    assert_eq!(jit.call(entry, &[100]) as i32, 150);
 }

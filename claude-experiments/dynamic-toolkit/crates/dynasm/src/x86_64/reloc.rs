@@ -1,5 +1,5 @@
-use crate::{Arch, CodeBuffer};
 use super::inst::X64Inst;
+use crate::{Arch, CodeBuffer};
 
 /// Marker type for the x86-64 architecture.
 pub struct X64;
@@ -30,8 +30,7 @@ impl Arch for X64 {
                 // displacement = target - (reloc_offset + 4)
                 let disp = (target_offset as i64) - ((reloc_offset as i64) + 4);
                 let disp32 = disp as i32;
-                code[reloc_offset..reloc_offset + 4]
-                    .copy_from_slice(&disp32.to_le_bytes());
+                code[reloc_offset..reloc_offset + 4].copy_from_slice(&disp32.to_le_bytes());
             }
         }
     }

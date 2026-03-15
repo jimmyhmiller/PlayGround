@@ -142,9 +142,7 @@ impl TypeInfo {
     /// Result is aligned to the object's alignment requirement.
     pub const fn allocation_size(&self, varlen_len: usize) -> usize {
         let size = match self.varlen {
-            VarLenKind::None => {
-                align8(self.raw_data_offset() + self.raw_byte_count as usize)
-            }
+            VarLenKind::None => align8(self.raw_data_offset() + self.raw_byte_count as usize),
             VarLenKind::Values => {
                 // count word + n×8 bytes
                 self.varlen_count_offset() + 8 + varlen_len * 8

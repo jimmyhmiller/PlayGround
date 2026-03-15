@@ -1,3 +1,4 @@
+use dynir::builder::ModuleBuilder;
 use dynir::*;
 use wasmparser::{BinaryReaderError, FuncType, Operator, Parser, Payload, ValType};
 
@@ -79,7 +80,10 @@ pub fn translate_wasm(
                         };
                         import_sigs.push((
                             format!("{}.{}", import.module, import.name),
-                            Signature { params: params?, ret },
+                            Signature {
+                                params: params?,
+                                ret,
+                            },
                         ));
                         func_type_indices.push(ty_idx);
                         import_count += 1;
@@ -107,8 +111,205 @@ pub fn translate_wasm(
     let func_idx = target_func_idx.ok_or(TranslateError::NoFunction)?;
     let name = export_name.unwrap();
     translate_function_inline(
-        &wasm_owned, &name, func_idx, import_count, &types, &func_type_indices, &import_sigs,
+        &wasm_owned,
+        &name,
+        func_idx,
+        import_count,
+        &types,
+        &func_type_indices,
+        &import_sigs,
     )
+}
+
+/// Translate an entire WASM module into a dynir [`Module`].
+///
+/// All internal functions are translated and wired up so they can call each other.
+/// Returns the Module and the FuncRef of the first exported function (entry point).
+pub fn translate_wasm_module(wasm_bytes: &[u8]) -> Result<(Module, FuncRef), TranslateError> {
+    let parser = Parser::new(0);
+    let mut types: Vec<FuncType> = Vec::new();
+    let mut func_type_indices: Vec<u32> = Vec::new();
+    let mut import_count: u32 = 0;
+    let mut import_sigs: Vec<(String, Signature)> = Vec::new();
+    let mut export_func_idx: Option<u32> = None;
+    let wasm_owned: Vec<u8> = wasm_bytes.to_vec();
+
+    // First pass: collect types, imports, function indices, exports
+    for payload in parser.parse_all(&wasm_owned) {
+        let payload = payload?;
+        match payload {
+            Payload::TypeSection(reader) => {
+                for rec_group in reader {
+                    let rec_group = rec_group?;
+                    for sub_type in rec_group.into_types() {
+                        if let wasmparser::CompositeInnerType::Func(ft) =
+                            sub_type.composite_type.inner
+                        {
+                            types.push(ft);
+                        }
+                    }
+                }
+            }
+            Payload::ImportSection(reader) => {
+                for import in reader {
+                    let import = import?;
+                    if let wasmparser::TypeRef::Func(ty_idx) = import.ty {
+                        let ft = &types[ty_idx as usize];
+                        let params: Result<Vec<Type>, _> =
+                            ft.params().iter().map(wasm_ty).collect();
+                        let ret = if ft.results().is_empty() {
+                            None
+                        } else {
+                            Some(wasm_ty(&ft.results()[0])?)
+                        };
+                        import_sigs.push((
+                            format!("{}.{}", import.module, import.name),
+                            Signature {
+                                params: params?,
+                                ret,
+                            },
+                        ));
+                        func_type_indices.push(ty_idx);
+                        import_count += 1;
+                    }
+                }
+            }
+            Payload::FunctionSection(reader) => {
+                for ty_idx in reader {
+                    func_type_indices.push(ty_idx?);
+                }
+            }
+            Payload::ExportSection(reader) => {
+                for exp in reader {
+                    let exp = exp?;
+                    if exp.kind == wasmparser::ExternalKind::Func && export_func_idx.is_none() {
+                        export_func_idx = Some(exp.index);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let entry_func_idx = export_func_idx.ok_or(TranslateError::NoFunction)?;
+    let internal_count = func_type_indices.len() as u32 - import_count;
+
+    // Build the module: declare imports, then declare all internal functions
+    let mut mb = ModuleBuilder::new();
+
+    // Declare imports
+    let mut import_frefs: Vec<FuncRef> = Vec::new();
+    for (name, sig) in &import_sigs {
+        import_frefs.push(mb.declare_extern(name, sig.clone()));
+    }
+
+    // Declare all internal functions
+    let mut internal_frefs: Vec<FuncRef> = Vec::new();
+    for i in 0..internal_count {
+        let abs_idx = (import_count + i) as usize;
+        let ft = &types[func_type_indices[abs_idx] as usize];
+        let params: Result<Vec<Type>, _> = ft.params().iter().map(wasm_ty).collect();
+        let params = params?;
+        let ret = if ft.results().is_empty() {
+            None
+        } else {
+            Some(wasm_ty(&ft.results()[0])?)
+        };
+        let fref = mb.declare_func(&format!("func_{}", i), &params, ret);
+        internal_frefs.push(fref);
+    }
+
+    // Build func_refs table: all imports + all internals
+    let mut func_refs: Vec<Option<FuncRef>> = Vec::new();
+    for fref in &import_frefs {
+        func_refs.push(Some(*fref));
+    }
+    for fref in &internal_frefs {
+        func_refs.push(Some(*fref));
+    }
+
+    // Second pass: translate each internal function's code
+    let parser2 = Parser::new(0);
+    let mut code_idx: u32 = 0;
+    for payload in parser2.parse_all(&wasm_owned) {
+        let payload = payload?;
+        if let Payload::CodeSectionEntry(body) = payload {
+            let abs_idx = (import_count + code_idx) as usize;
+            let fref = internal_frefs[code_idx as usize];
+            let ft = &types[func_type_indices[abs_idx] as usize];
+            let ret = if ft.results().is_empty() {
+                None
+            } else {
+                Some(wasm_ty(&ft.results()[0])?)
+            };
+
+            let mut fb = mb.define_func(fref);
+            let entry = fb.entry_block();
+
+            let mut locals: Vec<Value> = Vec::new();
+            let mut local_types: Vec<Type> = Vec::new();
+            for (i, vt) in ft.params().iter().enumerate() {
+                locals.push(fb.block_param(entry, i));
+                local_types.push(wasm_ty(vt)?);
+            }
+
+            let locals_reader = body.get_locals_reader()?;
+            for local in locals_reader {
+                let (count, ty) = local?;
+                let dynir_ty = wasm_ty(&ty)?;
+                for _ in 0..count {
+                    let zero = match dynir_ty {
+                        Type::I32 => fb.iconst(Type::I32, 0),
+                        Type::I64 => fb.iconst(Type::I64, 0),
+                        Type::F64 => fb.f64const(0.0),
+                        _ => fb.iconst(Type::I64, 0),
+                    };
+                    locals.push(zero);
+                    local_types.push(dynir_ty);
+                }
+            }
+
+            let mut translator = FuncTranslator {
+                builder: &mut fb,
+                stack: Vec::new(),
+                locals,
+                local_types: local_types.clone(),
+                control_stack: Vec::new(),
+                unreachable: false,
+                func_refs: &func_refs,
+                types: &types,
+                func_type_indices: &func_type_indices,
+                ret,
+            };
+
+            let result_types: Vec<Type> = ret.into_iter().collect();
+            translator.control_stack.push(ControlFrame::Block {
+                exit_block: None,
+                stack_height: 0,
+                under_stack_types: vec![],
+                result_types,
+                head_unreachable: false,
+            });
+
+            let ops_reader = body.get_operators_reader()?;
+            for op in ops_reader {
+                let op = op?;
+                translator.translate_op(&op)?;
+            }
+
+            mb.finish_func(fref, fb);
+            code_idx += 1;
+        }
+    }
+
+    let entry_fref = if entry_func_idx >= import_count {
+        internal_frefs[(entry_func_idx - import_count) as usize]
+    } else {
+        return Err(TranslateError::NoFunction);
+    };
+
+    let module = mb.build();
+    Ok((module, entry_fref))
 }
 
 fn translate_function_inline(
@@ -124,7 +325,11 @@ fn translate_function_inline(
     let ft = &types[func_type_indices[func_idx as usize] as usize];
     let params: Result<Vec<Type>, _> = ft.params().iter().map(wasm_ty).collect();
     let params = params?;
-    let ret = if ft.results().is_empty() { None } else { Some(wasm_ty(&ft.results()[0])?) };
+    let ret = if ft.results().is_empty() {
+        None
+    } else {
+        Some(wasm_ty(&ft.results()[0])?)
+    };
 
     let mut builder = FunctionBuilder::new(name, &params, ret);
     let entry = builder.entry_block();
@@ -248,9 +453,15 @@ impl ControlFrame {
 
     fn under_stack_types(&self) -> &[Type] {
         match self {
-            ControlFrame::Block { under_stack_types, .. }
-            | ControlFrame::Loop { under_stack_types, .. }
-            | ControlFrame::If { under_stack_types, .. } => under_stack_types,
+            ControlFrame::Block {
+                under_stack_types, ..
+            }
+            | ControlFrame::Loop {
+                under_stack_types, ..
+            }
+            | ControlFrame::If {
+                under_stack_types, ..
+            } => under_stack_types,
         }
     }
 
@@ -265,8 +476,9 @@ impl ControlFrame {
     /// Types that a `br` to this label passes as values.
     fn br_types(&self) -> &[Type] {
         match self {
-            ControlFrame::Block { result_types, .. }
-            | ControlFrame::If { result_types, .. } => result_types,
+            ControlFrame::Block { result_types, .. } | ControlFrame::If { result_types, .. } => {
+                result_types
+            }
             ControlFrame::Loop { param_types, .. } => param_types,
         }
     }
@@ -280,11 +492,24 @@ fn get_or_create_exit(
     local_types: &[Type],
 ) -> BlockId {
     let (exit_slot, under_stack_types, result_types) = match frame {
-        ControlFrame::Block { exit_block, under_stack_types, result_types, .. }
-        | ControlFrame::If { exit_block, under_stack_types, result_types, .. }
-        | ControlFrame::Loop { exit_block, under_stack_types, result_types, .. } => {
-            (exit_block, &*under_stack_types, &*result_types)
+        ControlFrame::Block {
+            exit_block,
+            under_stack_types,
+            result_types,
+            ..
         }
+        | ControlFrame::If {
+            exit_block,
+            under_stack_types,
+            result_types,
+            ..
+        }
+        | ControlFrame::Loop {
+            exit_block,
+            under_stack_types,
+            result_types,
+            ..
+        } => (exit_block, &*under_stack_types, &*result_types),
     };
     if let Some(bb) = *exit_slot {
         bb
@@ -324,7 +549,10 @@ impl<'a, 'b> FuncTranslator<'a, 'b> {
 
     /// Compute stack types for the current stack.
     fn stack_types(&self) -> Vec<Type> {
-        self.stack.iter().map(|v| self.builder.value_type(*v)).collect()
+        self.stack
+            .iter()
+            .map(|v| self.builder.value_type(*v))
+            .collect()
     }
 
     /// Build the full args for jumping to an exit block:
@@ -343,10 +571,13 @@ impl<'a, 'b> FuncTranslator<'a, 'b> {
             self.stack.push(self.builder.block_param(exit, i));
         }
         for i in 0..result_count {
-            self.stack.push(self.builder.block_param(exit, under_count + i));
+            self.stack
+                .push(self.builder.block_param(exit, under_count + i));
         }
         for (i, _ty) in self.local_types.iter().enumerate() {
-            self.locals[i] = self.builder.block_param(exit, under_count + result_count + i);
+            self.locals[i] = self
+                .builder
+                .block_param(exit, under_count + result_count + i);
         }
     }
 
@@ -361,7 +592,12 @@ impl<'a, 'b> FuncTranslator<'a, 'b> {
                 let bb = get_or_create_exit(frame, self.builder, &local_types);
                 (bb, br_types, sh)
             }
-            ControlFrame::Loop { header_block, param_types, stack_height, .. } => {
+            ControlFrame::Loop {
+                header_block,
+                param_types,
+                stack_height,
+                ..
+            } => {
                 let bb = *header_block;
                 let pt = param_types.clone();
                 let sh = *stack_height;
@@ -405,11 +641,19 @@ impl<'a, 'b> FuncTranslator<'a, 'b> {
                     });
                 }
                 Operator::Else => {
-                    if let Some(ControlFrame::If { head_unreachable, .. }) = self.control_stack.last() {
+                    if let Some(ControlFrame::If {
+                        head_unreachable, ..
+                    }) = self.control_stack.last()
+                    {
                         if !head_unreachable {
                             if let Some(ControlFrame::If {
-                                else_block, stack_height, has_else, under_stack_types, ..
-                            }) = self.control_stack.last_mut() {
+                                else_block,
+                                stack_height,
+                                has_else,
+                                under_stack_types,
+                                ..
+                            }) = self.control_stack.last_mut()
+                            {
                                 *has_else = true;
                                 let _sh = *stack_height;
                                 let eb = *else_block;
@@ -431,9 +675,18 @@ impl<'a, 'b> FuncTranslator<'a, 'b> {
                 Operator::End => {
                     let frame = self.control_stack.pop().unwrap();
                     match &frame {
-                        ControlFrame::Block { head_unreachable: true, .. }
-                        | ControlFrame::Loop { head_unreachable: true, .. }
-                        | ControlFrame::If { head_unreachable: true, .. } => {}
+                        ControlFrame::Block {
+                            head_unreachable: true,
+                            ..
+                        }
+                        | ControlFrame::Loop {
+                            head_unreachable: true,
+                            ..
+                        }
+                        | ControlFrame::If {
+                            head_unreachable: true,
+                            ..
+                        } => {}
                         _ => {
                             self.handle_end(frame)?;
                         }
@@ -470,7 +723,9 @@ impl<'a, 'b> FuncTranslator<'a, 'b> {
                 self.locals[*local_index as usize] = val;
             }
 
-            Operator::Drop => { self.pop(); }
+            Operator::Drop => {
+                self.pop();
+            }
             Operator::Select => {
                 let cond = self.pop();
                 let (a, b) = self.pop2();
@@ -603,8 +858,13 @@ impl<'a, 'b> FuncTranslator<'a, 'b> {
             Operator::Nop => {}
             Operator::Return => {
                 match self.ret {
-                    Some(_) => { let val = self.pop(); self.builder.ret(val); }
-                    None => { self.builder.ret_void(); }
+                    Some(_) => {
+                        let val = self.pop();
+                        self.builder.ret(val);
+                    }
+                    None => {
+                        self.builder.ret_void();
+                    }
                 }
                 self.unreachable = true;
             }
@@ -663,7 +923,8 @@ impl<'a, 'b> FuncTranslator<'a, 'b> {
                 let else_block = self.builder.create_block(&branch_params);
                 let mut branch_args: Vec<Value> = self.stack.clone();
                 branch_args.extend_from_slice(&self.locals);
-                self.builder.br_if(cond_i8, then_block, &branch_args, else_block, &branch_args);
+                self.builder
+                    .br_if(cond_i8, then_block, &branch_args, else_block, &branch_args);
                 self.builder.switch_to_block(then_block);
                 let under_count = self.stack.len();
                 for i in 0..under_count {
@@ -688,7 +949,11 @@ impl<'a, 'b> FuncTranslator<'a, 'b> {
                 let frame = self.control_stack.last_mut().unwrap();
                 let (else_block, stack_height, under_stack_types) = match frame {
                     ControlFrame::If {
-                        else_block, stack_height, has_else, under_stack_types, ..
+                        else_block,
+                        stack_height,
+                        has_else,
+                        under_stack_types,
+                        ..
                     } => {
                         *has_else = true;
                         (*else_block, *stack_height, under_stack_types.clone())
@@ -751,7 +1016,8 @@ impl<'a, 'b> FuncTranslator<'a, 'b> {
                 let mut fall_args: Vec<Value> = self.stack.clone();
                 fall_args.extend_from_slice(&self.locals);
 
-                self.builder.br_if(cond_i8, target, &target_args, fallthrough, &fall_args);
+                self.builder
+                    .br_if(cond_i8, target, &target_args, fallthrough, &fall_args);
                 self.builder.switch_to_block(fallthrough);
                 let stack_len = self.stack.len();
                 for i in 0..stack_len {
@@ -768,8 +1034,10 @@ impl<'a, 'b> FuncTranslator<'a, 'b> {
 
                 let default_depth = targets.default();
                 let didx = self.control_stack.len() - 1 - default_depth as usize;
-                let default_is_loop = matches!(&self.control_stack[didx], ControlFrame::Loop { .. });
-                let (default_target, default_br_types, default_sh) = self.br_target_and_types(default_depth);
+                let default_is_loop =
+                    matches!(&self.control_stack[didx], ControlFrame::Loop { .. });
+                let (default_target, default_br_types, default_sh) =
+                    self.br_target_and_types(default_depth);
                 let default_arity = default_br_types.len();
                 let default_args = if default_is_loop {
                     let mut args: Vec<Value> = self.stack[..default_sh].to_vec();
@@ -800,7 +1068,8 @@ impl<'a, 'b> FuncTranslator<'a, 'b> {
                     .iter()
                     .map(|(v, b, a)| (*v, *b, a.as_slice()))
                     .collect();
-                self.builder.switch(index_i64, &case_refs, default_target, &default_args);
+                self.builder
+                    .switch(index_i64, &case_refs, default_target, &default_args);
                 self.unreachable = true;
             }
 
@@ -809,7 +1078,10 @@ impl<'a, 'b> FuncTranslator<'a, 'b> {
                 let param_count = ft.params().len();
                 let args: Vec<Value> = self.stack.split_off(self.stack.len() - param_count);
                 let fref = self.func_refs[*function_index as usize].ok_or_else(|| {
-                    TranslateError::UnsupportedOp(format!("call to local function {}", function_index))
+                    TranslateError::UnsupportedOp(format!(
+                        "call to local function {}",
+                        function_index
+                    ))
                 })?;
                 let result = self.builder.call(fref, &args);
                 if let Some(val) = result {
@@ -830,19 +1102,30 @@ impl<'a, 'b> FuncTranslator<'a, 'b> {
         let num_results = frame.result_types().len();
 
         match frame {
-            ControlFrame::Block { exit_block: None, .. } => {
+            ControlFrame::Block {
+                exit_block: None, ..
+            } => {
                 if self.control_stack.is_empty() {
                     if !self.unreachable {
                         match self.ret {
-                            Some(_) => { let val = self.pop(); self.builder.ret(val); }
-                            None => { self.builder.ret_void(); }
+                            Some(_) => {
+                                let val = self.pop();
+                                self.builder.ret(val);
+                            }
+                            None => {
+                                self.builder.ret_void();
+                            }
                         }
                     }
                 } else if self.unreachable {
                     self.stack.truncate(stack_height);
                 }
             }
-            ControlFrame::Block { exit_block: Some(exit), result_types, .. } => {
+            ControlFrame::Block {
+                exit_block: Some(exit),
+                result_types,
+                ..
+            } => {
                 if !self.unreachable {
                     let args = self.exit_jump_args(stack_height, result_types.len());
                     self.builder.jump(exit, &args);
@@ -851,7 +1134,11 @@ impl<'a, 'b> FuncTranslator<'a, 'b> {
                 self.restore_from_exit(exit, under_count, num_results);
                 self.unreachable = false;
             }
-            ControlFrame::Loop { exit_block, result_types, .. } => {
+            ControlFrame::Loop {
+                exit_block,
+                result_types,
+                ..
+            } => {
                 if let Some(exit) = exit_block {
                     if !self.unreachable {
                         let args = self.exit_jump_args(stack_height, result_types.len());
@@ -864,7 +1151,14 @@ impl<'a, 'b> FuncTranslator<'a, 'b> {
                     self.stack.truncate(stack_height);
                 }
             }
-            ControlFrame::If { exit_block, else_block, result_types, has_else, under_stack_types, .. } => {
+            ControlFrame::If {
+                exit_block,
+                else_block,
+                result_types,
+                has_else,
+                under_stack_types,
+                ..
+            } => {
                 if !has_else {
                     let local_types = self.local_types.clone();
                     let arity = result_types.len();
@@ -927,7 +1221,10 @@ impl<'a, 'b> FuncTranslator<'a, 'b> {
         Ok(())
     }
 
-    fn blocktype_results(&self, blockty: &wasmparser::BlockType) -> Result<Vec<Type>, TranslateError> {
+    fn blocktype_results(
+        &self,
+        blockty: &wasmparser::BlockType,
+    ) -> Result<Vec<Type>, TranslateError> {
         match blockty {
             wasmparser::BlockType::Empty => Ok(vec![]),
             wasmparser::BlockType::Type(vt) => Ok(vec![wasm_ty(vt)?]),

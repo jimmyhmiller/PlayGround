@@ -8,7 +8,13 @@ type Val3 = Value<LowBit<3>>;
 fn low_bit_roundtrip() {
     for tag in 0..8u32 {
         let v = Val3::tagged(tag, 12345);
-        assert_eq!(v.decode(), Decoded::Tagged { tag, payload: 12345 });
+        assert_eq!(
+            v.decode(),
+            Decoded::Tagged {
+                tag,
+                payload: 12345
+            }
+        );
         assert!(v.has_tag(tag));
         assert_eq!(v.payload(), 12345);
     }
@@ -89,7 +95,15 @@ fn nan_box_tagged_roundtrip() {
 
 #[test]
 fn nan_box_float_roundtrip() {
-    let values = [0.0, -0.0, 1.0, -1.0, 3.14159, f64::INFINITY, f64::NEG_INFINITY];
+    let values = [
+        0.0,
+        -0.0,
+        1.0,
+        -1.0,
+        3.14159,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+    ];
     for &f in &values {
         let v = NVal::float(f);
         assert!(v.is_float());
@@ -165,11 +179,7 @@ fn generic_over_scheme() {
     ];
     assert_eq!(count_tagged_with_tag(&low_vals, 0), 2);
 
-    let nan_vals = vec![
-        NVal::tagged(0, 10),
-        NVal::tagged(1, 20),
-        NVal::float(3.14),
-    ];
+    let nan_vals = vec![NVal::tagged(0, 10), NVal::tagged(1, 20), NVal::float(3.14)];
     assert_eq!(count_tagged_with_tag(&nan_vals, 0), 1);
     assert_eq!(count_tagged_with_tag(&nan_vals, 1), 1);
 }

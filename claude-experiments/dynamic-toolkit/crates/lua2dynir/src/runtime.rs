@@ -6,10 +6,15 @@
 ///   - Tag 1: nil (payload 0)
 ///   - Tag 2: boolean (payload 0=false, 1=true)
 ///   - Tag 3: string constant index / built-in function ID
-
 use std::collections::HashMap;
 
-use dynvalue::{NanBox, TagScheme};
+use dynalloc::Heap;
+use dynobj::{Compact, ObjHeader, TypeInfo, VarLenKind};
+use dynobj::{
+    raw_data_mut, read_raw_bytes, read_type_info, read_value_field, read_varlen_bytes,
+    read_varlen_value, write_value_field, write_varlen_value,
+};
+use dynvalue::{NanBox, TagScheme, Value};
 
 // NanBox tag constants
 const TAG_PTR: u32 = 0;
@@ -54,93 +59,489 @@ fn as_bool_payload(v: u64) -> bool {
 }
 
 fn is_truthy(v: u64) -> bool {
-    if is_nil(v) { return false; }
-    if is_bool(v) { return as_bool_payload(v); }
+    if is_nil(v) {
+        return false;
+    }
+    if is_bool(v) {
+        return as_bool_payload(v);
+    }
     true
 }
 
-const CLOSURE_MARKER: u64 = 0xC105_C105_C105_C105;
+// ── GC TypeInfo statics ──────────────────────────────────────
 
-/// Closure layout (raw bytes, inline upvalues for direct IR struct access):
-///   offset 0:  marker     (u64) = CLOSURE_MARKER
-///   offset 8:  func_id    (u64) — index into function table
-///   offset 16: num_upvals (u64)
-///   offset 24: upval[0]   (u64) — NanBox-encoded
-///   offset 32: upval[1]   (u64)
-///   ...
-pub fn make_closure(func_id: usize, upvalues: &[u64]) -> u64 {
-    let total_size = 24 + upvalues.len() * 8;
-    let layout = std::alloc::Layout::from_size_align(total_size, 8).unwrap();
-    let ptr = unsafe { std::alloc::alloc(layout) as *mut u64 };
-    unsafe {
-        *ptr = CLOSURE_MARKER;
-        *ptr.add(1) = func_id as u64;
-        *ptr.add(2) = upvalues.len() as u64;
-        for (i, &v) in upvalues.iter().enumerate() {
-            *ptr.add(3 + i) = v;
-        }
+/// Closure: Compact header + func_id (raw u64) + varlen upvalues (GC-traced)
+static CLOSURE_TYPE: TypeInfo = TypeInfo {
+    header_size: Compact::SIZE as u16,
+    value_field_count: 0,
+    raw_byte_count: 8,          // func_id
+    varlen: VarLenKind::Values, // upvalues
+    align_log2: 3,
+};
+
+/// String: Compact header + varlen bytes (string content)
+static STRING_TYPE: TypeInfo = TypeInfo {
+    header_size: Compact::SIZE as u16,
+    value_field_count: 0,
+    raw_byte_count: 0,
+    varlen: VarLenKind::Bytes,
+    align_log2: 3,
+};
+
+/// Table header: Compact header + 2 value fields (hash ptr, array ptr) + 32 raw bytes (metadata)
+static TABLE_TYPE: TypeInfo = TypeInfo {
+    header_size: Compact::SIZE as u16,
+    value_field_count: 2, // hash_entries_ptr, array_ptr
+    raw_byte_count: 32,   // hash_count, hash_cap, array_len, array_cap (4 × u64)
+    varlen: VarLenKind::None,
+    align_log2: 3,
+};
+
+/// Array of GC-traced values (used for hash entries and array parts of tables)
+static ARRAY_TYPE: TypeInfo = TypeInfo {
+    header_size: Compact::SIZE as u16,
+    value_field_count: 0,
+    raw_byte_count: 0,
+    varlen: VarLenKind::Values,
+    align_log2: 3,
+};
+
+// ── Object type discrimination ─────────────────────────────
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ObjType {
+    Closure,
+    String,
+    Table,
+    Unknown,
+}
+
+fn obj_type_from_ptr(ptr: *const u8) -> ObjType {
+    let ti = unsafe { read_type_info(ptr, Compact::TYPE_INFO_OFFSET) };
+    if std::ptr::eq(ti, &CLOSURE_TYPE) {
+        ObjType::Closure
+    } else if std::ptr::eq(ti, &STRING_TYPE) {
+        ObjType::String
+    } else if std::ptr::eq(ti, &TABLE_TYPE) {
+        ObjType::Table
+    } else {
+        ObjType::Unknown
     }
+}
+
+fn encode_gc_ptr(ptr: *const u8) -> u64 {
     NanBox::encode_tagged(TAG_PTR, ptr as u64 & 0x0000_FFFF_FFFF_FFFF)
 }
 
+// ── Closures ──────────────────────────────────────────────────
+
+/// Allocate a closure on the GC heap.
+///
+/// Layout: [Compact header: 8B] [func_id: 8B raw] [varlen_count: 8B] [upval0: 8B] ...
+pub fn make_closure(heap: &Heap, func_id: usize, upvalues: &[u64]) -> u64 {
+    let ptr = heap.alloc_obj::<Compact>(&CLOSURE_TYPE, upvalues.len());
+    assert!(
+        !ptr.is_null(),
+        "GC heap exhausted during closure allocation"
+    );
+    unsafe {
+        let raw = raw_data_mut(ptr, &CLOSURE_TYPE);
+        raw[0..8].copy_from_slice(&(func_id as u64).to_ne_bytes());
+        for (i, &v) in upvalues.iter().enumerate() {
+            write_varlen_value::<NanBox>(ptr, &CLOSURE_TYPE, i, Value::from_bits(v));
+        }
+    }
+    encode_gc_ptr(ptr)
+}
+
 pub fn is_closure(v: u64) -> bool {
-    if !NanBox::has_tag(v, TAG_PTR) { return false; }
+    if !NanBox::has_tag(v, TAG_PTR) {
+        return false;
+    }
     let payload = NanBox::extract_payload(v);
-    if payload == 0 { return false; }
-    let ptr = payload as *const u64;
-    unsafe { *ptr == CLOSURE_MARKER }
+    if payload == 0 {
+        return false;
+    }
+    obj_type_from_ptr(payload as *const u8) == ObjType::Closure
 }
 
 pub fn closure_func_id(v: u64) -> Option<usize> {
-    if !is_closure(v) { return None; }
+    if !is_closure(v) {
+        return None;
+    }
     let payload = NanBox::extract_payload(v);
-    let ptr = payload as *const u64;
-    Some(unsafe { *ptr.add(1) } as usize)
+    let ptr = payload as *const u8;
+    let raw = unsafe { read_raw_bytes(ptr, &CLOSURE_TYPE) };
+    Some(u64::from_ne_bytes(raw[0..8].try_into().unwrap()) as usize)
 }
 
 pub fn closure_get_upvalue(v: u64, idx: usize) -> u64 {
     let payload = NanBox::extract_payload(v);
-    let ptr = payload as *const u64;
-    unsafe { *ptr.add(3 + idx) }
+    let ptr = payload as *const u8;
+    unsafe { read_varlen_value::<NanBox>(ptr, &CLOSURE_TYPE, idx).to_bits() }
+}
+
+// ── Strings ───────────────────────────────────────────────────
+
+/// Allocate a string on the GC heap.
+///
+/// Layout: [Compact header: 8B] [varlen_count/len: 8B] [bytes...] [padding]
+fn make_string_on_heap(heap: &Heap, s: &str) -> u64 {
+    let bytes = s.as_bytes();
+    let ptr = heap.alloc_obj::<Compact>(&STRING_TYPE, bytes.len());
+    assert!(!ptr.is_null(), "GC heap exhausted during string allocation");
+    unsafe {
+        let base = STRING_TYPE.varlen_count_offset() + 8;
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr.add(base), bytes.len());
+    }
+    encode_gc_ptr(ptr)
+}
+
+fn is_gc_string(v: u64) -> bool {
+    if !NanBox::has_tag(v, TAG_PTR) {
+        return false;
+    }
+    let payload = NanBox::extract_payload(v);
+    if payload == 0 {
+        return false;
+    }
+    obj_type_from_ptr(payload as *const u8) == ObjType::String
 }
 
 fn as_lua_string(v: u64) -> Option<&'static str> {
-    if !NanBox::has_tag(v, TAG_PTR) { return None; }
+    if !is_gc_string(v) {
+        return None;
+    }
     let payload = NanBox::extract_payload(v);
-    if payload == 0 { return None; }
-    let ptr = payload as *const u64;
-    let first_word = unsafe { *ptr };
-    if first_word == CLOSURE_MARKER { return None; }
-    if first_word == STRING_MARKER {
-        let str_ptr = payload as *const StringRepr;
-        Some(unsafe { (*str_ptr).data.as_str() })
-    } else {
-        None
-    }
+    let ptr = payload as *const u8;
+    let bytes = unsafe { read_varlen_bytes(ptr, &STRING_TYPE) };
+    // Safety: we only create strings from valid UTF-8 (&str)
+    Some(unsafe { std::str::from_utf8_unchecked(bytes) })
 }
 
-const STRING_MARKER: u64 = 0x5754_5754_5754_5754;
+fn is_table(v: u64) -> bool {
+    if !NanBox::has_tag(v, TAG_PTR) {
+        return false;
+    }
+    let payload = NanBox::extract_payload(v);
+    if payload == 0 {
+        return false;
+    }
+    obj_type_from_ptr(payload as *const u8) == ObjType::Table
+}
 
-pub fn make_string(s: String) -> u64 {
-    let layout = std::alloc::Layout::new::<StringRepr>();
-    let ptr = unsafe { std::alloc::alloc(layout) as *mut StringRepr };
+// ── Table helpers ─────────────────────────────────────────────
+
+fn table_read_meta(ptr: *const u8) -> (usize, usize, usize, usize) {
+    let raw = unsafe { read_raw_bytes(ptr, &TABLE_TYPE) };
+    let hash_count = u64::from_ne_bytes(raw[0..8].try_into().unwrap()) as usize;
+    let hash_cap = u64::from_ne_bytes(raw[8..16].try_into().unwrap()) as usize;
+    let array_len = u64::from_ne_bytes(raw[16..24].try_into().unwrap()) as usize;
+    let array_cap = u64::from_ne_bytes(raw[24..32].try_into().unwrap()) as usize;
+    (hash_count, hash_cap, array_len, array_cap)
+}
+
+fn table_write_meta(
+    ptr: *mut u8,
+    hash_count: usize,
+    hash_cap: usize,
+    array_len: usize,
+    array_cap: usize,
+) {
+    let raw = unsafe { raw_data_mut(ptr, &TABLE_TYPE) };
+    raw[0..8].copy_from_slice(&(hash_count as u64).to_ne_bytes());
+    raw[8..16].copy_from_slice(&(hash_cap as u64).to_ne_bytes());
+    raw[16..24].copy_from_slice(&(array_len as u64).to_ne_bytes());
+    raw[24..32].copy_from_slice(&(array_cap as u64).to_ne_bytes());
+}
+
+fn table_get_hash_ptr(ptr: *const u8) -> Option<*mut u8> {
+    let val = unsafe { read_value_field::<NanBox>(ptr, &TABLE_TYPE, 0) };
+    let bits = val.to_bits();
+    if is_nil(bits) {
+        return None;
+    }
+    Some(NanBox::extract_payload(bits) as *mut u8)
+}
+
+fn table_get_array_ptr(ptr: *const u8) -> Option<*mut u8> {
+    let val = unsafe { read_value_field::<NanBox>(ptr, &TABLE_TYPE, 1) };
+    let bits = val.to_bits();
+    if is_nil(bits) {
+        return None;
+    }
+    Some(NanBox::extract_payload(bits) as *mut u8)
+}
+
+fn hash_u64(key: u64) -> usize {
+    key.wrapping_mul(0x517cc1b727220a95) as usize
+}
+
+/// Allocate a GC array of values, initialized to nil.
+fn alloc_nil_values(heap: &Heap, count: usize) -> *mut u8 {
+    let ptr = heap.alloc_obj::<Compact>(&ARRAY_TYPE, count);
+    assert!(!ptr.is_null(), "GC heap exhausted during array allocation");
+    let nil_val = Value::<NanBox>::from_bits(make_nil());
+    for i in 0..count {
+        unsafe {
+            write_varlen_value::<NanBox>(ptr, &ARRAY_TYPE, i, nil_val);
+        }
+    }
+    ptr
+}
+
+fn table_get(table_ptr: *const u8, key: u64) -> u64 {
+    let (_, hash_cap, array_len, _) = table_read_meta(table_ptr);
+
+    // Check array part for positive integer keys
+    if is_number(key) {
+        let n = as_number(key);
+        if n == n.floor() && n >= 1.0 {
+            let idx = n as usize;
+            if idx <= array_len && idx > 0 {
+                if let Some(arr) = table_get_array_ptr(table_ptr) {
+                    return unsafe {
+                        read_varlen_value::<NanBox>(arr, &ARRAY_TYPE, idx - 1).to_bits()
+                    };
+                }
+            }
+        }
+    }
+
+    // Check hash part
+    if hash_cap == 0 {
+        return make_nil();
+    }
+    let hash_arr = match table_get_hash_ptr(table_ptr) {
+        Some(p) => p,
+        None => return make_nil(),
+    };
+
+    let nil = make_nil();
+    let mask = hash_cap - 1;
+    let mut slot = hash_u64(key) & mask;
+
+    for _ in 0..hash_cap {
+        let k = unsafe { read_varlen_value::<NanBox>(hash_arr, &ARRAY_TYPE, slot * 2).to_bits() };
+        if k == nil {
+            return make_nil();
+        } // empty slot — key not found
+        if k == key {
+            return unsafe {
+                read_varlen_value::<NanBox>(hash_arr, &ARRAY_TYPE, slot * 2 + 1).to_bits()
+            };
+        }
+        slot = (slot + 1) & mask;
+    }
+
+    make_nil()
+}
+
+fn table_set(heap: &Heap, table_ptr: *mut u8, key: u64, val: u64) {
+    // Try array part for sequential positive integer keys
+    if is_number(key) {
+        let n = as_number(key);
+        if n == n.floor() && n >= 1.0 {
+            let idx = n as usize;
+            let (hc, hcap, array_len, array_cap) = table_read_meta(table_ptr);
+            if idx <= array_len + 1 {
+                table_array_set(heap, table_ptr, idx, val, hc, hcap, array_len, array_cap);
+                return;
+            }
+        }
+    }
+
+    // Hash part
+    table_hash_set(heap, table_ptr, key, val);
+}
+
+fn table_array_set(
+    heap: &Heap,
+    table_ptr: *mut u8,
+    idx: usize,
+    val: u64,
+    hash_count: usize,
+    hash_cap: usize,
+    mut array_len: usize,
+    mut array_cap: usize,
+) {
+    // Grow array if needed
+    if idx > array_cap {
+        let new_cap = (array_cap * 2).max(8).max(idx);
+        let new_arr = alloc_nil_values(heap, new_cap);
+
+        // Copy existing elements
+        if let Some(old_arr) = table_get_array_ptr(table_ptr) {
+            for i in 0..array_len {
+                let v = unsafe { read_varlen_value::<NanBox>(old_arr, &ARRAY_TYPE, i) };
+                unsafe {
+                    write_varlen_value::<NanBox>(new_arr, &ARRAY_TYPE, i, v);
+                }
+            }
+        }
+
+        unsafe {
+            write_value_field::<NanBox>(
+                table_ptr,
+                &TABLE_TYPE,
+                1,
+                Value::from_bits(encode_gc_ptr(new_arr)),
+            );
+        }
+        array_cap = new_cap;
+    }
+
+    if idx > array_len {
+        array_len = idx;
+    }
+    table_write_meta(table_ptr, hash_count, hash_cap, array_len, array_cap);
+
+    let arr = table_get_array_ptr(table_ptr).unwrap();
     unsafe {
-        (*ptr).marker = STRING_MARKER;
-        // Use ptr::write to avoid dropping uninitialized memory
-        std::ptr::addr_of_mut!((*ptr).data).write(s);
+        write_varlen_value::<NanBox>(arr, &ARRAY_TYPE, idx - 1, Value::from_bits(val));
     }
-    NanBox::encode_tagged(TAG_PTR, ptr as u64 & 0x0000_FFFF_FFFF_FFFF)
 }
 
-#[repr(C)]
-struct StringRepr {
-    marker: u64,
-    data: String,
+fn table_hash_set(heap: &Heap, table_ptr: *mut u8, key: u64, val: u64) {
+    let (mut hash_count, mut hash_cap, array_len, array_cap) = table_read_meta(table_ptr);
+    let nil = make_nil();
+
+    // Check if key already exists
+    if hash_cap > 0 {
+        if let Some(hash_arr) = table_get_hash_ptr(table_ptr) {
+            let mask = hash_cap - 1;
+            let mut slot = hash_u64(key) & mask;
+            for _ in 0..hash_cap {
+                let k = unsafe {
+                    read_varlen_value::<NanBox>(hash_arr, &ARRAY_TYPE, slot * 2).to_bits()
+                };
+                if k == nil {
+                    break;
+                } // empty slot — key not found
+                if k == key {
+                    // Update existing entry's value
+                    unsafe {
+                        write_varlen_value::<NanBox>(
+                            hash_arr,
+                            &ARRAY_TYPE,
+                            slot * 2 + 1,
+                            Value::from_bits(val),
+                        );
+                    }
+                    return;
+                }
+                slot = (slot + 1) & mask;
+            }
+        }
+    }
+
+    // Don't insert new entries with nil value (matches HashMap::remove behavior)
+    if is_nil(val) {
+        return;
+    }
+
+    // Resize if needed
+    if hash_cap == 0 || hash_count >= hash_cap * 3 / 4 {
+        let new_cap = if hash_cap == 0 { 4 } else { hash_cap * 2 };
+        let new_arr = alloc_nil_values(heap, new_cap * 2); // key-value pairs interleaved
+
+        // Rehash existing entries
+        if let Some(old_arr) = table_get_hash_ptr(table_ptr) {
+            let new_mask = new_cap - 1;
+            for i in 0..hash_cap {
+                let k =
+                    unsafe { read_varlen_value::<NanBox>(old_arr, &ARRAY_TYPE, i * 2).to_bits() };
+                if k != nil {
+                    let v = unsafe {
+                        read_varlen_value::<NanBox>(old_arr, &ARRAY_TYPE, i * 2 + 1).to_bits()
+                    };
+                    // Re-insert (skip nil-valued entries to compact)
+                    if !is_nil(v) {
+                        let mut s = hash_u64(k) & new_mask;
+                        loop {
+                            let sk = unsafe {
+                                read_varlen_value::<NanBox>(new_arr, &ARRAY_TYPE, s * 2).to_bits()
+                            };
+                            if sk == nil {
+                                unsafe {
+                                    write_varlen_value::<NanBox>(
+                                        new_arr,
+                                        &ARRAY_TYPE,
+                                        s * 2,
+                                        Value::from_bits(k),
+                                    );
+                                    write_varlen_value::<NanBox>(
+                                        new_arr,
+                                        &ARRAY_TYPE,
+                                        s * 2 + 1,
+                                        Value::from_bits(v),
+                                    );
+                                }
+                                break;
+                            }
+                            s = (s + 1) & new_mask;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Recount after rehash (nil-valued entries were dropped)
+        let mut new_count = 0;
+        for i in 0..new_cap {
+            let k = unsafe { read_varlen_value::<NanBox>(new_arr, &ARRAY_TYPE, i * 2).to_bits() };
+            if k != nil {
+                new_count += 1;
+            }
+        }
+
+        unsafe {
+            write_value_field::<NanBox>(
+                table_ptr,
+                &TABLE_TYPE,
+                0,
+                Value::from_bits(encode_gc_ptr(new_arr)),
+            );
+        }
+        hash_count = new_count;
+        hash_cap = new_cap;
+        table_write_meta(table_ptr, hash_count, hash_cap, array_len, array_cap);
+    }
+
+    // Insert new entry
+    let hash_arr = table_get_hash_ptr(table_ptr).unwrap();
+    let mask = hash_cap - 1;
+    let mut slot = hash_u64(key) & mask;
+    loop {
+        let k = unsafe { read_varlen_value::<NanBox>(hash_arr, &ARRAY_TYPE, slot * 2).to_bits() };
+        if k == nil {
+            unsafe {
+                write_varlen_value::<NanBox>(
+                    hash_arr,
+                    &ARRAY_TYPE,
+                    slot * 2,
+                    Value::from_bits(key),
+                );
+                write_varlen_value::<NanBox>(
+                    hash_arr,
+                    &ARRAY_TYPE,
+                    slot * 2 + 1,
+                    Value::from_bits(val),
+                );
+            }
+            hash_count += 1;
+            table_write_meta(table_ptr, hash_count, hash_cap, array_len, array_cap);
+            return;
+        }
+        slot = (slot + 1) & mask;
+    }
 }
 
-/// The Lua runtime state — a bag of functions, globals, and constants.
-/// No interpreter logic — that stays in the test harness using DynIR's Interpreter.
+// ── LuaRuntime ────────────────────────────────────────────────
+
+/// The Lua runtime state — a bag of functions, globals, and constants used by the JIT externs.
 pub struct LuaRuntime {
+    heap: *const Heap,
     globals: HashMap<String, u64>,
     pub constants: Vec<String>,
     /// Register file snapshot for passing args to calls
@@ -149,8 +550,12 @@ pub struct LuaRuntime {
     pub output: String,
 }
 
+// Safety: LuaRuntime is only used single-threaded. The raw pointer to Heap
+// is valid for the lifetime of the runtime.
+unsafe impl Send for LuaRuntime {}
+
 impl LuaRuntime {
-    pub fn new(constants: &[crate::bytecode::Constant]) -> Self {
+    pub fn new(heap: &Heap, constants: &[crate::bytecode::Constant]) -> Self {
         let mut string_constants = Vec::new();
         for c in constants {
             match c {
@@ -160,6 +565,7 @@ impl LuaRuntime {
         }
 
         let mut rt = LuaRuntime {
+            heap: heap as *const Heap,
             globals: HashMap::new(),
             constants: string_constants,
             register_file: Vec::new(),
@@ -170,27 +576,88 @@ impl LuaRuntime {
         rt
     }
 
-    fn init_stdlib(&mut self) {
-        self.globals.insert("print".to_string(), NanBox::encode_tagged(TAG_INTERN, 0x0002_0000_0000));
-        self.globals.insert("type".to_string(), NanBox::encode_tagged(TAG_INTERN, 0x0002_0000_0001));
-        self.globals.insert("tostring".to_string(), NanBox::encode_tagged(TAG_INTERN, 0x0002_0000_0002));
-        self.globals.insert("tonumber".to_string(), NanBox::encode_tagged(TAG_INTERN, 0x0002_0000_0003));
-        self.globals.insert("pairs".to_string(), NanBox::encode_tagged(TAG_INTERN, 0x0002_0000_0004));
-        self.globals.insert("ipairs".to_string(), NanBox::encode_tagged(TAG_INTERN, 0x0002_0000_0005));
-        self.globals.insert("assert".to_string(), NanBox::encode_tagged(TAG_INTERN, 0x0002_0000_0006));
-        self.globals.insert("error".to_string(), NanBox::encode_tagged(TAG_INTERN, 0x0002_0000_0007));
-        self.globals.insert("pcall".to_string(), NanBox::encode_tagged(TAG_INTERN, 0x0002_0000_0008));
-        self.globals.insert("select".to_string(), NanBox::encode_tagged(TAG_INTERN, 0x0002_0000_0009));
-        self.globals.insert("unpack".to_string(), NanBox::encode_tagged(TAG_INTERN, 0x0002_0000_000A));
-        self.globals.insert("rawget".to_string(), NanBox::encode_tagged(TAG_INTERN, 0x0002_0000_000B));
-        self.globals.insert("rawset".to_string(), NanBox::encode_tagged(TAG_INTERN, 0x0002_0000_000C));
-        self.globals.insert("setmetatable".to_string(), NanBox::encode_tagged(TAG_INTERN, 0x0002_0000_000D));
-        self.globals.insert("getmetatable".to_string(), NanBox::encode_tagged(TAG_INTERN, 0x0002_0000_000E));
+    pub fn heap_ref(&self) -> &Heap {
+        unsafe { &*self.heap }
+    }
 
-        self.globals.insert("math".to_string(), NanBox::encode_tagged(TAG_INTERN, 0x0003_0000_0000));
-        self.globals.insert("string".to_string(), NanBox::encode_tagged(TAG_INTERN, 0x0003_0000_0001));
-        self.globals.insert("table".to_string(), NanBox::encode_tagged(TAG_INTERN, 0x0003_0000_0002));
-        self.globals.insert("io".to_string(), NanBox::encode_tagged(TAG_INTERN, 0x0003_0000_0003));
+    fn init_stdlib(&mut self) {
+        self.globals.insert(
+            "print".to_string(),
+            NanBox::encode_tagged(TAG_INTERN, 0x0002_0000_0000),
+        );
+        self.globals.insert(
+            "type".to_string(),
+            NanBox::encode_tagged(TAG_INTERN, 0x0002_0000_0001),
+        );
+        self.globals.insert(
+            "tostring".to_string(),
+            NanBox::encode_tagged(TAG_INTERN, 0x0002_0000_0002),
+        );
+        self.globals.insert(
+            "tonumber".to_string(),
+            NanBox::encode_tagged(TAG_INTERN, 0x0002_0000_0003),
+        );
+        self.globals.insert(
+            "pairs".to_string(),
+            NanBox::encode_tagged(TAG_INTERN, 0x0002_0000_0004),
+        );
+        self.globals.insert(
+            "ipairs".to_string(),
+            NanBox::encode_tagged(TAG_INTERN, 0x0002_0000_0005),
+        );
+        self.globals.insert(
+            "assert".to_string(),
+            NanBox::encode_tagged(TAG_INTERN, 0x0002_0000_0006),
+        );
+        self.globals.insert(
+            "error".to_string(),
+            NanBox::encode_tagged(TAG_INTERN, 0x0002_0000_0007),
+        );
+        self.globals.insert(
+            "pcall".to_string(),
+            NanBox::encode_tagged(TAG_INTERN, 0x0002_0000_0008),
+        );
+        self.globals.insert(
+            "select".to_string(),
+            NanBox::encode_tagged(TAG_INTERN, 0x0002_0000_0009),
+        );
+        self.globals.insert(
+            "unpack".to_string(),
+            NanBox::encode_tagged(TAG_INTERN, 0x0002_0000_000A),
+        );
+        self.globals.insert(
+            "rawget".to_string(),
+            NanBox::encode_tagged(TAG_INTERN, 0x0002_0000_000B),
+        );
+        self.globals.insert(
+            "rawset".to_string(),
+            NanBox::encode_tagged(TAG_INTERN, 0x0002_0000_000C),
+        );
+        self.globals.insert(
+            "setmetatable".to_string(),
+            NanBox::encode_tagged(TAG_INTERN, 0x0002_0000_000D),
+        );
+        self.globals.insert(
+            "getmetatable".to_string(),
+            NanBox::encode_tagged(TAG_INTERN, 0x0002_0000_000E),
+        );
+
+        self.globals.insert(
+            "math".to_string(),
+            NanBox::encode_tagged(TAG_INTERN, 0x0003_0000_0000),
+        );
+        self.globals.insert(
+            "string".to_string(),
+            NanBox::encode_tagged(TAG_INTERN, 0x0003_0000_0001),
+        );
+        self.globals.insert(
+            "table".to_string(),
+            NanBox::encode_tagged(TAG_INTERN, 0x0003_0000_0002),
+        );
+        self.globals.insert(
+            "io".to_string(),
+            NanBox::encode_tagged(TAG_INTERN, 0x0003_0000_0003),
+        );
     }
 
     pub fn resolve_string(&self, v: u64) -> Option<String> {
@@ -214,7 +681,11 @@ impl LuaRuntime {
         if is_nil(v) {
             "nil".to_string()
         } else if is_bool(v) {
-            if as_bool_payload(v) { "true".to_string() } else { "false".to_string() }
+            if as_bool_payload(v) {
+                "true".to_string()
+            } else {
+                "false".to_string()
+            }
         } else if is_number(v) {
             let n = as_number(v);
             if n == n.floor() && n.abs() < 1e15 && !n.is_infinite() {
@@ -229,6 +700,8 @@ impl LuaRuntime {
         } else if is_intern(v) {
             let payload = NanBox::extract_payload(v);
             format!("function: 0x{:x}", payload)
+        } else if is_table(v) {
+            "table".to_string()
         } else {
             format!("userdata: 0x{:016x}", v)
         }
@@ -301,6 +774,10 @@ impl LuaRuntime {
     pub fn lua_len(&self, a: u64) -> u64 {
         if let Some(s) = self.resolve_string(a) {
             make_number(s.len() as f64)
+        } else if is_table(a) {
+            let ptr = NanBox::extract_payload(a) as *const u8;
+            let (_, _, array_len, _) = table_read_meta(ptr);
+            make_number(array_len as f64)
         } else {
             make_number(0.0)
         }
@@ -344,14 +821,18 @@ impl LuaRuntime {
     pub fn lua_concat(&self, a: u64, b: u64) -> u64 {
         let sa = self.value_to_string(a);
         let sb = self.value_to_string(b);
-        make_string(format!("{}{}", sa, sb))
+        let combined = format!("{}{}", sa, sb);
+        make_string_on_heap(self.heap_ref(), &combined)
     }
 
     // ── Globals ────────────────────────────────────────────────
 
     pub fn lua_getglobal(&self, name: u64) -> u64 {
         if let Some(name_str) = self.resolve_string(name) {
-            self.globals.get(&name_str).copied().unwrap_or_else(make_nil)
+            self.globals
+                .get(&name_str)
+                .copied()
+                .unwrap_or_else(make_nil)
         } else {
             make_nil()
         }
@@ -366,17 +847,26 @@ impl LuaRuntime {
     // ── Tables ─────────────────────────────────────────────────
 
     pub fn lua_newtable(&mut self) -> u64 {
-        let table = Box::new(LuaTable::new());
-        let ptr = Box::into_raw(table) as u64;
-        NanBox::encode_tagged(TAG_PTR, ptr & 0x0000_FFFF_FFFF_FFFF)
+        let heap = self.heap_ref();
+        let ptr = heap.alloc_obj::<Compact>(&TABLE_TYPE, 0);
+        assert!(!ptr.is_null(), "GC heap exhausted during table allocation");
+        unsafe {
+            write_value_field::<NanBox>(ptr, &TABLE_TYPE, 0, Value::from_bits(make_nil()));
+            write_value_field::<NanBox>(ptr, &TABLE_TYPE, 1, Value::from_bits(make_nil()));
+            let raw = raw_data_mut(ptr, &TABLE_TYPE);
+            raw.fill(0);
+        }
+        encode_gc_ptr(ptr)
     }
 
     pub fn lua_gettable(&self, table: u64, key: u64) -> u64 {
-        if NanBox::has_tag(table, TAG_PTR) && !is_closure(table) {
-            let ptr = NanBox::extract_payload(table) as *const LuaTable;
-            if !ptr.is_null() {
-                let t = unsafe { &*ptr };
-                return t.get(key);
+        if NanBox::has_tag(table, TAG_PTR) {
+            let payload = NanBox::extract_payload(table);
+            if payload != 0 {
+                let ptr = payload as *const u8;
+                if obj_type_from_ptr(ptr) == ObjType::Table {
+                    return table_get(ptr, key);
+                }
             }
         }
         if is_intern(table) {
@@ -393,29 +883,34 @@ impl LuaRuntime {
     }
 
     pub fn lua_settable(&self, table: u64, key: u64, val: u64) {
-        if NanBox::has_tag(table, TAG_PTR) && !is_closure(table) {
-            let ptr = NanBox::extract_payload(table) as *mut LuaTable;
-            if !ptr.is_null() {
-                let t = unsafe { &mut *ptr };
-                t.set(key, val);
+        if NanBox::has_tag(table, TAG_PTR) {
+            let payload = NanBox::extract_payload(table);
+            if payload != 0 {
+                let ptr = payload as *mut u8;
+                if obj_type_from_ptr(ptr) == ObjType::Table {
+                    table_set(self.heap_ref(), ptr, key, val);
+                }
             }
         }
     }
 
     pub fn lua_setlist_from_regfile(&self, table: u64, base: usize, offset: usize, count: usize) {
-        if NanBox::has_tag(table, TAG_PTR) && !is_closure(table) {
-            let ptr = NanBox::extract_payload(table) as *mut LuaTable;
-            if !ptr.is_null() {
-                let t = unsafe { &mut *ptr };
-                let actual_count = if count == 0 {
-                    self.register_file.len().saturating_sub(base)
-                } else {
-                    count
-                };
-                for i in 0..actual_count {
-                    if base + i < self.register_file.len() {
-                        let key = make_number((offset + i + 1) as f64);
-                        t.set(key, self.register_file[base + i]);
+        if NanBox::has_tag(table, TAG_PTR) {
+            let payload = NanBox::extract_payload(table);
+            if payload != 0 {
+                let ptr = payload as *mut u8;
+                if obj_type_from_ptr(ptr) == ObjType::Table {
+                    let actual_count = if count == 0 {
+                        self.register_file.len().saturating_sub(base)
+                    } else {
+                        count
+                    };
+                    let heap = self.heap_ref();
+                    for i in 0..actual_count {
+                        if base + i < self.register_file.len() {
+                            let key = make_number((offset + i + 1) as f64);
+                            table_set(heap, ptr, key, self.register_file[base + i]);
+                        }
                     }
                 }
             }
@@ -443,8 +938,6 @@ impl LuaRuntime {
 
     // ── Calls ──────────────────────────────────────────────────
 
-    /// Call a Lua function value. For built-in functions, dispatch here.
-    /// For closures, the caller (test harness) handles it via call_handler.
     /// Call a built-in function. Closures are dispatched externally by the test harness.
     pub fn lua_call(&mut self, func: u64, base_reg: usize, nargs: usize) -> u64 {
         if is_intern(func) {
@@ -458,8 +951,10 @@ impl LuaRuntime {
                 return self.call_math(low, base_reg, nargs);
             }
         }
-        panic!("attempt to call a {} value (closures must be dispatched externally)",
-            if is_nil(func) { "nil" } else { "non-function" });
+        panic!(
+            "attempt to call a {} value (closures must be dispatched externally)",
+            if is_nil(func) { "nil" } else { "non-function" }
+        );
     }
 
     fn call_builtin(&mut self, id: u32, base_reg: usize, nargs: usize) -> u64 {
@@ -475,14 +970,20 @@ impl LuaRuntime {
                 make_nil()
             }
             6 => {
-                if nargs < 1 { panic!("assertion failed!"); }
+                if nargs < 1 {
+                    panic!("assertion failed!");
+                }
                 let v = self.register_file[base_reg];
-                if !is_truthy(v) { panic!("assertion failed!"); }
+                if !is_truthy(v) {
+                    panic!("assertion failed!");
+                }
                 v
             }
             7 => panic!("error raised"),
             3 => {
-                if nargs < 1 { return make_nil(); }
+                if nargs < 1 {
+                    return make_nil();
+                }
                 let v = self.register_file[base_reg];
                 if is_number(v) { v } else { make_nil() }
             }
@@ -491,9 +992,13 @@ impl LuaRuntime {
     }
 
     fn call_math(&self, id: u32, base_reg: usize, nargs: usize) -> u64 {
-        if nargs < 1 { return make_nil(); }
+        if nargs < 1 {
+            return make_nil();
+        }
         let a = self.register_file[base_reg];
-        if !is_number(a) { panic!("bad argument to math function"); }
+        if !is_number(a) {
+            panic!("bad argument to math function");
+        }
         let na = as_number(a);
 
         match id {
@@ -504,14 +1009,26 @@ impl LuaRuntime {
             4 => make_number(na.sin()),
             5 => make_number(na.cos()),
             6 => {
-                if nargs < 2 { return a; }
+                if nargs < 2 {
+                    return a;
+                }
                 let b = self.register_file[base_reg + 1];
-                if is_number(b) { make_number(na.max(as_number(b))) } else { a }
+                if is_number(b) {
+                    make_number(na.max(as_number(b)))
+                } else {
+                    a
+                }
             }
             7 => {
-                if nargs < 2 { return a; }
+                if nargs < 2 {
+                    return a;
+                }
                 let b = self.register_file[base_reg + 1];
-                if is_number(b) { make_number(na.min(as_number(b))) } else { a }
+                if is_number(b) {
+                    make_number(na.min(as_number(b)))
+                } else {
+                    a
+                }
             }
             _ => make_nil(),
         }
@@ -533,7 +1050,11 @@ impl LuaRuntime {
             let lim = as_number(limit);
             let stp = as_number(step);
             let continue_loop = if stp > 0.0 { idx <= lim } else { idx >= lim };
-            if continue_loop { make_number(idx) } else { make_nil() }
+            if continue_loop {
+                make_number(idx)
+            } else {
+                make_nil()
+            }
         } else {
             panic!("'for' values must be numbers");
         }
@@ -542,53 +1063,22 @@ impl LuaRuntime {
     pub fn lua_is_nil(&self, v: u64) -> u64 {
         make_bool(is_nil(v))
     }
-}
 
-/// Simple Lua table using a HashMap<u64, u64>.
-pub struct LuaTable {
-    hash: HashMap<u64, u64>,
-    array: Vec<u64>,
-}
-
-impl LuaTable {
-    fn new() -> Self {
-        LuaTable {
-            hash: HashMap::new(),
-            array: Vec::new(),
-        }
-    }
-
-    fn get(&self, key: u64) -> u64 {
-        if is_number(key) {
-            let n = as_number(key);
-            if n == n.floor() && n >= 1.0 {
-                let idx = n as usize;
-                if idx <= self.array.len() && idx > 0 {
-                    return self.array[idx - 1];
-                }
+    /// Scan all GC roots in this runtime for the collector.
+    ///
+    /// # Safety
+    /// Must only be called during a GC safepoint when no other code
+    /// is accessing the runtime. Uses a raw pointer to allow the GC
+    /// to update forwarded pointers in-place.
+    pub unsafe fn scan_gc_roots(rt_ptr: *mut LuaRuntime, visitor: &mut dyn FnMut(*mut u64)) {
+        unsafe {
+            let rt = &mut *rt_ptr;
+            for val in rt.globals.values_mut() {
+                visitor(val as *mut u64);
             }
-        }
-        self.hash.get(&key).copied().unwrap_or_else(make_nil)
-    }
-
-    fn set(&mut self, key: u64, val: u64) {
-        if is_number(key) {
-            let n = as_number(key);
-            if n == n.floor() && n >= 1.0 {
-                let idx = n as usize;
-                if idx <= self.array.len() + 1 {
-                    while self.array.len() < idx {
-                        self.array.push(make_nil());
-                    }
-                    self.array[idx - 1] = val;
-                    return;
-                }
+            for val in rt.register_file.iter_mut() {
+                visitor(val as *mut u64);
             }
-        }
-        if is_nil(val) {
-            self.hash.remove(&key);
-        } else {
-            self.hash.insert(key, val);
         }
     }
 }

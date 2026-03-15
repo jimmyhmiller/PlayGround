@@ -1,6 +1,7 @@
 import SwiftUI
 import PencilKit
 import PDFKit
+import UniformTypeIdentifiers
 
 #if os(macOS)
 import AppKit
@@ -131,6 +132,60 @@ struct ContentView: View {
                 sharedPDFManager.clearPending()
             }
         }
+        .onChange(of: sharedPDFManager.needsLibraryReload) { oldValue, newValue in
+            if newValue {
+                sharedPDFManager.needsLibraryReload = false
+                Task {
+                    await loadLibrary()
+                }
+            }
+        }
+        .onDrop(of: [UTType.pdf, UTType.fileURL], isTargeted: nil) { providers in
+            guard let provider = providers.first else { return false }
+            let manager = self.sharedPDFManager
+            print("📎 Drop received. Registered types: \(provider.registeredTypeIdentifiers)")
+            // Try loading as file URL first (Finder drag on macOS)
+            if provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) {
+                provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { item, error in
+                    if let error = error {
+                        print("📎 Error loading file URL: \(error)")
+                        return
+                    }
+                    print("📎 Item type: \(type(of: item)), value: \(String(describing: item))")
+                    var fileURL: URL?
+                    if let data = item as? Data {
+                        fileURL = URL(dataRepresentation: data, relativeTo: nil)
+                    } else if let url = item as? URL {
+                        fileURL = url
+                    } else if let urlString = item as? String {
+                        fileURL = URL(string: urlString)
+                    }
+                    guard let url = fileURL, url.pathExtension.lowercased() == "pdf" else {
+                        print("📎 Not a PDF or couldn't parse URL: \(String(describing: fileURL))")
+                        return
+                    }
+                    print("📎 Got PDF URL: \(url)")
+                    DispatchQueue.main.async {
+                        manager.handleIncomingPDF(url: url)
+                    }
+                }
+            } else if provider.hasItemConformingToTypeIdentifier(UTType.pdf.identifier) {
+                provider.loadFileRepresentation(forTypeIdentifier: UTType.pdf.identifier) { url, error in
+                    guard let url = url else {
+                        print("📎 loadFileRepresentation returned nil URL, error: \(String(describing: error))")
+                        return
+                    }
+                    let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent(url.lastPathComponent)
+                    try? FileManager.default.removeItem(at: tempURL)
+                    try? FileManager.default.copyItem(at: url, to: tempURL)
+                    print("📎 Got PDF via file representation: \(tempURL)")
+                    DispatchQueue.main.async {
+                        manager.handleIncomingPDF(url: tempURL)
+                    }
+                }
+            }
+            return true
+        }
     }
 
     func loadLibrary() async {
@@ -138,7 +193,7 @@ struct ContentView: View {
         defer { isLoadingLibrary = false }
 
         await Task.detached {
-            S3StateManager.shared.loadState()
+            await S3StateManager.shared.loadStateAsync()
 
             do {
                 guard AWSCredentials.isConfigured() else {

@@ -109,10 +109,7 @@ impl<S: TagScheme> fmt::Debug for Value<S> {
                 .field("tag", &tag)
                 .field("payload", &format_args!("{payload:#x}"))
                 .finish(),
-            Decoded::Float(v) => f
-                .debug_struct("Value")
-                .field("float", &v)
-                .finish(),
+            Decoded::Float(v) => f.debug_struct("Value").field("float", &v).finish(),
         }
     }
 }

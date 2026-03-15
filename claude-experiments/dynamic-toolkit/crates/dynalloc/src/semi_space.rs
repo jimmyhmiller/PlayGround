@@ -1,6 +1,5 @@
 use dynobj::{
-    read_type_info, read_varlen_count, scan_object,
-    ObjHeader, RootSource, TypeInfo, VarLenKind,
+    ObjHeader, RootSource, TypeInfo, VarLenKind, read_type_info, read_varlen_count, scan_object,
 };
 
 use crate::alloc::{Alloc, BumpAllocator};
@@ -73,11 +72,7 @@ impl SemiSpace {
     /// Allocate an object in from-space, initialize header and varlen count.
     ///
     /// Returns null if from-space is exhausted.
-    pub fn alloc_obj<H: ObjHeader>(
-        &self,
-        info: &'static TypeInfo,
-        varlen_len: usize,
-    ) -> *mut u8 {
+    pub fn alloc_obj<H: ObjHeader>(&self, info: &'static TypeInfo, varlen_len: usize) -> *mut u8 {
         unsafe { crate::alloc::alloc_obj::<H>(&self.from, info, varlen_len) }
     }
 

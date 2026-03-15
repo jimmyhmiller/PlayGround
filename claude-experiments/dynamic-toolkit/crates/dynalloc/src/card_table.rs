@@ -66,14 +66,17 @@ impl CardTable {
 
     /// Iterate over dirty cards, yielding (card_index, card_start_address).
     pub fn iter_dirty(&self) -> impl Iterator<Item = (usize, *const u8)> + '_ {
-        self.cards.iter().enumerate().filter_map(move |(idx, &val)| {
-            if val == CARD_DIRTY {
-                let addr = self.base_addr + (idx << CARD_SHIFT);
-                Some((idx, addr as *const u8))
-            } else {
-                None
-            }
-        })
+        self.cards
+            .iter()
+            .enumerate()
+            .filter_map(move |(idx, &val)| {
+                if val == CARD_DIRTY {
+                    let addr = self.base_addr + (idx << CARD_SHIFT);
+                    Some((idx, addr as *const u8))
+                } else {
+                    None
+                }
+            })
     }
 
     /// Number of cards in the table.

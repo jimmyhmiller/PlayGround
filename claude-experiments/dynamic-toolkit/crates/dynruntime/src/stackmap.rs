@@ -1,54 +1,91 @@
-use dynalloc::{Heap, Mutator, Root};
-use dynir::{Function, InterpError, InterpResult, Interpreter};
-use dynvalue::LowBit;
+use std::cell::RefCell;
+use std::marker::PhantomData;
+
+use dynalloc::{Heap, Mutator, PtrPolicy, Root, RootScope};
+use dynexec::RootPrecision;
+use dynir::InterpRootManager;
 use dynobj::{Compact, ObjHeader, TypeInfo};
 
-use crate::ptr_policy::LowBitPtrPolicy;
+// ─── MutatorRootManager ─────────────────────────────────────────────
 
-// ─── StackmapGcInterp ───────────────────────────────────────────────
-
-/// GC-integrated interpreter using tagged pointers + stackmap-based root finding.
-///
-/// Uses `LowBit<N>` tagging where tag 0 = heap pointer. At each `Safepoint`
-/// instruction, the live GcPtr values from the SSA value array are mirrored
-/// into a [`Mutator`]'s root slots, the GC updates them in-place, and the
-/// updated values are read back.
-///
-/// This models how a JIT compiler would work: the compiler emits stack maps
-/// at each safepoint recording which registers/stack slots hold GC pointers.
-/// The interpreter's `vals` array is the conceptual "register file".
-///
-/// Uses [`Heap`] for thread-safe allocation and collection, and [`Mutator`]
-/// from dynalloc for root management.
-pub struct StackmapGcInterp<const N: u32> {
-    heap: Heap,
+/// Per-frame scope info for the MutatorRootManager.
+struct MutatorFrameScope {
+    scope: RootScope,
+    roots: Vec<Root>,
 }
 
-impl<const N: u32> StackmapGcInterp<N> {
-    /// Create a new stackmap interpreter with a heap-backed GC.
-    ///
-    /// `space_size` is the size of each semi-space in bytes.
+/// Root manager for [`ModuleInterpreter`] using [`Mutator`]-based root tracking,
+/// generic over [`PtrPolicy`].
+///
+/// Each pushed frame creates new Root handles in the Mutator via `save`/`restore`
+/// scoping. The GC traces the Mutator's root slots to find all live heap pointers.
+///
+/// Implements [`InterpRootManager`] so it can be stored in a [`ModuleInterpreter`].
+pub struct MutatorRootManager<P: PtrPolicy> {
+    heap: Heap,
+    mutator: RefCell<Mutator>,
+    frame_scopes: RefCell<Vec<MutatorFrameScope>>,
+    roots_all: bool,
+    gc_threshold: f64,
+    _policy: PhantomData<P>,
+}
+
+impl<P: PtrPolicy> MutatorRootManager<P> {
+    /// Create a new root manager with the given semi-space size.
     pub fn new(space_size: usize) -> Self {
-        StackmapGcInterp {
+        MutatorRootManager {
             heap: Heap::new::<Compact>(space_size),
+            mutator: RefCell::new(Mutator::new()),
+            frame_scopes: RefCell::new(Vec::new()),
+            roots_all: false,
+            gc_threshold: 0.0,
+            _policy: PhantomData,
         }
     }
 
     /// Create with a custom header type.
     pub fn new_with_header<H: ObjHeader>(space_size: usize) -> Self {
-        StackmapGcInterp {
+        MutatorRootManager {
             heap: Heap::new::<H>(space_size),
+            mutator: RefCell::new(Mutator::new()),
+            frame_scopes: RefCell::new(Vec::new()),
+            roots_all: false,
+            gc_threshold: 0.0,
+            _policy: PhantomData,
         }
     }
 
-    /// Allocate a heap object, initialize its header, and return the raw pointer.
-    ///
-    /// The pointer has tag 0 (aligned, low bits zero) so it can be used
-    /// directly as a LowBit-tagged value.
-    ///
-    /// Returns null if space is exhausted.
+    /// Configure whether interpreter frames should conservatively expose every
+    /// value slot to the collector.
+    pub fn with_roots_all(mut self, roots_all: bool) -> Self {
+        self.roots_all = roots_all;
+        self
+    }
+
+    /// Set GC threshold: only collect when from-space usage exceeds this fraction (0.0–1.0).
+    /// Default 0.0 means collect at every safepoint.
+    pub fn with_gc_threshold(mut self, threshold: f64) -> Self {
+        self.gc_threshold = threshold;
+        self
+    }
+
+    /// Allocate a heap object.
     pub fn alloc(&self, info: &'static TypeInfo, varlen_len: usize) -> *mut u8 {
         self.heap.alloc_obj::<Compact>(info, varlen_len)
+    }
+
+    /// Allocate a heap object with a custom header type.
+    pub fn alloc_with_header<H: ObjHeader>(
+        &self,
+        info: &'static TypeInfo,
+        varlen_len: usize,
+    ) -> *mut u8 {
+        self.heap.alloc_obj::<H>(info, varlen_len)
+    }
+
+    /// Access the underlying heap (e.g. for sharing with a runtime that allocates).
+    pub fn heap(&self) -> &Heap {
+        &self.heap
     }
 
     /// Number of collections so far.
@@ -60,99 +97,66 @@ impl<const N: u32> StackmapGcInterp<N> {
     pub fn from_used(&self) -> usize {
         self.heap.from_used()
     }
+}
 
-    /// Run a function with GC integration.
-    ///
-    /// Pre-allocates [`Root`] handles in a [`Mutator`] for all GcPtr-typed SSA
-    /// values. At each `Safepoint`, live values are mirrored into the Mutator,
-    /// the Heap collects with the Mutator as a root source, and updated values
-    /// are read back.
-    pub fn run(
-        &self,
-        interp: &Interpreter<'_, LowBit<N>>,
-        func: &Function,
-        args: &[u64],
-    ) -> Result<InterpResult, InterpError> {
-        // Build mapping: SSA value index → Root handle (only for GcPtr values).
-        let mut mutator = Mutator::new();
-        let mut val_to_root: Vec<Option<Root>> = vec![None; func.value_types.len()];
-        for (i, ty) in func.value_types.iter().enumerate() {
-            if ty.is_gc() {
-                val_to_root[i] = Some(mutator.root(0));
-            }
-        }
-
-        let val_to_root_ref = &val_to_root;
-
-        interp.run_with_safepoint(args, |vals, live_values| {
-            // Clear all root slots (don't trace stale pointers).
-            for root_opt in val_to_root_ref.iter().flatten() {
-                mutator.set(root_opt, 0);
-            }
-
-            // Mirror live GcPtr values into Mutator root slots.
-            for v in live_values {
-                if let Some(root) = &val_to_root_ref[v.index()] {
-                    mutator.set(root, vals[v.index()]);
-                }
-            }
-
-            // Trigger GC — the Mutator is the root source.
-            unsafe {
-                self.heap.collect::<LowBitPtrPolicy<N>>(&[&mutator]);
-            }
-
-            // Read back (possibly forwarded) values from Mutator.
-            for v in live_values {
-                if let Some(root) = &val_to_root_ref[v.index()] {
-                    vals[v.index()] = mutator.get(root).bits();
-                }
-            }
-        })
+impl<P: PtrPolicy> InterpRootManager for MutatorRootManager<P> {
+    fn push_frame(&self, gc_slot_count: usize) -> usize {
+        let mut mutator = self.mutator.borrow_mut();
+        let scope = mutator.save();
+        let roots: Vec<Root> = (0..gc_slot_count).map(|_| mutator.root(0)).collect();
+        let mut scopes = self.frame_scopes.borrow_mut();
+        let idx = scopes.len();
+        scopes.push(MutatorFrameScope { scope, roots });
+        idx
     }
 
-    /// Run a function, triggering GC only when from-space usage exceeds
-    /// the given threshold (as a fraction, 0.0 to 1.0).
-    pub fn run_with_threshold(
-        &self,
-        interp: &Interpreter<'_, LowBit<N>>,
-        func: &Function,
-        args: &[u64],
-        threshold: f64,
-    ) -> Result<InterpResult, InterpError> {
-        let mut mutator = Mutator::new();
-        let mut val_to_root: Vec<Option<Root>> = vec![None; func.value_types.len()];
-        for (i, ty) in func.value_types.iter().enumerate() {
-            if ty.is_gc() {
-                val_to_root[i] = Some(mutator.root(0));
+    fn pop_frame(&self) {
+        let frame_scope = self
+            .frame_scopes
+            .borrow_mut()
+            .pop()
+            .expect("no frame to pop");
+        self.mutator.borrow_mut().restore(frame_scope.scope);
+    }
+
+    fn set_root(&self, frame: usize, slot: usize, value: u64) {
+        let scopes = self.frame_scopes.borrow();
+        let root = &scopes[frame].roots[slot];
+        self.mutator.borrow().set(root, value);
+    }
+
+    fn get_root(&self, frame: usize, slot: usize) -> u64 {
+        let scopes = self.frame_scopes.borrow();
+        let root = &scopes[frame].roots[slot];
+        self.mutator.borrow().get(root).bits()
+    }
+
+    fn clear_frame(&self, frame: usize) {
+        let scopes = self.frame_scopes.borrow();
+        let mutator = self.mutator.borrow();
+        for root in &scopes[frame].roots {
+            mutator.set(root, 0);
+        }
+    }
+
+    fn collect(&self) {
+        if self.gc_threshold > 0.0 {
+            let usage = self.heap.from_used() as f64 / self.heap.space_size() as f64;
+            if usage < self.gc_threshold {
+                return;
             }
         }
+        let mutator = self.mutator.borrow();
+        unsafe {
+            self.heap.collect::<P>(&[&*mutator]);
+        }
+    }
 
-        let val_to_root_ref = &val_to_root;
-
-        interp.run_with_safepoint(args, |vals, live_values| {
-            let usage = self.heap.from_used() as f64 / self.heap.space_size() as f64;
-
-            if usage >= threshold {
-                for root_opt in val_to_root_ref.iter().flatten() {
-                    mutator.set(root_opt, 0);
-                }
-                for v in live_values {
-                    if let Some(root) = &val_to_root_ref[v.index()] {
-                        mutator.set(root, vals[v.index()]);
-                    }
-                }
-
-                unsafe {
-                    self.heap.collect::<LowBitPtrPolicy<N>>(&[&mutator]);
-                }
-
-                for v in live_values {
-                    if let Some(root) = &val_to_root_ref[v.index()] {
-                        vals[v.index()] = mutator.get(root).bits();
-                    }
-                }
-            }
-        })
+    fn root_precision(&self) -> RootPrecision {
+        if self.roots_all {
+            RootPrecision::ConservativeWords
+        } else {
+            RootPrecision::PreciseSlots
+        }
     }
 }

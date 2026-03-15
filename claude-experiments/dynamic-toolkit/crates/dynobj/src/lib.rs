@@ -1,22 +1,24 @@
-mod header;
-mod type_info;
 mod field;
-mod scan;
+mod header;
 pub mod roots;
+mod scan;
+mod type_info;
 
 #[doc(hidden)]
 pub use paste::paste as __paste;
 
-pub use header::{ObjHeader, Compact, Full};
-pub use type_info::{TypeInfo, VarLenKind};
 pub use field::{
-    init_header, read_type_info, read_value_field, write_value_field,
-    read_raw_bytes, raw_data_mut,
-    read_varlen_count, read_varlen_value, write_varlen_value,
-    read_varlen_bytes, write_varlen_count,
+    init_header, raw_data_mut, read_raw_bytes, read_type_info, read_value_field, read_varlen_bytes,
+    read_varlen_count, read_varlen_value, write_value_field, write_varlen_count,
+    write_varlen_value,
+};
+pub use header::{Compact, Full, ObjHeader};
+pub use roots::{
+    AtomicRootSet, DynRootFrame, FrameChain, FrameGuard, FrameHeader, RootFrame, RootSet,
+    RootSource,
 };
 pub use scan::scan_object;
-pub use roots::{RootSource, FrameHeader, RootFrame, FrameChain, FrameGuard, DynRootFrame, RootSet, AtomicRootSet};
+pub use type_info::{TypeInfo, VarLenKind};
 
 #[cfg(test)]
 mod tests;

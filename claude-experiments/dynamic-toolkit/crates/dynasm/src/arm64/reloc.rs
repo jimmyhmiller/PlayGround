@@ -1,5 +1,5 @@
-use crate::{Arch, CodeBuffer};
 use super::inst::Arm64Inst;
+use crate::{Arch, CodeBuffer};
 
 /// Marker type for the ARM64 architecture.
 pub struct Arm64;

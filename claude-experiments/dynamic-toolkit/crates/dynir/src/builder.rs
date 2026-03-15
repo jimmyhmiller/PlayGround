@@ -1,6 +1,156 @@
 use crate::ir::*;
 use crate::types::{Signature, Type};
 
+// ─── ModuleBuilder ─────────────────────────────────────────────────
+
+enum ModuleEntryKind {
+    Extern,
+    Internal(usize), // index into internal_funcs
+}
+
+struct ModuleEntry {
+    name: String,
+    sig: Signature,
+    kind: ModuleEntryKind,
+}
+
+/// Builder for constructing a [`Module`] containing multiple functions.
+///
+/// Usage: declare all functions and externs first, then define each internal
+/// function using [`define_func`], and finally call [`build`].
+///
+/// ```ignore
+/// let mut mb = ModuleBuilder::new();
+/// let ext = mb.declare_extern("print", sig);
+/// let f1 = mb.declare_func("main", &[Type::I64], Some(Type::I64));
+/// let f2 = mb.declare_func("helper", &[Type::I64], Some(Type::I64));
+///
+/// let mut fb = mb.define_func(f1);
+/// // ... build function body using fb ...
+/// mb.finish_func(f1, fb);
+///
+/// let mut fb = mb.define_func(f2);
+/// // ... build function body ...
+/// mb.finish_func(f2, fb);
+///
+/// let module = mb.build();
+/// ```
+pub struct ModuleBuilder {
+    entries: Vec<ModuleEntry>,
+    internal_funcs: Vec<Option<Function>>,
+}
+
+impl ModuleBuilder {
+    pub fn new() -> Self {
+        ModuleBuilder {
+            entries: Vec::new(),
+            internal_funcs: Vec::new(),
+        }
+    }
+
+    /// Declare an extern (host-provided) function. Returns a module-global FuncRef.
+    pub fn declare_extern(&mut self, name: &str, sig: Signature) -> FuncRef {
+        let fref = FuncRef(self.entries.len() as u32);
+        self.entries.push(ModuleEntry {
+            name: name.to_string(),
+            sig,
+            kind: ModuleEntryKind::Extern,
+        });
+        fref
+    }
+
+    /// Declare an internal function. Returns a module-global FuncRef.
+    /// Call [`define_func`] later to provide the function body.
+    pub fn declare_func(&mut self, name: &str, params: &[Type], ret: Option<Type>) -> FuncRef {
+        let fref = FuncRef(self.entries.len() as u32);
+        let internal_idx = self.internal_funcs.len();
+        self.internal_funcs.push(None);
+        self.entries.push(ModuleEntry {
+            name: name.to_string(),
+            sig: Signature {
+                params: params.to_vec(),
+                ret,
+            },
+            kind: ModuleEntryKind::Internal(internal_idx),
+        });
+        fref
+    }
+
+    /// Create a [`FunctionBuilder`] for a previously declared internal function.
+    ///
+    /// All declarations (both extern and internal) must be done before calling this,
+    /// so that the builder can validate calls to any module-level function.
+    pub fn define_func(&self, fref: FuncRef) -> FunctionBuilder {
+        let entry = &self.entries[fref.index()];
+        match entry.kind {
+            ModuleEntryKind::Internal(_) => {}
+            ModuleEntryKind::Extern => panic!("cannot define extern function '{}'", entry.name),
+        }
+
+        // Create a FunctionBuilder with all module-level signatures as extern_funcs,
+        // so that Call/Invoke can validate arguments against any FuncRef.
+        let mut fb = FunctionBuilder::new(&entry.name, &entry.sig.params, entry.sig.ret);
+        fb.extern_funcs = self
+            .entries
+            .iter()
+            .map(|e| ExternFunc {
+                name: e.name.clone(),
+                sig: e.sig.clone(),
+            })
+            .collect();
+        fb
+    }
+
+    /// Finish defining an internal function by providing the built FunctionBuilder.
+    pub fn finish_func(&mut self, fref: FuncRef, fb: FunctionBuilder) {
+        let entry = &self.entries[fref.index()];
+        let internal_idx = match entry.kind {
+            ModuleEntryKind::Internal(idx) => idx,
+            ModuleEntryKind::Extern => panic!("cannot finish extern function '{}'", entry.name),
+        };
+        assert!(
+            self.internal_funcs[internal_idx].is_none(),
+            "function '{}' already defined",
+            entry.name
+        );
+        self.internal_funcs[internal_idx] = Some(fb.build());
+    }
+
+    /// Build the module. Panics if any declared internal function was not defined.
+    pub fn build(self) -> Module {
+        for (i, func_opt) in self.internal_funcs.iter().enumerate() {
+            assert!(
+                func_opt.is_some(),
+                "internal function at index {} was declared but not defined",
+                i
+            );
+        }
+
+        let functions: Vec<Function> = self
+            .internal_funcs
+            .into_iter()
+            .map(|f| f.unwrap())
+            .collect();
+
+        let func_table: Vec<FuncDef> = self
+            .entries
+            .into_iter()
+            .map(|entry| match entry.kind {
+                ModuleEntryKind::Internal(idx) => FuncDef::Internal(idx),
+                ModuleEntryKind::Extern => FuncDef::Extern(ExternFunc {
+                    name: entry.name,
+                    sig: entry.sig,
+                }),
+            })
+            .collect();
+
+        Module {
+            functions,
+            func_table,
+        }
+    }
+}
+
 /// Internal mutable block data during construction.
 struct BlockData {
     params: Vec<(Value, Type)>,
@@ -115,14 +265,18 @@ impl FunctionBuilder {
             assert!(
                 self.value_type(v).is_gc(),
                 "safepoint live value {} must be GcPtr, got {}",
-                v, self.value_type(v)
+                v,
+                self.value_type(v)
             );
         }
         self.push_void_inst(Inst::Safepoint(live.to_vec()));
     }
 
     pub fn iconst(&mut self, ty: Type, val: i64) -> Value {
-        assert!(ty.is_int() || ty.is_ptr(), "iconst requires int or ptr type");
+        assert!(
+            ty.is_int() || ty.is_ptr(),
+            "iconst requires int or ptr type"
+        );
         self.push_inst(ty, Inst::Iconst(ty, val))
     }
 
@@ -240,27 +394,42 @@ impl FunctionBuilder {
     // ── Conversions ────────────────────────────────────────────
 
     pub fn sext(&mut self, v: Value, to: Type) -> Value {
-        assert!(self.value_type(v).is_int() && to.is_int(), "sext requires int types");
+        assert!(
+            self.value_type(v).is_int() && to.is_int(),
+            "sext requires int types"
+        );
         self.push_inst(to, Inst::Sext(v, to))
     }
 
     pub fn zext(&mut self, v: Value, to: Type) -> Value {
-        assert!(self.value_type(v).is_int() && to.is_int(), "zext requires int types");
+        assert!(
+            self.value_type(v).is_int() && to.is_int(),
+            "zext requires int types"
+        );
         self.push_inst(to, Inst::Zext(v, to))
     }
 
     pub fn trunc(&mut self, v: Value, to: Type) -> Value {
-        assert!(self.value_type(v).is_int() && to.is_int(), "trunc requires int types");
+        assert!(
+            self.value_type(v).is_int() && to.is_int(),
+            "trunc requires int types"
+        );
         self.push_inst(to, Inst::Trunc(v, to))
     }
 
     pub fn int_to_float(&mut self, v: Value) -> Value {
-        assert!(self.value_type(v).is_int(), "int_to_float requires int input");
+        assert!(
+            self.value_type(v).is_int(),
+            "int_to_float requires int input"
+        );
         self.push_inst(Type::F64, Inst::IntToFloat(v))
     }
 
     pub fn float_to_int(&mut self, v: Value) -> Value {
-        assert!(self.value_type(v).is_float(), "float_to_int requires float input");
+        assert!(
+            self.value_type(v).is_float(),
+            "float_to_int requires float input"
+        );
         self.push_inst(Type::I64, Inst::FloatToInt(v))
     }
 
@@ -315,11 +484,7 @@ impl FunctionBuilder {
     // ── Select ─────────────────────────────────────────────────
 
     pub fn select(&mut self, cond: Value, if_true: Value, if_false: Value) -> Value {
-        assert_eq!(
-            self.value_type(cond),
-            Type::I8,
-            "select cond must be i8"
-        );
+        assert_eq!(self.value_type(cond), Type::I8, "select cond must be i8");
         let tt = self.value_type(if_true);
         let tf = self.value_type(if_false);
         assert_eq!(tt, tf, "select arms must have same type, got {tt} and {tf}");
@@ -353,15 +518,8 @@ impl FunctionBuilder {
     /// Emit a guard: if `cond` is false, deoptimize with the given metadata.
     /// `live` values are captured in the deopt frame.
     pub fn guard(&mut self, cond: Value, deopt_id: DeoptId, live: &[Value]) {
-        assert_eq!(
-            self.value_type(cond),
-            Type::I8,
-            "guard cond must be i8"
-        );
-        assert!(
-            deopt_id.index() < self.deopt_info.len(),
-            "invalid deopt_id"
-        );
+        assert_eq!(self.value_type(cond), Type::I8, "guard cond must be i8");
+        assert!(deopt_id.index() < self.deopt_info.len(), "invalid deopt_id");
         self.push_void_inst(Inst::Guard(cond, deopt_id, live.to_vec()));
     }
 
@@ -544,10 +702,7 @@ impl FunctionBuilder {
     /// Panics if any block is unterminated.
     pub fn build(self) -> Function {
         for (i, block) in self.blocks.iter().enumerate() {
-            assert!(
-                block.terminator.is_some(),
-                "block bb{i} is not terminated"
-            );
+            assert!(block.terminator.is_some(), "block bb{i} is not terminated");
         }
         let blocks = self
             .blocks
@@ -599,10 +754,7 @@ impl FunctionBuilder {
 
     fn set_terminator(&mut self, term: Terminator) {
         let block = self.cur_block();
-        assert!(
-            block.terminator.is_none(),
-            "block already has a terminator"
-        );
+        assert!(block.terminator.is_none(), "block already has a terminator");
         block.terminator = Some(term);
     }
 
@@ -619,7 +771,8 @@ impl FunctionBuilder {
         for (i, (&(_, pty), &arg)) in params.iter().zip(args.iter()).enumerate() {
             let at = self.value_type(arg);
             assert_eq!(
-                at, pty,
+                at,
+                pty,
                 "branch to bb{} arg {i} type mismatch: expected {pty}, got {at}",
                 target.index()
             );
@@ -644,16 +797,23 @@ impl FunctionBuilder {
         // Check return type matches first param
         if let Some(rty) = ret_ty {
             assert_eq!(
-                params[0].1, rty,
+                params[0].1,
+                rty,
                 "invoke normal bb{} first param must match return type: expected {rty}, got {}",
-                target.index(), params[0].1
+                target.index(),
+                params[0].1
             );
         }
         // Check remaining args match remaining params
-        for (i, (&(_, pty), &arg)) in params[ret_param_count..].iter().zip(args.iter()).enumerate() {
+        for (i, (&(_, pty), &arg)) in params[ret_param_count..]
+            .iter()
+            .zip(args.iter())
+            .enumerate()
+        {
             let at = self.value_type(arg);
             assert_eq!(
-                at, pty,
+                at,
+                pty,
                 "invoke normal branch to bb{} arg {i} type mismatch: expected {pty}, got {at}",
                 target.index()
             );

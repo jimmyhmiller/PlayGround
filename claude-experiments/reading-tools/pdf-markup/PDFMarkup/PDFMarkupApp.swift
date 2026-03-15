@@ -51,6 +51,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 /// Manages PDFs shared via the share sheet or Files app
 class SharedPDFManager: ObservableObject {
     @Published var pendingPDF: SharedPDF?
+    @Published var needsLibraryReload = false
 
     struct SharedPDF: Identifiable, Equatable {
         let id = UUID()
@@ -125,6 +126,9 @@ class SharedPDFManager: ObservableObject {
                     fileName: fileName,
                     pageCount: pageCount
                 )
+                await MainActor.run {
+                    self.needsLibraryReload = true
+                }
             } catch {
                 print("Failed to upload shared PDF to S3: \(error)")
             }

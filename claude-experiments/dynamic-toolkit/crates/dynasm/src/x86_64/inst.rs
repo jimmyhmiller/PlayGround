@@ -1,7 +1,7 @@
-use smallvec::{SmallVec, smallvec};
 use super::cond::Condition;
 use super::encoding::*;
 use super::reg::X64Reg;
+use smallvec::{SmallVec, smallvec};
 
 /// x86-64 instruction set.
 ///
@@ -18,15 +18,35 @@ pub enum X64Inst {
     /// MOV r/m64, imm32 (sign-extended)
     MovRI32 { dest: X64Reg, imm: i32 },
     /// MOV r64, [base + offset]
-    MovRM { dest: X64Reg, base: X64Reg, offset: i32 },
+    MovRM {
+        dest: X64Reg,
+        base: X64Reg,
+        offset: i32,
+    },
     /// MOV [base + offset], r64
-    MovMR { base: X64Reg, offset: i32, src: X64Reg },
+    MovMR {
+        base: X64Reg,
+        offset: i32,
+        src: X64Reg,
+    },
     /// MOV r64, [base + index*1]
-    MovRMIndexed { dest: X64Reg, base: X64Reg, index: X64Reg },
+    MovRMIndexed {
+        dest: X64Reg,
+        base: X64Reg,
+        index: X64Reg,
+    },
     /// MOV [base + index*1], r64
-    MovMRIndexed { base: X64Reg, index: X64Reg, src: X64Reg },
+    MovMRIndexed {
+        base: X64Reg,
+        index: X64Reg,
+        src: X64Reg,
+    },
     /// LEA r64, [base + offset]
-    Lea { dest: X64Reg, base: X64Reg, offset: i32 },
+    Lea {
+        dest: X64Reg,
+        base: X64Reg,
+        offset: i32,
+    },
     /// LEA r64, [RIP + disp32]
     LeaRipRel { dest: X64Reg, offset: i32 },
 
@@ -124,9 +144,17 @@ pub enum X64Inst {
     /// MOVSD xmm, xmm
     MovsdRR { dest: X64Reg, src: X64Reg },
     /// MOVSD xmm, [base + offset]
-    MovsdRM { dest: X64Reg, base: X64Reg, offset: i32 },
+    MovsdRM {
+        dest: X64Reg,
+        base: X64Reg,
+        offset: i32,
+    },
     /// MOVSD [base + offset], xmm
-    MovsdMR { base: X64Reg, offset: i32, src: X64Reg },
+    MovsdMR {
+        base: X64Reg,
+        offset: i32,
+        src: X64Reg,
+    },
     /// MOVQ r64, xmm
     MovqRX { dest: X64Reg, src: X64Reg },
     /// MOVQ xmm, r64
@@ -156,15 +184,21 @@ impl X64Inst {
     pub fn encode(&self) -> SmallVec<[u8; 15]> {
         match self {
             X64Inst::MovRR { dest, src } => {
-                smallvec![rex_w(src.index, dest.index), 0x89, modrm(0b11, src.index, dest.index)]
+                smallvec![
+                    rex_w(src.index, dest.index),
+                    0x89,
+                    modrm(0b11, src.index, dest.index)
+                ]
             }
             X64Inst::MovRI { dest, imm } => {
-                let mut bytes: SmallVec<[u8; 15]> = smallvec![rex_w(0, dest.index), 0xB8 + (dest.index & 0x7)];
+                let mut bytes: SmallVec<[u8; 15]> =
+                    smallvec![rex_w(0, dest.index), 0xB8 + (dest.index & 0x7)];
                 bytes.extend_from_slice(&imm.to_le_bytes());
                 bytes
             }
             X64Inst::MovRI32 { dest, imm } => {
-                let mut bytes: SmallVec<[u8; 15]> = smallvec![rex_w(0, dest.index), 0xC7, modrm(0b11, 0, dest.index)];
+                let mut bytes: SmallVec<[u8; 15]> =
+                    smallvec![rex_w(0, dest.index), 0xC7, modrm(0b11, 0, dest.index)];
                 bytes.extend_from_slice(&imm.to_le_bytes());
                 bytes
             }
@@ -178,7 +212,8 @@ impl X64Inst {
                 let base_idx = base.index;
                 let index_idx = index.index;
                 let dest_idx = dest.index;
-                let rex_byte = 0x48 | ((dest_idx >> 3) << 2) | ((index_idx >> 3) << 1) | (base_idx >> 3);
+                let rex_byte =
+                    0x48 | ((dest_idx >> 3) << 2) | ((index_idx >> 3) << 1) | (base_idx >> 3);
                 let modrm_byte = ((dest_idx & 0b111) << 3) | 0b100;
                 let sib_byte = ((index_idx & 0b111) << 3) | (base_idx & 0b111);
                 if (base_idx & 0b111) == 5 {
@@ -192,7 +227,8 @@ impl X64Inst {
                 let base_idx = base.index;
                 let index_idx = index.index;
                 let src_idx = src.index;
-                let rex_byte = 0x48 | ((src_idx >> 3) << 2) | ((index_idx >> 3) << 1) | (base_idx >> 3);
+                let rex_byte =
+                    0x48 | ((src_idx >> 3) << 2) | ((index_idx >> 3) << 1) | (base_idx >> 3);
                 let modrm_byte = ((src_idx & 0b111) << 3) | 0b100;
                 let sib_byte = ((index_idx & 0b111) << 3) | (base_idx & 0b111);
                 if (base_idx & 0b111) == 5 {
@@ -216,26 +252,45 @@ impl X64Inst {
 
             // === Arithmetic ===
             X64Inst::AddRR { dest, src } => {
-                smallvec![rex_w(src.index, dest.index), 0x01, modrm(0b11, src.index, dest.index)]
+                smallvec![
+                    rex_w(src.index, dest.index),
+                    0x01,
+                    modrm(0b11, src.index, dest.index)
+                ]
             }
             X64Inst::AddRI { dest, imm } => {
-                let mut bytes: SmallVec<[u8; 15]> = smallvec![rex_w(0, dest.index), 0x81, modrm(0b11, 0, dest.index)];
+                let mut bytes: SmallVec<[u8; 15]> =
+                    smallvec![rex_w(0, dest.index), 0x81, modrm(0b11, 0, dest.index)];
                 bytes.extend_from_slice(&imm.to_le_bytes());
                 bytes
             }
             X64Inst::SubRR { dest, src } => {
-                smallvec![rex_w(src.index, dest.index), 0x29, modrm(0b11, src.index, dest.index)]
+                smallvec![
+                    rex_w(src.index, dest.index),
+                    0x29,
+                    modrm(0b11, src.index, dest.index)
+                ]
             }
             X64Inst::SubRI { dest, imm } => {
-                let mut bytes: SmallVec<[u8; 15]> = smallvec![rex_w(0, dest.index), 0x81, modrm(0b11, 5, dest.index)];
+                let mut bytes: SmallVec<[u8; 15]> =
+                    smallvec![rex_w(0, dest.index), 0x81, modrm(0b11, 5, dest.index)];
                 bytes.extend_from_slice(&imm.to_le_bytes());
                 bytes
             }
             X64Inst::ImulRR { dest, src } => {
-                smallvec![rex_w(dest.index, src.index), 0x0F, 0xAF, modrm(0b11, dest.index, src.index)]
+                smallvec![
+                    rex_w(dest.index, src.index),
+                    0x0F,
+                    0xAF,
+                    modrm(0b11, dest.index, src.index)
+                ]
             }
             X64Inst::ImulRRI { dest, src, imm } => {
-                let mut bytes: SmallVec<[u8; 15]> = smallvec![rex_w(dest.index, src.index), 0x69, modrm(0b11, dest.index, src.index)];
+                let mut bytes: SmallVec<[u8; 15]> = smallvec![
+                    rex_w(dest.index, src.index),
+                    0x69,
+                    modrm(0b11, dest.index, src.index)
+                ];
                 bytes.extend_from_slice(&imm.to_le_bytes());
                 bytes
             }
@@ -251,26 +306,41 @@ impl X64Inst {
 
             // === Bitwise ===
             X64Inst::AndRR { dest, src } => {
-                smallvec![rex_w(src.index, dest.index), 0x21, modrm(0b11, src.index, dest.index)]
+                smallvec![
+                    rex_w(src.index, dest.index),
+                    0x21,
+                    modrm(0b11, src.index, dest.index)
+                ]
             }
             X64Inst::AndRI { dest, imm } => {
-                let mut bytes: SmallVec<[u8; 15]> = smallvec![rex_w(0, dest.index), 0x81, modrm(0b11, 4, dest.index)];
+                let mut bytes: SmallVec<[u8; 15]> =
+                    smallvec![rex_w(0, dest.index), 0x81, modrm(0b11, 4, dest.index)];
                 bytes.extend_from_slice(&imm.to_le_bytes());
                 bytes
             }
             X64Inst::OrRR { dest, src } => {
-                smallvec![rex_w(src.index, dest.index), 0x09, modrm(0b11, src.index, dest.index)]
+                smallvec![
+                    rex_w(src.index, dest.index),
+                    0x09,
+                    modrm(0b11, src.index, dest.index)
+                ]
             }
             X64Inst::OrRI { dest, imm } => {
-                let mut bytes: SmallVec<[u8; 15]> = smallvec![rex_w(0, dest.index), 0x81, modrm(0b11, 1, dest.index)];
+                let mut bytes: SmallVec<[u8; 15]> =
+                    smallvec![rex_w(0, dest.index), 0x81, modrm(0b11, 1, dest.index)];
                 bytes.extend_from_slice(&imm.to_le_bytes());
                 bytes
             }
             X64Inst::XorRR { dest, src } => {
-                smallvec![rex_w(src.index, dest.index), 0x31, modrm(0b11, src.index, dest.index)]
+                smallvec![
+                    rex_w(src.index, dest.index),
+                    0x31,
+                    modrm(0b11, src.index, dest.index)
+                ]
             }
             X64Inst::XorRI { dest, imm } => {
-                let mut bytes: SmallVec<[u8; 15]> = smallvec![rex_w(0, dest.index), 0x81, modrm(0b11, 6, dest.index)];
+                let mut bytes: SmallVec<[u8; 15]> =
+                    smallvec![rex_w(0, dest.index), 0x81, modrm(0b11, 6, dest.index)];
                 bytes.extend_from_slice(&imm.to_le_bytes());
                 bytes
             }
@@ -303,7 +373,8 @@ impl X64Inst {
                 smallvec![rex_w(b.index, a.index), 0x39, modrm(0b11, b.index, a.index)]
             }
             X64Inst::CmpRI { reg, imm } => {
-                let mut bytes: SmallVec<[u8; 15]> = smallvec![rex_w(0, reg.index), 0x81, modrm(0b11, 7, reg.index)];
+                let mut bytes: SmallVec<[u8; 15]> =
+                    smallvec![rex_w(0, reg.index), 0x81, modrm(0b11, 7, reg.index)];
                 bytes.extend_from_slice(&imm.to_le_bytes());
                 bytes
             }
@@ -311,7 +382,8 @@ impl X64Inst {
                 smallvec![rex_w(b.index, a.index), 0x85, modrm(0b11, b.index, a.index)]
             }
             X64Inst::TestRI { reg, imm } => {
-                let mut bytes: SmallVec<[u8; 15]> = smallvec![rex_w(0, reg.index), 0xF7, modrm(0b11, 0, reg.index)];
+                let mut bytes: SmallVec<[u8; 15]> =
+                    smallvec![rex_w(0, reg.index), 0xF7, modrm(0b11, 0, reg.index)];
                 bytes.extend_from_slice(&imm.to_le_bytes());
                 bytes
             }
@@ -399,22 +471,43 @@ impl X64Inst {
             }
             X64Inst::MovsdRM { dest, base, offset } => {
                 let mut bytes: SmallVec<[u8; 15]> = smallvec![0xF2];
-                bytes.extend_from_slice(&encode_mem_op_no_rex(0x10, dest.index, base.index, *offset));
+                bytes.extend_from_slice(&encode_mem_op_no_rex(
+                    0x10, dest.index, base.index, *offset,
+                ));
                 bytes
             }
             X64Inst::MovsdMR { base, offset, src } => {
                 let mut bytes: SmallVec<[u8; 15]> = smallvec![0xF2];
-                bytes.extend_from_slice(&encode_mem_op_no_rex(0x11, src.index, base.index, *offset));
+                bytes
+                    .extend_from_slice(&encode_mem_op_no_rex(0x11, src.index, base.index, *offset));
                 bytes
             }
             X64Inst::MovqRX { dest, src } => {
-                smallvec![0x66, rex_w(src.index, dest.index), 0x0F, 0x7E, modrm(0b11, src.index, dest.index)]
+                smallvec![
+                    0x66,
+                    rex_w(src.index, dest.index),
+                    0x0F,
+                    0x7E,
+                    modrm(0b11, src.index, dest.index)
+                ]
             }
             X64Inst::MovqXR { dest, src } => {
-                smallvec![0x66, rex_w(dest.index, src.index), 0x0F, 0x6E, modrm(0b11, dest.index, src.index)]
+                smallvec![
+                    0x66,
+                    rex_w(dest.index, src.index),
+                    0x0F,
+                    0x6E,
+                    modrm(0b11, dest.index, src.index)
+                ]
             }
             X64Inst::Cvtsi2sd { dest, src } => {
-                smallvec![0xF2, rex_w(dest.index, src.index), 0x0F, 0x2A, modrm(0b11, dest.index, src.index)]
+                smallvec![
+                    0xF2,
+                    rex_w(dest.index, src.index),
+                    0x0F,
+                    0x2A,
+                    modrm(0b11, dest.index, src.index)
+                ]
             }
             X64Inst::Ucomisd { a, b } => {
                 let mut bytes: SmallVec<[u8; 15]> = smallvec![0x66];
@@ -430,7 +523,8 @@ impl X64Inst {
                 smallvec![0x0F, 0xAE, 0xF0]
             }
             X64Inst::LockCmpxchg { base, src } => {
-                let mut bytes: SmallVec<[u8; 15]> = smallvec![0xF0, rex_w(src.index, base.index), 0x0F, 0xB1];
+                let mut bytes: SmallVec<[u8; 15]> =
+                    smallvec![0xF0, rex_w(src.index, base.index), 0x0F, 0xB1];
                 let mut modrm_bytes = Vec::new();
                 encode_modrm_mem(&mut modrm_bytes, src.index, base.index, 0);
                 bytes.extend_from_slice(&modrm_bytes);

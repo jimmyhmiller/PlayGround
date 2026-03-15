@@ -40,10 +40,7 @@ impl<A: Arch> CodeBuffer<A> {
 
     /// Bind a label to the current code offset.
     pub fn bind_label(&mut self, label: Label) {
-        assert!(
-            self.labels[label.0].is_none(),
-            "label already bound"
-        );
+        assert!(self.labels[label.0].is_none(), "label already bound");
         self.labels[label.0] = Some(self.code.len());
     }
 
@@ -76,8 +73,7 @@ impl<A: Arch> CodeBuffer<A> {
     /// Resolve all relocations. Panics if any label is unbound.
     pub fn finalize(&mut self) {
         for reloc in &self.relocs {
-            let target = self.labels[reloc.label.0]
-                .expect("unbound label during finalize");
+            let target = self.labels[reloc.label.0].expect("unbound label during finalize");
             A::patch(&mut self.code, reloc.offset, reloc.kind, target);
         }
         self.relocs.clear();

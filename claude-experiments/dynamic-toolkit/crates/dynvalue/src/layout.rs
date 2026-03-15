@@ -50,7 +50,11 @@ impl Payload for i64 {
     #[inline(always)]
     fn encode(self, payload_bits: u32) -> u64 {
         // Mask to payload width so negative values don't overflow
-        let mask = if payload_bits >= 64 { u64::MAX } else { (1u64 << payload_bits) - 1 };
+        let mask = if payload_bits >= 64 {
+            u64::MAX
+        } else {
+            (1u64 << payload_bits) - 1
+        };
         (self as u64) & mask
     }
     #[inline(always)]
@@ -64,7 +68,11 @@ impl Payload for i64 {
 impl Payload for i32 {
     #[inline(always)]
     fn encode(self, payload_bits: u32) -> u64 {
-        let mask = if payload_bits >= 64 { u64::MAX } else { (1u64 << payload_bits) - 1 };
+        let mask = if payload_bits >= 64 {
+            u64::MAX
+        } else {
+            (1u64 << payload_bits) - 1
+        };
         (self as u64) & mask
     }
     #[inline(always)]

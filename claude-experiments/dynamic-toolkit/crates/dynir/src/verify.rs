@@ -4,15 +4,47 @@ use std::fmt;
 
 #[derive(Debug, Clone)]
 pub enum VerifyError {
-    UndefinedValue { value: Value, in_block: BlockId },
-    TypeMismatch { expected: Type, got: Type, context: String },
-    UnterminatedBlock { block: BlockId },
-    BranchArgCount { block: BlockId, target: BlockId, expected: usize, got: usize },
-    BranchArgType { block: BlockId, target: BlockId, arg: usize, expected: Type, got: Type },
-    ReturnTypeMismatch { expected: Option<Type>, got: Option<Type> },
-    DominanceViolation { value: Value, def_block: BlockId, use_block: BlockId },
-    EntryParamMismatch { expected: usize, got: usize },
-    DuplicateValueDef { value: Value },
+    UndefinedValue {
+        value: Value,
+        in_block: BlockId,
+    },
+    TypeMismatch {
+        expected: Type,
+        got: Type,
+        context: String,
+    },
+    UnterminatedBlock {
+        block: BlockId,
+    },
+    BranchArgCount {
+        block: BlockId,
+        target: BlockId,
+        expected: usize,
+        got: usize,
+    },
+    BranchArgType {
+        block: BlockId,
+        target: BlockId,
+        arg: usize,
+        expected: Type,
+        got: Type,
+    },
+    ReturnTypeMismatch {
+        expected: Option<Type>,
+        got: Option<Type>,
+    },
+    DominanceViolation {
+        value: Value,
+        def_block: BlockId,
+        use_block: BlockId,
+    },
+    EntryParamMismatch {
+        expected: usize,
+        got: usize,
+    },
+    DuplicateValueDef {
+        value: Value,
+    },
 }
 
 impl fmt::Display for VerifyError {
@@ -21,20 +53,38 @@ impl fmt::Display for VerifyError {
             VerifyError::UndefinedValue { value, in_block } => {
                 write!(f, "undefined value v{} used in bb{}", value.0, in_block.0)
             }
-            VerifyError::TypeMismatch { expected, got, context } => {
-                write!(f, "type mismatch: expected {expected}, got {got} ({context})")
+            VerifyError::TypeMismatch {
+                expected,
+                got,
+                context,
+            } => {
+                write!(
+                    f,
+                    "type mismatch: expected {expected}, got {got} ({context})"
+                )
             }
             VerifyError::UnterminatedBlock { block } => {
                 write!(f, "block bb{} has no terminator", block.0)
             }
-            VerifyError::BranchArgCount { block, target, expected, got } => {
+            VerifyError::BranchArgCount {
+                block,
+                target,
+                expected,
+                got,
+            } => {
                 write!(
                     f,
                     "bb{} -> bb{}: expected {expected} args, got {got}",
                     block.0, target.0
                 )
             }
-            VerifyError::BranchArgType { block, target, arg, expected, got } => {
+            VerifyError::BranchArgType {
+                block,
+                target,
+                arg,
+                expected,
+                got,
+            } => {
                 write!(
                     f,
                     "bb{} -> bb{} arg {arg}: expected {expected}, got {got}",
@@ -42,9 +92,16 @@ impl fmt::Display for VerifyError {
                 )
             }
             VerifyError::ReturnTypeMismatch { expected, got } => {
-                write!(f, "return type mismatch: expected {expected:?}, got {got:?}")
+                write!(
+                    f,
+                    "return type mismatch: expected {expected:?}, got {got:?}"
+                )
             }
-            VerifyError::DominanceViolation { value, def_block, use_block } => {
+            VerifyError::DominanceViolation {
+                value,
+                def_block,
+                use_block,
+            } => {
                 write!(
                     f,
                     "v{} defined in bb{} does not dominate use in bb{}",
@@ -146,7 +203,16 @@ pub fn verify(func: &Function) -> Result<(), Vec<VerifyError>> {
         }
 
         // Check terminator
-        check_terminator(func, &block.terminator, bid, n_blocks, &value_def_block, &value_def_pos, &doms, &mut errors);
+        check_terminator(
+            func,
+            &block.terminator,
+            bid,
+            n_blocks,
+            &value_def_block,
+            &value_def_pos,
+            &doms,
+            &mut errors,
+        );
     }
 
     if errors.is_empty() {
@@ -221,8 +287,7 @@ fn check_inst_types(func: &Function, inst: &Inst, _block: BlockId, errors: &mut 
             let ta = vt(*a);
             let tb = vt(*b);
             // Allow pointer arithmetic: Ptr+I64, I64+Ptr
-            let is_ptr_arith = (ta.is_ptr() && tb == Type::I64)
-                || (ta == Type::I64 && tb.is_ptr());
+            let is_ptr_arith = (ta.is_ptr() && tb == Type::I64) || (ta == Type::I64 && tb.is_ptr());
             if !is_ptr_arith && ta != tb {
                 errors.push(VerifyError::TypeMismatch {
                     expected: ta,
@@ -350,13 +415,24 @@ fn check_terminator(
                 check_branch_args(func, block, *default_block, default_args, errors);
             }
         }
-        Terminator::Invoke { func: fref, args, normal, normal_args, exception, exception_args } => {
+        Terminator::Invoke {
+            func: fref,
+            args,
+            normal,
+            normal_args,
+            exception,
+            exception_args,
+        } => {
             let sig = &func.extern_funcs[fref.index()].sig;
             if sig.params.len() != args.len() {
                 errors.push(VerifyError::TypeMismatch {
                     expected: Type::I64,
                     got: Type::I64,
-                    context: format!("invoke arg count: expected {}, got {}", sig.params.len(), args.len()),
+                    context: format!(
+                        "invoke arg count: expected {}, got {}",
+                        sig.params.len(),
+                        args.len()
+                    ),
                 });
             } else {
                 for (i, (&param_ty, arg)) in sig.params.iter().zip(args.iter()).enumerate() {
@@ -377,7 +453,14 @@ fn check_terminator(
                 check_branch_args(func, block, *exception, exception_args, errors);
             }
         }
-        Terminator::InvokeIndirect { ret_ty, normal, normal_args, exception, exception_args, .. } => {
+        Terminator::InvokeIndirect {
+            ret_ty,
+            normal,
+            normal_args,
+            exception,
+            exception_args,
+            ..
+        } => {
             if normal.index() < n_blocks {
                 check_invoke_normal_args(func, block, *ret_ty, *normal, normal_args, errors);
             }

@@ -502,11 +502,9 @@ fn frame_chain_gc_updates_slots() {
     let _guard = chain.push(&frame);
 
     // "GC" doubles all values
-    chain.scan_roots(&mut |slot| {
-        unsafe {
-            let old = *slot;
-            *slot = old * 2;
-        }
+    chain.scan_roots(&mut |slot| unsafe {
+        let old = *slot;
+        *slot = old * 2;
     });
 
     assert_eq!(frame.slots[0].get(), 0x2000);
@@ -551,8 +549,8 @@ fn root_set_gc_update() {
     rs.add(200);
 
     // "GC" adds 1 to all values
-    rs.scan_roots(&mut |slot| {
-        unsafe { *slot += 1; }
+    rs.scan_roots(&mut |slot| unsafe {
+        *slot += 1;
     });
 
     assert_eq!(rs.get(0), 101);
@@ -748,4 +746,3 @@ fn read_type_info_full() {
         dealloc_obj(obj, &INFO, 0);
     }
 }
-

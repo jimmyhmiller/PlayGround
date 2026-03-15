@@ -171,7 +171,14 @@ impl fmt::Display for Terminator {
                 }
                 Ok(())
             }
-            Terminator::Invoke { func, args, normal, normal_args, exception, exception_args } => {
+            Terminator::Invoke {
+                func,
+                args,
+                normal,
+                normal_args,
+                exception,
+                exception_args,
+            } => {
                 write!(f, "invoke @f{}({}), {normal}", func.0, fmt_args(args))?;
                 if !normal_args.is_empty() {
                     write!(f, "({})", fmt_args(normal_args))?;
@@ -182,7 +189,15 @@ impl fmt::Display for Terminator {
                 }
                 Ok(())
             }
-            Terminator::InvokeIndirect { callee, args, normal, normal_args, exception, exception_args, .. } => {
+            Terminator::InvokeIndirect {
+                callee,
+                args,
+                normal,
+                normal_args,
+                exception,
+                exception_args,
+                ..
+            } => {
                 write!(f, "invoke_indirect {callee}({}), {normal}", fmt_args(args))?;
                 if !normal_args.is_empty() {
                     write!(f, "({})", fmt_args(normal_args))?;

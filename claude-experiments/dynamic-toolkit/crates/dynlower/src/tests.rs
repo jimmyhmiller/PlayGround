@@ -1,13 +1,47 @@
-use crate::{call_jit, JitFunction};
-use dynir::builder::FunctionBuilder;
+use crate::{JitFunction, JitModule, call_jit};
+use dynexec::{
+    AArch64CAbi, AArch64InternalCc, CallbackSafepoints, ExecutionConfig, PreciseStackRoots,
+    ShadowStackFrames, StackSlotFrames,
+};
+use dynir::builder::{FunctionBuilder, ModuleBuilder};
 use dynir::ir::*;
 use dynir::types::Type;
-use dynvalue::{NanBox, TagScheme};
+use dynvalue::{LowBit, NanBox, TagScheme};
 
 fn run_jit(func: &dynir::Function, args: &[u64]) -> u64 {
     // Use NanBox as default scheme for tests that don't use tag operations
     let jit = JitFunction::compile::<NanBox>(func, &[]);
     unsafe { call_jit(jit.as_ptr(), args) }
+}
+
+struct TestInternalConfig;
+
+impl ExecutionConfig for TestInternalConfig {
+    type Layout = LowBit<3>;
+    type Roots = PreciseStackRoots;
+    type CallingConvention = AArch64InternalCc;
+    type Frames = StackSlotFrames;
+    type Safepoints = CallbackSafepoints;
+}
+
+struct TestCAbiConfig;
+
+impl ExecutionConfig for TestCAbiConfig {
+    type Layout = LowBit<3>;
+    type Roots = PreciseStackRoots;
+    type CallingConvention = AArch64CAbi;
+    type Frames = ShadowStackFrames;
+    type Safepoints = CallbackSafepoints;
+}
+
+struct InvalidNanBoxConfig;
+
+impl ExecutionConfig for InvalidNanBoxConfig {
+    type Layout = NanBox;
+    type Roots = PreciseStackRoots;
+    type CallingConvention = AArch64InternalCc;
+    type Frames = StackSlotFrames;
+    type Safepoints = CallbackSafepoints;
 }
 
 // ── Phase 1: return_const ──────────────────────────────────────────
@@ -19,6 +53,36 @@ fn return_const() {
     b.ret(v);
     let func = b.build();
     assert_eq!(run_jit(&func, &[]), 42);
+}
+
+#[test]
+fn compile_with_explicit_internal_config() {
+    let mut b = FunctionBuilder::new("ret7", &[], Some(Type::I64));
+    let v = b.iconst(Type::I64, 7);
+    b.ret(v);
+    let func = b.build();
+    let jit = JitFunction::compile_with_config::<TestInternalConfig>(&func, &[]);
+    assert_eq!(unsafe { call_jit(jit.as_ptr(), &[]) }, 7);
+}
+
+#[test]
+fn compile_with_explicit_alternate_config_shape() {
+    let mut b = FunctionBuilder::new("ret9", &[], Some(Type::I64));
+    let v = b.iconst(Type::I64, 9);
+    b.ret(v);
+    let func = b.build();
+    let jit = JitFunction::compile_with_config::<TestCAbiConfig>(&func, &[]);
+    assert_eq!(unsafe { call_jit(jit.as_ptr(), &[]) }, 9);
+}
+
+#[test]
+#[should_panic(expected = "invalid dynlower config")]
+fn compile_rejects_invalid_layout_root_config() {
+    let mut b = FunctionBuilder::new("ret1", &[], Some(Type::I64));
+    let v = b.iconst(Type::I64, 1);
+    b.ret(v);
+    let func = b.build();
+    let _ = JitFunction::compile_with_config::<InvalidNanBoxConfig>(&func, &[]);
 }
 
 #[test]
@@ -447,10 +511,7 @@ fn float_sub_mul_div() {
     let quot = b.fdiv(prod, a);
     b.ret(quot);
     let func = b.build();
-    let result = f64::from_bits(run_jit(
-        &func,
-        &[10.0f64.to_bits(), 3.0f64.to_bits()],
-    ));
+    let result = f64::from_bits(run_jit(&func, &[10.0f64.to_bits(), 3.0f64.to_bits()]));
     assert!((result - 2.1).abs() < 1e-10);
 }
 
@@ -751,11 +812,15 @@ fn bench_primes() {
     let jit_time = start.elapsed();
 
     // Interpreter run
+    use dynir::NoGcRoots;
     use dynir::interp::*;
+    use dynir::ir::Module;
     use dynvalue::LowBit;
-    let interp = Interpreter::<LowBit<3>>::new(&func);
+    let (module, entry) = Module::from_function(func.clone());
+    let roots = NoGcRoots;
+    let interp = ModuleInterpreter::<LowBit<3>, _>::new(&module, &roots);
     let start = std::time::Instant::now();
-    let interp_result = match interp.run(&[10000]).unwrap() {
+    let interp_result = match interp.run(entry, &[10000]).unwrap() {
         InterpResult::Value(v) => v as i32,
         other => panic!("{:?}", other),
     };
@@ -766,7 +831,10 @@ fn bench_primes() {
     eprintln!("  compile:     {:?}", compile_time);
     eprintln!("  JIT run:     {:?}", jit_time);
     eprintln!("  interp run:  {:?}", interp_time);
-    eprintln!("  speedup:     {:.1}x", interp_time.as_secs_f64() / jit_time.as_secs_f64());
+    eprintln!(
+        "  speedup:     {:.1}x",
+        interp_time.as_secs_f64() / jit_time.as_secs_f64()
+    );
 }
 
 #[test]
@@ -815,7 +883,9 @@ fn test_payload_then_load() {
     let nanbox = NanBox::encode_tagged(0, ptr & ((1u64 << NanBox::PAYLOAD_BITS) - 1));
     let result = unsafe { call_jit(jit.as_ptr(), &[nanbox]) };
     assert_eq!(result, 0xDEAD_BEEF_CAFE_BABEu64);
-    unsafe { drop(Box::from_raw(ptr as *mut u64)); }
+    unsafe {
+        drop(Box::from_raw(ptr as *mut u64));
+    }
 }
 
 #[test]
@@ -825,10 +895,18 @@ fn test_extern_with_payload() {
     // fn(nanbox: I64) -> I64
     // p = Payload(nanbox)
     // result = call double_extern(p)
-    extern "C" fn double_val(x: u64) -> u64 { x * 2 }
+    extern "C" fn double_val(x: u64) -> u64 {
+        x * 2
+    }
 
     let mut b = FunctionBuilder::new("test", &[Type::I64], Some(Type::I64));
-    let fref = b.declare_func("double", Signature { params: vec![Type::I64], ret: Some(Type::I64) });
+    let fref = b.declare_func(
+        "double",
+        Signature {
+            params: vec![Type::I64],
+            ret: Some(Type::I64),
+        },
+    );
     let x = b.block_param(b.entry_block(), 0);
     let p = b.payload(x);
     let result = b.call(fref, &[p]).unwrap();
@@ -847,10 +925,18 @@ fn test_extern_two_params() {
 
     // fn(a: I64, b: I64) -> I64
     // Call extern sub(a, b)
-    extern "C" fn sub_fn(a: u64, b: u64) -> u64 { a.wrapping_sub(b) }
+    extern "C" fn sub_fn(a: u64, b: u64) -> u64 {
+        a.wrapping_sub(b)
+    }
 
     let mut b = FunctionBuilder::new("test", &[Type::I64, Type::I64], Some(Type::I64));
-    let fref = b.declare_func("sub", Signature { params: vec![Type::I64, Type::I64], ret: Some(Type::I64) });
+    let fref = b.declare_func(
+        "sub",
+        Signature {
+            params: vec![Type::I64, Type::I64],
+            ret: Some(Type::I64),
+        },
+    );
     let a = b.block_param(b.entry_block(), 0);
     let bv = b.block_param(b.entry_block(), 1);
     let result = b.call(fref, &[a, bv]).unwrap();
@@ -868,10 +954,18 @@ fn test_extern_skip_first_param() {
 
     // fn(unused: I64, a: I64, b: I64) -> I64
     // Call extern sub(a, b)  -- skipping param 0
-    extern "C" fn sub_fn(a: u64, b: u64) -> u64 { a.wrapping_sub(b) }
+    extern "C" fn sub_fn(a: u64, b: u64) -> u64 {
+        a.wrapping_sub(b)
+    }
 
     let mut b = FunctionBuilder::new("test", &[Type::I64, Type::I64, Type::I64], Some(Type::I64));
-    let fref = b.declare_func("sub", Signature { params: vec![Type::I64, Type::I64], ret: Some(Type::I64) });
+    let fref = b.declare_func(
+        "sub",
+        Signature {
+            params: vec![Type::I64, Type::I64],
+            ret: Some(Type::I64),
+        },
+    );
     let _unused = b.block_param(b.entry_block(), 0);
     let a = b.block_param(b.entry_block(), 1);
     let bv = b.block_param(b.entry_block(), 2);
@@ -893,12 +987,28 @@ fn test_branch_preserves_params() {
     //   else return call extern_identity(n)  <-- n must survive the branch
     use dynir::types::Signature;
 
-    extern "C" fn check_fn(x: u64) -> u64 { if x > 5 { 1 } else { 0 } }
-    extern "C" fn identity_fn(x: u64) -> u64 { x }
+    extern "C" fn check_fn(x: u64) -> u64 {
+        if x > 5 { 1 } else { 0 }
+    }
+    extern "C" fn identity_fn(x: u64) -> u64 {
+        x
+    }
 
     let mut b = FunctionBuilder::new("test", &[Type::I64, Type::I64], Some(Type::I64));
-    let check = b.declare_func("check", Signature { params: vec![Type::I64], ret: Some(Type::I64) });
-    let ident = b.declare_func("identity", Signature { params: vec![Type::I64], ret: Some(Type::I64) });
+    let check = b.declare_func(
+        "check",
+        Signature {
+            params: vec![Type::I64],
+            ret: Some(Type::I64),
+        },
+    );
+    let ident = b.declare_func(
+        "identity",
+        Signature {
+            params: vec![Type::I64],
+            ret: Some(Type::I64),
+        },
+    );
 
     let closure = b.block_param(b.entry_block(), 0);
     let n = b.block_param(b.entry_block(), 1);
@@ -1080,4 +1190,289 @@ fn test_roundtrip_nanbox() {
     let jit = JitFunction::compile::<NanBox>(&func, &[]);
     let result = unsafe { call_jit(jit.as_ptr(), &[0x1234_5678]) };
     assert_eq!(result, 0x1234_5678);
+}
+
+// ── JitModule tests ────────────────────────────────────────────────
+
+#[test]
+fn jit_module_two_funcs() {
+    // func double(x: I32) -> I32 = x * 2
+    // func main(x: I32) -> I32 = double(x) + 1
+    let mut mb = ModuleBuilder::new();
+    let double = mb.declare_func("double", &[Type::I32], Some(Type::I32));
+    let main_fn = mb.declare_func("main", &[Type::I32], Some(Type::I32));
+
+    {
+        let mut fb = mb.define_func(double);
+        let entry = fb.entry_block();
+        let x = fb.block_param(entry, 0);
+        let two = fb.iconst(Type::I32, 2);
+        let result = fb.mul(x, two);
+        fb.ret(result);
+        mb.finish_func(double, fb);
+    }
+    {
+        let mut fb = mb.define_func(main_fn);
+        let entry = fb.entry_block();
+        let x = fb.block_param(entry, 0);
+        let doubled = fb.call(double, &[x]).unwrap();
+        let one = fb.iconst(Type::I32, 1);
+        let result = fb.add(doubled, one);
+        fb.ret(result);
+        mb.finish_func(main_fn, fb);
+    }
+
+    let module = mb.build();
+    let jit = JitModule::compile::<NanBox>(&module, &[]);
+    assert_eq!(jit.call(main_fn, &[10]) as i32, 21);
+    assert_eq!(jit.call(main_fn, &[0]) as i32, 1);
+}
+
+#[test]
+fn jit_module_recursive_factorial() {
+    // func fact(n: I32) -> I32 = if n <= 1 then 1 else n * fact(n-1)
+    // func main(n: I32) -> I32 = fact(n)
+    let mut mb = ModuleBuilder::new();
+    let fact = mb.declare_func("fact", &[Type::I32], Some(Type::I32));
+    let main_fn = mb.declare_func("main", &[Type::I32], Some(Type::I32));
+
+    {
+        let mut fb = mb.define_func(fact);
+        let entry = fb.entry_block();
+        let n = fb.block_param(entry, 0);
+        let one = fb.iconst(Type::I32, 1);
+        let cond = fb.icmp(CmpOp::Sle, n, one);
+
+        let then_bb = fb.create_block(&[]);
+        let else_bb = fb.create_block(&[]);
+        fb.br_if(cond, then_bb, &[], else_bb, &[]);
+
+        fb.switch_to_block(then_bb);
+        let ret_one = fb.iconst(Type::I32, 1);
+        fb.ret(ret_one);
+
+        fb.switch_to_block(else_bb);
+        let one2 = fb.iconst(Type::I32, 1);
+        let n_minus_1 = fb.sub(n, one2);
+        let sub_result = fb.call(fact, &[n_minus_1]).unwrap();
+        let result = fb.mul(n, sub_result);
+        fb.ret(result);
+
+        mb.finish_func(fact, fb);
+    }
+    {
+        let mut fb = mb.define_func(main_fn);
+        let entry = fb.entry_block();
+        let n = fb.block_param(entry, 0);
+        let result = fb.call(fact, &[n]).unwrap();
+        fb.ret(result);
+        mb.finish_func(main_fn, fb);
+    }
+
+    let module = mb.build();
+    let jit = JitModule::compile::<NanBox>(&module, &[]);
+    assert_eq!(jit.call(main_fn, &[1]) as i32, 1);
+    assert_eq!(jit.call(main_fn, &[5]) as i32, 120);
+    assert_eq!(jit.call(main_fn, &[10]) as i32, 3628800);
+}
+
+#[test]
+fn jit_module_with_extern() {
+    use dynir::types::Signature;
+
+    // extern fn add_ten(x: I64) -> I64
+    // func main(x: I64) -> I64 = add_ten(x) * 2
+    extern "C" fn add_ten(x: u64) -> u64 {
+        x + 10
+    }
+
+    let mut mb = ModuleBuilder::new();
+    let ext = mb.declare_extern(
+        "add_ten",
+        Signature {
+            params: vec![Type::I64],
+            ret: Some(Type::I64),
+        },
+    );
+    let main_fn = mb.declare_func("main", &[Type::I64], Some(Type::I64));
+
+    {
+        let mut fb = mb.define_func(main_fn);
+        let entry = fb.entry_block();
+        let x = fb.block_param(entry, 0);
+        let added = fb.call(ext, &[x]).unwrap();
+        let two = fb.iconst(Type::I64, 2);
+        let result = fb.mul(added, two);
+        fb.ret(result);
+        mb.finish_func(main_fn, fb);
+    }
+
+    let module = mb.build();
+    let externs = vec![add_ten as *const u8];
+    let jit = JitModule::compile::<NanBox>(&module, &externs);
+    assert_eq!(jit.call(main_fn, &[5]), 30); // (5 + 10) * 2
+}
+
+#[test]
+fn jit_module_fifty_nested() {
+    // 50 functions chained: func_0(x) = x + 1, func_i(x) = func_{i-1}(x) + 1
+    // main(0) should return 50
+    let n = 50;
+    let mut wat = String::from("(module\n");
+    wat.push_str("  (func $func_0 (param i32) (result i32)\n");
+    wat.push_str("    local.get 0\n    i32.const 1\n    i32.add)\n");
+    for i in 1..n {
+        wat.push_str(&format!("  (func $func_{i} (param i32) (result i32)\n"));
+        wat.push_str("    local.get 0\n");
+        wat.push_str(&format!("    call $func_{}\n", i - 1));
+        wat.push_str("    i32.const 1\n    i32.add)\n");
+    }
+    wat.push_str(&format!("  (export \"main\" (func $func_{})))\n", n - 1));
+
+    let wasm = wat::parse_str(&wat).expect("parse WAT");
+    let (module, entry) = wasm2dynir::translate_wasm_module(&wasm).expect("translate");
+
+    let jit = JitModule::compile::<NanBox>(&module, &[]);
+    assert_eq!(jit.call(entry, &[0]) as i32, 50);
+    assert_eq!(jit.call(entry, &[100]) as i32, 150);
+}
+
+#[test]
+fn jit_module_wasm_recursive_factorial() {
+    let wat = r#"(module
+        (func $fact (param $n i32) (result i32)
+            local.get $n
+            i32.const 1
+            i32.le_s
+            if (result i32)
+                i32.const 1
+            else
+                local.get $n
+                local.get $n
+                i32.const 1
+                i32.sub
+                call $fact
+                i32.mul
+            end)
+        (func (export "main") (param i32) (result i32)
+            local.get 0
+            call $fact))"#;
+    let wasm = wat::parse_str(wat).expect("parse WAT");
+    let (module, entry) = wasm2dynir::translate_wasm_module(&wasm).expect("translate");
+
+    let jit = JitModule::compile::<NanBox>(&module, &[]);
+    assert_eq!(jit.call(entry, &[1]) as i32, 1);
+    assert_eq!(jit.call(entry, &[5]) as i32, 120);
+    assert_eq!(jit.call(entry, &[10]) as i32, 3628800);
+}
+
+#[test]
+fn jit_module_from_single_function() {
+    // Wrap a single function in a module and run it through JitModule
+    let mut b = FunctionBuilder::new("add1", &[Type::I64], Some(Type::I64));
+    let entry = b.entry_block();
+    let x = b.block_param(entry, 0);
+    let one = b.iconst(Type::I64, 1);
+    let result = b.add(x, one);
+    b.ret(result);
+    let func = b.build();
+
+    let (module, entry_ref) = Module::from_function(func);
+    let jit = JitModule::compile::<NanBox>(&module, &[]);
+    assert_eq!(jit.call(entry_ref, &[41]), 42);
+}
+
+#[test]
+fn jit_module_safepoint_no_handler() {
+    // Safepoint with no handler should be silently skipped
+    // Use GcPtr type since safepoint requires it
+    let mut b = FunctionBuilder::new("test", &[Type::GcPtr], Some(Type::GcPtr));
+    let entry = b.entry_block();
+    let x = b.block_param(entry, 0);
+    b.safepoint(&[x]);
+    // GcPtr is pointer-sized (I64 on 64-bit), so add works
+    let one = b.iconst(Type::I64, 1);
+    let result = b.add(x, one);
+    b.ret(result);
+    let func = b.build();
+
+    let (module, entry_ref) = Module::from_function(func);
+    let jit = JitModule::compile::<NanBox>(&module, &[]);
+    assert_eq!(jit.call(entry_ref, &[10]), 11);
+}
+
+#[test]
+fn jit_module_safepoint_with_handler() {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static CALL_COUNT: AtomicU32 = AtomicU32::new(0);
+
+    extern "C" fn test_handler(_frame_ptr: *mut u8, _frame_size: usize) {
+        CALL_COUNT.fetch_add(1, Ordering::SeqCst);
+    }
+
+    let mut b = FunctionBuilder::new("test", &[Type::GcPtr], Some(Type::GcPtr));
+    let entry = b.entry_block();
+    let x = b.block_param(entry, 0);
+    b.safepoint(&[x]);
+    let one = b.iconst(Type::I64, 1);
+    let result = b.add(x, one);
+    b.ret(result);
+    let func = b.build();
+
+    let (module, entry_ref) = Module::from_function(func);
+    CALL_COUNT.store(0, Ordering::SeqCst);
+    let jit = JitModule::compile_with_gc::<NanBox>(&module, &[], test_handler);
+    assert_eq!(jit.call(entry_ref, &[10]), 11);
+    assert_eq!(CALL_COUNT.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn jit_module_bench_fifty_nested() {
+    let n = 50;
+    let mut wat = String::from("(module\n");
+    wat.push_str("  (func $func_0 (param i32) (result i32)\n");
+    wat.push_str("    local.get 0\n    i32.const 1\n    i32.add)\n");
+    for i in 1..n {
+        wat.push_str(&format!("  (func $func_{i} (param i32) (result i32)\n"));
+        wat.push_str("    local.get 0\n");
+        wat.push_str(&format!("    call $func_{}\n", i - 1));
+        wat.push_str("    i32.const 1\n    i32.add)\n");
+    }
+    wat.push_str(&format!("  (export \"main\" (func $func_{})))\n", n - 1));
+
+    let wasm = wat::parse_str(&wat).expect("parse WAT");
+    let (module, entry) = wasm2dynir::translate_wasm_module(&wasm).expect("translate");
+
+    // JIT compile + run
+    let start = std::time::Instant::now();
+    let jit = JitModule::compile::<NanBox>(&module, &[]);
+    let compile_time = start.elapsed();
+
+    let start = std::time::Instant::now();
+    let jit_result = jit.call(entry, &[0]) as i32;
+    let jit_time = start.elapsed();
+
+    // Interpreter run
+    use dynir::NoGcRoots;
+    use dynir::interp::*;
+    use dynvalue::LowBit;
+    let roots = NoGcRoots;
+    let interp = ModuleInterpreter::<LowBit<3>, _>::new(&module, &roots);
+    let start = std::time::Instant::now();
+    let interp_result = match interp.run(entry, &[0]).unwrap() {
+        InterpResult::Value(v) => v as i32,
+        other => panic!("{:?}", other),
+    };
+    let interp_time = start.elapsed();
+
+    assert_eq!(jit_result, interp_result);
+    assert_eq!(jit_result, n as i32);
+    eprintln!("50-nested JIT module:");
+    eprintln!("  compile:     {:?}", compile_time);
+    eprintln!("  JIT run:     {:?}", jit_time);
+    eprintln!("  interp run:  {:?}", interp_time);
+    eprintln!(
+        "  speedup:     {:.1}x",
+        interp_time.as_secs_f64() / jit_time.as_secs_f64()
+    );
 }

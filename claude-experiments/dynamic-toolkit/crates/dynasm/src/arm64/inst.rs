@@ -58,13 +58,20 @@ impl Arm64Cond {
     pub fn invert(self) -> Self {
         use Arm64Cond::*;
         match self {
-            EQ => NE, NE => EQ,
-            CS => CC, CC => CS,
-            MI => PL, PL => MI,
-            VS => VC, VC => VS,
-            HI => LS, LS => HI,
-            GE => LT, LT => GE,
-            GT => LE, LE => GT,
+            EQ => NE,
+            NE => EQ,
+            CS => CC,
+            CC => CS,
+            MI => PL,
+            PL => MI,
+            VS => VC,
+            VC => VS,
+            HI => LS,
+            LS => HI,
+            GE => LT,
+            LT => GE,
+            GT => LE,
+            LE => GT,
             AL => AL,
         }
     }
@@ -77,123 +84,483 @@ impl Arm64Cond {
 #[derive(Debug)]
 pub enum Arm64Inst {
     // === Address generation ===
-    Adr { immlo: i32, immhi: i32, rd: Arm64Reg },
+    Adr {
+        immlo: i32,
+        immhi: i32,
+        rd: Arm64Reg,
+    },
 
     // === Arithmetic (immediate) ===
-    AddImm { sf: i32, sh: i32, imm12: i32, rn: Arm64Reg, rd: Arm64Reg },
-    SubImm { sf: i32, sh: i32, imm12: i32, rn: Arm64Reg, rd: Arm64Reg },
+    AddImm {
+        sf: i32,
+        sh: i32,
+        imm12: i32,
+        rn: Arm64Reg,
+        rd: Arm64Reg,
+    },
+    SubImm {
+        sf: i32,
+        sh: i32,
+        imm12: i32,
+        rn: Arm64Reg,
+        rd: Arm64Reg,
+    },
 
     // === Arithmetic (shifted register) ===
-    AddShifted { sf: i32, shift: i32, rm: Arm64Reg, imm6: i32, rn: Arm64Reg, rd: Arm64Reg },
-    SubShifted { sf: i32, shift: i32, rm: Arm64Reg, imm6: i32, rn: Arm64Reg, rd: Arm64Reg },
-    SubsShifted { sf: i32, shift: i32, rm: Arm64Reg, imm6: i32, rn: Arm64Reg, rd: Arm64Reg },
-    SubsImm { sf: i32, sh: i32, imm12: i32, rn: Arm64Reg, rd: Arm64Reg },
+    AddShifted {
+        sf: i32,
+        shift: i32,
+        rm: Arm64Reg,
+        imm6: i32,
+        rn: Arm64Reg,
+        rd: Arm64Reg,
+    },
+    SubShifted {
+        sf: i32,
+        shift: i32,
+        rm: Arm64Reg,
+        imm6: i32,
+        rn: Arm64Reg,
+        rd: Arm64Reg,
+    },
+    SubsShifted {
+        sf: i32,
+        shift: i32,
+        rm: Arm64Reg,
+        imm6: i32,
+        rn: Arm64Reg,
+        rd: Arm64Reg,
+    },
+    SubsImm {
+        sf: i32,
+        sh: i32,
+        imm12: i32,
+        rn: Arm64Reg,
+        rd: Arm64Reg,
+    },
 
     // === CMP (shifted register) — alias of SUBS with Rd=XZR ===
-    CmpShifted { sf: i32, shift: i32, rm: Arm64Reg, imm6: i32, rn: Arm64Reg },
+    CmpShifted {
+        sf: i32,
+        shift: i32,
+        rm: Arm64Reg,
+        imm6: i32,
+        rn: Arm64Reg,
+    },
 
     // === CSET — alias of CSINC ===
-    Cset { sf: i32, cond: i32, rd: Arm64Reg },
+    Cset {
+        sf: i32,
+        cond: i32,
+        rd: Arm64Reg,
+    },
 
     // === Logical (immediate) ===
-    AndImm { sf: i32, n: i32, immr: i32, imms: i32, rn: Arm64Reg, rd: Arm64Reg },
+    AndImm {
+        sf: i32,
+        n: i32,
+        immr: i32,
+        imms: i32,
+        rn: Arm64Reg,
+        rd: Arm64Reg,
+    },
 
     // === Logical (shifted register) ===
-    AndShifted { sf: i32, shift: i32, rm: Arm64Reg, imm6: i32, rn: Arm64Reg, rd: Arm64Reg },
-    OrrShifted { sf: i32, shift: i32, rm: Arm64Reg, imm6: i32, rn: Arm64Reg, rd: Arm64Reg },
-    EorShifted { sf: i32, shift: i32, rm: Arm64Reg, imm6: i32, rn: Arm64Reg, rd: Arm64Reg },
+    AndShifted {
+        sf: i32,
+        shift: i32,
+        rm: Arm64Reg,
+        imm6: i32,
+        rn: Arm64Reg,
+        rd: Arm64Reg,
+    },
+    OrrShifted {
+        sf: i32,
+        shift: i32,
+        rm: Arm64Reg,
+        imm6: i32,
+        rn: Arm64Reg,
+        rd: Arm64Reg,
+    },
+    EorShifted {
+        sf: i32,
+        shift: i32,
+        rm: Arm64Reg,
+        imm6: i32,
+        rn: Arm64Reg,
+        rd: Arm64Reg,
+    },
 
     // === Move ===
-    MovReg { sf: i32, rm: Arm64Reg, rd: Arm64Reg },
-    MovSp { sf: i32, rn: Arm64Reg, rd: Arm64Reg },
-    Movz { sf: i32, hw: i32, imm16: i32, rd: Arm64Reg },
-    Movk { sf: i32, hw: i32, imm16: i32, rd: Arm64Reg },
+    MovReg {
+        sf: i32,
+        rm: Arm64Reg,
+        rd: Arm64Reg,
+    },
+    MovSp {
+        sf: i32,
+        rn: Arm64Reg,
+        rd: Arm64Reg,
+    },
+    Movz {
+        sf: i32,
+        hw: i32,
+        imm16: i32,
+        rd: Arm64Reg,
+    },
+    Movk {
+        sf: i32,
+        hw: i32,
+        imm16: i32,
+        rd: Arm64Reg,
+    },
 
     // === Shift ===
-    LslReg { sf: i32, rm: Arm64Reg, rn: Arm64Reg, rd: Arm64Reg },
-    LslImm { sf: i32, n: i32, immr: i32, imms: i32, rn: Arm64Reg, rd: Arm64Reg },
-    LsrReg { sf: i32, rm: Arm64Reg, rn: Arm64Reg, rd: Arm64Reg },
-    LsrImm { sf: i32, n: i32, immr: i32, imms: i32, rn: Arm64Reg, rd: Arm64Reg },
-    AsrReg { sf: i32, rm: Arm64Reg, rn: Arm64Reg, rd: Arm64Reg },
-    AsrImm { sf: i32, n: i32, immr: i32, imms: i32, rn: Arm64Reg, rd: Arm64Reg },
+    LslReg {
+        sf: i32,
+        rm: Arm64Reg,
+        rn: Arm64Reg,
+        rd: Arm64Reg,
+    },
+    LslImm {
+        sf: i32,
+        n: i32,
+        immr: i32,
+        imms: i32,
+        rn: Arm64Reg,
+        rd: Arm64Reg,
+    },
+    LsrReg {
+        sf: i32,
+        rm: Arm64Reg,
+        rn: Arm64Reg,
+        rd: Arm64Reg,
+    },
+    LsrImm {
+        sf: i32,
+        n: i32,
+        immr: i32,
+        imms: i32,
+        rn: Arm64Reg,
+        rd: Arm64Reg,
+    },
+    AsrReg {
+        sf: i32,
+        rm: Arm64Reg,
+        rn: Arm64Reg,
+        rd: Arm64Reg,
+    },
+    AsrImm {
+        sf: i32,
+        n: i32,
+        immr: i32,
+        imms: i32,
+        rn: Arm64Reg,
+        rd: Arm64Reg,
+    },
 
     // === Multiply ===
-    Madd { sf: i32, rm: Arm64Reg, ra: Arm64Reg, rn: Arm64Reg, rd: Arm64Reg },
-    Msub { sf: i32, rm: Arm64Reg, ra: Arm64Reg, rn: Arm64Reg, rd: Arm64Reg },
-    Sdiv { sf: i32, rm: Arm64Reg, rn: Arm64Reg, rd: Arm64Reg },
+    Madd {
+        sf: i32,
+        rm: Arm64Reg,
+        ra: Arm64Reg,
+        rn: Arm64Reg,
+        rd: Arm64Reg,
+    },
+    Msub {
+        sf: i32,
+        rm: Arm64Reg,
+        ra: Arm64Reg,
+        rn: Arm64Reg,
+        rd: Arm64Reg,
+    },
+    Sdiv {
+        sf: i32,
+        rm: Arm64Reg,
+        rn: Arm64Reg,
+        rd: Arm64Reg,
+    },
 
     // === Branch ===
-    Bl { imm26: i32 },
-    Blr { rn: Arm64Reg },
-    Ret { rn: Arm64Reg },
-    BCond { imm19: i32, cond: i32 },
-    Cbz { sf: i32, imm19: i32, rt: Arm64Reg },
-    Cbnz { sf: i32, imm19: i32, rt: Arm64Reg },
-    Brk { imm16: i32 },
+    Bl {
+        imm26: i32,
+    },
+    Blr {
+        rn: Arm64Reg,
+    },
+    Ret {
+        rn: Arm64Reg,
+    },
+    BCond {
+        imm19: i32,
+        cond: i32,
+    },
+    Cbz {
+        sf: i32,
+        imm19: i32,
+        rt: Arm64Reg,
+    },
+    Cbnz {
+        sf: i32,
+        imm19: i32,
+        rt: Arm64Reg,
+    },
+    Brk {
+        imm16: i32,
+    },
 
     // === Load/Store ===
-    LdrImm { size: i32, imm9: i32, rn: Arm64Reg, rt: Arm64Reg, imm12: i32, mode: LdrImmMode },
-    LdrReg { size: i32, rm: Arm64Reg, option: i32, s: i32, rn: Arm64Reg, rt: Arm64Reg },
-    LdurGen { size: i32, imm9: i32, rn: Arm64Reg, rt: Arm64Reg },
-    Ldar { size: i32, rn: Arm64Reg, rt: Arm64Reg },
-    LdpGen { opc: i32, imm7: i32, rt2: Arm64Reg, rn: Arm64Reg, rt: Arm64Reg, mode: LdpMode },
+    LdrImm {
+        size: i32,
+        imm9: i32,
+        rn: Arm64Reg,
+        rt: Arm64Reg,
+        imm12: i32,
+        mode: LdrImmMode,
+    },
+    LdrReg {
+        size: i32,
+        rm: Arm64Reg,
+        option: i32,
+        s: i32,
+        rn: Arm64Reg,
+        rt: Arm64Reg,
+    },
+    LdurGen {
+        size: i32,
+        imm9: i32,
+        rn: Arm64Reg,
+        rt: Arm64Reg,
+    },
+    Ldar {
+        size: i32,
+        rn: Arm64Reg,
+        rt: Arm64Reg,
+    },
+    LdpGen {
+        opc: i32,
+        imm7: i32,
+        rt2: Arm64Reg,
+        rn: Arm64Reg,
+        rt: Arm64Reg,
+        mode: LdpMode,
+    },
 
-    StrImm { size: i32, imm9: i32, rn: Arm64Reg, rt: Arm64Reg, imm12: i32, mode: StrImmMode },
-    StrReg { size: i32, rm: Arm64Reg, option: i32, s: i32, rn: Arm64Reg, rt: Arm64Reg },
-    SturGen { size: i32, imm9: i32, rn: Arm64Reg, rt: Arm64Reg },
-    Stlr { size: i32, rn: Arm64Reg, rt: Arm64Reg },
-    StpGen { opc: i32, imm7: i32, rt2: Arm64Reg, rn: Arm64Reg, rt: Arm64Reg, mode: StpMode },
+    StrImm {
+        size: i32,
+        imm9: i32,
+        rn: Arm64Reg,
+        rt: Arm64Reg,
+        imm12: i32,
+        mode: StrImmMode,
+    },
+    StrReg {
+        size: i32,
+        rm: Arm64Reg,
+        option: i32,
+        s: i32,
+        rn: Arm64Reg,
+        rt: Arm64Reg,
+    },
+    SturGen {
+        size: i32,
+        imm9: i32,
+        rn: Arm64Reg,
+        rt: Arm64Reg,
+    },
+    Stlr {
+        size: i32,
+        rn: Arm64Reg,
+        rt: Arm64Reg,
+    },
+    StpGen {
+        opc: i32,
+        imm7: i32,
+        rt2: Arm64Reg,
+        rn: Arm64Reg,
+        rt: Arm64Reg,
+        mode: StpMode,
+    },
 
     // === Byte load (LDRB) ===
-    Ldrb { imm12: i32, rn: Arm64Reg, rt: Arm64Reg },
+    Ldrb {
+        imm12: i32,
+        rn: Arm64Reg,
+        rt: Arm64Reg,
+    },
 
     // === Atomic ===
-    Cas { size: i32, l: i32, rs: Arm64Reg, o0: i32, rn: Arm64Reg, rt: Arm64Reg },
+    Cas {
+        size: i32,
+        l: i32,
+        rs: Arm64Reg,
+        o0: i32,
+        rn: Arm64Reg,
+        rt: Arm64Reg,
+    },
 
     // === Unconditional branch ===
-    B { imm26: i32 },
+    B {
+        imm26: i32,
+    },
 
     // === Conditional select ===
-    Csel { sf: i32, rm: Arm64Reg, cond: i32, rn: Arm64Reg, rd: Arm64Reg },
+    Csel {
+        sf: i32,
+        rm: Arm64Reg,
+        cond: i32,
+        rn: Arm64Reg,
+        rd: Arm64Reg,
+    },
 
     // === ORN (shifted register) — for MVN ===
-    OrnShifted { sf: i32, shift: i32, rm: Arm64Reg, imm6: i32, rn: Arm64Reg, rd: Arm64Reg },
+    OrnShifted {
+        sf: i32,
+        shift: i32,
+        rm: Arm64Reg,
+        imm6: i32,
+        rn: Arm64Reg,
+        rd: Arm64Reg,
+    },
 
     // === Bitfield ===
-    Sbfm { sf: i32, n: i32, immr: i32, imms: i32, rn: Arm64Reg, rd: Arm64Reg },
-    Ubfm { sf: i32, n: i32, immr: i32, imms: i32, rn: Arm64Reg, rd: Arm64Reg },
+    Sbfm {
+        sf: i32,
+        n: i32,
+        immr: i32,
+        imms: i32,
+        rn: Arm64Reg,
+        rd: Arm64Reg,
+    },
+    Ubfm {
+        sf: i32,
+        n: i32,
+        immr: i32,
+        imms: i32,
+        rn: Arm64Reg,
+        rd: Arm64Reg,
+    },
 
     // === Unsigned divide ===
-    Udiv { sf: i32, rm: Arm64Reg, rn: Arm64Reg, rd: Arm64Reg },
+    Udiv {
+        sf: i32,
+        rm: Arm64Reg,
+        rn: Arm64Reg,
+        rd: Arm64Reg,
+    },
 
     // === Int/Float conversions ===
-    ScvtfIntToFloat { sf: i32, ftype: i32, rn: Arm64Reg, rd: Arm64Reg },
-    FcvtzsFloatToInt { sf: i32, ftype: i32, rn: Arm64Reg, rd: Arm64Reg },
+    ScvtfIntToFloat {
+        sf: i32,
+        ftype: i32,
+        rn: Arm64Reg,
+        rd: Arm64Reg,
+    },
+    FcvtzsFloatToInt {
+        sf: i32,
+        ftype: i32,
+        rn: Arm64Reg,
+        rd: Arm64Reg,
+    },
 
     // === Float negate ===
-    FnegFloat { ftype: i32, rn: Arm64Reg, rd: Arm64Reg },
+    FnegFloat {
+        ftype: i32,
+        rn: Arm64Reg,
+        rd: Arm64Reg,
+    },
 
     // === Float conditional select ===
-    FcselFloat { ftype: i32, rm: Arm64Reg, cond: i32, rn: Arm64Reg, rd: Arm64Reg },
+    FcselFloat {
+        ftype: i32,
+        rm: Arm64Reg,
+        cond: i32,
+        rn: Arm64Reg,
+        rd: Arm64Reg,
+    },
 
     // === FP load/store (V=1) ===
-    LdrFpImm { size: i32, imm12: i32, rn: Arm64Reg, rt: Arm64Reg },
-    StrFpImm { size: i32, imm12: i32, rn: Arm64Reg, rt: Arm64Reg },
-    LdurFp { size: i32, imm9: i32, rn: Arm64Reg, rt: Arm64Reg },
-    SturFp { size: i32, imm9: i32, rn: Arm64Reg, rt: Arm64Reg },
+    LdrFpImm {
+        size: i32,
+        imm12: i32,
+        rn: Arm64Reg,
+        rt: Arm64Reg,
+    },
+    StrFpImm {
+        size: i32,
+        imm12: i32,
+        rn: Arm64Reg,
+        rt: Arm64Reg,
+    },
+    LdurFp {
+        size: i32,
+        imm9: i32,
+        rn: Arm64Reg,
+        rt: Arm64Reg,
+    },
+    SturFp {
+        size: i32,
+        imm9: i32,
+        rn: Arm64Reg,
+        rt: Arm64Reg,
+    },
 
     // === Move NOT ===
-    Movn { sf: i32, hw: i32, imm16: i32, rd: Arm64Reg },
+    Movn {
+        sf: i32,
+        hw: i32,
+        imm16: i32,
+        rd: Arm64Reg,
+    },
 
     // === Floating point ===
-    FmovFloat { ftype: i32, rn: Arm64Reg, rd: Arm64Reg },
-    FmovFloatGen { sf: i32, ftype: i32, rmode: i32, opcode: i32, rn: Arm64Reg, rd: Arm64Reg },
-    FaddFloat { ftype: i32, rm: Arm64Reg, rn: Arm64Reg, rd: Arm64Reg },
-    FsubFloat { ftype: i32, rm: Arm64Reg, rn: Arm64Reg, rd: Arm64Reg },
-    FmulFloat { ftype: i32, rm: Arm64Reg, rn: Arm64Reg, rd: Arm64Reg },
-    FdivFloat { ftype: i32, rm: Arm64Reg, rn: Arm64Reg, rd: Arm64Reg },
-    FrintzFloat { ftype: i32, rn: Arm64Reg, rd: Arm64Reg },
-    FcmpFloat { ftype: i32, rm: Arm64Reg, rn: Arm64Reg },
+    FmovFloat {
+        ftype: i32,
+        rn: Arm64Reg,
+        rd: Arm64Reg,
+    },
+    FmovFloatGen {
+        sf: i32,
+        ftype: i32,
+        rmode: i32,
+        opcode: i32,
+        rn: Arm64Reg,
+        rd: Arm64Reg,
+    },
+    FaddFloat {
+        ftype: i32,
+        rm: Arm64Reg,
+        rn: Arm64Reg,
+        rd: Arm64Reg,
+    },
+    FsubFloat {
+        ftype: i32,
+        rm: Arm64Reg,
+        rn: Arm64Reg,
+        rd: Arm64Reg,
+    },
+    FmulFloat {
+        ftype: i32,
+        rm: Arm64Reg,
+        rn: Arm64Reg,
+        rd: Arm64Reg,
+    },
+    FdivFloat {
+        ftype: i32,
+        rm: Arm64Reg,
+        rn: Arm64Reg,
+        rd: Arm64Reg,
+    },
+    FrintzFloat {
+        ftype: i32,
+        rn: Arm64Reg,
+        rd: Arm64Reg,
+    },
+    FcmpFloat {
+        ftype: i32,
+        rm: Arm64Reg,
+        rn: Arm64Reg,
+    },
 }
 
 impl Arm64Inst {
@@ -206,7 +573,13 @@ impl Arm64Inst {
                     | (((*immhi as u32) & 0x7FFFF) << 5)
                     | (rd << 0)
             }
-            Arm64Inst::AddImm { sf, sh, imm12, rn, rd } => {
+            Arm64Inst::AddImm {
+                sf,
+                sh,
+                imm12,
+                rn,
+                rd,
+            } => {
                 0b0_0_0_100010_0_000000000000_00000_00000
                     | ((*sf as u32) << 31)
                     | ((*sh as u32) << 22)
@@ -214,7 +587,13 @@ impl Arm64Inst {
                     | (rn << 5)
                     | (rd << 0)
             }
-            Arm64Inst::SubImm { sf, sh, imm12, rn, rd } => {
+            Arm64Inst::SubImm {
+                sf,
+                sh,
+                imm12,
+                rn,
+                rd,
+            } => {
                 0b0_1_0_100010_0_000000000000_00000_00000
                     | ((*sf as u32) << 31)
                     | ((*sh as u32) << 22)
@@ -222,7 +601,14 @@ impl Arm64Inst {
                     | (rn << 5)
                     | (rd << 0)
             }
-            Arm64Inst::AddShifted { sf, shift, rm, imm6, rn, rd } => {
+            Arm64Inst::AddShifted {
+                sf,
+                shift,
+                rm,
+                imm6,
+                rn,
+                rd,
+            } => {
                 0b0_0_0_01011_00_0_00000_000000_00000_00000
                     | ((*sf as u32) << 31)
                     | ((*shift as u32) << 22)
@@ -231,7 +617,14 @@ impl Arm64Inst {
                     | (rn << 5)
                     | (rd << 0)
             }
-            Arm64Inst::SubShifted { sf, shift, rm, imm6, rn, rd } => {
+            Arm64Inst::SubShifted {
+                sf,
+                shift,
+                rm,
+                imm6,
+                rn,
+                rd,
+            } => {
                 0b0_1_0_01011_00_0_00000_000000_00000_00000
                     | ((*sf as u32) << 31)
                     | ((*shift as u32) << 22)
@@ -240,7 +633,13 @@ impl Arm64Inst {
                     | (rn << 5)
                     | (rd << 0)
             }
-            Arm64Inst::SubsImm { sf, sh, imm12, rn, rd } => {
+            Arm64Inst::SubsImm {
+                sf,
+                sh,
+                imm12,
+                rn,
+                rd,
+            } => {
                 // SUBS (immediate) = SUB (immediate) with S flag (bit 29)
                 0b0_1_1_100010_0_000000000000_00000_00000
                     | ((*sf as u32) << 31)
@@ -249,7 +648,14 @@ impl Arm64Inst {
                     | (rn << 5)
                     | (rd << 0)
             }
-            Arm64Inst::SubsShifted { sf, shift, rm, imm6, rn, rd } => {
+            Arm64Inst::SubsShifted {
+                sf,
+                shift,
+                rm,
+                imm6,
+                rn,
+                rd,
+            } => {
                 0b0_1_1_01011_00_0_00000_000000_00000_00000
                     | ((*sf as u32) << 31)
                     | ((*shift as u32) << 22)
@@ -258,7 +664,13 @@ impl Arm64Inst {
                     | (rn << 5)
                     | (rd << 0)
             }
-            Arm64Inst::CmpShifted { sf, shift, rm, imm6, rn } => {
+            Arm64Inst::CmpShifted {
+                sf,
+                shift,
+                rm,
+                imm6,
+                rn,
+            } => {
                 0b0_1_1_01011_00_0_00000_000000_00000_11111
                     | ((*sf as u32) << 31)
                     | ((*shift as u32) << 22)
@@ -272,7 +684,14 @@ impl Arm64Inst {
                     | ((*cond as u32) << 12)
                     | (rd << 0)
             }
-            Arm64Inst::AndImm { sf, n, immr, imms, rn, rd } => {
+            Arm64Inst::AndImm {
+                sf,
+                n,
+                immr,
+                imms,
+                rn,
+                rd,
+            } => {
                 0b0_00_100100_0_000000_000000_00000_00000
                     | ((*sf as u32) << 31)
                     | ((*n as u32) << 22)
@@ -281,7 +700,14 @@ impl Arm64Inst {
                     | (rn << 5)
                     | (rd << 0)
             }
-            Arm64Inst::AndShifted { sf, shift, rm, imm6, rn, rd } => {
+            Arm64Inst::AndShifted {
+                sf,
+                shift,
+                rm,
+                imm6,
+                rn,
+                rd,
+            } => {
                 0b0_00_01010_00_0_00000_000000_00000_00000
                     | ((*sf as u32) << 31)
                     | ((*shift as u32) << 22)
@@ -290,7 +716,14 @@ impl Arm64Inst {
                     | (rn << 5)
                     | (rd << 0)
             }
-            Arm64Inst::OrrShifted { sf, shift, rm, imm6, rn, rd } => {
+            Arm64Inst::OrrShifted {
+                sf,
+                shift,
+                rm,
+                imm6,
+                rn,
+                rd,
+            } => {
                 0b0_01_01010_00_0_00000_000000_00000_00000
                     | ((*sf as u32) << 31)
                     | ((*shift as u32) << 22)
@@ -299,7 +732,14 @@ impl Arm64Inst {
                     | (rn << 5)
                     | (rd << 0)
             }
-            Arm64Inst::EorShifted { sf, shift, rm, imm6, rn, rd } => {
+            Arm64Inst::EorShifted {
+                sf,
+                shift,
+                rm,
+                imm6,
+                rn,
+                rd,
+            } => {
                 0b0_10_01010_00_0_00000_000000_00000_00000
                     | ((*sf as u32) << 31)
                     | ((*shift as u32) << 22)
@@ -341,7 +781,14 @@ impl Arm64Inst {
                     | (rn << 5)
                     | (rd << 0)
             }
-            Arm64Inst::LslImm { sf, n, immr, imms, rn, rd } => {
+            Arm64Inst::LslImm {
+                sf,
+                n,
+                immr,
+                imms,
+                rn,
+                rd,
+            } => {
                 0b0_10_100110_0_000000_000000_00000_00000
                     | ((*sf as u32) << 31)
                     | ((*n as u32) << 22)
@@ -357,7 +804,14 @@ impl Arm64Inst {
                     | (rn << 5)
                     | (rd << 0)
             }
-            Arm64Inst::LsrImm { sf, n, immr, imms, rn, rd } => {
+            Arm64Inst::LsrImm {
+                sf,
+                n,
+                immr,
+                imms,
+                rn,
+                rd,
+            } => {
                 0b0_10_100110_0_000000_000000_00000_00000
                     | ((*sf as u32) << 31)
                     | ((*n as u32) << 22)
@@ -373,7 +827,14 @@ impl Arm64Inst {
                     | (rn << 5)
                     | (rd << 0)
             }
-            Arm64Inst::AsrImm { sf, n, immr, imms, rn, rd } => {
+            Arm64Inst::AsrImm {
+                sf,
+                n,
+                immr,
+                imms,
+                rn,
+                rd,
+            } => {
                 0b0_00_100110_0_000000_000000_00000_00000
                     | ((*sf as u32) << 31)
                     | ((*n as u32) << 22)
@@ -406,15 +867,10 @@ impl Arm64Inst {
                     | (rd << 0)
             }
             Arm64Inst::Bl { imm26 } => {
-                0b1_00101_00000000000000000000000000
-                    | (truncate_imm::<_, 26>(*imm26) << 0)
+                0b1_00101_00000000000000000000000000 | (truncate_imm::<_, 26>(*imm26) << 0)
             }
-            Arm64Inst::Blr { rn } => {
-                0b1101011_0_0_01_11111_0000_0_0_00000_00000 | (rn << 5)
-            }
-            Arm64Inst::Ret { rn } => {
-                0b1101011_0_0_10_11111_0000_0_0_00000_00000 | (rn << 5)
-            }
+            Arm64Inst::Blr { rn } => 0b1101011_0_0_01_11111_0000_0_0_00000_00000 | (rn << 5),
+            Arm64Inst::Ret { rn } => 0b1101011_0_0_10_11111_0000_0_0_00000_00000 | (rn << 5),
             Arm64Inst::BCond { imm19, cond } => {
                 0b0101010_0_0000000000000000000_0_0000
                     | (truncate_imm::<_, 19>(*imm19) << 5)
@@ -435,7 +891,14 @@ impl Arm64Inst {
             Arm64Inst::Brk { imm16 } => {
                 0b11010100_001_0000000000000000_000_00 | ((*imm16 as u32) << 5)
             }
-            Arm64Inst::LdrImm { size, imm9, rn, rt, imm12, mode } => match mode {
+            Arm64Inst::LdrImm {
+                size,
+                imm9,
+                rn,
+                rt,
+                imm12,
+                mode,
+            } => match mode {
                 LdrImmMode::PostIndex => {
                     0b00_111_0_00_01_0_000000000_01_00000_00000
                         | ((*size as u32) << 30)
@@ -458,7 +921,14 @@ impl Arm64Inst {
                         | (rt << 0)
                 }
             },
-            Arm64Inst::LdrReg { size, rm, option, s, rn, rt } => {
+            Arm64Inst::LdrReg {
+                size,
+                rm,
+                option,
+                s,
+                rn,
+                rt,
+            } => {
                 0b00_111_0_00_01_1_00000_000_0_10_00000_00000
                     | ((*size as u32) << 30)
                     | (rm << 16)
@@ -480,7 +950,14 @@ impl Arm64Inst {
                     | (rn << 5)
                     | (rt << 0)
             }
-            Arm64Inst::LdpGen { opc, imm7, rt2, rn, rt, mode } => match mode {
+            Arm64Inst::LdpGen {
+                opc,
+                imm7,
+                rt2,
+                rn,
+                rt,
+                mode,
+            } => match mode {
                 LdpMode::PostIndex => {
                     0b00_101_0_001_1_0000000_00000_00000_00000
                         | ((*opc as u32) << 30)
@@ -506,7 +983,14 @@ impl Arm64Inst {
                         | (rt << 0)
                 }
             },
-            Arm64Inst::StrImm { size, imm9, rn, rt, imm12, mode } => match mode {
+            Arm64Inst::StrImm {
+                size,
+                imm9,
+                rn,
+                rt,
+                imm12,
+                mode,
+            } => match mode {
                 StrImmMode::PostIndex => {
                     0b00_111_0_00_00_0_000000000_01_00000_00000
                         | ((*size as u32) << 30)
@@ -529,7 +1013,14 @@ impl Arm64Inst {
                         | (rt << 0)
                 }
             },
-            Arm64Inst::StrReg { size, rm, option, s, rn, rt } => {
+            Arm64Inst::StrReg {
+                size,
+                rm,
+                option,
+                s,
+                rn,
+                rt,
+            } => {
                 0b00_111_0_00_00_1_00000_000_0_10_00000_00000
                     | ((*size as u32) << 30)
                     | (rm << 16)
@@ -551,7 +1042,14 @@ impl Arm64Inst {
                     | (rn << 5)
                     | (rt << 0)
             }
-            Arm64Inst::StpGen { opc, imm7, rt2, rn, rt, mode } => match mode {
+            Arm64Inst::StpGen {
+                opc,
+                imm7,
+                rt2,
+                rn,
+                rt,
+                mode,
+            } => match mode {
                 StpMode::PostIndex => {
                     0b00_101_0_001_0_0000000_00000_00000_00000
                         | ((*opc as u32) << 30)
@@ -584,7 +1082,14 @@ impl Arm64Inst {
                     | (rn << 5)
                     | (rt << 0)
             }
-            Arm64Inst::Cas { size, l, rs, o0, rn, rt } => {
+            Arm64Inst::Cas {
+                size,
+                l,
+                rs,
+                o0,
+                rn,
+                rt,
+            } => {
                 0b00_0010001_0_1_00000_0_11111_00000_00000
                     | ((*size as u32) << 30)
                     | ((*l as u32) << 22)
@@ -595,10 +1100,15 @@ impl Arm64Inst {
             }
             Arm64Inst::B { imm26 } => {
                 // B imm26: 000101 imm26
-                0b0_00101_00000000000000000000000000
-                    | (truncate_imm::<_, 26>(*imm26) << 0)
+                0b0_00101_00000000000000000000000000 | (truncate_imm::<_, 26>(*imm26) << 0)
             }
-            Arm64Inst::Csel { sf, rm, cond, rn, rd } => {
+            Arm64Inst::Csel {
+                sf,
+                rm,
+                cond,
+                rn,
+                rd,
+            } => {
                 // CSEL: sf 0 0 11010100 rm cond 0 0 rn rd
                 0b0_0_0_11010100_00000_0000_0_0_00000_00000
                     | ((*sf as u32) << 31)
@@ -607,7 +1117,14 @@ impl Arm64Inst {
                     | (rn << 5)
                     | (rd << 0)
             }
-            Arm64Inst::OrnShifted { sf, shift, rm, imm6, rn, rd } => {
+            Arm64Inst::OrnShifted {
+                sf,
+                shift,
+                rm,
+                imm6,
+                rn,
+                rd,
+            } => {
                 // ORN: sf 01 01010 shift 1 rm imm6 rn rd
                 0b0_01_01010_00_1_00000_000000_00000_00000
                     | ((*sf as u32) << 31)
@@ -617,7 +1134,14 @@ impl Arm64Inst {
                     | (rn << 5)
                     | (rd << 0)
             }
-            Arm64Inst::Sbfm { sf, n, immr, imms, rn, rd } => {
+            Arm64Inst::Sbfm {
+                sf,
+                n,
+                immr,
+                imms,
+                rn,
+                rd,
+            } => {
                 // SBFM: sf 00 100110 N immr imms rn rd
                 0b0_00_100110_0_000000_000000_00000_00000
                     | ((*sf as u32) << 31)
@@ -627,7 +1151,14 @@ impl Arm64Inst {
                     | (rn << 5)
                     | (rd << 0)
             }
-            Arm64Inst::Ubfm { sf, n, immr, imms, rn, rd } => {
+            Arm64Inst::Ubfm {
+                sf,
+                n,
+                immr,
+                imms,
+                rn,
+                rd,
+            } => {
                 // UBFM: sf 10 100110 N immr imms rn rd
                 0b0_10_100110_0_000000_000000_00000_00000
                     | ((*sf as u32) << 31)
@@ -668,7 +1199,13 @@ impl Arm64Inst {
                     | (rn << 5)
                     | (rd << 0)
             }
-            Arm64Inst::FcselFloat { ftype, rm, cond, rn, rd } => {
+            Arm64Inst::FcselFloat {
+                ftype,
+                rm,
+                cond,
+                rn,
+                rd,
+            } => {
                 // FCSEL: 0 0 0 11110 ftype 1 rm cond 11 rn rd
                 0b0_0_0_11110_00_1_00000_0000_11_00000_00000
                     | ((*ftype as u32) << 22)
@@ -677,7 +1214,12 @@ impl Arm64Inst {
                     | (rn << 5)
                     | (rd << 0)
             }
-            Arm64Inst::LdrFpImm { size, imm12, rn, rt } => {
+            Arm64Inst::LdrFpImm {
+                size,
+                imm12,
+                rn,
+                rt,
+            } => {
                 // LDR (SIMD&FP, unsigned offset): size 1 11 1 1 01 01 imm12 rn rt
                 0b00_111_1_01_01_000000000000_00000_00000
                     | ((*size as u32) << 30)
@@ -685,7 +1227,12 @@ impl Arm64Inst {
                     | (rn << 5)
                     | (rt << 0)
             }
-            Arm64Inst::StrFpImm { size, imm12, rn, rt } => {
+            Arm64Inst::StrFpImm {
+                size,
+                imm12,
+                rn,
+                rt,
+            } => {
                 // STR (SIMD&FP, unsigned offset): size 1 11 1 1 01 00 imm12 rn rt
                 0b00_111_1_01_00_000000000000_00000_00000
                     | ((*size as u32) << 30)
@@ -722,7 +1269,14 @@ impl Arm64Inst {
                     | (rn << 5)
                     | (rd << 0)
             }
-            Arm64Inst::FmovFloatGen { sf, ftype, rmode, opcode, rn, rd } => {
+            Arm64Inst::FmovFloatGen {
+                sf,
+                ftype,
+                rmode,
+                opcode,
+                rn,
+                rd,
+            } => {
                 0b0_0_0_11110_00_1_00_000_000000_00000_00000
                     | ((*sf as u32) << 31)
                     | ((*ftype as u32) << 22)
@@ -766,10 +1320,7 @@ impl Arm64Inst {
                     | (rd << 0)
             }
             Arm64Inst::FcmpFloat { ftype, rm, rn } => {
-                0x1E202000
-                    | ((*ftype as u32) << 22)
-                    | (rm << 16)
-                    | (rn << 5)
+                0x1E202000 | ((*ftype as u32) << 22) | (rm << 16) | (rn << 5)
             }
         }
     }

@@ -203,7 +203,10 @@ pub fn parse(data: &[u8]) -> Result<Chunk, String> {
     }
     let version = r.u8();
     if version != 0x51 {
-        return Err(format!("unsupported Lua version: {:#04x} (expected 0x51)", version));
+        return Err(format!(
+            "unsupported Lua version: {:#04x} (expected 0x51)",
+            version
+        ));
     }
     let format = r.u8(); // 0 = official
     if format != 0 {
@@ -284,7 +287,11 @@ fn parse_proto(r: &mut Reader, size_t_size: usize) -> Result<Proto, String> {
         let name = r.string(size_t_size);
         let start_pc = r.u32();
         let end_pc = r.u32();
-        locals.push(Local { name, start_pc, end_pc });
+        locals.push(Local {
+            name,
+            start_pc,
+            end_pc,
+        });
     }
 
     // Debug info: upvalue names

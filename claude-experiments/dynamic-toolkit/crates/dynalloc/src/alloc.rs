@@ -1,9 +1,8 @@
 use core::cell::Cell;
 
 use dynobj::{
-    init_header, read_type_info, write_varlen_count, read_varlen_count,
-    ObjHeader, Compact,
-    TypeInfo, VarLenKind,
+    Compact, ObjHeader, TypeInfo, VarLenKind, init_header, read_type_info, read_varlen_count,
+    write_varlen_count,
 };
 
 // ─── Traits ──────────────────────────────────────────────────────────

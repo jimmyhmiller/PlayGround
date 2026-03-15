@@ -1,6 +1,6 @@
 pub mod bytecode;
-pub mod translate;
 pub mod runtime;
+pub mod translate;
 
 #[cfg(test)]
 mod tests;

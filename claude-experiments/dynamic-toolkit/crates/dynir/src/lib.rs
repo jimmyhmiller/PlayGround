@@ -1,19 +1,26 @@
-pub mod types;
-pub mod ir;
 pub mod builder;
-pub mod verify;
 pub mod display;
 pub mod interp;
+pub mod ir;
+pub mod types;
+pub mod verify;
 
-#[cfg(test)]
-mod tests;
+pub use dynexec;
+
 #[cfg(test)]
 mod expressiveness_tests;
 #[cfg(test)]
 mod interp_tests;
+#[cfg(test)]
+mod tests;
 
-pub use types::{Type, Signature};
-pub use ir::{Value, BlockId, FuncRef, CmpOp, OverflowOp, DeoptId, DeoptInfo, Inst, Terminator, InstNode, Block, ExternFunc, Function};
-pub use builder::FunctionBuilder;
+pub use builder::{FunctionBuilder, ModuleBuilder};
+pub use interp::{
+    ExternCallResult, InterpError, InterpResult, InterpRootManager, ModuleInterpreter, NoGcRoots,
+};
+pub use ir::{
+    Block, BlockId, CmpOp, DeoptId, DeoptInfo, ExternFunc, FuncDef, FuncRef, Function, Inst,
+    InstNode, Module, OverflowOp, Terminator, Value,
+};
+pub use types::{Signature, Type};
 pub use verify::{verify, VerifyError};
-pub use interp::{Interpreter, InterpResult, InterpError, ExternCallResult};

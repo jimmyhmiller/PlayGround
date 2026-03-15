@@ -1,6 +1,6 @@
 use std::cell::Cell;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Trait for types that can enumerate GC root references.
 ///
@@ -127,7 +127,11 @@ impl FrameChain {
         frame.header.parent.set(self.top.get());
         // Cast from the whole RootFrame pointer (not &frame.header) so the
         // raw pointer's provenance covers the trailing slots, not just the header.
-        self.top.set((frame as *const RootFrame<N>).cast::<FrameHeader>().cast_mut());
+        self.top.set(
+            (frame as *const RootFrame<N>)
+                .cast::<FrameHeader>()
+                .cast_mut(),
+        );
         FrameGuard { chain: self }
     }
 
@@ -145,6 +149,34 @@ impl FrameChain {
         unsafe { (*header).parent.set(self.top.get()) };
         self.top.set(header);
         FrameGuard { chain: self }
+    }
+
+    /// Push a raw FrameHeader without returning a guard.
+    ///
+    /// The caller is responsible for calling [`pop_raw`] later to maintain
+    /// stack discipline. This is intended for interpreters that manage
+    /// frame lifetimes dynamically rather than via RAII guards.
+    ///
+    /// # Safety
+    /// - `header` must point to valid memory with `slot_count` Cell<u64> slots
+    ///   immediately following the FrameHeader.
+    /// - The memory must remain valid until `pop_raw` is called.
+    pub unsafe fn push_raw_unguarded(&self, header: *mut FrameHeader) {
+        unsafe { (*header).parent.set(self.top.get()) };
+        self.top.set(header);
+    }
+
+    /// Pop the top frame from the chain without a guard.
+    ///
+    /// # Safety
+    /// - The chain must not be empty.
+    /// - Must be called in LIFO order matching `push_raw_unguarded` calls.
+    pub unsafe fn pop_raw(&self) {
+        unsafe {
+            let top = self.top.get();
+            assert!(!top.is_null(), "pop_raw: chain is empty");
+            self.top.set((*top).parent.get());
+        }
     }
 
     /// Number of frames currently in the chain.
@@ -262,7 +294,11 @@ impl DynRootFrame {
 
     /// Get the value in slot `i`.
     pub fn get(&self, i: usize) -> u64 {
-        assert!(i < self.slot_count, "slot index {i} >= slot_count {}", self.slot_count);
+        assert!(
+            i < self.slot_count,
+            "slot index {i} >= slot_count {}",
+            self.slot_count
+        );
         let header_words = std::mem::size_of::<FrameHeader>() / 8;
         let slot_ptr = unsafe {
             (self.backing.as_ptr().add(header_words + i) as *const Cell<u64>)
@@ -274,7 +310,11 @@ impl DynRootFrame {
 
     /// Set the value in slot `i`.
     pub fn set(&self, i: usize, val: u64) {
-        assert!(i < self.slot_count, "slot index {i} >= slot_count {}", self.slot_count);
+        assert!(
+            i < self.slot_count,
+            "slot index {i} >= slot_count {}",
+            self.slot_count
+        );
         let header_words = std::mem::size_of::<FrameHeader>() / 8;
         let slot_ptr = unsafe {
             (self.backing.as_ptr().add(header_words + i) as *const Cell<u64>)

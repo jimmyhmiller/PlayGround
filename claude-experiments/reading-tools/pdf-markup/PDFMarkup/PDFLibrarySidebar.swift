@@ -1,5 +1,6 @@
 import SwiftUI
 import PDFKit
+import UniformTypeIdentifiers
 
 struct PDFLibrarySidebar: View {
     let library: PDFLibrary
@@ -95,7 +96,10 @@ struct PDFLibrarySidebar: View {
                             onSelect: { pdf in
                                 selectedPDF = pdf
                             },
-                            onSelectShared: onSelectSharedPDF
+                            onSelectShared: onSelectSharedPDF,
+                            onExport: { pdf in
+                                exportPDF(pdf)
+                            }
                         )
                     }
                 } label: {
@@ -123,11 +127,19 @@ struct PDFLibrarySidebar: View {
                     isExpanded: folderBinding(for: folder)
                 ) {
                     ForEach(library.pdfs(in: folder)) { pdf in
-                        PDFListItem(pdf: pdf, isSelected: selectedPDF?.id == pdf.id)
-                            .contentShape(Rectangle())
-                            .onTapGesture {
-                                selectedPDF = pdf
+                        Button {
+                            selectedPDF = pdf
+                        } label: {
+                            PDFListItem(pdf: pdf, isSelected: selectedPDF?.id == pdf.id)
+                        }
+                        .buttonStyle(.plain)
+                        .contextMenu {
+                            Button {
+                                exportPDF(pdf)
+                            } label: {
+                                Label("Export with Markups", systemImage: "square.and.arrow.up")
                             }
+                        }
                     }
                 } label: {
                     FolderLabel(name: folder, count: library.pdfs(in: folder).count)
@@ -137,6 +149,36 @@ struct PDFLibrarySidebar: View {
         .listStyle(.sidebar)
         .refreshable {
             loadRecentlyHighlighted()
+        }
+    }
+
+    private func exportPDF(_ pdf: PDFMetadata) {
+        print("📤 Export requested for: \(pdf.displayTitle)")
+        Task { @MainActor in
+            let downloader = PDFDownloader()
+            do {
+                print("📤 Downloading PDF...")
+                let document = try await downloader.downloadPDF(metadata: pdf)
+                print("📤 Exporting with markups...")
+                let exportedURL = try PDFExporter.exportToTemporaryFile(document: document, pdfHash: pdf.hash)
+                print("📤 Exported to: \(exportedURL)")
+                let savePanel = NSSavePanel()
+                savePanel.allowedContentTypes = [UTType.pdf]
+                savePanel.nameFieldStringValue = pdf.displayTitle + ".pdf"
+                savePanel.begin { response in
+                    if response == .OK, let dest = savePanel.url {
+                        try? FileManager.default.removeItem(at: dest)
+                        do {
+                            try FileManager.default.copyItem(at: exportedURL, to: dest)
+                            print("📤 Saved to: \(dest)")
+                        } catch {
+                            print("📤 Failed to save: \(error)")
+                        }
+                    }
+                }
+            } catch {
+                print("📤 Export failed: \(error)")
+            }
         }
     }
 
@@ -214,6 +256,7 @@ struct RecentlyHighlightedItem: View {
     var isSelected: Bool = false
     var onSelect: ((PDFMetadata) -> Void)?
     var onSelectShared: ((String, PDFDocument) -> Void)?
+    var onExport: ((PDFMetadata) -> Void)?
 
     private var pdf: PDFMetadata? {
         library.pdfs.first { $0.hash == hash }
@@ -255,6 +298,13 @@ struct RecentlyHighlightedItem: View {
             .contentShape(Rectangle())
             .onTapGesture {
                 onSelect?(pdf)
+            }
+            .contextMenu {
+                Button {
+                    onExport?(pdf)
+                } label: {
+                    Label("Export with Markups", systemImage: "square.and.arrow.up")
+                }
             }
         } else {
             // PDF might be a shared one not in the library

@@ -2,8 +2,8 @@ use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use dynobj::{
-    read_type_info, read_varlen_count, scan_object,
-    ObjHeader, RootSource, TypeInfo, VarLenKind, AtomicRootSet,
+    AtomicRootSet, ObjHeader, RootSource, TypeInfo, VarLenKind, read_type_info, read_varlen_count,
+    scan_object,
 };
 
 use crate::alloc::{Alloc, AtomicBumpAllocator, HeapWalker};
@@ -158,13 +158,19 @@ impl Heap {
     /// Get the current from-space.
     #[inline(always)]
     fn from_space(&self) -> &AtomicBumpAllocator {
-        unsafe { self.spaces.get_unchecked(self.from_idx.load(Ordering::Acquire)) }
+        unsafe {
+            self.spaces
+                .get_unchecked(self.from_idx.load(Ordering::Acquire))
+        }
     }
 
     /// Get the current to-space.
     #[inline(always)]
     fn to_space(&self) -> &AtomicBumpAllocator {
-        unsafe { self.spaces.get_unchecked(1 - self.from_idx.load(Ordering::Acquire)) }
+        unsafe {
+            self.spaces
+                .get_unchecked(1 - self.from_idx.load(Ordering::Acquire))
+        }
     }
 
     /// Swap from-space and to-space by flipping the index.
@@ -174,10 +180,7 @@ impl Heap {
     }
 
     /// Create a new heap with statemap tracing enabled.
-    pub fn new_with_tracer<H: ObjHeader>(
-        space_size: usize,
-        tracer: Arc<StatemapTracer>,
-    ) -> Self {
+    pub fn new_with_tracer<H: ObjHeader>(space_size: usize, tracer: Arc<StatemapTracer>) -> Self {
         let mut heap = Self::new::<H>(space_size);
         heap.tracer = Some(tracer);
         heap
@@ -299,11 +302,7 @@ impl Heap {
     }
 
     /// Allocate and initialize header + varlen count.
-    pub fn alloc_obj<H: ObjHeader>(
-        &self,
-        info: &'static TypeInfo,
-        varlen_len: usize,
-    ) -> *mut u8 {
+    pub fn alloc_obj<H: ObjHeader>(&self, info: &'static TypeInfo, varlen_len: usize) -> *mut u8 {
         unsafe { crate::alloc::alloc_obj::<H>(self.from_space(), info, varlen_len) }
     }
 
@@ -448,19 +447,13 @@ impl Heap {
     /// - All mutator threads must be at safepoints (not running mutator code).
     /// - `extra_roots` can provide additional root sources beyond the
     ///   registered threads and globals.
-    pub unsafe fn collect<P: PtrPolicy>(
-        &self,
-        extra_roots: &[&dyn RootSource],
-    ) {
+    pub unsafe fn collect<P: PtrPolicy>(&self, extra_roots: &[&dyn RootSource]) {
         let _gc_guard = self.gc_lock.lock().unwrap();
         unsafe { self.collect_inner::<P>(extra_roots) };
     }
 
     /// Internal collection logic — caller must hold `gc_lock`.
-    unsafe fn collect_inner<P: PtrPolicy>(
-        &self,
-        extra_roots: &[&dyn RootSource],
-    ) {
+    unsafe fn collect_inner<P: PtrPolicy>(&self, extra_roots: &[&dyn RootSource]) {
         // Phase 1: scan all roots → copy/forward targets into to-space
 
         // Global roots
@@ -691,8 +684,10 @@ impl Heap {
                             self.from_space().contains(ptr),
                             "POST-SWAP: root slot {:p} points to {:p} which is NOT in from-space \
                              [{:p}..+{}). In to-space: {}. collections={}",
-                            slot, ptr,
-                            self.from_space().base(), self.from_space().size(),
+                            slot,
+                            ptr,
+                            self.from_space().base(),
+                            self.from_space().size(),
                             self.to_space().contains(ptr),
                             self.collections.load(Ordering::Relaxed),
                         );
@@ -762,7 +757,8 @@ impl Heap {
         // Check if this object has been forwarded to to-space
         if let Some(forwarded) = unsafe { self.check_forwarded_atomic(obj) } {
             unsafe {
-                let atomic_slot = &*(forwarded.add(field_offset) as *const std::sync::atomic::AtomicU64);
+                let atomic_slot =
+                    &*(forwarded.add(field_offset) as *const std::sync::atomic::AtomicU64);
                 atomic_slot.store(new_bits, Ordering::Relaxed);
             };
         }
@@ -809,7 +805,8 @@ impl Heap {
         // ── STW Pause #1: Snapshot roots ─────────────────────────
 
         self.trace_gc(TraceState::GcWaitingForSafepoints);
-        self.gc_phase.store(GcPhase::Copying as u8, Ordering::Release);
+        self.gc_phase
+            .store(GcPhase::Copying as u8, Ordering::Release);
 
         // Snapshot thread refs and set gc_requested atomically under threads lock.
         let thread_snapshot: Vec<Arc<ThreadState>> = {
@@ -852,7 +849,8 @@ impl Heap {
         // Snapshot generations so STW #2 can distinguish stale safepoints.
         self.trace_gc(TraceState::GcResuming);
         self.gc_requested.store(false, Ordering::Release);
-        let stw1_gens: Vec<u64> = thread_snapshot.iter()
+        let stw1_gens: Vec<u64> = thread_snapshot
+            .iter()
             .map(|ts| ts.safepoint_gen())
             .collect();
         for ts in thread_snapshot.iter() {
@@ -1016,8 +1014,10 @@ impl Heap {
                             self.from_space().contains(ptr),
                             "CONCURRENT POST-SWAP: root slot {:p} -> {:p} NOT in from [{:p}..+{}). \
                              In to: {}. collections={}",
-                            slot, ptr,
-                            self.from_space().base(), self.from_space().size(),
+                            slot,
+                            ptr,
+                            self.from_space().base(),
+                            self.from_space().size(),
                             self.to_space().contains(ptr),
                             self.collections.load(Ordering::Relaxed),
                         );
@@ -1265,7 +1265,10 @@ impl Heap {
 
         // Allocate in tenured from-space
         let new = self.from_space().alloc(info, varlen_len);
-        assert!(!new.is_null(), "tenured from-space exhausted during minor GC promotion");
+        assert!(
+            !new.is_null(),
+            "tenured from-space exhausted during minor GC promotion"
+        );
 
         unsafe {
             core::ptr::copy_nonoverlapping(old, new, size);
@@ -1306,10 +1309,7 @@ impl Heap {
     /// # Safety
     /// - All objects in the nursery and tenured spaces must have valid headers.
     /// - The triggering thread's frame chain must be stable.
-    pub unsafe fn mutator_triggered_minor_gc<P: PtrPolicy>(
-        &self,
-        triggering_thread: &ThreadState,
-    ) {
+    pub unsafe fn mutator_triggered_minor_gc<P: PtrPolicy>(&self, triggering_thread: &ThreadState) {
         let ns = match &self.nursery_state {
             Some(ns) => ns,
             None => return,
@@ -1345,7 +1345,9 @@ impl Heap {
                 threads.iter().cloned().collect()
             };
             for ts in thread_snapshot.iter() {
-                if Arc::as_ptr(ts) as usize == trigger_ptr { continue; }
+                if Arc::as_ptr(ts) as usize == trigger_ptr {
+                    continue;
+                }
                 while !ts.is_safely_at_safepoint() {
                     std::thread::yield_now();
                 }
@@ -1354,7 +1356,9 @@ impl Heap {
             unsafe { self.collect_inner::<P>(&[]) };
             self.gc_requested.store(false, Ordering::Release);
             for ts in thread_snapshot.iter() {
-                if Arc::as_ptr(ts) as usize == trigger_ptr { continue; }
+                if Arc::as_ptr(ts) as usize == trigger_ptr {
+                    continue;
+                }
                 ts.resume();
             }
         }
@@ -1402,7 +1406,12 @@ impl Heap {
             // object that starts at or before the card boundary. This lets us
             // jump directly to the right object instead of walking from offset 0.
             let obj_starts = unsafe {
-                Self::build_object_start_index(tenured, tenured_used, card_table, self.type_info_offset)
+                Self::build_object_start_index(
+                    tenured,
+                    tenured_used,
+                    card_table,
+                    self.type_info_offset,
+                )
             };
 
             for (card_idx, card_addr) in card_table.iter_dirty() {
@@ -1412,12 +1421,7 @@ impl Heap {
                     continue;
                 };
                 unsafe {
-                    self.scan_card_from_offset::<P>(
-                        card_addr,
-                        tenured,
-                        tenured_used,
-                        start_offset,
-                    );
+                    self.scan_card_from_offset::<P>(card_addr, tenured, tenured_used, start_offset);
                 }
             }
         }

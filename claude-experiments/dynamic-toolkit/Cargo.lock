@@ -210,10 +210,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynexec"
+version = "0.1.0"
+dependencies = [
+ "dynvalue",
+]
+
+[[package]]
 name = "dynir"
 version = "0.1.0"
 dependencies = [
  "criterion",
+ "dynexec",
  "dynvalue",
  "proptest",
 ]
@@ -223,6 +231,7 @@ name = "dynlower"
 version = "0.1.0"
 dependencies = [
  "dynasm",
+ "dynexec",
  "dynir",
  "dynvalue",
  "wasm2dynir",
@@ -243,6 +252,7 @@ name = "dynruntime"
 version = "0.1.0"
 dependencies = [
  "dynalloc",
+ "dynexec",
  "dynir",
  "dynobj",
  "dynvalue",
@@ -443,8 +453,11 @@ checksum = "5e5032e24019045c762d3c0f28f5b6b8bbf38563a65908389bf7978758920897"
 name = "lua2dynir"
 version = "0.1.0"
 dependencies = [
+ "dynalloc",
  "dynir",
  "dynlower",
+ "dynobj",
+ "dynruntime",
  "dynvalue",
 ]
 
@@ -942,6 +955,7 @@ name = "wasm2dynir"
 version = "0.1.0"
 dependencies = [
  "dynir",
+ "dynlower",
  "dynvalue",
  "wasmparser 0.227.1",
  "wat",

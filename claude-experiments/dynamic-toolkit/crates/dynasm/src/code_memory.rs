@@ -31,7 +31,11 @@ pub trait CodeMemory {
 
     /// Pointer to code at the given offset.
     fn ptr_at(&self, offset: usize) -> *const u8 {
-        assert!(offset < self.len(), "offset {offset} out of bounds (len {})", self.len());
+        assert!(
+            offset < self.len(),
+            "offset {offset} out of bounds (len {})",
+            self.len()
+        );
         unsafe { self.base_ptr().add(offset) }
     }
 
@@ -133,7 +137,11 @@ impl PagedCodeMemory {
         if needed <= self.committed {
             return;
         }
-        assert!(needed <= self.capacity, "code memory exhausted: need {needed}, capacity {}", self.capacity);
+        assert!(
+            needed <= self.capacity,
+            "code memory exhausted: need {needed}, capacity {}",
+            self.capacity
+        );
 
         let new_committed = page_align_up(needed, self.page_size);
         let grow_start = self.committed;
@@ -350,7 +358,10 @@ mod tests {
         let mem = PagedCodeMemory::new();
         assert_eq!(mem.len(), 0);
         assert!(mem.is_empty());
-        assert_eq!(mem.capacity(), page_align_up(DEFAULT_CAPACITY, mem.page_size()));
+        assert_eq!(
+            mem.capacity(),
+            page_align_up(DEFAULT_CAPACITY, mem.page_size())
+        );
         assert_eq!(mem.committed(), 0);
     }
 
@@ -514,8 +525,8 @@ mod tests {
     #[cfg(target_arch = "aarch64")]
     #[test]
     fn test_execute_return_42() {
-        use crate::arm64::*;
         use crate::arm64::inst::Arm64Inst;
+        use crate::arm64::*;
         use crate::buffer::CodeBuffer;
 
         let mut buf: CodeBuffer<Arm64> = CodeBuffer::new();
@@ -534,8 +545,8 @@ mod tests {
     #[cfg(target_arch = "aarch64")]
     #[test]
     fn test_execute_incremental() {
-        use crate::arm64::*;
         use crate::arm64::inst::Arm64Inst;
+        use crate::arm64::*;
         use crate::buffer::CodeBuffer;
 
         let mut mem = PagedCodeMemory::new();
@@ -565,8 +576,8 @@ mod tests {
     #[cfg(target_arch = "aarch64")]
     #[test]
     fn test_execute_after_patch() {
-        use crate::arm64::*;
         use crate::arm64::inst::Arm64Inst;
+        use crate::arm64::*;
         use crate::buffer::CodeBuffer;
 
         let mut mem = PagedCodeMemory::new();
@@ -594,9 +605,9 @@ mod tests {
     #[cfg(target_arch = "x86_64")]
     #[test]
     fn test_execute_return_42() {
-        use crate::x86_64::*;
-        use crate::x86_64::inst::X64Inst;
         use crate::buffer::CodeBuffer;
+        use crate::x86_64::inst::X64Inst;
+        use crate::x86_64::*;
 
         let mut buf: CodeBuffer<X64> = CodeBuffer::new();
         buf.emit(X64Inst::MovRI32 { dest: RAX, imm: 42 });
@@ -614,9 +625,9 @@ mod tests {
     #[cfg(target_arch = "x86_64")]
     #[test]
     fn test_execute_incremental() {
-        use crate::x86_64::*;
-        use crate::x86_64::inst::X64Inst;
         use crate::buffer::CodeBuffer;
+        use crate::x86_64::inst::X64Inst;
+        use crate::x86_64::*;
 
         let mut mem = PagedCodeMemory::new();
 
@@ -645,9 +656,9 @@ mod tests {
     #[cfg(target_arch = "x86_64")]
     #[test]
     fn test_execute_after_patch() {
-        use crate::x86_64::*;
-        use crate::x86_64::inst::X64Inst;
         use crate::buffer::CodeBuffer;
+        use crate::x86_64::inst::X64Inst;
+        use crate::x86_64::*;
 
         let mut mem = PagedCodeMemory::new();
 

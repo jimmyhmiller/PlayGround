@@ -17,19 +17,23 @@ class S3StateManager {
     private init() {}
 
     func loadState() {
+        Task {
+            await loadStateAsync()
+        }
+    }
+
+    func loadStateAsync() async {
         guard AWSCredentials.isConfigured() else {
             print("AWS credentials not configured")
             return
         }
 
-        Task {
-            do {
-                if let data = try await DrawingSyncManager.shared.signedDownloadData(key: "pdf-sync-state.json") {
-                    state = try JSONDecoder().decode(S3State.self, from: data)
-                }
-            } catch {
-                print("Failed to load S3 state: \(error)")
+        do {
+            if let data = try await DrawingSyncManager.shared.signedDownloadData(key: "pdf-sync-state.json") {
+                state = try JSONDecoder().decode(S3State.self, from: data)
             }
+        } catch {
+            print("Failed to load S3 state: \(error)")
         }
     }
 
