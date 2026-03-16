@@ -16,7 +16,8 @@ mod tests;
 
 pub use builder::{FunctionBuilder, ModuleBuilder};
 pub use interp::{
-    ExternCallResult, InterpError, InterpResult, InterpRootManager, ModuleInterpreter, NoGcRoots,
+    ConfiguredModuleInterpreter, ExternCallResult, InterpError, InterpResult, InterpRootManager,
+    ModuleInterpreter, NoGcRoots,
 };
 pub use ir::{
     Block, BlockId, CmpOp, DeoptId, DeoptInfo, ExternFunc, FuncDef, FuncRef, Function, Inst,

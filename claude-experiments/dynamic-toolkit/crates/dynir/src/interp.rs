@@ -1,6 +1,9 @@
 use std::marker::PhantomData;
 
-use dynexec::{RootPrecision, ValueLayout};
+use dynexec::{
+    DefaultExecutionConfig, ExecutionConfig, LayoutConfigDefaults, RootPrecision, RootStrategy,
+    RootTransport, RootTransportKind, ValueLayout,
+};
 use dynvalue::Decoded;
 
 use crate::ir::*;
@@ -39,7 +42,11 @@ pub enum ExternCallResult {
 ///
 /// The module interpreter calls these methods to maintain roots for all
 /// active frames so the GC can find and update heap pointers.
-pub trait InterpRootManager {
+pub trait InterpRootManager<
+    L: ValueLayout,
+    Roots: RootStrategy<L>,
+    Transport: RootTransport<L, Roots>,
+> {
     /// Push a new root frame with `gc_slot_count` slots. Returns a frame handle.
     fn push_frame(&self, gc_slot_count: usize) -> usize;
     /// Pop the most recent root frame.
@@ -55,14 +62,23 @@ pub trait InterpRootManager {
 
     /// How precisely this root manager tracks interpreter frame values.
     fn root_precision(&self) -> RootPrecision {
-        RootPrecision::PreciseSlots
+        Roots::precision()
+    }
+
+    fn root_transport_kind(&self) -> RootTransportKind {
+        Transport::kind()
     }
 }
 
 /// No-op root manager for when GC is not needed.
 pub struct NoGcRoots;
 
-impl InterpRootManager for NoGcRoots {
+impl<L, Roots, Transport> InterpRootManager<L, Roots, Transport> for NoGcRoots
+where
+    L: ValueLayout,
+    Roots: RootStrategy<L>,
+    Transport: RootTransport<L, Roots>,
+{
     fn push_frame(&self, _gc_slot_count: usize) -> usize {
         0
     }
@@ -131,23 +147,34 @@ enum FrameAction {
 ///
 /// The root manager `R` is stored by reference, so closures bound via `bind()`
 /// can borrow it directly (no `Rc` needed).
-pub struct ModuleInterpreter<'a, S: ValueLayout, R: InterpRootManager = NoGcRoots> {
+pub struct ConfiguredModuleInterpreter<
+    'a,
+    Cfg: ExecutionConfig,
+    R: InterpRootManager<Cfg::Layout, Cfg::Roots, Cfg::RootTransport> = NoGcRoots,
+> {
     module: &'a Module,
     roots: &'a R,
     externs: Vec<Option<Box<dyn Fn(&[u64]) -> ExternCallResult + 'a>>>,
     indirect_handler: Option<Box<dyn Fn(u64, &[u64]) -> ExternCallResult + 'a>>,
-    _scheme: PhantomData<S>,
+    _config: PhantomData<Cfg>,
 }
 
-impl<'a, S: ValueLayout, R: InterpRootManager> ModuleInterpreter<'a, S, R> {
+pub type ModuleInterpreter<'a, S, R = NoGcRoots> =
+    ConfiguredModuleInterpreter<'a, DefaultExecutionConfig<S>, R>;
+
+impl<'a, Cfg: ExecutionConfig, R> ConfiguredModuleInterpreter<'a, Cfg, R>
+where
+    Cfg::Layout: LayoutConfigDefaults,
+    R: InterpRootManager<Cfg::Layout, Cfg::Roots, Cfg::RootTransport>,
+{
     pub fn new(module: &'a Module, roots: &'a R) -> Self {
         let externs = (0..module.func_table.len()).map(|_| None).collect();
-        ModuleInterpreter {
+        ConfiguredModuleInterpreter {
             module,
             roots,
             externs,
             indirect_handler: None,
-            _scheme: PhantomData,
+            _config: PhantomData,
         }
     }
 
@@ -402,7 +429,7 @@ impl<'a, S: ValueLayout, R: InterpRootManager> ModuleInterpreter<'a, S, R> {
                     }
 
                     other => {
-                        let result = exec_non_call_inst::<S>(
+                        let result = exec_non_call_inst::<Cfg::Layout>(
                             other,
                             &frame.vals,
                             |v| func.value_type(v),
@@ -932,7 +959,13 @@ fn count_gc_slots_from_map(map: &[Option<usize>]) -> usize {
 }
 
 /// Sync all GcPtr values from a frame into root slots.
-fn sync_all_to_roots<R: InterpRootManager>(frame: &CallFrame, roots: &R) {
+fn sync_all_to_roots<L, Roots, Transport, R>(frame: &CallFrame, roots: &R)
+where
+    L: ValueLayout,
+    Roots: RootStrategy<L>,
+    Transport: RootTransport<L, Roots>,
+    R: InterpRootManager<L, Roots, Transport>,
+{
     roots.clear_frame(frame.root_frame);
     for (i, slot_opt) in frame.val_to_slot.iter().enumerate() {
         if let Some(slot) = slot_opt {
@@ -942,7 +975,13 @@ fn sync_all_to_roots<R: InterpRootManager>(frame: &CallFrame, roots: &R) {
 }
 
 /// Read back all GcPtr values from root slots into a frame (GC may have forwarded them).
-fn sync_all_from_roots<R: InterpRootManager>(frame: &mut CallFrame, roots: &R) {
+fn sync_all_from_roots<L, Roots, Transport, R>(frame: &mut CallFrame, roots: &R)
+where
+    L: ValueLayout,
+    Roots: RootStrategy<L>,
+    Transport: RootTransport<L, Roots>,
+    R: InterpRootManager<L, Roots, Transport>,
+{
     for (i, slot_opt) in frame.val_to_slot.iter().enumerate() {
         if let Some(slot) = slot_opt {
             frame.vals[i] = roots.get_root(frame.root_frame, *slot);
@@ -951,7 +990,13 @@ fn sync_all_from_roots<R: InterpRootManager>(frame: &mut CallFrame, roots: &R) {
 }
 
 /// Handle a safepoint: sync live GcPtr values to roots, collect, read back.
-fn handle_safepoint<R: InterpRootManager>(frame: &mut CallFrame, live: &[Value], roots: &R) {
+fn handle_safepoint<L, Roots, Transport, R>(frame: &mut CallFrame, live: &[Value], roots: &R)
+where
+    L: ValueLayout,
+    Roots: RootStrategy<L>,
+    Transport: RootTransport<L, Roots>,
+    R: InterpRootManager<L, Roots, Transport>,
+{
     if roots.root_precision() == RootPrecision::ConservativeWords {
         // Sync ALL frame values as potential roots (NanBox-style).
         for (i, slot_opt) in frame.val_to_slot.iter().enumerate() {

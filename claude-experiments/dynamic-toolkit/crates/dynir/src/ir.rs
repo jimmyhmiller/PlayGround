@@ -38,6 +38,10 @@ impl DeoptId {
     pub fn index(self) -> usize {
         self.0 as usize
     }
+
+    pub fn from_index(index: usize) -> Self {
+        Self(index as u32)
+    }
 }
 
 /// Deoptimization metadata: describes how to resume in the interpreter.

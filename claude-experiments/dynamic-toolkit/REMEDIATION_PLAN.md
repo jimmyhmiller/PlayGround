@@ -91,7 +91,41 @@ Phase 2 has started:
 - interpreter root management now uses explicit `RootPrecision` instead of `roots_all_values`
 - `dynruntime` exports named root strategies (`MutatorPreciseRoots`, `MutatorConservativeRoots`, `FrameChainPreciseRoots`)
 - `dynlower` now has config-driven tests proving external config selection and invalid config rejection
-- stack accounting in `dynlower` has been moved into a dedicated frame-layout state object that tracks local slots and outgoing arg area separately
+- stack accounting in `dynlower` has been moved into a dedicated frame-layout object that now owns:
+  - local slot allocation
+  - canonical block-param slots
+  - outgoing arg reservation
+  - safepoint-visible root slots
+- `dynexec::FrameStrategy` now constructs the lowerer frame layout, and `dynlower` is parameterized by full `ExecutionConfig`, not just layout
+- `dynexec::CallingConvention` now actively drives register-window size and stack-arg placement in `dynlower`, with host-side test coverage for a non-default 8-register convention
+- direct and indirect JIT call lowering now share one CC-driven argument assignment / call cleanup path instead of duplicating call setup logic
+- destination writes in `dynlower` now go through a shared assignment target model (`call arg` vs `frame slot`) instead of separate handwritten paths for calls and CFG edge transfers
+- `dynlower` now has matrix-style tests covering:
+  - low-bit + precise roots
+  - nanbox + conservative roots
+  - internal CC with more than 16 args
+  - configured block-param/frame-slot assignment across CFG edges
+- `dynlower` now has the first backend extraction point in [`crates/dynlower/src/backend.rs`](crates/dynlower/src/backend.rs): machine locations plus an `Arm64Backend` that owns prologue/epilogue patching, GP/FP moves, and frame-slot stack traffic
+- `Arm64Backend` now also owns backend-side instruction selection for:
+  - integer and floating-point binops
+  - compare/set operations
+  - basic branch/call/return glue (`cbz`, unconditional branch, `blr`, return-value moves)
+- `Arm64Backend` now also owns:
+  - `select` lowering for GP and FP values
+  - base+offset load/store lowering for GP and FP values, including large-offset address materialization
+- relocation-aware branch plumbing for the currently extracted CFG paths now goes through `Arm64Backend` instead of `dynlower` manipulating `Arm64RelocKind` directly
+- the backend contract is now architecture-typed and machine-word-size-neutral:
+  - `LoweringBackend` carries an associated `Arch`
+  - extracted backend operations use `MachineWordSize` instead of `RegSize`
+- `dynlower` orchestration is now backend-typed as well:
+  - `Lowerer` is parameterized as `Lowerer<Cfg, B>`
+  - JIT entrypoints can compile through an explicit backend type (`compile_with_backend_and_config`)
+  - extracted lowering paths now dispatch through `B::...` rather than always naming `Arm64Backend`
+- `dynlower` now has direct regression coverage for backend-routed:
+  - `select`
+  - load-after-payload
+  - store-then-load round trip
+- `dynlower` now has an explicit `X64Backend` stub so a second backend target exists in code, not just in comments
 
 ## Target Architecture
 

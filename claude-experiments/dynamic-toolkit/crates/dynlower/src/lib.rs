@@ -1,16 +1,21 @@
 use std::marker::PhantomData;
 
+mod backend;
+
+use backend::{
+    Arm64Backend, LoweringBackend, MachineFpBinOp, MachineGpBinOp, MachineLocation,
+    MachineWordSize,
+};
 use dynexec::{
-    DefaultExecutionConfig, ExecutionConfig, LayoutConfigDefaults, ValueLayout,
+    CallArgLocation, CallingConvention, DefaultExecutionConfig, ExecutionConfig, FrameLayout,
+    FrameSlotAccess, FrameStrategy, LayoutConfigDefaults, RootTransport, RootTransportKind,
     validate_execution_config,
 };
-use dynasm::arm64::inst::*;
-use dynasm::arm64::reg::*;
-use dynasm::arm64::reloc::*;
 use dynasm::buffer::{CodeBuffer, Label};
 use dynasm::code_memory::{CodeMemory, PagedCodeMemory};
 use dynir::ir::*;
 use dynir::types::Type;
+use dynvalue::TagScheme;
 
 #[cfg(test)]
 mod tests;
@@ -19,8 +24,50 @@ mod tests;
 
 pub type DefaultJitConfig<L> = DefaultExecutionConfig<L>;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SafepointRecord {
+    pub code_offset: usize,
+    pub root_slots: Vec<i32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SafepointHandlerPayloadKind {
+    FrameSize,
+    SafepointIndex,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u64)]
+pub enum JitOutcomeKind {
+    ReturnValue = 0,
+    ReturnVoid = 1,
+    Exception = 2,
+    Deopt = 3,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum JitOutcome {
+    Value(u64),
+    Void,
+    Exception(u64),
+    Deopt {
+        deopt_id: DeoptId,
+        resume_point: u64,
+        live_values: Vec<u64>,
+    },
+}
+
+#[repr(C)]
+struct JitControlContext {
+    live_values_ptr: *mut u64,
+    live_values_len: usize,
+}
+
 pub struct JitFunction {
     memory: PagedCodeMemory,
+    safepoints: Vec<SafepointRecord>,
+    handler_payload_kind: SafepointHandlerPayloadKind,
+    max_deopt_live_values: usize,
 }
 
 impl JitFunction {
@@ -36,33 +83,75 @@ impl JitFunction {
         Self::compile_with_config_and_gc::<DefaultJitConfig<L>>(func, externs, Some(handler as u64))
     }
 
-    pub fn compile_with_config<Cfg: ExecutionConfig>(func: &Function, externs: &[*const u8]) -> Self {
-        Self::compile_with_config_and_gc::<Cfg>(func, externs, None)
+    pub fn compile_with_config<Cfg: ExecutionConfig>(func: &Function, externs: &[*const u8]) -> Self
+    where
+        Cfg::Frames: FrameStrategy<Cfg::Layout, Cfg::Roots, Cfg::CallingConvention>,
+    {
+        Self::compile_with_backend_and_config::<Cfg, Arm64Backend>(func, externs, None)
     }
 
     pub fn compile_with_config_and_gc<Cfg: ExecutionConfig>(
         func: &Function,
         externs: &[*const u8],
         safepoint_handler: Option<u64>,
-    ) -> Self {
+    ) -> Self
+    where
+        Cfg::Frames: FrameStrategy<Cfg::Layout, Cfg::Roots, Cfg::CallingConvention>,
+    {
+        Self::compile_with_backend_and_config::<Cfg, Arm64Backend>(func, externs, safepoint_handler)
+    }
+
+    pub fn compile_with_backend_and_config<Cfg: ExecutionConfig, B: LoweringBackend>(
+        func: &Function,
+        externs: &[*const u8],
+        safepoint_handler: Option<u64>,
+    ) -> Self
+    where
+        Cfg::Frames: FrameStrategy<Cfg::Layout, Cfg::Roots, Cfg::CallingConvention>,
+    {
         validate_execution_config::<Cfg>().unwrap_or_else(|err| {
             panic!("invalid dynlower config: {err}");
         });
 
         let mut lowerer =
-            Lowerer::<Cfg::Layout>::new_inner(func, externs, None, safepoint_handler);
+            Lowerer::<Cfg, B>::new_inner(func, externs, None, None, safepoint_handler);
         lowerer.run();
+        let safepoints = std::mem::take(&mut lowerer.safepoints);
+        let max_deopt_live_values = lowerer.max_deopt_live_values;
         let code = lowerer.buf.into_code();
+        let handler_payload_kind = match Cfg::RootTransport::kind() {
+            RootTransportKind::FrameScan => SafepointHandlerPayloadKind::FrameSize,
+            RootTransportKind::ShadowStack | RootTransportKind::StackMap => {
+                SafepointHandlerPayloadKind::SafepointIndex
+            }
+        };
 
         let mut memory = PagedCodeMemory::new();
         memory.push(&code);
         memory.finalize();
 
-        JitFunction { memory }
+        JitFunction {
+            memory,
+            safepoints,
+            handler_payload_kind,
+            max_deopt_live_values,
+        }
     }
 
     pub fn as_ptr(&self) -> *const u8 {
         self.memory.base_ptr()
+    }
+
+    pub fn safepoints(&self) -> &[SafepointRecord] {
+        &self.safepoints
+    }
+
+    pub fn handler_payload_kind(&self) -> SafepointHandlerPayloadKind {
+        self.handler_payload_kind
+    }
+
+    pub fn call_outcome(&self, args: &[u64]) -> JitOutcome {
+        unsafe { call_jit_outcome(self.as_ptr(), args, self.max_deopt_live_values) }
     }
 }
 
@@ -78,6 +167,9 @@ pub struct JitModule {
     /// provided extern pointers; internal entries are filled in after
     /// compilation with pointers into `memory`.
     call_table: Vec<*const u8>,
+    function_safepoints: Vec<Vec<SafepointRecord>>,
+    handler_payload_kind: SafepointHandlerPayloadKind,
+    max_deopt_live_values: usize,
 }
 
 impl JitModule {
@@ -103,15 +195,32 @@ impl JitModule {
         )
     }
 
-    pub fn compile_with_config<Cfg: ExecutionConfig>(module: &Module, externs: &[*const u8]) -> Self {
-        Self::compile_with_config_and_gc::<Cfg>(module, externs, None)
+    pub fn compile_with_config<Cfg: ExecutionConfig>(module: &Module, externs: &[*const u8]) -> Self
+    where
+        Cfg::Frames: FrameStrategy<Cfg::Layout, Cfg::Roots, Cfg::CallingConvention>,
+    {
+        Self::compile_with_backend_and_config::<Cfg, Arm64Backend>(module, externs, None)
     }
 
     pub fn compile_with_config_and_gc<Cfg: ExecutionConfig>(
         module: &Module,
         externs: &[*const u8],
         safepoint_handler: Option<u64>,
-    ) -> Self {
+    ) -> Self
+    where
+        Cfg::Frames: FrameStrategy<Cfg::Layout, Cfg::Roots, Cfg::CallingConvention>,
+    {
+        Self::compile_with_backend_and_config::<Cfg, Arm64Backend>(module, externs, safepoint_handler)
+    }
+
+    pub fn compile_with_backend_and_config<Cfg: ExecutionConfig, B: LoweringBackend>(
+        module: &Module,
+        externs: &[*const u8],
+        safepoint_handler: Option<u64>,
+    ) -> Self
+    where
+        Cfg::Frames: FrameStrategy<Cfg::Layout, Cfg::Roots, Cfg::CallingConvention>,
+    {
         validate_execution_config::<Cfg>().unwrap_or_else(|err| {
             panic!("invalid dynlower config: {err}");
         });
@@ -137,11 +246,31 @@ impl JitModule {
         // 2. Compile each internal function
         let mut memory = PagedCodeMemory::new();
         let mut entry_offsets: Vec<usize> = Vec::new();
+        let mut function_safepoints: Vec<Vec<SafepointRecord>> = Vec::new();
+        let mut max_deopt_live_values = 0usize;
+        let handler_payload_kind = match Cfg::RootTransport::kind() {
+            RootTransportKind::FrameScan => SafepointHandlerPayloadKind::FrameSize,
+            RootTransportKind::ShadowStack | RootTransportKind::StackMap => {
+                SafepointHandlerPayloadKind::SafepointIndex
+            }
+        };
+
+        let direct_call_is_internal: Vec<bool> = module
+            .func_table
+            .iter()
+            .map(|def| matches!(def, FuncDef::Internal(_)))
+            .collect();
 
         for func in &module.functions {
-            let mut lowerer =
-                Lowerer::<Cfg::Layout>::new_module(func, call_table_base, safepoint_handler);
+            let mut lowerer = Lowerer::<Cfg, B>::new_module(
+                func,
+                &direct_call_is_internal,
+                call_table_base,
+                safepoint_handler,
+            );
             lowerer.run();
+            function_safepoints.push(std::mem::take(&mut lowerer.safepoints));
+            max_deopt_live_values = max_deopt_live_values.max(lowerer.max_deopt_live_values);
             let code = lowerer.buf.into_code();
             let offset = memory.push(&code);
             entry_offsets.push(offset);
@@ -158,14 +287,38 @@ impl JitModule {
             }
         }
 
-        JitModule { memory, call_table }
+        JitModule {
+            memory,
+            call_table,
+            function_safepoints,
+            handler_payload_kind,
+            max_deopt_live_values,
+        }
     }
 
     /// Call a function in the module by its `FuncRef`.
     pub fn call(&self, func_ref: FuncRef, args: &[u64]) -> u64 {
         let ptr = self.call_table[func_ref.index()];
         assert!(!ptr.is_null(), "call to unresolved function");
-        unsafe { call_jit(ptr, args) }
+        match self.call_outcome(func_ref, args) {
+            JitOutcome::Value(v) => v,
+            JitOutcome::Void => 0,
+            other => panic!("unexpected non-return outcome from JIT module call: {other:?}"),
+        }
+    }
+
+    pub fn call_outcome(&self, func_ref: FuncRef, args: &[u64]) -> JitOutcome {
+        let ptr = self.call_table[func_ref.index()];
+        assert!(!ptr.is_null(), "call to unresolved function");
+        unsafe { call_jit_outcome(ptr, args, self.max_deopt_live_values) }
+    }
+
+    pub fn safepoints_for_function(&self, func_idx: usize) -> &[SafepointRecord] {
+        &self.function_safepoints[func_idx]
+    }
+
+    pub fn handler_payload_kind(&self) -> SafepointHandlerPayloadKind {
+        self.handler_payload_kind
     }
 }
 
@@ -177,17 +330,26 @@ impl JitModule {
 ///
 /// This matches the lowering path used for JIT-to-JIT calls.
 #[cfg(target_arch = "aarch64")]
-pub unsafe fn call_jit(ptr: *const u8, args: &[u64]) -> u64 {
-    let padded_len = args.len().max(16);
+unsafe fn call_jit_regs_with_reg_limit(
+    ptr: *const u8,
+    args: &[u64],
+    reg_limit: usize,
+    ctx: *mut JitControlContext,
+) -> (u64, u64, u64, u64) {
+    let padded_len = args.len().max(reg_limit);
     let mut padded = vec![0u64; padded_len];
     padded[..args.len()].copy_from_slice(args);
-    let overflow = args.len().saturating_sub(16);
+    let overflow = args.len().saturating_sub(reg_limit);
     let overflow_bytes = align_up(overflow * 8, 16);
     let overflow_count = overflow;
-    let overflow_src = unsafe { padded.as_ptr().add(16) };
+    let overflow_src = unsafe { padded.as_ptr().add(reg_limit) };
     let result: u64;
+    let kind: u64;
+    let payload0: u64;
+    let payload1: u64;
     unsafe {
         core::arch::asm!(
+            "mov x23, {ctx}",
             "sub sp, sp, x20",
             "mov x9, sp",
             "cbz x21, 2f",
@@ -207,18 +369,76 @@ pub unsafe fn call_jit(ptr: *const u8, args: &[u64]) -> u64 {
             "ldp x14, x15, [x17, #112]",
             "blr x16",
             "add sp, sp, x20",
+            ctx = in(reg) ctx,
             inlateout("x21") overflow_count => _,
             inlateout("x22") overflow_src => _,
             in("x20") overflow_bytes,
             in("x16") ptr,
             in("x17") padded.as_ptr(),
             lateout("x0") result,
+            lateout("x1") kind,
+            lateout("x2") payload0,
+            lateout("x3") payload1,
+            lateout("x23") _,
             lateout("x9") _,
             lateout("x10") _,
             clobber_abi("C"),
         );
     }
-    result
+    (result, kind, payload0, payload1)
+}
+
+#[cfg(target_arch = "aarch64")]
+pub unsafe fn call_jit_with_reg_limit(
+    ptr: *const u8,
+    args: &[u64],
+    reg_limit: usize,
+) -> u64 {
+    match unsafe { call_jit_outcome_with_reg_limit(ptr, args, reg_limit, 0) } {
+        JitOutcome::Value(v) => v,
+        JitOutcome::Void => 0,
+        other => panic!("unexpected non-return outcome from JIT entry: {other:?}"),
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+pub unsafe fn call_jit(ptr: *const u8, args: &[u64]) -> u64 {
+    unsafe { call_jit_with_reg_limit(ptr, args, 16) }
+}
+
+#[cfg(target_arch = "aarch64")]
+pub unsafe fn call_jit_outcome_with_reg_limit(
+    ptr: *const u8,
+    args: &[u64],
+    reg_limit: usize,
+    max_deopt_live_values: usize,
+) -> JitOutcome {
+    let mut live_values = vec![0u64; max_deopt_live_values];
+    let mut ctx = JitControlContext {
+        live_values_ptr: live_values.as_mut_ptr(),
+        live_values_len: 0,
+    };
+    let (result, kind, payload0, payload1) =
+        unsafe { call_jit_regs_with_reg_limit(ptr, args, reg_limit, &mut ctx) };
+    match kind {
+        x if x == JitOutcomeKind::ReturnValue as u64 => JitOutcome::Value(result),
+        x if x == JitOutcomeKind::ReturnVoid as u64 => JitOutcome::Void,
+        x if x == JitOutcomeKind::Exception as u64 => JitOutcome::Exception(payload0),
+        x if x == JitOutcomeKind::Deopt as u64 => {
+            live_values.truncate(ctx.live_values_len);
+            JitOutcome::Deopt {
+                deopt_id: DeoptId::from_index(payload0 as usize),
+                resume_point: payload1,
+                live_values,
+            }
+        }
+        _ => panic!("unknown JIT outcome kind: {kind}"),
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+pub unsafe fn call_jit_outcome(ptr: *const u8, args: &[u64], max_deopt_live_values: usize) -> JitOutcome {
+    unsafe { call_jit_outcome_with_reg_limit(ptr, args, 16, max_deopt_live_values) }
 }
 
 // ─── Value Location ────────────────────────────────────────────────
@@ -231,6 +451,47 @@ enum ValueLoc {
     Unassigned,
 }
 
+fn machine_gp(index: u8) -> backend::MachineReg {
+    backend::MachineReg {
+        class: backend::MachineRegClass::Gp,
+        index,
+    }
+}
+
+fn machine_fp(index: u8) -> backend::MachineReg {
+    backend::MachineReg {
+        class: backend::MachineRegClass::Fp,
+        index,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AssignmentTarget {
+    CallArg(CallArgLocation),
+    FrameSlot(FrameSlotAccess),
+}
+
+impl AssignmentTarget {
+    fn as_machine_location(self) -> MachineLocation {
+        match self {
+            AssignmentTarget::CallArg(CallArgLocation::Register(reg_idx)) => {
+                MachineLocation::Reg(machine_gp(reg_idx as u8))
+            }
+            AssignmentTarget::CallArg(CallArgLocation::Stack(offset)) => {
+                MachineLocation::StackArg(offset)
+            }
+            AssignmentTarget::FrameSlot(access) => MachineLocation::FrameSlot(access),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ValueAssignment {
+    value: Value,
+    ty: Type,
+    target: AssignmentTarget,
+}
+
 #[derive(Debug, Clone)]
 struct ValueInfo {
     loc: ValueLoc,
@@ -240,38 +501,6 @@ struct ValueInfo {
 }
 
 // ─── Frame Layout State ────────────────────────────────────────────
-
-struct FrameLayoutState {
-    next_local_offset: i32,
-    max_outgoing_arg_bytes: i32,
-}
-
-impl FrameLayoutState {
-    fn new() -> Self {
-        FrameLayoutState {
-            next_local_offset: 16,
-            max_outgoing_arg_bytes: 0,
-        }
-    }
-
-    fn alloc_local_slot(&mut self) -> i32 {
-        let offset = self.next_local_offset;
-        self.next_local_offset += 8;
-        offset
-    }
-
-    fn reserve_outgoing_arg_bytes(&mut self, bytes: i32) {
-        self.max_outgoing_arg_bytes = self.max_outgoing_arg_bytes.max(bytes);
-    }
-
-    fn local_frame_size(&self) -> i32 {
-        self.next_local_offset
-    }
-
-    fn total_frame_size(&self) -> i32 {
-        align_up((self.next_local_offset + self.max_outgoing_arg_bytes) as usize, 16) as i32
-    }
-}
 
 // ─── Register State ────────────────────────────────────────────────
 
@@ -299,7 +528,6 @@ struct RegState {
     gp_occupant: [Option<Value>; NUM_GP],
     fp_occupant: [Option<Value>; NUM_FP],
     values: Vec<ValueInfo>,
-    frame: FrameLayoutState,
     gp_evict_cursor: usize,
     fp_evict_cursor: usize,
 }
@@ -317,7 +545,6 @@ impl RegState {
                     ty: Type::I64,
                 })
                 .collect(),
-            frame: FrameLayoutState::new(),
             gp_evict_cursor: 0,
             fp_evict_cursor: 0,
         }
@@ -327,7 +554,11 @@ impl RegState {
         ty == Type::F64
     }
 
-    fn alloc_gp(&mut self, buf: &mut CodeBuffer<Arm64>) -> u8 {
+    fn alloc_gp<B: LoweringBackend, F: FrameLayout>(
+        &mut self,
+        buf: &mut CodeBuffer<B::Arch>,
+        frame: &mut F,
+    ) -> u8 {
         // Try to find a free allocatable GP reg
         for &r in ALLOCATABLE_GP {
             if self.gp_occupant[r as usize].is_none() {
@@ -340,7 +571,7 @@ impl RegState {
             let idx = (start + i) % ALLOCATABLE_GP.len();
             let r = ALLOCATABLE_GP[idx];
             if let Some(val) = self.gp_occupant[r as usize] {
-                self.spill_gp_reg(buf, r, val);
+                self.spill_gp_reg::<B>(buf, frame, r, val);
                 self.gp_evict_cursor = (idx + 1) % ALLOCATABLE_GP.len();
                 return r;
             }
@@ -348,7 +579,11 @@ impl RegState {
         panic!("no GP register available");
     }
 
-    fn alloc_fp(&mut self, buf: &mut CodeBuffer<Arm64>) -> u8 {
+    fn alloc_fp<B: LoweringBackend, F: FrameLayout>(
+        &mut self,
+        buf: &mut CodeBuffer<B::Arch>,
+        frame: &mut F,
+    ) -> u8 {
         for &r in ALLOCATABLE_FP {
             if self.fp_occupant[r as usize].is_none() {
                 return r;
@@ -359,7 +594,7 @@ impl RegState {
             let idx = (start + i) % ALLOCATABLE_FP.len();
             let r = ALLOCATABLE_FP[idx];
             if let Some(val) = self.fp_occupant[r as usize] {
-                self.spill_fp_reg(buf, r, val);
+                self.spill_fp_reg::<B>(buf, frame, r, val);
                 self.fp_evict_cursor = (idx + 1) % ALLOCATABLE_FP.len();
                 return r;
             }
@@ -367,11 +602,13 @@ impl RegState {
         panic!("no FP register available");
     }
 
-    fn alloc_spill_slot(&mut self) -> i32 {
-        self.frame.alloc_local_slot()
-    }
-
-    fn spill_gp_reg(&mut self, buf: &mut CodeBuffer<Arm64>, r: u8, val: Value) {
+    fn spill_gp_reg<B: LoweringBackend>(
+        &mut self,
+        buf: &mut CodeBuffer<B::Arch>,
+        frame: &mut impl FrameLayout,
+        r: u8,
+        val: Value,
+    ) {
         if self.values[val.index()].remaining_uses == 0 {
             self.gp_occupant[r as usize] = None;
             self.values[val.index()].loc = ValueLoc::Unassigned;
@@ -380,18 +617,23 @@ impl RegState {
         let offset = match self.values[val.index()].spill_slot {
             Some(off) => off,
             None => {
-                let off = self.frame.alloc_local_slot();
+                let off = frame.alloc_root_slot();
                 self.values[val.index()].spill_slot = Some(off);
                 off
             }
         };
-        let reg = gp_reg(r, RegSize::X64);
-        emit_store_to_fp(buf, reg, offset);
+        B::emit_store_gp_to_frame(buf, machine_gp(r), frame.slot_access(offset));
         self.values[val.index()].loc = ValueLoc::Spill(offset);
         self.gp_occupant[r as usize] = None;
     }
 
-    fn spill_fp_reg(&mut self, buf: &mut CodeBuffer<Arm64>, r: u8, val: Value) {
+    fn spill_fp_reg<B: LoweringBackend>(
+        &mut self,
+        buf: &mut CodeBuffer<B::Arch>,
+        frame: &mut impl FrameLayout,
+        r: u8,
+        val: Value,
+    ) {
         if self.values[val.index()].remaining_uses == 0 {
             self.fp_occupant[r as usize] = None;
             self.values[val.index()].loc = ValueLoc::Unassigned;
@@ -400,13 +642,12 @@ impl RegState {
         let offset = match self.values[val.index()].spill_slot {
             Some(off) => off,
             None => {
-                let off = self.frame.alloc_local_slot();
+                let off = frame.alloc_root_slot();
                 self.values[val.index()].spill_slot = Some(off);
                 off
             }
         };
-        let dreg = Arm64Reg::new(r, RegSize::X64);
-        emit_fp_store_to_fp(buf, dreg, offset);
+        B::emit_store_fp_to_frame(buf, machine_fp(r), frame.slot_access(offset));
         self.values[val.index()].loc = ValueLoc::Spill(offset);
         self.fp_occupant[r as usize] = None;
     }
@@ -422,13 +663,17 @@ impl RegState {
     }
 
     /// Ensure a value is in a GP register, returning the reg index.
-    fn ensure_in_gp_reg(&mut self, buf: &mut CodeBuffer<Arm64>, val: Value) -> u8 {
+    fn ensure_in_gp_reg<B: LoweringBackend>(
+        &mut self,
+        buf: &mut CodeBuffer<B::Arch>,
+        frame: &mut impl FrameLayout,
+        val: Value,
+    ) -> u8 {
         match self.values[val.index()].loc {
             ValueLoc::GpReg(r) => r,
             ValueLoc::Spill(offset) => {
-                let r = self.alloc_gp(buf);
-                let reg = gp_reg(r, RegSize::X64);
-                emit_load_from_fp(buf, reg, offset);
+                let r = self.alloc_gp::<B, _>(buf, frame);
+                B::emit_load_gp_from_frame(buf, machine_gp(r), frame.slot_access(offset));
                 // Record the spill slot so the value can be restored after calls
                 if self.values[val.index()].spill_slot.is_none() {
                     self.values[val.index()].spill_slot = Some(offset);
@@ -442,13 +687,17 @@ impl RegState {
     }
 
     /// Ensure a value is in an FP register, returning the reg index.
-    fn ensure_in_fp_reg(&mut self, buf: &mut CodeBuffer<Arm64>, val: Value) -> u8 {
+    fn ensure_in_fp_reg<B: LoweringBackend>(
+        &mut self,
+        buf: &mut CodeBuffer<B::Arch>,
+        frame: &mut impl FrameLayout,
+        val: Value,
+    ) -> u8 {
         match self.values[val.index()].loc {
             ValueLoc::FpReg(r) => r,
             ValueLoc::Spill(offset) => {
-                let r = self.alloc_fp(buf);
-                let dreg = Arm64Reg::new(r, RegSize::X64);
-                emit_fp_load_from_fp(buf, dreg, offset);
+                let r = self.alloc_fp::<B, _>(buf, frame);
+                B::emit_load_fp_from_frame(buf, machine_fp(r), frame.slot_access(offset));
                 self.assign_fp(val, r);
                 r
             }
@@ -475,11 +724,15 @@ impl RegState {
     }
 
     /// Spill all caller-saved registers that have live values.
-    fn spill_caller_saved(&mut self, buf: &mut CodeBuffer<Arm64>) {
+    fn spill_caller_saved<B: LoweringBackend>(
+        &mut self,
+        buf: &mut CodeBuffer<B::Arch>,
+        frame: &mut impl FrameLayout,
+    ) {
         for &r in CALLER_SAVED_GP {
             if let Some(val) = self.gp_occupant[r as usize] {
                 if self.values[val.index()].remaining_uses > 0 {
-                    self.spill_gp_reg(buf, r, val);
+                    self.spill_gp_reg::<B>(buf, frame, r, val);
                     // Mark the value as in its spill slot (register will be clobbered)
                     if let Some(slot) = self.values[val.index()].spill_slot {
                         self.values[val.index()].loc = ValueLoc::Spill(slot);
@@ -494,7 +747,7 @@ impl RegState {
         for &r in CALLER_SAVED_FP {
             if let Some(val) = self.fp_occupant[r as usize] {
                 if self.values[val.index()].remaining_uses > 0 {
-                    self.spill_fp_reg(buf, r, val);
+                    self.spill_fp_reg::<B>(buf, frame, r, val);
                     if let Some(slot) = self.values[val.index()].spill_slot {
                         self.values[val.index()].loc = ValueLoc::Spill(slot);
                     }
@@ -508,11 +761,15 @@ impl RegState {
     }
 
     /// Spill ALL live register-resident values (used before multi-pred block transitions).
-    fn spill_all_live(&mut self, buf: &mut CodeBuffer<Arm64>) {
+    fn spill_all_live<B: LoweringBackend>(
+        &mut self,
+        buf: &mut CodeBuffer<B::Arch>,
+        frame: &mut impl FrameLayout,
+    ) {
         for r in 0..NUM_GP as u8 {
             if let Some(val) = self.gp_occupant[r as usize] {
                 if self.values[val.index()].remaining_uses > 0 {
-                    self.spill_gp_reg(buf, r, val);
+                    self.spill_gp_reg::<B>(buf, frame, r, val);
                 } else {
                     self.gp_occupant[r as usize] = None;
                 }
@@ -521,7 +778,7 @@ impl RegState {
         for r in 0..NUM_FP as u8 {
             if let Some(val) = self.fp_occupant[r as usize] {
                 if self.values[val.index()].remaining_uses > 0 {
-                    self.spill_fp_reg(buf, r, val);
+                    self.spill_fp_reg::<B>(buf, frame, r, val);
                 } else {
                     self.fp_occupant[r as usize] = None;
                 }
@@ -553,62 +810,213 @@ impl RegState {
 
 struct BlockMeta {
     label: Label,
-    /// Canonical spill slot offsets for each block param.
-    param_spill_slots: Vec<i32>,
+}
+
+struct RootTransportState {
+    shadow_slots_by_value: Vec<Option<i32>>,
+}
+
+impl RootTransportState {
+    fn new(num_values: usize) -> Self {
+        Self {
+            shadow_slots_by_value: vec![None; num_values],
+        }
+    }
 }
 
 // ─── Lowerer ───────────────────────────────────────────────────────
 
-struct Lowerer<'a, S: ValueLayout> {
+struct Lowerer<'a, Cfg: ExecutionConfig, B: LoweringBackend>
+where
+    Cfg::Frames: FrameStrategy<Cfg::Layout, Cfg::Roots, Cfg::CallingConvention>,
+{
     func: &'a Function,
     externs: &'a [*const u8],
+    direct_call_is_internal: Option<&'a [bool]>,
     /// When Some, all calls go through an indirect call table at this
     /// address. `call_table[func_ref.index()]` holds the function pointer.
     call_table_base: Option<u64>,
     /// When Some, safepoints emit a call to this handler function.
     /// Signature: `extern "C" fn(frame_ptr: *mut u8, frame_size: usize)`.
     safepoint_handler: Option<u64>,
-    buf: CodeBuffer<Arm64>,
+    buf: CodeBuffer<B::Arch>,
     regs: RegState,
+    frame: <Cfg::Frames as FrameStrategy<
+        Cfg::Layout,
+        Cfg::Roots,
+        Cfg::CallingConvention,
+    >>::Layout,
     block_meta: Vec<BlockMeta>,
+    root_transport: RootTransportState,
+    safepoints: Vec<SafepointRecord>,
+    max_deopt_live_values: usize,
     prologue_stp_offset: usize,
     epilogue_ldp_offsets: Vec<usize>, // offsets of LDP instructions to patch
-    _scheme: PhantomData<S>,
+    _config: PhantomData<Cfg>,
+    _backend: PhantomData<B>,
 }
 
-impl<'a, S: ValueLayout> Lowerer<'a, S> {
-    fn new(func: &'a Function, externs: &'a [*const u8]) -> Self {
-        Self::new_inner(func, externs, None, None)
+impl<'a, Cfg: ExecutionConfig, B: LoweringBackend> Lowerer<'a, Cfg, B>
+where
+    Cfg::Frames: FrameStrategy<Cfg::Layout, Cfg::Roots, Cfg::CallingConvention>,
+{
+    fn direct_call_is_control_aware(&self, func_ref: FuncRef) -> bool {
+        self.direct_call_is_internal
+            .map(|kinds| kinds[func_ref.index()])
+            .unwrap_or(false)
+    }
+
+    fn is_gc_ptr_value(&self, val: Value) -> bool {
+        self.regs.values[val.index()].ty == Type::GcPtr
+    }
+
+    fn assign_gp_value(&mut self, val: Value, reg: u8) {
+        self.regs.assign_gp(val, reg);
+        self.track_value_in_gp(val, reg);
+    }
+
+    fn assign_fp_value(&mut self, val: Value, reg: u8) {
+        self.regs.assign_fp(val, reg);
+    }
+
+    fn assign_spill_value(&mut self, val: Value, offset: i32) {
+        self.regs.values[val.index()].spill_slot = Some(offset);
+        self.regs.values[val.index()].loc = ValueLoc::Spill(offset);
+        self.track_value_in_frame_slot(val, offset);
+    }
+
+    fn ensure_shadow_slot_for_value(&mut self, val: Value) -> Option<i32> {
+        if Cfg::RootTransport::kind() != RootTransportKind::ShadowStack || !self.is_gc_ptr_value(val) {
+            return None;
+        }
+        let slot = &mut self.root_transport.shadow_slots_by_value[val.index()];
+        if slot.is_none() {
+            *slot = Some(self.frame.alloc_shadow_root_slot());
+        }
+        *slot
+    }
+
+    fn track_value_in_gp(&mut self, val: Value, reg: u8) {
+        if let Some(shadow_slot) = self.ensure_shadow_slot_for_value(val) {
+            B::emit_store_gp_to_frame(&mut self.buf, machine_gp(reg), self.frame.slot_access(shadow_slot));
+        }
+    }
+
+    fn track_value_in_frame_slot(&mut self, val: Value, slot_offset: i32) {
+        if let Some(shadow_slot) = self.ensure_shadow_slot_for_value(val) {
+            if shadow_slot != slot_offset {
+                B::emit_load_gp_from_frame(&mut self.buf, machine_gp(27), self.frame.slot_access(slot_offset));
+                B::emit_store_gp_to_frame(&mut self.buf, machine_gp(27), self.frame.slot_access(shadow_slot));
+            }
+        }
+    }
+
+    fn ensure_shadow_value_materialized(&mut self, val: Value) {
+        if Cfg::RootTransport::kind() != RootTransportKind::ShadowStack || !self.is_gc_ptr_value(val) {
+            return;
+        }
+        if self.root_transport.shadow_slots_by_value[val.index()].is_some() {
+            return;
+        }
+        match self.regs.values[val.index()].loc {
+            ValueLoc::GpReg(r) => self.track_value_in_gp(val, r),
+            ValueLoc::Spill(offset) => self.track_value_in_frame_slot(val, offset),
+            ValueLoc::FpReg(_) | ValueLoc::Unassigned => {}
+        }
+    }
+
+    fn emit_set_outcome_kind(&mut self, kind: JitOutcomeKind) {
+        B::emit_mov_imm(&mut self.buf, machine_gp(1), kind as u64);
+    }
+
+    fn emit_return_current_outcome(&mut self) {
+        self.emit_epilogue();
+    }
+
+    fn emit_write_deopt_live_values(&mut self, live: &[Value]) {
+        B::emit_load_gp(
+            &mut self.buf,
+            machine_gp(28),
+            machine_gp(23),
+            0,
+            MachineWordSize::W64,
+        );
+        for (idx, &value) in live.iter().enumerate() {
+            let ty = self.regs.values[value.index()].ty;
+            if RegState::is_float_type(ty) {
+                let src = self.regs.ensure_in_fp_reg::<B>(&mut self.buf, &mut self.frame, value);
+                B::emit_fp_to_gp_move(&mut self.buf, machine_gp(27), machine_fp(src));
+                B::emit_store_gp(
+                    &mut self.buf,
+                    machine_gp(27),
+                    machine_gp(28),
+                    (idx as i32) * 8,
+                    MachineWordSize::W64,
+                );
+            } else {
+                let src = self.regs.ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, value);
+                B::emit_store_gp(
+                    &mut self.buf,
+                    machine_gp(src),
+                    machine_gp(28),
+                    (idx as i32) * 8,
+                    MachineWordSize::W64,
+                );
+            }
+        }
+        B::emit_mov_imm(&mut self.buf, machine_gp(28), live.len() as u64);
+        B::emit_store_gp(
+            &mut self.buf,
+            machine_gp(28),
+            machine_gp(23),
+            8,
+            MachineWordSize::W64,
+        );
+    }
+
+    fn emit_deopt_return(&mut self, deopt_id: DeoptId, resume_point: u64, live: &[Value]) {
+        self.regs.spill_all_live::<B>(&mut self.buf, &mut self.frame);
+        self.emit_write_deopt_live_values(live);
+        self.emit_set_outcome_kind(JitOutcomeKind::Deopt);
+        B::emit_mov_imm(&mut self.buf, machine_gp(2), deopt_id.index() as u64);
+        B::emit_mov_imm(&mut self.buf, machine_gp(3), resume_point);
+        self.emit_return_current_outcome();
     }
 
     fn new_module(
         func: &'a Function,
+        direct_call_is_internal: &'a [bool],
         call_table_base: u64,
         safepoint_handler: Option<u64>,
     ) -> Self {
-        Self::new_inner(func, &[], Some(call_table_base), safepoint_handler)
+        Self::new_inner(
+            func,
+            &[],
+            Some(direct_call_is_internal),
+            Some(call_table_base),
+            safepoint_handler,
+        )
     }
 
     fn new_inner(
         func: &'a Function,
         externs: &'a [*const u8],
+        direct_call_is_internal: Option<&'a [bool]>,
         call_table_base: Option<u64>,
         safepoint_handler: Option<u64>,
     ) -> Self {
         let num_values = func.value_types.len();
-        let mut buf = CodeBuffer::<Arm64>::new();
+        let mut buf = CodeBuffer::<B::Arch>::new();
 
         // Create labels for all blocks
         let mut block_meta = Vec::new();
         for (_i, _block) in func.blocks.iter().enumerate() {
             let label = buf.create_label();
-            block_meta.push(BlockMeta {
-                label,
-                param_spill_slots: Vec::new(),
-            });
+            block_meta.push(BlockMeta { label });
         }
 
         let mut regs = RegState::new(num_values);
+        let mut frame = Cfg::Frames::new_layout(func.blocks.len());
 
         // Liveness pass: count uses
         for block in &func.blocks {
@@ -633,8 +1041,8 @@ impl<'a, S: ValueLayout> Lowerer<'a, S> {
         for (i, block) in func.blocks.iter().enumerate() {
             if i > 0 && !block.params.is_empty() {
                 for _ in &block.params {
-                    let offset = regs.alloc_spill_slot();
-                    block_meta[i].param_spill_slots.push(offset);
+                    let offset = frame.alloc_root_slot();
+                    frame.add_block_param_slot(i, offset);
                 }
             }
         }
@@ -642,14 +1050,29 @@ impl<'a, S: ValueLayout> Lowerer<'a, S> {
         Lowerer {
             func,
             externs,
+            direct_call_is_internal,
             call_table_base,
             safepoint_handler,
             buf,
             regs,
+            frame,
             block_meta,
+            root_transport: RootTransportState::new(num_values),
+            safepoints: Vec::new(),
+            max_deopt_live_values: func
+                .blocks
+                .iter()
+                .flat_map(|block| block.insts.iter())
+                .filter_map(|node| match &node.inst {
+                    Inst::Guard(_, _, live) => Some(live.len()),
+                    _ => None,
+                })
+                .max()
+                .unwrap_or(0),
             prologue_stp_offset: 0,
             epilogue_ldp_offsets: Vec::new(),
-            _scheme: PhantomData,
+            _config: PhantomData,
+            _backend: PhantomData,
         }
     }
 
@@ -664,54 +1087,32 @@ impl<'a, S: ValueLayout> Lowerer<'a, S> {
     }
 
     fn emit_prologue(&mut self) {
-        // Prologue: MOV X28, SP   ; incoming stack-arg base
-        //           SUB SP, SP, #frame_size (placeholder)
-        //           STP X29, X30, [SP]
-        //           MOV X29, SP
-        // The SUB will be patched after codegen with the actual frame size.
-        self.buf.emit(Arm64Inst::mov(X28, SP));
-        self.prologue_stp_offset = self.buf.emit(Arm64Inst::sub_imm(SP, SP, 16)); // placeholder
-        self.buf
-            .emit(Arm64Inst::stp(X29, X30, SP, 0, StpMode::SignedOffset));
-        self.buf.emit(Arm64Inst::mov(X29, SP));
+        self.prologue_stp_offset = B::emit_prologue(&mut self.buf);
     }
 
     fn emit_epilogue(&mut self) {
-        // MOV SP, X29
-        self.buf.emit(Arm64Inst::mov(SP, X29));
-        // LDP X29, X30, [SP]
-        self.buf
-            .emit(Arm64Inst::ldp(X29, X30, SP, 0, LdpMode::SignedOffset));
-        // ADD SP, SP, #frame_size — placeholder, patched later
-        let add_offset = self.buf.emit(Arm64Inst::add_imm(SP, SP, 16)); // placeholder
-        self.epilogue_ldp_offsets.push(add_offset);
-        self.buf.emit(Arm64Inst::ret());
+        B::emit_epilogue(&mut self.buf, &mut self.epilogue_ldp_offsets);
     }
 
     fn patch_prologue(&mut self) {
-        let total_frame = self.regs.frame.total_frame_size().max(16);
+        let total_frame = self
+            .frame
+            .total_frame_size(Cfg::Frames::stack_align())
+            .max(16);
 
-        // Patch the SUB SP at prologue
-        let sub_inst = Arm64Inst::sub_imm(SP, SP, total_frame);
-        self.patch_word(self.prologue_stp_offset, &sub_inst.encode().to_le_bytes());
-
-        // Patch all tracked ADD SP epilogues
-        let add_inst = Arm64Inst::add_imm(SP, SP, total_frame);
-        let add_bytes = add_inst.encode().to_le_bytes();
-        for &offset in &self.epilogue_ldp_offsets.clone() {
-            self.patch_word(offset, &add_bytes);
-        }
-    }
-
-    fn patch_word(&mut self, offset: usize, bytes: &[u8]) {
-        self.buf.patch_bytes(offset, bytes);
+        B::emit_frame_size_patch(
+            &mut self.buf,
+            self.prologue_stp_offset,
+            &self.epilogue_ldp_offsets,
+            total_frame,
+        );
     }
 
     fn lower_block(&mut self, block_idx: usize) {
         let block = &self.func.blocks[block_idx];
 
         // Bind label
-        self.buf.bind_label(self.block_meta[block_idx].label);
+        B::bind_label(&mut self.buf, self.block_meta[block_idx].label);
 
         // Clear register state at block entry (conservative approach)
         if block_idx > 0 {
@@ -721,44 +1122,16 @@ impl<'a, S: ValueLayout> Lowerer<'a, S> {
         // Handle block params
         if block_idx == 0 {
             // Entry block: params come from 64-bit argument slots.
-            // Slots 0..15 are in X0..X15; overflow slots arrive on the stack
-            // at the incoming SP captured in X28 by the prologue.
-            let mut gp_arg = 0u8;
-            for &(val, ty) in &block.params {
-                if gp_arg < 16 {
-                    if RegState::is_float_type(ty) {
-                        let gp = gp_reg(gp_arg, RegSize::X64);
-                        let fp_idx = self.regs.alloc_fp(&mut self.buf);
-                        let fp = Arm64Reg::new(fp_idx, RegSize::X64);
-                        self.buf.emit(Arm64Inst::fmov_gp_to_fp(fp, gp));
-                        self.regs.assign_fp(val, fp_idx);
-                    } else {
-                        self.regs.assign_gp(val, gp_arg);
-                    }
-                } else {
-                    // Beyond register window: copy from the caller's stack
-                    // arg area into a normal local spill slot.
-                    let slot = self.regs.alloc_spill_slot();
-                    self.regs.values[val.index()].spill_slot = Some(slot);
-                    self.regs.values[val.index()].loc = ValueLoc::Spill(slot);
-                    let incoming_offset = ((gp_arg - 16) as i32) * 8;
-                    if RegState::is_float_type(ty) {
-                        self.buf.emit(Arm64Inst::ldr(X27, X28, incoming_offset));
-                        let dtmp = Arm64Reg::new(31, RegSize::X64);
-                        self.buf.emit(Arm64Inst::fmov_gp_to_fp(dtmp, X27));
-                        emit_fp_store_to_fp(&mut self.buf, dtmp, slot);
-                    } else {
-                        self.buf.emit(Arm64Inst::ldr(X27, X28, incoming_offset));
-                        emit_store_to_fp(&mut self.buf, X27, slot);
-                    }
-                }
-                gp_arg += 1;
+            // Register-window slots arrive in the backend's incoming arg registers;
+            // overflow slots arrive through the backend-managed incoming stack area.
+            for (slot, &(val, ty)) in block.params.iter().enumerate() {
+                self.read_entry_arg_into_value(val, ty, slot);
             }
-        } else if !self.block_meta[block_idx].param_spill_slots.is_empty() {
+        } else if !self.frame.block_param_slots(block_idx).is_empty() {
             // Block params are in canonical spill slots
             for (i, &(val, _ty)) in block.params.iter().enumerate() {
-                let offset = self.block_meta[block_idx].param_spill_slots[i];
-                self.regs.values[val.index()].loc = ValueLoc::Spill(offset);
+                let offset = self.frame.block_param_slots(block_idx)[i];
+                self.assign_spill_value(val, offset);
             }
         }
 
@@ -777,28 +1150,22 @@ impl<'a, S: ValueLayout> Lowerer<'a, S> {
         match &inst_node.inst {
             Inst::Iconst(ty, imm) => {
                 let val = result_val.unwrap();
-                let r = self.regs.alloc_gp(&mut self.buf);
-                // Always use X register for mov_imm64 (W32 MOVZ can't encode all shifts)
-                let reg = gp_reg(r, RegSize::X64);
+                let r = self.regs.alloc_gp::<B, _>(&mut self.buf, &mut self.frame);
                 let imm_val = match ty {
                     Type::I8 => (*imm as u8) as u64,
                     Type::I32 => (*imm as u32) as u64,
                     _ => *imm as u64,
                 };
-                self.emit_mov_imm(reg, imm_val);
-                self.regs.assign_gp(val, r);
+                B::emit_mov_imm(&mut self.buf, machine_gp(r), imm_val);
+                self.assign_gp_value(val, r);
             }
 
             Inst::F64Const(f) => {
                 let val = result_val.unwrap();
                 let bits = f.to_bits();
-                // Load bits into scratch GP reg, then FMOV to FP reg
-                let scratch = X28;
-                self.emit_mov_imm(scratch, bits);
-                let fr = self.regs.alloc_fp(&mut self.buf);
-                let dreg = Arm64Reg::new(fr, RegSize::X64);
-                self.buf.emit(Arm64Inst::fmov_gp_to_fp(dreg, scratch));
-                self.regs.assign_fp(val, fr);
+                let fr = self.regs.alloc_fp::<B, _>(&mut self.buf, &mut self.frame);
+                B::emit_f64_const(&mut self.buf, machine_fp(fr), bits);
+                self.assign_fp_value(val, fr);
             }
 
             Inst::Add(a, b) => self.lower_gp_binop(result_val.unwrap(), *a, *b, BinOp::Add),
@@ -815,28 +1182,32 @@ impl<'a, S: ValueLayout> Lowerer<'a, S> {
 
             Inst::Neg(a) => {
                 let val = result_val.unwrap();
-                let ra = self.regs.ensure_in_gp_reg(&mut self.buf, *a);
+                let ra = self.regs.ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, *a);
                 let ty = self.regs.values[a.index()].ty;
                 self.regs.dec_use(*a);
-                let rd_idx = self.regs.alloc_gp(&mut self.buf);
-                let size = type_to_regsize(ty);
-                let rd = gp_reg(rd_idx, size);
-                let rn = gp_reg(ra, size);
-                let zr = if size == RegSize::W32 { WZR } else { XZR };
-                self.buf.emit(Arm64Inst::sub(rd, zr, rn));
-                self.regs.assign_gp(val, rd_idx);
+                let rd_idx = self.regs.alloc_gp::<B, _>(&mut self.buf, &mut self.frame);
+                B::emit_gp_neg(
+                    &mut self.buf,
+                    machine_gp(rd_idx),
+                    machine_gp(ra),
+                    type_to_machine_word_size(ty),
+                );
+                self.assign_gp_value(val, rd_idx);
             }
 
             Inst::Not(a) => {
                 let val = result_val.unwrap();
-                let ra = self.regs.ensure_in_gp_reg(&mut self.buf, *a);
+                let ra = self.regs.ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, *a);
                 let ty = self.regs.values[a.index()].ty;
                 self.regs.dec_use(*a);
-                let rd_idx = self.regs.alloc_gp(&mut self.buf);
-                let rd = gp_reg(rd_idx, type_to_regsize(ty));
-                let rm = gp_reg(ra, type_to_regsize(ty));
-                self.buf.emit(Arm64Inst::mvn(rd, rm));
-                self.regs.assign_gp(val, rd_idx);
+                let rd_idx = self.regs.alloc_gp::<B, _>(&mut self.buf, &mut self.frame);
+                B::emit_gp_not(
+                    &mut self.buf,
+                    machine_gp(rd_idx),
+                    machine_gp(ra),
+                    type_to_machine_word_size(ty),
+                );
+                self.assign_gp_value(val, rd_idx);
             }
 
             Inst::FAdd(a, b) => self.lower_fp_binop(result_val.unwrap(), *a, *b, FpBinOp::Add),
@@ -846,198 +1217,178 @@ impl<'a, S: ValueLayout> Lowerer<'a, S> {
 
             Inst::FNeg(a) => {
                 let val = result_val.unwrap();
-                let ra = self.regs.ensure_in_fp_reg(&mut self.buf, *a);
+                let ra = self.regs.ensure_in_fp_reg::<B>(&mut self.buf, &mut self.frame, *a);
                 self.regs.dec_use(*a);
-                let rd_idx = self.regs.alloc_fp(&mut self.buf);
-                let rd = Arm64Reg::new(rd_idx, RegSize::X64);
-                let rn = Arm64Reg::new(ra, RegSize::X64);
-                self.buf.emit(Arm64Inst::fneg(rd, rn));
-                self.regs.assign_fp(val, rd_idx);
+                let rd_idx = self.regs.alloc_fp::<B, _>(&mut self.buf, &mut self.frame);
+                B::emit_fp_neg(&mut self.buf, machine_fp(rd_idx), machine_fp(ra));
+                self.assign_fp_value(val, rd_idx);
             }
 
             Inst::Icmp(op, a, b) => {
                 let val = result_val.unwrap();
-                let ra = self.regs.ensure_in_gp_reg(&mut self.buf, *a);
-                let rb = self.regs.ensure_in_gp_reg(&mut self.buf, *b);
+                let ra = self.regs.ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, *a);
+                let rb = self.regs.ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, *b);
                 let ty = self.regs.values[a.index()].ty;
                 self.regs.dec_use(*a);
                 self.regs.dec_use(*b);
-                let size = type_to_regsize(ty);
-                let rn = gp_reg(ra, size);
-                let rm = gp_reg(rb, size);
-                self.buf.emit(Arm64Inst::cmp(rn, rm));
-                let rd_idx = self.regs.alloc_gp(&mut self.buf);
-                let rd = gp_reg(rd_idx, RegSize::W32);
-                let cond = cmpop_to_cond(*op);
-                self.buf.emit(Arm64Inst::cset(rd, cond));
-                self.regs.assign_gp(val, rd_idx);
+                let size = type_to_machine_word_size(ty);
+                let rd_idx = self.regs.alloc_gp::<B, _>(&mut self.buf, &mut self.frame);
+                B::emit_icmp_set(
+                    &mut self.buf,
+                    *op,
+                    machine_gp(rd_idx),
+                    machine_gp(ra),
+                    machine_gp(rb),
+                    size,
+                );
+                self.assign_gp_value(val, rd_idx);
             }
 
             Inst::Fcmp(op, a, b) => {
                 let val = result_val.unwrap();
-                let ra = self.regs.ensure_in_fp_reg(&mut self.buf, *a);
-                let rb = self.regs.ensure_in_fp_reg(&mut self.buf, *b);
+                let ra = self.regs.ensure_in_fp_reg::<B>(&mut self.buf, &mut self.frame, *a);
+                let rb = self.regs.ensure_in_fp_reg::<B>(&mut self.buf, &mut self.frame, *b);
                 self.regs.dec_use(*a);
                 self.regs.dec_use(*b);
-                let rn = Arm64Reg::new(ra, RegSize::X64);
-                let rm = Arm64Reg::new(rb, RegSize::X64);
-                self.buf.emit(Arm64Inst::fcmp_double(rn, rm));
-                let rd_idx = self.regs.alloc_gp(&mut self.buf);
-                let rd = gp_reg(rd_idx, RegSize::W32);
-                let cond = cmpop_to_cond(*op);
-                self.buf.emit(Arm64Inst::cset(rd, cond));
-                self.regs.assign_gp(val, rd_idx);
+                let rd_idx = self.regs.alloc_gp::<B, _>(&mut self.buf, &mut self.frame);
+                B::emit_fcmp_set(
+                    &mut self.buf,
+                    *op,
+                    machine_gp(rd_idx),
+                    machine_fp(ra),
+                    machine_fp(rb),
+                );
+                self.assign_gp_value(val, rd_idx);
             }
 
             Inst::Select(cond, t, f) => {
                 let val = result_val.unwrap();
-                let rc = self.regs.ensure_in_gp_reg(&mut self.buf, *cond);
+                let rc = self.regs.ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, *cond);
                 let ty = self.regs.values[t.index()].ty;
 
                 if RegState::is_float_type(ty) {
-                    let rt = self.regs.ensure_in_fp_reg(&mut self.buf, *t);
-                    let rf = self.regs.ensure_in_fp_reg(&mut self.buf, *f);
-                    let rc_reg = gp_reg(rc, RegSize::W32);
-                    self.buf.emit(Arm64Inst::cmp_imm(rc_reg, 0));
+                    let rt = self.regs.ensure_in_fp_reg::<B>(&mut self.buf, &mut self.frame, *t);
+                    let rf = self.regs.ensure_in_fp_reg::<B>(&mut self.buf, &mut self.frame, *f);
                     self.regs.dec_use(*cond);
                     self.regs.dec_use(*t);
                     self.regs.dec_use(*f);
-                    let rd_idx = self.regs.alloc_fp(&mut self.buf);
-                    let rd = Arm64Reg::new(rd_idx, RegSize::X64);
-                    let rn = Arm64Reg::new(rt, RegSize::X64);
-                    let rm = Arm64Reg::new(rf, RegSize::X64);
-                    self.buf.emit(Arm64Inst::fcsel(rd, rn, rm, Arm64Cond::NE));
-                    self.regs.assign_fp(val, rd_idx);
+                    let rd_idx = self.regs.alloc_fp::<B, _>(&mut self.buf, &mut self.frame);
+                    B::emit_fp_select(
+                        &mut self.buf,
+                        machine_gp(rc),
+                        machine_fp(rd_idx),
+                        machine_fp(rt),
+                        machine_fp(rf),
+                    );
+                    self.assign_fp_value(val, rd_idx);
                 } else {
-                    let rt = self.regs.ensure_in_gp_reg(&mut self.buf, *t);
-                    let rf = self.regs.ensure_in_gp_reg(&mut self.buf, *f);
-                    let size = type_to_regsize(ty);
-                    let rc_reg = gp_reg(rc, RegSize::W32);
-                    self.buf.emit(Arm64Inst::cmp_imm(rc_reg, 0));
+                    let rt = self.regs.ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, *t);
+                    let rf = self.regs.ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, *f);
+                    let size = type_to_machine_word_size(ty);
                     self.regs.dec_use(*cond);
                     self.regs.dec_use(*t);
                     self.regs.dec_use(*f);
-                    let rd_idx = self.regs.alloc_gp(&mut self.buf);
-                    let rd = gp_reg(rd_idx, size);
-                    let rn = gp_reg(rt, size);
-                    let rm = gp_reg(rf, size);
-                    self.buf.emit(Arm64Inst::csel(rd, rn, rm, Arm64Cond::NE));
-                    self.regs.assign_gp(val, rd_idx);
+                    let rd_idx = self.regs.alloc_gp::<B, _>(&mut self.buf, &mut self.frame);
+                    B::emit_gp_select(
+                        &mut self.buf,
+                        machine_gp(rd_idx),
+                        machine_gp(rc),
+                        machine_gp(rt),
+                        machine_gp(rf),
+                        size,
+                    );
+                    self.assign_gp_value(val, rd_idx);
+                }
+            }
+
+            Inst::OverflowCheck(op, a, b) => {
+                let val = result_val.unwrap();
+                let ra = self.regs.ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, *a);
+                let rb = self.regs.ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, *b);
+                let ty = self.regs.values[a.index()].ty;
+                if let Some(reg) = self.try_lower_overflow_check_inline(*op, ty, ra, rb) {
+                    self.regs.dec_use(*a);
+                    self.regs.dec_use(*b);
+                    self.assign_gp_value(val, reg);
+                } else {
+                    self.regs.spill_caller_saved::<B>(&mut self.buf, &mut self.frame);
+                    B::emit_gp_move(&mut self.buf, machine_gp(26), machine_gp(ra));
+                    B::emit_gp_move(&mut self.buf, machine_gp(27), machine_gp(rb));
+                    B::emit_mov_imm(&mut self.buf, machine_gp(0), overflow_op_code(*op));
+                    B::emit_mov_imm(&mut self.buf, machine_gp(1), overflow_type_code(ty));
+                    B::emit_gp_move(&mut self.buf, machine_gp(2), machine_gp(26));
+                    B::emit_gp_move(&mut self.buf, machine_gp(3), machine_gp(27));
+                    B::emit_mov_imm(
+                        &mut self.buf,
+                        machine_gp(28),
+                        jit_overflow_check_helper as usize as u64,
+                    );
+                    B::emit_call_reg(&mut self.buf, machine_gp(28));
+                    self.regs.dec_use(*a);
+                    self.regs.dec_use(*b);
+                    self.regs.clear_regs();
+                    self.assign_gp_value(val, 0);
                 }
             }
 
             Inst::Sext(a, target_ty) => {
                 let val = result_val.unwrap();
-                let ra = self.regs.ensure_in_gp_reg(&mut self.buf, *a);
+                let ra = self.regs.ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, *a);
                 let src_ty = self.regs.values[a.index()].ty;
                 self.regs.dec_use(*a);
-                let rd_idx = self.regs.alloc_gp(&mut self.buf);
-                let rd = gp_reg(rd_idx, type_to_regsize(*target_ty));
-                let rn = gp_reg(ra, RegSize::W32);
-                match (src_ty, target_ty) {
-                    (Type::I32, Type::I64) => {
-                        self.buf.emit(Arm64Inst::sxtw(rd, rn));
-                    }
-                    (Type::I8, Type::I32) | (Type::I8, Type::I64) => {
-                        self.buf.emit(Arm64Inst::sxtb(rd, rn));
-                    }
-                    _ => {
-                        // General case: just mov
-                        self.buf.emit(Arm64Inst::mov(rd, rn));
-                    }
-                }
-                self.regs.assign_gp(val, rd_idx);
+                let rd_idx = self.regs.alloc_gp::<B, _>(&mut self.buf, &mut self.frame);
+                B::emit_sign_extend(
+                    &mut self.buf,
+                    machine_gp(rd_idx),
+                    machine_gp(ra),
+                    src_ty,
+                    *target_ty,
+                );
+                self.assign_gp_value(val, rd_idx);
             }
 
             Inst::Zext(a, target_ty) => {
                 let val = result_val.unwrap();
-                let ra = self.regs.ensure_in_gp_reg(&mut self.buf, *a);
+                let ra = self.regs.ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, *a);
                 let src_ty = self.regs.values[a.index()].ty;
                 self.regs.dec_use(*a);
-                let rd_idx = self.regs.alloc_gp(&mut self.buf);
-                match (src_ty, target_ty) {
-                    (Type::I8, _) => {
-                        // AND Wd, Wn, #0xFF
-                        let rd = gp_reg(rd_idx, RegSize::W32);
-                        let rn = gp_reg(ra, RegSize::W32);
-                        self.buf.emit(Arm64Inst::AndImm {
-                            sf: 0,
-                            n: 0,
-                            immr: 0,
-                            imms: 7,
-                            rn,
-                            rd,
-                        });
-                    }
-                    (Type::I32, Type::I64) => {
-                        // MOV Wd, Wn (implicitly zero-extends to 64 bits)
-                        let rd = gp_reg(rd_idx, RegSize::W32);
-                        let rn = gp_reg(ra, RegSize::W32);
-                        self.buf.emit(Arm64Inst::mov(rd, rn));
-                    }
-                    _ => {
-                        let rd = gp_reg(rd_idx, type_to_regsize(*target_ty));
-                        let rn = gp_reg(ra, type_to_regsize(src_ty));
-                        self.buf.emit(Arm64Inst::mov(rd, rn));
-                    }
-                }
-                self.regs.assign_gp(val, rd_idx);
+                let rd_idx = self.regs.alloc_gp::<B, _>(&mut self.buf, &mut self.frame);
+                B::emit_zero_extend(
+                    &mut self.buf,
+                    machine_gp(rd_idx),
+                    machine_gp(ra),
+                    src_ty,
+                    *target_ty,
+                );
+                self.assign_gp_value(val, rd_idx);
             }
 
             Inst::Trunc(a, target_ty) => {
                 let val = result_val.unwrap();
-                let ra = self.regs.ensure_in_gp_reg(&mut self.buf, *a);
+                let ra = self.regs.ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, *a);
                 self.regs.dec_use(*a);
-                let rd_idx = self.regs.alloc_gp(&mut self.buf);
-                match target_ty {
-                    Type::I8 => {
-                        let rd = gp_reg(rd_idx, RegSize::W32);
-                        let rn = gp_reg(ra, RegSize::W32);
-                        self.buf.emit(Arm64Inst::AndImm {
-                            sf: 0,
-                            n: 0,
-                            immr: 0,
-                            imms: 7,
-                            rn,
-                            rd,
-                        });
-                    }
-                    Type::I32 => {
-                        // MOV Wd, Wn (truncates by using 32-bit reg)
-                        let rd = gp_reg(rd_idx, RegSize::W32);
-                        let rn = gp_reg(ra, RegSize::W32);
-                        self.buf.emit(Arm64Inst::mov(rd, rn));
-                    }
-                    _ => {
-                        let rd = gp_reg(rd_idx, type_to_regsize(*target_ty));
-                        let rn = gp_reg(ra, type_to_regsize(*target_ty));
-                        self.buf.emit(Arm64Inst::mov(rd, rn));
-                    }
-                }
-                self.regs.assign_gp(val, rd_idx);
+                let rd_idx = self.regs.alloc_gp::<B, _>(&mut self.buf, &mut self.frame);
+                B::emit_trunc(&mut self.buf, machine_gp(rd_idx), machine_gp(ra), *target_ty);
+                self.assign_gp_value(val, rd_idx);
             }
 
             Inst::IntToFloat(a) => {
                 let val = result_val.unwrap();
-                let ra = self.regs.ensure_in_gp_reg(&mut self.buf, *a);
+                let ra = self.regs.ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, *a);
                 let src_ty = self.regs.values[a.index()].ty;
                 self.regs.dec_use(*a);
-                let rd_idx = self.regs.alloc_fp(&mut self.buf);
-                let rd = Arm64Reg::new(rd_idx, RegSize::X64);
-                let rn = gp_reg(ra, type_to_regsize(src_ty));
-                self.buf.emit(Arm64Inst::scvtf_to_double(rd, rn));
-                self.regs.assign_fp(val, rd_idx);
+                let rd_idx = self.regs.alloc_fp::<B, _>(&mut self.buf, &mut self.frame);
+                B::emit_int_to_float(&mut self.buf, machine_fp(rd_idx), machine_gp(ra), src_ty);
+                self.assign_fp_value(val, rd_idx);
             }
 
             Inst::FloatToInt(a) => {
                 let val = result_val.unwrap();
-                let ra = self.regs.ensure_in_fp_reg(&mut self.buf, *a);
+                let ra = self.regs.ensure_in_fp_reg::<B>(&mut self.buf, &mut self.frame, *a);
                 self.regs.dec_use(*a);
-                let rd_idx = self.regs.alloc_gp(&mut self.buf);
-                let rd = gp_reg(rd_idx, RegSize::X64);
-                let rn = Arm64Reg::new(ra, RegSize::X64);
-                self.buf.emit(Arm64Inst::fcvtzs_from_double(rd, rn));
-                self.regs.assign_gp(val, rd_idx);
+                let rd_idx = self.regs.alloc_gp::<B, _>(&mut self.buf, &mut self.frame);
+                B::emit_float_to_int(&mut self.buf, machine_gp(rd_idx), machine_fp(ra));
+                self.assign_gp_value(val, rd_idx);
             }
 
             Inst::Bitcast(a, _target_ty) => {
@@ -1047,95 +1398,82 @@ impl<'a, S: ValueLayout> Lowerer<'a, S> {
 
                 if RegState::is_float_type(src_ty) && !RegState::is_float_type(dst_ty) {
                     // FP -> GP: FMOV Xd, Dn
-                    let ra = self.regs.ensure_in_fp_reg(&mut self.buf, *a);
+                    let ra = self.regs.ensure_in_fp_reg::<B>(&mut self.buf, &mut self.frame, *a);
                     self.regs.dec_use(*a);
-                    let rd_idx = self.regs.alloc_gp(&mut self.buf);
-                    let rd = gp_reg(rd_idx, RegSize::X64);
-                    let rn = Arm64Reg::new(ra, RegSize::X64);
-                    self.buf.emit(Arm64Inst::fmov_fp_to_gp(rd, rn));
-                    self.regs.assign_gp(val, rd_idx);
+                    let rd_idx = self.regs.alloc_gp::<B, _>(&mut self.buf, &mut self.frame);
+                    B::emit_fp_to_gp_move(&mut self.buf, machine_gp(rd_idx), machine_fp(ra));
+                    self.assign_gp_value(val, rd_idx);
                 } else if !RegState::is_float_type(src_ty) && RegState::is_float_type(dst_ty) {
                     // GP -> FP: FMOV Dd, Xn
-                    let ra = self.regs.ensure_in_gp_reg(&mut self.buf, *a);
+                    let ra = self.regs.ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, *a);
                     self.regs.dec_use(*a);
-                    let rd_idx = self.regs.alloc_fp(&mut self.buf);
-                    let rd = Arm64Reg::new(rd_idx, RegSize::X64);
-                    let rn = gp_reg(ra, RegSize::X64);
-                    self.buf.emit(Arm64Inst::fmov_gp_to_fp(rd, rn));
-                    self.regs.assign_fp(val, rd_idx);
+                    let rd_idx = self.regs.alloc_fp::<B, _>(&mut self.buf, &mut self.frame);
+                    B::emit_gp_to_fp_move(&mut self.buf, machine_fp(rd_idx), machine_gp(ra));
+                    self.assign_fp_value(val, rd_idx);
                 } else {
                     // Same class: just rename
                     if RegState::is_float_type(src_ty) {
-                        let ra = self.regs.ensure_in_fp_reg(&mut self.buf, *a);
+                        let ra = self.regs.ensure_in_fp_reg::<B>(&mut self.buf, &mut self.frame, *a);
                         self.regs.dec_use(*a);
-                        self.regs.assign_fp(val, ra);
+                        self.assign_fp_value(val, ra);
                     } else {
-                        let ra = self.regs.ensure_in_gp_reg(&mut self.buf, *a);
+                        let ra = self.regs.ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, *a);
                         self.regs.dec_use(*a);
-                        self.regs.assign_gp(val, ra);
+                        self.assign_gp_value(val, ra);
                     }
                 }
             }
 
             Inst::Load(ty, addr, offset) => {
                 let val = result_val.unwrap();
-                let ra = self.regs.ensure_in_gp_reg(&mut self.buf, *addr);
+                let ra = self.regs.ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, *addr);
                 self.regs.dec_use(*addr);
-                let base = gp_reg(ra, RegSize::X64);
 
                 if RegState::is_float_type(*ty) {
-                    let rd_idx = self.regs.alloc_fp(&mut self.buf);
-                    let rd = Arm64Reg::new(rd_idx, RegSize::X64);
-                    if *offset != 0 {
-                        // Add offset to base in scratch
-                        self.emit_mov_imm(X28, *offset as u64);
-                        self.buf.emit(Arm64Inst::add(X28, base, X28));
-                        self.buf.emit(Arm64Inst::ldur_fp(rd, X28, 0));
-                    } else {
-                        self.buf.emit(Arm64Inst::ldur_fp(rd, base, 0));
-                    }
-                    self.regs.assign_fp(val, rd_idx);
+                    let rd_idx = self.regs.alloc_fp::<B, _>(&mut self.buf, &mut self.frame);
+                    B::emit_load_fp(
+                        &mut self.buf,
+                        machine_fp(rd_idx),
+                        machine_gp(ra),
+                        *offset,
+                    );
+                    self.assign_fp_value(val, rd_idx);
                 } else {
-                    let rd_idx = self.regs.alloc_gp(&mut self.buf);
-                    let size = type_to_regsize(*ty);
-                    let rd = gp_reg(rd_idx, size);
-                    if *offset >= -256 && *offset <= 255 {
-                        self.buf.emit(Arm64Inst::ldur(rd, base, *offset));
-                    } else {
-                        self.emit_mov_imm(X28, *offset as u64);
-                        self.buf.emit(Arm64Inst::add(X28, base, X28));
-                        self.buf.emit(Arm64Inst::ldur(rd, X28, 0));
-                    }
-                    self.regs.assign_gp(val, rd_idx);
+                    let rd_idx = self.regs.alloc_gp::<B, _>(&mut self.buf, &mut self.frame);
+                    let size = type_to_machine_word_size(*ty);
+                    B::emit_load_gp(
+                        &mut self.buf,
+                        machine_gp(rd_idx),
+                        machine_gp(ra),
+                        *offset,
+                        size,
+                    );
+                    self.assign_gp_value(val, rd_idx);
                 }
             }
 
             Inst::Store(val_to_store, addr, offset) => {
-                let ra = self.regs.ensure_in_gp_reg(&mut self.buf, *addr);
-                let base = gp_reg(ra, RegSize::X64);
+                let ra = self.regs.ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, *addr);
                 let val_ty = self.regs.values[val_to_store.index()].ty;
 
                 if RegState::is_float_type(val_ty) {
-                    let rv = self.regs.ensure_in_fp_reg(&mut self.buf, *val_to_store);
-                    let src = Arm64Reg::new(rv, RegSize::X64);
-                    if *offset != 0 {
-                        self.emit_mov_imm(X28, *offset as u64);
-                        self.buf.emit(Arm64Inst::add(X28, base, X28));
-                        self.buf.emit(Arm64Inst::stur_fp(src, X28, 0));
-                    } else {
-                        self.buf.emit(Arm64Inst::stur_fp(src, base, 0));
-                    }
+                    let rv = self.regs.ensure_in_fp_reg::<B>(&mut self.buf, &mut self.frame, *val_to_store);
+                    B::emit_store_fp(
+                        &mut self.buf,
+                        machine_fp(rv),
+                        machine_gp(ra),
+                        *offset,
+                    );
                 } else {
-                    let rv = self.regs.ensure_in_gp_reg(&mut self.buf, *val_to_store);
-                    let size = type_to_regsize(val_ty);
-                    let src = gp_reg(rv, size);
-                    if *offset >= -256 && *offset <= 255 {
-                        self.buf.emit(Arm64Inst::stur(src, base, *offset));
-                    } else {
-                        self.emit_mov_imm(X28, *offset as u64);
-                        self.buf.emit(Arm64Inst::add(X28, base, X28));
-                        self.buf.emit(Arm64Inst::stur(src, X28, 0));
-                    }
+                    let rv = self.regs.ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, *val_to_store);
+                    let size = type_to_machine_word_size(val_ty);
+                    B::emit_store_gp(
+                        &mut self.buf,
+                        machine_gp(rv),
+                        machine_gp(ra),
+                        *offset,
+                        size,
+                    );
                 }
                 self.regs.dec_use(*val_to_store);
                 self.regs.dec_use(*addr);
@@ -1151,288 +1489,478 @@ impl<'a, S: ValueLayout> Lowerer<'a, S> {
 
             // ── Tagged value operations (TagScheme-generic) ─────────
             //
-            // Uses S: TagScheme constants to emit the correct bit
+            // Uses the selected ValueLayout constants to emit the correct bit
             // manipulation for any tagging scheme (NanBox, LowBit, etc).
             Inst::Payload(a) => {
-                // S::extract_payload(bits)
+                // Layout::extract_payload(bits)
                 let val = result_val.unwrap();
-                let ra = self.regs.ensure_in_gp_reg(&mut self.buf, *a);
+                let ra = self.regs.ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, *a);
                 self.regs.dec_use(*a);
-                let rd_idx = self.regs.alloc_gp(&mut self.buf);
-                let rd = gp_reg(rd_idx, RegSize::X64);
-                let rn = gp_reg(ra, RegSize::X64);
-                if S::HAS_UNBOXED_FLOAT {
-                    // NanBox-style: payload is in low PAYLOAD_BITS → AND with mask
-                    let mask = (1u64 << S::PAYLOAD_BITS) - 1;
-                    self.emit_mov_imm(X28, mask);
-                    self.buf.emit(Arm64Inst::and(rd, rn, X28));
-                } else {
-                    // LowBit-style: payload is in upper bits → LSR by tag_bits
-                    let tag_bits = 64 - S::PAYLOAD_BITS;
-                    self.emit_mov_imm(X28, tag_bits as u64);
-                    self.buf.emit(Arm64Inst::LsrReg {
-                        sf: 1,
-                        rm: X28,
-                        rn,
-                        rd,
-                    });
-                }
-                self.regs.assign_gp(val, rd_idx);
+                let rd_idx = self.regs.alloc_gp::<B, _>(&mut self.buf, &mut self.frame);
+                B::emit_extract_payload(
+                    &mut self.buf,
+                    machine_gp(rd_idx),
+                    machine_gp(ra),
+                    Cfg::Layout::HAS_UNBOXED_FLOAT,
+                    Cfg::Layout::PAYLOAD_BITS as u8,
+                );
+                self.assign_gp_value(val, rd_idx);
             }
 
             Inst::IsTag(a, tag) => {
-                // S::has_tag(bits, tag)
+                // Layout::has_tag(bits, tag)
                 let val = result_val.unwrap();
-                let ra = self.regs.ensure_in_gp_reg(&mut self.buf, *a);
+                let ra = self.regs.ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, *a);
                 self.regs.dec_use(*a);
-                let rn = gp_reg(ra, RegSize::X64);
-                let rd_idx = self.regs.alloc_gp(&mut self.buf);
-                if S::HAS_UNBOXED_FLOAT {
-                    // NanBox-style: shift right by PAYLOAD_BITS, compare upper bits
-                    let expected = S::encode_tagged(*tag, 0) >> S::PAYLOAD_BITS;
-                    self.emit_mov_imm(X28, S::PAYLOAD_BITS as u64);
-                    self.buf.emit(Arm64Inst::LsrReg {
-                        sf: 1,
-                        rm: X28,
-                        rn,
-                        rd: X28,
-                    });
-                    let tmp = gp_reg(rd_idx, RegSize::X64);
-                    self.emit_mov_imm(tmp, expected);
-                    self.buf.emit(Arm64Inst::cmp(X28, tmp));
+                let rd_idx = self.regs.alloc_gp::<B, _>(&mut self.buf, &mut self.frame);
+                let expected = if Cfg::Layout::HAS_UNBOXED_FLOAT {
+                    Cfg::Layout::encode_tagged(*tag, 0) >> Cfg::Layout::PAYLOAD_BITS
                 } else {
-                    // LowBit-style: mask low tag bits, compare with tag
-                    let tag_mask = S::TAG_COUNT as u64 - 1;
-                    self.emit_mov_imm(X28, tag_mask);
-                    self.buf.emit(Arm64Inst::and(X28, rn, X28));
-                    let tmp = gp_reg(rd_idx, RegSize::X64);
-                    self.emit_mov_imm(tmp, *tag as u64);
-                    self.buf.emit(Arm64Inst::cmp(X28, tmp));
-                }
-                let rd = gp_reg(rd_idx, RegSize::W32);
-                self.buf.emit(Arm64Inst::cset(rd, Arm64Cond::EQ));
-                self.regs.assign_gp(val, rd_idx);
+                    *tag as u64
+                };
+                B::emit_is_tag(
+                    &mut self.buf,
+                    machine_gp(rd_idx),
+                    machine_gp(ra),
+                    Cfg::Layout::HAS_UNBOXED_FLOAT,
+                    Cfg::Layout::PAYLOAD_BITS as u8,
+                    Cfg::Layout::TAG_COUNT as u64 - 1,
+                    expected,
+                );
+                self.assign_gp_value(val, rd_idx);
             }
 
             Inst::MakeTagged(tag, payload) => {
-                // S::encode_tagged(tag, payload)
+                // Layout::encode_tagged(tag, payload)
                 let val = result_val.unwrap();
-                let ra = self.regs.ensure_in_gp_reg(&mut self.buf, *payload);
+                let ra = self.regs.ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, *payload);
                 self.regs.dec_use(*payload);
-                let rd_idx = self.regs.alloc_gp(&mut self.buf);
-                let rd = gp_reg(rd_idx, RegSize::X64);
-                let rn = gp_reg(ra, RegSize::X64);
-                if S::HAS_UNBOXED_FLOAT {
-                    // NanBox-style: OR payload (in low bits) with tag pattern
-                    let pattern = S::encode_tagged(*tag, 0);
-                    self.emit_mov_imm(X28, pattern);
-                    self.buf.emit(Arm64Inst::orr(rd, rn, X28));
-                } else {
-                    // LowBit-style: shift payload left by tag_bits, OR with tag
-                    let tag_bits = 64 - S::PAYLOAD_BITS;
-                    self.emit_mov_imm(X28, tag_bits as u64);
-                    self.buf.emit(Arm64Inst::LslReg {
-                        sf: 1,
-                        rm: X28,
-                        rn,
-                        rd,
-                    });
-                    self.emit_mov_imm(X28, *tag as u64);
-                    self.buf.emit(Arm64Inst::orr(rd, rd, X28));
-                }
-                self.regs.assign_gp(val, rd_idx);
+                let rd_idx = self.regs.alloc_gp::<B, _>(&mut self.buf, &mut self.frame);
+                B::emit_make_tagged(
+                    &mut self.buf,
+                    machine_gp(rd_idx),
+                    machine_gp(ra),
+                    Cfg::Layout::HAS_UNBOXED_FLOAT,
+                    Cfg::Layout::PAYLOAD_BITS as u8,
+                    Cfg::Layout::encode_tagged(*tag, 0),
+                    *tag as u64,
+                );
+                self.assign_gp_value(val, rd_idx);
             }
 
             Inst::TagOf(a) => {
                 // Extract tag from bits
                 let val = result_val.unwrap();
-                let ra = self.regs.ensure_in_gp_reg(&mut self.buf, *a);
+                let ra = self.regs.ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, *a);
                 self.regs.dec_use(*a);
-                let rd_idx = self.regs.alloc_gp(&mut self.buf);
-                let rd = gp_reg(rd_idx, RegSize::X64);
-                let rn = gp_reg(ra, RegSize::X64);
-                let tag_mask = S::TAG_COUNT as u64 - 1;
-                if S::HAS_UNBOXED_FLOAT {
-                    // NanBox-style: tag is in upper bits after payload
-                    self.emit_mov_imm(X28, S::PAYLOAD_BITS as u64);
-                    self.buf.emit(Arm64Inst::LsrReg {
-                        sf: 1,
-                        rm: X28,
-                        rn,
-                        rd,
-                    });
-                    self.emit_mov_imm(X28, tag_mask);
-                    self.buf.emit(Arm64Inst::and(rd, rd, X28));
-                } else {
-                    // LowBit-style: tag is in low bits
-                    self.emit_mov_imm(X28, tag_mask);
-                    self.buf.emit(Arm64Inst::and(rd, rn, X28));
-                }
-                self.regs.assign_gp(val, rd_idx);
+                let rd_idx = self.regs.alloc_gp::<B, _>(&mut self.buf, &mut self.frame);
+                B::emit_tag_of(
+                    &mut self.buf,
+                    machine_gp(rd_idx),
+                    machine_gp(ra),
+                    Cfg::Layout::HAS_UNBOXED_FLOAT,
+                    Cfg::Layout::PAYLOAD_BITS as u8,
+                    Cfg::Layout::TAG_COUNT as u64 - 1,
+                );
+                self.assign_gp_value(val, rd_idx);
             }
 
             Inst::Safepoint(live) => {
-                if let Some(handler) = self.safepoint_handler {
-                    // Spill all live values so the handler can scan them
-                    self.regs.spill_all_live(&mut self.buf);
-
-                    // Call handler(frame_ptr, frame_size)
-                    self.buf.emit(Arm64Inst::mov(X0, X29));
-                    let frame_size = self.regs.frame.local_frame_size() as u64;
-                    self.emit_mov_imm(gp_reg(1, RegSize::X64), frame_size);
-                    self.emit_mov_imm(X28, handler);
-                    self.buf.emit(Arm64Inst::blr(X28));
-
-                    // After handler, all values are in spill slots
-                    self.regs.clear_regs();
-                }
+                self.emit_safepoint(live);
                 // Dec uses for live values
                 for v in live.iter() {
                     self.regs.dec_use(*v);
                 }
             }
 
-            // Instructions we don't lower in the JIT (deopt/guard/etc)
-            _ => {
-                if result_val.is_some() {
-                    panic!("unsupported instruction with result: {:?}", inst_node.inst);
+            Inst::Guard(cond, deopt_id, live) => {
+                let resume_point = self.func.deopt_info[deopt_id.index()].resume_point;
+                let cond_reg =
+                    self.regs
+                        .ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, *cond);
+                let continue_label = self.buf.create_label();
+                B::emit_cbnz_to_label(&mut self.buf, machine_gp(cond_reg), continue_label);
+                self.emit_deopt_return(*deopt_id, resume_point, live);
+                B::bind_label(&mut self.buf, continue_label);
+                self.regs.dec_use(*cond);
+                for &value in live {
+                    self.regs.dec_use(value);
                 }
-                // Consume uses for instructions without results
-                inst_node.inst.for_each_value(|v| {
-                    self.regs.dec_use(v);
-                });
             }
+
         }
     }
 
     fn lower_gp_binop(&mut self, val: Value, a: Value, b: Value, op: BinOp) {
-        let ra = self.regs.ensure_in_gp_reg(&mut self.buf, a);
-        let rb = self.regs.ensure_in_gp_reg(&mut self.buf, b);
+        let ra = self.regs.ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, a);
+        let rb = self.regs.ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, b);
         let ty = self.regs.values[a.index()].ty;
         self.regs.dec_use(a);
         self.regs.dec_use(b);
 
-        let rd_idx = self.regs.alloc_gp(&mut self.buf);
-        let size = type_to_regsize(ty);
-        let rd = gp_reg(rd_idx, size);
-        let rn = gp_reg(ra, size);
-        let rm = gp_reg(rb, size);
-
-        match op {
-            BinOp::Add => self.buf.emit(Arm64Inst::add(rd, rn, rm)),
-            BinOp::Sub => self.buf.emit(Arm64Inst::sub(rd, rn, rm)),
-            BinOp::Mul => self.buf.emit(Arm64Inst::mul(rd, rn, rm)),
-            BinOp::SDiv => self.buf.emit(Arm64Inst::sdiv(rd, rn, rm)),
-            BinOp::UDiv => self.buf.emit(Arm64Inst::udiv(rd, rn, rm)),
-            BinOp::And => self.buf.emit(Arm64Inst::and(rd, rn, rm)),
-            BinOp::Or => self.buf.emit(Arm64Inst::orr(rd, rn, rm)),
-            BinOp::Xor => self.buf.emit(Arm64Inst::eor(rd, rn, rm)),
-            BinOp::Shl => self.buf.emit(Arm64Inst::LslReg {
-                sf: rd.sf(),
-                rm,
-                rn,
-                rd,
-            }),
-            BinOp::LShr => self.buf.emit(Arm64Inst::LsrReg {
-                sf: rd.sf(),
-                rm,
-                rn,
-                rd,
-            }),
-            BinOp::AShr => self.buf.emit(Arm64Inst::AsrReg {
-                sf: rd.sf(),
-                rm,
-                rn,
-                rd,
-            }),
+        let rd_idx = self.regs.alloc_gp::<B, _>(&mut self.buf, &mut self.frame);
+        let size = type_to_machine_word_size(ty);
+        let backend_op = match op {
+            BinOp::Add => MachineGpBinOp::Add,
+            BinOp::Sub => MachineGpBinOp::Sub,
+            BinOp::Mul => MachineGpBinOp::Mul,
+            BinOp::SDiv => MachineGpBinOp::SDiv,
+            BinOp::UDiv => MachineGpBinOp::UDiv,
+            BinOp::And => MachineGpBinOp::And,
+            BinOp::Or => MachineGpBinOp::Or,
+            BinOp::Xor => MachineGpBinOp::Xor,
+            BinOp::Shl => MachineGpBinOp::Shl,
+            BinOp::LShr => MachineGpBinOp::LShr,
+            BinOp::AShr => MachineGpBinOp::AShr,
         };
 
-        self.regs.assign_gp(val, rd_idx);
+        B::emit_gp_binop(
+            &mut self.buf,
+            backend_op,
+            machine_gp(rd_idx),
+            machine_gp(ra),
+            machine_gp(rb),
+            size,
+        );
+
+        self.assign_gp_value(val, rd_idx);
     }
 
     fn lower_fp_binop(&mut self, val: Value, a: Value, b: Value, op: FpBinOp) {
-        let ra = self.regs.ensure_in_fp_reg(&mut self.buf, a);
-        let rb = self.regs.ensure_in_fp_reg(&mut self.buf, b);
+        let ra = self.regs.ensure_in_fp_reg::<B>(&mut self.buf, &mut self.frame, a);
+        let rb = self.regs.ensure_in_fp_reg::<B>(&mut self.buf, &mut self.frame, b);
         self.regs.dec_use(a);
         self.regs.dec_use(b);
 
-        let rd_idx = self.regs.alloc_fp(&mut self.buf);
-        let rd = Arm64Reg::new(rd_idx, RegSize::X64);
-        let rn = Arm64Reg::new(ra, RegSize::X64);
-        let rm = Arm64Reg::new(rb, RegSize::X64);
-
-        match op {
-            FpBinOp::Add => self.buf.emit(Arm64Inst::fadd(rd, rn, rm)),
-            FpBinOp::Sub => self.buf.emit(Arm64Inst::fsub(rd, rn, rm)),
-            FpBinOp::Mul => self.buf.emit(Arm64Inst::fmul(rd, rn, rm)),
-            FpBinOp::Div => self.buf.emit(Arm64Inst::fdiv(rd, rn, rm)),
+        let rd_idx = self.regs.alloc_fp::<B, _>(&mut self.buf, &mut self.frame);
+        let backend_op = match op {
+            FpBinOp::Add => MachineFpBinOp::Add,
+            FpBinOp::Sub => MachineFpBinOp::Sub,
+            FpBinOp::Mul => MachineFpBinOp::Mul,
+            FpBinOp::Div => MachineFpBinOp::Div,
         };
 
-        self.regs.assign_fp(val, rd_idx);
+        B::emit_fp_binop(
+            &mut self.buf,
+            backend_op,
+            machine_fp(rd_idx),
+            machine_fp(ra),
+            machine_fp(rb),
+        );
+
+        self.assign_fp_value(val, rd_idx);
     }
 
-    fn lower_call(&mut self, func_ref: FuncRef, args: &[Value], result_val: Option<Value>) {
-        // Spill caller-saved regs
-        self.regs.spill_caller_saved(&mut self.buf);
-
-        let overflow = args.len().saturating_sub(16);
-        let outgoing_size = align_up(overflow * 8, 16) as i32;
-        self.regs.frame.reserve_outgoing_arg_bytes(outgoing_size);
-        if outgoing_size > 0 {
-            self.buf.emit(Arm64Inst::sub_imm(SP, SP, outgoing_size));
+    fn try_lower_overflow_check_inline(
+        &mut self,
+        op: OverflowOp,
+        ty: Type,
+        ra: u8,
+        rb: u8,
+    ) -> Option<u8> {
+        let size = type_to_machine_word_size(ty);
+        match op {
+            OverflowOp::UAdd => {
+                let sum = self.regs.alloc_gp::<B, _>(&mut self.buf, &mut self.frame);
+                B::emit_gp_binop(
+                    &mut self.buf,
+                    MachineGpBinOp::Add,
+                    machine_gp(sum),
+                    machine_gp(ra),
+                    machine_gp(rb),
+                    size,
+                );
+                let out = self.regs.alloc_gp::<B, _>(&mut self.buf, &mut self.frame);
+                B::emit_icmp_set(
+                    &mut self.buf,
+                    CmpOp::Ult,
+                    machine_gp(out),
+                    machine_gp(sum),
+                    machine_gp(ra),
+                    size,
+                );
+                Some(out)
+            }
+            OverflowOp::USub => {
+                let out = self.regs.alloc_gp::<B, _>(&mut self.buf, &mut self.frame);
+                B::emit_icmp_set(
+                    &mut self.buf,
+                    CmpOp::Ult,
+                    machine_gp(out),
+                    machine_gp(ra),
+                    machine_gp(rb),
+                    size,
+                );
+                Some(out)
+            }
+            OverflowOp::SAdd if ty == Type::I64 => {
+                let sum = self.regs.alloc_gp::<B, _>(&mut self.buf, &mut self.frame);
+                B::emit_gp_binop(
+                    &mut self.buf,
+                    MachineGpBinOp::Add,
+                    machine_gp(sum),
+                    machine_gp(ra),
+                    machine_gp(rb),
+                    size,
+                );
+                let x1 = self.regs.alloc_gp::<B, _>(&mut self.buf, &mut self.frame);
+                B::emit_gp_binop(
+                    &mut self.buf,
+                    MachineGpBinOp::Xor,
+                    machine_gp(x1),
+                    machine_gp(sum),
+                    machine_gp(ra),
+                    MachineWordSize::W64,
+                );
+                let x2 = self.regs.alloc_gp::<B, _>(&mut self.buf, &mut self.frame);
+                B::emit_gp_binop(
+                    &mut self.buf,
+                    MachineGpBinOp::Xor,
+                    machine_gp(x2),
+                    machine_gp(sum),
+                    machine_gp(rb),
+                    MachineWordSize::W64,
+                );
+                let x3 = self.regs.alloc_gp::<B, _>(&mut self.buf, &mut self.frame);
+                B::emit_gp_binop(
+                    &mut self.buf,
+                    MachineGpBinOp::And,
+                    machine_gp(x3),
+                    machine_gp(x1),
+                    machine_gp(x2),
+                    MachineWordSize::W64,
+                );
+                let shift = self.regs.alloc_gp::<B, _>(&mut self.buf, &mut self.frame);
+                B::emit_mov_imm(&mut self.buf, machine_gp(27), 63);
+                B::emit_gp_binop(
+                    &mut self.buf,
+                    MachineGpBinOp::AShr,
+                    machine_gp(shift),
+                    machine_gp(x3),
+                    machine_gp(27),
+                    MachineWordSize::W64,
+                );
+                let out = self.regs.alloc_gp::<B, _>(&mut self.buf, &mut self.frame);
+                B::emit_mov_imm(&mut self.buf, machine_gp(27), 1);
+                B::emit_gp_binop(
+                    &mut self.buf,
+                    MachineGpBinOp::And,
+                    machine_gp(out),
+                    machine_gp(shift),
+                    machine_gp(27),
+                    MachineWordSize::W64,
+                );
+                Some(out)
+            }
+            OverflowOp::SSub if ty == Type::I64 => {
+                let diff = self.regs.alloc_gp::<B, _>(&mut self.buf, &mut self.frame);
+                B::emit_gp_binop(
+                    &mut self.buf,
+                    MachineGpBinOp::Sub,
+                    machine_gp(diff),
+                    machine_gp(ra),
+                    machine_gp(rb),
+                    size,
+                );
+                let x1 = self.regs.alloc_gp::<B, _>(&mut self.buf, &mut self.frame);
+                B::emit_gp_binop(
+                    &mut self.buf,
+                    MachineGpBinOp::Xor,
+                    machine_gp(x1),
+                    machine_gp(ra),
+                    machine_gp(rb),
+                    MachineWordSize::W64,
+                );
+                let x2 = self.regs.alloc_gp::<B, _>(&mut self.buf, &mut self.frame);
+                B::emit_gp_binop(
+                    &mut self.buf,
+                    MachineGpBinOp::Xor,
+                    machine_gp(x2),
+                    machine_gp(diff),
+                    machine_gp(ra),
+                    MachineWordSize::W64,
+                );
+                let x3 = self.regs.alloc_gp::<B, _>(&mut self.buf, &mut self.frame);
+                B::emit_gp_binop(
+                    &mut self.buf,
+                    MachineGpBinOp::And,
+                    machine_gp(x3),
+                    machine_gp(x1),
+                    machine_gp(x2),
+                    MachineWordSize::W64,
+                );
+                let shift = self.regs.alloc_gp::<B, _>(&mut self.buf, &mut self.frame);
+                B::emit_mov_imm(&mut self.buf, machine_gp(27), 63);
+                B::emit_gp_binop(
+                    &mut self.buf,
+                    MachineGpBinOp::AShr,
+                    machine_gp(shift),
+                    machine_gp(x3),
+                    machine_gp(27),
+                    MachineWordSize::W64,
+                );
+                let out = self.regs.alloc_gp::<B, _>(&mut self.buf, &mut self.frame);
+                B::emit_mov_imm(&mut self.buf, machine_gp(27), 1);
+                B::emit_gp_binop(
+                    &mut self.buf,
+                    MachineGpBinOp::And,
+                    machine_gp(out),
+                    machine_gp(shift),
+                    machine_gp(27),
+                    MachineWordSize::W64,
+                );
+                Some(out)
+            }
+            _ => None,
         }
+    }
 
-        for (slot, &arg) in args.iter().enumerate() {
-            let ty = self.regs.values[arg.index()].ty;
-            if slot < 16 {
-                let target = gp_reg(slot as u8, RegSize::X64);
+    fn write_value_to_frame_slot(&mut self, arg: Value, ty: Type, slot: FrameSlotAccess) {
+        if RegState::is_float_type(ty) {
+            let src = self.regs.ensure_in_fp_reg::<B>(&mut self.buf, &mut self.frame, arg);
+            B::emit_store_fp_to_frame(&mut self.buf, machine_fp(src), slot);
+        } else {
+            let src = self.regs.ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, arg);
+            B::emit_store_gp_to_frame(&mut self.buf, machine_gp(src), slot);
+        }
+    }
+
+    fn write_value_to_assignment_target(
+        &mut self,
+        arg: Value,
+        ty: Type,
+        target: AssignmentTarget,
+    ) {
+        match target.as_machine_location() {
+            MachineLocation::Reg(dst) => {
                 if RegState::is_float_type(ty) {
-                    let src = self.regs.ensure_in_fp_reg(&mut self.buf, arg);
-                    let rn = Arm64Reg::new(src, RegSize::X64);
-                    self.buf.emit(Arm64Inst::fmov_fp_to_gp(target, rn));
+                    let src = self.regs.ensure_in_fp_reg::<B>(&mut self.buf, &mut self.frame, arg);
+                    B::emit_fp_to_gp_move(&mut self.buf, dst, machine_fp(src));
                 } else {
-                    let src = self.regs.ensure_in_gp_reg(&mut self.buf, arg);
-                    if src != slot as u8 {
-                        let rn = gp_reg(src, RegSize::X64);
-                        self.buf.emit(Arm64Inst::mov(target, rn));
+                    let src = self.regs.ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, arg);
+                    if src != dst.index {
+                        B::emit_gp_move(
+                            &mut self.buf,
+                            dst,
+                            machine_gp(src),
+                        );
                     }
                 }
-            } else {
-                let stack_offset = ((slot - 16) * 8) as i32;
+            }
+            MachineLocation::StackArg(stack_offset) => {
                 if RegState::is_float_type(ty) {
-                    let src = self.regs.ensure_in_fp_reg(&mut self.buf, arg);
-                    let rn = Arm64Reg::new(src, RegSize::X64);
-                    self.buf.emit(Arm64Inst::fmov_fp_to_gp(X27, rn));
-                    self.buf.emit(Arm64Inst::str(X27, SP, stack_offset));
+                    let src = self.regs.ensure_in_fp_reg::<B>(&mut self.buf, &mut self.frame, arg);
+                    B::emit_fp_to_gp_move(
+                        &mut self.buf,
+                        machine_gp(27),
+                        machine_fp(src),
+                    );
+                    B::emit_store_gp_to_stack_arg(
+                        &mut self.buf,
+                        machine_gp(27),
+                        stack_offset,
+                    );
                 } else {
-                    let src = self.regs.ensure_in_gp_reg(&mut self.buf, arg);
-                    let rn = gp_reg(src, RegSize::X64);
+                    let src = self.regs.ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, arg);
                     if src != 27 {
-                        self.buf.emit(Arm64Inst::mov(X27, rn));
+                        B::emit_gp_move(
+                            &mut self.buf,
+                            machine_gp(27),
+                            machine_gp(src),
+                        );
                     }
-                    self.buf.emit(Arm64Inst::str(X27, SP, stack_offset));
+                    B::emit_store_gp_to_stack_arg(
+                        &mut self.buf,
+                        machine_gp(27),
+                        stack_offset,
+                    );
+                }
+            }
+            MachineLocation::FrameSlot(slot) => {
+                self.write_value_to_frame_slot(arg, ty, slot);
+            }
+        }
+    }
+
+    fn emit_assignments(&mut self, assignments: &[ValueAssignment]) {
+        for assignment in assignments {
+            self.write_value_to_assignment_target(
+                assignment.value,
+                assignment.ty,
+                assignment.target,
+            );
+        }
+    }
+
+    fn read_entry_arg_into_value(&mut self, val: Value, ty: Type, slot: usize) {
+        match Cfg::CallingConvention::arg_location(slot) {
+            CallArgLocation::Register(reg_idx) => {
+                if RegState::is_float_type(ty) {
+                    let gp = machine_gp(reg_idx as u8);
+                    let fp_idx = self.regs.alloc_fp::<B, _>(&mut self.buf, &mut self.frame);
+                    B::emit_gp_to_fp_move(
+                        &mut self.buf,
+                        machine_fp(fp_idx),
+                        gp,
+                    );
+                    self.assign_fp_value(val, fp_idx);
+                } else {
+                    self.assign_gp_value(val, reg_idx as u8);
+                }
+            }
+            CallArgLocation::Stack(incoming_offset) => {
+                let slot_offset = self.frame.alloc_root_slot();
+                self.assign_spill_value(val, slot_offset);
+                if RegState::is_float_type(ty) {
+                    B::emit_load_incoming_stack_arg(&mut self.buf, machine_gp(27), incoming_offset);
+                    B::emit_gp_to_fp_move(
+                        &mut self.buf,
+                        machine_fp(31),
+                        machine_gp(27),
+                    );
+                    B::emit_store_fp_to_frame(
+                        &mut self.buf,
+                        machine_fp(31),
+                        self.frame.slot_access(slot_offset),
+                    );
+                } else {
+                    B::emit_load_incoming_stack_arg(&mut self.buf, machine_gp(27), incoming_offset);
+                    B::emit_store_gp_to_frame(
+                        &mut self.buf,
+                        machine_gp(27),
+                        self.frame.slot_access(slot_offset),
+                    );
                 }
             }
         }
+    }
 
-        // Load function pointer into X28 and BLR
-        let func_idx = func_ref.index();
-        if let Some(table_base) = self.call_table_base {
-            // Module mode: load from indirect call table
-            self.emit_mov_imm(X28, table_base);
-            let offset = (func_idx * 8) as i32;
-            self.buf.emit(Arm64Inst::ldr(X28, X28, offset));
-        } else if func_idx < self.externs.len() {
-            let ptr = self.externs[func_idx] as u64;
-            self.emit_mov_imm(X28, ptr);
-        } else {
-            // null pointer - will crash, which is better than silently wrong behavior
-            self.emit_mov_imm(X28, 0);
-        }
-        self.buf.emit(Arm64Inst::blr(X28));
+    fn prepare_call_args(&mut self, args: &[Value]) -> i32 {
+        // Spill caller-saved regs
+        self.regs.spill_caller_saved::<B>(&mut self.buf, &mut self.frame);
 
+        let outgoing_size = Cfg::CallingConvention::outgoing_stack_size(args.len());
+        self.frame.reserve_outgoing_arg_bytes(outgoing_size);
         if outgoing_size > 0 {
-            self.buf.emit(Arm64Inst::add_imm(SP, SP, outgoing_size));
+            B::emit_stack_adjust(&mut self.buf, outgoing_size);
+        }
+
+        let assignments: Vec<ValueAssignment> = args
+            .iter()
+            .enumerate()
+            .map(|(slot, &arg)| ValueAssignment {
+                value: arg,
+                ty: self.regs.values[arg.index()].ty,
+                target: AssignmentTarget::CallArg(Cfg::CallingConvention::arg_location(slot)),
+            })
+            .collect();
+        self.emit_assignments(&assignments);
+        outgoing_size
+    }
+
+    fn finish_call_cleanup(&mut self, args: &[Value], outgoing_size: i32) {
+        if outgoing_size > 0 {
+            B::emit_stack_adjust(&mut self.buf, -outgoing_size);
         }
 
         for &arg in args {
@@ -1458,103 +1986,144 @@ impl<'a, S: ValueLayout> Lowerer<'a, S> {
             }
         }
 
-        // Result in X0 or D0
+    }
+
+    fn assign_call_result(&mut self, result_val: Option<Value>) {
         if let Some(val) = result_val {
             let ty = self.regs.values[val.index()].ty;
             if RegState::is_float_type(ty) {
-                self.regs.assign_fp(val, 0);
+                self.assign_fp_value(val, 0);
             } else {
-                self.regs.assign_gp(val, 0);
+                self.assign_gp_value(val, 0);
             }
         }
     }
 
+    fn lower_call(&mut self, func_ref: FuncRef, args: &[Value], result_val: Option<Value>) {
+        let outgoing_size = self.prepare_call_args(args);
+        let control_aware = self.direct_call_is_control_aware(func_ref);
+
+        // Load function pointer into the backend's call scratch register and call through it.
+        let func_idx = func_ref.index();
+        if let Some(table_base) = self.call_table_base {
+            // Module mode: load from indirect call table
+            B::emit_mov_imm(&mut self.buf, machine_gp(28), table_base);
+            let offset = (func_idx * 8) as i32;
+            B::emit_load_gp(
+                &mut self.buf,
+                machine_gp(28),
+                machine_gp(28),
+                offset,
+                MachineWordSize::W64,
+            );
+        } else if func_idx < self.externs.len() {
+            let ptr = self.externs[func_idx] as u64;
+            B::emit_mov_imm(&mut self.buf, machine_gp(28), ptr);
+        } else {
+            // null pointer - will crash, which is better than silently wrong behavior
+            B::emit_mov_imm(&mut self.buf, machine_gp(28), 0);
+        }
+        B::emit_call_reg(&mut self.buf, machine_gp(28));
+
+        if control_aware {
+            let continue_label = self.buf.create_label();
+            let expected_kind = if result_val.is_some() {
+                JitOutcomeKind::ReturnValue as u64
+            } else {
+                JitOutcomeKind::ReturnVoid as u64
+            };
+            B::emit_cmp_gp_imm(&mut self.buf, machine_gp(1), expected_kind);
+            B::emit_branch_eq_to_label(&mut self.buf, continue_label);
+            self.emit_return_current_outcome();
+            B::bind_label(&mut self.buf, continue_label);
+        }
+
+        self.finish_call_cleanup(args, outgoing_size);
+        self.assign_call_result(result_val);
+    }
+
     fn lower_call_indirect(&mut self, callee: Value, args: &[Value], result_val: Option<Value>) {
         // Get callee pointer first
-        let callee_reg = self.regs.ensure_in_gp_reg(&mut self.buf, callee);
-        // Move to X28 before spilling (spilling might clobber the reg)
-        let callee_hw = gp_reg(callee_reg, RegSize::X64);
-        self.buf.emit(Arm64Inst::mov(X28, callee_hw));
+        let callee_reg = self.regs.ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, callee);
+        // Move to the backend's call scratch register before spilling.
+        B::emit_gp_move(
+            &mut self.buf,
+            machine_gp(28),
+            machine_gp(callee_reg),
+        );
         self.regs.dec_use(callee);
 
-        // Spill caller-saved regs
-        self.regs.spill_caller_saved(&mut self.buf);
+        let outgoing_size = self.prepare_call_args(args);
 
-        let overflow = args.len().saturating_sub(16);
-        let outgoing_size = align_up(overflow * 8, 16) as i32;
-        self.regs.frame.reserve_outgoing_arg_bytes(outgoing_size);
-        if outgoing_size > 0 {
-            self.buf.emit(Arm64Inst::sub_imm(SP, SP, outgoing_size));
+        B::emit_call_reg(&mut self.buf, machine_gp(28));
+
+        let continue_label = self.buf.create_label();
+        let expected_kind = if result_val.is_some() {
+            JitOutcomeKind::ReturnValue as u64
+        } else {
+            JitOutcomeKind::ReturnVoid as u64
+        };
+        B::emit_cmp_gp_imm(&mut self.buf, machine_gp(1), expected_kind);
+        B::emit_branch_eq_to_label(&mut self.buf, continue_label);
+        self.emit_return_current_outcome();
+        B::bind_label(&mut self.buf, continue_label);
+
+        self.finish_call_cleanup(args, outgoing_size);
+        self.assign_call_result(result_val);
+    }
+
+    fn write_invoke_return_to_target(&mut self, target: BlockId) {
+        let block_idx = target.index();
+        let slots = self.frame.block_param_slots(block_idx);
+        if slots.is_empty() {
+            return;
         }
+        B::emit_store_gp_to_frame(&mut self.buf, machine_gp(0), self.frame.slot_access(slots[0]));
+    }
 
-        for (slot, &arg) in args.iter().enumerate() {
-            let ty = self.regs.values[arg.index()].ty;
-            if slot < 16 {
-                let target = gp_reg(slot as u8, RegSize::X64);
-                if RegState::is_float_type(ty) {
-                    let src = self.regs.ensure_in_fp_reg(&mut self.buf, arg);
-                    let rn = Arm64Reg::new(src, RegSize::X64);
-                    self.buf.emit(Arm64Inst::fmov_fp_to_gp(target, rn));
-                } else {
-                    let src = self.regs.ensure_in_gp_reg(&mut self.buf, arg);
-                    if src != slot as u8 {
-                        let rn = gp_reg(src, RegSize::X64);
-                        self.buf.emit(Arm64Inst::mov(target, rn));
-                    }
-                }
+    fn lower_invoke_common(
+        &mut self,
+        call_args: &[Value],
+        outgoing_size: i32,
+        normal: BlockId,
+        normal_args: &[Value],
+        has_ret_param: bool,
+        exception: BlockId,
+        exception_args: &[Value],
+        control_aware: bool,
+    ) {
+        if control_aware {
+            let exception_label = self.buf.create_label();
+            let normal_label = self.buf.create_label();
+            B::emit_cmp_gp_imm(&mut self.buf, machine_gp(1), JitOutcomeKind::Exception as u64);
+            B::emit_branch_eq_to_label(&mut self.buf, exception_label);
+            let expected_kind = if has_ret_param {
+                JitOutcomeKind::ReturnValue as u64
             } else {
-                let stack_offset = ((slot - 16) * 8) as i32;
-                if RegState::is_float_type(ty) {
-                    let src = self.regs.ensure_in_fp_reg(&mut self.buf, arg);
-                    let rn = Arm64Reg::new(src, RegSize::X64);
-                    self.buf.emit(Arm64Inst::fmov_fp_to_gp(X27, rn));
-                    self.buf.emit(Arm64Inst::str(X27, SP, stack_offset));
-                } else {
-                    let src = self.regs.ensure_in_gp_reg(&mut self.buf, arg);
-                    let rn = gp_reg(src, RegSize::X64);
-                    if src != 27 {
-                        self.buf.emit(Arm64Inst::mov(X27, rn));
-                    }
-                    self.buf.emit(Arm64Inst::str(X27, SP, stack_offset));
-                }
-            }
+                JitOutcomeKind::ReturnVoid as u64
+            };
+            B::emit_cmp_gp_imm(&mut self.buf, machine_gp(1), expected_kind);
+            B::emit_branch_eq_to_label(&mut self.buf, normal_label);
+            self.emit_return_current_outcome();
+
+            B::bind_label(&mut self.buf, exception_label);
+            self.finish_call_cleanup(call_args, outgoing_size);
+            self.emit_block_args(exception, exception_args);
+            B::emit_branch_to_label(&mut self.buf, self.block_meta[exception.index()].label);
+
+            B::bind_label(&mut self.buf, normal_label);
         }
 
-        self.buf.emit(Arm64Inst::blr(X28));
-
-        if outgoing_size > 0 {
-            self.buf.emit(Arm64Inst::add_imm(SP, SP, outgoing_size));
+        self.finish_call_cleanup(call_args, outgoing_size);
+        if has_ret_param {
+            self.write_invoke_return_to_target(normal);
         }
-
-        for &arg in args {
-            self.regs.dec_use(arg);
-        }
-
-        for &r in CALLER_SAVED_GP {
-            if let Some(val) = self.regs.gp_occupant[r as usize] {
-                if let Some(slot) = self.regs.values[val.index()].spill_slot {
-                    self.regs.values[val.index()].loc = ValueLoc::Spill(slot);
-                }
-                self.regs.gp_occupant[r as usize] = None;
-            }
-        }
-        for &r in CALLER_SAVED_FP {
-            if let Some(val) = self.regs.fp_occupant[r as usize] {
-                if let Some(slot) = self.regs.values[val.index()].spill_slot {
-                    self.regs.values[val.index()].loc = ValueLoc::Spill(slot);
-                }
-                self.regs.fp_occupant[r as usize] = None;
-            }
-        }
-
-        if let Some(val) = result_val {
-            let ty = self.regs.values[val.index()].ty;
-            if RegState::is_float_type(ty) {
-                self.regs.assign_fp(val, 0);
-            } else {
-                self.regs.assign_gp(val, 0);
-            }
-        }
+        self.store_block_args_to_canonical_with_param_offset(
+            normal,
+            normal_args,
+            usize::from(has_ret_param),
+        );
+        B::emit_branch_to_label(&mut self.buf, self.block_meta[normal.index()].label);
     }
 
     fn lower_terminator(&mut self, block_idx: usize) {
@@ -1564,32 +2133,29 @@ impl<'a, S: ValueLayout> Lowerer<'a, S> {
                 let ty = self.regs.values[v.index()].ty;
                 if RegState::is_float_type(ty) {
                     // Return float bits in X0 (call_jit reads X0 as u64)
-                    let r = self.regs.ensure_in_fp_reg(&mut self.buf, *v);
-                    let rn = Arm64Reg::new(r, RegSize::X64);
-                    self.buf.emit(Arm64Inst::fmov_fp_to_gp(X0, rn));
+                    let r = self.regs.ensure_in_fp_reg::<B>(&mut self.buf, &mut self.frame, *v);
+                    B::emit_return_fp_bits(&mut self.buf, machine_fp(r));
                 } else {
-                    let r = self.regs.ensure_in_gp_reg(&mut self.buf, *v);
-                    if r != 0 {
-                        let rn = gp_reg(r, RegSize::X64);
-                        self.buf.emit(Arm64Inst::mov(X0, rn));
-                    }
+                    let r = self.regs.ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, *v);
+                    B::emit_return_gp(&mut self.buf, machine_gp(r));
                 }
                 self.regs.dec_use(*v);
+                self.emit_set_outcome_kind(JitOutcomeKind::ReturnValue);
                 self.emit_epilogue();
             }
 
             Terminator::RetVoid => {
+                self.emit_set_outcome_kind(JitOutcomeKind::ReturnVoid);
                 self.emit_epilogue();
             }
 
             Terminator::Jump(target, args) => {
                 // Spill all live values so they survive the register state
                 // reset at the target block entry
-                self.regs.spill_all_live(&mut self.buf);
+                self.regs.spill_all_live::<B>(&mut self.buf, &mut self.frame);
                 self.emit_block_args(*target, args);
                 let label = self.block_meta[target.index()].label;
-                let offset = self.buf.emit(Arm64Inst::b(0));
-                self.buf.add_reloc(offset, label, Arm64RelocKind::Branch26);
+                B::emit_branch_to_label(&mut self.buf, label);
             }
 
             Terminator::BrIf {
@@ -1599,22 +2165,19 @@ impl<'a, S: ValueLayout> Lowerer<'a, S> {
                 else_block,
                 else_args,
             } => {
-                let rc = self.regs.ensure_in_gp_reg(&mut self.buf, *cond);
+                let rc = self.regs.ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, *cond);
                 // Don't dec_use cond yet - keep its register occupied so
                 // spill_all_live won't allocate it for something else.
                 // spill_all_live will spill it (harmless, just a redundant store).
 
                 // Spill all live values before the conditional branch
-                self.regs.spill_all_live(&mut self.buf);
+                self.regs.spill_all_live::<B>(&mut self.buf, &mut self.frame);
 
                 // Now safe to use rc - spill_all_live only emits STR (reads regs)
-                let cond_reg = gp_reg(rc, RegSize::W32);
                 self.regs.dec_use(*cond);
 
                 let else_tramp = self.buf.create_label();
-                let cbz_offset = self.buf.emit(Arm64Inst::cbz(cond_reg, 0));
-                self.buf
-                    .add_reloc(cbz_offset, else_tramp, Arm64RelocKind::Cond19);
+                B::emit_cbz_to_label(&mut self.buf, machine_gp(rc), else_tramp);
 
                 // Save value locs and reg state before the then path, so we can
                 // restore them for the else path. At runtime only one path
@@ -1631,9 +2194,7 @@ impl<'a, S: ValueLayout> Lowerer<'a, S> {
                 // Then path: store args and branch
                 self.store_block_args_for_branch(*then_block, then_args);
                 let then_label = self.block_meta[then_block.index()].label;
-                let b_offset = self.buf.emit(Arm64Inst::b(0));
-                self.buf
-                    .add_reloc(b_offset, then_label, Arm64RelocKind::Branch26);
+                B::emit_branch_to_label(&mut self.buf, then_label);
 
                 // Restore value locs and reg state for else path
                 for (i, (loc, spill)) in saved_values.into_iter().enumerate() {
@@ -1644,13 +2205,11 @@ impl<'a, S: ValueLayout> Lowerer<'a, S> {
                 self.regs.fp_occupant = saved_fp;
 
                 // Else trampoline: store args and branch
-                self.buf.bind_label(else_tramp);
+                B::bind_label(&mut self.buf, else_tramp);
                 self.store_block_args_for_branch(*else_block, else_args);
                 let else_label = self.block_meta[else_block.index()].label;
                 if else_block.index() != block_idx + 1 {
-                    let b_offset = self.buf.emit(Arm64Inst::b(0));
-                    self.buf
-                        .add_reloc(b_offset, else_label, Arm64RelocKind::Branch26);
+                    B::emit_branch_to_label(&mut self.buf, else_label);
                 }
                 // If else is next block, fall through
             }
@@ -1662,22 +2221,19 @@ impl<'a, S: ValueLayout> Lowerer<'a, S> {
                 default_args,
             } => {
                 // Spill everything first
-                let rv = self.regs.ensure_in_gp_reg(&mut self.buf, *val);
-                self.regs.spill_all_live(&mut self.buf);
+                let rv = self.regs.ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, *val);
+                self.regs.spill_all_live::<B>(&mut self.buf, &mut self.frame);
 
                 // For each case: CMP + B.EQ
                 for (case_val, target, args) in cases {
-                    self.emit_mov_imm(X28, *case_val as u64);
-                    let rn = gp_reg(rv, RegSize::X64);
-                    self.buf.emit(Arm64Inst::cmp(rn, X28));
+                    B::emit_cmp_gp_imm(&mut self.buf, machine_gp(rv), *case_val as u64);
 
                     if !args.is_empty() {
                         self.store_block_args_to_canonical(*target, args);
                     }
 
                     let label = self.block_meta[target.index()].label;
-                    let offset = self.buf.emit(Arm64Inst::b_cond(Arm64Cond::EQ, 0));
-                    self.buf.add_reloc(offset, label, Arm64RelocKind::Cond19);
+                    B::emit_branch_eq_to_label(&mut self.buf, label);
                 }
 
                 self.regs.dec_use(*val);
@@ -1685,17 +2241,86 @@ impl<'a, S: ValueLayout> Lowerer<'a, S> {
                 // Default
                 self.emit_block_args(*default_block, default_args);
                 let label = self.block_meta[default_block.index()].label;
-                let offset = self.buf.emit(Arm64Inst::b(0));
-                self.buf.add_reloc(offset, label, Arm64RelocKind::Branch26);
+                B::emit_branch_to_label(&mut self.buf, label);
+            }
+
+            Terminator::Invoke {
+                func,
+                args,
+                normal,
+                normal_args,
+                exception,
+                exception_args,
+            } => {
+                let outgoing_size = self.prepare_call_args(args);
+                let control_aware = self.direct_call_is_control_aware(*func);
+
+                let func_idx = func.index();
+                if let Some(table_base) = self.call_table_base {
+                    B::emit_mov_imm(&mut self.buf, machine_gp(28), table_base);
+                    let offset = (func_idx * 8) as i32;
+                    B::emit_load_gp(
+                        &mut self.buf,
+                        machine_gp(28),
+                        machine_gp(28),
+                        offset,
+                        MachineWordSize::W64,
+                    );
+                } else if func_idx < self.externs.len() {
+                    let ptr = self.externs[func_idx] as u64;
+                    B::emit_mov_imm(&mut self.buf, machine_gp(28), ptr);
+                } else {
+                    B::emit_mov_imm(&mut self.buf, machine_gp(28), 0);
+                }
+                B::emit_call_reg(&mut self.buf, machine_gp(28));
+
+                let has_ret_param = !self.func.blocks[normal.index()].params.is_empty();
+                self.lower_invoke_common(
+                    args,
+                    outgoing_size,
+                    *normal,
+                    normal_args,
+                    has_ret_param,
+                    *exception,
+                    exception_args,
+                    control_aware,
+                );
+            }
+
+            Terminator::InvokeIndirect {
+                callee,
+                args,
+                ret_ty,
+                normal,
+                normal_args,
+                exception,
+                exception_args,
+            } => {
+                let callee_reg =
+                    self.regs
+                        .ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, *callee);
+                B::emit_gp_move(&mut self.buf, machine_gp(28), machine_gp(callee_reg));
+                self.regs.dec_use(*callee);
+
+                let outgoing_size = self.prepare_call_args(args);
+                B::emit_call_reg(&mut self.buf, machine_gp(28));
+
+                self.lower_invoke_common(
+                    args,
+                    outgoing_size,
+                    *normal,
+                    normal_args,
+                    ret_ty.is_some(),
+                    *exception,
+                    exception_args,
+                    true,
+                );
             }
 
             Terminator::Unreachable => {
-                self.buf.emit(Arm64Inst::brk(1));
+                B::emit_trap(&mut self.buf);
             }
 
-            _ => {
-                panic!("unsupported terminator: {:?}", block.terminator);
-            }
         }
     }
 
@@ -1719,30 +2344,93 @@ impl<'a, S: ValueLayout> Lowerer<'a, S> {
     }
 
     fn store_block_args_to_canonical(&mut self, target: BlockId, args: &[Value]) {
-        let target_idx = target.index();
-        for (i, &arg) in args.iter().enumerate() {
-            let slot_offset = self.block_meta[target_idx].param_spill_slots[i];
-            let ty = self.regs.values[arg.index()].ty;
+        self.store_block_args_to_canonical_with_param_offset(target, args, 0);
+    }
 
-            if RegState::is_float_type(ty) {
-                let r = self.regs.ensure_in_fp_reg(&mut self.buf, arg);
-                let dreg = Arm64Reg::new(r, RegSize::X64);
-                emit_fp_store_to_fp(&mut self.buf, dreg, slot_offset);
-            } else {
-                let r = self.regs.ensure_in_gp_reg(&mut self.buf, arg);
-                let reg = gp_reg(r, RegSize::X64);
-                emit_store_to_fp(&mut self.buf, reg, slot_offset);
-            }
+    fn store_block_args_to_canonical_with_param_offset(
+        &mut self,
+        target: BlockId,
+        args: &[Value],
+        param_offset: usize,
+    ) {
+        let target_idx = target.index();
+        let assignments: Vec<ValueAssignment> = args
+            .iter()
+            .enumerate()
+            .map(|(i, &arg)| ValueAssignment {
+                value: arg,
+                ty: self.regs.values[arg.index()].ty,
+                target: AssignmentTarget::FrameSlot(
+                    self.frame
+                        .slot_access(self.frame.block_param_slots(target_idx)[param_offset + i]),
+                ),
+            })
+            .collect();
+        self.emit_assignments(&assignments);
+        for &arg in args {
             self.regs.dec_use(arg);
         }
     }
 
-    fn emit_mov_imm(&mut self, rd: Arm64Reg, value: u64) {
-        let insts = Arm64Inst::mov_imm64(rd, value);
-        for inst in insts {
-            self.buf.emit(inst);
+    fn collect_live_root_slots(&mut self, live: &[Value]) -> Vec<i32> {
+        let mut root_slots: Vec<i32> = live
+            .iter()
+            .filter_map(|&v| match Cfg::RootTransport::kind() {
+                RootTransportKind::FrameScan | RootTransportKind::StackMap => {
+                    self.regs.values[v.index()].spill_slot
+                }
+                RootTransportKind::ShadowStack => {
+                    self.ensure_shadow_value_materialized(v);
+                    self.root_transport.shadow_slots_by_value[v.index()]
+                }
+            })
+            .collect();
+        root_slots.sort_unstable();
+        root_slots.dedup();
+        root_slots
+    }
+
+    fn emit_safepoint(&mut self, live: &[Value]) {
+        match Cfg::RootTransport::kind() {
+            RootTransportKind::FrameScan => {
+                if let Some(handler) = self.safepoint_handler {
+                    self.regs.spill_all_live::<B>(&mut self.buf, &mut self.frame);
+                    let frame_size = self.frame.root_scan_size() as u64;
+                    B::emit_call_safepoint_handler(&mut self.buf, handler, frame_size);
+                    self.regs.clear_regs();
+                }
+            }
+            RootTransportKind::StackMap => {
+                self.regs.spill_all_live::<B>(&mut self.buf, &mut self.frame);
+                let code_offset = self.buf.current_offset();
+                let root_slots = self.collect_live_root_slots(live);
+                let safepoint_index = self.safepoints.len() as u64;
+                self.safepoints.push(SafepointRecord {
+                    code_offset,
+                    root_slots,
+                });
+                if let Some(handler) = self.safepoint_handler {
+                    B::emit_call_safepoint_handler(&mut self.buf, handler, safepoint_index);
+                }
+                self.regs.clear_regs();
+            }
+            RootTransportKind::ShadowStack => {
+                self.regs.spill_all_live::<B>(&mut self.buf, &mut self.frame);
+                let code_offset = self.buf.current_offset();
+                let root_slots = self.collect_live_root_slots(live);
+                let safepoint_index = self.safepoints.len() as u64;
+                self.safepoints.push(SafepointRecord {
+                    code_offset,
+                    root_slots,
+                });
+                if let Some(handler) = self.safepoint_handler {
+                    B::emit_call_safepoint_handler(&mut self.buf, handler, safepoint_index);
+                }
+                self.regs.clear_regs();
+            }
         }
     }
+
 }
 
 // ─── Helpers ───────────────────────────────────────────────────────
@@ -1770,57 +2458,57 @@ enum FpBinOp {
     Div,
 }
 
-fn type_to_regsize(ty: Type) -> RegSize {
+fn type_to_machine_word_size(ty: Type) -> MachineWordSize {
     match ty {
-        Type::I8 | Type::I32 => RegSize::W32,
-        Type::I64 | Type::Ptr | Type::GcPtr => RegSize::X64,
-        Type::F64 => RegSize::X64, // shouldn't be used for GP regs
+        Type::I8 | Type::I32 => MachineWordSize::W32,
+        Type::I64 | Type::Ptr | Type::GcPtr | Type::F64 => MachineWordSize::W64,
     }
 }
 
-fn gp_reg(index: u8, size: RegSize) -> Arm64Reg {
-    Arm64Reg::new(index, size)
+fn overflow_op_code(op: OverflowOp) -> u64 {
+    match op {
+        OverflowOp::SAdd => 0,
+        OverflowOp::SSub => 1,
+        OverflowOp::SMul => 2,
+        OverflowOp::UAdd => 3,
+        OverflowOp::USub => 4,
+        OverflowOp::UMul => 5,
+    }
 }
 
-fn cmpop_to_cond(op: CmpOp) -> Arm64Cond {
-    match op {
-        CmpOp::Eq => Arm64Cond::EQ,
-        CmpOp::Ne => Arm64Cond::NE,
-        CmpOp::Slt => Arm64Cond::LT,
-        CmpOp::Sle => Arm64Cond::LE,
-        CmpOp::Sgt => Arm64Cond::GT,
-        CmpOp::Sge => Arm64Cond::GE,
-        CmpOp::Ult => Arm64Cond::CC, // LO
-        CmpOp::Ule => Arm64Cond::LS,
-        CmpOp::Ugt => Arm64Cond::HI,
-        CmpOp::Uge => Arm64Cond::CS, // HS
+fn overflow_type_code(ty: Type) -> u64 {
+    match ty {
+        Type::I8 => 8,
+        Type::I32 => 32,
+        Type::I64 | Type::Ptr | Type::GcPtr => 64,
+        Type::F64 => panic!("overflow check on non-integer type"),
+    }
+}
+
+extern "C" fn jit_overflow_check_helper(op_code: u64, ty_code: u64, a: u64, b: u64) -> u64 {
+    match (op_code, ty_code) {
+        (0, 8) => (a as u8 as i8).overflowing_add(b as u8 as i8).1 as u64,
+        (0, 32) => (a as u32 as i32).overflowing_add(b as u32 as i32).1 as u64,
+        (0, 64) => (a as i64).overflowing_add(b as i64).1 as u64,
+        (1, 8) => (a as u8 as i8).overflowing_sub(b as u8 as i8).1 as u64,
+        (1, 32) => (a as u32 as i32).overflowing_sub(b as u32 as i32).1 as u64,
+        (1, 64) => (a as i64).overflowing_sub(b as i64).1 as u64,
+        (2, 8) => (a as u8 as i8).overflowing_mul(b as u8 as i8).1 as u64,
+        (2, 32) => (a as u32 as i32).overflowing_mul(b as u32 as i32).1 as u64,
+        (2, 64) => (a as i64).overflowing_mul(b as i64).1 as u64,
+        (3, 8) => (a as u8).overflowing_add(b as u8).1 as u64,
+        (3, 32) => (a as u32).overflowing_add(b as u32).1 as u64,
+        (3, 64) => a.overflowing_add(b).1 as u64,
+        (4, 8) => (a as u8).overflowing_sub(b as u8).1 as u64,
+        (4, 32) => (a as u32).overflowing_sub(b as u32).1 as u64,
+        (4, 64) => a.overflowing_sub(b).1 as u64,
+        (5, 8) => (a as u8).overflowing_mul(b as u8).1 as u64,
+        (5, 32) => (a as u32).overflowing_mul(b as u32).1 as u64,
+        (5, 64) => a.overflowing_mul(b).1 as u64,
+        _ => panic!("invalid overflow helper inputs: op_code={op_code}, ty_code={ty_code}"),
     }
 }
 
 fn align_up(n: usize, align: usize) -> usize {
     (n + align - 1) & !(align - 1)
-}
-
-/// Store a GP reg to [X29, #offset] where offset is positive and 8-byte aligned.
-fn emit_store_to_fp(buf: &mut CodeBuffer<Arm64>, rt: Arm64Reg, offset: i32) {
-    debug_assert!(offset >= 0 && offset % 8 == 0);
-    buf.emit(Arm64Inst::str(rt, X29, offset));
-}
-
-/// Load a GP reg from [X29, #offset].
-fn emit_load_from_fp(buf: &mut CodeBuffer<Arm64>, rt: Arm64Reg, offset: i32) {
-    debug_assert!(offset >= 0 && offset % 8 == 0);
-    buf.emit(Arm64Inst::ldr(rt, X29, offset));
-}
-
-/// Store an FP reg to [X29, #offset].
-fn emit_fp_store_to_fp(buf: &mut CodeBuffer<Arm64>, rt: Arm64Reg, offset: i32) {
-    debug_assert!(offset >= 0 && offset % 8 == 0);
-    buf.emit(Arm64Inst::str_fp(rt, X29, offset));
-}
-
-/// Load an FP reg from [X29, #offset].
-fn emit_fp_load_from_fp(buf: &mut CodeBuffer<Arm64>, rt: Arm64Reg, offset: i32) {
-    debug_assert!(offset >= 0 && offset % 8 == 0);
-    buf.emit(Arm64Inst::ldr_fp(rt, X29, offset));
 }

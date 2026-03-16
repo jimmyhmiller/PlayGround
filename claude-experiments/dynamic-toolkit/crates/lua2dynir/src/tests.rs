@@ -395,7 +395,6 @@ fn run_lua_with_heap(source: &str, heap_size: usize) -> (u64, LuaRuntime) {
     let heap_size = gc_heap_size.unwrap_or(64 * 1024 * 1024);
     let gc_enabled = gc_heap_size.is_some();
     let roots = MutatorRootManager::<NanBoxPtrPolicy>::new(heap_size)
-        .with_roots_all(gc_enabled)
         .with_gc_threshold(if gc_enabled { 0.75 } else { f64::INFINITY });
     let mut rt = LuaRuntime::new(roots.heap(), &chunk.main.constants);
 

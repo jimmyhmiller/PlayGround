@@ -1,6 +1,6 @@
 # Legibility is Ruining your Codebase
 
-James C Scott, in Seeing Like a State, coined the term legibility to refer to the way in which large organizations (in many cases the state) try to make sense of complicated phenomenon. Legibility does not involve merely abstracting over these activities, but fundamentally changing them, simplifying them, forcing them to be measurable. The quintessential example of this is the "scientifically managed" forests of 18th/19th century germany. Rather than a natural forest full of underbrush, diverse species of trees planted in a naturally occurring pattern, Germany created industrials "forests" in neat rows, cleared of underbrush. This worked remarkably well for the first generation of trees, but as time progressed the lack of diversity led to massive problems, including "forest death".
+In Seeing Like a State, James C Scott coined the term legibility to refer to the way in which large organizations (in many cases the state) try to make sense of complicated phenomenon. Legibility does not involve merely abstracting over these activities, but fundamentally changing them, simplifying them, forcing them to be measurable. The quintessential example of this is the "scientifically managed" forests of 18th/19th century germany. Rather than a natural forest full of underbrush, diverse species of trees planted in a naturally occurring pattern, Germany created industrials "forests" in neat rows, cleared of underbrush. This worked remarkably well for the first generation of trees, but as time progressed the lack of diversity led to massive problems, including "forest death".
 
 [Sean Goedecke](https://www.seangoedecke.com/) has recently published an article of the aptly named [Seeing like a Software Company](https://www.seangoedecke.com/seeing-like-a-software-company/) that does a fantastic job exploring the ways in which and the reasons for legibile practices being applied inside software companies. Sean's description provides a balanced perspective. It does not attempt to cover up the downsides, but also explains why companies often feel the tradeoffs are worth the downsides. But despite agreeing with almost everything Sean said, I think there a dimension lost. Just like the "scientific management" of the "forest" ruined the forest, legibility is ruining your codebase.
 
@@ -12,7 +12,7 @@ Consider the recent relicensing of Terraform. Terraform was a library created by
 
 A proprietary, fully in-house, codebase is no different. Different teams work on them. Different parts of the codebase satisfy the needs of different customers. Different parts of the codebase have different constraints, have different requirements, require different upkeep. Yes the company made this codebase "to make money" just as we cultivated forests to "make wood" but that does not stop the codebase from having its own internal structure, from having different relationships to different things. 
 
-A codebase can be ruined while a company is successful. In what follows I will be assuming this at all points. This point may seem obvious and not worth stating. But the natural reaction to justify any bad practices is that it is "what the business wants and they pay your pay check". That may well be true. But it doesn't prevent their actions from having negative consequences. Should companies care about these negative consequences? Hopefully we will see that they should way more than they currently do.
+A codebase can be ruined while a company is successful. In what follows I will be assuming this at all points. This point may seem obvious and not worth stating. But the natural reaction to justify any bad practices is that it is "what the business wants and they pay your pay check". That may well be true. But it doesn't prevent their actions from having negative consequences. Should companies care about these negative consequences? I don't know.
 
 ## Types of Legibility that Ruin Codebases
 
@@ -34,13 +34,11 @@ It isn't uncommon to discover while working on a feature that the feature is com
 
 Getting out of doing a project for which you provided an estimate for is a really tricky endeavor. Many times there are stakeholders who faught and argued to get this project prioritized. By killing it, you are making them take a hit to their reputation. So even if you are someone willing to fight these fights, you will have to choose your battles and will not win them all. This fact often leaves the codebase in a much worse place, full of things it didn't need and often leaves the company with a maintanence burden it didn't expect.
 
-(Note: Maybe talk about all the things estimates don't capture)
-
 ### Standup
 
 It is easy to see standup as a simple daily meeting and the fact that engineers would ever complain about them shows just how much of divas we are. But standup is the quintessential legibility play. Can all of software of my software day be reduced to what I worked on yesterday, blockers, and what I plan to work on today? Of course it can't. And we see this reality in the "failure modes" of standup. You can read countless articles telling you to not let your standup have "unstructured chatter" and their example always is one engineer talking about problems they had and others trying to help them. Perhaps rather than reducing software engineering down to three "essential questions" we could actually encourage these more meaningful conversations. Why don't we? Because they aren't legibile. 
 
-But how does this affect your codebase? Standup provides a negative incentive for sharing true deep problems. Coming to standup day after day saying that you are working on the same problem and don't have meaningful progress to share is consider a very bad thing. The idea is that all problems can be unblocked by simply talking to another team member. This creates a culture of workarounds, of being unwilling to sit with hard problems. Of not giving the time people need ot put things on the backburner.
+But how does this affect your codebase? Standup provides a negative incentive for sharing true deep problems. Coming to standup day after day saying that you are working on the same problem and don't have meaningful progress to share is considered a very bad thing. The idea is that all problems can be unblocked by simply talking to another team member. This creates a culture of workarounds, of being unwilling to sit with hard problems. Of not giving the time people need to put things on the backburner.
 
 ### The Backlog
 
@@ -52,13 +50,31 @@ The temptation here is to respond that clearly this isn't a problem with the bac
 
 ### OKRs / KPIs
 
-OKRs and KPIs are perhaps one of the most obvious forms of legibility. They are quite litterally an attempt to ignore all the true complexity for a team, a group, an individual and instead assign numbers that are meant to be a proxy, for these more complicated facts-on-the-ground. I think a large number of software developers hate these so I won't be labor the point. But I will tell you about a time I failed my OKR.
+OKRs and KPIs are perhaps one of the most obvious forms of legibility. They are quite literally an attempt to ignore all the true complexity for a team, a group, an individual and instead assign numbers that are meant to be a proxy, for these more complicated facts-on-the-ground. I think a large number of software developers hate these so I won't be labor the point. But I will tell you about a time I failed my OKR.
 
 I worked on a reporting system at a small startup. Our CEO had decided that OKRs (or was it KPIs I don't even remember) were incredibly important now for everyone to do. Anyways, it had been decided that our goal was to "lower median report end to end time by 10%". If we did not meet that goal it was a failure. So what we started with was talking to the customer who used reports the most. They had like 60k Reports a month. We asked them why they had so many they said "What? Umm that must be a bug". The next week the number of reports they ran dropped to like 60 a month and our median time decreased!
 
 Having been so successful, we went to the next highest user. Same exact thing! They were surprised at how much they were using reports and drastically reduced their usage. But this time, the median time increased....You see, most of those reports they were running returned no data, and so they were fast. Now that we got rid of them, our median time got higher. So we failed that okr despite making the system better.
 
+### Coding Standards
 
+Coding standards are an attempt at legibility by making software engineers interchangable resources. By standardizing software development practices, languages, style, tools, we make it easier for programmers to moved around. We allow the business to ignore us as individuals. This is the great irony of the whole situation. Many people feel that coding standards are **the** way to keep a codebase clean. But within the context of a business, they also serve the purpose of the illusion that we can have anyone work on any part of any codebase, leading to the decline in quality.
+
+### Others
+
+There are countless other practices I could list here. Nearly every software methodolgy I can think of has its roots in legibility. For some reason we keep ignoring the fact that our methods are explicitly designed around this feature. They aren't made to make our code better. They aren't made to make our products more enjoyable. Of course you hardcore agile apologist might disagree. But I have receipts.
+
+> “agile methodology”: a system of methods designed to allow the  development team to match and track the business needs, especially in a context where business needs change frequently, important facts change, or where we are obliged to adapt to important uncontrolled factors. - [Alister Cockburn](https://www.satisfice.com/blog/archives/5175#comment-205)
+
+Our practices are not meant for us. They are meant for the business. They are attempts to reign in software engineers, at the expense of the goals of those software engineers for the benfits of the company. Even processes we now consider "best practices" have this exact logic built into them.
+
+## Being Illegible
+
+I am bit hesitant to give people advice. Particularly advice that goes against the norm. So I instead I will rephrase it. One valuable thing to ask yourself is "Do I like being legible?". In my experience, some people really enjoy it. Some people want this external recognition that comes at each point along the way that is only possible if your work is legible. Some people love knowing that their work aligns with the business. Some people love the process, love the oversight.
+
+But for others of us, legibility is the death of motivation. Personally, I will do way more work if that work is not legible. If that work is self-guided, self-chosen, and not accounted for, I will work hard. I will be excited. As soon as my work becomes the bogged down with the trappings of legibilty, as soon as I feel this lose of control, that my work could be "reprioritized" at any minute, that the very thing that made the work valuable (to the customer) could be striped away, I lose all motiviation to do that work. That doesn't mean I don't do it. It just means I don't enjoy it.
+
+Being illegible can be good for the business. It can help the business achieve its goals in a way it itself has blocked off. It can get you in trouble as well. But it is also a way to succeed. I have seen countless projects fail only to be saved by the illegible work of a lone engineer who knew there was a better way to solve the problem.
 
 
 

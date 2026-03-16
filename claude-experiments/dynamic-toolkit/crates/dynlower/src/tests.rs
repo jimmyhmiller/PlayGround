@@ -1,16 +1,49 @@
-use crate::{JitFunction, JitModule, call_jit};
+use crate::{
+    JitFunction, JitModule, JitOutcome, SafepointHandlerPayloadKind, call_jit,
+    call_jit_with_reg_limit,
+};
+use crate::backend::{Arm64Backend, X64Backend};
 use dynexec::{
-    AArch64CAbi, AArch64InternalCc, CallbackSafepoints, ExecutionConfig, PreciseStackRoots,
-    ShadowStackFrames, StackSlotFrames,
+    AArch64CAbi, AArch64InternalCc, CallbackSafepoints, ConservativeWordRoots, ExecutionConfig,
+    FrameLayout, FrameScanRoots, FrameStrategy, PreciseStackRoots, ShadowStackFrames,
+    ShadowStackRoots, StackFrameLayout, StackMapFrames, StackMapRoots, StackMapSafepoints,
+    StackSlotFrames,
 };
 use dynir::builder::{FunctionBuilder, ModuleBuilder};
 use dynir::ir::*;
 use dynir::types::Type;
 use dynvalue::{LowBit, NanBox, TagScheme};
 
+#[cfg(target_arch = "aarch64")]
+core::arch::global_asm!(
+    ".globl _dynlower_test_throw_exception_stub",
+    "_dynlower_test_throw_exception_stub:",
+    "mov x1, #2",
+    "mov x2, #1234",
+    "ret",
+);
+
+#[cfg(target_arch = "aarch64")]
+unsafe extern "C" {
+    fn dynlower_test_throw_exception_stub();
+}
+
 fn run_jit(func: &dynir::Function, args: &[u64]) -> u64 {
     // Use NanBox as default scheme for tests that don't use tag operations
     let jit = JitFunction::compile::<NanBox>(func, &[]);
+    unsafe { call_jit(jit.as_ptr(), args) }
+}
+
+fn run_jit_outcome(func: &dynir::Function, args: &[u64]) -> JitOutcome {
+    let jit = JitFunction::compile::<NanBox>(func, &[]);
+    jit.call_outcome(args)
+}
+
+fn run_jit_with_config<Cfg: ExecutionConfig>(func: &dynir::Function, args: &[u64]) -> u64
+where
+    Cfg::Frames: dynexec::FrameStrategy<Cfg::Layout, Cfg::Roots, Cfg::CallingConvention>,
+{
+    let jit = JitFunction::compile_with_config::<Cfg>(func, &[]);
     unsafe { call_jit(jit.as_ptr(), args) }
 }
 
@@ -19,6 +52,7 @@ struct TestInternalConfig;
 impl ExecutionConfig for TestInternalConfig {
     type Layout = LowBit<3>;
     type Roots = PreciseStackRoots;
+    type RootTransport = FrameScanRoots;
     type CallingConvention = AArch64InternalCc;
     type Frames = StackSlotFrames;
     type Safepoints = CallbackSafepoints;
@@ -29,6 +63,7 @@ struct TestCAbiConfig;
 impl ExecutionConfig for TestCAbiConfig {
     type Layout = LowBit<3>;
     type Roots = PreciseStackRoots;
+    type RootTransport = FrameScanRoots;
     type CallingConvention = AArch64CAbi;
     type Frames = ShadowStackFrames;
     type Safepoints = CallbackSafepoints;
@@ -39,8 +74,114 @@ struct InvalidNanBoxConfig;
 impl ExecutionConfig for InvalidNanBoxConfig {
     type Layout = NanBox;
     type Roots = PreciseStackRoots;
+    type RootTransport = FrameScanRoots;
     type CallingConvention = AArch64InternalCc;
     type Frames = StackSlotFrames;
+    type Safepoints = CallbackSafepoints;
+}
+
+struct TestNanBoxConfig;
+
+impl ExecutionConfig for TestNanBoxConfig {
+    type Layout = NanBox;
+    type Roots = ConservativeWordRoots;
+    type RootTransport = FrameScanRoots;
+    type CallingConvention = AArch64InternalCc;
+    type Frames = StackSlotFrames;
+    type Safepoints = CallbackSafepoints;
+}
+
+struct TestStackMapConfig;
+
+impl ExecutionConfig for TestStackMapConfig {
+    type Layout = LowBit<3>;
+    type Roots = PreciseStackRoots;
+    type RootTransport = StackMapRoots;
+    type CallingConvention = AArch64InternalCc;
+    type Frames = StackMapFrames;
+    type Safepoints = StackMapSafepoints;
+}
+
+struct TestShadowStackConfig;
+
+impl ExecutionConfig for TestShadowStackConfig {
+    type Layout = LowBit<3>;
+    type Roots = PreciseStackRoots;
+    type RootTransport = ShadowStackRoots;
+    type CallingConvention = AArch64InternalCc;
+    type Frames = ShadowStackFrames;
+    type Safepoints = CallbackSafepoints;
+}
+
+#[derive(Debug, Clone)]
+struct WrappedFrameLayout(StackFrameLayout);
+
+impl FrameLayout for WrappedFrameLayout {
+    fn alloc_local_slot(&mut self) -> i32 {
+        self.0.alloc_local_slot()
+    }
+
+    fn alloc_root_slot(&mut self) -> i32 {
+        self.0.alloc_root_slot()
+    }
+
+    fn alloc_shadow_root_slot(&mut self) -> i32 {
+        self.0.alloc_shadow_root_slot()
+    }
+
+    fn reserve_outgoing_arg_bytes(&mut self, bytes: i32) {
+        self.0.reserve_outgoing_arg_bytes(bytes);
+    }
+
+    fn total_frame_size(&self, stack_align: usize) -> i32 {
+        self.0.total_frame_size(stack_align)
+    }
+
+    fn add_block_param_slot(&mut self, block_idx: usize, offset: i32) {
+        self.0.add_block_param_slot(block_idx, offset);
+    }
+
+    fn block_param_slots(&self, block_idx: usize) -> &[i32] {
+        self.0.block_param_slots(block_idx)
+    }
+
+    fn root_scan_size(&self) -> i32 {
+        self.0.root_scan_size()
+    }
+
+    fn shadow_root_slots(&self) -> &[i32] {
+        self.0.shadow_root_slots()
+    }
+
+    fn slot_access(&self, slot: i32) -> dynexec::FrameSlotAccess {
+        self.0.slot_access(slot)
+    }
+}
+
+struct WrappedFrameStrategy;
+
+impl<L, R, C> FrameStrategy<L, R, C> for WrappedFrameStrategy
+where
+    L: dynexec::ValueLayout,
+    R: dynexec::RootStrategy<L>,
+    C: dynexec::CallingConvention<L>,
+{
+    const NAME: &'static str = "wrapped-frame-strategy";
+    type Layout = WrappedFrameLayout;
+
+    fn new_layout(block_count: usize) -> Self::Layout {
+        WrappedFrameLayout(StackFrameLayout::new(block_count))
+    }
+}
+
+struct TestWrappedFrameConfig;
+
+impl ExecutionConfig for TestWrappedFrameConfig {
+    type Layout = LowBit<3>;
+    type Roots = PreciseStackRoots;
+    type RootTransport = FrameScanRoots;
+    type CallingConvention = AArch64InternalCc;
+    type Frames = WrappedFrameStrategy;
     type Safepoints = CallbackSafepoints;
 }
 
@@ -66,6 +207,17 @@ fn compile_with_explicit_internal_config() {
 }
 
 #[test]
+fn compile_with_explicit_backend_type() {
+    let mut b = FunctionBuilder::new("ret13", &[], Some(Type::I64));
+    let v = b.iconst(Type::I64, 13);
+    b.ret(v);
+    let func = b.build();
+    let jit =
+        JitFunction::compile_with_backend_and_config::<TestInternalConfig, Arm64Backend>(&func, &[], None);
+    assert_eq!(unsafe { call_jit(jit.as_ptr(), &[]) }, 13);
+}
+
+#[test]
 fn compile_with_explicit_alternate_config_shape() {
     let mut b = FunctionBuilder::new("ret9", &[], Some(Type::I64));
     let v = b.iconst(Type::I64, 9);
@@ -76,6 +228,207 @@ fn compile_with_explicit_alternate_config_shape() {
 }
 
 #[test]
+fn compile_with_wrapped_frame_layout() {
+    let mut b = FunctionBuilder::new("ret19", &[], Some(Type::I64));
+    let v = b.iconst(Type::I64, 19);
+    b.ret(v);
+    let func = b.build();
+    let jit = JitFunction::compile_with_config::<TestWrappedFrameConfig>(&func, &[]);
+    assert_eq!(unsafe { call_jit(jit.as_ptr(), &[]) }, 19);
+}
+
+#[test]
+fn compile_with_explicit_nanbox_conservative_config() {
+    let mut b = FunctionBuilder::new("ret11", &[], Some(Type::I64));
+    let v = b.iconst(Type::I64, 11);
+    b.ret(v);
+    let func = b.build();
+    assert_eq!(run_jit_with_config::<TestNanBoxConfig>(&func, &[]), 11);
+}
+
+#[test]
+fn x64_backend_stub_is_present() {
+    assert_eq!(X64Backend::name(), "x86_64");
+}
+
+#[test]
+fn x64_backend_can_compile_simple_integer_function() {
+    let mut b = FunctionBuilder::new("ret17_x64", &[], Some(Type::I64));
+    let v = b.iconst(Type::I64, 17);
+    b.ret(v);
+    let func = b.build();
+    let jit =
+        JitFunction::compile_with_backend_and_config::<TestInternalConfig, X64Backend>(&func, &[], None);
+    assert!(!jit.as_ptr().is_null());
+}
+
+#[test]
+fn x64_backend_can_compile_simple_integer_add() {
+    let mut b = FunctionBuilder::new("add2_x64", &[Type::I64, Type::I64], Some(Type::I64));
+    let entry = b.entry_block();
+    let a = b.block_param(entry, 0);
+    let c = b.block_param(entry, 1);
+    let sum = b.add(a, c);
+    b.ret(sum);
+    let func = b.build();
+    let jit =
+        JitFunction::compile_with_backend_and_config::<TestInternalConfig, X64Backend>(&func, &[], None);
+    assert!(!jit.as_ptr().is_null());
+}
+
+#[test]
+fn x64_backend_can_compile_integer_compare() {
+    let mut b = FunctionBuilder::new("eq_x64", &[Type::I64, Type::I64], Some(Type::I8));
+    let entry = b.entry_block();
+    let a = b.block_param(entry, 0);
+    let c = b.block_param(entry, 1);
+    let eq = b.icmp(CmpOp::Eq, a, c);
+    b.ret(eq);
+    let func = b.build();
+    let jit =
+        JitFunction::compile_with_backend_and_config::<TestInternalConfig, X64Backend>(&func, &[], None);
+    assert!(!jit.as_ptr().is_null());
+}
+
+#[test]
+fn x64_backend_can_compile_integer_negation() {
+    let mut b = FunctionBuilder::new("neg_x64", &[Type::I64], Some(Type::I64));
+    let entry = b.entry_block();
+    let a = b.block_param(entry, 0);
+    let neg = b.neg(a);
+    b.ret(neg);
+    let func = b.build();
+    let jit =
+        JitFunction::compile_with_backend_and_config::<TestInternalConfig, X64Backend>(&func, &[], None);
+    assert!(!jit.as_ptr().is_null());
+}
+
+#[test]
+fn stack_map_transport_records_safepoint_metadata() {
+    let mut b = FunctionBuilder::new("stackmap_meta", &[Type::GcPtr], Some(Type::GcPtr));
+    let entry = b.entry_block();
+    let arg = b.block_param(entry, 0);
+    b.safepoint(&[arg]);
+    b.ret(arg);
+    let func = b.build();
+    let jit = JitFunction::compile_with_config::<TestStackMapConfig>(&func, &[]);
+    let safepoints = jit.safepoints();
+    assert_eq!(safepoints.len(), 1);
+    assert!(!safepoints[0].root_slots.is_empty());
+}
+
+#[test]
+fn shadow_stack_transport_records_shadow_root_slots() {
+    let mut b = FunctionBuilder::new("shadow_meta", &[Type::GcPtr], Some(Type::GcPtr));
+    let entry = b.entry_block();
+    let arg = b.block_param(entry, 0);
+    b.safepoint(&[arg]);
+    b.ret(arg);
+    let func = b.build();
+    let jit = JitFunction::compile_with_config::<TestShadowStackConfig>(&func, &[]);
+    let safepoints = jit.safepoints();
+    assert_eq!(safepoints.len(), 1);
+    assert!(!safepoints[0].root_slots.is_empty());
+}
+
+#[test]
+fn stack_map_transport_uses_safepoint_index_payloads() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static LAST_PAYLOAD: AtomicUsize = AtomicUsize::new(usize::MAX);
+
+    extern "C" fn test_handler(_frame_ptr: *mut u8, payload: usize) {
+        LAST_PAYLOAD.store(payload, Ordering::SeqCst);
+    }
+
+    let mut b = FunctionBuilder::new("stackmap_handler", &[Type::GcPtr], Some(Type::GcPtr));
+    let entry = b.entry_block();
+    let arg = b.block_param(entry, 0);
+    b.safepoint(&[arg]);
+    b.ret(arg);
+    let func = b.build();
+
+    LAST_PAYLOAD.store(usize::MAX, Ordering::SeqCst);
+    let jit = JitFunction::compile_with_config_and_gc::<TestStackMapConfig>(
+        &func,
+        &[],
+        Some(test_handler as u64),
+    );
+    assert_eq!(
+        jit.handler_payload_kind(),
+        SafepointHandlerPayloadKind::SafepointIndex
+    );
+    assert_eq!(unsafe { call_jit(jit.as_ptr(), &[7]) }, 7);
+    assert_eq!(LAST_PAYLOAD.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn alternate_calling_convention_controls_arg_window() {
+    let params = vec![Type::I64; 10];
+    let mut b = FunctionBuilder::new("sum10", &params, Some(Type::I64));
+    let entry = b.entry_block();
+    let mut acc = b.block_param(entry, 0);
+    for i in 1..10 {
+        let p = b.block_param(entry, i);
+        acc = b.add(acc, p);
+    }
+    b.ret(acc);
+    let func = b.build();
+    let jit = JitFunction::compile_with_config::<TestCAbiConfig>(&func, &[]);
+    let args = [1u64, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+    assert_eq!(unsafe { call_jit_with_reg_limit(jit.as_ptr(), &args, 8) }, 55);
+}
+
+#[test]
+fn internal_calling_convention_handles_more_than_16_args() {
+    let params = vec![Type::I64; 20];
+    let mut b = FunctionBuilder::new("sum20", &params, Some(Type::I64));
+    let entry = b.entry_block();
+    let mut acc = b.block_param(entry, 0);
+    for i in 1..20 {
+        let p = b.block_param(entry, i);
+        acc = b.add(acc, p);
+    }
+    b.ret(acc);
+    let func = b.build();
+    let args = [
+        1u64, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
+    ];
+    assert_eq!(run_jit_with_config::<TestInternalConfig>(&func, &args), 210);
+}
+
+#[test]
+fn block_param_assignment_works_under_configured_lowering() {
+    let mut b = FunctionBuilder::new("diamond_cfg", &[Type::I64], Some(Type::I64));
+    let entry = b.entry_block();
+    let arg = b.block_param(entry, 0);
+    let cond = b.iconst(Type::I8, 1);
+    let then_bb = b.create_block(&[]);
+    let else_bb = b.create_block(&[]);
+    let merge = b.create_block(&[Type::I64]);
+
+    b.br_if(cond, then_bb, &[], else_bb, &[]);
+
+    b.switch_to_block(then_bb);
+    let one = b.iconst(Type::I64, 41);
+    b.jump(merge, &[one]);
+
+    b.switch_to_block(else_bb);
+    let hundred = b.iconst(Type::I64, 100);
+    let two = b.add(arg, hundred);
+    b.jump(merge, &[two]);
+
+    b.switch_to_block(merge);
+    let result = b.block_param(merge, 0);
+    let one_more = b.iconst(Type::I64, 1);
+    let final_result = b.add(result, one_more);
+    b.ret(final_result);
+
+    let func = b.build();
+    assert_eq!(run_jit_with_config::<TestInternalConfig>(&func, &[7]), 42);
+}
+
+#[test]
 #[should_panic(expected = "invalid dynlower config")]
 fn compile_rejects_invalid_layout_root_config() {
     let mut b = FunctionBuilder::new("ret1", &[], Some(Type::I64));
@@ -83,6 +436,109 @@ fn compile_rejects_invalid_layout_root_config() {
     b.ret(v);
     let func = b.build();
     let _ = JitFunction::compile_with_config::<InvalidNanBoxConfig>(&func, &[]);
+}
+
+#[test]
+fn overflow_check_overflows_in_jit() {
+    let mut b = FunctionBuilder::new("ov", &[Type::I64, Type::I64], Some(Type::I8));
+    let entry = b.entry_block();
+    let a = b.block_param(entry, 0);
+    let bb = b.block_param(entry, 1);
+    let r = b.overflow_check(OverflowOp::SAdd, a, bb);
+    b.ret(r);
+    let func = b.build();
+
+    assert_eq!(run_jit(&func, &[1, 2]), 0);
+    assert_eq!(run_jit(&func, &[i64::MAX as u64, 1]), 1);
+}
+
+#[test]
+fn guard_deopt_returns_jit_outcome() {
+    let mut b = FunctionBuilder::new("guard", &[Type::I64, Type::I64], Some(Type::I64));
+    let entry = b.entry_block();
+    let a = b.block_param(entry, 0);
+    let bb = b.block_param(entry, 1);
+    let zero = b.iconst(Type::I8, 0);
+    let deopt = b.create_deopt(42, "jit guard");
+    b.guard(zero, deopt, &[a, bb]);
+    b.ret(a);
+    let func = b.build();
+
+    let jit = JitFunction::compile::<LowBit<3>>(&func, &[]);
+    assert_eq!(
+        jit.call_outcome(&[10, 20]),
+        JitOutcome::Deopt {
+            deopt_id: deopt,
+            resume_point: 42,
+            live_values: vec![10, 20],
+        }
+    );
+}
+
+#[test]
+fn invoke_internal_normal_path_in_jit_module() {
+    let mut mb = ModuleBuilder::new();
+    let f_callee = mb.declare_func("callee", &[Type::I64], Some(Type::I64));
+    let f_main = mb.declare_func("main", &[Type::I64], Some(Type::I64));
+
+    let mut fb = mb.define_func(f_callee);
+    let entry = fb.entry_block();
+    let x = fb.block_param(entry, 0);
+    let three = fb.iconst(Type::I64, 3);
+    let r = fb.mul(x, three);
+    fb.ret(r);
+    mb.finish_func(f_callee, fb);
+
+    let mut fb = mb.define_func(f_main);
+    let entry = fb.entry_block();
+    let x = fb.block_param(entry, 0);
+    let normal = fb.create_block(&[Type::I64]);
+    let exception = fb.create_block(&[]);
+    fb.invoke(f_callee, &[x], normal, &[], exception, &[]);
+    fb.switch_to_block(normal);
+    let rv = fb.block_param(normal, 0);
+    fb.ret(rv);
+    fb.switch_to_block(exception);
+    let neg = fb.iconst(Type::I64, -1);
+    fb.ret(neg);
+    mb.finish_func(f_main, fb);
+
+    let module = mb.build();
+    let jit = JitModule::compile::<LowBit<3>>(&module, &[]);
+    assert_eq!(jit.call_outcome(f_main, &[14]), JitOutcome::Value(42));
+}
+
+#[test]
+fn invoke_indirect_normal_path_in_jit() {
+    let mut callee_builder = FunctionBuilder::new("callee", &[Type::I64], Some(Type::I64));
+    let callee_entry = callee_builder.entry_block();
+    let x = callee_builder.block_param(callee_entry, 0);
+    let ten = callee_builder.iconst(Type::I64, 10);
+    let mul = callee_builder.mul(x, ten);
+    callee_builder.ret(mul);
+    let callee = callee_builder.build();
+    let callee_jit = JitFunction::compile::<LowBit<3>>(&callee, &[]);
+
+    let mut b = FunctionBuilder::new("inv_ind", &[Type::Ptr], Some(Type::I64));
+    let entry = b.entry_block();
+    let callee_ptr = b.block_param(entry, 0);
+    let arg = b.iconst(Type::I64, 5);
+    let normal = b.create_block(&[Type::I64]);
+    let exception = b.create_block(&[]);
+    b.invoke_indirect(callee_ptr, &[arg], Some(Type::I64), normal, &[], exception, &[]);
+    b.switch_to_block(normal);
+    let ret = b.block_param(normal, 0);
+    b.ret(ret);
+    b.switch_to_block(exception);
+    let neg = b.iconst(Type::I64, -1);
+    b.ret(neg);
+    let func = b.build();
+
+    let jit = JitFunction::compile::<LowBit<3>>(&func, &[]);
+    assert_eq!(
+        jit.call_outcome(&[callee_jit.as_ptr() as u64]),
+        JitOutcome::Value(50)
+    );
 }
 
 #[test]
@@ -679,6 +1135,184 @@ fn switch_dispatch() {
     assert_eq!(run_jit(&func, &[3]), 99);
 }
 
+#[test]
+fn overflow_check_signed_add_overflow() {
+    let mut b = FunctionBuilder::new("ov", &[Type::I64, Type::I64], Some(Type::I8));
+    let entry = b.entry_block();
+    let a = b.block_param(entry, 0);
+    let c = b.block_param(entry, 1);
+    let overflowed = b.overflow_check(OverflowOp::SAdd, a, c);
+    b.ret(overflowed);
+    let func = b.build();
+
+    assert_eq!(run_jit(&func, &[i64::MAX as u64, 1]), 1);
+    assert_eq!(run_jit(&func, &[3, 4]), 0);
+}
+
+#[test]
+fn guard_deopt_returns_outcome() {
+    let mut b = FunctionBuilder::new("guard", &[Type::I64, Type::I64], Some(Type::I64));
+    let entry = b.entry_block();
+    let a = b.block_param(entry, 0);
+    let c = b.block_param(entry, 1);
+    let deopt = b.create_deopt(200, "guard fail");
+    let zero = b.iconst(Type::I8, 0);
+    b.guard(zero, deopt, &[a, c]);
+    b.ret(a);
+    let func = b.build();
+
+    assert_eq!(
+        run_jit_outcome(&func, &[10, 20]),
+        JitOutcome::Deopt {
+            deopt_id: DeoptId::from_index(0),
+            resume_point: 200,
+            live_values: vec![10, 20],
+        }
+    );
+}
+
+#[test]
+fn internal_call_propagates_deopt_outcome() {
+    let mut mb = ModuleBuilder::new();
+    let callee = mb.declare_func("callee", &[Type::I64], Some(Type::I64));
+    let main = mb.declare_func("main", &[Type::I64], Some(Type::I64));
+
+    let mut fb = mb.define_func(callee);
+    let entry = fb.entry_block();
+    let x = fb.block_param(entry, 0);
+    let deopt = fb.create_deopt(77, "callee deopt");
+    let zero = fb.iconst(Type::I8, 0);
+    fb.guard(zero, deopt, &[x]);
+    fb.ret(x);
+    mb.finish_func(callee, fb);
+
+    let mut fb = mb.define_func(main);
+    let entry = fb.entry_block();
+    let x = fb.block_param(entry, 0);
+    let rv = fb.call(callee, &[x]).unwrap();
+    fb.ret(rv);
+    mb.finish_func(main, fb);
+
+    let module = mb.build();
+    let jit = JitModule::compile::<NanBox>(&module, &[]);
+    assert_eq!(
+        jit.call_outcome(main, &[55]),
+        JitOutcome::Deopt {
+            deopt_id: DeoptId::from_index(0),
+            resume_point: 77,
+            live_values: vec![55],
+        }
+    );
+}
+
+#[test]
+fn invoke_internal_normal_path() {
+    let mut mb = ModuleBuilder::new();
+    let callee = mb.declare_func("callee", &[Type::I64], Some(Type::I64));
+    let main = mb.declare_func("main", &[Type::I64], Some(Type::I64));
+
+    let mut fb = mb.define_func(callee);
+    let entry = fb.entry_block();
+    let x = fb.block_param(entry, 0);
+    let three = fb.iconst(Type::I64, 3);
+    let rv = fb.mul(x, three);
+    fb.ret(rv);
+    mb.finish_func(callee, fb);
+
+    let mut fb = mb.define_func(main);
+    let entry = fb.entry_block();
+    let x = fb.block_param(entry, 0);
+    let normal = fb.create_block(&[Type::I64]);
+    let exception = fb.create_block(&[]);
+    fb.invoke(callee, &[x], normal, &[], exception, &[]);
+    fb.switch_to_block(normal);
+    let rv = fb.block_param(normal, 0);
+    fb.ret(rv);
+    fb.switch_to_block(exception);
+    let neg = fb.iconst(Type::I64, -1);
+    fb.ret(neg);
+    mb.finish_func(main, fb);
+
+    let module = mb.build();
+    let jit = JitModule::compile::<NanBox>(&module, &[]);
+    assert_eq!(jit.call_outcome(main, &[14]), JitOutcome::Value(42));
+}
+
+#[test]
+fn invoke_internal_propagates_deopt() {
+    let mut mb = ModuleBuilder::new();
+    let callee = mb.declare_func("callee", &[Type::I64], Some(Type::I64));
+    let main = mb.declare_func("main", &[Type::I64], Some(Type::I64));
+
+    let mut fb = mb.define_func(callee);
+    let entry = fb.entry_block();
+    let x = fb.block_param(entry, 0);
+    let deopt = fb.create_deopt(33, "invoke deopt");
+    let zero = fb.iconst(Type::I8, 0);
+    fb.guard(zero, deopt, &[x]);
+    fb.ret(x);
+    mb.finish_func(callee, fb);
+
+    let mut fb = mb.define_func(main);
+    let entry = fb.entry_block();
+    let x = fb.block_param(entry, 0);
+    let normal = fb.create_block(&[Type::I64]);
+    let exception = fb.create_block(&[]);
+    fb.invoke(callee, &[x], normal, &[], exception, &[]);
+    fb.switch_to_block(normal);
+    let rv = fb.block_param(normal, 0);
+    fb.ret(rv);
+    fb.switch_to_block(exception);
+    let neg = fb.iconst(Type::I64, -1);
+    fb.ret(neg);
+    mb.finish_func(main, fb);
+
+    let module = mb.build();
+    let jit = JitModule::compile::<NanBox>(&module, &[]);
+    assert_eq!(
+        jit.call_outcome(main, &[9]),
+        JitOutcome::Deopt {
+            deopt_id: DeoptId::from_index(0),
+            resume_point: 33,
+            live_values: vec![9],
+        }
+    );
+}
+
+#[cfg(target_arch = "aarch64")]
+#[test]
+fn invoke_internal_exception_path() {
+    let mut mb = ModuleBuilder::new();
+    let callee = mb.declare_func("callee", &[Type::Ptr], Some(Type::I64));
+    let main = mb.declare_func("main", &[Type::Ptr], Some(Type::I64));
+
+    let mut fb = mb.define_func(callee);
+    let entry = fb.entry_block();
+    let throw_ptr = fb.block_param(entry, 0);
+    let rv = fb.call_indirect(throw_ptr, &[], Some(Type::I64)).unwrap();
+    fb.ret(rv);
+    mb.finish_func(callee, fb);
+
+    let mut fb = mb.define_func(main);
+    let entry = fb.entry_block();
+    let throw_ptr = fb.block_param(entry, 0);
+    let normal = fb.create_block(&[Type::I64]);
+    let exception = fb.create_block(&[]);
+    fb.invoke(callee, &[throw_ptr], normal, &[], exception, &[]);
+    fb.switch_to_block(normal);
+    let rv = fb.block_param(normal, 0);
+    fb.ret(rv);
+    fb.switch_to_block(exception);
+    let sentinel = fb.iconst(Type::I64, 999);
+    fb.ret(sentinel);
+    mb.finish_func(main, fb);
+
+    let module = mb.build();
+    let jit = JitModule::compile::<NanBox>(&module, &[]);
+    let throw_ptr = dynlower_test_throw_exception_stub as usize as u64;
+    assert_eq!(jit.call_outcome(main, &[throw_ptr]), JitOutcome::Value(999));
+}
+
 // ── Loop with dynir builder ────────────────────────────────────────
 
 #[test]
@@ -886,6 +1520,23 @@ fn test_payload_then_load() {
     unsafe {
         drop(Box::from_raw(ptr as *mut u64));
     }
+}
+
+#[test]
+fn store_then_load_round_trip() {
+    let mut b = FunctionBuilder::new("store_load", &[Type::Ptr, Type::I64], Some(Type::I64));
+    let entry = b.entry_block();
+    let ptr = b.block_param(entry, 0);
+    let value = b.block_param(entry, 1);
+    b.store(value, ptr, 0);
+    let loaded = b.load(Type::I64, ptr, 0);
+    b.ret(loaded);
+    let func = b.build();
+
+    let mut slot = 0u64;
+    let result = run_jit(&func, &[(&mut slot as *mut u64) as u64, 0xDEAD_BEEF_CAFE_BABE]);
+    assert_eq!(result, 0xDEAD_BEEF_CAFE_BABE);
+    assert_eq!(slot, 0xDEAD_BEEF_CAFE_BABE);
 }
 
 #[test]

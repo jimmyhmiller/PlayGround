@@ -2,7 +2,7 @@ use std::cell::RefCell;
 use std::marker::PhantomData;
 
 use dynalloc::{Heap, Mutator, PtrPolicy, Root, RootScope};
-use dynexec::RootPrecision;
+use dynexec::{ConservativeWordRoots, PreciseStackRoots, RootTransport, ValueLayout};
 use dynir::InterpRootManager;
 use dynobj::{Compact, ObjHeader, TypeInfo};
 
@@ -25,7 +25,6 @@ pub struct MutatorRootManager<P: PtrPolicy> {
     heap: Heap,
     mutator: RefCell<Mutator>,
     frame_scopes: RefCell<Vec<MutatorFrameScope>>,
-    roots_all: bool,
     gc_threshold: f64,
     _policy: PhantomData<P>,
 }
@@ -37,7 +36,6 @@ impl<P: PtrPolicy> MutatorRootManager<P> {
             heap: Heap::new::<Compact>(space_size),
             mutator: RefCell::new(Mutator::new()),
             frame_scopes: RefCell::new(Vec::new()),
-            roots_all: false,
             gc_threshold: 0.0,
             _policy: PhantomData,
         }
@@ -49,17 +47,9 @@ impl<P: PtrPolicy> MutatorRootManager<P> {
             heap: Heap::new::<H>(space_size),
             mutator: RefCell::new(Mutator::new()),
             frame_scopes: RefCell::new(Vec::new()),
-            roots_all: false,
             gc_threshold: 0.0,
             _policy: PhantomData,
         }
-    }
-
-    /// Configure whether interpreter frames should conservatively expose every
-    /// value slot to the collector.
-    pub fn with_roots_all(mut self, roots_all: bool) -> Self {
-        self.roots_all = roots_all;
-        self
     }
 
     /// Set GC threshold: only collect when from-space usage exceeds this fraction (0.0–1.0).
@@ -99,7 +89,12 @@ impl<P: PtrPolicy> MutatorRootManager<P> {
     }
 }
 
-impl<P: PtrPolicy> InterpRootManager for MutatorRootManager<P> {
+impl<P, L, Transport> InterpRootManager<L, PreciseStackRoots, Transport> for MutatorRootManager<P>
+where
+    P: PtrPolicy,
+    L: ValueLayout,
+    Transport: RootTransport<L, PreciseStackRoots>,
+{
     fn push_frame(&self, gc_slot_count: usize) -> usize {
         let mut mutator = self.mutator.borrow_mut();
         let scope = mutator.save();
@@ -151,12 +146,63 @@ impl<P: PtrPolicy> InterpRootManager for MutatorRootManager<P> {
             self.heap.collect::<P>(&[&*mutator]);
         }
     }
+}
 
-    fn root_precision(&self) -> RootPrecision {
-        if self.roots_all {
-            RootPrecision::ConservativeWords
-        } else {
-            RootPrecision::PreciseSlots
+impl<P, L, Transport> InterpRootManager<L, ConservativeWordRoots, Transport> for MutatorRootManager<P>
+where
+    P: PtrPolicy,
+    L: ValueLayout,
+    Transport: RootTransport<L, ConservativeWordRoots>,
+{
+    fn push_frame(&self, gc_slot_count: usize) -> usize {
+        let mut mutator = self.mutator.borrow_mut();
+        let scope = mutator.save();
+        let roots: Vec<Root> = (0..gc_slot_count).map(|_| mutator.root(0)).collect();
+        let mut scopes = self.frame_scopes.borrow_mut();
+        let idx = scopes.len();
+        scopes.push(MutatorFrameScope { scope, roots });
+        idx
+    }
+
+    fn pop_frame(&self) {
+        let frame_scope = self
+            .frame_scopes
+            .borrow_mut()
+            .pop()
+            .expect("no frame to pop");
+        self.mutator.borrow_mut().restore(frame_scope.scope);
+    }
+
+    fn set_root(&self, frame: usize, slot: usize, value: u64) {
+        let scopes = self.frame_scopes.borrow();
+        let root = &scopes[frame].roots[slot];
+        self.mutator.borrow().set(root, value);
+    }
+
+    fn get_root(&self, frame: usize, slot: usize) -> u64 {
+        let scopes = self.frame_scopes.borrow();
+        let root = &scopes[frame].roots[slot];
+        self.mutator.borrow().get(root).bits()
+    }
+
+    fn clear_frame(&self, frame: usize) {
+        let scopes = self.frame_scopes.borrow();
+        let mutator = self.mutator.borrow();
+        for root in &scopes[frame].roots {
+            mutator.set(root, 0);
+        }
+    }
+
+    fn collect(&self) {
+        if self.gc_threshold > 0.0 {
+            let usage = self.heap.from_used() as f64 / self.heap.space_size() as f64;
+            if usage < self.gc_threshold {
+                return;
+            }
+        }
+        let mutator = self.mutator.borrow();
+        unsafe {
+            self.heap.collect::<P>(&[&*mutator]);
         }
     }
 }
