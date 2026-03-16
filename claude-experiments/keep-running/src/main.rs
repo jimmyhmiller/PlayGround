@@ -51,7 +51,15 @@ fn cmd_shell(name: Option<String>) -> Result<()> {
     cmd_run(name, command)
 }
 
+fn check_nested() -> Result<()> {
+    if std::env::var("KEEP_RUNNING").is_ok() {
+        anyhow::bail!("Already inside a keep-running session. Detach first (Ctrl+a d).");
+    }
+    Ok(())
+}
+
 fn cmd_run(name: Option<String>, command: Vec<String>) -> Result<()> {
+    check_nested()?;
     if command.is_empty() {
         anyhow::bail!("No command specified");
     }

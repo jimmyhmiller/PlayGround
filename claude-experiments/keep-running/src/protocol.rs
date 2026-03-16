@@ -25,6 +25,12 @@ pub enum DaemonMessage {
     /// Output data from PTY
     Output(Vec<u8>),
 
+    /// Replay of buffered history is starting (client should suppress rendering)
+    ReplayStart,
+
+    /// Replay of buffered history is complete (client should resume rendering)
+    ReplayEnd,
+
     /// Child process exited
     ChildExited { code: Option<i32> },
 

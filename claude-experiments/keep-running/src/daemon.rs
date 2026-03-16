@@ -11,9 +11,10 @@ use std::os::unix::process::CommandExt;
 use std::process::Command;
 use std::time::Duration;
 
-const MAX_BUFFER_SIZE: usize = 100 * 1024 * 1024; // 100MB
-/// If the client's send buffer exceeds this, the client is stuck and we drop it.
-const MAX_SEND_BUF: usize = 16 * 1024 * 1024; // 16MB
+const MAX_BUFFER_SIZE: usize = 5 * 1024 * 1024; // 5MB scrollback history
+/// When send_buf exceeds this, stop queuing new live output (client can't keep up).
+/// The data is still saved in the history buffer for replay on reattach.
+const MAX_SEND_BUF: usize = 4 * 1024 * 1024; // 4MB
 
 /// Shared state for the daemon
 struct DaemonState {
@@ -32,6 +33,9 @@ struct DaemonState {
     exit_code: Option<i32>,
     /// PTY master fd
     master_fd: i32,
+    /// Replay cursor: how far into `buffer` we've sent for the current replay.
+    /// None means no replay in progress.
+    replay_offset: Option<usize>,
 }
 
 impl DaemonState {
@@ -44,6 +48,7 @@ impl DaemonState {
             child_exited: false,
             exit_code: None,
             master_fd,
+            replay_offset: None,
         }
     }
 
@@ -63,7 +68,7 @@ impl DaemonState {
     }
 
     /// Flush as much of send_buf as possible using non-blocking writes.
-    /// Drops the client if the send buffer is too large (client is stuck).
+    /// Drops the client if the send buffer is too large and no replay is in progress.
     fn flush_send_buf(&mut self) {
         if self.send_buf.is_empty() || self.client.is_none() {
             return;
@@ -83,6 +88,7 @@ impl DaemonState {
                     Err(_) => {
                         // Real write error — client is gone
                         self.send_buf.clear();
+                        self.replay_offset = None;
                         self.client = None;
                         return;
                     }
@@ -90,21 +96,21 @@ impl DaemonState {
             }
         }
 
-        // If send buffer is huge, client isn't draining — drop it
-        if self.send_buf.len() > MAX_SEND_BUF {
-            self.send_buf.clear();
-            self.client = None;
-        }
     }
 
-    /// Buffer output data AND send to client if connected
+    /// Buffer output data AND send to client if connected.
+    /// If the client can't keep up (send_buf too large), we skip sending
+    /// live output — the child process is never blocked. The data is still
+    /// in the history buffer and the client will catch up on reattach.
     fn handle_output(&mut self, data: &[u8]) {
         // Always buffer output for session history
         self.buffer_data(data);
 
-        // Also queue for client if connected
-        let msg = DaemonMessage::Output(data.to_vec());
-        self.queue_message(&msg);
+        // Only queue for client if send_buf isn't backed up
+        if self.send_buf.len() <= MAX_SEND_BUF {
+            let msg = DaemonMessage::Output(data.to_vec());
+            self.queue_message(&msg);
+        }
     }
 
     fn buffer_data(&mut self, data: &[u8]) {
@@ -116,23 +122,61 @@ impl DaemonState {
         }
     }
 
-    /// Queue buffered output (session history) for replay to new client.
-    /// Sends in chunks to avoid creating one giant JSON message.
-    fn replay_buffer(&mut self) {
+    /// Begin an incremental replay of the session history buffer.
+    /// Sends a ReplayStart message and sets up the replay cursor.
+    /// Actual data is fed via pump_replay() each poll iteration.
+    fn start_replay(&mut self) {
         if self.client.is_none() || self.buffer.is_empty() {
             return;
         }
+        self.queue_message(&DaemonMessage::ReplayStart);
+        self.replay_offset = Some(0);
+    }
+
+    /// Feed the next batch of replay data into send_buf.
+    /// Called each poll iteration while a replay is in progress.
+    /// Only queues more data when send_buf is below a threshold so we
+    /// don't accumulate faster than the client can drain.
+    fn pump_replay(&mut self) {
         const CHUNK_SIZE: usize = 32 * 1024; // 32KB per message
-        let mut offset = 0;
-        while offset < self.buffer.len() {
-            let end = (offset + CHUNK_SIZE).min(self.buffer.len());
-            let chunk = self.buffer[offset..end].to_vec();
-            offset = end;
+        /// How much we allow in send_buf before pausing replay
+        const REPLAY_SEND_WATERMARK: usize = 256 * 1024; // 256KB
+
+        let offset = match self.replay_offset {
+            Some(o) => o,
+            None => return,
+        };
+
+        if self.client.is_none() {
+            self.replay_offset = None;
+            return;
+        }
+
+        // Don't queue more if send_buf is already full enough
+        if self.send_buf.len() > REPLAY_SEND_WATERMARK {
+            return;
+        }
+
+        if offset >= self.buffer.len() {
+            // Replay complete
+            self.queue_message(&DaemonMessage::ReplayEnd);
+            self.replay_offset = None;
+            return;
+        }
+
+        // Queue a batch of chunks up to the watermark
+        let mut pos = offset;
+        while pos < self.buffer.len() && self.send_buf.len() <= REPLAY_SEND_WATERMARK {
+            let end = (pos + CHUNK_SIZE).min(self.buffer.len());
+            let chunk = self.buffer[pos..end].to_vec();
+            pos = end;
             let msg = DaemonMessage::Output(chunk);
             if !self.queue_message(&msg) {
-                break; // Client was dropped
+                self.replay_offset = None;
+                return;
             }
         }
+        self.replay_offset = Some(pos);
     }
 
     /// Resize the PTY
@@ -234,8 +278,11 @@ fn spawn_in_pty(command: &[String], cols: u16, rows: u16) -> Result<(i32, Pid)> 
             drop(slave);
         }
 
-        // Exec
-        let err = Command::new(program).args(args).exec();
+        // Exec — set KEEP_RUNNING so nested sessions can be detected
+        let err = Command::new(program)
+            .args(args)
+            .env("KEEP_RUNNING", "1")
+            .exec();
         eprintln!("Failed to exec '{}': {}", program, err);
         std::process::exit(1);
     }
@@ -340,7 +387,8 @@ pub fn run_daemon(name: String, command: Vec<String>) -> Result<()> {
         // Build poll fds: [pty_master, listener, client?]
         let mut pollfds: Vec<libc::pollfd> = Vec::with_capacity(3);
 
-        // Always poll PTY master for readable data
+        // Always poll PTY master for readable data — never block the child.
+        // If the client can't keep up, handle_output() skips queueing to send_buf.
         pollfds.push(libc::pollfd {
             fd: master_fd,
             events: libc::POLLIN,
@@ -370,9 +418,9 @@ pub fn run_daemon(name: String, command: Vec<String>) -> Result<()> {
             None
         };
 
-        // Use a longer timeout when idle, short when we have pending sends
-        let timeout_ms = if !state.send_buf.is_empty() {
-            10 // Short timeout when we have data to flush
+        // Use a longer timeout when idle, short when we have pending sends or replay
+        let timeout_ms = if !state.send_buf.is_empty() || state.replay_offset.is_some() {
+            1 // Short timeout when we have data to flush or replay to pump
         } else {
             500 // Longer timeout when idle; still wakes to check child status
         };
@@ -526,10 +574,13 @@ pub fn run_daemon(name: String, command: Vec<String>) -> Result<()> {
             state.resize_pty(cols, rows);
         }
 
-        // Replay buffer after processing attach message
+        // Start incremental replay after processing attach message
         if should_replay {
-            state.replay_buffer();
+            state.start_replay();
         }
+
+        // Feed more replay data if a replay is in progress
+        state.pump_replay();
 
         if client_disconnected {
             // If we already sent ChildExited to this client, the info was delivered
@@ -538,6 +589,7 @@ pub fn run_daemon(name: String, command: Vec<String>) -> Result<()> {
             }
             state.client = None;
             state.send_buf.clear();
+            state.replay_offset = None;
             client_msg_buf.clear();
         }
 

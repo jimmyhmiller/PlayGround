@@ -3,7 +3,7 @@ use crate::session::{self, SessionInfo};
 use crate::terminal::{self, RawModeGuard};
 use anyhow::{Context, Result};
 use crossterm::tty::IsTty;
-use crossterm::{execute, terminal::{Clear, ClearType}, cursor::MoveTo};
+use crossterm::{execute, terminal::{Clear, ClearType}, cursor::{Hide, MoveTo, Show}};
 use std::io::{self, Read, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
@@ -233,6 +233,14 @@ pub fn attach(session: &SessionInfo) -> Result<()> {
                     match msg {
                         DaemonMessage::Output(data) => {
                             terminal::write_stdout(&data)?;
+                        }
+                        DaemonMessage::ReplayStart => {
+                            // Hide cursor during replay to reduce visual noise
+                            let _ = execute!(io::stdout(), Hide);
+                        }
+                        DaemonMessage::ReplayEnd => {
+                            // Restore cursor after replay
+                            let _ = execute!(io::stdout(), Show);
                         }
                         DaemonMessage::ChildExited { code } => {
                             if let Some(c) = code {
