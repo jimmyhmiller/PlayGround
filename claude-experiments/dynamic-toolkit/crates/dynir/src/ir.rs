@@ -8,6 +8,10 @@ impl Value {
     pub fn index(self) -> usize {
         self.0 as usize
     }
+
+    pub fn from_index(index: usize) -> Self {
+        Self(index as u32)
+    }
 }
 
 /// Basic block reference.
@@ -17,6 +21,24 @@ pub struct BlockId(pub(crate) u32);
 impl BlockId {
     pub fn index(self) -> usize {
         self.0 as usize
+    }
+
+    pub fn from_index(index: usize) -> Self {
+        Self(index as u32)
+    }
+}
+
+/// Reference to a prompt boundary within a function.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct PromptId(pub(crate) u32);
+
+impl PromptId {
+    pub fn index(self) -> usize {
+        self.0 as usize
+    }
+
+    pub fn from_index(index: usize) -> Self {
+        Self(index as u32)
     }
 }
 
@@ -150,6 +172,17 @@ pub enum Inst {
     /// This is a void instruction (side-effect only).
     Guard(Value, DeoptId, Vec<Value>),
 
+    // -- Delimited frame slices --
+    /// Install a prompt boundary in the current dynamic extent.
+    PushPrompt(PromptId),
+    /// Pop a prompt boundary when leaving its extent.
+    PopPrompt(PromptId),
+    /// Capture the current delimited suffix of frames up to `prompt`.
+    /// `live` values are explicitly reified into the captured slice.
+    CaptureSlice(PromptId, Vec<Value>),
+    /// Clone a captured frame slice to enable multi-shot resume.
+    CloneSlice(Value),
+
     // -- Calls --
     Call(FuncRef, Vec<Value>),
     CallIndirect(Value, Vec<Value>, Option<Type>),
@@ -224,6 +257,8 @@ impl Inst {
 
             Inst::OverflowCheck(_, _, _) => Some(Type::I8),
             Inst::Guard(_, _, _) => None,
+            Inst::PushPrompt(_) | Inst::PopPrompt(_) => None,
+            Inst::CaptureSlice(_, _) | Inst::CloneSlice(_) => Some(Type::FrameSlice),
 
             Inst::Call(fref, _) => extern_sigs[fref.index()].sig.ret,
             Inst::CallIndirect(_, _, ret_ty) => *ret_ty,
@@ -292,6 +327,10 @@ impl Inst {
                 f(*cond);
                 live.iter().for_each(|v| f(*v));
             }
+
+            Inst::PushPrompt(_) | Inst::PopPrompt(_) => {}
+            Inst::CaptureSlice(_, live) => live.iter().for_each(|v| f(*v)),
+            Inst::CloneSlice(v) => f(*v),
 
             Inst::Call(_, args) => args.iter().for_each(|v| f(*v)),
             Inst::CallIndirect(callee, args, _) => {
@@ -364,6 +403,10 @@ impl Inst {
                 live.iter_mut().for_each(|v| f(v));
             }
 
+            Inst::PushPrompt(_) | Inst::PopPrompt(_) => {}
+            Inst::CaptureSlice(_, live) => live.iter_mut().for_each(|v| f(v)),
+            Inst::CloneSlice(v) => f(v),
+
             Inst::Call(_, args) => args.iter_mut().for_each(|v| f(v)),
             Inst::CallIndirect(callee, args, _) => {
                 f(callee);
@@ -416,6 +459,16 @@ pub enum Terminator {
         exception: BlockId,
         exception_args: Vec<Value>,
     },
+    /// Resume a previously captured frame slice. This is a non-local control transfer.
+    ResumeSlice {
+        slice: Value,
+        args: Vec<Value>,
+    },
+    /// Abort directly to the nearest matching prompt.
+    AbortToPrompt {
+        prompt: PromptId,
+        args: Vec<Value>,
+    },
     Unreachable,
 }
 
@@ -424,6 +477,11 @@ impl Terminator {
         match self {
             Terminator::Ret(v) => f(*v),
             Terminator::RetVoid | Terminator::Unreachable => {}
+            Terminator::AbortToPrompt { args, .. } => args.iter().for_each(|v| f(*v)),
+            Terminator::ResumeSlice { slice, args } => {
+                f(*slice);
+                args.iter().for_each(|v| f(*v));
+            }
             Terminator::Jump(_, args) => args.iter().for_each(|v| f(*v)),
             Terminator::BrIf {
                 cond,
@@ -474,7 +532,11 @@ impl Terminator {
 
     pub fn successors(&self) -> Vec<BlockId> {
         match self {
-            Terminator::Ret(_) | Terminator::RetVoid | Terminator::Unreachable => vec![],
+            Terminator::Ret(_)
+            | Terminator::RetVoid
+            | Terminator::ResumeSlice { .. }
+            | Terminator::AbortToPrompt { .. }
+            | Terminator::Unreachable => vec![],
             Terminator::Jump(target, _) => vec![*target],
             Terminator::BrIf {
                 then_block,
@@ -533,6 +595,7 @@ pub struct Function {
     pub value_types: Vec<Type>,
     pub extern_funcs: Vec<ExternFunc>,
     pub deopt_info: Vec<DeoptInfo>,
+    pub prompt_count: u32,
 }
 
 impl Function {

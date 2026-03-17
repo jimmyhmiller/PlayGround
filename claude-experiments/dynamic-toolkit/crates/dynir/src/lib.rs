@@ -21,7 +21,7 @@ pub use interp::{
 };
 pub use ir::{
     Block, BlockId, CmpOp, DeoptId, DeoptInfo, ExternFunc, FuncDef, FuncRef, Function, Inst,
-    InstNode, Module, OverflowOp, Terminator, Value,
+    InstNode, Module, OverflowOp, PromptId, Terminator, Value,
 };
 pub use types::{Signature, Type};
 pub use verify::{verify, VerifyError};

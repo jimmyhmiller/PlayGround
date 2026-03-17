@@ -1113,6 +1113,111 @@ fn run_module_simple(entry: FuncRef, module: &crate::ir::Module, args: &[u64]) -
 }
 
 #[test]
+fn module_frame_slice_clone_and_resume_is_multi_shot() {
+    let mut mb = ModuleBuilder::new();
+    let f_capture = mb.declare_func("capture", &[], Some(Type::FrameSlice));
+    let f_clone = mb.declare_func("clone", &[Type::FrameSlice], Some(Type::FrameSlice));
+    let f_resume = mb.declare_func("resume", &[Type::FrameSlice, Type::I64], Some(Type::I64));
+
+    let mut fb = mb.define_func(f_capture);
+    let prompt = fb.create_prompt();
+    fb.push_prompt(prompt);
+    let slice = fb.capture_slice(prompt, &[]);
+    fb.pop_prompt(prompt);
+    fb.ret(slice);
+    mb.finish_func(f_capture, fb);
+
+    let mut fb = mb.define_func(f_clone);
+    let entry = fb.entry_block();
+    let slice = fb.block_param(entry, 0);
+    let cloned = fb.clone_slice(slice);
+    fb.ret(cloned);
+    mb.finish_func(f_clone, fb);
+
+    let mut fb = mb.define_func(f_resume);
+    let entry = fb.entry_block();
+    let slice = fb.block_param(entry, 0);
+    let value = fb.block_param(entry, 1);
+    fb.resume_slice(slice, &[value]);
+    mb.finish_func(f_resume, fb);
+
+    let module = mb.build();
+    let roots = NoGcRoots;
+    let interp = ModuleInterpreter::<LowBit<3>, _>::new(&module, &roots);
+
+    let captured = match interp.run(f_capture, &[]).unwrap() {
+        InterpResult::Value(v) => v,
+        other => panic!("expected capture to return slice handle, got {:?}", other),
+    };
+
+    let clone1 = match interp.run(f_clone, &[captured]).unwrap() {
+        InterpResult::Value(v) => v,
+        other => panic!("expected clone to return slice handle, got {:?}", other),
+    };
+    let clone2 = match interp.run(f_clone, &[captured]).unwrap() {
+        InterpResult::Value(v) => v,
+        other => panic!("expected clone to return slice handle, got {:?}", other),
+    };
+
+    let resumed1 = match interp.run(f_resume, &[clone1, 11]).unwrap() {
+        InterpResult::Value(v) => v,
+        other => panic!("expected resumed continuation value, got {:?}", other),
+    };
+    let resumed2 = match interp.run(f_resume, &[clone2, 22]).unwrap() {
+        InterpResult::Value(v) => v,
+        other => panic!("expected resumed continuation value, got {:?}", other),
+    };
+
+    assert_eq!(resumed1, 11);
+    assert_eq!(resumed2, 22);
+}
+
+#[test]
+fn module_abort_to_prompt_unwinds_to_prompt_owner() {
+    let mut mb = ModuleBuilder::new();
+    let f_aborter = mb.declare_func("aborter", &[Type::I64], Some(Type::I64));
+    let f_outer = mb.declare_func("outer", &[Type::I64], Some(Type::I64));
+    let f_main = mb.declare_func("main", &[Type::I64], Some(Type::I64));
+
+    let mut fb = mb.define_func(f_aborter);
+    let entry = fb.entry_block();
+    let value = fb.block_param(entry, 0);
+    let prompt = fb.create_prompt();
+    fb.abort_to_prompt(prompt, &[value]);
+    mb.finish_func(f_aborter, fb);
+
+    let mut fb = mb.define_func(f_outer);
+    let entry = fb.entry_block();
+    let value = fb.block_param(entry, 0);
+    let prompt = fb.create_prompt();
+    fb.push_prompt(prompt);
+    let called = fb.call(f_aborter, &[value]).unwrap();
+    fb.pop_prompt(prompt);
+    let one = fb.iconst(Type::I64, 1);
+    let bumped = fb.add(called, one);
+    fb.ret(bumped);
+    mb.finish_func(f_outer, fb);
+
+    let mut fb = mb.define_func(f_main);
+    let entry = fb.entry_block();
+    let value = fb.block_param(entry, 0);
+    let result = fb.call(f_outer, &[value]).unwrap();
+    fb.ret(result);
+    mb.finish_func(f_main, fb);
+
+    let module = mb.build();
+    let roots = NoGcRoots;
+    let interp = ModuleInterpreter::<LowBit<3>, _>::new(&module, &roots);
+
+    let result = match interp.run(f_main, &[41]).unwrap() {
+        InterpResult::Value(v) => v,
+        other => panic!("expected abort result, got {:?}", other),
+    };
+
+    assert_eq!(result, 41);
+}
+
+#[test]
 fn module_a_calls_b() {
     // B: double(x) = x * 2
     // A: main(x) = double(x)

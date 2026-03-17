@@ -8,6 +8,9 @@ pub enum Type {
     /// GC-managed pointer. Same size/ABI as Ptr, but the lowering must
     /// emit stack maps at safepoints so the collector can trace and update it.
     GcPtr,
+    /// Opaque handle to a captured delimited frame slice.
+    /// This is GC-managed runtime state, but it is not a raw pointer type.
+    FrameSlice,
 }
 
 impl Type {
@@ -26,14 +29,14 @@ impl Type {
 
     /// True if this type is GC-traced and must appear in stack maps at safepoints.
     pub fn is_gc(self) -> bool {
-        matches!(self, Type::GcPtr)
+        matches!(self, Type::GcPtr | Type::FrameSlice)
     }
 
     pub fn size_bytes(self) -> u32 {
         match self {
             Type::I8 => 1,
             Type::I32 => 4,
-            Type::I64 | Type::F64 | Type::Ptr | Type::GcPtr => 8,
+            Type::I64 | Type::F64 | Type::Ptr | Type::GcPtr | Type::FrameSlice => 8,
         }
     }
 }
@@ -47,6 +50,7 @@ impl std::fmt::Display for Type {
             Type::F64 => write!(f, "f64"),
             Type::Ptr => write!(f, "ptr"),
             Type::GcPtr => write!(f, "gcptr"),
+            Type::FrameSlice => write!(f, "frameslice"),
         }
     }
 }

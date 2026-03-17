@@ -209,6 +209,53 @@ fn test_store_no_result() {
 }
 
 #[test]
+fn test_frame_slice_ir_surface() {
+    let mut b = FunctionBuilder::new("capture", &[Type::I64], Some(Type::FrameSlice));
+    let entry = b.entry_block();
+    let arg = b.block_param(entry, 0);
+    let prompt = b.create_prompt();
+    b.push_prompt(prompt);
+    let slice = b.capture_slice(prompt, &[arg]);
+    let cloned = b.clone_slice(slice);
+    b.pop_prompt(prompt);
+    b.ret(cloned);
+
+    let func = b.build();
+    verify(&func).unwrap();
+    let s = func.to_string();
+    assert!(s.contains("push_prompt"));
+    assert!(s.contains("capture_slice"));
+    assert!(s.contains("clone_slice"));
+    assert!(s.contains("pop_prompt"));
+}
+
+#[test]
+fn test_resume_slice_terminator_verifies() {
+    let mut b = FunctionBuilder::new("resume", &[Type::FrameSlice, Type::I64], Some(Type::I64));
+    let entry = b.entry_block();
+    let slice = b.block_param(entry, 0);
+    let arg = b.block_param(entry, 1);
+    b.resume_slice(slice, &[arg]);
+
+    let func = b.build();
+    verify(&func).unwrap();
+    assert!(func.to_string().contains("resume_slice"));
+}
+
+#[test]
+fn test_abort_to_prompt_terminator_verifies() {
+    let mut b = FunctionBuilder::new("abort", &[Type::I64], Some(Type::I64));
+    let entry = b.entry_block();
+    let arg = b.block_param(entry, 0);
+    let prompt = b.create_prompt();
+    b.abort_to_prompt(prompt, &[arg]);
+
+    let func = b.build();
+    verify(&func).unwrap();
+    assert!(func.to_string().contains("abort_to_prompt"));
+}
+
+#[test]
 fn test_load_store_roundtrip() {
     let mut b = FunctionBuilder::new("read_write", &[Type::Ptr], Some(Type::I64));
     let entry = b.entry_block();

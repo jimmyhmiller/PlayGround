@@ -18,6 +18,96 @@ pub enum RootTransportKind {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrameSliceMode {
+    OneShot,
+    MultiShot,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CapturedCallerResume {
+    TopLevel,
+    FromCall {
+        return_dest: Option<usize>,
+    },
+    FromInvoke {
+        normal_block: usize,
+        normal_args_vals: Vec<u64>,
+        exception_block: usize,
+        exception_args_vals: Vec<u64>,
+        has_ret_param: bool,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FrameResumePoint {
+    pub func_idx: usize,
+    pub block_idx: usize,
+    pub inst_idx: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapturedFrame {
+    pub resume: FrameResumePoint,
+    pub values: Vec<u64>,
+    pub root_value_indices: Vec<usize>,
+    pub resume_arg_value_indices: Vec<usize>,
+    pub active_prompts: Vec<u32>,
+    pub caller_resume: CapturedCallerResume,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FrameSliceSnapshot {
+    pub prompt_id: u32,
+    pub mode: FrameSliceMode,
+    pub frames: Vec<CapturedFrame>,
+    pub consumed: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrameSliceError {
+    InvalidRootIndex { frame_idx: usize, root_idx: usize },
+    MissingSlice,
+    Consumed,
+}
+
+impl Display for FrameSliceError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FrameSliceError::InvalidRootIndex { frame_idx, root_idx } => {
+                write!(
+                    f,
+                    "frame slice root index {root_idx} is out of bounds for captured frame {frame_idx}"
+                )
+            }
+            FrameSliceError::MissingSlice => f.write_str("frame slice handle does not exist"),
+            FrameSliceError::Consumed => f.write_str("frame slice has already been consumed"),
+        }
+    }
+}
+
+impl Error for FrameSliceError {}
+
+impl FrameSliceSnapshot {
+    pub fn validate(&self) -> Result<(), FrameSliceError> {
+        for (frame_idx, frame) in self.frames.iter().enumerate() {
+            for &root_idx in &frame.root_value_indices {
+                if root_idx >= frame.values.len() {
+                    return Err(FrameSliceError::InvalidRootIndex { frame_idx, root_idx });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn root_word_count(&self) -> usize {
+        self.frames
+            .iter()
+            .map(|frame| frame.root_value_indices.len())
+            .sum()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SlotClass {
     IncomingArg,
     Local,
@@ -57,6 +147,78 @@ impl Display for ConfigError {
 }
 
 impl Error for ConfigError {}
+
+pub trait FrameSliceStore {
+    type Handle: Clone;
+
+    fn insert_slice(&mut self, slice: FrameSliceSnapshot) -> Result<Self::Handle, FrameSliceError>;
+    fn clone_slice(&mut self, handle: &Self::Handle) -> Result<Self::Handle, FrameSliceError>;
+    fn slice(&self, handle: &Self::Handle) -> Result<&FrameSliceSnapshot, FrameSliceError>;
+    fn slice_mut(
+        &mut self,
+        handle: &Self::Handle,
+    ) -> Result<&mut FrameSliceSnapshot, FrameSliceError>;
+    fn encode_handle(handle: &Self::Handle) -> u64;
+    fn decode_handle(bits: u64) -> Result<Self::Handle, FrameSliceError>;
+
+    fn mark_consumed(&mut self, handle: &Self::Handle) -> Result<(), FrameSliceError> {
+        let slice = self.slice_mut(handle)?;
+        if slice.consumed {
+            return Err(FrameSliceError::Consumed);
+        }
+        slice.consumed = true;
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+pub struct InMemoryFrameSliceStore {
+    slices: Vec<FrameSliceSnapshot>,
+}
+
+impl InMemoryFrameSliceStore {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl FrameSliceStore for InMemoryFrameSliceStore {
+    type Handle = usize;
+
+    fn insert_slice(&mut self, slice: FrameSliceSnapshot) -> Result<Self::Handle, FrameSliceError> {
+        slice.validate()?;
+        let handle = self.slices.len();
+        self.slices.push(slice);
+        Ok(handle)
+    }
+
+    fn clone_slice(&mut self, handle: &Self::Handle) -> Result<Self::Handle, FrameSliceError> {
+        let mut cloned = self.slice(handle)?.clone();
+        cloned.consumed = false;
+        self.insert_slice(cloned)
+    }
+
+    fn slice(&self, handle: &Self::Handle) -> Result<&FrameSliceSnapshot, FrameSliceError> {
+        self.slices.get(*handle).ok_or(FrameSliceError::MissingSlice)
+    }
+
+    fn slice_mut(
+        &mut self,
+        handle: &Self::Handle,
+    ) -> Result<&mut FrameSliceSnapshot, FrameSliceError> {
+        self.slices
+            .get_mut(*handle)
+            .ok_or(FrameSliceError::MissingSlice)
+    }
+
+    fn encode_handle(handle: &Self::Handle) -> u64 {
+        *handle as u64
+    }
+
+    fn decode_handle(bits: u64) -> Result<Self::Handle, FrameSliceError> {
+        usize::try_from(bits).map_err(|_| FrameSliceError::MissingSlice)
+    }
+}
 
 pub trait ValueLayout: TagScheme {
     const NAME: &'static str;
@@ -643,5 +805,38 @@ mod tests {
     fn stack_map_safepoints_require_stack_map_transport() {
         let err = validate_execution_config::<InvalidStackMapSafepointConfig>().unwrap_err();
         assert_eq!(err.message, "stack-map safepoints require stack-map root transport");
+    }
+
+    #[test]
+    fn frame_slice_snapshot_validates_root_indices() {
+        let good = FrameSliceSnapshot {
+            prompt_id: 0,
+            mode: FrameSliceMode::OneShot,
+            frames: vec![CapturedFrame {
+                resume: FrameResumePoint {
+                    func_idx: 1,
+                    block_idx: 2,
+                    inst_idx: 3,
+                },
+                values: vec![10, 20, 30],
+                root_value_indices: vec![0, 2],
+                resume_arg_value_indices: vec![1],
+                active_prompts: vec![0],
+                caller_resume: CapturedCallerResume::TopLevel,
+            }],
+            consumed: false,
+        };
+        assert_eq!(good.root_word_count(), 2);
+        assert!(good.validate().is_ok());
+
+        let mut bad = good.clone();
+        bad.frames[0].root_value_indices.push(9);
+        assert_eq!(
+            bad.validate(),
+            Err(FrameSliceError::InvalidRootIndex {
+                frame_idx: 0,
+                root_idx: 9,
+            })
+        );
     }
 }

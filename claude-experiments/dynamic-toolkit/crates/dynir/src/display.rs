@@ -106,6 +106,16 @@ impl fmt::Display for Inst {
                 }
                 Ok(())
             }
+            Inst::PushPrompt(prompt) => write!(f, "push_prompt prompt#{}", prompt.0),
+            Inst::PopPrompt(prompt) => write!(f, "pop_prompt prompt#{}", prompt.0),
+            Inst::CaptureSlice(prompt, live) => {
+                write!(f, "capture_slice prompt#{}", prompt.0)?;
+                if !live.is_empty() {
+                    write!(f, " [{}]", fmt_args(live))?;
+                }
+                Ok(())
+            }
+            Inst::CloneSlice(slice) => write!(f, "clone_slice {slice}"),
 
             Inst::Safepoint(live) => {
                 write!(f, "safepoint")?;
@@ -205,6 +215,20 @@ impl fmt::Display for Terminator {
                 write!(f, ", {exception}")?;
                 if !exception_args.is_empty() {
                     write!(f, "({})", fmt_args(exception_args))?;
+                }
+                Ok(())
+            }
+            Terminator::ResumeSlice { slice, args } => {
+                write!(f, "resume_slice {slice}")?;
+                if !args.is_empty() {
+                    write!(f, "({})", fmt_args(args))?;
+                }
+                Ok(())
+            }
+            Terminator::AbortToPrompt { prompt, args } => {
+                write!(f, "abort_to_prompt prompt#{}", prompt.0)?;
+                if !args.is_empty() {
+                    write!(f, "({})", fmt_args(args))?;
                 }
                 Ok(())
             }

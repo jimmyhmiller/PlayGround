@@ -171,6 +171,7 @@ pub struct FunctionBuilder {
     current_block: Option<BlockId>,
     extern_funcs: Vec<ExternFunc>,
     deopt_info: Vec<DeoptInfo>,
+    next_prompt: u32,
 }
 
 impl FunctionBuilder {
@@ -190,6 +191,7 @@ impl FunctionBuilder {
             current_block: None,
             extern_funcs: Vec::new(),
             deopt_info: Vec::new(),
+            next_prompt: 0,
         };
         let entry = b.create_block(params);
         b.switch_to_block(entry);
@@ -523,6 +525,39 @@ impl FunctionBuilder {
         self.push_void_inst(Inst::Guard(cond, deopt_id, live.to_vec()));
     }
 
+    // ── Delimited frame slices ─────────────────────────────────
+
+    pub fn create_prompt(&mut self) -> PromptId {
+        let id = PromptId(self.next_prompt);
+        self.next_prompt += 1;
+        id
+    }
+
+    pub fn push_prompt(&mut self, prompt: PromptId) {
+        assert!(prompt.index() < self.next_prompt as usize, "invalid prompt id");
+        self.push_void_inst(Inst::PushPrompt(prompt));
+    }
+
+    pub fn pop_prompt(&mut self, prompt: PromptId) {
+        assert!(prompt.index() < self.next_prompt as usize, "invalid prompt id");
+        self.push_void_inst(Inst::PopPrompt(prompt));
+    }
+
+    pub fn capture_slice(&mut self, prompt: PromptId, live: &[Value]) -> Value {
+        assert!(prompt.index() < self.next_prompt as usize, "invalid prompt id");
+        self.push_inst(Type::FrameSlice, Inst::CaptureSlice(prompt, live.to_vec()))
+    }
+
+    pub fn clone_slice(&mut self, slice: Value) -> Value {
+        assert_eq!(
+            self.value_type(slice),
+            Type::FrameSlice,
+            "clone_slice requires frameslice, got {}",
+            self.value_type(slice)
+        );
+        self.push_inst(Type::FrameSlice, Inst::CloneSlice(slice))
+    }
+
     // ── Calls ──────────────────────────────────────────────────
 
     pub fn call(&mut self, func: FuncRef, args: &[Value]) -> Option<Value> {
@@ -696,6 +731,27 @@ impl FunctionBuilder {
         self.set_terminator(Terminator::Unreachable);
     }
 
+    pub fn resume_slice(&mut self, slice: Value, args: &[Value]) {
+        assert_eq!(
+            self.value_type(slice),
+            Type::FrameSlice,
+            "resume_slice requires frameslice, got {}",
+            self.value_type(slice)
+        );
+        self.set_terminator(Terminator::ResumeSlice {
+            slice,
+            args: args.to_vec(),
+        });
+    }
+
+    pub fn abort_to_prompt(&mut self, prompt: PromptId, args: &[Value]) {
+        assert!(prompt.index() < self.next_prompt as usize, "invalid prompt id");
+        self.set_terminator(Terminator::AbortToPrompt {
+            prompt,
+            args: args.to_vec(),
+        });
+    }
+
     // ── Build ──────────────────────────────────────────────────
 
     /// Finalize and produce the Function.
@@ -720,6 +776,7 @@ impl FunctionBuilder {
             value_types: self.value_types,
             extern_funcs: self.extern_funcs,
             deopt_info: self.deopt_info,
+            prompt_count: self.next_prompt,
         }
     }
 

@@ -42,6 +42,10 @@ pub enum VerifyError {
         expected: usize,
         got: usize,
     },
+    InvalidPrompt {
+        prompt: PromptId,
+        context: String,
+    },
     DuplicateValueDef {
         value: Value,
     },
@@ -110,6 +114,9 @@ impl fmt::Display for VerifyError {
             }
             VerifyError::EntryParamMismatch { expected, got } => {
                 write!(f, "entry block params: expected {expected}, got {got}")
+            }
+            VerifyError::InvalidPrompt { prompt, context } => {
+                write!(f, "invalid prompt prompt#{} ({context})", prompt.0)
             }
             VerifyError::DuplicateValueDef { value } => {
                 write!(f, "value v{} defined more than once", value.0)
@@ -337,6 +344,23 @@ fn check_inst_types(func: &Function, inst: &Inst, _block: BlockId, errors: &mut 
                 });
             }
         }
+        Inst::PushPrompt(prompt) | Inst::PopPrompt(prompt) | Inst::CaptureSlice(prompt, _) => {
+            if prompt.index() >= func.prompt_count as usize {
+                errors.push(VerifyError::InvalidPrompt {
+                    prompt: *prompt,
+                    context: "instruction".into(),
+                });
+            }
+        }
+        Inst::CloneSlice(slice) => {
+            if vt(*slice) != Type::FrameSlice {
+                errors.push(VerifyError::TypeMismatch {
+                    expected: Type::FrameSlice,
+                    got: vt(*slice),
+                    context: "clone_slice requires frameslice".into(),
+                });
+            }
+        }
         _ => {} // Other instructions validated structurally
     }
 }
@@ -466,6 +490,23 @@ fn check_terminator(
             }
             if exception.index() < n_blocks {
                 check_branch_args(func, block, *exception, exception_args, errors);
+            }
+        }
+        Terminator::ResumeSlice { slice, .. } => {
+            if func.value_type(*slice) != Type::FrameSlice {
+                errors.push(VerifyError::TypeMismatch {
+                    expected: Type::FrameSlice,
+                    got: func.value_type(*slice),
+                    context: "resume_slice requires frameslice".into(),
+                });
+            }
+        }
+        Terminator::AbortToPrompt { prompt, .. } => {
+            if prompt.index() >= func.prompt_count as usize {
+                errors.push(VerifyError::InvalidPrompt {
+                    prompt: *prompt,
+                    context: "abort_to_prompt".into(),
+                });
             }
         }
         Terminator::Unreachable => {}

@@ -1,5 +1,5 @@
 use crate::{
-    JitFunction, JitModule, JitOutcome, SafepointHandlerPayloadKind, call_jit,
+    FrameReifyKind, JitFunction, JitModule, JitOutcome, SafepointHandlerPayloadKind, call_jit,
     call_jit_with_reg_limit,
 };
 use crate::backend::{Arm64Backend, X64Backend};
@@ -37,6 +37,175 @@ fn run_jit(func: &dynir::Function, args: &[u64]) -> u64 {
 fn run_jit_outcome(func: &dynir::Function, args: &[u64]) -> JitOutcome {
     let jit = JitFunction::compile::<NanBox>(func, &[]);
     jit.call_outcome(args)
+}
+
+#[test]
+fn capture_slice_returns_frame_reify_outcome() {
+    let mut b = FunctionBuilder::new("capture", &[Type::I64], Some(Type::FrameSlice));
+    let entry = b.entry_block();
+    let arg = b.block_param(entry, 0);
+    let prompt = b.create_prompt();
+    b.push_prompt(prompt);
+    let slice = b.capture_slice(prompt, &[arg]);
+    b.pop_prompt(prompt);
+    b.unreachable();
+    let func = b.build();
+
+    let jit = JitFunction::compile::<NanBox>(&func, &[]);
+    match jit.call_outcome(&[55]) {
+        JitOutcome::CaptureSlice { record_idx, values, .. } => {
+            assert_eq!(record_idx, 0);
+            assert_eq!(values, vec![55, 0]);
+        }
+        other => panic!("expected capture outcome, got {other:?}"),
+    }
+
+    let records = jit.frame_reify_records();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].kind, FrameReifyKind::CaptureSlice);
+    assert_eq!(records[0].prompt, Some(prompt));
+    assert_eq!(records[0].active_prompts, vec![prompt]);
+    assert_eq!(records[0].frame_value_count, func.value_types.len());
+    assert_eq!(records[0].value_indices, vec![arg.index(), slice.index()]);
+    assert_eq!(records[0].value_types, vec![Type::I64, Type::FrameSlice]);
+    assert!(records[0].root_payload_indices.is_empty());
+    assert_eq!(records[0].return_dest, Some(slice.index()));
+}
+
+#[test]
+fn capture_slice_marks_gc_payload_positions_as_roots() {
+    let mut b = FunctionBuilder::new("capture_gc", &[Type::GcPtr, Type::I64], Some(Type::FrameSlice));
+    let entry = b.entry_block();
+    let obj = b.block_param(entry, 0);
+    let num = b.block_param(entry, 1);
+    let prompt = b.create_prompt();
+    b.push_prompt(prompt);
+    let slice = b.capture_slice(prompt, &[num, obj]);
+    b.pop_prompt(prompt);
+    b.unreachable();
+    let func = b.build();
+
+    let jit = JitFunction::compile::<NanBox>(&func, &[]);
+    let records = jit.frame_reify_records();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].frame_value_count, func.value_types.len());
+    assert_eq!(records[0].value_indices, vec![obj.index(), num.index(), slice.index()]);
+    assert_eq!(records[0].value_types, vec![Type::GcPtr, Type::I64, Type::FrameSlice]);
+    assert_eq!(records[0].root_payload_indices, vec![0]);
+}
+
+#[test]
+fn abort_to_prompt_returns_frame_reify_outcome() {
+    let mut b = FunctionBuilder::new("abort", &[Type::I64], Some(Type::I64));
+    let entry = b.entry_block();
+    let arg = b.block_param(entry, 0);
+    let prompt = b.create_prompt();
+    b.abort_to_prompt(prompt, &[arg]);
+    let func = b.build();
+
+    let jit = JitFunction::compile::<NanBox>(&func, &[]);
+    match jit.call_outcome(&[77]) {
+        JitOutcome::AbortToPrompt { record_idx, values, .. } => {
+            assert_eq!(record_idx, 0);
+            assert_eq!(values, vec![77]);
+        }
+        other => panic!("expected abort outcome, got {other:?}"),
+    }
+
+    let records = jit.frame_reify_records();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].kind, FrameReifyKind::AbortToPrompt);
+    assert_eq!(records[0].prompt, Some(prompt));
+    assert_eq!(records[0].active_prompts, Vec::<PromptId>::new());
+    assert_eq!(records[0].frame_value_count, func.value_types.len());
+    assert_eq!(records[0].value_indices, vec![arg.index()]);
+    assert_eq!(records[0].value_types, vec![Type::I64]);
+    assert!(records[0].root_payload_indices.is_empty());
+    assert_eq!(records[0].return_dest, None);
+}
+
+#[test]
+fn clone_slice_returns_frame_reify_outcome() {
+    let mut b = FunctionBuilder::new("clone_slice", &[Type::FrameSlice], Some(Type::FrameSlice));
+    let entry = b.entry_block();
+    let slice = b.block_param(entry, 0);
+    let cloned = b.clone_slice(slice);
+    b.unreachable();
+    let func = b.build();
+
+    let jit = JitFunction::compile::<NanBox>(&func, &[]);
+    match jit.call_outcome(&[123]) {
+        JitOutcome::CloneSlice { record_idx, values, .. } => {
+            assert_eq!(record_idx, 0);
+            assert_eq!(values, vec![123, 0]);
+        }
+        other => panic!("expected clone outcome, got {other:?}"),
+    }
+
+    let records = jit.frame_reify_records();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].kind, FrameReifyKind::CloneSlice);
+    assert_eq!(records[0].prompt, None);
+    assert_eq!(records[0].active_prompts, Vec::<PromptId>::new());
+    assert_eq!(records[0].frame_value_count, func.value_types.len());
+    assert_eq!(records[0].value_indices, vec![slice.index(), cloned.index()]);
+    assert_eq!(records[0].control_value_indices, vec![slice.index()]);
+    assert_eq!(records[0].value_types, vec![Type::FrameSlice, Type::FrameSlice]);
+    assert_eq!(records[0].root_payload_indices, vec![0]);
+    assert_eq!(records[0].return_dest, Some(cloned.index()));
+}
+
+#[test]
+fn resume_slice_returns_frame_reify_outcome() {
+    let mut b = FunctionBuilder::new("resume_slice", &[Type::FrameSlice, Type::I64], Some(Type::I64));
+    let entry = b.entry_block();
+    let slice = b.block_param(entry, 0);
+    let value = b.block_param(entry, 1);
+    b.resume_slice(slice, &[value]);
+    let func = b.build();
+
+    let jit = JitFunction::compile::<NanBox>(&func, &[]);
+    match jit.call_outcome(&[456, 99]) {
+        JitOutcome::ResumeSlice { record_idx, values, .. } => {
+            assert_eq!(record_idx, 0);
+            assert_eq!(values, vec![456, 99]);
+        }
+        other => panic!("expected resume outcome, got {other:?}"),
+    }
+
+    let records = jit.frame_reify_records();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].kind, FrameReifyKind::ResumeSlice);
+    assert_eq!(records[0].prompt, None);
+    assert_eq!(records[0].active_prompts, Vec::<PromptId>::new());
+    assert_eq!(records[0].frame_value_count, func.value_types.len());
+    assert_eq!(records[0].value_indices, vec![slice.index(), value.index()]);
+    assert_eq!(records[0].control_value_indices, vec![slice.index(), value.index()]);
+    assert_eq!(records[0].value_types, vec![Type::FrameSlice, Type::I64]);
+    assert_eq!(records[0].root_payload_indices, vec![0]);
+    assert_eq!(records[0].return_dest, None);
+}
+
+#[test]
+fn capture_slice_records_nested_active_prompts() {
+    let mut b = FunctionBuilder::new("capture_nested", &[Type::I64], Some(Type::FrameSlice));
+    let entry = b.entry_block();
+    let arg = b.block_param(entry, 0);
+    let outer = b.create_prompt();
+    let inner = b.create_prompt();
+    b.push_prompt(outer);
+    b.push_prompt(inner);
+    let _slice = b.capture_slice(inner, &[arg]);
+    b.pop_prompt(inner);
+    b.pop_prompt(outer);
+    b.unreachable();
+    let func = b.build();
+
+    let jit = JitFunction::compile::<NanBox>(&func, &[]);
+    let records = jit.frame_reify_records();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].prompt, Some(inner));
+    assert_eq!(records[0].active_prompts, vec![outer, inner]);
 }
 
 fn run_jit_with_config<Cfg: ExecutionConfig>(func: &dynir::Function, args: &[u64]) -> u64

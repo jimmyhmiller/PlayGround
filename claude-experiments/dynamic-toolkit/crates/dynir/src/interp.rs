@@ -1,8 +1,11 @@
+use std::cell::RefCell;
 use std::marker::PhantomData;
 
 use dynexec::{
-    DefaultExecutionConfig, ExecutionConfig, LayoutConfigDefaults, RootPrecision, RootStrategy,
-    RootTransport, RootTransportKind, ValueLayout,
+    CapturedCallerResume, CapturedFrame, DefaultExecutionConfig, ExecutionConfig,
+    FrameResumePoint, FrameSliceError, FrameSliceMode, FrameSliceSnapshot, FrameSliceStore,
+    InMemoryFrameSliceStore, LayoutConfigDefaults, RootPrecision, RootStrategy, RootTransport,
+    RootTransportKind, ValueLayout,
 };
 use dynvalue::Decoded;
 
@@ -28,6 +31,14 @@ pub enum InterpError {
     UncaughtException(u64),
     UnknownExternFunc(String),
     DivideByZero,
+    UnsupportedControl(String),
+    FrameSlice(FrameSliceError),
+}
+
+impl From<FrameSliceError> for InterpError {
+    fn from(value: FrameSliceError) -> Self {
+        InterpError::FrameSlice(value)
+    }
 }
 
 /// What extern callbacks return.
@@ -118,6 +129,7 @@ struct CallFrame {
     root_frame: usize,
     val_to_slot: Vec<Option<usize>>,
     caller_resume: CallerResume,
+    active_prompts: Vec<PromptId>,
 }
 
 /// What `execute_frame` produces when it needs to transfer control.
@@ -138,6 +150,19 @@ enum FrameAction {
         resume_point: u64,
         live_values: Vec<u64>,
     },
+    CaptureSlice {
+        prompt: PromptId,
+        live: Vec<Value>,
+        return_dest: Value,
+    },
+    ResumeSlice {
+        slice_bits: u64,
+        args: Vec<u64>,
+    },
+    AbortToPrompt {
+        prompt: PromptId,
+        args: Vec<u64>,
+    },
 }
 
 /// Multi-function interpreter that executes [`Module`]s with an iterative call stack.
@@ -151,31 +176,42 @@ pub struct ConfiguredModuleInterpreter<
     'a,
     Cfg: ExecutionConfig,
     R: InterpRootManager<Cfg::Layout, Cfg::Roots, Cfg::RootTransport> = NoGcRoots,
+    S: FrameSliceStore = InMemoryFrameSliceStore,
 > {
     module: &'a Module,
     roots: &'a R,
+    frame_slices: RefCell<S>,
     externs: Vec<Option<Box<dyn Fn(&[u64]) -> ExternCallResult + 'a>>>,
     indirect_handler: Option<Box<dyn Fn(u64, &[u64]) -> ExternCallResult + 'a>>,
     _config: PhantomData<Cfg>,
 }
 
 pub type ModuleInterpreter<'a, S, R = NoGcRoots> =
-    ConfiguredModuleInterpreter<'a, DefaultExecutionConfig<S>, R>;
+    ConfiguredModuleInterpreter<'a, DefaultExecutionConfig<S>, R, InMemoryFrameSliceStore>;
 
-impl<'a, Cfg: ExecutionConfig, R> ConfiguredModuleInterpreter<'a, Cfg, R>
+impl<'a, Cfg: ExecutionConfig, R, S> ConfiguredModuleInterpreter<'a, Cfg, R, S>
 where
     Cfg::Layout: LayoutConfigDefaults,
     R: InterpRootManager<Cfg::Layout, Cfg::Roots, Cfg::RootTransport>,
+    S: FrameSliceStore,
 {
-    pub fn new(module: &'a Module, roots: &'a R) -> Self {
+    pub fn with_frame_slices(module: &'a Module, roots: &'a R, frame_slices: S) -> Self {
         let externs = (0..module.func_table.len()).map(|_| None).collect();
         ConfiguredModuleInterpreter {
             module,
             roots,
+            frame_slices: RefCell::new(frame_slices),
             externs,
             indirect_handler: None,
             _config: PhantomData,
         }
+    }
+
+    pub fn new(module: &'a Module, roots: &'a R) -> Self
+    where
+        S: Default,
+    {
+        Self::with_frame_slices(module, roots, S::default())
     }
 
     /// Bind a closure to an extern function by FuncRef.
@@ -213,7 +249,23 @@ where
 
         let mut stack: Vec<CallFrame> = Vec::new();
         self.push_internal_frame(&mut stack, entry_idx, args, CallerResume::TopLevel, roots);
+        self.run_stack(stack, roots)
+    }
 
+    pub fn resume_snapshot(
+        &self,
+        snapshot: FrameSliceSnapshot,
+        args: &[u64],
+    ) -> Result<InterpResult, InterpError> {
+        let roots = self.roots;
+        let mut stack = Vec::new();
+        restore_frame_slice::<Cfg::Layout, Cfg::Roots, Cfg::RootTransport, R>(
+            &mut stack, snapshot, args, roots,
+        )?;
+        self.run_stack(stack, roots)
+    }
+
+    fn run_stack(&self, mut stack: Vec<CallFrame>, roots: &R) -> Result<InterpResult, InterpError> {
         loop {
             let action = self.execute_frame(stack.last_mut().unwrap(), roots)?;
 
@@ -323,6 +375,93 @@ where
                         live_values,
                     });
                 }
+
+                FrameAction::CaptureSlice {
+                    prompt,
+                    live,
+                    return_dest,
+                } => {
+                    let slice =
+                        capture_frame_slice::<Cfg::Layout, Cfg::Roots, Cfg::RootTransport, R>(
+                            &stack, prompt, &live, return_dest, roots,
+                        )?;
+                    let handle = self
+                        .frame_slices
+                        .borrow_mut()
+                        .insert_slice(slice)
+                        .map_err(InterpError::FrameSlice)?;
+                    let bits = S::encode_handle(&handle);
+                    stack
+                        .last_mut()
+                        .unwrap()
+                        .vals[return_dest.index()] = bits;
+                }
+
+                FrameAction::ResumeSlice { slice_bits, args } => {
+                    let handle = S::decode_handle(slice_bits).map_err(InterpError::FrameSlice)?;
+                    let snapshot = {
+                        let mut store = self.frame_slices.borrow_mut();
+                        let snapshot = store.slice(&handle).map_err(InterpError::FrameSlice)?.clone();
+                        store.mark_consumed(&handle).map_err(InterpError::FrameSlice)?;
+                        snapshot
+                    };
+                    restore_frame_slice::<Cfg::Layout, Cfg::Roots, Cfg::RootTransport, R>(
+                        &mut stack, snapshot, &args, roots,
+                    )?;
+                }
+
+                FrameAction::AbortToPrompt { prompt, args } => {
+                    let ret_val = args.first().copied();
+
+                    loop {
+                        let frame = stack.pop().unwrap();
+                        roots.pop_frame();
+
+                        if frame.active_prompts.contains(&prompt) {
+                            if stack.is_empty() {
+                                return Ok(match ret_val {
+                                    Some(v) => InterpResult::Value(v),
+                                    None => InterpResult::Void,
+                                });
+                            }
+
+                            let caller = stack.last_mut().unwrap();
+                            sync_all_from_roots(caller, roots);
+
+                            match frame.caller_resume {
+                                CallerResume::FromCall { return_dest } => {
+                                    if let (Some(dest), Some(val)) = (return_dest, ret_val) {
+                                        caller.vals[dest.index()] = val;
+                                    }
+                                }
+                                CallerResume::FromInvoke {
+                                    normal,
+                                    normal_args_vals,
+                                    has_ret_param,
+                                    ..
+                                } => {
+                                    let func = &self.module.functions[caller.func_idx];
+                                    let target_block = &func.blocks[normal.index()];
+                                    let mut param_idx = 0;
+                                    if has_ret_param {
+                                        if let Some(val) = ret_val {
+                                            caller.vals[target_block.params[0].0.index()] = val;
+                                        }
+                                        param_idx = 1;
+                                    }
+                                    for (i, val) in normal_args_vals.iter().enumerate() {
+                                        caller.vals[target_block.params[param_idx + i].0.index()] =
+                                            *val;
+                                    }
+                                    caller.block_idx = normal.index();
+                                    caller.inst_idx = 0;
+                                }
+                                CallerResume::TopLevel => unreachable!(),
+                            }
+                            break;
+                        }
+                    }
+                }
             }
         }
     }
@@ -353,6 +492,7 @@ where
             root_frame,
             val_to_slot,
             caller_resume,
+            active_prompts: Vec::new(),
         });
     }
 
@@ -368,6 +508,43 @@ where
                 let node = &block.insts[frame.inst_idx];
 
                 match &node.inst {
+                    Inst::PushPrompt(prompt) => {
+                        frame.active_prompts.push(*prompt);
+                        frame.inst_idx += 1;
+                        continue;
+                    }
+
+                    Inst::PopPrompt(prompt) => {
+                        let popped = frame.active_prompts.pop();
+                        assert_eq!(popped, Some(*prompt), "prompt stack mismatch in interpreter");
+                        frame.inst_idx += 1;
+                        continue;
+                    }
+
+                    Inst::CaptureSlice(prompt, live) => {
+                        let return_dest = node.value.expect("capture_slice must produce a value");
+                        frame.inst_idx += 1;
+                        return Ok(FrameAction::CaptureSlice {
+                            prompt: *prompt,
+                            live: live.clone(),
+                            return_dest,
+                        });
+                    }
+
+                    Inst::CloneSlice(slice) => {
+                        let dest = node.value.expect("clone_slice must produce a value");
+                        let handle = S::decode_handle(frame.vals[slice.index()])
+                            .map_err(InterpError::FrameSlice)?;
+                        let cloned = self
+                            .frame_slices
+                            .borrow_mut()
+                            .clone_slice(&handle)
+                            .map_err(InterpError::FrameSlice)?;
+                        frame.vals[dest.index()] = S::encode_handle(&cloned);
+                        frame.inst_idx += 1;
+                        continue;
+                    }
+
                     Inst::Safepoint(live) => {
                         handle_safepoint(frame, live, roots);
                         frame.inst_idx += 1;
@@ -613,6 +790,21 @@ where
                             frame.inst_idx = 0;
                         }
                     }
+                }
+                Terminator::ResumeSlice { slice, args } => {
+                    let arg_vals = args.iter().map(|v| frame.vals[v.index()]).collect();
+                    return Ok(FrameAction::ResumeSlice {
+                        slice_bits: frame.vals[slice.index()],
+                        args: arg_vals,
+                    });
+                }
+
+                Terminator::AbortToPrompt { prompt, args } => {
+                    let arg_vals = args.iter().map(|v| frame.vals[v.index()]).collect();
+                    return Ok(FrameAction::AbortToPrompt {
+                        prompt: *prompt,
+                        args: arg_vals,
+                    });
                 }
 
                 Terminator::Unreachable => {
@@ -888,8 +1080,14 @@ fn exec_non_call_inst<S: ValueLayout>(
             }
         }
 
-        // Call/CallIndirect/Safepoint must be handled by the caller
-        Inst::Call(..) | Inst::CallIndirect(..) | Inst::Safepoint(..) => {
+        // Call/CallIndirect/Safepoint and frame-slice control must be handled by the caller
+        Inst::Call(..)
+        | Inst::CallIndirect(..)
+        | Inst::Safepoint(..)
+        | Inst::PushPrompt(..)
+        | Inst::PopPrompt(..)
+        | Inst::CaptureSlice(..)
+        | Inst::CloneSlice(..) => {
             panic!("Call/CallIndirect/Safepoint must be handled by the interpreter, not exec_non_call_inst");
         }
     }
@@ -956,6 +1154,165 @@ fn build_gc_slot_map(func: &Function, precision: RootPrecision) -> Vec<Option<us
 
 fn count_gc_slots_from_map(map: &[Option<usize>]) -> usize {
     map.iter().filter(|s| s.is_some()).count()
+}
+
+fn serialize_caller_resume(resume: &CallerResume) -> CapturedCallerResume {
+    match resume {
+        CallerResume::TopLevel => CapturedCallerResume::TopLevel,
+        CallerResume::FromCall { return_dest } => CapturedCallerResume::FromCall {
+            return_dest: return_dest.map(|value| value.index()),
+        },
+        CallerResume::FromInvoke {
+            normal,
+            normal_args_vals,
+            exception,
+            exception_args_vals,
+            has_ret_param,
+        } => CapturedCallerResume::FromInvoke {
+            normal_block: normal.index(),
+            normal_args_vals: normal_args_vals.clone(),
+            exception_block: exception.index(),
+            exception_args_vals: exception_args_vals.clone(),
+            has_ret_param: *has_ret_param,
+        },
+    }
+}
+
+fn deserialize_caller_resume(resume: &CapturedCallerResume) -> CallerResume {
+    match resume {
+        CapturedCallerResume::TopLevel => CallerResume::TopLevel,
+        CapturedCallerResume::FromCall { return_dest } => CallerResume::FromCall {
+            return_dest: return_dest.map(Value::from_index),
+        },
+        CapturedCallerResume::FromInvoke {
+            normal_block,
+            normal_args_vals,
+            exception_block,
+            exception_args_vals,
+            has_ret_param,
+        } => CallerResume::FromInvoke {
+            normal: BlockId::from_index(*normal_block),
+            normal_args_vals: normal_args_vals.clone(),
+            exception: BlockId::from_index(*exception_block),
+            exception_args_vals: exception_args_vals.clone(),
+            has_ret_param: *has_ret_param,
+        },
+    }
+}
+
+fn capture_frame_slice<L, Roots, Transport, R>(
+    stack: &[CallFrame],
+    prompt: PromptId,
+    _live: &[Value],
+    return_dest: Value,
+    roots: &R,
+) -> Result<FrameSliceSnapshot, InterpError>
+where
+    L: ValueLayout,
+    Roots: RootStrategy<L>,
+    Transport: RootTransport<L, Roots>,
+    R: InterpRootManager<L, Roots, Transport>,
+{
+    let start_idx = stack
+        .iter()
+        .enumerate()
+        .rfind(|(_, frame)| frame.active_prompts.contains(&prompt))
+        .map(|(idx, _)| idx)
+        .ok_or_else(|| {
+            InterpError::UnsupportedControl(format!("capture_slice: prompt {:?} is not active", prompt))
+        })?;
+
+    let mut frames = Vec::new();
+    for frame in &stack[start_idx..] {
+        let mut vals = frame.vals.clone();
+        for (i, slot_opt) in frame.val_to_slot.iter().enumerate() {
+            if let Some(slot) = slot_opt {
+                vals[i] = roots.get_root(frame.root_frame, *slot);
+            }
+        }
+        let root_value_indices = frame
+            .val_to_slot
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, slot)| slot.map(|_| idx))
+            .collect();
+        frames.push(CapturedFrame {
+            resume: FrameResumePoint {
+                func_idx: frame.func_idx,
+                block_idx: frame.block_idx,
+                inst_idx: frame.inst_idx,
+            },
+            values: vals,
+            root_value_indices,
+            resume_arg_value_indices: Vec::new(),
+            active_prompts: frame.active_prompts.iter().map(|p| p.0).collect(),
+            caller_resume: serialize_caller_resume(&frame.caller_resume),
+        });
+    }
+    if let Some(top) = frames.last_mut() {
+        top.resume_arg_value_indices = vec![return_dest.index()];
+    }
+
+    Ok(FrameSliceSnapshot {
+        prompt_id: prompt.0,
+        mode: FrameSliceMode::OneShot,
+        frames,
+        consumed: false,
+    })
+}
+
+fn restore_frame_slice<L, Roots, Transport, R>(
+    stack: &mut Vec<CallFrame>,
+    snapshot: FrameSliceSnapshot,
+    args: &[u64],
+    roots: &R,
+) -> Result<(), InterpError>
+where
+    L: ValueLayout,
+    Roots: RootStrategy<L>,
+    Transport: RootTransport<L, Roots>,
+    R: InterpRootManager<L, Roots, Transport>,
+{
+    while stack.pop().is_some() {
+        roots.pop_frame();
+    }
+
+    for (frame_idx, captured) in snapshot.frames.iter().enumerate() {
+        let func_idx = captured.resume.func_idx;
+        let root_frame = roots.push_frame(captured.root_value_indices.len());
+        let mut val_to_slot = vec![None; captured.values.len()];
+        for (slot, &value_idx) in captured.root_value_indices.iter().enumerate() {
+            val_to_slot[value_idx] = Some(slot);
+        }
+        let mut vals = captured.values.clone();
+        if frame_idx + 1 == snapshot.frames.len() {
+            for (idx, value_idx) in captured.resume_arg_value_indices.iter().copied().enumerate() {
+                if let Some(arg) = args.get(idx) {
+                    vals[value_idx] = *arg;
+                }
+            }
+        }
+
+        let frame = CallFrame {
+            func_idx,
+            vals,
+            block_idx: captured.resume.block_idx,
+            inst_idx: captured.resume.inst_idx,
+            root_frame,
+            val_to_slot,
+            caller_resume: deserialize_caller_resume(&captured.caller_resume),
+            active_prompts: captured
+                .active_prompts
+                .iter()
+                .copied()
+                .map(PromptId)
+                .collect(),
+        };
+        sync_all_to_roots::<L, Roots, Transport, R>(&frame, roots);
+        stack.push(frame);
+    }
+
+    Ok(())
 }
 
 /// Sync all GcPtr values from a frame into root slots.
@@ -1042,7 +1399,7 @@ fn mask(val: u64, ty: Type) -> u64 {
     match ty {
         Type::I8 => val & 0xFF,
         Type::I32 => val & 0xFFFF_FFFF,
-        Type::I64 | Type::Ptr | Type::GcPtr | Type::F64 => val,
+        Type::I64 | Type::Ptr | Type::GcPtr | Type::F64 | Type::FrameSlice => val,
     }
 }
 
@@ -1051,7 +1408,7 @@ fn sign_extend(val: u64, ty: Type) -> i64 {
     match ty {
         Type::I8 => val as u8 as i8 as i64,
         Type::I32 => val as u32 as i32 as i64,
-        Type::I64 | Type::Ptr | Type::GcPtr => val as i64,
+        Type::I64 | Type::Ptr | Type::GcPtr | Type::FrameSlice => val as i64,
         Type::F64 => val as i64,
     }
 }

@@ -1,3 +1,5 @@
+use std::cell::RefCell;
+use std::collections::VecDeque;
 use std::marker::PhantomData;
 
 mod backend;
@@ -7,8 +9,9 @@ use backend::{
     MachineWordSize,
 };
 use dynexec::{
-    CallArgLocation, CallingConvention, DefaultExecutionConfig, ExecutionConfig, FrameLayout,
-    FrameSlotAccess, FrameStrategy, LayoutConfigDefaults, RootTransport, RootTransportKind,
+    CallArgLocation, CallingConvention, CapturedCallerResume, CapturedFrame,
+    DefaultExecutionConfig, ExecutionConfig, FrameLayout, FrameResumePoint, FrameSlotAccess,
+    FrameSlotBase, FrameStrategy, LayoutConfigDefaults, RootTransport, RootTransportKind,
     validate_execution_config,
 };
 use dynasm::buffer::{CodeBuffer, Label};
@@ -31,6 +34,29 @@ pub struct SafepointRecord {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrameReifyKind {
+    CaptureSlice,
+    CloneSlice,
+    ResumeSlice,
+    AbortToPrompt,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FrameReifyRecord {
+    pub kind: FrameReifyKind,
+    pub prompt: Option<PromptId>,
+    pub active_prompts: Vec<PromptId>,
+    pub resume: FrameResumePoint,
+    pub native_resume_offset: Option<usize>,
+    pub frame_value_count: usize,
+    pub value_indices: Vec<usize>,
+    pub control_value_indices: Vec<usize>,
+    pub value_types: Vec<Type>,
+    pub root_payload_indices: Vec<usize>,
+    pub return_dest: Option<usize>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SafepointHandlerPayloadKind {
     FrameSize,
     SafepointIndex,
@@ -43,6 +69,10 @@ pub enum JitOutcomeKind {
     ReturnVoid = 1,
     Exception = 2,
     Deopt = 3,
+    CaptureSlice = 4,
+    AbortToPrompt = 5,
+    CloneSlice = 6,
+    ResumeSlice = 7,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -55,6 +85,134 @@ pub enum JitOutcome {
         resume_point: u64,
         live_values: Vec<u64>,
     },
+    CaptureSlice {
+        func_idx: usize,
+        record_idx: usize,
+        values: Vec<u64>,
+    },
+    CloneSlice {
+        func_idx: usize,
+        record_idx: usize,
+        values: Vec<u64>,
+    },
+    ResumeSlice {
+        func_idx: usize,
+        record_idx: usize,
+        values: Vec<u64>,
+    },
+    AbortToPrompt {
+        func_idx: usize,
+        record_idx: usize,
+        values: Vec<u64>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SuspendedJitFrame {
+    pub frame: CapturedFrame,
+    pub callee_caller_resume: CapturedCallerResume,
+}
+
+#[derive(Debug)]
+struct CallSuspendRecord {
+    resume: FrameResumePoint,
+    native_resume_offset: Option<usize>,
+    native_exception_resume_offset: Option<usize>,
+    value_accesses: Vec<Option<FrameSlotAccess>>,
+    root_value_indices: Vec<usize>,
+    active_prompts: Vec<u32>,
+    callee_caller_resume: SuspendCallerResume,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SuspendCallerResume {
+    FromCall {
+        return_dest: Option<usize>,
+    },
+    FromInvoke {
+        normal_block: usize,
+        normal_arg_indices: Vec<usize>,
+        exception_block: usize,
+        exception_arg_indices: Vec<usize>,
+        has_ret_param: bool,
+    },
+}
+
+impl SuspendCallerResume {
+    fn materialize(&self, values: &[u64]) -> CapturedCallerResume {
+        match self {
+            SuspendCallerResume::FromCall { return_dest } => CapturedCallerResume::FromCall {
+                return_dest: *return_dest,
+            },
+            SuspendCallerResume::FromInvoke {
+                normal_block,
+                normal_arg_indices,
+                exception_block,
+                exception_arg_indices,
+                has_ret_param,
+            } => CapturedCallerResume::FromInvoke {
+                normal_block: *normal_block,
+                normal_args_vals: normal_arg_indices
+                    .iter()
+                    .map(|&idx| values.get(idx).copied().unwrap_or(0))
+                    .collect(),
+                exception_block: *exception_block,
+                exception_args_vals: exception_arg_indices
+                    .iter()
+                    .map(|&idx| values.get(idx).copied().unwrap_or(0))
+                    .collect(),
+                has_ret_param: *has_ret_param,
+            },
+        }
+    }
+}
+
+thread_local! {
+    static ACTIVE_SUSPENDED_JIT_FRAMES: RefCell<Vec<SuspendedJitFrame>> = const { RefCell::new(Vec::new()) };
+}
+
+pub fn take_suspended_frames() -> Vec<SuspendedJitFrame> {
+    ACTIVE_SUSPENDED_JIT_FRAMES.with(|cell| std::mem::take(&mut *cell.borrow_mut()))
+}
+
+extern "C" fn jit_push_suspended_frame(
+    record: *const CallSuspendRecord,
+    frame_ptr: *mut u8,
+    stack_ptr: *mut u8,
+) {
+    let record = unsafe { &*record };
+    let mut values = vec![0u64; record.value_accesses.len()];
+    for (idx, access) in record.value_accesses.iter().enumerate() {
+        let Some(access) = access else {
+            continue;
+        };
+        let base_ptr = match access.base {
+            FrameSlotBase::FramePointer => frame_ptr,
+            FrameSlotBase::StackPointer => stack_ptr,
+        };
+        let slot = unsafe { base_ptr.byte_offset(access.offset as isize).cast::<u64>() };
+        values[idx] = unsafe { slot.read_unaligned() };
+    }
+    ACTIVE_SUSPENDED_JIT_FRAMES.with(|cell| {
+        let callee_caller_resume = record.callee_caller_resume.materialize(&values);
+        cell.borrow_mut().push(SuspendedJitFrame {
+            frame: CapturedFrame {
+                resume: record.resume,
+                values,
+                root_value_indices: record.root_value_indices.clone(),
+                resume_arg_value_indices: Vec::new(),
+                active_prompts: record.active_prompts.clone(),
+                caller_resume: CapturedCallerResume::TopLevel,
+            },
+            callee_caller_resume,
+        });
+    });
+}
+
+extern "C" fn jit_pop_suspended_frame() {
+    ACTIVE_SUSPENDED_JIT_FRAMES.with(|cell| {
+        let _ = cell.borrow_mut().pop();
+    });
 }
 
 #[repr(C)]
@@ -66,6 +224,8 @@ struct JitControlContext {
 pub struct JitFunction {
     memory: PagedCodeMemory,
     safepoints: Vec<SafepointRecord>,
+    frame_reify_records: Vec<FrameReifyRecord>,
+    suspend_records: Vec<Box<CallSuspendRecord>>,
     handler_payload_kind: SafepointHandlerPayloadKind,
     max_deopt_live_values: usize,
 }
@@ -114,9 +274,11 @@ impl JitFunction {
         });
 
         let mut lowerer =
-            Lowerer::<Cfg, B>::new_inner(func, externs, None, None, safepoint_handler);
+            Lowerer::<Cfg, B>::new_inner(0, func, externs, None, None, safepoint_handler);
         lowerer.run();
         let safepoints = std::mem::take(&mut lowerer.safepoints);
+        let frame_reify_records = std::mem::take(&mut lowerer.frame_reify_records);
+        let suspend_records = std::mem::take(&mut lowerer.suspend_records);
         let max_deopt_live_values = lowerer.max_deopt_live_values;
         let code = lowerer.buf.into_code();
         let handler_payload_kind = match Cfg::RootTransport::kind() {
@@ -133,6 +295,8 @@ impl JitFunction {
         JitFunction {
             memory,
             safepoints,
+            frame_reify_records,
+            suspend_records,
             handler_payload_kind,
             max_deopt_live_values,
         }
@@ -146,12 +310,69 @@ impl JitFunction {
         &self.safepoints
     }
 
+    pub fn frame_reify_records(&self) -> &[FrameReifyRecord] {
+        &self.frame_reify_records
+    }
+
     pub fn handler_payload_kind(&self) -> SafepointHandlerPayloadKind {
         self.handler_payload_kind
     }
 
     pub fn call_outcome(&self, args: &[u64]) -> JitOutcome {
         unsafe { call_jit_outcome(self.as_ptr(), args, self.max_deopt_live_values) }
+    }
+
+    pub fn native_resume_ptr(&self, record: &FrameReifyRecord) -> Option<*const u8> {
+        record
+            .native_resume_offset
+            .map(|offset| unsafe { self.as_ptr().add(offset) })
+    }
+
+    pub fn call_resume_outcome(
+        &self,
+        record: &FrameReifyRecord,
+        frame_values_ptr: *const u64,
+        resume_args: &[u64],
+    ) -> JitOutcome {
+        let ptr = self
+            .native_resume_ptr(record)
+            .expect("record does not have a native resume entry");
+        let args_ptr = if resume_args.is_empty() {
+            std::ptr::null()
+        } else {
+            resume_args.as_ptr()
+        };
+        let args = [frame_values_ptr as u64, args_ptr as u64, resume_args.len() as u64];
+        unsafe { call_jit_outcome(ptr, &args, self.max_deopt_live_values) }
+    }
+
+    pub fn call_captured_frame_resume_outcome(
+        &self,
+        frame: &CapturedFrame,
+        resume_args: &[u64],
+    ) -> Option<JitOutcome> {
+        if let Some(record) = self.frame_reify_records.iter().find(|record| {
+            record.kind == FrameReifyKind::CaptureSlice
+                && record.native_resume_offset.is_some()
+                && record.resume == frame.resume
+        }) {
+            return Some(self.call_resume_outcome(record, frame.values.as_ptr(), resume_args));
+        }
+
+        let suspend = self.suspend_records.iter().find(|record| {
+            record.native_resume_offset.is_some() && record.resume == frame.resume
+        })?;
+        let ptr = unsafe {
+            self.as_ptr()
+                .add(suspend.native_resume_offset.expect("checked above"))
+        };
+        let args_ptr = if resume_args.is_empty() {
+            std::ptr::null()
+        } else {
+            resume_args.as_ptr()
+        };
+        let args = [frame.values.as_ptr() as u64, args_ptr as u64, resume_args.len() as u64];
+        Some(unsafe { call_jit_outcome(ptr, &args, self.max_deopt_live_values) })
     }
 }
 
@@ -167,7 +388,10 @@ pub struct JitModule {
     /// provided extern pointers; internal entries are filled in after
     /// compilation with pointers into `memory`.
     call_table: Vec<*const u8>,
+    function_entry_offsets: Vec<usize>,
+    function_suspend_records: Vec<Vec<Box<CallSuspendRecord>>>,
     function_safepoints: Vec<Vec<SafepointRecord>>,
+    function_frame_reify_records: Vec<Vec<FrameReifyRecord>>,
     handler_payload_kind: SafepointHandlerPayloadKind,
     max_deopt_live_values: usize,
 }
@@ -246,7 +470,9 @@ impl JitModule {
         // 2. Compile each internal function
         let mut memory = PagedCodeMemory::new();
         let mut entry_offsets: Vec<usize> = Vec::new();
+        let mut function_suspend_records: Vec<Vec<Box<CallSuspendRecord>>> = Vec::new();
         let mut function_safepoints: Vec<Vec<SafepointRecord>> = Vec::new();
+        let mut function_frame_reify_records: Vec<Vec<FrameReifyRecord>> = Vec::new();
         let mut max_deopt_live_values = 0usize;
         let handler_payload_kind = match Cfg::RootTransport::kind() {
             RootTransportKind::FrameScan => SafepointHandlerPayloadKind::FrameSize,
@@ -261,15 +487,18 @@ impl JitModule {
             .map(|def| matches!(def, FuncDef::Internal(_)))
             .collect();
 
-        for func in &module.functions {
+        for (func_idx, func) in module.functions.iter().enumerate() {
             let mut lowerer = Lowerer::<Cfg, B>::new_module(
+                func_idx,
                 func,
                 &direct_call_is_internal,
                 call_table_base,
                 safepoint_handler,
             );
             lowerer.run();
+            function_suspend_records.push(std::mem::take(&mut lowerer.suspend_records));
             function_safepoints.push(std::mem::take(&mut lowerer.safepoints));
+            function_frame_reify_records.push(std::mem::take(&mut lowerer.frame_reify_records));
             max_deopt_live_values = max_deopt_live_values.max(lowerer.max_deopt_live_values);
             let code = lowerer.buf.into_code();
             let offset = memory.push(&code);
@@ -290,7 +519,10 @@ impl JitModule {
         JitModule {
             memory,
             call_table,
+            function_entry_offsets: entry_offsets,
+            function_suspend_records,
             function_safepoints,
+            function_frame_reify_records,
             handler_payload_kind,
             max_deopt_live_values,
         }
@@ -313,8 +545,111 @@ impl JitModule {
         unsafe { call_jit_outcome(ptr, args, self.max_deopt_live_values) }
     }
 
+    pub fn function_ptr(&self, func_ref: FuncRef) -> *const u8 {
+        let ptr = self.call_table[func_ref.index()];
+        assert!(!ptr.is_null(), "call to unresolved function");
+        ptr
+    }
+
     pub fn safepoints_for_function(&self, func_idx: usize) -> &[SafepointRecord] {
         &self.function_safepoints[func_idx]
+    }
+
+    pub fn frame_reify_records_for_function(&self, func_idx: usize) -> &[FrameReifyRecord] {
+        &self.function_frame_reify_records[func_idx]
+    }
+
+    pub fn native_resume_ptr(&self, func_idx: usize, record: &FrameReifyRecord) -> Option<*const u8> {
+        record.native_resume_offset.map(|offset| unsafe {
+            self.memory
+                .base_ptr()
+                .add(self.function_entry_offsets[func_idx] + offset)
+        })
+    }
+
+    pub fn call_resume_outcome(
+        &self,
+        func_idx: usize,
+        record: &FrameReifyRecord,
+        frame_values_ptr: *const u64,
+        resume_args: &[u64],
+    ) -> JitOutcome {
+        let ptr = self
+            .native_resume_ptr(func_idx, record)
+            .expect("record does not have a native resume entry");
+        let args_ptr = if resume_args.is_empty() {
+            std::ptr::null()
+        } else {
+            resume_args.as_ptr()
+        };
+        let args = [frame_values_ptr as u64, args_ptr as u64, resume_args.len() as u64];
+        unsafe { call_jit_outcome(ptr, &args, self.max_deopt_live_values) }
+    }
+
+    pub fn call_captured_frame_resume_outcome(
+        &self,
+        frame: &CapturedFrame,
+        resume_args: &[u64],
+    ) -> Option<JitOutcome> {
+        let func_idx = frame.resume.func_idx;
+        if let Some(record) = self.function_frame_reify_records[func_idx].iter().find(|record| {
+            record.kind == FrameReifyKind::CaptureSlice
+                && record.native_resume_offset.is_some()
+                && record.resume == frame.resume
+        }) {
+            return Some(self.call_resume_outcome(
+                func_idx,
+                record,
+                frame.values.as_ptr(),
+                resume_args,
+            ));
+        }
+
+        let suspend = self.function_suspend_records[func_idx]
+            .iter()
+            .find(|record| record.native_resume_offset.is_some() && record.resume == frame.resume)?;
+        let ptr = unsafe {
+            self.memory.base_ptr().add(
+                self.function_entry_offsets[func_idx]
+                    + suspend.native_resume_offset.expect("checked above"),
+            )
+        };
+        let args_ptr = if resume_args.is_empty() {
+            std::ptr::null()
+        } else {
+            resume_args.as_ptr()
+        };
+        let args = [frame.values.as_ptr() as u64, args_ptr as u64, resume_args.len() as u64];
+        Some(unsafe { call_jit_outcome(ptr, &args, self.max_deopt_live_values) })
+    }
+
+    pub fn call_invoke_frame_resume_outcome(
+        &self,
+        frame: &CapturedFrame,
+        is_exception: bool,
+        resume_args: &[u64],
+    ) -> Option<JitOutcome> {
+        let func_idx = frame.resume.func_idx;
+        let suspend = self.function_suspend_records[func_idx]
+            .iter()
+            .find(|record| record.resume == frame.resume)?;
+        let offset = if is_exception {
+            suspend.native_exception_resume_offset?
+        } else {
+            suspend.native_resume_offset?
+        };
+        let ptr = unsafe {
+            self.memory
+                .base_ptr()
+                .add(self.function_entry_offsets[func_idx] + offset)
+        };
+        let args_ptr = if resume_args.is_empty() {
+            std::ptr::null()
+        } else {
+            resume_args.as_ptr()
+        };
+        let args = [frame.values.as_ptr() as u64, args_ptr as u64, resume_args.len() as u64];
+        Some(unsafe { call_jit_outcome(ptr, &args, self.max_deopt_live_values) })
     }
 
     pub fn handler_payload_kind(&self) -> SafepointHandlerPayloadKind {
@@ -430,6 +765,38 @@ pub unsafe fn call_jit_outcome_with_reg_limit(
                 deopt_id: DeoptId::from_index(payload0 as usize),
                 resume_point: payload1,
                 live_values,
+            }
+        }
+        x if x == JitOutcomeKind::CaptureSlice as u64 => {
+            live_values.truncate(ctx.live_values_len);
+            JitOutcome::CaptureSlice {
+                func_idx: payload1 as usize,
+                record_idx: payload0 as usize,
+                values: live_values,
+            }
+        }
+        x if x == JitOutcomeKind::CloneSlice as u64 => {
+            live_values.truncate(ctx.live_values_len);
+            JitOutcome::CloneSlice {
+                func_idx: payload1 as usize,
+                record_idx: payload0 as usize,
+                values: live_values,
+            }
+        }
+        x if x == JitOutcomeKind::ResumeSlice as u64 => {
+            live_values.truncate(ctx.live_values_len);
+            JitOutcome::ResumeSlice {
+                func_idx: payload1 as usize,
+                record_idx: payload0 as usize,
+                values: live_values,
+            }
+        }
+        x if x == JitOutcomeKind::AbortToPrompt as u64 => {
+            live_values.truncate(ctx.live_values_len);
+            JitOutcome::AbortToPrompt {
+                func_idx: payload1 as usize,
+                record_idx: payload0 as usize,
+                values: live_values,
             }
         }
         _ => panic!("unknown JIT outcome kind: {kind}"),
@@ -810,6 +1177,26 @@ impl RegState {
 
 struct BlockMeta {
     label: Label,
+    active_prompts: Vec<PromptId>,
+}
+
+struct PendingResumeStub {
+    target: ResumeStubTarget,
+    continue_label: Label,
+    resume_inject: ResumeInjectTarget,
+    slot_offsets: Vec<Option<i32>>,
+}
+
+enum ResumeStubTarget {
+    FrameReifyRecord(usize),
+    SuspendRecord(usize),
+    SuspendRecordException(usize),
+}
+
+enum ResumeInjectTarget {
+    None,
+    FrameSlot(i32),
+    ReturnReg,
 }
 
 struct RootTransportState {
@@ -824,6 +1211,95 @@ impl RootTransportState {
     }
 }
 
+fn simulate_block_prompt_stack(block: &Block, stack: &[PromptId]) -> Vec<PromptId> {
+    let mut prompts = stack.to_vec();
+    for inst_node in &block.insts {
+        match &inst_node.inst {
+            Inst::PushPrompt(prompt) => prompts.push(*prompt),
+            Inst::PopPrompt(prompt) => {
+                let popped = prompts.pop().unwrap_or_else(|| {
+                    panic!("pop_prompt without matching active prompt in block")
+                });
+                assert_eq!(
+                    popped, *prompt,
+                    "mismatched prompt nesting in block: expected {:?}, got {:?}",
+                    popped, prompt
+                );
+            }
+            _ => {}
+        }
+    }
+    prompts
+}
+
+fn terminator_successors(terminator: &Terminator) -> Vec<BlockId> {
+    match terminator {
+        Terminator::Jump(target, _) => vec![*target],
+        Terminator::BrIf {
+            then_block,
+            else_block,
+            ..
+        } => vec![*then_block, *else_block],
+        Terminator::Switch {
+            cases,
+            default_block,
+            ..
+        } => {
+            let mut succs = Vec::with_capacity(cases.len() + 1);
+            succs.extend(cases.iter().map(|(_, block, _)| *block));
+            succs.push(*default_block);
+            succs
+        }
+        Terminator::Invoke {
+            normal, exception, ..
+        }
+        | Terminator::InvokeIndirect {
+            normal, exception, ..
+        } => vec![*normal, *exception],
+        Terminator::Ret(_)
+        | Terminator::RetVoid
+        | Terminator::Unreachable
+        | Terminator::ResumeSlice { .. }
+        | Terminator::AbortToPrompt { .. } => Vec::new(),
+    }
+}
+
+fn assign_block_prompt_stacks(func: &Function, block_meta: &mut [BlockMeta]) {
+    if func.blocks.is_empty() {
+        return;
+    }
+    let mut incoming: Vec<Option<Vec<PromptId>>> = vec![None; func.blocks.len()];
+    incoming[0] = Some(Vec::new());
+    let mut queue = VecDeque::from([0usize]);
+
+    while let Some(block_idx) = queue.pop_front() {
+        let entry_prompts = incoming[block_idx]
+            .clone()
+            .expect("queued block missing prompt stack");
+        let exit_prompts = simulate_block_prompt_stack(&func.blocks[block_idx], &entry_prompts);
+        for succ in terminator_successors(&func.blocks[block_idx].terminator) {
+            let succ_idx = succ.index();
+            match &incoming[succ_idx] {
+                Some(existing) => {
+                    assert_eq!(
+                        existing, &exit_prompts,
+                        "inconsistent prompt stack entering block bb{}",
+                        succ_idx
+                    );
+                }
+                None => {
+                    incoming[succ_idx] = Some(exit_prompts.clone());
+                    queue.push_back(succ_idx);
+                }
+            }
+        }
+    }
+
+    for (idx, meta) in block_meta.iter_mut().enumerate() {
+        meta.active_prompts = incoming[idx].clone().unwrap_or_default();
+    }
+}
+
 // ─── Lowerer ───────────────────────────────────────────────────────
 
 struct Lowerer<'a, Cfg: ExecutionConfig, B: LoweringBackend>
@@ -831,6 +1307,7 @@ where
     Cfg::Frames: FrameStrategy<Cfg::Layout, Cfg::Roots, Cfg::CallingConvention>,
 {
     func: &'a Function,
+    current_func_idx: usize,
     externs: &'a [*const u8],
     direct_call_is_internal: Option<&'a [bool]>,
     /// When Some, all calls go through an indirect call table at this
@@ -849,6 +1326,9 @@ where
     block_meta: Vec<BlockMeta>,
     root_transport: RootTransportState,
     safepoints: Vec<SafepointRecord>,
+    frame_reify_records: Vec<FrameReifyRecord>,
+    suspend_records: Vec<Box<CallSuspendRecord>>,
+    pending_resume_stubs: Vec<PendingResumeStub>,
     max_deopt_live_values: usize,
     prologue_stp_offset: usize,
     epilogue_ldp_offsets: Vec<usize>, // offsets of LDP instructions to patch
@@ -934,6 +1414,10 @@ where
     }
 
     fn emit_write_deopt_live_values(&mut self, live: &[Value]) {
+        self.emit_write_outcome_values(live);
+    }
+
+    fn emit_write_full_frame_values(&mut self) {
         B::emit_load_gp(
             &mut self.buf,
             machine_gp(28),
@@ -941,7 +1425,92 @@ where
             0,
             MachineWordSize::W64,
         );
-        for (idx, &value) in live.iter().enumerate() {
+        for value_idx in 0..self.func.value_types.len() {
+            let ty = self.regs.values[value_idx].ty;
+            let value = Value::from_index(value_idx);
+            match self.regs.values[value_idx].loc {
+                ValueLoc::FpReg(src) if RegState::is_float_type(ty) => {
+                    B::emit_fp_to_gp_move(&mut self.buf, machine_gp(27), machine_fp(src));
+                    B::emit_store_gp(
+                        &mut self.buf,
+                        machine_gp(27),
+                        machine_gp(28),
+                        (value_idx as i32) * 8,
+                        MachineWordSize::W64,
+                    );
+                }
+                ValueLoc::GpReg(src) => {
+                    B::emit_store_gp(
+                        &mut self.buf,
+                        machine_gp(src),
+                        machine_gp(28),
+                        (value_idx as i32) * 8,
+                        MachineWordSize::W64,
+                    );
+                }
+                ValueLoc::Spill(offset) => {
+                    if RegState::is_float_type(ty) {
+                        B::emit_load_fp_from_frame(
+                            &mut self.buf,
+                            machine_fp(31),
+                            self.frame.slot_access(offset),
+                        );
+                        B::emit_fp_to_gp_move(&mut self.buf, machine_gp(27), machine_fp(31));
+                        B::emit_store_gp(
+                            &mut self.buf,
+                            machine_gp(27),
+                            machine_gp(28),
+                            (value_idx as i32) * 8,
+                            MachineWordSize::W64,
+                        );
+                    } else {
+                        B::emit_load_gp_from_frame(
+                            &mut self.buf,
+                            machine_gp(27),
+                            self.frame.slot_access(offset),
+                        );
+                        B::emit_store_gp(
+                            &mut self.buf,
+                            machine_gp(27),
+                            machine_gp(28),
+                            (value_idx as i32) * 8,
+                            MachineWordSize::W64,
+                        );
+                    }
+                }
+                ValueLoc::Unassigned => {
+                    let _ = value;
+                    B::emit_mov_imm(&mut self.buf, machine_gp(27), 0);
+                    B::emit_store_gp(
+                        &mut self.buf,
+                        machine_gp(27),
+                        machine_gp(28),
+                        (value_idx as i32) * 8,
+                        MachineWordSize::W64,
+                    );
+                }
+                ValueLoc::FpReg(_) => unreachable!("non-float value in FP register"),
+            }
+        }
+        B::emit_mov_imm(&mut self.buf, machine_gp(28), self.func.value_types.len() as u64);
+        B::emit_store_gp(
+            &mut self.buf,
+            machine_gp(28),
+            machine_gp(23),
+            8,
+            MachineWordSize::W64,
+        );
+    }
+
+    fn emit_write_outcome_values(&mut self, values: &[Value]) {
+        B::emit_load_gp(
+            &mut self.buf,
+            machine_gp(28),
+            machine_gp(23),
+            0,
+            MachineWordSize::W64,
+        );
+        for (idx, &value) in values.iter().enumerate() {
             let ty = self.regs.values[value.index()].ty;
             if RegState::is_float_type(ty) {
                 let src = self.regs.ensure_in_fp_reg::<B>(&mut self.buf, &mut self.frame, value);
@@ -964,7 +1533,7 @@ where
                 );
             }
         }
-        B::emit_mov_imm(&mut self.buf, machine_gp(28), live.len() as u64);
+        B::emit_mov_imm(&mut self.buf, machine_gp(28), values.len() as u64);
         B::emit_store_gp(
             &mut self.buf,
             machine_gp(28),
@@ -983,13 +1552,127 @@ where
         self.emit_return_current_outcome();
     }
 
+    fn push_frame_reify_record(
+        &mut self,
+        kind: FrameReifyKind,
+        prompt: Option<PromptId>,
+        active_prompts: &[PromptId],
+        values: &[Value],
+        control_values: &[Value],
+        return_dest: Option<usize>,
+        resume: FrameResumePoint,
+    ) -> usize {
+        let value_indices: Vec<usize> = values.iter().map(|value| value.index()).collect();
+        let control_value_indices: Vec<usize> =
+            control_values.iter().map(|value| value.index()).collect();
+        let value_types: Vec<Type> = values
+            .iter()
+            .map(|value| self.regs.values[value.index()].ty)
+            .collect();
+        let root_payload_indices: Vec<usize> = value_types
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, ty)| {
+                (ty.is_gc() && self.regs.values[value_indices[idx]].loc != ValueLoc::Unassigned)
+                    .then_some(idx)
+            })
+            .collect();
+        let idx = self.frame_reify_records.len();
+        self.frame_reify_records.push(FrameReifyRecord {
+            kind,
+            prompt,
+            active_prompts: active_prompts.to_vec(),
+            resume,
+            native_resume_offset: None,
+            frame_value_count: self.func.value_types.len(),
+            value_indices,
+            control_value_indices,
+            value_types,
+            root_payload_indices,
+            return_dest,
+        });
+        idx
+    }
+
+    fn emit_frame_reify_outcome(
+        &mut self,
+        kind: JitOutcomeKind,
+        record_idx: usize,
+        values: &[Value],
+    ) {
+        self.regs.spill_all_live::<B>(&mut self.buf, &mut self.frame);
+        self.emit_write_outcome_values(values);
+        self.emit_set_outcome_kind(kind);
+        B::emit_mov_imm(&mut self.buf, machine_gp(2), record_idx as u64);
+        B::emit_mov_imm(&mut self.buf, machine_gp(3), self.current_func_idx as u64);
+        self.emit_return_current_outcome();
+    }
+
+    fn push_call_suspend_record(
+        &mut self,
+        active_prompts: &[PromptId],
+        callee_caller_resume: SuspendCallerResume,
+        resume: FrameResumePoint,
+    ) -> *const CallSuspendRecord {
+        let value_accesses = self
+            .regs
+            .values
+            .iter()
+            .map(|value| value.spill_slot.map(|slot| self.frame.slot_access(slot)))
+            .collect::<Vec<_>>();
+        let root_value_indices = self
+            .regs
+            .values
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, value)| {
+                (value.ty.is_gc() && value.spill_slot.is_some()).then_some(idx)
+            })
+            .collect::<Vec<_>>();
+        let record = Box::new(CallSuspendRecord {
+            resume,
+            native_resume_offset: None,
+            native_exception_resume_offset: None,
+            value_accesses,
+            root_value_indices,
+            active_prompts: active_prompts.iter().map(|p| p.index() as u32).collect(),
+            callee_caller_resume,
+        });
+        let ptr = (&*record) as *const CallSuspendRecord;
+        self.suspend_records.push(record);
+        ptr
+    }
+
+    fn emit_push_suspended_frame(&mut self, record_ptr: *const CallSuspendRecord) {
+        B::emit_mov_imm(&mut self.buf, machine_gp(0), record_ptr as usize as u64);
+        B::emit_gp_move(&mut self.buf, machine_gp(1), machine_gp(29));
+        B::emit_stack_pointer_to_gp(&mut self.buf, machine_gp(2));
+        B::emit_mov_imm(
+            &mut self.buf,
+            machine_gp(28),
+            jit_push_suspended_frame as usize as u64,
+        );
+        B::emit_call_reg(&mut self.buf, machine_gp(28));
+    }
+
+    fn emit_pop_suspended_frame(&mut self) {
+        B::emit_mov_imm(
+            &mut self.buf,
+            machine_gp(28),
+            jit_pop_suspended_frame as usize as u64,
+        );
+        B::emit_call_reg(&mut self.buf, machine_gp(28));
+    }
+
     fn new_module(
+        current_func_idx: usize,
         func: &'a Function,
         direct_call_is_internal: &'a [bool],
         call_table_base: u64,
         safepoint_handler: Option<u64>,
     ) -> Self {
         Self::new_inner(
+            current_func_idx,
             func,
             &[],
             Some(direct_call_is_internal),
@@ -999,6 +1682,7 @@ where
     }
 
     fn new_inner(
+        current_func_idx: usize,
         func: &'a Function,
         externs: &'a [*const u8],
         direct_call_is_internal: Option<&'a [bool]>,
@@ -1012,8 +1696,12 @@ where
         let mut block_meta = Vec::new();
         for (_i, _block) in func.blocks.iter().enumerate() {
             let label = buf.create_label();
-            block_meta.push(BlockMeta { label });
+            block_meta.push(BlockMeta {
+                label,
+                active_prompts: Vec::new(),
+            });
         }
+        assign_block_prompt_stacks(func, &mut block_meta);
 
         let mut regs = RegState::new(num_values);
         let mut frame = Cfg::Frames::new_layout(func.blocks.len());
@@ -1049,6 +1737,7 @@ where
 
         Lowerer {
             func,
+            current_func_idx,
             externs,
             direct_call_is_internal,
             call_table_base,
@@ -1059,14 +1748,24 @@ where
             block_meta,
             root_transport: RootTransportState::new(num_values),
             safepoints: Vec::new(),
+            frame_reify_records: Vec::new(),
+            suspend_records: Vec::new(),
+            pending_resume_stubs: Vec::new(),
             max_deopt_live_values: func
                 .blocks
                 .iter()
                 .flat_map(|block| block.insts.iter())
                 .filter_map(|node| match &node.inst {
                     Inst::Guard(_, _, live) => Some(live.len()),
+                    Inst::CaptureSlice(_, _) => Some(func.value_types.len()),
+                    Inst::CloneSlice(_) => Some(func.value_types.len()),
                     _ => None,
                 })
+                .chain(func.blocks.iter().filter_map(|block| match &block.terminator {
+                    Terminator::AbortToPrompt { args, .. } => Some(args.len()),
+                    Terminator::ResumeSlice { args, .. } => Some(args.len() + 1),
+                    _ => None,
+                }))
                 .max()
                 .unwrap_or(0),
             prologue_stp_offset: 0,
@@ -1084,6 +1783,7 @@ where
         }
 
         self.patch_prologue();
+        self.emit_resume_stubs();
     }
 
     fn emit_prologue(&mut self) {
@@ -1108,8 +1808,104 @@ where
         );
     }
 
+    fn emit_resume_stubs(&mut self) {
+        let total_frame = self
+            .frame
+            .total_frame_size(Cfg::Frames::stack_align())
+            .max(16);
+        let pending = std::mem::take(&mut self.pending_resume_stubs);
+        for stub in pending {
+            let code_offset = self.buf.current_offset();
+            match stub.target {
+                ResumeStubTarget::FrameReifyRecord(record_idx) => {
+                    self.frame_reify_records[record_idx].native_resume_offset = Some(code_offset);
+                }
+                ResumeStubTarget::SuspendRecord(record_idx) => {
+                    self.suspend_records[record_idx].native_resume_offset = Some(code_offset);
+                }
+                ResumeStubTarget::SuspendRecordException(record_idx) => {
+                    self.suspend_records[record_idx].native_exception_resume_offset =
+                        Some(code_offset);
+                }
+            }
+            let patch_offset = B::emit_prologue(&mut self.buf);
+            B::emit_frame_size_patch(&mut self.buf, patch_offset, &[], total_frame);
+
+            let value_types: Vec<Type> = match stub.target {
+                ResumeStubTarget::FrameReifyRecord(record_idx) => {
+                    self.frame_reify_records[record_idx].value_types.clone()
+                }
+                ResumeStubTarget::SuspendRecord(_)
+                | ResumeStubTarget::SuspendRecordException(_) => self.func.value_types.clone(),
+            };
+            for (payload_idx, slot_opt) in stub.slot_offsets.iter().enumerate() {
+                let Some(slot) = slot_opt else {
+                    continue;
+                };
+                let ty = value_types[payload_idx];
+                B::emit_load_gp(
+                    &mut self.buf,
+                    machine_gp(27),
+                    machine_gp(0),
+                    (payload_idx as i32) * 8,
+                    MachineWordSize::W64,
+                );
+                if RegState::is_float_type(ty) {
+                    B::emit_gp_to_fp_move(&mut self.buf, machine_fp(31), machine_gp(27));
+                    B::emit_store_fp_to_frame(
+                        &mut self.buf,
+                        machine_fp(31),
+                        self.frame.slot_access(*slot),
+                    );
+                } else {
+                    B::emit_store_gp_to_frame(
+                        &mut self.buf,
+                        machine_gp(27),
+                        self.frame.slot_access(*slot),
+                    );
+                }
+            }
+
+            match stub.resume_inject {
+                ResumeInjectTarget::None => {}
+                ResumeInjectTarget::FrameSlot(return_slot) => {
+                    let skip = self.buf.create_label();
+                    B::emit_cbz_to_label(&mut self.buf, machine_gp(2), skip);
+                    B::emit_load_gp(
+                        &mut self.buf,
+                        machine_gp(27),
+                        machine_gp(1),
+                        0,
+                        MachineWordSize::W64,
+                    );
+                    B::emit_store_gp_to_frame(
+                        &mut self.buf,
+                        machine_gp(27),
+                        self.frame.slot_access(return_slot),
+                    );
+                    B::bind_label(&mut self.buf, skip);
+                }
+                ResumeInjectTarget::ReturnReg => {
+                    let skip = self.buf.create_label();
+                    B::emit_cbz_to_label(&mut self.buf, machine_gp(2), skip);
+                    B::emit_load_gp(
+                        &mut self.buf,
+                        machine_gp(0),
+                        machine_gp(1),
+                        0,
+                        MachineWordSize::W64,
+                    );
+                    B::bind_label(&mut self.buf, skip);
+                }
+            }
+
+            B::emit_branch_to_label(&mut self.buf, stub.continue_label);
+        }
+    }
+
     fn lower_block(&mut self, block_idx: usize) {
         let block = &self.func.blocks[block_idx];
+        let mut active_prompts = self.block_meta[block_idx].active_prompts.clone();
 
         // Bind label
         B::bind_label(&mut self.buf, self.block_meta[block_idx].label);
@@ -1136,15 +1932,21 @@ where
         }
 
         // Lower instructions
-        for inst_node in &block.insts {
-            self.lower_inst(inst_node);
+        for (inst_idx, inst_node) in block.insts.iter().enumerate() {
+            self.lower_inst(block_idx, inst_idx, inst_node, &mut active_prompts);
         }
 
         // Lower terminator
-        self.lower_terminator(block_idx);
+        self.lower_terminator(block_idx, &active_prompts);
     }
 
-    fn lower_inst(&mut self, inst_node: &InstNode) {
+    fn lower_inst(
+        &mut self,
+        block_idx: usize,
+        inst_idx: usize,
+        inst_node: &InstNode,
+        active_prompts: &mut Vec<PromptId>,
+    ) {
         let result_val = inst_node.value;
 
         match &inst_node.inst {
@@ -1480,7 +2282,7 @@ where
             }
 
             Inst::Call(func_ref, args) => {
-                self.lower_call(*func_ref, args, result_val);
+                self.lower_call(*func_ref, args, result_val, block_idx, inst_idx, active_prompts);
             }
 
             Inst::CallIndirect(callee, args, _ret_ty) => {
@@ -1586,6 +2388,108 @@ where
                 for &value in live {
                     self.regs.dec_use(value);
                 }
+            }
+
+            Inst::CaptureSlice(prompt, live) => {
+                let return_dest = result_val
+                    .expect("capture_slice must define a destination value for later resume");
+                let frame_values: Vec<Value> = (0..self.func.value_types.len())
+                    .map(Value::from_index)
+                    .collect();
+                let record_idx = self.push_frame_reify_record(
+                    FrameReifyKind::CaptureSlice,
+                    Some(*prompt),
+                    active_prompts,
+                    &frame_values,
+                    &[],
+                    Some(return_dest.index()),
+                    FrameResumePoint {
+                        func_idx: self.current_func_idx,
+                        block_idx,
+                        inst_idx,
+                    },
+                );
+                self.regs.spill_all_live::<B>(&mut self.buf, &mut self.frame);
+                self.emit_write_full_frame_values();
+                self.emit_set_outcome_kind(JitOutcomeKind::CaptureSlice);
+                B::emit_mov_imm(&mut self.buf, machine_gp(2), record_idx as u64);
+                B::emit_mov_imm(&mut self.buf, machine_gp(3), self.current_func_idx as u64);
+                self.emit_return_current_outcome();
+                let continue_label = self.buf.create_label();
+                B::bind_label(&mut self.buf, continue_label);
+                let slot_offsets = self.frame_reify_records[record_idx]
+                    .value_indices
+                    .iter()
+                    .map(|&value_idx| self.regs.values[value_idx].spill_slot)
+                    .collect();
+                let return_slot = self.frame.alloc_root_slot();
+                self.assign_spill_value(return_dest, return_slot);
+                self.pending_resume_stubs.push(PendingResumeStub {
+                    target: ResumeStubTarget::FrameReifyRecord(record_idx),
+                    continue_label,
+                    resume_inject: ResumeInjectTarget::FrameSlot(return_slot),
+                    slot_offsets,
+                });
+                for &value in live {
+                    self.regs.dec_use(value);
+                }
+            }
+
+            Inst::PushPrompt(prompt) => {
+                active_prompts.push(*prompt);
+            }
+
+            Inst::PopPrompt(prompt) => {
+                let popped = active_prompts
+                    .pop()
+                    .unwrap_or_else(|| panic!("pop_prompt without active prompt in JIT lowering"));
+                assert_eq!(
+                    popped, *prompt,
+                    "mismatched prompt stack in JIT lowering: expected {:?}, got {:?}",
+                    popped, prompt
+                );
+            }
+
+            Inst::CloneSlice(slice) => {
+                let clone_dest = result_val.expect("clone_slice must define a destination value");
+                let frame_values: Vec<Value> = (0..self.func.value_types.len())
+                    .map(Value::from_index)
+                    .collect();
+                let record_idx = self.push_frame_reify_record(
+                    FrameReifyKind::CloneSlice,
+                    None,
+                    active_prompts,
+                    &frame_values,
+                    &[*slice],
+                    Some(clone_dest.index()),
+                    FrameResumePoint {
+                        func_idx: self.current_func_idx,
+                        block_idx,
+                        inst_idx,
+                    },
+                );
+                self.regs.spill_all_live::<B>(&mut self.buf, &mut self.frame);
+                self.emit_write_full_frame_values();
+                self.emit_set_outcome_kind(JitOutcomeKind::CloneSlice);
+                B::emit_mov_imm(&mut self.buf, machine_gp(2), record_idx as u64);
+                B::emit_mov_imm(&mut self.buf, machine_gp(3), self.current_func_idx as u64);
+                self.emit_return_current_outcome();
+                let continue_label = self.buf.create_label();
+                B::bind_label(&mut self.buf, continue_label);
+                let slot_offsets = self.frame_reify_records[record_idx]
+                    .value_indices
+                    .iter()
+                    .map(|&value_idx| self.regs.values[value_idx].spill_slot)
+                    .collect();
+                let return_slot = self.frame.alloc_root_slot();
+                self.assign_spill_value(clone_dest, return_slot);
+                self.pending_resume_stubs.push(PendingResumeStub {
+                    target: ResumeStubTarget::FrameReifyRecord(record_idx),
+                    continue_label,
+                    resume_inject: ResumeInjectTarget::FrameSlot(return_slot),
+                    slot_offsets,
+                });
+                self.regs.dec_use(*slice);
             }
 
         }
@@ -1999,9 +2903,38 @@ where
         }
     }
 
-    fn lower_call(&mut self, func_ref: FuncRef, args: &[Value], result_val: Option<Value>) {
-        let outgoing_size = self.prepare_call_args(args);
+    fn lower_call(
+        &mut self,
+        func_ref: FuncRef,
+        args: &[Value],
+        result_val: Option<Value>,
+        block_idx: usize,
+        inst_idx: usize,
+        active_prompts: &[PromptId],
+    ) {
         let control_aware = self.direct_call_is_control_aware(func_ref);
+        let suspend_record = if control_aware {
+            self.regs.spill_all_live::<B>(&mut self.buf, &mut self.frame);
+            Some(self.push_call_suspend_record(
+                active_prompts,
+                SuspendCallerResume::FromCall {
+                    return_dest: result_val.map(|value| value.index()),
+                },
+                FrameResumePoint {
+                    func_idx: self.current_func_idx,
+                    block_idx,
+                    inst_idx: inst_idx + 1,
+                },
+            ))
+        } else {
+            None
+        };
+
+        if let Some(record_ptr) = suspend_record {
+            self.emit_push_suspended_frame(record_ptr);
+        }
+
+        let outgoing_size = self.prepare_call_args(args);
 
         // Load function pointer into the backend's call scratch register and call through it.
         let func_idx = func_ref.index();
@@ -2027,6 +2960,7 @@ where
 
         if control_aware {
             let continue_label = self.buf.create_label();
+            let post_pop_label = self.buf.create_label();
             let expected_kind = if result_val.is_some() {
                 JitOutcomeKind::ReturnValue as u64
             } else {
@@ -2036,6 +2970,26 @@ where
             B::emit_branch_eq_to_label(&mut self.buf, continue_label);
             self.emit_return_current_outcome();
             B::bind_label(&mut self.buf, continue_label);
+            self.emit_pop_suspended_frame();
+            B::bind_label(&mut self.buf, post_pop_label);
+
+            let slot_offsets = self
+                .regs
+                .values
+                .iter()
+                .map(|value| value.spill_slot)
+                .collect::<Vec<_>>();
+            let suspend_idx = self.suspend_records.len() - 1;
+            self.pending_resume_stubs.push(PendingResumeStub {
+                target: ResumeStubTarget::SuspendRecord(suspend_idx),
+                continue_label: post_pop_label,
+                resume_inject: if result_val.is_some() {
+                    ResumeInjectTarget::ReturnReg
+                } else {
+                    ResumeInjectTarget::None
+                },
+                slot_offsets,
+            });
         }
 
         self.finish_call_cleanup(args, outgoing_size);
@@ -2091,10 +3045,13 @@ where
         exception: BlockId,
         exception_args: &[Value],
         control_aware: bool,
+        suspended_invoke_idx: Option<usize>,
     ) {
         if control_aware {
             let exception_label = self.buf.create_label();
             let normal_label = self.buf.create_label();
+            let normal_post_pop_label = self.buf.create_label();
+            let exception_post_pop_label = self.buf.create_label();
             B::emit_cmp_gp_imm(&mut self.buf, machine_gp(1), JitOutcomeKind::Exception as u64);
             B::emit_branch_eq_to_label(&mut self.buf, exception_label);
             let expected_kind = if has_ret_param {
@@ -2107,11 +3064,40 @@ where
             self.emit_return_current_outcome();
 
             B::bind_label(&mut self.buf, exception_label);
+            self.emit_pop_suspended_frame();
+            B::bind_label(&mut self.buf, exception_post_pop_label);
             self.finish_call_cleanup(call_args, outgoing_size);
             self.emit_block_args(exception, exception_args);
             B::emit_branch_to_label(&mut self.buf, self.block_meta[exception.index()].label);
 
             B::bind_label(&mut self.buf, normal_label);
+            self.emit_pop_suspended_frame();
+            B::bind_label(&mut self.buf, normal_post_pop_label);
+
+            if let Some(suspend_idx) = suspended_invoke_idx {
+                let slot_offsets = self
+                    .regs
+                    .values
+                    .iter()
+                    .map(|value| value.spill_slot)
+                    .collect::<Vec<_>>();
+                self.pending_resume_stubs.push(PendingResumeStub {
+                    target: ResumeStubTarget::SuspendRecord(suspend_idx),
+                    continue_label: normal_post_pop_label,
+                    resume_inject: if has_ret_param {
+                        ResumeInjectTarget::ReturnReg
+                    } else {
+                        ResumeInjectTarget::None
+                    },
+                    slot_offsets: slot_offsets.clone(),
+                });
+                self.pending_resume_stubs.push(PendingResumeStub {
+                    target: ResumeStubTarget::SuspendRecordException(suspend_idx),
+                    continue_label: exception_post_pop_label,
+                    resume_inject: ResumeInjectTarget::None,
+                    slot_offsets,
+                });
+            }
         }
 
         self.finish_call_cleanup(call_args, outgoing_size);
@@ -2126,7 +3112,7 @@ where
         B::emit_branch_to_label(&mut self.buf, self.block_meta[normal.index()].label);
     }
 
-    fn lower_terminator(&mut self, block_idx: usize) {
+    fn lower_terminator(&mut self, block_idx: usize, active_prompts: &[PromptId]) {
         let block = &self.func.blocks[block_idx];
         match &block.terminator {
             Terminator::Ret(v) => {
@@ -2252,8 +3238,36 @@ where
                 exception,
                 exception_args,
             } => {
-                let outgoing_size = self.prepare_call_args(args);
                 let control_aware = self.direct_call_is_control_aware(*func);
+                let suspended_invoke_idx = if control_aware {
+                    self.regs.spill_all_live::<B>(&mut self.buf, &mut self.frame);
+                    let record_ptr = self.push_call_suspend_record(
+                        active_prompts,
+                        SuspendCallerResume::FromInvoke {
+                            normal_block: normal.index(),
+                            normal_arg_indices: normal_args
+                                .iter()
+                                .map(|value| value.index())
+                                .collect(),
+                            exception_block: exception.index(),
+                            exception_arg_indices: exception_args
+                                .iter()
+                                .map(|value| value.index())
+                                .collect(),
+                            has_ret_param: !self.func.blocks[normal.index()].params.is_empty(),
+                        },
+                        FrameResumePoint {
+                            func_idx: self.current_func_idx,
+                            block_idx,
+                            inst_idx: block.insts.len(),
+                        },
+                    );
+                    self.emit_push_suspended_frame(record_ptr);
+                    Some(self.suspend_records.len() - 1)
+                } else {
+                    None
+                };
+                let outgoing_size = self.prepare_call_args(args);
 
                 let func_idx = func.index();
                 if let Some(table_base) = self.call_table_base {
@@ -2284,6 +3298,7 @@ where
                     *exception,
                     exception_args,
                     control_aware,
+                    suspended_invoke_idx,
                 );
             }
 
@@ -2296,13 +3311,47 @@ where
                 exception,
                 exception_args,
             } => {
-                let callee_reg =
-                    self.regs
-                        .ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, *callee);
-                B::emit_gp_move(&mut self.buf, machine_gp(28), machine_gp(callee_reg));
-                self.regs.dec_use(*callee);
+                let suspended_invoke_idx = {
+                    self.regs.spill_all_live::<B>(&mut self.buf, &mut self.frame);
+                    let record_ptr = self.push_call_suspend_record(
+                        active_prompts,
+                        SuspendCallerResume::FromInvoke {
+                            normal_block: normal.index(),
+                            normal_arg_indices: normal_args
+                                .iter()
+                                .map(|value| value.index())
+                                .collect(),
+                            exception_block: exception.index(),
+                            exception_arg_indices: exception_args
+                                .iter()
+                                .map(|value| value.index())
+                                .collect(),
+                            has_ret_param: ret_ty.is_some(),
+                        },
+                        FrameResumePoint {
+                            func_idx: self.current_func_idx,
+                            block_idx,
+                            inst_idx: block.insts.len(),
+                        },
+                    );
+                    self.emit_push_suspended_frame(record_ptr);
+                    Some(self.suspend_records.len() - 1)
+                };
 
                 let outgoing_size = self.prepare_call_args(args);
+                if let Some(slot) = self.regs.values[callee.index()].spill_slot {
+                    B::emit_load_gp_from_frame(
+                        &mut self.buf,
+                        machine_gp(28),
+                        self.frame.slot_access(slot),
+                    );
+                } else {
+                    let callee_reg =
+                        self.regs
+                            .ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, *callee);
+                    B::emit_gp_move(&mut self.buf, machine_gp(28), machine_gp(callee_reg));
+                }
+                self.regs.dec_use(*callee);
                 B::emit_call_reg(&mut self.buf, machine_gp(28));
 
                 self.lower_invoke_common(
@@ -2314,11 +3363,64 @@ where
                     *exception,
                     exception_args,
                     true,
+                    suspended_invoke_idx,
                 );
             }
 
             Terminator::Unreachable => {
                 B::emit_trap(&mut self.buf);
+            }
+
+            Terminator::AbortToPrompt { prompt, args } => {
+                let record_idx = self.push_frame_reify_record(
+                    FrameReifyKind::AbortToPrompt,
+                    Some(*prompt),
+                    active_prompts,
+                    args,
+                    args,
+                    None,
+                    FrameResumePoint {
+                        func_idx: self.current_func_idx,
+                        block_idx,
+                        inst_idx: block.insts.len(),
+                    },
+                );
+                self.emit_frame_reify_outcome(
+                    JitOutcomeKind::AbortToPrompt,
+                    record_idx,
+                    args,
+                );
+                for &value in args {
+                    self.regs.dec_use(value);
+                }
+            }
+
+            Terminator::ResumeSlice { slice, args } => {
+                let mut values = Vec::with_capacity(args.len() + 1);
+                values.push(*slice);
+                values.extend(args.iter().copied());
+                let record_idx = self.push_frame_reify_record(
+                    FrameReifyKind::ResumeSlice,
+                    None,
+                    active_prompts,
+                    &values,
+                    &values,
+                    None,
+                    FrameResumePoint {
+                        func_idx: self.current_func_idx,
+                        block_idx,
+                        inst_idx: block.insts.len(),
+                    },
+                );
+                self.emit_frame_reify_outcome(
+                    JitOutcomeKind::ResumeSlice,
+                    record_idx,
+                    &values,
+                );
+                self.regs.dec_use(*slice);
+                for &value in args {
+                    self.regs.dec_use(value);
+                }
             }
 
         }
@@ -2461,7 +3563,9 @@ enum FpBinOp {
 fn type_to_machine_word_size(ty: Type) -> MachineWordSize {
     match ty {
         Type::I8 | Type::I32 => MachineWordSize::W32,
-        Type::I64 | Type::Ptr | Type::GcPtr | Type::F64 => MachineWordSize::W64,
+        Type::I64 | Type::Ptr | Type::GcPtr | Type::F64 | Type::FrameSlice => {
+            MachineWordSize::W64
+        }
     }
 }
 
@@ -2481,7 +3585,7 @@ fn overflow_type_code(ty: Type) -> u64 {
         Type::I8 => 8,
         Type::I32 => 32,
         Type::I64 | Type::Ptr | Type::GcPtr => 64,
-        Type::F64 => panic!("overflow check on non-integer type"),
+        Type::F64 | Type::FrameSlice => panic!("overflow check on non-integer type"),
     }
 }
 

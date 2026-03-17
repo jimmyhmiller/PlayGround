@@ -73,6 +73,7 @@ pub trait LoweringBackend {
     );
 
     fn emit_gp_move(buf: &mut CodeBuffer<Self::Arch>, dst: MachineReg, src: MachineReg);
+    fn emit_stack_pointer_to_gp(buf: &mut CodeBuffer<Self::Arch>, dst: MachineReg);
     fn emit_fp_to_gp_move(buf: &mut CodeBuffer<Self::Arch>, dst: MachineReg, src: MachineReg);
     fn emit_gp_to_fp_move(buf: &mut CodeBuffer<Self::Arch>, dst: MachineReg, src: MachineReg);
     fn emit_store_gp_to_frame(buf: &mut CodeBuffer<Self::Arch>, src: MachineReg, slot: FrameSlotAccess);
@@ -351,6 +352,10 @@ impl Arm64Backend {
         ));
     }
 
+    pub fn emit_stack_pointer_to_gp(buf: &mut CodeBuffer<Arm64>, dst: MachineReg) {
+        buf.emit(Arm64Inst::mov(Self::gp_hw(dst, RegSize::X64), SP));
+    }
+
     pub fn emit_fp_to_gp_move(buf: &mut CodeBuffer<Arm64>, dst: MachineReg, src: MachineReg) {
         buf.emit(Arm64Inst::fmov_fp_to_gp(
             Self::gp_hw(dst, RegSize::X64),
@@ -493,6 +498,10 @@ impl LoweringBackend for Arm64Backend {
 
     fn emit_gp_move(buf: &mut CodeBuffer<Self::Arch>, dst: MachineReg, src: MachineReg) {
         Arm64Backend::emit_gp_move(buf, dst, src);
+    }
+
+    fn emit_stack_pointer_to_gp(buf: &mut CodeBuffer<Self::Arch>, dst: MachineReg) {
+        Arm64Backend::emit_stack_pointer_to_gp(buf, dst);
     }
 
     fn emit_fp_to_gp_move(buf: &mut CodeBuffer<Self::Arch>, dst: MachineReg, src: MachineReg) {
@@ -1103,6 +1112,13 @@ impl LoweringBackend for X64Backend {
         if dst.index != src.index {
             buf.emit(X64Inst::MovRR { dest: Self::gp_hw(dst), src: Self::gp_hw(src) });
         }
+    }
+
+    fn emit_stack_pointer_to_gp(buf: &mut CodeBuffer<Self::Arch>, dst: MachineReg) {
+        buf.emit(X64Inst::MovRR {
+            dest: Self::gp_hw(dst),
+            src: RSP,
+        });
     }
 
     fn emit_fp_to_gp_move(buf: &mut CodeBuffer<Self::Arch>, dst: MachineReg, src: MachineReg) {
