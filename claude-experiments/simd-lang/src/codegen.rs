@@ -9,7 +9,7 @@ use melior::{
             DenseElementsAttribute, DenseI32ArrayAttribute, DenseI64ArrayAttribute,
             FloatAttribute, IntegerAttribute, StringAttribute, TypeAttribute,
         },
-        operation::{OperationBuilder, OperationLike},
+        operation::{OperationBuilder, OperationLike, OperationMutLike},
         r#type::{FunctionType, IntegerType, MemRefType},
         RegionLike,
     },
@@ -1909,16 +1909,19 @@ impl<'c, 'a> FnCodegen<'c, 'a> {
 
                     for chunk_idx in 0..num_chunks {
                         let offset = chunk_idx * 16;
+                        let offsets_attr = melior::ir::attribute::Attribute::parse(
+                            self.ctx, &format!("[{}]", offset)).unwrap();
+                        let sizes_attr = melior::ir::attribute::Attribute::parse(
+                            self.ctx, "[16]").unwrap();
+                        let strides_attr = melior::ir::attribute::Attribute::parse(
+                            self.ctx, "[1]").unwrap();
                         let extract = OperationBuilder::new("vector.extract_strided_slice", self.loc)
                             .add_operands(&[idx_val])
                             .add_results(&[vec16xi8])
                             .add_attributes(&[
-                                (melior::ir::Identifier::new(self.ctx, "offsets"),
-                                 DenseI64ArrayAttribute::new(self.ctx, &[offset as i64]).into()),
-                                (melior::ir::Identifier::new(self.ctx, "sizes"),
-                                 DenseI64ArrayAttribute::new(self.ctx, &[16]).into()),
-                                (melior::ir::Identifier::new(self.ctx, "strides"),
-                                 DenseI64ArrayAttribute::new(self.ctx, &[1]).into()),
+                                (melior::ir::Identifier::new(self.ctx, "offsets"), offsets_attr),
+                                (melior::ir::Identifier::new(self.ctx, "sizes"), sizes_attr),
+                                (melior::ir::Identifier::new(self.ctx, "strides"), strides_attr),
                             ])
                             .build().unwrap();
                         let slice: Value = self.block.append_operation(extract).result(0).unwrap().into();
@@ -1940,14 +1943,16 @@ impl<'c, 'a> FnCodegen<'c, 'a> {
                                 .build().unwrap()
                         ).result(0).unwrap().into();
 
+                        let ins_offsets = melior::ir::attribute::Attribute::parse(
+                            self.ctx, &format!("[{}]", offset)).unwrap();
+                        let ins_strides = melior::ir::attribute::Attribute::parse(
+                            self.ctx, "[1]").unwrap();
                         let insert = OperationBuilder::new("vector.insert_strided_slice", self.loc)
                             .add_operands(&[tbl_result, current])
                             .add_results(&[result_type])
                             .add_attributes(&[
-                                (melior::ir::Identifier::new(self.ctx, "offsets"),
-                                 DenseI64ArrayAttribute::new(self.ctx, &[offset as i64]).into()),
-                                (melior::ir::Identifier::new(self.ctx, "strides"),
-                                 DenseI64ArrayAttribute::new(self.ctx, &[1]).into()),
+                                (melior::ir::Identifier::new(self.ctx, "offsets"), ins_offsets),
+                                (melior::ir::Identifier::new(self.ctx, "strides"), ins_strides),
                             ])
                             .build().unwrap();
                         current = self.block.append_operation(insert).result(0).unwrap().into();
@@ -2707,6 +2712,13 @@ pub fn compile_module<'c>(
 
 /// Lower an MLIR module through the pass pipeline to LLVM dialect.
 pub fn lower_to_llvm(ctx: &Context, module: &mut Module) -> Result<(), String> {
+    // Set native target CPU on the module for optimal codegen
+    // This tells LLVM to use the host CPU's instruction set
+    // Set target triple for native codegen
+    if let Some(attr) = melior::ir::attribute::Attribute::parse(ctx, "\"aarch64-apple-darwin\"") {
+        module.as_operation_mut().set_attribute("llvm.target_triple", attr);
+    }
+
     let pass_manager = pass::PassManager::new(ctx);
 
     // SCF → ControlFlow
