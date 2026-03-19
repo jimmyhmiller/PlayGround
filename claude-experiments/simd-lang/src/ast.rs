@@ -173,6 +173,34 @@ pub struct Param {
 
 // --- Statements ---
 
+/// Source location for error reporting.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Span {
+    pub line: usize,
+    pub col: usize,
+}
+
+impl Span {
+    pub fn new(line: usize, col: usize) -> Self {
+        Span { line, col }
+    }
+
+    /// A dummy span for contexts where source location is unavailable.
+    pub fn dummy() -> Self {
+        Span { line: 0, col: 0 }
+    }
+}
+
+impl std::fmt::Display for Span {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.line == 0 {
+            write!(f, "<unknown>")
+        } else {
+            write!(f, "{}:{}", self.line, self.col)
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct CarryDef {
     pub name: String,
@@ -180,10 +208,25 @@ pub struct CarryDef {
     pub init: Expr,
 }
 
+/// A statement with source location.
+#[derive(Debug, Clone)]
+pub struct Stmt {
+    pub kind: StmtKind,
+    pub span: Span,
+}
+
+/// Equality compares only the `kind`, ignoring source spans.
+impl PartialEq for Stmt {
+    fn eq(&self, other: &Self) -> bool {
+        self.kind == other.kind
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
-pub enum Stmt {
+pub enum StmtKind {
     Assign {
         target: AssignTarget,
+        ty: Option<Type>,
         value: Expr,
     },
     Return(Expr),
@@ -195,6 +238,15 @@ pub enum Stmt {
         carry: Vec<CarryDef>,
         body: Vec<Stmt>,
         carry_updates: Vec<(String, Expr)>,
+    },
+    If {
+        cond: Expr,
+        then_body: Vec<Stmt>,
+        else_body: Vec<Stmt>,
+    },
+    While {
+        cond: Expr,
+        body: Vec<Stmt>,
     },
 }
 
@@ -309,8 +361,9 @@ pub enum BinOp {
     NotEq,
     And,
     Or,
-    Shl,
-    Shr,
+    Xor,
+    BitShl,
+    BitShr,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

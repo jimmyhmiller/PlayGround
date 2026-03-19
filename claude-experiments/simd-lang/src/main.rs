@@ -2,6 +2,7 @@ mod ast;
 mod codegen;
 mod lexer;
 mod parser;
+mod typecheck;
 
 use melior::ir::operation::OperationLike;
 use std::collections::HashMap;
@@ -68,6 +69,14 @@ fn cmd_compile(args: &[String]) {
 
     // Parse
     let items = parser::parse(&source);
+
+    // Type check
+    if let Err(errors) = typecheck::typecheck(&items, &HashMap::new(), 8) {
+        for e in &errors {
+            eprintln!("{}: {}", input_path.display(), e);
+        }
+        std::process::exit(1);
+    }
 
     // Compile to MLIR
     let ctx = codegen::create_context();

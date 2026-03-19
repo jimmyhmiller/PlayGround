@@ -1,11 +1,11 @@
 -- Combined: structural detection + UTF-8 validation, single pass.
 fn json_stage1(input: ptr[u8], positions: ptr[i32]) -> i32[1] {
-    stream chunk: u8[64] over input carry (prev_in_string: u64[1] = 0, pos: i32[1] = 0, utf8_error: u8[64] = [u8: 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]) {
+    stream chunk: u8[64] over input carry (prev_in_string: u64[1] = 0, pos: i32[1] = 0, utf8_error: u8[64] = [u8: 0; 64]) {
 
         -- === STRUCTURAL DETECTION ===
         quote_vec = chunk == '"'
         bs_vec = chunk == '\\'
-        prev_bs_vec = bs_vec >> 1
+        prev_bs_vec = lane_shr(bs_vec, 1)
         real_quote_vec = quote_vec & ~prev_bs_vec
 
         structural_vec = (chunk == '{') | (chunk == '}') | (chunk == '[')
@@ -13,9 +13,9 @@ fn json_stage1(input: ptr[u8], positions: ptr[i32]) -> i32[1] {
 
         quote_bits = to_bitmask(real_quote_vec)
         structural_bits = to_bitmask(structural_vec)
-        all_ones = ~(quote_bits & ~quote_bits)
+        all_ones: u64[1] = ~0
         in_string_raw = clmul(quote_bits, all_ones)
-        in_string_with_carry = xor(in_string_raw, prev_in_string)
+        in_string_with_carry = in_string_raw ^ prev_in_string
 
         real_structural_bits = structural_bits & ~in_string_with_carry
         real_structural_vec = from_bitmask(real_structural_bits, 64)
@@ -24,27 +24,27 @@ fn json_stage1(input: ptr[u8], positions: ptr[i32]) -> i32[1] {
         compressstore(positions, pos, indices, real_structural_vec)
 
         -- === UTF-8 VALIDATION ===
-        prev1 = chunk >> 1
+        prev1 = lane_shr(chunk, 1)
         byte_1_high_table = [u8: 2, 2, 2, 2, 2, 2, 2, 2, 128, 128, 128, 128, 33, 1, 21, 73]
-        byte_1_high = tbl(byte_1_high_table, bit_shr(prev1, 4))
+        byte_1_high = tbl(byte_1_high_table, prev1 >> 4)
         byte_1_low_table = [u8: 231, 163, 131, 131, 139, 203, 203, 203, 203, 203, 203, 203, 203, 219, 203, 203]
         byte_1_low = tbl(byte_1_low_table, prev1 & 15)
         byte_2_high_table = [u8: 1, 1, 1, 1, 1, 1, 1, 1, 230, 174, 186, 186, 1, 1, 1, 1]
-        byte_2_high = tbl(byte_2_high_table, bit_shr(chunk, 4))
+        byte_2_high = tbl(byte_2_high_table, chunk >> 4)
         special_cases = byte_1_high & byte_1_low & byte_2_high
 
-        prev2 = chunk >> 2
-        prev3 = chunk >> 3
+        prev2 = lane_shr(chunk, 2)
+        prev3 = lane_shr(chunk, 3)
         must23 = (prev2 >= 224) | (prev3 >= 240)
-        zero_byte = chunk - chunk
+        zero_byte: u8[64] = 0
         must23_byte = [must23] zero_byte + 128 : zero_byte
-        errors_for_chunk = xor(special_cases, must23_byte)
+        errors_for_chunk = special_cases ^ must23_byte
 
         -- OR errors into accumulator
         utf8_error = utf8_error | errors_for_chunk
 
         -- === CARRY ===
-        carry_bit = bit_shr(in_string_with_carry, 63)
+        carry_bit = in_string_with_carry >> 63
         carry prev_in_string = carry_bit * all_ones
         carry pos = pos + popcount(real_structural_vec)
         carry utf8_error = utf8_error

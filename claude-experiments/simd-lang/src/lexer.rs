@@ -17,6 +17,9 @@ pub enum Token {
     Stream,
     Over,
     Carry,
+    If,
+    Else,
+    While,
 
     // Arithmetic operators
     Plus,
@@ -36,6 +39,7 @@ pub enum Token {
     Amp,
     Pipe,
     Tilde,
+    Caret,
     LtLt,  // <<
     GtGt,  // >>
 
@@ -58,6 +62,7 @@ pub enum Token {
     LBrace,
     RBrace,
     Comma,
+    Semicolon,
     Colon,
     Dot,
     Arrow,       // ->
@@ -161,6 +166,9 @@ impl<'a> Lexer<'a> {
             "stream" => Token::Stream,
             "over" => Token::Over,
             "carry" => Token::Carry,
+            "if" => Token::If,
+            "else" => Token::Else,
+            "while" => Token::While,
             "_" => Token::Underscore,
             _ => Token::Ident(text.to_string()),
         }
@@ -325,6 +333,14 @@ impl<'a> Lexer<'a> {
                 b'~' => {
                     self.advance();
                     Token::Tilde
+                }
+                b'^' => {
+                    self.advance();
+                    Token::Caret
+                }
+                b';' => {
+                    self.advance();
+                    Token::Semicolon
                 }
                 b'(' => {
                     self.advance();
@@ -900,6 +916,44 @@ mod tests {
                 Token::RBracket,
                 Token::Over,
                 Token::Ident("input".into()),
+            ]
+        );
+    }
+
+    // --- Caret (XOR) ---
+
+    #[test]
+    fn test_caret() {
+        assert_eq!(lex("^"), vec![Token::Caret]);
+    }
+
+    #[test]
+    fn test_caret_in_expr() {
+        assert_eq!(
+            lex("a ^ b"),
+            vec![Token::Ident("a".into()), Token::Caret, Token::Ident("b".into())]
+        );
+    }
+
+    // --- Semicolon ---
+
+    #[test]
+    fn test_semicolon() {
+        assert_eq!(lex(";"), vec![Token::Semicolon]);
+    }
+
+    #[test]
+    fn test_vec_repeat_tokens() {
+        assert_eq!(
+            lex("[u8: 0; 64]"),
+            vec![
+                Token::LBracket,
+                Token::Ident("u8".into()),
+                Token::Colon,
+                Token::IntLit(0),
+                Token::Semicolon,
+                Token::IntLit(64),
+                Token::RBracket,
             ]
         );
     }

@@ -39,6 +39,10 @@ impl Parser {
         self.pos += 1;
     }
 
+    fn current_span(&self) -> Span {
+        self.tokens.get(self.pos).map(|s| Span::new(s.line, s.col)).unwrap_or(Span::dummy())
+    }
+
     fn expect_ident(&mut self) -> String {
         match self.peek().clone() {
             Token::Ident(name) => {
@@ -251,9 +255,11 @@ impl Parser {
     // --- Statements ---
 
     fn parse_stmt(&mut self) -> Stmt {
+        let span = self.current_span();
+
         if *self.peek() == Token::Return {
             self.pos += 1;
-            return Stmt::Return(self.parse_expr());
+            return Stmt { kind: StmtKind::Return(self.parse_expr()), span };
         }
 
         // Stream: stream chunk: u8[64] over input carry (...) { ... }
@@ -261,10 +267,49 @@ impl Parser {
             return self.parse_stream();
         }
 
+        // If/else: if cond { ... } else { ... }
+        if *self.peek() == Token::If {
+            return self.parse_if(span);
+        }
+
+        // While: while cond { ... }
+        if *self.peek() == Token::While {
+            return self.parse_while(span);
+        }
+
         // Destructuring: (a, b) = expr
         if *self.peek() == Token::LParen {
             if let Some(stmt) = self.try_parse_destructure() {
                 return stmt;
+            }
+        }
+
+        // Typed assignment: ident: type = expr
+        // Check for ident followed by colon where next token is a type name (ident) then [ or =
+        if let Token::Ident(_) = self.peek() {
+            if *self.peek_at(1) == Token::Colon {
+                if let Token::Ident(_) = self.peek_at(2) {
+                    // Could be typed assignment: name: type = expr
+                    // Look ahead to confirm: type is ident optionally followed by [width], then =
+                    let saved = self.pos;
+                    let name = self.expect_ident();
+                    self.pos += 1; // consume :
+                    let ty = self.parse_type();
+                    if *self.peek() == Token::Eq {
+                        self.pos += 1;
+                        let value = self.parse_expr();
+                        return Stmt {
+                            kind: StmtKind::Assign {
+                                target: AssignTarget::Ident(name),
+                                ty: Some(ty),
+                                value,
+                            },
+                            span,
+                        };
+                    }
+                    // Not a typed assignment, backtrack
+                    self.pos = saved;
+                }
             }
         }
 
@@ -278,13 +323,14 @@ impl Parser {
                 Expr::Gather { base, index, mask } => AssignTarget::Scatter { base, index, mask },
                 _ => panic!("invalid assignment target: {:?}", expr),
             };
-            Stmt::Assign { target, value }
+            Stmt { kind: StmtKind::Assign { target, ty: None, value }, span }
         } else {
-            Stmt::Expr(expr)
+            Stmt { kind: StmtKind::Expr(expr), span }
         }
     }
 
     fn try_parse_destructure(&mut self) -> Option<Stmt> {
+        let span = self.current_span();
         let saved = self.pos;
 
         self.pos += 1; // consume (
@@ -320,9 +366,13 @@ impl Parser {
         self.pos += 1; // consume =
 
         let value = self.parse_expr();
-        Some(Stmt::Assign {
-            target: AssignTarget::Destructure(names),
-            value,
+        Some(Stmt {
+            kind: StmtKind::Assign {
+                target: AssignTarget::Destructure(names),
+                ty: None,
+                value,
+            },
+            span,
         })
     }
 
@@ -330,6 +380,7 @@ impl Parser {
 
     /// Parse: stream chunk: u8[64] over buf carry (in_string: bool[1] = false) { ... carry x = expr }
     fn parse_stream(&mut self) -> Stmt {
+        let span = self.current_span();
         self.expect(&Token::Stream);
         let chunk_name = self.expect_ident();
         self.expect(&Token::Colon);
@@ -381,13 +432,64 @@ impl Parser {
         }
         self.expect(&Token::RBrace);
 
-        Stmt::Stream {
-            chunk_name,
-            chunk_ty,
-            buffer,
-            carry,
-            body,
-            carry_updates,
+        Stmt {
+            kind: StmtKind::Stream {
+                chunk_name,
+                chunk_ty,
+                buffer,
+                carry,
+                body,
+                carry_updates,
+            },
+            span,
+        }
+    }
+
+    /// Parse: if cond { ... } else { ... }
+    fn parse_if(&mut self, span: Span) -> Stmt {
+        self.expect(&Token::If);
+        let cond = self.parse_expr();
+        self.expect(&Token::LBrace);
+        let mut then_body = Vec::new();
+        while *self.peek() != Token::RBrace {
+            then_body.push(self.parse_stmt());
+        }
+        self.expect(&Token::RBrace);
+
+        let mut else_body = Vec::new();
+        if *self.peek() == Token::Else {
+            self.pos += 1;
+            self.expect(&Token::LBrace);
+            while *self.peek() != Token::RBrace {
+                else_body.push(self.parse_stmt());
+            }
+            self.expect(&Token::RBrace);
+        }
+
+        Stmt {
+            kind: StmtKind::If {
+                cond,
+                then_body,
+                else_body,
+            },
+            span,
+        }
+    }
+
+    /// Parse: while cond { ... }
+    fn parse_while(&mut self, span: Span) -> Stmt {
+        self.expect(&Token::While);
+        let cond = self.parse_expr();
+        self.expect(&Token::LBrace);
+        let mut body = Vec::new();
+        while *self.peek() != Token::RBrace {
+            body.push(self.parse_stmt());
+        }
+        self.expect(&Token::RBrace);
+
+        Stmt {
+            kind: StmtKind::While { cond, body },
+            span,
         }
     }
 
@@ -427,13 +529,47 @@ impl Parser {
         }
     }
 
-    /// Parse [type: val, val, ...] — constant vector literal
+    /// Parse [type: val, val, ...] or [type: val; count] — constant vector literal
     fn parse_vec_lit(&mut self) -> Expr {
         self.expect(&Token::LBracket);
         let elem_type = self.expect_ident();
         self.expect(&Token::Colon);
-        let mut values = Vec::new();
-        loop {
+
+        // Parse first value
+        let neg = if *self.peek() == Token::Minus {
+            self.pos += 1;
+            true
+        } else {
+            false
+        };
+        let first = match self.peek().clone() {
+            Token::IntLit(n) => {
+                self.pos += 1;
+                if neg { -n } else { n }
+            }
+            _ => panic!("expected integer in vector literal"),
+        };
+
+        // Check for repeat syntax: [type: val; count]
+        if *self.peek() == Token::Semicolon {
+            self.pos += 1;
+            let count = match self.peek().clone() {
+                Token::IntLit(n) => {
+                    self.pos += 1;
+                    n as usize
+                }
+                _ => panic!("expected integer count after ';' in vector repeat"),
+            };
+            self.expect(&Token::RBracket);
+            return Expr::VecLit {
+                elem_type,
+                values: vec![first; count],
+            };
+        }
+
+        let mut values = vec![first];
+        while *self.peek() == Token::Comma {
+            self.pos += 1;
             // Handle negative numbers
             let neg = if *self.peek() == Token::Minus {
                 self.pos += 1;
@@ -448,23 +584,32 @@ impl Parser {
                 }
                 _ => panic!("expected integer in vector literal"),
             }
-            if *self.peek() == Token::Comma {
-                self.pos += 1;
-            } else {
-                break;
-            }
         }
         self.expect(&Token::RBracket);
         Expr::VecLit { elem_type, values }
     }
 
     fn parse_or(&mut self) -> Expr {
-        let mut left = self.parse_and();
+        let mut left = self.parse_xor();
         while *self.peek() == Token::Pipe {
+            self.pos += 1;
+            let right = self.parse_xor();
+            left = Expr::BinOp {
+                op: BinOp::Or,
+                lhs: Box::new(left),
+                rhs: Box::new(right),
+            };
+        }
+        left
+    }
+
+    fn parse_xor(&mut self) -> Expr {
+        let mut left = self.parse_and();
+        while *self.peek() == Token::Caret {
             self.pos += 1;
             let right = self.parse_and();
             left = Expr::BinOp {
-                op: BinOp::Or,
+                op: BinOp::Xor,
                 lhs: Box::new(left),
                 rhs: Box::new(right),
             };
@@ -510,8 +655,8 @@ impl Parser {
         let mut left = self.parse_add();
         loop {
             let op = match self.peek() {
-                Token::LtLt => BinOp::Shl,
-                Token::GtGt => BinOp::Shr,
+                Token::LtLt => BinOp::BitShl,
+                Token::GtGt => BinOp::BitShr,
                 _ => break,
             };
             self.pos += 1;
@@ -1524,7 +1669,7 @@ mod tests {
     fn test_simple_assign() {
         assert_eq!(
             parse_one_stmt("x = 42"),
-            Stmt::Assign { target: AssignTarget::Ident("x".into()), value: int(42) }
+            Stmt { kind: StmtKind::Assign { target: AssignTarget::Ident("x".into()), ty: None, value: int(42) }, span: Span::dummy() }
         );
     }
 
@@ -1532,9 +1677,13 @@ mod tests {
     fn test_assign_expr() {
         assert_eq!(
             parse_one_stmt("alive = p.mass > 0.0"),
-            Stmt::Assign {
-                target: AssignTarget::Ident("alive".into()),
-                value: binop(BinOp::Gt, field(ident("p"), "mass"), float(0.0)),
+            Stmt {
+                kind: StmtKind::Assign {
+                    target: AssignTarget::Ident("alive".into()),
+                    ty: None,
+                    value: binop(BinOp::Gt, field(ident("p"), "mass"), float(0.0)),
+                },
+                span: Span::dummy(),
             }
         );
     }
@@ -1543,31 +1692,38 @@ mod tests {
     fn test_assign_masked() {
         assert_eq!(
             parse_one_stmt("new_vel = [alive] p.vel : p.vel"),
-            Stmt::Assign {
-                target: AssignTarget::Ident("new_vel".into()),
-                value: Expr::Masked {
-                    mask: Box::new(ident("alive")),
-                    body: Box::new(field(ident("p"), "vel")),
-                    fallback: Some(Box::new(field(ident("p"), "vel"))),
+            Stmt {
+                kind: StmtKind::Assign {
+                    target: AssignTarget::Ident("new_vel".into()),
+                    ty: None,
+                    value: Expr::Masked {
+                        mask: Box::new(ident("alive")),
+                        body: Box::new(field(ident("p"), "vel")),
+                        fallback: Some(Box::new(field(ident("p"), "vel"))),
+                    },
                 },
+                span: Span::dummy(),
             }
         );
     }
 
     #[test]
     fn test_return_stmt() {
-        assert_eq!(parse_one_stmt("return x"), Stmt::Return(ident("x")));
+        assert_eq!(parse_one_stmt("return x"), Stmt { kind: StmtKind::Return(ident("x")), span: Span::dummy() });
     }
 
     #[test]
     fn test_return_struct_lit() {
         assert_eq!(
             parse_one_stmt("return Particle[1024] { pos_x: x }"),
-            Stmt::Return(Expr::StructLit {
-                name: "Particle".into(),
-                width: Width::Fixed(1024),
-                fields: vec![("pos_x".into(), ident("x"))],
-            }),
+            Stmt {
+                kind: StmtKind::Return(Expr::StructLit {
+                    name: "Particle".into(),
+                    width: Width::Fixed(1024),
+                    fields: vec![("pos_x".into(), ident("x"))],
+                }),
+                span: Span::dummy(),
+            },
         );
     }
 
@@ -1575,7 +1731,7 @@ mod tests {
     fn test_expr_stmt() {
         assert_eq!(
             parse_one_stmt("store(ptr, v)"),
-            Stmt::Expr(call(ident("store"), vec![pos_arg(ident("ptr")), pos_arg(ident("v"))]))
+            Stmt { kind: StmtKind::Expr(call(ident("store"), vec![pos_arg(ident("ptr")), pos_arg(ident("v"))])), span: Span::dummy() }
         );
     }
 
@@ -1583,13 +1739,17 @@ mod tests {
     fn test_scatter_assign() {
         assert_eq!(
             parse_one_stmt("dst.[indices] = src"),
-            Stmt::Assign {
-                target: AssignTarget::Scatter {
-                    base: Box::new(ident("dst")),
-                    index: Box::new(ident("indices")),
-                    mask: None,
+            Stmt {
+                kind: StmtKind::Assign {
+                    target: AssignTarget::Scatter {
+                        base: Box::new(ident("dst")),
+                        index: Box::new(ident("indices")),
+                        mask: None,
+                    },
+                    ty: None,
+                    value: ident("src"),
                 },
-                value: ident("src"),
+                span: Span::dummy(),
             }
         );
     }
@@ -1598,13 +1758,17 @@ mod tests {
     fn test_masked_scatter_assign() {
         assert_eq!(
             parse_one_stmt("dst.[indices, mask] = src"),
-            Stmt::Assign {
-                target: AssignTarget::Scatter {
-                    base: Box::new(ident("dst")),
-                    index: Box::new(ident("indices")),
-                    mask: Some(Box::new(ident("mask"))),
+            Stmt {
+                kind: StmtKind::Assign {
+                    target: AssignTarget::Scatter {
+                        base: Box::new(ident("dst")),
+                        index: Box::new(ident("indices")),
+                        mask: Some(Box::new(ident("mask"))),
+                    },
+                    ty: None,
+                    value: ident("src"),
                 },
-                value: ident("src"),
+                span: Span::dummy(),
             }
         );
     }
@@ -1613,9 +1777,13 @@ mod tests {
     fn test_destructure_assign() {
         assert_eq!(
             parse_one_stmt("(evens, odds) = unzip(v)"),
-            Stmt::Assign {
-                target: AssignTarget::Destructure(vec!["evens".into(), "odds".into()]),
-                value: call(ident("unzip"), vec![pos_arg(ident("v"))]),
+            Stmt {
+                kind: StmtKind::Assign {
+                    target: AssignTarget::Destructure(vec!["evens".into(), "odds".into()]),
+                    ty: None,
+                    value: call(ident("unzip"), vec![pos_arg(ident("v"))]),
+                },
+                span: Span::dummy(),
             }
         );
     }
@@ -1718,7 +1886,7 @@ mod tests {
                     Param { name: "b".into(), ty: ty("f32", Some(Width::Fixed(8))) },
                 ],
                 ret_ty: Some(ty("f32", Some(Width::Fixed(8)))),
-                body: vec![Stmt::Return(binop(BinOp::Add, ident("a"), ident("b")))],
+                body: vec![Stmt { kind: StmtKind::Return(binop(BinOp::Add, ident("a"), ident("b"))), span: Span::dummy() }],
             })]
         );
     }
@@ -1748,10 +1916,10 @@ mod tests {
                     Param { name: "b".into(), ty: ty("f32", Some(Width::Param("N".into()))) },
                 ],
                 ret_ty: Some(ty("f32", Some(Width::Fixed(1)))),
-                body: vec![Stmt::Return(Expr::Reduction {
+                body: vec![Stmt { kind: StmtKind::Return(Expr::Reduction {
                     op: ReductionOp::Add,
                     operand: Box::new(binop(BinOp::Mul, ident("a"), ident("b"))),
-                })],
+                }), span: Span::dummy() }],
             })]
         );
     }
@@ -1844,7 +2012,7 @@ mod tests {
             assert_eq!(f.body.len(), 14);
 
             // Return has struct literal with Param width
-            if let Stmt::Return(Expr::StructLit { name, width, fields }) = &f.body[13] {
+            if let Stmt { kind: StmtKind::Return(Expr::StructLit { name, width, fields }), .. } = &f.body[13] {
                 assert_eq!(name, "Particle");
                 assert_eq!(width, &Width::Param("N".into()));
                 assert_eq!(fields.len(), 5);
@@ -1912,8 +2080,8 @@ mod tests {
             assert_eq!(f.name, "string_mask");
             assert_eq!(f.comptime_params, vec![cparam("N")]);
             assert_eq!(f.body.len(), 2);
-            assert!(matches!(&f.body[0], Stmt::Assign { target: AssignTarget::Ident(n), .. } if n == "real_quote"));
-            assert!(matches!(&f.body[1], Stmt::Return(Expr::Scan { op: ScanOp::Xor, .. })));
+            assert!(matches!(&f.body[0], Stmt { kind: StmtKind::Assign { target: AssignTarget::Ident(n), .. }, .. } if n == "real_quote"));
+            assert!(matches!(&f.body[1], Stmt { kind: StmtKind::Return(Expr::Scan { op: ScanOp::Xor, .. }), .. }));
         } else {
             panic!("expected function");
         }
@@ -1976,10 +2144,10 @@ mod tests {
     fn test_store_with_mask() {
         assert_eq!(
             parse_one_stmt("store(ptr, v, mask)"),
-            Stmt::Expr(call(
+            Stmt { kind: StmtKind::Expr(call(
                 ident("store"),
                 vec![pos_arg(ident("ptr")), pos_arg(ident("v")), pos_arg(ident("mask"))]
-            ))
+            )), span: Span::dummy() }
         );
     }
 
@@ -1987,13 +2155,17 @@ mod tests {
     fn test_speed_clamp_pattern() {
         assert_eq!(
             parse_one_stmt("speed_sq = new_vel_x * new_vel_x + new_vel_y * new_vel_y"),
-            Stmt::Assign {
-                target: AssignTarget::Ident("speed_sq".into()),
-                value: binop(
-                    BinOp::Add,
-                    binop(BinOp::Mul, ident("new_vel_x"), ident("new_vel_x")),
-                    binop(BinOp::Mul, ident("new_vel_y"), ident("new_vel_y")),
-                ),
+            Stmt {
+                kind: StmtKind::Assign {
+                    target: AssignTarget::Ident("speed_sq".into()),
+                    ty: None,
+                    value: binop(
+                        BinOp::Add,
+                        binop(BinOp::Mul, ident("new_vel_x"), ident("new_vel_x")),
+                        binop(BinOp::Mul, ident("new_vel_y"), ident("new_vel_y")),
+                    ),
+                },
+                span: Span::dummy(),
             }
         );
     }
@@ -2069,7 +2241,7 @@ mod tests {
         let items = parse("fn foo[N]() -> V[N] { return V[N] { x: a } }");
         if let Item::Fn(f) = &items[0] {
             assert_eq!(f.comptime_params, vec![cparam("N")]);
-            if let Stmt::Return(Expr::StructLit { name, width, .. }) = &f.body[0] {
+            if let Stmt { kind: StmtKind::Return(Expr::StructLit { name, width, .. }), .. } = &f.body[0] {
                 assert_eq!(name, "V");
                 assert_eq!(width, &Width::Param("N".into()));
             } else {
@@ -2288,7 +2460,7 @@ mod tests {
         assert_eq!(
             expr,
             Expr::BinOp {
-                op: BinOp::Shr,
+                op: BinOp::BitShr,
                 lhs: Box::new(ident("v")),
                 rhs: Box::new(Expr::IntLit(1)),
             }
@@ -2301,7 +2473,7 @@ mod tests {
         assert_eq!(
             expr,
             Expr::BinOp {
-                op: BinOp::Shl,
+                op: BinOp::BitShl,
                 lhs: Box::new(ident("v")),
                 rhs: Box::new(Expr::IntLit(2)),
             }
@@ -2315,7 +2487,7 @@ mod tests {
         match expr {
             Expr::BinOp { op: BinOp::EqEq, lhs, rhs } => {
                 match *lhs {
-                    Expr::BinOp { op: BinOp::Shr, .. } => {}
+                    Expr::BinOp { op: BinOp::BitShr, .. } => {}
                     other => panic!("expected Shr, got {:?}", other),
                 }
                 assert_eq!(*rhs, ident("b"));
@@ -2329,7 +2501,7 @@ mod tests {
         // a + b >> 1 should parse as (a + b) >> 1
         let expr = parse_expr_str("a + b >> 1");
         match expr {
-            Expr::BinOp { op: BinOp::Shr, lhs, .. } => {
+            Expr::BinOp { op: BinOp::BitShr, lhs, .. } => {
                 match *lhs {
                     Expr::BinOp { op: BinOp::Add, .. } => {}
                     other => panic!("expected Add, got {:?}", other),
@@ -2337,6 +2509,114 @@ mod tests {
             }
             other => panic!("expected Shr, got {:?}", other),
         }
+    }
+
+    // ============================================================
+    // XOR operator
+    // ============================================================
+
+    #[test]
+    fn test_xor_operator() {
+        let expr = parse_expr_str("a ^ b");
+        assert_eq!(
+            expr,
+            Expr::BinOp {
+                op: BinOp::Xor,
+                lhs: Box::new(ident("a")),
+                rhs: Box::new(ident("b")),
+            }
+        );
+    }
+
+    #[test]
+    fn test_xor_precedence_between_or_and_and() {
+        // a | b ^ c & d should parse as a | (b ^ (c & d))
+        let expr = parse_expr_str("a | b ^ c & d");
+        match expr {
+            Expr::BinOp { op: BinOp::Or, rhs, .. } => {
+                match *rhs {
+                    Expr::BinOp { op: BinOp::Xor, rhs: inner_rhs, .. } => {
+                        match *inner_rhs {
+                            Expr::BinOp { op: BinOp::And, .. } => {}
+                            other => panic!("expected And, got {:?}", other),
+                        }
+                    }
+                    other => panic!("expected Xor, got {:?}", other),
+                }
+            }
+            other => panic!("expected Or, got {:?}", other),
+        }
+    }
+
+    // ============================================================
+    // Vector repeat syntax
+    // ============================================================
+
+    #[test]
+    fn test_vec_repeat() {
+        let expr = parse_expr_str("[u8: 0; 64]");
+        assert_eq!(
+            expr,
+            Expr::VecLit {
+                elem_type: "u8".into(),
+                values: vec![0; 64],
+            }
+        );
+    }
+
+    #[test]
+    fn test_vec_repeat_nonzero() {
+        let expr = parse_expr_str("[i32: 42; 4]");
+        assert_eq!(
+            expr,
+            Expr::VecLit {
+                elem_type: "i32".into(),
+                values: vec![42, 42, 42, 42],
+            }
+        );
+    }
+
+    // ============================================================
+    // Typed assignments
+    // ============================================================
+
+    #[test]
+    fn test_typed_assign() {
+        assert_eq!(
+            parse_one_stmt("x: u64[1] = ~0"),
+            Stmt {
+                kind: StmtKind::Assign {
+                    target: AssignTarget::Ident("x".into()),
+                    ty: Some(Type {
+                        name: "u64".into(),
+                        width: Some(Width::Fixed(1)),
+                    }),
+                    value: Expr::UnaryOp {
+                        op: UnaryOp::Not,
+                        operand: Box::new(Expr::IntLit(0)),
+                    },
+                },
+                span: Span::dummy(),
+            }
+        );
+    }
+
+    #[test]
+    fn test_typed_assign_zero() {
+        assert_eq!(
+            parse_one_stmt("z: u8[64] = 0"),
+            Stmt {
+                kind: StmtKind::Assign {
+                    target: AssignTarget::Ident("z".into()),
+                    ty: Some(Type {
+                        name: "u8".into(),
+                        width: Some(Width::Fixed(64)),
+                    }),
+                    value: Expr::IntLit(0),
+                },
+                span: Span::dummy(),
+            }
+        );
     }
 
     // ============================================================
@@ -2357,14 +2637,14 @@ mod tests {
         if let Item::Fn(f) = &items[0] {
             assert_eq!(f.body.len(), 1);
             match &f.body[0] {
-                Stmt::Stream {
+                Stmt { kind: StmtKind::Stream {
                     chunk_name,
                     chunk_ty,
                     buffer,
                     carry,
                     body,
                     carry_updates,
-                } => {
+                }, .. } => {
                     assert_eq!(chunk_name, "chunk");
                     assert_eq!(chunk_ty.name, "u8");
                     assert_eq!(buffer, "buf");
@@ -2391,7 +2671,7 @@ mod tests {
         let items = parse(input);
         if let Item::Fn(f) = &items[0] {
             match &f.body[0] {
-                Stmt::Stream { carry, carry_updates, .. } => {
+                Stmt { kind: StmtKind::Stream { carry, carry_updates, .. }, .. } => {
                     assert_eq!(carry.len(), 0);
                     assert_eq!(carry_updates.len(), 0);
                 }
