@@ -256,6 +256,11 @@ impl Parser {
             return Stmt::Return(self.parse_expr());
         }
 
+        // Stream: stream chunk: u8[64] over input carry (...) { ... }
+        if *self.peek() == Token::Stream {
+            return self.parse_stream();
+        }
+
         // Destructuring: (a, b) = expr
         if *self.peek() == Token::LParen {
             if let Some(stmt) = self.try_parse_destructure() {
@@ -321,11 +326,87 @@ impl Parser {
         })
     }
 
+    // --- Stream ---
+
+    /// Parse: stream chunk: u8[64] over buf carry (in_string: bool[1] = false) { ... carry x = expr }
+    fn parse_stream(&mut self) -> Stmt {
+        self.expect(&Token::Stream);
+        let chunk_name = self.expect_ident();
+        self.expect(&Token::Colon);
+        let chunk_ty = self.parse_type();
+        self.expect(&Token::Over);
+        let buffer = self.expect_ident();
+
+        // Parse carry state: carry (name: type = init, ...)
+        let mut carry = Vec::new();
+        if *self.peek() == Token::Carry {
+            self.pos += 1;
+            self.expect(&Token::LParen);
+            loop {
+                if *self.peek() == Token::RParen {
+                    break;
+                }
+                let name = self.expect_ident();
+                self.expect(&Token::Colon);
+                let ty = self.parse_type();
+                self.expect(&Token::Eq);
+                let init = self.parse_expr();
+                carry.push(CarryDef { name, ty, init });
+                if *self.peek() == Token::Comma {
+                    self.pos += 1;
+                } else {
+                    break;
+                }
+            }
+            self.expect(&Token::RParen);
+        }
+
+        self.expect(&Token::LBrace);
+
+        // Parse body statements and carry updates
+        let mut body = Vec::new();
+        let mut carry_updates = Vec::new();
+
+        while *self.peek() != Token::RBrace {
+            // Check for carry update: carry name = expr
+            if *self.peek() == Token::Carry {
+                self.pos += 1;
+                let name = self.expect_ident();
+                self.expect(&Token::Eq);
+                let value = self.parse_expr();
+                carry_updates.push((name, value));
+            } else {
+                body.push(self.parse_stmt());
+            }
+        }
+        self.expect(&Token::RBrace);
+
+        Stmt::Stream {
+            chunk_name,
+            chunk_ty,
+            buffer,
+            carry,
+            body,
+            carry_updates,
+        }
+    }
+
     // --- Expressions ---
 
     fn parse_expr(&mut self) -> Expr {
-        // Masked expression: [mask] body : fallback
         if *self.peek() == Token::LBracket {
+            // Could be:
+            // [type: val, val, ...] — constant vector literal
+            // [mask] body : fallback — masked expression
+            //
+            // Distinguish by: if [ is followed by Ident then :, it's a vec literal
+            if let Token::Ident(_) = self.peek_at(1) {
+                if *self.peek_at(2) == Token::Colon {
+                    return self.parse_vec_lit();
+                }
+            }
+
+            // Masked expression
             self.pos += 1;
             let mask = self.parse_or();
             self.expect(&Token::RBracket);
@@ -344,6 +425,37 @@ impl Parser {
         } else {
             self.parse_or()
         }
+    }
+
+    /// Parse [type: val, val, ...] — constant vector literal
+    fn parse_vec_lit(&mut self) -> Expr {
+        self.expect(&Token::LBracket);
+        let elem_type = self.expect_ident();
+        self.expect(&Token::Colon);
+        let mut values = Vec::new();
+        loop {
+            // Handle negative numbers
+            let neg = if *self.peek() == Token::Minus {
+                self.pos += 1;
+                true
+            } else {
+                false
+            };
+            match self.peek().clone() {
+                Token::IntLit(n) => {
+                    self.pos += 1;
+                    values.push(if neg { -n } else { n });
+                }
+                _ => panic!("expected integer in vector literal"),
+            }
+            if *self.peek() == Token::Comma {
+                self.pos += 1;
+            } else {
+                break;
+            }
+        }
+        self.expect(&Token::RBracket);
+        Expr::VecLit { elem_type, values }
     }
 
     fn parse_or(&mut self) -> Expr {
@@ -375,7 +487,7 @@ impl Parser {
     }
 
     fn parse_comparison(&mut self) -> Expr {
-        let left = self.parse_add();
+        let left = self.parse_shift();
         let op = match self.peek() {
             Token::Gt => BinOp::Gt,
             Token::Lt => BinOp::Lt,
@@ -386,12 +498,31 @@ impl Parser {
             _ => return left,
         };
         self.pos += 1;
-        let right = self.parse_add();
+        let right = self.parse_shift();
         Expr::BinOp {
             op,
             lhs: Box::new(left),
             rhs: Box::new(right),
         }
+    }
+
+    fn parse_shift(&mut self) -> Expr {
+        let mut left = self.parse_add();
+        loop {
+            let op = match self.peek() {
+                Token::LtLt => BinOp::Shl,
+                Token::GtGt => BinOp::Shr,
+                _ => break,
+            };
+            self.pos += 1;
+            let right = self.parse_add();
+            left = Expr::BinOp {
+                op,
+                lhs: Box::new(left),
+                rhs: Box::new(right),
+            };
+        }
+        left
     }
 
     fn parse_add(&mut self) -> Expr {
@@ -641,10 +772,17 @@ impl Parser {
         };
         self.expect(&Token::LParen);
         let operand = self.parse_expr();
+        let seed = if *self.peek() == Token::Comma {
+            self.pos += 1;
+            Some(Box::new(self.parse_expr()))
+        } else {
+            None
+        };
         self.expect(&Token::RParen);
         Expr::Scan {
             op,
             operand: Box::new(operand),
+            seed,
         }
     }
 
@@ -1153,7 +1291,7 @@ mod tests {
     fn test_scan_add() {
         assert_eq!(
             parse_expr_str("scan.add(v)"),
-            Expr::Scan { op: ScanOp::Add, operand: Box::new(ident("v")) }
+            Expr::Scan { op: ScanOp::Add, operand: Box::new(ident("v")), seed: None }
         );
     }
 
@@ -1161,7 +1299,7 @@ mod tests {
     fn test_scan_xor() {
         assert_eq!(
             parse_expr_str("scan.xor(v)"),
-            Expr::Scan { op: ScanOp::Xor, operand: Box::new(ident("v")) }
+            Expr::Scan { op: ScanOp::Xor, operand: Box::new(ident("v")), seed: None }
         );
     }
 
@@ -1169,7 +1307,7 @@ mod tests {
     fn test_scan_max() {
         assert_eq!(
             parse_expr_str("scan.max(v)"),
-            Expr::Scan { op: ScanOp::Max, operand: Box::new(ident("v")) }
+            Expr::Scan { op: ScanOp::Max, operand: Box::new(ident("v")), seed: None }
         );
     }
 
@@ -1177,7 +1315,7 @@ mod tests {
     fn test_scan_preceding_any() {
         assert_eq!(
             parse_expr_str("scan.preceding_any(v)"),
-            Expr::Scan { op: ScanOp::PrecedingAny, operand: Box::new(ident("v")) }
+            Expr::Scan { op: ScanOp::PrecedingAny, operand: Box::new(ident("v")), seed: None }
         );
     }
 
@@ -1187,7 +1325,7 @@ mod tests {
             parse_expr_str("~scan.preceding_any(is_escape)"),
             unary(
                 UnaryOp::Not,
-                Expr::Scan { op: ScanOp::PrecedingAny, operand: Box::new(ident("is_escape")) }
+                Expr::Scan { op: ScanOp::PrecedingAny, operand: Box::new(ident("is_escape")), seed: None }
             )
         );
     }
@@ -2137,6 +2275,128 @@ mod tests {
                 f.ret_ty,
                 Some(ty("f32", Some(width_div(Width::Param("N".into()), Width::Fixed(2)))))
             );
+        }
+    }
+
+    // ============================================================
+    // Shift operators
+    // ============================================================
+
+    #[test]
+    fn test_shift_right() {
+        let expr = parse_expr_str("v >> 1");
+        assert_eq!(
+            expr,
+            Expr::BinOp {
+                op: BinOp::Shr,
+                lhs: Box::new(ident("v")),
+                rhs: Box::new(Expr::IntLit(1)),
+            }
+        );
+    }
+
+    #[test]
+    fn test_shift_left() {
+        let expr = parse_expr_str("v << 2");
+        assert_eq!(
+            expr,
+            Expr::BinOp {
+                op: BinOp::Shl,
+                lhs: Box::new(ident("v")),
+                rhs: Box::new(Expr::IntLit(2)),
+            }
+        );
+    }
+
+    #[test]
+    fn test_shift_precedence_vs_comparison() {
+        // a >> 1 == b should parse as (a >> 1) == b
+        let expr = parse_expr_str("a >> 1 == b");
+        match expr {
+            Expr::BinOp { op: BinOp::EqEq, lhs, rhs } => {
+                match *lhs {
+                    Expr::BinOp { op: BinOp::Shr, .. } => {}
+                    other => panic!("expected Shr, got {:?}", other),
+                }
+                assert_eq!(*rhs, ident("b"));
+            }
+            other => panic!("expected EqEq, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_shift_precedence_vs_add() {
+        // a + b >> 1 should parse as (a + b) >> 1
+        let expr = parse_expr_str("a + b >> 1");
+        match expr {
+            Expr::BinOp { op: BinOp::Shr, lhs, .. } => {
+                match *lhs {
+                    Expr::BinOp { op: BinOp::Add, .. } => {}
+                    other => panic!("expected Add, got {:?}", other),
+                }
+            }
+            other => panic!("expected Shr, got {:?}", other),
+        }
+    }
+
+    // ============================================================
+    // Stream parsing
+    // ============================================================
+
+    #[test]
+    fn test_stream_basic() {
+        let input = r#"
+            fn process(buf: u8[1]) {
+                stream chunk: u8[8] over buf carry (in_str: bool[1] = false) {
+                    is_quote = chunk == '"'
+                    carry in_str = +/ is_quote
+                }
+            }
+        "#;
+        let items = parse(input);
+        if let Item::Fn(f) = &items[0] {
+            assert_eq!(f.body.len(), 1);
+            match &f.body[0] {
+                Stmt::Stream {
+                    chunk_name,
+                    chunk_ty,
+                    buffer,
+                    carry,
+                    body,
+                    carry_updates,
+                } => {
+                    assert_eq!(chunk_name, "chunk");
+                    assert_eq!(chunk_ty.name, "u8");
+                    assert_eq!(buffer, "buf");
+                    assert_eq!(carry.len(), 1);
+                    assert_eq!(carry[0].name, "in_str");
+                    assert_eq!(body.len(), 1);
+                    assert_eq!(carry_updates.len(), 1);
+                    assert_eq!(carry_updates[0].0, "in_str");
+                }
+                other => panic!("expected Stream, got {:?}", other),
+            }
+        }
+    }
+
+    #[test]
+    fn test_stream_no_carry() {
+        let input = r#"
+            fn process(buf: u8[1]) {
+                stream chunk: u8[8] over buf {
+                    result = chunk + 1
+                }
+            }
+        "#;
+        let items = parse(input);
+        if let Item::Fn(f) = &items[0] {
+            match &f.body[0] {
+                Stmt::Stream { carry, carry_updates, .. } => {
+                    assert_eq!(carry.len(), 0);
+                    assert_eq!(carry_updates.len(), 0);
+                }
+                other => panic!("expected Stream, got {:?}", other),
+            }
         }
     }
 }

@@ -174,6 +174,13 @@ pub struct Param {
 // --- Statements ---
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct CarryDef {
+    pub name: String,
+    pub ty: Type,
+    pub init: Expr,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum Stmt {
     Assign {
         target: AssignTarget,
@@ -181,6 +188,14 @@ pub enum Stmt {
     },
     Return(Expr),
     Expr(Expr),
+    Stream {
+        chunk_name: String,
+        chunk_ty: Type,
+        buffer: String,
+        carry: Vec<CarryDef>,
+        body: Vec<Stmt>,
+        carry_updates: Vec<(String, Expr)>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -203,6 +218,12 @@ pub enum Expr {
     BoolLit(bool),
     CharLit(char),
     Ident(String),
+
+    /// [type: val, val, ...] — constant vector literal
+    VecLit {
+        elem_type: String,
+        values: Vec<i64>,
+    },
 
     BinOp {
         op: BinOp,
@@ -227,10 +248,11 @@ pub enum Expr {
         operand: Box<Expr>,
     },
 
-    /// scan.add(expr), scan.xor(expr), etc.
+    /// scan.add(expr) or scan.xor(expr, seed)
     Scan {
         op: ScanOp,
         operand: Box<Expr>,
+        seed: Option<Box<Expr>>,
     },
 
     /// expr.field
@@ -287,6 +309,8 @@ pub enum BinOp {
     NotEq,
     And,
     Or,
+    Shl,
+    Shr,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

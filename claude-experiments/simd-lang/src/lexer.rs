@@ -14,6 +14,9 @@ pub enum Token {
     Comptime,
     True,
     False,
+    Stream,
+    Over,
+    Carry,
 
     // Arithmetic operators
     Plus,
@@ -33,6 +36,8 @@ pub enum Token {
     Amp,
     Pipe,
     Tilde,
+    LtLt,  // <<
+    GtGt,  // >>
 
     // Assignment
     Eq,
@@ -153,6 +158,9 @@ impl<'a> Lexer<'a> {
             "comptime" => Token::Comptime,
             "true" => Token::True,
             "false" => Token::False,
+            "stream" => Token::Stream,
+            "over" => Token::Over,
+            "carry" => Token::Carry,
             "_" => Token::Underscore,
             _ => Token::Ident(text.to_string()),
         }
@@ -263,6 +271,9 @@ impl<'a> Lexer<'a> {
                     if self.peek() == Some(b'=') {
                         self.advance();
                         Token::GtEq
+                    } else if self.peek() == Some(b'>') {
+                        self.advance();
+                        Token::GtGt
                     } else {
                         Token::Gt
                     }
@@ -272,6 +283,9 @@ impl<'a> Lexer<'a> {
                     if self.peek() == Some(b'=') {
                         self.advance();
                         Token::LtEq
+                    } else if self.peek() == Some(b'<') {
+                        self.advance();
+                        Token::LtLt
                     } else {
                         Token::Lt
                     }
@@ -824,6 +838,68 @@ mod tests {
                 Token::LBracket,
                 Token::IntLit(32),
                 Token::RBracket,
+            ]
+        );
+    }
+
+    // --- Shift operators ---
+
+    #[test]
+    fn test_shift_left() {
+        assert_eq!(lex("<<"), vec![Token::LtLt]);
+    }
+
+    #[test]
+    fn test_shift_right() {
+        assert_eq!(lex(">>"), vec![Token::GtGt]);
+    }
+
+    #[test]
+    fn test_shift_in_expr() {
+        assert_eq!(
+            lex("v >> 1"),
+            vec![Token::Ident("v".into()), Token::GtGt, Token::IntLit(1)]
+        );
+    }
+
+    #[test]
+    fn test_shift_vs_comparison() {
+        // >= should not be confused with >>
+        assert_eq!(lex(">="), vec![Token::GtEq]);
+        assert_eq!(lex(">>"), vec![Token::GtGt]);
+    }
+
+    // --- Stream keywords ---
+
+    #[test]
+    fn test_stream_keyword() {
+        assert_eq!(lex("stream"), vec![Token::Stream]);
+    }
+
+    #[test]
+    fn test_over_keyword() {
+        assert_eq!(lex("over"), vec![Token::Over]);
+    }
+
+    #[test]
+    fn test_carry_keyword() {
+        assert_eq!(lex("carry"), vec![Token::Carry]);
+    }
+
+    #[test]
+    fn test_stream_header() {
+        assert_eq!(
+            lex("stream chunk: u8[64] over input"),
+            vec![
+                Token::Stream,
+                Token::Ident("chunk".into()),
+                Token::Colon,
+                Token::Ident("u8".into()),
+                Token::LBracket,
+                Token::IntLit(64),
+                Token::RBracket,
+                Token::Over,
+                Token::Ident("input".into()),
             ]
         );
     }
