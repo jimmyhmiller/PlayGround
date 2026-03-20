@@ -1012,6 +1012,14 @@ impl TypeChecker {
                 let _ = self.infer_arg(args, 0);
                 CheckedType::Vec(VecType { scalar: ScalarType::Bool, width: 1 })
             }
+            "split_lo" | "split_hi" => {
+                self.check_arg_count(fname, args, 1);
+                let aty = self.infer_arg(args, 0);
+                match aty {
+                    CheckedType::Vec(vt) => CheckedType::Vec(VecType { scalar: vt.scalar, width: vt.width / 2 }),
+                    _ => aty,
+                }
+            }
             "ctz" | "clear_lowest_bit" => {
                 self.check_arg_count(fname, args, 1);
                 self.infer_arg(args, 0)

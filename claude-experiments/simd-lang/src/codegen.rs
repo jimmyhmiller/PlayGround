@@ -2072,6 +2072,49 @@ impl<'c, 'a> FnCodegen<'c, 'a> {
                     (current, idx_ty)
                 }
             }
+            ast::Expr::Ident(name) if name == "split_lo" => {
+                // split_lo(vec[N]) → vec[N/2], lower half via vector.shuffle
+                assert_eq!(args.len(), 1, "split_lo takes exactly 1 argument");
+                let (val, ty) = self.emit_expr(&args[0].value);
+                let half = ty.width / 2;
+                let result_ty = VecType { scalar: ty.scalar, width: half };
+                let result_mlir = result_ty.to_mlir_type(self.ctx);
+
+                // Use vector.shuffle with mask [0, 1, ..., half-1]
+                let mask: Vec<i64> = (0..half as i64).collect();
+                let shuffle_op = OperationBuilder::new("vector.shuffle", self.loc)
+                    .add_operands(&[val, val])
+                    .add_results(&[result_mlir])
+                    .add_attributes(&[(
+                        melior::ir::Identifier::new(self.ctx, "mask"),
+                        DenseI64ArrayAttribute::new(self.ctx, &mask).into(),
+                    )])
+                    .build()
+                    .expect("failed to build vector.shuffle for split_lo");
+                let result: Value = self.block.append_operation(shuffle_op).result(0).unwrap().into();
+                (result, result_ty)
+            }
+            ast::Expr::Ident(name) if name == "split_hi" => {
+                // split_hi(vec[N]) → vec[N/2], upper half via vector.shuffle
+                assert_eq!(args.len(), 1, "split_hi takes exactly 1 argument");
+                let (val, ty) = self.emit_expr(&args[0].value);
+                let half = ty.width / 2;
+                let result_ty = VecType { scalar: ty.scalar, width: half };
+                let result_mlir = result_ty.to_mlir_type(self.ctx);
+
+                let mask: Vec<i64> = (half as i64..ty.width as i64).collect();
+                let shuffle_op = OperationBuilder::new("vector.shuffle", self.loc)
+                    .add_operands(&[val, val])
+                    .add_results(&[result_mlir])
+                    .add_attributes(&[(
+                        melior::ir::Identifier::new(self.ctx, "mask"),
+                        DenseI64ArrayAttribute::new(self.ctx, &mask).into(),
+                    )])
+                    .build()
+                    .expect("failed to build vector.shuffle for split_hi");
+                let result: Value = self.block.append_operation(shuffle_op).result(0).unwrap().into();
+                (result, result_ty)
+            }
             ast::Expr::Ident(name) if name == "any" => {
                 // any(bool[N]) → bool[1], true if any lane is true
                 assert_eq!(args.len(), 1, "any takes exactly 1 argument");
@@ -6549,6 +6592,115 @@ mod tests {
     }
 
     #[test]
+    fn bench_json_stage1_128() {
+        // 128-wide: compare in u8[128], split into two bool[64] halves,
+        // bitmask+CLMUL each half, chain carry between them
+        let s1_src = r#"
+            fn stage1(input: ptr[u8], positions: ptr[i32]) -> i32[1] {
+                stream chunk: u8[128] over input carry (prev_in_string: u64[1] = 0, pos: i32[1] = 0) {
+                    -- Compare in 128-wide vector domain
+                    quote_vec = chunk == '"'
+                    bs_vec = chunk == '\\'
+                    prev_bs_vec = lane_shr(bs_vec, 1)
+                    real_quote_vec = quote_vec & ~prev_bs_vec
+                    structural_vec = (chunk == '{') | (chunk == '}') | (chunk == '[')
+                                   | (chunk == ']') | (chunk == ':') | (chunk == ',')
+
+                    -- Split into two 64-lane halves
+                    quote_lo = split_lo(real_quote_vec)
+                    quote_hi = split_hi(real_quote_vec)
+                    struct_lo = split_lo(structural_vec)
+                    struct_hi = split_hi(structural_vec)
+
+                    -- Bitmask + CLMUL on low half
+                    qbits_lo = to_bitmask(quote_lo)
+                    sbits_lo = to_bitmask(struct_lo)
+                    all_ones = qbits_lo | ~qbits_lo
+                    in_string_raw_lo = clmul(qbits_lo, all_ones)
+                    in_string_lo = in_string_raw_lo ^ prev_in_string
+                    real_sbits_lo = sbits_lo & ~in_string_lo
+
+                    -- Carry from low to high
+                    carry_lo = (in_string_lo >> 63) * all_ones
+
+                    -- Bitmask + CLMUL on high half
+                    qbits_hi = to_bitmask(quote_hi)
+                    sbits_hi = to_bitmask(struct_hi)
+                    in_string_raw_hi = clmul(qbits_hi, all_ones)
+                    in_string_hi = in_string_raw_hi ^ carry_lo
+                    real_sbits_hi = sbits_hi & ~in_string_hi
+
+                    -- Emit positions for low half
+                    real_struct_lo = from_bitmask(real_sbits_lo, 64)
+                    indices_lo = iota(64) + chunk_offset
+                    compressstore(positions, pos, indices_lo, real_struct_lo)
+                    pos_after_lo = pos + popcount(real_struct_lo)
+
+                    -- Emit positions for high half (offset by 64)
+                    real_struct_hi = from_bitmask(real_sbits_hi, 64)
+                    indices_hi = iota(64) + chunk_offset + 64
+                    compressstore(positions, pos_after_lo, indices_hi, real_struct_hi)
+
+                    -- Carry out
+                    carry prev_in_string = (in_string_hi >> 63) * all_ones
+                    carry pos = pos_after_lo + popcount(real_struct_hi)
+                }
+                return pos
+            }
+        "#;
+
+        let (fptr, _engine) = jit_lookup_opt(s1_src, "stage1", 2);
+
+        let mut json_parts = Vec::new();
+        json_parts.push(r#"{"data": ["#.to_string());
+        for i in 0..50000 {
+            if i > 0 { json_parts.push(",".to_string()); }
+            json_parts.push(format!(
+                r#"{{"id": {}, "name": "user_{}", "score": {}, "active": {}}}"#,
+                i, i, i * 17 % 10000, if i % 2 == 0 { "true" } else { "false" }
+            ));
+        }
+        json_parts.push(r#"]}"#.to_string());
+        let json_str = json_parts.join("");
+        let json_len = json_str.len();
+        let padded_len = ((json_len + 127) / 128) * 128;
+        let mut json = vec![0u8; padded_len];
+        json[..json_len].copy_from_slice(json_str.as_bytes());
+        let max_structural = json_len / 2;
+        let mut positions = vec![0i32; max_structural];
+
+        eprintln!("\n=== JSON Stage 1 (128-wide, vector scan.xor) ===");
+        eprintln!("Input size: {:.2} MB", json_len as f64 / 1e6);
+
+        unsafe {
+            let f: extern "C" fn(
+                *const u8, *const u8, i64, i64, i64,
+                *mut i32, *mut i32, i64, i64, i64,
+            ) -> f32 = std::mem::transmute(fptr);
+
+            let bits = f(json.as_ptr(), json.as_ptr(), 0, padded_len as i64, 1,
+                positions.as_mut_ptr(), positions.as_mut_ptr(), 0, max_structural as i64, 1);
+            let num = f32::to_bits(bits) as i32;
+            eprintln!("Structural chars: {}", num);
+
+            let iterations = 10;
+            let start = std::time::Instant::now();
+            for _ in 0..iterations {
+                let _ = f(json.as_ptr(), json.as_ptr(), 0, padded_len as i64, 1,
+                    positions.as_mut_ptr(), positions.as_mut_ptr(), 0, max_structural as i64, 1);
+            }
+            let elapsed = start.elapsed();
+            let total_bytes = json_len as f64 * iterations as f64;
+            let gb_per_sec = total_bytes / elapsed.as_secs_f64() / 1e9;
+
+            eprintln!("Per iteration: {:.3} ms", elapsed.as_secs_f64() * 1000.0 / iterations as f64);
+            eprintln!("Throughput: {:.2} GB/s", gb_per_sec);
+
+            assert_eq!(num, 500004, "128-wide should find same structural count");
+        }
+    }
+
+    #[test]
     fn test_tbl_basic() {
         // Table lookup: tbl(data, indices) where data is [0..15] used as both table and indices
         let source = r#"
@@ -7296,5 +7448,287 @@ mod tests {
             eprintln!("flag=0 result: {:?}", out);
             assert_eq!(out, [10, 20, 30, 40]);
         }
+    }
+
+    // ============================================================
+    // Full JSON DOM proof — round-trip reconstruction + navigation
+    // Proves our tape is morally equivalent to simdjson's DOM
+    // ============================================================
+
+    /// JIT stage1 and build a full DOM tape, then return the document
+    fn jit_parse_json(json: &[u8]) -> (crate::json::Document, Vec<u8>) {
+        let source = std::fs::read_to_string("examples/json_stage1.simd")
+            .expect("cannot read json_stage1.simd");
+        let (fptr, _engine) = jit_lookup_opt(&source, "json_stage1", 2);
+
+        let padded = crate::json::pad_input(json);
+        let mut positions = vec![0i32; json.len()];
+
+        unsafe {
+            let f: extern "C" fn(
+                *const u8, *const u8, i64, i64, i64,
+                *mut i32, *mut i32, i64, i64, i64,
+            ) -> f32 = std::mem::transmute(fptr);
+
+            let bits = f(
+                padded.as_ptr(), padded.as_ptr(), 0, padded.len() as i64, 1,
+                positions.as_mut_ptr(), positions.as_mut_ptr(), 0, positions.len() as i64, 1,
+            );
+            let num = f32::to_bits(bits) as usize;
+            let doc = crate::json::build_tape(&padded, &positions[..num]);
+            (doc, padded)
+        }
+    }
+
+    fn reconstruct_json(doc: &crate::json::Document, input: &[u8]) -> String {
+        let mut out = String::new();
+        reconstruct_at(doc, input, 1, &mut out);
+        out
+    }
+
+    fn reconstruct_at(
+        doc: &crate::json::Document, input: &[u8], index: usize, out: &mut String,
+    ) -> usize {
+        use crate::json::TapeType;
+        match doc.tape_type(index) {
+            TapeType::OpenObject => {
+                out.push('{');
+                let close = doc.get_partner(index);
+                let mut i = index + 1;
+                let mut first = true;
+                while i < close {
+                    if !first { out.push(','); }
+                    first = false;
+                    let key = doc.get_string(i, input);
+                    out.push('"');
+                    json_escape(&key, out);
+                    out.push('"');
+                    out.push(':');
+                    i += 1;
+                    i = reconstruct_at(doc, input, i, out);
+                }
+                out.push('}');
+                close + 1
+            }
+            TapeType::OpenArray => {
+                out.push('[');
+                let close = doc.get_partner(index);
+                let mut i = index + 1;
+                let mut first = true;
+                while i < close {
+                    if !first { out.push(','); }
+                    first = false;
+                    i = reconstruct_at(doc, input, i, out);
+                }
+                out.push(']');
+                close + 1
+            }
+            TapeType::String => {
+                let s = doc.get_string(index, input);
+                out.push('"');
+                json_escape(&s, out);
+                out.push('"');
+                index + 1
+            }
+            TapeType::Int64 => {
+                out.push_str(&doc.get_i64(index).to_string());
+                index + 1
+            }
+            TapeType::Double => {
+                let v = doc.get_f64(index);
+                out.push_str(&format!("{}", v));
+                index + 1
+            }
+            TapeType::True => { out.push_str("true"); index + 1 }
+            TapeType::False => { out.push_str("false"); index + 1 }
+            TapeType::Null => { out.push_str("null"); index + 1 }
+            _ => index + 1,
+        }
+    }
+
+    fn json_escape(s: &str, out: &mut String) {
+        for ch in s.chars() {
+            match ch {
+                '"' => out.push_str("\\\""),
+                '\\' => out.push_str("\\\\"),
+                '\n' => out.push_str("\\n"),
+                '\r' => out.push_str("\\r"),
+                '\t' => out.push_str("\\t"),
+                c if c < '\x20' => out.push_str(&format!("\\u{:04x}", c as u32)),
+                c => out.push(c),
+            }
+        }
+    }
+
+    #[test]
+    fn test_json_dom_roundtrip_simple() {
+        let json = br#"{"name":"Alice","age":30,"active":true}"#;
+        let (doc, padded) = jit_parse_json(json);
+        let reconstructed = reconstruct_json(&doc, &padded);
+        assert_eq!(reconstructed, std::str::from_utf8(json).unwrap());
+    }
+
+    #[test]
+    fn test_json_dom_roundtrip_nested() {
+        let json = br#"{"a":{"b":{"c":1}},"d":[1,2,3],"e":null,"f":false}"#;
+        let (doc, padded) = jit_parse_json(json);
+        let reconstructed = reconstruct_json(&doc, &padded);
+        assert_eq!(reconstructed, std::str::from_utf8(json).unwrap());
+    }
+
+    #[test]
+    fn test_json_dom_roundtrip_all_types() {
+        let json = br#"{"str":"hello","int":42,"neg":-17,"bool_t":true,"bool_f":false,"nil":null,"arr":[1,"two",true,null],"obj":{"x":1}}"#;
+        let (doc, padded) = jit_parse_json(json);
+        let reconstructed = reconstruct_json(&doc, &padded);
+        assert_eq!(reconstructed, std::str::from_utf8(json).unwrap());
+    }
+
+    #[test]
+    fn test_json_dom_roundtrip_100_objects() {
+        let mut json_parts = Vec::new();
+        json_parts.push(r#"{"data":["#.to_string());
+        for i in 0..100 {
+            if i > 0 { json_parts.push(",".to_string()); }
+            json_parts.push(format!(
+                r#"{{"id":{},"name":"user_{}","score":{},"active":{}}}"#,
+                i, i, i * 17 % 10000, if i % 2 == 0 { "true" } else { "false" }
+            ));
+        }
+        json_parts.push(r#"]}"#.to_string());
+        let json_str = json_parts.join("");
+        let (doc, padded) = jit_parse_json(json_str.as_bytes());
+        let reconstructed = reconstruct_json(&doc, &padded);
+        assert_eq!(reconstructed, json_str);
+    }
+
+    #[test]
+    fn test_json_dom_navigation() {
+        use crate::json::TapeType;
+        let json = br#"{"users":[{"name":"Alice","age":30},{"name":"Bob","age":25}],"count":2}"#;
+        let (doc, padded) = jit_parse_json(json);
+
+        // Find "users" key
+        let mut users_idx = None;
+        for i in 0..doc.tape.len() {
+            if doc.tape_type(i) == TapeType::String && &*doc.get_string(i, &padded) == "users" {
+                users_idx = Some(i + 1);
+                break;
+            }
+        }
+        let users_arr = users_idx.expect("should find 'users'");
+        assert_eq!(doc.tape_type(users_arr), TapeType::OpenArray);
+
+        // First element
+        let first_obj = users_arr + 1;
+        assert_eq!(doc.tape_type(first_obj), TapeType::OpenObject);
+
+        // Find "name" in first object
+        let first_close = doc.get_partner(first_obj);
+        let mut name_val = None;
+        let mut i = first_obj + 1;
+        while i < first_close {
+            if doc.tape_type(i) == TapeType::String && &*doc.get_string(i, &padded) == "name" {
+                name_val = Some(i + 1);
+                break;
+            }
+            i += 2;
+        }
+        assert_eq!(&*doc.get_string(name_val.unwrap(), &padded), "Alice");
+
+        // Container skip: jump from users array to "count"
+        let users_close = doc.get_partner(users_arr);
+        let after_users = users_close + 1;
+        assert_eq!(doc.tape_type(after_users), TapeType::String);
+        assert_eq!(&*doc.get_string(after_users, &padded), "count");
+        assert_eq!(doc.get_i64(after_users + 1), 2);
+    }
+
+    #[test]
+    fn test_json_dom_string_escapes() {
+        let json = br#"{"msg":"hello\nworld","quote":"say \"hi\"","path":"C:\\Users"}"#;
+        let (doc, padded) = jit_parse_json(json);
+
+        use crate::json::TapeType;
+        for i in 0..doc.tape.len() {
+            if doc.tape_type(i) == TapeType::String {
+                let s = doc.get_string(i, &padded);
+                if &*s == "msg" { assert_eq!(&*doc.get_string(i+1, &padded), "hello\nworld"); }
+                if &*s == "quote" { assert_eq!(&*doc.get_string(i+1, &padded), "say \"hi\""); }
+                if &*s == "path" { assert_eq!(&*doc.get_string(i+1, &padded), "C:\\Users"); }
+            }
+        }
+    }
+
+    #[test]
+    fn test_json_dom_numbers() {
+        let json = br#"{"int":42,"neg":-17,"big":1234567890}"#;
+        let (doc, padded) = jit_parse_json(json);
+
+        use crate::json::TapeType;
+        for i in 0..doc.tape.len() {
+            if doc.tape_type(i) == TapeType::String {
+                let key = doc.get_string(i, &padded);
+                match &*key {
+                    "int" => assert_eq!(doc.get_i64(i+1), 42),
+                    "neg" => assert_eq!(doc.get_i64(i+1), -17),
+                    "big" => assert_eq!(doc.get_i64(i+1), 1234567890),
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn bench_json_dom_full_parse() {
+        let mut json_parts = Vec::new();
+        json_parts.push(r#"{"data":["#.to_string());
+        for i in 0..50000 {
+            if i > 0 { json_parts.push(",".to_string()); }
+            json_parts.push(format!(
+                r#"{{"id":{},"name":"user_{}","score":{},"active":{}}}"#,
+                i, i, i * 17 % 10000, if i % 2 == 0 { "true" } else { "false" }
+            ));
+        }
+        json_parts.push(r#"]}"#.to_string());
+        let json_str = json_parts.join("");
+        let json_len = json_str.len();
+
+        let source = std::fs::read_to_string("examples/json_stage1.simd")
+            .expect("cannot read json_stage1.simd");
+        let (fptr, _engine) = jit_lookup_opt(&source, "json_stage1", 2);
+
+        let padded = crate::json::pad_input(json_str.as_bytes());
+        let mut parser = crate::json::Parser::new(json_len);
+
+        let stage1 = |input: &[u8], positions: &mut [i32]| -> usize {
+            unsafe {
+                let f: extern "C" fn(
+                    *const u8, *const u8, i64, i64, i64,
+                    *mut i32, *mut i32, i64, i64, i64,
+                ) -> f32 = std::mem::transmute(fptr);
+                f32::to_bits(f(
+                    input.as_ptr(), input.as_ptr(), 0, input.len() as i64, 1,
+                    positions.as_mut_ptr(), positions.as_mut_ptr(), 0, positions.len() as i64, 1,
+                )) as usize
+            }
+        };
+
+        // Warmup
+        let _ = parser.parse_with_stage1(&padded, stage1);
+
+        let iterations = 10;
+        let start = std::time::Instant::now();
+        for _ in 0..iterations {
+            let _ = parser.parse_with_stage1(&padded, stage1);
+        }
+        let elapsed = start.elapsed();
+        let gb = json_len as f64 * iterations as f64 / elapsed.as_secs_f64() / 1e9;
+
+        eprintln!("\n=== Full DOM Parse (JIT stage1 + Rust tape builder) ===");
+        eprintln!("Input: {:.2} MB", json_len as f64 / 1e6);
+        eprintln!("Throughput: {:.2} GB/s ({:.3} ms/iter)",
+            gb, elapsed.as_secs_f64() * 1000.0 / iterations as f64);
+        eprintln!("Compare: simdjson does ~1.5 GB/s on same data");
     }
 }

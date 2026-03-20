@@ -1,5 +1,6 @@
 mod ast;
 mod codegen;
+mod json;
 mod lexer;
 mod parser;
 mod typecheck;
