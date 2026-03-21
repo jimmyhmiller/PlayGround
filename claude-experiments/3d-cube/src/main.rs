@@ -30,7 +30,7 @@ impl ViewMode {
             ViewMode::HeapLandscape => "ownership landscape",
             ViewMode::HeapGraph => "heap graph",
             ViewMode::HeapCube => "heap cube",
-            ViewMode::HeapTreemap => "heap treemap",
+            ViewMode::HeapTreemap => "retained treemap",
         }
     }
 }
@@ -45,11 +45,11 @@ pub(crate) fn next_view_mode(path: &std::path::Path, current: ViewMode) -> ViewM
     }
 
     match current {
-        ViewMode::Binary => ViewMode::HeapLandscape,
+        ViewMode::Binary => ViewMode::HeapTreemap,
+        ViewMode::HeapTreemap => ViewMode::HeapLandscape,
         ViewMode::HeapLandscape => ViewMode::HeapGraph,
         ViewMode::HeapGraph => ViewMode::HeapCube,
-        ViewMode::HeapCube => ViewMode::HeapTreemap,
-        ViewMode::HeapTreemap => ViewMode::Binary,
+        ViewMode::HeapCube => ViewMode::Binary,
     }
 }
 
@@ -72,7 +72,7 @@ fn main() {
     let initial_view = file_path
         .as_deref()
         .filter(|path| is_hprof(path))
-        .map(|_| ViewMode::HeapLandscape)
+        .map(|_| ViewMode::HeapTreemap)
         .unwrap_or(ViewMode::Binary);
     let source = file_path
         .as_deref()

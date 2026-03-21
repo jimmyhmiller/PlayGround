@@ -17,7 +17,8 @@ use winit::{
     window::Window,
 };
 
-const MINIMAP_WIDTH_FRAC: f32 = 0.08;
+const SIDEBAR_WIDTH_FRAC: f32 = 0.24;
+const MINIMAP_HEIGHT_FRAC: f32 = 0.26;
 
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
@@ -115,7 +116,7 @@ fn build_minimap_vertices(rows: &[MinimapRow], sel_start: f32, sel_end: f32) -> 
 
     let num_rows = rows.len();
     let x_left = -1.0_f32;
-    let x_right = -1.0 + 2.0 * MINIMAP_WIDTH_FRAC;
+    let x_right = -1.0 + 2.0 * SIDEBAR_WIDTH_FRAC;
     let row_height = 2.0 / num_rows as f32;
 
     let mut verts = Vec::with_capacity(num_rows * 6 + 24);
@@ -272,6 +273,7 @@ struct GpuState {
 struct LoadedData {
     vertices: Vec<PointVertex>,
     inspect_points: Vec<InspectPoint>,
+    info_lines: Vec<String>,
     block_ranges: Vec<(u32, u32)>,
     minimap_rows: Vec<MinimapRow>,
     num_blocks: usize,
@@ -366,7 +368,7 @@ impl App {
 
     fn is_in_minimap(&self, x: f64) -> bool {
         if let Some(gpu) = &self.gpu {
-            x < gpu.config.width as f64 * MINIMAP_WIDTH_FRAC as f64
+            x < gpu.config.width as f64 * SIDEBAR_WIDTH_FRAC as f64
         } else {
             false
         }
@@ -374,7 +376,9 @@ impl App {
 
     fn pixel_y_to_file_pos(&self, y: f64) -> f32 {
         if let Some(gpu) = &self.gpu {
-            (y as f32 / gpu.config.height as f32).clamp(0.0, 1.0)
+            let minimap_top = gpu.config.height as f32 * (1.0 - MINIMAP_HEIGHT_FRAC);
+            ((y as f32 - minimap_top) / (gpu.config.height as f32 * MINIMAP_HEIGHT_FRAC))
+                .clamp(0.0, 1.0)
         } else {
             0.0
         }
@@ -412,7 +416,7 @@ impl App {
 
         if path.extension().is_some_and(|ext| ext == "hprof") {
             if matches!(self.view_mode, ViewMode::Binary) {
-                self.view_mode = ViewMode::HeapLandscape;
+                self.view_mode = ViewMode::HeapTreemap;
             }
         } else {
             self.view_mode = ViewMode::Binary;
@@ -483,29 +487,53 @@ impl App {
 
     fn update_title(&self) {
         if let Some(window) = &self.window {
-            let inspect_suffix = self
-                .inspect_text
-                .as_deref()
-                .map(|text| format!(" - {text}"))
-                .unwrap_or_default();
             if self.sel_start == 0.0 && self.sel_end >= 0.999 {
                 window.set_title(&format!(
-                    "Point Cloud Viewer - {} [{}]{}",
+                    "Point Cloud Viewer - {} [{}]",
                     self.file_name,
                     self.view_mode.label(),
-                    inspect_suffix
                 ));
             } else {
                 let pct_start = (self.sel_start * 100.0) as u32;
                 let pct_end = (self.sel_end * 100.0) as u32;
                 window.set_title(&format!(
-                    "Point Cloud Viewer - {} [{}] [{pct_start}%-{pct_end}%]{}",
+                    "Point Cloud Viewer - {} [{}] [{pct_start}%-{pct_end}%]",
                     self.file_name,
                     self.view_mode.label(),
-                    inspect_suffix
                 ));
             }
         }
+    }
+
+    fn print_loaded_summary(&self) {
+        let Some(loaded) = &self.loaded else {
+            return;
+        };
+        eprintln!();
+        eprintln!("=== {} [{}] ===", self.file_name, self.view_mode.label());
+        for line in &loaded.info_lines {
+            eprintln!("{line}");
+        }
+        eprintln!();
+        eprintln!(
+            "Controls: drag=orbit  wheel=zoom  right-click=inspect  v=cycle views  r=reset slice"
+        );
+        eprintln!("Sidebar: drag to scrub visible blocks, cmd+drag to resize slice");
+        eprintln!();
+    }
+
+    fn print_selection(&self, text: &str) {
+        let pct_start = (self.sel_start * 100.0) as u32;
+        let pct_end = (self.sel_end * 100.0) as u32;
+        eprintln!();
+        eprintln!(
+            "=== Selected [{}] [{}%-{}%] ===",
+            self.view_mode.label(),
+            pct_start,
+            pct_end
+        );
+        eprintln!("{text}");
+        eprintln!();
     }
 
     fn check_pending_load(&mut self) {
@@ -526,6 +554,7 @@ impl App {
                 self.loaded = Some(LoadedData {
                     vertices: result.vertices,
                     inspect_points: result.inspect_points,
+                    info_lines: result.info_lines,
                     block_ranges: result.block_ranges,
                     minimap_rows: result.minimap_rows,
                     num_blocks,
@@ -535,6 +564,7 @@ impl App {
                 self.file_name = name;
                 self.update_minimap();
                 self.update_title();
+                self.print_loaded_summary();
             }
         }
     }
@@ -832,7 +862,7 @@ impl App {
         let width = gpu.config.width as f32;
         let height = gpu.config.height as f32;
 
-        let viewport_x = width * MINIMAP_WIDTH_FRAC;
+        let viewport_x = width * SIDEBAR_WIDTH_FRAC;
         let viewport_w = width - viewport_x;
         let aspect = viewport_w / height;
 
@@ -927,6 +957,8 @@ impl App {
                 ..Default::default()
             });
 
+            let minimap_top = height * (1.0 - MINIMAP_HEIGHT_FRAC);
+            pass.set_viewport(0.0, minimap_top, viewport_x, height - minimap_top, 0.0, 1.0);
             pass.set_pipeline(&gpu.minimap_pipeline);
             pass.set_bind_group(0, &gpu.bind_group, &[]);
             pass.set_vertex_buffer(0, gpu.minimap_buffer.slice(..));
@@ -941,7 +973,7 @@ impl App {
         let gpu = self.gpu.as_ref()?;
         let width = gpu.config.width as f32;
         let height = gpu.config.height as f32;
-        let viewport_x = width * MINIMAP_WIDTH_FRAC;
+        let viewport_x = width * SIDEBAR_WIDTH_FRAC;
         let viewport_w = width - viewport_x;
         let aspect = viewport_w / height.max(1.0);
         let view_proj = self.camera.projection_matrix(aspect) * self.camera.view_matrix();
@@ -998,8 +1030,10 @@ impl App {
         }
 
         if let Some((index, _, _)) = best {
-            self.inspect_text = Some(loaded.inspect_points[index].label.to_string());
+            let text = loaded.inspect_points[index].label.to_string();
+            self.inspect_text = Some(text.clone());
             self.update_title();
+            self.print_selection(&text);
         }
     }
 }

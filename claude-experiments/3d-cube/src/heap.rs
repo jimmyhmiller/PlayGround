@@ -299,6 +299,7 @@ impl HeapDumpSource {
         LoadResult {
             vertices: all_vertices,
             inspect_points: vec![],
+            info_lines: vec![],
             block_ranges,
             minimap_rows,
         }
@@ -403,6 +404,7 @@ fn empty_result(num_blocks: usize) -> LoadResult {
     LoadResult {
         vertices: vec![],
         inspect_points: vec![],
+        info_lines: vec![],
         block_ranges: vec![(0, 0); num_blocks],
         minimap_rows: vec![],
     }

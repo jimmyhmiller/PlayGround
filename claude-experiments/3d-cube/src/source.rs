@@ -24,6 +24,8 @@ pub struct LoadResult {
     pub vertices: Vec<PointVertex>,
     /// Optional inspection metadata aligned with `vertices`.
     pub inspect_points: Vec<InspectPoint>,
+    /// Optional sidebar summary lines for the current source.
+    pub info_lines: Vec<String>,
     /// (start_instance, instance_count) per block.
     pub block_ranges: Vec<(u32, u32)>,
     /// Minimap row data: one entry per row with (avg_byte, entropy).
@@ -88,6 +90,7 @@ impl PointCloudSource for TrigramSource {
         LoadResult {
             vertices,
             inspect_points: vec![],
+            info_lines: vec![],
             block_ranges,
             minimap_rows,
         }
