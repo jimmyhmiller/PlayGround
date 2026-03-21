@@ -18,6 +18,7 @@ use winit::{
 const MINIMAP_WIDTH_FRAC: f32 = 0.08;
 const MINIMAP_ROWS: usize = 512;
 const NUM_BLOCKS: usize = 256;
+const MAX_POINTS_PER_BLOCK: usize = 4_000;
 
 // --- Data types ---
 
@@ -124,247 +125,132 @@ fn trigram_index(b0: u8, b1: u8, b2: u8) -> usize {
     (b0 as usize) << 16 | (b1 as usize) << 8 | (b2 as usize)
 }
 
-/// Sparse trigram data for one block: Vec of (trigram_index, count, position_sum)
-struct BlockTrigrams {
-    entries: Vec<(u32, u32, f32)>, // (idx, count, pos_sum)
+/// All block vertices concatenated into one buffer.
+/// Scrubbing = changing which instance range to draw. Zero CPU work.
+struct BlockVertexData {
+    /// All vertices for all blocks, concatenated
+    all_vertices: Vec<PointVertex>,
+    /// (start_instance, instance_count) for each block
+    block_ranges: Vec<(u32, u32)>,
 }
 
-/// Precomputed block data for instant scrubbing.
-/// Uses incremental add/subtract so moving selection by 1 block
-/// only touches ~500K entries instead of ~50M.
-struct PrecomputedBlocks {
-    blocks: Vec<BlockTrigrams>,
-    count: Vec<u32>,
-    pos_sum: Vec<f32>,
-    dirty: Vec<u32>,
-    points: Vec<PointVertex>,
-    positions: Vec<[f32; 3]>,
-    // Track current block range for incremental updates
-    cur_start: usize,
-    cur_end: usize,
-}
-
-impl PrecomputedBlocks {
-    fn new(blocks: Vec<BlockTrigrams>) -> Self {
-        let mut positions = Vec::with_capacity(TRIGRAM_COUNT);
-        for idx in 0..TRIGRAM_COUNT {
-            let b0 = (idx >> 16) as u16;
-            let b1 = ((idx >> 8) & 0xFF) as u16;
-            let b2 = (idx & 0xFF) as u16;
-            positions.push([
-                (b0 as f32 / 127.5) - 1.0,
-                (b1 as f32 / 127.5) - 1.0,
-                (b2 as f32 / 127.5) - 1.0,
-            ]);
-        }
-        Self {
-            blocks,
-            count: vec![0u32; TRIGRAM_COUNT],
-            pos_sum: vec![0f32; TRIGRAM_COUNT],
-            dirty: Vec::with_capacity(TRIGRAM_COUNT / 2),
-            points: Vec::with_capacity(TRIGRAM_COUNT / 2),
-            positions,
-            cur_start: 0,
-            cur_end: 0,
-        }
-    }
-
-    /// Add a block's entries to the accumulator.
-    fn add_block(&mut self, block_idx: usize) {
-        for &(idx, c, ps) in &self.blocks[block_idx].entries {
-            let i = idx as usize;
-            if self.count[i] == 0 {
-                self.dirty.push(idx);
-            }
-            self.count[i] += c;
-            self.pos_sum[i] += ps;
-        }
-    }
-
-    /// Subtract a block's entries from the accumulator.
-    fn sub_block(&mut self, block_idx: usize) {
-        for &(idx, c, ps) in &self.blocks[block_idx].entries {
-            let i = idx as usize;
-            self.count[i] = self.count[i].saturating_sub(c);
-            self.pos_sum[i] -= ps;
-        }
-    }
-
-    /// Update to a new block range, using incremental add/subtract when possible.
-    fn update_range(&mut self, new_start: usize, new_end: usize) -> usize {
-        let new_end = new_end.min(self.blocks.len());
-        let old_start = self.cur_start;
-        let old_end = self.cur_end;
-
-        if new_start == old_start && new_end == old_end {
-            return self.points.len();
-        }
-
-        // Check if there's overlap we can exploit
-        let has_overlap = old_end > 0 && new_start < old_end && new_end > old_start;
-
-        if has_overlap {
-            // Subtract blocks that left the window
-            for b in old_start..new_start.min(old_end) {
-                self.sub_block(b);
-            }
-            for b in new_end.max(old_start)..old_end {
-                self.sub_block(b);
-            }
-            // Add blocks that entered the window
-            for b in new_start..old_start.min(new_end) {
-                self.add_block(b);
-            }
-            for b in old_end.max(new_start)..new_end {
-                self.add_block(b);
-            }
-        } else {
-            // No overlap: full clear and recompute
-            for &idx in &self.dirty {
-                self.count[idx as usize] = 0;
-                self.pos_sum[idx as usize] = 0.0;
-            }
-            self.dirty.clear();
-            for b in new_start..new_end {
-                self.add_block(b);
-            }
-        }
-
-        self.cur_start = new_start;
-        self.cur_end = new_end;
-
-        self.rebuild_vertices()
-    }
-
-    /// Rebuild vertex buffer from dirty list.
-    /// Skips rare trigrams to keep point count manageable for GPU.
-    fn rebuild_vertices(&mut self) -> usize {
-        let mut max_freq: u32 = 0;
-        let count = &self.count;
-        self.dirty.retain(|&idx| {
-            let c = count[idx as usize];
-            if c > max_freq {
-                max_freq = c;
-            }
-            c > 0
-        });
-
-        if max_freq == 0 {
-            self.points.clear();
-            return 0;
-        }
-
-        // Find a count threshold that keeps us under MAX_POINTS.
-        // Binary search for the right cutoff.
-        const MAX_POINTS: usize = 500_000;
-        let min_count = if self.dirty.len() > MAX_POINTS {
-            // Build a histogram of log2(count) buckets to find cutoff fast
-            let mut above = self.dirty.len();
-            let mut threshold = 1u32;
-            // Double threshold until we're under budget
-            while above > MAX_POINTS && threshold < max_freq {
-                threshold *= 2;
-                above = 0;
-                for &idx in &self.dirty {
-                    if self.count[idx as usize] >= threshold {
-                        above += 1;
-                    }
-                }
-            }
-            // Back off one step and refine
-            let lo = threshold / 2;
-            let mut best = lo;
-            // Binary search between lo and threshold
-            let (mut a, mut b) = (lo, threshold);
-            while a < b {
-                let mid = a + (b - a) / 2;
-                let cnt = self.dirty.iter().filter(|&&idx| self.count[idx as usize] >= mid).count();
-                if cnt > MAX_POINTS {
-                    a = mid + 1;
-                    best = a;
-                } else {
-                    b = mid;
-                    best = mid;
-                }
-            }
-            best
-        } else {
-            1
-        };
-
-        let ln_max = (max_freq as f32).ln();
-
-        self.points.clear();
-        for &idx in &self.dirty {
-            let i = idx as usize;
-            let c = self.count[i];
-            if c < min_count {
-                continue;
-            }
-            let avg_pos = self.pos_sum[i] / c as f32;
-            let brightness = ((c as f32).ln() / ln_max).clamp(0.05, 1.0);
-            let (r, g, b_color) = file_position_color(avg_pos);
-
-            self.points.push(PointVertex {
-                position: self.positions[i],
-                color: [r * brightness, g * brightness, b_color * brightness, 1.0],
-            });
-        }
-        self.points.len()
-    }
-}
-
-/// Precompute trigram data for NUM_BLOCKS blocks, in parallel.
-/// Returns sparse per-block data suitable for fast range queries.
-fn precompute_blocks(data: &[u8]) -> Vec<BlockTrigrams> {
+/// Build vertex data for all blocks in parallel.
+/// Each block gets up to MAX_POINTS_PER_BLOCK vertices (top by frequency).
+/// With additive blending, overlapping trigrams from multiple blocks
+/// naturally accumulate brightness.
+fn build_all_block_vertices(data: &[u8]) -> BlockVertexData {
     if data.len() < 3 {
-        return vec![];
+        return BlockVertexData {
+            all_vertices: vec![],
+            block_ranges: vec![(0, 0); NUM_BLOCKS],
+        };
     }
 
     let block_size = data.len() / NUM_BLOCKS;
     if block_size < 3 {
-        return vec![];
+        return BlockVertexData {
+            all_vertices: vec![],
+            block_ranges: vec![(0, 0); NUM_BLOCKS],
+        };
     }
 
-    let inv_file_len = 1.0 / data.len() as f32;
-
-    std::thread::scope(|s| {
+    // Build per-block vertices in parallel
+    let block_verts: Vec<Vec<PointVertex>> = std::thread::scope(|s| {
         let mut handles = Vec::with_capacity(NUM_BLOCKS);
         for b in 0..NUM_BLOCKS {
             let start = b * block_size;
             let end = if b == NUM_BLOCKS - 1 {
                 data.len()
             } else {
-                // Overlap by 2 to capture trigrams at boundaries
                 ((b + 1) * block_size + 2).min(data.len())
             };
             let chunk = &data[start..end];
+            let block_pos = (b as f32 + 0.5) / NUM_BLOCKS as f32; // normalized position in file
+
             handles.push(s.spawn(move || {
                 let mut count = vec![0u32; TRIGRAM_COUNT];
-                let mut pos_sum = vec![0f32; TRIGRAM_COUNT];
+                let mut max_freq: u32 = 0;
 
                 for i in 0..chunk.len() - 2 {
                     let idx = trigram_index(chunk[i], chunk[i + 1], chunk[i + 2]);
                     unsafe {
-                        *count.get_unchecked_mut(idx) += 1;
-                        *pos_sum.get_unchecked_mut(idx) += (start + i) as f32 * inv_file_len;
+                        let c = count.get_unchecked_mut(idx);
+                        *c += 1;
+                        if *c > max_freq {
+                            max_freq = *c;
+                        }
                     }
                 }
 
-                // Convert to sparse
-                let mut entries = Vec::new();
+                if max_freq == 0 {
+                    return vec![];
+                }
+
+                // Collect non-zero entries with their counts
+                let mut entries: Vec<(usize, u32)> = Vec::new();
                 for idx in 0..TRIGRAM_COUNT {
                     let c = count[idx];
                     if c > 0 {
-                        entries.push((idx as u32, c, pos_sum[idx]));
+                        entries.push((idx, c));
                     }
                 }
 
-                BlockTrigrams { entries }
+                // If too many, keep only the top MAX_POINTS_PER_BLOCK by count
+                if entries.len() > MAX_POINTS_PER_BLOCK {
+                    entries.select_nth_unstable_by(MAX_POINTS_PER_BLOCK, |a, b| b.1.cmp(&a.1));
+                    entries.truncate(MAX_POINTS_PER_BLOCK);
+                    // Recalculate max_freq for the kept entries
+                    max_freq = entries.iter().map(|e| e.1).max().unwrap_or(1);
+                }
+
+                let ln_max = (max_freq as f32).ln().max(1.0);
+                let (cr, cg, cb) = file_position_color(block_pos);
+
+                entries
+                    .iter()
+                    .map(|&(idx, c)| {
+                        let b0 = (idx >> 16) as u16;
+                        let b1 = ((idx >> 8) & 0xFF) as u16;
+                        let b2 = (idx & 0xFF) as u16;
+                        let brightness = ((c as f32).ln() / ln_max).clamp(0.1, 1.0);
+                        // Low alpha so overlapping blocks accumulate naturally
+                        let alpha = 0.15;
+                        PointVertex {
+                            position: [
+                                (b0 as f32 / 127.5) - 1.0,
+                                (b1 as f32 / 127.5) - 1.0,
+                                (b2 as f32 / 127.5) - 1.0,
+                            ],
+                            color: [
+                                cr * brightness,
+                                cg * brightness,
+                                cb * brightness,
+                                alpha,
+                            ],
+                        }
+                    })
+                    .collect()
             }));
         }
         handles.into_iter().map(|h| h.join().unwrap()).collect()
-    })
+    });
+
+    // Concatenate into one buffer, recording ranges
+    let total: usize = block_verts.iter().map(|v| v.len()).sum();
+    let mut all_vertices = Vec::with_capacity(total);
+    let mut block_ranges = Vec::with_capacity(NUM_BLOCKS);
+
+    for verts in block_verts {
+        let start = all_vertices.len() as u32;
+        let count = verts.len() as u32;
+        all_vertices.extend_from_slice(&verts);
+        block_ranges.push((start, count));
+    }
+
+    BlockVertexData {
+        all_vertices,
+        block_ranges,
+    }
 }
 
 fn file_position_color(pos: f32) -> (f32, f32, f32) {
@@ -488,7 +374,6 @@ struct GpuState {
     line_pipeline: wgpu::RenderPipeline,
     minimap_pipeline: wgpu::RenderPipeline,
     point_buffer: wgpu::Buffer,
-    point_count: u32,
     line_buffer: wgpu::Buffer,
     line_vertex_count: u32,
     minimap_buffer: wgpu::Buffer,
@@ -509,8 +394,8 @@ struct App {
     point_size: f32,
     file_path: Option<PathBuf>,
     // Block precomputation (background)
-    pending_blocks: Option<mpsc::Receiver<(String, PrecomputedBlocks)>>,
-    blocks: Option<PrecomputedBlocks>,
+    pending_blocks: Option<mpsc::Receiver<(String, BlockVertexData)>>,
+    block_data: Option<BlockVertexData>,
     loading: bool,
     // File data
     file_data: Option<Arc<Mmap>>,
@@ -537,7 +422,7 @@ impl App {
             point_size: 3.0,
             file_path,
             pending_blocks: None,
-            blocks: None,
+            block_data: None,
             loading: false,
             file_data: None,
             file_name: String::new(),
@@ -607,7 +492,7 @@ impl App {
         self.file_data = Some(mmap.clone());
         self.sel_start = 0.0;
         self.sel_end = 1.0;
-        self.blocks = None;
+        self.block_data = None;
 
         self.update_minimap();
 
@@ -623,16 +508,15 @@ impl App {
 
         std::thread::spawn(move || {
             let start_time = std::time::Instant::now();
-            let block_data = precompute_blocks(&data);
+            let bvd = build_all_block_vertices(&data);
             let elapsed = start_time.elapsed();
             let size_mb = data.len() as f64 / (1024.0 * 1024.0);
             eprintln!(
-                "Precomputed {NUM_BLOCKS} blocks for {name} ({size_mb:.1} MB) in {:.2}s",
+                "Built {NUM_BLOCKS} block vertex sets for {name} ({size_mb:.1} MB) in {:.2}s -> {} total vertices",
                 elapsed.as_secs_f64(),
+                bvd.all_vertices.len(),
             );
-
-            let precomputed = PrecomputedBlocks::new(block_data);
-            let _ = tx.send((name, precomputed));
+            let _ = tx.send((name, bvd));
         });
     }
 
@@ -648,38 +532,25 @@ impl App {
         }
     }
 
-    /// Instantly recompute trigrams from precomputed blocks for the current selection.
-    fn recompute_from_blocks(&mut self) {
-        if let Some(blocks) = &mut self.blocks {
+    /// Compute the instance range for the current selection. Zero CPU work.
+    fn selection_instance_range(&self) -> (u32, u32) {
+        if let Some(bd) = &self.block_data {
             let start_block = (self.sel_start * NUM_BLOCKS as f32) as usize;
-            let end_block = ((self.sel_end * NUM_BLOCKS as f32).ceil() as usize).min(NUM_BLOCKS);
+            let end_block = ((self.sel_end * NUM_BLOCKS as f32).ceil() as usize)
+                .min(NUM_BLOCKS)
+                .min(bd.block_ranges.len());
 
-            let point_count = blocks.update_range(start_block, end_block);
-
-            if let Some(gpu) = &mut self.gpu {
-                gpu.point_count = point_count as u32;
-                if point_count > 0 {
-                    let byte_size = point_count * std::mem::size_of::<PointVertex>();
-                    // Recreate buffer only if current one is too small
-                    if gpu.point_buffer.size() < byte_size as u64 {
-                        gpu.point_buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
-                            label: Some("points"),
-                            // Allocate 2x to reduce future reallocations
-                            size: (byte_size * 2) as u64,
-                            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-                            mapped_at_creation: false,
-                        });
-                    }
-                    gpu.queue.write_buffer(
-                        &gpu.point_buffer,
-                        0,
-                        bytemuck::cast_slice(&blocks.points),
-                    );
-                }
+            if start_block >= end_block {
+                return (0, 0);
             }
-        }
 
-        self.update_title();
+            let first_instance = bd.block_ranges[start_block].0;
+            let last = &bd.block_ranges[end_block - 1];
+            let end_instance = last.0 + last.1;
+            (first_instance, end_instance - first_instance)
+        } else {
+            (0, 0)
+        }
     }
 
     fn update_title(&self) {
@@ -699,13 +570,23 @@ impl App {
 
     fn check_pending_blocks(&mut self) {
         if let Some(rx) = &self.pending_blocks {
-            if let Ok((name, blocks)) = rx.try_recv() {
-                self.blocks = Some(blocks);
+            if let Ok((name, bvd)) = rx.try_recv() {
+                // Upload ALL block vertices to GPU once
+                if let Some(gpu) = &mut self.gpu {
+                    if !bvd.all_vertices.is_empty() {
+                        gpu.point_buffer =
+                            gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                                label: Some("points"),
+                                contents: bytemuck::cast_slice(&bvd.all_vertices),
+                                usage: wgpu::BufferUsages::VERTEX,
+                            });
+                                            }
+                }
+                self.block_data = Some(bvd);
                 self.pending_blocks = None;
                 self.loading = false;
                 self.file_name = name;
-                // Initial full-file combine
-                self.recompute_from_blocks();
+                self.update_title();
             }
         }
     }
@@ -972,7 +853,6 @@ impl App {
             line_pipeline,
             minimap_pipeline,
             point_buffer,
-            point_count: 0,
             line_buffer,
             line_vertex_count,
             minimap_buffer,
@@ -999,6 +879,7 @@ impl App {
     }
 
     fn render(&mut self) {
+        let (inst_start, inst_count) = self.selection_instance_range();
         let gpu = self.gpu.as_ref().unwrap();
         let width = gpu.config.width as f32;
         let height = gpu.config.height as f32;
@@ -1063,11 +944,11 @@ impl App {
 
             pass.set_viewport(viewport_x, 0.0, viewport_w, height, 0.0, 1.0);
 
-            if gpu.point_count > 0 {
+            if inst_count > 0 {
                 pass.set_pipeline(&gpu.point_pipeline);
                 pass.set_bind_group(0, &gpu.bind_group, &[]);
                 pass.set_vertex_buffer(0, gpu.point_buffer.slice(..));
-                pass.draw(0..6, 0..gpu.point_count);
+                pass.draw(0..6, inst_start..inst_start + inst_count);
             }
 
             pass.set_pipeline(&gpu.line_pipeline);
@@ -1138,7 +1019,7 @@ impl ApplicationHandler for App {
                 let pressed = state == ElementState::Pressed;
                 if pressed {
                     if let Some((mx, my)) = self.last_mouse {
-                        if self.is_in_minimap(mx) && self.blocks.is_some() {
+                        if self.is_in_minimap(mx) && self.block_data.is_some() {
                             let pos = self.pixel_y_to_file_pos(my);
 
                             if self.cmd_held {
@@ -1184,13 +1065,13 @@ impl ApplicationHandler for App {
                     self.sel_start = new_start;
                     self.sel_end = (new_start + range).min(1.0);
                     self.update_minimap();
-                    self.recompute_from_blocks();
+                    self.update_title();
                 } else if self.minimap_resizing {
                     // Resize: anchor stays, other edge follows mouse
                     self.sel_start = self.resize_anchor.min(pos);
                     self.sel_end = self.resize_anchor.max(pos).max(self.sel_start + 0.005);
                     self.update_minimap();
-                    self.recompute_from_blocks();
+                    self.update_title();
                 } else if self.mouse_pressed {
                     if let Some((lx, ly)) = self.last_mouse {
                         let dx = (position.x - lx) as f32;
@@ -1216,14 +1097,14 @@ impl ApplicationHandler for App {
                     MouseScrollDelta::PixelDelta(p) => p.y as f32 * 0.01,
                 };
 
-                if in_minimap && self.blocks.is_some() {
+                if in_minimap && self.block_data.is_some() {
                     let shift = -scroll * 0.02;
                     let range = self.sel_end - self.sel_start;
                     let new_start = (self.sel_start + shift).clamp(0.0, 1.0 - range);
                     self.sel_start = new_start;
                     self.sel_end = new_start + range;
                     self.update_minimap();
-                    self.recompute_from_blocks();
+                    self.update_title();
                 } else {
                     self.camera.distance =
                         (self.camera.distance - scroll * 0.3).clamp(0.5, 20.0);
@@ -1243,7 +1124,7 @@ impl ApplicationHandler for App {
                             self.sel_start = 0.0;
                             self.sel_end = 1.0;
                             self.update_minimap();
-                            self.recompute_from_blocks();
+                            self.update_title();
                         }
                         Key::Named(NamedKey::Escape) => event_loop.exit(),
                         _ => {}
