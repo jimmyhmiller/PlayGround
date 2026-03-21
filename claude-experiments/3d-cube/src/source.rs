@@ -1,4 +1,5 @@
 use bytemuck::{Pod, Zeroable};
+use std::sync::Arc;
 
 /// A point in the cloud: position in [-1,1]^3 + RGBA color.
 #[repr(C)]
@@ -21,10 +22,17 @@ pub struct MinimapVertex {
 pub struct LoadResult {
     /// All point vertices for all blocks, concatenated.
     pub vertices: Vec<PointVertex>,
+    /// Optional inspection metadata aligned with `vertices`.
+    pub inspect_points: Vec<InspectPoint>,
     /// (start_instance, instance_count) per block.
     pub block_ranges: Vec<(u32, u32)>,
     /// Minimap row data: one entry per row with (avg_byte, entropy).
     pub minimap_rows: Vec<MinimapRow>,
+}
+
+#[derive(Clone)]
+pub struct InspectPoint {
+    pub label: Arc<str>,
 }
 
 pub struct MinimapRow {
@@ -79,6 +87,7 @@ impl PointCloudSource for TrigramSource {
         let (vertices, block_ranges) = self.build_block_vertices(data);
         LoadResult {
             vertices,
+            inspect_points: vec![],
             block_ranges,
             minimap_rows,
         }
@@ -99,7 +108,11 @@ impl TrigramSource {
         (0..rows)
             .map(|row| {
                 let start = row * chunk_size;
-                let end = if row == rows - 1 { data.len() } else { start + chunk_size };
+                let end = if row == rows - 1 {
+                    data.len()
+                } else {
+                    start + chunk_size
+                };
                 let slice = &data[start..end];
 
                 let mut sum: u64 = 0;

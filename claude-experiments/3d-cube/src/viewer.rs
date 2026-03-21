@@ -1,10 +1,13 @@
-use crate::source::{LoadResult, MinimapRow, MinimapVertex, PointCloudSource, PointVertex};
+use crate::ViewMode;
+use crate::source::{
+    InspectPoint, LoadResult, MinimapRow, MinimapVertex, PointCloudSource, PointVertex,
+};
 use bytemuck::{Pod, Zeroable};
-use glam::{Mat4, Vec3};
+use glam::{Mat4, Vec3, Vec4};
 use memmap2::Mmap;
 use std::path::PathBuf;
-use std::sync::mpsc;
 use std::sync::Arc;
+use std::sync::mpsc;
 use wgpu::util::DeviceExt;
 use winit::{
     application::ApplicationHandler,
@@ -77,26 +80,35 @@ fn cube_wireframe_vertices(min: Vec3, max: Vec3) -> Vec<LineVertex> {
         Vec3::new(min.x, max.y, max.z),
     ];
     let edges: [(usize, usize); 12] = [
-        (0, 1), (1, 2), (2, 3), (3, 0),
-        (4, 5), (5, 6), (6, 7), (7, 4),
-        (0, 4), (1, 5), (2, 6), (3, 7),
+        (0, 1),
+        (1, 2),
+        (2, 3),
+        (3, 0),
+        (4, 5),
+        (5, 6),
+        (6, 7),
+        (7, 4),
+        (0, 4),
+        (1, 5),
+        (2, 6),
+        (3, 7),
     ];
     edges
         .iter()
         .flat_map(|&(a, b)| {
             [
-                LineVertex { position: corners[a].into() },
-                LineVertex { position: corners[b].into() },
+                LineVertex {
+                    position: corners[a].into(),
+                },
+                LineVertex {
+                    position: corners[b].into(),
+                },
             ]
         })
         .collect()
 }
 
-fn build_minimap_vertices(
-    rows: &[MinimapRow],
-    sel_start: f32,
-    sel_end: f32,
-) -> Vec<MinimapVertex> {
+fn build_minimap_vertices(rows: &[MinimapRow], sel_start: f32, sel_end: f32) -> Vec<MinimapVertex> {
     if rows.is_empty() {
         return vec![];
     }
@@ -119,12 +131,30 @@ fn build_minimap_vertices(
         let y_bot = y_top - row_height;
         let color = [r * brightness, g * brightness, b * brightness, 1.0];
 
-        verts.push(MinimapVertex { position: [x_left, y_top], color });
-        verts.push(MinimapVertex { position: [x_right, y_top], color });
-        verts.push(MinimapVertex { position: [x_right, y_bot], color });
-        verts.push(MinimapVertex { position: [x_left, y_top], color });
-        verts.push(MinimapVertex { position: [x_right, y_bot], color });
-        verts.push(MinimapVertex { position: [x_left, y_bot], color });
+        verts.push(MinimapVertex {
+            position: [x_left, y_top],
+            color,
+        });
+        verts.push(MinimapVertex {
+            position: [x_right, y_top],
+            color,
+        });
+        verts.push(MinimapVertex {
+            position: [x_right, y_bot],
+            color,
+        });
+        verts.push(MinimapVertex {
+            position: [x_left, y_top],
+            color,
+        });
+        verts.push(MinimapVertex {
+            position: [x_right, y_bot],
+            color,
+        });
+        verts.push(MinimapVertex {
+            position: [x_left, y_bot],
+            color,
+        });
     }
 
     // Dim outside selection
@@ -133,32 +163,86 @@ fn build_minimap_vertices(
     let dim_color = [0.0_f32, 0.0, 0.0, 0.7];
 
     if sel_start > 0.001 {
-        verts.push(MinimapVertex { position: [x_left, 1.0], color: dim_color });
-        verts.push(MinimapVertex { position: [x_right, 1.0], color: dim_color });
-        verts.push(MinimapVertex { position: [x_right, sel_y_top], color: dim_color });
-        verts.push(MinimapVertex { position: [x_left, 1.0], color: dim_color });
-        verts.push(MinimapVertex { position: [x_right, sel_y_top], color: dim_color });
-        verts.push(MinimapVertex { position: [x_left, sel_y_top], color: dim_color });
+        verts.push(MinimapVertex {
+            position: [x_left, 1.0],
+            color: dim_color,
+        });
+        verts.push(MinimapVertex {
+            position: [x_right, 1.0],
+            color: dim_color,
+        });
+        verts.push(MinimapVertex {
+            position: [x_right, sel_y_top],
+            color: dim_color,
+        });
+        verts.push(MinimapVertex {
+            position: [x_left, 1.0],
+            color: dim_color,
+        });
+        verts.push(MinimapVertex {
+            position: [x_right, sel_y_top],
+            color: dim_color,
+        });
+        verts.push(MinimapVertex {
+            position: [x_left, sel_y_top],
+            color: dim_color,
+        });
     }
 
     if sel_end < 0.999 {
-        verts.push(MinimapVertex { position: [x_left, sel_y_bot], color: dim_color });
-        verts.push(MinimapVertex { position: [x_right, sel_y_bot], color: dim_color });
-        verts.push(MinimapVertex { position: [x_right, -1.0], color: dim_color });
-        verts.push(MinimapVertex { position: [x_left, sel_y_bot], color: dim_color });
-        verts.push(MinimapVertex { position: [x_right, -1.0], color: dim_color });
-        verts.push(MinimapVertex { position: [x_left, -1.0], color: dim_color });
+        verts.push(MinimapVertex {
+            position: [x_left, sel_y_bot],
+            color: dim_color,
+        });
+        verts.push(MinimapVertex {
+            position: [x_right, sel_y_bot],
+            color: dim_color,
+        });
+        verts.push(MinimapVertex {
+            position: [x_right, -1.0],
+            color: dim_color,
+        });
+        verts.push(MinimapVertex {
+            position: [x_left, sel_y_bot],
+            color: dim_color,
+        });
+        verts.push(MinimapVertex {
+            position: [x_right, -1.0],
+            color: dim_color,
+        });
+        verts.push(MinimapVertex {
+            position: [x_left, -1.0],
+            color: dim_color,
+        });
     }
 
     let border_h = 0.003;
     let border_color = [1.0_f32, 1.0, 1.0, 0.9];
     for &y in &[sel_y_top, sel_y_bot] {
-        verts.push(MinimapVertex { position: [x_left, y + border_h], color: border_color });
-        verts.push(MinimapVertex { position: [x_right, y + border_h], color: border_color });
-        verts.push(MinimapVertex { position: [x_right, y - border_h], color: border_color });
-        verts.push(MinimapVertex { position: [x_left, y + border_h], color: border_color });
-        verts.push(MinimapVertex { position: [x_right, y - border_h], color: border_color });
-        verts.push(MinimapVertex { position: [x_left, y - border_h], color: border_color });
+        verts.push(MinimapVertex {
+            position: [x_left, y + border_h],
+            color: border_color,
+        });
+        verts.push(MinimapVertex {
+            position: [x_right, y + border_h],
+            color: border_color,
+        });
+        verts.push(MinimapVertex {
+            position: [x_right, y - border_h],
+            color: border_color,
+        });
+        verts.push(MinimapVertex {
+            position: [x_left, y + border_h],
+            color: border_color,
+        });
+        verts.push(MinimapVertex {
+            position: [x_right, y - border_h],
+            color: border_color,
+        });
+        verts.push(MinimapVertex {
+            position: [x_left, y - border_h],
+            color: border_color,
+        });
     }
 
     verts
@@ -186,6 +270,8 @@ struct GpuState {
 
 /// Loaded data ready for rendering.
 struct LoadedData {
+    vertices: Vec<PointVertex>,
+    inspect_points: Vec<InspectPoint>,
     block_ranges: Vec<(u32, u32)>,
     minimap_rows: Vec<MinimapRow>,
     num_blocks: usize,
@@ -200,6 +286,8 @@ pub struct App {
     point_size: f32,
     file_path: Option<PathBuf>,
     source: Arc<dyn PointCloudSource>,
+    source_factory:
+        Arc<dyn Fn(&std::path::Path, ViewMode) -> Arc<dyn PointCloudSource> + Send + Sync>,
     pending_load: Option<mpsc::Receiver<(String, LoadResult)>>,
     loaded: Option<LoadedData>,
     loading: bool,
@@ -212,10 +300,19 @@ pub struct App {
     drag_offset: f32,
     resize_anchor: f32,
     cmd_held: bool,
+    view_mode: ViewMode,
+    inspect_text: Option<String>,
 }
 
 impl App {
-    pub fn new(source: Arc<dyn PointCloudSource>, file_path: Option<PathBuf>) -> Self {
+    pub fn new(
+        source: Arc<dyn PointCloudSource>,
+        source_factory: Arc<
+            dyn Fn(&std::path::Path, ViewMode) -> Arc<dyn PointCloudSource> + Send + Sync,
+        >,
+        view_mode: ViewMode,
+        file_path: Option<PathBuf>,
+    ) -> Self {
         Self {
             window: None,
             gpu: None,
@@ -225,6 +322,7 @@ impl App {
             point_size: 3.0,
             file_path,
             source,
+            source_factory,
             pending_load: None,
             loaded: None,
             loading: false,
@@ -237,6 +335,8 @@ impl App {
             drag_offset: 0.0,
             resize_anchor: 0.0,
             cmd_held: false,
+            view_mode,
+            inspect_text: None,
         }
     }
 
@@ -249,7 +349,11 @@ impl App {
     fn create_depth_texture(device: &wgpu::Device, width: u32, height: u32) -> wgpu::TextureView {
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("depth"),
-            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -292,6 +396,7 @@ impl App {
             }
         };
 
+        self.file_path = Some(path.to_owned());
         self.file_name = path
             .file_name()
             .unwrap_or_default()
@@ -303,6 +408,17 @@ impl App {
         self.sel_start = 0.0;
         self.sel_end = 1.0;
         self.loaded = None;
+        self.inspect_text = None;
+
+        if path.extension().is_some_and(|ext| ext == "hprof") {
+            if matches!(self.view_mode, ViewMode::Binary) {
+                self.view_mode = ViewMode::HeapLandscape;
+            }
+        } else {
+            self.view_mode = ViewMode::Binary;
+        }
+
+        self.source = (self.source_factory)(path, self.view_mode);
 
         let name = self.file_name.clone();
         let data = mmap;
@@ -334,11 +450,13 @@ impl App {
         if let (Some(loaded), Some(gpu)) = (&self.loaded, &mut self.gpu) {
             let verts = build_minimap_vertices(&loaded.minimap_rows, self.sel_start, self.sel_end);
             gpu.minimap_vertex_count = verts.len() as u32;
-            gpu.minimap_buffer = gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("minimap"),
-                contents: bytemuck::cast_slice(&verts),
-                usage: wgpu::BufferUsages::VERTEX,
-            });
+            gpu.minimap_buffer = gpu
+                .device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("minimap"),
+                    contents: bytemuck::cast_slice(&verts),
+                    usage: wgpu::BufferUsages::VERTEX,
+                });
         }
     }
 
@@ -365,14 +483,26 @@ impl App {
 
     fn update_title(&self) {
         if let Some(window) = &self.window {
+            let inspect_suffix = self
+                .inspect_text
+                .as_deref()
+                .map(|text| format!(" - {text}"))
+                .unwrap_or_default();
             if self.sel_start == 0.0 && self.sel_end >= 0.999 {
-                window.set_title(&format!("Point Cloud Viewer - {}", self.file_name));
+                window.set_title(&format!(
+                    "Point Cloud Viewer - {} [{}]{}",
+                    self.file_name,
+                    self.view_mode.label(),
+                    inspect_suffix
+                ));
             } else {
                 let pct_start = (self.sel_start * 100.0) as u32;
                 let pct_end = (self.sel_end * 100.0) as u32;
                 window.set_title(&format!(
-                    "Point Cloud Viewer - {} [{pct_start}%-{pct_end}%]",
-                    self.file_name
+                    "Point Cloud Viewer - {} [{}] [{pct_start}%-{pct_end}%]{}",
+                    self.file_name,
+                    self.view_mode.label(),
+                    inspect_suffix
                 ));
             }
         }
@@ -385,14 +515,17 @@ impl App {
                 if let Some(gpu) = &mut self.gpu {
                     if !result.vertices.is_empty() {
                         gpu.point_buffer =
-                            gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                                label: Some("points"),
-                                contents: bytemuck::cast_slice(&result.vertices),
-                                usage: wgpu::BufferUsages::VERTEX,
-                            });
+                            gpu.device
+                                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                                    label: Some("points"),
+                                    contents: bytemuck::cast_slice(&result.vertices),
+                                    usage: wgpu::BufferUsages::VERTEX,
+                                });
                     }
                 }
                 self.loaded = Some(LoadedData {
+                    vertices: result.vertices,
+                    inspect_points: result.inspect_points,
                     block_ranges: result.block_ranges,
                     minimap_rows: result.minimap_rows,
                     num_blocks,
@@ -677,7 +810,7 @@ impl App {
             depth_texture_view,
         });
 
-        if let Some(path) = self.file_path.take() {
+        if let Some(path) = self.file_path.clone() {
             self.load_file(&path);
         }
     }
@@ -726,12 +859,16 @@ impl App {
                 return;
             }
         };
-        let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let view = frame
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
         let gpu = self.gpu.as_ref().unwrap();
 
         let mut encoder = gpu
             .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("encoder") });
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("encoder"),
+            });
 
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -741,7 +878,10 @@ impl App {
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.02, g: 0.02, b: 0.03, a: 1.0,
+                            r: 0.02,
+                            g: 0.02,
+                            b: 0.03,
+                            a: 1.0,
                         }),
                         store: wgpu::StoreOp::Store,
                     },
@@ -796,6 +936,72 @@ impl App {
         gpu.queue.submit(std::iter::once(encoder.finish()));
         frame.present();
     }
+
+    fn current_view_proj(&self) -> Option<(Mat4, f32, f32, f32)> {
+        let gpu = self.gpu.as_ref()?;
+        let width = gpu.config.width as f32;
+        let height = gpu.config.height as f32;
+        let viewport_x = width * MINIMAP_WIDTH_FRAC;
+        let viewport_w = width - viewport_x;
+        let aspect = viewport_w / height.max(1.0);
+        let view_proj = self.camera.projection_matrix(aspect) * self.camera.view_matrix();
+        Some((view_proj, viewport_x, viewport_w, height))
+    }
+
+    fn inspect_at_cursor(&mut self, cursor_x: f64, cursor_y: f64) {
+        let Some(loaded) = &self.loaded else {
+            return;
+        };
+        if loaded.inspect_points.len() != loaded.vertices.len() || loaded.inspect_points.is_empty()
+        {
+            return;
+        }
+        let Some((view_proj, viewport_x, viewport_w, height)) = self.current_view_proj() else {
+            return;
+        };
+        if cursor_x < viewport_x as f64 {
+            return;
+        }
+
+        let (inst_start, inst_count) = self.selection_instance_range();
+        let start = inst_start as usize;
+        let end = (inst_start + inst_count) as usize;
+        if start >= end || end > loaded.vertices.len() {
+            return;
+        }
+
+        let threshold_sq = (self.point_size * 4.0).max(10.0).powi(2);
+        let mut best: Option<(usize, f32, f32)> = None;
+
+        for index in start..end {
+            let pos = loaded.vertices[index].position;
+            let clip = view_proj * Vec4::new(pos[0], pos[1], pos[2], 1.0);
+            if clip.w <= 0.0 {
+                continue;
+            }
+            let ndc = clip.truncate() / clip.w;
+            if ndc.z < -1.0 || ndc.z > 1.0 {
+                continue;
+            }
+            let screen_x = viewport_x + (ndc.x * 0.5 + 0.5) * viewport_w;
+            let screen_y = (1.0 - (ndc.y * 0.5 + 0.5)) * height;
+            let dx = screen_x - cursor_x as f32;
+            let dy = screen_y - cursor_y as f32;
+            let dist_sq = dx * dx + dy * dy;
+            if dist_sq > threshold_sq {
+                continue;
+            }
+            match best {
+                Some((_, best_dist, best_depth)) if dist_sq > best_dist && ndc.z >= best_depth => {}
+                _ => best = Some((index, dist_sq, ndc.z)),
+            }
+        }
+
+        if let Some((index, _, _)) = best {
+            self.inspect_text = Some(loaded.inspect_points[index].label.to_string());
+            self.update_title();
+        }
+    }
 }
 
 impl ApplicationHandler for App {
@@ -830,7 +1036,11 @@ impl ApplicationHandler for App {
             WindowEvent::DroppedFile(path) => {
                 self.load_file(&path);
             }
-            WindowEvent::MouseInput { state, button: MouseButton::Left, .. } => {
+            WindowEvent::MouseInput {
+                state,
+                button: MouseButton::Left,
+                ..
+            } => {
                 let pressed = state == ElementState::Pressed;
                 if pressed {
                     if let Some((mx, my)) = self.last_mouse {
@@ -861,6 +1071,15 @@ impl ApplicationHandler for App {
                     self.minimap_resizing = false;
                     self.mouse_pressed = false;
                     self.last_mouse = None;
+                }
+            }
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button: MouseButton::Right,
+                ..
+            } => {
+                if let Some((mx, my)) = self.last_mouse {
+                    self.inspect_at_cursor(mx, my);
                 }
             }
             WindowEvent::ModifiersChanged(modifiers) => {
@@ -916,8 +1135,7 @@ impl ApplicationHandler for App {
                     self.update_minimap();
                     self.update_title();
                 } else {
-                    self.camera.distance =
-                        (self.camera.distance - scroll * 0.3).clamp(0.5, 20.0);
+                    self.camera.distance = (self.camera.distance - scroll * 0.3).clamp(0.5, 20.0);
                 }
             }
             WindowEvent::KeyboardInput { event, .. } => {
@@ -935,6 +1153,13 @@ impl ApplicationHandler for App {
                             self.sel_end = 1.0;
                             self.update_minimap();
                             self.update_title();
+                        }
+                        Key::Character(ref c) if c.as_str() == "v" => {
+                            if let Some(path) = self.file_path.clone() {
+                                self.view_mode = crate::next_view_mode(&path, self.view_mode);
+                                eprintln!("Toggling view mode: {}", self.view_mode.label());
+                                self.load_file(&path);
+                            }
                         }
                         Key::Named(NamedKey::Escape) => event_loop.exit(),
                         _ => {}

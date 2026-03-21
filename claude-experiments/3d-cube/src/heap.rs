@@ -1,6 +1,5 @@
 use crate::source::{LoadResult, MinimapRow, PointCloudSource, PointVertex};
 use heapster::hprof::parser::HprofFile;
-use heapster::hprof::refs::RefGraph;
 use heapster::hprof::segment::ObjectMeta;
 use heapster::hprof::types::Id;
 use rand::Rng;
@@ -9,28 +8,22 @@ use std::collections::HashMap;
 pub struct HeapDumpSource {
     pub num_blocks: usize,
     pub max_objects: usize,
-    pub layout_iterations: usize,
-    pub max_points_per_block: usize,
+    pub class_layout_iterations: usize,
 }
 
 impl Default for HeapDumpSource {
     fn default() -> Self {
         Self {
             num_blocks: 256,
-            max_objects: 200_000,
-            layout_iterations: 50,
-            max_points_per_block: 4_000,
+            max_objects: 500_000,
+            class_layout_iterations: 100,
         }
     }
 }
 
-/// Hash a class ID to an RGB color.
 fn class_color(class_id: Id) -> [f32; 3] {
-    // Use a hash to generate a hue, then HSV -> RGB with high saturation
     let h = ((class_id.wrapping_mul(2654435761)) & 0xFFFFFFFF) as f32 / u32::MAX as f32;
-    let s = 0.7;
-    let v = 0.9;
-    hsv_to_rgb(h * 360.0, s, v)
+    hsv_to_rgb(h * 360.0, 0.7, 0.9)
 }
 
 fn hsv_to_rgb(h: f32, s: f32, v: f32) -> [f32; 3] {
@@ -48,21 +41,27 @@ fn hsv_to_rgb(h: f32, s: f32, v: f32) -> [f32; 3] {
     [r + m, g + m, b + m]
 }
 
+#[derive(Clone)]
+struct ClassEdge {
+    target_class: usize,
+    weight: u32,
+}
+
 impl PointCloudSource for HeapDumpSource {
     fn num_blocks(&self) -> usize {
         self.num_blocks
     }
 
     fn load(&self, path: &std::path::Path, _data: &[u8]) -> LoadResult {
-        self.load_from_path(&path.to_string_lossy())
+        self.load_from_path(path)
     }
 }
 
 impl HeapDumpSource {
-    fn load_from_path(&self, path: &str) -> LoadResult {
-        eprintln!("Loading heap dump: {path}");
+    fn load_from_path(&self, path: &std::path::Path) -> LoadResult {
+        eprintln!("Loading heap dump: {}", path.display());
 
-        let hprof = match HprofFile::open(std::path::Path::new(path)) {
+        let hprof = match HprofFile::open(path) {
             Ok(h) => h,
             Err(e) => {
                 eprintln!("Failed to parse heap dump: {e}");
@@ -91,164 +90,298 @@ impl HeapDumpSource {
         };
         eprintln!("Ref graph: {} edges", ref_graph.edge_count());
 
-        // Sample if too many objects
-        let sampled = if objects.len() > self.max_objects {
-            eprintln!("Sampling {} objects from {}", self.max_objects, objects.len());
-            sample_objects(&objects, self.max_objects, &ref_graph)
-        } else {
-            objects
-        };
-
-        // Build ID -> index map
-        let mut id_to_idx: HashMap<Id, usize> = HashMap::with_capacity(sampled.len());
-        for (i, obj) in sampled.iter().enumerate() {
-            id_to_idx.insert(obj.object_id, i);
+        // object_id -> class_id lookup
+        let mut obj_class: HashMap<Id, Id> = HashMap::with_capacity(objects.len());
+        for obj in &objects {
+            obj_class.insert(obj.object_id, obj.class_id);
         }
 
-        // Laplacian relaxation layout
-        eprintln!("Running layout ({} iterations on {} objects)...", self.layout_iterations, sampled.len());
-        let positions = self.layout(&sampled, &ref_graph, &id_to_idx);
+        // --- Step 1: Build class-level graph ---
+        eprintln!("Building class-level graph...");
 
-        // Assign objects to blocks by BFS depth from high-degree nodes
-        let depths = compute_depths(&sampled, &ref_graph, &id_to_idx);
-        let max_depth = depths.iter().copied().max().unwrap_or(1).max(1);
-
-        // Build per-block vertices
-        let num_blocks = self.num_blocks;
-        let mut block_verts: Vec<Vec<PointVertex>> = vec![vec![]; num_blocks];
-
-        for (i, obj) in sampled.iter().enumerate() {
-            let block = ((depths[i] as f64 / max_depth as f64) * (num_blocks - 1) as f64) as usize;
-            let block = block.min(num_blocks - 1);
-            let [r, g, b] = class_color(obj.class_id);
-            block_verts[block].push(PointVertex {
-                position: positions[i],
-                color: [r, g, b, 0.3],
-            });
+        let mut class_to_idx: HashMap<Id, usize> = HashMap::new();
+        let mut class_ids: Vec<Id> = Vec::new();
+        let mut class_instance_count: Vec<u32> = Vec::new();
+        for obj in &objects {
+            let idx = class_to_idx.len();
+            let entry = class_to_idx.entry(obj.class_id).or_insert(idx);
+            if *entry == idx {
+                class_ids.push(obj.class_id);
+                class_instance_count.push(0);
+            }
+            class_instance_count[*entry] += 1;
         }
+        let num_classes = class_ids.len();
+        eprintln!("{num_classes} unique classes");
 
-        // Cap per block
-        for verts in &mut block_verts {
-            if verts.len() > self.max_points_per_block {
-                verts.truncate(self.max_points_per_block);
+        // Count inter-class references
+        let mut class_edges: HashMap<(usize, usize), u32> = HashMap::new();
+        for obj in &objects {
+            let src_class = class_to_idx[&obj.class_id];
+            for &target_id in ref_graph.outgoing(obj.object_id) {
+                if let Some(&target_class_id) = obj_class.get(&target_id) {
+                    let tgt_class = class_to_idx[&target_class_id];
+                    if src_class != tgt_class {
+                        *class_edges.entry((src_class, tgt_class)).or_insert(0) += 1;
+                    }
+                }
             }
         }
 
-        // Concatenate
-        let total: usize = block_verts.iter().map(|v| v.len()).sum();
-        let mut all_vertices = Vec::with_capacity(total);
-        let mut block_ranges = Vec::with_capacity(num_blocks);
-        for verts in block_verts {
-            let start = all_vertices.len() as u32;
-            let count = verts.len() as u32;
-            all_vertices.extend_from_slice(&verts);
-            block_ranges.push((start, count));
+        let mut class_adj: Vec<Vec<ClassEdge>> = vec![vec![]; num_classes];
+        for (&(src, tgt), &weight) in &class_edges {
+            class_adj[src].push(ClassEdge {
+                target_class: tgt,
+                weight,
+            });
+            class_adj[tgt].push(ClassEdge {
+                target_class: src,
+                weight,
+            });
         }
 
-        // Build minimap rows from depth distribution
-        let minimap_rows = (0..512)
+        // --- Step 2: Force-directed layout on class graph ---
+        eprintln!(
+            "Laying out {} classes ({} inter-class edges)...",
+            num_classes,
+            class_edges.len()
+        );
+        let class_positions = self.layout_classes(num_classes, &class_adj, &class_instance_count);
+
+        // --- Step 3: Place objects near their class center ---
+        // Sample if needed
+        let sampled = if objects.len() > self.max_objects {
+            eprintln!(
+                "Sampling {} from {} objects",
+                self.max_objects,
+                objects.len()
+            );
+            sample_objects(&objects, self.max_objects)
+        } else {
+            objects
+        };
+        eprintln!("Placing {} objects...", sampled.len());
+
+        let mut rng = rand::thread_rng();
+
+        // Class radius proportional to sqrt(instance_count) relative to max
+        let max_instances = class_instance_count.iter().copied().max().unwrap_or(1) as f32;
+        let class_radii: Vec<f32> = class_instance_count
+            .iter()
+            .map(|&c| (c as f32 / max_instances).sqrt() * 0.12 + 0.005)
+            .collect();
+
+        // --- Step 3b: BFS from GC roots to compute depth per object ---
+        eprintln!("Computing BFS depths from GC roots...");
+        let gc_roots = hprof.gc_roots().unwrap_or_default();
+        let mut obj_depth: HashMap<Id, u32> = HashMap::with_capacity(sampled.len());
+        {
+            let sampled_set: std::collections::HashSet<Id> =
+                sampled.iter().map(|o| o.object_id).collect();
+            let mut queue = std::collections::VecDeque::new();
+
+            // Seed BFS from GC roots that are in our sampled set
+            for &root_id in &gc_roots {
+                if sampled_set.contains(&root_id) && !obj_depth.contains_key(&root_id) {
+                    obj_depth.insert(root_id, 0);
+                    queue.push_back(root_id);
+                }
+            }
+
+            eprintln!("BFS seeded with {} GC roots", obj_depth.len());
+
+            // BFS traversal
+            while let Some(id) = queue.pop_front() {
+                let d = obj_depth[&id];
+                for &target_id in ref_graph.outgoing(id) {
+                    if sampled_set.contains(&target_id) && !obj_depth.contains_key(&target_id) {
+                        obj_depth.insert(target_id, d + 1);
+                        queue.push_back(target_id);
+                    }
+                }
+            }
+        }
+
+        let max_depth = obj_depth.values().copied().max().unwrap_or(1).max(1);
+        let unreachable_count = sampled.len() - obj_depth.len();
+        eprintln!(
+            "BFS complete: max depth {max_depth}, {} reachable, {} unreachable",
+            obj_depth.len(),
+            unreachable_count
+        );
+
+        // Build vertices with depth info, then sort by depth
+        struct VertexWithDepth {
+            vertex: PointVertex,
+            depth: u32,
+        }
+
+        let mut verts_with_depth: Vec<VertexWithDepth> = Vec::with_capacity(sampled.len());
+
+        for obj in &sampled {
+            let ci = class_to_idx[&obj.class_id];
+            let center = class_positions[ci];
+            let radius = class_radii[ci];
+
+            // Uniform random point inside a sphere
+            let (ox, oy, oz) = loop {
+                let x = rng.r#gen::<f32>() * 2.0 - 1.0;
+                let y = rng.r#gen::<f32>() * 2.0 - 1.0;
+                let z = rng.r#gen::<f32>() * 2.0 - 1.0;
+                if x * x + y * y + z * z <= 1.0 {
+                    break (x * radius, y * radius, z * radius);
+                }
+            };
+
+            let pos = [center[0] + ox, center[1] + oy, center[2] + oz];
+            let [cr, cg, cb] = class_color(obj.class_id);
+            let depth = obj_depth.get(&obj.object_id).copied().unwrap_or(max_depth);
+
+            verts_with_depth.push(VertexWithDepth {
+                vertex: PointVertex {
+                    position: pos,
+                    color: [cr, cg, cb, 0.4],
+                },
+                depth,
+            });
+        }
+
+        // Sort by depth so blocks correspond to reference depth layers
+        verts_with_depth.sort_unstable_by_key(|v| v.depth);
+
+        let all_vertices: Vec<PointVertex> = verts_with_depth.iter().map(|v| v.vertex).collect();
+
+        // --- Step 4: Assign blocks by depth ---
+        // Each block covers a range of depths. Objects at depth 0 (GC roots) are in
+        // the first blocks, deepest objects in the last blocks.
+        let num_blocks = self.num_blocks;
+        let block_size = (all_vertices.len() + num_blocks - 1) / num_blocks.max(1);
+        let mut block_ranges = Vec::with_capacity(num_blocks);
+        for b in 0..num_blocks {
+            let start = (b * block_size).min(all_vertices.len()) as u32;
+            let end = ((b + 1) * block_size).min(all_vertices.len()) as u32;
+            block_ranges.push((start, end - start));
+        }
+
+        // Minimap: show depth distribution — color by depth, brightness by density
+        let minimap_rows: Vec<MinimapRow> = (0..512)
             .map(|row| {
-                let frac = row as f32 / 512.0;
-                let depth = (frac * max_depth as f32) as u32;
-                let count = depths.iter().filter(|&&d| d == depth).count();
+                let block = row * num_blocks / 512;
+                let count = block_ranges.get(block).map(|r| r.1).unwrap_or(0);
+
+                // Figure out the average depth for this block's vertices
+                let start = block_ranges.get(block).map(|r| r.0 as usize).unwrap_or(0);
+                let end = block_ranges
+                    .get(block)
+                    .map(|r| (r.0 + r.1) as usize)
+                    .unwrap_or(0);
+                let avg_depth = if end > start {
+                    let sum: u32 = verts_with_depth[start..end].iter().map(|v| v.depth).sum();
+                    sum as f32 / (end - start) as f32
+                } else {
+                    0.0
+                };
+
                 MinimapRow {
-                    avg_byte: frac * 255.0,
-                    entropy: (count as f32 / sampled.len() as f32 * 50.0).clamp(0.0, 1.0),
+                    // Map depth to color (low depth = warm/yellow, high depth = cool/blue)
+                    avg_byte: (avg_depth / max_depth as f32 * 255.0).clamp(0.0, 255.0),
+                    entropy: (count as f32 / block_size.max(1) as f32).clamp(0.0, 1.0),
                 }
             })
             .collect();
 
-        eprintln!("Layout complete: {} vertices in {} blocks", all_vertices.len(), num_blocks);
+        eprintln!(
+            "Done: {} vertices in {} blocks",
+            all_vertices.len(),
+            num_blocks
+        );
 
         LoadResult {
             vertices: all_vertices,
+            inspect_points: vec![],
             block_ranges,
             minimap_rows,
         }
     }
 
-    /// Laplacian relaxation: iteratively move each node toward the average
-    /// position of its neighbors.
-    fn layout(
+    /// Layout classes by starting evenly spread on a sphere,
+    /// then letting connected classes attract each other.
+    /// No repulsion needed since initial positions are well-separated.
+    fn layout_classes(
         &self,
-        objects: &[ObjectMeta],
-        ref_graph: &RefGraph,
-        id_to_idx: &HashMap<Id, usize>,
+        num_classes: usize,
+        adj: &[Vec<ClassEdge>],
+        _instance_counts: &[u32],
     ) -> Vec<[f32; 3]> {
-        let n = objects.len();
-        let mut rng = rand::thread_rng();
+        if num_classes <= 1 {
+            return vec![[0.0; 3]; num_classes];
+        }
 
-        // Initialize with random positions in [-1, 1]^3
-        let mut pos: Vec<[f32; 3]> = (0..n)
-            .map(|_| {
+        // Initialize: evenly distributed on a sphere using Fibonacci sphere
+        let golden = (1.0 + 5.0_f64.sqrt()) / 2.0;
+        let mut pos: Vec<[f32; 3]> = (0..num_classes)
+            .map(|i| {
+                let theta = 2.0 * std::f64::consts::PI * i as f64 / golden;
+                let phi = (1.0 - 2.0 * (i as f64 + 0.5) / num_classes as f64).acos();
+                let r = 0.85;
                 [
-                    rng.r#gen::<f32>() * 2.0 - 1.0,
-                    rng.r#gen::<f32>() * 2.0 - 1.0,
-                    rng.r#gen::<f32>() * 2.0 - 1.0,
+                    (r * phi.sin() * theta.cos()) as f32,
+                    (r * phi.sin() * theta.sin()) as f32,
+                    (r * phi.cos()) as f32,
                 ]
             })
             .collect();
 
-        // Pre-build adjacency in terms of indices (not IDs) for speed
-        let mut neighbors: Vec<Vec<usize>> = vec![vec![]; n];
-        for (i, obj) in objects.iter().enumerate() {
-            for &target_id in ref_graph.outgoing(obj.object_id) {
-                if let Some(&j) = id_to_idx.get(&target_id) {
-                    neighbors[i].push(j);
-                    neighbors[j].push(i); // bidirectional
-                }
-            }
-        }
+        // Attraction-only: connected classes pull toward each other.
+        // Use small alpha so they don't all collapse — just nudge neighbors closer.
+        for _iter in 0..self.class_layout_iterations {
+            let mut disp = vec![[0.0f32; 3]; num_classes];
 
-        // Iterative relaxation
-        let mut new_pos = vec![[0.0f32; 3]; n];
-        for iter in 0..self.layout_iterations {
-            let alpha = 0.5 * (1.0 - iter as f32 / self.layout_iterations as f32); // decay
-
-            for i in 0..n {
-                if neighbors[i].is_empty() {
-                    new_pos[i] = pos[i];
+            for i in 0..num_classes {
+                // Count total edge weight for normalization
+                let total_weight: f32 =
+                    adj[i].iter().map(|e| (e.weight as f32).ln().max(1.0)).sum();
+                if total_weight == 0.0 {
                     continue;
                 }
 
-                // Average of neighbors
-                let mut avg = [0.0f32; 3];
-                for &j in &neighbors[i] {
-                    avg[0] += pos[j][0];
-                    avg[1] += pos[j][1];
-                    avg[2] += pos[j][2];
-                }
-                let k = neighbors[i].len() as f32;
-                avg[0] /= k;
-                avg[1] /= k;
-                avg[2] /= k;
+                for edge in &adj[i] {
+                    let j = edge.target_class;
+                    let dx = pos[j][0] - pos[i][0];
+                    let dy = pos[j][1] - pos[i][1];
+                    let dz = pos[j][2] - pos[i][2];
 
-                // Move toward average
-                new_pos[i] = [
-                    pos[i][0] + alpha * (avg[0] - pos[i][0]),
-                    pos[i][1] + alpha * (avg[1] - pos[i][1]),
-                    pos[i][2] + alpha * (avg[2] - pos[i][2]),
-                ];
-            }
+                    // Normalized weight: fraction of this class's total connectivity
+                    let w = (edge.weight as f32).ln().max(1.0) / total_weight;
 
-            std::mem::swap(&mut pos, &mut new_pos);
-
-            // Rescale to [-1, 1] to prevent collapse
-            let mut min = [f32::MAX; 3];
-            let mut max = [f32::MIN; 3];
-            for p in &pos {
-                for d in 0..3 {
-                    min[d] = min[d].min(p[d]);
-                    max[d] = max[d].max(p[d]);
+                    disp[i][0] += dx * w;
+                    disp[i][1] += dy * w;
+                    disp[i][2] += dz * w;
                 }
             }
-            for p in &mut pos {
-                for d in 0..3 {
-                    let range = max[d] - min[d];
-                    if range > 0.0 {
-                        p[d] = (p[d] - min[d]) / range * 2.0 - 1.0;
-                    }
-                }
+
+            // Move each node 5% toward its weighted neighbor centroid
+            let alpha = 0.05;
+            for i in 0..num_classes {
+                pos[i][0] += disp[i][0] * alpha;
+                pos[i][1] += disp[i][1] * alpha;
+                pos[i][2] += disp[i][2] * alpha;
+            }
+        }
+
+        // Final normalize to [-0.85, 0.85]
+        let mut min = [f32::MAX; 3];
+        let mut max = [f32::MIN; 3];
+        for p in &pos {
+            for d in 0..3 {
+                min[d] = min[d].min(p[d]);
+                max[d] = max[d].max(p[d]);
+            }
+        }
+        for p in &mut pos {
+            for d in 0..3 {
+                let range = (max[d] - min[d]).max(1e-6);
+                p[d] = (p[d] - min[d]) / range * 1.7 - 0.85;
             }
         }
 
@@ -256,74 +389,20 @@ impl HeapDumpSource {
     }
 }
 
-/// Sample objects, preferring those with more references (more "interesting").
-fn sample_objects(objects: &[ObjectMeta], max: usize, ref_graph: &RefGraph) -> Vec<ObjectMeta> {
-    // Score each object by degree (in + out references)
-    let mut scored: Vec<(usize, u32)> = objects
+fn sample_objects(objects: &[ObjectMeta], max: usize) -> Vec<ObjectMeta> {
+    let step = objects.len() / max;
+    objects
         .iter()
-        .enumerate()
-        .map(|(i, obj)| {
-            let degree = ref_graph.outgoing(obj.object_id).len() as u32;
-            (i, degree)
-        })
-        .collect();
-
-    // Sort by degree descending, take top max
-    scored.sort_unstable_by(|a, b| b.1.cmp(&a.1));
-    scored.truncate(max);
-
-    scored.iter().map(|&(i, _)| objects[i]).collect()
-}
-
-/// Compute BFS depth from high-degree "root" nodes.
-fn compute_depths(
-    objects: &[ObjectMeta],
-    ref_graph: &RefGraph,
-    id_to_idx: &HashMap<Id, usize>,
-) -> Vec<u32> {
-    let n = objects.len();
-    let mut depth = vec![u32::MAX; n];
-    let mut queue = std::collections::VecDeque::new();
-
-    // Seed from objects with high out-degree (likely roots/containers)
-    let mut degrees: Vec<(usize, usize)> = objects
-        .iter()
-        .enumerate()
-        .map(|(i, obj)| (i, ref_graph.outgoing(obj.object_id).len()))
-        .collect();
-    degrees.sort_unstable_by(|a, b| b.1.cmp(&a.1));
-
-    for &(i, _) in degrees.iter().take(100) {
-        depth[i] = 0;
-        queue.push_back(i);
-    }
-
-    // BFS
-    while let Some(i) = queue.pop_front() {
-        let d = depth[i];
-        for &target_id in ref_graph.outgoing(objects[i].object_id) {
-            if let Some(&j) = id_to_idx.get(&target_id) {
-                if depth[j] == u32::MAX {
-                    depth[j] = d + 1;
-                    queue.push_back(j);
-                }
-            }
-        }
-    }
-
-    // Assign remaining (disconnected) objects depth 0
-    for d in &mut depth {
-        if *d == u32::MAX {
-            *d = 0;
-        }
-    }
-
-    depth
+        .step_by(step.max(1))
+        .copied()
+        .take(max)
+        .collect()
 }
 
 fn empty_result(num_blocks: usize) -> LoadResult {
     LoadResult {
         vertices: vec![],
+        inspect_points: vec![],
         block_ranges: vec![(0, 0); num_blocks],
         minimap_rows: vec![],
     }
