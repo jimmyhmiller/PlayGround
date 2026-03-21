@@ -1,0 +1,12 @@
+[package]
+name = "point-cloud-viewer"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+wgpu = "25"
+winit = "0.30"
+pollster = "0.4"
+bytemuck = { version = "1", features = ["derive"] }
+glam = "0.29"
+memmap2 = "0.9"
