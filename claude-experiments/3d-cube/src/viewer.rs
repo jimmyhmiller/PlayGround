@@ -3,6 +3,7 @@ use crate::source::{
     InspectPoint, LoadResult, MinimapRow, MinimapVertex, PointCloudSource, PointVertex,
 };
 use bytemuck::{Pod, Zeroable};
+use font8x8::UnicodeFonts;
 use glam::{Mat4, Vec3, Vec4};
 use memmap2::Mmap;
 use std::path::PathBuf;
@@ -19,6 +20,9 @@ use winit::{
 
 const SIDEBAR_WIDTH_FRAC: f32 = 0.24;
 const MINIMAP_HEIGHT_FRAC: f32 = 0.26;
+const SIDEBAR_MARGIN: f32 = 10.0;
+const SIDEBAR_GLYPH_SCALE: f32 = 2.5;
+const SIDEBAR_LINE_HEIGHT: f32 = 24.0;
 
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
@@ -249,6 +253,184 @@ fn build_minimap_vertices(rows: &[MinimapRow], sel_start: f32, sel_end: f32) -> 
     verts
 }
 
+fn pixel_to_ndc(x: f32, y: f32, width: f32, height: f32) -> [f32; 2] {
+    [
+        (x / width.max(1.0)) * 2.0 - 1.0,
+        1.0 - (y / height.max(1.0)) * 2.0,
+    ]
+}
+
+fn push_quad(
+    verts: &mut Vec<MinimapVertex>,
+    width: f32,
+    height: f32,
+    x0: f32,
+    y0: f32,
+    x1: f32,
+    y1: f32,
+    color: [f32; 4],
+) {
+    let p00 = pixel_to_ndc(x0, y0, width, height);
+    let p10 = pixel_to_ndc(x1, y0, width, height);
+    let p11 = pixel_to_ndc(x1, y1, width, height);
+    let p01 = pixel_to_ndc(x0, y1, width, height);
+    verts.push(MinimapVertex {
+        position: p00,
+        color,
+    });
+    verts.push(MinimapVertex {
+        position: p10,
+        color,
+    });
+    verts.push(MinimapVertex {
+        position: p11,
+        color,
+    });
+    verts.push(MinimapVertex {
+        position: p00,
+        color,
+    });
+    verts.push(MinimapVertex {
+        position: p11,
+        color,
+    });
+    verts.push(MinimapVertex {
+        position: p01,
+        color,
+    });
+}
+
+fn wrap_text_line(line: &str, max_chars: usize, out: &mut Vec<String>) {
+    if max_chars == 0 {
+        return;
+    }
+    if line.is_empty() {
+        out.push(String::new());
+        return;
+    }
+
+    let mut current = String::new();
+    for word in line.split_whitespace() {
+        let word_len = word.chars().count();
+        let current_len = current.chars().count();
+        let sep = if current.is_empty() { 0 } else { 1 };
+
+        if current_len + sep + word_len <= max_chars {
+            if !current.is_empty() {
+                current.push(' ');
+            }
+            current.push_str(word);
+            continue;
+        }
+
+        if !current.is_empty() {
+            out.push(current);
+            current = String::new();
+        }
+
+        if word_len <= max_chars {
+            current.push_str(word);
+            continue;
+        }
+
+        let chars: Vec<char> = word.chars().collect();
+        let mut start = 0usize;
+        while start < chars.len() {
+            let end = (start + max_chars).min(chars.len());
+            out.push(chars[start..end].iter().collect());
+            start = end;
+        }
+    }
+
+    if !current.is_empty() {
+        out.push(current);
+    }
+}
+
+fn build_sidebar_vertices(text: &str, width: f32, height: f32) -> Vec<MinimapVertex> {
+    let sidebar_width = width * SIDEBAR_WIDTH_FRAC;
+    let text_bottom = height * (1.0 - MINIMAP_HEIGHT_FRAC);
+    let panel_right = (sidebar_width - 1.0).max(0.0);
+    let panel_bottom = (text_bottom - 1.0).max(0.0);
+    let mut verts = Vec::new();
+
+    push_quad(
+        &mut verts,
+        width,
+        height,
+        0.0,
+        0.0,
+        panel_right,
+        panel_bottom,
+        [0.05, 0.06, 0.08, 0.96],
+    );
+    push_quad(
+        &mut verts,
+        width,
+        height,
+        panel_right,
+        0.0,
+        sidebar_width,
+        panel_bottom,
+        [0.16, 0.18, 0.22, 1.0],
+    );
+
+    let glyph_px = 8.0 * SIDEBAR_GLYPH_SCALE;
+    let usable_width = (sidebar_width - SIDEBAR_MARGIN * 2.0).max(glyph_px);
+    let max_chars = (usable_width / glyph_px).floor().max(1.0) as usize;
+    let max_lines = ((text_bottom - SIDEBAR_MARGIN * 2.0) / SIDEBAR_LINE_HEIGHT)
+        .floor()
+        .max(1.0) as usize;
+
+    let mut lines = Vec::new();
+    for line in text.lines() {
+        wrap_text_line(line, max_chars, &mut lines);
+    }
+    if lines.len() > max_lines {
+        lines.truncate(max_lines);
+        if let Some(last) = lines.last_mut() {
+            let keep = last.chars().count().saturating_sub(3);
+            *last = if keep == 0 {
+                String::from("...")
+            } else {
+                format!("{}...", last.chars().take(keep).collect::<String>())
+            };
+        }
+    }
+
+    let text_color = [0.9, 0.92, 0.96, 1.0];
+    for (line_index, line) in lines.iter().enumerate() {
+        let y = SIDEBAR_MARGIN + line_index as f32 * SIDEBAR_LINE_HEIGHT;
+        for (char_index, ch) in line.chars().enumerate() {
+            let Some(glyph) = font8x8::BASIC_FONTS.get(ch) else {
+                continue;
+            };
+            let x = SIDEBAR_MARGIN + char_index as f32 * glyph_px;
+            for (row, bits) in glyph.iter().enumerate() {
+                for col in 0..8 {
+                    if (bits >> col) & 1 == 0 {
+                        continue;
+                    }
+                    let px0 = x + col as f32 * SIDEBAR_GLYPH_SCALE;
+                    let py0 = y + row as f32 * SIDEBAR_GLYPH_SCALE;
+                    push_quad(
+                        &mut verts,
+                        width,
+                        height,
+                        px0,
+                        py0,
+                        px0 + SIDEBAR_GLYPH_SCALE,
+                        py0 + SIDEBAR_GLYPH_SCALE,
+                        text_color,
+                    );
+                }
+            }
+        }
+    }
+
+    verts
+}
+
 // --- GPU state ---
 
 struct GpuState {
@@ -262,6 +444,8 @@ struct GpuState {
     point_buffer: wgpu::Buffer,
     line_buffer: wgpu::Buffer,
     line_vertex_count: u32,
+    sidebar_buffer: wgpu::Buffer,
+    sidebar_vertex_count: u32,
     minimap_buffer: wgpu::Buffer,
     minimap_vertex_count: u32,
     uniform_buffer: wgpu::Buffer,
@@ -413,6 +597,7 @@ impl App {
         self.sel_end = 1.0;
         self.loaded = None;
         self.inspect_text = None;
+        self.update_sidebar();
 
         if path.extension().is_some_and(|ext| ext == "hprof") {
             if matches!(self.view_mode, ViewMode::Binary) {
@@ -462,6 +647,64 @@ impl App {
                     usage: wgpu::BufferUsages::VERTEX,
                 });
         }
+    }
+
+    fn sidebar_text(&self) -> String {
+        let mut lines = vec![
+            format!("VIEW  {}", self.view_mode.label()),
+            format!("FILE  {}", self.file_name),
+        ];
+
+        if self.sel_start > 0.0 || self.sel_end < 0.999 {
+            let pct_start = (self.sel_start * 100.0) as u32;
+            let pct_end = (self.sel_end * 100.0) as u32;
+            lines.push(format!("SLICE {}%-{}%", pct_start, pct_end));
+        }
+
+        lines.push(String::new());
+
+        if let Some(selected) = &self.inspect_text {
+            lines.push(String::from("SELECTED"));
+            lines.extend(selected.lines().map(str::to_owned));
+            lines.push(String::new());
+        }
+
+        if let Some(loaded) = &self.loaded {
+            lines.push(String::from("SUMMARY"));
+            lines.extend(loaded.info_lines.iter().cloned());
+        } else if self.loading {
+            lines.push(String::from("LOADING"));
+            lines.push(String::from("Building point cloud..."));
+        } else {
+            lines.push(String::from("DROP A FILE"));
+            lines.push(String::from("Open a binary or .hprof file."));
+        }
+
+        lines.push(String::new());
+        lines.push(String::from("CONTROLS"));
+        lines.push(String::from("drag orbit"));
+        lines.push(String::from("wheel zoom"));
+        lines.push(String::from("right-click inspect"));
+        lines.push(String::from("v cycle views"));
+        lines.push(String::from("r reset slice"));
+        lines.join("\n")
+    }
+
+    fn update_sidebar(&mut self) {
+        let text = self.sidebar_text();
+        let Some(gpu) = self.gpu.as_mut() else {
+            return;
+        };
+        let verts =
+            build_sidebar_vertices(&text, gpu.config.width as f32, gpu.config.height as f32);
+        gpu.sidebar_vertex_count = verts.len() as u32;
+        gpu.sidebar_buffer = gpu
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("sidebar"),
+                contents: bytemuck::cast_slice(&verts),
+                usage: wgpu::BufferUsages::VERTEX,
+            });
     }
 
     fn selection_instance_range(&self) -> (u32, u32) {
@@ -564,6 +807,7 @@ impl App {
                 self.file_name = name;
                 self.update_minimap();
                 self.update_title();
+                self.update_sidebar();
                 self.print_loaded_summary();
             }
         }
@@ -819,6 +1063,11 @@ impl App {
             contents: &[0u8; std::mem::size_of::<MinimapVertex>()],
             usage: wgpu::BufferUsages::VERTEX,
         });
+        let sidebar_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("sidebar"),
+            contents: &[0u8; std::mem::size_of::<MinimapVertex>()],
+            usage: wgpu::BufferUsages::VERTEX,
+        });
 
         let depth_texture_view = Self::create_depth_texture(&device, config.width, config.height);
 
@@ -833,6 +1082,8 @@ impl App {
             point_buffer,
             line_buffer,
             line_vertex_count,
+            sidebar_buffer,
+            sidebar_vertex_count: 0,
             minimap_buffer,
             minimap_vertex_count: 0,
             uniform_buffer,
@@ -843,6 +1094,7 @@ impl App {
         if let Some(path) = self.file_path.clone() {
             self.load_file(&path);
         }
+        self.update_sidebar();
     }
 
     fn resize(&mut self, new_size: PhysicalSize<u32>) {
@@ -854,6 +1106,7 @@ impl App {
             gpu.depth_texture_view =
                 Self::create_depth_texture(&gpu.device, new_size.width, new_size.height);
         }
+        self.update_sidebar();
     }
 
     fn render(&mut self) {
@@ -965,6 +1218,27 @@ impl App {
             pass.draw(0..gpu.minimap_vertex_count, 0..1);
         }
 
+        if gpu.sidebar_vertex_count > 0 {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("sidebar_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                ..Default::default()
+            });
+
+            pass.set_pipeline(&gpu.minimap_pipeline);
+            pass.set_bind_group(0, &gpu.bind_group, &[]);
+            pass.set_vertex_buffer(0, gpu.sidebar_buffer.slice(..));
+            pass.draw(0..gpu.sidebar_vertex_count, 0..1);
+        }
+
         gpu.queue.submit(std::iter::once(encoder.finish()));
         frame.present();
     }
@@ -1033,6 +1307,7 @@ impl App {
             let text = loaded.inspect_points[index].label.to_string();
             self.inspect_text = Some(text.clone());
             self.update_title();
+            self.update_sidebar();
             self.print_selection(&text);
         }
     }
@@ -1130,11 +1405,13 @@ impl ApplicationHandler for App {
                     self.sel_end = (new_start + range).min(1.0);
                     self.update_minimap();
                     self.update_title();
+                    self.update_sidebar();
                 } else if self.minimap_resizing {
                     self.sel_start = self.resize_anchor.min(pos);
                     self.sel_end = self.resize_anchor.max(pos).max(self.sel_start + 0.005);
                     self.update_minimap();
                     self.update_title();
+                    self.update_sidebar();
                 } else if self.mouse_pressed {
                     if let Some((lx, ly)) = self.last_mouse {
                         let dx = (position.x - lx) as f32;
@@ -1168,6 +1445,7 @@ impl ApplicationHandler for App {
                     self.sel_end = new_start + range;
                     self.update_minimap();
                     self.update_title();
+                    self.update_sidebar();
                 } else {
                     self.camera.distance = (self.camera.distance - scroll * 0.3).clamp(0.5, 20.0);
                 }
@@ -1187,6 +1465,7 @@ impl ApplicationHandler for App {
                             self.sel_end = 1.0;
                             self.update_minimap();
                             self.update_title();
+                            self.update_sidebar();
                         }
                         Key::Character(ref c) if c.as_str() == "v" => {
                             if let Some(path) = self.file_path.clone() {

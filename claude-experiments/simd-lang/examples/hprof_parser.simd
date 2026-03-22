@@ -1,0 +1,74 @@
+-- Single-pass HPROF parser. Walks all records once, finding the target class
+-- and counting its instances in one pass.
+--
+-- The class name is passed as two pre-computed big-endian u64 words.
+-- out[0] = instance count, out[1] = matching segment count
+
+fn read_u32_be(buf: ptr[u8], off: i64[1]) -> i64[1] {
+    b0 = to_i64(load_at(buf, off))
+    b1 = to_i64(load_at(buf, off + 1))
+    b2 = to_i64(load_at(buf, off + 2))
+    b3 = to_i64(load_at(buf, off + 3))
+    return (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
+}
+
+fn read_u64_be(buf: ptr[u8], off: i64[1]) -> i64[1] {
+    return bswap(load_at[u64[1]](buf, off))
+}
+
+fn find_and_count(buf: ptr[u8], buf_len: i64[1], name_w1: i64[1], name_w2: i64[1], name_len: i64[1], out: ptr[i64]) {
+    offset: i64[1] = 31
+    target_sid: i64[1] = 0
+    target_cid: i64[1] = 0
+    count: i64[1] = 0
+    matching_segs: i64[1] = 0
+
+    while offset + 50 <= buf_len {
+        tag = to_i64(load_at(buf, offset))
+        body_len = read_u32_be(buf, offset + 5)
+
+        -- UTF8 (tag==1): string_id at +9, text at +17
+        string_id = read_u64_be(buf, offset + 9)
+        text_len = body_len - 8
+        text_w1 = read_u64_be(buf, offset + 17)
+        text_w2 = read_u64_be(buf, offset + 25)
+
+        utf8_match = (tag == 1) & (text_len == name_len) & (text_w1 == name_w1) & (text_w2 == name_w2)
+        if utf8_match {
+            target_sid = string_id
+        } else {
+            target_sid = target_sid
+        }
+
+        -- LOAD_CLASS (tag==2): class_obj_id at +13, class_name_sid at +25
+        class_obj_id = read_u64_be(buf, offset + 13)
+        class_name_sid = read_u64_be(buf, offset + 25)
+
+        class_match = (tag == 2) & (class_name_sid == target_sid) & (target_sid > 0)
+        if class_match {
+            target_cid = class_obj_id
+        } else {
+            target_cid = target_cid
+        }
+
+        -- HEAP_DUMP_SEGMENT (tag==28): sub_tag at +9, class_id at +22, num_bytes at +30
+        sub_tag = to_i64(load_at(buf, offset + 9))
+        seg_class_id = read_u64_be(buf, offset + 22)
+        seg_num_bytes = read_u32_be(buf, offset + 30)
+        stride = 25 + seg_num_bytes
+        seg_match = (tag == 28) & (sub_tag == 33) & (seg_class_id == target_cid) & (target_cid > 0) & (stride > 25)
+
+        if seg_match {
+            count = count + body_len / stride
+            matching_segs = matching_segs + 1
+        } else {
+            count = count
+        }
+
+        offset = offset + 9 + body_len
+    }
+
+    i0: i32[1] = 0
+    store_at(out, i0, count)
+    store_at(out, i0 + 1, matching_segs)
+}

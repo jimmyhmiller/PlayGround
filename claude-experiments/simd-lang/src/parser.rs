@@ -880,7 +880,7 @@ impl Parser {
                 if name == "scan" && *self.peek_at(1) == Token::Dot {
                     return self.parse_scan();
                 }
-                if (name == "load" || name == "loadu") && *self.peek_at(1) == Token::LBracket {
+                if (name == "load" || name == "loadu" || name == "load_at") && *self.peek_at(1) == Token::LBracket {
                     return self.parse_load();
                 }
 
@@ -933,17 +933,25 @@ impl Parser {
 
     fn parse_load(&mut self) -> Expr {
         let name = self.expect_ident();
-        let aligned = name == "load";
+        let aligned = name == "load" || name == "load_at";
+        let has_offset = name == "load_at";
         self.expect(&Token::LBracket);
         let ty = self.parse_type();
         self.expect(&Token::RBracket);
         self.expect(&Token::LParen);
         let ptr = self.parse_expr();
+        let offset = if has_offset {
+            self.expect(&Token::Comma);
+            Some(Box::new(self.parse_expr()))
+        } else {
+            None
+        };
         self.expect(&Token::RParen);
         Expr::Load {
             aligned,
             ty,
             ptr: Box::new(ptr),
+            offset,
         }
     }
 
@@ -1511,6 +1519,7 @@ mod tests {
                 aligned: true,
                 ty: ty("f32", Some(Width::Fixed(8))),
                 ptr: Box::new(ident("ptr")),
+                offset: None,
             }
         );
     }
@@ -1523,6 +1532,7 @@ mod tests {
                 aligned: false,
                 ty: ty("f32", Some(Width::Fixed(8))),
                 ptr: Box::new(ident("ptr")),
+                offset: None,
             }
         );
     }
@@ -1535,6 +1545,7 @@ mod tests {
                 aligned: true,
                 ty: ty("f32", Some(Width::Param("N".into()))),
                 ptr: Box::new(ident("ptr")),
+                offset: None,
             }
         );
     }
@@ -2402,6 +2413,7 @@ mod tests {
                 aligned: true,
                 ty: ty("f32", Some(width_mul(Width::Param("N".into()), Width::Fixed(2)))),
                 ptr: Box::new(ident("ptr")),
+                offset: None,
             }
         );
     }

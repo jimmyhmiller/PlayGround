@@ -333,11 +333,12 @@ pub enum Expr {
         fields: Vec<(String, Expr)>,
     },
 
-    /// load[Type](ptr) or loadu[Type](ptr)
+    /// load[Type](ptr) or loadu[Type](ptr) or load_at[Type](ptr, offset)
     Load {
         aligned: bool,
         ty: Type,
         ptr: Box<Expr>,
+        offset: Option<Box<Expr>>,
     },
 }
 

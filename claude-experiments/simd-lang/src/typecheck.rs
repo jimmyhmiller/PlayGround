@@ -131,10 +131,18 @@ fn lit_compatible(kind: LitKind, scalar: ScalarType) -> bool {
 
 // ─── Type checker ───
 
+/// Signature of a user-defined function, for inter-function call checking.
+#[derive(Clone)]
+struct FnSig {
+    params: Vec<(String, CheckedType)>,
+    ret_ty: Option<CheckedType>,
+}
+
 struct TypeChecker {
     errors: Vec<TypeError>,
     vars: HashMap<String, CheckedType>,
     struct_defs: HashMap<String, ast::StructDef>,
+    fn_sigs: HashMap<String, FnSig>,
     comptime_env: HashMap<String, u64>,
     native_width: u64,
     current_span: ast::Span,
@@ -147,6 +155,7 @@ impl TypeChecker {
             errors: Vec::new(),
             vars: HashMap::new(),
             struct_defs: HashMap::new(),
+            fn_sigs: HashMap::new(),
             comptime_env: comptime_env.clone(),
             native_width,
             current_span: ast::Span::dummy(),
@@ -694,10 +703,13 @@ impl TypeChecker {
                 }
             }
 
-            ast::Expr::Load { ty, ptr, .. } => {
+            ast::Expr::Load { ty, ptr, offset, .. } => {
                 let pty = self.infer_expr(ptr);
                 if !matches!(pty, CheckedType::Ptr(_)) {
                     self.err(format!("load requires pointer, got {}", pty.describe()));
+                }
+                if let Some(off) = offset {
+                    let _ = self.infer_expr(off);
                 }
                 CheckedType::Vec(resolve_type(ty, &self.comptime_env, self.native_width))
             }
@@ -924,11 +936,12 @@ impl TypeChecker {
                 }
                 CheckedType::Void
             }
-            "to_i32" => {
+            "to_i32" | "to_i64" => {
                 self.check_arg_count(fname, args, 1);
                 let aty = self.infer_arg(args, 0);
+                let target_scalar = if fname == "to_i32" { ScalarType::I32 } else { ScalarType::I64 };
                 match aty {
-                    CheckedType::Vec(vt) => CheckedType::Vec(VecType { scalar: ScalarType::I32, width: vt.width }),
+                    CheckedType::Vec(vt) => CheckedType::Vec(VecType { scalar: target_scalar, width: vt.width }),
                     _ => aty,
                 }
             }
@@ -1024,12 +1037,71 @@ impl TypeChecker {
                 self.check_arg_count(fname, args, 1);
                 self.infer_arg(args, 0)
             }
-            _ => {
-                self.err(format!("unknown function: {}", fname));
-                for a in args {
-                    let _ = self.infer_expr(&a.value);
+            "load_at" => {
+                self.check_arg_count(fname, args, 2);
+                let pty = self.infer_arg(args, 0);
+                let _ = self.infer_arg(args, 1); // offset
+                match pty {
+                    CheckedType::Ptr(scalar) => CheckedType::Vec(VecType { scalar, width: 1 }),
+                    _ => {
+                        self.err("load_at first argument must be a pointer".to_string());
+                        CheckedType::Vec(VecType { scalar: ScalarType::I32, width: 1 })
+                    }
                 }
-                CheckedType::Vec(VecType { scalar: ScalarType::I32, width: 1 })
+            }
+            "ptr_add" => {
+                self.check_arg_count(fname, args, 2);
+                let pty = self.infer_arg(args, 0);
+                let _ = self.infer_arg(args, 1); // offset
+                match pty {
+                    CheckedType::Ptr(scalar) => CheckedType::Ptr(scalar),
+                    _ => {
+                        self.err("ptr_add first argument must be a pointer".to_string());
+                        CheckedType::Ptr(ScalarType::U8)
+                    }
+                }
+            }
+            "bswap" => {
+                self.check_arg_count(fname, args, 1);
+                let aty = self.infer_arg(args, 0);
+                match &aty {
+                    CheckedType::Vec(vt) => {
+                        match vt.scalar {
+                            ScalarType::U16 | ScalarType::I16 |
+                            ScalarType::U32 | ScalarType::I32 |
+                            ScalarType::U64 | ScalarType::I64 => {},
+                            _ => self.err("bswap requires u16/i16/u32/i32/u64/i64 element type".to_string()),
+                        }
+                    }
+                    _ => self.err("bswap argument must be a vector".to_string()),
+                }
+                aty
+            }
+            _ => {
+                // Check if it's a user-defined function
+                if let Some(sig) = self.fn_sigs.get(fname).cloned() {
+                    // Validate argument count
+                    if args.len() != sig.params.len() {
+                        self.err(format!(
+                            "function '{}' takes {} argument{}, got {}",
+                            fname, sig.params.len(),
+                            if sig.params.len() == 1 { "" } else { "s" },
+                            args.len()
+                        ));
+                    }
+                    // Infer arg types (for side effects / error checking)
+                    for a in args {
+                        let _ = self.infer_expr(&a.value);
+                    }
+                    // Return the declared return type
+                    sig.ret_ty.unwrap_or(CheckedType::Void)
+                } else {
+                    self.err(format!("unknown function: {}", fname));
+                    for a in args {
+                        let _ = self.infer_expr(&a.value);
+                    }
+                    CheckedType::Vec(VecType { scalar: ScalarType::I32, width: 1 })
+                }
             }
         }
     }
@@ -1095,6 +1167,72 @@ pub fn typecheck(
     for item in items {
         if let ast::Item::Struct(sd) = item {
             checker.struct_defs.insert(sd.name.clone(), sd.clone());
+        }
+    }
+
+    // Collect function signatures for inter-function call checking
+    for item in items {
+        if let ast::Item::Fn(f) = item {
+            let params: Vec<(String, CheckedType)> = f.params.iter().map(|p| {
+                let ty = if is_ptr_type_name(&p.ty.name) {
+                    let elem = match &p.ty.width {
+                        Some(ast::Width::Param(name)) => ScalarType::from_name(name),
+                        _ => ScalarType::U8,
+                    };
+                    CheckedType::Ptr(elem)
+                } else if is_scalar_type_name(&p.ty.name) {
+                    CheckedType::Vec(resolve_type(&p.ty, &comptime_env, native_width))
+                } else {
+                    // Struct param — resolve to struct type
+                    if let Some(sd) = checker.struct_defs.get(&p.ty.name) {
+                        let width = p.ty.width.as_ref()
+                            .expect("struct type must have width")
+                            .eval(&comptime_env, native_width);
+                        let mut struct_env = comptime_env.clone();
+                        if let Some(cp) = sd.comptime_params.first() {
+                            struct_env.insert(cp.name.clone(), width);
+                        }
+                        let fields = sd.fields.iter().map(|fld| {
+                            (fld.name.clone(), resolve_type(&fld.ty, &struct_env, native_width))
+                        }).collect();
+                        CheckedType::Struct { name: p.ty.name.clone(), fields }
+                    } else {
+                        CheckedType::Vec(VecType { scalar: ScalarType::I32, width: 1 })
+                    }
+                };
+                (p.name.clone(), ty)
+            }).collect();
+
+            let ret_ty = f.ret_ty.as_ref().map(|rt| {
+                if is_ptr_type_name(&rt.name) {
+                    let elem = match &rt.width {
+                        Some(ast::Width::Param(name)) => ScalarType::from_name(name),
+                        _ => ScalarType::U8,
+                    };
+                    CheckedType::Ptr(elem)
+                } else if is_scalar_type_name(&rt.name) {
+                    CheckedType::Vec(resolve_type(rt, &comptime_env, native_width))
+                } else {
+                    // Struct return
+                    if let Some(sd) = checker.struct_defs.get(&rt.name) {
+                        let width = rt.width.as_ref()
+                            .expect("struct return must have width")
+                            .eval(&comptime_env, native_width);
+                        let mut struct_env = comptime_env.clone();
+                        if let Some(cp) = sd.comptime_params.first() {
+                            struct_env.insert(cp.name.clone(), width);
+                        }
+                        let fields = sd.fields.iter().map(|fld| {
+                            (fld.name.clone(), resolve_type(&fld.ty, &struct_env, native_width))
+                        }).collect();
+                        CheckedType::Struct { name: rt.name.clone(), fields }
+                    } else {
+                        CheckedType::Vec(VecType { scalar: ScalarType::I32, width: 1 })
+                    }
+                }
+            });
+
+            checker.fn_sigs.insert(f.name.clone(), FnSig { params, ret_ty });
         }
     }
 
@@ -1330,5 +1468,92 @@ mod tests {
                 panic!("json_stage1.simd had {} type errors", errs.len());
             }
         }
+    }
+
+    // --- load_at ---
+
+    #[test]
+    fn test_load_at_ok() {
+        check_ok("fn f(buf: ptr[u8], off: i32[1]) -> u8[1] { return load_at(buf, off) }");
+    }
+
+    #[test]
+    fn test_load_at_non_ptr() {
+        check_err(
+            "fn f(a: i32[4], off: i32[1]) -> i32[1] { return load_at(a, off) }",
+            "load_at first argument must be a pointer",
+        );
+    }
+
+    // --- ptr_add ---
+
+    #[test]
+    fn test_ptr_add_ok() {
+        check_ok("fn f(buf: ptr[u8], off: i32[1]) -> u8[1] { p2 = ptr_add(buf, off)\n return load_at(p2, 0) }");
+    }
+
+    #[test]
+    fn test_ptr_add_non_ptr() {
+        check_err(
+            "fn f(a: i32[4], off: i32[1]) { x = ptr_add(a, off) }",
+            "ptr_add first argument must be a pointer",
+        );
+    }
+
+    // --- bswap ---
+
+    #[test]
+    fn test_bswap_u32() {
+        check_ok("fn f(a: u32[4]) -> u32[4] { return bswap(a) }");
+    }
+
+    #[test]
+    fn test_bswap_u64_scalar() {
+        check_ok("fn f(a: u64[1]) -> u64[1] { return bswap(a) }");
+    }
+
+    #[test]
+    fn test_bswap_bool_err() {
+        check_err(
+            "fn f(a: bool[4]) -> bool[4] { return bswap(a) }",
+            "bswap requires u16/i16/u32/i32/u64/i64",
+        );
+    }
+
+    #[test]
+    fn test_bswap_u8_err() {
+        check_err(
+            "fn f(a: u8[4]) -> u8[4] { return bswap(a) }",
+            "bswap requires u16/i16/u32/i32/u64/i64",
+        );
+    }
+
+    // --- inter-function calls ---
+
+    #[test]
+    fn test_inter_fn_call_ok() {
+        check_ok(r#"
+            fn add_one(x: i32[4]) -> i32[4] { return x + 1 }
+            fn f(a: i32[4]) -> i32[4] { return add_one(a) }
+        "#);
+    }
+
+    #[test]
+    fn test_inter_fn_call_wrong_arg_count() {
+        check_err(
+            r#"
+            fn add(x: i32[4], y: i32[4]) -> i32[4] { return x + y }
+            fn f(a: i32[4]) -> i32[4] { return add(a) }
+            "#,
+            "takes 2 arguments, got 1",
+        );
+    }
+
+    #[test]
+    fn test_inter_fn_call_with_ptr() {
+        check_ok(r#"
+            fn read_byte(buf: ptr[u8], off: i32[1]) -> u8[1] { return load_at(buf, off) }
+            fn f(data: ptr[u8]) -> u8[1] { return read_byte(data, 0) }
+        "#);
     }
 }

@@ -179,6 +179,8 @@ struct FnCodegen<'c, 'a> {
     comptime_env: HashMap<String, u64>,
     native_width: u64,
     struct_defs: HashMap<String, ast::StructDef>,
+    /// All function definitions in the module, for inter-function calls.
+    fn_defs: HashMap<String, ast::FnDef>,
     /// Current source location for error messages, set from stmt.span.
     current_span: ast::Span,
 }
@@ -271,7 +273,7 @@ impl<'c, 'a> FnCodegen<'c, 'a> {
                 fields,
             } => self.emit_struct_lit(name, width, fields),
 
-            ast::Expr::Load { aligned, ty, ptr } => self.emit_load(*aligned, ty, ptr),
+            ast::Expr::Load { aligned, ty, ptr, offset } => self.emit_load(*aligned, ty, ptr, offset.as_deref()),
 
             ast::Expr::VecLit { elem_type, values } => {
                 let scalar = ScalarType::from_name(elem_type);
@@ -1326,36 +1328,81 @@ impl<'c, 'a> FnCodegen<'c, 'a> {
         _aligned: bool,
         ty: &ast::Type,
         ptr: &ast::Expr,
+        offset_expr: Option<&ast::Expr>,
     ) -> (Value<'c, 'a>, VecType) {
         let (ptr_val, _ptr_ty) = self.emit_expr(ptr);
         let vec_ty = resolve_type(ty, &self.comptime_env, self.native_width);
         let result_mlir = vec_ty.to_mlir_type(self.ctx);
 
-        // vector.load %memref[%c0] : memref<?xelement>, vector<Nxelement>
         let index_type = Type::index(self.ctx);
-        let zero_index_attr = IntegerAttribute::new(index_type, 0);
-        let zero_index_op = arith::constant(self.ctx, zero_index_attr.into(), self.loc);
-        let zero_index = self
-            .block
-            .append_operation(zero_index_op)
-            .result(0)
-            .unwrap()
-            .into();
 
-        let load_op = OperationBuilder::new("vector.load", self.loc)
-            .add_operands(&[ptr_val, zero_index])
-            .add_results(&[result_mlir])
-            .build()
-            .expect("failed to build vector.load");
+        // Compute index: either 0 or the offset expression (in elements of the ptr type)
+        let load_index: Value = if let Some(off_expr) = offset_expr {
+            let (off_val, off_ty) = self.emit_expr(off_expr);
+            let off_elem_ty = off_ty.scalar.to_mlir_type(self.ctx);
+            let extract_op = OperationBuilder::new("vector.extract", self.loc)
+                .add_operands(&[off_val])
+                .add_results(&[off_elem_ty])
+                .add_attributes(&[(
+                    melior::ir::Identifier::new(self.ctx, "static_position"),
+                    DenseI64ArrayAttribute::new(self.ctx, &[0]).into(),
+                )])
+                .build()
+                .expect("failed to extract load offset");
+            let off_scalar = self.block.append_operation(extract_op).result(0).unwrap().into();
+            let cast_op = arith::index_cast(off_scalar, index_type, self.loc);
+            self.block.append_operation(cast_op).result(0).unwrap().into()
+        } else {
+            let zero_attr = IntegerAttribute::new(index_type, 0);
+            let zero_op = arith::constant(self.ctx, zero_attr.into(), self.loc);
+            self.block.append_operation(zero_op).result(0).unwrap().into()
+        };
 
-        let result = self
-            .block
-            .append_operation(load_op)
-            .result(0)
-            .unwrap()
-            .into();
+        // Check if load type differs from ptr element type — need bitcast
+        let ptr_scalar = if let ast::Expr::Ident(pname) = ptr {
+            match self.vars.get(pname) {
+                Some(Binding::Ptr(_, s)) => Some(*s),
+                _ => None,
+            }
+        } else {
+            None
+        };
 
-        (result, vec_ty)
+        let needs_bitcast = ptr_scalar.is_some() && ptr_scalar.unwrap() != vec_ty.scalar;
+
+        if needs_bitcast {
+            let ptr_sc = ptr_scalar.unwrap();
+            // Load as the ptr's element type with enough elements to fill the target type
+            let target_bytes = vec_ty.scalar.bit_width() as u64 / 8 * vec_ty.width;
+            let ptr_elem_bytes = ptr_sc.bit_width() as u64 / 8;
+            let load_width = target_bytes / ptr_elem_bytes;
+            let load_vt = VecType { scalar: ptr_sc, width: load_width };
+            let load_mlir = load_vt.to_mlir_type(self.ctx);
+
+            let load_op = OperationBuilder::new("vector.load", self.loc)
+                .add_operands(&[ptr_val, load_index])
+                .add_results(&[load_mlir])
+                .build()
+                .expect("failed to build vector.load");
+            let raw = self.block.append_operation(load_op).result(0).unwrap().into();
+
+            // Bitcast to target type
+            let bitcast_op = OperationBuilder::new("vector.bitcast", self.loc)
+                .add_operands(&[raw])
+                .add_results(&[result_mlir])
+                .build()
+                .expect("failed to build vector.bitcast");
+            let result = self.block.append_operation(bitcast_op).result(0).unwrap().into();
+            (result, vec_ty)
+        } else {
+            let load_op = OperationBuilder::new("vector.load", self.loc)
+                .add_operands(&[ptr_val, load_index])
+                .add_results(&[result_mlir])
+                .build()
+                .expect("failed to build vector.load");
+            let result = self.block.append_operation(load_op).result(0).unwrap().into();
+            (result, vec_ty)
+        }
     }
 
     fn emit_store(
@@ -1667,6 +1714,16 @@ impl<'c, 'a> FnCodegen<'c, 'a> {
                 let result = self.block.append_operation(ext_op).result(0).unwrap().into();
                 (result, result_ty)
             }
+            ast::Expr::Ident(name) if name == "to_i64" => {
+                // to_i64(vec) → zero-extend each lane to i64
+                assert_eq!(args.len(), 1, "to_i64 takes exactly 1 argument");
+                let (val, ty) = self.emit_expr(&args[0].value);
+                let result_ty = VecType { scalar: ScalarType::I64, width: ty.width };
+                let result_mlir = result_ty.to_mlir_type(self.ctx);
+                let ext_op = arith::extui(val, result_mlir, self.loc);
+                let result = self.block.append_operation(ext_op).result(0).unwrap().into();
+                (result, result_ty)
+            }
             ast::Expr::Ident(name) if name == "to_bitmask" => {
                 // to_bitmask(bool[N]) → pack into u64[1], one bit per lane
                 // Uses vector.bitcast which LLVM lowers to efficient NEON
@@ -1910,6 +1967,112 @@ impl<'c, 'a> FnCodegen<'c, 'a> {
                 let result: Value = self.block.append_operation(
                     arith::andi(val, x_minus_1, self.loc)
                 ).result(0).unwrap().into();
+
+                (result, ty)
+            }
+            ast::Expr::Ident(name) if name == "bswap" => {
+                // bswap(val) → reverse bytes within each element
+                assert_eq!(args.len(), 1, "bswap takes exactly 1 argument");
+                let (val, ty) = self.emit_expr(&args[0].value);
+
+                let bit_width = ty.scalar.bit_width();
+                let int_type: Type = IntegerType::new(self.ctx, bit_width as u32).into();
+                let vec_type = ty.to_mlir_type(self.ctx);
+
+                // Helper to create a constant vector splat
+                let make_const = |cg: &mut Self, c: i64| -> Value<'c, 'a> {
+                    let attr = IntegerAttribute::new(int_type, c);
+                    let splat = DenseElementsAttribute::new(vec_type, &[attr.into()]).unwrap();
+                    cg.block.append_operation(
+                        arith::constant(cg.ctx, splat.into(), cg.loc)
+                    ).result(0).unwrap().into()
+                };
+
+                let result = match bit_width {
+                    16 => {
+                        // (x >> 8) | (x << 8)
+                        let c8 = make_const(self, 8);
+                        let shr: Value = self.block.append_operation(arith::shrui(val, c8, self.loc)).result(0).unwrap().into();
+                        let shl: Value = self.block.append_operation(arith::shli(val, c8, self.loc)).result(0).unwrap().into();
+                        let r: Value = self.block.append_operation(arith::ori(shr, shl, self.loc)).result(0).unwrap().into();
+                        r
+                    }
+                    32 => {
+                        // byte0 = (x >> 24) & 0xFF
+                        // byte1 = (x >> 8) & 0xFF00
+                        // byte2 = (x << 8) & 0xFF0000
+                        // byte3 = (x << 24)
+                        let c8 = make_const(self, 8);
+                        let c24 = make_const(self, 24);
+                        let m_ff = make_const(self, 0xFF);
+                        let m_ff00 = make_const(self, 0xFF00);
+                        let m_ff0000 = make_const(self, 0xFF_0000);
+
+                        let shr24: Value = self.block.append_operation(arith::shrui(val, c24, self.loc)).result(0).unwrap().into();
+                        let byte0: Value = self.block.append_operation(arith::andi(shr24, m_ff, self.loc)).result(0).unwrap().into();
+
+                        let shr8: Value = self.block.append_operation(arith::shrui(val, c8, self.loc)).result(0).unwrap().into();
+                        let byte1: Value = self.block.append_operation(arith::andi(shr8, m_ff00, self.loc)).result(0).unwrap().into();
+
+                        let shl8: Value = self.block.append_operation(arith::shli(val, c8, self.loc)).result(0).unwrap().into();
+                        let byte2: Value = self.block.append_operation(arith::andi(shl8, m_ff0000, self.loc)).result(0).unwrap().into();
+
+                        let byte3: Value = self.block.append_operation(arith::shli(val, c24, self.loc)).result(0).unwrap().into();
+
+                        let r01: Value = self.block.append_operation(arith::ori(byte0, byte1, self.loc)).result(0).unwrap().into();
+                        let r23: Value = self.block.append_operation(arith::ori(byte2, byte3, self.loc)).result(0).unwrap().into();
+                        let r: Value = self.block.append_operation(arith::ori(r01, r23, self.loc)).result(0).unwrap().into();
+                        r
+                    }
+                    64 => {
+                        // 8 bytes: reverse using shift/mask/or
+                        let c8 = make_const(self, 8);
+                        let c24 = make_const(self, 24);
+                        let c40 = make_const(self, 40);
+                        let c56 = make_const(self, 56);
+                        let m_ff = make_const(self, 0xFF);
+                        let m_ff00 = make_const(self, 0xFF00);
+                        let m_ff0000 = make_const(self, 0xFF_0000);
+                        let m_ff000000 = make_const(self, 0xFF00_0000);
+                        let m_ff00000000: Value = make_const(self, 0xFF_0000_0000);
+                        let m_ff0000000000: Value = make_const(self, 0xFF00_0000_0000);
+                        let m_ff000000000000: Value = make_const(self, 0xFF_0000_0000_0000);
+
+                        // byte0 = (x >> 56) & 0xFF
+                        let shr56: Value = self.block.append_operation(arith::shrui(val, c56, self.loc)).result(0).unwrap().into();
+                        let b0: Value = self.block.append_operation(arith::andi(shr56, m_ff, self.loc)).result(0).unwrap().into();
+                        // byte1 = (x >> 40) & 0xFF00
+                        let shr40: Value = self.block.append_operation(arith::shrui(val, c40, self.loc)).result(0).unwrap().into();
+                        let b1: Value = self.block.append_operation(arith::andi(shr40, m_ff00, self.loc)).result(0).unwrap().into();
+                        // byte2 = (x >> 24) & 0xFF0000
+                        let shr24: Value = self.block.append_operation(arith::shrui(val, c24, self.loc)).result(0).unwrap().into();
+                        let b2: Value = self.block.append_operation(arith::andi(shr24, m_ff0000, self.loc)).result(0).unwrap().into();
+                        // byte3 = (x >> 8) & 0xFF000000
+                        let shr8: Value = self.block.append_operation(arith::shrui(val, c8, self.loc)).result(0).unwrap().into();
+                        let b3: Value = self.block.append_operation(arith::andi(shr8, m_ff000000, self.loc)).result(0).unwrap().into();
+                        // byte4 = (x << 8) & 0xFF00000000
+                        let shl8: Value = self.block.append_operation(arith::shli(val, c8, self.loc)).result(0).unwrap().into();
+                        let b4: Value = self.block.append_operation(arith::andi(shl8, m_ff00000000, self.loc)).result(0).unwrap().into();
+                        // byte5 = (x << 24) & 0xFF0000000000
+                        let shl24: Value = self.block.append_operation(arith::shli(val, c24, self.loc)).result(0).unwrap().into();
+                        let b5: Value = self.block.append_operation(arith::andi(shl24, m_ff0000000000, self.loc)).result(0).unwrap().into();
+                        // byte6 = (x << 40) & 0xFF000000000000
+                        let shl40: Value = self.block.append_operation(arith::shli(val, c40, self.loc)).result(0).unwrap().into();
+                        let b6: Value = self.block.append_operation(arith::andi(shl40, m_ff000000000000, self.loc)).result(0).unwrap().into();
+                        // byte7 = (x << 56)
+                        let b7: Value = self.block.append_operation(arith::shli(val, c56, self.loc)).result(0).unwrap().into();
+
+                        let r01: Value = self.block.append_operation(arith::ori(b0, b1, self.loc)).result(0).unwrap().into();
+                        let r23: Value = self.block.append_operation(arith::ori(b2, b3, self.loc)).result(0).unwrap().into();
+                        let r45: Value = self.block.append_operation(arith::ori(b4, b5, self.loc)).result(0).unwrap().into();
+                        let r67: Value = self.block.append_operation(arith::ori(b6, b7, self.loc)).result(0).unwrap().into();
+                        let r0123: Value = self.block.append_operation(arith::ori(r01, r23, self.loc)).result(0).unwrap().into();
+                        let r4567: Value = self.block.append_operation(arith::ori(r45, r67, self.loc)).result(0).unwrap().into();
+                        let r: Value = self.block.append_operation(arith::ori(r0123, r4567, self.loc)).result(0).unwrap().into();
+                        r
+                    }
+                    _ => panic!("bswap unsupported for bit width {}", bit_width),
+                };
 
                 (result, ty)
             }
@@ -2201,16 +2364,16 @@ impl<'c, 'a> FnCodegen<'c, 'a> {
                 // store_at(buf, offset, data) → vector.store at index offset
                 assert_eq!(args.len(), 3, "store_at takes 3 arguments (buf, offset, data)");
                 let (buf_val, _) = self.emit_expr(&args[0].value);
-                let (offset_val, _) = self.emit_expr(&args[1].value);
+                let (offset_val, offset_ty) = self.emit_expr(&args[1].value);
                 let (data_val, _) = self.emit_expr(&args[2].value);
 
-                // Convert offset from i32[1] to index
-                let scalar_i32 = ScalarType::I32.to_mlir_type(self.ctx);
+                // Convert offset to index
+                let offset_elem_ty = offset_ty.scalar.to_mlir_type(self.ctx);
                 let index_type = Type::index(self.ctx);
 
                 let extract_op = OperationBuilder::new("vector.extract", self.loc)
                     .add_operands(&[offset_val])
-                    .add_results(&[scalar_i32])
+                    .add_results(&[offset_elem_ty])
                     .add_attributes(&[(
                         melior::ir::Identifier::new(self.ctx, "static_position"),
                         DenseI64ArrayAttribute::new(self.ctx, &[0]).into(),
@@ -2232,7 +2395,234 @@ impl<'c, 'a> FnCodegen<'c, 'a> {
                 let dummy = self.emit_zero_vector(dummy_ty);
                 (dummy, dummy_ty)
             }
-            _ => panic!("unknown function call in codegen: {:?}", func_expr),
+            ast::Expr::Ident(name) if name == "ptr_add" => {
+                // ptr_add(ptr, offset) → memref.subview to create a new pointer advanced by offset elements
+                assert_eq!(args.len(), 2, "ptr_add takes 2 arguments (ptr, offset)");
+                let (ptr_val, ptr_dummy_ty) = self.emit_expr(&args[0].value);
+
+                // Determine the element scalar type from the ptr binding
+                let elem_scalar = if let ast::Expr::Ident(ref pname) = args[0].value {
+                    match self.vars.get(pname) {
+                        Some(Binding::Ptr(_, s)) => *s,
+                        _ => ptr_dummy_ty.scalar,
+                    }
+                } else {
+                    ptr_dummy_ty.scalar
+                };
+
+                let (offset_val, offset_ty) = self.emit_expr(&args[1].value);
+
+                // Extract offset scalar from vector and cast to index
+                let offset_elem_ty = offset_ty.scalar.to_mlir_type(self.ctx);
+                let index_type = Type::index(self.ctx);
+
+                let extract_op = OperationBuilder::new("vector.extract", self.loc)
+                    .add_operands(&[offset_val])
+                    .add_results(&[offset_elem_ty])
+                    .add_attributes(&[(
+                        melior::ir::Identifier::new(self.ctx, "static_position"),
+                        DenseI64ArrayAttribute::new(self.ctx, &[0]).into(),
+                    )])
+                    .build()
+                    .expect("failed to extract ptr_add offset");
+                let offset_scalar = self.block.append_operation(extract_op).result(0).unwrap().into();
+
+                let cast_op = arith::index_cast(offset_scalar, index_type, self.loc);
+                let offset_index = self.block.append_operation(cast_op).result(0).unwrap().into();
+
+                // Compute remaining size: dim - offset
+                let zero_idx = self.make_index_const(0);
+                let dim_op = OperationBuilder::new("memref.dim", self.loc)
+                    .add_operands(&[ptr_val, zero_idx])
+                    .add_results(&[index_type])
+                    .build()
+                    .expect("failed to build memref.dim");
+                let dim_val = self.block.append_operation(dim_op).result(0).unwrap().into();
+
+                let remaining_op = arith::subi(dim_val, offset_index, self.loc);
+                let remaining = self.block.append_operation(remaining_op).result(0).unwrap().into();
+
+                // Build memref.reinterpret_cast with offset
+                let elem_mlir = elem_scalar.to_mlir_type(self.ctx);
+                // Result type needs strided layout with dynamic offset and stride
+                let layout = melior::ir::attribute::Attribute::parse(self.ctx,
+                    "affine_map<(d0)[s0, s1] -> (d0 * s1 + s0)>").unwrap();
+                let result_memref_type = MemRefType::new(elem_mlir, &[i64::MIN], Some(layout), None);
+                let one_idx = self.make_index_const(1);
+
+                let cast_op = OperationBuilder::new("memref.reinterpret_cast", self.loc)
+                    .add_operands(&[ptr_val, offset_index, remaining, one_idx])
+                    .add_results(&[result_memref_type.into()])
+                    .add_attributes(&[
+                        (
+                            melior::ir::Identifier::new(self.ctx, "operandSegmentSizes"),
+                            DenseI32ArrayAttribute::new(self.ctx, &[1, 1, 1, 1]).into(),
+                        ),
+                        (
+                            melior::ir::Identifier::new(self.ctx, "static_offsets"),
+                            DenseI64ArrayAttribute::new(self.ctx, &[i64::MIN]).into(),
+                        ),
+                        (
+                            melior::ir::Identifier::new(self.ctx, "static_sizes"),
+                            DenseI64ArrayAttribute::new(self.ctx, &[i64::MIN]).into(),
+                        ),
+                        (
+                            melior::ir::Identifier::new(self.ctx, "static_strides"),
+                            DenseI64ArrayAttribute::new(self.ctx, &[i64::MIN]).into(),
+                        ),
+                    ])
+                    .build()
+                    .expect("failed to build memref.reinterpret_cast for ptr_add");
+
+                let reinterp_result = self.block.append_operation(cast_op).result(0).unwrap().into();
+
+                // Cast back to plain memref<?xT> (drop the strided layout)
+                let plain_memref_type = MemRefType::new(elem_mlir, &[i64::MIN], None, None);
+                let memcast_op = OperationBuilder::new("memref.cast", self.loc)
+                    .add_operands(&[reinterp_result])
+                    .add_results(&[plain_memref_type.into()])
+                    .build()
+                    .expect("failed to build memref.cast for ptr_add");
+                let result = self.block.append_operation(memcast_op).result(0).unwrap().into();
+
+                (result, VecType { scalar: elem_scalar, width: 0 })
+            }
+            ast::Expr::Ident(name) if name == "load_at" => {
+                // load_at(ptr, offset) → vector.load at element index offset, returns vector<1xT>
+                assert_eq!(args.len(), 2, "load_at takes 2 arguments (ptr, offset)");
+                let (ptr_val, ptr_dummy_ty) = self.emit_expr(&args[0].value);
+
+                // Determine the element scalar type from the ptr binding
+                let elem_scalar = if let ast::Expr::Ident(ref pname) = args[0].value {
+                    match self.vars.get(pname) {
+                        Some(Binding::Ptr(_, s)) => *s,
+                        _ => ptr_dummy_ty.scalar,
+                    }
+                } else {
+                    ptr_dummy_ty.scalar
+                };
+
+                let (offset_val, offset_ty) = self.emit_expr(&args[1].value);
+
+                // Convert offset from vector<1xi??> to index
+                let offset_elem_ty = offset_ty.scalar.to_mlir_type(self.ctx);
+                let index_type = Type::index(self.ctx);
+
+                // Extract scalar from vector
+                let extract_op = OperationBuilder::new("vector.extract", self.loc)
+                    .add_operands(&[offset_val])
+                    .add_results(&[offset_elem_ty])
+                    .add_attributes(&[(
+                        melior::ir::Identifier::new(self.ctx, "static_position"),
+                        DenseI64ArrayAttribute::new(self.ctx, &[0]).into(),
+                    )])
+                    .build()
+                    .expect("failed to extract load_at offset");
+                let offset_scalar = self.block.append_operation(extract_op).result(0).unwrap().into();
+
+                let cast_op = arith::index_cast(offset_scalar, index_type, self.loc);
+                let offset_index = self.block.append_operation(cast_op).result(0).unwrap().into();
+
+                let result_ty = VecType { scalar: elem_scalar, width: 1 };
+                let result_mlir = result_ty.to_mlir_type(self.ctx);
+
+                let load_op = OperationBuilder::new("vector.load", self.loc)
+                    .add_operands(&[ptr_val, offset_index])
+                    .add_results(&[result_mlir])
+                    .build()
+                    .expect("failed to build vector.load for load_at");
+
+                let result = self.block.append_operation(load_op).result(0).unwrap().into();
+                (result, result_ty)
+            }
+            _ => {
+                // Inter-function call: look up user-defined function
+                let target_name = match func_expr {
+                    ast::Expr::Ident(n) => n.clone(),
+                    _ => panic!("non-identifier function call not supported: {:?}", func_expr),
+                };
+
+                let target_fn = self.fn_defs.get(&target_name)
+                    .unwrap_or_else(|| panic!("unknown function in codegen: {}", target_name))
+                    .clone();
+
+                // Use flatten_params to determine expected MLIR parameter types
+                let flat_params = flatten_params(
+                    self.ctx, &target_fn.params, &self.struct_defs,
+                    &self.comptime_env, self.native_width,
+                );
+
+                let param_mlir_types: Vec<Type<'c>> = flat_params.iter().map(|(_, t, _, _)| *t).collect();
+
+                // Build argument values
+                let mut call_args: Vec<Value<'c, 'a>> = Vec::new();
+                for (i, arg) in args.iter().enumerate() {
+                    let target_param = &target_fn.params[i];
+                    if is_ptr_type_name(&target_param.ty.name) {
+                        // Ptr param: pass the memref value directly
+                        let (val, _) = self.emit_expr(&arg.value);
+                        call_args.push(val);
+                    } else if is_scalar_type_name(&target_param.ty.name) {
+                        // Scalar/vector param: pass directly
+                        let (val, _) = self.emit_expr(&arg.value);
+                        call_args.push(val);
+                    } else {
+                        // Struct param: flatten fields
+                        let (val, _) = self.emit_expr(&arg.value);
+                        // If it's a struct binding, push each field
+                        if let ast::Expr::Ident(ref var_name) = arg.value {
+                            if let Some(Binding::Struct { fields }) = self.vars.get(var_name).cloned() {
+                                for (_, fval, _) in &fields {
+                                    call_args.push(*fval);
+                                }
+                                continue;
+                            }
+                        }
+                        // Fallback: just pass the value (non-struct expression)
+                        call_args.push(val);
+                    }
+                }
+
+                // Determine return type
+                let (ret_mlir_types, ret_vt) = if let Some(ref ret_ty) = target_fn.ret_ty {
+                    if is_ptr_type_name(&ret_ty.name) {
+                        let scalar = ptr_element_scalar(ret_ty);
+                        let memref_type = ptr_to_memref_type(self.ctx, ret_ty);
+                        (vec![memref_type], VecType { scalar, width: 0 })
+                    } else if is_scalar_type_name(&ret_ty.name) {
+                        let vt = resolve_type(ret_ty, &self.comptime_env, self.native_width);
+                        (vec![vt.to_mlir_type(self.ctx)], vt)
+                    } else {
+                        panic!("inter-function calls returning structs are not yet supported");
+                    }
+                } else {
+                    // Void return
+                    (vec![], VecType { scalar: ScalarType::I32, width: 1 })
+                };
+
+                // Build func.call
+                let call_op = OperationBuilder::new("func.call", self.loc)
+                    .add_operands(&call_args)
+                    .add_results(&ret_mlir_types)
+                    .add_attributes(&[(
+                        melior::ir::Identifier::new(self.ctx, "callee"),
+                        melior::ir::attribute::FlatSymbolRefAttribute::new(self.ctx, &target_name).into(),
+                    )])
+                    .build()
+                    .expect("failed to build func.call for inter-function call");
+
+                let op_ref = self.block.append_operation(call_op);
+
+                if ret_mlir_types.is_empty() {
+                    // Void return — return a dummy
+                    let dummy_ty = VecType { scalar: ScalarType::I32, width: 1 };
+                    let dummy = self.emit_zero_vector(dummy_ty);
+                    (dummy, dummy_ty)
+                } else {
+                    let result: Value = op_ref.result(0).unwrap().into();
+                    (result, ret_vt)
+                }
+            }
         }
     }
 
@@ -2384,6 +2774,7 @@ impl<'c, 'a> FnCodegen<'c, 'a> {
                 comptime_env: self.comptime_env.clone(),
                 native_width: self.native_width,
                 struct_defs: self.struct_defs.clone(),
+                fn_defs: self.fn_defs.clone(),
                 current_span: ast::Span::dummy(),
             };
 
@@ -2532,7 +2923,12 @@ impl<'c, 'a> FnCodegen<'c, 'a> {
                             } else {
                                 self.emit_expr(value)
                             };
-                            self.vars.insert(name.clone(), Binding::Vec(val, ty));
+                            if ty.width == 0 {
+                                // width 0 is the sentinel for ptr types
+                                self.vars.insert(name.clone(), Binding::Ptr(val, ty.scalar));
+                            } else {
+                                self.vars.insert(name.clone(), Binding::Vec(val, ty));
+                            }
                         }
                     }
                 }
@@ -2682,144 +3078,248 @@ impl<'c, 'a> FnCodegen<'c, 'a> {
         }
     }
 
-    /// Emit a while loop using scf.while.
+    /// Collect variable names assigned in a list of statements (for while loop iter_args).
+    fn collect_assigned_vars(stmts: &[ast::Stmt]) -> Vec<String> {
+        let mut names = Vec::new();
+        for stmt in stmts {
+            match &stmt.kind {
+                ast::StmtKind::Assign { target, .. } => {
+                    if let ast::AssignTarget::Ident(name) = target {
+                        names.push(name.clone());
+                    }
+                }
+                ast::StmtKind::If { then_body, else_body, .. } => {
+                    names.extend(Self::collect_assigned_vars(then_body));
+                    names.extend(Self::collect_assigned_vars(else_body));
+                }
+                ast::StmtKind::While { body, .. } => {
+                    names.extend(Self::collect_assigned_vars(body));
+                }
+                _ => {}
+            }
+        }
+        names.sort();
+        names.dedup();
+        names
+    }
+
+    /// Emit a while loop using scf.while with iter_args for modified variables.
+    ///
+    /// Generates:
+    ///   scf.while (%v0 = %init0, %v1 = %init1, ...) : (types) -> (types) {
+    ///     // "before" region: evaluate condition
+    ///     scf.condition(%cond) %v0, %v1, ... : types
+    ///   } do {
+    ///   ^bb(%v0: T0, %v1: T1, ...):
+    ///     // body
+    ///     scf.yield %v0', %v1', ...
+    ///   }
     fn emit_while(
         &mut self,
         cond_expr: &ast::Expr,
         body_stmts: &[ast::Stmt],
     ) {
-        // Simple while: evaluate condition, if true execute body, repeat.
-        // We implement this as an scf.while op.
+        // Collect all variables assigned in the body that already exist in outer scope.
+        // Also include variables referenced in the condition that get modified.
+        let assigned_names = Self::collect_assigned_vars(body_stmts);
 
-        // Collect variables that might be modified in the loop body.
-        // For simplicity, we'll use a "loop with no iter_args" approach
-        // and rely on memref for mutable state. But since we don't have memrefs
-        // for locals, we use a simpler approach: just execute the body in-place.
-        //
-        // For now, emit as a simple conditional loop using scf.while with no carried state.
-        // The condition is re-evaluated each iteration.
+        // Filter to only variables that exist in the current scope (not new ones)
+        // and collect their initial values and types
+        let mut carried_vars: Vec<(String, Value<'c, 'a>, VecType, bool)> = Vec::new(); // (name, init_val, type, is_ptr)
+        for name in &assigned_names {
+            if let Some(binding) = self.vars.get(name) {
+                match binding {
+                    Binding::Vec(val, ty) => {
+                        carried_vars.push((name.clone(), *val, *ty, false));
+                    }
+                    Binding::Ptr(val, scalar) => {
+                        // Ptrs are memrefs — they can't easily be carried as iter_args
+                        // in scf.while because they need to be memref types.
+                        // For now, carry the memref value with a sentinel type.
+                        carried_vars.push((name.clone(), *val, VecType { scalar: *scalar, width: 0 }, true));
+                    }
+                    Binding::Struct { .. } => {
+                        // Skip struct bindings for now
+                    }
+                }
+            }
+        }
 
-        // We need to build the scf.while manually:
-        // scf.while : () -> () {
-        //   %cond = ... evaluate cond ...
-        //   scf.condition(%cond)
-        // } do {
-        //   ... body ...
-        //   scf.yield
-        // }
-
-        // For the initial implementation, we'll unroll the while as a bounded loop
-        // since true scf.while requires separate blocks. Let's use scf.while properly.
+        // Build MLIR types for carried values
+        let mut carried_mlir_types: Vec<Type<'c>> = Vec::new();
+        for (_name, _, ty, is_ptr) in &carried_vars {
+            if *is_ptr {
+                // For ptr types, build a memref<?xT> type
+                let elem_mlir = ty.scalar.to_mlir_type(self.ctx);
+                let memref_type = MemRefType::new(elem_mlir, &[i64::MIN], None, None);
+                carried_mlir_types.push(memref_type.into());
+            } else {
+                carried_mlir_types.push(ty.to_mlir_type(self.ctx));
+            }
+        }
 
         let i1_type: Type = IntegerType::new(self.ctx, 1).into();
 
-        // "before" region: evaluates condition
-        let before_block = Block::new(&[]);
-        // We need a FnCodegen for the before block — but we can't easily create one
-        // since we'd need to share vars. Instead, emit the condition inline.
-        // Actually, scf.while's before region gets the carried values as block args.
-        // For simplicity with no carried values:
+        // === "before" region: evaluate condition, pass carried vars through ===
+        let mut before_arg_types: Vec<(Type<'c>, Location<'c>)> = Vec::new();
+        for t in &carried_mlir_types {
+            before_arg_types.push((*t, self.loc));
+        }
+        let before_block = Block::new(&before_arg_types);
 
-        // Emit condition check
-        let (cond_val, _) = self.emit_expr(cond_expr);
-        let cond_scalar: Value = {
-            let extract_op = OperationBuilder::new("vector.extract", self.loc)
-                .add_operands(&[cond_val])
-                .add_results(&[i1_type])
-                .add_attributes(&[(
-                    melior::ir::Identifier::new(self.ctx, "static_position"),
-                    DenseI64ArrayAttribute::new(self.ctx, &[0]).into(),
-                )])
+        // Create inner FnCodegen for the before block to evaluate the condition
+        {
+            let mut before_cg = FnCodegen {
+                ctx: self.ctx,
+                loc: self.loc,
+                block: &before_block,
+                vars: HashMap::new(),
+                comptime_env: self.comptime_env.clone(),
+                native_width: self.native_width,
+                struct_defs: self.struct_defs.clone(),
+                fn_defs: self.fn_defs.clone(),
+                current_span: self.current_span.clone(),
+            };
+
+            // Copy outer variables (transmute lifetimes for MLIR cross-region refs)
+            for (name, binding) in &self.vars {
+                let inner_binding: Binding = unsafe { std::mem::transmute(binding.clone()) };
+                before_cg.vars.insert(name.clone(), inner_binding);
+            }
+
+            // Override carried vars with block args
+            for (idx, (name, _, ty, is_ptr)) in carried_vars.iter().enumerate() {
+                let arg_val: Value = before_block.argument(idx).unwrap().into();
+                if *is_ptr {
+                    before_cg.vars.insert(name.clone(), Binding::Ptr(arg_val, ty.scalar));
+                } else {
+                    before_cg.vars.insert(name.clone(), Binding::Vec(arg_val, *ty));
+                }
+            }
+
+            // Evaluate condition
+            let (cond_val, _) = before_cg.emit_expr(cond_expr);
+
+            // Extract scalar bool
+            let cond_scalar: Value = {
+                let extract_op = OperationBuilder::new("vector.extract", before_cg.loc)
+                    .add_operands(&[cond_val])
+                    .add_results(&[i1_type])
+                    .add_attributes(&[(
+                        melior::ir::Identifier::new(before_cg.ctx, "static_position"),
+                        DenseI64ArrayAttribute::new(before_cg.ctx, &[0]).into(),
+                    )])
+                    .build()
+                    .expect("failed to extract while condition");
+                before_block
+                    .append_operation(extract_op)
+                    .result(0)
+                    .unwrap()
+                    .into()
+            };
+
+            // scf.condition %cond %args... : types
+            // Pass through the block args as the values to forward to the "after" region
+            let mut condition_args: Vec<Value> = Vec::new();
+            for idx in 0..carried_vars.len() {
+                let arg_val: Value = before_block.argument(idx).unwrap().into();
+                condition_args.push(arg_val);
+            }
+
+            let condition_op = OperationBuilder::new("scf.condition", before_cg.loc)
+                .add_operands(&[&[cond_scalar], condition_args.as_slice()].concat())
                 .build()
-                .expect("failed to extract bool for while");
-            self.block
-                .append_operation(extract_op)
-                .result(0)
-                .unwrap()
-                .into()
-        };
+                .expect("failed to build scf.condition");
+            before_block.append_operation(condition_op);
+        }
 
-        // For a proper while loop we'd need scf.while with regions.
-        // Since building that with melior is complex with shared variable state,
-        // let's implement a simpler approach: bounded for loop with early exit.
-        // Actually, the simplest approach that works: just emit the body statements
-        // guarded by the condition, in a fixed iteration count loop.
-        //
-        // For now, we'll implement while as a utility — the main use case is
-        // bit extraction loops which have at most 64 iterations.
+        // === "after" region: execute body, yield updated vars ===
+        let mut after_arg_types: Vec<(Type<'c>, Location<'c>)> = Vec::new();
+        for t in &carried_mlir_types {
+            after_arg_types.push((*t, self.loc));
+        }
+        let after_block = Block::new(&after_arg_types);
 
-        // Use scf.for with a large bound and break when condition is false
-        // Actually scf.for doesn't support break. Let's just use a
-        // simple bounded loop (64 iterations max for bitmask processing):
+        {
+            let mut body_cg = FnCodegen {
+                ctx: self.ctx,
+                loc: self.loc,
+                block: &after_block,
+                vars: HashMap::new(),
+                comptime_env: self.comptime_env.clone(),
+                native_width: self.native_width,
+                struct_defs: self.struct_defs.clone(),
+                fn_defs: self.fn_defs.clone(),
+                current_span: self.current_span.clone(),
+            };
 
-        let index_type = Type::index(self.ctx);
-        let zero_idx = self.make_index_const(0);
-        let max_idx = self.make_index_const(64);
-        let one_idx = self.make_index_const(1);
+            // Copy outer variables
+            for (name, binding) in &self.vars {
+                let inner_binding: Binding = unsafe { std::mem::transmute(binding.clone()) };
+                body_cg.vars.insert(name.clone(), inner_binding);
+            }
 
-        // Re-check condition each iteration using carried bool state
-        let i1_vec_type = Type::vector(&[1], i1_type);
+            // Override carried vars with "after" block args
+            for (idx, (name, _, ty, is_ptr)) in carried_vars.iter().enumerate() {
+                let arg_val: Value = after_block.argument(idx).unwrap().into();
+                if *is_ptr {
+                    body_cg.vars.insert(name.clone(), Binding::Ptr(arg_val, ty.scalar));
+                } else {
+                    body_cg.vars.insert(name.clone(), Binding::Vec(arg_val, *ty));
+                }
+            }
 
-        // Initial condition as vector<1xi1>
-        let init_cond = cond_val;
+            // Emit body statements
+            for stmt in body_stmts {
+                body_cg.emit_stmt(stmt);
+            }
 
-        let inner_block = Block::new(&[
-            (index_type, self.loc),  // loop index
-            (i1_vec_type, self.loc), // carried condition
-        ]);
-        let _loop_idx: Value = inner_block.argument(0).unwrap().into();
-        let carried_cond: Value = inner_block.argument(1).unwrap().into();
+            // Yield updated carried vars
+            let mut yield_vals: Vec<Value> = Vec::new();
+            for (name, _, ty, is_ptr) in &carried_vars {
+                if let Some(binding) = body_cg.vars.get(name) {
+                    match binding {
+                        Binding::Vec(val, _) => yield_vals.push(*val),
+                        Binding::Ptr(val, _) => yield_vals.push(*val),
+                        _ => panic!("unexpected struct binding in while yield"),
+                    }
+                } else {
+                    panic!("carried variable '{}' not found after while body", name);
+                }
+            }
 
-        // Extract condition scalar
-        let inner_cond_scalar: Value = {
-            let extract_op = OperationBuilder::new("vector.extract", self.loc)
-                .add_operands(&[carried_cond])
-                .add_results(&[i1_type])
-                .add_attributes(&[(
-                    melior::ir::Identifier::new(self.ctx, "static_position"),
-                    DenseI64ArrayAttribute::new(self.ctx, &[0]).into(),
-                )])
-                .build()
-                .expect("failed to extract while cond");
-            inner_block
-                .append_operation(extract_op)
-                .result(0)
-                .unwrap()
-                .into()
-        };
+            after_block.append_operation(scf::r#yield(&yield_vals, body_cg.loc));
+        }
 
-        // scf.if to conditionally execute body
-        // For now, just yield the carried condition — the body modifies outer state
-        // through the shared block. This is a simplification.
+        // Build the two regions
+        let before_region = Region::new();
+        before_region.append_block(before_block);
 
-        // Actually, for a truly correct while loop implementation we'd need
-        // to thread all mutable variables through as iter_args. That's very complex.
-        //
-        // The practical solution: emit the while body inline and use the condition
-        // to mask updates. For the primary use case (bit extraction), this is fine.
+        let after_region = Region::new();
+        after_region.append_block(after_block);
 
-        // Let's take the simple approach: emit body unconditionally in a for loop,
-        // but wrap assignments in conditional selects using the carried condition.
+        // Initial values for iter_args
+        let init_vals: Vec<Value<'c, 'a>> = carried_vars.iter().map(|(_, v, _, _)| *v).collect();
 
-        // For now, just yield same condition (TODO: re-evaluate cond after body)
-        inner_block.append_operation(scf::r#yield(&[carried_cond], self.loc));
-
-        let region = Region::new();
-        region.append_block(inner_block);
-
-        let for_op = OperationBuilder::new("scf.for", self.loc)
-            .add_operands(&[zero_idx, max_idx, one_idx, init_cond])
-            .add_results(&[i1_vec_type])
-            .add_regions([region])
+        // Build scf.while
+        let while_op = OperationBuilder::new("scf.while", self.loc)
+            .add_operands(&init_vals)
+            .add_results(&carried_mlir_types)
+            .add_regions([before_region, after_region])
             .build()
-            .expect("failed to build scf.for for while loop");
+            .expect("failed to build scf.while");
 
-        self.block.append_operation(for_op);
+        let while_result = self.block.append_operation(while_op);
 
-        // For the while loop's actual body, execute it once guarded by the condition
-        // This is a placeholder — full while requires scf.while with proper regions
-        // For now, execute body statements directly (works for single-iteration patterns)
-        // TODO: Proper scf.while implementation
+        // Bind final values back into outer scope
+        for (idx, (name, _, ty, is_ptr)) in carried_vars.iter().enumerate() {
+            let result_val: Value<'c, 'a> = while_result.result(idx).unwrap().into();
+            if *is_ptr {
+                self.vars.insert(name.clone(), Binding::Ptr(result_val, ty.scalar));
+            } else {
+                self.vars.insert(name.clone(), Binding::Vec(result_val, *ty));
+            }
+        }
     }
 
     fn make_index_const(&mut self, value: i64) -> Value<'c, 'a> {
@@ -2935,6 +3435,7 @@ pub fn emit_fn<'c>(
     comptime_env: &HashMap<String, u64>,
     native_width: u64,
     struct_defs: &HashMap<String, ast::StructDef>,
+    fn_defs: &HashMap<String, ast::FnDef>,
 ) -> Operation<'c> {
     let loc = Location::unknown(ctx);
 
@@ -2969,6 +3470,7 @@ pub fn emit_fn<'c>(
         comptime_env: comptime_env.clone(),
         native_width,
         struct_defs: struct_defs.clone(),
+        fn_defs: fn_defs.clone(),
         current_span: ast::Span::dummy(),
     };
 
@@ -3109,13 +3611,21 @@ pub fn compile_module<'c>(
         }
     }
 
+    // Collect all function definitions for inter-function calls
+    let mut fn_defs: HashMap<String, ast::FnDef> = HashMap::new();
+    for item in items {
+        if let ast::Item::Fn(f) = item {
+            fn_defs.insert(f.name.clone(), f.clone());
+        }
+    }
+
     for item in items {
         match item {
             ast::Item::Fn(fn_def) => {
                 // Merge function-level comptime params with global env
                 let env = comptime_env.clone();
                 // For now, comptime params must be provided in the env
-                let op = emit_fn(ctx, fn_def, &env, native_width, &struct_defs);
+                let op = emit_fn(ctx, fn_def, &env, native_width, &struct_defs, &fn_defs);
                 module.body().append_operation(op);
             }
             ast::Item::Struct(_) => {
@@ -3139,6 +3649,9 @@ pub fn lower_to_llvm(ctx: &Context, module: &mut Module) -> Result<(), String> {
     }
 
     let pass_manager = pass::PassManager::new(ctx);
+
+    // Inline user-defined functions before lowering
+    pass_manager.add_pass(pass::transform::create_inliner());
 
     // SCF → ControlFlow
     pass_manager.add_pass(pass::conversion::create_scf_to_control_flow());
@@ -7730,5 +8243,234 @@ mod tests {
         eprintln!("Throughput: {:.2} GB/s ({:.3} ms/iter)",
             gb, elapsed.as_secs_f64() * 1000.0 / iterations as f64);
         eprintln!("Compare: simdjson does ~1.5 GB/s on same data");
+    }
+
+    // ============================================================
+    // New features: load_at, ptr_add, bswap, while, inter-fn calls
+    // ============================================================
+
+    #[test]
+    fn test_hprof_style_parsing() {
+        // Simulate parsing an HPROF-like binary format:
+        // - Read a tag byte at offset 0
+        // - Read a big-endian u32 body length at offset 5
+        // - Walk records using while loop until we've consumed the buffer
+        // - Count how many records have tag == 0x1C (HEAP_DUMP_SEGMENT)
+        let source = r#"
+            fn read_u32_be(buf: ptr[u8], off: i32[1]) -> i32[1] {
+                b0 = to_i32(load_at(buf, off))
+                b1 = to_i32(load_at(buf, off + 1))
+                b2 = to_i32(load_at(buf, off + 2))
+                b3 = to_i32(load_at(buf, off + 3))
+                return (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
+            }
+
+            fn count_segments(buf: ptr[u8], buf_len: i32[1]) -> i32[1] {
+                offset: i32[1] = 0
+                count: i32[1] = 0
+                while offset < buf_len {
+                    tag = to_i32(load_at(buf, offset))
+                    body_len = read_u32_be(buf, offset + 5)
+                    if tag == 28 {
+                        count = count + 1
+                    } else {
+                        count = count
+                    }
+                    offset = offset + 9 + body_len
+                }
+                return count
+            }
+        "#;
+        let ctx = create_context();
+        let items = parser::parse(source);
+        let mut module = compile_module(&ctx, &items, &HashMap::new(), 8);
+        assert!(module.as_operation().verify(), "MLIR verify failed:\n{}", module.as_operation());
+        lower_to_llvm(&ctx, &mut module).unwrap();
+        let engine = melior::ExecutionEngine::new(&module, 0, &[], false);
+        let fptr = engine.lookup("count_segments");
+
+        // Build a fake HPROF-like buffer with 3 records:
+        // Record 1: tag=0x01 (UTF8), body_len=2, body=[0xAA, 0xBB]  → 9+2=11 bytes
+        // Record 2: tag=0x1C (HEAP_DUMP_SEGMENT), body_len=4, body=[1,2,3,4] → 9+4=13 bytes
+        // Record 3: tag=0x1C (HEAP_DUMP_SEGMENT), body_len=0, body=[] → 9+0=9 bytes
+        // Total: 33 bytes
+        let mut buf = vec![0u8; 33];
+        // Record 1: tag=0x01, timestamp=0, body_len=2
+        buf[0] = 0x01;
+        buf[5] = 0; buf[6] = 0; buf[7] = 0; buf[8] = 2; // big-endian u32 = 2
+        buf[9] = 0xAA; buf[10] = 0xBB;
+        // Record 2: tag=0x1C, timestamp=0, body_len=4
+        buf[11] = 0x1C;
+        buf[16] = 0; buf[17] = 0; buf[18] = 0; buf[19] = 4; // big-endian u32 = 4
+        buf[20] = 1; buf[21] = 2; buf[22] = 3; buf[23] = 4;
+        // Record 3: tag=0x1C, timestamp=0, body_len=0
+        buf[24] = 0x1C;
+        buf[29] = 0; buf[30] = 0; buf[31] = 0; buf[32] = 0; // big-endian u32 = 0
+
+        unsafe {
+            // count_segments(buf: ptr[u8], buf_len: i32[1]) -> i32[1]
+            // ptr = 5 values, i32[1] = f32 (in NEON register)
+            let f: extern "C" fn(*const u8, *const u8, i64, i64, i64, f32) -> f32 =
+                std::mem::transmute(fptr);
+            let buf_len = f32::from_bits(33u32);
+            let result_bits = f(buf.as_ptr(), buf.as_ptr(), 0, 33, 1, buf_len);
+            let result = f32::to_bits(result_bits) as i32;
+            assert_eq!(result, 2, "should find 2 HEAP_DUMP_SEGMENT records (tag=0x1C)");
+        }
+    }
+
+    #[test]
+    fn test_load_at_basic() {
+        let source = r#"
+            fn read_byte(buf: ptr[u8], off: i32[1]) -> i32[1] {
+                v = load_at(buf, off)
+                return to_i32(v)
+            }
+        "#;
+        let (fptr, _engine) = jit_lookup(source, "read_byte");
+        let input: [u8; 8] = [10, 20, 30, 40, 50, 60, 70, 80];
+        unsafe {
+            let f: extern "C" fn(*const u8, *const u8, i64, i64, i64, f32) -> f32 =
+                std::mem::transmute(fptr);
+            // Read byte at offset 3 (should be 40)
+            let offset_bits = f32::from_bits(3u32);
+            let result_bits = f(input.as_ptr(), input.as_ptr(), 0, 8, 1, offset_bits);
+            let result = f32::to_bits(result_bits) as i32;
+            assert_eq!(result, 40, "load_at(buf, 3) should read byte 40");
+        }
+    }
+
+    #[test]
+    fn test_bswap_u32() {
+        let source = r#"
+            fn swap(v: u32[4]) -> u32[4] {
+                return bswap(v)
+            }
+        "#;
+        let (fptr, _engine) = jit_lookup(source, "swap");
+        unsafe {
+            let f: extern "C" fn(uint32x4_t) -> uint32x4_t = std::mem::transmute(fptr);
+            let input = vld1q_u32([0x01020304u32, 0xAABBCCDD, 0x00FF00FF, 0x12345678].as_ptr());
+            let result = f(input);
+            let mut out = [0u32; 4];
+            vst1q_u32(out.as_mut_ptr(), result);
+            assert_eq!(out[0], 0x04030201);
+            assert_eq!(out[1], 0xDDCCBBAA);
+            assert_eq!(out[2], 0xFF00FF00);
+            assert_eq!(out[3], 0x78563412);
+        }
+    }
+
+    #[test]
+    fn test_inter_fn_call_basic() {
+        let source = r#"
+            fn double(x: i32[4]) -> i32[4] {
+                return x + x
+            }
+            fn main(a: i32[4]) -> i32[4] {
+                return double(a)
+            }
+        "#;
+        let (fptr, _engine) = jit_lookup(source, "main");
+        unsafe {
+            let f: extern "C" fn(int32x4_t) -> int32x4_t = std::mem::transmute(fptr);
+            let input = vld1q_s32([1, 2, 3, 4].as_ptr());
+            let result = f(input);
+            let mut out = [0i32; 4];
+            vst1q_s32(out.as_mut_ptr(), result);
+            assert_eq!(out, [2, 4, 6, 8]);
+        }
+    }
+
+    #[test]
+    fn test_inter_fn_call_with_ptr() {
+        let source = r#"
+            fn read_first(buf: ptr[u8], off: i32[1]) -> i32[1] {
+                v = load_at(buf, off)
+                return to_i32(v)
+            }
+            fn main(buf: ptr[u8]) -> i32[1] {
+                off: i32[1] = 0
+                return read_first(buf, off)
+            }
+        "#;
+        let (fptr, _engine) = jit_lookup(source, "main");
+        let input: [u8; 4] = [42, 0, 0, 0];
+        unsafe {
+            let f: extern "C" fn(*const u8, *const u8, i64, i64, i64) -> f32 =
+                std::mem::transmute(fptr);
+            let result_bits = f(input.as_ptr(), input.as_ptr(), 0, 4, 1);
+            let result = f32::to_bits(result_bits) as i32;
+            assert_eq!(result, 42);
+        }
+    }
+
+    #[test]
+    fn test_while_loop_basic() {
+        // Count how many times we can subtract 10 from 45 before it goes below 10
+        // Expected: 45 -> 35 -> 25 -> 15 -> 5 (stop), count = 4
+        let source = r#"
+            fn count_tens(start: i32[1]) -> i32[1] {
+                val = start
+                count: i32[1] = 0
+                while val >= 10 {
+                    val = val - 10
+                    count = count + 1
+                }
+                return count
+            }
+        "#;
+        let ctx = create_context();
+        let items = parser::parse(source);
+        let mut module = compile_module(&ctx, &items, &HashMap::new(), 8);
+        assert!(module.as_operation().verify(), "MLIR verify failed:\n{}", module.as_operation());
+        lower_to_llvm(&ctx, &mut module).unwrap();
+        let engine = melior::ExecutionEngine::new(&module, 0, &[], false);
+        let fptr = engine.lookup("count_tens");
+        unsafe {
+            let f: extern "C" fn(f32) -> f32 = std::mem::transmute(fptr);
+            let input = f32::from_bits(45u32);
+            let result = f32::to_bits(f(input)) as i32;
+            assert_eq!(result, 4, "should count 4 tens in 45");
+        }
+    }
+}
+
+#[cfg(test)]
+mod extra_tests {
+    use super::*;
+    use crate::parser;
+
+    #[test]
+    fn test_while_with_if_else() {
+        let source = r#"
+            fn test(x: i32[1]) -> i32[1] {
+                i: i32[1] = 0
+                count: i32[1] = 0
+                while i < x {
+                    if i > 5 {
+                        count = count + 1
+                    } else {
+                        count = count
+                    }
+                    i = i + 1
+                }
+                return count
+            }
+        "#;
+        let ctx = create_context();
+        let items = parser::parse(source);
+        let mut module = compile_module(&ctx, &items, &HashMap::new(), 8);
+        assert!(module.as_operation().verify(), "MLIR verify failed:\n{}", module.as_operation());
+        lower_to_llvm(&ctx, &mut module).unwrap();
+        let engine = melior::ExecutionEngine::new(&module, 0, &[], false);
+        let fptr = engine.lookup("test");
+        unsafe {
+            let f: extern "C" fn(f32) -> f32 = std::mem::transmute(fptr);
+            // count how many i in [0,10) are > 5: that's 6,7,8,9 = 4
+            let input = f32::from_bits(10u32);
+            let result = f32::to_bits(f(input)) as i32;
+            assert_eq!(result, 4, "should count 4 values > 5 in range [0,10)");
+        }
     }
 }
