@@ -45,9 +45,10 @@ class UpdateManager: NSObject, ObservableObject, SPUUpdaterDelegate {
 
         super.init()
 
-        // Initialize the updater controller with self as delegate
+        // Only start the updater when running inside a signed app bundle
+        let inAppBundle = Bundle.main.bundlePath.hasSuffix(".app")
         self.updaterController = SPUStandardUpdaterController(
-            startingUpdater: true,
+            startingUpdater: inAppBundle,
             updaterDelegate: self,
             userDriverDelegate: nil
         )

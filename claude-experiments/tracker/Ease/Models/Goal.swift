@@ -6,13 +6,15 @@ struct Goal: Identifiable, Codable, Equatable {
     var colorHex: String
     var modifiedAt: Date
     var isDeleted: Bool
+    var isArchived: Bool
 
-    init(id: UUID = UUID(), name: String, colorHex: String, modifiedAt: Date = Date(), isDeleted: Bool = false) {
+    init(id: UUID = UUID(), name: String, colorHex: String, modifiedAt: Date = Date(), isDeleted: Bool = false, isArchived: Bool = false) {
         self.id = id
         self.name = name
         self.colorHex = colorHex
         self.modifiedAt = modifiedAt
         self.isDeleted = isDeleted
+        self.isArchived = isArchived
     }
 
     init(from decoder: Decoder) throws {
@@ -22,6 +24,7 @@ struct Goal: Identifiable, Codable, Equatable {
         colorHex = try container.decode(String.self, forKey: .colorHex)
         modifiedAt = try container.decodeIfPresent(Date.self, forKey: .modifiedAt) ?? Date()
         isDeleted = try container.decodeIfPresent(Bool.self, forKey: .isDeleted) ?? false
+        isArchived = try container.decodeIfPresent(Bool.self, forKey: .isArchived) ?? false
     }
 
     var color: Color {

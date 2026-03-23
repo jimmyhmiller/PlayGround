@@ -3,6 +3,7 @@ import SwiftUI
 struct MainPopoverView: View {
     @EnvironmentObject var viewModel: EaseViewModel
     @State private var isCmdHeld: Bool = false
+    @State private var isArchiveMode: Bool = false
     @State private var eventMonitor: Any?
     @State private var draggingGoal: Goal?
 
@@ -31,11 +32,22 @@ struct MainPopoverView: View {
         )
         .onAppear {
             isCmdHeld = NSEvent.modifierFlags.contains(.command)
-            eventMonitor = NSEvent.addLocalMonitorForEvents(matching: .flagsChanged) { event in
-                isCmdHeld = event.modifierFlags.contains(.command)
-                // Clear dragging state when Cmd is released
-                if !isCmdHeld {
-                    draggingGoal = nil
+            eventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.flagsChanged, .keyDown, .keyUp]) { event in
+                if event.type == .flagsChanged {
+                    let f = event.modifierFlags
+                    isCmdHeld = f.contains(.command)
+                    if !isCmdHeld {
+                        isArchiveMode = false
+                        draggingGoal = nil
+                    }
+                } else if event.charactersIgnoringModifiers == "a" {
+                    if event.type == .keyDown && event.modifierFlags.contains(.command) {
+                        isArchiveMode = true
+                        return nil
+                    } else if event.type == .keyUp {
+                        isArchiveMode = false
+                        return nil
+                    }
                 }
                 return event
             }
@@ -54,7 +66,7 @@ struct MainPopoverView: View {
             TimePeriodPicker(selection: $viewModel.selectedPeriod, animate: !viewModel.showCalendarView)
 
             // Bars or calendar heatmap visualization
-            if !viewModel.goals.isEmpty {
+            if !viewModel.activeGoals.isEmpty {
                 Group {
                     if viewModel.showCalendarView {
                         CalendarHeatmapView()
@@ -69,21 +81,25 @@ struct MainPopoverView: View {
 
             // Goal list
             VStack(spacing: 1) {
-                if viewModel.goals.isEmpty {
+                if viewModel.activeGoals.isEmpty {
                     Text("No goals yet")
                         .font(.caption)
                         .foregroundColor(.secondary)
                         .padding(.vertical, 20)
                 } else {
-                    ForEach(viewModel.goals) { goal in
+                    ForEach(viewModel.activeGoals) { goal in
                         GoalRowView(
                             goal: goal,
                             isReorderMode: isCmdHeld,
+                            isArchiveMode: isArchiveMode,
                             onAdd: { amount in
                                 viewModel.addEntry(for: goal, amount: amount)
                             },
                             onDelete: {
                                 viewModel.deleteGoal(goal)
+                            },
+                            onArchive: {
+                                viewModel.archiveGoal(goal)
                             },
                             onColorChange: { colorHex in
                                 viewModel.updateGoalColor(goal, colorHex: colorHex)
@@ -101,7 +117,7 @@ struct MainPopoverView: View {
                         }
                         .onDrop(of: [.text], delegate: GoalDropDelegate(
                             goal: goal,
-                            goals: viewModel.goals,
+                            goals: viewModel.activeGoals,
                             draggingGoal: $draggingGoal,
                             onMove: { from, to in
                                 viewModel.moveGoal(from: from, to: to)

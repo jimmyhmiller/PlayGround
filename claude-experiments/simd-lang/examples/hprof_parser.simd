@@ -1,8 +1,4 @@
--- Single-pass HPROF parser. Walks all records once, finding the target class
--- and counting its instances in one pass.
---
--- The class name is passed as two pre-computed big-endian u64 words.
--- out[0] = instance count, out[1] = matching segment count
+-- HPROF parser for repacked heap dumps (id_size=8).
 
 fn read_u32_be(buf: ptr[u8], off: i64[1]) -> i64[1] {
     b0 = to_i64(load_at(buf, off))
@@ -16,6 +12,48 @@ fn read_u64_be(buf: ptr[u8], off: i64[1]) -> i64[1] {
     return bswap(load_at[u64[1]](buf, off))
 }
 
+-- Build a segment directory in one pass over all records.
+-- For each HEAP_DUMP_SEGMENT with an INSTANCE_DUMP first sub-record, stores:
+--   dir_class_ids[i]  = class_object_id from first sub-record
+--   dir_offsets[i]    = byte offset of segment body within buf
+--   dir_lengths[i]    = segment body_length
+--   dir_strides[i]    = stride (25 + num_bytes), or 0 for non-instance segments
+-- out[0] = number of instance segments found
+fn build_directory(buf: ptr[u8], buf_len: i64[1], dir_class_ids: ptr[i64], dir_offsets: ptr[i64], dir_lengths: ptr[i64], dir_strides: ptr[i64], out: ptr[i64]) {
+    offset: i64[1] = 31
+    idx: i64[1] = 0
+
+    while offset + 50 <= buf_len {
+        tag = to_i64(load_at(buf, offset))
+        body_len = read_u32_be(buf, offset + 5)
+
+        -- Always read segment fields (safe: offset+34 < offset+50 <= buf_len)
+        sub_tag = to_i64(load_at(buf, offset + 9))
+        seg_class_id = read_u64_be(buf, offset + 22)
+        seg_num_bytes = read_u32_be(buf, offset + 30)
+        stride = 25 + seg_num_bytes
+
+        is_instance_seg = (tag == 28) & (sub_tag == 33) & (body_len > 25)
+
+        if is_instance_seg {
+            store_at(dir_class_ids, idx, seg_class_id)
+            store_at(dir_offsets, idx, offset + 9)
+            store_at(dir_lengths, idx, body_len)
+            store_at(dir_strides, idx, stride)
+            idx = idx + 1
+        } else {
+            idx = idx
+        }
+
+        offset = offset + 9 + body_len
+    }
+
+    i0: i32[1] = 0
+    store_at(out, i0, idx)
+}
+
+-- Single-pass: find class by name and count instances.
+-- Kept for convenience when you don't need the directory.
 fn find_and_count(buf: ptr[u8], buf_len: i64[1], name_w1: i64[1], name_w2: i64[1], name_len: i64[1], out: ptr[i64]) {
     offset: i64[1] = 31
     target_sid: i64[1] = 0
@@ -27,7 +65,6 @@ fn find_and_count(buf: ptr[u8], buf_len: i64[1], name_w1: i64[1], name_w2: i64[1
         tag = to_i64(load_at(buf, offset))
         body_len = read_u32_be(buf, offset + 5)
 
-        -- UTF8 (tag==1): string_id at +9, text at +17
         string_id = read_u64_be(buf, offset + 9)
         text_len = body_len - 8
         text_w1 = read_u64_be(buf, offset + 17)
@@ -40,7 +77,6 @@ fn find_and_count(buf: ptr[u8], buf_len: i64[1], name_w1: i64[1], name_w2: i64[1
             target_sid = target_sid
         }
 
-        -- LOAD_CLASS (tag==2): class_obj_id at +13, class_name_sid at +25
         class_obj_id = read_u64_be(buf, offset + 13)
         class_name_sid = read_u64_be(buf, offset + 25)
 
@@ -51,7 +87,6 @@ fn find_and_count(buf: ptr[u8], buf_len: i64[1], name_w1: i64[1], name_w2: i64[1
             target_cid = target_cid
         }
 
-        -- HEAP_DUMP_SEGMENT (tag==28): sub_tag at +9, class_id at +22, num_bytes at +30
         sub_tag = to_i64(load_at(buf, offset + 9))
         seg_class_id = read_u64_be(buf, offset + 22)
         seg_num_bytes = read_u32_be(buf, offset + 30)

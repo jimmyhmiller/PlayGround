@@ -8,7 +8,11 @@ But I will help you out. If you actually are someone whose recieved my regular r
 
 While I didn't write this directly in the blog post. It isn't a stretch to figure out my ["We ran out of columns" - The best, worst codebase](https://jimmyhmiller.com/ugliest-beautiful-codebase) was about my time Heartland Payment Systems. My first tech job. In fact, you can hear more about it about in [my interview with the Changelog](https://changelog.com/podcast/609) or if you are an audiobook listener, you can join 1M+ listeners and hear it [read to you by the Primagen](https://www.youtube.com/watch?v=uPrXEtvKFoI).
 
-I won't recount all the details of this codebase here. But I'll give you some highlights of the tech stack. It was primarily C# codebase. But quite a bit of Visual Basic, a sprinkle of delphi, and a number of other old technologies like JScript.
+### Technical Landscape
+
+Ignoring the craziness detailed above, Heartland was a fairly typical microsoft shop. There was a decent amount of legacy VB but largely everything was C#. This was a time where devops was a big growing force and there was some experimentation with it. Our source control was TFS with a strong contigent of developers trying to move us to Git. Deployments were bespoke, involving people on a late night call. This was also a time of vast change in the javascript ecoyststem. Heartland had every javascript framework you could imagine somewhere checked into the source code.
+
+### Story
 
 After my internship quickly turned into a Junior Developer job, I was the junior developer mentoring the interns in a support, bug fixing adjacent role. Basically, the task of our group (1 Senior developer, 1 Analyst, 1 produce person, 5 interns and myself) was to fix the bugs and handle the manual data requests that the business didn't want to spend money on. In practice, we did a ton of Brownfield development. Our software was made for internal customer support people and we talked to them directly. Gather requirements and built them software with in the existing monolith.
 
@@ -27,6 +31,12 @@ I learned the power of small groups who are given freedom and have direct feedba
 ## NextGear Capital  (2014-2016)
 
 NextGear was a radical departure from the simple, informal structure I was used to at Heartland. We had the full suite of agile stuff. We had 4 different "scrum teams" working on the same project split across two managers. We had scrum masters. We had product people. We had the outside agile consultants telling us the "right way" to do things. But what we didn't have when I initially joined was actual work for 20+ newly higher engineers and QA.
+
+### Technical Landscape
+
+NextGear had inherited a number of applications from contractors. But the revitalization of one of these projects had caused no amount of pain. So I was on a completely greenfield project. The tech stack was Spring, Spring Data, (and with much controversy) Spring Data Rest on the backend, and an angular 1 frontend. The company was all in on automated tests. Including a strict requirement for 100% unit test coverage (big mistake). I spent my time evenly split between frontend and backend.
+
+### Story
 
 NextGear was a newly created entity. Cox, the large private company, and had bought a bunch of smaller companies and stuck them together. These smaller companies had all their engineering contracted and now it was being brought in house. I joined as a mid-level software engineer and quickly found myself facing a leadership role I was ill-prepared for.
 
@@ -50,6 +60,12 @@ I learned a lot about the ways in which politics can affect a software project. 
 
 I was a big Clojure fan at this time (still love it). I had been searching on Linkedin to try and see of anyone locally (Indianapolis) was using Clojuire. I doubted that I'd find any companies. But I was considering starting a funcitonal programming meetup (which I did later do) and wanted to see if Individuals were using it. I found the CEO of a local company who was using it. I clicked on his profile, didn't think much of it. But after a bit he reached out to me.
 
+### Technical Landscope
+
+React, Redux, and all the things that come along with it. It was by far the simpliest stack I had to deal with. No production deployments. Just simple frontends.
+
+### Story
+
 Trabian was a react consultancy for fintech startups, banks, and credit unions. The CEO had been the primary programmer and wanted someone else to take this role and build out a team. That was my job. it was a very small company. When I joined I was the only full time engineer other than the CEO, we grew the team with two other engineers and two interns. We pumped out prototype after prototype. On a good day I was reviewing 8 PRs and write 3 myself. We wrote clean react. Each project we tried one new library to find what stack we believed worked best for our needs.
 
 I also work in very early react native on Android, maintaining a our own fork for some not great reasons. Outside of client work we were working some server side work prototyping in both Clojure and Elixir around some graphql work utilizing CUFX. We did a head to head comparison and found Clojure better for our use case. Sadly this work didn't get off the ground before Trabian ran out of money. On a Wednesday I was told that my paycheck on Friday wasn't coming. By Monday, I had a contract position back at NextGear.
@@ -64,7 +80,7 @@ I had been doing React since my days at Heartland. I taught a class on it at Nex
 
 ## NextGear (2017)
 
-I will keep this short as it was short. I joined NextGear for a quick stint after Trabian ran out of money as a contractor. There I worked on a neural network setup for classifying documents. The project was a bit of a mess so not much got done in those six months. But there was a big lesson learned and I will focus on that.
+I will keep this short as it was short. I joined NextGear for a quick stint as a contractor after Trabian ran out of money  There I worked on a neural network setup for classifying documents. The project was a bit of a mess so not much got done in those six months. But there was a big lesson learned and I will focus on that.
 
 ### What I Learned
 
@@ -75,6 +91,12 @@ At this point the project I worked on had been in production without me being ar
 ## HealthFinch (2017-2018)
 
 Heathfinch is one of the best companies I ever had the pleasure of working with. The people at this company deeply cared. The technology that was made there was fantastic. The culture was unmatched. It was of course not without its problems. But I will always look back fondly on that team. HealthFinch was my first fully remote job. My first job fully in Clojure. It was the first job where the software I made felt good to make.
+
+### Tech Landscape
+
+Health finch had gone fully in on Clojure, but still had a number of ruby remaining in production. I did some bug fixes and tooling for the ruby code. But my time was primarily spent in our clojure with our fairly sophisticated rules engine setup.
+
+### Story
 
 HealthFinch created a rules engine that would help with prescription renewals. If a patient needed a certain test before renewing their prescription, our system would figure that out and tell the doctor about these requirements. It was a sophisticated piece of software that would explain precisely why it made those recommendations.
 
@@ -88,9 +110,15 @@ I learned just how productive Clojure can be. I learned that languages are not s
 
 ## Adzerk/Kevel
 
-When I joined the company it was called Adzerk. By the time I left it had rebranded to one of the silliest names. Here I worked for the first time with people who I had known by reputation before ever working with them. Kevzerk had some big names in Clojure working for them. Many people who had worked directly with Rich Hickey. I have to admit, I was a bit surprised by the relative mess I had found when I joined. I was being handed off from the former maintainer the reporting side of this ad tech business. This involved hadoop clusters, redshift databases, a ton of queues and services. All of which were manually deployed, CI was non-existent, the servers were pets, not cattle. 
+When I joined the company it was called Adzerk. By the time I left it had rebranded to one of the silliest names. Here I worked for the first time with people who I had known by reputation before ever working with them. Kevzerk had some big names in Clojure working for them. Many people who had worked directly with Rich Hickey. I have to admit, I was a bit surprised by the relative mess I had found when I joined (in hindsight it was just the normal mess of a software company).
 
-As the former maintainer steps onto other things, I was on a team of one for a while before we hired [Grzegorz](https://github.com/nabacg) to join the team. This was an absolute massive change. Together we were able to transform this hand built system into something with complete cloudformation defined services, all with CI, autoscaling, automatic deployments, automatic rollback, etc. Not only that, we did a live migration of all the old api traffic to our complete rewrite, all with zero downtime and no customer visiable breakages. 
+### Technical Landscape
+
+Adzerk had a fairly complex setup. It was very service driven, but far from microservices. Well, kind of, it was a mix of monoliths and micros. The main adserving part of the platform was in node. But the api service and customer facing aspects were all in clojure and clojurescript. There were a ton of uses of things that had originated at adzerk. For example, Hoplon, Javelin, and boot. There were also so many parts of aws. We had redshift, s3, cloud formation, CDK, sqs, EMR, ec2, lambda, the list could go on.
+
+### Story
+
+I was being handed off from the former maintainer the reporting side of this ad tech business. This involved hadoop clusters, redshift databases, a ton of queues and services. All of which were manually deployed, CI was non-existent, the servers were pets, not cattle. As the former maintainer steps onto other things, I was on a team of one for a while before we hired [Grzegorz](https://github.com/nabacg) to join the team. This was an absolute massive change. Together we were able to transform this hand built system into something with complete cloudformation defined services, all with CI, autoscaling, automatic deployments, automatic rollback, etc. Not only that, we did a live migration of all the old api traffic to our complete rewrite, all with zero downtime and no customer visiable breakages. 
 
 I also wrote some very awful software using lambdas. There was a new process at the company obsessed with writing big long documents and I was given a project for which the document was needed. I quickly learned just how not value I found the process. Documents can absolutely be wonderful. And I've worked with many engineers who are great at producing them. But they are not how I think, I need to [discover the code](https://jimmyhmiller.com/discovery-coding) first, then write the document.
 
@@ -100,7 +128,13 @@ I learned a ton about "big data". Learned what it takes to get a proper CI/CD se
 
 ## Cisco: Threat Response (2021 - 2022)
 
-I joined Cisco with a number of my former coworkers from healthfinch. One of my former co-workers was now my manager. Cisco was quite a change. It was by far the largest company I had worked at, but felt really small. I had no real visibility outside my little org. When I was brought in there were a number of performance problems the team faced. 
+I joined Cisco with a number of my former coworkers from healthfinch. One of my former co-workers was now my manager. Cisco was quite a change. It was by far the largest company I had worked at, but felt really small. I had no real visibility outside my little org. When I was brought in there were a number of performance problems the team faced.
+
+### Technical Landscape
+
+The team I worked on own a fairly sophisticated  in browser setup for analyzing threat intelligence data all written in clojurescript. On the backend there was an elastic search setup that was beginning to show its age. A decent amount of my time was helping to forge a new path. As the size of thread intelligence data was growing, we needed a better way to organize this data and search it. To that end, I was working on some snowflake work to be able to properly aggregate over much larger swaths of data.
+
+### Story
 
 We were building some semi-sophisticated analysis software in the browser that would look at threat intelligence data and IOC and various sensor data and connect the dots. This would allow security teams to explore graphs to understand the potential impact of a security intrusion. Most of the data we were connecting was fairly small, but in certain pathological cases, we could spend upwards of 30 mins in the browser doing graph computations. I was able to bring this down first to second, then milliseconds.
 
@@ -116,6 +150,12 @@ I learned a ton about the security field. I had interest in security from a soft
 
 I will start with the negative first. I got laid off. I was caught in a cross the board 20% layoff. It was sad. While I was there I got to work with by far the smartest people I've had the pleasure of working with. Every single person on that team knew way more than me.
 
+### Technical Landscape
+
+I spent a good amount of my time in rust at the low level. Of course shopify is a big ruby shop. But I largely stayed out of the ruby code and focus on making Ruby faster with Rust.
+
+### Story
+
 At Shopify I got to work on YJIT a JIT compiler for Ruby written in Rust. My team lead was [Maxime Chevalier-Boisvert](https://arxiv.org/search/cs?searchtype=author&query=Chevalier-Boisvert,+M) creater of the technique that YJIT took advantage of [Lazy Basic Block Versioning](https://arxiv.org/abs/1411.0352). I was working with some of the powerhouses of Ruby world. I spent my team split between contributing to YJIT and helping some internal teams. For YJIT I spent time speeding up edge cases around various ways in which function calls could happen in ruby (is this a c call? Is it a method with named arguments, is it a method default arguments?) All of these paths needed code generation or else we'd have to exit the JIT back to the interpreter. I spent a good amount of time knocking these down.
 
 Internally, we had teams working on some wasm based things. I spent some time helping make sure benchmarks between our two teams made sense. Spent some time debugging some things with them. When I joined, in many ways that team felt like competition and I tried to instead make us colaborators. 
@@ -129,6 +169,12 @@ I learned a ton about compilers, about Ruby. I learned a good amount about the d
 ## Service Now (2023-Now)
 
 I'll admit, Sevice Now is not where I expected to find myself. On the surface, it's a large enterprise that makes software that people on hacker news love to complain about. But at the heart of the system is a very interesting choice, the [Rhino Javascript Runtime](https://github.com/mozilla/rhino/). Yes the very old runtime written in Java. What this means is that customers are able to write full applications on their Service Now instances. They are able to customize ever aspect of what they do. 
+
+### Technical Landscape
+
+Service Now is largely a monoculture of Java. There are millions of lines of code of Java spanning back to the companies start. This isn't the overly structured modern Spring, dependency inject everything Java. It is the much more straightforward java I personally prefer.
+
+### Story
 
 When I joined, the internal fork had been abandoned for years. Since I've joined, we've formed a team that has brought life back into it. We have our own fetch implemenation, growing compability with the node ecosystem. By integrating upstream and committing changes upstream we've gone from having very little support for modern javascript to a half-way decent runtime, and hopefully within this year will have a modern javascript runtime.
 

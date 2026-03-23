@@ -26,6 +26,7 @@ enum TimePeriod: String, CaseIterable {
 enum UndoAction {
     case addEntry(Entry)
     case deleteGoal(Goal, [Entry]) // Goal and its associated entries
+    case archiveGoal(Goal)
 }
 
 struct HeatmapCell {
@@ -141,6 +142,34 @@ class EaseViewModel: ObservableObject {
         pushToCloud()
     }
 
+    var activeGoals: [Goal] {
+        goals.filter { !$0.isArchived }
+    }
+
+    func archiveGoal(_ goal: Goal) {
+        if let index = goals.firstIndex(where: { $0.id == goal.id }) {
+            goals[index].isArchived = true
+            goals[index].modifiedAt = Date()
+            undoStack.append(.archiveGoal(goal))
+            redoStack.removeAll()
+            save()
+            pushToCloud()
+        }
+    }
+
+    var archivedGoals: [Goal] {
+        goals.filter { $0.isArchived }
+    }
+
+    func unarchiveGoal(_ goal: Goal) {
+        if let index = goals.firstIndex(where: { $0.id == goal.id }) {
+            goals[index].isArchived = false
+            goals[index].modifiedAt = Date()
+            save()
+            pushToCloud()
+        }
+    }
+
     func updateGoalColor(_ goal: Goal, colorHex: String) {
         if let index = goals.firstIndex(where: { $0.id == goal.id }) {
             goals[index].colorHex = colorHex
@@ -191,6 +220,12 @@ class EaseViewModel: ObservableObject {
             goals.append(goal)
             entries.append(contentsOf: goalEntries)
             redoStack.append(action)
+        case .archiveGoal(let goal):
+            if let index = goals.firstIndex(where: { $0.id == goal.id }) {
+                goals[index].isArchived = false
+                goals[index].modifiedAt = Date()
+            }
+            redoStack.append(action)
         }
         save()
         pushToCloud()
@@ -212,6 +247,12 @@ class EaseViewModel: ObservableObject {
             goals.removeAll { $0.id == goal.id }
             entries.removeAll { $0.goalId == goal.id }
             undoStack.append(.deleteGoal(goal, goalEntries))
+        case .archiveGoal(let goal):
+            if let index = goals.firstIndex(where: { $0.id == goal.id }) {
+                goals[index].isArchived = true
+                goals[index].modifiedAt = Date()
+            }
+            undoStack.append(action)
         }
         save()
         pushToCloud()
@@ -234,7 +275,7 @@ class EaseViewModel: ObservableObject {
     }
 
     func proportions(for period: TimePeriod) -> [(goal: Goal, proportion: Double)] {
-        let totals = goals.map { goal in
+        let totals = activeGoals.map { goal in
             (goal: goal, total: totalForGoal(goal, in: period))
         }
 
@@ -242,7 +283,7 @@ class EaseViewModel: ObservableObject {
 
         if grandTotal == 0 {
             // No data - show empty bars
-            return goals.map { ($0, 0.0) }
+            return activeGoals.map { ($0, 0.0) }
         }
 
         return totals.map { ($0.goal, $0.total / grandTotal) }
@@ -303,7 +344,7 @@ class EaseViewModel: ObservableObject {
 
     private func makeCell(index: Int, date: Date, from: Date, to: Date) -> HeatmapCell {
         let cellEntries = entries.filter { $0.timestamp >= from && $0.timestamp < to }
-        let goalAmounts = goals.compactMap { goal -> (goalId: UUID, amount: Double)? in
+        let goalAmounts = activeGoals.compactMap { goal -> (goalId: UUID, amount: Double)? in
             let amount = cellEntries.filter { $0.goalId == goal.id }.reduce(0) { $0 + $1.amount }
             return amount > 0 ? (goalId: goal.id, amount: amount) : nil
         }
@@ -313,7 +354,7 @@ class EaseViewModel: ObservableObject {
 
     /// Proportions for the first 3 goals (used for icon rendering)
     func iconProportions(for period: TimePeriod) -> [(proportion: Double, colorHex: String)] {
-        let iconGoalsList = Array(goals.prefix(3))
+        let iconGoalsList = Array(activeGoals.prefix(3))
 
         if iconGoalsList.isEmpty {
             // No goals - show 3 equal bars with default gray

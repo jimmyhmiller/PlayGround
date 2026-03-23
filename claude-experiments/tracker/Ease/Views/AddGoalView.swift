@@ -12,7 +12,7 @@ struct AddGoalView: View {
     }
 
     private var firstUnusedColor: String {
-        let usedColors = Set(viewModel.goals.map { $0.colorHex })
+        let usedColors = Set(viewModel.activeGoals.map { $0.colorHex })
         return Goal.presetColors.first { !usedColors.contains($0) } ?? Goal.presetColors[0]
     }
 
@@ -94,6 +94,45 @@ struct AddGoalView: View {
                     addGoal()
                 }
                 .disabled(!canAdd)
+            }
+
+            if !viewModel.archivedGoals.isEmpty {
+                Divider()
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Archived")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+
+                    ScrollView {
+                        VStack(spacing: 1) {
+                            ForEach(viewModel.archivedGoals) { goal in
+                                HStack(spacing: 12) {
+                                    Circle()
+                                        .fill(goal.color)
+                                        .frame(width: 12, height: 12)
+
+                                    Text(goal.name)
+                                        .font(.system(size: 13))
+                                        .lineLimit(1)
+
+                                    Spacer()
+
+                                    Image(systemName: "arrow.uturn.backward.circle")
+                                        .font(.system(size: 14))
+                                        .foregroundColor(.secondary)
+                                }
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 8)
+                                .contentShape(Rectangle())
+                                .onTapGesture {
+                                    viewModel.unarchiveGoal(goal)
+                                }
+                            }
+                        }
+                    }
+                    .frame(maxHeight: 3.2 * 36)
+                }
             }
         }
     }

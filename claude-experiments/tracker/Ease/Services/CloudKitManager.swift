@@ -3,9 +3,9 @@ import CloudKit
 
 @MainActor
 class CloudKitManager {
-    private let container: CKContainer
-    private let privateDB: CKDatabase
-    private let zoneID: CKRecordZone.ID
+    private lazy var container: CKContainer = CKContainer(identifier: "iCloud.com.jimmyhmiller.Ease")
+    private lazy var privateDB: CKDatabase = container.privateCloudDatabase
+    private lazy var zoneID: CKRecordZone.ID = CKRecordZone.ID(zoneName: zoneName, ownerName: CKCurrentUserDefaultName)
 
     private let goalRecordType = "Goal"
     private let entryRecordType = "Entry"
@@ -15,14 +15,14 @@ class CloudKitManager {
     private let zoneCreatedKey = "cloudKitZoneCreated"
     private let subscriptionCreatedKey = "cloudKitSubscriptionCreated"
 
-    var isAvailable: Bool {
-        FileManager.default.ubiquityIdentityToken != nil
-    }
+    private(set) var isAvailable: Bool
 
     init() {
-        container = CKContainer(identifier: "iCloud.com.jimmyhmiller.Ease")
-        privateDB = container.privateCloudDatabase
-        zoneID = CKRecordZone.ID(zoneName: zoneName, ownerName: CKCurrentUserDefaultName)
+        // CKContainer(identifier:) crashes without CloudKit entitlements (e.g. swift run).
+        // Only attempt CloudKit when running inside a signed app bundle.
+        let hasEntitlements = Bundle.main.bundleIdentifier != nil
+            && Bundle.main.bundlePath.hasSuffix(".app")
+        isAvailable = hasEntitlements && FileManager.default.ubiquityIdentityToken != nil
     }
 
     // MARK: - Zone & Subscription Setup

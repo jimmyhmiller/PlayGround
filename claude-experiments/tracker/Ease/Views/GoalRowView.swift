@@ -3,8 +3,10 @@ import SwiftUI
 struct GoalRowView: View {
     let goal: Goal
     var isReorderMode: Bool = false
+    var isArchiveMode: Bool = false
     let onAdd: (Double) -> Void
     let onDelete: () -> Void
+    var onArchive: (() -> Void)? = nil
     let onColorChange: (String) -> Void
 
     @State private var dragOffset: CGFloat = 0
@@ -27,6 +29,46 @@ struct GoalRowView: View {
     }
 
     var body: some View {
+        if isArchiveMode {
+            archiveRow
+        } else {
+            normalRow
+        }
+    }
+
+    private var archiveRow: some View {
+        HStack(spacing: 12) {
+            // Invisible placeholder matching reorder handle width
+            Color.clear
+                .frame(width: 16)
+
+            Circle()
+                .fill(goal.color)
+                .frame(width: 12, height: 12)
+
+            Text(goal.name)
+                .font(.system(size: 13))
+                .lineLimit(1)
+
+            Spacer()
+
+            // Placeholder matching pull indicator
+            Color.clear
+                .frame(width: 40, height: 28)
+
+            Image(systemName: "archivebox.fill")
+                .font(.system(size: 14))
+                .foregroundColor(.orange.opacity(0.7))
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            onArchive?()
+        }
+    }
+
+    private var normalRow: some View {
         HStack(spacing: 12) {
             Image(systemName: "line.3.horizontal")
                 .font(.system(size: 12))
