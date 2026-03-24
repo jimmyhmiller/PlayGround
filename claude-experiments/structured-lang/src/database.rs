@@ -2,9 +2,9 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
-use crate::apply::{apply, conform};
-use crate::diff::{Conflict, ConflictResolver, Differences, FromWins};
+use crate::apply::conform;
 use crate::schema::*;
+use crate::schema_edit::*;
 use crate::types::*;
 
 pub type BranchId = u64;
@@ -48,9 +48,6 @@ impl From<SchemaError> for DbError {
 }
 
 /// A table: schema (column definitions) + rows (data).
-/// Rows are stored by RowId in a HashMap for fast lookup, but also tracked
-/// positionally in `row_order` for the OT algebra. InsertRow = Ins on the
-/// row_order vec, DeleteRow = tombstone in row_order.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Table {
     pub schema: Schema,
@@ -66,6 +63,10 @@ pub struct Branch {
     pub tables: HashMap<String, Table>,
     /// Parent branch (None for root branches).
     pub parent: Option<BranchId>,
+    /// Edit log: every SchemaEdit applied to this branch, per table.
+    /// Used to seed diff trackers when comparing branches that weren't
+    /// tracked from the start.
+    pub edit_log: HashMap<String, Vec<SchemaEdit>>,
 }
 
 /// A named row view for display.
@@ -102,6 +103,7 @@ impl IdGen {
         self.row += 1;
         id
     }
+    #[allow(dead_code)]
     fn ins(&mut self) -> u64 {
         let id = self.ins;
         self.ins += 1;
@@ -109,26 +111,15 @@ impl IdGen {
     }
 }
 
-/// Diff channel: three levels of tracking per table.
-/// - Schema: column add/remove/convert/rename (applies to all rows)
-/// - Rows: row insert/delete (row manifest level)
-/// - RowData(RowId): per-row value changes (Set edits)
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-enum DiffChannel {
-    Schema,
-    Rows,
-    RowData(RowId),
-}
+/// Diff key: (min_branch, max_branch, table_name).
+/// The "a" side of SchemaDifferences is always the min branch id.
+type DiffKey = (BranchId, BranchId, String);
 
-/// Canonical diff key: (min_branch, max_branch, table_name, channel).
-/// The "a" side of Differences is always the min branch id.
-type DiffKey = (BranchId, BranchId, String, DiffChannel);
-
-fn canonical_key(a: BranchId, b: BranchId, table: &str, channel: DiffChannel) -> DiffKey {
+fn canonical_key(a: BranchId, b: BranchId, table: &str) -> DiffKey {
     if a <= b {
-        (a, b, table.to_string(), channel)
+        (a, b, table.to_string())
     } else {
-        (b, a, table.to_string(), channel)
+        (b, a, table.to_string())
     }
 }
 
@@ -149,17 +140,17 @@ fn key_has_branch(key: &DiffKey, branch: BranchId) -> bool {
 #[derive(Serialize, Deserialize)]
 pub struct Database {
     branches: HashMap<BranchId, Branch>,
-    /// Serialized as a list of (key, diffs) pairs since tuple keys can't be JSON map keys.
+    /// Schema diffs per (branch_pair, table). Uses name-based SchemaEdit OT.
     #[serde(
         serialize_with = "serialize_diffs",
         deserialize_with = "deserialize_diffs"
     )]
-    diffs: HashMap<DiffKey, Differences>,
+    diffs: HashMap<DiffKey, SchemaDifferences>,
     ids: IdGen,
 }
 
 fn serialize_diffs<S: serde::Serializer>(
-    diffs: &HashMap<DiffKey, Differences>,
+    diffs: &HashMap<DiffKey, SchemaDifferences>,
     serializer: S,
 ) -> Result<S::Ok, S::Error> {
     use serde::ser::SerializeSeq;
@@ -172,8 +163,8 @@ fn serialize_diffs<S: serde::Serializer>(
 
 fn deserialize_diffs<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
-) -> Result<HashMap<DiffKey, Differences>, D::Error> {
-    let entries: Vec<(DiffKey, Differences)> = Vec::deserialize(deserializer)?;
+) -> Result<HashMap<DiffKey, SchemaDifferences>, D::Error> {
+    let entries: Vec<(DiffKey, SchemaDifferences)> = Vec::deserialize(deserializer)?;
     Ok(entries.into_iter().collect())
 }
 
@@ -194,6 +185,7 @@ impl Database {
             name: name.to_string(),
             tables: HashMap::new(),
             parent: None,
+            edit_log: HashMap::new(),
         });
         id
     }
@@ -204,7 +196,6 @@ impl Database {
             .clone();
         let id = self.ids.branch();
 
-        // Find existing siblings (other branches forked from same parent)
         let siblings: Vec<BranchId> = self.branches.iter()
             .filter(|(bid, b)| b.parent == Some(source) && **bid != id)
             .map(|(bid, _)| *bid)
@@ -214,6 +205,7 @@ impl Database {
             name: name.to_string(),
             tables: src.tables,
             parent: Some(source),
+            edit_log: src.edit_log.clone(), // inherit parent's history
         });
 
         // Auto-track against parent
@@ -298,8 +290,6 @@ impl Database {
         data: Vec<(&str, Value)>,
     ) -> Result<RowId, DbError> {
         let id = self.ids.row();
-        let ins_id = self.ids.ins();
-        let row_idx;
         {
             let b = self.get_branch_mut(branch)?;
             let t = b.tables.get_mut(table).ok_or_else(|| DbError::TableNotFound(table.into()))?;
@@ -309,13 +299,9 @@ impl Database {
                     doc.fields[idx].value = value;
                 }
             }
-            row_idx = t.row_order.len();
             t.rows.insert(id, doc);
             t.row_order.push(id);
         }
-        // Record Ins on the row manifest
-        let edit = Edit::Ins { idx: row_idx, ty: AtomicType::Num, id: ins_id };
-        self.record_edit(branch, table, &edit, &DiffChannel::Rows);
         Ok(id)
     }
 
@@ -325,29 +311,19 @@ impl Database {
         table: &str,
         row: RowId,
     ) -> Result<(), DbError> {
-        let row_idx;
-        {
-            let b = self.get_branch_mut(branch)?;
-            let t = b.tables.get_mut(table).ok_or_else(|| DbError::TableNotFound(table.into()))?;
-            if t.rows.remove(&row).is_none() {
-                return Err(DbError::RowNotFound(row));
-            }
-            row_idx = t.row_order.iter().position(|&id| id == row);
-            if let Some(pos) = row_idx {
-                t.row_order[pos] = u64::MAX;
-            }
+        let b = self.get_branch_mut(branch)?;
+        let t = b.tables.get_mut(table).ok_or_else(|| DbError::TableNotFound(table.into()))?;
+        if t.rows.remove(&row).is_none() {
+            return Err(DbError::RowNotFound(row));
         }
-        // Record Conv{Del} on the row manifest
-        if let Some(idx) = row_idx {
-            let edit = Edit::Conv { idx, ty: AtomicType::Del };
-            self.record_edit(branch, table, &edit, &DiffChannel::Rows);
+        let row_idx = t.row_order.iter().position(|&id| id == row);
+        if let Some(pos) = row_idx {
+            t.row_order[pos] = u64::MAX;
         }
         Ok(())
     }
 
-    /// Set a value on a specific row. Records a Set edit in the per-row
-    /// diff channel (RowData). Each row has its own Differences tracker,
-    /// so Set edits on different rows don't conflict.
+    /// Set a value on a specific row. Records a SetField edit in the schema diff channel.
     pub fn set_field(
         &mut self,
         branch: BranchId,
@@ -356,17 +332,16 @@ impl Database {
         field: &str,
         value: Value,
     ) -> Result<(), DbError> {
-        let idx;
         {
             let b = self.get_branch_mut(branch)?;
             let t = b.tables.get_mut(table).ok_or_else(|| DbError::TableNotFound(table.into()))?;
-            idx = t.schema.index_of(field)
+            let idx = t.schema.index_of(field)
                 .ok_or_else(|| DbError::FieldNotFound(field.into()))?;
             let doc = t.rows.get_mut(&row).ok_or(DbError::RowNotFound(row))?;
             doc.fields[idx].value = value.clone();
         }
-        let edit = Edit::Set { idx, value };
-        self.record_edit(branch, table, &edit, &DiffChannel::RowData(row));
+        let edit = SchemaEdit::SetField { row, field: field.to_string(), value };
+        self.record_schema_edit(branch, table, &edit);
         Ok(())
     }
 
@@ -411,38 +386,39 @@ impl Database {
 
     // ── Schema edit operations (propagate to all rows) ─────────────────
 
-    /// Apply a schema edit to a table. Returns the Edit produced (if any).
-    /// The edit is applied to all rows and recorded in any active diff trackers.
     pub fn add_column(
         &mut self,
         branch: BranchId,
         table: &str,
         name: &str,
         ty: AtomicType,
-    ) -> Result<Vec<Edit>, DbError> {
-        let ins_id = self.ids.ins();
-        let edits = {
+    ) -> Result<(), DbError> {
+        {
             let b = self.get_branch_mut(branch)?;
             let t = b.tables.get_mut(table).ok_or_else(|| DbError::TableNotFound(table.into()))?;
-            let mut edits = t.schema.add_field(name, ty)?;
-            // Override ins id with global one
-            if let Some(Edit::Ins { idx, ty, .. }) = edits.first() {
-                edits[0] = Edit::Ins { idx: *idx, ty: *ty, id: ins_id };
+            // Check if field already exists
+            if t.schema.index_of(name).is_some() {
+                return Err(DbError::Schema(SchemaError::FieldAlreadyExists(name.to_string())));
             }
-            // Apply structural edits (Ins) to all rows — Rename is schema-only
-            for edit in &edits {
-                if matches!(edit, Edit::Ins { .. }) {
-                    for doc in t.rows.values_mut() {
-                        *doc = apply(doc, edit).ok_or(DbError::ApplyFailed)?;
-                    }
+            // Add field to schema
+            let idx = t.schema.fields.len();
+            t.schema.fields.push(NamedField {
+                name: name.to_string(),
+                ty,
+            });
+            // Add field to all existing rows (with default value)
+            let default_value = default_for_type(ty);
+            for doc in t.rows.values_mut() {
+                // Extend fields to match schema length
+                while doc.fields.len() <= idx {
+                    doc.fields.push(Field::null(AtomicType::Del));
                 }
+                doc.fields[idx] = Field { ty, value: default_value.clone() };
             }
-            edits
-        };
-        for edit in &edits {
-            self.record_edit(branch, table, edit, &DiffChannel::Schema);
         }
-        Ok(edits)
+        let edit = SchemaEdit::AddField { name: name.to_string(), ty };
+        self.record_schema_edit(branch, table, &edit);
+        Ok(())
     }
 
     pub fn remove_column(
@@ -450,18 +426,24 @@ impl Database {
         branch: BranchId,
         table: &str,
         name: &str,
-    ) -> Result<Edit, DbError> {
-        let edit = {
+    ) -> Result<(), DbError> {
+        {
             let b = self.get_branch_mut(branch)?;
             let t = b.tables.get_mut(table).ok_or_else(|| DbError::TableNotFound(table.into()))?;
-            let edit = t.schema.remove_field(name)?;
+            let idx = t.schema.index_of(name)
+                .ok_or_else(|| DbError::FieldNotFound(name.into()))?;
+            // Tombstone the field in schema
+            t.schema.fields[idx].ty = AtomicType::Del;
+            // Tombstone in all rows
             for doc in t.rows.values_mut() {
-                *doc = apply(doc, &edit).ok_or(DbError::ApplyFailed)?;
+                if idx < doc.fields.len() {
+                    doc.fields[idx] = Field::null(AtomicType::Del);
+                }
             }
-            edit
-        };
-        self.record_edit(branch, table, &edit, &DiffChannel::Schema);
-        Ok(edit)
+        }
+        let edit = SchemaEdit::RemoveField { name: name.to_string() };
+        self.record_schema_edit(branch, table, &edit);
+        Ok(())
     }
 
     pub fn convert_column(
@@ -470,18 +452,22 @@ impl Database {
         table: &str,
         name: &str,
         to: AtomicType,
-    ) -> Result<Edit, DbError> {
-        let edit = {
+    ) -> Result<(), DbError> {
+        {
             let b = self.get_branch_mut(branch)?;
             let t = b.tables.get_mut(table).ok_or_else(|| DbError::TableNotFound(table.into()))?;
-            let edit = t.schema.convert_field(name, to)?;
+            let idx = t.schema.index_of(name)
+                .ok_or_else(|| DbError::FieldNotFound(name.into()))?;
+            t.schema.fields[idx].ty = to;
             for doc in t.rows.values_mut() {
-                *doc = apply(doc, &edit).ok_or(DbError::ApplyFailed)?;
+                if idx < doc.fields.len() {
+                    doc.fields[idx].ty = to;
+                }
             }
-            edit
-        };
-        self.record_edit(branch, table, &edit, &DiffChannel::Schema);
-        Ok(edit)
+        }
+        let edit = SchemaEdit::ConvertField { name: name.to_string(), ty: to };
+        self.record_schema_edit(branch, table, &edit);
+        Ok(())
     }
 
     pub fn rename_column(
@@ -490,21 +476,31 @@ impl Database {
         table: &str,
         old: &str,
         new: &str,
-    ) -> Result<Edit, DbError> {
-        let edit = {
+    ) -> Result<(), DbError> {
+        {
             let b = self.get_branch_mut(branch)?;
             let t = b.tables.get_mut(table).ok_or_else(|| DbError::TableNotFound(table.into()))?;
-            t.schema.rename_field(old, new)?
-        };
-        self.record_edit(branch, table, &edit, &DiffChannel::Schema);
-        Ok(edit)
+            let idx = t.schema.index_of(old)
+                .ok_or_else(|| DbError::FieldNotFound(old.into()))?;
+            if t.schema.index_of(new).is_some() {
+                return Err(DbError::Schema(SchemaError::FieldAlreadyExists(new.to_string())));
+            }
+            t.schema.fields[idx].name = new.to_string();
+        }
+        let edit = SchemaEdit::RenameField { old_name: old.to_string(), new_name: new.to_string() };
+        self.record_schema_edit(branch, table, &edit);
+        Ok(())
     }
 
     // ── Diff & merge ───────────────────────────────────────────────────
 
     /// Start tracking diffs between two branches for all shared tables.
-    /// Called automatically by `fork_branch` — you rarely need to call this directly.
-    /// Idempotent: calling it twice is safe (won't reset existing tracking).
+    /// Called automatically by `fork_branch`.
+    ///
+    /// If the branches have already diverged, the diffs are seeded from
+    /// each branch's edit log — the permanent record of every SchemaEdit
+    /// applied since the branch was created. This correctly captures the
+    /// direction of changes (AddField vs RemoveField) without guessing.
     pub fn diff_branches(&mut self, a: BranchId, b: BranchId) -> Result<(), DbError> {
         let tables_a: Vec<String> = {
             let ba = self.get_branch(a)?;
@@ -514,33 +510,54 @@ impl Database {
             let bb = self.get_branch(b)?;
             bb.tables.keys().cloned().collect()
         };
-        // Collect shared row ids before creating trackers
-        let mut shared_rows: HashMap<String, Vec<RowId>> = HashMap::new();
-        for table in &tables_a {
-            if tables_b.contains(table) {
-                let ba = self.get_branch(a)?;
-                let row_ids: Vec<RowId> = ba.tables.get(table.as_str())
-                    .map(|t| t.rows.keys().cloned().collect())
-                    .unwrap_or_default();
-                shared_rows.insert(table.clone(), row_ids);
-            }
-        }
 
-        for (table, _row_ids) in &shared_rows {
-            let schema_key = canonical_key(a, b, table, DiffChannel::Schema);
-            self.diffs.entry(schema_key).or_insert_with(Differences::new);
-            let rows_key = canonical_key(a, b, table, DiffChannel::Rows);
-            self.diffs.entry(rows_key).or_insert_with(Differences::new);
-            // RowData channels are created on-demand by record_edit when
-            // set_field is first called. They're seeded with current schema
-            // diffs at creation time so the OT can shift Set indexes.
+        for table in &tables_a {
+            if !tables_b.contains(table) {
+                continue;
+            }
+            let key = canonical_key(a, b, table);
+            if self.diffs.contains_key(&key) {
+                continue; // already tracking
+            }
+
+            // Seed from edit logs. Each branch's edit log records what it did
+            // since creation. For parent-child pairs (fork), both branches
+            // share history up to the fork point — only post-fork edits matter.
+            // For arbitrary pairs, we use the full logs.
+            let a_parent = self.branches.get(&a).and_then(|br| br.parent);
+            let b_parent = self.branches.get(&b).and_then(|br| br.parent);
+
+            let (a_log, b_log) = if a_parent == Some(b) || b_parent == Some(a) {
+                // Parent-child: start with empty diffs (identical at fork)
+                (vec![], vec![])
+            } else {
+                // Non-fork pair: seed from full edit logs
+                let al: Vec<SchemaEdit> = self.branches.get(&a)
+                    .and_then(|br| br.edit_log.get(table.as_str()))
+                    .cloned()
+                    .unwrap_or_default();
+                let bl: Vec<SchemaEdit> = self.branches.get(&b)
+                    .and_then(|br| br.edit_log.get(table.as_str()))
+                    .cloned()
+                    .unwrap_or_default();
+                (al, bl)
+            };
+
+            let mut sd = SchemaDifferences::new();
+            for edit in &a_log {
+                sd.edit_a(edit);
+            }
+            for edit in &b_log {
+                sd.edit_b(edit);
+            }
+
+            self.diffs.insert(key, sd);
         }
         Ok(())
     }
 
     /// Get diff summary between two branches.
-    /// Returns (table/channel, from_diffs_count, to_diffs_count).
-    /// Includes all channels (Schema, Rows, RowData).
+    /// Returns (table_name, from_diffs_count, to_diffs_count).
     pub fn get_diffs(&self, from: BranchId, to: BranchId) -> Vec<(String, usize, usize)> {
         let mut result = Vec::new();
         for (key, diffs) in &self.diffs {
@@ -555,12 +572,7 @@ impl Database {
             if from_count == 0 && to_count == 0 {
                 continue;
             }
-            let label = match &key.3 {
-                DiffChannel::Schema => format!("{}", key_table(key)),
-                DiffChannel::Rows => format!("{}/rows", key_table(key)),
-                DiffChannel::RowData(id) => format!("{}/row:{}", key_table(key), id),
-            };
-            result.push((label, from_count, to_count));
+            result.push((key_table(key).to_string(), from_count, to_count));
         }
         result.sort_by(|a, b| a.0.cmp(&b.0));
         result
@@ -572,12 +584,11 @@ impl Database {
         from: BranchId,
         to: BranchId,
         table: &str,
-    ) -> Result<Option<Edit>, DbError> {
-        let key = canonical_key(from, to, table, DiffChannel::Schema);
+    ) -> Result<Option<SchemaEdit>, DbError> {
+        let key = canonical_key(from, to, table);
         let from_is_a = is_a_side(from, &key);
         let diffs = self.diffs.get_mut(&key).ok_or(DbError::NoDiffTracking)?;
 
-        // Check if the "from" side has diffs to migrate
         let has_diffs = if from_is_a {
             !diffs.a_diffs.is_empty()
         } else {
@@ -594,69 +605,17 @@ impl Database {
         };
 
         if !delta.is_id() {
-            // Get the field name from the source branch
-            let field_name = if let Edit::Ins { idx, .. } = delta {
-                self.branches.get(&from)
-                    .and_then(|fb| fb.tables.get(table))
-                    .and_then(|ft| ft.schema.name_at(idx).map(|s| s.to_string()))
-                    .unwrap_or_else(|| format!("col_{}", idx))
-            } else {
-                String::new()
-            };
+            // Apply the schema edit to the target branch's table
+            self.apply_schema_edit_to_branch(to, table, &delta)?;
 
-            // Apply the edit to the target branch's table
-            let b = self.branches.get_mut(&to).ok_or(DbError::BranchNotFound(to))?;
-            let t = b.tables.get_mut(table)
-                .ok_or_else(|| DbError::TableNotFound(table.into()))?;
-
-            // Check for duplicate column name (both branches added same column)
-            let is_duplicate = if let Edit::Ins { .. } = &delta {
-                !field_name.is_empty() && t.schema.index_of(&field_name).is_some()
-            } else {
-                false
-            };
-
-            if is_duplicate {
-                // Both branches added the same column — it's already there.
-                // Return Id so the caller knows nothing was applied.
-                return Ok(Some(Edit::Id));
-            }
-
-            match &delta {
-                Edit::Ins { idx, ty, .. } => {
-                    t.schema.fields.insert(*idx, NamedField {
-                        name: field_name,
-                        ty: *ty,
-                    });
-                }
-                Edit::Conv { idx, ty } => {
-                    if *idx < t.schema.fields.len() {
-                        t.schema.fields[*idx].ty = *ty;
-                    }
-                }
-                Edit::Rename { idx, name } => {
-                    if *idx < t.schema.fields.len() {
-                        t.schema.fields[*idx].name = name.clone();
-                    }
-                }
-                _ => {}
-            }
-            for doc in t.rows.values_mut() {
-                if let Some(new_doc) = apply(doc, &delta) {
-                    *doc = new_doc;
-                }
-            }
-
-            // Record this delta in OTHER Schema tracking channels for the
-            // target branch (not the channel we just migrated from).
-            let other_schema_keys: Vec<DiffKey> = self.diffs.keys()
+            // Record in other diff channels for bilateral convergence.
+            let other_keys: Vec<DiffKey> = self.diffs.keys()
                 .filter(|k| key_table(k) == table
                     && key_has_branch(k, to)
-                    && k.3 == DiffChannel::Schema
                     && !key_has_branch(k, from))
                 .cloned()
                 .collect();
-            for key in other_schema_keys {
+            for key in other_keys {
                 if is_a_side(to, &key) {
                     self.diffs.get_mut(&key).unwrap().edit_a(&delta);
                 } else {
@@ -668,12 +627,12 @@ impl Database {
         Ok(Some(delta))
     }
 
-    /// Get all conflicts between two branches (across all tables and channels).
+    /// Get all conflicts between two branches (across all tables).
     pub fn get_conflicts(
         &self,
         from: BranchId,
         to: BranchId,
-    ) -> Vec<(String, Conflict)> {
+    ) -> Vec<(String, SchemaConflict)> {
         let mut result = Vec::new();
         for (key, diffs) in &self.diffs {
             if !key_has_branch(key, from) || !key_has_branch(key, to) {
@@ -684,50 +643,28 @@ impl Database {
                 diffs.all_conflicts()
             } else {
                 // Swap perspective: b_diffs are "from", a_diffs are "to"
-                let swapped = Differences {
+                let swapped = SchemaDifferences {
                     a_diffs: diffs.b_diffs.clone(),
                     b_diffs: diffs.a_diffs.clone(),
                 };
                 swapped.all_conflicts()
             };
             for c in conflicts {
-                let channel_label = match &key.3 {
-                    DiffChannel::Schema => "schema".to_string(),
-                    DiffChannel::Rows => "rows".to_string(),
-                    DiffChannel::RowData(id) => format!("row:{}", id),
-                };
-                result.push((
-                    format!("{}/{}", key_table(key), channel_label),
-                    c,
-                ));
+                result.push((key_table(key).to_string(), c));
             }
         }
         result
     }
 
     /// Merge all diffs from branch `from` to branch `to` across all tracked tables.
-    /// Uses the provided ConflictResolver to decide which side wins each conflict.
-    /// Processes three levels in order:
-    /// 1. Schema edits (column add/remove/convert/rename)
-    /// 2. Row manifest edits (insert/delete rows)
-    /// 3. Per-row data edits (Set values)
     pub fn merge_all(
         &mut self,
         from: BranchId,
         to: BranchId,
-    ) -> Result<Vec<(String, Edit)>, DbError> {
+    ) -> Result<Vec<(String, SchemaEdit)>, DbError> {
         // Ensure tracking exists between these branches
         self.diff_branches(from, to)?;
-        self.merge_all_with(&mut FromWins, from, to)
-    }
 
-    /// Merge with a custom conflict resolver.
-    pub fn merge_all_with(
-        &mut self,
-        _resolver: &mut dyn ConflictResolver,
-        from: BranchId,
-        to: BranchId,
-    ) -> Result<Vec<(String, Edit)>, DbError> {
         let mut applied = Vec::new();
 
         // Collect tables that have any tracking between these branches
@@ -739,161 +676,45 @@ impl Database {
             .collect();
 
         for table in &tables {
-            // Level 1: Schema edits
-            let schema_deltas = self.migrate_channel(from, to, table, DiffChannel::Schema)?;
-            for delta in &schema_deltas {
-                applied.push((table.clone(), delta.clone()));
-            }
-
-            // Level 2: Row manifest edits (not yet wired to create/delete rows on target)
-            // TODO: wire row Ins/Del through to actually create/remove rows
-
-            // Level 3: Per-row data edits
-            let row_keys: Vec<RowId> = self.diffs.keys()
-                .filter(|key| key_has_branch(key, from) && key_has_branch(key, to)
-                    && key_table(key) == table.as_str()
-                    && matches!(key.3, DiffChannel::RowData(_)))
-                .filter_map(|key| if let DiffChannel::RowData(rid) = key.3 { Some(rid) } else { None })
-                .collect();
-
-            for row_id in row_keys {
-                let row_deltas = self.migrate_channel(from, to, table, DiffChannel::RowData(row_id))?;
-                for delta in &row_deltas {
-                    // RowData channels contain both schema edits (for OT index
-                    // shifting) and Set edits. Only apply Set deltas — schema
-                    // edits were already applied by Level 1 migration.
-                    if let Edit::Set { idx, value } = delta {
-                        if let Some(branch) = self.branches.get_mut(&to) {
-                            if let Some(t) = branch.tables.get_mut(table.as_str()) {
-                                if let Some(doc) = t.rows.get_mut(&row_id) {
-                                    if *idx < doc.fields.len() {
-                                        doc.fields[*idx].value = value.clone();
-                                    }
-                                }
-                            }
-                        }
-                        applied.push((table.clone(), delta.clone()));
-                    }
-                }
-            }
-        }
-        Ok(applied)
-    }
-
-    /// Migrate all edits in a specific channel from one branch to another.
-    /// Returns the list of deltas that were applied.
-    fn migrate_channel(
-        &mut self,
-        from: BranchId,
-        to: BranchId,
-        table: &str,
-        channel: DiffChannel,
-    ) -> Result<Vec<Edit>, DbError> {
-        let mut deltas = Vec::new();
-        loop {
-            let key = canonical_key(from, to, table, channel.clone());
-            let from_is_a = is_a_side(from, &key);
-            let has_diffs = self.diffs.get(&key)
-                .map(|d| if from_is_a { !d.a_diffs.is_empty() } else { !d.b_diffs.is_empty() })
-                .unwrap_or(false);
-            if !has_diffs {
-                break;
-            }
-
-            // For Schema channel, use migrate_table (handles schema metadata updates).
-            // For other channels, do a raw diff migration.
-            if matches!(channel, DiffChannel::Schema) {
+            // Migrate all schema edits (which now include SetField)
+            loop {
                 match self.migrate_table(from, to, table)? {
-                    Some(delta) if !delta.is_id() => deltas.push(delta),
-                    Some(_) => continue, // Id delta (absorbed) — keep going, more edits may follow
-                    None => break,       // No more diffs
-                }
-            } else {
-                let diffs = self.diffs.get_mut(&key).ok_or(DbError::NoDiffTracking)?;
-                let delta = if from_is_a {
-                    diffs.migrate_first_a_to_b()
-                } else {
-                    diffs.migrate_first_b_to_a()
-                };
-                match delta {
-                    Some(d) if !d.is_id() => deltas.push(d),
-                    Some(_) => continue,
+                    Some(delta) if !delta.is_id() => applied.push((table.clone(), delta)),
+                    Some(_) => continue, // Id delta (absorbed) — keep going
                     None => break,
                 }
             }
         }
-        Ok(deltas)
+
+        // Post-merge: sort columns into canonical alphabetical order.
+        // Records are unordered maps — column order is cosmetic. Using a
+        // deterministic canonical order ensures convergence regardless of
+        // merge direction. This is equivalent to a ReorderFields edit that
+        // always produces the same result.
+        for table in &tables {
+            if let Some(b) = self.branches.get_mut(&to) {
+                if let Some(t) = b.tables.get_mut(table.as_str()) {
+                    canonicalize_column_order(t);
+                }
+            }
+        }
+
+        Ok(applied)
     }
 
     // ── Internal helpers ───────────────────────────────────────────────
 
-    /// Record an edit in all active diff trackers for this branch+table.
-    ///
-    /// Correct-by-construction guarantees:
-    /// - Schema edits are recorded in the Schema channel AND all RowData channels
-    ///   (so Set edits in RowData get proper index shifting during migration)
-    /// - RowData edits auto-create the channel if it doesn't exist
-    /// - No edit is ever silently dropped
-    /// Record an edit in the appropriate diff channel.
-    ///
-    /// Schema edits are ALSO recorded in all RowData channels. This is
-    /// essential: when two branches both add a column, the Set edits on
-    /// those columns have the same positional index. The OT needs the Ins
-    /// edits in the RowData channel to shift the indexes and avoid false
-    /// conflicts between Set edits on different columns.
-    fn record_edit(&mut self, branch: BranchId, table: &str, edit: &Edit, channel: &DiffChannel) {
-        match channel {
-            DiffChannel::Schema => {
-                self.record_in_channel(branch, table, edit, &DiffChannel::Schema);
-                // Propagate to ALL RowData channels for proper index shifting
-                let row_keys: Vec<DiffKey> = self.diffs.keys()
-                    .filter(|k| key_table(k) == table
-                        && key_has_branch(k, branch)
-                        && matches!(k.3, DiffChannel::RowData(_)))
-                    .cloned()
-                    .collect();
-                for key in row_keys {
-                    if is_a_side(branch, &key) {
-                        self.diffs.get_mut(&key).unwrap().edit_a(edit);
-                    } else {
-                        self.diffs.get_mut(&key).unwrap().edit_b(edit);
-                    }
-                }
-            }
-            DiffChannel::RowData(row_id) => {
-                // Auto-create RowData channels for ALL tracked branch pairs.
-                // Seed with existing schema diffs so the OT can shift Set
-                // indexes through schema changes that happened before this
-                // RowData channel was created.
-                let schema_snapshots: Vec<(BranchId, BranchId, Differences)> = self.diffs.iter()
-                    .filter(|(k, _)| key_table(k) == table
-                        && key_has_branch(k, branch)
-                        && k.3 == DiffChannel::Schema)
-                    .map(|(k, d)| (k.0, k.1, d.clone()))
-                    .collect();
-                for (a, b, schema_diffs) in schema_snapshots {
-                    let key = canonical_key(a, b, table, DiffChannel::RowData(*row_id));
-                    self.diffs.entry(key).or_insert_with(|| {
-                        // Seed RowData with schema diffs so Ins shifts are known
-                        Differences {
-                            a_diffs: schema_diffs.a_diffs.clone(),
-                            b_diffs: schema_diffs.b_diffs.clone(),
-                        }
-                    });
-                }
-                self.record_in_channel(branch, table, edit, channel);
-            }
-            DiffChannel::Rows => {
-                self.record_in_channel(branch, table, edit, channel);
-            }
+    /// Record a schema edit in all active diff trackers AND the branch's edit log.
+    fn record_schema_edit(&mut self, branch: BranchId, table: &str, edit: &SchemaEdit) {
+        // Append to the branch's edit log (permanent history)
+        if let Some(b) = self.branches.get_mut(&branch) {
+            b.edit_log.entry(table.to_string()).or_default().push(edit.clone());
         }
-    }
 
-    /// Low-level: record an edit in matching channels only.
-    fn record_in_channel(&mut self, branch: BranchId, table: &str, edit: &Edit, channel: &DiffChannel) {
+        // Record in active diff trackers
         let keys: Vec<DiffKey> = self.diffs.keys().cloned().collect();
         for key in keys {
-            if key_table(&key) != table || key.3 != *channel || !key_has_branch(&key, branch) {
+            if key_table(&key) != table || !key_has_branch(&key, branch) {
                 continue;
             }
             if is_a_side(branch, &key) {
@@ -902,6 +723,94 @@ impl Database {
                 self.diffs.get_mut(&key).unwrap().edit_b(edit);
             }
         }
+    }
+
+    /// Apply a SchemaEdit delta to a target branch's table (schema + all rows).
+    fn apply_schema_edit_to_branch(
+        &mut self,
+        branch: BranchId,
+        table: &str,
+        edit: &SchemaEdit,
+    ) -> Result<(), DbError> {
+        let b = self.branches.get_mut(&branch).ok_or(DbError::BranchNotFound(branch))?;
+        let t = b.tables.get_mut(table)
+            .ok_or_else(|| DbError::TableNotFound(table.into()))?;
+
+        match edit {
+            SchemaEdit::AddField { name, ty } => {
+                if let Some(idx) = t.schema.index_of(name) {
+                    // Column already exists (same-name add from both sides).
+                    // Update type and value to match the winning side.
+                    t.schema.fields[idx].ty = *ty;
+                    let default_value = default_for_type(*ty);
+                    for doc in t.rows.values_mut() {
+                        if idx < doc.fields.len() {
+                            doc.fields[idx] = Field { ty: *ty, value: default_value.clone() };
+                        }
+                    }
+                } else {
+                    let idx = t.schema.fields.len();
+                    t.schema.fields.push(NamedField {
+                        name: name.clone(),
+                        ty: *ty,
+                    });
+                    let default_value = default_for_type(*ty);
+                    for doc in t.rows.values_mut() {
+                        while doc.fields.len() <= idx {
+                            doc.fields.push(Field::null(AtomicType::Del));
+                        }
+                        doc.fields[idx] = Field { ty: *ty, value: default_value.clone() };
+                    }
+                }
+            }
+            SchemaEdit::RemoveField { name } => {
+                if let Some(idx) = t.schema.index_of(name) {
+                    t.schema.fields[idx].ty = AtomicType::Del;
+                    for doc in t.rows.values_mut() {
+                        if idx < doc.fields.len() {
+                            doc.fields[idx] = Field::null(AtomicType::Del);
+                        }
+                    }
+                }
+            }
+            SchemaEdit::ConvertField { name, ty } => {
+                if let Some(idx) = t.schema.index_of(name) {
+                    t.schema.fields[idx].ty = *ty;
+                    for doc in t.rows.values_mut() {
+                        if idx < doc.fields.len() {
+                            doc.fields[idx].ty = *ty;
+                        }
+                    }
+                }
+            }
+            SchemaEdit::RenameField { old_name, new_name } => {
+                if let Some(idx) = t.schema.fields.iter().position(|f| f.name == *old_name && f.ty != AtomicType::Del) {
+                    // If new_name already exists, tombstone the old field
+                    // (the OT's conflict rule should prevent this, but guard defensively)
+                    if t.schema.index_of(new_name).is_some() {
+                        t.schema.fields[idx].ty = AtomicType::Del;
+                        for doc in t.rows.values_mut() {
+                            if idx < doc.fields.len() {
+                                doc.fields[idx] = Field::null(AtomicType::Del);
+                            }
+                        }
+                    } else {
+                        t.schema.fields[idx].name = new_name.clone();
+                    }
+                }
+            }
+            SchemaEdit::SetField { row: row_id, field, value } => {
+                if let Some(idx) = t.schema.index_of(field) {
+                    if let Some(doc) = t.rows.get_mut(row_id) {
+                        if idx < doc.fields.len() {
+                            doc.fields[idx].value = value.clone();
+                        }
+                    }
+                }
+            }
+            SchemaEdit::Id => {}
+        }
+        Ok(())
     }
 }
 
@@ -922,6 +831,65 @@ impl Database {
 impl Default for Database {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Reorder a table's columns (schema + row fields) to match the given name order.
+/// Columns present in `order` come first in that order; any remaining columns
+/// are appended at the end in their existing order.
+/// Canonical column ordering: sort active fields alphabetically by name.
+/// Tombstoned fields (Del) go to the end.
+/// Records are unordered maps — this gives a deterministic order
+/// that doesn't depend on merge direction.
+fn canonicalize_column_order(table: &mut Table) {
+    let n = table.schema.fields.len();
+    if n == 0 {
+        return;
+    }
+
+    // Build permutation: sort by (is_del, name)
+    let mut indices: Vec<usize> = (0..n).collect();
+    indices.sort_by(|&a, &b| {
+        let fa = &table.schema.fields[a];
+        let fb = &table.schema.fields[b];
+        let a_del = fa.ty == AtomicType::Del;
+        let b_del = fb.ty == AtomicType::Del;
+        (a_del, &fa.name).cmp(&(b_del, &fb.name))
+    });
+
+    // Check if already canonical
+    if indices.iter().enumerate().all(|(i, &p)| i == p) {
+        return;
+    }
+
+    // Apply permutation to schema
+    let old_fields = table.schema.fields.clone();
+    for (new_idx, &old_idx) in indices.iter().enumerate() {
+        table.schema.fields[new_idx] = old_fields[old_idx].clone();
+    }
+
+    // Apply permutation to all rows
+    for doc in table.rows.values_mut() {
+        let old_row = doc.fields.clone();
+        while doc.fields.len() < n {
+            doc.fields.push(Field::null(AtomicType::Del));
+        }
+        for (new_idx, &old_idx) in indices.iter().enumerate() {
+            if old_idx < old_row.len() {
+                doc.fields[new_idx] = old_row[old_idx].clone();
+            } else {
+                doc.fields[new_idx] = Field::null(AtomicType::Del);
+            }
+        }
+    }
+}
+
+fn default_for_type(ty: AtomicType) -> Value {
+    match ty {
+        AtomicType::Num => Value::Num(0.0),
+        AtomicType::Str => Value::Str(String::new()),
+        AtomicType::Bool => Value::Bool(false),
+        AtomicType::Del => Value::Null,
     }
 }
 
@@ -1031,7 +999,8 @@ mod tests {
         assert!(!diffs.is_empty(), "should have diffs");
         let schema_diffs: Vec<_> = diffs.iter().filter(|(n, _, _)| n == "users").collect();
         assert!(!schema_diffs.is_empty(), "should have users diffs");
-        // alice has edits (Ins + Rename for add_column), bob has edits (Ins + Rename for add_column)
+
+        // alice has edits, bob has edits
         let (_, alice_count, bob_count) = schema_diffs[0];
         assert!(*alice_count > 0, "alice should have diffs");
         assert!(*bob_count > 0, "bob should have diffs");

@@ -1,9 +1,0 @@
-# Seeds for failure cases proptest has generated in the past. It is
-# automatically read and these particular cases re-run before any
-# novel cases are generated.
-#
-# It is recommended to check this file in to source control so that
-# everyone who runs the test benefits from these saved cases.
-cc 7f65a55da5aab28c58518524ac392b32076c14e65db4c1da29e6e433ec3d71ff # shrinks to ops_a = [AddColumn { table: 0, name: "aa", ty: Str }], ops_b = [AddColumn { table: 0, name: "aa", ty: Str }, AddColumn { table: 0, name: "aa", ty: Str }], ops_c = [AddColumn { table: 0, name: "aa", ty: Str }]
-cc efda220b6eedb5b5696e08d087fccdd2238922943a71c90b08dfedbc944260e9 # shrinks to ops_a = [AddColumn { table: 0, name: "aa", ty: Str }], ops_b = [AddColumn { table: 0, name: "aa", ty: Str }, AddColumn { table: 0, name: "aa", ty: Str }, AddColumn { table: 0, name: "aa", ty: Str }], ops_c = [AddColumn { table: 0, name: "aa", ty: Str }]
-cc 86e7aa861901df68b7d87b3b53e23c7997658d7430c97a750057ba582d9c9d78 # shrinks to ops_a = [AddColumn { table: 1, name: "ph", ty: Str }], ops_b = [AddColumn { table: 1, name: "ph", ty: Str }], seed = 0
