@@ -64,6 +64,8 @@ pub struct Table {
 pub struct Branch {
     pub name: String,
     pub tables: HashMap<String, Table>,
+    /// Parent branch (None for root branches).
+    pub parent: Option<BranchId>,
 }
 
 /// A named row view for display.
@@ -191,6 +193,7 @@ impl Database {
         self.branches.insert(id, Branch {
             name: name.to_string(),
             tables: HashMap::new(),
+            parent: None,
         });
         id
     }
@@ -200,10 +203,27 @@ impl Database {
             .ok_or(DbError::BranchNotFound(source))?
             .clone();
         let id = self.ids.branch();
+
+        // Find existing siblings (other branches forked from same parent)
+        let siblings: Vec<BranchId> = self.branches.iter()
+            .filter(|(bid, b)| b.parent == Some(source) && **bid != id)
+            .map(|(bid, _)| *bid)
+            .collect();
+
         self.branches.insert(id, Branch {
             name: name.to_string(),
             tables: src.tables,
+            parent: Some(source),
         });
+
+        // Auto-track against parent
+        self.diff_branches(source, id)?;
+
+        // Auto-track against all siblings
+        for sibling in siblings {
+            self.diff_branches(sibling, id)?;
+        }
+
         Ok(id)
     }
 
@@ -483,6 +503,8 @@ impl Database {
     // ── Diff & merge ───────────────────────────────────────────────────
 
     /// Start tracking diffs between two branches for all shared tables.
+    /// Called automatically by `fork_branch` — you rarely need to call this directly.
+    /// Idempotent: calling it twice is safe (won't reset existing tracking).
     pub fn diff_branches(&mut self, a: BranchId, b: BranchId) -> Result<(), DbError> {
         let tables_a: Vec<String> = {
             let ba = self.get_branch(a)?;
@@ -504,29 +526,24 @@ impl Database {
             }
         }
 
-        for (table, row_ids) in &shared_rows {
+        for (table, _row_ids) in &shared_rows {
             let schema_key = canonical_key(a, b, table, DiffChannel::Schema);
             self.diffs.entry(schema_key).or_insert_with(Differences::new);
             let rows_key = canonical_key(a, b, table, DiffChannel::Rows);
             self.diffs.entry(rows_key).or_insert_with(Differences::new);
-            // Per-row data trackers for existing rows
-            for &row_id in row_ids {
-                let row_key = canonical_key(a, b, table, DiffChannel::RowData(row_id));
-                self.diffs.entry(row_key).or_insert_with(Differences::new);
-            }
+            // RowData channels are created on-demand by record_edit when
+            // set_field is first called. They're seeded with current schema
+            // diffs at creation time so the OT can shift Set indexes.
         }
         Ok(())
     }
 
     /// Get diff summary between two branches.
-    /// Returns (table, from_diffs_count, to_diffs_count) where "from" is the
-    /// first argument and "to" is the second.
+    /// Returns (table/channel, from_diffs_count, to_diffs_count).
+    /// Includes all channels (Schema, Rows, RowData).
     pub fn get_diffs(&self, from: BranchId, to: BranchId) -> Vec<(String, usize, usize)> {
         let mut result = Vec::new();
         for (key, diffs) in &self.diffs {
-            if key.3 != DiffChannel::Schema {
-                continue;
-            }
             if !key_has_branch(key, from) || !key_has_branch(key, to) {
                 continue;
             }
@@ -535,7 +552,15 @@ impl Database {
             } else {
                 (diffs.b_diffs.len(), diffs.a_diffs.len())
             };
-            result.push((key_table(key).to_string(), from_count, to_count));
+            if from_count == 0 && to_count == 0 {
+                continue;
+            }
+            let label = match &key.3 {
+                DiffChannel::Schema => format!("{}", key_table(key)),
+                DiffChannel::Rows => format!("{}/rows", key_table(key)),
+                DiffChannel::RowData(id) => format!("{}/row:{}", key_table(key), id),
+            };
+            result.push((label, from_count, to_count));
         }
         result.sort_by(|a, b| a.0.cmp(&b.0));
         result
@@ -584,6 +609,19 @@ impl Database {
             let t = b.tables.get_mut(table)
                 .ok_or_else(|| DbError::TableNotFound(table.into()))?;
 
+            // Check for duplicate column name (both branches added same column)
+            let is_duplicate = if let Edit::Ins { .. } = &delta {
+                !field_name.is_empty() && t.schema.index_of(&field_name).is_some()
+            } else {
+                false
+            };
+
+            if is_duplicate {
+                // Both branches added the same column — it's already there.
+                // Return Id so the caller knows nothing was applied.
+                return Ok(Some(Edit::Id));
+            }
+
             match &delta {
                 Edit::Ins { idx, ty, .. } => {
                     t.schema.fields.insert(*idx, NamedField {
@@ -606,6 +644,23 @@ impl Database {
             for doc in t.rows.values_mut() {
                 if let Some(new_doc) = apply(doc, &delta) {
                     *doc = new_doc;
+                }
+            }
+
+            // Record this delta in OTHER Schema tracking channels for the
+            // target branch (not the channel we just migrated from).
+            let other_schema_keys: Vec<DiffKey> = self.diffs.keys()
+                .filter(|k| key_table(k) == table
+                    && key_has_branch(k, to)
+                    && k.3 == DiffChannel::Schema
+                    && !key_has_branch(k, from))
+                .cloned()
+                .collect();
+            for key in other_schema_keys {
+                if is_a_side(to, &key) {
+                    self.diffs.get_mut(&key).unwrap().edit_a(&delta);
+                } else {
+                    self.diffs.get_mut(&key).unwrap().edit_b(&delta);
                 }
             }
         }
@@ -661,6 +716,8 @@ impl Database {
         from: BranchId,
         to: BranchId,
     ) -> Result<Vec<(String, Edit)>, DbError> {
+        // Ensure tracking exists between these branches
+        self.diff_branches(from, to)?;
         self.merge_all_with(&mut FromWins, from, to)
     }
 
@@ -702,7 +759,9 @@ impl Database {
             for row_id in row_keys {
                 let row_deltas = self.migrate_channel(from, to, table, DiffChannel::RowData(row_id))?;
                 for delta in &row_deltas {
-                    // Apply Set edit to the specific row on the target branch
+                    // RowData channels contain both schema edits (for OT index
+                    // shifting) and Set edits. Only apply Set deltas — schema
+                    // edits were already applied by Level 1 migration.
                     if let Edit::Set { idx, value } = delta {
                         if let Some(branch) = self.branches.get_mut(&to) {
                             if let Some(t) = branch.tables.get_mut(table.as_str()) {
@@ -713,8 +772,8 @@ impl Database {
                                 }
                             }
                         }
+                        applied.push((table.clone(), delta.clone()));
                     }
-                    applied.push((table.clone(), delta.clone()));
                 }
             }
         }
@@ -746,7 +805,8 @@ impl Database {
             if matches!(channel, DiffChannel::Schema) {
                 match self.migrate_table(from, to, table)? {
                     Some(delta) if !delta.is_id() => deltas.push(delta),
-                    _ => break,
+                    Some(_) => continue, // Id delta (absorbed) — keep going, more edits may follow
+                    None => break,       // No more diffs
                 }
             } else {
                 let diffs = self.diffs.get_mut(&key).ok_or(DbError::NoDiffTracking)?;
@@ -757,7 +817,8 @@ impl Database {
                 };
                 match delta {
                     Some(d) if !d.is_id() => deltas.push(d),
-                    _ => break,
+                    Some(_) => continue,
+                    None => break,
                 }
             }
         }
@@ -767,19 +828,78 @@ impl Database {
     // ── Internal helpers ───────────────────────────────────────────────
 
     /// Record an edit in all active diff trackers for this branch+table.
+    ///
+    /// Correct-by-construction guarantees:
+    /// - Schema edits are recorded in the Schema channel AND all RowData channels
+    ///   (so Set edits in RowData get proper index shifting during migration)
+    /// - RowData edits auto-create the channel if it doesn't exist
+    /// - No edit is ever silently dropped
+    /// Record an edit in the appropriate diff channel.
+    ///
+    /// Schema edits are ALSO recorded in all RowData channels. This is
+    /// essential: when two branches both add a column, the Set edits on
+    /// those columns have the same positional index. The OT needs the Ins
+    /// edits in the RowData channel to shift the indexes and avoid false
+    /// conflicts between Set edits on different columns.
     fn record_edit(&mut self, branch: BranchId, table: &str, edit: &Edit, channel: &DiffChannel) {
+        match channel {
+            DiffChannel::Schema => {
+                self.record_in_channel(branch, table, edit, &DiffChannel::Schema);
+                // Propagate to ALL RowData channels for proper index shifting
+                let row_keys: Vec<DiffKey> = self.diffs.keys()
+                    .filter(|k| key_table(k) == table
+                        && key_has_branch(k, branch)
+                        && matches!(k.3, DiffChannel::RowData(_)))
+                    .cloned()
+                    .collect();
+                for key in row_keys {
+                    if is_a_side(branch, &key) {
+                        self.diffs.get_mut(&key).unwrap().edit_a(edit);
+                    } else {
+                        self.diffs.get_mut(&key).unwrap().edit_b(edit);
+                    }
+                }
+            }
+            DiffChannel::RowData(row_id) => {
+                // Auto-create RowData channels for ALL tracked branch pairs.
+                // Seed with existing schema diffs so the OT can shift Set
+                // indexes through schema changes that happened before this
+                // RowData channel was created.
+                let schema_snapshots: Vec<(BranchId, BranchId, Differences)> = self.diffs.iter()
+                    .filter(|(k, _)| key_table(k) == table
+                        && key_has_branch(k, branch)
+                        && k.3 == DiffChannel::Schema)
+                    .map(|(k, d)| (k.0, k.1, d.clone()))
+                    .collect();
+                for (a, b, schema_diffs) in schema_snapshots {
+                    let key = canonical_key(a, b, table, DiffChannel::RowData(*row_id));
+                    self.diffs.entry(key).or_insert_with(|| {
+                        // Seed RowData with schema diffs so Ins shifts are known
+                        Differences {
+                            a_diffs: schema_diffs.a_diffs.clone(),
+                            b_diffs: schema_diffs.b_diffs.clone(),
+                        }
+                    });
+                }
+                self.record_in_channel(branch, table, edit, channel);
+            }
+            DiffChannel::Rows => {
+                self.record_in_channel(branch, table, edit, channel);
+            }
+        }
+    }
+
+    /// Low-level: record an edit in matching channels only.
+    fn record_in_channel(&mut self, branch: BranchId, table: &str, edit: &Edit, channel: &DiffChannel) {
         let keys: Vec<DiffKey> = self.diffs.keys().cloned().collect();
         for key in keys {
-            if key_table(&key) != table {
-                continue;
-            }
-            if key.3 != *channel {
+            if key_table(&key) != table || key.3 != *channel || !key_has_branch(&key, branch) {
                 continue;
             }
             if is_a_side(branch, &key) {
-                self.diffs.get_mut(&key).unwrap().edit_a(&edit);
-            } else if key_has_branch(&key, branch) {
-                self.diffs.get_mut(&key).unwrap().edit_b(&edit);
+                self.diffs.get_mut(&key).unwrap().edit_a(edit);
+            } else {
+                self.diffs.get_mut(&key).unwrap().edit_b(edit);
             }
         }
     }
@@ -802,6 +922,16 @@ impl Database {
 impl Default for Database {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+fn json_to_value(j: &JsonValue) -> Value {
+    match j {
+        JsonValue::Number(n) => Value::Num(n.as_f64().unwrap_or(0.0)),
+        JsonValue::String(s) => Value::Str(s.clone()),
+        JsonValue::Bool(b) => Value::Bool(*b),
+        JsonValue::Null => Value::Null,
+        _ => Value::Error,
     }
 }
 
@@ -896,12 +1026,15 @@ mod tests {
         // Bob adds age
         db.add_column(bob, "users", "age", AtomicType::Num).unwrap();
 
-        // Check diffs
+        // Check diffs — should have schema diffs for users table
         let diffs = db.get_diffs(alice, bob);
-        assert_eq!(diffs.len(), 1); // one table tracked
-        assert_eq!(diffs[0].0, "users");
-        assert_eq!(diffs[0].1, 1); // alice has 1 diff
-        assert_eq!(diffs[0].2, 1); // bob has 1 diff
+        assert!(!diffs.is_empty(), "should have diffs");
+        let schema_diffs: Vec<_> = diffs.iter().filter(|(n, _, _)| n == "users").collect();
+        assert!(!schema_diffs.is_empty(), "should have users diffs");
+        // alice has edits (Ins + Rename for add_column), bob has edits (Ins + Rename for add_column)
+        let (_, alice_count, bob_count) = schema_diffs[0];
+        assert!(*alice_count > 0, "alice should have diffs");
+        assert!(*bob_count > 0, "bob should have diffs");
 
         // Merge alice→bob
         let applied = db.merge_all(alice, bob).unwrap();

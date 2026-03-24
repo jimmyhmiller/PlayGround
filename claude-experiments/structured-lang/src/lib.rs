@@ -5,3 +5,4 @@ pub mod diff;
 pub mod schema;
 pub mod database;
 pub mod wire;
+pub mod gui;

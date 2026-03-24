@@ -74,41 +74,49 @@ impl Differences {
     }
 
     /// Apply an edit to document A and update the differences.
-    /// Returns the translated edit on B (delta), or None if retraction fails.
+    /// Returns the translated edit on B (delta), or None if retraction fails
+    /// (but the edit is STILL appended — dependent edits are valid, they just
+    /// can't be independently migrated until their dependency is migrated first).
     pub fn edit_a(&mut self, epsilon: &Edit) -> Option<Edit> {
-        let result = translate(epsilon, &self.a_diffs, &self.b_diffs)?;
-
-        if result.delta.is_id() {
-            // Edit was absorbed into the agreement: use adjusted diffs
-            // (the agreement has advanced, so diffs are recalculated)
-            self.a_diffs = result.a_diffs;
-            self.b_diffs = result.b_diffs;
-        } else {
-            // Edit increases differences: keep original diffs, just append epsilon.
-            // The paper says: when δ ≠ Id, the edit is appended to A's differences
-            // without modifying the existing diffs or agreement.
-            self.a_diffs.push(epsilon.clone());
+        match translate(epsilon, &self.a_diffs, &self.b_diffs) {
+            Some(result) if result.delta.is_id() => {
+                // Edit was absorbed into the agreement
+                self.a_diffs = result.a_diffs;
+                self.b_diffs = result.b_diffs;
+                Some(result.delta)
+            }
+            Some(result) => {
+                // Edit increases differences: append
+                self.a_diffs.push(epsilon.clone());
+                Some(result.delta)
+            }
+            None => {
+                // Translation failed (dependency). The edit still happened on A,
+                // so it must be tracked. Append it — it depends on an earlier
+                // edit and must be migrated after that dependency.
+                self.a_diffs.push(epsilon.clone());
+                None
+            }
         }
-
-        Some(result.delta)
     }
 
     /// Apply an edit to document B and update the differences.
-    /// Returns the translated edit on A (delta), or None if retraction fails.
     pub fn edit_b(&mut self, epsilon: &Edit) -> Option<Edit> {
-        // Symmetric: swap a and b, translate, swap back
-        let result = translate(epsilon, &self.b_diffs, &self.a_diffs)?;
-
-        if result.delta.is_id() {
-            // Absorbed: use adjusted diffs (swapped back)
-            self.b_diffs = result.a_diffs;
-            self.a_diffs = result.b_diffs;
-        } else {
-            // Not absorbed: keep original diffs, just append
-            self.b_diffs.push(epsilon.clone());
+        match translate(epsilon, &self.b_diffs, &self.a_diffs) {
+            Some(result) if result.delta.is_id() => {
+                self.b_diffs = result.a_diffs;
+                self.a_diffs = result.b_diffs;
+                Some(result.delta)
+            }
+            Some(result) => {
+                self.b_diffs.push(epsilon.clone());
+                Some(result.delta)
+            }
+            None => {
+                self.b_diffs.push(epsilon.clone());
+                None
+            }
         }
-
-        Some(result.delta)
     }
 
     /// Migrate the first (earliest) difference of A to B.
