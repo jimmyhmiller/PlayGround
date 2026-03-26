@@ -1,0 +1,1393 @@
+{
+  "config": {
+    "vocab_size": 50257,
+    "n_embd": 768,
+    "n_head": 12,
+    "n_layer": 12,
+    "seq_len": 3
+  },
+  "tensors": [
+    {
+      "name": "wte",
+      "shape": [
+        50257,
+        768
+      ],
+      "offset": 0,
+      "size_bytes": 154389504,
+      "n_elements": 38597376
+    },
+    {
+      "name": "wpe",
+      "shape": [
+        1024,
+        768
+      ],
+      "offset": 154389504,
+      "size_bytes": 3145728,
+      "n_elements": 786432
+    },
+    {
+      "name": "ln1_g_0",
+      "shape": [
+        768
+      ],
+      "offset": 157535232,
+      "size_bytes": 3072,
+      "n_elements": 768
+    },
+    {
+      "name": "ln1_b_0",
+      "shape": [
+        768
+      ],
+      "offset": 157538304,
+      "size_bytes": 3072,
+      "n_elements": 768
+    },
+    {
+      "name": "attn_qkv_w_0",
+      "shape": [
+        768,
+        2304
+      ],
+      "offset": 157541376,
+      "size_bytes": 7077888,
+      "n_elements": 1769472
+    },
+    {
+      "name": "attn_qkv_b_0",
+      "shape": [
+        2304
+      ],
+      "offset": 164619264,
+      "size_bytes": 9216,
+      "n_elements": 2304
+    },
+    {
+      "name": "attn_proj_w_0",
+      "shape": [
+        768,
+        768
+      ],
+      "offset": 164628480,
+      "size_bytes": 2359296,
+      "n_elements": 589824
+    },
+    {
+      "name": "attn_proj_b_0",
+      "shape": [
+        768
+      ],
+      "offset": 166987776,
+      "size_bytes": 3072,
+      "n_elements": 768
+    },
+    {
+      "name": "ln2_g_0",
+      "shape": [
+        768
+      ],
+      "offset": 166990848,
+      "size_bytes": 3072,
+      "n_elements": 768
+    },
+    {
+      "name": "ln2_b_0",
+      "shape": [
+        768
+      ],
+      "offset": 166993920,
+      "size_bytes": 3072,
+      "n_elements": 768
+    },
+    {
+      "name": "mlp_fc_w_0",
+      "shape": [
+        768,
+        3072
+      ],
+      "offset": 166996992,
+      "size_bytes": 9437184,
+      "n_elements": 2359296
+    },
+    {
+      "name": "mlp_fc_b_0",
+      "shape": [
+        3072
+      ],
+      "offset": 176434176,
+      "size_bytes": 12288,
+      "n_elements": 3072
+    },
+    {
+      "name": "mlp_proj_w_0",
+      "shape": [
+        3072,
+        768
+      ],
+      "offset": 176446464,
+      "size_bytes": 9437184,
+      "n_elements": 2359296
+    },
+    {
+      "name": "mlp_proj_b_0",
+      "shape": [
+        768
+      ],
+      "offset": 185883648,
+      "size_bytes": 3072,
+      "n_elements": 768
+    },
+    {
+      "name": "ln1_g_1",
+      "shape": [
+        768
+      ],
+      "offset": 185886720,
+      "size_bytes": 3072,
+      "n_elements": 768
+    },
+    {
+      "name": "ln1_b_1",
+      "shape": [
+        768
+      ],
+      "offset": 185889792,
+      "size_bytes": 3072,
+      "n_elements": 768
+    },
+    {
+      "name": "attn_qkv_w_1",
+      "shape": [
+        768,
+        2304
+      ],
+      "offset": 185892864,
+      "size_bytes": 7077888,
+      "n_elements": 1769472
+    },
+    {
+      "name": "attn_qkv_b_1",
+      "shape": [
+        2304
+      ],
+      "offset": 192970752,
+      "size_bytes": 9216,
+      "n_elements": 2304
+    },
+    {
+      "name": "attn_proj_w_1",
+      "shape": [
+        768,
+        768
+      ],
+      "offset": 192979968,
+      "size_bytes": 2359296,
+      "n_elements": 589824
+    },
+    {
+      "name": "attn_proj_b_1",
+      "shape": [
+        768
+      ],
+      "offset": 195339264,
+      "size_bytes": 3072,
+      "n_elements": 768
+    },
+    {
+      "name": "ln2_g_1",
+      "shape": [
+        768
+      ],
+      "offset": 195342336,
+      "size_bytes": 3072,
+      "n_elements": 768
+    },
+    {
+      "name": "ln2_b_1",
+      "shape": [
+        768
+      ],
+      "offset": 195345408,
+      "size_bytes": 3072,
+      "n_elements": 768
+    },
+    {
+      "name": "mlp_fc_w_1",
+      "shape": [
+        768,
+        3072
+      ],
+      "offset": 195348480,
+      "size_bytes": 9437184,
+      "n_elements": 2359296
+    },
+    {
+      "name": "mlp_fc_b_1",
+      "shape": [
+        3072
+      ],
+      "offset": 204785664,
+      "size_bytes": 12288,
+      "n_elements": 3072
+    },
+    {
+      "name": "mlp_proj_w_1",
+      "shape": [
+        3072,
+        768
+      ],
+      "offset": 204797952,
+      "size_bytes": 9437184,
+      "n_elements": 2359296
+    },
+    {
+      "name": "mlp_proj_b_1",
+      "shape": [
+        768
+      ],
+      "offset": 214235136,
+      "size_bytes": 3072,
+      "n_elements": 768
+    },
+    {
+      "name": "ln1_g_2",
+      "shape": [
+        768
+      ],
+      "offset": 214238208,
+      "size_bytes": 3072,
+      "n_elements": 768
+    },
+    {
+      "name": "ln1_b_2",
+      "shape": [
+        768
+      ],
+      "offset": 214241280,
+      "size_bytes": 3072,
+      "n_elements": 768
+    },
+    {
+      "name": "attn_qkv_w_2",
+      "shape": [
+        768,
+        2304
+      ],
+      "offset": 214244352,
+      "size_bytes": 7077888,
+      "n_elements": 1769472
+    },
+    {
+      "name": "attn_qkv_b_2",
+      "shape": [
+        2304
+      ],
+      "offset": 221322240,
+      "size_bytes": 9216,
+      "n_elements": 2304
+    },
+    {
+      "name": "attn_proj_w_2",
+      "shape": [
+        768,
+        768
+      ],
+      "offset": 221331456,
+      "size_bytes": 2359296,
+      "n_elements": 589824
+    },
+    {
+      "name": "attn_proj_b_2",
+      "shape": [
+        768
+      ],
+      "offset": 223690752,
+      "size_bytes": 3072,
+      "n_elements": 768
+    },
+    {
+      "name": "ln2_g_2",
+      "shape": [
+        768
+      ],
+      "offset": 223693824,
+      "size_bytes": 3072,
+      "n_elements": 768
+    },
+    {
+      "name": "ln2_b_2",
+      "shape": [
+        768
+      ],
+      "offset": 223696896,
+      "size_bytes": 3072,
+      "n_elements": 768
+    },
+    {
+      "name": "mlp_fc_w_2",
+      "shape": [
+        768,
+        3072
+      ],
+      "offset": 223699968,
+      "size_bytes": 9437184,
+      "n_elements": 2359296
+    },
+    {
+      "name": "mlp_fc_b_2",
+      "shape": [
+        3072
+      ],
+      "offset": 233137152,
+      "size_bytes": 12288,
+      "n_elements": 3072
+    },
+    {
+      "name": "mlp_proj_w_2",
+      "shape": [
+        3072,
+        768
+      ],
+      "offset": 233149440,
+      "size_bytes": 9437184,
+      "n_elements": 2359296
+    },
+    {
+      "name": "mlp_proj_b_2",
+      "shape": [
+        768
+      ],
+      "offset": 242586624,
+      "size_bytes": 3072,
+      "n_elements": 768
+    },
+    {
+      "name": "ln1_g_3",
+      "shape": [
+        768
+      ],
+      "offset": 242589696,
+      "size_bytes": 3072,
+      "n_elements": 768
+    },
+    {
+      "name": "ln1_b_3",
+      "shape": [
+        768
+      ],
+      "offset": 242592768,
+      "size_bytes": 3072,
+      "n_elements": 768
+    },
+    {
+      "name": "attn_qkv_w_3",
+      "shape": [
+        768,
+        2304
+      ],
+      "offset": 242595840,
+      "size_bytes": 7077888,
+      "n_elements": 1769472
+    },
+    {
+      "name": "attn_qkv_b_3",
+      "shape": [
+        2304
+      ],
+      "offset": 249673728,
+      "size_bytes": 9216,
+      "n_elements": 2304
+    },
+    {
+      "name": "attn_proj_w_3",
+      "shape": [
+        768,
+        768
+      ],
+      "offset": 249682944,
+      "size_bytes": 2359296,
+      "n_elements": 589824
+    },
+    {
+      "name": "attn_proj_b_3",
+      "shape": [
+        768
+      ],
+      "offset": 252042240,
+      "size_bytes": 3072,
+      "n_elements": 768
+    },
+    {
+      "name": "ln2_g_3",
+      "shape": [
+        768
+      ],
+      "offset": 252045312,
+      "size_bytes": 3072,
+      "n_elements": 768
+    },
+    {
+      "name": "ln2_b_3",
+      "shape": [
+        768
+      ],
+      "offset": 252048384,
+      "size_bytes": 3072,
+      "n_elements": 768
+    },
+    {
+      "name": "mlp_fc_w_3",
+      "shape": [
+        768,
+        3072
+      ],
+      "offset": 252051456,
+      "size_bytes": 9437184,
+      "n_elements": 2359296
+    },
+    {
+      "name": "mlp_fc_b_3",
+      "shape": [
+        3072
+      ],
+      "offset": 261488640,
+      "size_bytes": 12288,
+      "n_elements": 3072
+    },
+    {
+      "name": "mlp_proj_w_3",
+      "shape": [
+        3072,
+        768
+      ],
+      "offset": 261500928,
+      "size_bytes": 9437184,
+      "n_elements": 2359296
+    },
+    {
+      "name": "mlp_proj_b_3",
+      "shape": [
+        768
+      ],
+      "offset": 270938112,
+      "size_bytes": 3072,
+      "n_elements": 768
+    },
+    {
+      "name": "ln1_g_4",
+      "shape": [
+        768
+      ],
+      "offset": 270941184,
+      "size_bytes": 3072,
+      "n_elements": 768
+    },
+    {
+      "name": "ln1_b_4",
+      "shape": [
+        768
+      ],
+      "offset": 270944256,
+      "size_bytes": 3072,
+      "n_elements": 768
+    },
+    {
+      "name": "attn_qkv_w_4",
+      "shape": [
+        768,
+        2304
+      ],
+      "offset": 270947328,
+      "size_bytes": 7077888,
+      "n_elements": 1769472
+    },
+    {
+      "name": "attn_qkv_b_4",
+      "shape": [
+        2304
+      ],
+      "offset": 278025216,
+      "size_bytes": 9216,
+      "n_elements": 2304
+    },
+    {
+      "name": "attn_proj_w_4",
+      "shape": [
+        768,
+        768
+      ],
+      "offset": 278034432,
+      "size_bytes": 2359296,
+      "n_elements": 589824
+    },
+    {
+      "name": "attn_proj_b_4",
+      "shape": [
+        768
+      ],
+      "offset": 280393728,
+      "size_bytes": 3072,
+      "n_elements": 768
+    },
+    {
+      "name": "ln2_g_4",
+      "shape": [
+        768
+      ],
+      "offset": 280396800,
+      "size_bytes": 3072,
+      "n_elements": 768
+    },
+    {
+      "name": "ln2_b_4",
+      "shape": [
+        768
+      ],
+      "offset": 280399872,
+      "size_bytes": 3072,
+      "n_elements": 768
+    },
+    {
+      "name": "mlp_fc_w_4",
+      "shape": [
+        768,
+        3072
+      ],
+      "offset": 280402944,
+      "size_bytes": 9437184,
+      "n_elements": 2359296
+    },
+    {
+      "name": "mlp_fc_b_4",
+      "shape": [
+        3072
+      ],
+      "offset": 289840128,
+      "size_bytes": 12288,
+      "n_elements": 3072
+    },
+    {
+      "name": "mlp_proj_w_4",
+      "shape": [
+        3072,
+        768
+      ],
+      "offset": 289852416,
+      "size_bytes": 9437184,
+      "n_elements": 2359296
+    },
+    {
+      "name": "mlp_proj_b_4",
+      "shape": [
+        768
+      ],
+      "offset": 299289600,
+      "size_bytes": 3072,
+      "n_elements": 768
+    },
+    {
+      "name": "ln1_g_5",
+      "shape": [
+        768
+      ],
+      "offset": 299292672,
+      "size_bytes": 3072,
+      "n_elements": 768
+    },
+    {
+      "name": "ln1_b_5",
+      "shape": [
+        768
+      ],
+      "offset": 299295744,
+      "size_bytes": 3072,
+      "n_elements": 768
+    },
+    {
+      "name": "attn_qkv_w_5",
+      "shape": [
+        768,
+        2304
+      ],
+      "offset": 299298816,
+      "size_bytes": 7077888,
+      "n_elements": 1769472
+    },
+    {
+      "name": "attn_qkv_b_5",
+      "shape": [
+        2304
+      ],
+      "offset": 306376704,
+      "size_bytes": 9216,
+      "n_elements": 2304
+    },
+    {
+      "name": "attn_proj_w_5",
+      "shape": [
+        768,
+        768
+      ],
+      "offset": 306385920,
+      "size_bytes": 2359296,
+      "n_elements": 589824
+    },
+    {
+      "name": "attn_proj_b_5",
+      "shape": [
+        768
+      ],
+      "offset": 308745216,
+      "size_bytes": 3072,
+      "n_elements": 768
+    },
+    {
+      "name": "ln2_g_5",
+      "shape": [
+        768
+      ],
+      "offset": 308748288,
+      "size_bytes": 3072,
+      "n_elements": 768
+    },
+    {
+      "name": "ln2_b_5",
+      "shape": [
+        768
+      ],
+      "offset": 308751360,
+      "size_bytes": 3072,
+      "n_elements": 768
+    },
+    {
+      "name": "mlp_fc_w_5",
+      "shape": [
+        768,
+        3072
+      ],
+      "offset": 308754432,
+      "size_bytes": 9437184,
+      "n_elements": 2359296
+    },
+    {
+      "name": "mlp_fc_b_5",
+      "shape": [
+        3072
+      ],
+      "offset": 318191616,
+      "size_bytes": 12288,
+      "n_elements": 3072
+    },
+    {
+      "name": "mlp_proj_w_5",
+      "shape": [
+        3072,
+        768
+      ],
+      "offset": 318203904,
+      "size_bytes": 9437184,
+      "n_elements": 2359296
+    },
+    {
+      "name": "mlp_proj_b_5",
+      "shape": [
+        768
+      ],
+      "offset": 327641088,
+      "size_bytes": 3072,
+      "n_elements": 768
+    },
+    {
+      "name": "ln1_g_6",
+      "shape": [
+        768
+      ],
+      "offset": 327644160,
+      "size_bytes": 3072,
+      "n_elements": 768
+    },
+    {
+      "name": "ln1_b_6",
+      "shape": [
+        768
+      ],
+      "offset": 327647232,
+      "size_bytes": 3072,
+      "n_elements": 768
+    },
+    {
+      "name": "attn_qkv_w_6",
+      "shape": [
+        768,
+        2304
+      ],
+      "offset": 327650304,
+      "size_bytes": 7077888,
+      "n_elements": 1769472
+    },
+    {
+      "name": "attn_qkv_b_6",
+      "shape": [
+        2304
+      ],
+      "offset": 334728192,
+      "size_bytes": 9216,
+      "n_elements": 2304
+    },
+    {
+      "name": "attn_proj_w_6",
+      "shape": [
+        768,
+        768
+      ],
+      "offset": 334737408,
+      "size_bytes": 2359296,
+      "n_elements": 589824
+    },
+    {
+      "name": "attn_proj_b_6",
+      "shape": [
+        768
+      ],
+      "offset": 337096704,
+      "size_bytes": 3072,
+      "n_elements": 768
+    },
+    {
+      "name": "ln2_g_6",
+      "shape": [
+        768
+      ],
+      "offset": 337099776,
+      "size_bytes": 3072,
+      "n_elements": 768
+    },
+    {
+      "name": "ln2_b_6",
+      "shape": [
+        768
+      ],
+      "offset": 337102848,
+      "size_bytes": 3072,
+      "n_elements": 768
+    },
+    {
+      "name": "mlp_fc_w_6",
+      "shape": [
+        768,
+        3072
+      ],
+      "offset": 337105920,
+      "size_bytes": 9437184,
+      "n_elements": 2359296
+    },
+    {
+      "name": "mlp_fc_b_6",
+      "shape": [
+        3072
+      ],
+      "offset": 346543104,
+      "size_bytes": 12288,
+      "n_elements": 3072
+    },
+    {
+      "name": "mlp_proj_w_6",
+      "shape": [
+        3072,
+        768
+      ],
+      "offset": 346555392,
+      "size_bytes": 9437184,
+      "n_elements": 2359296
+    },
+    {
+      "name": "mlp_proj_b_6",
+      "shape": [
+        768
+      ],
+      "offset": 355992576,
+      "size_bytes": 3072,
+      "n_elements": 768
+    },
+    {
+      "name": "ln1_g_7",
+      "shape": [
+        768
+      ],
+      "offset": 355995648,
+      "size_bytes": 3072,
+      "n_elements": 768
+    },
+    {
+      "name": "ln1_b_7",
+      "shape": [
+        768
+      ],
+      "offset": 355998720,
+      "size_bytes": 3072,
+      "n_elements": 768
+    },
+    {
+      "name": "attn_qkv_w_7",
+      "shape": [
+        768,
+        2304
+      ],
+      "offset": 356001792,
+      "size_bytes": 7077888,
+      "n_elements": 1769472
+    },
+    {
+      "name": "attn_qkv_b_7",
+      "shape": [
+        2304
+      ],
+      "offset": 363079680,
+      "size_bytes": 9216,
+      "n_elements": 2304
+    },
+    {
+      "name": "attn_proj_w_7",
+      "shape": [
+        768,
+        768
+      ],
+      "offset": 363088896,
+      "size_bytes": 2359296,
+      "n_elements": 589824
+    },
+    {
+      "name": "attn_proj_b_7",
+      "shape": [
+        768
+      ],
+      "offset": 365448192,
+      "size_bytes": 3072,
+      "n_elements": 768
+    },
+    {
+      "name": "ln2_g_7",
+      "shape": [
+        768
+      ],
+      "offset": 365451264,
+      "size_bytes": 3072,
+      "n_elements": 768
+    },
+    {
+      "name": "ln2_b_7",
+      "shape": [
+        768
+      ],
+      "offset": 365454336,
+      "size_bytes": 3072,
+      "n_elements": 768
+    },
+    {
+      "name": "mlp_fc_w_7",
+      "shape": [
+        768,
+        3072
+      ],
+      "offset": 365457408,
+      "size_bytes": 9437184,
+      "n_elements": 2359296
+    },
+    {
+      "name": "mlp_fc_b_7",
+      "shape": [
+        3072
+      ],
+      "offset": 374894592,
+      "size_bytes": 12288,
+      "n_elements": 3072
+    },
+    {
+      "name": "mlp_proj_w_7",
+      "shape": [
+        3072,
+        768
+      ],
+      "offset": 374906880,
+      "size_bytes": 9437184,
+      "n_elements": 2359296
+    },
+    {
+      "name": "mlp_proj_b_7",
+      "shape": [
+        768
+      ],
+      "offset": 384344064,
+      "size_bytes": 3072,
+      "n_elements": 768
+    },
+    {
+      "name": "ln1_g_8",
+      "shape": [
+        768
+      ],
+      "offset": 384347136,
+      "size_bytes": 3072,
+      "n_elements": 768
+    },
+    {
+      "name": "ln1_b_8",
+      "shape": [
+        768
+      ],
+      "offset": 384350208,
+      "size_bytes": 3072,
+      "n_elements": 768
+    },
+    {
+      "name": "attn_qkv_w_8",
+      "shape": [
+        768,
+        2304
+      ],
+      "offset": 384353280,
+      "size_bytes": 7077888,
+      "n_elements": 1769472
+    },
+    {
+      "name": "attn_qkv_b_8",
+      "shape": [
+        2304
+      ],
+      "offset": 391431168,
+      "size_bytes": 9216,
+      "n_elements": 2304
+    },
+    {
+      "name": "attn_proj_w_8",
+      "shape": [
+        768,
+        768
+      ],
+      "offset": 391440384,
+      "size_bytes": 2359296,
+      "n_elements": 589824
+    },
+    {
+      "name": "attn_proj_b_8",
+      "shape": [
+        768
+      ],
+      "offset": 393799680,
+      "size_bytes": 3072,
+      "n_elements": 768
+    },
+    {
+      "name": "ln2_g_8",
+      "shape": [
+        768
+      ],
+      "offset": 393802752,
+      "size_bytes": 3072,
+      "n_elements": 768
+    },
+    {
+      "name": "ln2_b_8",
+      "shape": [
+        768
+      ],
+      "offset": 393805824,
+      "size_bytes": 3072,
+      "n_elements": 768
+    },
+    {
+      "name": "mlp_fc_w_8",
+      "shape": [
+        768,
+        3072
+      ],
+      "offset": 393808896,
+      "size_bytes": 9437184,
+      "n_elements": 2359296
+    },
+    {
+      "name": "mlp_fc_b_8",
+      "shape": [
+        3072
+      ],
+      "offset": 403246080,
+      "size_bytes": 12288,
+      "n_elements": 3072
+    },
+    {
+      "name": "mlp_proj_w_8",
+      "shape": [
+        3072,
+        768
+      ],
+      "offset": 403258368,
+      "size_bytes": 9437184,
+      "n_elements": 2359296
+    },
+    {
+      "name": "mlp_proj_b_8",
+      "shape": [
+        768
+      ],
+      "offset": 412695552,
+      "size_bytes": 3072,
+      "n_elements": 768
+    },
+    {
+      "name": "ln1_g_9",
+      "shape": [
+        768
+      ],
+      "offset": 412698624,
+      "size_bytes": 3072,
+      "n_elements": 768
+    },
+    {
+      "name": "ln1_b_9",
+      "shape": [
+        768
+      ],
+      "offset": 412701696,
+      "size_bytes": 3072,
+      "n_elements": 768
+    },
+    {
+      "name": "attn_qkv_w_9",
+      "shape": [
+        768,
+        2304
+      ],
+      "offset": 412704768,
+      "size_bytes": 7077888,
+      "n_elements": 1769472
+    },
+    {
+      "name": "attn_qkv_b_9",
+      "shape": [
+        2304
+      ],
+      "offset": 419782656,
+      "size_bytes": 9216,
+      "n_elements": 2304
+    },
+    {
+      "name": "attn_proj_w_9",
+      "shape": [
+        768,
+        768
+      ],
+      "offset": 419791872,
+      "size_bytes": 2359296,
+      "n_elements": 589824
+    },
+    {
+      "name": "attn_proj_b_9",
+      "shape": [
+        768
+      ],
+      "offset": 422151168,
+      "size_bytes": 3072,
+      "n_elements": 768
+    },
+    {
+      "name": "ln2_g_9",
+      "shape": [
+        768
+      ],
+      "offset": 422154240,
+      "size_bytes": 3072,
+      "n_elements": 768
+    },
+    {
+      "name": "ln2_b_9",
+      "shape": [
+        768
+      ],
+      "offset": 422157312,
+      "size_bytes": 3072,
+      "n_elements": 768
+    },
+    {
+      "name": "mlp_fc_w_9",
+      "shape": [
+        768,
+        3072
+      ],
+      "offset": 422160384,
+      "size_bytes": 9437184,
+      "n_elements": 2359296
+    },
+    {
+      "name": "mlp_fc_b_9",
+      "shape": [
+        3072
+      ],
+      "offset": 431597568,
+      "size_bytes": 12288,
+      "n_elements": 3072
+    },
+    {
+      "name": "mlp_proj_w_9",
+      "shape": [
+        3072,
+        768
+      ],
+      "offset": 431609856,
+      "size_bytes": 9437184,
+      "n_elements": 2359296
+    },
+    {
+      "name": "mlp_proj_b_9",
+      "shape": [
+        768
+      ],
+      "offset": 441047040,
+      "size_bytes": 3072,
+      "n_elements": 768
+    },
+    {
+      "name": "ln1_g_10",
+      "shape": [
+        768
+      ],
+      "offset": 441050112,
+      "size_bytes": 3072,
+      "n_elements": 768
+    },
+    {
+      "name": "ln1_b_10",
+      "shape": [
+        768
+      ],
+      "offset": 441053184,
+      "size_bytes": 3072,
+      "n_elements": 768
+    },
+    {
+      "name": "attn_qkv_w_10",
+      "shape": [
+        768,
+        2304
+      ],
+      "offset": 441056256,
+      "size_bytes": 7077888,
+      "n_elements": 1769472
+    },
+    {
+      "name": "attn_qkv_b_10",
+      "shape": [
+        2304
+      ],
+      "offset": 448134144,
+      "size_bytes": 9216,
+      "n_elements": 2304
+    },
+    {
+      "name": "attn_proj_w_10",
+      "shape": [
+        768,
+        768
+      ],
+      "offset": 448143360,
+      "size_bytes": 2359296,
+      "n_elements": 589824
+    },
+    {
+      "name": "attn_proj_b_10",
+      "shape": [
+        768
+      ],
+      "offset": 450502656,
+      "size_bytes": 3072,
+      "n_elements": 768
+    },
+    {
+      "name": "ln2_g_10",
+      "shape": [
+        768
+      ],
+      "offset": 450505728,
+      "size_bytes": 3072,
+      "n_elements": 768
+    },
+    {
+      "name": "ln2_b_10",
+      "shape": [
+        768
+      ],
+      "offset": 450508800,
+      "size_bytes": 3072,
+      "n_elements": 768
+    },
+    {
+      "name": "mlp_fc_w_10",
+      "shape": [
+        768,
+        3072
+      ],
+      "offset": 450511872,
+      "size_bytes": 9437184,
+      "n_elements": 2359296
+    },
+    {
+      "name": "mlp_fc_b_10",
+      "shape": [
+        3072
+      ],
+      "offset": 459949056,
+      "size_bytes": 12288,
+      "n_elements": 3072
+    },
+    {
+      "name": "mlp_proj_w_10",
+      "shape": [
+        3072,
+        768
+      ],
+      "offset": 459961344,
+      "size_bytes": 9437184,
+      "n_elements": 2359296
+    },
+    {
+      "name": "mlp_proj_b_10",
+      "shape": [
+        768
+      ],
+      "offset": 469398528,
+      "size_bytes": 3072,
+      "n_elements": 768
+    },
+    {
+      "name": "ln1_g_11",
+      "shape": [
+        768
+      ],
+      "offset": 469401600,
+      "size_bytes": 3072,
+      "n_elements": 768
+    },
+    {
+      "name": "ln1_b_11",
+      "shape": [
+        768
+      ],
+      "offset": 469404672,
+      "size_bytes": 3072,
+      "n_elements": 768
+    },
+    {
+      "name": "attn_qkv_w_11",
+      "shape": [
+        768,
+        2304
+      ],
+      "offset": 469407744,
+      "size_bytes": 7077888,
+      "n_elements": 1769472
+    },
+    {
+      "name": "attn_qkv_b_11",
+      "shape": [
+        2304
+      ],
+      "offset": 476485632,
+      "size_bytes": 9216,
+      "n_elements": 2304
+    },
+    {
+      "name": "attn_proj_w_11",
+      "shape": [
+        768,
+        768
+      ],
+      "offset": 476494848,
+      "size_bytes": 2359296,
+      "n_elements": 589824
+    },
+    {
+      "name": "attn_proj_b_11",
+      "shape": [
+        768
+      ],
+      "offset": 478854144,
+      "size_bytes": 3072,
+      "n_elements": 768
+    },
+    {
+      "name": "ln2_g_11",
+      "shape": [
+        768
+      ],
+      "offset": 478857216,
+      "size_bytes": 3072,
+      "n_elements": 768
+    },
+    {
+      "name": "ln2_b_11",
+      "shape": [
+        768
+      ],
+      "offset": 478860288,
+      "size_bytes": 3072,
+      "n_elements": 768
+    },
+    {
+      "name": "mlp_fc_w_11",
+      "shape": [
+        768,
+        3072
+      ],
+      "offset": 478863360,
+      "size_bytes": 9437184,
+      "n_elements": 2359296
+    },
+    {
+      "name": "mlp_fc_b_11",
+      "shape": [
+        3072
+      ],
+      "offset": 488300544,
+      "size_bytes": 12288,
+      "n_elements": 3072
+    },
+    {
+      "name": "mlp_proj_w_11",
+      "shape": [
+        3072,
+        768
+      ],
+      "offset": 488312832,
+      "size_bytes": 9437184,
+      "n_elements": 2359296
+    },
+    {
+      "name": "mlp_proj_b_11",
+      "shape": [
+        768
+      ],
+      "offset": 497750016,
+      "size_bytes": 3072,
+      "n_elements": 768
+    },
+    {
+      "name": "ln_f_g",
+      "shape": [
+        768
+      ],
+      "offset": 497753088,
+      "size_bytes": 3072,
+      "n_elements": 768
+    },
+    {
+      "name": "ln_f_b",
+      "shape": [
+        768
+      ],
+      "offset": 497756160,
+      "size_bytes": 3072,
+      "n_elements": 768
+    }
+  ]
+}

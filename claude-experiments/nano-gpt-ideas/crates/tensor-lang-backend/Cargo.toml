@@ -1,0 +1,12 @@
+[package]
+name = "tensor-lang-backend"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+tensor-lang-graph = { path = "../tensor-lang-graph" }
+
+[dev-dependencies]
+tensor-lang-test-oracle = { path = "../tensor-lang-test-oracle" }
+ndarray = "0.16"
+serde_json = "1"

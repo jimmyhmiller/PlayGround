@@ -23,6 +23,18 @@ const DEFAULT_REPL_SERVER = path.join(
 let beagProcess: child_process.ChildProcess | undefined;
 let serverOutput: string[] = [];
 
+interface ProcessCrashInfo {
+  exitCode: number | null;
+  signal: string | null;
+  stdout: string;
+  stderr: string;
+  startedAt: Date;
+  exitedAt: Date;
+  bgFile: string;
+}
+
+let lastCrash: ProcessCrashInfo | undefined;
+
 function killBeagleServer() {
   disconnectRepl();
   if (beagProcess && !beagProcess.killed) {
@@ -38,18 +50,36 @@ function startBeagleServer(bgFile: string, extraArgs: string[] = []): child_proc
   killBeagleServer();
   serverOutput = [];
 
+  const startedAt = new Date();
+  const stdoutChunks: string[] = [];
+  const stderrChunks: string[] = [];
+
   const proc = child_process.spawn("beag", ["run", ...extraArgs, bgFile], {
     stdio: ["ignore", "pipe", "pipe"],
   });
   proc.stdout?.on("data", (chunk: Buffer) => {
-    serverOutput.push(chunk.toString());
+    const text = chunk.toString();
+    stdoutChunks.push(text);
+    serverOutput.push(text);
   });
   proc.stderr?.on("data", (chunk: Buffer) => {
-    serverOutput.push(`[stderr] ${chunk.toString()}`);
+    const text = chunk.toString();
+    stderrChunks.push(text);
+    serverOutput.push(`[stderr] ${text}`);
   });
-  proc.on("exit", (code) => {
+  proc.on("exit", (code, signal) => {
     if (beagProcess === proc) {
+      lastCrash = {
+        exitCode: code,
+        signal: signal,
+        stdout: stdoutChunks.join(""),
+        stderr: stderrChunks.join(""),
+        startedAt,
+        exitedAt: new Date(),
+        bgFile,
+      };
       beagProcess = undefined;
+      introspectReady = false;
     }
   });
   return proc;
@@ -194,7 +224,11 @@ async function replRequest(op: string, extra: Record<string, string> = {}): Prom
     try {
       await connectRepl();
     } catch (err: any) {
-      return JSON.stringify({ error: `Connection failed: ${err.message}` });
+      let msg = `Connection failed: ${err.message}`;
+      if (lastCrash) {
+        msg += `\n\n${formatCrashInfo(lastCrash)}`;
+      }
+      return JSON.stringify({ error: msg });
     }
   }
 
@@ -381,8 +415,54 @@ function isErrorResponse(result: string): boolean {
 }
 
 // ---------------------------------------------------------------------------
+// Crash info formatting
+// ---------------------------------------------------------------------------
+
+function formatCrashInfo(crash: ProcessCrashInfo): string {
+  const duration = crash.exitedAt.getTime() - crash.startedAt.getTime();
+  const parts = [
+    `Process exited`,
+    `  File: ${crash.bgFile}`,
+    `  Exit code: ${crash.exitCode ?? "unknown"}`,
+    `  Signal: ${crash.signal ?? "none"}`,
+    `  Started: ${crash.startedAt.toISOString()}`,
+    `  Exited: ${crash.exitedAt.toISOString()}`,
+    `  Duration: ${duration}ms`,
+  ];
+  if (crash.stdout.trim()) {
+    parts.push(`\n--- stdout ---\n${crash.stdout.trimEnd()}`);
+  }
+  if (crash.stderr.trim()) {
+    parts.push(`\n--- stderr ---\n${crash.stderr.trimEnd()}`);
+  }
+  return parts.join("\n");
+}
+
+// ---------------------------------------------------------------------------
 // MCP Tools
 // ---------------------------------------------------------------------------
+
+const beagleStatus = tool(
+  "beagle_status",
+  "Check the status of the Beagle process. Shows whether it's running, and if it crashed, " +
+  "shows the exit code, signal, stdout, stderr, and timing information.",
+  {},
+  async () => {
+    const parts: string[] = [];
+    if (beagProcess && !beagProcess.killed) {
+      parts.push(`Process is running (PID: ${beagProcess.pid})`);
+      parts.push(`REPL connected: ${replConnected}`);
+    } else {
+      parts.push("Process is not running.");
+    }
+    if (lastCrash) {
+      parts.push("");
+      parts.push("Last exit:");
+      parts.push(formatCrashInfo(lastCrash));
+    }
+    return { content: [{ type: "text" as const, text: parts.join("\n") }] };
+  }
+);
 
 const beagleEval = tool(
   "beagle_eval",
@@ -490,8 +570,9 @@ fn main() {
       await waitForPort(REPL_HOST, REPL_PORT);
     } catch {
       const output = serverOutput.join("");
+      const crashInfo = lastCrash ? `\n\n${formatCrashInfo(lastCrash)}` : "";
       killBeagleServer();
-      return { content: [{ type: "text" as const, text: `Failed to start server.\n\nServer output:\n${output}` }] };
+      return { content: [{ type: "text" as const, text: `Failed to start server.\n\nServer output:\n${output}${crashInfo}` }] };
     }
 
     // Connect the persistent socket
@@ -681,7 +762,7 @@ const server = createSdkMcpServer({
   name: "beagle-repl",
   tools: [
     beagleRun, beagleLoad, beagleEval, beagleDescribe, beagleSessions, beagleInterrupt,
-    beagleListNamespaces, beagleNamespaceInfo, beagleSearch, beagleDoc,
+    beagleStatus, beagleListNamespaces, beagleNamespaceInfo, beagleSearch, beagleDoc,
   ],
 });
 
@@ -711,6 +792,8 @@ goes through the REPL.
   Use it to define functions, test expressions, and run code. \
   The code is evaluated in the live running Beagle program.
 - **beagle_interrupt**: Stop a long-running evaluation.
+- **beagle_status**: Check if the Beagle process is running. If it crashed, shows \
+  the exit code, signal, stdout, stderr, and timing. Use this to diagnose crashes.
 - **beagle_describe**: Discover what operations the REPL server supports.
 - **beagle_sessions**: List active REPL sessions.
 
@@ -837,6 +920,7 @@ async function main() {
             "mcp__beagle-repl__beagle_describe",
             "mcp__beagle-repl__beagle_sessions",
             "mcp__beagle-repl__beagle_interrupt",
+            "mcp__beagle-repl__beagle_status",
             "mcp__beagle-repl__beagle_list_namespaces",
             "mcp__beagle-repl__beagle_namespace_info",
             "mcp__beagle-repl__beagle_search",
