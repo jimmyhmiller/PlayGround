@@ -23,7 +23,12 @@ impl Parser {
         match self.peek() {
             Token::Fn => Item::FnDef(self.parse_fn_def()),
             Token::Let => Item::Let(self.parse_let()),
-            _ => panic!("expected 'fn' or 'let', got {:?}", self.peek()),
+            Token::DimKw => {
+                self.advance();
+                let name = self.expect_ident();
+                Item::DimDecl(name)
+            }
+            _ => panic!("expected 'fn', 'let', or 'dim', got {:?}", self.peek()),
         }
     }
 

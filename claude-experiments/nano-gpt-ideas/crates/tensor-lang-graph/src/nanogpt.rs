@@ -4,25 +4,26 @@
 ///   0: tokens [B, T] (float indices)
 ///   1: wte [vocab_size, n_embd]
 ///   2: wpe [T, n_embd]
+///   3: attn_mask [B, 1, T, T] (pre-scaled: 0.0=attend, -1e6=masked)
 ///   Then for each layer i (0..n_layer):
-///     3 + i*12 + 0:  ln1_gamma [n_embd]
-///     3 + i*12 + 1:  ln1_beta  [n_embd]
-///     3 + i*12 + 2:  attn_qkv_w [n_embd, 3*n_embd]  (pre-transposed)
-///     3 + i*12 + 3:  attn_qkv_b [3*n_embd]
-///     3 + i*12 + 4:  attn_proj_w [n_embd, n_embd]    (pre-transposed)
-///     3 + i*12 + 5:  attn_proj_b [n_embd]
-///     3 + i*12 + 6:  ln2_gamma [n_embd]
-///     3 + i*12 + 7:  ln2_beta  [n_embd]
-///     3 + i*12 + 8:  mlp_fc_w [n_embd, 4*n_embd]     (pre-transposed)
-///     3 + i*12 + 9:  mlp_fc_b [4*n_embd]
-///     3 + i*12 + 10: mlp_proj_w [4*n_embd, n_embd]    (pre-transposed)
-///     3 + i*12 + 11: mlp_proj_b [n_embd]
+///     4 + i*12 + 0:  ln1_gamma [n_embd]
+///     4 + i*12 + 1:  ln1_beta  [n_embd]
+///     4 + i*12 + 2:  attn_qkv_w [n_embd, 3*n_embd]  (pre-transposed)
+///     4 + i*12 + 3:  attn_qkv_b [3*n_embd]
+///     4 + i*12 + 4:  attn_proj_w [n_embd, n_embd]    (pre-transposed)
+///     4 + i*12 + 5:  attn_proj_b [n_embd]
+///     4 + i*12 + 6:  ln2_gamma [n_embd]
+///     4 + i*12 + 7:  ln2_beta  [n_embd]
+///     4 + i*12 + 8:  mlp_fc_w [n_embd, 4*n_embd]     (pre-transposed)
+///     4 + i*12 + 9:  mlp_fc_b [4*n_embd]
+///     4 + i*12 + 10: mlp_proj_w [4*n_embd, n_embd]    (pre-transposed)
+///     4 + i*12 + 11: mlp_proj_b [n_embd]
 ///   Final:
-///     3 + n_layer*12 + 0: ln_f_gamma [n_embd]
-///     3 + n_layer*12 + 1: ln_f_beta  [n_embd]
+///     4 + n_layer*12 + 0: ln_f_gamma [n_embd]
+///     4 + n_layer*12 + 1: ln_f_beta  [n_embd]
 ///   (lm_head reuses wte due to weight tying)
 ///
-/// Returns the DSL source string.
+/// Returns the DSL source string with concrete seq_len.
 pub fn generate_nanogpt_program(
     batch: usize,
     seq_len: usize,
@@ -31,12 +32,40 @@ pub fn generate_nanogpt_program(
     n_head: usize,
     n_layer: usize,
 ) -> String {
+    generate_nanogpt_program_inner(batch, &seq_len.to_string(), vocab_size, n_embd, n_head, n_layer, false)
+}
+
+/// Returns the DSL source string with symbolic seq_len (dimension parameter "T").
+pub fn generate_nanogpt_program_symbolic(
+    batch: usize,
+    vocab_size: usize,
+    n_embd: usize,
+    n_head: usize,
+    n_layer: usize,
+) -> String {
+    generate_nanogpt_program_inner(batch, "T", vocab_size, n_embd, n_head, n_layer, true)
+}
+
+fn generate_nanogpt_program_inner(
+    batch: usize,
+    seq_len: &str,
+    vocab_size: usize,
+    n_embd: usize,
+    n_head: usize,
+    n_layer: usize,
+    symbolic: bool,
+) -> String {
     let head_size = n_embd / n_head;
     let mlp_hidden = 4 * n_embd;
     let inv_d = 1.0 / n_embd as f64;
     let inv_head_size = 1.0 / (head_size as f64).sqrt();
 
     let mut p = String::new();
+
+    // Declare symbolic dim if needed
+    if symbolic {
+        p.push_str("dim T\n");
+    }
 
     // Helper functions
     p.push_str(&format!(r#"
@@ -80,10 +109,14 @@ fn softmax_attn(x) {{
 
 "#));
 
-    // Load shared weights
+    // Load shared weights and attention mask
     p.push_str(&format!("let tokens = load([{batch}, {seq_len}])\n"));
     p.push_str(&format!("let wte = load([{vocab_size}, {n_embd}])\n"));
     p.push_str(&format!("let wpe = load([{seq_len}, {n_embd}])\n"));
+    p.push_str(&format!("let attn_mask = load([{batch}, 1, {seq_len}, {seq_len}])\n"));
+
+    // Expand mask to all heads (once, reused by all layers)
+    p.push_str(&format!("let mask_full = expand(attn_mask, [{batch}, {n_head}, {seq_len}, {seq_len}])\n"));
 
     // Embedding: one-hot tokens @ wte + wpe
     // one_hot: for each position, create a [vocab_size] indicator vector
@@ -131,13 +164,7 @@ let k_h_{i} = permute(k_{i}, [0, 2, 1, 3])
 let v_h_{i} = permute(v_{i}, [0, 2, 1, 3])
 let kt_{i} = permute(k_h_{i}, [0, 1, 3, 2])
 let scores_{i} = mul(matmul(q_h_{i}, kt_{i}), {inv_head_size})
-let mask_rows = reshape(arange({seq_len}), [1, 1, {seq_len}, 1])
-let mask_cols = reshape(arange({seq_len}), [1, 1, 1, {seq_len}])
-let mask_r = expand(mask_rows, [{batch}, {n_head}, {seq_len}, {seq_len}])
-let mask_c = expand(mask_cols, [{batch}, {n_head}, {seq_len}, {seq_len}])
-let causal_{i} = cmplt(mask_r, mask_c)
-let neg_inf_{i} = expand(reshape(neg(1000000.0), [1, 1, 1, 1]), [{batch}, {n_head}, {seq_len}, {seq_len}])
-let masked_{i} = add(scores_{i}, mul(causal_{i}, neg_inf_{i}))
+let masked_{i} = add(scores_{i}, mask_full)
 let attn_{i} = softmax_attn(masked_{i})
 let attn_out_{i} = matmul(attn_{i}, v_h_{i})
 let merged_{i} = reshape(permute(attn_out_{i}, [0, 2, 1, 3]), [{batch}, {seq_len}, {n_embd}])
@@ -169,7 +196,7 @@ let logits = matmul(x_norm, wte_2d)
 
 /// Return the total number of inputs the generated program expects.
 pub fn nanogpt_input_count(n_layer: usize) -> usize {
-    3 + n_layer * 12 + 2  // tokens, wte, wpe, 12 per layer, ln_f_gamma, ln_f_beta
+    4 + n_layer * 12 + 2  // tokens, wte, wpe, attn_mask, 12 per layer, ln_f_gamma, ln_f_beta
 }
 
 /// Return the input names in order with their shapes.
@@ -185,6 +212,7 @@ pub fn nanogpt_input_layout(
         ("tokens".into(), vec![batch, seq_len]),
         ("wte".into(), vec![vocab_size, n_embd]),
         ("wpe".into(), vec![seq_len, n_embd]),
+        ("attn_mask".into(), vec![batch, 1, seq_len, seq_len]),
     ];
     for i in 0..n_layer {
         inputs.extend([

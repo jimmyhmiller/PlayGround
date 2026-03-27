@@ -12,15 +12,19 @@ const manifestPath = process.argv[4];
 const wasmModule = await loader.instantiate(readFileSync(wasmPath));
 const exports = wasmModule.exports;
 
-const manifest = JSON.parse(readFileSync(manifestPath, "utf-8"));
+const manifestRaw = JSON.parse(readFileSync(manifestPath, "utf-8"));
 const inputsBuf = readFileSync(inputsBinPath);
+
+// Support both old format (array) and new format (object with dim_params + inputs)
+const dimParams = Array.isArray(manifestRaw) ? [] : (manifestRaw.dim_params || []);
+const inputsManifest = Array.isArray(manifestRaw) ? manifestRaw : manifestRaw.inputs;
 
 const arrayId = exports.Float32Array_ID.value;
 const wasmInputs = [];
 let offset = 0;
 
-for (let idx = 0; idx < manifest.length; idx++) {
-    const n = manifest[idx].n_elements;
+for (let idx = 0; idx < inputsManifest.length; idx++) {
+    const n = inputsManifest[idx].n_elements;
     const f32arr = new Float32Array(inputsBuf.buffer, inputsBuf.byteOffset + offset, n);
     const ptr = exports.__newArray(arrayId, Array.from(f32arr));
     exports.__pin(ptr);  // prevent GC from collecting during later allocations
@@ -28,9 +32,9 @@ for (let idx = 0; idx < manifest.length; idx++) {
     offset += n * 4;
 }
 
-console.error(`Loaded ${manifest.length} inputs, running execute()...`);
+console.error(`Loaded ${inputsManifest.length} inputs${dimParams.length ? ` + ${dimParams.length} dim params` : ''}, running execute()...`);
 const t0 = performance.now();
-const result = exports.execute(...wasmInputs);
+const result = exports.execute(...dimParams, ...wasmInputs);
 const elapsed = performance.now() - t0;
 console.error(`execute() took ${(elapsed / 1000).toFixed(1)}s`);
 // Unpin inputs

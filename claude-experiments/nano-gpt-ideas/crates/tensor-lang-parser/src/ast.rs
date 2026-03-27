@@ -2,6 +2,8 @@
 pub enum Item {
     FnDef(FnDef),
     Let(LetBinding),
+    /// Declare a symbolic dimension parameter: `dim T`
+    DimDecl(String),
 }
 
 #[derive(Debug, Clone, PartialEq)]

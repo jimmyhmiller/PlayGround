@@ -84,14 +84,14 @@ fn build_inputs(graph: &tensor_lang_graph::Graph, vocab_size: usize) -> HashMap<
     let mut inputs = HashMap::new();
     for node in &graph.nodes {
         if let Op::Input { name } = &node.op {
-            let shape = &node.shape;
+            let shape: Vec<usize> = node.shape.iter().map(|d| d.as_usize().unwrap()).collect();
             let size: usize = shape.iter().product();
             let data: Vec<f32> = if name == "input_0" {
                 (0..size).map(|i| (i % vocab_size) as f32).collect()
             } else {
                 (0..size).map(|i| (i as f32 * 0.1).sin() * 0.1).collect()
             };
-            inputs.insert(name.clone(), ArrayD::from_shape_vec(shape.clone(), data).unwrap());
+            inputs.insert(name.clone(), ArrayD::from_shape_vec(shape, data).unwrap());
         }
     }
     inputs
@@ -176,7 +176,7 @@ fn bench_oracle_gpt2_single_token() {
     let input_nodes: Vec<(String, Vec<usize>)> = graph.nodes.iter()
         .filter_map(|n| {
             if let Op::Input { name } = &n.op {
-                Some((name.clone(), n.shape.clone()))
+                Some((name.clone(), n.shape.iter().map(|d| d.as_usize().unwrap()).collect()))
             } else { None }
         }).collect();
 

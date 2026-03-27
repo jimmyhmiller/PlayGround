@@ -1,6 +1,10 @@
 use ndarray::{ArrayD, IxDyn};
-use tensor_lang_graph::{Graph, Op};
+use tensor_lang_graph::{Dim, Graph, Op};
 use std::collections::HashMap;
+
+fn dim_shape_to_usize(shape: &[Dim]) -> Vec<usize> {
+    shape.iter().map(|d| d.as_usize().expect("symbolic dim not yet supported in oracle")).collect()
+}
 
 /// Execute a graph with specific input values using ndarray as the reference.
 /// Returns the value of every node in the graph.
@@ -29,7 +33,8 @@ fn eval_node(node: &tensor_lang_graph::Node, buffers: &[Option<ArrayD<f32>>]) ->
         Op::Constant(v) => ArrayD::from_elem(IxDyn(&[]), *v as f32),
 
         Op::Arange { size } => {
-            ArrayD::from_shape_vec(IxDyn(&[*size]), (0..*size).map(|i| i as f32).collect()).unwrap()
+            let sz = size.as_usize().expect("symbolic dim not yet supported in oracle");
+            ArrayD::from_shape_vec(IxDyn(&[sz]), (0..sz).map(|i| i as f32).collect()).unwrap()
         }
 
         Op::Neg => {
@@ -56,22 +61,22 @@ fn eval_node(node: &tensor_lang_graph::Node, buffers: &[Option<ArrayD<f32>>]) ->
         Op::Add => {
             let a = buffers[node.inputs[0].0].as_ref().unwrap();
             let b = buffers[node.inputs[1].0].as_ref().unwrap();
-            broadcast_binop(a, b, |x, y| x + y, &node.shape)
+            broadcast_binop(a, b, |x, y| x + y, &dim_shape_to_usize(&node.shape))
         }
         Op::Mul => {
             let a = buffers[node.inputs[0].0].as_ref().unwrap();
             let b = buffers[node.inputs[1].0].as_ref().unwrap();
-            broadcast_binop(a, b, |x, y| x * y, &node.shape)
+            broadcast_binop(a, b, |x, y| x * y, &dim_shape_to_usize(&node.shape))
         }
         Op::Max => {
             let a = buffers[node.inputs[0].0].as_ref().unwrap();
             let b = buffers[node.inputs[1].0].as_ref().unwrap();
-            broadcast_binop(a, b, |x, y| x.max(y), &node.shape)
+            broadcast_binop(a, b, |x, y| x.max(y), &dim_shape_to_usize(&node.shape))
         }
         Op::CmpLt => {
             let a = buffers[node.inputs[0].0].as_ref().unwrap();
             let b = buffers[node.inputs[1].0].as_ref().unwrap();
-            broadcast_binop(a, b, |x, y| if x < y { 1.0 } else { 0.0 }, &node.shape)
+            broadcast_binop(a, b, |x, y| if x < y { 1.0 } else { 0.0 }, &dim_shape_to_usize(&node.shape))
         }
 
         Op::ReduceSum { axis } => {
@@ -87,9 +92,10 @@ fn eval_node(node: &tensor_lang_graph::Node, buffers: &[Option<ArrayD<f32>>]) ->
 
         Op::Reshape { shape } => {
             let a = buffers[node.inputs[0].0].as_ref().unwrap();
+            let usize_shape = dim_shape_to_usize(shape);
             // Ensure contiguous layout before reshape (permute can make it non-contiguous)
             let contiguous = a.as_standard_layout().into_owned();
-            contiguous.into_shape_with_order(IxDyn(shape)).unwrap()
+            contiguous.into_shape_with_order(IxDyn(&usize_shape)).unwrap()
         }
         Op::Permute { order } => {
             let a = buffers[node.inputs[0].0].as_ref().unwrap();
@@ -97,7 +103,8 @@ fn eval_node(node: &tensor_lang_graph::Node, buffers: &[Option<ArrayD<f32>>]) ->
         }
         Op::Expand { shape } => {
             let a = buffers[node.inputs[0].0].as_ref().unwrap();
-            a.broadcast(IxDyn(shape)).unwrap().to_owned()
+            let usize_shape = dim_shape_to_usize(shape);
+            a.broadcast(IxDyn(&usize_shape)).unwrap().to_owned()
         }
 
         Op::Pad { padding } => {
@@ -117,8 +124,12 @@ fn eval_node(node: &tensor_lang_graph::Node, buffers: &[Option<ArrayD<f32>>]) ->
         }
         Op::Shrink { bounds } => {
             let a = buffers[node.inputs[0].0].as_ref().unwrap();
+            let usize_bounds: Vec<(usize, usize)> = bounds.iter().map(|(lo, hi)| {
+                (lo.as_usize().expect("symbolic dim not yet supported in oracle"),
+                 hi.as_usize().expect("symbolic dim not yet supported in oracle"))
+            }).collect();
             a.slice_each_axis(|ax| {
-                let (lo, hi) = bounds[ax.axis.index()];
+                let (lo, hi) = usize_bounds[ax.axis.index()];
                 ndarray::Slice::from(lo..hi)
             }).to_owned()
         }

@@ -72,77 +72,109 @@ impl Model {
         let encoding = self.tokenizer.encode(prompt, false).unwrap();
         let mut tokens: Vec<u32> = encoding.get_ids().to_vec();
 
+        // Compile once with symbolic seq_len (T)
+        eprintln!("Compiling graph with symbolic seq_len...");
+        let t_compile = Instant::now();
+
+        let program = nanogpt::generate_nanogpt_program_symbolic(
+            1, self.vocab_size, self.n_embd, self.n_head, self.n_layer,
+        );
+        let graph = compile(&program);
+
+        let backend = AssemblyScriptBackend;
+        let as_code = backend.emit_fused(&graph);
+        eprintln!("  {} nodes, {} lines AS", graph.nodes.len(), as_code.lines().count());
+
+        let src_path = tmp_dir.join("gpt2_cached.ts");
+        let wasm_path = tmp_dir.join("gpt2_cached.wasm");
+        std::fs::write(&src_path, &as_code).unwrap();
+
+        let asc_output = Command::new("npx")
+            .args(["asc", src_path.to_str().unwrap(),
+                   "--outFile", wasm_path.to_str().unwrap(),
+                   "--exportRuntime", "--optimize",
+                   "--initialMemory", "2048",
+                   "--maximumMemory", "65536"])
+            .current_dir(&root)
+            .output()
+            .expect("failed to run asc");
+
+        if !asc_output.status.success() {
+            let stderr = String::from_utf8_lossy(&asc_output.stderr);
+            eprintln!("asc compilation failed: {}", &stderr[..stderr.len().min(500)]);
+            return;
+        }
+        eprintln!("Compiled in {:.1}s", t_compile.elapsed().as_secs_f64());
+
+        // Count inputs (tokens=0, wte=1, wpe=2, attn_mask=3, then weights)
+        let n_inputs = graph.nodes.iter()
+            .filter(|n| matches!(&n.op, Op::Input { .. }))
+            .count();
+        let mask_input_idx = 3;
+
+        // Prepare weight inputs once (they don't change between steps)
+        let mut weight_data: Vec<(usize, Vec<f32>)> = Vec::new();
+        let mut wi = 0;
+        for idx in 1..n_inputs {
+            if idx == mask_input_idx {
+                continue; // mask is dynamic, built per step
+            }
+            let (ref _wname, ref data, _) = self.weights[wi];
+            wi += 1;
+            weight_data.push((idx, data.clone()));
+        }
+
         print!("{}", prompt);
         io::stdout().flush().unwrap();
 
         let t_gen = Instant::now();
+        let runner = root.join("test_runner_bin.mjs");
+        let inputs_bin_path = tmp_dir.join("gpt2_cli_inputs.bin");
+        let inputs_manifest_path = tmp_dir.join("gpt2_cli_manifest.json");
 
         for step in 0..max_tokens {
-            let seq_len = tokens.len();
-
-            // Generate DSL program and compile to graph
-            let program = nanogpt::generate_nanogpt_program(
-                1, seq_len, self.vocab_size, self.n_embd, self.n_head, self.n_layer,
-            );
-            let graph = compile(&program);
-
-            // Emit fused AssemblyScript
-            let backend = AssemblyScriptBackend;
-            let as_code = backend.emit_fused(&graph);
-
-            // Write AS source and compile to WASM
-            let src_path = tmp_dir.join(format!("gpt2_cli_{step}.ts"));
-            let wasm_path = tmp_dir.join(format!("gpt2_cli_{step}.wasm"));
-            std::fs::write(&src_path, &as_code).unwrap();
-
-            let asc_output = Command::new("npx")
-                .args(["asc", src_path.to_str().unwrap(),
-                       "--outFile", wasm_path.to_str().unwrap(),
-                       "--exportRuntime", "--optimize",
-                       "--initialMemory", "2048",
-                       "--maximumMemory", "65536"])
-                .current_dir(&root)
-                .output()
-                .expect("failed to run asc");
-
-            if !asc_output.status.success() {
-                let stderr = String::from_utf8_lossy(&asc_output.stderr);
-                eprintln!("asc compilation failed: {}", &stderr[..stderr.len().min(500)]);
-                return;
+            let actual_t = tokens.len();
+            if actual_t > 1024 {
+                eprintln!("Sequence exceeds 1024 tokens");
+                break;
             }
 
-            // Build inputs: token IDs + weights in graph order
-            let input_nodes: Vec<(String, Vec<usize>)> = graph.nodes.iter()
-                .filter_map(|n| {
-                    if let Op::Input { name } = &n.op {
-                        Some((name.clone(), n.shape.clone()))
-                    } else { None }
-                }).collect();
+            // Build dynamic inputs sized to actual_t (NOT padded!)
+            let token_input: Vec<f32> = tokens.iter().map(|&t| t as f32).collect();
 
-            let mut flat_inputs: Vec<Vec<f32>> = Vec::new();
+            // wpe: first actual_t rows of the full positional embedding table
+            let wpe_data = &self.weights[1].1; // wpe is the 2nd weight
+            let wpe_slice = &wpe_data[..actual_t * self.n_embd];
 
-            // Token input
-            let token_floats: Vec<f32> = tokens.iter().map(|&t| t as f32).collect();
-            flat_inputs.push(token_floats);
-
-            // Weight inputs
-            for (input_idx, (_, shape)) in input_nodes.iter().enumerate().skip(1) {
-                let (ref wname, ref data, _) = self.weights[input_idx - 1];
-
-                if wname == "wpe" && data.len() / self.n_embd > shape[0] {
-                    flat_inputs.push(data[..shape[0] * self.n_embd].to_vec());
-                } else {
-                    flat_inputs.push(data.clone());
+            // Attention mask: causal only, sized to actual_t x actual_t
+            let mut mask = vec![0.0f32; actual_t * actual_t];
+            for i in 0..actual_t {
+                for j in 0..actual_t {
+                    if j > i {
+                        mask[i * actual_t + j] = -1000000.0;
+                    }
                 }
             }
 
-            // Write inputs as binary + manifest
-            let inputs_bin_path = tmp_dir.join(format!("gpt2_cli_{step}_inputs.bin"));
-            let inputs_manifest_path = tmp_dir.join(format!("gpt2_cli_{step}_manifest.json"));
+            // Assemble all inputs in graph order
+            let mut flat_inputs: Vec<&[f32]> = vec![&[]; n_inputs];
+            flat_inputs[0] = &token_input;
+            // wte at index 1 — full table, doesn't change
+            flat_inputs[1] = &self.weights[0].1;
+            // wpe at index 2 — sliced to actual_t rows
+            flat_inputs[2] = wpe_slice;
+            // mask at index 3
+            flat_inputs[mask_input_idx] = &mask;
+            // remaining weights
+            for (idx, data) in &weight_data {
+                flat_inputs[*idx] = data;
+            }
+
+            // Write binary + manifest with dim_params
             {
                 let mut f = io::BufWriter::new(std::fs::File::create(&inputs_bin_path).unwrap());
                 for arr in &flat_inputs {
-                    for v in arr {
+                    for v in *arr {
                         f.write_all(&v.to_le_bytes()).unwrap();
                     }
                 }
@@ -150,10 +182,15 @@ impl Model {
             let manifest_entries: Vec<String> = flat_inputs.iter()
                 .map(|arr| format!("{{\"n_elements\":{}}}", arr.len()))
                 .collect();
-            std::fs::write(&inputs_manifest_path, format!("[{}]", manifest_entries.join(","))).unwrap();
+            let manifest = format!(
+                "{{\"dim_params\":[{}],\"inputs\":[{}]}}",
+                actual_t,
+                manifest_entries.join(",")
+            );
+            std::fs::write(&inputs_manifest_path, &manifest).unwrap();
 
-            // Run WASM
-            let runner = root.join("test_runner_bin.mjs");
+            // Run WASM (no recompilation — same .wasm, just different T)
+            let t_step = Instant::now();
             let node_output = Command::new("node")
                 .args(["--max-old-space-size=8192",
                        runner.to_str().unwrap(),
@@ -177,8 +214,8 @@ impl Model {
                 .map(|v| v.trim().parse::<f32>().unwrap())
                 .collect();
 
-            // Get logits for the last position, pick greedy
-            let last_start = (seq_len - 1) * self.vocab_size;
+            // Get logits for the last position (output is [1, T, vocab])
+            let last_start = (actual_t - 1) * self.vocab_size;
             let last_logits = &logits[last_start..last_start + self.vocab_size];
             let next_token = last_logits.iter()
                 .enumerate()
@@ -190,17 +227,21 @@ impl Model {
             print!("{}", text);
             io::stdout().flush().unwrap();
 
-
-            // Cleanup temp files
-            let _ = std::fs::remove_file(&src_path);
-            let _ = std::fs::remove_file(&wasm_path);
-            let _ = std::fs::remove_file(&inputs_bin_path);
-            let _ = std::fs::remove_file(&inputs_manifest_path);
+            let step_time = t_step.elapsed().as_secs_f64();
+            if step == 0 {
+                eprintln!("  (first token: {step_time:.1}s)");
+            }
 
             tokens.push(next_token);
 
             if next_token == 50256 { break; } // <|endoftext|>
         }
+
+        // Cleanup
+        let _ = std::fs::remove_file(&src_path);
+        let _ = std::fs::remove_file(&wasm_path);
+        let _ = std::fs::remove_file(&inputs_bin_path);
+        let _ = std::fs::remove_file(&inputs_manifest_path);
 
         println!();
         let generated = tokens.len() - encoding.get_ids().len();

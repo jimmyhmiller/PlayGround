@@ -10,6 +10,54 @@ import { query, tool, createSdkMcpServer } from "@anthropic-ai/claude-agent-sdk"
 import { z } from "zod";
 
 // ---------------------------------------------------------------------------
+// Logging
+// ---------------------------------------------------------------------------
+
+const LOG_FILE = path.join(
+  path.dirname(new URL(import.meta.url).pathname),
+  "beagle_agent.log"
+);
+
+function log(level: "INFO" | "WARN" | "ERROR", msg: string, data?: unknown) {
+  const ts = new Date().toISOString();
+  let line = `[${ts}] ${level}: ${msg}`;
+  if (data !== undefined) {
+    try {
+      line += ` ${JSON.stringify(data, null, 2)}`;
+    } catch {
+      line += ` [unstringifiable data]`;
+    }
+  }
+  line += "\n";
+  try {
+    fs.appendFileSync(LOG_FILE, line);
+  } catch {
+    // If we can't write to log file, at least stderr it
+    process.stderr.write(`[log-write-failed] ${line}`);
+  }
+}
+
+// Truncate log on startup so it doesn't grow unbounded
+try { fs.writeFileSync(LOG_FILE, `--- Beagle Agent started at ${new Date().toISOString()} ---\n`); } catch {}
+
+// Catch unhandled errors globally
+process.on("uncaughtException", (err) => {
+  log("ERROR", "Uncaught exception", { message: err.message, stack: err.stack });
+  console.error(`\n[FATAL] Uncaught exception: ${err.message}`);
+  console.error(`See ${LOG_FILE} for details.`);
+  process.exit(1);
+});
+
+process.on("unhandledRejection", (reason) => {
+  const msg = reason instanceof Error ? reason.message : String(reason);
+  const stack = reason instanceof Error ? reason.stack : undefined;
+  log("ERROR", "Unhandled rejection", { message: msg, stack });
+  console.error(`\n[FATAL] Unhandled rejection: ${msg}`);
+  console.error(`See ${LOG_FILE} for details.`);
+  process.exit(1);
+});
+
+// ---------------------------------------------------------------------------
 // Beagle REPL server management
 // ---------------------------------------------------------------------------
 
@@ -38,6 +86,7 @@ let lastCrash: ProcessCrashInfo | undefined;
 function killBeagleServer() {
   disconnectRepl();
   if (beagProcess && !beagProcess.killed) {
+    log("INFO", "Killing beagle server", { pid: beagProcess.pid });
     beagProcess.kill();
     beagProcess = undefined;
     introspectReady = false;
@@ -68,6 +117,7 @@ function startBeagleServer(bgFile: string, extraArgs: string[] = []): child_proc
     serverOutput.push(`[stderr] ${text}`);
   });
   proc.on("exit", (code, signal) => {
+    log("WARN", "Beagle process exited", { bgFile, exitCode: code, signal });
     if (beagProcess === proc) {
       lastCrash = {
         exitCode: code,
@@ -880,6 +930,7 @@ async function main() {
 
   console.log("Beagle Live Code Agent");
   console.log("======================");
+  console.log(`Logging to: ${LOG_FILE}`);
   console.log("Ask me to run a .bg file or start the default REPL server.\n");
 
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
@@ -929,31 +980,46 @@ async function main() {
           model: "claude-sonnet-4-6",
         };
 
-    for await (const message of query({ prompt: userInput, options })) {
-      if (message.type === "assistant") {
-        // Full assistant message — print text blocks, show tool use calls
-        const msg = message as any;
-        for (const block of msg.message?.content ?? []) {
-          if (block.type === "text" && block.text) {
-            console.log(block.text);
-          } else if (block.type === "tool_use") {
-            const input = block.input as Record<string, unknown>;
-            const summary = input.code
-              ? `${block.name}(${String(input.code).slice(0, 80)}${String(input.code).length > 80 ? "..." : ""})`
-              : `${block.name}(${JSON.stringify(input).slice(0, 80)})`;
-            console.log(`\x1b[2m⚙ ${summary}\x1b[0m`);
+    log("INFO", "Sending query to Claude", { promptLength: userInput.length, hasSession: !!sessionId });
+
+    try {
+      for await (const message of query({ prompt: userInput, options })) {
+        log("INFO", "Received message", { type: message.type, subtype: (message as any).subtype });
+
+        if (message.type === "assistant") {
+          // Full assistant message — print text blocks, show tool use calls
+          const msg = message as any;
+          for (const block of msg.message?.content ?? []) {
+            if (block.type === "text" && block.text) {
+              console.log(block.text);
+            } else if (block.type === "tool_use") {
+              const input = block.input as Record<string, unknown>;
+              const summary = input.code
+                ? `${block.name}(${String(input.code).slice(0, 80)}${String(input.code).length > 80 ? "..." : ""})`
+                : `${block.name}(${JSON.stringify(input).slice(0, 80)})`;
+              console.log(`\x1b[2m⚙ ${summary}\x1b[0m`);
+              log("INFO", "Tool call", { tool: block.name, input });
+            }
           }
+        } else if (message.type === "result") {
+          const result = (message as any).result;
+          if (result) console.log(result);
+          log("INFO", "Query completed with result", { resultLength: result?.length });
+        } else if (
+          message.type === "system" &&
+          (message as any).subtype === "init" &&
+          !sessionId
+        ) {
+          sessionId = (message as any).session_id;
+          log("INFO", "Session initialized", { sessionId });
         }
-      } else if (message.type === "result") {
-        const result = (message as any).result;
-        if (result) console.log(result);
-      } else if (
-        message.type === "system" &&
-        (message as any).subtype === "init" &&
-        !sessionId
-      ) {
-        sessionId = (message as any).session_id;
       }
+      log("INFO", "Query stream ended normally");
+    } catch (err: any) {
+      log("ERROR", "Query failed", { message: err.message, stack: err.stack, name: err.name });
+      console.error(`\n[ERROR] Agent query failed: ${err.message}`);
+      console.error(`See ${LOG_FILE} for details.`);
+      // Don't exit — let the user try again
     }
   }
 

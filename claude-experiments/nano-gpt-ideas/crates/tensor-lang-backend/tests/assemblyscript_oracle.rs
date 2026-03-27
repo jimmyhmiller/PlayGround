@@ -528,16 +528,16 @@ fn test_nanogpt_oracle() {
     let mut inputs = HashMap::new();
     for node in &graph.nodes {
         if let tensor_lang_graph::Op::Input { name } = &node.op {
-            let shape = &node.shape;
+            let shape: Vec<usize> = node.shape.iter().map(|d| d.as_usize().unwrap()).collect();
             let size: usize = shape.iter().product();
             let data: Vec<f32> = if name == "input_0" {
                 // Token indices: random ints in [0, vocab_size)
                 (0..size).map(|i| (i % vocab_size) as f32).collect()
             } else {
                 // Weights: small values to keep things numerically stable
-                (0..size).map(|i| ((i as f32 * 0.1).sin() * 0.1)).collect()
+                (0..size).map(|i| (i as f32 * 0.1).sin() * 0.1).collect()
             };
-            let arr = ArrayD::from_shape_vec(shape.clone(), data).unwrap();
+            let arr = ArrayD::from_shape_vec(shape, data).unwrap();
             inputs.insert(name.clone(), arr);
         }
     }
@@ -574,14 +574,14 @@ fn test_nanogpt_oracle_as() {
     let mut inputs = HashMap::new();
     for node in &graph.nodes {
         if let tensor_lang_graph::Op::Input { name } = &node.op {
-            let shape = &node.shape;
+            let shape: Vec<usize> = node.shape.iter().map(|d| d.as_usize().unwrap()).collect();
             let size: usize = shape.iter().product();
             let data: Vec<f32> = if name == "input_0" {
                 (0..size).map(|i| (i % vocab_size) as f32).collect()
             } else {
-                (0..size).map(|i| ((i as f32 * 0.1).sin() * 0.1)).collect()
+                (0..size).map(|i| (i as f32 * 0.1).sin() * 0.1).collect()
             };
-            let arr = ArrayD::from_shape_vec(shape.clone(), data).unwrap();
+            let arr = ArrayD::from_shape_vec(shape, data).unwrap();
             inputs.insert(name.clone(), arr);
         }
     }

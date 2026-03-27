@@ -1,7 +1,10 @@
+pub mod dim;
 pub mod nanogpt;
 
 use std::collections::HashMap;
 use tensor_lang_parser::{self as parser, Arg, BinOpKind, Expr, Item, Stmt};
+
+pub use dim::Dim;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct NodeId(pub usize);
@@ -11,7 +14,7 @@ pub enum Op {
     // Data
     Input { name: String },
     Constant(f64),
-    Arange { size: usize },
+    Arange { size: Dim },
 
     // Unary (elementwise)
     Neg,
@@ -31,18 +34,18 @@ pub enum Op {
     ReduceMax { axis: usize },
 
     // Movement
-    Reshape { shape: Vec<usize> },
+    Reshape { shape: Vec<Dim> },
     Permute { order: Vec<usize> },
-    Expand { shape: Vec<usize> },
+    Expand { shape: Vec<Dim> },
     Pad { padding: Vec<(usize, usize)> },
-    Shrink { bounds: Vec<(usize, usize)> },
+    Shrink { bounds: Vec<(Dim, Dim)> },
 }
 
 #[derive(Debug, Clone)]
 pub struct Node {
     pub op: Op,
     pub inputs: Vec<NodeId>,
-    pub shape: Vec<usize>,
+    pub shape: Vec<Dim>,
 }
 
 #[derive(Debug)]
@@ -62,11 +65,11 @@ impl Graph {
         id
     }
 
-    fn input_shape(&self, id: NodeId) -> &[usize] {
+    fn input_shape(&self, id: NodeId) -> &[Dim] {
         &self.nodes[id.0].shape
     }
 
-    fn infer_shape(&self, op: &Op, inputs: &[NodeId]) -> Vec<usize> {
+    fn infer_shape(&self, op: &Op, inputs: &[NodeId]) -> Vec<Dim> {
         match op {
             Op::Input { .. } => {
                 // Shape set after creation via set_input_shape
@@ -77,7 +80,7 @@ impl Graph {
                 vec![]
             }
             Op::Arange { size } => {
-                vec![*size]
+                vec![size.clone()]
             }
 
             // Unary elementwise — same shape as input
@@ -97,7 +100,7 @@ impl Graph {
                 let a = self.input_shape(inputs[0]);
                 let mut out = a.to_vec();
                 if *axis < out.len() {
-                    out[*axis] = 1;
+                    out[*axis] = Dim::Lit(1);
                 }
                 out
             }
@@ -106,22 +109,26 @@ impl Graph {
             Op::Reshape { shape } => shape.clone(),
             Op::Permute { order } => {
                 let a = self.input_shape(inputs[0]);
-                order.iter().map(|&i| a[i]).collect()
+                order.iter().map(|&i| a[i].clone()).collect()
             }
             Op::Expand { shape } => shape.clone(),
             Op::Pad { padding } => {
                 let a = self.input_shape(inputs[0]);
                 a.iter().zip(padding.iter())
-                    .map(|(&dim, &(lo, hi))| dim + lo + hi)
+                    .map(|(dim, &(lo, hi))| {
+                        Dim::Add(Box::new(dim.clone()), Box::new(Dim::Lit(lo + hi))).simplify()
+                    })
                     .collect()
             }
             Op::Shrink { bounds } => {
-                bounds.iter().map(|&(lo, hi)| hi - lo).collect()
+                bounds.iter().map(|(lo, hi)| {
+                    Dim::Sub(Box::new(hi.clone()), Box::new(lo.clone())).simplify()
+                }).collect()
             }
         }
     }
 
-    pub fn set_input_shape(&mut self, id: NodeId, shape: Vec<usize>) {
+    pub fn set_input_shape(&mut self, id: NodeId, shape: Vec<Dim>) {
         self.nodes[id.0].shape = shape;
     }
 
@@ -133,7 +140,7 @@ impl Graph {
             let label = match &node.op {
                 Op::Input { name } => format!("input\\n{name}"),
                 Op::Constant(v) => format!("{v}"),
-                Op::Arange { size } => format!("arange\\n{size}"),
+                Op::Arange { size } => format!("arange\\n{size:?}"),
                 Op::Neg => "neg".into(),
                 Op::Recip => "recip".into(),
                 Op::Exp2 => "exp2".into(),
@@ -178,24 +185,24 @@ impl Graph {
 /// - Align from the right
 /// - Dimensions must match, or one must be 1
 /// - Missing dimensions are treated as 1
-pub fn broadcast_shapes(a: &[usize], b: &[usize]) -> Vec<usize> {
+pub fn broadcast_shapes(a: &[Dim], b: &[Dim]) -> Vec<Dim> {
     // Scalar (empty shape) broadcasts to anything
     if a.is_empty() { return b.to_vec(); }
     if b.is_empty() { return a.to_vec(); }
 
     let len = a.len().max(b.len());
-    let mut result = vec![0; len];
+    let mut result = vec![Dim::Lit(0); len];
     for i in 0..len {
-        let da = if i < a.len() { a[a.len() - 1 - i] } else { 1 };
-        let db = if i < b.len() { b[b.len() - 1 - i] } else { 1 };
+        let da = if i < a.len() { &a[a.len() - 1 - i] } else { &Dim::Lit(1) };
+        let db = if i < b.len() { &b[b.len() - 1 - i] } else { &Dim::Lit(1) };
         if da == db {
-            result[len - 1 - i] = da;
-        } else if da == 1 {
-            result[len - 1 - i] = db;
-        } else if db == 1 {
-            result[len - 1 - i] = da;
+            result[len - 1 - i] = da.clone();
+        } else if da.is_one() {
+            result[len - 1 - i] = db.clone();
+        } else if db.is_one() {
+            result[len - 1 - i] = da.clone();
         } else {
-            panic!("cannot broadcast shapes {a:?} and {b:?}: dimension {da} vs {db}");
+            panic!("cannot broadcast shapes {a:?} and {b:?}: dimension {da:?} vs {db:?}");
         }
     }
     result
@@ -209,6 +216,8 @@ struct Compiler {
     // Function definitions, stored for when they're called
     fns: HashMap<String, parser::FnDef>,
     input_count: usize,
+    /// Declared dimension parameters (symbolic dims like "T" for seq_len)
+    dim_params: std::collections::HashSet<String>,
 }
 
 impl Compiler {
@@ -218,14 +227,17 @@ impl Compiler {
             env: HashMap::new(),
             fns: HashMap::new(),
             input_count: 0,
+            dim_params: std::collections::HashSet::new(),
         }
     }
 
     fn compile_program(mut self, items: &[Item]) -> Graph {
-        // First pass: collect function definitions
+        // First pass: collect function definitions and dim declarations
         for item in items {
-            if let Item::FnDef(f) = item {
-                self.fns.insert(f.name.clone(), f.clone());
+            match item {
+                Item::FnDef(f) => { self.fns.insert(f.name.clone(), f.clone()); }
+                Item::DimDecl(name) => { self.dim_params.insert(name.clone()); }
+                _ => {}
             }
         }
 
@@ -361,27 +373,34 @@ impl Compiler {
             // Movement
             "reshape" => {
                 let a = self.compile_positional(args, 0);
-                let shape = self.const_shape(args, 1);
+                let shape = self.compile_shape(args, 1);
                 self.graph.add_node(Op::Reshape { shape }, vec![a])
             }
             "permute" => {
                 let a = self.compile_positional(args, 0);
-                let order = self.const_shape(args, 1);
+                // Permute order is always concrete indices
+                let order: Vec<usize> = self.compile_shape(args, 1)
+                    .iter().map(|d| d.as_usize().expect("permute order must be concrete")).collect();
                 self.graph.add_node(Op::Permute { order }, vec![a])
             }
             "expand" => {
                 let a = self.compile_positional(args, 0);
-                let shape = self.const_shape(args, 1);
+                let shape = self.compile_shape(args, 1);
                 self.graph.add_node(Op::Expand { shape }, vec![a])
             }
             "pad" => {
                 let a = self.compile_positional(args, 0);
-                let padding = self.const_pairs(args, 1);
+                // Pad amounts are always concrete
+                let pairs = self.compile_pairs(args, 1);
+                let padding: Vec<(usize, usize)> = pairs.iter().map(|(lo, hi)| {
+                    (lo.as_usize().expect("pad lo must be concrete"),
+                     hi.as_usize().expect("pad hi must be concrete"))
+                }).collect();
                 self.graph.add_node(Op::Pad { padding }, vec![a])
             }
             "shrink" => {
                 let a = self.compile_positional(args, 0);
-                let bounds = self.const_pairs(args, 1);
+                let bounds = self.compile_pairs(args, 1);
                 self.graph.add_node(Op::Shrink { bounds }, vec![a])
             }
 
@@ -398,55 +417,44 @@ impl Compiler {
 
                 let ndim_a = a_shape.len();
                 let ndim_b = b_shape.len();
-                let m = a_shape[ndim_a - 2];
-                let k = a_shape[ndim_a - 1];
-                let k2 = b_shape[ndim_b - 2];
-                let n = b_shape[ndim_b - 1];
-                assert_eq!(k, k2, "matmul inner dimensions must match: {} vs {}", k, k2);
-
-                // For now handle 2D case: A[M,K] B[K,N] -> [M,N]
-                // Also handle 3D batched: A[B,M,K] B[B,K,N] -> [B,M,N]
+                let m = a_shape[ndim_a - 2].clone();
+                let k = a_shape[ndim_a - 1].clone();
+                let k2 = b_shape[ndim_b - 2].clone();
+                let n = b_shape[ndim_b - 1].clone();
+                assert_eq!(k, k2, "matmul inner dimensions must match: {:?} vs {:?}", k, k2);
 
                 // Get batch dims (everything except last 2)
                 let batch_a = &a_shape[..ndim_a - 2];
                 let batch_b = &b_shape[..ndim_b - 2];
                 let batch = broadcast_shapes(batch_a, batch_b);
 
-                // Build target shapes for reshape+expand
                 // A: [batch_a..., M, K] -> [batch_a..., M, K, 1]
+                let mut a_reshaped: Vec<Dim> = batch_a.to_vec();
+                a_reshaped.push(m.clone());
+                a_reshaped.push(k.clone());
+                a_reshaped.push(Dim::Lit(1));
+
                 // B: [batch_b..., K, N] -> [batch_b..., 1, K, N]
-                // Reshape preserves element count; expand handles broadcasting
+                let mut b_reshaped: Vec<Dim> = batch_b.to_vec();
+                b_reshaped.push(Dim::Lit(1));
+                b_reshaped.push(k.clone());
+                b_reshaped.push(n.clone());
 
-                let mut a_reshaped: Vec<usize> = batch_a.to_vec();
-                a_reshaped.push(m);
-                a_reshaped.push(k);
-                a_reshaped.push(1);
-
-                let mut b_reshaped: Vec<usize> = batch_b.to_vec();
-                b_reshaped.push(1);
-                b_reshaped.push(k);
-                b_reshaped.push(n);
-
-                // Expand target has the broadcasted batch dims
-                let mut expanded_shape: Vec<usize> = batch.clone();
-                expanded_shape.push(m);
+                // Expand target: [batch..., M, K, N]
+                let mut expanded_shape: Vec<Dim> = batch.clone();
+                expanded_shape.push(m.clone());
                 expanded_shape.push(k);
-                expanded_shape.push(n);
+                expanded_shape.push(n.clone());
 
-                // Reshape A: add trailing 1 (same element count)
                 let a_r = self.graph.add_node(Op::Reshape { shape: a_reshaped }, vec![a]);
-                // Reshape B: add 1 for M dim (same element count)
                 let b_r = self.graph.add_node(Op::Reshape { shape: b_reshaped }, vec![b]);
-                // Expand both to [batch..., M, K, N]
                 let a_e = self.graph.add_node(Op::Expand { shape: expanded_shape.clone() }, vec![a_r]);
                 let b_e = self.graph.add_node(Op::Expand { shape: expanded_shape.clone() }, vec![b_r]);
-                // Elementwise multiply
                 let prod = self.graph.add_node(Op::Mul, vec![a_e, b_e]);
-                // Sum over K axis (batch.len() + 1 is the K position in [..., M, K, N])
                 let k_axis = batch.len() + 1;
                 let summed = self.graph.add_node(Op::ReduceSum { axis: k_axis }, vec![prod]);
-                // Reshape to remove the K=1 dim: [..., M, 1, N] -> [..., M, N]
-                let mut out_shape: Vec<usize> = batch;
+                // Reshape to remove K=1 dim: [..., M, 1, N] -> [..., M, N]
+                let mut out_shape: Vec<Dim> = batch;
                 out_shape.push(m);
                 out_shape.push(n);
                 self.graph.add_node(Op::Reshape { shape: out_shape }, vec![summed])
@@ -454,13 +462,13 @@ impl Compiler {
 
             // arange(n) produces [0, 1, 2, ..., n-1] as a 1D tensor
             "arange" => {
-                let size = self.const_usize(self.get_positional_expr(args, 0));
+                let size = self.compile_dim(self.get_positional_expr(args, 0));
                 self.graph.add_node(Op::Arange { size }, vec![])
             }
 
             // load creates an input node with a known shape
             "load" => {
-                let shape = self.const_shape(args, 0);
+                let shape = self.compile_shape(args, 0);
                 let name = format!("input_{}", self.input_count);
                 self.input_count += 1;
                 let id = self.graph.add_node(Op::Input { name }, vec![]);
@@ -546,14 +554,28 @@ impl Compiler {
         }
     }
 
-    fn const_shape(&mut self, args: &[Arg], index: usize) -> Vec<usize> {
+    fn compile_dim(&self, expr: &Expr) -> Dim {
+        match expr {
+            Expr::Number(n) => Dim::Lit(*n as usize),
+            Expr::Ident(name) => {
+                if self.dim_params.contains(name) {
+                    Dim::Param(name.clone())
+                } else {
+                    panic!("unknown dimension parameter: {name}")
+                }
+            }
+            _ => panic!("expected number or dim parameter in shape, got {expr:?}"),
+        }
+    }
+
+    fn compile_shape(&mut self, args: &[Arg], index: usize) -> Vec<Dim> {
         let mut pos = 0;
         for arg in args {
             if let Arg::Positional(expr) = arg {
                 if pos == index {
                     return match expr {
                         Expr::Array(elems) => {
-                            elems.iter().map(|e| self.const_usize(e)).collect()
+                            elems.iter().map(|e| self.compile_dim(e)).collect()
                         }
                         _ => panic!("expected array literal for shape"),
                     };
@@ -564,8 +586,8 @@ impl Compiler {
         panic!("missing positional argument at index {index}")
     }
 
-    /// Parse a nested array like [[1, 2], [3, 4]] into Vec<(usize, usize)>
-    fn const_pairs(&mut self, args: &[Arg], index: usize) -> Vec<(usize, usize)> {
+    /// Parse a nested array like [[1, 2], [3, 4]] into Vec<(Dim, Dim)>
+    fn compile_pairs(&mut self, args: &[Arg], index: usize) -> Vec<(Dim, Dim)> {
         let mut pos = 0;
         for arg in args {
             if let Arg::Positional(expr) = arg {
@@ -575,7 +597,7 @@ impl Compiler {
                             elems.iter().map(|e| match e {
                                 Expr::Array(pair) => {
                                     assert_eq!(pair.len(), 2, "expected pair [a, b]");
-                                    (self.const_usize(&pair[0]), self.const_usize(&pair[1]))
+                                    (self.compile_dim(&pair[0]), self.compile_dim(&pair[1]))
                                 }
                                 _ => panic!("expected array pair"),
                             }).collect()
@@ -593,6 +615,11 @@ impl Compiler {
 pub fn compile(input: &str) -> Graph {
     let items = parser::parse(input);
     Compiler::new().compile_program(&items)
+}
+
+/// Helper to create a Vec<Dim> from concrete values.
+pub fn dims(vals: &[usize]) -> Vec<Dim> {
+    vals.iter().map(|&v| Dim::Lit(v)).collect()
 }
 
 #[cfg(test)]
@@ -714,38 +741,38 @@ mod tests {
     #[test]
     fn test_shape_input() {
         let g = compile("let x = load([4, 10])");
-        assert_eq!(g.nodes[0].shape, vec![4, 10]);
+        assert_eq!(g.nodes[0].shape, dims(&[4, 10]));
     }
 
     #[test]
     fn test_shape_elementwise() {
         let g = compile("let x = load([4, 10]) let y = neg(x)");
-        assert_eq!(g.nodes[1].shape, vec![4, 10]);
+        assert_eq!(g.nodes[1].shape, dims(&[4, 10]));
     }
 
     #[test]
     fn test_shape_reduce() {
         let g = compile("let x = load([4, 10]) let s = sum(x, axis: 1)");
-        assert_eq!(g.nodes[1].shape, vec![4, 1]);
+        assert_eq!(g.nodes[1].shape, dims(&[4, 1]));
     }
 
     #[test]
     fn test_shape_reduce_axis0() {
         let g = compile("let x = load([4, 10]) let s = sum(x, axis: 0)");
-        assert_eq!(g.nodes[1].shape, vec![1, 10]);
+        assert_eq!(g.nodes[1].shape, dims(&[1, 10]));
     }
 
     #[test]
     fn test_shape_broadcast_scalar() {
         // mul(tensor, scalar_constant) should keep tensor shape
         let g = compile("let x = load([4, 10]) let y = mul(x, 2.0)");
-        assert_eq!(g.nodes[2].shape, vec![4, 10]);
+        assert_eq!(g.nodes[2].shape, dims(&[4, 10]));
     }
 
     #[test]
     fn test_shape_permute() {
         let g = compile("let x = load([4, 10]) let y = permute(x, [1, 0])");
-        assert_eq!(g.nodes[1].shape, vec![10, 4]);
+        assert_eq!(g.nodes[1].shape, dims(&[10, 4]));
     }
 
     #[test]
@@ -762,30 +789,30 @@ mod tests {
         "#;
         let g = compile(input);
         // input [4,10], reduce_max [4,1], neg [4,1], add broadcasts to [4,10]
-        assert_eq!(g.nodes[0].shape, vec![4, 10]);   // input
-        assert_eq!(g.nodes[1].shape, vec![4, 1]);     // reduce_max
-        assert_eq!(g.nodes[2].shape, vec![4, 1]);     // neg
-        assert_eq!(g.nodes[3].shape, vec![4, 10]);    // add (broadcast [4,10] + [4,1])
+        assert_eq!(g.nodes[0].shape, dims(&[4, 10]));   // input
+        assert_eq!(g.nodes[1].shape, dims(&[4, 1]));     // reduce_max
+        assert_eq!(g.nodes[2].shape, dims(&[4, 1]));     // neg
+        assert_eq!(g.nodes[3].shape, dims(&[4, 10]));    // add (broadcast [4,10] + [4,1])
         // exp chain
-        assert_eq!(g.nodes[6].shape, vec![4, 10]);    // exp2
-        assert_eq!(g.nodes[7].shape, vec![4, 1]);     // reduce_sum
-        assert_eq!(g.nodes[8].shape, vec![4, 1]);     // recip
-        assert_eq!(g.nodes[9].shape, vec![4, 10]);    // final mul (broadcast [4,1] * [4,10])
+        assert_eq!(g.nodes[6].shape, dims(&[4, 10]));    // exp2
+        assert_eq!(g.nodes[7].shape, dims(&[4, 1]));     // reduce_sum
+        assert_eq!(g.nodes[8].shape, dims(&[4, 1]));     // recip
+        assert_eq!(g.nodes[9].shape, dims(&[4, 10]));    // final mul (broadcast [4,1] * [4,10])
     }
 
     #[test]
     fn test_broadcast_shapes() {
-        assert_eq!(broadcast_shapes(&[4, 10], &[10]), vec![4, 10]);
-        assert_eq!(broadcast_shapes(&[4, 10], &[1]), vec![4, 10]);
-        assert_eq!(broadcast_shapes(&[3, 1, 5], &[1, 4, 1]), vec![3, 4, 5]);
-        assert_eq!(broadcast_shapes(&[], &[4, 10]), vec![4, 10]);
-        assert_eq!(broadcast_shapes(&[4, 10], &[]), vec![4, 10]);
+        assert_eq!(broadcast_shapes(&dims(&[4, 10]), &dims(&[10])), dims(&[4, 10]));
+        assert_eq!(broadcast_shapes(&dims(&[4, 10]), &dims(&[1])), dims(&[4, 10]));
+        assert_eq!(broadcast_shapes(&dims(&[3, 1, 5]), &dims(&[1, 4, 1])), dims(&[3, 4, 5]));
+        assert_eq!(broadcast_shapes(&dims(&[]), &dims(&[4, 10])), dims(&[4, 10]));
+        assert_eq!(broadcast_shapes(&dims(&[4, 10]), &dims(&[])), dims(&[4, 10]));
     }
 
     #[test]
     #[should_panic(expected = "cannot broadcast")]
     fn test_broadcast_shapes_error() {
-        broadcast_shapes(&[3, 4], &[5, 4]);
+        broadcast_shapes(&dims(&[3, 4]), &dims(&[5, 4]));
     }
 
     #[test]
@@ -794,7 +821,7 @@ mod tests {
         let g = compile("let a = load([2, 3]) let b = load([3, 4]) let c = matmul(a, b)");
         // Last node should have shape [2, 4]
         let last = g.nodes.last().unwrap();
-        assert_eq!(last.shape, vec![2, 4]);
+        assert_eq!(last.shape, dims(&[2, 4]));
     }
 
     #[test]
@@ -802,7 +829,7 @@ mod tests {
         // matmul([2,3,4], [2,4,5]) -> [2,3,5]
         let g = compile("let a = load([2, 3, 4]) let b = load([2, 4, 5]) let c = matmul(a, b)");
         let last = g.nodes.last().unwrap();
-        assert_eq!(last.shape, vec![2, 3, 5]);
+        assert_eq!(last.shape, dims(&[2, 3, 5]));
     }
 
     #[test]
@@ -824,8 +851,8 @@ mod tests {
     #[test]
     fn test_arange() {
         let g = compile("let x = arange(5)");
-        assert_eq!(g.nodes[0].op, Op::Arange { size: 5 });
-        assert_eq!(g.nodes[0].shape, vec![5]);
+        assert_eq!(g.nodes[0].op, Op::Arange { size: Dim::Lit(5) });
+        assert_eq!(g.nodes[0].shape, dims(&[5]));
     }
 
     #[test]
@@ -835,7 +862,7 @@ mod tests {
         let g = compile(&program);
         // Last node should be the logits with shape [1, 4, 8] (B, T, vocab)
         let last = g.nodes.last().unwrap();
-        assert_eq!(last.shape, vec![1, 4, 8]);
+        assert_eq!(last.shape, dims(&[1, 4, 8]));
         // Count inputs
         let n_inputs = g.nodes.iter().filter(|n| matches!(&n.op, Op::Input { .. })).count();
         assert_eq!(n_inputs, crate::nanogpt::nanogpt_input_count(2));
@@ -855,5 +882,68 @@ mod tests {
         "#;
         let g = compile(input);
         println!("{}", g.to_dot());
+    }
+
+    #[test]
+    fn test_symbolic_dim_basic() {
+        let input = "dim T\nlet x = load([1, T, 768])";
+        let g = compile(input);
+        assert_eq!(g.nodes[0].shape.len(), 3);
+        assert_eq!(g.nodes[0].shape[0], Dim::Lit(1));
+        assert_eq!(g.nodes[0].shape[1], Dim::Param("T".into()));
+        assert_eq!(g.nodes[0].shape[2], Dim::Lit(768));
+    }
+
+    #[test]
+    fn test_symbolic_dim_propagates() {
+        // Symbolic T should propagate through elementwise ops
+        let input = "dim T\nlet x = load([1, T, 768])\nlet y = neg(x)";
+        let g = compile(input);
+        assert_eq!(g.nodes[1].shape[1], Dim::Param("T".into()));
+    }
+
+    #[test]
+    fn test_symbolic_dim_reduce() {
+        // Reduce on a non-symbolic axis keeps T
+        let input = "dim T\nlet x = load([1, T, 768])\nlet y = sum(x, axis: 2)";
+        let g = compile(input);
+        assert_eq!(g.nodes[1].shape[0], Dim::Lit(1));
+        assert_eq!(g.nodes[1].shape[1], Dim::Param("T".into()));
+        assert_eq!(g.nodes[1].shape[2], Dim::Lit(1));
+    }
+
+    #[test]
+    fn test_symbolic_dim_reshape() {
+        let input = "dim T\nlet x = load([1, T, 768])\nlet y = reshape(x, [T, 768])";
+        let g = compile(input);
+        assert_eq!(g.nodes[1].shape.len(), 2);
+        assert_eq!(g.nodes[1].shape[0], Dim::Param("T".into()));
+        assert_eq!(g.nodes[1].shape[1], Dim::Lit(768));
+    }
+
+    #[test]
+    fn test_symbolic_nanogpt_compiles() {
+        // Tiny config with symbolic T
+        let program = crate::nanogpt::generate_nanogpt_program_symbolic(1, 8, 16, 2, 2);
+        let g = compile(&program);
+        let last = g.nodes.last().unwrap();
+        // Output shape: [1, T, 8]
+        assert_eq!(last.shape.len(), 3);
+        assert_eq!(last.shape[0], Dim::Lit(1));
+        assert_eq!(last.shape[1], Dim::Param("T".into()));
+        assert_eq!(last.shape[2], Dim::Lit(8));
+    }
+
+    #[test]
+    fn test_symbolic_dim_matmul() {
+        // matmul with symbolic batch dim: [1, T, 768] @ [768, 2304]
+        let input = "dim T\nlet a = load([1, T, 768])\nlet b = load([768, 2304])\nlet c = matmul(a, b)";
+        let g = compile(input);
+        let last = g.nodes.last().unwrap();
+        // Output should be [1, T, 2304]
+        assert_eq!(last.shape.len(), 3);
+        assert_eq!(last.shape[0], Dim::Lit(1));
+        assert_eq!(last.shape[1], Dim::Param("T".into()));
+        assert_eq!(last.shape[2], Dim::Lit(2304));
     }
 }

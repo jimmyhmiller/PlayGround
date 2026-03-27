@@ -88,7 +88,7 @@ fn bench_as_full_gpt2() {
     let input_nodes: Vec<(String, Vec<usize>)> = graph.nodes.iter()
         .filter_map(|n| {
             if let Op::Input { name } = &n.op {
-                Some((name.clone(), n.shape.clone()))
+                Some((name.clone(), n.shape.iter().map(|d| d.as_usize().unwrap()).collect()))
             } else { None }
         }).collect();
 
@@ -97,9 +97,28 @@ fn bench_as_full_gpt2() {
     // Token input
     flat_inputs.push(vec![15496.0f32, 11.0, 995.0]);
 
-    // Weight inputs
+    // Weight inputs (skip tokens at index 0 and attn_mask at index 3)
+    // The attn_mask input is identified by position (index 3) since the compiler
+    // doesn't preserve DSL variable names.
+    let mask_input_idx = 3; // tokens=0, wte=1, wpe=2, attn_mask=3
+    let mut weight_idx = 0;
     for (idx, (_, shape)) in input_nodes.iter().enumerate().skip(1) {
-        let t = &tensors_meta[idx - 1];
+        if idx == mask_input_idx {
+            // Build causal mask for seq_len: 0.0=attend, -1e6=masked
+            let mut mask = vec![0.0f32; seq_len * seq_len];
+            for i in 0..seq_len {
+                for j in 0..seq_len {
+                    if j > i {
+                        mask[i * seq_len + j] = -1000000.0;
+                    }
+                }
+            }
+            flat_inputs.push(mask);
+            continue;
+        }
+
+        let t = &tensors_meta[weight_idx];
+        weight_idx += 1;
         let offset = t["offset"].as_u64().unwrap() as usize;
         let n_elements = t["n_elements"].as_u64().unwrap() as usize;
 
@@ -273,7 +292,7 @@ fn bench_as_full_gpt2_unfused() {
     let input_nodes: Vec<(String, Vec<usize>)> = graph.nodes.iter()
         .filter_map(|n| {
             if let Op::Input { name } = &n.op {
-                Some((name.clone(), n.shape.clone()))
+                Some((name.clone(), n.shape.iter().map(|d| d.as_usize().unwrap()).collect()))
             } else { None }
         }).collect();
 

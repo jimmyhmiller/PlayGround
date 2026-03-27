@@ -3,6 +3,7 @@ pub enum Token {
     // Keywords
     Fn,
     Let,
+    DimKw,
 
     // Literals
     Ident(String),
@@ -105,6 +106,7 @@ impl Lexer {
         match s.as_str() {
             "fn" => Token::Fn,
             "let" => Token::Let,
+            "dim" => Token::DimKw,
             _ => Token::Ident(s),
         }
     }

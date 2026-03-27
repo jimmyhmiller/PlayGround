@@ -4,7 +4,7 @@
 //! their consumer's loop body. Multi-consumer nodes and reduce outputs are
 //! materialized (get their own buffer).
 
-use tensor_lang_graph::{Graph, Op};
+use tensor_lang_graph::{Dim, Graph, Op};
 
 // ---------------------------------------------------------------------------
 // IR types
@@ -13,27 +13,29 @@ use tensor_lang_graph::{Graph, Op};
 #[derive(Debug, Clone)]
 pub enum Stmt {
     /// Allocate a buffer. Source nodes (Input, Constant, Arange) use this.
-    Alloc { buf: usize, size: usize },
+    Alloc { buf: usize, size: Dim },
     /// Fill a 1-element buffer with a constant.
     Fill { buf: usize, value: f64 },
     /// Fill a buffer with 0, 1, 2, ..., size-1.
-    FillArange { buf: usize, size: usize },
+    FillArange { buf: usize, size: Dim },
     /// A loop that computes a materialized buffer.
     Loop {
         buf: usize,
-        shape: Vec<usize>,
+        shape: Vec<Dim>,
         reduce: Option<ReduceDesc>,
         body: Vec<Inst>,
         /// Which instruction in `body` produces the output value.
         result: InstRef,
+        /// Optional tiling configuration for cache-friendly execution.
+        tile: Option<TileConfig>,
     },
     /// Pad: zero-fill output, then copy input with offsets.
     /// Uses the original unfused approach since pad has special structure.
     Pad {
         buf: usize,
         input_buf: usize,
-        output_shape: Vec<usize>,
-        input_shape: Vec<usize>,
+        output_shape: Vec<Dim>,
+        input_shape: Vec<Dim>,
         padding: Vec<(usize, usize)>,
     },
 }
@@ -41,11 +43,17 @@ pub enum Stmt {
 #[derive(Debug, Clone)]
 pub struct ReduceDesc {
     pub axis: usize,
-    pub size: usize,
+    pub size: Dim,
     pub op: ReduceOp,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone)]
+pub struct TileConfig {
+    /// Tile size for each output dimension + the reduce dimension (last entry).
+    pub tiles: Vec<Dim>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ReduceOp {
     Sum,
     Max,
@@ -72,14 +80,16 @@ pub enum Inst {
 }
 
 /// How to compute a flat buffer index from loop dimension variables.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Index {
     /// Flat index equals the output loop's flat index.
     Flat,
     /// Index = offset + sum of (d_{dim} * stride) for each entry.
+    /// First element is the dimension variable index (always concrete),
+    /// second is the stride (may be symbolic).
     Strided {
-        parts: Vec<(usize, usize)>,
-        offset: usize,
+        parts: Vec<(usize, Dim)>,
+        offset: Dim,
     },
 }
 
@@ -159,12 +169,12 @@ pub fn lower(graph: &Graph) -> Vec<Stmt> {
                 stmts.push(Stmt::Alloc { buf: i, size });
             }
             Op::Constant(v) => {
-                stmts.push(Stmt::Alloc { buf: i, size: 1 });
+                stmts.push(Stmt::Alloc { buf: i, size: Dim::Lit(1) });
                 stmts.push(Stmt::Fill { buf: i, value: *v });
             }
             Op::Arange { size } => {
-                stmts.push(Stmt::Alloc { buf: i, size: *size });
-                stmts.push(Stmt::FillArange { buf: i, size: *size });
+                stmts.push(Stmt::Alloc { buf: i, size: size.clone() });
+                stmts.push(Stmt::FillArange { buf: i, size: size.clone() });
             }
             Op::Pad { padding } if materialized[i] => {
                 let size = shape_size(&node.shape);
@@ -196,6 +206,7 @@ pub fn lower(graph: &Graph) -> Vec<Stmt> {
                     reduce: ctx.reduce,
                     body: ctx.body,
                     result,
+                    tile: None,
                 });
             }
             _ => {
@@ -207,28 +218,16 @@ pub fn lower(graph: &Graph) -> Vec<Stmt> {
     stmts
 }
 
-fn shape_size(shape: &[usize]) -> usize {
-    if shape.is_empty() {
-        1
-    } else {
-        shape.iter().product()
-    }
+fn shape_size(shape: &[Dim]) -> Dim {
+    Dim::product(shape)
 }
 
 /// Check if the reshape between two shapes is purely inserting/removing size-1 dims.
 /// Returns true if removing all 1s from both shapes yields the same sequence.
-fn is_pure_1dim_change(a: &[usize], b: &[usize]) -> bool {
-    let a_no1: Vec<usize> = a.iter().copied().filter(|&d| d != 1).collect();
-    let b_no1: Vec<usize> = b.iter().copied().filter(|&d| d != 1).collect();
+fn is_pure_1dim_change(a: &[Dim], b: &[Dim]) -> bool {
+    let a_no1: Vec<&Dim> = a.iter().filter(|d| !d.is_one()).collect();
+    let b_no1: Vec<&Dim> = b.iter().filter(|d| !d.is_one()).collect();
     a_no1 == b_no1
-}
-
-fn strides(shape: &[usize]) -> Vec<usize> {
-    let mut s = vec![1; shape.len()];
-    for i in (0..shape.len().saturating_sub(1)).rev() {
-        s[i] = s[i + 1] * shape[i + 1];
-    }
-    s
 }
 
 // ---------------------------------------------------------------------------
@@ -247,66 +246,66 @@ struct LowerCtx<'a> {
 #[derive(Clone, Debug)]
 struct IndexMap {
     /// The shape of the iteration space these dims refer to.
-    iter_shape: Vec<usize>,
+    iter_shape: Vec<Dim>,
     /// For each dimension of the target buffer, how to compute it:
     /// Some((loop_dim, stride)) or None (broadcast / collapsed).
     entries: Vec<IndexEntry>,
     /// Constant offset added to the computed index (used by shrink).
-    offset: usize,
+    offset: Dim,
 }
 
 #[derive(Clone, Debug)]
 enum IndexEntry {
     /// This buffer dimension maps to loop dimension `dim` with given stride.
-    Dim { dim: usize, stride: usize },
+    Dim { dim: usize, stride: Dim },
     /// Broadcast: this dimension is size 1, contributes 0 to the index.
     Broadcast,
 }
 
 impl IndexMap {
     /// Create an identity mapping: buffer dims match loop dims.
-    fn identity(shape: &[usize]) -> Self {
-        let strides_vec = strides(shape);
+    fn identity(shape: &[Dim]) -> Self {
+        let strides_vec = Dim::strides(shape);
         let entries = (0..shape.len())
             .map(|d| IndexEntry::Dim {
                 dim: d,
-                stride: strides_vec[d],
+                stride: strides_vec[d].clone(),
             })
             .collect();
         IndexMap {
             iter_shape: shape.to_vec(),
             entries,
-            offset: 0,
+            offset: Dim::Lit(0),
         }
     }
 
     /// Convert to an Index for codegen.
     fn to_index(&self) -> Index {
-        let parts: Vec<(usize, usize)> = self
+        let parts: Vec<(usize, Dim)> = self
             .entries
             .iter()
             .filter_map(|e| match e {
-                IndexEntry::Dim { dim, stride } => Some((*dim, *stride)),
+                IndexEntry::Dim { dim, stride } => Some((*dim, stride.clone())),
                 IndexEntry::Broadcast => None,
             })
             .collect();
         if parts.is_empty() {
             Index::Strided {
-                parts: vec![(0, 0)],
-                offset: self.offset,
+                parts: vec![(0, Dim::Lit(0))],
+                offset: self.offset.clone(),
             }
         } else {
             Index::Strided {
                 parts,
-                offset: self.offset,
+                offset: self.offset.clone(),
             }
         }
     }
 
     /// Adjust for an expand: where the source shape has 1s, mark as broadcast.
     /// Handles different ndims by right-aligning (broadcasting pads on the left).
-    fn through_expand(&self, expanded_shape: &[usize], source_shape: &[usize]) -> IndexMap {
-        let source_strides = strides(source_shape);
+    fn through_expand(&self, expanded_shape: &[Dim], source_shape: &[Dim]) -> IndexMap {
+        let source_strides = Dim::strides(source_shape);
         let exp_ndim = expanded_shape.len();
         let src_ndim = source_shape.len();
         let dim_offset = exp_ndim - src_ndim;
@@ -314,14 +313,14 @@ impl IndexMap {
         let entries = (0..src_ndim)
             .map(|d| {
                 let exp_d = d + dim_offset; // align right
-                if source_shape[d] == 1 && expanded_shape[exp_d] > 1 {
+                if source_shape[d].is_one() && !expanded_shape[exp_d].is_one() {
                     IndexEntry::Broadcast
                 } else {
                     // Map to the expanded shape's loop dim, but use source stride
                     match &self.entries[exp_d] {
                         IndexEntry::Dim { dim, .. } => IndexEntry::Dim {
                             dim: *dim,
-                            stride: source_strides[d],
+                            stride: source_strides[d].clone(),
                         },
                         IndexEntry::Broadcast => IndexEntry::Broadcast,
                     }
@@ -331,14 +330,14 @@ impl IndexMap {
         IndexMap {
             iter_shape: self.iter_shape.clone(),
             entries,
-            offset: self.offset,
+            offset: self.offset.clone(),
         }
     }
 
     /// Adjust for a reshape that only inserts/removes size-1 dims.
     /// Preserves original strides (entries are copied as-is, not re-strided).
     /// Requires: is_pure_1dim_change(old_shape, new_shape) && entries.len() == old_shape.len()
-    fn through_reshape_ndim(&self, old_shape: &[usize], new_shape: &[usize]) -> IndexMap {
+    fn through_reshape_ndim(&self, old_shape: &[Dim], new_shape: &[Dim]) -> IndexMap {
         let mut new_entries = Vec::new();
         let mut oi = 0; // index into old_shape / self.entries
         let mut ni = 0; // index into new_shape
@@ -349,10 +348,10 @@ impl IndexMap {
                 new_entries.push(self.entries[oi].clone());
                 oi += 1;
                 ni += 1;
-            } else if oi < old_shape.len() && old_shape[oi] == 1 {
+            } else if oi < old_shape.len() && old_shape[oi].is_one() {
                 // Old has a 1-dim not in new — skip it
                 oi += 1;
-            } else if new_shape[ni] == 1 {
+            } else if new_shape[ni].is_one() {
                 // New has a 1-dim not in old — insert Broadcast
                 new_entries.push(IndexEntry::Broadcast);
                 ni += 1;
@@ -367,7 +366,7 @@ impl IndexMap {
         IndexMap {
             iter_shape: self.iter_shape.clone(),
             entries: new_entries,
-            offset: self.offset,
+            offset: self.offset.clone(),
         }
     }
 
@@ -375,8 +374,8 @@ impl IndexMap {
     /// permute(x, order) means output dim d comes from input dim order[d].
     /// To index the input buffer: for each input dim j, find which output dim d
     /// maps to it (inv_order[j] = d), then use that loop variable with input strides.
-    fn through_permute(&self, order: &[usize], input_shape: &[usize]) -> IndexMap {
-        let input_strides = strides(input_shape);
+    fn through_permute(&self, order: &[usize], input_shape: &[Dim]) -> IndexMap {
+        let input_strides = Dim::strides(input_shape);
         // Build inverse permutation: inv[order[d]] = d
         let mut inv = vec![0; order.len()];
         for (d, &o) in order.iter().enumerate() {
@@ -389,7 +388,7 @@ impl IndexMap {
                 match &self.entries[out_d] {
                     IndexEntry::Dim { dim, .. } => IndexEntry::Dim {
                         dim: *dim,
-                        stride: input_strides[j],
+                        stride: input_strides[j].clone(),
                     },
                     IndexEntry::Broadcast => IndexEntry::Broadcast,
                 }
@@ -398,27 +397,29 @@ impl IndexMap {
         IndexMap {
             iter_shape: self.iter_shape.clone(),
             entries,
-            offset: self.offset,
+            offset: self.offset.clone(),
         }
     }
 
     /// Adjust for a shrink: use source strides and add lo offsets.
-    fn through_shrink(&self, bounds: &[(usize, usize)], source_shape: &[usize]) -> IndexMap {
-        let source_strides = strides(source_shape);
+    fn through_shrink(&self, bounds: &[(Dim, Dim)], source_shape: &[Dim]) -> IndexMap {
+        let source_strides = Dim::strides(source_shape);
         // Compute constant offset: sum of lo_d * source_stride_d
-        let lo_offset: usize = bounds
-            .iter()
-            .enumerate()
-            .map(|(d, &(lo, _))| lo * source_strides[d])
-            .sum();
+        let mut lo_offset = self.offset.clone();
+        for (d, (lo, _)) in bounds.iter().enumerate() {
+            if !lo.is_zero() {
+                let term = Dim::Mul(Box::new(lo.clone()), Box::new(source_strides[d].clone())).simplify();
+                lo_offset = Dim::Add(Box::new(lo_offset), Box::new(term)).simplify();
+            }
+        }
         // Replace strides with source strides
         let entries = bounds
             .iter()
             .enumerate()
-            .map(|(d, &(_lo, _hi))| match &self.entries[d] {
+            .map(|(d, (_lo, _hi))| match &self.entries[d] {
                 IndexEntry::Dim { dim, .. } => IndexEntry::Dim {
                     dim: *dim,
-                    stride: source_strides[d],
+                    stride: source_strides[d].clone(),
                 },
                 IndexEntry::Broadcast => IndexEntry::Broadcast,
             })
@@ -426,7 +427,7 @@ impl IndexMap {
         IndexMap {
             iter_shape: self.iter_shape.clone(),
             entries,
-            offset: self.offset + lo_offset,
+            offset: lo_offset,
         }
     }
 }
@@ -440,7 +441,7 @@ impl<'a> LowerCtx<'a> {
 
     /// Emit instructions for node `i`, returning the InstRef for its result.
     /// `iter_shape` is the iteration space of the enclosing loop.
-    fn emit_node(&mut self, i: usize, iter_shape: &[usize]) -> InstRef {
+    fn emit_node(&mut self, i: usize, iter_shape: &[Dim]) -> InstRef {
         let idx_map = IndexMap::identity(iter_shape);
         self.emit_node_with_index(i, &idx_map)
     }
@@ -471,7 +472,7 @@ impl<'a> LowerCtx<'a> {
                 let axis = *axis;
                 let input_id = node.inputs[0].0;
                 let input_shape = &self.graph.nodes[input_id].shape;
-                let reduce_size = input_shape[axis];
+                let reduce_size = input_shape[axis].clone();
 
                 let op = match &node.op {
                     Op::ReduceSum { .. } => ReduceOp::Sum,
@@ -494,14 +495,14 @@ impl<'a> LowerCtx<'a> {
                 // Build index map for the input to the reduce.
                 // The output loop iterates over the reduce's output shape (axis dim = 1).
                 // We need to add the reduce axis dimension.
-                let input_strides = strides(input_shape);
+                let input_strides = Dim::strides(input_shape);
                 let entries: Vec<IndexEntry> = (0..input_shape.len())
                     .map(|d| {
                         if d == axis {
                             // This dim is iterated by the reduce inner loop
                             IndexEntry::Dim {
                                 dim: reduce_dim_index,
-                                stride: input_strides[d],
+                                stride: input_strides[d].clone(),
                             }
                         } else {
                             // Map to the corresponding output dim.
@@ -510,7 +511,7 @@ impl<'a> LowerCtx<'a> {
                             // So dims before axis keep their index, dims after axis too.
                             IndexEntry::Dim {
                                 dim: d,
-                                stride: input_strides[d],
+                                stride: input_strides[d].clone(),
                             }
                         }
                     })
@@ -519,7 +520,7 @@ impl<'a> LowerCtx<'a> {
                 let inner_map = IndexMap {
                     iter_shape: idx_map.iter_shape.clone(),
                     entries,
-                    offset: 0,
+                    offset: Dim::Lit(0),
                 };
 
                 self.emit_recursive(input_id, &inner_map)
@@ -551,8 +552,11 @@ impl<'a> LowerCtx<'a> {
             Op::Add => {
                 let a_id = node.inputs[0].0;
                 let b_id = node.inputs[1].0;
-                let a_map = self.broadcast_map(idx_map, &node.shape, &self.graph.nodes[a_id].shape);
-                let b_map = self.broadcast_map(idx_map, &node.shape, &self.graph.nodes[b_id].shape);
+                let out_shape = &node.shape;
+                let a_shape = &self.graph.nodes[a_id].shape;
+                let b_shape = &self.graph.nodes[b_id].shape;
+                let a_map = self.broadcast_map(idx_map, out_shape, a_shape);
+                let b_map = self.broadcast_map(idx_map, out_shape, b_shape);
                 let a = self.emit_recursive(a_id, &a_map);
                 let b = self.emit_recursive(b_id, &b_map);
                 self.push(Inst::Add(a, b))
@@ -560,8 +564,11 @@ impl<'a> LowerCtx<'a> {
             Op::Mul => {
                 let a_id = node.inputs[0].0;
                 let b_id = node.inputs[1].0;
-                let a_map = self.broadcast_map(idx_map, &node.shape, &self.graph.nodes[a_id].shape);
-                let b_map = self.broadcast_map(idx_map, &node.shape, &self.graph.nodes[b_id].shape);
+                let out_shape = &node.shape;
+                let a_shape = &self.graph.nodes[a_id].shape;
+                let b_shape = &self.graph.nodes[b_id].shape;
+                let a_map = self.broadcast_map(idx_map, out_shape, a_shape);
+                let b_map = self.broadcast_map(idx_map, out_shape, b_shape);
                 let a = self.emit_recursive(a_id, &a_map);
                 let b = self.emit_recursive(b_id, &b_map);
                 self.push(Inst::Mul(a, b))
@@ -569,8 +576,11 @@ impl<'a> LowerCtx<'a> {
             Op::Max => {
                 let a_id = node.inputs[0].0;
                 let b_id = node.inputs[1].0;
-                let a_map = self.broadcast_map(idx_map, &node.shape, &self.graph.nodes[a_id].shape);
-                let b_map = self.broadcast_map(idx_map, &node.shape, &self.graph.nodes[b_id].shape);
+                let out_shape = &node.shape;
+                let a_shape = &self.graph.nodes[a_id].shape;
+                let b_shape = &self.graph.nodes[b_id].shape;
+                let a_map = self.broadcast_map(idx_map, out_shape, a_shape);
+                let b_map = self.broadcast_map(idx_map, out_shape, b_shape);
                 let a = self.emit_recursive(a_id, &a_map);
                 let b = self.emit_recursive(b_id, &b_map);
                 self.push(Inst::Max(a, b))
@@ -578,8 +588,11 @@ impl<'a> LowerCtx<'a> {
             Op::CmpLt => {
                 let a_id = node.inputs[0].0;
                 let b_id = node.inputs[1].0;
-                let a_map = self.broadcast_map(idx_map, &node.shape, &self.graph.nodes[a_id].shape);
-                let b_map = self.broadcast_map(idx_map, &node.shape, &self.graph.nodes[b_id].shape);
+                let out_shape = &node.shape;
+                let a_shape = &self.graph.nodes[a_id].shape;
+                let b_shape = &self.graph.nodes[b_id].shape;
+                let a_map = self.broadcast_map(idx_map, out_shape, a_shape);
+                let b_map = self.broadcast_map(idx_map, out_shape, b_shape);
                 let a = self.emit_recursive(a_id, &a_map);
                 let b = self.emit_recursive(b_id, &b_map);
                 self.push(Inst::CmpLt(a, b))
@@ -651,13 +664,13 @@ impl<'a> LowerCtx<'a> {
             // Scalar
             return Index::Strided {
                 parts: vec![],
-                offset: idx_map.offset,
+                offset: idx_map.offset.clone(),
             };
         }
 
         // Check if the idx_map's iteration shape matches the buffer shape
         // If so, we can use Flat (only if no offset)
-        if idx_map.offset == 0
+        if idx_map.offset.is_zero()
             && idx_map.iter_shape == *buf_shape
             && self.reduce.is_none()
         {
@@ -676,15 +689,15 @@ impl<'a> LowerCtx<'a> {
     fn broadcast_map(
         &self,
         parent_map: &IndexMap,
-        output_shape: &[usize],
-        input_shape: &[usize],
+        output_shape: &[Dim],
+        input_shape: &[Dim],
     ) -> IndexMap {
         if input_shape.is_empty() {
             // Scalar input — always index 0
             return IndexMap {
                 iter_shape: parent_map.iter_shape.clone(),
                 entries: vec![],
-                offset: 0,
+                offset: Dim::Lit(0),
             };
         }
         if output_shape == input_shape {
@@ -696,18 +709,18 @@ impl<'a> LowerCtx<'a> {
         let out_ndim = output_shape.len();
         let in_ndim = input_shape.len();
         let offset = out_ndim - in_ndim;
-        let input_strides = strides(input_shape);
+        let input_strides = Dim::strides(input_shape);
 
         let entries = (0..in_ndim)
             .map(|d| {
                 let out_d = d + offset;
-                if input_shape[d] == 1 && output_shape[out_d] > 1 {
+                if input_shape[d].is_one() && !output_shape[out_d].is_one() {
                     IndexEntry::Broadcast
                 } else {
                     match &parent_map.entries[out_d] {
                         IndexEntry::Dim { dim, .. } => IndexEntry::Dim {
                             dim: *dim,
-                            stride: input_strides[d],
+                            stride: input_strides[d].clone(),
                         },
                         IndexEntry::Broadcast => IndexEntry::Broadcast,
                     }
@@ -718,7 +731,78 @@ impl<'a> LowerCtx<'a> {
         IndexMap {
             iter_shape: parent_map.iter_shape.clone(),
             entries,
-            offset: parent_map.offset,
+            offset: parent_map.offset.clone(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tiling transform
+// ---------------------------------------------------------------------------
+
+/// Apply tiling to reduce loops whose dimensions are large enough to benefit.
+/// This transforms the loop metadata only; codegen emits the tiled nest.
+pub fn tile_reduce_loops(stmts: &mut Vec<Stmt>) {
+    const TILE_M: usize = 8;
+    const TILE_N: usize = 32;
+    const TILE_K: usize = 32;
+    // Minimum dimension size to bother tiling
+    const MIN_DIM: usize = 16;
+
+    for stmt in stmts.iter_mut() {
+        if let Stmt::Loop {
+            shape,
+            reduce: Some(reduce),
+            tile,
+            ..
+        } = stmt
+        {
+            // We tile 2D output + reduce (covers matmul pattern).
+            // Need at least 2 output dims where the last two are large enough.
+            if shape.len() < 2 {
+                continue;
+            }
+            let ndim = shape.len();
+            let m = &shape[ndim - 2];
+            let n = &shape[ndim - 1];
+            let k = &reduce.size;
+
+            // Use concrete values for threshold checks; skip if symbolic
+            let m_val = m.as_usize();
+            let n_val = n.as_usize();
+            let k_val = k.as_usize();
+
+            // If all are concrete and below threshold, skip
+            if let (Some(mv), Some(nv), Some(kv)) = (m_val, n_val, k_val) {
+                if mv < MIN_DIM && nv < MIN_DIM && kv < MIN_DIM {
+                    continue;
+                }
+            }
+
+            // Build tile sizes: leading dims get tile_size = dim_size (flat outer loops),
+            // last two dims get tiled.
+            let mut tiles: Vec<Dim> = Vec::with_capacity(ndim + 1);
+            for d in 0..ndim - 2 {
+                tiles.push(shape[d].clone()); // batch dims: tile = full size
+            }
+            // Clamp tile size to min(TILE, dim) when concrete; otherwise use TILE literal
+            let tile_m = match m_val {
+                Some(mv) => Dim::Lit(TILE_M.min(mv)),
+                None => Dim::Lit(TILE_M),
+            };
+            let tile_n = match n_val {
+                Some(nv) => Dim::Lit(TILE_N.min(nv)),
+                None => Dim::Lit(TILE_N),
+            };
+            let tile_k = match k_val {
+                Some(kv) => Dim::Lit(TILE_K.min(kv)),
+                None => Dim::Lit(TILE_K),
+            };
+            tiles.push(tile_m);
+            tiles.push(tile_n);
+            tiles.push(tile_k); // reduce dim tile
+
+            *tile = Some(TileConfig { tiles });
         }
     }
 }
@@ -806,9 +890,10 @@ mod tests {
             if let Stmt::Alloc { size, .. } = s {
                 // The expanded shape would be 2*3*4=24, but the matmul intermediates
                 // should NOT be allocated. Only: A(6), B(12), reduce output(8), final output(8).
+                let sz = size.as_usize().expect("expected concrete size in test");
                 assert!(
-                    *size <= 12,
-                    "Unexpected large allocation: size={size}"
+                    sz <= 12,
+                    "Unexpected large allocation: size={size:?}"
                 );
             }
         }

@@ -80,7 +80,8 @@ fn test_gpt2_real_weights() {
     let input_nodes: Vec<(usize, String, Vec<usize>)> = graph.nodes.iter().enumerate()
         .filter_map(|(i, n)| {
             if let Op::Input { name } = &n.op {
-                Some((i, name.clone(), n.shape.clone()))
+                let shape: Vec<usize> = n.shape.iter().map(|d| d.as_usize().unwrap()).collect();
+                Some((i, name.clone(), shape))
             } else {
                 None
             }

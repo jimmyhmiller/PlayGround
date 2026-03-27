@@ -432,16 +432,39 @@ fn test_fused_nanogpt_tiny() {
     let mut inputs = HashMap::new();
     for node in &graph.nodes {
         if let tensor_lang_graph::Op::Input { name } = &node.op {
-            let shape = &node.shape;
+            let shape: Vec<usize> = node.shape.iter().map(|d| d.as_usize().unwrap()).collect();
             let size: usize = shape.iter().product();
             let data: Vec<f32> = if name == "input_0" {
                 (0..size).map(|i| (i % vocab_size) as f32).collect()
             } else {
-                (0..size).map(|i| ((i as f32 * 0.1).sin() * 0.1)).collect()
+                (0..size).map(|i| (i as f32 * 0.1).sin() * 0.1).collect()
             };
-            inputs.insert(name.clone(), ArrayD::from_shape_vec(shape.clone(), data).unwrap());
+            inputs.insert(name.clone(), ArrayD::from_shape_vec(shape, data).unwrap());
         }
     }
 
     check_fused(&program, inputs, 1e-2);
+}
+
+#[test]
+fn test_fused_matmul_non_divisible_tile() {
+    // Test matmul with dimensions that don't divide evenly by tile sizes
+    // (tm=8, tn=32, tk=32) → M=7, N=37, K=41 are all non-divisible
+    let program = r#"
+        let a = load([7, 41])
+        let b = load([41, 37])
+        let c = matmul(a, b)
+    "#;
+
+    let graph = compile(program);
+    let mut inputs = HashMap::new();
+    for node in &graph.nodes {
+        if let tensor_lang_graph::Op::Input { name } = &node.op {
+            let shape: Vec<usize> = node.shape.iter().map(|d| d.as_usize().unwrap()).collect();
+            let size: usize = shape.iter().product();
+            let data: Vec<f32> = (0..size).map(|i| (i as f32 * 0.01).sin()).collect();
+            inputs.insert(name.clone(), ArrayD::from_shape_vec(shape, data).unwrap());
+        }
+    }
+    check_fused(program, inputs, 1e-4);
 }
