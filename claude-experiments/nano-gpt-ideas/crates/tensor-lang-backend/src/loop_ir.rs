@@ -4,7 +4,7 @@
 //! their consumer's loop body. Multi-consumer nodes and reduce outputs are
 //! materialized (get their own buffer).
 
-use tensor_lang_graph::{Dim, Graph, Op};
+use tensor_lang_graph::{Dim, Graph, NodeId, Op};
 
 // ---------------------------------------------------------------------------
 // IR types
@@ -99,6 +99,11 @@ pub enum Index {
 
 /// Lower a dataflow graph into the loop IR with fusion applied.
 pub fn lower(graph: &Graph) -> Vec<Stmt> {
+    lower_with_outputs(graph, &[])
+}
+
+/// Lower the graph, ensuring all `extra_outputs` nodes are materialized.
+pub fn lower_with_outputs(graph: &Graph, extra_outputs: &[NodeId]) -> Vec<Stmt> {
     let n = graph.nodes.len();
     if n == 0 {
         return vec![];
@@ -126,8 +131,8 @@ pub fn lower(graph: &Graph) -> Vec<Stmt> {
                 Op::Shrink { .. } => true,
                 // Multi-consumer: must materialize
                 _ if consumers[i] > 1 => true,
-                // Final output
-                _ if i == last => true,
+                // Final output or requested multi-outputs
+                _ if i == last || extra_outputs.contains(&NodeId(i)) => true,
                 // Reduce outputs: downstream iterates different shape
                 Op::ReduceSum { .. } | Op::ReduceMax { .. } => true,
                 // Reshapes that merge/split dims (not pure 1-dim change) must
@@ -155,6 +160,17 @@ pub fn lower(graph: &Graph) -> Vec<Stmt> {
                 && !is_pure_1dim_change(input_shape, shape)
             {
                 materialized[input_id] = true;
+            }
+        }
+    }
+
+    // Materialize the input of any Pad node, since Pad emits a special
+    // copy statement that reads directly from the input buffer.
+    for i in 0..n {
+        let node = &graph.nodes[i];
+        if let Op::Pad { .. } = &node.op {
+            if materialized[i] {
+                materialized[node.inputs[0].0] = true;
             }
         }
     }

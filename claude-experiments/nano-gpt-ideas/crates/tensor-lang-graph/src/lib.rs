@@ -1,4 +1,5 @@
 pub mod dim;
+pub mod grad;
 pub mod nanogpt;
 
 use std::collections::HashMap;

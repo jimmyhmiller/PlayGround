@@ -174,6 +174,7 @@ interface ReplResponse {
   ex?: string;
   status?: string[];
   id?: string;
+  "suspend-depth"?: number;
   [key: string]: unknown;
 }
 
@@ -300,24 +301,38 @@ function formatReplResponse(messages: ReplResponse[]): string {
   // Combine the nREPL-style streaming messages into a single readable result
   const parts: string[] = [];
   let value: string | undefined;
+  let resumable = false;
+  let suspendDepth: number | undefined;
 
   for (const msg of messages) {
     if (msg.out) parts.push(msg.out);
     if (msg.err) parts.push(`[stderr] ${msg.err}`);
     if (msg.ex) parts.push(`[error] ${msg.ex}`);
     if (msg.value !== undefined) value = msg.value;
+    if (msg.status?.includes("resumable")) resumable = true;
+    if (msg["suspend-depth"] !== undefined) suspendDepth = msg["suspend-depth"];
   }
 
   const output = parts.join("");
+  let result: string;
   if (output && value !== undefined) {
-    return `${output}\n=> ${value}`;
+    result = `${output}\n=> ${value}`;
   } else if (value !== undefined) {
-    return `=> ${value}`;
+    result = `=> ${value}`;
   } else if (output) {
-    return output;
+    result = output;
+  } else {
+    // Fallback: return the raw messages as JSON
+    result = JSON.stringify(messages, null, 2);
   }
-  // Fallback: return the raw messages as JSON
-  return JSON.stringify(messages, null, 2);
+
+  if (resumable) {
+    result += `\n\n⚠️ RESUMABLE EXCEPTION (suspend-depth: ${suspendDepth ?? "unknown"})`;
+    result += `\nThe evaluation is suspended — the program is waiting for you to provide a value.`;
+    result += `\nUse beagle_resume to supply a replacement value, or beagle_abort to abandon.`;
+  }
+
+  return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -559,6 +574,40 @@ const beagleInterrupt = tool(
   { session: z.string().describe("Session to interrupt") },
   async (args) => {
     const result = await replRequest("interrupt", { session: args.session });
+    return { content: [{ type: "text" as const, text: result }] };
+  }
+);
+
+const beagleResume = tool(
+  "beagle_resume",
+  "Resume a suspended resumable exception by providing a value. When an eval hits a resumable " +
+  "exception, the program suspends and waits for you to supply a replacement value. " +
+  "The code you provide is evaluated, and the result becomes the return value of the " +
+  "original throw expression — execution then continues from that point. " +
+  "While suspended, you can also use beagle_eval in the same session to inspect state " +
+  "before deciding what value to resume with.",
+  {
+    code: z.string().describe("Beagle expression to evaluate — its result becomes the return value of the throw site"),
+    session: z.string().optional().describe("Session name (default: agent)"),
+  },
+  async (args) => {
+    const session = args.session ?? "agent";
+    const result = await replRequest("resume", { code: args.code, session });
+    return { content: [{ type: "text" as const, text: result }] };
+  }
+);
+
+const beagleAbort = tool(
+  "beagle_abort",
+  "Abort a suspended resumable exception, abandoning the suspended evaluation. " +
+  "Use this when you don't want to resume — the exception is discarded and the " +
+  "suspended evaluation terminates.",
+  {
+    session: z.string().optional().describe("Session name (default: agent)"),
+  },
+  async (args) => {
+    const session = args.session ?? "agent";
+    const result = await replRequest("abort", { session });
     return { content: [{ type: "text" as const, text: result }] };
   }
 );
@@ -812,7 +861,8 @@ const server = createSdkMcpServer({
   name: "beagle-repl",
   tools: [
     beagleRun, beagleLoad, beagleEval, beagleDescribe, beagleSessions, beagleInterrupt,
-    beagleStatus, beagleListNamespaces, beagleNamespaceInfo, beagleSearch, beagleDoc,
+    beagleResume, beagleAbort, beagleStatus,
+    beagleListNamespaces, beagleNamespaceInfo, beagleSearch, beagleDoc,
   ],
 });
 
@@ -842,6 +892,10 @@ goes through the REPL.
   Use it to define functions, test expressions, and run code. \
   The code is evaluated in the live running Beagle program.
 - **beagle_interrupt**: Stop a long-running evaluation.
+- **beagle_resume**: Resume a suspended resumable exception by providing a value. \
+  The code you pass is evaluated, and the result replaces the throw expression — \
+  the program continues from where it threw.
+- **beagle_abort**: Abandon a suspended resumable exception. The suspended evaluation terminates.
 - **beagle_status**: Check if the Beagle process is running. If it crashed, shows \
   the exit code, signal, stdout, stderr, and timing. Use this to diagnose crashes.
 - **beagle_describe**: Discover what operations the REPL server supports.
@@ -868,6 +922,52 @@ goes through the REPL.
    Use session "dev" for definitions that should persist.
 4. **Think in terms of a live program**: You're not editing dead text in files. \
    You're modifying a running system. Every eval changes the live program.
+
+## Resumable exceptions
+
+Beagle supports **resumable exceptions** — when code throws an exception inside a \
+resumable try/catch, the program suspends instead of unwinding. The REPL holds the \
+continuation alive, letting you inspect state, fix the problem, and resume execution \
+with a replacement value.
+
+### How it works
+
+1. An eval hits a throw inside a resumable handler.
+2. The REPL response comes back with status \`["error", "resumable"]\` and a \`suspend-depth\`.
+3. The program is **paused at the throw site**, waiting for your input.
+4. While suspended, you can use **beagle_eval** in the same session to inspect \
+   variables, check state, or evaluate fix code.
+5. Use **beagle_resume** with a Beagle expression — it evaluates your code and the \
+   result becomes the return value of the original throw, so execution continues normally.
+6. Or use **beagle_abort** to abandon the suspended evaluation entirely.
+
+### Example workflow
+
+\`\`\`
+// Eval some code that throws:
+beagle_eval("let x = compute_something(bad_input)")
+// → [error] "Invalid input: ..."
+//   ⚠️ RESUMABLE EXCEPTION (suspend-depth: 1)
+
+// Inspect state while suspended:
+beagle_eval("bad_input")
+// → => {:data nil, :format "csv"}
+
+// Resume with a corrected value:
+beagle_resume("compute_fallback(default_input)")
+// → => <result of the rest of the computation>
+\`\`\`
+
+### Key points
+
+- Resumable exceptions **nest** — you can have multiple levels of suspension. \
+  Resume/abort always operates on the innermost (most recent) one.
+- The \`suspend-depth\` tells you how many levels deep you are.
+- While suspended, the eval thread is blocked — you can still eval new code in the \
+  same session (the REPL handles nested evals), but the original computation is paused.
+- This is powerful for interactive debugging: when something goes wrong, you can \
+  inspect the exact state at the failure point and provide a fix value without \
+  restarting the computation.
 
 ## Beagle language basics
 
@@ -971,6 +1071,8 @@ async function main() {
             "mcp__beagle-repl__beagle_describe",
             "mcp__beagle-repl__beagle_sessions",
             "mcp__beagle-repl__beagle_interrupt",
+            "mcp__beagle-repl__beagle_resume",
+            "mcp__beagle-repl__beagle_abort",
             "mcp__beagle-repl__beagle_status",
             "mcp__beagle-repl__beagle_list_namespaces",
             "mcp__beagle-repl__beagle_namespace_info",
@@ -1003,7 +1105,7 @@ async function main() {
           }
         } else if (message.type === "result") {
           const result = (message as any).result;
-          if (result) console.log(result);
+          // Don't print result text — it duplicates the last assistant message's text block
           log("INFO", "Query completed with result", { resultLength: result?.length });
         } else if (
           message.type === "system" &&

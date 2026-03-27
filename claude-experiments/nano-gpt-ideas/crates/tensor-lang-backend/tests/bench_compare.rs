@@ -185,8 +185,30 @@ fn bench_oracle_gpt2_single_token() {
     inputs.insert(input_nodes[0].0.clone(),
         ArrayD::from_shape_vec(vec![1, seq_len], vec![15496.0f32, 11.0, 995.0]).unwrap());
 
+    // Attention mask (causal): input_3 is dynamically generated, not in manifest
+    let mask_idx = 3;
+    {
+        let (ref mask_name, ref mask_shape) = input_nodes[mask_idx];
+        let mask_size: usize = mask_shape.iter().product();
+        let mut mask_data = vec![0.0f32; mask_size];
+        for i in 0..seq_len {
+            for j in 0..seq_len {
+                if j > i {
+                    mask_data[i * seq_len + j] = -1000000.0;
+                }
+            }
+        }
+        inputs.insert(mask_name.clone(), ArrayD::from_shape_vec(mask_shape.clone(), mask_data).unwrap());
+    }
+
+    // Weight tensors: skip tokens (idx 0) and attn_mask (idx 3)
+    let mut manifest_idx = 0;
     for (idx, (name, shape)) in input_nodes.iter().enumerate().skip(1) {
-        let t = &tensors_meta[idx - 1];
+        if idx == mask_idx {
+            continue; // already handled above
+        }
+        let t = &tensors_meta[manifest_idx];
+        manifest_idx += 1;
         let offset = t["offset"].as_u64().unwrap() as usize;
         let n_elements = t["n_elements"].as_u64().unwrap() as usize;
         let manifest_shape: Vec<usize> = t["shape"].as_array().unwrap()

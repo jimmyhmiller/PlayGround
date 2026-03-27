@@ -493,16 +493,36 @@ fn compute_loop_signature(
 impl AssemblyScriptBackend {
     /// Emit AssemblyScript from a graph using the fused loop IR.
     pub fn emit_fused(&self, graph: &Graph) -> String {
-        self.emit_fused_inner(graph, false)
+        self.emit_fused_inner(graph, false, None)
     }
 
     /// Emit AssemblyScript with bounds-checking instrumentation for debugging.
     pub fn emit_fused_debug(&self, graph: &Graph) -> String {
-        self.emit_fused_inner(graph, true)
+        self.emit_fused_inner(graph, true, None)
     }
 
-    fn emit_fused_inner(&self, graph: &Graph, debug_bounds: bool) -> String {
-        let mut stmts = loop_ir::lower(graph);
+    /// Emit AssemblyScript that returns multiple output buffers concatenated.
+    /// The returned Float32Array contains [output_0, output_1, ...] flattened.
+    /// Use the graph node shapes to split the result on the Rust side.
+    pub fn emit_fused_multi_output(
+        &self,
+        graph: &Graph,
+        outputs: &[tensor_lang_graph::NodeId],
+    ) -> String {
+        self.emit_fused_inner(graph, false, Some(outputs))
+    }
+
+    fn emit_fused_inner(
+        &self,
+        graph: &Graph,
+        debug_bounds: bool,
+        multi_outputs: Option<&[tensor_lang_graph::NodeId]>,
+    ) -> String {
+        let mut stmts = if let Some(outputs) = multi_outputs {
+            loop_ir::lower_with_outputs(graph, outputs)
+        } else {
+            loop_ir::lower(graph)
+        };
         loop_ir::tile_reduce_loops(&mut stmts);
         let mut out = String::new();
 
@@ -667,8 +687,28 @@ impl AssemblyScriptBackend {
             stmt_idx += 1;
         }
 
-        let last = graph.nodes.len() - 1;
-        out.push_str(&format!("\n  return buf{last};\n"));
+        if let Some(outputs) = multi_outputs {
+            // Multi-output: concatenate requested buffers into one result array
+            let size_parts: Vec<String> = outputs
+                .iter()
+                .map(|id| Dim::product(&graph.nodes[id.0].shape).to_code())
+                .collect();
+            let total_size = size_parts.join(" + ");
+            out.push_str(&format!("\n  const __out = new Float32Array({total_size});\n"));
+            out.push_str("  let __off: i32 = 0;\n");
+            for id in outputs {
+                let size_expr = Dim::product(&graph.nodes[id.0].shape).to_code();
+                out.push_str(&format!(
+                    "  for (let __i: i32 = 0; __i < {size_expr}; __i++) __out[__off + __i] = buf{}[__i];\n",
+                    id.0
+                ));
+                out.push_str(&format!("  __off += {size_expr};\n"));
+            }
+            out.push_str("  return __out;\n");
+        } else {
+            let last = graph.nodes.len() - 1;
+            out.push_str(&format!("\n  return buf{last};\n"));
+        }
         out.push_str("}\n");
         out
     }

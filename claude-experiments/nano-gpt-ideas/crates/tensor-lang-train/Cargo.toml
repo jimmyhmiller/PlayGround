@@ -1,9 +1,11 @@
 [package]
-name = "tensor-lang-test-oracle"
+name = "tensor-lang-train"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
 tensor-lang-graph = { path = "../tensor-lang-graph" }
-ndarray = "0.16"
+tensor-lang-backend = { path = "../tensor-lang-backend" }
 rand = "0.8"
+serde_json = "1"
+midly = "0.5"

@@ -1,3 +1,5 @@
+mod grad_check;
+
 use ndarray::{ArrayD, IxDyn};
 use tensor_lang_graph::{Dim, Graph, Op};
 use std::collections::HashMap;
