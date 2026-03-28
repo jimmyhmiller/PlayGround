@@ -512,6 +512,17 @@ impl AssemblyScriptBackend {
         self.emit_fused_inner(graph, false, Some(outputs))
     }
 
+    /// Like emit_fused_multi_output but skips tiling (more reliable for training).
+    pub fn emit_fused_multi_output_no_tile(
+        &self,
+        graph: &Graph,
+        outputs: &[tensor_lang_graph::NodeId],
+    ) -> String {
+        let stmts = loop_ir::lower_with_outputs(graph, outputs);
+        // Don't tile — skip tile_reduce_loops
+        self.emit_fused_from_stmts(graph, &stmts, false, Some(outputs))
+    }
+
     fn emit_fused_inner(
         &self,
         graph: &Graph,
@@ -524,6 +535,16 @@ impl AssemblyScriptBackend {
             loop_ir::lower(graph)
         };
         loop_ir::tile_reduce_loops(&mut stmts);
+        self.emit_fused_from_stmts(graph, &stmts, debug_bounds, multi_outputs)
+    }
+
+    fn emit_fused_from_stmts(
+        &self,
+        graph: &Graph,
+        stmts: &[loop_ir::Stmt],
+        debug_bounds: bool,
+        multi_outputs: Option<&[tensor_lang_graph::NodeId]>,
+    ) -> String {
         let mut out = String::new();
 
         // Export Float32Array type ID
@@ -553,7 +574,7 @@ impl AssemblyScriptBackend {
         // Per-stmt: Some((kernel_id, buf_ordering, out_buf)) for Loop stmts, None otherwise
         let mut loop_kernel_map: Vec<Option<(usize, Vec<usize>, usize)>> = Vec::new();
 
-        for stmt in &stmts {
+        for stmt in stmts {
             match stmt {
                 Stmt::Loop { buf, shape, reduce, body, result, tile } => {
                     let (sig, buf_ordering) = compute_loop_signature(
@@ -638,7 +659,7 @@ impl AssemblyScriptBackend {
 
         // Emit each statement
         let mut stmt_idx = 0;
-        for stmt in &stmts {
+        for stmt in stmts {
             match stmt {
                 Stmt::Alloc { buf, size } => {
                     // Check if this is an Input node — use the parameter directly
@@ -688,7 +709,7 @@ impl AssemblyScriptBackend {
         }
 
         if let Some(outputs) = multi_outputs {
-            // Multi-output: concatenate requested buffers into one result array
+            // Multi-output: allocate result buffer and copy each output into it
             let size_parts: Vec<String> = outputs
                 .iter()
                 .map(|id| Dim::product(&graph.nodes[id.0].shape).to_code())

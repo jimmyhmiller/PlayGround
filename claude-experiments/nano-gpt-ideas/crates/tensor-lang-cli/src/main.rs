@@ -1,4 +1,5 @@
 use std::io::{self, Write, BufRead};
+use rand::RngExt;
 use std::path::PathBuf;
 use std::process::Command;
 use std::time::Instant;
@@ -66,7 +67,7 @@ impl Model {
         Model { vocab_size, n_embd, n_head, n_layer, weights, tokenizer }
     }
 
-    fn generate(&self, prompt: &str, max_tokens: usize) {
+    fn generate(&self, prompt: &str, max_tokens: usize, temperature: f32) {
         let root = project_root();
         let tmp_dir = std::env::temp_dir();
         let encoding = self.tokenizer.encode(prompt, false).unwrap();
@@ -217,10 +218,32 @@ impl Model {
             // Get logits for the last position (output is [1, T, vocab])
             let last_start = (actual_t - 1) * self.vocab_size;
             let last_logits = &logits[last_start..last_start + self.vocab_size];
-            let next_token = last_logits.iter()
-                .enumerate()
-                .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
-                .unwrap().0 as u32;
+            let next_token = if temperature <= 0.0 {
+                // Greedy argmax
+                last_logits.iter()
+                    .enumerate()
+                    .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+                    .unwrap().0 as u32
+            } else {
+                // Temperature sampling
+                let max_l = last_logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+                let exp: Vec<f32> = last_logits.iter()
+                    .map(|&l| ((l - max_l) / temperature).exp())
+                    .collect();
+                let sum: f32 = exp.iter().sum();
+                let probs: Vec<f32> = exp.iter().map(|e| e / sum).collect();
+                let r: f32 = rand::rng().random();
+                let mut cumulative = 0.0;
+                let mut chosen = 0u32;
+                for (i, &p) in probs.iter().enumerate() {
+                    cumulative += p;
+                    if r < cumulative {
+                        chosen = i as u32;
+                        break;
+                    }
+                }
+                chosen
+            };
 
             // Decode and print
             let text = self.tokenizer.decode(&[next_token], false).unwrap();
@@ -250,6 +273,26 @@ impl Model {
 }
 
 fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    let mut temperature = 0.0f32;
+    let mut max_tokens = 20usize;
+
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--temp" | "--temperature" => {
+                i += 1;
+                temperature = args[i].parse().expect("invalid temperature value");
+            }
+            "--max-tokens" => {
+                i += 1;
+                max_tokens = args[i].parse().expect("invalid max-tokens value");
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+
     eprintln!("Loading GPT-2 (124M) weights...");
     let t0 = Instant::now();
     let model = Model::load();
@@ -257,6 +300,7 @@ fn main() {
     eprintln!("vocab={}, d={}, heads={}, layers={}",
         model.vocab_size, model.n_embd, model.n_head, model.n_layer);
     eprintln!("Backend: fused WASM (AssemblyScript)");
+    eprintln!("Temperature: {temperature}, Max tokens: {max_tokens}");
     eprintln!();
     eprintln!("Type a prompt and press Enter. Ctrl-C to quit.");
     eprintln!();
@@ -273,7 +317,7 @@ fn main() {
         let prompt = line.trim_end_matches('\n').trim_end_matches('\r');
         if prompt.is_empty() { continue; }
 
-        model.generate(prompt, 20);
+        model.generate(prompt, max_tokens, temperature);
         eprintln!();
     }
 }

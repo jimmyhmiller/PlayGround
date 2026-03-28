@@ -219,6 +219,12 @@ struct Compiler {
     input_count: usize,
     /// Declared dimension parameters (symbolic dims like "T" for seq_len)
     dim_params: std::collections::HashSet<String>,
+    /// Concrete values for dimension parameters. If a dim is in this map,
+    /// it resolves to Dim::Lit instead of Dim::Param.
+    dim_values: HashMap<String, usize>,
+    /// Named float constants injected from the environment.
+    /// Referenced as identifiers in expressions, compiled to Constant nodes.
+    constants: HashMap<String, f64>,
 }
 
 impl Compiler {
@@ -229,6 +235,8 @@ impl Compiler {
             fns: HashMap::new(),
             input_count: 0,
             dim_params: std::collections::HashSet::new(),
+            dim_values: HashMap::new(),
+            constants: HashMap::new(),
         }
     }
 
@@ -258,7 +266,13 @@ impl Compiler {
             Expr::Number(n) => self.graph.add_node(Op::Constant(*n), vec![]),
 
             Expr::Ident(name) => {
-                *self.env.get(name).unwrap_or_else(|| panic!("undefined variable: {name}"))
+                if let Some(&id) = self.env.get(name) {
+                    id
+                } else if let Some(&val) = self.constants.get(name) {
+                    self.graph.add_node(Op::Constant(val), vec![])
+                } else {
+                    panic!("undefined variable: {name}")
+                }
             }
 
             Expr::Array(_) => {
@@ -559,13 +573,25 @@ impl Compiler {
         match expr {
             Expr::Number(n) => Dim::Lit(*n as usize),
             Expr::Ident(name) => {
-                if self.dim_params.contains(name) {
+                if let Some(&val) = self.dim_values.get(name) {
+                    Dim::Lit(val)
+                } else if self.dim_params.contains(name) {
                     Dim::Param(name.clone())
                 } else {
                     panic!("unknown dimension parameter: {name}")
                 }
             }
-            _ => panic!("expected number or dim parameter in shape, got {expr:?}"),
+            Expr::BinOp { op, lhs, rhs } => {
+                let l = self.compile_dim(lhs);
+                let r = self.compile_dim(rhs);
+                let dim = match op {
+                    BinOpKind::Mul => Dim::Mul(Box::new(l), Box::new(r)),
+                    BinOpKind::Add => Dim::Add(Box::new(l), Box::new(r)),
+                    BinOpKind::Sub => Dim::Sub(Box::new(l), Box::new(r)),
+                };
+                dim.simplify()
+            }
+            _ => panic!("expected dimension expression, got {expr:?}"),
         }
     }
 
@@ -616,6 +642,22 @@ impl Compiler {
 pub fn compile(input: &str) -> Graph {
     let items = parser::parse(input);
     Compiler::new().compile_program(&items)
+}
+
+/// Compile with concrete values for dimension parameters and named constants.
+/// Dims declared with `dim T` in the source will resolve to `Dim::Lit(value)`
+/// instead of `Dim::Param("T")` if present in `dims`.
+/// Constants are available as named identifiers in expressions.
+pub fn compile_with_env(
+    input: &str,
+    dims: &HashMap<String, usize>,
+    constants: &HashMap<String, f64>,
+) -> Graph {
+    let items = parser::parse(input);
+    let mut compiler = Compiler::new();
+    compiler.dim_values = dims.clone();
+    compiler.constants = constants.clone();
+    compiler.compile_program(&items)
 }
 
 /// Helper to create a Vec<Dim> from concrete values.

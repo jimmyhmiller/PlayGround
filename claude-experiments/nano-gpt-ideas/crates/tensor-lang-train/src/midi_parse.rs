@@ -143,7 +143,7 @@ impl Vocab {
     }
 }
 
-fn pitch_name(pitch: u8) -> String {
+pub fn pitch_name(pitch: u8) -> String {
     let names = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
     let octave = (pitch / 12) as i32 - 1;
     format!("{}{}", names[(pitch % 12) as usize], octave)
@@ -197,6 +197,74 @@ pub fn tokenize(events: &[MidiEvent], ticks_per_step: u64, max_time_shift: usize
     }
 
     (tokens, vocab)
+}
+
+/// Tokenize events using an existing vocab (for multi-file training).
+pub fn tokenize_with_vocab(events: &[MidiEvent], vocab: &Vocab, ticks_per_step: u64) -> Vec<usize> {
+    let mut tokens = Vec::new();
+    let mut last_step: u64 = 0;
+
+    for e in events {
+        let step = e.tick / ticks_per_step;
+        if step > last_step {
+            let mut delta = (step - last_step) as usize;
+            while delta > 0 {
+                let shift = delta.min(vocab.max_time_shift);
+                tokens.push(vocab.time_shift(shift));
+                delta -= shift;
+            }
+            last_step = step;
+        }
+        match &e.kind {
+            MidiEventKind::NoteOn { pitch, velocity } => {
+                if *velocity > 0 {
+                    tokens.push(vocab.note_on(*pitch));
+                } else {
+                    tokens.push(vocab.note_off(*pitch));
+                }
+            }
+            MidiEventKind::NoteOff { pitch } => {
+                tokens.push(vocab.note_off(*pitch));
+            }
+        }
+    }
+    tokens
+}
+
+/// Parse multiple MIDI files, build a shared vocabulary, return concatenated tokens
+/// with a separator gap between pieces.
+pub fn tokenize_multi(paths: &[String], ticks_per_step: u64, max_time_shift: usize) -> (Vec<usize>, Vocab) {
+    // First pass: collect all pitches
+    let mut all_events: Vec<Vec<MidiEvent>> = Vec::new();
+    let mut pitch_set = BTreeSet::new();
+    for path in paths {
+        let events = parse_midi_file(path);
+        for e in &events {
+            match &e.kind {
+                MidiEventKind::NoteOn { pitch, .. } | MidiEventKind::NoteOff { pitch } => {
+                    pitch_set.insert(*pitch);
+                }
+            }
+        }
+        all_events.push(events);
+    }
+
+    let pitches: Vec<u8> = pitch_set.into_iter().collect();
+    let vocab = Vocab { pitches, max_time_shift };
+
+    // Second pass: tokenize each file with shared vocab, concatenate
+    let mut all_tokens = Vec::new();
+    for (i, events) in all_events.iter().enumerate() {
+        if i > 0 {
+            // Add a large time gap between pieces
+            all_tokens.push(vocab.time_shift(max_time_shift));
+            all_tokens.push(vocab.time_shift(max_time_shift));
+        }
+        let tokens = tokenize_with_vocab(events, &vocab, ticks_per_step);
+        all_tokens.extend(tokens);
+    }
+
+    (all_tokens, vocab)
 }
 
 /// Print summary of parsed MIDI

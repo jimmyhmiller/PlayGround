@@ -110,17 +110,22 @@ fi
 # Clean up old Tracker executable if present
 rm -f Ease.app/Contents/MacOS/Tracker
 
-# Sign the app (replace with your identity if you have one)
-# To find your identity: security find-identity -v -p codesigning
-IDENTITY="${CODESIGN_IDENTITY:-}"
-
-if [ -n "$IDENTITY" ]; then
-    echo "Signing with identity: $IDENTITY"
-    codesign --force --deep --sign "$IDENTITY" --entitlements Ease.entitlements Ease.app
+# Embed provisioning profile
+echo "Embedding provisioning profile..."
+PROFILE_PATH="$HOME/Library/Developer/Xcode/UserData/Provisioning Profiles/62bd6a42-5425-4524-a997-49a1662bb6d7.provisionprofile"
+if [ -f "$PROFILE_PATH" ]; then
+    cp "$PROFILE_PATH" Ease.app/Contents/embedded.provisionprofile
 else
-    echo "No CODESIGN_IDENTITY set, signing for local use only..."
-    codesign --force --deep --sign - --entitlements Ease.entitlements Ease.app
+    echo "Warning: Provisioning profile not found at $PROFILE_PATH"
+    echo "Open Ease.xcodeproj in Xcode and build once to generate it."
 fi
+
+# Sign the app
+# To find your identity: security find-identity -v -p codesigning
+IDENTITY="${CODESIGN_IDENTITY:-Apple Development: jimmyhmiller@gmail.com (NPAKY9T8P8)}"
+
+echo "Signing with identity: $IDENTITY"
+codesign --force --deep --sign "$IDENTITY" --entitlements Ease.entitlements Ease.app
 
 echo "App bundle created at Ease.app"
 

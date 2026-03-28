@@ -1,0 +1,152 @@
+// Transformer model for MIDI sequence generation
+// Shape dimensions are symbolic — resolved at compile time
+
+
+// ─── Helper functions ──────────────────────────────────────────────────────
+
+fn layernorm(x, gamma, beta) {
+    let mean = mul(sum(x, axis: 2), 0.015625)
+    let xc = sub(x, mean)
+    let var = mul(sum(mul(xc, xc), axis: 2), 0.015625)
+    let std = sqrt(add(var, 0.00001))
+    let normed = mul(xc, recip(std))
+    add(mul(normed, gamma), beta)
+}
+
+fn clamp(x, lo, hi) {
+    let upper = neg(max(neg(x), neg(hi)))
+    max(upper, lo)
+}
+
+fn gelu(x) {
+    let x3 = mul(mul(x, x), x)
+    let inner = mul(0.7978845608028654, add(x, mul(0.044715, x3)))
+    let clamped = clamp(inner, neg(10.0), 10.0)
+    let z2 = mul(clamped, 2.0)
+    let ez2 = exp(z2)
+    let tanh_val = mul(sub(ez2, 1.0), recip(add(ez2, 1.0)))
+    mul(mul(0.5, x), add(1.0, tanh_val))
+}
+
+fn linear(x, w, b) {
+    add(matmul(x, w), b)
+}
+
+fn softmax_attn(x) {
+    let m = max(x, axis: 3)
+    let e = exp(sub(x, m))
+    let s = sum(e, axis: 3)
+    mul(recip(s), e)
+}
+
+// ─── Inputs ────────────────────────────────────────────────────────────────
+
+let tokens = load([4, 128])
+let wte = load([99, 64])
+let wpe = load([128, 64])
+
+// ─── Embedding ─────────────────────────────────────────────────────────────
+
+let classes = arange(99)
+let cls = reshape(classes, [1, 1, 99])
+let cls_exp = expand(cls, [4, 128, 99])
+let tok_r = reshape(tokens, [4, 128, 1])
+let tok_exp = expand(tok_r, [4, 128, 99])
+let lo = sub(cls_exp, 0.5)
+let hi = add(cls_exp, 0.5)
+let one_hot = mul(cmplt(lo, tok_exp), cmplt(tok_exp, hi))
+let tok_emb = matmul(one_hot, wte)
+let pos_emb = reshape(wpe, [1, 128, 64])
+let x = add(tok_emb, expand(pos_emb, [4, 128, 64]))
+
+// ─── Causal mask ───────────────────────────────────────────────────────────
+
+let row = expand(reshape(arange(128), [1, 1, 128, 1]), [1, 1, 128, 128])
+let col = expand(reshape(arange(128), [1, 1, 1, 128]), [1, 1, 128, 128])
+let mask = mul(cmplt(row, col), neg(1000000.0))
+let mask_full = expand(mask, [4, 4, 128, 128])
+
+// ─── Transformer Layer 0 ──────────────────────────────────────────────────
+
+let ln1_g_0 = load([64])
+let ln1_b_0 = load([64])
+let qkv_w_0 = load([64, 3 * 64])
+let qkv_b_0 = load([3 * 64])
+let proj_w_0 = load([64, 64])
+let proj_b_0 = load([64])
+let ln2_g_0 = load([64])
+let ln2_b_0 = load([64])
+let fc_w_0 = load([64, 256])
+let fc_b_0 = load([256])
+let mlp_w_0 = load([256, 64])
+let mlp_b_0 = load([64])
+
+let ln1_0 = layernorm(x, ln1_g_0, ln1_b_0)
+let qkv_0 = linear(ln1_0, qkv_w_0, qkv_b_0)
+let qkv_r_0 = reshape(qkv_0, [4, 128, 3, 4, 16])
+let q_0 = reshape(shrink(qkv_r_0, [[0, 4], [0, 128], [0, 1], [0, 4], [0, 16]]), [4, 128, 4, 16])
+let k_0 = reshape(shrink(qkv_r_0, [[0, 4], [0, 128], [1, 2], [0, 4], [0, 16]]), [4, 128, 4, 16])
+let v_0 = reshape(shrink(qkv_r_0, [[0, 4], [0, 128], [2, 3], [0, 4], [0, 16]]), [4, 128, 4, 16])
+let q_h_0 = permute(q_0, [0, 2, 1, 3])
+let k_h_0 = permute(k_0, [0, 2, 1, 3])
+let v_h_0 = permute(v_0, [0, 2, 1, 3])
+let kt_0 = permute(k_h_0, [0, 1, 3, 2])
+let scores_0 = mul(matmul(q_h_0, kt_0), 0.25)
+let masked_0 = add(scores_0, mask_full)
+let attn_0 = softmax_attn(masked_0)
+let attn_out_0 = matmul(attn_0, v_h_0)
+let merged_0 = reshape(permute(attn_out_0, [0, 2, 1, 3]), [4, 128, 64])
+let attn_proj_0 = linear(merged_0, proj_w_0, proj_b_0)
+let x = add(x, attn_proj_0)
+
+let ln2_0 = layernorm(x, ln2_g_0, ln2_b_0)
+let fc_0 = gelu(linear(ln2_0, fc_w_0, fc_b_0))
+let mlp_out_0 = linear(fc_0, mlp_w_0, mlp_b_0)
+let x = add(x, mlp_out_0)
+
+// ─── Transformer Layer 1 ──────────────────────────────────────────────────
+
+let ln1_g_1 = load([64])
+let ln1_b_1 = load([64])
+let qkv_w_1 = load([64, 3 * 64])
+let qkv_b_1 = load([3 * 64])
+let proj_w_1 = load([64, 64])
+let proj_b_1 = load([64])
+let ln2_g_1 = load([64])
+let ln2_b_1 = load([64])
+let fc_w_1 = load([64, 256])
+let fc_b_1 = load([256])
+let mlp_w_1 = load([256, 64])
+let mlp_b_1 = load([64])
+
+let ln1_1 = layernorm(x, ln1_g_1, ln1_b_1)
+let qkv_1 = linear(ln1_1, qkv_w_1, qkv_b_1)
+let qkv_r_1 = reshape(qkv_1, [4, 128, 3, 4, 16])
+let q_1 = reshape(shrink(qkv_r_1, [[0, 4], [0, 128], [0, 1], [0, 4], [0, 16]]), [4, 128, 4, 16])
+let k_1 = reshape(shrink(qkv_r_1, [[0, 4], [0, 128], [1, 2], [0, 4], [0, 16]]), [4, 128, 4, 16])
+let v_1 = reshape(shrink(qkv_r_1, [[0, 4], [0, 128], [2, 3], [0, 4], [0, 16]]), [4, 128, 4, 16])
+let q_h_1 = permute(q_1, [0, 2, 1, 3])
+let k_h_1 = permute(k_1, [0, 2, 1, 3])
+let v_h_1 = permute(v_1, [0, 2, 1, 3])
+let kt_1 = permute(k_h_1, [0, 1, 3, 2])
+let scores_1 = mul(matmul(q_h_1, kt_1), 0.25)
+let masked_1 = add(scores_1, mask_full)
+let attn_1 = softmax_attn(masked_1)
+let attn_out_1 = matmul(attn_1, v_h_1)
+let merged_1 = reshape(permute(attn_out_1, [0, 2, 1, 3]), [4, 128, 64])
+let attn_proj_1 = linear(merged_1, proj_w_1, proj_b_1)
+let x = add(x, attn_proj_1)
+
+let ln2_1 = layernorm(x, ln2_g_1, ln2_b_1)
+let fc_1 = gelu(linear(ln2_1, fc_w_1, fc_b_1))
+let mlp_out_1 = linear(fc_1, mlp_w_1, mlp_b_1)
+let x = add(x, mlp_out_1)
+
+// ─── Output projection (weight-tied with wte) ─────────────────────────────
+
+let ln_f_g = load([64])
+let ln_f_b = load([64])
+let x_norm = layernorm(x, ln_f_g, ln_f_b)
+let wte_t = permute(reshape(wte, [1, 99, 64]), [0, 2, 1])
+let wte_2d = reshape(wte_t, [64, 99])
+let logits = matmul(x_norm, wte_2d)

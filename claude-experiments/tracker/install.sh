@@ -76,8 +76,14 @@ cp -R .build/arm64-apple-macosx/debug/Sparkle.framework Ease.app/Contents/Framew
 # Fix rpath
 install_name_tool -add_rpath @executable_path/../Frameworks Ease.app/Contents/MacOS/Ease 2>/dev/null || true
 
+# Embed provisioning profile
+PROFILE_PATH="$HOME/Library/Developer/Xcode/UserData/Provisioning Profiles/62bd6a42-5425-4524-a997-49a1662bb6d7.provisionprofile"
+if [ -f "$PROFILE_PATH" ]; then
+    cp "$PROFILE_PATH" Ease.app/Contents/embedded.provisionprofile
+fi
+
 # Re-sign
-codesign --force --deep --sign - Ease.app
+codesign --force --deep --sign "Apple Development: jimmyhmiller@gmail.com (NPAKY9T8P8)" --entitlements Ease.entitlements Ease.app
 
 echo "Done! Launching..."
 open Ease.app

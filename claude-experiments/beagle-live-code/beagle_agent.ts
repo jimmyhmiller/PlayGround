@@ -117,7 +117,13 @@ function startBeagleServer(bgFile: string, extraArgs: string[] = []): child_proc
     serverOutput.push(`[stderr] ${text}`);
   });
   proc.on("exit", (code, signal) => {
-    log("WARN", "Beagle process exited", { bgFile, exitCode: code, signal });
+    log("WARN", "Beagle process exited", {
+      bgFile,
+      exitCode: code,
+      signal,
+      stderr: stderrChunks.join(""),
+      stdout: stdoutChunks.join(""),
+    });
     if (beagProcess === proc) {
       lastCrash = {
         exitCode: code,
@@ -311,6 +317,13 @@ function formatReplResponse(messages: ReplResponse[]): string {
     if (msg.value !== undefined) value = msg.value;
     if (msg.status?.includes("resumable")) resumable = true;
     if (msg["suspend-depth"] !== undefined) suspendDepth = msg["suspend-depth"];
+    // Main-thread status fields
+    if ((msg as any)["main-thread"] === "suspended") {
+      parts.push(`[main-thread SUSPENDED] ${(msg as any).error ?? "unknown error"}`);
+      parts.push(`\nUse beagle_eval to fix the broken function, then beagle_main_resume to continue.`);
+    } else if ((msg as any)["main-thread"] === "running") {
+      parts.push(`[main-thread running]`);
+    }
   }
 
   const output = parts.join("");
@@ -613,6 +626,49 @@ const beagleAbort = tool(
 );
 
 // ---------------------------------------------------------------------------
+// Main-thread crash recovery tools
+// ---------------------------------------------------------------------------
+
+const beagleMainStatus = tool(
+  "beagle_main_status",
+  "Check whether the main thread (game loop / GUI) is running or suspended due to a crash. " +
+  "If suspended, shows the error. Use beagle_main_resume or beagle_main_abort to recover.",
+  {},
+  async () => {
+    const result = await replRequest("main-status", {});
+    return { content: [{ type: "text" as const, text: result }] };
+  }
+);
+
+const beagleMainResume = tool(
+  "beagle_main_resume",
+  "Resume the main thread after it crashed. The main thread (game loop) is suspended waiting " +
+  "for you to fix the problem. First use beagle_eval to redefine the broken function, then " +
+  "call this to resume execution. Optionally provide code to evaluate — its result becomes " +
+  "the return value at the crash site.",
+  {
+    code: z.string().optional().describe("Optional Beagle expression — result becomes the return value at the crash site"),
+  },
+  async (args) => {
+    const extra: Record<string, string> = {};
+    if (args.code) extra.code = args.code;
+    const result = await replRequest("main-resume", extra);
+    return { content: [{ type: "text" as const, text: result }] };
+  }
+);
+
+const beagleMainAbort = tool(
+  "beagle_main_abort",
+  "Abort the suspended main thread. The main function will return and the program will " +
+  "likely exit. Use this when you can't fix the crash and want to restart with beagle_run.",
+  {},
+  async () => {
+    const result = await replRequest("main-abort", {});
+    return { content: [{ type: "text" as const, text: result }] };
+  }
+);
+
+// ---------------------------------------------------------------------------
 // Program lifecycle tool
 // ---------------------------------------------------------------------------
 
@@ -862,6 +918,7 @@ const server = createSdkMcpServer({
   tools: [
     beagleRun, beagleLoad, beagleEval, beagleDescribe, beagleSessions, beagleInterrupt,
     beagleResume, beagleAbort, beagleStatus,
+    beagleMainStatus, beagleMainResume, beagleMainAbort,
     beagleListNamespaces, beagleNamespaceInfo, beagleSearch, beagleDoc,
   ],
 });
@@ -898,6 +955,13 @@ goes through the REPL.
 - **beagle_abort**: Abandon a suspended resumable exception. The suspended evaluation terminates.
 - **beagle_status**: Check if the Beagle process is running. If it crashed, shows \
   the exit code, signal, stdout, stderr, and timing. Use this to diagnose crashes.
+- **beagle_main_status**: Check if the main thread (game loop / GUI) is running or \
+  suspended due to a crash. If suspended, shows the error message.
+- **beagle_main_resume**: Resume the main thread after it crashed. First fix the \
+  broken function with beagle_eval, then call this. Optionally pass code whose \
+  result becomes the return value at the crash site.
+- **beagle_main_abort**: Abort the suspended main thread. The program will likely exit. \
+  Use beagle_run to restart afterward.
 - **beagle_describe**: Discover what operations the REPL server supports.
 - **beagle_sessions**: List active REPL sessions.
 
@@ -968,6 +1032,26 @@ beagle_resume("compute_fallback(default_input)")
 - This is powerful for interactive debugging: when something goes wrong, you can \
   inspect the exact state at the failure point and provide a fix value without \
   restarting the computation.
+
+## Main-thread crash recovery
+
+When running a GUI program (e.g. raylib game) with beagle_run, the main thread runs \
+the game loop while the REPL server runs on a background thread. If you redefine a \
+function with a bug and the game loop calls it, the **main thread crashes** — but \
+instead of killing the process, it suspends and waits for REPL recovery.
+
+### Workflow
+
+1. You redefine a function via beagle_eval — it has a bug.
+2. The game loop calls the broken function and throws an error.
+3. The main thread suspends. Use **beagle_main_status** to see the error.
+4. Fix the function with **beagle_eval**.
+5. Use **beagle_main_resume** to continue the game loop from where it crashed.
+6. Or use **beagle_main_abort** if you want to give up and restart with beagle_run.
+
+**Important**: The REPL server stays alive during a main-thread crash. You can still \
+eval code, redefine functions, and inspect state. The main thread is just paused \
+waiting for your signal to continue.
 
 ## Beagle language basics
 
@@ -1074,6 +1158,9 @@ async function main() {
             "mcp__beagle-repl__beagle_resume",
             "mcp__beagle-repl__beagle_abort",
             "mcp__beagle-repl__beagle_status",
+            "mcp__beagle-repl__beagle_main_status",
+            "mcp__beagle-repl__beagle_main_resume",
+            "mcp__beagle-repl__beagle_main_abort",
             "mcp__beagle-repl__beagle_list_namespaces",
             "mcp__beagle-repl__beagle_namespace_info",
             "mcp__beagle-repl__beagle_search",
