@@ -1398,3 +1398,166 @@ fn test_gc_stress_main_loop() {
     assert_eq!(as_number(result), 1250025000.0);
     assert_eq!(rt.output.trim(), "1250025000");
 }
+
+// ─── Table-heavy benchmark ─────────────────────────────────
+//
+// Exercises: integer-keyed tables, string-keyed tables, table creation,
+// lookup, iteration, filtering, and GC pressure from many small tables.
+// Designed to avoid the nested-call-as-arg bug.
+
+const TABLE_BENCH_SRC: &str = r#"
+local N = 50000
+
+-- Phase 1+2: Build table i->i*i, sum values
+local function build_and_sum(n)
+    local t = {}
+    for i = 1, n do
+        t[i] = i * i
+    end
+    local sum = 0
+    for i = 1, n do
+        local v = t[i]
+        sum = sum + v
+    end
+    return sum
+end
+
+-- Phase 3+4: Filter odd squares, sum them
+local function filter_odds(n)
+    local t = {}
+    for i = 1, n do
+        t[i] = i * i
+    end
+    local odds = {}
+    local odd_count = 0
+    for i = 1, n do
+        local v = t[i]
+        local half = v / 2
+        local floored = half - half % 1
+        if floored * 2 ~= v then
+            odd_count = odd_count + 1
+            odds[odd_count] = v
+        end
+    end
+    local odd_sum = 0
+    for i = 1, odd_count do
+        local v = odds[i]
+        odd_sum = odd_sum + v
+    end
+    return odd_count + odd_sum
+end
+
+-- Phase 5: Many small table creates + lookups
+local function chained_tables(n)
+    local chain_sum = 0
+    for i = 1, n / 10 do
+        local small = {}
+        local base = (i - 1) * 10
+        for j = 1, 10 do
+            small[j] = base + j
+        end
+        for j = 1, 10 do
+            local v = small[j]
+            chain_sum = chain_sum + v
+        end
+    end
+    return chain_sum
+end
+
+-- Phase 6: String-keyed hash table
+local function string_keys()
+    local dict = {}
+    local keys = {}
+    for i = 1, 1000 do
+        local k = "key_" .. i
+        keys[i] = k
+        dict[k] = i * 3
+    end
+    local dict_sum = 0
+    for i = 1, 1000 do
+        local k = keys[i]
+        local v = dict[k]
+        dict_sum = dict_sum + v
+    end
+    return dict_sum
+end
+
+local sum = build_and_sum(N)
+local odd_result = filter_odds(N)
+local chain_sum = chained_tables(N)
+local dict_sum = string_keys()
+
+print(sum)
+print(odd_result)
+print(chain_sum)
+print(dict_sum)
+return sum
+"#;
+
+#[test]
+fn test_table_bench_correctness() {
+    let (result, rt) = run_lua(TABLE_BENCH_SRC);
+    let lines: Vec<&str> = rt.output.trim().lines().collect();
+    assert_eq!(lines[0], "41667916675000");
+    assert_eq!(lines[1], "20833333350000");
+    assert_eq!(lines[2], "1250025000");
+    assert_eq!(lines[3], "1501500");
+    assert_eq!(as_number(result), 41667916675000.0);
+}
+
+#[test]
+fn bench_table_heavy_jit() {
+    // Warm up
+    let _ = run_lua("return 1");
+
+    let iterations = 5;
+    let mut times = Vec::new();
+    for _ in 0..iterations {
+        let start = std::time::Instant::now();
+        let (result, _) = run_lua(TABLE_BENCH_SRC);
+        let elapsed = start.elapsed();
+        assert_eq!(as_number(result), 41667916675000.0);
+        times.push(elapsed);
+    }
+
+    let total: std::time::Duration = times.iter().sum();
+    let avg = total / iterations as u32;
+    let min = times.iter().min().unwrap();
+    let max = times.iter().max().unwrap();
+
+    eprintln!("\n── JIT table benchmark ({} runs) ──", iterations);
+    eprintln!("  avg: {:?}", avg);
+    eprintln!("  min: {:?}", min);
+    eprintln!("  max: {:?}", max);
+
+    // Now run Lua 5.1 interpreter for comparison
+    let lua_src_path = std::env::temp_dir().join("table_bench_cmp.lua");
+    std::fs::write(&lua_src_path, TABLE_BENCH_SRC).unwrap();
+
+    let mut lua_times = Vec::new();
+    for _ in 0..iterations {
+        let start = std::time::Instant::now();
+        let status = Command::new("/tmp/lua-5.1.5/src/lua")
+            .arg(lua_src_path.to_str().unwrap())
+            .stdout(std::process::Stdio::null())
+            .status()
+            .expect("failed to run lua 5.1");
+        let elapsed = start.elapsed();
+        assert!(status.success());
+        lua_times.push(elapsed);
+    }
+    let _ = std::fs::remove_file(&lua_src_path);
+
+    let lua_total: std::time::Duration = lua_times.iter().sum();
+    let lua_avg = lua_total / iterations as u32;
+    let lua_min = lua_times.iter().min().unwrap();
+    let lua_max = lua_times.iter().max().unwrap();
+
+    eprintln!("\n── Lua 5.1 interpreter ({} runs) ──", iterations);
+    eprintln!("  avg: {:?}", lua_avg);
+    eprintln!("  min: {:?}", lua_min);
+    eprintln!("  max: {:?}", lua_max);
+
+    let ratio = lua_avg.as_secs_f64() / avg.as_secs_f64();
+    eprintln!("\n── Ratio: JIT is {:.2}x vs Lua 5.1 ──", ratio);
+}

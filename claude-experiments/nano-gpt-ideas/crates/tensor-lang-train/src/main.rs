@@ -361,7 +361,22 @@ fn main() {
     let cmd = args.get(1).map(|s| s.as_str()).unwrap_or("help");
     match cmd {
         "train" => cmd_train(args.get(2).map(|s| s.as_str()).unwrap_or(DEFAULT_MIDI)),
-        "train-rl" => cmd_train_rl(args.get(2).map(|s| s.as_str()).unwrap_or(DEFAULT_MIDI)),
+        "train-rl" => {
+            let mut midi = DEFAULT_MIDI;
+            let mut leverage_threshold: Option<f32> = None;
+            let mut episodes: usize = 200;
+            let mut rollouts: usize = 20;
+            let mut i = 2;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--leverage" => { leverage_threshold = Some(args.get(i+1).expect("--leverage needs a value").parse().expect("bad float")); i += 2; }
+                    "--episodes" => { episodes = args.get(i+1).expect("--episodes needs a value").parse().expect("bad int"); i += 2; }
+                    "--rollouts" => { rollouts = args.get(i+1).expect("--rollouts needs a value").parse().expect("bad int"); i += 2; }
+                    other => { midi = Box::leak(other.to_string().into_boxed_str()); i += 1; }
+                }
+            }
+            cmd_train_rl(midi, leverage_threshold, episodes, rollouts);
+        }
         "generate" => {
             let mut checkpoint = None;
             let mut temp = None;
@@ -979,8 +994,14 @@ fn compile_for_rl(cfg: &ModelConfig) -> TrainingGraph {
 
 // ─── RL training command ──────────────────────────────────────────────────
 
-fn cmd_train_rl(midi_path: &str) {
-    eprintln!("=== REINFORCE RL Training (Satie style) ===");
+fn cmd_train_rl(midi_path: &str, leverage_threshold: Option<f32>, num_episodes: usize, rollouts_per_batch: usize) {
+    let use_leverage = leverage_threshold.is_some();
+    let lev_thresh = leverage_threshold.unwrap_or(0.0);
+    if use_leverage {
+        eprintln!("=== RL Training with Leverage Thresholding (ℓ={:.2}) ===", lev_thresh);
+    } else {
+        eprintln!("=== RL Training BASELINE (no leverage thresholding) ===");
+    }
 
     // Load pretrained model
     let model_path = project_root().join("midi_model.bin");
@@ -1019,8 +1040,7 @@ fn cmd_train_rl(midi_path: &str) {
     let files = collect_midi_files(midi_path);
     eprintln!("Training MIDI files: {}", files.len());
 
-    let num_episodes = 200;
-    let rollouts_per_batch = 20; // generate many rollouts at once to amortize runner startup
+    // num_episodes and rollouts_per_batch come from CLI args
     eprintln!("\nRL training: {} episodes, {} rollouts/batch, {} batch size\n",
         num_episodes, rollouts_per_batch, rl_batch_size);
 
@@ -1051,31 +1071,97 @@ fn cmd_train_rl(midi_path: &str) {
             // inf_runner dropped here
         }
 
-        // Phase 2: Process rollouts in mini-batches (only RL runner alive)
-        eprintln!("--- Training on rollouts ---");
+        // ── Compute leverage and select samples ──────────────────────────
+        let n_total = all_rollouts.len();
+        let n_success = all_rewards.iter().filter(|&&r| r > 0.5).count();
+        let _n_fail = n_total - n_success;
+        let p = n_success as f32 / n_total as f32; // success rate
+
+        // Compute per-rollout leverage: rare outcomes have higher leverage
+        let leverages: Vec<f32> = all_rewards.iter().map(|&r| {
+            if p < 1e-6 || p > 1.0 - 1e-6 {
+                1.0 // degenerate case: all same reward
+            } else if r > 0.5 {
+                (1.0 - p) / p    // success leverage
+            } else {
+                p / (1.0 - p)    // failure leverage
+            }
+        }).collect();
+
+        let total_leverage: f32 = leverages.iter().sum();
+
+        // GRPO-style advantages: normalize within the batch
+        let mean_reward: f32 = all_rewards.iter().sum::<f32>() / n_total as f32;
+        let var_reward: f32 = all_rewards.iter().map(|&r| (r - mean_reward).powi(2)).sum::<f32>() / n_total as f32;
+        let std_reward = var_reward.sqrt().max(1e-8);
+
+        // Select rollouts based on leverage threshold
+        let selected_indices: Vec<usize> = if use_leverage && p > 1e-6 && p < 1.0 - 1e-6 {
+            // Sort indices by leverage (descending)
+            let mut idx_lev: Vec<(usize, f32)> = leverages.iter().enumerate().map(|(i, &l)| (i, l)).collect();
+            idx_lev.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+
+            // Select smallest subset with total leverage >= threshold * total
+            let target = lev_thresh * total_leverage;
+            let mut accum = 0.0f32;
+            let mut selected: Vec<usize> = Vec::new();
+            for (i, lev) in &idx_lev {
+                selected.push(*i);
+                accum += lev;
+                if accum >= target { break; }
+            }
+            // Ensure at least rl_batch_size samples
+            if selected.len() < rl_batch_size {
+                for (i, _) in &idx_lev {
+                    if !selected.contains(i) {
+                        selected.push(*i);
+                        if selected.len() >= rl_batch_size { break; }
+                    }
+                }
+            }
+            selected.sort(); // restore order for batching
+            selected
+        } else {
+            (0..n_total).collect() // baseline: use all
+        };
+
+        let n_selected = selected_indices.len();
+        let selected_leverage: f32 = selected_indices.iter().map(|&i| leverages[i]).sum();
+
+        eprintln!("--- Leverage stats: p={:.2} ({}/{} success), total_lev={:.1}, selected={}/{} ({:.0}% of leverage) ---",
+            p, n_success, n_total, total_leverage,
+            n_selected, n_total, 100.0 * selected_leverage / total_leverage.max(1e-8));
+
+        // Phase 2: Process selected rollouts in mini-batches
+        eprintln!("--- Training on {} selected rollouts ---", n_selected);
+        let mut total_train_time = 0.0f64;
         {
             let mut rl_runner = WasmRunner::new(&rl_wasm);
-            for batch_start in (0..all_rollouts.len()).step_by(rl_batch_size) {
-                if batch_start + rl_batch_size > all_rollouts.len() { break; }
+            let mut batch_buf: Vec<usize> = Vec::new();
+            for &si in &selected_indices {
+                batch_buf.push(si);
+                if batch_buf.len() < rl_batch_size { continue; }
+
                 let t_ep = Instant::now();
 
-                let batch_rollouts = &all_rollouts[batch_start..batch_start + rl_batch_size];
-                let batch_rewards = &all_rewards[batch_start..batch_start + rl_batch_size];
-
-                let mean_reward: f32 = batch_rewards.iter().sum::<f32>() / batch_rewards.len() as f32;
-                let advantages: Vec<f32> = batch_rewards.iter().map(|&r| r - mean_reward).collect();
+                // GRPO advantages for this mini-batch
+                let advantages: Vec<f32> = batch_buf.iter().map(|&i| {
+                    (all_rewards[i] - mean_reward) / std_reward
+                }).collect();
 
                 let adv_nonzero = advantages.iter().any(|&a| a.abs() > 1e-8);
                 if !adv_nonzero {
                     eprintln!("Episode {:3}/{}: no signal (all rewards={:.2}), skipping",
                         episode + 1, num_episodes, mean_reward);
                     episode += 1;
+                    batch_buf.clear();
                     continue;
                 }
 
                 let seq_len = rl_cfg.seq_len;
                 let mut tok_flat = vec![0.0f32; rl_batch_size * seq_len];
-                for (bi, rollout) in batch_rollouts.iter().enumerate() {
+                for (bi, &ri) in batch_buf.iter().enumerate() {
+                    let rollout = &all_rollouts[ri];
                     let start = if rollout.len() > seq_len { rollout.len() - seq_len } else { 0 };
                     let ctx = &rollout[start..];
                     for (j, &t) in ctx.iter().enumerate() {
@@ -1111,29 +1197,38 @@ fn cmd_train_rl(midi_path: &str) {
                     eprintln!("Episode {:3}/{}: NaN/Inf (loss={}, norm={}), skipping",
                         episode + 1, num_episodes, loss, norm);
                     episode += 1;
+                    batch_buf.clear();
                     continue;
                 }
 
                 optimizer.step(&mut weights, &clipped);
 
-                let n_success = batch_rewards.iter().filter(|&&r| r > 0.5).count();
-                eprintln!("Episode {:3}/{}: loss={:.4} reward={:.2} ({}/{} success) norm={:.1} ({:.1}s)",
+                let batch_success = batch_buf.iter().filter(|&i| all_rewards[*i] > 0.5).count();
+                let batch_lev: f32 = batch_buf.iter().map(|&i| leverages[i]).sum();
+                let elapsed = t_ep.elapsed().as_secs_f64();
+                total_train_time += elapsed;
+                eprintln!("Episode {:3}/{}: loss={:.4} reward={:.2} ({}/{} success) lev={:.1} norm={:.1} ({:.1}s)",
                     episode + 1, num_episodes, loss, mean_reward,
-                    n_success, rl_batch_size, norm, t_ep.elapsed().as_secs_f64());
+                    batch_success, rl_batch_size, batch_lev, norm, elapsed);
 
                 episode += 1;
+                batch_buf.clear();
                 if episode >= num_episodes { break; }
             }
             // rl_runner dropped here
         }
+        eprintln!("--- Batch done: {} train steps, {:.1}s train time ---", n_selected / rl_batch_size, total_train_time);
 
         // Checkpoint
-        let path = project_root().join(format!("rl_checkpoint_{}.bin", episode));
+        let tag = if use_leverage { format!("rl_lev{:.0}_{}", lev_thresh * 100.0, episode) }
+                  else { format!("rl_baseline_{}", episode) };
+        let path = project_root().join(format!("{}.bin", tag));
         save_model_to(&weights, &base_cfg, &vocab, &path);
     }
 
     // Save final model
-    let final_path = project_root().join("midi_model_rl.bin");
+    let suffix = if use_leverage { format!("_lev{:.0}", lev_thresh * 100.0) } else { "_baseline".into() };
+    let final_path = project_root().join(format!("midi_model_rl{}.bin", suffix));
     save_model_to(&weights, &base_cfg, &vocab, &final_path);
     eprintln!("\nRL training complete. Model saved to {}", final_path.display());
     eprintln!("Generate with: cargo run --release -p tensor-lang-train -- generate {}", final_path.display());
