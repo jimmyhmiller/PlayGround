@@ -185,10 +185,14 @@ fn project_root() -> std::path::PathBuf {
 }
 
 fn compile_wasm(as_code: &str) -> std::path::PathBuf {
+    compile_wasm_named(as_code, "train_model")
+}
+
+fn compile_wasm_named(as_code: &str, name: &str) -> std::path::PathBuf {
     let root = project_root();
     let tmp = std::env::temp_dir();
-    let src_path = tmp.join("train_model.ts");
-    let wasm_path = tmp.join("train_model.wasm");
+    let src_path = tmp.join(format!("{name}.ts"));
+    let wasm_path = tmp.join(format!("{name}.wasm"));
     std::fs::write(&src_path, as_code).unwrap();
     let output = Command::new("npx")
         .args(["asc", src_path.to_str().unwrap(),
@@ -262,8 +266,8 @@ impl WasmRunner {
 
 impl Drop for WasmRunner {
     fn drop(&mut self) {
-        // Close stdin to signal the runner to exit
-        drop(self.stdin.get_mut());
+        // Kill the child process to ensure it exits
+        let _ = self.child.kill();
         let _ = self.child.wait();
     }
 }
@@ -357,6 +361,7 @@ fn main() {
     let cmd = args.get(1).map(|s| s.as_str()).unwrap_or("help");
     match cmd {
         "train" => cmd_train(args.get(2).map(|s| s.as_str()).unwrap_or(DEFAULT_MIDI)),
+        "train-rl" => cmd_train_rl(args.get(2).map(|s| s.as_str()).unwrap_or(DEFAULT_MIDI)),
         "generate" => {
             let mut checkpoint = None;
             let mut temp = None;
@@ -374,7 +379,8 @@ fn main() {
         "parse" => cmd_parse(args.get(2).map(|s| s.as_str()).unwrap_or(DEFAULT_MIDI)),
         _ => {
             eprintln!("Usage:");
-            eprintln!("  train [midi]         Train on MIDI file");
+            eprintln!("  train [midi]         Train on MIDI file (supervised)");
+            eprintln!("  train-rl [midi]      RL fine-tune for bass note sustain");
             eprintln!("  generate [checkpoint] Generate from trained/checkpoint weights");
             eprintln!("  random               Generate from random weights");
             eprintln!("  parse [midi]         Analyze MIDI file");
@@ -383,10 +389,107 @@ fn main() {
 }
 
 fn cmd_parse(path: &str) {
-    eprintln!("Parsing: {path}");
-    let events = midi_parse::parse_midi_file(path);
-    let (tokens, vocab) = midi_parse::tokenize(&events, 120, 32);
-    midi_parse::print_summary(&events, &tokens, &vocab);
+    let files = collect_midi_files(path);
+    for f in &files {
+        eprintln!("=== {} ===", f);
+        let events = midi_parse::parse_midi_file(f);
+        let (tokens, vocab) = midi_parse::tokenize(&events, 120, 32);
+        midi_parse::print_summary(&events, &tokens, &vocab);
+        analyze_density(&tokens, &vocab);
+        // Test reward on windows — show quality over time
+        let window = 128.min(tokens.len());
+        let stride = 64;
+        let mut pos = 0;
+        let (mut total, mut rewarded) = (0, 0);
+        while pos + window <= tokens.len() {
+            let (r, bd) = midi_parse::compute_satie_reward(&tokens[pos..pos+window], &vocab);
+            let pct = pos as f32 / tokens.len() as f32 * 100.0;
+            eprintln!("  @{:>4} ({:>2.0}%): r={:.0} [{}]", pos, pct, r, bd);
+            total += 1;
+            if r > 0.5 { rewarded += 1; }
+            pos += stride;
+        }
+        eprintln!("  Reward: {}/{} ({:.0}%)", rewarded, total, rewarded as f32 / total.max(1) as f32 * 100.0);
+    }
+}
+
+fn analyze_density(tokens: &[usize], vocab: &midi_parse::Vocab) {
+    // Measure: for every 16-step window (1 measure), count note events and dead time
+    let mut time_pos = 0usize;
+    let mut events_per_measure: Vec<usize> = Vec::new();
+    let mut dead_steps_per_measure: Vec<usize> = Vec::new();
+
+    let mut measure_events = 0usize;
+    let mut measure_start = 0usize;
+    let mut last_event_time = 0usize;
+    let mut max_gap_in_measure = 0usize;
+
+    for &tok in tokens {
+        if let Some(s) = vocab.is_time_shift(tok) {
+            time_pos += s;
+            // Check if we crossed a measure boundary (every 16 steps)
+            while time_pos >= measure_start + 16 {
+                let dead = max_gap_in_measure;
+                events_per_measure.push(measure_events);
+                dead_steps_per_measure.push(dead);
+                measure_start += 16;
+                measure_events = 0;
+                max_gap_in_measure = 0;
+                last_event_time = measure_start;
+            }
+        } else if vocab.is_note_on(tok).is_some() {
+            let gap = time_pos.saturating_sub(last_event_time);
+            max_gap_in_measure = max_gap_in_measure.max(gap);
+            last_event_time = time_pos;
+            measure_events += 1;
+        }
+    }
+
+    if !events_per_measure.is_empty() {
+        let avg_events: f32 = events_per_measure.iter().sum::<usize>() as f32 / events_per_measure.len() as f32;
+        let avg_dead: f32 = dead_steps_per_measure.iter().sum::<usize>() as f32 / dead_steps_per_measure.len() as f32;
+        let max_dead = dead_steps_per_measure.iter().max().unwrap_or(&0);
+        eprintln!("  Density: {:.1} note-ons/measure, avg max-gap={:.1} steps, worst gap={} steps",
+            avg_events, avg_dead, max_dead);
+        eprintln!("  Measures: {}", events_per_measure.len());
+
+        // Time shift distribution
+        let mut shift_counts = vec![0usize; 33];
+        for &tok in tokens {
+            if let Some(s) = vocab.is_time_shift(tok) {
+                if s < shift_counts.len() { shift_counts[s] += 1; }
+            }
+        }
+        eprint!("  Time shifts: ");
+        for (s, &c) in shift_counts.iter().enumerate() {
+            if c > 0 { eprint!("T+{}:{}  ", s, c); }
+        }
+        eprintln!();
+
+        // Consecutive time shift analysis (total gap between note events)
+        let mut gaps: Vec<usize> = Vec::new();
+        let mut current_gap = 0usize;
+        let mut in_gap = false;
+        for &tok in tokens {
+            if let Some(s) = vocab.is_time_shift(tok) {
+                current_gap += s;
+                in_gap = true;
+            } else if vocab.is_note_on(tok).is_some() || vocab.is_note_off(tok).is_some() {
+                if in_gap && current_gap > 0 {
+                    gaps.push(current_gap);
+                }
+                current_gap = 0;
+                in_gap = false;
+            }
+        }
+        gaps.sort();
+        if !gaps.is_empty() {
+            let median = gaps[gaps.len() / 2];
+            let p90 = gaps[gaps.len() * 9 / 10];
+            let max = gaps[gaps.len() - 1];
+            eprintln!("  Event gaps: median={} p90={} max={} (in time steps)", median, p90, max);
+        }
+    }
 }
 
 fn collect_midi_files(path: &str) -> Vec<String> {
@@ -576,9 +679,11 @@ fn cmd_generate(checkpoint: Option<&str>, random: bool, temp_override: Option<f3
     let mut rng = rand::thread_rng();
     let temperature = temp_override.unwrap_or(0.3f32);
 
-    // Seed with a random 2-measure excerpt from a training song
+    // Seed selection
+    let seed_from_start = std::env::var("SEED_START").is_ok();
+    let custom_seed = std::env::var("SEED_CUSTOM").ok();
     let files = collect_midi_files(DEFAULT_MIDI);
-    let file = &files[rng.gen_range(0..files.len())];
+    let file = if seed_from_start { &files[0] } else { &files[rng.gen_range(0..files.len())] };
     let seed_events = midi_parse::parse_midi_file(file);
     let seed_tokens = midi_parse::tokenize_with_vocab(&seed_events, &vocab, 120);
 
@@ -596,7 +701,33 @@ fn cmd_generate(checkpoint: Option<&str>, random: bool, temp_override: Option<f3
         }
     }
 
-    let mut tokens: Vec<usize> = if measure_starts.len() >= 3 {
+    let mut tokens: Vec<usize> = if let Some(ref custom) = custom_seed {
+        // Parse custom seed like "ON(C2) T+4 ON(E3) ON(G3) ON(B3) T+8 OFF(B3) OFF(G3) OFF(E3) OFF(C2)"
+        let mut toks = Vec::new();
+        for part in custom.split_whitespace() {
+            if part.starts_with("ON(") && part.ends_with(")") {
+                let name = &part[3..part.len()-1];
+                if let Some(pitch) = parse_pitch_name(name) {
+                    toks.push(vocab.note_on(pitch));
+                }
+            } else if part.starts_with("OFF(") && part.ends_with(")") {
+                let name = &part[4..part.len()-1];
+                if let Some(pitch) = parse_pitch_name(name) {
+                    toks.push(vocab.note_off(pitch));
+                }
+            } else if part.starts_with("T+") {
+                if let Ok(s) = part[2..].parse::<usize>() {
+                    toks.push(vocab.time_shift(s));
+                }
+            }
+        }
+        eprintln!("Custom seed: {} tokens", toks.len());
+        toks
+    } else if seed_from_start {
+        // Use the very beginning of the file
+        let end_idx = if measure_starts.len() >= 3 { measure_starts[2] } else { seed_tokens.len().min(cfg.seq_len) };
+        seed_tokens[..end_idx.min(seed_tokens.len())].to_vec()
+    } else if measure_starts.len() >= 3 {
         // Pick a random 2-measure start (need at least 2 measures ahead)
         let max_start = measure_starts.len() - 2;
         let pick = rng.gen_range(0..max_start);
@@ -670,6 +801,355 @@ fn cmd_generate(checkpoint: Option<&str>, random: bool, temp_override: Option<f3
     tokens_to_midi(&midi_path, &tokens, &vocab);
     eprintln!("\nWrote: {}", midi_path.display());
     eprintln!("Play:  open {}", midi_path.display());
+}
+
+// ─── Rollout generation ───────────────────────────────────────────────────
+
+/// Pick a random 2-measure seed from a random training file.
+fn pick_random_seed(
+    files: &[String],
+    vocab: &midi_parse::Vocab,
+    max_len: usize,
+    rng: &mut impl rand::Rng,
+) -> Vec<usize> {
+    let file = &files[rng.gen_range(0..files.len())];
+    let events = midi_parse::parse_midi_file(file);
+    let tokens = midi_parse::tokenize_with_vocab(&events, vocab, 120);
+
+    let mut measure_starts: Vec<usize> = vec![0];
+    let mut accumulated_steps: usize = 0;
+    for (i, &tok) in tokens.iter().enumerate() {
+        if let Some(s) = vocab.is_time_shift(tok) {
+            accumulated_steps += s;
+            while accumulated_steps >= 16 && measure_starts.last().map_or(true, |&last| last < i + 1) {
+                measure_starts.push(i + 1);
+                accumulated_steps -= 16;
+            }
+        }
+    }
+
+    if measure_starts.len() >= 3 {
+        let max_start = measure_starts.len() - 2;
+        let pick = rng.gen_range(0..max_start);
+        let start_idx = measure_starts[pick];
+        let end_idx = if pick + 2 < measure_starts.len() {
+            measure_starts[pick + 2]
+        } else {
+            tokens.len()
+        };
+        tokens[start_idx..end_idx.min(tokens.len())].to_vec()
+    } else {
+        tokens[..tokens.len().min(max_len)].to_vec()
+    }
+}
+
+/// Generate a token sequence autoregressively from a seed.
+fn generate_rollout(
+    runner: &mut WasmRunner,
+    weights: &[Vec<f32>],
+    cfg: &ModelConfig,
+    _vocab: &midi_parse::Vocab,
+    seed_tokens: &[usize],
+    num_tokens: usize,
+    temperature: f32,
+    rng: &mut impl rand::Rng,
+) -> Vec<usize> {
+    let mut tokens = seed_tokens.to_vec();
+    for _ in 0..num_tokens {
+        let ctx_start = if tokens.len() > cfg.seq_len { tokens.len() - cfg.seq_len } else { 0 };
+        let ctx = &tokens[ctx_start..];
+        let mut token_data = vec![0.0f32; cfg.seq_len];
+        for (i, &t) in ctx.iter().enumerate() { token_data[i] = t as f32; }
+
+        let mut refs: Vec<&[f32]> = vec![&token_data];
+        for w in weights { refs.push(w); }
+
+        let logits = runner.run(&refs);
+        let pos = ctx.len() - 1;
+        let pos_logits = &logits[pos * cfg.vocab_size..(pos + 1) * cfg.vocab_size];
+
+        // Temperature-scaled softmax
+        let max_l = pos_logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        let exp: Vec<f32> = pos_logits.iter().map(|&l| ((l - max_l) / temperature).exp()).collect();
+        let sum: f32 = exp.iter().sum();
+        let probs: Vec<f32> = exp.iter().map(|&e| e / sum).collect();
+
+        // Top-p sampling
+        let top_p = 0.9f32;
+        let mut sorted_indices: Vec<usize> = (0..probs.len()).collect();
+        sorted_indices.sort_by(|&a, &b| probs[b].partial_cmp(&probs[a]).unwrap());
+        let mut cumulative = 0.0f32;
+        let mut cutoff = sorted_indices.len();
+        for (i, &idx) in sorted_indices.iter().enumerate() {
+            cumulative += probs[idx];
+            if cumulative > top_p { cutoff = i + 1; break; }
+        }
+        let kept = &sorted_indices[..cutoff];
+        let kept_sum: f32 = kept.iter().map(|&i| probs[i]).sum();
+        let mut r: f32 = rng.gen_range(0.0..1.0) * kept_sum;
+        let mut next = kept[0];
+        for &idx in kept { r -= probs[idx]; if r <= 0.0 { next = idx; break; } }
+        if next == 0 { next = 1; } // skip PAD
+
+        tokens.push(next);
+    }
+    tokens
+}
+
+// ─── RL graph compilation ─────────────────────────────────────────────────
+
+/// Compile the model graph with REINFORCE policy gradient loss.
+/// Inputs: tokens [B, T], weights..., advantages [B]
+/// Output: loss (scalar) + gradients for each weight
+fn compile_for_rl(cfg: &ModelConfig) -> TrainingGraph {
+    let source = model_source();
+    let (dims, constants) = model_env(cfg);
+    let mut graph = compile_with_env(&source, &dims, &constants);
+
+    let b = cfg.batch_size;
+    let t = cfg.seq_len;
+    let v = cfg.vocab_size;
+
+    let logits = NodeId(graph.nodes.len() - 1);
+
+    // Find learnable weight input nodes (everything except tokens = input_0)
+    let weight_ids: Vec<NodeId> = graph.nodes.iter().enumerate()
+        .filter_map(|(i, n)| {
+            if let Op::Input { name } = &n.op {
+                if name != "input_0" { Some(NodeId(i)) } else { None }
+            } else { None }
+        })
+        .collect();
+
+    // Add advantages input [B]
+    let advantages = graph.add_node(Op::Input { name: "advantages".into() }, vec![]);
+    graph.set_input_shape(advantages, tensor_lang_graph::dims(&[b]));
+
+    // Log-softmax of logits [B, T, V]
+    let mx = graph.add_node(Op::ReduceMax { axis: 2 }, vec![logits]);
+    let neg_mx = graph.add_node(Op::Neg, vec![mx]);
+    let shifted = graph.add_node(Op::Add, vec![logits, neg_mx]);
+    let log2e = graph.add_node(Op::Constant(std::f64::consts::LOG2_E), vec![]);
+    let scaled = graph.add_node(Op::Mul, vec![shifted, log2e]);
+    let ex = graph.add_node(Op::Exp2, vec![scaled]);
+    let sum_ex = graph.add_node(Op::ReduceSum { axis: 2 }, vec![ex]);
+    let log2_sum = graph.add_node(Op::Log2, vec![sum_ex]);
+    let ln2 = graph.add_node(Op::Constant(std::f64::consts::LN_2), vec![]);
+    let log_sum = graph.add_node(Op::Mul, vec![log2_sum, ln2]);
+    let neg_log_sum = graph.add_node(Op::Neg, vec![log_sum]);
+    let log_probs = graph.add_node(Op::Add, vec![shifted, neg_log_sum]);
+
+    // One-hot encode input tokens (the rollout actions) to select log_probs
+    let tokens_node = NodeId(0); // input_0 = tokens [B, T]
+    let classes = graph.add_node(Op::Arange { size: tensor_lang_graph::Dim::Lit(v) }, vec![]);
+    let cls = graph.add_node(Op::Reshape { shape: tensor_lang_graph::dims(&[1, 1, v]) }, vec![classes]);
+    let cls_exp = graph.add_node(Op::Expand { shape: tensor_lang_graph::dims(&[b, t, v]) }, vec![cls]);
+    let tok_r = graph.add_node(Op::Reshape { shape: tensor_lang_graph::dims(&[b, t, 1]) }, vec![tokens_node]);
+    let tok_exp = graph.add_node(Op::Expand { shape: tensor_lang_graph::dims(&[b, t, v]) }, vec![tok_r]);
+    let half = graph.add_node(Op::Constant(0.5), vec![]);
+    let neg_half = graph.add_node(Op::Neg, vec![half]);
+    let lo = graph.add_node(Op::Add, vec![cls_exp, neg_half]);
+    let half2 = graph.add_node(Op::Constant(0.5), vec![]);
+    let hi = graph.add_node(Op::Add, vec![cls_exp, half2]);
+    let lt_lo = graph.add_node(Op::CmpLt, vec![lo, tok_exp]);
+    let lt_hi = graph.add_node(Op::CmpLt, vec![tok_exp, hi]);
+    let action_one_hot = graph.add_node(Op::Mul, vec![lt_lo, lt_hi]);
+
+    // Select log_probs of chosen actions: sum(one_hot * log_probs, axis=2)
+    let prod = graph.add_node(Op::Mul, vec![action_one_hot, log_probs]);
+    let chosen_lp = graph.add_node(Op::ReduceSum { axis: 2 }, vec![prod]); // [B, T, 1]
+
+    // Sum log_probs across time for each sequence
+    let seq_lp = graph.add_node(Op::ReduceSum { axis: 1 }, vec![chosen_lp]); // [B, 1, 1]
+
+    // Weight by advantages: reshape [B] -> [B, 1, 1]
+    let adv_r = graph.add_node(Op::Reshape { shape: tensor_lang_graph::dims(&[b, 1, 1]) }, vec![advantages]);
+    let weighted = graph.add_node(Op::Mul, vec![seq_lp, adv_r]); // [B, 1, 1]
+
+    // Loss = -mean(advantage * sum_t(log_pi))
+    let sum_b = graph.add_node(Op::ReduceSum { axis: 0 }, vec![weighted]); // [1, 1, 1]
+    let scalar = graph.add_node(Op::Reshape { shape: vec![] }, vec![sum_b]);
+    let neg = graph.add_node(Op::Neg, vec![scalar]);
+    let inv_b = graph.add_node(Op::Constant(1.0 / b as f64), vec![]);
+    let loss = graph.add_node(Op::Mul, vec![neg, inv_b]);
+
+    let grad_ids = graph.grad(loss, &weight_ids);
+    TrainingGraph { graph, loss, grad_ids }
+}
+
+// ─── RL training command ──────────────────────────────────────────────────
+
+fn cmd_train_rl(midi_path: &str) {
+    eprintln!("=== REINFORCE RL Training (Satie style) ===");
+
+    // Load pretrained model
+    let model_path = project_root().join("midi_model.bin");
+    let (mut weights, base_cfg, vocab) = load_model_from(&model_path);
+    eprintln!("Loaded model: vocab={} seq={} embd={} heads={} layers={}",
+        base_cfg.vocab_size, base_cfg.seq_len, base_cfg.n_embd, base_cfg.n_head, base_cfg.n_layer);
+
+    let rl_batch_size = 4usize;
+    let rollout_tokens = 128usize; // long rollouts so tail quality is tested
+    let temperature = 0.5f32;
+
+    // Compile both WASM modules upfront (but only run one at a time)
+    let inf_cfg = ModelConfig { batch_size: 1, ..base_cfg.clone() };
+    let rl_cfg = ModelConfig { batch_size: rl_batch_size, ..base_cfg.clone() };
+
+    eprintln!("Compiling WASM modules...");
+    let t0 = Instant::now();
+    let backend = AssemblyScriptBackend;
+
+    let inf_graph = compile_for_inference(&inf_cfg);
+    let inf_code = backend.emit_fused(&inf_graph);
+    let inf_wasm = compile_wasm_named(&inf_code, "rl_inference");
+
+    let rl_tg = compile_for_rl(&rl_cfg);
+    eprintln!("  RL graph: {} nodes", rl_tg.graph.nodes.len());
+    let mut output_ids = vec![rl_tg.loss];
+    output_ids.extend_from_slice(&rl_tg.grad_ids);
+    let rl_code = backend.emit_fused_multi_output(&rl_tg.graph, &output_ids);
+    let rl_wasm = compile_wasm_named(&rl_code, "rl_training");
+    eprintln!("  Both WASM modules compiled in {:.1}s", t0.elapsed().as_secs_f64());
+
+    let sizes = weight_sizes(&rl_cfg);
+    let mut optimizer = Adam::new(&sizes, 1e-5);
+    let mut rng = rand::thread_rng();
+
+    let files = collect_midi_files(midi_path);
+    eprintln!("Training MIDI files: {}", files.len());
+
+    let num_episodes = 200;
+    let rollouts_per_batch = 20; // generate many rollouts at once to amortize runner startup
+    eprintln!("\nRL training: {} episodes, {} rollouts/batch, {} batch size\n",
+        num_episodes, rollouts_per_batch, rl_batch_size);
+
+    let mut episode = 0;
+    while episode < num_episodes {
+        // Phase 1: Generate a big batch of rollouts (only inference runner alive)
+        eprintln!("--- Generating {} rollouts ---", rollouts_per_batch);
+        let mut all_rollouts: Vec<Vec<usize>> = Vec::new();
+        let mut all_rewards: Vec<f32> = Vec::new();
+        {
+            let mut inf_runner = WasmRunner::new(&inf_wasm);
+            for ri in 0..rollouts_per_batch {
+                let t_roll = Instant::now();
+                let seed = pick_random_seed(&files, &vocab, inf_cfg.seq_len, &mut rng);
+                let rollout = generate_rollout(
+                    &mut inf_runner, &weights, &inf_cfg, &vocab,
+                    &seed, rollout_tokens, temperature, &mut rng,
+                );
+                // Score the TAIL of the rollout — this is what the model generates
+                // (the head is the seed from training data, which is always good)
+                let tail_start = rollout.len() / 2;
+                let (reward, breakdown) = midi_parse::compute_satie_reward(&rollout[tail_start..], &vocab);
+                eprintln!("  rollout {}/{}: {} tokens, tail r={:.0} [{}] ({:.1}s)",
+                    ri + 1, rollouts_per_batch, rollout.len(), reward, breakdown, t_roll.elapsed().as_secs_f64());
+                all_rollouts.push(rollout);
+                all_rewards.push(reward);
+            }
+            // inf_runner dropped here
+        }
+
+        // Phase 2: Process rollouts in mini-batches (only RL runner alive)
+        eprintln!("--- Training on rollouts ---");
+        {
+            let mut rl_runner = WasmRunner::new(&rl_wasm);
+            for batch_start in (0..all_rollouts.len()).step_by(rl_batch_size) {
+                if batch_start + rl_batch_size > all_rollouts.len() { break; }
+                let t_ep = Instant::now();
+
+                let batch_rollouts = &all_rollouts[batch_start..batch_start + rl_batch_size];
+                let batch_rewards = &all_rewards[batch_start..batch_start + rl_batch_size];
+
+                let mean_reward: f32 = batch_rewards.iter().sum::<f32>() / batch_rewards.len() as f32;
+                let advantages: Vec<f32> = batch_rewards.iter().map(|&r| r - mean_reward).collect();
+
+                let adv_nonzero = advantages.iter().any(|&a| a.abs() > 1e-8);
+                if !adv_nonzero {
+                    eprintln!("Episode {:3}/{}: no signal (all rewards={:.2}), skipping",
+                        episode + 1, num_episodes, mean_reward);
+                    episode += 1;
+                    continue;
+                }
+
+                let seq_len = rl_cfg.seq_len;
+                let mut tok_flat = vec![0.0f32; rl_batch_size * seq_len];
+                for (bi, rollout) in batch_rollouts.iter().enumerate() {
+                    let start = if rollout.len() > seq_len { rollout.len() - seq_len } else { 0 };
+                    let ctx = &rollout[start..];
+                    for (j, &t) in ctx.iter().enumerate() {
+                        tok_flat[bi * seq_len + j] = t as f32;
+                    }
+                }
+
+                let mut refs: Vec<&[f32]> = vec![&tok_flat];
+                for w in &weights { refs.push(w); }
+                refs.push(&advantages);
+
+                let result = rl_runner.run(&refs);
+                let expected_len = 1 + sizes.iter().sum::<usize>();
+                if result.len() != expected_len {
+                    panic!("RL WASM returned {} values, expected {}", result.len(), expected_len);
+                }
+
+                let loss = result[0];
+
+                let mut off = 1;
+                let grads: Vec<Vec<f32>> = sizes.iter().map(|&s| {
+                    let g = result[off..off + s].to_vec(); off += s; g
+                }).collect();
+
+                let norm: f32 = grads.iter().flat_map(|g| g.iter()).map(|g| g * g).sum::<f32>().sqrt();
+                let mut clipped = grads;
+                if norm > 1.0 {
+                    let s = 1.0 / norm;
+                    for g in &mut clipped { for v in g.iter_mut() { *v *= s; } }
+                }
+
+                if !loss.is_finite() || !norm.is_finite() {
+                    eprintln!("Episode {:3}/{}: NaN/Inf (loss={}, norm={}), skipping",
+                        episode + 1, num_episodes, loss, norm);
+                    episode += 1;
+                    continue;
+                }
+
+                optimizer.step(&mut weights, &clipped);
+
+                let n_success = batch_rewards.iter().filter(|&&r| r > 0.5).count();
+                eprintln!("Episode {:3}/{}: loss={:.4} reward={:.2} ({}/{} success) norm={:.1} ({:.1}s)",
+                    episode + 1, num_episodes, loss, mean_reward,
+                    n_success, rl_batch_size, norm, t_ep.elapsed().as_secs_f64());
+
+                episode += 1;
+                if episode >= num_episodes { break; }
+            }
+            // rl_runner dropped here
+        }
+
+        // Checkpoint
+        let path = project_root().join(format!("rl_checkpoint_{}.bin", episode));
+        save_model_to(&weights, &base_cfg, &vocab, &path);
+    }
+
+    // Save final model
+    let final_path = project_root().join("midi_model_rl.bin");
+    save_model_to(&weights, &base_cfg, &vocab, &final_path);
+    eprintln!("\nRL training complete. Model saved to {}", final_path.display());
+    eprintln!("Generate with: cargo run --release -p tensor-lang-train -- generate {}", final_path.display());
+}
+
+fn parse_pitch_name(name: &str) -> Option<u8> {
+    let names = [("C", 0), ("C#", 1), ("D", 2), ("D#", 3), ("E", 4), ("F", 5),
+                 ("F#", 6), ("G", 7), ("G#", 8), ("A", 9), ("A#", 10), ("B", 11)];
+    for &(n, semitone) in &names {
+        if name.starts_with(n) && name.len() > n.len() {
+            if let Ok(octave) = name[n.len()..].parse::<i32>() {
+                return Some(((octave + 1) * 12 + semitone) as u8);
+            }
+        }
+    }
+    None
 }
 
 // ─── Tokens → MIDI ────────────────────────────────────────────────────────
