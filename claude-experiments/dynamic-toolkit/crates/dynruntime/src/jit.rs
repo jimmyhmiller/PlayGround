@@ -826,6 +826,7 @@ pub struct JitSafepointSession<'a, P: PtrPolicy, T: JitRootTransportRuntime> {
     heap: &'a Heap,
     transport: T,
     safepoints: &'a [SafepointRecord],
+    gc_threshold: f64,
     _policy: PhantomData<P>,
 }
 
@@ -841,8 +842,17 @@ impl<'a, P: PtrPolicy, T: JitRootTransportRuntime> JitSafepointSession<'a, P, T>
             heap,
             transport,
             safepoints,
+            gc_threshold: 0.0,
             _policy: PhantomData,
         }
+    }
+
+    /// Set the GC threshold: only collect when from-space usage exceeds
+    /// this fraction (0.0–1.0). Default 0.0 means collect at every safepoint.
+    /// Mirrors `MutatorRootManager::with_gc_threshold`.
+    pub fn with_gc_threshold(mut self, threshold: f64) -> Self {
+        self.gc_threshold = threshold;
+        self
     }
 
     pub fn payload_kind(&self) -> SafepointHandlerPayloadKind {
@@ -873,14 +883,25 @@ impl<'a, P: PtrPolicy, T: JitRootTransportRuntime> JitSafepointSession<'a, P, T>
     }
 
     unsafe fn handle(&self, frame_ptr: *mut u8, payload: usize) {
+        if self.gc_threshold > 0.0 {
+            let usage = self.heap.from_used() as f64 / self.heap.space_size() as f64;
+            if usage < self.gc_threshold {
+                return;
+            }
+        }
         let root_source = RuntimeRootSource {
             transport: &self.transport,
             frame_ptr,
             payload,
             safepoints: self.safepoints,
         };
+        // Walk ancestor JIT frames via the native FP chain. The current
+        // frame is already scanned by root_source above; the FP walker
+        // scans all callers whose return addresses fall in registered
+        // JIT code ranges.
+        let ancestor_roots = dynlower::JitFrameRoots { jit_fp: frame_ptr };
         unsafe {
-            self.heap.collect::<P>(&[&root_source]);
+            self.heap.collect::<P>(&[&root_source, &ancestor_roots]);
         }
     }
 }

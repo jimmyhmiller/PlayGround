@@ -1,6 +1,7 @@
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::marker::PhantomData;
+use std::sync::RwLock;
 
 mod backend;
 
@@ -22,6 +23,110 @@ use dynvalue::TagScheme;
 
 #[cfg(test)]
 mod tests;
+
+// ─── JIT Code Registry & FP-Chain Root Scanner ───────────────────
+//
+// For multi-frame GC root scanning: instead of per-call push/pop overhead,
+// each JitFunction/JitModule registers its code range and frame scan size
+// at compile time. At GC time, the safepoint handler walks the native
+// ARM64 frame pointer chain (FP → [FP] → [[FP]] → ...) and looks up each
+// return address to identify JIT frames and their root scan regions.
+//
+// Zero per-call overhead. All cost is at compile time (register) and GC
+// time (walk + binary search).
+
+/// A registered JIT code region.
+#[derive(Clone, Copy, Debug)]
+struct JitCodeEntry {
+    code_start: usize, // inclusive
+    code_end: usize,   // exclusive
+    root_scan_size: usize,
+}
+
+static JIT_CODE_REGISTRY: RwLock<Vec<JitCodeEntry>> = RwLock::new(Vec::new());
+
+fn register_jit_code(code_start: usize, code_end: usize, root_scan_size: usize) {
+    let mut registry = JIT_CODE_REGISTRY.write().unwrap();
+    let pos = registry.partition_point(|e| e.code_start < code_start);
+    registry.insert(pos, JitCodeEntry { code_start, code_end, root_scan_size });
+}
+
+fn unregister_jit_code(code_start: usize) {
+    let mut registry = JIT_CODE_REGISTRY.write().unwrap();
+    if let Ok(pos) = registry.binary_search_by_key(&code_start, |e| e.code_start) {
+        registry.remove(pos);
+    }
+}
+
+fn lookup_code_entry(registry: &[JitCodeEntry], addr: usize) -> Option<&JitCodeEntry> {
+    let idx = registry.partition_point(|e| e.code_start <= addr);
+    if idx == 0 { return None; }
+    let entry = &registry[idx - 1];
+    if addr < entry.code_end { Some(entry) } else { None }
+}
+
+/// Walk ancestor JIT frames starting from `jit_fp` (the FP of the frame
+/// that hit the safepoint). The current frame is skipped — the safepoint
+/// handler already scans it via the `(frame_ptr, payload)` arguments.
+///
+/// For each ancestor: `[fp+8]` is the return address into the caller.
+/// If that address falls within a registered JIT code range, the frame
+/// at `[fp+0]` (the caller's FP) is a JIT frame and its root slots are
+/// scanned.
+#[cfg(target_arch = "aarch64")]
+pub fn walk_jit_ancestor_roots(jit_fp: *const u8, visitor: &mut dyn FnMut(*mut u64)) {
+    let registry = JIT_CODE_REGISTRY.read().unwrap();
+    if registry.is_empty() {
+        return;
+    }
+
+    let mut fp = jit_fp as *const u64;
+    loop {
+        if fp.is_null() {
+            break;
+        }
+        let saved_fp = unsafe { *fp } as *const u64;
+        let saved_lr = unsafe { *fp.add(1) } as usize;
+
+        if saved_fp.is_null() {
+            break;
+        }
+
+        if let Some(entry) = lookup_code_entry(&registry, saved_lr) {
+            // saved_lr is in a JIT function → the frame at saved_fp belongs
+            // to that function. Scan its root slots.
+            let slot_count = entry.root_scan_size / 8;
+            for i in 0..slot_count {
+                let slot = unsafe { (saved_fp as *mut u64).add(i) };
+                visitor(slot);
+            }
+        }
+
+        fp = saved_fp;
+    }
+}
+
+#[cfg(not(target_arch = "aarch64"))]
+pub fn walk_jit_ancestor_roots(_jit_fp: *const u8, _visitor: &mut dyn FnMut(*mut u64)) {
+    // FP-chain walking is architecture-specific; no-op on unsupported targets.
+}
+
+/// Root source that walks all ancestor JIT frames via the FP chain.
+/// Construct with the frame pointer of the JIT frame at the safepoint.
+pub struct JitFrameRoots {
+    pub jit_fp: *const u8,
+}
+
+// Safety: the pointer is only dereferenced during scan_roots, which
+// happens at a safepoint when all mutator threads are stopped.
+unsafe impl Send for JitFrameRoots {}
+unsafe impl Sync for JitFrameRoots {}
+
+impl dynobj::RootSource for JitFrameRoots {
+    fn scan_roots(&self, visitor: &mut dyn FnMut(*mut u64)) {
+        walk_jit_ancestor_roots(self.jit_fp, visitor);
+    }
+}
 
 // ─── Public API ────────────────────────────────────────────────────
 
@@ -228,6 +333,13 @@ pub struct JitFunction {
     suspend_records: Vec<Box<CallSuspendRecord>>,
     handler_payload_kind: SafepointHandlerPayloadKind,
     max_deopt_live_values: usize,
+    root_scan_size: usize,
+}
+
+impl Drop for JitFunction {
+    fn drop(&mut self) {
+        unregister_jit_code(self.memory.base_ptr() as usize);
+    }
 }
 
 impl JitFunction {
@@ -280,6 +392,7 @@ impl JitFunction {
         let frame_reify_records = std::mem::take(&mut lowerer.frame_reify_records);
         let suspend_records = std::mem::take(&mut lowerer.suspend_records);
         let max_deopt_live_values = lowerer.max_deopt_live_values;
+        let root_scan_size = lowerer.frame.root_scan_size() as usize;
         let code = lowerer.buf.into_code();
         let handler_payload_kind = match Cfg::RootTransport::kind() {
             RootTransportKind::FrameScan => SafepointHandlerPayloadKind::FrameSize,
@@ -292,6 +405,10 @@ impl JitFunction {
         memory.push(&code);
         memory.finalize();
 
+        let code_start = memory.base_ptr() as usize;
+        let code_end = code_start + memory.len();
+        register_jit_code(code_start, code_end, root_scan_size);
+
         JitFunction {
             memory,
             safepoints,
@@ -299,6 +416,7 @@ impl JitFunction {
             suspend_records,
             handler_payload_kind,
             max_deopt_live_values,
+            root_scan_size,
         }
     }
 
@@ -396,6 +514,15 @@ pub struct JitModule {
     max_deopt_live_values: usize,
 }
 
+impl Drop for JitModule {
+    fn drop(&mut self) {
+        let base = self.memory.base_ptr() as usize;
+        for &offset in &self.function_entry_offsets {
+            unregister_jit_code(base + offset);
+        }
+    }
+}
+
 impl JitModule {
     /// Compile a module with no GC safepoint handler.
     pub fn compile<L: LayoutConfigDefaults>(module: &Module, externs: &[*const u8]) -> Self {
@@ -487,6 +614,7 @@ impl JitModule {
             .map(|def| matches!(def, FuncDef::Internal(_)))
             .collect();
 
+        let mut function_root_scan_sizes: Vec<usize> = Vec::new();
         for (func_idx, func) in module.functions.iter().enumerate() {
             let mut lowerer = Lowerer::<Cfg, B>::new_module(
                 func_idx,
@@ -500,12 +628,26 @@ impl JitModule {
             function_safepoints.push(std::mem::take(&mut lowerer.safepoints));
             function_frame_reify_records.push(std::mem::take(&mut lowerer.frame_reify_records));
             max_deopt_live_values = max_deopt_live_values.max(lowerer.max_deopt_live_values);
+            function_root_scan_sizes.push(lowerer.frame.root_scan_size() as usize);
             let code = lowerer.buf.into_code();
             let offset = memory.push(&code);
             entry_offsets.push(offset);
         }
 
         memory.finalize();
+
+        // Register each function's code range in the global registry.
+        let base = memory.base_ptr() as usize;
+        let total_len = memory.len();
+        for (i, &offset) in entry_offsets.iter().enumerate() {
+            let code_start = base + offset;
+            let code_end = if i + 1 < entry_offsets.len() {
+                base + entry_offsets[i + 1]
+            } else {
+                base + total_len
+            };
+            register_jit_code(code_start, code_end, function_root_scan_sizes[i]);
+        }
 
         // 3. Patch internal function pointers into the call table
         let base = memory.base_ptr();
