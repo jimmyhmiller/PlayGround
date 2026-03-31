@@ -1,0 +1,13 @@
+[package]
+name = "chess-preprocess"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+pgn-reader = "0.27"
+shakmaty = "0.28"
+zstd = "0.13"
+
+[profile.release]
+opt-level = 3
+lto = true

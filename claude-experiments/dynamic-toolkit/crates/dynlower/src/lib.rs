@@ -3142,7 +3142,13 @@ where
             B::emit_branch_eq_to_label(&mut self.buf, continue_label);
             self.emit_return_current_outcome();
             B::bind_label(&mut self.buf, continue_label);
+            // Save return value (X0) across the pop call — it follows
+            // the C ABI and clobbers all caller-saved registers.
+            let save_slot = self.frame.alloc_local_slot();
+            let save_access = self.frame.slot_access(save_slot);
+            B::emit_store_gp_to_frame(&mut self.buf, machine_gp(0), save_access);
             self.emit_pop_suspended_frame();
+            B::emit_load_gp_from_frame(&mut self.buf, machine_gp(0), save_access);
             B::bind_label(&mut self.buf, post_pop_label);
 
             let slot_offsets = self
@@ -3236,14 +3242,26 @@ where
             self.emit_return_current_outcome();
 
             B::bind_label(&mut self.buf, exception_label);
-            self.emit_pop_suspended_frame();
+            {
+                let save_slot = self.frame.alloc_local_slot();
+                let save_access = self.frame.slot_access(save_slot);
+                B::emit_store_gp_to_frame(&mut self.buf, machine_gp(0), save_access);
+                self.emit_pop_suspended_frame();
+                B::emit_load_gp_from_frame(&mut self.buf, machine_gp(0), save_access);
+            }
             B::bind_label(&mut self.buf, exception_post_pop_label);
             self.finish_call_cleanup(call_args, outgoing_size);
             self.emit_block_args(exception, exception_args);
             B::emit_branch_to_label(&mut self.buf, self.block_meta[exception.index()].label);
 
             B::bind_label(&mut self.buf, normal_label);
-            self.emit_pop_suspended_frame();
+            {
+                let save_slot = self.frame.alloc_local_slot();
+                let save_access = self.frame.slot_access(save_slot);
+                B::emit_store_gp_to_frame(&mut self.buf, machine_gp(0), save_access);
+                self.emit_pop_suspended_frame();
+                B::emit_load_gp_from_frame(&mut self.buf, machine_gp(0), save_access);
+            }
             B::bind_label(&mut self.buf, normal_post_pop_label);
 
             if let Some(suspend_idx) = suspended_invoke_idx {

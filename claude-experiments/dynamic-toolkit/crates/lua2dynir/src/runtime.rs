@@ -786,8 +786,8 @@ impl LuaRuntime {
     // ── Comparison ─────────────────────────────────────────────
 
     pub fn lua_eq(&self, a: u64, b: u64) -> u64 {
-        let result = if is_nil(a) && is_nil(b) {
-            true
+        let result = if a == b {
+            true // same bits = always equal
         } else if is_nil(a) || is_nil(b) {
             false
         } else if is_bool(a) && is_bool(b) {
@@ -795,7 +795,11 @@ impl LuaRuntime {
         } else if is_number(a) && is_number(b) {
             as_number(a) == as_number(b)
         } else {
-            a == b
+            // String comparison: resolve both sides and compare
+            match (self.resolve_string(a), self.resolve_string(b)) {
+                (Some(sa), Some(sb)) => sa == sb,
+                _ => false,
+            }
         };
         make_bool(result)
     }
@@ -968,6 +972,47 @@ impl LuaRuntime {
                 self.output.push_str(&line);
                 self.output.push('\n');
                 make_nil()
+            }
+            1 => {
+                // type(val) → string name
+                if nargs < 1 { return make_nil(); }
+                let v = self.register_file[base_reg];
+                let type_name = if is_nil(v) {
+                    "nil"
+                } else if is_bool(v) {
+                    "boolean"
+                } else if is_number(v) {
+                    "number"
+                } else if is_intern(v) {
+                    let payload = NanBox::extract_payload(v);
+                    let high = (payload >> 32) as u32;
+                    if high == 0 {
+                        "string" // constant string
+                    } else {
+                        "function" // builtin function
+                    }
+                } else if is_closure(v) {
+                    "function"
+                } else if is_table(v) {
+                    "table"
+                } else if NanBox::has_tag(v, TAG_PTR) {
+                    let payload = NanBox::extract_payload(v);
+                    if payload != 0 && obj_type_from_ptr(payload as *const u8) == ObjType::String {
+                        "string"
+                    } else {
+                        "userdata"
+                    }
+                } else {
+                    "userdata"
+                };
+                make_string_on_heap(self.heap_ref(), type_name)
+            }
+            2 => {
+                // tostring(val)
+                if nargs < 1 { return make_nil(); }
+                let v = self.register_file[base_reg];
+                let s = self.value_to_string(v);
+                make_string_on_heap(self.heap_ref(), &s)
             }
             6 => {
                 if nargs < 1 {

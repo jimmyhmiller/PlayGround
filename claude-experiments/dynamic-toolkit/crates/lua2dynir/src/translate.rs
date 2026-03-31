@@ -25,8 +25,10 @@ enum FloatBinOp {
 }
 
 /// Translate a Lua 5.1 prototype into a DynIR function.
-pub fn translate(proto: &Proto) -> TranslatedFunction {
-    let mut t = Translator::new(proto);
+/// `string_remap` maps local constant index → global string index for string constants.
+/// If None, local indices are used (single-proto mode).
+pub fn translate(proto: &Proto, string_remap: Option<&[usize]>) -> TranslatedFunction {
+    let mut t = Translator::new(proto, string_remap);
     t.translate();
     t.finish()
 }
@@ -53,6 +55,10 @@ struct Translator<'a> {
     // Which PCs are block leaders
     block_leaders: BTreeSet<usize>,
 
+    /// Maps local constant index → global string index for string constants.
+    /// None = use local indices (single-proto mode).
+    string_remap: Option<Vec<usize>>,
+
     // Stack slots for Lua registers and metadata (declared in new, addressed in emit_abi_entry)
     reg_slots: Vec<StackSlot>,      // reg_slots[i] = stack slot for R[i]
     closure_slot: StackSlot,        // stack slot for closure
@@ -61,7 +67,7 @@ struct Translator<'a> {
 }
 
 impl<'a> Translator<'a> {
-    fn new(proto: &'a Proto) -> Self {
+    fn new(proto: &'a Proto, string_remap: Option<&[usize]>) -> Self {
         let num_regs = proto.max_stack_size as usize;
         let num_params = proto.num_params as usize;
         let mut param_types: Vec<Type> = Vec::with_capacity(num_params + 3);
@@ -101,6 +107,7 @@ impl<'a> Translator<'a> {
             extern_names: Vec::new(),
             pc_to_block,
             block_leaders,
+            string_remap: string_remap.map(|r| r.to_vec()),
             reg_slots,
             closure_slot,
             vararg_count_slot,
@@ -433,7 +440,11 @@ impl<'a> Translator<'a> {
             Constant::Bool(b) => self.bool_const(*b),
             Constant::Number(n) => self.number_const(*n),
             Constant::String(_) => {
-                let bits = 0x7FFF_0000_0000_0000u64 | (idx as u64);
+                let global_idx = match &self.string_remap {
+                    Some(remap) => remap[idx],
+                    None => idx,
+                };
+                let bits = 0x7FFF_0000_0000_0000u64 | (global_idx as u64);
                 self.builder.iconst(Type::I64, bits as i64)
             }
         }
@@ -749,7 +760,7 @@ impl<'a> Translator<'a> {
                         let a = field_a(inst) as usize;
                         let b = self.load_reg(field_b(inst) as usize);
                         let c = self.rk_value_from_slot(field_c(inst));
-                        let result = self.builder.call(ext.lua_gettable, &[b, c]).unwrap();
+                        let result = self.emit_inline_gettable(b, c, ext.lua_gettable);
                         self.store_reg(a, result);
                     }
                     Some(OpCode::SetTable) => {

@@ -2,6 +2,7 @@ pub mod builder;
 pub mod display;
 pub mod interp;
 pub mod ir;
+pub mod opt;
 pub mod types;
 pub mod verify;
 

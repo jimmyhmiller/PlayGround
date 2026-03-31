@@ -1,0 +1,368 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 56;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		AA000001 /* EaseApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB000001; };
+		AA000002 /* CloudKitManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB000002; };
+		AA000003 /* UpdateManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB000003; };
+		AA000004 /* EaseViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB000004; };
+		AA000005 /* DataStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB000005; };
+		AA000006 /* Goal.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB000006; };
+		AA000007 /* Entry.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB000007; };
+		AA000008 /* MainPopoverView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB000008; };
+		AA000009 /* AddGoalView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB000009; };
+		AA00000A /* GoalRowView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB00000A; };
+		AA00000B /* CalendarHeatmapView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB00000B; };
+		AA00000C /* ExportHeatmapView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB00000C; };
+		AA00000D /* ProportionalBarsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB00000D; };
+		AA00000E /* TimePeriodPicker.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB00000E; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		AB000001 /* EaseApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EaseApp.swift; sourceTree = "<group>"; };
+		AB000002 /* CloudKitManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CloudKitManager.swift; sourceTree = "<group>"; };
+		AB000003 /* UpdateManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UpdateManager.swift; sourceTree = "<group>"; };
+		AB000004 /* EaseViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EaseViewModel.swift; sourceTree = "<group>"; };
+		AB000005 /* DataStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DataStore.swift; sourceTree = "<group>"; };
+		AB000006 /* Goal.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Goal.swift; sourceTree = "<group>"; };
+		AB000007 /* Entry.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Entry.swift; sourceTree = "<group>"; };
+		AB000008 /* MainPopoverView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MainPopoverView.swift; sourceTree = "<group>"; };
+		AB000009 /* AddGoalView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AddGoalView.swift; sourceTree = "<group>"; };
+		AB00000A /* GoalRowView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GoalRowView.swift; sourceTree = "<group>"; };
+		AB00000B /* CalendarHeatmapView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CalendarHeatmapView.swift; sourceTree = "<group>"; };
+		AB00000C /* ExportHeatmapView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExportHeatmapView.swift; sourceTree = "<group>"; };
+		AB00000D /* ProportionalBarsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProportionalBarsView.swift; sourceTree = "<group>"; };
+		AB00000E /* TimePeriodPicker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TimePeriodPicker.swift; sourceTree = "<group>"; };
+		AC000001 /* Ease.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Ease.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		AC000002 /* Ease.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Ease.entitlements; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		AD000001 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		AE000001 = {
+			isa = PBXGroup;
+			children = (
+				AE000002 /* Ease */,
+				AC000002 /* Ease.entitlements */,
+				AE000010 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		AE000002 /* Ease */ = {
+			isa = PBXGroup;
+			children = (
+				AB000001 /* EaseApp.swift */,
+				AE000003 /* Models */,
+				AE000004 /* Views */,
+				AE000005 /* ViewModels */,
+				AE000006 /* Services */,
+				AE000007 /* Persistence */,
+			);
+			path = Ease;
+			sourceTree = "<group>";
+		};
+		AE000003 /* Models */ = {
+			isa = PBXGroup;
+			children = (
+				AB000006 /* Goal.swift */,
+				AB000007 /* Entry.swift */,
+			);
+			path = Models;
+			sourceTree = "<group>";
+		};
+		AE000004 /* Views */ = {
+			isa = PBXGroup;
+			children = (
+				AB000008 /* MainPopoverView.swift */,
+				AB000009 /* AddGoalView.swift */,
+				AB00000A /* GoalRowView.swift */,
+				AB00000B /* CalendarHeatmapView.swift */,
+				AB00000C /* ExportHeatmapView.swift */,
+				AB00000D /* ProportionalBarsView.swift */,
+				AB00000E /* TimePeriodPicker.swift */,
+			);
+			path = Views;
+			sourceTree = "<group>";
+		};
+		AE000005 /* ViewModels */ = {
+			isa = PBXGroup;
+			children = (
+				AB000004 /* EaseViewModel.swift */,
+			);
+			path = ViewModels;
+			sourceTree = "<group>";
+		};
+		AE000006 /* Services */ = {
+			isa = PBXGroup;
+			children = (
+				AB000002 /* CloudKitManager.swift */,
+				AB000003 /* UpdateManager.swift */,
+			);
+			path = Services;
+			sourceTree = "<group>";
+		};
+		AE000007 /* Persistence */ = {
+			isa = PBXGroup;
+			children = (
+				AB000005 /* DataStore.swift */,
+			);
+			path = Persistence;
+			sourceTree = "<group>";
+		};
+		AE000010 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				AC000001 /* Ease.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		AF000001 /* Ease */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = B1000001 /* Build configuration list for PBXNativeTarget "Ease" */;
+			buildPhases = (
+				AF000002 /* Sources */,
+				AD000001 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = Ease;
+			packageProductDependencies = (
+				AF000010 /* Sparkle */,
+			);
+			productName = Ease;
+			productReference = AC000001 /* Ease.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		B0000001 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 1540;
+				LastUpgradeCheck = 1540;
+				TargetAttributes = {
+					AF000001 = {
+						CreatedOnToolsVersion = 15.4;
+					};
+				};
+			};
+			buildConfigurationList = B1000002 /* Build configuration list for PBXProject "Ease" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = AE000001;
+			packageReferences = (
+				AF000011 /* XCRemoteSwiftPackageReference "Sparkle" */,
+			);
+			productRefGroup = AE000010 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				AF000001 /* Ease */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXSourcesBuildPhase section */
+		AF000002 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				AA000001 /* EaseApp.swift in Sources */,
+				AA000002 /* CloudKitManager.swift in Sources */,
+				AA000003 /* UpdateManager.swift in Sources */,
+				AA000004 /* EaseViewModel.swift in Sources */,
+				AA000005 /* DataStore.swift in Sources */,
+				AA000006 /* Goal.swift in Sources */,
+				AA000007 /* Entry.swift in Sources */,
+				AA000008 /* MainPopoverView.swift in Sources */,
+				AA000009 /* AddGoalView.swift in Sources */,
+				AA00000A /* GoalRowView.swift in Sources */,
+				AA00000B /* CalendarHeatmapView.swift in Sources */,
+				AA00000C /* ExportHeatmapView.swift in Sources */,
+				AA00000D /* ProportionalBarsView.swift in Sources */,
+				AA00000E /* TimePeriodPicker.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		B2000001 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = macosx;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) DEBUG";
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+			};
+			name = Debug;
+		};
+		B2000002 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				SDKROOT = macosx;
+				SWIFT_COMPILATION_MODE = wholemodule;
+			};
+			name = Release;
+		};
+		B2000003 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = Ease.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 5;
+				DEVELOPMENT_TEAM = 7J8U597P7P;
+				ENABLE_HARDENED_RUNTIME = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = Ease;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity";
+				INFOPLIST_KEY_LSUIElement = YES;
+				INFOPLIST_KEY_NSHighResolutionCapable = YES;
+				INFOPLIST_KEY_NSPrincipalClass = NSApplication;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "com.jimmyhmiller.Ease";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		B2000004 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = Ease.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 5;
+				DEVELOPMENT_TEAM = 7J8U597P7P;
+				ENABLE_HARDENED_RUNTIME = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = Ease;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity";
+				INFOPLIST_KEY_LSUIElement = YES;
+				INFOPLIST_KEY_NSHighResolutionCapable = YES;
+				INFOPLIST_KEY_NSPrincipalClass = NSApplication;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "com.jimmyhmiller.Ease";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		B1000001 /* Build configuration list for PBXNativeTarget "Ease" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				B2000003 /* Debug */,
+				B2000004 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		B1000002 /* Build configuration list for PBXProject "Ease" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				B2000001 /* Debug */,
+				B2000002 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		AF000011 /* XCRemoteSwiftPackageReference "Sparkle" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/sparkle-project/Sparkle";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 2.5.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		AF000010 /* Sparkle */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = AF000011 /* XCRemoteSwiftPackageReference "Sparkle" */;
+			productName = Sparkle;
+		};
+/* End XCSwiftPackageProductDependency section */
+	};
+	rootObject = B0000001 /* Project object */;
+}

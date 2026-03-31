@@ -557,6 +557,116 @@ impl Terminator {
         }
     }
 
+    pub fn for_each_value_mut(&mut self, mut f: impl FnMut(&mut Value)) {
+        match self {
+            Terminator::Ret(v) => f(v),
+            Terminator::RetVoid | Terminator::Unreachable => {}
+            Terminator::AbortToPrompt { args, .. } => args.iter_mut().for_each(|v| f(v)),
+            Terminator::ResumeSlice { slice, args } => {
+                f(slice);
+                args.iter_mut().for_each(|v| f(v));
+            }
+            Terminator::Jump(_, args) => args.iter_mut().for_each(|v| f(v)),
+            Terminator::BrIf {
+                cond,
+                then_args,
+                else_args,
+                ..
+            } => {
+                f(cond);
+                then_args.iter_mut().for_each(|v| f(v));
+                else_args.iter_mut().for_each(|v| f(v));
+            }
+            Terminator::Switch {
+                val,
+                cases,
+                default_args,
+                ..
+            } => {
+                f(val);
+                for (_, _, args) in cases {
+                    args.iter_mut().for_each(|v| f(v));
+                }
+                default_args.iter_mut().for_each(|v| f(v));
+            }
+            Terminator::Invoke {
+                args,
+                normal_args,
+                exception_args,
+                ..
+            } => {
+                args.iter_mut().for_each(|v| f(v));
+                normal_args.iter_mut().for_each(|v| f(v));
+                exception_args.iter_mut().for_each(|v| f(v));
+            }
+            Terminator::InvokeIndirect {
+                callee,
+                args,
+                normal_args,
+                exception_args,
+                ..
+            } => {
+                f(callee);
+                args.iter_mut().for_each(|v| f(v));
+                normal_args.iter_mut().for_each(|v| f(v));
+                exception_args.iter_mut().for_each(|v| f(v));
+            }
+        }
+    }
+
+    /// Call `f` for each (target_block, args) pair in this terminator.
+    pub fn for_each_successor_args_mut(&mut self, mut f: impl FnMut(BlockId, &mut Vec<Value>)) {
+        match self {
+            Terminator::Ret(_)
+            | Terminator::RetVoid
+            | Terminator::ResumeSlice { .. }
+            | Terminator::AbortToPrompt { .. }
+            | Terminator::Unreachable => {}
+            Terminator::Jump(target, args) => f(*target, args),
+            Terminator::BrIf {
+                then_block,
+                then_args,
+                else_block,
+                else_args,
+                ..
+            } => {
+                f(*then_block, then_args);
+                f(*else_block, else_args);
+            }
+            Terminator::Switch {
+                cases,
+                default_block,
+                default_args,
+                ..
+            } => {
+                for (_, block, args) in cases {
+                    f(*block, args);
+                }
+                f(*default_block, default_args);
+            }
+            Terminator::Invoke {
+                normal,
+                normal_args,
+                exception,
+                exception_args,
+                ..
+            } => {
+                f(*normal, normal_args);
+                f(*exception, exception_args);
+            }
+            Terminator::InvokeIndirect {
+                normal,
+                normal_args,
+                exception,
+                exception_args,
+                ..
+            } => {
+                f(*normal, normal_args);
+                f(*exception, exception_args);
+            }
+        }
+    }
+
     pub fn successors(&self) -> Vec<BlockId> {
         match self {
             Terminator::Ret(_)

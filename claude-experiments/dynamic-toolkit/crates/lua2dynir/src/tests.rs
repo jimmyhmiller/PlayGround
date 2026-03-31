@@ -1,4 +1,5 @@
 use std::cell::Cell;
+use std::collections::HashMap;
 use std::process::Command;
 
 #[allow(unused_imports)]
@@ -23,7 +24,10 @@ struct JitContext {
     rt: *mut LuaRuntime,
     child_jit_ptrs: Vec<*const u8>,
     child_info: Vec<(u8, u8)>,      // (num_params, is_vararg) per child
-    child_consts: Vec<Vec<String>>, // constant table per child
+    /// child_offsets[global_id] = global index where that proto's children start.
+    child_offsets: Vec<usize>,
+    /// Current function's child offset — `local_bx + current_child_offset = global_id`.
+    current_child_offset: usize,
 }
 
 thread_local! {
@@ -144,7 +148,10 @@ extern "C" fn jit_lua_sub(a: u64, b: u64) -> u64 {
     })
 }
 extern "C" fn jit_lua_mul(a: u64, b: u64) -> u64 {
-    with_jit_ctx(|_, rt| rt.lua_mul(a, b))
+    std::panic::catch_unwind(|| with_jit_ctx(|_, rt| rt.lua_mul(a, b))).unwrap_or_else(|_| {
+        eprintln!("PANIC jit_lua_mul a={:#018x} b={:#018x}", a, b);
+        std::process::exit(99);
+    })
 }
 extern "C" fn jit_lua_div(a: u64, b: u64) -> u64 {
     with_jit_ctx(|_, rt| rt.lua_div(a, b))
@@ -205,7 +212,7 @@ extern "C" fn jit_lua_call(func: u64, base: u64, nargs: u64) -> u64 {
 
         if is_closure(func) {
             let ctx_ptr = JIT_CTX.with(|c| c.get());
-            let ctx = unsafe { &*ctx_ptr };
+            let ctx = unsafe { &mut *ctx_ptr };
             let rt = unsafe { &mut *ctx.rt };
 
             let func_id = closure_func_id(func).unwrap();
@@ -220,8 +227,10 @@ extern "C" fn jit_lua_call(func: u64, base: u64, nargs: u64) -> u64 {
             // Read args from register_file
             let args: Vec<u64> = (0..nargs).map(|i| rt.register_file[base + i]).collect();
 
-            // Swap constants
-            let saved = std::mem::replace(&mut rt.constants, ctx.child_consts[func_id].clone());
+            // Set child_offset for the callee's scope (no constant swap needed —
+            // string constants use global indices).
+            let saved_offset = ctx.current_child_offset;
+            ctx.current_child_offset = ctx.child_offsets[func_id];
 
             let (num_params, is_vararg) = ctx.child_info[func_id];
             let call_args = LuaCallArgs::from_sig(num_params, is_vararg, func, &args);
@@ -229,9 +238,9 @@ extern "C" fn jit_lua_call(func: u64, base: u64, nargs: u64) -> u64 {
             // Call child JIT code
             let result = unsafe { call_jit(code_ptr, &call_args.abi_args) };
 
-            // Restore constants
-            let rt = unsafe { &mut *ctx.rt };
-            rt.constants = saved;
+            // Restore
+            let ctx = unsafe { &mut *ctx_ptr };
+            ctx.current_child_offset = saved_offset;
 
             result
         } else {
@@ -274,17 +283,38 @@ extern "C" fn jit_lua_store_reg(idx: u64, val: u64) -> u64 {
     })
 }
 
+/// Remap a local proto index (bx from CLOSURE instruction) to a global func_id.
+fn remap_func_id(ctx: &JitContext, local_bx: usize) -> usize {
+    ctx.current_child_offset + local_bx
+}
+
 extern "C" fn jit_lua_make_closure(func_id: u64, _num: u64) -> u64 {
-    with_jit_ctx(|_, rt| runtime::make_closure(rt.heap_ref(), func_id as usize, &[]))
+    let ctx_ptr = JIT_CTX.with(|c| c.get());
+    let ctx = unsafe { &*ctx_ptr };
+    let rt = unsafe { &mut *ctx.rt };
+    let global_id = remap_func_id(ctx, func_id as usize);
+    runtime::make_closure(rt.heap_ref(), global_id, &[])
 }
 extern "C" fn jit_lua_make_closure_1(func_id: u64, _num: u64, u0: u64) -> u64 {
-    with_jit_ctx(|_, rt| runtime::make_closure(rt.heap_ref(), func_id as usize, &[u0]))
+    let ctx_ptr = JIT_CTX.with(|c| c.get());
+    let ctx = unsafe { &*ctx_ptr };
+    let rt = unsafe { &mut *ctx.rt };
+    let global_id = remap_func_id(ctx, func_id as usize);
+    runtime::make_closure(rt.heap_ref(), global_id, &[u0])
 }
 extern "C" fn jit_lua_make_closure_2(func_id: u64, _num: u64, u0: u64, u1: u64) -> u64 {
-    with_jit_ctx(|_, rt| runtime::make_closure(rt.heap_ref(), func_id as usize, &[u0, u1]))
+    let ctx_ptr = JIT_CTX.with(|c| c.get());
+    let ctx = unsafe { &*ctx_ptr };
+    let rt = unsafe { &mut *ctx.rt };
+    let global_id = remap_func_id(ctx, func_id as usize);
+    runtime::make_closure(rt.heap_ref(), global_id, &[u0, u1])
 }
 extern "C" fn jit_lua_make_closure_3(func_id: u64, _num: u64, u0: u64, u1: u64, u2: u64) -> u64 {
-    with_jit_ctx(|_, rt| runtime::make_closure(rt.heap_ref(), func_id as usize, &[u0, u1, u2]))
+    let ctx_ptr = JIT_CTX.with(|c| c.get());
+    let ctx = unsafe { &*ctx_ptr };
+    let rt = unsafe { &mut *ctx.rt };
+    let global_id = remap_func_id(ctx, func_id as usize);
+    runtime::make_closure(rt.heap_ref(), global_id, &[u0, u1, u2])
 }
 extern "C" fn jit_lua_make_closure_4(
     func_id: u64,
@@ -294,7 +324,11 @@ extern "C" fn jit_lua_make_closure_4(
     u2: u64,
     u3: u64,
 ) -> u64 {
-    with_jit_ctx(|_, rt| runtime::make_closure(rt.heap_ref(), func_id as usize, &[u0, u1, u2, u3]))
+    let ctx_ptr = JIT_CTX.with(|c| c.get());
+    let ctx = unsafe { &*ctx_ptr };
+    let rt = unsafe { &mut *ctx.rt };
+    let global_id = remap_func_id(ctx, func_id as usize);
+    runtime::make_closure(rt.heap_ref(), global_id, &[u0, u1, u2, u3])
 }
 
 /// Build the extern pointer array matching the order in translate.rs.
@@ -358,7 +392,56 @@ fn compile_lua(source: &str) -> Vec<u8> {
     data
 }
 
-/// Run a Lua program fully through the JIT.
+/// Recursively collect all protos depth-first into a flat list.
+/// Returns (flat_protos, child_offsets) where child_offsets[global_id] is
+/// the global index where that proto's children start.
+fn flatten_all_protos(root: &Proto) -> (Vec<Proto>, Vec<usize>) {
+    let mut out = Vec::new();
+    let mut child_offsets = Vec::new();
+    flatten_children(root, &mut out, &mut child_offsets);
+    (out, child_offsets)
+}
+
+fn flatten_children(parent: &Proto, out: &mut Vec<Proto>, offsets: &mut Vec<usize>) {
+    let first_child_global = out.len();
+
+    for child in &parent.protos {
+        out.push(child.clone());
+        offsets.push(0); // placeholder
+    }
+
+    let num_children = parent.protos.len();
+    for i in 0..num_children {
+        let global_idx = first_child_global + i;
+        let grandchild_start = out.len();
+        offsets[global_idx] = grandchild_start;
+        let child_proto = out[global_idx].clone();
+        if !child_proto.protos.is_empty() {
+            flatten_children(&child_proto, out, offsets);
+        }
+    }
+}
+
+/// Build a mapping from local constant index → global string index for a proto.
+fn build_string_remap(
+    proto: &Proto,
+    global_strings: &mut Vec<String>,
+    string_index_map: &mut HashMap<String, usize>,
+) -> Vec<usize> {
+    proto.constants.iter().map(|c| {
+        match c {
+            Constant::String(s) => {
+                *string_index_map.entry(s.clone()).or_insert_with(|| {
+                    let idx = global_strings.len();
+                    global_strings.push(s.clone());
+                    idx
+                })
+            }
+            _ => 0,
+        }
+    }).collect()
+}
+
 fn run_lua(source: &str) -> (u64, LuaRuntime) {
     run_lua_with_heap(source, 64 * 1024 * 1024)
 }
@@ -366,39 +449,36 @@ fn run_lua(source: &str) -> (u64, LuaRuntime) {
 fn run_lua_with_heap(source: &str, heap_size: usize) -> (u64, LuaRuntime) {
     let gc_heap_size = Some(heap_size);
     let bytecode_data = compile_lua(source);
-    let chunk = bytecode::parse(&bytecode_data).expect("bytecode parse failed");
+    let mut chunk = bytecode::parse(&bytecode_data).expect("bytecode parse failed");
 
-    // Translate ALL protos up front (main + children)
-    let main_tf = translate::translate(&chunk.main);
-    let child_tfs: Vec<TranslatedFunction> = chunk
-        .main
-        .protos
+    // Flatten ALL protos recursively with global indices.
+    let (all_protos, child_offsets) = flatten_all_protos(&chunk.main);
+
+    let mut global_strings: Vec<String> = Vec::new();
+    let mut string_index_map: HashMap<String, usize> = HashMap::new();
+
+    let main_string_remap = build_string_remap(
+        &chunk.main, &mut global_strings, &mut string_index_map,
+    );
+    let child_string_remaps: Vec<Vec<usize>> = all_protos
         .iter()
-        .map(|p| translate::translate(p))
+        .map(|p| build_string_remap(p, &mut global_strings, &mut string_index_map))
         .collect();
 
-    // Collect child proto call-signature metadata
-    let child_info: Vec<(u8, u8)> = chunk
-        .main
-        .protos
+    let mut main_tf = translate::translate(&chunk.main, Some(&main_string_remap));
+    dynir::opt::optimize(&mut main_tf.function);
+    let mut child_tfs: Vec<TranslatedFunction> = all_protos
+        .iter()
+        .enumerate()
+        .map(|(i, p)| translate::translate(p, Some(&child_string_remaps[i])))
+        .collect();
+    for tf in &mut child_tfs {
+        dynir::opt::optimize(&mut tf.function);
+    }
+
+    let child_info: Vec<(u8, u8)> = all_protos
         .iter()
         .map(|p| (p.num_params, p.is_vararg))
-        .collect();
-
-    // Collect per-child constant tables (each proto has its own)
-    let child_constants: Vec<Vec<String>> = chunk
-        .main
-        .protos
-        .iter()
-        .map(|p| {
-            p.constants
-                .iter()
-                .map(|c| match c {
-                    Constant::String(s) => s.clone(),
-                    _ => String::new(),
-                })
-                .collect()
-        })
         .collect();
 
     let heap_size = gc_heap_size.unwrap_or(64 * 1024 * 1024);
@@ -406,6 +486,7 @@ fn run_lua_with_heap(source: &str, heap_size: usize) -> (u64, LuaRuntime) {
     let roots = MutatorRootManager::<NanBoxPtrPolicy>::new(heap_size)
         .with_gc_threshold(if gc_enabled { 0.75 } else { f64::INFINITY });
     let mut rt = LuaRuntime::new(roots.heap(), &chunk.main.constants);
+    rt.constants = global_strings.clone();
 
     let extern_ptrs = jit_extern_ptrs();
     let child_jits: Vec<JitFunction> = child_tfs
@@ -425,7 +506,8 @@ fn run_lua_with_heap(source: &str, heap_size: usize) -> (u64, LuaRuntime) {
         rt: &mut rt as *mut LuaRuntime,
         child_jit_ptrs,
         child_info,
-        child_consts: child_constants,
+        child_offsets: child_offsets.clone(),
+        current_child_offset: 0, // main's children start at global index 0
     };
     JIT_CTX.with(|c| c.set(&mut jit_ctx as *mut JitContext));
 
@@ -1172,7 +1254,6 @@ fn test_fifty_nested_function_calls() {
 // control flow together — proving the IR can support a real language.
 
 #[test]
-#[ignore = "hits Lua runtime bug: nested function-call-as-arg pattern corrupts values"]
 fn test_json_serializer() {
     // A Lua JSON serializer: builds a table structure representing a small
     // dataset, then serializes it to a JSON string using recursive functions,
@@ -1316,7 +1397,6 @@ fn test_json_serializer() {
 }
 
 #[test]
-#[ignore = "hits Lua runtime bug: nested function-call-as-arg pattern corrupts values"]
 fn test_jit_with_closures() {
     // A tiny expression evaluator: parse + evaluate arithmetic from a table-based AST.
     // Tests deep closure nesting, mutual recursion between eval and apply,
@@ -1548,38 +1628,37 @@ fn test_gc_multi_closure_stress() {
         return a + b
     "#);
     let chunk = bytecode::parse(&bytecode_data).expect("bytecode parse failed");
+    let (all_protos, child_offsets) = flatten_all_protos(&chunk.main);
 
-    let main_tf = translate::translate(&chunk.main);
-    let child_tfs: Vec<TranslatedFunction> = chunk
-        .main
-        .protos
+    let mut global_strings: Vec<String> = Vec::new();
+    let mut string_index_map: HashMap<String, usize> = HashMap::new();
+    let main_string_remap = build_string_remap(
+        &chunk.main, &mut global_strings, &mut string_index_map,
+    );
+    let child_string_remaps: Vec<Vec<usize>> = all_protos
         .iter()
-        .map(|p| translate::translate(p))
+        .map(|p| build_string_remap(p, &mut global_strings, &mut string_index_map))
         .collect();
-    let child_info: Vec<(u8, u8)> = chunk
-        .main
-        .protos
+
+    let mut main_tf = translate::translate(&chunk.main, Some(&main_string_remap));
+    dynir::opt::optimize(&mut main_tf.function);
+    let mut child_tfs: Vec<TranslatedFunction> = all_protos
+        .iter()
+        .enumerate()
+        .map(|(i, p)| translate::translate(p, Some(&child_string_remaps[i])))
+        .collect();
+    for tf in &mut child_tfs {
+        dynir::opt::optimize(&mut tf.function);
+    }
+    let child_info: Vec<(u8, u8)> = all_protos
         .iter()
         .map(|p| (p.num_params, p.is_vararg))
-        .collect();
-    let child_constants: Vec<Vec<String>> = chunk
-        .main
-        .protos
-        .iter()
-        .map(|p| {
-            p.constants
-                .iter()
-                .map(|c| match c {
-                    Constant::String(s) => s.clone(),
-                    _ => String::new(),
-                })
-                .collect()
-        })
         .collect();
 
     let roots = MutatorRootManager::<NanBoxPtrPolicy>::new(heap_size)
         .with_gc_threshold(0.75);
     let mut rt = LuaRuntime::new(roots.heap(), &chunk.main.constants);
+    rt.constants = global_strings.clone();
 
     let extern_ptrs = jit_extern_ptrs();
     let child_jits: Vec<JitFunction> = child_tfs
@@ -1599,7 +1678,8 @@ fn test_gc_multi_closure_stress() {
         rt: &mut rt as *mut LuaRuntime,
         child_jit_ptrs,
         child_info,
-        child_consts: child_constants,
+        child_offsets: child_offsets.clone(),
+        current_child_offset: 0, // main's children start at global index 0
     };
     JIT_CTX.with(|c| c.set(&mut jit_ctx as *mut JitContext));
 
@@ -1632,6 +1712,78 @@ fn test_gc_multi_closure_stress() {
 }
 
 #[test]
+fn test_nested_call_as_arg() {
+    // Simple: g(f(10))
+    let (result, _) = run_lua(r#"
+        local function f(x) return x end
+        local function g(x) return x * 2 end
+        local r = g(f(10))
+        return r
+    "#);
+    assert_eq!(as_number(result), 20.0);
+
+    // Two args from nested calls: h(f(3), g(4))
+    let (result, _) = run_lua(r#"
+        local function f(x) return x + 1 end
+        local function g(x) return x * 2 end
+        local function h(a, b) return a + b end
+        return h(f(3), g(4))
+    "#);
+    // f(3)=4, g(4)=8, h(4,8)=12
+    assert_eq!(as_number(result), 12.0);
+
+    // Three levels deep: f(g(h(5)))
+    let (result, _) = run_lua(r#"
+        local function f(x) return x + 1 end
+        local function g(x) return x * 2 end
+        local function h(x) return x * 3 end
+        return f(g(h(5)))
+    "#);
+    // h(5)=15, g(15)=30, f(30)=31
+    assert_eq!(as_number(result), 31.0);
+
+    // Nested calls as function args: binop("+", num(3), num(4))
+    let (result, _) = run_lua(r#"
+        local function num(n) return n end
+        local function binop(op, a, b) return a + b end
+        return binop("+", num(3), num(4))
+    "#);
+    assert_eq!(as_number(result), 7.0);
+
+    // Higher-order: fold
+    let (result, _) = run_lua(r#"
+        local function fold(t, init, f)
+            local acc = init
+            for i = 1, #t do
+                acc = f(acc, t[i])
+            end
+            return acc
+        end
+        local t = {}
+        t[1] = 10
+        t[2] = 20
+        t[3] = 30
+        return fold(t, 0, function(a, b) return a + b end)
+    "#);
+    assert_eq!(as_number(result), 60.0);
+
+    // Forward-declared self-referencing closure
+    let (result, _) = run_lua(r#"
+        local function make_counter()
+            local count
+            count = function(n)
+                if n <= 0 then return 0 end
+                return 1 + count(n - 1)
+            end
+            return count
+        end
+        local f = make_counter()
+        return f(5)
+    "#);
+    assert_eq!(as_number(result), 5.0);
+}
+
+#[test]
 fn test_table_bench_correctness() {
     let (result, _rt) = run_lua(TABLE_BENCH_SRC);
     assert_eq!(as_number(result), 62502500050000.0);
@@ -1639,15 +1791,86 @@ fn test_table_bench_correctness() {
 
 #[test]
 fn bench_table_heavy_jit() {
-    // Warm up
-    let _ = run_lua("return 1");
+    // ── Compile once ──────────────────────────────────────────
+    let bytecode_data = compile_lua(TABLE_BENCH_SRC);
+    let chunk = bytecode::parse(&bytecode_data).expect("bytecode parse failed");
+    let (all_protos, child_offsets) = flatten_all_protos(&chunk.main);
 
-    let iterations = 5;
+    let mut global_strings: Vec<String> = Vec::new();
+    let mut string_index_map: HashMap<String, usize> = HashMap::new();
+    let main_string_remap = build_string_remap(
+        &chunk.main, &mut global_strings, &mut string_index_map,
+    );
+    let child_string_remaps: Vec<Vec<usize>> = all_protos
+        .iter()
+        .map(|p| build_string_remap(p, &mut global_strings, &mut string_index_map))
+        .collect();
+
+    let mut main_tf = translate::translate(&chunk.main, Some(&main_string_remap));
+    dynir::opt::optimize(&mut main_tf.function);
+    let mut child_tfs: Vec<TranslatedFunction> = all_protos
+        .iter()
+        .enumerate()
+        .map(|(i, p)| translate::translate(p, Some(&child_string_remaps[i])))
+        .collect();
+    for tf in &mut child_tfs {
+        dynir::opt::optimize(&mut tf.function);
+    }
+    let child_info: Vec<(u8, u8)> = all_protos
+        .iter()
+        .map(|p| (p.num_params, p.is_vararg))
+        .collect();
+
+    let extern_ptrs = jit_extern_ptrs();
+    let child_jits: Vec<JitFunction> = child_tfs
+        .iter()
+        .map(|tf| {
+            JitFunction::compile_with_gc::<NanBox>(
+                &tf.function, &extern_ptrs, active_jit_safepoint_handler,
+            )
+        })
+        .collect();
+    let child_jit_ptrs: Vec<*const u8> = child_jits.iter().map(|j| j.as_ptr()).collect();
+    let main_jit = JitFunction::compile_with_gc::<NanBox>(
+        &main_tf.function, &extern_ptrs, active_jit_safepoint_handler,
+    );
+
+    // ── Execute many times (execution only) ──────────────────
+    let iterations = 10;
     let mut times = Vec::new();
     for _ in 0..iterations {
+        // Fresh runtime state each iteration
+        let heap_size = 64 * 1024 * 1024;
+        let roots = MutatorRootManager::<NanBoxPtrPolicy>::new(heap_size)
+            .with_gc_threshold(0.75);
+        let mut rt = LuaRuntime::new(roots.heap(), &chunk.main.constants);
+        rt.constants = global_strings.clone();
+
+        let mut jit_ctx = JitContext {
+            rt: &mut rt as *mut LuaRuntime,
+            child_jit_ptrs: child_jit_ptrs.clone(),
+            child_info: child_info.clone(),
+            child_offsets: child_offsets.clone(),
+            current_child_offset: 0,
+        };
+        JIT_CTX.with(|c| c.set(&mut jit_ctx as *mut JitContext));
+
+        let transport = LuaJitTransport {
+            register_file: &rt.register_file as *const Vec<u64>,
+        };
+        let session = JitSafepointSession::<NanBoxPtrPolicy, LuaJitTransport>::new(
+            roots.heap(), transport, main_jit.safepoints(),
+        ).with_gc_threshold(0.75);
+
+        let call_args = LuaCallArgs::for_proto(&chunk.main, make_nil(), &[]);
+
         let start = std::time::Instant::now();
-        let (result, _) = run_lua(TABLE_BENCH_SRC);
+        let result = session.with_installed(|| {
+            unsafe { call_jit(main_jit.as_ptr(), &call_args.abi_args) }
+        });
         let elapsed = start.elapsed();
+
+        JIT_CTX.with(|c| c.set(std::ptr::null_mut()));
         assert_eq!(as_number(result), 62502500050000.0);
         times.push(elapsed);
     }
@@ -1657,14 +1880,12 @@ fn bench_table_heavy_jit() {
     let min = times.iter().min().unwrap();
     let max = times.iter().max().unwrap();
 
-    eprintln!("\n── JIT table benchmark ({} runs) ──", iterations);
+    eprintln!("\n── JIT table benchmark ({} runs, exec only) ──", iterations);
     eprintln!("  avg: {:?}", avg);
     eprintln!("  min: {:?}", min);
     eprintln!("  max: {:?}", max);
 
     // Now run Lua 5.1 interpreter for comparison.
-    // TABLE_BENCH_SRC uses `return` which only works inside functions,
-    // so we wrap it for standalone execution.
     let lua_src_path = std::env::temp_dir().join("table_bench_cmp.lua");
     let lua_src = TABLE_BENCH_SRC.replace(
         "return sum + odd_result + chain_sum",
@@ -1691,7 +1912,7 @@ fn bench_table_heavy_jit() {
     let lua_min = lua_times.iter().min().unwrap();
     let lua_max = lua_times.iter().max().unwrap();
 
-    eprintln!("\n── Lua 5.1 interpreter ({} runs) ──", iterations);
+    eprintln!("\n── Lua 5.1 interpreter ({} runs, includes parse) ──", iterations);
     eprintln!("  avg: {:?}", lua_avg);
     eprintln!("  min: {:?}", lua_min);
     eprintln!("  max: {:?}", lua_max);
