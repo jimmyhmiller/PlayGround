@@ -1474,6 +1474,8 @@ where
     max_deopt_live_values: usize,
     prologue_stp_offset: usize,
     epilogue_ldp_offsets: Vec<usize>, // offsets of LDP instructions to patch
+    /// Pre-allocated frame offsets for each StackSlot declared by the function.
+    stack_slot_offsets: Vec<i32>,
     _config: PhantomData<Cfg>,
     _backend: PhantomData<B>,
 }
@@ -1912,12 +1914,27 @@ where
                 .unwrap_or(0),
             prologue_stp_offset: 0,
             epilogue_ldp_offsets: Vec::new(),
+            stack_slot_offsets: Vec::new(),
             _config: PhantomData,
             _backend: PhantomData,
         }
     }
 
     fn run(&mut self) {
+        // Pre-allocate frame slots for all declared stack slots.
+        self.stack_slot_offsets = self
+            .func
+            .stack_slots
+            .iter()
+            .map(|slot_data| {
+                if slot_data.is_gc_root {
+                    self.frame.alloc_root_slot()
+                } else {
+                    self.frame.alloc_local_slot()
+                }
+            })
+            .collect();
+
         self.emit_prologue();
 
         for block_idx in 0..self.func.blocks.len() {
@@ -2368,6 +2385,16 @@ where
                 }
             }
 
+            Inst::StackAddr(stack_slot) => {
+                let val = result_val.unwrap();
+                // Look up the pre-allocated frame offset for this stack slot.
+                let slot_offset = self.stack_slot_offsets[stack_slot.index()];
+                let slot = self.frame.slot_access(slot_offset);
+                let rd_idx = self.regs.alloc_gp::<B, _>(&mut self.buf, &mut self.frame);
+                B::emit_lea_frame_slot(&mut self.buf, machine_gp(rd_idx), slot);
+                self.assign_gp_value(val, rd_idx);
+            }
+
             Inst::Load(ty, addr, offset) => {
                 let val = result_val.unwrap();
                 let ra = self.regs.ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, *addr);
@@ -2397,11 +2424,13 @@ where
             }
 
             Inst::Store(val_to_store, addr, offset) => {
-                let ra = self.regs.ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, *addr);
                 let val_ty = self.regs.values[val_to_store.index()].ty;
 
+                // Load the value FIRST, then the address. This ensures the
+                // address register isn't evicted when loading the value.
                 if RegState::is_float_type(val_ty) {
                     let rv = self.regs.ensure_in_fp_reg::<B>(&mut self.buf, &mut self.frame, *val_to_store);
+                    let ra = self.regs.ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, *addr);
                     B::emit_store_fp(
                         &mut self.buf,
                         machine_fp(rv),
@@ -2410,6 +2439,7 @@ where
                     );
                 } else {
                     let rv = self.regs.ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, *val_to_store);
+                    let ra = self.regs.ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, *addr);
                     let size = type_to_machine_word_size(val_ty);
                     B::emit_store_gp(
                         &mut self.buf,
@@ -3081,13 +3111,13 @@ where
         // Load function pointer into the backend's call scratch register and call through it.
         let func_idx = func_ref.index();
         if let Some(table_base) = self.call_table_base {
-            // Module mode: load from indirect call table
-            B::emit_mov_imm(&mut self.buf, machine_gp(28), table_base);
+            // Module mode: load from indirect call table.
+            B::emit_mov_imm(&mut self.buf, machine_gp(27), table_base);
             let offset = (func_idx * 8) as i32;
             B::emit_load_gp(
                 &mut self.buf,
                 machine_gp(28),
-                machine_gp(28),
+                machine_gp(27),
                 offset,
                 MachineWordSize::W64,
             );
@@ -3413,12 +3443,12 @@ where
 
                 let func_idx = func.index();
                 if let Some(table_base) = self.call_table_base {
-                    B::emit_mov_imm(&mut self.buf, machine_gp(28), table_base);
+                    B::emit_mov_imm(&mut self.buf, machine_gp(27), table_base);
                     let offset = (func_idx * 8) as i32;
                     B::emit_load_gp(
                         &mut self.buf,
                         machine_gp(28),
-                        machine_gp(28),
+                        machine_gp(27),
                         offset,
                         MachineWordSize::W64,
                     );

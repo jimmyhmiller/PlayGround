@@ -1,0 +1,15 @@
+[package]
+name = "tensor-lang-viz"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+tensor-lang-graph = { path = "../tensor-lang-graph" }
+tensor-lang-test-oracle = { path = "../tensor-lang-test-oracle" }
+ndarray = "0.16"
+wgpu = "28"
+winit = "0.30"
+pollster = "0.4"
+bytemuck = { version = "1", features = ["derive"] }
+rand = "0.8"
+glyphon = "0.10"

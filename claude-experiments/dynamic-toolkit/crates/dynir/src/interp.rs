@@ -130,6 +130,9 @@ struct CallFrame {
     val_to_slot: Vec<Option<usize>>,
     caller_resume: CallerResume,
     active_prompts: Vec<PromptId>,
+    /// Stack memory for function-level stack slots. Pre-allocated based
+    /// on `Function::stack_slots`. Each slot is 8-byte aligned.
+    slot_memory: Vec<u64>,
 }
 
 /// What `execute_frame` produces when it needs to transfer control.
@@ -260,7 +263,7 @@ where
         let roots = self.roots;
         let mut stack = Vec::new();
         restore_frame_slice::<Cfg::Layout, Cfg::Roots, Cfg::RootTransport, R>(
-            &mut stack, snapshot, args, roots,
+            &mut stack, snapshot, args, roots, &self.module.functions,
         )?;
         self.run_stack(stack, roots)
     }
@@ -406,7 +409,7 @@ where
                         snapshot
                     };
                     restore_frame_slice::<Cfg::Layout, Cfg::Roots, Cfg::RootTransport, R>(
-                        &mut stack, snapshot, &args, roots,
+                        &mut stack, snapshot, &args, roots, &self.module.functions,
                     )?;
                 }
 
@@ -484,6 +487,9 @@ where
             vals[v.index()] = args[i];
         }
 
+        // Pre-allocate stack slot memory (each slot is 8 bytes)
+        let slot_memory = vec![0u64; func.stack_slots.len()];
+
         stack.push(CallFrame {
             func_idx,
             vals,
@@ -493,6 +499,7 @@ where
             val_to_slot,
             caller_resume,
             active_prompts: Vec::new(),
+            slot_memory,
         });
     }
 
@@ -541,6 +548,16 @@ where
                             .clone_slice(&handle)
                             .map_err(InterpError::FrameSlice)?;
                         frame.vals[dest.index()] = S::encode_handle(&cloned);
+                        frame.inst_idx += 1;
+                        continue;
+                    }
+
+                    Inst::StackAddr(slot) => {
+                        let dest = node.value.expect("stack_addr must produce a value");
+                        let ptr = unsafe {
+                            frame.slot_memory.as_ptr().add(slot.index())
+                        } as u64;
+                        frame.vals[dest.index()] = ptr;
                         frame.inst_idx += 1;
                         continue;
                     }
@@ -1080,15 +1097,16 @@ fn exec_non_call_inst<S: ValueLayout>(
             }
         }
 
-        // Call/CallIndirect/Safepoint and frame-slice control must be handled by the caller
+        // Call/CallIndirect/Safepoint/StackAddr and frame-slice control must be handled by the caller
         Inst::Call(..)
         | Inst::CallIndirect(..)
         | Inst::Safepoint(..)
+        | Inst::StackAddr(..)
         | Inst::PushPrompt(..)
         | Inst::PopPrompt(..)
         | Inst::CaptureSlice(..)
         | Inst::CloneSlice(..) => {
-            panic!("Call/CallIndirect/Safepoint must be handled by the interpreter, not exec_non_call_inst");
+            panic!("Call/CallIndirect/Safepoint/StackAddr must be handled by the interpreter, not exec_non_call_inst");
         }
     }
 }
@@ -1266,6 +1284,7 @@ fn restore_frame_slice<L, Roots, Transport, R>(
     snapshot: FrameSliceSnapshot,
     args: &[u64],
     roots: &R,
+    functions: &[Function],
 ) -> Result<(), InterpError>
 where
     L: ValueLayout,
@@ -1307,6 +1326,7 @@ where
                 .copied()
                 .map(PromptId)
                 .collect(),
+            slot_memory: vec![0u64; functions[func_idx].stack_slots.len()],
         };
         sync_all_to_roots::<L, Roots, Transport, R>(&frame, roots);
         stack.push(frame);

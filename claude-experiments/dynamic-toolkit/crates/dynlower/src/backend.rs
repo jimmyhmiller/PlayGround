@@ -91,6 +91,13 @@ pub trait LoweringBackend {
         size: MachineWordSize,
     );
 
+    /// Compute the address of a frame slot: `dst = base_reg + offset`.
+    fn emit_lea_frame_slot(
+        buf: &mut CodeBuffer<Self::Arch>,
+        dst: MachineReg,
+        slot: FrameSlotAccess,
+    );
+
     fn emit_fp_binop(
         buf: &mut CodeBuffer<Self::Arch>,
         op: MachineFpBinOp,
@@ -370,7 +377,7 @@ impl Arm64Backend {
         ));
     }
 
-    fn slot_base_reg(slot: FrameSlotAccess) -> Arm64Reg {
+    pub(crate) fn slot_base_reg(slot: FrameSlotAccess) -> Arm64Reg {
         match slot.base {
             FrameSlotBase::FramePointer => X29,
             FrameSlotBase::StackPointer => SP,
@@ -494,6 +501,23 @@ impl LoweringBackend for Arm64Backend {
         frame_size: i32,
     ) {
         Arm64Backend::emit_frame_size_patch(buf, prologue_offset, epilogue_offsets, frame_size);
+    }
+
+    fn emit_lea_frame_slot(
+        buf: &mut CodeBuffer<Self::Arch>,
+        dst: MachineReg,
+        slot: FrameSlotAccess,
+    ) {
+        let base = Arm64Backend::slot_base_reg(slot);
+        if slot.offset == 0 {
+            buf.emit(Arm64Inst::mov(Arm64Backend::gp_hw(dst, RegSize::X64), base));
+        } else {
+            buf.emit(Arm64Inst::add_imm(
+                Arm64Backend::gp_hw(dst, RegSize::X64),
+                base,
+                slot.offset,
+            ));
+        }
     }
 
     fn emit_gp_move(buf: &mut CodeBuffer<Self::Arch>, dst: MachineReg, src: MachineReg) {
@@ -672,13 +696,16 @@ impl LoweringBackend for Arm64Backend {
     ) {
         let size = Arm64Backend::size_to_regsize(size);
         let rd = Arm64Backend::gp_hw(dst, size);
+        let rd_x64 = Arm64Backend::gp_hw(dst, RegSize::X64);
         let rn = Arm64Backend::gp_hw(base, RegSize::X64);
         if (-256..=255).contains(&offset) {
             buf.emit(Arm64Inst::ldur(rd, rn, offset));
         } else {
-            Arm64Backend::emit_mov_imm64(buf, X28, offset as u64);
-            buf.emit(Arm64Inst::add(X28, rn, X28));
-            buf.emit(Arm64Inst::ldur(rd, X28, 0));
+            // Use rd as scratch to avoid clobbering rn (which might be the
+            // same physical register as X28, the usual scratch).
+            Arm64Backend::emit_mov_imm64(buf, rd_x64, offset as u64);
+            buf.emit(Arm64Inst::add(rd_x64, rn, rd_x64));
+            buf.emit(Arm64Inst::ldur(rd, rd_x64, 0));
         }
     }
 
@@ -712,6 +739,13 @@ impl LoweringBackend for Arm64Backend {
         if (-256..=255).contains(&offset) {
             buf.emit(Arm64Inst::stur(rt, rn, offset));
         } else {
+            // Use X28 as scratch for the address computation.
+            // This is safe as long as src != X28 AND base != X28.
+            debug_assert!(
+                Arm64Backend::gp_hw(src, RegSize::X64) != X28
+                && Arm64Backend::gp_hw(base, RegSize::X64) != X28,
+                "emit_store_gp: large offset path would clobber X28 which is src or base"
+            );
             Arm64Backend::emit_mov_imm64(buf, X28, offset as u64);
             buf.emit(Arm64Inst::add(X28, rn, X28));
             buf.emit(Arm64Inst::stur(rt, X28, 0));
@@ -1193,6 +1227,7 @@ impl LoweringBackend for X64Backend {
     fn emit_make_tagged(_buf: &mut CodeBuffer<Self::Arch>, _dst: MachineReg, _payload: MachineReg, _has_unboxed_float: bool, _payload_bits: u8, _encoded_tag_pattern: u64, _tag: u64) { todo!("x64 make_tagged") }
     fn emit_tag_of(_buf: &mut CodeBuffer<Self::Arch>, _dst: MachineReg, _src: MachineReg, _has_unboxed_float: bool, _payload_bits: u8, _tag_mask: u64) { todo!("x64 tag_of") }
     fn emit_call_safepoint_handler(_buf: &mut CodeBuffer<Self::Arch>, _handler: u64, _frame_size: u64) { todo!("x64 safepoint handler") }
+    fn emit_lea_frame_slot(_buf: &mut CodeBuffer<Self::Arch>, _dst: MachineReg, _slot: FrameSlotAccess) { todo!("x64 lea frame slot") }
 
     fn bind_label(buf: &mut CodeBuffer<Self::Arch>, label: Label) { buf.bind_label(label); }
     fn emit_branch_to_label(buf: &mut CodeBuffer<Self::Arch>, label: Label) {

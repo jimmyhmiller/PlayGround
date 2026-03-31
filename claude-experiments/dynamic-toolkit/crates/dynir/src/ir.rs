@@ -28,6 +28,29 @@ impl BlockId {
     }
 }
 
+/// Reference to a function-level stack slot.
+///
+/// Stack slots are declared at function scope (not in any block) via
+/// `FunctionBuilder::create_stack_slot`. Use `Inst::StackAddr` to get
+/// a `Ptr` to the slot's memory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct StackSlot(pub(crate) u32);
+
+impl StackSlot {
+    pub fn index(self) -> usize {
+        self.0 as usize
+    }
+}
+
+/// Metadata for a function-level stack slot.
+#[derive(Debug, Clone)]
+pub struct StackSlotData {
+    /// Size in bytes.
+    pub size: u32,
+    /// Whether this slot may hold GC pointers and must be scanned during collection.
+    pub is_gc_root: bool,
+}
+
 /// Reference to a prompt boundary within a function.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PromptId(pub(crate) u32);
@@ -146,6 +169,9 @@ pub enum Inst {
     Bitcast(Value, Type),
 
     // -- Memory --
+    /// Get the address of a function-level stack slot.
+    /// Returns a Ptr. The slot must have been declared via `create_stack_slot`.
+    StackAddr(StackSlot),
     Load(Type, Value, i32),
     Store(Value, Value, i32), // (value, addr, offset) — no result
 
@@ -245,6 +271,7 @@ impl Inst {
             Inst::IntToFloat(_) => Some(Type::F64),
             Inst::FloatToInt(_) => Some(Type::I64),
 
+            Inst::StackAddr(_) => Some(Type::Ptr),
             Inst::Load(ty, _, _) => Some(*ty),
             Inst::Store(_, _, _) => None,
 
@@ -269,7 +296,7 @@ impl Inst {
     /// Call `f` on every Value operand.
     pub fn for_each_value(&self, mut f: impl FnMut(Value)) {
         match self {
-            Inst::Iconst(_, _) | Inst::F64Const(_) => {}
+            Inst::Iconst(_, _) | Inst::F64Const(_) | Inst::StackAddr(_) => {}
 
             Inst::Add(a, b)
             | Inst::Sub(a, b)
@@ -344,7 +371,7 @@ impl Inst {
     /// Call `f` on every Value operand (mutable).
     pub fn for_each_value_mut(&mut self, mut f: impl FnMut(&mut Value)) {
         match self {
-            Inst::Iconst(_, _) | Inst::F64Const(_) => {}
+            Inst::Iconst(_, _) | Inst::F64Const(_) | Inst::StackAddr(_) => {}
 
             Inst::Add(a, b)
             | Inst::Sub(a, b)
@@ -596,6 +623,8 @@ pub struct Function {
     pub extern_funcs: Vec<ExternFunc>,
     pub deopt_info: Vec<DeoptInfo>,
     pub prompt_count: u32,
+    /// Function-level stack slot declarations.
+    pub stack_slots: Vec<StackSlotData>,
 }
 
 impl Function {

@@ -172,6 +172,7 @@ pub struct FunctionBuilder {
     extern_funcs: Vec<ExternFunc>,
     deopt_info: Vec<DeoptInfo>,
     next_prompt: u32,
+    stack_slots: Vec<StackSlotData>,
 }
 
 impl FunctionBuilder {
@@ -192,6 +193,7 @@ impl FunctionBuilder {
             extern_funcs: Vec::new(),
             deopt_info: Vec::new(),
             next_prompt: 0,
+            stack_slots: Vec::new(),
         };
         let entry = b.create_block(params);
         b.switch_to_block(entry);
@@ -443,6 +445,27 @@ impl FunctionBuilder {
             "bitcast requires same-size types, got {from} -> {to}"
         );
         self.push_inst(to, Inst::Bitcast(v, to))
+    }
+
+    // ── Stack slots ────────────────────────────────────────────
+
+    /// Declare a function-level stack slot. Returns a handle that can be
+    /// used with `stack_addr` to get a pointer to the slot's memory.
+    pub fn create_stack_slot(&mut self, size: u32, is_gc_root: bool) -> StackSlot {
+        let idx = self.stack_slots.len();
+        self.stack_slots.push(StackSlotData { size, is_gc_root });
+        StackSlot(idx as u32)
+    }
+
+    /// Get the address of a declared stack slot. Returns a `Ptr`.
+    pub fn stack_addr(&mut self, slot: StackSlot) -> Value {
+        assert!(
+            (slot.index()) < self.stack_slots.len(),
+            "stack_addr: slot index {} out of range (have {})",
+            slot.index(),
+            self.stack_slots.len()
+        );
+        self.push_inst(Type::Ptr, Inst::StackAddr(slot))
     }
 
     // ── Memory ─────────────────────────────────────────────────
@@ -777,6 +800,7 @@ impl FunctionBuilder {
             extern_funcs: self.extern_funcs,
             deopt_info: self.deopt_info,
             prompt_count: self.next_prompt,
+            stack_slots: self.stack_slots,
         }
     }
 

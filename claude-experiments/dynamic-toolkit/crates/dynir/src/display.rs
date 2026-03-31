@@ -88,6 +88,7 @@ impl fmt::Display for Inst {
             Inst::FloatToInt(v) => write!(f, "float_to_int {v}"),
             Inst::Bitcast(v, ty) => write!(f, "bitcast {v} -> {ty}"),
 
+            Inst::StackAddr(slot) => write!(f, "stack_addr ss{}", slot.index()),
             Inst::Load(ty, addr, off) => write!(f, "load.{ty} [{addr} + {off}]"),
             Inst::Store(val, addr, off) => write!(f, "store {val}, [{addr} + {off}]"),
 
