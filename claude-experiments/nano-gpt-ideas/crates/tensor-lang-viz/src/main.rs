@@ -85,22 +85,39 @@ struct TextEntry {
 }
 
 /// Collapse an ndarray to 2D for heatmap visualization.
-/// Takes first element of leading dims, last two dims become rows/cols.
-fn collapse_to_2d(arr: &ndarray::ArrayD<f32>) -> (usize, usize, Vec<f32>) {
+/// `slice_idx` selects which slice of the leading dimensions to show.
+/// Returns (rows, cols, data, n_slices) where n_slices is total number of leading-dim slices.
+fn collapse_to_2d_slice(arr: &ndarray::ArrayD<f32>, slice_idx: usize) -> (usize, usize, Vec<f32>, usize) {
     let shape = arr.shape();
     if shape.is_empty() {
-        return (1, 1, arr.iter().copied().collect());
+        return (1, 1, arr.iter().copied().collect(), 1);
     }
     if shape.len() == 1 {
-        return (1, shape[0], arr.iter().copied().collect());
+        return (1, shape[0], arr.iter().copied().collect(), 1);
     }
-    // Take last two dims
     let rows = shape[shape.len() - 2];
     let cols = shape[shape.len() - 1];
-    // Index into first element of all leading dims
-    let stride: usize = rows * cols;
-    let data: Vec<f32> = arr.iter().take(stride).copied().collect();
-    (rows, cols, data)
+    let stride = rows * cols;
+    let n_slices = arr.len() / stride.max(1);
+    let idx = slice_idx.min(n_slices.saturating_sub(1));
+    let offset = idx * stride;
+    let flat: Vec<f32> = arr.iter().copied().collect();
+    let data = flat[offset..offset + stride].to_vec();
+    (rows, cols, data, n_slices)
+}
+
+fn n_slices_for(arr: &ndarray::ArrayD<f32>) -> usize {
+    let shape = arr.shape();
+    if shape.len() <= 2 { return 1; }
+    let rows = shape[shape.len() - 2];
+    let cols = shape[shape.len() - 1];
+    let stride = rows * cols;
+    if stride == 0 { 1 } else { arr.len() / stride }
+}
+
+fn collapse_to_2d(arr: &ndarray::ArrayD<f32>) -> (usize, usize, Vec<f32>) {
+    let (r, c, d, _) = collapse_to_2d_slice(arr, 0);
+    (r, c, d)
 }
 
 // ─── Mode ─────────────────────────────────────────────────────────────────
@@ -116,6 +133,7 @@ enum ViewMode {
     Sequence,
     Graph,
     DAG,
+    Wall,
 }
 
 // ─── Node Graph Editor ────────────────────────────────────────────────────
@@ -468,6 +486,7 @@ struct App {
     dag_dragging: bool,
     dag_selected: Option<usize>,
     start_time: std::time::Instant,
+    wall_hide_constants: bool,
 }
 
 impl App {
@@ -497,6 +516,7 @@ impl App {
             dag_dragging: false,
             dag_selected: None,
             start_time: std::time::Instant::now(),
+            wall_hide_constants: true,
         };
         // Generate initial example
         app.new_example();
@@ -557,6 +577,217 @@ impl App {
 
         // Show the example we just trained on
         self.set_example(seq);
+    }
+
+    fn render_wall(
+        &self,
+        vertices: &mut Vec<ColorVertex>,
+        texts: &mut Vec<TextEntry>,
+        win_w: f32, win_h: f32,
+    ) {
+        let tw = GlyphonColor::rgb(220, 220, 220);
+        let td = GlyphonColor::rgb(150, 150, 165);
+
+        // Background
+        quad_px(vertices, 0.0, 0.0, win_w, win_h, win_w, win_h, [0.08, 0.08, 0.11, 1.0]);
+
+        let graph = &self.runner.inf_graph;
+        if self.all_node_values.is_empty() { return; }
+
+        // Filter out scalar nodes and optionally constant-derived nodes
+        let hide_const = self.wall_hide_constants;
+
+        // Pre-compute which nodes are "static" (derived entirely from constants/aranges)
+        let mut is_static = vec![false; graph.nodes.len()];
+        if hide_const {
+            for idx in 0..graph.nodes.len() {
+                let node = &graph.nodes[idx];
+                let is_leaf_static = matches!(node.op,
+                    tensor_lang_graph::Op::Constant(_) | tensor_lang_graph::Op::Arange { .. });
+                let all_inputs_static = !node.inputs.is_empty()
+                    && node.inputs.iter().all(|inp| is_static[inp.0]);
+                // Input nodes (weights) are NOT static — they're learned
+                let is_input = matches!(node.op, tensor_lang_graph::Op::Input { .. });
+                is_static[idx] = !is_input && (is_leaf_static || all_inputs_static);
+            }
+        }
+
+        let visible_indices: Vec<usize> = (0..graph.nodes.len())
+            .filter(|&idx| {
+                if idx >= self.all_node_values.len() { return false; }
+                let shape = self.all_node_values[idx].shape();
+                if shape.is_empty() || !shape.iter().any(|&d| d > 1) { return false; }
+                if hide_const && is_static[idx] { return false; }
+                true
+            })
+            .collect();
+        let n_nodes = visible_indices.len();
+        if n_nodes == 0 { return; }
+
+        // Compute grid dimensions to fill the screen
+        let margin = 8.0;
+        let header = 36.0; // space for title
+        let footer = 32.0; // space for controls
+        let avail_w = win_w - margin * 2.0;
+        let avail_h = win_h - header - footer - margin;
+
+        // Try different column counts and pick the one that fills best
+        let mut best_cols = 1usize;
+        let mut best_cell = 0.0f32;
+        for cols in 1..=30 {
+            let rows = (n_nodes + cols - 1) / cols;
+            let cell_w = avail_w / cols as f32 - 4.0;
+            let cell_h = avail_h / rows as f32 - 4.0;
+            let cell = cell_w.min(cell_h);
+            if cell > best_cell && cell > 20.0 {
+                best_cell = cell;
+                best_cols = cols;
+            }
+        }
+
+        let cols = best_cols;
+        let rows = (n_nodes + cols - 1) / cols;
+        let cell_w = avail_w / cols as f32;
+        let cell_h = avail_h / rows as f32;
+        let hm_size = (cell_w - 6.0).min(cell_h - 22.0).max(4.0);
+
+        // Title
+        texts.push(TextEntry {
+            text: format!("Wall of Tensors — {} nodes{}", n_nodes, if hide_const { " (constants hidden, [C] to show)" } else { " ([C] to hide constants)" }),
+            x: margin, y: 6.0, size: 24.0, color: tw,
+        });
+
+        // Sequence overlay top-right
+        {
+            let seq_str: String = self.current_example.iter()
+                .enumerate()
+                .map(|(i, &tok)| {
+                    let name = model::token_name(tok);
+                    if i == self.cursor_pos { format!("[{}]", name) } else { name.to_string() }
+                })
+                .collect::<Vec<_>>().join(" ");
+            let fs = 16.0;
+            let text_w = seq_str.len() as f32 * fs * 0.6 + 16.0;
+            let ox = (win_w - text_w - 10.0).max(10.0);
+            quad_px(vertices, ox - 6.0, 2.0, text_w + 12.0, 28.0,
+                win_w, win_h, [0.06, 0.06, 0.09, 0.9]);
+            texts.push(TextEntry {
+                text: seq_str, x: ox, y: 6.0, size: fs, color: td,
+            });
+        }
+
+        // Draw each node as a cell
+        for (vi, &idx) in visible_indices.iter().enumerate() {
+            let col = vi % cols;
+            let row = vi / cols;
+            let cx = margin + col as f32 * cell_w;
+            let cy = header + row as f32 * cell_h;
+
+            // Cell background
+            let gn = &graph.nodes[idx];
+            let bg = match &gn.op {
+                tensor_lang_graph::Op::Input { .. } => [0.14, 0.14, 0.22, 1.0],
+                tensor_lang_graph::Op::Constant(_) => [0.12, 0.12, 0.15, 1.0],
+                tensor_lang_graph::Op::Add | tensor_lang_graph::Op::Mul => [0.13, 0.13, 0.18, 1.0],
+                tensor_lang_graph::Op::ReduceSum { .. } | tensor_lang_graph::Op::ReduceMax { .. } => [0.14, 0.12, 0.18, 1.0],
+                _ => [0.12, 0.12, 0.16, 1.0],
+            };
+            quad_px(vertices, cx + 1.0, cy + 1.0, cell_w - 2.0, cell_h - 2.0,
+                win_w, win_h, bg);
+
+            // Op name label
+            let op_short = match &gn.op {
+                tensor_lang_graph::Op::Input { name } => {
+                    if name.len() > 8 { format!("In(..{})", &name[name.len()-3..]) } else { format!("In({})", name) }
+                }
+                tensor_lang_graph::Op::Constant(v) => format!("{:.2}", v),
+                tensor_lang_graph::Op::Arange { .. } => "Arange".into(),
+                tensor_lang_graph::Op::Neg => "Neg".into(),
+                tensor_lang_graph::Op::Recip => "1/x".into(),
+                tensor_lang_graph::Op::Exp2 => "Exp2".into(),
+                tensor_lang_graph::Op::Log2 => "Log2".into(),
+                tensor_lang_graph::Op::Sqrt => "√".into(),
+                tensor_lang_graph::Op::Add => "+".into(),
+                tensor_lang_graph::Op::Mul => "×".into(),
+                tensor_lang_graph::Op::Max => "Max".into(),
+                tensor_lang_graph::Op::CmpLt => "<".into(),
+                tensor_lang_graph::Op::ReduceSum { axis } => format!("Σ{}", axis),
+                tensor_lang_graph::Op::ReduceMax { axis } => format!("M{}", axis),
+                tensor_lang_graph::Op::Reshape { .. } => "Rsh".into(),
+                tensor_lang_graph::Op::Permute { .. } => "Prm".into(),
+                tensor_lang_graph::Op::Expand { .. } => "Exp".into(),
+                tensor_lang_graph::Op::Pad { .. } => "Pad".into(),
+                tensor_lang_graph::Op::Shrink { .. } => "Shr".into(),
+            };
+            let label_size = (cell_h * 0.12).clamp(6.0, 14.0);
+            texts.push(TextEntry {
+                text: format!("{} {}", idx, op_short),
+                x: cx + 3.0, y: cy + 2.0, size: label_size, color: td,
+            });
+
+            // Heatmap with slice scrubbing
+            if idx < self.all_node_values.len() {
+                let hx = cx + 3.0;
+                let hy = cy + label_size + 4.0;
+                let hw = hm_size.min(cell_w - 6.0);
+                let hh = hm_size.min(cell_h - label_size - 6.0);
+                if hw > 2.0 && hh > 2.0 {
+                    let val = &self.all_node_values[idx];
+                    let (mx, my) = self.mouse_pos;
+                    let hovering = mx >= cx && mx < cx + cell_w && my >= cy && my < cy + cell_h;
+
+                    // Determine slice from mouse X position within cell
+                    let (rows, cols, data, n_slices) = if hovering && n_slices_for(val) > 1 {
+                        let t = ((mx - cx) / cell_w).clamp(0.0, 0.999);
+                        let si = (t * n_slices_for(val) as f32) as usize;
+                        collapse_to_2d_slice(val, si)
+                    } else {
+                        collapse_to_2d_slice(val, 0)
+                    };
+
+                    if !data.is_empty() {
+                        let fmin = data.iter().copied().fold(f32::MAX, f32::min);
+                        let fmax = data.iter().copied().fold(f32::MIN, f32::max);
+                        let frange = (fmax - fmin).max(0.001);
+
+                        if rows > 1 || cols > 1 {
+                            let max_r = rows.min(32);
+                            let max_c = cols.min(64);
+                            let cw = hw / max_c as f32;
+                            let ch = hh / max_r as f32;
+                            for r in 0..max_r {
+                                for c in 0..max_c {
+                                    let v = data[r * cols + c];
+                                    let t = (v - fmin) / frange;
+                                    quad_px(vertices, hx + c as f32 * cw, hy + r as f32 * ch,
+                                        cw, ch, win_w, win_h, viridis(t));
+                                }
+                            }
+                        }
+                    }
+
+                    // Show slice indicator if multi-slice and hovering
+                    if hovering && n_slices > 1 {
+                        let t = ((mx - cx) / cell_w).clamp(0.0, 0.999);
+                        let si = (t * n_slices as f32) as usize;
+                        let indicator_size = (label_size * 0.9).max(5.0);
+                        let ic = GlyphonColor::rgba(255, 220, 100, 220);
+                        texts.push(TextEntry {
+                            text: format!("slice {}/{}", si + 1, n_slices),
+                            x: cx + 3.0, y: cy + cell_h - indicator_size - 3.0,
+                            size: indicator_size, color: ic,
+                        });
+
+                        // Highlight border
+                        let hc = [0.5, 0.4, 0.2, 0.6];
+                        quad_px(vertices, cx, cy, cell_w, 2.0, win_w, win_h, hc);
+                        quad_px(vertices, cx, cy + cell_h - 2.0, cell_w, 2.0, win_w, win_h, hc);
+                        quad_px(vertices, cx, cy, 2.0, cell_h, win_w, win_h, hc);
+                        quad_px(vertices, cx + cell_w - 2.0, cy, 2.0, cell_h, win_w, win_h, hc);
+                    }
+                }
+            }
+        }
     }
 
     fn render_dag(
@@ -1094,12 +1325,21 @@ impl App {
         let mut vertices: Vec<ColorVertex> = Vec::with_capacity(50_000);
         let mut texts: Vec<TextEntry> = Vec::new();
 
-        // DAG mode: full-screen graph, skip all panels
-        if self.view_mode == ViewMode::DAG {
-            self.render_dag(&mut vertices, &mut texts, win_w, win_h);
+        // Full-screen modes: DAG and Wall
+        if self.view_mode == ViewMode::DAG || self.view_mode == ViewMode::Wall {
+            if self.view_mode == ViewMode::DAG {
+                self.render_dag(&mut vertices, &mut texts, win_w, win_h);
+            } else {
+                self.render_wall(&mut vertices, &mut texts, win_w, win_h);
+            }
             let td = GlyphonColor::rgb(140, 140, 140);
+            let controls = if self.view_mode == ViewMode::DAG {
+                "[Tab]=Wall  [Drag]=Pan  [Pinch]=Zoom  [Click]=Expand  [S]=Train  [N]=New  [Left/Right]=Pos  [Q]=Quit"
+            } else {
+                "[Tab]=Seq  [S]=Train  [N]=New  [Left/Right]=Pos  [Q]=Quit"
+            };
             texts.push(TextEntry {
-                text: "[Tab]=Seq  [Drag]=Pan  [Pinch]=Zoom  [Click]=Expand  [S]=Train  [N]=New  [Left/Right]=Pos  [Q]=Quit".into(),
+                text: controls.into(),
                 x: 5.0, y: win_h - 30.0, size: 20.0, color: td,
             });
 
@@ -1486,9 +1726,8 @@ impl App {
                 &mut vertices, &mut texts, m, left_w, right_x, right_w, bot_y, bot_h, win_w, win_h,
             );
         }
-        ViewMode::DAG => {
-            // DAG uses full screen — panels above are still drawn but DAG overlays the bottom
-            self.render_dag(&mut vertices, &mut texts, win_w, win_h);
+        ViewMode::DAG | ViewMode::Wall => {
+            unreachable!("DAG/Wall handled by early return above");
         }
       } // end match view_mode
 
@@ -1498,8 +1737,7 @@ impl App {
                 "[Tab]=Graph  [Left/Right]=Step  [S]=Train  [N]=New  [Space]=Run/Pause  [R]=Reset  [Q]=Quit",
             ViewMode::Graph =>
                 "[Tab]=DAG  [Click/Up/Down]=Node  [Scroll]=Browse  [S]=Train  [N]=New  [Space]=Run/Pause  [Q]=Quit",
-            ViewMode::DAG =>
-                "[Tab]=Seq  [Drag]=Pan  [Scroll]=Zoom  [Click]=Select  [S]=Train  [N]=New  [Q]=Quit",
+            ViewMode::DAG | ViewMode::Wall => unreachable!(),
         };
         texts.push(TextEntry {
             text: controls.into(),
@@ -1806,7 +2044,8 @@ impl ApplicationHandler for App {
                         self.view_mode = match self.view_mode {
                             ViewMode::Sequence => ViewMode::Graph,
                             ViewMode::Graph => ViewMode::DAG,
-                            ViewMode::DAG => ViewMode::Sequence,
+                            ViewMode::DAG => ViewMode::Wall,
+                            ViewMode::Wall => ViewMode::Sequence,
                         };
                     }
                     Key::Named(NamedKey::ArrowRight) => {
@@ -1855,6 +2094,9 @@ impl ApplicationHandler for App {
                         self.loss_history.clear();
                         self.step = 0;
                         self.new_example();
+                    }
+                    Key::Character("c") => {
+                        self.wall_hide_constants = !self.wall_hide_constants;
                     }
                     Key::Character("q") => {
                         event_loop.exit();

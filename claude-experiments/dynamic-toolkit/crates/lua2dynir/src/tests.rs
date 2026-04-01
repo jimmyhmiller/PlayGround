@@ -443,10 +443,14 @@ fn build_string_remap(
 }
 
 fn run_lua(source: &str) -> (u64, LuaRuntime) {
-    run_lua_with_heap(source, 64 * 1024 * 1024)
+    run_lua_with_opts(source, 64 * 1024 * 1024, &dynir::opt::OptConfig::all())
 }
 
 fn run_lua_with_heap(source: &str, heap_size: usize) -> (u64, LuaRuntime) {
+    run_lua_with_opts(source, heap_size, &dynir::opt::OptConfig::all())
+}
+
+fn run_lua_with_opts(source: &str, heap_size: usize, opt: &dynir::opt::OptConfig) -> (u64, LuaRuntime) {
     let gc_heap_size = Some(heap_size);
     let bytecode_data = compile_lua(source);
     let mut chunk = bytecode::parse(&bytecode_data).expect("bytecode parse failed");
@@ -466,14 +470,14 @@ fn run_lua_with_heap(source: &str, heap_size: usize) -> (u64, LuaRuntime) {
         .collect();
 
     let mut main_tf = translate::translate(&chunk.main, Some(&main_string_remap));
-    dynir::opt::optimize(&mut main_tf.function);
+    dynir::opt::optimize_with(&mut main_tf.function, opt);
     let mut child_tfs: Vec<TranslatedFunction> = all_protos
         .iter()
         .enumerate()
         .map(|(i, p)| translate::translate(p, Some(&child_string_remaps[i])))
         .collect();
     for tf in &mut child_tfs {
-        dynir::opt::optimize(&mut tf.function);
+        dynir::opt::optimize_with(&mut tf.function, opt);
     }
 
     let child_info: Vec<(u8, u8)> = all_protos
@@ -1919,4 +1923,155 @@ fn bench_table_heavy_jit() {
 
     let ratio = lua_avg.as_secs_f64() / avg.as_secs_f64();
     eprintln!("\n── Ratio: JIT is {:.2}x vs Lua 5.1 ──", ratio);
+}
+
+// ─── Optimization pass combination tests ────────────────────────
+//
+// Run a non-trivial program under every interesting OptConfig
+// combination so regressions in individual passes are caught.
+
+/// Source that exercises loops, closures, tables, and arithmetic.
+const OPT_TEST_SRC: &str = r#"
+    local function build_and_sum(n)
+        local t = {}
+        for i = 1, n do
+            t[i] = i * i
+        end
+        local sum = 0
+        for i = 1, n do
+            sum = sum + t[i]
+        end
+        return sum
+    end
+    return build_and_sum(200)
+"#;
+
+fn opt_test_expected() -> f64 {
+    // sum(i^2, i=1..200) = 200*201*401/6 = 2686700
+    2686700.0
+}
+
+#[test]
+fn test_opt_none() {
+    let (r, _) = run_lua_with_opts(OPT_TEST_SRC, 64 * 1024 * 1024, &dynir::opt::OptConfig::none());
+    assert_eq!(as_number(r), opt_test_expected());
+}
+
+#[test]
+fn test_opt_all() {
+    let (r, _) = run_lua_with_opts(OPT_TEST_SRC, 64 * 1024 * 1024, &dynir::opt::OptConfig::all());
+    assert_eq!(as_number(r), opt_test_expected());
+}
+
+#[test]
+fn test_opt_mem2reg_only() {
+    let cfg = dynir::opt::OptConfig { mem2reg: true, ..dynir::opt::OptConfig::none() };
+    let (r, _) = run_lua_with_opts(OPT_TEST_SRC, 64 * 1024 * 1024, &cfg);
+    assert_eq!(as_number(r), opt_test_expected());
+}
+
+#[test]
+fn test_opt_constfold_only() {
+    let cfg = dynir::opt::OptConfig { constant_fold: true, ..dynir::opt::OptConfig::none() };
+    let (r, _) = run_lua_with_opts(OPT_TEST_SRC, 64 * 1024 * 1024, &cfg);
+    assert_eq!(as_number(r), opt_test_expected());
+}
+
+#[test]
+fn test_opt_gvn_only() {
+    let cfg = dynir::opt::OptConfig { gvn: true, ..dynir::opt::OptConfig::none() };
+    let (r, _) = run_lua_with_opts(OPT_TEST_SRC, 64 * 1024 * 1024, &cfg);
+    assert_eq!(as_number(r), opt_test_expected());
+}
+
+#[test]
+fn test_opt_dce_only() {
+    let cfg = dynir::opt::OptConfig { dce: true, ..dynir::opt::OptConfig::none() };
+    let (r, _) = run_lua_with_opts(OPT_TEST_SRC, 64 * 1024 * 1024, &cfg);
+    assert_eq!(as_number(r), opt_test_expected());
+}
+
+#[test]
+fn test_opt_licm_only() {
+    // LICM alone (without mem2reg) should be a no-op but must not break anything.
+    let cfg = dynir::opt::OptConfig { licm: true, ..dynir::opt::OptConfig::none() };
+    let (r, _) = run_lua_with_opts(OPT_TEST_SRC, 64 * 1024 * 1024, &cfg);
+    assert_eq!(as_number(r), opt_test_expected());
+}
+
+#[test]
+fn test_opt_mem2reg_gvn() {
+    let cfg = dynir::opt::OptConfig { mem2reg: true, gvn: true, ..dynir::opt::OptConfig::none() };
+    let (r, _) = run_lua_with_opts(OPT_TEST_SRC, 64 * 1024 * 1024, &cfg);
+    assert_eq!(as_number(r), opt_test_expected());
+}
+
+#[test]
+fn test_opt_mem2reg_licm() {
+    let cfg = dynir::opt::OptConfig { mem2reg: true, licm: true, ..dynir::opt::OptConfig::none() };
+    let (r, _) = run_lua_with_opts(OPT_TEST_SRC, 64 * 1024 * 1024, &cfg);
+    assert_eq!(as_number(r), opt_test_expected());
+}
+
+#[test]
+fn test_opt_mem2reg_constfold_gvn_dce() {
+    let cfg = dynir::opt::OptConfig {
+        mem2reg: true, constant_fold: true, gvn: true, dce: true, licm: false,
+    };
+    let (r, _) = run_lua_with_opts(OPT_TEST_SRC, 64 * 1024 * 1024, &cfg);
+    assert_eq!(as_number(r), opt_test_expected());
+}
+
+#[test]
+fn test_opt_all_closures() {
+    // Exercises closures under full optimization.
+    let (r, _) = run_lua_with_opts(r#"
+        local function make_adder(x)
+            return function(y) return x + y end
+        end
+        local add5 = make_adder(5)
+        local add10 = make_adder(10)
+        return add5(3) + add10(7)
+    "#, 64 * 1024 * 1024, &dynir::opt::OptConfig::all());
+    assert_eq!(as_number(r), 25.0);
+}
+
+#[test]
+fn test_opt_all_recursive() {
+    // Exercises recursive calls under full optimization.
+    let (r, _) = run_lua_with_opts(r#"
+        local function fib(n)
+            if n < 2 then return n end
+            return fib(n - 1) + fib(n - 2)
+        end
+        return fib(15)
+    "#, 64 * 1024 * 1024, &dynir::opt::OptConfig::all());
+    assert_eq!(as_number(r), 610.0);
+}
+
+#[test]
+fn test_opt_none_closures() {
+    // Same closure test with NO optimization.
+    let (r, _) = run_lua_with_opts(r#"
+        local function make_adder(x)
+            return function(y) return x + y end
+        end
+        local add5 = make_adder(5)
+        local add10 = make_adder(10)
+        return add5(3) + add10(7)
+    "#, 64 * 1024 * 1024, &dynir::opt::OptConfig::none());
+    assert_eq!(as_number(r), 25.0);
+}
+
+#[test]
+fn test_opt_none_recursive() {
+    // Same recursive test with NO optimization.
+    let (r, _) = run_lua_with_opts(r#"
+        local function fib(n)
+            if n < 2 then return n end
+            return fib(n - 1) + fib(n - 2)
+        end
+        return fib(15)
+    "#, 64 * 1024 * 1024, &dynir::opt::OptConfig::none());
+    assert_eq!(as_number(r), 610.0);
 }

@@ -1390,25 +1390,73 @@ fn reorder_blocks_with_order(func: &mut Function, order: &[usize]) {
     }
 }
 
-// ─── Combined Optimizer ──────────────────────────────────────────
+// ─── Configuration & Combined Optimizer ─────────────────────────
 
-/// Run all optimization passes in sequence.
+/// Controls which optimization passes are enabled.
+#[derive(Debug, Clone)]
+pub struct OptConfig {
+    pub mem2reg: bool,
+    pub constant_fold: bool,
+    pub gvn: bool,
+    pub licm: bool,
+    pub dce: bool,
+}
+
+impl OptConfig {
+    /// All passes enabled.
+    pub fn all() -> Self {
+        Self {
+            mem2reg: true,
+            constant_fold: true,
+            gvn: true,
+            licm: true,
+            dce: true,
+        }
+    }
+
+    /// All passes disabled.
+    pub fn none() -> Self {
+        Self {
+            mem2reg: false,
+            constant_fold: false,
+            gvn: false,
+            licm: false,
+            dce: false,
+        }
+    }
+}
+
+impl Default for OptConfig {
+    fn default() -> Self {
+        Self::all()
+    }
+}
+
+/// Run optimization passes according to `config`.
+pub fn optimize_with(func: &mut Function, config: &OptConfig) {
+    if config.mem2reg {
+        mem2reg(func);
+        reorder_blocks_rpo(func);
+    }
+
+    if config.constant_fold {
+        constant_fold(func);
+    }
+
+    if config.gvn {
+        gvn(func);
+    }
+
+    if config.licm {
+        licm(func);
+    }
+
+    if config.dce {
+        dce(func);
+    }
+}
+
+/// Run all optimization passes.
 pub fn optimize(func: &mut Function) {
-    // Round 1: mem2reg promotes stack slots to SSA
-    mem2reg(func);
-
-    // Round 2: reorder blocks for lowerer compatibility
-    reorder_blocks_rpo(func);
-
-    // Round 3: constant folding
-    constant_fold(func);
-
-    // Round 4: GVN eliminates redundant computations
-    gvn(func);
-
-    // Round 5: LICM hoists invariant code out of loops
-    licm(func);
-
-    // Round 6: final DCE cleanup
-    dce(func);
+    optimize_with(func, &OptConfig::all());
 }
