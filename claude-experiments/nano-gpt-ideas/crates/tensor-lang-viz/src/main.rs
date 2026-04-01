@@ -392,6 +392,8 @@ fn bezier(p0: (f32, f32), p1: (f32, f32), p2: (f32, f32), p3: (f32, f32), t: f32
      u*u*u*p0.1 + 3.0*u*u*t*p1.1 + 3.0*u*t*t*p2.1 + t*t*t*p3.1)
 }
 
+/// Render a heatmap that fits within the bounding box (px,py,pw,ph)
+/// while preserving the tensor's actual aspect ratio.
 fn render_mini_heatmap(
     vertices: &mut Vec<ColorVertex>,
     val: &ndarray::ArrayD<f32>,
@@ -407,20 +409,36 @@ fn render_mini_heatmap(
 
     if shape.len() >= 2 {
         let (rows, cols, data) = collapse_to_2d(val);
-        let max_r = rows.min(32);
-        let max_c = cols.min(64);
-        let cell_w = pw / max_c as f32;
-        let cell_h = ph / max_r as f32;
+        let max_r = rows.min(64);
+        let max_c = cols.min(128);
+        if max_r == 0 || max_c == 0 { return; }
+
+        // Fit within bounding box preserving aspect ratio
+        let aspect = max_c as f32 / max_r as f32;
+        let (draw_w, draw_h) = if pw / ph > aspect {
+            // Box is wider than tensor — constrain by height
+            (ph * aspect, ph)
+        } else {
+            // Box is taller than tensor — constrain by width
+            (pw, pw / aspect)
+        };
+        // Center within the bounding box
+        let draw_x = px + (pw - draw_w) * 0.5;
+        let draw_y = py + (ph - draw_h) * 0.5;
+
+        let cell_w = draw_w / max_c as f32;
+        let cell_h = draw_h / max_r as f32;
         for r in 0..max_r {
             for c in 0..max_c {
                 let v = data[r * cols + c];
                 let t = (v - fmin) / frange;
-                quad_px(vertices, px + c as f32 * cell_w, py + r as f32 * cell_h,
+                quad_px(vertices, draw_x + c as f32 * cell_w, draw_y + r as f32 * cell_h,
                     cell_w, cell_h, win_w, win_h, viridis(t));
             }
         }
     } else {
-        let n = flat.len().min(64);
+        // 1D: render as a single-row bar
+        let n = flat.len().min(128);
         let bar_w = pw / n as f32;
         for i in 0..n {
             let t = (flat[i] - fmin) / frange;
@@ -745,23 +763,30 @@ impl App {
                         collapse_to_2d_slice(val, 0)
                     };
 
-                    if !data.is_empty() {
+                    if !data.is_empty() && (rows > 1 || cols > 1) {
                         let fmin = data.iter().copied().fold(f32::MAX, f32::min);
                         let fmax = data.iter().copied().fold(f32::MIN, f32::max);
                         let frange = (fmax - fmin).max(0.001);
 
-                        if rows > 1 || cols > 1 {
-                            let max_r = rows.min(32);
-                            let max_c = cols.min(64);
-                            let cw = hw / max_c as f32;
-                            let ch = hh / max_r as f32;
-                            for r in 0..max_r {
-                                for c in 0..max_c {
-                                    let v = data[r * cols + c];
-                                    let t = (v - fmin) / frange;
-                                    quad_px(vertices, hx + c as f32 * cw, hy + r as f32 * ch,
-                                        cw, ch, win_w, win_h, viridis(t));
-                                }
+                        let max_r = rows.min(64);
+                        let max_c = cols.min(128);
+                        // Fit with correct aspect ratio
+                        let aspect = max_c as f32 / max_r as f32;
+                        let (dw, dh) = if hw / hh > aspect {
+                            (hh * aspect, hh)
+                        } else {
+                            (hw, hw / aspect)
+                        };
+                        let dx = hx + (hw - dw) * 0.5;
+                        let dy = hy + (hh - dh) * 0.5;
+                        let cw = dw / max_c as f32;
+                        let ch = dh / max_r as f32;
+                        for r in 0..max_r {
+                            for c in 0..max_c {
+                                let v = data[r * cols + c];
+                                let t = (v - fmin) / frange;
+                                quad_px(vertices, dx + c as f32 * cw, dy + r as f32 * ch,
+                                    cw, ch, win_w, win_h, viridis(t));
                             }
                         }
                     }

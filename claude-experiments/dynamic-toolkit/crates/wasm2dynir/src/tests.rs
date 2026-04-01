@@ -1,6 +1,7 @@
 use crate::{translate_wasm, translate_wasm_module};
 use dynir::interp::*;
 use dynir::ir::Module;
+use dynir::opt::{self, OptConfig};
 use dynir::verify::verify;
 use dynir::NoGcRoots;
 use dynvalue::NanBox;
