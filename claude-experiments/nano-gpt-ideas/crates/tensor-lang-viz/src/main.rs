@@ -505,6 +505,8 @@ struct App {
     dag_selected: Option<usize>,
     start_time: std::time::Instant,
     wall_hide_constants: bool,
+    wall_zoom: f32,
+    wall_offset: (f32, f32),
 }
 
 impl App {
@@ -535,6 +537,8 @@ impl App {
             dag_selected: None,
             start_time: std::time::Instant::now(),
             wall_hide_constants: true,
+            wall_zoom: 1.0,
+            wall_offset: (0.0, 0.0),
         };
         // Generate initial example
         app.new_example();
@@ -665,9 +669,11 @@ impl App {
 
         let cols = best_cols;
         let rows = (n_nodes + cols - 1) / cols;
-        let cell_w = avail_w / cols as f32;
-        let cell_h = avail_h / rows as f32;
-        let hm_size = (cell_w - 6.0).min(cell_h - 22.0).max(4.0);
+        let z = self.wall_zoom;
+        let (wox, woy) = self.wall_offset;
+        let cell_w = avail_w / cols as f32 * z;
+        let cell_h = avail_h / rows as f32 * z;
+        let hm_size = (cell_w - 6.0 * z).min(cell_h - 22.0 * z).max(4.0);
 
         // Title
         texts.push(TextEntry {
@@ -698,8 +704,11 @@ impl App {
         for (vi, &idx) in visible_indices.iter().enumerate() {
             let col = vi % cols;
             let row = vi / cols;
-            let cx = margin + col as f32 * cell_w;
-            let cy = header + row as f32 * cell_h;
+            let cx = margin + col as f32 * cell_w + wox;
+            let cy = header + row as f32 * cell_h + woy;
+
+            // Skip if off-screen
+            if cx + cell_w < 0.0 || cx > win_w || cy + cell_h < 0.0 || cy > win_h { continue; }
 
             // Cell background
             let gn = &graph.nodes[idx];
@@ -737,18 +746,18 @@ impl App {
                 tensor_lang_graph::Op::Pad { .. } => "Pad".into(),
                 tensor_lang_graph::Op::Shrink { .. } => "Shr".into(),
             };
-            let label_size = (cell_h * 0.12).clamp(6.0, 14.0);
+            let label_size = (cell_h * 0.12).clamp(6.0, 24.0);
             texts.push(TextEntry {
                 text: format!("{} {}", idx, op_short),
-                x: cx + 3.0, y: cy + 2.0, size: label_size, color: td,
+                x: cx + 3.0 * z, y: cy + 2.0 * z, size: label_size, color: td,
             });
 
             // Heatmap with slice scrubbing
             if idx < self.all_node_values.len() {
-                let hx = cx + 3.0;
-                let hy = cy + label_size + 4.0;
-                let hw = hm_size.min(cell_w - 6.0);
-                let hh = hm_size.min(cell_h - label_size - 6.0);
+                let hx = cx + 3.0 * z;
+                let hy = cy + label_size + 4.0 * z;
+                let hw = hm_size.min(cell_w - 6.0 * z);
+                let hh = hm_size.min(cell_h - label_size - 6.0 * z);
                 if hw > 2.0 && hh > 2.0 {
                     let val = &self.all_node_values[idx];
                     let (mx, my) = self.mouse_pos;
@@ -1978,20 +1987,32 @@ impl ApplicationHandler for App {
             WindowEvent::CursorMoved { position, .. } => {
                 let new_pos = (position.x as f32, position.y as f32);
                 if self.dag_dragging {
-                    self.dag_offset.0 += new_pos.0 - self.mouse_pos.0;
-                    self.dag_offset.1 += new_pos.1 - self.mouse_pos.1;
+                    let dx = new_pos.0 - self.mouse_pos.0;
+                    let dy = new_pos.1 - self.mouse_pos.1;
+                    if self.view_mode == ViewMode::DAG {
+                        self.dag_offset.0 += dx;
+                        self.dag_offset.1 += dy;
+                    } else if self.view_mode == ViewMode::Wall {
+                        self.wall_offset.0 += dx;
+                        self.wall_offset.1 += dy;
+                    }
                 }
                 self.mouse_pos = new_pos;
             }
             WindowEvent::PinchGesture { delta, .. } => {
+                let (mx, my) = self.mouse_pos;
                 if self.view_mode == ViewMode::DAG {
                     let old_zoom = self.dag_zoom;
                     self.dag_zoom = (self.dag_zoom * (1.0 + delta as f32)).clamp(0.15, 3.0);
-                    // Zoom toward mouse position
-                    let (mx, my) = self.mouse_pos;
                     let scale = self.dag_zoom / old_zoom;
                     self.dag_offset.0 = mx - (mx - self.dag_offset.0) * scale;
                     self.dag_offset.1 = my - (my - self.dag_offset.1) * scale;
+                } else if self.view_mode == ViewMode::Wall {
+                    let old_zoom = self.wall_zoom;
+                    self.wall_zoom = (self.wall_zoom * (1.0 + delta as f32)).clamp(0.3, 5.0);
+                    let scale = self.wall_zoom / old_zoom;
+                    self.wall_offset.0 = mx - (mx - self.wall_offset.0) * scale;
+                    self.wall_offset.1 = my - (my - self.wall_offset.1) * scale;
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
@@ -2036,6 +2057,8 @@ impl ApplicationHandler for App {
                         self.dag_dragging = true;
                         self.dag_selected = None;
                     }
+                } else if self.view_mode == ViewMode::Wall {
+                    self.dag_dragging = true;
                 } else if self.view_mode == ViewMode::Graph {
                     // Hit test against node list
                     let (mx, my) = self.mouse_pos;

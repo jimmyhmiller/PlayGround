@@ -851,6 +851,73 @@ fn eliminate_unreachable_blocks(func: &mut Function) {
     }
 }
 
+// ─── Dead Block Parameter Elimination ───────────────────────────
+
+/// Remove unused block parameters and their corresponding arguments from
+/// predecessor branches. This is especially effective for wasm-translated IR,
+/// where the translator passes all locals as block params even when unused.
+pub fn dead_block_param_elim(func: &mut Function) {
+    loop {
+        let use_counts = compute_use_counts(func);
+        // For each block, compute which param indices are dead (unused).
+        // Skip bb0 (entry) — its params are function arguments.
+        let mut dead_indices: Vec<Vec<usize>> = vec![vec![]; func.blocks.len()];
+        let mut any_dead = false;
+
+        for (block_idx, block) in func.blocks.iter().enumerate() {
+            if block_idx == 0 {
+                continue;
+            }
+            for (param_idx, (val, _ty)) in block.params.iter().enumerate() {
+                if use_counts[val.index()] == 0 {
+                    dead_indices[block_idx].push(param_idx);
+                    any_dead = true;
+                }
+            }
+        }
+
+        if !any_dead {
+            break;
+        }
+
+        // Remove dead params from each block.
+        for (block_idx, dead) in dead_indices.iter().enumerate() {
+            if dead.is_empty() {
+                continue;
+            }
+            let dead_set: HashSet<usize> = dead.iter().copied().collect();
+            let block = &mut func.blocks[block_idx];
+            let mut i = 0;
+            block.params.retain(|_| {
+                let keep = !dead_set.contains(&i);
+                i += 1;
+                keep
+            });
+        }
+
+        // Remove corresponding args from all predecessor terminators.
+        // We need to collect which blocks have dead params, then update
+        // terminators that target those blocks.
+        let dead_indices_ref = &dead_indices;
+        for block_idx in 0..func.blocks.len() {
+            func.blocks[block_idx]
+                .terminator
+                .for_each_successor_args_mut(|target, args| {
+                    let dead = &dead_indices_ref[target.index()];
+                    if !dead.is_empty() {
+                        let dead_set: HashSet<usize> = dead.iter().copied().collect();
+                        let mut i = 0;
+                        args.retain(|_| {
+                            let keep = !dead_set.contains(&i);
+                            i += 1;
+                            keep
+                        });
+                    }
+                });
+        }
+    }
+}
+
 // ─── Dead Code Elimination ──────────────────────────────────────
 
 pub fn dce(func: &mut Function) {
@@ -1400,6 +1467,7 @@ pub struct OptConfig {
     pub gvn: bool,
     pub licm: bool,
     pub dce: bool,
+    pub dead_block_params: bool,
 }
 
 impl OptConfig {
@@ -1411,6 +1479,7 @@ impl OptConfig {
             gvn: true,
             licm: true,
             dce: true,
+            dead_block_params: true,
         }
     }
 
@@ -1422,6 +1491,7 @@ impl OptConfig {
             gvn: false,
             licm: false,
             dce: false,
+            dead_block_params: false,
         }
     }
 }
@@ -1449,6 +1519,10 @@ pub fn optimize_with(func: &mut Function, config: &OptConfig) {
 
     if config.licm {
         licm(func);
+    }
+
+    if config.dead_block_params {
+        dead_block_param_elim(func);
     }
 
     if config.dce {

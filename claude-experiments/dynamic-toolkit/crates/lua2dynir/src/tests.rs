@@ -2017,6 +2017,7 @@ fn test_opt_mem2reg_licm() {
 fn test_opt_mem2reg_constfold_gvn_dce() {
     let cfg = dynir::opt::OptConfig {
         mem2reg: true, constant_fold: true, gvn: true, dce: true, licm: false,
+        ..dynir::opt::OptConfig::all()
     };
     let (r, _) = run_lua_with_opts(OPT_TEST_SRC, 64 * 1024 * 1024, &cfg);
     assert_eq!(as_number(r), opt_test_expected());

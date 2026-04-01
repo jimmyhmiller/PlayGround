@@ -11,3 +11,8 @@ wasmparser = "0.227"
 dynvalue = { path = "../dynvalue" }
 dynlower = { path = "../dynlower" }
 wat = "1"
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "jit_opt"
+harness = false

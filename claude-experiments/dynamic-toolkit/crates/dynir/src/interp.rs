@@ -100,6 +100,13 @@ where
     }
     fn clear_frame(&self, _frame: usize) {}
     fn collect(&self) {}
+
+    /// NoGcRoots has no actual root storage, so report PreciseSlots to avoid
+    /// mapping all values to root slots. With ConservativeWords, sync_all_from_roots
+    /// would overwrite caller frame values with 0 after internal calls.
+    fn root_precision(&self) -> RootPrecision {
+        RootPrecision::PreciseSlots
+    }
 }
 
 // ─── ModuleInterpreter ─────────────────────────────────────────────

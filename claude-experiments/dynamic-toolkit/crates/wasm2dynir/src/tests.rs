@@ -480,3 +480,466 @@ fn fifty_nested_functions_jit() {
     assert_eq!(jit.call(entry, &[0]) as i32, 50);
     assert_eq!(jit.call(entry, &[100]) as i32, 150);
 }
+
+// ─── Optimized helpers ─────────────────────────────────────────────
+
+fn run_wasm_i32_opt(wat: &str, args: &[u64], config: &OptConfig) -> i32 {
+    let wasm = wat::parse_str(wat).expect("failed to parse WAT");
+    let (mut func, _imports) = translate_wasm(&wasm).expect("failed to translate");
+    opt::optimize_with(&mut func, config);
+    verify(&func).expect("IR verification failed after optimization");
+    let (module, entry) = Module::from_function(func);
+    let roots = NoGcRoots;
+    let interp = ModuleInterpreter::<NanBox, _>::new(&module, &roots);
+    match interp.run(entry, args).unwrap() {
+        InterpResult::Value(v) => v as i32,
+        other => panic!("expected Value, got {:?}", other),
+    }
+}
+
+fn run_wasm_module_opt_jit(wat: &str, args: &[u64], config: &OptConfig) -> i32 {
+    let wasm = wat::parse_str(wat).expect("failed to parse WAT");
+    let (mut module, entry) = translate_wasm_module(&wasm).expect("failed to translate");
+    for func in &mut module.functions {
+        opt::optimize_with(func, config);
+    }
+    verify_module(&module);
+    let jit = dynlower::JitModule::compile::<NanBox>(&module, &[]);
+    jit.call(entry, args) as i32
+}
+
+fn verify_module(module: &Module) {
+    for func in &module.functions {
+        verify(func).expect("IR verification failed after optimization");
+    }
+}
+
+// ─── Optimization tests: individual passes ─────────────────────────
+
+#[test]
+fn opt_constfold_arithmetic() {
+    // Constant expressions should be folded at compile time
+    let config = OptConfig {
+        constant_fold: true,
+        dce: true,
+        ..OptConfig::none()
+    };
+    let result = run_wasm_i32_opt(
+        r#"(module
+            (func (export "main") (result i32)
+                i32.const 6
+                i32.const 7
+                i32.mul))"#,
+        &[],
+        &config,
+    );
+    assert_eq!(result, 42);
+}
+
+#[test]
+fn opt_constfold_chain() {
+    let config = OptConfig {
+        constant_fold: true,
+        dce: true,
+        ..OptConfig::none()
+    };
+    // (3 + 4) * (10 - 4) = 7 * 6 = 42
+    let result = run_wasm_i32_opt(
+        r#"(module
+            (func (export "main") (result i32)
+                i32.const 3
+                i32.const 4
+                i32.add
+                i32.const 10
+                i32.const 4
+                i32.sub
+                i32.mul))"#,
+        &[],
+        &config,
+    );
+    assert_eq!(result, 42);
+}
+
+#[test]
+fn opt_gvn_redundant_add() {
+    // GVN should eliminate redundant computations
+    let config = OptConfig {
+        gvn: true,
+        dce: true,
+        ..OptConfig::none()
+    };
+    // Compute x+y twice, add the results — GVN can dedup x+y
+    let result = run_wasm_i32_opt(
+        r#"(module
+            (func (export "main") (param i32) (param i32) (result i32)
+                local.get 0
+                local.get 1
+                i32.add
+                local.get 0
+                local.get 1
+                i32.add
+                i32.add))"#,
+        &[10, 11],
+        &config,
+    );
+    assert_eq!(result, 42); // (10+11) + (10+11) = 42
+}
+
+#[test]
+fn opt_dce_unused_computation() {
+    let config = OptConfig {
+        dce: true,
+        ..OptConfig::none()
+    };
+    // The i32.mul result is dropped — DCE should clean it up
+    let result = run_wasm_i32_opt(
+        r#"(module
+            (func (export "main") (param i32) (param i32) (result i32)
+                local.get 0
+                local.get 1
+                i32.mul
+                drop
+                local.get 0
+                local.get 1
+                i32.add))"#,
+        &[20, 22],
+        &config,
+    );
+    assert_eq!(result, 42);
+}
+
+#[test]
+fn opt_all_fibonacci() {
+    // Full optimization pipeline on fibonacci
+    let config = OptConfig::all();
+    let wat = r#"(module
+        (func (export "fib") (param $n i32) (result i32)
+            (local $a i32)
+            (local $b i32)
+            (local $i i32)
+            (local $tmp i32)
+            i32.const 0
+            local.set $a
+            i32.const 1
+            local.set $b
+            i32.const 0
+            local.set $i
+            block $exit
+                loop $loop
+                    local.get $i
+                    local.get $n
+                    i32.ge_s
+                    br_if $exit
+                    local.get $a
+                    local.get $b
+                    i32.add
+                    local.set $tmp
+                    local.get $b
+                    local.set $a
+                    local.get $tmp
+                    local.set $b
+                    local.get $i
+                    i32.const 1
+                    i32.add
+                    local.set $i
+                    br $loop
+                end
+            end
+            local.get $a))"#;
+    assert_eq!(run_wasm_i32_opt(wat, &[0], &config), 0);
+    assert_eq!(run_wasm_i32_opt(wat, &[1], &config), 1);
+    assert_eq!(run_wasm_i32_opt(wat, &[10], &config), 55);
+    assert_eq!(run_wasm_i32_opt(wat, &[20], &config), 6765);
+}
+
+#[test]
+fn opt_all_factorial() {
+    let config = OptConfig::all();
+    let wat = r#"(module
+        (func (export "fact") (param $n i32) (result i32)
+            (local $result i32)
+            i32.const 1
+            local.set $result
+            block $exit
+                loop $loop
+                    local.get $n
+                    i32.const 1
+                    i32.le_s
+                    br_if $exit
+                    local.get $result
+                    local.get $n
+                    i32.mul
+                    local.set $result
+                    local.get $n
+                    i32.const 1
+                    i32.sub
+                    local.set $n
+                    br $loop
+                end
+            end
+            local.get $result))"#;
+    assert_eq!(run_wasm_i32_opt(wat, &[1], &config), 1);
+    assert_eq!(run_wasm_i32_opt(wat, &[5], &config), 120);
+    assert_eq!(run_wasm_i32_opt(wat, &[10], &config), 3628800);
+}
+
+#[test]
+fn opt_all_if_else() {
+    let config = OptConfig::all();
+    let wat = r#"(module
+        (func (export "max") (param i32) (param i32) (result i32)
+            local.get 0
+            local.get 1
+            i32.gt_s
+            if (result i32)
+                local.get 0
+            else
+                local.get 1
+            end))"#;
+    assert_eq!(run_wasm_i32_opt(wat, &[10, 20], &config), 20);
+    assert_eq!(run_wasm_i32_opt(wat, &[30, 20], &config), 30);
+}
+
+#[test]
+fn opt_all_sum_loop() {
+    let config = OptConfig::all();
+    let wat = r#"(module
+        (func (export "sum") (param $n i32) (result i32)
+            (local $i i32)
+            (local $acc i32)
+            i32.const 0
+            local.set $i
+            i32.const 0
+            local.set $acc
+            block $exit
+                loop $loop
+                    local.get $i
+                    local.get $n
+                    i32.ge_s
+                    br_if $exit
+                    local.get $acc
+                    local.get $i
+                    i32.add
+                    local.set $acc
+                    local.get $i
+                    i32.const 1
+                    i32.add
+                    local.set $i
+                    br $loop
+                end
+            end
+            local.get $acc))"#;
+    assert_eq!(run_wasm_i32_opt(wat, &[10], &config), 45);
+    assert_eq!(run_wasm_i32_opt(wat, &[100], &config), 4950);
+}
+
+// ─── Optimized module tests ────────────────────────────────────────
+
+#[test]
+fn opt_module_recursive_factorial() {
+    let config = OptConfig::all();
+    let wat = r#"(module
+        (func $fact (param $n i32) (result i32)
+            local.get $n
+            i32.const 1
+            i32.le_s
+            if (result i32)
+                i32.const 1
+            else
+                local.get $n
+                local.get $n
+                i32.const 1
+                i32.sub
+                call $fact
+                i32.mul
+            end)
+        (func (export "main") (param i32) (result i32)
+            local.get 0
+            call $fact))"#;
+    assert_eq!(run_wasm_module_opt_jit(wat, &[1], &config), 1);
+    assert_eq!(run_wasm_module_opt_jit(wat, &[5], &config), 120);
+    assert_eq!(run_wasm_module_opt_jit(wat, &[10], &config), 3628800);
+}
+
+#[test]
+fn opt_module_two_functions() {
+    let config = OptConfig::all();
+    let wat = r#"(module
+        (func $double (param i32) (result i32)
+            local.get 0
+            i32.const 2
+            i32.mul)
+        (func (export "main") (param i32) (result i32)
+            local.get 0
+            call $double))"#;
+    assert_eq!(run_wasm_module_opt_jit(wat, &[21], &config), 42);
+}
+
+// ─── Optimized JIT tests ──────────────────────────────────────────
+
+#[test]
+fn opt_jit_fibonacci() {
+    let config = OptConfig::all();
+    let wat = r#"(module
+        (func (export "fib") (param $n i32) (result i32)
+            (local $a i32)
+            (local $b i32)
+            (local $i i32)
+            (local $tmp i32)
+            i32.const 0
+            local.set $a
+            i32.const 1
+            local.set $b
+            i32.const 0
+            local.set $i
+            block $exit
+                loop $loop
+                    local.get $i
+                    local.get $n
+                    i32.ge_s
+                    br_if $exit
+                    local.get $a
+                    local.get $b
+                    i32.add
+                    local.set $tmp
+                    local.get $b
+                    local.set $a
+                    local.get $tmp
+                    local.set $b
+                    local.get $i
+                    i32.const 1
+                    i32.add
+                    local.set $i
+                    br $loop
+                end
+            end
+            local.get $a))"#;
+    let wasm = wat::parse_str(wat).expect("failed to parse WAT");
+    let (mut func, _imports) = translate_wasm(&wasm).expect("failed to translate");
+    opt::optimize_with(&mut func, &config);
+    verify(&func).expect("verification failed after opt");
+    let (module, entry) = Module::from_function(func);
+    let jit = dynlower::JitModule::compile::<NanBox>(&module, &[]);
+    assert_eq!(jit.call(entry, &[0]) as i32, 0);
+    assert_eq!(jit.call(entry, &[1]) as i32, 1);
+    assert_eq!(jit.call(entry, &[10]) as i32, 55);
+    assert_eq!(jit.call(entry, &[20]) as i32, 6765);
+}
+
+#[test]
+fn opt_jit_factorial() {
+    let config = OptConfig::all();
+    let wat = r#"(module
+        (func (export "fact") (param $n i32) (result i32)
+            (local $result i32)
+            i32.const 1
+            local.set $result
+            block $exit
+                loop $loop
+                    local.get $n
+                    i32.const 1
+                    i32.le_s
+                    br_if $exit
+                    local.get $result
+                    local.get $n
+                    i32.mul
+                    local.set $result
+                    local.get $n
+                    i32.const 1
+                    i32.sub
+                    local.set $n
+                    br $loop
+                end
+            end
+            local.get $result))"#;
+    let wasm = wat::parse_str(wat).expect("failed to parse WAT");
+    let (mut func, _imports) = translate_wasm(&wasm).expect("failed to translate");
+    opt::optimize_with(&mut func, &config);
+    verify(&func).expect("verification failed after opt");
+    let (module, entry) = Module::from_function(func);
+    let jit = dynlower::JitModule::compile::<NanBox>(&module, &[]);
+    assert_eq!(jit.call(entry, &[1]) as i32, 1);
+    assert_eq!(jit.call(entry, &[5]) as i32, 120);
+    assert_eq!(jit.call(entry, &[10]) as i32, 3628800);
+}
+
+#[test]
+fn opt_jit_module_recursive() {
+    let config = OptConfig::all();
+    let wat = r#"(module
+        (func $fact (param $n i32) (result i32)
+            local.get $n
+            i32.const 1
+            i32.le_s
+            if (result i32)
+                i32.const 1
+            else
+                local.get $n
+                local.get $n
+                i32.const 1
+                i32.sub
+                call $fact
+                i32.mul
+            end)
+        (func (export "main") (param i32) (result i32)
+            local.get 0
+            call $fact))"#;
+    let wasm = wat::parse_str(wat).expect("failed to parse WAT");
+    let (mut module, entry) = translate_wasm_module(&wasm).expect("failed to translate");
+    for func in &mut module.functions {
+        opt::optimize_with(func, &config);
+    }
+    verify_module(&module);
+    let jit = dynlower::JitModule::compile::<NanBox>(&module, &[]);
+    assert_eq!(jit.call(entry, &[1]) as i32, 1);
+    assert_eq!(jit.call(entry, &[5]) as i32, 120);
+    assert_eq!(jit.call(entry, &[10]) as i32, 3628800);
+}
+
+// ─── Print optimized IR for inspection ─────────────────────────────
+
+#[test]
+fn print_optimized_ir() {
+    let wasm = wat::parse_str(
+        r#"(module
+            (func (export "fib") (param $n i32) (result i32)
+                (local $a i32)
+                (local $b i32)
+                (local $i i32)
+                (local $tmp i32)
+                i32.const 0
+                local.set $a
+                i32.const 1
+                local.set $b
+                i32.const 0
+                local.set $i
+                block $exit
+                    loop $loop
+                        local.get $i
+                        local.get $n
+                        i32.ge_s
+                        br_if $exit
+                        local.get $a
+                        local.get $b
+                        i32.add
+                        local.set $tmp
+                        local.get $b
+                        local.set $a
+                        local.get $tmp
+                        local.set $b
+                        local.get $i
+                        i32.const 1
+                        i32.add
+                        local.set $i
+                        br $loop
+                    end
+                end
+                local.get $a))"#,
+    )
+    .unwrap();
+    let (mut func, _) = translate_wasm(&wasm).unwrap();
+    println!("=== fib IR (before opt) ===\n{}", func);
+    opt::optimize(&mut func);
+    verify(&func).expect("verification failed after opt");
+    println!("=== fib IR (after opt) ===\n{}", func);
+}
