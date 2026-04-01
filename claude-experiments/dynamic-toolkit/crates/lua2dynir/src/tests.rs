@@ -2076,3 +2076,4 @@ fn test_opt_none_recursive() {
     "#, 64 * 1024 * 1024, &dynir::opt::OptConfig::none());
     assert_eq!(as_number(r), 610.0);
 }
+

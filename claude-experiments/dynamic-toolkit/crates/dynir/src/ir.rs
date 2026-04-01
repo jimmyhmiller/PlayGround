@@ -667,6 +667,59 @@ impl Terminator {
         }
     }
 
+    /// Call `f` for each (target_block, args) pair in this terminator (immutable).
+    pub fn for_each_successor_args(&self, mut f: impl FnMut(BlockId, &[Value])) {
+        match self {
+            Terminator::Ret(_)
+            | Terminator::RetVoid
+            | Terminator::ResumeSlice { .. }
+            | Terminator::AbortToPrompt { .. }
+            | Terminator::Unreachable => {}
+            Terminator::Jump(target, args) => f(*target, args),
+            Terminator::BrIf {
+                then_block,
+                then_args,
+                else_block,
+                else_args,
+                ..
+            } => {
+                f(*then_block, then_args);
+                f(*else_block, else_args);
+            }
+            Terminator::Switch {
+                cases,
+                default_block,
+                default_args,
+                ..
+            } => {
+                for (_, block, args) in cases {
+                    f(*block, args);
+                }
+                f(*default_block, default_args);
+            }
+            Terminator::Invoke {
+                normal,
+                normal_args,
+                exception,
+                exception_args,
+                ..
+            } => {
+                f(*normal, normal_args);
+                f(*exception, exception_args);
+            }
+            Terminator::InvokeIndirect {
+                normal,
+                normal_args,
+                exception,
+                exception_args,
+                ..
+            } => {
+                f(*normal, normal_args);
+                f(*exception, exception_args);
+            }
+        }
+    }
+
     pub fn successors(&self) -> Vec<BlockId> {
         match self {
             Terminator::Ret(_)

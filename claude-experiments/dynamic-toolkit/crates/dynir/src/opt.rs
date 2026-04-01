@@ -853,16 +853,38 @@ fn eliminate_unreachable_blocks(func: &mut Function) {
 
 // ─── Dead Block Parameter Elimination ───────────────────────────
 
-/// Remove unused block parameters and their corresponding arguments from
-/// predecessor branches. This is especially effective for wasm-translated IR,
-/// where the translator passes all locals as block params even when unused.
+/// Remove unnecessary block parameters:
+/// 1. **Dead params**: unused by any instruction in the block.
+/// 2. **Trivial params**: all predecessors pass the same value, so the param
+///    can be replaced with that value directly (like trivial phi elimination).
+///
+/// This is especially effective for wasm-translated IR, where the translator
+/// passes all locals as block params even when unchanged or unused.
 pub fn dead_block_param_elim(func: &mut Function) {
     loop {
         let use_counts = compute_use_counts(func);
-        // For each block, compute which param indices are dead (unused).
-        // Skip bb0 (entry) — its params are function arguments.
-        let mut dead_indices: Vec<Vec<usize>> = vec![vec![]; func.blocks.len()];
-        let mut any_dead = false;
+
+        // Collect incoming args for each (block, param_idx) from all predecessors.
+        let n = func.blocks.len();
+        let mut incoming: Vec<Vec<Vec<Value>>> = vec![vec![]; n];
+        for block_idx in 0..n {
+            let num_params = func.blocks[block_idx].params.len();
+            incoming[block_idx] = vec![vec![]; num_params];
+        }
+        for block in &func.blocks {
+            block.terminator.for_each_successor_args(|target, args| {
+                for (param_idx, &val) in args.iter().enumerate() {
+                    incoming[target.index()][param_idx].push(val);
+                }
+            });
+        }
+
+        // For each block (skip entry), find params to eliminate.
+        // An index is "dead" if unused, or "trivial" if all incoming values are identical.
+        let mut elim_indices: Vec<Vec<usize>> = vec![vec![]; n];
+        // For trivial params, record the replacement: param_value -> incoming_value
+        let mut replacements: Vec<(Value, Value)> = Vec::new();
+        let mut any_elim = false;
 
         for (block_idx, block) in func.blocks.iter().enumerate() {
             if block_idx == 0 {
@@ -870,45 +892,70 @@ pub fn dead_block_param_elim(func: &mut Function) {
             }
             for (param_idx, (val, _ty)) in block.params.iter().enumerate() {
                 if use_counts[val.index()] == 0 {
-                    dead_indices[block_idx].push(param_idx);
-                    any_dead = true;
+                    // Dead — unused
+                    elim_indices[block_idx].push(param_idx);
+                    any_elim = true;
+                } else {
+                    // Check if trivial — all incoming values are the same
+                    let inc = &incoming[block_idx][param_idx];
+                    if !inc.is_empty() {
+                        // A param is trivial if all predecessors pass the same value
+                        // AND that value is not the param itself (self-referencing
+                        // loop phis like `jump bb1(v8)` where v8 is bb1's param
+                        // are trivial only if there's another predecessor that
+                        // provides a concrete value and they all agree).
+                        let non_self: Vec<Value> = inc.iter()
+                            .copied()
+                            .filter(|&v| v != *val)
+                            .collect();
+                        if !non_self.is_empty()
+                            && non_self.iter().all(|&v| v == non_self[0])
+                        {
+                            elim_indices[block_idx].push(param_idx);
+                            replacements.push((*val, non_self[0]));
+                            any_elim = true;
+                        }
+                    }
                 }
             }
         }
 
-        if !any_dead {
+        if !any_elim {
             break;
         }
 
-        // Remove dead params from each block.
-        for (block_idx, dead) in dead_indices.iter().enumerate() {
-            if dead.is_empty() {
+        // Apply trivial param replacements (replace uses of param with incoming value).
+        for (old, new_val) in &replacements {
+            replace_all_uses(func, *old, *new_val);
+        }
+
+        // Remove eliminated params from each block.
+        for (block_idx, elim) in elim_indices.iter().enumerate() {
+            if elim.is_empty() {
                 continue;
             }
-            let dead_set: HashSet<usize> = dead.iter().copied().collect();
+            let elim_set: HashSet<usize> = elim.iter().copied().collect();
             let block = &mut func.blocks[block_idx];
             let mut i = 0;
             block.params.retain(|_| {
-                let keep = !dead_set.contains(&i);
+                let keep = !elim_set.contains(&i);
                 i += 1;
                 keep
             });
         }
 
         // Remove corresponding args from all predecessor terminators.
-        // We need to collect which blocks have dead params, then update
-        // terminators that target those blocks.
-        let dead_indices_ref = &dead_indices;
+        let elim_indices_ref = &elim_indices;
         for block_idx in 0..func.blocks.len() {
             func.blocks[block_idx]
                 .terminator
                 .for_each_successor_args_mut(|target, args| {
-                    let dead = &dead_indices_ref[target.index()];
-                    if !dead.is_empty() {
-                        let dead_set: HashSet<usize> = dead.iter().copied().collect();
+                    let elim = &elim_indices_ref[target.index()];
+                    if !elim.is_empty() {
+                        let elim_set: HashSet<usize> = elim.iter().copied().collect();
                         let mut i = 0;
                         args.retain(|_| {
-                            let keep = !dead_set.contains(&i);
+                            let keep = !elim_set.contains(&i);
                             i += 1;
                             keep
                         });
