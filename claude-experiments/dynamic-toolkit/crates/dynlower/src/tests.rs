@@ -1,6 +1,6 @@
 use crate::{
-    FrameReifyKind, JitFunction, JitModule, JitOutcome, SafepointHandlerPayloadKind, call_jit,
-    call_jit_with_reg_limit,
+    DefaultJitConfig, FrameReifyKind, JitFunction, JitModule, JitOutcome,
+    SafepointHandlerPayloadKind, call_jit, call_jit_with_reg_limit,
 };
 use crate::backend::{Arm64Backend, X64Backend};
 use dynexec::{
@@ -2295,4 +2295,131 @@ fn jit_module_bench_fifty_nested() {
         "  speedup:     {:.1}x",
         interp_time.as_secs_f64() / jit_time.as_secs_f64()
     );
+}
+
+// ─── Linear Scan Register Allocator Tests ─────────────────────────
+
+fn run_jit_linear_scan(func: &dynir::Function, args: &[u64]) -> u64 {
+    let jit = JitFunction::compile_with_regalloc::<
+        DefaultJitConfig<NanBox>,
+        crate::backend::Arm64Backend,
+        crate::regalloc::LinearScanAllocator,
+    >(func, &[], None);
+    unsafe { call_jit(jit.as_ptr(), args) }
+}
+
+#[test]
+fn linear_scan_return_const() {
+    let mut b = FunctionBuilder::new("const", &[], Some(Type::I64));
+    let entry = b.entry_block();
+    let _ = entry;
+    let v = b.iconst(Type::I64, 42);
+    b.ret(v);
+    let func = b.build();
+    assert_eq!(run_jit_linear_scan(&func, &[]), 42);
+}
+
+#[test]
+fn linear_scan_add() {
+    let mut b = FunctionBuilder::new("add", &[Type::I64, Type::I64], Some(Type::I64));
+    let entry = b.entry_block();
+    let a = b.block_param(entry, 0);
+    let bb = b.block_param(entry, 1);
+    let result = b.add(a, bb);
+    b.ret(result);
+    let func = b.build();
+    assert_eq!(run_jit_linear_scan(&func, &[10, 32]), 42);
+}
+
+#[test]
+fn linear_scan_if_else() {
+    let mut b = FunctionBuilder::new("max", &[Type::I64, Type::I64], Some(Type::I64));
+    let entry = b.entry_block();
+    let a = b.block_param(entry, 0);
+    let bb = b.block_param(entry, 1);
+
+    let then_bb = b.create_block(&[]);
+    let else_bb = b.create_block(&[]);
+    let merge = b.create_block(&[Type::I64]);
+
+    let cond = b.icmp(CmpOp::Sgt, a, bb);
+    b.br_if(cond, then_bb, &[], else_bb, &[]);
+
+    b.switch_to_block(then_bb);
+    b.jump(merge, &[a]);
+
+    b.switch_to_block(else_bb);
+    b.jump(merge, &[bb]);
+
+    b.switch_to_block(merge);
+    let result = b.block_param(merge, 0);
+    b.ret(result);
+
+    let func = b.build();
+    assert_eq!(run_jit_linear_scan(&func, &[10, 20]), 20);
+    assert_eq!(run_jit_linear_scan(&func, &[30, 20]), 30);
+}
+
+#[test]
+fn linear_scan_loop_sum() {
+    let mut b = FunctionBuilder::new("sum", &[Type::I64], Some(Type::I64));
+    let entry = b.entry_block();
+    let n = b.block_param(entry, 0);
+
+    let loop_bb = b.create_block(&[Type::I64, Type::I64]); // (i, acc)
+    let exit = b.create_block(&[Type::I64]);
+
+    let zero = b.iconst(Type::I64, 0);
+    b.jump(loop_bb, &[zero, zero]);
+
+    b.switch_to_block(loop_bb);
+    let i = b.block_param(loop_bb, 0);
+    let acc = b.block_param(loop_bb, 1);
+    let cond = b.icmp(CmpOp::Slt, i, n);
+    let new_acc = b.add(acc, i);
+    let one = b.iconst(Type::I64, 1);
+    let i_plus = b.add(i, one);
+    b.br_if(cond, loop_bb, &[i_plus, new_acc], exit, &[acc]);
+
+    b.switch_to_block(exit);
+    let result = b.block_param(exit, 0);
+    b.ret(result);
+
+    let func = b.build();
+    assert_eq!(run_jit_linear_scan(&func, &[0]), 0);
+    assert_eq!(run_jit_linear_scan(&func, &[10]), 45);
+    assert_eq!(run_jit_linear_scan(&func, &[100]), 4950);
+}
+
+#[test]
+fn linear_scan_fib_loop() {
+    let mut b = FunctionBuilder::new("fib", &[Type::I64], Some(Type::I64));
+    let entry = b.entry_block();
+    let n = b.block_param(entry, 0);
+
+    let loop_bb = b.create_block(&[Type::I64, Type::I64, Type::I64]); // (i, a, b)
+    let exit = b.create_block(&[Type::I64]);
+
+    let zero = b.iconst(Type::I64, 0);
+    let one = b.iconst(Type::I64, 1);
+    b.jump(loop_bb, &[zero, zero, one]);
+
+    b.switch_to_block(loop_bb);
+    let i = b.block_param(loop_bb, 0);
+    let a = b.block_param(loop_bb, 1);
+    let fib_b = b.block_param(loop_bb, 2);
+    let cond = b.icmp(CmpOp::Slt, i, n);
+    let next = b.add(a, fib_b);
+    let i_plus = b.add(i, one);
+    b.br_if(cond, loop_bb, &[i_plus, fib_b, next], exit, &[a]);
+
+    b.switch_to_block(exit);
+    let result = b.block_param(exit, 0);
+    b.ret(result);
+
+    let func = b.build();
+    assert_eq!(run_jit_linear_scan(&func, &[0]), 0);
+    assert_eq!(run_jit_linear_scan(&func, &[1]), 1);
+    assert_eq!(run_jit_linear_scan(&func, &[10]), 55);
+    assert_eq!(run_jit_linear_scan(&func, &[20]), 6765);
 }

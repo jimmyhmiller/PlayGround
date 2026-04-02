@@ -74,7 +74,7 @@ fn compute_use_counts(func: &Function) -> Vec<u32> {
 
 // ─── Reverse Post-Order & Predecessors ───────────────────────────
 
-fn compute_rpo(func: &Function) -> Vec<usize> {
+pub fn compute_rpo(func: &Function) -> Vec<usize> {
     let n = func.blocks.len();
     let mut visited = vec![false; n];
     let mut order = Vec::with_capacity(n);
@@ -95,7 +95,7 @@ fn compute_rpo(func: &Function) -> Vec<usize> {
     order
 }
 
-fn compute_predecessors(func: &Function) -> Vec<Vec<usize>> {
+pub fn compute_predecessors(func: &Function) -> Vec<Vec<usize>> {
     let n = func.blocks.len();
     let mut preds = vec![vec![]; n];
     for (i, block) in func.blocks.iter().enumerate() {

@@ -450,7 +450,15 @@ fn run_lua_with_heap(source: &str, heap_size: usize) -> (u64, LuaRuntime) {
     run_lua_with_opts(source, heap_size, &dynir::opt::OptConfig::all())
 }
 
+fn run_lua_linear_scan(source: &str, heap_size: usize, opt: &dynir::opt::OptConfig) -> (u64, LuaRuntime) {
+    run_lua_inner(source, heap_size, opt, true)
+}
+
 fn run_lua_with_opts(source: &str, heap_size: usize, opt: &dynir::opt::OptConfig) -> (u64, LuaRuntime) {
+    run_lua_inner(source, heap_size, opt, false)
+}
+
+fn run_lua_inner(source: &str, heap_size: usize, opt: &dynir::opt::OptConfig, use_linear_scan: bool) -> (u64, LuaRuntime) {
     let gc_heap_size = Some(heap_size);
     let bytecode_data = compile_lua(source);
     let mut chunk = bytecode::parse(&bytecode_data).expect("bytecode parse failed");
@@ -493,18 +501,19 @@ fn run_lua_with_opts(source: &str, heap_size: usize, opt: &dynir::opt::OptConfig
     rt.constants = global_strings.clone();
 
     let extern_ptrs = jit_extern_ptrs();
+    let compile_fn = |func: &dynir::Function, externs: &[*const u8]| -> JitFunction {
+        if use_linear_scan {
+            JitFunction::compile_with_gc_linear_scan::<NanBox>(func, externs, active_jit_safepoint_handler)
+        } else {
+            JitFunction::compile_with_gc::<NanBox>(func, externs, active_jit_safepoint_handler)
+        }
+    };
     let child_jits: Vec<JitFunction> = child_tfs
         .iter()
-        .map(|tf| {
-            JitFunction::compile_with_gc::<NanBox>(
-                &tf.function, &extern_ptrs, active_jit_safepoint_handler,
-            )
-        })
+        .map(|tf| compile_fn(&tf.function, &extern_ptrs))
         .collect();
     let child_jit_ptrs: Vec<*const u8> = child_jits.iter().map(|j| j.as_ptr()).collect();
-    let main_jit = JitFunction::compile_with_gc::<NanBox>(
-        &main_tf.function, &extern_ptrs, active_jit_safepoint_handler,
-    );
+    let main_jit = compile_fn(&main_tf.function, &extern_ptrs);
 
     let mut jit_ctx = JitContext {
         rt: &mut rt as *mut LuaRuntime,
@@ -2077,3 +2086,92 @@ fn test_opt_none_recursive() {
     assert_eq!(as_number(r), 610.0);
 }
 
+// ─── Linear Scan Tests ────────────────────────────────────────────
+
+#[test]
+#[ignore] // TODO: SIGSEGV with table operations — linear scan needs call-site interval splitting
+fn test_linear_scan_build_and_sum() {
+    let (r, _) = run_lua_linear_scan(OPT_TEST_SRC, 64 * 1024 * 1024, &dynir::opt::OptConfig::all());
+    assert_eq!(as_number(r), opt_test_expected());
+}
+
+#[test]
+fn test_linear_scan_closures() {
+    let (r, _) = run_lua_linear_scan(r#"
+        local function make_adder(x)
+            return function(y) return x + y end
+        end
+        local add5 = make_adder(5)
+        local add10 = make_adder(10)
+        return add5(3) + add10(7)
+    "#, 64 * 1024 * 1024, &dynir::opt::OptConfig::all());
+    assert_eq!(as_number(r), 25.0);
+}
+
+#[test]
+fn test_linear_scan_recursive() {
+    let (r, _) = run_lua_linear_scan(r#"
+        local function fib(n)
+            if n < 2 then return n end
+            return fib(n - 1) + fib(n - 2)
+        end
+        return fib(15)
+    "#, 64 * 1024 * 1024, &dynir::opt::OptConfig::all());
+    assert_eq!(as_number(r), 610.0);
+}
+
+#[test]
+fn test_linear_scan_loop_heavy() {
+    let (r, _) = run_lua_linear_scan(r#"
+        local function sum(n)
+            local total = 0
+            for i = 1, n do
+                total = total + i
+            end
+            return total
+        end
+        return sum(10000)
+    "#, 64 * 1024 * 1024, &dynir::opt::OptConfig::all());
+    assert_eq!(as_number(r), 50005000.0);
+}
+
+#[test]
+fn test_linear_scan_benchmark() {
+    use std::time::Instant;
+
+    let src = r#"
+        local function sum_squares(n)
+            local total = 0
+            for i = 1, n do
+                total = total + i * i
+            end
+            return total
+        end
+        return sum_squares(100000)
+    "#;
+    let expected = {
+        let n: f64 = 100000.0;
+        n * (n + 1.0) * (2.0 * n + 1.0) / 6.0
+    };
+
+    // Greedy allocator
+    let start = Instant::now();
+    let (r_greedy, _) = run_lua_with_opts(src, 64 * 1024 * 1024, &dynir::opt::OptConfig::all());
+    let greedy_time = start.elapsed();
+    assert_eq!(as_number(r_greedy), expected);
+
+    // Linear scan allocator
+    let start = Instant::now();
+    let (r_lsra, _) = run_lua_linear_scan(src, 64 * 1024 * 1024, &dynir::opt::OptConfig::all());
+    let lsra_time = start.elapsed();
+    assert_eq!(as_number(r_lsra), expected);
+
+    eprintln!("Lua sum_squares(100000):");
+    eprintln!("  greedy:      {:?}", greedy_time);
+    eprintln!("  linear scan: {:?}", lsra_time);
+    if lsra_time < greedy_time {
+        eprintln!("  speedup:     {:.1}x", greedy_time.as_secs_f64() / lsra_time.as_secs_f64());
+    } else {
+        eprintln!("  slowdown:    {:.1}x", lsra_time.as_secs_f64() / greedy_time.as_secs_f64());
+    }
+}

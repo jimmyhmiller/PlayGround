@@ -246,11 +246,16 @@ pub fn translate_wasm_module(wasm_bytes: &[u8]) -> Result<(Module, FuncRef), Tra
             let mut fb = mb.define_func(fref);
             let entry = fb.entry_block();
 
-            let mut locals: Vec<Value> = Vec::new();
             let mut local_types: Vec<Type> = Vec::new();
+            let mut local_addrs: Vec<Value> = Vec::new();
             for (i, vt) in ft.params().iter().enumerate() {
-                locals.push(fb.block_param(entry, i));
-                local_types.push(wasm_ty(vt)?);
+                let ty = wasm_ty(vt)?;
+                let slot = fb.create_stack_slot(8, false);
+                let addr = fb.stack_addr(slot);
+                let param_val = fb.block_param(entry, i);
+                fb.store(param_val, addr, 0);
+                local_addrs.push(addr);
+                local_types.push(ty);
             }
 
             let locals_reader = body.get_locals_reader()?;
@@ -258,13 +263,16 @@ pub fn translate_wasm_module(wasm_bytes: &[u8]) -> Result<(Module, FuncRef), Tra
                 let (count, ty) = local?;
                 let dynir_ty = wasm_ty(&ty)?;
                 for _ in 0..count {
+                    let slot = fb.create_stack_slot(8, false);
+                    let addr = fb.stack_addr(slot);
                     let zero = match dynir_ty {
                         Type::I32 => fb.iconst(Type::I32, 0),
                         Type::I64 => fb.iconst(Type::I64, 0),
                         Type::F64 => fb.f64const(0.0),
                         _ => fb.iconst(Type::I64, 0),
                     };
-                    locals.push(zero);
+                    fb.store(zero, addr, 0);
+                    local_addrs.push(addr);
                     local_types.push(dynir_ty);
                 }
             }
@@ -272,7 +280,7 @@ pub fn translate_wasm_module(wasm_bytes: &[u8]) -> Result<(Module, FuncRef), Tra
             let mut translator = FuncTranslator {
                 builder: &mut fb,
                 stack: Vec::new(),
-                locals,
+                local_addrs,
                 local_types: local_types.clone(),
                 control_stack: Vec::new(),
                 unreachable: false,
@@ -333,10 +341,16 @@ fn translate_function_inline(
 
     let mut builder = FunctionBuilder::new(name, &params, ret);
     let entry = builder.entry_block();
-    let mut locals: Vec<Value> = Vec::new();
     let mut local_types: Vec<Type> = Vec::new();
+    let mut local_addrs: Vec<Value> = Vec::new();
+
+    // Create stack slots for params and store initial values
     for (i, ty) in params.iter().enumerate() {
-        locals.push(builder.block_param(entry, i));
+        let slot = builder.create_stack_slot(8, false);
+        let addr = builder.stack_addr(slot);
+        let param_val = builder.block_param(entry, i);
+        builder.store(param_val, addr, 0);
+        local_addrs.push(addr);
         local_types.push(*ty);
     }
 
@@ -362,13 +376,16 @@ fn translate_function_inline(
                     let (count, ty) = local?;
                     let dynir_ty = wasm_ty(&ty)?;
                     for _ in 0..count {
+                        let slot = builder.create_stack_slot(8, false);
+                        let addr = builder.stack_addr(slot);
                         let zero = match dynir_ty {
                             Type::I32 => builder.iconst(Type::I32, 0),
                             Type::I64 => builder.iconst(Type::I64, 0),
                             Type::F64 => builder.f64const(0.0),
                             _ => builder.iconst(Type::I64, 0),
                         };
-                        locals.push(zero);
+                        builder.store(zero, addr, 0);
+                        local_addrs.push(addr);
                         local_types.push(dynir_ty);
                     }
                 }
@@ -376,7 +393,7 @@ fn translate_function_inline(
                 let mut translator = FuncTranslator {
                     builder: &mut builder,
                     stack: Vec::new(),
-                    locals,
+                    local_addrs,
                     local_types: local_types.clone(),
                     control_stack: Vec::new(),
                     unreachable: false,
@@ -485,11 +502,10 @@ impl ControlFrame {
 }
 
 /// Create or return the exit block for a control frame.
-/// Exit block params = under_stack_types + result_types + local_types.
+/// Exit block params = under_stack_types + result_types (no locals — they use stack slots).
 fn get_or_create_exit(
     frame: &mut ControlFrame,
     builder: &mut FunctionBuilder,
-    local_types: &[Type],
 ) -> BlockId {
     let (exit_slot, under_stack_types, result_types) = match frame {
         ControlFrame::Block {
@@ -516,7 +532,6 @@ fn get_or_create_exit(
     } else {
         let mut param_tys: Vec<Type> = under_stack_types.to_vec();
         param_tys.extend_from_slice(result_types);
-        param_tys.extend_from_slice(local_types);
         let bb = builder.create_block(&param_tys);
         *exit_slot = Some(bb);
         bb
@@ -526,7 +541,8 @@ fn get_or_create_exit(
 struct FuncTranslator<'a, 'b> {
     builder: &'a mut FunctionBuilder,
     stack: Vec<Value>,
-    locals: Vec<Value>,
+    /// Stack slot addresses for each wasm local (params + declared locals).
+    local_addrs: Vec<Value>,
     local_types: Vec<Type>,
     control_stack: Vec<ControlFrame>,
     unreachable: bool,
@@ -556,15 +572,14 @@ impl<'a, 'b> FuncTranslator<'a, 'b> {
     }
 
     /// Build the full args for jumping to an exit block:
-    /// under_stack_values + result_values + local_values.
+    /// under_stack_values + result_values (no locals — they use stack slots).
     fn exit_jump_args(&self, stack_height: usize, arity: usize) -> Vec<Value> {
         let mut args: Vec<Value> = self.stack[..stack_height].to_vec();
         args.extend_from_slice(&self.stack[self.stack.len() - arity..]);
-        args.extend_from_slice(&self.locals);
         args
     }
 
-    /// After switching to an exit block, restore stack and locals.
+    /// After switching to an exit block, restore stack from block params.
     fn restore_from_exit(&mut self, exit: BlockId, under_count: usize, result_count: usize) {
         self.stack.clear();
         for i in 0..under_count {
@@ -574,22 +589,16 @@ impl<'a, 'b> FuncTranslator<'a, 'b> {
             self.stack
                 .push(self.builder.block_param(exit, under_count + i));
         }
-        for (i, _ty) in self.local_types.iter().enumerate() {
-            self.locals[i] = self
-                .builder
-                .block_param(exit, under_count + result_count + i);
-        }
     }
 
     fn br_target_and_types(&mut self, depth: u32) -> (BlockId, Vec<Type>, usize) {
         let idx = self.control_stack.len() - 1 - depth as usize;
         match &mut self.control_stack[idx] {
             ControlFrame::Block { .. } | ControlFrame::If { .. } => {
-                let local_types = self.local_types.clone();
                 let frame = &mut self.control_stack[idx];
                 let br_types = frame.br_types().to_vec();
                 let sh = frame.stack_height();
-                let bb = get_or_create_exit(frame, self.builder, &local_types);
+                let bb = get_or_create_exit(frame, self.builder);
                 (bb, br_types, sh)
             }
             ControlFrame::Loop {
@@ -612,12 +621,11 @@ impl<'a, 'b> FuncTranslator<'a, 'b> {
         let (target, br_types, sh) = self.br_target_and_types(depth);
         let arity = br_types.len();
         if is_loop {
-            // Loop header expects under_stack + locals.
-            let mut args: Vec<Value> = self.stack[..sh].to_vec();
-            args.extend_from_slice(&self.locals);
+            // Loop header expects under_stack only.
+            let args: Vec<Value> = self.stack[..sh].to_vec();
             self.builder.jump(target, &args);
         } else {
-            // Block/If: pass under_stack + results + locals.
+            // Block/If: pass under_stack + results.
             let args = self.exit_jump_args(sh, arity);
             self.builder.jump(target, &args);
         }
@@ -664,9 +672,6 @@ impl<'a, 'b> FuncTranslator<'a, 'b> {
                                 for i in 0..ust.len() {
                                     self.stack.push(self.builder.block_param(eb, i));
                                 }
-                                for (i, _ty) in self.local_types.iter().enumerate() {
-                                    self.locals[i] = self.builder.block_param(eb, ust.len() + i);
-                                }
                                 self.unreachable = false;
                             }
                         }
@@ -712,15 +717,20 @@ impl<'a, 'b> FuncTranslator<'a, 'b> {
             }
 
             Operator::LocalGet { local_index } => {
-                self.stack.push(self.locals[*local_index as usize]);
+                let addr = self.local_addrs[*local_index as usize];
+                let ty = self.local_types[*local_index as usize];
+                let val = self.builder.load(ty, addr, 0);
+                self.stack.push(val);
             }
             Operator::LocalSet { local_index } => {
                 let val = self.pop();
-                self.locals[*local_index as usize] = val;
+                let addr = self.local_addrs[*local_index as usize];
+                self.builder.store(val, addr, 0);
             }
             Operator::LocalTee { local_index } => {
                 let val = *self.stack.last().expect("stack underflow");
-                self.locals[*local_index as usize] = val;
+                let addr = self.local_addrs[*local_index as usize];
+                self.builder.store(val, addr, 0);
             }
 
             Operator::Drop => {
@@ -884,21 +894,16 @@ impl<'a, 'b> FuncTranslator<'a, 'b> {
             Operator::Loop { blockty } => {
                 let result_types = self.blocktype_results(blockty)?;
                 let under_stack_types = self.stack_types();
-                // Loop header params = under_stack + locals.
-                let mut header_params: Vec<Type> = under_stack_types.clone();
-                header_params.extend_from_slice(&self.local_types);
+                // Loop header params = under_stack only (locals use stack slots).
+                let header_params: Vec<Type> = under_stack_types.clone();
                 let header = self.builder.create_block(&header_params);
-                let mut jump_args: Vec<Value> = self.stack.clone();
-                jump_args.extend_from_slice(&self.locals);
+                let jump_args: Vec<Value> = self.stack.clone();
                 self.builder.jump(header, &jump_args);
                 self.builder.switch_to_block(header);
                 // Restore stack from header params.
                 let under_count = self.stack.len();
                 for i in 0..under_count {
                     self.stack[i] = self.builder.block_param(header, i);
-                }
-                for (i, _ty) in self.local_types.iter().enumerate() {
-                    self.locals[i] = self.builder.block_param(header, under_count + i);
                 }
                 self.control_stack.push(ControlFrame::Loop {
                     header_block: header,
@@ -916,22 +921,17 @@ impl<'a, 'b> FuncTranslator<'a, 'b> {
                 let cond = self.pop();
                 let under_stack_types = self.stack_types();
                 let cond_i8 = self.i32_to_cond(cond);
-                // Then and else blocks get under_stack + locals as params.
-                let mut branch_params: Vec<Type> = under_stack_types.clone();
-                branch_params.extend_from_slice(&self.local_types);
+                // Then and else blocks get under_stack as params (locals use stack slots).
+                let branch_params: Vec<Type> = under_stack_types.clone();
                 let then_block = self.builder.create_block(&branch_params);
                 let else_block = self.builder.create_block(&branch_params);
-                let mut branch_args: Vec<Value> = self.stack.clone();
-                branch_args.extend_from_slice(&self.locals);
+                let branch_args: Vec<Value> = self.stack.clone();
                 self.builder
                     .br_if(cond_i8, then_block, &branch_args, else_block, &branch_args);
                 self.builder.switch_to_block(then_block);
                 let under_count = self.stack.len();
                 for i in 0..under_count {
                     self.stack[i] = self.builder.block_param(then_block, i);
-                }
-                for (i, _ty) in self.local_types.iter().enumerate() {
-                    self.locals[i] = self.builder.block_param(then_block, under_count + i);
                 }
                 self.control_stack.push(ControlFrame::If {
                     exit_block: None,
@@ -945,7 +945,6 @@ impl<'a, 'b> FuncTranslator<'a, 'b> {
             }
 
             Operator::Else => {
-                let local_types = self.local_types.clone();
                 let frame = self.control_stack.last_mut().unwrap();
                 let (else_block, stack_height, under_stack_types) = match frame {
                     ControlFrame::If {
@@ -964,7 +963,7 @@ impl<'a, 'b> FuncTranslator<'a, 'b> {
                 if !self.unreachable {
                     let result_types = frame.result_types().to_vec();
                     let arity = result_types.len();
-                    let exit = get_or_create_exit(frame, self.builder, &local_types);
+                    let exit = get_or_create_exit(frame, self.builder);
                     let args = self.exit_jump_args(stack_height, arity);
                     self.builder.jump(exit, &args);
                 }
@@ -974,9 +973,6 @@ impl<'a, 'b> FuncTranslator<'a, 'b> {
                 self.stack.clear();
                 for i in 0..under_count {
                     self.stack.push(self.builder.block_param(else_block, i));
-                }
-                for (i, _ty) in local_types.iter().enumerate() {
-                    self.locals[i] = self.builder.block_param(else_block, under_count + i);
                 }
                 self.unreachable = false;
             }
@@ -1000,21 +996,15 @@ impl<'a, 'b> FuncTranslator<'a, 'b> {
                 let arity = br_types.len();
 
                 let target_args = if is_loop {
-                    // Loop: pass under_stack + locals to header.
-                    let mut args: Vec<Value> = self.stack[..sh].to_vec();
-                    args.extend_from_slice(&self.locals);
-                    args
+                    self.stack[..sh].to_vec()
                 } else {
-                    // Block/If: pass under_stack[0..sh] + results + locals.
                     self.exit_jump_args(sh, arity)
                 };
 
-                // Fallthrough: full stack + locals.
-                let mut fall_types: Vec<Type> = self.stack_types();
-                fall_types.extend_from_slice(&self.local_types);
+                // Fallthrough: full stack only (no locals).
+                let fall_types: Vec<Type> = self.stack_types();
                 let fallthrough = self.builder.create_block(&fall_types);
-                let mut fall_args: Vec<Value> = self.stack.clone();
-                fall_args.extend_from_slice(&self.locals);
+                let fall_args: Vec<Value> = self.stack.clone();
 
                 self.builder
                     .br_if(cond_i8, target, &target_args, fallthrough, &fall_args);
@@ -1022,9 +1012,6 @@ impl<'a, 'b> FuncTranslator<'a, 'b> {
                 let stack_len = self.stack.len();
                 for i in 0..stack_len {
                     self.stack[i] = self.builder.block_param(fallthrough, i);
-                }
-                for (i, _ty) in self.local_types.iter().enumerate() {
-                    self.locals[i] = self.builder.block_param(fallthrough, stack_len + i);
                 }
             }
 
@@ -1040,9 +1027,7 @@ impl<'a, 'b> FuncTranslator<'a, 'b> {
                     self.br_target_and_types(default_depth);
                 let default_arity = default_br_types.len();
                 let default_args = if default_is_loop {
-                    let mut args: Vec<Value> = self.stack[..default_sh].to_vec();
-                    args.extend_from_slice(&self.locals);
-                    args
+                    self.stack[..default_sh].to_vec()
                 } else {
                     self.exit_jump_args(default_sh, default_arity)
                 };
@@ -1055,9 +1040,7 @@ impl<'a, 'b> FuncTranslator<'a, 'b> {
                     let (target, br_types, sh) = self.br_target_and_types(depth);
                     let arity = br_types.len();
                     let args = if c_is_loop {
-                        let mut a: Vec<Value> = self.stack[..sh].to_vec();
-                        a.extend_from_slice(&self.locals);
-                        a
+                        self.stack[..sh].to_vec()
                     } else {
                         self.exit_jump_args(sh, arity)
                     };
@@ -1160,7 +1143,6 @@ impl<'a, 'b> FuncTranslator<'a, 'b> {
                 ..
             } => {
                 if !has_else {
-                    let local_types = self.local_types.clone();
                     let arity = result_types.len();
 
                     // Create exit if needed, jump from then-branch.
@@ -1173,7 +1155,6 @@ impl<'a, 'b> FuncTranslator<'a, 'b> {
                     } else {
                         let mut param_tys: Vec<Type> = under_stack_types.clone();
                         param_tys.extend_from_slice(&result_types);
-                        param_tys.extend_from_slice(&local_types);
                         let e = self.builder.create_block(&param_tys);
                         if !self.unreachable {
                             let args = self.exit_jump_args(stack_height, arity);
@@ -1182,21 +1163,15 @@ impl<'a, 'b> FuncTranslator<'a, 'b> {
                         e
                     };
 
-                    // Else block: restore under-stack + locals, jump to exit.
+                    // Else block: restore under-stack, jump to exit.
                     self.builder.switch_to_block(else_block);
                     let uc = under_stack_types.len();
-                    let mut else_under: Vec<Value> = Vec::new();
+                    let mut else_args: Vec<Value> = Vec::new();
                     for i in 0..uc {
-                        else_under.push(self.builder.block_param(else_block, i));
+                        else_args.push(self.builder.block_param(else_block, i));
                     }
-                    let mut else_locals: Vec<Value> = Vec::new();
-                    for (i, _ty) in local_types.iter().enumerate() {
-                        else_locals.push(self.builder.block_param(else_block, uc + i));
-                    }
-                    // void if: no results to pass, just under_stack + locals.
-                    let mut args = else_under;
-                    args.extend_from_slice(&else_locals);
-                    self.builder.jump(exit, &args);
+                    // void if: no results to pass, just under_stack.
+                    self.builder.jump(exit, &else_args);
 
                     self.builder.switch_to_block(exit);
                     self.restore_from_exit(exit, under_count, num_results);

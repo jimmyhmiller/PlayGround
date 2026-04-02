@@ -296,6 +296,50 @@ fn bench_compile_time(c: &mut Criterion) {
     group.finish();
 }
 
+fn compile_single_linear_scan(wat: &str, config: Option<&OptConfig>) -> (dynlower::JitModule, dynir::ir::FuncRef) {
+    let wasm = wat::parse_str(wat).expect("parse WAT");
+    let (mut func, _) = translate_wasm(&wasm).expect("translate");
+    if let Some(cfg) = config {
+        opt::optimize_with(&mut func, cfg);
+    }
+    let (module, entry) = Module::from_function(func);
+    let jit = dynlower::JitModule::compile_linear_scan::<NanBox>(&module, &[]);
+    (jit, entry)
+}
+
+fn bench_linear_scan(c: &mut Criterion) {
+    let mut group = c.benchmark_group("linear_scan");
+    let opt_all = OptConfig::all();
+
+    let programs: &[(&str, &str, &[u64])] = &[
+        ("fib", FIBONACCI_WAT, &[30]),
+        ("factorial", FACTORIAL_WAT, &[20]),
+        ("sum", SUM_WAT, &[10000]),
+        ("nested_loop", NESTED_LOOP_WAT, &[100]),
+    ];
+
+    for &(name, wat, args) in programs {
+        // no_opt with greedy (baseline)
+        let (jit, entry) = compile_single(wat, None);
+        group.bench_function(BenchmarkId::new("greedy_no_opt", name), |b| {
+            b.iter(|| black_box(jit.call(entry, args)))
+        });
+
+        // opt_all with greedy
+        let (jit, entry) = compile_single(wat, Some(&opt_all));
+        group.bench_function(BenchmarkId::new("greedy_opt", name), |b| {
+            b.iter(|| black_box(jit.call(entry, args)))
+        });
+
+        // opt_all with linear scan
+        let (jit, entry) = compile_single_linear_scan(wat, Some(&opt_all));
+        group.bench_function(BenchmarkId::new("lsra_opt", name), |b| {
+            b.iter(|| black_box(jit.call(entry, args)))
+        });
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_fibonacci,
@@ -304,5 +348,6 @@ criterion_group!(
     bench_recursive_factorial,
     bench_nested_loop,
     bench_compile_time,
+    bench_linear_scan,
 );
 criterion_main!(benches);

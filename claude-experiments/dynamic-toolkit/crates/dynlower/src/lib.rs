@@ -4,10 +4,15 @@ use std::marker::PhantomData;
 use std::sync::RwLock;
 
 mod backend;
+pub mod regalloc;
 
 use backend::{
     Arm64Backend, LoweringBackend, MachineFpBinOp, MachineGpBinOp, MachineLocation,
     MachineWordSize,
+};
+use regalloc::{
+    GreedyRegState, ValueLoc, RegisterAllocator,
+    machine_gp, machine_fp, is_float_type,
 };
 use dynexec::{
     CallArgLocation, CallingConvention, CapturedCallerResume, CapturedFrame,
@@ -355,6 +360,19 @@ impl JitFunction {
         Self::compile_with_config_and_gc::<DefaultJitConfig<L>>(func, externs, Some(handler as u64))
     }
 
+    /// Compile with GC support using the linear scan register allocator.
+    pub fn compile_with_gc_linear_scan<L: LayoutConfigDefaults>(
+        func: &Function,
+        externs: &[*const u8],
+        handler: extern "C" fn(*mut u8, usize),
+    ) -> Self {
+        Self::compile_with_regalloc::<DefaultJitConfig<L>, Arm64Backend, regalloc::LinearScanAllocator>(
+            func,
+            externs,
+            Some(handler as u64),
+        )
+    }
+
     pub fn compile_with_config<Cfg: ExecutionConfig>(func: &Function, externs: &[*const u8]) -> Self
     where
         Cfg::Frames: FrameStrategy<Cfg::Layout, Cfg::Roots, Cfg::CallingConvention>,
@@ -381,12 +399,23 @@ impl JitFunction {
     where
         Cfg::Frames: FrameStrategy<Cfg::Layout, Cfg::Roots, Cfg::CallingConvention>,
     {
+        Self::compile_with_regalloc::<Cfg, B, GreedyRegState>(func, externs, safepoint_handler)
+    }
+
+    pub fn compile_with_regalloc<Cfg: ExecutionConfig, B: LoweringBackend, R: RegisterAllocator>(
+        func: &Function,
+        externs: &[*const u8],
+        safepoint_handler: Option<u64>,
+    ) -> Self
+    where
+        Cfg::Frames: FrameStrategy<Cfg::Layout, Cfg::Roots, Cfg::CallingConvention>,
+    {
         validate_execution_config::<Cfg>().unwrap_or_else(|err| {
             panic!("invalid dynlower config: {err}");
         });
 
         let mut lowerer =
-            Lowerer::<Cfg, B>::new_inner(0, func, externs, None, None, safepoint_handler);
+            Lowerer::<Cfg, B, R>::new_inner(0, func, externs, None, None, safepoint_handler);
         lowerer.run();
         let safepoints = std::mem::take(&mut lowerer.safepoints);
         let frame_reify_records = std::mem::take(&mut lowerer.frame_reify_records);
@@ -529,6 +558,18 @@ impl JitModule {
         Self::compile_with_config::<DefaultJitConfig<L>>(module, externs)
     }
 
+    /// Compile a module using the linear scan register allocator.
+    pub fn compile_linear_scan<L: LayoutConfigDefaults>(
+        module: &Module,
+        externs: &[*const u8],
+    ) -> Self {
+        Self::compile_with_regalloc::<DefaultJitConfig<L>, Arm64Backend, regalloc::LinearScanAllocator>(
+            module,
+            externs,
+            None,
+        )
+    }
+
     /// Compile a module with a GC safepoint handler.
     ///
     /// At each `Inst::Safepoint`, the JIT will spill all live values and
@@ -565,6 +606,17 @@ impl JitModule {
     }
 
     pub fn compile_with_backend_and_config<Cfg: ExecutionConfig, B: LoweringBackend>(
+        module: &Module,
+        externs: &[*const u8],
+        safepoint_handler: Option<u64>,
+    ) -> Self
+    where
+        Cfg::Frames: FrameStrategy<Cfg::Layout, Cfg::Roots, Cfg::CallingConvention>,
+    {
+        Self::compile_with_regalloc::<Cfg, B, GreedyRegState>(module, externs, safepoint_handler)
+    }
+
+    pub fn compile_with_regalloc<Cfg: ExecutionConfig, B: LoweringBackend, R: RegisterAllocator>(
         module: &Module,
         externs: &[*const u8],
         safepoint_handler: Option<u64>,
@@ -616,7 +668,7 @@ impl JitModule {
 
         let mut function_root_scan_sizes: Vec<usize> = Vec::new();
         for (func_idx, func) in module.functions.iter().enumerate() {
-            let mut lowerer = Lowerer::<Cfg, B>::new_module(
+            let mut lowerer = Lowerer::<Cfg, B, R>::new_module(
                 func_idx,
                 func,
                 &direct_call_is_internal,
@@ -950,30 +1002,6 @@ pub unsafe fn call_jit_outcome(ptr: *const u8, args: &[u64], max_deopt_live_valu
     unsafe { call_jit_outcome_with_reg_limit(ptr, args, 16, max_deopt_live_values) }
 }
 
-// ─── Value Location ────────────────────────────────────────────────
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ValueLoc {
-    GpReg(u8),
-    FpReg(u8),
-    Spill(i32), // offset from FP (negative)
-    Unassigned,
-}
-
-fn machine_gp(index: u8) -> backend::MachineReg {
-    backend::MachineReg {
-        class: backend::MachineRegClass::Gp,
-        index,
-    }
-}
-
-fn machine_fp(index: u8) -> backend::MachineReg {
-    backend::MachineReg {
-        class: backend::MachineRegClass::Fp,
-        index,
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AssignmentTarget {
     CallArg(CallArgLocation),
@@ -1001,319 +1029,9 @@ struct ValueAssignment {
     target: AssignmentTarget,
 }
 
-#[derive(Debug, Clone)]
-struct ValueInfo {
-    loc: ValueLoc,
-    spill_slot: Option<i32>, // if spilled, the offset from FP
-    remaining_uses: u32,
-    ty: Type,
-}
-
 // ─── Frame Layout State ────────────────────────────────────────────
 
 // ─── Register State ────────────────────────────────────────────────
-
-const NUM_GP: usize = 28; // X0-X27
-const NUM_FP: usize = 32; // D0-D31
-
-// Allocatable GP regs: caller-saved only.
-// We do not allocate callee-saved regs until the backend preserves them.
-const ALLOCATABLE_GP: &[u8] = &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
-
-// Allocatable FP regs: caller-saved only.
-const ALLOCATABLE_FP: &[u8] = &[
-    0, 1, 2, 3, 4, 5, 6, 7, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31,
-];
-
-// Caller-saved GP: X0-X15 (X16-X18 are special)
-const CALLER_SAVED_GP: &[u8] = &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
-
-// Caller-saved FP: D0-D7, D16-D31
-const CALLER_SAVED_FP: &[u8] = &[
-    0, 1, 2, 3, 4, 5, 6, 7, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31,
-];
-
-struct RegState {
-    gp_occupant: [Option<Value>; NUM_GP],
-    fp_occupant: [Option<Value>; NUM_FP],
-    values: Vec<ValueInfo>,
-    gp_evict_cursor: usize,
-    fp_evict_cursor: usize,
-}
-
-impl RegState {
-    fn new(num_values: usize) -> Self {
-        RegState {
-            gp_occupant: [None; NUM_GP],
-            fp_occupant: [None; NUM_FP],
-            values: (0..num_values)
-                .map(|_| ValueInfo {
-                    loc: ValueLoc::Unassigned,
-                    spill_slot: None,
-                    remaining_uses: 0,
-                    ty: Type::I64,
-                })
-                .collect(),
-            gp_evict_cursor: 0,
-            fp_evict_cursor: 0,
-        }
-    }
-
-    fn is_float_type(ty: Type) -> bool {
-        ty == Type::F64
-    }
-
-    fn alloc_gp<B: LoweringBackend, F: FrameLayout>(
-        &mut self,
-        buf: &mut CodeBuffer<B::Arch>,
-        frame: &mut F,
-    ) -> u8 {
-        // Try to find a free allocatable GP reg
-        for &r in ALLOCATABLE_GP {
-            if self.gp_occupant[r as usize].is_none() {
-                return r;
-            }
-        }
-        // Evict: round-robin through allocatable regs
-        let start = self.gp_evict_cursor;
-        for i in 0..ALLOCATABLE_GP.len() {
-            let idx = (start + i) % ALLOCATABLE_GP.len();
-            let r = ALLOCATABLE_GP[idx];
-            if let Some(val) = self.gp_occupant[r as usize] {
-                self.spill_gp_reg::<B>(buf, frame, r, val);
-                self.gp_evict_cursor = (idx + 1) % ALLOCATABLE_GP.len();
-                return r;
-            }
-        }
-        panic!("no GP register available");
-    }
-
-    fn alloc_fp<B: LoweringBackend, F: FrameLayout>(
-        &mut self,
-        buf: &mut CodeBuffer<B::Arch>,
-        frame: &mut F,
-    ) -> u8 {
-        for &r in ALLOCATABLE_FP {
-            if self.fp_occupant[r as usize].is_none() {
-                return r;
-            }
-        }
-        let start = self.fp_evict_cursor;
-        for i in 0..ALLOCATABLE_FP.len() {
-            let idx = (start + i) % ALLOCATABLE_FP.len();
-            let r = ALLOCATABLE_FP[idx];
-            if let Some(val) = self.fp_occupant[r as usize] {
-                self.spill_fp_reg::<B>(buf, frame, r, val);
-                self.fp_evict_cursor = (idx + 1) % ALLOCATABLE_FP.len();
-                return r;
-            }
-        }
-        panic!("no FP register available");
-    }
-
-    fn spill_gp_reg<B: LoweringBackend>(
-        &mut self,
-        buf: &mut CodeBuffer<B::Arch>,
-        frame: &mut impl FrameLayout,
-        r: u8,
-        val: Value,
-    ) {
-        if self.values[val.index()].remaining_uses == 0 {
-            self.gp_occupant[r as usize] = None;
-            self.values[val.index()].loc = ValueLoc::Unassigned;
-            return;
-        }
-        let offset = match self.values[val.index()].spill_slot {
-            Some(off) => off,
-            None => {
-                let off = frame.alloc_root_slot();
-                self.values[val.index()].spill_slot = Some(off);
-                off
-            }
-        };
-        B::emit_store_gp_to_frame(buf, machine_gp(r), frame.slot_access(offset));
-        self.values[val.index()].loc = ValueLoc::Spill(offset);
-        self.gp_occupant[r as usize] = None;
-    }
-
-    fn spill_fp_reg<B: LoweringBackend>(
-        &mut self,
-        buf: &mut CodeBuffer<B::Arch>,
-        frame: &mut impl FrameLayout,
-        r: u8,
-        val: Value,
-    ) {
-        if self.values[val.index()].remaining_uses == 0 {
-            self.fp_occupant[r as usize] = None;
-            self.values[val.index()].loc = ValueLoc::Unassigned;
-            return;
-        }
-        let offset = match self.values[val.index()].spill_slot {
-            Some(off) => off,
-            None => {
-                let off = frame.alloc_root_slot();
-                self.values[val.index()].spill_slot = Some(off);
-                off
-            }
-        };
-        B::emit_store_fp_to_frame(buf, machine_fp(r), frame.slot_access(offset));
-        self.values[val.index()].loc = ValueLoc::Spill(offset);
-        self.fp_occupant[r as usize] = None;
-    }
-
-    fn assign_gp(&mut self, val: Value, r: u8) {
-        self.gp_occupant[r as usize] = Some(val);
-        self.values[val.index()].loc = ValueLoc::GpReg(r);
-    }
-
-    fn assign_fp(&mut self, val: Value, r: u8) {
-        self.fp_occupant[r as usize] = Some(val);
-        self.values[val.index()].loc = ValueLoc::FpReg(r);
-    }
-
-    /// Ensure a value is in a GP register, returning the reg index.
-    fn ensure_in_gp_reg<B: LoweringBackend>(
-        &mut self,
-        buf: &mut CodeBuffer<B::Arch>,
-        frame: &mut impl FrameLayout,
-        val: Value,
-    ) -> u8 {
-        match self.values[val.index()].loc {
-            ValueLoc::GpReg(r) => r,
-            ValueLoc::Spill(offset) => {
-                let r = self.alloc_gp::<B, _>(buf, frame);
-                B::emit_load_gp_from_frame(buf, machine_gp(r), frame.slot_access(offset));
-                // Record the spill slot so the value can be restored after calls
-                if self.values[val.index()].spill_slot.is_none() {
-                    self.values[val.index()].spill_slot = Some(offset);
-                }
-                self.assign_gp(val, r);
-                r
-            }
-            ValueLoc::FpReg(_) => panic!("expected GP value, got FP"),
-            ValueLoc::Unassigned => panic!("value v{} is unassigned", val.index()),
-        }
-    }
-
-    /// Ensure a value is in an FP register, returning the reg index.
-    fn ensure_in_fp_reg<B: LoweringBackend>(
-        &mut self,
-        buf: &mut CodeBuffer<B::Arch>,
-        frame: &mut impl FrameLayout,
-        val: Value,
-    ) -> u8 {
-        match self.values[val.index()].loc {
-            ValueLoc::FpReg(r) => r,
-            ValueLoc::Spill(offset) => {
-                let r = self.alloc_fp::<B, _>(buf, frame);
-                B::emit_load_fp_from_frame(buf, machine_fp(r), frame.slot_access(offset));
-                self.assign_fp(val, r);
-                r
-            }
-            ValueLoc::GpReg(_) => panic!("expected FP value, got GP"),
-            ValueLoc::Unassigned => panic!("value v{} is unassigned", val.index()),
-        }
-    }
-
-    /// Decrement use count and free register if dead.
-    fn dec_use(&mut self, val: Value) {
-        let info = &mut self.values[val.index()];
-        info.remaining_uses = info.remaining_uses.saturating_sub(1);
-        if info.remaining_uses == 0 {
-            match info.loc {
-                ValueLoc::GpReg(r) => {
-                    self.gp_occupant[r as usize] = None;
-                }
-                ValueLoc::FpReg(r) => {
-                    self.fp_occupant[r as usize] = None;
-                }
-                _ => {}
-            }
-        }
-    }
-
-    /// Spill all caller-saved registers that have live values.
-    fn spill_caller_saved<B: LoweringBackend>(
-        &mut self,
-        buf: &mut CodeBuffer<B::Arch>,
-        frame: &mut impl FrameLayout,
-    ) {
-        for &r in CALLER_SAVED_GP {
-            if let Some(val) = self.gp_occupant[r as usize] {
-                if self.values[val.index()].remaining_uses > 0 {
-                    self.spill_gp_reg::<B>(buf, frame, r, val);
-                    // Mark the value as in its spill slot (register will be clobbered)
-                    if let Some(slot) = self.values[val.index()].spill_slot {
-                        self.values[val.index()].loc = ValueLoc::Spill(slot);
-                    }
-                    self.gp_occupant[r as usize] = None;
-                } else {
-                    self.gp_occupant[r as usize] = None;
-                    self.values[val.index()].loc = ValueLoc::Unassigned;
-                }
-            }
-        }
-        for &r in CALLER_SAVED_FP {
-            if let Some(val) = self.fp_occupant[r as usize] {
-                if self.values[val.index()].remaining_uses > 0 {
-                    self.spill_fp_reg::<B>(buf, frame, r, val);
-                    if let Some(slot) = self.values[val.index()].spill_slot {
-                        self.values[val.index()].loc = ValueLoc::Spill(slot);
-                    }
-                    self.fp_occupant[r as usize] = None;
-                } else {
-                    self.fp_occupant[r as usize] = None;
-                    self.values[val.index()].loc = ValueLoc::Unassigned;
-                }
-            }
-        }
-    }
-
-    /// Spill ALL live register-resident values (used before multi-pred block transitions).
-    fn spill_all_live<B: LoweringBackend>(
-        &mut self,
-        buf: &mut CodeBuffer<B::Arch>,
-        frame: &mut impl FrameLayout,
-    ) {
-        for r in 0..NUM_GP as u8 {
-            if let Some(val) = self.gp_occupant[r as usize] {
-                if self.values[val.index()].remaining_uses > 0 {
-                    self.spill_gp_reg::<B>(buf, frame, r, val);
-                } else {
-                    self.gp_occupant[r as usize] = None;
-                }
-            }
-        }
-        for r in 0..NUM_FP as u8 {
-            if let Some(val) = self.fp_occupant[r as usize] {
-                if self.values[val.index()].remaining_uses > 0 {
-                    self.spill_fp_reg::<B>(buf, frame, r, val);
-                } else {
-                    self.fp_occupant[r as usize] = None;
-                }
-            }
-        }
-    }
-
-    /// Free all register mappings. Values in registers revert to their spill
-    /// slot if one exists, otherwise become Unassigned.
-    fn clear_regs(&mut self) {
-        for info in &mut self.values {
-            match info.loc {
-                ValueLoc::GpReg(_) | ValueLoc::FpReg(_) => {
-                    if let Some(off) = info.spill_slot {
-                        info.loc = ValueLoc::Spill(off);
-                    } else {
-                        info.loc = ValueLoc::Unassigned;
-                    }
-                }
-                _ => {}
-            }
-        }
-        self.gp_occupant = [None; NUM_GP];
-        self.fp_occupant = [None; NUM_FP];
-    }
-}
 
 // ─── Block metadata ────────────────────────────────────────────────
 
@@ -1444,7 +1162,7 @@ fn assign_block_prompt_stacks(func: &Function, block_meta: &mut [BlockMeta]) {
 
 // ─── Lowerer ───────────────────────────────────────────────────────
 
-struct Lowerer<'a, Cfg: ExecutionConfig, B: LoweringBackend>
+struct Lowerer<'a, Cfg: ExecutionConfig, B: LoweringBackend, R: RegisterAllocator = GreedyRegState>
 where
     Cfg::Frames: FrameStrategy<Cfg::Layout, Cfg::Roots, Cfg::CallingConvention>,
 {
@@ -1459,7 +1177,7 @@ where
     /// Signature: `extern "C" fn(frame_ptr: *mut u8, frame_size: usize)`.
     safepoint_handler: Option<u64>,
     buf: CodeBuffer<B::Arch>,
-    regs: RegState,
+    regs: R,
     frame: <Cfg::Frames as FrameStrategy<
         Cfg::Layout,
         Cfg::Roots,
@@ -1480,7 +1198,7 @@ where
     _backend: PhantomData<B>,
 }
 
-impl<'a, Cfg: ExecutionConfig, B: LoweringBackend> Lowerer<'a, Cfg, B>
+impl<'a, Cfg: ExecutionConfig, B: LoweringBackend, R: RegisterAllocator> Lowerer<'a, Cfg, B, R>
 where
     Cfg::Frames: FrameStrategy<Cfg::Layout, Cfg::Roots, Cfg::CallingConvention>,
 {
@@ -1491,7 +1209,7 @@ where
     }
 
     fn is_gc_ptr_value(&self, val: Value) -> bool {
-        self.regs.values[val.index()].ty == Type::GcPtr
+        self.regs.value_type(val) == Type::GcPtr
     }
 
     fn assign_gp_value(&mut self, val: Value, reg: u8) {
@@ -1504,8 +1222,8 @@ where
     }
 
     fn assign_spill_value(&mut self, val: Value, offset: i32) {
-        self.regs.values[val.index()].spill_slot = Some(offset);
-        self.regs.values[val.index()].loc = ValueLoc::Spill(offset);
+        self.regs.set_spill_slot(val, offset);
+        self.regs.set_value_loc(val, ValueLoc::Spill(offset));
         self.track_value_in_frame_slot(val, offset);
     }
 
@@ -1542,7 +1260,7 @@ where
         if self.root_transport.shadow_slots_by_value[val.index()].is_some() {
             return;
         }
-        match self.regs.values[val.index()].loc {
+        match self.regs.value_loc(val) {
             ValueLoc::GpReg(r) => self.track_value_in_gp(val, r),
             ValueLoc::Spill(offset) => self.track_value_in_frame_slot(val, offset),
             ValueLoc::FpReg(_) | ValueLoc::Unassigned => {}
@@ -1570,10 +1288,10 @@ where
             MachineWordSize::W64,
         );
         for value_idx in 0..self.func.value_types.len() {
-            let ty = self.regs.values[value_idx].ty;
             let value = Value::from_index(value_idx);
-            match self.regs.values[value_idx].loc {
-                ValueLoc::FpReg(src) if RegState::is_float_type(ty) => {
+            let ty = self.regs.value_type(value);
+            match self.regs.value_loc(value) {
+                ValueLoc::FpReg(src) if is_float_type(ty) => {
                     B::emit_fp_to_gp_move(&mut self.buf, machine_gp(27), machine_fp(src));
                     B::emit_store_gp(
                         &mut self.buf,
@@ -1593,7 +1311,7 @@ where
                     );
                 }
                 ValueLoc::Spill(offset) => {
-                    if RegState::is_float_type(ty) {
+                    if is_float_type(ty) {
                         B::emit_load_fp_from_frame(
                             &mut self.buf,
                             machine_fp(31),
@@ -1655,8 +1373,8 @@ where
             MachineWordSize::W64,
         );
         for (idx, &value) in values.iter().enumerate() {
-            let ty = self.regs.values[value.index()].ty;
-            if RegState::is_float_type(ty) {
+            let ty = self.regs.value_type(value);
+            if is_float_type(ty) {
                 let src = self.regs.ensure_in_fp_reg::<B>(&mut self.buf, &mut self.frame, value);
                 B::emit_fp_to_gp_move(&mut self.buf, machine_gp(27), machine_fp(src));
                 B::emit_store_gp(
@@ -1711,13 +1429,13 @@ where
             control_values.iter().map(|value| value.index()).collect();
         let value_types: Vec<Type> = values
             .iter()
-            .map(|value| self.regs.values[value.index()].ty)
+            .map(|value| self.regs.value_type(*value))
             .collect();
         let root_payload_indices: Vec<usize> = value_types
             .iter()
             .enumerate()
             .filter_map(|(idx, ty)| {
-                (ty.is_gc() && self.regs.values[value_indices[idx]].loc != ValueLoc::Unassigned)
+                (ty.is_gc() && self.regs.value_loc(Value::from_index(value_indices[idx])) != ValueLoc::Unassigned)
                     .then_some(idx)
             })
             .collect();
@@ -1758,19 +1476,16 @@ where
         callee_caller_resume: SuspendCallerResume,
         resume: FrameResumePoint,
     ) -> *const CallSuspendRecord {
-        let value_accesses = self
-            .regs
-            .values
+        let snapshot = self.regs.value_info_snapshot();
+        let value_accesses = snapshot
             .iter()
-            .map(|value| value.spill_slot.map(|slot| self.frame.slot_access(slot)))
+            .map(|(spill_slot, _ty)| spill_slot.map(|slot| self.frame.slot_access(slot)))
             .collect::<Vec<_>>();
-        let root_value_indices = self
-            .regs
-            .values
+        let root_value_indices = snapshot
             .iter()
             .enumerate()
-            .filter_map(|(idx, value)| {
-                (value.ty.is_gc() && value.spill_slot.is_some()).then_some(idx)
+            .filter_map(|(idx, (spill_slot, ty))| {
+                (ty.is_gc() && spill_slot.is_some()).then_some(idx)
             })
             .collect::<Vec<_>>();
         let record = Box::new(CallSuspendRecord {
@@ -1847,25 +1562,28 @@ where
         }
         assign_block_prompt_stacks(func, &mut block_meta);
 
-        let mut regs = RegState::new(num_values);
+        let mut regs = R::new(num_values);
         let mut frame = Cfg::Frames::new_layout(func.blocks.len());
 
         // Liveness pass: count uses
         for block in &func.blocks {
             for inst_node in &block.insts {
                 inst_node.inst.for_each_value(|v| {
-                    regs.values[v.index()].remaining_uses += 1;
+                    regs.inc_use(v);
                 });
             }
             block.terminator.for_each_value(|v| {
-                regs.values[v.index()].remaining_uses += 1;
+                regs.inc_use(v);
             });
         }
 
         // Set types for all values
         for (i, ty) in func.value_types.iter().enumerate() {
-            regs.values[i].ty = *ty;
+            regs.set_type(Value::from_index(i), *ty);
         }
+
+        // Run allocator-specific pre-analysis (e.g., linear scan interval computation).
+        regs.prepare(func);
 
         // Allocate canonical spill slots for ALL blocks with params.
         // This simplifies block transitions: every block param has a
@@ -2009,7 +1727,7 @@ where
                     (payload_idx as i32) * 8,
                     MachineWordSize::W64,
                 );
-                if RegState::is_float_type(ty) {
+                if is_float_type(ty) {
                     B::emit_gp_to_fp_move(&mut self.buf, machine_fp(31), machine_gp(27));
                     B::emit_store_fp_to_frame(
                         &mut self.buf,
@@ -2069,25 +1787,14 @@ where
         // Bind label
         B::bind_label(&mut self.buf, self.block_meta[block_idx].label);
 
-        // Clear register state at block entry (conservative approach)
-        if block_idx > 0 {
-            self.regs.clear_regs();
-        }
-
-        // Handle block params
+        // Handle block params: entry block uses calling convention,
+        // other blocks delegate to the register allocator.
         if block_idx == 0 {
-            // Entry block: params come from 64-bit argument slots.
-            // Register-window slots arrive in the backend's incoming arg registers;
-            // overflow slots arrive through the backend-managed incoming stack area.
             for (slot, &(val, ty)) in block.params.iter().enumerate() {
                 self.read_entry_arg_into_value(val, ty, slot);
             }
-        } else if !self.frame.block_param_slots(block_idx).is_empty() {
-            // Block params are in canonical spill slots
-            for (i, &(val, _ty)) in block.params.iter().enumerate() {
-                let offset = self.frame.block_param_slots(block_idx)[i];
-                self.assign_spill_value(val, offset);
-            }
+        } else {
+            self.regs.enter_block::<B>(block_idx, self.func, &mut self.buf, &mut self.frame);
         }
 
         // Lower instructions
@@ -2111,7 +1818,7 @@ where
         match &inst_node.inst {
             Inst::Iconst(ty, imm) => {
                 let val = result_val.unwrap();
-                let r = self.regs.alloc_gp::<B, _>(&mut self.buf, &mut self.frame);
+                let r = self.regs.alloc_gp::<B>(&mut self.buf, &mut self.frame);
                 let imm_val = match ty {
                     Type::I8 => (*imm as u8) as u64,
                     Type::I32 => (*imm as u32) as u64,
@@ -2124,7 +1831,7 @@ where
             Inst::F64Const(f) => {
                 let val = result_val.unwrap();
                 let bits = f.to_bits();
-                let fr = self.regs.alloc_fp::<B, _>(&mut self.buf, &mut self.frame);
+                let fr = self.regs.alloc_fp::<B>(&mut self.buf, &mut self.frame);
                 B::emit_f64_const(&mut self.buf, machine_fp(fr), bits);
                 self.assign_fp_value(val, fr);
             }
@@ -2144,9 +1851,9 @@ where
             Inst::Neg(a) => {
                 let val = result_val.unwrap();
                 let ra = self.regs.ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, *a);
-                let ty = self.regs.values[a.index()].ty;
+                let ty = self.regs.value_type(*a);
                 self.regs.dec_use(*a);
-                let rd_idx = self.regs.alloc_gp::<B, _>(&mut self.buf, &mut self.frame);
+                let rd_idx = self.regs.alloc_gp::<B>(&mut self.buf, &mut self.frame);
                 B::emit_gp_neg(
                     &mut self.buf,
                     machine_gp(rd_idx),
@@ -2159,9 +1866,9 @@ where
             Inst::Not(a) => {
                 let val = result_val.unwrap();
                 let ra = self.regs.ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, *a);
-                let ty = self.regs.values[a.index()].ty;
+                let ty = self.regs.value_type(*a);
                 self.regs.dec_use(*a);
-                let rd_idx = self.regs.alloc_gp::<B, _>(&mut self.buf, &mut self.frame);
+                let rd_idx = self.regs.alloc_gp::<B>(&mut self.buf, &mut self.frame);
                 B::emit_gp_not(
                     &mut self.buf,
                     machine_gp(rd_idx),
@@ -2180,7 +1887,7 @@ where
                 let val = result_val.unwrap();
                 let ra = self.regs.ensure_in_fp_reg::<B>(&mut self.buf, &mut self.frame, *a);
                 self.regs.dec_use(*a);
-                let rd_idx = self.regs.alloc_fp::<B, _>(&mut self.buf, &mut self.frame);
+                let rd_idx = self.regs.alloc_fp::<B>(&mut self.buf, &mut self.frame);
                 B::emit_fp_neg(&mut self.buf, machine_fp(rd_idx), machine_fp(ra));
                 self.assign_fp_value(val, rd_idx);
             }
@@ -2189,11 +1896,11 @@ where
                 let val = result_val.unwrap();
                 let ra = self.regs.ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, *a);
                 let rb = self.regs.ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, *b);
-                let ty = self.regs.values[a.index()].ty;
+                let ty = self.regs.value_type(*a);
                 self.regs.dec_use(*a);
                 self.regs.dec_use(*b);
                 let size = type_to_machine_word_size(ty);
-                let rd_idx = self.regs.alloc_gp::<B, _>(&mut self.buf, &mut self.frame);
+                let rd_idx = self.regs.alloc_gp::<B>(&mut self.buf, &mut self.frame);
                 B::emit_icmp_set(
                     &mut self.buf,
                     *op,
@@ -2211,7 +1918,7 @@ where
                 let rb = self.regs.ensure_in_fp_reg::<B>(&mut self.buf, &mut self.frame, *b);
                 self.regs.dec_use(*a);
                 self.regs.dec_use(*b);
-                let rd_idx = self.regs.alloc_gp::<B, _>(&mut self.buf, &mut self.frame);
+                let rd_idx = self.regs.alloc_gp::<B>(&mut self.buf, &mut self.frame);
                 B::emit_fcmp_set(
                     &mut self.buf,
                     *op,
@@ -2225,15 +1932,15 @@ where
             Inst::Select(cond, t, f) => {
                 let val = result_val.unwrap();
                 let rc = self.regs.ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, *cond);
-                let ty = self.regs.values[t.index()].ty;
+                let ty = self.regs.value_type(*t);
 
-                if RegState::is_float_type(ty) {
+                if is_float_type(ty) {
                     let rt = self.regs.ensure_in_fp_reg::<B>(&mut self.buf, &mut self.frame, *t);
                     let rf = self.regs.ensure_in_fp_reg::<B>(&mut self.buf, &mut self.frame, *f);
                     self.regs.dec_use(*cond);
                     self.regs.dec_use(*t);
                     self.regs.dec_use(*f);
-                    let rd_idx = self.regs.alloc_fp::<B, _>(&mut self.buf, &mut self.frame);
+                    let rd_idx = self.regs.alloc_fp::<B>(&mut self.buf, &mut self.frame);
                     B::emit_fp_select(
                         &mut self.buf,
                         machine_gp(rc),
@@ -2249,7 +1956,7 @@ where
                     self.regs.dec_use(*cond);
                     self.regs.dec_use(*t);
                     self.regs.dec_use(*f);
-                    let rd_idx = self.regs.alloc_gp::<B, _>(&mut self.buf, &mut self.frame);
+                    let rd_idx = self.regs.alloc_gp::<B>(&mut self.buf, &mut self.frame);
                     B::emit_gp_select(
                         &mut self.buf,
                         machine_gp(rd_idx),
@@ -2266,7 +1973,7 @@ where
                 let val = result_val.unwrap();
                 let ra = self.regs.ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, *a);
                 let rb = self.regs.ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, *b);
-                let ty = self.regs.values[a.index()].ty;
+                let ty = self.regs.value_type(*a);
                 if let Some(reg) = self.try_lower_overflow_check_inline(*op, ty, ra, rb) {
                     self.regs.dec_use(*a);
                     self.regs.dec_use(*b);
@@ -2295,9 +2002,9 @@ where
             Inst::Sext(a, target_ty) => {
                 let val = result_val.unwrap();
                 let ra = self.regs.ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, *a);
-                let src_ty = self.regs.values[a.index()].ty;
+                let src_ty = self.regs.value_type(*a);
                 self.regs.dec_use(*a);
-                let rd_idx = self.regs.alloc_gp::<B, _>(&mut self.buf, &mut self.frame);
+                let rd_idx = self.regs.alloc_gp::<B>(&mut self.buf, &mut self.frame);
                 B::emit_sign_extend(
                     &mut self.buf,
                     machine_gp(rd_idx),
@@ -2311,9 +2018,9 @@ where
             Inst::Zext(a, target_ty) => {
                 let val = result_val.unwrap();
                 let ra = self.regs.ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, *a);
-                let src_ty = self.regs.values[a.index()].ty;
+                let src_ty = self.regs.value_type(*a);
                 self.regs.dec_use(*a);
-                let rd_idx = self.regs.alloc_gp::<B, _>(&mut self.buf, &mut self.frame);
+                let rd_idx = self.regs.alloc_gp::<B>(&mut self.buf, &mut self.frame);
                 B::emit_zero_extend(
                     &mut self.buf,
                     machine_gp(rd_idx),
@@ -2328,7 +2035,7 @@ where
                 let val = result_val.unwrap();
                 let ra = self.regs.ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, *a);
                 self.regs.dec_use(*a);
-                let rd_idx = self.regs.alloc_gp::<B, _>(&mut self.buf, &mut self.frame);
+                let rd_idx = self.regs.alloc_gp::<B>(&mut self.buf, &mut self.frame);
                 B::emit_trunc(&mut self.buf, machine_gp(rd_idx), machine_gp(ra), *target_ty);
                 self.assign_gp_value(val, rd_idx);
             }
@@ -2336,9 +2043,9 @@ where
             Inst::IntToFloat(a) => {
                 let val = result_val.unwrap();
                 let ra = self.regs.ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, *a);
-                let src_ty = self.regs.values[a.index()].ty;
+                let src_ty = self.regs.value_type(*a);
                 self.regs.dec_use(*a);
-                let rd_idx = self.regs.alloc_fp::<B, _>(&mut self.buf, &mut self.frame);
+                let rd_idx = self.regs.alloc_fp::<B>(&mut self.buf, &mut self.frame);
                 B::emit_int_to_float(&mut self.buf, machine_fp(rd_idx), machine_gp(ra), src_ty);
                 self.assign_fp_value(val, rd_idx);
             }
@@ -2347,33 +2054,33 @@ where
                 let val = result_val.unwrap();
                 let ra = self.regs.ensure_in_fp_reg::<B>(&mut self.buf, &mut self.frame, *a);
                 self.regs.dec_use(*a);
-                let rd_idx = self.regs.alloc_gp::<B, _>(&mut self.buf, &mut self.frame);
+                let rd_idx = self.regs.alloc_gp::<B>(&mut self.buf, &mut self.frame);
                 B::emit_float_to_int(&mut self.buf, machine_gp(rd_idx), machine_fp(ra));
                 self.assign_gp_value(val, rd_idx);
             }
 
             Inst::Bitcast(a, _target_ty) => {
                 let val = result_val.unwrap();
-                let src_ty = self.regs.values[a.index()].ty;
-                let dst_ty = self.regs.values[val.index()].ty;
+                let src_ty = self.regs.value_type(*a);
+                let dst_ty = self.regs.value_type(val);
 
-                if RegState::is_float_type(src_ty) && !RegState::is_float_type(dst_ty) {
+                if is_float_type(src_ty) && !is_float_type(dst_ty) {
                     // FP -> GP: FMOV Xd, Dn
                     let ra = self.regs.ensure_in_fp_reg::<B>(&mut self.buf, &mut self.frame, *a);
                     self.regs.dec_use(*a);
-                    let rd_idx = self.regs.alloc_gp::<B, _>(&mut self.buf, &mut self.frame);
+                    let rd_idx = self.regs.alloc_gp::<B>(&mut self.buf, &mut self.frame);
                     B::emit_fp_to_gp_move(&mut self.buf, machine_gp(rd_idx), machine_fp(ra));
                     self.assign_gp_value(val, rd_idx);
-                } else if !RegState::is_float_type(src_ty) && RegState::is_float_type(dst_ty) {
+                } else if !is_float_type(src_ty) && is_float_type(dst_ty) {
                     // GP -> FP: FMOV Dd, Xn
                     let ra = self.regs.ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, *a);
                     self.regs.dec_use(*a);
-                    let rd_idx = self.regs.alloc_fp::<B, _>(&mut self.buf, &mut self.frame);
+                    let rd_idx = self.regs.alloc_fp::<B>(&mut self.buf, &mut self.frame);
                     B::emit_gp_to_fp_move(&mut self.buf, machine_fp(rd_idx), machine_gp(ra));
                     self.assign_fp_value(val, rd_idx);
                 } else {
                     // Same class: just rename
-                    if RegState::is_float_type(src_ty) {
+                    if is_float_type(src_ty) {
                         let ra = self.regs.ensure_in_fp_reg::<B>(&mut self.buf, &mut self.frame, *a);
                         self.regs.dec_use(*a);
                         self.assign_fp_value(val, ra);
@@ -2390,7 +2097,7 @@ where
                 // Look up the pre-allocated frame offset for this stack slot.
                 let slot_offset = self.stack_slot_offsets[stack_slot.index()];
                 let slot = self.frame.slot_access(slot_offset);
-                let rd_idx = self.regs.alloc_gp::<B, _>(&mut self.buf, &mut self.frame);
+                let rd_idx = self.regs.alloc_gp::<B>(&mut self.buf, &mut self.frame);
                 B::emit_lea_frame_slot(&mut self.buf, machine_gp(rd_idx), slot);
                 self.assign_gp_value(val, rd_idx);
             }
@@ -2400,8 +2107,8 @@ where
                 let ra = self.regs.ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, *addr);
                 self.regs.dec_use(*addr);
 
-                if RegState::is_float_type(*ty) {
-                    let rd_idx = self.regs.alloc_fp::<B, _>(&mut self.buf, &mut self.frame);
+                if is_float_type(*ty) {
+                    let rd_idx = self.regs.alloc_fp::<B>(&mut self.buf, &mut self.frame);
                     B::emit_load_fp(
                         &mut self.buf,
                         machine_fp(rd_idx),
@@ -2410,7 +2117,7 @@ where
                     );
                     self.assign_fp_value(val, rd_idx);
                 } else {
-                    let rd_idx = self.regs.alloc_gp::<B, _>(&mut self.buf, &mut self.frame);
+                    let rd_idx = self.regs.alloc_gp::<B>(&mut self.buf, &mut self.frame);
                     let size = type_to_machine_word_size(*ty);
                     B::emit_load_gp(
                         &mut self.buf,
@@ -2424,11 +2131,11 @@ where
             }
 
             Inst::Store(val_to_store, addr, offset) => {
-                let val_ty = self.regs.values[val_to_store.index()].ty;
+                let val_ty = self.regs.value_type(*val_to_store);
 
                 // Load the value FIRST, then the address. This ensures the
                 // address register isn't evicted when loading the value.
-                if RegState::is_float_type(val_ty) {
+                if is_float_type(val_ty) {
                     let rv = self.regs.ensure_in_fp_reg::<B>(&mut self.buf, &mut self.frame, *val_to_store);
                     let ra = self.regs.ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, *addr);
                     B::emit_store_fp(
@@ -2470,7 +2177,7 @@ where
                 let val = result_val.unwrap();
                 let ra = self.regs.ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, *a);
                 self.regs.dec_use(*a);
-                let rd_idx = self.regs.alloc_gp::<B, _>(&mut self.buf, &mut self.frame);
+                let rd_idx = self.regs.alloc_gp::<B>(&mut self.buf, &mut self.frame);
                 B::emit_extract_payload(
                     &mut self.buf,
                     machine_gp(rd_idx),
@@ -2486,7 +2193,7 @@ where
                 let val = result_val.unwrap();
                 let ra = self.regs.ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, *a);
                 self.regs.dec_use(*a);
-                let rd_idx = self.regs.alloc_gp::<B, _>(&mut self.buf, &mut self.frame);
+                let rd_idx = self.regs.alloc_gp::<B>(&mut self.buf, &mut self.frame);
                 let expected = if Cfg::Layout::HAS_UNBOXED_FLOAT {
                     Cfg::Layout::encode_tagged(*tag, 0) >> Cfg::Layout::PAYLOAD_BITS
                 } else {
@@ -2509,7 +2216,7 @@ where
                 let val = result_val.unwrap();
                 let ra = self.regs.ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, *payload);
                 self.regs.dec_use(*payload);
-                let rd_idx = self.regs.alloc_gp::<B, _>(&mut self.buf, &mut self.frame);
+                let rd_idx = self.regs.alloc_gp::<B>(&mut self.buf, &mut self.frame);
                 B::emit_make_tagged(
                     &mut self.buf,
                     machine_gp(rd_idx),
@@ -2527,7 +2234,7 @@ where
                 let val = result_val.unwrap();
                 let ra = self.regs.ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, *a);
                 self.regs.dec_use(*a);
-                let rd_idx = self.regs.alloc_gp::<B, _>(&mut self.buf, &mut self.frame);
+                let rd_idx = self.regs.alloc_gp::<B>(&mut self.buf, &mut self.frame);
                 B::emit_tag_of(
                     &mut self.buf,
                     machine_gp(rd_idx),
@@ -2592,7 +2299,7 @@ where
                 let slot_offsets = self.frame_reify_records[record_idx]
                     .value_indices
                     .iter()
-                    .map(|&value_idx| self.regs.values[value_idx].spill_slot)
+                    .map(|&value_idx| self.regs.value_spill_slot(Value::from_index(value_idx)))
                     .collect();
                 let return_slot = self.frame.alloc_root_slot();
                 self.assign_spill_value(return_dest, return_slot);
@@ -2651,7 +2358,7 @@ where
                 let slot_offsets = self.frame_reify_records[record_idx]
                     .value_indices
                     .iter()
-                    .map(|&value_idx| self.regs.values[value_idx].spill_slot)
+                    .map(|&value_idx| self.regs.value_spill_slot(Value::from_index(value_idx)))
                     .collect();
                 let return_slot = self.frame.alloc_root_slot();
                 self.assign_spill_value(clone_dest, return_slot);
@@ -2670,11 +2377,11 @@ where
     fn lower_gp_binop(&mut self, val: Value, a: Value, b: Value, op: BinOp) {
         let ra = self.regs.ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, a);
         let rb = self.regs.ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, b);
-        let ty = self.regs.values[a.index()].ty;
+        let ty = self.regs.value_type(a);
         self.regs.dec_use(a);
         self.regs.dec_use(b);
 
-        let rd_idx = self.regs.alloc_gp::<B, _>(&mut self.buf, &mut self.frame);
+        let rd_idx = self.regs.alloc_gp::<B>(&mut self.buf, &mut self.frame);
         let size = type_to_machine_word_size(ty);
         let backend_op = match op {
             BinOp::Add => MachineGpBinOp::Add,
@@ -2708,7 +2415,7 @@ where
         self.regs.dec_use(a);
         self.regs.dec_use(b);
 
-        let rd_idx = self.regs.alloc_fp::<B, _>(&mut self.buf, &mut self.frame);
+        let rd_idx = self.regs.alloc_fp::<B>(&mut self.buf, &mut self.frame);
         let backend_op = match op {
             FpBinOp::Add => MachineFpBinOp::Add,
             FpBinOp::Sub => MachineFpBinOp::Sub,
@@ -2737,7 +2444,7 @@ where
         let size = type_to_machine_word_size(ty);
         match op {
             OverflowOp::UAdd => {
-                let sum = self.regs.alloc_gp::<B, _>(&mut self.buf, &mut self.frame);
+                let sum = self.regs.alloc_gp::<B>(&mut self.buf, &mut self.frame);
                 B::emit_gp_binop(
                     &mut self.buf,
                     MachineGpBinOp::Add,
@@ -2746,7 +2453,7 @@ where
                     machine_gp(rb),
                     size,
                 );
-                let out = self.regs.alloc_gp::<B, _>(&mut self.buf, &mut self.frame);
+                let out = self.regs.alloc_gp::<B>(&mut self.buf, &mut self.frame);
                 B::emit_icmp_set(
                     &mut self.buf,
                     CmpOp::Ult,
@@ -2758,7 +2465,7 @@ where
                 Some(out)
             }
             OverflowOp::USub => {
-                let out = self.regs.alloc_gp::<B, _>(&mut self.buf, &mut self.frame);
+                let out = self.regs.alloc_gp::<B>(&mut self.buf, &mut self.frame);
                 B::emit_icmp_set(
                     &mut self.buf,
                     CmpOp::Ult,
@@ -2770,7 +2477,7 @@ where
                 Some(out)
             }
             OverflowOp::SAdd if ty == Type::I64 => {
-                let sum = self.regs.alloc_gp::<B, _>(&mut self.buf, &mut self.frame);
+                let sum = self.regs.alloc_gp::<B>(&mut self.buf, &mut self.frame);
                 B::emit_gp_binop(
                     &mut self.buf,
                     MachineGpBinOp::Add,
@@ -2779,7 +2486,7 @@ where
                     machine_gp(rb),
                     size,
                 );
-                let x1 = self.regs.alloc_gp::<B, _>(&mut self.buf, &mut self.frame);
+                let x1 = self.regs.alloc_gp::<B>(&mut self.buf, &mut self.frame);
                 B::emit_gp_binop(
                     &mut self.buf,
                     MachineGpBinOp::Xor,
@@ -2788,7 +2495,7 @@ where
                     machine_gp(ra),
                     MachineWordSize::W64,
                 );
-                let x2 = self.regs.alloc_gp::<B, _>(&mut self.buf, &mut self.frame);
+                let x2 = self.regs.alloc_gp::<B>(&mut self.buf, &mut self.frame);
                 B::emit_gp_binop(
                     &mut self.buf,
                     MachineGpBinOp::Xor,
@@ -2797,7 +2504,7 @@ where
                     machine_gp(rb),
                     MachineWordSize::W64,
                 );
-                let x3 = self.regs.alloc_gp::<B, _>(&mut self.buf, &mut self.frame);
+                let x3 = self.regs.alloc_gp::<B>(&mut self.buf, &mut self.frame);
                 B::emit_gp_binop(
                     &mut self.buf,
                     MachineGpBinOp::And,
@@ -2806,7 +2513,7 @@ where
                     machine_gp(x2),
                     MachineWordSize::W64,
                 );
-                let shift = self.regs.alloc_gp::<B, _>(&mut self.buf, &mut self.frame);
+                let shift = self.regs.alloc_gp::<B>(&mut self.buf, &mut self.frame);
                 B::emit_mov_imm(&mut self.buf, machine_gp(27), 63);
                 B::emit_gp_binop(
                     &mut self.buf,
@@ -2816,7 +2523,7 @@ where
                     machine_gp(27),
                     MachineWordSize::W64,
                 );
-                let out = self.regs.alloc_gp::<B, _>(&mut self.buf, &mut self.frame);
+                let out = self.regs.alloc_gp::<B>(&mut self.buf, &mut self.frame);
                 B::emit_mov_imm(&mut self.buf, machine_gp(27), 1);
                 B::emit_gp_binop(
                     &mut self.buf,
@@ -2829,7 +2536,7 @@ where
                 Some(out)
             }
             OverflowOp::SSub if ty == Type::I64 => {
-                let diff = self.regs.alloc_gp::<B, _>(&mut self.buf, &mut self.frame);
+                let diff = self.regs.alloc_gp::<B>(&mut self.buf, &mut self.frame);
                 B::emit_gp_binop(
                     &mut self.buf,
                     MachineGpBinOp::Sub,
@@ -2838,7 +2545,7 @@ where
                     machine_gp(rb),
                     size,
                 );
-                let x1 = self.regs.alloc_gp::<B, _>(&mut self.buf, &mut self.frame);
+                let x1 = self.regs.alloc_gp::<B>(&mut self.buf, &mut self.frame);
                 B::emit_gp_binop(
                     &mut self.buf,
                     MachineGpBinOp::Xor,
@@ -2847,7 +2554,7 @@ where
                     machine_gp(rb),
                     MachineWordSize::W64,
                 );
-                let x2 = self.regs.alloc_gp::<B, _>(&mut self.buf, &mut self.frame);
+                let x2 = self.regs.alloc_gp::<B>(&mut self.buf, &mut self.frame);
                 B::emit_gp_binop(
                     &mut self.buf,
                     MachineGpBinOp::Xor,
@@ -2856,7 +2563,7 @@ where
                     machine_gp(ra),
                     MachineWordSize::W64,
                 );
-                let x3 = self.regs.alloc_gp::<B, _>(&mut self.buf, &mut self.frame);
+                let x3 = self.regs.alloc_gp::<B>(&mut self.buf, &mut self.frame);
                 B::emit_gp_binop(
                     &mut self.buf,
                     MachineGpBinOp::And,
@@ -2865,7 +2572,7 @@ where
                     machine_gp(x2),
                     MachineWordSize::W64,
                 );
-                let shift = self.regs.alloc_gp::<B, _>(&mut self.buf, &mut self.frame);
+                let shift = self.regs.alloc_gp::<B>(&mut self.buf, &mut self.frame);
                 B::emit_mov_imm(&mut self.buf, machine_gp(27), 63);
                 B::emit_gp_binop(
                     &mut self.buf,
@@ -2875,7 +2582,7 @@ where
                     machine_gp(27),
                     MachineWordSize::W64,
                 );
-                let out = self.regs.alloc_gp::<B, _>(&mut self.buf, &mut self.frame);
+                let out = self.regs.alloc_gp::<B>(&mut self.buf, &mut self.frame);
                 B::emit_mov_imm(&mut self.buf, machine_gp(27), 1);
                 B::emit_gp_binop(
                     &mut self.buf,
@@ -2892,7 +2599,7 @@ where
     }
 
     fn write_value_to_frame_slot(&mut self, arg: Value, ty: Type, slot: FrameSlotAccess) {
-        if RegState::is_float_type(ty) {
+        if is_float_type(ty) {
             let src = self.regs.ensure_in_fp_reg::<B>(&mut self.buf, &mut self.frame, arg);
             B::emit_store_fp_to_frame(&mut self.buf, machine_fp(src), slot);
         } else {
@@ -2909,7 +2616,7 @@ where
     ) {
         match target.as_machine_location() {
             MachineLocation::Reg(dst) => {
-                if RegState::is_float_type(ty) {
+                if is_float_type(ty) {
                     let src = self.regs.ensure_in_fp_reg::<B>(&mut self.buf, &mut self.frame, arg);
                     B::emit_fp_to_gp_move(&mut self.buf, dst, machine_fp(src));
                 } else {
@@ -2924,7 +2631,7 @@ where
                 }
             }
             MachineLocation::StackArg(stack_offset) => {
-                if RegState::is_float_type(ty) {
+                if is_float_type(ty) {
                     let src = self.regs.ensure_in_fp_reg::<B>(&mut self.buf, &mut self.frame, arg);
                     B::emit_fp_to_gp_move(
                         &mut self.buf,
@@ -2971,9 +2678,9 @@ where
     fn read_entry_arg_into_value(&mut self, val: Value, ty: Type, slot: usize) {
         match Cfg::CallingConvention::arg_location(slot) {
             CallArgLocation::Register(reg_idx) => {
-                if RegState::is_float_type(ty) {
+                if is_float_type(ty) {
                     let gp = machine_gp(reg_idx as u8);
-                    let fp_idx = self.regs.alloc_fp::<B, _>(&mut self.buf, &mut self.frame);
+                    let fp_idx = self.regs.alloc_fp::<B>(&mut self.buf, &mut self.frame);
                     B::emit_gp_to_fp_move(
                         &mut self.buf,
                         machine_fp(fp_idx),
@@ -2987,7 +2694,7 @@ where
             CallArgLocation::Stack(incoming_offset) => {
                 let slot_offset = self.frame.alloc_root_slot();
                 self.assign_spill_value(val, slot_offset);
-                if RegState::is_float_type(ty) {
+                if is_float_type(ty) {
                     B::emit_load_incoming_stack_arg(&mut self.buf, machine_gp(27), incoming_offset);
                     B::emit_gp_to_fp_move(
                         &mut self.buf,
@@ -3026,7 +2733,7 @@ where
             .enumerate()
             .map(|(slot, &arg)| ValueAssignment {
                 value: arg,
-                ty: self.regs.values[arg.index()].ty,
+                ty: self.regs.value_type(arg),
                 target: AssignmentTarget::CallArg(Cfg::CallingConvention::arg_location(slot)),
             })
             .collect();
@@ -3045,29 +2752,14 @@ where
 
         // Values loaded into caller-saved regs during arg setup must have
         // their locs restored to their spill slots (BLR clobbered the regs).
-        for &r in CALLER_SAVED_GP {
-            if let Some(val) = self.regs.gp_occupant[r as usize] {
-                if let Some(slot) = self.regs.values[val.index()].spill_slot {
-                    self.regs.values[val.index()].loc = ValueLoc::Spill(slot);
-                }
-                self.regs.gp_occupant[r as usize] = None;
-            }
-        }
-        for &r in CALLER_SAVED_FP {
-            if let Some(val) = self.regs.fp_occupant[r as usize] {
-                if let Some(slot) = self.regs.values[val.index()].spill_slot {
-                    self.regs.values[val.index()].loc = ValueLoc::Spill(slot);
-                }
-                self.regs.fp_occupant[r as usize] = None;
-            }
-        }
+        self.regs.clobber_caller_saved();
 
     }
 
     fn assign_call_result(&mut self, result_val: Option<Value>) {
         if let Some(val) = result_val {
-            let ty = self.regs.values[val.index()].ty;
-            if RegState::is_float_type(ty) {
+            let ty = self.regs.value_type(val);
+            if is_float_type(ty) {
                 self.assign_fp_value(val, 0);
             } else {
                 self.assign_gp_value(val, 0);
@@ -3153,9 +2845,9 @@ where
 
             let slot_offsets = self
                 .regs
-                .values
+                .value_info_snapshot()
                 .iter()
-                .map(|value| value.spill_slot)
+                .map(|(spill_slot, _ty)| *spill_slot)
                 .collect::<Vec<_>>();
             let suspend_idx = self.suspend_records.len() - 1;
             self.pending_resume_stubs.push(PendingResumeStub {
@@ -3267,9 +2959,9 @@ where
             if let Some(suspend_idx) = suspended_invoke_idx {
                 let slot_offsets = self
                     .regs
-                    .values
+                    .value_info_snapshot()
                     .iter()
-                    .map(|value| value.spill_slot)
+                    .map(|(spill_slot, _ty)| *spill_slot)
                     .collect::<Vec<_>>();
                 self.pending_resume_stubs.push(PendingResumeStub {
                     target: ResumeStubTarget::SuspendRecord(suspend_idx),
@@ -3306,8 +2998,8 @@ where
         let block = &self.func.blocks[block_idx];
         match &block.terminator {
             Terminator::Ret(v) => {
-                let ty = self.regs.values[v.index()].ty;
-                if RegState::is_float_type(ty) {
+                let ty = self.regs.value_type(*v);
+                if is_float_type(ty) {
                     // Return float bits in X0 (call_jit reads X0 as u64)
                     let r = self.regs.ensure_in_fp_reg::<B>(&mut self.buf, &mut self.frame, *v);
                     B::emit_return_fp_bits(&mut self.buf, machine_fp(r));
@@ -3326,10 +3018,12 @@ where
             }
 
             Terminator::Jump(target, args) => {
-                // Spill all live values so they survive the register state
-                // reset at the target block entry
-                self.regs.spill_all_live::<B>(&mut self.buf, &mut self.frame);
+                // Emit block args first while values are still in registers,
+                // avoiding the double memory hop (spill → reload → store to
+                // canonical). Safe because block params no longer alias their
+                // canonical slots as spill slots.
                 self.emit_block_args(*target, args);
+                self.regs.spill_all_live::<B>(&mut self.buf, &mut self.frame);
                 let label = self.block_meta[target.index()].label;
                 B::emit_branch_to_label(&mut self.buf, label);
             }
@@ -3355,30 +3049,18 @@ where
                 let else_tramp = self.buf.create_label();
                 B::emit_cbz_to_label(&mut self.buf, machine_gp(rc), else_tramp);
 
-                // Save value locs and reg state before the then path, so we can
-                // restore them for the else path. At runtime only one path
+                // Save register state before the then path, so we can
+                // restore for the else path. At runtime only one path
                 // executes, so they must each start from the post-spill state.
-                let saved_values: Vec<(ValueLoc, Option<i32>)> = self
-                    .regs
-                    .values
-                    .iter()
-                    .map(|v| (v.loc, v.spill_slot))
-                    .collect();
-                let saved_gp = self.regs.gp_occupant;
-                let saved_fp = self.regs.fp_occupant;
+                let saved = self.regs.save_state();
 
                 // Then path: store args and branch
                 self.store_block_args_for_branch(*then_block, then_args);
                 let then_label = self.block_meta[then_block.index()].label;
                 B::emit_branch_to_label(&mut self.buf, then_label);
 
-                // Restore value locs and reg state for else path
-                for (i, (loc, spill)) in saved_values.into_iter().enumerate() {
-                    self.regs.values[i].loc = loc;
-                    self.regs.values[i].spill_slot = spill;
-                }
-                self.regs.gp_occupant = saved_gp;
-                self.regs.fp_occupant = saved_fp;
+                // Restore register state for else path
+                self.regs.restore_state(saved);
 
                 // Else trampoline: store args and branch
                 B::bind_label(&mut self.buf, else_tramp);
@@ -3405,7 +3087,7 @@ where
                     B::emit_cmp_gp_imm(&mut self.buf, machine_gp(rv), *case_val as u64);
 
                     if !args.is_empty() {
-                        self.store_block_args_to_canonical(*target, args);
+                        self.emit_block_args(*target, args);
                     }
 
                     let label = self.block_meta[target.index()].label;
@@ -3529,7 +3211,7 @@ where
                 };
 
                 let outgoing_size = self.prepare_call_args(args);
-                if let Some(slot) = self.regs.values[callee.index()].spill_slot {
+                if let Some(slot) = self.regs.value_spill_slot(*callee) {
                     B::emit_load_gp_from_frame(
                         &mut self.buf,
                         machine_gp(28),
@@ -3619,24 +3301,11 @@ where
     /// Store block args to canonical spill slots for multi-pred blocks,
     /// or set up renaming for single-pred blocks.
     fn emit_block_args(&mut self, target: BlockId, args: &[Value]) {
-        if args.is_empty() {
-            return;
-        }
-
-        // All blocks with params use canonical spill slots
-        self.store_block_args_to_canonical(target, args);
+        self.regs.emit_block_args::<B>(target.index(), args, self.func, &mut self.buf, &mut self.frame);
     }
 
-    /// Store block args to canonical spill slots for a branch target.
     fn store_block_args_for_branch(&mut self, target: BlockId, args: &[Value]) {
-        if args.is_empty() {
-            return;
-        }
-        self.store_block_args_to_canonical(target, args);
-    }
-
-    fn store_block_args_to_canonical(&mut self, target: BlockId, args: &[Value]) {
-        self.store_block_args_to_canonical_with_param_offset(target, args, 0);
+        self.regs.emit_block_args::<B>(target.index(), args, self.func, &mut self.buf, &mut self.frame);
     }
 
     fn store_block_args_to_canonical_with_param_offset(
@@ -3645,13 +3314,15 @@ where
         args: &[Value],
         param_offset: usize,
     ) {
+        // This is still needed for Invoke normal/exception args where
+        // the first param is the return value (offset by 1).
         let target_idx = target.index();
         let assignments: Vec<ValueAssignment> = args
             .iter()
             .enumerate()
             .map(|(i, &arg)| ValueAssignment {
                 value: arg,
-                ty: self.regs.values[arg.index()].ty,
+                ty: self.regs.value_type(arg),
                 target: AssignmentTarget::FrameSlot(
                     self.frame
                         .slot_access(self.frame.block_param_slots(target_idx)[param_offset + i]),
@@ -3669,7 +3340,7 @@ where
             .iter()
             .filter_map(|&v| match Cfg::RootTransport::kind() {
                 RootTransportKind::FrameScan | RootTransportKind::StackMap => {
-                    self.regs.values[v.index()].spill_slot
+                    self.regs.value_spill_slot(v)
                 }
                 RootTransportKind::ShadowStack => {
                     self.ensure_shadow_value_materialized(v);
