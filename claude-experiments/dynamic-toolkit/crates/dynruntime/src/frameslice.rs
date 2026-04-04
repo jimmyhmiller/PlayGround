@@ -1,5 +1,5 @@
 use dynexec::{
-    ContinuationError, ContinuationStore, FrameSliceError, FrameSliceSnapshot, FrameSliceStore,
+    FrameSliceError, FrameSliceSnapshot, FrameSliceStore,
 };
 use dynobj::RootSource;
 
@@ -69,47 +69,6 @@ impl FrameSliceStore for OwnedFrameSliceStore {
         usize::try_from(bits)
             .map(FrameSliceHandle)
             .map_err(|_| FrameSliceError::MissingSlice)
-    }
-}
-
-impl ContinuationStore<FrameSliceSnapshot> for OwnedFrameSliceStore {
-    type Handle = FrameSliceHandle;
-
-    fn insert(
-        &mut self,
-        captured: FrameSliceSnapshot,
-    ) -> Result<Self::Handle, ContinuationError> {
-        self.insert_slice(captured).map_err(ContinuationError::from)
-    }
-
-    fn clone_captured(
-        &mut self,
-        handle: &Self::Handle,
-    ) -> Result<Self::Handle, ContinuationError> {
-        self.clone_slice(handle).map_err(ContinuationError::from)
-    }
-
-    fn get(&self, handle: &Self::Handle) -> Result<&FrameSliceSnapshot, ContinuationError> {
-        self.slice(handle).map_err(ContinuationError::from)
-    }
-
-    fn get_mut(
-        &mut self,
-        handle: &Self::Handle,
-    ) -> Result<&mut FrameSliceSnapshot, ContinuationError> {
-        self.slice_mut(handle).map_err(ContinuationError::from)
-    }
-
-    fn encode_handle(handle: &Self::Handle) -> u64 {
-        <Self as FrameSliceStore>::encode_handle(handle)
-    }
-
-    fn decode_handle(bits: u64) -> Result<Self::Handle, ContinuationError> {
-        <Self as FrameSliceStore>::decode_handle(bits).map_err(ContinuationError::from)
-    }
-
-    fn mark_consumed(&mut self, handle: &Self::Handle) -> Result<(), ContinuationError> {
-        FrameSliceStore::mark_consumed(self, handle).map_err(ContinuationError::from)
     }
 }
 

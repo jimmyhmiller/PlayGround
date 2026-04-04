@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::time::Instant;
 
-use tensor_lang_backend::assemblyscript::AssemblyScriptBackend;
+use tensor_lang_backend::wasm::WasmBackend;
 use tensor_lang_graph::{compile, nanogpt, Op};
 
 fn project_root() -> PathBuf {
@@ -82,29 +82,12 @@ impl Model {
         );
         let graph = compile(&program);
 
-        let backend = AssemblyScriptBackend;
-        let as_code = backend.emit_fused(&graph);
-        eprintln!("  {} nodes, {} lines AS", graph.nodes.len(), as_code.lines().count());
+        let backend = WasmBackend;
+        let wasm_bytes = backend.emit_fused(&graph);
+        eprintln!("  {} nodes", graph.nodes.len());
 
-        let src_path = tmp_dir.join("gpt2_cached.ts");
         let wasm_path = tmp_dir.join("gpt2_cached.wasm");
-        std::fs::write(&src_path, &as_code).unwrap();
-
-        let asc_output = Command::new("npx")
-            .args(["asc", src_path.to_str().unwrap(),
-                   "--outFile", wasm_path.to_str().unwrap(),
-                   "--exportRuntime", "--optimize",
-                   "--initialMemory", "2048",
-                   "--maximumMemory", "65536"])
-            .current_dir(&root)
-            .output()
-            .expect("failed to run asc");
-
-        if !asc_output.status.success() {
-            let stderr = String::from_utf8_lossy(&asc_output.stderr);
-            eprintln!("asc compilation failed: {}", &stderr[..stderr.len().min(500)]);
-            return;
-        }
+        std::fs::write(&wasm_path, &wasm_bytes).unwrap();
         eprintln!("Compiled in {:.1}s", t_compile.elapsed().as_secs_f64());
 
         // Count inputs (tokens=0, wte=1, wpe=2, attn_mask=3, then weights)
@@ -129,7 +112,7 @@ impl Model {
         io::stdout().flush().unwrap();
 
         let t_gen = Instant::now();
-        let runner = root.join("test_runner_bin.mjs");
+        let runner = root.join("test_runner_wasm_bin.mjs");
         let inputs_bin_path = tmp_dir.join("gpt2_cli_inputs.bin");
         let inputs_manifest_path = tmp_dir.join("gpt2_cli_manifest.json");
 
@@ -183,10 +166,12 @@ impl Model {
             let manifest_entries: Vec<String> = flat_inputs.iter()
                 .map(|arr| format!("{{\"n_elements\":{}}}", arr.len()))
                 .collect();
+            let output_size = actual_t * self.vocab_size; // [1, T, vocab]
             let manifest = format!(
-                "{{\"dim_params\":[{}],\"inputs\":[{}]}}",
+                "{{\"dim_params\":[{}],\"inputs\":[{}],\"output_size\":{}}}",
                 actual_t,
-                manifest_entries.join(",")
+                manifest_entries.join(","),
+                output_size
             );
             std::fs::write(&inputs_manifest_path, &manifest).unwrap();
 
@@ -261,7 +246,7 @@ impl Model {
         }
 
         // Cleanup
-        let _ = std::fs::remove_file(&src_path);
+        // (no AS source file to clean up)
         let _ = std::fs::remove_file(&wasm_path);
         let _ = std::fs::remove_file(&inputs_bin_path);
         let _ = std::fs::remove_file(&inputs_manifest_path);
@@ -299,7 +284,7 @@ fn main() {
     eprintln!("Loaded in {:.1}s", t0.elapsed().as_secs_f64());
     eprintln!("vocab={}, d={}, heads={}, layers={}",
         model.vocab_size, model.n_embd, model.n_head, model.n_layer);
-    eprintln!("Backend: fused WASM (AssemblyScript)");
+    eprintln!("Backend: fused WASM (direct)");
     eprintln!("Temperature: {temperature}, Max tokens: {max_tokens}");
     eprintln!();
     eprintln!("Type a prompt and press Enter. Ctrl-C to quit.");

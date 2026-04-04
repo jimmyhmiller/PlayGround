@@ -16,9 +16,9 @@ use regalloc::{
 };
 use dynexec::{
     CallArgLocation, CallingConvention, CapturedCallerResume, CapturedFrame,
-    DefaultExecutionConfig, ExecutionConfig, FrameLayout, FrameResumePoint, FrameSlotAccess,
+    CodegenConfig, DefaultCodegenConfig, FrameLayout, FrameResumePoint, FrameSlotAccess,
     FrameSlotBase, FrameStrategy, LayoutConfigDefaults, RootTransport, RootTransportKind,
-    validate_execution_config,
+    validate_codegen_config,
 };
 use dynasm::buffer::{CodeBuffer, Label};
 use dynasm::code_memory::{CodeMemory, PagedCodeMemory};
@@ -135,7 +135,7 @@ impl dynobj::RootSource for JitFrameRoots {
 
 // ─── Public API ────────────────────────────────────────────────────
 
-pub type DefaultJitConfig<L> = DefaultExecutionConfig<L>;
+pub type DefaultJitConfig<L> = DefaultCodegenConfig<L>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SafepointRecord {
@@ -373,14 +373,14 @@ impl JitFunction {
         )
     }
 
-    pub fn compile_with_config<Cfg: ExecutionConfig>(func: &Function, externs: &[*const u8]) -> Self
+    pub fn compile_with_config<Cfg: CodegenConfig>(func: &Function, externs: &[*const u8]) -> Self
     where
         Cfg::Frames: FrameStrategy<Cfg::Layout, Cfg::Roots, Cfg::CallingConvention>,
     {
         Self::compile_with_backend_and_config::<Cfg, Arm64Backend>(func, externs, None)
     }
 
-    pub fn compile_with_config_and_gc<Cfg: ExecutionConfig>(
+    pub fn compile_with_config_and_gc<Cfg: CodegenConfig>(
         func: &Function,
         externs: &[*const u8],
         safepoint_handler: Option<u64>,
@@ -391,7 +391,7 @@ impl JitFunction {
         Self::compile_with_backend_and_config::<Cfg, Arm64Backend>(func, externs, safepoint_handler)
     }
 
-    pub fn compile_with_backend_and_config<Cfg: ExecutionConfig, B: LoweringBackend>(
+    pub fn compile_with_backend_and_config<Cfg: CodegenConfig, B: LoweringBackend>(
         func: &Function,
         externs: &[*const u8],
         safepoint_handler: Option<u64>,
@@ -402,7 +402,7 @@ impl JitFunction {
         Self::compile_with_regalloc::<Cfg, B, GreedyRegState>(func, externs, safepoint_handler)
     }
 
-    pub fn compile_with_regalloc<Cfg: ExecutionConfig, B: LoweringBackend, R: RegisterAllocator>(
+    pub fn compile_with_regalloc<Cfg: CodegenConfig, B: LoweringBackend, R: RegisterAllocator>(
         func: &Function,
         externs: &[*const u8],
         safepoint_handler: Option<u64>,
@@ -410,7 +410,7 @@ impl JitFunction {
     where
         Cfg::Frames: FrameStrategy<Cfg::Layout, Cfg::Roots, Cfg::CallingConvention>,
     {
-        validate_execution_config::<Cfg>().unwrap_or_else(|err| {
+        validate_codegen_config::<Cfg>().unwrap_or_else(|err| {
             panic!("invalid dynlower config: {err}");
         });
 
@@ -587,14 +587,14 @@ impl JitModule {
         )
     }
 
-    pub fn compile_with_config<Cfg: ExecutionConfig>(module: &Module, externs: &[*const u8]) -> Self
+    pub fn compile_with_config<Cfg: CodegenConfig>(module: &Module, externs: &[*const u8]) -> Self
     where
         Cfg::Frames: FrameStrategy<Cfg::Layout, Cfg::Roots, Cfg::CallingConvention>,
     {
         Self::compile_with_backend_and_config::<Cfg, Arm64Backend>(module, externs, None)
     }
 
-    pub fn compile_with_config_and_gc<Cfg: ExecutionConfig>(
+    pub fn compile_with_config_and_gc<Cfg: CodegenConfig>(
         module: &Module,
         externs: &[*const u8],
         safepoint_handler: Option<u64>,
@@ -605,7 +605,7 @@ impl JitModule {
         Self::compile_with_backend_and_config::<Cfg, Arm64Backend>(module, externs, safepoint_handler)
     }
 
-    pub fn compile_with_backend_and_config<Cfg: ExecutionConfig, B: LoweringBackend>(
+    pub fn compile_with_backend_and_config<Cfg: CodegenConfig, B: LoweringBackend>(
         module: &Module,
         externs: &[*const u8],
         safepoint_handler: Option<u64>,
@@ -616,7 +616,7 @@ impl JitModule {
         Self::compile_with_regalloc::<Cfg, B, GreedyRegState>(module, externs, safepoint_handler)
     }
 
-    pub fn compile_with_regalloc<Cfg: ExecutionConfig, B: LoweringBackend, R: RegisterAllocator>(
+    pub fn compile_with_regalloc<Cfg: CodegenConfig, B: LoweringBackend, R: RegisterAllocator>(
         module: &Module,
         externs: &[*const u8],
         safepoint_handler: Option<u64>,
@@ -624,7 +624,7 @@ impl JitModule {
     where
         Cfg::Frames: FrameStrategy<Cfg::Layout, Cfg::Roots, Cfg::CallingConvention>,
     {
-        validate_execution_config::<Cfg>().unwrap_or_else(|err| {
+        validate_codegen_config::<Cfg>().unwrap_or_else(|err| {
             panic!("invalid dynlower config: {err}");
         });
 
@@ -1162,7 +1162,7 @@ fn assign_block_prompt_stacks(func: &Function, block_meta: &mut [BlockMeta]) {
 
 // ─── Lowerer ───────────────────────────────────────────────────────
 
-struct Lowerer<'a, Cfg: ExecutionConfig, B: LoweringBackend, R: RegisterAllocator = GreedyRegState>
+struct Lowerer<'a, Cfg: CodegenConfig, B: LoweringBackend, R: RegisterAllocator = GreedyRegState>
 where
     Cfg::Frames: FrameStrategy<Cfg::Layout, Cfg::Roots, Cfg::CallingConvention>,
 {
@@ -1198,7 +1198,7 @@ where
     _backend: PhantomData<B>,
 }
 
-impl<'a, Cfg: ExecutionConfig, B: LoweringBackend, R: RegisterAllocator> Lowerer<'a, Cfg, B, R>
+impl<'a, Cfg: CodegenConfig, B: LoweringBackend, R: RegisterAllocator> Lowerer<'a, Cfg, B, R>
 where
     Cfg::Frames: FrameStrategy<Cfg::Layout, Cfg::Roots, Cfg::CallingConvention>,
 {

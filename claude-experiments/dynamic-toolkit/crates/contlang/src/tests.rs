@@ -177,10 +177,10 @@ fn capture_abort_resume() {
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// Segment Interpreter Tests — frames are GC heap objects
+// GC Segment Tests — via unified interpreter + GCSegmentStack
 // ═══════════════════════════════════════════════════════════════════
 
-fn run_seg(src: &str, entry_name: &str, args: &[u64]) -> u64 {
+fn run_unified_gc(src: &str, entry_name: &str) -> u64 {
     let tokens = crate::lex(src);
     let program = crate::parse(tokens);
     let lowered = crate::lower_program(&program);
@@ -190,52 +190,51 @@ fn run_seg(src: &str, entry_name: &str, args: &[u64]) -> u64 {
         });
     }
     let entry = lowered.func_refs[entry_name];
-    let mut interp = crate::segment_interp::gc_interpreter(&lowered.module, 1024 * 1024);
-    interp.run(entry, args)
+    crate::unified_interp::run::<crate::gc_stack::GCSegmentStack>(&lowered.module, entry, &[])
 }
 
 #[test]
-fn seg_return_constant() {
-    assert_eq!(run_seg("fn main() { 42 }", "main", &[]), 42);
+fn gc_return_constant() {
+    assert_eq!(run_unified_gc("fn main() { 42 }", "main"), 42);
 }
 
 #[test]
-fn seg_arithmetic() {
-    assert_eq!(run_seg("fn main() { (3 + 4) * 2 - 1 }", "main", &[]), 13);
+fn gc_arithmetic() {
+    assert_eq!(run_unified_gc("fn main() { (3 + 4) * 2 - 1 }", "main"), 13);
 }
 
 #[test]
-fn seg_function_calls() {
+fn gc_function_calls() {
     let src = "fn double(x) { x + x }  fn main() { double(21) }";
-    assert_eq!(run_seg(src, "main", &[]), 42);
+    assert_eq!(run_unified_gc(src, "main"), 42);
 }
 
 #[test]
-fn seg_recursion() {
+fn gc_recursion() {
     let src = r#"
         fn factorial(n) { if n <= 1 { 1 } else { n * factorial(n - 1) } }
         fn main() { factorial(6) }
     "#;
-    assert_eq!(run_seg(src, "main", &[]), 720);
+    assert_eq!(run_unified_gc(src, "main"), 720);
 }
 
 #[test]
-fn seg_reset_without_abort() {
+fn gc_reset_without_abort() {
     let src = "fn body() { reset { 42 } }  fn main() { body() }";
-    assert_eq!(run_seg(src, "main", &[]), 42);
+    assert_eq!(run_unified_gc(src, "main"), 42);
 }
 
 #[test]
-fn seg_abort_returns_value() {
+fn gc_abort_returns_value() {
     let src = r#"
         fn body() { reset { abort(99); 999 } }
         fn main() { body() }
     "#;
-    assert_eq!(run_seg(src, "main", &[]), 99);
+    assert_eq!(run_unified_gc(src, "main"), 99);
 }
 
 #[test]
-fn seg_capture_abort_resume() {
+fn gc_capture_abort_resume() {
     let src = r#"
         fn capture_it() -> cont {
             reset { let k: cont = shift(); abort(k) }
@@ -246,11 +245,11 @@ fn seg_capture_abort_resume() {
             do_resume(k, 42)
         }
     "#;
-    assert_eq!(run_seg(src, "main", &[]), 42);
+    assert_eq!(run_unified_gc(src, "main"), 42);
 }
 
 #[test]
-fn seg_multi_shot_clone() {
+fn gc_multi_shot_clone() {
     let src = r#"
         fn capture_it() -> cont {
             reset { let k: cont = shift(); abort(k) }
@@ -264,47 +263,49 @@ fn seg_multi_shot_clone() {
             do_resume(k1, 11)
         }
     "#;
-    assert_eq!(run_seg(src, "main", &[]), 11);
+    assert_eq!(run_unified_gc(src, "main"), 11);
 }
 
 #[test]
-fn seg_nested_resets() {
+fn gc_nested_resets() {
     let src = r#"
         fn inner() { reset { abort(5) } }
         fn main() { reset { let v = inner(); v + 10 } }
     "#;
-    assert_eq!(run_seg(src, "main", &[]), 15);
+    assert_eq!(run_unified_gc(src, "main"), 15);
 }
 
 // ── GC-specific tests ──────────────────────────────────────────────
 
 #[test]
-fn seg_gc_collects_dead_segments() {
+fn gc_collects_dead_segments() {
+    use dynexec::StackConfig;
+
     let tokens = crate::lex("fn main() { 42 }");
     let program = crate::parse(tokens);
     let lowered = crate::lower_program(&program);
     let entry = lowered.func_refs["main"];
 
-    let mut interp = crate::segment_interp::gc_interpreter(&lowered.module, 64 * 1024);
-
-    // Run — allocates a segment for main's frame
-    let result = interp.run(entry, &[]);
+    let config = StackConfig { heap_size: 64 * 1024 };
+    let mut rt = crate::gc_stack::GCSegmentRuntime::new(config.heap_size);
+    let result = crate::unified_interp::interpret::<crate::gc_stack::GCSegmentStack>(
+        &lowered.module, &mut rt, entry, &[],
+    );
     assert_eq!(result, 42);
 
-    let used_before = interp.backend.from_used();
+    let used_before = rt.from_used();
     assert!(used_before > 0, "should have allocated something");
 
-    // Collect with empty stack — all segments are dead
-    interp.backend.collect_empty();
+    rt.collect_empty();
 
-    let used_after = interp.backend.from_used();
+    let used_after = rt.from_used();
     assert_eq!(used_after, 0, "dead segments should have been reclaimed");
 }
 
 #[test]
-fn seg_gc_moves_segments() {
+fn gc_moves_segments() {
     // Allocate a segment with tagged values, root it, collect, verify it moved.
-    use crate::segment_interp::SegPtrPolicy;
+    use crate::gc_stack::SegPtrPolicy;
     use dynalloc::{PtrPolicy, SemiSpace};
     use dynobj::{Compact, ObjHeader, TypeInfo};
     use dynvalue::LowBit;
@@ -364,10 +365,7 @@ fn seg_gc_moves_segments() {
 }
 
 #[test]
-fn seg_gc_during_execution() {
-    // Many sequential function calls generate dead segments.
-    // With a small heap, GC fires during allocation and reclaims dead segments.
-    // Only 2 frames are live at once (main + callee), but many segments accumulate.
+fn gc_during_execution() {
     let src = r#"
         fn work(x) { x + 1 }
         fn main() {
@@ -397,13 +395,13 @@ fn seg_gc_during_execution() {
         dynir::verify(func).unwrap();
     }
     let entry = lowered.func_refs["main"];
-    // Force GC every 3 allocations — stress-tests that the interpreter
-    // survives collections mid-execution with frames being moved.
-    let mut interp = crate::segment_interp::gc_interpreter(&lowered.module, 64 * 1024);
-    interp.backend.set_gc_stress(3);
-    let result = interp.run(entry, &[]);
-    assert_eq!(result, 17); // work applied 16 times: 1+16=17
-    assert!(interp.backend.gc_count() > 0, "GC should have been triggered (gc_count={})", interp.backend.gc_count());
+    let mut rt = crate::gc_stack::GCSegmentRuntime::new(64 * 1024);
+    rt.set_gc_stress(3);
+    let result = crate::unified_interp::interpret::<crate::gc_stack::GCSegmentStack>(
+        &lowered.module, &mut rt, entry, &[],
+    );
+    assert_eq!(result, 17);
+    assert!(rt.gc_count() > 0, "GC should have been triggered");
 }
 
 #[test]
@@ -482,85 +480,6 @@ fn cross_function_capture_and_resume() {
         }
     "#;
     assert_eq!(run_interp(src, "main", &[]), 42);
-}
-
-// ═══════════════════════════════════════════════════════════════════
-// Generic Interpreter Tests — ONE interpreter, multiple backends
-// ═══════════════════════════════════════════════════════════════════
-
-fn run_generic_vec(src: &str, entry_name: &str, args: &[u64]) -> u64 {
-    let tokens = crate::lex(src);
-    let program = crate::parse(tokens);
-    let lowered = crate::lower_program(&program);
-    for func in &lowered.module.functions {
-        dynir::verify(func).unwrap();
-    }
-    let entry = lowered.func_refs[entry_name];
-    let backend = dynexec::VecBackend::new();
-    let mut interp = crate::generic_interp::GenericInterpreter::new(&lowered.module, backend);
-    interp.run(entry, args)
-}
-
-#[test]
-fn generic_vec_arithmetic() {
-    assert_eq!(run_generic_vec("fn main() { (3 + 4) * 2 - 1 }", "main", &[]), 13);
-}
-
-#[test]
-fn generic_vec_function_calls() {
-    let src = "fn double(x) { x + x }  fn main() { double(21) }";
-    assert_eq!(run_generic_vec(src, "main", &[]), 42);
-}
-
-#[test]
-fn generic_vec_recursion() {
-    let src = r#"
-        fn factorial(n) { if n <= 1 { 1 } else { n * factorial(n - 1) } }
-        fn main() { factorial(6) }
-    "#;
-    assert_eq!(run_generic_vec(src, "main", &[]), 720);
-}
-
-#[test]
-fn generic_vec_abort() {
-    let src = r#"
-        fn body() { reset { abort(99); 999 } }
-        fn main() { body() }
-    "#;
-    assert_eq!(run_generic_vec(src, "main", &[]), 99);
-}
-
-#[test]
-fn generic_vec_capture_resume() {
-    let src = r#"
-        fn capture_it() -> cont {
-            reset { let k: cont = shift(); abort(k) }
-        }
-        fn do_resume(k: cont, v) { resume(k, v) }
-        fn main() {
-            let k: cont = capture_it();
-            do_resume(k, 42)
-        }
-    "#;
-    assert_eq!(run_generic_vec(src, "main", &[]), 42);
-}
-
-#[test]
-fn generic_vec_multi_shot() {
-    let src = r#"
-        fn capture_it() -> cont {
-            reset { let k: cont = shift(); abort(k) }
-        }
-        fn do_clone(k: cont) -> cont { clone(k) }
-        fn do_resume(k: cont, v) { resume(k, v) }
-        fn main() {
-            let k: cont = capture_it();
-            let k1: cont = do_clone(k);
-            let k2: cont = do_clone(k);
-            do_resume(k1, 11)
-        }
-    "#;
-    assert_eq!(run_generic_vec(src, "main", &[]), 11);
 }
 
 // ═══════════════════════════════════════════════════════════════════

@@ -2,7 +2,7 @@ use std::cell::RefCell;
 use std::marker::PhantomData;
 
 use dynexec::{
-    CapturedCallerResume, CapturedFrame, DefaultExecutionConfig, ExecutionConfig,
+    CapturedCallerResume, CapturedFrame, CodegenConfig, DefaultCodegenConfig,
     FrameResumePoint, FrameSliceError, FrameSliceMode, FrameSliceSnapshot, FrameSliceStore,
     InMemoryFrameSliceStore, LayoutConfigDefaults, RootPrecision, RootStrategy, RootTransport,
     RootTransportKind, ValueLayout,
@@ -184,7 +184,7 @@ enum FrameAction {
 /// can borrow it directly (no `Rc` needed).
 pub struct ConfiguredModuleInterpreter<
     'a,
-    Cfg: ExecutionConfig,
+    Cfg: CodegenConfig,
     R: InterpRootManager<Cfg::Layout, Cfg::Roots, Cfg::RootTransport> = NoGcRoots,
     S: FrameSliceStore = InMemoryFrameSliceStore,
 > {
@@ -197,9 +197,9 @@ pub struct ConfiguredModuleInterpreter<
 }
 
 pub type ModuleInterpreter<'a, S, R = NoGcRoots> =
-    ConfiguredModuleInterpreter<'a, DefaultExecutionConfig<S>, R, InMemoryFrameSliceStore>;
+    ConfiguredModuleInterpreter<'a, DefaultCodegenConfig<S>, R, InMemoryFrameSliceStore>;
 
-impl<'a, Cfg: ExecutionConfig, R, S> ConfiguredModuleInterpreter<'a, Cfg, R, S>
+impl<'a, Cfg: CodegenConfig, R, S> ConfiguredModuleInterpreter<'a, Cfg, R, S>
 where
     Cfg::Layout: LayoutConfigDefaults,
     R: InterpRootManager<Cfg::Layout, Cfg::Roots, Cfg::RootTransport>,

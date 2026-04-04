@@ -2,6 +2,8 @@ use std::collections::HashMap;
 use ndarray::{ArrayD, IxDyn};
 use rand::Rng;
 use tensor_lang_graph::{compile_with_env, Graph, NodeId, Op};
+use tensor_lang_backend::wasm::WasmBackend;
+use tensor_lang_backend::runtime::WasmRuntime;
 
 // ─── Chord grammar vocabulary ────────────���────────────────────────────────
 
@@ -134,6 +136,12 @@ pub struct ModelRunner {
     pub inf_logits_idx: usize,       // last forward node in inference graph
     pub train_logits_idx: usize,     // last model-forward node in training graph
     pub train_loss_idx: usize,       // loss node index (boundary: everything after = backprop)
+    // Compiled WASM runtimes
+    inf_wasm_bytes: Vec<u8>,
+    inf_all_output_ids: Vec<NodeId>,    // which nodes are materialized in inference
+    inf_output_sizes: Vec<usize>,       // size of each output
+    train_wasm_bytes: Vec<u8>,
+    train_output_sizes: Vec<usize>,
 }
 
 fn model_source() -> String {
@@ -329,23 +337,84 @@ pub fn init_weights_pub(cfg: &ModelConfig) -> Vec<Vec<f32>> {
     init_weights(cfg)
 }
 
+/// Compute output sizes for each node in a graph.
+fn node_sizes(graph: &Graph) -> Vec<usize> {
+    graph.nodes.iter().map(|n| {
+        n.shape.iter()
+            .map(|d| d.as_usize().expect("symbolic dim in viz"))
+            .product::<usize>()
+            .max(1) // scalars are 1 element
+    }).collect()
+}
+
+/// Compile inference WASM that outputs ALL non-input nodes.
+fn compile_inf_wasm(graph: &Graph) -> (Vec<u8>, Vec<NodeId>, Vec<usize>) {
+    // Output every non-input node so the graph explorer can inspect all values
+    let output_ids: Vec<NodeId> = (0..graph.nodes.len())
+        .filter(|&i| !matches!(&graph.nodes[i].op, Op::Input { .. }))
+        .map(NodeId)
+        .collect();
+    let output_sizes: Vec<usize> = output_ids.iter()
+        .map(|id| {
+            graph.nodes[id.0].shape.iter()
+                .map(|d| d.as_usize().unwrap())
+                .product::<usize>()
+                .max(1)
+        })
+        .collect();
+
+    let backend = WasmBackend;
+    let wasm_bytes = backend.emit_fused_multi_output(graph, &output_ids);
+    (wasm_bytes, output_ids, output_sizes)
+}
+
+/// Compile training WASM that outputs loss + gradients.
+fn compile_train_wasm(
+    graph: &Graph,
+    loss: NodeId,
+    grad_ids: &[NodeId],
+) -> (Vec<u8>, Vec<usize>) {
+    let mut output_ids = vec![loss];
+    output_ids.extend_from_slice(grad_ids);
+    let output_sizes: Vec<usize> = output_ids.iter()
+        .map(|id| {
+            graph.nodes[id.0].shape.iter()
+                .map(|d| d.as_usize().unwrap())
+                .product::<usize>()
+                .max(1)
+        })
+        .collect();
+
+    let backend = WasmBackend;
+    let wasm_bytes = backend.emit_fused_multi_output(graph, &output_ids);
+    (wasm_bytes, output_sizes)
+}
+
 impl ModelRunner {
     pub fn new() -> Self {
         let cfg = ModelConfig::default();
+        Self::build(cfg, init_weights(&ModelConfig::default()))
+    }
 
+    fn build(cfg: ModelConfig, weights: Vec<Vec<f32>>) -> Self {
         // Compile inference graph
         let source = model_source();
         let (dims, constants) = model_env(&cfg);
         let inf_graph = compile_with_env(&source, &dims, &constants);
         let inf_map = find_activation_map(&inf_graph, &cfg);
-
         let inf_logits_idx = inf_graph.nodes.len() - 1;
+
+        // Compile inference WASM (outputs all nodes)
+        let (inf_wasm_bytes, inf_all_output_ids, inf_output_sizes) =
+            compile_inf_wasm(&inf_graph);
 
         // Compile training graph
         let (train_graph, train_loss, train_grad_ids, train_weight_ids, train_logits_idx, train_loss_idx) =
             compile_for_training(&cfg);
 
-        let weights = init_weights(&cfg);
+        // Compile training WASM (outputs loss + grads)
+        let (train_wasm_bytes, train_output_sizes) =
+            compile_train_wasm(&train_graph, train_loss, &train_grad_ids);
 
         ModelRunner {
             inf_graph,
@@ -359,55 +428,101 @@ impl ModelRunner {
             train_loss_idx,
             cfg,
             weights,
+            inf_wasm_bytes,
+            inf_all_output_ids,
+            inf_output_sizes,
+            train_wasm_bytes,
+            train_output_sizes,
         }
     }
 
-    fn build_inputs(&self, graph: &Graph, tokens: &[f32], targets: Option<&[f32]>) -> HashMap<String, ArrayD<f32>> {
-        let mut inputs = HashMap::new();
-
-        for (_i, node) in graph.nodes.iter().enumerate() {
+    /// Build flat input arrays in graph order.
+    fn collect_inputs(&self, graph: &Graph, tokens: &[f32], targets: Option<&[f32]>) -> Vec<Vec<f32>> {
+        let mut inputs = Vec::new();
+        for node in &graph.nodes {
             if let Op::Input { name } = &node.op {
                 if name == "input_0" {
-                    let shape = vec![self.cfg.batch_size, self.cfg.seq_len];
-                    let arr = ArrayD::from_shape_vec(IxDyn(&shape), tokens.to_vec()).unwrap();
-                    inputs.insert(name.clone(), arr);
+                    inputs.push(tokens.to_vec());
                 } else if name == "targets" {
-                    if let Some(tgt) = targets {
-                        let shape = vec![self.cfg.batch_size, self.cfg.seq_len];
-                        let arr = ArrayD::from_shape_vec(IxDyn(&shape), tgt.to_vec()).unwrap();
-                        inputs.insert(name.clone(), arr);
-                    }
+                    inputs.push(targets.unwrap_or(&[]).to_vec());
                 } else if name.starts_with("input_") {
-                    // input_1 -> weights[0], input_2 -> weights[1], etc.
                     let num: usize = name[6..].parse().unwrap();
                     let weight_idx = num - 1;
-                    let w = &self.weights[weight_idx];
-                    let shape: Vec<usize> = node.shape.iter()
-                        .map(|d| d.as_usize().expect("symbolic dim in weight shape"))
-                        .collect();
-                    let arr = ArrayD::from_shape_vec(IxDyn(&shape), w.clone()).unwrap();
-                    inputs.insert(name.clone(), arr);
+                    inputs.push(self.weights[weight_idx].clone());
                 }
             }
         }
-
         inputs
     }
 
     pub fn forward(&self, tokens: &[f32]) -> Vec<ArrayD<f32>> {
-        let inputs = self.build_inputs(&self.inf_graph, tokens, None);
-        tensor_lang_test_oracle::eval_with_inputs(&self.inf_graph, &inputs)
+        let flat_inputs = self.collect_inputs(&self.inf_graph, tokens, None);
+        let input_refs: Vec<&[f32]> = flat_inputs.iter().map(|v| v.as_slice()).collect();
+
+        let total_output: usize = self.inf_output_sizes.iter().sum();
+
+        let mut runtime = WasmRuntime::new(&self.inf_wasm_bytes)
+            .expect("failed to create WASM runtime for inference");
+        let result = runtime.run(&input_refs, total_output);
+
+        // Split concatenated output into per-node ArrayD values.
+        // Build a full array for every node (input nodes get dummy empty arrays).
+        let n_nodes = self.inf_graph.nodes.len();
+        let mut all_values: Vec<ArrayD<f32>> = Vec::with_capacity(n_nodes);
+
+        // Create a map from node id -> output index for non-input nodes
+        let mut output_map: HashMap<usize, usize> = HashMap::new();
+        for (oi, id) in self.inf_all_output_ids.iter().enumerate() {
+            output_map.insert(id.0, oi);
+        }
+
+        let mut offset = 0usize;
+        // Pre-compute offsets for each output
+        let mut offsets = Vec::with_capacity(self.inf_output_sizes.len());
+        for &sz in &self.inf_output_sizes {
+            offsets.push(offset);
+            offset += sz;
+        }
+
+        for i in 0..n_nodes {
+            let shape: Vec<usize> = self.inf_graph.nodes[i].shape.iter()
+                .map(|d| d.as_usize().unwrap_or(1))
+                .collect();
+            if let Some(&oi) = output_map.get(&i) {
+                let start = offsets[oi];
+                let sz = self.inf_output_sizes[oi];
+                let data = result[start..start + sz].to_vec();
+                all_values.push(ArrayD::from_shape_vec(IxDyn(&shape), data)
+                    .unwrap_or_else(|_| ArrayD::zeros(IxDyn(&shape))));
+            } else {
+                // Input node — fill with zeros (the viz doesn't inspect these)
+                all_values.push(ArrayD::zeros(IxDyn(&shape)));
+            }
+        }
+
+        all_values
     }
 
     pub fn train_step(&mut self, tokens: &[f32], targets: &[f32]) -> (f32, Vec<Vec<f32>>) {
-        let inputs = self.build_inputs(&self.train_graph, tokens, Some(targets));
+        let flat_inputs = self.collect_inputs(&self.train_graph, tokens, Some(targets));
+        let input_refs: Vec<&[f32]> = flat_inputs.iter().map(|v| v.as_slice()).collect();
 
-        let all = tensor_lang_test_oracle::eval_with_inputs(&self.train_graph, &inputs);
+        let total_output: usize = self.train_output_sizes.iter().sum();
 
-        let loss = all[self.train_loss.0].iter().next().copied().unwrap_or(f32::NAN);
+        let mut runtime = WasmRuntime::new(&self.train_wasm_bytes)
+            .expect("failed to create WASM runtime for training");
+        let result = runtime.run(&input_refs, total_output);
 
-        let grads: Vec<Vec<f32>> = self.train_grad_ids.iter()
-            .map(|gid| all[gid.0].iter().copied().collect())
+        // First output is loss (1 element), rest are gradients
+        let loss = result[0];
+
+        let mut off = self.train_output_sizes[0]; // skip loss
+        let grads: Vec<Vec<f32>> = self.train_output_sizes[1..].iter()
+            .map(|&sz| {
+                let g = result[off..off + sz].to_vec();
+                off += sz;
+                g
+            })
             .collect();
 
         (loss, grads)
@@ -428,9 +543,9 @@ impl ModelRunner {
             n_embd: r32(&mut off) as usize,
             n_head: r32(&mut off) as usize,
             n_layer: r32(&mut off) as usize,
-            batch_size: 1, // override for viz (saved model may have batch_size=16)
+            batch_size: 1,
         };
-        let _saved_batch = r32(&mut off); // skip saved batch_size
+        let _saved_batch = r32(&mut off);
 
         let n_w = r32(&mut off) as usize;
         let mut weights = Vec::new();
@@ -447,20 +562,7 @@ impl ModelRunner {
         eprintln!("Loaded {} weight tensors from {} (n_embd={}, n_head={}, n_layer={})",
             n_w, path.display(), cfg.n_embd, cfg.n_head, cfg.n_layer);
 
-        // Compile graphs with loaded config
-        let source = model_source();
-        let (dims, constants) = model_env(&cfg);
-        let inf_graph = compile_with_env(&source, &dims, &constants);
-        let inf_map = find_activation_map(&inf_graph, &cfg);
-        let inf_logits_idx = inf_graph.nodes.len() - 1;
-        let (train_graph, train_loss, train_grad_ids, train_weight_ids, train_logits_idx, train_loss_idx) =
-            compile_for_training(&cfg);
-
-        ModelRunner {
-            inf_graph, train_graph, train_loss, train_grad_ids, train_weight_ids,
-            inf_logits_idx, train_logits_idx, train_loss_idx,
-            inf_map, cfg, weights,
-        }
+        Self::build(cfg, weights)
     }
 
     pub fn pad_sequence(seq: &[usize], seq_len: usize) -> Vec<f32> {

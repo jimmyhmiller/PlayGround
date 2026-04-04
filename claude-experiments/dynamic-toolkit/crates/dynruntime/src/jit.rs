@@ -241,7 +241,7 @@ pub fn resume_stored_slice_with_interpreter<'a, Cfg, R, IS, S>(
     args: &[u64],
 ) -> Result<InterpResult, ResumeWithInterpreterError>
 where
-    Cfg: dynexec::ExecutionConfig,
+    Cfg: dynexec::CodegenConfig,
     Cfg::Layout: dynexec::LayoutConfigDefaults,
     R: InterpRootManager<Cfg::Layout, Cfg::Roots, Cfg::RootTransport>,
     IS: FrameSliceStore,

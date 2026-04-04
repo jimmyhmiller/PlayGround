@@ -22,6 +22,7 @@ pub fn interpret<S: UnifiedStackStrategy>(
     let param_args: Vec<(usize, u64)> = func.blocks[0].params.iter().enumerate()
         .map(|(i, (v, _))| (v.index(), args[i]))
         .collect();
+    if rt.needs_gc() { rt.collect_gc(); }
     rt.push_frame(callee_idx, val_count, &param_args, FrameResume::TopLevel);
 
     'dispatch: loop {
@@ -104,6 +105,7 @@ pub fn interpret<S: UnifiedStackStrategy>(
                         .enumerate()
                         .map(|(i, (v, _))| (v.index(), arg_vals[i]))
                         .collect();
+                    if rt.needs_gc() { rt.collect_gc(); }
                     rt.push_frame(
                         callee_idx,
                         callee_func.value_types.len(),

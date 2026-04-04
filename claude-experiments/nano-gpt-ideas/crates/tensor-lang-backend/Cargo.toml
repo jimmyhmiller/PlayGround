@@ -5,6 +5,11 @@ edition = "2024"
 
 [dependencies]
 tensor-lang-graph = { path = "../tensor-lang-graph" }
+wasmtime = { version = "43", optional = true }
+
+[features]
+default = []
+runtime = ["wasmtime"]
 
 [dev-dependencies]
 tensor-lang-test-oracle = { path = "../tensor-lang-test-oracle" }

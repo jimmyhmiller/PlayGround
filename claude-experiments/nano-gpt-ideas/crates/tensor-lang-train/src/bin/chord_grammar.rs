@@ -6,7 +6,7 @@ use std::time::Instant;
 use midly::{Format, Header, MetaMessage, MidiMessage, Smf, Timing, Track, TrackEvent, TrackEventKind};
 use midly::num::{u4, u7, u15, u24, u28};
 use rand::Rng;
-use tensor_lang_backend::assemblyscript::AssemblyScriptBackend;
+use tensor_lang_backend::wasm::WasmBackend;
 use tensor_lang_graph::{compile_with_env, Graph, NodeId, Op};
 
 // ─── Chord grammar vocabulary ─────────────────────────────────────────────
@@ -287,23 +287,10 @@ fn project_root() -> std::path::PathBuf {
         .parent().unwrap().parent().unwrap().to_path_buf()
 }
 
-fn compile_wasm_named(as_code: &str, name: &str) -> std::path::PathBuf {
-    let root = project_root();
+fn write_wasm(wasm_bytes: &[u8], name: &str) -> std::path::PathBuf {
     let tmp = std::env::temp_dir();
-    let src_path = tmp.join(format!("{name}.ts"));
     let wasm_path = tmp.join(format!("{name}.wasm"));
-    std::fs::write(&src_path, as_code).unwrap();
-    let output = Command::new("npx")
-        .args(["asc", src_path.to_str().unwrap(),
-               "--outFile", wasm_path.to_str().unwrap(),
-               "--exportRuntime", "--optimize",
-               "--initialMemory", "256",
-               "--maximumMemory", "4096"])
-        .current_dir(&root).output().expect("failed to run asc");
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        panic!("asc compilation failed:\n{stderr}");
-    }
+    std::fs::write(&wasm_path, wasm_bytes).unwrap();
     wasm_path
 }
 
@@ -311,12 +298,13 @@ struct WasmRunner {
     child: std::process::Child,
     stdin: std::io::BufWriter<std::process::ChildStdin>,
     stdout: std::process::ChildStdout,
+    output_size: usize,
 }
 
 impl WasmRunner {
-    fn new(wasm_path: &std::path::Path) -> Self {
+    fn new(wasm_path: &std::path::Path, output_size: usize) -> Self {
         let root = project_root();
-        let runner = root.join("persistent_runner.mjs");
+        let runner = root.join("persistent_runner_wasm.mjs");
         let mut child = Command::new("node")
             .args([runner.to_str().unwrap(), wasm_path.to_str().unwrap()])
             .current_dir(&root)
@@ -328,7 +316,7 @@ impl WasmRunner {
 
         let stdin = std::io::BufWriter::new(child.stdin.take().unwrap());
         let stdout = child.stdout.take().unwrap();
-        WasmRunner { child, stdin, stdout }
+        WasmRunner { child, stdin, stdout, output_size }
     }
 
     fn run(&mut self, inputs: &[&[f32]]) -> Vec<f32> {
@@ -336,6 +324,7 @@ impl WasmRunner {
 
         let n = inputs.len() as u32;
         self.stdin.write_all(&n.to_le_bytes()).unwrap();
+        self.stdin.write_all(&(self.output_size as u32).to_le_bytes()).unwrap();
         for arr in inputs {
             let size = arr.len() as u32;
             self.stdin.write_all(&size.to_le_bytes()).unwrap();
@@ -569,16 +558,16 @@ fn cmd_train() {
 
     let mut output_ids = vec![tg.loss];
     output_ids.extend_from_slice(&tg.grad_ids);
-    let backend = AssemblyScriptBackend;
-    let as_code = backend.emit_fused_multi_output(&tg.graph, &output_ids);
-    eprintln!("Generated {} lines AS", as_code.lines().count());
+    let backend = WasmBackend;
+    let wasm_bytes = backend.emit_fused_multi_output(&tg.graph, &output_ids);
 
     let t0 = Instant::now();
-    let wasm_path = compile_wasm_named(&as_code, "chord_train");
-    eprintln!("WASM compiled in {:.1}s", t0.elapsed().as_secs_f64());
+    let wasm_path = write_wasm(&wasm_bytes, "chord_train");
+    eprintln!("WASM written in {:.1}s", t0.elapsed().as_secs_f64());
 
     let mut weights = init_weights(&cfg);
-    let mut runner = WasmRunner::new(&wasm_path);
+    let output_size = 1 + sizes.iter().sum::<usize>();
+    let mut runner = WasmRunner::new(&wasm_path, output_size);
     let mut optimizer = Adam::new(&sizes, 1e-3);
     let mut rng = rand::thread_rng();
 
@@ -700,11 +689,13 @@ fn cmd_generate_midi() {
 }
 
 fn generate_sequences(weights: &[Vec<f32>], cfg: &ModelConfig, n: usize) -> Vec<Vec<usize>> {
-    let backend = AssemblyScriptBackend;
+    let backend = WasmBackend;
     let inf_graph = compile_for_inference(cfg);
-    let inf_code = backend.emit_fused(&inf_graph);
-    let inf_wasm = compile_wasm_named(&inf_code, "chord_infer");
-    let mut runner = WasmRunner::new(&inf_wasm);
+    let wasm_bytes = backend.emit_fused(&inf_graph);
+    let inf_wasm = write_wasm(&wasm_bytes, "chord_infer");
+    let inf_output_size: usize = inf_graph.nodes.last().unwrap().shape.iter()
+        .map(|d| d.as_usize().unwrap()).product();
+    let mut runner = WasmRunner::new(&inf_wasm, inf_output_size);
     let mut rng = rand::thread_rng();
 
     let mut valid = 0;

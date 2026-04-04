@@ -4,9 +4,9 @@ use crate::{
 };
 use crate::backend::{Arm64Backend, X64Backend};
 use dynexec::{
-    AArch64CAbi, AArch64InternalCc, CallbackSafepoints, ContiguousStack, ConservativeWordRoots,
-    ExecutionConfig, FrameLayout, FrameScanRoots, FrameStrategy, PreciseStackRoots,
-    ReifyReplayContinuations, ShadowStackFrames, ShadowStackRoots, StackFrameLayout,
+    AArch64CAbi, AArch64InternalCc, CallbackSafepoints, ConservativeWordRoots,
+    CodegenConfig, FrameLayout, FrameScanRoots, FrameStrategy, PreciseStackRoots,
+    ShadowStackFrames, ShadowStackRoots, StackFrameLayout,
     StackMapFrames, StackMapRoots, StackMapSafepoints, StackSlotFrames,
 };
 use dynir::builder::{FunctionBuilder, ModuleBuilder};
@@ -227,7 +227,7 @@ fn capture_slice_records_nested_active_prompts() {
     assert_eq!(records[0].active_prompts, vec![outer, inner]);
 }
 
-fn run_jit_with_config<Cfg: ExecutionConfig>(func: &dynir::Function, args: &[u64]) -> u64
+fn run_jit_with_config<Cfg: CodegenConfig>(func: &dynir::Function, args: &[u64]) -> u64
 where
     Cfg::Frames: dynexec::FrameStrategy<Cfg::Layout, Cfg::Roots, Cfg::CallingConvention>,
 {
@@ -236,81 +236,63 @@ where
 }
 
 struct TestInternalConfig;
-
-impl ExecutionConfig for TestInternalConfig {
+impl CodegenConfig for TestInternalConfig {
     type Layout = LowBit<3>;
     type Roots = PreciseStackRoots;
     type RootTransport = FrameScanRoots;
     type CallingConvention = AArch64InternalCc;
     type Frames = StackSlotFrames;
     type Safepoints = CallbackSafepoints;
-    type Stack = ContiguousStack;
-    type Continuations = ReifyReplayContinuations;
 }
 
 struct TestCAbiConfig;
-
-impl ExecutionConfig for TestCAbiConfig {
+impl CodegenConfig for TestCAbiConfig {
     type Layout = LowBit<3>;
     type Roots = PreciseStackRoots;
     type RootTransport = FrameScanRoots;
     type CallingConvention = AArch64CAbi;
     type Frames = ShadowStackFrames;
     type Safepoints = CallbackSafepoints;
-    type Stack = ContiguousStack;
-    type Continuations = ReifyReplayContinuations;
 }
 
 struct InvalidNanBoxConfig;
-
-impl ExecutionConfig for InvalidNanBoxConfig {
+impl CodegenConfig for InvalidNanBoxConfig {
     type Layout = NanBox;
     type Roots = PreciseStackRoots;
     type RootTransport = FrameScanRoots;
     type CallingConvention = AArch64InternalCc;
     type Frames = StackSlotFrames;
     type Safepoints = CallbackSafepoints;
-    type Stack = ContiguousStack;
-    type Continuations = ReifyReplayContinuations;
 }
 
 struct TestNanBoxConfig;
-
-impl ExecutionConfig for TestNanBoxConfig {
+impl CodegenConfig for TestNanBoxConfig {
     type Layout = NanBox;
     type Roots = ConservativeWordRoots;
     type RootTransport = FrameScanRoots;
     type CallingConvention = AArch64InternalCc;
     type Frames = StackSlotFrames;
     type Safepoints = CallbackSafepoints;
-    type Stack = ContiguousStack;
-    type Continuations = ReifyReplayContinuations;
 }
 
 struct TestStackMapConfig;
-
-impl ExecutionConfig for TestStackMapConfig {
+impl CodegenConfig for TestStackMapConfig {
     type Layout = LowBit<3>;
     type Roots = PreciseStackRoots;
     type RootTransport = StackMapRoots;
     type CallingConvention = AArch64InternalCc;
     type Frames = StackMapFrames;
     type Safepoints = StackMapSafepoints;
-    type Stack = ContiguousStack;
-    type Continuations = ReifyReplayContinuations;
 }
 
 struct TestShadowStackConfig;
-
-impl ExecutionConfig for TestShadowStackConfig {
+impl CodegenConfig for TestShadowStackConfig {
     type Layout = LowBit<3>;
     type Roots = PreciseStackRoots;
     type RootTransport = ShadowStackRoots;
     type CallingConvention = AArch64InternalCc;
     type Frames = ShadowStackFrames;
     type Safepoints = CallbackSafepoints;
-    type Stack = ContiguousStack;
-    type Continuations = ReifyReplayContinuations;
 }
 
 #[derive(Debug, Clone)]
@@ -376,15 +358,13 @@ where
 
 struct TestWrappedFrameConfig;
 
-impl ExecutionConfig for TestWrappedFrameConfig {
+impl CodegenConfig for TestWrappedFrameConfig {
     type Layout = LowBit<3>;
     type Roots = PreciseStackRoots;
     type RootTransport = FrameScanRoots;
     type CallingConvention = AArch64InternalCc;
     type Frames = WrappedFrameStrategy;
     type Safepoints = CallbackSafepoints;
-    type Stack = ContiguousStack;
-    type Continuations = ReifyReplayContinuations;
 }
 
 // ── Phase 1: return_const ──────────────────────────────────────────
