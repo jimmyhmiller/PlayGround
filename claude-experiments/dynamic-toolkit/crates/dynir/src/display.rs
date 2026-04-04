@@ -107,7 +107,7 @@ impl fmt::Display for Inst {
                 }
                 Ok(())
             }
-            Inst::PushPrompt(prompt) => write!(f, "push_prompt prompt#{}", prompt.0),
+            Inst::PushPrompt(prompt, handler) => write!(f, "push_prompt prompt#{} -> {handler}", prompt.0),
             Inst::PopPrompt(prompt) => write!(f, "pop_prompt prompt#{}", prompt.0),
             Inst::CaptureSlice(prompt, live) => {
                 write!(f, "capture_slice prompt#{}", prompt.0)?;

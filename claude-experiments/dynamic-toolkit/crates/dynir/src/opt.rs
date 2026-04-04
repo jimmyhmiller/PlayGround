@@ -28,7 +28,7 @@ fn is_pure(inst: &Inst) -> bool {
         | Inst::CallIndirect(..)
         | Inst::Guard(..)
         | Inst::Safepoint(..)
-        | Inst::PushPrompt(_)
+        | Inst::PushPrompt(_, _)
         | Inst::PopPrompt(_) => false,
         _ => true,
     }

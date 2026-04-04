@@ -423,54 +423,63 @@ where
                 FrameAction::AbortToPrompt { prompt, args } => {
                     let ret_val = args.first().copied();
 
-                    loop {
-                        let frame = stack.pop().unwrap();
+                    // Find which frame owns the prompt (search from top of stack).
+                    // The top frame is the one that just executed the abort terminator.
+                    let prompt_frame_idx = {
+                        let mut found = None;
+                        for i in (0..stack.len()).rev() {
+                            if stack[i].active_prompts.contains(&prompt) {
+                                found = Some(i);
+                                break;
+                            }
+                        }
+                        found.expect("abort_to_prompt: no frame has the target prompt")
+                    };
+
+                    // Pop all frames above the prompt owner (the aborting frame and any in between).
+                    while stack.len() > prompt_frame_idx + 1 {
+                        stack.pop().unwrap();
                         roots.pop_frame();
+                    }
 
-                        if frame.active_prompts.contains(&prompt) {
-                            if stack.is_empty() {
-                                return Ok(match ret_val {
-                                    Some(v) => InterpResult::Value(v),
-                                    None => InterpResult::Void,
-                                });
-                            }
+                    // Now stack.last() is the frame that owns the prompt.
+                    // Find the handler block by scanning function for PushPrompt with matching prompt.
+                    let frame = stack.last_mut().unwrap();
+                    sync_all_from_roots(frame, roots);
 
-                            let caller = stack.last_mut().unwrap();
-                            sync_all_from_roots(caller, roots);
+                    let func = &self.module.functions[frame.func_idx];
 
-                            match frame.caller_resume {
-                                CallerResume::FromCall { return_dest } => {
-                                    if let (Some(dest), Some(val)) = (return_dest, ret_val) {
-                                        caller.vals[dest.index()] = val;
-                                    }
+                    let mut handler_block = None;
+                    for blk in &func.blocks {
+                        for node in &blk.insts {
+                            if let Inst::PushPrompt(p, h) = &node.inst {
+                                if *p == prompt {
+                                    handler_block = Some(*h);
+                                    break;
                                 }
-                                CallerResume::FromInvoke {
-                                    normal,
-                                    normal_args_vals,
-                                    has_ret_param,
-                                    ..
-                                } => {
-                                    let func = &self.module.functions[caller.func_idx];
-                                    let target_block = &func.blocks[normal.index()];
-                                    let mut param_idx = 0;
-                                    if has_ret_param {
-                                        if let Some(val) = ret_val {
-                                            caller.vals[target_block.params[0].0.index()] = val;
-                                        }
-                                        param_idx = 1;
-                                    }
-                                    for (i, val) in normal_args_vals.iter().enumerate() {
-                                        caller.vals[target_block.params[param_idx + i].0.index()] =
-                                            *val;
-                                    }
-                                    caller.block_idx = normal.index();
-                                    caller.inst_idx = 0;
-                                }
-                                CallerResume::TopLevel => unreachable!(),
                             }
-                            break;
+                        }
+                        if handler_block.is_some() { break; }
+                    }
+                    let handler_block = handler_block.expect(
+                        "abort_to_prompt: could not find PushPrompt instruction for prompt in owning frame"
+                    );
+
+                    // Pop the prompt from active_prompts.
+                    let pos = frame.active_prompts.iter().rposition(|p| *p == prompt).unwrap();
+                    frame.active_prompts.remove(pos);
+
+                    // Write the abort value into the handler block's first parameter.
+                    let hb = &func.blocks[handler_block.index()];
+                    if let Some(val) = ret_val {
+                        if let Some((param, _)) = hb.params.first() {
+                            frame.vals[param.index()] = val;
                         }
                     }
+
+                    // Jump to handler block.
+                    frame.block_idx = handler_block.index();
+                    frame.inst_idx = 0;
                 }
             }
         }
@@ -522,7 +531,7 @@ where
                 let node = &block.insts[frame.inst_idx];
 
                 match &node.inst {
-                    Inst::PushPrompt(prompt) => {
+                    Inst::PushPrompt(prompt, _handler) => {
                         frame.active_prompts.push(*prompt);
                         frame.inst_idx += 1;
                         continue;

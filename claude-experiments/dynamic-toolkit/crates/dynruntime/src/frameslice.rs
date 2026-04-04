@@ -1,4 +1,6 @@
-use dynexec::{FrameSliceError, FrameSliceSnapshot, FrameSliceStore};
+use dynexec::{
+    ContinuationError, ContinuationStore, FrameSliceError, FrameSliceSnapshot, FrameSliceStore,
+};
 use dynobj::RootSource;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -70,6 +72,64 @@ impl FrameSliceStore for OwnedFrameSliceStore {
     }
 }
 
+impl ContinuationStore<FrameSliceSnapshot> for OwnedFrameSliceStore {
+    type Handle = FrameSliceHandle;
+
+    fn insert(
+        &mut self,
+        captured: FrameSliceSnapshot,
+    ) -> Result<Self::Handle, ContinuationError> {
+        self.insert_slice(captured).map_err(ContinuationError::from)
+    }
+
+    fn clone_captured(
+        &mut self,
+        handle: &Self::Handle,
+    ) -> Result<Self::Handle, ContinuationError> {
+        self.clone_slice(handle).map_err(ContinuationError::from)
+    }
+
+    fn get(&self, handle: &Self::Handle) -> Result<&FrameSliceSnapshot, ContinuationError> {
+        self.slice(handle).map_err(ContinuationError::from)
+    }
+
+    fn get_mut(
+        &mut self,
+        handle: &Self::Handle,
+    ) -> Result<&mut FrameSliceSnapshot, ContinuationError> {
+        self.slice_mut(handle).map_err(ContinuationError::from)
+    }
+
+    fn encode_handle(handle: &Self::Handle) -> u64 {
+        <Self as FrameSliceStore>::encode_handle(handle)
+    }
+
+    fn decode_handle(bits: u64) -> Result<Self::Handle, ContinuationError> {
+        <Self as FrameSliceStore>::decode_handle(bits).map_err(ContinuationError::from)
+    }
+
+    fn mark_consumed(&mut self, handle: &Self::Handle) -> Result<(), ContinuationError> {
+        FrameSliceStore::mark_consumed(self, handle).map_err(ContinuationError::from)
+    }
+}
+
+/// Scans GC roots across all live captured continuations in the store.
+impl RootSource for OwnedFrameSliceStore {
+    fn scan_roots(&self, visitor: &mut dyn FnMut(*mut u64)) {
+        for slice in &self.slices {
+            if slice.consumed {
+                continue;
+            }
+            for frame in &slice.frames {
+                for &root_idx in &frame.root_value_indices {
+                    let slot = (&frame.values[root_idx] as *const u64).cast_mut();
+                    visitor(slot);
+                }
+            }
+        }
+    }
+}
+
 pub struct FrameSliceRootSource<'a> {
     slice: &'a FrameSliceSnapshot,
 }
@@ -128,7 +188,7 @@ mod tests {
     fn owned_store_clones_and_marks_consumed() {
         let mut store = OwnedFrameSliceStore::new();
         let handle = store.insert_slice(sample_slice()).unwrap();
-        store.mark_consumed(&handle).unwrap();
+        FrameSliceStore::mark_consumed(&mut store, &handle).unwrap();
         assert!(store.slice(&handle).unwrap().consumed);
 
         let cloned = store.clone_slice(&handle).unwrap();

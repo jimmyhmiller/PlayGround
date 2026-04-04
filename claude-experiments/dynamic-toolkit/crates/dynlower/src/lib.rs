@@ -1075,7 +1075,7 @@ fn simulate_block_prompt_stack(block: &Block, stack: &[PromptId]) -> Vec<PromptI
     let mut prompts = stack.to_vec();
     for inst_node in &block.insts {
         match &inst_node.inst {
-            Inst::PushPrompt(prompt) => prompts.push(*prompt),
+            Inst::PushPrompt(prompt, _) => prompts.push(*prompt),
             Inst::PopPrompt(prompt) => {
                 let popped = prompts.pop().unwrap_or_else(|| {
                     panic!("pop_prompt without matching active prompt in block")
@@ -2314,7 +2314,7 @@ where
                 }
             }
 
-            Inst::PushPrompt(prompt) => {
+            Inst::PushPrompt(prompt, _handler) => {
                 active_prompts.push(*prompt);
             }
 

@@ -4,10 +4,10 @@ use crate::{
 };
 use crate::backend::{Arm64Backend, X64Backend};
 use dynexec::{
-    AArch64CAbi, AArch64InternalCc, CallbackSafepoints, ConservativeWordRoots, ExecutionConfig,
-    FrameLayout, FrameScanRoots, FrameStrategy, PreciseStackRoots, ShadowStackFrames,
-    ShadowStackRoots, StackFrameLayout, StackMapFrames, StackMapRoots, StackMapSafepoints,
-    StackSlotFrames,
+    AArch64CAbi, AArch64InternalCc, CallbackSafepoints, ContiguousStack, ConservativeWordRoots,
+    ExecutionConfig, FrameLayout, FrameScanRoots, FrameStrategy, PreciseStackRoots,
+    ReifyReplayContinuations, ShadowStackFrames, ShadowStackRoots, StackFrameLayout,
+    StackMapFrames, StackMapRoots, StackMapSafepoints, StackSlotFrames,
 };
 use dynir::builder::{FunctionBuilder, ModuleBuilder};
 use dynir::ir::*;
@@ -44,10 +44,14 @@ fn capture_slice_returns_frame_reify_outcome() {
     let mut b = FunctionBuilder::new("capture", &[Type::I64], Some(Type::FrameSlice));
     let entry = b.entry_block();
     let arg = b.block_param(entry, 0);
+    let handler_bb = b.create_block(&[Type::FrameSlice]);
     let prompt = b.create_prompt();
-    b.push_prompt(prompt);
+    b.push_prompt(prompt, handler_bb);
     let slice = b.capture_slice(prompt, &[arg]);
     b.pop_prompt(prompt);
+    b.jump(handler_bb, &[slice]);
+    b.switch_to_block(handler_bb);
+    let _handler_param = b.block_param(handler_bb, 0);
     b.unreachable();
     let func = b.build();
 
@@ -55,7 +59,8 @@ fn capture_slice_returns_frame_reify_outcome() {
     match jit.call_outcome(&[55]) {
         JitOutcome::CaptureSlice { record_idx, values, .. } => {
             assert_eq!(record_idx, 0);
-            assert_eq!(values, vec![55, 0]);
+            // arg=55, handler_param=0 (block param), slice=0 (not yet assigned)
+            assert_eq!(values, vec![55, 0, 0]);
         }
         other => panic!("expected capture outcome, got {other:?}"),
     }
@@ -66,8 +71,8 @@ fn capture_slice_returns_frame_reify_outcome() {
     assert_eq!(records[0].prompt, Some(prompt));
     assert_eq!(records[0].active_prompts, vec![prompt]);
     assert_eq!(records[0].frame_value_count, func.value_types.len());
-    assert_eq!(records[0].value_indices, vec![arg.index(), slice.index()]);
-    assert_eq!(records[0].value_types, vec![Type::I64, Type::FrameSlice]);
+    assert_eq!(records[0].value_indices, vec![arg.index(), _handler_param.index(), slice.index()]);
+    assert_eq!(records[0].value_types, vec![Type::I64, Type::FrameSlice, Type::FrameSlice]);
     assert!(records[0].root_payload_indices.is_empty());
     assert_eq!(records[0].return_dest, Some(slice.index()));
 }
@@ -78,10 +83,14 @@ fn capture_slice_marks_gc_payload_positions_as_roots() {
     let entry = b.entry_block();
     let obj = b.block_param(entry, 0);
     let num = b.block_param(entry, 1);
+    let handler_bb = b.create_block(&[Type::FrameSlice]);
     let prompt = b.create_prompt();
-    b.push_prompt(prompt);
+    b.push_prompt(prompt, handler_bb);
     let slice = b.capture_slice(prompt, &[num, obj]);
     b.pop_prompt(prompt);
+    b.jump(handler_bb, &[slice]);
+    b.switch_to_block(handler_bb);
+    let _handler_param = b.block_param(handler_bb, 0);
     b.unreachable();
     let func = b.build();
 
@@ -89,8 +98,8 @@ fn capture_slice_marks_gc_payload_positions_as_roots() {
     let records = jit.frame_reify_records();
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].frame_value_count, func.value_types.len());
-    assert_eq!(records[0].value_indices, vec![obj.index(), num.index(), slice.index()]);
-    assert_eq!(records[0].value_types, vec![Type::GcPtr, Type::I64, Type::FrameSlice]);
+    assert_eq!(records[0].value_indices, vec![obj.index(), num.index(), _handler_param.index(), slice.index()]);
+    assert_eq!(records[0].value_types, vec![Type::GcPtr, Type::I64, Type::FrameSlice, Type::FrameSlice]);
     assert_eq!(records[0].root_payload_indices, vec![0]);
 }
 
@@ -191,13 +200,23 @@ fn capture_slice_records_nested_active_prompts() {
     let mut b = FunctionBuilder::new("capture_nested", &[Type::I64], Some(Type::FrameSlice));
     let entry = b.entry_block();
     let arg = b.block_param(entry, 0);
+    let outer_handler = b.create_block(&[Type::FrameSlice]);
+    let inner_handler = b.create_block(&[Type::FrameSlice]);
     let outer = b.create_prompt();
     let inner = b.create_prompt();
-    b.push_prompt(outer);
-    b.push_prompt(inner);
-    let _slice = b.capture_slice(inner, &[arg]);
+    b.push_prompt(outer, outer_handler);
+    b.push_prompt(inner, inner_handler);
+    let slice = b.capture_slice(inner, &[arg]);
     b.pop_prompt(inner);
+    b.jump(inner_handler, &[slice]);
+
+    b.switch_to_block(inner_handler);
+    let inner_result = b.block_param(inner_handler, 0);
     b.pop_prompt(outer);
+    b.jump(outer_handler, &[inner_result]);
+
+    b.switch_to_block(outer_handler);
+    let _outer_result = b.block_param(outer_handler, 0);
     b.unreachable();
     let func = b.build();
 
@@ -225,6 +244,8 @@ impl ExecutionConfig for TestInternalConfig {
     type CallingConvention = AArch64InternalCc;
     type Frames = StackSlotFrames;
     type Safepoints = CallbackSafepoints;
+    type Stack = ContiguousStack;
+    type Continuations = ReifyReplayContinuations;
 }
 
 struct TestCAbiConfig;
@@ -236,6 +257,8 @@ impl ExecutionConfig for TestCAbiConfig {
     type CallingConvention = AArch64CAbi;
     type Frames = ShadowStackFrames;
     type Safepoints = CallbackSafepoints;
+    type Stack = ContiguousStack;
+    type Continuations = ReifyReplayContinuations;
 }
 
 struct InvalidNanBoxConfig;
@@ -247,6 +270,8 @@ impl ExecutionConfig for InvalidNanBoxConfig {
     type CallingConvention = AArch64InternalCc;
     type Frames = StackSlotFrames;
     type Safepoints = CallbackSafepoints;
+    type Stack = ContiguousStack;
+    type Continuations = ReifyReplayContinuations;
 }
 
 struct TestNanBoxConfig;
@@ -258,6 +283,8 @@ impl ExecutionConfig for TestNanBoxConfig {
     type CallingConvention = AArch64InternalCc;
     type Frames = StackSlotFrames;
     type Safepoints = CallbackSafepoints;
+    type Stack = ContiguousStack;
+    type Continuations = ReifyReplayContinuations;
 }
 
 struct TestStackMapConfig;
@@ -269,6 +296,8 @@ impl ExecutionConfig for TestStackMapConfig {
     type CallingConvention = AArch64InternalCc;
     type Frames = StackMapFrames;
     type Safepoints = StackMapSafepoints;
+    type Stack = ContiguousStack;
+    type Continuations = ReifyReplayContinuations;
 }
 
 struct TestShadowStackConfig;
@@ -280,6 +309,8 @@ impl ExecutionConfig for TestShadowStackConfig {
     type CallingConvention = AArch64InternalCc;
     type Frames = ShadowStackFrames;
     type Safepoints = CallbackSafepoints;
+    type Stack = ContiguousStack;
+    type Continuations = ReifyReplayContinuations;
 }
 
 #[derive(Debug, Clone)]
@@ -352,6 +383,8 @@ impl ExecutionConfig for TestWrappedFrameConfig {
     type CallingConvention = AArch64InternalCc;
     type Frames = WrappedFrameStrategy;
     type Safepoints = CallbackSafepoints;
+    type Stack = ContiguousStack;
+    type Continuations = ReifyReplayContinuations;
 }
 
 // ── Phase 1: return_const ──────────────────────────────────────────

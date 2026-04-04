@@ -556,9 +556,9 @@ impl FunctionBuilder {
         id
     }
 
-    pub fn push_prompt(&mut self, prompt: PromptId) {
+    pub fn push_prompt(&mut self, prompt: PromptId, handler_block: BlockId) {
         assert!(prompt.index() < self.next_prompt as usize, "invalid prompt id");
-        self.push_void_inst(Inst::PushPrompt(prompt));
+        self.push_void_inst(Inst::PushPrompt(prompt, handler_block));
     }
 
     pub fn pop_prompt(&mut self, prompt: PromptId) {

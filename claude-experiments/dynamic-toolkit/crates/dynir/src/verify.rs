@@ -49,6 +49,9 @@ pub enum VerifyError {
     DuplicateValueDef {
         value: Value,
     },
+    ContinuationsNotAllowed {
+        context: String,
+    },
 }
 
 impl fmt::Display for VerifyError {
@@ -121,14 +124,38 @@ impl fmt::Display for VerifyError {
             VerifyError::DuplicateValueDef { value } => {
                 write!(f, "value v{} defined more than once", value.0)
             }
+            VerifyError::ContinuationsNotAllowed { context } => {
+                write!(f, "continuation instruction not allowed: {context}")
+            }
         }
     }
 }
 
 impl std::error::Error for VerifyError {}
 
+/// Options controlling what the verifier accepts.
+#[derive(Debug, Clone, Copy)]
+pub struct VerifyOptions {
+    /// Whether continuation instructions (PushPrompt, PopPrompt, CaptureSlice,
+    /// CloneSlice, ResumeSlice, AbortToPrompt) are permitted.
+    pub allow_continuations: bool,
+}
+
+impl Default for VerifyOptions {
+    fn default() -> Self {
+        VerifyOptions {
+            allow_continuations: true,
+        }
+    }
+}
+
 /// Verify the structural integrity of a function.
 pub fn verify(func: &Function) -> Result<(), Vec<VerifyError>> {
+    verify_with(func, VerifyOptions::default())
+}
+
+/// Verify with explicit options.
+pub fn verify_with(func: &Function, options: VerifyOptions) -> Result<(), Vec<VerifyError>> {
     let mut errors = Vec::new();
     let n_blocks = func.blocks.len();
 
@@ -206,7 +233,7 @@ pub fn verify(func: &Function) -> Result<(), Vec<VerifyError>> {
             });
 
             // Check instruction-specific type constraints
-            check_inst_types(func, &inst_node.inst, bid, &mut errors);
+            check_inst_types(func, &inst_node.inst, bid, options, &mut errors);
         }
 
         // Check terminator
@@ -218,6 +245,7 @@ pub fn verify(func: &Function) -> Result<(), Vec<VerifyError>> {
             &value_def_block,
             &value_def_pos,
             &doms,
+            options,
             &mut errors,
         );
     }
@@ -277,7 +305,7 @@ fn check_value_use(
     }
 }
 
-fn check_inst_types(func: &Function, inst: &Inst, _block: BlockId, errors: &mut Vec<VerifyError>) {
+fn check_inst_types(func: &Function, inst: &Inst, _block: BlockId, options: VerifyOptions, errors: &mut Vec<VerifyError>) {
     let vt = |v: Value| func.value_type(v);
     match inst {
         Inst::Add(a, b)
@@ -344,7 +372,12 @@ fn check_inst_types(func: &Function, inst: &Inst, _block: BlockId, errors: &mut 
                 });
             }
         }
-        Inst::PushPrompt(prompt) | Inst::PopPrompt(prompt) | Inst::CaptureSlice(prompt, _) => {
+        Inst::PushPrompt(prompt, _) | Inst::PopPrompt(prompt) | Inst::CaptureSlice(prompt, _) => {
+            if !options.allow_continuations {
+                errors.push(VerifyError::ContinuationsNotAllowed {
+                    context: format!("{inst:?}"),
+                });
+            }
             if prompt.index() >= func.prompt_count as usize {
                 errors.push(VerifyError::InvalidPrompt {
                     prompt: *prompt,
@@ -353,6 +386,11 @@ fn check_inst_types(func: &Function, inst: &Inst, _block: BlockId, errors: &mut 
             }
         }
         Inst::CloneSlice(slice) => {
+            if !options.allow_continuations {
+                errors.push(VerifyError::ContinuationsNotAllowed {
+                    context: "clone_slice".into(),
+                });
+            }
             if vt(*slice) != Type::FrameSlice {
                 errors.push(VerifyError::TypeMismatch {
                     expected: Type::FrameSlice,
@@ -373,6 +411,7 @@ fn check_terminator(
     def_block: &[Option<BlockId>],
     def_pos: &[i32],
     doms: &[u32],
+    options: VerifyOptions,
     errors: &mut Vec<VerifyError>,
 ) {
     // Check value uses in terminator
@@ -493,6 +532,11 @@ fn check_terminator(
             }
         }
         Terminator::ResumeSlice { slice, .. } => {
+            if !options.allow_continuations {
+                errors.push(VerifyError::ContinuationsNotAllowed {
+                    context: "resume_slice".into(),
+                });
+            }
             if func.value_type(*slice) != Type::FrameSlice {
                 errors.push(VerifyError::TypeMismatch {
                     expected: Type::FrameSlice,
@@ -502,6 +546,11 @@ fn check_terminator(
             }
         }
         Terminator::AbortToPrompt { prompt, .. } => {
+            if !options.allow_continuations {
+                errors.push(VerifyError::ContinuationsNotAllowed {
+                    context: "abort_to_prompt".into(),
+                });
+            }
             if prompt.index() >= func.prompt_count as usize {
                 errors.push(VerifyError::InvalidPrompt {
                     prompt: *prompt,

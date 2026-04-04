@@ -1120,11 +1120,15 @@ fn module_frame_slice_clone_and_resume_is_multi_shot() {
     let f_resume = mb.declare_func("resume", &[Type::FrameSlice, Type::I64], Some(Type::I64));
 
     let mut fb = mb.define_func(f_capture);
+    let handler_bb = fb.create_block(&[Type::FrameSlice]);
     let prompt = fb.create_prompt();
-    fb.push_prompt(prompt);
+    fb.push_prompt(prompt, handler_bb);
     let slice = fb.capture_slice(prompt, &[]);
     fb.pop_prompt(prompt);
-    fb.ret(slice);
+    fb.jump(handler_bb, &[slice]);
+    fb.switch_to_block(handler_bb);
+    let result = fb.block_param(handler_bb, 0);
+    fb.ret(result);
     mb.finish_func(f_capture, fb);
 
     let mut fb = mb.define_func(f_clone);
@@ -1189,12 +1193,17 @@ fn module_abort_to_prompt_unwinds_to_prompt_owner() {
     let mut fb = mb.define_func(f_outer);
     let entry = fb.entry_block();
     let value = fb.block_param(entry, 0);
+    let handler_bb = fb.create_block(&[Type::I64]);
     let prompt = fb.create_prompt();
-    fb.push_prompt(prompt);
+    fb.push_prompt(prompt, handler_bb);
     let called = fb.call(f_aborter, &[value]).unwrap();
     fb.pop_prompt(prompt);
+    fb.jump(handler_bb, &[called]);
+
+    fb.switch_to_block(handler_bb);
+    let popped = fb.block_param(handler_bb, 0);
     let one = fb.iconst(Type::I64, 1);
-    let bumped = fb.add(called, one);
+    let bumped = fb.add(popped, one);
     fb.ret(bumped);
     mb.finish_func(f_outer, fb);
 
@@ -1214,7 +1223,9 @@ fn module_abort_to_prompt_unwinds_to_prompt_owner() {
         other => panic!("expected abort result, got {:?}", other),
     };
 
-    assert_eq!(result, 41);
+    // abort(41) lands on handler_bb in outer → popped = 41
+    // outer continues: bumped = 41 + 1 = 42
+    assert_eq!(result, 42);
 }
 
 #[test]

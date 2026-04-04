@@ -1068,10 +1068,14 @@ mod tests {
         let mut b = FunctionBuilder::new("capture", &[Type::I64], Some(Type::FrameSlice));
         let entry = b.entry_block();
         let arg = b.block_param(entry, 0);
+        let handler_bb = b.create_block(&[Type::FrameSlice]);
         let prompt = b.create_prompt();
-        b.push_prompt(prompt);
+        b.push_prompt(prompt, handler_bb);
         let slice = b.capture_slice(prompt, &[arg]);
         b.pop_prompt(prompt);
+        b.jump(handler_bb, &[slice]);
+        b.switch_to_block(handler_bb);
+        let _handler_param = b.block_param(handler_bb, 0);
         b.unreachable();
         let func = b.build();
 
@@ -1129,11 +1133,15 @@ mod tests {
         mb.finish_func(f_inner, inner);
 
         let mut main = mb.define_func(f_main);
+        let handler_bb = main.create_block(&[Type::FrameSlice]);
         let prompt = main.create_prompt();
-        main.push_prompt(prompt);
+        main.push_prompt(prompt, handler_bb);
         let slice = main.call(f_inner, &[]).expect("call should produce a slice");
         main.pop_prompt(prompt);
-        main.ret(slice);
+        main.jump(handler_bb, &[slice]);
+        main.switch_to_block(handler_bb);
+        let popped = main.block_param(handler_bb, 0);
+        main.ret(popped);
         mb.finish_func(f_main, main);
 
         let module = mb.build();
@@ -1325,12 +1333,16 @@ mod tests {
     #[test]
     fn jit_capture_snapshot_can_resume_through_interpreter() {
         let mut b = FunctionBuilder::new("capture", &[], Some(Type::I64));
+        let handler_bb = b.create_block(&[Type::I64]);
         let prompt = b.create_prompt();
-        b.push_prompt(prompt);
+        b.push_prompt(prompt, handler_bb);
         let _slice = b.capture_slice(prompt, &[]);
-        b.pop_prompt(prompt);
         let resumed = b.iconst(Type::I64, 77);
-        b.ret(resumed);
+        b.pop_prompt(prompt);
+        b.jump(handler_bb, &[resumed]);
+        b.switch_to_block(handler_bb);
+        let popped = b.block_param(handler_bb, 0);
+        b.ret(popped);
         let func = b.build();
 
         let jit = JitFunction::compile::<NanBox>(&func, &[]);
@@ -1353,12 +1365,16 @@ mod tests {
     #[test]
     fn jit_capture_snapshot_can_resume_natively() {
         let mut b = FunctionBuilder::new("capture", &[], Some(Type::I64));
+        let handler_bb = b.create_block(&[Type::I64]);
         let prompt = b.create_prompt();
-        b.push_prompt(prompt);
+        b.push_prompt(prompt, handler_bb);
         let _slice = b.capture_slice(prompt, &[]);
-        b.pop_prompt(prompt);
         let resumed = b.iconst(Type::I64, 77);
-        b.ret(resumed);
+        b.pop_prompt(prompt);
+        b.jump(handler_bb, &[resumed]);
+        b.switch_to_block(handler_bb);
+        let popped = b.block_param(handler_bb, 0);
+        b.ret(popped);
         let func = b.build();
 
         let jit = JitFunction::compile::<NanBox>(&func, &[]);
@@ -1383,12 +1399,16 @@ mod tests {
             mb.declare_func("clone_resume", &[Type::FrameSlice], Some(Type::I64));
 
         let mut capture = mb.define_func(f_capture);
+        let handler_bb = capture.create_block(&[Type::I64]);
         let prompt = capture.create_prompt();
-        capture.push_prompt(prompt);
+        capture.push_prompt(prompt, handler_bb);
         let _slice = capture.capture_slice(prompt, &[]);
-        capture.pop_prompt(prompt);
         let resumed = capture.iconst(Type::I64, 77);
-        capture.ret(resumed);
+        capture.pop_prompt(prompt);
+        capture.jump(handler_bb, &[resumed]);
+        capture.switch_to_block(handler_bb);
+        let popped = capture.block_param(handler_bb, 0);
+        capture.ret(popped);
         mb.finish_func(f_capture, capture);
 
         let mut clone_resume = mb.define_func(f_clone_resume);
@@ -1434,11 +1454,15 @@ mod tests {
         mb.finish_func(f_inner, inner);
 
         let mut main = mb.define_func(f_main);
+        let handler_bb = main.create_block(&[Type::I64]);
         let prompt = main.create_prompt();
-        main.push_prompt(prompt);
+        main.push_prompt(prompt, handler_bb);
         let ret = main.call(f_inner, &[]).expect("inner call should return i64");
         main.pop_prompt(prompt);
-        main.ret(ret);
+        main.jump(handler_bb, &[ret]);
+        main.switch_to_block(handler_bb);
+        let popped = main.block_param(handler_bb, 0);
+        main.ret(popped);
         mb.finish_func(f_main, main);
 
         let module = mb.build();
@@ -1470,19 +1494,23 @@ mod tests {
         mb.finish_func(f_inner, inner);
 
         let mut main = mb.define_func(f_main);
+        let handler_bb = main.create_block(&[Type::I64]);
         let prompt = main.create_prompt();
         let _entry = main.entry_block();
         let normal = main.create_block(&[Type::I64]);
         let exception = main.create_block(&[]);
-        main.push_prompt(prompt);
+        main.push_prompt(prompt, handler_bb);
         main.invoke(f_inner, &[], normal, &[], exception, &[]);
         main.switch_to_block(normal);
         let ret = main.block_param(normal, 0);
         main.pop_prompt(prompt);
-        main.ret(ret);
+        main.jump(handler_bb, &[ret]);
         main.switch_to_block(exception);
         let zero = main.iconst(Type::I64, 0);
         main.ret(zero);
+        main.switch_to_block(handler_bb);
+        let popped = main.block_param(handler_bb, 0);
+        main.ret(popped);
         mb.finish_func(f_main, main);
 
         let module = mb.build();
@@ -1514,12 +1542,13 @@ mod tests {
         mb.finish_func(f_inner, inner);
 
         let mut main = mb.define_func(f_main);
+        let handler_bb = main.create_block(&[Type::I64]);
         let prompt = main.create_prompt();
         let normal = main.create_block(&[Type::I64, Type::I64]);
         let exception = main.create_block(&[Type::I64]);
         let normal_extra = main.iconst(Type::I64, 44);
         let exception_extra = main.iconst(Type::I64, 99);
-        main.push_prompt(prompt);
+        main.push_prompt(prompt, handler_bb);
         main.invoke(
             f_inner,
             &[],
@@ -1531,10 +1560,13 @@ mod tests {
         main.switch_to_block(normal);
         let ret = main.block_param(normal, 0);
         main.pop_prompt(prompt);
-        main.ret(ret);
+        main.jump(handler_bb, &[ret]);
         main.switch_to_block(exception);
         let exc = main.block_param(exception, 0);
         main.ret(exc);
+        main.switch_to_block(handler_bb);
+        let popped = main.block_param(handler_bb, 0);
+        main.ret(popped);
         mb.finish_func(f_main, main);
 
         let module = mb.build();
@@ -1574,20 +1606,24 @@ mod tests {
         mb.finish_func(f_inner, inner);
 
         let mut main = mb.define_func(f_main);
+        let handler_bb = main.create_block(&[Type::I64]);
         let prompt = main.create_prompt();
         let entry = main.entry_block();
         let callee = main.block_param(entry, 0);
         let normal = main.create_block(&[Type::I64]);
         let exception = main.create_block(&[]);
-        main.push_prompt(prompt);
+        main.push_prompt(prompt, handler_bb);
         main.invoke_indirect(callee, &[], Some(Type::I64), normal, &[], exception, &[]);
         main.switch_to_block(normal);
         let ret = main.block_param(normal, 0);
         main.pop_prompt(prompt);
-        main.ret(ret);
+        main.jump(handler_bb, &[ret]);
         main.switch_to_block(exception);
         let zero = main.iconst(Type::I64, 0);
         main.ret(zero);
+        main.switch_to_block(handler_bb);
+        let popped = main.block_param(handler_bb, 0);
+        main.ret(popped);
         mb.finish_func(f_main, main);
 
         let module = mb.build();
@@ -1625,20 +1661,24 @@ mod tests {
         mb.finish_func(f_inner, inner);
 
         let mut main = mb.define_func(f_main);
+        let handler_bb = main.create_block(&[Type::I64]);
         let prompt = main.create_prompt();
         let entry = main.entry_block();
         let callee = main.block_param(entry, 0);
         let normal = main.create_block(&[Type::I64]);
         let exception = main.create_block(&[]);
-        main.push_prompt(prompt);
+        main.push_prompt(prompt, handler_bb);
         main.invoke(f_inner, &[callee], normal, &[], exception, &[]);
         main.switch_to_block(normal);
         let ret = main.block_param(normal, 0);
         main.pop_prompt(prompt);
-        main.ret(ret);
+        main.jump(handler_bb, &[ret]);
         main.switch_to_block(exception);
         let ex = main.iconst(Type::I64, 222);
         main.ret(ex);
+        main.switch_to_block(handler_bb);
+        let popped = main.block_param(handler_bb, 0);
+        main.ret(popped);
         mb.finish_func(f_main, main);
 
         let module = mb.build();
@@ -1677,21 +1717,25 @@ mod tests {
         mb.finish_func(f_inner, inner);
 
         let mut main = mb.define_func(f_main);
+        let handler_bb = main.create_block(&[Type::I64]);
         let prompt = main.create_prompt();
         let entry = main.entry_block();
         let callee = main.block_param(entry, 0);
         let throw_ptr = main.block_param(entry, 1);
         let normal = main.create_block(&[Type::I64]);
         let exception = main.create_block(&[]);
-        main.push_prompt(prompt);
+        main.push_prompt(prompt, handler_bb);
         main.invoke_indirect(callee, &[throw_ptr], Some(Type::I64), normal, &[], exception, &[]);
         main.switch_to_block(normal);
         let ret = main.block_param(normal, 0);
         main.pop_prompt(prompt);
-        main.ret(ret);
+        main.jump(handler_bb, &[ret]);
         main.switch_to_block(exception);
         let ex = main.iconst(Type::I64, 616);
         main.ret(ex);
+        main.switch_to_block(handler_bb);
+        let popped = main.block_param(handler_bb, 0);
+        main.ret(popped);
         mb.finish_func(f_main, main);
 
         let module = mb.build();

@@ -213,12 +213,17 @@ fn test_frame_slice_ir_surface() {
     let mut b = FunctionBuilder::new("capture", &[Type::I64], Some(Type::FrameSlice));
     let entry = b.entry_block();
     let arg = b.block_param(entry, 0);
+    let handler_bb = b.create_block(&[Type::FrameSlice]);
     let prompt = b.create_prompt();
-    b.push_prompt(prompt);
+    b.push_prompt(prompt, handler_bb);
     let slice = b.capture_slice(prompt, &[arg]);
     let cloned = b.clone_slice(slice);
     b.pop_prompt(prompt);
-    b.ret(cloned);
+    b.jump(handler_bb, &[cloned]);
+
+    b.switch_to_block(handler_bb);
+    let result = b.block_param(handler_bb, 0);
+    b.ret(result);
 
     let func = b.build();
     verify(&func).unwrap();
@@ -914,4 +919,65 @@ fn test_fib_ir() {
     assert!(s.contains("fn fib(i64) -> i64"));
     assert!(s.contains("call @f0"));
     assert!(s.contains("br_if"));
+}
+
+// ── Verifier: continuation gate ──────────────────────────
+
+#[test]
+fn verify_rejects_push_prompt_when_continuations_disabled() {
+    let mut b = FunctionBuilder::new("f", &[], Some(Type::I64));
+    let handler_bb = b.create_block(&[Type::I64]);
+    let prompt = b.create_prompt();
+    b.push_prompt(prompt, handler_bb);
+    let body = b.iconst(Type::I64, 0);
+    b.pop_prompt(prompt);
+    b.jump(handler_bb, &[body]);
+
+    b.switch_to_block(handler_bb);
+    let v = b.block_param(handler_bb, 0);
+    b.ret(v);
+    let func = b.build();
+
+    // Allowed by default
+    verify(&func).unwrap();
+
+    // Rejected with continuations disabled
+    let opts = VerifyOptions { allow_continuations: false };
+    let errs = verify_with(&func, opts).unwrap_err();
+    assert!(errs.iter().any(|e| matches!(e, VerifyError::ContinuationsNotAllowed { .. })));
+}
+
+#[test]
+fn verify_rejects_capture_slice_when_continuations_disabled() {
+    let mut b = FunctionBuilder::new("f", &[Type::I64], Some(Type::FrameSlice));
+    let entry = b.entry_block();
+    let arg = b.block_param(entry, 0);
+    let handler_bb = b.create_block(&[Type::FrameSlice]);
+    let prompt = b.create_prompt();
+    b.push_prompt(prompt, handler_bb);
+    let slice = b.capture_slice(prompt, &[arg]);
+    b.pop_prompt(prompt);
+    b.jump(handler_bb, &[slice]);
+
+    b.switch_to_block(handler_bb);
+    let result = b.block_param(handler_bb, 0);
+    b.ret(result);
+    let func = b.build();
+
+    verify(&func).unwrap();
+
+    let opts = VerifyOptions { allow_continuations: false };
+    let errs = verify_with(&func, opts).unwrap_err();
+    assert!(errs.iter().any(|e| matches!(e, VerifyError::ContinuationsNotAllowed { .. })));
+}
+
+#[test]
+fn verify_allows_no_continuation_instructions_when_disabled() {
+    let mut b = FunctionBuilder::new("f", &[], Some(Type::I64));
+    let v = b.iconst(Type::I64, 42);
+    b.ret(v);
+    let func = b.build();
+
+    let opts = VerifyOptions { allow_continuations: false };
+    verify_with(&func, opts).unwrap();
 }

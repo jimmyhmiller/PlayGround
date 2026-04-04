@@ -25,4 +25,4 @@ pub use ir::{
     InstNode, Module, OverflowOp, PromptId, Terminator, Value,
 };
 pub use types::{Signature, Type};
-pub use verify::{verify, VerifyError};
+pub use verify::{verify, verify_with, VerifyError, VerifyOptions};

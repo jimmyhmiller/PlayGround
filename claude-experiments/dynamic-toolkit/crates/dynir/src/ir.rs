@@ -60,6 +60,10 @@ impl PromptId {
         self.0 as usize
     }
 
+    pub fn index_u32(self) -> u32 {
+        self.0
+    }
+
     pub fn from_index(index: usize) -> Self {
         Self(index as u32)
     }
@@ -200,8 +204,11 @@ pub enum Inst {
 
     // -- Delimited frame slices --
     /// Install a prompt boundary in the current dynamic extent.
-    PushPrompt(PromptId),
-    /// Pop a prompt boundary when leaving its extent.
+    /// `handler` is the block to jump to when `abort_to_prompt` targets this
+    /// prompt. The handler block must take exactly one parameter — the abort
+    /// value. This is the clean merge point for normal-flow and abort-flow.
+    PushPrompt(PromptId, BlockId),
+    /// Pop a prompt boundary when leaving its extent. Void instruction.
     PopPrompt(PromptId),
     /// Capture the current delimited suffix of frames up to `prompt`.
     /// `live` values are explicitly reified into the captured slice.
@@ -284,7 +291,7 @@ impl Inst {
 
             Inst::OverflowCheck(_, _, _) => Some(Type::I8),
             Inst::Guard(_, _, _) => None,
-            Inst::PushPrompt(_) | Inst::PopPrompt(_) => None,
+            Inst::PushPrompt(_, _) | Inst::PopPrompt(_) => None,
             Inst::CaptureSlice(_, _) | Inst::CloneSlice(_) => Some(Type::FrameSlice),
 
             Inst::Call(fref, _) => extern_sigs[fref.index()].sig.ret,
@@ -355,7 +362,7 @@ impl Inst {
                 live.iter().for_each(|v| f(*v));
             }
 
-            Inst::PushPrompt(_) | Inst::PopPrompt(_) => {}
+            Inst::PushPrompt(_, _) | Inst::PopPrompt(_) => {}
             Inst::CaptureSlice(_, live) => live.iter().for_each(|v| f(*v)),
             Inst::CloneSlice(v) => f(*v),
 
@@ -430,7 +437,7 @@ impl Inst {
                 live.iter_mut().for_each(|v| f(v));
             }
 
-            Inst::PushPrompt(_) | Inst::PopPrompt(_) => {}
+            Inst::PushPrompt(_, _) | Inst::PopPrompt(_) => {}
             Inst::CaptureSlice(_, live) => live.iter_mut().for_each(|v| f(v)),
             Inst::CloneSlice(v) => f(v),
 
