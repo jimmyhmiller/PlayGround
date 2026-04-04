@@ -23,7 +23,7 @@ fn test_bin_runner_symbolic_neg() {
     let program = "dim T\nlet x = load([1, T, 4])\nlet y = neg(x)";
     let graph = compile(program);
 
-    let backend = WasmBackend;
+    let backend = WasmBackend::default();
     let wasm_bytes = backend.emit_fused(&graph);
 
     let tmp = std::env::temp_dir();

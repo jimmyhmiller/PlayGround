@@ -7,6 +7,10 @@ edition = "2024"
 name = "gpt2"
 path = "src/main.rs"
 
+[[bin]]
+name = "bench-simd"
+path = "src/bench_simd.rs"
+
 [dependencies]
 tensor-lang-graph = { path = "../tensor-lang-graph" }
 tensor-lang-backend = { path = "../tensor-lang-backend" }

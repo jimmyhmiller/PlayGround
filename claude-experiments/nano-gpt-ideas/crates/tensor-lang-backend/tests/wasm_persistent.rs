@@ -80,7 +80,7 @@ fn test_persistent_runner_add() {
     let program = "let x = load([2, 3]) let y = load([2, 3]) let z = add(x, y)";
     let graph = compile(program);
 
-    let backend = WasmBackend;
+    let backend = WasmBackend::default();
     let wasm_bytes = backend.emit_fused(&graph);
 
     let tmp = std::env::temp_dir();
@@ -127,7 +127,7 @@ fn test_persistent_runner_softmax() {
     let oracle_results = eval_with_inputs(&graph, &inputs);
     let oracle_output = oracle_results.last().unwrap();
 
-    let backend = WasmBackend;
+    let backend = WasmBackend::default();
     let wasm_bytes = backend.emit_fused(&graph);
 
     let tmp = std::env::temp_dir();
@@ -157,7 +157,7 @@ fn test_persistent_runner_multi_output() {
     "#;
     let graph = compile(program);
 
-    let backend = WasmBackend;
+    let backend = WasmBackend::default();
     // Multi-output: both z and s
     let z_id = tensor_lang_graph::NodeId(graph.nodes.len() - 2); // z = add
     let s_id = tensor_lang_graph::NodeId(graph.nodes.len() - 1); // s = sum

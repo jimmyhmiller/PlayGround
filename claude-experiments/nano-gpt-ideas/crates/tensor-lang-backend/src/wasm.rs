@@ -24,6 +24,7 @@ use crate::loop_ir::{self, Stmt, Inst, Index, ReduceOp};
 /// WASM value types
 const I32: u8 = 0x7F;
 const F32: u8 = 0x7D;
+const V128: u8 = 0x7B;
 
 /// WASM section IDs
 const SEC_TYPE: u8 = 1;
@@ -98,6 +99,43 @@ mod op {
 
     // Select
     pub const SELECT: u8 = 0x1B;
+}
+
+/// WASM SIMD opcodes (all prefixed with 0xFD, values are LEB128-encoded)
+#[allow(dead_code)]
+mod simd_op {
+    pub const PREFIX: u8 = 0xFD;
+
+    // Load/Store (followed by memarg)
+    pub const V128_LOAD: u32 = 0;
+    pub const V128_STORE: u32 = 11;
+    pub const V128_CONST: u32 = 12;
+
+    // Splat
+    pub const F32X4_SPLAT: u32 = 19;
+
+    // Extract lane (followed by lane index byte)
+    pub const F32X4_EXTRACT_LANE: u32 = 31;
+
+    // f32x4 comparisons (return v128 mask: all-1s or all-0s per lane)
+    pub const F32X4_LT: u32 = 67;
+    pub const F32X4_GT: u32 = 68;
+
+    // Bitwise
+    pub const V128_BITSELECT: u32 = 82;
+
+    // f32x4 unary
+    pub const F32X4_ABS: u32 = 224;
+    pub const F32X4_NEG: u32 = 225;
+    pub const F32X4_SQRT: u32 = 227;
+
+    // f32x4 binary
+    pub const F32X4_ADD: u32 = 228;
+    pub const F32X4_SUB: u32 = 229;
+    pub const F32X4_MUL: u32 = 230;
+    pub const F32X4_DIV: u32 = 231;
+    pub const F32X4_MIN: u32 = 232;
+    pub const F32X4_MAX: u32 = 233;
 }
 
 /// Encode an unsigned LEB128 integer.
@@ -203,6 +241,41 @@ impl FuncBuilder {
     fn f32_const(&mut self, val: f32) {
         self.code.push(op::F32_CONST);
         self.code.extend_from_slice(&val.to_le_bytes());
+    }
+
+    // ---- SIMD helpers ----
+
+    /// Emit a SIMD instruction (0xFD prefix + LEB128 opcode).
+    fn emit_simd(&mut self, opcode: u32) {
+        self.code.push(simd_op::PREFIX);
+        leb128_u(opcode, &mut self.code);
+    }
+
+    /// Emit v128.load with 4-byte alignment and given offset.
+    fn v128_load(&mut self, memarg_offset: u32) {
+        self.code.push(simd_op::PREFIX);
+        leb128_u(simd_op::V128_LOAD, &mut self.code);
+        leb128_u(2, &mut self.code); // align = log2(4) = 2 (safe for f32-aligned data)
+        leb128_u(memarg_offset, &mut self.code);
+    }
+
+    /// Emit v128.store with 4-byte alignment and given offset.
+    fn v128_store(&mut self, memarg_offset: u32) {
+        self.code.push(simd_op::PREFIX);
+        leb128_u(simd_op::V128_STORE, &mut self.code);
+        leb128_u(2, &mut self.code); // align = log2(4) = 2
+        leb128_u(memarg_offset, &mut self.code);
+    }
+
+    /// Emit f32x4.splat (pops f32, pushes v128 with all 4 lanes = that f32).
+    fn f32x4_splat(&mut self) {
+        self.emit_simd(simd_op::F32X4_SPLAT);
+    }
+
+    /// Emit f32x4.extract_lane (pops v128, pushes f32 from given lane).
+    fn f32x4_extract_lane(&mut self, lane: u8) {
+        self.emit_simd(simd_op::F32X4_EXTRACT_LANE);
+        self.code.push(lane);
     }
 
     /// Emit local.get.
@@ -817,6 +890,199 @@ fn emit_inst_code(
     }
 }
 
+/// Check if a loop body can be SIMD-vectorized.
+/// Requirements: all loads use Index::Flat, no DimVar, no Exp2/Log2 (scalar function calls).
+fn can_simd_vectorize(body: &[Inst]) -> bool {
+    body.iter().all(|inst| match inst {
+        Inst::Load { index: Index::Flat, .. } => true,
+        Inst::Load { .. } => false,
+        Inst::Const(_) => true,
+        Inst::DimVar(_) => false,
+        Inst::Neg(_) | Inst::Recip(_) | Inst::Sqrt(_) => true,
+        Inst::Add(_, _) | Inst::Mul(_, _) | Inst::Max(_, _) | Inst::CmpLt(_, _) => true,
+        Inst::Exp2(_) | Inst::Log2(_) => false,
+    })
+}
+
+/// Emit a SIMD-vectorized elementwise loop (no reduce).
+/// Processes 4 f32 elements at a time using v128 SIMD, with a scalar remainder.
+fn emit_simd_elementwise_loop(
+    fb: &mut FuncBuilder,
+    out_buf_ptr: u32,
+    shape: &[Dim],
+    body: &[Inst],
+    result: usize,
+    ctx: &mut CodegenCtx,
+) {
+    let oi_local = fb.alloc_local(I32);
+    let out_size_local = fb.alloc_local(I32);
+    let simd_end_local = fb.alloc_local(I32);
+
+    // out_size = product(shape)
+    emit_dim(fb, &Dim::product(shape), &ctx.dim_locals);
+    fb.local_set(out_size_local);
+
+    // simd_end = out_size & ~3 (round down to multiple of 4)
+    fb.local_get(out_size_local);
+    fb.i32_const(!3); // 0xFFFFFFFC
+    fb.emit(op::I32_AND);
+    fb.local_set(simd_end_local);
+
+    // Allocate v128 locals for each instruction result
+    let mut v128_locals: HashMap<usize, u32> = HashMap::new();
+    for j in 0..body.len() {
+        v128_locals.insert(j, fb.alloc_local(V128));
+    }
+
+    // === SIMD main loop: oi = 0; while (oi < simd_end) { ... oi += 4; } ===
+    fb.i32_const(0);
+    fb.local_set(oi_local);
+
+    fb.block();
+    fb.loop_();
+
+    fb.local_get(oi_local);
+    fb.local_get(simd_end_local);
+    fb.emit(op::I32_GE_S);
+    fb.br_if(1);
+
+    // Emit SIMD body
+    for (j, inst) in body.iter().enumerate() {
+        let vlocal = v128_locals[&j];
+        match inst {
+            Inst::Load { buf, index: Index::Flat } => {
+                // v128.load from buf_ptr + oi * 4
+                let buf_ptr = ctx.buf_ptrs[buf];
+                fb.local_get(buf_ptr);
+                fb.local_get(oi_local);
+                fb.i32_const(4);
+                fb.emit(op::I32_MUL);
+                fb.emit(op::I32_ADD);
+                fb.v128_load(0);
+                fb.local_set(vlocal);
+            }
+            Inst::Const(v) => {
+                fb.f32_const(*v as f32);
+                fb.f32x4_splat();
+                fb.local_set(vlocal);
+            }
+            Inst::Neg(a) => {
+                fb.local_get(v128_locals[a]);
+                fb.emit_simd(simd_op::F32X4_NEG);
+                fb.local_set(vlocal);
+            }
+            Inst::Recip(a) => {
+                fb.f32_const(1.0);
+                fb.f32x4_splat();
+                fb.local_get(v128_locals[a]);
+                fb.emit_simd(simd_op::F32X4_DIV);
+                fb.local_set(vlocal);
+            }
+            Inst::Sqrt(a) => {
+                fb.local_get(v128_locals[a]);
+                fb.emit_simd(simd_op::F32X4_SQRT);
+                fb.local_set(vlocal);
+            }
+            Inst::Add(a, b) => {
+                fb.local_get(v128_locals[a]);
+                fb.local_get(v128_locals[b]);
+                fb.emit_simd(simd_op::F32X4_ADD);
+                fb.local_set(vlocal);
+            }
+            Inst::Mul(a, b) => {
+                fb.local_get(v128_locals[a]);
+                fb.local_get(v128_locals[b]);
+                fb.emit_simd(simd_op::F32X4_MUL);
+                fb.local_set(vlocal);
+            }
+            Inst::Max(a, b) => {
+                fb.local_get(v128_locals[a]);
+                fb.local_get(v128_locals[b]);
+                fb.emit_simd(simd_op::F32X4_MAX);
+                fb.local_set(vlocal);
+            }
+            Inst::CmpLt(a, b) => {
+                // f32x4.lt gives all-1s/all-0s per lane mask
+                // v128.bitselect(1.0_splat, 0.0_splat, mask) → 1.0 where true, 0.0 where false
+                fb.f32_const(1.0);
+                fb.f32x4_splat();
+                fb.f32_const(0.0);
+                fb.f32x4_splat();
+                fb.local_get(v128_locals[a]);
+                fb.local_get(v128_locals[b]);
+                fb.emit_simd(simd_op::F32X4_LT);
+                fb.emit_simd(simd_op::V128_BITSELECT);
+                fb.local_set(vlocal);
+            }
+            _ => unreachable!("can_simd_vectorize should have excluded this"),
+        }
+    }
+
+    // v128.store result to out_ptr + oi * 4
+    fb.local_get(out_buf_ptr);
+    fb.local_get(oi_local);
+    fb.i32_const(4);
+    fb.emit(op::I32_MUL);
+    fb.emit(op::I32_ADD);
+    fb.local_get(v128_locals[&result]);
+    fb.v128_store(0);
+
+    // oi += 4
+    fb.local_get(oi_local);
+    fb.i32_const(4);
+    fb.emit(op::I32_ADD);
+    fb.local_set(oi_local);
+    fb.br(0);
+
+    fb.end(); // loop
+    fb.end(); // block
+
+    // === Scalar remainder loop: oi from simd_end to out_size ===
+    fb.local_get(simd_end_local);
+    fb.local_set(oi_local);
+
+    // Map oi into dim_vars for emit_inst_code compatibility
+    let oi_dim = ctx.get_or_alloc_dim(fb, usize::MAX);
+    // We need a separate scalar local to alias oi
+    // Actually, just copy oi into the dim var each iteration
+
+    fb.block();
+    fb.loop_();
+
+    fb.local_get(oi_local);
+    fb.local_get(out_size_local);
+    fb.emit(op::I32_GE_S);
+    fb.br_if(1);
+
+    // Set the oi dim var for emit_inst_code (Flat index uses dim_vars[usize::MAX])
+    fb.local_get(oi_local);
+    fb.local_set(oi_dim);
+
+    // Emit scalar body
+    for (j, inst) in body.iter().enumerate() {
+        emit_inst_code(fb, j, inst, ctx);
+    }
+
+    // Scalar store
+    fb.local_get(out_buf_ptr);
+    fb.local_get(oi_local);
+    fb.i32_const(4);
+    fb.emit(op::I32_MUL);
+    fb.emit(op::I32_ADD);
+    fb.local_get(ctx.inst_vars[&result]);
+    fb.f32_store(0);
+
+    // oi++
+    fb.local_get(oi_local);
+    fb.i32_const(1);
+    fb.emit(op::I32_ADD);
+    fb.local_set(oi_local);
+    fb.br(0);
+
+    fb.end(); // loop
+    fb.end(); // block
+}
+
 /// Emit a standard (non-tiled) loop.
 fn emit_loop_code(
     fb: &mut FuncBuilder,
@@ -1014,6 +1280,44 @@ fn emit_loop_code(
     }
 }
 
+/// Check if a tiled loop body can use SIMD for the N-dimension unrolling.
+/// Requires: all n-dependent loads have stride 1 in n_dim (contiguous for v128.load),
+/// and no scalar function calls (exp2/log2) or DimVar in n-dependent instructions.
+fn can_simd_tiled_loop(body: &[Inst], depends_on_n: &[bool], n_dim: usize) -> bool {
+    body.iter().enumerate().all(|(j, inst)| {
+        if !depends_on_n[j] {
+            return true;
+        }
+        match inst {
+            Inst::Load { index: Index::Strided { parts, .. }, .. } => {
+                parts.iter().all(|(dim, stride)| *dim != n_dim || stride.is_one())
+            }
+            Inst::Load { index: Index::Flat, .. } => true,
+            Inst::Const(_) => true,
+            Inst::DimVar(_) => false,
+            Inst::Neg(_) | Inst::Recip(_) | Inst::Sqrt(_) => true,
+            Inst::Add(_, _) | Inst::Mul(_, _) | Inst::Max(_, _) | Inst::CmpLt(_, _) => true,
+            Inst::Exp2(_) | Inst::Log2(_) => false,
+        }
+    })
+}
+
+/// Push a v128 operand: if n-dependent, get the v128 local; if n-invariant, splat the scalar.
+fn push_v128_operand(
+    fb: &mut FuncBuilder,
+    idx: usize,
+    depends_on_n: &[bool],
+    simd_vars: &HashMap<usize, u32>,
+    inst_vars: &HashMap<usize, u32>,
+) {
+    if depends_on_n[idx] {
+        fb.local_get(simd_vars[&idx]);
+    } else {
+        fb.local_get(inst_vars[&idx]);
+        fb.f32x4_splat();
+    }
+}
+
 /// Emit a tiled loop (for matmul-like reduces with large dimensions).
 fn emit_tiled_loop_code(
     fb: &mut FuncBuilder,
@@ -1024,6 +1328,7 @@ fn emit_tiled_loop_code(
     result: usize,
     tile_cfg: &loop_ir::TileConfig,
     ctx: &mut CodegenCtx,
+    simd_enabled: bool,
 ) {
     let ndim = shape.len();
     let tiles = &tile_cfg.tiles;
@@ -1059,10 +1364,28 @@ fn emit_tiled_loop_code(
     // Compute n_dependence for hoisting
     let depends_on_n = compute_n_dependence(body, n_dim);
 
+    // Check if SIMD is applicable for the tiled N-unroll
+    let use_simd = simd_enabled && can_simd_tiled_loop(body, &depends_on_n, n_dim) && unroll >= 4;
+    let simd_groups = if use_simd { unroll / 4 } else { 0 };
+
     // Accumulator locals for unrolled section
     let mut acc_locals: Vec<u32> = Vec::new();
-    for _ in 0..unroll {
-        acc_locals.push(fb.alloc_local(F32));
+    let mut acc_v128_locals: Vec<u32> = Vec::new();
+    // SIMD locals for n-dependent instruction results (v128)
+    let mut simd_inst_locals: HashMap<usize, u32> = HashMap::new();
+    if use_simd {
+        for _ in 0..simd_groups {
+            acc_v128_locals.push(fb.alloc_local(V128));
+        }
+        for (j, _) in body.iter().enumerate() {
+            if depends_on_n[j] {
+                simd_inst_locals.insert(j, fb.alloc_local(V128));
+            }
+        }
+    } else {
+        for _ in 0..unroll {
+            acc_locals.push(fb.alloc_local(F32));
+        }
     }
     let acc_r_local = fb.alloc_local(F32);
 
@@ -1234,9 +1557,17 @@ fn emit_tiled_loop_code(
     fb.local_set(ni_base_local);
 
     // Init accumulators
-    for u in 0..unroll {
-        fb.f32_const(init_val);
-        fb.local_set(acc_locals[u]);
+    if use_simd {
+        for g in 0..simd_groups {
+            fb.f32_const(init_val);
+            fb.f32x4_splat();
+            fb.local_set(acc_v128_locals[g]);
+        }
+    } else {
+        for u in 0..unroll {
+            fb.f32_const(init_val);
+            fb.local_set(acc_locals[u]);
+        }
     }
 
     // --- K block loop ---
@@ -1301,38 +1632,133 @@ fn emit_tiled_loop_code(
         }
     }
 
-    // Unrolled: emit n-dependent instructions for each unroll position
+    // Unrolled: emit n-dependent instructions
     let n_dim_local = ctx.dim_vars[&n_dim];
-    for u in 0..unroll {
-        // d{n_dim} = ni_base + u
-        fb.local_get(ni_base_local);
-        fb.i32_const(u as i32);
-        fb.emit(op::I32_ADD);
-        fb.local_set(n_dim_local);
+    if use_simd {
+        // SIMD path: process groups of 4 N elements with v128
+        for g in 0..simd_groups {
+            // d{n_dim} = ni_base + g * 4 (base of this v128 group)
+            fb.local_get(ni_base_local);
+            fb.i32_const((g * 4) as i32);
+            fb.emit(op::I32_ADD);
+            fb.local_set(n_dim_local);
 
-        for (j, inst) in body.iter().enumerate() {
-            if depends_on_n[j] {
-                emit_inst_code(fb, j, inst, ctx);
+            // Emit SIMD body for n-dependent instructions
+            for (j, inst) in body.iter().enumerate() {
+                if !depends_on_n[j] { continue; }
+                let vlocal = simd_inst_locals[&j];
+                match inst {
+                    Inst::Load { buf, index } => {
+                        let buf_ptr = ctx.buf_ptrs[buf];
+                        emit_index_offset(fb, buf_ptr, index, ctx);
+                        fb.v128_load(0);
+                        fb.local_set(vlocal);
+                    }
+                    Inst::Const(v) => {
+                        fb.f32_const(*v as f32);
+                        fb.f32x4_splat();
+                        fb.local_set(vlocal);
+                    }
+                    Inst::Neg(a) => {
+                        push_v128_operand(fb, *a, &depends_on_n, &simd_inst_locals, &ctx.inst_vars);
+                        fb.emit_simd(simd_op::F32X4_NEG);
+                        fb.local_set(vlocal);
+                    }
+                    Inst::Recip(a) => {
+                        fb.f32_const(1.0);
+                        fb.f32x4_splat();
+                        push_v128_operand(fb, *a, &depends_on_n, &simd_inst_locals, &ctx.inst_vars);
+                        fb.emit_simd(simd_op::F32X4_DIV);
+                        fb.local_set(vlocal);
+                    }
+                    Inst::Sqrt(a) => {
+                        push_v128_operand(fb, *a, &depends_on_n, &simd_inst_locals, &ctx.inst_vars);
+                        fb.emit_simd(simd_op::F32X4_SQRT);
+                        fb.local_set(vlocal);
+                    }
+                    Inst::Add(a, b) => {
+                        push_v128_operand(fb, *a, &depends_on_n, &simd_inst_locals, &ctx.inst_vars);
+                        push_v128_operand(fb, *b, &depends_on_n, &simd_inst_locals, &ctx.inst_vars);
+                        fb.emit_simd(simd_op::F32X4_ADD);
+                        fb.local_set(vlocal);
+                    }
+                    Inst::Mul(a, b) => {
+                        push_v128_operand(fb, *a, &depends_on_n, &simd_inst_locals, &ctx.inst_vars);
+                        push_v128_operand(fb, *b, &depends_on_n, &simd_inst_locals, &ctx.inst_vars);
+                        fb.emit_simd(simd_op::F32X4_MUL);
+                        fb.local_set(vlocal);
+                    }
+                    Inst::Max(a, b) => {
+                        push_v128_operand(fb, *a, &depends_on_n, &simd_inst_locals, &ctx.inst_vars);
+                        push_v128_operand(fb, *b, &depends_on_n, &simd_inst_locals, &ctx.inst_vars);
+                        fb.emit_simd(simd_op::F32X4_MAX);
+                        fb.local_set(vlocal);
+                    }
+                    Inst::CmpLt(a, b) => {
+                        fb.f32_const(1.0);
+                        fb.f32x4_splat();
+                        fb.f32_const(0.0);
+                        fb.f32x4_splat();
+                        push_v128_operand(fb, *a, &depends_on_n, &simd_inst_locals, &ctx.inst_vars);
+                        push_v128_operand(fb, *b, &depends_on_n, &simd_inst_locals, &ctx.inst_vars);
+                        fb.emit_simd(simd_op::F32X4_LT);
+                        fb.emit_simd(simd_op::V128_BITSELECT);
+                        fb.local_set(vlocal);
+                    }
+                    _ => unreachable!("can_simd_tiled_loop should have excluded this"),
+                }
+            }
+
+            // Accumulate v128
+            let result_v128 = simd_inst_locals[&result];
+            match reduce.op {
+                ReduceOp::Sum => {
+                    fb.local_get(acc_v128_locals[g]);
+                    fb.local_get(result_v128);
+                    fb.emit_simd(simd_op::F32X4_ADD);
+                    fb.local_set(acc_v128_locals[g]);
+                }
+                ReduceOp::Max => {
+                    fb.local_get(acc_v128_locals[g]);
+                    fb.local_get(result_v128);
+                    fb.emit_simd(simd_op::F32X4_MAX);
+                    fb.local_set(acc_v128_locals[g]);
+                }
             }
         }
+    } else {
+        // Scalar path: emit n-dependent instructions for each unroll position
+        for u in 0..unroll {
+            // d{n_dim} = ni_base + u
+            fb.local_get(ni_base_local);
+            fb.i32_const(u as i32);
+            fb.emit(op::I32_ADD);
+            fb.local_set(n_dim_local);
 
-        // Accumulate
-        let result_val = ctx.inst_vars[&result];
-        match reduce.op {
-            ReduceOp::Sum => {
-                fb.local_get(acc_locals[u]);
-                fb.local_get(result_val);
-                fb.emit(op::F32_ADD);
-                fb.local_set(acc_locals[u]);
+            for (j, inst) in body.iter().enumerate() {
+                if depends_on_n[j] {
+                    emit_inst_code(fb, j, inst, ctx);
+                }
             }
-            ReduceOp::Max => {
-                fb.local_get(result_val);
-                fb.local_get(acc_locals[u]);
-                fb.local_get(result_val);
-                fb.local_get(acc_locals[u]);
-                fb.emit(op::F32_GT);
-                fb.emit(op::SELECT);
-                fb.local_set(acc_locals[u]);
+
+            // Accumulate
+            let result_val = ctx.inst_vars[&result];
+            match reduce.op {
+                ReduceOp::Sum => {
+                    fb.local_get(acc_locals[u]);
+                    fb.local_get(result_val);
+                    fb.emit(op::F32_ADD);
+                    fb.local_set(acc_locals[u]);
+                }
+                ReduceOp::Max => {
+                    fb.local_get(result_val);
+                    fb.local_get(acc_locals[u]);
+                    fb.local_get(result_val);
+                    fb.local_get(acc_locals[u]);
+                    fb.emit(op::F32_GT);
+                    fb.emit(op::SELECT);
+                    fb.local_set(acc_locals[u]);
+                }
             }
         }
     }
@@ -1355,19 +1781,35 @@ fn emit_tiled_loop_code(
     fb.end(); // k_blk loop
     fb.end(); // k_blk block
 
-    // Write back accumulators: out[row_base + ni_base + u]
-    for u in 0..unroll {
-        fb.local_get(out_buf_ptr);
-        fb.local_get(row_base_local);
-        fb.local_get(ni_base_local);
-        fb.emit(op::I32_ADD);
-        fb.i32_const(u as i32);
-        fb.emit(op::I32_ADD);
-        fb.i32_const(4);
-        fb.emit(op::I32_MUL);
-        fb.emit(op::I32_ADD);
-        fb.local_get(acc_locals[u]);
-        fb.f32_store(0);
+    // Write back accumulators: out[row_base + ni_base + ...]
+    if use_simd {
+        for g in 0..simd_groups {
+            fb.local_get(out_buf_ptr);
+            fb.local_get(row_base_local);
+            fb.local_get(ni_base_local);
+            fb.emit(op::I32_ADD);
+            fb.i32_const((g * 4) as i32);
+            fb.emit(op::I32_ADD);
+            fb.i32_const(4);
+            fb.emit(op::I32_MUL);
+            fb.emit(op::I32_ADD);
+            fb.local_get(acc_v128_locals[g]);
+            fb.v128_store(0);
+        }
+    } else {
+        for u in 0..unroll {
+            fb.local_get(out_buf_ptr);
+            fb.local_get(row_base_local);
+            fb.local_get(ni_base_local);
+            fb.emit(op::I32_ADD);
+            fb.i32_const(u as i32);
+            fb.emit(op::I32_ADD);
+            fb.i32_const(4);
+            fb.emit(op::I32_MUL);
+            fb.emit(op::I32_ADD);
+            fb.local_get(acc_locals[u]);
+            fb.f32_store(0);
+        }
     }
 
     // ni_grp++
@@ -1713,7 +2155,16 @@ fn compute_n_dependence(body: &[Inst], n_dim: usize) -> Vec<bool> {
 // Public API
 // ============================================================================
 
-pub struct WasmBackend;
+pub struct WasmBackend {
+    /// Whether to use WASM SIMD instructions. Default: true.
+    pub use_simd: bool,
+}
+
+impl Default for WasmBackend {
+    fn default() -> Self {
+        WasmBackend { use_simd: true }
+    }
+}
 
 /// Collect all Param names from a Dim expression.
 fn collect_params(dim: &Dim, params: &mut Vec<String>) {
@@ -1929,9 +2380,14 @@ impl WasmBackend {
                         log2_fn,
                     };
 
+                    let simd = self.use_simd;
                     if let (Some(reduce_desc), Some(tile_cfg)) = (reduce, tile) {
                         emit_tiled_loop_code(
-                            &mut fb, out_ptr, shape, reduce_desc, body, *result, tile_cfg, &mut ctx,
+                            &mut fb, out_ptr, shape, reduce_desc, body, *result, tile_cfg, &mut ctx, simd,
+                        );
+                    } else if simd && reduce.is_none() && can_simd_vectorize(body) {
+                        emit_simd_elementwise_loop(
+                            &mut fb, out_ptr, shape, body, *result, &mut ctx,
                         );
                     } else {
                         emit_loop_code(

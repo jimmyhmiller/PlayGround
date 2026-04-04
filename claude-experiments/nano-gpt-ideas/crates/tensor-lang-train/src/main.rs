@@ -287,7 +287,7 @@ impl Adam {
 // ─── Model save/load ───────────────────────────────────────────────────────
 
 fn save_model(weights: &[Vec<f32>], cfg: &ModelConfig, vocab: &midi_parse::Vocab) {
-    save_model_to(weights, cfg, vocab, &project_root().join("midi_model.bin"));
+    save_model_to(weights, cfg, vocab, &project_root().join("models/midi_model.bin"));
 }
 
 fn save_model_to(weights: &[Vec<f32>], cfg: &ModelConfig, vocab: &midi_parse::Vocab, path: &std::path::Path) {
@@ -552,7 +552,7 @@ fn cmd_train(midi_path: &str) {
 
     let mut output_ids = vec![tg.loss];
     output_ids.extend_from_slice(&tg.grad_ids);
-    let backend = WasmBackend;
+    let backend = WasmBackend::default();
     let wasm_bytes = backend.emit_fused_multi_output(&tg.graph, &output_ids);
     let t0 = Instant::now();
     let wasm_path = write_wasm(&wasm_bytes, "train_model");
@@ -640,7 +640,7 @@ fn cmd_train(midi_path: &str) {
 
         // Checkpoint every 25 epochs
         if (epoch + 1) % 25 == 0 {
-            let checkpoint_path = project_root().join(format!("checkpoint_epoch_{}.bin", epoch + 1));
+            let checkpoint_path = project_root().join(format!("checkpoints/checkpoint_epoch_{}.bin", epoch + 1));
             save_model_to(&weights, &cfg, &vocab, &checkpoint_path);
             eprintln!("  → Saved checkpoint: {}", checkpoint_path.display());
         }
@@ -663,7 +663,7 @@ fn cmd_generate(checkpoint: Option<&str>, random: bool, temp_override: Option<f3
     } else {
         let path = match checkpoint {
             Some(p) => std::path::PathBuf::from(p),
-            None => project_root().join("midi_model.bin"),
+            None => project_root().join("models/midi_model.bin"),
         };
         eprintln!("=== Generate from {} ===", path.display());
         load_model_from(&path)
@@ -671,7 +671,7 @@ fn cmd_generate(checkpoint: Option<&str>, random: bool, temp_override: Option<f3
 
     eprintln!("Compiling DSL → inference WASM...");
     let t0 = Instant::now();
-    let backend = WasmBackend;
+    let backend = WasmBackend::default();
     let inf_graph = compile_for_inference(&cfg);
     let wasm_bytes = backend.emit_fused(&inf_graph);
     let inf_wasm = write_wasm(&wasm_bytes, "train_model");
@@ -802,7 +802,7 @@ fn cmd_generate(checkpoint: Option<&str>, random: bool, temp_override: Option<f3
     }
     eprintln!();
 
-    let midi_path = project_root().join("generated.mid");
+    let midi_path = project_root().join("midi/generated.mid");
     tokens_to_midi(&midi_path, &tokens, &vocab);
     eprintln!("\nWrote: {}", midi_path.display());
     eprintln!("Play:  open {}", midi_path.display());
@@ -994,7 +994,7 @@ fn cmd_train_rl(midi_path: &str, leverage_threshold: Option<f32>, num_episodes: 
     }
 
     // Load pretrained model
-    let model_path = project_root().join("midi_model.bin");
+    let model_path = project_root().join("models/midi_model.bin");
     let (mut weights, base_cfg, vocab) = load_model_from(&model_path);
     eprintln!("Loaded model: vocab={} seq={} embd={} heads={} layers={}",
         base_cfg.vocab_size, base_cfg.seq_len, base_cfg.n_embd, base_cfg.n_head, base_cfg.n_layer);
@@ -1009,7 +1009,7 @@ fn cmd_train_rl(midi_path: &str, leverage_threshold: Option<f32>, num_episodes: 
 
     eprintln!("Compiling WASM modules...");
     let t0 = Instant::now();
-    let backend = WasmBackend;
+    let backend = WasmBackend::default();
 
     let inf_graph = compile_for_inference(&inf_cfg);
     let inf_bytes = backend.emit_fused(&inf_graph);
@@ -1215,13 +1215,13 @@ fn cmd_train_rl(midi_path: &str, leverage_threshold: Option<f32>, num_episodes: 
         // Checkpoint
         let tag = if use_leverage { format!("rl_lev{:.0}_{}", lev_thresh * 100.0, episode) }
                   else { format!("rl_baseline_{}", episode) };
-        let path = project_root().join(format!("{}.bin", tag));
+        let path = project_root().join(format!("checkpoints/{}.bin", tag));
         save_model_to(&weights, &base_cfg, &vocab, &path);
     }
 
     // Save final model
     let suffix = if use_leverage { format!("_lev{:.0}", lev_thresh * 100.0) } else { "_baseline".into() };
-    let final_path = project_root().join(format!("midi_model_rl{}.bin", suffix));
+    let final_path = project_root().join(format!("models/midi_model_rl{}.bin", suffix));
     save_model_to(&weights, &base_cfg, &vocab, &final_path);
     eprintln!("\nRL training complete. Model saved to {}", final_path.display());
     eprintln!("Generate with: cargo run --release -p tensor-lang-train -- generate {}", final_path.display());

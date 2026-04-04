@@ -2204,7 +2204,7 @@ fn main() {
         let idx = args.iter().position(|a| a == "--pretrained").unwrap();
         let default = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent().unwrap().parent().unwrap()
-            .join("chord_grammar_model.bin");
+            .join("models/chord_grammar_model.bin");
         let path = if idx + 1 < args.len() && !args[idx + 1].starts_with('-') {
             std::path::PathBuf::from(&args[idx + 1])
         } else {

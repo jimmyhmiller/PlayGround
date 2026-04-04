@@ -363,7 +363,7 @@ fn compile_inf_wasm(graph: &Graph) -> (Vec<u8>, Vec<NodeId>, Vec<usize>) {
         })
         .collect();
 
-    let backend = WasmBackend;
+    let backend = WasmBackend::default();
     let wasm_bytes = backend.emit_fused_multi_output(graph, &output_ids);
     (wasm_bytes, output_ids, output_sizes)
 }
@@ -385,7 +385,7 @@ fn compile_train_wasm(
         })
         .collect();
 
-    let backend = WasmBackend;
+    let backend = WasmBackend::default();
     let wasm_bytes = backend.emit_fused_multi_output(graph, &output_ids);
     (wasm_bytes, output_sizes)
 }

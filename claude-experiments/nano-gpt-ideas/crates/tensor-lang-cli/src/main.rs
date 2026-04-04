@@ -82,7 +82,7 @@ impl Model {
         );
         let graph = compile(&program);
 
-        let backend = WasmBackend;
+        let backend = WasmBackend::default();
         let wasm_bytes = backend.emit_fused(&graph);
         eprintln!("  {} nodes", graph.nodes.len());
 

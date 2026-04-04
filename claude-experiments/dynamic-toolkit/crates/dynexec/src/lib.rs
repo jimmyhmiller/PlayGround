@@ -23,20 +23,8 @@ pub enum FrameSliceMode {
     MultiShot,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CapturedCallerResume {
-    TopLevel,
-    FromCall {
-        return_dest: Option<usize>,
-    },
-    FromInvoke {
-        normal_block: usize,
-        normal_args_vals: Vec<u64>,
-        exception_block: usize,
-        exception_args_vals: Vec<u64>,
-        has_ret_param: bool,
-    },
-}
+/// Alias — `CapturedCallerResume` is now unified with `FrameResume`.
+pub type CapturedCallerResume = FrameResume;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FrameResumePoint {
@@ -148,78 +136,6 @@ impl Display for ConfigError {
 
 impl Error for ConfigError {}
 
-pub trait FrameSliceStore {
-    type Handle: Clone;
-
-    fn insert_slice(&mut self, slice: FrameSliceSnapshot) -> Result<Self::Handle, FrameSliceError>;
-    fn clone_slice(&mut self, handle: &Self::Handle) -> Result<Self::Handle, FrameSliceError>;
-    fn slice(&self, handle: &Self::Handle) -> Result<&FrameSliceSnapshot, FrameSliceError>;
-    fn slice_mut(
-        &mut self,
-        handle: &Self::Handle,
-    ) -> Result<&mut FrameSliceSnapshot, FrameSliceError>;
-    fn encode_handle(handle: &Self::Handle) -> u64;
-    fn decode_handle(bits: u64) -> Result<Self::Handle, FrameSliceError>;
-
-    fn mark_consumed(&mut self, handle: &Self::Handle) -> Result<(), FrameSliceError> {
-        let slice = self.slice_mut(handle)?;
-        if slice.consumed {
-            return Err(FrameSliceError::Consumed);
-        }
-        slice.consumed = true;
-        Ok(())
-    }
-}
-
-#[derive(Default)]
-pub struct InMemoryFrameSliceStore {
-    slices: Vec<FrameSliceSnapshot>,
-}
-
-impl InMemoryFrameSliceStore {
-    pub fn new() -> Self {
-        Self::default()
-    }
-}
-
-impl FrameSliceStore for InMemoryFrameSliceStore {
-    type Handle = usize;
-
-    fn insert_slice(&mut self, slice: FrameSliceSnapshot) -> Result<Self::Handle, FrameSliceError> {
-        slice.validate()?;
-        let handle = self.slices.len();
-        self.slices.push(slice);
-        Ok(handle)
-    }
-
-    fn clone_slice(&mut self, handle: &Self::Handle) -> Result<Self::Handle, FrameSliceError> {
-        let mut cloned = self.slice(handle)?.clone();
-        cloned.consumed = false;
-        self.insert_slice(cloned)
-    }
-
-    fn slice(&self, handle: &Self::Handle) -> Result<&FrameSliceSnapshot, FrameSliceError> {
-        self.slices.get(*handle).ok_or(FrameSliceError::MissingSlice)
-    }
-
-    fn slice_mut(
-        &mut self,
-        handle: &Self::Handle,
-    ) -> Result<&mut FrameSliceSnapshot, FrameSliceError> {
-        self.slices
-            .get_mut(*handle)
-            .ok_or(FrameSliceError::MissingSlice)
-    }
-
-    fn encode_handle(handle: &Self::Handle) -> u64 {
-        *handle as u64
-    }
-
-    fn decode_handle(bits: u64) -> Result<Self::Handle, FrameSliceError> {
-        usize::try_from(bits).map_err(|_| FrameSliceError::MissingSlice)
-    }
-}
-
 // ─── Stack Strategy ────────────────────────────────────────
 
 // ─── Unified Stack Strategy ────────────────────────────────
@@ -233,10 +149,17 @@ impl FrameSliceStore for InMemoryFrameSliceStore {
 // GCSegmentedStack) or implement their own.
 
 /// Resume information for a frame's caller.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FrameResume {
     TopLevel,
     FromCall { return_dest: Option<usize> },
+    FromInvoke {
+        normal_block: usize,
+        normal_args_vals: Vec<u64>,
+        exception_block: usize,
+        exception_args_vals: Vec<u64>,
+        has_ret_param: bool,
+    },
 }
 
 /// Configuration for creating a stack runtime.
@@ -258,8 +181,9 @@ pub trait StackRuntime {
     // ── Frame management ────────────────────────────────────────
 
     /// Push a new frame. `args` are written into the frame's param slots.
-    fn push_frame(&mut self, func_idx: usize, val_count: usize, args: &[(usize, u64)],
-                  resume: FrameResume);
+    /// `slot_count` is the number of stack-allocated slots for StackAddr instructions.
+    fn push_frame(&mut self, func_idx: usize, val_count: usize, slot_count: usize,
+                  args: &[(usize, u64)], resume: FrameResume);
     /// Pop the current frame. Returns the caller resume info.
     fn pop_frame(&mut self) -> FrameResume;
     /// Is the stack empty?
@@ -269,6 +193,15 @@ pub trait StackRuntime {
 
     fn get(&self, idx: usize) -> u64;
     fn set(&mut self, idx: usize, val: u64);
+
+    // ── Stack-allocated slots (current frame) ──────────────────
+
+    /// Return a raw pointer to a stack-allocated slot in the current frame.
+    /// Used by `StackAddr` instructions that need stable pointers to frame memory.
+    /// Default: panics (only needed by interpreters that support StackAddr).
+    fn slot_ptr(&self, _slot_idx: usize) -> *const u64 {
+        panic!("slot_ptr not supported by this StackRuntime")
+    }
 
     // ── Execution state (current frame) ─────────────────────────
 
@@ -306,6 +239,9 @@ pub trait StackRuntime {
     fn needs_gc(&self) -> bool { false }
     /// Run a GC collection. Only called when `needs_gc()` returns true.
     fn collect_gc(&mut self) {}
+    /// Precise safepoint: only the given value indices are live GC roots.
+    /// Default: falls back to `collect_gc()`.
+    fn safepoint(&mut self, _live_indices: &[usize]) { self.collect_gc() }
 }
 
 /// The unified stack strategy trait. Language authors implement this
@@ -356,6 +292,7 @@ impl UnifiedStackStrategy for ContiguousVecStack {
 struct VecFrame {
     func_idx: usize,
     vals: Vec<u64>,
+    slots: Vec<u64>,
     block_idx: usize,
     inst_idx: usize,
     resume: FrameResume,
@@ -371,6 +308,7 @@ struct VecCont {
 struct VecContFrame {
     func_idx: usize,
     vals: Vec<u64>,
+    slots: Vec<u64>,
     block_idx: usize,
     inst_idx: usize,
     resume: FrameResume,
@@ -394,13 +332,14 @@ impl Default for VecStackRuntime {
 }
 
 impl StackRuntime for VecStackRuntime {
-    fn push_frame(&mut self, func_idx: usize, val_count: usize, args: &[(usize, u64)], resume: FrameResume) {
+    fn push_frame(&mut self, func_idx: usize, val_count: usize, slot_count: usize, args: &[(usize, u64)], resume: FrameResume) {
         let mut vals = vec![0u64; val_count];
         for &(idx, val) in args {
             vals[idx] = val;
         }
         self.stack.push(VecFrame {
-            func_idx, vals, block_idx: 0, inst_idx: 0, resume,
+            func_idx, vals, slots: vec![0u64; slot_count],
+            block_idx: 0, inst_idx: 0, resume,
             active_prompts: Vec::new(),
         });
     }
@@ -413,6 +352,11 @@ impl StackRuntime for VecStackRuntime {
 
     fn get(&self, idx: usize) -> u64 { self.stack.last().unwrap().vals[idx] }
     fn set(&mut self, idx: usize, val: u64) { self.stack.last_mut().unwrap().vals[idx] = val; }
+
+    fn slot_ptr(&self, slot_idx: usize) -> *const u64 {
+        let frame = self.stack.last().unwrap();
+        unsafe { frame.slots.as_ptr().add(slot_idx) }
+    }
 
     fn func_idx(&self) -> usize { self.stack.last().unwrap().func_idx }
     fn block_idx(&self) -> usize { self.stack.last().unwrap().block_idx }
@@ -447,6 +391,7 @@ impl StackRuntime for VecStackRuntime {
             frames.push(VecContFrame {
                 func_idx: f.func_idx,
                 vals: f.vals.clone(),
+                slots: f.slots.clone(),
                 block_idx: f.block_idx,
                 inst_idx: f.inst_idx,
                 resume: f.resume.clone(),
@@ -475,6 +420,7 @@ impl StackRuntime for VecStackRuntime {
             self.stack.push(VecFrame {
                 func_idx: cf.func_idx,
                 vals,
+                slots: cf.slots,
                 block_idx: cf.block_idx,
                 inst_idx: cf.inst_idx,
                 resume: cf.resume,

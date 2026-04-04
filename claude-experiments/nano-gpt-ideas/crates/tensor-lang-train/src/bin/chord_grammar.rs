@@ -558,7 +558,7 @@ fn cmd_train() {
 
     let mut output_ids = vec![tg.loss];
     output_ids.extend_from_slice(&tg.grad_ids);
-    let backend = WasmBackend;
+    let backend = WasmBackend::default();
     let wasm_bytes = backend.emit_fused_multi_output(&tg.graph, &output_ids);
 
     let t0 = Instant::now();
@@ -628,7 +628,7 @@ fn cmd_train() {
     }
 
     // Save weights
-    let save_path = project_root().join("chord_grammar_model.bin");
+    let save_path = project_root().join("models/chord_grammar_model.bin");
     save_model(&weights, &cfg, &save_path);
 
     // Quick generation test
@@ -637,7 +637,7 @@ fn cmd_train() {
 }
 
 fn cmd_generate() {
-    let model_path = project_root().join("chord_grammar_model.bin");
+    let model_path = project_root().join("models/chord_grammar_model.bin");
     let (weights, cfg) = load_model(&model_path);
     eprintln!("Loaded model from {}", model_path.display());
     generate_sequences(&weights, &cfg, 50);
@@ -646,7 +646,7 @@ fn cmd_generate() {
 fn cmd_random_midi() {
     let args: Vec<String> = std::env::args().collect();
     let key_name = args.get(2).map(|s| s.as_str()).unwrap_or("C");
-    let out_path = args.get(3).map(|s| s.as_str()).unwrap_or("random_chords.mid");
+    let out_path = args.get(3).map(|s| s.as_str()).unwrap_or("midi/random_chords.mid");
     let n: usize = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(8);
 
     let key_root: u8 = match key_name {
@@ -670,7 +670,7 @@ fn cmd_random_midi() {
 fn cmd_generate_midi() {
     let args: Vec<String> = std::env::args().collect();
     let key_name = args.get(2).map(|s| s.as_str()).unwrap_or("C");
-    let out_path = args.get(3).map(|s| s.as_str()).unwrap_or("generated_chords.mid");
+    let out_path = args.get(3).map(|s| s.as_str()).unwrap_or("midi/generated_chords.mid");
     let n: usize = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(8);
 
     let key_root: u8 = match key_name {
@@ -680,7 +680,7 @@ fn cmd_generate_midi() {
         _ => { eprintln!("Unknown key: {key_name}, defaulting to C"); 0 }
     };
 
-    let model_path = project_root().join("chord_grammar_model.bin");
+    let model_path = project_root().join("models/chord_grammar_model.bin");
     let (weights, cfg) = load_model(&model_path);
     eprintln!("Loaded model from {}", model_path.display());
 
@@ -689,7 +689,7 @@ fn cmd_generate_midi() {
 }
 
 fn generate_sequences(weights: &[Vec<f32>], cfg: &ModelConfig, n: usize) -> Vec<Vec<usize>> {
-    let backend = WasmBackend;
+    let backend = WasmBackend::default();
     let inf_graph = compile_for_inference(cfg);
     let wasm_bytes = backend.emit_fused(&inf_graph);
     let inf_wasm = write_wasm(&wasm_bytes, "chord_infer");
@@ -1128,7 +1128,7 @@ fn render_seqs_to_midi(seqs: &[Vec<usize>], key_root: u8, out_path: &str) {
 fn cmd_midi() {
     let args: Vec<String> = std::env::args().collect();
     let key_name = args.get(2).map(|s| s.as_str()).unwrap_or("C");
-    let out_path = args.get(3).map(|s| s.as_str()).unwrap_or("chord_progressions.mid");
+    let out_path = args.get(3).map(|s| s.as_str()).unwrap_or("midi/chord_progressions.mid");
     let n_progressions: usize = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(8);
 
     let key_root: u8 = match key_name {

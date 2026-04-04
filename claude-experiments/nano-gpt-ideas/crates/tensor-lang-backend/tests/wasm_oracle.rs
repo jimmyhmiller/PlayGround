@@ -79,7 +79,7 @@ fn check_wasm(program: &str, input_data: HashMap<String, ArrayD<f32>>, atol: f32
     let oracle_output = oracle_results.last().unwrap();
 
     // Emit WASM
-    let backend = WasmBackend;
+    let backend = WasmBackend::default();
     let wasm_bytes = backend.emit_fused(&graph);
 
     // Compute output size

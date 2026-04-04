@@ -23,7 +23,7 @@ pub fn interpret<S: UnifiedStackStrategy>(
         .map(|(i, (v, _))| (v.index(), args[i]))
         .collect();
     if rt.needs_gc() { rt.collect_gc(); }
-    rt.push_frame(callee_idx, val_count, &param_args, FrameResume::TopLevel);
+    rt.push_frame(callee_idx, val_count, 0, &param_args, FrameResume::TopLevel);
 
     'dispatch: loop {
         let func = &module.functions[rt.func_idx()];
@@ -109,6 +109,7 @@ pub fn interpret<S: UnifiedStackStrategy>(
                     rt.push_frame(
                         callee_idx,
                         callee_func.value_types.len(),
+                        0,
                         &param_args,
                         FrameResume::FromCall { return_dest: dest },
                     );

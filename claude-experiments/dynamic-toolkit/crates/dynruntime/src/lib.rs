@@ -1,5 +1,4 @@
 mod framechain;
-mod frameslice;
 mod jit;
 mod ptr_policy;
 mod root_strategies;
@@ -7,11 +6,10 @@ mod stackmap;
 
 pub use dynalloc::PtrPolicy;
 pub use framechain::FrameChainRootManager;
-pub use frameslice::{FrameSliceHandle, FrameSliceRootSource, OwnedFrameSliceStore};
 pub use jit::{
     FrameScanJitTransport, JitExecutionResult, JitFrameControl, JitFrameControlError,
-    JitRootTransportRuntime, JitSafepointSession, ResumeWithInterpreterError,
-    ShadowStackJitTransport, StackMapJitTransport,
+    JitFrameSliceRuntime, JitRootTransportRuntime, JitSafepointSession,
+    ResumeWithInterpreterError, ShadowStackJitTransport, StackMapJitTransport,
     active_jit_safepoint_handler, decode_frame_control_outcome,
     execute_jit_function, execute_jit_function_to_terminal, execute_jit_module_function,
     execute_jit_module_function_to_terminal, materialize_capture_slice,
