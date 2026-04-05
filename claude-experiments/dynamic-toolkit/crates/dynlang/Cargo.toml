@@ -1,0 +1,12 @@
+[package]
+name = "dynlang"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+dynir = { path = "../dynir" }
+dynobj = { path = "../dynobj" }
+dynalloc = { path = "../dynalloc" }
+
+[dev-dependencies]
+dynvalue = { path = "../dynvalue" }
