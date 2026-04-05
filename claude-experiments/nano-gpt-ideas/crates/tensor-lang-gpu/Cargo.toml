@@ -1,0 +1,41 @@
+[package]
+name = "tensor-lang-gpu"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "bench-gpt2"
+path = "src/bench_gpt2.rs"
+required-features = ["native"]
+
+[dependencies]
+tensor-lang-graph = { path = "../tensor-lang-graph" }
+tensor-lang-backend = { path = "../tensor-lang-backend" }
+serde_json = { version = "1", optional = true }
+
+[dependencies.wgpu]
+version = "28"
+optional = true
+
+[dependencies.pollster]
+version = "0.4"
+optional = true
+
+[dependencies.bytemuck]
+version = "1"
+features = ["derive"]
+optional = true
+
+[features]
+default = []
+native = ["wgpu", "pollster", "bytemuck", "tensor-lang-backend/runtime", "serde_json"]
+
+[dev-dependencies]
+tensor-lang-graph = { path = "../tensor-lang-graph" }
+tensor-lang-backend = { path = "../tensor-lang-backend", features = ["runtime"] }
+tensor-lang-test-oracle = { path = "../tensor-lang-test-oracle" }
+ndarray = "0.16"
+pollster = "0.4"
+wgpu = "24"
+bytemuck = { version = "1", features = ["derive"] }
+serde_json = "1"

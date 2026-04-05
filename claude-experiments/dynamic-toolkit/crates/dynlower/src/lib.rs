@@ -571,6 +571,116 @@ impl JitModule {
         )
     }
 
+    /// Compile a module with fast calls: internal calls are treated as plain
+    /// calls without suspend/resume bookkeeping. Disables delimited continuation
+    /// support but significantly reduces call overhead.
+    pub fn compile_fast<L: LayoutConfigDefaults>(
+        module: &Module,
+        externs: &[*const u8],
+    ) -> Self {
+        Self::compile_fast_with_regalloc::<DefaultJitConfig<L>, Arm64Backend, regalloc::LinearScanAllocator>(
+            module,
+            externs,
+        )
+    }
+
+    fn compile_fast_with_regalloc<Cfg: CodegenConfig, B: LoweringBackend, R: RegisterAllocator>(
+        module: &Module,
+        externs: &[*const u8],
+    ) -> Self
+    where
+        Cfg::Frames: FrameStrategy<Cfg::Layout, Cfg::Roots, Cfg::CallingConvention>,
+    {
+        validate_codegen_config::<Cfg>().unwrap_or_else(|err| {
+            panic!("invalid dynlower config: {err}");
+        });
+
+        let mut call_table: Vec<*const u8> = Vec::with_capacity(module.func_table.len());
+        let mut extern_idx = 0usize;
+        for def in &module.func_table {
+            match def {
+                FuncDef::Extern(_) => {
+                    call_table.push(externs[extern_idx]);
+                    extern_idx += 1;
+                }
+                FuncDef::Internal(_) => {
+                    call_table.push(std::ptr::null());
+                }
+            }
+        }
+        let call_table_base = call_table.as_ptr() as u64;
+
+        let mut memory = PagedCodeMemory::new();
+        let mut entry_offsets: Vec<usize> = Vec::new();
+        let mut function_suspend_records: Vec<Vec<Box<CallSuspendRecord>>> = Vec::new();
+        let mut function_safepoints: Vec<Vec<SafepointRecord>> = Vec::new();
+        let mut function_frame_reify_records: Vec<Vec<FrameReifyRecord>> = Vec::new();
+        let mut max_deopt_live_values = 0usize;
+        let handler_payload_kind = match Cfg::RootTransport::kind() {
+            RootTransportKind::FrameScan => SafepointHandlerPayloadKind::FrameSize,
+            RootTransportKind::ShadowStack | RootTransportKind::StackMap => {
+                SafepointHandlerPayloadKind::SafepointIndex
+            }
+        };
+
+        // All false → no call is control-aware → no suspend/resume overhead
+        let direct_call_is_internal: Vec<bool> = vec![false; module.func_table.len()];
+
+        let mut function_root_scan_sizes: Vec<usize> = Vec::new();
+        for (func_idx, func) in module.functions.iter().enumerate() {
+            let mut lowerer = Lowerer::<Cfg, B, R>::new_module(
+                func_idx,
+                func,
+                &direct_call_is_internal,
+                call_table_base,
+                None,
+            );
+            lowerer.run();
+            function_suspend_records.push(std::mem::take(&mut lowerer.suspend_records));
+            function_safepoints.push(std::mem::take(&mut lowerer.safepoints));
+            function_frame_reify_records.push(std::mem::take(&mut lowerer.frame_reify_records));
+            max_deopt_live_values = max_deopt_live_values.max(lowerer.max_deopt_live_values);
+            function_root_scan_sizes.push(lowerer.frame.root_scan_size() as usize);
+
+            let code = lowerer.buf.into_code();
+            let offset = memory.push(&code);
+            entry_offsets.push(offset);
+        }
+
+        memory.finalize();
+
+        let base = memory.base_ptr() as usize;
+        let total_len = memory.len();
+        for (i, &offset) in entry_offsets.iter().enumerate() {
+            let code_start = base + offset;
+            let code_end = if i + 1 < entry_offsets.len() {
+                base + entry_offsets[i + 1]
+            } else {
+                base + total_len
+            };
+            register_jit_code(code_start, code_end, function_root_scan_sizes[i]);
+        }
+
+        let base = memory.base_ptr();
+        for (ft_idx, def) in module.func_table.iter().enumerate() {
+            if let FuncDef::Internal(func_idx) = def {
+                let ptr = unsafe { base.add(entry_offsets[*func_idx]) };
+                call_table[ft_idx] = ptr;
+            }
+        }
+
+        JitModule {
+            memory,
+            call_table,
+            function_entry_offsets: entry_offsets,
+            function_suspend_records,
+            function_safepoints,
+            function_frame_reify_records,
+            handler_payload_kind,
+            max_deopt_live_values,
+        }
+    }
+
     /// Compile a module with a GC safepoint handler.
     ///
     /// At each `Inst::Safepoint`, the JIT will spill all live values and
@@ -661,10 +771,19 @@ impl JitModule {
             }
         };
 
+        // Only mark internal calls as control-aware when the module
+        // actually uses continuations (prompts). Plain call/return is
+        // the fast path — no spill-all, no suspend records, no outcome
+        // checking.
+        let uses_continuations = module
+            .functions
+            .iter()
+            .any(|f| f.prompt_count > 0);
+
         let direct_call_is_internal: Vec<bool> = module
             .func_table
             .iter()
-            .map(|def| matches!(def, FuncDef::Internal(_)))
+            .map(|def| uses_continuations && matches!(def, FuncDef::Internal(_)))
             .collect();
 
         let mut function_root_scan_sizes: Vec<usize> = Vec::new();
@@ -738,6 +857,11 @@ impl JitModule {
         let ptr = self.call_table[func_ref.index()];
         assert!(!ptr.is_null(), "call to unresolved function");
         unsafe { call_jit_outcome(ptr, args, self.max_deopt_live_values) }
+    }
+
+    /// Get a copy of the call table (func_table_index → code pointer).
+    pub fn call_table(&self) -> &[*const u8] {
+        &self.call_table
     }
 
     pub fn function_ptr(&self, func_ref: FuncRef) -> *const u8 {

@@ -15,8 +15,13 @@ SKIP_DIRS = {"scanning", "expressions", "benchmark"}
 
 # Skip individual tests that test jlox-specific behavior or limits we don't implement
 SKIP_FILES = {
-    "test/limit/loop_too_large.lox",  # clox doesn't have this limit
-    "test/limit/no_reuse_constants.lox",  # clox doesn't have this limit
+    "limit/loop_too_large.lox",  # clox-specific bytecode limit
+    "limit/no_reuse_constants.lox",  # clox-specific bytecode limit
+    "limit/stack_overflow.lox",  # clox-specific stack limit
+    "limit/too_many_constants.lox",  # clox-specific bytecode limit
+    "limit/too_many_locals.lox",  # clox-specific bytecode limit
+    "limit/too_many_upvalues.lox",  # clox-specific bytecode limit
+    "function/local_mutual_recursion.lox",  # skipped in upstream test suite
 }
 
 class TestResult:

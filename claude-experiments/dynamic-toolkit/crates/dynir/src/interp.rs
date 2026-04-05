@@ -775,18 +775,52 @@ where
                         let callee_val = sr.get(callee.index());
                         let arg_vals: Vec<u64> =
                             call_args.iter().map(|v| sr.get(v.index())).collect();
-                        let handler = self.indirect_handler.as_ref().ok_or_else(|| {
-                            InterpError::UnknownExternFunc("(indirect)".to_string())
-                        })?;
-                        match handler(callee_val, &arg_vals) {
-                            ExternCallResult::Value(ret) => {
-                                if let (Some(dest), Some(val)) = (node.value, ret) {
-                                    sr.set(dest.index(), val);
+
+                        // Try the callee value as a func_table index.
+                        // This lets language runtimes store function indices in
+                        // closures and call them via CallIndirect, re-entering
+                        // the interpreter just like Call does.
+                        let idx = callee_val as usize;
+                        if idx < self.module.func_table.len() {
+                            match &self.module.func_table[idx] {
+                                FuncDef::Internal(callee_idx) => {
+                                    let return_dest = node.value.map(|v| v.index());
+                                    sr.advance_inst();
+                                    return Ok(FrameAction::InternalCall {
+                                        callee_idx: *callee_idx,
+                                        args: arg_vals,
+                                        resume: FrameResume::FromCall { return_dest },
+                                    });
+                                }
+                                FuncDef::Extern(_) => {
+                                    match self.call_extern(FuncRef(idx as u32), &arg_vals)? {
+                                        ExternCallResult::Value(ret) => {
+                                            if let (Some(dest), Some(val)) = (node.value, ret) {
+                                                sr.set(dest.index(), val);
+                                            }
+                                        }
+                                        ExternCallResult::Exception(exc) => {
+                                            return Ok(FrameAction::Exception(exc));
+                                        }
+                                    }
                                 }
                             }
-                            ExternCallResult::Exception(exc) => {
-                                return Ok(FrameAction::Exception(exc));
+                        } else if let Some(handler) = self.indirect_handler.as_ref() {
+                            // Fallback: opaque indirect handler (e.g., for host FFI).
+                            match handler(callee_val, &arg_vals) {
+                                ExternCallResult::Value(ret) => {
+                                    if let (Some(dest), Some(val)) = (node.value, ret) {
+                                        sr.set(dest.index(), val);
+                                    }
+                                }
+                                ExternCallResult::Exception(exc) => {
+                                    return Ok(FrameAction::Exception(exc));
+                                }
                             }
+                        } else {
+                            return Err(InterpError::UnknownExternFunc(
+                                format!("call_indirect: callee {} is not a valid func_table index and no indirect handler is bound", callee_val)
+                            ));
                         }
                         sr.advance_inst();
                         continue;

@@ -2,20 +2,45 @@
 use crate::ast::*;
 use crate::scanner::{Scanner, Token, TokenType};
 
+#[derive(Clone, Copy, PartialEq)]
+enum FunctionType {
+    None,
+    Function,
+    Method,
+    Initializer,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum ClassType {
+    None,
+    Class,
+    Subclass,
+}
+
 pub struct Parser {
     tokens: Vec<Token>,
     current: usize,
     had_error: bool,
     panic_mode: bool,
+    current_function: FunctionType,
+    current_class: ClassType,
+    /// Stack of scopes. Each scope maps variable name to (defined yet?, line).
+    scopes: Vec<std::collections::HashMap<String, (bool, usize)>>,
+    scope_depth: usize,
 }
 
 impl Parser {
     pub fn parse(source: &str) -> Option<Program> {
         let mut scanner = Scanner::new(source);
         let mut tokens = Vec::new();
+        let mut had_scan_error = false;
         loop {
             let tok = scanner.scan_token();
             let is_eof = tok.token_type == TokenType::Eof;
+            if tok.token_type == TokenType::Error {
+                eprintln!("[line {}] Error: {}", tok.line, tok.lexeme);
+                had_scan_error = true;
+            }
             tokens.push(tok);
             if is_eof {
                 break;
@@ -25,8 +50,12 @@ impl Parser {
         let mut parser = Parser {
             tokens,
             current: 0,
-            had_error: false,
+            had_error: had_scan_error,
             panic_mode: false,
+            current_function: FunctionType::None,
+            current_class: ClassType::None,
+            scopes: Vec::new(),
+            scope_depth: 0,
         };
 
         let mut stmts = Vec::new();
@@ -68,8 +97,20 @@ impl Parser {
     fn class_declaration(&mut self) -> Option<Stmt> {
         let name = self.consume_identifier("Expect class name.")?;
 
+        // Declare class in current scope
+        self.declare_in_scope(&name);
+        self.define_in_scope(&name);
+
+        let enclosing_class = self.current_class;
+        self.current_class = ClassType::Class;
+
         let superclass = if self.match_token(TokenType::Less) {
-            Some(self.consume_identifier("Expect superclass name.")?)
+            let super_name = self.consume_identifier("Expect superclass name.")?;
+            if super_name == name {
+                self.semantic_error("A class can't inherit from itself.");
+            }
+            self.current_class = ClassType::Subclass;
+            Some(super_name)
         } else {
             None
         };
@@ -78,10 +119,22 @@ impl Parser {
 
         let mut methods = Vec::new();
         while !self.check(TokenType::RightBrace) && !self.is_at_end() {
-            methods.push(self.fun_decl("method")?);
+            let method_name = if self.check(TokenType::Identifier) {
+                self.peek().lexeme.clone()
+            } else {
+                String::new()
+            };
+            let fn_type = if method_name == "init" {
+                FunctionType::Initializer
+            } else {
+                FunctionType::Method
+            };
+            methods.push(self.fun_decl_with_type("method", fn_type)?);
         }
 
         self.consume(TokenType::RightBrace, "Expect '}' after class body.")?;
+
+        self.current_class = enclosing_class;
 
         Some(Stmt::Class(ClassDecl {
             name,
@@ -91,12 +144,26 @@ impl Parser {
     }
 
     fn fun_declaration(&mut self) -> Option<Stmt> {
-        let decl = self.fun_decl("function")?;
+        // Declare the function name in the current scope before parsing the body
+        // (so the function can reference itself)
+        let decl = self.fun_decl_with_type("function", FunctionType::Function)?;
+        self.declare_in_scope(&decl.name);
+        self.define_in_scope(&decl.name);
         Some(Stmt::Fun(decl))
     }
 
     fn fun_decl(&mut self, kind: &str) -> Option<FunDecl> {
+        self.fun_decl_with_type(kind, FunctionType::Function)
+    }
+
+    fn fun_decl_with_type(&mut self, kind: &str, fn_type: FunctionType) -> Option<FunDecl> {
         let name = self.consume_identifier(&format!("Expect {} name.", kind))?;
+
+        let enclosing_function = self.current_function;
+        self.current_function = fn_type;
+
+        self.begin_scope();
+
         self.consume(
             TokenType::LeftParen,
             &format!("Expect '(' after {} name.", kind),
@@ -108,7 +175,10 @@ impl Parser {
                 if params.len() >= 255 {
                     self.error_at_current("Can't have more than 255 parameters.");
                 }
-                params.push(self.consume_identifier("Expect parameter name.")?);
+                let param = self.consume_identifier("Expect parameter name.")?;
+                self.declare_in_scope(&param);
+                self.define_in_scope(&param);
+                params.push(param);
                 if !self.match_token(TokenType::Comma) {
                     break;
                 }
@@ -120,18 +190,24 @@ impl Parser {
             &format!("Expect '{{' before {} body.", kind),
         )?;
 
-        let body = self.block_stmts()?;
+        // Parse block body WITHOUT creating a new scope (params are already in scope)
+        let body = self.block_stmts_no_scope()?;
+
+        self.end_scope();
+        self.current_function = enclosing_function;
 
         Some(FunDecl { name, params, body })
     }
 
     fn var_declaration(&mut self) -> Option<Stmt> {
         let name = self.consume_identifier("Expect variable name.")?;
+        self.declare_in_scope(&name);
         let initializer = if self.match_token(TokenType::Equal) {
             Some(self.expression()?)
         } else {
             None
         };
+        self.define_in_scope(&name);
         self.consume(TokenType::Semicolon, "Expect ';' after variable declaration.")?;
         Some(Stmt::Var(name, initializer))
     }
@@ -165,6 +241,9 @@ impl Parser {
 
     fn for_statement(&mut self) -> Option<Stmt> {
         self.consume(TokenType::LeftParen, "Expect '(' after 'for'.")?;
+
+        // For loop creates its own scope for the initializer variable
+        self.begin_scope();
 
         let initializer = if self.match_token(TokenType::Semicolon) {
             None
@@ -202,6 +281,8 @@ impl Parser {
             body = Stmt::Block(vec![init, body]);
         }
 
+        self.end_scope();
+
         Some(body)
     }
 
@@ -221,7 +302,13 @@ impl Parser {
     }
 
     fn return_statement(&mut self) -> Option<Stmt> {
+        if self.current_function == FunctionType::None {
+            self.semantic_error("Can't return from top-level code.");
+        }
         let value = if !self.check(TokenType::Semicolon) {
+            if self.current_function == FunctionType::Initializer {
+                self.semantic_error("Can't return a value from an initializer.");
+            }
             Some(self.expression()?)
         } else {
             None
@@ -245,6 +332,13 @@ impl Parser {
     }
 
     fn block_stmts(&mut self) -> Option<Vec<Stmt>> {
+        self.begin_scope();
+        let stmts = self.block_stmts_no_scope()?;
+        self.end_scope();
+        Some(stmts)
+    }
+
+    fn block_stmts_no_scope(&mut self) -> Option<Vec<Stmt>> {
         let mut stmts = Vec::new();
         while !self.check(TokenType::RightBrace) && !self.is_at_end() {
             if let Some(s) = self.declaration() {
@@ -265,13 +359,14 @@ impl Parser {
         let expr = self.or()?;
 
         if self.match_token(TokenType::Equal) {
+            let equals = self.previous().clone();
             let value = self.assignment()?;
             match expr {
                 Expr::Var(name) => return Some(Expr::Assign(name, Box::new(value))),
                 Expr::Get(obj, name) => return Some(Expr::Set(obj, name, Box::new(value))),
                 _ => {
-                    self.error("Invalid assignment target.");
-                    return Some(value);
+                    self.error_at(&equals, "Invalid assignment target.");
+                    return None;
                 }
             }
         }
@@ -425,15 +520,25 @@ impl Parser {
             return Some(Expr::String(s));
         }
         if self.match_token(TokenType::Super) {
+            if self.current_class == ClassType::None {
+                self.semantic_error("Can't use 'super' outside of a class.");
+            } else if self.current_class != ClassType::Subclass {
+                self.semantic_error("Can't use 'super' in a class with no superclass.");
+            }
             self.consume(TokenType::Dot, "Expect '.' after 'super'.")?;
             let method = self.consume_identifier("Expect superclass method name.")?;
             return Some(Expr::Super(method));
         }
         if self.match_token(TokenType::This) {
+            if self.current_class == ClassType::None {
+                self.semantic_error("Can't use 'this' outside of a class.");
+            }
             return Some(Expr::This);
         }
         if self.match_token(TokenType::Identifier) {
-            return Some(Expr::Var(self.previous().lexeme.clone()));
+            let name = self.previous().lexeme.clone();
+            self.check_local_read(&name);
+            return Some(Expr::Var(name));
         }
         if self.match_token(TokenType::LeftParen) {
             let expr = self.expression()?;
@@ -443,6 +548,51 @@ impl Parser {
 
         self.error_at_current("Expect expression.");
         None
+    }
+
+    // ── Scope tracking ─────────────────────────────────────��──────
+
+    fn begin_scope(&mut self) {
+        self.scopes.push(std::collections::HashMap::new());
+        self.scope_depth += 1;
+    }
+
+    fn end_scope(&mut self) {
+        self.scopes.pop();
+        self.scope_depth -= 1;
+    }
+
+    fn declare_in_scope(&mut self, name: &str) {
+        if self.scope_depth == 0 { return; } // global scope
+        let already_exists = self.scopes.last()
+            .map_or(false, |s| s.contains_key(name));
+        if already_exists {
+            self.semantic_error("Already a variable with this name in this scope.");
+        }
+        let line = self.previous().line;
+        if let Some(scope) = self.scopes.last_mut() {
+            scope.insert(name.to_string(), (false, line));
+        }
+    }
+
+    fn define_in_scope(&mut self, name: &str) {
+        if self.scope_depth == 0 { return; }
+        if let Some(scope) = self.scopes.last_mut() {
+            if let Some(entry) = scope.get_mut(name) {
+                entry.0 = true;
+            }
+        }
+    }
+
+    fn check_local_read(&mut self, name: &str) {
+        // Check if reading a variable that's declared but not yet defined in this scope
+        if let Some(scope) = self.scopes.last() {
+            if let Some(&(defined, _)) = scope.get(name) {
+                if !defined {
+                    self.semantic_error("Can't read local variable in its own initializer.");
+                }
+            }
+        }
     }
 
     // ── Helpers ──────────────────────────────────────────────────
@@ -513,6 +663,20 @@ impl Parser {
         self.error_at(&self.tokens[self.current - 1].clone(), message);
     }
 
+    /// Report a semantic error that doesn't prevent continued parsing.
+    /// Unlike error(), this doesn't trigger panic mode.
+    fn semantic_error(&mut self, message: &str) {
+        let token = self.tokens[self.current - 1].clone();
+        eprint!("[line {}] Error", token.line);
+        match token.token_type {
+            TokenType::Eof => eprint!(" at end"),
+            TokenType::Error => {}
+            _ => eprint!(" at '{}'", token.lexeme),
+        }
+        eprintln!(": {}", message);
+        self.had_error = true;
+    }
+
     fn error_at_current(&mut self, message: &str) {
         self.error_at(&self.tokens[self.current].clone(), message);
     }
@@ -535,7 +699,7 @@ impl Parser {
     fn synchronize(&mut self) {
         self.panic_mode = false;
         while !self.is_at_end() {
-            if self.previous().token_type == TokenType::Semicolon {
+            if self.current > 0 && self.previous().token_type == TokenType::Semicolon {
                 return;
             }
             match self.peek().token_type {

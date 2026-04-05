@@ -8,8 +8,8 @@ name = "lox"
 path = "src/main.rs"
 
 [dependencies]
-dynvalue = { path = "../dynvalue" }
+dynlang = { path = "../dynlang" }
 dynir = { path = "../dynir" }
-dynexec = { path = "../dynexec" }
-
-[dev-dependencies]
+dynlower = { path = "../dynlower" }
+dynobj = { path = "../dynobj" }
+dynvalue = { path = "../dynvalue" }

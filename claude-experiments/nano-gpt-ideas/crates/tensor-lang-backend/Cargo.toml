@@ -12,6 +12,7 @@ required-features = ["runtime"]
 tensor-lang-graph = { path = "../tensor-lang-graph" }
 wasmtime = { version = "43", optional = true }
 serde_json = { version = "1", optional = true }
+libc = "0.2"
 
 [features]
 default = []
