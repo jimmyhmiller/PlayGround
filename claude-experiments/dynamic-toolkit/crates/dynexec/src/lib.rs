@@ -95,6 +95,76 @@ impl FrameSliceSnapshot {
     }
 }
 
+// ─── ContinuationStore ───────���───────────────────────────────
+//
+// Shared trait for storing captured continuations. Both the interpreter
+// and the JIT produce FrameSliceSnapshots; this trait owns their storage.
+// Separates "where continuations live" from "how frames are managed."
+
+pub trait ContinuationStore {
+    fn store_snapshot(&mut self, snapshot: FrameSliceSnapshot) -> Result<u64, FrameSliceError>;
+    fn get_snapshot(&self, handle: u64) -> Result<&FrameSliceSnapshot, FrameSliceError>;
+    fn get_snapshot_mut(&mut self, handle: u64) -> Result<&mut FrameSliceSnapshot, FrameSliceError>;
+    fn clone_snapshot(&mut self, handle: u64) -> Result<u64, FrameSliceError>;
+    fn mark_consumed(&mut self, handle: u64) -> Result<(), FrameSliceError>;
+    /// Enumerate GC roots held in captured continuations.
+    fn scan_roots(&self, visitor: &mut dyn FnMut(*mut u64));
+}
+
+/// Simple Vec-backed continuation store. The default for most uses.
+#[derive(Default)]
+pub struct VecContinuationStore {
+    slices: Vec<FrameSliceSnapshot>,
+}
+
+impl VecContinuationStore {
+    pub fn new() -> Self { Self::default() }
+}
+
+impl ContinuationStore for VecContinuationStore {
+    fn store_snapshot(&mut self, snapshot: FrameSliceSnapshot) -> Result<u64, FrameSliceError> {
+        snapshot.validate()?;
+        let handle = self.slices.len() as u64;
+        self.slices.push(snapshot);
+        Ok(handle)
+    }
+
+    fn get_snapshot(&self, handle: u64) -> Result<&FrameSliceSnapshot, FrameSliceError> {
+        self.slices.get(handle as usize).ok_or(FrameSliceError::MissingSlice)
+    }
+
+    fn get_snapshot_mut(&mut self, handle: u64) -> Result<&mut FrameSliceSnapshot, FrameSliceError> {
+        self.slices.get_mut(handle as usize).ok_or(FrameSliceError::MissingSlice)
+    }
+
+    fn clone_snapshot(&mut self, handle: u64) -> Result<u64, FrameSliceError> {
+        let mut cloned = self.get_snapshot(handle)?.clone();
+        cloned.consumed = false;
+        self.store_snapshot(cloned)
+    }
+
+    fn mark_consumed(&mut self, handle: u64) -> Result<(), FrameSliceError> {
+        let slice = self.slices.get_mut(handle as usize).ok_or(FrameSliceError::MissingSlice)?;
+        if slice.consumed {
+            return Err(FrameSliceError::Consumed);
+        }
+        slice.consumed = true;
+        Ok(())
+    }
+
+    fn scan_roots(&self, visitor: &mut dyn FnMut(*mut u64)) {
+        for slice in &self.slices {
+            if slice.consumed { continue; }
+            for frame in &slice.frames {
+                for &root_idx in &frame.root_value_indices {
+                    let slot = (&frame.values[root_idx] as *const u64).cast_mut();
+                    visitor(slot);
+                }
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SlotClass {
     IncomingArg,
@@ -172,12 +242,14 @@ impl Default for StackConfig {
     fn default() -> Self { StackConfig { heap_size: 1024 * 1024 } }
 }
 
-/// The runtime side of a stack strategy — what the interpreter calls.
+/// The interpreter's frame store — what the interpreter dispatch loop calls.
 ///
-/// Owns the entire stack. The interpreter is a thin dispatch loop over
-/// this trait. Different implementations give different stack models
-/// (Vec-backed, GC-segmented, etc.) with different continuation behavior.
-pub trait StackRuntime {
+/// Manages frames, values, execution state, and prompts. Different
+/// implementations give different stack models (Vec-backed, GC-segmented, etc.).
+///
+/// Continuation capture/resume and GC are handled externally via
+/// `ContinuationStore` and separate GC traits, NOT inside this trait.
+pub trait InterpFrameStore {
     // ── Frame management ────────────────────────────────────────
 
     /// Push a new frame. `args` are written into the frame's param slots.
@@ -200,7 +272,7 @@ pub trait StackRuntime {
     /// Used by `StackAddr` instructions that need stable pointers to frame memory.
     /// Default: panics (only needed by interpreters that support StackAddr).
     fn slot_ptr(&self, _slot_idx: usize) -> *const u64 {
-        panic!("slot_ptr not supported by this StackRuntime")
+        panic!("slot_ptr not supported by this InterpFrameStore")
     }
 
     // ── Execution state (current frame) ─────────────────────────
@@ -221,17 +293,17 @@ pub trait StackRuntime {
     /// Pop all frames above `depth`, keeping the frame at `depth` as the new top.
     fn pop_frames_above(&mut self, depth: usize);
 
-    // ── Continuations ───────────────────────────────────────────
+    // ── Continuation snapshot support ────────────────────────────
+    //
+    // These produce/consume FrameSliceSnapshots. The ContinuationStore
+    // manages the handles; these methods handle the frame-level work.
 
-    /// Capture frames from the prompt to the top of the stack.
+    /// Capture frames from the prompt to the top of the stack as a snapshot.
     /// `resume_dest` is the value slot in the top frame where resume args go.
-    /// Returns a handle (u64) that can be stored in a value slot.
-    fn capture(&mut self, prompt: u32, resume_dest: usize) -> u64;
-    /// Resume a captured continuation with the given args.
-    /// Replaces the current stack entirely.
-    fn resume(&mut self, handle: u64, args: &[u64]);
-    /// Clone a continuation for multi-shot use. Returns new handle.
-    fn clone_continuation(&mut self, handle: u64) -> u64;
+    fn capture_snapshot(&mut self, prompt: u32, resume_dest: usize) -> FrameSliceSnapshot;
+
+    /// Replace the current stack with frames from a snapshot.
+    fn resume_snapshot(&mut self, snapshot: &FrameSliceSnapshot, args: &[u64]);
 
     // ── GC integration ─────────────────────────────────────────
 
@@ -243,6 +315,7 @@ pub trait StackRuntime {
     /// Default: falls back to `collect_gc()`.
     fn safepoint(&mut self, _live_indices: &[usize]) { self.collect_gc() }
 }
+
 
 /// The unified stack strategy trait. Language authors implement this
 /// (or use a prebuilt one) to control stack behavior for both
@@ -266,7 +339,7 @@ pub trait UnifiedStackStrategy: Sized + 'static {
     // ── Runtime ──────────────────────────────────────────────────
 
     /// The interpreter's runtime state.
-    type Runtime: StackRuntime;
+    type Runtime: InterpFrameStore;
     /// Create the runtime.
     fn create_runtime(config: StackConfig) -> Self::Runtime;
 
@@ -285,8 +358,8 @@ pub struct ContiguousVecStack;
 impl UnifiedStackStrategy for ContiguousVecStack {
     const NAME: &'static str = "contiguous-vec";
     fn supports_continuations() -> bool { true }
-    type Runtime = VecStackRuntime;
-    fn create_runtime(_: StackConfig) -> VecStackRuntime { VecStackRuntime::new() }
+    type Runtime = VecFrameStore;
+    fn create_runtime(_: StackConfig) -> VecFrameStore { VecFrameStore::new() }
 }
 
 struct VecFrame {
@@ -299,39 +372,22 @@ struct VecFrame {
     active_prompts: Vec<u32>,
 }
 
-#[derive(Clone)]
-struct VecCont {
-    frames: Vec<VecContFrame>,
-}
-
-#[derive(Clone)]
-struct VecContFrame {
-    func_idx: usize,
-    vals: Vec<u64>,
-    slots: Vec<u64>,
-    block_idx: usize,
-    inst_idx: usize,
-    resume: FrameResume,
-    active_prompts: Vec<u32>,
-    resume_arg_idx: Option<usize>,
-}
-
-pub struct VecStackRuntime {
+pub struct VecFrameStore {
     stack: Vec<VecFrame>,
-    conts: Vec<VecCont>,
 }
 
-impl VecStackRuntime {
+
+impl VecFrameStore {
     pub fn new() -> Self {
-        VecStackRuntime { stack: Vec::new(), conts: Vec::new() }
+        VecFrameStore { stack: Vec::new() }
     }
 }
 
-impl Default for VecStackRuntime {
+impl Default for VecFrameStore {
     fn default() -> Self { Self::new() }
 }
 
-impl StackRuntime for VecStackRuntime {
+impl InterpFrameStore for VecFrameStore {
     fn push_frame(&mut self, func_idx: usize, val_count: usize, slot_count: usize, args: &[(usize, u64)], resume: FrameResume) {
         let mut vals = vec![0u64; val_count];
         for &(idx, val) in args {
@@ -381,59 +437,56 @@ impl StackRuntime for VecStackRuntime {
         }
     }
 
-    fn capture(&mut self, prompt: u32, resume_dest: usize) -> u64 {
+    fn capture_snapshot(&mut self, prompt: u32, resume_dest: usize) -> FrameSliceSnapshot {
         let start = self.stack.iter().rposition(|f| f.active_prompts.contains(&prompt))
             .expect("capture: prompt not found");
         let frame_count = self.stack.len() - start;
         let mut frames = Vec::with_capacity(frame_count);
         for (i, f) in self.stack[start..].iter().enumerate() {
             let is_top = i + 1 == frame_count;
-            frames.push(VecContFrame {
-                func_idx: f.func_idx,
-                vals: f.vals.clone(),
-                slots: f.slots.clone(),
-                block_idx: f.block_idx,
-                inst_idx: f.inst_idx,
-                resume: f.resume.clone(),
+            frames.push(CapturedFrame {
+                resume: FrameResumePoint {
+                    func_idx: f.func_idx,
+                    block_idx: f.block_idx,
+                    inst_idx: f.inst_idx,
+                },
+                values: f.vals.clone(),
+                root_value_indices: Vec::new(),
+                resume_arg_value_indices: if is_top { vec![resume_dest] } else { Vec::new() },
                 active_prompts: f.active_prompts.clone(),
-                resume_arg_idx: if is_top { Some(resume_dest) } else { None },
+                caller_resume: f.resume.clone(),
             });
         }
-        let handle = self.conts.len() as u64;
-        self.conts.push(VecCont { frames });
-        handle
+        FrameSliceSnapshot {
+            prompt_id: prompt,
+            mode: FrameSliceMode::OneShot,
+            frames,
+            consumed: false,
+        }
     }
 
-    fn resume(&mut self, handle: u64, args: &[u64]) {
-        let cont = self.conts[handle as usize].clone();
+    fn resume_snapshot(&mut self, snapshot: &FrameSliceSnapshot, args: &[u64]) {
         self.stack.clear();
-        let frame_count = cont.frames.len();
-        for (i, cf) in cont.frames.into_iter().enumerate() {
-            let mut vals = cf.vals;
+        let frame_count = snapshot.frames.len();
+        for (i, captured) in snapshot.frames.iter().enumerate() {
+            let mut vals = captured.values.clone();
             if i + 1 == frame_count {
-                if let Some(idx) = cf.resume_arg_idx {
-                    if let Some(&arg) = args.first() {
-                        vals[idx] = arg;
+                for (idx, &value_idx) in captured.resume_arg_value_indices.iter().enumerate() {
+                    if let Some(&arg) = args.get(idx) {
+                        vals[value_idx] = arg;
                     }
                 }
             }
             self.stack.push(VecFrame {
-                func_idx: cf.func_idx,
+                func_idx: captured.resume.func_idx,
                 vals,
-                slots: cf.slots,
-                block_idx: cf.block_idx,
-                inst_idx: cf.inst_idx,
-                resume: cf.resume,
-                active_prompts: cf.active_prompts,
+                slots: Vec::new(),
+                block_idx: captured.resume.block_idx,
+                inst_idx: captured.resume.inst_idx,
+                resume: captured.caller_resume.clone(),
+                active_prompts: captured.active_prompts.clone(),
             });
         }
-    }
-
-    fn clone_continuation(&mut self, handle: u64) -> u64 {
-        let cloned = self.conts[handle as usize].clone();
-        let new_handle = self.conts.len() as u64;
-        self.conts.push(cloned);
-        new_handle
     }
 }
 

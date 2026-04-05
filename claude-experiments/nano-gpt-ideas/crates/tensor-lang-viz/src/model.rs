@@ -1,9 +1,38 @@
 use std::collections::HashMap;
-use ndarray::{ArrayD, IxDyn};
 use rand::Rng;
 use tensor_lang_graph::{compile_with_env, Graph, NodeId, Op};
-use tensor_lang_backend::wasm::WasmBackend;
-use tensor_lang_backend::runtime::WasmRuntime;
+use tensor_lang_gpu::plan::{self, GpuPlan};
+use tensor_lang_gpu::runtime::GpuRuntime;
+
+// ─── Simple tensor container (replaces ndarray) ─────────────────────────────
+
+pub struct Tensor {
+    pub shape: Vec<usize>,
+    pub data: Vec<f32>,
+}
+
+impl Tensor {
+    pub fn zeros(shape: Vec<usize>) -> Self {
+        let len = shape.iter().product::<usize>().max(1);
+        Tensor { shape, data: vec![0.0; len] }
+    }
+
+    pub fn from_shape_vec(shape: Vec<usize>, data: Vec<f32>) -> Self {
+        Tensor { shape, data }
+    }
+
+    pub fn len(&self) -> usize {
+        self.data.len()
+    }
+
+    pub fn shape(&self) -> &[usize] {
+        &self.shape
+    }
+
+    pub fn iter(&self) -> std::slice::Iter<'_, f32> {
+        self.data.iter()
+    }
+}
 
 // ─── Chord grammar vocabulary ────────────���────────────────────────────────
 
@@ -136,11 +165,12 @@ pub struct ModelRunner {
     pub inf_logits_idx: usize,       // last forward node in inference graph
     pub train_logits_idx: usize,     // last model-forward node in training graph
     pub train_loss_idx: usize,       // loss node index (boundary: everything after = backprop)
-    // Compiled WASM runtimes
-    inf_wasm_bytes: Vec<u8>,
+    // GPU execution
+    gpu_rt: GpuRuntime,
+    inf_plan: GpuPlan,
     inf_all_output_ids: Vec<NodeId>,    // which nodes are materialized in inference
     inf_output_sizes: Vec<usize>,       // size of each output
-    train_wasm_bytes: Vec<u8>,
+    train_plan: GpuPlan,
     train_output_sizes: Vec<usize>,
 }
 
@@ -348,7 +378,7 @@ fn node_sizes(graph: &Graph) -> Vec<usize> {
 }
 
 /// Compile inference WASM that outputs ALL non-input nodes.
-fn compile_inf_wasm(graph: &Graph) -> (Vec<u8>, Vec<NodeId>, Vec<usize>) {
+fn compile_inf_plan(graph: &Graph) -> (GpuPlan, Vec<NodeId>, Vec<usize>) {
     // Output every non-input node so the graph explorer can inspect all values
     let output_ids: Vec<NodeId> = (0..graph.nodes.len())
         .filter(|&i| !matches!(&graph.nodes[i].op, Op::Input { .. }))
@@ -363,17 +393,16 @@ fn compile_inf_wasm(graph: &Graph) -> (Vec<u8>, Vec<NodeId>, Vec<usize>) {
         })
         .collect();
 
-    let backend = WasmBackend::default();
-    let wasm_bytes = backend.emit_fused_multi_output(graph, &output_ids);
-    (wasm_bytes, output_ids, output_sizes)
+    let gpu_plan = plan::build_plan_multi_output(graph, &output_ids);
+    (gpu_plan, output_ids, output_sizes)
 }
 
-/// Compile training WASM that outputs loss + gradients.
-fn compile_train_wasm(
+/// Compile training GPU plan that outputs loss + gradients.
+fn compile_train_plan(
     graph: &Graph,
     loss: NodeId,
     grad_ids: &[NodeId],
-) -> (Vec<u8>, Vec<usize>) {
+) -> (GpuPlan, Vec<usize>) {
     let mut output_ids = vec![loss];
     output_ids.extend_from_slice(grad_ids);
     let output_sizes: Vec<usize> = output_ids.iter()
@@ -385,9 +414,8 @@ fn compile_train_wasm(
         })
         .collect();
 
-    let backend = WasmBackend::default();
-    let wasm_bytes = backend.emit_fused_multi_output(graph, &output_ids);
-    (wasm_bytes, output_sizes)
+    let gpu_plan = plan::build_plan_multi_output(graph, &output_ids);
+    (gpu_plan, output_sizes)
 }
 
 impl ModelRunner {
@@ -404,17 +432,20 @@ impl ModelRunner {
         let inf_map = find_activation_map(&inf_graph, &cfg);
         let inf_logits_idx = inf_graph.nodes.len() - 1;
 
-        // Compile inference WASM (outputs all nodes)
-        let (inf_wasm_bytes, inf_all_output_ids, inf_output_sizes) =
-            compile_inf_wasm(&inf_graph);
+        // Compile inference GPU plan (outputs all nodes)
+        let (inf_plan, inf_all_output_ids, inf_output_sizes) =
+            compile_inf_plan(&inf_graph);
 
         // Compile training graph
         let (train_graph, train_loss, train_grad_ids, train_weight_ids, train_logits_idx, train_loss_idx) =
             compile_for_training(&cfg);
 
-        // Compile training WASM (outputs loss + grads)
-        let (train_wasm_bytes, train_output_sizes) =
-            compile_train_wasm(&train_graph, train_loss, &train_grad_ids);
+        // Compile training GPU plan (outputs loss + grads)
+        let (train_plan, train_output_sizes) =
+            compile_train_plan(&train_graph, train_loss, &train_grad_ids);
+
+        // Initialize GPU runtime
+        let gpu_rt = GpuRuntime::new();
 
         ModelRunner {
             inf_graph,
@@ -428,10 +459,11 @@ impl ModelRunner {
             train_loss_idx,
             cfg,
             weights,
-            inf_wasm_bytes,
+            gpu_rt,
+            inf_plan,
             inf_all_output_ids,
             inf_output_sizes,
-            train_wasm_bytes,
+            train_plan,
             train_output_sizes,
         }
     }
@@ -455,29 +487,23 @@ impl ModelRunner {
         inputs
     }
 
-    pub fn forward(&self, tokens: &[f32]) -> Vec<ArrayD<f32>> {
+    pub fn forward(&self, tokens: &[f32]) -> Vec<Tensor> {
         let flat_inputs = self.collect_inputs(&self.inf_graph, tokens, None);
         let input_refs: Vec<&[f32]> = flat_inputs.iter().map(|v| v.as_slice()).collect();
 
         let total_output: usize = self.inf_output_sizes.iter().sum();
+        let result = self.gpu_rt.run(&self.inf_plan, &input_refs, total_output);
 
-        let mut runtime = WasmRuntime::new(&self.inf_wasm_bytes)
-            .expect("failed to create WASM runtime for inference");
-        let result = runtime.run(&input_refs, total_output);
-
-        // Split concatenated output into per-node ArrayD values.
-        // Build a full array for every node (input nodes get dummy empty arrays).
+        // Split concatenated output into per-node Tensor values.
         let n_nodes = self.inf_graph.nodes.len();
-        let mut all_values: Vec<ArrayD<f32>> = Vec::with_capacity(n_nodes);
+        let mut all_values: Vec<Tensor> = Vec::with_capacity(n_nodes);
 
-        // Create a map from node id -> output index for non-input nodes
         let mut output_map: HashMap<usize, usize> = HashMap::new();
         for (oi, id) in self.inf_all_output_ids.iter().enumerate() {
             output_map.insert(id.0, oi);
         }
 
         let mut offset = 0usize;
-        // Pre-compute offsets for each output
         let mut offsets = Vec::with_capacity(self.inf_output_sizes.len());
         for &sz in &self.inf_output_sizes {
             offsets.push(offset);
@@ -492,11 +518,9 @@ impl ModelRunner {
                 let start = offsets[oi];
                 let sz = self.inf_output_sizes[oi];
                 let data = result[start..start + sz].to_vec();
-                all_values.push(ArrayD::from_shape_vec(IxDyn(&shape), data)
-                    .unwrap_or_else(|_| ArrayD::zeros(IxDyn(&shape))));
+                all_values.push(Tensor::from_shape_vec(shape, data));
             } else {
-                // Input node — fill with zeros (the viz doesn't inspect these)
-                all_values.push(ArrayD::zeros(IxDyn(&shape)));
+                all_values.push(Tensor::zeros(shape));
             }
         }
 
@@ -508,10 +532,7 @@ impl ModelRunner {
         let input_refs: Vec<&[f32]> = flat_inputs.iter().map(|v| v.as_slice()).collect();
 
         let total_output: usize = self.train_output_sizes.iter().sum();
-
-        let mut runtime = WasmRuntime::new(&self.train_wasm_bytes)
-            .expect("failed to create WASM runtime for training");
-        let result = runtime.run(&input_refs, total_output);
+        let result = self.gpu_rt.run(&self.train_plan, &input_refs, total_output);
 
         // First output is loss (1 element), rest are gradients
         let loss = result[0];

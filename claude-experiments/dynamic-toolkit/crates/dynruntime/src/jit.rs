@@ -3,7 +3,8 @@ use std::marker::PhantomData;
 
 use dynalloc::{Heap, PtrPolicy};
 use dynexec::{
-    CapturedCallerResume, CapturedFrame, FrameSliceError, FrameSliceMode, FrameSliceSnapshot,
+    CapturedCallerResume, CapturedFrame, ContinuationStore,
+    FrameSliceError, FrameSliceMode, FrameSliceSnapshot,
 };
 use dynir::interp::{ConfiguredModuleInterpreter, InterpError, InterpResult, InterpRootManager};
 use dynlower::{
@@ -23,27 +24,39 @@ impl JitFrameSliceRuntime {
     pub fn new() -> Self {
         Self::default()
     }
+}
 
-    pub fn store_snapshot(&mut self, snapshot: FrameSliceSnapshot) -> Result<u64, FrameSliceError> {
+impl RootSource for JitFrameSliceRuntime {
+    fn scan_roots(&self, visitor: &mut dyn FnMut(*mut u64)) {
+        ContinuationStore::scan_roots(self, visitor)
+    }
+}
+
+impl ContinuationStore for JitFrameSliceRuntime {
+    fn store_snapshot(&mut self, snapshot: FrameSliceSnapshot) -> Result<u64, FrameSliceError> {
         snapshot.validate()?;
         let handle = self.slices.len() as u64;
         self.slices.push(snapshot);
         Ok(handle)
     }
 
-    pub fn get_snapshot(&self, handle: u64) -> Result<&FrameSliceSnapshot, FrameSliceError> {
+    fn get_snapshot(&self, handle: u64) -> Result<&FrameSliceSnapshot, FrameSliceError> {
         self.slices
             .get(handle as usize)
             .ok_or(FrameSliceError::MissingSlice)
     }
 
-    pub fn clone_snapshot(&mut self, handle: u64) -> Result<u64, FrameSliceError> {
+    fn get_snapshot_mut(&mut self, handle: u64) -> Result<&mut FrameSliceSnapshot, FrameSliceError> {
+        self.slices.get_mut(handle as usize).ok_or(FrameSliceError::MissingSlice)
+    }
+
+    fn clone_snapshot(&mut self, handle: u64) -> Result<u64, FrameSliceError> {
         let mut cloned = self.get_snapshot(handle)?.clone();
         cloned.consumed = false;
         self.store_snapshot(cloned)
     }
 
-    pub fn mark_consumed(&mut self, handle: u64) -> Result<(), FrameSliceError> {
+    fn mark_consumed(&mut self, handle: u64) -> Result<(), FrameSliceError> {
         let slice = self
             .slices
             .get_mut(handle as usize)
@@ -54,9 +67,7 @@ impl JitFrameSliceRuntime {
         slice.consumed = true;
         Ok(())
     }
-}
 
-impl RootSource for JitFrameSliceRuntime {
     fn scan_roots(&self, visitor: &mut dyn FnMut(*mut u64)) {
         for slice in &self.slices {
             if slice.consumed {

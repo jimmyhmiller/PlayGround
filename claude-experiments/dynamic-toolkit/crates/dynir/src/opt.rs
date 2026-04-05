@@ -1432,7 +1432,7 @@ pub fn reorder_blocks_rpo(func: &mut Function) {
     let rpo = compute_rpo(func);
     if rpo.len() != func.blocks.len() {
         // Some blocks unreachable — add them at the end
-        let mut in_rpo: HashSet<usize> = rpo.iter().copied().collect();
+        let in_rpo: HashSet<usize> = rpo.iter().copied().collect();
         let mut order = rpo.clone();
         for i in 0..func.blocks.len() {
             if !in_rpo.contains(&i) {

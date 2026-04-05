@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use crate::backend::{LoweringBackend, MachineReg, MachineRegClass};
 use dynasm::buffer::CodeBuffer;
 use dynexec::FrameLayout;
@@ -694,6 +692,7 @@ impl RegisterAllocator for GreedyRegState {
 #[derive(Debug, Clone)]
 struct LiveInterval {
     value: Value,
+    #[allow(dead_code)]
     ty: Type,
     start: u32,     // inclusive
     end: u32,       // inclusive
@@ -703,6 +702,7 @@ struct LiveInterval {
 }
 
 /// Pre-computed assignment for a block parameter at a specific edge.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 struct PhiMove {
     src: Value,         // Value in predecessor
@@ -744,6 +744,7 @@ pub struct LinearScanAllocator {
     /// For each block with params, the assigned registers for each param.
     block_param_regs: Vec<Vec<Option<u8>>>,
     /// Current lowering position (updated as we process instructions).
+    #[allow(dead_code)]
     current_pos: u32,
     /// Number of spill slots allocated during prepare.
     next_spill_offset: i32,

@@ -379,11 +379,11 @@ fn compile_lua(source: &str) -> Vec<u8> {
 
     std::fs::write(&src_path, source).unwrap();
 
-    let luac = "/tmp/lua-5.1.5/src/luac";
-    let status = Command::new(luac)
+    let luac = format!("{}/lua-5.1.5/src/luac", env!("CARGO_MANIFEST_DIR"));
+    let status = Command::new(&luac)
         .args(["-o", out_path.to_str().unwrap(), src_path.to_str().unwrap()])
         .status()
-        .expect("failed to run luac — build Lua 5.1 at /tmp/lua-5.1.5 first");
+        .unwrap_or_else(|_| panic!("failed to run luac at {luac} — run `make macosx` in lua-5.1.5/"));
 
     assert!(status.success(), "luac compilation failed");
     let data = std::fs::read(&out_path).unwrap();
@@ -1909,7 +1909,8 @@ fn bench_table_heavy_jit() {
     let mut lua_times = Vec::new();
     for _ in 0..iterations {
         let start = std::time::Instant::now();
-        let status = Command::new("/tmp/lua-5.1.5/src/lua")
+        let lua = format!("{}/lua-5.1.5/src/lua", env!("CARGO_MANIFEST_DIR"));
+        let status = Command::new(&lua)
             .arg(lua_src_path.to_str().unwrap())
             .stdout(std::process::Stdio::null())
             .status()

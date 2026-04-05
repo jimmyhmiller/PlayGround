@@ -2,10 +2,11 @@ use std::cell::RefCell;
 use std::marker::PhantomData;
 
 use dynexec::{
-    CapturedCallerResume, CodegenConfig, DefaultCodegenConfig,
-    FrameResume, FrameSliceError, FrameSliceSnapshot,
-    LayoutConfigDefaults, RootPrecision,
-    RootStrategy, RootTransport, RootTransportKind, StackRuntime, ValueLayout,
+    CapturedFrame, CodegenConfig, ContinuationStore, DefaultCodegenConfig,
+    FrameResume, FrameResumePoint, FrameSliceError, FrameSliceMode, FrameSliceSnapshot,
+    InterpFrameStore, LayoutConfigDefaults, RootPrecision,
+    RootStrategy, RootTransport, RootTransportKind, ValueLayout,
+    VecContinuationStore,
 };
 use dynvalue::Decoded;
 
@@ -124,28 +125,10 @@ struct InterpFrame {
     val_to_slot: Vec<Option<usize>>,
 }
 
-#[derive(Clone)]
-pub(crate) struct InterpCont {
-    frames: Vec<InterpContFrame>,
-}
 
-#[derive(Clone)]
-struct InterpContFrame {
-    func_idx: usize,
-    vals: Vec<u64>,
-    slots: Vec<u64>,
-    block_idx: usize,
-    inst_idx: usize,
-    resume: FrameResume,
-    active_prompts: Vec<u32>,
-    val_to_slot: Vec<Option<usize>>,
-    resume_arg_idx: Option<usize>,
-}
-
-/// A `StackRuntime` backed by `Vec<InterpFrame>` with GC root management.
+/// An `InterpFrameStore` backed by `Vec<InterpFrame>` with GC root management.
 pub struct InterpStackRuntime<'a, L: ValueLayout, Roots: RootStrategy<L>, Transport: RootTransport<L, Roots>, R: InterpRootManager<L, Roots, Transport>> {
     stack: Vec<InterpFrame>,
-    conts: &'a RefCell<Vec<InterpCont>>,
     roots: &'a R,
     functions: &'a [Function],
     root_precision: RootPrecision,
@@ -153,10 +136,9 @@ pub struct InterpStackRuntime<'a, L: ValueLayout, Roots: RootStrategy<L>, Transp
 }
 
 impl<'a, L: ValueLayout, Roots: RootStrategy<L>, Transport: RootTransport<L, Roots>, R: InterpRootManager<L, Roots, Transport>> InterpStackRuntime<'a, L, Roots, Transport, R> {
-    pub fn new(roots: &'a R, functions: &'a [Function], conts: &'a RefCell<Vec<InterpCont>>) -> Self {
+    pub fn new(roots: &'a R, functions: &'a [Function]) -> Self {
         InterpStackRuntime {
             stack: Vec::new(),
-            conts,
             roots,
             functions,
             root_precision: roots.root_precision(),
@@ -194,7 +176,7 @@ fn sync_frame_from_roots<L: ValueLayout, Roots: RootStrategy<L>, Transport: Root
     }
 }
 
-impl<'a, L: ValueLayout, Roots: RootStrategy<L>, Transport: RootTransport<L, Roots>, R: InterpRootManager<L, Roots, Transport>> StackRuntime for InterpStackRuntime<'a, L, Roots, Transport, R> {
+impl<'a, L: ValueLayout, Roots: RootStrategy<L>, Transport: RootTransport<L, Roots>, R: InterpRootManager<L, Roots, Transport>> InterpFrameStore for InterpStackRuntime<'a, L, Roots, Transport, R> {
     fn push_frame(
         &mut self,
         func_idx: usize,
@@ -301,7 +283,7 @@ impl<'a, L: ValueLayout, Roots: RootStrategy<L>, Transport: RootTransport<L, Roo
         self.sync_top_from_roots();
     }
 
-    fn capture(&mut self, prompt: u32, resume_dest: usize) -> u64 {
+    fn capture_snapshot(&mut self, prompt: u32, resume_dest: usize) -> FrameSliceSnapshot {
         let start = self
             .stack
             .iter()
@@ -318,65 +300,68 @@ impl<'a, L: ValueLayout, Roots: RootStrategy<L>, Transport: RootTransport<L, Roo
                     vals[vi] = self.roots.get_root(f.root_frame, *slot);
                 }
             }
-            frames.push(InterpContFrame {
-                func_idx: f.func_idx,
-                vals,
-                slots: f.slots.clone(),
-                block_idx: f.block_idx,
-                inst_idx: f.inst_idx,
-                resume: f.resume.clone(),
+            let root_value_indices: Vec<usize> = f.val_to_slot.iter().enumerate()
+                .filter_map(|(i, s)| s.map(|_| i))
+                .collect();
+            frames.push(CapturedFrame {
+                resume: FrameResumePoint {
+                    func_idx: f.func_idx,
+                    block_idx: f.block_idx,
+                    inst_idx: f.inst_idx,
+                },
+                values: vals,
+                root_value_indices,
+                resume_arg_value_indices: if is_top { vec![resume_dest] } else { Vec::new() },
                 active_prompts: f.active_prompts.clone(),
-                val_to_slot: f.val_to_slot.clone(),
-                resume_arg_idx: if is_top { Some(resume_dest) } else { None },
+                caller_resume: f.resume.clone(),
             });
         }
-        let mut conts = self.conts.borrow_mut();
-        let handle = conts.len() as u64;
-        conts.push(InterpCont { frames });
-        handle
+        FrameSliceSnapshot {
+            prompt_id: prompt,
+            mode: FrameSliceMode::OneShot,
+            frames,
+            consumed: false,
+        }
     }
 
-    fn resume(&mut self, handle: u64, args: &[u64]) {
-        let cont = self.conts.borrow()[handle as usize].clone();
+    fn resume_snapshot(&mut self, snapshot: &FrameSliceSnapshot, args: &[u64]) {
         // Pop all existing frames
         while !self.stack.is_empty() {
             self.stack.pop();
             self.roots.pop_frame();
         }
-        let frame_count = cont.frames.len();
-        for (i, cf) in cont.frames.into_iter().enumerate() {
-            let mut vals = cf.vals;
+        let frame_count = snapshot.frames.len();
+        for (i, captured) in snapshot.frames.iter().enumerate() {
+            let func_idx = captured.resume.func_idx;
+            let mut vals = captured.values.clone();
             if i + 1 == frame_count {
-                if let Some(idx) = cf.resume_arg_idx {
-                    if let Some(&arg) = args.first() {
-                        vals[idx] = arg;
+                for (idx, &value_idx) in captured.resume_arg_value_indices.iter().enumerate() {
+                    if let Some(&arg) = args.get(idx) {
+                        vals[value_idx] = arg;
                     }
                 }
             }
-            let gc_slots = count_gc_slots_from_map(&cf.val_to_slot);
+            // Rebuild val_to_slot from root_value_indices
+            let mut val_to_slot = vec![None; vals.len()];
+            for (slot, &value_idx) in captured.root_value_indices.iter().enumerate() {
+                val_to_slot[value_idx] = Some(slot);
+            }
+            let gc_slots = count_gc_slots_from_map(&val_to_slot);
             let root_frame = self.roots.push_frame(gc_slots);
             let frame = InterpFrame {
-                func_idx: cf.func_idx,
+                func_idx,
                 vals,
-                slots: cf.slots,
-                block_idx: cf.block_idx,
-                inst_idx: cf.inst_idx,
-                resume: cf.resume,
-                active_prompts: cf.active_prompts,
+                slots: vec![0u64; self.functions[func_idx].stack_slots.len()],
+                block_idx: captured.resume.block_idx,
+                inst_idx: captured.resume.inst_idx,
+                resume: captured.caller_resume.clone(),
+                active_prompts: captured.active_prompts.clone(),
                 root_frame,
-                val_to_slot: cf.val_to_slot,
+                val_to_slot,
             };
             sync_frame_to_roots(&frame, self.roots);
             self.stack.push(frame);
         }
-    }
-
-    fn clone_continuation(&mut self, handle: u64) -> u64 {
-        let mut conts = self.conts.borrow_mut();
-        let cloned = conts[handle as usize].clone();
-        let new_handle = conts.len() as u64;
-        conts.push(cloned);
-        new_handle
     }
 
     fn needs_gc(&self) -> bool {
@@ -461,7 +446,7 @@ pub struct ConfiguredModuleInterpreter<
 > {
     module: &'a Module,
     roots: &'a R,
-    conts: RefCell<Vec<InterpCont>>,
+    conts: RefCell<VecContinuationStore>,
     externs: Vec<Option<Box<dyn Fn(&[u64]) -> ExternCallResult + 'a>>>,
     indirect_handler: Option<Box<dyn Fn(u64, &[u64]) -> ExternCallResult + 'a>>,
     _config: PhantomData<Cfg>,
@@ -480,7 +465,7 @@ where
         ConfiguredModuleInterpreter {
             module,
             roots,
-            conts: RefCell::new(Vec::new()),
+            conts: RefCell::new(VecContinuationStore::new()),
             externs,
             indirect_handler: None,
             _config: PhantomData,
@@ -514,14 +499,14 @@ where
 
     /// Run an entry function. Creates an `InterpStackRuntime` internally.
     pub fn run(&self, entry: FuncRef, args: &[u64]) -> Result<InterpResult, InterpError> {
-        let mut sr = InterpStackRuntime::new(self.roots, &self.module.functions, &self.conts);
+        let mut sr = InterpStackRuntime::new(self.roots, &self.module.functions);
         self.run_with_runtime(&mut sr, entry, args)
     }
 
-    /// Run an entry function with a provided `StackRuntime`.
+    /// Run an entry function with a provided `InterpFrameStore`.
     pub fn run_with_runtime(
         &self,
-        sr: &mut impl StackRuntime,
+        sr: &mut impl InterpFrameStore,
         entry: FuncRef,
         args: &[u64],
     ) -> Result<InterpResult, InterpError> {
@@ -552,14 +537,15 @@ where
         snapshot: FrameSliceSnapshot,
         args: &[u64],
     ) -> Result<InterpResult, InterpError> {
-        let mut sr = InterpStackRuntime::new(self.roots, &self.module.functions, &self.conts);
-        load_snapshot_into_runtime(&mut sr, snapshot, args, self.roots, &self.module.functions)?;
+        let mut sr = InterpStackRuntime::new(self.roots, &self.module.functions);
+        sr.resume_snapshot(&snapshot, args);
         self.run_loop(&mut sr)
     }
 
-    fn run_loop(&self, sr: &mut impl StackRuntime) -> Result<InterpResult, InterpError> {
+    fn run_loop(&self, sr: &mut impl InterpFrameStore) -> Result<InterpResult, InterpError> {
+        let mut conts = self.conts.borrow_mut();
         loop {
-            let action = self.execute_frame(sr)?;
+            let action = self.execute_frame(sr, &mut *conts)?;
 
             match action {
                 FrameAction::InternalCall {
@@ -693,7 +679,7 @@ where
     }
 
     /// Execute the current frame until it needs to transfer control.
-    fn execute_frame(&self, sr: &mut impl StackRuntime) -> Result<FrameAction, InterpError> {
+    fn execute_frame(&self, sr: &mut impl InterpFrameStore, conts: &mut impl ContinuationStore) -> Result<FrameAction, InterpError> {
         let func_idx = sr.func_idx();
         let func = &self.module.functions[func_idx];
 
@@ -722,7 +708,8 @@ where
                     Inst::CaptureSlice(prompt, _live) => {
                         let dest = node.value.expect("capture_slice must produce a value");
                         sr.advance_inst();
-                        let handle = sr.capture(prompt.index_u32(), dest.index());
+                        let snapshot = sr.capture_snapshot(prompt.index_u32(), dest.index());
+                        let handle = conts.store_snapshot(snapshot)?;
                         sr.set(dest.index(), handle);
                         continue;
                     }
@@ -730,7 +717,7 @@ where
                     Inst::CloneSlice(slice) => {
                         let dest = node.value.expect("clone_slice must produce a value");
                         let handle = sr.get(slice.index());
-                        let new_handle = sr.clone_continuation(handle);
+                        let new_handle = conts.clone_snapshot(handle)?;
                         sr.set(dest.index(), new_handle);
                         sr.advance_inst();
                         continue;
@@ -1002,9 +989,10 @@ where
                 Terminator::ResumeSlice { slice, args } => {
                     let slice_bits = sr.get(slice.index());
                     let arg_vals: Vec<u64> = args.iter().map(|v| sr.get(v.index())).collect();
-                    sr.resume(slice_bits, &arg_vals);
+                    let snapshot = conts.get_snapshot(slice_bits)?;
+                    sr.resume_snapshot(snapshot, &arg_vals);
                     // After resume, the stack has been replaced; continue executing
-                    return Ok(self.execute_frame(sr)?);
+                    return Ok(self.execute_frame(sr, conts)?);
                 }
 
                 Terminator::AbortToPrompt { prompt, args } => {
@@ -1351,78 +1339,6 @@ fn count_gc_slots_from_map(map: &[Option<usize>]) -> usize {
 
 // ─── Snapshot helpers ─────────────────────────────────────────────
 
-fn load_snapshot_into_runtime<L: ValueLayout, Roots: RootStrategy<L>, Transport: RootTransport<L, Roots>, R: InterpRootManager<L, Roots, Transport>>(
-    sr: &mut InterpStackRuntime<L, Roots, Transport, R>,
-    snapshot: FrameSliceSnapshot,
-    args: &[u64],
-    roots: &R,
-    functions: &[Function],
-) -> Result<(), InterpError> {
-    // Clear existing stack
-    while !sr.stack.is_empty() {
-        sr.stack.pop();
-        roots.pop_frame();
-    }
-
-    for (frame_idx, captured) in snapshot.frames.iter().enumerate() {
-        let func_idx = captured.resume.func_idx;
-        let mut val_to_slot = vec![None; captured.values.len()];
-        for (slot, &value_idx) in captured.root_value_indices.iter().enumerate() {
-            val_to_slot[value_idx] = Some(slot);
-        }
-        let gc_slots = count_gc_slots_from_map(&val_to_slot);
-        let root_frame = roots.push_frame(gc_slots);
-
-        let mut vals = captured.values.clone();
-        if frame_idx + 1 == snapshot.frames.len() {
-            for (idx, value_idx) in captured.resume_arg_value_indices.iter().copied().enumerate() {
-                if let Some(arg) = args.get(idx) {
-                    vals[value_idx] = *arg;
-                }
-            }
-        }
-
-        let resume = deserialize_caller_resume(&captured.caller_resume);
-
-        let frame = InterpFrame {
-            func_idx,
-            vals,
-            slots: vec![0u64; functions[func_idx].stack_slots.len()],
-            block_idx: captured.resume.block_idx,
-            inst_idx: captured.resume.inst_idx,
-            root_frame,
-            val_to_slot,
-            resume,
-            active_prompts: captured.active_prompts.clone(),
-        };
-        sync_frame_to_roots(&frame, roots);
-        sr.stack.push(frame);
-    }
-
-    Ok(())
-}
-
-fn deserialize_caller_resume(resume: &CapturedCallerResume) -> FrameResume {
-    match resume {
-        CapturedCallerResume::TopLevel => FrameResume::TopLevel,
-        CapturedCallerResume::FromCall { return_dest } => FrameResume::FromCall {
-            return_dest: *return_dest,
-        },
-        CapturedCallerResume::FromInvoke {
-            normal_block,
-            normal_args_vals,
-            exception_block,
-            exception_args_vals,
-            has_ret_param,
-        } => FrameResume::FromInvoke {
-            normal_block: *normal_block,
-            normal_args_vals: normal_args_vals.clone(),
-            exception_block: *exception_block,
-            exception_args_vals: exception_args_vals.clone(),
-            has_ret_param: *has_ret_param,
-        },
-    }
-}
 
 // ─── Helpers ──────────────────────────────────────────────────────
 
@@ -1442,8 +1358,8 @@ fn find_handler(func: &Function, prompt: PromptId) -> BlockId {
     );
 }
 
-/// Transfer block arguments via a StackRuntime.
-fn transfer_args(sr: &mut impl StackRuntime, target: BlockId, args: &[Value], func: &Function) {
+/// Transfer block arguments via an InterpFrameStore.
+fn transfer_args(sr: &mut impl InterpFrameStore, target: BlockId, args: &[Value], func: &Function) {
     let arg_vals: Vec<u64> = args.iter().map(|v| sr.get(v.index())).collect();
     let target_block = &func.blocks[target.index()];
     for (i, val) in arg_vals.iter().enumerate() {

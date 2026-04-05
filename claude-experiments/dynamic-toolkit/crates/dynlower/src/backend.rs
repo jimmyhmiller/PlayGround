@@ -265,6 +265,7 @@ pub trait LoweringBackend {
 
 pub struct Arm64Backend;
 
+#[allow(dead_code)]
 pub struct X64Backend;
 
 impl Arm64Backend {
@@ -303,6 +304,7 @@ impl Arm64Backend {
         }
     }
 
+    #[allow(dead_code)]
     pub fn fp(index: u8) -> MachineReg {
         MachineReg {
             class: MachineRegClass::Fp,
@@ -1075,6 +1077,7 @@ impl LoweringBackend for Arm64Backend {
     }
 }
 
+#[allow(dead_code)]
 impl X64Backend {
     pub fn name() -> &'static str {
         "x86_64"

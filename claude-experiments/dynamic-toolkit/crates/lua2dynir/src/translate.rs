@@ -1207,6 +1207,7 @@ impl<'a> Translator<'a> {
     }
 
     /// Emit inline NanBox ForPrep: idx = init - step (Lua 5.1 semantics).
+    #[allow(dead_code)]
     fn emit_inline_forprep(
         &mut self,
         init: Value,
@@ -1245,6 +1246,7 @@ impl<'a> Translator<'a> {
 
     /// Emit inline NanBox ForLoop: idx += step, check against limit.
     /// Returns new idx if loop continues, or nil if done.
+    #[allow(dead_code)]
     fn emit_inline_forloop(
         &mut self,
         idx: Value,
@@ -1358,6 +1360,7 @@ impl<'a> Translator<'a> {
     }
 
     /// Emit inline SETTABLE with array fast path.
+    #[allow(dead_code)]
     fn emit_inline_settable(
         &mut self,
         table: Value,

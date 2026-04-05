@@ -257,6 +257,48 @@ fn test_wasm_exp_log() {
 }
 
 #[test]
+fn test_wasm_log2_range() {
+    // log2 across a range of values — tests the polynomial approximation
+    let data: Vec<f32> = (1..=20).map(|i| i as f32 * 0.2).collect();
+    let arr = ArrayD::from_shape_vec(vec![1, 20], data).unwrap();
+    let mut inputs = HashMap::new();
+    inputs.insert("input_0".into(), arr);
+    check_wasm(
+        "let x = load([1, 20]) let y = log2(x)",
+        inputs,
+        1e-5,
+    );
+}
+
+#[test]
+fn test_wasm_exp2_range() {
+    // exp2 across a range including negative and positive values
+    let data: Vec<f32> = (-10..=10).map(|i| i as f32).collect();
+    let arr = ArrayD::from_shape_vec(vec![1, 21], data).unwrap();
+    let mut inputs = HashMap::new();
+    inputs.insert("input_0".into(), arr);
+    check_wasm(
+        "let x = load([1, 21]) let y = exp2(x)",
+        inputs,
+        1e-2,
+    );
+}
+
+#[test]
+fn test_wasm_exp2_fractional() {
+    // exp2 with fractional inputs — the polynomial approximation is used here
+    let data: Vec<f32> = (-20..=20).map(|i| i as f32 * 0.3).collect();
+    let arr = ArrayD::from_shape_vec(vec![1, 41], data).unwrap();
+    let mut inputs = HashMap::new();
+    inputs.insert("input_0".into(), arr);
+    check_wasm(
+        "let x = load([1, 41]) let y = exp2(x)",
+        inputs,
+        1e-2,
+    );
+}
+
+#[test]
 fn test_wasm_broadcast_scalar() {
     let mut inputs = HashMap::new();
     inputs.insert(

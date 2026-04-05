@@ -7,7 +7,7 @@ use glyphon::{
     Attrs, Buffer as GlyphonBuffer, Cache, Color as GlyphonColor, Family, FontSystem, Metrics,
     Resolution, Shaping, SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport,
 };
-use model::{Adam, ModelRunner, TOKENS, VOCAB_SIZE};
+use model::{Adam, ModelRunner, Tensor, TOKENS, VOCAB_SIZE};
 use wgpu::util::DeviceExt;
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, KeyEvent, WindowEvent};
@@ -84,10 +84,10 @@ struct TextEntry {
     color: GlyphonColor,
 }
 
-/// Collapse an ndarray to 2D for heatmap visualization.
+/// Collapse a tensor to 2D for heatmap visualization.
 /// `slice_idx` selects which slice of the leading dimensions to show.
 /// Returns (rows, cols, data, n_slices) where n_slices is total number of leading-dim slices.
-fn collapse_to_2d_slice(arr: &ndarray::ArrayD<f32>, slice_idx: usize) -> (usize, usize, Vec<f32>, usize) {
+fn collapse_to_2d_slice(arr: &Tensor, slice_idx: usize) -> (usize, usize, Vec<f32>, usize) {
     let shape = arr.shape();
     if shape.is_empty() {
         return (1, 1, arr.iter().copied().collect(), 1);
@@ -106,7 +106,7 @@ fn collapse_to_2d_slice(arr: &ndarray::ArrayD<f32>, slice_idx: usize) -> (usize,
     (rows, cols, data, n_slices)
 }
 
-fn n_slices_for(arr: &ndarray::ArrayD<f32>) -> usize {
+fn n_slices_for(arr: &Tensor) -> usize {
     let shape = arr.shape();
     if shape.len() <= 2 { return 1; }
     let rows = shape[shape.len() - 2];
@@ -115,7 +115,7 @@ fn n_slices_for(arr: &ndarray::ArrayD<f32>) -> usize {
     if stride == 0 { 1 } else { arr.len() / stride }
 }
 
-fn collapse_to_2d(arr: &ndarray::ArrayD<f32>) -> (usize, usize, Vec<f32>) {
+fn collapse_to_2d(arr: &Tensor) -> (usize, usize, Vec<f32>) {
     let (r, c, d, _) = collapse_to_2d_slice(arr, 0);
     (r, c, d)
 }
@@ -396,7 +396,7 @@ fn bezier(p0: (f32, f32), p1: (f32, f32), p2: (f32, f32), p3: (f32, f32), t: f32
 /// while preserving the tensor's actual aspect ratio.
 fn render_mini_heatmap(
     vertices: &mut Vec<ColorVertex>,
-    val: &ndarray::ArrayD<f32>,
+    val: &Tensor,
     px: f32, py: f32, pw: f32, ph: f32,
     win_w: f32, win_h: f32,
 ) {
@@ -493,7 +493,7 @@ struct App {
     view_mode: ViewMode,
 
     // Graph explorer state
-    all_node_values: Vec<ndarray::ArrayD<f32>>,
+    all_node_values: Vec<Tensor>,
     graph_cursor: usize,
     graph_scroll: usize,   // first visible row in node list
     mouse_pos: (f32, f32),
@@ -1172,7 +1172,7 @@ impl App {
 
     fn render_graph_panels(
         runner: &ModelRunner,
-        all_node_values: &[ndarray::ArrayD<f32>],
+        all_node_values: &[Tensor],
         graph_cursor: usize,
         graph_scroll: usize,
         vertices: &mut Vec<ColorVertex>,

@@ -1,3 +1,4 @@
+mod engine;
 mod framechain;
 mod jit;
 mod ptr_policy;
@@ -5,6 +6,10 @@ mod root_strategies;
 mod stackmap;
 
 pub use dynalloc::PtrPolicy;
+pub use engine::{
+    AlwaysCompile, CallCountTier, ExecutionEngine, ExecutionError, ExecutionResult, NeverCompile,
+    TierPolicy, default_engine,
+};
 pub use framechain::FrameChainRootManager;
 pub use jit::{
     FrameScanJitTransport, JitExecutionResult, JitFrameControl, JitFrameControlError,

@@ -1,14 +1,16 @@
 //! Thin interpreter parameterized by UnifiedStackStrategy.
 //!
-//! The interpreter is just instruction dispatch. All stack management,
-//! frame storage, and continuation handling is delegated to the StackRuntime.
+//! The interpreter is just instruction dispatch. All stack management
+//! and frame storage is delegated to the InterpFrameStore.
+//! Continuations are stored in a shared ContinuationStore.
 
-use dynexec::{FrameResume, StackRuntime, UnifiedStackStrategy, StackConfig};
+use dynexec::{ContinuationStore, FrameResume, InterpFrameStore, UnifiedStackStrategy, StackConfig, VecContinuationStore};
 use dynir::ir::*;
 
 pub fn interpret<S: UnifiedStackStrategy>(
     module: &Module,
     rt: &mut S::Runtime,
+    conts: &mut impl ContinuationStore,
     entry: FuncRef,
     args: &[u64],
 ) -> u64 {
@@ -42,13 +44,14 @@ pub fn interpret<S: UnifiedStackStrategy>(
                 Inst::CaptureSlice(prompt, _) => {
                     let dest = node.value.unwrap();
                     rt.advance_inst();
-                    let handle = rt.capture(prompt.index_u32(), dest.index());
+                    let snapshot = rt.capture_snapshot(prompt.index_u32(), dest.index());
+                    let handle = conts.store_snapshot(snapshot).expect("store_snapshot failed");
                     rt.set(dest.index(), handle);
                     continue; // already advanced
                 }
                 Inst::CloneSlice(v) => {
                     let handle = rt.get(v.index());
-                    let new_handle = rt.clone_continuation(handle);
+                    let new_handle = conts.clone_snapshot(handle).expect("clone_snapshot failed");
                     if let Some(d) = node.value {
                         rt.set(d.index(), new_handle);
                     }
@@ -169,7 +172,8 @@ pub fn interpret<S: UnifiedStackStrategy>(
             Terminator::ResumeSlice { slice, args } => {
                 let handle = rt.get(slice.index());
                 let arg_vals: Vec<u64> = args.iter().map(|v| rt.get(v.index())).collect();
-                rt.resume(handle, &arg_vals);
+                let snapshot = conts.get_snapshot(handle).expect("resume: invalid handle");
+                rt.resume_snapshot(snapshot, &arg_vals);
                 // Stack replaced — loop continues from new top frame
             }
             Terminator::AbortToPrompt { prompt, args } => {
@@ -219,5 +223,6 @@ pub fn run<S: UnifiedStackStrategy>(
     args: &[u64],
 ) -> u64 {
     let mut rt = S::create_runtime(StackConfig::default());
-    interpret::<S>(module, &mut rt, entry, args)
+    let mut conts = VecContinuationStore::new();
+    interpret::<S>(module, &mut rt, &mut conts, entry, args)
 }

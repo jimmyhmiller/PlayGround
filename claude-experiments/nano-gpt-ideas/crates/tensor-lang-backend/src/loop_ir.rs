@@ -783,16 +783,22 @@ pub fn tile_reduce_loops(stmts: &mut Vec<Stmt>) {
             let n = &shape[ndim - 1];
             let k = &reduce.size;
 
-            // Use concrete values for threshold checks; skip if symbolic
+            // Use concrete values for threshold checks; skip if symbolic.
+            // Tiling requires concrete tile sizes and changes float
+            // accumulation order, so we only tile when we can prove it
+            // helps (all dims concrete and at least one large enough).
             let m_val = m.as_usize();
             let n_val = n.as_usize();
             let k_val = k.as_usize();
 
-            // If all are concrete and below threshold, skip
-            if let (Some(mv), Some(nv), Some(kv)) = (m_val, n_val, k_val) {
-                if mv < MIN_DIM && nv < MIN_DIM && kv < MIN_DIM {
-                    continue;
-                }
+            // All three must be concrete for tiling to apply
+            let (Some(mv), Some(nv), Some(kv)) = (m_val, n_val, k_val) else {
+                continue;
+            };
+
+            // Skip if all dims are below threshold
+            if mv < MIN_DIM && nv < MIN_DIM && kv < MIN_DIM {
+                continue;
             }
 
             // Build tile sizes: leading dims get tile_size = dim_size (flat outer loops),
@@ -801,22 +807,9 @@ pub fn tile_reduce_loops(stmts: &mut Vec<Stmt>) {
             for d in 0..ndim - 2 {
                 tiles.push(shape[d].clone()); // batch dims: tile = full size
             }
-            // Clamp tile size to min(TILE, dim) when concrete; otherwise use TILE literal
-            let tile_m = match m_val {
-                Some(mv) => Dim::Lit(TILE_M.min(mv)),
-                None => Dim::Lit(TILE_M),
-            };
-            let tile_n = match n_val {
-                Some(nv) => Dim::Lit(TILE_N.min(nv)),
-                None => Dim::Lit(TILE_N),
-            };
-            let tile_k = match k_val {
-                Some(kv) => Dim::Lit(TILE_K.min(kv)),
-                None => Dim::Lit(TILE_K),
-            };
-            tiles.push(tile_m);
-            tiles.push(tile_n);
-            tiles.push(tile_k); // reduce dim tile
+            tiles.push(Dim::Lit(TILE_M.min(mv)));
+            tiles.push(Dim::Lit(TILE_N.min(nv)));
+            tiles.push(Dim::Lit(TILE_K.min(kv))); // reduce dim tile
 
             *tile = Some(TileConfig { tiles });
         }

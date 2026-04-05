@@ -288,8 +288,9 @@ fn gc_collects_dead_segments() {
 
     let config = StackConfig { heap_size: 64 * 1024 };
     let mut rt = crate::gc_stack::GCSegmentRuntime::new(config.heap_size);
+    let mut conts = dynexec::VecContinuationStore::new();
     let result = crate::unified_interp::interpret::<crate::gc_stack::GCSegmentStack>(
-        &lowered.module, &mut rt, entry, &[],
+        &lowered.module, &mut rt, &mut conts, entry, &[],
     );
     assert_eq!(result, 42);
 
@@ -397,8 +398,9 @@ fn gc_during_execution() {
     let entry = lowered.func_refs["main"];
     let mut rt = crate::gc_stack::GCSegmentRuntime::new(64 * 1024);
     rt.set_gc_stress(3);
+    let mut conts = dynexec::VecContinuationStore::new();
     let result = crate::unified_interp::interpret::<crate::gc_stack::GCSegmentStack>(
-        &lowered.module, &mut rt, entry, &[],
+        &lowered.module, &mut rt, &mut conts, entry, &[],
     );
     assert_eq!(result, 17);
     assert!(rt.gc_count() > 0, "GC should have been triggered");

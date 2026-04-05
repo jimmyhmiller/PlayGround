@@ -1,0 +1,15 @@
+[package]
+name = "lox"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "lox"
+path = "src/main.rs"
+
+[dependencies]
+dynvalue = { path = "../dynvalue" }
+dynir = { path = "../dynir" }
+dynexec = { path = "../dynexec" }
+
+[dev-dependencies]

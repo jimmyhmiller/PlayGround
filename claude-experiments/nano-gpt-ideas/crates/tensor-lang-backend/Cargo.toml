@@ -3,13 +3,19 @@ name = "tensor-lang-backend"
 version = "0.1.0"
 edition = "2024"
 
+[[example]]
+name = "dump_wasm_logits"
+path = "../../bench/dump_wasm_logits.rs"
+required-features = ["runtime"]
+
 [dependencies]
 tensor-lang-graph = { path = "../tensor-lang-graph" }
 wasmtime = { version = "43", optional = true }
+serde_json = { version = "1", optional = true }
 
 [features]
 default = []
-runtime = ["wasmtime"]
+runtime = ["wasmtime", "serde_json"]
 
 [dev-dependencies]
 tensor-lang-test-oracle = { path = "../tensor-lang-test-oracle" }

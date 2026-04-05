@@ -597,20 +597,24 @@ fn build_exp2_func(fb: &mut FuncBuilder) {
     fb.local_set(int_pow);
 
     // Polynomial approximation for 2^frac on [0,1):
-    // Using minimax: p(f) = 1 + f*(0.6931472 + f*(0.2402265 + f*(0.0554993 + f*0.009618)))
-    // Horner form:
-    fb.f32_const(0.009618f32);
+    // Minimax degree-5: p(f) = 1 + f*(c0 + f*(c1 + f*(c2 + f*(c3 + f*c4))))
+    // Max error ~4e-7 over [0, 1).
+    fb.f32_const(0.0017896632f32);
     fb.local_get(frac);
     fb.emit(op::F32_MUL);
-    fb.f32_const(0.0554993f32);
+    fb.f32_const(0.009196793f32);
     fb.emit(op::F32_ADD);
     fb.local_get(frac);
     fb.emit(op::F32_MUL);
-    fb.f32_const(0.2402265f32);
+    fb.f32_const(0.055658683f32);
     fb.emit(op::F32_ADD);
     fb.local_get(frac);
     fb.emit(op::F32_MUL);
-    fb.f32_const(0.6931472f32);
+    fb.f32_const(0.24020687f32);
+    fb.emit(op::F32_ADD);
+    fb.local_get(frac);
+    fb.emit(op::F32_MUL);
+    fb.f32_const(0.6931476f32);
     fb.emit(op::F32_ADD);
     fb.local_get(frac);
     fb.emit(op::F32_MUL);
@@ -669,24 +673,28 @@ fn build_log2_func(fb: &mut FuncBuilder) {
     fb.local_set(p);
 
     // Polynomial approximation of log2(1+p) for p in [0, 1):
-    // log2(1+p) ~ p * (1.4426950 + p * (-0.7213475 + p * (0.4808983 + p * (-0.3606738 + p * 0.2885390))))
-    // Horner form:
-    fb.f32_const(0.2885390f32);
+    // log2(1+p) ~ p * (c0 + p * (c1 + p * (c2 + p * (c3 + p * (c4 + p * c5)))))
+    // Minimax degree-6 (with leading p factor). Max error ~9e-6 over [0, 1).
+    fb.f32_const(-0.034593768f32);
     fb.local_get(p);
     fb.emit(op::F32_MUL);
-    fb.f32_const(-0.3606738f32);
+    fb.f32_const(0.14642814f32);
     fb.emit(op::F32_ADD);
     fb.local_get(p);
     fb.emit(op::F32_MUL);
-    fb.f32_const(0.4808983f32);
+    fb.f32_const(-0.3033827f32);
     fb.emit(op::F32_ADD);
     fb.local_get(p);
     fb.emit(op::F32_MUL);
-    fb.f32_const(-0.7213475f32);
+    fb.f32_const(0.46929798f32);
     fb.emit(op::F32_ADD);
     fb.local_get(p);
     fb.emit(op::F32_MUL);
-    fb.f32_const(1.4426950f32);
+    fb.f32_const(-0.7204416f32);
+    fb.emit(op::F32_ADD);
+    fb.local_get(p);
+    fb.emit(op::F32_MUL);
+    fb.f32_const(1.4426832f32);
     fb.emit(op::F32_ADD);
     fb.local_get(p);
     fb.emit(op::F32_MUL);

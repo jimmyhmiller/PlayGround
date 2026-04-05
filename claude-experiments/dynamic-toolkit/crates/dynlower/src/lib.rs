@@ -338,6 +338,7 @@ pub struct JitFunction {
     suspend_records: Vec<Box<CallSuspendRecord>>,
     handler_payload_kind: SafepointHandlerPayloadKind,
     max_deopt_live_values: usize,
+    #[allow(dead_code)]
     root_scan_size: usize,
 }
 
