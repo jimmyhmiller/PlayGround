@@ -32,6 +32,11 @@ pub struct Allocation {
     /// value that requested `Record` or `SpillAndRecord`. Empty if the
     /// function has no safepoints or all actions are `CallingConvention`/`Ignore`.
     pub stackmaps: HashMap<InstId, Vec<StackmapEntry>>,
+
+    /// Home location for each vreg (before constraint resolution).
+    /// For register-allocated vregs, this is the PReg they live in for
+    /// their entire lifetime. For spilled vregs, this is the spill slot.
+    pub vreg_homes: HashMap<VReg, MoveOperand>,
 }
 
 /// One entry in a safepoint's stackmap: where a live value can be found.
@@ -124,6 +129,7 @@ impl Allocation {
             spill_slots: HashMap::new(),
             num_spill_slots: 0,
             stackmaps: HashMap::new(),
+            vreg_homes: HashMap::new(),
         }
     }
 

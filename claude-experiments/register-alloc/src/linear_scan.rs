@@ -350,10 +350,16 @@ fn build_allocation<F: Function, T: Target>(
     let mut alloc = Allocation::new();
     alloc.num_spill_slots = num_spill_slots;
 
-    // Record spill slots.
+    // Record spill slots and vreg homes.
     for (vreg, result) in alloc_result {
-        if let IntervalAlloc::Spilled(slot) = result {
-            alloc.spill_slots.insert(*vreg, *slot);
+        match result {
+            IntervalAlloc::Spilled(slot) => {
+                alloc.spill_slots.insert(*vreg, *slot);
+                alloc.vreg_homes.insert(*vreg, MoveOperand::SpillSlot(*slot));
+            }
+            IntervalAlloc::Reg(preg) => {
+                alloc.vreg_homes.insert(*vreg, MoveOperand::Reg(*preg));
+            }
         }
     }
 

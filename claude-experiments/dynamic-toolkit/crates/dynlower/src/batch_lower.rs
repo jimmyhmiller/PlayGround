@@ -803,48 +803,22 @@ pub fn compile_function_batch(
 
     // Phase 2.5: Inject moves for entry block params (function arguments).
     // The caller puts args in X0, X1, ... but the allocator may have assigned
-    // the param vregs to different registers. Insert Before(first_inst) moves.
+    // the param vregs to different home registers. Insert Before(first_inst) moves.
     {
         let first_inst = InstId(0);
         for (i, (val, _ty)) in func.blocks[0].params.iter().enumerate() {
             let vreg = VReg(val.index() as u32);
             let arg_preg = gp_preg(i as u8);
 
-            if let Some(&spill_slot) = allocation.spill_slots.get(&vreg) {
-                // Param was spilled
-                allocation.moves.push(InsertedMove {
-                    at: MovePosition::Before(first_inst),
-                    from: MoveOperand::Reg(arg_preg),
-                    to: MoveOperand::SpillSlot(spill_slot),
-                    class: GP,
-                });
-            } else {
-                // Find the home register for this vreg — look at where it's used
-                // as a Use operand. The allocated preg there is its home.
-                let mut home = None;
-                'outer: for block in adapted.blocks() {
-                    for inst in adapted.block_insts(block) {
-                        for (op_idx, op) in adapted.inst_operands(inst).enumerate() {
-                            if let Reg::Virtual(v) = op.reg {
-                                if v == vreg {
-                                    if let Some(preg) = allocation.get(inst, op_idx) {
-                                        home = Some(preg);
-                                        break 'outer;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                if let Some(home_preg) = home {
-                    if home_preg != arg_preg {
-                        allocation.moves.push(InsertedMove {
-                            at: MovePosition::Before(first_inst),
-                            from: MoveOperand::Reg(arg_preg),
-                            to: MoveOperand::Reg(home_preg),
-                            class: GP,
-                        });
-                    }
+            if let Some(home) = allocation.vreg_homes.get(&vreg) {
+                let from = MoveOperand::Reg(arg_preg);
+                if from != *home {
+                    allocation.moves.push(InsertedMove {
+                        at: MovePosition::Before(first_inst),
+                        from,
+                        to: *home,
+                        class: GP,
+                    });
                 }
             }
         }
