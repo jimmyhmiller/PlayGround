@@ -1136,6 +1136,93 @@ impl DynFunc {
     }
 }
 
+// ─── Inline cache ─────────────────────────────────────────────────
+
+/// A per-call-site monomorphic inline cache.
+///
+/// Stores `(guard_key, cached_value)` in a 16-byte stack slot.
+/// On the fast path: load guard, compare with runtime key, return cached value.
+/// On miss: call a slow path to compute the value, update the cache.
+///
+/// ## Example
+///
+/// ```ignore
+/// // At each property-access call site:
+/// let ic = f.inline_cache();
+/// let class_ptr = /* load class from instance */;
+/// let method = ic.get(f, class_ptr, |f| {
+///     // slow path: full method lookup
+///     f.fb.call(lookup_method_extern, &[obj, name_id])
+/// });
+/// ```
+///
+/// The first call always misses (guard initialized to 0).
+/// Subsequent calls with the same guard key hit the cache — one load + one compare.
+#[derive(Clone, Copy)]
+pub struct InlineCache {
+    slot: StackSlot,
+}
+
+impl DynFunc {
+    /// Allocate a new inline cache for this call site.
+    /// Each call to `inline_cache()` creates a separate cache.
+    pub fn inline_cache(&mut self) -> InlineCache {
+        // 16 bytes: [guard_key: u64, cached_value: u64]
+        let slot = self.fb.create_stack_slot(16, false);
+        // Initialize guard to 0 (guaranteed miss on first access since
+        // no valid guard key is 0 for heap pointers or NanBox values)
+        let addr = self.fb.stack_addr(slot);
+        let zero = self.fb.iconst(Type::I64, 0);
+        self.fb.store(zero, addr, 0);
+        self.fb.store(zero, addr, 8);
+        InlineCache { slot }
+    }
+}
+
+impl InlineCache {
+    /// Look up the cached value, or compute it via the slow path.
+    ///
+    /// - `guard_key`: the runtime key to check (e.g., class pointer, type info pointer).
+    ///   Must be a stable identifier — same key means same result.
+    /// - `slow_path`: called on cache miss. Must return the value to cache.
+    ///   Receives `&mut DynFunc` so it can emit IR (extern calls, etc.).
+    ///
+    /// Returns the cached (or freshly computed) value.
+    pub fn get(
+        &self,
+        f: &mut DynFunc,
+        guard_key: Value,
+        slow_path: impl FnOnce(&mut DynFunc) -> Value,
+    ) -> Value {
+        let merge_bb = f.fb.create_block(&[Type::I64]);
+        let miss_bb = f.fb.create_block(&[]);
+
+        // Fast path: load cached guard, compare
+        let addr = f.fb.stack_addr(self.slot);
+        let cached_guard = f.fb.load(Type::I64, addr, 0);
+        let hit = f.fb.icmp(CmpOp::Eq, cached_guard, guard_key);
+        let hit_bb = f.fb.create_block(&[]);
+        f.fb.br_if(hit, hit_bb, &[], miss_bb, &[]);
+
+        // Cache hit: return cached value
+        f.fb.switch_to_block(hit_bb);
+        let cached_val = f.fb.load(Type::I64, addr, 8);
+        f.fb.jump(merge_bb, &[cached_val]);
+
+        // Cache miss: call slow path, update cache
+        f.fb.switch_to_block(miss_bb);
+        let computed = slow_path(f);
+        // Update cache: store guard + value
+        let addr2 = f.fb.stack_addr(self.slot);
+        f.fb.store(guard_key, addr2, 0);
+        f.fb.store(computed, addr2, 8);
+        f.fb.jump(merge_bb, &[computed]);
+
+        f.fb.switch_to_block(merge_bb);
+        f.fb.block_param(merge_bb, 0)
+    }
+}
+
 #[derive(Clone, Copy)]
 enum FloatBinOp {
     Add,

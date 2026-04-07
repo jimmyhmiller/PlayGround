@@ -386,6 +386,16 @@ fn build_allocation<F: Function, T: Target>(
                         let final_preg = resolve_constraint(
                             operand, *preg, &op_assignments,
                         );
+                        // If the constraint requires a different register than
+                        // the interval's home, insert a move before the instruction.
+                        if final_preg != *preg {
+                            alloc.moves.push(InsertedMove {
+                                at: MovePosition::Before(inst),
+                                from: MoveOperand::Reg(*preg),
+                                to: MoveOperand::Reg(final_preg),
+                                class: func.vreg_class(vreg),
+                            });
+                        }
                         op_assignments[op_idx] = Some(final_preg);
                         operand_pregs.insert(final_preg);
                     }
@@ -404,6 +414,16 @@ fn build_allocation<F: Function, T: Target>(
                         let final_preg = resolve_constraint(
                             operand, *preg, &op_assignments,
                         );
+                        // If the constraint requires a different register than
+                        // the interval's home, insert a move after the instruction.
+                        if final_preg != *preg {
+                            alloc.moves.push(InsertedMove {
+                                at: MovePosition::After(inst),
+                                from: MoveOperand::Reg(final_preg),
+                                to: MoveOperand::Reg(*preg),
+                                class: func.vreg_class(vreg),
+                            });
+                        }
                         op_assignments[op_idx] = Some(final_preg);
                         operand_pregs.insert(final_preg);
                     }
@@ -578,6 +598,48 @@ fn build_allocation<F: Function, T: Target>(
             for (op_idx, _operand) in operands.iter().enumerate() {
                 if let Some(preg) = op_assignments[op_idx] {
                     alloc.set(inst, op_idx, preg);
+                }
+            }
+        }
+    }
+
+    // ── Block-edge moves (phi resolution) ─────────────────────
+    //
+    // For each branch, match the branch_args (source vregs) to the
+    // successor's block_params (destination vregs). If their allocated
+    // registers differ, insert a BlockEdge move.
+    for block in func.blocks() {
+        for inst in func.block_insts(block) {
+            if !func.is_branch(inst) {
+                continue;
+            }
+            let succs: Vec<BlockId> = func.block_succs(block).collect();
+            for (succ_idx, &succ) in succs.iter().enumerate() {
+                let args = func.branch_args(inst, succ_idx);
+                let params = func.block_params(succ);
+                for (arg_vreg, param_vreg) in args.iter().zip(params.iter()) {
+                    let arg_loc = alloc_result.get(arg_vreg);
+                    let param_loc = alloc_result.get(param_vreg);
+
+                    let from = match arg_loc {
+                        Some(IntervalAlloc::Reg(preg)) => MoveOperand::Reg(*preg),
+                        Some(IntervalAlloc::Spilled(slot)) => MoveOperand::SpillSlot(*slot),
+                        None => continue,
+                    };
+                    let to = match param_loc {
+                        Some(IntervalAlloc::Reg(preg)) => MoveOperand::Reg(*preg),
+                        Some(IntervalAlloc::Spilled(slot)) => MoveOperand::SpillSlot(*slot),
+                        None => continue,
+                    };
+
+                    if from != to {
+                        alloc.moves.push(InsertedMove {
+                            at: MovePosition::BlockEdge { from: block, to: succ },
+                            from,
+                            to,
+                            class: func.vreg_class(*arg_vreg),
+                        });
+                    }
                 }
             }
         }

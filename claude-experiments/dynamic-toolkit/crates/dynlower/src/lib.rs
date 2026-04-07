@@ -6,6 +6,8 @@ use std::sync::RwLock;
 
 mod backend;
 pub mod regalloc;
+pub mod regalloc_bridge;
+pub mod batch_lower;
 
 use backend::{
     Arm64Backend, LoweringBackend, MachineFpBinOp, MachineGpBinOp, MachineLocation,
@@ -749,6 +751,99 @@ impl JitModule {
             externs,
             Some(handler as u64),
         )
+    }
+
+    /// Compile a module using the **batch** register allocator from the
+    /// `regalloc` crate. This uses a proper SSA-aware linear scan with
+    /// callee-saved registers, producing better code for large functions.
+    ///
+    /// Note: safepoints / frame-reify / continuations are not yet supported
+    /// in the batch path — use this for benchmarking and non-GC workloads,
+    /// or workloads where GC doesn't trigger during JIT execution.
+    pub fn compile_batch<L: dynvalue::TagScheme>(
+        module: &Module,
+        externs: &[*const u8],
+    ) -> Self {
+        use batch_lower::{compile_function_batch, TagConfig};
+
+        let tags = TagConfig {
+            has_unboxed_float: L::HAS_UNBOXED_FLOAT,
+            payload_bits: L::PAYLOAD_BITS as u8,
+            tag_count: L::TAG_COUNT,
+            encode_tagged: L::encode_tagged,
+        };
+
+        // 1. Build call table
+        let mut call_table: Vec<*const u8> = Vec::with_capacity(module.func_table.len());
+        let mut extern_ptrs: Vec<*const u8> = Vec::new();
+        for def in &module.func_table {
+            match def {
+                FuncDef::Extern(_) => {
+                    let ptr = externs[extern_ptrs.len()];
+                    extern_ptrs.push(ptr);
+                    call_table.push(ptr);
+                }
+                FuncDef::Internal(_) => {
+                    call_table.push(std::ptr::null());
+                }
+            }
+        }
+        let call_table_base = call_table.as_ptr() as u64;
+
+        // 2. Compile each function with the batch allocator
+        let mut memory = PagedCodeMemory::new();
+        let mut entry_offsets: Vec<usize> = Vec::new();
+
+        for (_func_idx, func) in module.functions.iter().enumerate() {
+            let (code, _frame_size) = compile_function_batch(
+                func, &extern_ptrs, call_table_base, TagConfig {
+                    has_unboxed_float: L::HAS_UNBOXED_FLOAT,
+                    payload_bits: L::PAYLOAD_BITS as u8,
+                    tag_count: L::TAG_COUNT,
+                    encode_tagged: L::encode_tagged,
+                },
+            ).unwrap_or_else(|e| panic!("batch compile failed: {e}"));
+            let offset = memory.push(&code);
+            entry_offsets.push(offset);
+        }
+
+        memory.finalize();
+
+        // 3. Register code ranges
+        let base = memory.base_ptr() as usize;
+        let total_len = memory.len();
+        let mut perf_entries: Vec<(usize, usize, &str)> = Vec::new();
+        for (i, &offset) in entry_offsets.iter().enumerate() {
+            let code_start = base + offset;
+            let code_end = if i + 1 < entry_offsets.len() {
+                base + entry_offsets[i + 1]
+            } else {
+                base + total_len
+            };
+            register_jit_code(code_start, code_end, 0);
+            perf_entries.push((code_start, code_end - code_start, &module.functions[i].name));
+        }
+        write_perf_map_entries(&perf_entries);
+
+        // 4. Patch internal function pointers
+        let base = memory.base_ptr();
+        for (ft_idx, def) in module.func_table.iter().enumerate() {
+            if let FuncDef::Internal(func_idx) = def {
+                let ptr = unsafe { base.add(entry_offsets[*func_idx]) };
+                call_table[ft_idx] = ptr;
+            }
+        }
+
+        JitModule {
+            memory,
+            call_table,
+            function_entry_offsets: entry_offsets,
+            function_suspend_records: module.functions.iter().map(|_| vec![]).collect(),
+            function_safepoints: module.functions.iter().map(|_| vec![]).collect(),
+            function_frame_reify_records: module.functions.iter().map(|_| vec![]).collect(),
+            handler_payload_kind: SafepointHandlerPayloadKind::FrameSize,
+            max_deopt_live_values: 0,
+        }
     }
 
     pub fn compile_with_config<Cfg: CodegenConfig>(module: &Module, externs: &[*const u8]) -> Self

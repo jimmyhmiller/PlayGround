@@ -1660,11 +1660,19 @@ impl VM {
         use dynruntime::{FrameScanJitTransport, JitSafepointSession, active_jit_safepoint_handler};
 
         let externs = build_jit_externs(module);
-        // Compile with GC safepoint handler — at each allocation point,
-        // the JIT spills live values and calls the handler so the GC can scan them.
-        let jit = JitModule::compile_with_gc::<NanBox>(
-            module, &externs, active_jit_safepoint_handler,
-        );
+
+        let use_batch = std::env::var("LOX_BATCH_JIT").is_ok();
+        let jit = if use_batch {
+            // Batch register allocator: SSA-aware linear scan with callee-saved regs.
+            // No GC safepoints in this path — only safe for benchmarks that don't
+            // trigger GC during JIT execution.
+            JitModule::compile_batch::<NanBox>(module, &externs)
+        } else {
+            // Streaming allocator with GC safepoint handler.
+            JitModule::compile_with_gc::<NanBox>(
+                module, &externs, active_jit_safepoint_handler,
+            )
+        };
 
         self.jit_call_table = jit.call_table().to_vec();
 

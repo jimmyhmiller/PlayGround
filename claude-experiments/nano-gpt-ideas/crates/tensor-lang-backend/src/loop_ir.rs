@@ -967,7 +967,7 @@ pub fn unfuse_matmul_bodies(stmts: &mut Vec<Stmt>) {
     }
 }
 
-fn compute_dim_dep(body: &[Inst], dim: usize) -> Vec<bool> {
+pub fn compute_dim_dep(body: &[Inst], dim: usize) -> Vec<bool> {
     let mut dep = vec![false; body.len()];
     for (j, inst) in body.iter().enumerate() {
         dep[j] = match inst {
