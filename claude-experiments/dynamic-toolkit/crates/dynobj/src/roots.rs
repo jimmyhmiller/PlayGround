@@ -1,6 +1,6 @@
 use std::cell::Cell;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize, Ordering};
 
 /// Trait for types that can enumerate GC root references.
 ///
@@ -385,67 +385,481 @@ impl RootSource for RootSet {
 
 /// Thread-safe set of GC roots for globals and shared constants.
 ///
-/// Uses `AtomicU64` for slots (lock-free read/write/scan) and a
-/// `Mutex` to synchronize growth (`add`). Safe to share across
-/// threads via `Arc` or `&'static`.
+/// Lock-free reads via RCU (Read-Copy-Update) pattern:
+/// - `get`/`set` load a raw pointer (Relaxed) and do an atomic
+///   load/store on the slot. No mutex, no RwLock — just pointer
+///   arithmetic + atomic access (~1-2ns).
+/// - `add` takes a mutex to grow the backing Vec, then publishes
+///   the (possibly new) buffer pointer with Release ordering.
+/// - `scan_roots` iterates slots during STW — no concurrent mutation.
 ///
-/// The GC scans this during STW, so atomic ordering on individual
-/// slot access can be `Relaxed` — the safepoint handshake provides
-/// the necessary happens-before.
+/// Safety relies on the single-threaded mutator invariant: `add()`
+/// and `get()`/`set()` are never called concurrently. The GC only
+/// calls `scan_roots` during STW pauses. See per-method safety notes.
 pub struct AtomicRootSet {
-    slots: Mutex<Vec<AtomicU64>>,
+    /// Raw pointer to the Vec's backing buffer. Hot-path reads
+    /// go through this pointer — no lock needed.
+    ptr: AtomicPtr<AtomicU64>,
+
+    /// Current number of live slots.
+    len: AtomicUsize,
+
+    /// Mutex protects the Vec (which owns the allocation) during
+    /// growth. Never touched on the hot path (get/set).
+    backing: Mutex<Vec<AtomicU64>>,
 }
 
-// AtomicRootSet is Send + Sync by construction:
-// - Vec<AtomicU64> behind Mutex for growth
-// - AtomicU64 for individual slot access
+// AtomicRootSet is Send + Sync:
+// - AtomicPtr/AtomicUsize are Send+Sync
+// - Mutex<Vec<AtomicU64>> is Send+Sync
+// - Raw pointer dereferences in get/set are safe due to
+//   single-threaded mutator invariant (no concurrent add+get)
 unsafe impl Sync for AtomicRootSet {}
 
 impl AtomicRootSet {
     pub fn new() -> Self {
         AtomicRootSet {
-            slots: Mutex::new(Vec::new()),
+            ptr: AtomicPtr::new(core::ptr::null_mut()),
+            len: AtomicUsize::new(0),
+            backing: Mutex::new(Vec::new()),
         }
     }
 
     /// Add a root value, returning its index for later access.
     ///
-    /// Takes the lock to grow the vector. The returned index
-    /// can be used with `get`/`set` without locking.
+    /// Takes the mutex to grow the vector, then publishes the
+    /// (possibly reallocated) buffer pointer with Release ordering.
+    ///
+    /// # Safety invariant
+    /// Must not be called concurrently with `get`/`set` on the same
+    /// indices that might be affected by reallocation. In practice,
+    /// the single-threaded mutator guarantees this.
     pub fn add(&self, bits: u64) -> usize {
-        let mut slots = self.slots.lock().unwrap();
-        let index = slots.len();
-        slots.push(AtomicU64::new(bits));
+        let mut vec = self.backing.lock().unwrap();
+        let index = vec.len();
+        vec.push(AtomicU64::new(bits));
+        // Publish the (possibly new) buffer pointer and length.
+        // Release ordering ensures the new slot's data is visible
+        // before any reader sees the updated ptr/len.
+        self.ptr.store(vec.as_mut_ptr(), Ordering::Release);
+        self.len.store(vec.len(), Ordering::Release);
         index
     }
 
-    /// Read a root's current value (lock-free).
+    /// Read a root's current value. **Lock-free.**
+    ///
+    /// Two instructions on the hot path: load ptr, indexed atomic load.
+    #[inline]
     pub fn get(&self, index: usize) -> u64 {
-        let slots = self.slots.lock().unwrap();
-        slots[index].load(Ordering::Relaxed)
+        let ptr = self.ptr.load(Ordering::Relaxed);
+        debug_assert!(!ptr.is_null(), "AtomicRootSet::get on empty set");
+        debug_assert!(
+            index < self.len.load(Ordering::Relaxed),
+            "AtomicRootSet::get index {index} out of bounds"
+        );
+        unsafe { (*ptr.add(index)).load(Ordering::Relaxed) }
     }
 
-    /// Update a root's value (lock-free for the atomic store,
-    /// but takes lock to access the vec).
+    /// Update a root's value. **Lock-free.**
+    #[inline]
     pub fn set(&self, index: usize, bits: u64) {
-        let slots = self.slots.lock().unwrap();
-        slots[index].store(bits, Ordering::Relaxed);
+        let ptr = self.ptr.load(Ordering::Relaxed);
+        debug_assert!(!ptr.is_null(), "AtomicRootSet::set on empty set");
+        debug_assert!(
+            index < self.len.load(Ordering::Relaxed),
+            "AtomicRootSet::set index {index} out of bounds"
+        );
+        unsafe { (*ptr.add(index)).store(bits, Ordering::Relaxed) }
     }
 
     pub fn len(&self) -> usize {
-        self.slots.lock().unwrap().len()
+        self.len.load(Ordering::Relaxed)
     }
 
     pub fn is_empty(&self) -> bool {
-        self.slots.lock().unwrap().is_empty()
+        self.len() == 0
     }
 }
 
 impl RootSource for AtomicRootSet {
     fn scan_roots(&self, visitor: &mut dyn FnMut(*mut u64)) {
-        let slots = self.slots.lock().unwrap();
-        for atomic in slots.iter() {
-            visitor(atomic.as_ptr() as *mut u64);
+        let ptr = self.ptr.load(Ordering::Relaxed);
+        let len = self.len.load(Ordering::Relaxed);
+        for i in 0..len {
+            unsafe {
+                visitor((*ptr.add(i)).as_ptr());
+            }
         }
+    }
+}
+
+// ─── AtomicRootSet tests ───────────────────────────────────────────
+
+#[cfg(test)]
+mod atomic_root_set_tests {
+    use super::*;
+    use std::sync::Arc;
+    use std::sync::Barrier;
+    use std::thread;
+
+    // --- Basic functionality ---
+
+    #[test]
+    fn add_and_get() {
+        let rs = AtomicRootSet::new();
+        assert!(rs.is_empty());
+        assert_eq!(rs.len(), 0);
+
+        let i0 = rs.add(100);
+        let i1 = rs.add(200);
+        let i2 = rs.add(300);
+
+        assert_eq!(i0, 0);
+        assert_eq!(i1, 1);
+        assert_eq!(i2, 2);
+        assert_eq!(rs.len(), 3);
+        assert!(!rs.is_empty());
+
+        assert_eq!(rs.get(0), 100);
+        assert_eq!(rs.get(1), 200);
+        assert_eq!(rs.get(2), 300);
+    }
+
+    #[test]
+    fn set_updates_value() {
+        let rs = AtomicRootSet::new();
+        rs.add(42);
+        assert_eq!(rs.get(0), 42);
+
+        rs.set(0, 99);
+        assert_eq!(rs.get(0), 99);
+    }
+
+    #[test]
+    fn scan_roots_visits_all_slots() {
+        let rs = AtomicRootSet::new();
+        rs.add(10);
+        rs.add(20);
+        rs.add(30);
+
+        let mut visited = Vec::new();
+        rs.scan_roots(&mut |slot_ptr| {
+            visited.push(unsafe { *slot_ptr });
+        });
+        assert_eq!(visited, vec![10, 20, 30]);
+    }
+
+    #[test]
+    fn scan_roots_can_update_in_place() {
+        let rs = AtomicRootSet::new();
+        rs.add(100);
+        rs.add(200);
+
+        // Simulate GC forwarding: double every root value
+        rs.scan_roots(&mut |slot_ptr| {
+            unsafe {
+                let old = *slot_ptr;
+                *slot_ptr = old * 2;
+            }
+        });
+
+        assert_eq!(rs.get(0), 200);
+        assert_eq!(rs.get(1), 400);
+    }
+
+    #[test]
+    fn many_adds_trigger_reallocation() {
+        let rs = AtomicRootSet::new();
+        for i in 0..1000u64 {
+            rs.add(i * 7);
+        }
+        assert_eq!(rs.len(), 1000);
+        for i in 0..1000u64 {
+            assert_eq!(rs.get(i as usize), i * 7);
+        }
+    }
+
+    // --- Multi-threaded tests ---
+
+    #[test]
+    fn concurrent_readers_no_contention() {
+        // Pre-populate, then spawn many reader threads.
+        // This is the hot-path scenario: many reads, no writes.
+        let rs = Arc::new(AtomicRootSet::new());
+        let n = 100;
+        for i in 0..n {
+            rs.add(i as u64 * 11);
+        }
+
+        let barrier = Arc::new(Barrier::new(8));
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let rs = Arc::clone(&rs);
+                let barrier = Arc::clone(&barrier);
+                thread::spawn(move || {
+                    barrier.wait();
+                    for _ in 0..100_000 {
+                        for i in 0..n {
+                            assert_eq!(rs.get(i), i as u64 * 11);
+                        }
+                    }
+                })
+            })
+            .collect();
+
+        for h in handles {
+            h.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn concurrent_readers_and_writer() {
+        // One writer thread does set() on existing slots.
+        // Multiple reader threads do get().
+        // Readers should always see either old or new value, never garbage.
+        let rs = Arc::new(AtomicRootSet::new());
+        let n = 64;
+        for i in 0..n {
+            rs.add(i as u64);
+        }
+
+        let barrier = Arc::new(Barrier::new(5));
+        let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+        // Writer: continuously update slot values
+        let writer = {
+            let rs = Arc::clone(&rs);
+            let barrier = Arc::clone(&barrier);
+            let done = Arc::clone(&done);
+            thread::spawn(move || {
+                barrier.wait();
+                for round in 1u64..=50_000 {
+                    for i in 0..n {
+                        rs.set(i, round * 1000 + i as u64);
+                    }
+                }
+                done.store(true, Ordering::Release);
+            })
+        };
+
+        // Readers: continuously read and verify consistency per-slot
+        let readers: Vec<_> = (0..4)
+            .map(|_| {
+                let rs = Arc::clone(&rs);
+                let barrier = Arc::clone(&barrier);
+                let done = Arc::clone(&done);
+                thread::spawn(move || {
+                    barrier.wait();
+                    let mut reads = 0u64;
+                    while !done.load(Ordering::Acquire) {
+                        for i in 0..n {
+                            let val = rs.get(i);
+                            // Value is either initial (i) or round*1000+i
+                            if val >= 1000 {
+                                let slot = val % 1000;
+                                assert_eq!(
+                                    slot, i as u64,
+                                    "corrupted read: slot {i} had value {val}"
+                                );
+                            } else {
+                                assert_eq!(
+                                    val, i as u64,
+                                    "corrupted read: slot {i} had value {val}"
+                                );
+                            }
+                            reads += 1;
+                        }
+                    }
+                    reads
+                })
+            })
+            .collect();
+
+        writer.join().unwrap();
+        let total_reads: u64 = readers.into_iter().map(|h| h.join().unwrap()).sum();
+        assert!(
+            total_reads > 0,
+            "readers should have done work"
+        );
+    }
+
+    #[test]
+    fn concurrent_add_from_single_thread_then_read_from_many() {
+        // Simulates init phase (single-threaded add) followed by
+        // multi-threaded read phase (JIT execution).
+        let rs = Arc::new(AtomicRootSet::new());
+
+        // Init phase: add a bunch of roots
+        for i in 0..500u64 {
+            rs.add(i * 3 + 7);
+        }
+
+        // Read phase: many threads verify all values
+        let barrier = Arc::new(Barrier::new(8));
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let rs = Arc::clone(&rs);
+                let barrier = Arc::clone(&barrier);
+                thread::spawn(move || {
+                    barrier.wait();
+                    for _ in 0..10_000 {
+                        for i in 0..500usize {
+                            assert_eq!(rs.get(i), i as u64 * 3 + 7);
+                        }
+                    }
+                })
+            })
+            .collect();
+
+        for h in handles {
+            h.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn simulated_gc_scan_while_readers_active() {
+        // Simulates the GC scanning pattern: one thread does scan_roots
+        // (forwarding pointers) while other threads read via get().
+        // In production this happens during STW, but we test that
+        // the atomic operations are correct even without STW.
+        let rs = Arc::new(AtomicRootSet::new());
+        let n = 32;
+        for i in 0..n {
+            rs.add(i as u64 + 1); // values 1..=32
+        }
+
+        let barrier = Arc::new(Barrier::new(5));
+        let gc_done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+        // GC thread: repeatedly scan and "forward" (add 1000 to each value)
+        let gc_thread = {
+            let rs = Arc::clone(&rs);
+            let barrier = Arc::clone(&barrier);
+            let gc_done = Arc::clone(&gc_done);
+            thread::spawn(move || {
+                barrier.wait();
+                for _cycle in 0..100 {
+                    rs.scan_roots(&mut |slot_ptr| {
+                        unsafe {
+                            // Atomic store through the raw pointer
+                            let atomic = slot_ptr as *const AtomicU64;
+                            let old = (*atomic).load(Ordering::Relaxed);
+                            (*atomic).store(old + 1000, Ordering::Relaxed);
+                        }
+                    });
+                }
+                gc_done.store(true, Ordering::Release);
+            })
+        };
+
+        // Reader threads: read values, verify they're sensible
+        let readers: Vec<_> = (0..4)
+            .map(|_| {
+                let rs = Arc::clone(&rs);
+                let barrier = Arc::clone(&barrier);
+                let gc_done = Arc::clone(&gc_done);
+                thread::spawn(move || {
+                    barrier.wait();
+                    while !gc_done.load(Ordering::Acquire) {
+                        for i in 0..n {
+                            let val = rs.get(i);
+                            // Value should be (i+1) + k*1000 for some k >= 0
+                            let base = val % 1000;
+                            assert_eq!(
+                                base,
+                                i as u64 + 1,
+                                "corrupted: slot {i} = {val}, base = {base}"
+                            );
+                        }
+                    }
+                })
+            })
+            .collect();
+
+        gc_thread.join().unwrap();
+        for h in readers {
+            h.join().unwrap();
+        }
+
+        // After 100 GC cycles, each value should have been incremented
+        // by 100*1000 = 100000
+        for i in 0..n {
+            assert_eq!(rs.get(i), i as u64 + 1 + 100_000);
+        }
+    }
+
+    #[test]
+    fn stress_add_then_concurrent_get_set() {
+        // Stress test: large root set, concurrent get/set from many threads
+        let rs = Arc::new(AtomicRootSet::new());
+        let n = 2048;
+        for i in 0..n {
+            rs.add(i as u64);
+        }
+
+        let barrier = Arc::new(Barrier::new(16));
+        let handles: Vec<_> = (0..16)
+            .map(|tid| {
+                let rs = Arc::clone(&rs);
+                let barrier = Arc::clone(&barrier);
+                thread::spawn(move || {
+                    barrier.wait();
+                    // Each thread works on its own slice of indices
+                    let start = (tid * n) / 16;
+                    let end = ((tid + 1) * n) / 16;
+                    for _ in 0..10_000 {
+                        for i in start..end {
+                            let val = rs.get(i);
+                            rs.set(i, val.wrapping_add(1));
+                        }
+                    }
+                })
+            })
+            .collect();
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        // Each slot was incremented 10_000 times by exactly one thread
+        for i in 0..n {
+            assert_eq!(rs.get(i), i as u64 + 10_000);
+        }
+    }
+
+    #[test]
+    fn scan_roots_empty_set() {
+        let rs = AtomicRootSet::new();
+        let mut count = 0;
+        rs.scan_roots(&mut |_| count += 1);
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn add_interleaved_with_get_set_single_thread() {
+        // Simulates the define_global pattern: add() during execution,
+        // interleaved with get()/set() on existing indices.
+        let rs = AtomicRootSet::new();
+
+        let i0 = rs.add(10);
+        assert_eq!(rs.get(i0), 10);
+        rs.set(i0, 11);
+        assert_eq!(rs.get(i0), 11);
+
+        let i1 = rs.add(20);
+        // Old slot still accessible after growth
+        assert_eq!(rs.get(i0), 11);
+        assert_eq!(rs.get(i1), 20);
+
+        // Add many more to force reallocation
+        for i in 0..100 {
+            rs.add(i * 5);
+        }
+        // Original slots still correct
+        assert_eq!(rs.get(i0), 11);
+        assert_eq!(rs.get(i1), 20);
+        // New slots correct
+        assert_eq!(rs.get(2), 0);
+        assert_eq!(rs.get(50), 48 * 5);
     }
 }

@@ -449,6 +449,12 @@ impl Compiler {
                 a_reshaped.push(k.clone());
                 a_reshaped.push(Dim::Lit(1));
 
+                // A: [batch_a..., M, K] -> [batch_a..., M, K, 1]
+                let mut a_reshaped: Vec<Dim> = batch_a.to_vec();
+                a_reshaped.push(m.clone());
+                a_reshaped.push(k.clone());
+                a_reshaped.push(Dim::Lit(1));
+
                 // B: [batch_b..., K, N] -> [batch_b..., 1, K, N]
                 let mut b_reshaped: Vec<Dim> = batch_b.to_vec();
                 b_reshaped.push(Dim::Lit(1));

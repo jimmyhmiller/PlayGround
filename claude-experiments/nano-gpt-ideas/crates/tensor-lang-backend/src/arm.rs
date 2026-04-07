@@ -2457,6 +2457,73 @@ fn emit_matmul_mr8(
     emit_dim_to_reg(e, &out_row_stride, ctx, X9);
     store_to_sp_large(e, X9, out_row_stride_slot);
 
+    // If B has non-unit stride on N (i.e., B is in [N,K] layout after permute),
+    // transpose it to [K,N] layout for contiguous Q-loads in the micro-kernel.
+    // The transposed buffer is heap-allocated (one-time cost per matmul call).
+    let (effective_b_ptr_slot, effective_b_k_stride, effective_b_n_stride) = if b_n_stride > 1 {
+        let bt_slot = ctx.alloc_slot();
+        // Allocate K*N*4 bytes on heap (bump X20)
+        load_from_sp_large(e, X9, n_size_slot);
+        load_from_sp_large(e, X10, k_size_slot);
+        e.mul_reg(X11, X9, X10);
+        e.lsl_imm(X11, X11, 2);
+        store_to_sp_large(e, X20, bt_slot);
+        e.add_reg(X20, X20, X11);
+
+        // Transpose: B_t[k, n] = B[n * b_n_stride + k * b_k_stride]
+        // B_t stored as [K, N] with stride N on K, stride 1 on N.
+        load_buf_ptr(e, ctx, b_buf, X3); // src
+        load_from_sp_large(e, X4, bt_slot); // dst
+        load_from_sp_large(e, X5, k_size_slot);
+        load_from_sp_large(e, X6, n_size_slot);
+
+        e.mov_reg(X7, XZR); // n = 0
+        let n_loop = e.alloc_label();
+        let n_end = e.alloc_label();
+        e.bind_label(n_loop);
+        e.cmp_reg(X7, X6);
+        e.b_cond_label(COND_GE, n_end);
+
+        e.mov_reg(X9, XZR); // k = 0
+        let k_loop = e.alloc_label();
+        let k_end = e.alloc_label();
+        e.bind_label(k_loop);
+        e.cmp_reg(X9, X5);
+        e.b_cond_label(COND_GE, k_end);
+
+        // src_idx = n * b_n_stride + k * b_k_stride
+        e.mov_imm32(X10, b_n_stride as u32);
+        e.mul_reg(X11, X7, X10);
+        e.mov_imm32(X10, b_k_stride as u32);
+        e.madd(X11, X9, X10, X11);
+        e.ldr_s_reg_scaled(0, X3, X11);
+
+        // dst_idx = k * N + n
+        e.madd(X11, X9, X6, X7);
+        e.str_s_reg_scaled(0, X4, X11);
+
+        e.add_imm(X9, X9, 1);
+        e.b_label(k_loop);
+        e.bind_label(k_end);
+
+        e.add_imm(X7, X7, 1);
+        e.b_label(n_loop);
+        e.bind_label(n_end);
+
+        // After transpose: effective B at bt_slot, k_stride=N (runtime), n_stride=1
+        // Store effective b_k_stride = N into a slot
+        let bks_slot = ctx.alloc_slot();
+        load_from_sp_large(e, X9, n_size_slot);
+        store_to_sp_large(e, X9, bks_slot);
+        (bt_slot, bks_slot, 1usize)
+    } else {
+        let bks_slot = ctx.alloc_slot();
+        e.mov_imm64(X9, b_k_stride as u64);
+        store_to_sp_large(e, X9, bks_slot);
+        (b_ptr_slot, bks_slot, b_n_stride)
+    };
+    let effective_b_k_stride_slot = effective_b_k_stride; // rename for clarity
+
     // Build in MachIR
     let mut mb = MachBuilder::new();
 
@@ -2520,13 +2587,12 @@ fn emit_matmul_mr8(
     let a_row_stride_bytes = mb.new_gp();
     mb.push(MachInst::LslImm { dst: a_row_stride_bytes, src: a_row_stride_v, shift: 2 });
 
-    // B base for this n_blk: b_col_ptr = b_ptr + n_blk * b_n_stride * 4
-    // (B has no batch dims — it's the weight matrix, shared across all M rows)
-    let b_ptr = sp_load!(mb, b_ptr_slot);
-    let b_n_stride_v = mb.new_gp();
-    mb.push(MachInst::MovImm64 { dst: b_n_stride_v, val: b_n_stride as u64 });
+    // B base: use effective (possibly transposed) pointer and strides
+    let b_ptr = sp_load!(mb, effective_b_ptr_slot);
+    let eff_bn = mb.new_gp();
+    mb.push(MachInst::MovImm64 { dst: eff_bn, val: effective_b_n_stride as u64 });
     let b_col_off = mb.new_gp();
-    mb.push(MachInst::MulReg { dst: b_col_off, lhs: n_blk, rhs: b_n_stride_v });
+    mb.push(MachInst::MulReg { dst: b_col_off, lhs: n_blk, rhs: eff_bn });
     let b_col_byte = mb.new_gp();
     mb.push(MachInst::LslImm { dst: b_col_byte, src: b_col_off, shift: 2 });
     let b_col_ptr = mb.new_gp();
@@ -2544,7 +2610,25 @@ fn emit_matmul_mr8(
         accs.push(row_accs);
     }
 
-    // K loop
+    // K loop with pointer incrementing (no multiply per iteration)
+    //
+    // a_ptr_k starts at A[mi, 0], incremented by a_k_stride*4 each K step.
+    // b_ptr_k starts at B[0, n_blk], incremented by b_k_stride*4 each K step.
+    // A rows at offset r*a_row_stride_bytes from a_ptr_k (constant offsets).
+    let a_ptr_k = mb.new_gp();
+    mb.push(MachInst::MovReg { dst: a_ptr_k, src: a_base });
+    let b_ptr_k = mb.new_gp();
+    mb.push(MachInst::MovReg { dst: b_ptr_k, src: b_col_ptr });
+
+    // Stride increments in bytes (computed once before the loop)
+    let a_k_inc = mb.new_gp();
+    mb.push(MachInst::MovImm64 { dst: a_k_inc, val: (a_k_stride * 4) as u64 });
+    let b_k_inc = mb.new_gp();
+    {
+        let bks = sp_load!(mb, effective_b_k_stride_slot);
+        mb.push(MachInst::LslImm { dst: b_k_inc, src: bks, shift: 2 }); // b_k_stride * 4
+    }
+
     let ki = mb.new_gp();
     mb.push(MachInst::MovImm64 { dst: ki, val: 0 });
     let ki_start = e.alloc_label();
@@ -2553,54 +2637,39 @@ fn emit_matmul_mr8(
     mb.push(MachInst::CmpReg { lhs: ki, rhs: k_size });
     mb.push(MachInst::BCond { cond: COND_GE, label: ki_end });
 
-    // Load 2 B vectors: B[ki, n_blk..n_blk+8]
-    let b_k_stride_v = mb.new_gp();
-    mb.push(MachInst::MovImm64 { dst: b_k_stride_v, val: b_k_stride as u64 });
-    let b_k_off = mb.new_gp();
-    mb.push(MachInst::MulReg { dst: b_k_off, lhs: ki, rhs: b_k_stride_v });
-    let b_k_byte = mb.new_gp();
-    mb.push(MachInst::LslImm { dst: b_k_byte, src: b_k_off, shift: 2 });
-    let b_addr = mb.new_gp();
-    mb.push(MachInst::AddReg { dst: b_addr, lhs: b_col_ptr, rhs: b_k_byte });
-
+    // Load 2 B vectors from b_ptr_k
+    // After the transpose (if b_n_stride > 1), B_t is in [K,N]-like layout
+    // so b_ptr_k points to contiguous N values.
     let b0 = mb.new_vec();
-    mb.push(MachInst::LdrQImm { dst: b0, base: b_addr, imm: 0 });
+    mb.push(MachInst::LdrQImm { dst: b0, base: b_ptr_k, imm: 0 });
     let b1 = mb.new_vec();
-    mb.push(MachInst::LdrQImm { dst: b1, base: b_addr, imm: 16 });
+    mb.push(MachInst::LdrQImm { dst: b1, base: b_ptr_k, imm: 16 });
 
     // For each of MR=8 rows: load A scalar, broadcast, 2 FMLA
-    // Compute A element offset: ki * a_k_stride (shared across rows)
-    let a_k_stride_v = mb.new_gp();
-    mb.push(MachInst::MovImm64 { dst: a_k_stride_v, val: a_k_stride as u64 });
-    let a_k_off = mb.new_gp();
-    mb.push(MachInst::MulReg { dst: a_k_off, lhs: ki, rhs: a_k_stride_v });
-    let a_k_byte = mb.new_gp();
-    mb.push(MachInst::LslImm { dst: a_k_byte, src: a_k_off, shift: 2 });
-    // a_k_ptr = a_base + ki * a_k_stride * 4 (points to A[mi, ki])
-    let a_k_ptr = mb.new_gp();
-    mb.push(MachInst::AddReg { dst: a_k_ptr, lhs: a_base, rhs: a_k_byte });
-
+    // A[mi+r, ki] is at a_ptr_k + r * a_row_stride_bytes (constant offset per r)
     for r in 0..MR {
-        // A[mi+r, ki] is at a_k_ptr + r * a_row_stride_bytes
-        let a_addr = if r == 0 {
-            a_k_ptr
-        } else {
-            let addr = mb.new_gp();
-            let r_off = mb.new_gp();
-            mb.push(MachInst::MovImm64 { dst: r_off, val: (r as u64) });
-            mb.push(MachInst::Madd { dst: addr, mul_lhs: r_off, mul_rhs: a_row_stride_bytes, add: a_k_ptr });
-            addr
-        };
         let a_scalar = mb.new_fp();
-        mb.push(MachInst::LdrSImm { dst: a_scalar, base: a_addr, imm: 0 });
-        let a_bits = mb.new_gp();
-        mb.push(MachInst::FmovWFromS { dst_gp: a_bits, src_fp: a_scalar });
+        let imm_offset = (r * a_row_stride * 4) as u32;
+        if imm_offset % 4 == 0 && imm_offset / 4 < 4096 {
+            mb.push(MachInst::LdrSImm { dst: a_scalar, base: a_ptr_k, imm: imm_offset });
+        } else {
+            let off = mb.new_gp();
+            mb.push(MachInst::MovImm64 { dst: off, val: imm_offset as u64 });
+            let addr = mb.new_gp();
+            mb.push(MachInst::AddReg { dst: addr, lhs: a_ptr_k, rhs: off });
+            mb.push(MachInst::LdrSImm { dst: a_scalar, base: addr, imm: 0 });
+        }
+        // Broadcast: DUP Vd.4S, Sn (1 instruction instead of FMOV+DUP)
         let a_bcast = mb.new_vec();
-        mb.push(MachInst::Dup4sGp { dst: a_bcast, src_gp: a_bits });
+        mb.push(MachInst::Dup4sScalar { dst: a_bcast, src: a_scalar });
         // 2 FMLAs
         mb.push(MachInst::Fmla4s { acc: accs[r][0], lhs: a_bcast, rhs: b0 });
         mb.push(MachInst::Fmla4s { acc: accs[r][1], lhs: a_bcast, rhs: b1 });
     }
+
+    // Increment pointers
+    mb.push(MachInst::AddReg { dst: a_ptr_k, lhs: a_ptr_k, rhs: a_k_inc });
+    mb.push(MachInst::AddReg { dst: b_ptr_k, lhs: b_ptr_k, rhs: b_k_inc });
 
     // ki++
     mb.push(MachInst::AddImm { dst: ki, src: ki, imm: 1 });
@@ -2660,17 +2729,18 @@ fn emit_matmul_mr8(
     mb.push(MachInst::CmpReg { lhs: rem_ki, rhs: k_size });
     mb.push(MachInst::BCond { cond: COND_GE, label: rem_ki_end });
 
+    let rem_aks = mb.new_gp();
+    mb.push(MachInst::MovImm64 { dst: rem_aks, val: a_k_stride as u64 });
     let rem_a_off = mb.new_gp();
-    mb.push(MachInst::MulReg { dst: rem_a_off, lhs: rem_ki, rhs: a_k_stride_v });
+    mb.push(MachInst::MulReg { dst: rem_a_off, lhs: rem_ki, rhs: rem_aks });
     let rem_a_s = mb.new_fp();
     mb.push(MachInst::LdrSRegScaled { dst: rem_a_s, base: a_row, offset: rem_a_off });
-    let rem_a_gp = mb.new_gp();
-    mb.push(MachInst::FmovWFromS { dst_gp: rem_a_gp, src_fp: rem_a_s });
     let rem_a_bcast = mb.new_vec();
-    mb.push(MachInst::Dup4sGp { dst: rem_a_bcast, src_gp: rem_a_gp });
+    mb.push(MachInst::Dup4sScalar { dst: rem_a_bcast, src: rem_a_s });
 
+    let rem_bks = sp_load!(mb, effective_b_k_stride_slot);
     let rem_b_off = mb.new_gp();
-    mb.push(MachInst::MulReg { dst: rem_b_off, lhs: rem_ki, rhs: b_k_stride_v });
+    mb.push(MachInst::MulReg { dst: rem_b_off, lhs: rem_ki, rhs: rem_bks });
     let rem_b_byte = mb.new_gp();
     mb.push(MachInst::LslImm { dst: rem_b_byte, src: rem_b_off, shift: 2 });
     let rem_b_addr = mb.new_gp();
@@ -2731,7 +2801,7 @@ fn emit_matmul_mr8(
     mb.push(MachInst::Movi4sZero { dst: s_acc }); // zero scalar via movi (upper bits ignored)
 
     let a_ptr3 = sp_load!(mb, a_ptr_slot);
-    let b_ptr3 = sp_load!(mb, b_ptr_slot);
+    let b_ptr3 = sp_load!(mb, effective_b_ptr_slot);
     let a_row_stride_v3 = mb.new_gp();
     mb.push(MachInst::MovImm64 { dst: a_row_stride_v3, val: a_row_stride as u64 });
     let s_a_row_off = mb.new_gp();
@@ -2742,7 +2812,7 @@ fn emit_matmul_mr8(
     mb.push(MachInst::AddReg { dst: s_a_row, lhs: a_ptr3, rhs: s_a_byte });
 
     let b_n_stride_v2 = mb.new_gp();
-    mb.push(MachInst::MovImm64 { dst: b_n_stride_v2, val: b_n_stride as u64 });
+    mb.push(MachInst::MovImm64 { dst: b_n_stride_v2, val: effective_b_n_stride as u64 });
     let s_b_col_off = mb.new_gp();
     mb.push(MachInst::MulReg { dst: s_b_col_off, lhs: ni, rhs: b_n_stride_v2 });
     let s_b_byte = mb.new_gp();
@@ -2758,12 +2828,15 @@ fn emit_matmul_mr8(
     mb.push(MachInst::CmpReg { lhs: s_ki, rhs: k_size });
     mb.push(MachInst::BCond { cond: COND_GE, label: s_ki_end });
 
+    let s_aks = mb.new_gp();
+    mb.push(MachInst::MovImm64 { dst: s_aks, val: a_k_stride as u64 });
     let s_a_off = mb.new_gp();
-    mb.push(MachInst::MulReg { dst: s_a_off, lhs: s_ki, rhs: a_k_stride_v });
+    mb.push(MachInst::MulReg { dst: s_a_off, lhs: s_ki, rhs: s_aks });
     let s_a_val = mb.new_fp();
     mb.push(MachInst::LdrSRegScaled { dst: s_a_val, base: s_a_row, offset: s_a_off });
+    let s_bks = sp_load!(mb, effective_b_k_stride_slot);
     let s_b_off = mb.new_gp();
-    mb.push(MachInst::MulReg { dst: s_b_off, lhs: s_ki, rhs: b_k_stride_v });
+    mb.push(MachInst::MulReg { dst: s_b_off, lhs: s_ki, rhs: s_bks });
     let s_b_val = mb.new_fp();
     mb.push(MachInst::LdrSRegScaled { dst: s_b_val, base: s_b_col, offset: s_b_off });
     mb.push(MachInst::Fmadd { dst: s_acc, mul_lhs: s_a_val, mul_rhs: s_b_val, add: s_acc });
@@ -3352,26 +3425,29 @@ fn emit_tiled_loop(
 
     // Detect the common matmul pattern: Load, Load, Mul with Sum reduce
     // If matched, use the fully register-allocated fast path
-    let is_matmul_pattern = use_simd
-        && reduce.op == ReduceOp::Sum
+    // Detect matmul pattern: Load, Load, Mul with Sum reduce.
+    // The MR8 kernel handles its own B loading, so use_simd is not required.
+    let is_matmul_pattern = reduce.op == ReduceOp::Sum
         && body.len() == 3
         && matches!(&body[2], Inst::Mul(0, 1))
         && result == 2
-        && !depends_on_n[0] && depends_on_n[1]; // inst 0 = A (n-inv), inst 1 = B (n-dep)
+        && !depends_on_n[0] && depends_on_n[1];
 
-    // Also handle the reversed case (B first, A second)
-    let is_matmul_reversed = use_simd
-        && reduce.op == ReduceOp::Sum
+    let is_matmul_reversed = reduce.op == ReduceOp::Sum
         && body.len() == 3
         && matches!(&body[2], Inst::Mul(0, 1))
         && result == 2
         && depends_on_n[0] && !depends_on_n[1];
 
+    if std::env::var("ARM_BODY_DEBUG").is_ok() {
+        eprintln!("  PATTERN: use_simd={} is_mm={} is_mmr={} dep_n={:?}", use_simd, is_matmul_pattern, is_matmul_reversed, depends_on_n);
+        for (i,inst) in body.iter().enumerate() { eprintln!("    [{i}] {inst:?}"); }
+    }
     if (is_matmul_pattern || is_matmul_reversed) && simd_groups <= 8 {
         let (a_inst_idx, b_inst_idx) = if is_matmul_pattern { (0, 1) } else { (1, 0) };
         // Always use MR=8 micro-kernel for simple matmul patterns.
         if std::env::var("ARM_BODY_DEBUG").is_ok() {
-            eprintln!("MR8: shape={:?} batch_dims={} m_dim={} n_dim={}", shape, batch_dims, m_dim, n_dim);
+            eprintln!("MR8 HIT: shape={:?}", shape);
         }
         {
             emit_matmul_mr8(e, ctx, buf_slot, shape, reduce, body,
