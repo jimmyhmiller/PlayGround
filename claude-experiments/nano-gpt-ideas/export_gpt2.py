@@ -98,33 +98,32 @@ def export():
         add_tensor(f"ln1_g_{i}", sd[f"{prefix}.ln_1.weight"])
         add_tensor(f"ln1_b_{i}", sd[f"{prefix}.ln_1.bias"])
 
-        # Attention QKV weight: Conv1D stores [in, out], transpose to [out, in]
-        # so the K dimension is contiguous in memory for fast matmul.
+        # Attention QKV weight: Conv1D stores [in, out] = [K, N]
         attn_w = sd[f"{prefix}.attn.c_attn.weight"]  # [n_embd, 3*n_embd] (Conv1D)
         attn_b = sd[f"{prefix}.attn.c_attn.bias"]    # [3*n_embd]
-        add_tensor(f"attn_qkv_w_{i}", attn_w.t().contiguous())
+        add_tensor(f"attn_qkv_w_{i}", attn_w)
         add_tensor(f"attn_qkv_b_{i}", attn_b)
 
         # Attention output projection
         proj_w = sd[f"{prefix}.attn.c_proj.weight"]  # [n_embd, n_embd] (Conv1D)
         proj_b = sd[f"{prefix}.attn.c_proj.bias"]    # [n_embd]
-        add_tensor(f"attn_proj_w_{i}", proj_w.t().contiguous())
+        add_tensor(f"attn_proj_w_{i}", proj_w)
         add_tensor(f"attn_proj_b_{i}", proj_b)
 
         # LayerNorm 2 (pre-MLP)
         add_tensor(f"ln2_g_{i}", sd[f"{prefix}.ln_2.weight"])
         add_tensor(f"ln2_b_{i}", sd[f"{prefix}.ln_2.bias"])
 
-        # MLP fc (expand) — transpose for fast matmul
+        # MLP fc (expand)
         fc_w = sd[f"{prefix}.mlp.c_fc.weight"]  # [n_embd, 4*n_embd] (Conv1D)
         fc_b = sd[f"{prefix}.mlp.c_fc.bias"]    # [4*n_embd]
-        add_tensor(f"mlp_fc_w_{i}", fc_w.t().contiguous())
+        add_tensor(f"mlp_fc_w_{i}", fc_w)
         add_tensor(f"mlp_fc_b_{i}", fc_b)
 
-        # MLP proj (contract) — transpose for fast matmul
+        # MLP proj (contract)
         mp_w = sd[f"{prefix}.mlp.c_proj.weight"]  # [4*n_embd, n_embd] (Conv1D)
         mp_b = sd[f"{prefix}.mlp.c_proj.bias"]    # [n_embd]
-        add_tensor(f"mlp_proj_w_{i}", mp_w.t().contiguous())
+        add_tensor(f"mlp_proj_w_{i}", mp_w)
         add_tensor(f"mlp_proj_b_{i}", mp_b)
 
     # Final layer norm

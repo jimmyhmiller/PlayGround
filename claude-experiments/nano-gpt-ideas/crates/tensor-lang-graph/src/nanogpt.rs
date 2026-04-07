@@ -97,7 +97,7 @@ fn gelu(x) {{
 }}
 
 fn linear(x, w, b) {{
-    add(matmul(x, permute(w, [1, 0])), b)
+    add(matmul(x, w), b)
 }}
 
 fn softmax_attn(x) {{
@@ -140,17 +140,15 @@ let x = add(tok_emb, expand(pos_emb, [{batch}, {seq_len}, {n_embd}]))
         p.push_str(&format!("\n// Layer {i}\n"));
         p.push_str(&format!("let ln1_g_{i} = load([{n_embd}])\n"));
         p.push_str(&format!("let ln1_b_{i} = load([{n_embd}])\n"));
-        // Weight shapes are [out, in] = [N, K] after transpose in export.
-        // The linear() function permutes them to [K, N] before matmul.
-        p.push_str(&format!("let attn_qkv_w_{i} = load([{}, {n_embd}])\n", 3 * n_embd));
+        p.push_str(&format!("let attn_qkv_w_{i} = load([{n_embd}, {}])\n", 3 * n_embd));
         p.push_str(&format!("let attn_qkv_b_{i} = load([{}])\n", 3 * n_embd));
         p.push_str(&format!("let attn_proj_w_{i} = load([{n_embd}, {n_embd}])\n"));
         p.push_str(&format!("let attn_proj_b_{i} = load([{n_embd}])\n"));
         p.push_str(&format!("let ln2_g_{i} = load([{n_embd}])\n"));
         p.push_str(&format!("let ln2_b_{i} = load([{n_embd}])\n"));
-        p.push_str(&format!("let mlp_fc_w_{i} = load([{mlp_hidden}, {n_embd}])\n"));
+        p.push_str(&format!("let mlp_fc_w_{i} = load([{n_embd}, {mlp_hidden}])\n"));
         p.push_str(&format!("let mlp_fc_b_{i} = load([{mlp_hidden}])\n"));
-        p.push_str(&format!("let mlp_proj_w_{i} = load([{n_embd}, {mlp_hidden}])\n"));
+        p.push_str(&format!("let mlp_proj_w_{i} = load([{mlp_hidden}, {n_embd}])\n"));
         p.push_str(&format!("let mlp_proj_b_{i} = load([{n_embd}])\n"));
 
         // Attention block

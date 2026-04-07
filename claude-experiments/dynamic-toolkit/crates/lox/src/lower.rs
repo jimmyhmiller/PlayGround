@@ -900,12 +900,30 @@ fn lower_expr(f: &mut DynFunc, ctx: &mut Ctx, expr: &Expr) -> Value {
             let name_id = ctx.strings.intern(name);
             let name_val = f.fb.iconst(Type::I64, name_id as i64);
 
-            // Fast path: try field-only lookup (no method fallback)
-            let field_val = f.fb.call(ctx.externs.get_field, &[obj, name_val]).unwrap();
-            let is_nil_check = f.is_nil(field_val);
             let merge_bb = f.fb.create_block(&[Type::I64]);
             let slow_bb = f.fb.create_block(&[]);
-            f.fb.br_if(is_nil_check, slow_bb, &[], merge_bb, &[field_val]);
+
+            // Inline fast path: is_obj → is_instance → load fields → table_get
+            let is_obj = f.is_ptr(obj);
+            let type_check_bb = f.fb.create_block(&[]);
+            f.fb.br_if(is_obj, type_check_bb, &[], slow_bb, &[]);
+
+            f.fb.switch_to_block(type_check_bb);
+            let raw_ptr = f.obj_unwrap(obj);
+            let ti_val = f.fb.load(Type::I64, raw_ptr, 0);
+            let instance_ti = f.fb.iconst(Type::I64, ctx.types.instance.type_info_addr as i64);
+            let is_instance = f.fb.icmp(CmpOp::Eq, ti_val, instance_ti);
+            let field_lookup_bb = f.fb.create_block(&[]);
+            f.fb.br_if(is_instance, field_lookup_bb, &[], slow_bb, &[]);
+
+            // Inline field table lookup
+            f.fb.switch_to_block(field_lookup_bb);
+            let name_resolved = f.fb.call(ctx.externs.resolve_string, &[name_val]).unwrap();
+            let fields_val = ctx.types.instance.load(f, raw_ptr, "fields");
+            let fields_ptr = f.obj_unwrap(fields_val);
+            let field_val = emit_inline_table_get(f, ctx, fields_ptr, name_resolved);
+            let found = f.is_nil(field_val);
+            f.fb.br_if(found, slow_bb, &[], merge_bb, &[field_val]);
 
             // Slow path: full property lookup (methods, BoundMethod, errors)
             f.fb.switch_to_block(slow_bb);
@@ -1143,15 +1161,15 @@ fn emit_indirect_call(f: &mut DynFunc, ctx: &mut Ctx, callee: Value, args: &[Val
 
 /// Emit an inline hash table lookup (open addressing + linear probing).
 /// Returns the value if found, or nil if not found.
-/// `key_hash` is the pre-computed hash of the key (compile-time constant).
-fn emit_hash_table_get(f: &mut DynFunc, ctx: &mut Ctx, table_ptr: Value, key: Value, key_hash: u64) -> Value {
+/// Computes the hash at runtime from the key (FxHash-style multiply-shift).
+fn emit_inline_table_get(f: &mut DynFunc, ctx: &mut Ctx, table_ptr: Value, key: Value) -> Value {
     let varlen_count_off = ctx.types.table.type_info.varlen_count_offset() as i32;
     let base_off = ctx.types.table.type_info.varlen_element_offset(0) as i64;
 
     // Load capacity = varlen_count / 2
     let varlen_count = f.fb.load(Type::I64, table_ptr, varlen_count_off);
     let one = f.fb.iconst(Type::I64, 1);
-    let capacity = f.fb.ashr(varlen_count, one); // / 2 (varlen_count is always positive)
+    let capacity = f.fb.ashr(varlen_count, one);
 
     let nil_const = f.nil();
     let merge_bb = f.fb.create_block(&[Type::I64]);
@@ -1167,11 +1185,13 @@ fn emit_hash_table_get(f: &mut DynFunc, ctx: &mut Ctx, table_ptr: Value, key: Va
 
     // Probe loop
     f.fb.switch_to_block(probe_bb);
-    // mask = capacity - 1
     let mask = f.fb.sub(capacity, one);
-    // initial idx = hash & mask
-    let hash_const = f.fb.iconst(Type::I64, key_hash as i64);
-    let idx_init = f.fb.and(hash_const, mask);
+    // Compute hash at runtime: h = key * FX_HASH_CONST; hash = h >> 32
+    let fx_const = f.fb.iconst(Type::I64, 0x517cc1b727220a95u64 as i64);
+    let h = f.fb.mul(key, fx_const);
+    let thirty_two = f.fb.iconst(Type::I64, 32);
+    let hash = f.fb.lshr(h, thirty_two);
+    let idx_init = f.fb.and(hash, mask);
     // base_addr = table_ptr + base_off
     let base_const = f.fb.iconst(Type::I64, base_off);
     let base_addr = f.fb.add(table_ptr, base_const);
@@ -1229,8 +1249,8 @@ fn emit_resolve_func_ptr(f: &mut DynFunc, ctx: &mut Ctx, closure_ptr: Value, cal
 }
 
 /// Optimized method invoke: obj.method(args) without BoundMethod allocation.
-/// Uses invoke_fast for the common case (1 call does lookup+arity+func_ptr),
-/// falls back to slow path for field/not_found/arity_mismatch.
+/// Fully inline fast path: type check → field lookup → method lookup → arity check → call.
+/// Falls back to extern slow path for non-instances, field invocations, and errors.
 fn emit_invoke(f: &mut DynFunc, ctx: &mut Ctx, obj: Value, method_name: &str, args: &[Value]) -> Value {
     let name_id = ctx.strings.intern(method_name);
     let name_val = f.fb.iconst(Type::I64, name_id as i64);
@@ -1238,67 +1258,145 @@ fn emit_invoke(f: &mut DynFunc, ctx: &mut Ctx, obj: Value, method_name: &str, ar
     let num_args = args.len();
     let num_args_val = f.fb.iconst(Type::I64, num_args as i64);
 
-    // Fast path: single call does lookup + arity check.
-    // Returns closure (NaN-boxed) on success, nil on slow path.
-    let closure_or_nil = f.fb.call(ctx.externs.invoke_fast, &[obj, name_val, num_args_val]).unwrap();
-    let is_nil_check = f.is_nil(closure_or_nil);
-    let fast_bb = f.fb.create_block(&[]);
+    // Slow path block: falls back to extern invoke_fast + dispatch
     let slow_bb = f.fb.create_block(&[]);
-    // nil = slow path, non-nil = fast path (swap branches)
-    f.fb.br_if(is_nil_check, slow_bb, &[], fast_bb, &[]);
 
-    // Fast path: method found, arity OK — resolve func_ptr inline and call
-    f.fb.switch_to_block(fast_bb);
+    // ── Inline fast path ──────────────────────────────────────
+
+    // 1. Check obj is a heap pointer
+    let is_obj = f.is_ptr(obj);
+    let type_check_bb = f.fb.create_block(&[]);
+    f.fb.br_if(is_obj, type_check_bb, &[], slow_bb, &[]);
+
+    // 2. Check obj is an instance (compare TypeInfo pointer)
+    f.fb.switch_to_block(type_check_bb);
+    let raw_ptr = f.obj_unwrap(obj);
+    let ti_val = f.fb.load(Type::I64, raw_ptr, 0);
+    let instance_ti = f.fb.iconst(Type::I64, ctx.types.instance.type_info_addr as i64);
+    let is_instance = f.fb.icmp(CmpOp::Eq, ti_val, instance_ti);
+    let field_lookup_bb = f.fb.create_block(&[]);
+    f.fb.br_if(is_instance, field_lookup_bb, &[], slow_bb, &[]);
+
+    // 3. Resolve the method name string and look up in instance fields
+    f.fb.switch_to_block(field_lookup_bb);
+    let name_resolved = f.fb.call(ctx.externs.resolve_string, &[name_val]).unwrap();
+    let fields_val = ctx.types.instance.load(f, raw_ptr, "fields");
+    let fields_ptr = f.obj_unwrap(fields_val);
+    let field_result = emit_inline_table_get(f, ctx, fields_ptr, name_resolved);
+
+    // 4. If field found → slow path (field invocation needs indirect call dispatch)
+    let field_found = f.is_nil(field_result);
+    let method_lookup_bb = f.fb.create_block(&[]);
+    let field_invoke_bb = f.fb.create_block(&[]);
+    f.fb.br_if(field_found, method_lookup_bb, &[], field_invoke_bb, &[]);
+
+    // Field found → call it as a value (slow path handles dispatch)
+    f.fb.switch_to_block(field_invoke_bb);
     {
-        // Inline func_ptr resolution: closure_ptr.func_table_idx → call_table[idx]
-        let closure_ptr = f.obj_unwrap(closure_or_nil);
+        let result = emit_indirect_call(f, ctx, field_result, args);
+        f.fb.jump(merge_bb, &[result]);
+    }
+
+    // 5. Look up method in class method table
+    f.fb.switch_to_block(method_lookup_bb);
+    let class_val = ctx.types.instance.load(f, raw_ptr, "class_ptr");
+    let class_ptr = f.obj_unwrap(class_val);
+    let methods_val = ctx.types.class.load(f, class_ptr, "methods");
+    let methods_ptr = f.obj_unwrap(methods_val);
+    let method_result = emit_inline_table_get(f, ctx, methods_ptr, name_resolved);
+
+    // 6. If method not found → slow path (error reporting)
+    let method_found = f.is_nil(method_result);
+    let arity_check_bb = f.fb.create_block(&[]);
+    f.fb.br_if(method_found, slow_bb, &[], arity_check_bb, &[]);
+
+    // 7. Check arity
+    f.fb.switch_to_block(arity_check_bb);
+    let method_ptr = f.obj_unwrap(method_result);
+    let arity = ctx.types.closure.load(f, method_ptr, "arity");
+    let arity_ok = f.fb.icmp(CmpOp::Eq, arity, num_args_val);
+    let call_bb = f.fb.create_block(&[]);
+    let arity_err_bb = f.fb.create_block(&[]);
+    f.fb.br_if(arity_ok, call_bb, &[], arity_err_bb, &[]);
+
+    // Arity mismatch → report error
+    f.fb.switch_to_block(arity_err_bb);
+    {
+        f.fb.call(ctx.externs.check_arity, &[method_result, arity, num_args_val]);
+        let nil = f.nil();
+        f.fb.jump(merge_bb, &[nil]);
+    }
+
+    // 8. Fast call: resolve func_ptr from call table and call
+    f.fb.switch_to_block(call_bb);
+    {
         let call_table_base = ctx.cached_call_table_base.expect("call_table_base not cached");
-        let func_ptr = emit_resolve_func_ptr(f, ctx, closure_ptr, call_table_base);
-        let mut all_args = vec![closure_or_nil, obj];
+        let func_ptr = emit_resolve_func_ptr(f, ctx, method_ptr, call_table_base);
+        let mut all_args = vec![method_result, obj];
         all_args.extend_from_slice(args);
         let result = f.fb.call_indirect(func_ptr, &all_args, Some(Type::I64)).unwrap();
         f.fb.jump(merge_bb, &[result]);
     }
 
-    // Slow path: field, not found, or arity mismatch
+    // ── Slow path: extern fallback ────────────────────────────
     f.fb.switch_to_block(slow_bb);
     {
-        let kind = f.fb.call(ctx.externs.invoke_kind, &[]).unwrap();
-        let one = f.fb.iconst(Type::I64, 1);
-        let is_method = f.fb.icmp(CmpOp::Eq, kind, one);
-        let arity_err_bb = f.fb.create_block(&[]);
-        let not_method_bb = f.fb.create_block(&[]);
-        f.fb.br_if(is_method, arity_err_bb, &[], not_method_bb, &[]);
+        let closure_or_nil = f.fb.call(ctx.externs.invoke_fast, &[obj, name_val, num_args_val]).unwrap();
+        let is_nil_check = f.is_nil(closure_or_nil);
+        let extern_fast_bb = f.fb.create_block(&[]);
+        let extern_slow_bb = f.fb.create_block(&[]);
+        f.fb.br_if(is_nil_check, extern_slow_bb, &[], extern_fast_bb, &[]);
 
-        // Arity mismatch on method
-        f.fb.switch_to_block(arity_err_bb);
+        // Extern fast path succeeded
+        f.fb.switch_to_block(extern_fast_bb);
         {
-            let closure = f.fb.call(ctx.externs.invoke_closure, &[]).unwrap();
-            let method_ptr = f.obj_unwrap(closure);
-            let arity = ctx.types.closure.load(f, method_ptr, "arity");
-            f.fb.call(ctx.externs.check_arity, &[closure, arity, num_args_val]);
-            let nil = f.nil();
-            f.fb.jump(merge_bb, &[nil]);
+            let closure_ptr = f.obj_unwrap(closure_or_nil);
+            let call_table_base = ctx.cached_call_table_base.expect("call_table_base not cached");
+            let func_ptr = emit_resolve_func_ptr(f, ctx, closure_ptr, call_table_base);
+            let mut all_args = vec![closure_or_nil, obj];
+            all_args.extend_from_slice(args);
+            let result = f.fb.call_indirect(func_ptr, &all_args, Some(Type::I64)).unwrap();
+            f.fb.jump(merge_bb, &[result]);
         }
 
-        // Field or not found
-        f.fb.switch_to_block(not_method_bb);
+        // Extern slow path: field, not found, or arity mismatch
+        f.fb.switch_to_block(extern_slow_bb);
         {
-            let zero = f.fb.iconst(Type::I64, 0);
-            let is_field = f.fb.icmp(CmpOp::Eq, kind, zero);
-            let field_bb = f.fb.create_block(&[]);
-            let error_bb = f.fb.create_block(&[]);
-            f.fb.br_if(is_field, field_bb, &[], error_bb, &[]);
+            let kind = f.fb.call(ctx.externs.invoke_kind, &[]).unwrap();
+            let one = f.fb.iconst(Type::I64, 1);
+            let is_method = f.fb.icmp(CmpOp::Eq, kind, one);
+            let ext_arity_err_bb = f.fb.create_block(&[]);
+            let not_method_bb = f.fb.create_block(&[]);
+            f.fb.br_if(is_method, ext_arity_err_bb, &[], not_method_bb, &[]);
 
-            f.fb.switch_to_block(field_bb);
-            let field_val = f.fb.call(ctx.externs.invoke_closure, &[]).unwrap();
-            let result = emit_indirect_call(f, ctx, field_val, args);
-            f.fb.jump(merge_bb, &[result]);
+            f.fb.switch_to_block(ext_arity_err_bb);
+            {
+                let closure = f.fb.call(ctx.externs.invoke_closure, &[]).unwrap();
+                let mp = f.obj_unwrap(closure);
+                let ar = ctx.types.closure.load(f, mp, "arity");
+                f.fb.call(ctx.externs.check_arity, &[closure, ar, num_args_val]);
+                let nil = f.nil();
+                f.fb.jump(merge_bb, &[nil]);
+            }
 
-            f.fb.switch_to_block(error_bb);
-            f.fb.call(ctx.externs.get_property, &[obj, name_val]);
-            let nil = f.nil();
-            f.fb.jump(merge_bb, &[nil]);
+            f.fb.switch_to_block(not_method_bb);
+            {
+                let zero = f.fb.iconst(Type::I64, 0);
+                let is_field = f.fb.icmp(CmpOp::Eq, kind, zero);
+                let field_bb = f.fb.create_block(&[]);
+                let error_bb = f.fb.create_block(&[]);
+                f.fb.br_if(is_field, field_bb, &[], error_bb, &[]);
+
+                f.fb.switch_to_block(field_bb);
+                let field_val = f.fb.call(ctx.externs.invoke_closure, &[]).unwrap();
+                let result = emit_indirect_call(f, ctx, field_val, args);
+                f.fb.jump(merge_bb, &[result]);
+
+                f.fb.switch_to_block(error_bb);
+                f.fb.call(ctx.externs.get_property, &[obj, name_val]);
+                let nil = f.nil();
+                f.fb.jump(merge_bb, &[nil]);
+            }
         }
     }
 

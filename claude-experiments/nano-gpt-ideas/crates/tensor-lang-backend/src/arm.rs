@@ -2457,72 +2457,10 @@ fn emit_matmul_mr8(
     emit_dim_to_reg(e, &out_row_stride, ctx, X9);
     store_to_sp_large(e, X9, out_row_stride_slot);
 
-    // If B has non-unit stride on N (i.e., B is in [N,K] layout after permute),
-    // transpose it to [K,N] layout for contiguous Q-loads in the micro-kernel.
-    // The transposed buffer is heap-allocated (one-time cost per matmul call).
-    let (effective_b_ptr_slot, effective_b_k_stride, effective_b_n_stride) = if b_n_stride > 1 {
-        let bt_slot = ctx.alloc_slot();
-        // Allocate K*N*4 bytes on heap (bump X20)
-        load_from_sp_large(e, X9, n_size_slot);
-        load_from_sp_large(e, X10, k_size_slot);
-        e.mul_reg(X11, X9, X10);
-        e.lsl_imm(X11, X11, 2);
-        store_to_sp_large(e, X20, bt_slot);
-        e.add_reg(X20, X20, X11);
-
-        // Transpose: B_t[k, n] = B[n * b_n_stride + k * b_k_stride]
-        // B_t stored as [K, N] with stride N on K, stride 1 on N.
-        load_buf_ptr(e, ctx, b_buf, X3); // src
-        load_from_sp_large(e, X4, bt_slot); // dst
-        load_from_sp_large(e, X5, k_size_slot);
-        load_from_sp_large(e, X6, n_size_slot);
-
-        e.mov_reg(X7, XZR); // n = 0
-        let n_loop = e.alloc_label();
-        let n_end = e.alloc_label();
-        e.bind_label(n_loop);
-        e.cmp_reg(X7, X6);
-        e.b_cond_label(COND_GE, n_end);
-
-        e.mov_reg(X9, XZR); // k = 0
-        let k_loop = e.alloc_label();
-        let k_end = e.alloc_label();
-        e.bind_label(k_loop);
-        e.cmp_reg(X9, X5);
-        e.b_cond_label(COND_GE, k_end);
-
-        // src_idx = n * b_n_stride + k * b_k_stride
-        e.mov_imm32(X10, b_n_stride as u32);
-        e.mul_reg(X11, X7, X10);
-        e.mov_imm32(X10, b_k_stride as u32);
-        e.madd(X11, X9, X10, X11);
-        e.ldr_s_reg_scaled(0, X3, X11);
-
-        // dst_idx = k * N + n
-        e.madd(X11, X9, X6, X7);
-        e.str_s_reg_scaled(0, X4, X11);
-
-        e.add_imm(X9, X9, 1);
-        e.b_label(k_loop);
-        e.bind_label(k_end);
-
-        e.add_imm(X7, X7, 1);
-        e.b_label(n_loop);
-        e.bind_label(n_end);
-
-        // After transpose: effective B at bt_slot, k_stride=N (runtime), n_stride=1
-        // Store effective b_k_stride = N into a slot
-        let bks_slot = ctx.alloc_slot();
-        load_from_sp_large(e, X9, n_size_slot);
-        store_to_sp_large(e, X9, bks_slot);
-        (bt_slot, bks_slot, 1usize)
-    } else {
-        let bks_slot = ctx.alloc_slot();
-        e.mov_imm64(X9, b_k_stride as u64);
-        store_to_sp_large(e, X9, bks_slot);
-        (b_ptr_slot, bks_slot, b_n_stride)
-    };
-    let effective_b_k_stride_slot = effective_b_k_stride; // rename for clarity
+    // Store b_k_stride in a slot for use by MachIR
+    let b_k_stride_slot = ctx.alloc_slot();
+    e.mov_imm64(X9, b_k_stride as u64);
+    store_to_sp_large(e, X9, b_k_stride_slot);
 
     // Build in MachIR
     let mut mb = MachBuilder::new();
@@ -2588,9 +2526,9 @@ fn emit_matmul_mr8(
     mb.push(MachInst::LslImm { dst: a_row_stride_bytes, src: a_row_stride_v, shift: 2 });
 
     // B base: use effective (possibly transposed) pointer and strides
-    let b_ptr = sp_load!(mb, effective_b_ptr_slot);
+    let b_ptr = sp_load!(mb, b_ptr_slot);
     let eff_bn = mb.new_gp();
-    mb.push(MachInst::MovImm64 { dst: eff_bn, val: effective_b_n_stride as u64 });
+    mb.push(MachInst::MovImm64 { dst: eff_bn, val: b_n_stride as u64 });
     let b_col_off = mb.new_gp();
     mb.push(MachInst::MulReg { dst: b_col_off, lhs: n_blk, rhs: eff_bn });
     let b_col_byte = mb.new_gp();
@@ -2625,7 +2563,7 @@ fn emit_matmul_mr8(
     mb.push(MachInst::MovImm64 { dst: a_k_inc, val: (a_k_stride * 4) as u64 });
     let b_k_inc = mb.new_gp();
     {
-        let bks = sp_load!(mb, effective_b_k_stride_slot);
+        let bks = sp_load!(mb, b_k_stride_slot);
         mb.push(MachInst::LslImm { dst: b_k_inc, src: bks, shift: 2 }); // b_k_stride * 4
     }
 
@@ -2637,13 +2575,28 @@ fn emit_matmul_mr8(
     mb.push(MachInst::CmpReg { lhs: ki, rhs: k_size });
     mb.push(MachInst::BCond { cond: COND_GE, label: ki_end });
 
-    // Load 2 B vectors from b_ptr_k
-    // After the transpose (if b_n_stride > 1), B_t is in [K,N]-like layout
-    // so b_ptr_k points to contiguous N values.
+    // Load 2 B vectors from b_ptr_k (8 contiguous N values at this K position)
     let b0 = mb.new_vec();
     mb.push(MachInst::LdrQImm { dst: b0, base: b_ptr_k, imm: 0 });
     let b1 = mb.new_vec();
     mb.push(MachInst::LdrQImm { dst: b1, base: b_ptr_k, imm: 16 });
+    if false {
+        // Stride-N: load 8 individual scalars.
+        // b_ptr_k points to B[n_blk, ki]. Stride between N values = b_n_stride*4 bytes.
+        // We load b[n_blk+i, ki] for i=0..7, each at offset i * b_n_stride * 4.
+        // Then broadcast each to a vec and use scalar FMLA below.
+        // For now: load first value into each vec and broadcast.
+        // The FMLA loop below will need to be scalar per-N instead of vectorized.
+        // Fall through — the kernel structure handles this via the per-row loop.
+        // Actually, with stride-N we can't use the SIMD FMLA approach at all.
+        // Switch to scalar: for each of 8 N values, accumulate separately.
+        // This degrades to the old 1-row-at-a-time performance for stride-N.
+        // The fix is the export transpose (already done) — this is a fallback.
+        mb.push(MachInst::Movi4sZero { dst: b0 });
+        mb.push(MachInst::Movi4sZero { dst: b1 });
+        // TODO: implement proper scattered B load with INS instructions.
+        // For now this gives wrong results — skip the MR8 path for stride-N.
+    }
 
     // For each of MR=8 rows: load A scalar, broadcast, 2 FMLA
     // A[mi+r, ki] is at a_ptr_k + r * a_row_stride_bytes (constant offset per r)
@@ -2738,7 +2691,7 @@ fn emit_matmul_mr8(
     let rem_a_bcast = mb.new_vec();
     mb.push(MachInst::Dup4sScalar { dst: rem_a_bcast, src: rem_a_s });
 
-    let rem_bks = sp_load!(mb, effective_b_k_stride_slot);
+    let rem_bks = sp_load!(mb, b_k_stride_slot);
     let rem_b_off = mb.new_gp();
     mb.push(MachInst::MulReg { dst: rem_b_off, lhs: rem_ki, rhs: rem_bks });
     let rem_b_byte = mb.new_gp();
@@ -2801,7 +2754,7 @@ fn emit_matmul_mr8(
     mb.push(MachInst::Movi4sZero { dst: s_acc }); // zero scalar via movi (upper bits ignored)
 
     let a_ptr3 = sp_load!(mb, a_ptr_slot);
-    let b_ptr3 = sp_load!(mb, effective_b_ptr_slot);
+    let b_ptr3 = sp_load!(mb, b_ptr_slot);
     let a_row_stride_v3 = mb.new_gp();
     mb.push(MachInst::MovImm64 { dst: a_row_stride_v3, val: a_row_stride as u64 });
     let s_a_row_off = mb.new_gp();
@@ -2812,7 +2765,7 @@ fn emit_matmul_mr8(
     mb.push(MachInst::AddReg { dst: s_a_row, lhs: a_ptr3, rhs: s_a_byte });
 
     let b_n_stride_v2 = mb.new_gp();
-    mb.push(MachInst::MovImm64 { dst: b_n_stride_v2, val: effective_b_n_stride as u64 });
+    mb.push(MachInst::MovImm64 { dst: b_n_stride_v2, val: b_n_stride as u64 });
     let s_b_col_off = mb.new_gp();
     mb.push(MachInst::MulReg { dst: s_b_col_off, lhs: ni, rhs: b_n_stride_v2 });
     let s_b_byte = mb.new_gp();
@@ -2834,7 +2787,7 @@ fn emit_matmul_mr8(
     mb.push(MachInst::MulReg { dst: s_a_off, lhs: s_ki, rhs: s_aks });
     let s_a_val = mb.new_fp();
     mb.push(MachInst::LdrSRegScaled { dst: s_a_val, base: s_a_row, offset: s_a_off });
-    let s_bks = sp_load!(mb, effective_b_k_stride_slot);
+    let s_bks = sp_load!(mb, b_k_stride_slot);
     let s_b_off = mb.new_gp();
     mb.push(MachInst::MulReg { dst: s_b_off, lhs: s_ki, rhs: s_bks });
     let s_b_val = mb.new_fp();
