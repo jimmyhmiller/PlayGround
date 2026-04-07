@@ -1,5 +1,6 @@
 use std::cell::RefCell;
 use std::collections::VecDeque;
+use std::io::Write;
 use std::marker::PhantomData;
 use std::sync::RwLock;
 
@@ -68,6 +69,26 @@ fn lookup_code_entry(registry: &[JitCodeEntry], addr: usize) -> Option<&JitCodeE
     if idx == 0 { return None; }
     let entry = &registry[idx - 1];
     if addr < entry.code_end { Some(entry) } else { None }
+}
+
+// ─── perf-pid.map support ──────────────────────────────────────────
+//
+// Write entries to /tmp/perf-<pid>.map so profilers (perf, samply, etc.)
+// can resolve JIT-compiled function addresses to symbolic names.
+// Format per line: `<hex_start_addr> <hex_size> <name>\n`
+
+fn write_perf_map_entries(entries: &[(usize, usize, &str)]) {
+    let path = format!("/tmp/perf-{}.map", std::process::id());
+    let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    else {
+        return;
+    };
+    for &(addr, size, name) in entries {
+        let _ = writeln!(file, "{addr:x} {size:x} {name}");
+    }
 }
 
 /// Walk ancestor JIT frames starting from `jit_fp` (the FP of the frame
@@ -439,6 +460,8 @@ impl JitFunction {
         let code_end = code_start + memory.len();
         register_jit_code(code_start, code_end, root_scan_size);
 
+        write_perf_map_entries(&[(code_start, code_end - code_start, &func.name)]);
+
         JitFunction {
             memory,
             safepoints,
@@ -468,6 +491,20 @@ impl JitFunction {
 
     pub fn call_outcome(&self, args: &[u64]) -> JitOutcome {
         unsafe { call_jit_outcome(self.as_ptr(), args, self.max_deopt_live_values) }
+    }
+
+    /// Dump the raw bytes as hex for external disassembly, and print
+    /// a shell command to disassemble with llvm-objdump.
+    pub fn dump_code(&self) {
+        let base = self.memory.base_ptr();
+        let len = self.memory.len();
+        eprintln!("JIT code: {:?} ({} bytes)", base, len);
+        let bytes = unsafe { std::slice::from_raw_parts(base, len) };
+        // Write to a temp file and print the objdump command
+        let path = "/tmp/jit_dump.bin";
+        std::fs::write(path, bytes).unwrap();
+        eprintln!("Disassemble with:");
+        eprintln!("  llvm-objdump -d -m aarch64 -b binary {} | head -200", path);
     }
 
     pub fn native_resume_ptr(&self, record: &FrameReifyRecord) -> Option<*const u8> {
@@ -651,6 +688,7 @@ impl JitModule {
 
         let base = memory.base_ptr() as usize;
         let total_len = memory.len();
+        let mut perf_entries: Vec<(usize, usize, &str)> = Vec::new();
         for (i, &offset) in entry_offsets.iter().enumerate() {
             let code_start = base + offset;
             let code_end = if i + 1 < entry_offsets.len() {
@@ -659,7 +697,9 @@ impl JitModule {
                 base + total_len
             };
             register_jit_code(code_start, code_end, function_root_scan_sizes[i]);
+            perf_entries.push((code_start, code_end - code_start, &module.functions[i].name));
         }
+        write_perf_map_entries(&perf_entries);
 
         let base = memory.base_ptr();
         for (ft_idx, def) in module.func_table.iter().enumerate() {
@@ -681,7 +721,7 @@ impl JitModule {
         }
     }
 
-    /// Compile a module with a GC safepoint handler.
+    /// Compile a module with a GC safepoint handler (greedy register allocator).
     ///
     /// At each `Inst::Safepoint`, the JIT will spill all live values and
     /// call `handler(frame_ptr, frame_size)`. The handler can scan the
@@ -692,6 +732,19 @@ impl JitModule {
         handler: extern "C" fn(*mut u8, usize),
     ) -> Self {
         Self::compile_with_config_and_gc::<DefaultJitConfig<L>>(
+            module,
+            externs,
+            Some(handler as u64),
+        )
+    }
+
+    /// Compile a module with GC safepoint handler + linear scan register allocator.
+    pub fn compile_with_gc_linear_scan<L: LayoutConfigDefaults>(
+        module: &Module,
+        externs: &[*const u8],
+        handler: extern "C" fn(*mut u8, usize),
+    ) -> Self {
+        Self::compile_with_regalloc::<DefaultJitConfig<L>, Arm64Backend, regalloc::LinearScanAllocator>(
             module,
             externs,
             Some(handler as u64),
@@ -811,6 +864,7 @@ impl JitModule {
         // Register each function's code range in the global registry.
         let base = memory.base_ptr() as usize;
         let total_len = memory.len();
+        let mut perf_entries: Vec<(usize, usize, &str)> = Vec::new();
         for (i, &offset) in entry_offsets.iter().enumerate() {
             let code_start = base + offset;
             let code_end = if i + 1 < entry_offsets.len() {
@@ -819,7 +873,9 @@ impl JitModule {
                 base + total_len
             };
             register_jit_code(code_start, code_end, function_root_scan_sizes[i]);
+            perf_entries.push((code_start, code_end - code_start, &module.functions[i].name));
         }
+        write_perf_map_entries(&perf_entries);
 
         // 3. Patch internal function pointers into the call table
         let base = memory.base_ptr();
@@ -872,6 +928,22 @@ impl JitModule {
 
     pub fn safepoints_for_function(&self, func_idx: usize) -> &[SafepointRecord] {
         &self.function_safepoints[func_idx]
+    }
+
+    /// Dump all JIT code to a temp file and print disassembly commands.
+    /// Each function's entry offset is printed for correlation.
+    pub fn dump_code(&self) {
+        let base = self.memory.base_ptr();
+        let len = self.memory.len();
+        eprintln!("JIT module: {:?} ({} bytes, {} functions)", base, len, self.function_entry_offsets.len());
+        for (i, &off) in self.function_entry_offsets.iter().enumerate() {
+            eprintln!("  func[{}] at offset {:#x}", i, off);
+        }
+        let bytes = unsafe { std::slice::from_raw_parts(base, len) };
+        let path = "/tmp/jit_dump.bin";
+        std::fs::write(path, bytes).unwrap();
+        eprintln!("Disassemble with:");
+        eprintln!("  llvm-objdump -d -m aarch64 -b binary {} | head -500", path);
     }
 
     pub fn frame_reify_records_for_function(&self, func_idx: usize) -> &[FrameReifyRecord] {
@@ -2752,6 +2824,11 @@ where
                             dst,
                             machine_gp(src),
                         );
+                        // Mark the destination register as occupied so that
+                        // subsequent alloc_gp calls don't clobber it.  This is
+                        // critical when the same SSA value appears in multiple
+                        // argument slots (e.g. after GVN merges two iconst(0)).
+                        self.regs.mark_gp_occupied(dst.index, arg);
                     }
                 }
             }

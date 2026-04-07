@@ -8,6 +8,7 @@ pub mod testing;
 pub mod liveness;
 pub mod linear_scan;
 pub mod aarch64;
+pub mod flat;
 
 #[cfg(test)]
 mod tests;

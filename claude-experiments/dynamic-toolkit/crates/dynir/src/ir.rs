@@ -806,6 +806,11 @@ impl Function {
         &self.blocks[0]
     }
 
+    /// Total number of instructions across all blocks (for fixpoint detection).
+    pub fn inst_count(&self) -> usize {
+        self.blocks.iter().map(|b| b.insts.len()).sum()
+    }
+
     pub fn block(&self, id: BlockId) -> &Block {
         &self.blocks[id.index()]
     }

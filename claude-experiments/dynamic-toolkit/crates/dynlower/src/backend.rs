@@ -324,7 +324,10 @@ impl Arm64Backend {
 
     pub fn emit_prologue(buf: &mut CodeBuffer<Arm64>) -> usize {
         buf.emit(Arm64Inst::mov(X28, SP));
+        // Reserve 2 instructions for frame size adjustment (patched later).
+        // This supports frame sizes > 4095 bytes by splitting into hi/lo parts.
         let patch_offset = buf.emit(Arm64Inst::sub_imm(SP, SP, 16));
+        buf.emit(Arm64Inst::sub_imm(SP, SP, 0)); // placeholder for low bits
         buf.emit(Arm64Inst::stp(X29, X30, SP, 0, StpMode::SignedOffset));
         buf.emit(Arm64Inst::mov(X29, SP));
         patch_offset
@@ -333,7 +336,9 @@ impl Arm64Backend {
     pub fn emit_epilogue(buf: &mut CodeBuffer<Arm64>, patch_offsets: &mut Vec<usize>) {
         buf.emit(Arm64Inst::mov(SP, X29));
         buf.emit(Arm64Inst::ldp(X29, X30, SP, 0, LdpMode::SignedOffset));
+        // Reserve 2 instructions for frame size restore (patched later).
         let add_offset = buf.emit(Arm64Inst::add_imm(SP, SP, 16));
+        buf.emit(Arm64Inst::add_imm(SP, SP, 0)); // placeholder for low bits
         patch_offsets.push(add_offset);
         buf.emit(Arm64Inst::ret());
     }
@@ -344,13 +349,23 @@ impl Arm64Backend {
         epilogue_offsets: &[usize],
         frame_size: i32,
     ) {
-        let sub_inst = Arm64Inst::sub_imm(SP, SP, frame_size);
-        buf.patch_bytes(prologue_offset, &sub_inst.encode().to_le_bytes());
+        let hi = (frame_size >> 12) & 0xFFF;
+        let lo = frame_size & 0xFFF;
 
-        let add_inst = Arm64Inst::add_imm(SP, SP, frame_size);
-        let add_bytes = add_inst.encode().to_le_bytes();
+        // Prologue: sub SP, SP, #hi, LSL #12 ; sub SP, SP, #lo
+        let sub_hi = Arm64Inst::SubImm { sf: 1, sh: 1, imm12: hi, rn: SP, rd: SP };
+        let sub_lo = Arm64Inst::SubImm { sf: 1, sh: 0, imm12: lo, rn: SP, rd: SP };
+        buf.patch_bytes(prologue_offset, &sub_hi.encode().to_le_bytes());
+        buf.patch_bytes(prologue_offset + 4, &sub_lo.encode().to_le_bytes());
+
+        // Epilogue: add SP, SP, #hi, LSL #12 ; add SP, SP, #lo
+        let add_hi = Arm64Inst::AddImm { sf: 1, sh: 1, imm12: hi, rn: SP, rd: SP };
+        let add_lo = Arm64Inst::AddImm { sf: 1, sh: 0, imm12: lo, rn: SP, rd: SP };
+        let add_hi_bytes = add_hi.encode().to_le_bytes();
+        let add_lo_bytes = add_lo.encode().to_le_bytes();
         for &offset in epilogue_offsets {
-            buf.patch_bytes(offset, &add_bytes);
+            buf.patch_bytes(offset, &add_hi_bytes);
+            buf.patch_bytes(offset + 4, &add_lo_bytes);
         }
     }
 
@@ -1066,9 +1081,24 @@ impl LoweringBackend for Arm64Backend {
 
     fn emit_stack_adjust(buf: &mut CodeBuffer<Self::Arch>, amount: i32) {
         if amount >= 0 {
-            buf.emit(Arm64Inst::sub_imm(SP, SP, amount));
+            let hi = (amount >> 12) & 0xFFF;
+            let lo = amount & 0xFFF;
+            if hi > 0 {
+                buf.emit(Arm64Inst::SubImm { sf: 1, sh: 1, imm12: hi, rn: SP, rd: SP });
+            }
+            if lo > 0 || hi == 0 {
+                buf.emit(Arm64Inst::sub_imm(SP, SP, lo));
+            }
         } else {
-            buf.emit(Arm64Inst::add_imm(SP, SP, -amount));
+            let abs = -amount;
+            let hi = (abs >> 12) & 0xFFF;
+            let lo = abs & 0xFFF;
+            if hi > 0 {
+                buf.emit(Arm64Inst::AddImm { sf: 1, sh: 1, imm12: hi, rn: SP, rd: SP });
+            }
+            if lo > 0 || hi == 0 {
+                buf.emit(Arm64Inst::add_imm(SP, SP, lo));
+            }
         }
     }
 

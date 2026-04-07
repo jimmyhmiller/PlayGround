@@ -275,6 +275,15 @@ pub trait InterpFrameStore {
         panic!("slot_ptr not supported by this InterpFrameStore")
     }
 
+    // ── GC root synchronization ──────────────────────────────────
+
+    /// Sync live values from the current frame to GC root slots.
+    /// Called before extern calls that may trigger a moving GC.
+    fn sync_top_to_roots(&self) {}
+    /// Reload values from GC root slots into the current frame.
+    /// Called after extern calls that may have triggered a moving GC.
+    fn sync_top_from_roots(&mut self) {}
+
     // ── Execution state (current frame) ─────────────────────────
 
     fn func_idx(&self) -> usize;

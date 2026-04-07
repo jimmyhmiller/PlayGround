@@ -259,6 +259,14 @@ impl<'a, L: ValueLayout, Roots: RootStrategy<L>, Transport: RootTransport<L, Roo
         self.stack.last_mut().unwrap().inst_idx += 1;
     }
 
+    fn sync_top_to_roots(&self) {
+        InterpStackRuntime::sync_top_to_roots(self);
+    }
+
+    fn sync_top_from_roots(&mut self) {
+        InterpStackRuntime::sync_top_from_roots(self);
+    }
+
     fn push_prompt(&mut self, prompt: u32) {
         self.stack.last_mut().unwrap().active_prompts.push(prompt);
     }

@@ -5,7 +5,7 @@ use std::collections::HashMap;
 
 use crate::allocator::{AllocError, Allocation, RegisterAllocator};
 use crate::cost::{AllocationCost, CostModel};
-use crate::ir::Function;
+use crate::ir::{Function, SafepointAction};
 use crate::target::{CallingConvention, RegInfo};
 use crate::types::*;
 use crate::verify;
@@ -24,6 +24,7 @@ pub struct TestInst {
     pub is_branch: bool,
     pub is_return: bool,
     pub is_call: bool,
+    pub is_safepoint: bool,
 }
 
 /// A test basic block.
@@ -45,6 +46,9 @@ pub struct TestFunction {
     pub vreg_classes: Vec<RegClass>,
     /// branch_args[inst_id][succ_idx] = vec of vreg args
     pub branch_args: HashMap<(InstId, usize), Vec<VReg>>,
+    /// Per-instruction, per-vreg safepoint actions.
+    /// Only consulted when `is_safepoint` is true for the instruction.
+    pub safepoint_actions: HashMap<(InstId, VReg), SafepointAction>,
 }
 
 impl Function for TestFunction {
@@ -120,6 +124,17 @@ impl Function for TestFunction {
     fn num_insts(&self) -> usize {
         self.insts.len()
     }
+
+    fn is_safepoint(&self, inst: InstId) -> bool {
+        self.insts[inst.0 as usize].is_safepoint
+    }
+
+    fn safepoint_action(&self, inst: InstId, vreg: VReg) -> SafepointAction {
+        self.safepoint_actions
+            .get(&(inst, vreg))
+            .copied()
+            .unwrap_or(SafepointAction::CallingConvention)
+    }
 }
 
 // ============================================================
@@ -133,6 +148,7 @@ pub struct TestFunctionBuilder {
     num_vregs: u32,
     vreg_classes: Vec<RegClass>,
     branch_args: HashMap<(InstId, usize), Vec<VReg>>,
+    safepoint_actions: HashMap<(InstId, VReg), SafepointAction>,
     pub current_block: Option<usize>,
 }
 
@@ -144,6 +160,7 @@ impl TestFunctionBuilder {
             num_vregs: 0,
             vreg_classes: Vec::new(),
             branch_args: HashMap::new(),
+            safepoint_actions: HashMap::new(),
             current_block: None,
         }
     }
@@ -186,6 +203,7 @@ impl TestFunctionBuilder {
             is_branch: false,
             is_return: false,
             is_call: false,
+            is_safepoint: false,
         });
         let block_idx = self.current_block.expect("no current block");
         self.blocks[block_idx].insts.push(id);
@@ -202,6 +220,24 @@ impl TestFunctionBuilder {
             is_branch: false,
             is_return: false,
             is_call: true,
+            is_safepoint: false,
+        });
+        let block_idx = self.current_block.expect("no current block");
+        self.blocks[block_idx].insts.push(id);
+        id
+    }
+
+    /// Add a safepoint call instruction.
+    pub fn safepoint_call(&mut self, operands: Vec<Operand>, clobbers: Vec<PReg>) -> InstId {
+        let id = InstId(self.insts.len() as u32);
+        self.insts.push(TestInst {
+            id,
+            operands,
+            clobbers,
+            is_branch: false,
+            is_return: false,
+            is_call: true,
+            is_safepoint: true,
         });
         let block_idx = self.current_block.expect("no current block");
         self.blocks[block_idx].insts.push(id);
@@ -218,10 +254,16 @@ impl TestFunctionBuilder {
             is_branch: false,
             is_return: true,
             is_call: false,
+            is_safepoint: false,
         });
         let block_idx = self.current_block.expect("no current block");
         self.blocks[block_idx].insts.push(id);
         id
+    }
+
+    /// Mark a vreg as needing a specific safepoint action at an instruction.
+    pub fn set_safepoint_action(&mut self, inst: InstId, vreg: VReg, action: SafepointAction) {
+        self.safepoint_actions.insert((inst, vreg), action);
     }
 
     /// Add a branch instruction to the given successors.
@@ -239,6 +281,7 @@ impl TestFunctionBuilder {
             is_branch: true,
             is_return: false,
             is_call: false,
+            is_safepoint: false,
         });
         let block_idx = self.current_block.expect("no current block");
         self.blocks[block_idx].insts.push(id);
@@ -274,6 +317,7 @@ impl TestFunctionBuilder {
             num_vregs: self.num_vregs as usize,
             vreg_classes: self.vreg_classes,
             branch_args: self.branch_args,
+            safepoint_actions: self.safepoint_actions,
         }
     }
 }

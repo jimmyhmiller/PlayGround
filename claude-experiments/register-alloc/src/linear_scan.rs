@@ -19,7 +19,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::allocator::*;
-use crate::ir::Function;
+use crate::ir::{Function, SafepointAction};
 use crate::liveness::{self, LiveInterval, LivenessInfo};
 use crate::target::Target;
 use crate::types::*;
@@ -114,17 +114,32 @@ impl RegisterAllocator for LinearScanAllocator {
                     }
                     // else: interval got a register (stolen from the spilled one)
                 } else {
-                    // Assign a register from the free pool.
-                    let preg = pick_free_reg(&mut state, interval);
-                    alloc_result.insert(interval.vreg, IntervalAlloc::Reg(preg));
-                    // Add to active, sorted by increasing end point.
-                    insert_active(&mut state, interval.end, idx, preg);
+                    // Try to assign a register from the free pool.
+                    // pick_free_reg returns None if all free regs are
+                    // clobbered within this interval — must spill instead.
+                    match pick_free_reg(&mut state, interval, &liveness) {
+                        Some(preg) => {
+                            alloc_result.insert(interval.vreg, IntervalAlloc::Reg(preg));
+                            insert_active(&mut state, interval.end, idx, preg);
+                        }
+                        None => {
+                            // All free registers would be clobbered. Spill this interval.
+                            let slot = SpillSlot(num_spill_slots);
+                            num_spill_slots += 1;
+                            alloc_result.insert(interval.vreg, IntervalAlloc::Spilled(slot));
+                        }
+                    }
                 }
             }
         }
 
         // Step 3: Build the Allocation from the per-interval results.
-        build_allocation(func, target, &liveness, &alloc_result, num_spill_slots)
+        let mut alloc = build_allocation(func, target, &liveness, &alloc_result, num_spill_slots)?;
+
+        // Step 4: Build stackmaps for safepoint instructions.
+        build_stackmaps(func, &liveness, &alloc_result, &mut alloc);
+
+        Ok(alloc)
     }
 }
 
@@ -201,20 +216,107 @@ fn spill_at_interval(
     }
 }
 
-/// Pick a free register, preferring any fixed-hint register for this interval.
+/// Check if a physical register is clobbered at any point within [start, end].
+fn is_clobbered_in_range(
+    preg: PReg,
+    start: u32,
+    end: u32,
+    liveness: &LivenessInfo,
+) -> bool {
+    for (&pos, clobbers) in &liveness.clobber_points {
+        if pos >= start && pos <= end && clobbers.contains(&preg) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Pick a free register, preferring:
+/// 1. Fixed-hint register (if available)
+/// 2. A register NOT clobbered during this interval's lifetime
+/// 3. Any available register (caller-saved fallback)
 fn pick_free_reg(
     state: &mut ClassState,
     interval: &LiveInterval,
-) -> PReg {
+    liveness: &LivenessInfo,
+) -> Option<PReg> {
     // If there's a fixed-register hint and it's available, use it.
     if let Some(hint) = interval.fixed_hint {
         if let Some(pos) = state.free_regs.iter().position(|&r| r == hint) {
-            return state.free_regs.remove(pos);
+            return Some(state.free_regs.remove(pos));
         }
     }
-    // Otherwise, take the last register (which is the first-preference
-    // due to our reversed storage).
-    state.free_regs.pop().unwrap()
+
+    // Prefer a register that isn't clobbered during this interval's range.
+    // free_regs is stored reversed, so we search from the back (highest preference first).
+    if !liveness.clobber_points.is_empty() {
+        for i in (0..state.free_regs.len()).rev() {
+            if !is_clobbered_in_range(state.free_regs[i], interval.start, interval.end, liveness) {
+                return Some(state.free_regs.remove(i));
+            }
+        }
+        // All free registers are clobbered within this interval.
+        // Return None to force a spill.
+        return None;
+    }
+
+    // No clobber points at all — any register is fine.
+    state.free_regs.pop()
+}
+
+/// Try to steal a non-clobbered (callee-saved) register from an active
+/// interval that doesn't need clobber protection. The evicted interval
+/// gets a caller-saved register (which is safe for it since it doesn't
+/// span any clobber points). Returns the stolen PReg, or None if no
+/// suitable swap exists.
+fn steal_safe_reg(
+    state: &mut ClassState,
+    _new_idx: usize,
+    new_interval: &LiveInterval,
+    liveness: &LivenessInfo,
+    alloc_result: &mut HashMap<VReg, IntervalAlloc>,
+    num_spill_slots: &mut u32,
+) -> Option<PReg> {
+    // Find an active interval whose register is NOT clobbered within
+    // the new interval's range AND whose own interval doesn't span
+    // a clobber of the free caller-saved regs we'd give it.
+    for i in 0..state.active.len() {
+        let (_, _, active_preg) = state.active[i];
+
+        // Is this register safe for the new interval?
+        if is_clobbered_in_range(active_preg, new_interval.start, new_interval.end, liveness) {
+            continue;
+        }
+
+        // Can the evicted interval use a caller-saved register?
+        // Check if any free register (all are clobbered for new_interval,
+        // but might not be clobbered for the active interval).
+        let active_vreg = liveness.intervals[state.active[i].1].vreg;
+        let active_start = liveness.intervals[state.active[i].1].start;
+        let active_end = state.active[i].0;
+
+        let replacement = state.free_regs.iter().position(|&r| {
+            !is_clobbered_in_range(r, active_start, active_end, liveness)
+        });
+
+        if let Some(free_idx) = replacement {
+            let replacement_preg = state.free_regs.remove(free_idx);
+
+            // Steal: give the active interval the caller-saved reg,
+            // and take its callee-saved reg for the new interval.
+            alloc_result.insert(active_vreg, IntervalAlloc::Reg(replacement_preg));
+            state.active[i].2 = replacement_preg;
+
+            // The stolen register is NOT returned to free_regs;
+            // it's given to the new interval by the caller.
+            return Some(active_preg);
+        }
+    }
+
+    // No swap found. Last resort: spill the new interval.
+    // (Caller handles this by inserting a spill slot.)
+    let _ = num_spill_slots;
+    None
 }
 
 /// Insert into the active list maintaining sort by increasing end point.
@@ -359,11 +461,17 @@ fn build_allocation<F: Function, T: Target>(
                                     }
                                 };
 
-                                if let Some(free) = available.iter().find(|r| !conflicts(r)) {
-                                    *free
-                                } else {
-                                    // All registers conflict. Evict a register held by
-                                    // a value NOT used by this instruction.
+                                // Find a temp register. Prefer one not owned by
+                                // another live vreg. If we must borrow, save/restore
+                                // the owner around this instruction.
+                                let non_conflicting: Vec<PReg> = available.iter()
+                                    .filter(|r| !conflicts(r))
+                                    .copied()
+                                    .collect();
+
+                                if non_conflicting.is_empty() {
+                                    // All registers conflict with this inst's operands.
+                                    // Evict a register not used by THIS instruction.
                                     let evict_preg = available.iter()
                                         .find(|r| {
                                             !operands.iter().enumerate().any(|(oi, _)| {
@@ -372,10 +480,7 @@ fn build_allocation<F: Function, T: Target>(
                                             })
                                         })
                                         .ok_or(AllocError::OutOfRegisters { inst, class })?;
-
                                     let evict_preg = *evict_preg;
-
-                                    // Save/restore the evicted register around the inst.
                                     if let Some(&evicted_vreg) = preg_owner.get(&evict_preg) {
                                         let evicted_slot = alloc.spill_slots
                                             .get(&evicted_vreg)
@@ -394,8 +499,37 @@ fn build_allocation<F: Function, T: Target>(
                                             class,
                                         });
                                     }
-
                                     evict_preg
+                                } else {
+                                    // Prefer a register that's truly free (no owner).
+                                    let truly_free = non_conflicting.iter()
+                                        .find(|r| !preg_owner.contains_key(r));
+                                    if let Some(&free) = truly_free {
+                                        free
+                                    } else {
+                                        // Must borrow from a live owner. Pick one and
+                                        // save/restore it.
+                                        let borrow = non_conflicting[0];
+                                        if let Some(&evicted_vreg) = preg_owner.get(&borrow) {
+                                            let evicted_slot = alloc.spill_slots
+                                                .get(&evicted_vreg)
+                                                .copied()
+                                                .unwrap_or_else(|| alloc.add_spill(evicted_vreg));
+                                            alloc.moves.push(InsertedMove {
+                                                at: MovePosition::Before(inst),
+                                                from: MoveOperand::Reg(borrow),
+                                                to: MoveOperand::SpillSlot(evicted_slot),
+                                                class,
+                                            });
+                                            alloc.moves.push(InsertedMove {
+                                                at: MovePosition::After(inst),
+                                                from: MoveOperand::SpillSlot(evicted_slot),
+                                                to: MoveOperand::Reg(borrow),
+                                                class,
+                                            });
+                                        }
+                                        borrow
+                                    }
                                 }
                             }
                         };
@@ -450,6 +584,110 @@ fn build_allocation<F: Function, T: Target>(
     }
 
     Ok(alloc)
+}
+
+/// Build stackmaps for all safepoint instructions.
+///
+/// For each safepoint, finds all live vregs, queries the function for the
+/// desired `SafepointAction`, and records their locations. For `SpillAndRecord`
+/// values that are currently in registers, inserts spill moves and records
+/// the stack slot.
+fn build_stackmaps<F: Function>(
+    func: &F,
+    liveness: &LivenessInfo,
+    alloc_result: &HashMap<VReg, IntervalAlloc>,
+    alloc: &mut Allocation,
+) {
+    for block in func.blocks() {
+        for inst in func.block_insts(block) {
+            if !func.is_safepoint(inst) {
+                continue;
+            }
+
+            let pos = match liveness.inst_position.get(&inst) {
+                Some(&p) => p,
+                None => continue,
+            };
+
+            let mut entries = Vec::new();
+
+            for interval in &liveness.intervals {
+                // Is this vreg live at this instruction?
+                if pos < interval.start || pos > interval.end {
+                    continue;
+                }
+
+                let action = func.safepoint_action(inst, interval.vreg);
+
+                match action {
+                    SafepointAction::CallingConvention | SafepointAction::Ignore => {
+                        // Nothing to record.
+                        continue;
+                    }
+                    SafepointAction::Record => {
+                        // Record current location without moving anything.
+                        let location = match alloc_result.get(&interval.vreg) {
+                            Some(IntervalAlloc::Reg(preg)) => MoveOperand::Reg(*preg),
+                            Some(IntervalAlloc::Spilled(slot)) => MoveOperand::SpillSlot(*slot),
+                            None => continue,
+                        };
+                        entries.push(StackmapEntry {
+                            vreg: interval.vreg,
+                            location,
+                            action,
+                        });
+                    }
+                    SafepointAction::SpillAndRecord => {
+                        // Value must be on the stack at this safepoint.
+                        match alloc_result.get(&interval.vreg) {
+                            Some(IntervalAlloc::Spilled(slot)) => {
+                                // Already on the stack.
+                                entries.push(StackmapEntry {
+                                    vreg: interval.vreg,
+                                    location: MoveOperand::SpillSlot(*slot),
+                                    action,
+                                });
+                            }
+                            Some(IntervalAlloc::Reg(preg)) => {
+                                // In a register — need to spill before the safepoint
+                                // and reload after.
+                                let slot = *alloc.spill_slots
+                                    .entry(interval.vreg)
+                                    .or_insert_with(|| {
+                                        let s = SpillSlot(alloc.num_spill_slots);
+                                        alloc.num_spill_slots += 1;
+                                        s
+                                    });
+                                let class = interval.class;
+                                alloc.moves.push(InsertedMove {
+                                    at: MovePosition::Before(inst),
+                                    from: MoveOperand::Reg(*preg),
+                                    to: MoveOperand::SpillSlot(slot),
+                                    class,
+                                });
+                                alloc.moves.push(InsertedMove {
+                                    at: MovePosition::After(inst),
+                                    from: MoveOperand::SpillSlot(slot),
+                                    to: MoveOperand::Reg(*preg),
+                                    class,
+                                });
+                                entries.push(StackmapEntry {
+                                    vreg: interval.vreg,
+                                    location: MoveOperand::SpillSlot(slot),
+                                    action,
+                                });
+                            }
+                            None => continue,
+                        }
+                    }
+                }
+            }
+
+            if !entries.is_empty() {
+                alloc.stackmaps.insert(inst, entries);
+            }
+        }
+    }
 }
 
 /// Resolve a constraint: return the physical register this operand should use.

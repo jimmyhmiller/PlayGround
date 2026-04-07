@@ -37,7 +37,17 @@ fn is_pure(inst: &Inst) -> bool {
 /// Whether an instruction is safe to hoist (pure and no memory reads).
 fn is_hoistable(inst: &Inst) -> bool {
     match inst {
+        // Loads/stores may alias.
         Inst::Load(..) | Inst::Store(..) => false,
+        // Payload extracts a raw pointer from a NaN-boxed GC value.
+        // The raw pointer is not NaN-box-tagged, so the GC's conservative
+        // scanner won't update it after a moving collection. If hoisted
+        // past a safepoint, the raw pointer becomes stale.
+        Inst::Payload(..) => false,
+        // IsTag checks a NaN-boxed tag — safe to hoist since the tag bits
+        // are stable (NaN-box encoding doesn't change), but the value it
+        // checks could be stale. However, IsTag only produces a bool, not
+        // a pointer, so it's safe.
         _ => is_pure(inst),
     }
 }
@@ -1506,7 +1516,8 @@ fn reorder_blocks_with_order(func: &mut Function, order: &[usize]) {
 
 // ─── Configuration & Combined Optimizer ─────────────────────────
 
-/// Controls which optimization passes are enabled.
+/// Controls which optimization passes are enabled and how many
+/// iterations to run.
 #[derive(Debug, Clone)]
 pub struct OptConfig {
     pub mem2reg: bool,
@@ -1515,10 +1526,15 @@ pub struct OptConfig {
     pub licm: bool,
     pub dce: bool,
     pub dead_block_params: bool,
+    /// Maximum fixpoint iterations for the optimization pipeline.
+    /// Each iteration runs constant_fold → gvn → licm → dead_block_params → dce.
+    /// The pipeline stops early if no pass changes anything.
+    /// Default: 4.
+    pub max_iterations: usize,
 }
 
 impl OptConfig {
-    /// All passes enabled.
+    /// All passes enabled, 4 fixpoint iterations.
     pub fn all() -> Self {
         Self {
             mem2reg: true,
@@ -1527,6 +1543,7 @@ impl OptConfig {
             licm: true,
             dce: true,
             dead_block_params: true,
+            max_iterations: 4,
         }
     }
 
@@ -1539,6 +1556,7 @@ impl OptConfig {
             licm: false,
             dce: false,
             dead_block_params: false,
+            max_iterations: 0,
         }
     }
 }
@@ -1549,35 +1567,50 @@ impl Default for OptConfig {
     }
 }
 
-/// Run optimization passes according to `config`.
+/// Run optimization passes according to `config`, iterating to a fixpoint.
+///
+/// mem2reg and block reordering run once up front (they're not iterative).
+/// Then the pipeline of constant_fold → gvn → licm → dead_block_params → dce
+/// runs repeatedly until no pass makes a change or `max_iterations` is reached.
 pub fn optimize_with(func: &mut Function, config: &OptConfig) {
+    // Phase 1: one-shot passes
     if config.mem2reg {
         mem2reg(func);
         reorder_blocks_rpo(func);
     }
 
-    if config.constant_fold {
-        constant_fold(func);
-    }
+    // Phase 2: iterative pipeline to fixpoint
+    for _ in 0..config.max_iterations {
+        let snapshot = func.inst_count();
 
-    if config.gvn {
-        gvn(func);
-    }
+        if config.constant_fold {
+            constant_fold(func);
+        }
 
-    if config.licm {
-        licm(func);
-    }
+        if config.gvn {
+            gvn(func);
+        }
 
-    if config.dead_block_params {
-        dead_block_param_elim(func);
-    }
+        if config.licm {
+            licm(func);
+        }
 
-    if config.dce {
-        dce(func);
+        if config.dead_block_params {
+            dead_block_param_elim(func);
+        }
+
+        if config.dce {
+            dce(func);
+        }
+
+        // Stop if nothing changed
+        if func.inst_count() == snapshot {
+            break;
+        }
     }
 }
 
-/// Run all optimization passes.
+/// Run all optimization passes to fixpoint.
 pub fn optimize(func: &mut Function) {
     optimize_with(func, &OptConfig::all());
 }

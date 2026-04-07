@@ -816,6 +816,209 @@ pub fn tile_reduce_loops(stmts: &mut Vec<Stmt>) {
     }
 }
 
+/// Unfuse matmul bodies: when a tiled reduce loop has a fused body like
+/// layernorm + matmul, split it into a separate elementwise loop for the
+/// pre-processing and a clean Load-Load-Mul matmul body.
+///
+/// This enables the fast MR=8 micro-kernel which requires body_len==3.
+pub fn unfuse_matmul_bodies(stmts: &mut Vec<Stmt>) {
+    // Find the highest buf ID in use so new buffers don't conflict.
+    let mut max_buf: usize = 0;
+    for stmt in stmts.iter() {
+        match stmt {
+            Stmt::Alloc { buf, .. } | Stmt::Fill { buf, .. } | Stmt::FillArange { buf, .. } => {
+                max_buf = max_buf.max(*buf);
+            }
+            Stmt::Loop { buf, .. } => {
+                max_buf = max_buf.max(*buf);
+            }
+            Stmt::Pad { buf, input_buf, .. } => {
+                max_buf = max_buf.max(*buf);
+                max_buf = max_buf.max(*input_buf);
+            }
+        }
+    }
+    let mut next_buf = max_buf + 1;
+
+    let mut insertions: Vec<(usize, Vec<Stmt>)> = Vec::new();
+
+    for (si, stmt) in stmts.iter_mut().enumerate() {
+        let Stmt::Loop { buf, shape, reduce: Some(reduce), body, result, tile: _ } = stmt else {
+            continue;
+        };
+        if body.len() <= 3 { continue; }
+        if reduce.op != ReduceOp::Sum { continue; }
+
+        let result_idx = *result;
+        let (pre_idx, weight_idx) = match &body[result_idx] {
+            Inst::Mul(a, b) => (*a, *b),
+            _ => continue,
+        };
+
+        let ndim = shape.len();
+        if ndim < 2 { continue; }
+        let n_dim = ndim - 1;
+        let reduce_dim = ndim;
+
+        // Check weight_load depends on both reduce_dim and n_dim
+        let weight_ok = match &body[weight_idx] {
+            Inst::Load { index: Index::Strided { parts, .. }, .. } => {
+                parts.iter().any(|(d, _)| *d == n_dim) &&
+                parts.iter().any(|(d, _)| *d == reduce_dim)
+            }
+            _ => false,
+        };
+        if !weight_ok { continue; }
+
+        // pre chain must NOT depend on n_dim
+        let dep_n = compute_dim_dep(body, n_dim);
+        if dep_n[pre_idx] { continue; }
+
+        // pre chain SHOULD depend on reduce_dim (otherwise hoisting handles it)
+        let dep_k = compute_dim_dep(body, reduce_dim);
+        if !dep_k[pre_idx] { continue; }
+
+        // Build dim remapping: remove n_dim, reduce_dim → n_dim position
+        // Original dims: 0..n_dim-1 (batch+m), n_dim (N), reduce_dim (K)
+        // Pre dims: 0..n_dim-1 (batch+m), n_dim-1+1 = n_dim → K
+        // So: d < n_dim → d, d == reduce_dim → n_dim, d == n_dim → skip
+
+        // Compute transitive deps of pre_idx
+        let pre_deps = compute_transitive_deps(body, pre_idx);
+
+        // Build pre-processing body
+        let mut pre_body: Vec<Inst> = Vec::new();
+        let mut old_to_new: Vec<Option<usize>> = vec![None; body.len()];
+        for j in 0..=pre_idx {
+            if pre_deps[j] || j == pre_idx {
+                let new_idx = pre_body.len();
+                old_to_new[j] = Some(new_idx);
+                let mut inst = remap_inst_refs(&body[j], &old_to_new);
+                // Remap dim indices in Load instructions:
+                // reduce_dim → n_dim (K is now the last dim of pre shape)
+                // n_dim → skip (shouldn't appear, we checked dep_n)
+                if let Inst::Load { index: Index::Strided { parts, .. }, .. } = &mut inst {
+                    for (d, _) in parts.iter_mut() {
+                        if *d == reduce_dim {
+                            *d = n_dim; // K moves to position n_dim in pre shape
+                        }
+                    }
+                }
+                pre_body.push(inst);
+            }
+        }
+        let pre_result = old_to_new[pre_idx].unwrap();
+
+        // Pre shape: output dims (without last) + reduce dim as last
+        // The pre-processing produces values for each (batch..., m, k) position
+        let mut pre_shape: Vec<Dim> = shape[..n_dim].to_vec();
+        pre_shape.push(reduce.size.clone());
+
+        let pre_buf = next_buf;
+        next_buf += 1;
+
+        // Build the strided index for loading from pre_buf in the matmul.
+        // pre_buf has shape (batch..., m_dim_out, K) stored contiguously.
+        // In the matmul, we need to load pre_buf[batch_dims, m_dim, ki].
+        // The strides are: last dim (K) has stride 1, m_dim has stride K,
+        // batch dims have product strides.
+        let pre_strides = Dim::strides(&pre_shape);
+        let mut pre_load_parts: Vec<(usize, Dim)> = Vec::new();
+        for (d, stride) in pre_strides.iter().enumerate() {
+            if d < pre_shape.len() - 1 {
+                // batch or m dim — maps to output dims 0..n_dim-1
+                pre_load_parts.push((d, stride.clone()));
+            }
+        }
+        // reduce_dim maps to the last dim of pre_shape (stride 1)
+        pre_load_parts.push((reduce_dim, Dim::Lit(1)));
+
+        let pre_load = Inst::Load {
+            buf: pre_buf,
+            index: Index::Strided { parts: pre_load_parts, offset: Dim::Lit(0) },
+        };
+
+        let new_body = vec![
+            pre_load,
+            body[weight_idx].clone(),
+            Inst::Mul(0, 1),
+        ];
+        *body = new_body;
+        *result = 2;
+
+        insertions.push((si, vec![
+            Stmt::Alloc { buf: pre_buf, size: Dim::product(&pre_shape) },
+            Stmt::Loop {
+                buf: pre_buf,
+                shape: pre_shape,
+                reduce: None,
+                body: pre_body,
+                result: pre_result,
+                tile: None,
+            },
+        ]));
+    }
+
+    // Insert (reverse order for stable indices)
+    for (si, new_stmts) in insertions.into_iter().rev() {
+        for (i, s) in new_stmts.into_iter().enumerate() {
+            stmts.insert(si + i, s);
+        }
+    }
+}
+
+fn compute_dim_dep(body: &[Inst], dim: usize) -> Vec<bool> {
+    let mut dep = vec![false; body.len()];
+    for (j, inst) in body.iter().enumerate() {
+        dep[j] = match inst {
+            Inst::Load { index: Index::Strided { parts, .. }, .. } => {
+                parts.iter().any(|(d, _)| *d == dim)
+            }
+            Inst::Load { index: Index::Flat, .. } => true,
+            Inst::Const(_) => false,
+            Inst::DimVar(d) => *d == dim,
+            Inst::Neg(a) | Inst::Recip(a) | Inst::Exp2(a) | Inst::Log2(a) | Inst::Sqrt(a) => dep[*a],
+            Inst::Add(a, b) | Inst::Mul(a, b) | Inst::Max(a, b) | Inst::CmpLt(a, b) => dep[*a] || dep[*b],
+        };
+    }
+    dep
+}
+
+fn compute_transitive_deps(body: &[Inst], target: usize) -> Vec<bool> {
+    let mut needed = vec![false; body.len()];
+    needed[target] = true;
+    for j in (0..=target).rev() {
+        if !needed[j] { continue; }
+        match &body[j] {
+            Inst::Neg(a) | Inst::Recip(a) | Inst::Exp2(a) | Inst::Log2(a) | Inst::Sqrt(a) => {
+                needed[*a] = true;
+            }
+            Inst::Add(a, b) | Inst::Mul(a, b) | Inst::Max(a, b) | Inst::CmpLt(a, b) => {
+                needed[*a] = true;
+                needed[*b] = true;
+            }
+            _ => {}
+        }
+    }
+    needed
+}
+
+fn remap_inst_refs(inst: &Inst, mapping: &[Option<usize>]) -> Inst {
+    let r = |idx: usize| mapping[idx].unwrap_or(idx);
+    match inst {
+        Inst::Neg(a) => Inst::Neg(r(*a)),
+        Inst::Recip(a) => Inst::Recip(r(*a)),
+        Inst::Exp2(a) => Inst::Exp2(r(*a)),
+        Inst::Log2(a) => Inst::Log2(r(*a)),
+        Inst::Sqrt(a) => Inst::Sqrt(r(*a)),
+        Inst::Add(a, b) => Inst::Add(r(*a), r(*b)),
+        Inst::Mul(a, b) => Inst::Mul(r(*a), r(*b)),
+        Inst::Max(a, b) => Inst::Max(r(*a), r(*b)),
+        Inst::CmpLt(a, b) => Inst::CmpLt(r(*a), r(*b)),
+        other => other.clone(),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------

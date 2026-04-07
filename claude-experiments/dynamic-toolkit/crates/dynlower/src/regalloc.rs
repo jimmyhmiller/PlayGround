@@ -114,6 +114,12 @@ pub trait RegisterAllocator: Sized {
     fn dec_use(&mut self, val: Value);
     fn inc_use(&mut self, val: Value);
 
+    /// Mark a GP register as occupied by a value without updating the value's
+    /// canonical location.  Used during call‑arg setup so that subsequent
+    /// allocations don't clobber destination registers that already hold
+    /// the correct value.
+    fn mark_gp_occupied(&mut self, r: u8, val: Value);
+
     // Spilling
     fn spill_caller_saved<B: LoweringBackend>(
         &mut self,
@@ -523,6 +529,10 @@ impl RegisterAllocator for GreedyRegState {
 
     fn assign_fp(&mut self, val: Value, r: u8) {
         GreedyRegState::assign_fp(self, val, r)
+    }
+
+    fn mark_gp_occupied(&mut self, r: u8, val: Value) {
+        self.gp_occupant[r as usize] = Some(val);
     }
 
     fn set_spill_slot(&mut self, val: Value, offset: i32) {
@@ -1408,6 +1418,10 @@ impl RegisterAllocator for LinearScanAllocator {
     fn assign_fp(&mut self, val: Value, r: u8) {
         self.fp_occupant[r as usize] = Some(val);
         self.values[val.index()].loc = ValueLoc::FpReg(r);
+    }
+
+    fn mark_gp_occupied(&mut self, r: u8, val: Value) {
+        self.gp_occupant[r as usize] = Some(val);
     }
 
     fn set_spill_slot(&mut self, val: Value, offset: i32) {

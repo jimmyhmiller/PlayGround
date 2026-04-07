@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::fmt;
 
-use crate::ir::Function;
+use crate::ir::{Function, SafepointAction};
 use crate::target::Target;
 use crate::types::*;
 
@@ -27,6 +27,22 @@ pub struct Allocation {
 
     /// Total number of spill slots used.
     pub num_spill_slots: u32,
+
+    /// Stackmaps: at each safepoint instruction, the location of every live
+    /// value that requested `Record` or `SpillAndRecord`. Empty if the
+    /// function has no safepoints or all actions are `CallingConvention`/`Ignore`.
+    pub stackmaps: HashMap<InstId, Vec<StackmapEntry>>,
+}
+
+/// One entry in a safepoint's stackmap: where a live value can be found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StackmapEntry {
+    /// The virtual register this entry describes.
+    pub vreg: VReg,
+    /// Where the value lives at this safepoint.
+    pub location: MoveOperand,
+    /// The action that was requested (Record or SpillAndRecord).
+    pub action: SafepointAction,
 }
 
 /// A move that the allocator needs the user to insert.
@@ -107,6 +123,7 @@ impl Allocation {
             moves: Vec::new(),
             spill_slots: HashMap::new(),
             num_spill_slots: 0,
+            stackmaps: HashMap::new(),
         }
     }
 

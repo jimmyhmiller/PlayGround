@@ -10,6 +10,7 @@ required-features = ["runtime"]
 
 [dependencies]
 tensor-lang-graph = { path = "../tensor-lang-graph" }
+regalloc = { path = "../../../register-alloc" }
 wasmtime = { version = "43", optional = true }
 serde_json = { version = "1", optional = true }
 libc = "0.2"

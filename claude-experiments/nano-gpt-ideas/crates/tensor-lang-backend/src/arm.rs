@@ -748,6 +748,7 @@ impl ArmBackend {
         } else {
             loop_ir::lower(graph)
         };
+        loop_ir::unfuse_matmul_bodies(&mut stmts);
         loop_ir::tile_reduce_loops(&mut stmts);
 
         // Collect symbolic dim params
@@ -800,6 +801,12 @@ impl ArmBackend {
         e.stp_pre(X23, X24, -16);
         e.stp_pre(X25, X26, -16);
         e.stp_pre(X27, X28, -16);
+
+        // Save callee-saved FP regs (V8-V15) — 128-bit Q-reg pairs
+        e.stp_q_pre(8, 9, -32);
+        e.stp_q_pre(10, 11, -32);
+        e.stp_q_pre(12, 13, -32);
+        e.stp_q_pre(14, 15, -32);
 
         // Placeholder for frame allocation — we'll patch this after codegen
         // Reserve space for: MOVZ X9, #imm16; MOVK X9, #imm16; SUB SP, SP, X9
@@ -916,6 +923,9 @@ impl ArmBackend {
                     let buf_slot = ctx.buf_ptrs[buf];
 
                     if let (Some(reduce), Some(tile_cfg)) = (reduce.as_ref(), tile.as_ref()) {
+                        if std::env::var("ARM_BODY_DEBUG").is_ok() {
+                            eprintln!("TILED shape={:?} result={} body_len={}", shape, *result, body.len());
+                        }
                         emit_tiled_loop(&mut e, &mut ctx, buf_slot, shape, reduce, body, *result, tile_cfg);
                     } else if let Some(reduce) = reduce.as_ref() {
                         emit_reduce_loop(&mut e, &mut ctx, buf_slot, shape, reduce, body, *result);
@@ -951,7 +961,13 @@ impl ArmBackend {
         // ADD SP, SP, X9, UXTX (extended register form)
         e.emit(0x8B2963FF);
 
-        // Restore callee-saved
+        // Restore callee-saved FP regs (V8-V15) — reverse order
+        e.ldp_q_post(14, 15, 32);
+        e.ldp_q_post(12, 13, 32);
+        e.ldp_q_post(10, 11, 32);
+        e.ldp_q_post(8, 9, 32);
+
+        // Restore callee-saved GP regs
         e.ldp_post(X27, X28, 16);
         e.ldp_post(X25, X26, 16);
         e.ldp_post(X23, X24, 16);
@@ -1483,7 +1499,195 @@ fn emit_inst_machir(
     }
 }
 
+/// Check if a body can be SIMD-ized (no function calls, all innermost-dim loads
+/// have stride 1 or are broadcasts).
+fn can_simd_elementwise(body: &[Inst], innermost_dim: usize) -> bool {
+    for inst in body {
+        match inst {
+            Inst::Exp2(_) | Inst::Log2(_) => return false,
+            Inst::DimVar(d) if *d == innermost_dim => return false,
+            Inst::Load { index: Index::Strided { parts, .. }, .. } => {
+                for (d, stride) in parts {
+                    if *d == innermost_dim && !stride.is_one() {
+                        return false; // non-unit stride on innermost dim
+                    }
+                }
+            }
+            Inst::Load { index: Index::Flat, .. } => {
+                // Flat index = stride 1, OK for SIMD
+            }
+            _ => {}
+        }
+    }
+    true
+}
+
+/// Emit SIMD body instructions using Vec128 vregs.
+/// Each Inst produces a Vec128 result (4xf32).
+fn emit_simd_body_machir(
+    mb: &mut crate::mach_ir::MachBuilder,
+    ctx: &CodegenCtx,
+    body: &[Inst],
+    inst_vregs: &mut Vec<Option<crate::mach_ir::VReg>>,
+    dim_vregs: &[crate::mach_ir::VReg],
+    buf_ptr_vregs: &HashMap<usize, crate::mach_ir::VReg>,
+    innermost_dim: usize,
+    oi: crate::mach_ir::VReg,
+) {
+    use crate::mach_ir::MachInst;
+
+    for (j, inst) in body.iter().enumerate() {
+        let vreg = match inst {
+            Inst::Load { buf, index } => {
+                let buf_ptr = buf_ptr_vregs[buf];
+                let dst = mb.new_vec();
+                match index {
+                    Index::Flat => {
+                        // Flat: load 4 contiguous floats at out[oi*4]
+                        let byte_off = mb.new_gp();
+                        mb.push(MachInst::LslImm { dst: byte_off, src: oi, shift: 2 });
+                        mb.push(MachInst::LdrQReg { dst, base: buf_ptr, offset: byte_off });
+                    }
+                    Index::Strided { parts, offset } => {
+                        // Compute base address from non-innermost dims
+                        let base_off = mb.new_gp();
+                        let mut has_terms = false;
+                        for (dim, stride) in parts {
+                            if *dim == innermost_dim { continue; } // innermost handled by Q load
+                            let dv = dim_vregs[*dim];
+                            let term = if stride.is_one() {
+                                dv
+                            } else {
+                                let sv = mb.new_gp();
+                                mb.push(MachInst::MovImm64 { dst: sv, val: stride.as_usize().unwrap_or(1) as u64 });
+                                let p = mb.new_gp();
+                                mb.push(MachInst::MulReg { dst: p, lhs: dv, rhs: sv });
+                                p
+                            };
+                            if has_terms {
+                                mb.push(MachInst::AddReg { dst: base_off, lhs: base_off, rhs: term });
+                            } else {
+                                mb.push(MachInst::MovReg { dst: base_off, src: term });
+                                has_terms = true;
+                            }
+                        }
+                        // Add innermost_dim * 1 (stride must be 1 for SIMD)
+                        let inner_dv = dim_vregs[innermost_dim];
+                        if has_terms {
+                            mb.push(MachInst::AddReg { dst: base_off, lhs: base_off, rhs: inner_dv });
+                        } else {
+                            mb.push(MachInst::MovReg { dst: base_off, src: inner_dv });
+                            has_terms = true;
+                        }
+                        if !offset.is_zero() {
+                            let off = mb.new_gp();
+                            mb.push(MachInst::MovImm64 { dst: off, val: offset.as_usize().unwrap_or(0) as u64 });
+                            if has_terms {
+                                mb.push(MachInst::AddReg { dst: base_off, lhs: base_off, rhs: off });
+                            } else {
+                                mb.push(MachInst::MovReg { dst: base_off, src: off });
+                                has_terms = true;
+                            }
+                        }
+                        if !has_terms {
+                            mb.push(MachInst::MovImm64 { dst: base_off, val: 0 });
+                        }
+                        // Check if this is a broadcast (no innermost dim in parts)
+                        let has_inner = parts.iter().any(|(d, _)| *d == innermost_dim);
+                        if has_inner {
+                            // Strided load with stride 1 on innermost → contiguous Q load
+                            let byte_off = mb.new_gp();
+                            mb.push(MachInst::LslImm { dst: byte_off, src: base_off, shift: 2 });
+                            mb.push(MachInst::LdrQReg { dst, base: buf_ptr, offset: byte_off });
+                        } else {
+                            // Broadcast: load scalar, DUP to vector
+                            let byte_off = mb.new_gp();
+                            mb.push(MachInst::LslImm { dst: byte_off, src: base_off, shift: 2 });
+                            let addr = mb.new_gp();
+                            mb.push(MachInst::AddReg { dst: addr, lhs: buf_ptr, rhs: byte_off });
+                            let scalar = mb.new_fp();
+                            mb.push(MachInst::LdrSImm { dst: scalar, base: addr, imm: 0 });
+                            mb.push(MachInst::Dup4sScalar { dst, src: scalar });
+                        }
+                    }
+                }
+                dst
+            }
+            Inst::Const(v) => {
+                let bits = (*v as f32).to_bits();
+                let gp = mb.new_gp();
+                mb.push(MachInst::MovImm64 { dst: gp, val: bits as u64 });
+                let dst = mb.new_vec();
+                mb.push(MachInst::Dup4sGp { dst, src_gp: gp });
+                dst
+            }
+            Inst::Add(a, b) => {
+                let va = inst_vregs[*a].unwrap();
+                let vb = inst_vregs[*b].unwrap();
+                let dst = mb.new_vec();
+                mb.push(MachInst::Fadd4s { dst, lhs: va, rhs: vb });
+                dst
+            }
+            Inst::Mul(a, b) => {
+                let va = inst_vregs[*a].unwrap();
+                let vb = inst_vregs[*b].unwrap();
+                let dst = mb.new_vec();
+                mb.push(MachInst::Fmul4s { dst, lhs: va, rhs: vb });
+                dst
+            }
+            Inst::Neg(a) => {
+                let va = inst_vregs[*a].unwrap();
+                let dst = mb.new_vec();
+                mb.push(MachInst::Fneg4s { dst, src: va });
+                dst
+            }
+            Inst::Max(a, b) => {
+                let va = inst_vregs[*a].unwrap();
+                let vb = inst_vregs[*b].unwrap();
+                let dst = mb.new_vec();
+                mb.push(MachInst::Fmax4s { dst, lhs: va, rhs: vb });
+                dst
+            }
+            Inst::Sqrt(a) => {
+                let va = inst_vregs[*a].unwrap();
+                let dst = mb.new_vec();
+                mb.push(MachInst::Fsqrt4s { dst, src: va });
+                dst
+            }
+            Inst::Recip(a) => {
+                let va = inst_vregs[*a].unwrap();
+                let one = mb.new_vec();
+                mb.push(MachInst::Fmov4sOne { dst: one });
+                let dst = mb.new_vec();
+                mb.push(MachInst::Fdiv4s { dst, lhs: one, rhs: va });
+                dst
+            }
+            Inst::CmpLt(a, b) => {
+                // CmpLt(a,b) = a < b = b > a → FCMGT(b, a), result is all-1s or all-0s mask
+                // We return the mask as a float vector (AND with 1.0 to get 0.0/1.0)
+                let va = inst_vregs[*a].unwrap();
+                let vb = inst_vregs[*b].unwrap();
+                let mask = mb.new_vec();
+                mb.push(MachInst::Fcmgt4s { dst: mask, lhs: vb, rhs: va });
+                // AND with 1.0 to get 0.0/1.0
+                let one = mb.new_vec();
+                mb.push(MachInst::Fmov4sOne { dst: one });
+                let dst = mb.new_vec();
+                mb.push(MachInst::And16b { dst, lhs: mask, rhs: one });
+                dst
+            }
+            Inst::DimVar(_) => unreachable!("DimVar on innermost dim not supported in SIMD"),
+            Inst::Exp2(_) | Inst::Log2(_) => unreachable!("calls not supported in SIMD"),
+        };
+        inst_vregs[j] = Some(vreg);
+    }
+}
+
 /// Emit a simple elementwise loop (no reduce) using MachIR with virtual registers.
+///
+/// Uses nested loops instead of flat-index div/mod decomposition.
+/// This eliminates expensive SDIV instructions (12-20 cycles each) from the
+/// hot path, replacing them with simple counter increments.
 fn emit_elementwise_loop(
     e: &mut ArmEmitter,
     ctx: &mut CodegenCtx,
@@ -1495,21 +1699,10 @@ fn emit_elementwise_loop(
     use crate::mach_ir::{MachBuilder, MachInst, allocate_and_emit_with_spills};
 
     let ndim = shape.len();
-    let out_strides = Dim::strides(shape);
 
-    // Pre-compute sizes into stack slots (done before MachIR, using direct emitter)
-    let out_size_slot = ctx.alloc_slot();
-    emit_dim_to_reg(e, &Dim::product(shape), ctx, X9);
-    store_to_sp_large(e, X9, out_size_slot);
-
-    let mut stride_slots = Vec::new();
+    // Pre-compute shape sizes into stack slots
     let mut shape_slots = Vec::new();
     for d in 0..ndim {
-        let ss = ctx.alloc_slot();
-        emit_dim_to_reg(e, &out_strides[d], ctx, X9);
-        store_to_sp_large(e, X9, ss);
-        stride_slots.push(ss);
-
         let sh = ctx.alloc_slot();
         emit_dim_to_reg(e, &shape[d], ctx, X9);
         store_to_sp_large(e, X9, sh);
@@ -1526,105 +1719,158 @@ fn emit_elementwise_loop(
         Vec::new()
     };
 
-    // Build MachIR — hoist ALL loop invariants before the loop
+    // Build MachIR with nested loops (no div/mod decomposition)
     let mut mb = MachBuilder::new();
 
     let out_ptr = mb.new_gp();
     mb.push(MachInst::SpLoad { dst: out_ptr, slot: buf_slot });
-    let out_size = mb.new_gp();
-    mb.push(MachInst::SpLoad { dst: out_size, slot: out_size_slot });
 
-    // Hoist loop invariants before the loop when safe (no function calls).
-    // With calls, caller-saved regs get clobbered, so load inside the loop.
-    let hoist = !has_calls;
+    // Load shape sizes and buffer pointers
+    let shape_vregs: Vec<_> = shape_slots.iter().map(|&s| {
+        let v = mb.new_gp(); mb.push(MachInst::SpLoad { dst: v, slot: s }); v
+    }).collect();
+    let buf_ptr_vregs: HashMap<usize, _> = buf_info.iter().map(|(&buf_id, &slot)| {
+        let v = mb.new_gp(); mb.push(MachInst::SpLoad { dst: v, slot }); (buf_id, v)
+    }).collect();
 
-    let stride_vregs_pre: Vec<_>;
-    let shape_vregs_pre: Vec<_>;
-    let buf_ptr_vregs_pre: HashMap<usize, _>;
-    if hoist {
-        stride_vregs_pre = stride_slots.iter().map(|&s| {
-            let v = mb.new_gp(); mb.push(MachInst::SpLoad { dst: v, slot: s }); v
-        }).collect();
-        shape_vregs_pre = shape_slots.iter().map(|&s| {
-            let v = mb.new_gp(); mb.push(MachInst::SpLoad { dst: v, slot: s }); v
-        }).collect();
-        buf_ptr_vregs_pre = buf_info.iter().map(|(&buf_id, &slot)| {
-            let v = mb.new_gp(); mb.push(MachInst::SpLoad { dst: v, slot }); (buf_id, v)
-        }).collect();
-    } else {
-        stride_vregs_pre = Vec::new();
-        shape_vregs_pre = Vec::new();
-        buf_ptr_vregs_pre = HashMap::new();
-    }
-
+    // Flat output counter — incremented in innermost loop
     let oi = mb.new_gp();
     mb.push(MachInst::MovImm64 { dst: oi, val: 0 });
 
-    let loop_start = e.alloc_label();
-    let loop_end = e.alloc_label();
+    let innermost = ndim - 1;
+    let use_simd = ndim >= 1 && !has_calls && can_simd_elementwise(body, innermost);
 
-    mb.push(MachInst::Label { label: loop_start });
-    mb.push(MachInst::CmpReg { lhs: oi, rhs: out_size });
-    mb.push(MachInst::BCond { cond: COND_GE, label: loop_end });
+    // Outer loops: d0..d_{ndim-2}
+    let mut dim_vregs: Vec<crate::mach_ir::VReg> = Vec::with_capacity(ndim);
+    let mut loop_starts: Vec<usize> = Vec::with_capacity(ndim);
+    let mut loop_ends: Vec<usize> = Vec::with_capacity(ndim);
 
-    // Use hoisted values or reload each iteration
-    let stride_vregs: Vec<_> = if hoist { stride_vregs_pre.clone() } else {
-        stride_slots.iter().map(|&s| {
-            let v = mb.new_gp(); mb.push(MachInst::SpLoad { dst: v, slot: s }); v
-        }).collect()
-    };
-    let shape_vregs: Vec<_> = if hoist { shape_vregs_pre.clone() } else {
-        shape_slots.iter().map(|&s| {
-            let v = mb.new_gp(); mb.push(MachInst::SpLoad { dst: v, slot: s }); v
-        }).collect()
-    };
-    let buf_ptr_vregs: HashMap<usize, _> = if hoist { buf_ptr_vregs_pre.clone() } else {
-        buf_info.iter().map(|(&buf_id, &slot)| {
-            let v = mb.new_gp(); mb.push(MachInst::SpLoad { dst: v, slot }); (buf_id, v)
-        }).collect()
-    };
-
-    // Decompose oi into dim vars (iteration-local, short-lived)
-    let dim_vregs: Vec<_> = (0..ndim).map(|d| {
+    for d in 0..ndim {
         let dim_var = mb.new_gp();
-        if d < ndim - 1 {
-            let q = mb.new_gp();
-            mb.push(MachInst::Sdiv { dst: q, lhs: oi, rhs: stride_vregs[d] });
-            let div_result = mb.new_gp();
-            mb.push(MachInst::Sdiv { dst: div_result, lhs: q, rhs: shape_vregs[d] });
-            mb.push(MachInst::Msub { dst: dim_var, mul_lhs: div_result, mul_rhs: shape_vregs[d], sub_from: q });
+        mb.push(MachInst::MovImm64 { dst: dim_var, val: 0 });
+        dim_vregs.push(dim_var);
+
+        if d < innermost || !use_simd {
+            // Standard loop header for outer dims (and innermost if no SIMD)
+            let start = e.alloc_label();
+            let end = e.alloc_label();
+            loop_starts.push(start);
+            loop_ends.push(end);
+            mb.push(MachInst::Label { label: start });
+            mb.push(MachInst::CmpReg { lhs: dim_var, rhs: shape_vregs[d] });
+            mb.push(MachInst::BCond { cond: COND_GE, label: end });
         } else {
-            let div_result = mb.new_gp();
-            mb.push(MachInst::Sdiv { dst: div_result, lhs: oi, rhs: shape_vregs[d] });
-            mb.push(MachInst::Msub { dst: dim_var, mul_lhs: div_result, mul_rhs: shape_vregs[d], sub_from: oi });
+            // SIMD: innermost loop will be handled specially below
+            loop_starts.push(0); // placeholder
+            loop_ends.push(0);   // placeholder
         }
-        dim_var
-    }).collect();
-
-    // Emit body instructions
-    let mut inst_vregs: Vec<Option<crate::mach_ir::VReg>> = vec![None; body.len()];
-
-    for (j, inst) in body.iter().enumerate() {
-        let vreg = emit_inst_machir(
-            &mut mb, e, ctx, inst, j, &inst_vregs, &dim_vregs, &buf_ptr_vregs,
-            &shape_vregs, &stride_slots, &shape_slots, shape, ndim, &call_spill_slots,
-            Some(oi),
-        );
-        inst_vregs[j] = Some(vreg);
     }
 
-    // Store result: out[oi] = result_vreg
-    let result_vreg = inst_vregs[result].unwrap();
-    let byte_off = mb.new_gp();
-    mb.push(MachInst::LslImm { dst: byte_off, src: oi, shift: 2 });
-    let store_addr = mb.new_gp();
-    mb.push(MachInst::AddReg { dst: store_addr, lhs: out_ptr, rhs: byte_off });
-    mb.push(MachInst::StrSImm { src: result_vreg, base: store_addr, imm: 0 });
+    let stride_slots: Vec<u32> = Vec::new();
 
-    // oi++
-    mb.push(MachInst::AddImm { dst: oi, src: oi, imm: 1 });
-    mb.push(MachInst::B { label: loop_start });
-    mb.push(MachInst::Label { label: loop_end });
+    if use_simd {
+        // SIMD innermost loop: process 4 elements at a time
+        let inner_dim = dim_vregs[innermost];
+        // inner_limit = shape[innermost] & ~3  (round down to multiple of 4)
+        let inner_limit = mb.new_gp();
+        let four = mb.new_gp();
+        mb.push(MachInst::MovImm64 { dst: four, val: 4 });
+        mb.push(MachInst::Sdiv { dst: inner_limit, lhs: shape_vregs[innermost], rhs: four });
+        mb.push(MachInst::LslImm { dst: inner_limit, src: inner_limit, shift: 2 });
+
+        let simd_start = e.alloc_label();
+        let simd_end = e.alloc_label();
+        mb.push(MachInst::Label { label: simd_start });
+        mb.push(MachInst::CmpReg { lhs: inner_dim, rhs: inner_limit });
+        mb.push(MachInst::BCond { cond: COND_GE, label: simd_end });
+
+        // Emit SIMD body (4 elements at once)
+        let mut simd_inst_vregs: Vec<Option<crate::mach_ir::VReg>> = vec![None; body.len()];
+        emit_simd_body_machir(&mut mb, ctx, body, &mut simd_inst_vregs,
+                              &dim_vregs, &buf_ptr_vregs, innermost, oi);
+
+        // Store result: 4 floats to out[oi*4]
+        let simd_result = simd_inst_vregs[result].unwrap();
+        let byte_off = mb.new_gp();
+        mb.push(MachInst::LslImm { dst: byte_off, src: oi, shift: 2 });
+        mb.push(MachInst::StrQReg { src: simd_result, base: out_ptr, offset: byte_off });
+
+        // oi += 4, inner_dim += 4
+        mb.push(MachInst::AddImm { dst: oi, src: oi, imm: 4 });
+        mb.push(MachInst::AddImm { dst: inner_dim, src: inner_dim, imm: 4 });
+        mb.push(MachInst::B { label: simd_start });
+        mb.push(MachInst::Label { label: simd_end });
+
+        // Scalar remainder: inner_dim..shape[innermost]
+        let scalar_start = e.alloc_label();
+        let scalar_end = e.alloc_label();
+        mb.push(MachInst::Label { label: scalar_start });
+        mb.push(MachInst::CmpReg { lhs: inner_dim, rhs: shape_vregs[innermost] });
+        mb.push(MachInst::BCond { cond: COND_GE, label: scalar_end });
+
+        let mut scalar_inst_vregs: Vec<Option<crate::mach_ir::VReg>> = vec![None; body.len()];
+        for (j, inst) in body.iter().enumerate() {
+            let vreg = emit_inst_machir(
+                &mut mb, e, ctx, inst, j, &scalar_inst_vregs, &dim_vregs, &buf_ptr_vregs,
+                &shape_vregs, &stride_slots, &shape_slots, shape, ndim, &call_spill_slots,
+                Some(oi),
+            );
+            scalar_inst_vregs[j] = Some(vreg);
+        }
+        let scalar_result = scalar_inst_vregs[result].unwrap();
+        let byte_off2 = mb.new_gp();
+        mb.push(MachInst::LslImm { dst: byte_off2, src: oi, shift: 2 });
+        let store_addr = mb.new_gp();
+        mb.push(MachInst::AddReg { dst: store_addr, lhs: out_ptr, rhs: byte_off2 });
+        mb.push(MachInst::StrSImm { src: scalar_result, base: store_addr, imm: 0 });
+
+        mb.push(MachInst::AddImm { dst: oi, src: oi, imm: 1 });
+        mb.push(MachInst::AddImm { dst: inner_dim, src: inner_dim, imm: 1 });
+        mb.push(MachInst::B { label: scalar_start });
+        mb.push(MachInst::Label { label: scalar_end });
+
+        // Close outer loops (skip innermost — handled above)
+        for d in (0..innermost).rev() {
+            mb.push(MachInst::AddImm { dst: dim_vregs[d], src: dim_vregs[d], imm: 1 });
+            mb.push(MachInst::B { label: loop_starts[d] });
+            mb.push(MachInst::Label { label: loop_ends[d] });
+        }
+    } else {
+        // Scalar path (unchanged): for loops with calls or non-SIMD-safe bodies
+        let body_buf_ptr_vregs: HashMap<usize, _> = if has_calls {
+            buf_info.iter().map(|(&buf_id, &slot)| {
+                let v = mb.new_gp(); mb.push(MachInst::SpLoad { dst: v, slot }); (buf_id, v)
+            }).collect()
+        } else {
+            buf_ptr_vregs.clone()
+        };
+
+        let mut inst_vregs: Vec<Option<crate::mach_ir::VReg>> = vec![None; body.len()];
+        for (j, inst) in body.iter().enumerate() {
+            let vreg = emit_inst_machir(
+                &mut mb, e, ctx, inst, j, &inst_vregs, &dim_vregs, &body_buf_ptr_vregs,
+                &shape_vregs, &stride_slots, &shape_slots, shape, ndim, &call_spill_slots,
+                Some(oi),
+            );
+            inst_vregs[j] = Some(vreg);
+        }
+
+        let result_vreg = inst_vregs[result].unwrap();
+        let byte_off = mb.new_gp();
+        mb.push(MachInst::LslImm { dst: byte_off, src: oi, shift: 2 });
+        let store_addr = mb.new_gp();
+        mb.push(MachInst::AddReg { dst: store_addr, lhs: out_ptr, rhs: byte_off });
+        mb.push(MachInst::StrSImm { src: result_vreg, base: store_addr, imm: 0 });
+
+        mb.push(MachInst::AddImm { dst: oi, src: oi, imm: 1 });
+
+        // Close ALL nested loops
+        for d in (0..ndim).rev() {
+            mb.push(MachInst::AddImm { dst: dim_vregs[d], src: dim_vregs[d], imm: 1 });
+            mb.push(MachInst::B { label: loop_starts[d] });
+            mb.push(MachInst::Label { label: loop_ends[d] });
+        }
+    }
 
     let insts = mb.finish();
     let next_vreg = mb.next_vreg_id();
@@ -1642,44 +1888,30 @@ fn emit_reduce_loop(
     body: &[Inst],
     result: usize,
 ) {
-    use crate::mach_ir::{MachBuilder, MachInst, allocate_and_emit};
+    use crate::mach_ir::{MachBuilder, MachInst, allocate_and_emit_with_spills};
 
     let ndim = shape.len();
-    let out_strides = Dim::strides(shape);
 
     let init_val = match reduce.op {
         ReduceOp::Sum => 0.0f32,
         ReduceOp::Max => f32::NEG_INFINITY,
     };
 
-    // Pre-compute sizes into stack slots
-    let out_size_slot = ctx.alloc_slot();
-    emit_dim_to_reg(e, &Dim::product(shape), ctx, X9);
-    store_to_sp_large(e, X9, out_size_slot);
-
+    // Pre-compute shape and reduce sizes into stack slots
     let reduce_size_slot = ctx.alloc_slot();
     emit_dim_to_reg(e, &reduce.size, ctx, X9);
     store_to_sp_large(e, X9, reduce_size_slot);
 
-    // Pre-compute strides and shape values
-    let mut stride_slots = Vec::new();
     let mut shape_slots = Vec::new();
     for d in 0..ndim {
-        let ss = ctx.alloc_slot();
-        emit_dim_to_reg(e, &out_strides[d], ctx, X9);
-        store_to_sp_large(e, X9, ss);
-        stride_slots.push(ss);
-
         let sh = ctx.alloc_slot();
         emit_dim_to_reg(e, &shape[d], ctx, X9);
         store_to_sp_large(e, X9, sh);
         shape_slots.push(sh);
     }
 
-    // Pre-compute buffer pointers
     let buf_info = precompute_body_buf_info(e, ctx, body);
 
-    // Allocate call spill slots
     let has_calls = body.iter().any(|inst| matches!(inst, Inst::Exp2(_) | Inst::Log2(_)));
     let call_spill_slots: Vec<u32> = if has_calls {
         let n_slots = body.len() + 1 + ndim + body.len() + 4;
@@ -1688,56 +1920,45 @@ fn emit_reduce_loop(
         Vec::new()
     };
 
-    // Build MachIR
+    // Build MachIR with nested output loops + inner reduce loop
     let mut mb = MachBuilder::new();
 
-    // Load out_ptr, out_size, reduce_size before the loop
     let out_ptr = mb.new_gp();
     mb.push(MachInst::SpLoad { dst: out_ptr, slot: buf_slot });
-    let out_size = mb.new_gp();
-    mb.push(MachInst::SpLoad { dst: out_size, slot: out_size_slot });
     let reduce_size = mb.new_gp();
     mb.push(MachInst::SpLoad { dst: reduce_size, slot: reduce_size_slot });
 
-    // oi = 0
+    // Load shape sizes and buffer pointers
+    let shape_vregs: Vec<_> = shape_slots.iter().map(|&s| {
+        let v = mb.new_gp(); mb.push(MachInst::SpLoad { dst: v, slot: s }); v
+    }).collect();
+    let buf_ptr_vregs: HashMap<usize, _> = buf_info.iter().map(|(&buf_id, &slot)| {
+        let v = mb.new_gp(); mb.push(MachInst::SpLoad { dst: v, slot }); (buf_id, v)
+    }).collect();
+
+    // Flat output counter
     let oi = mb.new_gp();
     mb.push(MachInst::MovImm64 { dst: oi, val: 0 });
 
-    let outer_start = e.alloc_label();
-    let outer_end = e.alloc_label();
+    // Nested output loops (no div/mod)
+    let mut dim_vregs: Vec<crate::mach_ir::VReg> = Vec::with_capacity(ndim);
+    let mut loop_starts: Vec<usize> = Vec::with_capacity(ndim);
+    let mut loop_ends: Vec<usize> = Vec::with_capacity(ndim);
 
-    mb.push(MachInst::Label { label: outer_start });
-    mb.push(MachInst::CmpReg { lhs: oi, rhs: out_size });
-    mb.push(MachInst::BCond { cond: COND_GE, label: outer_end });
-
-    // Load strides, shapes inside the outer loop (short-lived)
-    let stride_vregs: Vec<_> = stride_slots.iter().map(|&s| {
-        let v = mb.new_gp();
-        mb.push(MachInst::SpLoad { dst: v, slot: s });
-        v
-    }).collect();
-    let shape_vregs: Vec<_> = shape_slots.iter().map(|&s| {
-        let v = mb.new_gp();
-        mb.push(MachInst::SpLoad { dst: v, slot: s });
-        v
-    }).collect();
-
-    // Decompose oi into dim vars (iteration-local)
-    let dim_vregs: Vec<_> = (0..ndim).map(|d| {
+    for d in 0..ndim {
         let dim_var = mb.new_gp();
-        if d < ndim - 1 {
-            let q = mb.new_gp();
-            mb.push(MachInst::Sdiv { dst: q, lhs: oi, rhs: stride_vregs[d] });
-            let div_result = mb.new_gp();
-            mb.push(MachInst::Sdiv { dst: div_result, lhs: q, rhs: shape_vregs[d] });
-            mb.push(MachInst::Msub { dst: dim_var, mul_lhs: div_result, mul_rhs: shape_vregs[d], sub_from: q });
-        } else {
-            let div_result = mb.new_gp();
-            mb.push(MachInst::Sdiv { dst: div_result, lhs: oi, rhs: shape_vregs[d] });
-            mb.push(MachInst::Msub { dst: dim_var, mul_lhs: div_result, mul_rhs: shape_vregs[d], sub_from: oi });
-        }
-        dim_var
-    }).collect();
+        mb.push(MachInst::MovImm64 { dst: dim_var, val: 0 });
+        dim_vregs.push(dim_var);
+
+        let start = e.alloc_label();
+        let end = e.alloc_label();
+        loop_starts.push(start);
+        loop_ends.push(end);
+
+        mb.push(MachInst::Label { label: start });
+        mb.push(MachInst::CmpReg { lhs: dim_var, rhs: shape_vregs[d] });
+        mb.push(MachInst::BCond { cond: COND_GE, label: end });
+    }
 
     // acc = init_val
     let init_gp = mb.new_gp();
@@ -1745,11 +1966,10 @@ fn emit_reduce_loop(
     let acc = mb.new_fp();
     mb.push(MachInst::FmovSFromW { dst_fp: acc, src_gp: init_gp });
 
-    // ki = 0
+    // Inner reduce loop: ki = 0..reduce_size
     let ki = mb.new_gp();
     mb.push(MachInst::MovImm64 { dst: ki, val: 0 });
 
-    // Build extended dim_vregs (output dims + reduce dim)
     let mut dim_vregs_ext = dim_vregs.clone();
     dim_vregs_ext.push(ki);
 
@@ -1760,14 +1980,8 @@ fn emit_reduce_loop(
     mb.push(MachInst::CmpReg { lhs: ki, rhs: reduce_size });
     mb.push(MachInst::BCond { cond: COND_GE, label: inner_end });
 
-    // Load buf_ptrs inside the inner loop (short-lived)
-    let buf_ptr_vregs: HashMap<usize, _> = buf_info.iter().map(|(&buf_id, &slot)| {
-        let v = mb.new_gp();
-        mb.push(MachInst::SpLoad { dst: v, slot });
-        (buf_id, v)
-    }).collect();
-
     // Emit body
+    let stride_slots: Vec<u32> = Vec::new();
     let mut inst_vregs: Vec<Option<crate::mach_ir::VReg>> = vec![None; body.len()];
 
     for (j, inst) in body.iter().enumerate() {
@@ -1779,7 +1993,7 @@ fn emit_reduce_loop(
         inst_vregs[j] = Some(vreg);
     }
 
-    // Accumulate: acc = acc op result
+    // Accumulate
     let result_vreg = inst_vregs[result].unwrap();
     match reduce.op {
         ReduceOp::Sum => {
@@ -1803,13 +2017,19 @@ fn emit_reduce_loop(
     mb.push(MachInst::AddReg { dst: store_addr, lhs: out_ptr, rhs: byte_off });
     mb.push(MachInst::StrSImm { src: acc, base: store_addr, imm: 0 });
 
-    // oi++
+    // oi++ (flat output counter)
     mb.push(MachInst::AddImm { dst: oi, src: oi, imm: 1 });
-    mb.push(MachInst::B { label: outer_start });
-    mb.push(MachInst::Label { label: outer_end });
+
+    // Close nested output loops (innermost first)
+    for d in (0..ndim).rev() {
+        mb.push(MachInst::AddImm { dst: dim_vregs[d], src: dim_vregs[d], imm: 1 });
+        mb.push(MachInst::B { label: loop_starts[d] });
+        mb.push(MachInst::Label { label: loop_ends[d] });
+    }
 
     let insts = mb.finish();
-    allocate_and_emit(&insts, e);
+    let next_vreg = mb.next_vreg_id();
+    allocate_and_emit_with_spills(&insts, e, next_vreg, &mut || ctx.alloc_slot());
 }
 
 /// Emit a tiled reduce loop with NEON SIMD, using the MachIR register allocator
@@ -1834,7 +2054,7 @@ fn emit_matmul_direct(
     k: &Dim,
     n: &Dim,
 ) {
-    use crate::mach_ir::{MachBuilder, MachInst, allocate_and_emit};
+    use crate::mach_ir::{MachBuilder, MachInst, allocate_and_emit_with_spills};
 
     let batch_dims = batch.len();
     let m_val = m.as_usize();
@@ -2145,7 +2365,432 @@ fn emit_matmul_direct(
     }
 
     let insts = mb.finish();
-    allocate_and_emit(&insts, e);
+    let next_vreg = mb.next_vreg_id();
+    allocate_and_emit_with_spills(&insts, e, next_vreg, &mut || ctx.alloc_slot());
+}
+
+/// MR=8 × NR=8 matmul micro-kernel. Processes 8 rows of A × 8 cols of B
+/// simultaneously in the K loop, reusing B data across all 8 rows.
+/// Uses 16 Vec128 accumulators (8 rows × 2 SIMD groups of 4 cols).
+fn emit_matmul_mr8(
+    e: &mut ArmEmitter,
+    ctx: &mut CodegenCtx,
+    buf_slot: u32,
+    shape: &[Dim],
+    reduce: &loop_ir::ReduceDesc,
+    body: &[Inst],
+    a_inst_idx: usize,
+    b_inst_idx: usize,
+    batch_strides: &[Dim],
+    batch_dims: usize,
+    m_dim: usize,
+    n_dim: usize,
+    reduce_dim: usize,
+) {
+    use crate::mach_ir::{MachBuilder, MachInst, allocate_and_emit_with_spills};
+
+    const MR: usize = 8;
+    const NR: usize = 8; // 2 SIMD groups of 4
+
+    let (a_buf, a_index) = match &body[a_inst_idx] {
+        Inst::Load { buf, index } => (*buf, index.clone()),
+        _ => unreachable!(),
+    };
+    let (b_buf, b_index) = match &body[b_inst_idx] {
+        Inst::Load { buf, index } => (*buf, index.clone()),
+        _ => unreachable!(),
+    };
+
+    let a_k_stride = get_stride_for_dim(&a_index, reduce_dim);
+    let b_k_stride = get_stride_for_dim(&b_index, reduce_dim);
+    let b_n_stride = get_stride_for_dim(&b_index, n_dim);
+
+    // Compute effective A row stride for the collapsed (batch..., m) space.
+    // Walk from m_dim through batch dims to find the stride between consecutive rows.
+    let a_row_stride = {
+        let mut s = get_stride_for_dim(&a_index, m_dim);
+        if s == 0 {
+            // m_dim has size 1, look at batch dims (right to left)
+            for d in (0..batch_dims).rev() {
+                s = get_stride_for_dim(&a_index, d);
+                if s != 0 { break; }
+            }
+        }
+        s
+    };
+
+    // Effective M = product of batch dims × shape[m_dim]
+    let effective_m_dim = Dim::product(
+        &(0..=m_dim).map(|d| shape[d].clone()).collect::<Vec<_>>()
+    );
+
+    // Output row stride = shape[n_dim] (output is [effective_M, N])
+    let out_row_stride = shape[n_dim].clone();
+
+    // Pre-compute values into stack slots
+    let out_ptr_slot = ctx.alloc_slot();
+    load_from_sp_large(e, X9, buf_slot);
+    store_to_sp_large(e, X9, out_ptr_slot);
+
+    let a_ptr_slot = ctx.alloc_slot();
+    load_buf_ptr(e, ctx, a_buf, X9);
+    store_to_sp_large(e, X9, a_ptr_slot);
+
+    let b_ptr_slot = ctx.alloc_slot();
+    load_buf_ptr(e, ctx, b_buf, X9);
+    store_to_sp_large(e, X9, b_ptr_slot);
+
+    let eff_m_slot = ctx.alloc_slot();
+    emit_dim_to_reg(e, &effective_m_dim, ctx, X9);
+    store_to_sp_large(e, X9, eff_m_slot);
+
+    let n_size_slot = ctx.alloc_slot();
+    emit_dim_to_reg(e, &shape[n_dim], ctx, X9);
+    store_to_sp_large(e, X9, n_size_slot);
+
+    let k_size_slot = ctx.alloc_slot();
+    emit_dim_to_reg(e, &reduce.size, ctx, X9);
+    store_to_sp_large(e, X9, k_size_slot);
+
+    // Output row stride slot
+    let out_row_stride_slot = ctx.alloc_slot();
+    emit_dim_to_reg(e, &out_row_stride, ctx, X9);
+    store_to_sp_large(e, X9, out_row_stride_slot);
+
+    // Build in MachIR
+    let mut mb = MachBuilder::new();
+
+    macro_rules! sp_load {
+        ($mb:expr, $slot:expr) => {{
+            let v = $mb.new_gp();
+            $mb.push(MachInst::SpLoad { dst: v, slot: $slot });
+            v
+        }};
+    }
+
+    let n_size = sp_load!(mb, n_size_slot);
+    let k_size = sp_load!(mb, k_size_slot);
+    let eff_m = sp_load!(mb, eff_m_slot);
+
+    // No batch loops — M is collapsed (batch dims × m_dim).
+    // B has no batch offset since it's the weight matrix (shared across all M rows).
+
+    // n_blk loop: step by NR=8
+    let nr_v = mb.new_gp();
+    mb.push(MachInst::MovImm64 { dst: nr_v, val: NR as u64 });
+    let n_blk = mb.new_gp();
+    mb.push(MachInst::MovImm64 { dst: n_blk, val: 0 });
+    let n_blk_start = e.alloc_label();
+    let n_blk_end = e.alloc_label();
+    mb.push(MachInst::Label { label: n_blk_start });
+    let n_blk_plus_nr = mb.new_gp();
+    mb.push(MachInst::AddReg { dst: n_blk_plus_nr, lhs: n_blk, rhs: nr_v });
+    mb.push(MachInst::CmpReg { lhs: n_blk_plus_nr, rhs: n_size });
+    mb.push(MachInst::BCond { cond: COND_GT, label: n_blk_end });
+
+    // m loop over effective M: step by MR=8, then remainder
+    let mr_v = mb.new_gp();
+    mb.push(MachInst::MovImm64 { dst: mr_v, val: MR as u64 });
+    let mi = mb.new_gp();
+    mb.push(MachInst::MovImm64 { dst: mi, val: 0 });
+    let m_limit = mb.new_gp();
+    mb.push(MachInst::Sdiv { dst: m_limit, lhs: eff_m, rhs: mr_v });
+    mb.push(MachInst::MulReg { dst: m_limit, lhs: m_limit, rhs: mr_v });
+
+    let mi_start = e.alloc_label();
+    let mi_end = e.alloc_label();
+    mb.push(MachInst::Label { label: mi_start });
+    mb.push(MachInst::CmpReg { lhs: mi, rhs: m_limit });
+    mb.push(MachInst::BCond { cond: COND_GE, label: mi_end });
+
+    // === MR=8 × NR=8 micro-kernel ===
+
+    // A base: a_base = a_ptr + mi * a_row_stride * 4
+    // (collapsed batch dims — flat indexing)
+    let a_ptr = sp_load!(mb, a_ptr_slot);
+    let a_row_stride_v = mb.new_gp();
+    mb.push(MachInst::MovImm64 { dst: a_row_stride_v, val: a_row_stride as u64 });
+    let a_base_off = mb.new_gp();
+    mb.push(MachInst::MulReg { dst: a_base_off, lhs: mi, rhs: a_row_stride_v });
+    let a_base_byte = mb.new_gp();
+    mb.push(MachInst::LslImm { dst: a_base_byte, src: a_base_off, shift: 2 });
+    let a_base = mb.new_gp();
+    mb.push(MachInst::AddReg { dst: a_base, lhs: a_ptr, rhs: a_base_byte });
+    // Row stride in bytes
+    let a_row_stride_bytes = mb.new_gp();
+    mb.push(MachInst::LslImm { dst: a_row_stride_bytes, src: a_row_stride_v, shift: 2 });
+
+    // B base for this n_blk: b_col_ptr = b_ptr + n_blk * b_n_stride * 4
+    // (B has no batch dims — it's the weight matrix, shared across all M rows)
+    let b_ptr = sp_load!(mb, b_ptr_slot);
+    let b_n_stride_v = mb.new_gp();
+    mb.push(MachInst::MovImm64 { dst: b_n_stride_v, val: b_n_stride as u64 });
+    let b_col_off = mb.new_gp();
+    mb.push(MachInst::MulReg { dst: b_col_off, lhs: n_blk, rhs: b_n_stride_v });
+    let b_col_byte = mb.new_gp();
+    mb.push(MachInst::LslImm { dst: b_col_byte, src: b_col_off, shift: 2 });
+    let b_col_ptr = mb.new_gp();
+    mb.push(MachInst::AddReg { dst: b_col_ptr, lhs: b_ptr, rhs: b_col_byte });
+
+    // Zero 16 accumulators: acc[r][g] for r=0..8, g=0..2
+    let mut accs: Vec<Vec<crate::mach_ir::VReg>> = Vec::new();
+    for _r in 0..MR {
+        let mut row_accs = Vec::new();
+        for _g in 0..2 {
+            let acc = mb.new_vec();
+            mb.push(MachInst::Movi4sZero { dst: acc });
+            row_accs.push(acc);
+        }
+        accs.push(row_accs);
+    }
+
+    // K loop
+    let ki = mb.new_gp();
+    mb.push(MachInst::MovImm64 { dst: ki, val: 0 });
+    let ki_start = e.alloc_label();
+    let ki_end = e.alloc_label();
+    mb.push(MachInst::Label { label: ki_start });
+    mb.push(MachInst::CmpReg { lhs: ki, rhs: k_size });
+    mb.push(MachInst::BCond { cond: COND_GE, label: ki_end });
+
+    // Load 2 B vectors: B[ki, n_blk..n_blk+8]
+    let b_k_stride_v = mb.new_gp();
+    mb.push(MachInst::MovImm64 { dst: b_k_stride_v, val: b_k_stride as u64 });
+    let b_k_off = mb.new_gp();
+    mb.push(MachInst::MulReg { dst: b_k_off, lhs: ki, rhs: b_k_stride_v });
+    let b_k_byte = mb.new_gp();
+    mb.push(MachInst::LslImm { dst: b_k_byte, src: b_k_off, shift: 2 });
+    let b_addr = mb.new_gp();
+    mb.push(MachInst::AddReg { dst: b_addr, lhs: b_col_ptr, rhs: b_k_byte });
+
+    let b0 = mb.new_vec();
+    mb.push(MachInst::LdrQImm { dst: b0, base: b_addr, imm: 0 });
+    let b1 = mb.new_vec();
+    mb.push(MachInst::LdrQImm { dst: b1, base: b_addr, imm: 16 });
+
+    // For each of MR=8 rows: load A scalar, broadcast, 2 FMLA
+    // Compute A element offset: ki * a_k_stride (shared across rows)
+    let a_k_stride_v = mb.new_gp();
+    mb.push(MachInst::MovImm64 { dst: a_k_stride_v, val: a_k_stride as u64 });
+    let a_k_off = mb.new_gp();
+    mb.push(MachInst::MulReg { dst: a_k_off, lhs: ki, rhs: a_k_stride_v });
+    let a_k_byte = mb.new_gp();
+    mb.push(MachInst::LslImm { dst: a_k_byte, src: a_k_off, shift: 2 });
+    // a_k_ptr = a_base + ki * a_k_stride * 4 (points to A[mi, ki])
+    let a_k_ptr = mb.new_gp();
+    mb.push(MachInst::AddReg { dst: a_k_ptr, lhs: a_base, rhs: a_k_byte });
+
+    for r in 0..MR {
+        // A[mi+r, ki] is at a_k_ptr + r * a_row_stride_bytes
+        let a_addr = if r == 0 {
+            a_k_ptr
+        } else {
+            let addr = mb.new_gp();
+            let r_off = mb.new_gp();
+            mb.push(MachInst::MovImm64 { dst: r_off, val: (r as u64) });
+            mb.push(MachInst::Madd { dst: addr, mul_lhs: r_off, mul_rhs: a_row_stride_bytes, add: a_k_ptr });
+            addr
+        };
+        let a_scalar = mb.new_fp();
+        mb.push(MachInst::LdrSImm { dst: a_scalar, base: a_addr, imm: 0 });
+        let a_bits = mb.new_gp();
+        mb.push(MachInst::FmovWFromS { dst_gp: a_bits, src_fp: a_scalar });
+        let a_bcast = mb.new_vec();
+        mb.push(MachInst::Dup4sGp { dst: a_bcast, src_gp: a_bits });
+        // 2 FMLAs
+        mb.push(MachInst::Fmla4s { acc: accs[r][0], lhs: a_bcast, rhs: b0 });
+        mb.push(MachInst::Fmla4s { acc: accs[r][1], lhs: a_bcast, rhs: b1 });
+    }
+
+    // ki++
+    mb.push(MachInst::AddImm { dst: ki, src: ki, imm: 1 });
+    mb.push(MachInst::B { label: ki_start });
+    mb.push(MachInst::Label { label: ki_end });
+
+    // Store 16 accumulators to C
+    // out[mi+r, n_blk..n_blk+8] — output is flat [effective_M, N]
+    let out_ptr = sp_load!(mb, out_ptr_slot);
+    let out_row_stride_r = sp_load!(mb, out_row_stride_slot);
+    for r in 0..MR {
+        let row_idx = mb.new_gp();
+        mb.push(MachInst::AddImm { dst: row_idx, src: mi, imm: r as u32 });
+        let out_off = mb.new_gp();
+        mb.push(MachInst::MulReg { dst: out_off, lhs: row_idx, rhs: out_row_stride_r });
+        mb.push(MachInst::AddReg { dst: out_off, lhs: out_off, rhs: n_blk });
+        let byte_off = mb.new_gp();
+        mb.push(MachInst::LslImm { dst: byte_off, src: out_off, shift: 2 });
+        let addr = mb.new_gp();
+        mb.push(MachInst::AddReg { dst: addr, lhs: out_ptr, rhs: byte_off });
+        mb.push(MachInst::StrQImm { src: accs[r][0], base: addr, imm: 0 });
+        mb.push(MachInst::StrQImm { src: accs[r][1], base: addr, imm: 16 });
+    }
+
+    // mi += MR
+    mb.push(MachInst::AddImm { dst: mi, src: mi, imm: MR as u32 });
+    mb.push(MachInst::B { label: mi_start });
+    mb.push(MachInst::Label { label: mi_end });
+
+    // === Scalar remainder for M % MR rows ===
+    let mi_rem_start = e.alloc_label();
+    let mi_rem_end = e.alloc_label();
+    mb.push(MachInst::Label { label: mi_rem_start });
+    mb.push(MachInst::CmpReg { lhs: mi, rhs: eff_m });
+    mb.push(MachInst::BCond { cond: COND_GE, label: mi_rem_end });
+
+    let a_ptr2 = sp_load!(mb, a_ptr_slot);
+    let a_row_stride_v2 = mb.new_gp();
+    mb.push(MachInst::MovImm64 { dst: a_row_stride_v2, val: a_row_stride as u64 });
+    let a_row_off = mb.new_gp();
+    mb.push(MachInst::MulReg { dst: a_row_off, lhs: mi, rhs: a_row_stride_v2 });
+    let a_row_byte = mb.new_gp();
+    mb.push(MachInst::LslImm { dst: a_row_byte, src: a_row_off, shift: 2 });
+    let a_row = mb.new_gp();
+    mb.push(MachInst::AddReg { dst: a_row, lhs: a_ptr2, rhs: a_row_byte });
+
+    let rem_acc0 = mb.new_vec();
+    mb.push(MachInst::Movi4sZero { dst: rem_acc0 });
+    let rem_acc1 = mb.new_vec();
+    mb.push(MachInst::Movi4sZero { dst: rem_acc1 });
+
+    let rem_ki = mb.new_gp();
+    mb.push(MachInst::MovImm64 { dst: rem_ki, val: 0 });
+    let rem_ki_start = e.alloc_label();
+    let rem_ki_end = e.alloc_label();
+    mb.push(MachInst::Label { label: rem_ki_start });
+    mb.push(MachInst::CmpReg { lhs: rem_ki, rhs: k_size });
+    mb.push(MachInst::BCond { cond: COND_GE, label: rem_ki_end });
+
+    let rem_a_off = mb.new_gp();
+    mb.push(MachInst::MulReg { dst: rem_a_off, lhs: rem_ki, rhs: a_k_stride_v });
+    let rem_a_s = mb.new_fp();
+    mb.push(MachInst::LdrSRegScaled { dst: rem_a_s, base: a_row, offset: rem_a_off });
+    let rem_a_gp = mb.new_gp();
+    mb.push(MachInst::FmovWFromS { dst_gp: rem_a_gp, src_fp: rem_a_s });
+    let rem_a_bcast = mb.new_vec();
+    mb.push(MachInst::Dup4sGp { dst: rem_a_bcast, src_gp: rem_a_gp });
+
+    let rem_b_off = mb.new_gp();
+    mb.push(MachInst::MulReg { dst: rem_b_off, lhs: rem_ki, rhs: b_k_stride_v });
+    let rem_b_byte = mb.new_gp();
+    mb.push(MachInst::LslImm { dst: rem_b_byte, src: rem_b_off, shift: 2 });
+    let rem_b_addr = mb.new_gp();
+    mb.push(MachInst::AddReg { dst: rem_b_addr, lhs: b_col_ptr, rhs: rem_b_byte });
+    let rem_b0 = mb.new_vec();
+    mb.push(MachInst::LdrQImm { dst: rem_b0, base: rem_b_addr, imm: 0 });
+    let rem_b1 = mb.new_vec();
+    mb.push(MachInst::LdrQImm { dst: rem_b1, base: rem_b_addr, imm: 16 });
+    mb.push(MachInst::Fmla4s { acc: rem_acc0, lhs: rem_a_bcast, rhs: rem_b0 });
+    mb.push(MachInst::Fmla4s { acc: rem_acc1, lhs: rem_a_bcast, rhs: rem_b1 });
+
+    mb.push(MachInst::AddImm { dst: rem_ki, src: rem_ki, imm: 1 });
+    mb.push(MachInst::B { label: rem_ki_start });
+    mb.push(MachInst::Label { label: rem_ki_end });
+
+    // Store remainder row
+    let out_ptr2 = sp_load!(mb, out_ptr_slot);
+    let out_row_stride_r2 = sp_load!(mb, out_row_stride_slot);
+    let rem_out_off = mb.new_gp();
+    mb.push(MachInst::MulReg { dst: rem_out_off, lhs: mi, rhs: out_row_stride_r2 });
+    mb.push(MachInst::AddReg { dst: rem_out_off, lhs: rem_out_off, rhs: n_blk });
+    let rem_byte = mb.new_gp();
+    mb.push(MachInst::LslImm { dst: rem_byte, src: rem_out_off, shift: 2 });
+    let rem_addr = mb.new_gp();
+    mb.push(MachInst::AddReg { dst: rem_addr, lhs: out_ptr2, rhs: rem_byte });
+    mb.push(MachInst::StrQImm { src: rem_acc0, base: rem_addr, imm: 0 });
+    mb.push(MachInst::StrQImm { src: rem_acc1, base: rem_addr, imm: 16 });
+
+    mb.push(MachInst::AddImm { dst: mi, src: mi, imm: 1 });
+    mb.push(MachInst::B { label: mi_rem_start });
+    mb.push(MachInst::Label { label: mi_rem_end });
+
+    // n_blk += NR
+    mb.push(MachInst::AddImm { dst: n_blk, src: n_blk, imm: NR as u32 });
+    mb.push(MachInst::B { label: n_blk_start });
+    mb.push(MachInst::Label { label: n_blk_end });
+
+    // === N remainder: scalar fallback for N % NR cols ===
+    // For each remaining column, scalar K-loop per row
+    let ni = mb.new_gp();
+    mb.push(MachInst::MovReg { dst: ni, src: n_blk }); // n_blk now == N rounded down to NR
+    let ni_start = e.alloc_label();
+    let ni_end = e.alloc_label();
+    mb.push(MachInst::Label { label: ni_start });
+    mb.push(MachInst::CmpReg { lhs: ni, rhs: n_size });
+    mb.push(MachInst::BCond { cond: COND_GE, label: ni_end });
+
+    let mi2 = mb.new_gp();
+    mb.push(MachInst::MovImm64 { dst: mi2, val: 0 });
+    let mi2_start = e.alloc_label();
+    let mi2_end = e.alloc_label();
+    mb.push(MachInst::Label { label: mi2_start });
+    mb.push(MachInst::CmpReg { lhs: mi2, rhs: eff_m });
+    mb.push(MachInst::BCond { cond: COND_GE, label: mi2_end });
+
+    // Scalar accumulate
+    let s_acc = mb.new_fp();
+    mb.push(MachInst::Movi4sZero { dst: s_acc }); // zero scalar via movi (upper bits ignored)
+
+    let a_ptr3 = sp_load!(mb, a_ptr_slot);
+    let b_ptr3 = sp_load!(mb, b_ptr_slot);
+    let a_row_stride_v3 = mb.new_gp();
+    mb.push(MachInst::MovImm64 { dst: a_row_stride_v3, val: a_row_stride as u64 });
+    let s_a_row_off = mb.new_gp();
+    mb.push(MachInst::MulReg { dst: s_a_row_off, lhs: mi2, rhs: a_row_stride_v3 });
+    let s_a_byte = mb.new_gp();
+    mb.push(MachInst::LslImm { dst: s_a_byte, src: s_a_row_off, shift: 2 });
+    let s_a_row = mb.new_gp();
+    mb.push(MachInst::AddReg { dst: s_a_row, lhs: a_ptr3, rhs: s_a_byte });
+
+    let b_n_stride_v2 = mb.new_gp();
+    mb.push(MachInst::MovImm64 { dst: b_n_stride_v2, val: b_n_stride as u64 });
+    let s_b_col_off = mb.new_gp();
+    mb.push(MachInst::MulReg { dst: s_b_col_off, lhs: ni, rhs: b_n_stride_v2 });
+    let s_b_byte = mb.new_gp();
+    mb.push(MachInst::LslImm { dst: s_b_byte, src: s_b_col_off, shift: 2 });
+    let s_b_col = mb.new_gp();
+    mb.push(MachInst::AddReg { dst: s_b_col, lhs: b_ptr3, rhs: s_b_byte });
+
+    let s_ki = mb.new_gp();
+    mb.push(MachInst::MovImm64 { dst: s_ki, val: 0 });
+    let s_ki_start = e.alloc_label();
+    let s_ki_end = e.alloc_label();
+    mb.push(MachInst::Label { label: s_ki_start });
+    mb.push(MachInst::CmpReg { lhs: s_ki, rhs: k_size });
+    mb.push(MachInst::BCond { cond: COND_GE, label: s_ki_end });
+
+    let s_a_off = mb.new_gp();
+    mb.push(MachInst::MulReg { dst: s_a_off, lhs: s_ki, rhs: a_k_stride_v });
+    let s_a_val = mb.new_fp();
+    mb.push(MachInst::LdrSRegScaled { dst: s_a_val, base: s_a_row, offset: s_a_off });
+    let s_b_off = mb.new_gp();
+    mb.push(MachInst::MulReg { dst: s_b_off, lhs: s_ki, rhs: b_k_stride_v });
+    let s_b_val = mb.new_fp();
+    mb.push(MachInst::LdrSRegScaled { dst: s_b_val, base: s_b_col, offset: s_b_off });
+    mb.push(MachInst::Fmadd { dst: s_acc, mul_lhs: s_a_val, mul_rhs: s_b_val, add: s_acc });
+
+    mb.push(MachInst::AddImm { dst: s_ki, src: s_ki, imm: 1 });
+    mb.push(MachInst::B { label: s_ki_start });
+    mb.push(MachInst::Label { label: s_ki_end });
+
+    // Store scalar result
+    let out_ptr3 = sp_load!(mb, out_ptr_slot);
+    let out_row_stride_r3 = sp_load!(mb, out_row_stride_slot);
+    let s_out_off = mb.new_gp();
+    mb.push(MachInst::MulReg { dst: s_out_off, lhs: mi2, rhs: out_row_stride_r3 });
+    mb.push(MachInst::AddReg { dst: s_out_off, lhs: s_out_off, rhs: ni });
+    mb.push(MachInst::StrSRegScaled { src: s_acc, base: out_ptr3, offset: s_out_off });
+
+    mb.push(MachInst::AddImm { dst: mi2, src: mi2, imm: 1 });
+    mb.push(MachInst::B { label: mi2_start });
+    mb.push(MachInst::Label { label: mi2_end });
+
+    mb.push(MachInst::AddImm { dst: ni, src: ni, imm: 1 });
+    mb.push(MachInst::B { label: ni_start });
+    mb.push(MachInst::Label { label: ni_end });
+
+    let insts = mb.finish();
+    let next_vreg = mb.next_vreg_id();
+    allocate_and_emit_with_spills(&insts, e, next_vreg, &mut || ctx.alloc_slot());
 }
 
 fn emit_tiled_matmul_fast(
@@ -2170,7 +2815,7 @@ fn emit_tiled_matmul_fast(
     simd_groups: usize,
     init_val: f32,
 ) {
-    use crate::mach_ir::{MachBuilder, MachInst, allocate_and_emit};
+    use crate::mach_ir::{MachBuilder, MachInst, allocate_and_emit_with_spills};
 
     // Extract buffer IDs and strides from the Load instructions
     let (a_buf, a_index) = match &body[a_inst_idx] {
@@ -2645,7 +3290,8 @@ fn emit_tiled_matmul_fast(
 
     // Allocate and emit
     let insts = mb.finish();
-    allocate_and_emit(&insts, e);
+    let next_vreg = mb.next_vreg_id();
+    allocate_and_emit_with_spills(&insts, e, next_vreg, &mut || ctx.alloc_slot());
 }
 
 /// Extract the stride for a given dimension from an Index.
@@ -2722,8 +3368,18 @@ fn emit_tiled_loop(
         && depends_on_n[0] && !depends_on_n[1];
 
     if (is_matmul_pattern || is_matmul_reversed) && simd_groups <= 8 {
-        // Fast FMLA path with MachIR register allocation
         let (a_inst_idx, b_inst_idx) = if is_matmul_pattern { (0, 1) } else { (1, 0) };
+        // Always use MR=8 micro-kernel for simple matmul patterns.
+        if std::env::var("ARM_BODY_DEBUG").is_ok() {
+            eprintln!("MR8: shape={:?} batch_dims={} m_dim={} n_dim={}", shape, batch_dims, m_dim, n_dim);
+        }
+        {
+            emit_matmul_mr8(e, ctx, buf_slot, shape, reduce, body,
+                a_inst_idx, b_inst_idx, &batch_strides, batch_dims, m_dim, n_dim,
+                reduce_dim);
+            return;
+        }
+        // Fall back to existing fast path for small-M or symbolic cases
         emit_tiled_matmul_fast(e, ctx, buf_slot, shape, reduce, body, tile_cfg,
             a_inst_idx, b_inst_idx, &batch_strides, batch_dims, m_dim, n_dim,
             reduce_dim, tm, tn, tk, unroll, simd_groups, init_val);
@@ -2975,6 +3631,18 @@ fn emit_tiled_loop(
         }
     }
 
+    // Compute K-dependence: instructions that don't depend on the reduce dim
+    // can be hoisted out of the K loop entirely.
+    let depends_on_k = compute_dim_dependence(body, reduce_dim);
+
+    // Emit K-invariant, N-invariant instructions BEFORE the K loop.
+    // These run once per (m, ni_grp) iteration instead of once per K.
+    for (j, inst) in body.iter().enumerate() {
+        if !depends_on_k[j] && !depends_on_n[j] {
+            emit_inst(e, ctx, j, inst);
+        }
+    }
+
     // --- K block loop ---
     // k_blocks = (K + tk - 1) / tk
     load_from_sp_large(e, X9, k_size_slot);
@@ -3026,9 +3694,10 @@ fn emit_tiled_loop(
     e.add_reg(X9, X9, X10);
     store_to_sp_large(e, X9, reduce_dim_slot);
 
-    // Emit n-invariant body instructions once
+    // Emit K-dependent, N-invariant body instructions (skip K-invariant ones
+    // already emitted above, and N-dependent ones emitted per-N below).
     for (j, inst) in body.iter().enumerate() {
-        if !depends_on_n[j] {
+        if depends_on_k[j] && !depends_on_n[j] {
             emit_inst(e, ctx, j, inst);
         }
     }
@@ -3503,6 +4172,25 @@ fn emit_pad(
 }
 
 // Reuse the N-dependence analysis from the WASM backend
+/// Compute which instructions depend on a given dimension (used for both
+/// N-dependence and K-dependence analysis).
+fn compute_dim_dependence(body: &[Inst], dim: usize) -> Vec<bool> {
+    let mut dep = vec![false; body.len()];
+    for (j, inst) in body.iter().enumerate() {
+        dep[j] = match inst {
+            Inst::Load { index: Index::Strided { parts, .. }, .. } => {
+                parts.iter().any(|(d, _)| *d == dim)
+            }
+            Inst::Load { index: Index::Flat, .. } => true,
+            Inst::Const(_) => false,
+            Inst::DimVar(d) => *d == dim,
+            Inst::Neg(a) | Inst::Recip(a) | Inst::Exp2(a) | Inst::Log2(a) | Inst::Sqrt(a) => dep[*a],
+            Inst::Add(a, b) | Inst::Mul(a, b) | Inst::Max(a, b) | Inst::CmpLt(a, b) => dep[*a] || dep[*b],
+        };
+    }
+    dep
+}
+
 fn compute_n_dependence(body: &[Inst], n_dim: usize) -> Vec<bool> {
     let mut dep = vec![false; body.len()];
     for (j, inst) in body.iter().enumerate() {

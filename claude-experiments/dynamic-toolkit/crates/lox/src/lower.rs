@@ -129,6 +129,7 @@ struct Externs {
     // Property ops
     get_property: FuncRef,
     set_property: FuncRef,
+    get_field: FuncRef,     // fast field-only lookup (returns nil if not found)
     // Super
     get_super: FuncRef,
     // Bound method
@@ -139,6 +140,19 @@ struct Externs {
     make_native_fn: FuncRef,
     // String resolution
     resolve_string: FuncRef,
+    // Invoke optimization: avoid BoundMethod allocation for method calls.
+    invoke_lookup: FuncRef,   // (obj, name_id) -> value; sets invoke_kind
+    invoke_func_ptr: FuncRef, // (closure) -> func_ptr (JIT call table)
+    invoke_kind: FuncRef,     // () -> kind (0=field, 1=method, 2=not_found)
+    // Call table base address (for inlining func_ptr resolution)
+    call_table_base: FuncRef, // () -> base_ptr
+    // Combined fast-path invoke: (obj, name_id, num_args) -> func_ptr or 0
+    invoke_fast: FuncRef,
+    invoke_closure: FuncRef,  // () -> closure from last invoke_fast
+    // Combined instantiate: (class) -> instance; also sets init info globals
+    instantiate: FuncRef,
+    last_init_arity: FuncRef,
+    last_init_func_ptr: FuncRef,
 }
 
 fn sig(params: &[Type], ret: Option<Type>) -> Signature {
@@ -176,19 +190,43 @@ fn declare_externs(dm: &mut DynModule) -> Externs {
         class_init_closure: dm.declare_extern("lox_class_init_closure", i(1)),
         get_property: dm.declare_extern("lox_get_property", i(2)),
         set_property: dm.declare_extern("lox_set_property", i(3)),
+        get_field: dm.declare_extern("lox_get_field", i(2)),
         get_super: dm.declare_extern("lox_get_super", i(3)),
         bound_receiver: dm.declare_extern("lox_bound_receiver", i(1)),
         bound_method_closure: dm.declare_extern("lox_bound_method_closure", i(1)),
         bound_closure_func_ptr: dm.declare_extern("lox_bound_closure_func_ptr", i(1)),
         make_native_fn: dm.declare_extern("lox_make_native_fn", i(1)),
         resolve_string: dm.declare_extern("lox_resolve_string", i(1)),
+        invoke_lookup: dm.declare_extern("lox_invoke_lookup", i(2)),
+        invoke_func_ptr: dm.declare_extern("lox_invoke_func_ptr", i(1)),
+        invoke_kind: dm.declare_extern("lox_invoke_kind", i(0)),
+        call_table_base: dm.declare_extern("lox_call_table_base", i(0)),
+        invoke_fast: dm.declare_extern("lox_invoke_fast", i(3)),
+        invoke_closure: dm.declare_extern("lox_invoke_closure", i(0)),
+        instantiate: dm.declare_extern("lox_instantiate", i(1)),
+        last_init_arity: dm.declare_extern("lox_last_init_arity", i(0)),
+        last_init_func_ptr: dm.declare_extern("lox_last_init_func_ptr", i(0)),
     }
+}
+
+/// Handles for inline object operations (type checks, field access, allocation).
+#[derive(Clone)]
+struct TypeHandles {
+    closure: ObjTypeHandle,
+    class: ObjTypeHandle,
+    instance: ObjTypeHandle,
+    bound_method: ObjTypeHandle,
+    upvalue: ObjTypeHandle,
+    native_fn: ObjTypeHandle,
+    table: ObjTypeHandle,
+    string: ObjTypeHandle,
 }
 
 // ── Lowering context ──────────────────────────────────────────────
 
 struct Ctx<'a> {
     externs: &'a Externs,
+    types: &'a TypeHandles,
     func_names: &'a HashMap<String, FuncRef>,
     func_arities: &'a HashMap<String, usize>,
     resolve: &'a ResolveResult,
@@ -197,6 +235,8 @@ struct Ctx<'a> {
     is_script: bool,
     is_init: bool,
     dead: bool,
+    /// Cached call_table_base (computed once per function, used by invoke fast path).
+    cached_call_table_base: Option<Value>,
     /// Maps upvalue name → local var holding the upvalue cell obj_val.
     upvalue_cells: HashMap<String, String>,
     /// Names of locals in the current function that are captured
@@ -250,7 +290,7 @@ fn extract_offset(ty: &ObjType, field: &str) -> i32 {
         .0
 }
 
-fn declare_gc_types(dm: &mut DynModule) -> LoxGcTypes {
+fn declare_gc_types(dm: &mut DynModule) -> (LoxGcTypes, TypeHandles) {
     let string_ty = dm.obj_type("String")
         .field("len", FieldKind::Raw64)
         .varlen_bytes()
@@ -309,7 +349,7 @@ fn declare_gc_types(dm: &mut DynModule) -> LoxGcTypes {
         .map(|t| t.type_info)
         .collect();
 
-    LoxGcTypes {
+    let gc_types = LoxGcTypes {
         type_infos,
         string_id: string_ty.0,
         closure_id: closure_ty.0,
@@ -345,7 +385,20 @@ fn declare_gc_types(dm: &mut DynModule) -> LoxGcTypes {
 
         native_name_off: extract_offset(nf, "name_ptr"),
         native_func_ptr_off: extract_offset(nf, "func_ptr"),
-    }
+    };
+
+    let handles = TypeHandles {
+        closure: dm.obj_handle(closure_ty),
+        class: dm.obj_handle(class_ty),
+        instance: dm.obj_handle(instance_ty),
+        bound_method: dm.obj_handle(bound_method_ty),
+        upvalue: dm.obj_handle(upvalue_ty),
+        native_fn: dm.obj_handle(native_fn_ty),
+        table: dm.obj_handle(table_ty),
+        string: dm.obj_handle(string_ty),
+    };
+
+    (gc_types, handles)
 }
 
 pub fn lower(program: &Program) -> LoweredProgram {
@@ -355,7 +408,7 @@ pub fn lower(program: &Program) -> LoweredProgram {
     );
     dm.register_slow_paths("lox");
 
-    let gc_types = declare_gc_types(&mut dm);
+    let (gc_types, type_handles) = declare_gc_types(&mut dm);
     let externs = declare_externs(&mut dm);
     let mut strings = StringPool::new();
     let resolved = resolve::resolve(program);
@@ -414,6 +467,7 @@ pub fn lower(program: &Program) -> LoweredProgram {
         let mut f = dm.start_func(script);
         let mut ctx = Ctx {
             externs: &externs,
+            types: &type_handles,
             func_names: &func_names,
             func_arities: &func_arities,
             resolve: &resolved,
@@ -422,10 +476,15 @@ pub fn lower(program: &Program) -> LoweredProgram {
             is_script: true,
             is_init: false,
             dead: false,
+            cached_call_table_base: None,
             upvalue_cells: HashMap::new(),
             captured_locals: if captured.is_empty() { &empty_captured } else { captured },
             current_class: None,
         };
+        // Cache call_table_base once at script entry
+        let ctb = f.fb.call(ctx.externs.call_table_base, &[]).unwrap();
+        ctx.cached_call_table_base = Some(ctb);
+
         // Define clock as a native function global
         {
             let clock_name_id = ctx.strings.intern("clock");
@@ -462,7 +521,7 @@ pub fn lower(program: &Program) -> LoweredProgram {
         let upvalue_names = captures.map(|c| c.upvalues.as_slice()).unwrap_or(&[]);
 
         lower_function(&mut dm, fref, decl, key, is_method, upvalue_names, captured_locals,
-                        &externs, &func_names, &func_arities, &resolved, &mut strings, None);
+                        &externs, &type_handles, &func_names, &func_arities, &resolved, &mut strings, None);
     }
 
     // ── Define methods ────────────────────────────────────────
@@ -476,7 +535,7 @@ pub fn lower(program: &Program) -> LoweredProgram {
                 let upvalue_names = captures.map(|c| c.upvalues.as_slice()).unwrap_or(&[]);
 
                 lower_function(&mut dm, fref, method, &key, true, upvalue_names, captured_locals,
-                                &externs, &func_names, &func_arities, &resolved, &mut strings,
+                                &externs, &type_handles, &func_names, &func_arities, &resolved, &mut strings,
                                 Some(class_decl.name.clone()));
             }
         }
@@ -500,6 +559,7 @@ fn lower_function(
     upvalue_names: &[String],
     captured_locals: &std::collections::HashSet<String>,
     externs: &Externs,
+    type_handles: &TypeHandles,
     func_names: &HashMap<String, FuncRef>,
     func_arities: &HashMap<String, usize>,
     resolve: &ResolveResult,
@@ -510,6 +570,7 @@ fn lower_function(
     let is_init = is_method && decl.name == "init";
     let mut ctx = Ctx {
         externs,
+        types: type_handles,
         func_names,
         func_arities,
         resolve,
@@ -518,6 +579,7 @@ fn lower_function(
         is_script: false,
         is_init,
         dead: false,
+        cached_call_table_base: None,
         upvalue_cells: HashMap::new(),
         captured_locals,
         current_class,
@@ -530,6 +592,10 @@ fn lower_function(
     let closure_val = f.fb.block_param(entry, param_idx);
     param_idx += 1;
     f.def_var("__closure__", closure_val);
+
+    // Cache call_table_base once at function entry for invoke fast paths
+    let ctb = f.fb.call(ctx.externs.call_table_base, &[]).unwrap();
+    ctx.cached_call_table_base = Some(ctb);
 
     // Load upvalues from closure
     for (i, uv_name) in upvalue_names.iter().enumerate() {
@@ -670,7 +736,12 @@ fn lower_stmt(f: &mut DynFunc, ctx: &mut Ctx, stmt: &Stmt) {
             f.fb.switch_to_block(body_bb);
             ctx.dead = false;
             lower_stmt(f, ctx, body);
-            if !ctx.dead { f.fb.jump(header, &[]); }
+            if !ctx.dead {
+                // GC safepoint at loop backedge — allows collection of
+                // dead objects accumulated during the loop body.
+                f.fb.safepoint(&[]);
+                f.fb.jump(header, &[]);
+            }
             else { f.fb.unreachable(); }
             ctx.dead = false;
             f.fb.switch_to_block(exit);
@@ -828,7 +899,21 @@ fn lower_expr(f: &mut DynFunc, ctx: &mut Ctx, expr: &Expr) -> Value {
             let obj = lower_expr(f, ctx, obj_expr);
             let name_id = ctx.strings.intern(name);
             let name_val = f.fb.iconst(Type::I64, name_id as i64);
-            f.fb.call(ctx.externs.get_property, &[obj, name_val]).unwrap()
+
+            // Fast path: try field-only lookup (no method fallback)
+            let field_val = f.fb.call(ctx.externs.get_field, &[obj, name_val]).unwrap();
+            let is_nil_check = f.is_nil(field_val);
+            let merge_bb = f.fb.create_block(&[Type::I64]);
+            let slow_bb = f.fb.create_block(&[]);
+            f.fb.br_if(is_nil_check, slow_bb, &[], merge_bb, &[field_val]);
+
+            // Slow path: full property lookup (methods, BoundMethod, errors)
+            f.fb.switch_to_block(slow_bb);
+            let full_val = f.fb.call(ctx.externs.get_property, &[obj, name_val]).unwrap();
+            f.fb.jump(merge_bb, &[full_val]);
+
+            f.fb.switch_to_block(merge_bb);
+            f.fb.block_param(merge_bb, 0)
         }
 
         Expr::Set(obj_expr, name, val_expr) => {
@@ -891,36 +976,58 @@ fn lower_call(f: &mut DynFunc, ctx: &mut Ctx, callee: &Expr, args: &[Expr]) -> V
         _ => {}
     }
 
+    // Optimize method calls: obj.method(args) → invoke without BoundMethod allocation
+    if let Expr::Get(obj_expr, method_name) = callee {
+        if let Expr::Super(_) = obj_expr.as_ref() {
+            // super.method() — fall through to general case
+        } else {
+            let obj = lower_expr(f, ctx, obj_expr);
+            return emit_invoke(f, ctx, obj, method_name, &arg_vals);
+        }
+    }
+
     // General case: indirect call through a value
     let callee_val = lower_expr(f, ctx, callee);
     emit_indirect_call(f, ctx, callee_val, &arg_vals)
 }
 
 /// Emit an indirect call: dispatch based on object type (closure, class, bound method).
+/// Uses inline type checks and field loads instead of extern calls for dispatch.
 fn emit_indirect_call(f: &mut DynFunc, ctx: &mut Ctx, callee: Value, args: &[Value]) -> Value {
-    let obj_type = f.fb.call(ctx.externs.obj_type, &[callee]).unwrap();
+    let error_bb = f.fb.create_block(&[]);
+    let merge_bb = f.fb.create_block(&[Type::I64]);
+
+    // Guard: callee must be a heap object
+    let is_obj = f.is_ptr(callee);
+    let dispatch_bb = f.fb.create_block(&[]);
+    f.fb.br_if(is_obj, dispatch_bb, &[], error_bb, &[]);
+
+    f.fb.switch_to_block(dispatch_bb);
+    // Inline type dispatch: load TypeInfo pointer from object header
+    let raw_ptr = f.obj_unwrap(callee);
+    let ti_val = f.fb.load(Type::I64, raw_ptr, 0); // TypeInfo* at header offset 0
 
     let closure_bb = f.fb.create_block(&[]);
     let class_bb = f.fb.create_block(&[]);
     let bound_bb = f.fb.create_block(&[]);
-    let error_bb = f.fb.create_block(&[]);
-    let merge_bb = f.fb.create_block(&[Type::I64]);
 
-    // ObjType::Closure = 1, Class = 3, BoundMethod = 5
-    let one = f.fb.iconst(Type::I64, 1);
-    let three = f.fb.iconst(Type::I64, 3);
-    let five = f.fb.iconst(Type::I64, 5);
+    // Compare against known TypeInfo addresses (inline, no extern)
+    let closure_ti = f.fb.iconst(Type::I64, ctx.types.closure.type_info_addr as i64);
+    let class_ti = f.fb.iconst(Type::I64, ctx.types.class.type_info_addr as i64);
+    let bound_ti = f.fb.iconst(Type::I64, ctx.types.bound_method.type_info_addr as i64);
+    let native_ti = f.fb.iconst(Type::I64, ctx.types.native_fn.type_info_addr as i64);
 
     let num_args = args.len();
     let num_args_val = f.fb.iconst(Type::I64, num_args as i64);
 
-    let is_closure = f.fb.icmp(CmpOp::Eq, obj_type, one);
+    let is_closure = f.fb.icmp(CmpOp::Eq, ti_val, closure_ti);
     f.fb.br_if(is_closure, closure_bb, &[], class_bb, &[]);
 
-    // ── Closure call
+    // ── Closure call (inline arity check + field loads)
     f.fb.switch_to_block(closure_bb);
     {
-        let arity = f.fb.call(ctx.externs.get_closure_arity, &[callee]).unwrap();
+        // Inline: load arity from closure object
+        let arity = ctx.types.closure.load(f, raw_ptr, "arity");
         let arity_ok = f.fb.icmp(CmpOp::Eq, arity, num_args_val);
         let closure_call_bb = f.fb.create_block(&[]);
         let closure_err_bb = f.fb.create_block(&[]);
@@ -932,6 +1039,7 @@ fn emit_indirect_call(f: &mut DynFunc, ctx: &mut Ctx, callee: Value, args: &[Val
         f.fb.jump(merge_bb, &[nil]);
 
         f.fb.switch_to_block(closure_call_bb);
+        // closure_func_ptr still extern (needs JIT call_table lookup)
         let func_ptr = f.fb.call(ctx.externs.closure_func_ptr, &[callee]).unwrap();
         let mut all_args = vec![callee];
         all_args.extend_from_slice(args);
@@ -939,78 +1047,69 @@ fn emit_indirect_call(f: &mut DynFunc, ctx: &mut Ctx, callee: Value, args: &[Val
         f.fb.jump(merge_bb, &[result]);
     }
 
-    // ── Class call (construction)
+    // ── Class call (construction) — also check NativeFn (both use extern for now)
     f.fb.switch_to_block(class_bb);
     {
-        let is_class = f.fb.icmp(CmpOp::Eq, obj_type, three);
+        let is_class = f.fb.icmp(CmpOp::Eq, ti_val, class_ti);
         let real_class_bb = f.fb.create_block(&[]);
         f.fb.br_if(is_class, real_class_bb, &[], bound_bb, &[]);
 
         f.fb.switch_to_block(real_class_bb);
-        // Check init arity
-        let init_arity = f.fb.call(ctx.externs.get_class_init_arity, &[callee]).unwrap();
+        // Combined: allocate instance + look up init method in one call
+        let instance = f.fb.call(ctx.externs.instantiate, &[callee]).unwrap();
+        let init_arity = f.fb.call(ctx.externs.last_init_arity, &[]).unwrap();
         let sentinel = f.fb.iconst(Type::I64, 255);
         let has_init_check = f.fb.icmp(CmpOp::Ne, init_arity, sentinel);
-        let has_init_arity_bb = f.fb.create_block(&[]);
-        let no_init_arity_bb = f.fb.create_block(&[]);
-        let after_arity_bb = f.fb.create_block(&[]);
-        f.fb.br_if(has_init_check, has_init_arity_bb, &[], no_init_arity_bb, &[]);
+        let has_init_bb = f.fb.create_block(&[]);
+        let no_init_bb = f.fb.create_block(&[]);
+        f.fb.br_if(has_init_check, has_init_bb, &[], no_init_bb, &[]);
 
-        f.fb.switch_to_block(has_init_arity_bb);
+        f.fb.switch_to_block(has_init_bb);
         {
+            // Check arity
             let init_arity_ok = f.fb.icmp(CmpOp::Eq, init_arity, num_args_val);
-            let init_ok_bb = f.fb.create_block(&[]);
+            let call_init_bb = f.fb.create_block(&[]);
             let init_err_bb = f.fb.create_block(&[]);
-            f.fb.br_if(init_arity_ok, init_ok_bb, &[], init_err_bb, &[]);
+            f.fb.br_if(init_arity_ok, call_init_bb, &[], init_err_bb, &[]);
 
             f.fb.switch_to_block(init_err_bb);
             f.fb.call(ctx.externs.check_arity, &[callee, init_arity, num_args_val]);
             let nil = f.nil();
             f.fb.jump(merge_bb, &[nil]);
 
-            f.fb.switch_to_block(init_ok_bb);
-            f.fb.jump(after_arity_bb, &[]);
+            f.fb.switch_to_block(call_init_bb);
+            let init_ptr = f.fb.call(ctx.externs.last_init_func_ptr, &[]).unwrap();
+            let init_closure = f.fb.call(ctx.externs.invoke_closure, &[]).unwrap();
+            let mut init_args = vec![init_closure, instance];
+            init_args.extend_from_slice(args);
+            f.fb.call_indirect(init_ptr, &init_args, Some(Type::I64));
+            f.fb.jump(merge_bb, &[instance]);
         }
 
-        f.fb.switch_to_block(no_init_arity_bb);
+        f.fb.switch_to_block(no_init_bb);
         if num_args > 0 {
             let zero_val = f.fb.iconst(Type::I64, 0);
             f.fb.call(ctx.externs.check_arity, &[callee, zero_val, num_args_val]);
             let nil = f.nil();
             f.fb.jump(merge_bb, &[nil]);
         } else {
-            f.fb.jump(after_arity_bb, &[]);
+            f.fb.jump(merge_bb, &[instance]);
         }
-
-        f.fb.switch_to_block(after_arity_bb);
-        let instance = f.fb.call(ctx.externs.construct_instance, &[callee]).unwrap();
-        let init_ptr = f.fb.call(ctx.externs.class_init_ptr, &[callee]).unwrap();
-        let zero = f.fb.iconst(Type::I64, 0);
-        let has_init = f.fb.icmp(CmpOp::Ne, init_ptr, zero);
-        let call_init_bb = f.fb.create_block(&[]);
-        let no_init_bb = f.fb.create_block(&[]);
-        f.fb.br_if(has_init, call_init_bb, &[], no_init_bb, &[]);
-
-        f.fb.switch_to_block(call_init_bb);
-        let init_closure = f.fb.call(ctx.externs.class_init_closure, &[callee]).unwrap();
-        let mut init_args = vec![init_closure, instance];
-        init_args.extend_from_slice(args);
-        f.fb.call_indirect(init_ptr, &init_args, Some(Type::I64));
-        f.fb.jump(merge_bb, &[instance]);
-
-        f.fb.switch_to_block(no_init_bb);
-        f.fb.jump(merge_bb, &[instance]);
     }
 
-    // ── Bound method call
+    // ── Bound method call (inline field loads)
     f.fb.switch_to_block(bound_bb);
     {
-        let is_bound = f.fb.icmp(CmpOp::Eq, obj_type, five);
+        let is_bound = f.fb.icmp(CmpOp::Eq, ti_val, bound_ti);
         let real_bound_bb = f.fb.create_block(&[]);
         f.fb.br_if(is_bound, real_bound_bb, &[], error_bb, &[]);
 
         f.fb.switch_to_block(real_bound_bb);
-        let bound_arity = f.fb.call(ctx.externs.get_bound_arity, &[callee]).unwrap();
+        // Inline: load method closure from BoundMethod, then arity from the closure
+        let receiver = ctx.types.bound_method.load(f, raw_ptr, "receiver");
+        let method_val = ctx.types.bound_method.load(f, raw_ptr, "method");
+        let method_ptr = f.fb.payload(method_val);
+        let bound_arity = ctx.types.closure.load(f, method_ptr, "arity");
         let bound_ok = f.fb.icmp(CmpOp::Eq, bound_arity, num_args_val);
         let bound_call_bb = f.fb.create_block(&[]);
         let bound_err_bb = f.fb.create_block(&[]);
@@ -1022,10 +1121,9 @@ fn emit_indirect_call(f: &mut DynFunc, ctx: &mut Ctx, callee: Value, args: &[Val
         f.fb.jump(merge_bb, &[nil]);
 
         f.fb.switch_to_block(bound_call_bb);
-        let receiver = f.fb.call(ctx.externs.bound_receiver, &[callee]).unwrap();
-        let method_closure = f.fb.call(ctx.externs.bound_method_closure, &[callee]).unwrap();
+        // bound_closure_func_ptr still extern (JIT call_table lookup)
         let func_ptr = f.fb.call(ctx.externs.bound_closure_func_ptr, &[callee]).unwrap();
-        let mut method_args = vec![method_closure, receiver];
+        let mut method_args = vec![method_val, f.obj_wrap(receiver)];
         method_args.extend_from_slice(args);
         let result = f.fb.call_indirect(func_ptr, &method_args, Some(Type::I64)).unwrap();
         f.fb.jump(merge_bb, &[result]);
@@ -1037,6 +1135,171 @@ fn emit_indirect_call(f: &mut DynFunc, ctx: &mut Ctx, callee: Value, args: &[Val
         f.fb.call(ctx.externs.call_non_callable, &[]);
         let nil = f.nil();
         f.fb.jump(merge_bb, &[nil]);
+    }
+
+    f.fb.switch_to_block(merge_bb);
+    f.fb.block_param(merge_bb, 0)
+}
+
+/// Emit an inline hash table lookup (open addressing + linear probing).
+/// Returns the value if found, or nil if not found.
+/// `key_hash` is the pre-computed hash of the key (compile-time constant).
+fn emit_hash_table_get(f: &mut DynFunc, ctx: &mut Ctx, table_ptr: Value, key: Value, key_hash: u64) -> Value {
+    let varlen_count_off = ctx.types.table.type_info.varlen_count_offset() as i32;
+    let base_off = ctx.types.table.type_info.varlen_element_offset(0) as i64;
+
+    // Load capacity = varlen_count / 2
+    let varlen_count = f.fb.load(Type::I64, table_ptr, varlen_count_off);
+    let one = f.fb.iconst(Type::I64, 1);
+    let capacity = f.fb.ashr(varlen_count, one); // / 2 (varlen_count is always positive)
+
+    let nil_const = f.nil();
+    let merge_bb = f.fb.create_block(&[Type::I64]);
+
+    // If capacity == 0, return nil
+    let zero = f.fb.iconst(Type::I64, 0);
+    let has_capacity = f.fb.icmp(CmpOp::Ne, capacity, zero);
+    let probe_bb = f.fb.create_block(&[]);
+    let empty_bb = f.fb.create_block(&[]);
+    f.fb.br_if(has_capacity, probe_bb, &[], empty_bb, &[]);
+    f.fb.switch_to_block(empty_bb);
+    f.fb.jump(merge_bb, &[nil_const]);
+
+    // Probe loop
+    f.fb.switch_to_block(probe_bb);
+    // mask = capacity - 1
+    let mask = f.fb.sub(capacity, one);
+    // initial idx = hash & mask
+    let hash_const = f.fb.iconst(Type::I64, key_hash as i64);
+    let idx_init = f.fb.and(hash_const, mask);
+    // base_addr = table_ptr + base_off
+    let base_const = f.fb.iconst(Type::I64, base_off);
+    let base_addr = f.fb.add(table_ptr, base_const);
+    let sixteen = f.fb.iconst(Type::I64, 16);
+
+    let loop_bb = f.fb.create_block(&[Type::I64]); // param = idx
+    f.fb.jump(loop_bb, &[idx_init]);
+    f.fb.switch_to_block(loop_bb);
+    let idx = f.fb.block_param(loop_bb, 0);
+
+    // addr = base_addr + idx * 16
+    let byte_off = f.fb.mul(idx, sixteen);
+    let addr = f.fb.add(base_addr, byte_off);
+    let k = f.fb.load(Type::I64, addr, 0);
+
+    // If key matches → found
+    let matches = f.fb.icmp(CmpOp::Eq, k, key);
+    let found_bb = f.fb.create_block(&[]);
+    let check_nil_bb = f.fb.create_block(&[]);
+    f.fb.br_if(matches, found_bb, &[], check_nil_bb, &[]);
+
+    f.fb.switch_to_block(found_bb);
+    let val = f.fb.load(Type::I64, addr, 8);
+    f.fb.jump(merge_bb, &[val]);
+
+    // If key is nil → not found
+    f.fb.switch_to_block(check_nil_bb);
+    let k_is_nil = f.is_nil(k);
+    let next_bb = f.fb.create_block(&[]);
+    f.fb.br_if(k_is_nil, merge_bb, &[nil_const], next_bb, &[]);
+
+    // Otherwise → next slot
+    f.fb.switch_to_block(next_bb);
+    let next_idx = f.fb.add(idx, one);
+    let wrapped = f.fb.and(next_idx, mask);
+    f.fb.jump(loop_bb, &[wrapped]);
+
+    f.fb.switch_to_block(merge_bb);
+    f.fb.block_param(merge_bb, 0)
+}
+
+/// Compute the hash of a u64 key (same algorithm as VM::table_hash).
+fn table_hash(key: u64) -> u64 {
+    let h = key.wrapping_mul(0x517cc1b727220a95);
+    h >> 32
+}
+
+/// Resolve a closure to a callable func_ptr using the call table.
+fn emit_resolve_func_ptr(f: &mut DynFunc, ctx: &mut Ctx, closure_ptr: Value, call_table_base: Value) -> Value {
+    let func_idx = ctx.types.closure.load(f, closure_ptr, "func_table_idx");
+    let eight = f.fb.iconst(Type::I64, 8);
+    let byte_offset = f.fb.mul(func_idx, eight);
+    let entry_addr = f.fb.add(call_table_base, byte_offset);
+    f.fb.load(Type::I64, entry_addr, 0)
+}
+
+/// Optimized method invoke: obj.method(args) without BoundMethod allocation.
+/// Uses invoke_fast for the common case (1 call does lookup+arity+func_ptr),
+/// falls back to slow path for field/not_found/arity_mismatch.
+fn emit_invoke(f: &mut DynFunc, ctx: &mut Ctx, obj: Value, method_name: &str, args: &[Value]) -> Value {
+    let name_id = ctx.strings.intern(method_name);
+    let name_val = f.fb.iconst(Type::I64, name_id as i64);
+    let merge_bb = f.fb.create_block(&[Type::I64]);
+    let num_args = args.len();
+    let num_args_val = f.fb.iconst(Type::I64, num_args as i64);
+
+    // Fast path: single call does lookup + arity check.
+    // Returns closure (NaN-boxed) on success, nil on slow path.
+    let closure_or_nil = f.fb.call(ctx.externs.invoke_fast, &[obj, name_val, num_args_val]).unwrap();
+    let is_nil_check = f.is_nil(closure_or_nil);
+    let fast_bb = f.fb.create_block(&[]);
+    let slow_bb = f.fb.create_block(&[]);
+    // nil = slow path, non-nil = fast path (swap branches)
+    f.fb.br_if(is_nil_check, slow_bb, &[], fast_bb, &[]);
+
+    // Fast path: method found, arity OK — resolve func_ptr inline and call
+    f.fb.switch_to_block(fast_bb);
+    {
+        // Inline func_ptr resolution: closure_ptr.func_table_idx → call_table[idx]
+        let closure_ptr = f.obj_unwrap(closure_or_nil);
+        let call_table_base = ctx.cached_call_table_base.expect("call_table_base not cached");
+        let func_ptr = emit_resolve_func_ptr(f, ctx, closure_ptr, call_table_base);
+        let mut all_args = vec![closure_or_nil, obj];
+        all_args.extend_from_slice(args);
+        let result = f.fb.call_indirect(func_ptr, &all_args, Some(Type::I64)).unwrap();
+        f.fb.jump(merge_bb, &[result]);
+    }
+
+    // Slow path: field, not found, or arity mismatch
+    f.fb.switch_to_block(slow_bb);
+    {
+        let kind = f.fb.call(ctx.externs.invoke_kind, &[]).unwrap();
+        let one = f.fb.iconst(Type::I64, 1);
+        let is_method = f.fb.icmp(CmpOp::Eq, kind, one);
+        let arity_err_bb = f.fb.create_block(&[]);
+        let not_method_bb = f.fb.create_block(&[]);
+        f.fb.br_if(is_method, arity_err_bb, &[], not_method_bb, &[]);
+
+        // Arity mismatch on method
+        f.fb.switch_to_block(arity_err_bb);
+        {
+            let closure = f.fb.call(ctx.externs.invoke_closure, &[]).unwrap();
+            let method_ptr = f.obj_unwrap(closure);
+            let arity = ctx.types.closure.load(f, method_ptr, "arity");
+            f.fb.call(ctx.externs.check_arity, &[closure, arity, num_args_val]);
+            let nil = f.nil();
+            f.fb.jump(merge_bb, &[nil]);
+        }
+
+        // Field or not found
+        f.fb.switch_to_block(not_method_bb);
+        {
+            let zero = f.fb.iconst(Type::I64, 0);
+            let is_field = f.fb.icmp(CmpOp::Eq, kind, zero);
+            let field_bb = f.fb.create_block(&[]);
+            let error_bb = f.fb.create_block(&[]);
+            f.fb.br_if(is_field, field_bb, &[], error_bb, &[]);
+
+            f.fb.switch_to_block(field_bb);
+            let field_val = f.fb.call(ctx.externs.invoke_closure, &[]).unwrap();
+            let result = emit_indirect_call(f, ctx, field_val, args);
+            f.fb.jump(merge_bb, &[result]);
+
+            f.fb.switch_to_block(error_bb);
+            f.fb.call(ctx.externs.get_property, &[obj, name_val]);
+            let nil = f.nil();
+            f.fb.jump(merge_bb, &[nil]);
+        }
     }
 
     f.fb.switch_to_block(merge_bb);

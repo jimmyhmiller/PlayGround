@@ -91,6 +91,55 @@ pub trait Function {
 
     /// Returns the total number of instructions (used for sizing data structures).
     fn num_insts(&self) -> usize;
+
+    /// Is this instruction a safepoint? At safepoints, the allocator records
+    /// the location of live values in a stackmap (and optionally forces them
+    /// to the stack) according to `safepoint_action`.
+    ///
+    /// Default: same as `is_call`. Override to mark additional instructions
+    /// (e.g., loop back-edges, allocation sites) or to exclude calls to
+    /// known non-allocating leaf functions.
+    fn is_safepoint(&self, inst: InstId) -> bool {
+        self.is_call(inst)
+    }
+
+    /// What should the allocator do with `vreg` at the safepoint `inst`?
+    ///
+    /// Only called when `is_safepoint(inst)` returns true and `vreg` is live
+    /// at that point. The default returns `CallingConvention` for all values,
+    /// which means no stackmaps are generated (fully backwards compatible).
+    ///
+    /// Typical overrides:
+    /// - Moving GC: return `SpillAndRecord` for heap pointer vregs, `Ignore` for raw ints
+    /// - Non-moving GC: return `Record` for heap pointer vregs
+    /// - Debug info: return `Record` for values you want in the debugger
+    fn safepoint_action(&self, inst: InstId, vreg: VReg) -> SafepointAction {
+        let _ = (inst, vreg);
+        SafepointAction::CallingConvention
+    }
+}
+
+/// What the allocator should do with a live value at a safepoint instruction.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum SafepointAction {
+    /// Standard calling-convention behavior: clobbered if caller-saved, preserved
+    /// if callee-saved. This is the default for all values at all instructions.
+    CallingConvention,
+
+    /// The value's location (register or spill slot) must be recorded in the
+    /// stackmap, but it doesn't need to be moved. Suitable for non-moving GC
+    /// roots, debug info, or conservative stack scanning.
+    Record,
+
+    /// The value must be spilled to the stack and its location recorded in the
+    /// stackmap. Suitable for moving GC roots where the collector may update
+    /// the pointer in-place on the stack.
+    SpillAndRecord,
+
+    /// The allocator doesn't need to do anything special with this value.
+    /// Use for raw integers, floats, or other non-GC values in a GC'd runtime
+    /// that don't need root tracking.
+    Ignore,
 }
 
 /// Optional trait for IRs that provide liveness info directly.

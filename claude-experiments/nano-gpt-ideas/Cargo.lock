@@ -2663,6 +2663,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "regalloc"
+version = "0.1.0"
+
+[[package]]
 name = "regalloc2"
 version = "0.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3147,6 +3151,7 @@ version = "0.1.0"
 dependencies = [
  "libc",
  "ndarray",
+ "regalloc",
  "serde_json",
  "tensor-lang-graph",
  "tensor-lang-test-oracle",

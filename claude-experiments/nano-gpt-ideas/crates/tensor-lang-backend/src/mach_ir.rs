@@ -133,6 +133,32 @@ pub enum MachInst {
     /// MOV Vd.16B, Vn.16B  (128-bit register move)
     MovVec { dst: VReg, src: VReg },
 
+    // --- NEON .4S elementwise ---
+    /// FADD Vd.4S, Vn.4S, Vm.4S
+    Fadd4s { dst: VReg, lhs: VReg, rhs: VReg },
+    /// FMUL Vd.4S, Vn.4S, Vm.4S
+    Fmul4s { dst: VReg, lhs: VReg, rhs: VReg },
+    /// FNEG Vd.4S, Vn.4S
+    Fneg4s { dst: VReg, src: VReg },
+    /// FMAX Vd.4S, Vn.4S, Vm.4S
+    Fmax4s { dst: VReg, lhs: VReg, rhs: VReg },
+    /// FSQRT Vd.4S, Vn.4S
+    Fsqrt4s { dst: VReg, src: VReg },
+    /// FDIV Vd.4S, Vn.4S, Vm.4S (for Recip: div 1.0 by src)
+    Fdiv4s { dst: VReg, lhs: VReg, rhs: VReg },
+    /// FCMGT Vd.4S, Vm.4S, Vn.4S  (true if Vm > Vn, per lane)
+    Fcmgt4s { dst: VReg, lhs: VReg, rhs: VReg },
+    /// AND Vd.16B, Vn.16B, Vm.16B  (bitwise AND, for masking with compare results)
+    And16b { dst: VReg, lhs: VReg, rhs: VReg },
+    /// DUP Vd.4S, Sn  (broadcast scalar S-reg to all 4 lanes)
+    Dup4sScalar { dst: VReg, src: VReg },
+    /// LDR Qt, [Xn, Xm]  (128-bit register-offset load)
+    LdrQReg { dst: VReg, base: VReg, offset: VReg },
+    /// STR Qt, [Xn, Xm]  (128-bit register-offset store)
+    StrQReg { src: VReg, base: VReg, offset: VReg },
+    /// FMOV Vd.4S, #1.0  (broadcast immediate 1.0 to all lanes)
+    Fmov4sOne { dst: VReg },
+
     // --- Control flow ---
     /// Unconditional branch to label
     B { label: usize },
@@ -208,8 +234,11 @@ const GP_POOL: &[u8] = &[
 ];
 
 /// FP/Vec registers available for allocation.
-/// Avoids V8-V15 (callee-saved lower 64 bits on AAPCS64).
+/// Callee-saved V8-V15 listed FIRST so the allocator assigns them to
+/// long-lived values (values that must survive function calls).
+/// Then caller-saved V0-V7 and V16-V31.
 const FP_VEC_POOL: &[u8] = &[
+    8, 9, 10, 11, 12, 13, 14, 15,
     0, 1, 2, 3, 4, 5, 6, 7,
     16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31,
 ];
@@ -218,14 +247,32 @@ const FP_VEC_POOL: &[u8] = &[
 // Live-range analysis & linear-scan allocator
 // ---------------------------------------------------------------------------
 
-/// Allocation result: maps VReg id -> (physical register number, class).
+/// Allocation result: maps VReg id -> physical register number.
+/// Supports both global (one register per vreg) and per-instruction
+/// (different register at different instructions, for spilled vregs).
 pub struct Allocation {
+    /// Global vreg→preg map (used when no per-instruction overrides exist).
     pub map: HashMap<u32, u8>,
     pub classes: HashMap<u32, RegClass>,
+    /// Per-instruction overrides. If inst_maps[i] has an entry for a vreg,
+    /// it takes precedence over the global map.
+    pub inst_maps: Vec<HashMap<u32, u8>>,
 }
 
 impl Allocation {
+    /// Look up the register for a vreg (global map only).
     pub fn get(&self, vr: VReg) -> u8 {
+        self.map[&vr.id]
+    }
+
+    /// Look up the register for a vreg at a specific instruction index.
+    /// Falls back to the global map if no per-instruction override exists.
+    pub fn get_at(&self, inst_idx: usize, vr: VReg) -> u8 {
+        if inst_idx < self.inst_maps.len() {
+            if let Some(&hw) = self.inst_maps[inst_idx].get(&vr.id) {
+                return hw;
+            }
+        }
         self.map[&vr.id]
     }
 }
@@ -329,7 +376,7 @@ pub fn linear_scan_alloc(insts: &[MachInst]) -> Result<Allocation, SpillRequest>
         return Err(SpillRequest { vreg_ids: spills, classes: classes.clone() });
     }
 
-    Ok(Allocation { map, classes })
+    Ok(Allocation { map, classes, inst_maps: Vec::new() })
 }
 
 /// Information about which vregs need to be spilled.
@@ -458,7 +505,74 @@ fn rewrite_spills(
     out
 }
 
-/// Create a copy of the instruction with certain vreg uses replaced.
+/// Remap ALL vregs (both defs and uses) in an instruction.
+pub fn remap_vreg_uses_and_defs(inst: &MachInst, remap: &HashMap<u32, VReg>) -> MachInst {
+    let r = |vr: &VReg| -> VReg {
+        remap.get(&vr.id).copied().unwrap_or(*vr)
+    };
+    use MachInst::*;
+    match inst {
+        AddReg { dst, lhs, rhs } => AddReg { dst: r(dst), lhs: r(lhs), rhs: r(rhs) },
+        AddImm { dst, src, imm } => AddImm { dst: r(dst), src: r(src), imm: *imm },
+        SubReg { dst, lhs, rhs } => SubReg { dst: r(dst), lhs: r(lhs), rhs: r(rhs) },
+        SubImm { dst, src, imm } => SubImm { dst: r(dst), src: r(src), imm: *imm },
+        MulReg { dst, lhs, rhs } => MulReg { dst: r(dst), lhs: r(lhs), rhs: r(rhs) },
+        Madd { dst, mul_lhs, mul_rhs, add } => Madd { dst: r(dst), mul_lhs: r(mul_lhs), mul_rhs: r(mul_rhs), add: r(add) },
+        Sdiv { dst, lhs, rhs } => Sdiv { dst: r(dst), lhs: r(lhs), rhs: r(rhs) },
+        MovImm64 { dst, val } => MovImm64 { dst: r(dst), val: *val },
+        MovReg { dst, src } => MovReg { dst: r(dst), src: r(src) },
+        LslImm { dst, src, shift } => LslImm { dst: r(dst), src: r(src), shift: *shift },
+        CmpReg { lhs, rhs } => CmpReg { lhs: r(lhs), rhs: r(rhs) },
+        CmpImm { lhs, imm } => CmpImm { lhs: r(lhs), imm: *imm },
+        Csel { dst, t_val, f_val, cond } => Csel { dst: r(dst), t_val: r(t_val), f_val: r(f_val), cond: *cond },
+        SpLoad { dst, slot } => SpLoad { dst: r(dst), slot: *slot },
+        SpStore { src, slot } => SpStore { src: r(src), slot: *slot },
+        LdrSRegScaled { dst, base, offset } => LdrSRegScaled { dst: r(dst), base: r(base), offset: r(offset) },
+        StrSRegScaled { src, base, offset } => StrSRegScaled { src: r(src), base: r(base), offset: r(offset) },
+        LdrSImm { dst, base, imm } => LdrSImm { dst: r(dst), base: r(base), imm: *imm },
+        StrSImm { src, base, imm } => StrSImm { src: r(src), base: r(base), imm: *imm },
+        FmovWFromS { dst_gp, src_fp } => FmovWFromS { dst_gp: r(dst_gp), src_fp: r(src_fp) },
+        FmovSFromW { dst_fp, src_gp } => FmovSFromW { dst_fp: r(dst_fp), src_gp: r(src_gp) },
+        Fmadd { dst, mul_lhs, mul_rhs, add } => Fmadd { dst: r(dst), mul_lhs: r(mul_lhs), mul_rhs: r(mul_rhs), add: r(add) },
+        FaddS { dst, lhs, rhs } => FaddS { dst: r(dst), lhs: r(lhs), rhs: r(rhs) },
+        FsubS { dst, lhs, rhs } => FsubS { dst: r(dst), lhs: r(lhs), rhs: r(rhs) },
+        FmulS { dst, lhs, rhs } => FmulS { dst: r(dst), lhs: r(lhs), rhs: r(rhs) },
+        FdivS { dst, lhs, rhs } => FdivS { dst: r(dst), lhs: r(lhs), rhs: r(rhs) },
+        FnegS { dst, src } => FnegS { dst: r(dst), src: r(src) },
+        FsqrtS { dst, src } => FsqrtS { dst: r(dst), src: r(src) },
+        ScvtfSX { dst, src } => ScvtfSX { dst: r(dst), src: r(src) },
+        FcmpS { lhs, rhs } => FcmpS { lhs: r(lhs), rhs: r(rhs) },
+        FcselS { dst, t_val, f_val, cond } => FcselS { dst: r(dst), t_val: r(t_val), f_val: r(f_val), cond: *cond },
+        FmaxS { dst, lhs, rhs } => FmaxS { dst: r(dst), lhs: r(lhs), rhs: r(rhs) },
+        FmovS { dst, src } => FmovS { dst: r(dst), src: r(src) },
+        LdrSReg { dst, base, offset } => LdrSReg { dst: r(dst), base: r(base), offset: r(offset) },
+        Msub { dst, mul_lhs, mul_rhs, sub_from } => Msub { dst: r(dst), mul_lhs: r(mul_lhs), mul_rhs: r(mul_rhs), sub_from: r(sub_from) },
+        CallFpUnary { func_ptr, arg, result } => CallFpUnary { func_ptr: r(func_ptr), arg: r(arg), result: r(result) },
+        SpStoreF32 { src, slot } => SpStoreF32 { src: r(src), slot: *slot },
+        SpLoadF32 { dst, slot } => SpLoadF32 { dst: r(dst), slot: *slot },
+        Movi4sZero { dst } => Movi4sZero { dst: r(dst) },
+        Dup4sGp { dst, src_gp } => Dup4sGp { dst: r(dst), src_gp: r(src_gp) },
+        LdrQImm { dst, base, imm } => LdrQImm { dst: r(dst), base: r(base), imm: *imm },
+        StrQImm { src, base, imm } => StrQImm { src: r(src), base: r(base), imm: *imm },
+        Fmla4s { acc, lhs, rhs } => Fmla4s { acc: r(acc), lhs: r(lhs), rhs: r(rhs) },
+        MovVec { dst, src } => MovVec { dst: r(dst), src: r(src) },
+        Fadd4s { dst, lhs, rhs } => Fadd4s { dst: r(dst), lhs: r(lhs), rhs: r(rhs) },
+        Fmul4s { dst, lhs, rhs } => Fmul4s { dst: r(dst), lhs: r(lhs), rhs: r(rhs) },
+        Fneg4s { dst, src } => Fneg4s { dst: r(dst), src: r(src) },
+        Fmax4s { dst, lhs, rhs } => Fmax4s { dst: r(dst), lhs: r(lhs), rhs: r(rhs) },
+        Fsqrt4s { dst, src } => Fsqrt4s { dst: r(dst), src: r(src) },
+        Fdiv4s { dst, lhs, rhs } => Fdiv4s { dst: r(dst), lhs: r(lhs), rhs: r(rhs) },
+        Fcmgt4s { dst, lhs, rhs } => Fcmgt4s { dst: r(dst), lhs: r(lhs), rhs: r(rhs) },
+        And16b { dst, lhs, rhs } => And16b { dst: r(dst), lhs: r(lhs), rhs: r(rhs) },
+        Dup4sScalar { dst, src } => Dup4sScalar { dst: r(dst), src: r(src) },
+        LdrQReg { dst, base, offset } => LdrQReg { dst: r(dst), base: r(base), offset: r(offset) },
+        StrQReg { src, base, offset } => StrQReg { src: r(src), base: r(base), offset: r(offset) },
+        Fmov4sOne { dst } => Fmov4sOne { dst: r(dst) },
+        B { .. } | BCond { .. } | Label { .. } => inst.clone(),
+    }
+}
+
+/// Create a copy of the instruction with certain vregs replaced (both defs and uses).
 fn remap_vreg_uses(inst: &MachInst, remap: &HashMap<u32, VReg>) -> MachInst {
     let r = |vr: &VReg| -> VReg {
         remap.get(&vr.id).copied().unwrap_or(*vr)
@@ -505,14 +619,25 @@ fn remap_vreg_uses(inst: &MachInst, remap: &HashMap<u32, VReg>) -> MachInst {
         LdrQImm { dst, base, imm } => LdrQImm { dst: *dst, base: r(base), imm: *imm },
         Fmla4s { acc, lhs, rhs } => Fmla4s { acc: r(acc), lhs: r(lhs), rhs: r(rhs) },
         MovVec { dst, src } => MovVec { dst: *dst, src: r(src) },
+        Fadd4s { dst, lhs, rhs } => Fadd4s { dst: *dst, lhs: r(lhs), rhs: r(rhs) },
+        Fmul4s { dst, lhs, rhs } => Fmul4s { dst: *dst, lhs: r(lhs), rhs: r(rhs) },
+        Fneg4s { dst, src } => Fneg4s { dst: *dst, src: r(src) },
+        Fmax4s { dst, lhs, rhs } => Fmax4s { dst: *dst, lhs: r(lhs), rhs: r(rhs) },
+        Fsqrt4s { dst, src } => Fsqrt4s { dst: *dst, src: r(src) },
+        Fdiv4s { dst, lhs, rhs } => Fdiv4s { dst: *dst, lhs: r(lhs), rhs: r(rhs) },
+        Fcmgt4s { dst, lhs, rhs } => Fcmgt4s { dst: *dst, lhs: r(lhs), rhs: r(rhs) },
+        And16b { dst, lhs, rhs } => And16b { dst: *dst, lhs: r(lhs), rhs: r(rhs) },
+        Dup4sScalar { dst, src } => Dup4sScalar { dst: *dst, src: r(src) },
+        LdrQReg { dst, base, offset } => LdrQReg { dst: *dst, base: r(base), offset: r(offset) },
+        StrQReg { src, base, offset } => StrQReg { src: r(src), base: r(base), offset: r(offset) },
         // These have no vreg uses to remap
         MovImm64 { .. } | SpLoad { .. } | SpLoadF32 { .. } | Movi4sZero { .. }
-        | B { .. } | BCond { .. } | Label { .. } => inst.clone(),
+        | Fmov4sOne { .. } | B { .. } | BCond { .. } | Label { .. } => inst.clone(),
     }
 }
 
 /// Return (defs, uses) for a MachInst.
-fn defs_uses(inst: &MachInst) -> (Vec<VReg>, Vec<VReg>) {
+pub fn defs_uses(inst: &MachInst) -> (Vec<VReg>, Vec<VReg>) {
     use MachInst::*;
     match inst {
         AddReg { dst, lhs, rhs } => (vec![*dst], vec![*lhs, *rhs]),
@@ -560,6 +685,18 @@ fn defs_uses(inst: &MachInst) -> (Vec<VReg>, Vec<VReg>) {
         // FMLA: acc is BOTH read and written (tied operand)
         Fmla4s { acc, lhs, rhs } => (vec![*acc], vec![*acc, *lhs, *rhs]),
         MovVec { dst, src } => (vec![*dst], vec![*src]),
+        Fadd4s { dst, lhs, rhs } => (vec![*dst], vec![*lhs, *rhs]),
+        Fmul4s { dst, lhs, rhs } => (vec![*dst], vec![*lhs, *rhs]),
+        Fneg4s { dst, src } => (vec![*dst], vec![*src]),
+        Fmax4s { dst, lhs, rhs } => (vec![*dst], vec![*lhs, *rhs]),
+        Fsqrt4s { dst, src } => (vec![*dst], vec![*src]),
+        Fdiv4s { dst, lhs, rhs } => (vec![*dst], vec![*lhs, *rhs]),
+        Fcmgt4s { dst, lhs, rhs } => (vec![*dst], vec![*lhs, *rhs]),
+        And16b { dst, lhs, rhs } => (vec![*dst], vec![*lhs, *rhs]),
+        Dup4sScalar { dst, src } => (vec![*dst], vec![*src]),
+        LdrQReg { dst, base, offset } => (vec![*dst], vec![*base, *offset]),
+        StrQReg { src, base, offset } => (vec![], vec![*src, *base, *offset]),
+        Fmov4sOne { dst } => (vec![*dst], vec![]),
         B { .. } | BCond { .. } | Label { .. } => (vec![], vec![]),
     }
 }
@@ -570,94 +707,96 @@ fn defs_uses(inst: &MachInst) -> (Vec<VReg>, Vec<VReg>) {
 
 /// Lower allocated MachInsts to real ARM64 instructions via ArmEmitter.
 pub(crate) fn lower_to_emitter(insts: &[MachInst], alloc: &Allocation, e: &mut ArmEmitter) {
-    for inst in insts {
-        lower_one(inst, alloc, e);
+    for (idx, inst) in insts.iter().enumerate() {
+        lower_one(inst, idx, alloc, e);
     }
 }
 
-fn lower_one(inst: &MachInst, a: &Allocation, e: &mut ArmEmitter) {
+fn lower_one(inst: &MachInst, idx: usize, a: &Allocation, e: &mut ArmEmitter) {
+    // Use per-instruction allocation (handles spilled vregs correctly).
+    let g = |vr: VReg| -> u8 { a.get_at(idx, vr) };
     use MachInst::*;
     match inst {
-        AddReg { dst, lhs, rhs } => e.add_reg(a.get(*dst), a.get(*lhs), a.get(*rhs)),
-        AddImm { dst, src, imm } => e.add_imm(a.get(*dst), a.get(*src), *imm),
-        SubReg { dst, lhs, rhs } => e.sub_reg(a.get(*dst), a.get(*lhs), a.get(*rhs)),
-        SubImm { dst, src, imm } => e.sub_imm(a.get(*dst), a.get(*src), *imm),
-        MulReg { dst, lhs, rhs } => e.mul_reg(a.get(*dst), a.get(*lhs), a.get(*rhs)),
+        AddReg { dst, lhs, rhs } => e.add_reg(g(*dst), g(*lhs), g(*rhs)),
+        AddImm { dst, src, imm } => e.add_imm(g(*dst), g(*src), *imm),
+        SubReg { dst, lhs, rhs } => e.sub_reg(g(*dst), g(*lhs), g(*rhs)),
+        SubImm { dst, src, imm } => e.sub_imm(g(*dst), g(*src), *imm),
+        MulReg { dst, lhs, rhs } => e.mul_reg(g(*dst), g(*lhs), g(*rhs)),
         Madd { dst, mul_lhs, mul_rhs, add } => {
-            e.madd(a.get(*dst), a.get(*mul_lhs), a.get(*mul_rhs), a.get(*add));
+            e.madd(g(*dst), g(*mul_lhs), g(*mul_rhs), g(*add));
         }
-        Sdiv { dst, lhs, rhs } => e.sdiv(a.get(*dst), a.get(*lhs), a.get(*rhs)),
-        MovImm64 { dst, val } => e.mov_imm64(a.get(*dst), *val),
-        MovReg { dst, src } => e.mov_reg(a.get(*dst), a.get(*src)),
-        LslImm { dst, src, shift } => e.lsl_imm(a.get(*dst), a.get(*src), *shift),
-        CmpReg { lhs, rhs } => e.cmp_reg(a.get(*lhs), a.get(*rhs)),
-        CmpImm { lhs, imm } => e.cmp_imm(a.get(*lhs), *imm),
+        Sdiv { dst, lhs, rhs } => e.sdiv(g(*dst), g(*lhs), g(*rhs)),
+        MovImm64 { dst, val } => e.mov_imm64(g(*dst), *val),
+        MovReg { dst, src } => e.mov_reg(g(*dst), g(*src)),
+        LslImm { dst, src, shift } => e.lsl_imm(g(*dst), g(*src), *shift),
+        CmpReg { lhs, rhs } => e.cmp_reg(g(*lhs), g(*rhs)),
+        CmpImm { lhs, imm } => e.cmp_imm(g(*lhs), *imm),
         Csel { dst, t_val, f_val, cond } => {
-            let rd = a.get(*dst);
-            let rn = a.get(*t_val);
-            let rm = a.get(*f_val);
+            let rd = g(*dst);
+            let rn = g(*t_val);
+            let rm = g(*f_val);
             // CSEL Xd, Xn, Xm, cond
             e.emit(0x9A800000 | (rm as u32) << 16 | (*cond as u32) << 12 | (rn as u32) << 5 | rd as u32);
         }
         SpLoad { dst, slot } => {
-            super::arm::load_from_sp_large(e, a.get(*dst), *slot);
+            super::arm::load_from_sp_large(e, g(*dst), *slot);
         }
         SpStore { src, slot } => {
-            super::arm::store_to_sp_large(e, a.get(*src), *slot);
+            super::arm::store_to_sp_large(e, g(*src), *slot);
         }
         LdrSRegScaled { dst, base, offset } => {
-            e.ldr_s_reg_scaled(a.get(*dst), a.get(*base), a.get(*offset));
+            e.ldr_s_reg_scaled(g(*dst), g(*base), g(*offset));
         }
         StrSRegScaled { src, base, offset } => {
-            e.str_s_reg_scaled(a.get(*src), a.get(*base), a.get(*offset));
+            e.str_s_reg_scaled(g(*src), g(*base), g(*offset));
         }
         LdrSImm { dst, base, imm } => {
-            e.ldr_s_imm(a.get(*dst), a.get(*base), *imm);
+            e.ldr_s_imm(g(*dst), g(*base), *imm);
         }
         StrSImm { src, base, imm } => {
-            e.str_s_imm(a.get(*src), a.get(*base), *imm);
+            e.str_s_imm(g(*src), g(*base), *imm);
         }
         FmovWFromS { dst_gp, src_fp } => {
-            e.fmov_w_from_s(a.get(*dst_gp), a.get(*src_fp));
+            e.fmov_w_from_s(g(*dst_gp), g(*src_fp));
         }
         FmovSFromW { dst_fp, src_gp } => {
-            e.fmov_s_from_w(a.get(*dst_fp), a.get(*src_gp));
+            e.fmov_s_from_w(g(*dst_fp), g(*src_gp));
         }
         Fmadd { dst, mul_lhs, mul_rhs, add } => {
-            let rd = a.get(*dst);
-            let rn = a.get(*mul_lhs);
-            let rm = a.get(*mul_rhs);
-            let ra = a.get(*add);
+            let rd = g(*dst);
+            let rn = g(*mul_lhs);
+            let rm = g(*mul_rhs);
+            let ra = g(*add);
             // FMADD Sd, Sn, Sm, Sa = Sa + Sn*Sm  =>  Rd = Ra + Rn*Rm
             e.emit(0x1F000000 | (rm as u32) << 16 | (ra as u32) << 10 | (rn as u32) << 5 | rd as u32);
         }
-        FaddS { dst, lhs, rhs } => e.fadd_s(a.get(*dst), a.get(*lhs), a.get(*rhs)),
-        FsubS { dst, lhs, rhs } => e.fsub_s(a.get(*dst), a.get(*lhs), a.get(*rhs)),
-        FmulS { dst, lhs, rhs } => e.fmul_s(a.get(*dst), a.get(*lhs), a.get(*rhs)),
-        FdivS { dst, lhs, rhs } => e.fdiv_s(a.get(*dst), a.get(*lhs), a.get(*rhs)),
-        FnegS { dst, src } => e.fneg_s(a.get(*dst), a.get(*src)),
-        FsqrtS { dst, src } => e.fsqrt_s(a.get(*dst), a.get(*src)),
-        ScvtfSX { dst, src } => e.scvtf_s_x(a.get(*dst), a.get(*src)),
-        FcmpS { lhs, rhs } => e.fcmp_s(a.get(*lhs), a.get(*rhs)),
+        FaddS { dst, lhs, rhs } => e.fadd_s(g(*dst), g(*lhs), g(*rhs)),
+        FsubS { dst, lhs, rhs } => e.fsub_s(g(*dst), g(*lhs), g(*rhs)),
+        FmulS { dst, lhs, rhs } => e.fmul_s(g(*dst), g(*lhs), g(*rhs)),
+        FdivS { dst, lhs, rhs } => e.fdiv_s(g(*dst), g(*lhs), g(*rhs)),
+        FnegS { dst, src } => e.fneg_s(g(*dst), g(*src)),
+        FsqrtS { dst, src } => e.fsqrt_s(g(*dst), g(*src)),
+        ScvtfSX { dst, src } => e.scvtf_s_x(g(*dst), g(*src)),
+        FcmpS { lhs, rhs } => e.fcmp_s(g(*lhs), g(*rhs)),
         FcselS { dst, t_val, f_val, cond } => {
-            e.fcsel_s(a.get(*dst), a.get(*t_val), a.get(*f_val), *cond);
+            e.fcsel_s(g(*dst), g(*t_val), g(*f_val), *cond);
         }
-        FmaxS { dst, lhs, rhs } => e.fmax_s(a.get(*dst), a.get(*lhs), a.get(*rhs)),
-        FmovS { dst, src } => e.fmov_s(a.get(*dst), a.get(*src)),
+        FmaxS { dst, lhs, rhs } => e.fmax_s(g(*dst), g(*lhs), g(*rhs)),
+        FmovS { dst, src } => e.fmov_s(g(*dst), g(*src)),
         LdrSReg { dst, base, offset } => {
             // LDR Sd, [Xbase, Xoff]  (byte offset, no scale)
-            let rd = a.get(*dst);
-            let rn = a.get(*base);
-            let rm = a.get(*offset);
+            let rd = g(*dst);
+            let rn = g(*base);
+            let rm = g(*offset);
             e.emit(0xBC606800 | (rm as u32) << 16 | (rn as u32) << 5 | rd as u32);
         }
         Msub { dst, mul_lhs, mul_rhs, sub_from } => {
-            e.msub(a.get(*dst), a.get(*mul_lhs), a.get(*mul_rhs), a.get(*sub_from));
+            e.msub(g(*dst), g(*mul_lhs), g(*mul_rhs), g(*sub_from));
         }
         CallFpUnary { func_ptr, arg, result } => {
-            let arg_phys = a.get(*arg);
-            let res_phys = a.get(*result);
-            let ptr_phys = a.get(*func_ptr);
+            let arg_phys = g(*arg);
+            let res_phys = g(*result);
+            let ptr_phys = g(*func_ptr);
 
             // FP save/restore is handled at the MachIR level (SpStoreF32/SpLoadF32
             // emitted around the call). GP regs are safe because the callee-saved-first
@@ -677,23 +816,73 @@ fn lower_one(inst: &MachInst, a: &Allocation, e: &mut ArmEmitter) {
             }
         }
         SpStoreF32 { src, slot } => {
-            super::arm::store_s_to_sp_seq(e, a.get(*src), *slot);
+            super::arm::store_s_to_sp_seq(e, g(*src), *slot);
         }
         SpLoadF32 { dst, slot } => {
-            super::arm::load_s_from_sp_seq(e, a.get(*dst), *slot);
+            super::arm::load_s_from_sp_seq(e, g(*dst), *slot);
         }
-        Movi4sZero { dst } => e.movi_4s_zero(a.get(*dst)),
-        Dup4sGp { dst, src_gp } => e.dup_4s_gp(a.get(*dst), a.get(*src_gp)),
-        LdrQImm { dst, base, imm } => e.ldr_q_imm(a.get(*dst), a.get(*base), *imm),
-        StrQImm { src, base, imm } => e.str_q_imm(a.get(*src), a.get(*base), *imm),
+        Movi4sZero { dst } => e.movi_4s_zero(g(*dst)),
+        Dup4sGp { dst, src_gp } => e.dup_4s_gp(g(*dst), g(*src_gp)),
+        LdrQImm { dst, base, imm } => e.ldr_q_imm(g(*dst), g(*base), *imm),
+        StrQImm { src, base, imm } => e.str_q_imm(g(*src), g(*base), *imm),
         Fmla4s { acc, lhs, rhs } => {
-            e.fmla_4s(a.get(*acc), a.get(*lhs), a.get(*rhs));
+            e.fmla_4s(g(*acc), g(*lhs), g(*rhs));
         }
         MovVec { dst, src } => {
-            let vd = a.get(*dst);
-            let vs = a.get(*src);
+            let vd = g(*dst);
+            let vs = g(*src);
             // ORR Vd.16B, Vs.16B, Vs.16B
             e.emit(0x4EA01C00 | (vs as u32) << 16 | (vs as u32) << 5 | vd as u32);
+        }
+        Fadd4s { dst, lhs, rhs } => {
+            // FADD Vd.4S, Vn.4S, Vm.4S: 0x4E20D400
+            e.emit(0x4E20D400 | (g(*rhs) as u32) << 16 | (g(*lhs) as u32) << 5 | g(*dst) as u32);
+        }
+        Fmul4s { dst, lhs, rhs } => {
+            // FMUL Vd.4S, Vn.4S, Vm.4S: 0x6E20DC00
+            e.emit(0x6E20DC00 | (g(*rhs) as u32) << 16 | (g(*lhs) as u32) << 5 | g(*dst) as u32);
+        }
+        Fneg4s { dst, src } => {
+            // FNEG Vd.4S, Vn.4S: 0x6EA0F800
+            e.emit(0x6EA0F800 | (g(*src) as u32) << 5 | g(*dst) as u32);
+        }
+        Fmax4s { dst, lhs, rhs } => {
+            e.fmax_4s(g(*dst), g(*lhs), g(*rhs));
+        }
+        Fsqrt4s { dst, src } => {
+            // FSQRT Vd.4S, Vn.4S: 0x6EA1F800
+            e.emit(0x6EA1F800 | (g(*src) as u32) << 5 | g(*dst) as u32);
+        }
+        Fdiv4s { dst, lhs, rhs } => {
+            // FDIV Vd.4S, Vn.4S, Vm.4S: 0x6E20FC00
+            e.emit(0x6E20FC00 | (g(*rhs) as u32) << 16 | (g(*lhs) as u32) << 5 | g(*dst) as u32);
+        }
+        Fcmgt4s { dst, lhs, rhs } => {
+            // FCMGT Vd.4S, Vn.4S, Vm.4S: 0x6E20E400
+            e.emit(0x6E20E400 | (g(*rhs) as u32) << 16 | (g(*lhs) as u32) << 5 | g(*dst) as u32);
+        }
+        And16b { dst, lhs, rhs } => {
+            // AND Vd.16B, Vn.16B, Vm.16B: 0x4E201C00
+            e.emit(0x4E201C00 | (g(*rhs) as u32) << 16 | (g(*lhs) as u32) << 5 | g(*dst) as u32);
+        }
+        Dup4sScalar { dst, src } => {
+            // DUP Vd.4S, Vn.S[0]: 0x4E040400 | (Rn<<5) | Rd
+            e.emit(0x4E040400 | (g(*src) as u32) << 5 | g(*dst) as u32);
+        }
+        LdrQReg { dst, base, offset } => {
+            // LDR Qt, [Xn, Xm]: 0x3CE06800
+            e.emit(0x3CE06800 | (g(*offset) as u32) << 16 | (g(*base) as u32) << 5 | g(*dst) as u32);
+        }
+        StrQReg { src, base, offset } => {
+            // STR Qt, [Xn, Xm]: 0x3CA06800
+            e.emit(0x3CA06800 | (g(*offset) as u32) << 16 | (g(*base) as u32) << 5 | g(*src) as u32);
+        }
+        Fmov4sOne { dst } => {
+            // FMOV Vd.4S, #1.0: 0x4F03F400 | Rd
+            // imm8 for 1.0 = 0b01110000 = 0x70, encoded as: a=0,b=1,c=1,d=1,e=0,f=0,g=0,h=0
+            // FMOV (vector, immediate): 0x4F00F400 | (a:b:c:d:e:f:g:h encoding)
+            // For 1.0f: abcdefgh = 01110000, op=0, cmode=1111
+            e.emit(0x4F03F400 | g(*dst) as u32);
         }
         B { label } => e.b_label(*label),
         BCond { cond, label } => e.b_cond_label(*cond, *label),
@@ -705,6 +894,18 @@ fn lower_one(inst: &MachInst, a: &Allocation, e: &mut ArmEmitter) {
 // Convenience: allocate + emit in one call
 // ---------------------------------------------------------------------------
 
+/// Compute the next vreg ID from an instruction stream (one past the max used).
+fn compute_num_vregs(insts: &[MachInst]) -> u32 {
+    let mut max_id: u32 = 0;
+    for inst in insts {
+        let (defs, uses) = defs_uses(inst);
+        for vr in defs.iter().chain(uses.iter()) {
+            max_id = max_id.max(vr.id + 1);
+        }
+    }
+    max_id
+}
+
 /// Build, allocate, and emit MachInsts to an ArmEmitter.
 /// `alloc_slot` provides stack slots for spilled vregs.
 pub(crate) fn allocate_and_emit_with_spills(
@@ -713,31 +914,21 @@ pub(crate) fn allocate_and_emit_with_spills(
     next_vreg_id: u32,
     alloc_slot: &mut dyn FnMut() -> u32,
 ) {
-    let mut current = insts.to_vec();
-    let mut next_id = next_vreg_id;
-
-    // Retry up to 10 times (each round spills 1+ vreg, reducing pressure)
-    for _ in 0..10 {
-        match linear_scan_alloc(&current) {
-            Ok(alloc) => {
-                lower_to_emitter(&current, &alloc, e);
-                return;
-            }
-            Err(spill_req) => {
-                current = rewrite_spills(
-                    &current, &spill_req.vreg_ids, &spill_req.classes,
-                    &mut next_id, alloc_slot,
-                );
-            }
-        }
-    }
-    panic!("register allocation failed after 10 spill iterations");
+    use crate::regalloc_bridge::regalloc_allocate;
+    let (rewritten, alloc) = regalloc_allocate(insts, next_vreg_id, alloc_slot)
+        .expect("register allocation failed");
+    lower_to_emitter(&rewritten, &alloc, e);
 }
 
 /// Simple version without spill support (panics if allocation fails).
 pub(crate) fn allocate_and_emit(insts: &[MachInst], e: &mut ArmEmitter) {
-    match linear_scan_alloc(insts) {
-        Ok(alloc) => lower_to_emitter(insts, &alloc, e),
-        Err(_) => panic!("register allocation failed — use allocate_and_emit_with_spills"),
-    }
+    use crate::regalloc_bridge::regalloc_allocate;
+    let num_vregs = compute_num_vregs(insts);
+    let mut next_slot = 0u32;
+    let (rewritten, alloc) = regalloc_allocate(insts, num_vregs, &mut || {
+        let s = next_slot;
+        next_slot += 1;
+        s
+    }).expect("register allocation failed");
+    lower_to_emitter(&rewritten, &alloc, e);
 }

@@ -75,6 +75,110 @@ impl GcConfig {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ObjTypeId(pub usize);
 
+/// Handle to a declared GC object type. Carries all the info needed to
+/// emit inline IR for allocation, field access, and type checks.
+///
+/// # Example
+/// ```ignore
+/// let closure_h = dm.obj_handle(closure_ty);
+///
+/// // Inline type check (no extern call):
+/// let is_closure = closure_h.check(f, val);
+///
+/// // Inline field load (no extern call):
+/// let raw = closure_h.unwrap(f, val);
+/// let arity = closure_h.load(f, raw, "arity");
+///
+/// // Inline allocation:
+/// let obj = closure_h.alloc(f, varlen_count);
+/// ```
+#[derive(Clone)]
+pub struct ObjTypeHandle {
+    pub id: ObjTypeId,
+    pub type_info: &'static TypeInfo,
+    /// The TypeInfo pointer as a u64, for embedding in IR constants.
+    pub type_info_addr: u64,
+    /// Field name → (byte offset, kind).
+    pub field_offsets: HashMap<String, (i32, FieldKind)>,
+    pub varlen: VarLenKind,
+}
+
+impl ObjTypeHandle {
+    /// Check if a NaN-boxed value is an object of this type. Returns I8.
+    ///
+    /// Emits inline: is_ptr(val) → extract payload → load TypeInfo from
+    /// header at offset 0 → compare against this type's known TypeInfo address.
+    pub fn check(&self, f: &mut DynFunc, val: Value) -> Value {
+        let is_obj = f.is_ptr(val);
+        let check_bb = f.fb.create_block(&[]);
+        let merge_bb = f.fb.create_block(&[Type::I8]);
+        let zero = f.fb.iconst(Type::I8, 0);
+        f.fb.br_if(is_obj, check_bb, &[], merge_bb, &[zero]);
+
+        f.fb.switch_to_block(check_bb);
+        let ptr = f.fb.payload(val);
+        let ti = f.fb.load(Type::I64, ptr, 0); // TypeInfo* at header offset 0
+        let expected = f.fb.iconst(Type::I64, self.type_info_addr as i64);
+        let matches = f.fb.icmp(CmpOp::Eq, ti, expected);
+        f.fb.jump(merge_bb, &[matches]);
+
+        f.fb.switch_to_block(merge_bb);
+        f.fb.block_param(merge_bb, 0)
+    }
+
+    /// Extract the raw GC pointer from a NaN-boxed object value.
+    /// Caller must ensure the value is a heap object (e.g. via `check`).
+    pub fn unwrap(&self, f: &mut DynFunc, val: Value) -> Value {
+        f.fb.payload(val)
+    }
+
+    /// Wrap a raw GC pointer into a NaN-boxed object value.
+    pub fn wrap(&self, f: &mut DynFunc, ptr: Value) -> Value {
+        f.fb.make_tagged(f.tags.ptr, ptr)
+    }
+
+    /// Load a field from a raw GC object pointer. Returns I64.
+    pub fn load(&self, f: &mut DynFunc, obj_ptr: Value, field: &str) -> Value {
+        let (offset, _kind) = self.field_offsets.get(field)
+            .unwrap_or_else(|| panic!("unknown field '{}' on ObjTypeHandle", field));
+        f.fb.load(Type::I64, obj_ptr, *offset)
+    }
+
+    /// Store a field to a raw GC object pointer.
+    pub fn store(&self, f: &mut DynFunc, obj_ptr: Value, field: &str, val: Value) {
+        let (offset, _kind) = self.field_offsets.get(field)
+            .unwrap_or_else(|| panic!("unknown field '{}' on ObjTypeHandle", field));
+        f.fb.store(val, obj_ptr, *offset);
+    }
+
+    /// Load an element from the variable-length array section.
+    pub fn load_elem(&self, f: &mut DynFunc, obj_ptr: Value, index: Value) -> Value {
+        let base_offset = self.type_info.varlen_element_offset(0) as i64;
+        let base = f.fb.iconst(Type::I64, base_offset);
+        let eight = f.fb.iconst(Type::I64, 8);
+        let byte_offset = f.fb.mul(index, eight);
+        let offset = f.fb.add(base, byte_offset);
+        let addr = f.fb.add(obj_ptr, offset);
+        f.fb.load(Type::I64, addr, 0)
+    }
+
+    /// Store an element to the variable-length array section.
+    pub fn store_elem(&self, f: &mut DynFunc, obj_ptr: Value, index: Value, val: Value) {
+        let base_offset = self.type_info.varlen_element_offset(0) as i64;
+        let base = f.fb.iconst(Type::I64, base_offset);
+        let eight = f.fb.iconst(Type::I64, 8);
+        let byte_offset = f.fb.mul(index, eight);
+        let offset = f.fb.add(base, byte_offset);
+        let addr = f.fb.add(obj_ptr, offset);
+        f.fb.store(val, addr, 0);
+    }
+
+    /// Allocate an object of this type via `__gc_alloc__`. Returns raw pointer (I64).
+    pub fn alloc(&self, f: &mut DynFunc, varlen_len: Value) -> Value {
+        f.gc_alloc(self.id, varlen_len)
+    }
+}
+
 /// Kind of field in a GC object.
 #[derive(Clone, Copy, Debug)]
 pub enum FieldKind {
@@ -303,6 +407,19 @@ impl DynModule {
     /// Get a registered object type by ID.
     pub fn get_obj_type(&self, id: ObjTypeId) -> &ObjType {
         &self.obj_types[id.0]
+    }
+
+    /// Get an `ObjTypeHandle` — a self-contained handle for emitting inline
+    /// IR operations (type checks, field loads/stores, allocation).
+    pub fn obj_handle(&self, id: ObjTypeId) -> ObjTypeHandle {
+        let ty = &self.obj_types[id.0];
+        ObjTypeHandle {
+            id,
+            type_info: ty.type_info,
+            type_info_addr: ty.type_info as *const TypeInfo as u64,
+            field_offsets: ty.field_offsets.clone(),
+            varlen: ty.varlen,
+        }
     }
 
     /// Get the GC configuration.
@@ -586,6 +703,17 @@ impl DynFunc {
     /// Is this value a heap pointer? Returns I8.
     pub fn is_ptr(&mut self, v: Value) -> Value {
         self.fb.is_tag(v, self.tags.ptr)
+    }
+
+    /// Extract the raw GC pointer from a NaN-boxed object value.
+    /// Caller must ensure the value is a heap object (e.g. checked with `is_ptr`).
+    pub fn obj_unwrap(&mut self, v: Value) -> Value {
+        self.fb.payload(v)
+    }
+
+    /// Wrap a raw GC pointer into a NaN-boxed object value.
+    pub fn obj_wrap(&mut self, ptr: Value) -> Value {
+        self.fb.make_tagged(self.tags.ptr, ptr)
     }
 
     /// Is this value tagged (i.e. NOT a float)? Returns I8.
@@ -1267,14 +1395,14 @@ mod tests {
         f.fb.ret(loaded);
         dm.finish_func(f);
 
-        let built = dm.build();
-
         // Create GC runtime and wire up __gc_alloc__
         let mut gc = crate::gc::DynGcRuntime::new(
             &GcConfig::leak(),
             &NanBoxTags::default(),
-            &built.obj_types,
+            &dm.obj_types,
         );
+
+        let built = dm.build();
 
         let roots = NoGcRoots;
         let mut interp = ModuleInterpreter::<NanBox, _>::new(&built.module, &roots);
