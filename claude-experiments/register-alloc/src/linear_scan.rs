@@ -240,10 +240,13 @@ fn pick_free_reg(
     interval: &LiveInterval,
     liveness: &LivenessInfo,
 ) -> Option<PReg> {
-    // If there's a fixed-register hint and it's available, use it.
+    // If there's a fixed-register hint, try it — but only if it's not clobbered
+    // during this interval's lifetime (otherwise we'd lose the value at a call site).
     if let Some(hint) = interval.fixed_hint {
         if let Some(pos) = state.free_regs.iter().position(|&r| r == hint) {
-            return Some(state.free_regs.remove(pos));
+            if !is_clobbered_in_range(hint, interval.start, interval.end, liveness) {
+                return Some(state.free_regs.remove(pos));
+            }
         }
     }
 

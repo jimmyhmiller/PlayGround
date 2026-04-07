@@ -759,7 +759,7 @@ pub fn compile_function_batch(
 
     // Phase 2: Run register allocation
     let mut allocator = LinearScanAllocator;
-    let allocation = allocator
+    let mut allocation = allocator
         .allocate(&adapted, &target)
         .map_err(|e| format!("Register allocation failed: {:?}", e))?;
 
@@ -782,7 +782,13 @@ pub fn compile_function_batch(
                         let a = allocation.get(iid, oi).map(|p| format!("{:?}", p)).unwrap_or("NONE".into());
                         format!("{:?}:{:?}={}", op.kind, op.constraint, a)
                     }).collect();
-                eprintln!("    inst({}) {:?} → [{}]", iid.0, std::mem::discriminant(&node.inst), allocs.join(", "));
+                let inst_name = match &node.inst {
+                    Inst::Iconst(_, v) => format!("Iconst({})", v),
+                    Inst::Call(fref, args) => format!("Call(f{}, args={:?})", fref.index(), args.iter().map(|v| v.index()).collect::<Vec<_>>()),
+                    Inst::CallIndirect(c, args, _) => format!("CallIndirect(c={}, args={:?})", c.index(), args.iter().map(|v| v.index()).collect::<Vec<_>>()),
+                    other => format!("{:?}", std::mem::discriminant(other)),
+                };
+                eprintln!("    inst({}) {} val={:?} → [{}]", iid.0, inst_name, node.value.map(|v| v.index()), allocs.join(", "));
             }
             let tid = InstId(base + block.insts.len() as u32);
             let tops: Vec<_> = adapted.inst_operands(tid).collect();
@@ -792,6 +798,55 @@ pub fn compile_function_batch(
                     format!("{:?}:{:?}={}", op.kind, op.constraint, a)
                 }).collect();
             eprintln!("    term({}) {:?} → [{}]", tid.0, std::mem::discriminant(&block.terminator), tallocs.join(", "));
+        }
+    }
+
+    // Phase 2.5: Inject moves for entry block params (function arguments).
+    // The caller puts args in X0, X1, ... but the allocator may have assigned
+    // the param vregs to different registers. Insert Before(first_inst) moves.
+    {
+        let first_inst = InstId(0);
+        for (i, (val, _ty)) in func.blocks[0].params.iter().enumerate() {
+            let vreg = VReg(val.index() as u32);
+            let arg_preg = gp_preg(i as u8);
+
+            if let Some(&spill_slot) = allocation.spill_slots.get(&vreg) {
+                // Param was spilled
+                allocation.moves.push(InsertedMove {
+                    at: MovePosition::Before(first_inst),
+                    from: MoveOperand::Reg(arg_preg),
+                    to: MoveOperand::SpillSlot(spill_slot),
+                    class: GP,
+                });
+            } else {
+                // Find the home register for this vreg — look at where it's used
+                // as a Use operand. The allocated preg there is its home.
+                let mut home = None;
+                'outer: for block in adapted.blocks() {
+                    for inst in adapted.block_insts(block) {
+                        for (op_idx, op) in adapted.inst_operands(inst).enumerate() {
+                            if let Reg::Virtual(v) = op.reg {
+                                if v == vreg {
+                                    if let Some(preg) = allocation.get(inst, op_idx) {
+                                        home = Some(preg);
+                                        break 'outer;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                if let Some(home_preg) = home {
+                    if home_preg != arg_preg {
+                        allocation.moves.push(InsertedMove {
+                            at: MovePosition::Before(first_inst),
+                            from: MoveOperand::Reg(arg_preg),
+                            to: MoveOperand::Reg(home_preg),
+                            class: GP,
+                        });
+                    }
+                }
+            }
         }
     }
 
