@@ -806,13 +806,17 @@ pub fn compile_function_batch(
     // the param vregs to different home registers. Insert Before(first_inst) moves.
     {
         let first_inst = InstId(0);
-        for (i, (val, _ty)) in func.blocks[0].params.iter().enumerate() {
+        let num_args = func.sig.params.len();
+        for (i, (val, _ty)) in func.blocks[0].params.iter().take(num_args).enumerate() {
             let vreg = VReg(val.index() as u32);
             let arg_preg = gp_preg(i as u8);
 
             if let Some(home) = allocation.vreg_homes.get(&vreg) {
                 let from = MoveOperand::Reg(arg_preg);
                 if from != *home {
+                    if std::env::var("BATCH_DEBUG").is_ok() {
+                        eprintln!("  entry_param[{i}]: val={} {:?} → {:?}", val.index(), from, home);
+                    }
                     allocation.moves.push(InsertedMove {
                         at: MovePosition::Before(first_inst),
                         from,
