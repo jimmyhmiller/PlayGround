@@ -1483,11 +1483,11 @@ mod tests {
         dm.finish_func(f);
 
         // Create GC runtime and wire up __gc_alloc__
-        let mut gc = crate::gc::DynGcRuntime::new(
+        let gc = std::cell::RefCell::new(crate::gc::DynGcRuntime::new(
             &GcConfig::leak(),
             &NanBoxTags::default(),
             &dm.obj_types,
-        );
+        ));
 
         let built = dm.build();
 
@@ -1496,7 +1496,7 @@ mod tests {
         interp.bind_by_name("__gc_alloc__", move |args| {
             let type_id = args[0] as usize;
             let varlen_len = args[1] as usize;
-            let ptr = gc.alloc(type_id, varlen_len);
+            let ptr = gc.borrow_mut().alloc(type_id, varlen_len);
             ExternCallResult::Value(Some(ptr as u64))
         });
 

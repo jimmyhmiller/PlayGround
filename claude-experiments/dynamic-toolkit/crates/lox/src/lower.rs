@@ -1249,13 +1249,13 @@ fn emit_invoke(f: &mut DynFunc, ctx: &mut Ctx, obj: Value, method_name: &str, ar
     // nil = slow path, non-nil = fast path (swap branches)
     f.fb.br_if(is_nil_check, slow_bb, &[], fast_bb, &[]);
 
-    // Fast path: method found, arity OK — resolve func_ptr inline and call
+    // Fast path: method found, arity OK — resolve func_ptr via extern and call
     f.fb.switch_to_block(fast_bb);
     {
-        // Inline func_ptr resolution: closure_ptr.func_table_idx → call_table[idx]
-        let closure_ptr = f.obj_unwrap(closure_or_nil);
-        let call_table_base = ctx.cached_call_table_base.expect("call_table_base not cached");
-        let func_ptr = emit_resolve_func_ptr(f, ctx, closure_ptr, call_table_base);
+        // Use invoke_func_ptr extern to resolve the callable.
+        // In JIT mode this returns a raw code pointer; in the interpreter it
+        // returns the func_table index — both work with call_indirect.
+        let func_ptr = f.fb.call(ctx.externs.invoke_func_ptr, &[closure_or_nil]).unwrap();
         let mut all_args = vec![closure_or_nil, obj];
         all_args.extend_from_slice(args);
         let result = f.fb.call_indirect(func_ptr, &all_args, Some(Type::I64)).unwrap();

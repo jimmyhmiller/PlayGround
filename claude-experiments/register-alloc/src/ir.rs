@@ -117,6 +117,17 @@ pub trait Function {
         let _ = (inst, vreg);
         SafepointAction::CallingConvention
     }
+
+    /// If this vreg is defined by a cheap-to-recompute instruction (e.g., a
+    /// constant load), return the immediate value. The allocator may choose to
+    /// rematerialize it before each use instead of allocating a register or
+    /// spill slot, dramatically reducing register pressure.
+    ///
+    /// Default: no rematerialization.
+    fn remat_value(&self, vreg: VReg) -> Option<u64> {
+        let _ = vreg;
+        None
+    }
 }
 
 /// What the allocator should do with a live value at a safepoint instruction.

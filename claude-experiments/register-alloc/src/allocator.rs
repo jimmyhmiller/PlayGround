@@ -80,6 +80,9 @@ pub enum MovePosition {
 pub enum MoveOperand {
     Reg(PReg),
     SpillSlot(SpillSlot),
+    /// Rematerializable constant: emit a MOV immediate with this value
+    /// instead of loading from a register or memory.
+    Remat(u64),
 }
 
 /// Errors that can occur during allocation.

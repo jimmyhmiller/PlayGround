@@ -43,6 +43,9 @@ enum IntervalAlloc {
     Reg(PReg),
     /// Spilled to a stack slot.
     Spilled(SpillSlot),
+    /// Rematerializable: the value is a constant that can be recomputed
+    /// with a MOV immediate before each use. No register or spill slot needed.
+    Remat(u64),
 }
 
 impl RegisterAllocator for LinearScanAllocator {
@@ -93,6 +96,12 @@ impl RegisterAllocator for LinearScanAllocator {
 
             for &idx in &sorted {
                 let interval = &liveness.intervals[idx];
+
+                // Skip rematerializable values — they don't need registers.
+                if let Some(imm) = func.remat_value(interval.vreg) {
+                    alloc_result.insert(interval.vreg, IntervalAlloc::Remat(imm));
+                    continue;
+                }
 
                 // EXPIREOLDINTERVALS(i)
                 expire_old_intervals(&mut state, interval.start);
@@ -217,15 +226,21 @@ fn spill_at_interval(
 }
 
 /// Check if a physical register is clobbered at any point within [start, end].
+/// Uses sorted clobber positions for fast range queries.
 fn is_clobbered_in_range(
     preg: PReg,
     start: u32,
     end: u32,
     liveness: &LivenessInfo,
 ) -> bool {
-    for (&pos, clobbers) in &liveness.clobber_points {
-        if pos >= start && pos <= end && clobbers.contains(&preg) {
-            return true;
+    let positions = &liveness.sorted_clobber_positions;
+    let lo = positions.partition_point(|&p| p < start);
+    for &pos in &positions[lo..] {
+        if pos > end { break; }
+        if let Some(clobbers) = liveness.clobber_points.get(&pos) {
+            if clobbers.contains(&preg) {
+                return true;
+            }
         }
     }
     false
@@ -360,6 +375,9 @@ fn build_allocation<F: Function, T: Target>(
             IntervalAlloc::Reg(preg) => {
                 alloc.vreg_homes.insert(*vreg, MoveOperand::Reg(*preg));
             }
+            IntervalAlloc::Remat(imm) => {
+                alloc.vreg_homes.insert(*vreg, MoveOperand::Remat(*imm));
+            }
         }
     }
 
@@ -439,7 +457,41 @@ fn build_allocation<F: Function, T: Target>(
                 }
             }
 
-            // Second pass: handle spilled operands.
+            // Second pass: handle rematerialized and spilled operands.
+            for (op_idx, operand) in operands.iter().enumerate() {
+                if op_assignments[op_idx].is_some() {
+                    continue;
+                }
+                // Remat: record a Remat move. The emitter materializes the
+                // constant directly into the required register.
+                if let Reg::Virtual(vreg) = operand.reg {
+                    if let Some(IntervalAlloc::Remat(imm)) = alloc_result.get(&vreg) {
+                        let class = func.vreg_class(vreg);
+                        let temp_preg = match &operand.constraint {
+                            OperandConstraint::FixedReg(preg) => *preg,
+                            _ => {
+                                // Pick any non-conflicting register
+                                let available = target.allocatable_regs(class);
+                                *available.iter()
+                                    .find(|r| !operand_pregs.contains(r))
+                                    .unwrap_or(&available[0])
+                            }
+                        };
+                        op_assignments[op_idx] = Some(temp_preg);
+                        operand_pregs.insert(temp_preg);
+                        if operand.kind == OperandKind::Use || operand.kind == OperandKind::UseDef {
+                            alloc.moves.push(InsertedMove {
+                                at: MovePosition::Before(inst),
+                                from: MoveOperand::Remat(*imm),
+                                to: MoveOperand::Reg(temp_preg),
+                                class,
+                            });
+                        }
+                        continue;
+                    }
+                }
+            }
+            // Third pass: handle spilled operands.
             // For each, we need a temp register. If all are occupied by
             // non-spilled operands of THIS instruction, we evict a register
             // that holds a value NOT used by this instruction.
@@ -633,11 +685,13 @@ fn build_allocation<F: Function, T: Target>(
                     let from = match arg_loc {
                         Some(IntervalAlloc::Reg(preg)) => MoveOperand::Reg(*preg),
                         Some(IntervalAlloc::Spilled(slot)) => MoveOperand::SpillSlot(*slot),
+                        Some(IntervalAlloc::Remat(imm)) => MoveOperand::Remat(*imm),
                         None => continue,
                     };
                     let to = match param_loc {
                         Some(IntervalAlloc::Reg(preg)) => MoveOperand::Reg(*preg),
                         Some(IntervalAlloc::Spilled(slot)) => MoveOperand::SpillSlot(*slot),
+                        Some(IntervalAlloc::Remat(imm)) => MoveOperand::Remat(*imm),
                         None => continue,
                     };
 
@@ -700,6 +754,7 @@ fn build_stackmaps<F: Function>(
                         let location = match alloc_result.get(&interval.vreg) {
                             Some(IntervalAlloc::Reg(preg)) => MoveOperand::Reg(*preg),
                             Some(IntervalAlloc::Spilled(slot)) => MoveOperand::SpillSlot(*slot),
+                            Some(IntervalAlloc::Remat(imm)) => MoveOperand::Remat(*imm),
                             None => continue,
                         };
                         entries.push(StackmapEntry {
@@ -747,6 +802,10 @@ fn build_stackmaps<F: Function>(
                                     location: MoveOperand::SpillSlot(slot),
                                     action,
                                 });
+                            }
+                            Some(IntervalAlloc::Remat(_)) => {
+                                // Constants don't need GC tracking
+                                continue;
                             }
                             None => continue,
                         }

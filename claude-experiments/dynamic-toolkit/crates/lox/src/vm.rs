@@ -1657,18 +1657,16 @@ impl VM {
     }
 
     fn run_jit(&mut self, module: &Module, entry: dynlang::FuncRef) -> InterpretResult {
-        use dynruntime::{FrameScanJitTransport, JitSafepointSession, active_jit_safepoint_handler};
+        use dynruntime::{StackMapJitTransport, JitSafepointSession, active_jit_safepoint_handler};
 
         let externs = build_jit_externs(module);
 
         let use_batch = std::env::var("LOX_BATCH_JIT").is_ok();
         let jit = if use_batch {
-            // Batch register allocator: SSA-aware linear scan with callee-saved regs.
-            // No GC safepoints in this path — only safe for benchmarks that don't
-            // trigger GC during JIT execution.
-            JitModule::compile_batch::<NanBox>(module, &externs)
+            JitModule::compile_batch::<NanBox>(
+                module, &externs, Some(active_jit_safepoint_handler as u64),
+            )
         } else {
-            // Streaming allocator with GC safepoint handler.
             JitModule::compile_with_gc::<NanBox>(
                 module, &externs, active_jit_safepoint_handler,
             )
@@ -1680,14 +1678,13 @@ impl VM {
             jit.dump_code();
         }
 
-        // Create a safepoint session that knows how to scan JIT frames.
-        // FrameScanJitTransport conservatively scans all frame words —
-        // it doesn't use the safepoint records (payload = frame_size).
+        // Create a safepoint session with precise stack map scanning.
         // Safety: gc_runtime outlives the session.
         let heap: &Heap = unsafe { &*((&self.gc_runtime.as_ref().unwrap().heap) as *const _) };
+        let safepoints = jit.all_safepoints();
         let session = JitSafepointSession::<LoxPtrPolicy, _>::new(
-            heap, FrameScanJitTransport, &[],
-        ).with_gc_threshold(0.75); // collect when 75% full
+            heap, StackMapJitTransport, &safepoints,
+        ).with_gc_threshold(0.75);
 
         unsafe { RAW_VM = self as *mut VM; }
         let result = session.with_installed(|| {

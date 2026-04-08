@@ -1017,13 +1017,17 @@ impl ValueLayout for NanBox {
     const NAME: &'static str = "nan-box";
 
     fn root_precision_hint() -> RootPrecision {
-        RootPrecision::ConservativeWords
+        // NanBox uses precise stack maps: the GC knows exactly which slots
+        // hold NaN-boxed values and checks tag bits at runtime to distinguish
+        // pointers from non-pointers. This is precise root LOCATION with
+        // runtime type discrimination — not conservative word scanning.
+        RootPrecision::PreciseSlots
     }
 }
 
 impl LayoutConfigDefaults for NanBox {
-    type DefaultRoots = ConservativeWordRoots;
-    type DefaultRootTransport = FrameScanRoots;
+    type DefaultRoots = PreciseStackRoots;
+    type DefaultRootTransport = StackMapRoots;
 }
 
 #[cfg(test)]

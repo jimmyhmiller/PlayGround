@@ -100,10 +100,14 @@ impl<'a> DynIRFunction<'a> {
             .collect();
 
         // Build call clobbers (all caller-saved GP + FP)
+        // X0-X15: standard caller-saved temporaries
+        // X16-X18: IP0/IP1 (linker scratch) + platform register — also clobbered by calls
+        // X27: used as scratch by emit_call to load the call table base
         let mut call_clobbers = Vec::new();
-        for i in 0..=15u8 {
+        for i in 0..=18u8 {
             call_clobbers.push(gp_preg(i));
         }
+        call_clobbers.push(gp_preg(27));
         for i in 0..=7u8 {
             call_clobbers.push(fp_preg(i));
         }
@@ -526,6 +530,24 @@ impl<'a> Function for DynIRFunction<'a> {
     fn num_insts(&self) -> usize {
         self.total_insts as usize
     }
+
+    fn remat_value(&self, vreg: VReg) -> Option<u64> {
+        // Find the instruction that defines this vreg.
+        // If it's an Iconst or F64Const, return the immediate value.
+        let val = dir::Value::from_index(vreg.0 as usize);
+        for block in &self.func.blocks {
+            for inst_node in &block.insts {
+                if inst_node.value == Some(val) {
+                    return match &inst_node.inst {
+                        Inst::Iconst(_, imm) => Some(*imm as u64),
+                        Inst::F64Const(f) => Some(f.to_bits()),
+                        _ => None,
+                    };
+                }
+            }
+        }
+        None
+    }
 }
 
 // ── AArch64 target ────────────────────────────────────────────────
@@ -550,11 +572,12 @@ static FP_REGS: &[PReg] = &[
     PReg(56), PReg(57), PReg(58), PReg(59), PReg(60), PReg(61), PReg(62), PReg(63),
 ];
 
-// Caller-saved: X0-X15, D0-D7, D16-D31
+// Caller-saved: X0-X18, D0-D7, D16-D31
 static CALLER_SAVED: &[PReg] = &[
-    // GP: X0-X15
+    // GP: X0-X18 (X16/X17 = IP0/IP1 linker scratch, X18 = platform register)
     PReg(0), PReg(1), PReg(2), PReg(3), PReg(4), PReg(5), PReg(6), PReg(7),
     PReg(8), PReg(9), PReg(10), PReg(11), PReg(12), PReg(13), PReg(14), PReg(15),
+    PReg(16), PReg(17), PReg(18),
     // FP: D0-D7
     PReg(32), PReg(33), PReg(34), PReg(35), PReg(36), PReg(37), PReg(38), PReg(39),
     // FP: D16-D31

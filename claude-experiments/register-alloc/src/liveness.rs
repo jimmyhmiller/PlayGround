@@ -43,6 +43,8 @@ pub struct LivenessInfo {
     /// Clobber points: position → set of physical registers clobbered at that point.
     /// Only populated for instructions that have non-empty clobber lists.
     pub clobber_points: HashMap<u32, Vec<PReg>>,
+    /// Sorted clobber positions for binary search in is_clobbered_in_range.
+    pub sorted_clobber_positions: Vec<u32>,
 }
 
 /// Compute live intervals for all virtual registers in a function.
@@ -301,6 +303,9 @@ pub fn compute_liveness<F: Function>(func: &F) -> LivenessInfo {
         }
     }
 
+    let mut sorted_clobber_positions: Vec<u32> = clobber_points.keys().copied().collect();
+    sorted_clobber_positions.sort_unstable();
+
     LivenessInfo {
         intervals,
         vreg_to_interval,
@@ -309,5 +314,6 @@ pub fn compute_liveness<F: Function>(func: &F) -> LivenessInfo {
         inst_order,
         inst_position,
         clobber_points,
+        sorted_clobber_positions,
     }
 }

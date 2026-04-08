@@ -757,12 +757,13 @@ impl JitModule {
     /// `regalloc` crate. This uses a proper SSA-aware linear scan with
     /// callee-saved registers, producing better code for large functions.
     ///
-    /// Note: safepoints / frame-reify / continuations are not yet supported
-    /// in the batch path — use this for benchmarking and non-GC workloads,
-    /// or workloads where GC doesn't trigger during JIT execution.
+    /// Compile a module with the batch register allocator (linear scan).
+    /// Supports GC safepoints via conservative frame scanning when a
+    /// safepoint_handler is provided.
     pub fn compile_batch<L: dynvalue::TagScheme>(
         module: &Module,
         externs: &[*const u8],
+        safepoint_handler: Option<u64>,
     ) -> Self {
         use batch_lower::{compile_function_batch, TagConfig};
 
@@ -793,18 +794,23 @@ impl JitModule {
         // 2. Compile each function with the batch allocator
         let mut memory = PagedCodeMemory::new();
         let mut entry_offsets: Vec<usize> = Vec::new();
+        let mut frame_sizes: Vec<u32> = Vec::new();
+        let mut function_safepoints: Vec<Vec<SafepointRecord>> = Vec::new();
 
         for (_func_idx, func) in module.functions.iter().enumerate() {
-            let (code, _frame_size) = compile_function_batch(
+            let (code, frame_size, safepoints) = compile_function_batch(
                 func, &extern_ptrs, call_table_base, TagConfig {
                     has_unboxed_float: L::HAS_UNBOXED_FLOAT,
                     payload_bits: L::PAYLOAD_BITS as u8,
                     tag_count: L::TAG_COUNT,
                     encode_tagged: L::encode_tagged,
                 },
+                safepoint_handler,
             ).unwrap_or_else(|e| panic!("batch compile failed: {e}"));
             let offset = memory.push(&code);
             entry_offsets.push(offset);
+            frame_sizes.push(frame_size);
+            function_safepoints.push(safepoints);
         }
 
         memory.finalize();
@@ -820,7 +826,7 @@ impl JitModule {
             } else {
                 base + total_len
             };
-            register_jit_code(code_start, code_end, 0);
+            register_jit_code(code_start, code_end, frame_sizes[i] as usize);
             perf_entries.push((code_start, code_end - code_start, &module.functions[i].name));
         }
         write_perf_map_entries(&perf_entries);
@@ -839,9 +845,9 @@ impl JitModule {
             call_table,
             function_entry_offsets: entry_offsets,
             function_suspend_records: module.functions.iter().map(|_| vec![]).collect(),
-            function_safepoints: module.functions.iter().map(|_| vec![]).collect(),
+            function_safepoints,
             function_frame_reify_records: module.functions.iter().map(|_| vec![]).collect(),
-            handler_payload_kind: SafepointHandlerPayloadKind::FrameSize,
+            handler_payload_kind: SafepointHandlerPayloadKind::SafepointIndex,
             max_deopt_live_values: 0,
         }
     }
@@ -919,19 +925,47 @@ impl JitModule {
             }
         };
 
-        // Only mark internal calls as control-aware when the module
-        // actually uses continuations (prompts). Plain call/return is
-        // the fast path — no spill-all, no suspend records, no outcome
-        // checking.
+        // Mark internal calls as control-aware per function.
+        // A call is control-aware when:
+        //   - The module uses continuations (prompts) — ALL internal calls need it
+        //   - The CALLEE has guards/deopts that might propagate non-standard outcomes
+        //   - The CALLER uses Invoke terminators (exception dispatch needs X1 check)
+        // Plain call/return is the fast path with no outcome checking.
         let uses_continuations = module
             .functions
             .iter()
             .any(|f| f.prompt_count > 0);
 
+        // Per-function: does this function have deopts that callers need to handle?
+        let func_has_deopts: Vec<bool> = module
+            .functions
+            .iter()
+            .map(|f| !f.deopt_info.is_empty())
+            .collect();
+
+        // Any caller uses Invoke terminators?
+        let any_invoke = module
+            .functions
+            .iter()
+            .any(|f| f.blocks.iter().any(|b| matches!(
+                b.terminator,
+                Terminator::Invoke { .. } | Terminator::InvokeIndirect { .. }
+            )));
+
         let direct_call_is_internal: Vec<bool> = module
             .func_table
             .iter()
-            .map(|def| uses_continuations && matches!(def, FuncDef::Internal(_)))
+            .enumerate()
+            .map(|(idx, def)| {
+                match def {
+                    FuncDef::Internal(func_idx) => {
+                        uses_continuations
+                            || func_has_deopts[*func_idx]
+                            || any_invoke
+                    }
+                    _ => false,
+                }
+            })
             .collect();
 
         let mut function_root_scan_sizes: Vec<usize> = Vec::new();
@@ -1023,6 +1057,11 @@ impl JitModule {
 
     pub fn safepoints_for_function(&self, func_idx: usize) -> &[SafepointRecord] {
         &self.function_safepoints[func_idx]
+    }
+
+    /// All safepoint records across all functions, flattened.
+    pub fn all_safepoints(&self) -> Vec<SafepointRecord> {
+        self.function_safepoints.iter().flat_map(|v| v.iter().cloned()).collect()
     }
 
     /// Dump all JIT code to a temp file and print disassembly commands.

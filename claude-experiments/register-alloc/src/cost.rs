@@ -89,6 +89,11 @@ pub trait CostModel {
                     cost.total_cost +=
                         self.spill_load_cost(class) + self.spill_store_cost(class);
                 }
+                // Remat moves are just MOV imm — very cheap
+                (MoveOperand::Remat(_), _) | (_, MoveOperand::Remat(_)) => {
+                    cost.reg_moves += 1;
+                    cost.total_cost += self.reg_move_cost(class);
+                }
             }
         }
 

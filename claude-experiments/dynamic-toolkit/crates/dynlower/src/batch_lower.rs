@@ -77,6 +77,10 @@ pub struct BatchEmitter<'a> {
     callee_saved_used: Vec<PReg>,
     /// Epilogue patch offsets (for frame size patching)
     epilogue_offsets: Vec<usize>,
+    /// GC safepoint handler function pointer (if GC is enabled)
+    safepoint_handler: Option<u64>,
+    /// Collected safepoint records (precise stack map slots)
+    safepoints: Vec<crate::SafepointRecord>,
 }
 
 impl<'a> BatchEmitter<'a> {
@@ -87,15 +91,17 @@ impl<'a> BatchEmitter<'a> {
         externs: &'a [*const u8],
         call_table_base: u64,
         tags: TagConfig,
+        safepoint_handler: Option<u64>,
     ) -> Self {
         let n_blocks = func.blocks.len();
         let mut buf = CodeBuffer::new();
         let block_labels: Vec<Label> = (0..n_blocks).map(|_| buf.create_label()).collect();
 
-        // Spill slots start below the frame pointer.
-        // Layout: [FP, LR] at [FP+0], then spill slots at [FP-8], [FP-16], ...
-        // Plus space for callee-saved registers we need to preserve.
-        let spill_base_offset = -16; // first spill at FP-16 (FP-8 reserved)
+        // Frame layout (all positive offsets from FP):
+        // [FP+0]: saved FP, [FP+8]: saved LR
+        // [FP+16..]: callee-saved regs, spill slots, stack slots
+        // Initial offset overridden in emit() after callee-saved count is known.
+        let spill_base_offset = 16; // placeholder, updated in emit()
 
         BatchEmitter {
             func,
@@ -110,6 +116,8 @@ impl<'a> BatchEmitter<'a> {
             tags,
             callee_saved_used: Vec::new(),
             epilogue_offsets: Vec::new(),
+            safepoint_handler,
+            safepoints: Vec::new(),
         }
     }
 
@@ -133,8 +141,8 @@ impl<'a> BatchEmitter<'a> {
         used
     }
 
-    /// Emit the full function. Returns the CodeBuffer ready for finalization.
-    pub fn emit(mut self) -> (CodeBuffer<Arm64>, u32) {
+    /// Emit the full function. Returns (CodeBuffer, frame_size, safepoint_records).
+    pub fn emit(mut self) -> (CodeBuffer<Arm64>, u32, Vec<crate::SafepointRecord>) {
         // Determine callee-saved registers to preserve
         let callee_saved = self.used_callee_saved();
         self.callee_saved_used = callee_saved.clone();
@@ -142,19 +150,22 @@ impl<'a> BatchEmitter<'a> {
         // Prologue (patch frame size later)
         let prologue_offset = Arm64Backend::emit_prologue(&mut self.buf);
 
-        // Save callee-saved registers to frame (at FP - 16, FP - 24, ...)
-        let callee_save_base = -16i32; // first callee-save slot at FP-16
+        // Save callee-saved registers within the frame at positive offsets from FP.
+        // Frame layout: [FP+0]=saved_FP, [FP+8]=saved_LR, [FP+16..]=callee-saved,
+        // then spill slots, then stack slots. Negative offsets from FP are BELOW SP
+        // and get overwritten by callee stack frames during function calls.
+        let callee_save_base = 16i32; // first callee-save slot at FP+16
         for (i, &preg) in callee_saved.iter().enumerate() {
-            let offset = callee_save_base - (i as i32) * 8;
+            let offset = callee_save_base + (i as i32) * 8;
             Arm64Backend::emit_store_gp(
                 &mut self.buf, preg_to_machine(preg), machine_gp(29), offset,
                 MachineWordSize::W64,
             );
         }
 
-        // Adjust spill base to account for callee-saved saves
+        // Spill slots start after callee-saved saves (positive offsets from FP)
         let callee_save_bytes = callee_saved.len() as u32 * 8;
-        self.spill_base_offset = -16 - callee_save_bytes as i32;
+        self.spill_base_offset = 16 + callee_save_bytes as i32;
 
         // Compute frame size: FP+LR + callee-saved saves + spill slots + stack slots
         let num_spills = self.alloc.num_spill_slots;
@@ -175,7 +186,7 @@ impl<'a> BatchEmitter<'a> {
             self.frame_size as i32,
         );
 
-        (self.buf, self.frame_size)
+        (self.buf, self.frame_size, self.safepoints)
     }
 
     fn emit_block(&mut self, block_idx: usize, block: &Block) {
@@ -351,16 +362,49 @@ impl<'a> BatchEmitter<'a> {
                     );
                 }
             }
-            (MoveOperand::SpillSlot(_), MoveOperand::SpillSlot(_)) => {
-                panic!("stack-to-stack moves should not be generated");
+            (MoveOperand::SpillSlot(src_slot), MoveOperand::SpillSlot(dst_slot)) => {
+                // Stack-to-stack: load to scratch X28, then store
+                let src_off = self.spill_offset(*src_slot);
+                let dst_off = self.spill_offset(*dst_slot);
+                if m.class == GP {
+                    Arm64Backend::emit_load_gp(
+                        &mut self.buf, machine_gp(28), machine_gp(29), src_off, MachineWordSize::W64,
+                    );
+                    Arm64Backend::emit_store_gp(
+                        &mut self.buf, machine_gp(28), machine_gp(29), dst_off, MachineWordSize::W64,
+                    );
+                } else {
+                    Arm64Backend::emit_load_fp(
+                        &mut self.buf, preg_to_machine(fp_preg(0)), machine_gp(29), src_off,
+                    );
+                    Arm64Backend::emit_store_fp(
+                        &mut self.buf, preg_to_machine(fp_preg(0)), machine_gp(29), dst_off,
+                    );
+                }
+            }
+            (MoveOperand::Remat(imm), MoveOperand::Reg(dst)) => {
+                // Rematerialize: emit MOV immediate → register
+                Arm64Backend::emit_mov_imm(&mut self.buf, preg_to_machine(*dst), *imm);
+            }
+            (MoveOperand::Remat(imm), MoveOperand::SpillSlot(slot)) => {
+                // Remat to stack: materialize into scratch, then store
+                let offset = self.spill_offset(*slot);
+                Arm64Backend::emit_mov_imm(&mut self.buf, machine_gp(28), *imm);
+                Arm64Backend::emit_store_gp(
+                    &mut self.buf, machine_gp(28), machine_gp(29), offset, MachineWordSize::W64,
+                );
+            }
+            (_, MoveOperand::Remat(_)) => {
+                // Can't move INTO a remat — this shouldn't happen
+                panic!("cannot move into a Remat operand");
             }
         }
     }
 
     fn restore_callee_saved(&mut self) {
-        let callee_save_base = -16i32;
+        let callee_save_base = 16i32;
         for (i, &preg) in self.callee_saved_used.iter().enumerate() {
-            let offset = callee_save_base - (i as i32) * 8;
+            let offset = callee_save_base + (i as i32) * 8;
             Arm64Backend::emit_load_gp(
                 &mut self.buf, preg_to_machine(preg), machine_gp(29), offset,
                 MachineWordSize::W64,
@@ -369,8 +413,8 @@ impl<'a> BatchEmitter<'a> {
     }
 
     fn spill_offset(&self, slot: SpillSlot) -> i32 {
-        // Spill slots are at FP - 16 - slot_index * 8
-        self.spill_base_offset - (slot.0 as i32) * 8
+        // Spill slots are at positive offsets from FP, after callee-saved saves
+        self.spill_base_offset + (slot.0 as i32) * 8
     }
 
     // ── Instruction emission ──────────────────────────────────
@@ -385,8 +429,17 @@ impl<'a> BatchEmitter<'a> {
             alloc.get(inst_id, idx).expect("missing use allocation")
         };
 
+        // Skip constant definitions that are rematerialized — they'll be
+        // re-emitted as MOV immediates before each use by Remat moves.
+        if let Some(val) = node.value {
+            let vreg = VReg(val.index() as u32);
+            if let Some(MoveOperand::Remat(_)) = self.alloc.vreg_homes.get(&vreg) {
+                return;
+            }
+        }
+
         match &node.inst {
-            Inst::Iconst(ty, imm) => {
+            Inst::Iconst(_ty, imm) => {
                 let dst = get_def(&self.alloc);
                 Arm64Backend::emit_mov_imm(&mut self.buf, preg_to_machine(dst), *imm as u64);
             }
@@ -649,8 +702,69 @@ impl<'a> BatchEmitter<'a> {
                 todo!("Prompt/Slice operations in batch lowerer");
             }
 
-            Inst::Safepoint(_) => {
-                // TODO: emit safepoint
+            Inst::Safepoint(live) => {
+                if let Some(handler) = self.safepoint_handler {
+                    // Spill all live callee-saved register values to their save slots
+                    // so the GC can find them. The callee-saved save area is populated
+                    // in the prologue, but register values may have changed since then.
+                    // Re-save the current callee-saved registers.
+                    let callee_save_base = 16i32;
+                    for (i, &preg) in self.callee_saved_used.iter().enumerate() {
+                        let offset = callee_save_base + (i as i32) * 8;
+                        Arm64Backend::emit_store_gp(
+                            &mut self.buf, preg_to_machine(preg), machine_gp(29), offset,
+                            MachineWordSize::W64,
+                        );
+                    }
+
+                    // Collect precise root slot offsets for all live values.
+                    // Values live at this safepoint are in:
+                    // - Callee-saved register save area (FP+16+i*8)
+                    // - Spill slots (spill_base_offset + slot*8)
+                    // - Stack slots (via stack_slot_offset)
+                    let mut root_slots: Vec<i32> = Vec::new();
+
+                    // All callee-saved save slots (they contain live register values)
+                    for (i, _) in self.callee_saved_used.iter().enumerate() {
+                        root_slots.push(callee_save_base + (i as i32) * 8);
+                    }
+
+                    // All spill slots that are in use
+                    for slot_idx in 0..self.alloc.num_spill_slots {
+                        root_slots.push(self.spill_offset(SpillSlot(slot_idx)));
+                    }
+
+                    // All stack slots (local variables)
+                    // Compute offsets inline since we can't construct StackSlot from outside dynir
+                    let spill_bytes = self.alloc.num_spill_slots * 8;
+                    let mut ss_offset = self.spill_base_offset + spill_bytes as i32;
+                    for ss in &self.func.stack_slots {
+                        root_slots.push(ss_offset);
+                        ss_offset += ss.size as i32;
+                    }
+
+                    let safepoint_index = self.safepoints.len();
+                    let code_offset = self.buf.current_offset();
+                    self.safepoints.push(crate::SafepointRecord {
+                        code_offset,
+                        root_slots,
+                    });
+
+                    // Call handler: X0 = FP, X1 = safepoint_index
+                    Arm64Backend::emit_gp_move(&mut self.buf, machine_gp(0), machine_gp(29));
+                    Arm64Backend::emit_mov_imm(&mut self.buf, machine_gp(1), safepoint_index as u64);
+                    Arm64Backend::emit_mov_imm(&mut self.buf, machine_gp(28), handler);
+                    Arm64Backend::emit_call_reg(&mut self.buf, machine_gp(28));
+
+                    // After GC, reload callee-saved registers (GC may have updated pointers)
+                    for (i, &preg) in self.callee_saved_used.iter().enumerate() {
+                        let offset = callee_save_base + (i as i32) * 8;
+                        Arm64Backend::emit_load_gp(
+                            &mut self.buf, preg_to_machine(preg), machine_gp(29), offset,
+                            MachineWordSize::W64,
+                        );
+                    }
+                }
             }
         }
     }
@@ -659,6 +773,9 @@ impl<'a> BatchEmitter<'a> {
         // Arguments are already in their fixed registers thanks to the allocation.
         // Load function pointer from call table and BLR.
         let func_idx = fref.index();
+        // Use X27 for the call table base, X28 for the function pointer.
+        // X27 is added to call_clobbers so the allocator won't assign live
+        // values to it across calls.
         Arm64Backend::emit_mov_imm(&mut self.buf, machine_gp(27), self.call_table_base);
         let offset = (func_idx * 8) as i32;
         Arm64Backend::emit_load_gp(
@@ -717,11 +834,11 @@ impl<'a> BatchEmitter<'a> {
     }
 
     fn stack_slot_offset(&self, slot: StackSlot) -> i32 {
-        // Stack slots come after spill slots
+        // Stack slots come after spill slots (positive offsets from FP)
         let spill_bytes = self.alloc.num_spill_slots * 8;
-        let mut offset = self.spill_base_offset - spill_bytes as i32;
+        let mut offset = self.spill_base_offset + spill_bytes as i32;
         for i in 0..slot.index() {
-            offset -= self.func.stack_slots[i].size as i32;
+            offset += self.func.stack_slots[i].size as i32;
         }
         offset
     }
@@ -740,16 +857,16 @@ fn type_to_word_size(ty: Type) -> MachineWordSize {
 
 /// Compile a single dynir function using the batch register allocator.
 ///
-/// Returns the emitted machine code bytes and frame size.
 /// Compile a single dynir function using the batch register allocator.
 ///
-/// Returns the emitted machine code bytes and frame size.
+/// Returns (machine_code, frame_size, safepoint_records).
 pub fn compile_function_batch(
     func: &Function,
     externs: &[*const u8],
     call_table_base: u64,
     tags: TagConfig,
-) -> Result<(Vec<u8>, u32), String> {
+    safepoint_handler: Option<u64>,
+) -> Result<(Vec<u8>, u32, Vec<crate::SafepointRecord>), String> {
     use regalloc::allocator::RegisterAllocator as _;
     use regalloc::linear_scan::LinearScanAllocator;
 
@@ -829,12 +946,12 @@ pub fn compile_function_batch(
     }
 
     // Phase 3: Emit machine code
-    let emitter = BatchEmitter::new(func, &adapted, &allocation, externs, call_table_base, tags);
-    let (mut buf, frame_size) = emitter.emit();
+    let emitter = BatchEmitter::new(func, &adapted, &allocation, externs, call_table_base, tags, safepoint_handler);
+    let (mut buf, frame_size, safepoints) = emitter.emit();
 
     // Finalize (resolve branch labels)
     buf.finalize();
     let code = buf.code().to_vec();
 
-    Ok((code, frame_size))
+    Ok((code, frame_size, safepoints))
 }
