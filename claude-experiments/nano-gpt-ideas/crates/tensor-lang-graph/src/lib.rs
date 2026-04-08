@@ -1,6 +1,9 @@
 pub mod dim;
 pub mod grad;
 pub mod nanogpt;
+pub mod runtime_trait;
+
+pub use runtime_trait::TensorRuntime;
 
 use std::collections::HashMap;
 use tensor_lang_parser::{self as parser, Arg, BinOpKind, Expr, Item, Stmt};

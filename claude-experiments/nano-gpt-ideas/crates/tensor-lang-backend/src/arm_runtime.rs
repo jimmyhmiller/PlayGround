@@ -1,5 +1,7 @@
 //! ARM64 native runtime: mmaps executable memory and runs JIT-compiled code.
 
+use tensor_lang_graph::TensorRuntime;
+
 use crate::arm::ArmCode;
 
 pub struct ArmRuntime {
@@ -129,6 +131,24 @@ impl Drop for ArmRuntime {
         unsafe {
             libc::munmap(self.code_ptr as *mut _, self.code_len);
         }
+    }
+}
+
+impl TensorRuntime for ArmRuntime {
+    fn backend_name(&self) -> &str { "arm" }
+
+    fn run(&mut self, inputs: &[&[f32]], output_size: usize) -> Vec<f32> {
+        self.run_with_dim_params(&[], inputs, output_size)
+    }
+
+    fn run_with_dim_params(
+        &mut self,
+        dim_param_values: &[u32],
+        inputs: &[&[f32]],
+        output_size: usize,
+    ) -> Vec<f32> {
+        let i32_params: Vec<i32> = dim_param_values.iter().map(|&v| v as i32).collect();
+        ArmRuntime::run_with_dim_params(self, &i32_params, inputs, output_size)
     }
 }
 

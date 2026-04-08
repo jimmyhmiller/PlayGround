@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 tensor-lang-graph = { path = "../tensor-lang-graph" }
 tensor-lang-gpu = { path = "../tensor-lang-gpu", features = ["native"] }
+tensor-lang-backend = { path = "../tensor-lang-backend", features = ["runtime"] }
 wgpu = "28"
 winit = "0.30"
 pollster = "0.4"

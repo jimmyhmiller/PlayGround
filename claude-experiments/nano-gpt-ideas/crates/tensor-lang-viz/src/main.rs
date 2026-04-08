@@ -575,7 +575,7 @@ impl App {
             if end <= self.logits.len() {
                 let slice = &self.logits[start..end];
                 let max_idx = slice.iter().enumerate()
-                    .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+                    .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
                     .map(|(i, _)| i).unwrap_or(0);
                 self.predicted.push(max_idx);
             }
@@ -1368,9 +1368,9 @@ impl App {
             }
             let td = GlyphonColor::rgb(140, 140, 140);
             let controls = if self.view_mode == ViewMode::DAG {
-                "[Tab]=Wall  [Drag]=Pan  [Pinch]=Zoom  [Click]=Expand  [S]=Train  [N]=New  [Left/Right]=Pos  [Q]=Quit"
+                "[Tab]=Wall  [Drag]=Pan  [Pinch]=Zoom  [Click]=Expand  [S]=Train  [N]=New  [Left/Right]=Pos  [B]=Backend  [Q]=Quit"
             } else {
-                "[Tab]=Seq  [S]=Train  [N]=New  [Left/Right]=Pos  [Q]=Quit"
+                "[Tab]=Seq  [S]=Train  [N]=New  [Left/Right]=Pos  [B]=Backend  [Q]=Quit"
             };
             texts.push(TextEntry {
                 text: controls.into(),
@@ -1468,8 +1468,9 @@ impl App {
             Mode::Training => " [TRAINING]",
         };
         let loss_val = self.loss_history.last().copied().unwrap_or(0.0);
+        let backend = self.runner.backend_name();
         texts.push(TextEntry {
-            text: format!("Step {} | Loss: {:.4}{}", self.step, loss_val, mode_str),
+            text: format!("Step {} | Loss: {:.4} | {} {}", self.step, loss_val, backend, mode_str),
             x: m + 5.0, y: 2.0, size: 36.0, color: tw,
         });
 
@@ -1768,9 +1769,9 @@ impl App {
         // Controls
         let controls = match self.view_mode {
             ViewMode::Sequence =>
-                "[Tab]=Graph  [Left/Right]=Step  [S]=Train  [N]=New  [Space]=Run/Pause  [R]=Reset  [Q]=Quit",
+                "[Tab]=Graph  [Left/Right]=Step  [S]=Train  [N]=New  [Space]=Run/Pause  [R]=Reset  [B]=Backend  [Q]=Quit",
             ViewMode::Graph =>
-                "[Tab]=DAG  [Click/Up/Down]=Node  [Scroll]=Browse  [S]=Train  [N]=New  [Space]=Run/Pause  [Q]=Quit",
+                "[Tab]=DAG  [Click/Up/Down]=Node  [Scroll]=Browse  [S]=Train  [N]=New  [Space]=Run/Pause  [B]=Backend  [Q]=Quit",
             ViewMode::DAG | ViewMode::Wall => unreachable!(),
         };
         texts.push(TextEntry {
@@ -2142,6 +2143,9 @@ impl ApplicationHandler for App {
                         self.loss_history.clear();
                         self.step = 0;
                         self.new_example();
+                    }
+                    Key::Character("b") => {
+                        self.runner.cycle_backend();
                     }
                     Key::Character("c") => {
                         self.wall_hide_constants = !self.wall_hide_constants;

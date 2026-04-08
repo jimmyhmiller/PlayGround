@@ -3,6 +3,7 @@
 //! Runs WASM modules emitted by `wasm::WasmBackend` directly from Rust,
 //! no Node.js required.
 
+use tensor_lang_graph::TensorRuntime;
 use wasmtime::*;
 
 pub struct WasmRuntime {
@@ -32,6 +33,24 @@ impl std::fmt::Display for RuntimeError {
 impl From<wasmtime::Error> for RuntimeError {
     fn from(e: wasmtime::Error) -> Self {
         RuntimeError::Wasmtime(e)
+    }
+}
+
+impl TensorRuntime for WasmRuntime {
+    fn backend_name(&self) -> &str { "wasm" }
+
+    fn run(&mut self, inputs: &[&[f32]], output_size: usize) -> Vec<f32> {
+        self.run_with_dim_params(&[], inputs, output_size)
+    }
+
+    fn run_with_dim_params(
+        &mut self,
+        dim_param_values: &[u32],
+        inputs: &[&[f32]],
+        output_size: usize,
+    ) -> Vec<f32> {
+        let i32_params: Vec<i32> = dim_param_values.iter().map(|&v| v as i32).collect();
+        WasmRuntime::run_with_dim_params(self, &i32_params, inputs, output_size)
     }
 }
 

@@ -1,8 +1,32 @@
 use std::collections::HashMap;
 use rand::Rng;
-use tensor_lang_graph::{compile_with_env, Graph, NodeId, Op};
+use tensor_lang_graph::{compile_with_env, Graph, NodeId, Op, TensorRuntime};
 use tensor_lang_gpu::plan::{self, GpuPlan};
-use tensor_lang_gpu::runtime::GpuRuntime;
+use tensor_lang_gpu::runtime::BoundGpuRuntime;
+use tensor_lang_backend::wasm::WasmBackend;
+use tensor_lang_backend::runtime::WasmRuntime;
+#[cfg(target_arch = "aarch64")]
+use tensor_lang_backend::arm::ArmBackend;
+#[cfg(target_arch = "aarch64")]
+use tensor_lang_backend::arm_runtime::ArmRuntime;
+
+/// Wrapper that overrides a runtime's backend name.
+struct NamedRuntime {
+    name: &'static str,
+    inner: Box<dyn TensorRuntime>,
+}
+
+impl TensorRuntime for NamedRuntime {
+    fn backend_name(&self) -> &str { self.name }
+
+    fn run(&mut self, inputs: &[&[f32]], output_size: usize) -> Vec<f32> {
+        self.inner.run(inputs, output_size)
+    }
+
+    fn run_with_dim_params(&mut self, dim_param_values: &[u32], inputs: &[&[f32]], output_size: usize) -> Vec<f32> {
+        self.inner.run_with_dim_params(dim_param_values, inputs, output_size)
+    }
+}
 
 // ─── Simple tensor container (replaces ndarray) ─────────────────────────────
 
@@ -165,12 +189,11 @@ pub struct ModelRunner {
     pub inf_logits_idx: usize,       // last forward node in inference graph
     pub train_logits_idx: usize,     // last model-forward node in training graph
     pub train_loss_idx: usize,       // loss node index (boundary: everything after = backprop)
-    // GPU execution
-    gpu_rt: GpuRuntime,
-    inf_plan: GpuPlan,
+    // Runtime execution (backend-agnostic)
+    inf_rt: Box<dyn TensorRuntime>,
     inf_all_output_ids: Vec<NodeId>,    // which nodes are materialized in inference
     inf_output_sizes: Vec<usize>,       // size of each output
-    train_plan: GpuPlan,
+    train_rt: Box<dyn TensorRuntime>,
     train_output_sizes: Vec<usize>,
 }
 
@@ -424,6 +447,87 @@ impl ModelRunner {
         Self::build(cfg, init_weights(&ModelConfig::default()))
     }
 
+    /// Swap the inference runtime (e.g. to switch from GPU to WASM/ARM).
+    pub fn set_inf_runtime(&mut self, rt: Box<dyn TensorRuntime>) {
+        self.inf_rt = rt;
+    }
+
+    /// Swap the training runtime.
+    pub fn set_train_runtime(&mut self, rt: Box<dyn TensorRuntime>) {
+        self.train_rt = rt;
+    }
+
+    /// Current inference backend name.
+    pub fn backend_name(&self) -> &str {
+        self.inf_rt.backend_name()
+    }
+
+    /// Access the compiled inference graph (for compiling to other backends).
+    pub fn inf_graph(&self) -> &Graph {
+        &self.inf_graph
+    }
+
+    /// Access the compiled training graph (for compiling to other backends).
+    pub fn train_graph(&self) -> &Graph {
+        &self.train_graph
+    }
+
+    /// Cycle to the next backend: wgpu -> wasm -> wasm-simd -> arm -> wgpu -> ...
+    pub fn cycle_backend(&mut self) {
+        #[cfg(target_arch = "aarch64")]
+        const BACKENDS: &[&str] = &["wgpu", "wasm", "wasm-simd", "arm"];
+        #[cfg(not(target_arch = "aarch64"))]
+        const BACKENDS: &[&str] = &["wgpu", "wasm", "wasm-simd"];
+
+        let current = self.inf_rt.backend_name();
+        let idx = BACKENDS.iter().position(|&b| b == current).unwrap_or(0);
+        let next = BACKENDS[(idx + 1) % BACKENDS.len()];
+        self.switch_backend(next);
+    }
+
+    fn switch_backend(&mut self, name: &str) {
+        let mut train_output_ids = vec![self.train_loss];
+        train_output_ids.extend_from_slice(&self.train_grad_ids);
+
+        match name {
+            name @ ("wasm" | "wasm-simd") => {
+                let use_simd = name == "wasm-simd";
+                let backend = WasmBackend { use_simd };
+                self.inf_rt = Box::new(NamedRuntime {
+                    name: if use_simd { "wasm-simd" } else { "wasm" },
+                    inner: Box::new(WasmRuntime::new(
+                        &backend.emit_fused_multi_output(&self.inf_graph, &self.inf_all_output_ids),
+                    ).expect("failed to compile WASM")),
+                });
+                self.train_rt = Box::new(NamedRuntime {
+                    name: if use_simd { "wasm-simd" } else { "wasm" },
+                    inner: Box::new(WasmRuntime::new(
+                        &backend.emit_fused_multi_output(&self.train_graph, &train_output_ids),
+                    ).expect("failed to compile WASM")),
+                });
+            }
+            #[cfg(target_arch = "aarch64")]
+            "arm" => {
+                let backend = ArmBackend;
+                self.inf_rt = Box::new(ArmRuntime::new(
+                    &backend.emit_fused_multi_output(&self.inf_graph, &self.inf_all_output_ids),
+                ));
+                self.train_rt = Box::new(ArmRuntime::new(
+                    &backend.emit_fused_multi_output(&self.train_graph, &train_output_ids),
+                ));
+            }
+            _ => {
+                // wgpu (default)
+                let (inf_plan, _, _) = compile_inf_plan(&self.inf_graph);
+                self.inf_rt = Box::new(BoundGpuRuntime::new(inf_plan));
+                let (train_plan, _) = compile_train_plan(
+                    &self.train_graph, self.train_loss, &self.train_grad_ids,
+                );
+                self.train_rt = Box::new(BoundGpuRuntime::new(train_plan));
+            }
+        }
+    }
+
     fn build(cfg: ModelConfig, weights: Vec<Vec<f32>>) -> Self {
         // Compile inference graph
         let source = model_source();
@@ -444,8 +548,9 @@ impl ModelRunner {
         let (train_plan, train_output_sizes) =
             compile_train_plan(&train_graph, train_loss, &train_grad_ids);
 
-        // Initialize GPU runtime
-        let gpu_rt = GpuRuntime::new();
+        // Initialize GPU runtimes
+        let inf_rt: Box<dyn TensorRuntime> = Box::new(BoundGpuRuntime::new(inf_plan));
+        let train_rt: Box<dyn TensorRuntime> = Box::new(BoundGpuRuntime::new(train_plan));
 
         ModelRunner {
             inf_graph,
@@ -459,11 +564,10 @@ impl ModelRunner {
             train_loss_idx,
             cfg,
             weights,
-            gpu_rt,
-            inf_plan,
+            inf_rt,
             inf_all_output_ids,
             inf_output_sizes,
-            train_plan,
+            train_rt,
             train_output_sizes,
         }
     }
@@ -487,12 +591,12 @@ impl ModelRunner {
         inputs
     }
 
-    pub fn forward(&self, tokens: &[f32]) -> Vec<Tensor> {
+    pub fn forward(&mut self, tokens: &[f32]) -> Vec<Tensor> {
         let flat_inputs = self.collect_inputs(&self.inf_graph, tokens, None);
         let input_refs: Vec<&[f32]> = flat_inputs.iter().map(|v| v.as_slice()).collect();
 
         let total_output: usize = self.inf_output_sizes.iter().sum();
-        let result = self.gpu_rt.run(&self.inf_plan, &input_refs, total_output);
+        let result = self.inf_rt.run(&input_refs, total_output);
 
         // Split concatenated output into per-node Tensor values.
         let n_nodes = self.inf_graph.nodes.len();
@@ -532,7 +636,7 @@ impl ModelRunner {
         let input_refs: Vec<&[f32]> = flat_inputs.iter().map(|v| v.as_slice()).collect();
 
         let total_output: usize = self.train_output_sizes.iter().sum();
-        let result = self.gpu_rt.run(&self.train_plan, &input_refs, total_output);
+        let result = self.train_rt.run(&input_refs, total_output);
 
         // First output is loss (1 element), rest are gradients
         let loss = result[0];

@@ -3,6 +3,8 @@
 
 use std::collections::HashMap;
 
+use tensor_lang_graph::TensorRuntime;
+
 use crate::plan::{BufId, GpuPlan, GpuStep};
 use crate::wgsl::Shader;
 
@@ -357,5 +359,37 @@ trait CreateBufferInit {
 impl CreateBufferInit for wgpu::Device {
     fn create_buffer_init(&self, desc: &wgpu::util::BufferInitDescriptor) -> wgpu::Buffer {
         wgpu::util::DeviceExt::create_buffer_init(self, desc)
+    }
+}
+
+/// A GPU runtime bundled with a compiled plan, implementing `TensorRuntime`.
+pub struct BoundGpuRuntime {
+    pub runtime: GpuRuntime,
+    pub plan: GpuPlan,
+}
+
+impl BoundGpuRuntime {
+    pub fn new(plan: GpuPlan) -> Self {
+        BoundGpuRuntime {
+            runtime: GpuRuntime::new(),
+            plan,
+        }
+    }
+}
+
+impl TensorRuntime for BoundGpuRuntime {
+    fn backend_name(&self) -> &str { "wgpu" }
+
+    fn run(&mut self, inputs: &[&[f32]], output_size: usize) -> Vec<f32> {
+        self.runtime.run(&self.plan, inputs, output_size)
+    }
+
+    fn run_with_dim_params(
+        &mut self,
+        dim_param_values: &[u32],
+        inputs: &[&[f32]],
+        output_size: usize,
+    ) -> Vec<f32> {
+        self.runtime.run_with_dim_params(&self.plan, dim_param_values, inputs, output_size)
     }
 }

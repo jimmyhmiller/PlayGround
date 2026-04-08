@@ -433,6 +433,12 @@ impl VM {
         self.intern_string(&format!("#{}", id))
     }
 
+    /// Look up a compile-time string's integer ID by name.
+    /// Used for runtime lookups of known strings like "init".
+    fn compile_string_id(&self, name: &str) -> u64 {
+        self.compile_strings.iter().position(|s| s == name).unwrap_or(u64::MAX as usize) as u64
+    }
+
     /// Get the text for a compile-time string ID (for error messages).
     fn string_text(&self, id: usize) -> String {
         if id < self.compile_strings.len() {
@@ -1184,7 +1190,7 @@ extern "C" fn jit_lox_get_closure_arity(callee: u64) -> u64 {
 
 extern "C" fn jit_lox_get_class_init_arity(callee: u64) -> u64 {
     with_vm(|vm| {
-        let init_name = vm.intern_string("init");
+        let init_name = vm.compile_string_id("init");
         if let Some(closure_val) = vm.class_get_method(callee, init_name) {
             return vm.closure_arity(closure_val);
         }
@@ -1226,7 +1232,7 @@ extern "C" fn jit_lox_construct_instance(class: u64) -> u64 {
 
 extern "C" fn jit_lox_class_init_ptr(class: u64) -> u64 {
     with_vm(|vm| {
-        let init_name = vm.intern_string("init");
+        let init_name = vm.compile_string_id("init");
         if let Some(closure_val) = vm.class_get_method(class, init_name) {
             let idx = vm.closure_func_idx(closure_val) as usize;
             if idx < vm.jit_call_table.len() {
@@ -1240,7 +1246,7 @@ extern "C" fn jit_lox_class_init_ptr(class: u64) -> u64 {
 
 extern "C" fn jit_lox_class_init_closure(class: u64) -> u64 {
     with_vm(|vm| {
-        let init_name = vm.intern_string("init");
+        let init_name = vm.compile_string_id("init");
         vm.class_get_method(class, init_name).unwrap_or(nil_val())
     })
 }
@@ -1399,7 +1405,7 @@ extern "C" fn jit_lox_invoke_closure() -> u64 {
 extern "C" fn jit_lox_instantiate(class: u64) -> u64 {
     with_vm(|vm| {
         let instance = vm.alloc_instance(class);
-        let init_name = vm.intern_string("init");
+        let init_name = vm.compile_string_id("init");
         if let Some(closure_val) = vm.class_get_method(class, init_name) {
             vm.last_invoke_closure = closure_val;
             vm.last_init_arity = vm.closure_arity(closure_val);
@@ -1854,7 +1860,7 @@ impl VM {
         });
         interp.bind_by_name("lox_get_class_init_arity", move |args| {
             let vm = unsafe{&mut*rt};
-            let init_name = vm.intern_string("init");
+            let init_name = vm.compile_string_id("init");
             let v = if let Some(closure_val) = vm.class_get_method(args[0], init_name) {
                 vm.closure_arity(closure_val)
             } else { 255 };
@@ -1900,7 +1906,7 @@ impl VM {
         });
         interp.bind_by_name("lox_class_init_ptr", move |args| {
             let vm = unsafe{&mut*rt};
-            let init_name = vm.intern_string("init");
+            let init_name = vm.compile_string_id("init");
             let v = if let Some(c) = vm.class_get_method(args[0], init_name) {
                 vm.closure_func_idx(c)
             } else { 0 };
@@ -1908,7 +1914,7 @@ impl VM {
         });
         interp.bind_by_name("lox_class_init_closure", move |args| {
             let vm = unsafe{&mut*rt};
-            let init_name = vm.intern_string("init");
+            let init_name = vm.compile_string_id("init");
             let v = vm.class_get_method(args[0], init_name).unwrap_or(nil_val());
             ExternCallResult::Value(Some(v))
         });
@@ -1917,7 +1923,7 @@ impl VM {
         interp.bind_by_name("lox_instantiate", move |args| {
             let vm = unsafe{&mut*rt};
             let instance = vm.alloc_instance(args[0]);
-            let init_name = vm.intern_string("init");
+            let init_name = vm.compile_string_id("init");
             if let Some(closure_val) = vm.class_get_method(args[0], init_name) {
                 vm.last_invoke_closure = closure_val;
                 vm.last_init_arity = vm.closure_arity(closure_val);
