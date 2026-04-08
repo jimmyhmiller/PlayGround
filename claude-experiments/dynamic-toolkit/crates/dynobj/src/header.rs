@@ -13,16 +13,15 @@ pub trait ObjHeader: Copy + 'static {
     /// Size of this header in bytes.
     const SIZE: usize;
 
-    /// Byte offset of the `type_info` field within this header.
-    /// Used by the heap walker to recover TypeInfo from any object
-    /// without knowing the concrete header type.
-    const TYPE_INFO_OFFSET: usize;
+    /// Byte offset of the `type_id` field within this header.
+    /// Used by the heap walker to recover the type from any object.
+    const TYPE_ID_OFFSET: usize;
 
     /// Initialize a header for a newly allocated object.
-    fn new(type_info: *const TypeInfo) -> Self;
+    fn new(type_id: u16) -> Self;
 
-    /// Get the TypeInfo pointer (GC needs this to know the object shape).
-    fn type_info(&self) -> *const TypeInfo;
+    /// Get the type ID (index into the runtime's TypeInfo table).
+    fn type_id(&self) -> u16;
 }
 
 /// Declarative macro for defining header structs with optional bitfield sub-fields.
@@ -63,7 +62,7 @@ macro_rules! define_header {
         }
     };
 
-    // ─── Munch: type_info special field ─────────────────────────────
+    // ─── Munch: type_id special field ─────────────────────────────
     (@munch
         name = $name:ident,
         struct_fields = [$($sf:tt)*],
@@ -74,7 +73,7 @@ macro_rules! define_header {
         $crate::define_header! {
             @munch
             name = $name,
-            struct_fields = [$($sf)* type_info: *const $crate::TypeInfo,],
+            struct_fields = [$($sf)* type_id: u16,],
             has_type_info = yes,
             accessors = [$($acc)*],
             rest = [$($rest)*]
@@ -226,18 +225,18 @@ macro_rules! define_header {
 
         impl $crate::ObjHeader for $name {
             const SIZE: usize = core::mem::size_of::<$name>();
-            const TYPE_INFO_OFFSET: usize = core::mem::offset_of!($name, type_info);
+            const TYPE_ID_OFFSET: usize = core::mem::offset_of!($name, type_id);
 
             #[inline(always)]
-            fn new(type_info: *const $crate::TypeInfo) -> Self {
+            fn new(type_id: u16) -> Self {
                 let mut h: Self = unsafe { core::mem::zeroed() };
-                h.type_info = type_info;
+                h.type_id = type_id;
                 h
             }
 
             #[inline(always)]
-            fn type_info(&self) -> *const $crate::TypeInfo {
-                self.type_info
+            fn type_id(&self) -> u16 {
+                self.type_id
             }
         }
 
@@ -269,25 +268,23 @@ macro_rules! define_header {
     };
 }
 
-// Compact header: just a type-info pointer (8 bytes).
-//
-// GC metadata (mark bits, forwarding pointers) lives in a side table
-// rather than inline. Smaller objects at the cost of requiring external
-// bookkeeping for the collector.
+// Compact header: type_id + padding (8 bytes total).
+// The remaining 6 bytes after type_id are available for future use
+// (e.g., GC mark bits, hash code, etc.)
 define_header! {
     pub Compact {
         type_info: *const TypeInfo,
+        _pad: u16,
+        _pad2: u32,
     }
 }
 
-// Full header: GC word + type-info pointer (16 bytes).
-//
-// The GC word can store mark bits, forwarding pointers, generation info,
-// or whatever your collector needs — right there in the object. Costs
-// 8 extra bytes per object but avoids side-table lookups.
+// Full header: GC word + type_id + padding (16 bytes total).
 define_header! {
     pub Full {
         gc_word: u64,
         type_info: *const TypeInfo,
+        _pad: u16,
+        _pad2: u32,
     }
 }

@@ -22,6 +22,10 @@
 /// ```
 #[derive(Debug, Clone, Copy)]
 pub struct TypeInfo {
+    /// Numeric type identifier. Stored in the object header for fast type dispatch.
+    /// Set by the runtime when registering types (e.g., 0=String, 1=Closure, etc.)
+    pub type_id: u16,
+
     /// Size of the object header in bytes (from `ObjHeader::SIZE`).
     pub header_size: u16,
 
@@ -68,12 +72,19 @@ impl TypeInfo {
     /// ```
     pub const fn for_header(header_size: usize) -> Self {
         Self {
+            type_id: 0, // set by runtime when registering types
             header_size: header_size as u16,
             value_field_count: 0,
             raw_byte_count: 0,
             varlen: VarLenKind::None,
             align_log2: 3, // 8-byte alignment minimum
         }
+    }
+
+    /// Set the type_id for this TypeInfo.
+    pub const fn with_type_id(mut self, id: u16) -> Self {
+        self.type_id = id;
+        self
     }
 
     /// Set the number of GC-traced Value fields (each 8 bytes).

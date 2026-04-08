@@ -11,7 +11,7 @@ use dynir::ir::{FuncDef, Module};
 use dynir::InterpRootManager;
 use dynir::opt;
 use dynlower::{JitModule, JitOutcome};
-use dynobj::{Compact, DynRootFrame, FrameChain, RootFrame, TypeInfo};
+use dynobj::{Compact, DynRootFrame, FrameChain, ObjHeader, RootFrame, TypeInfo};
 use dynvalue::NanBox;
 
 use crate::lower::{self, LoxGcTypes};
@@ -79,8 +79,8 @@ pub struct LoxGcRuntime {
     pub globals: GlobalRoots,
     /// Interned strings: maps text → index in heap.globals
     pub string_roots: StringRoots,
-    /// Type infos for alloc dispatch.
-    type_infos: Vec<&'static TypeInfo>,
+    /// Type infos for alloc dispatch. Owned by value — no leak.
+    type_infos: Vec<TypeInfo>,
     /// Alloc counter for triggering GC.
     alloc_count: Cell<usize>,
     gc_threshold: usize,
@@ -160,9 +160,9 @@ impl StringRoots {
 }
 
 impl LoxGcRuntime {
-    fn new(heap_size: usize, type_infos: Vec<&'static TypeInfo>) -> Self {
+    fn new(heap_size: usize, type_infos: Vec<TypeInfo>) -> Self {
         LoxGcRuntime {
-            heap: Heap::new::<Compact>(heap_size),
+            heap: Heap::new::<Compact>(heap_size, type_infos.clone()),
             chain: FrameChain::new(),
             frames: std::cell::RefCell::new(Vec::new()),
             globals: GlobalRoots::new(),
@@ -176,14 +176,14 @@ impl LoxGcRuntime {
     /// Allocate without triggering GC. Used by Rust-side helpers where
     /// local variables may hold unrooted GC pointers.
     fn alloc_raw(&self, type_id: usize, varlen_len: usize) -> *mut u8 {
-        let info = self.type_infos[type_id];
+        let info = &self.type_infos[type_id];
         self.heap.alloc_obj::<Compact>(info, varlen_len)
     }
 
     /// Allocate with GC trigger. Only safe to call when all live GC pointers
     /// are in root slots (i.e., from the __gc_alloc__ extern during IR execution).
     fn alloc_with_gc(&self, type_id: usize, varlen_len: usize) -> *mut u8 {
-        let info = self.type_infos[type_id];
+        let info = &self.type_infos[type_id];
 
         // Check if we should collect
         let count = self.alloc_count.get() + 1;
@@ -362,28 +362,14 @@ impl VM {
         }
     }
 
-    /// Read the TypeInfo pointer from a GC object header.
-    fn obj_type_info(&self, val: u64) -> *const TypeInfo {
-        if !is_obj(val) { return std::ptr::null(); }
-        let ptr = obj_ptr(val);
-        if ptr.is_null() { return std::ptr::null(); }
-        unsafe { gc_read_type_info(ptr) }
-    }
-
-    /// Determine the object type tag (matching the old ObjType enum values).
-    /// Returns: 0=String, 1=Closure, 2=Upvalue, 3=Class, 4=Instance, 5=BoundMethod, 6=NativeFn, 255=unknown
+    /// Read the type_id directly from the object header. One u16 read.
+    /// Returns: 0=String, 1=Closure, 2=Upvalue, 3=Class, 4=Instance, 5=BoundMethod, 6=NativeFn, etc.
+    #[inline(always)]
     fn obj_type_tag(&self, val: u64) -> u64 {
-        let ti = self.obj_type_info(val);
-        if ti.is_null() { return 255; }
-        let types = self.types();
-        if ti == types.type_infos[types.string_id] as *const _ { 0 }
-        else if ti == types.type_infos[types.closure_id] as *const _ { 1 }
-        else if ti == types.type_infos[types.upvalue_id] as *const _ { 2 }
-        else if ti == types.type_infos[types.class_id] as *const _ { 3 }
-        else if ti == types.type_infos[types.instance_id] as *const _ { 4 }
-        else if ti == types.type_infos[types.bound_method_id] as *const _ { 5 }
-        else if ti == types.type_infos[types.native_fn_id] as *const _ { 6 }
-        else { 255 }
+        if !is_obj(val) { return 255; }
+        let ptr = obj_ptr(val);
+        if ptr.is_null() { return 255; }
+        unsafe { dynobj::read_type_id(ptr, dynobj::Compact::TYPE_ID_OFFSET) as u64 }
     }
 
     fn is_closure(&self, val: u64) -> bool {
@@ -1116,7 +1102,7 @@ extern "C" fn jit_lox_set_upvalue(cell: u64, val: u64) {
 
 extern "C" fn jit_lox_make_closure(func_idx: u64, num_upvalues: u64, arity: u64, name_id: u64) -> u64 {
     with_vm(|vm| {
-        let name_val = vm.resolve_string(name_id as usize);
+        let name_val = name_id;
         vm.alloc_closure(func_idx, num_upvalues as usize, arity, name_val)
     })
 }
@@ -1157,14 +1143,14 @@ extern "C" fn jit_lox_obj_type(v: u64) -> u64 {
 
 extern "C" fn jit_lox_make_class(name_id: u64) -> u64 {
     with_vm(|vm| {
-        let name_val = vm.resolve_string(name_id as usize);
+        let name_val = name_id;
         vm.alloc_class(name_val)
     })
 }
 
 extern "C" fn jit_lox_make_native_fn(name_id: u64) -> u64 {
     with_vm(|vm| {
-        let name_val = vm.resolve_string(name_id as usize);
+        let name_val = name_id;
         // Store the clock function pointer for native fns
         vm.alloc_native_fn(name_val, jit_lox_clock as u64)
     })
@@ -1229,7 +1215,7 @@ extern "C" fn jit_lox_class_inherit(class: u64, super_val: u64) {
 
 extern "C" fn jit_lox_class_add_method(class: u64, name_id: u64, method_closure: u64) {
     with_vm(|vm| {
-        let name_val = vm.resolve_string(name_id as usize);
+        let name_val = name_id;
         vm.class_set_method(class, name_val, method_closure);
     });
 }
@@ -1263,7 +1249,7 @@ extern "C" fn jit_lox_class_init_closure(class: u64) -> u64 {
 
 extern "C" fn jit_lox_get_property(obj: u64, name_id: u64) -> u64 {
     with_vm(|vm| {
-        let name_val = vm.resolve_string(name_id as usize);
+        let name_val = name_id;
 
         if !is_obj(obj) || !vm.is_instance(obj) {
             vm.runtime_error("Only instances have properties.");
@@ -1290,7 +1276,7 @@ extern "C" fn jit_lox_get_property(obj: u64, name_id: u64) -> u64 {
 /// Fast field-only get: returns field value or nil (no method fallback).
 extern "C" fn jit_lox_get_field(obj: u64, name_id: u64) -> u64 {
     with_vm(|vm| {
-        let name_val = vm.resolve_string(name_id as usize);
+        let name_val = name_id;
         if !is_obj(obj) || !vm.is_instance(obj) {
             return nil_val();
         }
@@ -1300,7 +1286,7 @@ extern "C" fn jit_lox_get_field(obj: u64, name_id: u64) -> u64 {
 
 extern "C" fn jit_lox_set_property(obj: u64, name_id: u64, val: u64) -> u64 {
     with_vm(|vm| {
-        let name_val = vm.resolve_string(name_id as usize);
+        let name_val = name_id;
 
         if !is_obj(obj) || !vm.is_instance(obj) {
             vm.runtime_error("Only instances have fields.");
@@ -1323,7 +1309,7 @@ extern "C" fn jit_lox_set_property(obj: u64, name_id: u64, val: u64) -> u64 {
 /// invoke_lookup_kind returns 0=field, 1=method, 2=not_found.
 extern "C" fn jit_lox_invoke_lookup(obj: u64, name_id: u64) -> u64 {
     with_vm(|vm| {
-        let name_val = vm.resolve_string(name_id as usize);
+        let name_val = name_id;
         if !is_obj(obj) || !vm.is_instance(obj) {
             vm.last_invoke_kind = 2;
             return nil_val();
@@ -1373,7 +1359,7 @@ extern "C" fn jit_lox_invoke_func_ptr(closure: u64) -> u64 {
 /// Stores closure in last_invoke_closure, kind in last_invoke_kind for slow path.
 extern "C" fn jit_lox_invoke_fast(obj: u64, name_id: u64, num_args: u64) -> u64 {
     with_vm(|vm| {
-        let name_val = vm.resolve_string(name_id as usize);
+        let name_val = name_id;
         if !is_obj(obj) || !vm.is_instance(obj) {
             vm.last_invoke_kind = 2;
             return nil_val();
@@ -1445,7 +1431,7 @@ extern "C" fn jit_lox_last_init_func_ptr() -> u64 {
 extern "C" fn jit_lox_get_super(this: u64, class_val: u64, method_name_id: u64) -> u64 {
     with_vm(|vm| {
         let method_name_str = vm.string_text(method_name_id as usize);
-        let method_name = vm.resolve_string(method_name_id as usize);
+        let method_name = method_name_id;
 
         let superclass = vm.class_superclass(class_val);
         if is_nil(superclass) { return nil_val(); }
@@ -1657,7 +1643,7 @@ impl VM {
     }
 
     fn run_jit(&mut self, module: &Module, entry: dynlang::FuncRef) -> InterpretResult {
-        use dynruntime::{StackMapJitTransport, JitSafepointSession, active_jit_safepoint_handler};
+        use dynruntime::{FrameScanJitTransport, StackMapJitTransport, JitSafepointSession, active_jit_safepoint_handler};
 
         let externs = build_jit_externs(module);
 
@@ -1678,12 +1664,34 @@ impl VM {
             jit.dump_code();
         }
 
-        // Create a safepoint session with precise stack map scanning.
         // Safety: gc_runtime outlives the session.
         let heap: &Heap = unsafe { &*((&self.gc_runtime.as_ref().unwrap().heap) as *const _) };
-        let safepoints = jit.all_safepoints();
+
+        if use_batch {
+            // Batch JIT: precise stack map safepoints
+            let safepoints = jit.all_safepoints();
+            let session = JitSafepointSession::<LoxPtrPolicy, _>::new(
+                heap, StackMapJitTransport, &safepoints,
+            ).with_gc_threshold(0.75);
+
+            unsafe { RAW_VM = self as *mut VM; }
+            let result = session.with_installed(|| {
+                jit.call_outcome(entry, &[nil_val()])
+            });
+            unsafe { RAW_VM = std::ptr::null_mut(); }
+            self.jit_call_table.clear();
+            return match result {
+                JitOutcome::Value(_) | JitOutcome::Void => {
+                    if self.had_error { InterpretResult::RuntimeError }
+                    else { InterpretResult::Ok }
+                }
+                _ => { eprintln!("JIT error: {:?}", result); InterpretResult::RuntimeError }
+            };
+        }
+
+        // Streaming JIT: frame-scan safepoints
         let session = JitSafepointSession::<LoxPtrPolicy, _>::new(
-            heap, StackMapJitTransport, &safepoints,
+            heap, FrameScanJitTransport, &[],
         ).with_gc_threshold(0.75);
 
         unsafe { RAW_VM = self as *mut VM; }
@@ -1883,8 +1891,7 @@ impl VM {
         });
         interp.bind_by_name("lox_class_add_method", move |args| {
             let vm = unsafe{&mut*rt};
-            let name_val = vm.resolve_string(args[1] as usize);
-            vm.class_set_method(args[0], name_val, args[2]);
+            vm.class_set_method(args[0], args[1], args[2]);
             ExternCallResult::Value(None)
         });
         interp.bind_by_name("lox_construct_instance", move |args| {
@@ -1934,28 +1941,26 @@ impl VM {
         // Properties
         interp.bind_by_name("lox_get_field", move |args| {
             let vm = unsafe{&mut*rt};
-            let name_val = vm.resolve_string(args[1] as usize);
             if !is_obj(args[0]) || !vm.is_instance(args[0]) {
                 return ExternCallResult::Value(Some(nil_val()));
             }
-            let val = vm.instance_get_field(args[0], name_val).unwrap_or_else(nil_val);
+            let val = vm.instance_get_field(args[0], args[1]).unwrap_or_else(nil_val);
             ExternCallResult::Value(Some(val))
         });
         interp.bind_by_name("lox_get_property", move |args| {
             let vm = unsafe{&mut*rt};
             let name_id = args[1] as usize;
             let prop_name = vm.string_text(name_id);
-            let name_val = vm.resolve_string(name_id);
 
             if !is_obj(args[0]) || !vm.is_instance(args[0]) {
                 vm.runtime_error("Only instances have properties.");
                 return ExternCallResult::Value(Some(nil_val()));
             }
-            if let Some(val) = vm.instance_get_field(args[0], name_val) {
+            if let Some(val) = vm.instance_get_field(args[0], args[1]) {
                 return ExternCallResult::Value(Some(val));
             }
             let class = vm.instance_class(args[0]);
-            if let Some(method) = vm.class_get_method(class, name_val) {
+            if let Some(method) = vm.class_get_method(class, args[1]) {
                 let bm = vm.alloc_bound_method(args[0], method);
                 return ExternCallResult::Value(Some(bm));
             }
@@ -1964,13 +1969,12 @@ impl VM {
         });
         interp.bind_by_name("lox_set_property", move |args| {
             let vm = unsafe{&mut*rt};
-            let name_val = vm.resolve_string(args[1] as usize);
 
             if !is_obj(args[0]) || !vm.is_instance(args[0]) {
                 vm.runtime_error("Only instances have fields.");
                 return ExternCallResult::Value(Some(nil_val()));
             }
-            vm.instance_set_field(args[0], name_val, args[2]);
+            vm.instance_set_field(args[0], args[1], args[2]);
             ExternCallResult::Value(Some(args[2]))
         });
 
@@ -1978,12 +1982,11 @@ impl VM {
         interp.bind_by_name("lox_get_super", move |args| {
             let vm = unsafe{&mut*rt};
             let method_name_str = vm.string_text(args[2] as usize);
-            let method_name = vm.resolve_string(args[2] as usize);
 
             let superclass = vm.class_superclass(args[1]);
             if is_nil(superclass) { return ExternCallResult::Value(Some(nil_val())); }
 
-            if let Some(mc) = vm.class_get_method(superclass, method_name) {
+            if let Some(mc) = vm.class_get_method(superclass, args[2]) {
                 let bm = vm.alloc_bound_method(args[0], mc);
                 return ExternCallResult::Value(Some(bm));
             }
@@ -2017,15 +2020,14 @@ impl VM {
         // Invoke (optimized method call)
         interp.bind_by_name("lox_invoke_lookup", move |args| {
             let vm = unsafe{&mut*rt};
-            let name_val = vm.resolve_string(args[1] as usize);
             if !is_obj(args[0]) || !vm.is_instance(args[0]) {
                 return ExternCallResult::Value(Some(nil_val()));
             }
-            if let Some(val) = vm.instance_get_field(args[0], name_val) {
+            if let Some(val) = vm.instance_get_field(args[0], args[1]) {
                 return ExternCallResult::Value(Some(val));
             }
             let class = vm.instance_class(args[0]);
-            if let Some(method) = vm.class_get_method(class, name_val) {
+            if let Some(method) = vm.class_get_method(class, args[1]) {
                 return ExternCallResult::Value(Some(method));
             }
             ExternCallResult::Value(Some(nil_val()))
@@ -2048,19 +2050,18 @@ impl VM {
         // Combined fast-path invoke
         interp.bind_by_name("lox_invoke_fast", move |args| {
             let vm = unsafe{&mut*rt};
-            let name_val = vm.resolve_string(args[1] as usize);
             let num_args = args[2];
             if !is_obj(args[0]) || !vm.is_instance(args[0]) {
                 vm.last_invoke_kind = 2;
                 return ExternCallResult::Value(Some(nil_val()));
             }
-            if let Some(val) = vm.instance_get_field(args[0], name_val) {
+            if let Some(val) = vm.instance_get_field(args[0], args[1]) {
                 vm.last_invoke_kind = 0;
                 vm.last_invoke_closure = val;
                 return ExternCallResult::Value(Some(nil_val()));
             }
             let class = vm.instance_class(args[0]);
-            if let Some(method) = vm.class_get_method(class, name_val) {
+            if let Some(method) = vm.class_get_method(class, args[1]) {
                 vm.last_invoke_closure = method;
                 vm.last_invoke_kind = 1;
                 let arity = vm.closure_arity(method);

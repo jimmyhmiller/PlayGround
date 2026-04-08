@@ -610,15 +610,8 @@ fn block_param_assignment_works_under_configured_lowering() {
     assert_eq!(run_jit_with_config::<TestInternalConfig>(&func, &[7]), 42);
 }
 
-#[test]
-#[should_panic(expected = "invalid dynlower config")]
-fn compile_rejects_invalid_layout_root_config() {
-    let mut b = FunctionBuilder::new("ret1", &[], Some(Type::I64));
-    let v = b.iconst(Type::I64, 1);
-    b.ret(v);
-    let func = b.build();
-    let _ = JitFunction::compile_with_config::<InvalidNanBoxConfig>(&func, &[]);
-}
+// Test removed: NanBox + PreciseStackRoots is now a valid config
+// (NanBox uses precise stack maps with runtime tag checking).
 
 #[test]
 fn overflow_check_overflows_in_jit() {

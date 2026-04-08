@@ -5,22 +5,25 @@ use dynvalue::{TagScheme, Value};
 use crate::header::ObjHeader;
 use crate::type_info::{TypeInfo, VarLenKind};
 
-/// Read the TypeInfo pointer from a heap object, given the byte offset
-/// of the `type_info` field within the header.
-///
-/// This is used by the heap walker to recover TypeInfo from objects
-/// without knowing the concrete header type at compile time.
+/// Read the type_id from a heap object header, given the byte offset
+/// of the `type_id` field within the header.
 ///
 /// # Safety
 /// - `obj` must point to a valid heap object.
-/// - `type_info_offset` must be the correct offset of the `type_info` field
-///   (i.e. `H::TYPE_INFO_OFFSET` for the header type used).
+/// - `type_id_offset` must be the correct offset of the `type_id` field
+///   (i.e. `H::TYPE_ID_OFFSET` for the header type used).
 #[inline(always)]
-pub unsafe fn read_type_info(obj: *const u8, type_info_offset: usize) -> &'static TypeInfo {
+pub unsafe fn read_type_id(obj: *const u8, type_id_offset: usize) -> u16 {
     unsafe {
-        let ptr = core::ptr::read(obj.add(type_info_offset) as *const *const TypeInfo);
-        &*ptr
+        core::ptr::read(obj.add(type_id_offset) as *const u16)
     }
+}
+
+/// Look up TypeInfo from a type_id using the runtime's type table.
+/// Kept for GC scanning which still needs layout info.
+#[inline(always)]
+pub fn lookup_type_info<'a>(type_id: u16, type_table: &'a [&'static TypeInfo]) -> &'a TypeInfo {
+    type_table[type_id as usize]
 }
 
 /// Write the object header into a freshly allocated object.
@@ -29,8 +32,8 @@ pub unsafe fn read_type_info(obj: *const u8, type_info_offset: usize) -> &'stati
 /// `obj` must point to a valid allocation of at least `H::SIZE` bytes.
 /// The memory must not be concurrently accessed.
 #[inline(always)]
-pub unsafe fn init_header<H: ObjHeader>(obj: *mut u8, type_info: *const TypeInfo) {
-    let header = H::new(type_info);
+pub unsafe fn init_header<H: ObjHeader>(obj: *mut u8, type_id: u16) {
+    let header = H::new(type_id);
     unsafe {
         core::ptr::write(obj as *mut H, header);
     }

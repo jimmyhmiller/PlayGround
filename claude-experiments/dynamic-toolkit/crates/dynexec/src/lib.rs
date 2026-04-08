@@ -881,6 +881,10 @@ impl<L: ValueLayout, R: RootStrategy<L>, C: CallingConvention<L>> FrameStrategy<
     fn new_layout(block_count: usize) -> Self::Layout {
         StackFrameLayout::new(block_count)
     }
+
+    fn supports_stack_maps() -> bool {
+        true
+    }
 }
 
 pub struct ShadowStackFrames;
@@ -1017,17 +1021,13 @@ impl ValueLayout for NanBox {
     const NAME: &'static str = "nan-box";
 
     fn root_precision_hint() -> RootPrecision {
-        // NanBox uses precise stack maps: the GC knows exactly which slots
-        // hold NaN-boxed values and checks tag bits at runtime to distinguish
-        // pointers from non-pointers. This is precise root LOCATION with
-        // runtime type discrimination — not conservative word scanning.
-        RootPrecision::PreciseSlots
+        RootPrecision::ConservativeWords
     }
 }
 
 impl LayoutConfigDefaults for NanBox {
-    type DefaultRoots = PreciseStackRoots;
-    type DefaultRootTransport = StackMapRoots;
+    type DefaultRoots = ConservativeWordRoots;
+    type DefaultRootTransport = FrameScanRoots;
 }
 
 #[cfg(test)]

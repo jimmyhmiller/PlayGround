@@ -2,7 +2,7 @@ use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use dynobj::{
-    AtomicRootSet, ObjHeader, RootSource, TypeInfo, VarLenKind, read_type_info, read_varlen_count,
+    AtomicRootSet, ObjHeader, RootSource, TypeInfo, VarLenKind, read_type_id, read_varlen_count,
     scan_object,
 };
 
@@ -59,7 +59,8 @@ pub struct Heap {
     /// Prevents concurrent GC triggers.
     gc_lock: Mutex<()>,
 
-    type_info_offset: usize,
+    type_id_offset: usize,
+    type_table: Vec<TypeInfo>,
     collections: AtomicUsize,
 
     /// Current GC phase. Mutators check this to know if write barriers
@@ -87,7 +88,7 @@ unsafe impl Send for Heap {}
 
 impl Heap {
     /// Create a new heap with two spaces of `space_size` bytes each.
-    pub fn new<H: ObjHeader>(space_size: usize) -> Self {
+    pub fn new<H: ObjHeader>(space_size: usize, type_table: Vec<TypeInfo>) -> Self {
         Heap {
             spaces: [
                 AtomicBumpAllocator::new::<H>(space_size),
@@ -98,7 +99,8 @@ impl Heap {
             globals: AtomicRootSet::new(),
             gc_requested: AtomicBool::new(false),
             gc_lock: Mutex::new(()),
-            type_info_offset: H::TYPE_INFO_OFFSET,
+            type_id_offset: H::TYPE_ID_OFFSET,
+            type_table,
             collections: AtomicUsize::new(0),
             gc_phase: AtomicU8::new(GcPhase::Idle as u8),
             satb_queue: SATBQueue::new(),
@@ -114,7 +116,7 @@ impl Heap {
     /// New allocations go to the nursery. When the nursery fills, a minor
     /// GC promotes survivors to tenured from-space. When tenured space fills,
     /// a major GC (STW or concurrent) collects the old generation.
-    pub fn new_generational<H: ObjHeader>(nursery_size: usize, tenured_size: usize) -> Self {
+    pub fn new_generational<H: ObjHeader>(nursery_size: usize, tenured_size: usize, type_table: Vec<TypeInfo>) -> Self {
         let spaces = [
             AtomicBumpAllocator::new::<H>(tenured_size),
             AtomicBumpAllocator::new::<H>(tenured_size),
@@ -130,7 +132,8 @@ impl Heap {
             globals: AtomicRootSet::new(),
             gc_requested: AtomicBool::new(false),
             gc_lock: Mutex::new(()),
-            type_info_offset: H::TYPE_INFO_OFFSET,
+            type_id_offset: H::TYPE_ID_OFFSET,
+            type_table,
             collections: AtomicUsize::new(0),
             gc_phase: AtomicU8::new(GcPhase::Idle as u8),
             satb_queue: SATBQueue::new(),
@@ -180,8 +183,8 @@ impl Heap {
     }
 
     /// Create a new heap with statemap tracing enabled.
-    pub fn new_with_tracer<H: ObjHeader>(space_size: usize, tracer: Arc<StatemapTracer>) -> Self {
-        let mut heap = Self::new::<H>(space_size);
+    pub fn new_with_tracer<H: ObjHeader>(space_size: usize, type_table: Vec<TypeInfo>, tracer: Arc<StatemapTracer>) -> Self {
+        let mut heap = Self::new::<H>(space_size, type_table);
         heap.tracer = Some(tracer);
         heap
     }
@@ -297,12 +300,12 @@ impl Heap {
     ///
     /// Returns null if from-space is exhausted. Caller should
     /// trigger GC via `collect()` and retry.
-    pub fn alloc(&self, info: &'static TypeInfo, varlen_len: usize) -> *mut u8 {
+    pub fn alloc(&self, info: &TypeInfo, varlen_len: usize) -> *mut u8 {
         self.from_space().alloc(info, varlen_len)
     }
 
     /// Allocate and initialize header + varlen count.
-    pub fn alloc_obj<H: ObjHeader>(&self, info: &'static TypeInfo, varlen_len: usize) -> *mut u8 {
+    pub fn alloc_obj<H: ObjHeader>(&self, info: &TypeInfo, varlen_len: usize) -> *mut u8 {
         unsafe { crate::alloc::alloc_obj::<H>(self.from_space(), info, varlen_len) }
     }
 
@@ -330,7 +333,7 @@ impl Heap {
     }
 
     /// Allocate from the nursery if generational, otherwise from from-space.
-    pub fn alloc_nursery(&self, info: &'static TypeInfo, varlen_len: usize) -> *mut u8 {
+    pub fn alloc_nursery(&self, info: &TypeInfo, varlen_len: usize) -> *mut u8 {
         match &self.nursery_state {
             Some(ns) => ns.nursery.alloc(info, varlen_len),
             None => self.from_space().alloc(info, varlen_len),
@@ -340,7 +343,7 @@ impl Heap {
     /// Allocate and init header in the nursery if generational, otherwise from-space.
     pub fn alloc_nursery_obj<H: ObjHeader>(
         &self,
-        info: &'static TypeInfo,
+        info: &TypeInfo,
         varlen_len: usize,
     ) -> *mut u8 {
         match &self.nursery_state {
@@ -350,7 +353,7 @@ impl Heap {
     }
 
     /// Allocate directly in tenured from-space (for promotion during minor GC).
-    pub fn alloc_tenured(&self, info: &'static TypeInfo, varlen_len: usize) -> *mut u8 {
+    pub fn alloc_tenured(&self, info: &TypeInfo, varlen_len: usize) -> *mut u8 {
         self.from_space().alloc(info, varlen_len)
     }
 
@@ -482,7 +485,7 @@ impl Heap {
         // hold pointers to tenured from-space objects that need forwarding.
         if let Some(ns) = &self.nursery_state {
             unsafe {
-                ns.nursery.walk(&mut |obj, info| {
+                ns.nursery.walk(&self.type_table, &mut |obj, info| {
                     scan_object(obj, info, |slot| {
                         self.process_slot::<P>(slot);
                     });
@@ -494,7 +497,8 @@ impl Heap {
         let mut scan_offset = 0usize;
         while scan_offset < self.to_space().used() {
             let obj = unsafe { self.to_space().base().add(scan_offset) };
-            let info = unsafe { &*read_type_info(obj, self.type_info_offset) };
+            let type_id = unsafe { read_type_id(obj, self.type_id_offset) };
+            let info = &self.type_table[type_id as usize];
 
             unsafe {
                 scan_object(obj, info, |slot| {
@@ -634,7 +638,7 @@ impl Heap {
         // Nursery objects as roots during major GC
         if let Some(ns) = &self.nursery_state {
             unsafe {
-                ns.nursery.walk(&mut |obj, info| {
+                ns.nursery.walk(&self.type_table, &mut |obj, info| {
                     scan_object(obj, info, |slot| {
                         self.process_slot::<P>(slot);
                     });
@@ -646,7 +650,8 @@ impl Heap {
         let mut scan_offset = 0usize;
         while scan_offset < self.to_space().used() {
             let obj = unsafe { self.to_space().base().add(scan_offset) };
-            let info = unsafe { &*read_type_info(obj, self.type_info_offset) };
+            let type_id = unsafe { read_type_id(obj, self.type_id_offset) };
+            let info = &self.type_table[type_id as usize];
 
             unsafe {
                 scan_object(obj, info, |slot| {
@@ -730,9 +735,9 @@ impl Heap {
         self.gc_phase.load(Ordering::Relaxed) != GcPhase::Idle as u8
     }
 
-    /// The type_info_offset for this heap's header type.
-    pub fn type_info_offset(&self) -> usize {
-        self.type_info_offset
+    /// The type_id_offset for this heap's header type.
+    pub fn type_id_offset(&self) -> usize {
+        self.type_id_offset
     }
 
     /// Replication barrier: if `obj` has been forwarded to to-space,
@@ -784,7 +789,7 @@ impl Heap {
             return ptr;
         }
         // Slow path: check forwarding pointer
-        unsafe { crate::barrier::read_barrier_atomic(ptr, self.type_info_offset) }
+        unsafe { crate::barrier::read_barrier_atomic(ptr, self.type_id_offset) }
     }
 
     // ─── Concurrent Collection ──────────────────────────────────
@@ -837,7 +842,7 @@ impl Heap {
         // Nursery objects as roots during concurrent major GC
         if let Some(ns) = &self.nursery_state {
             unsafe {
-                ns.nursery.walk(&mut |obj, info| {
+                ns.nursery.walk(&self.type_table, &mut |obj, info| {
                     scan_object(obj, info, |slot| {
                         self.process_slot::<P>(slot);
                     });
@@ -878,7 +883,8 @@ impl Heap {
         let mut scan_offset = 0usize;
         while scan_offset < self.to_space().used() {
             let to_obj = unsafe { self.to_space().base().add(scan_offset) };
-            let info = unsafe { &*read_type_info(to_obj, self.type_info_offset) };
+            let type_id = unsafe { read_type_id(to_obj, self.type_id_offset) };
+            let info = &self.type_table[type_id as usize];
 
             // Read fields from the to-space copy to discover from-space
             // children. For each from-space pointer, copy the target to
@@ -935,7 +941,7 @@ impl Heap {
         // Re-scan nursery objects as roots
         if let Some(ns) = &self.nursery_state {
             unsafe {
-                ns.nursery.walk(&mut |obj, info| {
+                ns.nursery.walk(&self.type_table, &mut |obj, info| {
                     scan_object(obj, info, |slot| {
                         self.process_slot::<P>(slot);
                     });
@@ -976,7 +982,8 @@ impl Heap {
         scan_offset = 0;
         while scan_offset < self.to_space().used() {
             let obj = unsafe { self.to_space().base().add(scan_offset) };
-            let info = unsafe { &*read_type_info(obj, self.type_info_offset) };
+            let type_id = unsafe { read_type_id(obj, self.type_id_offset) };
+            let info = &self.type_table[type_id as usize];
 
             unsafe {
                 scan_object(obj, info, |slot| {
@@ -1109,7 +1116,7 @@ impl Heap {
     }
 
     unsafe fn check_forwarded(&self, old: *mut u8) -> Option<*mut u8> {
-        let slot = unsafe { old.add(self.type_info_offset) as *const u64 };
+        let slot = unsafe { old.add(self.type_id_offset) as *const u64 };
         let word = unsafe { *slot };
         if word & 1 == 1 {
             Some((word & !1) as *mut u8)
@@ -1121,7 +1128,7 @@ impl Heap {
     /// Atomic check for forwarding pointer (for concurrent use).
     unsafe fn check_forwarded_atomic(&self, old: *mut u8) -> Option<*mut u8> {
         use std::sync::atomic::AtomicU64;
-        let slot = unsafe { old.add(self.type_info_offset) as *const AtomicU64 };
+        let slot = unsafe { old.add(self.type_id_offset) as *const AtomicU64 };
         let word = unsafe { (*slot).load(Ordering::Acquire) };
         if word & 1 == 1 {
             Some((word & !1) as *mut u8)
@@ -1131,7 +1138,7 @@ impl Heap {
     }
 
     unsafe fn install_forwarding(&self, old: *mut u8, new: *mut u8) {
-        let slot = unsafe { old.add(self.type_info_offset) as *mut u64 };
+        let slot = unsafe { old.add(self.type_id_offset) as *mut u64 };
         unsafe { *slot = (new as u64) | 1 };
     }
 
@@ -1146,7 +1153,7 @@ impl Heap {
         new: *mut u8,
     ) -> *mut u8 {
         use std::sync::atomic::AtomicU64;
-        let slot = unsafe { old.add(self.type_info_offset) as *const AtomicU64 };
+        let slot = unsafe { old.add(self.type_id_offset) as *const AtomicU64 };
         let forwarding = (new as u64) | 1;
         match unsafe {
             (*slot).compare_exchange(
@@ -1170,7 +1177,8 @@ impl Heap {
             return forwarded;
         }
 
-        let info = unsafe { &*read_type_info(old, self.type_info_offset) };
+        let type_id = unsafe { read_type_id(old, self.type_id_offset) };
+        let info = &self.type_table[type_id as usize];
         let varlen_len = match info.varlen {
             VarLenKind::None => 0,
             _ => unsafe { read_varlen_count(old, info) },
@@ -1207,7 +1215,7 @@ impl Heap {
         //   the CAS below will fail and we'll use their copy.
         let type_info_word = unsafe {
             use std::sync::atomic::AtomicU64;
-            let slot = old.add(self.type_info_offset) as *const AtomicU64;
+            let slot = old.add(self.type_id_offset) as *const AtomicU64;
             (*slot).load(Ordering::Acquire)
         };
 
@@ -1216,7 +1224,7 @@ impl Heap {
             return (type_info_word & !1) as *mut u8;
         }
 
-        let info = unsafe { &*(type_info_word as *const TypeInfo) };
+        let info = &self.type_table[type_info_word as u16 as usize];
         let varlen_len = match info.varlen {
             VarLenKind::None => 0,
             _ => unsafe { read_varlen_count(old, info) },
@@ -1256,7 +1264,8 @@ impl Heap {
             return forwarded;
         }
 
-        let info = unsafe { &*read_type_info(old, self.type_info_offset) };
+        let type_id = unsafe { read_type_id(old, self.type_id_offset) };
+        let info = &self.type_table[type_id as usize];
         let varlen_len = match info.varlen {
             VarLenKind::None => 0,
             _ => unsafe { read_varlen_count(old, info) },
@@ -1410,7 +1419,8 @@ impl Heap {
                     tenured,
                     tenured_used,
                     card_table,
-                    self.type_info_offset,
+                    self.type_id_offset,
+                    &self.type_table,
                 )
             };
 
@@ -1432,7 +1442,8 @@ impl Heap {
         let mut scan_offset = promotion_start;
         while scan_offset < self.from_space().used() {
             let obj = unsafe { self.from_space().base().add(scan_offset) };
-            let info = unsafe { &*read_type_info(obj, self.type_info_offset) };
+            let type_id = unsafe { read_type_id(obj, self.type_id_offset) };
+            let info = &self.type_table[type_id as usize];
 
             unsafe {
                 scan_object(obj, info, |slot| {
@@ -1479,7 +1490,8 @@ impl Heap {
         tenured: &AtomicBumpAllocator,
         tenured_used: usize,
         card_table: &CardTable,
-        type_info_offset: usize,
+        type_id_offset: usize,
+        type_table: &[TypeInfo],
     ) -> Vec<usize> {
         let num_cards = card_table.card_count();
         // Sentinel: usize::MAX means "no object starts in this card".
@@ -1490,7 +1502,8 @@ impl Heap {
         let mut offset = 0usize;
         while offset < tenured_used {
             let obj = unsafe { tenured.base().add(offset) };
-            let info = unsafe { &*read_type_info(obj, type_info_offset) };
+            let type_id = unsafe { read_type_id(obj, type_id_offset) };
+            let info = &type_table[type_id as usize];
             let varlen_len = match info.varlen {
                 VarLenKind::None => 0,
                 _ => unsafe { read_varlen_count(obj, info) },
@@ -1544,7 +1557,8 @@ impl Heap {
         while offset < tenured_used {
             let obj = unsafe { tenured.base().add(offset) };
             let obj_addr = obj as usize;
-            let info = unsafe { &*read_type_info(obj, self.type_info_offset) };
+            let type_id = unsafe { read_type_id(obj, self.type_id_offset) };
+            let info = &self.type_table[type_id as usize];
 
             let varlen_len = match info.varlen {
                 VarLenKind::None => 0,

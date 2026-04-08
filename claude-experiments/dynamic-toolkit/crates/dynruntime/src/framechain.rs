@@ -29,9 +29,9 @@ pub struct FrameChainRootManager<P: PtrPolicy> {
 
 impl<P: PtrPolicy> FrameChainRootManager<P> {
     /// Create a new root manager with the given semi-space size.
-    pub fn new(space_size: usize) -> Self {
+    pub fn new(space_size: usize, type_table: Vec<TypeInfo>) -> Self {
         FrameChainRootManager {
-            heap: Heap::new::<Compact>(space_size),
+            heap: Heap::new::<Compact>(space_size, type_table),
             chain: FrameChain::new(),
             frames: std::cell::RefCell::new(Vec::new()),
             _policy: PhantomData,
@@ -39,9 +39,9 @@ impl<P: PtrPolicy> FrameChainRootManager<P> {
     }
 
     /// Create with a custom header type.
-    pub fn new_with_header<H: ObjHeader>(space_size: usize) -> Self {
+    pub fn new_with_header<H: ObjHeader>(space_size: usize, type_table: Vec<TypeInfo>) -> Self {
         FrameChainRootManager {
-            heap: Heap::new::<H>(space_size),
+            heap: Heap::new::<H>(space_size, type_table),
             chain: FrameChain::new(),
             frames: std::cell::RefCell::new(Vec::new()),
             _policy: PhantomData,
@@ -49,14 +49,14 @@ impl<P: PtrPolicy> FrameChainRootManager<P> {
     }
 
     /// Allocate a heap object.
-    pub fn alloc(&self, info: &'static TypeInfo, varlen_len: usize) -> *mut u8 {
+    pub fn alloc(&self, info: &TypeInfo, varlen_len: usize) -> *mut u8 {
         self.heap.alloc_obj::<Compact>(info, varlen_len)
     }
 
     /// Allocate a heap object with a custom header type.
     pub fn alloc_with_header<H: ObjHeader>(
         &self,
-        info: &'static TypeInfo,
+        info: &TypeInfo,
         varlen_len: usize,
     ) -> *mut u8 {
         self.heap.alloc_obj::<H>(info, varlen_len)

@@ -1,7 +1,7 @@
 use core::cell::Cell;
 
 use dynobj::{
-    Compact, ObjHeader, TypeInfo, VarLenKind, init_header, read_type_info, read_varlen_count,
+    Compact, ObjHeader, TypeInfo, VarLenKind, init_header, read_type_id, read_varlen_count,
     write_varlen_count,
 };
 
@@ -9,30 +9,22 @@ use dynobj::{
 
 /// Allocator trait for heap objects.
 ///
-/// Uses `&self` (not `&mut self`) so that the GC can hold a reference
-/// during scanning while allocation is still possible from the same
-/// reference. Interior mutability via `Cell` (single-threaded, no atomics).
-///
-/// Returns `*mut u8`, null on failure. The allocator does NOT write the
-/// header — use [`alloc_obj`] for alloc + header init + varlen count.
+/// Takes a `&TypeInfo` (not `&'static`) — the allocator only needs the
+/// layout info for the duration of the allocation call.
 pub trait Alloc {
     /// Allocate space for an object described by `info` with `varlen_len`
     /// variable-length elements. Returns a zeroed pointer, or null if
     /// the allocation cannot be satisfied.
-    fn alloc(&self, info: &'static TypeInfo, varlen_len: usize) -> *mut u8;
+    fn alloc(&self, info: &TypeInfo, varlen_len: usize) -> *mut u8;
 }
 
 /// Heap walking trait for GC.
-///
-/// Separate from `Alloc` because not all allocators support iteration,
-/// and heap walking is a GC-time concern.
 pub trait HeapWalker {
-    /// Walk all live objects in the heap, calling `visitor` for each one.
+    /// Walk all live objects, calling `visitor(obj_ptr, type_id)` for each.
     ///
     /// # Safety
-    /// All objects in the heap region must be valid (headers initialized,
-    /// varlen counts written). Typically called during GC with mutators stopped.
-    unsafe fn walk(&self, visitor: &mut dyn FnMut(*mut u8, &'static TypeInfo));
+    /// All objects must be valid (headers initialized, varlen counts written).
+    unsafe fn walk(&self, type_table: &[TypeInfo], visitor: &mut dyn FnMut(*mut u8, &TypeInfo));
 }
 
 // ─── alloc_obj helper ────────────────────────────────────────────────
@@ -46,7 +38,7 @@ pub trait HeapWalker {
 /// - `info` must accurately describe the object layout.
 pub unsafe fn alloc_obj<H: ObjHeader>(
     allocator: &dyn Alloc,
-    info: &'static TypeInfo,
+    info: &TypeInfo,
     varlen_len: usize,
 ) -> *mut u8 {
     let ptr = allocator.alloc(info, varlen_len);
@@ -54,7 +46,7 @@ pub unsafe fn alloc_obj<H: ObjHeader>(
         return ptr;
     }
     unsafe {
-        init_header::<H>(ptr, info as *const TypeInfo);
+        init_header::<H>(ptr, info.type_id);
         if info.varlen != VarLenKind::None {
             write_varlen_count(ptr, info, varlen_len);
         }
@@ -76,7 +68,7 @@ pub struct BumpAllocator {
     base: *mut u8,
     cursor: Cell<usize>,
     size: usize,
-    type_info_offset: usize,
+    type_id_offset: usize,
     owned: bool,
 }
 
@@ -87,7 +79,7 @@ unsafe impl Send for BumpAllocator {}
 impl BumpAllocator {
     /// Create a new bump allocator that owns a region of `size` bytes.
     ///
-    /// The header type `H` determines the `type_info_offset` used by
+    /// The header type `H` determines the `type_id_offset` used by
     /// the heap walker.
     pub fn new<H: ObjHeader>(size: usize) -> Self {
         let layout = std::alloc::Layout::from_size_align(size, 8).unwrap();
@@ -97,7 +89,7 @@ impl BumpAllocator {
             base,
             cursor: Cell::new(0),
             size,
-            type_info_offset: H::TYPE_INFO_OFFSET,
+            type_id_offset: H::TYPE_ID_OFFSET,
             owned: true,
         }
     }
@@ -113,7 +105,7 @@ impl BumpAllocator {
             base,
             cursor: Cell::new(0),
             size,
-            type_info_offset: H::TYPE_INFO_OFFSET,
+            type_id_offset: H::TYPE_ID_OFFSET,
             owned: false,
         }
     }
@@ -152,14 +144,14 @@ impl BumpAllocator {
         addr >= base_addr && addr < base_addr + self.size
     }
 
-    /// The type_info_offset stored at construction.
-    pub fn type_info_offset(&self) -> usize {
-        self.type_info_offset
+    /// The type_id_offset stored at construction.
+    pub fn type_id_offset(&self) -> usize {
+        self.type_id_offset
     }
 }
 
 impl Alloc for BumpAllocator {
-    fn alloc(&self, info: &'static TypeInfo, varlen_len: usize) -> *mut u8 {
+    fn alloc(&self, info: &TypeInfo, varlen_len: usize) -> *mut u8 {
         let obj_size = info.allocation_size(varlen_len);
         let align = 1usize << info.align_log2;
 
@@ -185,13 +177,14 @@ impl Alloc for BumpAllocator {
 }
 
 impl HeapWalker for BumpAllocator {
-    unsafe fn walk(&self, visitor: &mut dyn FnMut(*mut u8, &'static TypeInfo)) {
+    unsafe fn walk(&self, type_table: &[TypeInfo], visitor: &mut dyn FnMut(*mut u8, &TypeInfo)) {
         let mut offset = 0usize;
         let used = self.cursor.get();
 
         while offset < used {
             let ptr = unsafe { self.base.add(offset) };
-            let info = unsafe { read_type_info(ptr, self.type_info_offset) };
+            let type_id = unsafe { read_type_id(ptr, self.type_id_offset) };
+            let info = &type_table[type_id as usize];
 
             // Compute actual object size. For varlen objects we need to read
             // the element count from the object.
@@ -240,7 +233,7 @@ pub struct AtomicBumpAllocator {
     base: *mut u8,
     cursor: AtomicUsize,
     size: usize,
-    type_info_offset: usize,
+    type_id_offset: usize,
     owned: bool,
 }
 
@@ -260,7 +253,7 @@ impl AtomicBumpAllocator {
             base,
             cursor: AtomicUsize::new(0),
             size,
-            type_info_offset: H::TYPE_INFO_OFFSET,
+            type_id_offset: H::TYPE_ID_OFFSET,
             owned: true,
         }
     }
@@ -304,14 +297,14 @@ impl AtomicBumpAllocator {
         addr >= base_addr && addr < base_addr + self.size
     }
 
-    /// The type_info_offset stored at construction.
-    pub fn type_info_offset(&self) -> usize {
-        self.type_info_offset
+    /// The type_id_offset stored at construction.
+    pub fn type_id_offset(&self) -> usize {
+        self.type_id_offset
     }
 }
 
 impl Alloc for AtomicBumpAllocator {
-    fn alloc(&self, info: &'static TypeInfo, varlen_len: usize) -> *mut u8 {
+    fn alloc(&self, info: &TypeInfo, varlen_len: usize) -> *mut u8 {
         let obj_size = info.allocation_size(varlen_len);
         let align = 1usize << info.align_log2;
 
@@ -345,13 +338,14 @@ impl Alloc for AtomicBumpAllocator {
 }
 
 impl HeapWalker for AtomicBumpAllocator {
-    unsafe fn walk(&self, visitor: &mut dyn FnMut(*mut u8, &'static TypeInfo)) {
+    unsafe fn walk(&self, type_table: &[TypeInfo], visitor: &mut dyn FnMut(*mut u8, &TypeInfo)) {
         let mut offset = 0usize;
         let used = self.cursor.load(Ordering::Acquire);
 
         while offset < used {
             let ptr = unsafe { self.base.add(offset) };
-            let info = unsafe { read_type_info(ptr, self.type_info_offset) };
+            let type_id = unsafe { read_type_id(ptr, self.type_id_offset) };
+            let info = &type_table[type_id as usize];
 
             let varlen_len = match info.varlen {
                 VarLenKind::None => 0,
@@ -393,9 +387,6 @@ pub unsafe extern "C" fn bump_alloc(
 ) -> *mut u8 {
     let allocator = unsafe { &*allocator };
     let info = unsafe { &*info };
-    // We need a 'static reference. TypeInfo descriptors are always static
-    // constants in practice, so this is safe at FFI boundaries.
-    let info: &'static TypeInfo = unsafe { &*(info as *const TypeInfo) };
     allocator.alloc(info, varlen_len)
 }
 
@@ -403,7 +394,7 @@ pub unsafe extern "C" fn bump_alloc(
 ///
 /// # Safety
 /// - `allocator` must point to a valid `BumpAllocator`.
-/// - `info` must point to a valid, static `TypeInfo`.
+/// - `info` must point to a valid `TypeInfo`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn bump_alloc_init_compact(
     allocator: *const BumpAllocator,
@@ -411,7 +402,7 @@ pub unsafe extern "C" fn bump_alloc_init_compact(
     varlen_len: usize,
 ) -> *mut u8 {
     let allocator = unsafe { &*allocator };
-    let info: &'static TypeInfo = unsafe { &*(info as *const TypeInfo) };
+    let info = unsafe { &*info };
     unsafe { alloc_obj::<Compact>(allocator, info, varlen_len) }
 }
 

@@ -18,8 +18,8 @@ use crate::value::{TAG_BOOL, TAG_NIL, TAG_OBJ};
 /// Pre-computed field offsets and type info for all GC object types.
 /// Passed from lower.rs to vm.rs so both sides use consistent layouts.
 pub struct LoxGcTypes {
-    /// TypeInfo pointers indexed by ObjTypeId.
-    pub type_infos: Vec<&'static TypeInfo>,
+    /// TypeInfos indexed by ObjTypeId. Owned by value.
+    pub type_infos: Vec<TypeInfo>,
 
     // ObjTypeId indices
     pub string_id: usize,
@@ -345,8 +345,8 @@ fn declare_gc_types(dm: &mut DynModule) -> (LoxGcTypes, TypeHandles) {
     let nf = dm.get_obj_type(native_fn_ty);
     let tb = dm.get_obj_type(table_ty);
 
-    let type_infos: Vec<&'static TypeInfo> = dm.obj_types.iter()
-        .map(|t| t.type_info)
+    let type_infos: Vec<TypeInfo> = dm.obj_types.iter()
+        .map(|t| *t.type_info)
         .collect();
 
     let gc_types = LoxGcTypes {
@@ -1005,17 +1005,21 @@ fn emit_indirect_call(f: &mut DynFunc, ctx: &mut Ctx, callee: Value, args: &[Val
     f.fb.switch_to_block(dispatch_bb);
     // Inline type dispatch: load TypeInfo pointer from object header
     let raw_ptr = f.obj_unwrap(callee);
-    let ti_val = f.fb.load(Type::I64, raw_ptr, 0); // TypeInfo* at header offset 0
+    // Read type_id (u16 at offset 0 in the Compact header).
+    // Zero-extend to i64 for comparison.
+    let ti_raw = f.fb.load(Type::I32, raw_ptr, 0);
+    let mask = f.fb.iconst(Type::I32, 0xFFFF);
+    let ti_val = f.fb.and(ti_raw, mask);
 
     let closure_bb = f.fb.create_block(&[]);
     let class_bb = f.fb.create_block(&[]);
     let bound_bb = f.fb.create_block(&[]);
 
-    // Compare against known TypeInfo addresses (inline, no extern)
-    let closure_ti = f.fb.iconst(Type::I64, ctx.types.closure.type_info_addr as i64);
-    let class_ti = f.fb.iconst(Type::I64, ctx.types.class.type_info_addr as i64);
-    let bound_ti = f.fb.iconst(Type::I64, ctx.types.bound_method.type_info_addr as i64);
-    let native_ti = f.fb.iconst(Type::I64, ctx.types.native_fn.type_info_addr as i64);
+    // Compare against known type_id constants (just integers, no pointers)
+    let closure_ti = f.fb.iconst(Type::I32, ctx.types.closure.id.0 as i64);
+    let class_ti = f.fb.iconst(Type::I32, ctx.types.class.id.0 as i64);
+    let bound_ti = f.fb.iconst(Type::I32, ctx.types.bound_method.id.0 as i64);
+    let _native_ti = f.fb.iconst(Type::I32, ctx.types.native_fn.id.0 as i64);
 
     let num_args = args.len();
     let num_args_val = f.fb.iconst(Type::I64, num_args as i64);

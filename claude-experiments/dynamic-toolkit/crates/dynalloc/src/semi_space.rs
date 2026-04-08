@@ -1,5 +1,5 @@
 use dynobj::{
-    ObjHeader, RootSource, TypeInfo, VarLenKind, read_type_info, read_varlen_count, scan_object,
+    ObjHeader, RootSource, TypeInfo, VarLenKind, read_type_id, read_varlen_count, scan_object,
 };
 
 use crate::alloc::{Alloc, BumpAllocator};
@@ -42,12 +42,16 @@ pub trait PtrPolicy {
 /// - `PtrPolicy` (how to identify/rewrite heap pointers in value slots)
 /// - `ObjHeader` (object header layout — determines where TypeInfo lives)
 ///
-/// The header type is fixed at construction and stored as `type_info_offset`.
+/// The header type is fixed at construction and stored as `type_id_offset`.
 pub struct SemiSpace {
     from: BumpAllocator,
     to: BumpAllocator,
-    type_info_offset: usize,
+    type_id_offset: usize,
     collections: usize,
+    /// Temporarily set during collect() so copy_or_forward can look up TypeInfo.
+    /// Only valid during a collection cycle.
+    type_table_ptr: *const TypeInfo,
+    type_table_len: usize,
 }
 
 impl SemiSpace {
@@ -56,8 +60,10 @@ impl SemiSpace {
         SemiSpace {
             from: BumpAllocator::new::<H>(space_size),
             to: BumpAllocator::new::<H>(space_size),
-            type_info_offset: H::TYPE_INFO_OFFSET,
+            type_id_offset: H::TYPE_ID_OFFSET,
             collections: 0,
+            type_table_ptr: core::ptr::null(),
+            type_table_len: 0,
         }
     }
 
@@ -65,14 +71,14 @@ impl SemiSpace {
     ///
     /// Returns null if from-space is exhausted. Call `collect` first
     /// to free space, or check with `from_remaining`.
-    pub fn alloc(&self, info: &'static TypeInfo, varlen_len: usize) -> *mut u8 {
+    pub fn alloc(&self, info: &TypeInfo, varlen_len: usize) -> *mut u8 {
         self.from.alloc(info, varlen_len)
     }
 
     /// Allocate an object in from-space, initialize header and varlen count.
     ///
     /// Returns null if from-space is exhausted.
-    pub fn alloc_obj<H: ObjHeader>(&self, info: &'static TypeInfo, varlen_len: usize) -> *mut u8 {
+    pub fn alloc_obj<H: ObjHeader>(&self, info: &TypeInfo, varlen_len: usize) -> *mut u8 {
         unsafe { crate::alloc::alloc_obj::<H>(&self.from, info, varlen_len) }
     }
 
@@ -117,7 +123,16 @@ impl SemiSpace {
     /// - All objects in from-space must have valid headers and varlen counts.
     /// - `roots` must enumerate all live root slots (mutator roots, globals, etc.).
     /// - No references into from-space may be held across this call.
-    pub unsafe fn collect<P: PtrPolicy>(&mut self, roots: &mut [&dyn RootSource]) {
+    /// Access the type table set during collect().
+    fn type_table(&self) -> &[TypeInfo] {
+        unsafe { core::slice::from_raw_parts(self.type_table_ptr, self.type_table_len) }
+    }
+
+    pub unsafe fn collect<P: PtrPolicy>(&mut self, type_table: &[TypeInfo], roots: &mut [&dyn RootSource]) {
+        // Store type_table reference for use by copy_or_forward
+        self.type_table_ptr = type_table.as_ptr();
+        self.type_table_len = type_table.len();
+
         // Phase 1: scan roots, copy/forward root targets
         for source in roots.iter() {
             source.scan_roots(&mut |slot| {
@@ -131,7 +146,8 @@ impl SemiSpace {
         // during scan_object grows to-space.
         while scan_offset < self.to.used() {
             let obj = unsafe { self.to.base().add(scan_offset) };
-            let info = unsafe { &*read_type_info(obj, self.type_info_offset) };
+            let type_id = unsafe { read_type_id(obj, self.type_id_offset) };
+            let info = &type_table[type_id as usize];
 
             unsafe {
                 scan_object(obj, info, |slot| {
@@ -153,6 +169,10 @@ impl SemiSpace {
         core::mem::swap(&mut self.from, &mut self.to);
         self.to.reset();
         self.collections += 1;
+
+        // Clear type_table reference (no longer valid after collect returns)
+        self.type_table_ptr = core::ptr::null();
+        self.type_table_len = 0;
     }
 
     /// Process a single value slot: if it points into from-space,
@@ -171,7 +191,7 @@ impl SemiSpace {
     /// Returns `None` if the slot contains a forwarding pointer (bit 0 set).
     /// Returns `Some(forwarding_addr)` if forwarded.
     unsafe fn check_forwarded(&self, old: *mut u8) -> Option<*mut u8> {
-        let slot = unsafe { old.add(self.type_info_offset) as *const u64 };
+        let slot = unsafe { old.add(self.type_id_offset) as *const u64 };
         let word = unsafe { *slot };
         if word & 1 == 1 {
             // Bit 0 set → forwarding pointer. Clear bit 0 to recover address.
@@ -190,7 +210,7 @@ impl SemiSpace {
     /// - Heap pointers are 8-byte aligned, so `ptr | 1` doesn't
     ///   corrupt the address (recovered by `ptr & !1`)
     unsafe fn install_forwarding(&self, old: *mut u8, new: *mut u8) {
-        let slot = unsafe { old.add(self.type_info_offset) as *mut u64 };
+        let slot = unsafe { old.add(self.type_id_offset) as *mut u64 };
         unsafe { *slot = (new as u64) | 1 };
     }
 
@@ -204,7 +224,8 @@ impl SemiSpace {
         }
 
         // Read type info to determine object size (type_info slot is valid here)
-        let info = unsafe { &*read_type_info(old, self.type_info_offset) };
+        let type_id = unsafe { read_type_id(old, self.type_id_offset) };
+        let info = &self.type_table()[type_id as usize];
         let varlen_len = match info.varlen {
             VarLenKind::None => 0,
             _ => unsafe { read_varlen_count(old, info) },

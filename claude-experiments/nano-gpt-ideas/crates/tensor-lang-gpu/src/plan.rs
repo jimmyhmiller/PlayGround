@@ -55,6 +55,16 @@ pub enum GpuStep {
         output_buf: BufId,
         output_size: Dim,
     },
+    /// Dispatch a tiled matmul shader with 3D workgroup grid.
+    DispatchMatmul {
+        shader_idx: usize,
+        output_buf: BufId,
+        output_size: Dim,
+        /// Workgroup counts: (ceil(N/TILE_N), ceil(M/TILE_M), batch_size)
+        m_size: Dim,
+        n_size: Dim,
+        batch_size: Dim,
+    },
 }
 
 /// Build a GPU plan from a graph.
@@ -68,12 +78,14 @@ pub fn build_plan_multi_output(graph: &Graph, outputs: &[NodeId]) -> GpuPlan {
 }
 
 fn build_plan_inner(graph: &Graph, multi_outputs: Option<&[NodeId]>) -> GpuPlan {
-    let stmts = if let Some(outputs) = multi_outputs {
+    let mut stmts = if let Some(outputs) = multi_outputs {
         loop_ir::lower_with_outputs(graph, outputs)
     } else {
         loop_ir::lower(graph)
     };
     // Note: we skip tile_reduce_loops — that's CPU-specific tiling.
+    // Apply unfuse_matmul_bodies to enable tiled matmul for linear projections.
+    loop_ir::unfuse_matmul_bodies(&mut stmts);
 
     // Collect symbolic dim params
     let mut dim_params: Vec<String> = Vec::new();
@@ -132,6 +144,44 @@ fn build_plan_inner(graph: &Graph, multi_outputs: Option<&[NodeId]>) -> GpuPlan 
                 });
             }
             Stmt::Loop { buf, shape, reduce, body, result, .. } => {
+                // Try tiled matmul path for reduce loops with matmul pattern.
+                // Try tiled matmul for 3-instruction reduce bodies (Load, Load, Mul)
+                if let Some(rd) = reduce.as_ref() {
+                    if let Some(info) = wgsl::detect_matmul(body, *result, rd, shape) {
+                        // Only use tiled matmul for linear projections (B has no batch dims).
+                        // Attention matmuls (B has batch dims) need different handling
+                        // for correct batch decomposition.
+                        let n_ok = info.n_size.as_usize().map_or(true, |v| v >= 32);
+                        let k_ok = info.k_size.as_usize().map_or(true, |v| v >= 32);
+                        let m_ok = info.effective_m.as_usize().map_or(true, |v| v >= 16);
+                        if !info.b_has_batch && n_ok && k_ok && m_ok {
+                            let shader = wgsl::emit_tiled_matmul_shader(
+                                *buf,
+                                shape,
+                                rd,
+                                &info,
+                                &dim_params,
+                            );
+                            let shader_idx = shaders.len();
+                            shaders.push(shader);
+                            let output_size = Dim::product(shape);
+                            steps.push(GpuStep::DispatchMatmul {
+                                shader_idx,
+                                output_buf: *buf,
+                                output_size,
+                                m_size: info.effective_m.clone(),
+                                n_size: info.n_size.clone(),
+                                batch_size: if info.b_has_batch {
+                                    info.batch_count.clone()
+                                } else {
+                                    Dim::Lit(1)
+                                },
+                            });
+                            continue;
+                        }
+                    }
+                }
+
                 let shader = wgsl::emit_loop_shader(
                     *buf,
                     shape,

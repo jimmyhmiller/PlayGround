@@ -288,7 +288,7 @@ impl<P: PtrPolicy> MutatorThread<P> {
     /// (generational) or major GC (non-generational) and retries.
     ///
     /// Returns null only if allocation still fails after GC.
-    pub fn alloc(&self, info: &'static TypeInfo, varlen_len: usize) -> *mut u8 {
+    pub fn alloc(&self, info: &TypeInfo, varlen_len: usize) -> *mut u8 {
         if self.heap.gc_every_alloc() {
             self.trigger_gc();
         }
@@ -301,7 +301,7 @@ impl<P: PtrPolicy> MutatorThread<P> {
 
     /// Allocate and initialize header + varlen count.
     /// Triggers GC if from-space is full.
-    pub fn alloc_obj<H: ObjHeader>(&self, info: &'static TypeInfo, varlen_len: usize) -> *mut u8 {
+    pub fn alloc_obj<H: ObjHeader>(&self, info: &TypeInfo, varlen_len: usize) -> *mut u8 {
         if self.heap.gc_every_alloc() {
             self.trigger_gc();
         }
@@ -313,7 +313,7 @@ impl<P: PtrPolicy> MutatorThread<P> {
     }
 
     #[cold]
-    fn alloc_slow_path(&self, info: &'static TypeInfo, varlen_len: usize) -> *mut u8 {
+    fn alloc_slow_path(&self, info: &TypeInfo, varlen_len: usize) -> *mut u8 {
         if self.heap.has_nursery() {
             // Try minor GC first → retry nursery
             self.trigger_minor_gc();
@@ -338,7 +338,7 @@ impl<P: PtrPolicy> MutatorThread<P> {
     #[cold]
     fn alloc_obj_slow_path<H: ObjHeader>(
         &self,
-        info: &'static TypeInfo,
+        info: &TypeInfo,
         varlen_len: usize,
     ) -> *mut u8 {
         if self.heap.has_nursery() {

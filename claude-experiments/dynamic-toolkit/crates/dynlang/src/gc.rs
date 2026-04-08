@@ -123,8 +123,8 @@ enum Allocator {
 /// Holds the allocator, type registry, and root set.
 pub struct DynGcRuntime {
     allocator: Allocator,
-    /// Type registry — indexed by ObjTypeId.
-    type_infos: Vec<&'static TypeInfo>,
+    /// Type registry — indexed by ObjTypeId. Owned by value, no leak.
+    type_infos: Vec<TypeInfo>,
     /// The NanBox ptr tag for PtrPolicy.
     ptr_tag: u32,
     /// Root set for values held by the language runtime (globals, stack, etc.)
@@ -138,8 +138,8 @@ pub struct DynGcRuntime {
 impl DynGcRuntime {
     /// Create a new GC runtime from config and the module's object types.
     pub fn new(config: &GcConfig, tags: &NanBoxTags, obj_types: &[ObjType]) -> Self {
-        let type_infos: Vec<&'static TypeInfo> = obj_types.iter()
-            .map(|t| t.type_info)
+        let type_infos: Vec<TypeInfo> = obj_types.iter()
+            .map(|t| *t.type_info)
             .collect();
 
         let (allocator, gc_threshold) = match config {
@@ -170,7 +170,7 @@ impl DynGcRuntime {
         if type_id >= self.type_infos.len() {
             panic!("gc_alloc: unknown type_id {}", type_id);
         }
-        let info = self.type_infos[type_id];
+        let info = self.type_infos[type_id]; // Copy — TypeInfo is small and Copy
 
         // Try to collect if semi-space and threshold reached
         if self.gc_threshold > 0 {
@@ -183,22 +183,23 @@ impl DynGcRuntime {
 
         let ptr = match &self.allocator {
             Allocator::Leak(bump) => {
-                unsafe { alloc_obj::<Compact>(bump, info, varlen_len) }
+                unsafe { alloc_obj::<Compact>(bump, &info, varlen_len) }
             }
             Allocator::SemiSpace(ss) => {
-                ss.alloc_obj::<Compact>(info, varlen_len)
+                ss.alloc_obj::<Compact>(&info, varlen_len)
             }
         };
 
         if ptr.is_null() {
             // OOM — try collecting and retry
             self.collect();
+            let info = &self.type_infos[type_id];
             match &self.allocator {
                 Allocator::Leak(bump) => {
-                    unsafe { alloc_obj::<Compact>(bump, info, varlen_len) }
+                    unsafe { alloc_obj::<Compact>(bump, &info, varlen_len) }
                 }
                 Allocator::SemiSpace(ss) => {
-                    ss.alloc_obj::<Compact>(info, varlen_len)
+                    ss.alloc_obj::<Compact>(&info, varlen_len)
                 }
             }
         } else {
@@ -213,7 +214,7 @@ impl DynGcRuntime {
             Allocator::SemiSpace(ss) => {
                 PTR_TAG.with(|c| c.set(self.ptr_tag));
                 unsafe {
-                    ss.collect::<NanBoxPolicy>(&mut [&self.roots]);
+                    ss.collect::<NanBoxPolicy>(&self.type_infos, &mut [&self.roots]);
                 }
             }
         }
@@ -236,8 +237,8 @@ impl DynGcRuntime {
     }
 
     /// Get the TypeInfo for an object type.
-    pub fn type_info(&self, type_id: usize) -> &'static TypeInfo {
-        self.type_infos[type_id]
+    pub fn type_info(&self, type_id: usize) -> &TypeInfo {
+        &self.type_infos[type_id]
     }
 
     /// Number of registered object types.

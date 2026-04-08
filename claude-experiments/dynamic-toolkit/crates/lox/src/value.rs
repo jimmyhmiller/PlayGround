@@ -102,12 +102,6 @@ pub unsafe fn gc_write_field(ptr: *mut u8, offset: i32, val: u64) { unsafe {
     field_ptr.write(val);
 }}
 
-/// Read the TypeInfo pointer from a Compact header (first 8 bytes).
-#[inline]
-pub unsafe fn gc_read_type_info(ptr: *mut u8) -> *const dynobj::TypeInfo { unsafe {
-    (ptr as *const *const dynobj::TypeInfo).read()
-}}
-
 /// Read a varlen element at the given index from a GC object.
 /// `base_offset` is the byte offset of the first varlen element.
 #[inline]

@@ -250,6 +250,10 @@ impl<'a> ObjTypeBuilder<'a> {
             VarLenKind::None => {}
         }
 
+        // Set the type_id to the sequential index
+        let id = ObjTypeId(self.module.obj_types.len());
+        info = info.with_type_id(id.0 as u16);
+
         // Leak the TypeInfo to get a 'static reference (required by dynobj/dynalloc)
         let info_static: &'static TypeInfo = Box::leak(Box::new(info));
 
@@ -263,8 +267,6 @@ impl<'a> ObjTypeBuilder<'a> {
             let offset = info_static.raw_data_offset() as i32 + (i as i32 * 8);
             field_offsets.insert(name.clone(), (offset, FieldKind::Raw64));
         }
-
-        let id = ObjTypeId(self.module.obj_types.len());
         self.module.obj_types.push(ObjType {
             name: self.name,
             type_info: info_static,

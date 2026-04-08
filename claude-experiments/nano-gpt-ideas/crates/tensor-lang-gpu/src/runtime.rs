@@ -104,19 +104,27 @@ impl GpuRuntime {
             label: Some("tensor-lang-gpu"),
         });
 
+        // Pre-create all bind groups (need to outlive the compute pass)
+        struct DispatchInfo {
+            pipeline_idx: usize,
+            bind_group_idx: usize,
+            wg_x: u32,
+            wg_y: u32,
+            wg_z: u32,
+        }
+        let mut dispatches: Vec<DispatchInfo> = Vec::new();
+        let mut bind_groups: Vec<wgpu::BindGroup> = Vec::new();
+
         for step in &plan.steps {
             match step {
                 GpuStep::AllocBuffer { buf, size } => {
                     let n_elements = size.eval(&dim_map);
                     let byte_size = (n_elements * 4) as u64;
-                    // Minimum buffer size of 4 bytes
                     let byte_size = byte_size.max(4);
 
-                    // Check if this is an input buffer
                     let is_input = plan.inputs.iter().any(|(id, _)| *id == *buf);
 
                     if is_input {
-                        // Upload input data
                         let data = inputs[input_idx];
                         input_idx += 1;
                         let gpu_buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -126,7 +134,6 @@ impl GpuRuntime {
                         });
                         gpu_bufs.insert(*buf, gpu_buf);
                     } else {
-                        // Allocate zeroed buffer for intermediates/output
                         let usage = wgpu::BufferUsages::STORAGE
                             | wgpu::BufferUsages::COPY_SRC
                             | wgpu::BufferUsages::COPY_DST;
@@ -142,47 +149,68 @@ impl GpuRuntime {
                 GpuStep::FillConstant { shader_idx, size, .. }
                 | GpuStep::FillArange { shader_idx, size, .. } => {
                     let n_elements = size.eval(&dim_map) as u32;
-                    let (pipeline, layout) = &pipelines[*shader_idx];
                     let shader = &plan.shaders[*shader_idx];
-
-                    let bind_group = self.create_bind_group(
-                        layout,
-                        shader,
-                        &gpu_bufs,
-                        dims_buf.as_ref(),
-                    );
-
+                    let (_, layout) = &pipelines[*shader_idx];
+                    let bind_group = self.create_bind_group(layout, shader, &gpu_bufs, dims_buf.as_ref());
                     let workgroups = (n_elements + shader.workgroup_size - 1) / shader.workgroup_size;
-                    let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                        label: Some("fill"),
-                        timestamp_writes: None,
+                    let bg_idx = bind_groups.len();
+                    bind_groups.push(bind_group);
+                    dispatches.push(DispatchInfo {
+                        pipeline_idx: *shader_idx,
+                        bind_group_idx: bg_idx,
+                        wg_x: workgroups, wg_y: 1, wg_z: 1,
                     });
-                    pass.set_pipeline(pipeline);
-                    pass.set_bind_group(0, Some(&bind_group), &[]);
-                    pass.dispatch_workgroups(workgroups, 1, 1);
                 }
                 GpuStep::Dispatch { shader_idx, output_size, .. }
                 | GpuStep::Pad { shader_idx, output_size, .. } => {
                     let n_elements = output_size.eval(&dim_map) as u32;
-                    let (pipeline, layout) = &pipelines[*shader_idx];
                     let shader = &plan.shaders[*shader_idx];
-
-                    let bind_group = self.create_bind_group(
-                        layout,
-                        shader,
-                        &gpu_bufs,
-                        dims_buf.as_ref(),
-                    );
-
+                    let (_, layout) = &pipelines[*shader_idx];
+                    let bind_group = self.create_bind_group(layout, shader, &gpu_bufs, dims_buf.as_ref());
                     let workgroups = (n_elements + shader.workgroup_size - 1) / shader.workgroup_size;
-                    let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                        label: Some("dispatch"),
-                        timestamp_writes: None,
+                    let bg_idx = bind_groups.len();
+                    bind_groups.push(bind_group);
+                    dispatches.push(DispatchInfo {
+                        pipeline_idx: *shader_idx,
+                        bind_group_idx: bg_idx,
+                        wg_x: workgroups, wg_y: 1, wg_z: 1,
                     });
-                    pass.set_pipeline(pipeline);
-                    pass.set_bind_group(0, Some(&bind_group), &[]);
-                    pass.dispatch_workgroups(workgroups, 1, 1);
                 }
+                GpuStep::DispatchMatmul { shader_idx, m_size, n_size, batch_size, .. } => {
+                    let m = m_size.eval(&dim_map) as u32;
+                    let n = n_size.eval(&dim_map) as u32;
+                    let batch = batch_size.eval(&dim_map) as u32;
+                    let shader = &plan.shaders[*shader_idx];
+                    let (_, layout) = &pipelines[*shader_idx];
+                    let bind_group = self.create_bind_group(layout, shader, &gpu_bufs, dims_buf.as_ref());
+                    let tile_n = 16u32;
+                    let tile_m = 16u32;
+                    let bg_idx = bind_groups.len();
+                    bind_groups.push(bind_group);
+                    dispatches.push(DispatchInfo {
+                        pipeline_idx: *shader_idx,
+                        bind_group_idx: bg_idx,
+                        wg_x: (n + tile_n - 1) / tile_n,
+                        wg_y: (m + tile_m - 1) / tile_m,
+                        wg_z: batch,
+                    });
+                }
+            }
+        }
+
+        // Dispatch all operations in a single compute pass.
+        // On Metal backend, dispatches within a compute pass are ordered and
+        // writes from dispatch N are visible to dispatch N+1.
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("all"),
+                timestamp_writes: None,
+            });
+            for d in &dispatches {
+                let (pipeline, _) = &pipelines[d.pipeline_idx];
+                pass.set_pipeline(pipeline);
+                pass.set_bind_group(0, Some(&bind_groups[d.bind_group_idx]), &[]);
+                pass.dispatch_workgroups(d.wg_x, d.wg_y, d.wg_z);
             }
         }
 
