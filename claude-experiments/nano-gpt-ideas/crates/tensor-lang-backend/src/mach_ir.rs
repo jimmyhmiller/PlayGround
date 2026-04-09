@@ -117,6 +117,10 @@ pub enum MachInst {
     SpStoreF32 { src: VReg, slot: u32 },
     /// LDR Ss, [SP, #slot]  (load f32 from stack)
     SpLoadF32 { dst: VReg, slot: u32 },
+    /// STR Qt, [SP, #slot]  (store 128-bit vec to stack, needs 16 bytes)
+    SpStoreVec128 { src: VReg, slot: u32 },
+    /// LDR Qt, [SP, #slot]  (load 128-bit vec from stack)
+    SpLoadVec128 { dst: VReg, slot: u32 },
 
     // --- NEON .4S ---
     /// Vd.4S = 0
@@ -550,6 +554,8 @@ pub fn remap_vreg_uses_and_defs(inst: &MachInst, remap: &HashMap<u32, VReg>) -> 
         CallFpUnary { func_ptr, arg, result } => CallFpUnary { func_ptr: r(func_ptr), arg: r(arg), result: r(result) },
         SpStoreF32 { src, slot } => SpStoreF32 { src: r(src), slot: *slot },
         SpLoadF32 { dst, slot } => SpLoadF32 { dst: r(dst), slot: *slot },
+        SpStoreVec128 { src, slot } => SpStoreVec128 { src: r(src), slot: *slot },
+        SpLoadVec128 { dst, slot } => SpLoadVec128 { dst: r(dst), slot: *slot },
         Movi4sZero { dst } => Movi4sZero { dst: r(dst) },
         Dup4sGp { dst, src_gp } => Dup4sGp { dst: r(dst), src_gp: r(src_gp) },
         LdrQImm { dst, base, imm } => LdrQImm { dst: r(dst), base: r(base), imm: *imm },
@@ -631,8 +637,9 @@ fn remap_vreg_uses(inst: &MachInst, remap: &HashMap<u32, VReg>) -> MachInst {
         LdrQReg { dst, base, offset } => LdrQReg { dst: *dst, base: r(base), offset: r(offset) },
         StrQReg { src, base, offset } => StrQReg { src: r(src), base: r(base), offset: r(offset) },
         // These have no vreg uses to remap
-        MovImm64 { .. } | SpLoad { .. } | SpLoadF32 { .. } | Movi4sZero { .. }
+        MovImm64 { .. } | SpLoad { .. } | SpLoadF32 { .. } | SpLoadVec128 { .. } | Movi4sZero { .. }
         | Fmov4sOne { .. } | B { .. } | BCond { .. } | Label { .. } => inst.clone(),
+        SpStoreVec128 { src, slot } => SpStoreVec128 { src: r(src), slot: *slot },
     }
 }
 
@@ -678,6 +685,8 @@ pub fn defs_uses(inst: &MachInst) -> (Vec<VReg>, Vec<VReg>) {
         CallFpUnary { func_ptr, arg, result } => (vec![*result], vec![*func_ptr, *arg]),
         SpStoreF32 { src, .. } => (vec![], vec![*src]),
         SpLoadF32 { dst, .. } => (vec![*dst], vec![]),
+        SpStoreVec128 { src, .. } => (vec![], vec![*src]),
+        SpLoadVec128 { dst, .. } => (vec![*dst], vec![]),
         Movi4sZero { dst } => (vec![*dst], vec![]),
         Dup4sGp { dst, src_gp } => (vec![*dst], vec![*src_gp]),
         LdrQImm { dst, base, .. } => (vec![*dst], vec![*base]),
@@ -821,6 +830,12 @@ fn lower_one(inst: &MachInst, idx: usize, a: &Allocation, e: &mut ArmEmitter) {
         SpLoadF32 { dst, slot } => {
             super::arm::load_s_from_sp_seq(e, g(*dst), *slot);
         }
+        SpStoreVec128 { src, slot } => {
+            super::arm::store_q_to_sp_seq(e, g(*src), *slot);
+        }
+        SpLoadVec128 { dst, slot } => {
+            super::arm::load_q_from_sp_seq(e, g(*dst), *slot);
+        }
         Movi4sZero { dst } => e.movi_4s_zero(g(*dst)),
         Dup4sGp { dst, src_gp } => e.dup_4s_gp(g(*dst), g(*src_gp)),
         LdrQImm { dst, base, imm } => e.ldr_q_imm(g(*dst), g(*base), *imm),
@@ -858,8 +873,8 @@ fn lower_one(inst: &MachInst, idx: usize, a: &Allocation, e: &mut ArmEmitter) {
             e.emit(0x6E20FC00 | (g(*rhs) as u32) << 16 | (g(*lhs) as u32) << 5 | g(*dst) as u32);
         }
         Fcmgt4s { dst, lhs, rhs } => {
-            // FCMGT Vd.4S, Vn.4S, Vm.4S: 0x6E20E400
-            e.emit(0x6E20E400 | (g(*rhs) as u32) << 16 | (g(*lhs) as u32) << 5 | g(*dst) as u32);
+            // FCMGT Vd.4S, Vn.4S, Vm.4S (bit23=1 for GT, 0 would be GE)
+            e.emit(0x6EA0E400 | (g(*rhs) as u32) << 16 | (g(*lhs) as u32) << 5 | g(*dst) as u32);
         }
         And16b { dst, lhs, rhs } => {
             // AND Vd.16B, Vn.16B, Vm.16B: 0x4E201C00
@@ -878,11 +893,10 @@ fn lower_one(inst: &MachInst, idx: usize, a: &Allocation, e: &mut ArmEmitter) {
             e.emit(0x3CA06800 | (g(*offset) as u32) << 16 | (g(*base) as u32) << 5 | g(*src) as u32);
         }
         Fmov4sOne { dst } => {
-            // FMOV Vd.4S, #1.0: 0x4F03F400 | Rd
-            // imm8 for 1.0 = 0b01110000 = 0x70, encoded as: a=0,b=1,c=1,d=1,e=0,f=0,g=0,h=0
-            // FMOV (vector, immediate): 0x4F00F400 | (a:b:c:d:e:f:g:h encoding)
-            // For 1.0f: abcdefgh = 01110000, op=0, cmode=1111
-            e.emit(0x4F03F400 | g(*dst) as u32);
+            // FMOV Vd.4S, #1.0
+            // imm8 for 1.0 = 0b01110000: a=0,b=1,c=1,d=1,e=0,f=0,g=0,h=0
+            // Encoding: a at bit18, b:c at bits17:16, d:e:f:g:h at bits9:5
+            e.emit(0x4F03F600 | g(*dst) as u32);
         }
         B { label } => e.b_label(*label),
         BCond { cond, label } => e.b_cond_label(*cond, *label),

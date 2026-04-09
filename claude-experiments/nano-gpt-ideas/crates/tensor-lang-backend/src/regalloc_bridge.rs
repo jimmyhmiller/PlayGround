@@ -152,8 +152,17 @@ impl<'a> FlatFunction for MachFlatFunc<'a> {
     }
 
     fn inst_clobbers(&self, index: usize) -> Vec<PReg> {
-        let _ = index;
-        Vec::new()
+        if self.is_call(index) {
+            // Function calls (CallFpUnary for exp2/log2) destroy all
+            // caller-saved registers. The allocator must spill any live
+            // values in these registers across the call.
+            let mut clobbers = Vec::with_capacity(39);
+            clobbers.extend_from_slice(&GP_CALLER_SAVED);
+            clobbers.extend_from_slice(&FP_CALLER_SAVED);
+            clobbers
+        } else {
+            Vec::new()
+        }
     }
 }
 
@@ -431,15 +440,22 @@ pub(crate) fn regalloc_allocate(
     let mut spill_slot_to_mach_slot: HashMap<u32, u32> = HashMap::new();
 
     // Allocate real stack frame slots for all referenced spill slots.
+    // Vec128 spills need 16 bytes (2 × 8-byte slots), so always allocate
+    // 16 bytes to be safe for any register class.
+    let alloc_spill_slot = |alloc_slot: &mut dyn FnMut() -> u32| -> u32 {
+        let s = alloc_slot();
+        alloc_slot(); // allocate a second 8-byte slot for 16-byte alignment
+        s
+    };
     for (_, &slot) in &ralloc.spill_slots {
-        spill_slot_to_mach_slot.entry(slot.0).or_insert_with(|| alloc_slot());
+        spill_slot_to_mach_slot.entry(slot.0).or_insert_with(|| alloc_spill_slot(alloc_slot));
     }
     for m in &ralloc.moves {
         if let MoveOperand::SpillSlot(s) = &m.from {
-            spill_slot_to_mach_slot.entry(s.0).or_insert_with(|| alloc_slot());
+            spill_slot_to_mach_slot.entry(s.0).or_insert_with(|| alloc_spill_slot(alloc_slot));
         }
         if let MoveOperand::SpillSlot(s) = &m.to {
-            spill_slot_to_mach_slot.entry(s.0).or_insert_with(|| alloc_slot());
+            spill_slot_to_mach_slot.entry(s.0).or_insert_with(|| alloc_spill_slot(alloc_slot));
         }
     }
 
@@ -470,7 +486,7 @@ pub(crate) fn regalloc_allocate(
             (MoveOperand::SpillSlot(slot), MoveOperand::Reg(preg)) => {
                 let hw = preg_to_hw(*preg);
                 let mach_slot = slots[&slot.0];
-                let cls = if preg.0 < 32 { RegClass::GP } else { RegClass::FpScalar };
+                let cls = if preg.0 < 32 { RegClass::GP } else { RegClass::Vec128 };
                 let v = VReg { id: *next_vreg, class: cls };
                 *next_vreg += 1;
                 vreg_map.insert(v.id, hw);
@@ -480,13 +496,15 @@ pub(crate) fn regalloc_allocate(
                 out_maps.push(imap);
                 match cls {
                     RegClass::GP => out.push(MachInst::SpLoad { dst: v, slot: mach_slot }),
-                    _ => out.push(MachInst::SpLoadF32 { dst: v, slot: mach_slot }),
+                    // Always use Vec128 spill/restore for FP regs — this is safe
+                    // for both FpScalar and Vec128 (saves all 128 bits).
+                    _ => out.push(MachInst::SpLoadVec128 { dst: v, slot: mach_slot }),
                 }
             }
             (MoveOperand::Reg(preg), MoveOperand::SpillSlot(slot)) => {
                 let hw = preg_to_hw(*preg);
                 let mach_slot = slots[&slot.0];
-                let cls = if preg.0 < 32 { RegClass::GP } else { RegClass::FpScalar };
+                let cls = if preg.0 < 32 { RegClass::GP } else { RegClass::Vec128 };
                 let v = VReg { id: *next_vreg, class: cls };
                 *next_vreg += 1;
                 vreg_map.insert(v.id, hw);
@@ -496,11 +514,11 @@ pub(crate) fn regalloc_allocate(
                 out_maps.push(imap);
                 match cls {
                     RegClass::GP => out.push(MachInst::SpStore { src: v, slot: mach_slot }),
-                    _ => out.push(MachInst::SpStoreF32 { src: v, slot: mach_slot }),
+                    _ => out.push(MachInst::SpStoreVec128 { src: v, slot: mach_slot }),
                 }
             }
             (MoveOperand::Reg(from), MoveOperand::Reg(to)) => {
-                let cls = if from.0 < 32 { RegClass::GP } else { RegClass::FpScalar };
+                let cls = if from.0 < 32 { RegClass::GP } else { RegClass::Vec128 };
                 let src = VReg { id: *next_vreg, class: cls };
                 *next_vreg += 1;
                 let dst = VReg { id: *next_vreg, class: cls };
@@ -517,7 +535,8 @@ pub(crate) fn regalloc_allocate(
                 out_maps.push(imap);
                 match cls {
                     RegClass::GP => out.push(MachInst::MovReg { dst, src }),
-                    _ => out.push(MachInst::FmovS { dst, src }),
+                    // Use MovVec for FP reg-to-reg moves to preserve all 128 bits.
+                    _ => out.push(MachInst::MovVec { dst, src }),
                 }
             }
             _ => {}

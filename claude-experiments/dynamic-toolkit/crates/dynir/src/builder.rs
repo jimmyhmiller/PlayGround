@@ -624,6 +624,27 @@ impl FunctionBuilder {
         }
     }
 
+    /// Emit an inline-cached dynamic dispatch.
+    ///
+    /// Dispatches `symbol` on `receiver` with the given `args`.
+    /// Returns the result value (I64, NaN-boxed).
+    /// `cache_id` is the index into the module's InlineCacheArray.
+    pub fn invoke_dynamic(
+        &mut self,
+        receiver: Value,
+        symbol: dynsym::Symbol,
+        args: &[Value],
+        cache_id: u32,
+    ) -> Value {
+        let inst = Inst::InvokeDynamic {
+            receiver,
+            symbol,
+            args: args.to_vec(),
+            cache_id,
+        };
+        self.push_inst(Type::I64, inst)
+    }
+
     // ── Terminators ────────────────────────────────────────────
 
     pub fn ret(&mut self, v: Value) {

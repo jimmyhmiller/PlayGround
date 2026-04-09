@@ -1318,16 +1318,17 @@ fn exec_non_call_inst<S: ValueLayout>(
             }
         }
 
-        // Call/CallIndirect/Safepoint/StackAddr and frame-slice control must be handled by the caller
+        // Call/CallIndirect/InvokeDynamic/Safepoint/StackAddr and frame-slice control must be handled by the caller
         Inst::Call(..)
         | Inst::CallIndirect(..)
+        | Inst::InvokeDynamic { .. }
         | Inst::Safepoint(..)
         | Inst::StackAddr(..)
         | Inst::PushPrompt(..)
         | Inst::PopPrompt(..)
         | Inst::CaptureSlice(..)
         | Inst::CloneSlice(..) => {
-            panic!("Call/CallIndirect/Safepoint/StackAddr must be handled by the interpreter, not exec_non_call_inst");
+            panic!("Call/CallIndirect/InvokeDynamic/Safepoint/StackAddr must be handled by the interpreter, not exec_non_call_inst");
         }
     }
 }

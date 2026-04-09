@@ -2585,6 +2585,12 @@ where
                 }
             }
 
+            Inst::InvokeDynamic { .. } => {
+                // The streaming lowerer is deprecated. InvokeDynamic is handled
+                // by the batch lowerer only. This arm exists for exhaustiveness.
+                panic!("InvokeDynamic requires the batch lowerer");
+            }
+
             Inst::Guard(cond, deopt_id, live) => {
                 let resume_point = self.func.deopt_info[deopt_id.index()].resume_point;
                 let cond_reg =

@@ -926,7 +926,14 @@ impl ArmBackend {
                         if std::env::var("ARM_BODY_DEBUG").is_ok() {
                             eprintln!("TILED shape={:?} result={} body_len={}", shape, *result, body.len());
                         }
-                        emit_tiled_loop(&mut e, &mut ctx, buf_slot, shape, reduce, body, *result, tile_cfg);
+                        // Tiled matmul paths have batch-stride bugs for 4D+ tensors.
+                        // Fall back to non-tiled reduce for those until fixed.
+                        let batch_dims = shape.len().saturating_sub(2);
+                        if batch_dims > 1 {
+                            emit_reduce_loop(&mut e, &mut ctx, buf_slot, shape, reduce, body, *result);
+                        } else {
+                            emit_tiled_loop(&mut e, &mut ctx, buf_slot, shape, reduce, body, *result, tile_cfg);
+                        }
                     } else if let Some(reduce) = reduce.as_ref() {
                         emit_reduce_loop(&mut e, &mut ctx, buf_slot, shape, reduce, body, *result);
                     } else {
@@ -936,10 +943,64 @@ impl ArmBackend {
             }
         }
 
-        // Return: output byte offset = buf_ptr - memory_base
-        let out_slot = ctx.buf_ptrs[&last_buf];
-        load_from_sp_large(&mut e, X9, out_slot);
-        e.sub_reg(X0, X9, X19); // offset = ptr - base
+        // Return output
+        if let Some(outputs) = multi_outputs {
+            // Multi-output: allocate a contiguous result buffer, copy each output into it.
+
+            // Compute total element count into X10
+            e.mov_reg(X10, XZR);
+            for id in outputs {
+                emit_dim_to_reg(&mut e, &Dim::product(&graph.nodes[id.0].shape), &ctx, X9);
+                e.add_reg(X10, X10, X9);
+            }
+
+            // Bump-allocate result buffer: align heap to 16, result_ptr = base + heap
+            e.add_imm(X20, X20, 15);
+            e.mov_imm64(X9, !15u64);
+            e.and_reg(X20, X20, X9);
+            // X21 = result absolute ptr (we'll return offset later)
+            e.add_reg(X21, X19, X20);
+            // Advance heap by total_size * 4
+            e.lsl_imm(X9, X10, 2);
+            e.add_reg(X20, X20, X9);
+
+            // X22 = write cursor (starts at result_ptr)
+            e.mov_reg(X22, X21);
+
+            // Copy each output buffer sequentially
+            for id in outputs {
+                let src_slot = ctx.buf_ptrs[&id.0];
+                load_from_sp_large(&mut e, X9, src_slot); // X9 = src ptr
+                emit_dim_to_reg(&mut e, &Dim::product(&graph.nodes[id.0].shape), &ctx, X10); // X10 = n_elements
+
+                // Copy loop: X11 = counter
+                let loop_start = e.alloc_label();
+                let loop_end = e.alloc_label();
+                e.mov_reg(X11, XZR);
+                e.bind_label(loop_start);
+                e.cmp_reg(X11, X10);
+                e.b_cond_label(COND_GE, loop_end);
+                // LDR S0, [X9, X11, LSL #2]
+                e.ldr_s_reg_scaled(0, X9, X11);
+                // STR S0, [X22, X11, LSL #2]
+                e.str_s_reg_scaled(0, X22, X11);
+                e.add_imm(X11, X11, 1);
+                e.b_label(loop_start);
+                e.bind_label(loop_end);
+
+                // Advance write cursor by n_elements * 4
+                e.lsl_imm(X9, X10, 2);
+                e.add_reg(X22, X22, X9);
+            }
+
+            // Return byte offset of result buffer
+            e.sub_reg(X0, X21, X19);
+        } else {
+            // Single output: return last buffer offset
+            let out_slot = ctx.buf_ptrs[&last_buf];
+            load_from_sp_large(&mut e, X9, out_slot);
+            e.sub_reg(X0, X9, X19); // offset = ptr - base
+        }
 
         // === Patch frame size ===
         // Now we know the actual frame size from ctx.next_slot
@@ -1052,6 +1113,28 @@ pub(crate) fn load_s_from_sp_seq(e: &mut ArmEmitter, reg: u8, offset: u32) {
         e.mov_imm32(X8, offset);
         e.emit(0x8B2863E8); // ADD X8, SP, X8, UXTX
         e.ldr_s_imm(reg, X8, 0);
+    }
+}
+
+/// STR Qt, [SP, #offset]  (store 128-bit Q-register to stack)
+pub(crate) fn store_q_to_sp_seq(e: &mut ArmEmitter, reg: u8, offset: u32) {
+    if offset % 16 == 0 && offset / 16 < 4096 {
+        e.emit(0x3D800000 | ((offset / 16) << 10) | (31 << 5) | reg as u32);
+    } else {
+        e.mov_imm32(X8, offset);
+        e.emit(0x8B2863E8); // ADD X8, SP, X8, UXTX
+        e.str_q_imm(reg, X8, 0);
+    }
+}
+
+/// LDR Qt, [SP, #offset]  (load 128-bit Q-register from stack)
+pub(crate) fn load_q_from_sp_seq(e: &mut ArmEmitter, reg: u8, offset: u32) {
+    if offset % 16 == 0 && offset / 16 < 4096 {
+        e.emit(0x3DC00000 | ((offset / 16) << 10) | (31 << 5) | reg as u32);
+    } else {
+        e.mov_imm32(X8, offset);
+        e.emit(0x8B2863E8); // ADD X8, SP, X8, UXTX
+        e.ldr_q_imm(reg, X8, 0);
     }
 }
 
@@ -1571,13 +1654,17 @@ fn emit_simd_body_machir(
                                 has_terms = true;
                             }
                         }
-                        // Add innermost_dim * 1 (stride must be 1 for SIMD)
-                        let inner_dv = dim_vregs[innermost_dim];
-                        if has_terms {
-                            mb.push(MachInst::AddReg { dst: base_off, lhs: base_off, rhs: inner_dv });
-                        } else {
-                            mb.push(MachInst::MovReg { dst: base_off, src: inner_dv });
-                            has_terms = true;
+                        // Add innermost_dim offset only if it's actually in parts
+                        // (stride 1 for SIMD). Broadcasts (stride 0) skip this.
+                        let has_inner = parts.iter().any(|(d, _)| *d == innermost_dim);
+                        if has_inner {
+                            let inner_dv = dim_vregs[innermost_dim];
+                            if has_terms {
+                                mb.push(MachInst::AddReg { dst: base_off, lhs: base_off, rhs: inner_dv });
+                            } else {
+                                mb.push(MachInst::MovReg { dst: base_off, src: inner_dv });
+                                has_terms = true;
+                            }
                         }
                         if !offset.is_zero() {
                             let off = mb.new_gp();
@@ -1592,8 +1679,6 @@ fn emit_simd_body_machir(
                         if !has_terms {
                             mb.push(MachInst::MovImm64 { dst: base_off, val: 0 });
                         }
-                        // Check if this is a broadcast (no innermost dim in parts)
-                        let has_inner = parts.iter().any(|(d, _)| *d == innermost_dim);
                         if has_inner {
                             // Strided load with stride 1 on innermost → contiguous Q load
                             let byte_off = mb.new_gp();
@@ -1698,7 +1783,14 @@ fn emit_elementwise_loop(
 ) {
     use crate::mach_ir::{MachBuilder, MachInst, allocate_and_emit_with_spills};
 
-    let ndim = shape.len();
+    // Handle scalar (ndim == 0): treat as 1-element 1D
+    let scalar_shape;
+    let (ndim, shape) = if shape.is_empty() {
+        scalar_shape = vec![Dim::Lit(1)];
+        (1, scalar_shape.as_slice())
+    } else {
+        (shape.len(), shape)
+    };
 
     // Pre-compute shape sizes into stack slots
     let mut shape_slots = Vec::new();
@@ -2493,6 +2585,17 @@ fn emit_matmul_mr8(
     mb.push(MachInst::CmpReg { lhs: n_blk_plus_nr, rhs: n_size });
     mb.push(MachInst::BCond { cond: COND_GT, label: n_blk_end });
 
+    // B col pointer: compute before m loop so remainder path can use it too
+    let b_ptr = sp_load!(mb, b_ptr_slot);
+    let eff_bn = mb.new_gp();
+    mb.push(MachInst::MovImm64 { dst: eff_bn, val: b_n_stride as u64 });
+    let b_col_off = mb.new_gp();
+    mb.push(MachInst::MulReg { dst: b_col_off, lhs: n_blk, rhs: eff_bn });
+    let b_col_byte = mb.new_gp();
+    mb.push(MachInst::LslImm { dst: b_col_byte, src: b_col_off, shift: 2 });
+    let b_col_ptr = mb.new_gp();
+    mb.push(MachInst::AddReg { dst: b_col_ptr, lhs: b_ptr, rhs: b_col_byte });
+
     // m loop over effective M: step by MR=8, then remainder
     let mr_v = mb.new_gp();
     mb.push(MachInst::MovImm64 { dst: mr_v, val: MR as u64 });
@@ -2524,17 +2627,6 @@ fn emit_matmul_mr8(
     // Row stride in bytes
     let a_row_stride_bytes = mb.new_gp();
     mb.push(MachInst::LslImm { dst: a_row_stride_bytes, src: a_row_stride_v, shift: 2 });
-
-    // B base: use effective (possibly transposed) pointer and strides
-    let b_ptr = sp_load!(mb, b_ptr_slot);
-    let eff_bn = mb.new_gp();
-    mb.push(MachInst::MovImm64 { dst: eff_bn, val: b_n_stride as u64 });
-    let b_col_off = mb.new_gp();
-    mb.push(MachInst::MulReg { dst: b_col_off, lhs: n_blk, rhs: eff_bn });
-    let b_col_byte = mb.new_gp();
-    mb.push(MachInst::LslImm { dst: b_col_byte, src: b_col_off, shift: 2 });
-    let b_col_ptr = mb.new_gp();
-    mb.push(MachInst::AddReg { dst: b_col_ptr, lhs: b_ptr, rhs: b_col_byte });
 
     // Zero 16 accumulators: acc[r][g] for r=0..8, g=0..2
     let mut accs: Vec<Vec<crate::mach_ir::VReg>> = Vec::new();
@@ -3398,17 +3490,19 @@ fn emit_tiled_loop(
     }
     if (is_matmul_pattern || is_matmul_reversed) && simd_groups <= 8 {
         let (a_inst_idx, b_inst_idx) = if is_matmul_pattern { (0, 1) } else { (1, 0) };
-        // Always use MR=8 micro-kernel for simple matmul patterns.
-        if std::env::var("ARM_BODY_DEBUG").is_ok() {
-            eprintln!("MR8 HIT: shape={:?}", shape);
-        }
-        {
+        // MR8 kernel collapses batch dims into effective_M with flat row stride.
+        // This only works when batch dims are contiguous in A (ndim <= 3).
+        // For 4D+ (e.g. batched attention matmuls), fall through to the general
+        // tiled path which handles batch loops correctly.
+        if batch_dims <= 1 {
+            if std::env::var("ARM_BODY_DEBUG").is_ok() {
+                eprintln!("MR8 HIT: shape={:?}", shape);
+            }
             emit_matmul_mr8(e, ctx, buf_slot, shape, reduce, body,
                 a_inst_idx, b_inst_idx, &batch_strides, batch_dims, m_dim, n_dim,
                 reduce_dim);
             return;
         }
-        // Fall back to existing fast path for small-M or symbolic cases
         emit_tiled_matmul_fast(e, ctx, buf_slot, shape, reduce, body, tile_cfg,
             a_inst_idx, b_inst_idx, &batch_strides, batch_dims, m_dim, n_dim,
             reduce_dim, tm, tn, tk, unroll, simd_groups, init_val);

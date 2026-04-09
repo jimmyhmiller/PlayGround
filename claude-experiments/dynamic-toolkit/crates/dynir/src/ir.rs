@@ -220,6 +220,26 @@ pub enum Inst {
     Call(FuncRef, Vec<Value>),
     CallIndirect(Value, Vec<Value>, Option<Type>),
 
+    // -- Dynamic dispatch --
+    /// Invoke a method/field on a receiver using inline-cached dispatch.
+    ///
+    /// `receiver`: the object to dispatch on
+    /// `symbol`: the method/field name (compile-time Symbol)
+    /// `args`: arguments to pass (NOT including receiver — added automatically)
+    /// `cache_id`: index into the module's InlineCacheArray
+    ///
+    /// The lowerer emits a fast path that checks the receiver's class against
+    /// the cached class_id. On hit, it calls the cached target directly.
+    /// On miss, it calls a slow lookup and updates the cache.
+    ///
+    /// Result type is I64 (NaN-boxed return value).
+    InvokeDynamic {
+        receiver: Value,
+        symbol: dynsym::Symbol,
+        args: Vec<Value>,
+        cache_id: u32,
+    },
+
     // -- GC safepoint --
     /// Explicit safepoint (e.g. at loop backedges). The lowering must emit
     /// a stack map here so the GC can trace and update live GcPtr values.
@@ -296,6 +316,7 @@ impl Inst {
 
             Inst::Call(fref, _) => extern_sigs[fref.index()].sig.ret,
             Inst::CallIndirect(_, _, ret_ty) => *ret_ty,
+            Inst::InvokeDynamic { .. } => Some(Type::I64),
             Inst::Safepoint(_) => None,
         }
     }
@@ -371,6 +392,10 @@ impl Inst {
                 f(*callee);
                 args.iter().for_each(|v| f(*v));
             }
+            Inst::InvokeDynamic { receiver, args, .. } => {
+                f(*receiver);
+                args.iter().for_each(|v| f(*v));
+            }
             Inst::Safepoint(live) => live.iter().for_each(|v| f(*v)),
         }
     }
@@ -444,6 +469,10 @@ impl Inst {
             Inst::Call(_, args) => args.iter_mut().for_each(|v| f(v)),
             Inst::CallIndirect(callee, args, _) => {
                 f(callee);
+                args.iter_mut().for_each(|v| f(v));
+            }
+            Inst::InvokeDynamic { receiver, args, .. } => {
+                f(receiver);
                 args.iter_mut().for_each(|v| f(v));
             }
             Inst::Safepoint(live) => live.iter_mut().for_each(|v| f(v)),

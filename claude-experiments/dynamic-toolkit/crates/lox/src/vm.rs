@@ -1649,20 +1649,13 @@ impl VM {
     }
 
     fn run_jit(&mut self, module: &Module, entry: dynlang::FuncRef) -> InterpretResult {
-        use dynruntime::{FrameScanJitTransport, StackMapJitTransport, JitSafepointSession, active_jit_safepoint_handler};
+        use dynruntime::{StackMapJitTransport, JitSafepointSession, active_jit_safepoint_handler};
 
         let externs = build_jit_externs(module);
 
-        let use_batch = std::env::var("LOX_BATCH_JIT").is_ok();
-        let jit = if use_batch {
-            JitModule::compile_batch::<NanBox>(
-                module, &externs, Some(active_jit_safepoint_handler as u64),
-            )
-        } else {
-            JitModule::compile_with_gc::<NanBox>(
-                module, &externs, active_jit_safepoint_handler,
-            )
-        };
+        let jit = JitModule::compile_batch::<NanBox>(
+            module, &externs, Some(active_jit_safepoint_handler as u64),
+        );
 
         self.jit_call_table = jit.call_table().to_vec();
 
@@ -1672,32 +1665,9 @@ impl VM {
 
         // Safety: gc_runtime outlives the session.
         let heap: &Heap = unsafe { &*((&self.gc_runtime.as_ref().unwrap().heap) as *const _) };
-
-        if use_batch {
-            // Batch JIT: precise stack map safepoints
-            let safepoints = jit.all_safepoints();
-            let session = JitSafepointSession::<LoxPtrPolicy, _>::new(
-                heap, StackMapJitTransport, &safepoints,
-            ).with_gc_threshold(0.75);
-
-            unsafe { RAW_VM = self as *mut VM; }
-            let result = session.with_installed(|| {
-                jit.call_outcome(entry, &[nil_val()])
-            });
-            unsafe { RAW_VM = std::ptr::null_mut(); }
-            self.jit_call_table.clear();
-            return match result {
-                JitOutcome::Value(_) | JitOutcome::Void => {
-                    if self.had_error { InterpretResult::RuntimeError }
-                    else { InterpretResult::Ok }
-                }
-                _ => { eprintln!("JIT error: {:?}", result); InterpretResult::RuntimeError }
-            };
-        }
-
-        // Streaming JIT: frame-scan safepoints
+        let safepoints = jit.all_safepoints();
         let session = JitSafepointSession::<LoxPtrPolicy, _>::new(
-            heap, FrameScanJitTransport, &[],
+            heap, StackMapJitTransport, &safepoints,
         ).with_gc_threshold(0.75);
 
         unsafe { RAW_VM = self as *mut VM; }

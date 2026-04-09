@@ -130,6 +130,9 @@ impl fmt::Display for Inst {
             Inst::CallIndirect(callee, args, _) => {
                 write!(f, "call_indirect {callee}({})", fmt_args(args))
             }
+            Inst::InvokeDynamic { receiver, symbol, args, cache_id } => {
+                write!(f, "invoke_dynamic {receiver}.{symbol}({}) [cache={}]", fmt_args(args), cache_id)
+            }
         }
     }
 }

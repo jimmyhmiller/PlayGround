@@ -276,6 +276,29 @@ impl<'a> DynIRFunction<'a> {
                 }
             }
 
+            Inst::InvokeDynamic { receiver, args, .. } => {
+                // Receiver in X0, args in X1, X2, ...
+                ops.push(Operand {
+                    reg: Reg::Virtual(VReg(receiver.index() as u32)),
+                    kind: OperandKind::Use,
+                    constraint: OperandConstraint::FixedReg(gp_preg(0)),
+                });
+                for (i, &arg) in args.iter().enumerate() {
+                    let ty = func.value_type(arg);
+                    let class = Self::reg_class_for_type(ty);
+                    let constraint = if i + 1 < 16 {
+                        OperandConstraint::FixedReg(gp_preg((i + 1) as u8))
+                    } else {
+                        OperandConstraint::RegClass(class)
+                    };
+                    ops.push(Operand {
+                        reg: Reg::Virtual(VReg(arg.index() as u32)),
+                        kind: OperandKind::Use,
+                        constraint,
+                    });
+                }
+            }
+
             // Generic: all value operands are unconstrained uses
             other => {
                 other.for_each_value(|v| {
@@ -502,7 +525,7 @@ impl<'a> Function for DynIRFunction<'a> {
     fn is_call(&self, inst: InstId) -> bool {
         matches!(
             self.get_inst(inst),
-            Some(Inst::Call(_, _) | Inst::CallIndirect(_, _, _))
+            Some(Inst::Call(_, _) | Inst::CallIndirect(_, _, _) | Inst::InvokeDynamic { .. })
         )
     }
 
