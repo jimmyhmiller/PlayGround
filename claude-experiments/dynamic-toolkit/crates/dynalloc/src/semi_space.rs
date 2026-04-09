@@ -4,13 +4,13 @@ use dynobj::{
 
 use crate::alloc::{Alloc, BumpAllocator};
 
-// Forwarding pointers are stored in the type_info slot with bit 0 set.
-// This requires TypeInfo to have alignment ≥ 2 so valid pointers always
-// have bit 0 = 0. Assert this at compile time.
-const _: () = assert!(
-    core::mem::align_of::<TypeInfo>() >= 2,
-    "TypeInfo must be at least 2-byte aligned for forwarding pointer tagging"
-);
+// Forwarding pointers are stored in the header word (at type_id_offset)
+// with bit 63 set as a marker. Valid heap pointers use at most 48 bits
+// on current hardware, and the original header word (u16 type_id + padding)
+// never has bit 63 set. This avoids the old bit-0 scheme which broke when
+// headers switched from *const TypeInfo (always aligned) to u16 type_id
+// (which can be odd).
+pub(crate) const FORWARDING_BIT: u64 = 1 << 63;
 
 // ─── PtrPolicy ──────────────────────────────────────────────────────
 
@@ -187,31 +187,24 @@ impl SemiSpace {
         }
     }
 
-    /// Read the type_info slot of an object in from-space.
-    /// Returns `None` if the slot contains a forwarding pointer (bit 0 set).
-    /// Returns `Some(forwarding_addr)` if forwarded.
+    /// Check if an object in from-space has been forwarded.
+    /// Returns `Some(forwarding_addr)` if bit 63 is set (forwarding marker).
+    /// Returns `None` if the header word is a normal type_id (not forwarded).
     unsafe fn check_forwarded(&self, old: *mut u8) -> Option<*mut u8> {
         let slot = unsafe { old.add(self.type_id_offset) as *const u64 };
         let word = unsafe { *slot };
-        if word & 1 == 1 {
-            // Bit 0 set → forwarding pointer. Clear bit 0 to recover address.
-            Some((word & !1) as *mut u8)
+        if word & FORWARDING_BIT != 0 {
+            Some((word & !FORWARDING_BIT) as *mut u8)
         } else {
             None
         }
     }
 
-    /// Write a forwarding pointer into the type_info slot of the old object.
-    ///
-    /// Sets bit 0 to distinguish from a valid TypeInfo pointer.
-    /// This is safe because:
-    /// - TypeInfo has alignment ≥ 2 (contains u16 fields), so real
-    ///   TypeInfo pointers always have bit 0 = 0
-    /// - Heap pointers are 8-byte aligned, so `ptr | 1` doesn't
-    ///   corrupt the address (recovered by `ptr & !1`)
+    /// Write a forwarding pointer into the header slot of the old object.
+    /// Sets bit 63 to mark it as forwarded.
     unsafe fn install_forwarding(&self, old: *mut u8, new: *mut u8) {
         let slot = unsafe { old.add(self.type_id_offset) as *mut u64 };
-        unsafe { *slot = (new as u64) | 1 };
+        unsafe { *slot = (new as u64) | FORWARDING_BIT };
     }
 
     /// If the object at `old` has already been forwarded, return the

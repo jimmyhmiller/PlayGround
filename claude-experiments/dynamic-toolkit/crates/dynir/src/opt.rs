@@ -26,6 +26,7 @@ fn is_pure(inst: &Inst) -> bool {
         Inst::Store(..)
         | Inst::Call(..)
         | Inst::CallIndirect(..)
+        | Inst::InvokeDynamic { .. }
         | Inst::Guard(..)
         | Inst::Safepoint(..)
         | Inst::PushPrompt(_, _)

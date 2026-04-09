@@ -735,9 +735,10 @@ impl LoweringBackend for Arm64Backend {
         let rd = Arm64Backend::fp_hw(dst);
         let rn = Arm64Backend::gp_hw(base, RegSize::X64);
         if offset != 0 {
-            Arm64Backend::emit_mov_imm64(buf, X28, offset as u64);
-            buf.emit(Arm64Inst::add(X28, rn, X28));
-            buf.emit(Arm64Inst::ldur_fp(rd, X28, 0));
+            let scratch = if rn != X28 { X28 } else { X16 };
+            Arm64Backend::emit_mov_imm64(buf, scratch, offset as u64);
+            buf.emit(Arm64Inst::add(scratch, rn, scratch));
+            buf.emit(Arm64Inst::ldur_fp(rd, scratch, 0));
         } else {
             buf.emit(Arm64Inst::ldur_fp(rd, rn, 0));
         }
@@ -756,16 +757,24 @@ impl LoweringBackend for Arm64Backend {
         if (-256..=255).contains(&offset) {
             buf.emit(Arm64Inst::stur(rt, rn, offset));
         } else {
-            // Use X28 as scratch for the address computation.
-            // This is safe as long as src != X28 AND base != X28.
-            debug_assert!(
-                Arm64Backend::gp_hw(src, RegSize::X64) != X28
-                && Arm64Backend::gp_hw(base, RegSize::X64) != X28,
-                "emit_store_gp: large offset path would clobber X28 which is src or base"
-            );
-            Arm64Backend::emit_mov_imm64(buf, X28, offset as u64);
-            buf.emit(Arm64Inst::add(X28, rn, X28));
-            buf.emit(Arm64Inst::stur(rt, X28, 0));
+            // Large offset: need a scratch register for address computation.
+            // Use X28 (primary scratch) unless it conflicts with src/base,
+            // in which case fall back to X16 (secondary scratch / IP0).
+            let src_hw = Arm64Backend::gp_hw(src, RegSize::X64);
+            let base_hw = Arm64Backend::gp_hw(base, RegSize::X64);
+            let scratch = if src_hw != X28 && base_hw != X28 {
+                X28
+            } else if src_hw != X16 && base_hw != X16 {
+                X16
+            } else {
+                panic!(
+                    "emit_store_gp: large offset ({offset}) needs scratch but both \
+                     X28 and X16 conflict with src/base"
+                );
+            };
+            Arm64Backend::emit_mov_imm64(buf, scratch, offset as u64);
+            buf.emit(Arm64Inst::add(scratch, rn, scratch));
+            buf.emit(Arm64Inst::stur(rt, scratch, 0));
         }
     }
 
@@ -778,9 +787,10 @@ impl LoweringBackend for Arm64Backend {
         let rt = Arm64Backend::fp_hw(src);
         let rn = Arm64Backend::gp_hw(base, RegSize::X64);
         if offset != 0 {
-            Arm64Backend::emit_mov_imm64(buf, X28, offset as u64);
-            buf.emit(Arm64Inst::add(X28, rn, X28));
-            buf.emit(Arm64Inst::stur_fp(rt, X28, 0));
+            let scratch = if rn != X28 { X28 } else { X16 };
+            Arm64Backend::emit_mov_imm64(buf, scratch, offset as u64);
+            buf.emit(Arm64Inst::add(scratch, rn, scratch));
+            buf.emit(Arm64Inst::stur_fp(rt, scratch, 0));
         } else {
             buf.emit(Arm64Inst::stur_fp(rt, rn, 0));
         }

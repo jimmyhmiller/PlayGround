@@ -8,6 +8,7 @@ use dynobj::{
 
 use crate::alloc::{Alloc, AtomicBumpAllocator, HeapWalker};
 use crate::barrier::SATBQueue;
+use crate::semi_space::FORWARDING_BIT;
 use crate::card_table::CardTable;
 use crate::semi_space::PtrPolicy;
 use crate::statemap::{StatemapTracer, TraceState};
@@ -1118,8 +1119,8 @@ impl Heap {
     unsafe fn check_forwarded(&self, old: *mut u8) -> Option<*mut u8> {
         let slot = unsafe { old.add(self.type_id_offset) as *const u64 };
         let word = unsafe { *slot };
-        if word & 1 == 1 {
-            Some((word & !1) as *mut u8)
+        if word & FORWARDING_BIT != 0 {
+            Some((word & !FORWARDING_BIT) as *mut u8)
         } else {
             None
         }
@@ -1130,8 +1131,8 @@ impl Heap {
         use std::sync::atomic::AtomicU64;
         let slot = unsafe { old.add(self.type_id_offset) as *const AtomicU64 };
         let word = unsafe { (*slot).load(Ordering::Acquire) };
-        if word & 1 == 1 {
-            Some((word & !1) as *mut u8)
+        if word & FORWARDING_BIT != 0 {
+            Some((word & !FORWARDING_BIT) as *mut u8)
         } else {
             None
         }
@@ -1139,7 +1140,7 @@ impl Heap {
 
     unsafe fn install_forwarding(&self, old: *mut u8, new: *mut u8) {
         let slot = unsafe { old.add(self.type_id_offset) as *mut u64 };
-        unsafe { *slot = (new as u64) | 1 };
+        unsafe { *slot = (new as u64) | FORWARDING_BIT };
     }
 
     /// Atomically install a forwarding pointer using CAS.
@@ -1154,7 +1155,7 @@ impl Heap {
     ) -> *mut u8 {
         use std::sync::atomic::AtomicU64;
         let slot = unsafe { old.add(self.type_id_offset) as *const AtomicU64 };
-        let forwarding = (new as u64) | 1;
+        let forwarding = (new as u64) | FORWARDING_BIT;
         match unsafe {
             (*slot).compare_exchange(
                 old_type_info,
@@ -1166,8 +1167,8 @@ impl Heap {
             Ok(_) => new, // We won — our copy is the canonical one
             Err(current) => {
                 // Someone else already installed a forwarding pointer
-                debug_assert!(current & 1 == 1, "CAS failed but not forwarded?");
-                (current & !1) as *mut u8
+                debug_assert!(current & FORWARDING_BIT != 0, "CAS failed but not forwarded?");
+                (current & !FORWARDING_BIT) as *mut u8
             }
         }
     }
@@ -1220,8 +1221,8 @@ impl Heap {
         };
 
         // Re-check: might have been forwarded between our two loads
-        if type_info_word & 1 == 1 {
-            return (type_info_word & !1) as *mut u8;
+        if type_info_word & FORWARDING_BIT != 0 {
+            return (type_info_word & !FORWARDING_BIT) as *mut u8;
         }
 
         let info = &self.type_table[type_info_word as u16 as usize];

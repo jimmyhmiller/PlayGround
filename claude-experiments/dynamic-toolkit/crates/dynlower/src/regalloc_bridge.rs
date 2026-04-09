@@ -584,7 +584,7 @@ pub struct AArch64Target;
 static GP_REGS: &[PReg] = &[
     PReg(0), PReg(1), PReg(2), PReg(3), PReg(4), PReg(5), PReg(6), PReg(7),
     PReg(8), PReg(9), PReg(10), PReg(11), PReg(12), PReg(13), PReg(14), PReg(15),
-    PReg(16), PReg(17), PReg(18), PReg(19), PReg(20), PReg(21), PReg(22), PReg(23),
+    PReg(17), PReg(18), PReg(19), PReg(20), PReg(21), PReg(22), PReg(23),
     PReg(24), PReg(25), PReg(26), PReg(27),
 ];
 
@@ -595,12 +595,12 @@ static FP_REGS: &[PReg] = &[
     PReg(56), PReg(57), PReg(58), PReg(59), PReg(60), PReg(61), PReg(62), PReg(63),
 ];
 
-// Caller-saved: X0-X18, D0-D7, D16-D31
+// Caller-saved: X0-X15, X17-X18, D0-D7, D16-D31  (X16 is reserved as secondary scratch)
 static CALLER_SAVED: &[PReg] = &[
-    // GP: X0-X18 (X16/X17 = IP0/IP1 linker scratch, X18 = platform register)
+    // GP: X0-X15, X17-X18 (X16 = IP0 reserved as secondary scratch, X18 = platform register)
     PReg(0), PReg(1), PReg(2), PReg(3), PReg(4), PReg(5), PReg(6), PReg(7),
     PReg(8), PReg(9), PReg(10), PReg(11), PReg(12), PReg(13), PReg(14), PReg(15),
-    PReg(16), PReg(17), PReg(18),
+    PReg(17), PReg(18),
     // FP: D0-D7
     PReg(32), PReg(33), PReg(34), PReg(35), PReg(36), PReg(37), PReg(38), PReg(39),
     // FP: D16-D31
@@ -616,9 +616,9 @@ static CALLEE_SAVED: &[PReg] = &[
     PReg(40), PReg(41), PReg(42), PReg(43), PReg(44), PReg(45), PReg(46), PReg(47),
 ];
 
-// Reserved: X28 (scratch), X29 (FP), X30 (LR), SP
+// Reserved: X16 (secondary scratch / IP0), X28 (primary scratch), X29 (FP), X30 (LR), SP
 static RESERVED: &[PReg] = &[
-    PReg(28), PReg(29), PReg(30),
+    PReg(16), PReg(28), PReg(29), PReg(30),
 ];
 
 static GP_ARG_REGS: &[PReg] = &[

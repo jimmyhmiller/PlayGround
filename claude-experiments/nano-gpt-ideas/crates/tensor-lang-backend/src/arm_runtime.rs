@@ -72,7 +72,7 @@ impl ArmRuntime {
         for arr in inputs {
             total_input_bytes = align16(total_input_bytes) + arr.len() * 4;
         }
-        let total_bytes = align16(total_input_bytes + 16) + 512 * 1024 * 1024;
+        let total_bytes = align16(total_input_bytes + 16) + 2 * 1024 * 1024 * 1024;
         let mut memory = vec![0u8; total_bytes];
 
         // Copy inputs and record their byte offsets

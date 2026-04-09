@@ -1011,6 +1011,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "font8x8"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "875488b8711a968268c7cf5d139578713097ca4635a76044e8fe8eedf831d07e"
+
+[[package]]
 name = "fontconfig-parser"
 version = "0.5.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1219,6 +1225,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "glam"
+version = "0.29.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8babf46d4c1c9d92deac9f7be466f76dfc4482b6452fc5024b5e8daf6ffeb3ee"
+
+[[package]]
 name = "glow"
 version = "0.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1250,6 +1262,23 @@ dependencies = [
  "lru",
  "rustc-hash 2.1.2",
  "wgpu 28.0.0",
+]
+
+[[package]]
+name = "gpt2-viz"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "font8x8",
+ "glam",
+ "pollster",
+ "serde_json",
+ "tensor-lang-backend",
+ "tensor-lang-gpu",
+ "tensor-lang-graph",
+ "tokenizers",
+ "wgpu 28.0.0",
+ "winit",
 ]
 
 [[package]]

@@ -75,6 +75,9 @@ pub struct BatchEmitter<'a> {
     tags: TagConfig,
     /// Callee-saved registers used by this function (saved in prologue, restored before ret)
     callee_saved_used: Vec<PReg>,
+    /// Base offset for the safepoint-specific callee-saved spill area (separate from
+    /// the prologue/epilogue save area to avoid overwriting caller's register values).
+    safepoint_callee_save_base: i32,
     /// Epilogue patch offsets (for frame size patching)
     epilogue_offsets: Vec<usize>,
     /// GC safepoint handler function pointer (if GC is enabled)
@@ -125,6 +128,7 @@ impl<'a> BatchEmitter<'a> {
             call_table_base,
             tags,
             callee_saved_used: Vec::new(),
+            safepoint_callee_save_base: 0,
             epilogue_offsets: Vec::new(),
             safepoint_handler,
             ic_base,
@@ -176,14 +180,26 @@ impl<'a> BatchEmitter<'a> {
             );
         }
 
-        // Spill slots start after callee-saved saves (positive offsets from FP)
+        // Frame layout (positive offsets from FP):
+        //   [FP+0]: saved FP, [FP+8]: saved LR
+        //   [FP+16..]: callee-saved saves (prologue/epilogue — caller's values, never overwritten)
+        //   [FP+16+N*8..]: safepoint callee-saved area (GC spills current register values)
+        //   [FP+16+2*N*8..]: spill slots, stack slots
         let callee_save_bytes = callee_saved.len() as u32 * 8;
-        self.spill_base_offset = 16 + callee_save_bytes as i32;
+        self.safepoint_callee_save_base = 16 + callee_save_bytes as i32;
+        let safepoint_callee_save_bytes = callee_save_bytes; // same count of registers
+        self.spill_base_offset = 16 + callee_save_bytes as i32 + safepoint_callee_save_bytes as i32;
 
-        // Compute frame size: FP+LR + callee-saved saves + spill slots + stack slots
+        // Compute frame size: FP+LR + callee-saved saves + safepoint callee-saved + spill slots + stack slots
+        // + InvokeDynamic scratch (16 bytes for receiver/closure save if any InvokeDynamic exists)
         let num_spills = self.alloc.num_spill_slots;
         let stack_slot_bytes: u32 = self.func.stack_slots.iter().map(|s| s.size).sum();
-        let raw_frame = 16 /* FP+LR */ + callee_save_bytes + num_spills * 8 + stack_slot_bytes;
+        let has_invoke_dynamic = self.func.blocks.iter().any(|b| {
+            b.insts.iter().any(|n| matches!(&n.inst, Inst::InvokeDynamic { .. }))
+        });
+        let invoke_scratch_bytes: u32 = if has_invoke_dynamic { 16 } else { 0 };
+        let raw_frame = 16 /* FP+LR */ + callee_save_bytes + safepoint_callee_save_bytes
+            + num_spills * 8 + stack_slot_bytes + invoke_scratch_bytes;
         self.frame_size = (raw_frame + 15) & !15; // 16-byte aligned
 
         // Emit blocks
@@ -936,13 +952,12 @@ impl<'a> BatchEmitter<'a> {
 
             Inst::Safepoint(live) => {
                 if let Some(handler) = self.safepoint_handler {
-                    // Spill all live callee-saved register values to their save slots
-                    // so the GC can find them. The callee-saved save area is populated
-                    // in the prologue, but register values may have changed since then.
-                    // Re-save the current callee-saved registers.
-                    let callee_save_base = 16i32;
+                    // Spill callee-saved register values to a SEPARATE safepoint area
+                    // (not the prologue/epilogue save area) so the GC can find them
+                    // without corrupting the caller's saved register values.
+                    let sp_base = self.safepoint_callee_save_base;
                     for (i, &preg) in self.callee_saved_used.iter().enumerate() {
-                        let offset = callee_save_base + (i as i32) * 8;
+                        let offset = sp_base + (i as i32) * 8;
                         Arm64Backend::emit_store_gp(
                             &mut self.buf, preg_to_machine(preg), machine_gp(29), offset,
                             MachineWordSize::W64,
@@ -951,14 +966,14 @@ impl<'a> BatchEmitter<'a> {
 
                     // Collect precise root slot offsets for all live values.
                     // Values live at this safepoint are in:
-                    // - Callee-saved register save area (FP+16+i*8)
+                    // - Safepoint callee-saved area (safepoint_callee_save_base + i*8)
                     // - Spill slots (spill_base_offset + slot*8)
                     // - Stack slots (via stack_slot_offset)
                     let mut root_slots: Vec<i32> = Vec::new();
 
-                    // All callee-saved save slots (they contain live register values)
+                    // All safepoint callee-saved slots (they contain live register values)
                     for (i, _) in self.callee_saved_used.iter().enumerate() {
-                        root_slots.push(callee_save_base + (i as i32) * 8);
+                        root_slots.push(sp_base + (i as i32) * 8);
                     }
 
                     // All spill slots that are in use
@@ -990,7 +1005,7 @@ impl<'a> BatchEmitter<'a> {
 
                     // After GC, reload callee-saved registers (GC may have updated pointers)
                     for (i, &preg) in self.callee_saved_used.iter().enumerate() {
-                        let offset = callee_save_base + (i as i32) * 8;
+                        let offset = sp_base + (i as i32) * 8;
                         Arm64Backend::emit_load_gp(
                             &mut self.buf, preg_to_machine(preg), machine_gp(29), offset,
                             MachineWordSize::W64,
