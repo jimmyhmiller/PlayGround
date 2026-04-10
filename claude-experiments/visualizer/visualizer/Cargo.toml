@@ -1,0 +1,25 @@
+[package]
+name = "visualizer"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+vello = "0.8.0"
+winit = "0.30"
+wasm-bindgen = "=0.2.114"
+wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = [
+    "HtmlCanvasElement", "Document", "Window", "Element",
+    "HtmlDivElement", "HtmlInputElement", "HtmlLabelElement", "HtmlSpanElement",
+    "CssStyleDeclaration", "Event", "EventTarget", "InputEvent",
+] }
+web-time = "0.2"
+console_error_panic_hook = "0.1"
+console_log = "1"
+log = "0.4"
+simple-easing = "1"
+js-sys = "0.3"
+getrandom = { version = "0.3", features = ["wasm_js"] }

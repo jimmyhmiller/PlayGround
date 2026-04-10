@@ -1,0 +1,22 @@
+{
+  "manifest_version": 2,
+  "name": "Rustpad Eval",
+  "version": "1.0",
+  "description": "Send code from Rustpad to a local eval server",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "rustpad-eval@jimmyhmiller"
+    }
+  },
+  "permissions": [
+    "activeTab",
+    "http://localhost/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": ["*://rustpad.io/*", "http://localhost/*"],
+      "js": ["content.js"],
+      "css": ["content.css"]
+    }
+  ]
+}

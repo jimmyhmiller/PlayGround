@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Visualizer</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        html, body { height: 100%; background: #111; overflow: hidden; }
+        #app {
+            display: flex;
+            height: 100vh;
+            width: 100vw;
+        }
+        #editor-pane {
+            width: 400px;
+            min-width: 200px;
+            max-width: 80vw;
+            height: 100%;
+            display: flex;
+            flex-direction: column;
+            background: #1a1b26;
+            flex-shrink: 0;
+        }
+        #editor-header {
+            padding: 8px 12px;
+            font-family: monospace;
+            font-size: 12px;
+            color: #565f89;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            border-bottom: 1px solid #2a2b36;
+            flex-shrink: 0;
+        }
+        #editor-container {
+            flex: 1;
+            overflow: hidden;
+        }
+        #resize-handle {
+            width: 5px;
+            cursor: col-resize;
+            background: #2a2b36;
+            flex-shrink: 0;
+            transition: background 0.15s;
+        }
+        #resize-handle:hover, #resize-handle.dragging {
+            background: #7aa2f7;
+        }
+        #canvas-pane {
+            flex: 1;
+            position: relative;
+            min-width: 200px;
+        }
+        .cm-editor {
+            height: 100% !important;
+            font-size: 14px !important;
+        }
+        .cm-editor .cm-scroller {
+            font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace !important;
+        }
+    </style>
+</head>
+<body>
+    <div id="app">
+        <div id="editor-pane">
+            <div id="editor-header">scene</div>
+            <div id="editor-container"></div>
+        </div>
+        <div id="resize-handle"></div>
+        <div id="canvas-pane"></div>
+    </div>
+
+    <script>
+        const handle = document.getElementById('resize-handle');
+        const editorPane = document.getElementById('editor-pane');
+        let dragging = false;
+
+        handle.addEventListener('mousedown', (e) => {
+            dragging = true;
+            handle.classList.add('dragging');
+            document.body.style.cursor = 'col-resize';
+            document.body.style.userSelect = 'none';
+            e.preventDefault();
+        });
+
+        window.addEventListener('mousemove', (e) => {
+            if (!dragging) return;
+            const newWidth = Math.min(Math.max(e.clientX, 200), window.innerWidth * 0.8);
+            editorPane.style.width = newWidth + 'px';
+        });
+
+        window.addEventListener('mouseup', () => {
+            if (!dragging) return;
+            dragging = false;
+            handle.classList.remove('dragging');
+            document.body.style.cursor = '';
+            document.body.style.userSelect = '';
+        });
+    </script>
+
+    <script type="importmap">
+    {
+        "imports": {
+            "codemirror": "https://esm.sh/codemirror@6.0.1",
+            "@codemirror/lang-javascript": "https://esm.sh/@codemirror/lang-javascript@6.2.2",
+            "@codemirror/theme-one-dark": "https://esm.sh/@codemirror/theme-one-dark@6.1.2",
+            "@codemirror/view": "https://esm.sh/@codemirror/view@6.36.5",
+            "@codemirror/state": "https://esm.sh/@codemirror/state@6.5.2"
+        }
+    }
+    </script>
+
+    <script type="module">
+        import { basicSetup, EditorView } from 'codemirror';
+        import { javascript } from '@codemirror/lang-javascript';
+        import { oneDark } from '@codemirror/theme-one-dark';
+        import { ViewPlugin } from '@codemirror/view';
+
+        const initialDoc = `;; === Interactive Hash Map ===
+;; Click the canvas to insert entries!
+
+(scene hashmap
+  ;; State
+  (def op-index 0)
+  (def arrow-x 400)
+  (def arrow-alpha 0)
+  (def entries (list))
+  (def ops (list "name" "age" "city" "job"
+                 "lang" "os" "ide" "db"))
+
+  ;; Bucket array
+  (each i (range 8)
+    (let cx (+ 90 (* i 86)))
+    (rect :x cx :y 350
+          :w 70 :h 200
+          :fill "#0d0e15" :radius 8)
+    (rect :x cx :y 350
+          :w 66 :h 196
+          :fill "#1a1c28" :radius 6)
+    (circle :x cx :y 235
+            :r 3
+            :fill (rgba 0.5 0.5 0.6 0.6)))
+
+  ;; Hash arrow (tracks state)
+  (triangle :id "arrow"
+            :x (spring arrow-x
+                       :stiffness 300
+                       :damping 18)
+            :y 248 :size 10
+            :fill (rgba 1 0.8 0.2 0.9)
+            :opacity (spring arrow-alpha
+                             :stiffness 200
+                             :damping 15))
+
+  ;; Click hint
+  (circle :id "hint"
+          :x 400 :y 530 :r 8
+          :fill (rgba 0.5 0.7 1 0.7))
+
+  ;; Click handler
+  (on :click
+    (when (< op-index (len ops))
+      (sequence
+        ;; Compute target bucket
+        (let key (nth ops op-index))
+        (let bucket (hash key 8))
+        (let slot (count-where entries
+                               "bucket" bucket))
+        (let cx (+ 90 (* bucket 86)))
+        (let cy (- 430 (* slot 42)))
+
+        ;; Show arrow
+        (set! arrow-x cx)
+        (set! arrow-alpha 1)
+        (wait 0.4)
+
+        ;; Spawn entry — springs from top to bucket
+        (spawn! "_spawned"
+          (rect :x (spring 400
+                           :stiffness 300
+                           :damping 18)
+                :target-x cx
+                :y (spring 80
+                           :stiffness 300
+                           :damping 18)
+                :target-y cy
+                :w 54 :h 36 :radius 6
+                :fill (color-for op-index)
+                :scale (tween 0 1
+                              :duration 0.4
+                              :easing back-out)))
+
+        ;; Record the entry
+        (push! entries
+          (:bucket bucket :slot slot
+           :x cx :y cy))
+        (set! op-index (+ op-index 1))
+
+        (wait 0.5)
+
+        ;; Hide arrow
+        (set! arrow-alpha 0)))))
+`;
+
+        const updatePlugin = ViewPlugin.define(view => ({
+            update(viewUpdate) {
+                if (viewUpdate.docChanged) {
+                    const code = viewUpdate.state.doc.toString();
+                    if (window.__onCodeChange) {
+                        window.__onCodeChange(code);
+                    }
+                }
+            }
+        }));
+
+        const editor = new EditorView({
+            doc: initialDoc,
+            extensions: [
+                basicSetup,
+                javascript(),
+                oneDark,
+                updatePlugin,
+                EditorView.theme({
+                    '&': { backgroundColor: '#1a1b26' },
+                    '.cm-gutters': { backgroundColor: '#1a1b26', borderRight: '1px solid #2a2b36' },
+                    '.cm-activeLineGutter': { backgroundColor: '#1e1f2b' },
+                    '.cm-activeLine': { backgroundColor: '#1e1f2b' },
+                }),
+            ],
+            parent: document.getElementById('editor-container'),
+        });
+
+        window.__editor = editor;
+
+        const wasm = await import('./visualizer.js');
+        await wasm.default();
+
+        // Trigger initial compile after wasm is loaded
+        if (window.__onCodeChange) {
+            window.__onCodeChange(editor.state.doc.toString());
+        }
+    </script>
+</body>
+</html>
