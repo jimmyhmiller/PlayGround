@@ -72,7 +72,12 @@ impl ArmRuntime {
         for arr in inputs {
             total_input_bytes = align16(total_input_bytes) + arr.len() * 4;
         }
-        let total_bytes = align16(total_input_bytes + 16) + 2 * 1024 * 1024 * 1024;
+        // Size buffer: inputs + outputs + scratch headroom.
+        // Scratch needs to hold intermediate results during computation.
+        // Use max(512MB, 4x output) as a heuristic for scratch space.
+        let output_bytes = output_size * 4;
+        let scratch = (512 * 1024 * 1024usize).max(output_bytes * 4);
+        let total_bytes = align16(total_input_bytes + 16) + output_bytes + scratch;
         let mut memory = vec![0u8; total_bytes];
 
         // Copy inputs and record their byte offsets

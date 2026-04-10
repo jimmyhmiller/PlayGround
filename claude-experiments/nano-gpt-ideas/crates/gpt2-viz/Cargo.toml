@@ -1,0 +1,17 @@
+[package]
+name = "gpt2-viz"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+wgpu = "28"
+winit = "0.30"
+pollster = "0.4"
+bytemuck = { version = "1", features = ["derive"] }
+glam = "0.29"
+font8x8 = "0.3"
+serde_json = "1"
+tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
+tensor-lang-graph = { path = "../tensor-lang-graph" }
+tensor-lang-gpu = { path = "../tensor-lang-gpu", features = ["native"] }
+tensor-lang-backend = { path = "../tensor-lang-backend", features = ["runtime"] }
