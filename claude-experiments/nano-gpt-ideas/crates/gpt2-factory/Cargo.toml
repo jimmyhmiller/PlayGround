@@ -1,0 +1,25 @@
+[package]
+name = "gpt2-factory"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+gpt2-viz = { path = "../gpt2-viz" }
+tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
+bevy = { version = "0.14", default-features = false, features = [
+    "bevy_winit",
+    "bevy_core_pipeline",
+    "bevy_pbr",
+    "bevy_render",
+    "bevy_sprite",
+    "bevy_text",
+    "bevy_ui",
+    "bevy_asset",
+    "x11",
+    "wayland",
+    "tonemapping_luts",
+    "ktx2",
+    "zstd",
+    "default_font",
+    "multi_threaded",
+] }
