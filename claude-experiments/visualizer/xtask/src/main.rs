@@ -2,6 +2,8 @@ use std::env;
 use std::path::PathBuf;
 use std::process::Command;
 
+mod server;
+
 fn project_root() -> PathBuf {
     PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap())
         .parent()
@@ -46,12 +48,14 @@ fn build(release: bool) {
 fn serve() {
     let root = project_root();
     let web_dir = root.join("web");
-    eprintln!("Serving {} on http://localhost:8080", web_dir.display());
-    run(
-        Command::new("python3")
-            .args(["-m", "http.server", "8080"])
-            .current_dir(&web_dir),
-    );
+    let dsl_path = root.join("scene.dsl");
+    let port: u16 = 8080;
+
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("failed to build tokio runtime");
+    rt.block_on(server::run(web_dir, dsl_path, port));
 }
 
 fn main() {

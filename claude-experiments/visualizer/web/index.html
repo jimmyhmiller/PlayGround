@@ -166,121 +166,25 @@
         import { basicSetup, EditorView } from 'codemirror';
         import { javascript } from '@codemirror/lang-javascript';
         import { oneDark } from '@codemirror/theme-one-dark';
-        import { ViewPlugin } from '@codemirror/view';
 
-        const initialDoc = `;; === Interactive Hash Map ===
-;; Click step to insert entries!
+        // Fetch initial DSL from the server
+        const initialDoc = await fetch('/scene.dsl').then(r => r.text()).catch(() => '');
 
-(scene hashmap
-  ;; Tweakable constants (sliders in the panel)
-  (defc bucket-width 70 :min 30 :max 120 :step 1 :category layout)
-  (defc bucket-height 200 :min 80 :max 300 :step 1 :category layout)
-  (defc bucket-y 350 :min 100 :max 500 :step 1 :category layout)
-  (defc bucket-gap 16 :min 0 :max 40 :step 1 :category layout)
-  (defc item-width 54 :min 20 :max 100 :step 1 :category layout)
-  (defc item-height 36 :min 16 :max 60 :step 1 :category layout)
-  (defc entry-stiffness 300 :min 50 :max 800 :step 10 :category springs)
-  (defc entry-damping 18 :min 1 :max 40 :step 0.5 :category springs)
+        // Flag: suppress onCodeChange callback when content is pushed from server
+        let suppressUpdate = false;
 
-  ;; State
-  (def op-index 0)
-  (def arrow-x 400)
-  (def arrow-alpha 0)
-  (def entries (list))
-  (def ops (list "name" "age" "city" "job"
-                 "lang" "os" "ide" "db"))
-
-  ;; Bucket array
-  (each i (range 8)
-    (let cx (+ 90 (* i (+ bucket-width bucket-gap))))
-    (rect :x cx :y bucket-y
-          :w bucket-width :h bucket-height
-          :fill "#0d0e15" :radius 8)
-    (rect :x cx :y bucket-y
-          :w (- bucket-width 4) :h (- bucket-height 4)
-          :fill "#1a1c28" :radius 6)
-    (circle :x cx :y (- bucket-y 115)
-            :r 3
-            :fill (rgba 0.5 0.5 0.6 0.6)))
-
-  ;; Hash arrow (tracks state)
-  (triangle :id "arrow"
-            :x (spring arrow-x
-                       :stiffness 300
-                       :damping 18)
-            :y 248 :size 10
-            :fill (rgba 1 0.8 0.2 0.9)
-            :opacity (spring arrow-alpha
-                             :stiffness 200
-                             :damping 15))
-
-  ;; Click hint
-  (circle :id "hint"
-          :x 400 :y 530 :r 8
-          :fill (rgba 0.5 0.7 1 0.7))
-
-  ;; Click handler
-  (on :click
-    (when (< op-index (len ops))
-      (sequence
-        ;; Compute target bucket
-        (let key (nth ops op-index))
-        (let bucket (hash key 8))
-        (let slot (count-where entries
-                               "bucket" bucket))
-
-        ;; Show arrow — live-tracked via tweakables
-        (set! arrow-x
-              (+ 90 (* bucket
-                       (+ bucket-width bucket-gap))))
-        (set! arrow-alpha 1)
-        (wait 0.4)
-
-        ;; Spawn entry — springs from top, target follows tweakables
-        (spawn! "_spawned"
-          (rect :x (spring
-                     (+ 90 (* bucket
-                              (+ bucket-width
-                                 bucket-gap)))
-                     :initial 400
-                     :stiffness entry-stiffness
-                     :damping entry-damping)
-                :y (spring
-                     (- (+ bucket-y (/ bucket-height 2))
-                        (+ (/ item-height 2)
-                           8
-                           (* slot
-                              (+ item-height 4))))
-                     :initial 80
-                     :stiffness entry-stiffness
-                     :damping entry-damping)
-                :w item-width :h item-height :radius 6
-                :fill (color-for op-index)
-                :scale (tween 0 1
-                              :duration 0.4
-                              :easing back-out)))
-
-        ;; Record the entry
-        (push! entries
-          (:bucket bucket :slot slot))
-        (set! op-index (+ op-index 1))
-
-        (wait 0.5)
-
-        ;; Hide arrow
-        (set! arrow-alpha 0)))))
-`;
-
-        const updatePlugin = ViewPlugin.define(view => ({
-            update(viewUpdate) {
-                if (viewUpdate.docChanged) {
-                    const code = viewUpdate.state.doc.toString();
-                    if (window.__onCodeChange) {
+        const updateListener = EditorView.updateListener.of((update) => {
+            if (update.docChanged && !suppressUpdate) {
+                const code = update.state.doc.toString();
+                if (window.__onCodeChange) {
+                    try {
                         window.__onCodeChange(code);
+                    } catch (e) {
+                        console.error('[editor] onCodeChange threw:', e);
                     }
                 }
             }
-        }));
+        });
 
         const editor = new EditorView({
             doc: initialDoc,
@@ -288,7 +192,7 @@
                 basicSetup,
                 javascript(),
                 oneDark,
-                updatePlugin,
+                updateListener,
                 EditorView.theme({
                     '&': { backgroundColor: '#1a1b26' },
                     '.cm-gutters': { backgroundColor: '#1a1b26', borderRight: '1px solid #2a2b36' },
@@ -308,6 +212,26 @@
         if (window.__onCodeChange) {
             window.__onCodeChange(editor.state.doc.toString());
         }
+
+        // Subscribe to server-sent updates
+        const evtSource = new EventSource('/events');
+        evtSource.onmessage = (e) => {
+            const newCode = e.data;
+            if (newCode === editor.state.doc.toString()) return;
+            suppressUpdate = true;
+            editor.dispatch({
+                changes: { from: 0, to: editor.state.doc.length, insert: newCode }
+            });
+            suppressUpdate = false;
+            // Manually trigger compile since we suppressed the listener
+            if (window.__onCodeChange) {
+                window.__onCodeChange(newCode);
+            }
+            console.log('[sse] received update,', newCode.length, 'chars');
+        };
+        evtSource.onerror = (e) => {
+            console.warn('[sse] connection error', e);
+        };
     </script>
 </body>
 </html>

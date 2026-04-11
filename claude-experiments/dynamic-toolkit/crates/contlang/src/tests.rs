@@ -276,11 +276,6 @@ fn cross_function_capture_and_resume() {
 /// Property 1: the computation between shift and reset must be captured.
 /// The "delimited context" is `v + 1` — on resume, that addition must
 /// re-execute with the resume value bound to v.
-///
-/// Uses the Racket-style `shift |k| { ... }` form so the handle (`k`) and
-/// the resumed value (`v`) live in separate slots with separate types.
-/// The handler body invokes the continuation directly, which is the
-/// classic pattern `(reset (+ 1 (shift k (k 5))))` = 6.
 #[test]
 fn shift_captures_intervening_computation() {
     let src = r#"
@@ -291,14 +286,85 @@ fn shift_captures_intervening_computation() {
             }
         }
     "#;
-    // At capture: shift binds k to the handle, handler calls resume(k, 5),
-    // which splices the captured frame back on top. The resumed
-    // computation re-enters at resume_bb with v = 5, runs v + 1 = 6,
-    // falls out of reset with 6. The resumer (handler) gets 6 as the
-    // value of its `resume(...)` expression; that becomes the handler's
-    // return value; the handler's return value also becomes the reset's
-    // value (Racket semantics). Either way: 6.
+    // Classic (reset (+ 1 (shift k (k 5)))) = 6.
     assert_eq!(run_interp(src, "main", &[]), 6);
+}
+
+/// Multi-shot through the new `shift |k|` form: the handler invokes the
+/// continuation twice with different values, and each invocation must
+/// independently run the delimited context `v + 1`.
+#[test]
+fn shift_multi_shot_same_handler() {
+    let src = r#"
+        fn invoke(k: cont, v) { resume(k, v) }
+        fn main() {
+            reset {
+                let v = shift |k| {
+                    let a = invoke(k, 10);
+                    let b = invoke(k, 32);
+                    a + b
+                };
+                v + 1
+            }
+        }
+    "#;
+    // Each k-invocation runs `v + 1`. Results: (10+1) + (32+1) = 44.
+    assert_eq!(run_interp(src, "main", &[]), 44);
+}
+
+/// If the shift handler never invokes k and just returns a constant, the
+/// delimited context `v + 1` is discarded and the reset yields the
+/// constant. Matches (reset (+ 1 (shift k 99))) = 99.
+#[test]
+fn shift_handler_discards_continuation() {
+    let src = r#"
+        fn main() {
+            reset {
+                let v = shift |k| { 99 };
+                v + 1
+            }
+        }
+    "#;
+    assert_eq!(run_interp(src, "main", &[]), 99);
+}
+
+/// Prove that post-resume code in the *handler* actually runs and sees
+/// the resumed value. If resume were tail-only (the old bug), `r * 2`
+/// after it would be silently dropped.
+#[test]
+fn shift_resume_returns_to_post_resume_code() {
+    let src = r#"
+        fn main() {
+            reset {
+                let v = shift |k| {
+                    let r = resume(k, 20);
+                    r * 2
+                };
+                v + 1
+            }
+        }
+    "#;
+    // resume(k, 20) runs delimited context → 21 → r=21 → r*2=42.
+    assert_eq!(run_interp(src, "main", &[]), 42);
+}
+
+/// Two captures in the same reset body: the first shift captures a
+/// delimited context that itself contains another shift. Exercises
+/// shift-after-shift within the same reset.
+#[test]
+fn shift_two_captures_sequentially() {
+    let src = r#"
+        fn main() {
+            reset {
+                let v1 = shift |k1| { resume(k1, 5) };
+                let v2 = shift |k2| { resume(k2, 7) };
+                v1 + v2
+            }
+        }
+    "#;
+    // k1(5) re-enters at "let v2 = ...", runs the second shift, k2(7)
+    // re-enters at "v1 + v2", yields 12.
+    assert_eq!(run_interp(src, "main", &[]), 12);
 }
 
 /// Property 2: resume must return the prompt's value to its caller so
