@@ -48,14 +48,14 @@ fn build(release: bool) {
 fn serve() {
     let root = project_root();
     let web_dir = root.join("web");
-    let dsl_path = root.join("scene.dsl");
+    let scenes_dir = root.join("scenes");
     let port: u16 = 8080;
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .expect("failed to build tokio runtime");
-    rt.block_on(server::run(web_dir, dsl_path, port));
+    rt.block_on(server::run(web_dir, scenes_dir, port));
 }
 
 fn main() {

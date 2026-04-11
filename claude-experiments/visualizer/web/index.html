@@ -22,14 +22,30 @@
             flex-shrink: 0;
         }
         #editor-header {
-            padding: 8px 12px;
+            padding: 6px 8px;
             font-family: monospace;
             font-size: 12px;
             color: #565f89;
-            text-transform: uppercase;
-            letter-spacing: 1px;
             border-bottom: 1px solid #2a2b36;
             flex-shrink: 0;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        #scene-select {
+            background: #2a2b36;
+            color: #c0caf5;
+            border: 1px solid #3a3b46;
+            padding: 4px 8px;
+            font-family: inherit;
+            font-size: 12px;
+            border-radius: 3px;
+            cursor: pointer;
+        }
+        #editor-header label {
+            color: #565f89;
+            text-transform: uppercase;
+            letter-spacing: 1px;
         }
         #editor-container {
             flex: 1;
@@ -90,7 +106,10 @@
 <body>
     <div id="app">
         <div id="editor-pane">
-            <div id="editor-header">scene</div>
+            <div id="editor-header">
+                <label>scene</label>
+                <select id="scene-select"></select>
+            </div>
             <div id="editor-container"></div>
         </div>
         <div id="resize-handle"></div>
@@ -167,8 +186,27 @@
         import { javascript } from '@codemirror/lang-javascript';
         import { oneDark } from '@codemirror/theme-one-dark';
 
-        // Fetch initial DSL from the server
-        const initialDoc = await fetch('/scene.dsl').then(r => r.text()).catch(() => '');
+        // Load scene list and remember the last selection
+        const scenes = await fetch('/scenes').then(r => r.json()).catch(() => []);
+        const sceneSelect = document.getElementById('scene-select');
+        for (const name of scenes) {
+            const opt = document.createElement('option');
+            opt.value = name;
+            opt.textContent = name;
+            sceneSelect.appendChild(opt);
+        }
+        let currentScene = localStorage.getItem('scene') || scenes[0] || '';
+        if (scenes.includes(currentScene)) {
+            sceneSelect.value = currentScene;
+        } else {
+            currentScene = scenes[0] || '';
+        }
+
+        async function fetchScene(name) {
+            return await fetch(`/scenes/${name}`).then(r => r.text()).catch(() => '');
+        }
+
+        const initialDoc = currentScene ? await fetchScene(currentScene) : '';
 
         // Flag: suppress onCodeChange callback when content is pushed from server
         let suppressUpdate = false;
@@ -205,6 +243,25 @@
 
         window.__editor = editor;
 
+        function replaceEditorContent(newCode) {
+            suppressUpdate = true;
+            editor.dispatch({
+                changes: { from: 0, to: editor.state.doc.length, insert: newCode }
+            });
+            suppressUpdate = false;
+            if (window.__onCodeChange) {
+                window.__onCodeChange(newCode);
+            }
+        }
+
+        // Scene switcher
+        sceneSelect.addEventListener('change', async () => {
+            currentScene = sceneSelect.value;
+            localStorage.setItem('scene', currentScene);
+            const content = await fetchScene(currentScene);
+            replaceEditorContent(content);
+        });
+
         const wasm = await import('./visualizer.js');
         await wasm.default();
 
@@ -213,21 +270,18 @@
             window.__onCodeChange(editor.state.doc.toString());
         }
 
-        // Subscribe to server-sent updates
+        // Subscribe to server-sent updates — only apply changes for the current scene
         const evtSource = new EventSource('/events');
         evtSource.onmessage = (e) => {
-            const newCode = e.data;
-            if (newCode === editor.state.doc.toString()) return;
-            suppressUpdate = true;
-            editor.dispatch({
-                changes: { from: 0, to: editor.state.doc.length, insert: newCode }
-            });
-            suppressUpdate = false;
-            // Manually trigger compile since we suppressed the listener
-            if (window.__onCodeChange) {
-                window.__onCodeChange(newCode);
+            try {
+                const update = JSON.parse(e.data);
+                if (update.name !== currentScene) return;
+                if (update.content === editor.state.doc.toString()) return;
+                replaceEditorContent(update.content);
+                console.log('[sse] updated', update.name, update.content.length, 'chars');
+            } catch (err) {
+                console.warn('[sse] bad payload:', err);
             }
-            console.log('[sse] received update,', newCode.length, 'chars');
         };
         evtSource.onerror = (e) => {
             console.warn('[sse] connection error', e);

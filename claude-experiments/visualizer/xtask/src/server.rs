@@ -1,9 +1,9 @@
 use std::convert::Infallible;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use axum::{
-    extract::State,
+    extract::{Path as AxumPath, State},
     response::sse::{Event, KeepAlive, Sse},
     routing::get,
     Router,
@@ -14,34 +14,39 @@ use tokio::sync::broadcast;
 use tokio_stream::wrappers::BroadcastStream;
 use tower_http::services::ServeDir;
 
-#[derive(Clone)]
-struct AppState {
-    tx: broadcast::Sender<String>,
-    dsl_path: PathBuf,
+#[derive(Clone, Debug)]
+struct SceneUpdate {
+    name: String,
+    content: String,
 }
 
-pub async fn run(web_dir: PathBuf, dsl_path: PathBuf, port: u16) {
-    let (tx, _) = broadcast::channel::<String>(16);
+#[derive(Clone)]
+struct AppState {
+    tx: broadcast::Sender<SceneUpdate>,
+    scenes_dir: PathBuf,
+}
+
+pub async fn run(web_dir: PathBuf, scenes_dir: PathBuf, port: u16) {
+    let (tx, _) = broadcast::channel::<SceneUpdate>(16);
     let state = AppState {
         tx: tx.clone(),
-        dsl_path: dsl_path.clone(),
+        scenes_dir: scenes_dir.clone(),
     };
 
-    // Spawn file-watcher thread. Uses notify's blocking recommended_watcher,
-    // which runs the callback off the main thread.
-    spawn_watcher(dsl_path.clone(), tx.clone());
+    spawn_watcher(scenes_dir.clone(), tx.clone());
 
     let app = Router::new()
         .route("/events", get(sse_handler))
-        .route("/scene.dsl", get(dsl_handler))
+        .route("/scenes", get(list_scenes))
+        .route("/scenes/:name", get(get_scene))
         .fallback_service(ServeDir::new(&web_dir))
         .with_state(state);
 
     let addr = ("127.0.0.1", port);
     let listener = tokio::net::TcpListener::bind(addr).await.expect("bind failed");
     eprintln!("Serving {} on http://127.0.0.1:{port}", web_dir.display());
-    eprintln!("Watching {}", dsl_path.display());
-    eprintln!("  POST nothing — just write to {} to push updates", dsl_path.display());
+    eprintln!("Watching scenes in {}", scenes_dir.display());
+    eprintln!("  Write to any .dsl file in that directory to push updates");
 
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
@@ -54,10 +59,10 @@ async fn shutdown_signal() {
     eprintln!("Shutting down");
 }
 
-fn spawn_watcher(path: PathBuf, tx: broadcast::Sender<String>) {
+fn spawn_watcher(scenes_dir: PathBuf, tx: broadcast::Sender<SceneUpdate>) {
     std::thread::spawn(move || {
-        // notify sends events on its own thread; we receive via std mpsc
-        let (notify_tx, notify_rx) = std::sync::mpsc::channel::<notify::Result<notify::Event>>();
+        let (notify_tx, notify_rx) =
+            std::sync::mpsc::channel::<notify::Result<notify::Event>>();
         let mut watcher = match notify::recommended_watcher(move |res| {
             let _ = notify_tx.send(res);
         }) {
@@ -68,19 +73,14 @@ fn spawn_watcher(path: PathBuf, tx: broadcast::Sender<String>) {
             }
         };
 
-        // Watch the parent dir so we still get events if the file is replaced (atomic writes)
-        let watch_target = path.parent().map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
-        if let Err(e) = watcher.watch(&watch_target, RecursiveMode::NonRecursive) {
-            eprintln!("failed to watch {}: {e}", watch_target.display());
+        if let Err(e) = watcher.watch(&scenes_dir, RecursiveMode::NonRecursive) {
+            eprintln!("failed to watch {}: {e}", scenes_dir.display());
             return;
         }
 
-        // Send initial content on startup
-        if let Ok(content) = std::fs::read_to_string(&path) {
-            let _ = tx.send(content);
-        }
+        let mut last_sent: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
 
-        let mut last_sent: Option<String> = None;
         for res in notify_rx {
             let event = match res {
                 Ok(e) => e,
@@ -90,34 +90,67 @@ fn spawn_watcher(path: PathBuf, tx: broadcast::Sender<String>) {
                 }
             };
 
-            // Only react to events touching our specific file
-            let touches_file = event.paths.iter().any(|p| {
-                p.file_name() == path.file_name()
-                    || p.canonicalize().ok() == path.canonicalize().ok()
-            });
-            if !touches_file {
-                continue;
-            }
-
             if !matches!(event.kind, EventKind::Modify(_) | EventKind::Create(_)) {
                 continue;
             }
 
-            // Debounce: small delay so we don't read mid-write
+            // Debounce — small delay to avoid reading mid-write
             std::thread::sleep(Duration::from_millis(30));
 
-            match std::fs::read_to_string(&path) {
-                Ok(content) => {
-                    if last_sent.as_deref() == Some(content.as_str()) {
-                        continue;
+            for path in &event.paths {
+                let Some(name) = scene_name_from_path(path) else {
+                    continue;
+                };
+                match std::fs::read_to_string(path) {
+                    Ok(content) => {
+                        if last_sent.get(&name).map(String::as_str) == Some(content.as_str()) {
+                            continue;
+                        }
+                        let _ = tx.send(SceneUpdate {
+                            name: name.clone(),
+                            content: content.clone(),
+                        });
+                        last_sent.insert(name, content);
                     }
-                    let _ = tx.send(content.clone());
-                    last_sent = Some(content);
+                    Err(e) => eprintln!("failed to read {}: {e}", path.display()),
                 }
-                Err(e) => eprintln!("failed to read {}: {e}", path.display()),
             }
         }
     });
+}
+
+fn scene_name_from_path(path: &Path) -> Option<String> {
+    if path.extension().and_then(|e| e.to_str()) != Some("dsl") {
+        return None;
+    }
+    path.file_stem().and_then(|s| s.to_str()).map(String::from)
+}
+
+async fn list_scenes(State(state): State<AppState>) -> String {
+    let mut names: Vec<String> = std::fs::read_dir(&state.scenes_dir)
+        .map(|entries| {
+            entries
+                .filter_map(|e| e.ok())
+                .filter_map(|e| scene_name_from_path(&e.path()))
+                .collect()
+        })
+        .unwrap_or_default();
+    names.sort();
+
+    // Return as a simple JSON array
+    let quoted: Vec<String> = names
+        .iter()
+        .map(|n| format!("\"{}\"", n.replace('"', "\\\"")))
+        .collect();
+    format!("[{}]", quoted.join(","))
+}
+
+async fn get_scene(
+    State(state): State<AppState>,
+    AxumPath(name): AxumPath<String>,
+) -> String {
+    let path = state.scenes_dir.join(format!("{name}.dsl"));
+    std::fs::read_to_string(path).unwrap_or_default()
 }
 
 async fn sse_handler(
@@ -125,21 +158,37 @@ async fn sse_handler(
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let rx = state.tx.subscribe();
 
-    // Send the current file content immediately on connect
-    let initial = std::fs::read_to_string(&state.dsl_path).unwrap_or_default();
-    let initial_event = futures_util::stream::once(async move {
-        Ok(Event::default().data(initial))
-    });
-
     let live = BroadcastStream::new(rx).filter_map(|res| async move {
-        res.ok().map(|content| Ok(Event::default().data(content)))
+        res.ok().map(|update| {
+            // Event with named event type and JSON-encoded data
+            let data = format!(
+                "{{\"name\":\"{}\",\"content\":{}}}",
+                update.name.replace('"', "\\\""),
+                json_escape_string(&update.content)
+            );
+            Ok(Event::default().data(data))
+        })
     });
 
-    let stream = initial_event.chain(live);
-
-    Sse::new(stream).keep_alive(KeepAlive::default())
+    Sse::new(live).keep_alive(KeepAlive::default())
 }
 
-async fn dsl_handler(State(state): State<AppState>) -> String {
-    std::fs::read_to_string(&state.dsl_path).unwrap_or_default()
+fn json_escape_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => {
+                out.push_str(&format!("\\u{:04x}", c as u32));
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
