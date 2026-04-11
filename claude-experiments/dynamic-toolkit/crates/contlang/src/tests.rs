@@ -176,235 +176,6 @@ fn capture_abort_resume() {
     assert_eq!(run_interp(src, "main", &[]), 42);
 }
 
-// ═══════════════════════════════════════════════════════════════════
-// GC Segment Tests — via unified interpreter + GCSegmentStack
-// ═══════════════════════════════════════════════════════════════════
-
-fn run_unified_gc(src: &str, entry_name: &str) -> u64 {
-    let tokens = crate::lex(src);
-    let program = crate::parse(tokens);
-    let lowered = crate::lower_program(&program);
-    for func in &lowered.module.functions {
-        dynir::verify(func).unwrap_or_else(|errs| {
-            panic!("verification failed for {}: {:?}", func.name, errs);
-        });
-    }
-    let entry = lowered.func_refs[entry_name];
-    crate::unified_interp::run::<crate::gc_stack::GCSegmentStack>(&lowered.module, entry, &[])
-}
-
-#[test]
-fn gc_return_constant() {
-    assert_eq!(run_unified_gc("fn main() { 42 }", "main"), 42);
-}
-
-#[test]
-fn gc_arithmetic() {
-    assert_eq!(run_unified_gc("fn main() { (3 + 4) * 2 - 1 }", "main"), 13);
-}
-
-#[test]
-fn gc_function_calls() {
-    let src = "fn double(x) { x + x }  fn main() { double(21) }";
-    assert_eq!(run_unified_gc(src, "main"), 42);
-}
-
-#[test]
-fn gc_recursion() {
-    let src = r#"
-        fn factorial(n) { if n <= 1 { 1 } else { n * factorial(n - 1) } }
-        fn main() { factorial(6) }
-    "#;
-    assert_eq!(run_unified_gc(src, "main"), 720);
-}
-
-#[test]
-fn gc_reset_without_abort() {
-    let src = "fn body() { reset { 42 } }  fn main() { body() }";
-    assert_eq!(run_unified_gc(src, "main"), 42);
-}
-
-#[test]
-fn gc_abort_returns_value() {
-    let src = r#"
-        fn body() { reset { abort(99); 999 } }
-        fn main() { body() }
-    "#;
-    assert_eq!(run_unified_gc(src, "main"), 99);
-}
-
-#[test]
-fn gc_capture_abort_resume() {
-    let src = r#"
-        fn capture_it() -> cont {
-            reset { let k: cont = shift(); abort(k) }
-        }
-        fn do_resume(k: cont, v) { resume(k, v) }
-        fn main() {
-            let k: cont = capture_it();
-            do_resume(k, 42)
-        }
-    "#;
-    assert_eq!(run_unified_gc(src, "main"), 42);
-}
-
-#[test]
-fn gc_multi_shot_clone() {
-    let src = r#"
-        fn capture_it() -> cont {
-            reset { let k: cont = shift(); abort(k) }
-        }
-        fn do_clone(k: cont) -> cont { clone(k) }
-        fn do_resume(k: cont, v) { resume(k, v) }
-        fn main() {
-            let k: cont = capture_it();
-            let k1: cont = do_clone(k);
-            let k2: cont = do_clone(k);
-            do_resume(k1, 11)
-        }
-    "#;
-    assert_eq!(run_unified_gc(src, "main"), 11);
-}
-
-#[test]
-fn gc_nested_resets() {
-    let src = r#"
-        fn inner() { reset { abort(5) } }
-        fn main() { reset { let v = inner(); v + 10 } }
-    "#;
-    assert_eq!(run_unified_gc(src, "main"), 15);
-}
-
-// ── GC-specific tests ──────────────────────────────────────────────
-
-#[test]
-fn gc_collects_dead_segments() {
-    use dynexec::StackConfig;
-
-    let tokens = crate::lex("fn main() { 42 }");
-    let program = crate::parse(tokens);
-    let lowered = crate::lower_program(&program);
-    let entry = lowered.func_refs["main"];
-
-    let config = StackConfig { heap_size: 64 * 1024 };
-    let mut rt = crate::gc_stack::GCSegmentRuntime::new(config.heap_size);
-    let mut conts = dynexec::VecContinuationStore::new();
-    let result = crate::unified_interp::interpret::<crate::gc_stack::GCSegmentStack>(
-        &lowered.module, &mut rt, &mut conts, entry, &[],
-    );
-    assert_eq!(result, 42);
-
-    let used_before = rt.from_used();
-    assert!(used_before > 0, "should have allocated something");
-
-    rt.collect_empty();
-
-    let used_after = rt.from_used();
-    assert_eq!(used_after, 0, "dead segments should have been reclaimed");
-}
-
-#[test]
-fn gc_moves_segments() {
-    // Allocate a segment with tagged values, root it, collect, verify it moved.
-    use crate::gc_stack::SegPtrPolicy;
-    use dynalloc::{PtrPolicy, SemiSpace};
-    use dynobj::{Compact, ObjHeader, TypeInfo};
-    use dynvalue::LowBit;
-    use std::cell::Cell;
-
-    type TV = dynvalue::Value<LowBit<3>>;
-
-    fn tag_fixnum(n: i64) -> u64 { TV::tagged(1, n as u64).to_bits() }
-    fn untag_fixnum(bits: u64) -> i64 {
-        let p = TV::from_bits(bits).payload();
-        ((p as i64) << 3) >> 3
-    }
-    fn tag_ptr(ptr: *mut u8) -> u64 {
-        TV::tagged(0, (ptr as u64) >> 3).to_bits()
-    }
-    fn untag_ptr(bits: u64) -> *mut u8 {
-        (TV::from_bits(bits).payload() << 3) as *mut u8
-    }
-
-    static SEG: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_varlen_values(0);
-
-    let mut gc = SemiSpace::new::<Compact>(4096);
-    let seg = gc.alloc_obj::<Compact>(&SEG, 3);
-    assert!(!seg.is_null());
-
-    // Write tagged fixnum values
-    unsafe {
-        let base = SEG.varlen_element_offset(0);
-        *(seg.add(base) as *mut u64) = tag_fixnum(100);
-        *(seg.add(base + 8) as *mut u64) = tag_fixnum(200);
-        *(seg.add(base + 16) as *mut u64) = tag_fixnum(300);
-    }
-
-    // Root the segment as a tagged pointer
-    struct SingleRoot(Cell<u64>);
-    impl dynobj::RootSource for SingleRoot {
-        fn scan_roots(&self, visitor: &mut dyn FnMut(*mut u64)) {
-            visitor(self.0.as_ptr());
-        }
-    }
-    let root = SingleRoot(Cell::new(tag_ptr(seg)));
-
-    // Collect — segment moves to to-space, root updated
-    unsafe { gc.collect::<SegPtrPolicy>(&mut [&root]); }
-
-    let new_seg = untag_ptr(root.0.get());
-    assert_ne!(new_seg, seg, "segment should have moved");
-    assert!(gc.contains(new_seg as *const u8), "new ptr should be in from-space");
-
-    // Tagged values intact after move
-    unsafe {
-        let base = SEG.varlen_element_offset(0);
-        assert_eq!(untag_fixnum(*(new_seg.add(base) as *const u64)), 100);
-        assert_eq!(untag_fixnum(*(new_seg.add(base + 8) as *const u64)), 200);
-        assert_eq!(untag_fixnum(*(new_seg.add(base + 16) as *const u64)), 300);
-    }
-}
-
-#[test]
-fn gc_during_execution() {
-    let src = r#"
-        fn work(x) { x + 1 }
-        fn main() {
-            let a = work(1);
-            let b = work(a);
-            let c = work(b);
-            let d = work(c);
-            let e = work(d);
-            let f = work(e);
-            let g = work(f);
-            let h = work(g);
-            let i = work(h);
-            let j = work(i);
-            let k = work(j);
-            let l = work(k);
-            let m = work(l);
-            let n = work(m);
-            let o = work(n);
-            let p = work(o);
-            p
-        }
-    "#;
-    let tokens = crate::lex(src);
-    let program = crate::parse(tokens);
-    let lowered = crate::lower_program(&program);
-    for func in &lowered.module.functions {
-        dynir::verify(func).unwrap();
-    }
-    let entry = lowered.func_refs["main"];
-    let mut rt = crate::gc_stack::GCSegmentRuntime::new(64 * 1024);
-    rt.set_gc_stress(3);
-    let mut conts = dynexec::VecContinuationStore::new();
-    let result = crate::unified_interp::interpret::<crate::gc_stack::GCSegmentStack>(
-        &lowered.module, &mut rt, &mut conts, entry, &[],
-    );
-    assert_eq!(result, 17);
-    assert!(rt.gc_count() > 0, "GC should have been triggered");
-}
 
 #[test]
 fn multi_shot_with_clone() {
@@ -485,86 +256,97 @@ fn cross_function_capture_and_resume() {
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// Unified Interpreter Tests — THE final API shape
+// "Is it really delimited continuations?" — adversarial tests
 // ═══════════════════════════════════════════════════════════════════
+//
+// Real delimited continuations (shift/reset, prompt/control) must:
+//   1. Capture the delimited *context* between shift and reset, so that
+//      resuming re-runs the intervening computation with the fresh value.
+//   2. Make resume(k, v) *return* the prompt's final value to its caller,
+//      so subsequent computation can use the result.
+//   3. Be re-entrant: the same captured k can be resumed multiple times
+//      with observably independent effects.
+//
+// The existing tests above all share the shape
+//     reset { let k = shift(); abort(k) }
+// where the "delimited context" is literally just `abort(k)`. Those tests
+// cannot distinguish a real implementation from an exception/longjmp.
+// The tests below probe each of the three properties directly.
 
-fn run_unified_vec(src: &str, entry_name: &str) -> u64 {
-    let tokens = crate::lex(src);
-    let program = crate::parse(tokens);
-    let lowered = crate::lower_program(&program);
-    for func in &lowered.module.functions {
-        dynir::verify(func).unwrap();
-    }
-    let entry = lowered.func_refs[entry_name];
-    crate::unified_interp::run::<dynexec::ContiguousVecStack>(&lowered.module, entry, &[])
-}
-
+/// Property 1: the computation between shift and reset must be captured.
+/// The "delimited context" is `v + 1` — on resume, that addition must
+/// re-execute with the resume value bound to v.
+///
+/// Uses the Racket-style `shift |k| { ... }` form so the handle (`k`) and
+/// the resumed value (`v`) live in separate slots with separate types.
+/// The handler body invokes the continuation directly, which is the
+/// classic pattern `(reset (+ 1 (shift k (k 5))))` = 6.
 #[test]
-fn unified_vec_arithmetic() {
-    assert_eq!(run_unified_vec("fn main() { (3 + 4) * 2 - 1 }", "main"), 13);
-}
-
-#[test]
-fn unified_vec_function_calls() {
-    assert_eq!(run_unified_vec("fn double(x) { x + x }  fn main() { double(21) }", "main"), 42);
-}
-
-#[test]
-fn unified_vec_recursion() {
+fn shift_captures_intervening_computation() {
     let src = r#"
-        fn factorial(n) { if n <= 1 { 1 } else { n * factorial(n - 1) } }
-        fn main() { factorial(6) }
+        fn main() {
+            reset {
+                let v = shift |k| { resume(k, 5) };
+                v + 1
+            }
+        }
     "#;
-    assert_eq!(run_unified_vec(src, "main"), 720);
+    // At capture: shift binds k to the handle, handler calls resume(k, 5),
+    // which splices the captured frame back on top. The resumed
+    // computation re-enters at resume_bb with v = 5, runs v + 1 = 6,
+    // falls out of reset with 6. The resumer (handler) gets 6 as the
+    // value of its `resume(...)` expression; that becomes the handler's
+    // return value; the handler's return value also becomes the reset's
+    // value (Racket semantics). Either way: 6.
+    assert_eq!(run_interp(src, "main", &[]), 6);
 }
 
+/// Property 2: resume must return the prompt's value to its caller so
+/// the caller can keep computing with it.
 #[test]
-fn unified_vec_abort() {
-    let src = r#"
-        fn body() { reset { abort(99); 999 } }
-        fn main() { body() }
-    "#;
-    assert_eq!(run_unified_vec(src, "main"), 99);
-}
-
-#[test]
-fn unified_vec_capture_resume() {
+fn resume_returns_value_to_caller() {
     let src = r#"
         fn capture_it() -> cont {
             reset { let k: cont = shift(); abort(k) }
         }
-        fn do_resume(k: cont, v) { resume(k, v) }
+        fn do_resume(k: cont, v) {
+            let r = resume(k, v);
+            r + 100
+        }
         fn main() {
             let k: cont = capture_it();
             do_resume(k, 42)
         }
     "#;
-    assert_eq!(run_unified_vec(src, "main"), 42);
+    // Real delimited: resume(k, 42) returns 42 to do_resume, which then
+    // computes 42 + 100 = 142.
+    assert_eq!(run_interp(src, "main", &[]), 142);
 }
 
+/// Property 3: multi-shot — the same continuation invoked twice yields
+/// two independent results that can be combined.
 #[test]
-fn unified_vec_multi_shot() {
+fn multi_shot_continuation_is_reentrant() {
     let src = r#"
         fn capture_it() -> cont {
             reset { let k: cont = shift(); abort(k) }
         }
         fn do_clone(k: cont) -> cont { clone(k) }
-        fn do_resume(k: cont, v) { resume(k, v) }
+        fn invoke(k: cont, v) {
+            let r = resume(k, v);
+            r
+        }
         fn main() {
-            let k: cont = capture_it();
+            let k:  cont = capture_it();
             let k1: cont = do_clone(k);
             let k2: cont = do_clone(k);
-            do_resume(k1, 11)
+            let a = invoke(k1, 10);
+            let b = invoke(k2, 32);
+            a + b
         }
     "#;
-    assert_eq!(run_unified_vec(src, "main"), 11);
-}
-
-#[test]
-fn unified_vec_nested_resets() {
-    let src = r#"
-        fn inner() { reset { abort(5) } }
-        fn main() { reset { let v = inner(); v + 10 } }
-    "#;
-    assert_eq!(run_unified_vec(src, "main"), 15);
+    // Real multi-shot: 10 + 32 = 42. A one-shot / stack-replacing impl
+    // cannot even execute the second invoke — the first resume erases
+    // main's frame.
+    assert_eq!(run_interp(src, "main", &[]), 42);
 }

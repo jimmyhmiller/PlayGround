@@ -30,7 +30,10 @@ pub struct OverlayVertex {
 
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
-struct LineVertex { position: [f32; 3] }
+pub struct LineVertex {
+    pub position: [f32; 3],
+    pub color: [f32; 4],
+}
 
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
@@ -47,55 +50,50 @@ const SIDEBAR_MARGIN: f32 = 10.0;
 const SIDEBAR_GLYPH_SCALE: f32 = 2.0;
 const SIDEBAR_LINE_HEIGHT: f32 = 20.0;
 
-/// Wall camera: looks at the XY wall from +Z. Pan with drag, zoom with scroll.
-/// Slight tilt available via right-drag for seeing 3D attention structures.
-struct WallCamera {
-    /// Center of view in world XY
-    center_x: f32,
-    center_y: f32,
-    /// Distance from wall (zoom level)
+/// Landscape camera: orbits around a target point.
+/// Default view is 45° from above so you see heightfield depth.
+/// Left-drag orbits, right-drag pans the target, scroll zooms.
+struct LandscapeCamera {
+    /// Target point (what we're looking at)
+    target: Vec3,
+    /// Distance from target
     distance: f32,
-    /// Slight tilt angles for peeking at 3D structure
-    tilt_x: f32,
-    tilt_y: f32,
+    /// Horizontal angle (radians)
+    yaw: f32,
+    /// Vertical angle (radians) — 0 = horizon, PI/2 = straight down
+    pitch: f32,
 }
 
-impl WallCamera {
+impl LandscapeCamera {
     fn new() -> Self {
-        Self { center_x: 0.0, center_y: -15.0, distance: 40.0, tilt_x: 0.0, tilt_y: 0.0 }
+        Self {
+            target: Vec3::new(0.0, -15.0, 0.0),
+            distance: 40.0,
+            yaw: 0.3,       // slightly rotated
+            pitch: 0.7,     // ~40° from horizontal — good for seeing height
+        }
+    }
+
+    fn eye(&self) -> Vec3 {
+        let x = self.distance * self.pitch.cos() * self.yaw.sin();
+        let y = self.distance * self.pitch.sin();
+        let z = self.distance * self.pitch.cos() * self.yaw.cos();
+        self.target + Vec3::new(x, y, z)
     }
 
     fn view_matrix(&self) -> Mat4 {
-        let eye = Vec3::new(
-            self.center_x + self.tilt_x * self.distance * 0.3,
-            self.center_y + self.tilt_y * self.distance * 0.3,
-            self.distance,
-        );
-        let target = Vec3::new(self.center_x, self.center_y, 0.0);
-        Mat4::look_at_rh(eye, target, Vec3::Y)
+        Mat4::look_at_rh(self.eye(), self.target, Vec3::Y)
     }
 
     fn projection_matrix(&self, aspect: f32) -> Mat4 {
         Mat4::perspective_rh(45.0_f32.to_radians(), aspect, 0.01, 500.0)
     }
 
-    /// Convert a pixel drag to world-space pan delta.
     fn pan_scale(&self) -> f32 {
         self.distance * 0.003
     }
 }
 
-fn cube_wireframe_vertices(min: Vec3, max: Vec3) -> Vec<LineVertex> {
-    let c = [
-        Vec3::new(min.x, min.y, min.z), Vec3::new(max.x, min.y, min.z),
-        Vec3::new(max.x, max.y, min.z), Vec3::new(min.x, max.y, min.z),
-        Vec3::new(min.x, min.y, max.z), Vec3::new(max.x, min.y, max.z),
-        Vec3::new(max.x, max.y, max.z), Vec3::new(min.x, max.y, max.z),
-    ];
-    [(0,1),(1,2),(2,3),(3,0),(4,5),(5,6),(6,7),(7,4),(0,4),(1,5),(2,6),(3,7)]
-        .iter().flat_map(|&(a,b)| [LineVertex { position: c[a].into() }, LineVertex { position: c[b].into() }])
-        .collect()
-}
 
 // --- Sidebar ---
 fn pixel_to_ndc(x: f32, y: f32, w: f32, h: f32) -> [f32; 2] {
@@ -163,7 +161,7 @@ struct GpuState {
 
 pub struct App {
     window: Option<Arc<Window>>, gpu: Option<GpuState>,
-    camera: WallCamera,
+    camera: LandscapeCamera,
     left_pressed: bool,
     right_pressed: bool,
     last_mouse: Option<(f64, f64)>,
@@ -178,7 +176,7 @@ impl App {
     pub fn new(state: AppState) -> Self {
         Self {
             window: None, gpu: None,
-            camera: WallCamera::new(),
+            camera: LandscapeCamera::new(),
             left_pressed: false, right_pressed: false, last_mouse: None,
             point_size: 3.0,
             state, inspect_text: None, current_labels: vec![], dirty: true,
@@ -247,33 +245,36 @@ impl App {
         if !self.dirty { return; }
         self.dirty = false;
 
-        let tiles = viz::build_wall(
+        let machine = viz::build_machine(
             &self.state.tile_values,
             &self.state.model.node_infos,
+            &self.state.model.layout,
             &self.state.model.config,
             self.state.n_tokens(),
             self.state.focus_token,
             self.state.computing,
         );
 
-        let mut all_verts = Vec::new();
-        let mut all_labels = Vec::new();
-        for (tile, _, _) in &tiles {
-            let base = all_verts.len();
-            all_verts.extend_from_slice(&tile.vertices);
-            all_labels.extend(tile.labels.iter().cloned());
-        }
-        self.current_labels = all_labels;
+        self.current_labels = machine.labels;
 
         if let Some(gpu) = self.gpu.as_mut() {
-            if !all_verts.is_empty() {
+            if !machine.points.is_empty() {
                 gpu.point_buffer = gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("points"), contents: bytemuck::cast_slice(&all_verts),
+                    label: Some("points"), contents: bytemuck::cast_slice(&machine.points),
                     usage: wgpu::BufferUsages::VERTEX,
                 });
-                gpu.point_count = all_verts.len() as u32;
+                gpu.point_count = machine.points.len() as u32;
             } else {
                 gpu.point_count = 0;
+            }
+            if !machine.lines.is_empty() {
+                gpu.line_buffer = gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("lines"), contents: bytemuck::cast_slice(&machine.lines),
+                    usage: wgpu::BufferUsages::VERTEX,
+                });
+                gpu.line_vertex_count = machine.lines.len() as u32;
+            } else {
+                gpu.line_vertex_count = 0;
             }
         }
         self.update_sidebar();
@@ -374,10 +375,15 @@ impl App {
             label: Some("lines"), layout: Some(&pl),
             vertex: wgpu::VertexState { module: &shader, entry_point: Some("vs_line"),
                 buffers: &[wgpu::VertexBufferLayout { array_stride: std::mem::size_of::<LineVertex>() as u64, step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &[wgpu::VertexAttribute { offset: 0, shader_location: 0, format: wgpu::VertexFormat::Float32x3 }],
+                    attributes: &[
+                        wgpu::VertexAttribute { offset: 0, shader_location: 0, format: wgpu::VertexFormat::Float32x3 },
+                        wgpu::VertexAttribute { offset: 12, shader_location: 1, format: wgpu::VertexFormat::Float32x4 },
+                    ],
                 }], compilation_options: Default::default() },
             fragment: Some(wgpu::FragmentState { module: &shader, entry_point: Some("fs_line"),
-                targets: &[Some(wgpu::ColorTargetState { format, blend: None, write_mask: wgpu::ColorWrites::ALL })],
+                targets: &[Some(wgpu::ColorTargetState { format, blend: Some(wgpu::BlendState {
+                    color: wgpu::BlendComponent { src_factor: wgpu::BlendFactor::SrcAlpha, dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha, operation: wgpu::BlendOperation::Add },
+                    alpha: wgpu::BlendComponent::OVER }), write_mask: wgpu::ColorWrites::ALL })],
                 compilation_options: Default::default() }),
             primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::LineList, ..Default::default() },
             depth_stencil: ds.clone(), multisample: wgpu::MultisampleState::default(), multiview_mask: None, cache: None,
@@ -400,10 +406,9 @@ impl App {
 
         let point_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("points"), contents: &[0u8; std::mem::size_of::<PointVertex>()], usage: wgpu::BufferUsages::VERTEX });
-        let line_verts = cube_wireframe_vertices(Vec3::splat(-1.0), Vec3::splat(1.0));
-        let line_vertex_count = line_verts.len() as u32;
         let line_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("lines"), contents: bytemuck::cast_slice(&line_verts), usage: wgpu::BufferUsages::VERTEX });
+            label: Some("lines"), contents: &[0u8; std::mem::size_of::<LineVertex>()], usage: wgpu::BufferUsages::VERTEX });
+        let line_vertex_count: u32 = 0;
         let sidebar_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("sidebar"), contents: &[0u8; std::mem::size_of::<OverlayVertex>()], usage: wgpu::BufferUsages::VERTEX });
         let depth_texture_view = Self::create_depth_texture(&device, config.width, config.height);
@@ -466,6 +471,11 @@ impl App {
                 pass.set_vertex_buffer(0, gpu.point_buffer.slice(..));
                 pass.draw(0..6, 0..gpu.point_count);
             }
+            if gpu.line_vertex_count > 0 {
+                pass.set_pipeline(&gpu.line_pipeline); pass.set_bind_group(0, &gpu.bind_group, &[]);
+                pass.set_vertex_buffer(0, gpu.line_buffer.slice(..));
+                pass.draw(0..gpu.line_vertex_count, 0..1);
+            }
         }
 
         if gpu.sidebar_vertex_count > 0 {
@@ -484,45 +494,6 @@ impl App {
         frame.present();
     }
 
-    fn inspect_at_cursor(&mut self, cx: f64, cy: f64) {
-        if self.current_labels.is_empty() { return; }
-        let Some(gpu) = self.gpu.as_ref() else { return };
-        let w = gpu.config.width as f32; let h = gpu.config.height as f32;
-        let vp_x = w * SIDEBAR_WIDTH_FRAC; let vp_w = w - vp_x;
-        if cx < vp_x as f64 { return; }
-
-        // Rebuild points to get positions (TODO: cache)
-        let tiles = viz::build_wall(&self.state.tile_values, &self.state.model.node_infos,
-            &self.state.model.config, self.state.n_tokens(), self.state.focus_token, false);
-        let mut all_verts = Vec::new();
-        let mut all_labels = Vec::new();
-        for (tile, _, _) in &tiles {
-            all_verts.extend_from_slice(&tile.vertices);
-            all_labels.extend(tile.labels.iter().cloned());
-        }
-
-        let vp = self.camera.projection_matrix(vp_w / h) * self.camera.view_matrix();
-        let threshold_sq = (self.point_size * 4.0).max(8.0).powi(2);
-        let mut best: Option<(usize, f32, f32)> = None;
-        for (i, v) in all_verts.iter().enumerate() {
-            let clip = vp * Vec4::new(v.position[0], v.position[1], v.position[2], 1.0);
-            if clip.w <= 0.0 { continue; }
-            let ndc = clip.truncate() / clip.w;
-            if ndc.z < -1.0 || ndc.z > 1.0 { continue; }
-            let sx = vp_x + (ndc.x * 0.5 + 0.5) * vp_w;
-            let sy = (1.0 - (ndc.y * 0.5 + 0.5)) * h;
-            let d2 = (sx - cx as f32).powi(2) + (sy - cy as f32).powi(2);
-            if d2 > threshold_sq { continue; }
-            match best { Some((_, bd, bz)) if d2 > bd && ndc.z >= bz => {} _ => best = Some((i, d2, ndc.z)) }
-        }
-        if let Some((idx, _, _)) = best {
-            if let Some(label) = all_labels.get(idx) {
-                eprintln!("Inspect: {}", label.replace('\n', " | "));
-                self.inspect_text = Some(label.clone());
-                self.update_sidebar();
-            }
-        }
-    }
 }
 
 impl ApplicationHandler for App {
@@ -553,15 +524,19 @@ impl ApplicationHandler for App {
                     let dx = (position.x - lx) as f32;
                     let dy = (position.y - ly) as f32;
                     if self.left_pressed {
-                        // Pan across the wall
-                        let scale = self.camera.pan_scale();
-                        self.camera.center_x -= dx * scale;
-                        self.camera.center_y += dy * scale;
+                        // Orbit around target
+                        self.camera.yaw -= dx * 0.005;
+                        self.camera.pitch = (self.camera.pitch + dy * 0.005)
+                            .clamp(0.05, std::f32::consts::FRAC_PI_2 - 0.05);
                     }
                     if self.right_pressed {
-                        // Tilt to see 3D structure
-                        self.camera.tilt_x = (self.camera.tilt_x + dx * 0.003).clamp(-0.8, 0.8);
-                        self.camera.tilt_y = (self.camera.tilt_y - dy * 0.003).clamp(-0.8, 0.8);
+                        // Pan target point
+                        let scale = self.camera.pan_scale();
+                        // Pan in the camera's local XY plane
+                        let right = Vec3::new(self.camera.yaw.cos(), 0.0, -self.camera.yaw.sin());
+                        let forward = Vec3::new(-self.camera.yaw.sin(), 0.0, -self.camera.yaw.cos());
+                        self.camera.target -= right * dx * scale;
+                        self.camera.target += forward * dy * scale;
                     }
                 }
                 self.last_mouse = Some((position.x, position.y));
@@ -574,11 +549,11 @@ impl ApplicationHandler for App {
                 use winit::keyboard::{Key, NamedKey};
                 match event.logical_key {
                     Key::Named(NamedKey::ArrowDown) => {
-                        self.camera.center_y -= 2.0;
+                        self.camera.target.y -= 2.0;
                         self.dirty = true;
                     }
                     Key::Named(NamedKey::ArrowUp) => {
-                        self.camera.center_y += 2.0;
+                        self.camera.target.y += 2.0;
                         self.dirty = true;
                     }
                     Key::Named(NamedKey::ArrowLeft) => {

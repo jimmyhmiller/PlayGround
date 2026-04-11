@@ -51,6 +51,26 @@ impl Tweakables {
         })
     }
 
+    /// Check if a name is registered as a tweakable.
+    pub fn has(&self, name: &str) -> bool {
+        self.entries.borrow().contains_key(name)
+    }
+
+    /// Clear all registered tweakables and remove the panel.
+    pub fn clear(&mut self) {
+        self.entries.borrow_mut().clear();
+        self.order.clear();
+        self.panel_built = false;
+        // Remove existing panel from DOM
+        if let Some(doc) = web_sys::window().and_then(|w| w.document()) {
+            if let Some(panel) = doc.get_element_by_id("tweak-panel") {
+                if let Some(parent) = panel.parent_node() {
+                    let _ = parent.remove_child(&panel);
+                }
+            }
+        }
+    }
+
     /// Build the HTML panel. Call once after all values are registered.
     pub fn build_panel(&mut self) {
         if self.panel_built {

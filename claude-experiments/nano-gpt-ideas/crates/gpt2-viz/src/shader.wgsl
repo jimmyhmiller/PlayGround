@@ -60,16 +60,27 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     return vec4<f32>(in.color.rgb, alpha);
 }
 
-// --- Wireframe cube ---
+// --- Colored lines (for attention arcs) ---
+
+struct LineOut {
+    @builtin(position) clip_position: vec4<f32>,
+    @location(0) color: vec4<f32>,
+};
 
 @vertex
-fn vs_line(@location(0) position: vec3<f32>) -> @builtin(position) vec4<f32> {
-    return uniforms.view_proj * vec4<f32>(position, 1.0);
+fn vs_line(
+    @location(0) position: vec3<f32>,
+    @location(1) color: vec4<f32>,
+) -> LineOut {
+    var out: LineOut;
+    out.clip_position = uniforms.view_proj * vec4<f32>(position, 1.0);
+    out.color = color;
+    return out;
 }
 
 @fragment
-fn fs_line() -> @location(0) vec4<f32> {
-    return vec4<f32>(0.15, 0.2, 0.3, 1.0);
+fn fs_line(in: LineOut) -> @location(0) vec4<f32> {
+    return in.color;
 }
 
 // --- 2D overlay shader (sidebar/minimap) ---

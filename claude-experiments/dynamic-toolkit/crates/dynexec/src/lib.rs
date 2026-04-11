@@ -230,6 +230,15 @@ pub enum FrameResume {
         exception_args_vals: Vec<u64>,
         has_ret_param: bool,
     },
+    /// This frame is the bottom of a captured slice that was spliced on top
+    /// of the resumer's stack by `resume_slice`. When it pops, the runtime
+    /// should transfer control to `return_block` in the resumer's current
+    /// frame, delivering the returned value as that block's first param
+    /// (written at `return_param_dest`).
+    FromResume {
+        return_block: usize,
+        return_param_dest: Option<usize>,
+    },
 }
 
 /// Configuration for creating a stack runtime.
@@ -312,7 +321,29 @@ pub trait InterpFrameStore {
     fn capture_snapshot(&mut self, prompt: u32, resume_dest: usize) -> FrameSliceSnapshot;
 
     /// Replace the current stack with frames from a snapshot.
+    ///
+    /// Legacy one-way stack-replacement semantics (no caller link). Kept
+    /// for the dynir reference interpreter and consumers that have not
+    /// migrated.
     fn resume_snapshot(&mut self, snapshot: &FrameSliceSnapshot, args: &[u64]);
+
+    /// Splice the captured frames on top of the current stack. The bottom
+    /// captured frame's `resume` is overridden with `bottom_resume` so that,
+    /// when it eventually pops (via normal Ret or abort-to-prompt + handler
+    /// Ret), control returns to the resumer. This is the Chez-style
+    /// "caller link" path that makes delimited continuations composable and
+    /// multi-shot.
+    ///
+    /// Default implementation falls back to the legacy replacing form for
+    /// strategies that haven't implemented splice semantics yet.
+    fn resume_snapshot_splice(
+        &mut self,
+        snapshot: &FrameSliceSnapshot,
+        args: &[u64],
+        _bottom_resume: FrameResume,
+    ) {
+        self.resume_snapshot(snapshot, args);
+    }
 
     // ── GC integration ─────────────────────────────────────────
 

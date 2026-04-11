@@ -157,6 +157,54 @@ impl<'a, L: ValueLayout, Roots: RootStrategy<L>, Transport: RootTransport<L, Roo
             sync_frame_from_roots(frame, self.roots);
         }
     }
+
+    /// Push the frames of `snapshot` on top of the current live stack.
+    /// If `bottom_resume` is `Some`, the bottom pushed frame has its
+    /// `resume` field overridden to that value; otherwise it inherits
+    /// the original `caller_resume` from capture time.
+    fn push_captured_frames(
+        &mut self,
+        snapshot: &FrameSliceSnapshot,
+        args: &[u64],
+        bottom_resume: Option<FrameResume>,
+    ) {
+        let frame_count = snapshot.frames.len();
+        for (i, captured) in snapshot.frames.iter().enumerate() {
+            let func_idx = captured.resume.func_idx;
+            let mut vals = captured.values.clone();
+            if i + 1 == frame_count {
+                for (idx, &value_idx) in captured.resume_arg_value_indices.iter().enumerate() {
+                    if let Some(&arg) = args.get(idx) {
+                        vals[value_idx] = arg;
+                    }
+                }
+            }
+            let mut val_to_slot = vec![None; vals.len()];
+            for (slot, &value_idx) in captured.root_value_indices.iter().enumerate() {
+                val_to_slot[value_idx] = Some(slot);
+            }
+            let gc_slots = count_gc_slots_from_map(&val_to_slot);
+            let root_frame = self.roots.push_frame(gc_slots);
+            let resume = if i == 0 {
+                bottom_resume.clone().unwrap_or_else(|| captured.caller_resume.clone())
+            } else {
+                captured.caller_resume.clone()
+            };
+            let frame = InterpFrame {
+                func_idx,
+                vals,
+                slots: vec![0u64; self.functions[func_idx].stack_slots.len()],
+                block_idx: captured.resume.block_idx,
+                inst_idx: captured.resume.inst_idx,
+                resume,
+                active_prompts: captured.active_prompts.clone(),
+                root_frame,
+                val_to_slot,
+            };
+            sync_frame_to_roots(&frame, self.roots);
+            self.stack.push(frame);
+        }
+    }
 }
 
 fn sync_frame_to_roots<L: ValueLayout, Roots: RootStrategy<L>, Transport: RootTransport<L, Roots>, R: InterpRootManager<L, Roots, Transport>>(frame: &InterpFrame, roots: &R) {
@@ -333,43 +381,27 @@ impl<'a, L: ValueLayout, Roots: RootStrategy<L>, Transport: RootTransport<L, Roo
     }
 
     fn resume_snapshot(&mut self, snapshot: &FrameSliceSnapshot, args: &[u64]) {
-        // Pop all existing frames
+        // Legacy stack-replacing path. Real callers should use
+        // `resume_snapshot_splice`.
         while !self.stack.is_empty() {
             self.stack.pop();
             self.roots.pop_frame();
         }
-        let frame_count = snapshot.frames.len();
-        for (i, captured) in snapshot.frames.iter().enumerate() {
-            let func_idx = captured.resume.func_idx;
-            let mut vals = captured.values.clone();
-            if i + 1 == frame_count {
-                for (idx, &value_idx) in captured.resume_arg_value_indices.iter().enumerate() {
-                    if let Some(&arg) = args.get(idx) {
-                        vals[value_idx] = arg;
-                    }
-                }
-            }
-            // Rebuild val_to_slot from root_value_indices
-            let mut val_to_slot = vec![None; vals.len()];
-            for (slot, &value_idx) in captured.root_value_indices.iter().enumerate() {
-                val_to_slot[value_idx] = Some(slot);
-            }
-            let gc_slots = count_gc_slots_from_map(&val_to_slot);
-            let root_frame = self.roots.push_frame(gc_slots);
-            let frame = InterpFrame {
-                func_idx,
-                vals,
-                slots: vec![0u64; self.functions[func_idx].stack_slots.len()],
-                block_idx: captured.resume.block_idx,
-                inst_idx: captured.resume.inst_idx,
-                resume: captured.caller_resume.clone(),
-                active_prompts: captured.active_prompts.clone(),
-                root_frame,
-                val_to_slot,
-            };
-            sync_frame_to_roots(&frame, self.roots);
-            self.stack.push(frame);
-        }
+        self.push_captured_frames(snapshot, args, None);
+    }
+
+    fn resume_snapshot_splice(
+        &mut self,
+        snapshot: &FrameSliceSnapshot,
+        args: &[u64],
+        bottom_resume: FrameResume,
+    ) {
+        // Splice captured frames on top of the current live stack. The
+        // bottom pushed frame's resume is overridden with `bottom_resume`
+        // so that when the delimited computation eventually completes,
+        // control returns to the resumer.
+        self.sync_top_to_roots();
+        self.push_captured_frames(snapshot, args, Some(bottom_resume));
     }
 
     fn needs_gc(&self) -> bool {
@@ -615,6 +647,18 @@ where
                             sr.set_inst(0);
                         }
                         FrameResume::TopLevel => unreachable!(),
+                        FrameResume::FromResume { return_block, return_param_dest } => {
+                            // The popped frame was the bottom of a
+                            // captured slice that was spliced on top of
+                            // the resumer's stack. Deliver the return
+                            // value to the resumer's param slot and jump
+                            // to the resumer's continuation block.
+                            if let (Some(dest), Some(val)) = (return_param_dest, ret_val) {
+                                sr.set(dest, val);
+                            }
+                            sr.set_block(return_block);
+                            sr.set_inst(0);
+                        }
                     }
                 }
 
@@ -640,7 +684,8 @@ where
                                 sr.set_inst(0);
                                 break;
                             }
-                            FrameResume::FromCall { .. } => {
+                            FrameResume::FromCall { .. }
+                            | FrameResume::FromResume { .. } => {
                                 continue;
                             }
                         }
@@ -1028,12 +1073,26 @@ where
                     }
                 }
 
-                Terminator::ResumeSlice { slice, args } => {
+                Terminator::ResumeSlice { slice, args, return_block, return_args: _ } => {
+                    // Splice the captured frames on top of the current
+                    // stack. When the delimited computation eventually
+                    // completes, its Ret will see `FromResume` and
+                    // trampoline back to `return_block` in the resumer's
+                    // frame with the produced value as the block param.
                     let slice_bits = sr.get(slice.index());
                     let arg_vals: Vec<u64> = args.iter().map(|v| sr.get(v.index())).collect();
-                    let snapshot = conts.get_snapshot(slice_bits)?;
-                    sr.resume_snapshot(snapshot, &arg_vals);
-                    // After resume, the stack has been replaced; continue executing
+                    let resumer_func = &self.module.functions[sr.func_idx()];
+                    let return_param_dest = resumer_func.blocks[return_block.index()]
+                        .params.first().map(|(v, _)| v.index());
+                    let snapshot = conts.get_snapshot(slice_bits)?.clone();
+                    sr.resume_snapshot_splice(
+                        &snapshot,
+                        &arg_vals,
+                        FrameResume::FromResume {
+                            return_block: return_block.index(),
+                            return_param_dest,
+                        },
+                    );
                     return Ok(self.execute_frame(sr, conts)?);
                 }
 
@@ -1047,6 +1106,35 @@ where
 
                 Terminator::Unreachable => {
                     return Err(InterpError::Unreachable);
+                }
+                Terminator::CaptureSlice { prompt, handler_block, resume_block } => {
+                    // Racket-style `shift k in body`. At capture time,
+                    // transfer control to `handler_block` with the fresh
+                    // handle as its first block param. The captured
+                    // frame's saved PC is set to `resume_block`'s entry
+                    // so that on resume, execution picks up there with
+                    // the resume arg written into `resume_block`'s first
+                    // block param slot.
+                    let func_ref = &self.module.functions[sr.func_idx()];
+                    let resume_param_idx = func_ref.blocks[resume_block.index()]
+                        .params.first().map(|(v, _)| v.index())
+                        .expect("capture_slice: resume_block must have one I64 param");
+                    let handler_param_idx = func_ref.blocks[handler_block.index()]
+                        .params.first().map(|(v, _)| v.index())
+                        .expect("capture_slice: handler_block must have one FrameSlice param");
+
+                    // Prime the top frame's PC at resume_block so the
+                    // snapshot records it as the resume target.
+                    sr.set_block(resume_block.index());
+                    sr.set_inst(0);
+                    let snapshot = sr.capture_snapshot(prompt.index_u32(), resume_param_idx);
+                    let handle = conts.store_snapshot(snapshot)?;
+
+                    // Now jump to handler_block with the handle.
+                    sr.set_block(handler_block.index());
+                    sr.set_inst(0);
+                    sr.set(handler_param_idx, handle);
+                    continue;
                 }
             }
         }

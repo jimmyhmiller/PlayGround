@@ -1142,7 +1142,11 @@ fn module_frame_slice_clone_and_resume_is_multi_shot() {
     let entry = fb.entry_block();
     let slice = fb.block_param(entry, 0);
     let value = fb.block_param(entry, 1);
-    fb.resume_slice(slice, &[value]);
+    let ret_bb = fb.create_block(&[Type::I64]);
+    fb.resume_slice(slice, &[value], ret_bb, &[]);
+    fb.switch_to_block(ret_bb);
+    let rv = fb.block_param(ret_bb, 0);
+    fb.ret(rv);
     mb.finish_func(f_resume, fb);
 
     let module = mb.build();

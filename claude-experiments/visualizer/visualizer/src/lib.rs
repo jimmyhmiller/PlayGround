@@ -21,6 +21,7 @@ use vello::{AaConfig, Renderer, RendererOptions, RenderParams, Scene};
 
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseButton, WindowEvent};
+use winit::keyboard::{Key, NamedKey};
 use winit::event_loop::EventLoop;
 use winit::window::Window;
 
@@ -33,7 +34,7 @@ struct App<'s> {
     window: Arc<Window>,
     scene: Scene,
     program: Rc<RefCell<Option<Program>>>,
-    tweaks: Tweakables,
+    tweaks: Rc<RefCell<Tweakables>>,
     last_instant: Option<web_time::Instant>,
 }
 
@@ -63,7 +64,16 @@ impl ApplicationHandler for App<'_> {
                 ..
             } => {
                 if let Some(prog) = self.program.borrow_mut().as_mut() {
-                    prog.handle_click();
+                    prog.handle_click(&self.tweaks.borrow());
+                }
+            }
+            WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
+                if let Some(prog) = self.program.borrow_mut().as_mut() {
+                    match &event.logical_key {
+                        Key::Named(NamedKey::ArrowLeft) => prog.step_back(),
+                        Key::Named(NamedKey::ArrowRight) => prog.step_forward(),
+                        _ => {}
+                    }
                 }
             }
             WindowEvent::RedrawRequested => {
@@ -76,7 +86,7 @@ impl ApplicationHandler for App<'_> {
                 self.last_instant = Some(now);
 
                 if let Some(prog) = self.program.borrow_mut().as_mut() {
-                    prog.tick(dt, &self.tweaks);
+                    prog.tick(dt, &self.tweaks.borrow());
                 }
                 self.render();
                 self.window.request_redraw();
@@ -99,7 +109,7 @@ impl App<'_> {
 
         self.scene.reset();
         if let Some(prog) = self.program.borrow().as_ref() {
-            prog.draw(&mut self.scene, &self.tweaks);
+            prog.draw(&mut self.scene, &self.tweaks.borrow());
         }
 
         let renderer = self.renderers[dev_id].as_mut().unwrap();
@@ -127,12 +137,14 @@ pub fn start() {
     console_log::init().expect("could not init logger");
 
     let program: Rc<RefCell<Option<Program>>> = Rc::new(RefCell::new(None));
+    let tweaks: Rc<RefCell<Tweakables>> = Rc::new(RefCell::new(Tweakables::new()));
 
     // JS callback for code changes
     {
         let prog_ref = program.clone();
+        let tweaks_ref = tweaks.clone();
         let callback = Closure::wrap(Box::new(move |code: String| {
-            match Program::compile(&code) {
+            match Program::compile(&code, &mut tweaks_ref.borrow_mut()) {
                 Ok(prog) => {
                     let n = prog.graph.root.children.len();
                     log::info!("Program compiled: {n} top-level nodes");
@@ -147,6 +159,39 @@ pub fn start() {
         let window = web_sys::window().unwrap();
         js_sys::Reflect::set(&window, &JsValue::from_str("__onCodeChange"), callback.as_ref()).unwrap();
         callback.forget();
+    }
+
+    // JS callbacks for step forward/back
+    {
+        let prog_ref = program.clone();
+        let cb = Closure::wrap(Box::new(move || {
+            if let Some(prog) = prog_ref.borrow_mut().as_mut() {
+                prog.step_back();
+            }
+        }) as Box<dyn FnMut()>);
+        js_sys::Reflect::set(&web_sys::window().unwrap(), &JsValue::from_str("__stepBack"), cb.as_ref()).unwrap();
+        cb.forget();
+    }
+    {
+        let prog_ref = program.clone();
+        let cb = Closure::wrap(Box::new(move || {
+            if let Some(prog) = prog_ref.borrow_mut().as_mut() {
+                prog.step_forward();
+            }
+        }) as Box<dyn FnMut()>);
+        js_sys::Reflect::set(&web_sys::window().unwrap(), &JsValue::from_str("__stepForward"), cb.as_ref()).unwrap();
+        cb.forget();
+    }
+    {
+        let prog_ref = program.clone();
+        let tweaks_ref = tweaks.clone();
+        let cb = Closure::wrap(Box::new(move || {
+            if let Some(prog) = prog_ref.borrow_mut().as_mut() {
+                prog.handle_click(&tweaks_ref.borrow());
+            }
+        }) as Box<dyn FnMut()>);
+        js_sys::Reflect::set(&web_sys::window().unwrap(), &JsValue::from_str("__step"), cb.as_ref()).unwrap();
+        cb.forget();
     }
 
     wasm_bindgen_futures::spawn_local(async move {
@@ -179,8 +224,6 @@ pub fn start() {
         let device = &render_cx.devices[dev_id].device;
         renderers[dev_id] = Some(Renderer::new(device, RendererOptions::default()).expect("renderer"));
 
-        let tweaks = Tweakables::new();
-
         // Compile initial editor content
         {
             let initial_code = js_sys::Reflect::get(&web_sys::window().unwrap(), &JsValue::from_str("__editor")).ok()
@@ -193,7 +236,7 @@ pub fn start() {
                 .and_then(|s| s.as_string());
 
             if let Some(code) = initial_code {
-                if let Ok(prog) = Program::compile(&code) {
+                if let Ok(prog) = Program::compile(&code, &mut tweaks.borrow_mut()) {
                     *program.borrow_mut() = Some(prog);
                 }
             }

@@ -775,7 +775,13 @@ impl FunctionBuilder {
         self.set_terminator(Terminator::Unreachable);
     }
 
-    pub fn resume_slice(&mut self, slice: Value, args: &[Value]) {
+    pub fn resume_slice(
+        &mut self,
+        slice: Value,
+        args: &[Value],
+        return_block: BlockId,
+        return_args: &[Value],
+    ) {
         assert_eq!(
             self.value_type(slice),
             Type::FrameSlice,
@@ -785,6 +791,25 @@ impl FunctionBuilder {
         self.set_terminator(Terminator::ResumeSlice {
             slice,
             args: args.to_vec(),
+            return_block,
+            return_args: return_args.to_vec(),
+        });
+    }
+
+    /// Emit a CaptureSlice terminator. `handler_block` must have exactly
+    /// one FrameSlice param (the handle), and `resume_block` must have
+    /// exactly one I64 param (the resume value).
+    pub fn capture_slice_term(
+        &mut self,
+        prompt: PromptId,
+        handler_block: BlockId,
+        resume_block: BlockId,
+    ) {
+        assert!(prompt.index() < self.next_prompt as usize, "invalid prompt id");
+        self.set_terminator(Terminator::CaptureSlice {
+            prompt,
+            handler_block,
+            resume_block,
         });
     }
 

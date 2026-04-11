@@ -531,7 +531,50 @@ fn check_terminator(
                 check_branch_args(func, block, *exception, exception_args, errors);
             }
         }
-        Terminator::ResumeSlice { slice, .. } => {
+        Terminator::CaptureSlice { prompt, handler_block, resume_block } => {
+            if !options.allow_continuations {
+                errors.push(VerifyError::ContinuationsNotAllowed {
+                    context: "capture_slice".into(),
+                });
+            }
+            // handler_block expects one FrameSlice param; resume_block one I64
+            let _ = prompt;
+            if handler_block.index() < n_blocks {
+                let hb = &func.blocks[handler_block.index()];
+                if hb.params.len() != 1 {
+                    errors.push(VerifyError::BranchArgCount {
+                        block,
+                        target: *handler_block,
+                        expected: 0,
+                        got: hb.params.len(),
+                    });
+                } else if hb.params[0].1 != Type::FrameSlice {
+                    errors.push(VerifyError::TypeMismatch {
+                        expected: Type::FrameSlice,
+                        got: hb.params[0].1,
+                        context: "capture_slice handler_block param".into(),
+                    });
+                }
+            }
+            if resume_block.index() < n_blocks {
+                let rb = &func.blocks[resume_block.index()];
+                if rb.params.len() != 1 {
+                    errors.push(VerifyError::BranchArgCount {
+                        block,
+                        target: *resume_block,
+                        expected: 0,
+                        got: rb.params.len(),
+                    });
+                } else if rb.params[0].1 != Type::I64 {
+                    errors.push(VerifyError::TypeMismatch {
+                        expected: Type::I64,
+                        got: rb.params[0].1,
+                        context: "capture_slice resume_block param".into(),
+                    });
+                }
+            }
+        }
+        Terminator::ResumeSlice { slice, return_block, return_args, .. } => {
             if !options.allow_continuations {
                 errors.push(VerifyError::ContinuationsNotAllowed {
                     context: "resume_slice".into(),
@@ -543,6 +586,30 @@ fn check_terminator(
                     got: func.value_type(*slice),
                     context: "resume_slice requires frameslice".into(),
                 });
+            }
+            // return_block's first param is the runtime-produced result
+            // value of the resumed computation; `return_args` supplies any
+            // additional params beyond that.
+            if return_block.index() < n_blocks {
+                let target = &func.blocks[return_block.index()];
+                if target.params.is_empty() {
+                    errors.push(VerifyError::BranchArgCount {
+                        block,
+                        target: *return_block,
+                        expected: 1,
+                        got: 0,
+                    });
+                } else {
+                    let expected_extra = target.params.len() - 1;
+                    if return_args.len() != expected_extra {
+                        errors.push(VerifyError::BranchArgCount {
+                            block,
+                            target: *return_block,
+                            expected: expected_extra,
+                            got: return_args.len(),
+                        });
+                    }
+                }
             }
         }
         Terminator::AbortToPrompt { prompt, .. } => {

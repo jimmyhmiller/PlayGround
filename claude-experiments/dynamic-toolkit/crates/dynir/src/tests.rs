@@ -240,7 +240,11 @@ fn test_resume_slice_terminator_verifies() {
     let entry = b.entry_block();
     let slice = b.block_param(entry, 0);
     let arg = b.block_param(entry, 1);
-    b.resume_slice(slice, &[arg]);
+    let ret_bb = b.create_block(&[Type::I64]);
+    b.resume_slice(slice, &[arg], ret_bb, &[]);
+    b.switch_to_block(ret_bb);
+    let rv = b.block_param(ret_bb, 0);
+    b.ret(rv);
 
     let func = b.build();
     verify(&func).unwrap();

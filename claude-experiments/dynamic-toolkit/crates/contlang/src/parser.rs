@@ -14,6 +14,21 @@ pub enum Expr {
     Reset(Box<Expr>),
     /// capture() — captures the continuation up to the enclosing reset, returns FrameSlice
     Capture,
+    /// shift |k| { body } — Racket-style delimited control.
+    ///
+    /// At capture time: binds `binder` to the freshly captured continuation
+    /// (type `cont`) and runs `handler`. The handler is expected to either
+    /// abort to the enclosing reset, store the handle, or otherwise dispose
+    /// of it.
+    ///
+    /// At resume time (when someone invokes the captured continuation): the
+    /// whole `shift` expression evaluates to the resume argument (type
+    /// `i64`). The handler is not re-executed; execution continues after
+    /// the shift expression in the original reset body.
+    ShiftBind {
+        binder: String,
+        handler: Box<Expr>,
+    },
     /// abort(val) — aborts to enclosing reset with val as the result
     Abort(Box<Expr>),
     /// resume(cont, val) — resumes a captured continuation with val
@@ -346,11 +361,25 @@ impl Parser {
                 Expr::Reset(Box::new(body))
             }
             TokenKind::Shift => {
-                // capture() — keyword reused as "capture current continuation"
                 self.advance();
-                self.expect(&TokenKind::LParen);
-                self.expect(&TokenKind::RParen);
-                Expr::Capture
+                // Two forms:
+                //   shift()                 — old conflated form (returns handle as cont)
+                //   shift |binder| { body } — Racket-style delimited control
+                if matches!(self.tokens[self.pos].kind, TokenKind::Pipe) {
+                    self.advance(); // consume first |
+                    let binder = match &self.tokens[self.pos].kind {
+                        TokenKind::Ident(name) => name.clone(),
+                        other => panic!("shift |..|: expected identifier, got {:?}", other),
+                    };
+                    self.advance();
+                    self.expect(&TokenKind::Pipe);
+                    let handler = self.parse_block_expr();
+                    Expr::ShiftBind { binder, handler: Box::new(handler) }
+                } else {
+                    self.expect(&TokenKind::LParen);
+                    self.expect(&TokenKind::RParen);
+                    Expr::Capture
+                }
             }
             TokenKind::Resume => {
                 self.advance();

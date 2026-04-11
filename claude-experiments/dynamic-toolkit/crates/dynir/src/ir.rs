@@ -522,10 +522,30 @@ pub enum Terminator {
         exception: BlockId,
         exception_args: Vec<Value>,
     },
-    /// Resume a previously captured frame slice. This is a non-local control transfer.
+    /// Resume a previously captured frame slice. Splices the captured frames
+    /// on top of the current stack; when the captured computation eventually
+    /// completes (via its reset returning, or abort-to-prompt + handler Ret),
+    /// control lands at `return_block` with the produced value supplied as
+    /// `return_block`'s first block param.
     ResumeSlice {
         slice: Value,
         args: Vec<Value>,
+        return_block: BlockId,
+        return_args: Vec<Value>,
+    },
+    /// Capture the current continuation up to `prompt`, then take one of two
+    /// paths. At capture time, control transfers to `handler_block` with the
+    /// freshly produced continuation handle as its first block param
+    /// (FrameSlice-typed). On later resume, the captured frame's PC is
+    /// restored to the entry of `resume_block` with the value passed to
+    /// `resume` delivered as `resume_block`'s first block param (I64-typed).
+    /// This is the Racket-style `shift k in body` form: the handler binds
+    /// the continuation as a separate name from the resume value, so the
+    /// two never collide in the type system.
+    CaptureSlice {
+        prompt: PromptId,
+        handler_block: BlockId,
+        resume_block: BlockId,
     },
     /// Abort directly to the nearest matching prompt.
     AbortToPrompt {
@@ -540,10 +560,12 @@ impl Terminator {
         match self {
             Terminator::Ret(v) => f(*v),
             Terminator::RetVoid | Terminator::Unreachable => {}
+            Terminator::CaptureSlice { .. } => {}
             Terminator::AbortToPrompt { args, .. } => args.iter().for_each(|v| f(*v)),
-            Terminator::ResumeSlice { slice, args } => {
+            Terminator::ResumeSlice { slice, args, return_args, .. } => {
                 f(*slice);
                 args.iter().for_each(|v| f(*v));
+                return_args.iter().for_each(|v| f(*v));
             }
             Terminator::Jump(_, args) => args.iter().for_each(|v| f(*v)),
             Terminator::BrIf {
@@ -597,10 +619,12 @@ impl Terminator {
         match self {
             Terminator::Ret(v) => f(v),
             Terminator::RetVoid | Terminator::Unreachable => {}
+            Terminator::CaptureSlice { .. } => {}
             Terminator::AbortToPrompt { args, .. } => args.iter_mut().for_each(|v| f(v)),
-            Terminator::ResumeSlice { slice, args } => {
+            Terminator::ResumeSlice { slice, args, return_args, .. } => {
                 f(slice);
                 args.iter_mut().for_each(|v| f(v));
+                return_args.iter_mut().for_each(|v| f(v));
             }
             Terminator::Jump(_, args) => args.iter_mut().for_each(|v| f(v)),
             Terminator::BrIf {
@@ -651,13 +675,20 @@ impl Terminator {
     }
 
     /// Call `f` for each (target_block, args) pair in this terminator.
+    ///
+    /// NOTE: `CaptureSlice`'s successors (`handler_block`, `resume_block`)
+    /// are intentionally omitted: their first block_param is supplied by
+    /// the runtime (handle / resume value), and there are no static args
+    /// to mutate. SSA transforms needing to see every successor should use
+    /// `successors()` and handle CaptureSlice as a special case.
     pub fn for_each_successor_args_mut(&mut self, mut f: impl FnMut(BlockId, &mut Vec<Value>)) {
         match self {
             Terminator::Ret(_)
             | Terminator::RetVoid
-            | Terminator::ResumeSlice { .. }
             | Terminator::AbortToPrompt { .. }
-            | Terminator::Unreachable => {}
+            | Terminator::Unreachable
+            | Terminator::CaptureSlice { .. } => {}
+            Terminator::ResumeSlice { return_block, return_args, .. } => f(*return_block, return_args),
             Terminator::Jump(target, args) => f(*target, args),
             Terminator::BrIf {
                 then_block,
@@ -708,9 +739,13 @@ impl Terminator {
         match self {
             Terminator::Ret(_)
             | Terminator::RetVoid
-            | Terminator::ResumeSlice { .. }
             | Terminator::AbortToPrompt { .. }
             | Terminator::Unreachable => {}
+            Terminator::CaptureSlice { handler_block, resume_block, .. } => {
+                f(*handler_block, &[]);
+                f(*resume_block, &[]);
+            }
+            Terminator::ResumeSlice { return_block, return_args, .. } => f(*return_block, return_args),
             Terminator::Jump(target, args) => f(*target, args),
             Terminator::BrIf {
                 then_block,
@@ -760,9 +795,10 @@ impl Terminator {
         match self {
             Terminator::Ret(_)
             | Terminator::RetVoid
-            | Terminator::ResumeSlice { .. }
             | Terminator::AbortToPrompt { .. }
             | Terminator::Unreachable => vec![],
+            Terminator::CaptureSlice { handler_block, resume_block, .. } => vec![*handler_block, *resume_block],
+            Terminator::ResumeSlice { return_block, .. } => vec![*return_block],
             Terminator::Jump(target, _) => vec![*target],
             Terminator::BrIf {
                 then_block,

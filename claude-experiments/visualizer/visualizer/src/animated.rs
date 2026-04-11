@@ -27,6 +27,11 @@ enum Inner {
         source: Box<dyn Fn(&Tweakables) -> f64>,
         spring: Spring,
     },
+
+    /// Derives from another source, read live each frame (no spring).
+    DerivedLive {
+        source: Box<dyn Fn(&Tweakables) -> f64>,
+    },
 }
 
 /// A single animated f64 value.
@@ -95,6 +100,15 @@ impl AnimatedValue {
             },
         }
     }
+
+    /// Reads from an arbitrary function of tweakables, fresh each frame (no spring).
+    pub fn derived_live(source: impl Fn(&Tweakables) -> f64 + 'static) -> Self {
+        Self {
+            inner: Inner::DerivedLive {
+                source: Box::new(source),
+            },
+        }
+    }
 }
 
 // ── Reading ──
@@ -119,6 +133,7 @@ impl AnimatedValue {
                 }
             }
             Inner::Derived { spring, .. } => spring.position,
+            Inner::DerivedLive { source } => source(tw),
         }
     }
 
@@ -132,6 +147,7 @@ impl AnimatedValue {
             Inner::Spring(s) => s.settled(),
             Inner::Tween { tween, fired } => !fired || tween.done(),
             Inner::Derived { spring, .. } => spring.settled(),
+            Inner::DerivedLive { .. } => true,
         }
     }
 }
@@ -162,6 +178,11 @@ impl AnimatedValue {
                 s.position = value;
                 s.velocity = 0.0;
                 s.target = value;
+            }
+            Inner::Derived { spring, .. } => {
+                spring.position = value;
+                spring.velocity = 0.0;
+                // target stays whatever the source returns
             }
             _ => {}
         }
@@ -227,6 +248,7 @@ impl AnimatedValue {
                 spring.set_target(target);
                 spring.tick(dt);
             }
+            Inner::DerivedLive { .. } => {} // always live, no state to advance
         }
     }
 }

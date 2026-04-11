@@ -854,9 +854,15 @@ fn eliminate_unreachable_blocks(func: &mut Function) {
                 *exception = remap(*exception);
             }
             Terminator::AbortToPrompt { .. } => {}
+            Terminator::ResumeSlice { return_block, .. } => {
+                *return_block = remap(*return_block);
+            }
+            Terminator::CaptureSlice { handler_block, resume_block, .. } => {
+                *handler_block = remap(*handler_block);
+                *resume_block = remap(*resume_block);
+            }
             Terminator::Ret(_)
             | Terminator::RetVoid
-            | Terminator::ResumeSlice { .. }
             | Terminator::Unreachable => {}
         }
     }
@@ -1507,9 +1513,15 @@ fn reorder_blocks_with_order(func: &mut Function, order: &[usize]) {
                 *exception = remap(*exception);
             }
             Terminator::AbortToPrompt { .. } => {}
+            Terminator::ResumeSlice { return_block, .. } => {
+                *return_block = remap(*return_block);
+            }
+            Terminator::CaptureSlice { handler_block, resume_block, .. } => {
+                *handler_block = remap(*handler_block);
+                *resume_block = remap(*resume_block);
+            }
             Terminator::Ret(_)
             | Terminator::RetVoid
-            | Terminator::ResumeSlice { .. }
             | Terminator::Unreachable => {}
         }
     }

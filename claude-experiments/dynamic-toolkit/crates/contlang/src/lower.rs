@@ -251,6 +251,49 @@ impl<'a> FuncLowerer<'a> {
                     .collect();
                 self.fb.capture_slice(prompt, &live_vals)
             }
+            Expr::ShiftBind { binder, handler } => {
+                // shift |k| { handler_body } — Racket-style delimited control.
+                //
+                // Lowered as a two-successor terminator:
+                //   - handler_bb (takes [FrameSlice]): runs at capture time
+                //     with `binder` bound to the fresh handle. Expected to
+                //     abort out of the enclosing reset.
+                //   - resume_bb (takes [I64]): runs at resume time. The
+                //     block param *is* the value of the whole shift
+                //     expression.
+                let prompt = self.current_prompt();
+                let handler_bb = self.fb.create_block(&[Type::FrameSlice]);
+                let resume_bb = self.fb.create_block(&[Type::I64]);
+                self.fb.capture_slice_term(prompt, handler_bb, resume_bb);
+
+                // Capture-time path: bind the handle and lower the handler.
+                self.fb.switch_to_block(handler_bb);
+                let k_val = self.fb.block_param(handler_bb, 0);
+                self.push_scope();
+                self.def_var(binder, k_val);
+                let body_result = self.lower_expr(handler);
+                if self.dead {
+                    // Handler body already aborted or otherwise terminated;
+                    // we're in a dead block. Emit `unreachable` to give the
+                    // block a terminator so the builder is happy.
+                    self.fb.unreachable();
+                } else {
+                    // Handler body returned normally. Its value becomes
+                    // the value of the whole reset expression — semantics
+                    // match Racket: `(reset (+ e (shift k body)))` where
+                    // body doesn't invoke k evaluates to body. Route via
+                    // abort_to_prompt so the value lands at the reset's
+                    // handler block.
+                    self.fb.abort_to_prompt(prompt, &[body_result]);
+                }
+                self.pop_scope();
+                self.dead = false;
+
+                // Resume-time path: switch to resume_bb; the block param is
+                // the shift expression's value.
+                self.fb.switch_to_block(resume_bb);
+                self.fb.block_param(resume_bb, 0)
+            }
             Expr::Abort(val) => {
                 let v = self.lower_expr(val);
                 let prompt = self.current_prompt();
@@ -260,8 +303,14 @@ impl<'a> FuncLowerer<'a> {
             Expr::Resume(cont, val) => {
                 let k = self.lower_expr(cont);
                 let v = self.lower_expr(val);
-                self.fb.resume_slice(k, &[v]);
-                self.enter_dead_block()
+                // The captured computation will eventually return a value
+                // (either by the reset's body returning normally or by
+                // abort-to-prompt + handler Ret). Control lands in
+                // `cont_bb` with that value as its first block param.
+                let cont_bb = self.fb.create_block(&[Type::I64]);
+                self.fb.resume_slice(k, &[v], cont_bb, &[]);
+                self.fb.switch_to_block(cont_bb);
+                self.fb.block_param(cont_bb, 0)
             }
             Expr::CloneCont(cont) => {
                 let k = self.lower_expr(cont);

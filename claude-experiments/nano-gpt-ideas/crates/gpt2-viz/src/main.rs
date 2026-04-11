@@ -1,4 +1,4 @@
-mod gpt2;
+use gpt2_viz::gpt2;
 mod viewer;
 mod viz;
 

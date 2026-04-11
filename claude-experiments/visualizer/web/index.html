@@ -50,6 +50,34 @@
             position: relative;
             min-width: 200px;
         }
+        #controls {
+            position: absolute;
+            top: 12px;
+            left: 12px;
+            display: flex;
+            gap: 8px;
+            z-index: 100;
+            font-family: monospace;
+            font-size: 12px;
+        }
+        #controls button {
+            background: #1a1b26;
+            color: #c0caf5;
+            border: 1px solid #2a2b36;
+            padding: 6px 12px;
+            cursor: pointer;
+            border-radius: 4px;
+            font-family: inherit;
+            font-size: inherit;
+            transition: background 0.15s;
+        }
+        #controls button:hover {
+            background: #2a2b36;
+        }
+        #controls button:disabled {
+            opacity: 0.4;
+            cursor: not-allowed;
+        }
         .cm-editor {
             height: 100% !important;
             font-size: 14px !important;
@@ -66,7 +94,12 @@
             <div id="editor-container"></div>
         </div>
         <div id="resize-handle"></div>
-        <div id="canvas-pane"></div>
+        <div id="canvas-pane">
+            <div id="controls">
+                <button id="btn-back" title="Back (←)">← back</button>
+                <button id="btn-step" title="Step (→ or space)">step →</button>
+            </div>
+        </div>
     </div>
 
     <script>
@@ -95,6 +128,26 @@
             document.body.style.cursor = '';
             document.body.style.userSelect = '';
         });
+
+        // Step controls
+        document.getElementById('btn-back').addEventListener('click', () => {
+            if (window.__stepBack) window.__stepBack();
+        });
+        document.getElementById('btn-step').addEventListener('click', () => {
+            if (window.__step) window.__step();
+        });
+
+        // Keyboard shortcuts
+        document.addEventListener('keydown', (e) => {
+            if (e.target.closest('.cm-editor')) return;
+            if (e.key === 'ArrowLeft') {
+                if (window.__stepBack) window.__stepBack();
+                e.preventDefault();
+            } else if (e.key === 'ArrowRight' || e.key === ' ' || e.key === 'Enter') {
+                if (window.__step) window.__step();
+                e.preventDefault();
+            }
+        });
     </script>
 
     <script type="importmap">
@@ -116,9 +169,19 @@
         import { ViewPlugin } from '@codemirror/view';
 
         const initialDoc = `;; === Interactive Hash Map ===
-;; Click the canvas to insert entries!
+;; Click step to insert entries!
 
 (scene hashmap
+  ;; Tweakable constants (sliders in the panel)
+  (defc bucket-width 70 :min 30 :max 120 :step 1 :category layout)
+  (defc bucket-height 200 :min 80 :max 300 :step 1 :category layout)
+  (defc bucket-y 350 :min 100 :max 500 :step 1 :category layout)
+  (defc bucket-gap 16 :min 0 :max 40 :step 1 :category layout)
+  (defc item-width 54 :min 20 :max 100 :step 1 :category layout)
+  (defc item-height 36 :min 16 :max 60 :step 1 :category layout)
+  (defc entry-stiffness 300 :min 50 :max 800 :step 10 :category springs)
+  (defc entry-damping 18 :min 1 :max 40 :step 0.5 :category springs)
+
   ;; State
   (def op-index 0)
   (def arrow-x 400)
@@ -129,14 +192,14 @@
 
   ;; Bucket array
   (each i (range 8)
-    (let cx (+ 90 (* i 86)))
-    (rect :x cx :y 350
-          :w 70 :h 200
+    (let cx (+ 90 (* i (+ bucket-width bucket-gap))))
+    (rect :x cx :y bucket-y
+          :w bucket-width :h bucket-height
           :fill "#0d0e15" :radius 8)
-    (rect :x cx :y 350
-          :w 66 :h 196
+    (rect :x cx :y bucket-y
+          :w (- bucket-width 4) :h (- bucket-height 4)
           :fill "#1a1c28" :radius 6)
-    (circle :x cx :y 235
+    (circle :x cx :y (- bucket-y 115)
             :r 3
             :fill (rgba 0.5 0.5 0.6 0.6)))
 
@@ -165,25 +228,33 @@
         (let bucket (hash key 8))
         (let slot (count-where entries
                                "bucket" bucket))
-        (let cx (+ 90 (* bucket 86)))
-        (let cy (- 430 (* slot 42)))
 
-        ;; Show arrow
-        (set! arrow-x cx)
+        ;; Show arrow — live-tracked via tweakables
+        (set! arrow-x
+              (+ 90 (* bucket
+                       (+ bucket-width bucket-gap))))
         (set! arrow-alpha 1)
         (wait 0.4)
 
-        ;; Spawn entry — springs from top to bucket
+        ;; Spawn entry — springs from top, target follows tweakables
         (spawn! "_spawned"
-          (rect :x (spring 400
-                           :stiffness 300
-                           :damping 18)
-                :target-x cx
-                :y (spring 80
-                           :stiffness 300
-                           :damping 18)
-                :target-y cy
-                :w 54 :h 36 :radius 6
+          (rect :x (spring
+                     (+ 90 (* bucket
+                              (+ bucket-width
+                                 bucket-gap)))
+                     :initial 400
+                     :stiffness entry-stiffness
+                     :damping entry-damping)
+                :y (spring
+                     (- (+ bucket-y (/ bucket-height 2))
+                        (+ (/ item-height 2)
+                           8
+                           (* slot
+                              (+ item-height 4))))
+                     :initial 80
+                     :stiffness entry-stiffness
+                     :damping entry-damping)
+                :w item-width :h item-height :radius 6
                 :fill (color-for op-index)
                 :scale (tween 0 1
                               :duration 0.4
@@ -191,8 +262,7 @@
 
         ;; Record the entry
         (push! entries
-          (:bucket bucket :slot slot
-           :x cx :y cy))
+          (:bucket bucket :slot slot))
         (set! op-index (+ op-index 1))
 
         (wait 0.5)

@@ -1447,10 +1447,13 @@ fn terminator_successors(terminator: &Terminator) -> Vec<BlockId> {
         | Terminator::InvokeIndirect {
             normal, exception, ..
         } => vec![*normal, *exception],
+        Terminator::ResumeSlice { return_block, .. } => vec![*return_block],
+        Terminator::CaptureSlice { handler_block, resume_block, .. } => {
+            vec![*handler_block, *resume_block]
+        }
         Terminator::Ret(_)
         | Terminator::RetVoid
         | Terminator::Unreachable
-        | Terminator::ResumeSlice { .. }
         | Terminator::AbortToPrompt { .. } => Vec::new(),
     }
 }
@@ -3609,7 +3612,7 @@ where
                 }
             }
 
-            Terminator::ResumeSlice { slice, args } => {
+            Terminator::ResumeSlice { slice, args, .. } => {
                 let mut values = Vec::with_capacity(args.len() + 1);
                 values.push(*slice);
                 values.extend(args.iter().copied());
@@ -3637,6 +3640,11 @@ where
                 }
             }
 
+            Terminator::CaptureSlice { .. } => {
+                // The JIT does not yet lower the new shift/reset form.
+                // Interpreter-only for now.
+                panic!("CaptureSlice terminator not supported in JIT backend yet");
+            }
         }
     }
 

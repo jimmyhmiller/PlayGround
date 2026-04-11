@@ -222,10 +222,14 @@ impl fmt::Display for Terminator {
                 }
                 Ok(())
             }
-            Terminator::ResumeSlice { slice, args } => {
+            Terminator::ResumeSlice { slice, args, return_block, return_args } => {
                 write!(f, "resume_slice {slice}")?;
                 if !args.is_empty() {
                     write!(f, "({})", fmt_args(args))?;
+                }
+                write!(f, " -> {return_block}")?;
+                if !return_args.is_empty() {
+                    write!(f, "({})", fmt_args(return_args))?;
                 }
                 Ok(())
             }
@@ -237,6 +241,13 @@ impl fmt::Display for Terminator {
                 Ok(())
             }
             Terminator::Unreachable => write!(f, "unreachable"),
+            Terminator::CaptureSlice { prompt, handler_block, resume_block } => {
+                write!(
+                    f,
+                    "capture_slice prompt#{} -> handler {handler_block}, resume {resume_block}",
+                    prompt.0
+                )
+            }
         }
     }
 }

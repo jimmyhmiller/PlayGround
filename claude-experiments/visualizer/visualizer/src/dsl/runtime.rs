@@ -48,13 +48,18 @@ impl RtVal {
     }
 }
 
-// ── State Binding ──
-// Tracks which node property should follow which state key.
+// ── Binding ──
+// Tracks which node property should follow which source (state or tweakable).
 
 struct Binding {
     node_id: String,
     property: PropPath,
-    state_key: String,
+    source: BindingSource,
+}
+
+enum BindingSource {
+    State(String),
+    Tweakable(String),
 }
 
 #[derive(Clone)]
@@ -70,6 +75,69 @@ struct Sequence {
     current: usize,
     wait_remaining: f64,
     env_snapshot: HashMap<String, RtVal>, // captured let bindings
+}
+
+// ── Journal (undo/redo) ──
+
+/// A single reversible mutation.
+#[derive(Clone)]
+enum Mutation {
+    /// State variable changed: key, old value, new value
+    State { key: String, old: RtVal, new: RtVal },
+    /// Item pushed to a state list: list key, the pushed item
+    PushList { key: String, item: HashMap<String, RtVal> },
+    /// Node spawned into a group: group id, AST template of the node, bindings added
+    Spawn { group_id: String, template: Value, bindings_added: usize },
+}
+
+/// A group of mutations committed together (one click = one step).
+struct Step {
+    mutations: Vec<Mutation>,
+}
+
+struct Journal {
+    /// All recorded steps, both past and future (for redo).
+    steps: Vec<Step>,
+    /// Number of steps currently applied (cursor position).
+    /// 0 means no steps applied; steps.len() means all applied.
+    cursor: usize,
+    /// Mutations accumulating for the in-progress step (being recorded live).
+    recording: Option<Vec<Mutation>>,
+}
+
+impl Journal {
+    fn new() -> Self {
+        Self { steps: Vec::new(), cursor: 0, recording: None }
+    }
+
+    fn begin_step(&mut self) {
+        // Starting a new step invalidates any future (redo) steps
+        self.steps.truncate(self.cursor);
+        self.recording = Some(Vec::new());
+    }
+
+    fn record(&mut self, m: Mutation) {
+        if let Some(rec) = &mut self.recording {
+            rec.push(m);
+        }
+    }
+
+    fn commit_step(&mut self) {
+        if let Some(rec) = self.recording.take() {
+            if !rec.is_empty() {
+                self.steps.push(Step { mutations: rec });
+                self.cursor = self.steps.len();
+            }
+        }
+    }
+
+    fn can_back(&self) -> bool {
+        self.cursor > 0 && self.recording.is_none()
+    }
+
+    fn can_forward(&self) -> bool {
+        self.cursor < self.steps.len() && self.recording.is_none()
+    }
 }
 
 // ── Program ──
@@ -95,6 +163,9 @@ pub struct Program {
 
     // Color palette for entries
     color_index: usize,
+
+    // Undo/redo journal
+    journal: Journal,
 }
 
 fn entry_color(idx: usize) -> [f32; 4] {
@@ -119,38 +190,90 @@ fn hash_key(key: &str, n: usize) -> usize {
     h as usize % n
 }
 
-// ── Env (lexical + state) ──
+// ── Env (lexical + state + tweakables) ──
 
 struct Env<'a> {
     scopes: Vec<HashMap<String, RtVal>>,
+    /// Lexical bindings whose values are unresolved expressions (because they
+    /// contain tweakable references). When a symbol resolves to a deferred
+    /// expression, the caller should treat it as a live-derived value.
+    deferred: Vec<HashMap<String, Value>>,
     state: &'a HashMap<String, RtVal>,
+    tweaks: Option<&'a Tweakables>,
 }
 
 impl<'a> Env<'a> {
     fn new(state: &'a HashMap<String, RtVal>) -> Self {
-        Self { scopes: vec![HashMap::new()], state }
+        Self { scopes: vec![HashMap::new()], deferred: vec![HashMap::new()], state, tweaks: None }
     }
 
-    fn push(&mut self) { self.scopes.push(HashMap::new()); }
-    fn pop(&mut self) { self.scopes.pop(); }
+    fn new_with_tweaks(state: &'a HashMap<String, RtVal>, tweaks: &'a Tweakables) -> Self {
+        Self { scopes: vec![HashMap::new()], deferred: vec![HashMap::new()], state, tweaks: Some(tweaks) }
+    }
+
+    fn push(&mut self) {
+        self.scopes.push(HashMap::new());
+        self.deferred.push(HashMap::new());
+    }
+    fn pop(&mut self) {
+        self.scopes.pop();
+        self.deferred.pop();
+    }
 
     fn set(&mut self, name: &str, val: RtVal) {
         self.scopes.last_mut().unwrap().insert(name.to_string(), val);
     }
 
-    fn get(&self, name: &str) -> Option<&RtVal> {
+    fn set_deferred(&mut self, name: &str, expr: Value) {
+        self.deferred.last_mut().unwrap().insert(name.to_string(), expr);
+    }
+
+    fn get_deferred(&self, name: &str) -> Option<&Value> {
+        for scope in self.deferred.iter().rev() {
+            if let Some(e) = scope.get(name) {
+                return Some(e);
+            }
+        }
+        None
+    }
+
+    fn is_tweakable(&self, name: &str) -> bool {
+        self.tweaks.map(|t| t.has(name)).unwrap_or(false)
+    }
+
+    fn get(&self, name: &str) -> Option<RtVal> {
         // Check lexical scopes first
         for scope in self.scopes.iter().rev() {
             if let Some(v) = scope.get(name) {
-                return Some(v);
+                return Some(v.clone());
             }
         }
         // Then check state
-        self.state.get(name)
+        if let Some(v) = self.state.get(name) {
+            return Some(v.clone());
+        }
+        // Then check tweakables (live value)
+        if let Some(tw) = self.tweaks {
+            if tw.has(name) {
+                return Some(RtVal::Num(tw.get(name)));
+            }
+        }
+        None
     }
 
     fn get_num(&self, name: &str) -> Result<f64, RuntimeError> {
         self.get(name).ok_or_else(|| err(format!("undefined: {name}")))?.as_num()
+    }
+
+    /// Collect all deferred expressions currently in scope (for capturing in closures).
+    fn deferred_snapshot(&self) -> HashMap<String, Value> {
+        let mut out = HashMap::new();
+        for scope in &self.deferred {
+            for (k, v) in scope {
+                out.insert(k.clone(), v.clone());
+            }
+        }
+        out
     }
 }
 
@@ -162,9 +285,7 @@ fn eval_expr(val: &Value, env: &Env) -> Result<RtVal, RuntimeError> {
         Value::String(s) => Ok(RtVal::Str(s.clone())),
         Value::Bool(b) => Ok(RtVal::Bool(*b)),
         Value::Symbol(name) => {
-            // @name syntax is handled by the parser as a symbol starting with @
-            // but our parser doesn't do that yet. For now, just look up the name.
-            env.get(name).cloned().ok_or_else(|| err(format!("undefined: {name}")))
+            env.get(name).ok_or_else(|| err(format!("undefined: {name}")))
         }
         Value::List(items) => {
             if items.is_empty() { return Err(err("empty expression")); }
@@ -379,19 +500,79 @@ fn parse_hex_color(s: &str) -> Result<[f32; 4], RuntimeError> {
 
 // ── Animated value from DSL ──
 
+/// Check if an expression references any tweakables (live values).
+fn expr_has_tweakable(val: &Value, env: &Env) -> bool {
+    match val {
+        Value::Symbol(name) => env.is_tweakable(name),
+        Value::List(items) => items.iter().any(|v| expr_has_tweakable(v, env)),
+        _ => false,
+    }
+}
+
+/// Check if an expression references any tweakables OR deferred let bindings.
+fn expr_has_tweakable_or_deferred(val: &Value, env: &Env) -> bool {
+    match val {
+        Value::Symbol(name) => env.is_tweakable(name) || env.get_deferred(name).is_some(),
+        Value::List(items) => items.iter().any(|v| expr_has_tweakable_or_deferred(v, env)),
+        _ => false,
+    }
+}
+
+/// Fully inline deferred let bindings into an expression, so the resulting
+/// AST can be evaluated without needing access to the deferred map.
+fn inline_deferred(val: &Value, env: &Env) -> Value {
+    match val {
+        Value::Symbol(name) => {
+            if let Some(expr) = env.get_deferred(name) {
+                inline_deferred(&expr.clone(), env)
+            } else {
+                val.clone()
+            }
+        }
+        Value::List(items) => {
+            Value::List(items.iter().map(|v| inline_deferred(v, env)).collect())
+        }
+        _ => val.clone(),
+    }
+}
+
+/// Freeze all lexical (non-state, non-tweakable) numeric bindings from env
+/// so they can be captured by a closure.
+fn freeze_lexicals(env: &Env) -> HashMap<String, f64> {
+    let mut frozen = HashMap::new();
+    for scope in &env.scopes {
+        for (k, v) in scope.iter() {
+            if !env.state.contains_key(k) && !env.is_tweakable(k) {
+                if let RtVal::Num(n) = v {
+                    frozen.insert(k.clone(), *n);
+                }
+            }
+        }
+    }
+    frozen
+}
+
 fn make_animated(val: &Value, env: &Env, bindings: &mut Vec<Binding>, node_id: &str, prop: PropPath) -> Result<AnimatedValue, RuntimeError> {
     match val {
         Value::Number(n) => Ok(AnimatedValue::constant(*n)),
         Value::Symbol(name) => {
+            // Deferred let binding: substitute the expression and recurse
+            if env.get_deferred(name).is_some() {
+                let inlined = inline_deferred(val, env);
+                return make_animated(&inlined, env, bindings, node_id, prop);
+            }
             let v = env.get_num(name)?;
-            // If it's a state reference, create a binding
+            // State reference: reactive via spring binding
             if env.state.contains_key(name) {
                 bindings.push(Binding {
                     node_id: node_id.to_string(),
                     property: prop,
-                    state_key: name.to_string(),
+                    source: BindingSource::State(name.to_string()),
                 });
                 Ok(AnimatedValue::spring(v, 300.0, 18.0))
+            } else if env.is_tweakable(name) {
+                // Tweakable reference: live reads
+                Ok(AnimatedValue::tweakable(name))
             } else {
                 Ok(AnimatedValue::constant(v))
             }
@@ -401,21 +582,65 @@ fn make_animated(val: &Value, env: &Env, bindings: &mut Vec<Binding>, node_id: &
             let head = items[0].as_symbol().ok_or_else(|| err("expected function"))?;
             match head {
                 "spring" => {
-                    let target = eval_num(&items[1], env)?;
                     let (_, kw) = parse_kwargs(&items[2..]);
                     let stiffness = kw.get("stiffness").map(|v| eval_num(v, env)).transpose()?.unwrap_or(300.0);
                     let damping = kw.get("damping").map(|v| eval_num(v, env)).transpose()?.unwrap_or(18.0);
-                    // Check if the target is a state reference
+
+                    // State-binding case: (spring some-state-symbol ...)
                     if let Value::Symbol(name) = &items[1] {
                         if env.state.contains_key(name) {
+                            let target = env.get_num(name)?;
                             bindings.push(Binding {
                                 node_id: node_id.to_string(),
                                 property: prop,
-                                state_key: name.to_string(),
+                                source: BindingSource::State(name.to_string()),
                             });
+                            return Ok(AnimatedValue::spring(target, stiffness, damping));
                         }
                     }
-                    Ok(AnimatedValue::spring(target, stiffness, damping))
+
+                    // Derived-target case: target expression references a tweakable or deferred let
+                    if expr_has_tweakable_or_deferred(&items[1], env) {
+                        let expr = inline_deferred(&items[1], env);
+                        let frozen = freeze_lexicals(env);
+                        // Compute initial target value now
+                        let initial_target = {
+                            let empty_state = HashMap::new();
+                            let mut e = match env.tweaks {
+                                Some(t) => Env::new_with_tweaks(&empty_state, t),
+                                None => Env::new(&empty_state),
+                            };
+                            for (k, v) in &frozen {
+                                e.set(k, RtVal::Num(*v));
+                            }
+                            eval_num(&expr, &e).unwrap_or(0.0)
+                        };
+                        // Optional :initial overrides the starting position
+                        let initial = kw.get("initial").map(|v| eval_num(v, env)).transpose()?.unwrap_or(initial_target);
+                        let source_frozen = frozen.clone();
+                        let source_expr = expr.clone();
+                        let mut av = AnimatedValue::derived(
+                            move |tw| {
+                                let empty_state = HashMap::new();
+                                let mut e = Env::new_with_tweaks(&empty_state, tw);
+                                for (k, v) in &source_frozen {
+                                    e.set(k, RtVal::Num(*v));
+                                }
+                                eval_num(&source_expr, &e).unwrap_or(0.0)
+                            },
+                            stiffness,
+                            damping,
+                        );
+                        av.set_immediate(initial);
+                        return Ok(av);
+                    }
+
+                    // Plain spring: target is a constant expression
+                    let target = eval_num(&items[1], env)?;
+                    let initial = kw.get("initial").map(|v| eval_num(v, env)).transpose()?.unwrap_or(target);
+                    let mut av = AnimatedValue::spring(initial, stiffness, damping);
+                    av.set_target(target);
+                    Ok(av)
                 }
                 "tween" => {
                     let from = eval_num(&items[1], env)?;
@@ -428,7 +653,23 @@ fn make_animated(val: &Value, env: &Env, bindings: &mut Vec<Binding>, node_id: &
                     Ok(t)
                 }
                 "+" | "-" | "*" | "/" | "%" | "if" => {
-                    Ok(AnimatedValue::constant(eval_num(val, env)?))
+                    // If the expression references any tweakable (directly or via a
+                    // deferred let), make it reactive by inlining and creating a
+                    // derived-live animated value.
+                    if expr_has_tweakable_or_deferred(val, env) {
+                        let expr = inline_deferred(val, env);
+                        let frozen = freeze_lexicals(env);
+                        Ok(AnimatedValue::derived_live(move |tw| {
+                            let empty_state = HashMap::new();
+                            let mut e = Env::new_with_tweaks(&empty_state, tw);
+                            for (k, v) in &frozen {
+                                e.set(k, RtVal::Num(*v));
+                            }
+                            eval_num(&expr, &e).unwrap_or(0.0)
+                        }))
+                    } else {
+                        Ok(AnimatedValue::constant(eval_num(val, env)?))
+                    }
                 }
                 _ => Err(err(format!("unknown in animated: {head}"))),
             }
@@ -568,14 +809,19 @@ fn build_node(val: &Value, env: &mut Env, bindings: &mut Vec<Binding>, id_counte
         "let" => {
             if items.len() < 3 { return Err(err("let needs name and value")); }
             let name = items[1].as_symbol().ok_or_else(|| err("let name must be symbol"))?;
-            let val = eval_expr(&items[2], env)?;
-            env.set(name, val);
+            // If the expression references tweakables (or chains through a deferred let),
+            // store it deferred so it gets re-evaluated live when referenced.
+            if expr_has_tweakable_or_deferred(&items[2], env) {
+                env.set_deferred(name, items[2].clone());
+            } else {
+                let val = eval_expr(&items[2], env)?;
+                env.set(name, val);
+            }
             Ok(None)
         }
 
-        "def" => {
-            // (def name value) — handled at top level to set state, here it's a no-op
-            // because state was already set in the first pass
+        "def" | "defc" => {
+            // Handled in the first pass; no-op during node building
             Ok(None)
         }
 
@@ -610,6 +856,30 @@ fn build_node(val: &Value, env: &mut Env, bindings: &mut Vec<Binding>, id_counte
         }
 
         _ => Err(err(format!("unknown: {head}"))),
+    }
+}
+
+/// Walk an AST and replace any symbol that resolves to a runtime number
+/// with a literal Value::Number. This "freezes" the template so redo works
+/// after the sequence env is gone.
+fn resolve_template(val: &Value, env: &Env) -> Result<Value, RuntimeError> {
+    match val {
+        Value::Number(_) | Value::String(_) | Value::Bool(_) | Value::Keyword(_) => Ok(val.clone()),
+        Value::Symbol(name) => {
+            // Only resolve lexical variables, not state or tweakables (those are reactive)
+            if !env.state.contains_key(name) && !env.is_tweakable(name) {
+                match env.get(name) {
+                    Some(RtVal::Num(n)) => return Ok(Value::Number(n)),
+                    Some(RtVal::Str(s)) => return Ok(Value::String(s)),
+                    _ => {}
+                }
+            }
+            Ok(val.clone())
+        }
+        Value::List(items) => {
+            let resolved: Result<Vec<Value>, _> = items.iter().map(|v| resolve_template(v, env)).collect();
+            Ok(Value::List(resolved?))
+        }
     }
 }
 
@@ -661,14 +931,22 @@ fn apply_binding(node: &mut Node, prop: &PropPath, value: f64) {
 // ── Program implementation ──
 
 impl Program {
-    pub fn compile(source: &str) -> Result<Self, RuntimeError> {
+    pub fn compile(source: &str, tweaks: &mut Tweakables) -> Result<Self, RuntimeError> {
         let values = super::parser::parse(source).map_err(|e| err(e.to_string()))?;
 
-        // First pass: extract (def ...) and (on ...) from top-level forms
+        // Clear any existing tweakables from a previous compile
+        tweaks.clear();
+
+        // First pass: extract (def ...), (defc ...) and (on ...) from top-level forms
         let mut state = HashMap::new();
         let mut on_click = Vec::new();
 
-        fn extract_defs_and_handlers(vals: &[Value], state: &mut HashMap<String, RtVal>, on_click: &mut Vec<Vec<Value>>) -> Result<(), RuntimeError> {
+        fn extract(
+            vals: &[Value],
+            state: &mut HashMap<String, RtVal>,
+            on_click: &mut Vec<Vec<Value>>,
+            tweaks: &mut Tweakables,
+        ) -> Result<(), RuntimeError> {
             for val in vals {
                 if let Some(items) = val.as_list() {
                     if items.is_empty() { continue; }
@@ -683,7 +961,6 @@ impl Program {
                                 Value::Bool(b) => RtVal::Bool(*b),
                                 Value::List(inner) => {
                                     if inner.is_empty() || inner[0].as_symbol() == Some("list") {
-                                        // (list) or (list "a" "b" ...) -> list of single-value maps
                                         let items: Vec<HashMap<String, RtVal>> = inner[1..].iter().map(|v| {
                                             let mut m = HashMap::new();
                                             match v {
@@ -702,6 +979,44 @@ impl Program {
                             };
                             state.insert(name, init);
                         }
+                        "defc" => {
+                            // (defc name default :min M :max X :step S :category C)
+                            if items.len() < 3 { return Err(err("defc needs name and default")); }
+                            let name = items[1].as_symbol().ok_or_else(|| err("defc name must be symbol"))?.to_string();
+                            let default = match &items[2] {
+                                Value::Number(n) => *n,
+                                _ => return Err(err("defc default must be a number")),
+                            };
+                            let (_, kw) = parse_kwargs(&items[3..]);
+                            let empty_state = HashMap::new();
+                            let env = Env::new(&empty_state);
+                            let min = kw.get("min").and_then(|v| match v {
+                                Value::Number(n) => Some(*n),
+                                _ => eval_num(v, &env).ok(),
+                            }).unwrap_or_else(|| {
+                                if default > 0.0 { 0.0 } else { default * 2.0 }
+                            });
+                            let max = kw.get("max").and_then(|v| match v {
+                                Value::Number(n) => Some(*n),
+                                _ => eval_num(v, &env).ok(),
+                            }).unwrap_or_else(|| {
+                                if default > 0.0 { default * 2.0 } else { 0.0 }
+                            });
+                            let step = kw.get("step").and_then(|v| match v {
+                                Value::Number(n) => Some(*n),
+                                _ => None,
+                            }).unwrap_or_else(|| {
+                                let range = max - min;
+                                if range >= 10.0 { 1.0 }
+                                else if range >= 1.0 { 0.1 }
+                                else { 0.01 }
+                            });
+                            let category = kw.get("category")
+                                .and_then(|v| v.as_string().or(v.as_symbol()))
+                                .unwrap_or("scene")
+                                .to_string();
+                            tweaks.register(&name, default, min, max, step, &category);
+                        }
                         "on" => {
                             if items.len() < 3 { continue; }
                             if items[1].as_keyword() == Some("click") {
@@ -709,9 +1024,8 @@ impl Program {
                             }
                         }
                         "scene" => {
-                            // Recurse into scene bodies
                             let start = if items.len() > 1 && items[1].as_symbol().is_some() { 2 } else { 1 };
-                            extract_defs_and_handlers(&items[start..], state, on_click)?;
+                            extract(&items[start..], state, on_click, tweaks)?;
                         }
                         _ => {}
                     }
@@ -720,10 +1034,13 @@ impl Program {
             Ok(())
         }
 
-        extract_defs_and_handlers(&values, &mut state, &mut on_click)?;
+        extract(&values, &mut state, &mut on_click, tweaks)?;
+
+        // Build the HTML panel from whatever was registered
+        tweaks.build_panel();
 
         // Second pass: build scene graph
-        let mut env = Env::new(&state);
+        let mut env = Env::new_with_tweaks(&state, tweaks);
         let mut bindings = Vec::new();
         let mut id_counter = 0;
         let mut graph = SceneGraph::new();
@@ -747,19 +1064,29 @@ impl Program {
             on_click,
             sequences: Vec::new(),
             color_index: 0,
+            journal: Journal::new(),
         })
     }
 
     pub fn tick(&mut self, dt: f64, tw: &Tweakables) {
         // Advance sequences
-        self.tick_sequences(dt);
+        self.tick_sequences(dt, tw);
 
-        // Apply bindings: state -> node springs
+        // Apply bindings: retarget node springs from state or tweakables
         for binding in &self.bindings {
-            if let Some(RtVal::Num(v)) = self.state.get(&binding.state_key) {
-                if self.graph.find_mut(&binding.node_id).is_some() {
-                    let node = self.graph.find_mut(&binding.node_id).unwrap();
-                    apply_binding(node, &binding.property, *v);
+            let value = match &binding.source {
+                BindingSource::State(key) => {
+                    if let Some(RtVal::Num(v)) = self.state.get(key) {
+                        Some(*v)
+                    } else {
+                        None
+                    }
+                }
+                BindingSource::Tweakable(key) => Some(tw.get(key)),
+            };
+            if let Some(v) = value {
+                if let Some(node) = self.graph.find_mut(&binding.node_id) {
+                    apply_binding(node, &binding.property, v);
                 }
             }
         }
@@ -772,34 +1099,126 @@ impl Program {
         self.graph.draw(scene, tw);
     }
 
-    pub fn handle_click(&mut self) {
-        log::info!("handle_click: {} handlers, state: op-index={:?}, arrow-x={:?}",
-            self.on_click.len(),
-            self.state.get("op-index"),
-            self.state.get("arrow-x"));
+    pub fn handle_click(&mut self, tw: &Tweakables) {
+        if self.journal.recording.is_some() {
+            return;
+        }
+        self.journal.begin_step();
+
         let handlers: Vec<Vec<Value>> = self.on_click.clone();
         for handler_body in &handlers {
-            self.exec_body(handler_body);
+            self.exec_body(handler_body, tw);
         }
-        log::info!("after click: op-index={:?}, arrow-x={:?}, sequences={}",
-            self.state.get("op-index"),
-            self.state.get("arrow-x"),
-            self.sequences.len());
     }
 
-    fn exec_body(&mut self, body: &[Value]) {
+    pub fn step_back(&mut self) {
+        log::info!("step_back: cursor={}/{} recording={}",
+            self.journal.cursor,
+            self.journal.steps.len(),
+            self.journal.recording.is_some());
+        if !self.journal.can_back() {
+            log::info!("  can't step back");
+            return;
+        }
+        self.journal.cursor -= 1;
+        let step_idx = self.journal.cursor;
+        let mutations = self.journal.steps[step_idx].mutations.clone();
+        log::info!("  undoing {} mutations", mutations.len());
+        for m in mutations.iter().rev() {
+            self.apply_inverse(m);
+        }
+    }
+
+    pub fn step_forward(&mut self) {
+        log::info!("step_forward: cursor={}/{} recording={}",
+            self.journal.cursor,
+            self.journal.steps.len(),
+            self.journal.recording.is_some());
+        if !self.journal.can_forward() {
+            log::info!("  can't step forward");
+            return;
+        }
+        let step_idx = self.journal.cursor;
+        self.journal.cursor += 1;
+        let mutations = self.journal.steps[step_idx].mutations.clone();
+        log::info!("  redoing {} mutations", mutations.len());
+        for m in mutations.iter() {
+            self.apply_forward(m);
+        }
+    }
+
+    pub fn can_step_back(&self) -> bool {
+        self.journal.can_back()
+    }
+
+    pub fn can_step_forward(&self) -> bool {
+        self.journal.can_forward()
+    }
+
+    fn apply_inverse(&mut self, m: &Mutation) {
+        match m {
+            Mutation::State { key, old, .. } => {
+                self.state.insert(key.clone(), old.clone());
+            }
+            Mutation::PushList { key, .. } => {
+                if let Some(RtVal::List(l)) = self.state.get_mut(key) {
+                    l.pop();
+                }
+            }
+            Mutation::Spawn { group_id, bindings_added, .. } => {
+                // Remove the last child from the group
+                if let Some(group) = self.graph.find_mut(group_id).and_then(|n| n.as_group_mut()) {
+                    group.children.pop();
+                }
+                // Remove the bindings that were added
+                let new_len = self.bindings.len().saturating_sub(*bindings_added);
+                self.bindings.truncate(new_len);
+            }
+        }
+    }
+
+    fn apply_forward(&mut self, m: &Mutation) {
+        match m {
+            Mutation::State { key, new, .. } => {
+                self.state.insert(key.clone(), new.clone());
+            }
+            Mutation::PushList { key, item } => {
+                if let Some(RtVal::List(l)) = self.state.get_mut(key) {
+                    l.push(item.clone());
+                }
+            }
+            Mutation::Spawn { group_id, template, .. } => {
+                // Re-build the node from the template
+                let state_snap = self.state.clone();
+                let mut env = Env::new(&state_snap);
+                let mut new_bindings = Vec::new();
+                let mut id_counter = self.graph.root.children.len() + 9000;
+                if let Some(node) = build_node(template, &mut env, &mut new_bindings, &mut id_counter).ok().flatten() {
+                    let n_added = new_bindings.len();
+                    self.bindings.extend(new_bindings);
+                    if let Some(group) = self.graph.find_mut(group_id).and_then(|n| n.as_group_mut()) {
+                        group.children.push(node);
+                    }
+                    // Update the stored count in case it changed (shouldn't)
+                    let _ = n_added;
+                }
+            }
+        }
+    }
+
+    fn exec_body(&mut self, body: &[Value], tw: &Tweakables) {
         let state_snapshot = self.state.clone();
-        let mut env = Env::new(&state_snapshot);
+        let mut env = Env::new_with_tweaks(&state_snapshot, tw);
 
         for form in body {
-            if let Err(e) = self.exec_form(form, &mut env) {
+            if let Err(e) = self.exec_form(form, &mut env, tw) {
                 log::warn!("runtime: {e}");
                 return;
             }
         }
     }
 
-    fn exec_form(&mut self, form: &Value, env: &mut Env) -> Result<(), RuntimeError> {
+    fn exec_form(&mut self, form: &Value, env: &mut Env, tw: &Tweakables) -> Result<(), RuntimeError> {
         let items = form.as_list().ok_or_else(|| err("expected list in handler"))?;
         if items.is_empty() { return Ok(()); }
         let head = items[0].as_symbol().ok_or_else(|| err("expected symbol"))?;
@@ -809,6 +1228,12 @@ impl Program {
                 if items.len() < 3 { return Err(err("set! needs name and value")); }
                 let name = items[1].as_symbol().ok_or_else(|| err("set! name must be symbol"))?;
                 let val = eval_expr(&items[2], env)?;
+                let old = self.state.get(name).cloned().unwrap_or(RtVal::Nil);
+                self.journal.record(Mutation::State {
+                    key: name.to_string(),
+                    old,
+                    new: val.clone(),
+                });
                 self.state.insert(name.to_string(), val);
             }
 
@@ -840,7 +1265,7 @@ impl Program {
                 };
                 if truthy {
                     for item in &items[2..] {
-                        self.exec_form(item, env)?;
+                        self.exec_form(item, env, tw)?;
                     }
                 }
             }
@@ -855,6 +1280,10 @@ impl Program {
                 for (k, v) in &kw {
                     map.insert(k.clone(), eval_expr(v, env)?);
                 }
+                self.journal.record(Mutation::PushList {
+                    key: list_name.clone(),
+                    item: map.clone(),
+                });
                 if let Some(RtVal::List(list)) = self.state.get_mut(&list_name) {
                     list.push(map);
                 }
@@ -863,12 +1292,13 @@ impl Program {
             "spawn!" => {
                 // (spawn! group-id (rect ...))
                 if items.len() < 3 { return Err(err("spawn! needs group-id and node")); }
-                let group_id = items[1].as_symbol().or(items[1].as_string()).unwrap_or("_spawned");
+                let group_id = items[1].as_symbol().or(items[1].as_string()).unwrap_or("_spawned").to_string();
+                // Resolve kwargs into a concrete template so undo/redo is deterministic
+                let template = resolve_template(&items[2], env)?;
                 let mut new_bindings = Vec::new();
                 let mut id_counter = self.graph.root.children.len() + 9000;
-                if let Some(mut node) = build_node(&items[2], env, &mut new_bindings, &mut id_counter)? {
-                    // Check for :target-x / :target-y kwargs to set spring targets
-                    let node_items = items[2].as_list().unwrap_or(&[]);
+                if let Some(mut node) = build_node(&template, env, &mut new_bindings, &mut id_counter)? {
+                    let node_items = template.as_list().unwrap_or(&[]);
                     let (_, kw) = parse_kwargs(&node_items[1..]);
                     if let Some(tx) = kw.get("target-x") {
                         let v = eval_num(tx, env)?;
@@ -878,8 +1308,14 @@ impl Program {
                         let v = eval_num(ty, env)?;
                         node.props_mut().pos.y.set_target(v);
                     }
+                    let bindings_added = new_bindings.len();
+                    self.journal.record(Mutation::Spawn {
+                        group_id: group_id.clone(),
+                        template: template.clone(),
+                        bindings_added,
+                    });
                     self.bindings.extend(new_bindings);
-                    if let Some(group) = self.graph.find_mut(group_id).and_then(|n| n.as_group_mut()) {
+                    if let Some(group) = self.graph.find_mut(&group_id).and_then(|n| n.as_group_mut()) {
                         group.children.push(node);
                     }
                 }
@@ -919,8 +1355,7 @@ impl Program {
         Ok(())
     }
 
-    fn tick_sequences(&mut self, dt: f64) {
-        // Take sequences out to avoid borrow conflicts with self.exec_form
+    fn tick_sequences(&mut self, dt: f64, tw: &Tweakables) {
         let mut sequences = std::mem::take(&mut self.sequences);
         let mut to_remove = Vec::new();
 
@@ -933,14 +1368,13 @@ impl Program {
                 seq.current += 1;
             }
 
-            // Execute steps until we hit a (wait) or run out
             while seq.current < seq.steps.len() {
                 let step = seq.steps[seq.current].clone();
                 if let Some(items) = step.as_list() {
                     if items.first().and_then(|v| v.as_symbol()) == Some("wait") {
                         if items.len() >= 2 {
                             let state_snap = self.state.clone();
-                            let env = Env::new(&state_snap);
+                            let env = Env::new_with_tweaks(&state_snap, tw);
                             seq.wait_remaining = eval_num(&items[1], &env).unwrap_or(0.5);
                         }
                         break;
@@ -949,12 +1383,12 @@ impl Program {
 
                 let env_snap = seq.env_snapshot.clone();
                 let state_snap = self.state.clone();
-                let mut env = Env::new(&state_snap);
+                let mut env = Env::new_with_tweaks(&state_snap, tw);
                 env.push();
                 for (k, v) in &env_snap {
                     env.set(k, v.clone());
                 }
-                if let Err(e) = self.exec_form(&step, &mut env) {
+                if let Err(e) = self.exec_form(&step, &mut env, tw) {
                     log::warn!("sequence step error: {e}");
                 }
                 for (k, v) in env.scopes.last().unwrap().iter() {
@@ -974,5 +1408,12 @@ impl Program {
         }
 
         self.sequences = sequences;
+
+        // If no sequences are active and we're recording a step, commit it
+        if self.sequences.is_empty() && self.journal.recording.is_some() {
+            let mutations = self.journal.recording.as_ref().map(|r| r.len()).unwrap_or(0);
+            log::info!("committing step with {mutations} mutations; total steps={}", self.journal.steps.len() + 1);
+            self.journal.commit_step();
+        }
     }
 }
