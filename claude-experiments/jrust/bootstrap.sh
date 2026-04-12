@@ -1,43 +1,288 @@
 #!/bin/bash
-set -e
-
+#
+# Safe, transactional bootstrap for the JRust self-hosting compiler.
+#
+# This script never modifies stage0 until it has proven the new compiler:
+#   1. Compiles successfully from stage0
+#   2. Can compile itself (self-compile verification)
+#   3. Reaches a fixed point (output == output of self-compile)
+#   4. Passes all tests
+#
+# If any step fails, stage0 is untouched and the error is reported clearly.
+#
+# Usage:
+#   bash bootstrap.sh              # normal bootstrap
+#   bash bootstrap.sh --recover    # restore stage0 from git
+#
+set -euo pipefail
 cd "$(dirname "$0")"
 
 STAGE="stages/stage0"
-CP="$STAGE:asm.jar"
+ASM="asm.jar"
+SOURCE="compiler.jrs"
+TMP1=".bootstrap/phase1"
+TMP2=".bootstrap/phase2"
+TMP3=".bootstrap/phase3"
 
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+BOLD='\033[1m'
+NC='\033[0m'
+
+info()  { echo -e "${BOLD}=== $1${NC}"; }
+ok()    { echo -e "${GREEN}$1${NC}"; }
+warn()  { echo -e "${YELLOW}$1${NC}"; }
+fail()  { echo -e "${RED}$1${NC}"; }
+
+cleanup() {
+    rm -rf .bootstrap
+}
+
+# --- Recovery mode ---
+if [ "${1:-}" = "--recover" ]; then
+    info "Recovering stage0 from git"
+    # Find the last commit that touched stage0
+    LAST_COMMIT=$(git log --oneline -1 --diff-filter=M -- "$STAGE/" 2>/dev/null | cut -d' ' -f1)
+    if [ -z "$LAST_COMMIT" ]; then
+        LAST_COMMIT=$(git log --oneline -1 -- "$STAGE/" 2>/dev/null | cut -d' ' -f1)
+    fi
+    if [ -z "$LAST_COMMIT" ]; then
+        fail "Could not find any commit with stage0 files."
+        exit 1
+    fi
+    echo "Restoring from commit $LAST_COMMIT"
+    git checkout "$LAST_COMMIT" -- "$STAGE/"
+
+    # Verify it works
+    mkdir -p .bootstrap/verify
+    if java -cp "$STAGE:$ASM" Main "$SOURCE" 2>.bootstrap/verify.err; then
+        ok "Stage0 recovered and verified."
+        cleanup
+    else
+        fail "Recovered stage0 still can't compile. Error:"
+        cat .bootstrap/verify.err
+        echo ""
+        echo "Try an older commit: git log --oneline -- $STAGE/"
+        cleanup
+        exit 1
+    fi
+    exit 0
+fi
+
+# --- Normal bootstrap ---
+
+trap cleanup EXIT
+
+# Check prerequisites
 if [ ! -d "$STAGE" ]; then
-    echo "ERROR: $STAGE does not exist. Run build.sh first to create the Java bootstrap, then:"
-    echo "  mkdir -p $STAGE"
-    echo "  java -cp 'asm.jar:build' jrust.Main compiler.jrs"
-    echo "  cp output/*.class $STAGE/"
+    fail "ERROR: $STAGE does not exist."
+    echo "Run: bash bootstrap.sh --recover"
     exit 1
 fi
 
-echo "=== Compiling compiler.jrs with stage0 ==="
-java -cp "$CP" Main compiler.jrs
+if [ ! -f "$ASM" ]; then
+    fail "ERROR: $ASM not found."
+    exit 1
+fi
 
-echo "=== Checking fixed point ==="
-DIFF=$(diff <(cd "$STAGE" && md5 -r *.class | sort) <(cd output && md5 -r *.class | sort) || true)
+if [ ! -f "$SOURCE" ]; then
+    fail "ERROR: $SOURCE not found."
+    exit 1
+fi
+
+# Clean workspace
+rm -rf .bootstrap
+mkdir -p "$TMP1" "$TMP2" "$TMP3"
+
+# -------------------------------------------------------
+# Step 1: Compile source with current stage0
+# -------------------------------------------------------
+info "Step 1: Compiling $SOURCE with stage0"
+
+COMPILE_ERR=""
+if ! java -cp "$STAGE:$ASM" Main "$SOURCE" 2>"$TMP1/stderr.txt"; then
+    COMPILE_ERR=$(cat "$TMP1/stderr.txt")
+
+    # Check if it's a parse error (suggests new syntax stage0 doesn't know)
+    if echo "$COMPILE_ERR" | grep -q "Parse error"; then
+        fail "Stage0 can't parse your source code."
+        echo ""
+        echo "$COMPILE_ERR" | head -5
+        echo ""
+        warn "If you added new syntax, you need to bootstrap in two steps:"
+        echo "  1. Add the parser/codegen support but DON'T use the new syntax in compiler.jrs"
+        echo "  2. Run: bash bootstrap.sh"
+        echo "  3. Now use the new syntax in compiler.jrs"
+        echo "  4. Run: bash bootstrap.sh"
+        exit 1
+    fi
+
+    # Check if it's a type error
+    if echo "$COMPILE_ERR" | grep -q "Type error"; then
+        fail "Type checker rejected your source code."
+        echo ""
+        echo "$COMPILE_ERR" | head -20
+        if [ "$(echo "$COMPILE_ERR" | wc -l)" -gt 20 ]; then
+            echo "... ($(echo "$COMPILE_ERR" | wc -l) total lines)"
+        fi
+        echo ""
+        echo "Stage0 was NOT modified."
+        exit 1
+    fi
+
+    fail "Compilation failed:"
+    echo "$COMPILE_ERR"
+    echo ""
+    echo "Stage0 was NOT modified."
+    exit 1
+fi
+
+# Move output to phase1 dir
+cp output/*.class "$TMP1/"
+ok "  Compiled successfully ($(ls "$TMP1"/*.class | wc -l) classes)"
+
+# -------------------------------------------------------
+# Step 2: Self-compile — new compiler compiles same source
+# -------------------------------------------------------
+info "Step 2: Self-compile verification"
+
+if ! java -cp "$TMP1:$ASM" Main "$SOURCE" 2>"$TMP2/stderr.txt"; then
+    SELF_ERR=$(cat "$TMP2/stderr.txt")
+    fail "New compiler can't compile itself!"
+    echo ""
+    echo "$SELF_ERR" | head -30
+    if [ "$(echo "$SELF_ERR" | wc -l)" -gt 30 ]; then
+        echo "... ($(echo "$SELF_ERR" | wc -l) total lines)"
+    fi
+    echo ""
+    if echo "$SELF_ERR" | grep -q "VerifyError"; then
+        echo "The compiled output has invalid bytecode (JVM VerifyError)."
+        echo "This is a codegen bug — the compiler generated bytecode that"
+        echo "the JVM rejects. Check for type mismatches or unsupported"
+        echo "control flow patterns in your changes."
+    elif echo "$SELF_ERR" | grep -q "Type error"; then
+        echo "The new compiler's type checker rejects code the old compiler"
+        echo "accepted. Fix the type errors above, or disable the type checker"
+        echo "during bootstrap if it's still under development."
+    elif echo "$SELF_ERR" | grep -q "Parse error"; then
+        echo "The new compiler can't parse its own source. This likely means"
+        echo "the parser changes have a bug."
+    else
+        echo "The new compiler failed to compile itself. Check the errors above."
+    fi
+    echo ""
+    echo "Stage0 was NOT modified."
+    exit 1
+fi
+
+cp output/*.class "$TMP2/"
+ok "  Self-compile succeeded"
+
+# -------------------------------------------------------
+# Step 3: Check fixed point
+# -------------------------------------------------------
+info "Step 3: Checking fixed point"
+
+DIFF=$(diff <(cd "$TMP1" && md5sum *.class | sort) <(cd "$TMP2" && md5sum *.class | sort) || true)
 
 if [ -z "$DIFF" ]; then
-    echo "Fixed point reached. No changes needed."
+    ok "  Fixed point reached on first iteration"
+    FINAL="$TMP1"
 else
-    echo "Output differs from stage0. Updating stage0..."
-    rm -f "$STAGE"/*.class
-    cp output/*.class "$STAGE"/
+    warn "  Output differs — running third iteration"
 
-    echo "=== Verifying new stage0 reaches fixed point ==="
-    java -cp "$CP" Main compiler.jrs
+    if ! java -cp "$TMP2:$ASM" Main "$SOURCE" 2>"$TMP3/stderr.txt"; then
+        fail "Third iteration failed!"
+        cat "$TMP3/stderr.txt"
+        echo ""
+        echo "Stage0 was NOT modified."
+        exit 1
+    fi
+    cp output/*.class "$TMP3/"
 
-    DIFF2=$(diff <(cd "$STAGE" && md5 -r *.class | sort) <(cd output && md5 -r *.class | sort) || true)
+    DIFF2=$(diff <(cd "$TMP2" && md5sum *.class | sort) <(cd "$TMP3" && md5sum *.class | sort) || true)
     if [ -z "$DIFF2" ]; then
-        echo "Fixed point confirmed."
+        ok "  Fixed point reached on second iteration"
+        FINAL="$TMP2"
     else
-        echo "WARNING: New stage0 does NOT reach fixed point!"
+        fail "Could not reach fixed point after 3 iterations!"
+        echo "This usually indicates a non-determinism bug in the compiler."
+        echo ""
+        echo "Files that still differ:"
         echo "$DIFF2"
+        echo ""
+        echo "Stage0 was NOT modified."
         exit 1
     fi
 fi
 
-echo "=== Done ==="
+# -------------------------------------------------------
+# Step 4: Run tests
+# -------------------------------------------------------
+info "Step 4: Running tests"
+
+COMPILER_CP="$FINAL:$ASM"
+TEST_PASS=0
+TEST_FAIL=0
+TEST_ERRORS=""
+
+for test_file in tests/*.jrs; do
+    name=$(basename "$test_file" .jrs)
+    expected="tests/${name}.expected"
+
+    if [ ! -f "$expected" ]; then
+        continue
+    fi
+
+    rm -rf output && mkdir -p output
+    if ! java -cp "$COMPILER_CP" Main "$test_file" > /dev/null 2>&1; then
+        echo "  FAIL $name (compile error)"
+        TEST_FAIL=$((TEST_FAIL + 1))
+        TEST_ERRORS="$TEST_ERRORS\n  $name: compile error"
+        continue
+    fi
+
+    actual=$(java -cp output Main 2>&1) || true
+
+    if [ "$actual" = "$(cat "$expected")" ]; then
+        TEST_PASS=$((TEST_PASS + 1))
+    else
+        echo "  FAIL $name"
+        TEST_FAIL=$((TEST_FAIL + 1))
+        TEST_ERRORS="$TEST_ERRORS\n  $name: output mismatch"
+    fi
+done
+
+echo "  $TEST_PASS passed, $TEST_FAIL failed"
+
+if [ "$TEST_FAIL" -gt 0 ]; then
+    fail "Tests failed! Stage0 was NOT modified."
+    echo -e "Failures:$TEST_ERRORS"
+    exit 1
+fi
+
+ok "  All tests passed"
+
+# -------------------------------------------------------
+# Step 5: Update stage0 (atomic swap)
+# -------------------------------------------------------
+info "Step 5: Updating stage0"
+
+# Backup current stage0
+cp -r "$STAGE" "$STAGE.bak"
+
+# Swap
+rm -f "$STAGE"/*.class
+cp "$FINAL"/*.class "$STAGE/"
+
+# Remove backup on success
+rm -rf "$STAGE.bak"
+
+ok "  Stage0 updated ($(ls "$STAGE"/*.class | wc -l) classes)"
+
+# -------------------------------------------------------
+# Done
+# -------------------------------------------------------
+echo ""
+ok "Bootstrap successful."

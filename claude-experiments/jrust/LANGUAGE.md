@@ -603,20 +603,48 @@ The `JRustAsm` class provides a handle-based wrapper around the ASM bytecode lib
 
 ## Building
 
-```bash
-# Compile the bootstrap (Java) compiler
-bash build.sh
+### Bootstrap
 
+The compiler is self-hosting — it compiles itself. Use `bootstrap.sh` for all compiler changes:
+
+```bash
+bash bootstrap.sh              # compile, verify, update stage0
+bash bootstrap.sh --recover    # restore stage0 from git if corrupted
+```
+
+The bootstrap script is **transactional** — it never modifies stage0 until it has verified:
+1. Stage0 can compile the new source
+2. The new compiler can compile itself (self-compile)
+3. The output reaches a fixed point (deterministic)
+4. All tests pass
+
+If any step fails, stage0 is untouched.
+
+### Adding new syntax
+
+When adding a new language feature that you want to use in the compiler itself, you must bootstrap in two steps:
+
+1. Add the parser + codegen support for the new syntax (but **don't use it** in compiler.jrs yet)
+2. `bash bootstrap.sh` — this gets the new parser into stage0
+3. Now write code in compiler.jrs that uses the new syntax
+4. `bash bootstrap.sh` — stage0 can now parse the new syntax
+
+The bootstrap script detects when stage0 can't parse your source and prints this reminder.
+
+### Compiling programs
+
+```bash
 # Compile a .jrs file
-java -cp "asm.jar:build" jrust.Main myfile.jrs
+java -cp "stages/stage0:asm.jar" Main myfile.jrs
 
 # Run the compiled output
-java -cp "output:asm.jar:build" Main
+java -cp "output:asm.jar" Main
+```
 
-# Self-hosting: compile compiler.jrs, then use the output to compile again
-java -cp "asm.jar:build" jrust.Main compiler.jrs
-cp output/*.class self/
-java -cp "self:asm.jar:build" Main compiler.jrs
+### Running tests
+
+```bash
+bash run_tests.sh
 ```
 
 ## Differences from Rust
