@@ -1,0 +1,49 @@
+interface Greeter {
+    fn greet(self, name: String) -> String;
+}
+
+struct EnglishGreeter {
+    prefix: String,
+}
+
+impl EnglishGreeter {
+    fn new(prefix: String) -> EnglishGreeter {
+        let g = EnglishGreeter { prefix: prefix };
+        return g;
+    }
+}
+
+impl Greeter for EnglishGreeter {
+    fn greet(self, name: String) -> String {
+        return self.prefix + " " + name + "!";
+    }
+}
+
+struct FrenchGreeter {
+    dummy: i32,
+}
+
+impl FrenchGreeter {
+    fn new() -> FrenchGreeter {
+        let g = FrenchGreeter { dummy: 0 };
+        return g;
+    }
+}
+
+impl Greeter for FrenchGreeter {
+    fn greet(self, name: String) -> String {
+        return "Bonjour " + name + "!";
+    }
+}
+
+fn say_hello(g: Greeter, name: String) {
+    println(g.greet(name));
+}
+
+fn main() {
+    let eng: EnglishGreeter = EnglishGreeter::new("Hello");
+    let fr: FrenchGreeter = FrenchGreeter::new();
+
+    say_hello(eng, "World");
+    say_hello(fr, "Monde");
+}

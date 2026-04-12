@@ -1157,6 +1157,24 @@ public class JvmCodegen {
                         "(ILjava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/Object;)Lorg/objectweb/asm/FieldVisitor;", false);
                 yield new Type.Simple("FieldVisitor");
             }
+            case "visit_with_interfaces" -> {
+                // visit_with_interfaces(version, access, name, superName, interfaces: Vec<String>)
+                generateExpr(args.get(0)); // version
+                generateExpr(args.get(1)); // access
+                generateExpr(args.get(2)); // name
+                mv.visitInsn(ACONST_NULL); // signature
+                generateExpr(args.get(3)); // superName
+                // Convert Vec<String> to String[]
+                generateExpr(args.get(4)); // interfaces Vec
+                mv.visitInsn(ICONST_0);
+                mv.visitTypeInsn(ANEWARRAY, "java/lang/String");
+                mv.visitMethodInsn(INVOKEVIRTUAL, "java/util/ArrayList", "toArray",
+                        "([Ljava/lang/Object;)[Ljava/lang/Object;", false);
+                mv.visitTypeInsn(CHECKCAST, "[Ljava/lang/String;");
+                mv.visitMethodInsn(INVOKEVIRTUAL, "org/objectweb/asm/ClassWriter", "visit",
+                        "(IILjava/lang/String;Ljava/lang/String;Ljava/lang/String;[Ljava/lang/String;)V", false);
+                yield new Type.Void();
+            }
             case "visit_end" -> {
                 mv.visitMethodInsn(INVOKEVIRTUAL, "org/objectweb/asm/ClassWriter", "visitEnd", "()V", false);
                 yield new Type.Void();

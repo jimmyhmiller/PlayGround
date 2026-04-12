@@ -114,7 +114,7 @@ enum TK {
     // Keywords
     Fn, Struct, Impl, Let, Mut, SelfKw, Import, Return,
     True, False, If, Else, While, For, In, Match, Enum, Const, Null,
-    Break, Continue, As, With,
+    Break, Continue, As, With, Interface,
     // Identifiers and literals
     Ident { text: String },
     IntLit { value: String },
@@ -557,6 +557,9 @@ impl Lexer {
         if word == "with" {
             return Token { kind: TK::With, line: start_line, col: start_col };
         }
+        if word == "interface" {
+            return Token { kind: TK::Interface, line: start_line, col: start_col };
+        }
         return Token { kind: TK::Ident { text: word }, line: start_line, col: start_col };
     }
 }
@@ -611,6 +614,7 @@ fn tok_is(t: Token, kind_name: String) -> bool {
         TK::Continue => { return kind_name == "continue"; }
         TK::As => { return kind_name == "as"; }
         TK::With => { return kind_name == "with"; }
+        TK::Interface => { return kind_name == "interface"; }
         TK::Ident { text } => { return kind_name == "ident"; }
         TK::IntLit { value } => { return kind_name == "int"; }
         TK::FloatLit { value } => { return kind_name == "float"; }
@@ -706,6 +710,7 @@ fn tok_describe(t: Token) -> String {
         TK::Continue => { return "CONTINUE"; }
         TK::As => { return "AS"; }
         TK::With => { return "WITH"; }
+        TK::Interface => { return "INTERFACE"; }
         TK::Plus => { return "+"; }
         TK::Minus => { return "-"; }
         TK::Star => { return "*"; }
@@ -818,6 +823,8 @@ enum Item {
     ImportI { path: String },
     EnumDefI { name: String, variants: Vec<EnumVariant> },
     ConstDefI { name: String, ty: Ty, value: Expr },
+    InterfaceDefI { name: String, methods: Vec<Item> },
+    ImplForDefI { interface_name: String, struct_name: String, methods: Vec<Item> },
 }
 
 struct Program {
@@ -914,6 +921,9 @@ impl Parser {
         if self.check("const") {
             return self.parse_const_def();
         }
+        if self.check("interface") {
+            return self.parse_interface_def();
+        }
         let t: Token = self.current();
         panic("Parse error at " + t.line + ":" + t.col + ": Expected item, got " + tok_describe(t));
         return Item::ImportI { path: "" };
@@ -1007,7 +1017,23 @@ impl Parser {
     fn parse_impl_def(mut self) -> Item {
         self.expect("impl");
         let name_tok: Token = self.expect("ident");
-        let type_name: String = tok_text(name_tok);
+        let first_name: String = tok_text(name_tok);
+
+        // Check for `impl Interface for Struct { ... }`
+        if self.check("for") {
+            self.advance();
+            let struct_tok: Token = self.expect("ident");
+            let struct_name: String = tok_text(struct_tok);
+            self.expect("{");
+            let mut methods: Vec<Item> = Vec::new();
+            while !self.check("}") {
+                let m: Item = self.parse_fn_def();
+                methods.push(m);
+            }
+            self.expect("}");
+            return Item::ImplForDefI { interface_name: first_name, struct_name: struct_name, methods: methods };
+        }
+
         self.expect("{");
         let mut methods: Vec<Item> = Vec::new();
         while !self.check("}") {
@@ -1015,7 +1041,39 @@ impl Parser {
             methods.push(m);
         }
         self.expect("}");
-        return Item::ImplDefI { type_name: type_name, methods: methods };
+        return Item::ImplDefI { type_name: first_name, methods: methods };
+    }
+
+    fn parse_interface_def(mut self) -> Item {
+        self.expect("interface");
+        let name_tok: Token = self.expect("ident");
+        let name: String = tok_text(name_tok);
+        self.expect("{");
+        let mut methods: Vec<Item> = Vec::new();
+        while !self.check("}") {
+            // Parse method signature: fn name(self, params...) -> RetType;
+            let m: Item = self.parse_fn_sig();
+            methods.push(m);
+        }
+        self.expect("}");
+        return Item::InterfaceDefI { name: name, methods: methods };
+    }
+
+    fn parse_fn_sig(mut self) -> Item {
+        self.expect("fn");
+        let name_tok: Token = self.expect("ident");
+        let name: String = tok_text(name_tok);
+        self.expect("(");
+        let params: Vec<Param> = self.parse_params();
+        self.expect(")");
+        let mut ret_type: Ty = Ty::VoidTy;
+        if self.check("->") {
+            self.advance();
+            ret_type = self.parse_type();
+        }
+        self.expect(";");
+        let body: Vec<Stmt> = Vec::new();
+        return Item::FnDefI { name: name, params: params, return_type: ret_type, body: body };
     }
 
     fn parse_import(mut self) -> Item {
@@ -1801,6 +1859,8 @@ struct Codegen {
     top_level_fns: Vec<Item>,
     constants: Vec<Item>,
     imports: Map<String, String>,
+    interfaces: Map<String, Item>,
+    impl_for: Vec<Item>,
     // Per-method state
     mv: MethodVisitor,
     locals: Map<String, i32>,
@@ -1824,6 +1884,8 @@ impl Codegen {
             top_level_fns: Vec::new(),
             constants: Vec::new(),
             imports: Map::new(),
+            interfaces: Map::new(),
+            impl_for: Vec::new(),
             mv: null,
             locals: Map::new(),
             local_types: Map::new(),
@@ -1876,8 +1938,27 @@ impl Codegen {
                 Item::ConstDefI { name, ty, value } => {
                     self.constants.push(item);
                 }
+                Item::InterfaceDefI { name, methods } => {
+                    self.interfaces.insert(name, item);
+                }
+                Item::ImplForDefI { interface_name, struct_name, methods } => {
+                    self.impl_for.push(item);
+                }
             }
             i = i + 1;
+        }
+
+        // Generate interface class files
+        let mut ii: i32 = 0;
+        while ii < self.program.items.len() {
+            let item: Item = self.program.items.get(ii);
+            match item {
+                Item::InterfaceDefI { name, methods } => {
+                    self.generate_interface(name, methods);
+                }
+                _ => {}
+            }
+            ii = ii + 1;
         }
 
         // Generate struct classes
@@ -1932,9 +2013,74 @@ impl Codegen {
 
     // --- Struct generation ---
 
+    fn generate_interface(mut self, name: String, methods: Vec<Item>) {
+        let cw: ClassWriter = create_class_writer(3);
+        // ACC_PUBLIC + ACC_INTERFACE + ACC_ABSTRACT
+        cw.visit(V21, ACC_PUBLIC + 512 + ACC_ABSTRACT, name, "java/lang/Object");
+
+        let mut mi: i32 = 0;
+        while mi < methods.len() {
+            let m: Item = methods.get(mi);
+            let mname: String = item_fn_name(m);
+            let mparams: Vec<Param> = item_fn_params(m);
+            let mret: Ty = item_fn_return_type(m);
+            let desc: String = self.method_descriptor(mparams, mret, false, name, mname);
+            // ACC_PUBLIC + ACC_ABSTRACT
+            let amv: MethodVisitor = cw.visit_method(ACC_PUBLIC + ACC_ABSTRACT, mname, desc);
+            amv.visit_end();
+            mi = mi + 1;
+        }
+
+        cw.visit_end();
+        JRustRuntime::write_class(cw, self.output_dir, name);
+    }
+
+    fn get_interfaces_for_struct(self, target_struct: String) -> Vec<String> {
+        let mut ifaces: Vec<String> = Vec::new();
+        let mut i: i32 = 0;
+        while i < self.impl_for.len() {
+            let item: Item = self.impl_for.get(i);
+            match item {
+                Item::ImplForDefI { interface_name, struct_name, methods } => {
+                    if struct_name == target_struct {
+                        ifaces.push(interface_name);
+                    }
+                }
+                _ => {}
+            }
+            i = i + 1;
+        }
+        return ifaces;
+    }
+
+    fn get_impl_for_methods(self, target_iface: String, target_struct: String) -> Vec<Item> {
+        let mut i: i32 = 0;
+        while i < self.impl_for.len() {
+            let item: Item = self.impl_for.get(i);
+            match item {
+                Item::ImplForDefI { interface_name, struct_name, methods } => {
+                    if interface_name == target_iface && struct_name == target_struct {
+                        return methods;
+                    }
+                }
+                _ => {}
+            }
+            i = i + 1;
+        }
+        let empty: Vec<Item> = Vec::new();
+        return empty;
+    }
+
     fn generate_struct(mut self, name: String, fields: Vec<Field>) {
         let cw: ClassWriter = create_class_writer(3);
-        cw.visit(V21, ACC_PUBLIC + ACC_SUPER, name, "java/lang/Object");
+
+        // Check if this struct implements any interfaces
+        let ifaces: Vec<String> = self.get_interfaces_for_struct(name);
+        if ifaces.len() > 0 {
+            cw.visit_with_interfaces(V21, ACC_PUBLIC + ACC_SUPER, name, "java/lang/Object", ifaces);
+        } else {
+            cw.visit(V21, ACC_PUBLIC + ACC_SUPER, name, "java/lang/Object");
+        }
 
         // Fields
         let mut fi: i32 = 0;
@@ -1963,6 +2109,20 @@ impl Codegen {
                 self.generate_method(cw, name, m);
                 mi = mi + 1;
             }
+        }
+
+        // Interface impl methods
+        let mut ii: i32 = 0;
+        while ii < ifaces.len() {
+            let iface_name: String = ifaces.get(ii);
+            let iface_methods: Vec<Item> = self.get_impl_for_methods(iface_name, name);
+            let mut mi: i32 = 0;
+            while mi < iface_methods.len() {
+                let m: Item = iface_methods.get(mi);
+                self.generate_method(cw, name, m);
+                mi = mi + 1;
+            }
+            ii = ii + 1;
         }
 
         cw.visit_end();
@@ -2878,6 +3038,36 @@ impl Codegen {
             return self.gen_field_visitor_method(method_name, args);
         }
 
+        // Interface method call
+        if self.interfaces.contains_key(type_name) {
+            let iface_item: Item = self.interfaces.get(type_name);
+            let iface_method: Item = self.find_interface_method(type_name, method_name);
+            match iface_method {
+                Item::FnDefI { name, params, return_type, body } => {
+                    let mut desc_sb: StringBuilder = StringBuilder::new();
+                    desc_sb.append("(");
+                    let mut arg_idx: i32 = 0;
+                    let mut pi: i32 = 0;
+                    while pi < params.len() {
+                        let p: Param = params.get(pi);
+                        if !p.is_self {
+                            if arg_idx < args.len() {
+                                self.gen_expr(args.get(arg_idx));
+                                desc_sb.append(self.type_descriptor(p.ty));
+                                arg_idx = arg_idx + 1;
+                            }
+                        }
+                        pi = pi + 1;
+                    }
+                    desc_sb.append(")");
+                    desc_sb.append(self.type_descriptor(return_type));
+                    self.mv.visit_method_insn(INVOKEINTERFACE, type_name, method_name, desc_sb.to_string(), 1);
+                    return return_type;
+                }
+                _ => {}
+            }
+        }
+
         // User-defined method
         let method: Item = self.find_impl_method(type_name, method_name);
         match method {
@@ -3140,6 +3330,24 @@ impl Codegen {
             }
             self.mv.visit_method_insn(INVOKEVIRTUAL, "org/objectweb/asm/ClassWriter", "visitField", "(ILjava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/Object;)Lorg/objectweb/asm/FieldVisitor;", 0);
             return Ty::SimpleTy { name: "FieldVisitor" };
+        }
+        if method_name == "visit_with_interfaces" {
+            // visit_with_interfaces(version, access, name, superName, interfaces: Vec<String>)
+            // → visit(ver, acc, name, null/*sig*/, super, String[]{ifaces...})
+            self.gen_expr(args.get(0));
+            self.gen_expr(args.get(1));
+            self.gen_expr(args.get(2));
+            self.mv.visit_insn(ACONST_NULL);
+            self.gen_expr(args.get(3));
+            // Convert Vec<String> to String[]
+            self.gen_expr(args.get(4));
+            // Vec.toArray(T[]) → create empty String[], call toArray
+            self.mv.visit_insn(ICONST_0);
+            self.mv.visit_type_insn(ANEWARRAY, "java/lang/String");
+            self.mv.visit_method_insn(INVOKEVIRTUAL, "java/util/ArrayList", "toArray", "([Ljava/lang/Object;)[Ljava/lang/Object;", 0);
+            self.mv.visit_type_insn(CHECKCAST, "[Ljava/lang/String;");
+            self.mv.visit_method_insn(INVOKEVIRTUAL, "org/objectweb/asm/ClassWriter", "visit", "(IILjava/lang/String;Ljava/lang/String;Ljava/lang/String;[Ljava/lang/String;)V", 0);
+            return Ty::VoidTy;
         }
         if method_name == "visit_end" {
             self.mv.visit_method_insn(INVOKEVIRTUAL, "org/objectweb/asm/ClassWriter", "visitEnd", "()V", 0);
@@ -4546,6 +4754,26 @@ impl Codegen {
             i = i + 1;
         }
         panic("Unknown function: " + name);
+        return Item::ImportI { path: "" };
+    }
+
+    fn find_interface_method(self, interface_name: String, method_name: String) -> Item {
+        let iface_item: Item = self.interfaces.get(interface_name);
+        match iface_item {
+            Item::InterfaceDefI { name, methods } => {
+                let mut i: i32 = 0;
+                while i < methods.len() {
+                    let m: Item = methods.get(i);
+                    let mn: String = item_fn_name(m);
+                    if mn == method_name {
+                        return m;
+                    }
+                    i = i + 1;
+                }
+            }
+            _ => {}
+        }
+        panic("Unknown interface method: " + interface_name + "." + method_name);
         return Item::ImportI { path: "" };
     }
 
