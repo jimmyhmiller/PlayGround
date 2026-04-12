@@ -10,6 +10,7 @@ pub enum Value {
 }
 
 impl Value {
+    #[allow(dead_code)]
     pub fn as_number(&self) -> Option<f64> {
         match self {
             Value::Number(n) => Some(*n),

@@ -278,6 +278,72 @@ fn bytes_sum_via_loop() {
     assert_eq!(run_interp(src, "main", &[]), 55);
 }
 
+/// Multi-frame capture with GC between: the prompt-owning function
+/// holds a bytes pointer, calls a helper, the helper allocates
+/// heavily (triggering GC that forwards the pointer in the
+/// prompt-owner's root slots but NOT in its vals), then the helper
+/// captures. The captured prompt-owner frame must contain the
+/// forwarded pointer, not the stale pre-GC address.
+///
+/// This test catches a bug where `build_captured_stack_impl` read
+/// non-top frames' vals directly (stale after GC) instead of
+/// overlaying forwarded values from root slots.
+#[test]
+fn multi_frame_capture_gc_forwards_non_top_frame_pointer() {
+    let src = r#"
+        fn do_capture_after_gc() -> cont {
+            // This function is called with the prompt already
+            // installed by the caller. Allocate heavily to trigger
+            // GC (which forwards the caller's bytes pointer in its
+            // root slots), then capture.
+            let i = 0;
+            while i < 20 {
+                let scratch: bytes = bytes_alloc(32);
+                bytes_set(scratch, 0, i);
+                i = i + 1;
+            }
+            // Now capture — the captured slice includes BOTH this
+            // frame AND the caller's frame (which owns the prompt).
+            // The caller's frame holds the bytes pointer. If we
+            // read the caller's vals (stale), we get a dangling
+            // pointer. If we read from root slots (forwarded),
+            // we get the correct new address.
+            shift |k| { abort(k) }
+        }
+
+        fn invoke(k: cont, v) { resume(k, v) }
+
+        fn main() {
+            let p: bytes = bytes_alloc(4);
+            bytes_set(p, 0, 77);
+            bytes_set(p, 1, 88);
+            let k: cont = reset {
+                do_capture_after_gc()
+            };
+            // Resume — the captured frame re-enters do_capture_after_gc
+            // at the shift's resume_bb; the delimited context is empty
+            // so it falls through and returns via the trampoline.
+            // The interesting part is whether p in main's captured
+            // frame survived the GC correctly.
+            let r = invoke(k, 0);
+            // r is the resume arg (0); what we really care about is
+            // whether p is still valid:
+            bytes_get(p, 0) + bytes_get(p, 1)
+        }
+    "#;
+
+    // Aggressive GC: threshold 3, small heap.
+    let (result, collections) =
+        run_interp_with(src, "main", &[], 3, 16 * 1024);
+
+    assert_eq!(result, 77 + 88, "bytes must survive GC across a multi-frame capture");
+    assert!(
+        collections >= 3,
+        "GC should have fired during do_capture_after_gc; got {}",
+        collections
+    );
+}
+
 /// Chain of continuations: capture `a`, then capture `b` in a
 /// context where `a` is in scope, force several GC cycles, then
 /// invoke each independently.

@@ -1,5 +1,3 @@
-/* @ts-self-types="./visualizer.d.ts" */
-
 export function start() {
     wasm.start();
 }

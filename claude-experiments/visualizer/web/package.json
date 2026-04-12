@@ -1,0 +1,17 @@
+{
+  "private": true,
+  "scripts": {
+    "build": "esbuild src/editor.js --bundle --format=esm --outfile=editor.bundle.js",
+    "watch": "esbuild src/editor.js --bundle --format=esm --outfile=editor.bundle.js --watch"
+  },
+  "dependencies": {
+    "@codemirror/lang-javascript": "^6.2.2",
+    "@codemirror/state": "^6.5.2",
+    "@codemirror/theme-one-dark": "^6.1.2",
+    "@codemirror/view": "^6.36.5",
+    "codemirror": "^6.0.1"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0"
+  }
+}

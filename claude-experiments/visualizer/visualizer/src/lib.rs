@@ -1,10 +1,17 @@
+#[allow(dead_code)]
 mod anim;
+#[allow(dead_code)]
 mod animated;
+#[allow(dead_code)]
 mod collection;
 mod dsl;
+#[allow(dead_code)]
 mod hashmap_viz;
+#[allow(dead_code)]
 mod scene;
+#[allow(dead_code)]
 mod scene_demo;
+#[allow(dead_code)]
 mod state;
 mod theme;
 mod tweakables;
@@ -73,7 +80,7 @@ impl ApplicationHandler for App<'_> {
                 if let Some(prog) = self.program.borrow_mut().as_mut() {
                     match &event.logical_key {
                         Key::Named(NamedKey::ArrowLeft) => prog.step_back(),
-                        Key::Named(NamedKey::ArrowRight) => prog.step_forward(),
+                        Key::Named(NamedKey::ArrowRight) => prog.handle_click(&self.tweaks.borrow()),
                         _ => {}
                     }
                 }

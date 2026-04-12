@@ -3,8 +3,9 @@ use std::marker::PhantomData;
 
 use dynalloc::{Heap, PtrPolicy};
 use dynexec::{
-    CapturedCallerResume, CapturedFrame, ContinuationStore,
-    FrameSliceError, FrameSliceMode, FrameSliceSnapshot,
+    CapturedCallerResume, CapturedFrame, ContinuationContext,
+    FrameSliceError, FrameSliceSnapshot,
+    snapshot_to_builder, view_to_snapshot,
 };
 use dynir::interp::{ConfiguredModuleInterpreter, InterpError, InterpResult, InterpRootManager};
 use dynlower::{
@@ -13,73 +14,59 @@ use dynlower::{
 };
 use dynobj::RootSource;
 
-/// Continuation store for the JIT path. Stores `FrameSliceSnapshot`s
-/// indexed by u64 handles (simple indices into a Vec).
-#[derive(Default)]
-pub struct JitFrameSliceRuntime {
-    slices: Vec<FrameSliceSnapshot>,
+/// Continuation store for the JIT path. Delegates to a
+/// `ContinuationContext` (heap-backed) so captured continuations are
+/// real GC objects: traced, forwarded during collection, and
+/// reclaimed when unreferenced.
+///
+/// Handles returned from `capture` are heap-tagged pointers (u64),
+/// not Vec indices. `read` materializes a `FrameSliceSnapshot` from
+/// the heap object on every call — the view is transient and cheap
+/// (one linear scan of the packed metadata).
+pub struct JitFrameSliceRuntime<'a> {
+    ctx: &'a dyn ContinuationContext,
 }
 
-impl JitFrameSliceRuntime {
-    pub fn new() -> Self {
-        Self::default()
-    }
-}
-
-impl RootSource for JitFrameSliceRuntime {
-    fn scan_roots(&self, visitor: &mut dyn FnMut(*mut u64)) {
-        ContinuationStore::scan_roots(self, visitor)
-    }
-}
-
-impl ContinuationStore for JitFrameSliceRuntime {
-    fn store_snapshot(&mut self, snapshot: FrameSliceSnapshot) -> Result<u64, FrameSliceError> {
-        snapshot.validate()?;
-        let handle = self.slices.len() as u64;
-        self.slices.push(snapshot);
-        Ok(handle)
+impl<'a> JitFrameSliceRuntime<'a> {
+    pub fn new(ctx: &'a dyn ContinuationContext) -> Self {
+        JitFrameSliceRuntime { ctx }
     }
 
-    fn get_snapshot(&self, handle: u64) -> Result<&FrameSliceSnapshot, FrameSliceError> {
-        self.slices
-            .get(handle as usize)
+    /// Capture a continuation on the heap. Converts the legacy
+    /// `FrameSliceSnapshot` into a `CapturedStackBuilder` and
+    /// allocates via the backing `ContinuationContext`.
+    pub fn capture(&self, snapshot: FrameSliceSnapshot) -> Result<u64, FrameSliceError> {
+        let builder = snapshot_to_builder(&snapshot);
+        self.ctx
+            .capture(&builder)
             .ok_or(FrameSliceError::MissingSlice)
     }
 
-    fn get_snapshot_mut(&mut self, handle: u64) -> Result<&mut FrameSliceSnapshot, FrameSliceError> {
-        self.slices.get_mut(handle as usize).ok_or(FrameSliceError::MissingSlice)
-    }
-
-    fn clone_snapshot(&mut self, handle: u64) -> Result<u64, FrameSliceError> {
-        let mut cloned = self.get_snapshot(handle)?.clone();
-        cloned.consumed = false;
-        self.store_snapshot(cloned)
-    }
-
-    fn mark_consumed(&mut self, handle: u64) -> Result<(), FrameSliceError> {
-        let slice = self
-            .slices
-            .get_mut(handle as usize)
+    /// Read a previously-captured continuation. Materializes a
+    /// `FrameSliceSnapshot` from the heap object (the view is read
+    /// from the `ContObj`'s varlen values tail and the `ContMeta`'s
+    /// packed metadata).
+    pub fn read(&self, handle: u64) -> Result<FrameSliceSnapshot, FrameSliceError> {
+        let view = self
+            .ctx
+            .read(handle)
             .ok_or(FrameSliceError::MissingSlice)?;
-        if slice.consumed {
-            return Err(FrameSliceError::Consumed);
-        }
-        slice.consumed = true;
-        Ok(())
+        Ok(view_to_snapshot(&view))
     }
 
-    fn scan_roots(&self, visitor: &mut dyn FnMut(*mut u64)) {
-        for slice in &self.slices {
-            if slice.consumed {
-                continue;
-            }
-            for frame in &slice.frames {
-                for &root_idx in &frame.root_value_indices {
-                    let slot = (&frame.values[root_idx] as *const u64).cast_mut();
-                    visitor(slot);
-                }
-            }
-        }
+    /// Clone a continuation handle. Since the heap representation is
+    /// immutable, cloning is just returning the same handle.
+    pub fn clone_handle(&self, handle: u64) -> u64 {
+        handle
+    }
+}
+
+// JitFrameSliceRuntime no longer needs to be a RootSource — the
+// heap objects are traced by scan_object during collection. This
+// empty impl satisfies any leftover RootSource bounds.
+impl<'a> RootSource for JitFrameSliceRuntime<'a> {
+    fn scan_roots(&self, _visitor: &mut dyn FnMut(*mut u64)) {
+        // No-op: heap objects are traced by the GC directly.
     }
 }
 
@@ -283,20 +270,18 @@ fn build_capture_snapshot(
     };
     Ok(FrameSliceSnapshot {
         prompt_id: prompt.index() as u32,
-        mode: FrameSliceMode::OneShot,
         frames: std::mem::take(&mut frames),
-        consumed: false,
     })
 }
 
 pub fn materialize_capture_slice(
-    store: &mut JitFrameSliceRuntime,
+    store: &JitFrameSliceRuntime,
     record: &FrameReifyRecord,
     values: &[u64],
 ) -> Result<u64, JitFrameControlError> {
     let snapshot = build_capture_snapshot(record, values, Vec::new())?;
     store
-        .store_snapshot(snapshot)
+        .capture(snapshot)
         .map_err(|_| JitFrameControlError::UnsupportedOutcome)
 }
 
@@ -312,9 +297,8 @@ where
     R: InterpRootManager<Cfg::Layout, Cfg::Roots, Cfg::RootTransport>,
 {
     let snapshot = store
-        .get_snapshot(handle)
-        .map_err(ResumeWithInterpreterError::FrameSlice)?
-        .clone();
+        .read(handle)
+        .map_err(ResumeWithInterpreterError::FrameSlice)?;
     interpreter
         .resume_snapshot(snapshot, args)
         .map_err(ResumeWithInterpreterError::Interp)
@@ -328,7 +312,7 @@ pub fn resume_stored_slice_with_jit(
     args: &[u64],
 ) -> Result<JitOutcome, ResumeWithInterpreterError> {
     let snapshot = store
-        .get_snapshot(handle)
+        .read(handle)
         .map_err(ResumeWithInterpreterError::FrameSlice)?;
     let frame = snapshot
         .frames
@@ -354,7 +338,7 @@ pub fn resume_stored_slice_with_jit_module(
     args: &[u64],
 ) -> Result<JitOutcome, ResumeWithInterpreterError> {
     let snapshot = store
-        .get_snapshot(handle)
+        .read(handle)
         .map_err(ResumeWithInterpreterError::FrameSlice)?;
     let mut frame_idx = snapshot
         .frames
@@ -438,14 +422,14 @@ pub fn resume_stored_slice_with_jit_module(
 fn continue_outcome_with_function(
     jit: &JitFunction,
     outcome: JitOutcome,
-    store: &mut JitFrameSliceRuntime,
+    store: &JitFrameSliceRuntime,
 ) -> Result<JitExecutionResult, JitFrameControlError> {
     if let Some(control) = decode_frame_control_outcome(outcome.clone(), jit.frame_reify_records())? {
         return match control {
             JitFrameControl::CaptureSlice { record, values } => {
                 let snapshot = build_capture_snapshot(&record, &values, take_suspended_frames())?;
                 let handle = store
-                    .store_snapshot(snapshot)
+                    .capture(snapshot)
                     .map_err(|_| JitFrameControlError::UnsupportedOutcome)?;
                 Ok(JitExecutionResult::CaptureSlice { handle, record })
             }
@@ -458,9 +442,7 @@ fn continue_outcome_with_function(
                     return Err(JitFrameControlError::UnsupportedOutcome);
                 };
                 let handle = source_bits;
-                let cloned = store
-                    .clone_snapshot(handle)
-                    .map_err(JitFrameControlError::FrameSlice)?;
+                let cloned = store.clone_handle(handle);
                 if record.native_resume_offset.is_some() {
                     return continue_outcome_with_function(
                         jit,
@@ -478,17 +460,6 @@ fn continue_outcome_with_function(
                     .split_first()
                     .ok_or(JitFrameControlError::UnsupportedOutcome)?;
                 let handle = *slice_bits;
-                if matches!(
-                    store
-                        .get_snapshot(handle)
-                        .map_err(JitFrameControlError::FrameSlice)?
-                        .mode,
-                    FrameSliceMode::OneShot
-                ) {
-                    store
-                        .mark_consumed(handle)
-                        .map_err(JitFrameControlError::FrameSlice)?;
-                }
                 return continue_outcome_with_function(
                     jit,
                     resume_stored_slice_with_jit(jit, &record, store, handle, args)
@@ -540,7 +511,7 @@ fn continue_outcome_with_function(
 pub fn execute_jit_function(
     jit: &JitFunction,
     args: &[u64],
-    store: &mut JitFrameSliceRuntime,
+    store: &JitFrameSliceRuntime,
 ) -> Result<JitExecutionResult, JitFrameControlError> {
     execute_outcome(jit.call_outcome(args), jit.frame_reify_records(), store)
 }
@@ -548,7 +519,7 @@ pub fn execute_jit_function(
 pub fn execute_jit_function_to_terminal(
     jit: &JitFunction,
     args: &[u64],
-    store: &mut JitFrameSliceRuntime,
+    store: &JitFrameSliceRuntime,
 ) -> Result<JitExecutionResult, JitFrameControlError> {
     continue_outcome_with_function(jit, jit.call_outcome(args), store)
 }
@@ -557,7 +528,7 @@ pub fn execute_jit_module_function(
     jit: &JitModule,
     func_ref: dynir::FuncRef,
     args: &[u64],
-    store: &mut JitFrameSliceRuntime,
+    store: &JitFrameSliceRuntime,
 ) -> Result<JitExecutionResult, JitFrameControlError> {
     continue_outcome_with_module(
         jit,
@@ -571,7 +542,7 @@ fn continue_outcome_with_module(
     jit: &JitModule,
     records: &[FrameReifyRecord],
     outcome: JitOutcome,
-    store: &mut JitFrameSliceRuntime,
+    store: &JitFrameSliceRuntime,
 ) -> Result<JitExecutionResult, JitFrameControlError> {
     let records = match &outcome {
         JitOutcome::CaptureSlice { func_idx, .. }
@@ -587,7 +558,7 @@ fn continue_outcome_with_module(
             JitFrameControl::CaptureSlice { record, values } => {
                 let snapshot = build_capture_snapshot(&record, &values, take_suspended_frames())?;
                 let handle = store
-                    .store_snapshot(snapshot)
+                    .capture(snapshot)
                     .map_err(|_| JitFrameControlError::UnsupportedOutcome)?;
                 Ok(JitExecutionResult::CaptureSlice { handle, record })
             }
@@ -600,9 +571,7 @@ fn continue_outcome_with_module(
                     return Err(JitFrameControlError::UnsupportedOutcome);
                 };
                 let handle = source_bits;
-                let cloned = store
-                    .clone_snapshot(handle)
-                    .map_err(JitFrameControlError::FrameSlice)?;
+                let cloned = store.clone_handle(handle);
                 if record.native_resume_offset.is_some() {
                     let next = jit.call_resume_outcome(
                         record.resume.func_idx,
@@ -627,17 +596,6 @@ fn continue_outcome_with_module(
                     .split_first()
                     .ok_or(JitFrameControlError::UnsupportedOutcome)?;
                 let handle = *slice_bits;
-                if matches!(
-                    store
-                        .get_snapshot(handle)
-                        .map_err(JitFrameControlError::FrameSlice)?
-                        .mode,
-                    FrameSliceMode::OneShot
-                ) {
-                    store
-                        .mark_consumed(handle)
-                        .map_err(JitFrameControlError::FrameSlice)?;
-                }
                 let next = resume_stored_slice_with_jit_module(jit, &record, store, handle, args)
                     .map_err(|err| match err {
                         ResumeWithInterpreterError::FrameSlice(err) => {
@@ -688,7 +646,7 @@ pub fn execute_jit_module_function_to_terminal(
     jit: &JitModule,
     func_ref: dynir::FuncRef,
     args: &[u64],
-    store: &mut JitFrameSliceRuntime,
+    store: &JitFrameSliceRuntime,
 ) -> Result<JitExecutionResult, JitFrameControlError> {
     continue_outcome_with_module(
         jit,
@@ -701,7 +659,7 @@ pub fn execute_jit_module_function_to_terminal(
 fn execute_outcome(
     outcome: JitOutcome,
     records: &[FrameReifyRecord],
-    store: &mut JitFrameSliceRuntime,
+    store: &JitFrameSliceRuntime,
 ) -> Result<JitExecutionResult, JitFrameControlError> {
     if let Some(control) = decode_frame_control_outcome(outcome.clone(), records)? {
         return match control {
@@ -713,9 +671,7 @@ fn execute_outcome(
                 let handle = *values.first().ok_or(
                     JitFrameControlError::UnsupportedOutcome,
                 )?;
-                let cloned = store
-                    .clone_snapshot(handle)
-                    .map_err(|_| JitFrameControlError::UnsupportedOutcome)?;
+                let cloned = store.clone_handle(handle);
                 Ok(JitExecutionResult::CloneSlice {
                     handle: cloned,
                     record,
@@ -726,17 +682,6 @@ fn execute_outcome(
                     .split_first()
                     .ok_or(JitFrameControlError::UnsupportedOutcome)?;
                 let handle = *slice_bits;
-                if matches!(
-                    store
-                        .get_snapshot(handle)
-                        .map_err(JitFrameControlError::FrameSlice)?
-                        .mode,
-                    FrameSliceMode::OneShot
-                ) {
-                    store
-                        .mark_consumed(handle)
-                        .map_err(JitFrameControlError::FrameSlice)?;
-                }
                 Ok(JitExecutionResult::ResumeSlice {
                     handle,
                     args: args.to_vec(),
@@ -990,13 +935,33 @@ mod tests {
     use dynalloc::Heap;
     use dynexec::FrameResumePoint;
     use dynir::builder::{FunctionBuilder, ModuleBuilder};
-    use dynir::interp::{ModuleInterpreter, NoGcRoots};
+    use dynir::interp::ModuleInterpreter;
     use dynir::Module;
     use dynir::types::Type;
     use dynlower::FrameReifyKind;
     use dynobj::Compact;
     use dynvalue::NanBox;
     // Tests use JitFrameSliceRuntime (imported via super::*)
+
+    /// Build a GcInterpCtx suitable for continuation tests.
+    fn make_cont_ctx() -> dynir::gc_runtime::GcInterpCtx<dynobj::Compact, TestPol> {
+        use dynalloc::SemiSpace;
+        use dynexec::ContinuationTypes;
+
+        let mut type_table = Vec::new();
+        let cont_types = ContinuationTypes::register_into::<dynobj::Compact>(&mut type_table);
+        let heap = SemiSpace::new::<dynobj::Compact>(64 * 1024);
+        dynir::gc_runtime::GcInterpCtx::<dynobj::Compact, TestPol>::new(heap, type_table, cont_types)
+    }
+
+    struct TestPol;
+    impl dynalloc::PtrPolicy for TestPol {
+        fn try_decode_ptr(bits: u64) -> Option<*mut u8> {
+            if bits == 0 { return None; }
+            if bits & 0b111 == 0 { Some(bits as *mut u8) } else { None }
+        }
+        fn encode_ptr(ptr: *mut u8) -> u64 { ptr as u64 }
+    }
 
     #[cfg(target_arch = "aarch64")]
     core::arch::global_asm!(
@@ -1093,7 +1058,8 @@ mod tests {
 
     #[test]
     fn materialize_capture_slice_inserts_snapshot() {
-        let mut store = JitFrameSliceRuntime::new();
+        let ctx = make_cont_ctx();
+        let store = JitFrameSliceRuntime::new(&ctx);
         let record = FrameReifyRecord {
             kind: FrameReifyKind::CaptureSlice,
             prompt: Some(dynir::PromptId::from_index(1)),
@@ -1112,8 +1078,8 @@ mod tests {
             return_dest: Some(30),
         };
 
-        let handle = materialize_capture_slice(&mut store, &record, &[88, 99]).unwrap();
-        let snapshot = store.get_snapshot(handle).unwrap();
+        let handle = materialize_capture_slice(&store, &record, &[88, 99]).unwrap();
+        let snapshot = store.read(handle).unwrap();
         assert_eq!(snapshot.prompt_id, 1);
         assert_eq!(snapshot.frames.len(), 1);
         assert_eq!(snapshot.frames[0].resume, record.resume);
@@ -1142,13 +1108,14 @@ mod tests {
         let func = b.build();
 
         let jit = JitFunction::compile::<NanBox>(&func, &[]);
-        let mut store = JitFrameSliceRuntime::new();
-        let result = execute_jit_function(&jit, &[123], &mut store).unwrap();
+        let ctx = make_cont_ctx();
+        let store = JitFrameSliceRuntime::new(&ctx);
+        let result = execute_jit_function(&jit, &[123], &store).unwrap();
 
         match result {
             JitExecutionResult::CaptureSlice { handle, record } => {
                 assert_eq!(record.kind, FrameReifyKind::CaptureSlice);
-                let snapshot = store.get_snapshot(handle).unwrap();
+                let snapshot = store.read(handle).unwrap();
                 assert_eq!(snapshot.frames.len(), 1);
                 assert_eq!(snapshot.frames[0].values[arg.index()], 123);
                 assert_eq!(snapshot.frames[0].resume_arg_value_indices, vec![slice.index()]);
@@ -1170,8 +1137,9 @@ mod tests {
         let module = mb.build();
 
         let jit = JitModule::compile::<NanBox>(&module, &[]);
-        let mut store = JitFrameSliceRuntime::new();
-        let result = execute_jit_module_function(&jit, f_main, &[77], &mut store).unwrap();
+        let ctx = make_cont_ctx();
+        let store = JitFrameSliceRuntime::new(&ctx);
+        let result = execute_jit_module_function(&jit, f_main, &[77], &store).unwrap();
 
         match result {
             JitExecutionResult::AbortToPrompt { prompt, values, record } => {
@@ -1208,13 +1176,14 @@ mod tests {
 
         let module = mb.build();
         let jit = JitModule::compile::<NanBox>(&module, &[]);
-        let mut store = JitFrameSliceRuntime::new();
-        let result = execute_jit_module_function(&jit, f_main, &[], &mut store).unwrap();
+        let ctx = make_cont_ctx();
+        let store = JitFrameSliceRuntime::new(&ctx);
+        let result = execute_jit_module_function(&jit, f_main, &[], &store).unwrap();
 
         match result {
             JitExecutionResult::CaptureSlice { handle, record } => {
                 assert_eq!(record.kind, FrameReifyKind::CaptureSlice);
-                let snapshot = store.get_snapshot(handle).unwrap();
+                let snapshot = store.read(handle).unwrap();
                 assert_eq!(snapshot.frames.len(), 2);
                 assert_eq!(snapshot.frames[0].resume.func_idx, 0);
                 assert_eq!(snapshot.frames[1].resume.func_idx, 1);
@@ -1298,11 +1267,11 @@ mod tests {
 
     #[test]
     fn execute_jit_function_bridges_clone_and_resume_requests() {
-        let mut store = JitFrameSliceRuntime::new();
+        let ctx = make_cont_ctx();
+        let store = JitFrameSliceRuntime::new(&ctx);
         let handle = store
-            .store_snapshot(FrameSliceSnapshot {
+            .capture(FrameSliceSnapshot {
                 prompt_id: 0,
-                mode: FrameSliceMode::OneShot,
                 frames: vec![CapturedFrame {
                     resume: FrameResumePoint {
                         func_idx: 1,
@@ -1315,7 +1284,6 @@ mod tests {
                     active_prompts: vec![],
                     caller_resume: CapturedCallerResume::TopLevel,
                 }],
-                consumed: false,
             })
             .unwrap();
 
@@ -1342,7 +1310,7 @@ mod tests {
                 root_payload_indices: vec![],
                 return_dest: Some(1),
             }],
-            &mut store,
+            &store,
         )
         .unwrap();
 
@@ -1350,7 +1318,7 @@ mod tests {
             JitExecutionResult::CloneSlice { handle, .. } => handle,
             other => panic!("expected clone result, got {other:?}"),
         };
-        assert_ne!(handle, cloned_handle);
+        assert_eq!(handle, cloned_handle);
 
         let resume_result = execute_outcome(
             JitOutcome::ResumeSlice {
@@ -1375,7 +1343,7 @@ mod tests {
                 root_payload_indices: vec![],
                 return_dest: None,
             }],
-            &mut store,
+            &store,
         )
         .unwrap();
 
@@ -1386,7 +1354,7 @@ mod tests {
                     cloned_handle
                 );
                 assert_eq!(args, vec![99]);
-                assert!(store.get_snapshot(handle).unwrap().consumed);
+
             }
             other => panic!("expected resume result, got {other:?}"),
         }
@@ -1409,11 +1377,14 @@ mod tests {
 
         let jit = JitFunction::compile::<NanBox>(&func, &[]);
         let (module, _entry) = Module::from_function(func);
-        let roots = NoGcRoots;
-        let interp = ModuleInterpreter::<NanBox, _>::new(&module, &roots);
-        let mut store = JitFrameSliceRuntime::new();
 
-        let handle = match execute_jit_function(&jit, &[], &mut store).unwrap() {
+        let ctx = make_cont_ctx();
+
+        let mut interp = ModuleInterpreter::<NanBox, _>::new(&module, &ctx);
+        interp.set_cont_ctx(&ctx);
+        let store = JitFrameSliceRuntime::new(&ctx);
+
+        let handle = match execute_jit_function(&jit, &[], &store).unwrap() {
             JitExecutionResult::CaptureSlice { handle, .. } => handle,
             other => panic!("expected capture result, got {other:?}"),
         };
@@ -1440,9 +1411,10 @@ mod tests {
         let func = b.build();
 
         let jit = JitFunction::compile::<NanBox>(&func, &[]);
-        let mut store = JitFrameSliceRuntime::new();
+        let ctx = make_cont_ctx();
+        let store = JitFrameSliceRuntime::new(&ctx);
 
-        let (handle, record) = match execute_jit_function(&jit, &[], &mut store).unwrap() {
+        let (handle, record) = match execute_jit_function(&jit, &[], &store).unwrap() {
             JitExecutionResult::CaptureSlice { handle, record } => (handle, record),
             other => panic!("expected capture result, got {other:?}"),
         };
@@ -1477,14 +1449,19 @@ mod tests {
         let entry = clone_resume.entry_block();
         let slice = clone_resume.block_param(entry, 0);
         let cloned = clone_resume.clone_slice(slice);
-        clone_resume.resume_slice(cloned, &[]);
+        let return_block = clone_resume.create_block(&[Type::I64]);
+        clone_resume.resume_slice(cloned, &[], return_block, &[]);
+        clone_resume.switch_to_block(return_block);
+        let ret_val = clone_resume.block_param(return_block, 0);
+        clone_resume.ret(ret_val);
         mb.finish_func(f_clone_resume, clone_resume);
 
         let module = mb.build();
         let jit = JitModule::compile::<NanBox>(&module, &[]);
-        let mut store = JitFrameSliceRuntime::new();
+        let ctx = make_cont_ctx();
+        let store = JitFrameSliceRuntime::new(&ctx);
 
-        let handle = match execute_jit_module_function(&jit, f_capture, &[], &mut store).unwrap() {
+        let handle = match execute_jit_module_function(&jit, f_capture, &[], &store).unwrap() {
             JitExecutionResult::CaptureSlice { handle, .. } => handle,
             other => panic!("expected capture result, got {other:?}"),
         };
@@ -1493,7 +1470,7 @@ mod tests {
             &jit,
             f_clone_resume,
             &[handle],
-            &mut store,
+            &store,
         )
         .unwrap()
         {
@@ -1529,9 +1506,10 @@ mod tests {
 
         let module = mb.build();
         let jit = JitModule::compile::<NanBox>(&module, &[]);
-        let mut store = JitFrameSliceRuntime::new();
+        let ctx = make_cont_ctx();
+        let store = JitFrameSliceRuntime::new(&ctx);
 
-        let (handle, record) = match execute_jit_module_function(&jit, f_main, &[], &mut store).unwrap() {
+        let (handle, record) = match execute_jit_module_function(&jit, f_main, &[], &store).unwrap() {
             JitExecutionResult::CaptureSlice { handle, record } => (handle, record),
             other => panic!("expected capture result, got {other:?}"),
         };
@@ -1577,9 +1555,10 @@ mod tests {
 
         let module = mb.build();
         let jit = JitModule::compile::<NanBox>(&module, &[]);
-        let mut store = JitFrameSliceRuntime::new();
+        let ctx = make_cont_ctx();
+        let store = JitFrameSliceRuntime::new(&ctx);
 
-        let (handle, record) = match execute_jit_module_function(&jit, f_main, &[], &mut store).unwrap() {
+        let (handle, record) = match execute_jit_module_function(&jit, f_main, &[], &store).unwrap() {
             JitExecutionResult::CaptureSlice { handle, record } => (handle, record),
             other => panic!("expected capture result, got {other:?}"),
         };
@@ -1633,13 +1612,14 @@ mod tests {
 
         let module = mb.build();
         let jit = JitModule::compile::<NanBox>(&module, &[]);
-        let mut store = JitFrameSliceRuntime::new();
+        let ctx = make_cont_ctx();
+        let store = JitFrameSliceRuntime::new(&ctx);
 
-        let handle = match execute_jit_module_function(&jit, f_main, &[], &mut store).unwrap() {
+        let handle = match execute_jit_module_function(&jit, f_main, &[], &store).unwrap() {
             JitExecutionResult::CaptureSlice { handle, .. } => handle,
             other => panic!("expected capture result, got {other:?}"),
         };
-        let snapshot = store.get_snapshot(handle).unwrap();
+        let snapshot = store.read(handle).unwrap();
         assert_eq!(snapshot.frames.len(), 2);
         match &snapshot.frames[1].caller_resume {
             CapturedCallerResume::FromInvoke {
@@ -1690,11 +1670,12 @@ mod tests {
 
         let module = mb.build();
         let jit = JitModule::compile::<NanBox>(&module, &[]);
-        let mut store = JitFrameSliceRuntime::new();
+        let ctx = make_cont_ctx();
+        let store = JitFrameSliceRuntime::new(&ctx);
         let inner_ptr = jit.function_ptr(f_inner) as u64;
 
         let (handle, record) =
-            match execute_jit_module_function(&jit, f_main, &[inner_ptr], &mut store).unwrap() {
+            match execute_jit_module_function(&jit, f_main, &[inner_ptr], &store).unwrap() {
                 JitExecutionResult::CaptureSlice { handle, record } => (handle, record),
                 other => panic!("expected capture result, got {other:?}"),
             };
@@ -1745,11 +1726,12 @@ mod tests {
 
         let module = mb.build();
         let jit = JitModule::compile::<NanBox>(&module, &[]);
-        let mut store = JitFrameSliceRuntime::new();
+        let ctx = make_cont_ctx();
+        let store = JitFrameSliceRuntime::new(&ctx);
         let throw_ptr = dynruntime_test_throw_exception_stub as usize as u64;
 
         let (handle, record) =
-            match execute_jit_module_function(&jit, f_main, &[throw_ptr], &mut store).unwrap() {
+            match execute_jit_module_function(&jit, f_main, &[throw_ptr], &store).unwrap() {
                 JitExecutionResult::CaptureSlice { handle, record } => (handle, record),
                 other => panic!("expected capture result, got {other:?}"),
             };
@@ -1802,12 +1784,13 @@ mod tests {
 
         let module = mb.build();
         let jit = JitModule::compile::<NanBox>(&module, &[]);
-        let mut store = JitFrameSliceRuntime::new();
+        let ctx = make_cont_ctx();
+        let store = JitFrameSliceRuntime::new(&ctx);
         let inner_ptr = jit.function_ptr(f_inner) as u64;
         let throw_stub_ptr = dynruntime_test_throw_exception_stub as usize as u64;
 
         let (handle, record) =
-            match execute_jit_module_function(&jit, f_main, &[inner_ptr, throw_stub_ptr], &mut store).unwrap() {
+            match execute_jit_module_function(&jit, f_main, &[inner_ptr, throw_stub_ptr], &store).unwrap() {
                 JitExecutionResult::CaptureSlice { handle, record } => (handle, record),
                 other => panic!("expected capture result, got {other:?}"),
             };
@@ -1842,7 +1825,9 @@ mod tests {
 
     #[test]
     fn installed_session_routes_handler_calls_through_transport() {
-        let heap = Heap::new::<Compact>(256);
+        use dynobj::{ObjHeader, TypeInfo};
+        let dummy_type = TypeInfo::for_header(Compact::SIZE);
+        let heap = Heap::new::<Compact>(256, vec![dummy_type]);
         let last_payload = Cell::new(usize::MAX);
         let transport = CountingTransport {
             last_payload: &last_payload,

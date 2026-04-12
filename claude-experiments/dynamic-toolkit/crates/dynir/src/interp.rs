@@ -2,10 +2,10 @@ use std::marker::PhantomData;
 
 use dynexec::{
     BuilderFrame, CapturedFrame, CapturedResume, CapturedStackBuilder, CodegenConfig,
-    ContinuationView, DefaultCodegenConfig, FrameResume, FrameResumePoint,
-    FrameSliceError, FrameSliceMode, FrameSliceSnapshot, InterpFrameStore,
-    LayoutConfigDefaults, RootPrecision, RootStrategy, RootTransport, RootTransportKind,
-    ValueLayout,
+    ContinuationView, DefaultCodegenConfig, FrameCapture, FrameResume, FrameResumePoint,
+    FrameRestorable, FrameSliceError, FrameSliceSnapshot, InterpFrameStore,
+    LayoutConfigDefaults, PromptBoundaryAction, RootPrecision, RootStrategy, RootTransport,
+    RootTransportKind, ValueLayout,
 };
 use dynvalue::Decoded;
 
@@ -79,6 +79,16 @@ pub trait InterpRootManager<
     fn should_collect(&self) -> bool {
         false
     }
+
+    /// Register an additional root source (e.g., the JIT's
+    /// continuation store) that should be scanned during collection.
+    /// Default: no-op (NoGcRoots doesn't collect so extra roots are
+    /// meaningless).
+    ///
+    /// # Safety
+    /// The pointed-to RootSource must remain valid for all subsequent
+    /// `collect()` calls.
+    fn register_root_source_raw(&self, _source: *const dyn dynobj::RootSource) {}
 
     /// How precisely this root manager tracks interpreter frame values.
     fn root_precision(&self) -> RootPrecision {
@@ -249,6 +259,13 @@ impl<'a, L: ValueLayout, Roots: RootStrategy<L>, Transport: RootTransport<L, Roo
         prompt_id: u32,
         resume_dest: usize,
     ) -> CapturedStackBuilder {
+        // Sync the top frame's vals to root slots BEFORE reading any
+        // frame. This ensures that for the top frame (which the
+        // interpreter modifies directly via vals), the root slots
+        // are up to date. For non-top frames, root slots were
+        // already forwarded by the most recent GC.
+        self.sync_top_to_roots();
+
         let start = self
             .stack
             .iter()
@@ -260,10 +277,16 @@ impl<'a, L: ValueLayout, Roots: RootStrategy<L>, Transport: RootTransport<L, Roo
         for (i, f) in self.stack[start..].iter().enumerate() {
             let is_top = i + 1 == frame_count;
 
-            // `f.vals` is authoritative at instruction boundaries —
-            // the root cells are only freshened on specific events
-            // (frame push/pop, collect_gc) and may be stale here.
-            let vals = f.vals.clone();
+            // Start from vals (authoritative for non-GC slots like
+            // I64 values), then overlay GC-tracked slots from root
+            // cells (which hold the forwarded addresses after any
+            // GC that ran while this frame was dormant).
+            let mut vals = f.vals.clone();
+            for (vi, slot_opt) in f.val_to_slot.iter().enumerate() {
+                if let Some(slot) = slot_opt {
+                    vals[vi] = self.roots.get_root(f.root_frame, *slot);
+                }
+            }
 
             let root_indices: Vec<u16> = f
                 .val_to_slot
@@ -283,12 +306,19 @@ impl<'a, L: ValueLayout, Roots: RootStrategy<L>, Transport: RootTransport<L, Roo
                         return_param_dest: return_param_dest.map(|d| d as u32),
                     }
                 }
-                FrameResume::FromInvoke { .. } => {
-                    panic!(
-                        "build_captured_stack: capturing a FromInvoke frame is \
-                         not supported (cannot capture across a try/catch boundary)"
-                    );
-                }
+                FrameResume::FromInvoke {
+                    normal_block,
+                    normal_args_vals,
+                    exception_block,
+                    exception_args_vals,
+                    has_ret_param,
+                } => CapturedResume::FromInvoke {
+                    normal_block: *normal_block as u32,
+                    normal_args_vals: normal_args_vals.clone(),
+                    exception_block: *exception_block as u32,
+                    exception_args_vals: exception_args_vals.clone(),
+                    has_ret_param: *has_ret_param,
+                },
             };
 
             frames.push(BuilderFrame {
@@ -370,6 +400,30 @@ impl<'a, L: ValueLayout, Roots: RootStrategy<L>, Transport: RootTransport<L, Roo
     }
 }
 
+// ─── FrameCapture / FrameRestorable trait impls ────────────────────
+//
+// These delegate to the inherent methods (build_captured_stack_impl,
+// splice_from_view_impl) defined on InterpStackRuntime above. The
+// trait boundary lets the shared continuation operations in
+// dynexec::cont_ops work with both the interpreter and the JIT.
+
+impl<'a, L: ValueLayout, Roots: RootStrategy<L>, Transport: RootTransport<L, Roots>, R: InterpRootManager<L, Roots, Transport>> FrameCapture for InterpStackRuntime<'a, L, Roots, Transport, R> {
+    fn extract_capture(&self, prompt_id: u32, resume_dest: usize) -> CapturedStackBuilder {
+        self.build_captured_stack_impl(prompt_id, resume_dest)
+    }
+}
+
+impl<'a, L: ValueLayout, Roots: RootStrategy<L>, Transport: RootTransport<L, Roots>, R: InterpRootManager<L, Roots, Transport>> FrameRestorable for InterpStackRuntime<'a, L, Roots, Transport, R> {
+    fn splice_restore(
+        &mut self,
+        view: &ContinuationView<'_>,
+        args: &[u64],
+        bottom_resume: FrameResume,
+    ) {
+        self.splice_from_view_impl(view, args, bottom_resume)
+    }
+}
+
 /// Convert a `CapturedResume` (cont-heap restricted enum) back into a
 /// `FrameResume` for use as a live frame's resume field.
 fn captured_to_frame_resume(r: CapturedResume) -> FrameResume {
@@ -384,6 +438,19 @@ fn captured_to_frame_resume(r: CapturedResume) -> FrameResume {
                 return_param_dest: return_param_dest.map(|d| d as usize),
             }
         }
+        CapturedResume::FromInvoke {
+            normal_block,
+            normal_args_vals,
+            exception_block,
+            exception_args_vals,
+            has_ret_param,
+        } => FrameResume::FromInvoke {
+            normal_block: normal_block as usize,
+            normal_args_vals,
+            exception_block: exception_block as usize,
+            exception_args_vals,
+            has_ret_param,
+        },
     }
 }
 
@@ -562,9 +629,7 @@ impl<'a, L: ValueLayout, Roots: RootStrategy<L>, Transport: RootTransport<L, Roo
         }
         FrameSliceSnapshot {
             prompt_id: prompt,
-            mode: FrameSliceMode::OneShot,
             frames,
-            consumed: false,
         }
     }
 

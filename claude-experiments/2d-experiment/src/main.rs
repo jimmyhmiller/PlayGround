@@ -6,8 +6,7 @@ use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::render::render_resource::{AsBindGroup, ShaderType};
 use bevy::shader::ShaderRef;
 use bevy::sprite_render::{AlphaMode2d, Material2d, Material2dPlugin};
-use bevy_inspector_egui::bevy_egui::EguiPlugin;
-use bevy_inspector_egui::quick::ResourceInspectorPlugin;
+use bevy_inspector_egui::bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass, egui};
 use bevy_inspector_egui::InspectorOptions;
 use bevy_inspector_egui::prelude::ReflectInspectorOptions;
 use serde::{Deserialize, Serialize};
@@ -101,6 +100,52 @@ impl Default for Monster {
     }
 }
 
+/// Tracks whether a monster has spotted the player and how long since it lost sight.
+#[derive(Component)]
+struct MonsterAlert {
+    has_seen: bool,
+    time_since_los: f32,
+    /// Accumulates while the player is in LOS; once it exceeds `notice_threshold`
+    /// the monster becomes alerted. Reset when LOS is lost.
+    notice_accumulator: f32,
+    /// Random per-monster threshold (seconds of LOS needed to notice the player).
+    notice_threshold: f32,
+    /// Current wander direction (idle roaming).
+    wander_dir: Vec2,
+    /// Time remaining before picking a new wander direction.
+    wander_timer: f32,
+}
+
+impl Default for MonsterAlert {
+    fn default() -> Self {
+        let angle = rand_range(0.0, std::f32::consts::TAU);
+        Self {
+            has_seen: false,
+            time_since_los: 0.0,
+            notice_accumulator: 0.0,
+            notice_threshold: rand_range(0.3, 1.5),
+            wander_dir: Vec2::new(angle.cos(), angle.sin()),
+            wander_timer: rand_range(1.0, 3.0),
+        }
+    }
+}
+
+/// Simple deterministic-ish random f32 in [lo, hi) seeded from a global counter.
+fn rand_range(lo: f32, hi: f32) -> f32 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static CTR: AtomicU64 = AtomicU64::new(0);
+    let n = CTR.fetch_add(1, Ordering::Relaxed);
+    // xorshift-style mix
+    let mut x = n.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+    x ^= x >> 33;
+    x = x.wrapping_mul(0xff51afd7ed558ccd);
+    x ^= x >> 33;
+    let frac = (x & 0xFFFFFF) as f32 / 0xFFFFFF as f32;
+    lo + frac * (hi - lo)
+}
+
+const ALERT_TIMEOUT: f32 = 5.0;
+
 #[derive(Component, Copy, Clone)]
 struct Collider {
     half: Vec2,
@@ -154,10 +199,69 @@ enum EditorTool {
     Monster,
 }
 
+impl EditorTool {
+    fn label(&self) -> &'static str {
+        match self {
+            EditorTool::Wall => "Wall",
+            EditorTool::Monster => "Monster",
+        }
+    }
+
+}
+
+/// All tools grouped by category, in display order.
+const EDITOR_CATEGORIES: &[(&str, &[EditorTool])] = &[
+    ("Structures", &[EditorTool::Wall]),
+    ("Enemies", &[EditorTool::Monster]),
+];
+
+#[derive(Clone, Debug)]
+enum EditorAction {
+    PlaceWall { center: Vec2, size: Vec2 },
+    DeleteWall { center: Vec2, size: Vec2 },
+    PlaceMonster { pos: Vec2, monster: MonsterSnapshot },
+    DeleteMonster { pos: Vec2, monster: MonsterSnapshot },
+}
+
+#[derive(Clone, Debug)]
+struct MonsterSnapshot {
+    speed: f32,
+    detection_range: f32,
+    attack_reach: f32,
+    strength: f32,
+}
+
+impl From<&Monster> for MonsterSnapshot {
+    fn from(m: &Monster) -> Self {
+        Self {
+            speed: m.speed,
+            detection_range: m.detection_range,
+            attack_reach: m.attack_reach,
+            strength: m.strength,
+        }
+    }
+}
+
+impl MonsterSnapshot {
+    fn to_monster(&self) -> Monster {
+        Monster {
+            speed: self.speed,
+            detection_range: self.detection_range,
+            attack_reach: self.attack_reach,
+            strength: self.strength,
+        }
+    }
+}
+
 #[derive(Resource, Default)]
 struct EditorState {
     drag_start: Option<Vec2>,
     tool: EditorTool,
+    undo_stack: Vec<EditorAction>,
+    redo_stack: Vec<EditorAction>,
+    selected: Option<Entity>,
+    /// Set by editor_ui each frame; true when the pointer is over any egui panel.
+    ui_has_pointer: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -168,9 +272,21 @@ struct WallData {
     h: f32,
 }
 
+#[derive(Serialize, Deserialize)]
+struct MonsterData {
+    x: f32,
+    y: f32,
+    speed: f32,
+    detection_range: f32,
+    attack_reach: f32,
+    strength: f32,
+}
+
 #[derive(Serialize, Deserialize, Default)]
 struct LevelData {
     walls: Vec<WallData>,
+    #[serde(default)]
+    monsters: Vec<MonsterData>,
 }
 
 // Y-sort by `transform.y + ground_offset`. Use the offset so wall visuals
@@ -248,7 +364,7 @@ fn main() {
         .add_plugins(Material2dPlugin::<ConeLightMaterial>::default())
         .add_plugins(Material2dPlugin::<CaveFloorMaterial>::default())
         .add_plugins(EguiPlugin::default())
-        .add_plugins(ResourceInspectorPlugin::<Tuning>::default())
+        .register_type::<Monster>()
         .insert_resource(ClearColor(Color::srgb(0.10, 0.12, 0.15)))
         .insert_resource(Time::<Fixed>::from_hz(FIXED_HZ))
         .init_resource::<Tuning>()
@@ -258,7 +374,13 @@ fn main() {
         .add_systems(Startup, setup)
         .add_systems(
             FixedUpdate,
-            advance_physics.run_if(in_state(GameMode::Playing)),
+            (
+                advance_physics,
+                monster_ai,
+                monster_attack,
+            )
+                .chain()
+                .run_if(in_state(GameMode::Playing)),
         )
         .add_systems(
             RunFixedMainLoop,
@@ -286,14 +408,23 @@ fn main() {
         .add_systems(OnEnter(GameMode::Editing), on_enter_editing)
         .add_systems(OnEnter(GameMode::Playing), on_enter_playing)
         .add_systems(
+            EguiPrimaryContextPass,
+            editor_ui.run_if(in_state(GameMode::Editing)),
+        )
+        .add_systems(
             Update,
             (
-                editor_camera_pan.run_if(in_state(GameMode::Editing)),
-                editor_camera_zoom.run_if(in_state(GameMode::Editing)),
-                editor_handle_placement.run_if(in_state(GameMode::Editing)),
-                editor_handle_delete.run_if(in_state(GameMode::Editing)),
-                editor_save.run_if(in_state(GameMode::Editing)),
-            ),
+                editor_camera_pan,
+                editor_camera_zoom,
+                editor_handle_select,
+                editor_handle_placement,
+                editor_handle_delete,
+                editor_undo_redo,
+                editor_save,
+                editor_draw_monsters,
+                editor_draw_selection,
+            )
+                .run_if(in_state(GameMode::Editing)),
         )
         .run();
 }
@@ -309,19 +440,22 @@ fn setup(
     mut cone_materials: ResMut<Assets<ConeLightMaterial>>,
     mut cave_materials: ResMut<Assets<CaveFloorMaterial>>,
 ) {
-    commands.spawn(Camera2d);
+    commands.spawn((Camera2d, Name::new("Camera")));
 
     // Procedural cave floor — one big quad, shader samples world-space noise.
     commands.spawn((
         Mesh2d(meshes.add(Rectangle::new(8192.0, 8192.0))),
         MeshMaterial2d(cave_materials.add(CaveFloorMaterial::default())),
         Transform::from_xyz(0.0, 0.0, -10.0),
+        Name::new("Cave Floor"),
     ));
 
     // Player — green square.
     let player_half = Vec2::new(14.0, 14.0);
     commands.spawn((
         Player,
+        PlayerSpawn(Vec2::ZERO),
+        Name::new("Player"),
         Mesh2d(meshes.add(Rectangle::new(player_half.x * 2.0, player_half.y * 2.0))),
         MeshMaterial2d(color_materials.add(Color::srgb(0.45, 0.92, 0.55))),
         Transform::from_xyz(0.0, 0.0, 1.0),
@@ -349,6 +483,7 @@ fn setup(
         Mesh2d(overlay_mesh),
         MeshMaterial2d(overlay_mat),
         Transform::from_xyz(0.0, 0.0, 900.0),
+        Name::new("Light Overlay"),
     ));
 
     // Shadow geometry mesh — regenerated each frame by `update_shadow_geometry`.
@@ -361,6 +496,7 @@ fn setup(
         Mesh2d(shadow_mesh),
         MeshMaterial2d(shadow_mat),
         Transform::from_xyz(0.0, 0.0, 901.0),
+        Name::new("Shadow Mesh"),
     ));
 }
 
@@ -412,6 +548,7 @@ fn spawn_wall(
             MeshMaterial2d(materials.add(top_color)),
             Transform::from_xyz(center.x, center.y, 0.0),
             YSorted { ground_offset: sort_y - center.y },
+            Name::new("Wall Top"),
         ))
         .id();
 
@@ -422,6 +559,7 @@ fn spawn_wall(
             MeshMaterial2d(materials.add(front_color)),
             Transform::from_xyz(front_center.x, front_center.y, 0.0),
             YSorted { ground_offset: sort_y - front_center.y },
+            Name::new("Wall Front"),
         ))
         .id();
 
@@ -432,6 +570,32 @@ fn spawn_wall(
             Transform::from_xyz(center.x, center.y, 0.0),
             GlobalTransform::default(),
             Visibility::Hidden,
+            Name::new("Wall"),
+        ))
+        .id()
+}
+
+fn spawn_monster(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<ColorMaterial>,
+    pos: Vec2,
+    monster: Monster,
+) -> Entity {
+    let half = Vec2::new(12.0, 12.0);
+    commands
+        .spawn((
+            monster,
+            MonsterAlert::default(),
+            Mesh2d(meshes.add(Rectangle::new(half.x * 2.0, half.y * 2.0))),
+            MeshMaterial2d(materials.add(Color::srgb(0.92, 0.25, 0.25))),
+            Transform::from_xyz(pos.x, pos.y, 1.0),
+            Collider { half },
+            Velocity::default(),
+            PhysicalTranslation(pos),
+            PreviousPhysicalTranslation(pos),
+            YSorted { ground_offset: 0.0 },
+            Name::new("Monster"),
         ))
         .id()
 }
@@ -783,7 +947,7 @@ fn load_level_or_default(
     if let Ok(s) = std::fs::read_to_string(LEVEL_PATH) {
         match ron::de::from_str::<LevelData>(&s) {
             Ok(level) => {
-                info!("loaded {} walls from {}", level.walls.len(), LEVEL_PATH);
+                info!("loaded {} walls, {} monsters from {}", level.walls.len(), level.monsters.len(), LEVEL_PATH);
                 for w in level.walls {
                     spawn_wall(
                         commands,
@@ -791,6 +955,20 @@ fn load_level_or_default(
                         materials,
                         Vec2::new(w.cx, w.cy),
                         Vec2::new(w.w, w.h),
+                    );
+                }
+                for m in level.monsters {
+                    spawn_monster(
+                        commands,
+                        meshes,
+                        materials,
+                        Vec2::new(m.x, m.y),
+                        Monster {
+                            speed: m.speed,
+                            detection_range: m.detection_range,
+                            attack_reach: m.attack_reach,
+                            strength: m.strength,
+                        },
                     );
                 }
                 return;
@@ -815,6 +993,7 @@ fn load_level_or_default(
 fn editor_save(
     keys: Res<ButtonInput<KeyCode>>,
     walls: Query<(&Transform, &Collider), With<WallFootprint>>,
+    monsters: Query<(&Transform, &Monster)>,
 ) {
     let mod_key = keys.pressed(KeyCode::ControlLeft)
         || keys.pressed(KeyCode::ControlRight)
@@ -831,6 +1010,17 @@ fn editor_save(
                 cy: tf.translation.y,
                 w: c.half.x * 2.0,
                 h: c.half.y * 2.0,
+            })
+            .collect(),
+        monsters: monsters
+            .iter()
+            .map(|(tf, m)| MonsterData {
+                x: tf.translation.x,
+                y: tf.translation.y,
+                speed: m.speed,
+                detection_range: m.detection_range,
+                attack_reach: m.attack_reach,
+                strength: m.strength,
             })
             .collect(),
     };
@@ -865,17 +1055,27 @@ fn toggle_mode(
     }
 }
 
-fn on_enter_editing(mut overlays: Query<&mut Visibility, With<LightOverlay>>) {
+fn on_enter_editing(
+    mut overlays: Query<&mut Visibility, With<LightOverlay>>,
+    mut shadows: Query<&mut Visibility, (With<ShadowMesh>, Without<LightOverlay>)>,
+) {
     for mut v in &mut overlays {
+        *v = Visibility::Hidden;
+    }
+    for mut v in &mut shadows {
         *v = Visibility::Hidden;
     }
 }
 
 fn on_enter_playing(
     mut overlays: Query<&mut Visibility, With<LightOverlay>>,
+    mut shadows: Query<&mut Visibility, (With<ShadowMesh>, Without<LightOverlay>)>,
     mut cameras: Query<&mut Projection, With<Camera2d>>,
 ) {
     for mut v in &mut overlays {
+        *v = Visibility::Inherited;
+    }
+    for mut v in &mut shadows {
         *v = Visibility::Inherited;
     }
     // Snap zoom back so the gameplay framing is consistent regardless of where
@@ -911,7 +1111,12 @@ fn editor_camera_pan(
 fn editor_camera_zoom(
     mut scroll: MessageReader<MouseWheel>,
     mut cameras: Query<&mut Projection, With<Camera2d>>,
+    state: Res<EditorState>,
 ) {
+    if state.ui_has_pointer {
+        for _ in scroll.read() {}
+        return;
+    }
     let Ok(mut proj) = cameras.single_mut() else { return };
     let mut total = 0.0f32;
     for ev in scroll.read() {
@@ -935,6 +1140,102 @@ fn cursor_world(
     camera.viewport_to_world_2d(cam_tf, pixel).ok()
 }
 
+fn editor_ui(
+    mut contexts: EguiContexts,
+    mut state: ResMut<EditorState>,
+    mut tuning: ResMut<Tuning>,
+    mut monsters: Query<&mut Monster>,
+    names: Query<&Name>,
+) {
+    let Ok(ctx) = contexts.ctx_mut() else { return };
+
+    egui::SidePanel::left("editor_panel")
+        .default_width(200.0)
+        .resizable(true)
+        .show(ctx, |ui| {
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                // ── Place Tool ──────────────────────────────
+                ui.heading("Place");
+                ui.separator();
+
+                for &(category, tools) in EDITOR_CATEGORIES {
+                    egui::CollapsingHeader::new(category)
+                        .default_open(true)
+                        .show(ui, |ui| {
+                            for &tool in tools {
+                                let selected = state.tool == tool;
+                                if ui.selectable_label(selected, tool.label()).clicked() {
+                                    state.tool = tool;
+                                }
+                            }
+                        });
+                }
+
+                ui.add_space(8.0);
+
+                // ── Selected Entity ─────────────────────────
+                if let Some(entity) = state.selected {
+                    let label = names
+                        .get(entity)
+                        .map(|n| n.as_str().to_owned())
+                        .unwrap_or_else(|_| format!("{entity:?}"));
+
+                    ui.heading("Selected");
+                    ui.separator();
+                    ui.label(label);
+
+                    if let Ok(mut monster) = monsters.get_mut(entity) {
+                        ui.add_space(4.0);
+                        ui.label("Monster");
+                        ui.add(egui::Slider::new(&mut monster.speed, 0.0..=500.0).text("Speed"));
+                        ui.add(egui::Slider::new(&mut monster.detection_range, 0.0..=800.0).text("Detection"));
+                        ui.add(egui::Slider::new(&mut monster.attack_reach, 0.0..=100.0).text("Reach"));
+                        ui.add(egui::Slider::new(&mut monster.strength, 0.0..=100.0).text("Strength"));
+                    }
+
+                    if ui.button("Deselect").clicked() {
+                        state.selected = None;
+                    }
+
+                    ui.add_space(8.0);
+                }
+
+                // ── Tuning ──────────────────────────────────
+                egui::CollapsingHeader::new("Tuning")
+                    .default_open(false)
+                    .show(ui, |ui| {
+                        ui.add(egui::Slider::new(&mut tuning.max_speed, 0.0..=1000.0).text("Max Speed"));
+                        ui.add(egui::Slider::new(&mut tuning.accel, 0.0..=10000.0).text("Accel"));
+                        ui.add(egui::Slider::new(&mut tuning.friction, 0.0..=10000.0).text("Friction"));
+                        ui.add(egui::Slider::new(&mut tuning.light_range, 50.0..=2000.0).text("Light Range"));
+                        ui.add(egui::Slider::new(&mut tuning.light_half_angle_deg, 1.0..=180.0).text("Light Angle"));
+                        ui.add(egui::Slider::new(&mut tuning.light_intensity, 0.0..=4.0).text("Light Intensity"));
+                        ui.add(egui::Slider::new(&mut tuning.ambient, 0.0..=1.0).text("Ambient"));
+                        ui.add(egui::Slider::new(&mut tuning.camera_smoothing, 0.0..=30.0).text("Cam Smoothing"));
+                        ui.add(egui::Slider::new(&mut tuning.run_multiplier, 1.0..=4.0).text("Run Mult"));
+                        ui.add(egui::Slider::new(&mut tuning.sneak_multiplier, 0.1..=1.0).text("Sneak Mult"));
+                    });
+
+                ui.add_space(8.0);
+
+                // ── Help ────────────────────────────────────
+                egui::CollapsingHeader::new("Controls")
+                    .default_open(false)
+                    .show(ui, |ui| {
+                        ui.small("Left-click: place / select");
+                        ui.small("Right-click: delete");
+                        ui.small("Cmd+Z: undo");
+                        ui.small("Cmd+Shift+Z: redo");
+                        ui.small("Cmd+S: save level");
+                        ui.small("F1: back to game");
+                    });
+            });
+        });
+
+    // Record after drawing so the panel area is registered for this frame.
+    state.ui_has_pointer = ctx.is_pointer_over_area();
+}
+
 fn editor_handle_placement(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -942,28 +1243,52 @@ fn editor_handle_placement(
     mut state: ResMut<EditorState>,
     mut gizmos: Gizmos,
     buttons: Res<ButtonInput<MouseButton>>,
+    keys: Res<ButtonInput<KeyCode>>,
     windows: Query<&Window>,
     cameras: Query<(&Camera, &GlobalTransform), With<Camera2d>>,
 ) {
+    if state.ui_has_pointer { return; }
+    // Shift+click is select, not place
+    if keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight) { return; }
     let Some(cursor) = cursor_world(&windows, &cameras) else { return };
 
-    if buttons.just_pressed(MouseButton::Left) {
-        state.drag_start = Some(cursor);
-    }
+    match state.tool {
+        EditorTool::Wall => {
+            if buttons.just_pressed(MouseButton::Left) {
+                state.drag_start = Some(cursor);
+            }
 
-    if let Some(start) = state.drag_start {
-        let center = (start + cursor) * 0.5;
-        let size = (cursor - start).abs();
-        gizmos.rect_2d(
-            Isometry2d::from_translation(center),
-            size.max(Vec2::splat(1.0)),
-            Color::srgb(1.0, 0.85, 0.15),
-        );
+            if let Some(start) = state.drag_start {
+                let center = (start + cursor) * 0.5;
+                let size = (cursor - start).abs();
+                gizmos.rect_2d(
+                    Isometry2d::from_translation(center),
+                    size.max(Vec2::splat(1.0)),
+                    Color::srgb(1.0, 0.85, 0.15),
+                );
 
-        if buttons.just_released(MouseButton::Left) {
-            state.drag_start = None;
-            if size.x >= 10.0 && size.y >= 10.0 {
-                spawn_wall(&mut commands, &mut meshes, &mut materials, center, size);
+                if buttons.just_released(MouseButton::Left) {
+                    state.drag_start = None;
+                    if size.x >= 10.0 && size.y >= 10.0 {
+                        spawn_wall(&mut commands, &mut meshes, &mut materials, center, size);
+                        state.redo_stack.clear();
+                        state.undo_stack.push(EditorAction::PlaceWall { center, size });
+                    }
+                }
+            }
+        }
+        EditorTool::Monster => {
+            if buttons.just_pressed(MouseButton::Left) {
+                let snap = MonsterSnapshot::from(&Monster::default());
+                spawn_monster(
+                    &mut commands,
+                    &mut meshes,
+                    &mut materials,
+                    cursor,
+                    Monster::default(),
+                );
+                state.redo_stack.clear();
+                state.undo_stack.push(EditorAction::PlaceMonster { pos: cursor, monster: snap });
             }
         }
     }
@@ -975,20 +1300,433 @@ fn editor_handle_delete(
     windows: Query<&Window>,
     cameras: Query<(&Camera, &GlobalTransform), With<Camera2d>>,
     walls: Query<(Entity, &Transform, &Collider, &WallFootprint)>,
+    monsters: Query<(Entity, &Transform, &Collider, &Monster)>,
+    mut state: ResMut<EditorState>,
 ) {
+    if state.ui_has_pointer { return; }
     if !buttons.just_pressed(MouseButton::Right) {
         return;
     }
     let Some(cursor) = cursor_world(&windows, &cameras) else { return };
+
+    // Try monsters first (smaller targets, drawn on top)
+    for (entity, tf, col, monster) in &monsters {
+        let center = tf.translation.truncate();
+        if (cursor.x - center.x).abs() < col.half.x
+            && (cursor.y - center.y).abs() < col.half.y
+        {
+            let snap = MonsterSnapshot::from(monster);
+            commands.entity(entity).despawn();
+            if state.selected == Some(entity) { state.selected = None; }
+            state.redo_stack.clear();
+            state.undo_stack.push(EditorAction::DeleteMonster { pos: center, monster: snap });
+            return;
+        }
+    }
     for (entity, tf, col, wall) in &walls {
         let center = tf.translation.truncate();
+        let size = col.half * 2.0;
         if (cursor.x - center.x).abs() < col.half.x
             && (cursor.y - center.y).abs() < col.half.y
         {
             commands.entity(wall.top_face).despawn();
             commands.entity(wall.front_face).despawn();
             commands.entity(entity).despawn();
+            if state.selected == Some(entity) { state.selected = None; }
+            state.redo_stack.clear();
+            state.undo_stack.push(EditorAction::DeleteWall { center, size });
+            return;
+        }
+    }
+}
+
+fn editor_undo_redo(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<ColorMaterial>>,
+    keys: Res<ButtonInput<KeyCode>>,
+    mut state: ResMut<EditorState>,
+    walls: Query<(Entity, &Transform, &Collider, &WallFootprint)>,
+    monsters: Query<(Entity, &Transform, &Collider, &Monster)>,
+) {
+    let mod_key = keys.pressed(KeyCode::SuperLeft) || keys.pressed(KeyCode::SuperRight)
+        || keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
+    if !mod_key {
+        return;
+    }
+    let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
+
+    if shift && keys.just_pressed(KeyCode::KeyZ) {
+        // Redo
+        let Some(action) = state.redo_stack.pop() else { return };
+        apply_action(&action, &mut commands, &mut meshes, &mut materials, &walls, &monsters);
+        state.undo_stack.push(action);
+    } else if keys.just_pressed(KeyCode::KeyZ) {
+        // Undo — apply the inverse
+        let Some(action) = state.undo_stack.pop() else { return };
+        let inverse = invert_action(&action);
+        apply_action(&inverse, &mut commands, &mut meshes, &mut materials, &walls, &monsters);
+        state.redo_stack.push(action);
+    }
+}
+
+fn invert_action(action: &EditorAction) -> EditorAction {
+    match action {
+        EditorAction::PlaceWall { center, size } => EditorAction::DeleteWall { center: *center, size: *size },
+        EditorAction::DeleteWall { center, size } => EditorAction::PlaceWall { center: *center, size: *size },
+        EditorAction::PlaceMonster { pos, monster } => EditorAction::DeleteMonster { pos: *pos, monster: monster.clone() },
+        EditorAction::DeleteMonster { pos, monster } => EditorAction::PlaceMonster { pos: *pos, monster: monster.clone() },
+    }
+}
+
+fn apply_action(
+    action: &EditorAction,
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<ColorMaterial>,
+    walls: &Query<(Entity, &Transform, &Collider, &WallFootprint)>,
+    monsters: &Query<(Entity, &Transform, &Collider, &Monster)>,
+) {
+    match action {
+        EditorAction::PlaceWall { center, size } => {
+            spawn_wall(commands, meshes, materials, *center, *size);
+        }
+        EditorAction::DeleteWall { center, size: _ } => {
+            // Find the wall at this position and remove it
+            for (entity, tf, _col, wall) in walls {
+                let wc = tf.translation.truncate();
+                if (wc - *center).length() < 1.0 {
+                    commands.entity(wall.top_face).despawn();
+                    commands.entity(wall.front_face).despawn();
+                    commands.entity(entity).despawn();
+                    break;
+                }
+            }
+        }
+        EditorAction::PlaceMonster { pos, monster } => {
+            spawn_monster(commands, meshes, materials, *pos, monster.to_monster());
+        }
+        EditorAction::DeleteMonster { pos, .. } => {
+            for (entity, tf, _col, _m) in monsters {
+                let mc = tf.translation.truncate();
+                if (mc - *pos).length() < 1.0 {
+                    commands.entity(entity).despawn();
+                    break;
+                }
+            }
+        }
+    }
+}
+
+fn editor_handle_select(
+    buttons: Res<ButtonInput<MouseButton>>,
+    keys: Res<ButtonInput<KeyCode>>,
+    windows: Query<&Window>,
+    cameras: Query<(&Camera, &GlobalTransform), With<Camera2d>>,
+    mut state: ResMut<EditorState>,
+    monsters: Query<(Entity, &Transform, &Collider), With<Monster>>,
+    walls: Query<(Entity, &Transform, &Collider), With<WallFootprint>>,
+) {
+    if state.ui_has_pointer { return; }
+    if !buttons.just_pressed(MouseButton::Left) { return; }
+    // Only select when shift is held — plain click places
+    if !keys.pressed(KeyCode::ShiftLeft) && !keys.pressed(KeyCode::ShiftRight) { return; }
+
+    let Some(cursor) = cursor_world(&windows, &cameras) else { return };
+
+    // Try monsters first
+    for (entity, tf, col) in &monsters {
+        let center = tf.translation.truncate();
+        if (cursor.x - center.x).abs() < col.half.x
+            && (cursor.y - center.y).abs() < col.half.y
+        {
+            state.selected = Some(entity);
+            return;
+        }
+    }
+    // Then walls
+    for (entity, tf, col) in &walls {
+        let center = tf.translation.truncate();
+        if (cursor.x - center.x).abs() < col.half.x
+            && (cursor.y - center.y).abs() < col.half.y
+        {
+            state.selected = Some(entity);
+            return;
+        }
+    }
+    // Clicked empty space — deselect
+    state.selected = None;
+}
+
+fn editor_draw_monsters(
+    mut gizmos: Gizmos,
+    monsters: Query<(&Transform, &Monster)>,
+) {
+    for (tf, monster) in &monsters {
+        let pos = tf.translation.truncate();
+        gizmos.circle_2d(
+            Isometry2d::from_translation(pos),
+            monster.detection_range,
+            Color::srgba(1.0, 0.3, 0.3, 0.3),
+        );
+        gizmos.circle_2d(
+            Isometry2d::from_translation(pos),
+            monster.attack_reach,
+            Color::srgba(1.0, 0.0, 0.0, 0.6),
+        );
+    }
+}
+
+fn editor_draw_selection(
+    mut gizmos: Gizmos,
+    state: Res<EditorState>,
+    transforms: Query<(&Transform, &Collider)>,
+) {
+    let Some(entity) = state.selected else { return };
+    let Ok((tf, col)) = transforms.get(entity) else {
+        return;
+    };
+    let center = tf.translation.truncate();
+    let size = col.half * 2.0 + Vec2::splat(4.0);
+    gizmos.rect_2d(
+        Isometry2d::from_translation(center),
+        size,
+        Color::srgb(0.2, 0.8, 1.0),
+    );
+}
+
+// =====================================================================
+// Line of sight + pathfinding
+// =====================================================================
+
+/// Returns true if the segment from `a` to `b` is blocked by any wall AABB.
+fn segment_blocked(a: Vec2, b: Vec2, walls: &[(Vec2, Vec2)]) -> bool {
+    let dir = b - a;
+    if dir.length_squared() < 0.001 {
+        return false;
+    }
+    for &(center, half) in walls {
+        let bl = center + Vec2::new(-half.x, -half.y);
+        let br = center + Vec2::new(half.x, -half.y);
+        let tr = center + Vec2::new(half.x, half.y);
+        let tl = center + Vec2::new(-half.x, half.y);
+        for (ea, eb) in [(bl, br), (br, tr), (tr, tl), (tl, bl)] {
+            if let Some(t) = ray_segment_hit(a, dir, ea, eb) {
+                if t > 0.001 && t < 0.999 {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Find the next waypoint toward `to` using a visibility graph over expanded
+/// wall corners. Returns None if no path exists.
+fn pathfind_next_waypoint(
+    from: Vec2,
+    to: Vec2,
+    walls: &[(Vec2, Vec2)],
+    agent_half: Vec2,
+) -> Option<Vec2> {
+    // Expand walls by agent size so paths don't clip geometry
+    let expanded: Vec<(Vec2, Vec2)> = walls
+        .iter()
+        .map(|(c, h)| (*c, *h + agent_half))
+        .collect();
+
+    // Direct line clear? Go straight.
+    if !segment_blocked(from, to, &expanded) {
+        return Some(to);
+    }
+
+    // Build navigation nodes: start, goal, + expanded wall corners
+    let margin = 2.0;
+    let mut nodes = vec![from, to];
+    for &(center, half) in &expanded {
+        let h = half + Vec2::splat(margin);
+        nodes.push(center + Vec2::new(-h.x, -h.y));
+        nodes.push(center + Vec2::new(h.x, -h.y));
+        nodes.push(center + Vec2::new(h.x, h.y));
+        nodes.push(center + Vec2::new(-h.x, h.y));
+    }
+
+    // Filter out corners that land inside another expanded wall
+    let valid: Vec<Vec2> = nodes
+        .iter()
+        .copied()
+        .enumerate()
+        .filter(|&(i, p)| {
+            i < 2
+                || !expanded
+                    .iter()
+                    .any(|(c, h)| (p.x - c.x).abs() < h.x && (p.y - c.y).abs() < h.y)
+        })
+        .map(|(_, p)| p)
+        .collect();
+
+    // Dijkstra on the visibility graph
+    let n = valid.len();
+    let mut dist = vec![f32::INFINITY; n];
+    let mut prev = vec![usize::MAX; n];
+    let mut visited = vec![false; n];
+    dist[0] = 0.0;
+
+    for _ in 0..n {
+        let mut u = usize::MAX;
+        let mut best = f32::INFINITY;
+        for i in 0..n {
+            if !visited[i] && dist[i] < best {
+                best = dist[i];
+                u = i;
+            }
+        }
+        if u == usize::MAX || u == 1 {
             break;
+        }
+        visited[u] = true;
+
+        for v in 0..n {
+            if visited[v] {
+                continue;
+            }
+            if segment_blocked(valid[u], valid[v], &expanded) {
+                continue;
+            }
+            let d = dist[u] + (valid[v] - valid[u]).length();
+            if d < dist[v] {
+                dist[v] = d;
+                prev[v] = u;
+            }
+        }
+    }
+
+    if dist[1].is_infinite() {
+        return None;
+    }
+
+    // Trace back to find the first waypoint after `from`
+    let mut step = 1;
+    while prev[step] != 0 && prev[step] != usize::MAX {
+        step = prev[step];
+    }
+    Some(valid[step])
+}
+
+// =====================================================================
+// Monster AI + attack
+// =====================================================================
+
+fn monster_ai(
+    fixed_time: Res<Time<Fixed>>,
+    players: Query<&PhysicalTranslation, With<Player>>,
+    walls: Query<(&Transform, &Collider), (With<WallFootprint>, Without<Player>, Without<Monster>)>,
+    mut monsters: Query<
+        (&Monster, &mut MonsterAlert, &mut PhysicalTranslation, &mut PreviousPhysicalTranslation, &mut Velocity, &Collider),
+        Without<Player>,
+    >,
+) {
+    let Ok(player_pos) = players.single() else { return };
+    let dt = fixed_time.delta_secs();
+    let wall_list: Vec<(Vec2, Vec2)> = walls
+        .iter()
+        .map(|(tf, c)| (tf.translation.truncate(), c.half))
+        .collect();
+
+    for (monster, mut alert, mut pos, mut prev, mut vel, col) in &mut monsters {
+        prev.0 = pos.0;
+
+        let to_player = player_pos.0 - pos.0;
+        let dist = to_player.length();
+        let in_range = dist < monster.detection_range && dist > 0.1;
+        let has_los = in_range && !segment_blocked(pos.0, player_pos.0, &wall_list);
+
+        // Update alert state
+        if has_los {
+            if alert.has_seen {
+                // Already alerted — stay locked on
+                alert.time_since_los = 0.0;
+            } else {
+                // Not yet alerted — accumulate awareness
+                alert.notice_accumulator += dt;
+                if alert.notice_accumulator >= alert.notice_threshold {
+                    alert.has_seen = true;
+                    alert.time_since_los = 0.0;
+                }
+            }
+        } else {
+            // No LOS — reset accumulator, tick alert timeout
+            alert.notice_accumulator = 0.0;
+            if alert.has_seen {
+                alert.time_since_los += dt;
+                if !in_range || alert.time_since_los > ALERT_TIMEOUT {
+                    alert.has_seen = false;
+                    // New threshold for next encounter
+                    alert.notice_threshold = rand_range(0.3, 1.5);
+                }
+            }
+        }
+
+        if has_los && alert.has_seen {
+            // Direct LOS — chase straight at the player
+            let dir = to_player.normalize_or_zero();
+            vel.0 = dir * monster.speed;
+        } else if alert.has_seen && in_range {
+            // Lost sight but alerted — pathfind around walls
+            if let Some(wp) = pathfind_next_waypoint(pos.0, player_pos.0, &wall_list, col.half) {
+                let dir = (wp - pos.0).normalize_or_zero();
+                vel.0 = dir * monster.speed;
+            } else {
+                vel.0 = Vec2::ZERO;
+            }
+        } else {
+            // Idle — roam randomly
+            alert.wander_timer -= dt;
+            if alert.wander_timer <= 0.0 {
+                // Chance to pause briefly
+                if rand_range(0.0, 1.0) < 0.3 {
+                    alert.wander_dir = Vec2::ZERO;
+                    alert.wander_timer = rand_range(1.0, 3.0);
+                } else {
+                    let angle = rand_range(0.0, std::f32::consts::TAU);
+                    alert.wander_dir = Vec2::new(angle.cos(), angle.sin());
+                    alert.wander_timer = rand_range(1.5, 4.0);
+                }
+            }
+            vel.0 = alert.wander_dir * monster.speed * 0.3;
+        }
+
+        let move_delta = vel.0 * dt;
+        let old_pos = pos.0;
+        pos.0 = resolve_collision(pos.0, col.half, move_delta, &wall_list, &mut vel.0);
+
+        // If wandering and hit a wall, pick a new direction immediately
+        if !alert.has_seen && vel.0.length_squared() < 1.0 && alert.wander_dir != Vec2::ZERO && (pos.0 - old_pos).length() < 0.01 {
+            let angle = rand_range(0.0, std::f32::consts::TAU);
+            alert.wander_dir = Vec2::new(angle.cos(), angle.sin());
+            alert.wander_timer = rand_range(1.5, 4.0);
+        }
+    }
+}
+
+fn monster_attack(
+    mut players: Query<
+        (&mut PhysicalTranslation, &mut PreviousPhysicalTranslation, &PlayerSpawn, &mut Velocity),
+        With<Player>,
+    >,
+    monsters: Query<(&PhysicalTranslation, &Monster), Without<Player>>,
+) {
+    let Ok((mut phys, mut prev, spawn, mut vel)) = players.single_mut() else { return };
+    let player_p = phys.0;
+
+    for (monster_pos, monster) in &monsters {
+        let dist = (monster_pos.0 - player_p).length();
+        if dist < monster.attack_reach {
+            vel.0 = Vec2::ZERO;
+            phys.0 = spawn.0;
+            prev.0 = spawn.0;
+            info!("player hit by monster — respawning");
+            return;
         }
     }
 }

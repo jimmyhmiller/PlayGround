@@ -4,6 +4,7 @@ use std::rc::Rc;
 
 use wasm_bindgen::prelude::*;
 
+#[allow(dead_code)]
 struct Entry {
     value: f64,
     min: f64,

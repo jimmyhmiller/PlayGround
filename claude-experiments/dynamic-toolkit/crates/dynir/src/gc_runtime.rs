@@ -45,6 +45,10 @@ pub struct GcInterpCtx<H: ObjHeader, P: PtrPolicy> {
     type_table: Vec<TypeInfo>,
     cont_types: ContinuationTypes,
     root_frames: RefCell<Vec<Vec<Cell<u64>>>>,
+    /// Extra root sources registered by the embedding (e.g., the JIT's
+    /// continuation store). Raw pointers — the caller is responsible
+    /// for ensuring they outlive the `collect()` call.
+    extra_roots: RefCell<Vec<*const dyn RootSource>>,
     /// Number of allocations since the last collection. Bumped by
     /// `Alloc::alloc`, checked by `should_collect`.
     alloc_count: Cell<usize>,
@@ -54,6 +58,11 @@ pub struct GcInterpCtx<H: ObjHeader, P: PtrPolicy> {
     gc_threshold: Cell<usize>,
     _phantom: PhantomData<(H, P)>,
 }
+
+// SAFETY: GcInterpCtx is single-threaded (uses Cell/RefCell). The
+// extra_roots raw pointers are only dereferenced during collect()
+// which runs on the same thread.
+unsafe impl<H: ObjHeader, P: PtrPolicy> Send for GcInterpCtx<H, P> {}
 
 impl<H: ObjHeader, P: PtrPolicy> GcInterpCtx<H, P> {
     /// Build a new GC-backed context.
@@ -73,12 +82,27 @@ impl<H: ObjHeader, P: PtrPolicy> GcInterpCtx<H, P> {
             type_table,
             cont_types,
             root_frames: RefCell::new(Vec::new()),
+            extra_roots: RefCell::new(Vec::new()),
             alloc_count: Cell::new(0),
             // Default: disable auto-gc. Tests and real programs can
             // call `set_gc_threshold` to turn it on.
             gc_threshold: Cell::new(usize::MAX),
             _phantom: PhantomData,
         }
+    }
+
+    /// Register an additional root source that the GC should scan
+    /// during collection. Used by the JIT engine to register its
+    /// `JitFrameSliceRuntime` (which holds Vec-backed continuation
+    /// snapshots with heap-pointer slots) alongside the interpreter's
+    /// root frames.
+    ///
+    /// # Safety
+    /// The caller must ensure the pointed-to `RootSource` outlives
+    /// every `collect()` call. Typically the source is a field on the
+    /// `ExecutionEngine` which outlives the `GcInterpCtx`.
+    pub unsafe fn register_extra_roots(&self, source: *const dyn RootSource) {
+        self.extra_roots.borrow_mut().push(source);
     }
 
     /// Set the auto-gc threshold: after this many `alloc` calls, the
@@ -163,12 +187,22 @@ impl<H: ObjHeader, P: PtrPolicy> GcInterpCtx<H, P> {
     pub fn collect(&self) {
         let frames_guard = self.root_frames.borrow();
         let src = AllFramesRootSource { frames: &*frames_guard };
-        // SAFETY: we pass a correctly-shaped root source and the type
-        // table that matches the heap's expectations.
+
+        // Build a root-source list: interpreter frame roots plus
+        // any extra root sources registered by the embedding (e.g.,
+        // the JIT's continuation store).
+        let extras_guard = self.extra_roots.borrow();
+        let mut sources: Vec<&dyn RootSource> = vec![&src];
+        for &ptr in extras_guard.iter() {
+            // SAFETY: the caller of `register_extra_roots` guaranteed
+            // the pointer remains valid for all `collect()` calls.
+            sources.push(unsafe { &*ptr });
+        }
+
         unsafe {
             self.heap
                 .borrow_mut()
-                .collect::<P>(&self.type_table, &mut [&src]);
+                .collect::<P>(&self.type_table, &mut sources);
         }
         // Reset the alloc counter: the next threshold window starts
         // from here.
@@ -226,6 +260,11 @@ where
     }
     fn should_collect(&self) -> bool {
         self.should_auto_collect()
+    }
+    fn register_root_source_raw(&self, source: *const dyn RootSource) {
+        // SAFETY: delegated from the caller who guarantees the source
+        // outlives all collect() calls.
+        unsafe { self.register_extra_roots(source) }
     }
     fn root_precision(&self) -> RootPrecision {
         RootPrecision::PreciseSlots

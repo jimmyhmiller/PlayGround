@@ -106,11 +106,18 @@ impl ContinuationTypes {
 /// `FrameResume` — only the variants that appear in correctly-formed
 /// captures. Capturing a frame that sits under a `try/catch` (FromInvoke)
 /// is not supported and panics.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CapturedResume {
     TopLevel,
     FromCall { return_dest: Option<u32> },
     FromResume { return_block: u32, return_param_dest: Option<u32> },
+    FromInvoke {
+        normal_block: u32,
+        normal_args_vals: Vec<u64>,
+        exception_block: u32,
+        exception_args_vals: Vec<u64>,
+        has_ret_param: bool,
+    },
 }
 
 /// Describes a single frame to be captured. Construction is bottom-to-top
@@ -206,11 +213,51 @@ impl<'h> ContinuationView<'h> {
             core::slice::from_raw_parts(vals_ptr, preamble.val_count as usize)
         };
 
-        let caller_resume = decode_caller_resume(
+        let mut caller_resume = decode_caller_resume(
             preamble.resume_kind,
             preamble.resume_extra_a,
             preamble.resume_extra_b,
         );
+
+        // For FromInvoke, decode the inline args that follow root_indices.
+        if preamble.resume_kind == RESUME_KIND_FROM_INVOKE {
+            let root_idx_bytes = 2 * preamble.root_index_count as usize;
+            let invoke_off = root_indices_off + ((root_idx_bytes + 3) & !3);
+            let normal_count = unsafe {
+                u32::from_le_bytes(core::ptr::read(
+                    self.meta_bytes.add(invoke_off) as *const [u8; 4],
+                )) as usize
+            };
+            let exception_count = unsafe {
+                u32::from_le_bytes(core::ptr::read(
+                    self.meta_bytes.add(invoke_off + 4) as *const [u8; 4],
+                )) as usize
+            };
+            let data_off = invoke_off + 8;
+            let normal_args: Vec<u64> = (0..normal_count)
+                .map(|j| unsafe {
+                    core::ptr::read(self.meta_bytes.add(data_off + j * 8) as *const u64)
+                })
+                .collect();
+            let exception_args: Vec<u64> = (0..exception_count)
+                .map(|j| unsafe {
+                    core::ptr::read(
+                        self.meta_bytes
+                            .add(data_off + normal_count * 8 + j * 8)
+                            as *const u64,
+                    )
+                })
+                .collect();
+            if let CapturedResume::FromInvoke {
+                normal_args_vals,
+                exception_args_vals,
+                ..
+            } = &mut caller_resume
+            {
+                *normal_args_vals = normal_args;
+                *exception_args_vals = exception_args;
+            }
+        }
 
         FrameView {
             func_idx: preamble.func_idx,
@@ -255,10 +302,14 @@ const FRAME_PREAMBLE_SIZE: usize = 40;
 const RESUME_KIND_TOP_LEVEL: u32 = 0;
 const RESUME_KIND_FROM_CALL: u32 = 1;
 const RESUME_KIND_FROM_RESUME: u32 = 2;
+const RESUME_KIND_FROM_INVOKE: u32 = 3;
 
 // ─── Metadata encoding helpers ─────────────────────────────────────
 
-fn encode_caller_resume(r: CapturedResume) -> (u32, u32, u32) {
+/// Encode the fixed part of a CapturedResume. For simple variants
+/// this is all that's needed. For FromInvoke the variable-length
+/// args are written separately by `encode_meta`.
+fn encode_caller_resume(r: &CapturedResume) -> (u32, u32, u32) {
     match r {
         CapturedResume::TopLevel => (RESUME_KIND_TOP_LEVEL, u32::MAX, u32::MAX),
         CapturedResume::FromCall { return_dest } => (
@@ -268,8 +319,18 @@ fn encode_caller_resume(r: CapturedResume) -> (u32, u32, u32) {
         ),
         CapturedResume::FromResume { return_block, return_param_dest } => (
             RESUME_KIND_FROM_RESUME,
-            return_block,
+            *return_block,
             return_param_dest.unwrap_or(u32::MAX),
+        ),
+        CapturedResume::FromInvoke {
+            normal_block,
+            exception_block,
+            has_ret_param,
+            ..
+        } => (
+            RESUME_KIND_FROM_INVOKE,
+            *normal_block,
+            (*exception_block & 0x7FFF_FFFF) | ((*has_ret_param as u32) << 31),
         ),
     }
 }
@@ -283,6 +344,14 @@ fn decode_caller_resume(kind: u32, a: u32, b: u32) -> CapturedResume {
         RESUME_KIND_FROM_RESUME => CapturedResume::FromResume {
             return_block: a,
             return_param_dest: if b == u32::MAX { None } else { Some(b) },
+        },
+        RESUME_KIND_FROM_INVOKE => CapturedResume::FromInvoke {
+            normal_block: a,
+            exception_block: b & 0x7FFF_FFFF,
+            has_ret_param: (b >> 31) != 0,
+            // args are decoded separately from the variable-length tail
+            normal_args_vals: Vec::new(),
+            exception_args_vals: Vec::new(),
         },
         other => panic!("cont_heap: unknown resume_kind {other}"),
     }
@@ -333,8 +402,20 @@ fn encoded_meta_len(builder: &CapturedStackBuilder) -> usize {
         len += FRAME_PREAMBLE_SIZE;
         len += 4 * f.active_prompts.len();
         let root_idx_bytes = 2 * f.root_indices.len();
-        // Pad root_indices tail up to u32 alignment.
         len += (root_idx_bytes + 3) & !3;
+        // FromInvoke: store normal_args_vals and exception_args_vals
+        // as u64 arrays preceded by two u32 counts.
+        if let CapturedResume::FromInvoke {
+            normal_args_vals,
+            exception_args_vals,
+            ..
+        } = &f.caller_resume
+        {
+            len += 4; // u32 normal_args_count
+            len += 4; // u32 exception_args_count
+            len += 8 * normal_args_vals.len();
+            len += 8 * exception_args_vals.len();
+        }
     }
     len
 }
@@ -361,7 +442,7 @@ fn encode_meta(builder: &CapturedStackBuilder, out: &mut [u8]) -> Vec<usize> {
     for f in &builder.frames {
         offsets.push(cursor);
 
-        let (resume_kind, ra, rb) = encode_caller_resume(f.caller_resume);
+        let (resume_kind, ra, rb) = encode_caller_resume(&f.caller_resume);
         let resume_arg_slot = f.resume_arg_slot.unwrap_or(u32::MAX);
         let array_word = (f.active_prompts.len() as u32 & 0xFFFF)
             | ((f.root_indices.len() as u32 & 0xFFFF) << 16);
@@ -392,6 +473,29 @@ fn encode_meta(builder: &CapturedStackBuilder, out: &mut [u8]) -> Vec<usize> {
         while cursor & 3 != 0 {
             out[cursor] = 0;
             cursor += 1;
+        }
+
+        // FromInvoke: write invoke args inline.
+        if let CapturedResume::FromInvoke {
+            normal_args_vals,
+            exception_args_vals,
+            ..
+        } = &f.caller_resume
+        {
+            out[cursor..cursor + 4]
+                .copy_from_slice(&(normal_args_vals.len() as u32).to_le_bytes());
+            cursor += 4;
+            out[cursor..cursor + 4]
+                .copy_from_slice(&(exception_args_vals.len() as u32).to_le_bytes());
+            cursor += 4;
+            for &val in normal_args_vals {
+                out[cursor..cursor + 8].copy_from_slice(&val.to_le_bytes());
+                cursor += 8;
+            }
+            for &val in exception_args_vals {
+                out[cursor..cursor + 8].copy_from_slice(&val.to_le_bytes());
+                cursor += 8;
+            }
         }
 
         running_val_offset += f.values.len() as u32;
@@ -543,6 +647,24 @@ pub fn read_continuation<'h, A: Alloc, P: PtrPolicy>(
         cursor += 4 * preamble.active_prompt_count as usize;
         let root_idx_bytes = 2 * preamble.root_index_count as usize;
         cursor += (root_idx_bytes + 3) & !3;
+        // FromInvoke: skip the inline invoke args (two u32 counts + u64 arrays).
+        if preamble.resume_kind == RESUME_KIND_FROM_INVOKE {
+            let normal_count = u32::from_le_bytes([
+                meta_bytes_slice[cursor],
+                meta_bytes_slice[cursor + 1],
+                meta_bytes_slice[cursor + 2],
+                meta_bytes_slice[cursor + 3],
+            ]) as usize;
+            let exception_count = u32::from_le_bytes([
+                meta_bytes_slice[cursor + 4],
+                meta_bytes_slice[cursor + 5],
+                meta_bytes_slice[cursor + 6],
+                meta_bytes_slice[cursor + 7],
+            ]) as usize;
+            cursor += 8; // two u32 counts
+            cursor += 8 * normal_count;
+            cursor += 8 * exception_count;
+        }
     }
 
     // Sanity-check ContObj's varlen count.
@@ -561,6 +683,129 @@ pub fn read_continuation<'h, A: Alloc, P: PtrPolicy>(
         total_value_count,
         _heap_borrow: PhantomData,
     })
+}
+
+// ─── Conversion utilities ─────────────────────────────────────────
+//
+// Bridge between the old `FrameSliceSnapshot`-based API and the new
+// `CapturedStackBuilder`/`ContinuationView`-based API.
+
+use crate::{
+    CapturedCallerResume, CapturedFrame, FrameResume, FrameResumePoint,
+    FrameSliceSnapshot,
+};
+
+/// Convert a legacy `FrameSliceSnapshot` into a `CapturedStackBuilder`
+/// suitable for `capture_continuation`.
+pub fn snapshot_to_builder(snapshot: &FrameSliceSnapshot) -> CapturedStackBuilder {
+    let frames = snapshot
+        .frames
+        .iter()
+        .enumerate()
+        .map(|(i, f)| {
+            let is_top = i + 1 == snapshot.frames.len();
+            BuilderFrame {
+                func_idx: f.resume.func_idx as u32,
+                block_idx: f.resume.block_idx as u32,
+                inst_idx: f.resume.inst_idx as u32,
+                values: f.values.clone(),
+                active_prompts: f.active_prompts.clone(),
+                root_indices: f.root_value_indices.iter().map(|&i| i as u16).collect(),
+                resume_arg_slot: if is_top {
+                    f.resume_arg_value_indices.first().map(|&i| i as u32)
+                } else {
+                    None
+                },
+                caller_resume: match &f.caller_resume {
+                    CapturedCallerResume::TopLevel => CapturedResume::TopLevel,
+                    CapturedCallerResume::FromCall { return_dest } => {
+                        CapturedResume::FromCall {
+                            return_dest: return_dest.map(|d| d as u32),
+                        }
+                    }
+                    CapturedCallerResume::FromResume {
+                        return_block,
+                        return_param_dest,
+                    } => CapturedResume::FromResume {
+                        return_block: *return_block as u32,
+                        return_param_dest: return_param_dest.map(|d| d as u32),
+                    },
+                    CapturedCallerResume::FromInvoke {
+                        normal_block,
+                        normal_args_vals,
+                        exception_block,
+                        exception_args_vals,
+                        has_ret_param,
+                    } => CapturedResume::FromInvoke {
+                        normal_block: *normal_block as u32,
+                        normal_args_vals: normal_args_vals.clone(),
+                        exception_block: *exception_block as u32,
+                        exception_args_vals: exception_args_vals.clone(),
+                        has_ret_param: *has_ret_param,
+                    },
+                },
+            }
+        })
+        .collect();
+    CapturedStackBuilder {
+        prompt_id: snapshot.prompt_id,
+        frames,
+    }
+}
+
+/// Materialize a `FrameSliceSnapshot` from a `ContinuationView`.
+/// Used when the old API shape is needed (e.g., passing to
+/// `interpreter.resume_snapshot`).
+pub fn view_to_snapshot(view: &ContinuationView<'_>) -> FrameSliceSnapshot {
+    let mut frames = Vec::with_capacity(view.frame_count());
+    for i in 0..view.frame_count() {
+        let f = view.frame(i);
+        let caller_resume = match &f.caller_resume {
+            CapturedResume::TopLevel => FrameResume::TopLevel,
+            CapturedResume::FromCall { return_dest } => FrameResume::FromCall {
+                return_dest: return_dest.map(|d| d as usize),
+            },
+            CapturedResume::FromResume {
+                return_block,
+                return_param_dest,
+            } => FrameResume::FromResume {
+                return_block: *return_block as usize,
+                return_param_dest: return_param_dest.map(|d| d as usize),
+            },
+            CapturedResume::FromInvoke {
+                normal_block,
+                normal_args_vals,
+                exception_block,
+                exception_args_vals,
+                has_ret_param,
+            } => FrameResume::FromInvoke {
+                normal_block: *normal_block as usize,
+                normal_args_vals: normal_args_vals.clone(),
+                exception_block: *exception_block as usize,
+                exception_args_vals: exception_args_vals.clone(),
+                has_ret_param: *has_ret_param,
+            },
+        };
+        frames.push(CapturedFrame {
+            resume: FrameResumePoint {
+                func_idx: f.func_idx as usize,
+                block_idx: f.block_idx as usize,
+                inst_idx: f.inst_idx as usize,
+            },
+            values: f.values.to_vec(),
+            root_value_indices: f.root_indices.iter().map(|&i| i as usize).collect(),
+            resume_arg_value_indices: f
+                .resume_arg_slot
+                .map(|s| vec![s as usize])
+                .unwrap_or_default(),
+            active_prompts: f.active_prompts.to_vec(),
+            caller_resume,
+        });
+    }
+    FrameSliceSnapshot {
+        prompt_id: view.prompt_id(),
+        frames,
+    }
 }
 
 // ─── ContinuationContext trait ─────────────────────────────────────

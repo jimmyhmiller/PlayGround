@@ -5,10 +5,15 @@ use std::marker::PhantomData;
 use dynvalue::{LowBit, NanBox, TagScheme};
 
 pub mod cont_heap;
+pub mod cont_ops;
 pub use cont_heap::{
-    capture_continuation, read_continuation, BuilderFrame, CapturedResume,
-    CapturedStackBuilder, ContinuationContext, ContinuationTypes, ContinuationView,
-    FrameView, NoContinuations,
+    capture_continuation, read_continuation, snapshot_to_builder, view_to_snapshot,
+    BuilderFrame, CapturedResume, CapturedStackBuilder, ContinuationContext,
+    ContinuationTypes, ContinuationView, FrameView, NoContinuations,
+};
+pub use cont_ops::{
+    do_capture, do_clone, do_resume, resolve_prompt_boundary, FrameCapture,
+    FrameRestorable, PromptBoundaryAction,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -22,12 +27,6 @@ pub enum RootTransportKind {
     FrameScan,
     ShadowStack,
     StackMap,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FrameSliceMode {
-    OneShot,
-    MultiShot,
 }
 
 /// Alias — `CapturedCallerResume` is now unified with `FrameResume`.
@@ -53,16 +52,13 @@ pub struct CapturedFrame {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FrameSliceSnapshot {
     pub prompt_id: u32,
-    pub mode: FrameSliceMode,
     pub frames: Vec<CapturedFrame>,
-    pub consumed: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FrameSliceError {
     InvalidRootIndex { frame_idx: usize, root_idx: usize },
     MissingSlice,
-    Consumed,
 }
 
 impl Display for FrameSliceError {
@@ -75,102 +71,11 @@ impl Display for FrameSliceError {
                 )
             }
             FrameSliceError::MissingSlice => f.write_str("frame slice handle does not exist"),
-            FrameSliceError::Consumed => f.write_str("frame slice has already been consumed"),
         }
     }
 }
 
 impl Error for FrameSliceError {}
-
-impl FrameSliceSnapshot {
-    pub fn validate(&self) -> Result<(), FrameSliceError> {
-        for (frame_idx, frame) in self.frames.iter().enumerate() {
-            for &root_idx in &frame.root_value_indices {
-                if root_idx >= frame.values.len() {
-                    return Err(FrameSliceError::InvalidRootIndex { frame_idx, root_idx });
-                }
-            }
-        }
-        Ok(())
-    }
-
-    pub fn root_word_count(&self) -> usize {
-        self.frames
-            .iter()
-            .map(|frame| frame.root_value_indices.len())
-            .sum()
-    }
-}
-
-// ─── ContinuationStore ───────���───────────────────────────────
-//
-// Shared trait for storing captured continuations. Both the interpreter
-// and the JIT produce FrameSliceSnapshots; this trait owns their storage.
-// Separates "where continuations live" from "how frames are managed."
-
-pub trait ContinuationStore {
-    fn store_snapshot(&mut self, snapshot: FrameSliceSnapshot) -> Result<u64, FrameSliceError>;
-    fn get_snapshot(&self, handle: u64) -> Result<&FrameSliceSnapshot, FrameSliceError>;
-    fn get_snapshot_mut(&mut self, handle: u64) -> Result<&mut FrameSliceSnapshot, FrameSliceError>;
-    fn clone_snapshot(&mut self, handle: u64) -> Result<u64, FrameSliceError>;
-    fn mark_consumed(&mut self, handle: u64) -> Result<(), FrameSliceError>;
-    /// Enumerate GC roots held in captured continuations.
-    fn scan_roots(&self, visitor: &mut dyn FnMut(*mut u64));
-}
-
-/// Simple Vec-backed continuation store. The default for most uses.
-#[derive(Default)]
-pub struct VecContinuationStore {
-    slices: Vec<FrameSliceSnapshot>,
-}
-
-impl VecContinuationStore {
-    pub fn new() -> Self { Self::default() }
-}
-
-impl ContinuationStore for VecContinuationStore {
-    fn store_snapshot(&mut self, snapshot: FrameSliceSnapshot) -> Result<u64, FrameSliceError> {
-        snapshot.validate()?;
-        let handle = self.slices.len() as u64;
-        self.slices.push(snapshot);
-        Ok(handle)
-    }
-
-    fn get_snapshot(&self, handle: u64) -> Result<&FrameSliceSnapshot, FrameSliceError> {
-        self.slices.get(handle as usize).ok_or(FrameSliceError::MissingSlice)
-    }
-
-    fn get_snapshot_mut(&mut self, handle: u64) -> Result<&mut FrameSliceSnapshot, FrameSliceError> {
-        self.slices.get_mut(handle as usize).ok_or(FrameSliceError::MissingSlice)
-    }
-
-    fn clone_snapshot(&mut self, handle: u64) -> Result<u64, FrameSliceError> {
-        let mut cloned = self.get_snapshot(handle)?.clone();
-        cloned.consumed = false;
-        self.store_snapshot(cloned)
-    }
-
-    fn mark_consumed(&mut self, handle: u64) -> Result<(), FrameSliceError> {
-        let slice = self.slices.get_mut(handle as usize).ok_or(FrameSliceError::MissingSlice)?;
-        if slice.consumed {
-            return Err(FrameSliceError::Consumed);
-        }
-        slice.consumed = true;
-        Ok(())
-    }
-
-    fn scan_roots(&self, visitor: &mut dyn FnMut(*mut u64)) {
-        for slice in &self.slices {
-            if slice.consumed { continue; }
-            for frame in &slice.frames {
-                for &root_idx in &frame.root_value_indices {
-                    let slot = (&frame.values[root_idx] as *const u64).cast_mut();
-                    visitor(slot);
-                }
-            }
-        }
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SlotClass {
@@ -552,9 +457,7 @@ impl InterpFrameStore for VecFrameStore {
         }
         FrameSliceSnapshot {
             prompt_id: prompt,
-            mode: FrameSliceMode::OneShot,
             frames,
-            consumed: false,
         }
     }
 
@@ -1176,37 +1079,5 @@ mod tests {
         assert_eq!(err.message, "stack-map safepoints require stack-map root transport");
     }
 
-    #[test]
-    fn frame_slice_snapshot_validates_root_indices() {
-        let good = FrameSliceSnapshot {
-            prompt_id: 0,
-            mode: FrameSliceMode::OneShot,
-            frames: vec![CapturedFrame {
-                resume: FrameResumePoint {
-                    func_idx: 1,
-                    block_idx: 2,
-                    inst_idx: 3,
-                },
-                values: vec![10, 20, 30],
-                root_value_indices: vec![0, 2],
-                resume_arg_value_indices: vec![1],
-                active_prompts: vec![0],
-                caller_resume: CapturedCallerResume::TopLevel,
-            }],
-            consumed: false,
-        };
-        assert_eq!(good.root_word_count(), 2);
-        assert!(good.validate().is_ok());
-
-        let mut bad = good.clone();
-        bad.frames[0].root_value_indices.push(9);
-        assert_eq!(
-            bad.validate(),
-            Err(FrameSliceError::InvalidRootIndex {
-                frame_idx: 0,
-                root_idx: 9,
-            })
-        );
-    }
 
 }

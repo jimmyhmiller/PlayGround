@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use crate::anim::Easing;
 use crate::animated::{AnimatedColor, AnimatedPos, AnimatedValue};
-use crate::scene::{CircleNode, GroupNode, Node, RectNode, SceneGraph, TriangleNode};
+use crate::scene::{ArrowNode, CircleNode, GroupNode, LineNode, Node, RectNode, SceneGraph, TriangleNode};
 use crate::theme;
 use crate::tweakables::Tweakables;
 
@@ -65,7 +65,7 @@ enum BindingSource {
 
 #[derive(Clone)]
 enum PropPath {
-    X, Y, Opacity, Scale, Radius, Width, Height, Size,
+    X, Y, X2, Y2, Opacity, Scale, Radius, Width, Height, Size, StrokeWidth, HeadSize,
     FillR, FillG, FillB, FillA,
 }
 
@@ -161,6 +161,9 @@ pub struct Program {
 
     // Active sequences
     sequences: Vec<Sequence>,
+
+    // Clicks received while a sequence is in progress
+    queued_clicks: usize,
 
     // Color palette for entries
     color_index: usize,
@@ -389,12 +392,12 @@ fn eval_expr(val: &Value, env: &Env) -> Result<RtVal, RuntimeError> {
                     // (get map "key")
                     let map_name = items[1].as_symbol().ok_or_else(|| err("get expects symbol"))?;
                     let key = eval_expr(&items[2], env)?;
-                    let key_str = match &key {
+                    let _key_str = match &key {
                         RtVal::Str(s) => s.clone(),
                         _ => return Err(err("get key must be string")),
                     };
                     match env.get(map_name) {
-                        Some(RtVal::List(l)) => {
+                        Some(RtVal::List(_l)) => {
                             // get on a list doesn't make sense, but...
                             Ok(RtVal::Nil)
                         }
@@ -780,6 +783,66 @@ fn build_node(val: &Value, env: &mut Env, bindings: &mut Vec<Binding>, id_counte
             Ok(Some(Node::Triangle(t)))
         }
 
+        "line" => {
+            let (_, kw) = parse_kwargs(&items[1..]);
+            let id = kw.get("id").and_then(|v| v.as_string().or(v.as_symbol())).map(|s| s.to_string())
+                .unwrap_or_else(|| { *id_counter += 1; format!("_n{}", id_counter) });
+
+            let from_node = kw.get("from").and_then(|v| v.as_string().or(v.as_symbol())).map(|s| s.to_string());
+            let to_node = kw.get("to").and_then(|v| v.as_string().or(v.as_symbol())).map(|s| s.to_string());
+
+            let x1 = kw.get("x1").map(|v| make_animated(v, env, bindings, &id, PropPath::X)).transpose()?.unwrap_or(AnimatedValue::constant(0.0));
+            let y1 = kw.get("y1").map(|v| make_animated(v, env, bindings, &id, PropPath::Y)).transpose()?.unwrap_or(AnimatedValue::constant(0.0));
+            let x2 = kw.get("x2").map(|v| make_animated(v, env, bindings, &id, PropPath::X2)).transpose()?.unwrap_or(AnimatedValue::constant(100.0));
+            let y2 = kw.get("y2").map(|v| make_animated(v, env, bindings, &id, PropPath::Y2)).transpose()?.unwrap_or(AnimatedValue::constant(100.0));
+            let sw = kw.get("stroke-width").or(kw.get("w")).map(|v| make_animated(v, env, bindings, &id, PropPath::StrokeWidth)).transpose()?.unwrap_or(AnimatedValue::constant(2.0));
+            let color = kw.get("color").or(kw.get("fill")).map(|v| make_color(v, env)).transpose()?.unwrap_or(AnimatedColor::constant(1.0, 1.0, 1.0, 1.0));
+            let opacity = kw.get("opacity").map(|v| make_animated(v, env, bindings, &id, PropPath::Opacity)).transpose()?.unwrap_or(AnimatedValue::constant(1.0));
+
+            let mut line = LineNode::new(0.0, 0.0, 0.0, 0.0);
+            line.props.id = Some(id);
+            line.props.pos = AnimatedPos { x: x1, y: y1 };
+            line.x2 = x2;
+            line.y2 = y2;
+            line.stroke_width = sw;
+            line.color = color;
+            line.props.opacity = opacity;
+            line.from_node = from_node;
+            line.to_node = to_node;
+            Ok(Some(Node::Line(line)))
+        }
+
+        "arrow" => {
+            let (_, kw) = parse_kwargs(&items[1..]);
+            let id = kw.get("id").and_then(|v| v.as_string().or(v.as_symbol())).map(|s| s.to_string())
+                .unwrap_or_else(|| { *id_counter += 1; format!("_n{}", id_counter) });
+
+            let from_node = kw.get("from").and_then(|v| v.as_string().or(v.as_symbol())).map(|s| s.to_string());
+            let to_node = kw.get("to").and_then(|v| v.as_string().or(v.as_symbol())).map(|s| s.to_string());
+
+            let x1 = kw.get("x1").map(|v| make_animated(v, env, bindings, &id, PropPath::X)).transpose()?.unwrap_or(AnimatedValue::constant(0.0));
+            let y1 = kw.get("y1").map(|v| make_animated(v, env, bindings, &id, PropPath::Y)).transpose()?.unwrap_or(AnimatedValue::constant(0.0));
+            let x2 = kw.get("x2").map(|v| make_animated(v, env, bindings, &id, PropPath::X2)).transpose()?.unwrap_or(AnimatedValue::constant(100.0));
+            let y2 = kw.get("y2").map(|v| make_animated(v, env, bindings, &id, PropPath::Y2)).transpose()?.unwrap_or(AnimatedValue::constant(100.0));
+            let sw = kw.get("stroke-width").or(kw.get("w")).map(|v| make_animated(v, env, bindings, &id, PropPath::StrokeWidth)).transpose()?.unwrap_or(AnimatedValue::constant(2.0));
+            let hs = kw.get("head-size").map(|v| make_animated(v, env, bindings, &id, PropPath::HeadSize)).transpose()?.unwrap_or(AnimatedValue::constant(8.0));
+            let color = kw.get("color").or(kw.get("fill")).map(|v| make_color(v, env)).transpose()?.unwrap_or(AnimatedColor::constant(1.0, 1.0, 1.0, 1.0));
+            let opacity = kw.get("opacity").map(|v| make_animated(v, env, bindings, &id, PropPath::Opacity)).transpose()?.unwrap_or(AnimatedValue::constant(1.0));
+
+            let mut arrow = ArrowNode::new(0.0, 0.0, 0.0, 0.0);
+            arrow.props.id = Some(id);
+            arrow.props.pos = AnimatedPos { x: x1, y: y1 };
+            arrow.x2 = x2;
+            arrow.y2 = y2;
+            arrow.stroke_width = sw;
+            arrow.head_size = hs;
+            arrow.color = color;
+            arrow.props.opacity = opacity;
+            arrow.from_node = from_node;
+            arrow.to_node = to_node;
+            Ok(Some(Node::Arrow(arrow)))
+        }
+
         "group" => {
             let (_, kw) = parse_kwargs(&items[1..]);
             let mut group = GroupNode::new();
@@ -916,6 +979,21 @@ fn apply_binding(node: &mut Node, prop: &PropPath, value: f64) {
         PropPath::Radius => {
             if let Some(r) = node.as_rect_mut() { r.corner_radius.set_target(value); }
             if let Some(c) = node.as_circle_mut() { c.radius.set_target(value); }
+        }
+        PropPath::X2 => {
+            if let Some(l) = node.as_line_mut() { l.x2.set_target(value); }
+            if let Some(a) = node.as_arrow_mut() { a.x2.set_target(value); }
+        }
+        PropPath::Y2 => {
+            if let Some(l) = node.as_line_mut() { l.y2.set_target(value); }
+            if let Some(a) = node.as_arrow_mut() { a.y2.set_target(value); }
+        }
+        PropPath::StrokeWidth => {
+            if let Some(l) = node.as_line_mut() { l.stroke_width.set_target(value); }
+            if let Some(a) = node.as_arrow_mut() { a.stroke_width.set_target(value); }
+        }
+        PropPath::HeadSize => {
+            if let Some(a) = node.as_arrow_mut() { a.head_size.set_target(value); }
         }
         PropPath::Size => {
             // triangle
@@ -1061,6 +1139,7 @@ impl Program {
             bindings,
             on_click,
             sequences: Vec::new(),
+            queued_clicks: 0,
             color_index: 0,
             journal: Journal::new(),
         })
@@ -1099,8 +1178,14 @@ impl Program {
 
     pub fn handle_click(&mut self, tw: &Tweakables) {
         if self.journal.recording.is_some() {
+            self.queued_clicks += 1;
+            log::info!("click queued (total queued: {})", self.queued_clicks);
             return;
         }
+        self.fire_click(tw);
+    }
+
+    fn fire_click(&mut self, tw: &Tweakables) {
         self.journal.begin_step();
 
         let handlers: Vec<Vec<Value>> = self.on_click.clone();
@@ -1332,8 +1417,12 @@ impl Program {
                     let prop_path = match prop {
                         "x" => Some(PropPath::X),
                         "y" => Some(PropPath::Y),
+                        "x2" => Some(PropPath::X2),
+                        "y2" => Some(PropPath::Y2),
                         "opacity" => Some(PropPath::Opacity),
                         "scale" => Some(PropPath::Scale),
+                        "stroke-width" => Some(PropPath::StrokeWidth),
+                        "head-size" => Some(PropPath::HeadSize),
                         _ => None,
                     };
                     if let Some(p) = prop_path {
@@ -1412,6 +1501,12 @@ impl Program {
             let mutations = self.journal.recording.as_ref().map(|r| r.len()).unwrap_or(0);
             log::info!("committing step with {mutations} mutations; total steps={}", self.journal.steps.len() + 1);
             self.journal.commit_step();
+
+            // Drain one queued click
+            if self.queued_clicks > 0 {
+                self.queued_clicks -= 1;
+                self.fire_click(tw);
+            }
         }
     }
 }

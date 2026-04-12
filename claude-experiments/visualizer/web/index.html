@@ -196,6 +196,18 @@
             text-align: center;
         }
         #style-panel .copy-btn:hover { background: #2a2b36; }
+        /* Presentation mode */
+        #app.present #editor-pane,
+        #app.present #resize-handle,
+        #app.present #style-panel {
+            display: none;
+        }
+        #app.present #controls {
+            display: none;
+        }
+        #app.present.show-controls #controls {
+            display: flex;
+        }
         .cm-editor {
             height: 100% !important;
             font-size: 14px !important;
@@ -285,6 +297,8 @@
     </div>
 
     <script>
+        const app = document.getElementById('app');
+
         const handle = document.getElementById('resize-handle');
         const editorPane = document.getElementById('editor-pane');
         let dragging = false;
@@ -328,26 +342,18 @@
             } else if (e.key === 'ArrowRight' || e.key === ' ' || e.key === 'Enter') {
                 if (window.__step) window.__step();
                 e.preventDefault();
+            } else if (e.key === 'p') {
+                const entering = !app.classList.contains('present');
+                app.classList.toggle('present', entering);
+                if (entering) app.classList.add('show-controls');
+            } else if (e.key === 'c') {
+                app.classList.toggle('show-controls');
             }
         });
     </script>
 
-    <script type="importmap">
-    {
-        "imports": {
-            "codemirror": "https://esm.sh/codemirror@6.0.1",
-            "@codemirror/lang-javascript": "https://esm.sh/@codemirror/lang-javascript@6.2.2",
-            "@codemirror/theme-one-dark": "https://esm.sh/@codemirror/theme-one-dark@6.1.2",
-            "@codemirror/view": "https://esm.sh/@codemirror/view@6.36.5",
-            "@codemirror/state": "https://esm.sh/@codemirror/state@6.5.2"
-        }
-    }
-    </script>
-
     <script type="module">
-        import { basicSetup, EditorView } from 'codemirror';
-        import { javascript } from '@codemirror/lang-javascript';
-        import { oneDark } from '@codemirror/theme-one-dark';
+        import { basicSetup, EditorView, javascript, oneDark, rainbowBrackets } from './editor.bundle.js';
 
         // Load scene list and remember the last selection
         const scenes = await fetch('/scenes').then(r => r.json()).catch(() => []);
@@ -393,6 +399,7 @@
                 basicSetup,
                 javascript(),
                 oneDark,
+                rainbowBrackets(),
                 updateListener,
                 EditorView.theme({
                     '&': { backgroundColor: '#1a1b26' },

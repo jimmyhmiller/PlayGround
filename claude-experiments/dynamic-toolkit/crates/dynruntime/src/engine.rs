@@ -7,7 +7,7 @@
 use std::marker::PhantomData;
 
 use dynexec::{
-    CodegenConfig, ContinuationStore, DefaultCodegenConfig, LayoutConfigDefaults,
+    CodegenConfig, DefaultCodegenConfig, LayoutConfigDefaults,
 };
 use dynir::interp::{
     ConfiguredModuleInterpreter, ExternCallResult, InterpError, InterpResult, InterpRootManager,
@@ -142,14 +142,17 @@ pub struct ExecutionEngine<
     interpreter: ConfiguredModuleInterpreter<'a, Cfg, R>,
     module: &'a Module,
     jit: Option<JitModule>,
-    jit_conts: JitFrameSliceRuntime,
+    jit_conts: JitFrameSliceRuntime<'a>,
     tier_policy: Box<dyn TierPolicy>,
     _phantom: PhantomData<Cfg>,
 }
 
+/// Static singleton for engines without a heap-backed continuation context.
+static ENGINE_NO_CONTS: dynexec::NoContinuations = dynexec::NoContinuations;
+
 /// Create a default interpreter-only engine (LowBit<3>, no GC).
 pub fn default_engine<'a>(module: &'a Module) -> ExecutionEngine<'a> {
-    ExecutionEngine::with_tier_policy(module, &NoGcRoots, Box::new(NeverCompile))
+    ExecutionEngine::with_tier_policy(module, &NoGcRoots, &ENGINE_NO_CONTS, Box::new(NeverCompile))
 }
 
 impl<'a, Cfg, R> ExecutionEngine<'a, Cfg, R>
@@ -159,21 +162,24 @@ where
     R: InterpRootManager<Cfg::Layout, Cfg::Roots, Cfg::RootTransport>,
 {
     /// Create an interpreter-only engine.
-    pub fn new(module: &'a Module, roots: &'a R) -> Self {
-        Self::with_tier_policy(module, roots, Box::new(NeverCompile))
+    pub fn new(module: &'a Module, roots: &'a R, cont_ctx: &'a dyn dynexec::ContinuationContext) -> Self {
+        Self::with_tier_policy(module, roots, cont_ctx, Box::new(NeverCompile))
     }
 
     /// Create an engine with a custom tier policy.
     pub fn with_tier_policy(
         module: &'a Module,
         roots: &'a R,
+        cont_ctx: &'a dyn dynexec::ContinuationContext,
         tier_policy: Box<dyn TierPolicy>,
     ) -> Self {
+        let mut interp = ConfiguredModuleInterpreter::new(module, roots);
+        interp.set_cont_ctx(cont_ctx);
         ExecutionEngine {
-            interpreter: ConfiguredModuleInterpreter::new(module, roots),
+            interpreter: interp,
             module,
             jit: None,
-            jit_conts: JitFrameSliceRuntime::new(),
+            jit_conts: JitFrameSliceRuntime::new(cont_ctx),
             tier_policy,
             _phantom: PhantomData,
         }
@@ -212,7 +218,7 @@ where
         // If we have a JIT module, use it
         if let Some(jit) = &self.jit {
             let result =
-                execute_jit_module_function_to_terminal(jit, entry, args, &mut self.jit_conts)?;
+                execute_jit_module_function_to_terminal(jit, entry, args, &self.jit_conts)?;
             return self.handle_jit_result(result);
         }
 
@@ -233,7 +239,7 @@ where
                     &jit,
                     entry,
                     args,
-                    &mut self.jit_conts,
+                    &self.jit_conts,
                 )?;
                 self.jit = Some(jit);
                 return self.handle_jit_result(result);
@@ -294,11 +300,11 @@ where
                 // Cross-mode: JIT captured, interpreter resumes
                 let snapshot = self
                     .jit_conts
-                    .get_snapshot(handle)
+                    .read(handle)
                     .map_err(|e| ExecutionError::Jit(JitFrameControlError::FrameSlice(e)))?;
                 let result = self
                     .interpreter
-                    .resume_snapshot(snapshot.clone(), &args)?;
+                    .resume_snapshot(snapshot, &args)?;
                 Ok(interp_to_result(result))
             }
             JitExecutionResult::AbortToPrompt { .. } => Err(ExecutionError::CompilationFailed(
@@ -308,12 +314,12 @@ where
     }
 
     /// Access the continuation store.
-    pub fn continuation_store(&self) -> &JitFrameSliceRuntime {
+    pub fn continuation_store(&self) -> &JitFrameSliceRuntime<'a> {
         &self.jit_conts
     }
 
     /// Access the continuation store mutably.
-    pub fn continuation_store_mut(&mut self) -> &mut JitFrameSliceRuntime {
+    pub fn continuation_store_mut(&mut self) -> &mut JitFrameSliceRuntime<'a> {
         &mut self.jit_conts
     }
 
@@ -546,7 +552,7 @@ mod tests {
             b.ret(v);
         });
         let mut engine: ExecutionEngine =
-            ExecutionEngine::with_tier_policy(&module, &NoGcRoots, Box::new(AlwaysCompile::new()));
+            ExecutionEngine::with_tier_policy(&module, &NoGcRoots, &ENGINE_NO_CONTS, Box::new(AlwaysCompile::new()));
         // First call triggers compilation
         assert_eq!(engine.run(entry, &[]).unwrap(), ExecutionResult::Value(77));
         // JIT module should now be set
@@ -564,6 +570,7 @@ mod tests {
         let mut engine: ExecutionEngine<'_> = ExecutionEngine::with_tier_policy(
             &module,
             &NoGcRoots,
+            &ENGINE_NO_CONTS,
             Box::new(CallCountTier::new(3)),
         );
         // First two calls: interpreted, no JIT
