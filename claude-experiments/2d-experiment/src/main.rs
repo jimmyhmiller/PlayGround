@@ -70,6 +70,37 @@ impl Default for Tuning {
 #[derive(Component)]
 struct Player;
 
+#[derive(Component)]
+struct PlayerSpawn(Vec2);
+
+// =====================================================================
+// Monster
+// =====================================================================
+
+#[derive(Component, Reflect, InspectorOptions)]
+#[reflect(InspectorOptions)]
+struct Monster {
+    #[inspector(min = 0.0, max = 500.0)]
+    speed: f32,
+    #[inspector(min = 0.0, max = 800.0)]
+    detection_range: f32,
+    #[inspector(min = 0.0, max = 100.0)]
+    attack_reach: f32,
+    #[inspector(min = 0.0, max = 100.0)]
+    strength: f32,
+}
+
+impl Default for Monster {
+    fn default() -> Self {
+        Self {
+            speed: 120.0,
+            detection_range: 300.0,
+            attack_reach: 28.0,
+            strength: 1.0,
+        }
+    }
+}
+
 #[derive(Component, Copy, Clone)]
 struct Collider {
     half: Vec2,
@@ -116,9 +147,17 @@ enum GameMode {
     Editing,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Reflect)]
+enum EditorTool {
+    #[default]
+    Wall,
+    Monster,
+}
+
 #[derive(Resource, Default)]
 struct EditorState {
     drag_start: Option<Vec2>,
+    tool: EditorTool,
 }
 
 #[derive(Serialize, Deserialize)]
