@@ -2,6 +2,8 @@ import org.objectweb.asm.ClassWriter;
 import org.objectweb.asm.MethodVisitor;
 import org.objectweb.asm.FieldVisitor;
 import org.objectweb.asm.Label;
+import org.objectweb.asm.ClassReader;
+import org.objectweb.asm.ClassVisitor;
 import java.lang.Integer;
 import java.lang.Double;
 
@@ -772,7 +774,7 @@ enum Expr {
     ThrowE { message: Expr },
     ArrayLitE { elements: Vec<Expr> },
     CastE { value: Expr, cast_type: Ty },
-    SubclassE { type_name: String, args: Vec<Expr>, methods: Vec<Item> },
+    SubclassE { type_name: String, args: Vec<Expr>, methods: Vec<Item>, fields: Vec<Field> },
 }
 
 struct FieldValue {
@@ -1140,6 +1142,12 @@ impl Parser {
     // --- Type parsing ---
 
     fn parse_type(mut self) -> Ty {
+        // Array type: [ElementType]
+        if self.match_token("[") {
+            let elem: Ty = self.parse_type();
+            self.expect("]");
+            return Ty::ArrayTy { element: elem };
+        }
         let name_tok: Token = self.expect("ident");
         let name: String = tok_text(name_tok);
         if self.match_token("<") {
@@ -1271,10 +1279,19 @@ impl Parser {
     }
 
     fn parse_bitwise_or(mut self) -> Expr {
-        let mut left: Expr = self.parse_equality();
+        let mut left: Expr = self.parse_bitwise_and();
         while self.match_token("|") {
-            let right: Expr = self.parse_equality();
+            let right: Expr = self.parse_bitwise_and();
             left = Expr::BinaryE { left: left, op: "|", right: right };
+        }
+        return left;
+    }
+
+    fn parse_bitwise_and(mut self) -> Expr {
+        let mut left: Expr = self.parse_equality();
+        while self.match_token("&") {
+            let right: Expr = self.parse_equality();
+            left = Expr::BinaryE { left: left, op: "&", right: right };
         }
         return left;
     }
@@ -1355,18 +1372,29 @@ impl Parser {
                 let cast_ty: Ty = self.parse_type();
                 expr = Expr::CastE { value: expr, cast_type: cast_ty };
             } else if self.check("with") {
-                // Subclass expression: Type::new(args) with { fn method... }
+                // Subclass expression: Type::new(args) with { let field...; fn method... }
                 match expr {
                     Expr::StaticCallE { type_name, method_name, args } => {
                         self.advance();
                         self.expect("{");
+                        let mut fields: Vec<Field> = Vec::new();
                         let mut methods: Vec<Item> = Vec::new();
-                        while self.check("fn") {
-                            let method: Item = self.parse_fn_def();
-                            methods.push(method);
+                        while self.check("fn") || self.check("let") {
+                            if self.check("let") {
+                                self.advance();
+                                let field_name: String = tok_text(self.advance());
+                                self.expect(":");
+                                let field_ty: Ty = self.parse_type();
+                                self.expect(";");
+                                let f = Field { name: field_name, ty: field_ty };
+                                fields.push(f);
+                            } else {
+                                let method: Item = self.parse_fn_def();
+                                methods.push(method);
+                            }
                         }
                         self.expect("}");
-                        expr = Expr::SubclassE { type_name: type_name, args: args, methods: methods };
+                        expr = Expr::SubclassE { type_name: type_name, args: args, methods: methods, fields: fields };
                     }
                     _ => {
                         break;
@@ -1847,6 +1875,977 @@ fn item_fn_body(item: Item) -> Vec<Stmt> {
 }
 
 // ============================================================
+// Import Resolution — read .class files via ASM ClassReader
+// ============================================================
+
+const ASM9: i32 = 589824;
+const SKIP_CODE: i32 = 1;
+const SKIP_DEBUG: i32 = 2;
+const SKIP_FRAMES: i32 = 4;
+
+struct ImportedMethod {
+    name: String,
+    descriptor: String,
+    is_static: bool,
+    access: i32,
+}
+
+struct ImportedField {
+    name: String,
+    descriptor: String,
+}
+
+struct ImportedClass {
+    name: String,
+    methods: Vec<ImportedMethod>,
+    fields: Vec<ImportedField>,
+    super_name: String,
+    is_interface: bool,
+}
+
+struct ParsedType {
+    ty: Ty,
+    consumed: i32,
+}
+
+fn parse_jvm_type_at(desc: String, pos: i32) -> ParsedType {
+    let c: char = desc.char_at(pos);
+    if c == 'I' {
+        return ParsedType { ty: Ty::SimpleTy { name: "i32" }, consumed: 1 };
+    }
+    if c == 'J' {
+        return ParsedType { ty: Ty::SimpleTy { name: "i64" }, consumed: 1 };
+    }
+    if c == 'D' {
+        return ParsedType { ty: Ty::SimpleTy { name: "f64" }, consumed: 1 };
+    }
+    if c == 'F' {
+        return ParsedType { ty: Ty::SimpleTy { name: "f64" }, consumed: 1 };
+    }
+    if c == 'Z' {
+        return ParsedType { ty: Ty::SimpleTy { name: "bool" }, consumed: 1 };
+    }
+    if c == 'C' {
+        return ParsedType { ty: Ty::SimpleTy { name: "char" }, consumed: 1 };
+    }
+    if c == 'B' {
+        return ParsedType { ty: Ty::SimpleTy { name: "i32" }, consumed: 1 };
+    }
+    if c == 'S' {
+        return ParsedType { ty: Ty::SimpleTy { name: "i32" }, consumed: 1 };
+    }
+    if c == 'V' {
+        return ParsedType { ty: Ty::VoidTy, consumed: 1 };
+    }
+    if c == '[' {
+        let inner: ParsedType = parse_jvm_type_at(desc, pos + 1);
+        return ParsedType { ty: Ty::ArrayTy { element: inner.ty }, consumed: 1 + inner.consumed };
+    }
+    if c == 'L' {
+        let mut end: i32 = pos + 1;
+        while desc.char_at(end) != ';' {
+            end = end + 1;
+        }
+        let class_path: String = desc.substring(pos + 1, end);
+        let ty: Ty = jvm_path_to_ty(class_path);
+        return ParsedType { ty: ty, consumed: end - pos + 1 };
+    }
+    panic("Unknown JVM type descriptor char: " + String::from(c) + " in " + desc);
+    return ParsedType { ty: Ty::VoidTy, consumed: 1 };
+}
+
+fn jvm_path_to_ty(class_path: String) -> Ty {
+    if class_path == "java/lang/String" { return Ty::SimpleTy { name: "String" }; }
+    if class_path == "java/util/ArrayList" { return Ty::SimpleTy { name: "Vec" }; }
+    if class_path == "java/util/HashMap" { return Ty::SimpleTy { name: "Map" }; }
+    if class_path == "java/lang/StringBuilder" { return Ty::SimpleTy { name: "StringBuilder" }; }
+    if class_path == "java/lang/Object" { return Ty::SimpleTy { name: "Object" }; }
+    if class_path == "java/lang/Integer" { return Ty::SimpleTy { name: "Integer" }; }
+    if class_path == "java/lang/Long" { return Ty::SimpleTy { name: "Long" }; }
+    if class_path == "java/lang/Double" { return Ty::SimpleTy { name: "Double" }; }
+    if class_path == "java/lang/Boolean" { return Ty::SimpleTy { name: "Boolean" }; }
+    if class_path == "java/lang/Character" { return Ty::SimpleTy { name: "Character" }; }
+    let mut last_slash: i32 = -1;
+    let mut i: i32 = 0;
+    while i < class_path.len() {
+        if class_path.char_at(i) == '/' {
+            last_slash = i;
+        }
+        i = i + 1;
+    }
+    if last_slash >= 0 {
+        return Ty::SimpleTy { name: class_path.substring(last_slash + 1) };
+    }
+    return Ty::SimpleTy { name: class_path };
+}
+
+struct ParsedDescriptor {
+    param_types: Vec<Ty>,
+    return_type: Ty,
+}
+
+fn parse_method_descriptor(desc: String) -> ParsedDescriptor {
+    let mut params: Vec<Ty> = Vec::new();
+    let mut pos: i32 = 1;
+    while desc.char_at(pos) != ')' {
+        let parsed: ParsedType = parse_jvm_type_at(desc, pos);
+        params.push(parsed.ty);
+        pos = pos + parsed.consumed;
+    }
+    pos = pos + 1;
+    let ret: ParsedType = parse_jvm_type_at(desc, pos);
+    return ParsedDescriptor { param_types: params, return_type: ret.ty };
+}
+
+fn has_flag(value: i32, flag: i32) -> bool {
+    return (value / flag) % 2 != 0;
+}
+
+fn load_imported_class(jvm_name: String) -> ImportedClass {
+    let dot_name: String = jvm_name.replace("/", ".");
+    let reader: ClassReader = ClassReader::new(dot_name);
+
+    let visitor = ClassVisitor::new(ASM9) with {
+        let methods: Vec<ImportedMethod>;
+        let fields: Vec<ImportedField>;
+        fn visitMethod(mut self, access: i32, name: String, descriptor: String, signature: String, exceptions: [String]) -> MethodVisitor {
+            let m = ImportedMethod {
+                name: name,
+                descriptor: descriptor,
+                is_static: has_flag(access, 8),
+                access: access,
+            };
+            self.methods.push(m);
+            return null;
+        }
+        fn visitField(mut self, access: i32, name: String, descriptor: String, signature: String, value: Object) -> FieldVisitor {
+            let f = ImportedField { name: name, descriptor: descriptor };
+            self.fields.push(f);
+            return null;
+        }
+    };
+
+    visitor.methods = Vec::new();
+    visitor.fields = Vec::new();
+
+    reader.accept(visitor, SKIP_CODE + SKIP_DEBUG + SKIP_FRAMES);
+
+    let super_name: String = reader.getSuperName();
+    let access: i32 = reader.getAccess();
+    let is_iface: bool = has_flag(access, 512);
+
+    return ImportedClass {
+        name: jvm_name,
+        methods: visitor.methods,
+        fields: visitor.fields,
+        super_name: super_name,
+        is_interface: is_iface,
+    };
+}
+
+// ============================================================
+// Type Checker — Bidirectional type checking pass
+// ============================================================
+
+struct TypeChecker {
+    program: Program,
+    structs: Map<String, Item>,
+    enums: Map<String, Item>,
+    functions: Map<String, Item>,
+    impl_methods: Map<String, Vec<Item>>,
+    constants: Map<String, Ty>,
+    interfaces: Map<String, Item>,
+    impl_for: Vec<Item>,
+    imports: Map<String, String>,
+    imported_classes: Map<String, ImportedClass>,
+    struct_interfaces: Map<String, Vec<String>>,
+    local_types: Map<String, Ty>,
+    current_class: String,
+    current_return_type: Ty,
+    current_fn_name: String,
+    errors: Vec<String>,
+}
+
+impl TypeChecker {
+    fn new(program: Program) -> TypeChecker {
+        let tc = TypeChecker {
+            program: program,
+            structs: Map::new(),
+            enums: Map::new(),
+            functions: Map::new(),
+            impl_methods: Map::new(),
+            constants: Map::new(),
+            interfaces: Map::new(),
+            impl_for: Vec::new(),
+            imports: Map::new(),
+            imported_classes: Map::new(),
+            struct_interfaces: Map::new(),
+            local_types: Map::new(),
+            current_class: "",
+            current_return_type: Ty::VoidTy,
+            current_fn_name: "",
+            errors: Vec::new(),
+        };
+        return tc;
+    }
+
+    fn check(mut self) {
+        let mut i: i32 = 0;
+        while i < self.program.items.len() {
+            let item: Item = self.program.items.get(i);
+            match item {
+                Item::StructDefI { name, fields } => { self.structs.insert(name, item); }
+                Item::EnumDefI { name, variants } => { self.enums.insert(name, item); }
+                Item::ImplDefI { type_name, methods } => {
+                    if self.impl_methods.contains_key(type_name) {
+                        let existing: Vec<Item> = self.impl_methods.get(type_name);
+                        let mut j: i32 = 0;
+                        while j < methods.len() { existing.push(methods.get(j)); j = j + 1; }
+                    } else {
+                        let mut new_list: Vec<Item> = Vec::new();
+                        let mut j: i32 = 0;
+                        while j < methods.len() { new_list.push(methods.get(j)); j = j + 1; }
+                        self.impl_methods.insert(type_name, new_list);
+                    }
+                }
+                Item::FnDefI { name, params, return_type, body } => { self.functions.insert(name, item); }
+                Item::ImportI { path } => { self.tc_register_import(path); }
+                Item::ConstDefI { name, ty, value } => { self.constants.insert(name, ty); }
+                Item::InterfaceDefI { name, methods } => { self.interfaces.insert(name, item); }
+                Item::ImplForDefI { interface_name, struct_name, methods } => {
+                    self.impl_for.push(item);
+                    if self.struct_interfaces.contains_key(struct_name) {
+                        self.struct_interfaces.get(struct_name).push(interface_name);
+                    } else {
+                        let mut ifaces: Vec<String> = Vec::new();
+                        ifaces.push(interface_name);
+                        self.struct_interfaces.insert(struct_name, ifaces);
+                    }
+                }
+            }
+            i = i + 1;
+        }
+
+        self.check_top_level_functions();
+        self.check_impl_methods();
+        self.check_impl_for_methods();
+
+        if self.errors.len() > 0 {
+            let mut ei: i32 = 0;
+            while ei < self.errors.len() {
+                eprintln(self.errors.get(ei));
+                ei = ei + 1;
+            }
+            panic("Type checking failed with " + String::from(self.errors.len()) + " error(s)");
+        }
+    }
+
+    fn tc_register_import(mut self, path: String) {
+        let jvm_name: String = path.replace(".", "/");
+        let mut idx: i32 = path.len() - 1;
+        let mut last_dot: i32 = -1;
+        while idx >= 0 {
+            if path.char_at(idx) == '.' { last_dot = idx; break; }
+            idx = idx - 1;
+        }
+        let simple_name: String = path.substring(last_dot + 1);
+        self.imports.insert(simple_name, jvm_name);
+        let cls: ImportedClass = load_imported_class(jvm_name);
+        self.imported_classes.insert(simple_name, cls);
+    }
+
+    fn check_top_level_functions(mut self) {
+        let mut i: i32 = 0;
+        while i < self.program.items.len() {
+            let item: Item = self.program.items.get(i);
+            match item {
+                Item::FnDefI { name, params, return_type, body } => {
+                    self.current_class = "Main";
+                    self.current_fn_name = name;
+                    self.current_return_type = return_type;
+                    self.check_function_body(params, body);
+                }
+                _ => {}
+            }
+            i = i + 1;
+        }
+    }
+
+    fn check_impl_methods(mut self) {
+        let mut i: i32 = 0;
+        while i < self.program.items.len() {
+            let item: Item = self.program.items.get(i);
+            match item {
+                Item::ImplDefI { type_name, methods } => {
+                    self.current_class = type_name;
+                    let mut mi: i32 = 0;
+                    while mi < methods.len() {
+                        let m: Item = methods.get(mi);
+                        match m {
+                            Item::FnDefI { name, params, return_type, body } => {
+                                self.current_fn_name = type_name + "." + name;
+                                self.current_return_type = return_type;
+                                self.check_function_body(params, body);
+                            }
+                            _ => {}
+                        }
+                        mi = mi + 1;
+                    }
+                }
+                _ => {}
+            }
+            i = i + 1;
+        }
+    }
+
+    fn check_impl_for_methods(mut self) {
+        let mut i: i32 = 0;
+        while i < self.impl_for.len() {
+            let item: Item = self.impl_for.get(i);
+            match item {
+                Item::ImplForDefI { interface_name, struct_name, methods } => {
+                    self.current_class = struct_name;
+                    let mut mi: i32 = 0;
+                    while mi < methods.len() {
+                        let m: Item = methods.get(mi);
+                        match m {
+                            Item::FnDefI { name, params, return_type, body } => {
+                                self.current_fn_name = struct_name + "." + name;
+                                self.current_return_type = return_type;
+                                self.check_function_body(params, body);
+                            }
+                            _ => {}
+                        }
+                        mi = mi + 1;
+                    }
+                }
+                _ => {}
+            }
+            i = i + 1;
+        }
+    }
+
+    fn check_function_body(mut self, params: Vec<Param>, body: Vec<Stmt>) {
+        self.local_types = Map::new();
+        let mut pi: i32 = 0;
+        while pi < params.len() {
+            let p: Param = params.get(pi);
+            if p.is_self {
+                self.local_types.insert("self", Ty::SimpleTy { name: self.current_class });
+            } else {
+                self.local_types.insert(p.name, p.ty);
+            }
+            pi = pi + 1;
+        }
+        self.check_stmts(body);
+    }
+
+    fn error(mut self, msg: String) {
+        self.errors.push("Type error in '" + self.current_fn_name + "': " + msg);
+    }
+
+    fn check_stmt(mut self, stmt: Stmt) {
+        match stmt {
+            Stmt::LetS { name, mutable, ty, init } => {
+                if ty != null && init != null {
+                    self.check_expr(init, ty);
+                    self.local_types.insert(name, ty);
+                } else if ty != null {
+                    self.local_types.insert(name, ty);
+                } else if init != null {
+                    let inferred: Ty = self.synth_expr(init);
+                    if inferred == null {
+                        self.error("Cannot infer type for let binding '" + name + "'");
+                    } else {
+                        self.local_types.insert(name, inferred);
+                    }
+                } else {
+                    self.error("Cannot infer type for '" + name + "' without annotation or initializer");
+                }
+            }
+            Stmt::ReturnS { value } => {
+                if value != null {
+                    if self.current_return_type != null {
+                        self.check_expr(value, self.current_return_type);
+                    } else {
+                        self.synth_expr(value);
+                    }
+                }
+            }
+            Stmt::BreakS => {}
+            Stmt::ContinueS => {}
+            Stmt::ExprStmtS { expr } => { self.synth_expr(expr); }
+        }
+    }
+
+    fn check_expr(mut self, expr: Expr, expected: Ty) {
+        let mut is_null: bool = false;
+        match expr { Expr::NullLitE => { is_null = true; } _ => {} }
+        if is_null {
+            if self.is_primitive(expected) {
+                self.error("Cannot assign null to primitive type " + self.ty_to_string(expected));
+            }
+            return;
+        }
+
+        let mut is_int_lit: bool = false;
+        match expr { Expr::IntLitE { value } => { is_int_lit = true; } _ => {} }
+        if is_int_lit {
+            let en: String = self.resolve_type_name(expected);
+            if en == "i32" || en == "i64" || en == "f64" { return; }
+        }
+
+        let mut is_collection_new: bool = false;
+        match expr {
+            Expr::StaticCallE { type_name, method_name, args } => {
+                if method_name == "new" {
+                    if type_name == "Vec" || type_name == "Map" || type_name == "StringBuilder" {
+                        let en: String = self.resolve_type_name(expected);
+                        if en == type_name { is_collection_new = true; }
+                    }
+                }
+            }
+            _ => {}
+        }
+        if is_collection_new { return; }
+
+        let actual: Ty = self.synth_expr(expr);
+        if !self.types_compatible(actual, expected) {
+            self.error("Expected " + self.ty_to_string(expected) + ", found " + self.ty_to_string(actual));
+        }
+    }
+
+    fn synth_expr(mut self, expr: Expr) -> Ty {
+        match expr {
+            Expr::IntLitE { value } => { return Ty::SimpleTy { name: "i32" }; }
+            Expr::FloatLitE { value } => { return Ty::SimpleTy { name: "f64" }; }
+            Expr::StringLitE { value } => { return Ty::SimpleTy { name: "String" }; }
+            Expr::CharLitE { value } => { return Ty::SimpleTy { name: "char" }; }
+            Expr::BoolLitE { value } => { return Ty::SimpleTy { name: "bool" }; }
+            Expr::NullLitE => { return Ty::SimpleTy { name: "null" }; }
+            Expr::IdentE { name } => {
+                if self.local_types.contains_key(name) { return self.local_types.get(name); }
+                if self.constants.contains_key(name) { return self.constants.get(name); }
+                self.error("Undefined variable: " + name);
+                return Ty::SimpleTy { name: "Object" };
+            }
+            Expr::SelfExprE => { return Ty::SimpleTy { name: self.current_class }; }
+            Expr::BinaryE { left, op, right } => { return self.synth_binary(left, op, right); }
+            Expr::UnaryE { op, operand } => {
+                let t: Ty = self.synth_expr(operand);
+                if op == "!" { return Ty::SimpleTy { name: "bool" }; }
+                return t;
+            }
+            Expr::CallE { name, args } => { return self.synth_call(name, args); }
+            Expr::MethodCallE { receiver, method_name, args } => { return self.synth_method_call(receiver, method_name, args); }
+            Expr::FieldAccessE { receiver, field } => { return self.synth_field_access(receiver, field); }
+            Expr::StructInitE { name, fields } => { return self.synth_struct_init(name, fields); }
+            Expr::StaticCallE { type_name, method_name, args } => { return self.synth_static_call(type_name, method_name, args); }
+            Expr::AssignE { target, value } => {
+                let target_type: Ty = self.synth_expr(target);
+                self.check_expr(value, target_type);
+                return Ty::VoidTy;
+            }
+            Expr::IfE { condition, then_block, else_block } => {
+                self.check_expr(condition, Ty::SimpleTy { name: "bool" });
+                self.check_stmts(then_block);
+                self.check_stmts(else_block);
+                return Ty::VoidTy;
+            }
+            Expr::WhileE { condition, body } => {
+                self.check_expr(condition, Ty::SimpleTy { name: "bool" });
+                self.check_stmts(body);
+                return Ty::VoidTy;
+            }
+            Expr::BlockE { stmts } => { self.check_stmts(stmts); return Ty::VoidTy; }
+            Expr::ForRangeE { var_name, start, end, body } => {
+                self.check_expr(start, Ty::SimpleTy { name: "i32" });
+                self.check_expr(end, Ty::SimpleTy { name: "i32" });
+                self.local_types.insert(var_name, Ty::SimpleTy { name: "i32" });
+                self.check_stmts(body);
+                return Ty::VoidTy;
+            }
+            Expr::ForEachE { var_name, iterable, body } => {
+                let iter_ty: Ty = self.synth_expr(iterable);
+                let elem_ty: Ty = self.get_vec_elem_type(iter_ty);
+                self.local_types.insert(var_name, elem_ty);
+                self.check_stmts(body);
+                return Ty::VoidTy;
+            }
+            Expr::MatchE { subject, arms } => {
+                let subject_type: Ty = self.synth_expr(subject);
+                self.check_match(subject_type, arms);
+                return Ty::VoidTy;
+            }
+            Expr::IndexE { receiver, index } => {
+                let recv_type: Ty = self.synth_expr(receiver);
+                self.synth_expr(index);
+                if self.is_vec_type(recv_type) { return self.get_vec_elem_type(recv_type); }
+                if self.is_string(recv_type) { return Ty::SimpleTy { name: "char" }; }
+                return Ty::SimpleTy { name: "Object" };
+            }
+            Expr::EnumInitE { enum_name, variant, fields } => { return self.synth_enum_init(enum_name, variant, fields); }
+            Expr::ThrowE { message } => { self.synth_expr(message); return Ty::VoidTy; }
+            Expr::ArrayLitE { elements } => {
+                if elements.len() == 0 { return Ty::ArrayTy { element: Ty::SimpleTy { name: "Object" } }; }
+                let elem_ty: Ty = self.synth_expr(elements.get(0));
+                let mut ei: i32 = 1;
+                while ei < elements.len() { self.check_expr(elements.get(ei), elem_ty); ei = ei + 1; }
+                return Ty::ArrayTy { element: elem_ty };
+            }
+            Expr::CastE { value, cast_type } => { self.synth_expr(value); return cast_type; }
+            Expr::SubclassE { type_name, args, methods, fields } => {
+                let mut ai: i32 = 0;
+                while ai < args.len() { self.synth_expr(args.get(ai)); ai = ai + 1; }
+                return Ty::SimpleTy { name: type_name };
+            }
+        }
+        return Ty::VoidTy;
+    }
+
+    fn check_stmts(mut self, stmts: Vec<Stmt>) {
+        if stmts == null { return; }
+        let mut i: i32 = 0;
+        while i < stmts.len() { self.check_stmt(stmts.get(i)); i = i + 1; }
+    }
+
+    fn synth_binary(mut self, left: Expr, op: String, right: Expr) -> Ty {
+        let mut left_null: bool = false;
+        let mut right_null: bool = false;
+        match left { Expr::NullLitE => { left_null = true; } _ => {} }
+        match right { Expr::NullLitE => { right_null = true; } _ => {} }
+        if left_null || right_null {
+            if !left_null { self.synth_expr(left); }
+            if !right_null { self.synth_expr(right); }
+            return Ty::SimpleTy { name: "bool" };
+        }
+        if op == "&&" || op == "||" {
+            self.check_expr(left, Ty::SimpleTy { name: "bool" });
+            self.check_expr(right, Ty::SimpleTy { name: "bool" });
+            return Ty::SimpleTy { name: "bool" };
+        }
+        let lt: Ty = self.synth_expr(left);
+        let rt: Ty = self.synth_expr(right);
+        if self.is_comparison_op(op) { return Ty::SimpleTy { name: "bool" }; }
+        if op == "+" && self.is_string(lt) { return Ty::SimpleTy { name: "String" }; }
+        return lt;
+    }
+
+    fn synth_call(mut self, name: String, args: Vec<Expr>) -> Ty {
+        if name == "println" || name == "print" || name == "eprintln" {
+            let mut ai: i32 = 0;
+            while ai < args.len() { self.synth_expr(args.get(ai)); ai = ai + 1; }
+            return Ty::VoidTy;
+        }
+        if name == "panic" { if args.len() > 0 { self.synth_expr(args.get(0)); } return Ty::VoidTy; }
+        if name == "exit" { if args.len() > 0 { self.check_expr(args.get(0), Ty::SimpleTy { name: "i32" }); } return Ty::VoidTy; }
+        if name == "read_file" { if args.len() > 0 { self.check_expr(args.get(0), Ty::SimpleTy { name: "String" }); } return Ty::SimpleTy { name: "String" }; }
+        if name == "write_file" { let mut ai: i32 = 0; while ai < args.len() { self.synth_expr(args.get(ai)); ai = ai + 1; } return Ty::VoidTy; }
+        if name == "mkdir" { if args.len() > 0 { self.synth_expr(args.get(0)); } return Ty::VoidTy; }
+        if name == "args_get" { if args.len() > 0 { self.check_expr(args.get(0), Ty::SimpleTy { name: "i32" }); } return Ty::SimpleTy { name: "String" }; }
+        if name == "args_len" { return Ty::SimpleTy { name: "i32" }; }
+        if name == "system" || name == "run_command" { if args.len() > 0 { self.synth_expr(args.get(0)); } return Ty::SimpleTy { name: "i32" }; }
+        if name == "parse_int" { if args.len() > 0 { self.synth_expr(args.get(0)); } return Ty::SimpleTy { name: "i32" }; }
+        if name == "parse_long" { if args.len() > 0 { self.synth_expr(args.get(0)); } return Ty::SimpleTy { name: "i64" }; }
+        if name == "parse_double" { if args.len() > 0 { self.synth_expr(args.get(0)); } return Ty::SimpleTy { name: "f64" }; }
+        if name == "is_digit" || name == "is_letter" || name == "is_alphanumeric" {
+            if args.len() > 0 { self.check_expr(args.get(0), Ty::SimpleTy { name: "char" }); }
+            return Ty::SimpleTy { name: "bool" };
+        }
+        if self.functions.contains_key(name) {
+            let fn_item: Item = self.functions.get(name);
+            let fn_params: Vec<Param> = item_fn_params(fn_item);
+            let fn_ret: Ty = item_fn_return_type(fn_item);
+            let mut ai: i32 = 0;
+            let mut pi: i32 = 0;
+            while pi < fn_params.len() {
+                let p: Param = fn_params.get(pi);
+                if !p.is_self {
+                    if ai < args.len() { self.check_expr(args.get(ai), p.ty); }
+                    ai = ai + 1;
+                }
+                pi = pi + 1;
+            }
+            return fn_ret;
+        }
+        self.error("Unknown function: " + name);
+        return Ty::VoidTy;
+    }
+
+    fn synth_method_call(mut self, receiver: Expr, method_name: String, args: Vec<Expr>) -> Ty {
+        let recv_type: Ty = self.synth_expr(receiver);
+        let type_name: String = self.resolve_type_name(recv_type);
+        if type_name == "String" { return self.synth_string_method(method_name, args); }
+        if self.is_vec_type(recv_type) { return self.synth_vec_method(recv_type, method_name, args); }
+        if self.is_map_type(recv_type) { return self.synth_map_method(recv_type, method_name, args); }
+        if type_name == "StringBuilder" { return self.synth_sb_method(method_name, args); }
+        if self.imported_classes.contains_key(type_name) { return self.synth_imported_method(type_name, method_name, args, false); }
+        if self.interfaces.contains_key(type_name) { return self.synth_interface_method(type_name, method_name, args); }
+        if self.impl_methods.contains_key(type_name) { return self.synth_user_method(type_name, method_name, args); }
+        let mut ai: i32 = 0;
+        while ai < args.len() { self.synth_expr(args.get(ai)); ai = ai + 1; }
+        self.error("Unknown method: " + type_name + "." + method_name);
+        return Ty::VoidTy;
+    }
+
+    fn synth_string_method(mut self, method_name: String, args: Vec<Expr>) -> Ty {
+        let mut ai: i32 = 0;
+        while ai < args.len() { self.synth_expr(args.get(ai)); ai = ai + 1; }
+        if method_name == "len" || method_name == "length" || method_name == "indexOf" || method_name == "index_of" { return Ty::SimpleTy { name: "i32" }; }
+        if method_name == "char_at" || method_name == "charAt" { return Ty::SimpleTy { name: "char" }; }
+        if method_name == "contains" || method_name == "starts_with" || method_name == "startsWith"
+            || method_name == "ends_with" || method_name == "endsWith"
+            || method_name == "equals" || method_name == "is_empty" || method_name == "isEmpty" { return Ty::SimpleTy { name: "bool" }; }
+        return Ty::SimpleTy { name: "String" };
+    }
+
+    fn synth_vec_method(mut self, recv_type: Ty, method_name: String, args: Vec<Expr>) -> Ty {
+        let mut ai: i32 = 0;
+        while ai < args.len() { self.synth_expr(args.get(ai)); ai = ai + 1; }
+        if method_name == "len" || method_name == "size" { return Ty::SimpleTy { name: "i32" }; }
+        if method_name == "is_empty" || method_name == "isEmpty" || method_name == "contains" { return Ty::SimpleTy { name: "bool" }; }
+        if method_name == "get" || method_name == "remove" { return self.get_vec_elem_type(recv_type); }
+        return Ty::VoidTy;
+    }
+
+    fn synth_map_method(mut self, recv_type: Ty, method_name: String, args: Vec<Expr>) -> Ty {
+        let mut ai: i32 = 0;
+        while ai < args.len() { self.synth_expr(args.get(ai)); ai = ai + 1; }
+        if method_name == "len" || method_name == "size" { return Ty::SimpleTy { name: "i32" }; }
+        if method_name == "is_empty" || method_name == "isEmpty" || method_name == "contains_key" || method_name == "containsKey" { return Ty::SimpleTy { name: "bool" }; }
+        if method_name == "get" || method_name == "remove" || method_name == "get_or_default" || method_name == "getOrDefault" { return self.get_map_value_type(recv_type); }
+        return Ty::VoidTy;
+    }
+
+    fn synth_sb_method(mut self, method_name: String, args: Vec<Expr>) -> Ty {
+        let mut ai: i32 = 0;
+        while ai < args.len() { self.synth_expr(args.get(ai)); ai = ai + 1; }
+        if method_name == "append" { return Ty::SimpleTy { name: "StringBuilder" }; }
+        if method_name == "to_string" || method_name == "toString" { return Ty::SimpleTy { name: "String" }; }
+        if method_name == "len" || method_name == "length" { return Ty::SimpleTy { name: "i32" }; }
+        return Ty::VoidTy;
+    }
+
+    fn synth_imported_method(mut self, type_name: String, method_name: String, args: Vec<Expr>, is_static: bool) -> Ty {
+        let mut arg_types: Vec<Ty> = Vec::new();
+        let mut ai: i32 = 0;
+        while ai < args.len() { arg_types.push(self.synth_expr(args.get(ai))); ai = ai + 1; }
+        let cls: ImportedClass = self.imported_classes.get(type_name);
+        let mut mi: i32 = 0;
+        while mi < cls.methods.len() {
+            let m: ImportedMethod = cls.methods.get(mi);
+            if m.name == method_name && m.is_static == is_static {
+                let parsed: ParsedDescriptor = parse_method_descriptor(m.descriptor);
+                if parsed.param_types.len() == args.len() { return parsed.return_type; }
+            }
+            mi = mi + 1;
+        }
+        mi = 0;
+        while mi < cls.methods.len() {
+            let m: ImportedMethod = cls.methods.get(mi);
+            if m.name == method_name && m.is_static == is_static {
+                let parsed: ParsedDescriptor = parse_method_descriptor(m.descriptor);
+                return parsed.return_type;
+            }
+            mi = mi + 1;
+        }
+        self.error("Unknown method on imported class " + type_name + ": " + method_name);
+        return Ty::VoidTy;
+    }
+
+    fn synth_interface_method(mut self, type_name: String, method_name: String, args: Vec<Expr>) -> Ty {
+        let mut ai: i32 = 0;
+        while ai < args.len() { self.synth_expr(args.get(ai)); ai = ai + 1; }
+        let iface: Item = self.interfaces.get(type_name);
+        match iface {
+            Item::InterfaceDefI { name, methods } => {
+                let mut mi: i32 = 0;
+                while mi < methods.len() {
+                    let m: Item = methods.get(mi);
+                    if item_fn_name(m) == method_name { return item_fn_return_type(m); }
+                    mi = mi + 1;
+                }
+            }
+            _ => {}
+        }
+        self.error("Unknown interface method: " + type_name + "." + method_name);
+        return Ty::VoidTy;
+    }
+
+    fn synth_user_method(mut self, type_name: String, method_name: String, args: Vec<Expr>) -> Ty {
+        let methods: Vec<Item> = self.impl_methods.get(type_name);
+        let mut mi: i32 = 0;
+        while mi < methods.len() {
+            let m: Item = methods.get(mi);
+            if item_fn_name(m) == method_name {
+                let fn_params: Vec<Param> = item_fn_params(m);
+                let fn_ret: Ty = item_fn_return_type(m);
+                let mut ai: i32 = 0;
+                let mut pi: i32 = 0;
+                while pi < fn_params.len() {
+                    let p: Param = fn_params.get(pi);
+                    if !p.is_self {
+                        if ai < args.len() { self.check_expr(args.get(ai), p.ty); }
+                        ai = ai + 1;
+                    }
+                    pi = pi + 1;
+                }
+                return fn_ret;
+            }
+            mi = mi + 1;
+        }
+        self.error("Unknown method: " + type_name + "." + method_name);
+        return Ty::VoidTy;
+    }
+
+    fn synth_field_access(mut self, receiver: Expr, field: String) -> Ty {
+        let recv_type: Ty = self.synth_expr(receiver);
+        let type_name: String = self.resolve_type_name(recv_type);
+        if self.structs.contains_key(type_name) {
+            let field_ty: Ty = self.find_field_type_in_struct(type_name, field);
+            if field_ty != null { return field_ty; }
+        }
+        if self.imported_classes.contains_key(type_name) {
+            let cls: ImportedClass = self.imported_classes.get(type_name);
+            let mut fi: i32 = 0;
+            while fi < cls.fields.len() {
+                let f: ImportedField = cls.fields.get(fi);
+                if f.name == field {
+                    let parsed: ParsedType = parse_jvm_type_at(f.descriptor, 0);
+                    return parsed.ty;
+                }
+                fi = fi + 1;
+            }
+        }
+        self.error("Unknown field: " + type_name + "." + field);
+        return Ty::SimpleTy { name: "Object" };
+    }
+
+    fn synth_struct_init(mut self, name: String, init_fields: Vec<FieldValue>) -> Ty {
+        if !self.structs.contains_key(name) {
+            self.error("Unknown struct: " + name);
+            let mut fi: i32 = 0;
+            while fi < init_fields.len() { self.synth_expr(init_fields.get(fi).value); fi = fi + 1; }
+            return Ty::SimpleTy { name: name };
+        }
+        let mut fi: i32 = 0;
+        while fi < init_fields.len() {
+            let fv: FieldValue = init_fields.get(fi);
+            let fty: Ty = self.find_field_type_in_struct(name, fv.name);
+            if fty != null {
+                self.check_expr(fv.value, fty);
+            } else {
+                self.synth_expr(fv.value);
+                self.error("Unknown field '" + fv.name + "' in struct " + name);
+            }
+            fi = fi + 1;
+        }
+        return Ty::SimpleTy { name: name };
+    }
+
+    fn find_field_type_in_struct(self, struct_name: String, field_name: String) -> Ty {
+        let sd: Item = self.structs.get(struct_name);
+        match sd {
+            Item::StructDefI { name, fields } => {
+                let mut i: i32 = 0;
+                while i < fields.len() {
+                    let f: Field = fields.get(i);
+                    if f.name == field_name { return f.ty; }
+                    i = i + 1;
+                }
+            }
+            _ => {}
+        }
+        return null;
+    }
+
+    fn synth_enum_init(mut self, enum_name: String, variant: String, init_fields: Vec<FieldValue>) -> Ty {
+        if !self.enums.contains_key(enum_name) {
+            self.error("Unknown enum: " + enum_name);
+            let mut fi: i32 = 0;
+            while fi < init_fields.len() { self.synth_expr(init_fields.get(fi).value); fi = fi + 1; }
+            return Ty::SimpleTy { name: enum_name };
+        }
+        let variant_fields: Vec<Field> = self.find_enum_variant_fields(enum_name, variant);
+        if variant_fields == null {
+            self.error("Unknown variant: " + enum_name + "::" + variant);
+            let mut fi: i32 = 0;
+            while fi < init_fields.len() { self.synth_expr(init_fields.get(fi).value); fi = fi + 1; }
+        } else {
+            let mut fi: i32 = 0;
+            while fi < init_fields.len() {
+                let fv: FieldValue = init_fields.get(fi);
+                let fty: Ty = self.find_field_type_in_list(variant_fields, fv.name);
+                if fty != null { self.check_expr(fv.value, fty); }
+                else {
+                    self.synth_expr(fv.value);
+                    self.error("Unknown field '" + fv.name + "' in " + enum_name + "::" + variant);
+                }
+                fi = fi + 1;
+            }
+        }
+        return Ty::SimpleTy { name: enum_name };
+    }
+
+    fn find_enum_variant_fields(self, enum_name: String, variant_name: String) -> Vec<Field> {
+        let ed: Item = self.enums.get(enum_name);
+        match ed {
+            Item::EnumDefI { name, variants } => {
+                let mut vi: i32 = 0;
+                while vi < variants.len() {
+                    let v: EnumVariant = variants.get(vi);
+                    if v.name == variant_name { return v.fields; }
+                    vi = vi + 1;
+                }
+            }
+            _ => {}
+        }
+        return null;
+    }
+
+    fn find_field_type_in_list(self, fields: Vec<Field>, name: String) -> Ty {
+        let mut i: i32 = 0;
+        while i < fields.len() {
+            let f: Field = fields.get(i);
+            if f.name == name { return f.ty; }
+            i = i + 1;
+        }
+        return null;
+    }
+
+    fn synth_static_call(mut self, type_name: String, method_name: String, args: Vec<Expr>) -> Ty {
+        if type_name == "Vec" && method_name == "new" { return Ty::SimpleTy { name: "Vec" }; }
+        if type_name == "Map" && method_name == "new" { return Ty::SimpleTy { name: "Map" }; }
+        if type_name == "StringBuilder" && method_name == "new" {
+            let mut ai: i32 = 0;
+            while ai < args.len() { self.synth_expr(args.get(ai)); ai = ai + 1; }
+            return Ty::SimpleTy { name: "StringBuilder" };
+        }
+        if type_name == "String" && method_name == "from" {
+            if args.len() > 0 { self.synth_expr(args.get(0)); }
+            return Ty::SimpleTy { name: "String" };
+        }
+        if self.imported_classes.contains_key(type_name) {
+            if method_name == "new" {
+                let mut ai: i32 = 0;
+                while ai < args.len() { self.synth_expr(args.get(ai)); ai = ai + 1; }
+                return Ty::SimpleTy { name: type_name };
+            }
+            return self.synth_imported_method(type_name, method_name, args, true);
+        }
+        if self.impl_methods.contains_key(type_name) { return self.synth_user_method(type_name, method_name, args); }
+        if self.enums.contains_key(type_name) {
+            let empty_fields: Vec<FieldValue> = Vec::new();
+            return self.synth_enum_init(type_name, method_name, empty_fields);
+        }
+        let mut ai: i32 = 0;
+        while ai < args.len() { self.synth_expr(args.get(ai)); ai = ai + 1; }
+        self.error("Unknown static method: " + type_name + "::" + method_name);
+        return Ty::VoidTy;
+    }
+
+    fn check_match(mut self, subject_type: Ty, arms: Vec<MatchArm>) {
+        let mut ai: i32 = 0;
+        while ai < arms.len() {
+            let arm: MatchArm = arms.get(ai);
+            match arm.pattern {
+                Pattern::WildcardP => {}
+                Pattern::LiteralP { expr } => { self.synth_expr(expr); }
+                Pattern::EnumVariantP { enum_name, variant, bindings } => {
+                    if self.enums.contains_key(enum_name) {
+                        let variant_fields: Vec<Field> = self.find_enum_variant_fields(enum_name, variant);
+                        if variant_fields != null {
+                            let mut bi: i32 = 0;
+                            while bi < bindings.len() {
+                                if bi < variant_fields.len() {
+                                    let f: Field = variant_fields.get(bi);
+                                    let binding: String = bindings.get(bi);
+                                    self.local_types.insert(binding, f.ty);
+                                }
+                                bi = bi + 1;
+                            }
+                        }
+                    }
+                }
+            }
+            self.check_stmts(arm.body);
+            ai = ai + 1;
+        }
+    }
+
+    fn ty_to_string(self, ty: Ty) -> String {
+        if ty == null { return "null"; }
+        match ty {
+            Ty::SimpleTy { name } => { return name; }
+            Ty::GenericTy { name, args } => {
+                let mut sb: StringBuilder = StringBuilder::new();
+                sb.append(name);
+                sb.append("<");
+                let mut i: i32 = 0;
+                while i < args.len() {
+                    if i > 0 { sb.append(", "); }
+                    sb.append(self.ty_to_string(args.get(i)));
+                    i = i + 1;
+                }
+                sb.append(">");
+                return sb.to_string();
+            }
+            Ty::ArrayTy { element } => { return "[" + self.ty_to_string(element) + "]"; }
+            Ty::VoidTy => { return "void"; }
+        }
+        return "unknown";
+    }
+
+    fn resolve_type_name(self, ty: Ty) -> String {
+        if ty == null { return "null"; }
+        match ty { Ty::SimpleTy { name } => { return name; } Ty::GenericTy { name, args } => { return name; } Ty::ArrayTy { element } => { return "array"; } Ty::VoidTy => { return "void"; } }
+        return "unknown";
+    }
+
+    fn is_primitive(self, ty: Ty) -> bool {
+        let n: String = self.resolve_type_name(ty);
+        return n == "i32" || n == "i64" || n == "f64" || n == "bool" || n == "char";
+    }
+
+    fn is_string(self, ty: Ty) -> bool { return self.resolve_type_name(ty) == "String"; }
+    fn is_vec_type(self, ty: Ty) -> bool { return self.resolve_type_name(ty) == "Vec"; }
+    fn is_map_type(self, ty: Ty) -> bool { return self.resolve_type_name(ty) == "Map"; }
+
+    fn is_comparison_op(self, op: String) -> bool {
+        return op == "==" || op == "!=" || op == "<" || op == ">" || op == "<=" || op == ">=";
+    }
+
+    fn get_vec_elem_type(self, vec_type: Ty) -> Ty {
+        match vec_type { Ty::GenericTy { name, args } => { if args.len() > 0 { return args.get(0); } } _ => {} }
+        return Ty::SimpleTy { name: "Object" };
+    }
+
+    fn get_map_value_type(self, map_type: Ty) -> Ty {
+        match map_type { Ty::GenericTy { name, args } => { if args.len() > 1 { return args.get(1); } } _ => {} }
+        return Ty::SimpleTy { name: "Object" };
+    }
+
+    fn types_compatible(self, actual: Ty, expected: Ty) -> bool {
+        if actual == null || expected == null { return true; }
+        let an: String = self.resolve_type_name(actual);
+        let en: String = self.resolve_type_name(expected);
+        if an == en { return true; }
+        if an == "null" && !self.is_primitive(expected) { return true; }
+        if an == "void" && en == "void" { return true; }
+        if an == "Vec" && en == "Vec" { return true; }
+        if an == "Map" && en == "Map" { return true; }
+        if self.struct_interfaces.contains_key(an) {
+            let ifaces: Vec<String> = self.struct_interfaces.get(an);
+            let mut ii: i32 = 0;
+            while ii < ifaces.len() { if ifaces.get(ii) == en { return true; } ii = ii + 1; }
+        }
+        if an == "Object" && !self.is_primitive(expected) { return true; }
+        if en == "Object" && !self.is_primitive(actual) { return true; }
+        return false;
+    }
+}
+
+// ============================================================
 // Codegen
 // ============================================================
 
@@ -1871,6 +2870,7 @@ struct Codegen {
     break_label: Label,
     continue_label: Label,
     anon_counter: i32,
+    anon_parents: Map<String, String>,
 }
 
 impl Codegen {
@@ -1895,6 +2895,7 @@ impl Codegen {
             break_label: null,
             continue_label: null,
             anon_counter: 0,
+            anon_parents: Map::new(),
         };
         return c;
     }
@@ -2435,8 +3436,14 @@ impl Codegen {
         if init != null {
             let prev_expected: Ty = self.expected_type;
             self.expected_type = actual_ty;
-            self.gen_expr(init);
+            let expr_ty: Ty = self.gen_expr(init);
             self.expected_type = prev_expected;
+            // If gen_expr returned a more specific type (e.g. anon subclass),
+            // update the local's type to match
+            let expr_name: String = self.resolve_type_name(expr_ty);
+            if self.anon_parents.contains_key(expr_name) {
+                self.local_types.insert(name, expr_ty);
+            }
             self.store_local(slot, actual_ty);
         }
     }
@@ -2572,8 +3579,8 @@ impl Codegen {
             Expr::CastE { value, cast_type } => {
                 return self.gen_cast(value, cast_type);
             }
-            Expr::SubclassE { type_name, args, methods } => {
-                return self.gen_subclass(type_name, args, methods);
+            Expr::SubclassE { type_name, args, methods, fields } => {
+                return self.gen_subclass(type_name, args, methods, fields);
             }
         }
         return Ty::VoidTy;
@@ -2708,6 +3715,7 @@ impl Codegen {
             else if op == "/" { self.mv.visit_insn(IDIV); }
             else if op == "%" { self.mv.visit_insn(IREM); }
             else if op == "|" { self.mv.visit_insn(IOR); }
+            else if op == "&" { self.mv.visit_insn(IAND); }
             else if op == "==" { self.gen_int_comparison(IF_ICMPEQ); }
             else if op == "!=" { self.gen_int_comparison(IF_ICMPNE); }
             else if op == "<" { self.gen_int_comparison(IF_ICMPLT); }
@@ -3006,7 +4014,12 @@ impl Codegen {
 
     fn gen_method_call(mut self, receiver: Expr, method_name: String, args: Vec<Expr>) -> Ty {
         let recv_type: Ty = self.gen_expr(receiver);
-        let type_name: String = self.resolve_type_name(recv_type);
+        let mut type_name: String = self.resolve_type_name(recv_type);
+
+        // For anon subclasses, resolve to the parent type for method dispatch
+        if self.anon_parents.contains_key(type_name) {
+            type_name = self.anon_parents.get(type_name);
+        }
 
         // String methods
         if type_name == "String" {
@@ -3069,33 +4082,56 @@ impl Codegen {
         }
 
         // User-defined method
-        let method: Item = self.find_impl_method(type_name, method_name);
-        match method {
-            Item::FnDefI { name, params, return_type, body } => {
-                let mut desc_sb: StringBuilder = StringBuilder::new();
-                desc_sb.append("(");
-                let mut arg_idx: i32 = 0;
-                let mut pi: i32 = 0;
-                while pi < params.len() {
-                    let p: Param = params.get(pi);
-                    if !p.is_self {
-                        if arg_idx < args.len() {
-                            self.gen_expr(args.get(arg_idx));
-                            desc_sb.append(self.type_descriptor(p.ty));
-                            arg_idx = arg_idx + 1;
+        if self.impl_methods.contains_key(type_name) {
+            let method: Item = self.find_impl_method(type_name, method_name);
+            match method {
+                Item::FnDefI { name, params, return_type, body } => {
+                    let mut desc_sb: StringBuilder = StringBuilder::new();
+                    desc_sb.append("(");
+                    let mut arg_idx: i32 = 0;
+                    let mut pi: i32 = 0;
+                    while pi < params.len() {
+                        let p: Param = params.get(pi);
+                        if !p.is_self {
+                            if arg_idx < args.len() {
+                                self.gen_expr(args.get(arg_idx));
+                                desc_sb.append(self.type_descriptor(p.ty));
+                                arg_idx = arg_idx + 1;
+                            }
                         }
+                        pi = pi + 1;
                     }
-                    pi = pi + 1;
+                    desc_sb.append(")");
+                    desc_sb.append(self.type_descriptor(return_type));
+                    self.mv.visit_method_insn(INVOKEVIRTUAL, type_name, method_name, desc_sb.to_string(), 0);
+                    return return_type;
                 }
-                desc_sb.append(")");
-                desc_sb.append(self.type_descriptor(return_type));
-                self.mv.visit_method_insn(INVOKEVIRTUAL, type_name, method_name, desc_sb.to_string(), 0);
-                return return_type;
-            }
-            _ => {
-                panic("Unknown method: " + type_name + "." + method_name);
+                _ => {}
             }
         }
+
+        // Imported class instance method call (infer descriptor from arg types)
+        if self.imports.contains_key(type_name) {
+            let jvm_class: String = self.imports.get(type_name);
+            let mut desc_sb: StringBuilder = StringBuilder::new();
+            desc_sb.append("(");
+            let mut ai: i32 = 0;
+            while ai < args.len() {
+                let arg_type: Ty = self.gen_expr(args.get(ai));
+                desc_sb.append(self.type_descriptor(arg_type));
+                ai = ai + 1;
+            }
+            desc_sb.append(")");
+            let mut ret_type: Ty = Ty::VoidTy;
+            if self.expected_type != null {
+                ret_type = self.expected_type;
+            }
+            desc_sb.append(self.type_descriptor(ret_type));
+            self.mv.visit_method_insn(INVOKEVIRTUAL, jvm_class, method_name, desc_sb.to_string(), 0);
+            return ret_type;
+        }
+
+        panic("Unknown method: " + type_name + "." + method_name);
         return Ty::VoidTy;
     }
 
@@ -3794,6 +4830,24 @@ impl Codegen {
             return self.gen_jrust_runtime_static_call(method_name, args);
         }
 
+        // Imported class constructor: Type::new(args)
+        if self.imports.contains_key(type_name) && method_name == "new" {
+            let jvm_class: String = self.imports.get(type_name);
+            self.mv.visit_type_insn(NEW, jvm_class);
+            self.mv.visit_insn(DUP);
+            let mut desc_sb: StringBuilder = StringBuilder::new();
+            desc_sb.append("(");
+            let mut ai: i32 = 0;
+            while ai < args.len() {
+                let arg_type: Ty = self.gen_expr(args.get(ai));
+                desc_sb.append(self.type_descriptor(arg_type));
+                ai = ai + 1;
+            }
+            desc_sb.append(")V");
+            self.mv.visit_method_insn(INVOKESPECIAL, jvm_class, "<init>", desc_sb.to_string(), 0);
+            return Ty::SimpleTy { name: type_name };
+        }
+
         // Imported class static call
         if self.imports.contains_key(type_name) {
             let jvm_class: String = self.imports.get(type_name);
@@ -4231,7 +5285,7 @@ impl Codegen {
         return cast_type;
     }
 
-    fn gen_subclass(mut self, type_name: String, args: Vec<Expr>, methods: Vec<Item>) -> Ty {
+    fn gen_subclass(mut self, type_name: String, args: Vec<Expr>, methods: Vec<Item>, fields: Vec<Field>) -> Ty {
         let parent_class: String = self.jvm_class_name(type_name);
 
         // Generate unique anon class name
@@ -4257,6 +5311,14 @@ impl Codegen {
         desc_sb.append(")V");
         let init_desc: String = desc_sb.to_string();
 
+        // Register anon class in structs map so self.field access works
+        if fields.len() > 0 {
+            self.structs.insert(anon_name, Item::StructDefI { name: anon_name, fields: fields });
+        }
+
+        // Track parent class for method dispatch fallback
+        self.anon_parents.insert(anon_name, type_name);
+
         // Save codegen state
         let saved_mv: MethodVisitor = self.mv;
         let saved_locals: Map<String, i32> = self.locals;
@@ -4268,7 +5330,16 @@ impl Codegen {
         let anon_cw: ClassWriter = ClassWriter::new(3);
         anon_cw.visit(V21, ACC_PUBLIC + ACC_SUPER, anon_name, parent_class);
 
-        // Generate pass-through constructor
+        // Generate fields on the anon class
+        let mut fi: i32 = 0;
+        while fi < fields.len() {
+            let f: Field = fields.get(fi);
+            let fv: FieldVisitor = anon_cw.visit_field(ACC_PUBLIC, f.name, self.type_descriptor(f.ty));
+            fv.visit_end();
+            fi = fi + 1;
+        }
+
+        // Generate constructor: call super, then initialize fields
         let init_mv: MethodVisitor = anon_cw.visit_method(ACC_PUBLIC, "<init>", init_desc);
         init_mv.visit_code();
         init_mv.visit_var_insn(ALOAD, 0);
@@ -4293,6 +5364,26 @@ impl Codegen {
             ai = ai + 1;
         }
         init_mv.visit_method_insn(INVOKESPECIAL, parent_class, "<init>", init_desc, 0);
+
+        // Initialize fields with default values in the constructor
+        fi = 0;
+        while fi < fields.len() {
+            let f: Field = fields.get(fi);
+            let f_name: String = self.resolve_type_name(f.ty);
+            init_mv.visit_var_insn(ALOAD, 0);
+            if f_name == "i32" || f_name == "bool" || f_name == "char" {
+                init_mv.visit_insn(ICONST_0);
+            } else if f_name == "i64" {
+                init_mv.visit_insn(9);  // LCONST_0
+            } else if f_name == "f64" {
+                init_mv.visit_insn(14); // DCONST_0
+            } else {
+                init_mv.visit_insn(ACONST_NULL);
+            }
+            init_mv.visit_field_insn(PUTFIELD, anon_name, f.name, self.type_descriptor(f.ty));
+            fi = fi + 1;
+        }
+
         init_mv.visit_insn(RETURN_OP);
         init_mv.visit_maxs(0, 0);
         init_mv.visit_end();
@@ -4325,7 +5416,7 @@ impl Codegen {
         }
         self.mv.visit_method_insn(INVOKESPECIAL, anon_name, "<init>", init_desc, 0);
 
-        return Ty::SimpleTy { name: type_name };
+        return Ty::SimpleTy { name: anon_name };
     }
 
     // --- Boxing / Unboxing ---
@@ -4407,6 +5498,15 @@ impl Codegen {
                 if name == "FieldVisitor" { return "Lorg/objectweb/asm/FieldVisitor;"; }
                 if name == "Label" { return "Lorg/objectweb/asm/Label;"; }
                 if name == "Object" || name == "null" { return "Ljava/lang/Object;"; }
+                // For anon subclasses, use the parent class in descriptors
+                if self.anon_parents.contains_key(name) {
+                    let parent: String = self.anon_parents.get(name);
+                    return self.type_descriptor(Ty::SimpleTy { name: parent });
+                }
+                // Check imports for full JVM path
+                if self.imports.contains_key(name) {
+                    return "L" + self.imports.get(name) + ";";
+                }
                 return "L" + name + ";";
             }
             Ty::GenericTy { name, args } => {
@@ -4736,7 +5836,7 @@ impl Codegen {
                 return Ty::ArrayTy { element: self.infer_type(elements.get(0)) };
             }
             Expr::CastE { value, cast_type } => { return cast_type; }
-            Expr::SubclassE { type_name, args, methods } => { return Ty::SimpleTy { name: type_name }; }
+            Expr::SubclassE { type_name, args, methods, fields } => { return Ty::SimpleTy { name: type_name }; }
         }
         return Ty::VoidTy;
     }
@@ -4854,6 +5954,10 @@ fn main() {
     // Parse
     let mut parser: Parser = Parser::new(tokens);
     let program: Program = parser.parse();
+
+    // Type Check (disabled during bootstrap — enable once alias methods are handled)
+    // let mut checker: TypeChecker = TypeChecker::new(program);
+    // checker.check();
 
     // Codegen
     let output_dir: String = "output";
