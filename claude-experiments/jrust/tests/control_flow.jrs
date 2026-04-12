@@ -1,0 +1,23 @@
+fn main() {
+    // if/else
+    let x: i32 = 10;
+    if x > 5 {
+        println("big");
+    } else {
+        println("small");
+    }
+
+    // while
+    let mut i: i32 = 0;
+    while i < 3 {
+        println(i);
+        i = i + 1;
+    }
+
+    // for range
+    let mut sum: i32 = 0;
+    for j in 0..5 {
+        sum = sum + j;
+    }
+    println(sum);
+}

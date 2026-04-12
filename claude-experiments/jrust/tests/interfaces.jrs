@@ -1,0 +1,48 @@
+interface Speaker {
+    fn speak(self) -> String;
+}
+
+struct Dog {
+    name: String,
+}
+
+impl Dog {
+    fn new(name: String) -> Dog {
+        let d = Dog { name: name };
+        return d;
+    }
+}
+
+impl Speaker for Dog {
+    fn speak(self) -> String {
+        return self.name + " says woof";
+    }
+}
+
+struct Cat {
+    lives: i32,
+}
+
+impl Cat {
+    fn new() -> Cat {
+        let c = Cat { lives: 9 };
+        return c;
+    }
+}
+
+impl Speaker for Cat {
+    fn speak(self) -> String {
+        return "meow (" + self.lives + " lives)";
+    }
+}
+
+fn announce(s: Speaker) {
+    println(s.speak());
+}
+
+fn main() {
+    let d: Dog = Dog::new("Rex");
+    let c: Cat = Cat::new();
+    announce(d);
+    announce(c);
+}

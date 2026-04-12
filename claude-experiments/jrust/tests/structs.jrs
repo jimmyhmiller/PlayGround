@@ -1,0 +1,22 @@
+struct Point {
+    x: i32,
+    y: i32,
+}
+
+impl Point {
+    fn new(x: i32, y: i32) -> Point {
+        let p = Point { x: x, y: y };
+        return p;
+    }
+
+    fn sum(self) -> i32 {
+        return self.x + self.y;
+    }
+}
+
+fn main() {
+    let p: Point = Point::new(3, 4);
+    println(p.x);
+    println(p.y);
+    println(p.sum());
+}

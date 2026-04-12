@@ -1,0 +1,26 @@
+enum Shape {
+    Circle { radius: i32 },
+    Rect { w: i32, h: i32 },
+    Dot,
+}
+
+fn describe(s: Shape) -> String {
+    match s {
+        Shape::Circle { radius } => {
+            return "circle " + radius;
+        }
+        Shape::Rect { w, h } => {
+            return "rect " + w + "x" + h;
+        }
+        Shape::Dot => {
+            return "dot";
+        }
+    }
+    return "";
+}
+
+fn main() {
+    println(describe(Shape::Circle { radius: 5 }));
+    println(describe(Shape::Rect { w: 3, h: 4 }));
+    println(describe(Shape::Dot));
+}

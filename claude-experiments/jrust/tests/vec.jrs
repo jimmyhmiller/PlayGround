@@ -1,0 +1,10 @@
+fn main() {
+    let mut v: Vec<i32> = Vec::new();
+    v.push(10);
+    v.push(20);
+    v.push(30);
+    println(v.len());
+    println(v.get(0));
+    println(v.get(2));
+    println(v.is_empty());
+}
