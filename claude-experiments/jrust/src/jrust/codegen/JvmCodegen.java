@@ -38,6 +38,7 @@ public class JvmCodegen {
     private Type expectedType; // set by let binding for imported class return types
     private Label breakLabel; // target for break statements
     private Label continueLabel; // target for continue statements
+    private int anonCounter; // for anonymous subclass names
 
     public JvmCodegen(Program program, String outputDir) {
         this.program = program;
@@ -445,6 +446,7 @@ public class JvmCodegen {
             case Expr.Throw th -> generateThrow(th);
             case Expr.ArrayLit al -> generateArrayLit(al);
             case Expr.Cast cast -> generateCast(cast);
+            case Expr.Subclass sub -> generateSubclass(sub);
         };
     }
 
@@ -750,6 +752,27 @@ public class JvmCodegen {
             return new Type.Simple("String");
         }
 
+        // Built-in: is_digit
+        if (call.name().equals("is_digit")) {
+            generateExpr(call.args().get(0));
+            mv.visitMethodInsn(INVOKESTATIC, "java/lang/Character", "isDigit", "(C)Z", false);
+            return new Type.Simple("bool");
+        }
+
+        // Built-in: is_letter
+        if (call.name().equals("is_letter")) {
+            generateExpr(call.args().get(0));
+            mv.visitMethodInsn(INVOKESTATIC, "java/lang/Character", "isLetter", "(C)Z", false);
+            return new Type.Simple("bool");
+        }
+
+        // Built-in: is_alphanumeric
+        if (call.name().equals("is_alphanumeric")) {
+            generateExpr(call.args().get(0));
+            mv.visitMethodInsn(INVOKESTATIC, "java/lang/Character", "isLetterOrDigit", "(C)Z", false);
+            return new Type.Simple("bool");
+        }
+
         // Top-level function call on Main class
         Item.FnDef fn = findTopLevelFn(call.name());
         if (fn == null) {
@@ -908,6 +931,12 @@ public class JvmCodegen {
             case "is_empty", "isEmpty" -> {
                 mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "isEmpty", "()Z", false);
                 yield new Type.Simple("bool");
+            }
+            case "indexOf", "index_of" -> {
+                generateExpr(args.get(0));
+                mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "indexOf",
+                        "(Ljava/lang/String;)I", false);
+                yield new Type.Simple("i32");
             }
             default -> throw new RuntimeException("Unknown String method: " + method);
         };
@@ -1948,6 +1977,86 @@ public class JvmCodegen {
         return destType;
     }
 
+    private Type generateSubclass(Expr.Subclass sub) {
+        String parentClass = jvmClassName(sub.typeName());
+        anonCounter++;
+        String anonName = "__Anon" + anonCounter;
+
+        // Infer arg types
+        List<Type> argTypes = new ArrayList<>();
+        for (Expr arg : sub.args()) {
+            argTypes.add(inferType(arg));
+        }
+
+        // Build constructor descriptor
+        StringBuilder initDesc = new StringBuilder("(");
+        for (Type t : argTypes) {
+            initDesc.append(typeDescriptor(t));
+        }
+        initDesc.append(")V");
+
+        // Save codegen state
+        MethodVisitor savedMv = mv;
+        Map<String, Integer> savedLocals = new HashMap<>(locals);
+        Map<String, Type> savedLocalTypes = new HashMap<>(localTypes);
+        int savedNextLocal = nextLocal;
+        String savedCurrentClass = currentClass;
+
+        // Create anonymous subclass
+        ClassWriter anonCw = createClassWriter();
+        anonCw.visit(V21, ACC_PUBLIC | ACC_SUPER, anonName, null, parentClass, null);
+
+        // Generate pass-through constructor
+        MethodVisitor initMv = anonCw.visitMethod(ACC_PUBLIC, "<init>", initDesc.toString(), null, null);
+        initMv.visitCode();
+        initMv.visitVarInsn(ALOAD, 0);
+        int slot = 1;
+        for (Type t : argTypes) {
+            String tn = resolveSimpleTypeName(t);
+            switch (tn) {
+                case "i32", "bool", "char" -> { initMv.visitVarInsn(ILOAD, slot); slot++; }
+                case "i64" -> { initMv.visitVarInsn(LLOAD, slot); slot += 2; }
+                case "f64" -> { initMv.visitVarInsn(DLOAD, slot); slot += 2; }
+                default -> { initMv.visitVarInsn(ALOAD, slot); slot++; }
+            }
+        }
+        initMv.visitMethodInsn(INVOKESPECIAL, parentClass, "<init>", initDesc.toString(), false);
+        initMv.visitInsn(RETURN);
+        initMv.visitMaxs(0, 0);
+        initMv.visitEnd();
+
+        // Generate override methods
+        for (Item.FnDef method : sub.methods()) {
+            generateMethod(anonCw, anonName, method);
+        }
+
+        anonCw.visitEnd();
+        try {
+            writeClass(anonName, anonCw.toByteArray());
+        } catch (IOException e) {
+            throw new RuntimeException("Failed to write anon class: " + e.getMessage());
+        }
+
+        // Restore codegen state
+        mv = savedMv;
+        locals.clear();
+        locals.putAll(savedLocals);
+        localTypes.clear();
+        localTypes.putAll(savedLocalTypes);
+        nextLocal = savedNextLocal;
+        currentClass = savedCurrentClass;
+
+        // Instantiate: new AnonN(args)
+        mv.visitTypeInsn(NEW, anonName);
+        mv.visitInsn(DUP);
+        for (Expr arg : sub.args()) {
+            generateExpr(arg);
+        }
+        mv.visitMethodInsn(INVOKESPECIAL, anonName, "<init>", initDesc.toString(), false);
+
+        return new Type.Simple(sub.typeName());
+    }
+
     // --- Boxing / Unboxing ---
 
     private void boxIfNeeded(Type type) {
@@ -2283,6 +2392,7 @@ public class JvmCodegen {
                 yield new Type.Array(inferType(al.elements().get(0)));
             }
             case Expr.Cast c -> c.type();
+            case Expr.Subclass s -> new Type.Simple(s.typeName());
         };
     }
 

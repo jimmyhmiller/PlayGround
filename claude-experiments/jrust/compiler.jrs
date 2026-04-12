@@ -3402,6 +3402,12 @@ impl Codegen {
             self.mv.visit_field_insn(PUTSTATIC, "Main", "__args", "[Ljava/lang/String;");
             return Ty::VoidTy;
         }
+        if method_name == "create_class_writer" {
+            self.gen_expr(args.get(0));
+            self.mv.visit_method_insn(INVOKESTATIC, "jrust/JRustRuntime", "create_class_writer",
+                "(I)Lorg/objectweb/asm/ClassWriter;", 0);
+            return Ty::SimpleTy { name: "ClassWriter" };
+        }
         panic("Unknown JRustRuntime method: " + method_name);
         return Ty::VoidTy;
     }

@@ -30,6 +30,7 @@ public sealed interface Expr {
     record Throw(Expr message) implements Expr {}
     record ArrayLit(List<Expr> elements) implements Expr {}
     record Cast(Expr value, Type type) implements Expr {}
+    record Subclass(String typeName, List<Expr> args, List<Item.FnDef> methods) implements Expr {}
 
     record FieldValue(String name, Expr value) {}
     record MatchArm(Pattern pattern, List<Stmt> body) {}

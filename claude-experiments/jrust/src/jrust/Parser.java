@@ -458,6 +458,19 @@ public class Parser {
                 if (matchToken(Token.Kind.LPAREN)) {
                     List<Expr> args = parseArgList();
                     expect(Token.Kind.RPAREN);
+
+                    // Check for subclass expression: Type::new(args) with { fn ... }
+                    if (check(Token.Kind.IDENT) && current().text.equals("with")) {
+                        advance(); // consume 'with'
+                        expect(Token.Kind.LBRACE);
+                        List<Item.FnDef> methods = new ArrayList<>();
+                        while (check(Token.Kind.FN)) {
+                            methods.add(parseFnDef());
+                        }
+                        expect(Token.Kind.RBRACE);
+                        return new Expr.Subclass(ident.text, args, methods);
+                    }
+
                     return new Expr.StaticCall(ident.text, member, args);
                 }
 
