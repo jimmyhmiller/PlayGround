@@ -788,6 +788,12 @@ fn dominates(a: BlockId, b: BlockId, doms: &[u32]) -> bool {
         if cur == a.0 {
             return true;
         }
+        // Unreachable blocks have idom == u32::MAX. Such blocks
+        // are not dominated by any reachable block (and vice versa);
+        // return false instead of indexing out of bounds.
+        if cur == u32::MAX {
+            return false;
+        }
         let idom = doms[cur as usize];
         if idom == cur {
             return false; // reached entry without finding a
@@ -800,18 +806,45 @@ fn reverse_postorder(func: &Function, n: usize) -> Vec<u32> {
     let mut visited = vec![false; n];
     let mut order = Vec::with_capacity(n);
 
-    fn dfs(block: u32, func: &Function, visited: &mut Vec<bool>, order: &mut Vec<u32>) {
+    // Pre-compute prompt → handler block mapping so we can follow
+    // implicit `abort_to_prompt → handler` edges during DFS. This
+    // mirrors what `Function::predecessors()` does for the inverse
+    // direction.
+    let mut prompt_handlers: std::collections::HashMap<u32, BlockId> =
+        std::collections::HashMap::new();
+    for block in &func.blocks {
+        for node in &block.insts {
+            if let Inst::PushPrompt(p, h) = &node.inst {
+                prompt_handlers.insert(p.index_u32(), *h);
+            }
+        }
+    }
+
+    fn dfs(
+        block: u32,
+        func: &Function,
+        prompt_handlers: &std::collections::HashMap<u32, BlockId>,
+        visited: &mut Vec<bool>,
+        order: &mut Vec<u32>,
+    ) {
         if visited[block as usize] {
             return;
         }
         visited[block as usize] = true;
-        for succ in func.blocks[block as usize].terminator.successors() {
-            dfs(succ.0, func, visited, order);
+        let term = &func.blocks[block as usize].terminator;
+        for succ in term.successors() {
+            dfs(succ.0, func, prompt_handlers, visited, order);
+        }
+        // Implicit abort-to-prompt successor.
+        if let Terminator::AbortToPrompt { prompt, .. } = term {
+            if let Some(handler) = prompt_handlers.get(&prompt.index_u32()) {
+                dfs(handler.0, func, prompt_handlers, visited, order);
+            }
         }
         order.push(block);
     }
 
-    dfs(0, func, &mut visited, &mut order);
+    dfs(0, func, &prompt_handlers, &mut visited, &mut order);
     order.reverse();
     order
 }

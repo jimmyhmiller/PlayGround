@@ -21,15 +21,13 @@ fn fragment(mesh: VertexOutput) -> @location(0) vec4<f32> {
     if (dist < params.range) {
         let dir = to_pixel / max(dist, 0.0001);
         let aim = normalize(params.aim_dir);
-        let dot_val = dot(dir, aim);
-        if (dot_val > params.cos_half_angle) {
-            // Soft edge on the angular boundary.
-            let edge = params.cos_half_angle;
-            let angular = smoothstep(edge, mix(edge, 1.0, 0.25), dot_val);
-            // Radial falloff — brightest near the player, fading to range.
-            let radial = 1.0 - smoothstep(0.0, params.range, dist);
-            cone = angular * radial * params.intensity;
-        }
+        // Hard angular edge with a narrow antialiasing band so the rasterizer
+        // blends the boundary pixels instead of stair-stepping.
+        let edge = params.cos_half_angle;
+        let angular = smoothstep(edge - 0.004, edge + 0.004, dot(dir, aim));
+        // Smooth radial falloff — bright near the player, fading to `range`.
+        let radial = 1.0 - smoothstep(params.range * 0.15, params.range, dist);
+        cone = angular * radial * params.intensity;
     }
 
     let light = clamp(params.ambient + cone, 0.0, 1.0);

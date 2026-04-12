@@ -889,6 +889,38 @@ impl Function {
                 preds[succ.index()].push(src);
             }
         }
+        // ── Abort-to-prompt implicit edges ──────────────────────
+        //
+        // `Terminator::AbortToPrompt(P)` has no static successors —
+        // at runtime it walks up the stack to the prompt-owning frame
+        // and then jumps to whichever block was registered as the
+        // handler via `Inst::PushPrompt(P, h)`. To make CFG analyses
+        // (dominators, dead-block detection) see this as a real
+        // control-flow edge, we look up each abort_to_prompt and add
+        // the corresponding PushPrompt's handler block as an
+        // implicit predecessor.
+        //
+        // This is what makes lowerings that route a reset's normal
+        // exit through `abort_to_prompt(P, [val])` rather than an
+        // explicit `pop_prompt + jump` still type-check: the
+        // verifier sees the abort site as a predecessor of the
+        // handler block and SSA dominance works out.
+        let mut prompt_handlers: std::collections::HashMap<u32, BlockId> =
+            std::collections::HashMap::new();
+        for block in &self.blocks {
+            for node in &block.insts {
+                if let Inst::PushPrompt(p, h) = &node.inst {
+                    prompt_handlers.insert(p.index_u32(), *h);
+                }
+            }
+        }
+        for (i, block) in self.blocks.iter().enumerate() {
+            if let Terminator::AbortToPrompt { prompt, .. } = &block.terminator {
+                if let Some(&handler) = prompt_handlers.get(&prompt.index_u32()) {
+                    preds[handler.index()].push(BlockId(i as u32));
+                }
+            }
+        }
         preds
     }
 }

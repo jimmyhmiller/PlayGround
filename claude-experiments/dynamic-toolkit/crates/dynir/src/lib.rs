@@ -1,5 +1,6 @@
 pub mod builder;
 pub mod display;
+pub mod gc_runtime;
 pub mod interp;
 pub mod ir;
 pub mod opt;

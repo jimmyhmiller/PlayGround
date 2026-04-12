@@ -46,7 +46,12 @@ pub enum BinOp {
 
 #[derive(Debug, Clone)]
 pub enum Stmt {
-    Let(String, Expr),
+    /// `let name = expr;` or `let name: ty = expr;`
+    /// The `Option<ValType>` is the optional type annotation. When
+    /// set, the lowerer coerces `expr`'s result to the matching IR
+    /// type via a bitcast, which lets the value flow into a
+    /// correctly-typed frame slot for GC root tracking.
+    Let(String, Option<ValType>, Expr),
     Assign(String, Expr),
     Expr(Expr),
     Return(Expr),
@@ -56,6 +61,9 @@ pub enum Stmt {
 pub enum ValType {
     Int,
     Cont,
+    /// A heap-allocated byte buffer. Maps to `Type::GcPtr` in IR and
+    /// is rooted by the interpreter's GC root map automatically.
+    Bytes,
 }
 
 #[derive(Debug, Clone)]
@@ -137,6 +145,10 @@ impl Parser {
                 self.advance();
                 ValType::Int
             }
+            TokenKind::Ident(s) if s == "bytes" => {
+                self.advance();
+                ValType::Bytes
+            }
             _ => ValType::Int,
         }
     }
@@ -210,16 +222,18 @@ impl Parser {
         self.expect(&TokenKind::Let);
         let name = self.expect_ident();
         // Optional type annotation: let x: cont = ...
-        if *self.peek() == TokenKind::Colon {
+        let ty = if *self.peek() == TokenKind::Colon {
             self.advance();
-            let _ = self.parse_type(); // consume type, used for documentation only
-        }
+            Some(self.parse_type())
+        } else {
+            None
+        };
         self.expect(&TokenKind::Eq);
         let val = self.parse_expr();
         if *self.peek() == TokenKind::Semicolon {
             self.advance();
         }
-        Stmt::Let(name, val)
+        Stmt::Let(name, ty, val)
     }
 
     fn parse_expr(&mut self) -> Expr {

@@ -94,6 +94,108 @@
             opacity: 0.4;
             cursor: not-allowed;
         }
+        #style-panel {
+            position: absolute;
+            bottom: 12px;
+            left: 12px;
+            width: 260px;
+            z-index: 100;
+            background: rgba(26, 27, 38, 0.92);
+            border: 1px solid #2a2b36;
+            border-radius: 6px;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 11px;
+            color: #c0caf5;
+            backdrop-filter: blur(6px);
+            max-height: calc(100vh - 24px);
+            overflow-y: auto;
+        }
+        #style-panel.collapsed .style-body { display: none; }
+        #style-panel .style-header {
+            padding: 8px 10px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-bottom: 1px solid #2a2b36;
+            cursor: pointer;
+            user-select: none;
+        }
+        #style-panel.collapsed .style-header { border-bottom: none; }
+        #style-panel .style-header .title {
+            text-transform: uppercase;
+            letter-spacing: 1.5px;
+            color: #7aa2f7;
+            font-size: 10px;
+        }
+        #style-panel .style-header .caret { color: #565f89; }
+        #style-panel .style-body {
+            padding: 10px;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+        #style-panel .row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+        }
+        #style-panel .row label {
+            color: #565f89;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            font-size: 10px;
+            flex: 1;
+        }
+        #style-panel select,
+        #style-panel input[type=number],
+        #style-panel input[type=text] {
+            background: #1a1b26;
+            color: #c0caf5;
+            border: 1px solid #2a2b36;
+            padding: 3px 6px;
+            font-family: inherit;
+            font-size: 11px;
+            border-radius: 3px;
+        }
+        #style-panel input[type=color] {
+            width: 28px;
+            height: 20px;
+            border: 1px solid #2a2b36;
+            background: transparent;
+            padding: 0;
+            border-radius: 3px;
+            cursor: pointer;
+        }
+        #style-panel input[type=range] {
+            flex: 1;
+            accent-color: #7aa2f7;
+        }
+        #style-panel .accents {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 6px;
+        }
+        #style-panel .accents input[type=color] { width: 100%; height: 24px; }
+        #style-panel .section-label {
+            color: #565f89;
+            text-transform: uppercase;
+            letter-spacing: 1.5px;
+            font-size: 10px;
+            margin-top: 2px;
+        }
+        #style-panel .copy-btn {
+            background: #1a1b26;
+            color: #7aa2f7;
+            border: 1px solid #2a2b36;
+            padding: 5px 8px;
+            cursor: pointer;
+            font-family: inherit;
+            font-size: 11px;
+            border-radius: 3px;
+            text-align: center;
+        }
+        #style-panel .copy-btn:hover { background: #2a2b36; }
         .cm-editor {
             height: 100% !important;
             font-size: 14px !important;
@@ -117,6 +219,67 @@
             <div id="controls">
                 <button id="btn-back" title="Back (←)">← back</button>
                 <button id="btn-step" title="Step (→ or space)">step →</button>
+            </div>
+            <div id="style-panel" class="collapsed">
+                <div class="style-header" id="style-header">
+                    <span class="title">style</span>
+                    <span class="caret">▸</span>
+                </div>
+                <div class="style-body">
+                    <div class="row">
+                        <label>preset</label>
+                        <select id="theme-preset"></select>
+                    </div>
+                    <div class="row">
+                        <label>background</label>
+                        <input type="color" id="theme-bg">
+                    </div>
+                    <div class="row">
+                        <label>stroke</label>
+                        <input type="color" id="theme-stroke">
+                    </div>
+                    <div class="row">
+                        <label>label</label>
+                        <input type="color" id="theme-label">
+                    </div>
+                    <div class="row">
+                        <label>stroke width</label>
+                        <input type="range" id="theme-stroke-width" min="0" max="4" step="0.05">
+                        <span id="theme-stroke-width-val" style="width: 28px; text-align: right; color: #565f89;">1.25</span>
+                    </div>
+                    <div class="section-label">accents</div>
+                    <div class="accents" id="theme-accents"></div>
+                    <div class="section-label">grain</div>
+                    <div class="row">
+                        <label><input type="checkbox" id="theme-grain-enabled"> enabled</label>
+                    </div>
+                    <div class="row">
+                        <label>intensity</label>
+                        <input type="range" id="theme-grain-intensity" min="0" max="0.5" step="0.01">
+                        <span id="theme-grain-intensity-val" style="width: 28px; text-align: right; color: #565f89;">0.08</span>
+                    </div>
+                    <div class="section-label">motion</div>
+                    <div class="row">
+                        <label>stiffness</label>
+                        <input type="range" id="theme-spring-stiffness" min="20" max="800" step="5">
+                        <span id="theme-spring-stiffness-val" style="width: 32px; text-align: right; color: #565f89;"></span>
+                    </div>
+                    <div class="row">
+                        <label>damping</label>
+                        <input type="range" id="theme-spring-damping" min="1" max="50" step="0.5">
+                        <span id="theme-spring-damping-val" style="width: 32px; text-align: right; color: #565f89;"></span>
+                    </div>
+                    <div class="row">
+                        <label>duration</label>
+                        <input type="range" id="theme-tween-duration" min="0.05" max="2.0" step="0.05">
+                        <span id="theme-tween-duration-val" style="width: 32px; text-align: right; color: #565f89;"></span>
+                    </div>
+                    <div class="row">
+                        <label>easing</label>
+                        <select id="theme-tween-easing"></select>
+                    </div>
+                    <button class="copy-btn" id="theme-copy">copy as rust preset</button>
+                </div>
             </div>
         </div>
     </div>
@@ -264,6 +427,171 @@
 
         const wasm = await import('./visualizer.js');
         await wasm.default();
+
+        // ── Style panel ──
+        const styleHeader = document.getElementById('style-header');
+        const stylePanel = document.getElementById('style-panel');
+        styleHeader.addEventListener('click', () => {
+            stylePanel.classList.toggle('collapsed');
+            styleHeader.querySelector('.caret').textContent =
+                stylePanel.classList.contains('collapsed') ? '▸' : '▾';
+        });
+
+        const presetSelect = document.getElementById('theme-preset');
+        const bgInput = document.getElementById('theme-bg');
+        const strokeInput = document.getElementById('theme-stroke');
+        const labelInput = document.getElementById('theme-label');
+        const strokeWidthInput = document.getElementById('theme-stroke-width');
+        const strokeWidthVal = document.getElementById('theme-stroke-width-val');
+        const grainEnabledInput = document.getElementById('theme-grain-enabled');
+        const grainIntensityInput = document.getElementById('theme-grain-intensity');
+        const grainIntensityVal = document.getElementById('theme-grain-intensity-val');
+        const accentsDiv = document.getElementById('theme-accents');
+        const copyBtn = document.getElementById('theme-copy');
+        const stiffInput = document.getElementById('theme-spring-stiffness');
+        const stiffVal = document.getElementById('theme-spring-stiffness-val');
+        const dampInput = document.getElementById('theme-spring-damping');
+        const dampVal = document.getElementById('theme-spring-damping-val');
+        const durInput = document.getElementById('theme-tween-duration');
+        const durVal = document.getElementById('theme-tween-duration-val');
+        const easingSelect = document.getElementById('theme-tween-easing');
+
+        const easings = [
+            'linear', 'quad-in', 'quad-out', 'quad-in-out',
+            'cubic-in', 'cubic-out', 'cubic-in-out',
+            'elastic-in', 'elastic-out', 'elastic-in-out',
+            'bounce-in', 'bounce-out', 'bounce-in-out',
+            'back-in', 'back-out', 'back-in-out',
+        ];
+        for (const name of easings) {
+            const opt = document.createElement('option');
+            opt.value = name;
+            opt.textContent = name;
+            easingSelect.appendChild(opt);
+        }
+
+        // Populate presets
+        const presetNames = JSON.parse(wasm.theme_preset_names());
+        for (const name of presetNames) {
+            const opt = document.createElement('option');
+            opt.value = name;
+            opt.textContent = name;
+            presetSelect.appendChild(opt);
+        }
+
+        function recompile() {
+            if (window.__onCodeChange) {
+                window.__onCodeChange(editor.state.doc.toString());
+            }
+        }
+
+        function readTheme() {
+            return JSON.parse(wasm.theme_get_json());
+        }
+
+        function renderTheme() {
+            const t = readTheme();
+            presetSelect.value = t.name;
+            bgInput.value = t.background;
+            strokeInput.value = t.stroke;
+            labelInput.value = t.label;
+            strokeWidthInput.value = t.stroke_width;
+            strokeWidthVal.textContent = Number(t.stroke_width).toFixed(2);
+            grainEnabledInput.checked = !!t.grain_enabled;
+            grainIntensityInput.value = t.grain_intensity;
+            grainIntensityVal.textContent = Number(t.grain_intensity).toFixed(2);
+            stiffInput.value = t.spring_stiffness;
+            stiffVal.textContent = Number(t.spring_stiffness).toFixed(0);
+            dampInput.value = t.spring_damping;
+            dampVal.textContent = Number(t.spring_damping).toFixed(1);
+            durInput.value = t.tween_duration;
+            durVal.textContent = Number(t.tween_duration).toFixed(2);
+            easingSelect.value = t.tween_easing;
+
+            accentsDiv.innerHTML = '';
+            t.accents.forEach((hex, i) => {
+                const input = document.createElement('input');
+                input.type = 'color';
+                input.value = hex;
+                input.addEventListener('input', () => {
+                    wasm.theme_set_accent(i, input.value);
+                    recompile();
+                });
+                accentsDiv.appendChild(input);
+            });
+        }
+
+        presetSelect.addEventListener('change', () => {
+            wasm.theme_set_preset(presetSelect.value);
+            renderTheme();
+            recompile();
+        });
+
+        bgInput.addEventListener('input', () => {
+            wasm.theme_set_field('background', bgInput.value);
+        });
+        strokeInput.addEventListener('input', () => {
+            wasm.theme_set_field('stroke', strokeInput.value);
+        });
+        labelInput.addEventListener('input', () => {
+            wasm.theme_set_field('label', labelInput.value);
+        });
+        strokeWidthInput.addEventListener('input', () => {
+            wasm.theme_set_field('stroke_width', strokeWidthInput.value);
+            strokeWidthVal.textContent = Number(strokeWidthInput.value).toFixed(2);
+        });
+        grainEnabledInput.addEventListener('change', () => {
+            wasm.theme_set_field('grain_enabled', grainEnabledInput.checked ? 'true' : 'false');
+        });
+        grainIntensityInput.addEventListener('input', () => {
+            wasm.theme_set_field('grain_intensity', grainIntensityInput.value);
+            grainIntensityVal.textContent = Number(grainIntensityInput.value).toFixed(2);
+        });
+        stiffInput.addEventListener('input', () => {
+            wasm.theme_set_field('spring_stiffness', stiffInput.value);
+            stiffVal.textContent = Number(stiffInput.value).toFixed(0);
+            recompile();
+        });
+        dampInput.addEventListener('input', () => {
+            wasm.theme_set_field('spring_damping', dampInput.value);
+            dampVal.textContent = Number(dampInput.value).toFixed(1);
+            recompile();
+        });
+        durInput.addEventListener('input', () => {
+            wasm.theme_set_field('tween_duration', durInput.value);
+            durVal.textContent = Number(durInput.value).toFixed(2);
+            recompile();
+        });
+        easingSelect.addEventListener('change', () => {
+            wasm.theme_set_field('tween_easing', easingSelect.value);
+            recompile();
+        });
+
+        copyBtn.addEventListener('click', () => {
+            const t = readTheme();
+            const rust = `Theme {
+    name: "${t.name}".into(),
+    background: hex("${t.background}"),
+    stroke: hex("${t.stroke}"),
+    stroke_width: ${t.stroke_width},
+    label: hex("${t.label}"),
+    accents: vec![
+${t.accents.map(c => `        hex("${c}"),`).join('\n')}
+    ],
+    grain_enabled: ${t.grain_enabled},
+    grain_intensity: ${t.grain_intensity},
+    spring_stiffness: ${t.spring_stiffness},
+    spring_damping: ${t.spring_damping},
+    tween_duration: ${t.tween_duration},
+    tween_easing: "${t.tween_easing}".into(),
+}`;
+            navigator.clipboard.writeText(rust).then(() => {
+                copyBtn.textContent = 'copied!';
+                setTimeout(() => copyBtn.textContent = 'copy as rust preset', 1200);
+            });
+        });
+
+        renderTheme();
 
         // Trigger initial compile after wasm is loaded
         if (window.__onCodeChange) {

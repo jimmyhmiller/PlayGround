@@ -1,4 +1,8 @@
+use bevy::asset::RenderAssetUsages;
+use bevy::input::mouse::MouseWheel;
 use bevy::prelude::*;
+use bevy::camera::Projection;
+use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::render::render_resource::{AsBindGroup, ShaderType};
 use bevy::shader::ShaderRef;
 use bevy::sprite_render::{AlphaMode2d, Material2d, Material2dPlugin};
@@ -6,6 +10,10 @@ use bevy_inspector_egui::bevy_egui::EguiPlugin;
 use bevy_inspector_egui::quick::ResourceInspectorPlugin;
 use bevy_inspector_egui::InspectorOptions;
 use bevy_inspector_egui::prelude::ReflectInspectorOptions;
+use serde::{Deserialize, Serialize};
+
+const LEVEL_PATH: &str = "levels/level.ron";
+const WALL_HEIGHT: f32 = 48.0;
 
 const FIXED_HZ: f64 = 60.0;
 
@@ -92,7 +100,39 @@ struct PhysicalTranslation(Vec2);
 struct PreviousPhysicalTranslation(Vec2);
 
 #[derive(Component)]
-struct WallFootprint;
+struct WallFootprint {
+    top_face: Entity,
+    front_face: Entity,
+}
+
+// =====================================================================
+// Game mode + editor state
+// =====================================================================
+
+#[derive(States, Clone, PartialEq, Eq, Hash, Debug, Default)]
+enum GameMode {
+    #[default]
+    Playing,
+    Editing,
+}
+
+#[derive(Resource, Default)]
+struct EditorState {
+    drag_start: Option<Vec2>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct WallData {
+    cx: f32,
+    cy: f32,
+    w: f32,
+    h: f32,
+}
+
+#[derive(Serialize, Deserialize, Default)]
+struct LevelData {
+    walls: Vec<WallData>,
+}
 
 // Y-sort by `transform.y + ground_offset`. Use the offset so wall visuals
 // (top cap, front face) sort by their shared ground-plane front edge rather
@@ -110,11 +150,15 @@ impl YSorted {
 #[derive(Component)]
 struct LightOverlay;
 
+// Marker for the shadow geometry mesh — regenerated each frame.
+#[derive(Component)]
+struct ShadowMesh;
+
 // =====================================================================
 // Cone-light material
 // =====================================================================
 
-#[derive(ShaderType, Clone, Copy, Default, Debug)]
+#[derive(ShaderType, Clone, Copy, Default)]
 struct ConeLightParams {
     player_pos: Vec2,
     aim_dir: Vec2,
@@ -124,7 +168,7 @@ struct ConeLightParams {
     intensity: f32,
 }
 
-#[derive(Asset, TypePath, AsBindGroup, Clone)]
+#[derive(Asset, TypePath, AsBindGroup, Clone, Default)]
 struct ConeLightMaterial {
     #[uniform(0)]
     params: ConeLightParams,
@@ -170,22 +214,46 @@ fn main() {
         .insert_resource(Time::<Fixed>::from_hz(FIXED_HZ))
         .init_resource::<Tuning>()
         .register_type::<Tuning>()
+        .init_state::<GameMode>()
+        .init_resource::<EditorState>()
         .add_systems(Startup, setup)
-        .add_systems(FixedUpdate, advance_physics)
+        .add_systems(
+            FixedUpdate,
+            advance_physics.run_if(in_state(GameMode::Playing)),
+        )
         .add_systems(
             RunFixedMainLoop,
             (
-                (accumulate_input, update_aim_from_mouse)
+                (
+                    (accumulate_input, update_aim_from_mouse)
+                        .run_if(in_state(GameMode::Playing)),
+                )
                     .in_set(RunFixedMainLoopSystems::BeforeFixedMainLoop),
                 (
-                    interpolate_rendered_transform,
-                    camera_follow_player,
-                    y_sort,
-                    update_cone_light,
-                    follow_camera,
+                    (
+                        interpolate_rendered_transform,
+                        camera_follow_player.run_if(in_state(GameMode::Playing)),
+                        y_sort,
+                        update_cone_light,
+                        update_shadow_geometry,
+                        follow_camera,
+                    )
+                        .chain(),
                 )
-                    .chain()
                     .in_set(RunFixedMainLoopSystems::AfterFixedMainLoop),
+            ),
+        )
+        .add_systems(Update, toggle_mode)
+        .add_systems(OnEnter(GameMode::Editing), on_enter_editing)
+        .add_systems(OnEnter(GameMode::Playing), on_enter_playing)
+        .add_systems(
+            Update,
+            (
+                editor_camera_pan.run_if(in_state(GameMode::Editing)),
+                editor_camera_zoom.run_if(in_state(GameMode::Editing)),
+                editor_handle_placement.run_if(in_state(GameMode::Editing)),
+                editor_handle_delete.run_if(in_state(GameMode::Editing)),
+                editor_save.run_if(in_state(GameMode::Editing)),
             ),
         )
         .run();
@@ -228,23 +296,8 @@ fn setup(
         YSorted::player(),
     ));
 
-    // Walls — each gets a footprint (collision), a top face (lighter), and a front face (darker).
-    let wall_specs: [(Vec2, Vec2); 5] = [
-        (Vec2::new(-300.0, 150.0), Vec2::new(240.0, 40.0)),
-        (Vec2::new(250.0, -50.0), Vec2::new(60.0, 220.0)),
-        (Vec2::new(-150.0, -220.0), Vec2::new(320.0, 40.0)),
-        (Vec2::new(420.0, 220.0), Vec2::new(120.0, 120.0)),
-        (Vec2::new(-450.0, -40.0), Vec2::new(40.0, 260.0)),
-    ];
-    for (center, size) in wall_specs {
-        spawn_wall(
-            &mut commands,
-            &mut meshes,
-            &mut color_materials,
-            center,
-            size,
-        );
-    }
+    // Walls — load from disk, falling back to a hand-authored starter layout.
+    load_level_or_default(&mut commands, &mut meshes, &mut color_materials);
 
     // Fullscreen cone-light overlay. The mesh is enormous so it covers whatever
     // the camera is looking at; we also follow the camera in `follow_camera`.
@@ -258,6 +311,46 @@ fn setup(
         MeshMaterial2d(overlay_mat),
         Transform::from_xyz(0.0, 0.0, 900.0),
     ));
+
+    // Shadow geometry mesh — regenerated each frame by `update_shadow_geometry`.
+    // Rendered above the darkness overlay so it over-darkens areas where walls
+    // block the cone.
+    let shadow_mesh = meshes.add(empty_shadow_mesh());
+    let shadow_mat = color_materials.add(Color::srgb(0.0, 0.0, 0.0));
+    commands.spawn((
+        ShadowMesh,
+        Mesh2d(shadow_mesh),
+        MeshMaterial2d(shadow_mat),
+        Transform::from_xyz(0.0, 0.0, 901.0),
+    ));
+}
+
+// Ray-segment intersection: returns the ray parameter `t` of the hit, or None.
+// Ray is `origin + t * dir` with t >= 0; segment is `a + u * (b - a)` with u ∈ [0,1].
+fn ray_segment_hit(origin: Vec2, dir: Vec2, a: Vec2, b: Vec2) -> Option<f32> {
+    let s = b - a;
+    let denom = dir.x * s.y - dir.y * s.x;
+    if denom.abs() < 1e-6 {
+        return None;
+    }
+    let diff = a - origin;
+    let t = (diff.x * s.y - diff.y * s.x) / denom;
+    let u = (diff.x * dir.y - diff.y * dir.x) / denom;
+    if t >= 0.0 && u >= 0.0 && u <= 1.0 {
+        Some(t)
+    } else {
+        None
+    }
+}
+
+fn empty_shadow_mesh() -> Mesh {
+    let mut mesh = Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::RENDER_WORLD | RenderAssetUsages::MAIN_WORLD,
+    );
+    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, Vec::<[f32; 3]>::new());
+    mesh.insert_indices(Indices::U32(Vec::new()));
+    mesh
 }
 
 fn spawn_wall(
@@ -266,45 +359,42 @@ fn spawn_wall(
     materials: &mut Assets<ColorMaterial>,
     center: Vec2,
     size: Vec2,
-) {
-    let wall_height = 48.0;
-
-    // Collision + sort anchor lives on this invisible "footprint" entity.
-    // Top face: drawn at footprint center, lighter.
-    // Front face: drawn below, darker — fakes the side of the wall.
+) -> Entity {
     let top_color = Color::srgb(0.58, 0.55, 0.50);
     let front_color = Color::srgb(0.28, 0.26, 0.24);
 
-    // Footprint (collision)
-    commands.spawn((
-        WallFootprint,
-        Collider { half: size * 0.5 },
-        Transform::from_xyz(center.x, center.y, 0.0),
-        GlobalTransform::default(),
-        Visibility::Hidden,
-    ));
-
-    // Both wall pieces sort against the footprint's front (south) edge. This is
-    // the wall's true "ground line" — the player should draw in front of the wall
-    // the moment their feet are south of it.
+    // Both wall pieces sort against the footprint's front (south) edge — the
+    // wall's true "ground line".
     let sort_y = center.y - size.y * 0.5;
 
-    // Top face — drawn at the footprint.
-    commands.spawn((
-        Mesh2d(meshes.add(Rectangle::new(size.x, size.y))),
-        MeshMaterial2d(materials.add(top_color)),
-        Transform::from_xyz(center.x, center.y, 0.0),
-        YSorted { ground_offset: sort_y - center.y },
-    ));
+    let top_face = commands
+        .spawn((
+            Mesh2d(meshes.add(Rectangle::new(size.x, size.y))),
+            MeshMaterial2d(materials.add(top_color)),
+            Transform::from_xyz(center.x, center.y, 0.0),
+            YSorted { ground_offset: sort_y - center.y },
+        ))
+        .id();
 
-    // Front face — sits visually below the footprint's front edge.
-    let front_center = Vec2::new(center.x, center.y - size.y * 0.5 - wall_height * 0.5);
-    commands.spawn((
-        Mesh2d(meshes.add(Rectangle::new(size.x, wall_height))),
-        MeshMaterial2d(materials.add(front_color)),
-        Transform::from_xyz(front_center.x, front_center.y, 0.0),
-        YSorted { ground_offset: sort_y - front_center.y },
-    ));
+    let front_center = Vec2::new(center.x, center.y - size.y * 0.5 - WALL_HEIGHT * 0.5);
+    let front_face = commands
+        .spawn((
+            Mesh2d(meshes.add(Rectangle::new(size.x, WALL_HEIGHT))),
+            MeshMaterial2d(materials.add(front_color)),
+            Transform::from_xyz(front_center.x, front_center.y, 0.0),
+            YSorted { ground_offset: sort_y - front_center.y },
+        ))
+        .id();
+
+    commands
+        .spawn((
+            WallFootprint { top_face, front_face },
+            Collider { half: size * 0.5 },
+            Transform::from_xyz(center.x, center.y, 0.0),
+            GlobalTransform::default(),
+            Visibility::Hidden,
+        ))
+        .id()
 }
 
 // =====================================================================
@@ -492,14 +582,117 @@ fn update_cone_light(
     let Ok((tf, aim)) = players.single() else { return };
     for handle in &overlays {
         if let Some(mat) = materials.get_mut(&handle.0) {
-            mat.params = ConeLightParams {
-                player_pos: tf.translation.truncate(),
-                aim_dir: aim.0,
-                cos_half_angle: tuning.light_half_angle_deg.to_radians().cos(),
-                range: tuning.light_range,
-                ambient: tuning.ambient,
-                intensity: tuning.light_intensity,
-            };
+            mat.params.player_pos = tf.translation.truncate();
+            mat.params.aim_dir = aim.0;
+            mat.params.cos_half_angle = tuning.light_half_angle_deg.to_radians().cos();
+            mat.params.range = tuning.light_range;
+            mat.params.ambient = tuning.ambient;
+            mat.params.intensity = tuning.light_intensity;
+        }
+    }
+}
+
+// Rebuild the shadow mesh each frame using the visibility-polygon technique
+// from https://ncase.me/sight-and-light/. Cast a ray from the player toward
+// every wall corner (plus ±ε to slip past corners), take the nearest wall hit,
+// sort by angle, and fill the area OUTSIDE the resulting visibility polygon
+// with dark quads — each quad spans from one hit point to the next and extends
+// radially out to a far boundary. A handful of evenly-spaced filler rays cap
+// the max angular gap so empty directions still get proper far coverage.
+fn update_shadow_geometry(
+    players: Query<&Transform, With<Player>>,
+    walls: Query<(&Transform, &Collider), With<WallFootprint>>,
+    shadow_query: Query<&Mesh2d, With<ShadowMesh>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+) {
+    let Ok(player_tf) = players.single() else { return };
+    let light = player_tf.translation.truncate();
+    let far_dist: f32 = 5000.0;
+    const EPS: f32 = 0.0001;
+    const FILLER_RAYS: usize = 16;
+    // Push the shadow start a little past each wall hit so a thin strip of the
+    // wall top facing the player stays lit. Enough to read the wall, not so
+    // much that light visibly bleeds over.
+    const WALL_TOP_REVEAL: f32 = 20.0;
+
+    let mut segments: Vec<(Vec2, Vec2)> = Vec::new();
+    let mut endpoints: Vec<Vec2> = Vec::new();
+    for (wtf, col) in &walls {
+        let c = wtf.translation.truncate();
+        let h = col.half;
+        let bl = c + Vec2::new(-h.x, -h.y);
+        let br = c + Vec2::new( h.x, -h.y);
+        let tr = c + Vec2::new( h.x,  h.y);
+        let tl = c + Vec2::new(-h.x,  h.y);
+        segments.push((bl, br));
+        segments.push((br, tr));
+        segments.push((tr, tl));
+        segments.push((tl, bl));
+        endpoints.extend_from_slice(&[bl, br, tr, tl]);
+    }
+
+    let mut positions: Vec<[f32; 3]> = Vec::new();
+    let mut indices: Vec<u32> = Vec::new();
+
+    if !endpoints.is_empty() {
+        let mut angles: Vec<f32> = Vec::with_capacity(endpoints.len() * 3 + FILLER_RAYS);
+        for p in &endpoints {
+            let a = (*p - light).to_angle();
+            angles.push(a - EPS);
+            angles.push(a);
+            angles.push(a + EPS);
+        }
+        for i in 0..FILLER_RAYS {
+            let a = -std::f32::consts::PI
+                + (i as f32 / FILLER_RAYS as f32) * std::f32::consts::TAU;
+            angles.push(a);
+        }
+
+        let mut hits: Vec<(f32, Vec2)> = angles
+            .iter()
+            .map(|&a| {
+                let dir = Vec2::new(a.cos(), a.sin());
+                let mut best_t = far_dist;
+                for &(sa, sb) in &segments {
+                    if let Some(t) = ray_segment_hit(light, dir, sa, sb) {
+                        if t > 0.0 && t < best_t {
+                            best_t = t;
+                        }
+                    }
+                }
+                (a, light + dir * best_t)
+            })
+            .collect();
+
+        hits.sort_by(|x, y| x.0.partial_cmp(&y.0).unwrap());
+
+        // For each adjacent pair of sorted rays, emit a quad that covers the
+        // shadow wedge between them: from the hit points outward along the
+        // rays to `far_dist`. The last→first wraparound closes the ring.
+        let n = hits.len();
+        for i in 0..n {
+            let j = (i + 1) % n;
+            let (a_i, p_i) = hits[i];
+            let (a_j, p_j) = hits[j];
+            let dir_i = Vec2::new(a_i.cos(), a_i.sin());
+            let dir_j = Vec2::new(a_j.cos(), a_j.sin());
+            let f_i = light + dir_i * far_dist;
+            let f_j = light + dir_j * far_dist;
+            let p_i = p_i + dir_i * WALL_TOP_REVEAL;
+            let p_j = p_j + dir_j * WALL_TOP_REVEAL;
+            let base = positions.len() as u32;
+            positions.push([p_i.x, p_i.y, 0.0]);
+            positions.push([p_j.x, p_j.y, 0.0]);
+            positions.push([f_j.x, f_j.y, 0.0]);
+            positions.push([f_i.x, f_i.y, 0.0]);
+            indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+        }
+    }
+
+    for handle in &shadow_query {
+        if let Some(mesh) = meshes.get_mut(&handle.0) {
+            mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions.clone());
+            mesh.insert_indices(Indices::U32(indices.clone()));
         }
     }
 }
@@ -536,5 +729,227 @@ fn follow_camera(
     for mut tf in &mut overlays {
         tf.translation.x = cam.translation.x;
         tf.translation.y = cam.translation.y;
+    }
+}
+
+// =====================================================================
+// Level save / load
+// =====================================================================
+
+fn load_level_or_default(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<ColorMaterial>,
+) {
+    if let Ok(s) = std::fs::read_to_string(LEVEL_PATH) {
+        match ron::de::from_str::<LevelData>(&s) {
+            Ok(level) => {
+                info!("loaded {} walls from {}", level.walls.len(), LEVEL_PATH);
+                for w in level.walls {
+                    spawn_wall(
+                        commands,
+                        meshes,
+                        materials,
+                        Vec2::new(w.cx, w.cy),
+                        Vec2::new(w.w, w.h),
+                    );
+                }
+                return;
+            }
+            Err(e) => warn!("failed to parse {}: {e}", LEVEL_PATH),
+        }
+    }
+
+    // Fallback layout for first run.
+    let defaults: [(Vec2, Vec2); 5] = [
+        (Vec2::new(-300.0, 150.0), Vec2::new(240.0, 40.0)),
+        (Vec2::new(250.0, -50.0), Vec2::new(60.0, 220.0)),
+        (Vec2::new(-150.0, -220.0), Vec2::new(320.0, 40.0)),
+        (Vec2::new(420.0, 220.0), Vec2::new(120.0, 120.0)),
+        (Vec2::new(-450.0, -40.0), Vec2::new(40.0, 260.0)),
+    ];
+    for (center, size) in defaults {
+        spawn_wall(commands, meshes, materials, center, size);
+    }
+}
+
+fn editor_save(
+    keys: Res<ButtonInput<KeyCode>>,
+    walls: Query<(&Transform, &Collider), With<WallFootprint>>,
+) {
+    let mod_key = keys.pressed(KeyCode::ControlLeft)
+        || keys.pressed(KeyCode::ControlRight)
+        || keys.pressed(KeyCode::SuperLeft)
+        || keys.pressed(KeyCode::SuperRight);
+    if !(mod_key && keys.just_pressed(KeyCode::KeyS)) {
+        return;
+    }
+    let data = LevelData {
+        walls: walls
+            .iter()
+            .map(|(tf, c)| WallData {
+                cx: tf.translation.x,
+                cy: tf.translation.y,
+                w: c.half.x * 2.0,
+                h: c.half.y * 2.0,
+            })
+            .collect(),
+    };
+    if let Err(e) = std::fs::create_dir_all("levels") {
+        warn!("couldn't create levels dir: {e}");
+        return;
+    }
+    match ron::ser::to_string_pretty(&data, ron::ser::PrettyConfig::default()) {
+        Ok(s) => match std::fs::write(LEVEL_PATH, s) {
+            Ok(()) => info!("saved {} walls to {}", data.walls.len(), LEVEL_PATH),
+            Err(e) => warn!("save failed: {e}"),
+        },
+        Err(e) => warn!("serialize failed: {e}"),
+    }
+}
+
+// =====================================================================
+// Editor — mode toggle, camera, placement, deletion
+// =====================================================================
+
+fn toggle_mode(
+    keys: Res<ButtonInput<KeyCode>>,
+    current: Res<State<GameMode>>,
+    mut next: ResMut<NextState<GameMode>>,
+) {
+    if keys.just_pressed(KeyCode::F1) {
+        let new = match current.get() {
+            GameMode::Playing => GameMode::Editing,
+            GameMode::Editing => GameMode::Playing,
+        };
+        next.set(new);
+    }
+}
+
+fn on_enter_editing(mut overlays: Query<&mut Visibility, With<LightOverlay>>) {
+    for mut v in &mut overlays {
+        *v = Visibility::Hidden;
+    }
+}
+
+fn on_enter_playing(
+    mut overlays: Query<&mut Visibility, With<LightOverlay>>,
+    mut cameras: Query<&mut Projection, With<Camera2d>>,
+) {
+    for mut v in &mut overlays {
+        *v = Visibility::Inherited;
+    }
+    // Snap zoom back so the gameplay framing is consistent regardless of where
+    // the editor left it.
+    for mut proj in &mut cameras {
+        if let Projection::Orthographic(ref mut o) = *proj {
+            o.scale = 1.0;
+        }
+    }
+}
+
+fn editor_camera_pan(
+    time: Res<Time>,
+    keys: Res<ButtonInput<KeyCode>>,
+    mut cameras: Query<(&mut Transform, &Projection), With<Camera2d>>,
+) {
+    let Ok((mut tf, proj)) = cameras.single_mut() else { return };
+    let scale = match proj {
+        Projection::Orthographic(o) => o.scale,
+        _ => 1.0,
+    };
+    let mut d = Vec2::ZERO;
+    if keys.pressed(KeyCode::KeyW) || keys.pressed(KeyCode::ArrowUp)    { d.y += 1.0; }
+    if keys.pressed(KeyCode::KeyS) || keys.pressed(KeyCode::ArrowDown)  { d.y -= 1.0; }
+    if keys.pressed(KeyCode::KeyA) || keys.pressed(KeyCode::ArrowLeft)  { d.x -= 1.0; }
+    if keys.pressed(KeyCode::KeyD) || keys.pressed(KeyCode::ArrowRight) { d.x += 1.0; }
+    let speed = 700.0 * scale;
+    let step = d.normalize_or_zero() * speed * time.delta_secs();
+    tf.translation.x += step.x;
+    tf.translation.y += step.y;
+}
+
+fn editor_camera_zoom(
+    mut scroll: MessageReader<MouseWheel>,
+    mut cameras: Query<&mut Projection, With<Camera2d>>,
+) {
+    let Ok(mut proj) = cameras.single_mut() else { return };
+    let mut total = 0.0f32;
+    for ev in scroll.read() {
+        total += ev.y;
+    }
+    if total == 0.0 {
+        return;
+    }
+    if let Projection::Orthographic(ref mut o) = *proj {
+        o.scale = (o.scale * (1.0 - total * 0.025)).clamp(0.3, 10.0);
+    }
+}
+
+fn cursor_world(
+    windows: &Query<&Window>,
+    cameras: &Query<(&Camera, &GlobalTransform), With<Camera2d>>,
+) -> Option<Vec2> {
+    let window = windows.single().ok()?;
+    let (camera, cam_tf) = cameras.single().ok()?;
+    let pixel = window.cursor_position()?;
+    camera.viewport_to_world_2d(cam_tf, pixel).ok()
+}
+
+fn editor_handle_placement(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<ColorMaterial>>,
+    mut state: ResMut<EditorState>,
+    mut gizmos: Gizmos,
+    buttons: Res<ButtonInput<MouseButton>>,
+    windows: Query<&Window>,
+    cameras: Query<(&Camera, &GlobalTransform), With<Camera2d>>,
+) {
+    let Some(cursor) = cursor_world(&windows, &cameras) else { return };
+
+    if buttons.just_pressed(MouseButton::Left) {
+        state.drag_start = Some(cursor);
+    }
+
+    if let Some(start) = state.drag_start {
+        let center = (start + cursor) * 0.5;
+        let size = (cursor - start).abs();
+        gizmos.rect_2d(
+            Isometry2d::from_translation(center),
+            size.max(Vec2::splat(1.0)),
+            Color::srgb(1.0, 0.85, 0.15),
+        );
+
+        if buttons.just_released(MouseButton::Left) {
+            state.drag_start = None;
+            if size.x >= 10.0 && size.y >= 10.0 {
+                spawn_wall(&mut commands, &mut meshes, &mut materials, center, size);
+            }
+        }
+    }
+}
+
+fn editor_handle_delete(
+    mut commands: Commands,
+    buttons: Res<ButtonInput<MouseButton>>,
+    windows: Query<&Window>,
+    cameras: Query<(&Camera, &GlobalTransform), With<Camera2d>>,
+    walls: Query<(Entity, &Transform, &Collider, &WallFootprint)>,
+) {
+    if !buttons.just_pressed(MouseButton::Right) {
+        return;
+    }
+    let Some(cursor) = cursor_world(&windows, &cameras) else { return };
+    for (entity, tf, col, wall) in &walls {
+        let center = tf.translation.truncate();
+        if (cursor.x - center.x).abs() < col.half.x
+            && (cursor.y - center.y).abs() < col.half.y
+        {
+            commands.entity(wall.top_face).despawn();
+            commands.entity(wall.front_face).despawn();
+            commands.entity(entity).despawn();
+            break;
+        }
     }
 }

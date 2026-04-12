@@ -2,9 +2,14 @@
 /* eslint-disable */
 export const memory: WebAssembly.Memory;
 export const start: () => void;
-export const wasm_bindgen__closure__destroy__h5ad3c03a66b84261: (a: number, b: number) => void;
+export const theme_get_json: () => [number, number];
+export const theme_preset_names: () => [number, number];
+export const theme_set_accent: (a: number, b: number, c: number) => number;
+export const theme_set_field: (a: number, b: number, c: number, d: number) => number;
+export const theme_set_preset: (a: number, b: number) => number;
 export const wasm_bindgen__closure__destroy__ha3b6bac00ec24833: (a: number, b: number) => void;
 export const wasm_bindgen__closure__destroy__h4e9aaed4c664decb: (a: number, b: number) => void;
+export const wasm_bindgen__closure__destroy__h5ad3c03a66b84261: (a: number, b: number) => void;
 export const wasm_bindgen__closure__destroy__he4058ea69d132961: (a: number, b: number) => void;
 export const wasm_bindgen__closure__destroy__hc2e60cb81d4431bf: (a: number, b: number) => void;
 export const wasm_bindgen__closure__destroy__h04f59023cd0a8e37: (a: number, b: number) => void;

@@ -1,8 +1,9 @@
-use vello::kurbo::{Affine, Circle, Point, RoundedRect};
+use vello::kurbo::{Affine, Circle, Point, RoundedRect, Stroke};
 use vello::peniko::{Color, Fill};
 use vello::Scene;
 
 use crate::animated::{AnimatedColor, AnimatedPos, AnimatedValue};
+use crate::theme;
 use crate::tweakables::Tweakables;
 
 /// Common properties shared by all nodes.
@@ -275,6 +276,12 @@ impl Node {
 
         let [px, py] = props.pos.get(tw);
 
+        let th = theme::current();
+        let stroke_rgba = th.stroke;
+        let stroke_width = th.stroke_width;
+        let stroke_color =
+            Color::new([stroke_rgba[0], stroke_rgba[1], stroke_rgba[2], stroke_rgba[3] * opacity]);
+
         match self {
             Node::Rect(n) => {
                 let w = n.width.get(tw) * scale;
@@ -292,6 +299,15 @@ impl Node {
                     None,
                     &rect,
                 );
+                if stroke_width > 0.0 {
+                    scene.stroke(
+                        &Stroke::new(stroke_width),
+                        Affine::IDENTITY,
+                        stroke_color,
+                        None,
+                        &rect,
+                    );
+                }
             }
             Node::Circle(n) => {
                 let r = n.radius.get(tw) * scale;
@@ -305,6 +321,15 @@ impl Node {
                     None,
                     &circle,
                 );
+                if stroke_width > 0.0 {
+                    scene.stroke(
+                        &Stroke::new(stroke_width),
+                        Affine::IDENTITY,
+                        stroke_color,
+                        None,
+                        &circle,
+                    );
+                }
             }
             Node::Triangle(n) => {
                 let s = n.size.get(tw) * scale;
@@ -323,6 +348,15 @@ impl Node {
                     None,
                     &path,
                 );
+                if stroke_width > 0.0 {
+                    scene.stroke(
+                        &Stroke::new(stroke_width),
+                        Affine::IDENTITY,
+                        stroke_color,
+                        None,
+                        &path,
+                    );
+                }
             }
             Node::Group(n) => {
                 for child in &n.children {

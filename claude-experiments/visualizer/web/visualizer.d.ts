@@ -3,14 +3,29 @@
 
 export function start(): void;
 
+export function theme_get_json(): string;
+
+export function theme_preset_names(): string;
+
+export function theme_set_accent(index: number, hex: string): boolean;
+
+export function theme_set_field(key: string, value: string): boolean;
+
+export function theme_set_preset(name: string): boolean;
+
 export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
 
 export interface InitOutput {
     readonly memory: WebAssembly.Memory;
     readonly start: () => void;
-    readonly wasm_bindgen__closure__destroy__h5ad3c03a66b84261: (a: number, b: number) => void;
+    readonly theme_get_json: () => [number, number];
+    readonly theme_preset_names: () => [number, number];
+    readonly theme_set_accent: (a: number, b: number, c: number) => number;
+    readonly theme_set_field: (a: number, b: number, c: number, d: number) => number;
+    readonly theme_set_preset: (a: number, b: number) => number;
     readonly wasm_bindgen__closure__destroy__ha3b6bac00ec24833: (a: number, b: number) => void;
     readonly wasm_bindgen__closure__destroy__h4e9aaed4c664decb: (a: number, b: number) => void;
+    readonly wasm_bindgen__closure__destroy__h5ad3c03a66b84261: (a: number, b: number) => void;
     readonly wasm_bindgen__closure__destroy__he4058ea69d132961: (a: number, b: number) => void;
     readonly wasm_bindgen__closure__destroy__hc2e60cb81d4431bf: (a: number, b: number) => void;
     readonly wasm_bindgen__closure__destroy__h04f59023cd0a8e37: (a: number, b: number) => void;

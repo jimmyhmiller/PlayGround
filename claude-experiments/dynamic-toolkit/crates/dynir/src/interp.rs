@@ -1,12 +1,11 @@
-use std::cell::RefCell;
 use std::marker::PhantomData;
 
 use dynexec::{
-    CapturedFrame, CodegenConfig, ContinuationStore, DefaultCodegenConfig,
-    FrameResume, FrameResumePoint, FrameSliceError, FrameSliceMode, FrameSliceSnapshot,
-    InterpFrameStore, LayoutConfigDefaults, RootPrecision,
-    RootStrategy, RootTransport, RootTransportKind, ValueLayout,
-    VecContinuationStore,
+    BuilderFrame, CapturedFrame, CapturedResume, CapturedStackBuilder, CodegenConfig,
+    ContinuationView, DefaultCodegenConfig, FrameResume, FrameResumePoint,
+    FrameSliceError, FrameSliceMode, FrameSliceSnapshot, InterpFrameStore,
+    LayoutConfigDefaults, RootPrecision, RootStrategy, RootTransport, RootTransportKind,
+    ValueLayout,
 };
 use dynvalue::Decoded;
 
@@ -72,6 +71,15 @@ pub trait InterpRootManager<
     /// Trigger garbage collection.
     fn collect(&self);
 
+    /// Whether an automatic collection is due (e.g., because an
+    /// allocation threshold was crossed). Default: never. Heap-backed
+    /// implementations override to return `true` when appropriate.
+    /// The interpreter polls this at instruction boundaries — the only
+    /// safe points for collection.
+    fn should_collect(&self) -> bool {
+        false
+    }
+
     /// How precisely this root manager tracks interpreter frame values.
     fn root_precision(&self) -> RootPrecision {
         Roots::precision()
@@ -107,6 +115,33 @@ where
     /// would overwrite caller frame values with 0 after internal calls.
     fn root_precision(&self) -> RootPrecision {
         RootPrecision::PreciseSlots
+    }
+}
+
+/// `NoGcRoots` also serves as a trivial `ContinuationContext` that
+/// panics on any capture/resume attempt. Interpreters using `NoGcRoots`
+/// are implicitly saying "this program will never use continuations";
+/// if one tries to, the panic makes the mistake loud.
+impl dynexec::ContinuationContext for NoGcRoots {
+    fn capture(
+        &self,
+        _builder: &dynexec::CapturedStackBuilder,
+    ) -> Option<u64> {
+        panic!(
+            "NoGcRoots: capture_continuation called but no heap was \
+             configured. Use GcInterpCtx as the root manager if you \
+             need delimited continuations."
+        );
+    }
+    fn read<'h>(
+        &'h self,
+        _handle: u64,
+    ) -> Option<dynexec::ContinuationView<'h>> {
+        panic!(
+            "NoGcRoots: read_continuation called but no heap was \
+             configured. Use GcInterpCtx as the root manager if you \
+             need delimited continuations."
+        );
     }
 }
 
@@ -205,6 +240,151 @@ impl<'a, L: ValueLayout, Roots: RootStrategy<L>, Transport: RootTransport<L, Roo
             self.stack.push(frame);
         }
     }
+
+    /// Build a `CapturedStackBuilder` describing the current stack
+    /// slice from the frame owning `prompt_id` up to the top. This is
+    /// the heap-backed analogue of `capture_snapshot`.
+    fn build_captured_stack_impl(
+        &self,
+        prompt_id: u32,
+        resume_dest: usize,
+    ) -> CapturedStackBuilder {
+        let start = self
+            .stack
+            .iter()
+            .rposition(|f| f.active_prompts.contains(&prompt_id))
+            .expect("build_captured_stack: prompt not found");
+        let frame_count = self.stack.len() - start;
+        let mut frames = Vec::with_capacity(frame_count);
+
+        for (i, f) in self.stack[start..].iter().enumerate() {
+            let is_top = i + 1 == frame_count;
+
+            // `f.vals` is authoritative at instruction boundaries —
+            // the root cells are only freshened on specific events
+            // (frame push/pop, collect_gc) and may be stale here.
+            let vals = f.vals.clone();
+
+            let root_indices: Vec<u16> = f
+                .val_to_slot
+                .iter()
+                .enumerate()
+                .filter_map(|(i, s)| s.map(|_| i as u16))
+                .collect();
+
+            let caller_resume = match &f.resume {
+                FrameResume::TopLevel => CapturedResume::TopLevel,
+                FrameResume::FromCall { return_dest } => CapturedResume::FromCall {
+                    return_dest: return_dest.map(|d| d as u32),
+                },
+                FrameResume::FromResume { return_block, return_param_dest } => {
+                    CapturedResume::FromResume {
+                        return_block: *return_block as u32,
+                        return_param_dest: return_param_dest.map(|d| d as u32),
+                    }
+                }
+                FrameResume::FromInvoke { .. } => {
+                    panic!(
+                        "build_captured_stack: capturing a FromInvoke frame is \
+                         not supported (cannot capture across a try/catch boundary)"
+                    );
+                }
+            };
+
+            frames.push(BuilderFrame {
+                func_idx: f.func_idx as u32,
+                block_idx: f.block_idx as u32,
+                inst_idx: f.inst_idx as u32,
+                values: vals,
+                active_prompts: f.active_prompts.clone(),
+                root_indices,
+                resume_arg_slot: if is_top { Some(resume_dest as u32) } else { None },
+                caller_resume,
+            });
+        }
+
+        CapturedStackBuilder {
+            prompt_id,
+            frames,
+        }
+    }
+
+    /// Splice frames from a heap-backed `ContinuationView` on top of
+    /// the current live stack. The bottom pushed frame has its
+    /// `resume` field overridden to `bottom_resume` so that when it
+    /// eventually pops, control returns to the resumer.
+    fn splice_from_view_impl(
+        &mut self,
+        view: &ContinuationView<'_>,
+        args: &[u64],
+        bottom_resume: FrameResume,
+    ) {
+        self.sync_top_to_roots();
+
+        let frame_count = view.frame_count();
+        for i in 0..frame_count {
+            let f = view.frame(i);
+            let func_idx = f.func_idx as usize;
+            let mut vals: Vec<u64> = f.values.to_vec();
+
+            // If this is the top captured frame, inject the resume
+            // arg into the resume_arg_slot.
+            if i + 1 == frame_count {
+                if let Some(slot) = f.resume_arg_slot {
+                    if let Some(&arg) = args.first() {
+                        vals[slot as usize] = arg;
+                    }
+                }
+            }
+
+            // Rebuild val_to_slot from root_indices.
+            let mut val_to_slot = vec![None; vals.len()];
+            for (slot_idx, &value_idx) in f.root_indices.iter().enumerate() {
+                val_to_slot[value_idx as usize] = Some(slot_idx);
+            }
+            let gc_slots = count_gc_slots_from_map(&val_to_slot);
+            let root_frame = self.roots.push_frame(gc_slots);
+
+            // The bottom of the spliced slice gets the override;
+            // others restore their captured caller_resume.
+            let resume = if i == 0 {
+                bottom_resume.clone()
+            } else {
+                captured_to_frame_resume(f.caller_resume)
+            };
+
+            let frame = InterpFrame {
+                func_idx,
+                vals,
+                slots: vec![0u64; self.functions[func_idx].stack_slots.len()],
+                block_idx: f.block_idx as usize,
+                inst_idx: f.inst_idx as usize,
+                resume,
+                active_prompts: f.active_prompts.to_vec(),
+                root_frame,
+                val_to_slot,
+            };
+            sync_frame_to_roots(&frame, self.roots);
+            self.stack.push(frame);
+        }
+    }
+}
+
+/// Convert a `CapturedResume` (cont-heap restricted enum) back into a
+/// `FrameResume` for use as a live frame's resume field.
+fn captured_to_frame_resume(r: CapturedResume) -> FrameResume {
+    match r {
+        CapturedResume::TopLevel => FrameResume::TopLevel,
+        CapturedResume::FromCall { return_dest } => FrameResume::FromCall {
+            return_dest: return_dest.map(|d| d as usize),
+        },
+        CapturedResume::FromResume { return_block, return_param_dest } => {
+            FrameResume::FromResume {
+                return_block: return_block as usize,
+                return_param_dest: return_param_dest.map(|d| d as usize),
+            }
+        }
+    }
 }
 
 fn sync_frame_to_roots<L: ValueLayout, Roots: RootStrategy<L>, Transport: RootTransport<L, Roots>, R: InterpRootManager<L, Roots, Transport>>(frame: &InterpFrame, roots: &R) {
@@ -264,6 +444,14 @@ impl<'a, L: ValueLayout, Roots: RootStrategy<L>, Transport: RootTransport<L, Roo
         // Sync new top frame from roots (GC may have forwarded pointers)
         self.sync_top_from_roots();
         frame.resume
+    }
+
+    fn peek_top_resume(&self) -> FrameResume {
+        self.stack
+            .last()
+            .expect("peek_top_resume on empty stack")
+            .resume
+            .clone()
     }
 
     fn is_empty(&self) -> bool {
@@ -404,8 +592,25 @@ impl<'a, L: ValueLayout, Roots: RootStrategy<L>, Transport: RootTransport<L, Roo
         self.push_captured_frames(snapshot, args, Some(bottom_resume));
     }
 
+    fn build_captured_stack(
+        &self,
+        prompt_id: u32,
+        resume_dest: usize,
+    ) -> CapturedStackBuilder {
+        self.build_captured_stack_impl(prompt_id, resume_dest)
+    }
+
+    fn splice_from_view(
+        &mut self,
+        view: &ContinuationView<'_>,
+        args: &[u64],
+        bottom_resume: FrameResume,
+    ) {
+        self.splice_from_view_impl(view, args, bottom_resume);
+    }
+
     fn needs_gc(&self) -> bool {
-        false
+        self.roots.should_collect()
     }
 
     fn collect_gc(&mut self) {
@@ -486,11 +691,21 @@ pub struct ConfiguredModuleInterpreter<
 > {
     module: &'a Module,
     roots: &'a R,
-    conts: RefCell<VecContinuationStore>,
+    /// Plug-in continuation heap. Defaults to a static panicking stub.
+    /// Programs that never invoke capture/resume can ignore this; any
+    /// program that does must call `set_cont_ctx` with a real
+    /// `ContinuationContext` (typically a `GcInterpCtx`).
+    cont_ctx: &'a dyn dynexec::ContinuationContext,
     externs: Vec<Option<Box<dyn Fn(&[u64]) -> ExternCallResult + 'a>>>,
     indirect_handler: Option<Box<dyn Fn(u64, &[u64]) -> ExternCallResult + 'a>>,
     _config: PhantomData<Cfg>,
 }
+
+/// Static singleton used as the default `ContinuationContext` for new
+/// interpreters. Any call panics — programs that use continuations must
+/// install a real context via `set_cont_ctx`.
+static NO_CONT_CTX: dynexec::NoContinuations = dynexec::NoContinuations;
+
 
 pub type ModuleInterpreter<'a, S, R = NoGcRoots> =
     ConfiguredModuleInterpreter<'a, DefaultCodegenConfig<S>, R>;
@@ -505,11 +720,20 @@ where
         ConfiguredModuleInterpreter {
             module,
             roots,
-            conts: RefCell::new(VecContinuationStore::new()),
+            cont_ctx: &NO_CONT_CTX,
             externs,
             indirect_handler: None,
             _config: PhantomData,
         }
+    }
+
+    /// Install a heap-backed continuation context. Any program that
+    /// uses `capture_slice`, `clone_slice`, or `resume_slice` must
+    /// call this before `run()`. Typically the argument is a
+    /// `&GcInterpCtx<H, P>` — the same value also passed as `roots`
+    /// to `new()`.
+    pub fn set_cont_ctx(&mut self, ctx: &'a dyn dynexec::ContinuationContext) {
+        self.cont_ctx = ctx;
     }
 
     /// Bind a closure to an extern function by FuncRef.
@@ -583,9 +807,16 @@ where
     }
 
     fn run_loop(&self, sr: &mut impl InterpFrameStore) -> Result<InterpResult, InterpError> {
-        let mut conts = self.conts.borrow_mut();
         loop {
-            let action = self.execute_frame(sr, &mut *conts)?;
+            // Auto-GC poll: at each outer-loop iteration (between
+            // FrameActions), no raw heap pointers are held in
+            // interpreter-level locals, so collection is safe. The
+            // root manager decides when to actually trigger via its
+            // own threshold.
+            if sr.needs_gc() {
+                sr.collect_gc();
+            }
+            let action = self.execute_frame(sr)?;
 
             match action {
                 FrameAction::InternalCall {
@@ -714,6 +945,52 @@ where
                         .find_prompt_depth(prompt.index_u32())
                         .expect("abort_to_prompt: no frame has the target prompt");
                     sr.pop_frames_above(depth);
+
+                    // ── Resumed-frame trampoline ─────────────────
+                    //
+                    // After popping frames above the prompt-owning
+                    // frame, that frame is now the top. If it's a
+                    // spliced captured frame (resume = FromResume),
+                    // the abort is leaving the prompt boundary of a
+                    // resumed continuation — control should return to
+                    // the original resumer, NOT run the prompt's
+                    // handler block (which would re-execute "the rest
+                    // of the function after the reset" inside the
+                    // captured frame).
+                    //
+                    // This is the equivalent of Chez's `dounderflow`
+                    // trampoline at the bottom of a captured stack
+                    // segment: when control reaches the prompt
+                    // boundary of a resumed continuation, it pops
+                    // back into the resumer via the saved
+                    // STACKLINK / FromResume.
+                    if let FrameResume::FromResume {
+                        return_block,
+                        return_param_dest,
+                    } = sr.peek_top_resume() {
+                        // Pop the captured (top) frame and trampoline.
+                        let _ = sr.pop_frame();
+                        if sr.is_empty() {
+                            // No resumer left; return the value as
+                            // the program's final result.
+                            return Ok(match ret_val {
+                                Some(v) => InterpResult::Value(v),
+                                None => InterpResult::Void,
+                            });
+                        }
+                        if let (Some(dest), Some(val)) =
+                            (return_param_dest, ret_val)
+                        {
+                            sr.set(dest, val);
+                        }
+                        sr.set_block(return_block);
+                        sr.set_inst(0);
+                        continue;
+                    }
+
+                    // Normal abort path: the prompt-owning frame is
+                    // a regular live frame. Run its handler block
+                    // with the aborted value.
                     sr.pop_prompt(prompt.index_u32());
 
                     let func = &self.module.functions[sr.func_idx()];
@@ -732,7 +1009,7 @@ where
     }
 
     /// Execute the current frame until it needs to transfer control.
-    fn execute_frame(&self, sr: &mut impl InterpFrameStore, conts: &mut impl ContinuationStore) -> Result<FrameAction, InterpError> {
+    fn execute_frame(&self, sr: &mut impl InterpFrameStore) -> Result<FrameAction, InterpError> {
         let func_idx = sr.func_idx();
         let func = &self.module.functions[func_idx];
 
@@ -742,6 +1019,13 @@ where
 
             // Execute instructions
             while sr.inst_idx() < block.insts.len() {
+                // Auto-GC poll: at an instruction boundary, no raw
+                // heap pointers are held in interpreter-level Rust
+                // locals. This is the one safe place to run a
+                // collection between allocations within a function.
+                if sr.needs_gc() {
+                    sr.collect_gc();
+                }
                 let inst_idx = sr.inst_idx();
                 let node = &block.insts[inst_idx];
 
@@ -761,17 +1045,23 @@ where
                     Inst::CaptureSlice(prompt, _live) => {
                         let dest = node.value.expect("capture_slice must produce a value");
                         sr.advance_inst();
-                        let snapshot = sr.capture_snapshot(prompt.index_u32(), dest.index());
-                        let handle = conts.store_snapshot(snapshot)?;
+                        let builder = sr
+                            .build_captured_stack(prompt.index_u32(), dest.index());
+                        let handle = self
+                            .cont_ctx
+                            .capture(&builder)
+                            .expect("OOM capturing continuation");
                         sr.set(dest.index(), handle);
                         continue;
                     }
 
                     Inst::CloneSlice(slice) => {
+                        // Heap-backed continuations are immutable, so
+                        // "cloning" is a no-op: both aliases share the
+                        // same underlying ContObj.
                         let dest = node.value.expect("clone_slice must produce a value");
                         let handle = sr.get(slice.index());
-                        let new_handle = conts.clone_snapshot(handle)?;
-                        sr.set(dest.index(), new_handle);
+                        sr.set(dest.index(), handle);
                         sr.advance_inst();
                         continue;
                     }
@@ -1084,16 +1374,22 @@ where
                     let resumer_func = &self.module.functions[sr.func_idx()];
                     let return_param_dest = resumer_func.blocks[return_block.index()]
                         .params.first().map(|(v, _)| v.index());
-                    let snapshot = conts.get_snapshot(slice_bits)?.clone();
-                    sr.resume_snapshot_splice(
-                        &snapshot,
-                        &arg_vals,
-                        FrameResume::FromResume {
-                            return_block: return_block.index(),
-                            return_param_dest,
-                        },
-                    );
-                    return Ok(self.execute_frame(sr, conts)?);
+                    let bottom_resume = FrameResume::FromResume {
+                        return_block: return_block.index(),
+                        return_param_dest,
+                    };
+
+                    // Heap-backed: read the continuation via the
+                    // user's heap, splice its frames on top of the
+                    // current stack. The view is dropped inside
+                    // `splice_from_view` before any subsequent
+                    // allocation on the same heap.
+                    let view = self
+                        .cont_ctx
+                        .read(slice_bits)
+                        .expect("resume: invalid continuation handle");
+                    sr.splice_from_view(&view, &arg_vals, bottom_resume);
+                    return Ok(self.execute_frame(sr)?);
                 }
 
                 Terminator::AbortToPrompt { prompt, args } => {
@@ -1108,13 +1404,11 @@ where
                     return Err(InterpError::Unreachable);
                 }
                 Terminator::CaptureSlice { prompt, handler_block, resume_block } => {
-                    // Racket-style `shift k in body`. At capture time,
-                    // transfer control to `handler_block` with the fresh
-                    // handle as its first block param. The captured
-                    // frame's saved PC is set to `resume_block`'s entry
-                    // so that on resume, execution picks up there with
-                    // the resume arg written into `resume_block`'s first
-                    // block param slot.
+                    // Racket-style `shift k in body`. Prime the top
+                    // frame's PC at `resume_block` (so the snapshot
+                    // records it as the resume target), capture the
+                    // slice onto the user's heap, then jump to
+                    // `handler_block` with the fresh handle.
                     let func_ref = &self.module.functions[sr.func_idx()];
                     let resume_param_idx = func_ref.blocks[resume_block.index()]
                         .params.first().map(|(v, _)| v.index())
@@ -1123,14 +1417,17 @@ where
                         .params.first().map(|(v, _)| v.index())
                         .expect("capture_slice: handler_block must have one FrameSlice param");
 
-                    // Prime the top frame's PC at resume_block so the
-                    // snapshot records it as the resume target.
                     sr.set_block(resume_block.index());
                     sr.set_inst(0);
-                    let snapshot = sr.capture_snapshot(prompt.index_u32(), resume_param_idx);
-                    let handle = conts.store_snapshot(snapshot)?;
 
-                    // Now jump to handler_block with the handle.
+                    let builder =
+                        sr.build_captured_stack(prompt.index_u32(), resume_param_idx);
+                    let handle = self
+                        .cont_ctx
+                        .capture(&builder)
+                        .expect("OOM capturing continuation");
+
+                    // Jump to handler_block with the handle.
                     sr.set_block(handler_block.index());
                     sr.set_inst(0);
                     sr.set(handler_param_idx, handle);

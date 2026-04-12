@@ -4,6 +4,13 @@ use std::marker::PhantomData;
 
 use dynvalue::{LowBit, NanBox, TagScheme};
 
+pub mod cont_heap;
+pub use cont_heap::{
+    capture_continuation, read_continuation, BuilderFrame, CapturedResume,
+    CapturedStackBuilder, ContinuationContext, ContinuationTypes, ContinuationView,
+    FrameView, NoContinuations,
+};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RootPrecision {
     PreciseSlots,
@@ -267,6 +274,12 @@ pub trait InterpFrameStore {
                   args: &[(usize, u64)], resume: FrameResume);
     /// Pop the current frame. Returns the caller resume info.
     fn pop_frame(&mut self) -> FrameResume;
+    /// Read the current top frame's resume info without popping.
+    /// Used by the dispatcher's `abort_to_prompt` handler to detect
+    /// spliced captured frames (whose `resume` is `FromResume`) and
+    /// trampoline back to the resumer instead of running the
+    /// prompt's handler block.
+    fn peek_top_resume(&self) -> FrameResume;
     /// Is the stack empty?
     fn is_empty(&self) -> bool;
 
@@ -343,6 +356,42 @@ pub trait InterpFrameStore {
         _bottom_resume: FrameResume,
     ) {
         self.resume_snapshot(snapshot, args);
+    }
+
+    // ── Heap-backed continuation support ─────────────────────────
+    //
+    // These replace the snapshot-based API above for stores that
+    // allocate continuations on the user's GC heap. They take/return
+    // `CapturedStackBuilder` and `ContinuationView` types from the
+    // `cont_heap` module. Default impls panic — only stores that
+    // support heap-backed continuations override them.
+
+    /// Build a `CapturedStackBuilder` describing the current stack slice
+    /// from the frame owning `prompt_id` up to the top. The caller
+    /// passes the builder to `ContinuationContext::capture` on their
+    /// heap.
+    fn build_captured_stack(
+        &self,
+        _prompt_id: u32,
+        _resume_dest: usize,
+    ) -> CapturedStackBuilder {
+        panic!(
+            "build_captured_stack not implemented by this InterpFrameStore"
+        );
+    }
+
+    /// Splice frames from a heap-backed `ContinuationView` on top of
+    /// the current live stack. The bottom pushed frame's resume is
+    /// overridden with `bottom_resume`.
+    fn splice_from_view(
+        &mut self,
+        _view: &ContinuationView<'_>,
+        _args: &[u64],
+        _bottom_resume: FrameResume,
+    ) {
+        panic!(
+            "splice_from_view not implemented by this InterpFrameStore"
+        );
     }
 
     // ── GC integration ─────────────────────────────────────────
@@ -442,6 +491,10 @@ impl InterpFrameStore for VecFrameStore {
 
     fn pop_frame(&mut self) -> FrameResume {
         self.stack.pop().expect("pop_frame on empty stack").resume
+    }
+
+    fn peek_top_resume(&self) -> FrameResume {
+        self.stack.last().expect("peek_top_resume on empty stack").resume.clone()
     }
 
     fn is_empty(&self) -> bool { self.stack.is_empty() }

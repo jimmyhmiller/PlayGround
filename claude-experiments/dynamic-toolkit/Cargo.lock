@@ -226,6 +226,8 @@ dependencies = [
 name = "dynexec"
 version = "0.1.0"
 dependencies = [
+ "dynalloc",
+ "dynobj",
  "dynvalue",
 ]
 
@@ -234,7 +236,9 @@ name = "dynir"
 version = "0.1.0"
 dependencies = [
  "criterion",
+ "dynalloc",
  "dynexec",
+ "dynobj",
  "dynsym",
  "dynvalue",
  "proptest",

@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use crate::anim::Easing;
 use crate::animated::{AnimatedColor, AnimatedPos, AnimatedValue};
 use crate::scene::{CircleNode, GroupNode, Node, RectNode, SceneGraph, TriangleNode};
+use crate::theme;
 use crate::tweakables::Tweakables;
 
 use super::parser::Value;
@@ -169,17 +170,7 @@ pub struct Program {
 }
 
 fn entry_color(idx: usize) -> [f32; 4] {
-    let colors: &[[f32; 4]] = &[
-        [0.35, 0.65, 0.95, 1.0],
-        [0.95, 0.45, 0.35, 1.0],
-        [0.40, 0.85, 0.50, 1.0],
-        [0.95, 0.75, 0.30, 1.0],
-        [0.75, 0.45, 0.90, 1.0],
-        [0.95, 0.55, 0.70, 1.0],
-        [0.40, 0.85, 0.85, 1.0],
-        [0.90, 0.65, 0.40, 1.0],
-    ];
-    colors[idx % colors.len()]
+    theme::accent(idx)
 }
 
 fn hash_key(key: &str, n: usize) -> usize {
@@ -410,10 +401,13 @@ fn eval_expr(val: &Value, env: &Env) -> Result<RtVal, RuntimeError> {
                         _ => Ok(RtVal::Nil),
                     }
                 }
-                "color-for" => {
+                "color-for" | "palette" => {
                     let idx = eval_expr(&items[1], env)?.as_num()? as usize;
                     Ok(RtVal::Color(entry_color(idx)))
                 }
+                "bg" => Ok(RtVal::Color(theme::current().background)),
+                "stroke-color" => Ok(RtVal::Color(theme::current().stroke)),
+                "label-color" => Ok(RtVal::Color(theme::current().label)),
                 "count-where" => {
                     // (count-where list-name "field" value)
                     let list_name = items[1].as_symbol().ok_or_else(|| err("count-where expects list name"))?;
@@ -569,7 +563,8 @@ fn make_animated(val: &Value, env: &Env, bindings: &mut Vec<Binding>, node_id: &
                     property: prop,
                     source: BindingSource::State(name.to_string()),
                 });
-                Ok(AnimatedValue::spring(v, 300.0, 18.0))
+                let th = theme::current();
+                Ok(AnimatedValue::spring(v, th.spring_stiffness, th.spring_damping))
             } else if env.is_tweakable(name) {
                 // Tweakable reference: live reads
                 Ok(AnimatedValue::tweakable(name))
@@ -583,8 +578,9 @@ fn make_animated(val: &Value, env: &Env, bindings: &mut Vec<Binding>, node_id: &
             match head {
                 "spring" => {
                     let (_, kw) = parse_kwargs(&items[2..]);
-                    let stiffness = kw.get("stiffness").map(|v| eval_num(v, env)).transpose()?.unwrap_or(300.0);
-                    let damping = kw.get("damping").map(|v| eval_num(v, env)).transpose()?.unwrap_or(18.0);
+                    let th = theme::current();
+                    let stiffness = kw.get("stiffness").map(|v| eval_num(v, env)).transpose()?.unwrap_or(th.spring_stiffness);
+                    let damping = kw.get("damping").map(|v| eval_num(v, env)).transpose()?.unwrap_or(th.spring_damping);
 
                     // State-binding case: (spring some-state-symbol ...)
                     if let Value::Symbol(name) = &items[1] {
@@ -646,8 +642,10 @@ fn make_animated(val: &Value, env: &Env, bindings: &mut Vec<Binding>, node_id: &
                     let from = eval_num(&items[1], env)?;
                     let to = eval_num(&items[2], env)?;
                     let (_, kw) = parse_kwargs(&items[3..]);
-                    let dur = kw.get("duration").map(|v| eval_num(v, env)).transpose()?.unwrap_or(0.5);
-                    let easing = kw.get("easing").and_then(|v| v.as_symbol()).unwrap_or("cubic-out");
+                    let th = theme::current();
+                    let dur = kw.get("duration").map(|v| eval_num(v, env)).transpose()?.unwrap_or(th.tween_duration);
+                    let theme_easing = th.tween_easing.clone();
+                    let easing = kw.get("easing").and_then(|v| v.as_symbol()).unwrap_or(&theme_easing);
                     let mut t = AnimatedValue::tween(from, to, dur, eval_easing(easing)?);
                     t.fire();
                     Ok(t)
@@ -694,7 +692,7 @@ fn make_color(val: &Value, env: &Env) -> Result<AnimatedColor, RuntimeError> {
             if items.is_empty() { return Err(err("empty color")); }
             let head = items[0].as_symbol().unwrap_or("");
             match head {
-                "rgba" | "rgb" | "color-for" | "if" => {
+                "rgba" | "rgb" | "color-for" | "palette" | "bg" | "stroke-color" | "label-color" | "if" => {
                     let v = eval_expr(val, env)?;
                     let c = v.as_color()?;
                     Ok(AnimatedColor::constant(c[0], c[1], c[2], c[3]))

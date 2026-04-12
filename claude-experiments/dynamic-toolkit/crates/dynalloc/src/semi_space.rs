@@ -4,6 +4,12 @@ use dynobj::{
 
 use crate::alloc::{Alloc, BumpAllocator};
 
+impl Alloc for SemiSpace {
+    fn alloc(&self, info: &TypeInfo, varlen_len: usize) -> *mut u8 {
+        SemiSpace::alloc(self, info, varlen_len)
+    }
+}
+
 // Forwarding pointers are stored in the header word (at type_id_offset)
 // with bit 63 set as a marker. Valid heap pointers use at most 48 bits
 // on current hardware, and the original header word (u16 type_id + padding)

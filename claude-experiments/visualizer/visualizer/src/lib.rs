@@ -6,6 +6,7 @@ mod hashmap_viz;
 mod scene;
 mod scene_demo;
 mod state;
+mod theme;
 mod tweakables;
 
 use std::cell::RefCell;
@@ -14,7 +15,8 @@ use std::sync::Arc;
 
 use dsl::runtime::Program;
 use tweakables::Tweakables;
-use vello::peniko::color::palette;
+use vello::kurbo::{Affine, Rect};
+use vello::peniko::{Color, Fill};
 use vello::util::{RenderContext, RenderSurface};
 use vello::wgpu;
 use vello::{AaConfig, Renderer, RendererOptions, RenderParams, Scene};
@@ -112,11 +114,29 @@ impl App<'_> {
             prog.draw(&mut self.scene, &self.tweaks.borrow());
         }
 
+        let theme = theme::current();
+        let [br, bg, bb, ba] = theme.background;
+        let base_color = Color::new([br, bg, bb, ba]);
+
+        // Grain overlay — pre-baked seamless tile stretched over the viewport.
+        if theme.grain_enabled && theme.grain_intensity > 0.0 {
+            let brush = theme::grain_brush(theme.grain_intensity);
+            // Fill the viewport with an image-brushed rect, letting Repeat tile it.
+            let rect = Rect::new(0.0, 0.0, width as f64, height as f64);
+            self.scene.fill(
+                Fill::NonZero,
+                Affine::IDENTITY,
+                &brush,
+                None,
+                &rect,
+            );
+        }
+
         let renderer = self.renderers[dev_id].as_mut().unwrap();
         renderer
             .render_to_texture(device, queue, &self.scene, &surface.target_view,
                 &RenderParams {
-                    base_color: palette::css::BLACK,
+                    base_color,
                     width, height,
                     antialiasing_method: AaConfig::Area,
                 })
@@ -129,6 +149,115 @@ impl App<'_> {
         queue.submit([encoder.finish()]);
         tex.present();
     }
+}
+
+// ── Theme API exposed to JS ──
+
+fn parse_hex(s: &str) -> Option<[f32; 4]> {
+    let s = s.trim_start_matches('#');
+    let p = |lo: usize, hi: usize| u8::from_str_radix(&s[lo..hi], 16).ok().map(|v| v as f32 / 255.0);
+    match s.len() {
+        6 => Some([p(0, 2)?, p(2, 4)?, p(4, 6)?, 1.0]),
+        8 => Some([p(0, 2)?, p(2, 4)?, p(4, 6)?, p(6, 8)?]),
+        _ => None,
+    }
+}
+
+fn rgba_to_hex(c: [f32; 4]) -> String {
+    let to8 = |x: f32| (x.clamp(0.0, 1.0) * 255.0).round() as u8;
+    format!("#{:02x}{:02x}{:02x}", to8(c[0]), to8(c[1]), to8(c[2]))
+}
+
+fn theme_to_json(t: &theme::Theme) -> String {
+    let mut accents = String::new();
+    for (i, c) in t.accents.iter().enumerate() {
+        if i > 0 { accents.push(','); }
+        accents.push('"');
+        accents.push_str(&rgba_to_hex(*c));
+        accents.push('"');
+    }
+    format!(
+        r#"{{"name":"{}","background":"{}","stroke":"{}","stroke_width":{},"label":"{}","accents":[{}],"grain_enabled":{},"grain_intensity":{},"spring_stiffness":{},"spring_damping":{},"tween_duration":{},"tween_easing":"{}"}}"#,
+        t.name,
+        rgba_to_hex(t.background),
+        rgba_to_hex(t.stroke),
+        t.stroke_width,
+        rgba_to_hex(t.label),
+        accents,
+        t.grain_enabled,
+        t.grain_intensity,
+        t.spring_stiffness,
+        t.spring_damping,
+        t.tween_duration,
+        t.tween_easing,
+    )
+}
+
+#[wasm_bindgen]
+pub fn theme_get_json() -> String {
+    theme_to_json(&theme::current())
+}
+
+#[wasm_bindgen]
+pub fn theme_set_preset(name: &str) -> bool {
+    if let Some(t) = theme::Theme::preset(name) {
+        theme::set(t);
+        true
+    } else {
+        false
+    }
+}
+
+#[wasm_bindgen]
+pub fn theme_set_field(key: &str, value: &str) -> bool {
+    let mut t = theme::current();
+    match key {
+        "background" => { if let Some(c) = parse_hex(value) { t.background = c; } else { return false; } }
+        "stroke" => { if let Some(c) = parse_hex(value) { t.stroke = c; } else { return false; } }
+        "label" => { if let Some(c) = parse_hex(value) { t.label = c; } else { return false; } }
+        "stroke_width" => {
+            if let Ok(n) = value.parse::<f64>() { t.stroke_width = n; } else { return false; }
+        }
+        "grain_enabled" => { t.grain_enabled = value == "true" || value == "1"; }
+        "grain_intensity" => {
+            if let Ok(n) = value.parse::<f32>() { t.grain_intensity = n; } else { return false; }
+        }
+        "spring_stiffness" => {
+            if let Ok(n) = value.parse::<f64>() { t.spring_stiffness = n; } else { return false; }
+        }
+        "spring_damping" => {
+            if let Ok(n) = value.parse::<f64>() { t.spring_damping = n; } else { return false; }
+        }
+        "tween_duration" => {
+            if let Ok(n) = value.parse::<f64>() { t.tween_duration = n; } else { return false; }
+        }
+        "tween_easing" => {
+            t.tween_easing = value.to_string();
+        }
+        _ => return false,
+    }
+    theme::set(t);
+    true
+}
+
+#[wasm_bindgen]
+pub fn theme_set_accent(index: usize, hex: &str) -> bool {
+    let mut t = theme::current();
+    if let Some(c) = parse_hex(hex) {
+        while t.accents.len() <= index {
+            t.accents.push([1.0, 1.0, 1.0, 1.0]);
+        }
+        t.accents[index] = c;
+        theme::set(t);
+        true
+    } else {
+        false
+    }
+}
+
+#[wasm_bindgen]
+pub fn theme_preset_names() -> String {
+    r#"["iso50","byrne","paper","terminal"]"#.to_string()
 }
 
 #[wasm_bindgen(start)]

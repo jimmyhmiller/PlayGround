@@ -1114,6 +1114,35 @@ fn run_module_simple(entry: FuncRef, module: &crate::ir::Module, args: &[u64]) -
 
 #[test]
 fn module_frame_slice_clone_and_resume_is_multi_shot() {
+    // This test uses the old-style flat `shift()` form (Inst::CaptureSlice
+    // + pop_prompt + jump) which conflates the handle with the resume
+    // value in a single slot. Each `interp.run()` call starts fresh,
+    // so handles must persist across runs. We plug a `GcInterpCtx` into
+    // the interpreter so captures allocate on a real heap that outlives
+    // individual runs.
+    //
+    // NOTE: multi-shot here really exercises "clone a handle into a
+    // fresh alias, then invoke each alias independently". Since
+    // heap-backed continuations are immutable, `clone_slice` is the
+    // identity function — both clones share the underlying ContObj.
+    use crate::gc_runtime::GcInterpCtx;
+    use dynalloc::{PtrPolicy, SemiSpace};
+    use dynexec::ContinuationTypes;
+    use dynobj::{Compact, TypeInfo};
+
+    // A trivial LowBit<3> policy: tag 0 = pointer, tag 1 = fixnum.
+    struct Pol;
+    impl PtrPolicy for Pol {
+        fn try_decode_ptr(bits: u64) -> Option<*mut u8> {
+            if bits == 0 { return None; }
+            if bits & 0b111 == 0 { Some(bits as *mut u8) } else { None }
+        }
+        fn encode_ptr(ptr: *mut u8) -> u64 {
+            debug_assert_eq!((ptr as u64) & 0b111, 0);
+            ptr as u64
+        }
+    }
+
     let mut mb = ModuleBuilder::new();
     let f_capture = mb.declare_func("capture", &[], Some(Type::FrameSlice));
     let f_clone = mb.declare_func("clone", &[Type::FrameSlice], Some(Type::FrameSlice));
@@ -1150,8 +1179,16 @@ fn module_frame_slice_clone_and_resume_is_multi_shot() {
     mb.finish_func(f_resume, fb);
 
     let module = mb.build();
-    let roots = NoGcRoots;
-    let interp = ModuleInterpreter::<LowBit<3>, _>::new(&module, &roots);
+
+    // Build a GcInterpCtx and plug it into the interpreter as both
+    // root manager and continuation context.
+    let mut type_table: Vec<TypeInfo> = Vec::new();
+    let cont_types = ContinuationTypes::register_into::<Compact>(&mut type_table);
+    let heap = SemiSpace::new::<Compact>(64 * 1024);
+    let ctx: GcInterpCtx<Compact, Pol> = GcInterpCtx::new(heap, type_table, cont_types);
+
+    let mut interp = ModuleInterpreter::<LowBit<3>, _>::new(&module, &ctx);
+    interp.set_cont_ctx(&ctx);
 
     let captured = match interp.run(f_capture, &[]).unwrap() {
         InterpResult::Value(v) => v,

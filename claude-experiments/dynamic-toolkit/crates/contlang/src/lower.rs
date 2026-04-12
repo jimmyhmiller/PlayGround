@@ -84,6 +84,29 @@ impl<'a> FuncLowerer<'a> {
         self.fb.iconst(Type::I64, 0)
     }
 
+    /// Coerce a value to the target IR type.
+    ///
+    /// If the types already match, returns `v` unchanged. Otherwise
+    /// emits a `bitcast` — which at runtime is a no-op but lets the
+    /// IR builder see a type-consistent value. Used at merge points
+    /// like reset's handler_bb (which is always typed `I64` internally
+    /// so the builder's type checker is happy regardless of whether
+    /// the reset body fell through as an int or aborted with a
+    /// pointer) and at consumers of reset expressions where the
+    /// surrounding context knows the "real" surface type.
+    ///
+    /// Bitcast only works for same-size types. Since every
+    /// contlang-visible value is 64 bits wide (i64, cont, bytes, ptr
+    /// all map to 8 bytes), this is always valid.
+    fn coerce_to(&mut self, v: Value, target: Type) -> Value {
+        let from = self.fb.value_type(v);
+        if from == target {
+            v
+        } else {
+            self.fb.bitcast(v, target)
+        }
+    }
+
     fn lower_expr(&mut self, expr: &Expr) -> Value {
         match expr {
             Expr::Int(n) => self.fb.iconst(Type::I64, *n),
@@ -133,15 +156,24 @@ impl<'a> FuncLowerer<'a> {
                 if name == "abort" {
                     assert_eq!(args.len(), 1, "abort() takes exactly 1 argument");
                     let val = self.lower_expr(&args[0]);
+                    // Reset's handler_bb is uniformly typed I64;
+                    // coerce the aborted value to match.
+                    let val_i64 = self.coerce_to(val, Type::I64);
                     let prompt = self.current_prompt();
-                    self.fb.abort_to_prompt(prompt, &[val]);
+                    self.fb.abort_to_prompt(prompt, &[val_i64]);
                     return self.enter_dead_block();
                 }
 
                 let func_ref = *self.func_refs.get(name.as_str())
                     .unwrap_or_else(|| panic!("undefined function: {}", name));
                 let arg_vals: Vec<Value> = args.iter().map(|a| self.lower_expr(a)).collect();
-                self.fb.call(func_ref, &arg_vals).unwrap()
+                // Void calls (e.g. `bytes_set`) return None from
+                // `fb.call`; in expression context we produce a
+                // dummy i64 0 so the caller has something to discard.
+                match self.fb.call(func_ref, &arg_vals) {
+                    Some(v) => v,
+                    None => self.fb.iconst(Type::I64, 0),
+                }
             }
             Expr::If(cond, then_body, else_body) => {
                 let c = self.lower_expr(cond);
@@ -187,24 +219,80 @@ impl<'a> FuncLowerer<'a> {
                 self.fb.block_param(merge_bb, 0)
             }
             Expr::While(cond, body) => {
-                let header_bb = self.fb.create_block(&[]);
+                // SSA-correct while lowering: every variable visible
+                // in the enclosing scope at loop entry becomes a
+                // header block param. On each back-edge from the body
+                // end to the header, the current (possibly updated)
+                // value is passed in. After the loop exits, those
+                // variables are bound to the header's block params
+                // (which dominate exit_bb).
+                //
+                // This handles loop-carried values like `let i = 0;
+                // while i < 10 { i = i + 1 }` correctly — previously
+                // this triggered DominanceViolation because i was
+                // re-defined inside the body and its new value was
+                // still referenced from the header by name.
+
+                // Snapshot the variables visible at loop entry, in a
+                // stable order. Uses an inner scope to avoid
+                // duplicates when the same name is shadowed.
+                let snapshot: Vec<(String, Value)> = {
+                    let mut seen = HashMap::<String, Value>::new();
+                    // Iterate scopes outer→inner so inner shadows win.
+                    for scope in self.vars.iter() {
+                        for (name, &val) in scope {
+                            seen.insert(name.clone(), val);
+                        }
+                    }
+                    seen.into_iter().collect()
+                };
+                let header_param_tys: Vec<Type> = snapshot
+                    .iter()
+                    .map(|(_, v)| self.fb.value_type(*v))
+                    .collect();
+                let header_bb = self.fb.create_block(&header_param_tys);
                 let body_bb = self.fb.create_block(&[]);
                 let exit_bb = self.fb.create_block(&[]);
 
-                self.fb.jump(header_bb, &[]);
+                // Jump from current block to header with initial values.
+                let initial_args: Vec<Value> =
+                    snapshot.iter().map(|(_, v)| *v).collect();
+                self.fb.jump(header_bb, &initial_args);
 
+                // Header: replace scope mappings with the block params.
                 self.fb.switch_to_block(header_bb);
+                let header_params: Vec<Value> = (0..snapshot.len())
+                    .map(|i| self.fb.block_param(header_bb, i))
+                    .collect();
+                for (i, (name, _)) in snapshot.iter().enumerate() {
+                    self.set_var(name, header_params[i]);
+                }
+
                 let c = self.lower_expr(cond);
                 let c8 = self.fb.trunc(c, Type::I8);
                 self.fb.br_if(c8, body_bb, &[], exit_bb, &[]);
 
+                // Body: any `set_var` inside updates the outer scope
+                // mapping for these names, which we then read back on
+                // the back-edge.
                 self.fb.switch_to_block(body_bb);
                 self.push_scope();
                 let _ = self.lower_expr(body);
                 self.pop_scope();
-                self.fb.jump(header_bb, &[]);
+                let back_args: Vec<Value> = snapshot
+                    .iter()
+                    .map(|(name, _)| self.lookup_var(name))
+                    .collect();
+                self.fb.jump(header_bb, &back_args);
 
+                // Exit: the scope mappings need to point at the
+                // header's block params (which dominate exit_bb),
+                // NOT at whatever the last body iteration set them to
+                // (which lives in body_bb).
                 self.fb.switch_to_block(exit_bb);
+                for (i, (name, _)) in snapshot.iter().enumerate() {
+                    self.set_var(name, header_params[i]);
+                }
                 self.fb.iconst(Type::I64, 0)
             }
             Expr::Block(stmts, tail) => {
@@ -221,8 +309,26 @@ impl<'a> FuncLowerer<'a> {
                 result
             }
             Expr::Reset(body) => {
-                // Create handler block for abort landing
-                let handler_bb = self.fb.create_block(&[self.ret_ty]);
+                // The reset's handler block is a MERGE POINT: control
+                // arrives here from two unrelated paths, the abort
+                // path (whatever value was passed to abort_to_prompt
+                // for this prompt) and the normal-fallthrough path
+                // (whatever the reset body evaluated to). Those two
+                // paths can have different IR types — e.g. the body
+                // is `shift |k| { abort(k) }` where the abort path
+                // contributes a FrameSlice and the fallthrough path
+                // contributes the shift expression's I64 result.
+                //
+                // To keep the IR's static type system happy at this
+                // merge, we type the handler block param uniformly
+                // as `I64`. Both incoming edges coerce to I64 via
+                // bitcast (a no-op at runtime — every contlang value
+                // is 8 bytes wide). The reset expression's "real"
+                // type for the consuming context is whatever the
+                // consumer expects; consumers (let bindings with
+                // type annotations, function returns, etc.) emit a
+                // bitcast back to their target type if needed.
+                let handler_bb = self.fb.create_block(&[Type::I64]);
                 let prompt = self.fb.create_prompt();
                 self.fb.push_prompt(prompt, handler_bb);
                 self.prompt_stack.push(prompt);
@@ -231,15 +337,30 @@ impl<'a> FuncLowerer<'a> {
 
                 self.prompt_stack.pop();
                 if !self.dead {
-                    self.fb.pop_prompt(prompt);
-                    // Normal path: jump to handler block with body result
-                    self.fb.jump(handler_bb, &[result]);
+                    // Normal-fallthrough path: route through
+                    // abort_to_prompt instead of pop_prompt + jump.
+                    // This makes BOTH paths (explicit abort AND
+                    // synthetic exit) hit the interpreter's
+                    // resumed-frame trampoline check, so when a
+                    // captured frame's body completes naturally, it
+                    // returns to the resumer instead of falling
+                    // through into the resumer's IR.
+                    //
+                    // At capture time, the synthetic abort_to_prompt
+                    // pops the prompt, finds the handler block (= bb1
+                    // / `handler_bb` here, via find_handler on the
+                    // PushPrompt instruction), and jumps with the
+                    // value — semantically identical to the old
+                    // pop_prompt + jump.
+                    let result_i64 = self.coerce_to(result, Type::I64);
+                    self.fb.abort_to_prompt(prompt, &[result_i64]);
                 } else {
                     // Dead path: unreachable (abort will jump to handler_bb directly)
                     self.fb.unreachable();
                 }
 
-                // Handler block: merge point for normal flow and abort flow
+                // Handler block: merge point for normal flow and abort flow.
+                // Returns the I64 block param. Consumers cast as needed.
                 self.fb.switch_to_block(handler_bb);
                 self.dead = false;
                 self.fb.block_param(handler_bb, 0)
@@ -282,9 +403,9 @@ impl<'a> FuncLowerer<'a> {
                     // the value of the whole reset expression — semantics
                     // match Racket: `(reset (+ e (shift k body)))` where
                     // body doesn't invoke k evaluates to body. Route via
-                    // abort_to_prompt so the value lands at the reset's
-                    // handler block.
-                    self.fb.abort_to_prompt(prompt, &[body_result]);
+                    // abort_to_prompt; the abort lowering coerces to I64.
+                    let body_i64 = self.coerce_to(body_result, Type::I64);
+                    self.fb.abort_to_prompt(prompt, &[body_i64]);
                 }
                 self.pop_scope();
                 self.dead = false;
@@ -296,8 +417,11 @@ impl<'a> FuncLowerer<'a> {
             }
             Expr::Abort(val) => {
                 let v = self.lower_expr(val);
+                // Reset's handler_bb is always typed I64; coerce
+                // the aborted value before the merge.
+                let v_i64 = self.coerce_to(v, Type::I64);
                 let prompt = self.current_prompt();
-                self.fb.abort_to_prompt(prompt, &[v]);
+                self.fb.abort_to_prompt(prompt, &[v_i64]);
                 self.enter_dead_block()
             }
             Expr::Resume(cont, val) => {
@@ -321,12 +445,27 @@ impl<'a> FuncLowerer<'a> {
 
     fn lower_stmt(&mut self, stmt: &Stmt) {
         match stmt {
-            Stmt::Let(name, expr) => {
+            Stmt::Let(name, ty_ann, expr) => {
                 let val = self.lower_expr(expr);
+                // If the let has a type annotation, coerce the value
+                // to the matching IR type. This is what makes
+                // `let k: cont = reset { ... }` work even when the
+                // reset expression's IR result is I64 — the cast
+                // produces a FrameSlice-typed value, which goes
+                // into a GC-rooted frame slot.
+                let val = if let Some(ty) = ty_ann {
+                    self.coerce_to(val, val_type_to_ir(*ty))
+                } else {
+                    val
+                };
                 self.def_var(name, val);
             }
             Stmt::Assign(name, expr) => {
                 let val = self.lower_expr(expr);
+                // Match the existing slot's type to keep IR types stable.
+                let existing = self.lookup_var(name);
+                let target = self.fb.value_type(existing);
+                let val = self.coerce_to(val, target);
                 self.set_var(name, val);
             }
             Stmt::Expr(expr) => {
@@ -334,6 +473,7 @@ impl<'a> FuncLowerer<'a> {
             }
             Stmt::Return(expr) => {
                 let val = self.lower_expr(expr);
+                let val = self.coerce_to(val, self.ret_ty);
                 self.fb.ret(val);
                 self.enter_dead_block();
             }
@@ -345,14 +485,58 @@ fn val_type_to_ir(ty: ValType) -> Type {
     match ty {
         ValType::Int => Type::I64,
         ValType::Cont => Type::FrameSlice,
+        ValType::Bytes => Type::GcPtr,
     }
 }
 
+/// Names and signatures of the built-in heap externs that every
+/// contlang program can call without declaring. The interpreter
+/// harness must `bind` closures for each of these before running.
+pub const BYTES_ALLOC: &str = "bytes_alloc";
+pub const BYTES_GET: &str = "bytes_get";
+pub const BYTES_SET: &str = "bytes_set";
+pub const BYTES_LEN: &str = "bytes_len";
+
 pub fn lower_program(program: &Program) -> LoweredProgram {
+    use dynir::types::Signature;
+
     let mut mb = ModuleBuilder::new();
+    let mut func_refs = HashMap::new();
+
+    // Phase 0: Pre-declare built-in heap externs.
+    //
+    //   bytes_alloc(len: i64) -> bytes
+    //   bytes_get(p: bytes, i: i64) -> i64
+    //   bytes_set(p: bytes, i: i64, b: i64) -> void
+    //   bytes_len(p: bytes) -> i64
+    //
+    // These are extern functions whose closures are supplied at
+    // interpreter setup time (see the contlang test harness).
+    let f_alloc = mb.declare_extern(
+        BYTES_ALLOC,
+        Signature { params: vec![Type::I64], ret: Some(Type::GcPtr) },
+    );
+    func_refs.insert(BYTES_ALLOC.to_string(), f_alloc);
+
+    let f_get = mb.declare_extern(
+        BYTES_GET,
+        Signature { params: vec![Type::GcPtr, Type::I64], ret: Some(Type::I64) },
+    );
+    func_refs.insert(BYTES_GET.to_string(), f_get);
+
+    let f_set = mb.declare_extern(
+        BYTES_SET,
+        Signature { params: vec![Type::GcPtr, Type::I64, Type::I64], ret: None },
+    );
+    func_refs.insert(BYTES_SET.to_string(), f_set);
+
+    let f_len = mb.declare_extern(
+        BYTES_LEN,
+        Signature { params: vec![Type::GcPtr], ret: Some(Type::I64) },
+    );
+    func_refs.insert(BYTES_LEN.to_string(), f_len);
 
     // Phase 1: Declare user functions
-    let mut func_refs = HashMap::new();
     for decl in &program.decls {
         let params: Vec<Type> = decl.params.iter().map(|p| val_type_to_ir(p.ty)).collect();
         let ret_ty = Some(val_type_to_ir(decl.ret_ty));
@@ -378,6 +562,13 @@ pub fn lower_program(program: &Program) -> LoweredProgram {
         if lowerer.dead {
             lowerer.fb.unreachable();
         } else {
+            // Coerce the body's result to the function's declared
+            // return type. This makes patterns like
+            //   fn get_cont() -> cont { reset { ... } }
+            // work even when the reset's IR result is I64 (because
+            // reset's handler block is type-uniformly I64) — the
+            // bitcast at the Ret restores the correct surface type.
+            let result = lowerer.coerce_to(result, ret_ty);
             lowerer.fb.ret(result);
         }
 
