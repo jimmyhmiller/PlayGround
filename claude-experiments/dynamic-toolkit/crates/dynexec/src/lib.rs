@@ -8,7 +8,7 @@ pub mod cont_heap;
 pub mod cont_ops;
 pub use cont_heap::{
     capture_continuation, read_continuation,
-    BuilderFrame, CapturedResume, CapturedStackBuilder, ContinuationContext,
+    BuilderFrame, CapturedStackBuilder, ContinuationContext,
     ContinuationTypes, ContinuationView, FrameView, NoContinuations,
 };
 pub use cont_ops::{
@@ -28,9 +28,6 @@ pub enum RootTransportKind {
     ShadowStack,
     StackMap,
 }
-
-/// Alias — `CapturedCallerResume` is now unified with `FrameResume`.
-pub type CapturedCallerResume = FrameResume;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FrameResumePoint {
@@ -213,41 +210,11 @@ pub trait InterpFrameStore {
     /// Pop all frames above `depth`, keeping the frame at `depth` as the new top.
     fn pop_frames_above(&mut self, depth: usize);
 
-    // ── Heap-backed continuation support ─────────────────────────
-    //
-    // These replace the snapshot-based API above for stores that
-    // allocate continuations on the user's GC heap. They take/return
-    // `CapturedStackBuilder` and `ContinuationView` types from the
-    // `cont_heap` module. Default impls panic — only stores that
-    // support heap-backed continuations override them.
-
-    /// Build a `CapturedStackBuilder` describing the current stack slice
-    /// from the frame owning `prompt_id` up to the top. The caller
-    /// passes the builder to `ContinuationContext::capture` on their
-    /// heap.
-    fn build_captured_stack(
-        &self,
-        _prompt_id: u32,
-        _resume_dest: usize,
-    ) -> CapturedStackBuilder {
-        panic!(
-            "build_captured_stack not implemented by this InterpFrameStore"
-        );
-    }
-
-    /// Splice frames from a heap-backed `ContinuationView` on top of
-    /// the current live stack. The bottom pushed frame's resume is
-    /// overridden with `bottom_resume`.
-    fn splice_from_view(
-        &mut self,
-        _view: &ContinuationView<'_>,
-        _args: &[u64],
-        _bottom_resume: FrameResume,
-    ) {
-        panic!(
-            "splice_from_view not implemented by this InterpFrameStore"
-        );
-    }
+    // Heap-backed continuation support lives in the `FrameCapture` and
+    // `FrameRestorable` traits (in `cont_ops`). Stores that support
+    // heap-backed continuations implement those in addition to
+    // `InterpFrameStore`. The core frame-store trait stays focused on
+    // mechanics that every store must provide.
 
     // ── GC integration ─────────────────────────────────────────
 

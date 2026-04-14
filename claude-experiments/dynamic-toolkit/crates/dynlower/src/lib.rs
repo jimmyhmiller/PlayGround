@@ -18,7 +18,7 @@ use regalloc::{
     machine_gp, machine_fp, is_float_type,
 };
 use dynexec::{
-    CallArgLocation, CallingConvention, CapturedCallerResume,
+    BuilderFrame, CallArgLocation, CallingConvention, FrameResume,
     CodegenConfig, DefaultCodegenConfig, FrameLayout, FrameResumePoint, FrameSlotAccess,
     FrameSlotBase, FrameStrategy, LayoutConfigDefaults, RootTransport, RootTransportKind,
     validate_codegen_config,
@@ -240,13 +240,16 @@ pub enum JitOutcome {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// A JIT frame that was on the native stack when a deeper frame decided
+/// to reify (capture / clone / resume / abort). The `frame` carries the
+/// same data a `BuilderFrame` does — except its `caller_resume` is a
+/// placeholder. `build_capture_builder` fills in each frame's real
+/// `caller_resume` from the `callee_caller_resume` of the frame above it
+/// (or `TopLevel` at the outermost).
+#[derive(Debug, Clone)]
 pub struct SuspendedJitFrame {
-    pub resume: FrameResumePoint,
-    pub values: Vec<u64>,
-    pub root_value_indices: Vec<usize>,
-    pub active_prompts: Vec<u32>,
-    pub callee_caller_resume: CapturedCallerResume,
+    pub frame: BuilderFrame,
+    pub callee_caller_resume: FrameResume,
 }
 
 #[derive(Debug)]
@@ -275,9 +278,9 @@ enum SuspendCallerResume {
 }
 
 impl SuspendCallerResume {
-    fn materialize(&self, values: &[u64]) -> CapturedCallerResume {
+    fn materialize(&self, values: &[u64]) -> FrameResume {
         match self {
-            SuspendCallerResume::FromCall { return_dest } => CapturedCallerResume::FromCall {
+            SuspendCallerResume::FromCall { return_dest } => FrameResume::FromCall {
                 return_dest: *return_dest,
             },
             SuspendCallerResume::FromInvoke {
@@ -286,7 +289,7 @@ impl SuspendCallerResume {
                 exception_block,
                 exception_arg_indices,
                 has_ret_param,
-            } => CapturedCallerResume::FromInvoke {
+            } => FrameResume::FromInvoke {
                 normal_block: *normal_block,
                 normal_args_vals: normal_arg_indices
                     .iter()
@@ -331,11 +334,24 @@ extern "C" fn jit_push_suspended_frame(
     }
     ACTIVE_SUSPENDED_JIT_FRAMES.with(|cell| {
         let callee_caller_resume = record.callee_caller_resume.materialize(&values);
+        let root_indices: Vec<u16> = record
+            .root_value_indices
+            .iter()
+            .map(|&i| i as u16)
+            .collect();
         cell.borrow_mut().push(SuspendedJitFrame {
-            resume: record.resume,
-            values,
-            root_value_indices: record.root_value_indices.clone(),
-            active_prompts: record.active_prompts.clone(),
+            frame: BuilderFrame {
+                func_idx: record.resume.func_idx as u32,
+                block_idx: record.resume.block_idx as u32,
+                inst_idx: record.resume.inst_idx as u32,
+                values,
+                active_prompts: record.active_prompts.clone(),
+                root_indices,
+                resume_arg_slot: None,
+                // Placeholder — `build_capture_builder` fills this in from
+                // the `callee_caller_resume` of the next outer frame.
+                caller_resume: FrameResume::TopLevel,
+            },
             callee_caller_resume,
         });
     });

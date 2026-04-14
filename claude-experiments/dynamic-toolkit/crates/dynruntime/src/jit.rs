@@ -3,7 +3,7 @@ use std::marker::PhantomData;
 
 use dynalloc::{Heap, PtrPolicy};
 use dynexec::{
-    BuilderFrame, CapturedCallerResume, CapturedResume, CapturedStackBuilder,
+    BuilderFrame, FrameResume, CapturedStackBuilder,
     ContinuationContext, FrameSliceError,
 };
 use dynir::interp::{ConfiguredModuleInterpreter, InterpError, InterpResult, InterpRootManager};
@@ -211,36 +211,6 @@ pub fn decode_frame_control_outcome(
     }
 }
 
-/// Convert a `FrameResume` (caller_resume from a suspended JIT frame)
-/// into a `CapturedResume` for the heap format.
-fn frame_resume_to_captured(r: &CapturedCallerResume) -> CapturedResume {
-    match r {
-        CapturedCallerResume::TopLevel => CapturedResume::TopLevel,
-        CapturedCallerResume::FromCall { return_dest } => CapturedResume::FromCall {
-            return_dest: return_dest.map(|d| d as u32),
-        },
-        CapturedCallerResume::FromResume { return_block, return_param_dest } => {
-            CapturedResume::FromResume {
-                return_block: *return_block as u32,
-                return_param_dest: return_param_dest.map(|d| d as u32),
-            }
-        }
-        CapturedCallerResume::FromInvoke {
-            normal_block,
-            normal_args_vals,
-            exception_block,
-            exception_args_vals,
-            has_ret_param,
-        } => CapturedResume::FromInvoke {
-            normal_block: *normal_block as u32,
-            normal_args_vals: normal_args_vals.clone(),
-            exception_block: *exception_block as u32,
-            exception_args_vals: exception_args_vals.clone(),
-            has_ret_param: *has_ret_param,
-        },
-    }
-}
-
 /// Build a `CapturedStackBuilder` directly from JIT frame state.
 /// This is the JIT's `FrameCapture` — equivalent to the interpreter's
 /// `build_captured_stack_impl` but reads from `FrameReifyRecord` +
@@ -272,11 +242,9 @@ fn build_capture_builder(
     let resume_arg_slot = record.return_dest.map(|d| d as u32);
 
     let top_caller_resume = if suspended.is_empty() {
-        CapturedResume::TopLevel
+        FrameResume::TopLevel
     } else {
-        frame_resume_to_captured(
-            &suspended.last().unwrap().callee_caller_resume,
-        )
+        suspended.last().unwrap().callee_caller_resume.clone()
     };
 
     let top_builder_frame = BuilderFrame {
@@ -294,29 +262,13 @@ fn build_capture_builder(
         vec![top_builder_frame]
     } else {
         let mut frames_rev = vec![top_builder_frame];
-        while let Some(entry) = suspended.pop() {
-            let caller_resume = if suspended.is_empty() {
-                CapturedResume::TopLevel
+        while let Some(mut entry) = suspended.pop() {
+            entry.frame.caller_resume = if suspended.is_empty() {
+                FrameResume::TopLevel
             } else {
-                frame_resume_to_captured(
-                    &suspended.last().unwrap().callee_caller_resume,
-                )
+                suspended.last().unwrap().callee_caller_resume.clone()
             };
-            let root_indices: Vec<u16> = entry
-                .root_value_indices
-                .iter()
-                .map(|&i| i as u16)
-                .collect();
-            frames_rev.push(BuilderFrame {
-                func_idx: entry.resume.func_idx as u32,
-                block_idx: entry.resume.block_idx as u32,
-                inst_idx: entry.resume.inst_idx as u32,
-                values: entry.values.clone(),
-                active_prompts: entry.active_prompts.clone(),
-                root_indices,
-                resume_arg_slot: None,
-                caller_resume,
-            });
+            frames_rev.push(entry.frame);
         }
         frames_rev.reverse();
         frames_rev
@@ -429,43 +381,43 @@ pub fn resume_stored_slice_with_jit_module(
     loop {
         let caller = view.frame(frame_idx).caller_resume.clone();
         match (&caller, outcome.clone()) {
-            (CapturedResume::TopLevel, final_outcome) => return Ok(final_outcome),
-            (CapturedResume::FromCall { .. }, JitOutcome::Value(v)) => {
+            (FrameResume::TopLevel, final_outcome) => return Ok(final_outcome),
+            (FrameResume::FromCall { .. }, JitOutcome::Value(v)) => {
                 if frame_idx == 0 {
                     return Ok(JitOutcome::Value(v));
                 }
                 frame_idx -= 1;
                 outcome = call_resume(frame_idx, &[v]).ok_or_else(missing)?;
             }
-            (CapturedResume::FromCall { .. }, JitOutcome::Void) => {
+            (FrameResume::FromCall { .. }, JitOutcome::Void) => {
                 if frame_idx == 0 {
                     return Ok(JitOutcome::Void);
                 }
                 frame_idx -= 1;
                 outcome = call_resume(frame_idx, &[]).ok_or_else(missing)?;
             }
-            (CapturedResume::FromCall { .. }, JitOutcome::Exception(exc)) => {
+            (FrameResume::FromCall { .. }, JitOutcome::Exception(exc)) => {
                 if frame_idx == 0 {
                     return Ok(JitOutcome::Exception(exc));
                 }
                 frame_idx -= 1;
                 continue;
             }
-            (CapturedResume::FromInvoke { .. }, JitOutcome::Value(v)) => {
+            (FrameResume::FromInvoke { .. }, JitOutcome::Value(v)) => {
                 if frame_idx == 0 {
                     return Ok(JitOutcome::Value(v));
                 }
                 frame_idx -= 1;
                 outcome = call_invoke(frame_idx, false, &[v]).ok_or_else(missing)?;
             }
-            (CapturedResume::FromInvoke { .. }, JitOutcome::Void) => {
+            (FrameResume::FromInvoke { .. }, JitOutcome::Void) => {
                 if frame_idx == 0 {
                     return Ok(JitOutcome::Void);
                 }
                 frame_idx -= 1;
                 outcome = call_invoke(frame_idx, false, &[]).ok_or_else(missing)?;
             }
-            (CapturedResume::FromInvoke { .. }, JitOutcome::Exception(exc)) => {
+            (FrameResume::FromInvoke { .. }, JitOutcome::Exception(exc)) => {
                 if frame_idx == 0 {
                     return Ok(JitOutcome::Exception(exc));
                 }
@@ -1251,8 +1203,8 @@ mod tests {
                 assert_eq!(view.frame(1).func_idx, 1);
                 assert_eq!(
                     view.frame(1).caller_resume,
-                    CapturedResume::FromCall {
-                        return_dest: Some(slice.index() as u32)
+                    FrameResume::FromCall {
+                        return_dest: Some(slice.index())
                     }
                 );
                 assert_eq!(view.frame(0).active_prompts, &[prompt.index() as u32]);
@@ -1341,7 +1293,7 @@ mod tests {
                 root_indices: vec![],
                 resume_arg_slot: None,
                 active_prompts: vec![],
-                caller_resume: CapturedResume::TopLevel,
+                caller_resume: FrameResume::TopLevel,
             }],
         };
         let handle = store.capture_from_builder(&builder).unwrap();
@@ -1681,7 +1633,7 @@ mod tests {
         let view = store.read(handle).unwrap();
         assert_eq!(view.frame_count(), 2);
         match &view.frame(1).caller_resume {
-            CapturedResume::FromInvoke {
+            FrameResume::FromInvoke {
                 normal_args_vals,
                 exception_args_vals,
                 ..

@@ -1,7 +1,7 @@
 use std::marker::PhantomData;
 
 use dynexec::{
-    BuilderFrame, CapturedResume, CapturedStackBuilder, CodegenConfig,
+    BuilderFrame, CapturedStackBuilder, CodegenConfig,
     ContinuationView, DefaultCodegenConfig, FrameCapture, FrameResume,
     FrameRestorable, FrameSliceError, InterpFrameStore,
     LayoutConfigDefaults, PromptBoundaryAction, RootPrecision, RootStrategy, RootTransport,
@@ -247,32 +247,6 @@ impl<'a, L: ValueLayout, Roots: RootStrategy<L>, Transport: RootTransport<L, Roo
                 .filter_map(|(i, s)| s.map(|_| i as u16))
                 .collect();
 
-            let caller_resume = match &f.resume {
-                FrameResume::TopLevel => CapturedResume::TopLevel,
-                FrameResume::FromCall { return_dest } => CapturedResume::FromCall {
-                    return_dest: return_dest.map(|d| d as u32),
-                },
-                FrameResume::FromResume { return_block, return_param_dest } => {
-                    CapturedResume::FromResume {
-                        return_block: *return_block as u32,
-                        return_param_dest: return_param_dest.map(|d| d as u32),
-                    }
-                }
-                FrameResume::FromInvoke {
-                    normal_block,
-                    normal_args_vals,
-                    exception_block,
-                    exception_args_vals,
-                    has_ret_param,
-                } => CapturedResume::FromInvoke {
-                    normal_block: *normal_block as u32,
-                    normal_args_vals: normal_args_vals.clone(),
-                    exception_block: *exception_block as u32,
-                    exception_args_vals: exception_args_vals.clone(),
-                    has_ret_param: *has_ret_param,
-                },
-            };
-
             frames.push(BuilderFrame {
                 func_idx: f.func_idx as u32,
                 block_idx: f.block_idx as u32,
@@ -281,7 +255,7 @@ impl<'a, L: ValueLayout, Roots: RootStrategy<L>, Transport: RootTransport<L, Roo
                 active_prompts: f.active_prompts.clone(),
                 root_indices,
                 resume_arg_slot: if is_top { Some(resume_dest as u32) } else { None },
-                caller_resume,
+                caller_resume: f.resume.clone(),
             });
         }
 
@@ -332,7 +306,7 @@ impl<'a, L: ValueLayout, Roots: RootStrategy<L>, Transport: RootTransport<L, Roo
             let resume = if i == 0 {
                 bottom_resume.clone()
             } else {
-                captured_to_frame_resume(f.caller_resume)
+                f.caller_resume.clone()
             };
 
             let frame = InterpFrame {
@@ -373,36 +347,6 @@ impl<'a, L: ValueLayout, Roots: RootStrategy<L>, Transport: RootTransport<L, Roo
         bottom_resume: FrameResume,
     ) {
         self.splice_from_view_impl(view, args, bottom_resume)
-    }
-}
-
-/// Convert a `CapturedResume` (cont-heap restricted enum) back into a
-/// `FrameResume` for use as a live frame's resume field.
-fn captured_to_frame_resume(r: CapturedResume) -> FrameResume {
-    match r {
-        CapturedResume::TopLevel => FrameResume::TopLevel,
-        CapturedResume::FromCall { return_dest } => FrameResume::FromCall {
-            return_dest: return_dest.map(|d| d as usize),
-        },
-        CapturedResume::FromResume { return_block, return_param_dest } => {
-            FrameResume::FromResume {
-                return_block: return_block as usize,
-                return_param_dest: return_param_dest.map(|d| d as usize),
-            }
-        }
-        CapturedResume::FromInvoke {
-            normal_block,
-            normal_args_vals,
-            exception_block,
-            exception_args_vals,
-            has_ret_param,
-        } => FrameResume::FromInvoke {
-            normal_block: normal_block as usize,
-            normal_args_vals,
-            exception_block: exception_block as usize,
-            exception_args_vals,
-            has_ret_param,
-        },
     }
 }
 
@@ -544,23 +488,6 @@ impl<'a, L: ValueLayout, Roots: RootStrategy<L>, Transport: RootTransport<L, Roo
         }
         // Sync the new top frame from roots
         self.sync_top_from_roots();
-    }
-
-    fn build_captured_stack(
-        &self,
-        prompt_id: u32,
-        resume_dest: usize,
-    ) -> CapturedStackBuilder {
-        self.build_captured_stack_impl(prompt_id, resume_dest)
-    }
-
-    fn splice_from_view(
-        &mut self,
-        view: &ContinuationView<'_>,
-        args: &[u64],
-        bottom_resume: FrameResume,
-    ) {
-        self.splice_from_view_impl(view, args, bottom_resume);
     }
 
     fn needs_gc(&self) -> bool {
@@ -759,7 +686,7 @@ where
         args: &[u64],
     ) -> Result<InterpResult, InterpError> {
         let mut sr = InterpStackRuntime::new(self.roots, &self.module.functions);
-        sr.splice_from_view(view, args, FrameResume::TopLevel);
+        sr.splice_restore(view, args, FrameResume::TopLevel);
         self.run_loop(&mut sr)
     }
 

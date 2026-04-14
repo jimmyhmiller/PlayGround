@@ -293,7 +293,7 @@ impl<'a> RootSource for AllFramesRootSource<'a> {
 mod tests {
     use super::*;
     use dynexec::{
-        capture_continuation, read_continuation, BuilderFrame, CapturedResume,
+        capture_continuation, read_continuation, BuilderFrame, FrameResume,
         CapturedStackBuilder,
     };
     use dynobj::{init_header, write_varlen_count, Compact, ObjHeader};
@@ -380,7 +380,7 @@ mod tests {
                 active_prompts: vec![3],
                 root_indices: vec![0],
                 resume_arg_slot: None,
-                caller_resume: CapturedResume::TopLevel,
+                caller_resume: FrameResume::TopLevel,
             }],
         };
         let handle_before = capture_continuation::<Compact, _, TestPolicy>(

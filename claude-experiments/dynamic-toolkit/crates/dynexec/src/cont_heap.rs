@@ -102,23 +102,10 @@ impl ContinuationTypes {
     }
 }
 
-/// Resume information for a captured frame. A restricted subset of
-/// `FrameResume` — only the variants that appear in correctly-formed
-/// captures. Capturing a frame that sits under a `try/catch` (FromInvoke)
-/// is not supported and panics.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CapturedResume {
-    TopLevel,
-    FromCall { return_dest: Option<u32> },
-    FromResume { return_block: u32, return_param_dest: Option<u32> },
-    FromInvoke {
-        normal_block: u32,
-        normal_args_vals: Vec<u64>,
-        exception_block: u32,
-        exception_args_vals: Vec<u64>,
-        has_ret_param: bool,
-    },
-}
+// Captured frames' `caller_resume` uses `crate::FrameResume` directly —
+// the heap encoding narrows to u32 at the byte-packing layer in
+// `encode_caller_resume` / `decode_caller_resume` below.
+use crate::FrameResume;
 
 /// Describes a single frame to be captured. Construction is bottom-to-top
 /// (innermost frame last) so `builder.frames[0]` is the frame that owns
@@ -133,7 +120,7 @@ pub struct BuilderFrame {
     pub active_prompts: Vec<u32>,
     pub root_indices: Vec<u16>,
     pub resume_arg_slot: Option<u32>,
-    pub caller_resume: CapturedResume,
+    pub caller_resume: FrameResume,
 }
 
 /// Describes a full captured stack slice.
@@ -248,7 +235,7 @@ impl<'h> ContinuationView<'h> {
                     )
                 })
                 .collect();
-            if let CapturedResume::FromInvoke {
+            if let FrameResume::FromInvoke {
                 normal_args_vals,
                 exception_args_vals,
                 ..
@@ -289,7 +276,7 @@ pub struct FrameView<'a> {
     pub active_prompts: &'a [u32],
     pub root_indices: &'a [u16],
     pub resume_arg_slot: Option<u32>,
-    pub caller_resume: CapturedResume,
+    pub caller_resume: FrameResume,
     _rest: PhantomData<&'a ()>,
     _rest2: usize,
 }
@@ -306,48 +293,48 @@ const RESUME_KIND_FROM_INVOKE: u32 = 3;
 
 // ─── Metadata encoding helpers ─────────────────────────────────────
 
-/// Encode the fixed part of a CapturedResume. For simple variants
+/// Encode the fixed part of a FrameResume. For simple variants
 /// this is all that's needed. For FromInvoke the variable-length
 /// args are written separately by `encode_meta`.
-fn encode_caller_resume(r: &CapturedResume) -> (u32, u32, u32) {
+fn encode_caller_resume(r: &FrameResume) -> (u32, u32, u32) {
     match r {
-        CapturedResume::TopLevel => (RESUME_KIND_TOP_LEVEL, u32::MAX, u32::MAX),
-        CapturedResume::FromCall { return_dest } => (
+        FrameResume::TopLevel => (RESUME_KIND_TOP_LEVEL, u32::MAX, u32::MAX),
+        FrameResume::FromCall { return_dest } => (
             RESUME_KIND_FROM_CALL,
-            return_dest.unwrap_or(u32::MAX),
+            return_dest.map(|d| d as u32).unwrap_or(u32::MAX),
             u32::MAX,
         ),
-        CapturedResume::FromResume { return_block, return_param_dest } => (
+        FrameResume::FromResume { return_block, return_param_dest } => (
             RESUME_KIND_FROM_RESUME,
-            *return_block,
-            return_param_dest.unwrap_or(u32::MAX),
+            *return_block as u32,
+            return_param_dest.map(|d| d as u32).unwrap_or(u32::MAX),
         ),
-        CapturedResume::FromInvoke {
+        FrameResume::FromInvoke {
             normal_block,
             exception_block,
             has_ret_param,
             ..
         } => (
             RESUME_KIND_FROM_INVOKE,
-            *normal_block,
-            (*exception_block & 0x7FFF_FFFF) | ((*has_ret_param as u32) << 31),
+            *normal_block as u32,
+            ((*exception_block as u32) & 0x7FFF_FFFF) | ((*has_ret_param as u32) << 31),
         ),
     }
 }
 
-fn decode_caller_resume(kind: u32, a: u32, b: u32) -> CapturedResume {
+fn decode_caller_resume(kind: u32, a: u32, b: u32) -> FrameResume {
     match kind {
-        RESUME_KIND_TOP_LEVEL => CapturedResume::TopLevel,
-        RESUME_KIND_FROM_CALL => CapturedResume::FromCall {
-            return_dest: if a == u32::MAX { None } else { Some(a) },
+        RESUME_KIND_TOP_LEVEL => FrameResume::TopLevel,
+        RESUME_KIND_FROM_CALL => FrameResume::FromCall {
+            return_dest: if a == u32::MAX { None } else { Some(a as usize) },
         },
-        RESUME_KIND_FROM_RESUME => CapturedResume::FromResume {
-            return_block: a,
-            return_param_dest: if b == u32::MAX { None } else { Some(b) },
+        RESUME_KIND_FROM_RESUME => FrameResume::FromResume {
+            return_block: a as usize,
+            return_param_dest: if b == u32::MAX { None } else { Some(b as usize) },
         },
-        RESUME_KIND_FROM_INVOKE => CapturedResume::FromInvoke {
-            normal_block: a,
-            exception_block: b & 0x7FFF_FFFF,
+        RESUME_KIND_FROM_INVOKE => FrameResume::FromInvoke {
+            normal_block: a as usize,
+            exception_block: (b & 0x7FFF_FFFF) as usize,
             has_ret_param: (b >> 31) != 0,
             // args are decoded separately from the variable-length tail
             normal_args_vals: Vec::new(),
@@ -405,7 +392,7 @@ fn encoded_meta_len(builder: &CapturedStackBuilder) -> usize {
         len += (root_idx_bytes + 3) & !3;
         // FromInvoke: store normal_args_vals and exception_args_vals
         // as u64 arrays preceded by two u32 counts.
-        if let CapturedResume::FromInvoke {
+        if let FrameResume::FromInvoke {
             normal_args_vals,
             exception_args_vals,
             ..
@@ -476,7 +463,7 @@ fn encode_meta(builder: &CapturedStackBuilder, out: &mut [u8]) -> Vec<usize> {
         }
 
         // FromInvoke: write invoke args inline.
-        if let CapturedResume::FromInvoke {
+        if let FrameResume::FromInvoke {
             normal_args_vals,
             exception_args_vals,
             ..
@@ -790,7 +777,7 @@ mod tests {
                 active_prompts: vec![7],
                 root_indices: vec![],
                 resume_arg_slot: Some(2),
-                caller_resume: CapturedResume::FromCall { return_dest: Some(9) },
+                caller_resume: FrameResume::FromCall { return_dest: Some(9) },
             }],
         };
 
@@ -811,7 +798,7 @@ mod tests {
         assert_eq!(f.active_prompts, &[7u32]);
         assert_eq!(f.root_indices.len(), 0);
         assert_eq!(f.resume_arg_slot, Some(2));
-        assert_eq!(f.caller_resume, CapturedResume::FromCall { return_dest: Some(9) });
+        assert_eq!(f.caller_resume, FrameResume::FromCall { return_dest: Some(9) });
     }
 
     #[test]
@@ -828,7 +815,7 @@ mod tests {
                     active_prompts: vec![12],
                     root_indices: vec![0],
                     resume_arg_slot: None,
-                    caller_resume: CapturedResume::FromCall { return_dest: None },
+                    caller_resume: FrameResume::FromCall { return_dest: None },
                 },
                 BuilderFrame {
                     func_idx: 1,
@@ -838,7 +825,7 @@ mod tests {
                     active_prompts: vec![12, 99],
                     root_indices: vec![1, 2],
                     resume_arg_slot: None,
-                    caller_resume: CapturedResume::FromCall { return_dest: Some(5) },
+                    caller_resume: FrameResume::FromCall { return_dest: Some(5) },
                 },
                 BuilderFrame {
                     func_idx: 2,
@@ -848,7 +835,7 @@ mod tests {
                     active_prompts: vec![12, 99],
                     root_indices: vec![],
                     resume_arg_slot: Some(0),
-                    caller_resume: CapturedResume::FromResume {
+                    caller_resume: FrameResume::FromResume {
                         return_block: 4,
                         return_param_dest: Some(6),
                     },
@@ -869,7 +856,7 @@ mod tests {
         assert_eq!(f0.values, &[100u64, 200]);
         assert_eq!(f0.root_indices, &[0u16]);
         assert_eq!(f0.active_prompts, &[12u32]);
-        assert_eq!(f0.caller_resume, CapturedResume::FromCall { return_dest: None });
+        assert_eq!(f0.caller_resume, FrameResume::FromCall { return_dest: None });
 
         let f1 = view.frame(1);
         assert_eq!(f1.func_idx, 1);
@@ -878,7 +865,7 @@ mod tests {
         assert_eq!(f1.values, &[1u64, 2, 3]);
         assert_eq!(f1.active_prompts, &[12u32, 99]);
         assert_eq!(f1.root_indices, &[1u16, 2]);
-        assert_eq!(f1.caller_resume, CapturedResume::FromCall { return_dest: Some(5) });
+        assert_eq!(f1.caller_resume, FrameResume::FromCall { return_dest: Some(5) });
 
         let f2 = view.frame(2);
         assert_eq!(f2.func_idx, 2);
@@ -886,7 +873,7 @@ mod tests {
         assert_eq!(f2.resume_arg_slot, Some(0));
         assert_eq!(
             f2.caller_resume,
-            CapturedResume::FromResume { return_block: 4, return_param_dest: Some(6) }
+            FrameResume::FromResume { return_block: 4, return_param_dest: Some(6) }
         );
     }
 
@@ -945,7 +932,7 @@ mod tests {
                 active_prompts: vec![1],
                 root_indices: vec![0], // slot 0 is a root
                 resume_arg_slot: None,
-                caller_resume: CapturedResume::TopLevel,
+                caller_resume: FrameResume::TopLevel,
             }],
         };
 
@@ -1025,7 +1012,7 @@ mod tests {
                     active_prompts: vec![1],
                     root_indices: vec![],
                     resume_arg_slot: None,
-                    caller_resume: CapturedResume::TopLevel,
+                    caller_resume: FrameResume::TopLevel,
                 }],
             };
             let h = capture_continuation::<Compact, _, TestPolicy>(&ss, &types, &builder)
@@ -1098,7 +1085,7 @@ mod tests {
                 active_prompts: vec![1],
                 root_indices: vec![],
                 resume_arg_slot: None,
-                caller_resume: CapturedResume::TopLevel,
+                caller_resume: FrameResume::TopLevel,
             }],
         };
 
@@ -1112,7 +1099,7 @@ mod tests {
             let f = view.frame(0);
             assert_eq!(f.func_idx, 11);
             assert_eq!(f.values, &[7u64, 8, 9]);
-            assert_eq!(f.caller_resume, CapturedResume::TopLevel);
+            assert_eq!(f.caller_resume, FrameResume::TopLevel);
         }
     }
 }
