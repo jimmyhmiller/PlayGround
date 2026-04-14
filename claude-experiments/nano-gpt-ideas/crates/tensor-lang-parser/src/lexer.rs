@@ -4,6 +4,8 @@ pub enum Token {
     Fn,
     Let,
     DimKw,
+    For,
+    In,
 
     // Literals
     Ident(String),
@@ -20,8 +22,10 @@ pub enum Token {
     Colon,
     Eq,
     Star,
+    Slash,
     Plus,
     Minus,
+    DotDot,
 
     Eof,
 }
@@ -83,7 +87,13 @@ impl Lexer {
     fn read_number(&mut self) -> Token {
         let start = self.pos;
         while let Some(ch) = self.peek() {
-            if ch.is_ascii_digit() || ch == '.' {
+            if ch.is_ascii_digit() {
+                self.advance();
+            } else if ch == '.' {
+                // Stop at `..` (range operator) — don't eat the dot.
+                if self.input.get(self.pos + 1) == Some(&'.') {
+                    break;
+                }
                 self.advance();
             } else {
                 break;
@@ -107,6 +117,8 @@ impl Lexer {
             "fn" => Token::Fn,
             "let" => Token::Let,
             "dim" => Token::DimKw,
+            "for" => Token::For,
+            "in" => Token::In,
             _ => Token::Ident(s),
         }
     }
@@ -129,8 +141,14 @@ impl Lexer {
             ':' => { self.advance(); Token::Colon }
             '=' => { self.advance(); Token::Eq }
             '*' => { self.advance(); Token::Star }
+            '/' => { self.advance(); Token::Slash }
             '+' => { self.advance(); Token::Plus }
             '-' => { self.advance(); Token::Minus }
+            '.' if self.input.get(self.pos + 1) == Some(&'.') => {
+                self.advance();
+                self.advance();
+                Token::DotDot
+            }
             c if c.is_ascii_digit() => self.read_number(),
             c if c.is_alphabetic() || c == '_' => self.read_ident(),
             _ => panic!("unexpected character: {ch}"),

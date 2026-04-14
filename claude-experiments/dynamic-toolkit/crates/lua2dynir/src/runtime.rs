@@ -9,9 +9,9 @@
 use std::collections::HashMap;
 
 use dynalloc::Heap;
-use dynobj::{Compact, ObjHeader, TypeInfo, VarLenKind};
+use dynobj::{Compact, ObjHeader, TypeInfo};
 use dynobj::{
-    raw_data_mut, read_raw_bytes, read_type_info, read_value_field, read_varlen_bytes,
+    raw_data_mut, read_raw_bytes, read_type_id, read_value_field, read_varlen_bytes,
     read_varlen_value, write_value_field, write_varlen_value,
 };
 use dynvalue::{NanBox, TagScheme, Value};
@@ -70,41 +70,39 @@ fn is_truthy(v: u64) -> bool {
 
 // ── GC TypeInfo statics ──────────────────────────────────────
 
+// Numeric type ids used to discriminate objects at runtime.
+const TYPE_ID_CLOSURE: u16 = 0;
+const TYPE_ID_STRING: u16 = 1;
+const TYPE_ID_TABLE: u16 = 2;
+const TYPE_ID_ARRAY: u16 = 3;
+
 /// Closure: Compact header + func_id (raw u64) + varlen upvalues (GC-traced)
-static CLOSURE_TYPE: TypeInfo = TypeInfo {
-    header_size: Compact::SIZE as u16,
-    value_field_count: 0,
-    raw_byte_count: 8,          // func_id
-    varlen: VarLenKind::Values, // upvalues
-    align_log2: 3,
-};
+static CLOSURE_TYPE: TypeInfo = TypeInfo::for_header(Compact::SIZE)
+    .with_type_id(TYPE_ID_CLOSURE)
+    .with_raw_bytes(8)
+    .with_varlen_values(0);
 
 /// String: Compact header + varlen bytes (string content)
-static STRING_TYPE: TypeInfo = TypeInfo {
-    header_size: Compact::SIZE as u16,
-    value_field_count: 0,
-    raw_byte_count: 0,
-    varlen: VarLenKind::Bytes,
-    align_log2: 3,
-};
+static STRING_TYPE: TypeInfo = TypeInfo::for_header(Compact::SIZE)
+    .with_type_id(TYPE_ID_STRING)
+    .with_varlen_bytes(0);
 
 /// Table header: Compact header + 2 value fields (hash ptr, array ptr) + 32 raw bytes (metadata)
-static TABLE_TYPE: TypeInfo = TypeInfo {
-    header_size: Compact::SIZE as u16,
-    value_field_count: 2, // hash_entries_ptr, array_ptr
-    raw_byte_count: 32,   // hash_count, hash_cap, array_len, array_cap (4 × u64)
-    varlen: VarLenKind::None,
-    align_log2: 3,
-};
+static TABLE_TYPE: TypeInfo = TypeInfo::for_header(Compact::SIZE)
+    .with_type_id(TYPE_ID_TABLE)
+    .with_fields(2)
+    .with_raw_bytes(32);
 
 /// Array of GC-traced values (used for hash entries and array parts of tables)
-static ARRAY_TYPE: TypeInfo = TypeInfo {
-    header_size: Compact::SIZE as u16,
-    value_field_count: 0,
-    raw_byte_count: 0,
-    varlen: VarLenKind::Values,
-    align_log2: 3,
-};
+static ARRAY_TYPE: TypeInfo = TypeInfo::for_header(Compact::SIZE)
+    .with_type_id(TYPE_ID_ARRAY)
+    .with_varlen_values(0);
+
+/// Returns the TypeInfo table for the Lua runtime. Ordered by type_id so
+/// the GC can look up each TypeInfo by the id stored in an object's header.
+pub fn type_table() -> Vec<TypeInfo> {
+    vec![CLOSURE_TYPE, STRING_TYPE, TABLE_TYPE, ARRAY_TYPE]
+}
 
 // ── Object type discrimination ─────────────────────────────
 
@@ -117,15 +115,12 @@ enum ObjType {
 }
 
 fn obj_type_from_ptr(ptr: *const u8) -> ObjType {
-    let ti = unsafe { read_type_info(ptr, Compact::TYPE_INFO_OFFSET) };
-    if std::ptr::eq(ti, &CLOSURE_TYPE) {
-        ObjType::Closure
-    } else if std::ptr::eq(ti, &STRING_TYPE) {
-        ObjType::String
-    } else if std::ptr::eq(ti, &TABLE_TYPE) {
-        ObjType::Table
-    } else {
-        ObjType::Unknown
+    let tid = unsafe { read_type_id(ptr, Compact::TYPE_ID_OFFSET) };
+    match tid {
+        TYPE_ID_CLOSURE => ObjType::Closure,
+        TYPE_ID_STRING => ObjType::String,
+        TYPE_ID_TABLE => ObjType::Table,
+        _ => ObjType::Unknown,
     }
 }
 

@@ -5,7 +5,7 @@ use std::process::Command;
 use std::time::Instant;
 
 use tensor_lang_backend::wasm::WasmBackend;
-use tensor_lang_graph::{compile, nanogpt, Op};
+use tensor_lang_graph::{nanogpt, Op};
 
 fn project_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -77,10 +77,9 @@ impl Model {
         eprintln!("Compiling graph with symbolic seq_len...");
         let t_compile = Instant::now();
 
-        let program = nanogpt::generate_nanogpt_program_symbolic(
-            1, self.vocab_size, self.n_embd, self.n_head, self.n_layer,
+        let graph = nanogpt::compile_gpt2(
+            1, None, self.vocab_size, self.n_embd, self.n_head, self.n_layer,
         );
-        let graph = compile(&program);
 
         let backend = WasmBackend::default();
         let wasm_bytes = backend.emit_fused(&graph);

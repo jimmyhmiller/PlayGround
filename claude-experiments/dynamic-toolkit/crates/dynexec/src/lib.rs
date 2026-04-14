@@ -7,7 +7,7 @@ use dynvalue::{LowBit, NanBox, TagScheme};
 pub mod cont_heap;
 pub mod cont_ops;
 pub use cont_heap::{
-    capture_continuation, read_continuation, snapshot_to_builder, view_to_snapshot,
+    capture_continuation, read_continuation,
     BuilderFrame, CapturedResume, CapturedStackBuilder, ContinuationContext,
     ContinuationTypes, ContinuationView, FrameView, NoContinuations,
 };
@@ -37,22 +37,6 @@ pub struct FrameResumePoint {
     pub func_idx: usize,
     pub block_idx: usize,
     pub inst_idx: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CapturedFrame {
-    pub resume: FrameResumePoint,
-    pub values: Vec<u64>,
-    pub root_value_indices: Vec<usize>,
-    pub resume_arg_value_indices: Vec<usize>,
-    pub active_prompts: Vec<u32>,
-    pub caller_resume: CapturedCallerResume,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FrameSliceSnapshot {
-    pub prompt_id: u32,
-    pub frames: Vec<CapturedFrame>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -229,40 +213,6 @@ pub trait InterpFrameStore {
     /// Pop all frames above `depth`, keeping the frame at `depth` as the new top.
     fn pop_frames_above(&mut self, depth: usize);
 
-    // ── Continuation snapshot support ────────────────────────────
-    //
-    // These produce/consume FrameSliceSnapshots. The ContinuationStore
-    // manages the handles; these methods handle the frame-level work.
-
-    /// Capture frames from the prompt to the top of the stack as a snapshot.
-    /// `resume_dest` is the value slot in the top frame where resume args go.
-    fn capture_snapshot(&mut self, prompt: u32, resume_dest: usize) -> FrameSliceSnapshot;
-
-    /// Replace the current stack with frames from a snapshot.
-    ///
-    /// Legacy one-way stack-replacement semantics (no caller link). Kept
-    /// for the dynir reference interpreter and consumers that have not
-    /// migrated.
-    fn resume_snapshot(&mut self, snapshot: &FrameSliceSnapshot, args: &[u64]);
-
-    /// Splice the captured frames on top of the current stack. The bottom
-    /// captured frame's `resume` is overridden with `bottom_resume` so that,
-    /// when it eventually pops (via normal Ret or abort-to-prompt + handler
-    /// Ret), control returns to the resumer. This is the Chez-style
-    /// "caller link" path that makes delimited continuations composable and
-    /// multi-shot.
-    ///
-    /// Default implementation falls back to the legacy replacing form for
-    /// strategies that haven't implemented splice semantics yet.
-    fn resume_snapshot_splice(
-        &mut self,
-        snapshot: &FrameSliceSnapshot,
-        args: &[u64],
-        _bottom_resume: FrameResume,
-    ) {
-        self.resume_snapshot(snapshot, args);
-    }
-
     // ── Heap-backed continuation support ─────────────────────────
     //
     // These replace the snapshot-based API above for stores that
@@ -435,55 +385,6 @@ impl InterpFrameStore for VecFrameStore {
         }
     }
 
-    fn capture_snapshot(&mut self, prompt: u32, resume_dest: usize) -> FrameSliceSnapshot {
-        let start = self.stack.iter().rposition(|f| f.active_prompts.contains(&prompt))
-            .expect("capture: prompt not found");
-        let frame_count = self.stack.len() - start;
-        let mut frames = Vec::with_capacity(frame_count);
-        for (i, f) in self.stack[start..].iter().enumerate() {
-            let is_top = i + 1 == frame_count;
-            frames.push(CapturedFrame {
-                resume: FrameResumePoint {
-                    func_idx: f.func_idx,
-                    block_idx: f.block_idx,
-                    inst_idx: f.inst_idx,
-                },
-                values: f.vals.clone(),
-                root_value_indices: Vec::new(),
-                resume_arg_value_indices: if is_top { vec![resume_dest] } else { Vec::new() },
-                active_prompts: f.active_prompts.clone(),
-                caller_resume: f.resume.clone(),
-            });
-        }
-        FrameSliceSnapshot {
-            prompt_id: prompt,
-            frames,
-        }
-    }
-
-    fn resume_snapshot(&mut self, snapshot: &FrameSliceSnapshot, args: &[u64]) {
-        self.stack.clear();
-        let frame_count = snapshot.frames.len();
-        for (i, captured) in snapshot.frames.iter().enumerate() {
-            let mut vals = captured.values.clone();
-            if i + 1 == frame_count {
-                for (idx, &value_idx) in captured.resume_arg_value_indices.iter().enumerate() {
-                    if let Some(&arg) = args.get(idx) {
-                        vals[value_idx] = arg;
-                    }
-                }
-            }
-            self.stack.push(VecFrame {
-                func_idx: captured.resume.func_idx,
-                vals,
-                slots: Vec::new(),
-                block_idx: captured.resume.block_idx,
-                inst_idx: captured.resume.inst_idx,
-                resume: captured.caller_resume.clone(),
-                active_prompts: captured.active_prompts.clone(),
-            });
-        }
-    }
 }
 
 // ─── Value Layout ──────────────────────────────────────────

@@ -18,7 +18,7 @@ use regalloc::{
     machine_gp, machine_fp, is_float_type,
 };
 use dynexec::{
-    CallArgLocation, CallingConvention, CapturedCallerResume, CapturedFrame,
+    CallArgLocation, CallingConvention, CapturedCallerResume,
     CodegenConfig, DefaultCodegenConfig, FrameLayout, FrameResumePoint, FrameSlotAccess,
     FrameSlotBase, FrameStrategy, LayoutConfigDefaults, RootTransport, RootTransportKind,
     validate_codegen_config,
@@ -242,7 +242,10 @@ pub enum JitOutcome {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SuspendedJitFrame {
-    pub frame: CapturedFrame,
+    pub resume: FrameResumePoint,
+    pub values: Vec<u64>,
+    pub root_value_indices: Vec<usize>,
+    pub active_prompts: Vec<u32>,
     pub callee_caller_resume: CapturedCallerResume,
 }
 
@@ -329,14 +332,10 @@ extern "C" fn jit_push_suspended_frame(
     ACTIVE_SUSPENDED_JIT_FRAMES.with(|cell| {
         let callee_caller_resume = record.callee_caller_resume.materialize(&values);
         cell.borrow_mut().push(SuspendedJitFrame {
-            frame: CapturedFrame {
-                resume: record.resume,
-                values,
-                root_value_indices: record.root_value_indices.clone(),
-                resume_arg_value_indices: Vec::new(),
-                active_prompts: record.active_prompts.clone(),
-                caller_resume: CapturedCallerResume::TopLevel,
-            },
+            resume: record.resume,
+            values,
+            root_value_indices: record.root_value_indices.clone(),
+            active_prompts: record.active_prompts.clone(),
             callee_caller_resume,
         });
     });
@@ -533,21 +532,24 @@ impl JitFunction {
         unsafe { call_jit_outcome(ptr, &args, self.max_deopt_live_values) }
     }
 
-    pub fn call_captured_frame_resume_outcome(
+    /// View-based resume entry point. Takes the resume point and frame
+    /// values directly.
+    pub fn call_view_resume_outcome(
         &self,
-        frame: &CapturedFrame,
+        resume: &FrameResumePoint,
+        values: &[u64],
         resume_args: &[u64],
     ) -> Option<JitOutcome> {
         if let Some(record) = self.frame_reify_records.iter().find(|record| {
             record.kind == FrameReifyKind::CaptureSlice
                 && record.native_resume_offset.is_some()
-                && record.resume == frame.resume
+                && record.resume == *resume
         }) {
-            return Some(self.call_resume_outcome(record, frame.values.as_ptr(), resume_args));
+            return Some(self.call_resume_outcome(record, values.as_ptr(), resume_args));
         }
 
         let suspend = self.suspend_records.iter().find(|record| {
-            record.native_resume_offset.is_some() && record.resume == frame.resume
+            record.native_resume_offset.is_some() && record.resume == *resume
         })?;
         let ptr = unsafe {
             self.as_ptr()
@@ -558,7 +560,7 @@ impl JitFunction {
         } else {
             resume_args.as_ptr()
         };
-        let args = [frame.values.as_ptr() as u64, args_ptr as u64, resume_args.len() as u64];
+        let args = [values.as_ptr() as u64, args_ptr as u64, resume_args.len() as u64];
         Some(unsafe { call_jit_outcome(ptr, &args, self.max_deopt_live_values) })
     }
 }
@@ -1111,28 +1113,31 @@ impl JitModule {
         unsafe { call_jit_outcome(ptr, &args, self.max_deopt_live_values) }
     }
 
-    pub fn call_captured_frame_resume_outcome(
+    /// View-based resume entry point. Takes the resume point and frame
+    /// values directly.
+    pub fn call_view_resume_outcome(
         &self,
-        frame: &CapturedFrame,
+        resume: &FrameResumePoint,
+        values: &[u64],
         resume_args: &[u64],
     ) -> Option<JitOutcome> {
-        let func_idx = frame.resume.func_idx;
+        let func_idx = resume.func_idx;
         if let Some(record) = self.function_frame_reify_records[func_idx].iter().find(|record| {
             record.kind == FrameReifyKind::CaptureSlice
                 && record.native_resume_offset.is_some()
-                && record.resume == frame.resume
+                && record.resume == *resume
         }) {
             return Some(self.call_resume_outcome(
                 func_idx,
                 record,
-                frame.values.as_ptr(),
+                values.as_ptr(),
                 resume_args,
             ));
         }
 
         let suspend = self.function_suspend_records[func_idx]
             .iter()
-            .find(|record| record.native_resume_offset.is_some() && record.resume == frame.resume)?;
+            .find(|record| record.native_resume_offset.is_some() && record.resume == *resume)?;
         let ptr = unsafe {
             self.memory.base_ptr().add(
                 self.function_entry_offsets[func_idx]
@@ -1144,20 +1149,22 @@ impl JitModule {
         } else {
             resume_args.as_ptr()
         };
-        let args = [frame.values.as_ptr() as u64, args_ptr as u64, resume_args.len() as u64];
+        let args = [values.as_ptr() as u64, args_ptr as u64, resume_args.len() as u64];
         Some(unsafe { call_jit_outcome(ptr, &args, self.max_deopt_live_values) })
     }
 
-    pub fn call_invoke_frame_resume_outcome(
+    /// View-based invoke-resume entry point.
+    pub fn call_view_invoke_resume_outcome(
         &self,
-        frame: &CapturedFrame,
+        resume: &FrameResumePoint,
+        values: &[u64],
         is_exception: bool,
         resume_args: &[u64],
     ) -> Option<JitOutcome> {
-        let func_idx = frame.resume.func_idx;
+        let func_idx = resume.func_idx;
         let suspend = self.function_suspend_records[func_idx]
             .iter()
-            .find(|record| record.resume == frame.resume)?;
+            .find(|record| record.resume == *resume)?;
         let offset = if is_exception {
             suspend.native_exception_resume_offset?
         } else {
@@ -1173,7 +1180,7 @@ impl JitModule {
         } else {
             resume_args.as_ptr()
         };
-        let args = [frame.values.as_ptr() as u64, args_ptr as u64, resume_args.len() as u64];
+        let args = [values.as_ptr() as u64, args_ptr as u64, resume_args.len() as u64];
         Some(unsafe { call_jit_outcome(ptr, &args, self.max_deopt_live_values) })
     }
 

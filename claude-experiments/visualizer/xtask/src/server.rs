@@ -13,6 +13,8 @@ use notify::{EventKind, RecursiveMode, Watcher};
 use tokio::sync::broadcast;
 use tokio_stream::wrappers::BroadcastStream;
 use tower_http::services::ServeDir;
+use tower_http::set_header::SetResponseHeaderLayer;
+use axum::http::HeaderValue;
 
 #[derive(Clone, Debug)]
 struct SceneUpdate {
@@ -40,6 +42,10 @@ pub async fn run(web_dir: PathBuf, scenes_dir: PathBuf, port: u16) {
         .route("/scenes", get(list_scenes))
         .route("/scenes/:name", get(get_scene))
         .fallback_service(ServeDir::new(&web_dir))
+        .layer(SetResponseHeaderLayer::overriding(
+            axum::http::header::CACHE_CONTROL,
+            HeaderValue::from_static("no-cache, no-store, must-revalidate"),
+        ))
         .with_state(state);
 
     let addr = ("127.0.0.1", port);

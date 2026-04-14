@@ -245,23 +245,68 @@ impl Compiler {
 
     fn compile_program(mut self, items: &[Item]) -> Graph {
         // First pass: collect function definitions and dim declarations
+        // (recursing into for-loop bodies for fns/dims as well).
+        self.collect_decls(items);
+
+        // Second pass: compile top-level let bindings, unrolling for-loops.
+        self.compile_items(items);
+
+        self.graph
+    }
+
+    fn collect_decls(&mut self, items: &[Item]) {
         for item in items {
             match item {
                 Item::FnDef(f) => { self.fns.insert(f.name.clone(), f.clone()); }
                 Item::DimDecl(name) => { self.dim_params.insert(name.clone()); }
+                Item::ForLoop { body, .. } => self.collect_decls(body),
                 _ => {}
             }
         }
+    }
 
-        // Second pass: compile top-level let bindings
+    fn compile_items(&mut self, items: &[Item]) {
         for item in items {
-            if let Item::Let(binding) = item {
-                let id = self.compile_expr(&binding.value);
-                self.env.insert(binding.name.clone(), id);
+            match item {
+                Item::Let(binding) => {
+                    let id = self.compile_expr(&binding.value);
+                    self.env.insert(binding.name.clone(), id);
+                }
+                Item::ForLoop { var, start, end, body } => {
+                    let start_val = self.eval_concrete_int(start);
+                    let end_val = self.eval_concrete_int(end);
+                    let had_prev = self.dim_values.contains_key(var);
+                    let prev = self.dim_values.get(var).copied();
+                    for i in start_val..end_val {
+                        // Expose loop var as both a dim value (for shapes) and
+                        // a constant (for use in runtime expressions).
+                        self.dim_values.insert(var.clone(), i);
+                        self.constants.insert(var.clone(), i as f64);
+                        self.compile_items(body);
+                    }
+                    // Restore prior binding (if any).
+                    if had_prev {
+                        self.dim_values.insert(var.clone(), prev.unwrap());
+                        self.constants.insert(var.clone(), prev.unwrap() as f64);
+                    } else {
+                        self.dim_values.remove(var);
+                        self.constants.remove(var);
+                    }
+                }
+                // FnDef and DimDecl already handled in collect_decls.
+                Item::FnDef(_) | Item::DimDecl(_) => {}
             }
         }
+    }
 
-        self.graph
+    /// Evaluate a for-loop bound. Must resolve to a concrete integer:
+    /// either a number literal, a declared dim with a known value, or an
+    /// arithmetic expression over those.
+    fn eval_concrete_int(&self, expr: &Expr) -> usize {
+        let dim = self.compile_dim(expr);
+        dim.as_usize().unwrap_or_else(|| {
+            panic!("for-loop bound must be a concrete integer, got {dim:?}")
+        })
     }
 
     fn compile_expr(&mut self, expr: &Expr) -> NodeId {
@@ -293,6 +338,10 @@ impl Compiler {
                     BinOpKind::Sub => {
                         let neg = self.graph.add_node(Op::Neg, vec![r]);
                         self.graph.add_node(Op::Add, vec![l, neg])
+                    }
+                    BinOpKind::Div => {
+                        let rec = self.graph.add_node(Op::Recip, vec![r]);
+                        self.graph.add_node(Op::Mul, vec![l, rec])
                     }
                 }
             }
@@ -595,6 +644,7 @@ impl Compiler {
                 let r = self.compile_dim(rhs);
                 let dim = match op {
                     BinOpKind::Mul => Dim::Mul(Box::new(l), Box::new(r)),
+                    BinOpKind::Div => Dim::Div(Box::new(l), Box::new(r)),
                     BinOpKind::Add => Dim::Add(Box::new(l), Box::new(r)),
                     BinOpKind::Sub => Dim::Sub(Box::new(l), Box::new(r)),
                 };
@@ -910,8 +960,7 @@ mod tests {
     #[test]
     fn test_nanogpt_compiles() {
         // Tiny config: B=1, T=4, vocab=8, d=16, heads=2, layers=2
-        let program = crate::nanogpt::generate_nanogpt_program(1, 4, 8, 16, 2, 2);
-        let g = compile(&program);
+        let g = crate::nanogpt::compile_gpt2(1, Some(4), 8, 16, 2, 2);
         // Last node should be the logits with shape [1, 4, 8] (B, T, vocab)
         let last = g.nodes.last().unwrap();
         assert_eq!(last.shape, dims(&[1, 4, 8]));
@@ -974,12 +1023,11 @@ mod tests {
     }
 
     #[test]
-    fn test_symbolic_nanogpt_compiles() {
-        // Tiny config with symbolic T
-        let program = crate::nanogpt::generate_nanogpt_program_symbolic(1, 8, 16, 2, 2);
-        let g = compile(&program);
+    fn test_static_gpt2_symbolic_t() {
+        // Leave T symbolic; all other dims concrete. Final shape should
+        // preserve T as a parameter.
+        let g = crate::nanogpt::compile_gpt2(1, None, 8, 16, 2, 2);
         let last = g.nodes.last().unwrap();
-        // Output shape: [1, T, 8]
         assert_eq!(last.shape.len(), 3);
         assert_eq!(last.shape[0], Dim::Lit(1));
         assert_eq!(last.shape[1], Dim::Param("T".into()));

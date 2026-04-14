@@ -28,8 +28,25 @@ impl Parser {
                 let name = self.expect_ident();
                 Item::DimDecl(name)
             }
-            _ => panic!("expected 'fn', 'let', or 'dim', got {:?}", self.peek()),
+            Token::For => self.parse_for(),
+            _ => panic!("expected 'fn', 'let', 'dim', or 'for', got {:?}", self.peek()),
         }
+    }
+
+    fn parse_for(&mut self) -> Item {
+        self.expect(Token::For);
+        let var = self.expect_ident();
+        self.expect(Token::In);
+        let start = self.parse_expr();
+        self.expect(Token::DotDot);
+        let end = self.parse_expr();
+        self.expect(Token::LBrace);
+        let mut body = Vec::new();
+        while self.peek() != Token::RBrace {
+            body.push(self.parse_item());
+        }
+        self.expect(Token::RBrace);
+        Item::ForLoop { var, start, end, body }
     }
 
     fn parse_fn_def(&mut self) -> FnDef {
@@ -95,6 +112,7 @@ impl Parser {
             Token::Plus  => Some((BinOpKind::Add, 1, 2)),
             Token::Minus => Some((BinOpKind::Sub, 1, 2)),
             Token::Star  => Some((BinOpKind::Mul, 3, 4)),
+            Token::Slash => Some((BinOpKind::Div, 3, 4)),
             _ => None,
         }
     }

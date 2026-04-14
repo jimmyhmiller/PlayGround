@@ -73,14 +73,17 @@ fn run_wasm(wasm_bytes: &[u8], inputs: &[&[f32]], output_size: usize) -> Vec<f32
 
 fn check_wasm(program: &str, input_data: HashMap<String, ArrayD<f32>>, atol: f32) {
     let graph = compile(program);
+    check_wasm_graph(&graph, input_data, atol);
+}
 
+fn check_wasm_graph(graph: &tensor_lang_graph::Graph, input_data: HashMap<String, ArrayD<f32>>, atol: f32) {
     // Run oracle
-    let oracle_results = eval_with_inputs(&graph, &input_data);
+    let oracle_results = eval_with_inputs(graph, &input_data);
     let oracle_output = oracle_results.last().unwrap();
 
     // Emit WASM
     let backend = WasmBackend::default();
-    let wasm_bytes = backend.emit_fused(&graph);
+    let wasm_bytes = backend.emit_fused(graph);
 
     // Compute output size
     let last_node = &graph.nodes[graph.nodes.len() - 1];
@@ -454,10 +457,9 @@ fn test_wasm_nanogpt_tiny() {
     let n_head = 2;
     let n_layer = 1;
 
-    let program = tensor_lang_graph::nanogpt::generate_nanogpt_program(
-        batch, seq_len, vocab_size, n_embd, n_head, n_layer,
+    let graph = tensor_lang_graph::nanogpt::compile_gpt2(
+        batch, Some(seq_len), vocab_size, n_embd, n_head, n_layer,
     );
-    let graph = compile(&program);
 
     let mut inputs = HashMap::new();
     for node in &graph.nodes {
@@ -473,7 +475,7 @@ fn test_wasm_nanogpt_tiny() {
         }
     }
 
-    check_wasm(&program, inputs, 1e-2);
+    check_wasm_graph(&graph, inputs, 1e-2);
 }
 
 #[test]

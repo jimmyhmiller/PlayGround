@@ -4,7 +4,7 @@ use tensor_lang_backend::runtime::WasmRuntime;
 use tensor_lang_backend::wasm::WasmBackend;
 use tensor_lang_gpu::plan;
 use tensor_lang_gpu::runtime::GpuRuntime;
-use tensor_lang_graph::{compile, nanogpt, Op};
+use tensor_lang_graph::{nanogpt, Op};
 
 use std::path::PathBuf;
 
@@ -52,8 +52,7 @@ fn test_symbolic_vs_concrete_wasm() {
     let seq_len = 4;
 
     // Concrete
-    let prog_c = nanogpt::generate_nanogpt_program(1, seq_len, 50257, 768, 12, 1);
-    let graph_c = compile(&prog_c);
+    let graph_c = nanogpt::compile_gpt2(1, Some(seq_len), 50257, 768, 12, 1);
     let inputs_c = build_inputs(&graph_c, &weights, seq_len);
     let slices_c: Vec<&[f32]> = inputs_c.iter().map(|v| v.as_slice()).collect();
     let out_size = seq_len * 50257;
@@ -62,8 +61,7 @@ fn test_symbolic_vs_concrete_wasm() {
     let out_c = rt_c.run(&slices_c, out_size);
 
     // Symbolic
-    let prog_s = nanogpt::generate_nanogpt_program_symbolic(1, 50257, 768, 12, 1);
-    let graph_s = compile(&prog_s);
+    let graph_s = nanogpt::compile_gpt2(1, None, 50257, 768, 12, 1);
     let inputs_s = build_inputs(&graph_s, &weights, seq_len);
     let slices_s: Vec<&[f32]> = inputs_s.iter().map(|v| v.as_slice()).collect();
     let wasm_s = WasmBackend::default().emit_fused(&graph_s);
@@ -82,8 +80,7 @@ fn test_symbolic_vs_concrete_gpu() {
     let seq_len = 4;
 
     // Concrete
-    let prog_c = nanogpt::generate_nanogpt_program(1, seq_len, 50257, 768, 12, 1);
-    let graph_c = compile(&prog_c);
+    let graph_c = nanogpt::compile_gpt2(1, Some(seq_len), 50257, 768, 12, 1);
     let inputs_c = build_inputs(&graph_c, &weights, seq_len);
     let slices_c: Vec<&[f32]> = inputs_c.iter().map(|v| v.as_slice()).collect();
     let out_size = seq_len * 50257;
@@ -92,8 +89,7 @@ fn test_symbolic_vs_concrete_gpu() {
     let out_c = gpu_rt.run(&plan_c, &slices_c, out_size);
 
     // Symbolic
-    let prog_s = nanogpt::generate_nanogpt_program_symbolic(1, 50257, 768, 12, 1);
-    let graph_s = compile(&prog_s);
+    let graph_s = nanogpt::compile_gpt2(1, None, 50257, 768, 12, 1);
     let inputs_s = build_inputs(&graph_s, &weights, seq_len);
     let slices_s: Vec<&[f32]> = inputs_s.iter().map(|v| v.as_slice()).collect();
     let plan_s = plan::build_plan(&graph_s);

@@ -107,16 +107,16 @@ fn full_header_size() {
 
 #[test]
 fn compact_header_stores_type_info() {
-    let info = TypeInfo::for_header(Compact::SIZE).with_fields(2);
-    let header = Compact::new(&info as *const TypeInfo);
-    assert_eq!(header.type_info(), &info as *const TypeInfo);
+    let _info = TypeInfo::for_header(Compact::SIZE).with_fields(2);
+    let header = Compact::new(7);
+    assert_eq!(header.type_id(), 7);
 }
 
 #[test]
 fn full_header_stores_type_info_and_gc_word() {
-    let info = TypeInfo::for_header(Full::SIZE).with_fields(1);
-    let mut header = Full::new(&info as *const TypeInfo);
-    assert_eq!(header.type_info(), &info as *const TypeInfo);
+    let _info = TypeInfo::for_header(Full::SIZE).with_fields(1);
+    let mut header = Full::new(7);
+    assert_eq!(header.type_id(), 7);
     assert_eq!(header.gc_word(), 0);
 
     header.set_gc_word(0xDEAD_BEEF);
@@ -148,7 +148,7 @@ fn write_read_value_fields_lowbit() {
 
     let obj = alloc_obj(&INFO, 0);
     unsafe {
-        init_header::<Compact>(obj, &INFO as *const TypeInfo);
+        init_header::<Compact>(obj, 0);
 
         let v0 = Value::<S>::tagged(1, 42);
         let v1 = Value::<S>::tagged(2, 99);
@@ -162,7 +162,7 @@ fn write_read_value_fields_lowbit() {
 
         // Verify header
         let header = core::ptr::read(obj as *const Compact);
-        assert_eq!(header.type_info(), &INFO as *const TypeInfo);
+        assert_eq!(header.type_id(), 0);
 
         dealloc_obj(obj, &INFO, 0);
     }
@@ -175,7 +175,7 @@ fn write_read_value_fields_nanbox() {
 
     let obj = alloc_obj(&INFO, 0);
     unsafe {
-        init_header::<Full>(obj, &INFO as *const TypeInfo);
+        init_header::<Full>(obj, 0);
 
         let v0 = Value::<S>::tagged(0, 0xCAFE);
         let v1 = Value::<S>::tagged(1, 123);
@@ -203,7 +203,7 @@ fn raw_bytes_read_write() {
 
     let obj = alloc_obj(&INFO, 0);
     unsafe {
-        init_header::<Compact>(obj, &INFO as *const TypeInfo);
+        init_header::<Compact>(obj, 0);
 
         let data = raw_data_mut(obj, &INFO);
         data.copy_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]);
@@ -223,7 +223,7 @@ fn varlen_values_read_write() {
     let n = 5usize;
     let obj = alloc_obj(&INFO, n);
     unsafe {
-        init_header::<Compact>(obj, &INFO as *const TypeInfo);
+        init_header::<Compact>(obj, 0);
         write_varlen_count(obj, &INFO, n);
 
         for i in 0..n {
@@ -250,7 +250,7 @@ fn varlen_bytes_read_write() {
     let n = data.len();
     let obj = alloc_obj(&INFO, n);
     unsafe {
-        init_header::<Full>(obj, &INFO as *const TypeInfo);
+        init_header::<Full>(obj, 0);
         write_varlen_count(obj, &INFO, n);
 
         // Write bytes manually
@@ -273,7 +273,7 @@ fn scan_fixed_fields() {
 
     let obj = alloc_obj(&INFO, 0);
     unsafe {
-        init_header::<Compact>(obj, &INFO as *const TypeInfo);
+        init_header::<Compact>(obj, 0);
 
         for i in 0..3u16 {
             let v = Value::<S>::tagged(0, (i as u64 + 1) * 100);
@@ -304,7 +304,7 @@ fn scan_varlen_values() {
     let varlen_n = 4usize;
     let obj = alloc_obj(&INFO, varlen_n);
     unsafe {
-        init_header::<Compact>(obj, &INFO as *const TypeInfo);
+        init_header::<Compact>(obj, 0);
 
         // Write the fixed field
         let fixed_val = Value::<S>::tagged(2, 999);
@@ -351,7 +351,7 @@ fn scan_bytes_object_skips_bytes() {
     let varlen_n = 10usize;
     let obj = alloc_obj(&INFO, varlen_n);
     unsafe {
-        init_header::<Compact>(obj, &INFO as *const TypeInfo);
+        init_header::<Compact>(obj, 0);
 
         let fixed_val = Value::<S>::tagged(3, 42);
         write_value_field(obj, &INFO, 0, fixed_val);
@@ -378,7 +378,7 @@ fn scan_no_fields() {
 
     let obj = alloc_obj(&INFO, 0);
     unsafe {
-        init_header::<Full>(obj, &INFO as *const TypeInfo);
+        init_header::<Full>(obj, 0);
 
         let mut count = 0usize;
         scan_object(obj, &INFO, |_slot| {
@@ -400,7 +400,7 @@ fn scan_can_update_slots() {
 
     let obj = alloc_obj(&INFO, 0);
     unsafe {
-        init_header::<Compact>(obj, &INFO as *const TypeInfo);
+        init_header::<Compact>(obj, 0);
         write_value_field(obj, &INFO, 0, Value::<S>::tagged(0, 100));
         write_value_field(obj, &INFO, 1, Value::<S>::tagged(0, 200));
 
@@ -603,16 +603,16 @@ fn gc_header_size() {
 
 #[test]
 fn gc_header_type_info() {
-    let info = TypeInfo::for_header(GcHeader::SIZE).with_fields(1);
-    let header = GcHeader::new(&info as *const TypeInfo);
-    assert_eq!(header.type_info(), &info as *const TypeInfo);
+    let _info = TypeInfo::for_header(GcHeader::SIZE).with_fields(1);
+    let header = GcHeader::new(11);
+    assert_eq!(header.type_id(), 11);
     assert_eq!(header.gc_bits(), 0);
 }
 
 #[test]
 fn gc_header_bitfield_set_get() {
     let info = TypeInfo::for_header(GcHeader::SIZE);
-    let mut header = GcHeader::new(&info as *const TypeInfo);
+    let mut header = GcHeader::new(0);
 
     // mark: bits [0..2] — 2 bits, max value 3
     header.set_mark(3);
@@ -634,7 +634,7 @@ fn gc_header_bitfield_set_get() {
 #[test]
 fn gc_header_bitfield_independence() {
     let info = TypeInfo::for_header(GcHeader::SIZE);
-    let mut header = GcHeader::new(&info as *const TypeInfo);
+    let mut header = GcHeader::new(0);
 
     // Set all sub-fields
     header.set_mark(2);
@@ -666,7 +666,7 @@ fn gc_header_bitfield_independence() {
 #[test]
 fn gc_header_whole_word_accessor() {
     let info = TypeInfo::for_header(GcHeader::SIZE);
-    let mut header = GcHeader::new(&info as *const TypeInfo);
+    let mut header = GcHeader::new(0);
 
     header.set_gc_bits(0xDEAD_BEEF_CAFE_BABE);
     assert_eq!(header.gc_bits(), 0xDEAD_BEEF_CAFE_BABE);
@@ -695,9 +695,9 @@ fn gc_header_with_plain_field() {
 
     assert_eq!(RichHeader::SIZE, 24); // ptr(8) + u64(8) + u32(4) + padding(4)
 
-    let info = TypeInfo::for_header(RichHeader::SIZE);
-    let mut header = RichHeader::new(&info as *const TypeInfo);
-    assert_eq!(header.type_info(), &info as *const TypeInfo);
+    let _info = TypeInfo::for_header(RichHeader::SIZE);
+    let mut header = RichHeader::new(13);
+    assert_eq!(header.type_id(), 13);
     assert_eq!(header.gc_bits(), 0);
     assert_eq!(header.identity_hash(), 0);
 
@@ -710,39 +710,39 @@ fn gc_header_with_plain_field() {
     assert_eq!(header.identity_hash(), 0xCAFE);
 }
 
-// ─── TYPE_INFO_OFFSET ────────────────────────────────────────────────
+// ─── TYPE_ID_OFFSET ──────────────────────────────────────────────────
 
 #[test]
-fn compact_type_info_offset() {
-    assert_eq!(Compact::TYPE_INFO_OFFSET, 0);
+fn compact_type_id_offset() {
+    assert_eq!(Compact::TYPE_ID_OFFSET, 0);
 }
 
 #[test]
-fn full_type_info_offset() {
-    // Full has gc_word (u64) first, then type_info
-    assert_eq!(Full::TYPE_INFO_OFFSET, 8);
+fn full_type_id_offset() {
+    // Full has gc_word (u64) first, then type_id
+    assert_eq!(Full::TYPE_ID_OFFSET, 8);
 }
 
 #[test]
-fn read_type_info_compact() {
+fn read_type_id_compact() {
     static INFO: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_fields(2);
     let obj = alloc_obj(&INFO, 0);
     unsafe {
-        init_header::<Compact>(obj, &INFO as *const TypeInfo);
-        let recovered = read_type_info(obj, Compact::TYPE_INFO_OFFSET);
-        assert_eq!(recovered as *const TypeInfo, &INFO as *const TypeInfo);
+        init_header::<Compact>(obj, 42);
+        let recovered = read_type_id(obj, Compact::TYPE_ID_OFFSET);
+        assert_eq!(recovered, 42);
         dealloc_obj(obj, &INFO, 0);
     }
 }
 
 #[test]
-fn read_type_info_full() {
+fn read_type_id_full() {
     static INFO: TypeInfo = TypeInfo::for_header(Full::SIZE).with_fields(1);
     let obj = alloc_obj(&INFO, 0);
     unsafe {
-        init_header::<Full>(obj, &INFO as *const TypeInfo);
-        let recovered = read_type_info(obj, Full::TYPE_INFO_OFFSET);
-        assert_eq!(recovered as *const TypeInfo, &INFO as *const TypeInfo);
+        init_header::<Full>(obj, 42);
+        let recovered = read_type_id(obj, Full::TYPE_ID_OFFSET);
+        assert_eq!(recovered, 42);
         dealloc_obj(obj, &INFO, 0);
     }
 }

@@ -4,6 +4,14 @@ pub enum Item {
     Let(LetBinding),
     /// Declare a symbolic dimension parameter: `dim T`
     DimDecl(String),
+    /// Loop unrolled at compile time: `for i in 0..N { ... }`.
+    /// `start` and `end` must evaluate to concrete integers.
+    ForLoop {
+        var: String,
+        start: Expr,
+        end: Expr,
+        body: Vec<Item>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -50,6 +58,7 @@ pub enum Arg {
 #[derive(Debug, Clone, PartialEq)]
 pub enum BinOpKind {
     Mul,
+    Div,
     Add,
     Sub,
 }

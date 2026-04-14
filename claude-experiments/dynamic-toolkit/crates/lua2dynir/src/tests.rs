@@ -495,7 +495,7 @@ fn run_lua_inner(source: &str, heap_size: usize, opt: &dynir::opt::OptConfig, us
 
     let heap_size = gc_heap_size.unwrap_or(64 * 1024 * 1024);
     let gc_enabled = gc_heap_size.is_some();
-    let roots = MutatorRootManager::<NanBoxPtrPolicy>::new(heap_size)
+    let roots = MutatorRootManager::<NanBoxPtrPolicy>::new(heap_size, crate::runtime::type_table())
         .with_gc_threshold(if gc_enabled { 0.75 } else { f64::INFINITY });
     let mut rt = LuaRuntime::new(roots.heap(), &chunk.main.constants);
     rt.constants = global_strings.clone();
@@ -1668,7 +1668,7 @@ fn test_gc_multi_closure_stress() {
         .map(|p| (p.num_params, p.is_vararg))
         .collect();
 
-    let roots = MutatorRootManager::<NanBoxPtrPolicy>::new(heap_size)
+    let roots = MutatorRootManager::<NanBoxPtrPolicy>::new(heap_size, crate::runtime::type_table())
         .with_gc_threshold(0.75);
     let mut rt = LuaRuntime::new(roots.heap(), &chunk.main.constants);
     rt.constants = global_strings.clone();
@@ -1854,7 +1854,7 @@ fn bench_table_heavy_jit() {
     for _ in 0..iterations {
         // Fresh runtime state each iteration
         let heap_size = 64 * 1024 * 1024;
-        let roots = MutatorRootManager::<NanBoxPtrPolicy>::new(heap_size)
+        let roots = MutatorRootManager::<NanBoxPtrPolicy>::new(heap_size, crate::runtime::type_table())
             .with_gc_threshold(0.75);
         let mut rt = LuaRuntime::new(roots.heap(), &chunk.main.constants);
         rt.constants = global_strings.clone();

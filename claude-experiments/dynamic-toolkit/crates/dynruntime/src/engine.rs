@@ -297,14 +297,14 @@ where
                 Ok(ExecutionResult::Value(handle))
             }
             JitExecutionResult::ResumeSlice { handle, args, .. } => {
-                // Cross-mode: JIT captured, interpreter resumes
-                let snapshot = self
+                // Cross-mode: JIT captured, interpreter resumes.
+                let view = self
                     .jit_conts
                     .read(handle)
                     .map_err(|e| ExecutionError::Jit(JitFrameControlError::FrameSlice(e)))?;
                 let result = self
                     .interpreter
-                    .resume_snapshot(snapshot, &args)?;
+                    .resume_view(&view, &args)?;
                 Ok(interp_to_result(result))
             }
             JitExecutionResult::AbortToPrompt { .. } => Err(ExecutionError::CompilationFailed(

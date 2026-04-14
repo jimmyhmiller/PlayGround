@@ -182,10 +182,12 @@ impl SceneDemo {
     }
 
     pub fn draw(&self, scene: &mut Scene, tw: &Tweakables) {
-        self.graph.draw(scene, tw);
+        let empty = std::collections::HashSet::new();
+        let hover = crate::scene::HoverCtx { hovered: None, connected: &empty };
+        self.graph.draw(scene, tw, &hover);
         // Draw entries collection on top
         for child in &self.entries.group.children {
-            child.draw(scene, tw, 1.0);
+            child.draw(scene, tw, 1.0, &hover);
         }
     }
 }

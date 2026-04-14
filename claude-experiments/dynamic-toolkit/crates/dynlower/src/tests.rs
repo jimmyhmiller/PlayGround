@@ -170,7 +170,11 @@ fn resume_slice_returns_frame_reify_outcome() {
     let entry = b.entry_block();
     let slice = b.block_param(entry, 0);
     let value = b.block_param(entry, 1);
-    b.resume_slice(slice, &[value]);
+    let ret_bb = b.create_block(&[Type::I64]);
+    b.resume_slice(slice, &[value], ret_bb, &[]);
+    b.switch_to_block(ret_bb);
+    let ret_val = b.block_param(ret_bb, 0);
+    b.ret(ret_val);
     let func = b.build();
 
     let jit = JitFunction::compile::<NanBox>(&func, &[]);

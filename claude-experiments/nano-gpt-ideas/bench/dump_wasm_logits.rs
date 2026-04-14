@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 use tensor_lang_backend::runtime::WasmRuntime;
 use tensor_lang_backend::wasm::WasmBackend;
-use tensor_lang_graph::{compile, nanogpt, Op};
+use tensor_lang_graph::{nanogpt, Op};
 
 fn project_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -60,8 +60,7 @@ fn main() {
     eprintln!("Tokens: {:?}", token_input);
 
     // Compile graph (symbolic T)
-    let program = nanogpt::generate_nanogpt_program_symbolic(1, vocab_size, n_embd, n_head, n_layer);
-    let graph = compile(&program);
+    let graph = nanogpt::compile_gpt2(1, None, vocab_size, n_embd, n_head, n_layer);
     let n_inputs = graph.nodes.iter().filter(|n| matches!(&n.op, Op::Input { .. })).count();
 
     // Emit WASM SIMD

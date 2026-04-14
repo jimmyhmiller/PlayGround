@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use ndarray::ArrayD;
-use tensor_lang_graph::{compile, nanogpt, Op};
+use tensor_lang_graph::{nanogpt, Op};
 use tensor_lang_test_oracle::eval_with_inputs;
 
 fn project_root() -> std::path::PathBuf {
@@ -70,11 +70,8 @@ fn test_gpt2_real_weights() {
 
     println!("Config: vocab={vocab_size}, d={n_embd}, heads={n_head}, layers={n_layer}, T={seq_len}");
 
-    // Generate the DSL program
-    let program = nanogpt::generate_nanogpt_program(1, seq_len, vocab_size, n_embd, n_head, n_layer);
-
     println!("Compiling DSL program...");
-    let graph = compile(&program);
+    let graph = nanogpt::compile_gpt2(1, Some(seq_len), vocab_size, n_embd, n_head, n_layer);
 
     // Collect input nodes in order
     let input_nodes: Vec<(usize, String, Vec<usize>)> = graph.nodes.iter().enumerate()

@@ -14,7 +14,7 @@ use tensor_lang_backend::arm::ArmBackend;
 use tensor_lang_backend::arm_runtime::ArmRuntime;
 use tensor_lang_gpu::plan;
 use tensor_lang_gpu::runtime::GpuRuntime;
-use tensor_lang_graph::{compile, nanogpt, Op};
+use tensor_lang_graph::{nanogpt, Op};
 
 fn project_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -72,8 +72,7 @@ fn main() {
     eprintln!("Compiling graph...");
     let t0 = Instant::now();
     let n_layer_bench: usize = args.get(4).map(|s| s.parse().unwrap()).unwrap_or(n_layer);
-    let program = nanogpt::generate_nanogpt_program_symbolic(1, vocab_size, n_embd, n_head, n_layer_bench);
-    let graph = compile(&program);
+    let graph = nanogpt::compile_gpt2(1, None, vocab_size, n_embd, n_head, n_layer_bench);
     eprintln!("  {} nodes, compiled in {:.2}s", graph.nodes.len(), t0.elapsed().as_secs_f64());
 
     // --- Prepare inputs ---

@@ -3,9 +3,8 @@ use std::marker::PhantomData;
 
 use dynalloc::{Heap, PtrPolicy};
 use dynexec::{
-    CapturedCallerResume, CapturedFrame, ContinuationContext,
-    FrameSliceError, FrameSliceSnapshot,
-    snapshot_to_builder, view_to_snapshot,
+    BuilderFrame, CapturedCallerResume, CapturedResume, CapturedStackBuilder,
+    ContinuationContext, FrameSliceError,
 };
 use dynir::interp::{ConfiguredModuleInterpreter, InterpError, InterpResult, InterpRootManager};
 use dynlower::{
@@ -20,9 +19,8 @@ use dynobj::RootSource;
 /// reclaimed when unreferenced.
 ///
 /// Handles returned from `capture` are heap-tagged pointers (u64),
-/// not Vec indices. `read` materializes a `FrameSliceSnapshot` from
-/// the heap object on every call — the view is transient and cheap
-/// (one linear scan of the packed metadata).
+/// not Vec indices. `read` returns a `ContinuationView` — a zero-copy
+/// view into the heap object (one linear scan of the packed metadata).
 pub struct JitFrameSliceRuntime<'a> {
     ctx: &'a dyn ContinuationContext,
 }
@@ -32,26 +30,22 @@ impl<'a> JitFrameSliceRuntime<'a> {
         JitFrameSliceRuntime { ctx }
     }
 
-    /// Capture a continuation on the heap. Converts the legacy
-    /// `FrameSliceSnapshot` into a `CapturedStackBuilder` and
-    /// allocates via the backing `ContinuationContext`.
-    pub fn capture(&self, snapshot: FrameSliceSnapshot) -> Result<u64, FrameSliceError> {
-        let builder = snapshot_to_builder(&snapshot);
+    /// Capture a continuation on the heap from a `CapturedStackBuilder`.
+    pub fn capture_from_builder(
+        &self,
+        builder: &CapturedStackBuilder,
+    ) -> Result<u64, FrameSliceError> {
         self.ctx
-            .capture(&builder)
+            .capture(builder)
             .ok_or(FrameSliceError::MissingSlice)
     }
 
-    /// Read a previously-captured continuation. Materializes a
-    /// `FrameSliceSnapshot` from the heap object (the view is read
-    /// from the `ContObj`'s varlen values tail and the `ContMeta`'s
-    /// packed metadata).
-    pub fn read(&self, handle: u64) -> Result<FrameSliceSnapshot, FrameSliceError> {
-        let view = self
-            .ctx
+    /// Read a previously-captured continuation as a zero-copy view
+    /// into the heap object. The view's lifetime is tied to `&self`.
+    pub fn read<'s>(&'s self, handle: u64) -> Result<dynexec::ContinuationView<'s>, FrameSliceError> {
+        self.ctx
             .read(handle)
-            .ok_or(FrameSliceError::MissingSlice)?;
-        Ok(view_to_snapshot(&view))
+            .ok_or(FrameSliceError::MissingSlice)
     }
 
     /// Clone a continuation handle. Since the heap representation is
@@ -217,14 +211,50 @@ pub fn decode_frame_control_outcome(
     }
 }
 
-fn build_capture_snapshot(
+/// Convert a `FrameResume` (caller_resume from a suspended JIT frame)
+/// into a `CapturedResume` for the heap format.
+fn frame_resume_to_captured(r: &CapturedCallerResume) -> CapturedResume {
+    match r {
+        CapturedCallerResume::TopLevel => CapturedResume::TopLevel,
+        CapturedCallerResume::FromCall { return_dest } => CapturedResume::FromCall {
+            return_dest: return_dest.map(|d| d as u32),
+        },
+        CapturedCallerResume::FromResume { return_block, return_param_dest } => {
+            CapturedResume::FromResume {
+                return_block: *return_block as u32,
+                return_param_dest: return_param_dest.map(|d| d as u32),
+            }
+        }
+        CapturedCallerResume::FromInvoke {
+            normal_block,
+            normal_args_vals,
+            exception_block,
+            exception_args_vals,
+            has_ret_param,
+        } => CapturedResume::FromInvoke {
+            normal_block: *normal_block as u32,
+            normal_args_vals: normal_args_vals.clone(),
+            exception_block: *exception_block as u32,
+            exception_args_vals: exception_args_vals.clone(),
+            has_ret_param: *has_ret_param,
+        },
+    }
+}
+
+/// Build a `CapturedStackBuilder` directly from JIT frame state.
+/// This is the JIT's `FrameCapture` — equivalent to the interpreter's
+/// `build_captured_stack_impl` but reads from `FrameReifyRecord` +
+/// suspended frame chain instead of `InterpFrame`.
+fn build_capture_builder(
     record: &FrameReifyRecord,
     values: &[u64],
     mut suspended: Vec<SuspendedJitFrame>,
-) -> Result<FrameSliceSnapshot, JitFrameControlError> {
+) -> Result<CapturedStackBuilder, JitFrameControlError> {
     let prompt = record
         .prompt
         .ok_or(JitFrameControlError::UnsupportedOutcome)?;
+
+    // Build the top frame from the reify record.
     let mut frame_values = vec![0u64; record.frame_value_count];
     for (&value_idx, &bits) in record.value_indices.iter().zip(values.iter()) {
         if value_idx >= frame_values.len() {
@@ -232,45 +262,69 @@ fn build_capture_snapshot(
         }
         frame_values[value_idx] = bits;
     }
-    let mut root_value_indices = Vec::with_capacity(record.root_payload_indices.len());
-    for &payload_idx in &record.root_payload_indices {
-        let Some(&value_idx) = record.value_indices.get(payload_idx) else {
-            return Err(JitFrameControlError::UnsupportedOutcome);
-        };
-        root_value_indices.push(value_idx);
-    }
-    let resume_arg_value_indices = record.return_dest.into_iter().collect();
-    let frame = CapturedFrame {
-        resume: record.resume,
-        values: frame_values,
-        root_value_indices,
-        resume_arg_value_indices,
-        active_prompts: record.active_prompts.iter().map(|p| p.index() as u32).collect(),
-        caller_resume: CapturedCallerResume::TopLevel,
-    };
-    let mut frames = if suspended.is_empty() {
-        vec![frame]
+    let root_indices: Vec<u16> = record
+        .root_payload_indices
+        .iter()
+        .filter_map(|&payload_idx| {
+            record.value_indices.get(payload_idx).map(|&vi| vi as u16)
+        })
+        .collect();
+    let resume_arg_slot = record.return_dest.map(|d| d as u32);
+
+    let top_caller_resume = if suspended.is_empty() {
+        CapturedResume::TopLevel
     } else {
-        let mut current = frame;
-        current.caller_resume = suspended
-            .last()
-            .map(|entry| entry.callee_caller_resume.clone())
-            .unwrap_or(CapturedCallerResume::TopLevel);
-        let mut frames_rev = vec![current];
+        frame_resume_to_captured(
+            &suspended.last().unwrap().callee_caller_resume,
+        )
+    };
+
+    let top_builder_frame = BuilderFrame {
+        func_idx: record.resume.func_idx as u32,
+        block_idx: record.resume.block_idx as u32,
+        inst_idx: record.resume.inst_idx as u32,
+        values: frame_values,
+        active_prompts: record.active_prompts.iter().map(|p| p.index() as u32).collect(),
+        root_indices,
+        resume_arg_slot,
+        caller_resume: top_caller_resume,
+    };
+
+    let builder_frames = if suspended.is_empty() {
+        vec![top_builder_frame]
+    } else {
+        let mut frames_rev = vec![top_builder_frame];
         while let Some(entry) = suspended.pop() {
-            let mut caller = entry.frame;
-            caller.caller_resume = suspended
-                .last()
-                .map(|outer| outer.callee_caller_resume.clone())
-                .unwrap_or(CapturedCallerResume::TopLevel);
-            frames_rev.push(caller);
+            let caller_resume = if suspended.is_empty() {
+                CapturedResume::TopLevel
+            } else {
+                frame_resume_to_captured(
+                    &suspended.last().unwrap().callee_caller_resume,
+                )
+            };
+            let root_indices: Vec<u16> = entry
+                .root_value_indices
+                .iter()
+                .map(|&i| i as u16)
+                .collect();
+            frames_rev.push(BuilderFrame {
+                func_idx: entry.resume.func_idx as u32,
+                block_idx: entry.resume.block_idx as u32,
+                inst_idx: entry.resume.inst_idx as u32,
+                values: entry.values.clone(),
+                active_prompts: entry.active_prompts.clone(),
+                root_indices,
+                resume_arg_slot: None,
+                caller_resume,
+            });
         }
         frames_rev.reverse();
         frames_rev
     };
-    Ok(FrameSliceSnapshot {
+
+    Ok(CapturedStackBuilder {
         prompt_id: prompt.index() as u32,
-        frames: std::mem::take(&mut frames),
+        frames: builder_frames,
     })
 }
 
@@ -279,9 +333,9 @@ pub fn materialize_capture_slice(
     record: &FrameReifyRecord,
     values: &[u64],
 ) -> Result<u64, JitFrameControlError> {
-    let snapshot = build_capture_snapshot(record, values, Vec::new())?;
+    let builder = build_capture_builder(record, values, Vec::new())?;
     store
-        .capture(snapshot)
+        .capture_from_builder(&builder)
         .map_err(|_| JitFrameControlError::UnsupportedOutcome)
 }
 
@@ -296,11 +350,11 @@ where
     Cfg::Layout: dynexec::LayoutConfigDefaults,
     R: InterpRootManager<Cfg::Layout, Cfg::Roots, Cfg::RootTransport>,
 {
-    let snapshot = store
+    let view = store
         .read(handle)
         .map_err(ResumeWithInterpreterError::FrameSlice)?;
     interpreter
-        .resume_snapshot(snapshot, args)
+        .resume_view(&view, args)
         .map_err(ResumeWithInterpreterError::Interp)
 }
 
@@ -311,20 +365,25 @@ pub fn resume_stored_slice_with_jit(
     handle: u64,
     args: &[u64],
 ) -> Result<JitOutcome, ResumeWithInterpreterError> {
-    let snapshot = store
+    let view = store
         .read(handle)
         .map_err(ResumeWithInterpreterError::FrameSlice)?;
-    let frame = snapshot
-        .frames
-        .last()
-        .ok_or(ResumeWithInterpreterError::FrameSlice(FrameSliceError::MissingSlice))?;
+    if view.frame_count() == 0 {
+        return Err(ResumeWithInterpreterError::FrameSlice(FrameSliceError::MissingSlice));
+    }
+    let frame = view.frame(view.frame_count() - 1);
+    let resume_point = dynexec::FrameResumePoint {
+        func_idx: frame.func_idx as usize,
+        block_idx: frame.block_idx as usize,
+        inst_idx: frame.inst_idx as usize,
+    };
     let capture_record = jit
         .frame_reify_records()
         .iter()
         .find(|record| {
             record.kind == FrameReifyKind::CaptureSlice
                 && record.native_resume_offset.is_some()
-                && record.resume == frame.resume
+                && record.resume == resume_point
         })
         .ok_or(ResumeWithInterpreterError::FrameSlice(FrameSliceError::MissingSlice))?;
     Ok(jit.call_resume_outcome(capture_record, frame.values.as_ptr(), args))
@@ -337,82 +396,81 @@ pub fn resume_stored_slice_with_jit_module(
     handle: u64,
     args: &[u64],
 ) -> Result<JitOutcome, ResumeWithInterpreterError> {
-    let snapshot = store
+    let view = store
         .read(handle)
         .map_err(ResumeWithInterpreterError::FrameSlice)?;
-    let mut frame_idx = snapshot
-        .frames
-        .len()
+    let mut frame_idx = view
+        .frame_count()
         .checked_sub(1)
         .ok_or(ResumeWithInterpreterError::FrameSlice(FrameSliceError::MissingSlice))?;
-    let mut outcome = jit
-        .call_captured_frame_resume_outcome(&snapshot.frames[frame_idx], args)
-        .ok_or(ResumeWithInterpreterError::FrameSlice(FrameSliceError::MissingSlice))?;
+
+    let frame_resume_point = |i: usize| {
+        let f = view.frame(i);
+        dynexec::FrameResumePoint {
+            func_idx: f.func_idx as usize,
+            block_idx: f.block_idx as usize,
+            inst_idx: f.inst_idx as usize,
+        }
+    };
+
+    let call_resume = |i: usize, args: &[u64]| -> Option<JitOutcome> {
+        let f = view.frame(i);
+        jit.call_view_resume_outcome(&frame_resume_point(i), f.values, args)
+    };
+    let call_invoke = |i: usize, is_exc: bool, args: &[u64]| -> Option<JitOutcome> {
+        let f = view.frame(i);
+        jit.call_view_invoke_resume_outcome(&frame_resume_point(i), f.values, is_exc, args)
+    };
+
+    let missing = || ResumeWithInterpreterError::FrameSlice(FrameSliceError::MissingSlice);
+
+    let mut outcome = call_resume(frame_idx, args).ok_or_else(missing)?;
 
     loop {
-        let frame = &snapshot.frames[frame_idx];
-        match (&frame.caller_resume, outcome.clone()) {
-            (CapturedCallerResume::TopLevel, final_outcome) => return Ok(final_outcome),
-            (CapturedCallerResume::FromCall { .. }, JitOutcome::Value(v)) => {
+        let caller = view.frame(frame_idx).caller_resume.clone();
+        match (&caller, outcome.clone()) {
+            (CapturedResume::TopLevel, final_outcome) => return Ok(final_outcome),
+            (CapturedResume::FromCall { .. }, JitOutcome::Value(v)) => {
                 if frame_idx == 0 {
                     return Ok(JitOutcome::Value(v));
                 }
                 frame_idx -= 1;
-                outcome = jit
-                    .call_captured_frame_resume_outcome(&snapshot.frames[frame_idx], &[v])
-                    .ok_or(ResumeWithInterpreterError::FrameSlice(FrameSliceError::MissingSlice))?;
+                outcome = call_resume(frame_idx, &[v]).ok_or_else(missing)?;
             }
-            (CapturedCallerResume::FromCall { .. }, JitOutcome::Void) => {
+            (CapturedResume::FromCall { .. }, JitOutcome::Void) => {
                 if frame_idx == 0 {
                     return Ok(JitOutcome::Void);
                 }
                 frame_idx -= 1;
-                outcome = jit
-                    .call_captured_frame_resume_outcome(&snapshot.frames[frame_idx], &[])
-                    .ok_or(ResumeWithInterpreterError::FrameSlice(FrameSliceError::MissingSlice))?;
+                outcome = call_resume(frame_idx, &[]).ok_or_else(missing)?;
             }
-            (CapturedCallerResume::FromCall { .. }, JitOutcome::Exception(exc)) => {
+            (CapturedResume::FromCall { .. }, JitOutcome::Exception(exc)) => {
                 if frame_idx == 0 {
                     return Ok(JitOutcome::Exception(exc));
                 }
                 frame_idx -= 1;
                 continue;
             }
-            (
-                CapturedCallerResume::FromInvoke { .. },
-                JitOutcome::Value(v),
-            ) => {
+            (CapturedResume::FromInvoke { .. }, JitOutcome::Value(v)) => {
                 if frame_idx == 0 {
                     return Ok(JitOutcome::Value(v));
                 }
                 frame_idx -= 1;
-                outcome = jit
-                    .call_invoke_frame_resume_outcome(&snapshot.frames[frame_idx], false, &[v])
-                    .ok_or(ResumeWithInterpreterError::FrameSlice(FrameSliceError::MissingSlice))?;
+                outcome = call_invoke(frame_idx, false, &[v]).ok_or_else(missing)?;
             }
-            (
-                CapturedCallerResume::FromInvoke { .. },
-                JitOutcome::Void,
-            ) => {
+            (CapturedResume::FromInvoke { .. }, JitOutcome::Void) => {
                 if frame_idx == 0 {
                     return Ok(JitOutcome::Void);
                 }
                 frame_idx -= 1;
-                outcome = jit
-                    .call_invoke_frame_resume_outcome(&snapshot.frames[frame_idx], false, &[])
-                    .ok_or(ResumeWithInterpreterError::FrameSlice(FrameSliceError::MissingSlice))?;
+                outcome = call_invoke(frame_idx, false, &[]).ok_or_else(missing)?;
             }
-            (
-                CapturedCallerResume::FromInvoke { .. },
-                JitOutcome::Exception(exc),
-            ) => {
+            (CapturedResume::FromInvoke { .. }, JitOutcome::Exception(exc)) => {
                 if frame_idx == 0 {
                     return Ok(JitOutcome::Exception(exc));
                 }
                 frame_idx -= 1;
-                outcome = jit
-                    .call_invoke_frame_resume_outcome(&snapshot.frames[frame_idx], true, &[exc])
-                    .ok_or(ResumeWithInterpreterError::FrameSlice(FrameSliceError::MissingSlice))?;
+                outcome = call_invoke(frame_idx, true, &[exc]).ok_or_else(missing)?;
             }
             (_, other) => return Ok(other),
         }
@@ -427,9 +485,9 @@ fn continue_outcome_with_function(
     if let Some(control) = decode_frame_control_outcome(outcome.clone(), jit.frame_reify_records())? {
         return match control {
             JitFrameControl::CaptureSlice { record, values } => {
-                let snapshot = build_capture_snapshot(&record, &values, take_suspended_frames())?;
+                let builder = build_capture_builder(&record, &values, take_suspended_frames())?;
                 let handle = store
-                    .capture(snapshot)
+                    .capture_from_builder(&builder)
                     .map_err(|_| JitFrameControlError::UnsupportedOutcome)?;
                 Ok(JitExecutionResult::CaptureSlice { handle, record })
             }
@@ -556,9 +614,9 @@ fn continue_outcome_with_module(
     if let Some(control) = decode_frame_control_outcome(outcome.clone(), records)? {
         return match control {
             JitFrameControl::CaptureSlice { record, values } => {
-                let snapshot = build_capture_snapshot(&record, &values, take_suspended_frames())?;
+                let builder = build_capture_builder(&record, &values, take_suspended_frames())?;
                 let handle = store
-                    .capture(snapshot)
+                    .capture_from_builder(&builder)
                     .map_err(|_| JitFrameControlError::UnsupportedOutcome)?;
                 Ok(JitExecutionResult::CaptureSlice { handle, record })
             }
@@ -1079,16 +1137,19 @@ mod tests {
         };
 
         let handle = materialize_capture_slice(&store, &record, &[88, 99]).unwrap();
-        let snapshot = store.read(handle).unwrap();
-        assert_eq!(snapshot.prompt_id, 1);
-        assert_eq!(snapshot.frames.len(), 1);
-        assert_eq!(snapshot.frames[0].resume, record.resume);
-        assert_eq!(snapshot.frames[0].values.len(), 32);
-        assert_eq!(snapshot.frames[0].values[10], 88);
-        assert_eq!(snapshot.frames[0].values[20], 99);
-        assert_eq!(snapshot.frames[0].root_value_indices, vec![20]);
-        assert_eq!(snapshot.frames[0].resume_arg_value_indices, vec![30]);
-        assert_eq!(snapshot.frames[0].active_prompts, vec![0, 1]);
+        let view = store.read(handle).unwrap();
+        assert_eq!(view.prompt_id(), 1);
+        assert_eq!(view.frame_count(), 1);
+        let f = view.frame(0);
+        assert_eq!(f.func_idx, record.resume.func_idx as u32);
+        assert_eq!(f.block_idx, record.resume.block_idx as u32);
+        assert_eq!(f.inst_idx, record.resume.inst_idx as u32);
+        assert_eq!(f.values.len(), 32);
+        assert_eq!(f.values[10], 88);
+        assert_eq!(f.values[20], 99);
+        assert_eq!(f.root_indices, &[20u16]);
+        assert_eq!(f.resume_arg_slot, Some(30));
+        assert_eq!(f.active_prompts, &[0u32, 1]);
     }
 
     #[test]
@@ -1115,10 +1176,11 @@ mod tests {
         match result {
             JitExecutionResult::CaptureSlice { handle, record } => {
                 assert_eq!(record.kind, FrameReifyKind::CaptureSlice);
-                let snapshot = store.read(handle).unwrap();
-                assert_eq!(snapshot.frames.len(), 1);
-                assert_eq!(snapshot.frames[0].values[arg.index()], 123);
-                assert_eq!(snapshot.frames[0].resume_arg_value_indices, vec![slice.index()]);
+                let view = store.read(handle).unwrap();
+                assert_eq!(view.frame_count(), 1);
+                let f = view.frame(0);
+                assert_eq!(f.values[arg.index()], 123);
+                assert_eq!(f.resume_arg_slot, Some(slice.index() as u32));
             }
             other => panic!("expected capture execution result, got {other:?}"),
         }
@@ -1183,17 +1245,17 @@ mod tests {
         match result {
             JitExecutionResult::CaptureSlice { handle, record } => {
                 assert_eq!(record.kind, FrameReifyKind::CaptureSlice);
-                let snapshot = store.read(handle).unwrap();
-                assert_eq!(snapshot.frames.len(), 2);
-                assert_eq!(snapshot.frames[0].resume.func_idx, 0);
-                assert_eq!(snapshot.frames[1].resume.func_idx, 1);
+                let view = store.read(handle).unwrap();
+                assert_eq!(view.frame_count(), 2);
+                assert_eq!(view.frame(0).func_idx, 0);
+                assert_eq!(view.frame(1).func_idx, 1);
                 assert_eq!(
-                    snapshot.frames[1].caller_resume,
-                    CapturedCallerResume::FromCall {
-                        return_dest: Some(slice.index())
+                    view.frame(1).caller_resume,
+                    CapturedResume::FromCall {
+                        return_dest: Some(slice.index() as u32)
                     }
                 );
-                assert_eq!(snapshot.frames[0].active_prompts, vec![prompt.index() as u32]);
+                assert_eq!(view.frame(0).active_prompts, &[prompt.index() as u32]);
             }
             other => panic!("expected capture execution result, got {other:?}"),
         }
@@ -1269,23 +1331,20 @@ mod tests {
     fn execute_jit_function_bridges_clone_and_resume_requests() {
         let ctx = make_cont_ctx();
         let store = JitFrameSliceRuntime::new(&ctx);
-        let handle = store
-            .capture(FrameSliceSnapshot {
-                prompt_id: 0,
-                frames: vec![CapturedFrame {
-                    resume: FrameResumePoint {
-                        func_idx: 1,
-                        block_idx: 2,
-                        inst_idx: 3,
-                    },
-                    values: vec![44],
-                    root_value_indices: vec![],
-                    resume_arg_value_indices: vec![],
-                    active_prompts: vec![],
-                    caller_resume: CapturedCallerResume::TopLevel,
-                }],
-            })
-            .unwrap();
+        let builder = CapturedStackBuilder {
+            prompt_id: 0,
+            frames: vec![BuilderFrame {
+                func_idx: 1,
+                block_idx: 2,
+                inst_idx: 3,
+                values: vec![44],
+                root_indices: vec![],
+                resume_arg_slot: None,
+                active_prompts: vec![],
+                caller_resume: CapturedResume::TopLevel,
+            }],
+        };
+        let handle = store.capture_from_builder(&builder).unwrap();
 
         let clone_result = execute_outcome(
             JitOutcome::CloneSlice {
@@ -1619,16 +1678,16 @@ mod tests {
             JitExecutionResult::CaptureSlice { handle, .. } => handle,
             other => panic!("expected capture result, got {other:?}"),
         };
-        let snapshot = store.read(handle).unwrap();
-        assert_eq!(snapshot.frames.len(), 2);
-        match &snapshot.frames[1].caller_resume {
-            CapturedCallerResume::FromInvoke {
+        let view = store.read(handle).unwrap();
+        assert_eq!(view.frame_count(), 2);
+        match &view.frame(1).caller_resume {
+            CapturedResume::FromInvoke {
                 normal_args_vals,
                 exception_args_vals,
                 ..
             } => {
-                assert_eq!(normal_args_vals, &vec![44]);
-                assert_eq!(exception_args_vals, &vec![99]);
+                assert_eq!(normal_args_vals, &[44u64]);
+                assert_eq!(exception_args_vals, &[99u64]);
             }
             other => panic!("expected invoke caller resume, got {other:?}"),
         }

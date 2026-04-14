@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use ndarray::ArrayD;
 use tensor_lang_gpu::plan;
 use tensor_lang_gpu::runtime::GpuRuntime;
-use tensor_lang_graph::{compile, nanogpt, Op};
+use tensor_lang_graph::{nanogpt, Op};
 use tensor_lang_test_oracle::eval_with_inputs;
 
 fn project_root() -> PathBuf {
@@ -55,8 +55,7 @@ fn test_gpu_vs_oracle_gpt2_1layer() {
     let n_embd = 768;
     let n_head = 12;
 
-    let program = nanogpt::generate_nanogpt_program(1, seq_len, vocab_size, n_embd, n_head, 1);
-    let graph = compile(&program);
+    let graph = nanogpt::compile_gpt2(1, Some(seq_len), vocab_size, n_embd, n_head, 1);
 
     let token_input: Vec<f32> = (0..seq_len).map(|i| (464 + i) as f32).collect();
     let wpe_slice = weights[1][..seq_len * n_embd].to_vec();

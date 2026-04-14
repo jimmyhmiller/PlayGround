@@ -170,6 +170,12 @@ pub struct Program {
 
     // Undo/redo journal
     journal: Journal,
+
+    // Mouse position (updated from window events)
+    mouse_pos: [f64; 2],
+
+    // Currently hovered node ID (computed from hit testing)
+    hovered_node: Option<String>,
 }
 
 fn entry_color(idx: usize) -> [f32; 4] {
@@ -809,6 +815,7 @@ fn build_node(val: &Value, env: &mut Env, bindings: &mut Vec<Binding>, id_counte
             line.props.opacity = opacity;
             line.from_node = from_node;
             line.to_node = to_node;
+            line.curve = kw.get("curve").map(|v| eval_num(v, env)).transpose()?.unwrap_or(0.0);
             Ok(Some(Node::Line(line)))
         }
 
@@ -840,6 +847,7 @@ fn build_node(val: &Value, env: &mut Env, bindings: &mut Vec<Binding>, id_counte
             arrow.props.opacity = opacity;
             arrow.from_node = from_node;
             arrow.to_node = to_node;
+            arrow.curve = kw.get("curve").map(|v| eval_num(v, env)).transpose()?.unwrap_or(0.0);
             Ok(Some(Node::Arrow(arrow)))
         }
 
@@ -1142,7 +1150,13 @@ impl Program {
             queued_clicks: 0,
             color_index: 0,
             journal: Journal::new(),
+            mouse_pos: [0.0, 0.0],
+            hovered_node: None,
         })
+    }
+
+    pub fn set_mouse_pos(&mut self, x: f64, y: f64) {
+        self.mouse_pos = [x, y];
     }
 
     pub fn tick(&mut self, dt: f64, tw: &Tweakables) {
@@ -1170,10 +1184,21 @@ impl Program {
 
         // Tick the scene graph
         self.graph.tick(dt, tw);
+
+        // Hit test for hover
+        self.hovered_node = self.graph.hit_test(self.mouse_pos[0], self.mouse_pos[1], tw);
     }
 
     pub fn draw(&self, scene: &mut vello::Scene, tw: &Tweakables) {
-        self.graph.draw(scene, tw);
+        let connected = match &self.hovered_node {
+            Some(id) => self.graph.connected_set(id),
+            None => std::collections::HashSet::new(),
+        };
+        let hover = crate::scene::HoverCtx {
+            hovered: self.hovered_node.as_deref(),
+            connected: &connected,
+        };
+        self.graph.draw(scene, tw, &hover);
     }
 
     pub fn handle_click(&mut self, tw: &Tweakables) {

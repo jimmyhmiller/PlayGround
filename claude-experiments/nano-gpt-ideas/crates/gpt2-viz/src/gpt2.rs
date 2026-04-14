@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::sync::mpsc;
 
-use tensor_lang_graph::{compile, nanogpt, Graph, NodeId, Op, TensorRuntime};
+use tensor_lang_graph::{nanogpt, Graph, NodeId, Op, TensorRuntime};
 use tensor_lang_backend::arm::ArmBackend;
 use tensor_lang_backend::arm_runtime::ArmRuntime;
 
@@ -333,8 +333,7 @@ impl Gpt2Model {
 
         let seq_len = MAX_SEQ_LEN;
         eprintln!("Compiling graph (T={seq_len})...");
-        let program = nanogpt::generate_nanogpt_program(1, seq_len, vocab_size, n_embd, n_head, n_layer);
-        let graph = compile(&program);
+        let graph = nanogpt::compile_gpt2(1, Some(seq_len), vocab_size, n_embd, n_head, n_layer);
         eprintln!("  {} graph nodes", graph.nodes.len());
 
         let logits_id = (0..graph.nodes.len()).rev().find(|&i| {

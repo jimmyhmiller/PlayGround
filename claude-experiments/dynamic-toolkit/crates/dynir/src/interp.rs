@@ -1,9 +1,9 @@
 use std::marker::PhantomData;
 
 use dynexec::{
-    BuilderFrame, CapturedFrame, CapturedResume, CapturedStackBuilder, CodegenConfig,
-    ContinuationView, DefaultCodegenConfig, FrameCapture, FrameResume, FrameResumePoint,
-    FrameRestorable, FrameSliceError, FrameSliceSnapshot, InterpFrameStore,
+    BuilderFrame, CapturedResume, CapturedStackBuilder, CodegenConfig,
+    ContinuationView, DefaultCodegenConfig, FrameCapture, FrameResume,
+    FrameRestorable, FrameSliceError, InterpFrameStore,
     LayoutConfigDefaults, PromptBoundaryAction, RootPrecision, RootStrategy, RootTransport,
     RootTransportKind, ValueLayout,
 };
@@ -200,54 +200,6 @@ impl<'a, L: ValueLayout, Roots: RootStrategy<L>, Transport: RootTransport<L, Roo
     fn sync_top_from_roots(&mut self) {
         if let Some(frame) = self.stack.last_mut() {
             sync_frame_from_roots(frame, self.roots);
-        }
-    }
-
-    /// Push the frames of `snapshot` on top of the current live stack.
-    /// If `bottom_resume` is `Some`, the bottom pushed frame has its
-    /// `resume` field overridden to that value; otherwise it inherits
-    /// the original `caller_resume` from capture time.
-    fn push_captured_frames(
-        &mut self,
-        snapshot: &FrameSliceSnapshot,
-        args: &[u64],
-        bottom_resume: Option<FrameResume>,
-    ) {
-        let frame_count = snapshot.frames.len();
-        for (i, captured) in snapshot.frames.iter().enumerate() {
-            let func_idx = captured.resume.func_idx;
-            let mut vals = captured.values.clone();
-            if i + 1 == frame_count {
-                for (idx, &value_idx) in captured.resume_arg_value_indices.iter().enumerate() {
-                    if let Some(&arg) = args.get(idx) {
-                        vals[value_idx] = arg;
-                    }
-                }
-            }
-            let mut val_to_slot = vec![None; vals.len()];
-            for (slot, &value_idx) in captured.root_value_indices.iter().enumerate() {
-                val_to_slot[value_idx] = Some(slot);
-            }
-            let gc_slots = count_gc_slots_from_map(&val_to_slot);
-            let root_frame = self.roots.push_frame(gc_slots);
-            let resume = if i == 0 {
-                bottom_resume.clone().unwrap_or_else(|| captured.caller_resume.clone())
-            } else {
-                captured.caller_resume.clone()
-            };
-            let frame = InterpFrame {
-                func_idx,
-                vals,
-                slots: vec![0u64; self.functions[func_idx].stack_slots.len()],
-                block_idx: captured.resume.block_idx,
-                inst_idx: captured.resume.inst_idx,
-                resume,
-                active_prompts: captured.active_prompts.clone(),
-                root_frame,
-                val_to_slot,
-            };
-            sync_frame_to_roots(&frame, self.roots);
-            self.stack.push(frame);
         }
     }
 
@@ -594,69 +546,6 @@ impl<'a, L: ValueLayout, Roots: RootStrategy<L>, Transport: RootTransport<L, Roo
         self.sync_top_from_roots();
     }
 
-    fn capture_snapshot(&mut self, prompt: u32, resume_dest: usize) -> FrameSliceSnapshot {
-        let start = self
-            .stack
-            .iter()
-            .rposition(|f| f.active_prompts.contains(&prompt))
-            .expect("capture: prompt not found");
-        let frame_count = self.stack.len() - start;
-        let mut frames = Vec::with_capacity(frame_count);
-        for (i, f) in self.stack[start..].iter().enumerate() {
-            let is_top = i + 1 == frame_count;
-            // Sync values from roots to get up-to-date GC pointers
-            let mut vals = f.vals.clone();
-            for (vi, slot_opt) in f.val_to_slot.iter().enumerate() {
-                if let Some(slot) = slot_opt {
-                    vals[vi] = self.roots.get_root(f.root_frame, *slot);
-                }
-            }
-            let root_value_indices: Vec<usize> = f.val_to_slot.iter().enumerate()
-                .filter_map(|(i, s)| s.map(|_| i))
-                .collect();
-            frames.push(CapturedFrame {
-                resume: FrameResumePoint {
-                    func_idx: f.func_idx,
-                    block_idx: f.block_idx,
-                    inst_idx: f.inst_idx,
-                },
-                values: vals,
-                root_value_indices,
-                resume_arg_value_indices: if is_top { vec![resume_dest] } else { Vec::new() },
-                active_prompts: f.active_prompts.clone(),
-                caller_resume: f.resume.clone(),
-            });
-        }
-        FrameSliceSnapshot {
-            prompt_id: prompt,
-            frames,
-        }
-    }
-
-    fn resume_snapshot(&mut self, snapshot: &FrameSliceSnapshot, args: &[u64]) {
-        // Legacy stack-replacing path. Real callers should use
-        // `resume_snapshot_splice`.
-        while !self.stack.is_empty() {
-            self.stack.pop();
-            self.roots.pop_frame();
-        }
-        self.push_captured_frames(snapshot, args, None);
-    }
-
-    fn resume_snapshot_splice(
-        &mut self,
-        snapshot: &FrameSliceSnapshot,
-        args: &[u64],
-        bottom_resume: FrameResume,
-    ) {
-        // Splice captured frames on top of the current live stack. The
-        // bottom pushed frame's resume is overridden with `bottom_resume`
-        // so that when the delimited computation eventually completes,
-        // control returns to the resumer.
-        self.sync_top_to_roots();
-        self.push_captured_frames(snapshot, args, Some(bottom_resume));
-    }
-
     fn build_captured_stack(
         &self,
         prompt_id: u32,
@@ -835,7 +724,7 @@ where
     /// Run an entry function with a provided `InterpFrameStore`.
     pub fn run_with_runtime(
         &self,
-        sr: &mut impl InterpFrameStore,
+        sr: &mut (impl InterpFrameStore + FrameCapture + FrameRestorable),
         entry: FuncRef,
         args: &[u64],
     ) -> Result<InterpResult, InterpError> {
@@ -861,17 +750,20 @@ where
         self.run_loop(sr)
     }
 
-    pub fn resume_snapshot(
+    /// Resume execution from a heap-backed `ContinuationView`. Replaces
+    /// the interpreter stack with the captured frames (stack is freshly
+    /// empty here, so splice-with-TopLevel == replace).
+    pub fn resume_view(
         &self,
-        snapshot: FrameSliceSnapshot,
+        view: &ContinuationView<'_>,
         args: &[u64],
     ) -> Result<InterpResult, InterpError> {
         let mut sr = InterpStackRuntime::new(self.roots, &self.module.functions);
-        sr.resume_snapshot(&snapshot, args);
+        sr.splice_from_view(view, args, FrameResume::TopLevel);
         self.run_loop(&mut sr)
     }
 
-    fn run_loop(&self, sr: &mut impl InterpFrameStore) -> Result<InterpResult, InterpError> {
+    fn run_loop(&self, sr: &mut (impl InterpFrameStore + FrameCapture + FrameRestorable)) -> Result<InterpResult, InterpError> {
         loop {
             // Auto-GC poll: at each outer-loop iteration (between
             // FrameActions), no raw heap pointers are held in
@@ -1011,70 +903,57 @@ where
                         .expect("abort_to_prompt: no frame has the target prompt");
                     sr.pop_frames_above(depth);
 
-                    // ── Resumed-frame trampoline ─────────────────
-                    //
-                    // After popping frames above the prompt-owning
-                    // frame, that frame is now the top. If it's a
-                    // spliced captured frame (resume = FromResume),
-                    // the abort is leaving the prompt boundary of a
-                    // resumed continuation — control should return to
-                    // the original resumer, NOT run the prompt's
-                    // handler block (which would re-execute "the rest
-                    // of the function after the reset" inside the
-                    // captured frame).
-                    //
-                    // This is the equivalent of Chez's `dounderflow`
-                    // trampoline at the bottom of a captured stack
-                    // segment: when control reaches the prompt
-                    // boundary of a resumed continuation, it pops
-                    // back into the resumer via the saved
-                    // STACKLINK / FromResume.
-                    if let FrameResume::FromResume {
-                        return_block,
-                        return_param_dest,
-                    } = sr.peek_top_resume() {
-                        // Pop the captured (top) frame and trampoline.
-                        let _ = sr.pop_frame();
-                        if sr.is_empty() {
-                            // No resumer left; return the value as
-                            // the program's final result.
-                            return Ok(match ret_val {
-                                Some(v) => InterpResult::Value(v),
-                                None => InterpResult::Void,
-                            });
+                    // Use the shared decision function to determine
+                    // whether to trampoline back to the resumer or
+                    // run the handler block.
+                    match dynexec::resolve_prompt_boundary(
+                        &sr.peek_top_resume(),
+                        ret_val,
+                    ) {
+                        PromptBoundaryAction::TrampolineToResumer {
+                            return_block,
+                            return_param_dest,
+                            value,
+                        } => {
+                            // Pop the captured (top) frame and
+                            // trampoline to the resumer.
+                            let _ = sr.pop_frame();
+                            if sr.is_empty() {
+                                return Ok(match value {
+                                    Some(v) => InterpResult::Value(v),
+                                    None => InterpResult::Void,
+                                });
+                            }
+                            if let (Some(dest), Some(val)) =
+                                (return_param_dest, value)
+                            {
+                                sr.set(dest, val);
+                            }
+                            sr.set_block(return_block);
+                            sr.set_inst(0);
                         }
-                        if let (Some(dest), Some(val)) =
-                            (return_param_dest, ret_val)
-                        {
-                            sr.set(dest, val);
-                        }
-                        sr.set_block(return_block);
-                        sr.set_inst(0);
-                        continue;
-                    }
-
-                    // Normal abort path: the prompt-owning frame is
-                    // a regular live frame. Run its handler block
-                    // with the aborted value.
-                    sr.pop_prompt(prompt.index_u32());
-
-                    let func = &self.module.functions[sr.func_idx()];
-                    let handler = find_handler(func, prompt);
-                    let hb = &func.blocks[handler.index()];
-                    if let Some(val) = ret_val {
-                        if let Some((param, _)) = hb.params.first() {
-                            sr.set(param.index(), val);
+                        PromptBoundaryAction::RunHandler { value } => {
+                            // Normal abort: run the handler block.
+                            sr.pop_prompt(prompt.index_u32());
+                            let func = &self.module.functions[sr.func_idx()];
+                            let handler = find_handler(func, prompt);
+                            let hb = &func.blocks[handler.index()];
+                            if let Some(val) = value {
+                                if let Some((param, _)) = hb.params.first() {
+                                    sr.set(param.index(), val);
+                                }
+                            }
+                            sr.set_block(handler.index());
+                            sr.set_inst(0);
                         }
                     }
-                    sr.set_block(handler.index());
-                    sr.set_inst(0);
                 }
             }
         }
     }
 
     /// Execute the current frame until it needs to transfer control.
-    fn execute_frame(&self, sr: &mut impl InterpFrameStore) -> Result<FrameAction, InterpError> {
+    fn execute_frame(&self, sr: &mut (impl InterpFrameStore + FrameCapture + FrameRestorable)) -> Result<FrameAction, InterpError> {
         let func_idx = sr.func_idx();
         let func = &self.module.functions[func_idx];
 
@@ -1110,23 +989,17 @@ where
                     Inst::CaptureSlice(prompt, _live) => {
                         let dest = node.value.expect("capture_slice must produce a value");
                         sr.advance_inst();
-                        let builder = sr
-                            .build_captured_stack(prompt.index_u32(), dest.index());
-                        let handle = self
-                            .cont_ctx
-                            .capture(&builder)
-                            .expect("OOM capturing continuation");
+                        let handle = dynexec::do_capture(
+                            sr, self.cont_ctx, prompt.index_u32(), dest.index(),
+                        );
                         sr.set(dest.index(), handle);
                         continue;
                     }
 
                     Inst::CloneSlice(slice) => {
-                        // Heap-backed continuations are immutable, so
-                        // "cloning" is a no-op: both aliases share the
-                        // same underlying ContObj.
                         let dest = node.value.expect("clone_slice must produce a value");
                         let handle = sr.get(slice.index());
-                        sr.set(dest.index(), handle);
+                        sr.set(dest.index(), dynexec::do_clone(handle));
                         sr.advance_inst();
                         continue;
                     }
@@ -1439,21 +1312,14 @@ where
                     let resumer_func = &self.module.functions[sr.func_idx()];
                     let return_param_dest = resumer_func.blocks[return_block.index()]
                         .params.first().map(|(v, _)| v.index());
-                    let bottom_resume = FrameResume::FromResume {
-                        return_block: return_block.index(),
+                    dynexec::do_resume(
+                        sr,
+                        self.cont_ctx,
+                        slice_bits,
+                        &arg_vals,
+                        return_block.index(),
                         return_param_dest,
-                    };
-
-                    // Heap-backed: read the continuation via the
-                    // user's heap, splice its frames on top of the
-                    // current stack. The view is dropped inside
-                    // `splice_from_view` before any subsequent
-                    // allocation on the same heap.
-                    let view = self
-                        .cont_ctx
-                        .read(slice_bits)
-                        .expect("resume: invalid continuation handle");
-                    sr.splice_from_view(&view, &arg_vals, bottom_resume);
+                    );
                     return Ok(self.execute_frame(sr)?);
                 }
 
@@ -1485,12 +1351,9 @@ where
                     sr.set_block(resume_block.index());
                     sr.set_inst(0);
 
-                    let builder =
-                        sr.build_captured_stack(prompt.index_u32(), resume_param_idx);
-                    let handle = self
-                        .cont_ctx
-                        .capture(&builder)
-                        .expect("OOM capturing continuation");
+                    let handle = dynexec::do_capture(
+                        sr, self.cont_ctx, prompt.index_u32(), resume_param_idx,
+                    );
 
                     // Jump to handler_block with the handle.
                     sr.set_block(handler_block.index());

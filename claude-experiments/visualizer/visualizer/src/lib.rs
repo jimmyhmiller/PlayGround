@@ -76,6 +76,11 @@ impl ApplicationHandler for App<'_> {
                     prog.handle_click(&self.tweaks.borrow());
                 }
             }
+            WindowEvent::CursorMoved { position, .. } => {
+                if let Some(prog) = self.program.borrow_mut().as_mut() {
+                    prog.set_mouse_pos(position.x, position.y);
+                }
+            }
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
                 if let Some(prog) = self.program.borrow_mut().as_mut() {
                     match &event.logical_key {
