@@ -2448,6 +2448,7 @@ impl TypeChecker {
         if name == "parse_int" { if args.len() > 0 { self.synth_expr(args.get(0)); } return Ty::SimpleTy { name: "i32" }; }
         if name == "parse_long" { if args.len() > 0 { self.synth_expr(args.get(0)); } return Ty::SimpleTy { name: "i64" }; }
         if name == "parse_double" { if args.len() > 0 { self.synth_expr(args.get(0)); } return Ty::SimpleTy { name: "f64" }; }
+        if name == "write_class" { let mut ai: i32 = 0; while ai < args.len() { self.synth_expr(args.get(ai)); ai = ai + 1; } return Ty::VoidTy; }
         if name == "is_digit" || name == "is_letter" || name == "is_alphanumeric" {
             if args.len() > 0 { self.check_expr(args.get(0), Ty::SimpleTy { name: "char" }); }
             return Ty::SimpleTy { name: "bool" };
@@ -2725,6 +2726,9 @@ impl TypeChecker {
             if args.len() > 0 { self.synth_expr(args.get(0)); }
             return Ty::SimpleTy { name: "String" };
         }
+        if type_name == "JRustRuntime" {
+            return self.synth_call(method_name, args);
+        }
         if self.imported_classes.contains_key(type_name) {
             if method_name == "new" {
                 let mut ai: i32 = 0;
@@ -2858,6 +2862,7 @@ struct Codegen {
     top_level_fns: Vec<Item>,
     constants: Vec<Item>,
     imports: Map<String, String>,
+    imported_classes: Map<String, ImportedClass>,
     interfaces: Map<String, Item>,
     impl_for: Vec<Item>,
     // Per-method state
@@ -2884,6 +2889,7 @@ impl Codegen {
             top_level_fns: Vec::new(),
             constants: Vec::new(),
             imports: Map::new(),
+            imported_classes: Map::new(),
             interfaces: Map::new(),
             impl_for: Vec::new(),
             mv: null,
@@ -3010,6 +3016,8 @@ impl Codegen {
         }
         let simple_name: String = path.substring(dot_pos + 1);
         self.imports.insert(simple_name, jvm_name);
+        let cls: ImportedClass = load_imported_class(jvm_name);
+        self.imported_classes.insert(simple_name, cls);
     }
 
     // --- Struct generation ---
@@ -3977,6 +3985,62 @@ impl Codegen {
             return Ty::SimpleTy { name: "String" };
         }
 
+        if name == "write_class" {
+            // write_class(cw, dir, name) — inline bytecode
+            self.gen_expr(args.get(0));
+            self.gen_expr(args.get(1));
+            self.gen_expr(args.get(2));
+            // stack: [cw, dir, name]
+            let wc_name_local: i32 = self.next_local;
+            self.next_local = self.next_local + 1;
+            self.mv.visit_var_insn(ASTORE, wc_name_local);
+            let wc_dir_local: i32 = self.next_local;
+            self.next_local = self.next_local + 1;
+            self.mv.visit_var_insn(ASTORE, wc_dir_local);
+            // stack: [cw]
+            // cw.toByteArray()
+            self.mv.visit_method_insn(INVOKEVIRTUAL, "org/objectweb/asm/ClassWriter", "toByteArray", "()[B", 0);
+            let wc_bytes_local: i32 = self.next_local;
+            self.next_local = self.next_local + 1;
+            self.mv.visit_var_insn(ASTORE, wc_bytes_local);
+            // new File(dir).mkdirs()
+            self.mv.visit_type_insn(NEW, "java/io/File");
+            self.mv.visit_insn(DUP);
+            self.mv.visit_var_insn(ALOAD, wc_dir_local);
+            self.mv.visit_method_insn(INVOKESPECIAL, "java/io/File", "<init>", "(Ljava/lang/String;)V", 0);
+            self.mv.visit_method_insn(INVOKEVIRTUAL, "java/io/File", "mkdirs", "()Z", 0);
+            self.mv.visit_insn(POP);
+            // Build path: dir + "/" + name + ".class"
+            self.mv.visit_type_insn(NEW, "java/lang/StringBuilder");
+            self.mv.visit_insn(DUP);
+            self.mv.visit_method_insn(INVOKESPECIAL, "java/lang/StringBuilder", "<init>", "()V", 0);
+            self.mv.visit_var_insn(ALOAD, wc_dir_local);
+            self.mv.visit_method_insn(INVOKEVIRTUAL, "java/lang/StringBuilder", "append", "(Ljava/lang/String;)Ljava/lang/StringBuilder;", 0);
+            self.mv.ldc_str("/");
+            self.mv.visit_method_insn(INVOKEVIRTUAL, "java/lang/StringBuilder", "append", "(Ljava/lang/String;)Ljava/lang/StringBuilder;", 0);
+            self.mv.visit_var_insn(ALOAD, wc_name_local);
+            self.mv.visit_method_insn(INVOKEVIRTUAL, "java/lang/StringBuilder", "append", "(Ljava/lang/String;)Ljava/lang/StringBuilder;", 0);
+            self.mv.ldc_str(".class");
+            self.mv.visit_method_insn(INVOKEVIRTUAL, "java/lang/StringBuilder", "append", "(Ljava/lang/String;)Ljava/lang/StringBuilder;", 0);
+            self.mv.visit_method_insn(INVOKEVIRTUAL, "java/lang/StringBuilder", "toString", "()Ljava/lang/String;", 0);
+            // stack: [path_string]
+            let wc_path_local: i32 = self.next_local;
+            self.next_local = self.next_local + 1;
+            self.mv.visit_var_insn(ASTORE, wc_path_local);
+            // new FileOutputStream(path)
+            self.mv.visit_type_insn(NEW, "java/io/FileOutputStream");
+            self.mv.visit_insn(DUP);
+            self.mv.visit_var_insn(ALOAD, wc_path_local);
+            self.mv.visit_method_insn(INVOKESPECIAL, "java/io/FileOutputStream", "<init>", "(Ljava/lang/String;)V", 0);
+            // stack: [fos]
+            self.mv.visit_insn(DUP);
+            self.mv.visit_var_insn(ALOAD, wc_bytes_local);
+            self.mv.visit_method_insn(INVOKEVIRTUAL, "java/io/FileOutputStream", "write", "([B)V", 0);
+            // stack: [fos]
+            self.mv.visit_method_insn(INVOKEVIRTUAL, "java/io/FileOutputStream", "close", "()V", 0);
+            return Ty::VoidTy;
+        }
+
         // Top-level function call
         let fn_item: Item = self.find_top_level_fn(name);
         let fn_params: Vec<Param> = item_fn_params(fn_item);
@@ -4110,25 +4174,9 @@ impl Codegen {
             }
         }
 
-        // Imported class instance method call (infer descriptor from arg types)
-        if self.imports.contains_key(type_name) {
-            let jvm_class: String = self.imports.get(type_name);
-            let mut desc_sb: StringBuilder = StringBuilder::new();
-            desc_sb.append("(");
-            let mut ai: i32 = 0;
-            while ai < args.len() {
-                let arg_type: Ty = self.gen_expr(args.get(ai));
-                desc_sb.append(self.type_descriptor(arg_type));
-                ai = ai + 1;
-            }
-            desc_sb.append(")");
-            let mut ret_type: Ty = Ty::VoidTy;
-            if self.expected_type != null {
-                ret_type = self.expected_type;
-            }
-            desc_sb.append(self.type_descriptor(ret_type));
-            self.mv.visit_method_insn(INVOKEVIRTUAL, jvm_class, method_name, desc_sb.to_string(), 0);
-            return ret_type;
+        // Imported class instance method call
+        if self.imported_classes.contains_key(type_name) {
+            return self.gen_imported_method_call(type_name, method_name, args, false);
         }
 
         panic("Unknown method: " + type_name + "." + method_name);
@@ -4322,11 +4370,110 @@ impl Codegen {
         return Ty::VoidTy;
     }
 
+    fn is_array_type(self, ty: Ty) -> bool {
+        match ty {
+            Ty::ArrayTy { element } => { return true; }
+            _ => { return false; }
+        }
+        return false;
+    }
+
+    fn gen_imported_method_call(mut self, type_name: String, method_name: String, args: Vec<Expr>, is_static: bool) -> Ty {
+        let cls: ImportedClass = self.imported_classes.get(type_name);
+        let jvm_class: String = self.imports.get(type_name);
+
+        // Search for matching method by name + arg count
+        let mut descriptor: String = "";
+        let mut mi: i32 = 0;
+        while mi < cls.methods.len() {
+            let m: ImportedMethod = cls.methods.get(mi);
+            if m.name == method_name && m.is_static == is_static {
+                let parsed: ParsedDescriptor = parse_method_descriptor(m.descriptor);
+                if parsed.param_types.len() == args.len() {
+                    descriptor = m.descriptor;
+                    break;
+                }
+            }
+            mi = mi + 1;
+        }
+
+        // Fall back to name-only match
+        if descriptor == "" {
+            mi = 0;
+            while mi < cls.methods.len() {
+                let m: ImportedMethod = cls.methods.get(mi);
+                if m.name == method_name && m.is_static == is_static {
+                    descriptor = m.descriptor;
+                    break;
+                }
+                mi = mi + 1;
+            }
+        }
+
+        if descriptor == "" {
+            panic("Unknown method on imported class " + type_name + ": " + method_name);
+        }
+
+        let parsed: ParsedDescriptor = parse_method_descriptor(descriptor);
+
+        // Generate args, boxing primitives when param is Object, converting Vec to String[] when param is array type
+        let mut ai: i32 = 0;
+        while ai < args.len() {
+            let arg_type: Ty = self.gen_expr(args.get(ai));
+            if ai < parsed.param_types.len() {
+                let param_type: Ty = parsed.param_types.get(ai);
+                let param_name: String = self.resolve_type_name(param_type);
+                if param_name == "Object" {
+                    self.box_if_needed(arg_type);
+                } else if self.is_array_type(param_type) {
+                    // Convert Vec to array if needed
+                    if self.is_vec_type(arg_type) {
+                        self.mv.visit_insn(ICONST_0);
+                        self.mv.visit_type_insn(ANEWARRAY, "java/lang/String");
+                        self.mv.visit_method_insn(INVOKEVIRTUAL, "java/util/ArrayList", "toArray", "([Ljava/lang/Object;)[Ljava/lang/Object;", 0);
+                        self.mv.visit_type_insn(CHECKCAST, "[Ljava/lang/String;");
+                    }
+                }
+            }
+            ai = ai + 1;
+        }
+
+        if is_static {
+            self.mv.visit_method_insn(INVOKESTATIC, jvm_class, method_name, descriptor, 0);
+        } else {
+            let is_iface: bool = cls.is_interface;
+            if is_iface {
+                self.mv.visit_method_insn(INVOKEINTERFACE, jvm_class, method_name, descriptor, 1);
+            } else {
+                self.mv.visit_method_insn(INVOKEVIRTUAL, jvm_class, method_name, descriptor, 0);
+            }
+        }
+
+        return parsed.return_type;
+    }
+
     // --- ASM ClassWriter methods ---
 
     fn gen_class_writer_method(mut self, method_name: String, args: Vec<Expr>) -> Ty {
         if method_name == "visit" {
-            // visit(version, access, name, superName) → visit(ver, acc, name, null/*sig*/, super, null/*ifaces*/)
+            if args.len() == 6 {
+                // 6-arg visit: visit(ver, acc, name, sig, super, ifaces)
+                self.gen_expr(args.get(0));
+                self.gen_expr(args.get(1));
+                self.gen_expr(args.get(2));
+                self.gen_expr(args.get(3));
+                self.gen_expr(args.get(4));
+                let ifaces_type: Ty = self.gen_expr(args.get(5));
+                if self.is_vec_type(ifaces_type) {
+                    self.mv.visit_insn(ICONST_0);
+                    self.mv.visit_type_insn(ANEWARRAY, "java/lang/String");
+                    self.mv.visit_method_insn(INVOKEVIRTUAL, "java/util/ArrayList", "toArray", "([Ljava/lang/Object;)[Ljava/lang/Object;", 0);
+                    self.mv.visit_type_insn(CHECKCAST, "[Ljava/lang/String;");
+                }
+                self.mv.visit_method_insn(INVOKEVIRTUAL, "org/objectweb/asm/ClassWriter", "visit", "(IILjava/lang/String;Ljava/lang/String;Ljava/lang/String;[Ljava/lang/String;)V", 0);
+                return Ty::VoidTy;
+            }
+            // 4-arg visit(version, access, name, superName) → visit(ver, acc, name, null/*sig*/, super, null/*ifaces*/)
             self.gen_expr(args.get(0));
             self.gen_expr(args.get(1));
             self.gen_expr(args.get(2));
@@ -4336,7 +4483,18 @@ impl Codegen {
             self.mv.visit_method_insn(INVOKEVIRTUAL, "org/objectweb/asm/ClassWriter", "visit", "(IILjava/lang/String;Ljava/lang/String;Ljava/lang/String;[Ljava/lang/String;)V", 0);
             return Ty::VoidTy;
         }
-        if method_name == "visit_method" {
+        if method_name == "visit_method" || method_name == "visitMethod" {
+            if args.len() == 5 {
+                // 5-arg: visitMethod(access, name, desc, sig, exceptions)
+                let mut ai: i32 = 0;
+                while ai < args.len() {
+                    self.gen_expr(args.get(ai));
+                    ai = ai + 1;
+                }
+                self.mv.visit_method_insn(INVOKEVIRTUAL, "org/objectweb/asm/ClassWriter", "visitMethod", "(ILjava/lang/String;Ljava/lang/String;Ljava/lang/String;[Ljava/lang/String;)Lorg/objectweb/asm/MethodVisitor;", 0);
+                return Ty::SimpleTy { name: "MethodVisitor" };
+            }
+            // 3-arg: visitMethod(access, name, desc) → add null sig, null exceptions
             let mut ai: i32 = 0;
             while ai < args.len() {
                 self.gen_expr(args.get(ai));
@@ -4347,8 +4505,31 @@ impl Codegen {
             self.mv.visit_method_insn(INVOKEVIRTUAL, "org/objectweb/asm/ClassWriter", "visitMethod", "(ILjava/lang/String;Ljava/lang/String;Ljava/lang/String;[Ljava/lang/String;)Lorg/objectweb/asm/MethodVisitor;", 0);
             return Ty::SimpleTy { name: "MethodVisitor" };
         }
-        if method_name == "visit_field" {
+        if method_name == "visit_field" || method_name == "visitField" {
+            if args.len() == 5 {
+                // 5-arg: visitField(access, name, desc, sig, value)
+                self.gen_expr(args.get(0));
+                self.gen_expr(args.get(1));
+                self.gen_expr(args.get(2));
+                self.gen_expr(args.get(3));
+                let val_type: Ty = self.gen_expr(args.get(4));
+                self.box_if_needed(val_type);
+                self.mv.visit_method_insn(INVOKEVIRTUAL, "org/objectweb/asm/ClassWriter", "visitField", "(ILjava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/Object;)Lorg/objectweb/asm/FieldVisitor;", 0);
+                return Ty::SimpleTy { name: "FieldVisitor" };
+            }
+            if args.len() == 4 {
+                // 4-arg: visitField(access, name, desc, value) → insert null for sig
+                self.gen_expr(args.get(0));
+                self.gen_expr(args.get(1));
+                self.gen_expr(args.get(2));
+                self.mv.visit_insn(ACONST_NULL);
+                let val_type: Ty = self.gen_expr(args.get(3));
+                self.box_if_needed(val_type);
+                self.mv.visit_method_insn(INVOKEVIRTUAL, "org/objectweb/asm/ClassWriter", "visitField", "(ILjava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/Object;)Lorg/objectweb/asm/FieldVisitor;", 0);
+                return Ty::SimpleTy { name: "FieldVisitor" };
+            }
             if args.len() == 3 {
+                // 3-arg: visitField(access, name, desc) → add null sig, null value
                 let mut ai: i32 = 0;
                 while ai < args.len() {
                     self.gen_expr(args.get(ai));
@@ -4356,16 +4537,9 @@ impl Codegen {
                 }
                 self.mv.visit_insn(ACONST_NULL);
                 self.mv.visit_insn(ACONST_NULL);
-            } else {
-                self.gen_expr(args.get(0));
-                self.gen_expr(args.get(1));
-                self.gen_expr(args.get(2));
-                self.mv.visit_insn(ACONST_NULL);
-                let val_type: Ty = self.gen_expr(args.get(3));
-                self.box_if_needed(val_type);
+                self.mv.visit_method_insn(INVOKEVIRTUAL, "org/objectweb/asm/ClassWriter", "visitField", "(ILjava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/Object;)Lorg/objectweb/asm/FieldVisitor;", 0);
+                return Ty::SimpleTy { name: "FieldVisitor" };
             }
-            self.mv.visit_method_insn(INVOKEVIRTUAL, "org/objectweb/asm/ClassWriter", "visitField", "(ILjava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/Object;)Lorg/objectweb/asm/FieldVisitor;", 0);
-            return Ty::SimpleTy { name: "FieldVisitor" };
         }
         if method_name == "visit_with_interfaces" {
             // visit_with_interfaces(version, access, name, superName, interfaces: Vec<String>)
@@ -4385,39 +4559,39 @@ impl Codegen {
             self.mv.visit_method_insn(INVOKEVIRTUAL, "org/objectweb/asm/ClassWriter", "visit", "(IILjava/lang/String;Ljava/lang/String;Ljava/lang/String;[Ljava/lang/String;)V", 0);
             return Ty::VoidTy;
         }
-        if method_name == "visit_end" {
+        if method_name == "visit_end" || method_name == "visitEnd" {
             self.mv.visit_method_insn(INVOKEVIRTUAL, "org/objectweb/asm/ClassWriter", "visitEnd", "()V", 0);
             return Ty::VoidTy;
         }
-        panic("Unknown ClassWriter method: " + method_name);
-        return Ty::VoidTy;
+        // Fall through to gen_imported_method_call
+        return self.gen_imported_method_call("ClassWriter", method_name, args, false);
     }
 
     // --- ASM MethodVisitor methods ---
 
     fn gen_method_visitor_method(mut self, method_name: String, args: Vec<Expr>) -> Ty {
-        if method_name == "visit_code" {
+        if method_name == "visit_code" || method_name == "visitCode" {
             self.mv.visit_method_insn(INVOKEVIRTUAL, "org/objectweb/asm/MethodVisitor", "visitCode", "()V", 0);
             return Ty::VoidTy;
         }
-        if method_name == "visit_insn" {
+        if method_name == "visit_insn" || method_name == "visitInsn" {
             self.gen_expr(args.get(0));
             self.mv.visit_method_insn(INVOKEVIRTUAL, "org/objectweb/asm/MethodVisitor", "visitInsn", "(I)V", 0);
             return Ty::VoidTy;
         }
-        if method_name == "visit_int_insn" {
+        if method_name == "visit_int_insn" || method_name == "visitIntInsn" {
             self.gen_expr(args.get(0));
             self.gen_expr(args.get(1));
             self.mv.visit_method_insn(INVOKEVIRTUAL, "org/objectweb/asm/MethodVisitor", "visitIntInsn", "(II)V", 0);
             return Ty::VoidTy;
         }
-        if method_name == "visit_var_insn" {
+        if method_name == "visit_var_insn" || method_name == "visitVarInsn" {
             self.gen_expr(args.get(0));
             self.gen_expr(args.get(1));
             self.mv.visit_method_insn(INVOKEVIRTUAL, "org/objectweb/asm/MethodVisitor", "visitVarInsn", "(II)V", 0);
             return Ty::VoidTy;
         }
-        if method_name == "visit_field_insn" {
+        if method_name == "visit_field_insn" || method_name == "visitFieldInsn" {
             let mut ai: i32 = 0;
             while ai < args.len() {
                 self.gen_expr(args.get(ai));
@@ -4426,7 +4600,7 @@ impl Codegen {
             self.mv.visit_method_insn(INVOKEVIRTUAL, "org/objectweb/asm/MethodVisitor", "visitFieldInsn", "(ILjava/lang/String;Ljava/lang/String;Ljava/lang/String;)V", 0);
             return Ty::VoidTy;
         }
-        if method_name == "visit_method_insn" {
+        if method_name == "visit_method_insn" || method_name == "visitMethodInsn" {
             let mut ai: i32 = 0;
             while ai < args.len() {
                 self.gen_expr(args.get(ai));
@@ -4435,13 +4609,13 @@ impl Codegen {
             self.mv.visit_method_insn(INVOKEVIRTUAL, "org/objectweb/asm/MethodVisitor", "visitMethodInsn", "(ILjava/lang/String;Ljava/lang/String;Ljava/lang/String;Z)V", 0);
             return Ty::VoidTy;
         }
-        if method_name == "visit_jump_insn" {
+        if method_name == "visit_jump_insn" || method_name == "visitJumpInsn" {
             self.gen_expr(args.get(0));
             self.gen_expr(args.get(1));
             self.mv.visit_method_insn(INVOKEVIRTUAL, "org/objectweb/asm/MethodVisitor", "visitJumpInsn", "(ILorg/objectweb/asm/Label;)V", 0);
             return Ty::VoidTy;
         }
-        if method_name == "visit_label" {
+        if method_name == "visit_label" || method_name == "visitLabel" {
             self.gen_expr(args.get(0));
             self.mv.visit_method_insn(INVOKEVIRTUAL, "org/objectweb/asm/MethodVisitor", "visitLabel", "(Lorg/objectweb/asm/Label;)V", 0);
             return Ty::VoidTy;
@@ -4469,41 +4643,48 @@ impl Codegen {
             self.mv.visit_method_insn(INVOKEVIRTUAL, "org/objectweb/asm/MethodVisitor", "visitLdcInsn", "(Ljava/lang/Object;)V", 0);
             return Ty::VoidTy;
         }
-        if method_name == "visit_type_insn" {
+        if method_name == "visitLdcInsn" {
+            // Auto-box based on arg type
+            let arg_type: Ty = self.gen_expr(args.get(0));
+            self.box_if_needed(arg_type);
+            self.mv.visit_method_insn(INVOKEVIRTUAL, "org/objectweb/asm/MethodVisitor", "visitLdcInsn", "(Ljava/lang/Object;)V", 0);
+            return Ty::VoidTy;
+        }
+        if method_name == "visit_type_insn" || method_name == "visitTypeInsn" {
             self.gen_expr(args.get(0));
             self.gen_expr(args.get(1));
             self.mv.visit_method_insn(INVOKEVIRTUAL, "org/objectweb/asm/MethodVisitor", "visitTypeInsn", "(ILjava/lang/String;)V", 0);
             return Ty::VoidTy;
         }
-        if method_name == "visit_iinc_insn" {
+        if method_name == "visit_iinc_insn" || method_name == "visitIincInsn" {
             self.gen_expr(args.get(0));
             self.gen_expr(args.get(1));
             self.mv.visit_method_insn(INVOKEVIRTUAL, "org/objectweb/asm/MethodVisitor", "visitIincInsn", "(II)V", 0);
             return Ty::VoidTy;
         }
-        if method_name == "visit_maxs" {
+        if method_name == "visit_maxs" || method_name == "visitMaxs" {
             self.gen_expr(args.get(0));
             self.gen_expr(args.get(1));
             self.mv.visit_method_insn(INVOKEVIRTUAL, "org/objectweb/asm/MethodVisitor", "visitMaxs", "(II)V", 0);
             return Ty::VoidTy;
         }
-        if method_name == "visit_end" {
+        if method_name == "visit_end" || method_name == "visitEnd" {
             self.mv.visit_method_insn(INVOKEVIRTUAL, "org/objectweb/asm/MethodVisitor", "visitEnd", "()V", 0);
             return Ty::VoidTy;
         }
-        panic("Unknown MethodVisitor method: " + method_name);
-        return Ty::VoidTy;
+        // Fall through to gen_imported_method_call
+        return self.gen_imported_method_call("MethodVisitor", method_name, args, false);
     }
 
     // --- ASM FieldVisitor methods ---
 
     fn gen_field_visitor_method(mut self, method_name: String, args: Vec<Expr>) -> Ty {
-        if method_name == "visit_end" {
+        if method_name == "visit_end" || method_name == "visitEnd" {
             self.mv.visit_method_insn(INVOKEVIRTUAL, "org/objectweb/asm/FieldVisitor", "visitEnd", "()V", 0);
             return Ty::VoidTy;
         }
-        panic("Unknown FieldVisitor method: " + method_name);
-        return Ty::VoidTy;
+        // Fall through to gen_imported_method_call
+        return self.gen_imported_method_call("FieldVisitor", method_name, args, false);
     }
 
     // --- JRustRuntime static calls ---
@@ -4825,9 +5006,9 @@ impl Codegen {
             return Ty::SimpleTy { name: "Label" };
         }
 
-        // JRustRuntime static calls
+        // JRustRuntime static calls — forward to free function handlers
         if type_name == "JRustRuntime" {
-            return self.gen_jrust_runtime_static_call(method_name, args);
+            return self.gen_call(method_name, args);
         }
 
         // Imported class constructor: Type::new(args)
@@ -4849,24 +5030,8 @@ impl Codegen {
         }
 
         // Imported class static call
-        if self.imports.contains_key(type_name) {
-            let jvm_class: String = self.imports.get(type_name);
-            let mut desc_sb: StringBuilder = StringBuilder::new();
-            desc_sb.append("(");
-            let mut ai: i32 = 0;
-            while ai < args.len() {
-                let arg_type: Ty = self.gen_expr(args.get(ai));
-                desc_sb.append(self.type_descriptor(arg_type));
-                ai = ai + 1;
-            }
-            desc_sb.append(")");
-            let mut ret_type: Ty = Ty::VoidTy;
-            if self.expected_type != null {
-                ret_type = self.expected_type;
-            }
-            desc_sb.append(self.type_descriptor(ret_type));
-            self.mv.visit_method_insn(INVOKESTATIC, jvm_class, method_name, desc_sb.to_string(), 0);
-            return ret_type;
+        if self.imported_classes.contains_key(type_name) {
+            return self.gen_imported_method_call(type_name, method_name, args, true);
         }
 
         // User-defined static method
@@ -5279,6 +5444,8 @@ impl Codegen {
         else if src_name == "i32" && dest_name == "f64" { self.mv.visit_insn(I2D); }
         else if src_name == "i64" && dest_name == "i32" { self.mv.visit_insn(L2I); }
         else if src_name == "f64" && dest_name == "i32" { self.mv.visit_insn(D2I); }
+        else if src_name == "char" && dest_name == "i32" { }
+        else if src_name == "i32" && dest_name == "char" { }
         else {
             self.mv.visit_type_insn(CHECKCAST, self.jvm_class_name(dest_name));
         }
