@@ -223,6 +223,23 @@ fn rebuild_inspector_on_selection_change(
                 NodeKind::Router => {
                     kv_row(inspector, "Policy", "Round-robin", &theme, false);
                 }
+                NodeKind::Custom => {
+                    kv_row(
+                        inspector,
+                        "Contains",
+                        &format!("{} nodes", node.contains.len()),
+                        &theme,
+                        true,
+                    );
+                }
+            }
+
+            // Step list view — the ECS-like primitives that actually
+            // drive behavior. Read-only for now; sliders above still
+            // edit the common fields (rate, service time).
+            section_header(inspector, "Steps", &theme);
+            for step in &node.steps {
+                kv_row(inspector, "", &format_step(step), &theme, true);
             }
         }
 
@@ -465,6 +482,46 @@ fn spawn_delete_button(parent: &mut ChildSpawnerCommands, theme: &Theme) {
         });
 }
 
+fn format_step(step: &crate::sim::Step) -> String {
+    use crate::sim::Step;
+    match step {
+        Step::EmitAtRate {
+            period_ns,
+            one_way,
+            ..
+        } => {
+            let rate = crate::sim::period_ns_to_rate(*period_ns);
+            let label = if *one_way { "Emit" } else { "Request" };
+            format!("{} @ {:.1}/s", label, rate)
+        }
+        Step::PullInbound => "Pull from upstream".into(),
+        Step::AcceptInbound => "Accept push".into(),
+        Step::MatchColor { color } => format!("Match color #{:06x}", color.0),
+        Step::Buffer { capacity } => {
+            if *capacity == usize::MAX {
+                "Buffer (unbounded)".into()
+            } else {
+                format!("Buffer (cap {})", capacity)
+            }
+        }
+        Step::Process { duration_ns } => {
+            let ms = *duration_ns as f64 / crate::sim::NS_PER_MS as f64;
+            format!("Process {:.0}ms", ms)
+        }
+        Step::ForwardOut { strategy } => {
+            use crate::sim::ForwardStrategy::*;
+            match strategy {
+                BlindRoundRobin => "Forward (blind RR)".into(),
+                ReadyRoundRobin => "Forward (ready RR)".into(),
+                ForwardOrConsume => "Forward or consume".into(),
+            }
+        }
+        Step::RespondImmediate => "Respond immediately".into(),
+        Step::RespondOnComplete => "Respond on complete".into(),
+        Step::Consume => "Consume (sink)".into(),
+    }
+}
+
 fn kind_label(k: NodeKind) -> &'static str {
     match k {
         NodeKind::Generator => "Generator",
@@ -473,6 +530,7 @@ fn kind_label(k: NodeKind) -> &'static str {
         NodeKind::Router => "Router",
         NodeKind::Queue => "Queue",
         NodeKind::Sink => "Sink",
+        NodeKind::Custom => "Group",
     }
 }
 

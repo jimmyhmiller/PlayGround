@@ -120,24 +120,70 @@ fn pick_nodes_for_edge(
             draw_state.pending_from = None;
         }
         Some(from) => {
+            // Interpret the gesture. If the user drew from a
+            // pull-capable consumer (Worker etc.) toward a data
+            // source (Queue etc.), that's the natural gesture for
+            // "this one pulls from that one" — swap the sim
+            // endpoints so the sim edge represents data flow, and
+            // flag the edge as Pull mode so the sim's pull executor
+            // drives it.
+            let (sim_from, sim_to, is_pull) =
+                resolve_edge_kind(from, entity, &maps, &sim_res);
             let dup = existing_edges
                 .iter()
-                .any(|e| e.from == from && e.to == entity);
+                .any(|e| e.from == sim_from && e.to == sim_to);
             if !dup {
                 let edge_entity = commands
                     .spawn(Edge {
-                        from,
-                        to: entity,
+                        from: sim_from,
+                        to: sim_to,
                     })
                     .id();
                 if let Some(eid) =
-                    register_edge(&mut sim_res, &mut maps, edge_entity, from, entity)
+                    register_edge(&mut sim_res, &mut maps, edge_entity, sim_from, sim_to)
                 {
+                    if is_pull {
+                        sim_res.0.set_edge_mode(eid, crate::sim::EdgeMode::Pull);
+                    }
                     commands.entity(edge_entity).insert(SimEdgeRef(eid));
                 }
             }
             draw_state.pending_from = None;
         }
+    }
+}
+
+/// Interpret the user's edge-drawing gesture. The raw gesture goes
+/// from clicked-first (`a`) to clicked-second (`b`); in most cases the
+/// sim edge is just (a → b). BUT if `a` is a pull-only consumer
+/// (Worker etc. — has `PullInbound`, no `AcceptInbound`) and `b` is a
+/// data source (Buffer or ForwardOut in its steps), we swap: the sim
+/// edge is (b → a), reading as "Worker pulls from Queue." This
+/// matches the natural gesture of pointing *from* the consumer
+/// *toward* its data source.
+/// Decide `(sim_from, sim_to, is_pull)` from a draw gesture of (a → b).
+/// Default: straight push from a to b. If `a` is a pull-capable
+/// consumer and `b` is a source-y node, swap endpoints and mark Pull.
+fn resolve_edge_kind(
+    a: Entity,
+    b: Entity,
+    maps: &EntityMaps,
+    sim_res: &SimResource,
+) -> (Entity, Entity, bool) {
+    use crate::sim::Step;
+    let Some(&a_id) = maps.entity_to_node.get(&a) else { return (a, b, false) };
+    let Some(&b_id) = maps.entity_to_node.get(&b) else { return (a, b, false) };
+    let Some(a_node) = sim_res.0.nodes.get(&a_id) else { return (a, b, false) };
+    let Some(b_node) = sim_res.0.nodes.get(&b_id) else { return (a, b, false) };
+    let a_is_pull = a_node.is_pulling() && !a_node.accepts_push();
+    let b_is_source = b_node
+        .steps
+        .iter()
+        .any(|s| matches!(s, Step::Buffer { .. } | Step::ForwardOut { .. } | Step::EmitAtRate { .. }));
+    if a_is_pull && b_is_source {
+        (b, a, true)
+    } else {
+        (a, b, false)
     }
 }
 
@@ -226,7 +272,7 @@ fn dist_to_segment(p: Vec2, a: Vec2, b: Vec2) -> f32 {
 fn draw_edges_gizmos(
     mut gizmos: Gizmos,
     theme: Res<Theme>,
-    edges: Query<&Edge>,
+    edges: Query<(&Edge, Option<&SimEdgeRef>)>,
     nodes: Query<(&Transform, &SimNode, Option<&SimNodeRef>)>,
     nodes_tf: Query<&Transform, With<SimNode>>,
     draw_state: Res<EdgeDrawState>,
@@ -237,38 +283,43 @@ fn draw_edges_gizmos(
     let ink = theme.ink;
     let preview = theme.accent;
 
-    for edge in edges.iter() {
-        let (Ok((a_tf, a_sn, _)), Ok((b_tf, b_sn, b_ref))) =
+    for (edge, edge_ref) in edges.iter() {
+        let (Ok((a_tf, a_sn, _)), Ok((b_tf, b_sn, _))) =
             (nodes.get(edge.from), nodes.get(edge.to))
         else {
             continue;
         };
-        let a_center = a_tf.translation.truncate();
-        let b_center = b_tf.translation.truncate();
-        let a_half = a_sn.kind.size() / 2.0;
-        let b_half = b_sn.kind.size() / 2.0;
+        let is_pull = edge_ref
+            .and_then(|r| sim_res.0.edges.get(&r.0))
+            .map(|e| e.mode == crate::sim::EdgeMode::Pull)
+            .unwrap_or(false);
 
-        let dir = (b_center - a_center).normalize_or_zero();
+        // Sim edge always stores (from=data-source, to=consumer).
+        // Push edges draw in that direction (data flow). Pull edges
+        // draw the arrow in the OPPOSITE direction so the arrowhead
+        // lands on the source — reading as "this consumer pulls
+        // from that producer."
+        let (head_tf, head_sn, tail_tf, tail_sn) = if is_pull {
+            (a_tf, a_sn, b_tf, b_sn)
+        } else {
+            (b_tf, b_sn, a_tf, a_sn)
+        };
+        let tail_center = tail_tf.translation.truncate();
+        let head_center = head_tf.translation.truncate();
+        let tail_half = tail_sn.kind.size() / 2.0;
+        let head_half = head_sn.kind.size() / 2.0;
+
+        let dir = (head_center - tail_center).normalize_or_zero();
         if dir.length_squared() == 0.0 {
             continue;
         }
-
-        let a_exit = a_center + dir * border_exit(a_half, dir);
-        let b_entry = b_center - dir * (border_exit(b_half, -dir) + 4.0);
-
-        // Pull-edge styling: if the destination sim node is pull-only
-        // (has PullInbound, not AcceptInbound), draw the edge dashed
-        // with a hollow arrowhead to indicate demand flow rather than
-        // data push.
-        let is_pull = b_ref
-            .and_then(|r| sim_res.0.nodes.get(&r.0))
-            .map(|n| n.is_pulling() && !n.accepts_push())
-            .unwrap_or(false);
+        let tail_exit = tail_center + dir * border_exit(tail_half, dir);
+        let head_entry = head_center - dir * (border_exit(head_half, -dir) + 4.0);
 
         if is_pull {
-            draw_dashed_arrow(&mut gizmos, a_exit, b_entry, ink);
+            draw_dashed_arrow(&mut gizmos, tail_exit, head_entry, ink);
         } else {
-            draw_curved_arrow(&mut gizmos, a_exit, b_entry, ink);
+            draw_curved_arrow(&mut gizmos, tail_exit, head_entry, ink);
         }
     }
 

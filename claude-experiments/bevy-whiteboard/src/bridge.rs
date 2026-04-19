@@ -152,10 +152,27 @@ pub fn register_node(
         NodeKind::Sink => sim_res.0.add_sink(sc),
         NodeKind::Router => sim_res.0.add_router(),
         NodeKind::Queue => sim_res.0.add_queue(sc, usize::MAX),
+        NodeKind::Custom => {
+            panic!("register_node: Custom must be bound via bind_existing_node");
+        }
     };
     maps.entity_to_node.insert(entity, nid);
     maps.node_to_entity.insert(nid, entity);
     nid
+}
+
+/// Bind a Bevy entity to an already-existing sim node id. Used when a
+/// composite is created via `Sim::group_into_composite` — the node
+/// already lives in the sim; we just need entity-maps bookkeeping.
+pub fn bind_existing_node(maps: &mut EntityMaps, entity: Entity, nid: NodeId) {
+    maps.entity_to_node.insert(entity, nid);
+    maps.node_to_entity.insert(nid, entity);
+}
+
+/// Bind a Bevy edge entity to an already-existing sim edge id.
+pub fn bind_existing_edge(maps: &mut EntityMaps, entity: Entity, eid: EdgeId) {
+    maps.entity_to_edge.insert(entity, eid);
+    maps.edge_to_entity.insert(eid, entity);
 }
 
 /// Registers a newly-spawned edge entity with the sim. Returns the new EdgeId.

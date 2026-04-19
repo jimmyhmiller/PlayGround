@@ -6,16 +6,25 @@ edition = "2024"
 [dependencies]
 editor_core = { path = "../editor-core" }
 ropey = "1.6.1"
-# Use the umbrella `ui` feature so the renderer (`bevy_ui_render`) is included,
-# not just the API (`bevy_ui`). `default_font` bundles a minimal FiraMono
-# subset so `TextFont::default()` actually has glyphs to draw.
+arboard = "3.4"
+# `2d` covers Text2d via bevy_sprite + the sprite renderer + bevy_text.
+# We deliberately skip the `ui` feature (Node/bevy_ui): the editor renders
+# its own caret/selection as sprite quads so layout is driven by cosmic-text
+# glyph positions, not Bevy UI.
 bevy = { version = "0.18", default-features = false, features = [
-    "ui",
-    "default_font",
+    "2d",
     "x11",
     "wayland",
 ] }
 
+[lib]
+name = "editor_bevy"
+path = "src/lib.rs"
+
 [[bin]]
 name = "editor"
 path = "src/main.rs"
+
+[[bin]]
+name = "screenshots"
+path = "src/bin/screenshots.rs"

@@ -1,9 +1,17 @@
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::{generate, Shell};
 
+const KEYBINDINGS_HELP: &str = "\
+Keybindings (inside an attached session):
+  Ctrl+a d        Detach from the session (leave it running)
+  Ctrl+a k        Kill the session
+  Ctrl+a Ctrl+a   Send a literal Ctrl+a to the program";
+
 #[derive(Parser)]
 #[command(name = "keep-running")]
 #[command(about = "Human-friendly terminal session manager with dtach-style detach")]
+#[command(after_help = KEYBINDINGS_HELP)]
+#[command(after_long_help = KEYBINDINGS_HELP)]
 #[command(version)]
 pub struct Cli {
     #[command(subcommand)]
@@ -18,6 +26,8 @@ pub struct Cli {
 pub enum Commands {
     /// Start a new session with the given command
     #[command(trailing_var_arg = true)]
+    #[command(after_help = KEYBINDINGS_HELP)]
+    #[command(after_long_help = KEYBINDINGS_HELP)]
     Run {
         /// Session name (auto-generated if not specified)
         #[arg(short, long)]

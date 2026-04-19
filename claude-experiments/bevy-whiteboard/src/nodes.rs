@@ -1,4 +1,4 @@
-use crate::bridge::{EntityMaps, SimNodeRef, SimResource, register_node};
+use crate::bridge::{EntityMaps, SimNodeRef, SimResource, bind_existing_edge, bind_existing_node, register_node};
 use crate::camera::MainCamera;
 use crate::edges::{Probe, ProbeTarget};
 use crate::palette::pointer_over_ui;
@@ -35,6 +35,8 @@ impl Plugin for NodesPlugin {
                     update_canvas_labels,
                     toggle_worker_down,
                     update_down_visual,
+                    group_selected_into_composite,
+                    draw_composite_boundaries,
                 )
                     .chain(),
             );
@@ -51,6 +53,10 @@ pub enum NodeKind {
     Sink,
     Router,
     Queue,
+    /// Composite node built via `Sim::group_into_composite` — holds an
+    /// inner sim. Renders as a double-bordered block to read as
+    /// "container of things" at a glance.
+    Custom,
 }
 
 impl NodeKind {
@@ -62,6 +68,7 @@ impl NodeKind {
             NodeKind::Sink => Vec2::new(60.0, 60.0),
             NodeKind::Router => Vec2::new(70.0, 50.0),
             NodeKind::Queue => Vec2::new(90.0, 40.0),
+            NodeKind::Custom => Vec2::new(100.0, 60.0),
         }
     }
 
@@ -262,6 +269,7 @@ fn kind_letter(k: NodeKind) -> &'static str {
         NodeKind::Sink => "S",
         NodeKind::Router => "R",
         NodeKind::Queue => "Q",
+        NodeKind::Custom => "⊞",
     }
 }
 
@@ -281,14 +289,58 @@ fn hit_test_node(
         .map(|(e, _, _)| e)
 }
 
+/// Hit-test composite boundary rectangles. Returns the composite
+/// entity if the cursor lands inside its padded bounding box. Use as
+/// a fallback after `hit_test_node` so that clicking a member picks
+/// the member, but clicking the padding picks the composite.
+fn hit_test_composite(
+    world: Vec2,
+    sim: &SimResource,
+    composites: &Query<(Entity, &SimNodeRef), With<CompositeTag>>,
+    members: &Query<(&SimNodeRef, &Transform, &SimNode), Without<CompositeTag>>,
+) -> Option<Entity> {
+    let pad = 16.0;
+    for (entity, nref) in composites.iter() {
+        let Some(node) = sim.0.nodes.get(&nref.0) else { continue };
+        if node.contains.is_empty() {
+            continue;
+        }
+        let contains: HashSet<crate::sim::NodeId> = node.contains.iter().copied().collect();
+        let mut min = Vec2::splat(f32::INFINITY);
+        let mut max = Vec2::splat(f32::NEG_INFINITY);
+        for (m_ref, tf, sn) in members.iter() {
+            if !contains.contains(&m_ref.0) {
+                continue;
+            }
+            let half = sn.kind.size() / 2.0;
+            let c = tf.translation.truncate();
+            min = min.min(c - half);
+            max = max.max(c + half);
+        }
+        if min.x.is_infinite() {
+            continue;
+        }
+        min -= Vec2::splat(pad);
+        max += Vec2::splat(pad);
+        if world.x >= min.x && world.x <= max.x && world.y >= min.y && world.y <= max.y {
+            return Some(entity);
+        }
+    }
+    None
+}
+
 #[allow(clippy::too_many_arguments)]
 fn select_and_begin_drag(
     mouse: Res<ButtonInput<MouseButton>>,
+    keys: Res<ButtonInput<KeyCode>>,
     active_tool: Res<ActiveTool>,
     ui: Query<&Interaction>,
     windows: Query<&Window>,
     cams: Query<(&Camera, &GlobalTransform), With<MainCamera>>,
     nodes: Query<(Entity, &Transform, &SimNode)>,
+    composites: Query<(Entity, &SimNodeRef), With<CompositeTag>>,
+    members: Query<(&SimNodeRef, &Transform, &SimNode), Without<CompositeTag>>,
+    sim_res: Res<SimResource>,
     selected: Query<Entity, With<Selected>>,
     mut drag: ResMut<DragState>,
     mut commands: Commands,
@@ -304,24 +356,32 @@ fn select_and_begin_drag(
     let Ok((cam, cam_tf)) = cams.single() else { return };
     let Ok(world) = cam.viewport_to_world_2d(cam_tf, cursor) else { return };
 
-    let hit = hit_test_node(world, &nodes);
+    // Prefer member hit; fall back to composite boundary.
+    let hit = hit_test_node(world, &nodes)
+        .or_else(|| hit_test_composite(world, &sim_res, &composites, &members));
+    let additive = keys.pressed(KeyCode::ShiftLeft)
+        || keys.pressed(KeyCode::ShiftRight)
+        || keys.pressed(KeyCode::SuperLeft)
+        || keys.pressed(KeyCode::SuperRight);
 
-    // Selection works in any tool: click a node to inspect it. (place_node
-    // already bails when the click is over an existing node, so we never
-    // double-fire place + select on the same hit.) Only the Select tool
-    // begins a drag, otherwise the click just changes selection.
-    for e in selected.iter() {
-        commands.entity(e).remove::<Selected>();
+    if !additive {
+        for e in selected.iter() {
+            commands.entity(e).remove::<Selected>();
+        }
     }
     if let Some(hit) = hit {
-        commands.entity(hit).insert(Selected);
-        if active_tool.0 == Tool::Select {
-            let node_pos = nodes
-                .get(hit)
-                .map(|(_, tf, _)| tf.translation.truncate())
-                .unwrap_or(world);
-            drag.entity = Some(hit);
-            drag.offset = node_pos - world;
+        if additive && selected.iter().any(|e| e == hit) {
+            commands.entity(hit).remove::<Selected>();
+        } else {
+            commands.entity(hit).insert(Selected);
+            if active_tool.0 == Tool::Select && !additive {
+                let node_pos = nodes
+                    .get(hit)
+                    .map(|(_, tf, _)| tf.translation.truncate())
+                    .unwrap_or(world);
+                drag.entity = Some(hit);
+                drag.offset = node_pos - world;
+            }
         }
     }
 }
@@ -331,6 +391,9 @@ fn drag_selected_node(
     windows: Query<&Window>,
     cams: Query<(&Camera, &GlobalTransform), With<MainCamera>>,
     drag: Res<DragState>,
+    composites: Query<&SimNodeRef, With<CompositeTag>>,
+    node_refs: Query<(Entity, &SimNodeRef), With<SimNode>>,
+    sim_res: Res<SimResource>,
     mut tfs: Query<&mut Transform, With<SimNode>>,
 ) {
     if !mouse.pressed(MouseButton::Left) {
@@ -341,8 +404,40 @@ fn drag_selected_node(
     let Some(cursor) = win.cursor_position() else { return };
     let Ok((cam, cam_tf)) = cams.single() else { return };
     let Ok(world) = cam.viewport_to_world_2d(cam_tf, cursor) else { return };
+
+    let target = world + drag.offset;
+
+    // If the dragged entity is a composite, translate every member
+    // entity by the same delta so the group moves as a unit.
+    if let Ok(nref) = composites.get(entity) {
+        let Some(node) = sim_res.0.nodes.get(&nref.0) else { return };
+        let current = match tfs.get(entity) {
+            Ok(t) => t.translation.truncate(),
+            Err(_) => return,
+        };
+        let delta = target - current;
+        if delta.length_squared() < 1e-6 {
+            return;
+        }
+        let member_set: HashSet<crate::sim::NodeId> = node.contains.iter().copied().collect();
+        let member_entities: Vec<Entity> = node_refs
+            .iter()
+            .filter_map(|(e, r)| member_set.contains(&r.0).then_some(e))
+            .collect();
+        if let Ok(mut tf) = tfs.get_mut(entity) {
+            tf.translation.x = target.x;
+            tf.translation.y = target.y;
+        }
+        for e in member_entities {
+            if let Ok(mut tf) = tfs.get_mut(e) {
+                tf.translation.x += delta.x;
+                tf.translation.y += delta.y;
+            }
+        }
+        return;
+    }
+
     if let Ok(mut tf) = tfs.get_mut(entity) {
-        let target = world + drag.offset;
         tf.translation.x = target.x;
         tf.translation.y = target.y;
     }
@@ -804,6 +899,7 @@ fn update_canvas_labels(
                     NodeKind::Queue => format!("{}", node.buffer.len()),
                     NodeKind::Sink => format!("{}", node.sink_total),
                     NodeKind::Router => String::new(),
+                    NodeKind::Custom => format!("{} nodes", node.contains.len()),
                 },
                 None => String::new(),
             };
@@ -858,6 +954,191 @@ fn fmt_duration_short(ns: u64) -> String {
         format!("{:.0}µs", ns as f64 / NS_PER_US as f64)
     } else {
         format!("{}ns", ns)
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn group_selected_into_composite(
+    keys: Res<ButtonInput<KeyCode>>,
+    selected_q: Query<(Entity, &Transform, &SimNodeRef, &SimNode), With<Selected>>,
+    edge_q: Query<(Entity, &crate::edges::Edge, &crate::bridge::SimEdgeRef)>,
+    theme: Res<Theme>,
+    edit: Res<EditState>,
+    mut sim_res: ResMut<SimResource>,
+    mut maps: ResMut<EntityMaps>,
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<ColorMaterial>>,
+    mut registry: ResMut<NodeRegistry>,
+) {
+    if edit.is_editing() {
+        return;
+    }
+    let chord = keys.pressed(KeyCode::SuperLeft)
+        || keys.pressed(KeyCode::SuperRight)
+        || keys.pressed(KeyCode::ControlLeft)
+        || keys.pressed(KeyCode::ControlRight);
+    if !chord || !keys.just_pressed(KeyCode::KeyG) {
+        return;
+    }
+
+    let selected: Vec<(Entity, Vec2, crate::sim::NodeId, Color)> = selected_q
+        .iter()
+        .map(|(e, tf, nref, sn)| (e, tf.translation.truncate(), nref.0, sn.color))
+        .collect();
+    if selected.len() < 2 {
+        return;
+    }
+
+    let centroid = selected.iter().map(|(_, p, _, _)| *p).sum::<Vec2>() / selected.len() as f32;
+    let color = selected[0].3;
+    let selected_ids: HashSet<crate::sim::NodeId> =
+        selected.iter().map(|(_, _, id, _)| *id).collect();
+
+    let sim_color = crate::bridge::bevy_to_sim_color(color);
+    let Some(result) = sim_res.0.group_into_composite(&selected_ids, "Group", sim_color) else {
+        return;
+    };
+
+    // Members stay as Bevy entities — the composite is a boundary
+    // drawn AROUND them, not a replacement for them. Only external
+    // edges that the sim-side rewired need new edge entities; the
+    // removed outer edges need their Bevy entities despawned.
+    let removed_edges: HashSet<crate::sim::EdgeId> =
+        result.removed_outer_edges.iter().copied().collect();
+    for (edge_entity, _, eref) in edge_q.iter() {
+        if removed_edges.contains(&eref.0) {
+            maps.entity_to_edge.remove(&edge_entity);
+            maps.edge_to_entity.remove(&eref.0);
+            commands.entity(edge_entity).despawn();
+        }
+    }
+    // Also deselect the absorbed members so the next thing the user
+    // does doesn't operate on 5 selected nodes.
+    for (entity, _, nref, _) in selected_q.iter() {
+        if result.absorbed_nodes.contains(&nref.0) {
+            commands.entity(entity).remove::<Selected>();
+        }
+    }
+
+    let composite_entity = spawn_composite_entity(
+        &mut commands,
+        &mut meshes,
+        &mut materials,
+        &theme,
+        centroid,
+        color,
+    );
+    commands
+        .entity(composite_entity)
+        .insert(SimNodeRef(result.composite));
+    bind_existing_node(&mut maps, composite_entity, result.composite);
+    registry.positions.insert(composite_entity, centroid);
+
+    for eid in &result.new_outer_edges {
+        let Some(edge) = sim_res.0.edges.get(eid).cloned() else { continue };
+        let from_entity = if edge.from == result.composite {
+            composite_entity
+        } else {
+            match maps.node_to_entity.get(&edge.from) {
+                Some(e) => *e,
+                None => continue,
+            }
+        };
+        let to_entity = if edge.to == result.composite {
+            composite_entity
+        } else {
+            match maps.node_to_entity.get(&edge.to) {
+                Some(e) => *e,
+                None => continue,
+            }
+        };
+        let edge_entity = commands
+            .spawn((
+                crate::edges::Edge {
+                    from: from_entity,
+                    to: to_entity,
+                },
+                crate::bridge::SimEdgeRef(*eid),
+            ))
+            .id();
+        bind_existing_edge(&mut maps, edge_entity, *eid);
+    }
+}
+
+/// Marker on a composite's lightweight entity. The composite doesn't
+/// own a body mesh — it's drawn as a boundary box by
+/// `draw_composite_boundaries` each frame, computed from the bounding
+/// box of its member nodes' current positions.
+#[derive(Component)]
+pub struct CompositeTag;
+
+fn spawn_composite_entity(
+    commands: &mut Commands,
+    _meshes: &mut Assets<Mesh>,
+    _materials: &mut Assets<ColorMaterial>,
+    _theme: &Theme,
+    pos: Vec2,
+    color: Color,
+) -> Entity {
+    // The composite is not rendered as a block — it's just a sim
+    // routing node with a label. The boundary around its members is
+    // drawn by `draw_composite_boundaries` from live transforms.
+    commands
+        .spawn((
+            SimNode {
+                kind: NodeKind::Custom,
+                color,
+            },
+            CompositeTag,
+            Transform::from_xyz(pos.x, pos.y, 0.0),
+            Visibility::default(),
+        ))
+        .id()
+}
+
+/// Draw a cream-filled rounded rect around every composite's member
+/// nodes, with the composite's label at the top-left corner. Runs
+/// every frame so dragging a member updates the box instantly.
+fn draw_composite_boundaries(
+    mut gizmos: Gizmos,
+    theme: Res<Theme>,
+    composites: Query<(&SimNodeRef, &SimNode), With<CompositeTag>>,
+    member_tfs: Query<(&SimNodeRef, &Transform, &SimNode), Without<CompositeTag>>,
+    sim_res: Res<SimResource>,
+) {
+    for (nref, _sn) in composites.iter() {
+        let Some(node) = sim_res.0.nodes.get(&nref.0) else { continue };
+        let contains: HashSet<crate::sim::NodeId> = node.contains.iter().copied().collect();
+        if contains.is_empty() {
+            continue;
+        }
+        let mut min = Vec2::splat(f32::INFINITY);
+        let mut max = Vec2::splat(f32::NEG_INFINITY);
+        for (m_ref, tf, m_sn) in member_tfs.iter() {
+            if !contains.contains(&m_ref.0) {
+                continue;
+            }
+            let half = m_sn.kind.size() / 2.0;
+            let c = tf.translation.truncate();
+            min = min.min(c - half);
+            max = max.max(c + half);
+        }
+        if min.x.is_infinite() {
+            continue;
+        }
+        let pad = 16.0;
+        min -= Vec2::splat(pad);
+        max += Vec2::splat(pad);
+        let corners = [
+            Vec2::new(min.x, min.y),
+            Vec2::new(max.x, min.y),
+            Vec2::new(max.x, max.y),
+            Vec2::new(min.x, max.y),
+        ];
+        for i in 0..4 {
+            gizmos.line_2d(corners[i], corners[(i + 1) % 4], theme.ink);
+        }
     }
 }
 

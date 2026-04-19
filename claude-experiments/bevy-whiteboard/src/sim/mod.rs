@@ -255,18 +255,6 @@ pub enum Step {
     RespondOnComplete,
     /// Terminal absorb. Stats: increments `sink_total` / per-color.
     Consume,
-    /// Dispatch the packet into this node's inner [`SubBody`]. Only
-    /// valid on composite nodes (`Node::sub` = `Some`). The inner sim
-    /// processes the packet; later, when the inner output-port marks
-    /// a packet `ExportToParent`, the packet reappears on the outer
-    /// executor *after* this step and continues through the remaining
-    /// outer steps. Panics if the node is not composite.
-    DispatchToSub,
-    /// Push the packet into this node's `exit_queue`. A composite node
-    /// looks for its inner output-port's exit_queue after each inner
-    /// tick and re-injects packets into the outer pipeline. Outside of
-    /// a composite this step is a no-op terminal.
-    ExportToParent,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -333,22 +321,23 @@ pub struct Node {
     pub rtt_sum_ns: u64,
     pub rtt_count: u32,
 
-    // Composite wiring -------------------------------------------------
-    /// If `Some`, this node is a composite: incoming pushes are routed
-    /// into `sub.sim` at `sub.input_port`, and packets exported from
-    /// `sub.output_port` reappear on the outer pipeline.
-    pub sub: Option<Box<SubBody>>,
-    /// Packets queued by a `Step::ExportToParent` on this node, awaiting
-    /// re-injection into the enclosing composite's outer pipeline.
-    pub exit_queue: VecDeque<Packet>,
-}
-
-/// Inner body of a composite node.
-#[derive(Clone, Debug)]
-pub struct SubBody {
-    pub sim: Sim,
-    pub input_port: NodeId,
-    pub output_port: NodeId,
+    // Composite membership ---------------------------------------------
+    /// If non-empty, this node is a composite: it visually groups the
+    /// listed member node ids (which still live in the outer sim). The
+    /// composite itself acts as a routing waypoint: external pushes
+    /// land on the composite and its `ForwardOut` fans them into
+    /// internal edges that reach the real members. Edges leaving the
+    /// composite's `output_port` are rendered as leaving the composite
+    /// boundary but are plain sim edges from the member.
+    pub contains: Vec<NodeId>,
+    /// Member node that receives incoming pushes via the composite.
+    pub input_port: Option<NodeId>,
+    /// Member node whose outgoing edges are rendered as leaving the
+    /// composite boundary (pure presentation; the sim edge is just a
+    /// regular outbound from this member).
+    pub output_port: Option<NodeId>,
+    /// If this node is a member of a composite, the composite's id.
+    pub parent: Option<NodeId>,
 }
 
 impl Default for NodeKind {
@@ -496,6 +485,19 @@ pub struct Sim {
 pub struct Edge {
     pub from: NodeId,
     pub to: NodeId,
+    /// Who initiates transfer across this edge. `Push` is the default:
+    /// the source decides when to fire (Generator tick, Queue drain,
+    /// Worker post-process Forward). `Pull` inverts that — the
+    /// destination decides: when it is ready, it asks the source for
+    /// one packet. A Queue→Worker edge in `Pull` mode means the Worker
+    /// reaches back for work when idle, rather than the Queue pushing.
+    pub mode: EdgeMode,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EdgeMode {
+    Push,
+    Pull,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -672,49 +674,26 @@ impl Sim {
         id
     }
 
-    /// Build a composite node whose behavior is a nested `Sim`. The
-    /// closure constructs the inner topology and returns
-    /// `(input_port, output_port)` — two node ids inside the inner sim
-    /// that serve as the composite's external interface. External
-    /// pushes to the composite enter at `input_port`; packets exported
-    /// from `output_port` (via `Step::ExportToParent`) reappear on the
-    /// composite's outer pipeline after the `DispatchToSub` step.
-    pub fn add_composite(
-        &mut self,
-        name: impl Into<String>,
-        color: Color,
-        build: impl FnOnce(&mut Sim) -> (NodeId, NodeId),
-    ) -> NodeId {
-        let id = self.fresh_node();
-        let mut inner = Sim::new();
-        let (input_port, output_port) = build(&mut inner);
-        let mut node = Node::new(
-            name.into(),
-            NodeKind::Custom,
-            color,
-            vec![
-                Step::AcceptInbound,
-                Step::DispatchToSub,
-                Step::ForwardOut {
-                    strategy: ForwardStrategy::ForwardOrConsume,
-                },
-            ],
-        );
-        node.sub = Some(Box::new(SubBody {
-            sim: inner,
-            input_port,
-            output_port,
-        }));
-        self.nodes.insert(id, node);
+    pub fn connect(&mut self, from: NodeId, to: NodeId) -> EdgeId {
+        self.connect_with_mode(from, to, EdgeMode::Push)
+    }
+
+    pub fn connect_pull(&mut self, from: NodeId, to: NodeId) -> EdgeId {
+        self.connect_with_mode(from, to, EdgeMode::Pull)
+    }
+
+    pub fn connect_with_mode(&mut self, from: NodeId, to: NodeId, mode: EdgeMode) -> EdgeId {
+        let id = self.next_edge_id;
+        self.next_edge_id += 1;
+        self.edges.insert(id, Edge { from, to, mode });
+        self.outbound.entry(from).or_default().push(id);
         id
     }
 
-    pub fn connect(&mut self, from: NodeId, to: NodeId) -> EdgeId {
-        let id = self.next_edge_id;
-        self.next_edge_id += 1;
-        self.edges.insert(id, Edge { from, to });
-        self.outbound.entry(from).or_default().push(id);
-        id
+    pub fn set_edge_mode(&mut self, id: EdgeId, mode: EdgeMode) {
+        if let Some(e) = self.edges.get_mut(&id) {
+            e.mode = mode;
+        }
     }
 
     pub fn set_generator_period_ns(&mut self, id: NodeId, period_ns: TimeNs) {
@@ -772,6 +751,120 @@ impl Sim {
         self.remove_edge_inner(id)
     }
 
+    /// Pull a set of selected nodes (and the edges entirely between them)
+    /// into a new composite node. External edges touching the selection
+    /// are rewired to connect the outer world to the composite via
+    /// auto-inserted entry/exit gateways inside. Returns the new
+    /// composite's outer id plus the ids of outer edges that were
+    /// removed (so the caller can despawn the corresponding Bevy edge
+    /// entities) and the ids of fresh outer edges created to replace
+    /// them.
+    pub fn group_into_composite(
+        &mut self,
+        selected: &HashSet<NodeId>,
+        name: impl Into<String>,
+        color: Color,
+    ) -> Option<GroupResult> {
+        if selected.len() < 2 || !selected.iter().all(|id| self.nodes.contains_key(id)) {
+            return None;
+        }
+
+        // Bucket all incident edges.
+        let mut internal_edges: Vec<EdgeId> = Vec::new();
+        let mut ext_in: Vec<EdgeId> = Vec::new();
+        let mut ext_out: Vec<EdgeId> = Vec::new();
+        for (eid, e) in &self.edges {
+            let from_sel = selected.contains(&e.from);
+            let to_sel = selected.contains(&e.to);
+            match (from_sel, to_sel) {
+                (true, true) => internal_edges.push(*eid),
+                (false, true) => ext_in.push(*eid),
+                (true, false) => ext_out.push(*eid),
+                (false, false) => {}
+            }
+        }
+
+        // Pick a stable, deterministic ordering for selection. input
+        // port is the first selected node (by id) that is the target
+        // of any external-in edge; else first selected node. Output
+        // port is analogous for external-out.
+        let mut sel_sorted: Vec<NodeId> = selected.iter().copied().collect();
+        sel_sorted.sort_unstable();
+        let input_port = ext_in
+            .iter()
+            .filter_map(|eid| self.edges.get(eid).map(|e| e.to))
+            .min()
+            .unwrap_or_else(|| sel_sorted[0]);
+        let output_port = ext_out
+            .iter()
+            .filter_map(|eid| self.edges.get(eid).map(|e| e.from))
+            .min()
+            .unwrap_or_else(|| sel_sorted[sel_sorted.len() - 1]);
+
+        // Create composite node in outer sim. Its steps forward
+        // incoming packets into internal edges leading to member
+        // nodes. Output packets from members leave via ordinary
+        // outbound edges — no special routing; we only redirect the
+        // external-out SIM edge so it still points at the real
+        // external target (the composite is purely visual for the
+        // output side).
+        let composite_id = self.fresh_node();
+        let mut comp = Node::new(
+            name,
+            NodeKind::Custom,
+            color,
+            vec![
+                Step::AcceptInbound,
+                Step::ForwardOut {
+                    strategy: ForwardStrategy::BlindRoundRobin,
+                },
+            ],
+        );
+        comp.contains = sel_sorted.clone();
+        comp.input_port = Some(input_port);
+        comp.output_port = Some(output_port);
+
+        // Tag each member with its parent.
+        for id in &sel_sorted {
+            if let Some(n) = self.nodes.get_mut(id) {
+                n.parent = Some(composite_id);
+            }
+        }
+
+        self.nodes.insert(composite_id, comp);
+
+        // Rewire external-in edges: each X → A_selected becomes
+        // X → composite, and we add an internal composite → A_selected
+        // edge so the composite's ForwardOut pushes packets to the
+        // correct member.
+        let mut removed_outer_edges: Vec<EdgeId> = Vec::new();
+        let mut new_outer_edges: Vec<EdgeId> = Vec::new();
+        // Track (original_target → new-from-composite edge id) so we
+        // don't double-create composite→A if multiple external edges
+        // landed on the same A.
+        let mut comp_to_member_added: HashSet<NodeId> = HashSet::new();
+        for eid in &ext_in {
+            let Some(e) = self.edges.get(eid).cloned() else { continue };
+            self.remove_edge_inner(*eid);
+            removed_outer_edges.push(*eid);
+            new_outer_edges.push(self.connect(e.from, composite_id));
+            if comp_to_member_added.insert(e.to) {
+                self.connect(composite_id, e.to);
+            }
+        }
+        // External-out edges: leave the sim edge as (B_selected → Y)
+        // untouched. They'll be rendered as leaving the composite
+        // boundary via the Bevy layer's awareness of composite
+        // membership.
+
+        Some(GroupResult {
+            composite: composite_id,
+            absorbed_nodes: sel_sorted,
+            removed_outer_edges,
+            new_outer_edges,
+        })
+    }
+
     fn remove_edge_inner(&mut self, id: EdgeId) -> bool {
         let Some(edge) = self.edges.remove(&id) else {
             return false;
@@ -825,16 +918,6 @@ impl Sim {
                 let t = node.started_at_ns.saturating_add(node.processing_ns());
                 min = Some(min.map_or(t, |m| m.min(t)));
             }
-            // Composite: aggregate inner sim's next event, and drain
-            // the inner output-port's exit_queue immediately (now).
-            if let Some(sub) = &node.sub {
-                if let Some(t) = sub.sim.next_event_ns() {
-                    min = Some(min.map_or(t, |m| m.min(t)));
-                }
-                if !sub.sim.nodes[&sub.output_port].exit_queue.is_empty() {
-                    min = Some(min.map_or(self.now_ns, |m| m.min(self.now_ns)));
-                }
-            }
         }
         min
     }
@@ -843,38 +926,73 @@ impl Sim {
         self.complete_processing(events);
         self.drain_buffers(events);
         self.emit_due(events);
-        self.tick_composites(events);
+        self.service_pullers(events);
     }
 
-    /// For every composite node: sync inner clock, run inner
-    /// process_due, then drain any packets exported from the inner
-    /// output-port back into the outer pipeline.
-    fn tick_composites(&mut self, events: &mut Vec<SimEvent>) {
-        let composite_ids: Vec<NodeId> = self
+    /// Pull-side execution: find every node that is currently ready
+    /// to accept (its step list gates pass) and has at least one
+    /// Pull-mode inbound edge. Ask each such source to yield one
+    /// packet (currently only a buffered source, i.e. a Queue, can
+    /// yield). If yielded, the packet travels across the pull edge to
+    /// the puller's usual arrival path. At most one pull per puller
+    /// per tick — re-entry via the next `process_due` call handles
+    /// steady draining as the puller becomes idle again.
+    fn service_pullers(&mut self, events: &mut Vec<SimEvent>) {
+        let mut pullers: Vec<NodeId> = self
             .nodes
             .iter()
-            .filter_map(|(id, n)| n.sub.is_some().then_some(*id))
+            .filter_map(|(id, _)| {
+                let has_pull = self
+                    .edges
+                    .values()
+                    .any(|e| e.to == *id && e.mode == EdgeMode::Pull);
+                has_pull.then_some(*id)
+            })
             .collect();
-        for cid in composite_ids {
-            // Advance inner sim up to now.
-            let exported: Vec<Packet> = {
-                let Some(n) = self.nodes.get_mut(&cid) else { continue };
-                let Some(sub) = n.sub.as_mut() else { continue };
-                sub.sim.now_ns = self.now_ns;
-                let mut inner_events = Vec::new();
-                sub.sim.process_due(&mut inner_events);
-                let out_port = sub.output_port;
-                let Some(out_node) = sub.sim.nodes.get_mut(&out_port) else { continue };
-                out_node.exit_queue.drain(..).collect()
-            };
-            if exported.is_empty() {
+        pullers.sort_unstable();
+
+        for pid in pullers {
+            let Some(color) = self.nodes.get(&pid).map(|n| n.color) else { continue };
+            if !self.is_ready_now(pid, color) {
                 continue;
             }
-            let resume_idx = self.nodes.get(&cid).map(|n| n.outbound_cursor).unwrap_or(0);
-            for packet in exported {
-                let _ = self.run_steps_from(cid, packet, resume_idx, events);
+            let mut pull_in: Vec<EdgeId> = self
+                .edges
+                .iter()
+                .filter_map(|(eid, e)| {
+                    (e.to == pid && e.mode == EdgeMode::Pull).then_some(*eid)
+                })
+                .collect();
+            pull_in.sort_unstable();
+            for eid in pull_in {
+                let Some(edge) = self.edges.get(&eid).cloned() else { continue };
+                if let Some(packet) = self.try_yield_buffered(edge.from, color) {
+                    self.travel_forward(eid, packet, events);
+                    break;
+                }
             }
         }
+    }
+
+    /// If `source` is a buffered node (has a `Buffer` step and a
+    /// non-empty buffer whose front matches `color`), pop and return
+    /// the front packet. Otherwise `None`. This is the only yield
+    /// pathway today — generators and other sources are not
+    /// pull-responsive yet.
+    fn try_yield_buffered(&mut self, source: NodeId, color: Color) -> Option<Packet> {
+        let n = self.nodes.get_mut(&source)?;
+        if n.down {
+            return None;
+        }
+        if !n.steps.iter().any(|s| matches!(s, Step::Buffer { .. })) {
+            return None;
+        }
+        if n.buffer.front().map(|p| p.color) != Some(color) {
+            return None;
+        }
+        let p = n.buffer.pop_front()?;
+        n.total_out += 1;
+        Some(p)
     }
 
     // --- Source emission --------------------------------------------------
@@ -1130,13 +1248,25 @@ impl Sim {
                 Step::ForwardOut { strategy } => {
                     let (candidates, empty_is_drop) = match strategy {
                         ForwardStrategy::BlindRoundRobin => {
-                            // Blind push: round-robin across ALL outbound
-                            // (not filtered by readiness). Only drop if
-                            // outbound list is genuinely empty.
-                            let outs = self
+                            // Blind push: round-robin across all
+                            // PUSH-mode outbound (readiness ignored;
+                            // pull edges are excluded — the receiver
+                            // will come fetch when ready). Only drop
+                            // if the push-outbound set is empty.
+                            let outs: Vec<EdgeId> = self
                                 .outbound
                                 .get(&nid)
-                                .cloned()
+                                .map(|v| {
+                                    v.iter()
+                                        .copied()
+                                        .filter(|eid| {
+                                            self.edges
+                                                .get(eid)
+                                                .map(|e| e.mode == EdgeMode::Push)
+                                                .unwrap_or(false)
+                                        })
+                                        .collect()
+                                })
                                 .unwrap_or_default();
                             (outs, true)
                         }
@@ -1178,60 +1308,6 @@ impl Sim {
                     if let Some(n) = self.nodes.get_mut(&nid) {
                         *n.sink_per_color.entry(packet.color).or_insert(0) += 1;
                         n.sink_total += 1;
-                    }
-                    return StepOutcome::Consumed;
-                }
-                Step::DispatchToSub => {
-                    // Route into the composite's inner sim at its
-                    // input port. The packet will re-enter this node's
-                    // outer pipeline later when the inner output port
-                    // hits `ExportToParent`. We remember which step to
-                    // resume at on the node so re-injection knows
-                    // where to start.
-                    let (input_port, resume_idx) = {
-                        let Some(n) = self.nodes.get_mut(&nid) else {
-                            return StepOutcome::Consumed;
-                        };
-                        let Some(sub) = n.sub.as_ref() else {
-                            // Not a composite — treat as silent pass-through.
-                            idx += 1;
-                            continue;
-                        };
-                        (sub.input_port, idx + 1)
-                    };
-                    // Store the resume index on the node so when the
-                    // inner export bubbles out we know where to pick
-                    // up. We encode this by stashing in
-                    // `started_at_ns`'s companion slot — but cleaner:
-                    // use `outbound_cursor` field we already have
-                    // and aren't using on composites. Reserve it for
-                    // "composite resume idx". (u64 is plenty.)
-                    if let Some(n) = self.nodes.get_mut(&nid) {
-                        n.outbound_cursor = resume_idx;
-                    }
-                    // Dispatch into inner sim.
-                    let inner_sim = self
-                        .nodes
-                        .get_mut(&nid)
-                        .and_then(|n| n.sub.as_mut())
-                        .map(|sub| &mut sub.sim);
-                    if let Some(inner) = inner_sim {
-                        // Inner sim shares the parent clock.
-                        inner.now_ns = self.now_ns;
-                        let mut inner_events = Vec::new();
-                        inner.deliver_push(input_port, packet, &mut inner_events);
-                        // Inner events are private to the composite;
-                        // do not leak them to the outer event stream.
-                    }
-                    return StepOutcome::Dispatched;
-                }
-                Step::ExportToParent => {
-                    // Stash the packet on this node's exit_queue; the
-                    // enclosing composite drains it after its own
-                    // tick. If there is no enclosing composite this
-                    // step is effectively a terminal.
-                    if let Some(n) = self.nodes.get_mut(&nid) {
-                        n.exit_queue.push_back(packet);
                     }
                     return StepOutcome::Consumed;
                 }
@@ -1351,6 +1427,9 @@ impl Sim {
 
     // --- Readiness --------------------------------------------------------
 
+    /// Push-mode outbound edges whose destination is ready for
+    /// `color` right now. Pull edges are deliberately excluded — only
+    /// the pull-side executor uses them.
     fn ready_outbound_candidates(&self, source: NodeId, color: Color) -> Vec<EdgeId> {
         let Some(outs) = self.outbound.get(&source) else {
             return Vec::new();
@@ -1359,7 +1438,7 @@ impl Sim {
             .copied()
             .filter(|eid| {
                 let e = &self.edges[eid];
-                self.is_ready_now(e.to, color)
+                e.mode == EdgeMode::Push && self.is_ready_now(e.to, color)
             })
             .collect()
     }
@@ -1411,15 +1490,6 @@ impl Sim {
                     });
                 }
                 Step::Consume => return true,
-                Step::DispatchToSub => {
-                    // Composite: ready iff the inner input port is
-                    // ready for this color.
-                    if let Some(sub) = &n.sub {
-                        return sub.sim.is_ready_now(sub.input_port, color);
-                    }
-                    return false;
-                }
-                Step::ExportToParent => return true,
             }
         }
         false
@@ -1626,6 +1696,17 @@ impl Sim {
     }
 }
 
+/// Result of `Sim::group_into_composite`. Contains the new composite's
+/// outer id plus the edge-id deltas the caller needs to reconcile Bevy
+/// entities with.
+#[derive(Debug)]
+pub struct GroupResult {
+    pub composite: NodeId,
+    pub absorbed_nodes: Vec<NodeId>,
+    pub removed_outer_edges: Vec<EdgeId>,
+    pub new_outer_edges: Vec<EdgeId>,
+}
+
 // ---- Outcomes & helpers --------------------------------------------------
 
 enum StepOutcome {
@@ -1633,7 +1714,6 @@ enum StepOutcome {
     Consumed,
     Buffered,
     Processing,
-    Dispatched,
     Dropped { reason: LostReason, color: Color },
 }
 
@@ -2224,40 +2304,181 @@ mod tests {
     }
 
     #[test]
-    fn composite_wraps_inner_pipeline() {
-        // Outer: Gen → Composite → Sink.
-        // Composite internals: input_worker (0ms) → ExportToParent.
-        // A packet enters the composite, gets processed by the inner
-        // worker, exports out to the outer Sink.
+    fn grouping_worker_and_sink_preserves_throughput() {
+        // Gen → Worker → Sink, group Worker+Sink into a composite.
+        // Observable behavior: the Sink's sink_total (still addressable
+        // on the outer sim, since members live there) must match the
+        // un-grouped baseline within ±1.
         let mut sim = Sim::new();
-        let g = sim.add_generator(RED, rate_to_period_ns(5.0));
+        let g = sim.add_generator(RED, rate_to_period_ns(2.0));
+        let w = add_worker_secs(&mut sim, RED, 0.1);
         let s = sim.add_sink(RED);
-        let c = sim.add_composite("MyNode", RED, |inner| {
-            // Input port: a no-op pass-through node that accepts and
-            // exports.
-            let pass = inner.nodes.len() as NodeId; // fresh id will be 0
-            let pass_id = {
-                let mut n = Node::new(
-                    "pass",
-                    NodeKind::Custom,
-                    RED,
-                    vec![
-                        Step::AcceptInbound,
-                        Step::MatchColor { color: RED },
-                        Step::ExportToParent,
-                    ],
-                );
-                let id = pass;
-                inner.nodes.insert(id, n);
-                inner.next_node_id = id + 1;
-                id
-            };
-            (pass_id, pass_id)
-        });
-        sim.connect(g, c);
-        sim.connect(c, s);
+        sim.connect(g, w);
+        sim.connect(w, s);
+        let mut baseline = sim.clone();
+        advance_secs(&mut baseline, 2.0);
+        let baseline_sunk = baseline.nodes[&s].sink_total;
+
+        let mut selected: HashSet<NodeId> = HashSet::new();
+        selected.insert(w);
+        selected.insert(s);
+        sim.group_into_composite(&selected, "Pipeline", RED).unwrap();
+        advance_secs(&mut sim, 2.0);
+
+        let sunk = sim.nodes[&s].sink_total;
+        assert!(
+            sunk >= baseline_sunk.saturating_sub(1) && sunk <= baseline_sunk + 1,
+            "grouped sink {} vs baseline {}",
+            sunk,
+            baseline_sunk
+        );
+    }
+
+    #[test]
+    fn grouping_gen_gen_router_all_flows_through() {
+        // Two generators and a router, all grouped. Their flow must
+        // still reach downstream sinks unchanged: the composite adds no
+        // new sim behavior beyond routing its external-in edges into
+        // the members it contains. Gens are self-sourced (no external
+        // in) so they fire as before.
+        let mut sim = Sim::new();
+        let g1 = add_gen(&mut sim, RED, 5.0);
+        let g2 = add_gen(&mut sim, YELLOW, 5.0);
+        let r = sim.add_router();
+        let s_r = sim.add_sink(RED);
+        let s_y = sim.add_sink(YELLOW);
+        sim.connect(g1, r);
+        sim.connect(g2, r);
+        sim.connect(r, s_r);
+        sim.connect(r, s_y);
+
+        let mut selected: HashSet<NodeId> = HashSet::new();
+        selected.insert(g1);
+        selected.insert(g2);
+        selected.insert(r);
+        sim.group_into_composite(&selected, "Sources", RED).unwrap();
+
         advance_secs(&mut sim, 1.0);
-        assert_eq!(sim.nodes[&s].sink_total, 5);
+        assert_eq!(sim.nodes[&s_r].sink_total, 5);
+        assert_eq!(sim.nodes[&s_y].sink_total, 5);
+    }
+
+    #[test]
+    fn grouping_queue_worker_probe_stays_visible() {
+        // Gen → Queue → Worker → Sink. Group {Queue, Worker}. The
+        // queue's buffer depth, in/out stats, and the worker's
+        // processed count must all still be directly readable on the
+        // outer sim (because members live in the outer sim after
+        // grouping — no hidden inner sim).
+        let mut sim = Sim::new();
+        let g = add_gen(&mut sim, RED, 4.0);
+        let q = sim.add_queue(RED, usize::MAX);
+        let w = add_worker_secs(&mut sim, RED, 0.5);
+        let s = sim.add_sink(RED);
+        sim.connect(g, q);
+        sim.connect(q, w);
+        sim.connect(w, s);
+
+        let mut sel: HashSet<NodeId> = HashSet::new();
+        sel.insert(q);
+        sel.insert(w);
+        sim.group_into_composite(&sel, "QWpair", RED).unwrap();
+
+        advance_secs(&mut sim, 2.0);
+        // Probing Q: its stats are still on the outer sim node.
+        let queue_total_in = sim.nodes[&q].total_in;
+        let queue_total_out = sim.nodes[&q].total_out;
+        let worker_processed = sim.nodes[&w].processed;
+        let sink_total = sim.nodes[&s].sink_total;
+        assert!(
+            queue_total_in >= 7,
+            "queue total_in too low: {queue_total_in}"
+        );
+        assert!(
+            worker_processed >= 3,
+            "worker processed too low: {worker_processed}"
+        );
+        assert_eq!(
+            queue_total_out, worker_processed + sim.nodes[&w].holding.is_some() as u32,
+            "queue out == worker in-flight+processed"
+        );
+        assert!(sink_total >= 3, "sink too low: {sink_total}");
+    }
+
+    #[test]
+    fn grouping_client_queue_worker_acks_immediately() {
+        // Client → Queue → Worker, group Queue+Worker. Queue still
+        // acks immediately; Client sees fast responses despite slow
+        // Worker.
+        let mut sim = Sim::new();
+        let c = sim.add_client(RED, rate_to_period_ns(2.0));
+        let q = sim.add_queue(RED, usize::MAX);
+        let w = add_worker_secs(&mut sim, RED, 0.5);
+        sim.connect(c, q);
+        sim.connect(q, w);
+        let mut sel: HashSet<NodeId> = HashSet::new();
+        sel.insert(q);
+        sel.insert(w);
+        sim.group_into_composite(&sel, "QW", RED).unwrap();
+
+        advance_secs(&mut sim, 1.0);
+        let client = &sim.nodes[&c];
+        assert_eq!(client.sent, 2);
+        assert_eq!(client.received, 2, "queue should ack both immediately");
+    }
+
+    #[test]
+    fn pull_edge_drains_queue_to_worker() {
+        // Gen → Queue [push], Queue → Worker [PULL]. With a pull
+        // edge, the queue does NOT push to the worker; the worker
+        // initiates. Worker is idle, queue has packets, so on each
+        // tick the worker pulls one and starts processing.
+        let mut sim = Sim::new();
+        let g = add_gen(&mut sim, RED, 4.0);
+        let q = sim.add_queue(RED, usize::MAX);
+        let w = add_worker_secs(&mut sim, RED, 0.5);
+        sim.connect(g, q);
+        sim.connect_pull(q, w); // pull edge
+        advance_secs(&mut sim, 2.0);
+        let processed = sim.nodes[&w].processed;
+        let depth = sim.nodes[&q].buffer.len() as u32;
+        let in_worker = sim.nodes[&w].holding.is_some() as u32;
+        assert_eq!(processed + depth + in_worker, 8);
+        assert!(processed >= 3, "worker processed only {processed}");
+    }
+
+    #[test]
+    fn pull_edge_waits_when_worker_busy() {
+        // Gen → Queue [push], Queue → Worker [PULL]. Worker is slow;
+        // queue should back up because the pull-worker only yanks
+        // when idle.
+        let mut sim = Sim::new();
+        let g = add_gen(&mut sim, RED, 10.0);
+        let q = sim.add_queue(RED, usize::MAX);
+        let w = add_worker_secs(&mut sim, RED, 1.0);
+        sim.connect(g, q);
+        sim.connect_pull(q, w);
+        advance_secs(&mut sim, 2.0);
+        let processed = sim.nodes[&w].processed;
+        let depth = sim.nodes[&q].buffer.len() as u32;
+        assert!(processed <= 2, "expected ≤2 processed, got {processed}");
+        assert!(depth >= 17, "expected queue to back up, depth {depth}");
+    }
+
+    #[test]
+    fn pull_edge_ignores_generator_push() {
+        // Gen → Worker with a PULL edge. Generator fires but the
+        // pull-only edge means the generator's BlindRoundRobin does
+        // NOT push across it — the edge is dead to pushes. Worker,
+        // having no buffer to pull from, gets nothing. Gen drops
+        // every emission as "no push outbound."
+        let mut sim = Sim::new();
+        let g = add_gen(&mut sim, RED, 5.0);
+        let w = add_worker_secs(&mut sim, RED, 0.1);
+        sim.connect_pull(g, w);
+        advance_secs(&mut sim, 1.0);
+        assert_eq!(sim.nodes[&w].processed, 0);
+        assert!(sim.nodes[&g].dropped >= 4);
     }
 
     #[test]
