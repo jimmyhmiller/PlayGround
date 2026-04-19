@@ -3721,6 +3721,13 @@ where
                 }
             })
             .collect();
+        root_slots.extend(
+            self.func
+                .stack_slots
+                .iter()
+                .enumerate()
+                .filter_map(|(idx, slot)| slot.is_gc_root.then_some(self.stack_slot_offsets[idx])),
+        );
         root_slots.sort_unstable();
         root_slots.dedup();
         root_slots

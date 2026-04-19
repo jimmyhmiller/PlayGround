@@ -2,11 +2,15 @@ use std::cell::Cell;
 use std::collections::HashMap;
 use std::process::Command;
 
+use dynir::dynexec::{
+    AArch64InternalCc, CodegenConfig, PreciseStackRoots, StackMapFrames, StackMapRoots,
+    StackMapSafepoints,
+};
 #[allow(unused_imports)]
 use dynlower::{JitFunction, SafepointHandlerPayloadKind, SafepointRecord, call_jit};
 use dynruntime::{
     JitRootTransportRuntime, JitSafepointSession, MutatorRootManager, NanBoxPtrPolicy,
-    active_jit_safepoint_handler,
+    ScopedJitRoots, active_jit_safepoint_handler,
 };
 use dynvalue::{Decoded, NanBox, TagScheme};
 
@@ -39,6 +43,16 @@ fn with_jit_ctx<R>(f: impl FnOnce(&JitContext, &mut LuaRuntime) -> R) -> R {
     let ctx = unsafe { &*ctx_ptr };
     let rt = unsafe { &mut *ctx.rt };
     f(ctx, rt)
+}
+
+struct LuaJitStackMapConfig;
+impl CodegenConfig for LuaJitStackMapConfig {
+    type Layout = NanBox;
+    type Roots = PreciseStackRoots;
+    type RootTransport = StackMapRoots;
+    type CallingConvention = AArch64InternalCc;
+    type Frames = StackMapFrames;
+    type Safepoints = StackMapSafepoints;
 }
 
 struct LuaCallArgs {
@@ -99,6 +113,7 @@ impl LuaCallArgs {
 /// all words) plus the Lua register_file which holds values across calls.
 struct LuaJitTransport {
     register_file: *const Vec<u64>,
+    precise_frame_roots: bool,
 }
 
 // Safety: only used single-threaded; pointer valid during JIT execution.
@@ -107,21 +122,33 @@ unsafe impl Sync for LuaJitTransport {}
 
 impl JitRootTransportRuntime for LuaJitTransport {
     fn payload_kind(&self) -> SafepointHandlerPayloadKind {
-        SafepointHandlerPayloadKind::FrameSize
+        if self.precise_frame_roots {
+            SafepointHandlerPayloadKind::SafepointIndex
+        } else {
+            SafepointHandlerPayloadKind::FrameSize
+        }
     }
 
     unsafe fn scan_roots(
         &self,
         frame_ptr: *mut u8,
         payload: usize,
-        _safepoints: &[SafepointRecord],
+        safepoints: &[SafepointRecord],
         visitor: &mut dyn FnMut(*mut u64),
     ) {
-        // Scan all words in the current JIT frame (same as FrameScanJitTransport)
-        let frame_words = payload / 8;
-        let base = frame_ptr as *mut u64;
-        for i in 0..frame_words {
-            visitor(unsafe { base.add(i) });
+        if self.precise_frame_roots {
+            let record = safepoints
+                .get(payload)
+                .unwrap_or_else(|| panic!("missing Lua JIT safepoint record {payload}"));
+            for &offset in &record.root_slots {
+                visitor(unsafe { frame_ptr.add(offset as usize).cast::<u64>() });
+            }
+        } else {
+            let frame_words = payload / 8;
+            let base = frame_ptr as *mut u64;
+            for i in 0..frame_words {
+                visitor(unsafe { base.add(i) });
+            }
         }
 
         // Also scan the Lua register_file (holds values passed to externs)
@@ -300,21 +327,36 @@ extern "C" fn jit_lua_make_closure_1(func_id: u64, _num: u64, u0: u64) -> u64 {
     let ctx = unsafe { &*ctx_ptr };
     let rt = unsafe { &mut *ctx.rt };
     let global_id = remap_func_id(ctx, func_id as usize);
-    runtime::make_closure(rt.heap_ref(), global_id, &[u0])
+    let mut roots = ScopedJitRoots::new();
+    let up0 = roots.push(u0);
+    roots.with_active(|| {
+        runtime::make_closure_from_roots(rt.heap_ref(), global_id, &roots, &[up0])
+    })
 }
 extern "C" fn jit_lua_make_closure_2(func_id: u64, _num: u64, u0: u64, u1: u64) -> u64 {
     let ctx_ptr = JIT_CTX.with(|c| c.get());
     let ctx = unsafe { &*ctx_ptr };
     let rt = unsafe { &mut *ctx.rt };
     let global_id = remap_func_id(ctx, func_id as usize);
-    runtime::make_closure(rt.heap_ref(), global_id, &[u0, u1])
+    let mut roots = ScopedJitRoots::new();
+    let up0 = roots.push(u0);
+    let up1 = roots.push(u1);
+    roots.with_active(|| {
+        runtime::make_closure_from_roots(rt.heap_ref(), global_id, &roots, &[up0, up1])
+    })
 }
 extern "C" fn jit_lua_make_closure_3(func_id: u64, _num: u64, u0: u64, u1: u64, u2: u64) -> u64 {
     let ctx_ptr = JIT_CTX.with(|c| c.get());
     let ctx = unsafe { &*ctx_ptr };
     let rt = unsafe { &mut *ctx.rt };
     let global_id = remap_func_id(ctx, func_id as usize);
-    runtime::make_closure(rt.heap_ref(), global_id, &[u0, u1, u2])
+    let mut roots = ScopedJitRoots::new();
+    let up0 = roots.push(u0);
+    let up1 = roots.push(u1);
+    let up2 = roots.push(u2);
+    roots.with_active(|| {
+        runtime::make_closure_from_roots(rt.heap_ref(), global_id, &roots, &[up0, up1, up2])
+    })
 }
 extern "C" fn jit_lua_make_closure_4(
     func_id: u64,
@@ -328,7 +370,14 @@ extern "C" fn jit_lua_make_closure_4(
     let ctx = unsafe { &*ctx_ptr };
     let rt = unsafe { &mut *ctx.rt };
     let global_id = remap_func_id(ctx, func_id as usize);
-    runtime::make_closure(rt.heap_ref(), global_id, &[u0, u1, u2, u3])
+    let mut roots = ScopedJitRoots::new();
+    let up0 = roots.push(u0);
+    let up1 = roots.push(u1);
+    let up2 = roots.push(u2);
+    let up3 = roots.push(u3);
+    roots.with_active(|| {
+        runtime::make_closure_from_roots(rt.heap_ref(), global_id, &roots, &[up0, up1, up2, up3])
+    })
 }
 
 /// Build the extern pointer array matching the order in translate.rs.
@@ -372,10 +421,13 @@ fn compile_lua(source: &str) -> Vec<u8> {
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let pid = std::process::id();
 
     let dir = std::env::temp_dir();
-    let src_path = dir.join(format!("lua2dynir_test_{}.lua", id));
-    let out_path = dir.join(format!("lua2dynir_test_{}.luac", id));
+    let work_dir = dir.join(format!("lua2dynir_test_{}_{}", pid, id));
+    std::fs::create_dir(&work_dir).unwrap();
+    let src_path = work_dir.join("input.lua");
+    let out_path = work_dir.join("output.luac");
 
     std::fs::write(&src_path, source).unwrap();
 
@@ -389,6 +441,7 @@ fn compile_lua(source: &str) -> Vec<u8> {
     let data = std::fs::read(&out_path).unwrap();
     let _ = std::fs::remove_file(&src_path);
     let _ = std::fs::remove_file(&out_path);
+    let _ = std::fs::remove_dir(&work_dir);
     data
 }
 
@@ -503,9 +556,17 @@ fn run_lua_inner(source: &str, heap_size: usize, opt: &dynir::opt::OptConfig, us
     let extern_ptrs = jit_extern_ptrs();
     let compile_fn = |func: &dynir::Function, externs: &[*const u8]| -> JitFunction {
         if use_linear_scan {
-            JitFunction::compile_with_gc_linear_scan::<NanBox>(func, externs, active_jit_safepoint_handler)
+            JitFunction::compile_with_gc_linear_scan::<NanBox>(
+                func,
+                externs,
+                active_jit_safepoint_handler,
+            )
         } else {
-            JitFunction::compile_with_gc::<NanBox>(func, externs, active_jit_safepoint_handler)
+            JitFunction::compile_with_config_and_gc::<LuaJitStackMapConfig>(
+                func,
+                externs,
+                Some(active_jit_safepoint_handler as u64),
+            )
         }
     };
     let child_jits: Vec<JitFunction> = child_tfs
@@ -526,6 +587,7 @@ fn run_lua_inner(source: &str, heap_size: usize, opt: &dynir::opt::OptConfig, us
 
     let transport = LuaJitTransport {
         register_file: &rt.register_file as *const Vec<u64>,
+        precise_frame_roots: !use_linear_scan,
     };
     let threshold = if gc_enabled { 0.75 } else { f64::INFINITY };
     let session = JitSafepointSession::<NanBoxPtrPolicy, LuaJitTransport>::new(
@@ -1514,6 +1576,33 @@ fn test_gc_stress_main_loop() {
     assert_eq!(rt.output.trim(), "1250025000");
 }
 
+#[test]
+fn test_gc_straight_line_table_allocs() {
+    let mut src = String::from("local sum = 0\n");
+    for i in 1..=120 {
+        src.push_str(&format!(
+            "do local t = {{}}\n t[1] = {}\n sum = sum + 1\n end\n",
+            i
+        ));
+    }
+    src.push_str("return sum\n");
+
+    let (result, _) = run_lua_with_heap(&src, 8 * 1024);
+    assert_eq!(as_number(result), 120.0);
+}
+
+#[test]
+fn test_gc_straight_line_string_allocs() {
+    let mut src = String::from("local sum = 0\n");
+    for _ in 0..120 {
+        src.push_str("do local s = tostring(123456789)\n sum = sum + #s\n end\n");
+    }
+    src.push_str("return sum\n");
+
+    let (result, _) = run_lua_with_heap(&src, 8 * 1024);
+    assert_eq!(as_number(result), (120 * 9) as f64);
+}
+
 // ─── Table-heavy benchmark ─────────────────────────────────
 //
 // Exercises: integer-keyed tables, string-keyed tables, table creation,
@@ -1677,14 +1766,18 @@ fn test_gc_multi_closure_stress() {
     let child_jits: Vec<JitFunction> = child_tfs
         .iter()
         .map(|tf| {
-            JitFunction::compile_with_gc::<NanBox>(
-                &tf.function, &extern_ptrs, active_jit_safepoint_handler,
+            JitFunction::compile_with_config_and_gc::<LuaJitStackMapConfig>(
+                &tf.function,
+                &extern_ptrs,
+                Some(active_jit_safepoint_handler as u64),
             )
         })
         .collect();
     let child_jit_ptrs: Vec<*const u8> = child_jits.iter().map(|j| j.as_ptr()).collect();
-    let main_jit = JitFunction::compile_with_gc::<NanBox>(
-        &main_tf.function, &extern_ptrs, active_jit_safepoint_handler,
+    let main_jit = JitFunction::compile_with_config_and_gc::<LuaJitStackMapConfig>(
+        &main_tf.function,
+        &extern_ptrs,
+        Some(active_jit_safepoint_handler as u64),
     );
 
     let mut jit_ctx = JitContext {
@@ -1698,6 +1791,7 @@ fn test_gc_multi_closure_stress() {
 
     let transport = LuaJitTransport {
         register_file: &rt.register_file as *const Vec<u64>,
+        precise_frame_roots: true,
     };
     let session = JitSafepointSession::<NanBoxPtrPolicy, LuaJitTransport>::new(
         roots.heap(), transport, main_jit.safepoints(),
@@ -1838,14 +1932,18 @@ fn bench_table_heavy_jit() {
     let child_jits: Vec<JitFunction> = child_tfs
         .iter()
         .map(|tf| {
-            JitFunction::compile_with_gc::<NanBox>(
-                &tf.function, &extern_ptrs, active_jit_safepoint_handler,
+            JitFunction::compile_with_config_and_gc::<LuaJitStackMapConfig>(
+                &tf.function,
+                &extern_ptrs,
+                Some(active_jit_safepoint_handler as u64),
             )
         })
         .collect();
     let child_jit_ptrs: Vec<*const u8> = child_jits.iter().map(|j| j.as_ptr()).collect();
-    let main_jit = JitFunction::compile_with_gc::<NanBox>(
-        &main_tf.function, &extern_ptrs, active_jit_safepoint_handler,
+    let main_jit = JitFunction::compile_with_config_and_gc::<LuaJitStackMapConfig>(
+        &main_tf.function,
+        &extern_ptrs,
+        Some(active_jit_safepoint_handler as u64),
     );
 
     // ── Execute many times (execution only) ──────────────────
@@ -1868,9 +1966,10 @@ fn bench_table_heavy_jit() {
         };
         JIT_CTX.with(|c| c.set(&mut jit_ctx as *mut JitContext));
 
-        let transport = LuaJitTransport {
-            register_file: &rt.register_file as *const Vec<u64>,
-        };
+    let transport = LuaJitTransport {
+        register_file: &rt.register_file as *const Vec<u64>,
+        precise_frame_roots: true,
+    };
         let session = JitSafepointSession::<NanBoxPtrPolicy, LuaJitTransport>::new(
             roots.heap(), transport, main_jit.safepoints(),
         ).with_gc_threshold(0.75);

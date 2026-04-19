@@ -14,6 +14,7 @@ use dynobj::{
     raw_data_mut, read_raw_bytes, read_type_id, read_value_field, read_varlen_bytes,
     read_varlen_value, write_value_field, write_varlen_value,
 };
+use dynruntime::{ScopedJitRoot, ScopedJitRoots};
 use dynvalue::{NanBox, TagScheme, Value};
 
 // NanBox tag constants
@@ -149,6 +150,27 @@ pub fn make_closure(heap: &Heap, func_id: usize, upvalues: &[u64]) -> u64 {
     encode_gc_ptr(ptr)
 }
 
+pub(crate) fn make_closure_from_roots(
+    heap: &Heap,
+    func_id: usize,
+    roots: &ScopedJitRoots,
+    upvalues: &[ScopedJitRoot],
+) -> u64 {
+    let ptr = heap.alloc_obj::<Compact>(&CLOSURE_TYPE, upvalues.len());
+    assert!(
+        !ptr.is_null(),
+        "GC heap exhausted during closure allocation"
+    );
+    unsafe {
+        let raw = raw_data_mut(ptr, &CLOSURE_TYPE);
+        raw[0..8].copy_from_slice(&(func_id as u64).to_ne_bytes());
+        for (i, root) in upvalues.iter().copied().enumerate() {
+            write_varlen_value::<NanBox>(ptr, &CLOSURE_TYPE, i, Value::from_bits(roots.get(root)));
+        }
+    }
+    encode_gc_ptr(ptr)
+}
+
 pub fn is_closure(v: u64) -> bool {
     if !NanBox::has_tag(v, TAG_PTR) {
         return false;
@@ -268,6 +290,13 @@ fn table_get_array_ptr(ptr: *const u8) -> Option<*mut u8> {
     Some(NanBox::extract_payload(bits) as *mut u8)
 }
 
+fn table_ptr_from_boxed(table: u64) -> Option<*mut u8> {
+    if !is_table(table) {
+        return None;
+    }
+    Some(NanBox::extract_payload(table) as *mut u8)
+}
+
 fn hash_u64(key: u64) -> usize {
     key.wrapping_mul(0x517cc1b727220a95) as usize
 }
@@ -332,40 +361,58 @@ fn table_get(table_ptr: *const u8, key: u64) -> u64 {
     make_nil()
 }
 
-fn table_set(heap: &Heap, table_ptr: *mut u8, key: u64, val: u64) {
-    // Try array part for sequential positive integer keys
+fn table_set_rooted(
+    heap: &Heap,
+    roots: &ScopedJitRoots,
+    table_root: ScopedJitRoot,
+    key_root: ScopedJitRoot,
+    val_root: ScopedJitRoot,
+) {
+    let key = roots.get(key_root);
     if is_number(key) {
         let n = as_number(key);
         if n == n.floor() && n >= 1.0 {
             let idx = n as usize;
+            let table_ptr = table_ptr_from_boxed(roots.get(table_root))
+                .expect("rooted table value must stay a table");
             let (hc, hcap, array_len, array_cap) = table_read_meta(table_ptr);
             if idx <= array_len + 1 {
-                table_array_set(heap, table_ptr, idx, val, hc, hcap, array_len, array_cap);
+                table_array_set_rooted(
+                    heap,
+                    roots,
+                    table_root,
+                    val_root,
+                    idx,
+                    hc,
+                    hcap,
+                    array_len,
+                    array_cap,
+                );
                 return;
             }
         }
     }
 
-    // Hash part
-    table_hash_set(heap, table_ptr, key, val);
+    table_hash_set_rooted(heap, roots, table_root, key_root, val_root);
 }
 
-fn table_array_set(
+fn table_array_set_rooted(
     heap: &Heap,
-    table_ptr: *mut u8,
+    roots: &ScopedJitRoots,
+    table_root: ScopedJitRoot,
+    val_root: ScopedJitRoot,
     idx: usize,
-    val: u64,
     hash_count: usize,
     hash_cap: usize,
     mut array_len: usize,
     mut array_cap: usize,
 ) {
-    // Grow array if needed
     if idx > array_cap {
         let new_cap = (array_cap * 2).max(8).max(idx);
+        let table_ptr = table_ptr_from_boxed(roots.get(table_root))
+            .expect("rooted table value must stay a table");
         let new_arr = alloc_nil_values(heap, new_cap);
 
-        // Copy existing elements
         if let Some(old_arr) = table_get_array_ptr(table_ptr) {
             for i in 0..array_len {
                 let v = unsafe { read_varlen_value::<NanBox>(old_arr, &ARRAY_TYPE, i) };
@@ -375,6 +422,8 @@ fn table_array_set(
             }
         }
 
+        let table_ptr = table_ptr_from_boxed(roots.get(table_root))
+            .expect("rooted table value must stay a table");
         unsafe {
             write_value_field::<NanBox>(
                 table_ptr,
@@ -389,22 +438,37 @@ fn table_array_set(
     if idx > array_len {
         array_len = idx;
     }
+    let table_ptr = table_ptr_from_boxed(roots.get(table_root))
+        .expect("rooted table value must stay a table");
     table_write_meta(table_ptr, hash_count, hash_cap, array_len, array_cap);
 
     let arr = table_get_array_ptr(table_ptr).unwrap();
     unsafe {
-        write_varlen_value::<NanBox>(arr, &ARRAY_TYPE, idx - 1, Value::from_bits(val));
+        write_varlen_value::<NanBox>(
+            arr,
+            &ARRAY_TYPE,
+            idx - 1,
+            Value::from_bits(roots.get(val_root)),
+        );
     }
 }
 
-fn table_hash_set(heap: &Heap, table_ptr: *mut u8, key: u64, val: u64) {
+fn table_hash_set_rooted(
+    heap: &Heap,
+    roots: &ScopedJitRoots,
+    table_root: ScopedJitRoot,
+    key_root: ScopedJitRoot,
+    val_root: ScopedJitRoot,
+) {
+    let table_ptr = table_ptr_from_boxed(roots.get(table_root))
+        .expect("rooted table value must stay a table");
     let (mut hash_count, mut hash_cap, array_len, array_cap) = table_read_meta(table_ptr);
     let nil = make_nil();
 
-    // Check if key already exists
     if hash_cap > 0 {
         if let Some(hash_arr) = table_get_hash_ptr(table_ptr) {
             let mask = hash_cap - 1;
+            let key = roots.get(key_root);
             let mut slot = hash_u64(key) & mask;
             for _ in 0..hash_cap {
                 let k = unsafe {
@@ -412,15 +476,14 @@ fn table_hash_set(heap: &Heap, table_ptr: *mut u8, key: u64, val: u64) {
                 };
                 if k == nil {
                     break;
-                } // empty slot — key not found
+                }
                 if k == key {
-                    // Update existing entry's value
                     unsafe {
                         write_varlen_value::<NanBox>(
                             hash_arr,
                             &ARRAY_TYPE,
                             slot * 2 + 1,
-                            Value::from_bits(val),
+                            Value::from_bits(roots.get(val_root)),
                         );
                     }
                     return;
@@ -430,17 +493,16 @@ fn table_hash_set(heap: &Heap, table_ptr: *mut u8, key: u64, val: u64) {
         }
     }
 
-    // Don't insert new entries with nil value (matches HashMap::remove behavior)
-    if is_nil(val) {
+    if is_nil(roots.get(val_root)) {
         return;
     }
 
-    // Resize if needed
     if hash_cap == 0 || hash_count >= hash_cap * 3 / 4 {
         let new_cap = if hash_cap == 0 { 4 } else { hash_cap * 2 };
-        let new_arr = alloc_nil_values(heap, new_cap * 2); // key-value pairs interleaved
+        let table_ptr = table_ptr_from_boxed(roots.get(table_root))
+            .expect("rooted table value must stay a table");
+        let new_arr = alloc_nil_values(heap, new_cap * 2);
 
-        // Rehash existing entries
         if let Some(old_arr) = table_get_hash_ptr(table_ptr) {
             let new_mask = new_cap - 1;
             for i in 0..hash_cap {
@@ -450,7 +512,6 @@ fn table_hash_set(heap: &Heap, table_ptr: *mut u8, key: u64, val: u64) {
                     let v = unsafe {
                         read_varlen_value::<NanBox>(old_arr, &ARRAY_TYPE, i * 2 + 1).to_bits()
                     };
-                    // Re-insert (skip nil-valued entries to compact)
                     if !is_nil(v) {
                         let mut s = hash_u64(k) & new_mask;
                         loop {
@@ -481,7 +542,6 @@ fn table_hash_set(heap: &Heap, table_ptr: *mut u8, key: u64, val: u64) {
             }
         }
 
-        // Recount after rehash (nil-valued entries were dropped)
         let mut new_count = 0;
         for i in 0..new_cap {
             let k = unsafe { read_varlen_value::<NanBox>(new_arr, &ARRAY_TYPE, i * 2).to_bits() };
@@ -490,6 +550,8 @@ fn table_hash_set(heap: &Heap, table_ptr: *mut u8, key: u64, val: u64) {
             }
         }
 
+        let table_ptr = table_ptr_from_boxed(roots.get(table_root))
+            .expect("rooted table value must stay a table");
         unsafe {
             write_value_field::<NanBox>(
                 table_ptr,
@@ -503,8 +565,10 @@ fn table_hash_set(heap: &Heap, table_ptr: *mut u8, key: u64, val: u64) {
         table_write_meta(table_ptr, hash_count, hash_cap, array_len, array_cap);
     }
 
-    // Insert new entry
+    let table_ptr = table_ptr_from_boxed(roots.get(table_root))
+        .expect("rooted table value must stay a table");
     let hash_arr = table_get_hash_ptr(table_ptr).unwrap();
+    let key = roots.get(key_root);
     let mask = hash_cap - 1;
     let mut slot = hash_u64(key) & mask;
     loop {
@@ -521,7 +585,7 @@ fn table_hash_set(heap: &Heap, table_ptr: *mut u8, key: u64, val: u64) {
                     hash_arr,
                     &ARRAY_TYPE,
                     slot * 2 + 1,
-                    Value::from_bits(val),
+                    Value::from_bits(roots.get(val_root)),
                 );
             }
             hash_count += 1;
@@ -881,37 +945,41 @@ impl LuaRuntime {
         make_nil()
     }
 
-    pub fn lua_settable(&self, table: u64, key: u64, val: u64) {
-        if NanBox::has_tag(table, TAG_PTR) {
-            let payload = NanBox::extract_payload(table);
-            if payload != 0 {
-                let ptr = payload as *mut u8;
-                if obj_type_from_ptr(ptr) == ObjType::Table {
-                    table_set(self.heap_ref(), ptr, key, val);
-                }
-            }
+    pub fn lua_settable(&mut self, table: u64, key: u64, val: u64) {
+        if !is_table(table) {
+            return;
         }
+        let heap = self.heap_ref();
+        let mut roots = ScopedJitRoots::new();
+        let table_root = roots.push(table);
+        let key_root = roots.push(key);
+        let val_root = roots.push(val);
+        roots.with_active(|| {
+            table_set_rooted(heap, &roots, table_root, key_root, val_root);
+        });
     }
 
-    pub fn lua_setlist_from_regfile(&self, table: u64, base: usize, offset: usize, count: usize) {
-        if NanBox::has_tag(table, TAG_PTR) {
-            let payload = NanBox::extract_payload(table);
-            if payload != 0 {
-                let ptr = payload as *mut u8;
-                if obj_type_from_ptr(ptr) == ObjType::Table {
-                    let actual_count = if count == 0 {
-                        self.register_file.len().saturating_sub(base)
-                    } else {
-                        count
-                    };
-                    let heap = self.heap_ref();
-                    for i in 0..actual_count {
-                        if base + i < self.register_file.len() {
-                            let key = make_number((offset + i + 1) as f64);
-                            table_set(heap, ptr, key, self.register_file[base + i]);
-                        }
-                    }
-                }
+    pub fn lua_setlist_from_regfile(&mut self, table: u64, base: usize, offset: usize, count: usize) {
+        if !is_table(table) {
+            return;
+        }
+        let actual_count = if count == 0 {
+            self.register_file.len().saturating_sub(base)
+        } else {
+            count
+        };
+        let heap = self.heap_ref();
+        for i in 0..actual_count {
+            if base + i < self.register_file.len() {
+                let val = self.register_file[base + i];
+                let key = make_number((offset + i + 1) as f64);
+                let mut roots = ScopedJitRoots::new();
+                let table_root = roots.push(table);
+                let key_root = roots.push(key);
+                let val_root = roots.push(val);
+                roots.with_active(|| {
+                    table_set_rooted(heap, &roots, table_root, key_root, val_root);
+                });
             }
         }
     }

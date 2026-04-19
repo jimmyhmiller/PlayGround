@@ -1,0 +1,574 @@
+//! Right-side poster panel: tool picker, data-color swatches, action footer.
+//! All visual choices come from [`Theme`] via [`re_skin_palette`] so swapping
+//! the theme re-paints every button, swatch, and divider in place — there is
+//! no per-theme spawn pass.
+
+use crate::bridge::Bold;
+use crate::inspector::InspectorRoot;
+use crate::theme::{Theme, DATA_SLOT_COUNT};
+use crate::tool::{ActiveColor, ActiveTool, Tool};
+use bevy::ecs::hierarchy::ChildSpawnerCommands;
+use bevy::prelude::*;
+
+pub struct PalettePlugin;
+
+impl Plugin for PalettePlugin {
+    fn build(&self, app: &mut App) {
+        app.add_systems(Startup, spawn_palette).add_systems(
+            Update,
+            (
+                handle_tool_buttons,
+                handle_color_buttons,
+                handle_action_buttons,
+                sync_active_color_to_theme,
+                re_skin_palette,
+                sync_tool_button_visuals,
+                sync_color_button_visuals,
+            ),
+        );
+    }
+}
+
+/// Marker for the palette root node — used to detect "pointer over UI" so we
+/// don't place nodes when clicking the palette itself.
+#[derive(Component)]
+pub struct PaletteRoot;
+
+#[derive(Component)]
+struct ToolButton(Tool);
+
+/// Index into `Theme.data` rather than a baked color, so swapping themes
+/// repaints the swatches without forgetting the user's selection.
+#[derive(Component)]
+struct ColorSwatch(usize);
+
+/// One of the bottom-row footer actions.
+#[derive(Component, Clone, Copy)]
+enum ActionButton {
+    Clear,
+    NextTheme,
+}
+
+/// Tag the parts of the panel chrome whose color comes from the theme so the
+/// re-skin system can find them. `PanelBg` paints the panel body, `HeaderBg`
+/// the dark header strip, `HeaderTitle` the bottom (accent-colored) line of
+/// the title, etc.
+#[derive(Component)]
+struct PanelBg;
+#[derive(Component)]
+struct HeaderBg;
+#[derive(Component)]
+struct HeaderTitle1;
+#[derive(Component)]
+struct HeaderTitle2;
+#[derive(Component)]
+struct SectionTitle;
+#[derive(Component)]
+struct FooterBg;
+
+/// Bevy 0.18 doesn't ship a `letter-spacing` text style, so we approximate
+/// the iso50 design's wide-tracked caps by inserting a hair space (`U+200A`)
+/// between glyphs. Better than monospaced and visually close enough for
+/// header/section labels at small point sizes.
+pub fn caps_spaced(s: &str) -> String {
+    let upper = s.to_uppercase();
+    let mut out = String::with_capacity(upper.len() * 3);
+    for (i, ch) in upper.chars().enumerate() {
+        if i > 0 {
+            out.push('\u{2009}'); // thin space
+        }
+        out.push(ch);
+    }
+    out
+}
+
+fn spawn_palette(mut commands: Commands, theme: Res<Theme>) {
+    let panel_root = commands
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                right: Val::Px(20.0),
+                top: Val::Px(20.0),
+                bottom: Val::Px(20.0),
+                width: Val::Px(264.0),
+                flex_direction: FlexDirection::Column,
+                border: UiRect::all(Val::Px(1.5)),
+                border_radius: BorderRadius::all(Val::Px(10.0)),
+                overflow: Overflow::clip(),
+                ..default()
+            },
+            BackgroundColor(theme.paper_alt),
+            BorderColor::all(theme.ink),
+            Interaction::None,
+            PaletteRoot,
+            PanelBg,
+        ))
+        .id();
+
+    commands.entity(panel_root).with_children(|p| {
+        // ── Poster header bar ──────────────────────────────────────────────
+        p.spawn((
+            Node {
+                width: Val::Percent(100.0),
+                padding: UiRect {
+                    left: Val::Px(16.0),
+                    right: Val::Px(16.0),
+                    top: Val::Px(16.0),
+                    bottom: Val::Px(14.0),
+                },
+                flex_direction: FlexDirection::Column,
+                border: UiRect::bottom(Val::Px(1.5)),
+                // Rounded only at the top so the header pill matches the
+                // panel's outer corners but seams flush with the body below.
+                border_radius: BorderRadius {
+                    top_left: Val::Px(10.0),
+                    top_right: Val::Px(10.0),
+                    bottom_left: Val::Px(0.0),
+                    bottom_right: Val::Px(0.0),
+                },
+                ..default()
+            },
+            BackgroundColor(theme.ink),
+            BorderColor::all(theme.ink),
+            HeaderBg,
+        ))
+        .with_children(|h| {
+            h.spawn((
+                Text::new(caps_spaced("LIVING")),
+                TextFont {
+                    font_size: 24.0,
+                    ..default()
+                },
+                TextColor(theme.paper),
+                Bold,
+                HeaderTitle1,
+            ));
+            h.spawn((
+                Text::new(caps_spaced("WHITEBOARD")),
+                TextFont {
+                    font_size: 24.0,
+                    ..default()
+                },
+                TextColor(theme.accent),
+                Bold,
+                HeaderTitle2,
+            ));
+        });
+
+        // ── Scrollable body ────────────────────────────────────────────────
+        p.spawn((
+            Node {
+                flex_grow: 1.0,
+                width: Val::Percent(100.0),
+                padding: UiRect::all(Val::Px(12.0)),
+                flex_direction: FlexDirection::Column,
+                row_gap: Val::Px(2.0),
+                overflow: Overflow::clip(),
+                ..default()
+            },
+            BackgroundColor(theme.paper_alt),
+        ))
+        .with_children(|body| {
+            section(body, "Tools", &theme);
+            tool_group(body, &theme, &[
+                (Tool::Select, "Select"),
+                (Tool::Edge, "Connect"),
+            ]);
+
+            section(body, "Emitters", &theme);
+            tool_group(body, &theme, &[
+                (Tool::Generator, "Generator"),
+                (Tool::Client, "Client"),
+            ]);
+
+            section(body, "Processors", &theme);
+            tool_group(body, &theme, &[
+                (Tool::Worker, "Worker"),
+                (Tool::Router, "Router"),
+                (Tool::Queue, "Queue"),
+            ]);
+
+            section(body, "Terminals", &theme);
+            tool_group(body, &theme, &[
+                (Tool::Sink, "Sink"),
+                (Tool::Probe, "Probe"),
+            ]);
+
+            section(body, "Data Palette", &theme);
+            body.spawn(Node {
+                width: Val::Percent(100.0),
+                margin: UiRect::vertical(Val::Px(6.0)),
+                column_gap: Val::Px(6.0),
+                ..default()
+            })
+            .with_children(|row| {
+                for i in 0..DATA_SLOT_COUNT {
+                    row.spawn((
+                        Button,
+                        Node {
+                            flex_grow: 1.0,
+                            height: Val::Px(28.0),
+                            border: UiRect::all(Val::Px(1.5)),
+                            border_radius: BorderRadius::all(Val::Px(4.0)),
+                            ..default()
+                        },
+                        BackgroundColor(theme.data[i]),
+                        BorderColor::all(theme.ink),
+                        ColorSwatch(i),
+                    ));
+                }
+            });
+
+            // Inspector mount — body is rebuilt by `inspector.rs` whenever
+            // selection changes. Hidden by default.
+            body.spawn((
+                Node {
+                    width: Val::Percent(100.0),
+                    flex_direction: FlexDirection::Column,
+                    row_gap: Val::Px(2.0),
+                    margin: UiRect::top(Val::Px(4.0)),
+                    display: Display::None,
+                    ..default()
+                },
+                InspectorRoot,
+            ));
+        });
+
+        // ── Footer actions ────────────────────────────────────────────────
+        p.spawn((
+            Node {
+                width: Val::Percent(100.0),
+                padding: UiRect::all(Val::Px(10.0)),
+                column_gap: Val::Px(6.0),
+                border: UiRect::top(Val::Px(1.5)),
+                border_radius: BorderRadius {
+                    top_left: Val::Px(0.0),
+                    top_right: Val::Px(0.0),
+                    bottom_left: Val::Px(10.0),
+                    bottom_right: Val::Px(10.0),
+                },
+                ..default()
+            },
+            BackgroundColor(theme.paper),
+            BorderColor::all(theme.ink),
+            FooterBg,
+        ))
+        .with_children(|f| {
+            flat_action(f, &theme, "Clear", ActionButton::Clear);
+            flat_action(f, &theme, "Theme", ActionButton::NextTheme);
+        });
+    });
+}
+
+fn section(parent: &mut ChildSpawnerCommands, label: &str, theme: &Theme) {
+    parent
+        .spawn((
+            Node {
+                width: Val::Percent(100.0),
+                padding: UiRect {
+                    top: Val::Px(12.0),
+                    bottom: Val::Px(6.0),
+                    left: Val::Px(4.0),
+                    right: Val::Px(4.0),
+                },
+                margin: UiRect::bottom(Val::Px(6.0)),
+                border: UiRect::bottom(Val::Px(1.0)),
+                ..default()
+            },
+            BorderColor::all(theme.rule),
+        ))
+        .with_children(|p| {
+            p.spawn((
+                Text::new(caps_spaced(label)),
+                TextFont {
+                    font_size: 10.0,
+                    ..default()
+                },
+                TextColor(theme.ink_soft),
+                Bold,
+                SectionTitle,
+            ));
+        });
+}
+
+fn tool_group(parent: &mut ChildSpawnerCommands, theme: &Theme, items: &[(Tool, &str)]) {
+    parent
+        .spawn(Node {
+            width: Val::Percent(100.0),
+            display: Display::Grid,
+            grid_template_columns: vec![
+                RepeatedGridTrack::flex(1, 1.0),
+                RepeatedGridTrack::flex(1, 1.0),
+            ],
+            column_gap: Val::Px(4.0),
+            row_gap: Val::Px(4.0),
+            ..default()
+        })
+        .with_children(|g| {
+            for (tool, label) in items {
+                spawn_tool_button(g, *tool, label, theme);
+            }
+        });
+}
+
+/// Map each tool to a Unicode glyph that approximates its design icon. We
+/// avoid emoji (color-painted, ignores TextColor); these are all geometric
+/// shapes from the BMP that Jost / Avenir Next render in line with their
+/// regular weight.
+fn tool_glyph(tool: Tool) -> &'static str {
+    match tool {
+        Tool::Select => "↖",
+        Tool::Edge => "↝",
+        Tool::Generator => "◉",
+        Tool::Client => "☻",
+        Tool::Worker => "▣",
+        Tool::Router => "⊕",
+        Tool::Queue => "▦",
+        Tool::Sink => "▽",
+        Tool::Probe => "◎",
+    }
+}
+
+fn spawn_tool_button(
+    parent: &mut ChildSpawnerCommands,
+    tool: Tool,
+    label: &str,
+    theme: &Theme,
+) {
+    parent
+        .spawn((
+            Button,
+            Node {
+                width: Val::Percent(100.0),
+                height: Val::Px(36.0),
+                align_items: AlignItems::Center,
+                justify_content: JustifyContent::FlexStart,
+                padding: UiRect::horizontal(Val::Px(10.0)),
+                column_gap: Val::Px(8.0),
+                border: UiRect::all(Val::Px(1.0)),
+                border_radius: BorderRadius::all(Val::Px(6.0)),
+                ..default()
+            },
+            BackgroundColor(Color::NONE),
+            BorderColor::all(theme.rule),
+            ToolButton(tool),
+        ))
+        .with_children(|b| {
+            b.spawn((
+                Text::new(tool_glyph(tool)),
+                TextFont {
+                    font_size: 15.0,
+                    ..default()
+                },
+                TextColor(theme.ink),
+            ));
+            b.spawn((
+                Text::new(caps_spaced(label)),
+                TextFont {
+                    font_size: 11.0,
+                    ..default()
+                },
+                TextColor(theme.ink),
+                Bold,
+            ));
+        });
+}
+
+fn flat_action(
+    parent: &mut ChildSpawnerCommands,
+    theme: &Theme,
+    label: &str,
+    action: ActionButton,
+) {
+    parent
+        .spawn((
+            Button,
+            Node {
+                flex_grow: 1.0,
+                padding: UiRect::vertical(Val::Px(8.0)),
+                justify_content: JustifyContent::Center,
+                align_items: AlignItems::Center,
+                border: UiRect::all(Val::Px(1.0)),
+                border_radius: BorderRadius::all(Val::Px(6.0)),
+                ..default()
+            },
+            BackgroundColor(Color::NONE),
+            BorderColor::all(theme.ink),
+            action,
+        ))
+        .with_children(|b| {
+            b.spawn((
+                Text::new(caps_spaced(label)),
+                TextFont {
+                    font_size: 11.0,
+                    ..default()
+                },
+                TextColor(theme.ink),
+                Bold,
+            ));
+        });
+}
+
+// ---- Interaction systems -------------------------------------------------
+
+fn handle_tool_buttons(
+    mut q: Query<(&Interaction, &ToolButton), (Changed<Interaction>, With<Button>)>,
+    mut active: ResMut<ActiveTool>,
+) {
+    for (interaction, btn) in q.iter_mut() {
+        if *interaction == Interaction::Pressed {
+            active.0 = btn.0;
+        }
+    }
+}
+
+fn handle_color_buttons(
+    q: Query<(&Interaction, &ColorSwatch), (Changed<Interaction>, With<Button>)>,
+    mut active: ResMut<ActiveColor>,
+    theme: Res<Theme>,
+) {
+    for (interaction, swatch) in q.iter() {
+        if *interaction == Interaction::Pressed {
+            active.0 = theme.data[swatch.0];
+        }
+    }
+}
+
+fn handle_action_buttons(
+    q: Query<(&Interaction, &ActionButton), (Changed<Interaction>, With<Button>)>,
+    mut theme: ResMut<Theme>,
+) {
+    for (interaction, action) in q.iter() {
+        if *interaction != Interaction::Pressed {
+            continue;
+        }
+        match action {
+            ActionButton::Clear => {
+                // Wired in a later phase — the current sim has no top-level
+                // "clear all" yet. Leaving the button hot so the wiring is
+                // obvious when it lands.
+            }
+            ActionButton::NextTheme => {
+                *theme = theme.next();
+            }
+        }
+    }
+}
+
+/// Keep `ActiveColor` pointing at slot 0 of whatever the live theme is, so
+/// freshly-placed nodes pick up theme-appropriate hues immediately after a
+/// theme swap. The user can still override with the swatches.
+fn sync_active_color_to_theme(theme: Res<Theme>, mut active: ResMut<ActiveColor>) {
+    if theme.is_changed() {
+        active.0 = theme.data[0];
+    }
+}
+
+/// Repaint every theme-dependent UI surface in place when the Theme resource
+/// changes. We deliberately re-skin instead of despawn/respawn so user state
+/// (active tool, hover state, focus) survives the swap.
+#[allow(clippy::too_many_arguments)]
+fn re_skin_palette(
+    theme: Res<Theme>,
+    mut panel_bg: Query<&mut BackgroundColor, (With<PanelBg>, Without<HeaderBg>, Without<FooterBg>)>,
+    mut panel_borders: Query<&mut BorderColor, With<PanelBg>>,
+    mut header_bg: Query<&mut BackgroundColor, (With<HeaderBg>, Without<PanelBg>, Without<FooterBg>)>,
+    mut footer_bg: Query<&mut BackgroundColor, (With<FooterBg>, Without<PanelBg>, Without<HeaderBg>)>,
+    mut h1: Query<&mut TextColor, (With<HeaderTitle1>, Without<HeaderTitle2>, Without<SectionTitle>)>,
+    mut h2: Query<&mut TextColor, (With<HeaderTitle2>, Without<HeaderTitle1>, Without<SectionTitle>)>,
+    mut sec: Query<&mut TextColor, (With<SectionTitle>, Without<HeaderTitle1>, Without<HeaderTitle2>)>,
+    mut swatches: Query<(&ColorSwatch, &mut BackgroundColor), (Without<PanelBg>, Without<HeaderBg>, Without<FooterBg>)>,
+) {
+    if !theme.is_changed() {
+        return;
+    }
+    for mut bg in panel_bg.iter_mut() {
+        bg.0 = theme.paper_alt;
+    }
+    for mut border in panel_borders.iter_mut() {
+        *border = BorderColor::all(theme.ink);
+    }
+    for mut bg in header_bg.iter_mut() {
+        bg.0 = theme.ink;
+    }
+    for mut bg in footer_bg.iter_mut() {
+        bg.0 = theme.paper;
+    }
+    for mut t in h1.iter_mut() {
+        t.0 = theme.paper;
+    }
+    for mut t in h2.iter_mut() {
+        t.0 = theme.accent;
+    }
+    for mut t in sec.iter_mut() {
+        t.0 = theme.ink_soft;
+    }
+    for (swatch, mut bg) in swatches.iter_mut() {
+        bg.0 = theme.data[swatch.0];
+    }
+}
+
+fn sync_tool_button_visuals(
+    theme: Res<Theme>,
+    active: Res<ActiveTool>,
+    mut q: Query<(
+        Entity,
+        &Interaction,
+        &ToolButton,
+        &mut BackgroundColor,
+        &mut BorderColor,
+    )>,
+    children_q: Query<&Children>,
+    mut text_q: Query<&mut TextColor>,
+) {
+    for (entity, interaction, btn, mut bg, mut border) in q.iter_mut() {
+        let is_active = active.0 == btn.0;
+        let hovered = matches!(interaction, Interaction::Hovered | Interaction::Pressed);
+        let (bg_c, border_c, text_c) = if is_active {
+            (theme.ink, theme.ink, theme.paper)
+        } else if hovered {
+            (theme.paper, theme.ink, theme.ink)
+        } else {
+            (Color::NONE, theme.rule, theme.ink)
+        };
+        bg.0 = bg_c;
+        *border = BorderColor::all(border_c);
+
+        for child in children_q.iter_descendants(entity) {
+            if let Ok(mut tc) = text_q.get_mut(child) {
+                tc.0 = text_c;
+            }
+        }
+    }
+}
+
+fn sync_color_button_visuals(
+    theme: Res<Theme>,
+    active: Res<ActiveColor>,
+    mut q: Query<(&ColorSwatch, &mut BorderColor), Without<ToolButton>>,
+) {
+    for (swatch, mut border) in q.iter_mut() {
+        let is_active = color_approx_eq(theme.data[swatch.0], active.0);
+        *border = if is_active {
+            BorderColor::all(theme.ink)
+        } else {
+            BorderColor::all(theme.rule)
+        };
+    }
+}
+
+fn color_approx_eq(a: Color, b: Color) -> bool {
+    let a = a.to_srgba();
+    let b = b.to_srgba();
+    (a.red - b.red).abs() < 1e-3
+        && (a.green - b.green).abs() < 1e-3
+        && (a.blue - b.blue).abs() < 1e-3
+}
+
+/// Returns true if the mouse is currently over any UI element (any node whose
+/// Interaction is Hovered/Pressed). Used to prevent canvas clicks from firing
+/// when the user clicks the palette.
+pub fn pointer_over_ui(ui: &Query<&Interaction>) -> bool {
+    ui.iter()
+        .any(|i| matches!(i, Interaction::Hovered | Interaction::Pressed))
+}

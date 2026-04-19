@@ -1,7 +1,5 @@
 #import bevy_sprite::mesh2d_vertex_output::VertexOutput
 
-const MAX_EXTRA_LIGHTS: u32 = 8u;
-
 struct ExtraLight {
     pos: vec2<f32>,
     dir: vec2<f32>,
@@ -18,14 +16,10 @@ struct ConeLightParams {
     range: f32,
     ambient: f32,
     intensity: f32,
-    extra_count: u32,
-    _pad1: u32,
-    _pad2: u32,
-    _pad3: u32,
-    extras: array<ExtraLight, 8>,
 };
 
 @group(2) @binding(0) var<uniform> params: ConeLightParams;
+@group(2) @binding(1) var<storage, read> extras: array<ExtraLight>;
 
 fn cone_contribution(world_pos: vec2<f32>, light_pos: vec2<f32>, light_dir: vec2<f32>, cos_half: f32, light_range: f32, light_intensity: f32) -> f32 {
     let to_pixel = world_pos - light_pos;
@@ -47,7 +41,6 @@ fn cone_contribution(world_pos: vec2<f32>, light_pos: vec2<f32>, light_dir: vec2
 fn fragment(mesh: VertexOutput) -> @location(0) vec4<f32> {
     let world_pos = mesh.world_position.xy;
 
-    // Player cone
     var total_light = cone_contribution(
         world_pos,
         params.player_pos,
@@ -57,10 +50,9 @@ fn fragment(mesh: VertexOutput) -> @location(0) vec4<f32> {
         params.intensity,
     );
 
-    // Extra lights (sentinels etc.)
-    let count = min(params.extra_count, MAX_EXTRA_LIGHTS);
+    let count = arrayLength(&extras);
     for (var i = 0u; i < count; i = i + 1u) {
-        let ex = params.extras[i];
+        let ex = extras[i];
         total_light += cone_contribution(
             world_pos,
             ex.pos,

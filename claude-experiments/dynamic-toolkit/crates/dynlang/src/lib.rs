@@ -12,6 +12,7 @@
 //! - **Type checks** — `is_number`, `is_nil`, `is_falsey`
 //! - **String constant pool** — `add_string("hello")` → ID, resolved at runtime
 //! - **Truthiness branching** — `br_if_truthy(v, then, else)`
+//! - **GC-aware object refs** — use `ObjRef` helpers so raw object pointers stay rooted across allocations
 //!
 //! ## Quick example
 //!
@@ -52,8 +53,8 @@ pub enum GcConfig {
     /// Bump allocator, never collects. Zero overhead — no safepoints,
     /// no root tracking. Objects are allocated and never freed.
     Leak,
-    /// Semi-space copying collector. Safepoints emitted before
-    /// allocations, roots tracked automatically.
+    /// Semi-space copying collector. Use `gc_alloc_with_roots` when raw
+    /// object pointers must survive a moving collection across allocation.
     SemiSpace {
         /// Initial heap size in bytes.
         heap_size: usize,
@@ -85,12 +86,12 @@ pub struct ObjTypeId(pub usize);
 /// // Inline type check (no extern call):
 /// let is_closure = closure_h.check(f, val);
 ///
-/// // Inline field load (no extern call):
-/// let raw = closure_h.unwrap(f, val);
-/// let arity = closure_h.load(f, raw, "arity");
+/// // Typed raw object ref:
+/// let raw = closure_h.unwrap_ref(f, val);
+/// let arity = closure_h.load_ref(f, raw, "arity");
 ///
-/// // Inline allocation:
-/// let obj = closure_h.alloc(f, varlen_count);
+/// // Rooted allocation:
+/// let obj = closure_h.alloc_ref(f, varlen_count);
 /// ```
 #[derive(Clone)]
 pub struct ObjTypeHandle {
@@ -101,6 +102,21 @@ pub struct ObjTypeHandle {
     /// Field name → (byte offset, kind).
     pub field_offsets: HashMap<String, (i32, FieldKind)>,
     pub varlen: VarLenKind,
+}
+
+/// Typed handle to a raw GC-managed object pointer in IR.
+///
+/// This wraps a `dynir::Value` whose type is `Type::GcPtr`, making it harder
+/// to accidentally pass plain integer values through rooted allocation paths.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ObjRef {
+    value: Value,
+}
+
+impl ObjRef {
+    pub fn value(self) -> Value {
+        self.value
+    }
 }
 
 impl ObjTypeHandle {
@@ -129,12 +145,22 @@ impl ObjTypeHandle {
     /// Extract the raw GC pointer from a NaN-boxed object value.
     /// Caller must ensure the value is a heap object (e.g. via `check`).
     pub fn unwrap(&self, f: &mut DynFunc, val: Value) -> Value {
-        f.fb.payload(val)
+        f.obj_unwrap(val)
+    }
+
+    /// Extract the raw GC pointer from a boxed object value as a typed `ObjRef`.
+    pub fn unwrap_ref(&self, f: &mut DynFunc, val: Value) -> ObjRef {
+        f.obj_unwrap_ref(val)
     }
 
     /// Wrap a raw GC pointer into a NaN-boxed object value.
     pub fn wrap(&self, f: &mut DynFunc, ptr: Value) -> Value {
-        f.fb.make_tagged(f.tags.ptr, ptr)
+        f.obj_wrap(ptr)
+    }
+
+    /// Wrap a typed raw GC pointer into a NaN-boxed object value.
+    pub fn wrap_ref(&self, f: &mut DynFunc, ptr: ObjRef) -> Value {
+        f.obj_wrap_ref(ptr)
     }
 
     /// Load a field from a raw GC object pointer. Returns I64.
@@ -144,11 +170,21 @@ impl ObjTypeHandle {
         f.fb.load(Type::I64, obj_ptr, *offset)
     }
 
+    /// Load a field from a typed raw GC object pointer. Returns I64.
+    pub fn load_ref(&self, f: &mut DynFunc, obj_ptr: ObjRef, field: &str) -> Value {
+        self.load(f, obj_ptr.value(), field)
+    }
+
     /// Store a field to a raw GC object pointer.
     pub fn store(&self, f: &mut DynFunc, obj_ptr: Value, field: &str, val: Value) {
         let (offset, _kind) = self.field_offsets.get(field)
             .unwrap_or_else(|| panic!("unknown field '{}' on ObjTypeHandle", field));
         f.fb.store(val, obj_ptr, *offset);
+    }
+
+    /// Store a field to a typed raw GC object pointer.
+    pub fn store_ref(&self, f: &mut DynFunc, obj_ptr: ObjRef, field: &str, val: Value) {
+        self.store(f, obj_ptr.value(), field, val)
     }
 
     /// Load an element from the variable-length array section.
@@ -162,6 +198,10 @@ impl ObjTypeHandle {
         f.fb.load(Type::I64, addr, 0)
     }
 
+    pub fn load_elem_ref(&self, f: &mut DynFunc, obj_ptr: ObjRef, index: Value) -> Value {
+        self.load_elem(f, obj_ptr.value(), index)
+    }
+
     /// Store an element to the variable-length array section.
     pub fn store_elem(&self, f: &mut DynFunc, obj_ptr: Value, index: Value, val: Value) {
         let base_offset = self.type_info.varlen_element_offset(0) as i64;
@@ -173,9 +213,26 @@ impl ObjTypeHandle {
         f.fb.store(val, addr, 0);
     }
 
-    /// Allocate an object of this type via `__gc_alloc__`. Returns raw pointer (I64).
+    pub fn store_elem_ref(&self, f: &mut DynFunc, obj_ptr: ObjRef, index: Value, val: Value) {
+        self.store_elem(f, obj_ptr.value(), index, val)
+    }
+
+    /// Allocate an object of this type via `__gc_alloc__`. Returns raw pointer (`GcPtr`).
     pub fn alloc(&self, f: &mut DynFunc, varlen_len: Value) -> Value {
         f.gc_alloc(self.id, varlen_len)
+    }
+
+    pub fn alloc_ref(&self, f: &mut DynFunc, varlen_len: Value) -> ObjRef {
+        f.gc_alloc_ref(self.id, varlen_len)
+    }
+
+    pub fn alloc_ref_with_roots(
+        &self,
+        f: &mut DynFunc,
+        varlen_len: Value,
+        live_roots: &[ObjRef],
+    ) -> ObjRef {
+        f.gc_alloc_ref_with_roots(self.id, varlen_len, live_roots)
     }
 }
 
@@ -393,7 +450,7 @@ impl DynModule {
         if self.gc_alloc_extern.is_none() {
             let sig = Signature {
                 params: vec![Type::I64, Type::I64],  // type_id, varlen_len
-                ret: Some(Type::I64),                 // returns pointer as I64
+                ret: Some(Type::GcPtr),               // returns raw GC pointer
             };
             self.gc_alloc_extern = Some(self.mb.declare_extern("__gc_alloc__", sig));
         }
@@ -708,14 +765,25 @@ impl DynFunc {
     }
 
     /// Extract the raw GC pointer from a NaN-boxed object value.
+    /// The result is typed as `GcPtr`, so it can participate in safepoints.
     /// Caller must ensure the value is a heap object (e.g. checked with `is_ptr`).
     pub fn obj_unwrap(&mut self, v: Value) -> Value {
-        self.fb.payload(v)
+        let payload = self.fb.payload(v);
+        self.fb.bitcast(payload, Type::GcPtr)
     }
 
     /// Wrap a raw GC pointer into a NaN-boxed object value.
     pub fn obj_wrap(&mut self, ptr: Value) -> Value {
-        self.fb.make_tagged(self.tags.ptr, ptr)
+        let payload = self.fb.bitcast(ptr, Type::I64);
+        self.fb.make_tagged(self.tags.ptr, payload)
+    }
+
+    pub fn obj_unwrap_ref(&mut self, v: Value) -> ObjRef {
+        ObjRef { value: self.obj_unwrap(v) }
+    }
+
+    pub fn obj_wrap_ref(&mut self, ptr: ObjRef) -> Value {
+        self.obj_wrap(ptr.value())
     }
 
     /// Is this value tagged (i.e. NOT a float)? Returns I8.
@@ -1087,16 +1155,50 @@ impl DynFunc {
     // Field access computes offsets at IR-build time — no runtime lookup.
 
     /// Allocate a GC object. `varlen_len` is the number of variable-length
-    /// elements (0 for fixed-size objects). Returns the object as I64
-    /// (a raw pointer in NanBox ptr-tag encoding is done by the caller).
+    /// elements (0 for fixed-size objects). Returns the raw object pointer as `GcPtr`.
     ///
-    /// If GcConfig is SemiSpace, a safepoint is emitted before allocation.
+    /// Use [`obj_wrap`](Self::obj_wrap) if you need the boxed NanBox form.
     pub fn gc_alloc(&mut self, type_id: ObjTypeId, varlen_len: Value) -> Value {
+        self.gc_alloc_with_roots(type_id, varlen_len, &[])
+    }
+
+    /// Allocate a GC object and return a typed object reference.
+    pub fn gc_alloc_ref(&mut self, type_id: ObjTypeId, varlen_len: Value) -> ObjRef {
+        ObjRef {
+            value: self.gc_alloc(type_id, varlen_len),
+        }
+    }
+
+    /// Allocate a GC object, first emitting a safepoint for the provided live roots.
+    ///
+    /// When using a moving collector, pass every raw `GcPtr` object reference that must
+    /// remain valid across the allocation. This keeps the high-level dynlang builder on
+    /// the same GC contract as raw dynir.
+    pub fn gc_alloc_with_roots(
+        &mut self,
+        type_id: ObjTypeId,
+        varlen_len: Value,
+        live_roots: &[Value],
+    ) -> Value {
         let alloc_fn = self.gc_alloc_extern
             .expect("gc_alloc: no object types declared on this module");
         let type_id_val = self.fb.iconst(Type::I64, type_id.0 as i64);
-        // TODO: emit safepoint for SemiSpace (needs live GcPtr tracking)
+        if self.gc_config.is_collecting() && !live_roots.is_empty() {
+            self.fb.safepoint(live_roots);
+        }
         self.fb.call(alloc_fn, &[type_id_val, varlen_len]).unwrap()
+    }
+
+    pub fn gc_alloc_ref_with_roots(
+        &mut self,
+        type_id: ObjTypeId,
+        varlen_len: Value,
+        live_roots: &[ObjRef],
+    ) -> ObjRef {
+        let roots: Vec<Value> = live_roots.iter().map(|root| root.value()).collect();
+        ObjRef {
+            value: self.gc_alloc_with_roots(type_id, varlen_len, &roots),
+        }
     }
 
     /// Load a value field from a GC object. Offset is computed at build
@@ -1238,8 +1340,38 @@ enum FloatBinOp {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dynalloc::{PtrPolicy, SemiSpace, alloc_obj};
+    use dynir::dynexec::ContinuationTypes;
+    use dynir::gc_runtime::GcInterpCtx;
     use dynir::interp::{ExternCallResult, InterpResult, ModuleInterpreter, NoGcRoots};
+    use dynobj::{Compact, TypeInfo};
     use dynvalue::NanBox;
+
+    struct TestNanBoxPolicy;
+
+    impl PtrPolicy for TestNanBoxPolicy {
+        fn try_decode_ptr(bits: u64) -> Option<*mut u8> {
+            if bits == 0 {
+                None
+            } else if bits & 0b111 == 0 {
+                Some(bits as *mut u8)
+            } else {
+                None
+            }
+        }
+
+        fn encode_ptr(ptr: *mut u8) -> u64 {
+            debug_assert_eq!((ptr as u64) & 0b111, 0);
+            ptr as u64
+        }
+    }
+
+    fn make_gc_ctx(obj_types: &[ObjType], heap_size: usize) -> GcInterpCtx<Compact, TestNanBoxPolicy> {
+        let mut type_table: Vec<TypeInfo> = obj_types.iter().map(|obj| *obj.type_info).collect();
+        let cont_types = ContinuationTypes::register_into::<Compact>(&mut type_table);
+        let heap = SemiSpace::new::<Compact>(heap_size);
+        GcInterpCtx::new(heap, type_table, cont_types)
+    }
 
     fn run(module: &Module, entry: FuncRef, args: &[u64]) -> u64 {
         let roots = NoGcRoots;
@@ -1506,6 +1638,159 @@ mod tests {
             Ok(InterpResult::Value(v)) => assert_eq!(v, 42),
             other => panic!("unexpected: {:?}", other),
         }
+    }
+
+    #[test]
+    fn test_gc_alloc_with_roots_survives_moving_gc() {
+        let mut dm = DynModule::new(GcConfig::semi_space(256), NanBoxTags::default());
+
+        let pair_ty = dm.obj_type("Pair")
+            .field("value", FieldKind::Value)
+            .build();
+
+        let main = dm.declare_func("main", 0);
+
+        let mut f = dm.start_func(main);
+        let zero = f.fb.iconst(Type::I64, 0);
+        let obj1 = f.gc_alloc(pair_ty, zero);
+        let val = f.fb.iconst(Type::I64, 42);
+        {
+            let ty = dm.get_obj_type(pair_ty);
+            f.gc_store_field(obj1, ty, "value", val);
+        }
+
+        // This allocation triggers a safepoint first, so obj1 must survive a moving GC.
+        let _obj2 = f.gc_alloc_with_roots(pair_ty, zero, &[obj1]);
+
+        let loaded = {
+            let ty = dm.get_obj_type(pair_ty);
+            f.gc_load_field(obj1, ty, "value")
+        };
+        f.fb.ret(loaded);
+        dm.finish_func(f);
+
+        let ctx = make_gc_ctx(&dm.obj_types, 256);
+        ctx.set_gc_threshold(1);
+        let built = dm.build();
+
+        let mut interp = ModuleInterpreter::<NanBox, _>::new(&built.module, &ctx);
+        interp.bind_by_name("__gc_alloc__", |args| {
+            let type_id = args[0] as usize;
+            let varlen_len = args[1] as usize;
+            let info = &ctx.type_table()[type_id];
+            let ptr = unsafe { alloc_obj::<Compact>(&ctx, info, varlen_len) };
+            assert!(!ptr.is_null(), "gc alloc failed");
+            ExternCallResult::Value(Some(ptr as u64))
+        });
+
+        match interp.run(main, &[]) {
+            Ok(InterpResult::Value(v)) => assert_eq!(v, 42),
+            other => panic!("unexpected: {:?}", other),
+        }
+        assert!(
+            ctx.collection_count() >= 1,
+            "expected moving GC to run during rooted allocation path"
+        );
+    }
+
+    #[test]
+    fn test_boxed_object_round_trip_after_rooted_gc_alloc() {
+        let mut dm = DynModule::new(GcConfig::semi_space(256), NanBoxTags::default());
+
+        let pair_ty = dm.obj_type("Pair")
+            .field("value", FieldKind::Value)
+            .build();
+
+        let main = dm.declare_func("main", 0);
+
+        let mut f = dm.start_func(main);
+        let zero = f.fb.iconst(Type::I64, 0);
+        let obj = f.gc_alloc(pair_ty, zero);
+        let boxed = f.obj_wrap(obj);
+        let raw = f.obj_unwrap(boxed);
+        let val = f.fb.iconst(Type::I64, 7);
+        {
+            let ty = dm.get_obj_type(pair_ty);
+            f.gc_store_field(raw, ty, "value", val);
+        }
+
+        let _moved = f.gc_alloc_with_roots(pair_ty, zero, &[raw]);
+
+        let loaded = {
+            let ty = dm.get_obj_type(pair_ty);
+            f.gc_load_field(raw, ty, "value")
+        };
+        f.fb.ret(loaded);
+        dm.finish_func(f);
+
+        let ctx = make_gc_ctx(&dm.obj_types, 256);
+        ctx.set_gc_threshold(1);
+        let built = dm.build();
+
+        let mut interp = ModuleInterpreter::<NanBox, _>::new(&built.module, &ctx);
+        interp.bind_by_name("__gc_alloc__", |args| {
+            let type_id = args[0] as usize;
+            let varlen_len = args[1] as usize;
+            let info = &ctx.type_table()[type_id];
+            let ptr = unsafe { alloc_obj::<Compact>(&ctx, info, varlen_len) };
+            assert!(!ptr.is_null(), "gc alloc failed");
+            ExternCallResult::Value(Some(ptr as u64))
+        });
+
+        match interp.run(main, &[]) {
+            Ok(InterpResult::Value(v)) => assert_eq!(v, 7),
+            other => panic!("unexpected: {:?}", other),
+        }
+        assert!(
+            ctx.collection_count() >= 1,
+            "expected moving GC to run during boxed round-trip path"
+        );
+    }
+
+    #[test]
+    fn test_obj_ref_api_survives_rooted_allocation() {
+        let mut dm = DynModule::new(GcConfig::semi_space(256), NanBoxTags::default());
+
+        let pair_ty = dm.obj_type("Pair")
+            .field("value", FieldKind::Value)
+            .build();
+        let pair = dm.obj_handle(pair_ty);
+
+        let main = dm.declare_func("main", 0);
+
+        let mut f = dm.start_func(main);
+        let zero = f.fb.iconst(Type::I64, 0);
+        let obj1 = pair.alloc_ref(&mut f, zero);
+        let forty_two = f.fb.iconst(Type::I64, 42);
+        pair.store_ref(&mut f, obj1, "value", forty_two);
+
+        let _obj2 = pair.alloc_ref_with_roots(&mut f, zero, &[obj1]);
+        let loaded = pair.load_ref(&mut f, obj1, "value");
+        f.fb.ret(loaded);
+        dm.finish_func(f);
+
+        let ctx = make_gc_ctx(&dm.obj_types, 256);
+        ctx.set_gc_threshold(1);
+        let built = dm.build();
+
+        let mut interp = ModuleInterpreter::<NanBox, _>::new(&built.module, &ctx);
+        interp.bind_by_name("__gc_alloc__", |args| {
+            let type_id = args[0] as usize;
+            let varlen_len = args[1] as usize;
+            let info = &ctx.type_table()[type_id];
+            let ptr = unsafe { alloc_obj::<Compact>(&ctx, info, varlen_len) };
+            assert!(!ptr.is_null(), "gc alloc failed");
+            ExternCallResult::Value(Some(ptr as u64))
+        });
+
+        match interp.run(main, &[]) {
+            Ok(InterpResult::Value(v)) => assert_eq!(v, 42),
+            other => panic!("unexpected: {:?}", other),
+        }
+        assert!(
+            ctx.collection_count() >= 1,
+            "expected moving GC to run during ObjRef allocation path"
+        );
     }
 
     #[test]

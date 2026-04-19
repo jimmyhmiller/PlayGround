@@ -19,7 +19,5 @@ pub use thread::{MutatorThread, ThreadState};
 
 mod gc_regression;
 
-// TODO: tests.rs has 115 compile errors from API changes (type_table param, type_id rename).
-// Disabled until fixed. Regression tests are in gc_regression.rs.
-#[cfg(all(test, feature = "broken_tests"))]
+#[cfg(test)]
 mod tests;

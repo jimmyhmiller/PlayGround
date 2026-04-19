@@ -1008,10 +1008,10 @@ fn emit_indirect_call(f: &mut DynFunc, ctx: &mut Ctx, callee: Value, args: &[Val
 
     f.fb.switch_to_block(dispatch_bb);
     // Inline type dispatch: load TypeInfo pointer from object header
-    let raw_ptr = f.obj_unwrap(callee);
+    let raw_ptr = f.obj_unwrap_ref(callee);
     // Read type_id (u16 at offset 0 in the Compact header).
     // Zero-extend to i64 for comparison.
-    let ti_raw = f.fb.load(Type::I32, raw_ptr, 0);
+    let ti_raw = f.fb.load(Type::I32, raw_ptr.value(), 0);
     let mask = f.fb.iconst(Type::I32, 0xFFFF);
     let ti_val = f.fb.and(ti_raw, mask);
 
@@ -1035,7 +1035,7 @@ fn emit_indirect_call(f: &mut DynFunc, ctx: &mut Ctx, callee: Value, args: &[Val
     f.fb.switch_to_block(closure_bb);
     {
         // Inline: load arity from closure object
-        let arity = ctx.types.closure.load(f, raw_ptr, "arity");
+        let arity = ctx.types.closure.load_ref(f, raw_ptr, "arity");
         let arity_ok = f.fb.icmp(CmpOp::Eq, arity, num_args_val);
         let closure_call_bb = f.fb.create_block(&[]);
         let closure_err_bb = f.fb.create_block(&[]);
@@ -1114,10 +1114,10 @@ fn emit_indirect_call(f: &mut DynFunc, ctx: &mut Ctx, callee: Value, args: &[Val
 
         f.fb.switch_to_block(real_bound_bb);
         // Inline: load method closure from BoundMethod, then arity from the closure
-        let receiver = ctx.types.bound_method.load(f, raw_ptr, "receiver");
-        let method_val = ctx.types.bound_method.load(f, raw_ptr, "method");
-        let method_ptr = f.fb.payload(method_val);
-        let bound_arity = ctx.types.closure.load(f, method_ptr, "arity");
+        let receiver = ctx.types.bound_method.load_ref(f, raw_ptr, "receiver");
+        let method_val = ctx.types.bound_method.load_ref(f, raw_ptr, "method");
+        let method_ptr = ctx.types.closure.unwrap_ref(f, method_val);
+        let bound_arity = ctx.types.closure.load_ref(f, method_ptr, "arity");
         let bound_ok = f.fb.icmp(CmpOp::Eq, bound_arity, num_args_val);
         let bound_call_bb = f.fb.create_block(&[]);
         let bound_err_bb = f.fb.create_block(&[]);
@@ -1131,7 +1131,7 @@ fn emit_indirect_call(f: &mut DynFunc, ctx: &mut Ctx, callee: Value, args: &[Val
         f.fb.switch_to_block(bound_call_bb);
         // bound_closure_func_ptr still extern (JIT call_table lookup)
         let func_ptr = f.fb.call(ctx.externs.bound_closure_func_ptr, &[callee]).unwrap();
-        let mut method_args = vec![method_val, f.obj_wrap(receiver)];
+        let mut method_args = vec![method_val, receiver];
         method_args.extend_from_slice(args);
         let result = f.fb.call_indirect(func_ptr, &method_args, Some(Type::I64)).unwrap();
         f.fb.jump(merge_bb, &[result]);
@@ -1152,12 +1152,18 @@ fn emit_indirect_call(f: &mut DynFunc, ctx: &mut Ctx, callee: Value, args: &[Val
 /// Emit an inline hash table lookup (open addressing + linear probing).
 /// Returns the value if found, or nil if not found.
 /// Computes the hash at runtime from the key (FxHash-style multiply-shift).
-fn emit_inline_table_get(f: &mut DynFunc, types: &TypeHandles, _dm: &mut DynModule, table_ptr: Value, key: Value) -> Value {
+fn emit_inline_table_get(
+    f: &mut DynFunc,
+    types: &TypeHandles,
+    _dm: &mut DynModule,
+    table_ptr: ObjRef,
+    key: Value,
+) -> Value {
     let varlen_count_off = types.table.type_info.varlen_count_offset() as i32;
     let base_off = types.table.type_info.varlen_element_offset(0) as i64;
 
     // Load capacity = varlen_count / 2
-    let varlen_count = f.fb.load(Type::I64, table_ptr, varlen_count_off);
+    let varlen_count = f.fb.load(Type::I64, table_ptr.value(), varlen_count_off);
     let one = f.fb.iconst(Type::I64, 1);
     let capacity = f.fb.ashr(varlen_count, one);
 
@@ -1184,7 +1190,7 @@ fn emit_inline_table_get(f: &mut DynFunc, types: &TypeHandles, _dm: &mut DynModu
     let idx_init = f.fb.and(hash, mask);
     // base_addr = table_ptr + base_off
     let base_const = f.fb.iconst(Type::I64, base_off);
-    let base_addr = f.fb.add(table_ptr, base_const);
+    let base_addr = f.fb.add(table_ptr.value(), base_const);
     let sixteen = f.fb.iconst(Type::I64, 16);
 
     let loop_bb = f.fb.create_block(&[Type::I64]); // param = idx
@@ -1230,8 +1236,13 @@ fn table_hash(key: u64) -> u64 {
 }
 
 /// Resolve a closure to a callable func_ptr using the call table.
-fn emit_resolve_func_ptr(f: &mut DynFunc, ctx: &mut Ctx, closure_ptr: Value, call_table_base: Value) -> Value {
-    let func_idx = ctx.types.closure.load(f, closure_ptr, "func_table_idx");
+fn emit_resolve_func_ptr(
+    f: &mut DynFunc,
+    ctx: &mut Ctx,
+    closure_ptr: ObjRef,
+    call_table_base: Value,
+) -> Value {
+    let func_idx = ctx.types.closure.load_ref(f, closure_ptr, "func_table_idx");
     let eight = f.fb.iconst(Type::I64, 8);
     let byte_offset = f.fb.mul(func_idx, eight);
     let entry_addr = f.fb.add(call_table_base, byte_offset);

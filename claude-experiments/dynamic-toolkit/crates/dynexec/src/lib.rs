@@ -876,7 +876,9 @@ impl ValueLayout for NanBox {
     const NAME: &'static str = "nan-box";
 
     fn root_precision_hint() -> RootPrecision {
-        RootPrecision::ConservativeWords
+        // NanBox values are stored in ordinary u64 slots. Precise root maps are
+        // still sound because the GC's PtrPolicy filters non-pointer payloads.
+        RootPrecision::PreciseSlots
     }
 }
 
@@ -889,8 +891,8 @@ impl LayoutConfigDefaults for NanBox {
 mod tests {
     use super::*;
 
-    struct InvalidNanBoxConfig;
-    impl CodegenConfig for InvalidNanBoxConfig {
+    struct PreciseNanBoxConfig;
+    impl CodegenConfig for PreciseNanBoxConfig {
         type Layout = NanBox;
         type Roots = PreciseStackRoots;
         type RootTransport = FrameScanRoots;
@@ -930,9 +932,8 @@ mod tests {
     }
 
     #[test]
-    fn precise_roots_reject_nan_box_layout() {
-        let err = validate_codegen_config::<InvalidNanBoxConfig>().unwrap_err();
-        assert_eq!(err.message, "root strategy is incompatible with value layout");
+    fn precise_roots_accept_nan_box_layout() {
+        assert!(validate_codegen_config::<PreciseNanBoxConfig>().is_ok());
     }
 
     #[test]

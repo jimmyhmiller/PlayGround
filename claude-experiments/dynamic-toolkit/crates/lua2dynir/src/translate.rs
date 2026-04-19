@@ -373,6 +373,13 @@ impl<'a> Translator<'a> {
         self.builder.load(Type::I64, addr, 0)
     }
 
+    /// Externs that can allocate on the GC heap must be preceded by a
+    /// safepoint so straight-line code can collect before entering them.
+    fn call_allocating_extern(&mut self, func: FuncRef, args: &[Value]) -> Option<Value> {
+        self.builder.safepoint(&[]);
+        self.builder.call(func, args)
+    }
+
     /// Load vararg_count from its slot.
     fn load_vararg_count(&mut self) -> Value {
         let addr = self.builder.stack_addr(self.vararg_count_slot);
@@ -596,10 +603,7 @@ impl<'a> Translator<'a> {
                         let mut result = self.load_reg(b);
                         for i in (b + 1)..=c {
                             let reg_i = self.load_reg(i);
-                            result = self
-                                .builder
-                                .call(ext.lua_concat, &[result, reg_i])
-                                .unwrap();
+                            result = self.call_allocating_extern(ext.lua_concat, &[result, reg_i]).unwrap();
                         }
                         self.store_reg(a, result);
                     }
@@ -753,7 +757,7 @@ impl<'a> Translator<'a> {
                     }
                     Some(OpCode::NewTable) => {
                         let a = field_a(inst) as usize;
-                        let result = self.builder.call(ext.lua_newtable, &[]).unwrap();
+                        let result = self.call_allocating_extern(ext.lua_newtable, &[]).unwrap();
                         self.store_reg(a, result);
                     }
                     Some(OpCode::GetTable) => {
@@ -768,7 +772,7 @@ impl<'a> Translator<'a> {
                         let reg_a = self.load_reg(a);
                         let b = self.rk_value_from_slot(field_b(inst));
                         let c = self.rk_value_from_slot(field_c(inst));
-                        self.builder.call(ext.lua_settable, &[reg_a, b, c]);
+                        self.call_allocating_extern(ext.lua_settable, &[reg_a, b, c]);
                     }
                     Some(OpCode::Self_) => {
                         let a = field_a(inst) as usize;
@@ -801,8 +805,7 @@ impl<'a> Translator<'a> {
                         let base_idx = self.builder.iconst(Type::I64, 0i64);
                         let nargs_val = self.builder.iconst(Type::I64, nargs as i64);
                         let result = self
-                            .builder
-                            .call(ext.lua_call, &[func_val, base_idx, nargs_val])
+                            .call_allocating_extern(ext.lua_call, &[func_val, base_idx, nargs_val])
                             .unwrap();
 
                         if c == 0 {
@@ -835,8 +838,7 @@ impl<'a> Translator<'a> {
                         let base_idx = self.builder.iconst(Type::I64, 0i64);
                         let nargs_val = self.builder.iconst(Type::I64, nargs as i64);
                         let result = self
-                            .builder
-                            .call(ext.lua_call, &[func_val, base_idx, nargs_val])
+                            .call_allocating_extern(ext.lua_call, &[func_val, base_idx, nargs_val])
                             .unwrap();
                         self.builder.ret(result);
                         terminated = true;
@@ -923,8 +925,10 @@ impl<'a> Translator<'a> {
                         let offset_val = self.builder.iconst(Type::I64, offset as i64);
                         let count_val = self.builder.iconst(Type::I64, count as i64);
 
-                        self.builder
-                            .call(ext.lua_setlist, &[table, base_idx, offset_val, count_val]);
+                        self.call_allocating_extern(
+                            ext.lua_setlist,
+                            &[table, base_idx, offset_val, count_val],
+                        );
                     }
                     Some(OpCode::Closure) => {
                         let a = field_a(inst) as usize;
@@ -968,19 +972,19 @@ impl<'a> Translator<'a> {
 
                         let closure_val = match num_upvalues {
                             0 => self
-                                .builder
-                                .call(ext.lua_make_closure_0, &[proto_idx_val, num_upval_val])
+                                .call_allocating_extern(
+                                    ext.lua_make_closure_0,
+                                    &[proto_idx_val, num_upval_val],
+                                )
                                 .unwrap(),
                             1 => self
-                                .builder
-                                .call(
+                                .call_allocating_extern(
                                     ext.lua_make_closure_1,
                                     &[proto_idx_val, num_upval_val, upval_values[0]],
                                 )
                                 .unwrap(),
                             2 => self
-                                .builder
-                                .call(
+                                .call_allocating_extern(
                                     ext.lua_make_closure_2,
                                     &[
                                         proto_idx_val,
@@ -991,8 +995,7 @@ impl<'a> Translator<'a> {
                                 )
                                 .unwrap(),
                             3 => self
-                                .builder
-                                .call(
+                                .call_allocating_extern(
                                     ext.lua_make_closure_3,
                                     &[
                                         proto_idx_val,
@@ -1004,8 +1007,7 @@ impl<'a> Translator<'a> {
                                 )
                                 .unwrap(),
                             4 => self
-                                .builder
-                                .call(
+                                .call_allocating_extern(
                                     ext.lua_make_closure_4,
                                     &[
                                         proto_idx_val,
@@ -1352,7 +1354,7 @@ impl<'a> Translator<'a> {
 
         // Slow path: call extern
         self.builder.switch_to_block(slow_block);
-        let slow = self.builder.call(fallback, &[table, key]).unwrap();
+        let slow = self.call_allocating_extern(fallback, &[table, key]).unwrap();
         self.builder.jump(merge_block, &[slow]);
 
         self.builder.switch_to_block(merge_block);
@@ -1413,7 +1415,7 @@ impl<'a> Translator<'a> {
 
         // Slow path: call extern
         self.builder.switch_to_block(slow_block);
-        self.builder.call(fallback, &[table, key, val]);
+        self.call_allocating_extern(fallback, &[table, key, val]);
         self.builder.jump(merge_block, &[]);
 
         self.builder.switch_to_block(merge_block);

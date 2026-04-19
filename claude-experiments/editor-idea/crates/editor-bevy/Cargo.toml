@@ -1,0 +1,21 @@
+[package]
+name = "editor_bevy"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+editor_core = { path = "../editor-core" }
+ropey = "1.6.1"
+# Use the umbrella `ui` feature so the renderer (`bevy_ui_render`) is included,
+# not just the API (`bevy_ui`). `default_font` bundles a minimal FiraMono
+# subset so `TextFont::default()` actually has glyphs to draw.
+bevy = { version = "0.18", default-features = false, features = [
+    "ui",
+    "default_font",
+    "x11",
+    "wayland",
+] }
+
+[[bin]]
+name = "editor"
+path = "src/main.rs"

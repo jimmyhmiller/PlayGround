@@ -56,7 +56,7 @@ provide a parser.
 ```rust
 use dynlang::*;
 
-let mut dm = DynModule::new();
+let mut dm = DynModule::new(GcConfig::leak(), NanBoxTags::default());
 
 // Register slow-path externs for operations that can't be handled inline.
 // This declares: lox_add, lox_sub, lox_mul, lox_div, lox_neg,

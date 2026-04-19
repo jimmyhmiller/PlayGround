@@ -11,7 +11,7 @@ use dynlower::{
     FrameReifyKind, FrameReifyRecord, JitFunction, JitModule, JitOutcome,
     SafepointHandlerPayloadKind, SafepointRecord, SuspendedJitFrame, take_suspended_frames,
 };
-use dynobj::RootSource;
+use dynobj::{RootSet, RootSource};
 
 /// Continuation store for the JIT path. Delegates to a
 /// `ContinuationContext` (heap-backed) so captured continuations are
@@ -844,6 +844,7 @@ pub struct JitSafepointSession<'a, P: PtrPolicy, T: JitRootTransportRuntime> {
     transport: T,
     safepoints: &'a [SafepointRecord],
     gc_threshold: f64,
+    extra_roots: RefCell<Vec<*const dyn RootSource>>,
     _policy: PhantomData<P>,
 }
 
@@ -851,6 +852,8 @@ pub struct JitSafepointSession<'a, P: PtrPolicy, T: JitRootTransportRuntime> {
 struct ActiveJitSafepointSession {
     ptr: *const (),
     handle: unsafe fn(*const (), *mut u8, usize),
+    push_root_source: unsafe fn(*const (), *const dyn RootSource),
+    pop_root_source: unsafe fn(*const ()),
 }
 
 impl<'a, P: PtrPolicy, T: JitRootTransportRuntime> JitSafepointSession<'a, P, T> {
@@ -860,6 +863,7 @@ impl<'a, P: PtrPolicy, T: JitRootTransportRuntime> JitSafepointSession<'a, P, T>
             transport,
             safepoints,
             gc_threshold: 0.0,
+            extra_roots: RefCell::new(Vec::new()),
             _policy: PhantomData,
         }
     }
@@ -883,6 +887,8 @@ impl<'a, P: PtrPolicy, T: JitRootTransportRuntime> JitSafepointSession<'a, P, T>
                 slot.replace(ActiveJitSafepointSession {
                     ptr: self as *const Self as *const (),
                     handle: Self::handle_erased,
+                    push_root_source: Self::push_root_source_erased,
+                    pop_root_source: Self::pop_root_source_erased,
                 })
             };
             let result = f();
@@ -897,6 +903,16 @@ impl<'a, P: PtrPolicy, T: JitRootTransportRuntime> JitSafepointSession<'a, P, T>
         unsafe {
             session.handle(frame_ptr, payload);
         }
+    }
+
+    unsafe fn push_root_source_erased(ptr: *const (), source: *const dyn RootSource) {
+        let session = unsafe { &*(ptr as *const Self) };
+        session.extra_roots.borrow_mut().push(source);
+    }
+
+    unsafe fn pop_root_source_erased(ptr: *const ()) {
+        let session = unsafe { &*(ptr as *const Self) };
+        session.extra_roots.borrow_mut().pop();
     }
 
     unsafe fn handle(&self, frame_ptr: *mut u8, payload: usize) {
@@ -917,8 +933,13 @@ impl<'a, P: PtrPolicy, T: JitRootTransportRuntime> JitSafepointSession<'a, P, T>
         // scans all callers whose return addresses fall in registered
         // JIT code ranges.
         let ancestor_roots = dynlower::JitFrameRoots { jit_fp: frame_ptr };
+        let extra_roots = self.extra_roots.borrow();
+        let mut sources: Vec<&dyn RootSource> = vec![&root_source, &ancestor_roots];
+        for &ptr in extra_roots.iter() {
+            sources.push(unsafe { &*ptr });
+        }
         unsafe {
-            self.heap.collect::<P>(&[&root_source, &ancestor_roots]);
+            self.heap.collect::<P>(&sources);
         }
     }
 }
@@ -935,6 +956,70 @@ pub extern "C" fn active_jit_safepoint_handler(frame_ptr: *mut u8, payload: usiz
             (session.handle)(session.ptr, frame_ptr, payload);
         }
     });
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScopedJitRoot(usize);
+
+/// A small dynamic root set for native/JIT helpers that need to keep boxed
+/// values alive across allocations inside a moving-GC safepoint session.
+pub struct ScopedJitRoots {
+    roots: RootSet,
+}
+
+impl ScopedJitRoots {
+    pub fn new() -> Self {
+        Self { roots: RootSet::new() }
+    }
+
+    pub fn push(&mut self, bits: u64) -> ScopedJitRoot {
+        ScopedJitRoot(self.roots.add(bits))
+    }
+
+    pub fn get(&self, root: ScopedJitRoot) -> u64 {
+        self.roots.get(root.0)
+    }
+
+    pub fn with_active<R>(&self, f: impl FnOnce() -> R) -> R {
+        with_registered_active_jit_roots(&self.roots, f)
+    }
+}
+
+struct ActiveRootSourceGuard {
+    session: ActiveJitSafepointSession,
+}
+
+impl Drop for ActiveRootSourceGuard {
+    fn drop(&mut self) {
+        unsafe {
+            (self.session.pop_root_source)(self.session.ptr);
+        }
+    }
+}
+
+pub fn with_registered_active_jit_roots<R>(
+    source: &dyn RootSource,
+    f: impl FnOnce() -> R,
+) -> R {
+    ACTIVE_JIT_SAFEPOINT_SESSION.with(|cell| {
+        let maybe_session = *cell.borrow();
+        let Some(session) = maybe_session else {
+            return f();
+        };
+        // SAFETY: the root source reference remains live for the full dynamic
+        // extent of this function call, and the guard below unregisters it
+        // before we return.
+        let source_ptr: *const dyn RootSource = unsafe {
+            std::mem::transmute::<*const dyn RootSource, *const dyn RootSource>(
+                source as *const dyn RootSource,
+            )
+        };
+        unsafe {
+            (session.push_root_source)(session.ptr, source_ptr);
+        }
+        let _guard = ActiveRootSourceGuard { session };
+        f()
+    })
 }
 
 #[cfg(test)]

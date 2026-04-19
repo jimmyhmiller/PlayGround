@@ -5,6 +5,7 @@ use bevy::asset::RenderAssetUsages;
 use bevy::prelude::*;
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::render::render_resource::{AsBindGroup, ShaderType};
+use bevy::render::storage::ShaderStorageBuffer;
 use bevy::shader::ShaderRef;
 use bevy::sprite_render::{AlphaMode2d, Material2d, Material2dPlugin};
 use bevy_inspector_egui::bevy_egui::{EguiPlugin, EguiPrimaryContextPass};
@@ -157,8 +158,6 @@ pub struct ShadowMesh;
 // Cone-light material
 // =====================================================================
 
-const MAX_EXTRA_LIGHTS: usize = 8;
-
 #[derive(ShaderType, Clone, Copy, Default)]
 struct ExtraLightGpu {
     pos: Vec2,
@@ -169,7 +168,7 @@ struct ExtraLightGpu {
     _pad: f32,
 }
 
-#[derive(ShaderType, Clone, Copy)]
+#[derive(ShaderType, Clone, Copy, Default)]
 struct ConeLightParams {
     player_pos: Vec2,
     aim_dir: Vec2,
@@ -177,35 +176,14 @@ struct ConeLightParams {
     range: f32,
     ambient: f32,
     intensity: f32,
-    extra_count: u32,
-    _pad1: u32,
-    _pad2: u32,
-    _pad3: u32,
-    extras: [ExtraLightGpu; MAX_EXTRA_LIGHTS],
-}
-
-impl Default for ConeLightParams {
-    fn default() -> Self {
-        Self {
-            player_pos: Vec2::ZERO,
-            aim_dir: Vec2::X,
-            cos_half_angle: 0.0,
-            range: 0.0,
-            ambient: 0.0,
-            intensity: 0.0,
-            extra_count: 0,
-            _pad1: 0,
-            _pad2: 0,
-            _pad3: 0,
-            extras: [ExtraLightGpu::default(); MAX_EXTRA_LIGHTS],
-        }
-    }
 }
 
 #[derive(Asset, TypePath, AsBindGroup, Clone, Default)]
 struct ConeLightMaterial {
     #[uniform(0)]
     params: ConeLightParams,
+    #[storage(1, read_only)]
+    extras: Handle<ShaderStorageBuffer>,
 }
 
 impl Material2d for ConeLightMaterial {
@@ -320,6 +298,7 @@ fn setup(
     mut color_materials: ResMut<Assets<ColorMaterial>>,
     mut cone_materials: ResMut<Assets<ConeLightMaterial>>,
     mut cave_materials: ResMut<Assets<CaveFloorMaterial>>,
+    mut storage_buffers: ResMut<Assets<ShaderStorageBuffer>>,
 ) {
     commands.spawn((Camera2d, Name::new("Camera")));
 
@@ -351,8 +330,10 @@ fn setup(
     load_level_or_default(&mut commands, &mut meshes, &mut color_materials);
 
     let overlay_mesh = meshes.add(Rectangle::new(4096.0, 4096.0));
+    let extras_buffer = storage_buffers.add(ShaderStorageBuffer::default());
     let overlay_mat = cone_materials.add(ConeLightMaterial {
         params: ConeLightParams::default(),
+        extras: extras_buffer,
     });
     commands.spawn((
         LightOverlay,
@@ -623,8 +604,27 @@ fn update_cone_light(
     sentinel_lights: Query<(&Transform, &Sentinel, &SentinelState)>,
     overlays: Query<&MeshMaterial2d<ConeLightMaterial>, With<LightOverlay>>,
     mut materials: ResMut<Assets<ConeLightMaterial>>,
+    mut storage_buffers: ResMut<Assets<ShaderStorageBuffer>>,
 ) {
     let Ok((tf, aim)) = players.single() else { return };
+
+    let mut extras: Vec<ExtraLightGpu> = Vec::new();
+    for (stf, sentinel, sstate) in &sentinel_lights {
+        let dir = Vec2::new(sstate.aim_angle.cos(), sstate.aim_angle.sin());
+        extras.push(ExtraLightGpu {
+            pos: stf.translation.truncate(),
+            dir,
+            cos_half_angle: sentinel.light_half_angle_deg.to_radians().cos(),
+            range: sentinel.light_range,
+            intensity: sentinel.light_intensity,
+            _pad: 0.0,
+        });
+    }
+    // Storage buffers can't be zero-sized on some backends.
+    if extras.is_empty() {
+        extras.push(ExtraLightGpu::default());
+    }
+
     for handle in &overlays {
         if let Some(mat) = materials.get_mut(&handle.0) {
             mat.params.player_pos = tf.translation.truncate();
@@ -634,23 +634,9 @@ fn update_cone_light(
             mat.params.ambient = tuning.ambient;
             mat.params.intensity = tuning.light_intensity;
 
-            let mut count = 0u32;
-            for (stf, sentinel, sstate) in &sentinel_lights {
-                if (count as usize) >= MAX_EXTRA_LIGHTS {
-                    break;
-                }
-                let dir = Vec2::new(sstate.aim_angle.cos(), sstate.aim_angle.sin());
-                mat.params.extras[count as usize] = ExtraLightGpu {
-                    pos: stf.translation.truncate(),
-                    dir,
-                    cos_half_angle: sentinel.light_half_angle_deg.to_radians().cos(),
-                    range: sentinel.light_range,
-                    intensity: sentinel.light_intensity,
-                    _pad: 0.0,
-                };
-                count += 1;
+            if let Some(buf) = storage_buffers.get_mut(&mat.extras) {
+                buf.set_data(extras.as_slice());
             }
-            mat.params.extra_count = count;
         }
     }
 }

@@ -9,6 +9,19 @@ use dynobj::{AtomicRootSet, FrameChain, RootFrame, RootSet, RootSource};
 
 use std::sync::Arc;
 
+fn tt(infos: &[TypeInfo]) -> Vec<TypeInfo> {
+    infos.to_vec()
+}
+
+unsafe fn read_obj_info<'a>(
+    obj: *const u8,
+    type_id_offset: usize,
+    type_table: &'a [TypeInfo],
+) -> &'a TypeInfo {
+    let type_id = unsafe { read_type_id(obj, type_id_offset) } as usize;
+    &type_table[type_id]
+}
+
 // ─── BumpAllocator ───────────────────────────────────────────────────
 
 #[test]
@@ -80,7 +93,9 @@ fn bump_reset() {
 
 #[test]
 fn bump_alloc_obj_convenience() {
-    static INFO: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_fields(2);
+    static INFO: TypeInfo = TypeInfo::for_header(Compact::SIZE)
+        .with_type_id(0)
+        .with_fields(2);
     let bump = BumpAllocator::new::<Compact>(4096);
 
     let ptr = unsafe { alloc_obj::<Compact>(&bump, &INFO, 0) };
@@ -89,13 +104,15 @@ fn bump_alloc_obj_convenience() {
     // Verify header is initialized
     unsafe {
         let header = core::ptr::read(ptr as *const Compact);
-        assert_eq!(header.type_info(), &INFO as *const TypeInfo);
+        assert_eq!(header.type_id(), INFO.type_id);
     }
 }
 
 #[test]
 fn bump_alloc_obj_varlen() {
-    static INFO: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_varlen_values(1);
+    static INFO: TypeInfo = TypeInfo::for_header(Compact::SIZE)
+        .with_type_id(0)
+        .with_varlen_values(1);
     let bump = BumpAllocator::new::<Compact>(4096);
 
     let ptr = unsafe { alloc_obj::<Compact>(&bump, &INFO, 5) };
@@ -104,7 +121,7 @@ fn bump_alloc_obj_varlen() {
     unsafe {
         // Verify header
         let header = core::ptr::read(ptr as *const Compact);
-        assert_eq!(header.type_info(), &INFO as *const TypeInfo);
+        assert_eq!(header.type_id(), INFO.type_id);
 
         // Verify varlen count was written
         assert_eq!(read_varlen_count(ptr, &INFO), 5);
@@ -113,9 +130,15 @@ fn bump_alloc_obj_varlen() {
 
 #[test]
 fn bump_heap_walk() {
-    static INFO_A: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_fields(1);
-    static INFO_B: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_fields(2);
-    static INFO_C: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_fields(0);
+    static INFO_A: TypeInfo = TypeInfo::for_header(Compact::SIZE)
+        .with_type_id(0)
+        .with_fields(1);
+    static INFO_B: TypeInfo = TypeInfo::for_header(Compact::SIZE)
+        .with_type_id(1)
+        .with_fields(2);
+    static INFO_C: TypeInfo = TypeInfo::for_header(Compact::SIZE)
+        .with_type_id(2)
+        .with_fields(0);
 
     let bump = BumpAllocator::new::<Compact>(4096);
 
@@ -125,25 +148,31 @@ fn bump_heap_walk() {
 
     let mut visited: Vec<(*mut u8, *const TypeInfo)> = Vec::new();
     unsafe {
-        bump.walk(&mut |ptr, info| {
+        bump.walk(&[INFO_A, INFO_B, INFO_C], &mut |ptr, info| {
             visited.push((ptr, info as *const TypeInfo));
         });
     }
 
     assert_eq!(visited.len(), 3);
     assert_eq!(visited[0].0, ptr_a);
-    assert_eq!(visited[0].1, &INFO_A as *const TypeInfo);
+    assert_eq!(unsafe { &*visited[0].1 }.type_id, INFO_A.type_id);
     assert_eq!(visited[1].0, ptr_b);
-    assert_eq!(visited[1].1, &INFO_B as *const TypeInfo);
+    assert_eq!(unsafe { &*visited[1].1 }.type_id, INFO_B.type_id);
     assert_eq!(visited[2].0, ptr_c);
-    assert_eq!(visited[2].1, &INFO_C as *const TypeInfo);
+    assert_eq!(unsafe { &*visited[2].1 }.type_id, INFO_C.type_id);
 }
 
 #[test]
 fn bump_heap_walk_varlen() {
-    static INFO_FIX: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_fields(1);
-    static INFO_VEC: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_varlen_values(0);
-    static INFO_STR: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_varlen_bytes(0);
+    static INFO_FIX: TypeInfo = TypeInfo::for_header(Compact::SIZE)
+        .with_type_id(0)
+        .with_fields(1);
+    static INFO_VEC: TypeInfo = TypeInfo::for_header(Compact::SIZE)
+        .with_type_id(1)
+        .with_varlen_values(0);
+    static INFO_STR: TypeInfo = TypeInfo::for_header(Compact::SIZE)
+        .with_type_id(2)
+        .with_varlen_bytes(0);
 
     let bump = BumpAllocator::new::<Compact>(4096);
 
@@ -153,18 +182,18 @@ fn bump_heap_walk_varlen() {
 
     let mut visited: Vec<(*mut u8, *const TypeInfo)> = Vec::new();
     unsafe {
-        bump.walk(&mut |ptr, info| {
+        bump.walk(&[INFO_FIX, INFO_VEC, INFO_STR], &mut |ptr, info| {
             visited.push((ptr, info as *const TypeInfo));
         });
     }
 
     assert_eq!(visited.len(), 3);
     assert_eq!(visited[0].0, ptr_fix);
-    assert_eq!(visited[0].1, &INFO_FIX as *const TypeInfo);
+    assert_eq!(unsafe { &*visited[0].1 }.type_id, INFO_FIX.type_id);
     assert_eq!(visited[1].0, ptr_vec);
-    assert_eq!(visited[1].1, &INFO_VEC as *const TypeInfo);
+    assert_eq!(unsafe { &*visited[1].1 }.type_id, INFO_VEC.type_id);
     assert_eq!(visited[2].0, ptr_str);
-    assert_eq!(visited[2].1, &INFO_STR as *const TypeInfo);
+    assert_eq!(unsafe { &*visited[2].1 }.type_id, INFO_STR.type_id);
 }
 
 #[test]
@@ -172,10 +201,15 @@ fn bump_integration_roots_scan() {
     type S = LowBit<3>;
 
     // obj_a (1 field) → obj_b (leaf)
-    static INFO_1F: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_fields(1);
-    static INFO_0F: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_fields(0);
+    static INFO_1F: TypeInfo = TypeInfo::for_header(Compact::SIZE)
+        .with_type_id(0)
+        .with_fields(1);
+    static INFO_0F: TypeInfo = TypeInfo::for_header(Compact::SIZE)
+        .with_type_id(1)
+        .with_fields(0);
 
     let bump = BumpAllocator::new::<Compact>(4096);
+    let type_table = [INFO_1F, INFO_0F];
     let mut m = Mutator::new();
 
     let root_b = m.alloc::<Compact>(&bump, &INFO_0F, 0).unwrap();
@@ -209,7 +243,7 @@ fn bump_integration_roots_scan() {
     assert!(marked.contains(&obj_b));
 
     while let Some(obj) = mark_stack.pop() {
-        let info = unsafe { read_type_info(obj, Compact::TYPE_INFO_OFFSET) };
+        let info = unsafe { read_obj_info(obj, Compact::TYPE_ID_OFFSET, &type_table) };
         unsafe {
             scan_object(obj, info, |slot| {
                 let bits = core::ptr::read(slot);
@@ -232,7 +266,7 @@ fn bump_integration_roots_scan() {
     // Walk heap and verify same objects found
     let mut walked: Vec<*mut u8> = Vec::new();
     unsafe {
-        bump.walk(&mut |ptr, _info| {
+        bump.walk(&type_table, &mut |ptr, _info| {
             walked.push(ptr);
         });
     }
@@ -274,7 +308,9 @@ fn mutator_gcref_value_decode() {
 
 #[test]
 fn mutator_alloc_returns_rooted_object() {
-    const PAIR: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_fields(2);
+    const PAIR: TypeInfo = TypeInfo::for_header(Compact::SIZE)
+        .with_type_id(0)
+        .with_fields(2);
 
     let bump = BumpAllocator::new::<Compact>(4096);
     let mut m = Mutator::new();
@@ -283,9 +319,9 @@ fn mutator_alloc_returns_rooted_object() {
     let ptr = m.get(&root).bits();
     assert_ne!(ptr, 0);
 
-    // Verify the header is initialized: read_type_info should return PAIR
+    // Verify the header is initialized with the expected type id/layout.
     let obj = ptr as *const u8;
-    let info = unsafe { read_type_info(obj, Compact::TYPE_INFO_OFFSET) };
+    let info = unsafe { read_obj_info(obj, Compact::TYPE_ID_OFFSET, &[PAIR]) };
     assert_eq!(info.value_field_count, 2);
     assert_eq!(info.header_size, Compact::SIZE as u16);
 }
@@ -320,7 +356,9 @@ fn mutator_save_restore_scoping() {
 
 #[test]
 fn mutator_root_field() {
-    const PAIR: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_fields(2);
+    const PAIR: TypeInfo = TypeInfo::for_header(Compact::SIZE)
+        .with_type_id(0)
+        .with_fields(2);
 
     let bump = BumpAllocator::new::<Compact>(4096);
     let mut m = Mutator::new();
@@ -363,7 +401,7 @@ fn mutator_multiple_gcrefs_same_scope() {
 
 #[test]
 fn mutator_reread_after_alloc() {
-    const LEAF: TypeInfo = TypeInfo::for_header(Compact::SIZE);
+    const LEAF: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_type_id(0);
 
     let bump = BumpAllocator::new::<Compact>(4096);
     let mut m = Mutator::new();
@@ -384,7 +422,7 @@ fn mutator_reread_after_alloc() {
 
 #[test]
 fn mutator_alloc_full_returns_none() {
-    const LEAF: TypeInfo = TypeInfo::for_header(Compact::SIZE);
+    const LEAF: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_type_id(0);
     // Leaf object: 8-byte Compact header, allocation_size = 8
     assert_eq!(LEAF.allocation_size(0), 8);
 
@@ -405,7 +443,9 @@ fn mutator_alloc_full_returns_none() {
 
 #[test]
 fn mutator_integration_with_scan() {
-    const PAIR: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_fields(2);
+    const PAIR: TypeInfo = TypeInfo::for_header(Compact::SIZE)
+        .with_type_id(0)
+        .with_fields(2);
 
     let bump = BumpAllocator::new::<Compact>(4096);
     let mut m = Mutator::new();
@@ -449,7 +489,7 @@ fn mutator_integration_with_scan() {
 
     // Trace transitively
     while let Some(obj) = mark_stack.pop() {
-        let info = unsafe { read_type_info(obj, Compact::TYPE_INFO_OFFSET) };
+        let info = unsafe { read_obj_info(obj, Compact::TYPE_ID_OFFSET, &[PAIR]) };
         unsafe {
             scan_object(obj, info, |slot| {
                 let v = Value::<LowBit<3>>::from_bits(*slot);
@@ -472,8 +512,12 @@ fn mutator_integration_with_scan() {
 
 // ─── extern "C" API that never exposes raw pointers ─────────────────
 
-const PAIR_INFO: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_fields(2);
-const VEC_INFO: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_varlen_values(0);
+const PAIR_INFO: TypeInfo = TypeInfo::for_header(Compact::SIZE)
+    .with_type_id(0)
+    .with_fields(2);
+const VEC_INFO: TypeInfo = TypeInfo::for_header(Compact::SIZE)
+    .with_type_id(1)
+    .with_varlen_values(0);
 
 unsafe extern "C" fn rt_alloc_pair(m: *mut Mutator, bump: *const BumpAllocator) -> Root {
     let m = unsafe { &mut *m };
@@ -691,7 +735,8 @@ fn fixnum(n: i64) -> u64 {
 
 #[test]
 fn semi_space_collect_preserves_live_object() {
-    static LEAF: TypeInfo = TypeInfo::for_header(Compact::SIZE);
+    static LEAF: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_type_id(0);
+    let type_table = [LEAF];
 
     let mut gc = SemiSpace::new::<Compact>(4096);
     let obj = gc.alloc_obj::<Compact>(&LEAF, 0);
@@ -708,7 +753,7 @@ fn semi_space_collect_preserves_live_object() {
 
     let root = SingleRoot(Cell::new(ptr_val(obj)));
 
-    unsafe { gc.collect::<LowBit3Tag0>(&mut [&root]) };
+    unsafe { gc.collect::<LowBit3Tag0>(&[LEAF], &mut [&root]) };
 
     // Root should now point into the new from-space (formerly to-space)
     let new_ptr = LowBit3Tag0::try_decode_ptr(root.0.get()).unwrap();
@@ -716,13 +761,14 @@ fn semi_space_collect_preserves_live_object() {
     assert_ne!(new_ptr, obj, "object should have moved");
 
     // Header should still be valid
-    let info = unsafe { read_type_info(new_ptr, Compact::TYPE_INFO_OFFSET) };
-    assert_eq!(info as *const TypeInfo, &LEAF as *const TypeInfo);
+    let info = unsafe { read_obj_info(new_ptr, Compact::TYPE_ID_OFFSET, &type_table) };
+    assert_eq!(info.type_id, LEAF.type_id);
 }
 
 #[test]
 fn semi_space_dead_objects_reclaimed() {
-    static LEAF: TypeInfo = TypeInfo::for_header(Compact::SIZE);
+    static LEAF: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_type_id(0);
+    let type_table = [LEAF];
 
     let mut gc = SemiSpace::new::<Compact>(4096);
 
@@ -742,7 +788,7 @@ fn semi_space_dead_objects_reclaimed() {
     let root = SingleRoot(Cell::new(ptr_val(live)));
 
     let used_before = gc.from_used();
-    unsafe { gc.collect::<LowBit3Tag0>(&mut [&root]) };
+    unsafe { gc.collect::<LowBit3Tag0>(&type_table, &mut [&root]) };
     let used_after = gc.from_used();
 
     // Only one object should survive
@@ -752,8 +798,11 @@ fn semi_space_dead_objects_reclaimed() {
 
 #[test]
 fn semi_space_pointer_fixup() {
-    static PAIR: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_fields(2);
-    static LEAF: TypeInfo = TypeInfo::for_header(Compact::SIZE);
+    static PAIR: TypeInfo = TypeInfo::for_header(Compact::SIZE)
+        .with_type_id(0)
+        .with_fields(2);
+    static LEAF: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_type_id(1);
+    let type_table = [PAIR, LEAF];
 
     let mut gc = SemiSpace::new::<Compact>(4096);
 
@@ -780,7 +829,7 @@ fn semi_space_pointer_fixup() {
     }
     let root = SingleRoot(Cell::new(ptr_val(parent)));
 
-    unsafe { gc.collect::<LowBit3Tag0>(&mut [&root]) };
+    unsafe { gc.collect::<LowBit3Tag0>(&type_table, &mut [&root]) };
 
     // Verify parent moved and its fields are updated
     let new_parent = LowBit3Tag0::try_decode_ptr(root.0.get()).unwrap();
@@ -802,8 +851,11 @@ fn semi_space_pointer_fixup() {
 #[test]
 fn semi_space_dag_shared_child() {
     // Two parents point to the same child → child should be copied once
-    static PAIR: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_fields(2);
-    static LEAF: TypeInfo = TypeInfo::for_header(Compact::SIZE);
+    static PAIR: TypeInfo = TypeInfo::for_header(Compact::SIZE)
+        .with_type_id(0)
+        .with_fields(2);
+    static LEAF: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_type_id(1);
+    let type_table = [PAIR, LEAF];
 
     let mut gc = SemiSpace::new::<Compact>(4096);
 
@@ -838,7 +890,7 @@ fn semi_space_dag_shared_child() {
     }
     let root_source = Roots([&roots[0], &roots[1]]);
 
-    unsafe { gc.collect::<LowBit3Tag0>(&mut [&root_source]) };
+    unsafe { gc.collect::<LowBit3Tag0>(&type_table, &mut [&root_source]) };
 
     // Both parents' field[0] should point to the SAME new child
     let new_a = LowBit3Tag0::try_decode_ptr(roots[0].get()).unwrap();
@@ -861,7 +913,10 @@ fn semi_space_dag_shared_child() {
 #[test]
 fn semi_space_chain() {
     // a → b → c → d (chain of 4)
-    static NODE: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_fields(1);
+    static NODE: TypeInfo = TypeInfo::for_header(Compact::SIZE)
+        .with_type_id(0)
+        .with_fields(1);
+    let type_table = [NODE];
 
     let mut gc = SemiSpace::new::<Compact>(4096);
 
@@ -886,7 +941,7 @@ fn semi_space_chain() {
     }
     let root = SingleRoot(Cell::new(ptr_val(a)));
 
-    unsafe { gc.collect::<LowBit3Tag0>(&mut [&root]) };
+    unsafe { gc.collect::<LowBit3Tag0>(&type_table, &mut [&root]) };
 
     // Walk the chain in to-space and verify it's intact
     let mut cur = LowBit3Tag0::try_decode_ptr(root.0.get()).unwrap();
@@ -904,7 +959,10 @@ fn semi_space_chain() {
 #[test]
 fn semi_space_cycle() {
     // a → b → a (cycle)
-    static NODE: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_fields(1);
+    static NODE: TypeInfo = TypeInfo::for_header(Compact::SIZE)
+        .with_type_id(0)
+        .with_fields(1);
+    let type_table = [NODE];
 
     let mut gc = SemiSpace::new::<Compact>(4096);
 
@@ -925,7 +983,7 @@ fn semi_space_cycle() {
     }
     let root = SingleRoot(Cell::new(ptr_val(a)));
 
-    unsafe { gc.collect::<LowBit3Tag0>(&mut [&root]) };
+    unsafe { gc.collect::<LowBit3Tag0>(&type_table, &mut [&root]) };
 
     let new_a = LowBit3Tag0::try_decode_ptr(root.0.get()).unwrap();
     let field_a: Value<LowBit<3>> = unsafe { read_value_field(new_a, &NODE, 0) };
@@ -943,8 +1001,11 @@ fn semi_space_cycle() {
 
 #[test]
 fn semi_space_multiple_collections() {
-    static PAIR: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_fields(2);
-    static LEAF: TypeInfo = TypeInfo::for_header(Compact::SIZE);
+    static PAIR: TypeInfo = TypeInfo::for_header(Compact::SIZE)
+        .with_type_id(0)
+        .with_fields(2);
+    static LEAF: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_type_id(1);
+    let type_table = [PAIR, LEAF];
 
     let mut gc = SemiSpace::new::<Compact>(4096);
 
@@ -959,7 +1020,7 @@ fn semi_space_multiple_collections() {
     // Round 1: allocate, root, collect
     let obj = gc.alloc_obj::<Compact>(&PAIR, 0);
     let root = SingleRoot(Cell::new(ptr_val(obj)));
-    unsafe { gc.collect::<LowBit3Tag0>(&mut [&root]) };
+    unsafe { gc.collect::<LowBit3Tag0>(&type_table, &mut [&root]) };
     assert_eq!(gc.collections(), 1);
 
     let after_1 = LowBit3Tag0::try_decode_ptr(root.0.get()).unwrap();
@@ -967,7 +1028,7 @@ fn semi_space_multiple_collections() {
     // Round 2: allocate more garbage, collect again
     let _dead = gc.alloc_obj::<Compact>(&LEAF, 0);
     let _dead2 = gc.alloc_obj::<Compact>(&LEAF, 0);
-    unsafe { gc.collect::<LowBit3Tag0>(&mut [&root]) };
+    unsafe { gc.collect::<LowBit3Tag0>(&type_table, &mut [&root]) };
     assert_eq!(gc.collections(), 2);
 
     let after_2 = LowBit3Tag0::try_decode_ptr(root.0.get()).unwrap();
@@ -988,7 +1049,7 @@ fn semi_space_multiple_collections() {
             Value::<LowBit<3>>::from_bits(ptr_val(child)),
         );
     }
-    unsafe { gc.collect::<LowBit3Tag0>(&mut [&root]) };
+    unsafe { gc.collect::<LowBit3Tag0>(&type_table, &mut [&root]) };
     assert_eq!(gc.collections(), 3);
 
     let new_parent = LowBit3Tag0::try_decode_ptr(root.0.get()).unwrap();
@@ -1001,8 +1062,11 @@ fn semi_space_multiple_collections() {
 
 #[test]
 fn semi_space_varlen_values() {
-    static VEC: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_varlen_values(0);
-    static LEAF: TypeInfo = TypeInfo::for_header(Compact::SIZE);
+    static VEC: TypeInfo = TypeInfo::for_header(Compact::SIZE)
+        .with_type_id(0)
+        .with_varlen_values(0);
+    static LEAF: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_type_id(1);
+    let type_table = [VEC, LEAF];
 
     let mut gc = SemiSpace::new::<Compact>(4096);
 
@@ -1026,7 +1090,7 @@ fn semi_space_varlen_values() {
     }
     let root = SingleRoot(Cell::new(ptr_val(vec)));
 
-    unsafe { gc.collect::<LowBit3Tag0>(&mut [&root]) };
+    unsafe { gc.collect::<LowBit3Tag0>(&type_table, &mut [&root]) };
 
     let new_vec = LowBit3Tag0::try_decode_ptr(root.0.get()).unwrap();
     assert!(gc.contains(new_vec as *const u8));
@@ -1054,7 +1118,10 @@ fn semi_space_varlen_values() {
 
 #[test]
 fn semi_space_varlen_bytes() {
-    static STR: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_varlen_bytes(0);
+    static STR: TypeInfo = TypeInfo::for_header(Compact::SIZE)
+        .with_type_id(0)
+        .with_varlen_bytes(0);
+    let type_table = [STR];
 
     let mut gc = SemiSpace::new::<Compact>(4096);
 
@@ -1076,7 +1143,7 @@ fn semi_space_varlen_bytes() {
     }
     let root = SingleRoot(Cell::new(ptr_val(s)));
 
-    unsafe { gc.collect::<LowBit3Tag0>(&mut [&root]) };
+    unsafe { gc.collect::<LowBit3Tag0>(&type_table, &mut [&root]) };
 
     let new_s = LowBit3Tag0::try_decode_ptr(root.0.get()).unwrap();
     assert!(gc.contains(new_s as *const u8));
@@ -1092,8 +1159,11 @@ fn semi_space_varlen_bytes() {
 
 #[test]
 fn semi_space_with_full_header() {
-    static PAIR: TypeInfo = TypeInfo::for_header(Full::SIZE).with_fields(2);
-    static LEAF: TypeInfo = TypeInfo::for_header(Full::SIZE);
+    static PAIR: TypeInfo = TypeInfo::for_header(Full::SIZE)
+        .with_type_id(0)
+        .with_fields(2);
+    static LEAF: TypeInfo = TypeInfo::for_header(Full::SIZE).with_type_id(1);
+    let type_table = [PAIR, LEAF];
 
     let mut gc = SemiSpace::new::<Full>(4096);
 
@@ -1119,15 +1189,15 @@ fn semi_space_with_full_header() {
     }
     let root = SingleRoot(Cell::new(ptr_val(parent)));
 
-    unsafe { gc.collect::<LowBit3Tag0>(&mut [&root]) };
+    unsafe { gc.collect::<LowBit3Tag0>(&type_table, &mut [&root]) };
 
     let new_parent = LowBit3Tag0::try_decode_ptr(root.0.get()).unwrap();
     assert!(gc.contains(new_parent as *const u8));
 
     unsafe {
         // Verify type_info is correct (Full has type_info at offset 8)
-        let info = read_type_info(new_parent, Full::TYPE_INFO_OFFSET);
-        assert_eq!(info as *const TypeInfo, &PAIR as *const TypeInfo);
+        let info = read_obj_info(new_parent, Full::TYPE_ID_OFFSET, &type_table);
+        assert_eq!(info.type_id, PAIR.type_id);
 
         // Verify child pointer was fixed up
         let field0: Value<LowBit<3>> = read_value_field(new_parent, &PAIR, 0);
@@ -1135,8 +1205,8 @@ fn semi_space_with_full_header() {
         assert!(gc.contains(new_child as *const u8));
 
         // Verify child's header
-        let child_info = read_type_info(new_child, Full::TYPE_INFO_OFFSET);
-        assert_eq!(child_info as *const TypeInfo, &LEAF as *const TypeInfo);
+        let child_info = read_obj_info(new_child, Full::TYPE_ID_OFFSET, &type_table);
+        assert_eq!(child_info.type_id, LEAF.type_id);
 
         // Verify fixnum preserved
         let field1: Value<LowBit<3>> = read_value_field(new_parent, &PAIR, 1);
@@ -1148,8 +1218,11 @@ fn semi_space_with_full_header() {
 
 #[test]
 fn semi_space_with_nanbox() {
-    static PAIR: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_fields(2);
-    static LEAF: TypeInfo = TypeInfo::for_header(Compact::SIZE);
+    static PAIR: TypeInfo = TypeInfo::for_header(Compact::SIZE)
+        .with_type_id(0)
+        .with_fields(2);
+    static LEAF: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_type_id(1);
+    let type_table = [PAIR, LEAF];
 
     let mut gc = SemiSpace::new::<Compact>(4096);
 
@@ -1173,7 +1246,7 @@ fn semi_space_with_nanbox() {
     }
     let root = SingleRoot(Cell::new(NanBoxTag0::encode_ptr(parent)));
 
-    unsafe { gc.collect::<NanBoxTag0>(&mut [&root]) };
+    unsafe { gc.collect::<NanBoxTag0>(&type_table, &mut [&root]) };
 
     let new_parent = NanBoxTag0::try_decode_ptr(root.0.get()).unwrap();
     assert!(gc.contains(new_parent as *const u8));
@@ -1194,7 +1267,8 @@ fn semi_space_with_nanbox() {
 
 #[test]
 fn semi_space_multiple_root_sources() {
-    static LEAF: TypeInfo = TypeInfo::for_header(Compact::SIZE);
+    static LEAF: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_type_id(0);
+    let type_table = [LEAF];
 
     let mut gc = SemiSpace::new::<Compact>(4096);
 
@@ -1215,7 +1289,7 @@ fn semi_space_multiple_root_sources() {
     let r2 = SingleRoot(Cell::new(ptr_val(obj_b)));
     let r3 = SingleRoot(Cell::new(ptr_val(obj_c)));
 
-    unsafe { gc.collect::<LowBit3Tag0>(&mut [&r1, &r2, &r3]) };
+    unsafe { gc.collect::<LowBit3Tag0>(&type_table, &mut [&r1, &r2, &r3]) };
 
     let new_a = LowBit3Tag0::try_decode_ptr(r1.0.get()).unwrap();
     let new_b = LowBit3Tag0::try_decode_ptr(r2.0.get()).unwrap();
@@ -1236,8 +1310,11 @@ fn semi_space_multiple_root_sources() {
 
 #[test]
 fn semi_space_with_mutator_as_root_source() {
-    static PAIR: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_fields(2);
-    static LEAF: TypeInfo = TypeInfo::for_header(Compact::SIZE);
+    static PAIR: TypeInfo = TypeInfo::for_header(Compact::SIZE)
+        .with_type_id(0)
+        .with_fields(2);
+    static LEAF: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_type_id(1);
+    let type_table = [PAIR, LEAF];
 
     let mut gc = SemiSpace::new::<Compact>(4096);
 
@@ -1262,7 +1339,7 @@ fn semi_space_with_mutator_as_root_source() {
     let r_child = m.root(ptr_val(child));
 
     // Collect using Mutator as RootSource
-    unsafe { gc.collect::<LowBit3Tag0>(&mut [&m]) };
+    unsafe { gc.collect::<LowBit3Tag0>(&type_table, &mut [&m]) };
 
     // The mutator's root slots should be updated in-place
     let new_parent = LowBit3Tag0::try_decode_ptr(m.get(&r_parent).bits()).unwrap();
@@ -1283,7 +1360,10 @@ fn semi_space_with_mutator_as_root_source() {
 
 #[test]
 fn semi_space_fill_collect_refill() {
-    static NODE: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_fields(1);
+    static NODE: TypeInfo = TypeInfo::for_header(Compact::SIZE)
+        .with_type_id(0)
+        .with_fields(1);
+    let type_table = [NODE];
 
     let obj_size = NODE.allocation_size(0); // 16 bytes
     let space_size = obj_size * 10; // room for 10 objects per space
@@ -1310,7 +1390,7 @@ fn semi_space_fill_collect_refill() {
     );
 
     // Collect — should free 9 objects
-    unsafe { gc.collect::<LowBit3Tag0>(&mut [&root]) };
+    unsafe { gc.collect::<LowBit3Tag0>(&type_table, &mut [&root]) };
     assert_eq!(gc.from_used(), obj_size);
 
     // Fill again — we should be able to allocate 9 more
@@ -1328,7 +1408,7 @@ fn semi_space_fill_collect_refill() {
     // Walk from-space to link objects into a chain
     let mut objects = vec![prev];
     unsafe {
-        gc.from_space().walk(&mut |ptr, _info| {
+        gc.from_space().walk(&type_table, &mut |ptr, _info| {
             if ptr != prev {
                 objects.push(ptr);
             }
@@ -1346,7 +1426,7 @@ fn semi_space_fill_collect_refill() {
     }
 
     // Collect — all 10 should survive (reachable via chain)
-    unsafe { gc.collect::<LowBit3Tag0>(&mut [&root]) };
+    unsafe { gc.collect::<LowBit3Tag0>(&type_table, &mut [&root]) };
     assert_eq!(gc.from_used(), obj_size * 10);
 }
 
@@ -1354,10 +1434,17 @@ fn semi_space_fill_collect_refill() {
 
 #[test]
 fn semi_space_mixed_object_types() {
-    static PAIR: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_fields(2);
-    static VEC: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_varlen_values(0);
-    static STR: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_varlen_bytes(0);
-    static LEAF: TypeInfo = TypeInfo::for_header(Compact::SIZE);
+    static PAIR: TypeInfo = TypeInfo::for_header(Compact::SIZE)
+        .with_type_id(0)
+        .with_fields(2);
+    static VEC: TypeInfo = TypeInfo::for_header(Compact::SIZE)
+        .with_type_id(1)
+        .with_varlen_values(0);
+    static STR: TypeInfo = TypeInfo::for_header(Compact::SIZE)
+        .with_type_id(2)
+        .with_varlen_bytes(0);
+    static LEAF: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_type_id(3);
+    let type_table = [PAIR, VEC, STR, LEAF];
 
     let mut gc = SemiSpace::new::<Compact>(8192);
 
@@ -1393,7 +1480,7 @@ fn semi_space_mixed_object_types() {
     }
     let root = SingleRoot(Cell::new(ptr_val(vec)));
 
-    unsafe { gc.collect::<LowBit3Tag0>(&mut [&root]) };
+    unsafe { gc.collect::<LowBit3Tag0>(&type_table, &mut [&root]) };
 
     // All 4 objects reachable: vec → leaf, pair → s, vec
     let new_vec = LowBit3Tag0::try_decode_ptr(root.0.get()).unwrap();
@@ -1439,7 +1526,10 @@ fn semi_space_with_custom_header() {
         }
     }
 
-    static PAIR: TypeInfo = TypeInfo::for_header(GcHeader::SIZE).with_fields(2);
+    static PAIR: TypeInfo = TypeInfo::for_header(GcHeader::SIZE)
+        .with_type_id(0)
+        .with_fields(2);
+    let type_table = [PAIR];
 
     let mut gc = SemiSpace::new::<GcHeader>(4096);
 
@@ -1458,14 +1548,14 @@ fn semi_space_with_custom_header() {
     }
     let root = SingleRoot(Cell::new(ptr_val(obj)));
 
-    unsafe { gc.collect::<LowBit3Tag0>(&mut [&root]) };
+    unsafe { gc.collect::<LowBit3Tag0>(&type_table, &mut [&root]) };
 
     let new_obj = LowBit3Tag0::try_decode_ptr(root.0.get()).unwrap();
     assert!(gc.contains(new_obj as *const u8));
 
     // Verify type_info recovered via custom header offset
-    let info = unsafe { read_type_info(new_obj, GcHeader::TYPE_INFO_OFFSET) };
-    assert_eq!(info as *const TypeInfo, &PAIR as *const TypeInfo);
+    let info = unsafe { read_obj_info(new_obj, GcHeader::TYPE_ID_OFFSET, &type_table) };
+    assert_eq!(info.type_id, PAIR.type_id);
 
     unsafe {
         let f0: Value<LowBit<3>> = read_value_field(new_obj, &PAIR, 0);
@@ -1481,7 +1571,7 @@ fn semi_space_with_custom_header() {
 fn semi_space_collect_empty() {
     let mut gc = SemiSpace::new::<Compact>(4096);
     let roots: &mut [&dyn RootSource] = &mut [];
-    unsafe { gc.collect::<LowBit3Tag0>(roots) };
+    unsafe { gc.collect::<LowBit3Tag0>(&[], roots) };
     assert_eq!(gc.collections(), 1);
     assert_eq!(gc.from_used(), 0);
 }
@@ -1489,7 +1579,10 @@ fn semi_space_collect_empty() {
 #[test]
 fn semi_space_collect_no_pointers() {
     // Object with only immediates (no heap pointers)
-    static PAIR: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_fields(2);
+    static PAIR: TypeInfo = TypeInfo::for_header(Compact::SIZE)
+        .with_type_id(0)
+        .with_fields(2);
+    let type_table = [PAIR];
 
     let mut gc = SemiSpace::new::<Compact>(4096);
 
@@ -1508,7 +1601,7 @@ fn semi_space_collect_no_pointers() {
     }
     let root = SingleRoot(Cell::new(ptr_val(obj)));
 
-    unsafe { gc.collect::<LowBit3Tag0>(&mut [&root]) };
+    unsafe { gc.collect::<LowBit3Tag0>(&type_table, &mut [&root]) };
 
     let new_obj = LowBit3Tag0::try_decode_ptr(root.0.get()).unwrap();
     unsafe {
@@ -1523,8 +1616,11 @@ fn semi_space_collect_no_pointers() {
 
 #[test]
 fn semi_space_with_frame_chain() {
-    static PAIR: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_fields(2);
-    static LEAF: TypeInfo = TypeInfo::for_header(Compact::SIZE);
+    static PAIR: TypeInfo = TypeInfo::for_header(Compact::SIZE)
+        .with_type_id(0)
+        .with_fields(2);
+    static LEAF: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_type_id(1);
+    let type_table = [PAIR, LEAF];
 
     let mut gc = SemiSpace::new::<Compact>(4096);
 
@@ -1547,7 +1643,7 @@ fn semi_space_with_frame_chain() {
     frame.slots[1].set(ptr_val(child));
     let _guard = chain.push(&frame);
 
-    unsafe { gc.collect::<LowBit3Tag0>(&mut [&chain]) };
+    unsafe { gc.collect::<LowBit3Tag0>(&type_table, &mut [&chain]) };
 
     // Slots should be updated in-place with new addresses
     let new_parent = LowBit3Tag0::try_decode_ptr(frame.slots[0].get()).unwrap();
@@ -1570,7 +1666,8 @@ fn semi_space_with_frame_chain() {
 #[test]
 fn semi_space_with_nested_frames() {
     // Simulates: outer_fn roots obj_a, calls inner_fn which roots obj_b
-    static LEAF: TypeInfo = TypeInfo::for_header(Compact::SIZE);
+    static LEAF: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_type_id(0);
+    let type_table = [LEAF];
 
     let mut gc = SemiSpace::new::<Compact>(4096);
 
@@ -1592,7 +1689,7 @@ fn semi_space_with_nested_frames() {
 
     assert_eq!(chain.depth(), 2);
 
-    unsafe { gc.collect::<LowBit3Tag0>(&mut [&chain]) };
+    unsafe { gc.collect::<LowBit3Tag0>(&type_table, &mut [&chain]) };
 
     // Both roots should survive, dead object reclaimed
     let new_a = LowBit3Tag0::try_decode_ptr(outer_frame.slots[0].get()).unwrap();
@@ -1607,7 +1704,8 @@ fn semi_space_with_nested_frames() {
 
 #[test]
 fn semi_space_with_root_set() {
-    static LEAF: TypeInfo = TypeInfo::for_header(Compact::SIZE);
+    static LEAF: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_type_id(0);
+    let type_table = [LEAF];
 
     let mut gc = SemiSpace::new::<Compact>(4096);
 
@@ -1619,7 +1717,7 @@ fn semi_space_with_root_set() {
     let i0 = globals.add(ptr_val(global1));
     let i1 = globals.add(ptr_val(global2));
 
-    unsafe { gc.collect::<LowBit3Tag0>(&mut [&globals]) };
+    unsafe { gc.collect::<LowBit3Tag0>(&type_table, &mut [&globals]) };
 
     let new_g1 = LowBit3Tag0::try_decode_ptr(globals.get(i0)).unwrap();
     let new_g2 = LowBit3Tag0::try_decode_ptr(globals.get(i1)).unwrap();
@@ -1633,8 +1731,11 @@ fn semi_space_with_root_set() {
 #[test]
 fn semi_space_mixed_root_sources() {
     // Combines FrameChain + RootSet + Mutator as root sources
-    static NODE: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_fields(1);
-    static LEAF: TypeInfo = TypeInfo::for_header(Compact::SIZE);
+    static NODE: TypeInfo = TypeInfo::for_header(Compact::SIZE)
+        .with_type_id(0)
+        .with_fields(1);
+    static LEAF: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_type_id(1);
+    let type_table = [NODE, LEAF];
 
     let mut gc = SemiSpace::new::<Compact>(8192);
 
@@ -1676,7 +1777,7 @@ fn semi_space_mixed_root_sources() {
 
     // Collect with all three sources
     unsafe {
-        gc.collect::<LowBit3Tag0>(&mut [&globals, &chain, &mutator]);
+        gc.collect::<LowBit3Tag0>(&type_table, &mut [&globals, &chain, &mutator]);
     }
 
     // All 4 live objects should survive
@@ -1707,7 +1808,10 @@ fn semi_space_mixed_root_sources() {
 
 #[test]
 fn semi_space_frame_chain_with_full_header() {
-    static PAIR: TypeInfo = TypeInfo::for_header(Full::SIZE).with_fields(2);
+    static PAIR: TypeInfo = TypeInfo::for_header(Full::SIZE)
+        .with_type_id(0)
+        .with_fields(2);
+    let type_table = [PAIR];
 
     let mut gc = SemiSpace::new::<Full>(4096);
 
@@ -1722,14 +1826,14 @@ fn semi_space_frame_chain_with_full_header() {
     frame.slots[0].set(ptr_val(obj));
     let _guard = chain.push(&frame);
 
-    unsafe { gc.collect::<LowBit3Tag0>(&mut [&chain]) };
+    unsafe { gc.collect::<LowBit3Tag0>(&type_table, &mut [&chain]) };
 
     let new_obj = LowBit3Tag0::try_decode_ptr(frame.slots[0].get()).unwrap();
     assert!(gc.contains(new_obj as *const u8));
 
     unsafe {
-        let info = read_type_info(new_obj, Full::TYPE_INFO_OFFSET);
-        assert_eq!(info as *const TypeInfo, &PAIR as *const TypeInfo);
+        let info = read_obj_info(new_obj, Full::TYPE_ID_OFFSET, &type_table);
+        assert_eq!(info.type_id, PAIR.type_id);
 
         let f0: Value<LowBit<3>> = read_value_field(new_obj, &PAIR, 0);
         let f1: Value<LowBit<3>> = read_value_field(new_obj, &PAIR, 1);
@@ -1740,8 +1844,11 @@ fn semi_space_frame_chain_with_full_header() {
 
 #[test]
 fn semi_space_frame_chain_with_nanbox() {
-    static PAIR: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_fields(2);
-    static LEAF: TypeInfo = TypeInfo::for_header(Compact::SIZE);
+    static PAIR: TypeInfo = TypeInfo::for_header(Compact::SIZE)
+        .with_type_id(0)
+        .with_fields(2);
+    static LEAF: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_type_id(1);
+    let type_table = [PAIR, LEAF];
 
     let mut gc = SemiSpace::new::<Compact>(4096);
 
@@ -1761,7 +1868,7 @@ fn semi_space_frame_chain_with_nanbox() {
     frame.slots[0].set(NanBoxTag0::encode_ptr(parent));
     let _guard = chain.push(&frame);
 
-    unsafe { gc.collect::<NanBoxTag0>(&mut [&chain]) };
+    unsafe { gc.collect::<NanBoxTag0>(&type_table, &mut [&chain]) };
 
     let new_parent = NanBoxTag0::try_decode_ptr(frame.slots[0].get()).unwrap();
     assert!(gc.contains(new_parent as *const u8));
@@ -1938,10 +2045,12 @@ fn atomic_root_set_concurrent_add() {
 
 #[test]
 fn heap_basic_alloc_and_collect() {
-    static PAIR: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_fields(2);
-    static LEAF: TypeInfo = TypeInfo::for_header(Compact::SIZE);
+    static PAIR: TypeInfo = TypeInfo::for_header(Compact::SIZE)
+        .with_type_id(0)
+        .with_fields(2);
+    static LEAF: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_type_id(1);
 
-    let heap = Heap::new::<Compact>(4096);
+    let heap = Heap::new::<Compact>(4096, tt(&[PAIR, LEAF]));
 
     let child = heap.alloc_obj::<Compact>(&LEAF, 0);
     let parent = heap.alloc_obj::<Compact>(&PAIR, 0);
@@ -1978,9 +2087,9 @@ fn heap_basic_alloc_and_collect() {
 
 #[test]
 fn heap_dead_objects_reclaimed() {
-    static LEAF: TypeInfo = TypeInfo::for_header(Compact::SIZE);
+    static LEAF: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_type_id(0);
 
-    let heap = Heap::new::<Compact>(4096);
+    let heap = Heap::new::<Compact>(4096, tt(&[LEAF]));
 
     let _dead1 = heap.alloc_obj::<Compact>(&LEAF, 0);
     let live = heap.alloc_obj::<Compact>(&LEAF, 0);
@@ -1998,9 +2107,9 @@ fn heap_dead_objects_reclaimed() {
 
 #[test]
 fn heap_with_thread_roots() {
-    static LEAF: TypeInfo = TypeInfo::for_header(Compact::SIZE);
+    static LEAF: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_type_id(0);
 
-    let heap = Heap::new::<Compact>(4096);
+    let heap = Heap::new::<Compact>(4096, tt(&[LEAF]));
 
     let obj = heap.alloc_obj::<Compact>(&LEAF, 0);
 
@@ -2019,9 +2128,9 @@ fn heap_with_thread_roots() {
 
 #[test]
 fn heap_multiple_collections() {
-    static LEAF: TypeInfo = TypeInfo::for_header(Compact::SIZE);
+    static LEAF: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_type_id(0);
 
-    let heap = Heap::new::<Compact>(4096);
+    let heap = Heap::new::<Compact>(4096, tt(&[LEAF]));
     let live = heap.alloc_obj::<Compact>(&LEAF, 0);
     heap.globals.add(ptr_val(live));
 
@@ -2036,10 +2145,12 @@ fn heap_multiple_collections() {
 
 #[test]
 fn heap_mixed_globals_and_thread_roots() {
-    static PAIR: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_fields(2);
-    static LEAF: TypeInfo = TypeInfo::for_header(Compact::SIZE);
+    static PAIR: TypeInfo = TypeInfo::for_header(Compact::SIZE)
+        .with_type_id(0)
+        .with_fields(2);
+    static LEAF: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_type_id(1);
 
-    let heap = Heap::new::<Compact>(8192);
+    let heap = Heap::new::<Compact>(8192, tt(&[PAIR, LEAF]));
 
     let global_obj = heap.alloc_obj::<Compact>(&LEAF, 0);
     let thread_obj = heap.alloc_obj::<Compact>(&PAIR, 0);
@@ -2087,9 +2198,9 @@ fn heap_stw_collect_with_threads() {
     use std::sync::atomic::AtomicBool;
     use std::thread;
 
-    static LEAF: TypeInfo = TypeInfo::for_header(Compact::SIZE);
+    static LEAF: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_type_id(0);
 
-    let heap = Arc::new(Heap::new::<Compact>(65536));
+    let heap = Arc::new(Heap::new::<Compact>(65536, tt(&[LEAF])));
     let num_threads = 4;
     let barrier = Arc::new(Barrier::new(num_threads + 1)); // +1 for GC thread
     let gc_done = Arc::new(AtomicBool::new(false));
@@ -2147,10 +2258,12 @@ fn heap_stw_preserves_object_graph() {
     use std::sync::atomic::AtomicBool;
     use std::thread;
 
-    static PAIR: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_fields(2);
-    static LEAF: TypeInfo = TypeInfo::for_header(Compact::SIZE);
+    static PAIR: TypeInfo = TypeInfo::for_header(Compact::SIZE)
+        .with_type_id(0)
+        .with_fields(2);
+    static LEAF: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_type_id(1);
 
-    let heap = Arc::new(Heap::new::<Compact>(65536));
+    let heap = Arc::new(Heap::new::<Compact>(65536, tt(&[PAIR, LEAF])));
     let barrier = Arc::new(Barrier::new(2)); // 1 mutator + 1 GC
     let gc_done = Arc::new(AtomicBool::new(false));
 
@@ -2223,9 +2336,9 @@ use crate::MutatorThread;
 
 #[test]
 fn mutator_thread_basic_alloc() {
-    static LEAF: TypeInfo = TypeInfo::for_header(Compact::SIZE);
+    static LEAF: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_type_id(0);
 
-    let heap = Arc::new(Heap::new::<Compact>(4096));
+    let heap = Arc::new(Heap::new::<Compact>(4096, tt(&[LEAF])));
     let mt = MutatorThread::<LowBit3Tag0>::register(heap.clone());
 
     let obj = mt.alloc_obj::<Compact>(&LEAF, 0);
@@ -2235,11 +2348,11 @@ fn mutator_thread_basic_alloc() {
 
 #[test]
 fn mutator_thread_auto_gc_on_full() {
-    static LEAF: TypeInfo = TypeInfo::for_header(Compact::SIZE);
+    static LEAF: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_type_id(0);
 
     let obj_size = LEAF.allocation_size(0);
     let space_size = obj_size * 4; // room for 4 objects
-    let heap = Arc::new(Heap::new::<Compact>(space_size));
+    let heap = Arc::new(Heap::new::<Compact>(space_size, tt(&[LEAF])));
     let mt = MutatorThread::<LowBit3Tag0>::register(heap.clone());
 
     // Root one object via frame chain
@@ -2266,7 +2379,7 @@ fn mutator_thread_auto_gc_on_full() {
 
 #[test]
 fn mutator_thread_deregisters_on_drop() {
-    let heap = Arc::new(Heap::new::<Compact>(4096));
+    let heap = Arc::new(Heap::new::<Compact>(4096, tt(&[])));
 
     {
         let _mt = MutatorThread::<LowBit3Tag0>::register(heap.clone());
@@ -2280,7 +2393,7 @@ fn mutator_thread_deregisters_on_drop() {
 
 #[test]
 fn mutator_thread_safepoint_noop_without_gc() {
-    let heap = Arc::new(Heap::new::<Compact>(4096));
+    let heap = Arc::new(Heap::new::<Compact>(4096, tt(&[])));
     let mt = MutatorThread::<LowBit3Tag0>::register(heap.clone());
 
     // Should be a no-op (no GC requested)
@@ -2291,12 +2404,14 @@ fn mutator_thread_safepoint_noop_without_gc() {
 
 #[test]
 fn stress_single_thread_alloc_gc_cycle() {
-    static NODE: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_fields(1);
+    static NODE: TypeInfo = TypeInfo::for_header(Compact::SIZE)
+        .with_type_id(0)
+        .with_fields(1);
 
     let obj_size = NODE.allocation_size(0);
     // Heap large enough to hold all live objects (51 nodes) plus room to allocate
     let space_size = obj_size * 60;
-    let heap = Arc::new(Heap::new::<Compact>(space_size));
+    let heap = Arc::new(Heap::new::<Compact>(space_size, tt(&[NODE])));
     let mt = MutatorThread::<LowBit3Tag0>::register(heap.clone());
 
     let frame = RootFrame::<1>::new();
@@ -2360,12 +2475,12 @@ fn stress_multi_thread_alloc_with_gc() {
     use std::sync::atomic::AtomicBool;
     use std::thread;
 
-    static LEAF: TypeInfo = TypeInfo::for_header(Compact::SIZE);
+    static LEAF: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_type_id(0);
 
     let obj_size = LEAF.allocation_size(0);
     // Heap big enough for all threads' live objects + some garbage
     let space_size = obj_size * 40;
-    let heap = Arc::new(Heap::new::<Compact>(space_size));
+    let heap = Arc::new(Heap::new::<Compact>(space_size, tt(&[LEAF])));
     let num_threads = 4;
     let allocs_per_thread = 30;
     let barrier = Arc::new(Barrier::new(num_threads + 1));
@@ -2434,13 +2549,15 @@ fn stress_mutator_thread_concurrent_alloc_gc() {
     use std::sync::Barrier;
     use std::thread;
 
-    static NODE: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_fields(1);
+    static NODE: TypeInfo = TypeInfo::for_header(Compact::SIZE)
+        .with_type_id(0)
+        .with_fields(1);
 
     let obj_size = NODE.allocation_size(0);
     // Each thread builds a list of ~11 nodes. 3 threads × 11 = 33 live objects.
     // Need space_size > 33 * obj_size, but small enough to force GC.
     let space_size = obj_size * 50;
-    let heap = Arc::new(Heap::new::<Compact>(space_size));
+    let heap = Arc::new(Heap::new::<Compact>(space_size, tt(&[NODE])));
     let num_threads = 3;
     let barrier = Arc::new(Barrier::new(num_threads));
 
@@ -2593,7 +2710,7 @@ fn read_barrier_no_forwarding() {
     let bump = BumpAllocator::new::<Compact>(4096);
     let ptr = unsafe { alloc_obj::<Compact>(&bump, &INFO, 0) };
 
-    let result = unsafe { read_barrier(ptr, Compact::TYPE_INFO_OFFSET) };
+    let result = unsafe { read_barrier(ptr, Compact::TYPE_ID_OFFSET) };
     assert_eq!(result, ptr, "no forwarding → same pointer");
 }
 
@@ -2606,11 +2723,11 @@ fn read_barrier_follows_forwarding() {
     // Simulate a forwarding pointer
     let fake_new = 0xDEAD_BEE0 as *mut u8; // aligned, won't conflict
     unsafe {
-        let slot = old.add(Compact::TYPE_INFO_OFFSET) as *mut u64;
+        let slot = old.add(Compact::TYPE_ID_OFFSET) as *mut u64;
         *slot = (fake_new as u64) | 1; // set bit 0
     }
 
-    let result = unsafe { read_barrier(old, Compact::TYPE_INFO_OFFSET) };
+    let result = unsafe { read_barrier(old, Compact::TYPE_ID_OFFSET) };
     assert_eq!(result, fake_new, "should follow forwarding pointer");
 }
 
@@ -2622,24 +2739,24 @@ fn read_barrier_atomic_follows_forwarding() {
 
     let fake_new = 0xDEAD_BEE0 as *mut u8;
     unsafe {
-        let slot = old.add(Compact::TYPE_INFO_OFFSET) as *mut u64;
+        let slot = old.add(Compact::TYPE_ID_OFFSET) as *mut u64;
         *slot = (fake_new as u64) | 1;
     }
 
-    let result = unsafe { read_barrier_atomic(old, Compact::TYPE_INFO_OFFSET) };
+    let result = unsafe { read_barrier_atomic(old, Compact::TYPE_ID_OFFSET) };
     assert_eq!(result, fake_new, "atomic barrier should follow forwarding");
 }
 
 #[test]
 fn heap_gc_phase_starts_idle() {
-    let heap = Heap::new::<Compact>(4096);
+    let heap = Heap::new::<Compact>(4096, tt(&[]));
     assert_eq!(heap.gc_phase(), GcPhase::Idle);
     assert!(!heap.barriers_active());
 }
 
 #[test]
 fn write_barrier_noop_when_idle() {
-    let heap = Arc::new(Heap::new::<Compact>(4096));
+    let heap = Arc::new(Heap::new::<Compact>(4096, tt(&[])));
     let mt = MutatorThread::<LowBit3Tag0>::register(heap.clone());
 
     // Write barrier should be a no-op when GC is idle
@@ -2656,8 +2773,10 @@ fn write_barrier_noop_when_idle() {
 
 #[test]
 fn heap_read_barrier_no_gc() {
-    static INFO: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_fields(1);
-    let heap = Arc::new(Heap::new::<Compact>(4096));
+    static INFO: TypeInfo = TypeInfo::for_header(Compact::SIZE)
+        .with_type_id(0)
+        .with_fields(1);
+    let heap = Arc::new(Heap::new::<Compact>(4096, tt(&[INFO])));
 
     let ptr = heap.alloc_obj::<Compact>(&INFO, 0);
     assert!(!ptr.is_null());
@@ -2670,9 +2789,11 @@ fn heap_read_barrier_no_gc() {
 #[test]
 fn concurrent_collect_basic() {
     // Basic concurrent collection: allocate objects, add roots, collect
-    static PAIR: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_fields(2);
+    static PAIR: TypeInfo = TypeInfo::for_header(Compact::SIZE)
+        .with_type_id(0)
+        .with_fields(2);
 
-    let heap = Arc::new(Heap::new::<Compact>(4096));
+    let heap = Arc::new(Heap::new::<Compact>(4096, tt(&[PAIR])));
 
     // Allocate two objects and root them via globals
     let a = heap.alloc_obj::<Compact>(&PAIR, 0);
@@ -2740,10 +2861,12 @@ fn concurrent_collect_with_mutations() {
     // 3. During the concurrent phase, the mutator disconnects child from parent
     //    (write barrier should log the old child pointer)
     // 4. After GC, child should still survive (it was in the SATB snapshot)
-    static NODE: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_fields(1);
+    static NODE: TypeInfo = TypeInfo::for_header(Compact::SIZE)
+        .with_type_id(0)
+        .with_fields(1);
 
     let obj_size = NODE.allocation_size(0);
-    let heap = Arc::new(Heap::new::<Compact>(obj_size * 30));
+    let heap = Arc::new(Heap::new::<Compact>(obj_size * 30, tt(&[NODE])));
 
     // Allocate parent and child
     let parent = heap.alloc_obj::<Compact>(&NODE, 0);
@@ -2787,10 +2910,12 @@ fn concurrent_collect_with_mutations() {
 
 #[test]
 fn concurrent_collect_dead_objects_reclaimed() {
-    static INFO: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_fields(1);
+    static INFO: TypeInfo = TypeInfo::for_header(Compact::SIZE)
+        .with_type_id(0)
+        .with_fields(1);
     let obj_size = INFO.allocation_size(0);
 
-    let heap = Arc::new(Heap::new::<Compact>(obj_size * 10));
+    let heap = Arc::new(Heap::new::<Compact>(obj_size * 10, tt(&[INFO])));
 
     // Allocate several objects but only root one
     let rooted = heap.alloc_obj::<Compact>(&INFO, 0);
@@ -2819,9 +2944,11 @@ fn concurrent_collect_dead_objects_reclaimed() {
 #[test]
 fn concurrent_collect_with_mutator_threads() {
     // Multiple mutator threads running while GC collects concurrently
-    static NODE: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_fields(1);
+    static NODE: TypeInfo = TypeInfo::for_header(Compact::SIZE)
+        .with_type_id(0)
+        .with_fields(1);
     let obj_size = NODE.allocation_size(0);
-    let heap = Arc::new(Heap::new::<Compact>(obj_size * 60));
+    let heap = Arc::new(Heap::new::<Compact>(obj_size * 60, tt(&[NODE])));
 
     let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
@@ -2874,9 +3001,11 @@ fn concurrent_collect_with_mutator_threads() {
 fn mutator_thread_write_barrier_integration() {
     // Test that MutatorThread's write_barrier interacts correctly with
     // the heap's barrier state
-    static NODE: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_fields(1);
+    static NODE: TypeInfo = TypeInfo::for_header(Compact::SIZE)
+        .with_type_id(0)
+        .with_fields(1);
     let obj_size = NODE.allocation_size(0);
-    let heap = Arc::new(Heap::new::<Compact>(obj_size * 20));
+    let heap = Arc::new(Heap::new::<Compact>(obj_size * 20, tt(&[NODE])));
     let mt = MutatorThread::<LowBit3Tag0>::register(heap.clone());
 
     // Initially barriers are inactive
@@ -2888,8 +3017,10 @@ fn mutator_thread_write_barrier_integration() {
 
 #[test]
 fn mutator_thread_read_barrier_integration() {
-    static INFO: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_fields(1);
-    let heap = Arc::new(Heap::new::<Compact>(4096));
+    static INFO: TypeInfo = TypeInfo::for_header(Compact::SIZE)
+        .with_type_id(0)
+        .with_fields(1);
+    let heap = Arc::new(Heap::new::<Compact>(4096, tt(&[INFO])));
     let mt = MutatorThread::<LowBit3Tag0>::register(heap.clone());
 
     let ptr = mt.alloc_obj::<Compact>(&INFO, 0);
@@ -2963,7 +3094,9 @@ fn stress_concurrent_gc_heap_properties() {
     use std::thread;
 
     // NODE layout: field 0 = next pointer, field 1 = stamp (tagged int)
-    static NODE: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_fields(2);
+    static NODE: TypeInfo = TypeInfo::for_header(Compact::SIZE)
+        .with_type_id(0)
+        .with_fields(2);
 
     let obj_size = NODE.allocation_size(0);
     let gc_every_alloc = std::env::var("GC_EVERY_ALLOC")
@@ -2975,7 +3108,7 @@ fn stress_concurrent_gc_heap_properties() {
     // Space must hold all live data across all threads + some headroom for
     // concurrent allocation. Each thread keeps ~list_target_len nodes alive.
     let space_size = obj_size * (num_mutators * (list_target_len + 10) + 40);
-    let heap = Arc::new(Heap::new::<Compact>(space_size));
+    let heap = Arc::new(Heap::new::<Compact>(space_size, tt(&[NODE])));
 
     let start_barrier = Arc::new(Barrier::new(num_mutators + 1)); // +1 for GC thread
     let stop = Arc::new(AtomicBool::new(false));
@@ -3284,7 +3417,9 @@ fn stress_concurrent_gc_pointer_graph_integrity() {
     use std::thread;
 
     // NODE: field 0 = pointer to another node, field 1 = stamp
-    static NODE: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_fields(2);
+    static NODE: TypeInfo = TypeInfo::for_header(Compact::SIZE)
+        .with_type_id(0)
+        .with_fields(2);
 
     let obj_size = NODE.allocation_size(0);
     let gc_every_alloc = std::env::var("GC_EVERY_ALLOC")
@@ -3300,7 +3435,11 @@ fn stress_concurrent_gc_pointer_graph_integrity() {
     // (which would deadlock mutator-triggered GC vs verify barrier).
     let space_size = obj_size * (num_mutators * (pool_size + iterations / 3 + 10) + 100);
     let tracer = Arc::new(crate::statemap::StatemapTracer::new());
-    let heap = Arc::new(Heap::new_with_tracer::<Compact>(space_size, tracer.clone()));
+    let heap = Arc::new(Heap::new_with_tracer::<Compact>(
+        space_size,
+        tt(&[NODE]),
+        tracer.clone(),
+    ));
 
     let start_barrier = Arc::new(Barrier::new(num_mutators + 1));
     // All mutators wait here before verification, ensuring no mutator
@@ -3548,14 +3687,16 @@ fn stress_concurrent_gc_rapid_fire() {
     use std::sync::atomic::{AtomicBool, Ordering as AO};
     use std::thread;
 
-    static LEAF: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_fields(1);
+    static LEAF: TypeInfo = TypeInfo::for_header(Compact::SIZE)
+        .with_type_id(0)
+        .with_fields(1);
 
     let obj_size = LEAF.allocation_size(0);
     let num_mutators: usize = 12;
     let gc_cycles: usize = 50;
     // Each thread keeps 1 object live + some temporary garbage
     let space_size = obj_size * (num_mutators * 10 + 60);
-    let heap = Arc::new(Heap::new::<Compact>(space_size));
+    let heap = Arc::new(Heap::new::<Compact>(space_size, tt(&[LEAF])));
 
     let start_barrier = Arc::new(Barrier::new(num_mutators + 1));
     let stop = Arc::new(AtomicBool::new(false));
@@ -3670,7 +3811,9 @@ fn statemap_trace_output() {
     use crate::statemap::StatemapTracer;
     use crate::thread::MutatorThread;
 
-    static NODE: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_fields(2);
+    static NODE: TypeInfo = TypeInfo::for_header(Compact::SIZE)
+        .with_type_id(0)
+        .with_fields(2);
 
     let num_mutators: usize = 4;
     let gc_cycles: usize = 20;
@@ -3678,7 +3821,11 @@ fn statemap_trace_output() {
     let space_size = obj_size * (num_mutators * 20 + 100);
 
     let tracer = Arc::new(StatemapTracer::new());
-    let heap = Arc::new(Heap::new_with_tracer::<Compact>(space_size, tracer.clone()));
+    let heap = Arc::new(Heap::new_with_tracer::<Compact>(
+        space_size,
+        tt(&[NODE]),
+        tracer.clone(),
+    ));
 
     let start_barrier = Arc::new(Barrier::new(num_mutators + 1));
     let stop = Arc::new(AtomicBool::new(false));
@@ -3763,9 +3910,9 @@ fn statemap_trace_output() {
 #[test]
 fn minor_gc_basic() {
     // Allocate in nursery, root some, minor GC, verify survivors in tenured
-    static LEAF: TypeInfo = TypeInfo::for_header(Compact::SIZE);
+    static LEAF: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_type_id(0);
 
-    let heap = Arc::new(Heap::new_generational::<Compact>(4096, 65536));
+    let heap = Arc::new(Heap::new_generational::<Compact>(4096, 65536, tt(&[LEAF])));
     let (ts, _id) = heap.register_thread();
 
     let frame = RootFrame::<2>::new();
@@ -3805,9 +3952,11 @@ fn minor_gc_basic() {
 #[test]
 fn minor_gc_promotes_linked_list() {
     // Build a chain in nursery, minor GC, verify all nodes promoted
-    static NODE: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_fields(1);
+    static NODE: TypeInfo = TypeInfo::for_header(Compact::SIZE)
+        .with_type_id(0)
+        .with_fields(1);
 
-    let heap = Arc::new(Heap::new_generational::<Compact>(4096, 65536));
+    let heap = Arc::new(Heap::new_generational::<Compact>(4096, 65536, tt(&[NODE])));
     let (ts, _id) = heap.register_thread();
 
     let frame = RootFrame::<1>::new();
@@ -3847,9 +3996,9 @@ fn minor_gc_promotes_linked_list() {
 #[test]
 fn minor_gc_reclaims_garbage() {
     // Unreachable nursery objects should not be promoted
-    static LEAF: TypeInfo = TypeInfo::for_header(Compact::SIZE);
+    static LEAF: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_type_id(0);
 
-    let heap = Arc::new(Heap::new_generational::<Compact>(4096, 65536));
+    let heap = Arc::new(Heap::new_generational::<Compact>(4096, 65536, tt(&[LEAF])));
     let (ts, _id) = heap.register_thread();
 
     let frame = RootFrame::<1>::new();
@@ -3882,10 +4031,12 @@ fn minor_gc_reclaims_garbage() {
 fn card_table_tracks_old_to_young() {
     // Promote A to tenured, alloc B in nursery, store B into A's field,
     // mark card, minor GC → B should be promoted and A's field updated.
-    static PAIR: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_fields(2);
-    static LEAF: TypeInfo = TypeInfo::for_header(Compact::SIZE);
+    static PAIR: TypeInfo = TypeInfo::for_header(Compact::SIZE)
+        .with_type_id(0)
+        .with_fields(2);
+    static LEAF: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_type_id(1);
 
-    let heap = Arc::new(Heap::new_generational::<Compact>(4096, 65536));
+    let heap = Arc::new(Heap::new_generational::<Compact>(4096, 65536, tt(&[PAIR, LEAF])));
     let (ts, _id) = heap.register_thread();
 
     let frame = RootFrame::<1>::new();
@@ -3942,9 +4093,11 @@ fn card_table_tracks_old_to_young() {
 #[test]
 fn minor_then_major() {
     // Fill nursery → minor GC → fill tenured → major GC → verify integrity
-    static NODE: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_fields(1);
+    static NODE: TypeInfo = TypeInfo::for_header(Compact::SIZE)
+        .with_type_id(0)
+        .with_fields(1);
 
-    let heap = Arc::new(Heap::new_generational::<Compact>(2048, 65536));
+    let heap = Arc::new(Heap::new_generational::<Compact>(2048, 65536, tt(&[NODE])));
     let (ts, _id) = heap.register_thread();
 
     let frame = RootFrame::<1>::new();
@@ -4016,9 +4169,11 @@ fn generational_multi_thread_stress() {
     use std::sync::atomic::{AtomicBool, Ordering as AO};
     use std::thread;
 
-    static NODE: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_fields(1);
+    static NODE: TypeInfo = TypeInfo::for_header(Compact::SIZE)
+        .with_type_id(0)
+        .with_fields(1);
 
-    let heap = Arc::new(Heap::new_generational::<Compact>(4096, 1048576));
+    let heap = Arc::new(Heap::new_generational::<Compact>(4096, 1048576, tt(&[NODE])));
     let stop = Arc::new(AtomicBool::new(false));
     let num_threads = 4;
     let mut handles = Vec::new();
@@ -4079,9 +4234,9 @@ fn generational_multi_thread_stress() {
 #[test]
 fn non_generational_unchanged() {
     // Verify Heap::new still works identically — no nursery overhead
-    static LEAF: TypeInfo = TypeInfo::for_header(Compact::SIZE);
+    static LEAF: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_type_id(0);
 
-    let heap = Arc::new(Heap::new::<Compact>(4096));
+    let heap = Arc::new(Heap::new::<Compact>(4096, tt(&[LEAF])));
     assert!(!heap.has_nursery());
     assert_eq!(heap.minor_collections(), 0);
     assert_eq!(heap.nursery_used(), 0);
@@ -4108,9 +4263,11 @@ fn stress_generational_concurrent() {
     use std::sync::atomic::{AtomicBool, Ordering as AO};
     use std::thread;
 
-    static NODE: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_fields(1);
+    static NODE: TypeInfo = TypeInfo::for_header(Compact::SIZE)
+        .with_type_id(0)
+        .with_fields(1);
 
-    let heap = Arc::new(Heap::new_generational::<Compact>(4096, 1048576));
+    let heap = Arc::new(Heap::new_generational::<Compact>(4096, 1048576, tt(&[NODE])));
     let stop = Arc::new(AtomicBool::new(false));
     let num_threads = 3;
     let mut handles = Vec::new();
