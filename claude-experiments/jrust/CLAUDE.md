@@ -52,4 +52,4 @@ Tests live in `tests/` — each test has a `.jrs` source file and a `.expected` 
 
 ## Current state
 
-The type checker is implemented but disabled (commented out in `main()`). It correctly reads imported class signatures from `.class` files via ASM ClassReader. The remaining work is handling method name aliases — the codegen uses snake_case names (`visit_method`, `visit_insn`) for Java camelCase methods (`visitMethod`, `visitInsn`), and the type checker needs to understand these aliases.
+The type checker is enabled and runs on every compilation. It reads imported class signatures from `.class` files via ASM ClassReader. The codegen uses a generic `gen_imported_method_call` function that looks up method descriptors from imported class metadata, handles boxing and Vec-to-array conversion automatically. All Java interop calls use real Java method names (camelCase).
