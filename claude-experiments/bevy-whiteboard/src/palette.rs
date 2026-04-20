@@ -188,6 +188,11 @@ fn spawn_palette(mut commands: Commands, theme: Res<Theme>) {
                 (Tool::Queue, "Queue"),
             ]);
 
+            section(body, "Workflows", &theme);
+            tool_group(body, &theme, &[
+                (Tool::Steps, "Steps"),
+            ]);
+
             section(body, "Terminals", &theme);
             tool_group(body, &theme, &[
                 (Tool::Sink, "Sink"),
@@ -326,6 +331,7 @@ fn tool_glyph(tool: Tool) -> &'static str {
         Tool::Queue => "▦",
         Tool::Sink => "▽",
         Tool::Probe => "◎",
+        Tool::Steps => "≡",
     }
 }
 

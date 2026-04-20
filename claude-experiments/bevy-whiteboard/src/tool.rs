@@ -9,6 +9,7 @@ pub enum Tool {
     Sink,
     Router,
     Queue,
+    Steps,
     Edge,
     Probe,
 }
@@ -23,12 +24,13 @@ impl Tool {
             Tool::Sink => "Sink",
             Tool::Router => "Router",
             Tool::Queue => "Queue",
+            Tool::Steps => "Steps",
             Tool::Edge => "Edge",
             Tool::Probe => "Probe",
         }
     }
 
-    pub fn all() -> [Tool; 9] {
+    pub fn all() -> [Tool; 10] {
         [
             Tool::Select,
             Tool::Generator,
@@ -37,6 +39,7 @@ impl Tool {
             Tool::Sink,
             Tool::Router,
             Tool::Queue,
+            Tool::Steps,
             Tool::Edge,
             Tool::Probe,
         ]

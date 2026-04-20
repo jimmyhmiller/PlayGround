@@ -155,6 +155,11 @@ pub fn register_node(
         NodeKind::Custom => {
             panic!("register_node: Custom must be bound via bind_existing_node");
         }
+        NodeKind::Steps => {
+            // Empty by default — the user adds rows by clicking the
+            // Client/Worker palette tools inside the container.
+            sim_res.0.add_steps(sc, Vec::new())
+        }
     };
     maps.entity_to_node.insert(entity, nid);
     maps.node_to_entity.insert(nid, entity);

@@ -557,7 +557,19 @@ const beagleEval = tool(
     if (!isErrorResponse(result)) {
       persistDefinitions(args.code, session);
     }
-    return { content: [{ type: "text" as const, text: result }] };
+    // After every eval, check main-thread health. The game loop may have called
+    // a freshly-redefined function that throws, suspending the main thread —
+    // the agent has no other signal that this happened.
+    let text = result;
+    try {
+      const mainStatus = await replRequest("main-status", { session });
+      if (mainStatus.includes("SUSPENDED")) {
+        text += `\n\n${mainStatus}`;
+      }
+    } catch {
+      // Best-effort; don't fail the eval if the status check fails.
+    }
+    return { content: [{ type: "text" as const, text }] };
   }
 );
 
@@ -929,9 +941,11 @@ const server = createSdkMcpServer({
 
 const SYSTEM_PROMPT = `\
 You are a Beagle live coding agent. You interact with a running Beagle program \
-exclusively through a REPL socket connection. You do NOT have access to the file \
-system — no reading files, no writing files, no editing files. Everything you do \
-goes through the REPL.
+primarily through a REPL socket connection. You also have read-only file system \
+access (Read, Glob, Grep) for inspecting source — use it when you need to see \
+the code of the file you're editing or look up Beagle stdlib sources. You cannot \
+write or edit files; all code changes happen through beagle_eval, which auto-persists \
+definitions back to source.
 
 ## Your tools
 
@@ -1165,6 +1179,9 @@ async function main() {
             "mcp__beagle-repl__beagle_namespace_info",
             "mcp__beagle-repl__beagle_search",
             "mcp__beagle-repl__beagle_doc",
+            "Read",
+            "Glob",
+            "Grep",
           ],
           model: "claude-sonnet-4-6",
         };

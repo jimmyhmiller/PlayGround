@@ -93,6 +93,9 @@ enum SliderTarget {
     GeneratorRate(NodeId),
     ClientRate(NodeId),
     WorkerProcessingMs(NodeId),
+    /// Worker-row duration inside a Steps container. Writes back
+    /// through `Sim::set_steps_worker_duration_ns`.
+    StepsWorkerMs { node: NodeId, row: usize },
 }
 
 #[derive(Component, Clone, Copy)]
@@ -232,14 +235,52 @@ fn rebuild_inspector_on_selection_change(
                         true,
                     );
                 }
-            }
+                NodeKind::Steps => {
+                    kv_row(
+                        inspector,
+                        "Current",
+                        &node
+                            .current_row
+                            .map(|i| i.to_string())
+                            .unwrap_or_else(|| "-".into()),
+                        &theme,
+                        true,
+                    );
+                    kv_row(inspector, "Sent", &format!("{}", node.sent), &theme, true);
+                    kv_row(inspector, "Recv", &format!("{}", node.received), &theme, true);
 
-            // Step list view — the ECS-like primitives that actually
-            // drive behavior. Read-only for now; sliders above still
-            // edit the common fields (rate, service time).
-            section_header(inspector, "Steps", &theme);
-            for step in &node.steps {
-                kv_row(inspector, "", &format_step(step), &theme, true);
+                    if !node.step_rows.is_empty() {
+                        section_header(inspector, "Rows", &theme);
+                        for (i, row) in node.step_rows.iter().enumerate() {
+                            match row {
+                                crate::sim::StepRow::Client { .. } => {
+                                    kv_row(
+                                        inspector,
+                                        &format!("{}", i),
+                                        "Client",
+                                        &theme,
+                                        false,
+                                    );
+                                }
+                                crate::sim::StepRow::Worker { duration_ns, .. } => {
+                                    spawn_slider_row(
+                                        inspector,
+                                        &format!("{} · Worker", i),
+                                        (*duration_ns / NS_PER_MS) as f32,
+                                        1.0,
+                                        5000.0,
+                                        "ms",
+                                        SliderTarget::StepsWorkerMs {
+                                            node: node_id,
+                                            row: i,
+                                        },
+                                        &theme,
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
 
@@ -384,6 +425,12 @@ fn target_id(t: SliderTarget) -> u64 {
         SliderTarget::GeneratorRate(id) => id,
         SliderTarget::ClientRate(id) => id,
         SliderTarget::WorkerProcessingMs(id) => id,
+        // Mix node id + row index so multiple Worker-row sliders on
+        // the same Steps node don't collide. High 16 bits = row,
+        // low 48 bits = node id — plenty of room for either.
+        SliderTarget::StepsWorkerMs { node, row } => {
+            ((row as u64) << 48) | (node & 0xFFFF_FFFF_FFFF)
+        }
     }
 }
 
@@ -482,46 +529,6 @@ fn spawn_delete_button(parent: &mut ChildSpawnerCommands, theme: &Theme) {
         });
 }
 
-fn format_step(step: &crate::sim::Step) -> String {
-    use crate::sim::Step;
-    match step {
-        Step::EmitAtRate {
-            period_ns,
-            one_way,
-            ..
-        } => {
-            let rate = crate::sim::period_ns_to_rate(*period_ns);
-            let label = if *one_way { "Emit" } else { "Request" };
-            format!("{} @ {:.1}/s", label, rate)
-        }
-        Step::PullInbound => "Pull from upstream".into(),
-        Step::AcceptInbound => "Accept push".into(),
-        Step::MatchColor { color } => format!("Match color #{:06x}", color.0),
-        Step::Buffer { capacity } => {
-            if *capacity == usize::MAX {
-                "Buffer (unbounded)".into()
-            } else {
-                format!("Buffer (cap {})", capacity)
-            }
-        }
-        Step::Process { duration_ns } => {
-            let ms = *duration_ns as f64 / crate::sim::NS_PER_MS as f64;
-            format!("Process {:.0}ms", ms)
-        }
-        Step::ForwardOut { strategy } => {
-            use crate::sim::ForwardStrategy::*;
-            match strategy {
-                BlindRoundRobin => "Forward (blind RR)".into(),
-                ReadyRoundRobin => "Forward (ready RR)".into(),
-                ForwardOrConsume => "Forward or consume".into(),
-            }
-        }
-        Step::RespondImmediate => "Respond immediately".into(),
-        Step::RespondOnComplete => "Respond on complete".into(),
-        Step::Consume => "Consume (sink)".into(),
-    }
-}
-
 fn kind_label(k: NodeKind) -> &'static str {
     match k {
         NodeKind::Generator => "Generator",
@@ -531,6 +538,7 @@ fn kind_label(k: NodeKind) -> &'static str {
         NodeKind::Queue => "Queue",
         NodeKind::Sink => "Sink",
         NodeKind::Custom => "Group",
+        NodeKind::Steps => "Steps",
     }
 }
 
@@ -617,6 +625,10 @@ fn write_slider_to_sim(sim: &mut SimResource, target: SliderTarget, value: f32) 
             let ns = (value as u64).max(1) * NS_PER_MS;
             sim.0.set_worker_processing_ns(id, ns);
         }
+        SliderTarget::StepsWorkerMs { node, row } => {
+            let ns = (value as u64).max(1) * NS_PER_MS;
+            sim.0.set_steps_worker_duration_ns(node, row, ns);
+        }
     }
 }
 
@@ -641,6 +653,17 @@ fn sync_slider_visuals(
                 .nodes
                 .get(&id)
                 .map(|n| (n.processing_ns() / NS_PER_MS) as f32),
+            SliderTarget::StepsWorkerMs { node, row } => sim
+                .0
+                .nodes
+                .get(&node)
+                .and_then(|n| n.step_rows.get(row))
+                .and_then(|r| match r {
+                    crate::sim::StepRow::Worker { duration_ns, .. } => {
+                        Some((*duration_ns / NS_PER_MS) as f32)
+                    }
+                    _ => None,
+                }),
         };
         if let Some(live) = live {
             slider.value = live;
@@ -665,7 +688,7 @@ fn sync_slider_visuals(
 fn slider_unit(t: SliderTarget) -> &'static str {
     match t {
         SliderTarget::GeneratorRate(_) | SliderTarget::ClientRate(_) => "/s",
-        SliderTarget::WorkerProcessingMs(_) => "ms",
+        SliderTarget::WorkerProcessingMs(_) | SliderTarget::StepsWorkerMs { .. } => "ms",
     }
 }
 

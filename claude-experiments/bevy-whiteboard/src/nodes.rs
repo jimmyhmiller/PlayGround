@@ -39,7 +39,347 @@ impl Plugin for NodesPlugin {
                     draw_composite_boundaries,
                 )
                     .chain(),
+            )
+            .add_systems(
+                Update,
+                (
+                    rebuild_steps_on_row_change,
+                    update_steps_row_highlight,
+                    draw_steps_loop_arc,
+                    spawn_steps_loop_dots,
+                    animate_steps_loop_dots,
+                )
+                    .chain(),
             );
+    }
+}
+
+/// When a Steps node's `step_rows` length no longer matches its
+/// visual row count (rows added or removed since last frame),
+/// despawn every child of the entity and rebuild the visuals at the
+/// new size. Cheap because it only runs on the (rare) frame after a
+/// row edit.
+#[allow(clippy::too_many_arguments)]
+fn rebuild_steps_on_row_change(
+    sim_res: Res<crate::bridge::SimResource>,
+    theme: Res<Theme>,
+    mut nodes: Query<(
+        Entity,
+        &mut SimNode,
+        &crate::bridge::SimNodeRef,
+        Option<&Children>,
+    )>,
+    row_q: Query<&StepsRow>,
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<ColorMaterial>>,
+) {
+    for (entity, mut sn, nref, children) in nodes.iter_mut() {
+        if sn.kind != NodeKind::Steps {
+            continue;
+        }
+        let Some(node) = sim_res.0.nodes.get(&nref.0) else { continue };
+        let want = node.step_rows.len();
+        let have = children
+            .map(|c| c.iter().filter(|e| row_q.get(*e).is_ok()).count())
+            .unwrap_or(0);
+        if want == have {
+            continue;
+        }
+        // Tear down all children and rebuild at the new size.
+        if let Some(children) = children {
+            for child in children.iter() {
+                commands.entity(child).despawn();
+            }
+        }
+        let new_size = steps_container_size(want.max(1));
+        sn.size = new_size;
+        commands
+            .entity(entity)
+            .insert(Mesh2d(meshes.add(Rectangle::new(new_size.x, new_size.y))))
+            .insert(MeshMaterial2d(materials.add(sn.kind.body_color(&theme))));
+        let rows_snapshot: Vec<(usize, String)> = node
+            .step_rows
+            .iter()
+            .enumerate()
+            .map(|(i, r)| (i, format_step_row(r)))
+            .collect();
+        let color = sn.color;
+        spawn_steps_children(
+            &mut commands,
+            entity,
+            &mut meshes,
+            &mut materials,
+            &theme,
+            color,
+            new_size,
+            &rows_snapshot,
+        );
+    }
+}
+
+/// Spawn the child entities that make a Steps container render:
+/// data-color dot, ink border, "STEPS" header, one row rectangle per
+/// script row, and the below-node canvas label placeholder. Called
+/// both from initial spawn and from the rebuild system.
+#[allow(clippy::too_many_arguments)]
+fn spawn_steps_children(
+    commands: &mut Commands,
+    parent: Entity,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<ColorMaterial>,
+    theme: &Theme,
+    color: Color,
+    size: Vec2,
+    rows: &[(usize, String)],
+) {
+    commands.entity(parent).with_children(|p| {
+        p.spawn((
+            Mesh2d(meshes.add(Circle::new(5.0))),
+            MeshMaterial2d(materials.add(color)),
+            Transform::from_xyz(size.x / 2.0 - 9.0, size.y / 2.0 - 9.0, 0.2),
+        ));
+        p.spawn((
+            Mesh2d(meshes.add(Rectangle::new(size.x + 3.0, size.y + 3.0))),
+            MeshMaterial2d(materials.add(theme.ink)),
+            Transform::from_xyz(0.0, 0.0, -0.1),
+            NodeBorderChild,
+        ));
+        let header_y = size.y / 2.0 - STEPS_HEADER_H / 2.0 - 2.0;
+        p.spawn((
+            Text2d::new("STEPS"),
+            TextFont {
+                font_size: 10.0,
+                ..default()
+            },
+            TextColor(theme.ink_soft),
+            Transform::from_xyz(0.0, header_y, 0.3),
+        ));
+        let row_count = rows.len().max(1);
+        let row_w = size.x - 14.0;
+        let row_h = STEPS_ROW_HEIGHT - 4.0;
+        for (i, label) in rows {
+            let cy = steps_row_center_y(row_count, *i);
+            p.spawn((
+                StepsRow { index: *i },
+                Transform::from_xyz(0.0, cy, 0.15),
+                Visibility::default(),
+            ))
+            .with_children(|r| {
+                r.spawn((
+                    Mesh2d(meshes.add(Rectangle::new(row_w, row_h))),
+                    MeshMaterial2d(materials.add(theme.paper_alt)),
+                    Transform::from_xyz(0.0, 0.0, 0.0),
+                    StepsRowBody,
+                ));
+                r.spawn((
+                    Mesh2d(meshes.add(Rectangle::new(row_w + 1.5, row_h + 1.5))),
+                    MeshMaterial2d(materials.add(theme.rule)),
+                    Transform::from_xyz(0.0, 0.0, -0.05),
+                ));
+                r.spawn((
+                    Text2d::new(label.clone()),
+                    TextFont {
+                        font_size: 11.0,
+                        ..default()
+                    },
+                    TextColor(theme.ink),
+                    Transform::from_xyz(0.0, 0.0, 0.1),
+                ));
+            });
+        }
+        p.spawn((
+            Text2d::new(""),
+            TextFont {
+                font_size: 11.0,
+                ..default()
+            },
+            TextColor(theme.ink_soft),
+            Transform::from_xyz(0.0, -size.y / 2.0 - 12.0, 0.3),
+            NodeCanvasLabel,
+        ));
+    });
+}
+
+/// Control points for the loop-back arc on the left side of a Steps
+/// container. Endpoints sit just outside the left border at the
+/// vertical centres of the first and last rows. Control point pulls
+/// the curve further left so the arc reads as an obvious return
+/// path. Returns `None` for containers with <1 row (nothing to loop).
+fn steps_arc_points(center: Vec2, size: Vec2, row_count: usize) -> Option<(Vec2, Vec2, Vec2)> {
+    if row_count == 0 {
+        return None;
+    }
+    let first_y = center.y + steps_row_center_y(row_count, 0);
+    let last_y = center.y + steps_row_center_y(row_count, row_count.saturating_sub(1));
+    let left_x = center.x - size.x / 2.0 - 4.0;
+    let start = Vec2::new(left_x, last_y);
+    let end = Vec2::new(left_x, first_y);
+    let bulge = (first_y - last_y).abs().max(24.0) * 0.6;
+    let ctrl = Vec2::new(left_x - bulge, (first_y + last_y) / 2.0);
+    Some((start, ctrl, end))
+}
+
+fn quad_bezier(a: Vec2, b: Vec2, c: Vec2, t: f32) -> Vec2 {
+    let u = 1.0 - t;
+    a * (u * u) + b * (2.0 * u * t) + c * (t * t)
+}
+
+/// Draw a curved return line on the left of every Steps container,
+/// connecting the last row back to the first. Purely cosmetic — the
+/// token loop actually happens instantaneously in the sim.
+fn draw_steps_loop_arc(
+    mut gizmos: Gizmos,
+    theme: Res<Theme>,
+    sim_res: Res<crate::bridge::SimResource>,
+    nodes: Query<(&Transform, &SimNode, &crate::bridge::SimNodeRef)>,
+) {
+    for (tf, sn, nref) in nodes.iter() {
+        if sn.kind != NodeKind::Steps {
+            continue;
+        }
+        let Some(node) = sim_res.0.nodes.get(&nref.0) else { continue };
+        let row_count = node.step_rows.len();
+        // Need at least 2 rows to have an actual loop-back (a single
+        // row visibly jumps from itself to itself — skip to avoid
+        // drawing a zero-length arc).
+        if row_count < 2 {
+            continue;
+        }
+        let center = tf.translation.truncate();
+        let Some((a, b, c)) = steps_arc_points(center, sn.size, row_count) else {
+            continue;
+        };
+        const SEGMENTS: usize = 20;
+        let mut prev = a;
+        for i in 1..=SEGMENTS {
+            let t = i as f32 / SEGMENTS as f32;
+            let p = quad_bezier(a, b, c, t);
+            gizmos.line_2d(prev, p, theme.rule);
+            prev = p;
+        }
+    }
+}
+
+/// A short-lived dot that animates along a Steps container's
+/// loop-back arc, spawned each time the sim emits
+/// `SimEvent::StepsLooped`. Purely visual; despawned on completion.
+#[derive(Component)]
+pub struct StepsLoopDot {
+    pub node: Entity,
+    pub t: f32,
+    pub duration: f32,
+}
+
+/// React to `SimEvent::StepsLooped` events from the latest tick by
+/// spawning a traveling dot entity for each. Only fires when the
+/// container has ≥2 rows — matches the arc-drawing threshold.
+fn spawn_steps_loop_dots(
+    events: Res<crate::bridge::TickEvents>,
+    maps: Res<crate::bridge::EntityMaps>,
+    sim_res: Res<crate::bridge::SimResource>,
+    nodes: Query<(&Transform, &SimNode)>,
+    theme: Res<Theme>,
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<ColorMaterial>>,
+) {
+    for ev in &events.0 {
+        let crate::sim::SimEvent::StepsLooped { node: nid } = ev else {
+            continue;
+        };
+        let Some(&entity) = maps.node_to_entity.get(nid) else { continue };
+        let Ok((_tf, _sn)) = nodes.get(entity) else { continue };
+        let row_count = sim_res
+            .0
+            .nodes
+            .get(nid)
+            .map(|n| n.step_rows.len())
+            .unwrap_or(0);
+        if row_count < 2 {
+            continue;
+        }
+        commands.spawn((
+            StepsLoopDot {
+                node: entity,
+                t: 0.0,
+                duration: 0.35,
+            },
+            Mesh2d(meshes.add(Circle::new(4.0))),
+            MeshMaterial2d(materials.add(theme.accent)),
+            Transform::from_xyz(0.0, 0.0, 0.6),
+            Visibility::default(),
+        ));
+    }
+}
+
+fn animate_steps_loop_dots(
+    time: Res<Time>,
+    sim_res: Res<crate::bridge::SimResource>,
+    nodes: Query<(&Transform, &SimNode, &crate::bridge::SimNodeRef), Without<StepsLoopDot>>,
+    mut dots: Query<(Entity, &mut StepsLoopDot, &mut Transform)>,
+    mut commands: Commands,
+) {
+    let dt = time.delta_secs();
+    for (entity, mut dot, mut tf) in dots.iter_mut() {
+        dot.t += dt / dot.duration.max(0.01);
+        if dot.t >= 1.0 {
+            commands.entity(entity).despawn();
+            continue;
+        }
+        let Ok((node_tf, node_sn, nref)) = nodes.get(dot.node) else {
+            commands.entity(entity).despawn();
+            continue;
+        };
+        let row_count = sim_res
+            .0
+            .nodes
+            .get(&nref.0)
+            .map(|n| n.step_rows.len())
+            .unwrap_or(0);
+        let Some((a, b, c)) = steps_arc_points(
+            node_tf.translation.truncate(),
+            node_sn.size,
+            row_count,
+        ) else {
+            continue;
+        };
+        let p = quad_bezier(a, b, c, dot.t.clamp(0.0, 1.0));
+        tf.translation.x = p.x;
+        tf.translation.y = p.y;
+    }
+}
+
+/// Paint the active row's body the accent colour, others paper_alt.
+/// Runs every frame — cheap (linear in total row entities).
+fn update_steps_row_highlight(
+    theme: Res<Theme>,
+    sim_res: Res<crate::bridge::SimResource>,
+    nodes: Query<(&crate::bridge::SimNodeRef, &SimNode, &Children)>,
+    row_q: Query<(&StepsRow, &Children)>,
+    body_q: Query<&MeshMaterial2d<ColorMaterial>, With<StepsRowBody>>,
+    mut materials: ResMut<Assets<ColorMaterial>>,
+) {
+    for (nref, sn, children) in nodes.iter() {
+        if sn.kind != NodeKind::Steps {
+            continue;
+        }
+        let current = sim_res.0.nodes.get(&nref.0).and_then(|n| n.current_row);
+        for child in children.iter() {
+            let Ok((row, row_children)) = row_q.get(child) else { continue };
+            let target = if Some(row.index) == current {
+                theme.accent
+            } else {
+                theme.paper_alt
+            };
+            for inner in row_children.iter() {
+                if let Ok(mat) = body_q.get(inner) {
+                    if let Some(m) = materials.get_mut(&mat.0) {
+                        m.color = target;
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -57,9 +397,18 @@ pub enum NodeKind {
     /// inner sim. Renders as a double-bordered block to read as
     /// "container of things" at a glance.
     Custom,
+    /// Scripted process — rendered as a stack of step rows. See the
+    /// sim-side [`crate::sim::NodeKind::Steps`] and
+    /// [`crate::sim::StepRow`].
+    Steps,
 }
 
 impl NodeKind {
+    /// Default visual size for a fixed-size kind. Steps nodes ignore
+    /// this — their size depends on the current row count (see
+    /// [`steps_container_size`]) and is stored on the per-entity
+    /// `SimNode::size` so hit-tests read the live dimension without
+    /// cross-referencing the sim.
     pub fn size(self) -> Vec2 {
         match self {
             NodeKind::Generator => Vec2::new(60.0, 60.0),
@@ -69,6 +418,7 @@ impl NodeKind {
             NodeKind::Router => Vec2::new(70.0, 50.0),
             NodeKind::Queue => Vec2::new(90.0, 40.0),
             NodeKind::Custom => Vec2::new(100.0, 60.0),
+            NodeKind::Steps => steps_container_size(1),
         }
     }
 
@@ -82,12 +432,80 @@ impl NodeKind {
     }
 }
 
+/// Pixel height of a single step row (excluding vertical padding
+/// between the row and the container border).
+pub const STEPS_ROW_HEIGHT: f32 = 28.0;
+/// Pixel width of the Steps container box.
+pub const STEPS_WIDTH: f32 = 170.0;
+/// Inner vertical padding at the top (for the "Steps" header) and
+/// bottom of the container.
+pub const STEPS_HEADER_H: f32 = 18.0;
+pub const STEPS_PAD_Y: f32 = 8.0;
+
+/// Total outer size of a Steps container given its row count.
+pub fn steps_container_size(row_count: usize) -> Vec2 {
+    let rows = row_count.max(1) as f32;
+    Vec2::new(
+        STEPS_WIDTH,
+        STEPS_HEADER_H + STEPS_PAD_Y + rows * STEPS_ROW_HEIGHT + STEPS_PAD_Y,
+    )
+}
+
+/// Y-offset of row `i`'s centre relative to the container centre
+/// (positive Y = up). Used by edge anchoring and row hit-testing.
+pub fn steps_row_center_y(row_count: usize, i: usize) -> f32 {
+    let total = steps_container_size(row_count).y;
+    let top_y = total / 2.0;
+    // First row starts below header + pad.
+    let row_top = top_y - STEPS_HEADER_H - STEPS_PAD_Y;
+    let center = row_top - STEPS_ROW_HEIGHT * (i as f32 + 0.5);
+    center
+}
+
+/// Which row (if any) a click at `world` falls on, given a Steps
+/// container centred at `node_center` with `row_count` rows. Returns
+/// `None` if the click was in the header/padding or outside the rows.
+pub fn steps_row_at(
+    world: Vec2,
+    node_center: Vec2,
+    row_count: usize,
+) -> Option<usize> {
+    if row_count == 0 {
+        return None;
+    }
+    let dy = world.y - node_center.y;
+    for i in 0..row_count {
+        let cy = steps_row_center_y(row_count, i);
+        if (dy - cy).abs() <= STEPS_ROW_HEIGHT / 2.0 {
+            return Some(i);
+        }
+    }
+    None
+}
+
 /// Rendering metadata for a node entity. Behavioral state lives in `Sim`.
 #[derive(Component)]
 pub struct SimNode {
     pub kind: NodeKind,
     pub color: Color,
+    /// Current visual outer size in world pixels. For fixed-size kinds
+    /// this mirrors `kind.size()`; for Steps it's recomputed whenever
+    /// the row count changes.
+    pub size: Vec2,
 }
+
+/// Child-entity marker on a row rectangle inside a [`NodeKind::Steps`]
+/// container. Carries the row index so the highlight system can map
+/// the sim's `current_row` onto the right visual.
+#[derive(Component)]
+pub struct StepsRow {
+    pub index: usize,
+}
+
+/// Marker on the per-row body mesh whose colour the highlight system
+/// paints (accent while active, paper otherwise).
+#[derive(Component)]
+pub struct StepsRowBody;
 
 #[derive(Component)]
 pub struct Selected;
@@ -136,7 +554,7 @@ fn place_node_on_click(
     ui: Query<&Interaction>,
     windows: Query<&Window>,
     cams: Query<(&Camera, &GlobalTransform), With<MainCamera>>,
-    existing: Query<(&Transform, &SimNode)>,
+    existing: Query<(&Transform, &SimNode, &SimNodeRef)>,
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<ColorMaterial>>,
@@ -154,6 +572,7 @@ fn place_node_on_click(
         Tool::Sink => NodeKind::Sink,
         Tool::Router => NodeKind::Router,
         Tool::Queue => NodeKind::Queue,
+        Tool::Steps => NodeKind::Steps,
         _ => return,
     };
     if pointer_over_ui(&ui) {
@@ -164,10 +583,31 @@ fn place_node_on_click(
     let Ok((cam, cam_tf)) = cams.single() else { return };
     let Ok(world) = cam.viewport_to_world_2d(cam_tf, cursor) else { return };
 
-    for (tf, sn) in existing.iter() {
-        let half = sn.kind.size() / 2.0;
+    // Before the normal overlap rule fires: if the click landed
+    // inside a Steps container AND the active tool is one that can
+    // behave as a row (Client, Worker), append a row of that kind
+    // to the container instead of placing a new free-standing node.
+    // This is the "node types ARE steps" gesture: the same tool that
+    // places a Client node on blank canvas adds a Client row when
+    // aimed at a Steps container.
+    for (tf, sn, nref) in existing.iter() {
+        let half = sn.size / 2.0;
         let c = tf.translation.truncate();
         if (world.x - c.x).abs() <= half.x && (world.y - c.y).abs() <= half.y {
+            if sn.kind == NodeKind::Steps
+                && matches!(active_tool.0, Tool::Client | Tool::Worker)
+            {
+                let sc = crate::bridge::bevy_to_sim_color(active_color.0);
+                let row = match active_tool.0 {
+                    Tool::Client => crate::sim::StepRow::Client { color: sc },
+                    Tool::Worker => crate::sim::StepRow::Worker {
+                        duration_ns: 500 * crate::sim::NS_PER_MS,
+                        color: sc,
+                    },
+                    _ => unreachable!(),
+                };
+                sim_res.0.push_step_row(nref.0, row);
+            }
             return;
         }
     }
@@ -199,11 +639,50 @@ pub fn spawn_node(
     color: Color,
     pos: Vec2,
 ) -> Entity {
-    let size = kind.size();
+    // Steps nodes need the sim to exist first (so the registered
+    // node's `step_rows` drives the visual row count). Register the
+    // sim node before building visuals so size can reflect the actual
+    // script.
+    let nid = {
+        // Temporary placeholder entity — we replace it below, but
+        // `register_node` requires an Entity to bind. Alternative would
+        // be to thread maps-binding manually, which is uglier.
+        let placeholder = commands.spawn_empty().id();
+        let id = register_node(sim_res, maps, placeholder, kind, color);
+        commands.entity(placeholder).despawn();
+        maps.entity_to_node.remove(&placeholder);
+        id
+    };
+    let row_count = sim_res.0.nodes.get(&nid).map(|n| n.step_rows.len()).unwrap_or(1);
+    let size = if kind == NodeKind::Steps {
+        steps_container_size(row_count.max(1))
+    } else {
+        kind.size()
+    };
+
+    // Snapshot row descriptors off the sim so we don't need a second
+    // borrow of `sim_res` inside the closure.
+    let steps_rows_for_spawn: Vec<(usize, String)> = if kind == NodeKind::Steps {
+        sim_res
+            .0
+            .nodes
+            .get(&nid)
+            .map(|n| {
+                n.step_rows
+                    .iter()
+                    .enumerate()
+                    .map(|(i, row)| (i, format_step_row(row)))
+                    .collect()
+            })
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
 
     let entity = commands
         .spawn((
-            SimNode { kind, color },
+            SimNode { kind, color, size },
+            SimNodeRef(nid),
             Mesh2d(meshes.add(Rectangle::new(size.x, size.y))),
             MeshMaterial2d(materials.add(kind.body_color(theme))),
             Transform::from_xyz(pos.x, pos.y, 0.0),
@@ -238,6 +717,57 @@ pub fn spawn_node(
                 NodeGlyphText,
             ));
 
+            // Steps node: header label at the top and one inset row
+            // rectangle per script row. Rows are child entities so hit
+            // testing, edge anchoring, and the current-row highlight
+            // can all address them by index via `StepsRow`.
+            if kind == NodeKind::Steps {
+                let header_y = size.y / 2.0 - STEPS_HEADER_H / 2.0 - 2.0;
+                p.spawn((
+                    Text2d::new("STEPS"),
+                    TextFont {
+                        font_size: 10.0,
+                        ..default()
+                    },
+                    TextColor(theme.ink_soft),
+                    Transform::from_xyz(0.0, header_y, 0.3),
+                ));
+                let row_w = size.x - 14.0;
+                let row_h = STEPS_ROW_HEIGHT - 4.0;
+                for (i, label) in &steps_rows_for_spawn {
+                    let cy = steps_row_center_y(row_count.max(1), *i);
+                    p.spawn((
+                        StepsRow { index: *i },
+                        Transform::from_xyz(0.0, cy, 0.15),
+                        Visibility::default(),
+                    ))
+                    .with_children(|r| {
+                        r.spawn((
+                            Mesh2d(meshes.add(Rectangle::new(row_w, row_h))),
+                            MeshMaterial2d(materials.add(theme.paper_alt)),
+                            Transform::from_xyz(0.0, 0.0, 0.0),
+                            StepsRowBody,
+                        ));
+                        // Row outline (lighter than the container
+                        // border) so rows visually separate.
+                        r.spawn((
+                            Mesh2d(meshes.add(Rectangle::new(row_w + 1.5, row_h + 1.5))),
+                            MeshMaterial2d(materials.add(theme.rule)),
+                            Transform::from_xyz(0.0, 0.0, -0.05),
+                        ));
+                        r.spawn((
+                            Text2d::new(label.clone()),
+                            TextFont {
+                                font_size: 11.0,
+                                ..default()
+                            },
+                            TextColor(theme.ink),
+                            Transform::from_xyz(0.0, 0.0, 0.1),
+                        ));
+                    });
+                }
+            }
+
             // Canvas label: one-line summary under the node. Populated and
             // kept up to date by `update_node_label` below. Empty string at
             // spawn so the first frame of rendering isn't a "0" or similar.
@@ -254,11 +784,33 @@ pub fn spawn_node(
         })
         .id();
 
-    let nid = register_node(sim_res, maps, entity, kind, color);
-    commands.entity(entity).insert(SimNodeRef(nid));
+    // Rebind the sim node's entity from the placeholder to the real one.
+    maps.node_to_entity.insert(nid, entity);
+    maps.entity_to_node.insert(entity, nid);
 
     registry.positions.insert(entity, pos);
     entity
+}
+
+/// Render a sim-level [`crate::sim::StepRow`] to the short label
+/// shown inside its row rectangle. Rows mirror the palette's node
+/// kinds; labels match so users recognize them at a glance.
+pub fn format_step_row(row: &crate::sim::StepRow) -> String {
+    use crate::sim::StepRow;
+    match row {
+        StepRow::Client { .. } => "Client".to_string(),
+        StepRow::Worker { duration_ns, .. } => {
+            if *duration_ns >= NS_PER_S {
+                format!("Worker {:.1}s", *duration_ns as f64 / NS_PER_S as f64)
+            } else if *duration_ns >= NS_PER_MS {
+                format!("Worker {}ms", duration_ns / NS_PER_MS)
+            } else if *duration_ns >= NS_PER_US {
+                format!("Worker {}us", duration_ns / NS_PER_US)
+            } else {
+                format!("Worker {}ns", duration_ns)
+            }
+        }
+    }
 }
 
 fn kind_letter(k: NodeKind) -> &'static str {
@@ -270,6 +822,10 @@ fn kind_letter(k: NodeKind) -> &'static str {
         NodeKind::Router => "R",
         NodeKind::Queue => "Q",
         NodeKind::Custom => "⊞",
+        // Steps container uses row children for its visible content,
+        // so the body glyph would collide with the header text the row
+        // renderer draws at the top. Keep it empty.
+        NodeKind::Steps => "",
     }
 }
 
@@ -282,7 +838,7 @@ fn hit_test_node(
     nodes
         .iter()
         .find(|(_, tf, sn)| {
-            let half = sn.kind.size() / 2.0;
+            let half = sn.size / 2.0;
             let c = tf.translation.truncate();
             (world.x - c.x).abs() <= half.x && (world.y - c.y).abs() <= half.y
         })
@@ -312,7 +868,7 @@ fn hit_test_composite(
             if !contains.contains(&m_ref.0) {
                 continue;
             }
-            let half = sn.kind.size() / 2.0;
+            let half = sn.size / 2.0;
             let c = tf.translation.truncate();
             min = min.min(c - half);
             max = max.max(c + half);
@@ -463,7 +1019,7 @@ fn update_selection_outline(
     q: Query<(&Transform, &SimNode), With<Selected>>,
 ) {
     for (tf, sn) in q.iter() {
-        let half = sn.kind.size() / 2.0 + Vec2::splat(6.0);
+        let half = sn.size / 2.0 + Vec2::splat(6.0);
         let c = tf.translation.truncate();
         let color = Color::srgb(0.25, 0.55, 0.90);
         gizmos.rect_2d(c, half * 2.0, color);
@@ -900,6 +1456,10 @@ fn update_canvas_labels(
                     NodeKind::Sink => format!("{}", node.sink_total),
                     NodeKind::Router => String::new(),
                     NodeKind::Custom => format!("{} nodes", node.contains.len()),
+                    // Row info is drawn directly on the Steps body by
+                    // the row renderer; keep the shared canvas label
+                    // empty to avoid double-labeling.
+                    NodeKind::Steps => String::new(),
                 },
                 None => String::new(),
             };
@@ -1089,6 +1649,7 @@ fn spawn_composite_entity(
             SimNode {
                 kind: NodeKind::Custom,
                 color,
+                size: NodeKind::Custom.size(),
             },
             CompositeTag,
             Transform::from_xyz(pos.x, pos.y, 0.0),
@@ -1119,7 +1680,7 @@ fn draw_composite_boundaries(
             if !contains.contains(&m_ref.0) {
                 continue;
             }
-            let half = m_sn.kind.size() / 2.0;
+            let half = m_sn.size / 2.0;
             let c = tf.translation.truncate();
             min = min.min(c - half);
             max = max.max(c + half);
@@ -1148,7 +1709,7 @@ fn update_down_visual(
 ) {
     for (tf, sn) in q.iter() {
         let c = tf.translation.truncate();
-        let half = sn.kind.size() / 2.0;
+        let half = sn.size / 2.0;
         let red = Color::srgb(0.85, 0.2, 0.2);
         gizmos.line_2d(c - half, c + half, red);
         gizmos.line_2d(

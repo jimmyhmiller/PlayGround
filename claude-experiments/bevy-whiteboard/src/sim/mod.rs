@@ -211,6 +211,33 @@ pub enum NodeKind {
     Queue,
     Client,
     Custom,
+    /// Scripted process: its behavior is an ordered list of [`StepRow`]s
+    /// rather than the lower-level [`Step`] primitives. Rows advance
+    /// sequentially; each row can have its own outbound edge(s) tagged
+    /// with the row index (see [`Edge::from_row`]).
+    Steps,
+}
+
+/// A lifecycle row inside a [`NodeKind::Steps`] container. Variants
+/// mirror the subset of [`NodeKind`]s that have sensible "step-mode"
+/// behavior (i.e. the ones whose normal behavior maps cleanly onto
+/// "do a thing when triggered, then signal done"). A Steps container's
+/// `step_rows` is an ordered list of these; the container auto-loops
+/// back to row 0 after the last row completes.
+///
+/// Think of a `StepRow` as "this row IS a Client" (or Worker, etc.)
+/// configured for single-shot operation instead of self-rate emission.
+#[derive(Clone, Debug)]
+pub enum StepRow {
+    /// Behaves like a Client: on row entry, fires a request packet
+    /// of `color` down this row's outbound edge, waits for the
+    /// response to walk back, then advances. Rate is irrelevant —
+    /// emission is driven by row entry.
+    Client { color: Color },
+    /// Behaves like a Worker: on row entry, holds the token for
+    /// `duration_ns` sim time, then advances. `color` is reserved
+    /// for future color-match gating; unused for now.
+    Worker { duration_ns: TimeNs, color: Color },
 }
 
 /// Simulation primitive. A node's behavior is an ordered list of these.
@@ -338,6 +365,22 @@ pub struct Node {
     pub output_port: Option<NodeId>,
     /// If this node is a member of a composite, the composite's id.
     pub parent: Option<NodeId>,
+
+    // Steps-specific state -------------------------------------------------
+    /// Lifecycle script for a [`NodeKind::Steps`] node. Empty for every
+    /// other kind.
+    pub step_rows: Vec<StepRow>,
+    /// Index of the currently-executing row. `None` means the script
+    /// finished (ran off the end without a Loop row) and the node is
+    /// dormant.
+    pub current_row: Option<usize>,
+    /// Sim time at which the current row began executing. Drives Delay
+    /// row completion.
+    pub row_started_ns: TimeNs,
+    /// When a Call row has fired a request and is waiting for the
+    /// response, holds the request's packet id so `deliver_response`
+    /// can match it and advance the row.
+    pub row_awaiting: Option<PacketId>,
 }
 
 impl Default for NodeKind {
@@ -492,6 +535,10 @@ pub struct Edge {
     /// one packet. A Queue→Worker edge in `Pull` mode means the Worker
     /// reaches back for work when idle, rather than the Queue pushing.
     pub mode: EdgeMode,
+    /// If the source node is a [`NodeKind::Steps`], which row this
+    /// edge emerges from. `None` means the edge is anchored at the
+    /// node as a whole (legacy) or the source isn't a Steps node.
+    pub from_row: Option<usize>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -520,6 +567,12 @@ pub enum SimEvent {
         client: NodeId,
         color: Color,
         rtt_ns: TimeNs,
+    },
+    /// A Steps container finished its last row and wrapped its
+    /// `current_row` back to 0. The renderer uses this to animate a
+    /// loop-back dot traveling along the container's return arc.
+    StepsLooped {
+        node: NodeId,
     },
 }
 
@@ -674,6 +727,34 @@ impl Sim {
         id
     }
 
+    /// Spawn a [`NodeKind::Steps`] node with the given script. The
+    /// node starts dormant if `rows` is empty; otherwise its
+    /// `current_row` is set to 0 so the first row fires on the next
+    /// `advance_ns` call.
+    pub fn add_steps(&mut self, color: Color, rows: Vec<StepRow>) -> NodeId {
+        let id = self.fresh_node();
+        let mut node = Node::new("Steps", NodeKind::Steps, color, Vec::new());
+        node.step_rows = rows;
+        node.current_row = if node.step_rows.is_empty() { None } else { Some(0) };
+        node.row_started_ns = self.now_ns;
+        self.nodes.insert(id, node);
+        id
+    }
+
+    /// Replace the row script for a Steps node and restart at row 0.
+    /// No-op if the node isn't a Steps node.
+    pub fn set_step_rows(&mut self, id: NodeId, rows: Vec<StepRow>) {
+        let now = self.now_ns;
+        let Some(n) = self.nodes.get_mut(&id) else { return };
+        if n.kind != NodeKind::Steps {
+            return;
+        }
+        n.step_rows = rows;
+        n.current_row = if n.step_rows.is_empty() { None } else { Some(0) };
+        n.row_started_ns = now;
+        n.row_awaiting = None;
+    }
+
     pub fn connect(&mut self, from: NodeId, to: NodeId) -> EdgeId {
         self.connect_with_mode(from, to, EdgeMode::Push)
     }
@@ -683,9 +764,27 @@ impl Sim {
     }
 
     pub fn connect_with_mode(&mut self, from: NodeId, to: NodeId, mode: EdgeMode) -> EdgeId {
+        self.connect_full(from, to, mode, None)
+    }
+
+    /// Like `connect` but tags the edge as emerging from a specific
+    /// row of a [`NodeKind::Steps`] source. Edge rendering (tail
+    /// anchor) and the Steps runtime (which edge fires for a Call row)
+    /// both key off this field.
+    pub fn connect_from_row(&mut self, from: NodeId, to: NodeId, from_row: usize) -> EdgeId {
+        self.connect_full(from, to, EdgeMode::Push, Some(from_row))
+    }
+
+    fn connect_full(
+        &mut self,
+        from: NodeId,
+        to: NodeId,
+        mode: EdgeMode,
+        from_row: Option<usize>,
+    ) -> EdgeId {
         let id = self.next_edge_id;
         self.next_edge_id += 1;
-        self.edges.insert(id, Edge { from, to, mode });
+        self.edges.insert(id, Edge { from, to, mode, from_row });
         self.outbound.entry(from).or_default().push(id);
         id
     }
@@ -905,7 +1004,7 @@ impl Sim {
 
     pub fn next_event_ns(&self) -> Option<TimeNs> {
         let mut min: Option<TimeNs> = None;
-        for node in self.nodes.values() {
+        for (nid, node) in &self.nodes {
             if node.down {
                 continue;
             }
@@ -918,8 +1017,53 @@ impl Sim {
                 let t = node.started_at_ns.saturating_add(node.processing_ns());
                 min = Some(min.map_or(t, |m| m.min(t)));
             }
+            // Steps-node row scheduling. A row only contributes an
+            // event when the sim can actually advance it:
+            // - Client row: has an outbound edge for this row and isn't
+            //   already waiting on a response.
+            // - Worker row: always schedules its deadline.
+            // - Wrap past end: auto-loop runs synchronously inside
+            //   `tick_steps_nodes`, so no separate event.
+            // Dormant (empty script) or stuck-without-edge Clients
+            // contribute nothing so `advance_ns` can exit its loop.
+            if node.kind == NodeKind::Steps {
+                if let Some(i) = node.current_row {
+                    if i < node.step_rows.len() {
+                        match &node.step_rows[i] {
+                            StepRow::Client { .. }
+                                if node.row_awaiting.is_none()
+                                    && self.steps_row_has_outbound(*nid, i) =>
+                            {
+                                min = Some(min.map_or(self.now_ns, |m| m.min(self.now_ns)));
+                            }
+                            StepRow::Worker { duration_ns, .. } => {
+                                let t = node.row_started_ns.saturating_add(*duration_ns);
+                                min = Some(min.map_or(t, |m| m.min(t)));
+                            }
+                            _ => {}
+                        }
+                    } else {
+                        // Past last row but not empty: auto-loop
+                        // fires synchronously on next tick.
+                        if !node.step_rows.is_empty() {
+                            min = Some(min.map_or(self.now_ns, |m| m.min(self.now_ns)));
+                        }
+                    }
+                }
+            }
         }
         min
+    }
+
+    fn steps_row_has_outbound(&self, nid: NodeId, row: usize) -> bool {
+        self.outbound
+            .get(&nid)
+            .map(|outs| {
+                outs.iter().any(|eid| {
+                    self.edges.get(eid).and_then(|e| e.from_row) == Some(row)
+                })
+            })
+            .unwrap_or(false)
     }
 
     fn process_due(&mut self, events: &mut Vec<SimEvent>) {
@@ -927,6 +1071,128 @@ impl Sim {
         self.drain_buffers(events);
         self.emit_due(events);
         self.service_pullers(events);
+        self.tick_steps_nodes(events);
+    }
+
+    /// Advance every Steps node as far as it can go right now.
+    ///
+    /// - A Client row fires one request on its outbound edge and
+    ///   stops (waits for response).
+    /// - A Worker row holds the token for `duration_ns`; advance
+    ///   when the deadline has passed.
+    /// - After the last row, the container auto-loops: `current_row`
+    ///   wraps back to 0 and we emit a `StepsLooped` event so the
+    ///   renderer can animate the return hop.
+    ///
+    /// Inner loop is bounded — a script of all-instant rows (empty
+    /// set for now, but guards against future additions) would spin.
+    fn tick_steps_nodes(&mut self, events: &mut Vec<SimEvent>) {
+        let now = self.now_ns;
+        let mut ids: Vec<NodeId> = self
+            .nodes
+            .iter()
+            .filter_map(|(id, n)| (n.kind == NodeKind::Steps && !n.down).then_some(*id))
+            .collect();
+        ids.sort_unstable();
+
+        for nid in ids {
+            for _ in 0..1024 {
+                let Some(node) = self.nodes.get(&nid) else { break };
+                let Some(i) = node.current_row else { break };
+                if node.step_rows.is_empty() {
+                    break;
+                }
+                if i >= node.step_rows.len() {
+                    // Past last row — auto-loop to 0 and signal the
+                    // visual so it can draw the return animation.
+                    if let Some(n) = self.nodes.get_mut(&nid) {
+                        n.current_row = Some(0);
+                        n.row_started_ns = now;
+                        n.row_awaiting = None;
+                    }
+                    events.push(SimEvent::StepsLooped { node: nid });
+                    continue;
+                }
+                let row = node.step_rows[i].clone();
+                match row {
+                    StepRow::Client { color } => {
+                        if node.row_awaiting.is_some() {
+                            // Request sent, response in flight.
+                            break;
+                        }
+                        let edge_for_row = self
+                            .outbound
+                            .get(&nid)
+                            .and_then(|outs| {
+                                outs.iter().copied().find(|eid| {
+                                    self.edges
+                                        .get(eid)
+                                        .and_then(|e| e.from_row)
+                                        == Some(i)
+                                })
+                            });
+                        let Some(edge_id) = edge_for_row else { break };
+                        let pid = self.fresh_packet_id();
+                        let packet = Packet::request(pid, color, nid, now);
+                        if let Some(n) = self.nodes.get_mut(&nid) {
+                            n.row_awaiting = Some(pid);
+                            n.sent += 1;
+                            n.outstanding.insert(pid, now);
+                        }
+                        self.travel_forward(edge_id, packet, events);
+                        break;
+                    }
+                    StepRow::Worker { duration_ns, .. } => {
+                        if now < node.row_started_ns.saturating_add(duration_ns) {
+                            break;
+                        }
+                        self.advance_step_row(nid);
+                        continue;
+                    }
+                }
+            }
+        }
+    }
+
+    fn advance_step_row(&mut self, nid: NodeId) {
+        let now = self.now_ns;
+        if let Some(n) = self.nodes.get_mut(&nid) {
+            n.current_row = n.current_row.map(|i| i + 1);
+            n.row_started_ns = now;
+            n.row_awaiting = None;
+        }
+    }
+
+    /// Update the `duration_ns` of the Worker row at `row` inside a
+    /// Steps script. Silently no-ops if the id isn't a Steps node,
+    /// the row is out of range, or the row isn't a Worker.
+    pub fn set_steps_worker_duration_ns(&mut self, id: NodeId, row: usize, ns: TimeNs) {
+        let Some(n) = self.nodes.get_mut(&id) else { return };
+        if n.kind != NodeKind::Steps {
+            return;
+        }
+        if let Some(StepRow::Worker { duration_ns, .. }) = n.step_rows.get_mut(row) {
+            *duration_ns = ns.max(1);
+        }
+    }
+
+    /// Append a row to a Steps node's script. If the node was
+    /// dormant (empty script), starts the script at row 0. Returns
+    /// the new row's index, or `None` if the node isn't a Steps node.
+    pub fn push_step_row(&mut self, id: NodeId, row: StepRow) -> Option<usize> {
+        let now = self.now_ns;
+        let n = self.nodes.get_mut(&id)?;
+        if n.kind != NodeKind::Steps {
+            return None;
+        }
+        n.step_rows.push(row);
+        let idx = n.step_rows.len() - 1;
+        if n.current_row.is_none() {
+            n.current_row = Some(0);
+            n.row_started_ns = now;
+            n.row_awaiting = None;
+        }
+        Some(idx)
     }
 
     /// Pull-side execution: find every node that is currently ready
@@ -1408,18 +1674,44 @@ impl Sim {
         let now = self.now_ns;
         if cursor == addr.client {
             if let Some(n) = self.nodes.get_mut(&cursor) {
-                if n.kind == NodeKind::Client {
-                    if let Some(send_time) = n.outstanding.remove(&packet_id) {
-                        let rtt = now.saturating_sub(send_time);
-                        n.received += 1;
-                        n.rtt_sum_ns = n.rtt_sum_ns.saturating_add(rtt);
-                        n.rtt_count += 1;
-                        events.push(SimEvent::ResponseReceived {
-                            client: cursor,
-                            color,
-                            rtt_ns: rtt,
-                        });
+                match n.kind {
+                    NodeKind::Client => {
+                        if let Some(send_time) = n.outstanding.remove(&packet_id) {
+                            let rtt = now.saturating_sub(send_time);
+                            n.received += 1;
+                            n.rtt_sum_ns = n.rtt_sum_ns.saturating_add(rtt);
+                            n.rtt_count += 1;
+                            events.push(SimEvent::ResponseReceived {
+                                client: cursor,
+                                color,
+                                rtt_ns: rtt,
+                            });
+                        }
                     }
+                    NodeKind::Steps => {
+                        // If this response matches the Call row we're
+                        // blocked on, clear the wait and advance. RTT
+                        // stats are tracked the same way as for Client
+                        // so the inspector has a consistent readout.
+                        let send_time = n.outstanding.remove(&packet_id);
+                        if n.row_awaiting == Some(packet_id) {
+                            n.row_awaiting = None;
+                            n.current_row = n.current_row.map(|i| i + 1);
+                            n.row_started_ns = now;
+                        }
+                        if let Some(st) = send_time {
+                            let rtt = now.saturating_sub(st);
+                            n.received += 1;
+                            n.rtt_sum_ns = n.rtt_sum_ns.saturating_add(rtt);
+                            n.rtt_count += 1;
+                            events.push(SimEvent::ResponseReceived {
+                                client: cursor,
+                                color,
+                                rtt_ns: rtt,
+                            });
+                        }
+                    }
+                    _ => {}
                 }
             }
         }
@@ -2479,6 +2771,75 @@ mod tests {
         advance_secs(&mut sim, 1.0);
         assert_eq!(sim.nodes[&w].processed, 0);
         assert!(sim.nodes[&g].dropped >= 4);
+    }
+
+    #[test]
+    fn steps_client_row_roundtrips_and_loops() {
+        // Steps: [Client RED] → Worker. Auto-loops after the Client
+        // row completes: each loop issues a new request.
+        let mut sim = Sim::new();
+        let steps = sim.add_steps(
+            RED,
+            vec![StepRow::Client { color: RED }],
+        );
+        let w = add_worker_secs(&mut sim, RED, 0.05);
+        sim.connect_from_row(steps, w, 0);
+        advance_secs(&mut sim, 0.5);
+        let n = &sim.nodes[&steps];
+        assert!(n.sent >= 5, "expected ≥5 roundtrips at 50ms each, got {}", n.sent);
+        assert!(n.sent - n.received <= 1, "too many in-flight: {}/{}", n.received, n.sent);
+    }
+
+    #[test]
+    fn steps_worker_row_waits_sim_time() {
+        // Steps: [Worker 200ms, Client RED]. First Client fire only
+        // after the Worker row's dwell has elapsed.
+        let mut sim = Sim::new();
+        let steps = sim.add_steps(
+            RED,
+            vec![
+                StepRow::Worker {
+                    duration_ns: 200 * NS_PER_MS,
+                    color: RED,
+                },
+                StepRow::Client { color: RED },
+            ],
+        );
+        let w = add_worker_secs(&mut sim, RED, 0.01);
+        sim.connect_from_row(steps, w, 1);
+        advance_secs(&mut sim, 0.1);
+        assert_eq!(sim.nodes[&steps].sent, 0, "worker row should still be holding");
+        advance_secs(&mut sim, 0.2);
+        assert!(sim.nodes[&steps].sent >= 1, "expected ≥1 send after worker row");
+    }
+
+    #[test]
+    fn steps_empty_script_is_dormant() {
+        let mut sim = Sim::new();
+        let steps = sim.add_steps(RED, vec![]);
+        advance_secs(&mut sim, 1.0);
+        let n = &sim.nodes[&steps];
+        assert_eq!(n.sent, 0);
+        assert_eq!(n.current_row, None);
+    }
+
+    #[test]
+    fn steps_auto_loop_emits_event() {
+        let mut sim = Sim::new();
+        let steps = sim.add_steps(
+            RED,
+            vec![StepRow::Worker {
+                duration_ns: 50 * NS_PER_MS,
+                color: RED,
+            }],
+        );
+        let events = advance_secs(&mut sim, 0.3);
+        let loops = events
+            .iter()
+            .filter(|e| matches!(e, SimEvent::StepsLooped { node } if *node == steps))
+            .count();
+        // ~6 loops at 50ms each in 300ms.
+        assert!(loops >= 4, "expected ≥4 loop events, got {loops}");
     }
 
     #[test]

@@ -56,6 +56,10 @@ pub struct Edge {
 #[derive(Resource, Default)]
 pub struct EdgeDrawState {
     pub pending_from: Option<Entity>,
+    /// If the pending source is a Steps container, which row was
+    /// clicked — edges out of Steps nodes are anchored to specific
+    /// rows rather than the whole container.
+    pub pending_from_row: Option<usize>,
 }
 
 /// A probe targets either a specific edge (and measures flow rate of packets
@@ -102,22 +106,37 @@ fn pick_nodes_for_edge(
     let Ok(world) = cam.viewport_to_world_2d(cam_tf, cursor) else { return };
 
     let hit = nodes.iter().find(|(_, tf, sn)| {
-        let half = sn.kind.size() / 2.0;
+        let half = sn.size / 2.0;
         let center = tf.translation.truncate();
         (world.x - center.x).abs() <= half.x && (world.y - center.y).abs() <= half.y
     });
 
-    let Some((entity, _, _)) = hit else {
+    let Some((entity, hit_tf, hit_sn)) = hit else {
         draw_state.pending_from = None;
+        draw_state.pending_from_row = None;
         return;
     };
 
     match draw_state.pending_from {
         None => {
             draw_state.pending_from = Some(entity);
+            // Steps: capture which row the click landed on so the
+            // resulting edge anchors there.
+            draw_state.pending_from_row = if hit_sn.kind == crate::nodes::NodeKind::Steps {
+                let row_count = maps
+                    .entity_to_node
+                    .get(&entity)
+                    .and_then(|id| sim_res.0.nodes.get(id))
+                    .map(|n| n.step_rows.len())
+                    .unwrap_or(0);
+                crate::nodes::steps_row_at(world, hit_tf.translation.truncate(), row_count)
+            } else {
+                None
+            };
         }
         Some(from) if from == entity => {
             draw_state.pending_from = None;
+            draw_state.pending_from_row = None;
         }
         Some(from) => {
             // Interpret the gesture. If the user drew from a
@@ -129,6 +148,10 @@ fn pick_nodes_for_edge(
             // drives it.
             let (sim_from, sim_to, is_pull) =
                 resolve_edge_kind(from, entity, &maps, &sim_res);
+            // Only carry the row tag forward if the gesture wasn't
+            // swapped by pull-inference (the row belonged to the
+            // original source, not the pulled-from source).
+            let from_row = if sim_from == from { draw_state.pending_from_row } else { None };
             let dup = existing_edges
                 .iter()
                 .any(|e| e.from == sim_from && e.to == sim_to);
@@ -145,10 +168,16 @@ fn pick_nodes_for_edge(
                     if is_pull {
                         sim_res.0.set_edge_mode(eid, crate::sim::EdgeMode::Pull);
                     }
+                    if let Some(row) = from_row {
+                        if let Some(e) = sim_res.0.edges.get_mut(&eid) {
+                            e.from_row = Some(row);
+                        }
+                    }
                     commands.entity(edge_entity).insert(SimEdgeRef(eid));
                 }
             }
             draw_state.pending_from = None;
+            draw_state.pending_from_row = None;
         }
     }
 }
@@ -215,7 +244,7 @@ fn place_probe_on_click(
     let Ok(world) = cam.viewport_to_world_2d(cam_tf, cursor) else { return };
 
     let node_hit = nodes_tf.iter().find(|(_, tf, sn)| {
-        let half = sn.kind.size() / 2.0;
+        let half = sn.size / 2.0;
         let c = tf.translation.truncate();
         (world.x - c.x).abs() <= half.x && (world.y - c.y).abs() <= half.y
     });
@@ -284,36 +313,67 @@ fn draw_edges_gizmos(
     let preview = theme.accent;
 
     for (edge, edge_ref) in edges.iter() {
-        let (Ok((a_tf, a_sn, _)), Ok((b_tf, b_sn, _))) =
+        let (Ok((a_tf, a_sn, a_nref)), Ok((b_tf, b_sn, _))) =
             (nodes.get(edge.from), nodes.get(edge.to))
         else {
             continue;
         };
-        let is_pull = edge_ref
-            .and_then(|r| sim_res.0.edges.get(&r.0))
+        let sim_edge = edge_ref.and_then(|r| sim_res.0.edges.get(&r.0));
+        let is_pull = sim_edge
             .map(|e| e.mode == crate::sim::EdgeMode::Pull)
             .unwrap_or(false);
+        let from_row = sim_edge.and_then(|e| e.from_row);
 
         // Sim edge always stores (from=data-source, to=consumer).
         // Push edges draw in that direction (data flow). Pull edges
         // draw the arrow in the OPPOSITE direction so the arrowhead
         // lands on the source — reading as "this consumer pulls
         // from that producer."
-        let (head_tf, head_sn, tail_tf, tail_sn) = if is_pull {
-            (a_tf, a_sn, b_tf, b_sn)
+        let (head_tf, head_sn, tail_tf, tail_sn, tail_is_from) = if is_pull {
+            (a_tf, a_sn, b_tf, b_sn, false)
         } else {
-            (b_tf, b_sn, a_tf, a_sn)
+            (b_tf, b_sn, a_tf, a_sn, true)
         };
         let tail_center = tail_tf.translation.truncate();
         let head_center = head_tf.translation.truncate();
-        let tail_half = tail_sn.kind.size() / 2.0;
-        let head_half = head_sn.kind.size() / 2.0;
+        let tail_half = tail_sn.size / 2.0;
+        let head_half = head_sn.size / 2.0;
 
-        let dir = (head_center - tail_center).normalize_or_zero();
+        // If the edge is anchored at a specific row of the Steps
+        // source, shift the tail's vertical origin to the row's
+        // centre. Only applies when the sim "from" is the actual
+        // drawing tail (i.e. push edges — a pull swap uses the other
+        // end as the tail and the row belongs to the sim source).
+        let tail_row_dy = if tail_is_from {
+            from_row.and_then(|i| {
+                let row_count = a_nref
+                    .and_then(|r| sim_res.0.nodes.get(&r.0))
+                    .map(|n| n.step_rows.len())
+                    .unwrap_or(0);
+                (a_sn.kind == crate::nodes::NodeKind::Steps && row_count > 0)
+                    .then(|| crate::nodes::steps_row_center_y(row_count, i))
+            })
+        } else {
+            None
+        };
+        let tail_anchor = if let Some(dy) = tail_row_dy {
+            Vec2::new(tail_center.x, tail_center.y + dy)
+        } else {
+            tail_center
+        };
+
+        let dir = (head_center - tail_anchor).normalize_or_zero();
         if dir.length_squared() == 0.0 {
             continue;
         }
-        let tail_exit = tail_center + dir * border_exit(tail_half, dir);
+        // For a row anchor the tail exit is the right edge of the
+        // row, not the ray-into-box intersection of the whole
+        // container — the row is the visual source of the line.
+        let tail_exit = if tail_row_dy.is_some() {
+            Vec2::new(tail_center.x + tail_half.x, tail_anchor.y)
+        } else {
+            tail_anchor + dir * border_exit(tail_half, dir)
+        };
         let head_entry = head_center - dir * (border_exit(head_half, -dir) + 4.0);
 
         if is_pull {
@@ -329,7 +389,30 @@ fn draw_edges_gizmos(
         let Some(cursor) = win.cursor_position() else { return };
         let Ok((cam, cam_tf)) = cams.single() else { return };
         let Ok(world) = cam.viewport_to_world_2d(cam_tf, cursor) else { return };
-        let a = from_tf.translation.truncate();
+        let center = from_tf.translation.truncate();
+        // Start the preview at the row anchor (right edge of the row)
+        // if the user clicked into a Steps row, so the rubber-band
+        // visibly emerges from the specific row.
+        let a = if let Some(row) = draw_state.pending_from_row {
+            if let Ok((_, sn, Some(nref))) = nodes.get(from) {
+                if sn.kind == crate::nodes::NodeKind::Steps {
+                    let row_count = sim_res
+                        .0
+                        .nodes
+                        .get(&nref.0)
+                        .map(|n| n.step_rows.len())
+                        .unwrap_or(0);
+                    let dy = crate::nodes::steps_row_center_y(row_count, row);
+                    Vec2::new(center.x + sn.size.x / 2.0, center.y + dy)
+                } else {
+                    center
+                }
+            } else {
+                center
+            }
+        } else {
+            center
+        };
         draw_curved_arrow(&mut gizmos, a, world, preview);
     }
 }
@@ -461,7 +544,7 @@ fn update_probe_visuals(
             ProbeTarget::Node(nid) => {
                 let Ok((node_tf, sn, nref_opt)) = nodes.get(nid) else { continue };
                 let c = node_tf.translation.truncate();
-                let half = sn.kind.size() / 2.0;
+                let half = sn.size / 2.0;
                 let label_pos = c + Vec2::new(0.0, -half.y - 22.0);
                 tf.translation.x = label_pos.x;
                 tf.translation.y = label_pos.y;
@@ -564,5 +647,19 @@ fn format_node_stats(node: &SimNodeState) -> String {
             )
         }
         NodeKind::Router | NodeKind::Custom => String::new(),
+        NodeKind::Steps => {
+            let rtt = if node.rtt_count > 0 {
+                node.rtt_sum_ns / node.rtt_count as u64
+            } else {
+                0
+            };
+            format!(
+                "sent:{} recv:{} row:{} rtt:{}ns",
+                node.sent,
+                node.received,
+                node.current_row.map(|i| i.to_string()).unwrap_or_else(|| "-".into()),
+                rtt,
+            )
+        }
     }
 }
