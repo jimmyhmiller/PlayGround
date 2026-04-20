@@ -1,0 +1,52 @@
+namespace sentinel_trace
+
+// Traces whether a sentinel's rendered position and its uploaded light
+// position stay in sync across many frames of simulation.
+
+use ray as r
+use vec as v
+use beagle_zelda as game
+
+fn main() {
+    let s0 = game/default_sentinel(v/make(200.0, 0.0 - 340.0))
+    println("initial sentinel pos=" ++ to-string(s0.pos.x) ++ "," ++ to-string(s0.pos.y)
+               ++ " aim_angle=" ++ to-string(s0.aim_angle)
+               ++ " sweep_dir=" ++ to-string(s0.sweep_dir))
+
+    // Drive the AI by hand: player sitting at (0, 0), no walls.
+    let player_pos = v/ZERO
+    let mut s = s0
+    let dt = 1.0 / 60.0
+    let mut i = 0
+    while i < 120 {
+        s = game/advance_sentinel(s, player_pos, [], dt)
+        if i == 0 || i == 30 || i == 60 || i == 119 {
+            println("frame " ++ to-string(i)
+                       ++ "  pos=(" ++ to-string(s.pos.x) ++ "," ++ to-string(s.pos.y) ++ ")"
+                       ++ "  aim_angle=" ++ to-string(s.aim_angle)
+                       ++ "  sweep_dir=" ++ to-string(s.sweep_dir)
+                       ++ "  alerted=" ++ to-string(s.alerted))
+        }
+        i = i + 1
+    }
+
+    // Build the world-space screen position from the updated sentinel, and
+    // the screen position used for the light uniform (should match).
+    let camera = v/ZERO
+    let sprite_screen = game/world_to_screen(s.pos, camera)
+
+    let world = game/initial_world()
+    let custom_world = game/with_world(world, world.player, world.walls,
+                                       world.monsters, [s], camera, world.tuning,
+                                       world.mode, world.editor)
+    let lights = game/sentinel_screen_lights(custom_world)
+    let light = lights[0]
+    println("sprite screen=(" ++ to-string(sprite_screen.x) ++ "," ++ to-string(sprite_screen.y) ++ ")")
+    println("light  screen=(" ++ to-string(light.pos_x) ++ "," ++ to-string(light.pos_y) ++ ")")
+    if sprite_screen.x == light.pos_x && sprite_screen.y == light.pos_y {
+        println("PASS sprite and light positions match")
+    } else {
+        println("FAIL sprite/light mismatch")
+    }
+    0
+}

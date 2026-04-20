@@ -82,7 +82,6 @@ fn pick_nodes_for_edge(
     windows: Query<&Window>,
     cams: Query<(&Camera, &GlobalTransform), With<MainCamera>>,
     nodes: Query<(Entity, &Transform, &SimNode)>,
-    existing_edges: Query<&Edge>,
     mut draw_state: ResMut<EdgeDrawState>,
     mut commands: Commands,
     mut sim_res: ResMut<SimResource>,
@@ -152,9 +151,19 @@ fn pick_nodes_for_edge(
             // swapped by pull-inference (the row belonged to the
             // original source, not the pulled-from source).
             let from_row = if sim_from == from { draw_state.pending_from_row } else { None };
-            let dup = existing_edges
-                .iter()
-                .any(|e| e.from == sim_from && e.to == sim_to);
+            // Duplicate check: a (from, to) pair isn't enough when
+            // the source is a Steps container — two different rows
+            // legitimately target the same downstream, each with
+            // their own from_row. Include the row tag in the
+            // equality.
+            let sim_from_id = maps.entity_to_node.get(&sim_from).copied();
+            let sim_to_id = maps.entity_to_node.get(&sim_to).copied();
+            let dup = match (sim_from_id, sim_to_id) {
+                (Some(f), Some(t)) => sim_res.0.edges.values().any(|e| {
+                    e.from == f && e.to == t && e.from_row == from_row
+                }),
+                _ => false,
+            };
             if !dup {
                 let edge_entity = commands
                     .spawn(Edge {

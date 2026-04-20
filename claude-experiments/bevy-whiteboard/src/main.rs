@@ -9,6 +9,7 @@ mod sim;
 mod simulation;
 mod theme;
 mod tool;
+mod ui;
 
 use bevy::prelude::*;
 
@@ -41,6 +42,7 @@ fn main() {
         .init_resource::<nodes::NodeRegistry>()
         .add_plugins((
             camera::CameraPlugin,
+            ui::UiPlugin,
             palette::PalettePlugin,
             chrome::ChromePlugin,
             inspector::InspectorPlugin,

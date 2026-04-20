@@ -1,0 +1,29 @@
+namespace hidpi_probe
+
+// Prints the screen/render sizes raylib reports so we can tell whether the
+// framebuffer matches the logical window (the shader assumption).
+
+use ray as r
+
+fn main() {
+    r/init_window(1280, 720, "hidpi_probe")
+    // A single begin/end drawing to make sure the framebuffer has been created.
+    r/begin_drawing()
+    r/clear_background(r/BLACK)
+    r/end_drawing()
+
+    let sw = r/screen_width()
+    let sh = r/screen_height()
+    let rw = r/render_width()
+    let rh = r/render_height()
+    println("screen=" ++ to-string(sw) ++ "x" ++ to-string(sh))
+    println("render=" ++ to-string(rw) ++ "x" ++ to-string(rh))
+    if rw == sw && rh == sh {
+        println("OK framebuffer matches window — no HiDPI scaling")
+    } else {
+        println("MISMATCH — framebuffer is " ++ to-string(rw) ++ "x" ++ to-string(rh)
+                   ++ " but window is " ++ to-string(sw) ++ "x" ++ to-string(sh))
+    }
+    r/close_window()
+    0
+}

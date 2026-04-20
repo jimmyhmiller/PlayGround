@@ -1,0 +1,72 @@
+namespace coord_test
+
+// Sanity-check the coordinate transforms and render positions.
+// Doesn't open a window — pure logic test.
+
+use ray as r
+use vec as v
+use beagle_zelda as game
+
+fn approx_eq(actual, expected, tolerance) {
+    let d = actual - expected
+    let ad = if d < 0.0 { 0.0 - d } else { d }
+    ad < tolerance
+}
+
+fn check(label, actual, expected) {
+    let ok = approx_eq(actual, expected, 0.001)
+    let tag = if ok { "PASS" } else { "FAIL" }
+    println(tag ++ " " ++ label ++ "  actual=" ++ to-string(actual)
+               ++ "  expected=" ++ to-string(expected))
+    ok
+}
+
+fn main() {
+    // World (0, 0), camera (0, 0) -> screen center (640, 360).
+    let s = game/world_to_screen(v/ZERO, v/ZERO)
+    check("world->screen origin .x", s.x, 640.0)
+    check("world->screen origin .y", s.y, 360.0)
+
+    // World y is up, screen y is down: (0, 100) world -> (640, 260) screen.
+    let s2 = game/world_to_screen(v/make(0.0, 100.0), v/ZERO)
+    check("world y=+100 -> screen y=260", s2.y, 260.0)
+
+    // Camera follow centers the player: with camera == player.pos, the player
+    // should always map to screen center regardless of world position.
+    let s3 = game/world_to_screen(v/make(500.0, 300.0), v/make(500.0, 300.0))
+    check("camera-follow center .x", s3.x, 640.0)
+    check("camera-follow center .y", s3.y, 360.0)
+
+    // Round-trip: screen (640, 360) camera (0, 0) -> world (0, 0).
+    let w = game/screen_to_world(640, 360, v/ZERO)
+    check("screen->world round-trip .x", w.x, 0.0)
+    check("screen->world round-trip .y", w.y, 0.0)
+
+    // Round-trip with non-zero camera.
+    let w2 = game/screen_to_world(640, 360, v/make(300.0, 400.0))
+    check("screen->world with camera .x", w2.x, 300.0)
+    check("screen->world with camera .y", w2.y, 400.0)
+
+    // Shadow math: ray from (0, 0) in direction (1, 0) hitting a segment
+    // from (100, -50) to (100, 50) should give t=100.
+    let t = game/ray_segment_hit(v/ZERO, v/make(1.0, 0.0),
+                                 v/make(100.0, 0.0 - 50.0), v/make(100.0, 50.0))
+    check("ray hits wall at x=100", t, 100.0)
+
+    // Ray missing a segment returns -1.
+    let t2 = game/ray_segment_hit(v/ZERO, v/make(0.0, 1.0),
+                                  v/make(100.0, 0.0 - 50.0), v/make(100.0, 50.0))
+    check("ray missing wall returns -1", t2, 0.0 - 1.0)
+
+    // Initial world sanity.
+    let iw = game/initial_world()
+    check("initial player x", iw.player.pos.x, 0.0)
+    check("initial player y", iw.player.pos.y, 0.0)
+    check("initial camera x", iw.camera.x, 0.0)
+    check("initial camera y", iw.camera.y, 0.0)
+    check("initial ambient is >0 (bumped for visibility)",
+          iw.tuning.ambient, 0.15)
+
+    println("done")
+    0
+}

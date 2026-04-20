@@ -156,6 +156,9 @@ fn spawn_palette(mut commands: Commands, theme: Res<Theme>) {
         });
 
         // ── Scrollable body ────────────────────────────────────────────────
+        // Body is a vertically-scrolling column. Interaction::None is
+        // added so the `scroll_panels_on_wheel` system can detect hover
+        // and route mousewheel events to this panel.
         p.spawn((
             Node {
                 flex_grow: 1.0,
@@ -163,10 +166,13 @@ fn spawn_palette(mut commands: Commands, theme: Res<Theme>) {
                 padding: UiRect::all(Val::Px(12.0)),
                 flex_direction: FlexDirection::Column,
                 row_gap: Val::Px(2.0),
-                overflow: Overflow::clip(),
+                overflow: Overflow::scroll_y(),
                 ..default()
             },
             BackgroundColor(theme.paper_alt),
+            Interaction::None,
+            ScrollPosition::default(),
+            crate::ui::ScrollPane,
         ))
         .with_children(|body| {
             section(body, "Tools", &theme);

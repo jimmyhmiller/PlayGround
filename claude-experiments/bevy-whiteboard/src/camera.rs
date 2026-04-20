@@ -41,7 +41,19 @@ fn pan_camera(
 fn zoom_camera(
     mut wheel_evr: MessageReader<MouseWheel>,
     mut q: Query<&mut Projection, With<MainCamera>>,
+    panes: Query<&Interaction, With<crate::ui::ScrollPane>>,
 ) {
+    // If the pointer is over a scrollable UI panel, the wheel is
+    // theirs — let `ui::scroll_panes_on_wheel` consume it and don't
+    // zoom the canvas. Checks hover/pressed so grabbing the
+    // scrollbar still forwards the event correctly.
+    let over_pane = panes.iter().any(|i| {
+        matches!(i, Interaction::Hovered | Interaction::Pressed)
+    });
+    if over_pane {
+        wheel_evr.clear();
+        return;
+    }
     let Ok(mut proj) = q.single_mut() else { return };
     let Projection::Orthographic(ortho) = proj.as_mut() else { return };
     for ev in wheel_evr.read() {

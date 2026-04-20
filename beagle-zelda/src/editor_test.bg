@@ -1,0 +1,33 @@
+namespace editor_test
+
+// Runs the game for 60 frames starting in editor mode, to exercise
+// the raygui panel and the editor tick path.
+
+use ray as r
+use vec as v
+use beagle_zelda as game
+
+fn main() {
+    r/init_window(1280, 720, "beagle-zelda (editor test)")
+    r/set_target_fps(60)
+    let shader_ctx = game/load_cone_light_shader()
+    let initial0 = game/initial_world()
+    let ui_bufs = game/alloc_ui_buffers(initial0.tuning)
+    // Force-edit mode for this run.
+    let initial = game/with_world(initial0, initial0.player, initial0.walls,
+                                  initial0.monsters, initial0.sentinels,
+                                  initial0.camera, initial0.tuning,
+                                  game/MODE_EDITING, initial0.editor)
+    let final = game/game_loop(initial, shader_ctx, ui_bufs, 60)
+    r/close_window()
+    println("editor test reached frame " ++ to-string(final.frame))
+    println("walls: " ++ to-string(length(final.walls)))
+
+    // Round-trip serialization.
+    let text = game/serialize_level(final)
+    let reload = game/deserialize_level(text)
+    println("round-trip walls: " ++ to-string(length(reload.walls)))
+    println("round-trip monsters: " ++ to-string(length(reload.monsters)))
+    println("round-trip sentinels: " ++ to-string(length(reload.sentinels)))
+    0
+}

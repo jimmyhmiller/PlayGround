@@ -18,6 +18,7 @@ impl Plugin for NodesPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<DragState>()
             .init_resource::<EditState>()
+            .init_resource::<StepsRowActivity>()
             .add_systems(
                 Update,
                 (
@@ -44,6 +45,7 @@ impl Plugin for NodesPlugin {
                 Update,
                 (
                     rebuild_steps_on_row_change,
+                    record_steps_row_activity,
                     update_steps_row_highlight,
                     draw_steps_loop_arc,
                     spawn_steps_loop_dots,
@@ -114,6 +116,7 @@ fn rebuild_steps_on_row_change(
             color,
             new_size,
             &rows_snapshot,
+            nref.0,
         );
     }
 }
@@ -132,6 +135,7 @@ fn spawn_steps_children(
     color: Color,
     size: Vec2,
     rows: &[(usize, String)],
+    node_id: crate::sim::NodeId,
 ) {
     commands.entity(parent).with_children(|p| {
         p.spawn((
@@ -158,10 +162,11 @@ fn spawn_steps_children(
         let row_count = rows.len().max(1);
         let row_w = size.x - 14.0;
         let row_h = STEPS_ROW_HEIGHT - 4.0;
-        for (i, label) in rows {
+        for (i, _label) in rows {
             let cy = steps_row_center_y(row_count, *i);
+            let row_index = *i;
             p.spawn((
-                StepsRow { index: *i },
+                StepsRow { index: row_index },
                 Transform::from_xyz(0.0, cy, 0.15),
                 Visibility::default(),
             ))
@@ -177,14 +182,23 @@ fn spawn_steps_children(
                     MeshMaterial2d(materials.add(theme.rule)),
                     Transform::from_xyz(0.0, 0.0, -0.05),
                 ));
+                // Empty initial text + LiveText binding — the
+                // ui::sync_live_text_canvas system fills it every
+                // frame, so a slider change to a Worker row's
+                // duration reflects here without a structural
+                // rebuild.
                 r.spawn((
-                    Text2d::new(label.clone()),
+                    Text2d::new(String::new()),
                     TextFont {
                         font_size: 11.0,
                         ..default()
                     },
                     TextColor(theme.ink),
                     Transform::from_xyz(0.0, 0.0, 0.1),
+                    crate::ui::LiveText {
+                        node: node_id,
+                        field: crate::ui::LiveField::StepRowLabel(row_index),
+                    },
                 ));
             });
         }
@@ -350,28 +364,76 @@ fn animate_steps_loop_dots(
     }
 }
 
-/// Paint the active row's body the accent colour, others paper_alt.
-/// Runs every frame — cheap (linear in total row entities).
-fn update_steps_row_highlight(
-    theme: Res<Theme>,
+/// Real-time duration of the post-entry flash on a step row.
+/// 250ms is long enough that a row which was only current for 0 sim
+/// time (instant Client roundtrip) is still clearly visible.
+const STEPS_ROW_FLASH_SECS: f32 = 0.25;
+
+/// Per-step-row "last entered at" timestamps (real-time seconds from
+/// `Time::elapsed_secs`). Updated from `SimEvent::StepsRowEntered`
+/// and from the currently-active row each frame so even non-event
+/// rows (e.g. initial row 0 at spawn) get a lit indicator.
+#[derive(Resource, Default)]
+pub struct StepsRowActivity {
+    pub last_entered: HashMap<(crate::sim::NodeId, usize), f32>,
+}
+
+/// Update the activity tracker from sim events (caught by the
+/// bridge's `TickEvents`) and from the current row (so the active
+/// row's entry holds indefinitely while it's executing — the
+/// "flash" only decays *after* the row advances past).
+fn record_steps_row_activity(
+    time: Res<Time>,
+    events: Res<crate::bridge::TickEvents>,
     sim_res: Res<crate::bridge::SimResource>,
+    nodes: Query<(&crate::bridge::SimNodeRef, &SimNode)>,
+    mut activity: ResMut<StepsRowActivity>,
+) {
+    let now = time.elapsed_secs();
+    for ev in &events.0 {
+        if let crate::sim::SimEvent::StepsRowEntered { node, row } = ev {
+            activity.last_entered.insert((*node, *row), now);
+        }
+    }
+    // Also refresh the currently-executing row each frame so its
+    // highlight doesn't fade while it's still doing work (awaiting
+    // response, holding a Worker dwell, etc.).
+    for (nref, sn) in nodes.iter() {
+        if sn.kind != NodeKind::Steps {
+            continue;
+        }
+        if let Some(cur) = sim_res.0.nodes.get(&nref.0).and_then(|n| n.current_row) {
+            activity.last_entered.insert((nref.0, cur), now);
+        }
+    }
+}
+
+/// Paint each row body with a mix between accent (just-active) and
+/// paper_alt (dormant) based on how recently it was active.
+fn update_steps_row_highlight(
+    time: Res<Time>,
+    theme: Res<Theme>,
+    activity: Res<StepsRowActivity>,
     nodes: Query<(&crate::bridge::SimNodeRef, &SimNode, &Children)>,
     row_q: Query<(&StepsRow, &Children)>,
     body_q: Query<&MeshMaterial2d<ColorMaterial>, With<StepsRowBody>>,
     mut materials: ResMut<Assets<ColorMaterial>>,
 ) {
+    let now = time.elapsed_secs();
     for (nref, sn, children) in nodes.iter() {
         if sn.kind != NodeKind::Steps {
             continue;
         }
-        let current = sim_res.0.nodes.get(&nref.0).and_then(|n| n.current_row);
         for child in children.iter() {
             let Ok((row, row_children)) = row_q.get(child) else { continue };
-            let target = if Some(row.index) == current {
-                theme.accent
-            } else {
-                theme.paper_alt
-            };
+            let since = activity
+                .last_entered
+                .get(&(nref.0, row.index))
+                .map(|t| now - t)
+                .unwrap_or(f32::INFINITY);
+            let intensity =
+                (1.0 - (since / STEPS_ROW_FLASH_SECS)).clamp(0.0, 1.0);
+            let target = lerp_color(theme.paper_alt, theme.accent, intensity);
             for inner in row_children.iter() {
                 if let Ok(mat) = body_q.get(inner) {
                     if let Some(m) = materials.get_mut(&mat.0) {
@@ -381,6 +443,17 @@ fn update_steps_row_highlight(
             }
         }
     }
+}
+
+fn lerp_color(a: Color, b: Color, t: f32) -> Color {
+    let a = a.to_srgba();
+    let b = b.to_srgba();
+    Color::srgba(
+        a.red + (b.red - a.red) * t,
+        a.green + (b.green - a.green) * t,
+        a.blue + (b.blue - a.blue) * t,
+        a.alpha + (b.alpha - a.alpha) * t,
+    )
 }
 
 /// Kind of sim node — duplicated from `sim` because Bevy rendering code needs
@@ -734,10 +807,11 @@ pub fn spawn_node(
                 ));
                 let row_w = size.x - 14.0;
                 let row_h = STEPS_ROW_HEIGHT - 4.0;
-                for (i, label) in &steps_rows_for_spawn {
+                for (i, _label) in &steps_rows_for_spawn {
                     let cy = steps_row_center_y(row_count.max(1), *i);
+                    let row_index = *i;
                     p.spawn((
-                        StepsRow { index: *i },
+                        StepsRow { index: row_index },
                         Transform::from_xyz(0.0, cy, 0.15),
                         Visibility::default(),
                     ))
@@ -748,21 +822,23 @@ pub fn spawn_node(
                             Transform::from_xyz(0.0, 0.0, 0.0),
                             StepsRowBody,
                         ));
-                        // Row outline (lighter than the container
-                        // border) so rows visually separate.
                         r.spawn((
                             Mesh2d(meshes.add(Rectangle::new(row_w + 1.5, row_h + 1.5))),
                             MeshMaterial2d(materials.add(theme.rule)),
                             Transform::from_xyz(0.0, 0.0, -0.05),
                         ));
                         r.spawn((
-                            Text2d::new(label.clone()),
+                            Text2d::new(String::new()),
                             TextFont {
                                 font_size: 11.0,
                                 ..default()
                             },
                             TextColor(theme.ink),
                             Transform::from_xyz(0.0, 0.0, 0.1),
+                            crate::ui::LiveText {
+                                node: nid,
+                                field: crate::ui::LiveField::StepRowLabel(row_index),
+                            },
                         ));
                     });
                 }

@@ -42,6 +42,7 @@ impl Plugin for InspectorPlugin {
                     sync_slider_visuals,
                     handle_delete_button,
                     handle_color_picker,
+                    handle_step_row_buttons,
                 )
                     .chain(),
             );
@@ -236,48 +237,47 @@ fn rebuild_inspector_on_selection_change(
                     );
                 }
                 NodeKind::Steps => {
-                    kv_row(
+                    use crate::ui::{LiveField, LiveText, RowControl, row};
+                    row(
                         inspector,
-                        "Current",
-                        &node
-                            .current_row
-                            .map(|i| i.to_string())
-                            .unwrap_or_else(|| "-".into()),
                         &theme,
-                        true,
+                        "Current",
+                        RowControl::Readout {
+                            text: "",
+                            live: Some(LiveText { node: node_id, field: LiveField::CurrentRow }),
+                        },
                     );
-                    kv_row(inspector, "Sent", &format!("{}", node.sent), &theme, true);
-                    kv_row(inspector, "Recv", &format!("{}", node.received), &theme, true);
+                    row(
+                        inspector,
+                        &theme,
+                        "Sent",
+                        RowControl::Readout {
+                            text: "",
+                            live: Some(LiveText { node: node_id, field: LiveField::Sent }),
+                        },
+                    );
+                    row(
+                        inspector,
+                        &theme,
+                        "Recv",
+                        RowControl::Readout {
+                            text: "",
+                            live: Some(LiveText { node: node_id, field: LiveField::Received }),
+                        },
+                    );
 
                     if !node.step_rows.is_empty() {
                         section_header(inspector, "Rows", &theme);
+                        let row_count = node.step_rows.len();
                         for (i, row) in node.step_rows.iter().enumerate() {
-                            match row {
-                                crate::sim::StepRow::Client { .. } => {
-                                    kv_row(
-                                        inspector,
-                                        &format!("{}", i),
-                                        "Client",
-                                        &theme,
-                                        false,
-                                    );
-                                }
-                                crate::sim::StepRow::Worker { duration_ns, .. } => {
-                                    spawn_slider_row(
-                                        inspector,
-                                        &format!("{} · Worker", i),
-                                        (*duration_ns / NS_PER_MS) as f32,
-                                        1.0,
-                                        5000.0,
-                                        "ms",
-                                        SliderTarget::StepsWorkerMs {
-                                            node: node_id,
-                                            row: i,
-                                        },
-                                        &theme,
-                                    );
-                                }
-                            }
+                            spawn_step_row_editor(
+                                inspector,
+                                &theme,
+                                node_id,
+                                i,
+                                row,
+                                row_count,
+                            );
                         }
                     }
                 }
@@ -501,6 +501,142 @@ fn spawn_color_picker(
         });
 }
 
+/// One inspector row for editing a single step row of a Steps node.
+/// Layout: `idx · kind · [control]? · [↑ ↓ ×]`. Client rows show
+/// just a readout; Worker rows show a duration slider. Both get the
+/// reorder + delete trailing actions.
+fn spawn_step_row_editor(
+    parent: &mut ChildSpawnerCommands,
+    theme: &Theme,
+    node_id: crate::sim::NodeId,
+    index: usize,
+    row: &crate::sim::StepRow,
+    row_count: usize,
+) {
+    use crate::ui::{RowControl, row_with_actions};
+    // Kind-specific control: Client has nothing to tune yet; Worker
+    // has its dwell time.
+    match row {
+        crate::sim::StepRow::Client { .. } => {
+            row_with_actions(
+                parent,
+                theme,
+                &format!("{}", index),
+                RowControl::Readout { text: "Client", live: None },
+                |actions| spawn_row_action_buttons(actions, theme, node_id, index, row_count),
+            );
+        }
+        crate::sim::StepRow::Worker { .. } => {
+            // For Worker we want the slider, so route through the
+            // existing slider row and append action buttons inline.
+            // The current `spawn_slider_row` has no actions slot —
+            // drop a thin labeled row + slider + actions directly.
+            spawn_worker_row_editor(parent, theme, node_id, index, row, row_count);
+        }
+    }
+}
+
+fn spawn_row_action_buttons(
+    parent: &mut ChildSpawnerCommands,
+    theme: &Theme,
+    node_id: crate::sim::NodeId,
+    index: usize,
+    row_count: usize,
+) {
+    use crate::ui::icon_button;
+    let can_up = index > 0;
+    let can_down = index + 1 < row_count;
+    parent
+        .spawn(Node {
+            column_gap: Val::Px(3.0),
+            ..default()
+        })
+        .with_children(|b| {
+            if can_up {
+                icon_button(
+                    b,
+                    theme,
+                    "↑",
+                    StepRowMoveUpButton { node: node_id, row: index },
+                );
+            }
+            if can_down {
+                icon_button(
+                    b,
+                    theme,
+                    "↓",
+                    StepRowMoveDownButton { node: node_id, row: index },
+                );
+            }
+            icon_button(
+                b,
+                theme,
+                "×",
+                StepRowDeleteButton { node: node_id, row: index },
+            );
+        });
+}
+
+fn spawn_worker_row_editor(
+    parent: &mut ChildSpawnerCommands,
+    theme: &Theme,
+    node_id: crate::sim::NodeId,
+    index: usize,
+    row: &crate::sim::StepRow,
+    row_count: usize,
+) {
+    let duration_ns = match row {
+        crate::sim::StepRow::Worker { duration_ns, .. } => *duration_ns,
+        _ => 0,
+    };
+    // Outer container for this row — vertical stack with slider on
+    // top and action-button row below it.
+    parent
+        .spawn(Node {
+            width: Val::Percent(100.0),
+            flex_direction: FlexDirection::Column,
+            row_gap: Val::Px(2.0),
+            ..default()
+        })
+        .with_children(|col| {
+            spawn_slider_row(
+                col,
+                &format!("{} · Worker", index),
+                (duration_ns / NS_PER_MS) as f32,
+                1.0,
+                5000.0,
+                "ms",
+                SliderTarget::StepsWorkerMs { node: node_id, row: index },
+                theme,
+            );
+            col.spawn(Node {
+                width: Val::Percent(100.0),
+                column_gap: Val::Px(3.0),
+                justify_content: JustifyContent::FlexEnd,
+                ..default()
+            })
+            .with_children(|actions| {
+                spawn_row_action_buttons(actions, theme, node_id, index, row_count);
+            });
+        });
+}
+
+#[derive(Component, Clone, Copy)]
+struct StepRowMoveUpButton {
+    node: crate::sim::NodeId,
+    row: usize,
+}
+#[derive(Component, Clone, Copy)]
+struct StepRowMoveDownButton {
+    node: crate::sim::NodeId,
+    row: usize,
+}
+#[derive(Component, Clone, Copy)]
+struct StepRowDeleteButton {
+    node: crate::sim::NodeId,
+    row: usize,
+}
+
 fn spawn_delete_button(parent: &mut ChildSpawnerCommands, theme: &Theme) {
     parent
         .spawn((
@@ -709,6 +845,51 @@ fn handle_color_picker(
             // Bust the rebuild cache so the inspector picks up the change.
             state.last_selected = None;
         }
+    }
+}
+
+/// Handle clicks on per-step-row action buttons: ↑ / ↓ / ×. Busts
+/// the inspector rebuild cache after any edit so the panel
+/// regenerates with the new row list next frame. Edges anchored to
+/// deleted rows are despawned here too (via the sim's returned
+/// EdgeIds).
+fn handle_step_row_buttons(
+    mut commands: Commands,
+    up_q: Query<(&Interaction, &StepRowMoveUpButton), Changed<Interaction>>,
+    down_q: Query<(&Interaction, &StepRowMoveDownButton), Changed<Interaction>>,
+    del_q: Query<(&Interaction, &StepRowDeleteButton), Changed<Interaction>>,
+    mut sim_res: ResMut<SimResource>,
+    mut maps: ResMut<crate::bridge::EntityMaps>,
+    mut state: ResMut<InspectorState>,
+) {
+    let mut changed = false;
+    for (i, btn) in up_q.iter() {
+        if *i == Interaction::Pressed && btn.row > 0 {
+            sim_res.0.swap_step_rows(btn.node, btn.row, btn.row - 1);
+            changed = true;
+        }
+    }
+    for (i, btn) in down_q.iter() {
+        if *i == Interaction::Pressed {
+            sim_res.0.swap_step_rows(btn.node, btn.row, btn.row + 1);
+            changed = true;
+        }
+    }
+    for (i, btn) in del_q.iter() {
+        if *i == Interaction::Pressed {
+            let removed = sim_res.0.remove_step_row(btn.node, btn.row);
+            for eid in removed {
+                if let Some(edge_entity) = maps.edge_to_entity.remove(&eid) {
+                    commands.entity(edge_entity).despawn();
+                    maps.entity_to_edge.remove(&edge_entity);
+                }
+            }
+            changed = true;
+        }
+    }
+    if changed {
+        // Force the inspector to rebuild from the new row list.
+        state.last_selected = None;
     }
 }
 

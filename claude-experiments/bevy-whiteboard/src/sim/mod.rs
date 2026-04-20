@@ -574,6 +574,14 @@ pub enum SimEvent {
     StepsLooped {
         node: NodeId,
     },
+    /// A Steps container's execution pointer entered `row`. Emitted
+    /// for every transition, including rows that complete
+    /// instantaneously — so the renderer can flash zero-dwell rows
+    /// even when they're never "current" at a frame boundary.
+    StepsRowEntered {
+        node: NodeId,
+        row: usize,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1111,6 +1119,7 @@ impl Sim {
                         n.row_awaiting = None;
                     }
                     events.push(SimEvent::StepsLooped { node: nid });
+                    events.push(SimEvent::StepsRowEntered { node: nid, row: 0 });
                     continue;
                 }
                 let row = node.step_rows[i].clone();
@@ -1146,7 +1155,7 @@ impl Sim {
                         if now < node.row_started_ns.saturating_add(duration_ns) {
                             break;
                         }
-                        self.advance_step_row(nid);
+                        self.advance_step_row(nid, events);
                         continue;
                     }
                 }
@@ -1154,12 +1163,18 @@ impl Sim {
         }
     }
 
-    fn advance_step_row(&mut self, nid: NodeId) {
+    fn advance_step_row(&mut self, nid: NodeId, events: &mut Vec<SimEvent>) {
         let now = self.now_ns;
-        if let Some(n) = self.nodes.get_mut(&nid) {
+        let entered = if let Some(n) = self.nodes.get_mut(&nid) {
             n.current_row = n.current_row.map(|i| i + 1);
             n.row_started_ns = now;
             n.row_awaiting = None;
+            n.current_row.filter(|r| *r < n.step_rows.len())
+        } else {
+            None
+        };
+        if let Some(r) = entered {
+            events.push(SimEvent::StepsRowEntered { node: nid, row: r });
         }
     }
 
@@ -1174,6 +1189,90 @@ impl Sim {
         if let Some(StepRow::Worker { duration_ns, .. }) = n.step_rows.get_mut(row) {
             *duration_ns = ns.max(1);
         }
+    }
+
+    /// Swap step rows `a` and `b` inside a Steps node. Updates any
+    /// `from_row` tags on outbound edges so per-row anchors follow
+    /// their row. If `current_row` pointed at one of the swapped
+    /// rows, update it so execution stays on the same logical row.
+    pub fn swap_step_rows(&mut self, id: NodeId, a: usize, b: usize) {
+        let Some(n) = self.nodes.get_mut(&id) else { return };
+        if n.kind != NodeKind::Steps || a == b {
+            return;
+        }
+        if a >= n.step_rows.len() || b >= n.step_rows.len() {
+            return;
+        }
+        n.step_rows.swap(a, b);
+        if n.current_row == Some(a) {
+            n.current_row = Some(b);
+        } else if n.current_row == Some(b) {
+            n.current_row = Some(a);
+        }
+        for edge in self.edges.values_mut() {
+            if edge.from != id {
+                continue;
+            }
+            match edge.from_row {
+                Some(r) if r == a => edge.from_row = Some(b),
+                Some(r) if r == b => edge.from_row = Some(a),
+                _ => {}
+            }
+        }
+    }
+
+    /// Remove step row `idx` from a Steps node. Edges anchored to
+    /// the removed row are deleted; edges anchored to later rows
+    /// shift down by one. Returns the EdgeIds that were removed so
+    /// the caller can despawn the matching Bevy edge entities.
+    pub fn remove_step_row(&mut self, id: NodeId, idx: usize) -> Vec<EdgeId> {
+        let mut removed = Vec::new();
+        let Some(n) = self.nodes.get_mut(&id) else { return removed };
+        if n.kind != NodeKind::Steps || idx >= n.step_rows.len() {
+            return removed;
+        }
+        n.step_rows.remove(idx);
+        // Fix up current_row so it doesn't point past the new end or
+        // at the (now-gone) row.
+        if let Some(cur) = n.current_row {
+            if cur == idx {
+                // The row we were executing vanished — jump to the
+                // row that took its slot (or dormant if empty).
+                if n.step_rows.is_empty() {
+                    n.current_row = None;
+                } else if cur >= n.step_rows.len() {
+                    n.current_row = Some(0);
+                }
+                // else leave current_row at the same index (which
+                // now points at the next row).
+                n.row_awaiting = None;
+                n.row_started_ns = self.now_ns;
+            } else if cur > idx {
+                n.current_row = Some(cur - 1);
+            }
+        }
+        // Collect edges to remove (anchored at the removed row) and
+        // edges to shift (anchored at later rows).
+        let edge_ids: Vec<EdgeId> = self.edges.keys().copied().collect();
+        for eid in edge_ids {
+            let Some(e) = self.edges.get_mut(&eid) else { continue };
+            if e.from != id {
+                continue;
+            }
+            match e.from_row {
+                Some(r) if r == idx => {
+                    removed.push(eid);
+                }
+                Some(r) if r > idx => {
+                    e.from_row = Some(r - 1);
+                }
+                _ => {}
+            }
+        }
+        for eid in &removed {
+            self.remove_edge_inner(*eid);
+        }
+        removed
     }
 
     /// Append a row to a Steps node's script. If the node was
@@ -1694,10 +1793,18 @@ impl Sim {
                         // stats are tracked the same way as for Client
                         // so the inspector has a consistent readout.
                         let send_time = n.outstanding.remove(&packet_id);
+                        let mut advanced_to: Option<usize> = None;
                         if n.row_awaiting == Some(packet_id) {
                             n.row_awaiting = None;
                             n.current_row = n.current_row.map(|i| i + 1);
                             n.row_started_ns = now;
+                            advanced_to = n.current_row.filter(|r| *r < n.step_rows.len());
+                        }
+                        if let Some(r) = advanced_to {
+                            events.push(SimEvent::StepsRowEntered {
+                                node: cursor,
+                                row: r,
+                            });
                         }
                         if let Some(st) = send_time {
                             let rtt = now.saturating_sub(st);

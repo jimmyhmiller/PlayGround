@@ -1,0 +1,40 @@
+namespace vec
+
+// Minimal 2D vector helpers — data lives in plain structs.
+
+struct Vec2 {
+    x
+    y
+}
+
+fn make(x, y) { Vec2 { x: x, y: y } }
+let ZERO = Vec2 { x: 0.0, y: 0.0 }
+let UNIT_X = Vec2 { x: 1.0, y: 0.0 }
+
+fn add(a, b) { Vec2 { x: a.x + b.x, y: a.y + b.y } }
+fn sub(a, b) { Vec2 { x: a.x - b.x, y: a.y - b.y } }
+fn scale(a, s) { Vec2 { x: a.x * s, y: a.y * s } }
+fn neg(a) { Vec2 { x: 0.0 - a.x, y: 0.0 - a.y } }
+fn dot(a, b) { a.x * b.x + a.y * b.y }
+fn length_sq(a) { a.x * a.x + a.y * a.y }
+fn length(a) { sqrt(length_sq(a)) }
+
+fn normalize_or_zero(a) {
+    let len = length(a)
+    if len < 0.000001 { ZERO } else { scale(a, 1.0 / len) }
+}
+
+fn lerp(a, b, t) {
+    Vec2 { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t }
+}
+
+// Angle of a vector in radians, matches (cos θ, sin θ).
+fn to_angle(a) { atan2(a.y, a.x) }
+fn from_angle(angle) { Vec2 { x: cos(angle), y: sin(angle) } }
+
+fn abs_f(x) { if x < 0.0 { 0.0 - x } else { x } }
+
+// AABB overlap: two rects at (pa, ha) and (pb, hb) (center + half-extents).
+fn aabb_overlap(pa, ha, pb, hb) {
+    abs_f(pa.x - pb.x) < (ha.x + hb.x) && abs_f(pa.y - pb.y) < (ha.y + hb.y)
+}

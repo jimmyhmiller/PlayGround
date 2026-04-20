@@ -1,0 +1,413 @@
+namespace ray
+
+// ============================================================
+// raylib + raygui FFI bindings for beagle-zelda.
+//
+// Design notes:
+//   * All drawing funcs take camera-adjusted screen coordinates as ints.
+//     Camera offset is applied in Beagle, not via raylib's Camera2D,
+//     which avoids passing Camera2D-as-HFA structs through FFI.
+//   * Rectangle (HFA of 4 f32) is always expanded to 4 F32 params —
+//     matches the AArch64 calling convention (v0..v3).
+//   * Vector2 (HFA of 2 f32) is expanded to 2 F32 params.
+//   * Color (4 u8 = 4 bytes) is packed into a single U32.
+//   * Shader is a 2-u64 struct — split into (low, high) via StructReturn
+//     and always passed as U64, U64 like breakout.bg does.
+// ============================================================
+
+use beagle.ffi as ffi
+
+let raylib = ffi/load-library("/opt/homebrew/lib/libraylib.dylib")
+let raygui = ffi/load-library("/Users/jimmyhmiller/Documents/Code/PlayGround/beagle-zelda/vendor/libraygui.dylib")
+
+// ------------------------------------------------------------
+// Window / time
+// ------------------------------------------------------------
+let rl_init_window = ffi/get-function(
+    raylib, "InitWindow",
+    [ffi/Type.I32, ffi/Type.I32, ffi/Type.String],
+    ffi/Type.Void)
+let rl_close_window = ffi/get-function(raylib, "CloseWindow", [], ffi/Type.Void)
+let rl_window_should_close = ffi/get-function(raylib, "WindowShouldClose", [], ffi/Type.I32)
+let rl_set_target_fps = ffi/get-function(raylib, "SetTargetFPS", [ffi/Type.I32], ffi/Type.Void)
+let rl_set_config_flags = ffi/get-function(raylib, "SetConfigFlags", [ffi/Type.U32], ffi/Type.Void)
+let rl_get_screen_width = ffi/get-function(raylib, "GetScreenWidth", [], ffi/Type.I32)
+let rl_get_screen_height = ffi/get-function(raylib, "GetScreenHeight", [], ffi/Type.I32)
+let rl_get_render_width = ffi/get-function(raylib, "GetRenderWidth", [], ffi/Type.I32)
+let rl_get_render_height = ffi/get-function(raylib, "GetRenderHeight", [], ffi/Type.I32)
+let rl_get_time = ffi/get-function(raylib, "GetTime", [], ffi/Type.U64)
+let rl_get_frame_time = ffi/get-function(raylib, "GetFrameTime", [], ffi/Type.F32)
+
+// ------------------------------------------------------------
+// Drawing control
+// ------------------------------------------------------------
+let rl_begin_drawing = ffi/get-function(raylib, "BeginDrawing", [], ffi/Type.Void)
+let rl_end_drawing = ffi/get-function(raylib, "EndDrawing", [], ffi/Type.Void)
+let rl_clear_background = ffi/get-function(raylib, "ClearBackground", [ffi/Type.U32], ffi/Type.Void)
+
+// ------------------------------------------------------------
+// Shapes (all use Color-as-U32)
+// ------------------------------------------------------------
+let rl_draw_rectangle = ffi/get-function(
+    raylib, "DrawRectangle",
+    [ffi/Type.I32, ffi/Type.I32, ffi/Type.I32, ffi/Type.I32, ffi/Type.U32],
+    ffi/Type.Void)
+let rl_draw_rectangle_lines = ffi/get-function(
+    raylib, "DrawRectangleLines",
+    [ffi/Type.I32, ffi/Type.I32, ffi/Type.I32, ffi/Type.I32, ffi/Type.U32],
+    ffi/Type.Void)
+let rl_draw_rectangle_lines_ex = ffi/get-function(
+    raylib, "DrawRectangleLinesEx",
+    [ffi/Type.F32, ffi/Type.F32, ffi/Type.F32, ffi/Type.F32, ffi/Type.F32, ffi/Type.U32],
+    ffi/Type.Void)
+let rl_draw_circle = ffi/get-function(
+    raylib, "DrawCircle",
+    [ffi/Type.I32, ffi/Type.I32, ffi/Type.F32, ffi/Type.U32],
+    ffi/Type.Void)
+let rl_draw_circle_lines = ffi/get-function(
+    raylib, "DrawCircleLines",
+    [ffi/Type.I32, ffi/Type.I32, ffi/Type.F32, ffi/Type.U32],
+    ffi/Type.Void)
+let rl_draw_line = ffi/get-function(
+    raylib, "DrawLine",
+    [ffi/Type.I32, ffi/Type.I32, ffi/Type.I32, ffi/Type.I32, ffi/Type.U32],
+    ffi/Type.Void)
+let rl_draw_line_ex = ffi/get-function(
+    raylib, "DrawLineEx",
+    // Vector2 start (2xF32), Vector2 end (2xF32), F32 thick, U32 color
+    [ffi/Type.F32, ffi/Type.F32, ffi/Type.F32, ffi/Type.F32, ffi/Type.F32, ffi/Type.U32],
+    ffi/Type.Void)
+let rl_draw_text = ffi/get-function(
+    raylib, "DrawText",
+    [ffi/Type.String, ffi/Type.I32, ffi/Type.I32, ffi/Type.I32, ffi/Type.U32],
+    ffi/Type.Void)
+let rl_draw_fps = ffi/get-function(raylib, "DrawFPS", [ffi/Type.I32, ffi/Type.I32], ffi/Type.Void)
+
+// ------------------------------------------------------------
+// Input
+// ------------------------------------------------------------
+let rl_is_key_down = ffi/get-function(raylib, "IsKeyDown", [ffi/Type.I32], ffi/Type.I32)
+let rl_is_key_pressed = ffi/get-function(raylib, "IsKeyPressed", [ffi/Type.I32], ffi/Type.I32)
+let rl_is_key_released = ffi/get-function(raylib, "IsKeyReleased", [ffi/Type.I32], ffi/Type.I32)
+let rl_get_mouse_x = ffi/get-function(raylib, "GetMouseX", [], ffi/Type.I32)
+let rl_get_mouse_y = ffi/get-function(raylib, "GetMouseY", [], ffi/Type.I32)
+let rl_is_mouse_button_down = ffi/get-function(raylib, "IsMouseButtonDown", [ffi/Type.I32], ffi/Type.I32)
+let rl_is_mouse_button_pressed = ffi/get-function(raylib, "IsMouseButtonPressed", [ffi/Type.I32], ffi/Type.I32)
+let rl_is_mouse_button_released = ffi/get-function(raylib, "IsMouseButtonReleased", [ffi/Type.I32], ffi/Type.I32)
+let rl_get_mouse_wheel_move = ffi/get-function(raylib, "GetMouseWheelMove", [], ffi/Type.F32)
+
+// ------------------------------------------------------------
+// Shaders
+// ------------------------------------------------------------
+let rl_load_shader_from_memory = ffi/get-function(
+    raylib, "LoadShaderFromMemory",
+    [ffi/Type.String, ffi/Type.String],
+    ffi/Type.Structure { types: [ffi/Type.U32, ffi/Type.Pointer] })
+let rl_unload_shader = ffi/get-function(
+    raylib, "UnloadShader",
+    [ffi/Type.U64, ffi/Type.U64],
+    ffi/Type.Void)
+let rl_begin_shader_mode = ffi/get-function(
+    raylib, "BeginShaderMode",
+    [ffi/Type.U64, ffi/Type.U64],
+    ffi/Type.Void)
+let rl_end_shader_mode = ffi/get-function(raylib, "EndShaderMode", [], ffi/Type.Void)
+let rl_get_shader_location = ffi/get-function(
+    raylib, "GetShaderLocation",
+    [ffi/Type.U64, ffi/Type.U64, ffi/Type.String],
+    ffi/Type.I32)
+let rl_set_shader_value = ffi/get-function(
+    raylib, "SetShaderValue",
+    [ffi/Type.U64, ffi/Type.U64, ffi/Type.I32, ffi/Type.Pointer, ffi/Type.I32],
+    ffi/Type.Void)
+let rl_set_shader_value_v = ffi/get-function(
+    raylib, "SetShaderValueV",
+    [ffi/Type.U64, ffi/Type.U64, ffi/Type.I32, ffi/Type.Pointer, ffi/Type.I32, ffi/Type.I32],
+    ffi/Type.Void)
+
+// ------------------------------------------------------------
+// rlgl immediate mode (for shadow geometry)
+// ------------------------------------------------------------
+let rl_begin = ffi/get-function(raylib, "rlBegin", [ffi/Type.I32], ffi/Type.Void)
+let rl_end = ffi/get-function(raylib, "rlEnd", [], ffi/Type.Void)
+let rl_vertex_2f = ffi/get-function(raylib, "rlVertex2f", [ffi/Type.F32, ffi/Type.F32], ffi/Type.Void)
+let rl_color_4ub = ffi/get-function(
+    raylib, "rlColor4ub",
+    [ffi/Type.U8, ffi/Type.U8, ffi/Type.U8, ffi/Type.U8],
+    ffi/Type.Void)
+let rl_set_texture = ffi/get-function(raylib, "rlSetTexture", [ffi/Type.U32], ffi/Type.Void)
+
+// ------------------------------------------------------------
+// Scissor mode — used to mask drawing when needed
+// ------------------------------------------------------------
+let rl_begin_scissor = ffi/get-function(
+    raylib, "BeginScissorMode",
+    [ffi/Type.I32, ffi/Type.I32, ffi/Type.I32, ffi/Type.I32],
+    ffi/Type.Void)
+let rl_end_scissor = ffi/get-function(raylib, "EndScissorMode", [], ffi/Type.Void)
+
+// ------------------------------------------------------------
+// Blend modes (for additive-lighting style tricks)
+// ------------------------------------------------------------
+let rl_begin_blend_mode = ffi/get-function(raylib, "BeginBlendMode", [ffi/Type.I32], ffi/Type.Void)
+let rl_end_blend_mode = ffi/get-function(raylib, "EndBlendMode", [], ffi/Type.Void)
+
+// ------------------------------------------------------------
+// Float buffer helpers — thin wrappers over native Beagle FFI accessors.
+// ------------------------------------------------------------
+fn set_f32(buf, offset, value) { ffi/set-f32(buf, offset, value) }
+fn get_f32(buf, offset) { ffi/get-f32(buf, offset) }
+fn set_vec2(buf, offset, x, y) {
+    ffi/set-f32(buf, offset, x)
+    ffi/set-f32(buf, offset + 4, y)
+}
+fn set_vec4(buf, offset, x, y, z, w) {
+    ffi/set-f32(buf, offset, x)
+    ffi/set-f32(buf, offset + 4, y)
+    ffi/set-f32(buf, offset + 8, z)
+    ffi/set-f32(buf, offset + 12, w)
+}
+
+// ------------------------------------------------------------
+// raygui
+// ------------------------------------------------------------
+let gui_button = ffi/get-function(
+    raygui, "GuiButton",
+    [ffi/Type.F32, ffi/Type.F32, ffi/Type.F32, ffi/Type.F32, ffi/Type.String],
+    ffi/Type.I32)
+let gui_label = ffi/get-function(
+    raygui, "GuiLabel",
+    [ffi/Type.F32, ffi/Type.F32, ffi/Type.F32, ffi/Type.F32, ffi/Type.String],
+    ffi/Type.I32)
+let gui_panel = ffi/get-function(
+    raygui, "GuiPanel",
+    [ffi/Type.F32, ffi/Type.F32, ffi/Type.F32, ffi/Type.F32, ffi/Type.String],
+    ffi/Type.I32)
+let gui_window_box = ffi/get-function(
+    raygui, "GuiWindowBox",
+    [ffi/Type.F32, ffi/Type.F32, ffi/Type.F32, ffi/Type.F32, ffi/Type.String],
+    ffi/Type.I32)
+let gui_check_box = ffi/get-function(
+    raygui, "GuiCheckBox",
+    [ffi/Type.F32, ffi/Type.F32, ffi/Type.F32, ffi/Type.F32, ffi/Type.String, ffi/Type.Pointer],
+    ffi/Type.I32)
+// GuiSlider(Rectangle bounds, const char *textLeft, const char *textRight, float *value, float minValue, float maxValue)
+let gui_slider = ffi/get-function(
+    raygui, "GuiSlider",
+    [ffi/Type.F32, ffi/Type.F32, ffi/Type.F32, ffi/Type.F32,
+     ffi/Type.String, ffi/Type.String,
+     ffi/Type.Pointer, ffi/Type.F32, ffi/Type.F32],
+    ffi/Type.I32)
+let gui_slider_bar = ffi/get-function(
+    raygui, "GuiSliderBar",
+    [ffi/Type.F32, ffi/Type.F32, ffi/Type.F32, ffi/Type.F32,
+     ffi/Type.String, ffi/Type.String,
+     ffi/Type.Pointer, ffi/Type.F32, ffi/Type.F32],
+    ffi/Type.I32)
+// GuiToggleGroup(Rectangle, text, int *active) -> int
+let gui_toggle_group = ffi/get-function(
+    raygui, "GuiToggleGroup",
+    [ffi/Type.F32, ffi/Type.F32, ffi/Type.F32, ffi/Type.F32,
+     ffi/Type.String, ffi/Type.Pointer],
+    ffi/Type.I32)
+
+// ============================================================
+// Constants
+// ============================================================
+
+// Uniform type enum for SetShaderValue
+let SHADER_UNIFORM_FLOAT = 0
+let SHADER_UNIFORM_VEC2 = 1
+let SHADER_UNIFORM_VEC3 = 2
+let SHADER_UNIFORM_VEC4 = 3
+let SHADER_UNIFORM_INT = 4
+let SHADER_UNIFORM_IVEC2 = 5
+let SHADER_UNIFORM_IVEC3 = 6
+let SHADER_UNIFORM_IVEC4 = 7
+
+// Draw modes for rlgl
+let RL_TRIANGLES = 4
+let RL_LINES = 1
+let RL_QUADS = 7
+
+// Config flags
+let FLAG_WINDOW_RESIZABLE = 4
+let FLAG_MSAA_4X_HINT = 32
+let FLAG_VSYNC_HINT = 64
+
+// Blend modes
+let BLEND_ALPHA = 0
+let BLEND_ADDITIVE = 1
+let BLEND_MULTIPLIED = 2
+
+// Mouse buttons
+let MOUSE_LEFT = 0
+let MOUSE_RIGHT = 1
+let MOUSE_MIDDLE = 2
+
+// Keys (subset we need)
+let KEY_APOSTROPHE = 39
+let KEY_COMMA = 44
+let KEY_MINUS = 45
+let KEY_PERIOD = 46
+let KEY_SLASH = 47
+let KEY_ZERO = 48
+let KEY_ONE = 49
+let KEY_TWO = 50
+let KEY_THREE = 51
+let KEY_NINE = 57
+let KEY_SEMICOLON = 59
+let KEY_EQUAL = 61
+let KEY_A = 65
+let KEY_B = 66
+let KEY_C = 67
+let KEY_D = 68
+let KEY_E = 69
+let KEY_F = 70
+let KEY_G = 71
+let KEY_H = 72
+let KEY_I = 73
+let KEY_J = 74
+let KEY_K = 75
+let KEY_L = 76
+let KEY_M = 77
+let KEY_N = 78
+let KEY_O = 79
+let KEY_P = 80
+let KEY_Q = 81
+let KEY_R = 82
+let KEY_S = 83
+let KEY_T = 84
+let KEY_U = 85
+let KEY_V = 86
+let KEY_W = 87
+let KEY_X = 88
+let KEY_Y = 89
+let KEY_Z = 90
+let KEY_SPACE = 32
+let KEY_ESCAPE = 256
+let KEY_ENTER = 257
+let KEY_TAB = 258
+let KEY_BACKSPACE = 259
+let KEY_DELETE = 261
+let KEY_RIGHT = 262
+let KEY_LEFT = 263
+let KEY_DOWN = 264
+let KEY_UP = 265
+let KEY_LEFT_SHIFT = 340
+let KEY_LEFT_CONTROL = 341
+let KEY_LEFT_ALT = 342
+let KEY_RIGHT_SHIFT = 344
+let KEY_RIGHT_CONTROL = 345
+
+// ============================================================
+// Color helpers
+// ============================================================
+
+fn color(r, g, b, a) {
+    r + (g * 256) + (b * 65536) + (a * 16777216)
+}
+
+fn rgb(r, g, b) {
+    color(r, g, b, 255)
+}
+
+let BLACK = rgb(0, 0, 0)
+let WHITE = rgb(255, 255, 255)
+let LIGHTGRAY = rgb(200, 200, 200)
+let GRAY = rgb(130, 130, 130)
+let DARKGRAY = rgb(80, 80, 80)
+let RED = rgb(230, 41, 55)
+let GREEN = rgb(0, 228, 48)
+let DARKGREEN = rgb(0, 117, 44)
+let BLUE = rgb(0, 121, 241)
+let SKYBLUE = rgb(102, 191, 255)
+let DARKBLUE = rgb(0, 82, 172)
+let YELLOW = rgb(253, 249, 0)
+let GOLD = rgb(255, 203, 0)
+let ORANGE = rgb(255, 161, 0)
+let PINK = rgb(255, 109, 194)
+let PURPLE = rgb(200, 122, 255)
+let BROWN = rgb(127, 106, 79)
+let BEIGE = rgb(211, 176, 131)
+let MAROON = rgb(190, 33, 55)
+
+// ============================================================
+// Thin helpers (keep call sites readable)
+// ============================================================
+
+fn init_window(w, h, title) { rl_init_window(w, h, title) }
+fn close_window() { rl_close_window() }
+fn window_should_close() { rl_window_should_close() != 0 }
+fn set_target_fps(fps) { rl_set_target_fps(fps) }
+fn set_config_flags(flags) { rl_set_config_flags(flags) }
+fn screen_width() { rl_get_screen_width() }
+fn screen_height() { rl_get_screen_height() }
+fn render_width() { rl_get_render_width() }
+fn render_height() { rl_get_render_height() }
+fn frame_time() { rl_get_frame_time() }
+
+fn begin_drawing() { rl_begin_drawing() }
+fn end_drawing() { rl_end_drawing() }
+fn clear_background(c) { rl_clear_background(c) }
+
+fn draw_rectangle(x, y, w, h, c) { rl_draw_rectangle(x, y, w, h, c) }
+fn draw_rectangle_lines(x, y, w, h, c) { rl_draw_rectangle_lines(x, y, w, h, c) }
+fn draw_rectangle_lines_ex(x, y, w, h, thick, c) { rl_draw_rectangle_lines_ex(x, y, w, h, thick, c) }
+fn draw_circle(x, y, radius, c) { rl_draw_circle(x, y, radius, c) }
+fn draw_circle_lines(x, y, radius, c) { rl_draw_circle_lines(x, y, radius, c) }
+fn draw_line(x1, y1, x2, y2, c) { rl_draw_line(x1, y1, x2, y2, c) }
+fn draw_line_ex(x1, y1, x2, y2, thick, c) { rl_draw_line_ex(x1, y1, x2, y2, thick, c) }
+fn draw_text(t, x, y, sz, c) { rl_draw_text(t, x, y, sz, c) }
+fn draw_fps(x, y) { rl_draw_fps(x, y) }
+
+fn is_key_down(k) { rl_is_key_down(k) != 0 }
+fn is_key_pressed(k) { rl_is_key_pressed(k) != 0 }
+fn is_key_released(k) { rl_is_key_released(k) != 0 }
+fn mouse_x() { rl_get_mouse_x() }
+fn mouse_y() { rl_get_mouse_y() }
+fn is_mouse_button_down(b) { rl_is_mouse_button_down(b) != 0 }
+fn is_mouse_button_pressed(b) { rl_is_mouse_button_pressed(b) != 0 }
+fn is_mouse_button_released(b) { rl_is_mouse_button_released(b) != 0 }
+fn mouse_wheel_move() { rl_get_mouse_wheel_move() }
+
+// Shader handle is a {low, high} pair from StructReturn.
+fn load_shader(vs, fs) { rl_load_shader_from_memory(vs, fs) }
+fn unload_shader(s) { rl_unload_shader(s.low, s.high) }
+fn begin_shader_mode(s) { rl_begin_shader_mode(s.low, s.high) }
+fn end_shader_mode() { rl_end_shader_mode() }
+fn shader_location(s, name) { rl_get_shader_location(s.low, s.high, name) }
+fn set_shader_value(s, loc, ptr, uniform_type) {
+    rl_set_shader_value(s.low, s.high, loc, ptr, uniform_type)
+}
+fn set_shader_value_v(s, loc, ptr, uniform_type, count) {
+    rl_set_shader_value_v(s.low, s.high, loc, ptr, uniform_type, count)
+}
+
+fn gl_begin(mode) { rl_begin(mode) }
+fn gl_end() { rl_end() }
+fn gl_vertex_2f(x, y) { rl_vertex_2f(x, y) }
+fn gl_color_4ub(r, g, b, a) { rl_color_4ub(r, g, b, a) }
+fn gl_set_texture(id) { rl_set_texture(id) }
+
+fn begin_scissor_mode(x, y, w, h) { rl_begin_scissor(x, y, w, h) }
+fn end_scissor_mode() { rl_end_scissor() }
+
+fn begin_blend_mode(m) { rl_begin_blend_mode(m) }
+fn end_blend_mode() { rl_end_blend_mode() }
+
+// raygui helpers — return the int result (for Button: 1 if clicked).
+fn button(x, y, w, h, text) { gui_button(x, y, w, h, text) }
+fn label(x, y, w, h, text) { gui_label(x, y, w, h, text) }
+fn panel(x, y, w, h, title) { gui_panel(x, y, w, h, title) }
+fn window_box(x, y, w, h, title) { gui_window_box(x, y, w, h, title) }
+fn check_box(x, y, w, h, text, bool_ptr) { gui_check_box(x, y, w, h, text, bool_ptr) }
+fn slider(x, y, w, h, left, right, f32_ptr, vmin, vmax) {
+    gui_slider(x, y, w, h, left, right, f32_ptr, vmin, vmax)
+}
+fn slider_bar(x, y, w, h, left, right, f32_ptr, vmin, vmax) {
+    gui_slider_bar(x, y, w, h, left, right, f32_ptr, vmin, vmax)
+}
+fn toggle_group(x, y, w, h, text, int_ptr) {
+    gui_toggle_group(x, y, w, h, text, int_ptr)
+}
