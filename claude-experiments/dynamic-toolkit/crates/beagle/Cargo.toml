@@ -1,0 +1,20 @@
+[package]
+name = "beagle"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "beagle"
+path = "src/main.rs"
+
+[dependencies]
+dynalloc = { path = "../dynalloc" }
+dynexec = { path = "../dynexec" }
+dynlang = { path = "../dynlang" }
+dynsym = { path = "../dynsym" }
+dynir = { path = "../dynir" }
+dynobj = { path = "../dynobj" }
+dynvalue = { path = "../dynvalue" }
+
+# dynlower/dynruntime omitted until they build on x86_64 Linux
+# (pre-existing issue: call_jit_outcome is aarch64-only)
