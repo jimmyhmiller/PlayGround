@@ -187,19 +187,19 @@ struct Editor {
     drag_start        // Vec2 world-space or null if not dragging
     selection         // Selection enum
     status_text       // short message shown in the editor HUD
-    tool_slot         // FFI i32 buffer so raygui toggle_group can read/write it
+    tool_slot         // ffi/Cell<I32> — raygui toggle_group reads/writes through it
     lighting_enabled  // F1 toggles the cone shader overlay + shadow mesh
 }
 
 fn default_editor() {
-    let slot = ffi/allocate(4)
-    ffi/set-i32(slot, 0, tool_to_int(Tool.Select))
     Editor {
         tool: Tool.Select,
         drag_start: null,
         selection: Selection.None,
         status_text: "ready",
-        tool_slot: slot,
+        // Typed I32 cell — raygui ToggleGroup reads/writes through the
+        // auto-unwrapped ptr field. GC-freed when the Editor drops.
+        tool_slot: ffi/cell(ffi/Type.I32, tool_to_int(Tool.Select)),
         lighting_enabled: true
     }
 }
@@ -949,28 +949,31 @@ fn load_cone_light_shader() {
         loc_extras_cos: r/shader_location(s, "extras_cos"),
         loc_extras_range: r/shader_location(s, "extras_range"),
         loc_extras_intensity: r/shader_location(s, "extras_intensity"),
-        buf_vec2: ffi/allocate(8),
-        buf_float: ffi/allocate(4),
-        buf_int: ffi/allocate(4),
-        buf_extras_pos: ffi/allocate(8 * MAX_EXTRA_LIGHTS),
-        buf_extras_dir: ffi/allocate(8 * MAX_EXTRA_LIGHTS),
-        buf_extras_cos: ffi/allocate(4 * MAX_EXTRA_LIGHTS),
-        buf_extras_range: ffi/allocate(4 * MAX_EXTRA_LIGHTS),
-        buf_extras_intensity: ffi/allocate(4 * MAX_EXTRA_LIGHTS)
+        // Staging cells for single-value uniforms. Shader writes flow through
+        // raylib which reads raw bytes — Cell/TypedArray auto-unwrap the ptr.
+        buf_vec2: ffi/array(ffi/Type.F32, 2),
+        buf_float: ffi/cell(ffi/Type.F32, 0),
+        buf_int: ffi/cell(ffi/Type.I32, 0),
+        // Typed arrays: element index is a slot, not a byte offset.
+        buf_extras_pos: ffi/array(ffi/Type.F32, 2 * MAX_EXTRA_LIGHTS),
+        buf_extras_dir: ffi/array(ffi/Type.F32, 2 * MAX_EXTRA_LIGHTS),
+        buf_extras_cos: ffi/array(ffi/Type.F32, MAX_EXTRA_LIGHTS),
+        buf_extras_range: ffi/array(ffi/Type.F32, MAX_EXTRA_LIGHTS),
+        buf_extras_intensity: ffi/array(ffi/Type.F32, MAX_EXTRA_LIGHTS)
     }
 }
 
 fn set_uniform_vec2(ctx, loc, x, y) {
-    r/set_f32(ctx.buf_vec2, 0, x)
-    r/set_f32(ctx.buf_vec2, 4, y)
+    ffi/array-set(ctx.buf_vec2, 0, x)
+    ffi/array-set(ctx.buf_vec2, 1, y)
     r/set_shader_value(ctx.shader, loc, ctx.buf_vec2, r/SHADER_UNIFORM_VEC2)
 }
 fn set_uniform_float(ctx, loc, x) {
-    r/set_f32(ctx.buf_float, 0, x)
+    ffi/cell-set(ctx.buf_float, x)
     r/set_shader_value(ctx.shader, loc, ctx.buf_float, r/SHADER_UNIFORM_FLOAT)
 }
 fn set_uniform_int(ctx, loc, x) {
-    ffi/set-i32(ctx.buf_int, 0, x)
+    ffi/cell-set(ctx.buf_int, x)
     r/set_shader_value(ctx.shader, loc, ctx.buf_int, r/SHADER_UNIFORM_INT)
 }
 
@@ -1003,13 +1006,15 @@ fn upload_cone_uniforms(ctx, world, sentinel_screen_lights) {
     let mut i = 0
     while i < capped {
         let e = sentinel_screen_lights[i]
-        r/set_f32(ctx.buf_extras_pos, i * 8, e.pos_x * sx)
-        r/set_f32(ctx.buf_extras_pos, i * 8 + 4, e.pos_y * sy)
-        r/set_f32(ctx.buf_extras_dir, i * 8, e.dir_x)
-        r/set_f32(ctx.buf_extras_dir, i * 8 + 4, e.dir_y)
-        r/set_f32(ctx.buf_extras_cos, i * 4, e.cos_half)
-        r/set_f32(ctx.buf_extras_range, i * 4, e.range * sx)
-        r/set_f32(ctx.buf_extras_intensity, i * 4, e.intensity)
+        // pos/dir are F32 pairs: two slots per light. cos/range/intensity
+        // are one slot per light. Index is an element number, not bytes.
+        ffi/array-set(ctx.buf_extras_pos, i * 2,     e.pos_x * sx)
+        ffi/array-set(ctx.buf_extras_pos, i * 2 + 1, e.pos_y * sy)
+        ffi/array-set(ctx.buf_extras_dir, i * 2,     e.dir_x)
+        ffi/array-set(ctx.buf_extras_dir, i * 2 + 1, e.dir_y)
+        ffi/array-set(ctx.buf_extras_cos, i, e.cos_half)
+        ffi/array-set(ctx.buf_extras_range, i, e.range * sx)
+        ffi/array-set(ctx.buf_extras_intensity, i, e.intensity)
         i = i + 1
     }
     r/set_shader_value_v(ctx.shader, ctx.loc_extras_pos, ctx.buf_extras_pos,
@@ -1525,47 +1530,33 @@ struct UiBuffers {
 }
 
 fn alloc_ui_buffers(t) {
-    let a = ffi/allocate(4)
-    let b = ffi/allocate(4)
-    let c = ffi/allocate(4)
-    let d = ffi/allocate(4)
-    let e = ffi/allocate(4)
-    let f = ffi/allocate(4)
-    let g = ffi/allocate(4)
-    let h = ffi/allocate(4)
-    let i = ffi/allocate(4)
-    let j = ffi/allocate(4)
-    r/set_f32(a, 0, t.max_speed)
-    r/set_f32(b, 0, t.accel)
-    r/set_f32(c, 0, t.friction)
-    r/set_f32(d, 0, t.light_range)
-    r/set_f32(e, 0, t.light_half_angle_deg)
-    r/set_f32(f, 0, t.light_intensity)
-    r/set_f32(g, 0, t.ambient)
-    r/set_f32(h, 0, t.camera_smoothing)
-    r/set_f32(i, 0, t.run_multiplier)
-    r/set_f32(j, 0, t.sneak_multiplier)
     UiBuffers {
-        max_speed: a, accel: b, friction: c,
-        light_range: d, light_half_angle_deg: e, light_intensity: f,
-        ambient: g, camera_smoothing: h,
-        run_mult: i, sneak_mult: j
+        max_speed:            ffi/cell(ffi/Type.F32, t.max_speed),
+        accel:                ffi/cell(ffi/Type.F32, t.accel),
+        friction:             ffi/cell(ffi/Type.F32, t.friction),
+        light_range:          ffi/cell(ffi/Type.F32, t.light_range),
+        light_half_angle_deg: ffi/cell(ffi/Type.F32, t.light_half_angle_deg),
+        light_intensity:      ffi/cell(ffi/Type.F32, t.light_intensity),
+        ambient:              ffi/cell(ffi/Type.F32, t.ambient),
+        camera_smoothing:     ffi/cell(ffi/Type.F32, t.camera_smoothing),
+        run_mult:             ffi/cell(ffi/Type.F32, t.run_multiplier),
+        sneak_mult:           ffi/cell(ffi/Type.F32, t.sneak_multiplier)
     }
 }
 
 // Read the buffers back into a fresh Tuning.
 fn read_tuning_from_ui(bufs) {
     Tuning {
-        max_speed: r/get_f32(bufs.max_speed, 0),
-        accel: r/get_f32(bufs.accel, 0),
-        friction: r/get_f32(bufs.friction, 0),
-        light_range: r/get_f32(bufs.light_range, 0),
-        light_half_angle_deg: r/get_f32(bufs.light_half_angle_deg, 0),
-        light_intensity: r/get_f32(bufs.light_intensity, 0),
-        ambient: r/get_f32(bufs.ambient, 0),
-        camera_smoothing: r/get_f32(bufs.camera_smoothing, 0),
-        run_multiplier: r/get_f32(bufs.run_mult, 0),
-        sneak_multiplier: r/get_f32(bufs.sneak_mult, 0)
+        max_speed:            ffi/cell-get(bufs.max_speed),
+        accel:                ffi/cell-get(bufs.accel),
+        friction:             ffi/cell-get(bufs.friction),
+        light_range:          ffi/cell-get(bufs.light_range),
+        light_half_angle_deg: ffi/cell-get(bufs.light_half_angle_deg),
+        light_intensity:      ffi/cell-get(bufs.light_intensity),
+        ambient:              ffi/cell-get(bufs.ambient),
+        camera_smoothing:     ffi/cell-get(bufs.camera_smoothing),
+        run_multiplier:       ffi/cell-get(bufs.run_mult),
+        sneak_multiplier:     ffi/cell-get(bufs.sneak_mult)
     }
 }
 
@@ -1821,7 +1812,7 @@ fn editor_tick(world) {
     let dt = current_dt()
     let ed = world.editor
     // Read current tool from the raygui toggle slot — FFI boundary returns an int.
-    let tool = int_to_tool(ffi/get-i32(ed.tool_slot, 0))
+    let tool = int_to_tool(ffi/cell-get(ed.tool_slot))
     let is_select = match tool { Tool.Select => true, _ => false }
     let is_wall = match tool { Tool.Wall => true, _ => false }
     let is_placement_enemy = match tool {

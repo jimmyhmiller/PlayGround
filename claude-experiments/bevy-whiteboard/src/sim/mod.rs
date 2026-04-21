@@ -1626,6 +1626,49 @@ impl Sim {
         }
     }
 
+    /// Cycle through the values of an enum-shaped primitive at
+    /// `program[row]` (Sort's key, Filter's predicate, Require's
+    /// reason). No-op if the row isn't one of those shapes.
+    pub fn cycle_steps_row_enum(&mut self, id: NodeId, row: usize) {
+        let Some(n) = self.nodes.get_mut(&id) else { return };
+        let Some(top) = n.program.get_mut(row) else { return };
+        match top {
+            Instruction::Sort { key } => {
+                *key = match *key {
+                    PortKey::LastSentAt => PortKey::QueueDepth,
+                    PortKey::QueueDepth => PortKey::EdgeOrder,
+                    PortKey::EdgeOrder => PortKey::Random,
+                    PortKey::Random => PortKey::LastSentAt,
+                };
+            }
+            Instruction::Filter { pred } => {
+                *pred = match *pred {
+                    PortPredicate::Ready => PortPredicate::ColorMatches,
+                    PortPredicate::ColorMatches => PortPredicate::Ready,
+                };
+            }
+            Instruction::Require { reason } => {
+                *reason = match *reason {
+                    LostReason::NoReadyOutbound => LostReason::QueueFull,
+                    LostReason::QueueFull => LostReason::RouterStarved,
+                    LostReason::RouterStarved => LostReason::WorkerBusy,
+                    LostReason::WorkerBusy => LostReason::SinkRejected,
+                    LostReason::SinkRejected => LostReason::NoReadyOutbound,
+                };
+            }
+            Instruction::Take { n } => {
+                // Cycle 1 → 2 → 3 → ∞ → 1.
+                *n = match *n {
+                    1 => 2,
+                    2 => 3,
+                    3 => usize::MAX,
+                    _ => 1,
+                };
+            }
+            _ => {}
+        }
+    }
+
     /// Read the duration of a duration-carrying instruction at
     /// top-level program[row], in the same shapes accepted by
     /// `set_steps_worker_duration_ns`. Returns `None` if there's

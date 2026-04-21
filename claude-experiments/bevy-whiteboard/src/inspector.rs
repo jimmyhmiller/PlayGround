@@ -44,6 +44,7 @@ impl Plugin for InspectorPlugin {
                     handle_delete_button,
                     handle_color_picker,
                     handle_step_row_buttons,
+                    handle_cycle_enum_buttons,
                     handle_breadcrumb_clicks,
                     handle_focus_unwind,
                     handle_canvas_drill_click,
@@ -693,13 +694,21 @@ fn spawn_step_row_editor(
 ) {
     use crate::sim::Instruction;
     use crate::ui::{RowControl, row, row_with_actions};
-    // Primitives with a duration field get a slider + reorder/
-    // delete actions. Other primitives get a readout-only row.
     let duration = match instr {
         Instruction::Process { duration_ns } => Some(*duration_ns),
         Instruction::Hold { duration_ns } => Some(*duration_ns),
         _ => None,
     };
+    // Is this an "enum-cycling" primitive? Sort/Filter/Take/Require
+    // all have a finite variant set and can be advanced in place
+    // with a click.
+    let cyclable = matches!(
+        instr,
+        Instruction::Sort { .. }
+            | Instruction::Filter { .. }
+            | Instruction::Take { .. }
+            | Instruction::Require { .. }
+    );
     match instr {
         Instruction::Sequence { label, body } if label == "Worker" && editable => {
             spawn_worker_row_editor(parent, theme, node_id, index, body, row_count);
@@ -715,6 +724,16 @@ fn spawn_step_row_editor(
                 row_count,
             );
         }
+        _ if cyclable && editable => {
+            spawn_cycling_row_editor(
+                parent,
+                theme,
+                node_id,
+                index,
+                crate::nodes::format_step_row(instr),
+                row_count,
+            );
+        }
         Instruction::Sequence { label, .. } if editable => {
             let label_text = label.clone();
             row_with_actions(
@@ -726,9 +745,6 @@ fn spawn_step_row_editor(
             );
         }
         other if editable => {
-            // Primitive with no slider (Send, Require, Filter, etc.)
-            // but still top-level: show readout with action buttons
-            // so reorder/delete work.
             let name = crate::nodes::format_step_row(other);
             row_with_actions(
                 parent,
@@ -747,6 +763,71 @@ fn spawn_step_row_editor(
                 &format!("{}", index),
                 RowControl::Readout { text: &name, live: None },
             );
+        }
+    }
+}
+
+/// Row with a clickable value that cycles to the next variant of
+/// the row's underlying enum (Sort's key, Filter's pred, etc.).
+/// Trailing reorder/delete actions are kept.
+fn spawn_cycling_row_editor(
+    parent: &mut ChildSpawnerCommands,
+    theme: &Theme,
+    node_id: crate::sim::NodeId,
+    index: usize,
+    label_text: String,
+    row_count: usize,
+) {
+    use crate::ui::{RowControl, row_with_actions};
+    row_with_actions(
+        parent,
+        theme,
+        &format!("{}", index),
+        RowControl::Readout { text: "", live: None },
+        |actions| {
+            actions
+                .spawn((
+                    Button,
+                    Node {
+                        padding: UiRect::axes(Val::Px(6.0), Val::Px(3.0)),
+                        border: UiRect::all(Val::Px(1.0)),
+                        border_radius: BorderRadius::all(Val::Px(4.0)),
+                        align_items: AlignItems::Center,
+                        justify_content: JustifyContent::Center,
+                        ..default()
+                    },
+                    BackgroundColor(Color::NONE),
+                    BorderColor::all(theme.rule),
+                    CycleEnumButton { node: node_id, row: index },
+                ))
+                .with_children(|b| {
+                    b.spawn((
+                        Text::new(label_text),
+                        TextFont { font_size: 11.0, ..default() },
+                        TextColor(theme.ink),
+                        crate::bridge::Bold,
+                    ));
+                });
+            spawn_row_action_buttons(actions, theme, node_id, index, row_count);
+        },
+    );
+}
+
+#[derive(Component, Clone, Copy)]
+struct CycleEnumButton {
+    node: crate::sim::NodeId,
+    row: usize,
+}
+
+fn handle_cycle_enum_buttons(
+    q: Query<(&Interaction, &CycleEnumButton), Changed<Interaction>>,
+    mut sim_res: ResMut<SimResource>,
+    mut state: ResMut<InspectorState>,
+) {
+    for (i, btn) in q.iter() {
+        if *i == Interaction::Pressed {
+            sim_res.0.cycle_steps_row_enum(btn.node, btn.row);
+            state.dirty = true;
         }
     }
 }

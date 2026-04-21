@@ -28,7 +28,6 @@ impl Plugin for NodesPlugin {
                     end_row_drag,
                     sync_step_row_transforms,
                     draw_selected_step_outline,
-                    delete_selected_step,
                     clear_selected_step_on_canvas_click,
                 )
                     .chain(),
@@ -44,7 +43,12 @@ impl Plugin for NodesPlugin {
                     update_selection_outline,
                     start_edit_on_key,
                     handle_edit_keys,
+                    // `delete_selected` must run BEFORE
+                    // `delete_selected_step` so its SelectedStep
+                    // gate sees the current selection. The step
+                    // delete then cleans up.
                     delete_selected,
+                    delete_selected_step,
                     adjust_selected_rate,
                     re_skin_node_meshes,
                     update_canvas_labels,
