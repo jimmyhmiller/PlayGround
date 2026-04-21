@@ -37,10 +37,33 @@ let WALL_HEIGHT = 48.0             // pseudo-3D front-face height
 let MODE_PLAYING = 0
 let MODE_EDITING = 1
 
-let TOOL_SELECT = 0
-let TOOL_WALL = 1
-let TOOL_MONSTER = 2
-let TOOL_SENTINEL = 3
+enum Tool { Select, Wall, Monster, Sentinel }
+
+// raygui's toggle_group writes the active tab index as an i32 into tool_slot.
+// Convert at the FFI boundary so the rest of the code works with the enum.
+fn int_to_tool(n) {
+    if n == 1 { Tool.Wall }
+    else if n == 2 { Tool.Monster }
+    else if n == 3 { Tool.Sentinel }
+    else { Tool.Select }
+}
+
+fn tool_to_int(t) {
+    match t {
+        Tool.Select => 0,
+        Tool.Wall => 1,
+        Tool.Monster => 2,
+        Tool.Sentinel => 3
+    }
+}
+
+// Selection in the editor — replaces the old (selected_kind, selected_index) pair.
+enum Selection {
+    None,
+    Wall { index },
+    Monster { index },
+    Sentinel { index }
+}
 
 // Tuning — mirrors the Bevy `Tuning` resource.
 struct Tuning {
@@ -160,10 +183,9 @@ struct Wall {
 // ============================================================
 
 struct Editor {
-    tool              // TOOL_WALL / TOOL_MONSTER / TOOL_SENTINEL
+    tool              // Tool enum
     drag_start        // Vec2 world-space or null if not dragging
-    selected_kind     // 0=none, 1=wall, 2=monster, 3=sentinel
-    selected_index    // int
+    selection         // Selection enum
     status_text       // short message shown in the editor HUD
     tool_slot         // FFI i32 buffer so raygui toggle_group can read/write it
     lighting_enabled  // F1 toggles the cone shader overlay + shadow mesh
@@ -171,12 +193,11 @@ struct Editor {
 
 fn default_editor() {
     let slot = ffi/allocate(4)
-    ffi/set-i32(slot, 0, TOOL_SELECT)
+    ffi/set-i32(slot, 0, tool_to_int(Tool.Select))
     Editor {
-        tool: TOOL_SELECT,
+        tool: Tool.Select,
         drag_start: null,
-        selected_kind: 0,
-        selected_index: 0 - 1,
+        selection: Selection.None,
         status_text: "ready",
         tool_slot: slot,
         lighting_enabled: true
@@ -283,13 +304,11 @@ fn advance_player(player, tuning, walls, desired, speed_mult, dt) {
     let move_delta = v/scale(new_vel, dt)
     let res = resolve_collision(player.pos, player.half, move_delta, walls, new_vel)
     Player {
+        ...player,
         pos: res.pos,
         prev: player.pos,
         vel: res.vel,
-        half: player.half,
-        aim: player.aim,
         speed_mult: speed_mult,
-        hp: player.hp,
         iframes: if player.iframes > 0.0 { player.iframes - dt } else { 0.0 }
     }
 }
@@ -583,14 +602,10 @@ fn advance_monster(m, player_pos, walls, dt) {
     let res = resolve_collision(m.pos, m.half, delta, walls, vel)
 
     Monster {
+        ...m,
         pos: res.pos,
         prev: m.pos,
         vel: res.vel,
-        half: m.half,
-        speed: m.speed,
-        detection_range: m.detection_range,
-        attack_reach: m.attack_reach,
-        strength: m.strength,
         has_seen: has_seen,
         time_since_los: time_since_los,
         notice_acc: notice_acc,
@@ -657,16 +672,10 @@ fn advance_sentinel(s, player_pos, walls, dt) {
     let res = resolve_collision(s.pos, s.half, delta, walls, vel)
 
     Sentinel {
+        ...s,
         pos: res.pos,
         prev: s.pos,
         vel: res.vel,
-        half: s.half,
-        light_range: s.light_range,
-        light_half_angle_deg: s.light_half_angle_deg,
-        light_intensity: s.light_intensity,
-        speed: s.speed,
-        attack_reach: s.attack_reach,
-        sweep_speed: s.sweep_speed,
         aim_angle: new_angle,
         sweep_dir: new_sweep,
         alerted: new_alerted
@@ -1043,31 +1052,11 @@ fn initial_world() {
     }
 }
 
-// World builder — 10 args is a lot, so a small helper keeps callers tidy.
-fn with_world(w, player, walls, monsters, sentinels, camera, tuning, mode, editor) {
-    World {
-        player: player,
-        walls: walls,
-        monsters: monsters,
-        sentinels: sentinels,
-        camera: camera,
-        tuning: tuning,
-        mode: mode,
-        frame: w.frame + 1,
-        editor: editor
-    }
-}
-
 fn update_aim(player, camera) {
     let mouse = screen_to_world(r/mouse_x(), r/mouse_y(), camera)
     let delta = v/sub(mouse, player.pos)
     if v/length_sq(delta) > 1.0 {
-        Player {
-            pos: player.pos, prev: player.prev, vel: player.vel,
-            half: player.half, aim: v/normalize_or_zero(delta),
-            speed_mult: player.speed_mult,
-            hp: player.hp, iframes: player.iframes
-        }
+        Player { ...player, aim: v/normalize_or_zero(delta) }
     } else {
         player
     }
@@ -1134,19 +1123,9 @@ fn apply_monster_attacks(player, monsters, walls) {
             player
         } else if hp <= 0.0 {
             let spawn = pick_respawn(player, monsters, walls)
-            Player {
-                pos: spawn, prev: spawn, vel: v/ZERO,
-                half: player.half, aim: player.aim,
-                speed_mult: player.speed_mult,
-                hp: 5.0, iframes: 2.0
-            }
+            Player { ...player, pos: spawn, prev: spawn, vel: v/ZERO, hp: 5.0, iframes: 2.0 }
         } else {
-            Player {
-                pos: player.pos, prev: player.prev, vel: player.vel,
-                half: player.half, aim: player.aim,
-                speed_mult: player.speed_mult,
-                hp: hp, iframes: 0.75
-            }
+            Player { ...player, hp: hp, iframes: 0.75 }
         }
     }
 }
@@ -1163,8 +1142,14 @@ fn playing_tick(world) {
     let monsters = advance_all_monsters(world.monsters, player_b.pos, world.walls, dt)
     let sentinels = advance_all_sentinels(world.sentinels, player_b.pos, world.walls, dt)
     let player_c = apply_monster_attacks(player_b, monsters, world.walls)
-    with_world(world, player_c, world.walls, monsters, sentinels, camera,
-               world.tuning, world.mode, world.editor)
+    World {
+        ...world,
+        frame: world.frame + 1,
+        player: player_c,
+        monsters: monsters,
+        sentinels: sentinels,
+        camera: camera
+    }
 }
 
 // ============================================================
@@ -1172,14 +1157,24 @@ fn playing_tick(world) {
 // front properly overlap things behind (fake 2.5D depth).
 // ============================================================
 //
-// Each drawable is tagged (1=wall, 2=monster, 3=sentinel, 4=player)
-// and paired with a ground_y key. We insertion-sort by key descending
-// (highest world-y drawn first = furthest back) then dispatch by kind.
+// Each drawable carries a ground_y key + enough payload to render itself.
+// We insertion-sort by ground_y descending (highest world-y drawn first =
+// furthest back) then match to dispatch.
 
-struct Drawable {
-    kind
-    ground_y
-    index     // index into the corresponding world list
+enum Drawable {
+    Wall { index, ground_y },
+    Monster { index, ground_y },
+    Sentinel { index, ground_y },
+    Player { ground_y }
+}
+
+fn drawable_ground_y(d) {
+    match d {
+        Drawable.Wall { index, ground_y } => ground_y,
+        Drawable.Monster { index, ground_y } => ground_y,
+        Drawable.Sentinel { index, ground_y } => ground_y,
+        Drawable.Player { ground_y } => ground_y
+    }
 }
 
 fn ysort_drawables(world) {
@@ -1192,35 +1187,36 @@ fn ysort_drawables(world) {
         // of any player standing south of them, so the wall is drawn on top of
         // the player and it looks like collision isn't working.
         let gy = w.center.y - w.half.y
-        items = push(items, Drawable { kind: 1, ground_y: gy, index: i })
+        items = push(items, Drawable.Wall { index: i, ground_y: gy })
         i = i + 1
     }
     let mut m = 0
     while m < length(world.monsters) {
         let mm = world.monsters[m]
-        items = push(items, Drawable { kind: 2, ground_y: mm.pos.y - mm.half.y, index: m })
+        items = push(items, Drawable.Monster { index: m, ground_y: mm.pos.y - mm.half.y })
         m = m + 1
     }
     let mut s = 0
     while s < length(world.sentinels) {
         let ss = world.sentinels[s]
-        items = push(items, Drawable { kind: 3, ground_y: ss.pos.y - ss.half.y, index: s })
+        items = push(items, Drawable.Sentinel { index: s, ground_y: ss.pos.y - ss.half.y })
         s = s + 1
     }
     let p = world.player
-    items = push(items, Drawable { kind: 4, ground_y: p.pos.y - p.half.y, index: 0 })
+    items = push(items, Drawable.Player { ground_y: p.pos.y - p.half.y })
 
     // Insertion sort descending by ground_y (small N, fine).
     let mut sorted = []
     let mut j = 0
     while j < length(items) {
         let cur = items[j]
+        let cur_y = drawable_ground_y(cur)
         let mut k = 0
         let mut inserted = false
         let mut next = []
         while k < length(sorted) {
             let ex = sorted[k]
-            if (!inserted) && cur.ground_y > ex.ground_y {
+            if (!inserted) && cur_y > drawable_ground_y(ex) {
                 next = push(next, cur)
                 inserted = true
             }
@@ -1238,11 +1234,12 @@ fn draw_scene_ysorted(world) {
     let items = ysort_drawables(world)
     let mut i = 0
     while i < length(items) {
-        let it = items[i]
-        if it.kind == 1 { draw_wall(world.walls[it.index], world.camera) }
-        else if it.kind == 2 { draw_monster(world.monsters[it.index], world.camera) }
-        else if it.kind == 3 { draw_sentinel(world.sentinels[it.index], world.camera) }
-        else { draw_player(world.player, world.camera) }
+        match items[i] {
+            Drawable.Wall     { index, ground_y } => draw_wall(world.walls[index], world.camera),
+            Drawable.Monster  { index, ground_y } => draw_monster(world.monsters[index], world.camera),
+            Drawable.Sentinel { index, ground_y } => draw_sentinel(world.sentinels[index], world.camera),
+            Drawable.Player   { ground_y }        => draw_player(world.player, world.camera)
+        }
         i = i + 1
     }
 }
@@ -1274,37 +1271,50 @@ fn sentinel_screen_lights(world) {
 // ============================================================
 
 fn draw_editor_selection(world) {
-    let ed = world.editor
-    if ed.selected_kind == 1 && ed.selected_index < length(world.walls) {
-        let w = world.walls[ed.selected_index]
-        draw_world_rect_lines(w.center,
-                              v/make(w.half.x + 3.0, w.half.y + 3.0),
-                              r/YELLOW, world.camera)
-    } else if ed.selected_kind == 2 && ed.selected_index < length(world.monsters) {
-        let m = world.monsters[ed.selected_index]
-        draw_world_rect_lines(m.pos,
-                              v/make(m.half.x + 4.0, m.half.y + 4.0),
-                              r/YELLOW, world.camera)
-    } else if ed.selected_kind == 3 && ed.selected_index < length(world.sentinels) {
-        let s = world.sentinels[ed.selected_index]
-        draw_world_rect_lines(s.pos,
-                              v/make(s.half.x + 4.0, s.half.y + 4.0),
-                              r/YELLOW, world.camera)
-    } else {
-        0
+    match world.editor.selection {
+        Selection.None => 0,
+        Selection.Wall { index } => {
+            if index < length(world.walls) {
+                let w = world.walls[index]
+                draw_world_rect_lines(w.center,
+                                      v/make(w.half.x + 3.0, w.half.y + 3.0),
+                                      r/YELLOW, world.camera)
+            } else { 0 }
+        },
+        Selection.Monster { index } => {
+            if index < length(world.monsters) {
+                let m = world.monsters[index]
+                draw_world_rect_lines(m.pos,
+                                      v/make(m.half.x + 4.0, m.half.y + 4.0),
+                                      r/YELLOW, world.camera)
+            } else { 0 }
+        },
+        Selection.Sentinel { index } => {
+            if index < length(world.sentinels) {
+                let s = world.sentinels[index]
+                draw_world_rect_lines(s.pos,
+                                      v/make(s.half.x + 4.0, s.half.y + 4.0),
+                                      r/YELLOW, world.camera)
+            } else { 0 }
+        }
     }
 }
 
 fn draw_editor_drag_preview(world) {
     let ed = world.editor
-    if ed.drag_start != null && ed.tool == TOOL_WALL {
-        let mouse = screen_to_world(r/mouse_x(), r/mouse_y(), world.camera)
-        let cx = (ed.drag_start.x + mouse.x) * 0.5
-        let cy = (ed.drag_start.y + mouse.y) * 0.5
-        let hx = v/abs_f(ed.drag_start.x - mouse.x) * 0.5
-        let hy = v/abs_f(ed.drag_start.y - mouse.y) * 0.5
-        draw_world_rect_lines(v/make(cx, cy), v/make(hx, hy),
-                              r/rgb(120, 200, 255), world.camera)
+    if ed.drag_start != null {
+        match ed.tool {
+            Tool.Wall => {
+                let mouse = screen_to_world(r/mouse_x(), r/mouse_y(), world.camera)
+                let cx = (ed.drag_start.x + mouse.x) * 0.5
+                let cy = (ed.drag_start.y + mouse.y) * 0.5
+                let hx = v/abs_f(ed.drag_start.x - mouse.x) * 0.5
+                let hy = v/abs_f(ed.drag_start.y - mouse.y) * 0.5
+                draw_world_rect_lines(v/make(cx, cy), v/make(hx, hy),
+                                      r/rgb(120, 200, 255), world.camera)
+            },
+            _ => 0
+        }
     } else { 0 }
 }
 
@@ -1572,45 +1582,50 @@ fn editor_world_mouse(world) {
     screen_to_world(r/mouse_x(), r/mouse_y(), world.camera)
 }
 
-// Find an entity under `p` within EDITOR_SELECT_RADIUS.
-// Returns {kind, index} — kind 0=none, 1=wall, 2=monster, 3=sentinel.
-struct Pick {
-    kind
-    index
-}
-
+// Find an entity under `p` within EDITOR_SELECT_RADIUS. Returns a Selection.
 fn pick_at(world, p) {
     // Scan walls, then monsters, then sentinels — first hit wins.
-    let mut found_kind = 0
-    let mut found_index = 0 - 1
+    let mut result = Selection.None
     let mut i = 0
-    while i < length(world.walls) && found_kind == 0 {
+    while i < length(world.walls) {
         let w = world.walls[i]
-        if v/aabb_overlap(p, v/make(1.0, 1.0), w.center, w.half) {
-            found_kind = 1
-            found_index = i
+        match result {
+            Selection.None => {
+                if v/aabb_overlap(p, v/make(1.0, 1.0), w.center, w.half) {
+                    result = Selection.Wall { index: i }
+                }
+            },
+            _ => 0
         }
         i = i + 1
     }
     let mut m = 0
-    while m < length(world.monsters) && found_kind == 0 {
-        let mm = world.monsters[m]
-        if v/length(v/sub(p, mm.pos)) < EDITOR_SELECT_RADIUS {
-            found_kind = 2
-            found_index = m
+    while m < length(world.monsters) {
+        match result {
+            Selection.None => {
+                let mm = world.monsters[m]
+                if v/length(v/sub(p, mm.pos)) < EDITOR_SELECT_RADIUS {
+                    result = Selection.Monster { index: m }
+                }
+            },
+            _ => 0
         }
         m = m + 1
     }
     let mut s = 0
-    while s < length(world.sentinels) && found_kind == 0 {
-        let ss = world.sentinels[s]
-        if v/length(v/sub(p, ss.pos)) < EDITOR_SELECT_RADIUS {
-            found_kind = 3
-            found_index = s
+    while s < length(world.sentinels) {
+        match result {
+            Selection.None => {
+                let ss = world.sentinels[s]
+                if v/length(v/sub(p, ss.pos)) < EDITOR_SELECT_RADIUS {
+                    result = Selection.Sentinel { index: s }
+                }
+            },
+            _ => 0
         }
         s = s + 1
     }
-    Pick { kind: found_kind, index: found_index }
+    result
 }
 
 // Remove element at index i from a list; returns a new list.
@@ -1624,35 +1639,26 @@ fn list_remove_at(xs, i) {
     result
 }
 
-// Serialize a float (we stringify with to-string to preserve precision).
-fn ser_f(x) { to-string(x) }
-
 fn serialize_level(world) {
     let mut s = "walls\n"
     let mut i = 0
     while i < length(world.walls) {
         let w = world.walls[i]
-        s = s ++ ser_f(w.center.x) ++ " " ++ ser_f(w.center.y) ++ " "
-              ++ ser_f(w.half.x) ++ " " ++ ser_f(w.half.y) ++ "\n"
+        s = s ++ "${w.center.x} ${w.center.y} ${w.half.x} ${w.half.y}\n"
         i = i + 1
     }
     s = s ++ "monsters\n"
     let mut m = 0
     while m < length(world.monsters) {
         let mm = world.monsters[m]
-        s = s ++ ser_f(mm.pos.x) ++ " " ++ ser_f(mm.pos.y) ++ " "
-              ++ ser_f(mm.speed) ++ " " ++ ser_f(mm.detection_range) ++ " "
-              ++ ser_f(mm.attack_reach) ++ " " ++ ser_f(mm.strength) ++ "\n"
+        s = s ++ "${mm.pos.x} ${mm.pos.y} ${mm.speed} ${mm.detection_range} ${mm.attack_reach} ${mm.strength}\n"
         m = m + 1
     }
     s = s ++ "sentinels\n"
     let mut n = 0
     while n < length(world.sentinels) {
         let ss = world.sentinels[n]
-        s = s ++ ser_f(ss.pos.x) ++ " " ++ ser_f(ss.pos.y) ++ " "
-              ++ ser_f(ss.light_range) ++ " " ++ ser_f(ss.light_half_angle_deg) ++ " "
-              ++ ser_f(ss.light_intensity) ++ " " ++ ser_f(ss.speed) ++ " "
-              ++ ser_f(ss.attack_reach) ++ " " ++ ser_f(ss.sweep_speed) ++ "\n"
+        s = s ++ "${ss.pos.x} ${ss.pos.y} ${ss.light_range} ${ss.light_half_angle_deg} ${ss.light_intensity} ${ss.speed} ${ss.attack_reach} ${ss.sweep_speed}\n"
         n = n + 1
     }
     s
@@ -1661,8 +1667,8 @@ fn serialize_level(world) {
 fn save_level(world) {
     let result = async/blocking-write-file(LEVEL_PATH, serialize_level(world))
     match result {
-        Result.Ok { value } => "saved " ++ to-string(value) ++ " bytes",
-        Result.Err { error } => "save failed: " ++ to-string(error)
+        Result.Ok { value } => "saved ${value} bytes",
+        Result.Err { error } => "save failed: ${error}"
     }
 }
 
@@ -1709,30 +1715,24 @@ fn deserialize_level(text) {
                 })
             } else if section == "monsters" && length(parts) >= 6 {
                 let m = default_monster(v/make(to-float(parts[0]), to-float(parts[1])))
-                let m2 = Monster {
-                    pos: m.pos, prev: m.prev, vel: m.vel, half: m.half,
+                monsters = push(monsters, Monster {
+                    ...m,
                     speed: to-float(parts[2]),
                     detection_range: to-float(parts[3]),
                     attack_reach: to-float(parts[4]),
-                    strength: to-float(parts[5]),
-                    has_seen: m.has_seen, time_since_los: m.time_since_los,
-                    notice_acc: m.notice_acc, notice_threshold: m.notice_threshold,
-                    wander_dir: m.wander_dir, wander_timer: m.wander_timer
-                }
-                monsters = push(monsters, m2)
+                    strength: to-float(parts[5])
+                })
             } else if section == "sentinels" && length(parts) >= 8 {
                 let s = default_sentinel(v/make(to-float(parts[0]), to-float(parts[1])))
-                let s2 = Sentinel {
-                    pos: s.pos, prev: s.prev, vel: s.vel, half: s.half,
+                sentinels = push(sentinels, Sentinel {
+                    ...s,
                     light_range: to-float(parts[2]),
                     light_half_angle_deg: to-float(parts[3]),
                     light_intensity: to-float(parts[4]),
                     speed: to-float(parts[5]),
                     attack_reach: to-float(parts[6]),
-                    sweep_speed: to-float(parts[7]),
-                    aim_angle: s.aim_angle, sweep_dir: s.sweep_dir, alerted: s.alerted
-                }
-                sentinels = push(sentinels, s2)
+                    sweep_speed: to-float(parts[7])
+                })
             }
         }
         i = i + 1
@@ -1752,8 +1752,13 @@ fn load_level(world) {
         match result {
             Result.Ok { value } => {
                 let data = deserialize_level(value)
-                with_world(world, world.player, data.walls, data.monsters, data.sentinels,
-                           world.camera, world.tuning, world.mode, world.editor)
+                World {
+                    ...world,
+                    frame: world.frame + 1,
+                    walls: data.walls,
+                    monsters: data.monsters,
+                    sentinels: data.sentinels
+                }
             },
             Result.Err { error } => world
         }
@@ -1762,74 +1767,68 @@ fn load_level(world) {
 
 // Place a new entity at `p` in the world using the current tool.
 fn editor_place(world, tool, p, drag_start) {
-    if tool == TOOL_WALL {
-        // Wall defined by rect between drag_start and p.
-        let cx = (drag_start.x + p.x) * 0.5
-        let cy = (drag_start.y + p.y) * 0.5
-        let hx = v/abs_f(drag_start.x - p.x) * 0.5
-        let hy = v/abs_f(drag_start.y - p.y) * 0.5
-        if hx < 5.0 || hy < 5.0 { world }
-        else {
-            let walls = push(world.walls, Wall {
-                center: v/make(cx, cy),
-                half: v/make(hx, hy)
-            })
-            with_world(world, world.player, walls, world.monsters, world.sentinels,
-                       world.camera, world.tuning, world.mode, world.editor)
-        }
-    } else if tool == TOOL_MONSTER {
-        let monsters = push(world.monsters, default_monster(p))
-        with_world(world, world.player, world.walls, monsters, world.sentinels,
-                   world.camera, world.tuning, world.mode, world.editor)
-    } else {
-        let sentinels = push(world.sentinels, default_sentinel(p))
-        with_world(world, world.player, world.walls, world.monsters, sentinels,
-                   world.camera, world.tuning, world.mode, world.editor)
+    match tool {
+        Tool.Wall => {
+            // Wall defined by rect between drag_start and p.
+            let cx = (drag_start.x + p.x) * 0.5
+            let cy = (drag_start.y + p.y) * 0.5
+            let hx = v/abs_f(drag_start.x - p.x) * 0.5
+            let hy = v/abs_f(drag_start.y - p.y) * 0.5
+            if hx < 5.0 || hy < 5.0 { world }
+            else {
+                let walls = push(world.walls, Wall {
+                    center: v/make(cx, cy),
+                    half: v/make(hx, hy)
+                })
+                World { ...world, frame: world.frame + 1, walls: walls }
+            }
+        },
+        Tool.Monster => {
+            let monsters = push(world.monsters, default_monster(p))
+            World { ...world, frame: world.frame + 1, monsters: monsters }
+        },
+        Tool.Sentinel => {
+            let sentinels = push(world.sentinels, default_sentinel(p))
+            World { ...world, frame: world.frame + 1, sentinels: sentinels }
+        },
+        Tool.Select => world
     }
 }
 
 fn editor_delete_selected(world) {
     let ed = world.editor
-    if ed.selected_kind == 1 {
-        let walls = list_remove_at(world.walls, ed.selected_index)
-        let new_ed = Editor {
-            tool: ed.tool, drag_start: ed.drag_start,
-            selected_kind: 0, selected_index: 0 - 1,
-            lighting_enabled: ed.lighting_enabled, status_text: "deleted wall",
-            tool_slot: ed.tool_slot
-        }
-        with_world(world, world.player, walls, world.monsters, world.sentinels,
-                   world.camera, world.tuning, world.mode, new_ed)
-    } else if ed.selected_kind == 2 {
-        let monsters = list_remove_at(world.monsters, ed.selected_index)
-        let new_ed = Editor {
-            tool: ed.tool, drag_start: ed.drag_start,
-            selected_kind: 0, selected_index: 0 - 1,
-            lighting_enabled: ed.lighting_enabled, status_text: "deleted monster",
-            tool_slot: ed.tool_slot
-        }
-        with_world(world, world.player, world.walls, monsters, world.sentinels,
-                   world.camera, world.tuning, world.mode, new_ed)
-    } else if ed.selected_kind == 3 {
-        let sentinels = list_remove_at(world.sentinels, ed.selected_index)
-        let new_ed = Editor {
-            tool: ed.tool, drag_start: ed.drag_start,
-            selected_kind: 0, selected_index: 0 - 1,
-            lighting_enabled: ed.lighting_enabled, status_text: "deleted sentinel",
-            tool_slot: ed.tool_slot
-        }
-        with_world(world, world.player, world.walls, world.monsters, sentinels,
-                   world.camera, world.tuning, world.mode, new_ed)
-    } else {
-        world
+    match ed.selection {
+        Selection.Wall { index } => {
+            let walls = list_remove_at(world.walls, index)
+            let new_ed = Editor { ...ed, selection: Selection.None, status_text: "deleted wall" }
+            World { ...world, frame: world.frame + 1, walls: walls, editor: new_ed }
+        },
+        Selection.Monster { index } => {
+            let monsters = list_remove_at(world.monsters, index)
+            let new_ed = Editor { ...ed, selection: Selection.None, status_text: "deleted monster" }
+            World { ...world, frame: world.frame + 1, monsters: monsters, editor: new_ed }
+        },
+        Selection.Sentinel { index } => {
+            let sentinels = list_remove_at(world.sentinels, index)
+            let new_ed = Editor { ...ed, selection: Selection.None, status_text: "deleted sentinel" }
+            World { ...world, frame: world.frame + 1, sentinels: sentinels, editor: new_ed }
+        },
+        Selection.None => world
     }
 }
 
 fn editor_tick(world) {
     let dt = current_dt()
     let ed = world.editor
-    // Read current tool from the raygui toggle slot.
-    let tool = ffi/get-i32(ed.tool_slot, 0)
+    // Read current tool from the raygui toggle slot — FFI boundary returns an int.
+    let tool = int_to_tool(ffi/get-i32(ed.tool_slot, 0))
+    let is_select = match tool { Tool.Select => true, _ => false }
+    let is_wall = match tool { Tool.Wall => true, _ => false }
+    let is_placement_enemy = match tool {
+        Tool.Monster => true,
+        Tool.Sentinel => true,
+        _ => false
+    }
 
     // Free-camera panning with WASD / arrows.
     let mut cx = world.camera.x
@@ -1843,9 +1842,7 @@ fn editor_tick(world) {
     let mouse_world = screen_to_world(r/mouse_x(), r/mouse_y(), camera)
 
     // Deletion.
-    let mut world1 =
-      with_world(world, world.player, world.walls, world.monsters, world.sentinels,
-                 camera, world.tuning, world.mode, ed)
+    let mut world1 = World { ...world, frame: world.frame + 1, camera: camera }
     world1 = if r/is_key_pressed(r/KEY_DELETE) || r/is_key_pressed(r/KEY_BACKSPACE) {
         editor_delete_selected(world1)
     } else { world1 }
@@ -1857,61 +1854,38 @@ fn editor_tick(world) {
     let right_pressed = r/is_mouse_button_pressed(r/MOUSE_RIGHT) && !on_ui
 
     // Select-tool left-click OR right-click-anywhere picks an entity.
-    let select_click = (left_pressed && tool == TOOL_SELECT) || right_pressed
+    let select_click = (left_pressed && is_select) || right_pressed
     let mut ed2 = world1.editor
     if select_click {
         let pick = pick_at(world1, mouse_world)
         ed2 = Editor {
+            ...ed2,
             tool: tool,
-            drag_start: ed2.drag_start,
-            selected_kind: pick.kind,
-            selected_index: pick.index,
-            lighting_enabled: ed2.lighting_enabled,
-            status_text: if pick.kind == 0 { "no selection" }
-                         else if pick.kind == 1 { "wall selected" }
-                         else if pick.kind == 2 { "monster selected" }
-                         else { "sentinel selected" },
-            tool_slot: ed2.tool_slot
+            selection: pick,
+            status_text: match pick {
+                Selection.None => "no selection",
+                Selection.Wall { index } => "wall selected",
+                Selection.Monster { index } => "monster selected",
+                Selection.Sentinel { index } => "sentinel selected"
+            }
         }
     }
 
     // Left-click with a placement tool starts placement (wall drags, enemies click).
-    let mut world2 = with_world(world1, world1.player, world1.walls,
-                                world1.monsters, world1.sentinels,
-                                world1.camera, world1.tuning, world1.mode, ed2)
-    if left_pressed && tool != TOOL_SELECT {
-        let mut new_ed = Editor {
-            tool: tool,
-            drag_start: mouse_world,
-            selected_kind: ed2.selected_kind,
-            selected_index: ed2.selected_index,
-            lighting_enabled: ed2.lighting_enabled,
-            status_text: ed2.status_text,
-            tool_slot: ed2.tool_slot
-        }
-        if tool == TOOL_MONSTER || tool == TOOL_SENTINEL {
+    let mut world2 = World { ...world1, frame: world1.frame + 1, editor: ed2 }
+    if left_pressed && !is_select {
+        let mut new_ed = Editor { ...ed2, tool: tool, drag_start: mouse_world }
+        if is_placement_enemy {
             world2 = editor_place(world2, tool, mouse_world, mouse_world)
-            new_ed = Editor {
-                tool: tool, drag_start: null,
-                selected_kind: new_ed.selected_kind, selected_index: new_ed.selected_index,
-                lighting_enabled: new_ed.lighting_enabled, status_text: "placed", tool_slot: new_ed.tool_slot
-            }
+            new_ed = Editor { ...new_ed, drag_start: null, status_text: "placed" }
         }
-        world2 = with_world(world2, world2.player, world2.walls,
-                            world2.monsters, world2.sentinels,
-                            world2.camera, world2.tuning, world2.mode, new_ed)
+        world2 = World { ...world2, frame: world2.frame + 1, editor: new_ed }
     }
     // Wall tool: drag-release finalises the rect.
-    if left_released && world2.editor.drag_start != null && tool == TOOL_WALL {
-        world2 = editor_place(world2, TOOL_WALL, mouse_world, world2.editor.drag_start)
-        let new_ed = Editor {
-            tool: tool, drag_start: null,
-            selected_kind: world2.editor.selected_kind, selected_index: world2.editor.selected_index,
-            lighting_enabled: world2.editor.lighting_enabled, status_text: "placed wall", tool_slot: world2.editor.tool_slot
-        }
-        world2 = with_world(world2, world2.player, world2.walls,
-                            world2.monsters, world2.sentinels,
-                            world2.camera, world2.tuning, world2.mode, new_ed)
+    if left_released && world2.editor.drag_start != null && is_wall {
+        world2 = editor_place(world2, Tool.Wall, mouse_world, world2.editor.drag_start)
+        let new_ed = Editor { ...world2.editor, tool: tool, drag_start: null, status_text: "placed wall" }
+        world2 = World { ...world2, frame: world2.frame + 1, editor: new_ed }
     }
 
     world2
@@ -1922,8 +1896,7 @@ fn maybe_toggle_mode(world) {
     let mut w = world
     if r/is_key_pressed(r/KEY_TAB) {
         let new_mode = if w.mode == MODE_PLAYING { MODE_EDITING } else { MODE_PLAYING }
-        w = with_world(w, w.player, w.walls, w.monsters, w.sentinels,
-                       w.camera, w.tuning, new_mode, w.editor)
+        w = World { ...w, frame: w.frame + 1, mode: new_mode }
     }
     // F1 (raylib keycode 290) toggles the cone overlay + shadow mesh so the
     // user can confirm where the player actually is when lighting obscures it.
@@ -1931,14 +1904,11 @@ fn maybe_toggle_mode(world) {
     if r/is_key_pressed(KEY_F1) {
         let ed = w.editor
         let new_ed = Editor {
-            tool: ed.tool, drag_start: ed.drag_start,
-            selected_kind: ed.selected_kind, selected_index: ed.selected_index,
+            ...ed,
             status_text: if ed.lighting_enabled { "lighting off" } else { "lighting on" },
-            tool_slot: ed.tool_slot,
             lighting_enabled: !ed.lighting_enabled
         }
-        w = with_world(w, w.player, w.walls, w.monsters, w.sentinels,
-                       w.camera, w.tuning, w.mode, new_ed)
+        w = World { ...w, frame: w.frame + 1, editor: new_ed }
     }
     // F2 toggles the FPS cap. 60 (capped) <-> 0 (uncapped in raylib).
     let KEY_F2 = 291
@@ -1965,19 +1935,11 @@ fn game_loop(world, shader_ctx, ui_bufs, max_frames) {
         let world_after = if next.mode == MODE_EDITING {
             let ui = render_editor(next, shader_ctx, ui_bufs)
             // Apply any save/load/tuning updates the UI produced this frame.
-            let w1 = with_world(next, next.player, next.walls, next.monsters, next.sentinels,
-                                next.camera, ui.new_tuning, next.mode, next.editor)
+            let w1 = World { ...next, frame: next.frame + 1, tuning: ui.new_tuning }
             let w2 = if ui.save {
                 let msg = save_level(w1)
-                let ed = Editor {
-                    tool: w1.editor.tool, drag_start: w1.editor.drag_start,
-                    selected_kind: w1.editor.selected_kind,
-                    selected_index: w1.editor.selected_index,
-                    lighting_enabled: w1.editor.lighting_enabled, status_text: msg,
-                    tool_slot: w1.editor.tool_slot
-                }
-                with_world(w1, w1.player, w1.walls, w1.monsters, w1.sentinels,
-                           w1.camera, w1.tuning, w1.mode, ed)
+                let ed = Editor { ...w1.editor, status_text: msg }
+                World { ...w1, frame: w1.frame + 1, editor: ed }
             } else { w1 }
             if ui.load { load_level(w2) } else { w2 }
         } else {
@@ -2005,8 +1967,15 @@ fn startup_world() {
         match result {
             Result.Ok { value } => {
                 let data = deserialize_level(value)
-                with_world(base, base.player, data.walls, data.monsters, data.sentinels,
-                           v/ZERO, base.tuning, MODE_PLAYING, base.editor)
+                World {
+                    ...base,
+                    frame: base.frame + 1,
+                    walls: data.walls,
+                    monsters: data.monsters,
+                    sentinels: data.sentinels,
+                    camera: v/ZERO,
+                    mode: MODE_PLAYING
+                }
             },
             Result.Err { error } => base
         }
@@ -2024,6 +1993,6 @@ fn main() {
     let final_world = game_loop(initial, shader_ctx, ui_bufs, 0 - 1)
 
     r/close_window()
-    println("exited after frame " ++ to-string(final_world.frame))
+    println("exited after frame ${final_world.frame}")
     0
 }

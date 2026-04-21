@@ -36,9 +36,7 @@ fn main() {
     let sprite_screen = game/world_to_screen(s.pos, camera)
 
     let world = game/initial_world()
-    let custom_world = game/with_world(world, world.player, world.walls,
-                                       world.monsters, [s], camera, world.tuning,
-                                       world.mode, world.editor)
+    let custom_world = game/World { ...world, sentinels: [s], camera: camera }
     let lights = game/sentinel_screen_lights(custom_world)
     let light = lights[0]
     println("sprite screen=(" ++ to-string(sprite_screen.x) ++ "," ++ to-string(sprite_screen.y) ++ ")")

@@ -143,6 +143,7 @@ fn spawn_bottom_hud(mut commands: Commands, theme: Res<Theme>, speed: Res<SimSpe
                     TextFont { font_size: 13.0, ..default() },
                     TextColor(theme.ink),
                     HudTimeText,
+                    crate::bridge::Mono,
                 ));
             });
 
@@ -202,12 +203,14 @@ fn spawn_bottom_hud(mut commands: Commands, theme: Res<Theme>, speed: Res<SimSpe
                     TextFont { font_size: 11.0, ..default() },
                     TextColor(theme.ink_soft),
                     HudPktCountText,
+                    crate::bridge::Mono,
                 ));
                 p.spawn((
                     Text::new("0 done"),
                     TextFont { font_size: 11.0, ..default() },
                     TextColor(theme.ink_soft),
                     HudDoneCountText,
+                    crate::bridge::Mono,
                 ));
             });
         });

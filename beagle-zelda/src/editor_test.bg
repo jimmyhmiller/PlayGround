@@ -14,20 +14,17 @@ fn main() {
     let initial0 = game/initial_world()
     let ui_bufs = game/alloc_ui_buffers(initial0.tuning)
     // Force-edit mode for this run.
-    let initial = game/with_world(initial0, initial0.player, initial0.walls,
-                                  initial0.monsters, initial0.sentinels,
-                                  initial0.camera, initial0.tuning,
-                                  game/MODE_EDITING, initial0.editor)
+    let initial = game/World { ...initial0, mode: game/MODE_EDITING }
     let final = game/game_loop(initial, shader_ctx, ui_bufs, 60)
     r/close_window()
-    println("editor test reached frame " ++ to-string(final.frame))
-    println("walls: " ++ to-string(length(final.walls)))
+    println("editor test reached frame ${final.frame}")
+    println("walls: ${length(final.walls)}")
 
     // Round-trip serialization.
     let text = game/serialize_level(final)
     let reload = game/deserialize_level(text)
-    println("round-trip walls: " ++ to-string(length(reload.walls)))
-    println("round-trip monsters: " ++ to-string(length(reload.monsters)))
-    println("round-trip sentinels: " ++ to-string(length(reload.sentinels)))
+    println("round-trip walls: ${length(reload.walls)}")
+    println("round-trip monsters: ${length(reload.monsters)}")
+    println("round-trip sentinels: ${length(reload.sentinels)}")
     0
 }

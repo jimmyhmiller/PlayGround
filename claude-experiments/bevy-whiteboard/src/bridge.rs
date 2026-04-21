@@ -21,9 +21,9 @@ impl Plugin for BridgePlugin {
             .init_resource::<EdgeVisualState>()
             .add_systems(
                 Startup,
-                (enable_system_font_fallback, load_unicode_font, load_bold_font).chain(),
+                (enable_system_font_fallback, load_unicode_font, load_bold_font, load_mono_font).chain(),
             )
-            .add_systems(Update, (apply_unicode_font_to_text, apply_bold_font).chain())
+            .add_systems(Update, (apply_unicode_font_to_text, apply_bold_font, apply_mono_font).chain())
             .add_systems(
                 Update,
                 (
@@ -246,6 +246,50 @@ pub struct BoldFont(pub Handle<bevy::text::Font>);
 /// at spawn time. The per-frame applier handles the rest.
 #[derive(Component)]
 pub struct Bold;
+
+/// Marker: this text entity wants the monospace face. Live numeric
+/// readouts (counts, durations, rates) use `Mono` so their width
+/// doesn't jitter as digits change. The per-frame
+/// [`apply_mono_font`] system stamps the mono font onto matching
+/// text widgets. Falls back silently if the font didn't load.
+#[derive(Component)]
+pub struct Mono;
+
+/// Handle to the loaded monospace font. Default = unloaded.
+#[derive(Resource, Default)]
+pub struct MonoFont(pub Handle<bevy::text::Font>);
+
+fn load_mono_font(mut fonts: ResMut<Assets<bevy::text::Font>>, mut commands: Commands) {
+    // Probe order: bundled first (if we ever ship one), then the
+    // well-known system monos. First hit wins.
+    const CANDIDATES: &[&str] = &[
+        "assets/fonts/JetBrainsMono-Regular.ttf",
+        "/System/Library/Fonts/Menlo.ttc",
+        "/System/Library/Fonts/SFNSMono.ttf",
+        "/System/Library/Fonts/Monaco.ttf",
+        "/System/Library/Fonts/Courier.ttc",
+    ];
+    for path in CANDIDATES {
+        if let Ok(bytes) = std::fs::read(path) {
+            if let Ok(font) = bevy::text::Font::try_from_bytes(bytes) {
+                commands.insert_resource(MonoFont(fonts.add(font)));
+                return;
+            }
+        }
+    }
+    commands.insert_resource(MonoFont::default());
+}
+
+fn apply_mono_font(mono: Res<MonoFont>, mut q: Query<&mut TextFont, With<Mono>>) {
+    if mono.0 == Handle::default() {
+        return;
+    }
+    for mut tf in q.iter_mut() {
+        if tf.font != mono.0 {
+            tf.font = mono.0.clone();
+        }
+    }
+}
 
 fn load_bold_font(
     mut fonts: ResMut<Assets<bevy::text::Font>>,

@@ -14,18 +14,62 @@ pub struct PalettePlugin;
 
 impl Plugin for PalettePlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, spawn_palette).add_systems(
-            Update,
-            (
-                handle_tool_buttons,
-                handle_color_buttons,
-                handle_action_buttons,
-                sync_active_color_to_theme,
-                re_skin_palette,
-                sync_tool_button_visuals,
-                sync_color_button_visuals,
-            ),
-        );
+        app.init_resource::<PaletteDrag>()
+            .add_systems(Startup, spawn_palette)
+            .add_systems(
+                Update,
+                (
+                    handle_tool_buttons,
+                    handle_color_buttons,
+                    handle_action_buttons,
+                    sync_active_color_to_theme,
+                    re_skin_palette,
+                    sync_tool_button_visuals,
+                    sync_color_button_visuals,
+                    sync_user_preset_buttons,
+                    start_primitive_drag,
+                    update_primitive_drag_ghost,
+                    end_primitive_drag,
+                ),
+            );
+    }
+}
+
+/// Active drag of a primitive tile from the palette. Ghost follows
+/// the cursor; release over an opened node appends the primitive.
+#[derive(Resource, Default)]
+pub struct PaletteDrag {
+    pub active: Option<crate::tool::PrimitiveKind>,
+    pub ghost: Option<Entity>,
+}
+
+/// Marker on the Node that holds the user-presets buttons.
+/// `sync_user_preset_buttons` despawns and respawns its children
+/// whenever `PresetLibrary` changes so the section reflects the
+/// latest library state.
+#[derive(Component)]
+pub struct UserPresetsContainer;
+
+fn sync_user_preset_buttons(
+    library: Res<crate::ui::PresetLibrary>,
+    theme: Res<Theme>,
+    containers: Query<(Entity, Option<&Children>), With<UserPresetsContainer>>,
+    mut commands: Commands,
+) {
+    if !library.is_changed() {
+        return;
+    }
+    for (entity, children) in containers.iter() {
+        if let Some(children) = children {
+            for c in children.iter() {
+                commands.entity(c).despawn();
+            }
+        }
+        commands.entity(entity).with_children(|c| {
+            for (i, preset) in library.user.iter().enumerate() {
+                spawn_tool_button(c, Tool::UserPreset(i), &preset.label, &theme);
+            }
+        });
     }
 }
 
@@ -199,6 +243,42 @@ fn spawn_palette(mut commands: Commands, theme: Res<Theme>) {
                 (Tool::Steps, "Steps"),
             ]);
 
+            // Step library — primitive instructions. Clicking a
+            // tile, then clicking inside an opened node, appends
+            // that primitive to the node's program.
+            section(body, "Primitives", &theme);
+            body.spawn(Node {
+                width: Val::Percent(100.0),
+                display: Display::Grid,
+                grid_template_columns: vec![
+                    RepeatedGridTrack::flex(1, 1.0),
+                    RepeatedGridTrack::flex(1, 1.0),
+                ],
+                column_gap: Val::Px(4.0),
+                row_gap: Val::Px(4.0),
+                ..default()
+            })
+            .with_children(|g| {
+                for kind in crate::tool::PrimitiveKind::all() {
+                    spawn_tool_button(g, Tool::Primitive(kind), kind.label(), &theme);
+                }
+            });
+
+            // "My Presets" — dynamic section, rebuilt by
+            // `sync_user_preset_buttons` whenever PresetLibrary
+            // changes. We spawn the heading + empty container here
+            // so the layout is stable from frame 0.
+            section(body, "My Presets", &theme);
+            body.spawn((
+                Node {
+                    width: Val::Percent(100.0),
+                    flex_direction: FlexDirection::Column,
+                    row_gap: Val::Px(4.0),
+                    ..default()
+                },
+                UserPresetsContainer,
+            ));
+
             section(body, "Terminals", &theme);
             tool_group(body, &theme, &[
                 (Tool::Sink, "Sink"),
@@ -338,6 +418,8 @@ fn tool_glyph(tool: Tool) -> &'static str {
         Tool::Sink => "▽",
         Tool::Probe => "◎",
         Tool::Steps => "≡",
+        Tool::UserPreset(_) => "★",
+        Tool::Primitive(_) => "∙",
     }
 }
 
@@ -429,6 +511,13 @@ fn handle_tool_buttons(
 ) {
     for (interaction, btn) in q.iter_mut() {
         if *interaction == Interaction::Pressed {
+            // Primitive tiles are drag-only — pressing them starts
+            // a drag via `start_primitive_drag`, not a tool switch.
+            // Leaves the user's existing tool active so they can
+            // return to, e.g., Select after dropping.
+            if matches!(btn.0, Tool::Primitive(_)) {
+                continue;
+            }
             active.0 = btn.0;
         }
     }
@@ -583,4 +672,134 @@ fn color_approx_eq(a: Color, b: Color) -> bool {
 pub fn pointer_over_ui(ui: &Query<&Interaction>) -> bool {
     ui.iter()
         .any(|i| matches!(i, Interaction::Hovered | Interaction::Pressed))
+}
+
+/// Marker component on the floating "ghost" tile entity spawned
+/// while a palette primitive is being dragged. Its position is
+/// updated each frame to track the cursor.
+#[derive(Component)]
+struct PaletteGhost;
+
+/// Start a palette drag when the user presses on a primitive tile.
+/// Suppresses `handle_tool_buttons` so the active tool doesn't
+/// change — drag is a one-shot drop gesture, not a tool selector.
+fn start_primitive_drag(
+    interactions: Query<(&Interaction, &ToolButton), Changed<Interaction>>,
+    windows: Query<&Window>,
+    theme: Res<Theme>,
+    mut drag: ResMut<PaletteDrag>,
+    mut commands: Commands,
+) {
+    for (interaction, btn) in interactions.iter() {
+        if *interaction != Interaction::Pressed {
+            continue;
+        }
+        let Tool::Primitive(kind) = btn.0 else { continue };
+        if drag.active.is_some() {
+            continue;
+        }
+        drag.active = Some(kind);
+        let Ok(win) = windows.single() else { continue };
+        let cursor = win.cursor_position().unwrap_or_default();
+        let ghost = commands
+            .spawn((
+                Node {
+                    position_type: PositionType::Absolute,
+                    left: Val::Px(cursor.x - 40.0),
+                    top: Val::Px(cursor.y - 12.0),
+                    padding: UiRect::axes(Val::Px(10.0), Val::Px(5.0)),
+                    border: UiRect::all(Val::Px(1.5)),
+                    border_radius: BorderRadius::all(Val::Px(4.0)),
+                    ..default()
+                },
+                BackgroundColor(theme.paper),
+                BorderColor::all(theme.ink),
+                PaletteGhost,
+                // High z so ghost floats above the palette itself.
+                ZIndex(1000),
+            ))
+            .with_children(|g| {
+                g.spawn((
+                    Text::new(kind.label().to_string()),
+                    TextFont { font_size: 11.0, ..default() },
+                    TextColor(theme.ink),
+                    Bold,
+                ));
+            })
+            .id();
+        drag.ghost = Some(ghost);
+    }
+}
+
+/// Each frame while a drag is active, move the ghost to follow
+/// the cursor.
+fn update_primitive_drag_ghost(
+    drag: Res<PaletteDrag>,
+    windows: Query<&Window>,
+    mut ghosts: Query<&mut Node, With<PaletteGhost>>,
+) {
+    if drag.active.is_none() {
+        return;
+    }
+    let Some(entity) = drag.ghost else { return };
+    let Ok(win) = windows.single() else { return };
+    let Some(cursor) = win.cursor_position() else { return };
+    if let Ok(mut node) = ghosts.get_mut(entity) {
+        node.left = Val::Px(cursor.x - 40.0);
+        node.top = Val::Px(cursor.y - 12.0);
+    }
+}
+
+/// On mouseup during a palette drag, drop the primitive onto the
+/// opened node under the cursor (or cancel if not over one).
+/// Always despawns the ghost and clears drag state.
+fn end_primitive_drag(
+    mouse: Res<ButtonInput<MouseButton>>,
+    windows: Query<&Window>,
+    cams: Query<
+        (&Camera, &GlobalTransform),
+        With<crate::camera::MainCamera>,
+    >,
+    nodes_q: Query<(
+        &Transform,
+        &crate::nodes::SimNode,
+        &crate::bridge::SimNodeRef,
+        Option<&crate::nodes::Opened>,
+    )>,
+    active_color: Res<ActiveColor>,
+    mut drag: ResMut<PaletteDrag>,
+    mut sim_res: ResMut<crate::bridge::SimResource>,
+    mut commands: Commands,
+) {
+    if !mouse.just_released(MouseButton::Left) {
+        return;
+    }
+    let Some(kind) = drag.active.take() else { return };
+    if let Some(g) = drag.ghost.take() {
+        commands.entity(g).despawn();
+    }
+
+    // Translate cursor into world space and look for an opened-ish
+    // node under it. If found, append the primitive.
+    let Ok(win) = windows.single() else { return };
+    let Some(cursor) = win.cursor_position() else { return };
+    let Ok((cam, cam_tf)) = cams.single() else { return };
+    let Ok(world) = cam.viewport_to_world_2d(cam_tf, cursor) else { return };
+    let sc = crate::bridge::bevy_to_sim_color(active_color.0);
+    for (tf, sn, nref, opened) in nodes_q.iter() {
+        let half = sn.size / 2.0;
+        let c = tf.translation.truncate();
+        if (world.x - c.x).abs() > half.x || (world.y - c.y).abs() > half.y {
+            continue;
+        }
+        let is_openable =
+            sn.kind == crate::nodes::NodeKind::Steps || opened.is_some();
+        if !is_openable {
+            return;
+        }
+        sim_res
+            .0
+            .push_instruction(nref.0, kind.default_instruction(sc));
+        return;
+    }
 }

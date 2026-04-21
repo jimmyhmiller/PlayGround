@@ -126,7 +126,7 @@ fn pick_nodes_for_edge(
                     .entity_to_node
                     .get(&entity)
                     .and_then(|id| sim_res.0.nodes.get(id))
-                    .map(|n| n.step_rows.len())
+                    .map(|n| n.program.len())
                     .unwrap_or(0);
                 crate::nodes::steps_row_at(world, hit_tf.translation.truncate(), row_count)
             } else {
@@ -208,16 +208,16 @@ fn resolve_edge_kind(
     maps: &EntityMaps,
     sim_res: &SimResource,
 ) -> (Entity, Entity, bool) {
-    use crate::sim::Step;
+    use crate::sim::Instruction;
     let Some(&a_id) = maps.entity_to_node.get(&a) else { return (a, b, false) };
     let Some(&b_id) = maps.entity_to_node.get(&b) else { return (a, b, false) };
     let Some(a_node) = sim_res.0.nodes.get(&a_id) else { return (a, b, false) };
     let Some(b_node) = sim_res.0.nodes.get(&b_id) else { return (a, b, false) };
     let a_is_pull = a_node.is_pulling() && !a_node.accepts_push();
     let b_is_source = b_node
-        .steps
+        .program
         .iter()
-        .any(|s| matches!(s, Step::Buffer { .. } | Step::ForwardOut { .. } | Step::EmitAtRate { .. }));
+        .any(|s| matches!(s, Instruction::Buffer { .. } | Instruction::Send | Instruction::EmitAtRate { .. }));
     if a_is_pull && b_is_source {
         (b, a, true)
     } else {
@@ -296,6 +296,7 @@ fn place_probe_on_click(
         },
         TextColor(Color::srgb(0.1, 0.1, 0.15)),
         Transform::from_xyz(0.0, 0.0, 1.0),
+        crate::bridge::Mono,
     ));
 }
 
@@ -357,7 +358,7 @@ fn draw_edges_gizmos(
             from_row.and_then(|i| {
                 let row_count = a_nref
                     .and_then(|r| sim_res.0.nodes.get(&r.0))
-                    .map(|n| n.step_rows.len())
+                    .map(|n| n.program.len())
                     .unwrap_or(0);
                 (a_sn.kind == crate::nodes::NodeKind::Steps && row_count > 0)
                     .then(|| crate::nodes::steps_row_center_y(row_count, i))
@@ -409,7 +410,7 @@ fn draw_edges_gizmos(
                         .0
                         .nodes
                         .get(&nref.0)
-                        .map(|n| n.step_rows.len())
+                        .map(|n| n.program.len())
                         .unwrap_or(0);
                     let dy = crate::nodes::steps_row_center_y(row_count, row);
                     Vec2::new(center.x + sn.size.x / 2.0, center.y + dy)
@@ -662,12 +663,15 @@ fn format_node_stats(node: &SimNodeState) -> String {
             } else {
                 0
             };
+            let row_str = node
+                .cursor
+                .as_ref()
+                .and_then(|p| p.first())
+                .map(|i| i.to_string())
+                .unwrap_or_else(|| "-".into());
             format!(
                 "sent:{} recv:{} row:{} rtt:{}ns",
-                node.sent,
-                node.received,
-                node.current_row.map(|i| i.to_string()).unwrap_or_else(|| "-".into()),
-                rtt,
+                node.sent, node.received, row_str, rtt,
             )
         }
     }

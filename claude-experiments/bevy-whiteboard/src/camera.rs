@@ -41,18 +41,35 @@ fn pan_camera(
 fn zoom_camera(
     mut wheel_evr: MessageReader<MouseWheel>,
     mut q: Query<&mut Projection, With<MainCamera>>,
-    panes: Query<&Interaction, With<crate::ui::ScrollPane>>,
+    panes: Query<
+        (&bevy::ui::ComputedNode, &bevy::ui::UiGlobalTransform),
+        With<crate::ui::ScrollPane>,
+    >,
+    windows: Query<&Window>,
 ) {
-    // If the pointer is over a scrollable UI panel, the wheel is
-    // theirs — let `ui::scroll_panes_on_wheel` consume it and don't
-    // zoom the canvas. Checks hover/pressed so grabbing the
-    // scrollbar still forwards the event correctly.
-    let over_pane = panes.iter().any(|i| {
-        matches!(i, Interaction::Hovered | Interaction::Pressed)
-    });
-    if over_pane {
-        wheel_evr.clear();
-        return;
+    // Wheel-over-panel should scroll the panel, not zoom the canvas.
+    // We check cursor-in-bounds rather than Interaction because hovering
+    // a button *inside* the panel leaves the panel itself
+    // Interaction::None, which would let the event fall through to zoom.
+    if let (Ok(win), Some(cursor_logical)) = (
+        windows.single(),
+        windows.single().ok().and_then(|w| w.cursor_position()),
+    ) {
+        let cursor_px = cursor_logical * win.scale_factor();
+        let over_pane = panes.iter().any(|(computed, xform)| {
+            let half = computed.size * 0.5;
+            let center = xform.translation;
+            let min = center - half;
+            let max = center + half;
+            cursor_px.x >= min.x
+                && cursor_px.x <= max.x
+                && cursor_px.y >= min.y
+                && cursor_px.y <= max.y
+        });
+        if over_pane {
+            wheel_evr.clear();
+            return;
+        }
     }
     let Ok(mut proj) = q.single_mut() else { return };
     let Projection::Orthographic(ortho) = proj.as_mut() else { return };

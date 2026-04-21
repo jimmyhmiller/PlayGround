@@ -19,6 +19,20 @@ impl Plugin for NodesPlugin {
         app.init_resource::<DragState>()
             .init_resource::<EditState>()
             .init_resource::<StepsRowActivity>()
+            .init_resource::<RowDragState>()
+            .init_resource::<SelectedStep>()
+            .add_systems(
+                Update,
+                (
+                    start_row_drag,
+                    end_row_drag,
+                    sync_step_row_transforms,
+                    draw_selected_step_outline,
+                    delete_selected_step,
+                    clear_selected_step_on_canvas_click,
+                )
+                    .chain(),
+            )
             .add_systems(
                 Update,
                 (
@@ -44,25 +58,26 @@ impl Plugin for NodesPlugin {
             .add_systems(
                 Update,
                 (
-                    rebuild_steps_on_row_change,
+                    rebuild_node_rendering,
                     record_steps_row_activity,
                     update_steps_row_highlight,
                     draw_steps_loop_arc,
                     spawn_steps_loop_dots,
                     animate_steps_loop_dots,
+                    toggle_opened_on_double_click,
                 )
                     .chain(),
             );
     }
 }
 
-/// When a Steps node's `step_rows` length no longer matches its
-/// visual row count (rows added or removed since last frame),
-/// despawn every child of the entity and rebuild the visuals at the
-/// new size. Cheap because it only runs on the (rare) frame after a
-/// row edit.
+/// Reconcile every node's visual with its current (opened, row_count)
+/// state. Steps containers are effectively always "opened"; every
+/// other kind renders as the small kind-glyph box unless it has the
+/// [`Opened`] marker. On state change, despawn children, resize the
+/// body mesh, and respawn children in the appropriate style.
 #[allow(clippy::too_many_arguments)]
-fn rebuild_steps_on_row_change(
+fn rebuild_node_rendering(
     sim_res: Res<crate::bridge::SimResource>,
     theme: Res<Theme>,
     mut nodes: Query<(
@@ -70,63 +85,494 @@ fn rebuild_steps_on_row_change(
         &mut SimNode,
         &crate::bridge::SimNodeRef,
         Option<&Children>,
+        Option<&Opened>,
+        Option<&RenderedAs>,
     )>,
-    row_q: Query<&StepsRow>,
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<ColorMaterial>>,
 ) {
-    for (entity, mut sn, nref, children) in nodes.iter_mut() {
-        if sn.kind != NodeKind::Steps {
-            continue;
-        }
+    for (entity, mut sn, nref, children, opened, rendered) in nodes.iter_mut() {
         let Some(node) = sim_res.0.nodes.get(&nref.0) else { continue };
-        let want = node.step_rows.len();
-        let have = children
-            .map(|c| c.iter().filter(|e| row_q.get(*e).is_ok()).count())
-            .unwrap_or(0);
-        if want == have {
+        // Every Steps container is always opened; any other kind
+        // opens on explicit double-click via the [`Opened`] marker.
+        let is_open = sn.kind == NodeKind::Steps || opened.is_some();
+        let row_count = if is_open { node.program.len() } else { 0 };
+        let want = (is_open, row_count);
+        let have = rendered.map(|r| (r.opened, r.row_count));
+        if have == Some(want) {
             continue;
         }
-        // Tear down all children and rebuild at the new size.
+        // Tear down all children and rebuild in the new style.
         if let Some(children) = children {
             for child in children.iter() {
                 commands.entity(child).despawn();
             }
         }
-        let new_size = steps_container_size(want.max(1));
+        let new_size = if is_open {
+            steps_container_size(row_count.max(1))
+        } else {
+            sn.kind.size()
+        };
         sn.size = new_size;
         commands
             .entity(entity)
             .insert(Mesh2d(meshes.add(Rectangle::new(new_size.x, new_size.y))))
-            .insert(MeshMaterial2d(materials.add(sn.kind.body_color(&theme))));
-        let rows_snapshot: Vec<(usize, String)> = node
-            .step_rows
-            .iter()
-            .enumerate()
-            .map(|(i, r)| (i, format_step_row(r)))
-            .collect();
-        let color = sn.color;
-        spawn_steps_children(
-            &mut commands,
-            entity,
-            &mut meshes,
-            &mut materials,
-            &theme,
-            color,
-            new_size,
-            &rows_snapshot,
-            nref.0,
-        );
+            .insert(MeshMaterial2d(materials.add(sn.kind.body_color(&theme))))
+            .insert(RenderedAs {
+                opened: is_open,
+                row_count,
+            });
+        if is_open {
+            let rows_snapshot: Vec<(usize, String)> = node
+                .program
+                .iter()
+                .enumerate()
+                .map(|(i, r)| (i, format_step_row(r)))
+                .collect();
+            let color = sn.color;
+            let header = if sn.kind == NodeKind::Steps {
+                "STEPS".to_string()
+            } else {
+                format!("{} · PROGRAM", kind_name(sn.kind).to_uppercase())
+            };
+            spawn_opened_children(
+                &mut commands,
+                entity,
+                &mut meshes,
+                &mut materials,
+                &theme,
+                color,
+                new_size,
+                &rows_snapshot,
+                nref.0,
+                &header,
+            );
+        } else {
+            spawn_closed_children(
+                &mut commands,
+                entity,
+                &mut meshes,
+                &mut materials,
+                &theme,
+                sn.kind,
+                sn.color,
+                new_size,
+            );
+        }
     }
 }
 
-/// Spawn the child entities that make a Steps container render:
-/// data-color dot, ink border, "STEPS" header, one row rectangle per
-/// script row, and the below-node canvas label placeholder. Called
-/// both from initial spawn and from the rebuild system.
+/// On mouse-down over a row of an opened node, pick up that row
+/// for potential reordering. Run BEFORE select-and-drag so a row
+/// pickup suppresses the usual node-drag gesture.
 #[allow(clippy::too_many_arguments)]
-fn spawn_steps_children(
+fn start_row_drag(
+    mouse: Res<ButtonInput<MouseButton>>,
+    active_tool: Res<ActiveTool>,
+    windows: Query<&Window>,
+    cams: Query<(&Camera, &GlobalTransform), With<MainCamera>>,
+    ui: Query<&Interaction>,
+    nodes_q: Query<(Entity, &Transform, &SimNode, &crate::bridge::SimNodeRef, Option<&Opened>)>,
+    sim_res: Res<crate::bridge::SimResource>,
+    mut drag: ResMut<RowDragState>,
+    mut selected: ResMut<SelectedStep>,
+) {
+    if !mouse.just_pressed(MouseButton::Left) {
+        return;
+    }
+    if active_tool.0 != Tool::Select {
+        return;
+    }
+    if pointer_over_ui(&ui) {
+        return;
+    }
+    let Ok(win) = windows.single() else { return };
+    let Some(cursor) = win.cursor_position() else { return };
+    let Ok((cam, cam_tf)) = cams.single() else { return };
+    let Ok(world) = cam.viewport_to_world_2d(cam_tf, cursor) else { return };
+    for (entity, tf, sn, nref, opened) in nodes_q.iter() {
+        let center = tf.translation.truncate();
+        let half = sn.size / 2.0;
+        if (world.x - center.x).abs() > half.x || (world.y - center.y).abs() > half.y {
+            continue;
+        }
+        let is_open = sn.kind == NodeKind::Steps || opened.is_some();
+        if !is_open {
+            return;
+        }
+        let row_count = sim_res
+            .0
+            .nodes
+            .get(&nref.0)
+            .map(|n| n.program.len())
+            .unwrap_or(0);
+        if let Some(row) = steps_row_at(world, center, row_count) {
+            drag.source_entity = Some(entity);
+            drag.source_node = nref.0;
+            drag.source_row = row;
+            // Selecting a row and picking it up are the same
+            // gesture — set the selection immediately so the
+            // outline appears on press, not only on release.
+            selected.entity = Some(entity);
+            selected.node = nref.0;
+            selected.row = row;
+        } else {
+            // Clicked the node header/padding but not a row —
+            // clear row selection, the node-drag will take over.
+            selected.entity = None;
+        }
+        return;
+    }
+}
+
+/// Per-frame reconciliation of step-row local transforms. Writes
+/// each `StepsRow` child's Y to `steps_row_center_y(row_count, i)`,
+/// then — if a row is being dragged — overrides the dragged row's
+/// Y to track the cursor. This is what makes reorder *feel*
+/// reordery: the row you grabbed follows your finger; everything
+/// else snaps to its natural slot on drop.
+#[allow(clippy::too_many_arguments)]
+fn sync_step_row_transforms(
+    sim_res: Res<crate::bridge::SimResource>,
+    nodes_q: Query<(Entity, &Transform, &crate::bridge::SimNodeRef, &Children)>,
+    mut rows: Query<(&StepsRow, &mut Transform), Without<crate::bridge::SimNodeRef>>,
+    drag: Res<RowDragState>,
+    windows: Query<&Window>,
+    cams: Query<(&Camera, &GlobalTransform), With<MainCamera>>,
+) {
+    let cursor_world = windows
+        .single()
+        .ok()
+        .and_then(|w| w.cursor_position())
+        .and_then(|c| {
+            cams.single()
+                .ok()
+                .and_then(|(cam, cam_tf)| cam.viewport_to_world_2d(cam_tf, c).ok())
+        });
+    for (entity, node_tf, nref, children) in nodes_q.iter() {
+        let row_count = sim_res
+            .0
+            .nodes
+            .get(&nref.0)
+            .map(|n| n.program.len().max(1))
+            .unwrap_or(1);
+        let node_center = node_tf.translation.truncate();
+        let dragging_this =
+            drag.source_entity == Some(entity) && cursor_world.is_some();
+        // Hover target: which row the cursor is currently over. If
+        // the user hasn't moved off the source row, hover = None
+        // and nothing previews.
+        let hover_target = if dragging_this {
+            let cursor = cursor_world.unwrap();
+            steps_row_at(cursor, node_center, row_count)
+                .filter(|t| *t != drag.source_row)
+        } else {
+            None
+        };
+        for child in children.iter() {
+            let Ok((row, mut tf)) = rows.get_mut(child) else { continue };
+            if dragging_this && row.index == drag.source_row {
+                // Dragged row follows the cursor Y within the
+                // container. Clamped + z-lifted so it draws above
+                // the siblings.
+                let cursor_y = cursor_world.unwrap().y;
+                let local_y = cursor_y - node_center.y;
+                let max = steps_row_center_y(row_count, 0).abs();
+                tf.translation.y = local_y.clamp(-max, max);
+                tf.translation.z = 0.5;
+            } else if let Some(target) = hover_target {
+                // Preview the swap: the row sitting at `target`
+                // would move to `source_row`'s slot after drop.
+                // Everyone else keeps their index.
+                let displayed_index = if row.index == target {
+                    drag.source_row
+                } else {
+                    row.index
+                };
+                tf.translation.y = steps_row_center_y(row_count, displayed_index);
+                tf.translation.z = 0.15;
+            } else {
+                tf.translation.y = steps_row_center_y(row_count, row.index);
+                tf.translation.z = 0.15;
+            }
+        }
+    }
+}
+
+/// Each frame, if a step is selected, draw a gizmo outline around
+/// its row rectangle. Tracks the node's current transform + size so
+/// the outline follows when the user drags the container around.
+fn draw_selected_step_outline(
+    mut gizmos: Gizmos,
+    theme: Res<Theme>,
+    selected: Res<SelectedStep>,
+    sim_res: Res<crate::bridge::SimResource>,
+    nodes_q: Query<(Entity, &Transform, &SimNode, &crate::bridge::SimNodeRef)>,
+) {
+    let Some(entity) = selected.entity else { return };
+    let Ok((_e, tf, sn, nref)) = nodes_q.get(entity) else { return };
+    if sn.kind != NodeKind::Steps {
+        // Non-Steps nodes can only be selected if opened; still OK.
+    }
+    let row_count = sim_res
+        .0
+        .nodes
+        .get(&nref.0)
+        .map(|n| n.program.len().max(1))
+        .unwrap_or(1);
+    if selected.row >= row_count {
+        return;
+    }
+    let center = tf.translation.truncate();
+    let cy = center.y + steps_row_center_y(row_count, selected.row);
+    let w = sn.size.x - 10.0;
+    let h = STEPS_ROW_HEIGHT + 2.0;
+    let half = Vec2::new(w / 2.0, h / 2.0);
+    let corners = [
+        Vec2::new(center.x - half.x, cy - half.y),
+        Vec2::new(center.x + half.x, cy - half.y),
+        Vec2::new(center.x + half.x, cy + half.y),
+        Vec2::new(center.x - half.x, cy + half.y),
+    ];
+    let color = theme.accent;
+    for i in 0..4 {
+        gizmos.line_2d(corners[i], corners[(i + 1) % 4], color);
+    }
+}
+
+/// Delete/Backspace removes the selected step row if there is one.
+/// Otherwise the key falls through to `delete_selected` (node delete).
+fn delete_selected_step(
+    keys: Res<ButtonInput<KeyCode>>,
+    edit: Res<EditState>,
+    mut selected: ResMut<SelectedStep>,
+    mut sim_res: ResMut<SimResource>,
+    mut maps: ResMut<EntityMaps>,
+    mut commands: Commands,
+) {
+    if edit.is_editing() {
+        return;
+    }
+    if !(keys.just_pressed(KeyCode::Delete) || keys.just_pressed(KeyCode::Backspace)) {
+        return;
+    }
+    let Some(_entity) = selected.entity else { return };
+    let removed = sim_res.0.remove_step_row(selected.node, selected.row);
+    for eid in removed {
+        if let Some(edge_entity) = maps.edge_to_entity.remove(&eid) {
+            commands.entity(edge_entity).despawn();
+            maps.entity_to_edge.remove(&edge_entity);
+        }
+    }
+    selected.entity = None;
+}
+
+/// If the user clicks blank canvas (no node, no row), clear the
+/// step selection. Mirrors how clicking blank canvas clears node
+/// selection in `select_and_begin_drag`.
+fn clear_selected_step_on_canvas_click(
+    mouse: Res<ButtonInput<MouseButton>>,
+    windows: Query<&Window>,
+    cams: Query<(&Camera, &GlobalTransform), With<MainCamera>>,
+    nodes_q: Query<(&Transform, &SimNode)>,
+    ui: Query<&Interaction>,
+    mut selected: ResMut<SelectedStep>,
+) {
+    if !mouse.just_pressed(MouseButton::Left) {
+        return;
+    }
+    if pointer_over_ui(&ui) {
+        return;
+    }
+    if selected.entity.is_none() {
+        return;
+    }
+    let Ok(win) = windows.single() else { return };
+    let Some(cursor) = win.cursor_position() else { return };
+    let Ok((cam, cam_tf)) = cams.single() else { return };
+    let Ok(world) = cam.viewport_to_world_2d(cam_tf, cursor) else { return };
+    let any_hit = nodes_q.iter().any(|(tf, sn)| {
+        let half = sn.size / 2.0;
+        let c = tf.translation.truncate();
+        (world.x - c.x).abs() <= half.x && (world.y - c.y).abs() <= half.y
+    });
+    if !any_hit {
+        selected.entity = None;
+    }
+}
+
+/// On mouse release, if a row-drag is active, compute the target
+/// row under the cursor and swap if different. Clears drag state
+/// either way.
+#[allow(clippy::too_many_arguments)]
+fn end_row_drag(
+    mouse: Res<ButtonInput<MouseButton>>,
+    windows: Query<&Window>,
+    cams: Query<(&Camera, &GlobalTransform), With<MainCamera>>,
+    nodes_q: Query<(Entity, &Transform, &SimNode, &crate::bridge::SimNodeRef)>,
+    mut sim_res: ResMut<crate::bridge::SimResource>,
+    mut drag: ResMut<RowDragState>,
+    mut selected: ResMut<SelectedStep>,
+) {
+    if !mouse.just_released(MouseButton::Left) {
+        return;
+    }
+    let Some(source_entity) = drag.source_entity.take() else { return };
+    let source_row = drag.source_row;
+    let source_node = drag.source_node;
+    let Ok(win) = windows.single() else { return };
+    let Some(cursor) = win.cursor_position() else { return };
+    let Ok((cam, cam_tf)) = cams.single() else { return };
+    let Ok(world) = cam.viewport_to_world_2d(cam_tf, cursor) else { return };
+    for (entity, tf, sn, nref) in nodes_q.iter() {
+        if entity != source_entity {
+            continue;
+        }
+        let center = tf.translation.truncate();
+        let half = sn.size / 2.0;
+        if (world.x - center.x).abs() > half.x || (world.y - center.y).abs() > half.y {
+            return;
+        }
+        let row_count = sim_res
+            .0
+            .nodes
+            .get(&nref.0)
+            .map(|n| n.program.len())
+            .unwrap_or(0);
+        if let Some(target_row) = steps_row_at(world, center, row_count) {
+            if target_row != source_row {
+                sim_res.0.swap_step_rows(source_node, source_row, target_row);
+                // The row the user picked up moved to `target_row`.
+                // Keep the selection on the same logical step.
+                if selected.entity == Some(entity) && selected.row == source_row {
+                    selected.row = target_row;
+                }
+            }
+        }
+        return;
+    }
+}
+
+/// Detect a left-click double-click on a node body and toggle its
+/// `Opened` marker. Selection happens via the existing
+/// `select_and_begin_drag`; this just layers the open-toggle onto
+/// the second click. Steps containers are always opened and ignore
+/// this gesture.
+fn toggle_opened_on_double_click(
+    mouse: Res<ButtonInput<MouseButton>>,
+    windows: Query<&Window>,
+    cams: Query<(&Camera, &GlobalTransform), With<MainCamera>>,
+    nodes_q: Query<(Entity, &Transform, &SimNode, Option<&Opened>)>,
+    ui: Query<&Interaction>,
+    mut last_click: Local<Option<(f64, Vec2)>>,
+    time: Res<Time>,
+    mut commands: Commands,
+) {
+    if !mouse.just_pressed(MouseButton::Left) {
+        return;
+    }
+    if pointer_over_ui(&ui) {
+        return;
+    }
+    let Ok(win) = windows.single() else { return };
+    let Some(cursor) = win.cursor_position() else { return };
+    let Ok((cam, cam_tf)) = cams.single() else { return };
+    let Ok(world) = cam.viewport_to_world_2d(cam_tf, cursor) else { return };
+
+    let now = time.elapsed_secs_f64();
+    let is_double = matches!(*last_click, Some((t, p)) if now - t < 0.4 && (p - world).length() < 8.0);
+    *last_click = Some((now, world));
+    if !is_double {
+        return;
+    }
+
+    for (entity, tf, sn, opened) in nodes_q.iter() {
+        if sn.kind == NodeKind::Steps {
+            continue;
+        }
+        let center = tf.translation.truncate();
+        let half = sn.size / 2.0;
+        if (world.x - center.x).abs() > half.x || (world.y - center.y).abs() > half.y {
+            continue;
+        }
+        if opened.is_some() {
+            commands.entity(entity).remove::<Opened>();
+        } else {
+            commands.entity(entity).insert(Opened);
+        }
+        break;
+    }
+}
+
+/// Friendly name for a kind used in the opened-mode header.
+fn kind_name(k: NodeKind) -> &'static str {
+    match k {
+        NodeKind::Generator => "Generator",
+        NodeKind::Client => "Client",
+        NodeKind::Worker => "Worker",
+        NodeKind::Sink => "Sink",
+        NodeKind::Router => "Router",
+        NodeKind::Queue => "Queue",
+        NodeKind::Custom => "Group",
+        NodeKind::Steps => "Steps",
+    }
+}
+
+/// Spawn the visuals for a closed (non-opened, non-Steps) node:
+/// the data-color dot, ink border, kind-letter glyph, and canvas
+/// label below. Mirrors the inline spawn in `spawn_node` so both
+/// paths produce the same visuals.
+#[allow(clippy::too_many_arguments)]
+fn spawn_closed_children(
+    commands: &mut Commands,
+    parent: Entity,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<ColorMaterial>,
+    theme: &Theme,
+    kind: NodeKind,
+    color: Color,
+    size: Vec2,
+) {
+    commands.entity(parent).with_children(|p| {
+        if kind != NodeKind::Router {
+            p.spawn((
+                Mesh2d(meshes.add(Circle::new(5.0))),
+                MeshMaterial2d(materials.add(color)),
+                Transform::from_xyz(size.x / 2.0 - 9.0, size.y / 2.0 - 9.0, 0.2),
+            ));
+        }
+        p.spawn((
+            Mesh2d(meshes.add(Rectangle::new(size.x + 3.0, size.y + 3.0))),
+            MeshMaterial2d(materials.add(theme.ink)),
+            Transform::from_xyz(0.0, 0.0, -0.1),
+            NodeBorderChild,
+        ));
+        p.spawn((
+            Text2d::new(kind_letter(kind)),
+            TextFont { font_size: 18.0, ..default() },
+            TextColor(theme.ink),
+            Transform::from_xyz(0.0, 0.0, 0.3),
+            NodeGlyphText,
+        ));
+        p.spawn((
+            Text2d::new(""),
+            TextFont { font_size: 11.0, ..default() },
+            TextColor(theme.ink_soft),
+            Transform::from_xyz(0.0, -size.y / 2.0 - 12.0, 0.3),
+            NodeCanvasLabel,
+            crate::bridge::Mono,
+        ));
+    });
+}
+
+/// Spawn the child entities that make an *opened* node render as
+/// a vertical stack of step rows. Used by Steps containers (always
+/// opened) and by any other kind when the user has double-clicked
+/// it to crack it open. `header` is the banner text shown at the
+/// top of the container.
+#[allow(clippy::too_many_arguments)]
+fn spawn_opened_children(
     commands: &mut Commands,
     parent: Entity,
     meshes: &mut Assets<Mesh>,
@@ -136,6 +582,7 @@ fn spawn_steps_children(
     size: Vec2,
     rows: &[(usize, String)],
     node_id: crate::sim::NodeId,
+    header: &str,
 ) {
     commands.entity(parent).with_children(|p| {
         p.spawn((
@@ -151,7 +598,7 @@ fn spawn_steps_children(
         ));
         let header_y = size.y / 2.0 - STEPS_HEADER_H / 2.0 - 2.0;
         p.spawn((
-            Text2d::new("STEPS"),
+            Text2d::new(header.to_string()),
             TextFont {
                 font_size: 10.0,
                 ..default()
@@ -253,7 +700,7 @@ fn draw_steps_loop_arc(
             continue;
         }
         let Some(node) = sim_res.0.nodes.get(&nref.0) else { continue };
-        let row_count = node.step_rows.len();
+        let row_count = node.program.len();
         // Need at least 2 rows to have an actual loop-back (a single
         // row visibly jumps from itself to itself — skip to avoid
         // drawing a zero-length arc).
@@ -308,7 +755,7 @@ fn spawn_steps_loop_dots(
             .0
             .nodes
             .get(nid)
-            .map(|n| n.step_rows.len())
+            .map(|n| n.program.len())
             .unwrap_or(0);
         if row_count < 2 {
             continue;
@@ -349,7 +796,7 @@ fn animate_steps_loop_dots(
             .0
             .nodes
             .get(&nref.0)
-            .map(|n| n.step_rows.len())
+            .map(|n| n.program.len())
             .unwrap_or(0);
         let Some((a, b, c)) = steps_arc_points(
             node_tf.translation.truncate(),
@@ -402,7 +849,13 @@ fn record_steps_row_activity(
         if sn.kind != NodeKind::Steps {
             continue;
         }
-        if let Some(cur) = sim_res.0.nodes.get(&nref.0).and_then(|n| n.current_row) {
+        if let Some(cur) = sim_res
+            .0
+            .nodes
+            .get(&nref.0)
+            .and_then(|n| n.cursor.as_ref())
+            .and_then(|p| p.first().copied())
+        {
             activity.last_entered.insert((nref.0, cur), now);
         }
     }
@@ -575,6 +1028,23 @@ pub struct StepsRow {
     pub index: usize,
 }
 
+/// Marker on a node that's been "cracked open" on the canvas —
+/// the node renders its program as a vertical stack of step rows
+/// instead of the small kind-glyph box. Added by double-click,
+/// removed by double-click again (or Escape). Works on any kind;
+/// Steps containers are effectively always opened.
+#[derive(Component)]
+pub struct Opened;
+
+/// Cache of the last-rendered shape per node so
+/// `rebuild_node_rendering` can detect mismatches and rebuild only
+/// when visual state actually changed.
+#[derive(Component)]
+pub struct RenderedAs {
+    pub opened: bool,
+    pub row_count: usize,
+}
+
 /// Marker on the per-row body mesh whose colour the highlight system
 /// paints (accent while active, paper otherwise).
 #[derive(Component)]
@@ -616,6 +1086,28 @@ pub struct DragState {
     pub offset: Vec2,
 }
 
+/// Active row-drag: the user pressed on a specific row of an
+/// opened node and is (presumably) sliding it up or down. Released
+/// on mouseup — target row index decides whether `swap_step_rows`
+/// fires or we noop. `None` = no row drag in progress.
+#[derive(Resource, Default)]
+pub struct RowDragState {
+    pub source_entity: Option<Entity>,
+    pub source_node: crate::sim::NodeId,
+    pub source_row: usize,
+}
+
+/// A step row is currently selected on the canvas. Mirrors the
+/// node-level `Selected` marker, but targets a specific row within
+/// an opened node. Delete/Backspace removes the selected row;
+/// clicking elsewhere clears the selection.
+#[derive(Resource, Default)]
+pub struct SelectedStep {
+    pub entity: Option<Entity>,
+    pub node: crate::sim::NodeId,
+    pub row: usize,
+}
+
 // ---- Node placement ------------------------------------------------------
 
 #[allow(clippy::too_many_arguments)]
@@ -627,7 +1119,8 @@ fn place_node_on_click(
     ui: Query<&Interaction>,
     windows: Query<&Window>,
     cams: Query<(&Camera, &GlobalTransform), With<MainCamera>>,
-    existing: Query<(&Transform, &SimNode, &SimNodeRef)>,
+    existing: Query<(&Transform, &SimNode, &SimNodeRef, Option<&Opened>)>,
+    library: Res<crate::ui::PresetLibrary>,
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<ColorMaterial>>,
@@ -638,6 +1131,57 @@ fn place_node_on_click(
     if !mouse.just_pressed(MouseButton::Left) {
         return;
     }
+    if pointer_over_ui(&ui) {
+        return;
+    }
+    let Ok(win) = windows.single() else { return };
+    let Some(cursor) = win.cursor_position() else { return };
+    let Ok((cam, cam_tf)) = cams.single() else { return };
+    let Ok(world) = cam.viewport_to_world_2d(cam_tf, cursor) else { return };
+    let sc = crate::bridge::bevy_to_sim_color(active_color.0);
+
+    // First: did the click land on an existing node? If so, the
+    // tool might want to mutate it (append a Client row, drop a
+    // primitive into an opened node, etc.) rather than spawn a
+    // fresh node. This runs BEFORE the node-placement kind lookup
+    // because tools like Primitive/UserPreset aren't placement
+    // tools at all — they only act on existing targets.
+    for (tf, sn, nref, opened) in existing.iter() {
+        let half = sn.size / 2.0;
+        let c = tf.translation.truncate();
+        if (world.x - c.x).abs() <= half.x && (world.y - c.y).abs() <= half.y {
+            let is_openable = sn.kind == NodeKind::Steps || opened.is_some();
+            let instr = match active_tool.0 {
+                Tool::Client if sn.kind == NodeKind::Steps => {
+                    Some(crate::sim::client_step(sc))
+                }
+                Tool::Worker if sn.kind == NodeKind::Steps => {
+                    Some(crate::sim::worker_step(500 * crate::sim::NS_PER_MS, sc))
+                }
+                Tool::UserPreset(i) if sn.kind == NodeKind::Steps => library
+                    .user
+                    .get(i)
+                    .map(|p| crate::sim::Instruction::Sequence {
+                        label: p.label.clone(),
+                        body: p.body.clone(),
+                    }),
+                Tool::Primitive(kind) if is_openable => {
+                    Some(kind.default_instruction(sc))
+                }
+                _ => None,
+            };
+            if let Some(instr) = instr {
+                sim_res.0.push_instruction(nref.0, instr);
+            }
+            // The click hit an existing node: never spawn a new
+            // one at this position, even if the tool didn't apply.
+            return;
+        }
+    }
+
+    // Click was on empty canvas. If it's a node-placement tool,
+    // spawn. Non-placement tools (Primitive, UserPreset, Select,
+    // Edge, Probe) fall through and do nothing.
     let kind = match active_tool.0 {
         Tool::Generator => NodeKind::Generator,
         Tool::Client => NodeKind::Client,
@@ -648,42 +1192,6 @@ fn place_node_on_click(
         Tool::Steps => NodeKind::Steps,
         _ => return,
     };
-    if pointer_over_ui(&ui) {
-        return;
-    }
-    let Ok(win) = windows.single() else { return };
-    let Some(cursor) = win.cursor_position() else { return };
-    let Ok((cam, cam_tf)) = cams.single() else { return };
-    let Ok(world) = cam.viewport_to_world_2d(cam_tf, cursor) else { return };
-
-    // Before the normal overlap rule fires: if the click landed
-    // inside a Steps container AND the active tool is one that can
-    // behave as a row (Client, Worker), append a row of that kind
-    // to the container instead of placing a new free-standing node.
-    // This is the "node types ARE steps" gesture: the same tool that
-    // places a Client node on blank canvas adds a Client row when
-    // aimed at a Steps container.
-    for (tf, sn, nref) in existing.iter() {
-        let half = sn.size / 2.0;
-        let c = tf.translation.truncate();
-        if (world.x - c.x).abs() <= half.x && (world.y - c.y).abs() <= half.y {
-            if sn.kind == NodeKind::Steps
-                && matches!(active_tool.0, Tool::Client | Tool::Worker)
-            {
-                let sc = crate::bridge::bevy_to_sim_color(active_color.0);
-                let row = match active_tool.0 {
-                    Tool::Client => crate::sim::StepRow::Client { color: sc },
-                    Tool::Worker => crate::sim::StepRow::Worker {
-                        duration_ns: 500 * crate::sim::NS_PER_MS,
-                        color: sc,
-                    },
-                    _ => unreachable!(),
-                };
-                sim_res.0.push_step_row(nref.0, row);
-            }
-            return;
-        }
-    }
 
     spawn_node(
         &mut commands,
@@ -712,46 +1220,28 @@ pub fn spawn_node(
     color: Color,
     pos: Vec2,
 ) -> Entity {
-    // Steps nodes need the sim to exist first (so the registered
-    // node's `step_rows` drives the visual row count). Register the
-    // sim node before building visuals so size can reflect the actual
-    // script.
+    // Steps containers need their sim node to exist before visuals
+    // so the initial row count is known for sizing. The
+    // placeholder dance lets us reuse `register_node` cleanly.
     let nid = {
-        // Temporary placeholder entity — we replace it below, but
-        // `register_node` requires an Entity to bind. Alternative would
-        // be to thread maps-binding manually, which is uglier.
         let placeholder = commands.spawn_empty().id();
         let id = register_node(sim_res, maps, placeholder, kind, color);
         commands.entity(placeholder).despawn();
         maps.entity_to_node.remove(&placeholder);
         id
     };
-    let row_count = sim_res.0.nodes.get(&nid).map(|n| n.step_rows.len()).unwrap_or(1);
+    let row_count = sim_res.0.nodes.get(&nid).map(|n| n.program.len()).unwrap_or(0);
     let size = if kind == NodeKind::Steps {
         steps_container_size(row_count.max(1))
     } else {
         kind.size()
     };
 
-    // Snapshot row descriptors off the sim so we don't need a second
-    // borrow of `sim_res` inside the closure.
-    let steps_rows_for_spawn: Vec<(usize, String)> = if kind == NodeKind::Steps {
-        sim_res
-            .0
-            .nodes
-            .get(&nid)
-            .map(|n| {
-                n.step_rows
-                    .iter()
-                    .enumerate()
-                    .map(|(i, row)| (i, format_step_row(row)))
-                    .collect()
-            })
-            .unwrap_or_default()
-    } else {
-        Vec::new()
-    };
-
+    // Minimal entity — body mesh for the size, core components. The
+    // actual children (data dot, border, glyph or stacked rows) are
+    // populated by `rebuild_node_rendering` on the first frame.
+    // Keeping spawn_node thin means one code path for rendering,
+    // avoiding the split-brain we had before.
     let entity = commands
         .spawn((
             SimNode { kind, color, size },
@@ -761,131 +1251,82 @@ pub fn spawn_node(
             Transform::from_xyz(pos.x, pos.y, 0.0),
             Visibility::default(),
         ))
-        .with_children(|p| {
-            // Small data-color dot in the top-right of colour-aware nodes.
-            // Sinks/workers/queues/generators/clients all have a
-            // single-colour identity; router passes everything through and
-            // is left neutral so it doesn't visually claim one colour.
-            if kind != NodeKind::Router {
-                p.spawn((
-                    Mesh2d(meshes.add(Circle::new(5.0))),
-                    MeshMaterial2d(materials.add(color)),
-                    Transform::from_xyz(size.x / 2.0 - 9.0, size.y / 2.0 - 9.0, 0.2),
-                ));
-            }
-            p.spawn((
-                Mesh2d(meshes.add(Rectangle::new(size.x + 3.0, size.y + 3.0))),
-                MeshMaterial2d(materials.add(theme.ink)),
-                Transform::from_xyz(0.0, 0.0, -0.1),
-                NodeBorderChild,
-            ));
-            p.spawn((
-                Text2d::new(kind_letter(kind)),
-                TextFont {
-                    font_size: 18.0,
-                    ..default()
-                },
-                TextColor(theme.ink),
-                Transform::from_xyz(0.0, 0.0, 0.3),
-                NodeGlyphText,
-            ));
-
-            // Steps node: header label at the top and one inset row
-            // rectangle per script row. Rows are child entities so hit
-            // testing, edge anchoring, and the current-row highlight
-            // can all address them by index via `StepsRow`.
-            if kind == NodeKind::Steps {
-                let header_y = size.y / 2.0 - STEPS_HEADER_H / 2.0 - 2.0;
-                p.spawn((
-                    Text2d::new("STEPS"),
-                    TextFont {
-                        font_size: 10.0,
-                        ..default()
-                    },
-                    TextColor(theme.ink_soft),
-                    Transform::from_xyz(0.0, header_y, 0.3),
-                ));
-                let row_w = size.x - 14.0;
-                let row_h = STEPS_ROW_HEIGHT - 4.0;
-                for (i, _label) in &steps_rows_for_spawn {
-                    let cy = steps_row_center_y(row_count.max(1), *i);
-                    let row_index = *i;
-                    p.spawn((
-                        StepsRow { index: row_index },
-                        Transform::from_xyz(0.0, cy, 0.15),
-                        Visibility::default(),
-                    ))
-                    .with_children(|r| {
-                        r.spawn((
-                            Mesh2d(meshes.add(Rectangle::new(row_w, row_h))),
-                            MeshMaterial2d(materials.add(theme.paper_alt)),
-                            Transform::from_xyz(0.0, 0.0, 0.0),
-                            StepsRowBody,
-                        ));
-                        r.spawn((
-                            Mesh2d(meshes.add(Rectangle::new(row_w + 1.5, row_h + 1.5))),
-                            MeshMaterial2d(materials.add(theme.rule)),
-                            Transform::from_xyz(0.0, 0.0, -0.05),
-                        ));
-                        r.spawn((
-                            Text2d::new(String::new()),
-                            TextFont {
-                                font_size: 11.0,
-                                ..default()
-                            },
-                            TextColor(theme.ink),
-                            Transform::from_xyz(0.0, 0.0, 0.1),
-                            crate::ui::LiveText {
-                                node: nid,
-                                field: crate::ui::LiveField::StepRowLabel(row_index),
-                            },
-                        ));
-                    });
-                }
-            }
-
-            // Canvas label: one-line summary under the node. Populated and
-            // kept up to date by `update_node_label` below. Empty string at
-            // spawn so the first frame of rendering isn't a "0" or similar.
-            p.spawn((
-                Text2d::new(""),
-                TextFont {
-                    font_size: 11.0,
-                    ..default()
-                },
-                TextColor(theme.ink_soft),
-                Transform::from_xyz(0.0, -size.y / 2.0 - 12.0, 0.3),
-                NodeCanvasLabel,
-            ));
-        })
         .id();
-
-    // Rebind the sim node's entity from the placeholder to the real one.
+    // Rebind entity→node (the placeholder mapping was for
+    // `register_node`; we've since despawned it).
     maps.node_to_entity.insert(nid, entity);
     maps.entity_to_node.insert(entity, nid);
 
     registry.positions.insert(entity, pos);
+    let _ = theme;
     entity
 }
 
-/// Render a sim-level [`crate::sim::StepRow`] to the short label
-/// shown inside its row rectangle. Rows mirror the palette's node
-/// kinds; labels match so users recognize them at a glance.
-pub fn format_step_row(row: &crate::sim::StepRow) -> String {
-    use crate::sim::StepRow;
-    match row {
-        StepRow::Client { .. } => "Client".to_string(),
-        StepRow::Worker { duration_ns, .. } => {
-            if *duration_ns >= NS_PER_S {
-                format!("Worker {:.1}s", *duration_ns as f64 / NS_PER_S as f64)
-            } else if *duration_ns >= NS_PER_MS {
-                format!("Worker {}ms", duration_ns / NS_PER_MS)
-            } else if *duration_ns >= NS_PER_US {
-                format!("Worker {}us", duration_ns / NS_PER_US)
-            } else {
-                format!("Worker {}ns", duration_ns)
+/// Render a top-level program instruction as the short label shown
+/// inside its canvas-row rectangle. Named `Sequence`s use their
+/// label (with extra detail where useful — e.g. a "Worker" sequence
+/// surfaces its dwell time). Bare primitives render as their
+/// instruction name so the user sees the machinery.
+pub fn format_step_row(instr: &crate::sim::Instruction) -> String {
+    use crate::sim::Instruction;
+    match instr {
+        Instruction::Sequence { label, body } => {
+            if label == "Worker" {
+                if let Some(Instruction::Hold { duration_ns }) = body.first() {
+                    return format!("Worker {}", fmt_duration_ns(*duration_ns));
+                }
             }
+            label.clone()
         }
+        Instruction::Emit { one_way: false, .. } => "Emit request".to_string(),
+        Instruction::Emit { one_way: true, .. } => "Emit".to_string(),
+        Instruction::Hold { duration_ns } => format!("Hold {}", fmt_duration_ns(*duration_ns)),
+        Instruction::AwaitResponse => "Await".to_string(),
+        Instruction::Process { duration_ns } => {
+            format!("Process {}", fmt_duration_ns(*duration_ns))
+        }
+        Instruction::Buffer { .. } => "Buffer".to_string(),
+        Instruction::MatchColor { .. } => "Match color".to_string(),
+        Instruction::Respond => "Respond".to_string(),
+        Instruction::Consume => "Consume".to_string(),
+        Instruction::EmitAtRate { .. } => "Emit at rate".to_string(),
+        Instruction::AcceptInbound => "Accept".to_string(),
+        Instruction::PullInbound => "Pull".to_string(),
+        Instruction::Filter { pred } => format!("Filter · {}", format_port_pred(*pred)),
+        Instruction::Sort { key } => format!("Sort · {}", format_port_key(*key)),
+        Instruction::Take { n } => format!("Take {}", n),
+        Instruction::Send => "Send".to_string(),
+        Instruction::Require { .. } => "Require".to_string(),
+    }
+}
+
+fn format_port_pred(p: crate::sim::PortPredicate) -> &'static str {
+    use crate::sim::PortPredicate;
+    match p {
+        PortPredicate::Ready => "ready",
+        PortPredicate::ColorMatches => "color match",
+    }
+}
+
+fn format_port_key(k: crate::sim::PortKey) -> &'static str {
+    use crate::sim::PortKey;
+    match k {
+        PortKey::LastSentAt => "last sent",
+        PortKey::QueueDepth => "queue depth",
+        PortKey::EdgeOrder => "edge order",
+        PortKey::Random => "random",
+    }
+}
+
+fn fmt_duration_ns(ns: u64) -> String {
+    if ns >= NS_PER_S {
+        format!("{:.1}s", ns as f64 / NS_PER_S as f64)
+    } else if ns >= NS_PER_MS {
+        format!("{}ms", ns / NS_PER_MS)
+    } else if ns >= NS_PER_US {
+        format!("{}us", ns / NS_PER_US)
+    } else {
+        format!("{}ns", ns)
     }
 }
 
@@ -974,10 +1415,16 @@ fn select_and_begin_drag(
     members: Query<(&SimNodeRef, &Transform, &SimNode), Without<CompositeTag>>,
     sim_res: Res<SimResource>,
     selected: Query<Entity, With<Selected>>,
+    row_drag: Res<RowDragState>,
     mut drag: ResMut<DragState>,
     mut commands: Commands,
 ) {
     if !mouse.just_pressed(MouseButton::Left) {
+        return;
+    }
+    // If the press started a row-drag, don't start a node-drag in
+    // addition — the user is reordering, not moving the node.
+    if row_drag.source_entity.is_some() {
         return;
     }
     if pointer_over_ui(&ui) {
@@ -1308,6 +1755,7 @@ fn trim_trailing(n: f64) -> String {
 fn delete_selected(
     keys: Res<ButtonInput<KeyCode>>,
     edit: Res<EditState>,
+    selected_step: Res<SelectedStep>,
     selected: Query<(Entity, &SimNodeRef), With<Selected>>,
     edges_q: Query<(Entity, &crate::edges::Edge)>,
     probes_q: Query<(Entity, &crate::edges::Probe)>,
@@ -1319,6 +1767,12 @@ fn delete_selected(
         return;
     }
     if !(keys.just_pressed(KeyCode::Delete) || keys.just_pressed(KeyCode::Backspace)) {
+        return;
+    }
+    // A step is currently selected on the canvas. Delete belongs
+    // to the step; `delete_selected_step` handled it — don't also
+    // delete the containing node.
+    if selected_step.entity.is_some() {
         return;
     }
     // Collect the set of (node entity, sim id) pairs to delete. Cloning into

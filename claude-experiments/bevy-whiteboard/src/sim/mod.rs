@@ -1,18 +1,41 @@
 //! Pure simulation core. No Bevy types, no rendering, no coordinates.
 //!
-//! Each node is a named ordered list of [`Step`] primitives plus a shared
-//! runtime. A packet threads through the list; instant steps run to
-//! completion and blocking steps ([`Step::Buffer`], [`Step::Process`])
-//! suspend the packet until a later tick. The six built-in kinds
-//! (Generator / Worker / Sink / Router / Queue / Client) are just preset
-//! step-lists constructed by the `add_*` methods; custom user components
-//! are the same thing under a different name.
+//! # Model
 //!
-//! All time is stored as [`TimeNs`] (nanoseconds, u64). Simulation is
-//! event-driven: [`Sim::advance_ns`] jumps to the next scheduled event
-//! rather than ticking. Emissions cascade through routers/queues
-//! synchronously in the same event; `SimEvent::Traveled` is emitted once
-//! per hop for visuals.
+//! Every node has a **program**: `Vec<Instruction>`. The same instruction
+//! set is used by every kind — Generator, Worker, Sink, Router, Queue,
+//! and Client are just presets that ship with a pre-baked program.
+//! Steps containers are components whose program the user builds up.
+//!
+//! # Instruction set
+//!
+//! **Entry / source** — control how the program starts running.
+//! - [`Instruction::EmitAtRate`] — fire a fresh packet every `period_ns`
+//!   (one-way or request-with-reply).
+//! - [`Instruction::AcceptInbound`] — entry point for packets pushed
+//!   onto this node.
+//! - [`Instruction::PullInbound`] — node fetches from a buffered upstream
+//!   when idle.
+//!
+//! **Gating / timing** — block or filter.
+//! - [`Instruction::MatchColor`] — drop packets whose color doesn't match.
+//! - [`Instruction::Buffer`] — FIFO; suspends the packet until drain.
+//! - [`Instruction::Process`] — hold one packet for `duration_ns`.
+//! - [`Instruction::AwaitResponse`] — block a sequential cursor until
+//!   the most-recent request's response returns. No-op in PerPacket mode.
+//!
+//! **Side effects** — do a thing.
+//! - [`Instruction::ForwardOut`] — push the packet onto an outbound edge.
+//! - [`Instruction::RespondImmediate`] / [`Instruction::RespondOnComplete`]
+//!   — synthesize a response for the packet's reply-address.
+//! - [`Instruction::Consume`] — terminal absorb (sink semantics).
+//!
+//! # Runtime
+//!
+//! All time is [`TimeNs`] (nanoseconds, u64). [`Sim::advance_ns`] jumps
+//! to the next scheduled event rather than ticking. Emissions cascade
+//! through routers/queues synchronously in the same event;
+//! `SimEvent::Traveled` fires once per hop for visuals.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -218,31 +241,15 @@ pub enum NodeKind {
     Steps,
 }
 
-/// A lifecycle row inside a [`NodeKind::Steps`] container. Variants
-/// mirror the subset of [`NodeKind`]s that have sensible "step-mode"
-/// behavior (i.e. the ones whose normal behavior maps cleanly onto
-/// "do a thing when triggered, then signal done"). A Steps container's
-/// `step_rows` is an ordered list of these; the container auto-loops
-/// back to row 0 after the last row completes.
-///
-/// Think of a `StepRow` as "this row IS a Client" (or Worker, etc.)
-/// configured for single-shot operation instead of self-rate emission.
-#[derive(Clone, Debug)]
-pub enum StepRow {
-    /// Behaves like a Client: on row entry, fires a request packet
-    /// of `color` down this row's outbound edge, waits for the
-    /// response to walk back, then advances. Rate is irrelevant —
-    /// emission is driven by row entry.
-    Client { color: Color },
-    /// Behaves like a Worker: on row entry, holds the token for
-    /// `duration_ns` sim time, then advances. `color` is reserved
-    /// for future color-match gating; unused for now.
-    Worker { duration_ns: TimeNs, color: Color },
-}
 
-/// Simulation primitive. A node's behavior is an ordered list of these.
+/// Simulation primitive — one instruction in a node's program.
+/// A node's behavior is an ordered list of `Instruction`s executed
+/// either per-arriving-packet (the default) or sequentially by a
+/// single cursor (see [`RuntimeMode`]). Instant instructions return
+/// immediately; blocking ones ([`Instruction::Buffer`],
+/// [`Instruction::Process`]) suspend execution until a later tick.
 #[derive(Clone, Debug)]
-pub enum Step {
+pub enum Instruction {
     /// Source: synthesize a packet every `period_ns`. `one_way = false`
     /// means emit a Request carrying a reply-address back to this node.
     EmitAtRate {
@@ -267,38 +274,148 @@ pub enum Step {
     Buffer { capacity: usize },
     /// Hold one packet for `duration_ns` sim time, then advance.
     Process { duration_ns: TimeNs },
-    /// Hand the packet to an outbound edge. Strategy picks which edge
-    /// when multiple match.
-    ForwardOut { strategy: ForwardStrategy },
     /// If the packet carries a reply-address, synthesize a response
     /// back to its client *now* and strip the address. The packet
     /// continues through subsequent steps as plain data (no reply
     /// obligation). Non-request packets pass through untouched.
-    RespondImmediate,
-    /// Same as `RespondImmediate` but conceptually triggered "after
-    /// work is done." Semantically identical to RespondImmediate today
-    /// — the distinction is purely positional in the step list (before
-    /// vs after a `Process`).
-    RespondOnComplete,
+    /// Position in the program controls "when" the response fires
+    /// (before vs after a `Process` / `Wait` step).
+    Respond,
     /// Terminal absorb. Stats: increments `sink_total` / per-color.
     Consume,
+    /// Block the sequential cursor until a response arrives for the
+    /// request most recently emitted from this program. No-op in
+    /// PerPacket mode. Pairs with a preceding `Emit { one_way: false }`.
+    AwaitResponse,
+    /// Sequential-mode one-shot emit: fire one packet via the
+    /// top-level row's outbound edge and advance (if `one_way`) or
+    /// mark the cursor awaiting (if request). Unlike `EmitAtRate`
+    /// this has no timer — firing is driven by cursor arrival.
+    Emit { color: Color, one_way: bool },
+    /// Sequential-mode cursor dwell. Holds the cursor in place for
+    /// `duration_ns` sim time. Analogous to `Process` but carries
+    /// no packet — pure delay between steps.
+    Hold { duration_ns: TimeNs },
+    /// Composition primitive. A named group of instructions. When
+    /// the sequential cursor reaches a `Sequence`, it descends into
+    /// `body`; when it advances past the last child, it ascends.
+    /// The `label` is purely for display. In PerPacket mode the
+    /// body is inlined (flattened) during execution.
+    Sequence { label: String, body: Vec<Instruction> },
+
+    // ── Port-pipeline primitives ─────────────────────────────────
+    //
+    // Routing is a tiny pipeline that operates on the node's *set
+    // of outbound ports*. Each primitive transforms the current
+    // set; `Send` commits the packet to whatever remains. All the
+    // standard strategies fall out of composing these:
+    //
+    // - Broadcast:  Filter(Ready) → Send
+    // - RoundRobin: Filter(Ready) → Sort(LastSentAt) → Take(1) → Send
+    // - Failover:   Filter(Ready) → Sort(EdgeOrder)  → Take(1) → Send
+    // - Least-load: Filter(Ready) → Sort(QueueDepth) → Take(1) → Send
+    // - By color:   Filter(ColorMatches) → Take(1) → Send
+    //
+    // The initial port set (if the first pipeline primitive runs
+    // with no set established yet) is all push-mode outbound
+    // edges. Pull edges are excluded — they're demand-driven and
+    // handled by a separate executor.
+    /// Narrow the current port set to ports whose target matches
+    /// the predicate.
+    Filter { pred: PortPredicate },
+    /// Reorder the current port set by a sort key. Stable.
+    Sort { key: PortKey },
+    /// Keep only the first `n` ports of the current set.
+    Take { n: usize },
+    /// Dispatch the packet to every port in the current set. A
+    /// single port = conventional forward; multiple = broadcast
+    /// (each gets a cloned packet with a fresh id). Empty set =
+    /// silent consume (no drop event). Use `Require` earlier in
+    /// the pipeline if you want an explicit drop on empty.
+    Send,
+    /// If the current port set is empty at this point, drop the
+    /// packet with the given reason. No-op otherwise. Used to
+    /// turn router-style "no ready downstream" into a Lost event
+    /// without baking the policy into Send.
+    Require { reason: LostReason },
 }
 
+/// Tests a port's target against the current packet.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ForwardStrategy {
-    /// Round-robin over ALL outbound edges, regardless of downstream
-    /// readiness. Downstream is responsible for rejecting packets it
-    /// can't accept. Used by sources (Generator, Client): the source
-    /// fires blindly and any drop is recorded at the receiver. If the
-    /// source has no outbound edges at all, it drops at self.
-    BlindRoundRobin,
-    /// Round-robin over READY outbound edges only. If none is ready,
-    /// drop-at-self. Router semantics.
-    ReadyRoundRobin,
-    /// First ready outbound edge, else silently consume (no drop event
-    /// and no counter tick). Worker-post-process semantics: if there is
-    /// no downstream to hand to, the work is simply done.
-    ForwardOrConsume,
+pub enum PortPredicate {
+    /// Target is ready to accept right now (has capacity,
+    /// color-match passes downstream, etc.). Excludes pull edges.
+    Ready,
+    /// Target's program would accept a packet of this color
+    /// (walks Match gates). Doesn't require immediate readiness.
+    ColorMatches,
+}
+
+/// Sort key for the port-pipeline `Sort` primitive. Ascending.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PortKey {
+    /// Edge's `last_sent_ns` ascending — oldest first. Gives
+    /// round-robin when combined with `Take(1)` and `Send`.
+    LastSentAt,
+    /// Target node's buffer depth ascending — emptiest first.
+    /// Gives least-loaded.
+    QueueDepth,
+    /// Edge id ascending — declared order. Gives priority /
+    /// failover when combined with `Take(1) → Send`.
+    EdgeOrder,
+    /// Pseudo-random order, reshuffled each execution. Implemented
+    /// deterministically from `now_ns` + edge id so the sim is
+    /// reproducible.
+    Random,
+}
+
+// ── Preset constructors ────────────────────────────────────────────
+//
+// Short helpers for common sequential-mode steps. Each returns a
+// `Sequence` whose body is one or a few primitives. The UI labels
+// rows by the Sequence label and exposes sub-instructions for
+// editing when the user "cracks open" the Sequence (Stage C).
+
+/// A "Client" step: fire a request and wait for the response.
+pub fn client_step(color: Color) -> Instruction {
+    Instruction::Sequence {
+        label: "Client".into(),
+        body: vec![
+            Instruction::Emit { color, one_way: false },
+            Instruction::AwaitResponse,
+        ],
+    }
+}
+
+/// A "Worker" step: dwell the cursor for `duration_ns`.
+pub fn worker_step(duration_ns: TimeNs, _color: Color) -> Instruction {
+    Instruction::Sequence {
+        label: "Worker".into(),
+        body: vec![Instruction::Hold { duration_ns }],
+    }
+}
+
+/// How a node's program is driven.
+///
+/// - `PerPacket`: the program is a per-packet script. Every inbound
+///   (or emitted) packet starts a fresh cursor at the appropriate
+///   entry point and runs through the program until it blocks
+///   (Buffer / Process) or exits (Forward / Consume). Multiple
+///   packets can be in flight through the same node at once.
+/// - `Sequential`: the node has a single cursor walking the program
+///   over sim time. Used by Steps containers — the program is a
+///   lifecycle script that loops. `AwaitResponse` blocks the
+///   cursor; `Process`-style dwell holds it for a duration.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RuntimeMode {
+    PerPacket,
+    Sequential,
+}
+
+impl Default for RuntimeMode {
+    fn default() -> Self {
+        RuntimeMode::PerPacket
+    }
 }
 
 // ---- Node runtime --------------------------------------------------------
@@ -307,7 +424,10 @@ pub enum ForwardStrategy {
 pub struct Node {
     pub name: String,
     pub kind: NodeKind,
-    pub steps: Vec<Step>,
+    /// How the program is driven. Default `PerPacket`; Steps
+    /// containers use `Sequential`.
+    pub mode: RuntimeMode,
+    pub program: Vec<Instruction>,
     /// Primary color (UI tint + palette grouping). When a step carries a
     /// `color` field it is authoritative for that step, but `color` here
     /// mirrors the dominant one for UI convenience.
@@ -366,21 +486,19 @@ pub struct Node {
     /// If this node is a member of a composite, the composite's id.
     pub parent: Option<NodeId>,
 
-    // Steps-specific state -------------------------------------------------
-    /// Lifecycle script for a [`NodeKind::Steps`] node. Empty for every
-    /// other kind.
-    pub step_rows: Vec<StepRow>,
-    /// Index of the currently-executing row. `None` means the script
-    /// finished (ran off the end without a Loop row) and the node is
-    /// dormant.
-    pub current_row: Option<usize>,
-    /// Sim time at which the current row began executing. Drives Delay
-    /// row completion.
-    pub row_started_ns: TimeNs,
-    /// When a Call row has fired a request and is waiting for the
-    /// response, holds the request's packet id so `deliver_response`
-    /// can match it and advance the row.
-    pub row_awaiting: Option<PacketId>,
+    // Sequential-mode cursor state -----------------------------------------
+    /// Path of indices into nested `Sequence` instructions in
+    /// `program`. `None` = dormant (empty program or script ended
+    /// without a loop). Empty path shouldn't appear in practice;
+    /// the executor normalises to `[0]`.
+    pub cursor: Option<Vec<usize>>,
+    /// Sim time at which the current instruction (pointed at by
+    /// `cursor`) began executing. Drives `Hold` completion.
+    pub cursor_started_ns: TimeNs,
+    /// When an `Emit { one_way: false }` has fired a request and the
+    /// cursor is blocked on `AwaitResponse`, holds the request's
+    /// packet id so `deliver_response` can match it and advance.
+    pub cursor_awaiting: Option<PacketId>,
 }
 
 impl Default for NodeKind {
@@ -396,12 +514,12 @@ impl Default for Color {
 }
 
 impl Node {
-    pub fn new(name: impl Into<String>, kind: NodeKind, color: Color, steps: Vec<Step>) -> Self {
+    pub fn new(name: impl Into<String>, kind: NodeKind, color: Color, program: Vec<Instruction>) -> Self {
         Self {
             name: name.into(),
             kind,
             color,
-            steps,
+            program,
             ..Default::default()
         }
     }
@@ -410,10 +528,10 @@ impl Node {
 
     /// Emission period in ns from the first `EmitAtRate` step, or 0.
     pub fn emit_period_ns(&self) -> TimeNs {
-        self.steps
+        self.program
             .iter()
             .find_map(|s| match s {
-                Step::EmitAtRate { period_ns, .. } => Some(*period_ns),
+                Instruction::EmitAtRate { period_ns, .. } => Some(*period_ns),
                 _ => None,
             })
             .unwrap_or(0)
@@ -421,20 +539,20 @@ impl Node {
 
     /// Processing duration of the first `Process` step, or 0.
     pub fn processing_ns(&self) -> TimeNs {
-        self.steps
+        self.program
             .iter()
             .find_map(|s| match s {
-                Step::Process { duration_ns } => Some(*duration_ns),
+                Instruction::Process { duration_ns } => Some(*duration_ns),
                 _ => None,
             })
             .unwrap_or(0)
     }
 
     pub fn buffer_capacity(&self) -> usize {
-        self.steps
+        self.program
             .iter()
             .find_map(|s| match s {
-                Step::Buffer { capacity } => Some(*capacity),
+                Instruction::Buffer { capacity } => Some(*capacity),
                 _ => None,
             })
             .unwrap_or(0)
@@ -444,20 +562,20 @@ impl Node {
         self.buffer.len()
     }
 
-    pub fn has_step(&self, matches: impl Fn(&Step) -> bool) -> bool {
-        self.steps.iter().any(matches)
+    pub fn has_step(&self, matches: impl Fn(&Instruction) -> bool) -> bool {
+        self.program.iter().any(matches)
     }
 
     pub fn is_source(&self) -> bool {
-        self.has_step(|s| matches!(s, Step::EmitAtRate { .. }))
+        self.has_step(|s| matches!(s, Instruction::EmitAtRate { .. }))
     }
 
     pub fn is_pulling(&self) -> bool {
-        self.has_step(|s| matches!(s, Step::PullInbound))
+        self.has_step(|s| matches!(s, Instruction::PullInbound))
     }
 
     pub fn accepts_push(&self) -> bool {
-        self.has_step(|s| matches!(s, Step::AcceptInbound))
+        self.has_step(|s| matches!(s, Instruction::AcceptInbound))
     }
 
     // --- Mutators used by UI (write) ----------------------------------
@@ -466,8 +584,8 @@ impl Node {
     /// to the current now so the next emission is `period_ns` in the
     /// future, not retroactive.
     pub fn set_emit_period_ns(&mut self, new_period: TimeNs, now_ns: TimeNs) {
-        for s in self.steps.iter_mut() {
-            if let Step::EmitAtRate { period_ns, .. } = s {
+        for s in self.program.iter_mut() {
+            if let Instruction::EmitAtRate { period_ns, .. } = s {
                 *period_ns = new_period;
                 self.emit_scheduled = if new_period == 0 { 0 } else { now_ns / new_period };
                 return;
@@ -478,8 +596,8 @@ impl Node {
     /// Update the first `Process` step's duration. Does not affect a
     /// packet currently being processed.
     pub fn set_processing_ns(&mut self, new_ns: TimeNs) {
-        for s in self.steps.iter_mut() {
-            if let Step::Process { duration_ns } = s {
+        for s in self.program.iter_mut() {
+            if let Instruction::Process { duration_ns } = s {
                 *duration_ns = new_ns.max(1);
                 return;
             }
@@ -491,8 +609,8 @@ impl Node {
     /// flight or color-match steps (those keep their own color).
     pub fn set_emit_color(&mut self, new_color: Color) {
         self.color = new_color;
-        for s in self.steps.iter_mut() {
-            if let Step::EmitAtRate { color, .. } = s {
+        for s in self.program.iter_mut() {
+            if let Instruction::EmitAtRate { color, .. } = s {
                 *color = new_color;
                 return;
             }
@@ -501,10 +619,10 @@ impl Node {
 
     pub fn set_match_color(&mut self, new_color: Color) {
         self.color = new_color;
-        for s in self.steps.iter_mut() {
+        for s in self.program.iter_mut() {
             match s {
-                Step::MatchColor { color } => *color = new_color,
-                Step::EmitAtRate { color, .. } => *color = new_color,
+                Instruction::MatchColor { color } => *color = new_color,
+                Instruction::EmitAtRate { color, .. } => *color = new_color,
                 _ => {}
             }
         }
@@ -539,6 +657,10 @@ pub struct Edge {
     /// edge emerges from. `None` means the edge is anchored at the
     /// node as a whole (legacy) or the source isn't a Steps node.
     pub from_row: Option<usize>,
+    /// Sim time of the most-recent packet dispatched on this edge.
+    /// Driven by `Send`; used by the `PortKey::LastSentAt` sort
+    /// to give round-robin semantics via composition.
+    pub last_sent_ns: TimeNs,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -612,21 +734,32 @@ impl Sim {
         id
     }
 
+    // ── Presets ────────────────────────────────────────────────────
+    //
+    // Each `add_*` below constructs a node whose behavior is one
+    // concrete program. In the unified model there's nothing special
+    // about these kinds — they're just reusable programs. A user
+    // authoring a Steps container is doing the same thing by hand:
+    // composing instructions into a program.
+    //
+    // Adding a new preset = writing one of these. Stage C's "save as
+    // preset" will let the UI produce them without editing Rust.
+
     pub fn add_generator(&mut self, color: Color, period_ns: TimeNs) -> NodeId {
+        // Blind round-robin: any push outbound, cycle by LastSentAt.
+        // `Require` drops when the push-outbound set is empty,
+        // preserving the original BlindRR "drop on no outbound."
         let id = self.fresh_node();
         let mut node = Node::new(
             "Generator",
             NodeKind::Generator,
             color,
             vec![
-                Step::EmitAtRate {
-                    period_ns,
-                    color,
-                    one_way: true,
-                },
-                Step::ForwardOut {
-                    strategy: ForwardStrategy::BlindRoundRobin,
-                },
+                Instruction::EmitAtRate { period_ns, color, one_way: true },
+                Instruction::Require { reason: LostReason::NoReadyOutbound },
+                Instruction::Sort { key: PortKey::LastSentAt },
+                Instruction::Take { n: 1 },
+                Instruction::Send,
             ],
         );
         node.emit_scheduled = if period_ns == 0 { 0 } else { self.now_ns / period_ns };
@@ -641,14 +774,11 @@ impl Sim {
             NodeKind::Client,
             color,
             vec![
-                Step::EmitAtRate {
-                    period_ns,
-                    color,
-                    one_way: false,
-                },
-                Step::ForwardOut {
-                    strategy: ForwardStrategy::BlindRoundRobin,
-                },
+                Instruction::EmitAtRate { period_ns, color, one_way: false },
+                Instruction::Require { reason: LostReason::NoReadyOutbound },
+                Instruction::Sort { key: PortKey::LastSentAt },
+                Instruction::Take { n: 1 },
+                Instruction::Send,
             ],
         );
         node.emit_scheduled = if period_ns == 0 { 0 } else { self.now_ns / period_ns };
@@ -657,25 +787,23 @@ impl Sim {
     }
 
     pub fn add_worker(&mut self, color: Color, processing_ns: TimeNs) -> NodeId {
+        // Worker: pull inbound, match color, process for a duration,
+        // respond, then forward-or-consume (Filter Ready + Take 1;
+        // empty Send silently consumes so a Worker with no downstream
+        // just absorbs the finished packet).
         let id = self.fresh_node();
-        // Worker is a PULLER: it fetches from an upstream buffer when
-        // idle. Pushes into a worker are rejected (the old behavior
-        // where generators could push directly into a worker is kept as
-        // a compatibility path — see `deliver_push`).
         let node = Node::new(
             "Worker",
             NodeKind::Worker,
             color,
             vec![
-                Step::PullInbound,
-                Step::MatchColor { color },
-                Step::Process {
-                    duration_ns: processing_ns.max(1),
-                },
-                Step::RespondOnComplete,
-                Step::ForwardOut {
-                    strategy: ForwardStrategy::ForwardOrConsume,
-                },
+                Instruction::PullInbound,
+                Instruction::MatchColor { color },
+                Instruction::Process { duration_ns: processing_ns.max(1) },
+                Instruction::Respond,
+                Instruction::Filter { pred: PortPredicate::Ready },
+                Instruction::Take { n: 1 },
+                Instruction::Send,
             ],
         );
         self.nodes.insert(id, node);
@@ -689,9 +817,9 @@ impl Sim {
             NodeKind::Sink,
             color,
             vec![
-                Step::AcceptInbound,
-                Step::MatchColor { color },
-                Step::Consume,
+                Instruction::AcceptInbound,
+                Instruction::MatchColor { color },
+                Instruction::Consume,
             ],
         );
         self.nodes.insert(id, node);
@@ -699,16 +827,21 @@ impl Sim {
     }
 
     pub fn add_router(&mut self) -> NodeId {
+        // Ready round-robin: filter to ready-for-this-color, require
+        // at least one (else RouterStarved), round-robin by LastSentAt,
+        // take one, send.
         let id = self.fresh_node();
         let node = Node::new(
             "Router",
             NodeKind::Router,
             Color(0),
             vec![
-                Step::AcceptInbound,
-                Step::ForwardOut {
-                    strategy: ForwardStrategy::ReadyRoundRobin,
-                },
+                Instruction::AcceptInbound,
+                Instruction::Filter { pred: PortPredicate::Ready },
+                Instruction::Require { reason: LostReason::RouterStarved },
+                Instruction::Sort { key: PortKey::LastSentAt },
+                Instruction::Take { n: 1 },
+                Instruction::Send,
             ],
         );
         self.nodes.insert(id, node);
@@ -716,19 +849,25 @@ impl Sim {
     }
 
     pub fn add_queue(&mut self, color: Color, capacity: usize) -> NodeId {
+        // Queue buffers and acks immediately. The post-Buffer pipeline
+        // is included for visual consistency but isn't executed by
+        // `run_steps_from` (Buffer short-circuits); the actual drain
+        // routing is done by `drain_buffers` using its own ReadyRR
+        // cursor.
         let id = self.fresh_node();
         let node = Node::new(
             "Queue",
             NodeKind::Queue,
             color,
             vec![
-                Step::AcceptInbound,
-                Step::MatchColor { color },
-                Step::RespondImmediate,
-                Step::Buffer { capacity },
-                Step::ForwardOut {
-                    strategy: ForwardStrategy::ReadyRoundRobin,
-                },
+                Instruction::AcceptInbound,
+                Instruction::MatchColor { color },
+                Instruction::Respond,
+                Instruction::Buffer { capacity },
+                Instruction::Filter { pred: PortPredicate::Ready },
+                Instruction::Sort { key: PortKey::LastSentAt },
+                Instruction::Take { n: 1 },
+                Instruction::Send,
             ],
         );
         self.nodes.insert(id, node);
@@ -739,28 +878,28 @@ impl Sim {
     /// node starts dormant if `rows` is empty; otherwise its
     /// `current_row` is set to 0 so the first row fires on the next
     /// `advance_ns` call.
-    pub fn add_steps(&mut self, color: Color, rows: Vec<StepRow>) -> NodeId {
+    pub fn add_steps(&mut self, color: Color, program: Vec<Instruction>) -> NodeId {
         let id = self.fresh_node();
-        let mut node = Node::new("Steps", NodeKind::Steps, color, Vec::new());
-        node.step_rows = rows;
-        node.current_row = if node.step_rows.is_empty() { None } else { Some(0) };
-        node.row_started_ns = self.now_ns;
+        let mut node = Node::new("Steps", NodeKind::Steps, color, program);
+        node.mode = RuntimeMode::Sequential;
+        node.cursor = if node.program.is_empty() { None } else { Some(vec![0]) };
+        node.cursor_started_ns = self.now_ns;
         self.nodes.insert(id, node);
         id
     }
 
-    /// Replace the row script for a Steps node and restart at row 0.
-    /// No-op if the node isn't a Steps node.
-    pub fn set_step_rows(&mut self, id: NodeId, rows: Vec<StepRow>) {
+    /// Replace the program of a Steps node and reset the cursor to
+    /// the start. No-op if the node isn't a Steps node.
+    pub fn set_steps_program(&mut self, id: NodeId, program: Vec<Instruction>) {
         let now = self.now_ns;
         let Some(n) = self.nodes.get_mut(&id) else { return };
         if n.kind != NodeKind::Steps {
             return;
         }
-        n.step_rows = rows;
-        n.current_row = if n.step_rows.is_empty() { None } else { Some(0) };
-        n.row_started_ns = now;
-        n.row_awaiting = None;
+        n.program = program;
+        n.cursor = if n.program.is_empty() { None } else { Some(vec![0]) };
+        n.cursor_started_ns = now;
+        n.cursor_awaiting = None;
     }
 
     pub fn connect(&mut self, from: NodeId, to: NodeId) -> EdgeId {
@@ -792,7 +931,16 @@ impl Sim {
     ) -> EdgeId {
         let id = self.next_edge_id;
         self.next_edge_id += 1;
-        self.edges.insert(id, Edge { from, to, mode, from_row });
+        self.edges.insert(
+            id,
+            Edge {
+                from,
+                to,
+                mode,
+                from_row,
+                last_sent_ns: 0,
+            },
+        );
         self.outbound.entry(from).or_default().push(id);
         id
     }
@@ -921,10 +1069,10 @@ impl Sim {
             NodeKind::Custom,
             color,
             vec![
-                Step::AcceptInbound,
-                Step::ForwardOut {
-                    strategy: ForwardStrategy::BlindRoundRobin,
-                },
+                Instruction::AcceptInbound,
+                Instruction::Sort { key: PortKey::LastSentAt },
+                Instruction::Take { n: 1 },
+                Instruction::Send,
             ],
         );
         comp.contains = sel_sorted.clone();
@@ -1025,36 +1173,56 @@ impl Sim {
                 let t = node.started_at_ns.saturating_add(node.processing_ns());
                 min = Some(min.map_or(t, |m| m.min(t)));
             }
-            // Steps-node row scheduling. A row only contributes an
-            // event when the sim can actually advance it:
-            // - Client row: has an outbound edge for this row and isn't
-            //   already waiting on a response.
-            // - Worker row: always schedules its deadline.
-            // - Wrap past end: auto-loop runs synchronously inside
-            //   `tick_steps_nodes`, so no separate event.
-            // Dormant (empty script) or stuck-without-edge Clients
-            // contribute nothing so `advance_ns` can exit its loop.
-            if node.kind == NodeKind::Steps {
-                if let Some(i) = node.current_row {
-                    if i < node.step_rows.len() {
-                        match &node.step_rows[i] {
-                            StepRow::Client { .. }
-                                if node.row_awaiting.is_none()
-                                    && self.steps_row_has_outbound(*nid, i) =>
-                            {
+            // Sequential-mode scheduling. The cursor contributes an
+            // event only when the current instruction can progress.
+            // Walk the cursor path and look at the pointed-at
+            // instruction; instant ones (Sequence entry,
+            // AwaitResponse-with-response, no-op leaves) schedule
+            // for `now`, Hold schedules its deadline, and blocked
+            // states (Emit with no outbound edge, AwaitResponse
+            // still waiting) contribute nothing.
+            if node.mode == RuntimeMode::Sequential {
+                if let Some(path) = node.cursor.as_deref() {
+                    let top_row = path.first().copied();
+                    match instr_at(&node.program, path) {
+                        Some(Instruction::Hold { duration_ns }) => {
+                            let t = node.cursor_started_ns
+                                .saturating_add(*duration_ns);
+                            min = Some(min.map_or(t, |m| m.min(t)));
+                        }
+                        Some(Instruction::Emit { one_way, .. }) => {
+                            let can_fire = match top_row {
+                                Some(r) => self.steps_row_has_outbound(*nid, r),
+                                None => false,
+                            };
+                            let needs_event = if *one_way {
+                                can_fire
+                            } else {
+                                can_fire && node.cursor_awaiting.is_none()
+                            };
+                            if needs_event {
                                 min = Some(min.map_or(self.now_ns, |m| m.min(self.now_ns)));
                             }
-                            StepRow::Worker { duration_ns, .. } => {
-                                let t = node.row_started_ns.saturating_add(*duration_ns);
-                                min = Some(min.map_or(t, |m| m.min(t)));
-                            }
-                            _ => {}
                         }
-                    } else {
-                        // Past last row but not empty: auto-loop
-                        // fires synchronously on next tick.
-                        if !node.step_rows.is_empty() {
+                        Some(Instruction::AwaitResponse)
+                            if node.cursor_awaiting.is_none() =>
+                        {
                             min = Some(min.map_or(self.now_ns, |m| m.min(self.now_ns)));
+                        }
+                        Some(Instruction::Sequence { body, .. }) if !body.is_empty() => {
+                            min = Some(min.map_or(self.now_ns, |m| m.min(self.now_ns)));
+                        }
+                        Some(Instruction::AwaitResponse) => {}
+                        Some(_) => {
+                            // Instant no-op leaf: fire now to advance past.
+                            min = Some(min.map_or(self.now_ns, |m| m.min(self.now_ns)));
+                        }
+                        None => {
+                            // Path overran (end-of-scope, etc.). Auto-loop
+                            // runs synchronously in tick_steps_nodes.
+                            if !node.program.is_empty() {
+                                min = Some(min.map_or(self.now_ns, |m| m.min(self.now_ns)));
+                            }
                         }
                     }
                 }
@@ -1074,6 +1242,199 @@ impl Sim {
             .unwrap_or(false)
     }
 
+    // ── Port pipeline helpers ─────────────────────────────────────
+
+    fn port_matches(
+        &self,
+        eid: EdgeId,
+        pred: PortPredicate,
+        color: Color,
+    ) -> bool {
+        let Some(e) = self.edges.get(&eid) else { return false };
+        // Pull edges are always excluded from push-send pipelines.
+        if e.mode != EdgeMode::Push {
+            return false;
+        }
+        match pred {
+            PortPredicate::Ready => self.is_ready_now(e.to, color),
+            PortPredicate::ColorMatches => self.target_accepts_color(e.to, color),
+        }
+    }
+
+    fn sort_ports(&self, ports: &mut Vec<EdgeId>, key: PortKey) {
+        match key {
+            PortKey::LastSentAt => ports.sort_by_key(|eid| {
+                self.edges.get(eid).map(|e| e.last_sent_ns).unwrap_or(0)
+            }),
+            PortKey::QueueDepth => ports.sort_by_key(|eid| {
+                self.edges
+                    .get(eid)
+                    .and_then(|e| self.nodes.get(&e.to))
+                    .map(|n| n.buffer.len())
+                    .unwrap_or(0)
+            }),
+            PortKey::EdgeOrder => ports.sort_unstable(),
+            PortKey::Random => {
+                // Deterministic pseudo-shuffle: order by a hash
+                // mixing `now_ns` with the edge id. Changes every
+                // tick so repeated Send calls spread differently,
+                // but reproducible under the same sim state.
+                let now = self.now_ns;
+                ports.sort_by_key(|eid| xor_shift(now.wrapping_mul(0x9E37_79B1) ^ *eid));
+            }
+        }
+    }
+
+    fn dispatch_send(
+        &mut self,
+        nid: NodeId,
+        packet: Packet,
+        ports: &[EdgeId],
+        events: &mut Vec<SimEvent>,
+    ) -> StepOutcome {
+        let _ = nid;
+        // Multiple ports = broadcast. First N-1 get clones with
+        // fresh packet ids so reply-address round-trips stay
+        // per-clone; the last edge consumes the original packet
+        // without a clone.
+        if ports.len() == 1 {
+            let edge_id = ports[0];
+            if let Some(e) = self.edges.get_mut(&edge_id) {
+                e.last_sent_ns = self.now_ns;
+            }
+            self.travel_forward(edge_id, packet, events);
+            return StepOutcome::Forwarded;
+        }
+        let last = ports.len() - 1;
+        for (i, &edge_id) in ports.iter().enumerate() {
+            if let Some(e) = self.edges.get_mut(&edge_id) {
+                e.last_sent_ns = self.now_ns;
+            }
+            if i == last {
+                self.travel_forward(edge_id, packet, events);
+                return StepOutcome::Forwarded;
+            }
+            let mut clone = packet.clone();
+            clone.id = self.fresh_packet_id();
+            self.travel_forward(edge_id, clone, events);
+        }
+        // Unreachable — empty set handled by caller.
+        StepOutcome::Forwarded
+    }
+}
+
+/// Initial push-mode port set for a node, used to seed the port
+/// pipeline when the first Filter/Sort/Take/Send runs.
+fn default_push_ports(sim: &Sim, nid: NodeId) -> Vec<EdgeId> {
+    sim.outbound
+        .get(&nid)
+        .map(|v| {
+            v.iter()
+                .copied()
+                .filter(|eid| {
+                    sim.edges
+                        .get(eid)
+                        .map(|e| e.mode == EdgeMode::Push)
+                        .unwrap_or(false)
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Cheap deterministic mixer for `PortKey::Random`.
+fn xor_shift(mut x: u64) -> u64 {
+    x ^= x << 13;
+    x ^= x >> 7;
+    x ^= x << 17;
+    x
+}
+
+// ── Cursor-path helpers for sequential execution ──────────────────
+//
+// A sequential cursor is a `Vec<usize>` of indices into nested
+// `Instruction::Sequence` bodies. `[3]` = top-level program[3];
+// `[3, 1]` = program[3].body[1], and so on. Execution walks the
+// tree in reading order; descending into a Sequence is how the
+// cursor enters a sub-program.
+
+/// Return the body a focus path points INTO (the scope a user
+/// would be editing after "cracking open" the Sequence at `path`).
+/// `body_at(program, &[])` is the top-level program itself;
+/// `body_at(program, &[3])` is `program[3].body` (must be a
+/// Sequence); and so on. `None` if the path is malformed.
+pub fn body_at<'a>(program: &'a [Instruction], path: &[usize]) -> Option<&'a [Instruction]> {
+    let mut scope: &[Instruction] = program;
+    for &i in path {
+        match scope.get(i)? {
+            Instruction::Sequence { body, .. } => scope = body,
+            _ => return None,
+        }
+    }
+    Some(scope)
+}
+
+/// Resolve the instruction at `path`. Returns `None` if the path
+/// is empty, any prefix is out of bounds, or any intermediate node
+/// on the path isn't a Sequence.
+pub fn instr_at<'a>(program: &'a [Instruction], path: &[usize]) -> Option<&'a Instruction> {
+    if path.is_empty() {
+        return None;
+    }
+    let mut scope: &[Instruction] = program;
+    for (depth, &i) in path.iter().enumerate() {
+        let node = scope.get(i)?;
+        if depth == path.len() - 1 {
+            return Some(node);
+        }
+        match node {
+            Instruction::Sequence { body, .. } => scope = body,
+            _ => return None,
+        }
+    }
+    None
+}
+
+/// Return the scope (sibling list) that contains the last element
+/// of `path`. Empty if the path is malformed. With `path = []`
+/// returns the top-level program; with `path = [3]` returns the
+/// top-level scope that contains item 3; with `path = [3, 0]`
+/// returns `program[3].body`.
+pub fn scope_at<'a>(program: &'a [Instruction], path: &[usize]) -> &'a [Instruction] {
+    let mut scope: &[Instruction] = program;
+    for &i in path.iter().take(path.len().saturating_sub(1)) {
+        match scope.get(i) {
+            Some(Instruction::Sequence { body, .. }) => scope = body,
+            _ => return &[],
+        }
+    }
+    scope
+}
+
+/// Advance the cursor one "sibling" step: increment the last index
+/// and ascend as needed when we run off the end of a scope. Returns
+/// `true` if we wrapped (finished the whole program and restarted
+/// at the top).
+fn advance_cursor_path(program: &[Instruction], path: &mut Vec<usize>) -> bool {
+    loop {
+        if path.is_empty() {
+            if !program.is_empty() {
+                path.push(0);
+            }
+            return true;
+        }
+        let last_idx = path.len() - 1;
+        path[last_idx] += 1;
+        let scope = scope_at(program, path);
+        if path[last_idx] < scope.len() {
+            return false;
+        }
+        path.pop();
+    }
+}
+
+impl Sim {
+
     fn process_due(&mut self, events: &mut Vec<SimEvent>) {
         self.complete_processing(events);
         self.drain_buffers(events);
@@ -1082,132 +1443,230 @@ impl Sim {
         self.tick_steps_nodes(events);
     }
 
-    /// Advance every Steps node as far as it can go right now.
-    ///
-    /// - A Client row fires one request on its outbound edge and
-    ///   stops (waits for response).
-    /// - A Worker row holds the token for `duration_ns`; advance
-    ///   when the deadline has passed.
-    /// - After the last row, the container auto-loops: `current_row`
-    ///   wraps back to 0 and we emit a `StepsLooped` event so the
-    ///   renderer can animate the return hop.
-    ///
-    /// Inner loop is bounded — a script of all-instant rows (empty
-    /// set for now, but guards against future additions) would spin.
+    /// Advance every Sequential-mode node as far as it can go right
+    /// now. Walks the cursor path through the program tree,
+    /// descending into Sequences, dwelling on Hold, firing Emit
+    /// (and blocking on AwaitResponse when a request response
+    /// hasn't returned yet). Auto-loops from end-of-program back to
+    /// the top and emits `StepsLooped`.
     fn tick_steps_nodes(&mut self, events: &mut Vec<SimEvent>) {
         let now = self.now_ns;
         let mut ids: Vec<NodeId> = self
             .nodes
             .iter()
-            .filter_map(|(id, n)| (n.kind == NodeKind::Steps && !n.down).then_some(*id))
+            .filter_map(|(id, n)| {
+                (n.mode == RuntimeMode::Sequential && !n.down).then_some(*id)
+            })
             .collect();
         ids.sort_unstable();
 
         for nid in ids {
+            // If the inner loop runs all 1024 iterations without
+            // ever hitting a `break`, the program has no
+            // ever-blocking step (e.g. program is just `Accept` or
+            // a chain of no-ops) and is spinning. Stall by
+            // clearing the cursor so `next_event_ns` stops
+            // scheduling it. `push_instruction` wakes it back up
+            // on the next program edit.
+            let mut iters = 0u32;
             for _ in 0..1024 {
-                let Some(node) = self.nodes.get(&nid) else { break };
-                let Some(i) = node.current_row else { break };
-                if node.step_rows.is_empty() {
+                iters += 1;
+                let (path, cursor_awaiting, cursor_started_ns, program_empty) = {
+                    let Some(n) = self.nodes.get(&nid) else { break };
+                    (
+                        n.cursor.clone(),
+                        n.cursor_awaiting,
+                        n.cursor_started_ns,
+                        n.program.is_empty(),
+                    )
+                };
+                if program_empty {
                     break;
                 }
-                if i >= node.step_rows.len() {
-                    // Past last row — auto-loop to 0 and signal the
-                    // visual so it can draw the return animation.
-                    if let Some(n) = self.nodes.get_mut(&nid) {
-                        n.current_row = Some(0);
-                        n.row_started_ns = now;
-                        n.row_awaiting = None;
-                    }
-                    events.push(SimEvent::StepsLooped { node: nid });
-                    events.push(SimEvent::StepsRowEntered { node: nid, row: 0 });
-                    continue;
-                }
-                let row = node.step_rows[i].clone();
-                match row {
-                    StepRow::Client { color } => {
-                        if node.row_awaiting.is_some() {
-                            // Request sent, response in flight.
-                            break;
-                        }
-                        let edge_for_row = self
-                            .outbound
-                            .get(&nid)
-                            .and_then(|outs| {
-                                outs.iter().copied().find(|eid| {
-                                    self.edges
-                                        .get(eid)
-                                        .and_then(|e| e.from_row)
-                                        == Some(i)
-                                })
-                            });
-                        let Some(edge_id) = edge_for_row else { break };
-                        let pid = self.fresh_packet_id();
-                        let packet = Packet::request(pid, color, nid, now);
+                let Some(path) = path else { break };
+
+                let instr = {
+                    let n = self.nodes.get(&nid).unwrap();
+                    instr_at(&n.program, &path).cloned()
+                };
+
+                match instr {
+                    None => {
+                        // Path overran end of its scope — auto-loop
+                        // to the top.
                         if let Some(n) = self.nodes.get_mut(&nid) {
-                            n.row_awaiting = Some(pid);
-                            n.sent += 1;
-                            n.outstanding.insert(pid, now);
+                            n.cursor = Some(vec![0]);
+                            n.cursor_started_ns = now;
+                            n.cursor_awaiting = None;
                         }
-                        self.travel_forward(edge_id, packet, events);
-                        break;
-                    }
-                    StepRow::Worker { duration_ns, .. } => {
-                        if now < node.row_started_ns.saturating_add(duration_ns) {
-                            break;
-                        }
-                        self.advance_step_row(nid, events);
+                        events.push(SimEvent::StepsLooped { node: nid });
+                        events.push(SimEvent::StepsRowEntered { node: nid, row: 0 });
                         continue;
                     }
+                    Some(Instruction::Sequence { body, .. }) => {
+                        if body.is_empty() {
+                            self.advance_sequential_cursor(nid, events);
+                            continue;
+                        }
+                        // Descend into the sequence.
+                        if let Some(n) = self.nodes.get_mut(&nid) {
+                            if let Some(c) = n.cursor.as_mut() {
+                                c.push(0);
+                            }
+                            n.cursor_started_ns = now;
+                        }
+                        continue;
+                    }
+                    Some(Instruction::Hold { duration_ns }) => {
+                        if now < cursor_started_ns.saturating_add(duration_ns) {
+                            break;
+                        }
+                        self.advance_sequential_cursor(nid, events);
+                        continue;
+                    }
+                    Some(Instruction::Emit { color, one_way }) => {
+                        if !one_way && cursor_awaiting.is_some() {
+                            break;
+                        }
+                        let top_row = match path.first() {
+                            Some(&r) => r,
+                            None => break,
+                        };
+                        let edge_for_row = self.outbound.get(&nid).and_then(|outs| {
+                            outs.iter().copied().find(|eid| {
+                                self.edges.get(eid).and_then(|e| e.from_row) == Some(top_row)
+                            })
+                        });
+                        let Some(edge_id) = edge_for_row else { break };
+                        let pid = self.fresh_packet_id();
+                        let packet = if one_way {
+                            Packet::oneway(pid, color)
+                        } else {
+                            Packet::request(pid, color, nid, now)
+                        };
+                        if let Some(n) = self.nodes.get_mut(&nid) {
+                            n.sent += 1;
+                            if !one_way {
+                                n.outstanding.insert(pid, now);
+                                n.cursor_awaiting = Some(pid);
+                            }
+                        }
+                        self.travel_forward(edge_id, packet, events);
+                        if one_way {
+                            self.advance_sequential_cursor(nid, events);
+                            continue;
+                        }
+                        break;
+                    }
+                    Some(Instruction::AwaitResponse) => {
+                        if cursor_awaiting.is_some() {
+                            break;
+                        }
+                        self.advance_sequential_cursor(nid, events);
+                        continue;
+                    }
+                    Some(_) => {
+                        // Any other leaf instruction is a no-op in
+                        // sequential mode; advance past it.
+                        self.advance_sequential_cursor(nid, events);
+                        continue;
+                    }
+                }
+            }
+            if iters >= 1024 {
+                if let Some(n) = self.nodes.get_mut(&nid) {
+                    n.cursor = None;
                 }
             }
         }
     }
 
-    fn advance_step_row(&mut self, nid: NodeId, events: &mut Vec<SimEvent>) {
+    /// Move the sequential cursor to the next leaf. Emits
+    /// `StepsLooped` if we wrap to the top of the program and
+    /// `StepsRowEntered` whenever the top-level row index changes.
+    fn advance_sequential_cursor(&mut self, nid: NodeId, events: &mut Vec<SimEvent>) {
         let now = self.now_ns;
-        let entered = if let Some(n) = self.nodes.get_mut(&nid) {
-            n.current_row = n.current_row.map(|i| i + 1);
-            n.row_started_ns = now;
-            n.row_awaiting = None;
-            n.current_row.filter(|r| *r < n.step_rows.len())
-        } else {
-            None
-        };
-        if let Some(r) = entered {
-            events.push(SimEvent::StepsRowEntered { node: nid, row: r });
+        let Some(n) = self.nodes.get_mut(&nid) else { return };
+        let Some(cursor) = n.cursor.as_mut() else { return };
+        let prev_top = cursor.first().copied();
+        let wrapped = advance_cursor_path(&n.program, cursor);
+        n.cursor_started_ns = now;
+        n.cursor_awaiting = None;
+        let new_top = cursor.first().copied();
+        if wrapped {
+            events.push(SimEvent::StepsLooped { node: nid });
+        }
+        if new_top != prev_top {
+            if let Some(r) = new_top {
+                events.push(SimEvent::StepsRowEntered { node: nid, row: r });
+            }
         }
     }
 
-    /// Update the `duration_ns` of the Worker row at `row` inside a
-    /// Steps script. Silently no-ops if the id isn't a Steps node,
-    /// the row is out of range, or the row isn't a Worker.
+    /// Update the duration of a duration-carrying instruction at
+    /// top-level program[row]. Handles bare `Process` / `Hold`
+    /// primitives and also "Worker"-labelled `Sequence` rows whose
+    /// first body entry is a `Hold`. Silently no-ops for other
+    /// shapes.
     pub fn set_steps_worker_duration_ns(&mut self, id: NodeId, row: usize, ns: TimeNs) {
         let Some(n) = self.nodes.get_mut(&id) else { return };
-        if n.kind != NodeKind::Steps {
-            return;
-        }
-        if let Some(StepRow::Worker { duration_ns, .. }) = n.step_rows.get_mut(row) {
-            *duration_ns = ns.max(1);
+        let Some(top) = n.program.get_mut(row) else { return };
+        let ns = ns.max(1);
+        match top {
+            Instruction::Process { duration_ns } => *duration_ns = ns,
+            Instruction::Hold { duration_ns } => *duration_ns = ns,
+            Instruction::Sequence { body, .. } => {
+                if let Some(Instruction::Hold { duration_ns }) = body.get_mut(0) {
+                    *duration_ns = ns;
+                } else if let Some(Instruction::Process { duration_ns }) = body.get_mut(0) {
+                    *duration_ns = ns;
+                }
+            }
+            _ => {}
         }
     }
 
-    /// Swap step rows `a` and `b` inside a Steps node. Updates any
-    /// `from_row` tags on outbound edges so per-row anchors follow
-    /// their row. If `current_row` pointed at one of the swapped
-    /// rows, update it so execution stays on the same logical row.
+    /// Read the duration of a duration-carrying instruction at
+    /// top-level program[row], in the same shapes accepted by
+    /// `set_steps_worker_duration_ns`. Returns `None` if there's
+    /// nothing duration-shaped at that row.
+    pub fn get_steps_row_duration_ns(&self, id: NodeId, row: usize) -> Option<TimeNs> {
+        let n = self.nodes.get(&id)?;
+        let top = n.program.get(row)?;
+        match top {
+            Instruction::Process { duration_ns } => Some(*duration_ns),
+            Instruction::Hold { duration_ns } => Some(*duration_ns),
+            Instruction::Sequence { body, .. } => match body.first()? {
+                Instruction::Hold { duration_ns } => Some(*duration_ns),
+                Instruction::Process { duration_ns } => Some(*duration_ns),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// Swap top-level program entries `a` and `b` inside a Steps
+    /// node. Updates any `from_row` edge tags so per-row anchors
+    /// follow their step. If the cursor's top-level index was at
+    /// one of the swapped rows, update it so execution stays on the
+    /// same logical step.
     pub fn swap_step_rows(&mut self, id: NodeId, a: usize, b: usize) {
         let Some(n) = self.nodes.get_mut(&id) else { return };
         if n.kind != NodeKind::Steps || a == b {
             return;
         }
-        if a >= n.step_rows.len() || b >= n.step_rows.len() {
+        if a >= n.program.len() || b >= n.program.len() {
             return;
         }
-        n.step_rows.swap(a, b);
-        if n.current_row == Some(a) {
-            n.current_row = Some(b);
-        } else if n.current_row == Some(b) {
-            n.current_row = Some(a);
+        n.program.swap(a, b);
+        if let Some(cursor) = n.cursor.as_mut() {
+            if let Some(first) = cursor.first_mut() {
+                if *first == a {
+                    *first = b;
+                } else if *first == b {
+                    *first = a;
+                }
+            }
         }
         for edge in self.edges.values_mut() {
             if edge.from != id {
@@ -1221,38 +1680,40 @@ impl Sim {
         }
     }
 
-    /// Remove step row `idx` from a Steps node. Edges anchored to
-    /// the removed row are deleted; edges anchored to later rows
-    /// shift down by one. Returns the EdgeIds that were removed so
-    /// the caller can despawn the matching Bevy edge entities.
+    /// Remove the top-level program entry at `idx` from a Steps
+    /// node. Edges anchored to that row are removed and later rows
+    /// shift down. Returns the EdgeIds removed so the caller can
+    /// despawn their Bevy counterparts.
     pub fn remove_step_row(&mut self, id: NodeId, idx: usize) -> Vec<EdgeId> {
         let mut removed = Vec::new();
         let Some(n) = self.nodes.get_mut(&id) else { return removed };
-        if n.kind != NodeKind::Steps || idx >= n.step_rows.len() {
+        if n.kind != NodeKind::Steps || idx >= n.program.len() {
             return removed;
         }
-        n.step_rows.remove(idx);
-        // Fix up current_row so it doesn't point past the new end or
-        // at the (now-gone) row.
-        if let Some(cur) = n.current_row {
-            if cur == idx {
-                // The row we were executing vanished — jump to the
-                // row that took its slot (or dormant if empty).
-                if n.step_rows.is_empty() {
-                    n.current_row = None;
-                } else if cur >= n.step_rows.len() {
-                    n.current_row = Some(0);
+        n.program.remove(idx);
+        // Fix up the cursor so it doesn't point at (or past) the
+        // removed row.
+        let now = self.now_ns;
+        if let Some(cursor) = n.cursor.as_mut() {
+            if let Some(first) = cursor.first().copied() {
+                if first == idx {
+                    // We were inside the removed row. Reset to the
+                    // replacement at the same index (or dormant if
+                    // empty, or wrap to 0 if past end).
+                    if n.program.is_empty() {
+                        n.cursor = None;
+                    } else if idx >= n.program.len() {
+                        n.cursor = Some(vec![0]);
+                    } else {
+                        n.cursor = Some(vec![idx]);
+                    }
+                    n.cursor_awaiting = None;
+                    n.cursor_started_ns = now;
+                } else if first > idx {
+                    cursor[0] = first - 1;
                 }
-                // else leave current_row at the same index (which
-                // now points at the next row).
-                n.row_awaiting = None;
-                n.row_started_ns = self.now_ns;
-            } else if cur > idx {
-                n.current_row = Some(cur - 1);
             }
         }
-        // Collect edges to remove (anchored at the removed row) and
-        // edges to shift (anchored at later rows).
         let edge_ids: Vec<EdgeId> = self.edges.keys().copied().collect();
         for eid in edge_ids {
             let Some(e) = self.edges.get_mut(&eid) else { continue };
@@ -1275,21 +1736,37 @@ impl Sim {
         removed
     }
 
-    /// Append a row to a Steps node's script. If the node was
-    /// dormant (empty script), starts the script at row 0. Returns
-    /// the new row's index, or `None` if the node isn't a Steps node.
-    pub fn push_step_row(&mut self, id: NodeId, row: StepRow) -> Option<usize> {
+    /// Append a top-level instruction to any node's program (not
+    /// just Steps). For Steps nodes, starts the cursor at the new
+    /// row if it was dormant. Returns the new index.
+    pub fn push_instruction(&mut self, id: NodeId, instr: Instruction) -> Option<usize> {
+        let now = self.now_ns;
+        let n = self.nodes.get_mut(&id)?;
+        n.program.push(instr);
+        let idx = n.program.len() - 1;
+        if n.mode == RuntimeMode::Sequential && n.cursor.is_none() {
+            n.cursor = Some(vec![0]);
+            n.cursor_started_ns = now;
+            n.cursor_awaiting = None;
+        }
+        Some(idx)
+    }
+
+    /// Legacy alias used by the existing click-append-Client/Worker
+    /// palette flow. Retained for source compatibility; prefer
+    /// `push_instruction`.
+    pub fn push_step_row(&mut self, id: NodeId, instr: Instruction) -> Option<usize> {
         let now = self.now_ns;
         let n = self.nodes.get_mut(&id)?;
         if n.kind != NodeKind::Steps {
             return None;
         }
-        n.step_rows.push(row);
-        let idx = n.step_rows.len() - 1;
-        if n.current_row.is_none() {
-            n.current_row = Some(0);
-            n.row_started_ns = now;
-            n.row_awaiting = None;
+        n.program.push(instr);
+        let idx = n.program.len() - 1;
+        if n.cursor.is_none() {
+            n.cursor = Some(vec![0]);
+            n.cursor_started_ns = now;
+            n.cursor_awaiting = None;
         }
         Some(idx)
     }
@@ -1349,7 +1826,7 @@ impl Sim {
         if n.down {
             return None;
         }
-        if !n.steps.iter().any(|s| matches!(s, Step::Buffer { .. })) {
+        if !n.program.iter().any(|s| matches!(s, Instruction::Buffer { .. })) {
             return None;
         }
         if n.buffer.front().map(|p| p.color) != Some(color) {
@@ -1369,9 +1846,9 @@ impl Sim {
             .iter()
             .filter_map(|(id, n)| {
                 if !n.down
-                    && n.steps
+                    && n.program
                         .iter()
-                        .any(|s| matches!(s, Step::EmitAtRate { period_ns, .. } if *period_ns > 0))
+                        .any(|s| matches!(s, Instruction::EmitAtRate { period_ns, .. } if *period_ns > 0))
                 {
                     Some(*id)
                 } else {
@@ -1387,10 +1864,10 @@ impl Sim {
                     continue;
                 };
                 let (period, color, one_way) = node
-                    .steps
+                    .program
                     .iter()
                     .find_map(|s| match s {
-                        Step::EmitAtRate {
+                        Instruction::EmitAtRate {
                             period_ns,
                             color,
                             one_way,
@@ -1424,9 +1901,9 @@ impl Sim {
                     .nodes
                     .get(&nid)
                     .and_then(|n| {
-                        n.steps
+                        n.program
                             .iter()
-                            .position(|s| matches!(s, Step::EmitAtRate { .. }))
+                            .position(|s| matches!(s, Instruction::EmitAtRate { .. }))
                             .map(|i| i + 1)
                     })
                     .unwrap_or(0);
@@ -1479,7 +1956,7 @@ impl Sim {
             let resume_idx = match self
                 .nodes
                 .get(&nid)
-                .and_then(|n| n.steps.iter().position(|s| matches!(s, Step::Process { .. })))
+                .and_then(|n| n.program.iter().position(|s| matches!(s, Instruction::Process { .. })))
             {
                 Some(i) => i + 1,
                 None => continue,
@@ -1546,24 +2023,71 @@ impl Sim {
         mut idx: usize,
         events: &mut Vec<SimEvent>,
     ) -> StepOutcome {
+        // Per-packet port-pipeline accumulator. Populated lazily on
+        // the first Filter/Sort/Take/Send. `None` = not yet
+        // initialized; `Some(vec)` = current candidate ports.
+        let mut ports: Option<Vec<EdgeId>> = None;
         loop {
             let step = match self
                 .nodes
                 .get(&nid)
-                .and_then(|n| n.steps.get(idx).cloned())
+                .and_then(|n| n.program.get(idx).cloned())
             {
                 Some(s) => s,
                 None => return StepOutcome::Consumed,
             };
 
             match step {
-                Step::EmitAtRate { .. }
-                | Step::PullInbound
-                | Step::AcceptInbound => {
-                    // Entry-style steps — skipped when advancing.
+                Instruction::EmitAtRate { .. }
+                | Instruction::PullInbound
+                | Instruction::AcceptInbound
+                | Instruction::AwaitResponse
+                | Instruction::Emit { .. }
+                | Instruction::Hold { .. }
+                | Instruction::Sequence { .. } => {
+                    // Entry-style / sequential-only instructions —
+                    // skipped when a packet is walking through the
+                    // program (per-packet mode). The sequential
+                    // primitives (Emit / Hold / Sequence) are driven
+                    // by the cursor, not by arriving packets, so
+                    // they're no-ops here.
                     idx += 1;
                 }
-                Step::MatchColor { color } => {
+                Instruction::Filter { pred } => {
+                    let set = ports.get_or_insert_with(|| default_push_ports(self, nid));
+                    set.retain(|eid| self.port_matches(*eid, pred, packet.color));
+                    idx += 1;
+                }
+                Instruction::Sort { key } => {
+                    let set = ports.get_or_insert_with(|| default_push_ports(self, nid));
+                    self.sort_ports(set, key);
+                    idx += 1;
+                }
+                Instruction::Take { n } => {
+                    let set = ports.get_or_insert_with(|| default_push_ports(self, nid));
+                    set.truncate(n);
+                    idx += 1;
+                }
+                Instruction::Send => {
+                    let set = ports.take().unwrap_or_else(|| default_push_ports(self, nid));
+                    if set.is_empty() {
+                        // Silent consume. For a drop event, place a
+                        // `Require { reason }` earlier in the pipeline.
+                        return StepOutcome::Consumed;
+                    }
+                    return self.dispatch_send(nid, packet, &set, events);
+                }
+                Instruction::Require { reason } => {
+                    let set = ports.get_or_insert_with(|| default_push_ports(self, nid));
+                    if set.is_empty() {
+                        return StepOutcome::Dropped {
+                            reason,
+                            color: packet.color,
+                        };
+                    }
+                    idx += 1;
+                }
+                Instruction::MatchColor { color } => {
                     if packet.color != color {
                         return StepOutcome::Dropped {
                             reason: drop_reason_for(self.nodes.get(&nid)),
@@ -1572,7 +2096,7 @@ impl Sim {
                     }
                     idx += 1;
                 }
-                Step::Buffer { capacity } => {
+                Instruction::Buffer { capacity } => {
                     let Some(n) = self.nodes.get_mut(&nid) else {
                         return StepOutcome::Consumed;
                     };
@@ -1590,7 +2114,7 @@ impl Sim {
                     }
                     return StepOutcome::Buffered;
                 }
-                Step::Process { duration_ns: _ } => {
+                Instruction::Process { duration_ns: _ } => {
                     let Some(n) = self.nodes.get_mut(&nid) else {
                         return StepOutcome::Consumed;
                     };
@@ -1604,72 +2128,13 @@ impl Sim {
                     n.started_at_ns = self.now_ns;
                     return StepOutcome::Processing;
                 }
-                Step::RespondImmediate | Step::RespondOnComplete => {
+                Instruction::Respond => {
                     if let Some(addr) = packet.reply.take() {
                         self.deliver_response(nid, &addr, packet.id, packet.color, events);
                     }
                     idx += 1;
                 }
-                Step::ForwardOut { strategy } => {
-                    let (candidates, empty_is_drop) = match strategy {
-                        ForwardStrategy::BlindRoundRobin => {
-                            // Blind push: round-robin across all
-                            // PUSH-mode outbound (readiness ignored;
-                            // pull edges are excluded — the receiver
-                            // will come fetch when ready). Only drop
-                            // if the push-outbound set is empty.
-                            let outs: Vec<EdgeId> = self
-                                .outbound
-                                .get(&nid)
-                                .map(|v| {
-                                    v.iter()
-                                        .copied()
-                                        .filter(|eid| {
-                                            self.edges
-                                                .get(eid)
-                                                .map(|e| e.mode == EdgeMode::Push)
-                                                .unwrap_or(false)
-                                        })
-                                        .collect()
-                                })
-                                .unwrap_or_default();
-                            (outs, true)
-                        }
-                        ForwardStrategy::ReadyRoundRobin => {
-                            (self.ready_outbound_candidates(nid, packet.color), true)
-                        }
-                        ForwardStrategy::ForwardOrConsume => {
-                            (self.ready_outbound_candidates(nid, packet.color), false)
-                        }
-                    };
-                    if candidates.is_empty() {
-                        if empty_is_drop {
-                            return StepOutcome::Dropped {
-                                reason: no_ready_reason_for(self.nodes.get(&nid)),
-                                color: packet.color,
-                            };
-                        } else {
-                            return StepOutcome::Consumed;
-                        }
-                    }
-                    let pick = match strategy {
-                        ForwardStrategy::BlindRoundRobin
-                        | ForwardStrategy::ReadyRoundRobin => {
-                            let Some(n) = self.nodes.get_mut(&nid) else {
-                                return StepOutcome::Consumed;
-                            };
-                            let cur = n.cursor_per_color.entry(packet.color).or_insert(0);
-                            let i = *cur % candidates.len();
-                            *cur = (i + 1) % candidates.len();
-                            i
-                        }
-                        ForwardStrategy::ForwardOrConsume => 0,
-                    };
-                    let edge_id = candidates[pick];
-                    self.travel_forward(edge_id, packet, events);
-                    return StepOutcome::Forwarded;
-                }
-                Step::Consume => {
+                Instruction::Consume => {
                     if let Some(n) = self.nodes.get_mut(&nid) {
                         *n.sink_per_color.entry(packet.color).or_insert(0) += 1;
                         n.sink_total += 1;
@@ -1713,12 +2178,12 @@ impl Sim {
                 // compatibility with pull-workers that still need to
                 // function when wired directly from a generator) the
                 // first MatchColor / Process step.
-                if let Some(i) = n.steps.iter().position(|s| matches!(s, Step::AcceptInbound)) {
+                if let Some(i) = n.program.iter().position(|s| matches!(s, Instruction::AcceptInbound)) {
                     i + 1
-                } else if let Some(i) = n.steps.iter().position(|s| {
+                } else if let Some(i) = n.program.iter().position(|s| {
                     matches!(
                         s,
-                        Step::MatchColor { .. } | Step::Process { .. } | Step::Buffer { .. }
+                        Instruction::MatchColor { .. } | Instruction::Process { .. } | Instruction::Buffer { .. }
                     )
                 }) {
                     i
@@ -1788,23 +2253,13 @@ impl Sim {
                         }
                     }
                     NodeKind::Steps => {
-                        // If this response matches the Call row we're
-                        // blocked on, clear the wait and advance. RTT
-                        // stats are tracked the same way as for Client
-                        // so the inspector has a consistent readout.
+                        // If this response matches the request the
+                        // cursor is blocked on, clear the wait. The
+                        // tick loop will then see AwaitResponse with
+                        // no awaiting and advance the cursor.
                         let send_time = n.outstanding.remove(&packet_id);
-                        let mut advanced_to: Option<usize> = None;
-                        if n.row_awaiting == Some(packet_id) {
-                            n.row_awaiting = None;
-                            n.current_row = n.current_row.map(|i| i + 1);
-                            n.row_started_ns = now;
-                            advanced_to = n.current_row.filter(|r| *r < n.step_rows.len());
-                        }
-                        if let Some(r) = advanced_to {
-                            events.push(SimEvent::StepsRowEntered {
-                                node: cursor,
-                                row: r,
-                            });
+                        if n.cursor_awaiting == Some(packet_id) {
+                            n.cursor_awaiting = None;
                         }
                         if let Some(st) = send_time {
                             let rtt = now.saturating_sub(st);
@@ -1863,23 +2318,26 @@ impl Sim {
             return false;
         }
         // Walk steps to determine ready-now.
-        for step in &n.steps {
+        for step in &n.program {
             match step {
-                Step::AcceptInbound | Step::PullInbound | Step::EmitAtRate { .. } => continue,
-                Step::MatchColor { color: c } => {
-                    if *c != color {
-                        return false;
-                    }
-                }
-                Step::Buffer { capacity } => {
-                    return n.buffer.len() < *capacity;
-                }
-                Step::Process { .. } => {
-                    return n.holding.is_none();
-                }
-                Step::RespondImmediate | Step::RespondOnComplete => continue,
-                Step::ForwardOut { .. } => {
-                    // Pass-through: ready iff some downstream is ready.
+                Instruction::AcceptInbound
+                | Instruction::PullInbound
+                | Instruction::EmitAtRate { .. }
+                | Instruction::AwaitResponse
+                | Instruction::Emit { .. }
+                | Instruction::Hold { .. }
+                | Instruction::Sequence { .. }
+                | Instruction::Filter { .. }
+                | Instruction::Sort { .. }
+                | Instruction::Take { .. }
+                | Instruction::Require { .. } => continue,
+                Instruction::Send => {
+                    // Same pass-through semantics as `ForwardOut`:
+                    // ready iff any downstream is ready for this
+                    // color. The pipeline transforms may narrow
+                    // that set, but at readiness-check time we
+                    // can't run the pipeline (no packet), so be
+                    // conservative and probe all outbound.
                     let Some(outs) = self.outbound.get(&node) else {
                         return false;
                     };
@@ -1888,7 +2346,19 @@ impl Sim {
                         self.ready_now_inner(e.to, color, visited)
                     });
                 }
-                Step::Consume => return true,
+                Instruction::MatchColor { color: c } => {
+                    if *c != color {
+                        return false;
+                    }
+                }
+                Instruction::Buffer { capacity } => {
+                    return n.buffer.len() < *capacity;
+                }
+                Instruction::Process { .. } => {
+                    return n.holding.is_none();
+                }
+                Instruction::Respond => continue,
+                Instruction::Consume => return true,
             }
         }
         false
@@ -1901,8 +2371,8 @@ impl Sim {
             .nodes
             .values()
             .filter_map(|n| {
-                n.steps.iter().find_map(|s| match s {
-                    Step::EmitAtRate {
+                n.program.iter().find_map(|s| match s {
+                    Instruction::EmitAtRate {
                         period_ns, color, ..
                     } if !n.down && *period_ns > 0 => Some(*color),
                     _ => None,
@@ -1982,8 +2452,8 @@ impl Sim {
             .map(|(eid, _)| cr.get(&(*eid, color)).copied().unwrap_or(0.0))
             .sum();
         // Source?
-        if let Some((period, c)) = n.steps.iter().find_map(|s| match s {
-            Step::EmitAtRate {
+        if let Some((period, c)) = n.program.iter().find_map(|s| match s {
+            Instruction::EmitAtRate {
                 period_ns, color, ..
             } if *period_ns > 0 => Some((*period_ns, *color)),
             _ => None,
@@ -1995,15 +2465,15 @@ impl Sim {
             }
         }
         // Worker-like: capped by processing rate and color match.
-        if let Some(proc_ns) = n.steps.iter().find_map(|s| match s {
-            Step::Process { duration_ns } => Some(*duration_ns),
+        if let Some(proc_ns) = n.program.iter().find_map(|s| match s {
+            Instruction::Process { duration_ns } => Some(*duration_ns),
             _ => None,
         }) {
             let color_ok = n
-                .steps
+                .program
                 .iter()
                 .find_map(|s| match s {
-                    Step::MatchColor { color } => Some(*color),
+                    Instruction::MatchColor { color } => Some(*color),
                     _ => None,
                 })
                 .map(|c| c == color)
@@ -2016,10 +2486,10 @@ impl Sim {
         // Queue / router / buffer pass-through: gated by color if a
         // MatchColor step exists.
         let color_ok = n
-            .steps
+            .program
             .iter()
             .find_map(|s| match s {
-                Step::MatchColor { color } => Some(*color),
+                Instruction::MatchColor { color } => Some(*color),
                 _ => None,
             })
             .map(|c| c == color)
@@ -2028,7 +2498,7 @@ impl Sim {
             return 0.0;
         }
         // Sinks don't push out.
-        if n.steps.iter().any(|s| matches!(s, Step::Consume)) {
+        if n.program.iter().any(|s| matches!(s, Instruction::Consume)) {
             return 0.0;
         }
         inbound
@@ -2038,8 +2508,8 @@ impl Sim {
         let Some(n) = self.nodes.get(&id) else {
             return false;
         };
-        let mc = n.steps.iter().find_map(|s| match s {
-            Step::MatchColor { color } => Some(*color),
+        let mc = n.program.iter().find_map(|s| match s {
+            Instruction::MatchColor { color } => Some(*color),
             _ => None,
         });
         match mc {
@@ -2069,10 +2539,10 @@ impl Sim {
             return 0.0;
         }
         let color_ok = n
-            .steps
+            .program
             .iter()
             .find_map(|s| match s {
-                Step::MatchColor { color } => Some(*color),
+                Instruction::MatchColor { color } => Some(*color),
                 _ => None,
             })
             .map(|c| c == color)
@@ -2081,8 +2551,8 @@ impl Sim {
             return 0.0;
         }
         // Worker-like cap
-        if let Some(proc_ns) = n.steps.iter().find_map(|s| match s {
-            Step::Process { duration_ns } => Some(*duration_ns),
+        if let Some(proc_ns) = n.program.iter().find_map(|s| match s {
+            Instruction::Process { duration_ns } => Some(*duration_ns),
             _ => None,
         }) {
             if proc_ns == 0 {
@@ -2881,14 +3351,72 @@ mod tests {
     }
 
     #[test]
+    fn pipeline_round_robin_by_composition() {
+        // Build a custom "router" by hand out of primitives:
+        //   Accept → Filter(Ready) → Sort(LastSentAt) → Take(1) → Send
+        // Fire 10 packets in; each downstream should see 5.
+        let mut sim = Sim::new();
+        let src = add_gen(&mut sim, RED, 10.0);
+        let router = sim.fresh_node();
+        let node = Node::new(
+            "CustomRouter",
+            NodeKind::Router,
+            RED,
+            vec![
+                Instruction::AcceptInbound,
+                Instruction::Filter { pred: PortPredicate::Ready },
+                Instruction::Sort { key: PortKey::LastSentAt },
+                Instruction::Take { n: 1 },
+                Instruction::Send,
+            ],
+        );
+        sim.nodes.insert(router, node);
+        sim.connect(src, router);
+        let s1 = sim.add_sink(RED);
+        let s2 = sim.add_sink(RED);
+        sim.connect(router, s1);
+        sim.connect(router, s2);
+        advance_secs(&mut sim, 1.0);
+        let a = sink_total(&sim, s1);
+        let b = sink_total(&sim, s2);
+        assert_eq!(a + b, 10);
+        assert!((a as i32 - b as i32).abs() <= 1, "uneven split: {a}/{b}");
+    }
+
+    #[test]
+    fn pipeline_broadcast_fans_to_all() {
+        // Send without Take dispatches to every port in the set.
+        let mut sim = Sim::new();
+        let src = add_gen(&mut sim, RED, 3.0);
+        let router = sim.fresh_node();
+        let node = Node::new(
+            "Broadcast",
+            NodeKind::Router,
+            RED,
+            vec![
+                Instruction::AcceptInbound,
+                Instruction::Filter { pred: PortPredicate::Ready },
+                Instruction::Send,
+            ],
+        );
+        sim.nodes.insert(router, node);
+        sim.connect(src, router);
+        let s1 = sim.add_sink(RED);
+        let s2 = sim.add_sink(RED);
+        sim.connect(router, s1);
+        sim.connect(router, s2);
+        advance_secs(&mut sim, 1.0);
+        // Every sink should see all 3 packets.
+        assert_eq!(sink_total(&sim, s1), 3);
+        assert_eq!(sink_total(&sim, s2), 3);
+    }
+
+    #[test]
     fn steps_client_row_roundtrips_and_loops() {
         // Steps: [Client RED] → Worker. Auto-loops after the Client
         // row completes: each loop issues a new request.
         let mut sim = Sim::new();
-        let steps = sim.add_steps(
-            RED,
-            vec![StepRow::Client { color: RED }],
-        );
+        let steps = sim.add_steps(RED, vec![client_step(RED)]);
         let w = add_worker_secs(&mut sim, RED, 0.05);
         sim.connect_from_row(steps, w, 0);
         advance_secs(&mut sim, 0.5);
@@ -2904,13 +3432,7 @@ mod tests {
         let mut sim = Sim::new();
         let steps = sim.add_steps(
             RED,
-            vec![
-                StepRow::Worker {
-                    duration_ns: 200 * NS_PER_MS,
-                    color: RED,
-                },
-                StepRow::Client { color: RED },
-            ],
+            vec![worker_step(200 * NS_PER_MS, RED), client_step(RED)],
         );
         let w = add_worker_secs(&mut sim, RED, 0.01);
         sim.connect_from_row(steps, w, 1);
@@ -2927,19 +3449,13 @@ mod tests {
         advance_secs(&mut sim, 1.0);
         let n = &sim.nodes[&steps];
         assert_eq!(n.sent, 0);
-        assert_eq!(n.current_row, None);
+        assert_eq!(n.cursor, None);
     }
 
     #[test]
     fn steps_auto_loop_emits_event() {
         let mut sim = Sim::new();
-        let steps = sim.add_steps(
-            RED,
-            vec![StepRow::Worker {
-                duration_ns: 50 * NS_PER_MS,
-                color: RED,
-            }],
-        );
+        let steps = sim.add_steps(RED, vec![worker_step(50 * NS_PER_MS, RED)]);
         let events = advance_secs(&mut sim, 0.3);
         let loops = events
             .iter()
