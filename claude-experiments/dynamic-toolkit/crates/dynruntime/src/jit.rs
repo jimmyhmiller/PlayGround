@@ -1097,6 +1097,7 @@ mod tests {
         frame[4] = 55;
         let safepoints = [SafepointRecord {
             code_offset: 0,
+            return_offset: 0,
             root_slots: vec![16, 32],
         }];
 

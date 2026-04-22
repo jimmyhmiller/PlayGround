@@ -440,12 +440,15 @@ fn sim_speed_controls(
     }
     if keys.just_pressed(KeyCode::BracketLeft) {
         speed.multiplier = (speed.multiplier * 0.5).max(1e-15);
+        eprintln!("[sim] speed = {:e}×", speed.multiplier);
     }
     if keys.just_pressed(KeyCode::BracketRight) {
         speed.multiplier = (speed.multiplier * 2.0).min(1e9);
+        eprintln!("[sim] speed = {:e}×", speed.multiplier);
     }
     if keys.just_pressed(KeyCode::Digit0) {
         speed.multiplier = 1.0;
+        eprintln!("[sim] speed = {:e}×", speed.multiplier);
     }
     if keys.just_pressed(KeyCode::Period) && speed.paused {
         // Step to the next scheduled sim event. On a mixed-scale board, a

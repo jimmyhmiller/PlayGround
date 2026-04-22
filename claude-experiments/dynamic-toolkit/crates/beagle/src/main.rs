@@ -1,146 +1,257 @@
-use beagle::lower::{lower_program, StringPool, STRING_TAG};
+use beagle::lower::{IcContext, lower_program, StringPool, STRING_TAG};
 use beagle::parser::Parser;
 
-use dynalloc::{PtrPolicy, SemiSpace};
-use dynir::dynexec::ContinuationTypes;
-use dynir::gc_runtime::GcInterpCtx;
-use dynir::interp::{ExternCallResult, InterpResult, ModuleInterpreter};
-use dynobj::{Compact, TypeInfo};
+use dynexec::NanBoxConfig;
+use dynlower::JitOutcome;
+use dynsym::Symbol;
 use dynvalue::{Decoded, NanBox, TagScheme};
 
-/// PtrPolicy hard-coded to the default beagle tag scheme: ptr_tag = 2.
-/// dynlang's `NanBoxPolicy` uses a thread-local that the private
-/// `DynGcRuntime` sets; since we drive the GC directly, use this.
-struct BeaglePtrPolicy;
-
-const BEAGLE_PTR_TAG: u32 = 2;
-const FULL_MASK: u64 = 0xFFFC_0000_0000_0000;
+/// NaN-box tag pattern — needed locally only for `nanbox_nil`. The GC's
+/// ptr tag, PtrPolicy, and safepoint wiring all live inside `DynGcRuntime`.
 const TAG_PATTERN: u64 = 0x7FFC_0000_0000_0000;
-const TAG_FIELD_MASK: u64 = 0x0003_0000_0000_0000;
-const PAYLOAD_MASK: u64 = 0x0000_FFFF_FFFF_FFFF;
 
-impl PtrPolicy for BeaglePtrPolicy {
-    fn try_decode_ptr(bits: u64) -> Option<*mut u8> {
-        let expected = TAG_PATTERN | ((BEAGLE_PTR_TAG as u64) << 48);
-        if (bits & (FULL_MASK | TAG_FIELD_MASK)) != expected {
-            return None;
-        }
-        let payload = bits & PAYLOAD_MASK;
-        if payload == 0 {
-            None
-        } else {
-            Some(payload as *mut u8)
-        }
-    }
+thread_local! {
+    static STRINGS: std::cell::RefCell<Option<StringPool>> =
+        const { std::cell::RefCell::new(None) };
 
-    fn encode_ptr(ptr: *mut u8) -> u64 {
-        TAG_PATTERN | ((BEAGLE_PTR_TAG as u64) << 48) | ((ptr as u64) & PAYLOAD_MASK)
+    /// Inline-cache state for dynamic property access. The JIT embeds a raw
+    /// pointer into `IcContext::array` at compile time, so this must stay
+    /// alive (and at a stable address) for the lifetime of the JIT module.
+    static IC: std::cell::RefCell<Option<IcContext>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+// ── JIT extern thunks ─────────────────────────────────────────────
+//
+// `__gc_alloc__` is NOT listed here — `DynGcRuntime::compile_jit` binds
+// it automatically. Language authors who try to bind it manually are
+// overridden.
+
+extern "C" fn ext_print(val: u64) {
+    print_value(val, false);
+}
+
+extern "C" fn ext_println(val: u64) {
+    print_value(val, true);
+}
+
+extern "C" fn ext_length(args: u64) -> u64 {
+    // Our "args" is either nil or a plain float NanBox carrying N.
+    // Treat "nil" as zero-length and "anything else" as one-length.
+    if args == nanbox_nil() {
+        encode_f64_int(0)
+    } else {
+        encode_f64_int(1)
     }
 }
 
+extern "C" fn ext_get(args: u64, _i: u64) -> u64 {
+    // Single-element "args": just return the args value back.
+    args
+}
+
+extern "C" fn ext_to_number(val: u64) -> u64 {
+    val
+}
+
+macro_rules! slow_stub {
+    ($name:ident) => {
+        extern "C" fn $name(a: u64, b: u64) -> u64 {
+            panic!(
+                "beagle slow-path `{}` hit: a=0x{:x} b=0x{:x} \
+                 — binary_trees subset shouldn't need it",
+                stringify!($name),
+                a,
+                b,
+            );
+        }
+    };
+}
+
+slow_stub!(ext_add);
+slow_stub!(ext_sub);
+slow_stub!(ext_mul);
+slow_stub!(ext_div);
+slow_stub!(ext_eq);
+slow_stub!(ext_lt);
+slow_stub!(ext_gt);
+
+extern "C" fn ext_neg(_v: u64) -> u64 {
+    panic!("beagle slow-path `ext_neg` hit");
+}
+extern "C" fn ext_not(_v: u64) -> u64 {
+    panic!("beagle slow-path `ext_not` hit");
+}
+
+/// IC miss: the JIT calls this when `cached_class_id` didn't match the
+/// object's `TypeInfo*`. We read the TypeInfo pointer from the header,
+/// look up the field's byte offset in the per-type dispatch table, write
+/// that back into the IC entry so the next call takes the fast path, and
+/// return the loaded field value.
+///
+/// Safety: this must not allocate. The object pointer is a live GC root on
+/// the caller's frame; there are no safepoints in here.
+/// The dynalloc semispace collector sets `1 << 63` in the header word
+/// when it moves an object, using the low 63 bits as the to-space
+/// address (see `dynalloc::semi_space::FORWARDING_BIT`).
+const FORWARDING_BIT: u64 = 1 << 63;
+
+extern "C" fn ext_prop_slow(obj_bits: u64, sym_id: u64, cache_id: u64) -> u64 {
+    // Decode the NanBox to a raw object pointer. Tag 2 is the default
+    // pointer tag (see `NanBoxTags::default`).
+    let mut raw_ptr = match NanBox::decode(obj_bits) {
+        Decoded::Tagged { tag: 2, payload } => payload as usize as *const u8,
+        other => panic!("beagle: property access on non-object NanBox: {:?}", other),
+    };
+
+    // Read the header word. For `dynobj::Compact`, that's u16 type_id at
+    // offset 0 + 6 bytes of zeroed padding. But this extern runs at the
+    // call-site safepoint: the stack slot holding our NanBox is updated
+    // by the GC, the arg register is not — so `raw_ptr` may already be a
+    // stale from-space address whose header now carries a forwarding
+    // pointer. Follow it before keying the cache.
+    let mut header = unsafe { *(raw_ptr as *const u64) };
+    if header & FORWARDING_BIT != 0 {
+        raw_ptr = (header & !FORWARDING_BIT) as usize as *const u8;
+        header = unsafe { *(raw_ptr as *const u64) };
+        debug_assert_eq!(
+            header & FORWARDING_BIT,
+            0,
+            "beagle: forwarding pointer chain (to-space object {:p} also forwarded)",
+            raw_ptr,
+        );
+    }
+
+    let class_key = header + 1;
+    let sym = Symbol::from_raw(sym_id as u32);
+
+    IC.with(|cell| {
+        let mut guard = cell.borrow_mut();
+        let ic = guard.as_mut().expect("IC not installed");
+        let table = ic.per_type.get(&class_key).unwrap_or_else(|| {
+            panic!(
+                "beagle: no dispatch table for class_key {} (sym `{}`)",
+                class_key,
+                ic.symbols.try_name(sym).unwrap_or("<unknown>"),
+            )
+        });
+        let offset = table.get(sym).unwrap_or_else(|| {
+            panic!(
+                "beagle: class_key {} has no field `{}`",
+                class_key,
+                ic.symbols.try_name(sym).unwrap_or("<unknown>"),
+            )
+        });
+
+        let entry = ic.array.get_mut(cache_id as u32);
+        entry.cached_class_id = class_key;
+        entry.cached_value = offset;
+
+        unsafe { *(raw_ptr.add(offset as usize) as *const u64) }
+    })
+}
+
+/// User extern map. `__gc_alloc__` is intentionally absent — the runtime
+/// owns it. Returning `None` tells dynlang the extern is unresolved.
+fn jit_extern_for(name: &str) -> Option<*const u8> {
+    Some(match name {
+        "beagle_print" => ext_print as *const u8,
+        "beagle_println" => ext_println as *const u8,
+        "beagle_length" => ext_length as *const u8,
+        "beagle_get" => ext_get as *const u8,
+        "beagle_to_number" => ext_to_number as *const u8,
+        "beagle_add" => ext_add as *const u8,
+        "beagle_sub" => ext_sub as *const u8,
+        "beagle_mul" => ext_mul as *const u8,
+        "beagle_div" => ext_div as *const u8,
+        "beagle_neg" => ext_neg as *const u8,
+        "beagle_eq" => ext_eq as *const u8,
+        "beagle_lt" => ext_lt as *const u8,
+        "beagle_gt" => ext_gt as *const u8,
+        "beagle_not" => ext_not as *const u8,
+        "beagle_prop_slow" => ext_prop_slow as *const u8,
+        _ => return None,
+    })
+}
+
 fn main() {
+    // Beagle's binary_trees recursion (doWorkHelper with iterations up to
+    // 2M at n=21) blows the default 8 MiB thread stack. Spawn a worker
+    // thread with room for it.
+    let handle = std::thread::Builder::new()
+        .name("beagle-main".into())
+        .stack_size(2 * 1024 * 1024 * 1024)
+        .spawn(real_main)
+        .expect("spawn beagle-main");
+    handle.join().expect("beagle-main panicked");
+}
+
+fn real_main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
-        eprintln!("usage: beagle <file.bg>");
+        eprintln!("usage: beagle <file.bg> [N]");
         std::process::exit(1);
     }
     let path = &args[1];
+    let cli_n: Option<i64> = args.get(2).map(|s| {
+        s.parse::<i64>()
+            .unwrap_or_else(|_| panic!("expected integer for N, got {s:?}"))
+    });
+
     let src = std::fs::read_to_string(path).expect("read source file");
     let mut parser = Parser::new(path.clone(), src).expect("create parser");
     let ast = parser.parse().expect("parse");
-
     let lowered = lower_program(&ast);
 
-    // Install the string pool for the print extern.
     STRINGS.with(|cell| *cell.borrow_mut() = Some(lowered.strings));
+    // Install the IC *before* JIT compile: the compiled code embeds a raw
+    // pointer into `ic.array`. Moving the IcContext into the thread-local
+    // keeps that pointer valid (Vec's heap storage doesn't move on move).
+    IC.with(|cell| *cell.borrow_mut() = Some(lowered.ic));
 
-    // Build the GC context: beagle object types + continuation types.
-    let mut type_table: Vec<TypeInfo> = lowered.type_infos.clone();
-    let cont_types = ContinuationTypes::register_into::<Compact>(&mut type_table);
-
-    let heap = SemiSpace::new::<Compact>(2 * 1024 * 1024 * 1024);
-    let ctx: GcInterpCtx<Compact, BeaglePtrPolicy> =
-        GcInterpCtx::new(heap, type_table, cont_types);
-    ctx.set_gc_threshold(1_000_000);
-
-    // ── Build interpreter. ────────────────────────────────────────
-    let mut interp = ModuleInterpreter::<NanBox, _>::new(&lowered.module, &ctx);
-
-    if module_has_extern(&lowered.module, "__gc_alloc__") {
-        interp.bind_by_name("__gc_alloc__", |args| {
-            let type_id = args[0] as usize;
-            let varlen_len = args[1] as usize;
-            let info = &ctx.type_table()[type_id];
-            let ptr = unsafe { dynalloc::alloc_obj::<Compact>(&ctx, info, varlen_len) };
-            assert!(!ptr.is_null(), "gc alloc failed (OOM even after collection)");
-            ExternCallResult::Value(Some(ptr as u64))
-        });
-    }
-
-    interp.bind_by_name("beagle_print", |args| {
-        print_value(args[0], false);
-        ExternCallResult::Value(None)
-    });
-    interp.bind_by_name("beagle_println", |args| {
-        print_value(args[0], true);
-        ExternCallResult::Value(None)
-    });
-
-    // Minimal stdlib stubs — just enough for `main(args)` to accept
-    // that args is nil and fall through to its default branch.
-    if module_has_extern(&lowered.module, "beagle_length") {
-        interp.bind_by_name("beagle_length", |_args| {
-            // nil has length 0 in our stub
-            ExternCallResult::Value(Some(encode_f64_int(0)))
-        });
-    }
-    if module_has_extern(&lowered.module, "beagle_get") {
-        interp.bind_by_name("beagle_get", |_args| {
-            ExternCallResult::Value(Some(nanbox_nil()))
-        });
-    }
-    if module_has_extern(&lowered.module, "beagle_to_number") {
-        interp.bind_by_name("beagle_to_number", |args| {
-            // Pass through; in a real stdlib we'd parse strings.
-            ExternCallResult::Value(Some(args[0]))
-        });
-    }
-
-    for name in [
-        "beagle_add", "beagle_sub", "beagle_mul", "beagle_div",
-        "beagle_neg", "beagle_eq", "beagle_lt", "beagle_gt", "beagle_not",
-    ] {
-        interp.bind_by_name(name, move |_args| {
-            panic!(
-                "beagle slow-path `{name}` hit — binary_trees subset shouldn't need it",
-            );
-        });
-    }
-
-    // ── Run main with a single nil arg. ──────────────────────────
-    // binary_trees declares `fn main(args)`; we pass nil and rely on
-    // `length(args) > 0` being false → falls through to `n = 10`.
-    // Our lowering doesn't implement `length` yet though, so if main
-    // tries to call it we'll panic. For now the benchmark file uses
-    // `if length(args) > 0 { to-number(get(args, 0)) } else { 10 }` —
-    // we need those externs, or a workaround.
+    // Compile with `NanBoxConfig` (precise stack maps) + LinearScan regalloc
+    // for tighter frames (binary_trees recurses millions deep).
     //
-    // Simplest workaround for MVP: bind `length` as a fake extern that
-    // always returns 0 (so `length(args) > 0` is false → n = 10).
-    // This only works if lowering routes `length(args)` to an extern,
-    // which it does NOT — `Call { name: "length", ... }` will panic
-    // at lowering as "unknown function". We need to handle that.
-    //
-    // For now just run and see what happens.
-    let nil = nanbox_nil();
-    match interp.run(lowered.main, &[nil]) {
-        Ok(InterpResult::Value(_)) | Ok(InterpResult::Void) => {}
-        Ok(other) => {
-            eprintln!("beagle: unexpected result: {:?}", other);
-            std::process::exit(1);
+    // `gc.compile_jit` auto-binds `__gc_alloc__` and wires the safepoint
+    // handler — language code supplies only its own externs.
+    let jit = lowered.gc.compile_jit::<
+        NanBoxConfig,
+        dynlower::Arm64Backend,
+        dynlower::regalloc::LinearScanAllocator,
+    >(&lowered.module, jit_extern_for);
+
+    if std::env::var("BEAGLE_DUMP_IR").is_ok() {
+        for func in &lowered.module.functions {
+            eprintln!("{}", func);
+            eprintln!("---");
         }
-        Err(e) => {
-            eprintln!("beagle: runtime error: {:?}", e);
+    }
+
+    if std::env::var("BEAGLE_DUMP_JIT").is_ok() {
+        jit.dump_code();
+    }
+
+    let gc_threshold: f64 = std::env::var("BEAGLE_GC_THRESHOLD")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0.75);
+
+    // Build the `args` nanbox. If an N was passed on the CLI, encode
+    // it as a plain float NanBox and rely on beagle_length/get/to_number
+    // stubs above to treat it as a single-element arg vector.
+    let args_val = match cli_n {
+        Some(n) => encode_f64_int(n),
+        None => nanbox_nil(),
+    };
+
+    // `run_jit` installs the stack-map safepoint session, the PtrPolicy,
+    // and this thread as the active runtime for `__gc_alloc__` callbacks.
+    let result = lowered.gc.run_jit_with_threshold(&jit, lowered.main, &[args_val], gc_threshold);
+
+    match result {
+        JitOutcome::Value(_) | JitOutcome::Void => {}
+        other => {
+            eprintln!("beagle: JIT error: {:?}", other);
             std::process::exit(1);
         }
     }
@@ -152,18 +263,6 @@ fn nanbox_nil() -> u64 {
 
 fn encode_f64_int(n: i64) -> u64 {
     (n as f64).to_bits()
-}
-
-fn module_has_extern(module: &dynir::Module, name: &str) -> bool {
-    module.func_table.iter().any(|def| match def {
-        dynir::FuncDef::Extern(ef) => ef.name == name,
-        _ => false,
-    })
-}
-
-thread_local! {
-    static STRINGS: std::cell::RefCell<Option<StringPool>> =
-        std::cell::RefCell::new(None);
 }
 
 fn print_value(bits: u64, newline: bool) {

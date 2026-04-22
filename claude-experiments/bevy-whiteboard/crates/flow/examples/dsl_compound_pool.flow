@@ -1,0 +1,126 @@
+# compound_pool written in the Flow DSL.
+#
+# Load with:  cargo run -p flow --example dsl_load
+
+params {
+    network:       1ms
+    service_mean:  25ms
+    dispatch_cost: 1us
+    tick_period:   10ms
+}
+
+node Router {
+    slots {
+        ready: Samples(64)
+    }
+    rule worker_ready {
+        on ready(w)
+        do push ready <- w
+    }
+    rule dispatch {
+        on req(_)
+        when len(ready) > 0
+        do {
+            pop ready -> w
+            emit work(nil) to (w)
+        }
+    }
+    rule worker_done {
+        on done(w)
+        do {
+            push ready <- w
+            emit resp(nil) to out resp
+        }
+    }
+}
+
+node W0 {
+    rule bootstrap {
+        on start(_)
+        do emit ready(self) to Router
+    }
+    rule accept_work {
+        on work(_)
+        do emit tick_done(nil) to self
+    }
+    rule publish_done {
+        on tick_done(_)
+        do emit done(self) to Router
+    }
+}
+
+node W1 {
+    rule bootstrap {
+        on start(_)
+        do emit ready(self) to Router
+    }
+    rule accept_work {
+        on work(_)
+        do emit tick_done(nil) to self
+    }
+    rule publish_done {
+        on tick_done(_)
+        do emit done(self) to Router
+    }
+}
+
+node W2 {
+    rule bootstrap {
+        on start(_)
+        do emit ready(self) to Router
+    }
+    rule accept_work {
+        on work(_)
+        do emit tick_done(nil) to self
+    }
+    rule publish_done {
+        on tick_done(_)
+        do emit done(self) to Router
+    }
+}
+
+compound Pool {
+    in  { req: Router }
+    out { resp: Router }
+}
+
+node Client {
+    rule fire {
+        on tick(_)
+        do {
+            emit req(nil) to Pool
+            emit tick(nil) to Client
+        }
+    }
+    rule got_resp {
+        on resp(_)
+        do record completed 1
+    }
+}
+
+edges {
+    # internal: Router ↔ each worker, with stochastic service on self-loops
+    Router -> W0 : param(dispatch_cost)
+    W0 -> Router : param(dispatch_cost)
+    W0 -> W0     : Exp(param(service_mean))
+
+    Router -> W1 : param(dispatch_cost)
+    W1 -> Router : param(dispatch_cost)
+    W1 -> W1     : Exp(param(service_mean))
+
+    Router -> W2 : param(dispatch_cost)
+    W2 -> Router : param(dispatch_cost)
+    W2 -> W2     : Exp(param(service_mean))
+
+    # external: Client ↔ Pool via ports
+    Client      -> Pool.req   : param(network)
+    Pool.resp   -> Client     : param(network)
+    Client      -> Client     : param(tick_period)
+}
+
+scenario {
+    at 0ns: inject W0 <- start(nil)
+    at 0ns: inject W1 <- start(nil)
+    at 0ns: inject W2 <- start(nil)
+    at 0ns: inject Client <- tick(nil)
+}

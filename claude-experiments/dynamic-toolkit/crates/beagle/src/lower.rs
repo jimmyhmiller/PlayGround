@@ -5,8 +5,8 @@
 use std::collections::HashMap;
 
 use dynir::{CmpOp, FuncRef, Module, Signature, Type, Value};
-use dynlang::{DynFunc, DynModule, FieldKind, GcConfig, NanBoxTags, ObjTypeId};
-use dynobj::TypeInfo;
+use dynlang::{DynFunc, DynModule, FieldKind, GcConfig, NanBoxTags, ObjTypeId, gc::DynGcRuntime};
+use dynsym::{DispatchTable, InlineCacheArray, InlineCacheEntry, Symbol, SymbolTable};
 
 use crate::ast::{Ast, Condition, Pattern};
 
@@ -39,9 +39,31 @@ pub struct Lowered {
     pub module: Module,
     pub main: FuncRef,
     pub strings: StringPool,
-    /// TypeInfos for every registered object type, in ObjTypeId order.
-    /// Used at runtime to set up the GC's type table.
-    pub type_infos: Vec<TypeInfo>,
+    /// Preconfigured GC runtime — already knows the module's tag scheme
+    /// and type table. Use it via `DynGcRuntime::compile_jit` / `run_jit`
+    /// or `interp_gc_alloc`. Language embedders should never roll their
+    /// own `Heap` / `PtrPolicy` / `JitSafepointSession`.
+    pub gc: DynGcRuntime,
+    /// Inline-cache state for dynamic property access. Must outlive the JIT
+    /// module — the JIT holds a raw pointer into `ic.array`. Host binary
+    /// installs this into a thread_local and reads it from the slow path.
+    pub ic: IcContext,
+}
+
+/// Inline-cache state: interned field names, per-struct offset tables
+/// keyed by class key (u16 type_id + 1, stored as u64), and the array of
+/// call-site cache slots whose stable base pointer is embedded in JIT code.
+///
+/// Why the +1: the object header stores a u16 `type_id` at offset 0
+/// (`dynobj::Compact`). We load it as u64 and shift by 1 so that
+/// `class_key = 0` can be used as the empty-cache sentinel — the first
+/// struct declared in a program would otherwise collide with the
+/// `InlineCacheEntry::EMPTY` marker and never take the fast path.
+pub struct IcContext {
+    pub symbols: SymbolTable,
+    /// class_key (type_id as u64, +1) → (symbol → field byte offset as u64).
+    pub per_type: HashMap<u64, DispatchTable>,
+    pub array: InlineCacheArray,
 }
 
 /// Field layout we extract from dynlang up front, so we can do field
@@ -63,10 +85,9 @@ pub fn lower_program(program: &Ast) -> Lowered {
         _ => panic!("lower_program: expected Program, got {:?}", program),
     };
 
-    let mut dm = DynModule::new(
-        GcConfig::semi_space(2 * 1024 * 1024 * 1024),
-        NanBoxTags::default(),
-    );
+    let gc_config = GcConfig::generational(2 * 1024 * 1024 * 1024);
+    let tags = NanBoxTags::default();
+    let mut dm = DynModule::new(gc_config.clone(), tags.clone());
 
     dm.register_slow_paths("beagle");
 
@@ -94,9 +115,24 @@ pub fn lower_program(program: &Ast) -> Lowered {
         Signature { params: vec![Type::I64], ret: Some(Type::I64) },
     );
 
+    // Inline-cache slow path for property access. The host binary
+    // registers this in `jit_extern_for`. Takes (obj, sym_id, cache_id),
+    // fills the IC entry, returns the loaded field.
+    let prop_slow_ref = dm.declare_extern(
+        "beagle_prop_slow",
+        Signature {
+            params: vec![Type::I64, Type::I64, Type::I64],
+            ret: Some(Type::I64),
+        },
+    );
+
     // ── Phase 1: register object types for all `struct` declarations. ──
+    // Also build the symbol table + per-type dispatch tables that the IC
+    // slow path will consult. Field names are allowed to collide across
+    // structs — polymorphic access goes through the inline cache.
     let mut structs: HashMap<String, StructInfo> = HashMap::new();
-    let mut field_to_struct: HashMap<String, String> = HashMap::new();
+    let mut symbols = SymbolTable::new();
+    let mut per_type: HashMap<u64, DispatchTable> = HashMap::new();
 
     for el in elements {
         if let Ast::Struct { name, fields, .. } = el {
@@ -111,28 +147,29 @@ pub fn lower_program(program: &Ast) -> Lowered {
                 field_names.push(fname);
             }
             let id = builder.build();
-            // Grab the offsets now, before we start mutating dm with
-            // function bodies.
             let ty = dm.get_obj_type(id);
             let offsets: HashMap<String, i32> = ty
                 .field_offsets
                 .iter()
                 .map(|(k, (off, _kind))| (k.clone(), *off))
                 .collect();
+            // Class key = u16 type_id + 1, so no valid key is 0 (which
+            // InlineCacheEntry reserves as "empty"). type_ids are
+            // assigned sequentially from 0 by ObjTypeBuilder::build.
+            let class_key = (ty.type_info.type_id as u64) + 1;
+
+            let mut table = DispatchTable::with_capacity(0);
+            for fname in &field_names {
+                let sym = symbols.intern(fname);
+                let off = offsets[fname] as u64;
+                table.set(sym, off);
+            }
+            per_type.insert(class_key, table);
+
             structs.insert(
                 name.clone(),
                 StructInfo { type_id: id, field_offsets: offsets },
             );
-            for fname in field_names {
-                if let Some(prev) = field_to_struct.insert(fname.clone(), name.clone()) {
-                    if prev != *name {
-                        panic!(
-                            "field name `{fname}` appears on both `{prev}` and `{name}`; \
-                             MVP requires statically resolvable field access",
-                        );
-                    }
-                }
-            }
         }
     }
 
@@ -150,6 +187,15 @@ pub fn lower_program(program: &Ast) -> Lowered {
 
     let mut strings = StringPool::default();
 
+    // Pre-walk the program to count property-access sites so we can
+    // allocate a fixed-size `InlineCacheArray` whose base pointer we can
+    // embed in IR as a constant. Growing the array later would invalidate
+    // that pointer.
+    let num_ic_sites = count_property_accesses(program);
+    let ic_array = InlineCacheArray::new(num_ic_sites);
+    let ic_base_addr = ic_array.as_ptr() as u64;
+    let mut next_cache_id: u32 = 0;
+
     // ── Phase 3: define bodies. ──
     for el in elements {
         if let Ast::Function { name, args, body, .. } = el {
@@ -159,15 +205,18 @@ pub fn lower_program(program: &Ast) -> Lowered {
             {
                 let mut lw = Lowerer {
                     structs: &structs,
-                    field_to_struct: &field_to_struct,
                     func_refs: &func_refs,
                     print_ref,
                     println_ref,
                     length_ref,
                     get_ref,
                     to_number_ref,
+                    prop_slow_ref,
                     current_fn: fname.clone(),
                     strings: &mut strings,
+                    symbols: &mut symbols,
+                    ic_base_addr,
+                    next_cache_id: &mut next_cache_id,
                 };
                 let entry = f.fb.entry_block();
                 for (i, pat) in args.iter().enumerate() {
@@ -185,34 +234,49 @@ pub fn lower_program(program: &Ast) -> Lowered {
         }
     }
 
-    // Collect TypeInfos (in ObjTypeId order) before consuming dm.
-    let mut type_infos: Vec<TypeInfo> = Vec::with_capacity(dm.obj_types.len());
-    for obj_ty in &dm.obj_types {
-        type_infos.push(*obj_ty.type_info);
-    }
+    // Build the GC runtime from the module's obj_types *before* we
+    // consume `dm` via `build()`. The runtime carries everything needed
+    // to compile and run the module: tag scheme, type table, safepoint
+    // handler, __gc_alloc__ thunk.
+    let gc = DynGcRuntime::new(&gc_config, &tags, &dm.obj_types);
 
     let built = dm.build();
     // `built.strings` is dynlang's pool, not ours. Discard it.
     let _ = built.strings;
+
+    assert_eq!(
+        next_cache_id as usize, num_ic_sites,
+        "IC site count mismatch: pre-count said {num_ic_sites} but lowering consumed {next_cache_id}",
+    );
+
     Lowered {
         module: built.module,
         main: main_ref,
         strings,
-        type_infos,
+        gc,
+        ic: IcContext {
+            symbols,
+            per_type,
+            array: ic_array,
+        },
     }
 }
 
 struct Lowerer<'a> {
     structs: &'a HashMap<String, StructInfo>,
-    field_to_struct: &'a HashMap<String, String>,
     func_refs: &'a HashMap<String, FuncRef>,
     print_ref: FuncRef,
     println_ref: FuncRef,
     length_ref: FuncRef,
     get_ref: FuncRef,
     to_number_ref: FuncRef,
+    prop_slow_ref: FuncRef,
     current_fn: String,
     strings: &'a mut StringPool,
+    symbols: &'a mut SymbolTable,
+    /// Base address of the InlineCacheArray, embedded as an IR constant.
+    ic_base_addr: u64,
+    next_cache_id: &'a mut u32,
 }
 
 impl<'a> Lowerer<'a> {
@@ -395,6 +459,12 @@ impl<'a> Lowerer<'a> {
                     .collect();
 
                 let zero = f.fb.iconst(Type::I64, 0);
+                // Emit an empty safepoint right before the allocation. The
+                // JIT's batch_lower records ALL stack/spill/callee-save
+                // slots here regardless of the `live` list, and the
+                // PtrPolicy filters non-pointer NanBox words out during
+                // GC. This gives the collector a place to safely run.
+                f.fb.safepoint(&[]);
                 let raw = f.gc_alloc(info.type_id, zero);
 
                 for (fname, val) in &field_vals {
@@ -411,18 +481,14 @@ impl<'a> Lowerer<'a> {
             // ── Property access ─────────────────────────────────────
             Ast::PropertyAccess { object, property, .. } => {
                 let obj_val = self.lower_expr(f, object);
-                let raw = f.obj_unwrap(obj_val);
                 let fname = match property.as_ref() {
                     Ast::Identifier(n, _) => n.clone(),
                     other => panic!("property access expects ident, got {:?}", other),
                 };
-                let struct_name = self
-                    .field_to_struct
-                    .get(&fname)
-                    .unwrap_or_else(|| panic!("unknown field `{fname}`"));
-                let info = self.structs.get(struct_name).unwrap();
-                let offset = *info.field_offsets.get(&fname).unwrap();
-                f.fb.load(Type::I64, raw, offset)
+                let sym = self.symbols.intern(&fname);
+                let cache_id = *self.next_cache_id;
+                *self.next_cache_id += 1;
+                self.emit_ic_property_load(f, obj_val, sym, cache_id)
             }
 
             // ── Inert at lowering ──────────────────────────────────
@@ -436,6 +502,64 @@ impl<'a> Lowerer<'a> {
                 self.current_fn, other
             ),
         }
+    }
+
+    /// Emit inline-cache dispatch for a property load. The shape is
+    /// monomorphic-with-slow-path: compare the object header's TypeInfo*
+    /// against the cached class id, take the fast load on hit, call the
+    /// slow-path extern on miss (which fills the entry and does the load).
+    fn emit_ic_property_load(
+        &mut self,
+        f: &mut DynFunc,
+        obj: Value,
+        sym: Symbol,
+        cache_id: u32,
+    ) -> Value {
+        // Raw heap pointer. `dynobj::Compact` stores a u16 `type_id` at
+        // offset 0 with zeroed padding in the remaining 6 bytes, so a
+        // full I64 load gives `type_id as u64`. We add 1 to produce the
+        // class key (keeps 0 free as the IC empty-sentinel).
+        let raw = f.obj_unwrap(obj);
+        let type_id = f.fb.load(Type::I64, raw, 0);
+        let one = f.fb.iconst(Type::I64, 1);
+        let ti = f.fb.add(type_id, one);
+
+        // IC entry address: ic_base + cache_id * sizeof(InlineCacheEntry).
+        // The base is a compile-time-known u64; the array is heap-allocated
+        // once with fixed capacity, so the pointer is stable.
+        let entry_size = std::mem::size_of::<InlineCacheEntry>() as i64;
+        let entry_addr_const =
+            self.ic_base_addr as i64 + (cache_id as i64) * entry_size;
+        let entry_addr = f.fb.iconst(Type::I64, entry_addr_const);
+
+        // cached_class_id is the first u64 in InlineCacheEntry.
+        let cached_class = f.fb.load(Type::I64, entry_addr, 0);
+        let hit = f.fb.icmp(CmpOp::Eq, cached_class, ti);
+
+        let hit_bb = f.fb.create_block(&[]);
+        let miss_bb = f.fb.create_block(&[]);
+        let merge_bb = f.fb.create_block(&[Type::I64]);
+        f.fb.br_if(hit, hit_bb, &[], miss_bb, &[]);
+
+        // ── Fast path: load(raw + cached_offset) ───────────────────
+        f.fb.switch_to_block(hit_bb);
+        let cached_off = f.fb.load(Type::I64, entry_addr, 8); // cached_value field
+        let addr = f.fb.add(raw, cached_off);
+        let fast_val = f.fb.load(Type::I64, addr, 0);
+        f.fb.jump(merge_bb, &[fast_val]);
+
+        // ── Slow path: extern call, fills the IC entry and returns value ─
+        f.fb.switch_to_block(miss_bb);
+        let sym_val = f.fb.iconst(Type::I64, sym.as_u32() as i64);
+        let cid_val = f.fb.iconst(Type::I64, cache_id as i64);
+        let slow_val = f
+            .fb
+            .call(self.prop_slow_ref, &[obj, sym_val, cid_val])
+            .unwrap();
+        f.fb.jump(merge_bb, &[slow_val]);
+
+        f.fb.switch_to_block(merge_bb);
+        f.fb.block_param(merge_bb, 0)
     }
 
     /// Bit-equal two NanBox values. For beagle's `==`, this gives the
@@ -466,4 +590,174 @@ fn snapshot_vars(f: &mut DynFunc) -> Vec<Value> {
         .flat_map(|scope| scope.keys().cloned())
         .collect();
     names.into_iter().map(|n| f.get_var(&n)).collect()
+}
+
+/// Count every `Ast::PropertyAccess` node reachable from `ast`. Must
+/// match (or exceed) the number of IC sites lowering will emit — we
+/// embed the IC array's base pointer as a compile-time constant, so
+/// the array cannot grow once lowering starts. The assertion in
+/// `lower_program` catches mismatches.
+///
+/// Exhaustive: every `Ast` variant is enumerated so adding a new
+/// variant to the AST triggers a compile error here.
+pub fn count_property_accesses(ast: &Ast) -> usize {
+    let mut n = 0;
+    count_in(ast, &mut n);
+    n
+}
+
+fn count_in(ast: &Ast, n: &mut usize) {
+    match ast {
+        Ast::PropertyAccess { object, property, .. } => {
+            *n += 1;
+            count_in(object, n);
+            count_in(property, n);
+        }
+
+        Ast::Program { elements, .. } => count_vec(elements, n),
+        Ast::Function { body, .. } => count_vec(body, n),
+        Ast::Struct { fields, .. } => count_vec(fields, n),
+        Ast::StructField { default_value, .. } => count_opt_box(default_value, n),
+        Ast::Enum { variants, .. } => count_vec(variants, n),
+        Ast::EnumVariant { fields, .. } => count_vec(fields, n),
+        Ast::Protocol { body, .. } => count_vec(body, n),
+        Ast::Extend { body, .. } => count_vec(body, n),
+        Ast::If { condition, then, else_, .. } => {
+            count_in(condition, n);
+            count_vec(then, n);
+            count_vec(else_, n);
+        }
+        Ast::Condition { left, right, .. }
+        | Ast::Add { left, right, .. }
+        | Ast::Sub { left, right, .. }
+        | Ast::Mul { left, right, .. }
+        | Ast::Div { left, right, .. }
+        | Ast::Modulo { left, right, .. }
+        | Ast::ShiftLeft { left, right, .. }
+        | Ast::ShiftRight { left, right, .. }
+        | Ast::ShiftRightZero { left, right, .. }
+        | Ast::BitWiseAnd { left, right, .. }
+        | Ast::BitWiseOr { left, right, .. }
+        | Ast::BitWiseXor { left, right, .. }
+        | Ast::And { left, right, .. }
+        | Ast::Or { left, right, .. } => {
+            count_in(left, n);
+            count_in(right, n);
+        }
+        Ast::Recurse { args, .. } | Ast::TailRecurse { args, .. } => count_vec(args, n),
+        Ast::Call { args, .. } => count_vec(args, n),
+        Ast::CallExpr { callee, args, .. } => {
+            count_in(callee, n);
+            count_vec(args, n);
+        }
+        Ast::Let { value, .. }
+        | Ast::LetMut { value, .. }
+        | Ast::LetDynamic { value, .. } => count_in(value, n),
+        Ast::Binding { value_expr, body, .. } => {
+            count_in(value_expr, n);
+            count_vec(body, n);
+        }
+        Ast::StringInterpolation { parts, .. } => {
+            for p in parts {
+                if let crate::ast::StringInterpolationPart::Expression(e) = p {
+                    count_in(e, n);
+                }
+            }
+        }
+        Ast::StructCreation { fields, spread, .. } => {
+            for (_, v) in fields {
+                count_in(v, n);
+            }
+            count_opt_box(spread, n);
+        }
+        Ast::EnumCreation { fields, .. } => {
+            for (_, v) in fields {
+                count_in(v, n);
+            }
+        }
+        Ast::Use { alias, .. } => count_in(alias, n),
+        Ast::Not { expr, .. } => count_in(expr, n),
+        Ast::Array { array, .. } => count_vec(array, n),
+        Ast::MapLiteral { pairs, .. } => {
+            for (k, v) in pairs {
+                count_in(k, n);
+                count_in(v, n);
+            }
+        }
+        Ast::SetLiteral { elements, .. } => count_vec(elements, n),
+        Ast::IndexOperator { array, index, .. } => {
+            count_in(array, n);
+            count_in(index, n);
+        }
+        Ast::Loop { body, .. } => count_vec(body, n),
+        Ast::While { condition, body, .. } => {
+            count_in(condition, n);
+            count_vec(body, n);
+        }
+        Ast::Break { value, .. } | Ast::Return { value, .. } | Ast::Throw { value, .. } => {
+            count_in(value, n);
+        }
+        Ast::For { collection, body, .. } => {
+            count_in(collection, n);
+            count_vec(body, n);
+        }
+        Ast::Assignment { name, value, .. } => {
+            count_in(name, n);
+            count_in(value, n);
+        }
+        Ast::Try { body, catch_body, .. } => {
+            count_vec(body, n);
+            count_vec(catch_body, n);
+        }
+        Ast::Match { value, arms, .. } => {
+            count_in(value, n);
+            for arm in arms {
+                if let Some(g) = &arm.guard {
+                    count_in(g, n);
+                }
+                count_vec(&arm.body, n);
+            }
+        }
+        Ast::MultiArityFunction { cases, .. } => {
+            for c in cases {
+                count_vec(&c.body, n);
+            }
+        }
+        Ast::Reset { body, .. } | Ast::Shift { body, .. } | Ast::Test { body, .. } => {
+            count_vec(body, n);
+        }
+        Ast::Perform { value, .. } => count_in(value, n),
+        Ast::Handle { handler_instance, body, .. } => {
+            count_in(handler_instance, n);
+            count_vec(body, n);
+        }
+        Ast::Future { body, .. } => count_in(body, n),
+
+        // Leaves and inert declarations — no child expressions.
+        Ast::FunctionStub { .. }
+        | Ast::EnumStaticVariant { .. }
+        | Ast::IntegerLiteral(..)
+        | Ast::FloatLiteral(..)
+        | Ast::Identifier(..)
+        | Ast::String(..)
+        | Ast::Keyword(..)
+        | Ast::True(..)
+        | Ast::False(..)
+        | Ast::Null(..)
+        | Ast::Namespace { .. }
+        | Ast::Continue { .. }
+        | Ast::ProtocolDispatch { .. } => {}
+    }
+}
+
+fn count_vec(xs: &[Ast], n: &mut usize) {
+    for x in xs {
+        count_in(x, n);
+    }
+}
+
+fn count_opt_box(x: &Option<Box<Ast>>, n: &mut usize) {
+    if let Some(b) = x {
+        count_in(b, n);
+    }
 }

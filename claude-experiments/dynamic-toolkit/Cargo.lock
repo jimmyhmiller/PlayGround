@@ -43,7 +43,9 @@ dependencies = [
  "dynexec",
  "dynir",
  "dynlang",
+ "dynlower",
  "dynobj",
+ "dynruntime",
  "dynsym",
  "dynvalue",
 ]
@@ -262,8 +264,11 @@ name = "dynlang"
 version = "0.1.0"
 dependencies = [
  "dynalloc",
+ "dynexec",
  "dynir",
+ "dynlower",
  "dynobj",
+ "dynruntime",
  "dynvalue",
 ]
 

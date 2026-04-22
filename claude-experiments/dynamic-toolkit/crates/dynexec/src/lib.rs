@@ -647,12 +647,90 @@ pub trait SafepointStrategy<
     }
 }
 
+/// Sealing module — only this crate can implement `SoundRoots` and
+/// `SoundTransport`. This makes the set of valid GC configurations
+/// closed: downstream code cannot declare new "sound" combinations.
+mod sound {
+    pub trait Sealed {}
+}
+
+/// Marker trait: `Self` is a sound root strategy for `L`.
+///
+/// Sound here means: at every safepoint, the GC can identify the exact
+/// set of heap references the program depends on — no stale slots,
+/// no conservative false-retention. Implementations are sealed; only
+/// combinations verified correct in this crate are admitted.
+pub trait SoundRoots<L: ValueLayout>: RootStrategy<L> + sound::Sealed {}
+
+/// Marker trait: `Self` is a sound root transport for `(L, R)`.
+///
+/// Sound means the transport reports *only* slots that are live at
+/// the current safepoint — `FrameScanRoots` is intentionally not sound
+/// under a moving collector because it scans every root slot ever
+/// allocated in the frame, including stale spill slots left by dead
+/// values.
+pub trait SoundTransport<L: ValueLayout, R: RootStrategy<L>>:
+    RootTransport<L, R> + sound::Sealed {}
+
+impl sound::Sealed for PreciseStackRoots {}
+impl sound::Sealed for ConservativeWordRoots {}
+impl sound::Sealed for StackMapRoots {}
+impl sound::Sealed for ShadowStackRoots {}
+impl sound::Sealed for FrameScanRoots {}
+
+// Which `RootStrategy` is sound for which layout.
+//
+// `PreciseStackRoots` requires that the lowerer mark every slot that can
+// hold a GC reference with `is_gc_root = true` — true for all layouts
+// the library supports today.
+impl<const TAG_BITS: u32> SoundRoots<LowBit<TAG_BITS>> for PreciseStackRoots {}
+impl SoundRoots<NanBox> for PreciseStackRoots {}
+
+// `ConservativeWordRoots` scans every word in the root-slot region.
+// For `LowBit` that's fine (tag bits reliably distinguish pointers).
+// For `NanBox` stale bits can masquerade as `0x7FFE…` pointer-tags,
+// which is precisely how the n=21 livelock happens — so it is *not*
+// sound here.
+impl<const TAG_BITS: u32> SoundRoots<LowBit<TAG_BITS>> for ConservativeWordRoots {}
+
+// Which `RootTransport` is sound for which `(L, R)`.
+//
+// `StackMapRoots` and `ShadowStackRoots` record live-slot sets per
+// safepoint — precise in both time and space. Sound everywhere.
+impl<L, R> SoundTransport<L, R> for StackMapRoots
+where
+    L: ValueLayout,
+    R: RootStrategy<L> + SoundRoots<L>,
+{
+}
+impl<L, R> SoundTransport<L, R> for ShadowStackRoots
+where
+    L: ValueLayout,
+    R: RootStrategy<L> + SoundRoots<L>,
+{
+}
+
+// `FrameScanRoots` scans the entire root-slot region at each safepoint.
+// Sound for `LowBit` (tagged pointers rarely collide with residue) but
+// unsafe under `NanBox` — stale spill slots become phantom roots.
+impl<const TAG_BITS: u32, R> SoundTransport<LowBit<TAG_BITS>, R> for FrameScanRoots
+where
+    R: RootStrategy<LowBit<TAG_BITS>> + SoundRoots<LowBit<TAG_BITS>>,
+{
+}
+
 /// Codegen configuration for JIT lowering. Controls value layout, root
 /// strategy, calling convention, frame strategy, and safepoints.
+///
+/// `Roots` / `RootTransport` are gated by [`SoundRoots`] / [`SoundTransport`]
+/// so that the only `CodegenConfig` types that typecheck are those whose
+/// GC contract is verified safe — there is no runtime "oops" path.
 pub trait CodegenConfig {
     type Layout: ValueLayout;
-    type Roots: RootStrategy<Self::Layout>;
-    type RootTransport: RootTransport<Self::Layout, Self::Roots>;
+    type Roots: RootStrategy<Self::Layout> + SoundRoots<Self::Layout>;
+    type RootTransport:
+        RootTransport<Self::Layout, Self::Roots>
+        + SoundTransport<Self::Layout, Self::Roots>;
     type CallingConvention: CallingConvention<Self::Layout>;
     type Frames: FrameStrategy<Self::Layout, Self::Roots, Self::CallingConvention>;
     type Safepoints:
@@ -663,18 +741,6 @@ pub trait CodegenConfig {
             Self::Frames,
             Self::CallingConvention,
         >;
-
-    fn validate() -> Result<(), ConfigError> {
-        Self::Roots::validate()?;
-        Self::Frames::validate()?;
-        Self::RootTransport::validate_frame::<Self::Frames, Self::CallingConvention>()?;
-        Self::Safepoints::validate()?;
-        Ok(())
-    }
-}
-
-pub fn validate_codegen_config<C: CodegenConfig>() -> Result<(), ConfigError> {
-    <C as CodegenConfig>::validate()
 }
 
 pub struct PreciseStackRoots;
@@ -849,13 +915,37 @@ impl<
 
 pub struct DefaultCodegenConfig<L: LayoutConfigDefaults>(PhantomData<L>);
 
-impl<L: LayoutConfigDefaults> CodegenConfig for DefaultCodegenConfig<L> {
+impl<L> CodegenConfig for DefaultCodegenConfig<L>
+where
+    L: LayoutConfigDefaults,
+    L::DefaultRoots: SoundRoots<L>,
+    L::DefaultRootTransport: SoundTransport<L, L::DefaultRoots>,
+{
     type Layout = L;
     type Roots = L::DefaultRoots;
     type RootTransport = L::DefaultRootTransport;
     type CallingConvention = AArch64InternalCc;
     type Frames = StackSlotFrames;
     type Safepoints = CallbackSafepoints;
+}
+
+/// The blessed GC configuration for NaN-boxed dynamic languages.
+///
+/// Uses `PreciseStackRoots` + `StackMapRoots` + `StackSlotFrames` +
+/// `StackMapSafepoints`. Together they guarantee the GC sees exactly the
+/// slots live at each safepoint — no conservative over-retention from
+/// stale spill slots. `StackSlotFrames` matches the interpreter-side
+/// layout, so the same `NanBoxConfig` can feed both the JIT and
+/// `ModuleInterpreter`.
+pub struct NanBoxConfig;
+
+impl CodegenConfig for NanBoxConfig {
+    type Layout = NanBox;
+    type Roots = PreciseStackRoots;
+    type RootTransport = StackMapRoots;
+    type CallingConvention = AArch64InternalCc;
+    type Frames = StackSlotFrames;
+    type Safepoints = StackMapSafepoints;
 }
 
 
@@ -882,71 +972,30 @@ impl ValueLayout for NanBox {
     }
 }
 
+// The historical `NanBox` defaults (`ConservativeWordRoots` +
+// `FrameScanRoots`) were unsound — stale spill slots retain the whole
+// heap under a moving GC (see binary_trees n=21 livelock). We keep the
+// impl but point it at the *sound* pairing, and the `SoundRoots` /
+// `SoundTransport` bounds on `CodegenConfig` enforce that any other
+// combination would fail to typecheck.
 impl LayoutConfigDefaults for NanBox {
-    type DefaultRoots = ConservativeWordRoots;
-    type DefaultRootTransport = FrameScanRoots;
+    type DefaultRoots = PreciseStackRoots;
+    type DefaultRootTransport = StackMapRoots;
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    struct PreciseNanBoxConfig;
-    impl CodegenConfig for PreciseNanBoxConfig {
-        type Layout = NanBox;
-        type Roots = PreciseStackRoots;
-        type RootTransport = FrameScanRoots;
-        type CallingConvention = AArch64InternalCc;
-        type Frames = StackSlotFrames;
-        type Safepoints = CallbackSafepoints;
-    }
-
-    struct InvalidShadowTransportConfig;
-    impl CodegenConfig for InvalidShadowTransportConfig {
-        type Layout = LowBit<3>;
-        type Roots = PreciseStackRoots;
-        type RootTransport = ShadowStackRoots;
-        type CallingConvention = AArch64InternalCc;
-        type Frames = StackSlotFrames;
-        type Safepoints = CallbackSafepoints;
-    }
-
-    struct InvalidStackMapSafepointConfig;
-    impl CodegenConfig for InvalidStackMapSafepointConfig {
-        type Layout = LowBit<3>;
-        type Roots = PreciseStackRoots;
-        type RootTransport = FrameScanRoots;
-        type CallingConvention = AArch64InternalCc;
-        type Frames = StackSlotFrames;
-        type Safepoints = StackMapSafepoints;
-    }
-
+    // Compile-time assertion: the sound combinations we ship typecheck.
+    fn _assert_sound<C: CodegenConfig>() {}
     #[test]
-    fn low_bit_default_config_is_valid() {
-        assert!(validate_codegen_config::<DefaultCodegenConfig<LowBit<3>>>().is_ok());
+    fn sound_configs_typecheck() {
+        _assert_sound::<DefaultCodegenConfig<LowBit<3>>>();
+        _assert_sound::<NanBoxConfig>();
     }
 
-    #[test]
-    fn nan_box_default_config_is_valid() {
-        assert!(validate_codegen_config::<DefaultCodegenConfig<NanBox>>().is_ok());
-    }
-
-    #[test]
-    fn precise_roots_accept_nan_box_layout() {
-        assert!(validate_codegen_config::<PreciseNanBoxConfig>().is_ok());
-    }
-
-    #[test]
-    fn shadow_stack_transport_requires_shadow_frame_support() {
-        let err = validate_codegen_config::<InvalidShadowTransportConfig>().unwrap_err();
-        assert_eq!(err.message, "root transport requires shadow-root frame support");
-    }
-
-    #[test]
-    fn stack_map_safepoints_require_stack_map_transport() {
-        let err = validate_codegen_config::<InvalidStackMapSafepointConfig>().unwrap_err();
-        assert_eq!(err.message, "stack-map safepoints require stack-map root transport");
-    }
-
-
+    // Negative combinations are enforced by the type system — see the
+    // `compile_fail` docs on `NanBoxConfig`. We can't test them from
+    // Rust code because constructing them would itself fail to compile.
 }

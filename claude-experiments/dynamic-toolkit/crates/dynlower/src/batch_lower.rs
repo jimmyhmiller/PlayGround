@@ -992,16 +992,19 @@ impl<'a> BatchEmitter<'a> {
 
                     let safepoint_index = self.safepoints.len();
                     let code_offset = self.buf.current_offset();
-                    self.safepoints.push(crate::SafepointRecord {
-                        code_offset,
-                        root_slots,
-                    });
 
                     // Call handler: X0 = FP, X1 = safepoint_index
                     Arm64Backend::emit_gp_move(&mut self.buf, machine_gp(0), machine_gp(29));
                     Arm64Backend::emit_mov_imm(&mut self.buf, machine_gp(1), safepoint_index as u64);
                     Arm64Backend::emit_mov_imm(&mut self.buf, machine_gp(28), handler);
                     Arm64Backend::emit_call_reg(&mut self.buf, machine_gp(28));
+
+                    let return_offset = self.buf.current_offset();
+                    self.safepoints.push(crate::SafepointRecord {
+                        code_offset,
+                        return_offset,
+                        root_slots,
+                    });
 
                     // After GC, reload callee-saved registers (GC may have updated pointers)
                     for (i, &preg) in self.callee_saved_used.iter().enumerate() {

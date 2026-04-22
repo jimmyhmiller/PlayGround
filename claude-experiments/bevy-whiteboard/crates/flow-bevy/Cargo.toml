@@ -1,0 +1,12 @@
+[package]
+name = "flow-bevy"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+bevy = { version = "0.18", features = ["default_font"] }
+flow = { path = "../flow" }
+poster-ui = { path = "../poster-ui" }
+
+[dev-dependencies]
+poster-ui = { path = "../poster-ui", features = ["testing"] }

@@ -4,13 +4,15 @@ use std::io::Write;
 use std::marker::PhantomData;
 use std::sync::RwLock;
 
-mod backend;
+pub mod backend;
 pub mod regalloc;
 pub mod regalloc_bridge;
 pub mod batch_lower;
 
+pub use backend::Arm64Backend;
+
 use backend::{
-    Arm64Backend, LoweringBackend, MachineFpBinOp, MachineGpBinOp, MachineLocation,
+    LoweringBackend, MachineFpBinOp, MachineGpBinOp, MachineLocation,
     MachineWordSize,
 };
 use regalloc::{
@@ -21,7 +23,7 @@ use dynexec::{
     BuilderFrame, CallArgLocation, CallingConvention, FrameResume,
     CodegenConfig, DefaultCodegenConfig, FrameLayout, FrameResumePoint, FrameSlotAccess,
     FrameSlotBase, FrameStrategy, LayoutConfigDefaults, RootTransport, RootTransportKind,
-    validate_codegen_config,
+    SoundRoots, SoundTransport,
 };
 use dynasm::buffer::{CodeBuffer, Label};
 use dynasm::code_memory::{CodeMemory, PagedCodeMemory};
@@ -44,19 +46,39 @@ mod tests;
 // time (walk + binary search).
 
 /// A registered JIT code region.
-#[derive(Clone, Copy, Debug)]
+///
+/// Holds enough information for the ancestor-frame walker to scan only
+/// the slots live at the specific PC of an ancestor — not the entire
+/// function's root-slot region.
+#[derive(Clone, Debug)]
 struct JitCodeEntry {
     code_start: usize, // inclusive
     code_end: usize,   // exclusive
-    root_scan_size: usize,
+    /// Per-PC live-slot map. Every internal `BLR` in this function
+    /// (both explicit `Inst::Safepoint` calls and ordinary
+    /// `Inst::Call`s) pushes a record here whose `return_offset`
+    /// equals the offset of the byte immediately after the `BLR`.
+    /// Records are sorted by `return_offset`, so lookup is O(log n).
+    safepoints: std::sync::Arc<[SafepointRecord]>,
 }
 
 static JIT_CODE_REGISTRY: RwLock<Vec<JitCodeEntry>> = RwLock::new(Vec::new());
 
-fn register_jit_code(code_start: usize, code_end: usize, root_scan_size: usize) {
+fn register_jit_code(
+    code_start: usize,
+    code_end: usize,
+    safepoints: std::sync::Arc<[SafepointRecord]>,
+) {
     let mut registry = JIT_CODE_REGISTRY.write().unwrap();
     let pos = registry.partition_point(|e| e.code_start < code_start);
-    registry.insert(pos, JitCodeEntry { code_start, code_end, root_scan_size });
+    registry.insert(
+        pos,
+        JitCodeEntry {
+            code_start,
+            code_end,
+            safepoints,
+        },
+    );
 }
 
 fn unregister_jit_code(code_start: usize) {
@@ -97,10 +119,11 @@ fn write_perf_map_entries(entries: &[(usize, usize, &str)]) {
 /// that hit the safepoint). The current frame is skipped — the safepoint
 /// handler already scans it via the `(frame_ptr, payload)` arguments.
 ///
-/// For each ancestor: `[fp+8]` is the return address into the caller.
-/// If that address falls within a registered JIT code range, the frame
-/// at `[fp+0]` (the caller's FP) is a JIT frame and its root slots are
-/// scanned.
+/// For each ancestor, `[fp+8]` is the saved return address into that
+/// ancestor. We look up the `SafepointRecord` for that exact PC and
+/// scan *only* the root slots recorded as live at that point —
+/// conservative whole-frame sweeping would resurrect stale spill slots
+/// as phantom roots.
 #[cfg(target_arch = "aarch64")]
 pub fn walk_jit_ancestor_roots(jit_fp: *const u8, visitor: &mut dyn FnMut(*mut u64)) {
     let registry = JIT_CODE_REGISTRY.read().unwrap();
@@ -121,12 +144,34 @@ pub fn walk_jit_ancestor_roots(jit_fp: *const u8, visitor: &mut dyn FnMut(*mut u
         }
 
         if let Some(entry) = lookup_code_entry(&registry, saved_lr) {
-            // saved_lr is in a JIT function → the frame at saved_fp belongs
-            // to that function. Scan its root slots.
-            let slot_count = entry.root_scan_size / 8;
-            for i in 0..slot_count {
-                let slot = unsafe { (saved_fp as *mut u64).add(i) };
-                visitor(slot);
+            let return_offset = saved_lr - entry.code_start;
+            // Binary-search the safepoints by return_offset.
+            match entry
+                .safepoints
+                .binary_search_by_key(&return_offset, |sp| sp.return_offset)
+            {
+                Ok(idx) => {
+                    let record = &entry.safepoints[idx];
+                    for &slot_offset in &record.root_slots {
+                        let slot = unsafe {
+                            (saved_fp as *mut u8).offset(slot_offset as isize) as *mut u64
+                        };
+                        visitor(slot);
+                    }
+                }
+                Err(_) => {
+                    // No exact match: the saved_lr came from code we
+                    // didn't register as a safepoint (e.g. an
+                    // internal block branch). That can't happen under
+                    // the soundness invariant — calls and explicit
+                    // safepoints always record here — so flag it.
+                    debug_assert!(
+                        false,
+                        "no SafepointRecord for return_offset={:#x} in JIT function \
+                         [{:#x}..{:#x})",
+                        return_offset, entry.code_start, entry.code_end,
+                    );
+                }
             }
         }
 
@@ -162,7 +207,18 @@ pub type DefaultJitConfig<L> = DefaultCodegenConfig<L>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SafepointRecord {
+    /// Offset (within the enclosing function) of the first instruction
+    /// of the safepoint's handler-call sequence. Used as the payload
+    /// passed to `active_jit_safepoint_handler` under `StackMapRoots`
+    /// (via its index into the module's safepoint list).
     pub code_offset: usize,
+    /// Offset (within the enclosing function) of the *return address*
+    /// that would be saved in LR if execution is suspended at this
+    /// safepoint — i.e. the byte just after the `BLR` of the safepoint
+    /// call, or after a `BLR` to another JIT function. Used by the FP
+    /// chain walker to find the right record for an ancestor frame
+    /// whose `saved_lr` falls within this function's code range.
+    pub return_offset: usize,
     pub root_slots: Vec<i32>,
 }
 
@@ -387,24 +443,39 @@ impl Drop for JitFunction {
 }
 
 impl JitFunction {
-    pub fn compile<L: LayoutConfigDefaults>(func: &Function, externs: &[*const u8]) -> Self {
+    pub fn compile<L>(func: &Function, externs: &[*const u8]) -> Self
+    where
+        L: LayoutConfigDefaults,
+        L::DefaultRoots: SoundRoots<L>,
+        L::DefaultRootTransport: SoundTransport<L, L::DefaultRoots>,
+    {
         Self::compile_with_config::<DefaultJitConfig<L>>(func, externs)
     }
 
-    pub fn compile_with_gc<L: LayoutConfigDefaults>(
+    pub fn compile_with_gc<L>(
         func: &Function,
         externs: &[*const u8],
         handler: extern "C" fn(*mut u8, usize),
-    ) -> Self {
+    ) -> Self
+    where
+        L: LayoutConfigDefaults,
+        L::DefaultRoots: SoundRoots<L>,
+        L::DefaultRootTransport: SoundTransport<L, L::DefaultRoots>,
+    {
         Self::compile_with_config_and_gc::<DefaultJitConfig<L>>(func, externs, Some(handler as u64))
     }
 
     /// Compile with GC support using the linear scan register allocator.
-    pub fn compile_with_gc_linear_scan<L: LayoutConfigDefaults>(
+    pub fn compile_with_gc_linear_scan<L>(
         func: &Function,
         externs: &[*const u8],
         handler: extern "C" fn(*mut u8, usize),
-    ) -> Self {
+    ) -> Self
+    where
+        L: LayoutConfigDefaults,
+        L::DefaultRoots: SoundRoots<L>,
+        L::DefaultRootTransport: SoundTransport<L, L::DefaultRoots>,
+    {
         Self::compile_with_regalloc::<DefaultJitConfig<L>, Arm64Backend, regalloc::LinearScanAllocator>(
             func,
             externs,
@@ -449,10 +520,6 @@ impl JitFunction {
     where
         Cfg::Frames: FrameStrategy<Cfg::Layout, Cfg::Roots, Cfg::CallingConvention>,
     {
-        validate_codegen_config::<Cfg>().unwrap_or_else(|err| {
-            panic!("invalid dynlower config: {err}");
-        });
-
         let mut lowerer =
             Lowerer::<Cfg, B, R>::new_inner(0, func, externs, None, None, safepoint_handler);
         lowerer.run();
@@ -475,7 +542,8 @@ impl JitFunction {
 
         let code_start = memory.base_ptr() as usize;
         let code_end = code_start + memory.len();
-        register_jit_code(code_start, code_end, root_scan_size);
+        let safepoints_arc: std::sync::Arc<[SafepointRecord]> = safepoints.clone().into();
+        register_jit_code(code_start, code_end, safepoints_arc);
 
         write_perf_map_entries(&[(code_start, code_end - code_start, &func.name)]);
 
@@ -612,15 +680,22 @@ impl Drop for JitModule {
 
 impl JitModule {
     /// Compile a module with no GC safepoint handler.
-    pub fn compile<L: LayoutConfigDefaults>(module: &Module, externs: &[*const u8]) -> Self {
+    pub fn compile<L>(module: &Module, externs: &[*const u8]) -> Self
+    where
+        L: LayoutConfigDefaults,
+        L::DefaultRoots: SoundRoots<L>,
+        L::DefaultRootTransport: SoundTransport<L, L::DefaultRoots>,
+    {
         Self::compile_with_config::<DefaultJitConfig<L>>(module, externs)
     }
 
     /// Compile a module using the linear scan register allocator.
-    pub fn compile_linear_scan<L: LayoutConfigDefaults>(
-        module: &Module,
-        externs: &[*const u8],
-    ) -> Self {
+    pub fn compile_linear_scan<L>(module: &Module, externs: &[*const u8]) -> Self
+    where
+        L: LayoutConfigDefaults,
+        L::DefaultRoots: SoundRoots<L>,
+        L::DefaultRootTransport: SoundTransport<L, L::DefaultRoots>,
+    {
         Self::compile_with_regalloc::<DefaultJitConfig<L>, Arm64Backend, regalloc::LinearScanAllocator>(
             module,
             externs,
@@ -631,10 +706,12 @@ impl JitModule {
     /// Compile a module with fast calls: internal calls are treated as plain
     /// calls without suspend/resume bookkeeping. Disables delimited continuation
     /// support but significantly reduces call overhead.
-    pub fn compile_fast<L: LayoutConfigDefaults>(
-        module: &Module,
-        externs: &[*const u8],
-    ) -> Self {
+    pub fn compile_fast<L>(module: &Module, externs: &[*const u8]) -> Self
+    where
+        L: LayoutConfigDefaults,
+        L::DefaultRoots: SoundRoots<L>,
+        L::DefaultRootTransport: SoundTransport<L, L::DefaultRoots>,
+    {
         Self::compile_fast_with_regalloc::<DefaultJitConfig<L>, Arm64Backend, regalloc::LinearScanAllocator>(
             module,
             externs,
@@ -648,10 +725,6 @@ impl JitModule {
     where
         Cfg::Frames: FrameStrategy<Cfg::Layout, Cfg::Roots, Cfg::CallingConvention>,
     {
-        validate_codegen_config::<Cfg>().unwrap_or_else(|err| {
-            panic!("invalid dynlower config: {err}");
-        });
-
         let mut call_table: Vec<*const u8> = Vec::with_capacity(module.func_table.len());
         let mut extern_idx = 0usize;
         for def in &module.func_table {
@@ -716,9 +789,12 @@ impl JitModule {
             } else {
                 base + total_len
             };
-            register_jit_code(code_start, code_end, function_root_scan_sizes[i]);
+            let safepoints_arc: std::sync::Arc<[SafepointRecord]> =
+                function_safepoints[i].clone().into();
+            register_jit_code(code_start, code_end, safepoints_arc);
             perf_entries.push((code_start, code_end - code_start, &module.functions[i].name));
         }
+        let _ = function_root_scan_sizes; // no longer used at runtime
         write_perf_map_entries(&perf_entries);
 
         let base = memory.base_ptr();
@@ -746,11 +822,16 @@ impl JitModule {
     /// At each `Inst::Safepoint`, the JIT will spill all live values and
     /// call `handler(frame_ptr, frame_size)`. The handler can scan the
     /// frame for GC pointers using `PtrPolicy::try_decode_ptr`.
-    pub fn compile_with_gc<L: LayoutConfigDefaults>(
+    pub fn compile_with_gc<L>(
         module: &Module,
         externs: &[*const u8],
         handler: extern "C" fn(*mut u8, usize),
-    ) -> Self {
+    ) -> Self
+    where
+        L: LayoutConfigDefaults,
+        L::DefaultRoots: SoundRoots<L>,
+        L::DefaultRootTransport: SoundTransport<L, L::DefaultRoots>,
+    {
         Self::compile_with_config_and_gc::<DefaultJitConfig<L>>(
             module,
             externs,
@@ -759,11 +840,16 @@ impl JitModule {
     }
 
     /// Compile a module with GC safepoint handler + linear scan register allocator.
-    pub fn compile_with_gc_linear_scan<L: LayoutConfigDefaults>(
+    pub fn compile_with_gc_linear_scan<L>(
         module: &Module,
         externs: &[*const u8],
         handler: extern "C" fn(*mut u8, usize),
-    ) -> Self {
+    ) -> Self
+    where
+        L: LayoutConfigDefaults,
+        L::DefaultRoots: SoundRoots<L>,
+        L::DefaultRootTransport: SoundTransport<L, L::DefaultRoots>,
+    {
         Self::compile_with_regalloc::<DefaultJitConfig<L>, Arm64Backend, regalloc::LinearScanAllocator>(
             module,
             externs,
@@ -844,9 +930,12 @@ impl JitModule {
             } else {
                 base + total_len
             };
-            register_jit_code(code_start, code_end, frame_sizes[i] as usize);
+            let safepoints_arc: std::sync::Arc<[SafepointRecord]> =
+                function_safepoints[i].clone().into();
+            register_jit_code(code_start, code_end, safepoints_arc);
             perf_entries.push((code_start, code_end - code_start, &module.functions[i].name));
         }
+        let _ = frame_sizes; // historical (was passed to registry for conservative scan)
         write_perf_map_entries(&perf_entries);
 
         // 4. Patch internal function pointers
@@ -907,10 +996,6 @@ impl JitModule {
     where
         Cfg::Frames: FrameStrategy<Cfg::Layout, Cfg::Roots, Cfg::CallingConvention>,
     {
-        validate_codegen_config::<Cfg>().unwrap_or_else(|err| {
-            panic!("invalid dynlower config: {err}");
-        });
-
         // 1. Build call table: fill externs, leave internals as null
         let mut call_table: Vec<*const u8> = Vec::with_capacity(module.func_table.len());
         let mut extern_idx = 0usize;
@@ -1019,9 +1104,12 @@ impl JitModule {
             } else {
                 base + total_len
             };
-            register_jit_code(code_start, code_end, function_root_scan_sizes[i]);
+            let safepoints_arc: std::sync::Arc<[SafepointRecord]> =
+                function_safepoints[i].clone().into();
+            register_jit_code(code_start, code_end, safepoints_arc);
             perf_entries.push((code_start, code_end - code_start, &module.functions[i].name));
         }
+        let _ = function_root_scan_sizes; // historical (was passed to registry for conservative scan)
         write_perf_map_entries(&perf_entries);
 
         // 3. Patch internal function pointers into the call table
@@ -2154,7 +2242,6 @@ where
             self.regs.enter_block::<B>(block_idx, self.func, &mut self.buf, &mut self.frame);
         }
 
-        // Lower instructions
         for (inst_idx, inst_node) in block.insts.iter().enumerate() {
             self.lower_inst(block_idx, inst_idx, inst_node, &mut active_prompts);
         }
@@ -3189,6 +3276,10 @@ where
             B::emit_mov_imm(&mut self.buf, machine_gp(28), 0);
         }
         B::emit_call_reg(&mut self.buf, machine_gp(28));
+        // Any GC inside the callee will walk our frame via the FP
+        // chain; the ancestor walker looks up a SafepointRecord keyed
+        // by the saved LR (== current buffer offset after the BLR).
+        self.record_call_return_safepoint();
 
         if control_aware {
             let continue_label = self.buf.create_label();
@@ -3248,6 +3339,7 @@ where
         let outgoing_size = self.prepare_call_args(args);
 
         B::emit_call_reg(&mut self.buf, machine_gp(28));
+        self.record_call_return_safepoint();
 
         let continue_label = self.buf.create_label();
         let expected_kind = if result_val.is_some() {
@@ -3733,6 +3825,63 @@ where
         root_slots
     }
 
+    /// After emitting a `BLR` to another JIT function, push a
+    /// `SafepointRecord` whose `return_offset` matches the LR the
+    /// ancestor-frame walker will see if a GC fires inside the callee.
+    ///
+    /// The record's `root_slots` covers (a) the spill slots of every
+    /// still-live value (spilled into root slots by the regalloc) and
+    /// (b) every `is_gc_root = true` stack slot (the user-visible
+    /// variables emitted by the frontend's `def_var`). Under the
+    /// `SoundRoots` / `SoundTransport` contract nothing else in the
+    /// frame can contain a heap reference while the callee is running.
+    ///
+    /// No-op for `FrameScan` transport, which doesn't consult the
+    /// per-PC records (it scans by `root_scan_size`).
+    fn record_call_return_safepoint(&mut self) {
+        if !matches!(
+            Cfg::RootTransport::kind(),
+            RootTransportKind::StackMap | RootTransportKind::ShadowStack,
+        ) {
+            return;
+        }
+        let return_offset = self.buf.current_offset();
+        let code_offset = return_offset;
+
+        // Every still-live regalloc value whose home is a spill slot
+        // plus every user-declared `is_gc_root = true` stack slot.
+        // `spill_caller_saved` before the BLR has already flushed live
+        // values into their spill slots, so reading the spill slot is
+        // guaranteed to see a live heap reference (or a non-pointer
+        // payload that `PtrPolicy` will filter).
+        let mut root_slots: Vec<i32> = (0..self.regs.num_values())
+            .filter_map(|i| {
+                let v = Value::from_index(i);
+                if self.regs.remaining_uses(v) == 0 {
+                    return None;
+                }
+                self.regs.value_spill_slot(v)
+            })
+            .collect();
+        root_slots.extend(
+            self.func
+                .stack_slots
+                .iter()
+                .enumerate()
+                .filter_map(|(idx, slot)| {
+                    slot.is_gc_root.then_some(self.stack_slot_offsets[idx])
+                }),
+        );
+        root_slots.sort_unstable();
+        root_slots.dedup();
+
+        self.safepoints.push(SafepointRecord {
+            code_offset,
+            return_offset,
+            root_slots,
+        });
+    }
+
     fn emit_safepoint(&mut self, live: &[Value]) {
         match Cfg::RootTransport::kind() {
             RootTransportKind::FrameScan => {
@@ -3748,13 +3897,15 @@ where
                 let code_offset = self.buf.current_offset();
                 let root_slots = self.collect_live_root_slots(live);
                 let safepoint_index = self.safepoints.len() as u64;
-                self.safepoints.push(SafepointRecord {
-                    code_offset,
-                    root_slots,
-                });
                 if let Some(handler) = self.safepoint_handler {
                     B::emit_call_safepoint_handler(&mut self.buf, handler, safepoint_index);
                 }
+                let return_offset = self.buf.current_offset();
+                self.safepoints.push(SafepointRecord {
+                    code_offset,
+                    return_offset,
+                    root_slots,
+                });
                 self.regs.clear_regs();
             }
             RootTransportKind::ShadowStack => {
@@ -3762,13 +3913,15 @@ where
                 let code_offset = self.buf.current_offset();
                 let root_slots = self.collect_live_root_slots(live);
                 let safepoint_index = self.safepoints.len() as u64;
-                self.safepoints.push(SafepointRecord {
-                    code_offset,
-                    root_slots,
-                });
                 if let Some(handler) = self.safepoint_handler {
                     B::emit_call_safepoint_handler(&mut self.buf, handler, safepoint_index);
                 }
+                let return_offset = self.buf.current_offset();
+                self.safepoints.push(SafepointRecord {
+                    code_offset,
+                    return_offset,
+                    root_slots,
+                });
                 self.regs.clear_regs();
             }
         }

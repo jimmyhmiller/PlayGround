@@ -259,24 +259,23 @@ impl CodegenConfig for TestCAbiConfig {
     type Safepoints = CallbackSafepoints;
 }
 
-struct InvalidNanBoxConfig;
-impl CodegenConfig for InvalidNanBoxConfig {
-    type Layout = NanBox;
-    type Roots = PreciseStackRoots;
-    type RootTransport = FrameScanRoots;
-    type CallingConvention = AArch64InternalCc;
-    type Frames = StackSlotFrames;
-    type Safepoints = CallbackSafepoints;
-}
+// `InvalidNanBoxConfig` and the old `TestNanBoxConfig` (PreciseStackRoots +
+// FrameScanRoots, and ConservativeWordRoots + FrameScanRoots respectively)
+// used to live here. Both are now rejected at the type level by the
+// `SoundRoots` / `SoundTransport` bounds on `CodegenConfig` — attempting
+// to declare them fails to compile, which is the guarantee we want.
+//
+// The corresponding positive test is the one on `NanBoxConfig` itself
+// (in `dynexec::tests`), plus beagle's production use of it.
 
 struct TestNanBoxConfig;
 impl CodegenConfig for TestNanBoxConfig {
     type Layout = NanBox;
-    type Roots = ConservativeWordRoots;
-    type RootTransport = FrameScanRoots;
+    type Roots = PreciseStackRoots;
+    type RootTransport = StackMapRoots;
     type CallingConvention = AArch64InternalCc;
-    type Frames = StackSlotFrames;
-    type Safepoints = CallbackSafepoints;
+    type Frames = StackMapFrames;
+    type Safepoints = StackMapSafepoints;
 }
 
 struct TestStackMapConfig;

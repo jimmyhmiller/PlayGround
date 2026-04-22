@@ -1,0 +1,13 @@
+[package]
+name = "bevy-whiteboard"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+bevy = "0.18"
+# Bevy 0.18 wraps cosmic-text 0.16 internally for text layout. We pull in the
+# same version directly so we can construct a `FontSystem::new()` that loads
+# the host's system fonts — Bevy's default CosmicFontSystem starts with an
+# empty database, which means any glyph missing from our primary font
+# silently renders as tofu instead of falling back to a font that has it.
+cosmic-text = { version = "0.16", features = ["shape-run-cache"] }

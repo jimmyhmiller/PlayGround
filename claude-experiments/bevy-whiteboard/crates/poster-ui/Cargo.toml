@@ -1,0 +1,21 @@
+[package]
+name = "poster-ui"
+version = "0.1.0"
+edition = "2024"
+description = "Bevy UI toolkit for iso50 / mid-century-poster look — theme, typography, panel and HUD primitives."
+
+[features]
+default = []
+# Enables the `testing` module: headless test-app helpers, UI-button click
+# simulation, and canvas-click simulation. Pulled in as a dev-dependency from
+# consumers (e.g. `poster-ui = { path = "...", features = ["testing"] }` in
+# `[dev-dependencies]`).
+testing = []
+
+[dependencies]
+bevy = { version = "0.18", features = ["default_font"] }
+# Bevy 0.18 wraps cosmic-text 0.16 internally. We pull in the same version so
+# the TypographyPlugin can install a FontSystem loaded with the host's system
+# fonts — without that, glyphs missing from our primary font render as tofu
+# instead of falling back through the system fontstack.
+cosmic-text = { version = "0.16", features = ["shape-run-cache"] }

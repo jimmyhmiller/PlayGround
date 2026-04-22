@@ -7,7 +7,7 @@
 use std::marker::PhantomData;
 
 use dynexec::{
-    CodegenConfig, DefaultCodegenConfig, LayoutConfigDefaults,
+    CodegenConfig, DefaultCodegenConfig, LayoutConfigDefaults, SoundRoots, SoundTransport,
 };
 use dynir::interp::{
     ConfiguredModuleInterpreter, ExternCallResult, InterpError, InterpResult, InterpRootManager,
@@ -159,6 +159,12 @@ impl<'a, Cfg, R> ExecutionEngine<'a, Cfg, R>
 where
     Cfg: CodegenConfig,
     Cfg::Layout: LayoutConfigDefaults,
+    <Cfg::Layout as LayoutConfigDefaults>::DefaultRoots:
+        SoundRoots<Cfg::Layout>,
+    <Cfg::Layout as LayoutConfigDefaults>::DefaultRootTransport: SoundTransport<
+        Cfg::Layout,
+        <Cfg::Layout as LayoutConfigDefaults>::DefaultRoots,
+    >,
     R: InterpRootManager<Cfg::Layout, Cfg::Roots, Cfg::RootTransport>,
 {
     /// Create an interpreter-only engine.

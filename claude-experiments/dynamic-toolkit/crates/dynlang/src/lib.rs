@@ -59,14 +59,30 @@ pub enum GcConfig {
         /// Initial heap size in bytes.
         heap_size: usize,
     },
+    /// Generational, thread-aware, concurrent-capable `dynalloc::Heap`.
+    /// Supports precise stack-map roots for the JIT and card-table
+    /// write barriers for old→young pointers.
+    Generational {
+        /// Total heap size per space, in bytes.
+        heap_size: usize,
+        /// Optional nursery size for a young-generation split. `None`
+        /// disables the generational split (single tenured space).
+        nursery_size: Option<usize>,
+    },
 }
 
 impl GcConfig {
     pub fn leak() -> Self { GcConfig::Leak }
     pub fn semi_space(heap_size: usize) -> Self { GcConfig::SemiSpace { heap_size } }
+    pub fn generational(heap_size: usize) -> Self {
+        GcConfig::Generational { heap_size, nursery_size: None }
+    }
+    pub fn generational_with_nursery(heap_size: usize, nursery_size: usize) -> Self {
+        GcConfig::Generational { heap_size, nursery_size: Some(nursery_size) }
+    }
 
     pub fn is_collecting(&self) -> bool {
-        matches!(self, GcConfig::SemiSpace { .. })
+        matches!(self, GcConfig::SemiSpace { .. } | GcConfig::Generational { .. })
     }
 }
 
@@ -97,8 +113,6 @@ pub struct ObjTypeId(pub usize);
 pub struct ObjTypeHandle {
     pub id: ObjTypeId,
     pub type_info: &'static TypeInfo,
-    /// The TypeInfo pointer as a u64, for embedding in IR constants.
-    pub type_info_addr: u64,
     /// Field name → (byte offset, kind).
     pub field_offsets: HashMap<String, (i32, FieldKind)>,
     pub varlen: VarLenKind,
@@ -122,8 +136,9 @@ impl ObjRef {
 impl ObjTypeHandle {
     /// Check if a NaN-boxed value is an object of this type. Returns I8.
     ///
-    /// Emits inline: is_ptr(val) → extract payload → load TypeInfo from
-    /// header at offset 0 → compare against this type's known TypeInfo address.
+    /// Emits inline: is_ptr(val) → extract payload → load the u16 type_id
+    /// from the `Compact` header (at offset 0, zero-padded in the rest of
+    /// the word) → compare against this type's known type_id.
     pub fn check(&self, f: &mut DynFunc, val: Value) -> Value {
         let is_obj = f.is_ptr(val);
         let check_bb = f.fb.create_block(&[]);
@@ -133,8 +148,10 @@ impl ObjTypeHandle {
 
         f.fb.switch_to_block(check_bb);
         let ptr = f.fb.payload(val);
-        let ti = f.fb.load(Type::I64, ptr, 0); // TypeInfo* at header offset 0
-        let expected = f.fb.iconst(Type::I64, self.type_info_addr as i64);
+        // Compact header: u16 type_id at offset 0, 6 bytes of zeroed
+        // padding follow — so a full I64 load gives `type_id as u64`.
+        let ti = f.fb.load(Type::I64, ptr, 0);
+        let expected = f.fb.iconst(Type::I64, self.type_info.type_id as i64);
         let matches = f.fb.icmp(CmpOp::Eq, ti, expected);
         f.fb.jump(merge_bb, &[matches]);
 
@@ -475,7 +492,6 @@ impl DynModule {
         ObjTypeHandle {
             id,
             type_info: ty.type_info,
-            type_info_addr: ty.type_info as *const TypeInfo as u64,
             field_offsets: ty.field_offsets.clone(),
             varlen: ty.varlen,
         }
@@ -669,8 +685,13 @@ impl DynFunc {
 
     /// Define a mutable variable with an initial value.
     /// Backed by a stack slot — no SSA management needed.
+    ///
+    /// Dynlang values are NaN-boxed I64s that may carry heap pointers,
+    /// so the slot is created as a GC root. The GC's PtrPolicy filters
+    /// non-pointer payloads, and under a moving collector the slot is
+    /// updated in place so reloads see the forwarded pointer.
     pub fn def_var(&mut self, name: &str, init: Value) {
-        let slot = self.fb.create_stack_slot(8, false);
+        let slot = self.fb.create_stack_slot(8, true);
         let addr = self.fb.stack_addr(slot);
         self.fb.store(init, addr, 0);
         self.vars
@@ -1617,22 +1638,17 @@ mod tests {
         dm.finish_func(f);
 
         // Create GC runtime and wire up __gc_alloc__
-        let gc = std::cell::RefCell::new(crate::gc::DynGcRuntime::new(
+        let gc = crate::gc::DynGcRuntime::new(
             &GcConfig::leak(),
             &NanBoxTags::default(),
             &dm.obj_types,
-        ));
+        );
 
         let built = dm.build();
 
         let roots = NoGcRoots;
         let mut interp = ModuleInterpreter::<NanBox, _>::new(&built.module, &roots);
-        interp.bind_by_name("__gc_alloc__", move |args| {
-            let type_id = args[0] as usize;
-            let varlen_len = args[1] as usize;
-            let ptr = gc.borrow_mut().alloc(type_id, varlen_len);
-            ExternCallResult::Value(Some(ptr as u64))
-        });
+        interp.bind_by_name(crate::gc::GC_ALLOC_EXTERN, gc.interp_gc_alloc());
 
         match interp.run(main, &[]) {
             Ok(InterpResult::Value(v)) => assert_eq!(v, 42),
