@@ -40,9 +40,6 @@ impl Plugin for HudPlugin {
 struct HudPlayBtn;
 
 #[derive(Component)]
-struct HudPlayIcon;
-
-#[derive(Component)]
 struct HudStepBtn;
 
 #[derive(Component)]
@@ -85,7 +82,7 @@ fn spawn_hud(mut commands: Commands, theme: Res<Theme>, clock: Res<SimClock>) {
     let play_glyph = if clock.paused { "▶" } else { "❚❚" };
 
     commands.entity(hud).with_children(|bar| {
-        hud_button_cell(bar, &theme, play_style, play_glyph, (HudPlayBtn, HudPlayIcon));
+        hud_button_cell(bar, &theme, play_style, play_glyph, HudPlayBtn);
         hud_step_cell(bar, &theme, "›|", HudStepBtn);
         hud_text_cell(bar, &theme, "0.000 ms", HudTimeText);
         hud_text_cell(bar, &theme, "vis k=410", HudVisScale);
@@ -196,7 +193,7 @@ fn sync_play_button_visual(
         (&mut BackgroundColor, &mut HudButtonFill, &Children),
         With<HudPlayBtn>,
     >,
-    mut text_q: Query<&mut Text, With<HudPlayIcon>>,
+    mut text_q: Query<&mut Text>,
 ) {
     if !clock.is_changed() && !theme.is_changed() { return; }
     for (mut bg, mut fill, children) in btn_q.iter_mut() {

@@ -1,6 +1,5 @@
-//! Gadgets — prebuilt Flow node shapes that map to the original
-//! bevy-whiteboard kinds. Each function returns a new Flow `NodeId`
-//! in the supplied `Sim`.
+//! Gadgets — prebuilt Flow node shapes. Each function returns a new
+//! Flow `NodeId` in the supplied `Sim`.
 //!
 //! Design: a gadget is just a set of slots + rules that emulate the
 //! classic kind. The user can later edit the slots (and eventually the
