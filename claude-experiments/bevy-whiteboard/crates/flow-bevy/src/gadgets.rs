@@ -221,9 +221,13 @@ const GADGETS_DSL: &str = r#"
             emitted:   Int = 0
             color:     Int = 0
             period_ns: Int = 500000000
+            # 1 = up (emitting), 0 = down (self-tick keeps ticking so the
+            # loop can resume when up flips back, but packets are skipped).
+            up:        Int = 1
         }
         rule tick {
             on tick(_)
+            when up == 1
             do {
                 emitted := emitted + 1
                 record emitted emitted
@@ -231,19 +235,27 @@ const GADGETS_DSL: &str = r#"
                 emit tick(nil)     to self
             }
         }
+        rule tick_idle {
+            on tick(_)
+            when up == 0
+            do { emit tick(nil) to self }
+        }
     }
 
     node Client {
         slots {
             emitted:   Int = 0
             in_flight: Int = 0
+            failed:    Int = 0
             sent_at:   Samples(1024)
             completed: Int = 0
             color:     Int = 0
             period_ns: Int = 500000000
+            up:        Int = 1
         }
         rule fire {
             on tick(_)
+            when up == 1
             do {
                 emitted   := emitted + 1
                 in_flight := in_flight + 1
@@ -255,6 +267,11 @@ const GADGETS_DSL: &str = r#"
                 emit tick(nil)  to self
             }
         }
+        rule fire_idle {
+            on tick(_)
+            when up == 0
+            do { emit tick(nil) to self }
+        }
         rule on_resp {
             on resp(_)
             do {
@@ -262,6 +279,19 @@ const GADGETS_DSL: &str = r#"
                 completed := completed + 1
                 pop sent_at -> t
                 record rtt_ns now - t
+            }
+        }
+        # A downstream down-node replies with resp_error instead of
+        # resp. Balance in_flight / sent_at just like a success, but
+        # count toward `failed` and record a request_failed error so
+        # the failure is visible on the HUD.
+        rule on_resp_error {
+            on resp_error(_)
+            do {
+                in_flight := in_flight - 1
+                failed    := failed + 1
+                pop sent_at -> t
+                error "request_failed" "client: request failed (downstream down)"
             }
         }
     }
@@ -272,6 +302,7 @@ const GADGETS_DSL: &str = r#"
             color:      Int = 0
             service_ns: Int = 50000000
             busy:       Int = 0
+            up:         Int = 1
             upstream:   Any = nil
             downstream: Any = nil
         }
@@ -282,11 +313,23 @@ const GADGETS_DSL: &str = r#"
         # AND the offending packet doesn't sit in the inbox forever.
         rule serve {
             on req(c)
-            when c == color
+            when c == color && up == 1
             do {
                 served := served + 1
                 record served served
                 emit resp(nil) popping to (head(return_path))
+            }
+        }
+        # Down: any inbound req is immediately failed back to the
+        # client via `resp_error`, and a `node_down` error is logged.
+        # Takes precedence over colour-mismatch rejection because the
+        # down state is the more actionable signal for the operator.
+        rule serve_down {
+            on req(_)
+            when up == 0
+            do {
+                error "node_down" "worker: request to down node"
+                emit resp_error(nil) popping to (head(return_path))
             }
         }
         rule serve_reject {
@@ -295,19 +338,31 @@ const GADGETS_DSL: &str = r#"
         }
         rule start_service {
             on packet(p)
-            when busy == 0 && p == color
+            when busy == 0 && p == color && up == 1
             do {
                 busy := 1
                 emit done(p) to self
             }
+        }
+        # Crash model: while down, every inbound packet is dropped on
+        # the floor with a `node_down` error, regardless of `busy`.
+        # No busy==0 gate here — if the worker crashed mid-service,
+        # packets that pile up behind the stuck `busy` flag still get
+        # rejected rather than queuing forever.
+        rule start_service_down {
+            on packet(_)
+            when up == 0
+            do { error "node_down" "worker: packet to down node" }
         }
         rule start_service_reject {
             on packet(_)
             when busy == 0
             do { error "color_mismatch" "worker: wrong-colour packet rejected" }
         }
+        # `done` completes the in-flight packet — fires only when up.
         rule done {
             on done(p)
+            when up == 1
             do {
                 busy   := 0
                 served := served + 1
@@ -316,17 +371,58 @@ const GADGETS_DSL: &str = r#"
                 emit pull(self)  to (upstream)
             }
         }
+        # Crash: the `done(p)` self-packet that was scheduled before
+        # the crash arrives and gets consumed + discarded. Clears
+        # `busy` so when the worker comes back up it's a fresh machine
+        # (no resumed work, no leaked downstream emission). The
+        # packet the worker was servicing is simply lost — that's
+        # what a real crash looks like.
+        rule done_crashed {
+            on done(_)
+            when up == 0
+            do {
+                busy := 0
+                error "node_down" "worker: crashed mid-service, packet lost"
+            }
+        }
+        # Resume hook: the UI injects `resume(nil)` when `up` flips
+        # 0→1. If the worker is idle and has an upstream, kick the
+        # pull loop back to life — otherwise the worker sits forever
+        # because `done` (the usual re-pull emitter) never fired.
+        rule resume_pull {
+            on resume(_)
+            when up == 1 && busy == 0
+            do { emit pull(self) to (upstream) }
+        }
+        # Resume arrived while the worker is still busy (a service
+        # was in flight but hasn't timed out yet) or still down.
+        # Consume silently — the normal done/done_crashed path will
+        # handle the in-flight packet, and a subsequent resume on
+        # the next up toggle will re-kick the loop if needed.
+        rule resume_noop {
+            on resume(_)
+            do { }
+        }
     }
 
     node Router {
+        slots {
+            up: Int = 1
+        }
         # Fan-out by colour. `packet` is fire-and-forget: no reply is
         # expected, so return_path passes through untouched.
         rule forward {
             on packet(p)
+            when up == 1
             do {
                 emit_each packet(p) to filter(out_neighbors(), "n",
                     slot_of(n, "color") == p)
             }
+        }
+        rule forward_down {
+            on packet(_)
+            when up == 0
+            do { error "node_down" "router: packet to down router" }
         }
         # Request forwarding: the Router opts into the reply path by
         # pushing itself onto return_path. The downstream Worker pops
@@ -336,20 +432,37 @@ const GADGETS_DSL: &str = r#"
         # no triangle reply edge.
         rule forward_req {
             on req(p)
+            when up == 1
             do {
                 emit_each req(p) pushing self to filter(out_neighbors(), "n",
                     slot_of(n, "color") == p)
+            }
+        }
+        rule forward_req_down {
+            on req(_)
+            when up == 0
+            do {
+                error "node_down" "router: request to down router"
+                emit resp_error(nil) popping to (head(return_path))
             }
         }
         # Relay a response back along the chain. Pops ourselves off
         # the head we pushed on forward, emits to whoever's now at
         # head (the next hop back toward the client). Works for any
         # depth of nested routers because each one pushes on req and
-        # pops on resp.
+        # pops on resp. Stays active even when the router is down
+        # so an in-flight response from a still-up downstream doesn't
+        # get stranded.
         rule forward_resp {
             on resp(x)
             do {
                 emit resp(x) popping to (head(return_path))
+            }
+        }
+        rule forward_resp_error {
+            on resp_error(x)
+            do {
+                emit resp_error(x) popping to (head(return_path))
             }
         }
     }
@@ -358,6 +471,7 @@ const GADGETS_DSL: &str = r#"
         slots {
             len:     Int = 0
             color:   Int = 0
+            up:      Int = 1
             waiting: Samples(256)
         }
         # Colour-strict on both inbound variants. Router-matched
@@ -366,8 +480,13 @@ const GADGETS_DSL: &str = r#"
         # the error panel rather than silently piling up.
         rule enqueue {
             on packet(c)
-            when c == color
+            when c == color && up == 1
             do { len := len + 1 }
+        }
+        rule enqueue_down {
+            on packet(_)
+            when up == 0
+            do { error "node_down" "queue: packet to down queue" }
         }
         rule enqueue_reject {
             on packet(_)
@@ -380,19 +499,30 @@ const GADGETS_DSL: &str = r#"
         # reverse (engine's reverse-route fallback).
         rule enqueue_req {
             on req(c)
-            when c == color
+            when c == color && up == 1
             do {
                 len := len + 1
                 emit resp(nil) popping to (head(return_path))
+            }
+        }
+        rule enqueue_req_down {
+            on req(_)
+            when up == 0
+            do {
+                error "node_down" "queue: request to down queue"
+                emit resp_error(nil) popping to (head(return_path))
             }
         }
         rule enqueue_req_reject {
             on req(_)
             do { error "color_mismatch" "queue: wrong-colour req rejected" }
         }
+        # Wake-tick keeps ticking either way so the queue resumes
+        # flushing the moment `up` flips back to 1. The flushing
+        # branch is gated so a down queue never emits to a waiter.
         rule wake_tick_flush {
             on wake(_)
-            when len > 0 && len(waiting) > 0
+            when len > 0 && len(waiting) > 0 && up == 1
             do {
                 pop waiting -> consumer
                 len := len - 1
@@ -402,14 +532,17 @@ const GADGETS_DSL: &str = r#"
         }
         rule wake_tick_idle {
             on wake(_)
-            when len == 0 || len(waiting) == 0
+            when len == 0 || len(waiting) == 0 || up == 0
             do {
                 emit wake(nil) to self
             }
         }
+        # Pulls arriving while down get stashed rather than served —
+        # consumers resume naturally once `up` flips and `wake_tick_flush`
+        # drains the `waiting` list.
         rule on_pull {
             on pull(consumer)
-            when len > 0
+            when len > 0 && up == 1
             do {
                 len := len - 1
                 emit packet(color) to (consumer)
@@ -417,7 +550,7 @@ const GADGETS_DSL: &str = r#"
         }
         rule on_pull_stash {
             on pull(consumer)
-            when len == 0
+            when len == 0 || up == 0
             do {
                 push waiting <- consumer
             }
@@ -428,17 +561,23 @@ const GADGETS_DSL: &str = r#"
         slots {
             count: Int = 0
             color: Int = 0
+            up:    Int = 1
         }
         # Colour-strict: only matching-colour `packet(c)` bumps the
         # counter. Wrong colours, or any other variant, are rejected
         # with a `color_mismatch` error.
         rule absorb {
             on packet(c)
-            when c == color
+            when c == color && up == 1
             do {
                 count := count + 1
                 record absorbed count
             }
+        }
+        rule absorb_down {
+            on packet(_)
+            when up == 0
+            do { error "node_down" "sink: packet to down sink" }
         }
         rule absorb_reject_packet {
             on packet(_)

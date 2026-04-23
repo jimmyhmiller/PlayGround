@@ -21,7 +21,7 @@
 //!        are filtered out.
 
 use flow::{Event, NodeId, PacketId, Value};
-use flow_bevy::visual::VisualTimeline;
+use flow_bevy::visual::{VisualPacket, VisualTimeline};
 use proptest::prelude::*;
 
 // ────────────────────────────────────────────────────────────
@@ -167,10 +167,16 @@ proptest! {
         for ev in &events { tl.ingest(ev, 0.0); }
 
         for p in &tl.packets {
+            // Identify the outer packet by pointer equality. Fuzzed
+            // event streams can emit multiple VisualPackets that share
+            // `(packet_id, from, to)` with different durations — a
+            // key-based filter would alias them and sample progress
+            // from the wrong packet's window.
+            let same = |vp: &VisualPacket| std::ptr::eq(vp, p);
+
             // At emit_real, progress = 0.
             let visible_at_emit: Vec<_> = tl.visible_at(p.emit_real)
-                .filter(|(vp, _)| vp.packet_id == p.packet_id
-                    && vp.from == p.from && vp.to == p.to)
+                .filter(|(vp, _)| same(vp))
                 .collect();
             if let Some((_, prog0)) = visible_at_emit.first() {
                 prop_assert!(*prog0 < 1e-3,
@@ -180,8 +186,7 @@ proptest! {
             let denom = p.arrive_real - p.emit_real;
             let almost = p.arrive_real - denom * 0.001;
             let visible_at_end: Vec<_> = tl.visible_at(almost)
-                .filter(|(vp, _)| vp.packet_id == p.packet_id
-                    && vp.from == p.from && vp.to == p.to)
+                .filter(|(vp, _)| same(vp))
                 .collect();
             if let Some((_, prog_end)) = visible_at_end.first() {
                 prop_assert!(*prog_end > 0.99,
@@ -193,12 +198,10 @@ proptest! {
             let t_a = p.emit_real + denom * 0.25;
             let t_b = p.emit_real + denom * 0.75;
             let prog_a = tl.visible_at(t_a)
-                .filter(|(vp, _)| vp.packet_id == p.packet_id
-                    && vp.from == p.from && vp.to == p.to)
+                .filter(|(vp, _)| same(vp))
                 .map(|(_, pr)| pr).next();
             let prog_b = tl.visible_at(t_b)
-                .filter(|(vp, _)| vp.packet_id == p.packet_id
-                    && vp.from == p.from && vp.to == p.to)
+                .filter(|(vp, _)| same(vp))
                 .map(|(_, pr)| pr).next();
             if let (Some(a), Some(b)) = (prog_a, prog_b) {
                 prop_assert!(b > a,

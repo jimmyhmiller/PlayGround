@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 4588652f9e9925991641f1efbd753b2fe3dece13c3ac1f4da33d553dd2f85366 # shrinks to events = [PacketEmitted { packet: PacketId(299), from: NodeId(1), to: NodeId(3), at_ns: 0, arrives_at_ns: 271255, payload: Variant { tag: "packet", payload: Int(0) } }, PacketEmitted { packet: PacketId(299), from: NodeId(1), to: NodeId(3), at_ns: 0, arrives_at_ns: 813765, payload: Variant { tag: "packet", payload: Int(0) } }], k = 0.5

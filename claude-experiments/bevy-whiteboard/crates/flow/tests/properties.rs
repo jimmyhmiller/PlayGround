@@ -307,6 +307,8 @@ proptest! {
             "edge_latency_negative",
             "spawn_failed",
             "color_mismatch",
+            "node_down",
+            "request_failed",
         ];
         for (kind, _count) in sim.error_counts.iter() {
             prop_assert!(

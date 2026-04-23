@@ -22,6 +22,11 @@ use crate::bridge::FlowSim;
 use crate::gadgets::Kind;
 use crate::nodes::{NodeKind, Selection};
 
+/// Text labels on the up/down toggle. Small constants so the spawn
+/// path, the click handler, and the live-sync system all agree.
+const UP_LABEL: &str = "Up";
+const DOWN_LABEL: &str = "Down";
+
 pub struct InspectorPlugin;
 
 impl Plugin for InspectorPlugin {
@@ -31,6 +36,8 @@ impl Plugin for InspectorPlugin {
             (
                 rebuild_inspector_on_selection_change,
                 push_rate_slider_to_sim,
+                handle_up_toggle_clicks,
+                sync_up_toggle_visual,
                 sync_queue_fill,
                 sync_sink_count,
             ),
@@ -82,6 +89,13 @@ struct QueueFillReadout {
 /// Live sink absorbed count.
 #[derive(Component)]
 struct SinkCountReadout {
+    node: NodeId,
+}
+
+/// Clickable toggle for a node's `up` slot. Flips 1 ↔ 0 on press; the
+/// sync system paints the label + border to match the current state.
+#[derive(Component, Debug, Clone, Copy)]
+struct UpToggle {
     node: NodeId,
 }
 
@@ -148,7 +162,81 @@ fn rebuild_inspector_on_selection_change(
                 // Router has no rate — it forwards whatever arrives.
             }
         }
+
+        // Every gadget carries an `up` slot; surface a toggle for it
+        // after the kind-specific rows. The initial label matches the
+        // slot's current state so the button doesn't flash on rebuild.
+        if node.slots.contains_key("up") {
+            let up = read_int_slot(node, "up") != 0;
+            spawn_up_toggle(body, &theme, nid, up);
+        }
     });
+}
+
+fn spawn_up_toggle(
+    parent: &mut bevy::ecs::hierarchy::ChildSpawnerCommands,
+    theme: &Theme,
+    nid: NodeId,
+    up: bool,
+) {
+    // Label + button row. The button takes the full remaining width so
+    // it's an easy target; the label sits to its left matching the
+    // existing slider rows' visual rhythm.
+    parent
+        .spawn((
+            Node {
+                width: Val::Percent(100.0),
+                padding: UiRect::vertical(Val::Px(6.0)),
+                column_gap: Val::Px(8.0),
+                align_items: AlignItems::Center,
+                ..default()
+            },
+            InspectorChild,
+        ))
+        .with_children(|row| {
+            row.spawn((
+                Text::new(caps_spaced("State")),
+                TextFont { font_size: 9.0, ..default() },
+                TextColor(theme.ink_soft),
+                poster_ui::Bold,
+            ));
+            let (border, label) = up_toggle_visuals(theme, up);
+            row.spawn((
+                Button,
+                Node {
+                    flex_grow: 1.0,
+                    padding: UiRect::vertical(Val::Px(6.0)),
+                    justify_content: JustifyContent::Center,
+                    align_items: AlignItems::Center,
+                    border: UiRect::all(Val::Px(1.0)),
+                    border_radius: BorderRadius::all(Val::Px(6.0)),
+                    ..default()
+                },
+                BackgroundColor(Color::NONE),
+                BorderColor::all(border),
+                UpToggle { node: nid },
+            ))
+            .with_children(|b| {
+                b.spawn((
+                    Text::new(caps_spaced(label)),
+                    TextFont { font_size: 11.0, ..default() },
+                    TextColor(border),
+                    poster_ui::Bold,
+                ));
+            });
+        });
+}
+
+/// (border/text colour, label) for the toggle in the given state.
+/// `accent` for up — matches the "everything is wired" feel; `muted`
+/// for down — a deliberate off/grey so a crashed node reads as inert
+/// without shouting red at the user.
+fn up_toggle_visuals(theme: &Theme, up: bool) -> (Color, &'static str) {
+    if up {
+        (theme.accent, UP_LABEL)
+    } else {
+        (theme.muted, DOWN_LABEL)
+    }
 }
 
 fn inspector_heading(parent: &mut bevy::ecs::hierarchy::ChildSpawnerCommands, theme: &Theme, name: &str) {
@@ -275,6 +363,61 @@ fn push_rate_slider_to_sim(
             RateSliderKind::ServiceMs => {
                 let ms = slider.value.max(0.5) as i64;
                 node.slots.insert("service_ns".into(), Value::Int(ms * 1_000_000));
+            }
+        }
+    }
+}
+
+/// Flip the node's `up` slot on every press. We gate on `Pressed`
+/// (the same edge the palette buttons use) so hover / release don't
+/// re-toggle the state.
+///
+/// On the 0→1 transition we inject a `resume(nil)` packet so stateful
+/// gadgets can kick their loops back to life. Worker's pull-loop is
+/// the motivating case: its `done` rule (which emits the next pull)
+/// was consumed by `done_crashed` while down, so without a resume
+/// kick the worker sits idle forever even though `up == 1`.
+fn handle_up_toggle_clicks(
+    q: Query<(&Interaction, &UpToggle), (Changed<Interaction>, With<Button>)>,
+    mut sim: ResMut<FlowSim>,
+) {
+    for (interaction, toggle) in q.iter() {
+        if *interaction != Interaction::Pressed { continue; }
+        let Some(node) = sim.sim.nodes.get_mut(&toggle.node) else { continue };
+        let cur = node.slots.get("up")
+            .and_then(|v| match v { Value::Int(i) => Some(*i), _ => None })
+            .unwrap_or(1);
+        let next = if cur == 0 { 1 } else { 0 };
+        node.slots.insert("up".into(), Value::Int(next));
+        if cur == 0 && next == 1 {
+            sim.sim.inject(toggle.node, Value::variant("resume", Value::Nil));
+        }
+    }
+}
+
+/// Repaint the toggle to match the slot every frame. Cheap — the
+/// query is scoped to entities carrying `UpToggle` (at most one per
+/// inspector rebuild). Also covers slot edits from any other source
+/// (scripts, tests, future DSL hooks).
+fn sync_up_toggle_visual(
+    theme: Res<Theme>,
+    sim: Res<FlowSim>,
+    mut buttons: Query<(&UpToggle, &mut BorderColor, &Children)>,
+    mut texts: Query<(&mut Text, &mut TextColor)>,
+) {
+    for (toggle, mut border, children) in buttons.iter_mut() {
+        let up = sim.sim.nodes.get(&toggle.node)
+            .and_then(|n| n.slots.get("up"))
+            .and_then(|v| match v { Value::Int(i) => Some(*i != 0), _ => None })
+            .unwrap_or(true);
+        let (color, label) = up_toggle_visuals(&theme, up);
+        *border = BorderColor::all(color);
+        // The button has exactly one text child (spawned above).
+        for child in children.iter() {
+            if let Ok((mut text, mut tc)) = texts.get_mut(child) {
+                let spaced = caps_spaced(label);
+                if text.0 != spaced { text.0 = spaced; }
+                *tc = TextColor(color);
             }
         }
     }
