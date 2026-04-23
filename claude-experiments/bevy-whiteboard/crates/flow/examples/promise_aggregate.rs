@@ -41,9 +41,9 @@ fn main() {
     let server_rules = vec![
         Rule::new("respond")
             .when(When::input(Pattern::variant("req", Pattern::wild())))
-            .do_(Effect::Respond {
-                payload: Expr::variant("resp", Expr::lit(Value::Nil)),
-            }),
+            .do_(Effect::respond(
+                Expr::variant("resp", Expr::lit(Value::Nil)),
+            )),
     ];
     let server = sim.add_node("Server", BTreeMap::new(), server_rules);
 
@@ -74,15 +74,15 @@ fn main() {
                     Expr::slot("peak"),
                 ),
             })
-            .do_(Effect::Emit {
-                payload: Expr::variant("req", Expr::lit(Value::Nil)),
-                to: EmitTo::ToTarget("Server".into()),
-            })
+            .do_(Effect::emit(
+                Expr::variant("req", Expr::lit(Value::Nil)),
+                EmitTo::ToTarget("Server".into()),
+            ))
             // Re-tick on self-loop (fires another tick `REQUEST_PERIOD_NS` later).
-            .do_(Effect::Emit {
-                payload: Expr::variant("tick", Expr::lit(Value::Nil)),
-                to: EmitTo::ToTarget("Client".into()),
-            }),
+            .do_(Effect::emit(
+                Expr::variant("tick", Expr::lit(Value::Nil)),
+                EmitTo::ToTarget("Client".into()),
+            )),
         // On response: decrement count, pop oldest sent_at, record RTT.
         Rule::new("recv")
             .when(When::input(Pattern::variant("resp", Pattern::wild())))
@@ -110,7 +110,7 @@ fn main() {
     sim.add_edge(client, client, Expr::int(REQUEST_PERIOD_NS));
 
     // ---------- Kick off ----------
-    sim.inject(client, Value::variant("tick", Value::Nil), None);
+    sim.inject(client, Value::variant("tick", Value::Nil));
 
     // ---------- Observe ----------
     println!("=== promise_aggregate ===\n");

@@ -5,7 +5,7 @@ use rand_distr::{Bernoulli, Distribution, Exp};
 use std::collections::BTreeMap;
 
 use crate::samples::Samples;
-use crate::sim::{Edge, EdgeId, Node, NodeId};
+use crate::sim::{Edge, EdgeId, Node, NodeId, Packet};
 use crate::value::{Bindings, Value};
 
 /// Binary operator over two evaluated expressions.
@@ -106,6 +106,23 @@ pub enum Expr {
         init: Box<Expr>,
         expr: Box<Expr>,
     },
+
+    // ---- Packet introspection (read the consumed inbound packet). ------
+    /// Look up a key in the consumed packet's `metadata`. Returns
+    /// `Value::Nil` if the key is absent or no packet was consumed
+    /// (e.g. source-rule fire). Never errors — metadata absence is a
+    /// normal state, not a type mismatch.
+    Meta(String),
+    /// The consumed packet's `return_path`, materialized as
+    /// `Value::List(NodeRef…)` with head at index 0. `Value::Nil` if
+    /// no packet was consumed.
+    ReturnPath,
+    /// First element of a `Value::List`, or `Value::Nil` if empty.
+    /// Complements `Tail` so you can pattern a stack without indexing.
+    Head(Box<Expr>),
+    /// All-but-first of a `Value::List`, or empty list if the list is
+    /// empty or has one element.
+    Tail(Box<Expr>),
 }
 
 /// Helpers for building expressions concisely.
@@ -163,6 +180,10 @@ impl Expr {
     pub fn index(list: Expr, i: Expr) -> Self {
         Expr::Index { list: Box::new(list), i: Box::new(i) }
     }
+    pub fn meta(key: impl Into<String>) -> Self { Expr::Meta(key.into()) }
+    pub fn return_path() -> Self { Expr::ReturnPath }
+    pub fn head(list: Expr) -> Self { Expr::Head(Box::new(list)) }
+    pub fn tail(list: Expr) -> Self { Expr::Tail(Box::new(list)) }
     pub fn filter(list: Expr, bind: impl Into<String>, pred: Expr) -> Self {
         Expr::Filter { list: Box::new(list), bind: bind.into(), pred: Box::new(pred) }
     }
@@ -203,6 +224,12 @@ pub struct EvalCtx<'a> {
     /// to enumerate neighbours and look up cross-node slots.
     pub nodes: &'a BTreeMap<NodeId, Node>,
     pub edges: &'a BTreeMap<EdgeId, Edge>,
+    /// The packet the current rule firing is consuming, if any. Read
+    /// by `Expr::Meta` and `Expr::ReturnPath`. `None` for source-rule
+    /// fires (no `Input` pattern) and for any evaluation outside a
+    /// rule firing — both treat the absent packet as empty metadata /
+    /// empty return_path.
+    pub packet: Option<&'a Packet>,
 }
 
 impl Expr {
@@ -310,6 +337,7 @@ impl Expr {
                         param_stack: ctx.param_stack,
                         nodes: ctx.nodes,
                         edges: ctx.edges,
+                        packet: ctx.packet,
                     };
                     if pred.eval(&mut sub).as_bool().expect("SamplesCountWhere: pred must be Bool") {
                         count += 1;
@@ -413,6 +441,7 @@ impl Expr {
                         param_stack: ctx.param_stack,
                         nodes: ctx.nodes,
                         edges: ctx.edges,
+                        packet: ctx.packet,
                     };
                     if pred.eval(&mut sub).as_bool().expect("Filter: pred must be Bool") {
                         out.push(item);
@@ -440,6 +469,7 @@ impl Expr {
                         param_stack: ctx.param_stack,
                         nodes: ctx.nodes,
                         edges: ctx.edges,
+                        packet: ctx.packet,
                     };
                     out.push(expr.eval(&mut sub));
                 }
@@ -466,10 +496,43 @@ impl Expr {
                         param_stack: ctx.param_stack,
                         nodes: ctx.nodes,
                         edges: ctx.edges,
+                        packet: ctx.packet,
                     };
                     accumulator = expr.eval(&mut sub);
                 }
                 accumulator
+            }
+
+            // ---- Packet introspection. Absence of a packet is NOT an
+            // error; it produces the "empty" reading. Rule authors often
+            // read meta/return_path on fallthrough guards where no packet
+            // is available, and we don't want to panic them.
+            Expr::Meta(key) => match ctx.packet {
+                Some(p) => p.metadata.get(key).cloned().unwrap_or(Value::Nil),
+                None => Value::Nil,
+            },
+            Expr::ReturnPath => match ctx.packet {
+                Some(p) => Value::List(p.return_path.iter().copied().map(Value::NodeRef).collect()),
+                None => Value::Nil,
+            },
+            Expr::Head(list_expr) => {
+                let v = list_expr.eval(ctx);
+                match v {
+                    Value::List(items) => items.into_iter().next().unwrap_or(Value::Nil),
+                    Value::Nil => Value::Nil,
+                    other => panic!("Head: expected List or Nil, got {:?}", other),
+                }
+            }
+            Expr::Tail(list_expr) => {
+                let v = list_expr.eval(ctx);
+                match v {
+                    Value::List(items) => {
+                        if items.is_empty() { Value::List(Vec::new()) }
+                        else { Value::List(items.into_iter().skip(1).collect()) }
+                    }
+                    Value::Nil => Value::List(Vec::new()),
+                    other => panic!("Tail: expected List or Nil, got {:?}", other),
+                }
             }
         }
     }
@@ -567,6 +630,7 @@ mod tests {
             bindings, slots, now_ns: 0, rng,
             current_node: None, params, param_stack,
             nodes: empty_nodes(), edges: empty_edges(),
+            packet: None,
         }
     }
 

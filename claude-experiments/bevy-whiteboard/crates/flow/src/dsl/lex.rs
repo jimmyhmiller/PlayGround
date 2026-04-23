@@ -20,9 +20,13 @@ pub enum Tok {
     // Keywords
     Params, Node, Compound, In, Out, Edges, Scenario, Template,
     Slots, Rule, On, When, Do,
-    Push, Pop, Drop, Emit, EmitEach, Respond, Record, Spawn,
+    Push, Pop, Drop, Emit, EmitEach, Record, Spawn, Error,
     To, As, At, Inject, SetParam, SetSlot, Kill,
     True, False, Nil, Self_,
+    // Packet metadata / return_path modifiers for Emit/EmitEach.
+    // `Meta` doubles as the `meta(key)` expression function; the
+    // parser distinguishes by the following `{` vs `(`.
+    Meta, ForgetMeta, Pushing, Popping, ReturnPath,
 
     // Literals
     Int(i64),
@@ -204,8 +208,13 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
                 "drop" => Some(Tok::Drop),
                 "emit" => Some(Tok::Emit),
                 "emit_each" => Some(Tok::EmitEach),
-                "respond" => Some(Tok::Respond),
+                "meta" => Some(Tok::Meta),
+                "forget_meta" => Some(Tok::ForgetMeta),
+                "pushing" => Some(Tok::Pushing),
+                "popping" => Some(Tok::Popping),
+                "return_path" => Some(Tok::ReturnPath),
                 "record" => Some(Tok::Record),
+                "error" => Some(Tok::Error),
                 "spawn" => Some(Tok::Spawn),
                 "to" => Some(Tok::To),
                 "as" => Some(Tok::As),

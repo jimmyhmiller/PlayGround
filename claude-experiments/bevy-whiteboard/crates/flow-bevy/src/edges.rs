@@ -1,42 +1,77 @@
-//! Edges: connect mode, rendering, animated packets from sim events.
+//! Edges: connect mode, arrow rendering, and the Bevy shell around the
+//! pure `visual::VisualTimeline`.
+//!
+//! The packet pipeline here is deliberately thin. All the "when is a
+//! packet visible, where is it on the edge" logic lives in
+//! [`crate::visual`] as a pure data type so it can be property-tested
+//! without a Bevy world. This file only does three things with packets:
+//!
+//!   1. `ingest_new_events` — every frame, feed `NewEvents` into the
+//!      timeline resource and spawn a Bevy entity for each new
+//!      `VisualPacket`.
+//!   2. `sync_packet_transforms` — each frame, read the timeline's
+//!      answer for every live entity (visible? progress?) and write
+//!      that into the entity's `Transform` / `Visibility`.
+//!   3. `despawn_arrived_packets` — once real time passes a packet's
+//!      `arrive_real`, remove the entity.
+//!
+//! No sequencing, FIFO, dwell, backlog cap, or throttle. Causality is
+//! inherited from the sim: if the sim emits an outgoing packet at or
+//! after an incoming packet's delivery, the visuals will too (because
+//! we just scale sim time to real time).
 
 use bevy::prelude::*;
-use flow::{Event, EdgeId};
+use flow::{EdgeId, NodeId, PacketId};
 
 use crate::bridge::{EntityMaps, FlowEdgeRef, FlowSim, NewEvents};
 use crate::camera::{MainCamera, cursor_to_world};
 use crate::nodes::NodeKind;
 use crate::theme::Theme;
 use crate::tool::{ActiveTool, Tool};
+use crate::visual::{VisualPacket, VisualTimeline};
 
 pub struct EdgesPlugin;
 impl Plugin for EdgesPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ConnectState>()
-            .init_resource::<EdgeVisualState>()
             .init_resource::<HiddenEdges>()
+            .init_resource::<DebugMode>()
+            .insert_resource(VisualTimelineRes(VisualTimeline::default()))
             .add_systems(Update, (
                 handle_connect_click,
                 draw_edges,
-                spawn_traveling_packets,
-                animate_packets,
-                despawn_finished_packets,
+                ingest_new_events,
+                sync_packet_transforms,
+                sync_packet_id_labels,
+                despawn_arrived_packets,
+                gc_timeline,
             ).chain());
     }
 }
 
-/// Per-edge last-spawn real-time, for coalescing burst traffic.
-#[derive(Resource, Default)]
-pub struct EdgeVisualState {
-    pub last_spawn: std::collections::HashMap<EdgeId, f32>,
+/// Bevy wrapper around the pure timeline so it can live as a
+/// `Resource`. The underlying `VisualTimeline` deliberately has no
+/// Bevy dependency.
+#[derive(Resource)]
+pub struct VisualTimelineRes(pub VisualTimeline);
+
+impl std::ops::Deref for VisualTimelineRes {
+    type Target = VisualTimeline;
+    fn deref(&self) -> &VisualTimeline { &self.0 }
+}
+impl std::ops::DerefMut for VisualTimelineRes {
+    fn deref_mut(&mut self) -> &mut VisualTimeline { &mut self.0 }
 }
 
 /// Sim edges that exist solely for routing — not drawn, not visualized.
 /// When the user establishes a pull relationship, we create a forward
 /// "pull signal" edge *and* a reverse "data" edge under the hood. Only
 /// one of them represents what the user drew; the other is hidden here
-/// so it doesn't clutter the canvas with a mirror arrow and a second set
-/// of moving dots.
+/// so it doesn't clutter the canvas with a mirror arrow.
+///
+/// Visual packets don't consult this set — they interpolate between
+/// `from`/`to` node positions directly, which coincides spatially
+/// whether the edge is rendered or hidden.
 #[derive(Resource, Default)]
 pub struct HiddenEdges {
     pub set: std::collections::HashSet<EdgeId>,
@@ -49,39 +84,36 @@ pub struct ConnectState {
     pub source: Option<Entity>,
 }
 
-/// A visible packet. Animates over a fixed real-time duration
-/// regardless of the edge's sim-time latency — the visual is a cue
-/// ("an event happened on this edge"), not a faithful rendering of
-/// sim timing. This keeps the canvas watchable whether the edge is
-/// 1μs or 1s in sim time.
-#[derive(Component)]
+/// A live visual packet. Fields are a read-only copy of the matching
+/// `VisualPacket` in the timeline resource — both are set at spawn
+/// and never mutated. Keeping the values here avoids a timeline
+/// lookup in the per-frame sync system and makes tests trivial
+/// (`app.world().query::<&TravelingPacket>()`).
+#[derive(Component, Clone, Debug)]
 pub struct TravelingPacket {
-    pub edge: EdgeId,
-    pub t: f32,                  // 0..1, animated real-time
-    pub duration_real_s: f32,
+    pub packet_id: PacketId,
+    pub from: NodeId,
+    pub to: NodeId,
+    pub emit_real: f64,
+    pub arrive_real: f64,
 }
 
-/// Visual traversal time is proportional to the packet's actual sim
-/// latency (so faster edges produce visibly faster packets), scaled
-/// to real time and clamped for readability.
-///
-/// Base scale: a 1 ms sim edge takes ~0.6 real seconds to traverse.
-const VIS_REAL_S_PER_SIM_NS: f32 = 6e-7;
-const VIS_MIN_REAL_S:        f32 = 0.15;
-const VIS_MAX_REAL_S:        f32 = 3.0;
+/// Marker component on the text child entity that shows a packet's
+/// id in debug mode. Updated to match visibility state of the parent
+/// packet each frame.
+#[derive(Component)]
+pub struct PacketIdLabel;
 
-/// Minimum real-time gap between two visual packets on the same edge;
-/// coalesces bursty emissions so we don't flood the canvas.
-pub const MIN_SPAWN_INTERVAL: f32 = 0.05;
-
-fn visual_duration_for(sim_latency_ns: u64) -> f32 {
-    let raw = (sim_latency_ns as f32) * VIS_REAL_S_PER_SIM_NS;
-    raw.clamp(VIS_MIN_REAL_S, VIS_MAX_REAL_S)
+/// When on, each `TravelingPacket` renders its `packet_id` as a
+/// small label on the dot. Toggled by hotkey `d` (see palette).
+#[derive(Resource, Default)]
+pub struct DebugMode {
+    pub on: bool,
 }
 
-/// If the packet's payload is `packet(Int(slot))` or `req(Int(slot))`,
-/// extract the slot index. Returns `None` for nil payloads or other
-/// shapes — caller falls back to the emitter's colour.
+/// If the payload is `packet(Int(slot))` or `req(Int(slot))`, extract
+/// the slot index. Returns `None` for nil payloads or other shapes —
+/// caller falls back to the emitter's colour.
 pub fn payload_slot(payload: &flow::Value) -> Option<usize> {
     let inner = match payload {
         flow::Value::Variant { tag, payload } if tag == "packet" || tag == "req" => payload,
@@ -98,12 +130,12 @@ pub fn payload_slot(payload: &flow::Value) -> Option<usize> {
 /// Resolution order:
 ///   1. Payload colour: if the payload is `packet(Int(slot))` or
 ///      `req(Int(slot))`, use `palette[slot]`. This lets a data
-///      packet's colour persist end-to-end through routers, queues, and
-///      workers — what the sink receives is the colour of whoever
-///      originated the stream, not the last hop.
+///      packet's colour persist end-to-end through routers, queues,
+///      and workers — what the sink receives is the colour of
+///      whoever originated the stream, not the last hop.
 ///   2. Emitter colour: fall back to the emitter's `NodeColors` entry.
-///      Used for payloads with no slot tag (e.g. `pull(NodeRef)`, which
-///      is a control signal, not data).
+///      Used for payloads with no slot tag (e.g. `pull(NodeRef)`,
+///      which is a control signal, not data).
 ///   3. Accent: final fallback for fully untyped payloads.
 ///
 /// Out-of-range slot indices clamp to the last palette entry rather
@@ -142,8 +174,6 @@ fn handle_connect_click(
     if poster_ui::pointer_over_ui(&ui) { return; }
     let Some(world) = cursor_to_world(&windows, &cams) else { return; };
 
-    // Pick node under cursor. Uses the same hit-size as node dragging so
-    // edge-connect and node-pick behave consistently.
     use crate::nodes::{body_shape, hit_size};
     let hit = nodes.iter().find(|(_, tf, kind)| {
         let half = hit_size(&body_shape(kind.0)) * 0.5;
@@ -153,7 +183,6 @@ fn handle_connect_click(
     let Some(entity) = hit else { return; };
 
     if let Some(src) = connect.source.take() {
-        // Second click: create edge + wire pull semantics if applicable.
         let Some(&from_nid) = maps.entity_to_node.get(&src) else { return; };
         let Some(&to_nid) = maps.entity_to_node.get(&entity) else { return; };
         let from_kind = nodes.get(src).map(|(_, _, k)| k.0).ok();
@@ -176,20 +205,11 @@ fn handle_connect_click(
 /// # Queue ← Worker pull semantics
 ///
 /// Pull is one-directional: the arrow has to start at the worker and
-/// point at the queue (**Worker → Queue**), matching the natural reading
-/// "worker pulls from queue". When that exact pairing is drawn:
+/// point at the queue (**Worker → Queue**). When drawn that way:
 ///
-///  * Visible edge: Worker → Queue (what the user drew), arrowhead at
-///    the queue — the pull arrow.
-///  * Hidden edge:  Queue → Worker — the data return path, created
-///    under the hood so `Respond`-equivalent routing has somewhere to
-///    travel. Added to [`HiddenEdges`] so it doesn't clutter the canvas.
+///  * Visible edge: Worker → Queue (what the user drew).
+///  * Hidden edge:  Queue → Worker — the data return path.
 ///  * Kickoff pull injected into the queue.
-///
-/// Drawing **Queue → Worker** does NOT establish a pull relationship.
-/// The queue won't push on its own (no self-drain), so nothing flows —
-/// this is on purpose: the user must draw the arrow in the pull
-/// direction to wire up a working chain.
 pub fn wire_flow_edge(
     sim: &mut flow::Sim,
     maps: &mut EntityMaps,
@@ -202,13 +222,10 @@ pub fn wire_flow_edge(
 ) {
     use crate::gadgets::Kind;
 
-    // Pull requires Worker → Queue. The other direction is a no-op chain.
     if matches!(from_kind, Some(Kind::Worker)) && matches!(to_kind, Some(Kind::Queue)) {
         let worker_id = from_nid;
         let queue_id  = to_nid;
 
-        // The visible edge is the one the user drew: Worker → Queue.
-        // The hidden data-return edge is Queue → Worker.
         let signal_eid = sim.add_edge(worker_id, queue_id,  flow::Expr::int(1_000_000));
         let data_eid   = sim.add_edge(queue_id,  worker_id, flow::Expr::int(1_000_000));
 
@@ -220,50 +237,30 @@ pub fn wire_flow_edge(
         maps.entity_to_edge.insert(dat_ent, data_eid);
         hidden.set.insert(data_eid);
 
-        // Worker remembers its upstream so `done` can aim pull signals.
         if let Some(n) = sim.nodes.get_mut(&worker_id) {
             n.slots.insert("upstream".into(), flow::Value::NodeRef(queue_id));
         }
 
-        // Kick off the cycle. Pull payload carries the worker's NodeRef
-        // so the queue can route the response back.
         sim.inject(
             queue_id,
             flow::Value::variant("pull", flow::Value::NodeRef(worker_id)),
-            Some(worker_id),
         );
         return;
     }
 
-    // Default case: one ordinary edge.
     let eid = sim.add_edge(from_nid, to_nid, flow::Expr::int(1_000_000));
     let ent = commands.spawn((FlowEdgeRef(eid),)).id();
     maps.edge_to_entity.insert(eid, ent);
     maps.entity_to_edge.insert(ent, eid);
 
-    // Worker → downstream (anything non-Queue) records downstream.
     if matches!(from_kind, Some(Kind::Worker)) {
         if let Some(n) = sim.nodes.get_mut(&from_nid) {
             n.slots.insert("downstream".into(), flow::Value::NodeRef(to_nid));
         }
     }
-
-    // Client → Worker is request/response: also create the hidden
-    // response edge Worker → Client so the worker's `Respond` can route
-    // back. Without this the worker silently drops responses (engine
-    // does this gracefully now, but the user wouldn't see anything
-    // happen). Hide the response edge so the user sees one arrow per
-    // user-drawn connection — same as the pull case.
-    if matches!(from_kind, Some(Kind::Client)) && matches!(to_kind, Some(Kind::Worker)) {
-        let resp_eid = sim.add_edge(to_nid, from_nid, flow::Expr::int(1_000_000));
-        let resp_ent = commands.spawn((FlowEdgeRef(resp_eid),)).id();
-        maps.edge_to_entity.insert(resp_eid, resp_ent);
-        maps.entity_to_edge.insert(resp_ent, resp_eid);
-        hidden.set.insert(resp_eid);
-    }
 }
 
-// ---------------- rendering ----------------
+// ---------------- arrow rendering ----------------
 
 fn draw_edges(
     mut gizmos: Gizmos,
@@ -281,23 +278,14 @@ fn draw_edges(
         let Ok((tf_from, kind_from)) = nodes.get(ent_from) else { continue; };
         let Ok((tf_to,   kind_to))   = nodes.get(ent_to)   else { continue; };
 
-        // Self-loops are a sim implementation detail — Generator / Client /
-        // Queue use them to drive their own tick rules. The user doesn't
-        // need to see that plumbing, so we skip rendering them. Packet
-        // visualizer already filters self-loop packets out too
-        // (see spawn_traveling_packets).
-        if edge.from == edge.to {
-            continue;
-        }
+        // Self-loops are sim plumbing (tick / done / period), not user edges.
+        if edge.from == edge.to { continue; }
 
         let from_center = tf_from.translation.truncate();
         let to_center = tf_to.translation.truncate();
         let dir = (to_center - from_center).normalize_or_zero();
         if dir.length_squared() == 0.0 { continue; }
 
-        // Trim the line to the node borders so the arrow doesn't overlap
-        // the body meshes. Circle bodies use radius, rect bodies use
-        // ray-into-box; hit_size() gives a consistent bounding extent.
         use crate::nodes::{body_shape, hit_size};
         let from_half = hit_size(&body_shape(kind_from.0)) * 0.5;
         let to_half = hit_size(&body_shape(kind_to.0)) * 0.5;
@@ -307,7 +295,6 @@ fn draw_edges(
         draw_arrow(&mut gizmos, from_exit, to_entry, theme.ink_soft);
     }
 
-    // Show the "source" node highlight during connect mode.
     if let Some(src) = connect.source {
         if let Ok((tf, _)) = nodes.get(src) {
             gizmos.circle_2d(tf.translation.truncate(), 40.0, theme.accent);
@@ -315,19 +302,13 @@ fn draw_edges(
     }
 }
 
-/// Ray-into-box exit distance: how far along `dir` from the centre until we
-/// hit the box border. For circular bodies whose hit_size is square, this
-/// is an outer-square approximation — slightly outside the actual circle
-/// radius at diagonals, which reads fine.
+/// Ray-into-box exit distance.
 fn border_exit(half: Vec2, dir: Vec2) -> f32 {
     let tx = if dir.x.abs() > 1e-4 { half.x / dir.x.abs() } else { f32::INFINITY };
     let ty = if dir.y.abs() > 1e-4 { half.y / dir.y.abs() } else { f32::INFINITY };
     tx.min(ty)
 }
 
-/// Draw a straight edge from `a` to `b` with a filled-wedge arrowhead at
-/// `b`. Gizmos don't render filled primitives, so the head is faked by a
-/// fan of strokes from the tip to interpolated points along the base.
 fn draw_arrow(gizmos: &mut Gizmos, a: Vec2, b: Vec2, color: Color) {
     let delta = b - a;
     let dist = delta.length();
@@ -343,8 +324,6 @@ fn draw_arrow(gizmos: &mut Gizmos, a: Vec2, b: Vec2, color: Color) {
     let left = back + head_perp * head_w;
     let right = back - head_perp * head_w;
 
-    // Fan-fill the wedge so it reads as a solid arrowhead rather than a
-    // three-stroke wireframe.
     const FILL_STEPS: usize = 6;
     for i in 0..=FILL_STEPS {
         let t = i as f32 / FILL_STEPS as f32;
@@ -356,118 +335,169 @@ fn draw_arrow(gizmos: &mut Gizmos, a: Vec2, b: Vec2, color: Color) {
     gizmos.line_2d(left, right, color);
 }
 
-// ---------------- packets ----------------
+// ---------------- packet pipeline (F1) ----------------
 
-fn spawn_traveling_packets(
+/// Feed sim events into the pure timeline and spawn a Bevy entity
+/// for each new visible packet.
+///
+/// F5: the anchor is NOT re-set per frame. It's set once at
+/// scenario load (see `examples::handle_load_example`) or when the
+/// user changes `k` (see `apply_visual_scale_change`). Events are
+/// ingested through a fixed sim↔real mapping, so visuals play at a
+/// rate that's independent of sim speed.
+fn ingest_new_events(
     mut commands: Commands,
     evs: Res<NewEvents>,
-    flow: Res<FlowSim>,
+    time: Res<Time>,
     maps: Res<EntityMaps>,
     theme: Res<Theme>,
     node_colors: Res<crate::tool::NodeColors>,
-    clock: Res<crate::bridge::SimClock>,
-    time: Res<Time>,
-    hidden: Res<HiddenEdges>,
-    mut vis: ResMut<EdgeVisualState>,
+    mut timeline: ResMut<VisualTimelineRes>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<ColorMaterial>>,
+    node_transforms: Query<&Transform, With<crate::bridge::FlowNodeRef>>,
 ) {
-    let now_real = time.elapsed_secs();
-    let multiplier = clock.multiplier.max(0.01) as f32;
+    let real_now = time.elapsed_secs_f64();
     for ev in &evs.0 {
-        let Event::PacketEmitted { from, to, at_ns, arrives_at_ns, payload, .. } = ev else { continue; };
-
-        // Skip internal plumbing emissions: pull signals and queue wake
-        // ticks. Users only care about data moving.
-        if let flow::Value::Variant { tag, .. } = payload {
-            if tag == "pull" || tag == "wake" { continue; }
-        }
-
-        let edge_id = flow.sim.edges.iter()
-            .find(|(_, e)| e.from == *from && e.to == *to)
-            .map(|(eid, _)| *eid);
-        let Some(edge_id) = edge_id else { continue; };
-        if flow.sim.edges[&edge_id].from == flow.sim.edges[&edge_id].to {
-            continue;
-        }
-        // NOTE: we deliberately DON'T skip hidden edges here. In a pull
-        // relationship the data edge (Queue→Worker) is often the hidden
-        // one, but data packets traveling along it are the whole point
-        // of the visual. The visible edge's line coincides spatially
-        // (same two nodes), so the animation lands on the right line.
-        let _ = &hidden; // touched to prove we considered it
-        let last = vis.last_spawn.get(&edge_id).copied().unwrap_or(f32::NEG_INFINITY);
-        if now_real - last < MIN_SPAWN_INTERVAL { continue; }
-        vis.last_spawn.insert(edge_id, now_real);
-
-        // Visual duration scales with the actual sim latency of THIS
-        // packet, so faster edges visibly produce faster-moving dots.
-        // Then divide by the playback multiplier so cranking to 4× makes
-        // packets travel 4× faster across the edge — we're going for
-        // "impression of flow", not cycle-accurate animation.
-        let sim_latency = arrives_at_ns.saturating_sub(*at_ns);
-        let dur = visual_duration_for(sim_latency) / multiplier;
-
-        let pkt_color = packet_color(
-            payload,
-            node_colors.0.get(from).copied(),
-            &theme.data,
-            theme.accent,
+        let Some(idx) = timeline.ingest(ev, real_now) else { continue; };
+        let vp = timeline.packets[idx].clone();
+        spawn_packet_entity(
+            &mut commands,
+            &mut meshes,
+            &mut materials,
+            &maps,
+            &theme,
+            &node_colors,
+            &node_transforms,
+            &vp,
         );
-
-        let _ = maps;
-        commands.spawn((
-            Mesh2d(meshes.add(Circle::new(6.0))),
-            MeshMaterial2d(materials.add(ColorMaterial::from(pkt_color))),
-            Transform::from_xyz(0.0, 0.0, 3.0),
-            TravelingPacket {
-                edge: edge_id,
-                t: 0.0,
-                duration_real_s: dur,
-            },
-        ));
     }
 }
 
-fn animate_packets(
+fn spawn_packet_entity(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<ColorMaterial>,
+    maps: &EntityMaps,
+    theme: &Theme,
+    node_colors: &crate::tool::NodeColors,
+    node_transforms: &Query<&Transform, With<crate::bridge::FlowNodeRef>>,
+    vp: &VisualPacket,
+) {
+    let pkt_color = packet_color(
+        &vp.payload,
+        node_colors.0.get(&vp.from).copied(),
+        &theme.data,
+        theme.accent,
+    );
+
+    // Initial position = source node's world pos. If Visibility has a
+    // one-frame render glitch, the dot flashes AT its source — which
+    // reads as "about to leave" — not at world origin.
+    let initial_pos = maps.node_to_entity.get(&vp.from)
+        .and_then(|e| node_transforms.get(*e).ok())
+        .map(|t| t.translation.truncate())
+        .unwrap_or(Vec2::ZERO);
+
+    let packet_entity = commands.spawn((
+        Mesh2d(meshes.add(Circle::new(6.0))),
+        MeshMaterial2d(materials.add(ColorMaterial::from(pkt_color))),
+        Transform::from_xyz(initial_pos.x, initial_pos.y, 3.0),
+        Visibility::Hidden,
+        TravelingPacket {
+            packet_id: vp.packet_id,
+            from: vp.from,
+            to: vp.to,
+            emit_real: vp.emit_real,
+            arrive_real: vp.arrive_real,
+        },
+    )).id();
+
+    commands.entity(packet_entity).with_children(|p| {
+        p.spawn((
+            Text2d::new(format!("{}", vp.packet_id.0)),
+            TextFont { font_size: 10.0, ..default() },
+            TextColor(theme.ink),
+            Transform::from_xyz(0.0, 12.0, 0.1),
+            Visibility::Hidden,
+            PacketIdLabel,
+        ));
+    });
+}
+
+/// Per frame: snap each packet's transform + visibility to the pure
+/// formalism. `emit_real <= now < arrive_real` ⇒ visible, position
+/// interpolated `from → to`. Outside that window ⇒ hidden (either
+/// not-yet-alive or already-arrived; `despawn_arrived_packets`
+/// deletes the latter).
+fn sync_packet_transforms(
     time: Res<Time>,
-    flow: Res<FlowSim>,
     maps: Res<EntityMaps>,
     nodes: Query<&Transform, (With<crate::bridge::FlowNodeRef>, Without<TravelingPacket>)>,
-    mut pkts: Query<(&mut Transform, &mut TravelingPacket)>,
+    mut pkts: Query<(&mut Transform, &TravelingPacket, &mut Visibility)>,
 ) {
-    let dt = time.delta_secs();
-    for (mut tf, mut pkt) in pkts.iter_mut() {
-        pkt.t = (pkt.t + dt / pkt.duration_real_s).min(1.0);
-        let Some(edge) = flow.sim.edges.get(&pkt.edge) else { continue; };
-        let Some(&ent_from) = maps.node_to_entity.get(&edge.from) else { continue; };
-        let Some(&ent_to)   = maps.node_to_entity.get(&edge.to)   else { continue; };
+    let now = time.elapsed_secs_f64();
+    for (mut tf, pkt, mut vis) in pkts.iter_mut() {
+        if now < pkt.emit_real || now >= pkt.arrive_real {
+            *vis = Visibility::Hidden;
+            continue;
+        }
+        *vis = Visibility::Visible;
+        let denom = pkt.arrive_real - pkt.emit_real;
+        let prog = ((now - pkt.emit_real) / denom).clamp(0.0, 1.0) as f32;
+        let Some(&ent_from) = maps.node_to_entity.get(&pkt.from) else { continue; };
+        let Some(&ent_to)   = maps.node_to_entity.get(&pkt.to)   else { continue; };
         let Ok(a) = nodes.get(ent_from) else { continue; };
         let Ok(b) = nodes.get(ent_to) else { continue; };
-        let p0 = a.translation.truncate();
-        let p1 = b.translation.truncate();
-        let p = p0.lerp(p1, pkt.t);
+        let p = a.translation.truncate().lerp(b.translation.truncate(), prog);
         tf.translation.x = p.x;
         tf.translation.y = p.y;
     }
 }
 
-fn despawn_finished_packets(
+/// Flip each `PacketIdLabel`'s visibility to match `DebugMode.on`.
+fn sync_packet_id_labels(
+    debug: Res<DebugMode>,
+    mut labels: Query<&mut Visibility, With<PacketIdLabel>>,
+) {
+    let want = if debug.on { Visibility::Inherited } else { Visibility::Hidden };
+    for mut v in labels.iter_mut() {
+        if *v != want { *v = want; }
+    }
+}
+
+/// Despawn entities whose packets have arrived.
+fn despawn_arrived_packets(
     mut commands: Commands,
+    time: Res<Time>,
     q: Query<(Entity, &TravelingPacket)>,
 ) {
+    let now = time.elapsed_secs_f64();
     for (e, pkt) in q.iter() {
-        if pkt.t >= 1.0 {
+        if now >= pkt.arrive_real {
             commands.entity(e).despawn();
         }
     }
 }
 
+/// Trim the timeline's arrived-history so long sessions don't grow
+/// unbounded. Keeps a ~2s window past arrival for debugging and
+/// test introspection.
+///
+/// `gc_before` retains packets whose `arrive_real >= now - keep`,
+/// so already-despawned entities get pruned without affecting any
+/// live `TravelingPacket` (live ones have `arrive_real >= now`).
+fn gc_timeline(
+    time: Res<Time>,
+    mut timeline: ResMut<VisualTimelineRes>,
+) {
+    let now = time.elapsed_secs_f64();
+    timeline.gc_before(now, 2.0);
+}
+
 #[cfg(test)]
 mod color_tests {
-    //! Unit tests for the packet-colour resolution chain. These cover
-    //! the pure function so every downstream visual test can rely on
-    //! the same rules: payload colour beats emitter colour beats accent.
+    //! Unit tests for the packet-colour resolution chain.
 
     use super::*;
     use bevy::prelude::Color;
@@ -525,18 +555,12 @@ mod color_tests {
 
     #[test]
     fn packet_color_prefers_payload_over_emitter() {
-        // A yellow (slot 1) packet emitted by a red-coloured node still
-        // reads yellow on the wire. This is the invariant that lets a
-        // packet's origin colour persist through routers/queues/workers.
         let c = packet_color(&v_packet(1), Some(RED), &PAL, ACCENT);
         assert_eq!(c, YELLOW);
     }
 
     #[test]
     fn packet_color_falls_back_to_emitter_for_control_payloads() {
-        // `pull(self)` has no slot tag — the emitter's colour wins. This
-        // is how a worker's pull-signal back to a queue still renders in
-        // the worker's colour.
         let c = packet_color(
             &Value::variant("pull", Value::Nil),
             Some(BLUE),
@@ -554,16 +578,12 @@ mod color_tests {
 
     #[test]
     fn packet_color_clamps_oversized_slot() {
-        // Slot index beyond palette length clamps to last entry. Prevents
-        // panics if theme palette shrinks while in-flight packets still
-        // carry their original slot.
         let c = packet_color(&v_packet(99), Some(EMITTER), &PAL, ACCENT);
-        assert_eq!(c, BLUE); // last palette entry
+        assert_eq!(c, BLUE);
     }
 
     #[test]
     fn packet_color_handles_empty_palette() {
-        // Edge case: no palette at all. Fall through to emitter, then accent.
         let c = packet_color(&v_packet(0), Some(EMITTER), &[], ACCENT);
         assert_eq!(c, EMITTER);
         let c = packet_color(&v_packet(0), None, &[], ACCENT);
@@ -572,10 +592,6 @@ mod color_tests {
 
     #[test]
     fn packet_color_resolves_each_stream_to_its_slot() {
-        // Three parallel streams, each tagged with its slot, all emitted
-        // by the same forwarder (emitter colour = red). Each packet
-        // should render in its stream's colour — proves routers can
-        // multiplex without losing colour identity.
         let forwarder_color = Some(RED);
         for slot in 0..3 {
             let c = packet_color(&v_packet(slot as i64), forwarder_color, &PAL, ACCENT);

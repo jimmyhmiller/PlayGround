@@ -45,6 +45,23 @@ pub enum Event {
     /// A node was despawned. Its edges are already gone; any in-flight
     /// packets to/from it will be silently dropped on delivery.
     NodeDespawned { node: NodeId, at_ns: Time },
+
+    /// A runtime error happened during rule execution. The engine never
+    /// panics on user-configurable failure modes (missing edge, type
+    /// mismatch, empty return-path pop); it records one of these and
+    /// drops the effect on the floor. Paired with `Sim.error_counts`
+    /// for aggregate visibility.
+    ///
+    /// `kind` is a short stable string key (e.g. `"emit_no_edge"`,
+    /// `"return_path_empty_pop"`, `"slot_type_mismatch"`) so downstream
+    /// tools can classify without scraping the detail message.
+    RuntimeError {
+        kind: String,
+        node: Option<NodeId>,
+        rule: Option<String>,
+        detail: String,
+        at_ns: Time,
+    },
 }
 
 /// Ring-bounded event log. Always on; the bound caps memory.

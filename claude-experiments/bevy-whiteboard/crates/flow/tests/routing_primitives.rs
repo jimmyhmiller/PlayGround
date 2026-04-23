@@ -50,7 +50,7 @@ fn out_neighbors_returns_outbound_node_refs() {
     sim.add_edge(_other, src, Expr::int(1)); // inbound — not counted
     sim.add_edge(src, src, Expr::int(1));    // self-loop — not counted
 
-    sim.inject(src, Value::variant("go", Value::Nil), None);
+    sim.inject(src, Value::variant("go", Value::Nil));
     sim.run_until(1);
 
     // Length expression stored 2 in `count`.
@@ -73,7 +73,7 @@ fn slot_of_reads_neighbors_state() {
             }),
     ]);
     sim.add_edge(src, neighbour, Expr::int(1));
-    sim.inject(src, Value::variant("go", Value::Nil), None);
+    sim.inject(src, Value::variant("go", Value::Nil));
     sim.run_until(1);
     assert_eq!(sim.nodes[&src].slots["seen_color"], Value::Int(7));
 }
@@ -84,10 +84,10 @@ fn emit_to_each_broadcasts_to_all_outbounds() {
     let src = sim.add_node("src", slots(&[]), vec![
         Rule::new("broadcast")
             .when(When::input(Pattern::variant("go", Pattern::wild())))
-            .do_(Effect::EmitToEach {
-                payload: Expr::variant("packet", Expr::lit(Value::Nil)),
-                targets: Expr::out_neighbors(),
-            }),
+            .do_(Effect::emit_to_each(
+                Expr::variant("packet", Expr::lit(Value::Nil)),
+                Expr::out_neighbors(),
+            )),
     ]);
     let a = sim.add_node("a", slots(&[]), vec![]);
     let b = sim.add_node("b", slots(&[]), vec![]);
@@ -96,7 +96,7 @@ fn emit_to_each_broadcasts_to_all_outbounds() {
     sim.add_edge(src, b, Expr::int(1));
     sim.add_edge(src, c, Expr::int(1));
 
-    sim.inject(src, Value::variant("go", Value::Nil), None);
+    sim.inject(src, Value::variant("go", Value::Nil));
     sim.run_until(2);
 
     // One emission scheduled per outbound.
@@ -121,13 +121,13 @@ fn round_robin_router_via_index_and_modulo() {
                     slot: "rr".into(),
                     value: Expr::add(Expr::slot("rr"), Expr::int(1)),
                 })
-                .do_(Effect::Emit {
-                    payload: Expr::variant("packet", Expr::var("p")),
-                    to: EmitTo::ToTargetExpr(Expr::index(
+                .do_(Effect::emit(
+                    Expr::variant("packet", Expr::var("p")),
+                    EmitTo::ToTargetExpr(Expr::index(
                         Expr::out_neighbors(),
                         Expr::slot("rr"),
                     )),
-                }),
+                )),
         ],
     );
     let a = sim.add_node("a", slots(&[]), vec![]);
@@ -138,7 +138,7 @@ fn round_robin_router_via_index_and_modulo() {
     sim.add_edge(src, c, Expr::int(1));
 
     for _ in 0..6 {
-        sim.inject(src, Value::variant("packet", Value::Nil), None);
+        sim.inject(src, Value::variant("packet", Value::Nil));
     }
     sim.run_until(10);
 
@@ -162,9 +162,9 @@ fn least_loaded_router_via_reduce_slot_of() {
         vec![
             Rule::new("forward")
                 .when(When::input(Pattern::variant("packet", Pattern::var("p"))))
-                .do_(Effect::Emit {
-                    payload: Expr::variant("packet", Expr::var("p")),
-                    to: EmitTo::ToTargetExpr(Expr::reduce(
+                .do_(Effect::emit(
+                    Expr::variant("packet", Expr::var("p")),
+                    EmitTo::ToTargetExpr(Expr::reduce(
                         Expr::out_neighbors(),
                         "n", "best",
                         Expr::index(Expr::out_neighbors(), Expr::int(0)),
@@ -177,13 +177,13 @@ fn least_loaded_router_via_reduce_slot_of() {
                             Expr::var("best"),
                         ),
                     )),
-                }),
+                )),
         ],
     );
     sim.add_edge(src, busy, Expr::int(1));
     sim.add_edge(src, idle, Expr::int(1));
 
-    sim.inject(src, Value::variant("packet", Value::Nil), None);
+    sim.inject(src, Value::variant("packet", Value::Nil));
     sim.run_until(2);
 
     // Idle wins both packets.
@@ -204,9 +204,9 @@ fn filter_then_emit_to_subset() {
         vec![
             Rule::new("emit_to_enabled")
                 .when(When::input(Pattern::variant("go", Pattern::wild())))
-                .do_(Effect::EmitToEach {
-                    payload: Expr::variant("packet", Expr::lit(Value::Nil)),
-                    targets: Expr::filter(
+                .do_(Effect::emit_to_each(
+                    Expr::variant("packet", Expr::lit(Value::Nil)),
+                    Expr::filter(
                         Expr::out_neighbors(),
                         "n",
                         Expr::eq(
@@ -214,14 +214,14 @@ fn filter_then_emit_to_subset() {
                             Expr::int(1),
                         ),
                     ),
-                }),
+                )),
         ],
     );
     sim.add_edge(src, on1, Expr::int(1));
     sim.add_edge(src, off, Expr::int(1));
     sim.add_edge(src, on2, Expr::int(1));
 
-    sim.inject(src, Value::variant("go", Value::Nil), None);
+    sim.inject(src, Value::variant("go", Value::Nil));
     sim.run_until(2);
 
     assert_eq!(count_emissions_to(&sim, on1), 1);
@@ -257,7 +257,7 @@ fn map_can_extract_slot_values_into_a_list() {
     sim.add_edge(src, b, Expr::int(1));
     sim.add_edge(src, c, Expr::int(1));
 
-    sim.inject(src, Value::variant("go", Value::Nil), None);
+    sim.inject(src, Value::variant("go", Value::Nil));
     sim.run_until(1);
 
     assert_eq!(

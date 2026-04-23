@@ -73,11 +73,41 @@ pub enum Stmt {
     Push    { slot: String, value: Expr },
     Pop     { slot: String, into: String },
     DropN   { slot: String, n: Expr },
-    Emit    { payload: Expr, target: EmitTarget },
-    EmitEach{ payload: Expr, targets: Expr },
-    Respond { payload: Expr },
+    Emit    {
+        payload: Expr,
+        target: EmitTarget,
+        meta_ops: Vec<MetaOp>,
+        rp_op: ReturnPathOp,
+    },
+    EmitEach{
+        payload: Expr,
+        targets: Expr,
+        meta_ops: Vec<MetaOp>,
+        rp_op: ReturnPathOp,
+    },
     Record  { name: String, value: Expr },
     Spawn   { template: String, into: String },
+    /// `error "kind" detail_expr` — record a runtime error in
+    /// `Sim.error_counts[kind]` and emit a `RuntimeError` event.
+    /// `kind` must be a string literal at parse time; detail can be
+    /// any expression (string literal typical).
+    Error   { kind: String, detail: Expr },
+}
+
+/// Surface-level metadata modification. Lowered to `rule::MetaOp`.
+#[derive(Debug, Clone)]
+pub enum MetaOp {
+    Set { key: String, value: Expr },
+    Remove { key: String },
+}
+
+/// Surface-level return_path modification. Lowered to `rule::ReturnPathOp`.
+#[derive(Debug, Clone)]
+pub enum ReturnPathOp {
+    Inherit,
+    Push(Expr),
+    Pop,
+    Replace(Expr),
 }
 
 #[derive(Debug, Clone)]
@@ -137,6 +167,12 @@ pub enum Expr {
     Binary(BinOp, Box<Expr>, Box<Expr>),
     Unary(UnOp, Box<Expr>),
     If { cond: Box<Expr>, then_: Box<Expr>, else_: Box<Expr> },
+    /// `meta(key)` — look up the consumed packet's metadata value. Lowers
+    /// to `flow::Expr::Meta`. Key must be a string literal at parse time.
+    Meta(String),
+    /// `return_path` bare — the consumed packet's return_path as a List
+    /// of NodeRefs. Lowers to `flow::Expr::ReturnPath`.
+    ReturnPath,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

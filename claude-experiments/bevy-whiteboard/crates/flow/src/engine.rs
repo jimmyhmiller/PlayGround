@@ -1,9 +1,11 @@
 use std::cmp::Reverse;
 use std::collections::VecDeque;
 
+use std::collections::BTreeMap;
+
 use crate::event::Event;
 use crate::expr::{EvalCtx, Expr};
-use crate::rule::{Effect, EmitTo, Rule, When};
+use crate::rule::{Effect, EmitTo, MetaOp, ReturnPathOp, Rule, When};
 use crate::scenario::Action;
 use crate::sim::{EdgeId, Node, NodeId, Packet, Scheduled, Sim, Time};
 use crate::template::EdgeEnd;
@@ -201,6 +203,11 @@ impl Sim {
                 let params = &self.params;
                 let now_ns = self.now_ns;
                 let rng = &mut self.rng;
+                // If the rule consumes a packet, the guard sees it via
+                // `meta(...)` / `return_path`. The packet itself still
+                // lives in the node's inbox at this point (we haven't
+                // consumed yet), so grab a reference for the guard eval.
+                let pkt_ref: Option<&Packet> = pkt_idx.map(|i| &self.nodes[&nid].inbox[i]);
                 let mut ctx = EvalCtx {
                     bindings: &bindings,
                     slots: &slot_snapshot,
@@ -211,6 +218,7 @@ impl Sim {
                     param_stack: &mut pstack,
                     nodes,
                     edges,
+                    packet: pkt_ref,
                 };
                 let v = g.eval(&mut ctx);
                 if !v.as_bool().expect("guard must evaluate to Bool") {
@@ -266,133 +274,136 @@ impl Sim {
 
         match eff {
             Effect::SetSlot { slot, value } => {
-                let v = self.eval_at_node(nid, bindings, value);
+                let v = self.eval_at_node(nid, bindings, value, consumed_pkt);
                 self.write_slot(nid, slot, v, now);
             }
             Effect::SamplesPush { slot, value } => {
-                let v = self.eval_at_node(nid, bindings, value);
+                let v = self.eval_at_node(nid, bindings, value, consumed_pkt);
                 let node = self.nodes.get_mut(&nid).unwrap();
-                let entry = node.slots.get_mut(slot)
-                    .unwrap_or_else(|| panic!("SamplesPush: slot `{}` missing", slot));
-                match entry {
-                    Value::Samples(s) => s.push(v),
-                    other => panic!("SamplesPush: slot `{}` is not Samples: {:?}", slot, other),
+                match node.slots.get_mut(slot) {
+                    Some(Value::Samples(s)) => s.push(v),
+                    Some(other) => {
+                        let detail = format!("slot `{}` is not Samples: {:?}", slot, other);
+                        self.record_error("slot_type_mismatch", Some(nid), Some(rule_name), detail);
+                    }
+                    None => {
+                        let detail = format!("SamplesPush: slot `{}` missing", slot);
+                        self.record_error("slot_missing", Some(nid), Some(rule_name), detail);
+                    }
                 }
             }
             Effect::SamplesPopOldestInto { slot, into_var } => {
                 let node = self.nodes.get_mut(&nid).unwrap();
-                let entry = node.slots.get_mut(slot)
-                    .unwrap_or_else(|| panic!("SamplesPopOldestInto: slot `{}` missing", slot));
-                let v = match entry {
-                    Value::Samples(s) => s.pop_oldest()
-                        .unwrap_or_else(|| panic!("SamplesPopOldestInto: slot `{}` empty", slot)),
-                    other => panic!("SamplesPopOldestInto: slot `{}` not Samples: {:?}", slot, other),
+                let v = match node.slots.get_mut(slot) {
+                    Some(Value::Samples(s)) => match s.pop_oldest() {
+                        Some(v) => Some(v),
+                        None => {
+                            let detail = format!("pop from empty Samples slot `{}`", slot);
+                            self.record_error("samples_empty_pop", Some(nid), Some(rule_name), detail);
+                            None
+                        }
+                    },
+                    Some(other) => {
+                        let detail = format!("slot `{}` is not Samples: {:?}", slot, other);
+                        self.record_error("slot_type_mismatch", Some(nid), Some(rule_name), detail);
+                        None
+                    }
+                    None => {
+                        let detail = format!("SamplesPopOldestInto: slot `{}` missing", slot);
+                        self.record_error("slot_missing", Some(nid), Some(rule_name), detail);
+                        None
+                    }
                 };
-                bindings.insert(into_var.clone(), v);
+                if let Some(v) = v {
+                    bindings.insert(into_var.clone(), v);
+                }
             }
             Effect::SamplesDropOldest { slot, n } => {
-                let n_val = self.eval_at_node(nid, bindings, n).as_int()
-                    .expect("SamplesDropOldest: n must be Int");
+                let n_v = self.eval_at_node(nid, bindings, n, consumed_pkt);
+                let n_val = match n_v.as_int() {
+                    Some(n) => n,
+                    None => {
+                        self.record_error(
+                            "expr_type_mismatch",
+                            Some(nid),
+                            Some(rule_name),
+                            format!("SamplesDropOldest: n must be Int, got {:?}", n_v),
+                        );
+                        return;
+                    }
+                };
                 let node = self.nodes.get_mut(&nid).unwrap();
-                let entry = node.slots.get_mut(slot)
-                    .unwrap_or_else(|| panic!("SamplesDropOldest: slot `{}` missing", slot));
-                match entry {
-                    Value::Samples(s) => {
+                match node.slots.get_mut(slot) {
+                    Some(Value::Samples(s)) => {
                         for _ in 0..n_val.max(0) {
                             if s.pop_oldest().is_none() { break; }
                         }
                     }
-                    other => panic!("SamplesDropOldest: slot `{}` not Samples: {:?}", slot, other),
+                    Some(other) => {
+                        let detail = format!("slot `{}` is not Samples: {:?}", slot, other);
+                        self.record_error("slot_type_mismatch", Some(nid), Some(rule_name), detail);
+                    }
+                    None => {
+                        let detail = format!("SamplesDropOldest: slot `{}` missing", slot);
+                        self.record_error("slot_missing", Some(nid), Some(rule_name), detail);
+                    }
                 }
             }
-            Effect::Emit { payload, to } => {
-                let v = self.eval_at_node(nid, bindings, payload);
-                self.schedule_emit(nid, to.clone(), v, Some(nid), bindings);
+            Effect::Emit { payload, to, meta_ops, return_path_op } => {
+                let v = self.eval_at_node(nid, bindings, payload, consumed_pkt);
+                self.schedule_emit(
+                    nid, rule_name, to.clone(), v,
+                    consumed_pkt, meta_ops, return_path_op,
+                    bindings,
+                );
             }
-            Effect::EmitToEach { payload, targets } => {
-                let targets_v = self.eval_at_node(nid, bindings, targets);
+            Effect::EmitToEach { payload, targets, meta_ops, return_path_op } => {
+                let targets_v = self.eval_at_node(nid, bindings, targets, consumed_pkt);
                 let items = match targets_v {
                     Value::List(v) => v,
-                    other => panic!(
-                        "EmitToEach: targets must be a List of NodeRef, got {:?}",
-                        other
-                    ),
+                    other => {
+                        self.record_error(
+                            "emit_to_each_bad_targets",
+                            Some(nid),
+                            Some(rule_name),
+                            format!("targets must be a List of NodeRef, got {:?}", other),
+                        );
+                        return;
+                    }
                 };
-                let payload_v = self.eval_at_node(nid, bindings, payload);
+                let payload_v = self.eval_at_node(nid, bindings, payload, consumed_pkt);
                 for t in items {
                     let nref = match t {
                         Value::NodeRef(id) => id,
-                        other => panic!(
-                            "EmitToEach: each target must be NodeRef, got {:?}",
-                            other
-                        ),
+                        other => {
+                            self.record_error(
+                                "emit_to_each_bad_targets",
+                                Some(nid),
+                                Some(rule_name),
+                                format!("target must be NodeRef, got {:?}", other),
+                            );
+                            continue;
+                        }
                     };
                     // Routes through the same engine path as
                     // ToTargetExpr — silent-drops when no outbound
                     // edge exists from `nid` to `nref`.
                     self.schedule_emit(
                         nid,
+                        rule_name,
                         crate::rule::EmitTo::ToTargetExpr(
                             crate::expr::Expr::Lit(Value::NodeRef(nref))
                         ),
                         payload_v.clone(),
-                        Some(nid),
+                        consumed_pkt,
+                        meta_ops,
+                        return_path_op,
                         bindings,
                     );
                 }
             }
-            Effect::Respond { payload } => {
-                let Some(pkt) = consumed_pkt else {
-                    panic!("Respond effect requires a consumed inbound packet (rule `{}`)", rule_name);
-                };
-                let Some(reply_to) = pkt.reply_to else {
-                    // Nowhere to reply — silently skip. (Modeling choice: you could panic.)
-                    return;
-                };
-                // The reply travels on the outbound edge from this node (the responder)
-                // to the requester. That edge is where the response latency expression
-                // lives — NOT the inbound edge, which is evaluated in the requester's
-                // slot context and would panic here.
-                // Silent-drop when no reverse edge exists. Interactive
-                // graphs often have a request edge but not the matching
-                // response edge — panicking here cascades through every
-                // subsequent rule firing. Same contract as unwired
-                // `DefaultOut` / stale `ToTargetExpr`.
-                let Some(reverse_edge) = self
-                    .outbound(nid)
-                    .into_iter()
-                    .find(|eid| self.edges[eid].to == reply_to)
-                else {
-                    return;
-                };
-                let edge = self.edges[&reverse_edge].clone();
-                let v = self.eval_at_node(nid, bindings, payload);
-                let latency = self.eval_latency_expr(&edge.latency_ns, nid, bindings, &v);
-                let arrives_at = self.now_ns.saturating_add(latency);
-                let pid = self.next_packet_id();
-                self.log.push(Event::PacketEmitted {
-                    packet: pid,
-                    from: nid,
-                    to: reply_to,
-                    at_ns: self.now_ns,
-                    arrives_at_ns: arrives_at,
-                    payload: v.clone(),
-                });
-                self.in_flight.push(Reverse(Scheduled {
-                    arrives_at_ns: arrives_at,
-                    packet: Packet {
-                        id: pid,
-                        payload: v,
-                        from_edge: None,
-                        reply_to: Some(nid),
-                        emitted_at_ns: self.now_ns,
-                    },
-                    edge: reverse_edge,
-                    deliver_to: reply_to,
-                }));
-            }
             Effect::RecordMetric { name, value } => {
-                let v = self.eval_at_node(nid, bindings, value);
+                let v = self.eval_at_node(nid, bindings, value, consumed_pkt);
                 self.log.push(Event::MetricRecorded {
                     node: nid,
                     name: name.clone(),
@@ -400,19 +411,43 @@ impl Sim {
                     at_ns: now,
                 });
             }
+            Effect::RecordError { kind, detail } => {
+                let v = self.eval_at_node(nid, bindings, detail, consumed_pkt);
+                let detail_s = match v {
+                    Value::Str(s) => s,
+                    // Non-string details stringify via Debug — rule
+                    // authors usually pass a literal string, but any
+                    // Value is accepted so you can surface a slot
+                    // value without needing a sprintf-like facility.
+                    other => format!("{:?}", other),
+                };
+                self.record_error(kind, Some(nid), Some(rule_name), detail_s);
+            }
             Effect::Spawn { template, into_var } => {
-                let new_id = self.spawn_from_template(template, Some(nid));
-                if let Some(var) = into_var {
-                    bindings.insert(var.clone(), Value::NodeRef(new_id));
+                match self.try_spawn_from_template(template, Some(nid)) {
+                    Ok(new_id) => {
+                        if let Some(var) = into_var {
+                            bindings.insert(var.clone(), Value::NodeRef(new_id));
+                        }
+                    }
+                    Err(detail) => {
+                        self.record_error("spawn_failed", Some(nid), Some(rule_name), detail);
+                    }
                 }
             }
             Effect::Despawn { node } => {
-                let v = self.eval_at_node(nid, bindings, node);
-                let target = match v {
-                    Value::NodeRef(id) => id,
-                    other => panic!("Despawn: expected NodeRef, got {:?}", other),
-                };
-                self.despawn_node(target);
+                let v = self.eval_at_node(nid, bindings, node, consumed_pkt);
+                match v {
+                    Value::NodeRef(id) => { self.despawn_node(id); }
+                    other => {
+                        self.record_error(
+                            "expr_type_mismatch",
+                            Some(nid),
+                            Some(rule_name),
+                            format!("Despawn: expected NodeRef, got {:?}", other),
+                        );
+                    }
+                }
             }
         }
     }
@@ -466,8 +501,8 @@ impl Sim {
     /// Apply one scripted scenario action at the current clock.
     fn apply_action(&mut self, action: Action) {
         match action {
-            Action::Inject { node, payload, reply_to } => {
-                self.inject(node, payload, reply_to);
+            Action::Inject { node, payload, metadata, return_path } => {
+                self.inject_with(node, payload, metadata, return_path);
             }
             Action::SetSlot { node, slot, value } => {
                 let now = self.now_ns;
@@ -495,10 +530,22 @@ impl Sim {
     /// Instantiate a template. Returns the new node's id.
     ///
     /// Template edges with `EdgeEnd::Parent` require a parent to be
-    /// supplied. Panics otherwise.
+    /// supplied. Panics otherwise — use `try_spawn_from_template` if
+    /// you want to recover.
     pub fn spawn_from_template(&mut self, template_name: &str, parent: Option<NodeId>) -> NodeId {
+        self.try_spawn_from_template(template_name, parent)
+            .unwrap_or_else(|e| panic!("spawn_from_template: {}", e))
+    }
+
+    /// Non-panicking variant: returns `Err(detail)` if the template is
+    /// missing or its edges require a parent that wasn't supplied.
+    pub fn try_spawn_from_template(
+        &mut self,
+        template_name: &str,
+        parent: Option<NodeId>,
+    ) -> Result<NodeId, String> {
         let t = self.templates.get(template_name).cloned()
-            .unwrap_or_else(|| panic!("spawn: no template named `{}`", template_name));
+            .ok_or_else(|| format!("no template named `{}`", template_name))?;
 
         self.next_instance_seq += 1;
         let seq = self.next_instance_seq;
@@ -525,33 +572,159 @@ impl Sim {
 
         // Materialize template edges.
         for spec in &t.edges {
-            let resolve = |end: EdgeEnd| match end {
+            let from = match spec.from {
                 EdgeEnd::ThisInstance => new_id,
-                EdgeEnd::Parent => parent.unwrap_or_else(|| panic!(
-                    "spawn: template `{}` has an edge with EdgeEnd::Parent \
-                     but no parent was supplied",
-                    template_name
-                )),
+                EdgeEnd::Parent => match parent {
+                    Some(p) => p,
+                    None => return Err(format!(
+                        "template `{}` has an edge with EdgeEnd::Parent but no parent was supplied",
+                        template_name,
+                    )),
+                },
             };
-            let from = resolve(spec.from);
-            let to = resolve(spec.to);
+            let to = match spec.to {
+                EdgeEnd::ThisInstance => new_id,
+                EdgeEnd::Parent => match parent {
+                    Some(p) => p,
+                    None => return Err(format!(
+                        "template `{}` has an edge with EdgeEnd::Parent but no parent was supplied",
+                        template_name,
+                    )),
+                },
+            };
             self.add_edge(from, to, spec.latency.clone());
         }
 
-        new_id
+        Ok(new_id)
+    }
+
+    /// Build the `(metadata, return_path)` pair that an emitted packet
+    /// should carry, starting from the consumed packet's values (or
+    /// empty for source emits) and applying the rule's modifications.
+    ///
+    /// Returns `None` and records an error if a modification is
+    /// malformed (e.g. popping an empty path, pushing a non-NodeRef):
+    /// the caller should silently drop the emit.
+    fn build_meta_and_path(
+        &mut self,
+        from_nid: NodeId,
+        rule_name: &str,
+        consumed_pkt: Option<&Packet>,
+        meta_ops: &[MetaOp],
+        rp_op: &ReturnPathOp,
+        bindings: &Bindings,
+    ) -> Option<(BTreeMap<String, Value>, Vec<NodeId>)> {
+        // Inherit from consumed packet. Empty map/vec for source emits
+        // are zero-heap — Vec::new() / BTreeMap::new() don't allocate.
+        let mut metadata = consumed_pkt.map(|p| p.metadata.clone()).unwrap_or_default();
+        let inherited_path: Vec<NodeId> = consumed_pkt.map(|p| p.return_path.clone()).unwrap_or_default();
+
+        for op in meta_ops {
+            match op {
+                MetaOp::Set { key, value } => {
+                    let v = self.eval_at_node(from_nid, bindings, value, consumed_pkt);
+                    metadata.insert(key.clone(), v);
+                }
+                MetaOp::Remove { key } => { metadata.remove(key); }
+            }
+        }
+
+        let return_path = match rp_op {
+            ReturnPathOp::Inherit => inherited_path,
+            ReturnPathOp::Push(e) => {
+                let v = self.eval_at_node(from_nid, bindings, e, consumed_pkt);
+                match v {
+                    Value::NodeRef(id) => {
+                        let mut p = Vec::with_capacity(inherited_path.len() + 1);
+                        p.push(id);
+                        p.extend(inherited_path);
+                        p
+                    }
+                    other => {
+                        self.record_error(
+                            "return_path_push_bad_type",
+                            Some(from_nid),
+                            Some(rule_name),
+                            format!("pushing value must be NodeRef, got {:?}", other),
+                        );
+                        return None;
+                    }
+                }
+            }
+            ReturnPathOp::Pop => {
+                if inherited_path.is_empty() {
+                    self.record_error(
+                        "return_path_empty_pop",
+                        Some(from_nid),
+                        Some(rule_name),
+                        "popping from empty return_path",
+                    );
+                    return None;
+                }
+                inherited_path[1..].to_vec()
+            }
+            ReturnPathOp::Replace(e) => {
+                let v = self.eval_at_node(from_nid, bindings, e, consumed_pkt);
+                match v {
+                    Value::List(items) => {
+                        let mut out = Vec::with_capacity(items.len());
+                        for item in items {
+                            match item {
+                                Value::NodeRef(id) => out.push(id),
+                                other => {
+                                    self.record_error(
+                                        "return_path_replace_bad_type",
+                                        Some(from_nid),
+                                        Some(rule_name),
+                                        format!("return_path entry must be NodeRef, got {:?}", other),
+                                    );
+                                    return None;
+                                }
+                            }
+                        }
+                        out
+                    }
+                    other => {
+                        self.record_error(
+                            "return_path_replace_bad_type",
+                            Some(from_nid),
+                            Some(rule_name),
+                            format!("return_path replacement must be List of NodeRef, got {:?}", other),
+                        );
+                        return None;
+                    }
+                }
+            }
+        };
+
+        Some((metadata, return_path))
     }
 
     fn schedule_emit(
         &mut self,
         from_nid: NodeId,
+        rule_name: &str,
         to: EmitTo,
         payload: Value,
-        reply_to: Option<NodeId>,
+        consumed_pkt: Option<&Packet>,
+        meta_ops: &[MetaOp],
+        rp_op: &ReturnPathOp,
         bindings: &Bindings,
     ) {
-        // Resolve outbound edge.
+        // Build metadata + return_path first. If either is malformed,
+        // record_error has already fired; drop the emit.
+        let Some((metadata, return_path)) = self.build_meta_and_path(
+            from_nid, rule_name, consumed_pkt, meta_ops, rp_op, bindings,
+        ) else {
+            return;
+        };
+
+        // Resolve outbound edge. Yields (edge_id, deliver_to): normally
+        // deliver_to == edge.to, but reverse-routing (see ToTargetExpr
+        // below) lets a reply travel along an existing INBOUND edge in
+        // the opposite direction, in which case deliver_to = edge.from.
         let outs = self.outbound(from_nid);
-        let target_edge_id = match to {
+        let (target_edge_id, deliver_to) = match to {
             EmitTo::DefaultOut => {
                 // Prefer the first NON-self outbound. A node's self-loop is
                 // usually a timing mechanism, not its intended downstream.
@@ -563,43 +736,79 @@ impl Sim {
                     .or_else(|| outs.first())
                     .copied();
                 match pick {
-                    Some(eid) => eid,
+                    Some(eid) => (eid, self.edges[&eid].to),
                     None => return,
                 }
             },
-            EmitTo::ToTarget(name) => outs.into_iter().find(|eid| {
-                let to_id = self.edges[eid].to;
-                self.nodes.get(&to_id).map(|n| n.name == name).unwrap_or(false)
-            }).unwrap_or_else(|| {
-                panic!("Emit::ToTarget(`{}`): no outbound edge with that target", name)
-            }),
+            EmitTo::ToTarget(name) => {
+                match outs.into_iter().find(|eid| {
+                    let to_id = self.edges[eid].to;
+                    self.nodes.get(&to_id).map(|n| n.name == name).unwrap_or(false)
+                }) {
+                    Some(eid) => (eid, self.edges[&eid].to),
+                    None => {
+                        self.record_error(
+                            "emit_no_edge",
+                            Some(from_nid),
+                            Some(rule_name),
+                            format!("Emit::ToTarget(`{}`): no outbound edge with that target", name),
+                        );
+                        return;
+                    }
+                }
+            }
             EmitTo::ToTargetExpr(e) => {
-                let v = self.eval_at_node(from_nid, bindings, &e);
+                let v = self.eval_at_node(from_nid, bindings, &e, consumed_pkt);
                 let target_id = match v {
                     Value::NodeRef(id) => id,
-                    Value::Str(name) => self.node_by_name(&name).unwrap_or_else(|| {
-                        panic!("EmitTo::ToTargetExpr: no node named `{}`", name)
-                    }),
+                    Value::Str(name) => {
+                        match self.node_by_name(&name) {
+                            Some(id) => id,
+                            None => {
+                                self.record_error(
+                                    "emit_unknown_target",
+                                    Some(from_nid),
+                                    Some(rule_name),
+                                    format!("EmitTo::ToTargetExpr: no node named `{}`", name),
+                                );
+                                return;
+                            }
+                        }
+                    }
                     // Nil is the "no match" signal from expressions like
                     // `OutNeighborWithSlot` that may resolve to nothing.
-                    // Silently drop the emit — same contract as unwired
-                    // `DefaultOut`.
+                    // Silently drop — not an error, expected flow.
                     Value::Nil => return,
-                    other => panic!(
-                        "EmitTo::ToTargetExpr must yield Str or NodeRef, got {:?}",
-                        other
-                    ),
+                    other => {
+                        self.record_error(
+                            "emit_target_bad_type",
+                            Some(from_nid),
+                            Some(rule_name),
+                            format!("ToTargetExpr must yield Str, NodeRef, or Nil, got {:?}", other),
+                        );
+                        return;
+                    }
                 };
-                // Silent-drop when no outbound edge reaches the resolved
-                // target. Interactive graphs churn: a user deletes the
-                // node that was a node's current reply target, and stale
-                // NodeRefs sit in slots like `pending_pull` until the
-                // next write. Panicking here would cascade through every
-                // subsequent rule firing; dropping matches the "unwired
-                // output" contract DefaultOut already uses.
-                match outs.into_iter().find(|eid| self.edges[eid].to == target_id) {
-                    Some(eid) => eid,
-                    None => return,
+                // Look for an outbound edge first.
+                if let Some(eid) = outs.into_iter().find(|eid| self.edges[eid].to == target_id) {
+                    (eid, self.edges[&eid].to)
+                } else if let Some(eid) = self.edges.values()
+                    .find(|e| e.from == target_id && e.to == from_nid)
+                    .map(|e| e.id)
+                {
+                    // Reverse-route: NO outbound edge exists to the target,
+                    // but an INBOUND edge from the target does. A reply
+                    // travels back along the request edge. This is how
+                    // return_path-based replies reach clients without
+                    // requiring a user-drawn response edge or a hidden
+                    // auto-created one — the single wire the user drew
+                    // carries both directions.
+                    (eid, target_id)
+                } else {
+                    // Neither direction available — the target genuinely
+                    // isn't reachable from this node. Silent-drop matches
+                    // "unwired output" contract for interactive authoring.
+                    return;
                 }
             }
             EmitTo::ToOutPort(port_name) => {
@@ -608,18 +817,22 @@ impl Sim {
                 // from=that compound and from_port=port_name. (Multiple
                 // edges = broadcast.) Return early without setting a
                 // single target edge — handled below.
-                let compound_nid = self.find_enclosing_compound_for_out_port(from_nid, &port_name)
-                    .unwrap_or_else(|| panic!(
-                        "ToOutPort(`{}`): node {:?} has no enclosing compound with that out-port mapping it",
-                        port_name, from_nid
-                    ));
+                let Some(compound_nid) = self.find_enclosing_compound_for_out_port(from_nid, &port_name) else {
+                    self.record_error(
+                        "emit_bad_port",
+                        Some(from_nid),
+                        Some(rule_name),
+                        format!("ToOutPort(`{}`): no enclosing compound with that out-port mapping", port_name),
+                    );
+                    return;
+                };
                 let edge_ids: Vec<EdgeId> = self.edges.values()
                     .filter(|e| e.from == compound_nid && e.from_port.as_deref() == Some(port_name.as_str()))
                     .map(|e| e.id)
                     .collect();
                 if edge_ids.is_empty() {
-                    // Port is mapped but nothing is wired to it — silently drop.
-                    // (Could alternatively panic; dropping matches "unwired output" semantics.)
+                    // Port is mapped but nothing is wired to it — silently drop
+                    // (same contract as unwired DefaultOut).
                     return;
                 }
                 for eid in edge_ids {
@@ -641,7 +854,8 @@ impl Sim {
                             id: pid,
                             payload: payload.clone(),
                             from_edge: None,
-                            reply_to,
+                            metadata: metadata.clone(),
+                            return_path: return_path.clone(),
                             emitted_at_ns: self.now_ns,
                         },
                         edge: eid,
@@ -658,7 +872,7 @@ impl Sim {
         self.log.push(Event::PacketEmitted {
             packet: pid,
             from: from_nid,
-            to: edge.to,
+            to: deliver_to,
             at_ns: self.now_ns,
             arrives_at_ns: arrives_at,
             payload: payload.clone(),
@@ -669,15 +883,22 @@ impl Sim {
                 id: pid,
                 payload,
                 from_edge: None,
-                reply_to,
+                metadata,
+                return_path,
                 emitted_at_ns: self.now_ns,
             },
             edge: target_edge_id,
-            deliver_to: edge.to,
+            deliver_to,
         }));
     }
 
-    fn eval_at_node(&mut self, nid: NodeId, bindings: &Bindings, e: &Expr) -> Value {
+    fn eval_at_node(
+        &mut self,
+        nid: NodeId,
+        bindings: &Bindings,
+        e: &Expr,
+        packet: Option<&Packet>,
+    ) -> Value {
         let slots = self.nodes.get(&nid).unwrap().slots.clone();
         let mut pstack: Vec<String> = Vec::new();
         let nodes = &self.nodes;
@@ -695,6 +916,7 @@ impl Sim {
             param_stack: &mut pstack,
             nodes,
             edges,
+            packet,
         };
         e.eval(&mut ctx)
     }
@@ -707,6 +929,8 @@ impl Sim {
         packet_payload: &Value,
     ) -> Time {
         // Edge latency is evaluated with: source node's slots + `packet` = payload.
+        // No consumed-packet is available here — latency exprs don't
+        // reference meta/return_path.
         let mut b = bindings.clone();
         b.insert("packet".to_string(), packet_payload.clone());
         let slots = self.nodes.get(&src_nid).unwrap().slots.clone();
@@ -726,10 +950,30 @@ impl Sim {
             param_stack: &mut pstack,
             nodes,
             edges,
+            packet: None,
         };
         let v = latency_ns.eval(&mut ctx);
-        let n = v.as_int().unwrap_or_else(|| panic!("edge latency must be Int, got {:?}", v));
-        assert!(n >= 0, "edge latency was negative: {}", n);
+        let n = match v.as_int() {
+            Some(n) => n,
+            None => {
+                self.record_error(
+                    "edge_latency_bad_type",
+                    Some(src_nid),
+                    None,
+                    format!("edge latency must be Int, got {:?}", v),
+                );
+                0
+            }
+        };
+        if n < 0 {
+            self.record_error(
+                "edge_latency_negative",
+                Some(src_nid),
+                None,
+                format!("edge latency was negative: {}", n),
+            );
+            return 0;
+        }
         n as Time
     }
 

@@ -240,24 +240,20 @@ impl Parser {
             Tok::Emit => {
                 self.bump();
                 let payload = self.parse_expr()?;
+                let (meta_ops, rp_op) = self.parse_emit_modifiers()?;
                 self.expect(Tok::To)?;
                 let target = self.parse_emit_target()?;
                 let _ = self.eat(&Tok::Semi);
-                Ok(Stmt::Emit { payload, target })
+                Ok(Stmt::Emit { payload, target, meta_ops, rp_op })
             }
             Tok::EmitEach => {
                 self.bump();
                 let payload = self.parse_expr()?;
+                let (meta_ops, rp_op) = self.parse_emit_modifiers()?;
                 self.expect(Tok::To)?;
                 let targets = self.parse_expr()?;
                 let _ = self.eat(&Tok::Semi);
-                Ok(Stmt::EmitEach { payload, targets })
-            }
-            Tok::Respond => {
-                self.bump();
-                let payload = self.parse_expr()?;
-                let _ = self.eat(&Tok::Semi);
-                Ok(Stmt::Respond { payload })
+                Ok(Stmt::EmitEach { payload, targets, meta_ops, rp_op })
             }
             Tok::Record => {
                 self.bump();
@@ -265,6 +261,19 @@ impl Parser {
                 let value = self.parse_expr()?;
                 let _ = self.eat(&Tok::Semi);
                 Ok(Stmt::Record { name, value })
+            }
+            Tok::Error => {
+                self.bump();
+                let kind = match self.bump() {
+                    Tok::Str(s) => s,
+                    other => return Err(format!(
+                        "{}: error: expected string literal kind, got {:?}",
+                        self.here(), other
+                    )),
+                };
+                let detail = self.parse_expr()?;
+                let _ = self.eat(&Tok::Semi);
+                Ok(Stmt::Error { kind, detail })
             }
             Tok::Spawn => {
                 self.bump();
@@ -284,6 +293,70 @@ impl Parser {
             }
             other => Err(format!("{}: expected statement, got {:?}", self.here(), other)),
         }
+    }
+
+    /// Parse zero-or-more metadata / return_path modifiers that sit
+    /// between an emit payload and its `to` target. At most one of
+    /// {pushing, popping, return_path <expr>} is accepted per emit
+    /// — later ones overwrite earlier ones at this layer but the
+    /// lowerer rejects it if you care (we just let the last one win).
+    ///
+    ///   meta { k: EXPR, k: EXPR }
+    ///   forget_meta { IDENT, IDENT }
+    ///   pushing EXPR
+    ///   popping
+    ///   return_path EXPR
+    fn parse_emit_modifiers(&mut self) -> Result<(Vec<MetaOp>, ReturnPathOp), String> {
+        let mut meta_ops: Vec<MetaOp> = Vec::new();
+        let mut rp_op = ReturnPathOp::Inherit;
+        loop {
+            match self.peek() {
+                Tok::Meta => {
+                    self.bump();
+                    self.expect(Tok::LBrace)?;
+                    while !matches!(self.peek(), Tok::RBrace | Tok::Eof) {
+                        let key = self.ident()?;
+                        self.expect(Tok::Colon)?;
+                        let value = self.parse_expr()?;
+                        meta_ops.push(MetaOp::Set { key, value });
+                        let _ = self.eat(&Tok::Comma) || self.eat(&Tok::Semi);
+                    }
+                    self.expect(Tok::RBrace)?;
+                }
+                Tok::ForgetMeta => {
+                    self.bump();
+                    self.expect(Tok::LBrace)?;
+                    while !matches!(self.peek(), Tok::RBrace | Tok::Eof) {
+                        let key = self.ident()?;
+                        meta_ops.push(MetaOp::Remove { key });
+                        let _ = self.eat(&Tok::Comma) || self.eat(&Tok::Semi);
+                    }
+                    self.expect(Tok::RBrace)?;
+                }
+                Tok::Pushing => {
+                    self.bump();
+                    let e = self.parse_expr()?;
+                    rp_op = ReturnPathOp::Push(e);
+                }
+                Tok::Popping => {
+                    self.bump();
+                    rp_op = ReturnPathOp::Pop;
+                }
+                Tok::ReturnPath => {
+                    // `return_path EXPR` — only valid here as a modifier
+                    // when NOT immediately followed by a `(` (that would
+                    // be a function-call-style misuse; return_path takes
+                    // no args as an expression). Since `return_path` in
+                    // expression position is a nullary keyword, this
+                    // modifier form is always `return_path EXPR`.
+                    self.bump();
+                    let e = self.parse_expr()?;
+                    rp_op = ReturnPathOp::Replace(e);
+                }
+                _ => break,
+            }
+        }
+        Ok((meta_ops, rp_op))
     }
 
     fn parse_emit_target(&mut self) -> Result<EmitTarget, String> {
@@ -523,6 +596,23 @@ impl Parser {
             Tok::False => { self.bump(); Ok(Expr::Bool(false)) }
             Tok::Nil => { self.bump(); Ok(Expr::Nil) }
             Tok::Self_ => { self.bump(); Ok(Expr::SelfRef) }
+            Tok::ReturnPath => { self.bump(); Ok(Expr::ReturnPath) }
+            Tok::Meta => {
+                // Only valid in expression position as `meta("key")`.
+                // Anywhere else, `meta` is consumed earlier by
+                // parse_emit_modifiers as a modifier keyword.
+                self.bump();
+                self.expect(Tok::LParen)?;
+                let key = match self.bump() {
+                    Tok::Str(s) => s,
+                    other => return Err(format!(
+                        "{}: meta(): expected string literal key, got {:?}",
+                        self.here(), other
+                    )),
+                };
+                self.expect(Tok::RParen)?;
+                Ok(Expr::Meta(key))
+            }
             Tok::Ident(s) if s == "now" => { self.bump(); Ok(Expr::Now) }
             Tok::Ident(s) if s == "param" => {
                 self.bump();
@@ -562,6 +652,7 @@ impl Parser {
                         | "len" | "mean"
                         | "out_neighbors" | "slot_of"
                         | "length" | "index" | "filter" | "map" | "reduce"
+                        | "head" | "tail"
                     );
                     if is_builtin {
                         Ok(Expr::FnCall(name, args))

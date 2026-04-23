@@ -25,15 +25,28 @@ pub struct PacketId(pub u64);
 /// A packet flowing between nodes.
 ///
 /// `from_edge` records which edge delivered this packet to the current
-/// node's inbox — used for `When::Input { from: ... }` filtering and
-/// for reply addressing. `reply_to` records the packet's requester; a
-/// `Respond` effect sends back to that node.
+/// node's inbox — used for `When::Input { from: ... }` filtering.
+///
+/// `metadata` and `return_path` are **always preserved** across hops:
+/// when a rule fires on a consumed packet, emits inherit both fields
+/// by default. Rules opt in to mutation explicitly (push/pop/set/remove)
+/// — there is no engine-level overwriting. Empty `Vec` and empty
+/// `BTreeMap` are zero-heap defaults, so packets that don't use either
+/// mechanism pay no allocation cost.
 #[derive(Debug, Clone)]
 pub struct Packet {
     pub id: PacketId,
     pub payload: Value,
     pub from_edge: Option<EdgeId>,
-    pub reply_to: Option<NodeId>,
+    /// Arbitrary string-keyed metadata. Rule authors decide what keys
+    /// mean (trace ids, deadlines, auth tokens, …). Preserved through
+    /// all emits that inherit from a consumed packet.
+    pub metadata: BTreeMap<String, Value>,
+    /// Stack of nodes that want to receive the response. Head is the
+    /// innermost caller; `popping` an emit removes the head. Empty for
+    /// packets that are fire-and-forget. Preserved through all emits
+    /// that don't explicitly push/pop/replace.
+    pub return_path: Vec<NodeId>,
     pub emitted_at_ns: Time,
 }
 
@@ -150,6 +163,11 @@ pub struct Sim {
     /// instant. A well-written model won't hit this; if it does, we
     /// want a loud error, not a hang.
     pub max_steps_per_instant: usize,
+    /// Running counts of runtime errors, keyed by `kind` string.
+    /// Incremented alongside `Event::RuntimeError` emission. Lets the
+    /// UI / tests surface aggregate error rates without scraping the
+    /// event log.
+    pub error_counts: BTreeMap<String, u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -189,7 +207,30 @@ impl Sim {
             params: HashMap::new(),
             pending_actions: BinaryHeap::new(),
             max_steps_per_instant: 10_000,
+            error_counts: BTreeMap::new(),
         }
+    }
+
+    /// Record a runtime error: increments `error_counts[kind]` and
+    /// emits a `RuntimeError` event. Call this instead of panicking
+    /// when the failure is user-configurable (bad expression type,
+    /// missing edge, empty return-path pop, etc.) — the sim keeps
+    /// running and the caller silently drops the offending effect.
+    pub(crate) fn record_error(
+        &mut self,
+        kind: &str,
+        node: Option<NodeId>,
+        rule: Option<&str>,
+        detail: impl Into<String>,
+    ) {
+        *self.error_counts.entry(kind.to_string()).or_insert(0) += 1;
+        self.log.push(Event::RuntimeError {
+            kind: kind.to_string(),
+            node,
+            rule: rule.map(|s| s.to_string()),
+            detail: detail.into(),
+            at_ns: self.now_ns,
+        });
     }
 
     /// Bind or rebind a live parameter. Takes effect on the next
@@ -340,14 +381,29 @@ impl Sim {
     }
 
     /// Inject a packet directly into a node's inbox at the current clock.
-    /// Useful for scripted scenarios.
-    pub fn inject(&mut self, to: NodeId, payload: Value, reply_to: Option<NodeId>) -> PacketId {
+    /// Useful for scripted scenarios. `metadata` and `return_path` both
+    /// default to empty — most injections are fire-and-forget.
+    pub fn inject(&mut self, to: NodeId, payload: Value) -> PacketId {
+        self.inject_with(to, payload, BTreeMap::new(), Vec::new())
+    }
+
+    /// Inject a packet carrying specific metadata and/or return_path.
+    /// Use this when seeding a request that expects a response from the
+    /// graph, or pre-populating metadata for a scenario-driven test.
+    pub fn inject_with(
+        &mut self,
+        to: NodeId,
+        payload: Value,
+        metadata: BTreeMap<String, Value>,
+        return_path: Vec<NodeId>,
+    ) -> PacketId {
         let id = self.next_packet_id();
         let pkt = Packet {
             id,
             payload,
             from_edge: None,
-            reply_to,
+            metadata,
+            return_path,
             emitted_at_ns: self.now_ns,
         };
         self.log.push(Event::PacketDelivered { packet: id, to, at_ns: self.now_ns });

@@ -35,9 +35,9 @@ fn main() {
                 slot: "holder".into(),
                 value: Expr::variant("Some", Expr::var("who")),
             })
-            .do_(Effect::Respond {
-                payload: Expr::variant("granted", Expr::lit(Value::Nil)),
-            }),
+            .do_(Effect::respond(
+                Expr::variant("granted", Expr::lit(Value::Nil)),
+            )),
         // Release frees the holder slot.
         Rule::new("release")
             .when(When::input(Pattern::variant("release", Pattern::wild())))
@@ -67,10 +67,10 @@ fn main() {
                     slot: "idle".into(),
                     value: Expr::bool(false),
                 })
-                .do_(Effect::Emit {
-                    payload: Expr::variant("acquire", Expr::lit(Value::str(wname.clone()))),
-                    to: EmitTo::ToTarget("Mutex".into()),
-                }),
+                .do_(Effect::emit(
+                    Expr::variant("acquire", Expr::lit(Value::str(wname.clone()))),
+                    EmitTo::ToTarget("Mutex".into()),
+                )),
             // On grant: bump counter, release immediately, go back to idle.
             Rule::new("on_granted")
                 .when(When::input(Pattern::variant("granted", Pattern::wild())))
@@ -82,10 +82,10 @@ fn main() {
                     name: "completed".into(),
                     value: Expr::slot("completed"),
                 })
-                .do_(Effect::Emit {
-                    payload: Expr::variant("release", Expr::lit(Value::Nil)),
-                    to: EmitTo::ToTarget("Mutex".into()),
-                })
+                .do_(Effect::emit(
+                    Expr::variant("release", Expr::lit(Value::Nil)),
+                    EmitTo::ToTarget("Mutex".into()),
+                ))
                 .do_(Effect::SetSlot {
                     slot: "idle".into(),
                     value: Expr::bool(true),

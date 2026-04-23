@@ -116,6 +116,14 @@ fn event_to_json(ev: &Event) -> String {
             r#"{{"k":"despawn","at":{},"node":{}}}"#,
             at_ns, node.0
         ),
+        Event::RuntimeError { kind, node, rule, detail, at_ns } => format!(
+            r#"{{"k":"error","at":{},"kind":{},"node":{},"rule":{},"detail":{}}}"#,
+            at_ns,
+            esc(kind),
+            node.map(|n| n.0.to_string()).unwrap_or_else(|| "null".into()),
+            rule.as_ref().map(|r| esc(r)).unwrap_or_else(|| "null".into()),
+            esc(detail),
+        ),
     }
 }
 

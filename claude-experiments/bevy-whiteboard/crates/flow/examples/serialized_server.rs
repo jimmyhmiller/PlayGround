@@ -51,10 +51,10 @@ fn main() {
             })
             // Emit work-timer to self. The self-loop edge carries the service
             // time, so `complete` fires after ~service_mean ns.
-            .do_(Effect::Emit {
-                payload: Expr::variant("work_done", Expr::lit(Value::Nil)),
-                to: EmitTo::ToTarget("Server".into()),
-            }),
+            .do_(Effect::emit(
+                Expr::variant("work_done", Expr::lit(Value::Nil)),
+                EmitTo::ToTarget("Server".into()),
+            )),
 
         // Work completed: emit response to whoever's name is stashed,
         // bump counter, clear busy.
@@ -64,10 +64,10 @@ fn main() {
                 slot: "total_served".into(),
                 value: Expr::add(Expr::slot("total_served"), Expr::int(1)),
             })
-            .do_(Effect::Emit {
-                payload: Expr::variant("resp", Expr::lit(Value::Nil)),
-                to: EmitTo::ToTargetExpr(Expr::slot("current_client")),
-            })
+            .do_(Effect::emit(
+                Expr::variant("resp", Expr::lit(Value::Nil)),
+                EmitTo::ToTargetExpr(Expr::slot("current_client")),
+            ))
             .do_(Effect::SetSlot { slot: "busy".into(), value: Expr::bool(false) }),
     ];
     let server = sim.add_node("Server", server_slots, server_rules);
@@ -98,17 +98,17 @@ fn main() {
                 ),
             })
             // Payload carries the client's own name so the server can stash it.
-            .do_(Effect::Emit {
-                payload: Expr::variant(
+            .do_(Effect::emit(
+                Expr::variant(
                     "req",
                     Expr::record([("who", Expr::lit(Value::str("Client")))]),
                 ),
-                to: EmitTo::ToTarget("Server".into()),
-            })
-            .do_(Effect::Emit {
-                payload: Expr::variant("tick", Expr::lit(Value::Nil)),
-                to: EmitTo::ToTarget("Client".into()),
-            }),
+                EmitTo::ToTarget("Server".into()),
+            ))
+            .do_(Effect::emit(
+                Expr::variant("tick", Expr::lit(Value::Nil)),
+                EmitTo::ToTarget("Client".into()),
+            )),
         Rule::new("recv")
             .when(When::input(Pattern::variant("resp", Pattern::wild())))
             .do_(Effect::SetSlot {
@@ -137,7 +137,7 @@ fn main() {
     // Server self-loop: service time lives here.
     sim.add_edge(server, server, Expr::exp_dist(Expr::float(SERVICE_MEAN_NS)));
 
-    sim.inject(client, Value::variant("tick", Value::Nil), None);
+    sim.inject(client, Value::variant("tick", Value::Nil));
 
     // ---------- Observe ----------
     println!("=== serialized_server ===\n");

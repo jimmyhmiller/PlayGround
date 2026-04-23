@@ -23,6 +23,17 @@ use flow_bevy::theme::Theme;
 pub fn make_app() -> App {
     let mut app = poster_ui::testing::test_app_headless();
     app.add_plugins(FlowBevyPlugins);
+    // Test-only knob settings: sim at 1× wall clock, and visual
+    // scale `k = 1.0` so sim nanoseconds map 1:1 to real seconds.
+    // The live app uses `k = 200` so gadget edges (~1 ms) are
+    // clearly visible (~200 ms); tests prefer the identity mapping
+    // so assertions like "a packet emitted at at_ns=T becomes
+    // visible at real_t ≈ T * 1e-9" hold without unit conversion.
+    app.world_mut().resource_mut::<flow_bevy::bridge::SimClock>().multiplier = 1.0;
+    {
+        let mut tl = app.world_mut().resource_mut::<flow_bevy::edges::VisualTimelineRes>();
+        tl.0.k = 1.0;
+    }
     app.update();
     app.update();
     app

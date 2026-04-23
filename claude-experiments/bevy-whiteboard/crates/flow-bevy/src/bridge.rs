@@ -56,21 +56,25 @@ pub struct FlowNodeRef(pub NodeId);
 #[derive(Component, Clone, Copy)]
 pub struct FlowEdgeRef(pub EdgeId);
 
-/// Playback state.
+/// Sim playback state. `multiplier` controls ONLY how fast the sim
+/// advances — it does NOT affect visual packet duration. The visual
+/// scale lives in `VisualTimeline::k` (see `visual.rs`) and is
+/// tuned independently with its own hotkeys.
+///
+/// This split is what the user asked for: fast sim + readable
+/// visuals (or slow sim + fast-flashing visuals) are both possible.
+///
+/// `[` / `]` → sim speed (halve / double `multiplier`)
+/// `-` / `=` → visual scale (halve / double `VisualTimeline::k`)
 #[derive(Resource)]
 pub struct SimClock {
-    /// Real seconds per sim second. At 1.0, one real second = one sim
-    /// second. Whiteboard scales happen on ns-scale so default slow.
+    /// Sim seconds per wall second. 1.0 = sim runs at wall clock.
     pub multiplier: f64,
     pub paused: bool,
     pub step_once_ns: Option<u64>,
 }
 impl Default for SimClock {
     fn default() -> Self {
-        // 1.0 = real time. Flow-bevy's gadgets run at ms scale (100ms emit
-        // period, 50ms service) which is already watchable at real time —
-        // no need to slow down by default. Users who want a slower view
-        // can pick a slower speed chip in the HUD.
         Self { multiplier: 1.0, paused: false, step_once_ns: None }
     }
 }

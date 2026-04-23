@@ -10,6 +10,7 @@ use poster_ui::{
 };
 
 use crate::bridge::{FlowSim, SimClock};
+use crate::edges::VisualTimelineRes;
 
 pub struct HudPlugin;
 impl Plugin for HudPlugin {
@@ -19,6 +20,7 @@ impl Plugin for HudPlugin {
                 Update,
                 (
                     update_time_readout,
+                    update_vis_readout,
                     update_counts,
                     handle_play_button,
                     handle_step_button,
@@ -46,11 +48,21 @@ struct HudStepBtn;
 #[derive(Component)]
 struct HudTimeText;
 
+/// Visual scale readout — shows `VisualTimeline.k` so the user
+/// knows what `-` / `=` are set to. Displayed as "vis k=NNN" so
+/// the units are clear (real-ms per sim-ms of packet latency =
+/// scale factor applied to packet animation duration).
+#[derive(Component)]
+struct HudVisScale;
+
 #[derive(Component)]
 struct HudNodeCount;
 
 #[derive(Component)]
 struct HudEdgeCount;
+
+#[derive(Component)]
+struct HudErrorCount;
 
 #[derive(Component, Clone, Copy)]
 struct HudSpeedChip(f64);
@@ -76,6 +88,7 @@ fn spawn_hud(mut commands: Commands, theme: Res<Theme>, clock: Res<SimClock>) {
         hud_button_cell(bar, &theme, play_style, play_glyph, (HudPlayBtn, HudPlayIcon));
         hud_step_cell(bar, &theme, "›|", HudStepBtn);
         hud_text_cell(bar, &theme, "0.000 ms", HudTimeText);
+        hud_text_cell(bar, &theme, "vis k=410", HudVisScale);
 
         hud_chip_strip(bar, &theme, |chips| {
             for (i, (val, label)) in SPEED_OPTIONS.iter().enumerate() {
@@ -88,6 +101,7 @@ fn spawn_hud(mut commands: Commands, theme: Res<Theme>, clock: Res<SimClock>) {
         hud_counter_strip(bar, |cs| {
             hud_counter(cs, &theme, "0 nodes", HudNodeCount);
             hud_counter(cs, &theme, "0 edges", HudEdgeCount);
+            hud_counter(cs, &theme, "0 errors", HudErrorCount);
         });
     });
 }
@@ -106,15 +120,39 @@ fn update_time_readout(
     if text.0 != new { text.0 = new; }
 }
 
+/// Show the current visual scale so `-` / `=` adjustments are
+/// legible. Rounded to an integer — `k` always gets halved/doubled
+/// from the 100 default so fractions only show up after many presses.
+fn update_vis_readout(
+    timeline: Res<VisualTimelineRes>,
+    mut q: Query<&mut Text, With<HudVisScale>>,
+) {
+    let Ok(mut text) = q.single_mut() else { return };
+    let k = timeline.0.k;
+    let new = if k >= 10.0 {
+        format!("vis k={}", k.round() as i64)
+    } else {
+        format!("vis k={:.2}", k)
+    };
+    if text.0 != new { text.0 = new; }
+}
+
 fn update_counts(
     flow: Res<FlowSim>,
-    mut nodes: Query<&mut Text, (With<HudNodeCount>, Without<HudEdgeCount>)>,
-    mut edges: Query<&mut Text, (With<HudEdgeCount>, Without<HudNodeCount>)>,
+    mut nodes: Query<&mut Text, (With<HudNodeCount>, Without<HudEdgeCount>, Without<HudErrorCount>)>,
+    mut edges: Query<&mut Text, (With<HudEdgeCount>, Without<HudNodeCount>, Without<HudErrorCount>)>,
+    mut errors: Query<&mut Text, (With<HudErrorCount>, Without<HudNodeCount>, Without<HudEdgeCount>)>,
 ) {
     let n = format!("{} nodes", flow.sim.nodes.len());
     let e = format!("{} edges", flow.sim.edges.len());
+    // Total error count — sum across all kinds. Lets the user notice
+    // a new error happened at a glance; clicking through to the
+    // event log (future) would show which kinds and where.
+    let err_total: u64 = flow.sim.error_counts.values().sum();
+    let err = format!("{} errors", err_total);
     for mut t in nodes.iter_mut() { if t.0 != n { t.0 = n.clone(); } }
     for mut t in edges.iter_mut() { if t.0 != e { t.0 = e.clone(); } }
+    for mut t in errors.iter_mut() { if t.0 != err { t.0 = err.clone(); } }
 }
 
 fn handle_play_button(

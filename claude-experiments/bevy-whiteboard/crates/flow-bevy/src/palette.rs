@@ -8,10 +8,10 @@
 //! Hotkeys (mirror the panel):
 //!   g — Generator     e — toggle Connect
 //!   c — Client        space — play/pause
-//!   w — Worker        [ / ]  — slow/fast
-//!   r — Router        .      — step one event
-//!   q — Queue         esc    — Select
-//!   s — Sink
+//!   w — Worker        [ / ]  — slow/fast SIM
+//!   r — Router        - / =  — slow/fast VISUAL (independent of sim)
+//!   q — Queue         .      — step one event
+//!   s — Sink          esc    — Select
 
 use bevy::prelude::*;
 use flow::Event;
@@ -33,6 +33,7 @@ use poster_ui::{
 };
 
 use crate::bridge::{FlowSim, SimClock};
+use crate::examples::{Example, LoadExample};
 use crate::gadgets::Kind;
 use crate::tool::{ActiveSlot, ActiveTool, Tool};
 
@@ -119,6 +120,10 @@ fn spawn_palette(mut commands: Commands, theme: Res<Theme>) {
                 }
             });
 
+            // Examples moved to the hover-reveal dropdown in the
+            // top-left corner (see `crate::examples_menu`). Hotkeys
+            // 1..4 below still fire `LoadExample` directly.
+
             // Inspector mount: the inspector module repopulates this
             // node's children whenever the selection changes. Hidden by
             // default (no selection → no contents).
@@ -148,10 +153,28 @@ fn spawn_palette(mut commands: Commands, theme: Res<Theme>) {
 
 fn handle_hotkeys(
     keys: Res<ButtonInput<KeyCode>>,
+    time: Res<Time>,
     mut active: ResMut<ActiveTool>,
     mut clock: ResMut<SimClock>,
     mut flow: ResMut<FlowSim>,
+    mut timeline: ResMut<crate::edges::VisualTimelineRes>,
+    mut load: bevy::ecs::message::MessageWriter<LoadExample>,
+    mut debug: ResMut<crate::edges::DebugMode>,
 ) {
+    // Digit keys map to Example::ALL in order. Matches the glyph shown
+    // on each Examples-section button, so the palette doubles as a
+    // hotkey hint.
+    let digit_keys = [
+        KeyCode::Digit1, KeyCode::Digit2, KeyCode::Digit3, KeyCode::Digit4,
+        KeyCode::Digit5, KeyCode::Digit6, KeyCode::Digit7, KeyCode::Digit8,
+        KeyCode::Digit9,
+    ];
+    for (i, kc) in digit_keys.iter().enumerate() {
+        if i >= Example::ALL.len() { break; }
+        if keys.just_pressed(*kc) {
+            load.write(LoadExample(Example::ALL[i]));
+        }
+    }
     if keys.just_pressed(KeyCode::KeyG) { active.0 = Tool::Drop(Kind::Generator); }
     if keys.just_pressed(KeyCode::KeyC) { active.0 = Tool::Drop(Kind::Client); }
     if keys.just_pressed(KeyCode::KeyW) { active.0 = Tool::Drop(Kind::Worker); }
@@ -167,8 +190,26 @@ fn handle_hotkeys(
     }
     if keys.just_pressed(KeyCode::Escape) { active.0 = Tool::Select; }
     if keys.just_pressed(KeyCode::Space) { clock.paused = !clock.paused; }
+    if keys.just_pressed(KeyCode::KeyD) {
+        // Toggle packet-id labels on every TravelingPacket.
+        debug.on = !debug.on;
+    }
     if keys.just_pressed(KeyCode::BracketLeft)  { clock.multiplier *= 0.5; }
     if keys.just_pressed(KeyCode::BracketRight) { clock.multiplier *= 2.0; }
+    // Visual scale — decoupled from sim speed. `-` halves (packets
+    // flash quicker); `=` doubles (packets linger longer). Under F12
+    // `set_k` only affects future ingestions; already-in-flight
+    // packets complete their existing windows naturally.
+    if keys.just_pressed(KeyCode::Minus) {
+        let k = timeline.0.k * 0.5;
+        timeline.0.set_k(k);
+    }
+    if keys.just_pressed(KeyCode::Equal) {
+        let k = timeline.0.k * 2.0;
+        timeline.0.set_k(k);
+    }
+    // Silence unused-param warnings when neither key was pressed.
+    let _ = (&time, &flow);
     if keys.just_pressed(KeyCode::Period) {
         step_to_visible(&mut flow.sim);
     }
@@ -216,12 +257,17 @@ fn sync_swatch_visuals(
 fn handle_action_buttons(
     q: Query<(&Interaction, &ActionBtn), (Changed<Interaction>, With<Button>)>,
     mut theme: ResMut<Theme>,
+    mut load: bevy::ecs::message::MessageWriter<LoadExample>,
 ) {
     for (interaction, action) in q.iter() {
         if *interaction != Interaction::Pressed { continue; }
         match action {
             ActionBtn::Clear => {
-                // Wired later — the sim doesn't have a "clear all" yet.
+                // "Clear" is conceptually "load an empty scenario." We
+                // don't have a variant for that — load the default
+                // instead, which is the thing a user most likely wants
+                // to return to after experimenting.
+                load.write(LoadExample(Example::ThreeLaneFanout));
             }
             ActionBtn::NextTheme => {
                 *theme = theme.next();
@@ -229,6 +275,9 @@ fn handle_action_buttons(
         }
     }
 }
+
+// handle_example_buttons moved to crate::examples_menu along with the
+// ExampleBtn marker.
 
 /// Paint hover / active state onto each tool button each frame. Delegates to
 /// `poster_ui::apply_tool_button_style` for the colour choices, then stamps

@@ -11,6 +11,8 @@
 //! Scenarios are separate from rules. A scenario *is not* part of the
 //! system being modeled; it's the external perturber.
 
+use std::collections::BTreeMap;
+
 use crate::expr::Expr;
 use crate::sim::{EdgeId, NodeId, Time};
 use crate::value::Value;
@@ -19,10 +21,14 @@ use crate::value::Value;
 #[derive(Debug, Clone)]
 pub enum Action {
     /// Deliver a packet directly into a node's inbox (bypassing edges).
+    /// `metadata` and `return_path` default to empty when absent; pass
+    /// non-empty values to seed a request that expects a response from
+    /// the graph.
     Inject {
         node: NodeId,
         payload: Value,
-        reply_to: Option<NodeId>,
+        metadata: BTreeMap<String, Value>,
+        return_path: Vec<NodeId>,
     },
     /// Overwrite a slot's value.
     SetSlot {
@@ -69,7 +75,12 @@ impl Scenario {
         for i in 0..count {
             self.entries.push((
                 start + (i as Time) * period,
-                Action::Inject { node, payload: payload.clone(), reply_to: None },
+                Action::Inject {
+                    node,
+                    payload: payload.clone(),
+                    metadata: BTreeMap::new(),
+                    return_path: Vec::new(),
+                },
             ));
         }
         self

@@ -20,7 +20,10 @@ use std::collections::{BTreeMap, HashSet};
 use super::ast;
 use crate::{
     expr::{BinOp as IbinOp, Expr as Ie},
-    rule::{Effect as Ieff, EmitTo as Iem, Rule as Irule, When as Iwhen},
+    rule::{
+        Effect as Ieff, EmitTo as Iem, MetaOp as IMetaOp, ReturnPathOp as IRpOp,
+        Rule as Irule, When as Iwhen,
+    },
     samples::Samples,
     sim::{NodeId, Sim},
     value::{Pattern as Ipat, Value},
@@ -220,7 +223,7 @@ fn lower_stmt(s: &ast::Stmt, bound: &mut HashSet<String>) -> Result<Ieff, String
             slot: slot.clone(),
             n: lower_expr(n, bound)?,
         },
-        ast::Stmt::Emit { payload, target } => {
+        ast::Stmt::Emit { payload, target, meta_ops, rp_op } => {
             let p = lower_expr(payload, bound)?;
             let to = match target {
                 ast::EmitTarget::Default => Iem::DefaultOut,
@@ -229,16 +232,26 @@ fn lower_stmt(s: &ast::Stmt, bound: &mut HashSet<String>) -> Result<Ieff, String
                 ast::EmitTarget::Target(name) => Iem::ToTarget(name.clone()),
                 ast::EmitTarget::Dynamic(e) => Iem::ToTargetExpr(lower_expr(e, bound)?),
             };
-            Ieff::Emit { payload: p, to }
+            Ieff::Emit {
+                payload: p,
+                to,
+                meta_ops: lower_meta_ops(meta_ops, bound)?,
+                return_path_op: lower_rp_op(rp_op, bound)?,
+            }
         }
-        ast::Stmt::EmitEach { payload, targets } => Ieff::EmitToEach {
+        ast::Stmt::EmitEach { payload, targets, meta_ops, rp_op } => Ieff::EmitToEach {
             payload: lower_expr(payload, bound)?,
             targets: lower_expr(targets, bound)?,
+            meta_ops: lower_meta_ops(meta_ops, bound)?,
+            return_path_op: lower_rp_op(rp_op, bound)?,
         },
-        ast::Stmt::Respond { payload } => Ieff::Respond { payload: lower_expr(payload, bound)? },
         ast::Stmt::Record { name, value } => Ieff::RecordMetric {
             name: name.clone(),
             value: lower_expr(value, bound)?,
+        },
+        ast::Stmt::Error { kind, detail } => Ieff::RecordError {
+            kind: kind.clone(),
+            detail: lower_expr(detail, bound)?,
         },
         ast::Stmt::Spawn { template, into } => {
             bound.insert(into.clone());
@@ -300,6 +313,31 @@ fn lower_expr(e: &ast::Expr, bound: &HashSet<String>) -> Result<Ie, String> {
             lower_expr(then_, bound)?,
             lower_expr(else_, bound)?,
         ),
+        ast::Expr::Meta(key) => Ie::meta(key.clone()),
+        ast::Expr::ReturnPath => Ie::return_path(),
+    })
+}
+
+fn lower_meta_ops(ops: &[ast::MetaOp], bound: &HashSet<String>) -> Result<Vec<IMetaOp>, String> {
+    let mut out = Vec::with_capacity(ops.len());
+    for op in ops {
+        out.push(match op {
+            ast::MetaOp::Set { key, value } => IMetaOp::Set {
+                key: key.clone(),
+                value: lower_expr(value, bound)?,
+            },
+            ast::MetaOp::Remove { key } => IMetaOp::Remove { key: key.clone() },
+        });
+    }
+    Ok(out)
+}
+
+fn lower_rp_op(op: &ast::ReturnPathOp, bound: &HashSet<String>) -> Result<IRpOp, String> {
+    Ok(match op {
+        ast::ReturnPathOp::Inherit => IRpOp::Inherit,
+        ast::ReturnPathOp::Push(e) => IRpOp::Push(lower_expr(e, bound)?),
+        ast::ReturnPathOp::Pop => IRpOp::Pop,
+        ast::ReturnPathOp::Replace(e) => IRpOp::Replace(lower_expr(e, bound)?),
     })
 }
 
@@ -315,6 +353,12 @@ fn lower_fn_call(name: &str, args: &[ast::Expr], bound: &HashSet<String>) -> Res
         }
         ("length", 1) => {
             return Ok(Ie::length(lower_expr(&args[0], bound)?));
+        }
+        ("head", 1) => {
+            return Ok(Ie::head(lower_expr(&args[0], bound)?));
+        }
+        ("tail", 1) => {
+            return Ok(Ie::tail(lower_expr(&args[0], bound)?));
         }
         ("index", 2) => {
             return Ok(Ie::index(
@@ -395,7 +439,12 @@ fn lower_scene_action(
                 None => Value::Nil,
                 Some(e) => lower_literal(e)?,
             };
-            Ok(Action::Inject { node: nid, payload: Value::variant(tag.clone(), inner), reply_to: None })
+            Ok(Action::Inject {
+                node: nid,
+                payload: Value::variant(tag.clone(), inner),
+                metadata: BTreeMap::new(),
+                return_path: Vec::new(),
+            })
         }
         ast::SceneAction::SetParam { name, value } => {
             let e = lower_expr(value, &HashSet::new())?;

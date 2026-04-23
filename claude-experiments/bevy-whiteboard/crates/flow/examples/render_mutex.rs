@@ -25,9 +25,9 @@ fn main() -> std::io::Result<()> {
                 slot: "holder".into(),
                 value: Expr::variant("Some", Expr::var("who")),
             })
-            .do_(Effect::Respond {
-                payload: Expr::variant("granted", Expr::lit(Value::Nil)),
-            }),
+            .do_(Effect::respond(
+                Expr::variant("granted", Expr::lit(Value::Nil)),
+            )),
         Rule::new("release")
             .when(When::input(Pattern::variant("release", Pattern::wild())))
             .do_(Effect::SetSlot {
@@ -48,10 +48,10 @@ fn main() -> std::io::Result<()> {
             Rule::new("request")
                 .when(When::slot("idle", Pattern::lit(Value::Bool(true))))
                 .do_(Effect::SetSlot { slot: "idle".into(), value: Expr::bool(false) })
-                .do_(Effect::Emit {
-                    payload: Expr::variant("acquire", Expr::lit(Value::str(wname.clone()))),
-                    to: EmitTo::ToTarget("Mutex".into()),
-                }),
+                .do_(Effect::emit(
+                    Expr::variant("acquire", Expr::lit(Value::str(wname.clone()))),
+                    EmitTo::ToTarget("Mutex".into()),
+                )),
             Rule::new("on_granted")
                 .when(When::input(Pattern::variant("granted", Pattern::wild())))
                 .do_(Effect::SetSlot {
@@ -62,10 +62,10 @@ fn main() -> std::io::Result<()> {
                     name: "completed".into(),
                     value: Expr::slot("completed"),
                 })
-                .do_(Effect::Emit {
-                    payload: Expr::variant("release", Expr::lit(Value::Nil)),
-                    to: EmitTo::ToTarget("Mutex".into()),
-                })
+                .do_(Effect::emit(
+                    Expr::variant("release", Expr::lit(Value::Nil)),
+                    EmitTo::ToTarget("Mutex".into()),
+                ))
                 .do_(Effect::SetSlot { slot: "idle".into(), value: Expr::bool(true) }),
         ];
         let w = sim.add_node(&wname, slots, rules);

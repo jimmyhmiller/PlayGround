@@ -41,11 +41,11 @@ fn main() {
         .rule(
             Rule::new("serve")
                 .when(When::input(Pattern::variant("work", Pattern::wild())))
-                .do_(Effect::Emit {
+                .do_(Effect::emit(
                     // self-loop with service-time latency
-                    payload: Expr::variant("done", Expr::lit(Value::Nil)),
-                    to: EmitTo::DefaultOut, // default is Worker→Pool edge
-                })
+                    Expr::variant("done", Expr::lit(Value::Nil)),
+                    EmitTo::DefaultOut, // default is Worker→Pool edge
+                ))
         )
         // Parent → ThisInstance: near-instant work routing (1 μs).
         .edge(EdgeEnd::Parent, EdgeEnd::ThisInstance, Expr::int(1_000))
@@ -108,10 +108,10 @@ fn main() {
                 slot: "round_robin".into(),
                 value: Expr::var("w"),
             })
-            .do_(Effect::Emit {
-                payload: Expr::variant("work", Expr::lit(Value::Nil)),
-                to: EmitTo::ToTargetExpr(Expr::var("w")),
-            }),
+            .do_(Effect::emit(
+                Expr::variant("work", Expr::lit(Value::Nil)),
+                EmitTo::ToTargetExpr(Expr::var("w")),
+            )),
 
         // On worker response: count and surface.
         Rule::new("on_done")
@@ -129,21 +129,21 @@ fn main() {
     let client_rules = vec![
         Rule::new("fire")
             .when(When::input(Pattern::variant("tick", Pattern::wild())))
-            .do_(Effect::Emit {
-                payload: Expr::variant("req", Expr::lit(Value::Nil)),
-                to: EmitTo::ToTarget("Pool".into()),
-            })
-            .do_(Effect::Emit {
-                payload: Expr::variant("tick", Expr::lit(Value::Nil)),
-                to: EmitTo::ToTarget("Client".into()),
-            }),
+            .do_(Effect::emit(
+                Expr::variant("req", Expr::lit(Value::Nil)),
+                EmitTo::ToTarget("Pool".into()),
+            ))
+            .do_(Effect::emit(
+                Expr::variant("tick", Expr::lit(Value::Nil)),
+                EmitTo::ToTarget("Client".into()),
+            )),
     ];
     let client = sim.add_node("Client", client_slots, client_rules);
 
     sim.add_edge(client, pool, Expr::int(1_000_000));
     sim.add_edge(client, client, Expr::slot("period_ns"));
 
-    sim.inject(client, Value::variant("tick", Value::Nil), None);
+    sim.inject(client, Value::variant("tick", Value::Nil));
 
     // ---------- Run ----------
     println!("=== autoscaling (concrete workers) ===\n");

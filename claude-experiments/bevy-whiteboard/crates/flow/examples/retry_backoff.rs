@@ -24,9 +24,9 @@ fn main() {
     let server_rules = vec![
         Rule::new("reply_err")
             .when(When::input(Pattern::wild()))
-            .do_(Effect::Respond {
-                payload: Expr::variant("err", Expr::lit(Value::Nil)),
-            }),
+            .do_(Effect::respond(
+                Expr::variant("err", Expr::lit(Value::Nil)),
+            )),
     ];
     let server = sim.add_node("Server", BTreeMap::new(), server_rules);
 
@@ -41,10 +41,10 @@ fn main() {
         // On the initial kick ("go" packet), fire the first request.
         Rule::new("initial_fire")
             .when(When::input(Pattern::variant("go", Pattern::wild())))
-            .do_(Effect::Emit {
-                payload: Expr::variant("req", Expr::lit(Value::Nil)),
-                to: EmitTo::ToTarget("Server".to_string()),
-            }),
+            .do_(Effect::emit(
+                Expr::variant("req", Expr::lit(Value::Nil)),
+                EmitTo::ToTarget("Server".to_string()),
+            )),
 
         // Server replied with err, and we're under the retry budget.
         Rule::new("retry")
@@ -64,10 +64,10 @@ fn main() {
             })
             // Emit an outbound request. Retry delay is modeled by the Client→Server
             // edge's latency expression (see below), which reads `attempts`.
-            .do_(Effect::Emit {
-                payload: Expr::variant("req", Expr::lit(Value::Nil)),
-                to: EmitTo::ToTarget("Server".to_string()),
-            }),
+            .do_(Effect::emit(
+                Expr::variant("req", Expr::lit(Value::Nil)),
+                EmitTo::ToTarget("Server".to_string()),
+            )),
 
         // Budget exhausted: give up.
         Rule::new("giveup")
@@ -121,7 +121,7 @@ fn main() {
     sim.add_edge(server, client, Expr::int(1_000_000)); // 1ms return
 
     // --------- Kick off ---------
-    sim.inject(client, Value::variant("go", Value::Nil), None);
+    sim.inject(client, Value::variant("go", Value::Nil));
 
     // --------- Run ---------
     // Deadline: enough to cover the final backoff (100 + 200 + 400 + 800 ≈ 1.5s of backoff)

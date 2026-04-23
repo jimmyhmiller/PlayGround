@@ -199,7 +199,7 @@ impl Repl {
         let node = args.first().ok_or("usage: inject <node> <tag>")?;
         let tag = args.get(1).ok_or("usage: inject <node> <tag>")?;
         let nid = self.find_node(node)?;
-        let pid = self.sim.inject(nid, Value::variant(*tag, Value::Nil), None);
+        let pid = self.sim.inject(nid, Value::variant(*tag, Value::Nil));
         Ok(format!("injected pkt {} ({}) into {}", pid.0, tag, node))
     }
 
@@ -405,6 +405,15 @@ fn format_event(e: &Event, sim: &Sim) -> String {
             format!("{} spawn {} from {} parent={:?}", t(*at_ns), name(node), template, parent.map(|p| p.0)),
         Event::NodeDespawned { node, at_ns } =>
             format!("{} desp  {}", t(*at_ns), name(node)),
+        Event::RuntimeError { kind, node, rule, detail, at_ns } => {
+            let where_ = match (node, rule) {
+                (Some(nid), Some(r)) => format!("{}·{}", name(nid), r),
+                (Some(nid), None) => name(nid),
+                (None, Some(r)) => r.clone(),
+                (None, None) => "?".to_string(),
+            };
+            format!("{} ERR   [{}] {} — {}", t(*at_ns), kind, where_, detail)
+        }
     }
 }
 

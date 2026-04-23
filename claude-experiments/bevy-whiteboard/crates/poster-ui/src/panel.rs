@@ -207,6 +207,14 @@ pub fn panel_scroll_body(
         .spawn((
             Node {
                 flex_grow: 1.0,
+                // `min_height: 0` overrides flexbox's default
+                // `min-size: auto`, which otherwise refuses to shrink
+                // the body below its content size — that prevents
+                // the body from ever *having* overflow, so the
+                // scroll container never scrolls. With this set, the
+                // body claims only the space flex allots it and the
+                // rest becomes scroll overflow.
+                min_height: Val::Px(0.0),
                 width: Val::Percent(100.0),
                 padding: UiRect::all(Val::Px(12.0)),
                 flex_direction: FlexDirection::Column,

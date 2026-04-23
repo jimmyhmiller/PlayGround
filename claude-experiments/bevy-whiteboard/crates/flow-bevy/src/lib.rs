@@ -5,6 +5,8 @@
 pub mod bridge;
 pub mod camera;
 pub mod edges;
+pub mod examples;
+pub mod examples_menu;
 pub mod gadgets;
 pub mod hud;
 pub mod inspector;
@@ -13,6 +15,7 @@ pub mod palette;
 pub mod probes;
 pub mod theme;
 pub mod tool;
+pub mod visual;
 
 use bevy::prelude::*;
 
@@ -32,8 +35,24 @@ pub fn build_app() -> App {
         ..default()
     }))
     .add_plugins(FlowBevyPlugins)
-    .add_plugins(nodes::DemoSeedPlugin);
+    .add_plugins(DemoSeedPlugin);
     app
+}
+
+/// Seed the canvas on startup by firing the `LoadExample` message for
+/// the default scenario. Tests deliberately skip this so they start
+/// from an empty canvas. Intentionally lives in lib.rs (not nodes.rs)
+/// because the seed now dispatches through the examples pipeline, not
+/// directly into the node/edge systems.
+pub struct DemoSeedPlugin;
+impl Plugin for DemoSeedPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_systems(Startup, seed_default);
+    }
+}
+
+fn seed_default(mut writer: bevy::ecs::message::MessageWriter<examples::LoadExample>) {
+    writer.write(examples::LoadExample(examples::Example::ThreeLaneFanout));
 }
 
 /// Plugin variant of [`build_app`] for integration tests that want to start
@@ -56,6 +75,8 @@ impl Plugin for FlowBevyPlugins {
             hud::HudPlugin,
             inspector::InspectorPlugin,
             probes::ProbesPlugin,
+            examples::ExamplesPlugin,
+            examples_menu::ExamplesMenuPlugin,
         ));
     }
 }

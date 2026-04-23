@@ -24,7 +24,7 @@ pub mod dsl;
 pub use value::{Pattern, Value, Bindings, match_pattern};
 pub use expr::{Expr, BinOp, EvalCtx};
 pub use samples::Samples;
-pub use rule::{Rule, When, Effect, EmitTo};
+pub use rule::{Rule, When, Effect, EmitTo, MetaOp, ReturnPathOp};
 pub use sim::{Sim, Node, Edge, NodeId, EdgeId, Packet, PacketId, Time};
 pub use event::{Event, EventLog};
 pub use template::{Template, EdgeSpec, EdgeEnd};

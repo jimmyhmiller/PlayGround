@@ -58,19 +58,19 @@ fn main() {
             .when(When::input(Pattern::variant("req", Pattern::wild())))
             .guard(Expr::gt(Expr::samples_len("ready"), Expr::int(0)))
             .do_(Effect::SamplesPopOldestInto { slot: "ready".into(), into_var: "w".into() })
-            .do_(Effect::Emit {
-                payload: Expr::variant("work", Expr::lit(Value::Nil)),
-                to: EmitTo::ToTargetExpr(Expr::var("w")),
-            }),
+            .do_(Effect::emit(
+                Expr::variant("work", Expr::lit(Value::Nil)),
+                EmitTo::ToTargetExpr(Expr::var("w")),
+            )),
         // Worker finished: push their ref back to ready AND forward a
         // `resp` out through the compound's out-port.
         Rule::new("worker_done")
             .when(When::input(Pattern::variant("done", Pattern::var("w"))))
             .do_(Effect::SamplesPush { slot: "ready".into(), value: Expr::var("w") })
-            .do_(Effect::Emit {
-                payload: Expr::variant("resp", Expr::lit(Value::Nil)),
-                to: EmitTo::ToOutPort("resp".into()),
-            }),
+            .do_(Effect::emit(
+                Expr::variant("resp", Expr::lit(Value::Nil)),
+                EmitTo::ToOutPort("resp".into()),
+            )),
     ];
     let router = sim.add_node("Router", router_slots, router_rules);
 
@@ -81,16 +81,16 @@ fn main() {
         let rules = vec![
             Rule::new("accept_work")
                 .when(When::input(Pattern::variant("work", Pattern::wild())))
-                .do_(Effect::Emit {
-                    payload: Expr::variant("tick_done", Expr::lit(Value::Nil)),
-                    to: EmitTo::ToTargetExpr(Expr::self_ref()),  // service-time self-loop
-                }),
+                .do_(Effect::emit(
+                    Expr::variant("tick_done", Expr::lit(Value::Nil)),
+                    EmitTo::ToTargetExpr(Expr::self_ref()),  // service-time self-loop
+                )),
             Rule::new("publish_done")
                 .when(When::input(Pattern::variant("tick_done", Pattern::wild())))
-                .do_(Effect::Emit {
-                    payload: Expr::variant("done", Expr::self_ref()),
-                    to: EmitTo::ToTarget("Router".into()),
-                }),
+                .do_(Effect::emit(
+                    Expr::variant("done", Expr::self_ref()),
+                    EmitTo::ToTarget("Router".into()),
+                )),
         ];
         let w = sim.add_node(&name, BTreeMap::new(), rules);
         worker_ids.push(w);
@@ -132,14 +132,14 @@ fn main() {
     let client_rules = vec![
         Rule::new("fire")
             .when(When::input(Pattern::variant("tick", Pattern::wild())))
-            .do_(Effect::Emit {
-                payload: Expr::variant("req", Expr::lit(Value::Nil)),
-                to: EmitTo::ToTarget("Pool".into()),
-            })
-            .do_(Effect::Emit {
-                payload: Expr::variant("tick", Expr::lit(Value::Nil)),
-                to: EmitTo::ToTarget("Client".into()),
-            }),
+            .do_(Effect::emit(
+                Expr::variant("req", Expr::lit(Value::Nil)),
+                EmitTo::ToTarget("Pool".into()),
+            ))
+            .do_(Effect::emit(
+                Expr::variant("tick", Expr::lit(Value::Nil)),
+                EmitTo::ToTarget("Client".into()),
+            )),
         Rule::new("got_resp")
             .when(When::input(Pattern::variant("resp", Pattern::wild())))
             .do_(Effect::RecordMetric { name: "completed".into(), value: Expr::int(1) }),
@@ -151,7 +151,7 @@ fn main() {
     sim.add_edge_ports(pool, Some("resp".into()), client, None, Expr::param("network"));
     sim.add_edge(client, client, Expr::int(10_000_000));  // 10ms tick period
 
-    sim.inject(client, Value::variant("tick", Value::Nil), None);
+    sim.inject(client, Value::variant("tick", Value::Nil));
 
     // ---------- Run ----------
     sim.run_until(500_000_000);

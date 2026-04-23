@@ -236,6 +236,7 @@ const GADGETS_DSL: &str = r#"
 
     node Client {
         slots {
+            emitted:   Int = 0
             in_flight: Int = 0
             sent_at:   Samples(1024)
             completed: Int = 0
@@ -245,9 +246,13 @@ const GADGETS_DSL: &str = r#"
         rule fire {
             on tick(_)
             do {
+                emitted   := emitted + 1
                 in_flight := in_flight + 1
                 push sent_at <- now
-                emit req(color) to default
+                # Push self onto return_path so the response walks back —
+                # preserved automatically across intermediate hops (routers,
+                # queues) that don't touch return_path.
+                emit req(color) pushing self to default
                 emit tick(nil)  to self
             }
         }
@@ -271,21 +276,36 @@ const GADGETS_DSL: &str = r#"
             upstream:   Any = nil
             downstream: Any = nil
         }
+        # Strict on colour: serve only fires for req/packet whose
+        # payload colour matches this worker's `color` slot. Mismatches
+        # are consumed by the reject rules below and recorded as
+        # `color_mismatch` errors. That way the error panel ticks up
+        # AND the offending packet doesn't sit in the inbox forever.
         rule serve {
-            on req(_)
+            on req(c)
+            when c == color
             do {
                 served := served + 1
                 record served served
-                respond resp(nil)
+                emit resp(nil) popping to (head(return_path))
             }
+        }
+        rule serve_reject {
+            on req(_)
+            do { error "color_mismatch" "worker: wrong-colour req rejected" }
         }
         rule start_service {
             on packet(p)
-            when busy == 0
+            when busy == 0 && p == color
             do {
                 busy := 1
                 emit done(p) to self
             }
+        }
+        rule start_service_reject {
+            on packet(_)
+            when busy == 0
+            do { error "color_mismatch" "worker: wrong-colour packet rejected" }
         }
         rule done {
             on done(p)
@@ -300,6 +320,8 @@ const GADGETS_DSL: &str = r#"
     }
 
     node Router {
+        # Fan-out by colour. `packet` is fire-and-forget: no reply is
+        # expected, so return_path passes through untouched.
         rule forward {
             on packet(p)
             do {
@@ -307,11 +329,28 @@ const GADGETS_DSL: &str = r#"
                     slot_of(n, "color") == p)
             }
         }
+        # Request forwarding: the Router opts into the reply path by
+        # pushing itself onto return_path. The downstream Worker pops
+        # back to us (not to the original Client); we then relay the
+        # response one more hop via `forward_resp`. This makes
+        # Client→Router→Worker a proper two-edge req/resp chain with
+        # no triangle reply edge.
         rule forward_req {
             on req(p)
             do {
-                emit_each req(p) to filter(out_neighbors(), "n",
+                emit_each req(p) pushing self to filter(out_neighbors(), "n",
                     slot_of(n, "color") == p)
+            }
+        }
+        # Relay a response back along the chain. Pops ourselves off
+        # the head we pushed on forward, emits to whoever's now at
+        # head (the next hop back toward the client). Works for any
+        # depth of nested routers because each one pushes on req and
+        # pops on resp.
+        rule forward_resp {
+            on resp(x)
+            do {
+                emit resp(x) popping to (head(return_path))
             }
         }
     }
@@ -322,9 +361,35 @@ const GADGETS_DSL: &str = r#"
             color:   Int = 0
             waiting: Samples(256)
         }
+        # Colour-strict on both inbound variants. Router-matched
+        # traffic always reaches the right queue, but direct wiring
+        # from a wrong-colour source surfaces a `color_mismatch` on
+        # the error panel rather than silently piling up.
         rule enqueue {
-            on packet(_)
+            on packet(c)
+            when c == color
             do { len := len + 1 }
+        }
+        rule enqueue_reject {
+            on packet(_)
+            do { error "color_mismatch" "queue: wrong-colour packet rejected" }
+        }
+        # Client-facing variant: `req(c)` is a request TO queue
+        # something. Bump the depth counter AND ack the client by
+        # popping its frame off return_path and emitting resp back.
+        # The ack travels along the existing Client→Queue edge in
+        # reverse (engine's reverse-route fallback).
+        rule enqueue_req {
+            on req(c)
+            when c == color
+            do {
+                len := len + 1
+                emit resp(nil) popping to (head(return_path))
+            }
+        }
+        rule enqueue_req_reject {
+            on req(_)
+            do { error "color_mismatch" "queue: wrong-colour req rejected" }
         }
         rule wake_tick_flush {
             on wake(_)
@@ -365,12 +430,20 @@ const GADGETS_DSL: &str = r#"
             count: Int = 0
             color: Int = 0
         }
+        # Colour-strict: only matching-colour `packet(c)` bumps the
+        # counter. Wrong colours, or any other variant, are rejected
+        # with a `color_mismatch` error.
         rule absorb {
-            on _
+            on packet(c)
+            when c == color
             do {
                 count := count + 1
                 record absorbed count
             }
+        }
+        rule absorb_reject_packet {
+            on packet(_)
+            do { error "color_mismatch" "sink: wrong-colour packet rejected" }
         }
     }
 "#;
@@ -413,7 +486,7 @@ fn gen_generator(sim: &mut Sim, name: &str, slot: usize) -> NodeId {
     // changes via slot writes propagate automatically.
     sim.add_edge(id, id, Expr::slot("period_ns"));
     // Inject the initial tick so the loop starts.
-    sim.inject(id, Value::variant("tick", Value::Nil), None);
+    sim.inject(id, Value::variant("tick", Value::Nil));
     id
 }
 
@@ -424,7 +497,7 @@ fn gen_client(sim: &mut Sim, name: &str, slot: usize) -> NodeId {
     slots.insert("color".into(), Value::Int(slot as i64));
     let id = sim.add_node(name, slots, rules);
     sim.add_edge(id, id, Expr::slot("period_ns"));
-    sim.inject(id, Value::variant("tick", Value::Nil), None);
+    sim.inject(id, Value::variant("tick", Value::Nil));
     id
 }
 
@@ -461,7 +534,7 @@ fn gen_queue(sim: &mut Sim, name: &str, slot: usize) -> NodeId {
     let id = sim.add_node(name, slots, rules);
     // Self-loop wake-tick at 1ms keeps the queue responsive.
     sim.add_edge(id, id, Expr::int(1_000_000));
-    sim.inject(id, Value::variant("wake", Value::Nil), None);
+    sim.inject(id, Value::variant("wake", Value::Nil));
     id
 }
 

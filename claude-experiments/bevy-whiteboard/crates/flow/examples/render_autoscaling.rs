@@ -15,16 +15,16 @@ fn main() -> std::io::Result<()> {
     let worker = Template::new("Worker").with_prefix("W")
         .rule(Rule::new("take_work")
             .when(When::input(Pattern::variant("work", Pattern::wild())))
-            .do_(Effect::Emit {
-                payload: Expr::variant("done", Expr::lit(Value::Nil)),
-                to: EmitTo::ToTargetExpr(Expr::self_ref()),
-            }))
+            .do_(Effect::emit(
+                Expr::variant("done", Expr::lit(Value::Nil)),
+                EmitTo::ToTargetExpr(Expr::self_ref()),
+            )))
         .rule(Rule::new("finish")
             .when(When::input(Pattern::variant("done", Pattern::wild())))
-            .do_(Effect::Emit {
-                payload: Expr::variant("ready", Expr::self_ref()),
-                to: EmitTo::ToTarget("Pool".into()),
-            }))
+            .do_(Effect::emit(
+                Expr::variant("ready", Expr::self_ref()),
+                EmitTo::ToTarget("Pool".into()),
+            )))
         .edge(EdgeEnd::Parent, EdgeEnd::ThisInstance, Expr::int(1_000))
         .edge(EdgeEnd::ThisInstance, EdgeEnd::Parent, Expr::int(1_000))
         .edge(EdgeEnd::ThisInstance, EdgeEnd::ThisInstance,
@@ -48,10 +48,10 @@ fn main() -> std::io::Result<()> {
                 value: Expr::add(Expr::slot("dispatched"), Expr::int(1)),
             })
             .do_(Effect::RecordMetric { name: "dispatched".into(), value: Expr::slot("dispatched") })
-            .do_(Effect::Emit {
-                payload: Expr::variant("work", Expr::lit(Value::Nil)),
-                to: EmitTo::ToTargetExpr(Expr::var("w")),
-            }),
+            .do_(Effect::emit(
+                Expr::variant("work", Expr::lit(Value::Nil)),
+                EmitTo::ToTargetExpr(Expr::var("w")),
+            )),
         Rule::new("spawn_and_enroll")
             .when(When::input(Pattern::variant("kick", Pattern::wild())))
             .do_(Effect::Spawn { template: "Worker".into(), into_var: Some("w".into()) })
@@ -62,27 +62,27 @@ fn main() -> std::io::Result<()> {
     // Schedule staggered spawning so the visualization shows nodes appearing over time.
     use flow::{Action, Scenario};
     let scenario = Scenario::new()
-        .at(10_000_000, Action::Inject { node: pool, payload: Value::variant("kick", Value::Nil), reply_to: None })
-        .at(40_000_000, Action::Inject { node: pool, payload: Value::variant("kick", Value::Nil), reply_to: None })
-        .at(70_000_000, Action::Inject { node: pool, payload: Value::variant("kick", Value::Nil), reply_to: None });
+        .at(10_000_000, Action::Inject { node: pool, payload: Value::variant("kick", Value::Nil), metadata: BTreeMap::new(), return_path: Vec::new() })
+        .at(40_000_000, Action::Inject { node: pool, payload: Value::variant("kick", Value::Nil), metadata: BTreeMap::new(), return_path: Vec::new() })
+        .at(70_000_000, Action::Inject { node: pool, payload: Value::variant("kick", Value::Nil), metadata: BTreeMap::new(), return_path: Vec::new() });
     sim.load_scenario(scenario);
 
     let client_rules = vec![
         Rule::new("fire")
             .when(When::input(Pattern::variant("tick", Pattern::wild())))
-            .do_(Effect::Emit {
-                payload: Expr::variant("req", Expr::lit(Value::Nil)),
-                to: EmitTo::ToTarget("Pool".into()),
-            })
-            .do_(Effect::Emit {
-                payload: Expr::variant("tick", Expr::lit(Value::Nil)),
-                to: EmitTo::ToTarget("Client".into()),
-            }),
+            .do_(Effect::emit(
+                Expr::variant("req", Expr::lit(Value::Nil)),
+                EmitTo::ToTarget("Pool".into()),
+            ))
+            .do_(Effect::emit(
+                Expr::variant("tick", Expr::lit(Value::Nil)),
+                EmitTo::ToTarget("Client".into()),
+            )),
     ];
     let client = sim.add_node("Client", BTreeMap::new(), client_rules);
     sim.add_edge(client, pool, Expr::int(1_000_000));
     sim.add_edge(client, client, Expr::int(10_000_000));
-    sim.inject(client, Value::variant("tick", Value::Nil), None);
+    sim.inject(client, Value::variant("tick", Value::Nil));
 
     sim.run_until(400_000_000);
 

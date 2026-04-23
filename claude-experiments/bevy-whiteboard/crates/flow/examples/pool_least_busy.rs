@@ -43,19 +43,19 @@ fn main() {
         .rule(
             Rule::new("take_work")
                 .when(When::input(Pattern::variant("work", Pattern::wild())))
-                .do_(Effect::Emit {
-                    payload: Expr::variant("done", Expr::lit(Value::Nil)),
-                    to: EmitTo::ToTargetExpr(Expr::self_ref()),
-                })
+                .do_(Effect::emit(
+                    Expr::variant("done", Expr::lit(Value::Nil)),
+                    EmitTo::ToTargetExpr(Expr::self_ref()),
+                ))
         )
         // Work finished: announce readiness to Pool, carrying our own ref.
         .rule(
             Rule::new("finish")
                 .when(When::input(Pattern::variant("done", Pattern::wild())))
-                .do_(Effect::Emit {
-                    payload: Expr::variant("ready", Expr::self_ref()),
-                    to: EmitTo::ToTarget("Pool".into()),
-                })
+                .do_(Effect::emit(
+                    Expr::variant("ready", Expr::self_ref()),
+                    EmitTo::ToTarget("Pool".into()),
+                ))
         )
         .edge(EdgeEnd::Parent, EdgeEnd::ThisInstance, Expr::int(1_000))
         .edge(EdgeEnd::ThisInstance, EdgeEnd::Parent, Expr::int(1_000))
@@ -98,10 +98,10 @@ fn main() {
                 slot: "dispatched".into(),
                 value: Expr::add(Expr::slot("dispatched"), Expr::int(1)),
             })
-            .do_(Effect::Emit {
-                payload: Expr::variant("work", Expr::lit(Value::Nil)),
-                to: EmitTo::ToTargetExpr(Expr::var("w")),
-            }),
+            .do_(Effect::emit(
+                Expr::variant("work", Expr::lit(Value::Nil)),
+                EmitTo::ToTargetExpr(Expr::var("w")),
+            )),
     ];
     let pool = sim.add_node("Pool", pool_slots, pool_rules);
 
@@ -123,26 +123,26 @@ fn main() {
     sim.nodes.get_mut(&pool).unwrap().rules.push(spawn_rule);
 
     for _ in 0..NUM_WORKERS {
-        sim.inject(pool, Value::variant("kick", Value::Nil), None);
+        sim.inject(pool, Value::variant("kick", Value::Nil));
     }
 
     // ---------- Client generating load ----------
     let client_rules = vec![
         Rule::new("fire")
             .when(When::input(Pattern::variant("tick", Pattern::wild())))
-            .do_(Effect::Emit {
-                payload: Expr::variant("req", Expr::lit(Value::Nil)),
-                to: EmitTo::ToTarget("Pool".into()),
-            })
-            .do_(Effect::Emit {
-                payload: Expr::variant("tick", Expr::lit(Value::Nil)),
-                to: EmitTo::ToTarget("Client".into()),
-            }),
+            .do_(Effect::emit(
+                Expr::variant("req", Expr::lit(Value::Nil)),
+                EmitTo::ToTarget("Pool".into()),
+            ))
+            .do_(Effect::emit(
+                Expr::variant("tick", Expr::lit(Value::Nil)),
+                EmitTo::ToTarget("Client".into()),
+            )),
     ];
     let client = sim.add_node("Client", BTreeMap::new(), client_rules);
     sim.add_edge(client, pool, Expr::int(1_000_000));
     sim.add_edge(client, client, Expr::int(REQUEST_PERIOD_NS));
-    sim.inject(client, Value::variant("tick", Value::Nil), None);
+    sim.inject(client, Value::variant("tick", Value::Nil));
 
     // ---------- Observe ----------
     println!("=== pool_least_busy ===\n");
