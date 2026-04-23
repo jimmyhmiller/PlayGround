@@ -25,6 +25,7 @@ pub enum Kind {
     #[default]
     Generator,
     Client,
+    BackoffClient,
     Worker,
     Router,
     Queue,
@@ -57,6 +58,11 @@ pub fn probes_for_kind(kind: Kind) -> &'static [ProbeSpec] {
         Kind::Generator | Kind::Client => &[
             ProbeSpec { label: "rate",    read: read_rate },
             ProbeSpec { label: "emitted", read: read_emitted },
+        ],
+        Kind::BackoffClient => &[
+            ProbeSpec { label: "rate",    read: read_rate },
+            ProbeSpec { label: "emitted", read: read_emitted },
+            ProbeSpec { label: "backoff", read: read_backoff_ms },
         ],
         Kind::Worker => &[
             ProbeSpec { label: "served",  read: read_served },
@@ -130,11 +136,23 @@ fn read_sink_count(node: &flow::Node) -> String {
     }
 }
 
+fn read_backoff_ms(node: &flow::Node) -> String {
+    match node.slots.get("backoff_ns") {
+        Some(Value::Int(ns)) => {
+            if *ns == 0 { "—".into() }
+            else if *ns >= 1_000_000_000 { format!("{:.1}s", *ns as f64 / 1e9) }
+            else { format!("{}ms", ns / 1_000_000) }
+        }
+        _ => "—".into(),
+    }
+}
+
 impl Kind {
     pub fn label(self) -> &'static str {
         match self {
             Kind::Generator => "Gen",
             Kind::Client => "Client",
+            Kind::BackoffClient => "BackoffClient",
             Kind::Worker => "Worker",
             Kind::Router => "Router",
             Kind::Queue => "Queue",
@@ -146,6 +164,7 @@ impl Kind {
         match self {
             Kind::Generator => 'g',
             Kind::Client => 'c',
+            Kind::BackoffClient => 'b',
             Kind::Worker => 'w',
             Kind::Router => 'r',
             Kind::Queue => 'q',
@@ -164,6 +183,7 @@ impl Kind {
         match self {
             Kind::Generator => "◉",
             Kind::Client => "☻",
+            Kind::BackoffClient => "↻",
             Kind::Worker => "▣",
             Kind::Router => "⊕",
             Kind::Queue => "▦",
@@ -173,7 +193,7 @@ impl Kind {
 
     pub fn size(self) -> Vec2 {
         match self {
-            Kind::Generator | Kind::Client | Kind::Sink => Vec2::new(60.0, 60.0),
+            Kind::Generator | Kind::Client | Kind::BackoffClient | Kind::Sink => Vec2::new(60.0, 60.0),
             Kind::Worker | Kind::Router => Vec2::new(70.0, 50.0),
             Kind::Queue => Vec2::new(90.0, 40.0),
         }
@@ -196,8 +216,9 @@ pub fn install_default_params(sim: &mut Sim) {
 /// just make them filter on it.
 pub fn spawn(sim: &mut Sim, kind: Kind, name: &str, slot: usize) -> NodeId {
     match kind {
-        Kind::Generator => gen_generator(sim, name, slot),
-        Kind::Client    => gen_client(sim, name, slot),
+        Kind::Generator     => gen_generator(sim, name, slot),
+        Kind::Client        => gen_client(sim, name, slot),
+        Kind::BackoffClient => gen_backoff_client(sim, name, slot),
         Kind::Worker    => gen_worker(sim, name, slot),
         Kind::Router    => gen_router(sim, name),
         Kind::Queue     => gen_queue(sim, name, slot),
@@ -296,28 +317,198 @@ const GADGETS_DSL: &str = r#"
         }
     }
 
+    # Like Client, but delays its next tick with fixed exponential backoff
+    # on resp_error and resets the delay on resp. Self-edge latency is
+    # period_ns + backoff_ns, so backoff_ns = 0 recovers plain Client
+    # timing. The doubling is deterministic (no jitter) on purpose — this
+    # is the shape that produces a thundering herd when many clients
+    # share an outage and come back into sync.
+    node BackoffClient {
+        slots {
+            emitted:        Int = 0
+            in_flight:      Int = 0
+            failed:         Int = 0
+            sent_at:        Samples(1024)
+            completed:      Int = 0
+            color:          Int = 0
+            period_ns:      Int = 500000000
+            backoff_ns:     Int = 0
+            max_backoff_ns: Int = 8000000000
+            up:             Int = 1
+        }
+        rule fire {
+            on tick(_)
+            when up == 1
+            do {
+                emitted   := emitted + 1
+                in_flight := in_flight + 1
+                push sent_at <- now
+                emit req(color) pushing self to default
+                emit tick(nil)  to self
+            }
+        }
+        rule fire_idle {
+            on tick(_)
+            when up == 0
+            do { emit tick(nil) to self }
+        }
+        # Success clears the backoff window so the next tick fires at
+        # the base period again.
+        rule on_resp {
+            on resp(_)
+            do {
+                in_flight  := in_flight - 1
+                completed  := completed + 1
+                backoff_ns := 0
+                pop sent_at -> t
+                record rtt_ns now - t
+            }
+        }
+        # First failure after a success: seed backoff to one period.
+        rule on_resp_error_seed {
+            on resp_error(_)
+            when backoff_ns == 0
+            do {
+                in_flight  := in_flight - 1
+                failed     := failed + 1
+                backoff_ns := period_ns
+                pop sent_at -> t
+                error "request_failed" "client: request failed (downstream down)"
+            }
+        }
+        # Subsequent failure, still under cap: double.
+        rule on_resp_error_double {
+            on resp_error(_)
+            when backoff_ns > 0 && backoff_ns * 2 <= max_backoff_ns
+            do {
+                in_flight  := in_flight - 1
+                failed     := failed + 1
+                backoff_ns := backoff_ns * 2
+                pop sent_at -> t
+                error "request_failed" "client: request failed (downstream down)"
+            }
+        }
+        # Doubling would exceed the cap: clamp to max_backoff_ns.
+        rule on_resp_error_cap {
+            on resp_error(_)
+            when backoff_ns > 0 && backoff_ns * 2 > max_backoff_ns
+            do {
+                in_flight  := in_flight - 1
+                failed     := failed + 1
+                backoff_ns := max_backoff_ns
+                pop sent_at -> t
+                error "request_failed" "client: request failed (downstream down)"
+            }
+        }
+    }
+
     node Worker {
         slots {
-            served:     Int = 0
-            color:      Int = 0
-            service_ns: Int = 50000000
-            busy:       Int = 0
-            up:         Int = 1
-            upstream:   Any = nil
-            downstream: Any = nil
+            served:      Int = 0
+            color:       Int = 0
+            service_ns:  Int = 50000000
+            busy:        Int = 0
+            # A small FIFO of queued requests, modeled like a naive
+            # `listen(backlog)` socket. Each slot stores the req's
+            # `return_path` as a List(NodeRef). `backlog_cap` is the
+            # listen backlog (how many reqs the OS would hold for us
+            # before dropping new connections); the Samples ring
+            # itself is sized generously above that so push never
+            # silently evicts — the `reject_full` rule is the only
+            # way a req gets rejected for capacity reasons.
+            backlog:     Samples(16)
+            backlog_cap: Int = 5
+            up:          Int = 1
+            upstream:    Any = nil
+            downstream:  Any = nil
         }
-        # Strict on colour: serve only fires for req/packet whose
-        # payload colour matches this worker's `color` slot. Mismatches
-        # are consumed by the reject rules below and recorded as
-        # `color_mismatch` errors. That way the error panel ticks up
-        # AND the offending packet doesn't sit in the inbox forever.
-        rule serve {
-            on req(c)
-            when c == color && up == 1
+        # Rule ORDER is load-bearing on the Worker: completion rules
+        # (finish_req_*) come BEFORE acceptance rules (serve /
+        # enqueue) so a `done_req` arriving in the same sim tick as
+        # a new `req` advances the queue first, letting the fresh
+        # req be admitted to a freshly-drained slot rather than
+        # spuriously bounced.
+        #
+        # Service time is the self-loop edge latency: `serve` sets
+        # `busy := 1` and emits a `done_req` to self; when it
+        # arrives, `finish_req_*` dispatches the reply and — if a
+        # queued req was waiting — emits the NEXT `done_req` using
+        # that queued req's stored return_path. The self-loop is
+        # the only place the service delay lives, so the worker
+        # reads as single-threaded (one service in flight) with a
+        # bounded accept queue behind it, matching a naive Python
+        # HTTP server's shape.
+
+        # Something was queued: finish this one, pop the head of
+        # the backlog, and kick off its service. `busy` stays 1
+        # because we're immediately starting the next job — no
+        # idle window between queued reqs.
+        rule finish_req_next {
+            on done_req(_)
+            when up == 1 && len(backlog) > 0
             do {
                 served := served + 1
                 record served served
+                pop backlog -> next_path
+                emit done_req(nil) return_path next_path to self
                 emit resp(nil) popping to (head(return_path))
+            }
+        }
+        # Nothing queued: finish and go idle.
+        rule finish_req_idle {
+            on done_req(_)
+            when up == 1 && len(backlog) == 0
+            do {
+                busy := 0
+                served := served + 1
+                record served served
+                emit resp(nil) popping to (head(return_path))
+            }
+        }
+        # Worker went down during the service window: the in-flight
+        # reply becomes an error, same shape the client sees for any
+        # other node-down failure. `busy` clears so the worker is a
+        # fresh machine when it comes back up. Queued entries stay
+        # in `backlog`; `resume_work` drains them once up flips 1.
+        rule finish_req_crashed {
+            on done_req(_)
+            when up == 0
+            do {
+                busy := 0
+                error "node_down" "worker: crashed mid-req, reply lost"
+                emit resp_error(nil) popping to (head(return_path))
+            }
+        }
+        # Serve: strict on colour, accept only when fully idle (no
+        # in-flight service AND empty backlog so we don't overtake
+        # queued reqs that were stranded by a prior crash).
+        rule serve {
+            on req(c)
+            when c == color && up == 1 && busy == 0 && len(backlog) == 0
+            do {
+                busy := 1
+                emit done_req(nil) to self
+            }
+        }
+        # Already servicing and the backlog has room: stash this
+        # req's return_path so `finish_req_next` can dispatch it
+        # when its turn comes up.
+        rule enqueue {
+            on req(c)
+            when c == color && up == 1 && len(backlog) < backlog_cap
+            do {
+                push backlog <- return_path
+            }
+        }
+        # Accept queue is full — reject with resp_error so the
+        # client can back off. "worker_full" is the error kind
+        # that surfaces in the panel.
+        rule reject_full {
+            on req(c)
+            when c == color && up == 1 && len(backlog) >= backlog_cap
+            do {
+                error "worker_full" "worker: backlog full, rejecting request"
+                emit resp_error(nil) popping to (head(return_path))
             }
         }
         # Down: any inbound req is immediately failed back to the
@@ -386,9 +577,20 @@ const GADGETS_DSL: &str = r#"
             }
         }
         # Resume hook: the UI injects `resume(nil)` when `up` flips
-        # 0→1. If the worker is idle and has an upstream, kick the
-        # pull loop back to life — otherwise the worker sits forever
-        # because `done` (the usual re-pull emitter) never fired.
+        # 0→1. Drain any queued reqs first (reqs stashed during the
+        # outage are still valid — their clients are still waiting
+        # for a reply), then kick the pull loop. We pop ONE queued
+        # req here; subsequent queued reqs are picked up by
+        # `finish_req_next` as each service completes.
+        rule resume_drain {
+            on resume(_)
+            when up == 1 && busy == 0 && len(backlog) > 0
+            do {
+                busy := 1
+                pop backlog -> next_path
+                emit done_req(nil) return_path next_path to self
+            }
+        }
         rule resume_pull {
             on resume(_)
             when up == 1 && busy == 0
@@ -635,6 +837,23 @@ fn gen_client(sim: &mut Sim, name: &str, slot: usize) -> NodeId {
     slots.insert("color".into(), Value::Int(slot as i64));
     let id = sim.add_node(name, slots, rules);
     sim.add_edge(id, id, Expr::slot("period_ns"));
+    sim.inject(id, Value::variant("tick", Value::Nil));
+    id
+}
+
+/// BackoffClient: Client variant whose self-tick latency is
+/// `period_ns + backoff_ns`, so `resp_error` can extend the next tick
+/// by doubling `backoff_ns` (capped at `max_backoff_ns`). On `resp`
+/// the backoff resets to 0 and timing collapses back to the base period.
+fn gen_backoff_client(sim: &mut Sim, name: &str, slot: usize) -> NodeId {
+    let (mut slots, rules) = template("BackoffClient");
+    slots.insert("color".into(), Value::Int(slot as i64));
+    let id = sim.add_node(name, slots, rules);
+    sim.add_edge(
+        id,
+        id,
+        Expr::add(Expr::slot("period_ns"), Expr::slot("backoff_ns")),
+    );
     sim.inject(id, Value::variant("tick", Value::Nil));
     id
 }

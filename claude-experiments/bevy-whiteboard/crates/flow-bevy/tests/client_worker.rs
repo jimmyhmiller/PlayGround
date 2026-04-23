@@ -72,6 +72,60 @@ fn client_to_worker_does_not_panic() {
 }
 
 #[test]
+fn worker_waits_service_ns_before_responding() {
+    // The Worker must take `service_ns` to produce a resp — not reply
+    // instantly. Regression for a bug where `serve` emitted resp
+    // directly on req, so RTT was effectively 2 * edge_latency. The
+    // fix routes through a `done_req` self-emit so the self-edge
+    // latency (= service_ns) gates the reply.
+    use common::{spawn_node, wire};
+    use flow_bevy::gadgets::Kind;
+
+    let mut app = make_app();
+    let client = spawn_node(&mut app, Kind::Client, 0, "Client_test");
+    let worker = spawn_node(&mut app, Kind::Worker, 0, "Worker_test");
+    wire(&mut app, client, Kind::Client, worker, Kind::Worker);
+
+    // Slow worker (200ms service) vs fast client (10ms period). With
+    // the bug, a resp lands in a few ms. With the fix, the first resp
+    // can't land before ~200ms (service) + a couple of 1ms edge hops.
+    {
+        let world = app.world_mut();
+        let mut flow = world.resource_mut::<FlowSim>();
+        flow.sim.nodes.get_mut(&worker).unwrap().slots
+            .insert("service_ns".into(), flow::Value::Int(200_000_000));
+        flow.sim.nodes.get_mut(&client).unwrap().slots
+            .insert("period_ns".into(), flow::Value::Int(10_000_000));
+    }
+
+    // t = 50ms: well before service_ns, so nothing should have
+    // completed yet.
+    advance_sim_ns(&mut app, 50_000_000);
+    let completed_early = match &app.world().resource::<FlowSim>().sim.nodes[&client].slots["completed"] {
+        flow::Value::Int(i) => *i,
+        _ => -1,
+    };
+    assert_eq!(
+        completed_early, 0,
+        "no resp should have landed yet at t=50ms (service_ns=200ms), got completed={}",
+        completed_early
+    );
+
+    // t = 500ms: comfortably past service_ns, at least one resp should
+    // have made it back.
+    advance_sim_ns(&mut app, 450_000_000);
+    let completed_late = match &app.world().resource::<FlowSim>().sim.nodes[&client].slots["completed"] {
+        flow::Value::Int(i) => *i,
+        _ => -1,
+    };
+    assert!(
+        completed_late > 0,
+        "expected completed > 0 by t=500ms, got {}",
+        completed_late
+    );
+}
+
+#[test]
 fn client_only_no_worker_does_not_panic() {
     // Even without a worker on the other end (so no Respond happens),
     // the sim shouldn't crash. The client just sees no responses.

@@ -203,12 +203,14 @@ fn client_queue_worker_full_pipeline() {
 /// `TwoClientsOneWorker` — the load-bearing property test for
 /// return_path under a shared destination.
 ///
-/// Property (STRONG — `completed > 0` was insufficient): for each
-/// client, `completed + in_flight == emitted`. Every emit ended up
-/// either acknowledged or still traveling; none were silently
-/// dropped or misrouted to the other client. If return_path ever
-/// crosses streams, at least one client's completed would diverge
-/// from its emitted count minus in_flight.
+/// Property (STRONG): for each client, `completed + failed +
+/// in_flight == emitted`, AND every resp/resp_error emitted by the
+/// Worker targeting that client matches its `completed` / `failed`
+/// counts respectively. With the Worker's bounded accept queue,
+/// arrivals past `backlog_cap` get rejected as `resp_error` + a
+/// `worker_full` log entry; return_path must steer both successful
+/// and error responses back to the originating client without
+/// crossing streams.
 #[test]
 fn two_clients_one_worker_no_cross_talk() {
     let mut app = make_app();
@@ -217,10 +219,12 @@ fn two_clients_one_worker_no_cross_talk() {
 
     // Quiesce both clients by stretching their self-loop period_ns
     // to effectively-infinity. A last already-scheduled tick will
-    // still fire, then emission stops. Drain for another 50 ms of
-    // sim time so any resp's still in-flight reach their client and
-    // get processed. After this, the checks below can be EXACT —
-    // no slop from end-of-sim in-flight packets.
+    // still fire, then emission stops. Drain for long enough that
+    // any in-flight req (already scheduled for the Worker) finishes
+    // its service window and its resp reaches the originating
+    // client. service_ns = 100ms → 300ms drain is comfortable
+    // slack. After this, the checks below can be EXACT — no slop
+    // from end-of-sim in-flight packets.
     {
         let mut flow = app.world_mut().resource_mut::<FlowSim>();
         let clients_q: Vec<flow::NodeId> = flow.sim.nodes.iter()
@@ -232,81 +236,107 @@ fn two_clients_one_worker_no_cross_talk() {
                 .insert("period_ns".into(), flow::Value::Int(i64::MAX / 4));
         }
     }
-    advance_sim_ns(&mut app, 50_000_000);
+    advance_sim_ns(&mut app, 300_000_000);
 
-    assert_no_runtime_errors(&app, "TwoClientsOneWorker");
-
-    let clients = all_of_kind(&app, Kind::Client);
-    assert_eq!(clients.len(), 2);
-
-    let mut totals = Vec::new();
-    for c in &clients {
-        let emitted   = slot_int(&app, *c, "emitted");
-        let completed = slot_int(&app, *c, "completed");
-        let in_flight = slot_int(&app, *c, "in_flight");
-        totals.push((*c, emitted, completed, in_flight));
-
-        // The load-bearing invariant. Per client.
-        assert_eq!(
-            emitted,
-            completed + in_flight,
-            "client {:?}: emitted ({}) != completed ({}) + in_flight ({}) — \
-             responses were misrouted, dropped, or duplicated",
-            c, emitted, completed, in_flight,
-        );
-
-        // Both must have ACTUALLY emitted something (otherwise the
-        // scenario didn't run; the invariant above is vacuous).
-        assert!(emitted > 0, "client {:?}: nothing emitted", c);
-        // Both must have received at least one response (otherwise a
-        // whole client's reply channel is broken).
+    // Worker's bounded accept queue can legitimately fire
+    // `worker_full` + `request_failed` under saturation — those
+    // aren't errors in the load-bearing sense. Assert no OTHER
+    // error kinds show up.
+    {
+        let errors = &app.world().resource::<FlowSim>().sim.error_counts;
+        let unexpected: std::collections::BTreeMap<_, _> = errors.iter()
+            .filter(|(k, _)| k.as_str() != "worker_full" && k.as_str() != "request_failed")
+            .collect();
         assert!(
-            completed > 0,
-            "client {:?}: zero responses out of {} emitted",
-            c, emitted
+            unexpected.is_empty(),
+            "TwoClientsOneWorker: unexpected error kinds: {:?}", unexpected,
         );
     }
 
-    // Cross-check: the worker must have served exactly as many
-    // requests as the two clients emitted together. `served` is
-    // incremented once per `serve` rule firing (one per req consumed).
+    let clients = all_of_kind(&app, Kind::Client);
+    assert_eq!(clients.len(), 2);
     let worker = first_of_kind(&app, Kind::Worker);
-    let served = slot_int(&app, worker, "served");
-    let total_emitted: i64 = totals.iter().map(|(_, e, _, _)| e).sum();
-    assert_eq!(
-        served, total_emitted,
-        "worker served {} but clients emitted {} total — \
-         requests were dropped or duplicated",
-        served, total_emitted
-    );
 
-    // Strong invariant: the per-client (in_flight + completed)
-    // equation holds even if resp's get 1:1 swapped between
-    // clients. So inspect the event log directly — count how many
-    // resp packets the worker emitted to each client, and confirm
-    // each count exactly matches that client's completed. If
-    // return_path ever crosses streams, these diverge.
+    // Count the worker's resp / resp_error emits per target client,
+    // straight from the event log. This is the ground truth for
+    // cross-talk detection.
     let sim = &app.world().resource::<FlowSim>().sim;
-    let mut resp_to: std::collections::HashMap<flow::NodeId, i64> =
+    let mut resp_ok_to: std::collections::HashMap<flow::NodeId, i64> =
+        std::collections::HashMap::new();
+    let mut resp_err_to: std::collections::HashMap<flow::NodeId, i64> =
         std::collections::HashMap::new();
     for ev in sim.log.iter() {
         if let flow::Event::PacketEmitted { from, to, payload, .. } = ev {
             if *from != worker { continue; }
             if let flow::Value::Variant { tag, .. } = payload {
-                if tag != "resp" { continue; }
-            } else { continue; }
-            *resp_to.entry(*to).or_insert(0) += 1;
+                match tag.as_str() {
+                    "resp"       => *resp_ok_to.entry(*to).or_insert(0)  += 1,
+                    "resp_error" => *resp_err_to.entry(*to).or_insert(0) += 1,
+                    _ => {}
+                }
+            }
         }
     }
-    for (client, _emitted, completed, _in_flight) in &totals {
-        let actual_replies_to_this_client =
-            resp_to.get(client).copied().unwrap_or(0);
+
+    let mut totals = Vec::new();
+    for c in &clients {
+        let emitted   = slot_int(&app, *c, "emitted");
+        let completed = slot_int(&app, *c, "completed");
+        let failed    = slot_int(&app, *c, "failed");
+        let in_flight = slot_int(&app, *c, "in_flight");
+        let ok_here   = resp_ok_to.get(c).copied().unwrap_or(0);
+        let err_here  = resp_err_to.get(c).copied().unwrap_or(0);
+        totals.push((*c, emitted, completed, failed));
+
+        // Conservation: every emit ended up either acknowledged
+        // (completed), rejected (failed), or still traveling
+        // (in_flight). After drain in_flight should be 0.
         assert_eq!(
-            actual_replies_to_this_client, *completed,
-            "client {:?}: worker emitted {} resp's targeting it, but its \
-             completed slot is {} — cross-talk (responses landed on the \
-             wrong client)",
-            client, actual_replies_to_this_client, completed,
+            in_flight, 0,
+            "client {:?}: in_flight didn't drain to 0 (got {})", c, in_flight,
+        );
+        assert_eq!(
+            emitted, completed + failed,
+            "client {:?}: emitted ({}) != completed ({}) + failed ({}) — \
+             responses were misrouted or dropped",
+            c, emitted, completed, failed,
+        );
+
+        // Scenario sanity: both clients must have actually run.
+        assert!(emitted > 0, "client {:?}: nothing emitted", c);
+        assert!(
+            completed > 0,
+            "client {:?}: zero successful responses out of {} emitted",
+            c, emitted,
+        );
+
+        // No cross-talk: the Worker's log of resp's targeting this
+        // client must match the client's completed, and same for
+        // resp_error's vs failed. If return_path ever crosses
+        // streams, one of these diverges.
+        assert_eq!(
+            ok_here, completed,
+            "client {:?}: worker emitted {} resp's to it, completed={} \
+             — cross-talk on success path",
+            c, ok_here, completed,
+        );
+        assert_eq!(
+            err_here, failed,
+            "client {:?}: worker emitted {} resp_error's to it, failed={} \
+             — cross-talk on error path",
+            c, err_here, failed,
         );
     }
+
+    // Worker's `served` counter only ticks on successful
+    // completion — equal to the sum of each client's `completed`.
+    // Queue-full rejections are tracked separately via
+    // `worker_full` errors.
+    let served = slot_int(&app, worker, "served");
+    let total_completed: i64 = totals.iter().map(|(_, _, c, _)| c).sum();
+    assert_eq!(
+        served, total_completed,
+        "worker.served ({}) != sum(client.completed) ({})",
+        served, total_completed,
+    );
 }

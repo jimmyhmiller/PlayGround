@@ -1,0 +1,861 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Payment Terminal — 3D</title>
+<style>
+  html, body { height: 100%; margin: 0; background: #f5ece4; color: #3a2a22;
+    font: 13px/1.4 -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Helvetica, Arial, sans-serif; }
+  #app { position: fixed; inset: 0; }
+  canvas { display: block; }
+  .hud { position: fixed; left: 16px; top: 16px; padding: 12px 14px;
+    background: rgba(255,255,255,.72); backdrop-filter: blur(8px);
+    border: 1px solid rgba(0,0,0,.06); border-radius: 10px; max-width: 300px;
+    box-shadow: 0 6px 24px rgba(58,42,34,.08); }
+  .hud h1 { margin: 0 0 4px; font-size: 13px; letter-spacing: .12em; text-transform: uppercase; }
+  .hud p { margin: 4px 0; color: #8b6f63; font-size: 12px; }
+  .hud kbd { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px;
+    background: #fff; border: 1px solid rgba(0,0,0,.1); padding: 1px 5px; border-radius: 4px; color: #3a2a22; }
+  .toolbar { position: fixed; right: 16px; top: 16px; display: flex; flex-direction: column; gap: 6px; }
+  .toolbar button { appearance: none; border: 1px solid rgba(0,0,0,.08);
+    background: rgba(255,255,255,.8); backdrop-filter: blur(8px);
+    color: #3a2a22; font: inherit; padding: 6px 10px; border-radius: 8px; cursor: pointer; }
+  .toolbar button:hover { background: #fff; }
+  .status { position: fixed; left: 16px; bottom: 16px; padding: 8px 10px;
+    background: rgba(255,255,255,.72); backdrop-filter: blur(8px);
+    border: 1px solid rgba(0,0,0,.06); border-radius: 8px; font-size: 12px; color: #8b6f63;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; max-width: 70vw; }
+</style>
+</head>
+<body>
+<div id="app"></div>
+
+<div class="hud">
+  <h1>Payment Terminal</h1>
+  <p>Drag to orbit · scroll to zoom · click the buttons.</p>
+  <p><kbd>1</kbd>–<kbd>6</kbd> press button · <kbd>R</kbd> reset · <kbd>F</kbd> front · <kbd>L</kbd> left · <kbd>B</kbd> back</p>
+</div>
+
+<div class="toolbar">
+  <button id="viewFront">Front</button>
+  <button id="viewLeft">Left</button>
+  <button id="viewRight">Right</button>
+  <button id="viewBack">Back</button>
+  <button id="viewPersp">Perspective</button>
+  <button id="toggleWire">Wireframe</button>
+  <hr style="border:none;border-top:1px solid rgba(0,0,0,.08);margin:4px 0" />
+  <label style="font-size:11px;color:#8b6f63">Lighting
+    <select id="lightingSel" style="width:100%;margin-top:3px">
+      <option value="studio">Studio</option>
+      <option value="golden">Golden hour</option>
+      <option value="cool">Cool daylight</option>
+      <option value="dramatic">Dramatic</option>
+      <option value="night">Night / neon</option>
+    </select>
+  </label>
+  <label style="font-size:11px;color:#8b6f63">Body
+    <select id="bodyMatSel" style="width:100%;margin-top:3px">
+      <option value="peachMatte">Peach matte</option>
+      <option value="peachGlossy">Peach glossy</option>
+      <option value="white">White plastic</option>
+      <option value="graphite">Graphite</option>
+      <option value="brushed">Brushed aluminum</option>
+      <option value="speckle" selected>Speckled plastic</option>
+    </select>
+  </label>
+  <label style="font-size:11px;color:#8b6f63">Screen
+    <select id="screenSel" style="width:100%;margin-top:3px">
+      <option value="payment">Payment UI</option>
+      <option value="bars">Color bars</option>
+      <option value="stars">Starfield</option>
+      <option value="grid">Grid / test</option>
+      <option value="off">Off</option>
+    </select>
+  </label>
+  <hr style="border:none;border-top:1px solid rgba(0,0,0,.08);margin:4px 0" />
+  <label style="font-size:11px;color:#8b6f63">Light azimuth <span id="azVal">45°</span>
+    <input type="range" id="lightAz" min="-180" max="180" step="1" value="45" style="width:100%">
+  </label>
+  <label style="font-size:11px;color:#8b6f63">Light elevation <span id="elVal">45°</span>
+    <input type="range" id="lightEl" min="-20" max="85" step="1" value="45" style="width:100%">
+  </label>
+  <label style="font-size:11px;color:#8b6f63">Light distance <span id="distVal">6.0</span>
+    <input type="range" id="lightDist" min="2" max="12" step="0.1" value="6.0" style="width:100%">
+  </label>
+  <label style="font-size:11px;color:#8b6f63;display:flex;align-items:center;gap:6px;margin-top:2px">
+    <input type="checkbox" id="lightMarker" checked /> show light marker
+  </label>
+</div>
+
+<div class="status" id="status">booting…</div>
+
+<script>
+  const statusEl = document.getElementById('status');
+  function setStatus(msg, err=false) {
+    statusEl.style.color = err ? '#b02a2a' : '#8b6f63';
+    statusEl.textContent = String(msg);
+  }
+  window.addEventListener('error', (e) => setStatus('error: ' + (e.error?.stack || e.message), true));
+  window.addEventListener('unhandledrejection', (e) => setStatus('promise: ' + (e.reason?.stack || e.reason), true));
+  setStatus('loading three.js…');
+</script>
+
+<script type="module">
+import * as THREE from 'https://unpkg.com/three@0.160.0/build/three.module.js';
+import { RoundedBoxGeometry } from './vendor/RoundedBoxGeometry.js';
+setStatus('three loaded, building scene…');
+
+try {
+  // =================================================================
+  // Modeling the payment terminal as a real product, not a blob:
+  //   - Enclosure is ONE solid peach shell. Small corner radius
+  //     (~6 mm on a 350 mm device) so edges read as crisp industrial
+  //     plastic, not a pillow.
+  //   - The FRONT face is dominated by a single RECESSED black panel
+  //     (like a device's front glass + control strip). The LCD lives
+  //     in the top ~78% of that panel; the PAYMENT wordmark and the
+  //     six physical buttons live on the black control strip at the
+  //     bottom of that panel.
+  //   - Below the black panel, a narrow peach strip forms the "base
+  //     lip" visible in the reference.
+  // =================================================================
+
+  // ------- renderer / scene -------
+  const app = document.getElementById('app');
+  const renderer = new THREE.WebGLRenderer({ antialias: true });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  renderer.outputColorSpace = THREE.SRGBColorSpace;
+  renderer.toneMapping = THREE.ACESFilmicToneMapping;
+  renderer.toneMappingExposure = 1.05;
+  renderer.shadowMap.enabled = true;
+  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  app.appendChild(renderer.domElement);
+
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color('#f5ece4');
+
+  // ------- real dimensions (m). Scale up ×3 for comfy viewing. -------
+  const S = 3;
+  const W = 0.320 * S;   // 0.96
+  const H = 0.350 * S;   // 1.05
+  const D = 0.240 * S;   // 0.72
+  const MM = 0.001 * S;  // a "1 mm" unit in scene space
+
+  const camera = new THREE.PerspectiveCamera(28, window.innerWidth / window.innerHeight, 0.05, 100);
+  const target = new THREE.Vector3(0, 0, 0);
+  const defaultCam = new THREE.Vector3(1.3, 0.55, 1.85);
+  camera.position.copy(defaultCam);
+  camera.lookAt(target);
+
+  // ------- orbit -------
+  let orbit = {
+    az: Math.atan2(defaultCam.x, defaultCam.z),
+    el: Math.asin(defaultCam.y / defaultCam.length()),
+    dist: defaultCam.length()
+  };
+  function applyOrbit() {
+    const cd = Math.cos(orbit.el) * orbit.dist;
+    camera.position.set(
+      Math.sin(orbit.az) * cd + target.x,
+      Math.sin(orbit.el) * orbit.dist + target.y,
+      Math.cos(orbit.az) * cd + target.z
+    );
+    camera.lookAt(target);
+  }
+  applyOrbit();
+
+  let dragging = false, lastX = 0, lastY = 0, movedAfterDown = false;
+  renderer.domElement.addEventListener('pointerdown', (e) => {
+    dragging = true; movedAfterDown = false;
+    lastX = e.clientX; lastY = e.clientY;
+    renderer.domElement.setPointerCapture(e.pointerId);
+  });
+  renderer.domElement.addEventListener('pointermove', (e) => {
+    if (!dragging) return;
+    const dx = e.clientX - lastX, dy = e.clientY - lastY;
+    if (Math.abs(dx) + Math.abs(dy) > 3) movedAfterDown = true;
+    lastX = e.clientX; lastY = e.clientY;
+    orbit.az -= dx * 0.008;
+    orbit.el = Math.max(-Math.PI * 0.48, Math.min(Math.PI * 0.48, orbit.el + dy * 0.008));
+    applyOrbit();
+  });
+  renderer.domElement.addEventListener('pointerup', (e) => {
+    dragging = false;
+    try { renderer.domElement.releasePointerCapture(e.pointerId); } catch {}
+  });
+  renderer.domElement.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    orbit.dist = Math.max(1.0, Math.min(6, orbit.dist * Math.pow(1.0015, e.deltaY)));
+    applyOrbit();
+  }, { passive: false });
+
+  // ------- lights (swappable preset rigs with movable key light) -------
+  const sceneLights = [];
+  let keyLightRef = null;
+  function clearLights() {
+    sceneLights.forEach(l => scene.remove(l));
+    sceneLights.length = 0;
+    keyLightRef = null;
+  }
+  function addLight(l, isKey=false) {
+    scene.add(l); sceneLights.push(l);
+    if (isKey) keyLightRef = l;
+    return l;
+  }
+  function dirLight(color, intensity, pos, cast=false) {
+    const l = new THREE.DirectionalLight(color, intensity);
+    l.position.set(pos[0], pos[1], pos[2]);
+    if (cast) {
+      l.castShadow = true;
+      l.shadow.mapSize.set(2048, 2048);
+      Object.assign(l.shadow.camera, { left: -2, right: 2, top: 2, bottom: -2, near: 0.1, far: 14 });
+      l.shadow.bias = -0.0003; l.shadow.normalBias = 0.02;
+    }
+    return l;
+  }
+
+  // Key light position — driven by sliders. Preset placements of the key are
+  // overridden after applyLighting() by updateKeyLight().
+  const keyState = { az: 45, el: 45, dist: 6.0 };
+  function keyPosVec() {
+    const az = keyState.az * Math.PI / 180;
+    const el = keyState.el * Math.PI / 180;
+    const cd = Math.cos(el) * keyState.dist;
+    return new THREE.Vector3(Math.sin(az) * cd, Math.sin(el) * keyState.dist, Math.cos(az) * cd);
+  }
+
+  const lightingPresets = {
+    studio() {
+      addLight(new THREE.HemisphereLight('#ffffff', '#e8d5c8', 0.45));
+      addLight(dirLight('#ffffff', 2.0, [0,0,0], true), true);
+      addLight(dirLight('#ffd9c5', 0.50, [-3.2, 1.8, 2.2]));
+      addLight(dirLight('#fff0e5', 0.55, [-1.0, 2.2, -3.2]));
+      scene.background = new THREE.Color('#f5ece4');
+      renderer.toneMappingExposure = 1.05;
+    },
+    golden() {
+      addLight(new THREE.HemisphereLight('#ffcfa0', '#3a1a08', 0.5));
+      addLight(dirLight('#ffb04d', 2.4, [0,0,0], true), true);
+      addLight(dirLight('#ff7a3a', 0.6, [-3.0, 0.8, 1.8]));
+      addLight(dirLight('#ffe0a0', 0.5, [-0.5, 2.5, -3.0]));
+      scene.background = new THREE.Color('#efc28c');
+      renderer.toneMappingExposure = 1.0;
+    },
+    cool() {
+      addLight(new THREE.HemisphereLight('#cfe4ff', '#0a1a2a', 0.55));
+      addLight(dirLight('#e6efff', 1.9, [0,0,0], true), true);
+      addLight(dirLight('#7aa6ff', 0.7, [-3.0, 1.0, 2.0]));
+      addLight(dirLight('#c8d8ff', 0.5, [-1.0, 2.5, -3.0]));
+      scene.background = new THREE.Color('#dfeaf6');
+      renderer.toneMappingExposure = 1.05;
+    },
+    dramatic() {
+      addLight(new THREE.HemisphereLight('#333333', '#080808', 0.15));
+      addLight(dirLight('#ffffff', 4.2, [0,0,0], true), true);
+      addLight(dirLight('#2a1a40', 0.35, [-3.5, 1.5, 2.0]));
+      addLight(dirLight('#ffe5c0', 0.25, [0, -1, 2]));
+      scene.background = new THREE.Color('#0d0d0f');
+      renderer.toneMappingExposure = 1.15;
+    },
+    night() {
+      addLight(new THREE.HemisphereLight('#0f1428', '#000000', 0.3));
+      addLight(dirLight('#8ea8ff', 0.8, [0,0,0], true), true);
+      addLight(dirLight('#ff5e9a', 1.2, [-2.8, 0.6, 1.6]));
+      addLight(dirLight('#3effb2', 0.8, [-0.5, 2.5, -3.0]));
+      scene.background = new THREE.Color('#07070c');
+      renderer.toneMappingExposure = 1.2;
+    },
+  };
+
+  // Visible marker showing where the key light sits.
+  const keyMarker = new THREE.Group();
+  const markerBulb = new THREE.Mesh(
+    new THREE.SphereGeometry(0.06, 20, 20),
+    new THREE.MeshBasicMaterial({ color: '#fff5b0' })
+  );
+  const markerHalo = new THREE.Mesh(
+    new THREE.SphereGeometry(0.11, 20, 20),
+    new THREE.MeshBasicMaterial({ color: '#fff5b0', transparent: true, opacity: 0.18 })
+  );
+  keyMarker.add(markerHalo, markerBulb);
+  scene.add(keyMarker);
+
+  function updateKeyLight() {
+    const p = keyPosVec();
+    if (keyLightRef) keyLightRef.position.copy(p);
+    keyMarker.position.copy(p);
+    markerBulb.material.color.copy(keyLightRef ? keyLightRef.color : new THREE.Color('#fff'));
+    markerHalo.material.color.copy(markerBulb.material.color);
+  }
+
+  function applyLighting(name) {
+    clearLights();
+    (lightingPresets[name] || lightingPresets.studio)();
+    updateKeyLight();
+  }
+  applyLighting('studio');
+
+  // ------- floor -------
+  const floor = new THREE.Mesh(
+    new THREE.CircleGeometry(8, 64),
+    new THREE.MeshStandardMaterial({ color: '#f5ece4', roughness: 0.95, metalness: 0 })
+  );
+  floor.rotation.x = -Math.PI / 2;
+  floor.position.y = -H / 2;
+  floor.receiveShadow = true;
+  scene.add(floor);
+
+  // ------- materials -------
+  const matPeach   = new THREE.MeshStandardMaterial({ color: '#ef9e80', roughness: 0.55, metalness: 0.02 });
+  const matBlack   = new THREE.MeshStandardMaterial({ color: '#0b0b0d', roughness: 0.35, metalness: 0.12 });
+  const matPort    = new THREE.MeshStandardMaterial({ color: '#141418', roughness: 0.55, metalness: 0.18 });
+
+  const terminal = new THREE.Group();
+  scene.add(terminal);
+
+  // ------- enclosure: one solid peach shell -------
+  const bodyRadius = 6 * MM;
+  const body = new THREE.Mesh(
+    new RoundedBoxGeometry(W, H, D, 6, bodyRadius),
+    matPeach
+  );
+  body.castShadow = true; body.receiveShadow = true;
+  terminal.add(body);
+
+  // ------- panel lines (decorative surface seams suggesting assembly) -------
+  // Horizontal line near the bottom on front + both sides + back.
+  // Modeled as a thin darker sliver sitting a hair below the surface — reads as a groove.
+  const panelLineMat = new THREE.MeshStandardMaterial({
+    color: '#b36a50', roughness: 0.6, metalness: 0.02,
+  });
+  const plY = -H / 2 + H * 0.195;        // ~20% up from the bottom
+  const plThick = 0.9 * MM;              // line thickness (how tall)
+  const plInset = 0.6 * MM;              // how deep the "groove" reads
+  // front
+  {
+    const m = new THREE.Mesh(
+      new THREE.BoxGeometry(W - 4 * bodyRadius, plThick, plInset),
+      panelLineMat
+    );
+    m.position.set(0, plY, D / 2 - plInset / 2 + 0.05 * MM);
+    terminal.add(m);
+  }
+  // back
+  {
+    const m = new THREE.Mesh(
+      new THREE.BoxGeometry(W - 4 * bodyRadius, plThick, plInset),
+      panelLineMat
+    );
+    m.position.set(0, plY, -D / 2 + plInset / 2 - 0.05 * MM);
+    terminal.add(m);
+  }
+  // left
+  {
+    const m = new THREE.Mesh(
+      new THREE.BoxGeometry(plInset, plThick, D - 4 * bodyRadius),
+      panelLineMat
+    );
+    m.position.set(-W / 2 + plInset / 2 - 0.05 * MM, plY, 0);
+    terminal.add(m);
+  }
+  // right
+  {
+    const m = new THREE.Mesh(
+      new THREE.BoxGeometry(plInset, plThick, D - 4 * bodyRadius),
+      panelLineMat
+    );
+    m.position.set(W / 2 - plInset / 2 + 0.05 * MM, plY, 0);
+    terminal.add(m);
+  }
+
+  // =========================================================
+  // FRONT-FACE LAYOUT (fractions of total H, top → bottom):
+  //   0.00 – 0.04  : top peach bezel of body
+  //   0.04 – 0.81  : PEACH BEZEL FRAME with BLACK SCREEN inside
+  //     within the screen area:
+  //       top 78%  = LCD display
+  //       bot 22%  = control strip (6 buttons)
+  //   0.81 – 1.00  : peach below screen (crossed by panel line at ~0.80)
+  // =========================================================
+
+  const topBezel    = 0;        // face plate hugs the body's top edge
+  const baseLip     = H * 0.19;
+  const sideBezel   = 0;        // face plate hugs the body's side edges
+
+  // Overall screen-area footprint on the body's front face
+  const areaW = W - sideBezel * 2;
+  const areaH = H - topBezel - baseLip;
+  const areaCenterY = (H / 2 - topBezel) - areaH / 2;
+
+  // PEACH BEZEL — a chunky raised face plate protruding ~25 mm from the body,
+  // roughly an inch forward like the reference's side profile.
+  const bezelDepth = 25 * MM;
+  const bezelR     = bodyRadius;  // match body corner radius so edges line up
+  const peachBezel = new THREE.Mesh(
+    new RoundedBoxGeometry(areaW, areaH, bezelDepth, 4, bezelR),
+    matPeach
+  );
+  peachBezel.position.set(0, areaCenterY, D / 2 + bezelDepth / 2);
+  peachBezel.castShadow = true; peachBezel.receiveShadow = true;
+  terminal.add(peachBezel);
+
+  // BLACK SCREEN PANEL — sits on the front face of the peach bezel, smaller so
+  // the bezel shows as a peach border around the display. Thin (~3 mm) since
+  // the depth is provided by the peach bezel behind it.
+  const bezelBorder = 12 * MM;
+  const panelW = areaW - bezelBorder * 2;
+  const panelH = areaH - bezelBorder * 2;
+  const panelR = 4 * MM;
+  const panelDepth = 3 * MM;
+  const panelBackZ  = D / 2 + bezelDepth;                 // back of screen sits on bezel's front face
+  const panelFrontZ = panelBackZ + panelDepth;
+  const panelCenterY = areaCenterY;
+
+  const panel = new THREE.Mesh(
+    new RoundedBoxGeometry(panelW, panelH, panelDepth, 4, panelR),
+    matBlack
+  );
+  panel.position.set(0, panelCenterY, panelBackZ + panelDepth / 2);
+  panel.castShadow = true; panel.receiveShadow = true;
+  terminal.add(panel);
+
+  // ------- LCD (canvas texture on the upper 78% of the panel) -------
+  const ctrlStripH = panelH * 0.22;
+  const lcdGap     = panelH * 0.015;
+  const lcdH       = panelH - ctrlStripH - lcdGap;
+  const lcdW       = panelW * 0.96;
+  const lcdCenterY = (panelCenterY + panelH / 2) - lcdH / 2 - panelH * 0.01;
+  const ctrlCenterY = (panelCenterY - panelH / 2) + ctrlStripH / 2 + panelH * 0.005;
+
+  const screenCanvas = document.createElement('canvas');
+  const lcdAspect = lcdW / lcdH;
+  screenCanvas.width  = 1024;
+  screenCanvas.height = Math.round(1024 / lcdAspect);
+  const sctx = screenCanvas.getContext('2d');
+  const screenTex = new THREE.CanvasTexture(screenCanvas);
+  screenTex.colorSpace = THREE.SRGBColorSpace;
+  screenTex.anisotropy = 8;
+
+  const lcd = new THREE.Mesh(
+    new THREE.PlaneGeometry(lcdW, lcdH),
+    new THREE.MeshBasicMaterial({ map: screenTex })
+  );
+  lcd.position.set(0, lcdCenterY, panelFrontZ + 0.3 * MM);
+  terminal.add(lcd);
+
+  const state = { amount: 0, message: 'Tap or insert card', status: 'READY' };
+  function drawScreen() {
+    const ctx = sctx, w = screenCanvas.width, h = screenCanvas.height;
+    ctx.fillStyle = '#0a0a0c'; ctx.fillRect(0, 0, w, h);
+    const grd = ctx.createRadialGradient(w/2, h*0.42, 40, w/2, h*0.42, w*0.8);
+    grd.addColorStop(0, 'rgba(255,180,150,0.07)');
+    grd.addColorStop(1, 'rgba(0,0,0,0.6)');
+    ctx.fillStyle = grd; ctx.fillRect(0, 0, w, h);
+    ctx.globalAlpha = 0.035; ctx.fillStyle = '#fff';
+    for (let y = 0; y < h; y += 3) ctx.fillRect(0, y, w, 1);
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = '#f4b49a';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.font = '600 150px -apple-system, Helvetica, sans-serif';
+    ctx.fillText('$' + state.amount.toFixed(2), w/2, h*0.42);
+    ctx.fillStyle = '#ffd9c5';
+    ctx.font = '500 38px -apple-system, Helvetica, sans-serif';
+    ctx.fillText(state.message, w/2, h*0.42 + 130);
+    ctx.textAlign = 'right'; ctx.fillStyle = '#ffd9c5';
+    ctx.font = '500 24px -apple-system, Helvetica, sans-serif';
+    ctx.fillText(state.status, w - 40, h - 50);
+    screenTex.needsUpdate = true;
+  }
+  drawScreen();
+
+  // ------- 6 buttons on the black control strip, bottom row -------
+  const buttons = [];
+  const btnCount = 6;
+  const btnRadius = 9 * MM;                         // beefier
+  const btnHeight = 5 * MM;                         // more pronounced
+  const btnY = ctrlCenterY - ctrlStripH * 0.15;
+  const ringTube = 0.9 * MM;
+  const btnZBase = panelFrontZ + ringTube + btnHeight / 2 + 0.3 * MM;
+
+  const btnSpacing = panelW * 0.085;
+  const btnSpan = btnSpacing * (btnCount - 1);
+  const btnEndX   = panelW / 2 - panelW * 0.065;
+  const btnStartX = btnEndX - btnSpan;
+
+  for (let i = 0; i < btnCount; i++) {
+    const isActive = i < 2;
+    const cx = btnStartX + i * btnSpacing;
+
+    // Peach gasket ring — a thin torus hugging the panel, frames the button
+    // and picks up the body material so it stays coherent across presets.
+    const ring = new THREE.Mesh(
+      new THREE.TorusGeometry(btnRadius + 1.4 * MM, ringTube, 10, 52),
+      matPeach
+    );
+    ring.position.set(cx, btnY, panelFrontZ + ringTube * 0.6);
+    ring.castShadow = true;
+    terminal.add(ring);
+
+    // Domed-looking button (cylinder with a small spherical cap on top)
+    const mat = new THREE.MeshStandardMaterial({
+      color:     isActive ? '#ff8a5f' : '#9ca0a8',
+      roughness: isActive ? 0.36     : 0.42,
+      metalness: isActive ? 0.22     : 0.55,
+      emissive:  isActive ? new THREE.Color('#7a1d0a') : new THREE.Color('#0a0a12'),
+      emissiveIntensity: isActive ? 0.55 : 0.06,
+    });
+    const b = new THREE.Mesh(
+      new THREE.CylinderGeometry(btnRadius, btnRadius * 0.96, btnHeight, 48),
+      mat
+    );
+    b.rotation.x = Math.PI / 2;
+    b.position.set(cx, btnY, btnZBase);
+    b.castShadow = true;
+    b.userData = { kind: 'button', index: i, baseZ: b.position.z };
+    terminal.add(b);
+    buttons.push(b);
+
+    // Subtle domed cap for active buttons to sell the "lit key" look
+    if (isActive) {
+      const cap = new THREE.Mesh(
+        new THREE.SphereGeometry(btnRadius * 0.95, 28, 16, 0, Math.PI * 2, 0, Math.PI / 2),
+        new THREE.MeshStandardMaterial({
+          color: '#ffb497', roughness: 0.28, metalness: 0.15,
+          emissive: new THREE.Color('#ff6a3a'), emissiveIntensity: 0.35,
+        })
+      );
+      cap.rotation.x = -Math.PI / 2;
+      cap.position.set(cx, btnY, btnZBase + btnHeight / 2 - 0.2 * MM);
+      cap.castShadow = true;
+      terminal.add(cap);
+    }
+  }
+
+  // ------- back: vent grill + ports -------
+  const backZ = -D / 2 + 0.2 * MM;
+  {
+    const gw = W * 0.22, gh = H * 0.10, slatCount = 22;
+    const grp = new THREE.Group();
+    for (let i = 0; i < slatCount; i++) {
+      const slat = new THREE.Mesh(
+        new THREE.BoxGeometry(gw / slatCount - 1.5 * MM, gh, 1.5 * MM),
+        matPort
+      );
+      slat.position.x = -gw/2 + (i + 0.5) * (gw / slatCount);
+      grp.add(slat);
+    }
+    grp.position.set(-W / 2 + W * 0.17, -H / 2 + H * 0.20, backZ);
+    terminal.add(grp);
+  }
+  {
+    const ports = [
+      { w: W * 0.06, h: H * 0.028 },
+      { w: W * 0.042, h: H * 0.025 },
+      { w: W * 0.042, h: H * 0.025 },
+      { w: H * 0.045, h: H * 0.045 },
+    ];
+    let x = -W / 2 + W * 0.42;
+    const y = -H / 2 + H * 0.20;
+    for (const p of ports) {
+      const m = new THREE.Mesh(new THREE.BoxGeometry(p.w, p.h, 1.5 * MM), matPort);
+      m.position.set(x + p.w / 2, y, backZ);
+      terminal.add(m);
+      x += p.w + W * 0.02;
+    }
+  }
+
+  // ------- left-side slot (thin vertical) -------
+  {
+    const slot = new THREE.Mesh(
+      new THREE.BoxGeometry(2 * MM, H * 0.18, 10 * MM),
+      matPort
+    );
+    slot.position.set(-W / 2 - 0.4 * MM, H * 0.03, -D / 2 + D * 0.18);
+    terminal.add(slot);
+  }
+
+  // ------- contact shadow under device -------
+  const contact = new THREE.Mesh(
+    new THREE.CircleGeometry(W * 0.9, 48),
+    new THREE.MeshBasicMaterial({ color: '#000', transparent: true, opacity: 0.1 })
+  );
+  contact.rotation.x = -Math.PI / 2;
+  contact.position.y = -H / 2 + 0.3 * MM;
+  scene.add(contact);
+
+  // ------- interaction -------
+  const ray = new THREE.Raycaster();
+  const pointer = new THREE.Vector2();
+
+  function pressButton(i, src) {
+    const btn = buttons[i]; if (!btn) return;
+    const t0 = performance.now(); const dur = 180; const depth = 2 * MM;
+    (function anim() {
+      const t = Math.min(1, (performance.now() - t0) / dur);
+      const k = Math.sin(t * Math.PI);
+      btn.position.z = btn.userData.baseZ - k * depth;
+      if (t < 1) requestAnimationFrame(anim); else btn.position.z = btn.userData.baseZ;
+    })();
+    if (i === 0) { state.amount = Math.round((state.amount + 1) * 100)/100; state.message = 'Added $1.00'; state.status = 'EDIT'; }
+    else if (i === 1) { state.amount = Math.max(0, Math.round((state.amount - 1) * 100)/100); state.message = 'Removed $1.00'; state.status = 'EDIT'; }
+    else if (i === 2) {
+      state.message = 'Processing…'; state.status = 'BUSY'; drawScreen();
+      setTimeout(() => { state.message = 'Approved'; state.status = 'OK'; drawScreen(); }, 700);
+    }
+    else if (i === 3) { state.amount = 0; state.message = 'Cleared'; state.status = 'READY'; }
+    else if (i === 4) { state.message = 'Receipt printed'; state.status = 'OK'; }
+    else { state.message = 'Menu…'; state.status = 'MENU'; }
+    drawScreen();
+    setStatus(`pressed ${i + 1} (${src})`);
+  }
+
+  renderer.domElement.addEventListener('pointerup', (e) => {
+    if (movedAfterDown) return;
+    pointer.x = (e.clientX / window.innerWidth) * 2 - 1;
+    pointer.y = -(e.clientY / window.innerHeight) * 2 + 1;
+    ray.setFromCamera(pointer, camera);
+    const hits = ray.intersectObjects(buttons, false);
+    if (hits.length) pressButton(hits[0].object.userData.index, 'click');
+  });
+  renderer.domElement.addEventListener('pointermove', (e) => {
+    if (dragging) return;
+    pointer.x = (e.clientX / window.innerWidth) * 2 - 1;
+    pointer.y = -(e.clientY / window.innerHeight) * 2 + 1;
+    ray.setFromCamera(pointer, camera);
+    const hits = ray.intersectObjects(buttons, false);
+    renderer.domElement.style.cursor = hits.length ? 'pointer' : '';
+  });
+
+  function viewTo(x, y, z) {
+    const p = new THREE.Vector3(x, y, z);
+    orbit.az = Math.atan2(p.x, p.z);
+    orbit.el = Math.asin(p.y / p.length());
+    orbit.dist = p.length();
+    applyOrbit();
+  }
+  document.getElementById('viewFront').onclick = () => viewTo(0, 0.1, 2.2);
+  document.getElementById('viewLeft').onclick  = () => viewTo(-2.2, 0.1, 0);
+  document.getElementById('viewRight').onclick = () => viewTo(2.2, 0.1, 0);
+  document.getElementById('viewBack').onclick  = () => viewTo(0, 0.25, -2.2);
+  document.getElementById('viewPersp').onclick = () => viewTo(1.3, 0.55, 1.85);
+
+  let wireOn = false;
+  document.getElementById('toggleWire').onclick = () => {
+    wireOn = !wireOn;
+    terminal.traverse(o => { if (o.isMesh && 'wireframe' in o.material) o.material.wireframe = wireOn; });
+  };
+
+  window.addEventListener('keydown', (e) => {
+    if (e.key >= '1' && e.key <= '6') pressButton(parseInt(e.key, 10) - 1, 'key');
+    else if (e.key === 'r' || e.key === 'R') viewTo(1.3, 0.55, 1.85);
+    else if (e.key === 'f' || e.key === 'F') viewTo(0, 0.1, 2.2);
+    else if (e.key === 'b' || e.key === 'B') viewTo(0, 0.25, -2.2);
+    else if (e.key === 'l' || e.key === 'L') viewTo(-2.2, 0.1, 0);
+  });
+
+  window.addEventListener('resize', () => {
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+  });
+
+  // ------- body material presets -------
+  function makeSpeckleMap(tintHex, strength=0.18) {
+    const c = document.createElement('canvas'); c.width = 512; c.height = 512;
+    const ctx = c.getContext('2d');
+    ctx.fillStyle = tintHex; ctx.fillRect(0, 0, 512, 512);
+    const img = ctx.getImageData(0, 0, 512, 512);
+    for (let i = 0; i < img.data.length; i += 4) {
+      const n = (Math.random() - 0.5) * 255 * strength;
+      img.data[i]   = Math.max(0, Math.min(255, img.data[i]   + n));
+      img.data[i+1] = Math.max(0, Math.min(255, img.data[i+1] + n));
+      img.data[i+2] = Math.max(0, Math.min(255, img.data[i+2] + n));
+    }
+    ctx.putImageData(img, 0, 0);
+    const tex = new THREE.CanvasTexture(c);
+    tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+    tex.repeat.set(4, 4);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    return tex;
+  }
+  function makeBrushedMap() {
+    const c = document.createElement('canvas'); c.width = 1024; c.height = 256;
+    const ctx = c.getContext('2d');
+    ctx.fillStyle = '#b8bcc2'; ctx.fillRect(0, 0, 1024, 256);
+    for (let y = 0; y < 256; y++) {
+      const s = 170 + Math.floor(Math.random() * 60);
+      ctx.fillStyle = `rgb(${s},${s+2},${s+6})`;
+      ctx.fillRect(0, y, 1024, 1);
+    }
+    const tex = new THREE.CanvasTexture(c);
+    tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+    tex.repeat.set(2, 1);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    return tex;
+  }
+  // pre-build textures once
+  const texSpecklePeach = makeSpeckleMap('#ef9e80', 0.12);
+  const texBrushed      = makeBrushedMap();
+
+  const bodyPresets = {
+    peachMatte:  { color: '#ef9e80', roughness: 0.55, metalness: 0.02, map: null,          line: '#b36a50' },
+    peachGlossy: { color: '#f0a488', roughness: 0.18, metalness: 0.08, map: null,          line: '#a8513a' },
+    white:       { color: '#ececec', roughness: 0.40, metalness: 0.02, map: null,          line: '#a6a6a6' },
+    graphite:    { color: '#2c2c30', roughness: 0.50, metalness: 0.15, map: null,          line: '#0f0f12' },
+    brushed:     { color: '#b4b8bc', roughness: 0.32, metalness: 0.90, map: texBrushed,    line: '#6a6d72' },
+    speckle:     { color: '#ef9e80', roughness: 0.65, metalness: 0.02, map: texSpecklePeach, line: '#a55a40' },
+  };
+  function applyBodyMat(name) {
+    const p = bodyPresets[name] || bodyPresets.peachMatte;
+    matPeach.color.set(p.color);
+    matPeach.roughness = p.roughness;
+    matPeach.metalness = p.metalness;
+    matPeach.map = p.map;
+    matPeach.needsUpdate = true;
+    panelLineMat.color.set(p.line);
+    panelLineMat.needsUpdate = true;
+  }
+
+  // ------- screen content modes -------
+  let screenMode = 'payment';
+  let screenAnimId = null;
+  const stars = [];
+  function stopScreenAnim() { if (screenAnimId) { cancelAnimationFrame(screenAnimId); screenAnimId = null; } }
+
+  function drawPaymentUI() {
+    const ctx = sctx, w = screenCanvas.width, h = screenCanvas.height;
+    ctx.fillStyle = '#0a0a0c'; ctx.fillRect(0, 0, w, h);
+    const grd = ctx.createRadialGradient(w/2, h*0.42, 40, w/2, h*0.42, w*0.8);
+    grd.addColorStop(0, 'rgba(255,180,150,0.07)'); grd.addColorStop(1, 'rgba(0,0,0,0.6)');
+    ctx.fillStyle = grd; ctx.fillRect(0, 0, w, h);
+    ctx.globalAlpha = 0.035; ctx.fillStyle = '#fff';
+    for (let y = 0; y < h; y += 3) ctx.fillRect(0, y, w, 1);
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = '#f4b49a'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.font = '600 150px -apple-system, Helvetica, sans-serif';
+    ctx.fillText('$' + state.amount.toFixed(2), w/2, h*0.42);
+    ctx.fillStyle = '#ffd9c5'; ctx.font = '500 38px -apple-system, Helvetica, sans-serif';
+    ctx.fillText(state.message, w/2, h*0.42 + 130);
+    ctx.textAlign = 'right'; ctx.fillStyle = '#ffd9c5';
+    ctx.font = '500 24px -apple-system, Helvetica, sans-serif';
+    ctx.fillText(state.status, w - 40, h - 50);
+    screenTex.needsUpdate = true;
+  }
+  function drawColorBars() {
+    const ctx = sctx, w = screenCanvas.width, h = screenCanvas.height;
+    const bars = ['#c0c0c0','#c0c000','#00c0c0','#00c000','#c000c0','#c00000','#0000c0'];
+    const topH = Math.round(h * 0.72);
+    for (let i = 0; i < bars.length; i++) {
+      ctx.fillStyle = bars[i];
+      ctx.fillRect(Math.floor(i * w / bars.length), 0, Math.ceil(w / bars.length) + 1, topH);
+    }
+    const mid = ['#0000c0','#0a0a0a','#c000c0','#0a0a0a','#00c0c0','#0a0a0a','#c0c0c0'];
+    const midH = Math.round(h * 0.10);
+    for (let i = 0; i < mid.length; i++) {
+      ctx.fillStyle = mid[i];
+      ctx.fillRect(Math.floor(i * w / mid.length), topH, Math.ceil(w / mid.length) + 1, midH);
+    }
+    const pluge = ['#101010','#000000','#202020','#000000','#303030'];
+    const pH = h - topH - midH;
+    for (let i = 0; i < pluge.length; i++) {
+      ctx.fillStyle = pluge[i];
+      ctx.fillRect(Math.floor(i * w / pluge.length), topH + midH, Math.ceil(w / pluge.length) + 1, pH);
+    }
+    ctx.fillStyle = '#ffffff'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.font = '600 64px -apple-system, Helvetica, sans-serif';
+    ctx.fillText('TEST', w/2, topH/2);
+    screenTex.needsUpdate = true;
+  }
+  function drawGrid() {
+    const ctx = sctx, w = screenCanvas.width, h = screenCanvas.height;
+    ctx.fillStyle = '#07070a'; ctx.fillRect(0, 0, w, h);
+    ctx.strokeStyle = '#24d36a'; ctx.lineWidth = 2;
+    const step = 60;
+    for (let x = 0; x <= w; x += step) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, h); ctx.stroke(); }
+    for (let y = 0; y <= h; y += step) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke(); }
+    ctx.strokeStyle = '#9cffbf';
+    ctx.beginPath(); ctx.moveTo(w/2, 0); ctx.lineTo(w/2, h); ctx.moveTo(0, h/2); ctx.lineTo(w, h/2); ctx.stroke();
+    ctx.fillStyle = '#9cffbf'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.font = '600 48px ui-monospace, Menlo, monospace';
+    ctx.fillText(`${w}×${h}`, w/2, h/2);
+    screenTex.needsUpdate = true;
+  }
+  function runStarfield() {
+    if (stars.length === 0) {
+      for (let i = 0; i < 180; i++) stars.push({
+        x: Math.random() * screenCanvas.width,
+        y: Math.random() * screenCanvas.height,
+        z: Math.random() * 0.9 + 0.1,
+      });
+    }
+    const frame = () => {
+      const ctx = sctx, w = screenCanvas.width, h = screenCanvas.height;
+      ctx.fillStyle = 'rgba(0,0,0,0.30)'; ctx.fillRect(0, 0, w, h);
+      for (const s of stars) {
+        s.x -= s.z * 9;
+        if (s.x < 0) { s.x = w; s.y = Math.random() * h; }
+        const a = s.z;
+        ctx.fillStyle = `rgba(${180 + (s.z*70)|0},${180 + (s.z*60)|0},${220},${a})`;
+        ctx.fillRect(s.x, s.y, 2 + s.z * 2, 2);
+      }
+      screenTex.needsUpdate = true;
+      if (screenMode === 'stars') screenAnimId = requestAnimationFrame(frame);
+    };
+    frame();
+  }
+  function drawOff() {
+    const ctx = sctx, w = screenCanvas.width, h = screenCanvas.height;
+    ctx.fillStyle = '#000'; ctx.fillRect(0, 0, w, h);
+    const grd = ctx.createRadialGradient(w/2, h/2, 0, w/2, h/2, w*0.5);
+    grd.addColorStop(0, 'rgba(255,255,255,0.03)');
+    grd.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = grd; ctx.fillRect(0, 0, w, h);
+    screenTex.needsUpdate = true;
+  }
+
+  // Reassign `drawScreen` to dispatch based on mode. It already exists from the
+  // earlier Payment-only definition; we overwrite the reference.
+  drawScreen = function() {
+    stopScreenAnim();
+    if (screenMode === 'payment') drawPaymentUI();
+    else if (screenMode === 'bars') drawColorBars();
+    else if (screenMode === 'grid') drawGrid();
+    else if (screenMode === 'stars') runStarfield();
+    else if (screenMode === 'off') drawOff();
+  };
+  drawScreen();
+
+  // ------- wire up preset selectors -------
+  document.getElementById('lightingSel').onchange = (e) => applyLighting(e.target.value);
+  document.getElementById('bodyMatSel').onchange  = (e) => applyBodyMat(e.target.value);
+  document.getElementById('screenSel').onchange   = (e) => { screenMode = e.target.value; drawScreen(); };
+
+  // start with speckled plastic
+  applyBodyMat('speckle');
+
+  // ------- wire up key-light sliders -------
+  const elAz = document.getElementById('lightAz'), lblAz = document.getElementById('azVal');
+  const elEl = document.getElementById('lightEl'), lblEl = document.getElementById('elVal');
+  const elDs = document.getElementById('lightDist'), lblDs = document.getElementById('distVal');
+  const elMk = document.getElementById('lightMarker');
+  elAz.oninput = (e) => { keyState.az = +e.target.value; lblAz.textContent = keyState.az + '°'; updateKeyLight(); };
+  elEl.oninput = (e) => { keyState.el = +e.target.value; lblEl.textContent = keyState.el + '°'; updateKeyLight(); };
+  elDs.oninput = (e) => { keyState.dist = +e.target.value; lblDs.textContent = keyState.dist.toFixed(1); updateKeyLight(); };
+  elMk.onchange = (e) => { keyMarker.visible = e.target.checked; };
+
+  setStatus('ready — click a button or press 1–6');
+
+  function tick() {
+    renderer.render(scene, camera);
+    requestAnimationFrame(tick);
+  }
+  tick();
+} catch (err) {
+  setStatus('build error: ' + (err.stack || err.message), true);
+  throw err;
+}
+</script>
+</body>
+</html>

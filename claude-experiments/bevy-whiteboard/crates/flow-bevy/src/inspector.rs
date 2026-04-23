@@ -16,9 +16,10 @@
 
 use bevy::prelude::*;
 use flow::{NodeId, Value};
-use poster_ui::{Slider, Theme, caps_spaced, spawn_slider};
+use poster_ui::{Bold, Mono, Slider, Theme, caps_spaced, spawn_slider};
 
 use crate::bridge::FlowSim;
+use crate::errors::NodeErrorStats;
 use crate::gadgets::Kind;
 use crate::nodes::{NodeKind, Selection};
 
@@ -40,6 +41,7 @@ impl Plugin for InspectorPlugin {
                 sync_up_toggle_visual,
                 sync_queue_fill,
                 sync_sink_count,
+                sync_error_breakdown,
             ),
         );
     }
@@ -132,7 +134,7 @@ fn rebuild_inspector_on_selection_change(
         inspector_heading(body, &theme, &node.name);
 
         match kind.0 {
-            Kind::Generator | Kind::Client => {
+            Kind::Generator | Kind::Client | Kind::BackoffClient => {
                 let rate = period_ns_to_rate(read_int_slot(node, "period_ns"));
                 spawn_slider(
                     body, &theme,
@@ -170,7 +172,104 @@ fn rebuild_inspector_on_selection_change(
             let up = read_int_slot(node, "up") != 0;
             spawn_up_toggle(body, &theme, nid, up);
         }
+
+        // Per-node error breakdown. Always spawned (even when the
+        // node has no errors yet) so `sync_error_breakdown` can fill
+        // it in live without triggering a structural rebuild that
+        // would drop slider state mid-drag. Hidden when count == 0.
+        spawn_error_breakdown(body, &theme, nid);
     });
+}
+
+/// Per-node error list. Single multi-line Text that the sync system
+/// fills in each frame. Hidden entirely when the node has no errors.
+#[derive(Component)]
+struct ErrorBreakdown {
+    node: NodeId,
+}
+
+fn spawn_error_breakdown(
+    parent: &mut bevy::ecs::hierarchy::ChildSpawnerCommands,
+    theme: &Theme,
+    nid: NodeId,
+) {
+    parent
+        .spawn((
+            Node {
+                width: Val::Percent(100.0),
+                flex_direction: FlexDirection::Column,
+                margin: UiRect::top(Val::Px(8.0)),
+                padding: UiRect::all(Val::Px(6.0)),
+                border: UiRect::all(Val::Px(1.0)),
+                border_radius: BorderRadius::all(Val::Px(4.0)),
+                row_gap: Val::Px(2.0),
+                ..default()
+            },
+            BackgroundColor(theme.paper_alt),
+            BorderColor::all(theme.accent),
+            Visibility::Hidden,
+        ))
+        .with_children(|section| {
+            section.spawn((
+                Text::new("Errors"),
+                TextFont { font_size: 10.0, ..default() },
+                TextColor(theme.accent),
+                Mono,
+                Bold,
+            ));
+            section.spawn((
+                Text::new(""),
+                TextFont { font_size: 11.0, ..default() },
+                TextColor(theme.ink),
+                Mono,
+                ErrorBreakdown { node: nid },
+            ));
+        });
+}
+
+/// Fill the selected node's error breakdown every frame. We can't
+/// put this inside the rebuild pass because rebuild is gated on
+/// `Selection` / `Theme` changes (by design — rebuilding on every
+/// error tick would reset a slider mid-drag). Instead we look up
+/// the breakdown entity by its marker and patch its text + the
+/// container's visibility in-place.
+fn sync_error_breakdown(
+    stats: Res<NodeErrorStats>,
+    mut breakdowns: Query<(&ErrorBreakdown, &mut Text, &ChildOf)>,
+    mut containers: Query<&mut Visibility>,
+) {
+    for (bd, mut text, parent) in breakdowns.iter_mut() {
+        let kinds = stats.per_node.get(&bd.node);
+        let new_text = match kinds {
+            Some(map) if !map.is_empty() => {
+                let mut entries: Vec<(&String, u64)> =
+                    map.iter().map(|(k, v)| (k, *v)).collect();
+                entries.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+                let max_w = entries.iter().map(|(_, v)| v.to_string().len()).max().unwrap_or(1);
+                entries
+                    .iter()
+                    .map(|(k, v)| format!("{:>w$}  {}", v, k, w = max_w))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            }
+            _ => String::new(),
+        };
+        if text.0 != new_text {
+            text.0 = new_text.clone();
+        }
+        // Toggle the container's visibility — parent is the section
+        // row, which is the `ChildOf` target here.
+        if let Ok(mut vis) = containers.get_mut(parent.parent()) {
+            let want = if new_text.is_empty() {
+                Visibility::Hidden
+            } else {
+                Visibility::Inherited
+            };
+            if *vis != want {
+                *vis = want;
+            }
+        }
+    }
 }
 
 fn spawn_up_toggle(

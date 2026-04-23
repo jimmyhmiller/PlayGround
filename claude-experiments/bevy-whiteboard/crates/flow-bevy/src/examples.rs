@@ -66,6 +66,15 @@ pub enum Example {
     /// cadence. Models "async submit + ack" — the Client's RTT is
     /// the submission round-trip, not end-to-end processing time.
     ClientQueueWorker,
+    /// Twenty BackoffClients sharing a single Worker. When the Worker
+    /// is up, the clients' staggered base periods keep retries
+    /// spread out. Toggle the Worker `up → down`: every client's
+    /// next request gets a `resp_error` and they all seed
+    /// `backoff_ns = period_ns` at roughly the same instant. From
+    /// there the fixed-backoff doubling locks them into synchronised
+    /// 1s / 2s / 4s / 8s waves — the thundering herd. Bring the
+    /// Worker back up and watch a wall of simultaneous reqs hit it.
+    BackoffHerd,
 }
 
 impl Example {
@@ -75,6 +84,7 @@ impl Example {
         Example::ClientRouterWorker,
         Example::TwoClientsOneWorker,
         Example::ClientQueueWorker,
+        Example::BackoffHerd,
     ];
 
     pub fn label(self) -> &'static str {
@@ -84,6 +94,7 @@ impl Example {
             Example::ClientRouterWorker => "Client→Router→Worker",
             Example::TwoClientsOneWorker => "2 Clients→1 Worker",
             Example::ClientQueueWorker  => "Client→Queue→Worker",
+            Example::BackoffHerd        => "Backoff herd",
         }
     }
 
@@ -94,6 +105,7 @@ impl Example {
             Example::ClientRouterWorker => "Router forwards the request transparently; Worker still replies directly to Client.",
             Example::TwoClientsOneWorker => "Two clients share one worker. Each client's return_path steers its own response back — they never cross.",
             Example::ClientQueueWorker  => "Client submits to a queue, queue acks immediately; a worker pulls from the queue on its own schedule.",
+            Example::BackoffHerd        => "Twenty BackoffClients hammering one Worker. Toggle the Worker down/up to see fixed exponential backoff synchronise into a thundering herd.",
         }
     }
 }
@@ -175,6 +187,7 @@ fn handle_load_example(
         Example::ClientRouterWorker => build_client_router_worker(&mut ctx),
         Example::TwoClientsOneWorker => build_two_clients_one_worker(&mut ctx),
         Example::ClientQueueWorker  => build_client_queue_worker(&mut ctx),
+        Example::BackoffHerd        => build_backoff_herd(&mut ctx),
     }
 }
 
@@ -362,7 +375,9 @@ fn build_two_clients_one_worker(ctx: &mut BuildCtx) {
 
     // Distinct cadences make it obvious the two clients are independent
     // — responses arrive at their respective rates, not interleaved by
-    // round-robin coincidence.
+    // round-robin coincidence. The Worker's `busy` gate means
+    // coincident arrivals get rejected with `resp_error`; that's
+    // correct saturation behaviour and the tests account for it.
     ctx.set_slot(client_a, "period_ns", Value::Int(300_000_000));
     ctx.set_slot(client_b, "period_ns", Value::Int(500_000_000));
     ctx.set_slot(worker,   "service_ns", Value::Int(100_000_000));
@@ -407,4 +422,66 @@ fn build_client_queue_worker(ctx: &mut BuildCtx) {
     ctx.wire(client, Kind::Client, queue,  Kind::Queue);
     ctx.wire(worker, Kind::Worker, queue,  Kind::Queue);
     ctx.wire(worker, Kind::Worker, sink,   Kind::Sink);
+}
+
+/// Thundering-herd demo. A crowd of BackoffClients (`N = 20`) all
+/// talk to one Worker. Base periods are staggered across a ~40%
+/// spread so the initial req stream is desynchronised — you can
+/// see that in the probes: `emitted` counters climb at slightly
+/// different rates.
+///
+/// The interesting behaviour appears when the user flips the
+/// Worker's `up` toggle 1 → 0 in the inspector:
+///   - Every in-flight request fails back as `resp_error`.
+///   - Each client's `on_resp_error_seed` rule fires the first time
+///     (backoff_ns = 0 → period_ns ≈ 500ms).
+///   - Subsequent failures double the backoff in lockstep.
+///   - Because there's no jitter, every client's retry lands at
+///     the same instant — `1s`, `2s`, `4s`, `8s` after the outage.
+///
+/// When the user flips `up` back 0 → 1, all clients that happened
+/// to land their retry in that window get served simultaneously.
+/// The visible effect: a wall of concurrent req packets hitting
+/// the Worker at each backoff tier, then silence, then another
+/// wall — the textbook thundering-herd shape.
+fn build_backoff_herd(ctx: &mut BuildCtx) {
+    // 4 columns × 5 rows, centred horizontally on x ≈ -400 so the
+    // Worker sits comfortably to the right with room for the many
+    // arrows to fan in.
+    const COLS: i32 = 4;
+    const ROWS: i32 = 5;
+    const X_STEP: f32 = 110.0;
+    const Y_STEP: f32 = 110.0;
+    const ORIGIN_X: f32 = -620.0;
+
+    let worker = ctx.place(Kind::Worker, 0, Vec2::new(200.0, 0.0));
+    // Service time is picked to be visually substantial — you want to
+    // see each req "dwell" on the Worker before the resp comes out.
+    // The Worker's `serve` rule has no busy gate, so many services
+    // run concurrently; 200ms work vs 500ms client cadence keeps the
+    // animation readable without saturating anything.
+    ctx.set_slot(worker, "service_ns", Value::Int(200_000_000));
+
+    for row in 0..ROWS {
+        for col in 0..COLS {
+            let idx = (row * COLS + col) as usize;
+            // Spread positions in a grid, centred vertically.
+            let x = ORIGIN_X + col as f32 * X_STEP;
+            let y = (row as f32 - (ROWS as f32 - 1.0) * 0.5) * Y_STEP;
+            let client = ctx.place(Kind::BackoffClient, 0, Vec2::new(x, y));
+
+            // Stagger base periods from 400ms up to ~580ms in 10ms
+            // steps so the initial stream is visibly desynchronised.
+            // All within 30–40% of each other — once a failure seeds
+            // backoff to `period_ns`, the doublings converge anyway.
+            let period_ns = 400_000_000 + (idx as i64) * 10_000_000;
+            ctx.set_slot(client, "period_ns", Value::Int(period_ns));
+
+            // Cap backoff at 4s — fast enough to see multiple
+            // backoff tiers in a short session before saturation.
+            ctx.set_slot(client, "max_backoff_ns", Value::Int(4_000_000_000));
+
+            ctx.wire(client, Kind::BackoffClient, worker, Kind::Worker);
+        }
+    }
 }

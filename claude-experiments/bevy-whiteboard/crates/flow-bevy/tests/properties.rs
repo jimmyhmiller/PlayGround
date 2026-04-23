@@ -288,7 +288,13 @@ proptest! {
     #![proptest_config(ProptestConfig { cases: 20, ..ProptestConfig::default() })]
 
     /// R4 — N clients sharing a worker, each gets exactly its own
-    /// reqs' responses back. Event log counts match client slots.
+    /// reqs' responses back. With the Worker's busy gate, some reqs
+    /// coming in while the worker is still servicing another get
+    /// rejected with `resp_error` (client increments `failed`) —
+    /// that's correct saturation behaviour. The no-cross-talk
+    /// property is: per client, successful resp's from the worker
+    /// match `completed`, and resp_error's match `failed`; no
+    /// response of either kind lands on the wrong client.
     #[test]
     fn r4_n_clients_no_cross_talk(
         n in 2usize..5,
@@ -306,34 +312,52 @@ proptest! {
 
         let sim = &app.world().resource::<FlowSim>().sim;
 
-        // Every resp emitted by the worker targeted someone; count per client.
-        let mut resp_to: HashMap<NodeId, i64> = HashMap::new();
+        // Every resp / resp_error emitted by the worker targeted
+        // someone; count per client, split by tag.
+        let mut resp_ok_to: HashMap<NodeId, i64> = HashMap::new();
+        let mut resp_err_to: HashMap<NodeId, i64> = HashMap::new();
         for ev in sim.log.iter() {
             if let Event::PacketEmitted { from, to, payload, .. } = ev {
                 if *from != worker { continue; }
                 if let Value::Variant { tag, .. } = payload {
-                    if tag == "resp" {
-                        *resp_to.entry(*to).or_insert(0) += 1;
+                    match tag.as_str() {
+                        "resp"       => *resp_ok_to.entry(*to).or_insert(0) += 1,
+                        "resp_error" => *resp_err_to.entry(*to).or_insert(0) += 1,
+                        _ => {}
                     }
                 }
             }
         }
 
         for c in &clients {
+            let emitted   = slot_int(sim, *c, "emitted");
             let completed = slot_int(sim, *c, "completed");
-            let emitted = slot_int(sim, *c, "emitted");
-            let targets = resp_to.get(c).copied().unwrap_or(0);
-            prop_assert_eq!(completed, emitted,
-                "client {:?}: completed={} != emitted={}", c, completed, emitted);
-            prop_assert_eq!(targets, completed,
-                "client {:?}: worker emitted {} resp's to it, but it records {} completed — cross-talk",
-                c, targets, completed);
+            let failed    = slot_int(sim, *c, "failed");
+            let in_flight = slot_int(sim, *c, "in_flight");
+            let ok_here   = resp_ok_to.get(c).copied().unwrap_or(0);
+            let err_here  = resp_err_to.get(c).copied().unwrap_or(0);
+
+            prop_assert_eq!(in_flight, 0,
+                "client {:?}: in_flight should drain to 0, got {}", c, in_flight);
+            prop_assert_eq!(completed + failed, emitted,
+                "client {:?}: completed ({}) + failed ({}) != emitted ({})",
+                c, completed, failed, emitted);
+            prop_assert_eq!(ok_here, completed,
+                "client {:?}: worker emitted {} resp's to it, completed={} — cross-talk",
+                c, ok_here, completed);
+            prop_assert_eq!(err_here, failed,
+                "client {:?}: worker emitted {} resp_error's to it, failed={} — cross-talk",
+                c, err_here, failed);
         }
 
-        // Total served should be sum of client emits.
+        // `served` ticks only on successful `serve` — should equal
+        // the sum of each client's `completed`.
         let served = slot_int(sim, worker, "served");
-        let total_emit: i64 = clients.iter().map(|c| slot_int(sim, *c, "emitted")).sum();
-        prop_assert_eq!(served, total_emit);
+        let total_completed: i64 =
+            clients.iter().map(|c| slot_int(sim, *c, "completed")).sum();
+        prop_assert_eq!(served, total_completed,
+            "worker.served ({}) != sum(client.completed) ({})",
+            served, total_completed);
     }
 }
 
@@ -523,18 +547,28 @@ proptest! {
         quiesce_and_drain(&mut app);
 
         let sim = &app.world().resource::<FlowSim>().sim;
-        prop_assert!(sim.error_counts.is_empty(), "errors: {:?}", sim.error_counts);
+        // Worker's bounded accept queue can legitimately fire
+        // `worker_full` + `request_failed` under saturation —
+        // those aren't cross-talk. Assert no OTHER error kinds
+        // appeared.
+        let unexpected: BTreeMap<_, _> = sim.error_counts.iter()
+            .filter(|(k, _)| k.as_str() != "worker_full" && k.as_str() != "request_failed")
+            .collect();
+        prop_assert!(unexpected.is_empty(), "unexpected errors: {:?}", unexpected);
 
-        // Count resp's the Router emitted per client (the Router
-        // is the direct sender to each client, because it relays
-        // the worker's reply with `pop to head(return_path)`).
-        let mut resp_to: HashMap<NodeId, i64> = HashMap::new();
+        // Count resp's and resp_error's the Router emitted per
+        // client (Router is the direct sender via `forward_resp` /
+        // `forward_resp_error`).
+        let mut resp_ok_to: HashMap<NodeId, i64> = HashMap::new();
+        let mut resp_err_to: HashMap<NodeId, i64> = HashMap::new();
         for ev in sim.log.iter() {
             if let Event::PacketEmitted { from, to, payload, .. } = ev {
                 if *from != router { continue; }
                 if let Value::Variant { tag, .. } = payload {
-                    if tag == "resp" {
-                        *resp_to.entry(*to).or_insert(0) += 1;
+                    match tag.as_str() {
+                        "resp"       => *resp_ok_to.entry(*to).or_insert(0) += 1,
+                        "resp_error" => *resp_err_to.entry(*to).or_insert(0) += 1,
+                        _ => {}
                     }
                 }
             }
@@ -542,12 +576,21 @@ proptest! {
         for c in &clients {
             let emitted   = slot_int(sim, *c, "emitted");
             let completed = slot_int(sim, *c, "completed");
-            let targets   = resp_to.get(c).copied().unwrap_or(0);
-            prop_assert_eq!(emitted, completed,
-                "client {:?} completed != emitted", c);
-            prop_assert_eq!(targets, completed,
-                "client {:?}: router emitted {} resp's to it, completed={} — cross-talk",
-                c, targets, completed);
+            let failed    = slot_int(sim, *c, "failed");
+            let in_flight = slot_int(sim, *c, "in_flight");
+            let ok_here   = resp_ok_to.get(c).copied().unwrap_or(0);
+            let err_here  = resp_err_to.get(c).copied().unwrap_or(0);
+
+            prop_assert_eq!(in_flight, 0,
+                "client {:?}: in_flight should drain to 0, got {}", c, in_flight);
+            prop_assert_eq!(completed + failed, emitted,
+                "client {:?}: completed + failed != emitted", c);
+            prop_assert_eq!(ok_here, completed,
+                "client {:?}: router relayed {} resp's to it, completed={} — cross-talk",
+                c, ok_here, completed);
+            prop_assert_eq!(err_here, failed,
+                "client {:?}: router relayed {} resp_error's to it, failed={} — cross-talk",
+                c, err_here, failed);
         }
     }
 }

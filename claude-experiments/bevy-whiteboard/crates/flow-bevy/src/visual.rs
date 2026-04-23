@@ -182,9 +182,14 @@ impl VisualTimeline {
     /// fresh-enough data. The engine's event log is already ordered
     /// by `at_ns`, so the natural ingestion loop preserves this.
     pub fn ingest(&mut self, ev: &Event, real_now: f64) -> Option<usize> {
-        if !Self::is_visible_event(ev) { return None; }
         let Event::PacketEmitted { packet, from, to, at_ns, arrives_at_ns, payload } = ev
         else { return None; };
+        // Control-plane / zero-duration events contribute nothing — not
+        // a visible packet, not a causal clamp.
+        if arrives_at_ns <= at_ns { return None; }
+        if let Value::Variant { tag, .. } = payload {
+            if tag == "pull" || tag == "wake" { return None; }
+        }
 
         let k = self.k.clamp(Self::K_MIN, Self::K_MAX);
         let clamp = self.node_arrivals.get(from)
@@ -192,6 +197,22 @@ impl VisualTimeline {
             .unwrap_or(f64::NEG_INFINITY);
         let emit_real = real_now.max(clamp);
         let sim_latency_s = (arrives_at_ns - at_ns) as f64 * 1e-9;
+
+        // Self-loops (service-time dwells, tick periods, wake pulses)
+        // have no spatial representation — no edge to fly along — so
+        // they don't become visible packets. They DO need to contribute
+        // to `node_arrivals` though: a Worker's `done_req` self-hop is
+        // the only place the service delay lives, and without it the
+        // subsequent `resp` emit would clamp back to the req's arrival
+        // time and appear instant. Unscaled (no `k`) so a 200ms
+        // service produces a 200ms visible dwell instead of `200ms*k`
+        // which would stretch the simulation into minutes.
+        if from == to {
+            let arrive_real = emit_real + sim_latency_s;
+            self.node_arrivals.entry(*to).or_default().push(*arrives_at_ns, arrive_real);
+            return None;
+        }
+
         let arrive_real = emit_real + sim_latency_s * k;
 
         self.node_arrivals.entry(*to).or_default().push(*arrives_at_ns, arrive_real);

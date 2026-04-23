@@ -18,6 +18,7 @@ pub fn kind_color(theme: &Theme, kind: Kind) -> Color {
     match kind {
         Kind::Generator => theme.node_fill.generator,
         Kind::Client => theme.node_fill.client,
+        Kind::BackoffClient => theme.node_fill.client,
         Kind::Worker => theme.node_fill.worker,
         Kind::Router => theme.node_fill.router,
         Kind::Queue => theme.node_fill.queue,

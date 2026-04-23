@@ -5,6 +5,7 @@
 pub mod bridge;
 pub mod camera;
 pub mod edges;
+pub mod errors;
 pub mod examples;
 pub mod examples_menu;
 pub mod gadgets;
@@ -75,6 +76,7 @@ impl Plugin for FlowBevyPlugins {
             hud::HudPlugin,
             inspector::InspectorPlugin,
             probes::ProbesPlugin,
+            errors::ErrorsPlugin,
             examples::ExamplesPlugin,
             examples_menu::ExamplesMenuPlugin,
         ));

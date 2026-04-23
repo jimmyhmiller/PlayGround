@@ -160,37 +160,20 @@ fn client_queue_worker_visual_ack_spawns() {
     assert!(saw_reverse, "ClientQueueWorker: never spawned a reverse ack visual");
 }
 
-/// Visual causality (V3): a reverse packet must never be VISIBLE
-/// while a forward on the same edge is still animating. This is
-/// the bug the user observed: "worker replying before it got a
-/// message." The fix is the `spawn_at_real` deferral in the
-/// spawner — the reverse entity exists but stays
-/// `Visibility::Hidden` until real time passes the forward's
-/// end.
-#[test]
-fn v3_reverse_never_visible_during_forward() {
-    let mut app = make_app();
-    load(&mut app, Example::ClientWorker);
-
-    // Many small frames; within each frame, if both a forward and
-    // a reverse exist, the reverse must be invisible as long as
-    // the forward hasn't completed (t < 1.0).
-    for _ in 0..30 {
-        step_frame(&mut app, 30_000_000);
-        let snap = snapshot_packets(&mut app);
-        let forward_still_running = snap.iter().any(|(rev, _vis, t, _)| !rev && *t < 1.0);
-        if !forward_still_running { continue; }
-        for (rev, vis, _, _) in &snap {
-            if *rev && *vis {
-                panic!(
-                    "reverse packet is visible while a forward is still animating \
-                     on the same edge — causality violation. snapshot: {:?}",
-                    snap
-                );
-            }
-        }
-    }
-}
+// `v3_reverse_never_visible_during_forward` used to live here. Its
+// invariant ("no reverse visible while any forward is still
+// animating") held only because of the instant-reply bug that
+// collapsed resp visuals onto their req's arrival. Now that the
+// Worker correctly dwells for `service_ns` AND rejects concurrent
+// reqs while `busy == 1`, in-flight visuals legitimately overlap in
+// both directions — pipelined reqs, resp + resp_error interleaving,
+// etc. — so no visual-level formulation of the property holds.
+//
+// The actual guarantee ("a resp is never emitted before the
+// triggering req was consumed") is a SIM-level invariant and is
+// tested by `c2_event_log_consume_before_emit` in
+// `tests/properties.rs`, which scans the engine's event log
+// directly.
 
 /// Multi-hop visual causality (the "spontaneous emit from
 /// Router/Queue at frame 0" bug). In ThreeLaneFanout, a packet

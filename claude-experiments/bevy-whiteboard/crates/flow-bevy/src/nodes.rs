@@ -70,7 +70,7 @@ pub enum BodyShape {
 
 pub fn body_shape(kind: Kind) -> BodyShape {
     match kind {
-        Kind::Generator | Kind::Client | Kind::Sink => BodyShape::Circle(34.0),
+        Kind::Generator | Kind::Client | Kind::BackoffClient | Kind::Sink => BodyShape::Circle(34.0),
         Kind::Worker | Kind::Router => BodyShape::Rect(Vec2::new(80.0, 56.0)),
         Kind::Queue => BodyShape::Rect(Vec2::new(100.0, 46.0)),
     }
@@ -97,7 +97,7 @@ pub fn hit_size(shape: &BodyShape) -> Vec2 {
 /// a bit smaller for rectangular processors.
 fn glyph_size_for(kind: Kind) -> f32 {
     match kind {
-        Kind::Generator | Kind::Client | Kind::Sink => 26.0,
+        Kind::Generator | Kind::Client | Kind::BackoffClient | Kind::Sink => 26.0,
         _ => 20.0,
     }
 }
@@ -413,7 +413,7 @@ fn sync_node_state_labels(
 
 fn format_node_state(kind: Kind, node: &flow::Node) -> String {
     match kind {
-        Kind::Generator | Kind::Client => {
+        Kind::Generator | Kind::Client | Kind::BackoffClient => {
             let period_ns = match node.slots.get("period_ns") {
                 Some(flow::Value::Int(i)) => *i,
                 _ => 0,

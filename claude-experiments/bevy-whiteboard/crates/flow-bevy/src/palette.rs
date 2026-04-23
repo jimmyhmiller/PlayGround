@@ -96,8 +96,9 @@ fn spawn_palette(mut commands: Commands, theme: Res<Theme>) {
 
             section(body, &theme, "Emitters");
             tool_grid(body, |g| {
-                tool_button(g, &theme, Kind::Generator.glyph(), "Generator", ToolBtn(Tool::Drop(Kind::Generator)));
-                tool_button(g, &theme, Kind::Client.glyph(),    "Client",    ToolBtn(Tool::Drop(Kind::Client)));
+                tool_button(g, &theme, Kind::Generator.glyph(),     "Generator",     ToolBtn(Tool::Drop(Kind::Generator)));
+                tool_button(g, &theme, Kind::Client.glyph(),        "Client",        ToolBtn(Tool::Drop(Kind::Client)));
+                tool_button(g, &theme, Kind::BackoffClient.glyph(), "BackoffClient", ToolBtn(Tool::Drop(Kind::BackoffClient)));
             });
 
             section(body, &theme, "Processors");
@@ -177,6 +178,7 @@ fn handle_hotkeys(
     }
     if keys.just_pressed(KeyCode::KeyG) { active.0 = Tool::Drop(Kind::Generator); }
     if keys.just_pressed(KeyCode::KeyC) { active.0 = Tool::Drop(Kind::Client); }
+    if keys.just_pressed(KeyCode::KeyB) { active.0 = Tool::Drop(Kind::BackoffClient); }
     if keys.just_pressed(KeyCode::KeyW) { active.0 = Tool::Drop(Kind::Worker); }
     if keys.just_pressed(KeyCode::KeyR) { active.0 = Tool::Drop(Kind::Router); }
     if keys.just_pressed(KeyCode::KeyQ) { active.0 = Tool::Drop(Kind::Queue); }
