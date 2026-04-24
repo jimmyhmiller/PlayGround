@@ -861,6 +861,13 @@ impl Sim {
                         edge: eid,
                         deliver_to: edge.to,
                     }));
+                    // ToOutPort is always forward: deliver_to == edge.to by
+                    // construction, so every edge is a forward traversal.
+                    let seq = self.next_emit_seq;
+                    self.next_emit_seq += 1;
+                    if let Some(e) = self.edges.get_mut(&eid) {
+                        e.last_sent_seq = Some(seq);
+                    }
                 }
                 return;
             }
@@ -890,6 +897,17 @@ impl Sim {
             edge: target_edge_id,
             deliver_to,
         }));
+        // Stamp forward-direction traversals only. Reverse-route replies
+        // (deliver_to == edge.from) travel the same edge backwards and
+        // shouldn't count as "this edge was used for sending" — routing
+        // decisions care about forward load, not returning traffic.
+        if deliver_to == edge.to {
+            let seq = self.next_emit_seq;
+            self.next_emit_seq += 1;
+            if let Some(e) = self.edges.get_mut(&target_edge_id) {
+                e.last_sent_seq = Some(seq);
+            }
+        }
     }
 
     fn eval_at_node(

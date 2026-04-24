@@ -109,6 +109,16 @@ pub struct Edge {
     /// Evaluated with bindings for the emitted packet's payload as `packet`,
     /// plus the source node's slots. Returns Int nanoseconds.
     pub latency_ns: Expr,
+    /// Engine-managed monotonic sequence number of the most recent
+    /// forward-direction emit on this edge. Incremented from a single
+    /// sim-wide counter so every emission gets a unique value — sim
+    /// time alone can't disambiguate multiple emits in the same tick.
+    /// `None` until first traversal; higher values mean "sent more
+    /// recently", so LRU / round-robin picks the edge with the
+    /// smallest value (treating `None` as "smaller than any sent").
+    /// Reverse-route replies do not tick this — it tracks *forward*
+    /// load only.
+    pub last_sent_seq: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -149,6 +159,12 @@ pub struct Sim {
     pub(crate) next_node_id: u64,
     pub(crate) next_edge_id: u64,
     pub(crate) next_packet_id: u64,
+    /// Monotonic counter ticked per forward-direction emit; written to
+    /// `Edge.last_sent_seq` so LRU / round-robin routing can break
+    /// same-tick ties. `1` is the first emission so `0` can act as a
+    /// "definitely older than any real send" sentinel in read paths
+    /// that don't want an `Option`.
+    pub(crate) next_emit_seq: u64,
     pub(crate) next_instance_seq: u64,
     pub(crate) next_scenario_seq: u64,
     pub templates: HashMap<String, Template>,
@@ -201,6 +217,7 @@ impl Sim {
             next_node_id: 1,
             next_edge_id: 1,
             next_packet_id: 1,
+            next_emit_seq: 1,
             next_instance_seq: 1,
             next_scenario_seq: 1,
             templates: HashMap::new(),
@@ -366,7 +383,10 @@ impl Sim {
     ) -> EdgeId {
         let id = EdgeId(self.next_edge_id);
         self.next_edge_id += 1;
-        self.edges.insert(id, Edge { id, from, from_port, to, to_port, latency_ns });
+        self.edges.insert(id, Edge {
+            id, from, from_port, to, to_port, latency_ns,
+            last_sent_seq: None,
+        });
         id
     }
 

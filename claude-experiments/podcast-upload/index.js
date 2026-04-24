@@ -52,7 +52,10 @@ async function uploadToS3(filePath) {
   
   const fileContent = fs.readFileSync(filePath);
   const sanitizedFileName = fileName.replace(/\s+/g, '-');
-  const key = `jimmy-uploads/${sanitizedFileName}`;
+  const dateMatch = sanitizedFileName.match(/^(\d+)(?:[-_](\d+))?[-_]?(.*)$/);
+  const key = dateMatch
+    ? `jimmy-uploads/${[dateMatch[1], dateMatch[2]].filter(Boolean).join('/')}/${dateMatch[3]}`
+    : `jimmy-uploads/${sanitizedFileName}`;
   
   // Check if file already exists in S3
   try {

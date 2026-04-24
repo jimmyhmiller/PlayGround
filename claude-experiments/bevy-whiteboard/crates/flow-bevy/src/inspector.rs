@@ -39,6 +39,8 @@ impl Plugin for InspectorPlugin {
                 push_rate_slider_to_sim,
                 handle_up_toggle_clicks,
                 sync_up_toggle_visual,
+                handle_router_mode_clicks,
+                sync_router_mode_visual,
                 sync_queue_fill,
                 sync_sink_count,
                 sync_error_breakdown,
@@ -98,6 +100,13 @@ struct SinkCountReadout {
 /// sync system paints the label + border to match the current state.
 #[derive(Component, Debug, Clone, Copy)]
 struct UpToggle {
+    node: NodeId,
+}
+
+/// Clickable toggle for a Router's `mode` slot. Flips FanOut (0) ↔
+/// RoundRobin (1) on press; the sync system paints the label.
+#[derive(Component, Debug, Clone, Copy)]
+struct RouterModeToggle {
     node: NodeId,
 }
 
@@ -161,7 +170,8 @@ fn rebuild_inspector_on_selection_change(
                 sink_row(body, &theme, nid);
             }
             Kind::Router => {
-                // Router has no rate — it forwards whatever arrives.
+                let mode = read_int_slot(node, "mode");
+                spawn_router_mode_toggle(body, &theme, nid, mode);
             }
         }
 
@@ -338,6 +348,69 @@ fn up_toggle_visuals(theme: &Theme, up: bool) -> (Color, &'static str) {
     }
 }
 
+fn spawn_router_mode_toggle(
+    parent: &mut bevy::ecs::hierarchy::ChildSpawnerCommands,
+    theme: &Theme,
+    nid: NodeId,
+    mode: i64,
+) {
+    parent
+        .spawn((
+            Node {
+                width: Val::Percent(100.0),
+                padding: UiRect::vertical(Val::Px(6.0)),
+                column_gap: Val::Px(8.0),
+                align_items: AlignItems::Center,
+                ..default()
+            },
+            InspectorChild,
+        ))
+        .with_children(|row| {
+            row.spawn((
+                Text::new(caps_spaced("Mode")),
+                TextFont { font_size: 9.0, ..default() },
+                TextColor(theme.ink_soft),
+                poster_ui::Bold,
+            ));
+            let (border, label) = router_mode_visuals(theme, mode);
+            row.spawn((
+                Button,
+                Node {
+                    flex_grow: 1.0,
+                    padding: UiRect::vertical(Val::Px(6.0)),
+                    justify_content: JustifyContent::Center,
+                    align_items: AlignItems::Center,
+                    border: UiRect::all(Val::Px(1.0)),
+                    border_radius: BorderRadius::all(Val::Px(6.0)),
+                    ..default()
+                },
+                BackgroundColor(Color::NONE),
+                BorderColor::all(border),
+                RouterModeToggle { node: nid },
+            ))
+            .with_children(|b| {
+                b.spawn((
+                    Text::new(caps_spaced(label)),
+                    TextFont { font_size: 11.0, ..default() },
+                    TextColor(border),
+                    poster_ui::Bold,
+                ));
+            });
+        });
+}
+
+/// Router mode label/colour. Accent for RoundRobin (the "active load
+/// balancing" feel); ink_soft for FanOut (the neutral broadcast
+/// default). Avoid using `muted` here since that reads as "disabled"
+/// — both modes are valid on-states.
+fn router_mode_visuals(theme: &Theme, mode: i64) -> (Color, &'static str) {
+    if mode == 1 {
+        (theme.accent, "Round Robin")
+    } else {
+        (theme.ink_soft, "Fan Out")
+    }
+}
+
 fn inspector_heading(parent: &mut bevy::ecs::hierarchy::ChildSpawnerCommands, theme: &Theme, name: &str) {
     parent
         .spawn((
@@ -490,6 +563,44 @@ fn handle_up_toggle_clicks(
         node.slots.insert("up".into(), Value::Int(next));
         if cur == 0 && next == 1 {
             sim.sim.inject(toggle.node, Value::variant("resume", Value::Nil));
+        }
+    }
+}
+
+fn handle_router_mode_clicks(
+    q: Query<(&Interaction, &RouterModeToggle), (Changed<Interaction>, With<Button>)>,
+    mut sim: ResMut<FlowSim>,
+) {
+    for (interaction, toggle) in q.iter() {
+        if *interaction != Interaction::Pressed { continue; }
+        let Some(node) = sim.sim.nodes.get_mut(&toggle.node) else { continue };
+        let cur = node.slots.get("mode")
+            .and_then(|v| match v { Value::Int(i) => Some(*i), _ => None })
+            .unwrap_or(0);
+        let next = if cur == 0 { 1 } else { 0 };
+        node.slots.insert("mode".into(), Value::Int(next));
+    }
+}
+
+fn sync_router_mode_visual(
+    theme: Res<Theme>,
+    sim: Res<FlowSim>,
+    mut buttons: Query<(&RouterModeToggle, &mut BorderColor, &Children)>,
+    mut texts: Query<(&mut Text, &mut TextColor)>,
+) {
+    for (toggle, mut border, children) in buttons.iter_mut() {
+        let mode = sim.sim.nodes.get(&toggle.node)
+            .and_then(|n| n.slots.get("mode"))
+            .and_then(|v| match v { Value::Int(i) => Some(*i), _ => None })
+            .unwrap_or(0);
+        let (color, label) = router_mode_visuals(&theme, mode);
+        *border = BorderColor::all(color);
+        for child in children.iter() {
+            if let Ok((mut text, mut tc)) = texts.get_mut(child) {
+                let spaced = caps_spaced(label);
+                if text.0 != spaced { text.0 = spaced; }
+                *tc = TextColor(color);
+            }
         }
     }
 }

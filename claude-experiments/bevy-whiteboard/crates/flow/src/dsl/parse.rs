@@ -651,8 +651,9 @@ impl Parser {
                         "Exp" | "Uniform" | "Bernoulli"
                         | "len" | "mean"
                         | "out_neighbors" | "slot_of"
-                        | "length" | "index" | "filter" | "map" | "reduce"
+                        | "length" | "index" | "filter" | "map" | "reduce" | "argmin"
                         | "head" | "tail"
+                        | "edge_last_sent"
                     );
                     if is_builtin {
                         Ok(Expr::FnCall(name, args))

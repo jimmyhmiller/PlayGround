@@ -106,6 +106,17 @@ pub enum Expr {
         init: Box<Expr>,
         expr: Box<Expr>,
     },
+    /// Return the item of `list` that minimises `expr(item)`. `Value::Nil`
+    /// when the list is empty. Ties broken by first-seen (list order). The
+    /// keying expression must yield `Value::Int`.
+    Argmin { list: Box<Expr>, bind: String, expr: Box<Expr> },
+
+    // ---- Edge-scoped reads. --------------------------------------------
+    /// Sim-time (Int ns) of the most recent forward-direction emit on the
+    /// outbound edge from the current node to `to` (a `NodeRef`). Returns
+    /// `0` if the edge has never been traversed, or if no such outbound
+    /// edge exists. Used by routing strategies like LRU / round-robin.
+    EdgeLastSent { to: Box<Expr> },
 
     // ---- Packet introspection (read the consumed inbound packet). ------
     /// Look up a key in the consumed packet's `metadata`. Returns
@@ -198,6 +209,12 @@ impl Expr {
             init: Box::new(init),
             expr: Box::new(expr),
         }
+    }
+    pub fn argmin(list: Expr, bind: impl Into<String>, expr: Expr) -> Self {
+        Expr::Argmin { list: Box::new(list), bind: bind.into(), expr: Box::new(expr) }
+    }
+    pub fn edge_last_sent(to: Expr) -> Self {
+        Expr::EdgeLastSent { to: Box::new(to) }
     }
 }
 
@@ -533,6 +550,62 @@ impl Expr {
                     Value::Nil => Value::List(Vec::new()),
                     other => panic!("Tail: expected List or Nil, got {:?}", other),
                 }
+            }
+            Expr::Argmin { list, bind, expr } => {
+                let lv = list.eval(ctx);
+                let items = match lv {
+                    Value::List(v) => v,
+                    other => panic!("Argmin: first arg must be a List, got {:?}", other),
+                };
+                let mut best: Option<(i64, Value)> = None;
+                let mut local = ctx.bindings.clone();
+                for item in items {
+                    local.insert(bind.clone(), item.clone());
+                    let mut sub = EvalCtx {
+                        bindings: &local,
+                        slots: ctx.slots,
+                        now_ns: ctx.now_ns,
+                        rng: ctx.rng,
+                        current_node: ctx.current_node,
+                        params: ctx.params,
+                        param_stack: ctx.param_stack,
+                        nodes: ctx.nodes,
+                        edges: ctx.edges,
+                        packet: ctx.packet,
+                    };
+                    let key = expr.eval(&mut sub).as_int()
+                        .expect("Argmin: key expression must yield Int");
+                    match &best {
+                        Some((k, _)) if *k <= key => {} // keep earlier on ties
+                        _ => best = Some((key, item)),
+                    }
+                }
+                match best {
+                    Some((_, v)) => v,
+                    None => Value::Nil,
+                }
+            }
+            Expr::EdgeLastSent { to } => {
+                let v = to.eval(ctx);
+                let target = match v {
+                    Value::NodeRef(id) => id,
+                    Value::Nil => return Value::Int(0),
+                    other => panic!(
+                        "EdgeLastSent: arg must yield NodeRef or Nil, got {:?}", other
+                    ),
+                };
+                let nid = ctx.current_node
+                    .expect("EdgeLastSent: needs current_node");
+                // Forward edge from self to target; `0` if no edge or
+                // never traversed. The emit-seq counter starts at 1,
+                // so never-sent (0) always sorts strictly before any
+                // real emission under argmin — new neighbours absorb
+                // load first, matching LRU semantics.
+                let seq = ctx.edges.values()
+                    .find(|e| e.from == nid && e.to == target)
+                    .and_then(|e| e.last_sent_seq)
+                    .unwrap_or(0);
+                Value::Int(seq as i64)
             }
         }
     }

@@ -394,6 +394,14 @@ fn lower_fn_call(name: &str, args: &[ast::Expr], bound: &HashSet<String>) -> Res
             let body = lower_expr(&args[4], &inner)?;
             return Ok(Ie::reduce(list, elt, acc, init, body));
         }
+        ("argmin", 3) => {
+            let list = lower_expr(&args[0], bound)?;
+            let bind = expect_str_lit(&args[1], "argmin")?;
+            let mut inner = bound.clone();
+            inner.insert(bind.clone());
+            let body = lower_expr(&args[2], &inner)?;
+            return Ok(Ie::argmin(list, bind, body));
+        }
         _ => {}
     }
 
@@ -416,6 +424,7 @@ fn lower_fn_call(name: &str, args: &[ast::Expr], bound: &HashSet<String>) -> Res
             if let Ie::Slot(s) = a.pop().unwrap() { Ok(Ie::samples_mean(s)) }
             else { Err(format!("mean(): expected slot name")) }
         }
+        ("edge_last_sent", 1) => Ok(Ie::edge_last_sent(a.pop().unwrap())),
         _ => Err(format!("unknown function `{}` with {} arg(s)", name, args.len())),
     }
 }

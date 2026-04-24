@@ -609,16 +609,36 @@ const GADGETS_DSL: &str = r#"
 
     node Router {
         slots {
-            up: Int = 1
+            up:   Int = 1
+            # Routing strategy. 0 = FanOut (broadcast to every colour-
+            # matching neighbour). 1 = RoundRobin (pick the colour-
+            # matching neighbour whose edge has the oldest
+            # last-sent-at; ties broken by edge-id order). The LRU
+            # selection is naturally per-colour: each edge carries its
+            # own timestamp, so red and blue lanes don't interfere.
+            mode: Int = 0
         }
-        # Fan-out by colour. `packet` is fire-and-forget: no reply is
-        # expected, so return_path passes through untouched.
-        rule forward {
+        # Fan-out by colour (mode=0). `packet` is fire-and-forget: no
+        # reply is expected, so return_path passes through untouched.
+        rule forward_fanout {
             on packet(p)
-            when up == 1
+            when up == 1 && mode == 0
             do {
                 emit_each packet(p) to filter(out_neighbors(), "n",
                     slot_of(n, "color") == p)
+            }
+        }
+        # Round-robin by colour (mode=1). argmin over colour-matching
+        # neighbours keyed on `edge_last_sent(n)` picks the edge whose
+        # last forward traversal is oldest. Empty list → Nil target →
+        # silent drop, matching fan-out's "no match" behaviour.
+        rule forward_rr {
+            on packet(p)
+            when up == 1 && mode == 1
+            do {
+                emit packet(p) to (argmin(
+                    filter(out_neighbors(), "n", slot_of(n, "color") == p),
+                    "n", edge_last_sent(n)))
             }
         }
         rule forward_down {
@@ -632,12 +652,21 @@ const GADGETS_DSL: &str = r#"
         # response one more hop via `forward_resp`. This makes
         # Client→Router→Worker a proper two-edge req/resp chain with
         # no triangle reply edge.
-        rule forward_req {
+        rule forward_req_fanout {
             on req(p)
-            when up == 1
+            when up == 1 && mode == 0
             do {
                 emit_each req(p) pushing self to filter(out_neighbors(), "n",
                     slot_of(n, "color") == p)
+            }
+        }
+        rule forward_req_rr {
+            on req(p)
+            when up == 1 && mode == 1
+            do {
+                emit req(p) pushing self to (argmin(
+                    filter(out_neighbors(), "n", slot_of(n, "color") == p),
+                    "n", edge_last_sent(n)))
             }
         }
         rule forward_req_down {
